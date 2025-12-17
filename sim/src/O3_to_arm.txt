@@ -1,0 +1,413 @@
+Programs loaded
+Functions found in both binaries: 
+0.791139240506Programs loaded
+Functions found in both binaries: 
+0.766538722059Programs loaded
+Functions found in both binaries: 
+0.703636363636Programs loaded
+Functions found in both binaries: 
+0.703636363636Programs loaded
+Functions found in both binaries: 
+0.677570093458Programs loaded
+Functions found in both binaries: 
+0.826792963464Programs loaded
+Functions found in both binaries: 
+0.803693570451Programs loaded
+Functions found in both binaries: 
+0.757884028484Programs loaded
+Functions found in both binaries: 
+0.830004438526Programs loaded
+Functions found in both binaries: 
+0.771760154739Programs loaded
+Functions found in both binaries: 
+0.870700636943Programs loaded
+Functions found in both binaries: 
+0.856209150327Programs loaded
+Functions found in both binaries: 
+0.733113673806Programs loaded
+Functions found in both binaries: 
+0.545006165228Programs loaded
+Functions found in both binaries: 
+0.825660377358Programs loaded
+Functions found in both binaries: 
+0.68824940048Programs loaded
+Functions found in both binaries: 
+0.760910815939Programs loaded
+Functions found in both binaries: 
+0.68538222295Programs loaded
+Functions found in both binaries: 
+0.818539976825Programs loaded
+Functions found in both binaries: 
+0.770633971292Programs loaded
+Functions found in both binaries: 
+0.694162436548Programs loaded
+Functions found in both binaries: 
+0.708955223881Programs loaded
+Functions found in both binaries: 
+0.816259269431Programs loaded
+Functions found in both binaries: 
+0.758968609865Programs loaded
+Functions found in both binaries: 
+0.720720720721Programs loaded
+Functions found in both binaries: 
+0.791713325868Programs loaded
+Functions found in both binaries: 
+0.80269058296Programs loaded
+Functions found in both binaries: 
+0.712962962963Programs loaded
+Functions found in both binaries: 
+0.715517241379Programs loaded
+Functions found in both binaries: 
+0.732522796353Programs loaded
+Functions found in both binaries: 
+0.745417515275Programs loaded
+Functions found in both binaries: 
+0.770967741935Programs loaded
+Functions found in both binaries: 
+0.78009322731Programs loaded
+Functions found in both binaries: 
+0.868686868687Programs loaded
+Functions found in both binaries: 
+0.794718485301Programs loaded
+Functions found in both binaries: 
+0.834016393443Programs loaded
+Functions found in both binaries: 
+0.831152250239Programs loaded
+Functions found in both binaries: 
+0.77972027972Programs loaded
+Functions found in both binaries: 
+0.821989528796Programs loaded
+Functions found in both binaries: 
+0.764705882353Programs loaded
+Functions found in both binaries: 
+0.89592760181Programs loaded
+Functions found in both binaries: 
+0.770633971292Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.732954545455Programs loaded
+Functions found in both binaries: 
+0.720067453626Programs loaded
+Functions found in both binaries: 
+0.805097451274Programs loaded
+Functions found in both binaries: 
+0.812731310141Programs loaded
+Functions found in both binaries: 
+0.805084745763Programs loaded
+Functions found in both binaries: 
+0.841346153846Programs loaded
+Functions found in both binaries: 
+0.66437007874Programs loaded
+Functions found in both binaries: 
+0.868243243243Programs loaded
+Functions found in both binaries: 
+0.714285714286Programs loaded
+Functions found in both binaries: 
+0.798309178744Programs loaded
+Functions found in both binaries: 
+0.596125551741Programs loaded
+Functions found in both binaries: 
+0.651888341544Programs loaded
+Functions found in both binaries: 
+0.739164086687Programs loaded
+Functions found in both binaries: 
+0.709211986681Programs loaded
+Functions found in both binaries: 
+0.74623655914Programs loaded
+Functions found in both binaries: 
+0.736220472441Programs loaded
+Functions found in both binaries: 
+0.781153450051Programs loaded
+Functions found in both binaries: 
+0.490648702125Programs loaded
+Functions found in both binaries: 
+0.684507042254Programs loaded
+Functions found in both binaries: 
+0.694842406877Programs loaded
+Functions found in both binaries: 
+0.733486943164Programs loaded
+Functions found in both binaries: 
+0.804587155963Programs loaded
+Functions found in both binaries: 
+0.720858895706Programs loaded
+Functions found in both binaries: 
+0.715966386555Programs loaded
+Functions found in both binaries: 
+0.788839823364Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.768215720023Programs loaded
+Functions found in both binaries: 
+0.8017839445Programs loaded
+Functions found in both binaries: 
+0.735109717868Programs loaded
+Functions found in both binaries: 
+0.751335156962Programs loaded
+Functions found in both binaries: 
+0.715630472855Programs loaded
+Functions found in both binaries: 
+0.695652173913Programs loaded
+Functions found in both binaries: 
+0.762907608696Programs loaded
+Functions found in both binaries: 
+0.824343675418Programs loaded
+Functions found in both binaries: 
+0.724390243902Programs loaded
+Functions found in both binaries: 
+0.706447187929Programs loaded
+Functions found in both binaries: 
+0.770212765957Programs loaded
+Functions found in both binaries: 
+0.790932811481Programs loaded
+Functions found in both binaries: 
+0.699716713881Programs loaded
+Functions found in both binaries: 
+0.698113207547Programs loaded
+Functions found in both binaries: 
+0.707692307692Programs loaded
+Functions found in both binaries: 
+0.774461028192Programs loaded
+Functions found in both binaries: 
+0.609306260575Programs loaded
+Functions found in both binaries: 
+0.715517241379Programs loaded
+Functions found in both binaries: 
+0.668346312414Programs loaded
+Functions found in both binaries: 
+0.823145400593Programs loaded
+Functions found in both binaries: 
+0.711920529801Programs loaded
+Functions found in both binaries: 
+0.673784104389Programs loaded
+Functions found in both binaries: 
+0.73944294699Programs loaded
+Functions found in both binaries: 
+0.74989010989Programs loaded
+Functions found in both binaries: 
+0.861842105263Programs loaded
+Functions found in both binaries: 
+0.778301886792Programs loaded
+Functions found in both binaries: 
+0.774038461538Programs loaded
+Functions found in both binaries: 
+0.770633971292Programs loaded
+Functions found in both binaries: 
+0.791139240506Programs loaded
+Functions found in both binaries: 
+0.766538722059Programs loaded
+Functions found in both binaries: 
+0.703636363636Programs loaded
+Functions found in both binaries: 
+0.703636363636Programs loaded
+Functions found in both binaries: 
+0.677570093458Programs loaded
+Functions found in both binaries: 
+0.826792963464Programs loaded
+Functions found in both binaries: 
+0.803693570451Programs loaded
+Functions found in both binaries: 
+0.757884028484Programs loaded
+Functions found in both binaries: 
+0.830004438526Programs loaded
+Functions found in both binaries: 
+0.771760154739Programs loaded
+Functions found in both binaries: 
+0.870700636943Programs loaded
+Functions found in both binaries: 
+0.856209150327Programs loaded
+Functions found in both binaries: 
+0.733113673806Programs loaded
+Functions found in both binaries: 
+0.545006165228Programs loaded
+Functions found in both binaries: 
+0.825660377358Programs loaded
+Functions found in both binaries: 
+0.68824940048Programs loaded
+Functions found in both binaries: 
+0.760910815939Programs loaded
+Functions found in both binaries: 
+0.68538222295Programs loaded
+Functions found in both binaries: 
+0.818539976825Programs loaded
+Functions found in both binaries: 
+0.770633971292Programs loaded
+Functions found in both binaries: 
+0.694162436548Programs loaded
+Functions found in both binaries: 
+0.708955223881Programs loaded
+Functions found in both binaries: 
+0.816259269431Programs loaded
+Functions found in both binaries: 
+0.758968609865Programs loaded
+Functions found in both binaries: 
+0.720720720721Programs loaded
+Functions found in both binaries: 
+0.791713325868Programs loaded
+Functions found in both binaries: 
+0.80269058296Programs loaded
+Functions found in both binaries: 
+0.712962962963Programs loaded
+Functions found in both binaries: 
+0.715517241379Programs loaded
+Functions found in both binaries: 
+0.732522796353Programs loaded
+Functions found in both binaries: 
+0.745417515275Programs loaded
+Functions found in both binaries: 
+0.770967741935Programs loaded
+Functions found in both binaries: 
+0.78009322731Programs loaded
+Functions found in both binaries: 
+0.868686868687Programs loaded
+Functions found in both binaries: 
+0.794718485301Programs loaded
+Functions found in both binaries: 
+0.834016393443Programs loaded
+Functions found in both binaries: 
+0.831152250239Programs loaded
+Functions found in both binaries: 
+0.77972027972Programs loaded
+Functions found in both binaries: 
+0.821989528796Programs loaded
+Functions found in both binaries: 
+0.764705882353Programs loaded
+Functions found in both binaries: 
+0.89592760181Programs loaded
+Functions found in both binaries: 
+0.770633971292Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.732954545455Programs loaded
+Functions found in both binaries: 
+0.720067453626Programs loaded
+Functions found in both binaries: 
+0.805097451274Programs loaded
+Functions found in both binaries: 
+0.812731310141Programs loaded
+Functions found in both binaries: 
+0.805084745763Programs loaded
+Functions found in both binaries: 
+0.841346153846Programs loaded
+Functions found in both binaries: 
+0.66437007874Programs loaded
+Functions found in both binaries: 
+0.868243243243Programs loaded
+Functions found in both binaries: 
+0.714285714286Programs loaded
+Functions found in both binaries: 
+0.798309178744Programs loaded
+Functions found in both binaries: 
+0.596125551741Programs loaded
+Functions found in both binaries: 
+0.651888341544Programs loaded
+Functions found in both binaries: 
+0.739164086687Programs loaded
+Functions found in both binaries: 
+0.709211986681Programs loaded
+Functions found in both binaries: 
+0.74623655914Programs loaded
+Functions found in both binaries: 
+0.736220472441Programs loaded
+Functions found in both binaries: 
+0.781153450051Programs loaded
+Functions found in both binaries: 
+0.490648702125Programs loaded
+Functions found in both binaries: 
+0.684507042254Programs loaded
+Functions found in both binaries: 
+0.694842406877Programs loaded
+Functions found in both binaries: 
+0.733486943164Programs loaded
+Functions found in both binaries: 
+0.804587155963Programs loaded
+Functions found in both binaries: 
+0.720858895706Programs loaded
+Functions found in both binaries: 
+0.715966386555Programs loaded
+Functions found in both binaries: 
+0.788839823364Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.763446475196Programs loaded
+Functions found in both binaries: 
+0.768215720023Programs loaded
+Functions found in both binaries: 
+0.8017839445Programs loaded
+Functions found in both binaries: 
+0.735109717868Programs loaded
+Functions found in both binaries: 
+0.751335156962Programs loaded
+Functions found in both binaries: 
+0.715630472855Programs loaded
+Functions found in both binaries: 
+0.695652173913Programs loaded
+Functions found in both binaries: 
+0.762907608696Programs loaded
+Functions found in both binaries: 
+0.824343675418Programs loaded
+Functions found in both binaries: 
+0.724390243902Programs loaded
+Functions found in both binaries: 
+0.706447187929Programs loaded
+Functions found in both binaries: 
+0.770212765957Programs loaded
+Functions found in both binaries: 
+0.790932811481Programs loaded
+Functions found in both binaries: 
+0.699716713881Programs loaded
+Functions found in both binaries: 
+0.698113207547Programs loaded
+Functions found in both binaries: 
+0.707692307692Programs loaded
+Functions found in both binaries: 
+0.774461028192Programs loaded
+Functions found in both binaries: 
+0.609306260575Programs loaded
+Functions found in both binaries: 
+0.715517241379Programs loaded
+Functions found in both binaries: 
+0.668346312414Programs loaded
+Functions found in both binaries: 
+0.823145400593Programs loaded
+Functions found in both binaries: 
+0.711920529801Programs loaded
+Functions found in both binaries: 
+0.673784104389Programs loaded
+Functions found in both binaries: 
+0.73944294699Programs loaded
+Functions found in both binaries: 
+0.74989010989Programs loaded
+Functions found in both binaries: 
+0.861842105263Programs loaded
+Functions found in both binaries: 
+0.778301886792Programs loaded
+Functions found in both binaries: 
+0.774038461538Programs loaded
+Functions found in both binaries: 
+0.770633971292Programs loaded
+Functions found in both binaries: 
+0.803470715835Programs loaded
+Functions found in both binaries: 
+0.607476635514Programs loaded
+Functions found in both binaries: 
+0.884462151394Programs loaded
+Functions found in both binaries: 
+0.87866927593

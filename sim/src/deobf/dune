@@ -1,0 +1,22 @@
+(library
+  (name deobf)
+  (public_name deobf)
+  (preprocess (pps ppx_bap))
+  (libraries
+    bap
+    bap-core-theory
+    bap-future
+    bap-knowledge
+    bap-main
+    bitvec
+    bitvec-order
+    core_kernel
+    monads
+    z3
+    ogre))
+
+(plugin
+  (name smt)
+  (package deobf)
+  (libraries smt.plugin)
+  (site (bap-common plugins)))
