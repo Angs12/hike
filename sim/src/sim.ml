@@ -37,7 +37,7 @@ let exists_func proj ~func =
 let print_n_gram n_gram =
   print_endline
   @@ List.fold_right n_gram ~init:"\n\n/--/" ~f:(fun acc stmt ->
-         stmt ^ acc ^ "/--/")
+      stmt ^ acc ^ "/--/")
 
 let print_norm_insts insts file =
   Stdlib.output_string file
@@ -65,18 +65,13 @@ let prepare_sub arch proj sub =
 (*   sub |> Sub.ssa |> Deadcode.clean_sub arch |> Smt.remove_opaque proj *)
 (*   |> Smt.merge_cfg |> Deadcode.clean_sub arch |> Sub.flatten *)
 
-let get_pass (name : string) =
-  Bil.passes () |> List.find ~f:(fun p -> Bil.Pass.name p = name)
+let find_sub proj ~func =
+  let prog = Project.program proj in
+  Seq.find (Term.enum sub_t prog) ~f:(fun sub -> Sub.name sub = func)
+  |> Result.of_option ~error:"Function not found"
 
 let main bin1 bin2 func _ =
   let loader = "llvm" in
-  let normalization = Option.value_exn @@ get_pass "bnf1" in
-  let optimizations =
-    List.map
-      ~f:(fun pass -> Option.value_exn @@ get_pass pass)
-      [ "constant-propagation"; "prune-dead-virtuals"; "constant-folding" ]
-  in
-  Bil.select_passes @@ (normalization :: optimizations);
   let proj1 =
     Project.create ~package:bin1 @@ Input.load bin1 ~loader |> Or_error.ok_exn
   in
@@ -87,8 +82,8 @@ let main bin1 bin2 func _ =
   let proj1_arch = Project.arch proj1 in
   let proj2_arch = Project.arch proj2 in
   let open Result in
-  let func1 = find_leaf proj1 ~func >>| prepare_sub proj1_arch proj1 in
-  let func2 = find_leaf proj2 ~func >>| prepare_sub proj2_arch proj2 in
+  let func1 = find_sub proj1 ~func >>| prepare_sub proj1_arch proj1 in
+  let func2 = find_sub proj2 ~func >>| prepare_sub proj2_arch proj2 in
   print_endline @@ "Functions found in both binaries: ";
   Result.combine func1 func2 ~ok:similarity ~err:(fun err1 err2 ->
       err1 ^ " " ^ err2)

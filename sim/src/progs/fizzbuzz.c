@@ -26,9 +26,7 @@ int fizzBuzz(int n) {
 }
 
 int main() {
-  int n = 20;
+  int n = 10;
   int f = fizzBuzz(n);
-  printf("FizzBuzz: %d\n", f);
-
-  return 0;
+  return f;
 }

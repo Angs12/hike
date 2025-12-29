@@ -4,7 +4,6 @@
   (preprocess (pps ppx_bap))
   (libraries
     bap
-    cbat_value_set
     bap-core-theory
     bap-future
     bap-knowledge

@@ -31,25 +31,67 @@ let set_mem target =
 let stack = ref @@ Var.create "DUMMY" (Mem (`r32, Size.of_int_exn 8))
 let sp = ref @@ Var.create "DUMMY" (Imm 1)
 let regs = ref []
-let subs = ref Tid.Map.empty
+let subs = ref StrMap.empty
+
+let get_global_memory proj =
+  let m = Project.memory proj in
+  let lenght =
+    Word.( - )
+      (Base.Option.value_exn (Memmap.max_addr m))
+      (Base.Option.value_exn (Memmap.min_addr m))
+    |> Word.to_int_exn
+  in
+  let memory = Base.Array.init (lenght + 1) ~f:(fun _ -> 0) in
+  Project.memory proj |> Memmap.to_sequence
+  |> Seq.iter ~f:(fun (mem, _) ->
+      Memory.iteri ~word_size:`r8 mem ~f:(fun index v ->
+          memory.(Word.to_int_exn index) <- Word.to_int_exn v));
+  memory
 
 let set_sub sub =
   if Sub.name sub = "main" then
     subs :=
-      Tid.Map.add_exn !subs ~key:(Term.tid sub)
-        ~data:(Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
-  else subs := Tid.Map.add_exn !subs ~key:(Term.tid sub) ~data:Seq.empty
+      StrMap.add "main"
+        (Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
+        !subs
+  else subs := StrMap.add (Term.tid sub |> Tid.name) Seq.empty !subs
+
+let set_libc =
+  let rdi = Var.create "RDI" (Imm 64) in
+  subs :=
+    StrMap.add "@putc"
+      (Seq.of_list
+         [
+           Arg.create ~intent:Out !ret_reg (Var !ret_reg);
+           Arg.create ~intent:In rdi (Var rdi);
+         ])
+      !subs
 
 let set_sp target =
   sp :=
-    Theory.Target.reg target stack_pointer
-    |> Base.Option.value_exn ~message:"No stack pointer"
+    Base.Option.value_exn ~message:"set_sp: stack pointer not found"
+      (Theory.Target.reg target stack_pointer)
     |> Var.reify
 
 let set_regs target =
+  let flags =
+    [
+      Var.create "CF" (Imm 1);
+      Var.create "PF" (Imm 1);
+      Var.create "AF" (Imm 1);
+      Var.create "ZF" (Imm 1);
+      Var.create "SF" (Imm 1);
+      Var.create "TF" (Imm 1);
+      Var.create "IF" (Imm 1);
+      Var.create "DF" (Imm 1);
+      Var.create "OF" (Imm 1);
+      Var.create "PF" (Imm 1);
+    ]
+  in
   regs :=
-    Theory.Target.regs target ~roles:[ general; integer ]
-    |> Base.Set.to_list |> Base.List.map ~f:Var.reify
+    Theory.Target.regs target |> Base.Set.to_list |> Base.List.map ~f:Var.reify
+    |> Base.List.filter ~f:(fun reg ->
+        not (Base.List.mem flags reg ~equal:Var.same))
 
 let set_stack target =
   let byte = Theory.Target.byte target in
@@ -196,8 +238,8 @@ let trivial_exp_type exp =
   | _ -> failwith "pp exp type: non-trivial expression"
 
 let pp_type exp1 exp2 =
-  if trivial_exp_type exp1 = trivial_exp_type exp2 then trivial_exp_type exp1
-  else failwith "pp type: non-equal types"
+  if trivial_exp_type exp1 > trivial_exp_type exp2 then trivial_exp_type exp1
+  else trivial_exp_type exp2
 
 let pp_binop (op, e1, e2) =
   if is_trivial e1 && is_trivial e2 then
@@ -288,6 +330,27 @@ let pp_call_args tid args =
   in
   if args = "" then "" else String.sub args 0 (String.length args - 1)
 
+let pp_concat ppf (var, exp1, exp2) =
+  let temp_var1 = pp_trivial_exp (Var var) ^ "_tmp1" in
+  let temp_var2 = pp_trivial_exp (Var var) ^ "_tmp2" in
+  let temp_var3 = pp_trivial_exp (Var var) ^ "_tmp3" in
+  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var1 (trivial_exp_type exp1)
+    (pp_trivial_exp exp1) (var_type var);
+  fprintf ppf "\t%s = shl %s %s, %d\n" temp_var2 (var_type var) temp_var1
+    (exp_type_size exp2);
+  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var3 (trivial_exp_type exp2)
+    (pp_trivial_exp exp2) (var_type var);
+  fprintf ppf "\t%s = and %s %s, %s\n" (pp_trivial_exp (Var var)) (var_type var)
+    temp_var2 temp_var3
+
+let pp_extract ppf (var, hi, lo, exp) =
+  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
+  fprintf ppf "\t%s = lshr %s %s, %d\n" temp_var (trivial_exp_type exp)
+    (pp_trivial_exp exp) lo;
+  let result_size = hi - lo + 1 in
+  fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_trivial_exp (Var var))
+    (trivial_exp_type exp) temp_var result_size
+
 let pp_load ppf (var, mem, addr, size) =
   let size_type = size_type size in
   let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
@@ -377,8 +440,8 @@ let cf_type control_flow =
           match Call.target c with
           | Direct tid ->
               let args =
-                Tid.Map.find !subs tid
-                |> Base.Option.value_exn ~message:"cf_type: sub not found"
+                Base.Option.value_exn ~message:"cf_type: sub not found"
+                  (StrMap.find_opt (Tid.name tid) !subs)
               in
               let ret = ret_arg args in
               if ret then Call else CallVoid
@@ -388,8 +451,8 @@ let cf_type control_flow =
 
 let pp_func_call blk_tid ret_var fallthrough target ppf =
   let args =
-    Tid.Map.find !subs target
-    |> Base.Option.value_exn ~message:"pp_func_call: sub not found"
+    Base.Option.value_exn ~message:"pp_func_call: sub not found"
+      (StrMap.find_opt (Tid.name target) !subs)
   in
   let ret = ret_arg args in
   match ret with
@@ -460,8 +523,8 @@ let pp_def ppf def =
   | UnOp (op, e) -> pp_unop (op, e) |> fprintf ppf "\t%s = %s \n" var_name
   | Cast (cast, i, exp) -> pp_cast (var, cast, i, exp) |> fprintf ppf "\t%s \n"
   | Load (mem, addr, _, size) -> pp_load ppf (var, mem, addr, size)
-  | Concat _ -> fprintf ppf "CONCAT"
-  | Extract _ -> fprintf ppf "EXTRACT"
+  | Concat (exp1, exp2) -> pp_concat ppf (var, exp1, exp2)
+  | Extract (hi, lo, exp) -> pp_extract ppf (var, hi, lo, exp)
   | Var _ ->
       if is_mem var then ()
       else
@@ -478,6 +541,14 @@ let pp_def ppf def =
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
+
+let has_var var exp =
+  (object
+     inherit [bool] Exp.visitor as super
+     method! enter_var v flag = if Var.same v var || flag then true else false
+  end)
+    #visit_exp
+    exp false
 
 let base_exp_sub base_var sub =
   object
@@ -551,23 +622,89 @@ let get_reg reg =
     Load (Var cpu_regs, word_exp 62, BigEndian, Size.r64)
   else if Var.name reg = "RAX" then
     Load (Var cpu_regs, word_exp 70, BigEndian, Size.r64)
+  else if Var.name reg = "EAX" then
+    Load (Var cpu_regs, word_exp 74, BigEndian, Size.r32)
+  else if Var.name reg = "AX" then
+    Load (Var cpu_regs, word_exp 76, BigEndian, Size.r16)
   else if Var.name reg = "RBP" then
     Load (Var cpu_regs, word_exp 78, BigEndian, Size.r64)
+  else if Var.name reg = "EBP" then
+    Load (Var cpu_regs, word_exp 82, BigEndian, Size.r32)
+  else if Var.name reg = "BP" then
+    Load (Var cpu_regs, word_exp 84, BigEndian, Size.r16)
   else if Var.name reg = "RBX" then
     Load (Var cpu_regs, word_exp 86, BigEndian, Size.r64)
+  else if Var.name reg = "EBX" then
+    Load (Var cpu_regs, word_exp 90, BigEndian, Size.r32)
+  else if Var.name reg = "BX" then
+    Load (Var cpu_regs, word_exp 92, BigEndian, Size.r16)
   else if Var.name reg = "RCX" then
     Load (Var cpu_regs, word_exp 94, BigEndian, Size.r64)
+  else if Var.name reg = "ECX" then
+    Load (Var cpu_regs, word_exp 98, BigEndian, Size.r32)
+  else if Var.name reg = "CX" then
+    Load (Var cpu_regs, word_exp 100, BigEndian, Size.r16)
   else if Var.name reg = "RDI" then
     Load (Var cpu_regs, word_exp 102, BigEndian, Size.r64)
+  else if Var.name reg = "EDI" then
+    Load (Var cpu_regs, word_exp 106, BigEndian, Size.r32)
+  else if Var.name reg = "DI" then
+    Load (Var cpu_regs, word_exp 108, BigEndian, Size.r16)
   else if Var.name reg = "RDX" then
     Load (Var cpu_regs, word_exp 110, BigEndian, Size.r64)
+  else if Var.name reg = "EDX" then
+    Load (Var cpu_regs, word_exp 114, BigEndian, Size.r32)
+  else if Var.name reg = "DX" then
+    Load (Var cpu_regs, word_exp 116, BigEndian, Size.r16)
   else if Var.name reg = "RSI" then
     Load (Var cpu_regs, word_exp 118, BigEndian, Size.r64)
+  else if Var.name reg = "ESI" then
+    Load (Var cpu_regs, word_exp 122, BigEndian, Size.r32)
+  else if Var.name reg = "SI" then
+    Load (Var cpu_regs, word_exp 124, BigEndian, Size.r16)
   else if Var.name reg = "RSP" then
     Load (Var cpu_regs, word_exp 126, BigEndian, Size.r64)
+  else if Var.name reg = "ESP" then
+    Load (Var cpu_regs, word_exp 130, BigEndian, Size.r32)
+  else if Var.name reg = "SP" then
+    Load (Var cpu_regs, word_exp 132, BigEndian, Size.r16)
   else if Var.name reg = "SS" then
     Load (Var cpu_regs, word_exp 134, BigEndian, Size.r16)
-  else failwith "get_reg: not implemented"
+  else if Var.name reg = "YMM0" then
+    Load (Var cpu_regs, word_exp 136, BigEndian, Size.r256)
+  else if Var.name reg = "YMM1" then
+    Load (Var cpu_regs, word_exp 168, BigEndian, Size.r256)
+  else if Var.name reg = "YMM2" then
+    Load (Var cpu_regs, word_exp 200, BigEndian, Size.r256)
+  else if Var.name reg = "YMM3" then
+    Load (Var cpu_regs, word_exp 232, BigEndian, Size.r256)
+  else if Var.name reg = "YMM4" then
+    Load (Var cpu_regs, word_exp 264, BigEndian, Size.r256)
+  else if Var.name reg = "YMM5" then
+    Load (Var cpu_regs, word_exp 296, BigEndian, Size.r256)
+  else if Var.name reg = "YMM6" then
+    Load (Var cpu_regs, word_exp 328, BigEndian, Size.r256)
+  else if Var.name reg = "YMM7" then
+    Load (Var cpu_regs, word_exp 360, BigEndian, Size.r256)
+  else if Var.name reg = "YMM8" then
+    Load (Var cpu_regs, word_exp 392, BigEndian, Size.r256)
+  else if Var.name reg = "YMM9" then
+    Load (Var cpu_regs, word_exp 424, BigEndian, Size.r256)
+  else if Var.name reg = "YMM10" then
+    Load (Var cpu_regs, word_exp 456, BigEndian, Size.r256)
+  else if Var.name reg = "YMM11" then
+    Load (Var cpu_regs, word_exp 488, BigEndian, Size.r256)
+  else if Var.name reg = "YMM12" then
+    Load (Var cpu_regs, word_exp 520, BigEndian, Size.r256)
+  else if Var.name reg = "YMM13" then
+    Load (Var cpu_regs, word_exp 552, BigEndian, Size.r256)
+  else if Var.name reg = "YMM14" then
+    Load (Var cpu_regs, word_exp 584, BigEndian, Size.r256)
+  else if Var.name reg = "YMM15" then
+    Load (Var cpu_regs, word_exp 616, BigEndian, Size.r256)
+  else (
+    fprintf err_formatter "get_reg: not implemented %s\n" (Var.name reg);
+    failwith "get_reg: not implemented")
 
 let set_reg reg data =
   if Var.name reg = "CS" then
@@ -610,6 +747,38 @@ let set_reg reg data =
     Store (Var cpu_regs, word_exp 126, data, BigEndian, Size.r64)
   else if Var.name reg = "SS" then
     Store (Var cpu_regs, word_exp 134, data, BigEndian, Size.r16)
+  else if Var.name reg = "YMM0" then
+    Store (Var cpu_regs, word_exp 136, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM1" then
+    Store (Var cpu_regs, word_exp 168, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM2" then
+    Store (Var cpu_regs, word_exp 200, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM3" then
+    Store (Var cpu_regs, word_exp 232, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM4" then
+    Store (Var cpu_regs, word_exp 264, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM5" then
+    Store (Var cpu_regs, word_exp 296, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM6" then
+    Store (Var cpu_regs, word_exp 328, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM7" then
+    Store (Var cpu_regs, word_exp 360, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM8" then
+    Store (Var cpu_regs, word_exp 392, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM9" then
+    Store (Var cpu_regs, word_exp 424, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM10" then
+    Store (Var cpu_regs, word_exp 456, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM11" then
+    Store (Var cpu_regs, word_exp 488, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM12" then
+    Store (Var cpu_regs, word_exp 520, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM13" then
+    Store (Var cpu_regs, word_exp 552, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM14" then
+    Store (Var cpu_regs, word_exp 584, data, BigEndian, Size.r256)
+  else if Var.name reg = "YMM15" then
+    Store (Var cpu_regs, word_exp 616, data, BigEndian, Size.r256)
   else failwith "set_reg: not implemented"
 
 let update_args sub =
@@ -652,8 +821,8 @@ let update_rets sub =
         (match cf_type control_flow with
         | CallRet -> (
             let jmp =
-              Term.first jmp_t blk
-              |> Base.Option.value_exn ~message:"ret jmp not found"
+              Base.Option.value_exn ~message:"ret jmp not found"
+                (Term.first jmp_t blk)
             in
             let call = jmp |> call_exn in
             match Call.target call with
@@ -678,28 +847,24 @@ let update_rets sub =
       Sub.Builder.add_arg sub_builder arg);
   Sub.Builder.result sub_builder
 
-let update_main sub =
+let update_main lenght sub =
   if Sub.name sub = "main" then (
     let entry_tid =
-      Sub.to_graph sub
-      |> Graphs.Tid.Node.succs Graphs.Tid.start
-      |> Seq.hd
-      |> Base.Option.value_exn ~message:"Main function has no blocks"
+      Base.Option.value_exn ~message:"Main function has no blocks"
+        (Sub.to_graph sub |> Graphs.Tid.Node.succs Graphs.Tid.start |> Seq.hd)
     in
+    let reg = !sp in
     let sub =
       Term.map blk_t sub ~f:(fun blk ->
           if Term.tid blk = entry_tid then (
             let builder =
               Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk
             in
-            Base.List.iter !regs ~f:(fun reg ->
-                let data =
-                  if Var.same reg !sp then
-                    Bil.Int (Word.of_int ~width:(var_size reg) 65535)
-                  else Bil.Int (Word.zero (var_size reg))
-                in
-                let def = Def.create reg (set_reg reg data) in
-                Blk.Builder.add_def builder def);
+            (let data =
+               Bil.Int (Word.of_int ~width:(var_size reg) (lenght - 1))
+             in
+             let def = Def.create reg (set_reg reg data) in
+             Blk.Builder.add_def builder def);
             Term.enum def_t blk
             |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
             Blk.Builder.result builder)
@@ -718,19 +883,23 @@ let update_main sub =
 let transfer_regs sub =
   Term.map blk_t sub ~f:(fun blk ->
       let tid = Term.tid blk in
-      let tmp_reg_map =
-        !regs
-        |> Base.List.fold ~init:Var.Map.empty ~f:(fun reg_map v ->
-               Var.Map.add_exn reg_map ~key:v
-                 ~data:(create_reg ~name:(Var.name v) ~tid ~typ:(Var.typ v)))
+      let reg_map = ref Var.Map.empty in
+      let ret_reg_var =
+        create_reg ~name:(Var.name !ret_reg) ~tid ~typ:(Var.typ !ret_reg)
       in
-      let reg_map = ref tmp_reg_map in
+      reg_map := Var.Map.add_exn !reg_map ~key:!ret_reg ~data:ret_reg_var;
       let blk =
-        Var.Map.fold ~init:blk tmp_reg_map ~f:(fun ~key:base ~data:reg blk ->
+        Base.List.fold ~init:blk !regs ~f:(fun blk base ->
             let ver = ref 0 in
+            let reg =
+              create_reg ~name:(Var.name base) ~tid ~typ:(Var.typ base)
+            in
             Blk.map_elts blk ~def:(fun def ->
                 let var = Def.lhs def in
                 let exp = Def.rhs def in
+                if has_var base exp && not (Var.Map.mem !reg_map base) then
+                  reg_map := Var.Map.add_exn !reg_map ~key:base ~data:reg
+                else ();
                 let def =
                   Def.with_rhs def
                     (Exp.map (base_exp_sub base (Var.with_index reg !ver)) exp)
@@ -753,38 +922,13 @@ let transfer_regs sub =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
           ~copy_jmps:true blk
       in
-      (* let graph = Sub.to_cfg sub in *)
-      (* let node = Graphs.Ir.Node.create blk in *)
-      (* let inputs = *)
-      (*   Graphs.Ir.Node.inputs node graph *)
-      (*   |> Seq.map ~f:Graphs.Ir.Edge.src *)
-      (*   |> Seq.map ~f:Graphs.Ir.Node.label *)
-      (*   |> Seq.map ~f:Term.tid *)
-      (* in *)
-      (* if Seq.is_empty inputs then *)
       Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
           let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in
           let def = Def.create var (get_reg key) in
           Blk.Builder.add_def builder def);
-      (* else *)
-      (*   Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ -> *)
-      (*       let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in *)
-      (*       let vals = *)
-      (*         Seq.fold inputs ~init:[] ~f:(fun vals tid -> *)
-      (*             let reg_var = *)
-      (*               create_reg *)
-      (*                 ~name:("reg_" ^ Var.name key) *)
-      (*                 ~tid ~typ:(Var.typ key) *)
-      (*             in *)
-      (*             (tid, Var reg_var) :: vals) *)
-      (*       in *)
-      (*       let phi = Phi.of_list var vals in *)
-      (*       Blk.Builder.add_phi builder phi) *)
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
-             match elt with
-             | `Def def -> Blk.Builder.add_def builder def
-             | _ -> ());
+          match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
           match (cf_type (Term.enum jmp_t blk), Var.same key !ret_reg) with
           | Call, true -> ()
@@ -794,15 +938,14 @@ let transfer_regs sub =
               in
               let def = Def.create reg_var (Var data) in
               Blk.Builder.add_def builder def);
-      (match cf_type (Term.enum jmp_t blk) with
-      | Call | Ret | CallVoid | CallRet ->
-          Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
-              let reg_var =
-                create_reg ~name:("reg_" ^ Var.name key) ~tid ~typ:(Var.typ key)
-              in
-              let store_def = Def.create cpu_regs (set_reg key (Var reg_var)) in
-              Blk.Builder.add_def builder store_def)
-      | _ -> ());
+      Var.Map.iter_keys !reg_map ~f:(fun key ->
+          if Var.Map.mem !reg_map key then
+            let reg_var =
+              create_reg ~name:("reg_" ^ Var.name key) ~tid ~typ:(Var.typ key)
+            in
+            let store_def = Def.create cpu_regs (set_reg key (Var reg_var)) in
+            Blk.Builder.add_def builder store_def
+          else ());
       Blk.Builder.result builder)
 
 let pp_sub ppf sub =
@@ -813,9 +956,9 @@ let pp_sub ppf sub =
     (pp_args args) (pp_body ret) blks
 
 let filter_sub sub =
-  (String.starts_with ~prefix:"_" (Sub.name sub)
-  || String.starts_with ~prefix:"." (Sub.name sub)
-  || String.starts_with ~prefix:"sub" (Sub.name sub)
+  (Base.String.is_prefix ~prefix:"_" (Sub.name sub)
+  || Base.String.is_prefix ~prefix:"." (Sub.name sub)
+  || Base.String.is_prefix ~prefix:"sub" (Sub.name sub)
   || Sub.name sub = "frame_dummy"
   || Sub.name sub = "register_tm_clones"
   || Sub.name sub = "deregister_tm_clones"
@@ -825,6 +968,17 @@ let filter_sub sub =
 
 let pp_prog proj ppf prog =
   let target = Project.target proj in
+  let mem = get_global_memory proj in
+  let stack = Base.Array.init 1024 ~f:(fun _ -> 0) in
+  let mem = Array.append mem stack in
+  let data =
+    Base.Array.fold ~init:"" ~f:(fun acc v -> acc ^ sprintf "i8 %d," v) mem
+  in
+  (* remove last comma *)
+  let data =
+    if data = "" then "" else String.sub data 0 (String.length data - 1)
+  in
+  let length = Array.length mem in
   set_stack target;
   set_sp target;
   set_regs target;
@@ -835,11 +989,12 @@ let pp_prog proj ppf prog =
     Term.map sub_t prog ~f:(fun sub ->
         if filter_sub sub then
           sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
-          |> update_stack |> transfer_regs |> update_main
-        else sub)
+          |> update_stack |> transfer_regs |> update_main length
+        (* if filter_sub sub then sub |> Sub.ssa |> Sub.flatten  *)
+          else sub)
   in
-  fprintf ppf "@cpu = addrspace(1) global [140 x i8] undef\n";
-  fprintf ppf "@stack = addrspace(0) global [65536 x i8] undef\n";
+  fprintf ppf "@cpu = addrspace(1) global [650 x i8]  zeroinitializer \n";
+  fprintf ppf "@stack = addrspace(0) global [%d x i8] [ %s ]\n" length data;
   Term.enum sub_t prog |> Seq.filter ~f:filter_sub
   |> Seq.iter ~f:(fprintf ppf "@[%a@]@\n" pp_sub)
 

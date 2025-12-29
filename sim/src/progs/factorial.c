@@ -1,10 +1,10 @@
 #include <pthread.h>
 #include <stdio.h>
 
-#pragma noinline
-int __attribute__((noinline)) inc(int x) {
-  x++;
-  return x;
+int global = 4;
+
+int inc(int x, int y, int z, int w, int i, int j, int s) {
+  return x + y + z + w + i + j + s;
 }
 
 unsigned int factorial(unsigned int N) {
@@ -18,8 +18,6 @@ unsigned int factorial(unsigned int N) {
 }
 
 int main() {
-  int N = 3;
-  int fact = factorial(N);
-  putchar(0x42);
-  return fact;
+  int fact = factorial(global);
+  return inc(fact, 0, 0, 0, 0, 0, 1);
 }
