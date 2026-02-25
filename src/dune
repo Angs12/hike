@@ -1,0 +1,22 @@
+(library
+  (name sim_plugin)
+  (public_name sim.plugin)
+  (preprocess (pps ppx_bap))
+  (libraries
+    bap
+    bap-core-theory
+    bap-future
+    bap-knowledge
+    bap-main
+    bitvec
+    bitvec-order
+    core_kernel
+    monads
+    re
+    ogre))
+
+(plugin
+  (name simila)
+  (package sim)
+  (libraries sim.plugin)
+  (site (bap-common plugins)))
