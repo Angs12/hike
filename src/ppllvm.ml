@@ -4,6 +4,7 @@ open Bap_main
 open Bap.Std.Bil.Types
 open Bap_core_theory
 open Regular.Std
+open Reachable_funcs
 open Theory.Role.Register
 open Format
 module StrMap = Map.Make (String)
@@ -34,10 +35,22 @@ let set_sub sub =
         !subs
   else subs := StrMap.add (Term.tid sub |> Tid.name) Seq.empty !subs
 
-let set_libc =
+let set_libc () =
   let rdi = Var.create "RDI" (Imm 64) in
   subs :=
-    StrMap.add "@putc"
+    StrMap.add "@getchar"
+      (Seq.of_list [ Arg.create ~intent:Out !ret_reg (Var !ret_reg) ])
+      !subs;
+  subs :=
+    StrMap.add "@putchar"
+      (Seq.of_list
+         [
+           Arg.create ~intent:Out !ret_reg (Var !ret_reg);
+           Arg.create ~intent:In rdi (Var rdi);
+         ])
+      !subs;
+  subs :=
+    StrMap.add "@puts"
       (Seq.of_list
          [
            Arg.create ~intent:Out !ret_reg (Var !ret_reg);
@@ -376,58 +389,16 @@ let cf_type control_flow =
           match Call.target c with
           | Direct tid ->
               let args =
-                Base.Option.value_exn ~message:"cf_type: sub not found"
+                Base.Option.value_exn
+                  ~message:(sprintf "cf_type: sub %s not found" (Tid.name tid))
                   (StrMap.find_opt (Tid.name tid) !subs)
               in
               let ret = ret_arg args in
+              fprintf err_formatter "%s -- %b \n" (Tid.name tid) ret;
               if ret then Call else CallVoid
           | Indirect _ -> Call)
       | None -> CallRet)
   | Int _ -> Int
-
-let pp_func_call blk_tid ret_var fallthrough target ppf =
-  let args =
-    Base.Option.value_exn ~message:"pp_func_call: sub not found"
-      (StrMap.find_opt (Tid.name target) !subs)
-  in
-  let ret = ret_arg args in
-  match ret with
-  | true ->
-      fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
-        (pp_trivial_exp (Var ret_var))
-        (var_type ret_var) (pp_func target)
-        (pp_call_args blk_tid args);
-      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-  | false ->
-      fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
-        (pp_call_args blk_tid args);
-      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-
-let pp_call tid returns_value ret ppf call =
-  match (Call.return call, Call.target call) with
-  | None, _ -> (
-      match returns_value with
-      | true ->
-          fprintf ppf "\tret %s %s\n" (var_type ret) (pp_trivial_exp (Var ret))
-      | false -> fprintf ppf "\tret void\n")
-  | Some (Direct ret_label), Direct target_label ->
-      pp_func_call tid ret ret_label target_label ppf
-  | _, _ -> fprintf ppf "\tCALL\n"
-
-let pp_phi ppf phi =
-  let var = Phi.lhs phi in
-  if is_mem var || Base.List.mem !regs var ~equal:Var.same then ()
-  else
-    let var_name = pp_trivial_exp (Var var) in
-    let vals = Phi.values phi in
-    let values =
-      Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) ->
-          sprintf "%s [%s,%%%s]," prev (pp_trivial_exp exp) (pp_label tid))
-    in
-    let values = String.sub values 0 (String.length values - 1) in
-    fprintf ppf "\t%s = phi %s %s\n" var_name
-      (trivial_exp_type (Var var))
-      values
 
 let pp_cast (var, cast, i, exp) =
   let var_name = pp_trivial_exp (Var var) in
@@ -474,6 +445,54 @@ let pp_def ppf def =
   | _ ->
       fprintf ppf "Not trivial expression\n";
       pp_trivial_exp expr |> fprintf ppf "\t%s = %s \n" var_name
+
+let pp_func_call blk_tid ret_var fallthrough target ppf =
+  let args =
+    Base.Option.value_exn ~message:"pp_func_call: sub not found"
+      (StrMap.find_opt (Tid.name target) !subs)
+  in
+  Seq.iter args ~f:(fun arg -> fprintf err_formatter "%s\n" (Arg.str () arg));
+  let ret = ret_arg args in
+  match ret with
+  | true ->
+      fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
+        (pp_trivial_exp (Var ret_var))
+        (var_type ret_var) (pp_func target)
+        (pp_call_args blk_tid args);
+      let store_exp = set_reg !ret_reg (Var ret_var) in
+      let store_def = Def.create cpu_regs store_exp in
+      pp_def ppf store_def;
+      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
+  | false ->
+      fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
+        (pp_call_args blk_tid args);
+      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
+
+let pp_call tid returns_value ret ppf call =
+  match (Call.return call, Call.target call) with
+  | None, _ -> (
+      match returns_value with
+      | true ->
+          fprintf ppf "\tret %s %s\n" (var_type ret) (pp_trivial_exp (Var ret))
+      | false -> fprintf ppf "\tret void\n")
+  | Some (Direct ret_label), Direct target_label ->
+      pp_func_call tid ret ret_label target_label ppf
+  | _, _ -> fprintf ppf "\tCALL\n"
+
+let pp_phi ppf phi =
+  let var = Phi.lhs phi in
+  if is_mem var || Base.List.mem !regs var ~equal:Var.same then ()
+  else
+    let var_name = pp_trivial_exp (Var var) in
+    let vals = Phi.values phi in
+    let values =
+      Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) ->
+          sprintf "%s [%s,%%%s]," prev (pp_trivial_exp exp) (pp_label tid))
+    in
+    let values = String.sub values 0 (String.length values - 1) in
+    fprintf ppf "\t%s = phi %s %s\n" var_name
+      (trivial_exp_type (Var var))
+      values
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
@@ -687,15 +706,9 @@ let transfer_regs sub =
                 create_reg ~name:("reg_" ^ Var.name key) ~tid ~typ:(Var.typ key)
               in
               let def = Def.create reg_var (Var data) in
-              Blk.Builder.add_def builder def);
-      Var.Map.iter_keys !reg_map ~f:(fun key ->
-          if Var.Map.mem !reg_map key then
-            let reg_var =
-              create_reg ~name:("reg_" ^ Var.name key) ~tid ~typ:(Var.typ key)
-            in
-            let store_def = Def.create cpu_regs (set_reg key (Var reg_var)) in
-            Blk.Builder.add_def builder store_def
-          else ());
+              let store_def = Def.create cpu_regs (set_reg key (Var reg_var)) in
+              Blk.Builder.add_def builder def;
+              Blk.Builder.add_def builder store_def);
       Blk.Builder.result builder)
 
 let pp_sub ppf sub =
@@ -705,16 +718,12 @@ let pp_sub ppf sub =
   fprintf ppf "@[<2>define %a @%s(%s) {@\n%a@]@\n}" pp_ret args (Sub.name sub)
     (pp_args args) (pp_body ret) blks
 
-let filter_sub sub =
-  (Base.String.is_prefix ~prefix:"_" (Sub.name sub)
-  || Base.String.is_prefix ~prefix:"." (Sub.name sub)
-  || Base.String.is_prefix ~prefix:"sub" (Sub.name sub)
-  || Sub.name sub = "frame_dummy"
-  || Sub.name sub = "register_tm_clones"
-  || Sub.name sub = "deregister_tm_clones"
-  || String.contains (Sub.name sub) '-'
-  || String.contains (Sub.name sub) ':')
-  |> not
+let libc_calls sub =
+  not
+    (Sub.name sub = "getchar"
+    || Sub.name sub = "puts"
+    || Sub.name sub = "putchar"
+    || Base.String.is_substring ~substring:":external" (Sub.name sub))
 
 let pp_prog proj ppf prog =
   let target = Project.target proj in
@@ -729,24 +738,28 @@ let pp_prog proj ppf prog =
     if data = "" then "" else String.sub data 0 (String.length data - 1)
   in
   let length = Array.length mem in
+  set_ret_reg target;
+  set_regs target;
   set_stack target;
   set_sp target;
-  set_regs target;
   set_mem target;
-  set_ret_reg target;
-  Term.enum sub_t prog |> Seq.iter ~f:set_sub;
-  let prog =
-    Term.map sub_t prog ~f:(fun sub ->
-        if filter_sub sub then
-          sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
-          |> update_stack |> transfer_regs |> update_main length
-        (* if filter_sub sub then sub |> Sub.ssa |> Sub.flatten  *)
-          else sub)
+  set_libc ();
+  (* convert only functions that are reachable from main *)
+  let main_sub =
+    Term.enum sub_t prog |> Seq.find_exn ~f:(fun sub -> Sub.name sub = "main")
+  in
+  let reachable = reachable_funcs prog main_sub |> SubSet.filter libc_calls in
+  SubSet.iter (fun sub -> set_sub sub) reachable;
+  let updated_subs =
+    SubSet.map
+      (fun sub ->
+        sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
+        |> update_stack |> transfer_regs |> update_main length)
+      reachable
   in
   fprintf ppf "@cpu = addrspace(1) global [650 x i8]  zeroinitializer \n";
   fprintf ppf "@stack = addrspace(0) global [%d x i8] [ %s ]\n" length data;
-  Term.enum sub_t prog |> Seq.filter ~f:filter_sub
-  |> Seq.iter ~f:(fprintf ppf "@[%a@]@\n" pp_sub)
+  SubSet.iter (fprintf ppf "@[%a@]@\n" pp_sub) updated_subs
 
 let pp ppf proj =
   let pass =
