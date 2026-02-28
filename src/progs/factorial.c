@@ -20,6 +20,6 @@ unsigned int factorial(unsigned int N) {
 int main() {
   int fact = factorial(global);
   int t = getchar();
-  putchar(t);
+  // putchar(t);
   return inc(fact, 0, 0, 0, 0, 0, 1);
 }

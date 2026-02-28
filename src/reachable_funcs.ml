@@ -1,4 +1,3 @@
-open Bap
 open Bap.Std
 module SubSet = Set.Make (Sub)
 

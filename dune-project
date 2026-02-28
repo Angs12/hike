@@ -22,11 +22,12 @@
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends ocaml)
+ (allow_empty)
  (tags
   ("add topics" "to describe" your project)))
 
 (package
- (name sim_lib)
+ (name convlir)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends ocaml)

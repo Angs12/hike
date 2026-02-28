@@ -1,0 +1,4 @@
+(test
+ (name parser_test)
+ (libraries convlir)
+ )

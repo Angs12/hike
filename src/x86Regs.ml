@@ -171,9 +171,7 @@ let get_reg reg =
     Load (Var cpu_regs, word_exp 584, BigEndian, Size.r256)
   else if Var.name reg = "YMM15" then
     Load (Var cpu_regs, word_exp 616, BigEndian, Size.r256)
-  else (
-    fprintf err_formatter "get_reg: not implemented %s\n" (Var.name reg);
-    failwith "get_reg: not implemented")
+  else failwith @@ sprintf "get_reg: not implemented %s\n" (Var.name reg)
 
 let set_reg reg data =
   if Var.name reg = "CS" then
@@ -200,20 +198,52 @@ let set_reg reg data =
     Store (Var cpu_regs, word_exp 62, data, BigEndian, Size.r64)
   else if Var.name reg = "RAX" then
     Store (Var cpu_regs, word_exp 70, data, BigEndian, Size.r64)
+  else if Var.name reg = "EAX" then
+    Store (Var cpu_regs, word_exp 74, data, BigEndian, Size.r32)
+  else if Var.name reg = "AX" then
+    Store (Var cpu_regs, word_exp 76, data, BigEndian, Size.r16)
   else if Var.name reg = "RBP" then
     Store (Var cpu_regs, word_exp 78, data, BigEndian, Size.r64)
+  else if Var.name reg = "EBP" then
+    Store (Var cpu_regs, word_exp 82, data, BigEndian, Size.r32)
+  else if Var.name reg = "BP" then
+    Store (Var cpu_regs, word_exp 84, data, BigEndian, Size.r16)
   else if Var.name reg = "RBX" then
     Store (Var cpu_regs, word_exp 86, data, BigEndian, Size.r64)
+  else if Var.name reg = "EBX" then
+    Store (Var cpu_regs, word_exp 90, data, BigEndian, Size.r32)
+  else if Var.name reg = "BX" then
+    Store (Var cpu_regs, word_exp 92, data, BigEndian, Size.r16)
   else if Var.name reg = "RCX" then
     Store (Var cpu_regs, word_exp 94, data, BigEndian, Size.r64)
+  else if Var.name reg = "ECX" then
+    Store (Var cpu_regs, word_exp 98, data, BigEndian, Size.r32)
+  else if Var.name reg = "CX" then
+    Store (Var cpu_regs, word_exp 100, data, BigEndian, Size.r16)
   else if Var.name reg = "RDI" then
     Store (Var cpu_regs, word_exp 102, data, BigEndian, Size.r64)
+  else if Var.name reg = "EDI" then
+    Store (Var cpu_regs, word_exp 106, data, BigEndian, Size.r32)
+  else if Var.name reg = "DI" then
+    Store (Var cpu_regs, word_exp 108, data, BigEndian, Size.r16)
   else if Var.name reg = "RDX" then
     Store (Var cpu_regs, word_exp 110, data, BigEndian, Size.r64)
+  else if Var.name reg = "EDX" then
+    Store (Var cpu_regs, word_exp 114, data, BigEndian, Size.r32)
+  else if Var.name reg = "DX" then
+    Store (Var cpu_regs, word_exp 116, data, BigEndian, Size.r16)
   else if Var.name reg = "RSI" then
     Store (Var cpu_regs, word_exp 118, data, BigEndian, Size.r64)
+  else if Var.name reg = "ESI" then
+    Store (Var cpu_regs, word_exp 122, data, BigEndian, Size.r32)
+  else if Var.name reg = "SI" then
+    Store (Var cpu_regs, word_exp 124, data, BigEndian, Size.r16)
   else if Var.name reg = "RSP" then
     Store (Var cpu_regs, word_exp 126, data, BigEndian, Size.r64)
+  else if Var.name reg = "ESP" then
+    Store (Var cpu_regs, word_exp 130, data, BigEndian, Size.r32)
+  else if Var.name reg = "SP" then
+    Store (Var cpu_regs, word_exp 132, data, BigEndian, Size.r16)
   else if Var.name reg = "SS" then
     Store (Var cpu_regs, word_exp 134, data, BigEndian, Size.r16)
   else if Var.name reg = "YMM0" then
@@ -248,4 +278,4 @@ let set_reg reg data =
     Store (Var cpu_regs, word_exp 584, data, BigEndian, Size.r256)
   else if Var.name reg = "YMM15" then
     Store (Var cpu_regs, word_exp 616, data, BigEndian, Size.r256)
-  else failwith "set_reg: not implemented"
+  else failwith @@ sprintf "set_reg: not implemented %s\n" (Var.name reg)

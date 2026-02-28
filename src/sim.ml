@@ -1,4 +1,4 @@
-open Core_kernel
+open Core
 open Poly
 open Bap.Std.Project
 open Bap.Std
@@ -7,7 +7,6 @@ open Bap_main.Extension
 open Bap_main.Extension.Command
 open Format
 open Normalize
-open Leafs
 include Self ()
 
 let features_used =
@@ -58,8 +57,7 @@ let similarity func1 func2 =
   print_norm_insts n_grams2 file2;
   compare_n_grams n_grams1 n_grams2
 
-let prepare_sub arch proj sub =
-  sub |> Sub.ssa |> Deadcode.clean_sub arch |> Sub.flatten
+let prepare_sub sub = sub |> Sub.ssa |> Sub.flatten
 
 (* let prepare_sub arch proj sub = *)
 (*   sub |> Sub.ssa |> Deadcode.clean_sub arch |> Smt.remove_opaque proj *)
@@ -79,11 +77,9 @@ let main bin1 bin2 func _ =
     Project.create ~package:bin2 @@ Input.load bin2 ~loader |> Or_error.ok_exn
   in
   print_endline @@ "Programs loaded";
-  let proj1_arch = Project.arch proj1 in
-  let proj2_arch = Project.arch proj2 in
   let open Result in
-  let func1 = find_sub proj1 ~func >>| prepare_sub proj1_arch proj1 in
-  let func2 = find_sub proj2 ~func >>| prepare_sub proj2_arch proj2 in
+  let func1 = find_sub proj1 ~func >>| prepare_sub in
+  let func2 = find_sub proj2 ~func >>| prepare_sub in
   print_endline @@ "Functions found in both binaries: ";
   Result.combine func1 func2 ~ok:similarity ~err:(fun err1 err2 ->
       err1 ^ " " ^ err2)

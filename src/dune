@@ -1,6 +1,6 @@
 (library
-  (name sim_plugin)
-  (public_name sim.plugin)
+  (name convlir)
+  (public_name convlir)
   (preprocess (pps ppx_bap))
   (libraries
     bap
@@ -14,9 +14,3 @@
     monads
     re
     ogre))
-
-(plugin
-  (name simila)
-  (package sim)
-  (libraries sim.plugin)
-  (site (bap-common plugins)))

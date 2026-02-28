@@ -21,9 +21,10 @@ compileO3_fizzbuzz:
 	clang -Oz -fno-slp-vectorize -o fizzbuzz_llvmO3 fizzbuzz.ll
 
 compile32:
-	gcc -O0 -fno-pie -m32 -o ./progs/factorial32  ./progs/factorial.c
+	gcc -O0 -m32 -o ./progs/factorial32  ./progs/factorial.c
 	bap ./progs/factorial32 -L ./plugins --pass=ppllvm 1> factorial.ll
-	clang -Oz -o factorial_llvm32 factorial.ll
+	cat stdio_headers.ll factorial.ll > converted.ll
+	clang -Oz -o factorial_llvm32 converted.ll
 
 compileO0_fact:
 	gcc -O0 -o ./progs/factorial_0  ./progs/factorial.c

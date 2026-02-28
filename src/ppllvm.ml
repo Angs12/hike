@@ -2,10 +2,8 @@ open Bap.Std
 open X86Regs
 open Bap_main
 open Bap.Std.Bil.Types
-open Bap_core_theory
 open Regular.Std
 open Reachable_funcs
-open Theory.Role.Register
 open Format
 module StrMap = Map.Make (String)
 module ExpMap = Map.Make (Exp)
@@ -499,7 +497,7 @@ let call_exn jmp =
 
 let has_var var exp =
   (object
-     inherit [bool] Exp.visitor as super
+     inherit [bool] Exp.visitor
      method! enter_var v flag = if Var.same v var || flag then true else false
   end)
     #visit_exp
@@ -507,7 +505,7 @@ let has_var var exp =
 
 let base_exp_sub base_var sub =
   object
-    inherit Exp.mapper as super
+    inherit Exp.mapper
     method! map_var var = if Var.same var base_var then Var sub else Var var
   end
 
@@ -715,7 +713,8 @@ let pp_sub ppf sub =
   let args = Term.enum arg_t sub in
   let blks = Term.enum blk_t sub in
   let ret = ret_arg args in
-  fprintf ppf "@[<2>define %a @%s(%s) {@\n%a@]@\n}" pp_ret args (Sub.name sub)
+  fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret args
+    (pp_func @@ Term.tid sub)
     (pp_args args) (pp_body ret) blks
 
 let libc_calls sub =
