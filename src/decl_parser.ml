@@ -1,40 +1,42 @@
-open Core
 module LibcMap = Map.Make (String)
 
-type functype = Void | Int of int | Float of int | Pointer | Struct of int
+type functype =
+  | Void
+  | Pointer
+  | Int of int
+  | Half
+  | Bfloat
+  | Float
+  | Double
+  | FP128
+  | X86fp80
+  | PPCfp128
+  | X86amx
+  | Struct of functype list
+
 type funcdef = { return : functype; args : functype list }
+type libcmap = funcdef Map.Make(String).t
 
-let type_size (s : string) : int =
-  match s with
-  | "void" -> 0
-  | "ptr" -> 64
-  | "float" -> 32
-  | "double" -> 64
-  | "half" -> 16
-  | "bfloat" -> 16
-  | t ->
-      if String.length t > 0 && Char.equal (String.get t 0) 'i' then
-        int_of_string (String.sub t ~pos:1 ~len:(String.length t - 1))
-      else 0
+open Core
 
-let ll_type_to_functype (s : string) : functype =
+let rec ll_type_to_functype (s : string) : functype =
   match s with
   | "void" -> Void
   | "ptr" -> Pointer
-  | "float" -> Float 32
-  | "double" -> Float 64
-  | "half" -> Float 16
-  | "bfloat" -> Float 16
+  | "float" -> Float
+  | "double" -> Double
+  | "half" -> Half
+  | "bfloat" -> Bfloat
+  | "x86_fp80" -> X86fp80
+  | "ppc_fp128" -> PPCfp128
+  | "x86_amx" -> X86amx
   | t ->
       if String.length t > 0 && Char.equal (String.get t 0) 'i' then
         Int (int_of_string (String.sub t ~pos:1 ~len:(String.length t - 1)))
       else if String.length t > 0 && Char.equal (String.get t 0) '{' then
         let inner = String.sub t ~pos:1 ~len:(String.length t - 2) in
         let types = String.split inner ~on:',' |> List.map ~f:String.strip in
-        let total_size =
-          List.fold types ~init:0 ~f:(fun acc x -> acc + type_size x)
-        in
-        Struct total_size
+        Struct (List.map types ~f:ll_type_to_functype)
       else Void
 
 let extract_arg_type (s : string) : string =
@@ -83,10 +85,8 @@ let parse_decl (line : string) : (string * funcdef) option =
         with _ -> None)
     | _ -> None
 
-let parse_file (filename : string) : funcdef LibcMap.t =
+let parse_header_file (filename : string) : libcmap =
   let lines = In_channel.read_lines filename in
   let decls = List.filter_map lines ~f:parse_decl in
-  let map_ref = ref LibcMap.empty in
-  List.iter decls ~f:(fun (name, def) ->
-      map_ref := Map.set !map_ref ~key:name ~data:def);
-  !map_ref
+  List.fold decls ~init:LibcMap.empty ~f:(fun map (name, def) ->
+      LibcMap.add name def map)
