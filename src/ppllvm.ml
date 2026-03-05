@@ -7,6 +7,7 @@ open Reachable_funcs
 open Format
 module StrMap = Map.Make (String)
 module ExpMap = Map.Make (Exp)
+module Libcmap = Map.Make (String)
 
 let subs = ref StrMap.empty
 
@@ -33,28 +34,18 @@ let set_sub sub =
         !subs
   else subs := StrMap.add (Term.tid sub |> Tid.name) Seq.empty !subs
 
-let set_libc () =
-  let rdi = Var.create "RDI" (Imm 64) in
-  subs :=
-    StrMap.add "@getchar"
-      (Seq.of_list [ Arg.create ~intent:Out !ret_reg (Var !ret_reg) ])
-      !subs;
-  subs :=
-    StrMap.add "@putchar"
-      (Seq.of_list
-         [
-           Arg.create ~intent:Out !ret_reg (Var !ret_reg);
-           Arg.create ~intent:In rdi (Var rdi);
-         ])
-      !subs;
-  subs :=
-    StrMap.add "@puts"
-      (Seq.of_list
-         [
-           Arg.create ~intent:Out !ret_reg (Var !ret_reg);
-           Arg.create ~intent:In rdi (Var rdi);
-         ])
-      !subs
+let set_libc libc =
+  Libcmap.iter
+    (fun key (data : Decl_parser.funcdef) ->
+      let ret = Gnu64_abi.return_regs data.return in
+      let args = Gnu64_abi.arg_regs data.args in
+      let func_decl =
+        Seq.of_list
+          (List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret
+          @ List.map (fun r -> Arg.create ~intent:In r (Var r)) args)
+      in
+      subs := StrMap.add ("@" ^ key) func_decl !subs)
+    libc
 
 let some_exn option =
   match option with Some x -> x | None -> failwith "some_exn"
@@ -717,16 +708,24 @@ let pp_sub ppf sub =
     (pp_func @@ Term.tid sub)
     (pp_args args) (pp_body ret) blks
 
-let libc_calls sub =
+let libc_calls libc sub =
   not
-    (Sub.name sub = "getchar"
-    || Sub.name sub = "puts"
-    || Sub.name sub = "putchar"
+    (Libcmap.mem (Sub.name sub) libc
     || Base.String.is_substring ~substring:":external" (Sub.name sub))
+
+let print_sections p =
+  Project.memory p |> Memmap.to_sequence
+  |> Seq.iter ~f:(fun (mem, x) ->
+      Base.Option.iter (Value.get Image.section x) ~f:(fun name ->
+          fprintf err_formatter "Section: %s@.%a@." name Memory.pp mem))
 
 let pp_prog proj ppf prog =
   let target = Project.target proj in
+  print_sections proj;
   let mem = get_global_memory proj in
+  for i = 8196 to 8204 do
+    fprintf err_formatter "%c" (Char.chr mem.(i))
+  done;
   let stack = Base.Array.init 1024 ~f:(fun _ -> 0) in
   let mem = Array.append mem stack in
   let data =
@@ -737,17 +736,22 @@ let pp_prog proj ppf prog =
     if data = "" then "" else String.sub data 0 (String.length data - 1)
   in
   let length = Array.length mem in
+  let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
   set_ret_reg target;
   set_regs target;
   set_stack target;
   set_sp target;
   set_mem target;
-  set_libc ();
+  set_libc libc;
   (* convert only functions that are reachable from main *)
   let main_sub =
     Term.enum sub_t prog |> Seq.find_exn ~f:(fun sub -> Sub.name sub = "main")
   in
-  let reachable = reachable_funcs prog main_sub |> SubSet.filter libc_calls in
+  let reachable =
+    reachable_funcs prog main_sub |> SubSet.filter (libc_calls libc)
+  in
+  SubSet.iter (fun sub -> fprintf err_formatter "%s" (Sub.name sub)) reachable;
+  Program.pp err_formatter prog;
   SubSet.iter (fun sub -> set_sub sub) reachable;
   let updated_subs =
     SubSet.map
