@@ -12,7 +12,7 @@ let print_libc libc =
       let ret = Gnu64_abi.return_regs data.return in
       let args = Gnu64_abi.arg_regs data.args in
       Stdio.printf "fn %s " key;
-      List.iter (fun r -> Stdio.printf " %s " (Var.name r)) args;
+      List.iter (fun (r, _) -> Stdio.printf " %s " (Var.name r)) args;
       Stdio.printf " -> ";
       List.iter (fun r -> Stdio.printf " %s " (Var.name r)) ret;
       Stdio.printf "\n")

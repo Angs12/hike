@@ -42,7 +42,7 @@ let set_libc libc =
       let func_decl =
         Seq.of_list
           (List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret
-          @ List.map (fun r -> Arg.create ~intent:In r (Var r)) args)
+          @ List.map (fun (r, i) -> Arg.create ~intent:i r (Var r)) args)
       in
       subs := StrMap.add ("@" ^ key) func_decl !subs)
     libc
@@ -247,22 +247,56 @@ let ret_arg args =
   Seq.exists args ~f:(fun arg ->
       match Arg.intent arg with Some Out -> true | _ -> false)
 
+let ready_args ppf tid args =
+  Seq.iter args ~f:(fun arg ->
+      match Arg.intent arg with
+      | Some i -> (
+          match i with
+          | In -> ()
+          | Out -> ()
+          | Both ->
+              let var = Arg.lhs arg in
+              let reg =
+                create_reg ~name:("reg_" ^ Var.name var) ~tid ~typ:(Var.typ var)
+              in
+              let tmp =
+                create_reg ~name:("tmp_" ^ Var.name var) ~tid ~typ:(Var.typ var)
+              in
+              let ptr =
+                create_reg ~name:("ptr_" ^ Var.name var) ~tid ~typ:(Var.typ var)
+              in
+              fprintf ppf "\t%s = ptrtoint ptr addrspace(0) @stack to i64\n"
+                (pp_trivial_exp (Var tmp));
+              fprintf ppf "\t%s = add %s %s, %s\n" (pp_trivial_exp (Var ptr))
+                (trivial_exp_type (Var tmp))
+                (pp_trivial_exp (Var tmp)) (pp_trivial_exp (Var reg)))
+      | None -> ())
+
 let pp_call_args tid args =
   let args =
     Seq.fold args ~init:"" ~f:(fun prev arg ->
         let var = Arg.lhs arg in
-        let var =
-          create_reg ~name:("reg_" ^ Var.name var) ~tid ~typ:(Var.typ var)
-        in
         match Arg.intent arg with
         | Some i -> (
             match i with
             | In ->
+                let var =
+                  create_reg
+                    ~name:("reg_" ^ Var.name var)
+                    ~tid ~typ:(Var.typ var)
+                in
+
                 sprintf "%s %s %s," prev (var_type var)
                   (pp_trivial_exp (Var var))
             | Out -> prev
             | Both ->
-                sprintf "%s %s %s," prev (var_type var)
+                let var =
+                  create_reg
+                    ~name:("ptr_" ^ Var.name var)
+                    ~tid ~typ:(Var.typ var)
+                in
+                sprintf "%s %s %s," prev
+                  (trivial_exp_type (Var var))
                   (pp_trivial_exp (Var var)))
         | None -> prev)
   in
@@ -444,6 +478,7 @@ let pp_func_call blk_tid ret_var fallthrough target ppf =
   let ret = ret_arg args in
   match ret with
   | true ->
+      ready_args ppf blk_tid args;
       fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
         (pp_trivial_exp (Var ret_var))
         (var_type ret_var) (pp_func target)
@@ -453,6 +488,7 @@ let pp_func_call blk_tid ret_var fallthrough target ppf =
       pp_def ppf store_def;
       fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
   | false ->
+      ready_args ppf blk_tid args;
       fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
         (pp_call_args blk_tid args);
       fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
@@ -721,6 +757,7 @@ let print_sections p =
 
 let pp_prog proj ppf prog =
   let target = Project.target proj in
+  Program.pp err_formatter prog;
   print_sections proj;
   let mem = get_global_memory proj in
   for i = 8196 to 8204 do

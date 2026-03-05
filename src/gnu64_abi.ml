@@ -1,9 +1,9 @@
-open Base
 open Decl_parser
 open Bap.Std
 
 type typeclass =
   | INT
+  | PTR
   | SSE
   | SSEUP
   | X87
@@ -11,21 +11,6 @@ type typeclass =
   | COMPLEX_X87
   | NOCLASS
   | MEMORY
-
-let rec arg_type_size (t : functype) : int =
-  match t with
-  | Void -> 0
-  | Pointer -> 8
-  | Int n -> n / 8
-  | Half -> 4
-  | Bfloat -> 8
-  | Float -> 4
-  | Double -> 8
-  | FP128 -> 16
-  | X86fp80 -> 10
-  | PPCfp128 -> 16
-  | X86amx -> 16
-  | Struct ts -> List.fold ts ~init:0 ~f:(fun acc t -> acc + arg_type_size t)
 
 (* let arg_aggregate_classification (ts : typeclass list) : typeclass = *)
 (*   let classify cl1 cl2 = *)
@@ -54,7 +39,7 @@ let arg_type_classification (ts : functype list) : typeclass list =
   let classify t accum =
     match t with
     | Void -> accum
-    | Pointer -> INT :: accum
+    | Pointer -> PTR :: accum
     | Int n -> if n <= 64 then INT :: accum else SSE :: accum
     | Half -> SSE :: accum
     | Bfloat -> SSE :: accum
@@ -66,7 +51,7 @@ let arg_type_classification (ts : functype list) : typeclass list =
     | X86amx -> INT :: accum (* TODO *)
     | Struct _ -> MEMORY :: accum (* TODO *)
   in
-  List.fold_right ts ~init:[] ~f:classify
+  Base.List.fold_right ts ~init:[] ~f:classify
 
 type regs_state = {
   avl_int_reg : var;
@@ -74,7 +59,7 @@ type regs_state = {
   avl_xmm_reg_offset : int;
 }
 
-let arg_regs (ts : functype list) : var list =
+let arg_regs (ts : functype list) =
   let rdi = Var.create "RDI" (Imm 64) in
   let rsi = Var.create "RSI" (Imm 64) in
   let rdx = Var.create "RDX" (Imm 64) in
@@ -90,29 +75,38 @@ let arg_regs (ts : functype list) : var list =
   in
   let cls = arg_type_classification ts in
   let is_sse = ref false in
-  List.fold cls ~init:[] ~f:(fun acc t ->
+  Base.List.fold cls ~init:[] ~f:(fun acc t ->
       match t with
       | INT ->
           if !is_sse then (
-            let new_reg = List.hd_exn !vec_regs in
+            let new_reg = Base.List.hd_exn !vec_regs in
             regs_state := { !regs_state with avl_xmm_reg = new_reg };
             regs_state := { !regs_state with avl_xmm_reg_offset = 0 });
-          let new_reg = List.hd_exn !int_regs in
+          let new_reg = Base.List.hd_exn !int_regs in
           regs_state := { !regs_state with avl_int_reg = new_reg };
-          int_regs := List.tl_exn !int_regs;
-          new_reg :: acc
+          int_regs := Base.List.tl_exn !int_regs;
+          (new_reg, In) :: acc
+      | PTR ->
+          if !is_sse then (
+            let new_reg = Base.List.hd_exn !vec_regs in
+            regs_state := { !regs_state with avl_xmm_reg = new_reg };
+            regs_state := { !regs_state with avl_xmm_reg_offset = 0 });
+          let new_reg = Base.List.hd_exn !int_regs in
+          regs_state := { !regs_state with avl_int_reg = new_reg };
+          int_regs := Base.List.tl_exn !int_regs;
+          (new_reg, Both) :: acc
       | MEMORY ->
           if !is_sse then (
-            let new_reg = List.hd_exn !vec_regs in
+            let new_reg = Base.List.hd_exn !vec_regs in
             regs_state := { !regs_state with avl_xmm_reg = new_reg };
             regs_state := { !regs_state with avl_xmm_reg_offset = 0 });
           failwith "TODO add stack arguments"
       | SSE ->
-          let new_reg = List.hd_exn !vec_regs in
+          let new_reg = Base.List.hd_exn !vec_regs in
           regs_state := { !regs_state with avl_xmm_reg = new_reg };
           regs_state := { !regs_state with avl_xmm_reg_offset = 64 };
-          vec_regs := List.tl_exn !vec_regs;
-          new_reg :: acc
+          vec_regs := Base.List.tl_exn !vec_regs;
+          (new_reg, In) :: acc
       | SSEUP ->
           let reg = !regs_state.avl_xmm_reg in
           if !regs_state.avl_xmm_reg_offset = 64 then (
@@ -125,7 +119,7 @@ let arg_regs (ts : functype list) : var list =
             failwith "TODO add sseup arguments")
       | X87 | X87UP | COMPLEX_X87 ->
           if !is_sse then (
-            let new_reg = List.hd_exn !vec_regs in
+            let new_reg = Base.List.hd_exn !vec_regs in
             regs_state := { !regs_state with avl_xmm_reg = new_reg };
             regs_state := { !regs_state with avl_xmm_reg_offset = 0 });
           failwith "TODO add x87 arguments"
@@ -143,9 +137,9 @@ let return_regs (t : functype) : var list =
   let regs_state =
     ref { avl_int_reg = rax; avl_xmm_reg = xmm0; avl_xmm_reg_offset = 0 }
   in
-  List.fold cls ~init:[] ~f:(fun acc cl ->
+  Base.List.fold cls ~init:[] ~f:(fun acc cl ->
       match cl with
-      | INT ->
+      | INT | PTR ->
           let new_reg = !regs_state.avl_int_reg in
           regs_state := { !regs_state with avl_int_reg = rdx };
           new_reg :: acc
