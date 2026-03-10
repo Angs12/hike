@@ -4,6 +4,7 @@ open Bap_main
 open Bap.Std.Bil.Types
 open Regular.Std
 open Reachable_funcs
+open Bap_main.Extension.Command
 open Format
 module StrMap = Map.Make (String)
 module ExpMap = Map.Make (Exp)
@@ -30,6 +31,11 @@ let get_global_memory proj =
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
+let free_vars sub =
+  Sub.free_vars sub
+  |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
+  |> Var.Set.to_list
+
 let set_sub sub =
   if Term.tid sub |> Tid.name = "@main" then
     subs :=
@@ -37,6 +43,7 @@ let set_sub sub =
         (Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
         !subs
   else
+    let free_vars = free_vars sub in
     subs :=
       StrMap.add
         (Term.tid sub |> Tid.name)
@@ -48,7 +55,7 @@ let set_sub sub =
                     Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
                   in
                   Arg.create ~intent:In arg_var (Var reg))
-                !regs))
+                free_vars))
         !subs
 
 let set_libc libc =
@@ -752,16 +759,21 @@ let transfer_regs sub =
             in
             let phi = Phi.of_list var phi_rhs in
             Blk.Builder.add_phi builder phi)
-      else if not (Sub.name sub = "main") then (
-        fprintf err_formatter "Warning: register map is empty %s\n\n\n\n\n\n"
-          (Sub.name sub);
-        Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
-            let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in
-            let reg_var =
-              Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
+      else if not (Sub.name sub = "main") then
+        let free_vars = free_vars sub in
+        Base.List.iter !regs ~f:(fun var ->
+            let reg = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
+            let def =
+              if not @@ Base.List.mem free_vars var ~equal:Var.same then
+                let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
+                Def.create reg data
+              else
+                let reg_var =
+                  Var.create (Sub.name sub ^ Var.name var) (Var.typ var)
+                in
+                Def.create reg (Var reg_var)
             in
-            let def = Def.create var (Var reg_var) in
-            Blk.Builder.add_def builder def))
+            Blk.Builder.add_def builder def)
       else fprintf err_formatter "\n\n\n\n\n MAIN FUNCTIPN \n\n\n\n\n";
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
@@ -883,12 +895,43 @@ let pp ppf proj =
   |> Seq.iter ~f:(fun (_, insn) -> fprintf err_formatter "%a\n" Insn.pp insn);
   fprintf ppf "@[%a@]" (pp_prog proj) (Project.program proj)
 
-let main proj =
-  let ppf = Format.std_formatter in
-  pp ppf proj
+let main input_program output _ =
+  let ppf = Out_channel.open_text output |> Format.formatter_of_out_channel in
+  let loader = "llvm" in
+  let proj =
+    Project.create @@ Project.Input.load input_program ~loader
+    |> Core.Or_error.ok_exn
+  in
+  pp ppf proj;
+  Ok ()
+
+let features_used =
+  [
+    "semantics";
+    "function-starts";
+    "disassembler";
+    "lifter";
+    "symbolizer";
+    "rooter";
+    "reconstructor";
+    "brancher";
+    "loader";
+    "abi";
+  ]
+
+let input =
+  Extension.Command.argument
+    Extension.Type.("input file" %: string)
+    ~doc:"Executable to convert to LLVM IR"
+
+let output =
+  Extension.Command.argument
+    Extension.Type.("output file" %: string)
+    ~doc:"File to output LLVM IR"
 
 let () =
-  Bil.select_passes [];
-  Extension.declare @@ fun _ctxt ->
-  Project.register_pass' main;
-  Ok ()
+  Extension.Command.declare "convlir"
+    (args $ input $ output)
+    main ~doc:"Convert a binary to LLVM IR" ~requires:features_used
+
+let () = Extension.declare ~provides:[ "command" ] (fun _ -> Ok ())

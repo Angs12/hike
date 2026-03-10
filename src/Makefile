@@ -31,7 +31,7 @@ compile32:
 
 compileO0_fact:
 	gcc -O0 -o ./progs/factorial_0  ./progs/factorial.c
-	bap ./progs/factorial_0 -L ./plugins --pass=ppllvm  1> factorial.ll
+	bap convlir -L ./plugins ./progs/factorial_0 factorial.ll
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -mno-avx -O3 -fno-slp-vectorize -fno-vectorize -o factorial_llvmO0 converted.ll 
 
