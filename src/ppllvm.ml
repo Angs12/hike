@@ -9,6 +9,8 @@ module StrMap = Map.Make (String)
 module ExpMap = Map.Make (Exp)
 module Libcmap = Map.Make (String)
 
+type trivial_exp = Var of Var.t | Int of Word.t
+
 let subs = ref StrMap.empty
 
 let get_global_memory proj =
@@ -26,31 +28,45 @@ let get_global_memory proj =
           memory.(Word.to_int_exn index) <- Word.to_int_exn v));
   memory
 
+let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
+
 let set_sub sub =
-  if Sub.name sub = "main" then
+  if Term.tid sub |> Tid.name = "@main" then
     subs :=
-      StrMap.add "main"
+      StrMap.add "@main"
         (Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
         !subs
-  else subs := StrMap.add (Term.tid sub |> Tid.name) Seq.empty !subs
+  else
+    subs :=
+      StrMap.add
+        (Term.tid sub |> Tid.name)
+        (Seq.of_list
+           (Arg.create ~intent:Out !ret_reg (Var !ret_reg)
+           :: Base.List.map
+                ~f:(fun reg ->
+                  let arg_var =
+                    Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
+                  in
+                  Arg.create ~intent:In arg_var (Var reg))
+                !regs))
+        !subs
 
 let set_libc libc =
   Libcmap.iter
-    (fun key (data : Decl_parser.funcdef) ->
+    (fun name (data : Decl_parser.funcdef) ->
       let ret = Gnu64_abi.return_regs data.return in
-      let args = Gnu64_abi.arg_regs data.args in
+      let args = Gnu64_abi.arg_regs data.args data.return in
       let func_decl =
         Seq.of_list
           (List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret
-          @ List.map (fun (r, i) -> Arg.create ~intent:i r (Var r)) args)
+          @ List.mapi
+              (fun i (a, typ) ->
+                let arg_var = Var.create (name ^ sprintf "arg%d" i) typ in
+                Arg.create ~intent:In arg_var a)
+              args)
       in
-      subs := StrMap.add ("@" ^ key) func_decl !subs)
+      subs := StrMap.add ("@" ^ name) func_decl !subs)
     libc
-
-let some_exn option =
-  match option with Some x -> x | None -> failwith "some_exn"
-
-let is_trivial exp = match exp with Int _ -> true | Var _ -> true | _ -> false
 
 let pp_label tid =
   let sub =
@@ -88,6 +104,18 @@ let create_var ~is_virtual ~name ~typ ~tid =
 let create_reg ~name ~typ ~tid = create_var ~is_virtual:false ~name ~typ ~tid
 let create_virtual ~name ~typ ~tid = create_var ~is_virtual:true ~name ~typ ~tid
 
+let correct_registers tid regs =
+  object
+    inherit Exp.mapper
+
+    method! map_var var =
+      if Var.same var !ret_reg then
+        Var (create_reg ~name:("ret_" ^ Var.name var) ~tid ~typ:(Var.typ var))
+      else if Base.List.mem regs var ~equal:Var.same then
+        Var (create_reg ~name:("reg_" ^ Var.name var) ~tid ~typ:(Var.typ var))
+      else Var var
+  end
+
 let pp_mem_type mem =
   match mem with
   | Var v -> (
@@ -99,6 +127,35 @@ let pp_mem_type mem =
       | _ -> failwith "pp mem type: non-mem var")
   | _ -> failwith "pp mem type: non-var expression"
 
+let ptr_type exp =
+  match exp with
+  | Var v -> (
+      match Var.typ v with
+      | Mem (`r32, _) -> Imm 32
+      | Mem (`r64, _) -> Imm 64
+      | _ -> failwith "pp ptr type: non-mem var")
+  | _ -> failwith "pp ptr type: non-var expression"
+
+let size_type size = Imm (Size.in_bits size)
+
+let pp_trivial_exp_exn exp =
+  let sub =
+    String.map (fun c ->
+        if c = '#' then '_'
+        else if c = '.' then '_'
+        else if c = '%' then '_'
+        else c)
+  in
+  match exp with
+  | Bil.Var v -> (
+      match Var.typ v with
+      | Imm _ | Unk -> sprintf "%%var_%s" (sub (Var.name v))
+      | Mem _ ->
+          if Var.name v = "stack" then "@stack"
+          else sprintf "%%%s" (sub (Var.name v)))
+  | Int i -> Int64.to_string (Word.to_int64_exn i)
+  | _ -> failwith "pp trivial exp : non-trivial exp"
+
 let pp_trivial_exp exp =
   let sub =
     String.map (fun c ->
@@ -108,15 +165,13 @@ let pp_trivial_exp exp =
         else c)
   in
   match exp with
-  | Int i -> Int64.to_string (Word.to_int64_exn i)
   | Var v -> (
       match Var.typ v with
       | Imm _ | Unk -> sprintf "%%var_%s" (sub (Var.name v))
       | Mem _ ->
           if Var.name v = "stack" then "@stack"
-          else if Var.name v = "cpu" then "@cpu"
           else sprintf "%%%s" (sub (Var.name v)))
-  | _ -> failwith "pp exp: non-trivial expression"
+  | Int i -> Int64.to_string (Word.to_int64_exn i)
 
 let binop_str op =
   match op with
@@ -140,103 +195,197 @@ let binop_str op =
   | LE -> "icmp ule"
   | SLE -> "icmp sle"
 
-let var_type var =
-  match Var.typ var with
-  | Imm n -> sprintf "i%d" n
-  | Mem (_, size) -> sprintf "i%d" (Size.in_bits size)
-  | Unk -> "unk"
-
 let var_size var =
   match Var.typ var with Imm n -> n | _ -> failwith "pp exp type: non-imm var"
 
-let pp_ret ppf args =
-  let ret_type = ref "void" in
-  Seq.iter args ~f:(fun arg ->
-      match Arg.intent arg with
-      | Some i -> (
-          match i with
-          | In -> ()
-          | Out -> ret_type := var_type !ret_reg
-          | Both -> ())
-      | None -> ());
-  fprintf ppf "%s" !ret_type
+let word_type word = Imm (Word.bitwidth word)
+let exp_type exp = match exp with Int i -> word_type i | Var v -> Var.typ v
 
-let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
-let word_type word = sprintf "i%d" (Word.bitwidth word)
+let var_type var =
+  match Var.typ var with
+  | Imm n -> sprintf "i%d" n
+  | _ -> failwith "var_type : non-imm var"
 
-let trivial_exp_name exp =
-  match exp with
-  | Var v -> Var.name v
-  | _ -> failwith "pp exp name: non-trivial expression"
+let exps_type (exp1 : trivial_exp) (exp2 : trivial_exp) =
+  if exp_type exp1 = exp_type exp2 then exp_type exp1
+  else
+    failwith
+    @@ sprintf "exps_type: non-equal types: %s::%s and %s::%s"
+         (pp_trivial_exp exp1)
+         (Type.str () (exp_type exp1))
+         (pp_trivial_exp exp2)
+         (Type.str () (exp_type exp2))
 
-let trivial_exp_type exp =
-  match exp with
-  | Int i -> word_type i
-  | Var v -> var_type v
-  | _ -> failwith "pp exp type: non-trivial expression"
+let pp_types exp1 exp2 =
+  match exps_type exp1 exp2 with
+  | Imm n -> sprintf "i%d" n
+  | _ -> failwith "pp types: non-trivial type"
 
-let pp_type exp1 exp2 =
-  if trivial_exp_type exp1 > trivial_exp_type exp2 then trivial_exp_type exp1
-  else trivial_exp_type exp2
+let pp_type exp = pp_types exp exp
 
 let pp_binop (op, e1, e2) =
-  if is_trivial e1 && is_trivial e2 then
-    sprintf "%s %s %s, %s" (binop_str op) (pp_type e1 e2) (pp_trivial_exp e1)
-      (pp_trivial_exp e2)
-  else failwith "pp binop: non-trivial definition"
+  sprintf "%s %s %s, %s" (binop_str op) (pp_types e1 e2) (pp_trivial_exp e1)
+    (pp_trivial_exp e2)
 
-let all_ones exp =
+let all_ones (exp : trivial_exp) =
   match exp with
-  | Int i -> Word.ones @@ Word.bitwidth i |> Word.signed |> Word.to_int_exn
+  | Int i -> Word.ones @@ Word.bitwidth i
   | Var v -> (
       match Var.typ v with
-      | Imm n -> Word.ones n |> Word.signed |> Word.to_int_exn
+      | Imm n -> Word.ones n
       | _ -> failwith "pp all ones: non-imm var")
-  | _ -> failwith "pp all ones: non-trivial expression"
 
-let pp_unop (op, e) =
-  if is_trivial e then
-    match op with
-    | NEG -> sprintf "sub %s 0, %s" (trivial_exp_type e) (pp_trivial_exp e)
-    | NOT ->
-        sprintf "xor %s %d, %s" (trivial_exp_type e) (all_ones e)
-          (pp_trivial_exp e)
-  else failwith "pp unop: non-trivial definition"
+let pp_unop ((op, e) : unop * trivial_exp) =
+  match op with
+  | NEG -> sprintf "sub %s 0, %s" (pp_type e) (pp_trivial_exp e)
+  | NOT ->
+      sprintf "xor %s %s, %s" (pp_type e)
+        (Int64.to_string (Word.to_int64_exn (all_ones e)))
+        (pp_trivial_exp e)
 
-let size_type size = sprintf "i%d" (Size.in_bits size)
-
-let exp_type_size exp =
+let exp_type_size (exp : trivial_exp) =
   match exp with
   | Int i -> Word.bitwidth i
   | Var v -> (
       match Var.typ v with
       | Imm n -> n
       | _ -> failwith "pp exp type: non-imm var")
-  | _ -> failwith "pp exp type: non-trivial expression"
 
-let pp_exp ppf exp =
+let pp_concat ppf ((var, exp1, exp2) : var * trivial_exp * trivial_exp) =
+  let temp_var1 = pp_trivial_exp (Var var) ^ "_tmp1" in
+  let temp_var2 = pp_trivial_exp (Var var) ^ "_tmp2" in
+  let temp_var3 = pp_trivial_exp (Var var) ^ "_tmp3" in
+  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var1 (pp_type exp1)
+    (pp_trivial_exp exp1) (var_type var);
+  fprintf ppf "\t%s = shl %s %s, %d\n" temp_var2 (var_type var) temp_var1
+    (exp_type_size exp2);
+  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var3 (pp_type exp2)
+    (pp_trivial_exp exp2) (var_type var);
+  fprintf ppf "\t%s = and %s %s, %s\n" (pp_trivial_exp (Var var)) (var_type var)
+    temp_var2 temp_var3
+
+let pp_extract ppf (var, hi, lo, exp) =
+  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
+  fprintf ppf "\t%s = lshr %s %s, %d\n" temp_var (pp_type exp)
+    (pp_trivial_exp exp) lo;
+  let result_size = hi - lo + 1 in
+  fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_trivial_exp (Var var))
+    (pp_type exp) temp_var result_size
+
+let pp_load ppf (var, mem, addr, size) =
+  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
+  fprintf ppf "\t%s = getelementptr i8, %s %s, %s %s\n" temp_var
+    (pp_mem_type mem) (pp_trivial_exp mem) (pp_type addr) (pp_trivial_exp addr);
+  fprintf ppf "\t%s = load i%d, %s %s\n" (pp_trivial_exp (Var var))
+    (Size.in_bits size) (pp_mem_type mem) temp_var
+
+let pp_store ppf (mem, addr, data) =
+  let temp_var = Var.create ~is_virtual:true ~fresh:true "" (ptr_type mem) in
+  fprintf ppf "\t%s = getelementptr i8, %s %s, %s %s\n"
+    (pp_trivial_exp (Var temp_var))
+    (pp_mem_type mem) (pp_trivial_exp mem) (pp_type addr) (pp_trivial_exp addr);
+  fprintf ppf "\tstore %s %s, %s %s\n" (pp_type data) (pp_trivial_exp data)
+    (pp_mem_type mem)
+    (pp_trivial_exp (Var temp_var))
+
+let pp_cast ppf (var, cast, i, exp) =
+  let var_name = pp_trivial_exp (Var var) in
+  match cast with
+  | UNSIGNED ->
+      fprintf ppf "\t%s = zext %s %s to i%d\n" var_name (pp_type exp)
+        (pp_trivial_exp exp) i
+  | SIGNED ->
+      fprintf ppf "\t%s = sext %s %s to i%d\n" var_name (pp_type exp)
+        (pp_trivial_exp exp) i
+  | HIGH ->
+      fprintf ppf "\t%s_tmp = lshr %s %s, %d\n" var_name (pp_type exp)
+        (pp_trivial_exp exp)
+        (exp_type_size exp - i);
+      fprintf ppf "\t%s = trunc %s %s_tmp to i%d\n" var_name (pp_type exp)
+        var_name i
+  | LOW ->
+      fprintf ppf "\t%s = trunc %s %s to i%d\n" var_name (pp_type exp)
+        (pp_trivial_exp exp) i
+
+let rec pp_exp ?res ppf exp : trivial_exp =
   match exp with
-  | BinOp (op, e1, e2) -> fprintf ppf "%s" (pp_binop (op, e1, e2))
-  | UnOp (op, e) -> fprintf ppf "%s" (pp_unop (op, e))
+  | BinOp (op, e1, e2) ->
+      let var1 = pp_exp ppf e1 in
+      let var2 = pp_exp ppf e2 in
+      let res =
+        Option.value res
+          ~default:
+            (Var.create ~is_virtual:true ~fresh:true "" (exps_type var1 var2))
+      in
+      fprintf ppf "\t%s = %s\n" (pp_trivial_exp (Var res))
+        (pp_binop (op, var1, var2));
+      Var res
+  | UnOp (op, e) ->
+      let var = pp_exp ppf e in
+      let res =
+        Option.value res
+          ~default:(Var.create ~is_virtual:true ~fresh:true "" (exp_type var))
+      in
+      fprintf ppf "\t%s = %s\n" (pp_trivial_exp (Var res)) (pp_unop (op, var));
+      Var res
+  | Var v -> Var v
+  | Int i -> Int i
+  | Cast (cast, i, exp) ->
+      let exp = pp_exp ppf exp in
+      let res =
+        Option.value res
+          ~default:(Var.create ~is_virtual:true ~fresh:true "" (Imm i))
+      in
+      pp_cast ppf (res, cast, i, exp);
+      Var res
+  | Load (mem, addr, _, size) ->
+      let mem = pp_exp ppf mem in
+      let addr = pp_exp ppf addr in
+      let res =
+        Option.value res
+          ~default:(Var.create ~is_virtual:true ~fresh:true "" (size_type size))
+      in
+      pp_load ppf (res, mem, addr, size);
+      Var res
+  | Concat (exp1, exp2) ->
+      let exp1 = pp_exp ppf exp1 in
+      let exp2 = pp_exp ppf exp2 in
+      let res =
+        Option.value res
+          ~default:
+            (Var.create ~is_virtual:true ~fresh:true ""
+               (Imm (exp_type_size exp1 + exp_type_size exp2)))
+      in
+      pp_concat ppf (res, exp1, exp2);
+      Var res
+  | Extract (hi, lo, exp) ->
+      let exp = pp_exp ppf exp in
+      let res =
+        Option.value res
+          ~default:
+            (Var.create ~is_virtual:true ~fresh:true "" (Imm (hi - lo + 1)))
+      in
+      pp_extract ppf (res, hi, lo, exp);
+      Var res
+  | Store (mem, addr, data, _, _) ->
+      let mem = pp_exp ppf mem in
+      let addr = pp_exp ppf addr in
+      let data = pp_exp ppf data in
+      pp_store ppf (mem, addr, data);
+      mem
+  | Unknown _ -> failwith "pp_exp: Unknown expression"
+  | _ -> failwith "pp_exp: Ite and Let expressions"
+
+let pp_exp ppf res (exp : exp) =
+  match exp with
   | Var v ->
-      let t = var_type v in
-      pp_trivial_exp exp |> fprintf ppf "add %s %s, 0" t
-  | Int _ ->
-      let t = trivial_exp_type exp in
-      pp_trivial_exp exp |> fprintf ppf "add %s %s, 0" t
-  | Cast (cast, i, exp) -> (
-      match cast with
-      | UNSIGNED ->
-          fprintf ppf "zext %s %s to i%d" (trivial_exp_type exp)
-            (pp_trivial_exp exp) i
-      | SIGNED ->
-          fprintf ppf "sext %s %s to i%d" (trivial_exp_type exp)
-            (pp_trivial_exp exp) i
-      | LOW ->
-          fprintf ppf "trunc %s %s to i%d" (trivial_exp_type exp)
-            (pp_trivial_exp exp) i
-      | _ -> failwith "pp exp cast high: non-trivial expression")
-  | _ -> fprintf ppf "pp_expr: Not trivial expression\n"
+      fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
+        (pp_type (Var res)) (pp_trivial_exp (Var v))
+  | Int i ->
+      fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
+        (pp_type (Var res))
+        (Word.to_int64_exn i |> Int64.to_string)
+  | _ -> pp_exp ~res ppf exp |> ignore
 
 let label_tid label =
   match label with
@@ -247,106 +396,9 @@ let ret_arg args =
   Seq.exists args ~f:(fun arg ->
       match Arg.intent arg with Some Out -> true | _ -> false)
 
-let ready_args ppf tid args =
-  Seq.iter args ~f:(fun arg ->
-      match Arg.intent arg with
-      | Some i -> (
-          match i with
-          | In -> ()
-          | Out -> ()
-          | Both ->
-              let var = Arg.lhs arg in
-              let reg =
-                create_reg ~name:("reg_" ^ Var.name var) ~tid ~typ:(Var.typ var)
-              in
-              let tmp =
-                create_reg ~name:("tmp_" ^ Var.name var) ~tid ~typ:(Var.typ var)
-              in
-              let ptr =
-                create_reg ~name:("ptr_" ^ Var.name var) ~tid ~typ:(Var.typ var)
-              in
-              fprintf ppf "\t%s = ptrtoint ptr addrspace(0) @stack to i64\n"
-                (pp_trivial_exp (Var tmp));
-              fprintf ppf "\t%s = add %s %s, %s\n" (pp_trivial_exp (Var ptr))
-                (trivial_exp_type (Var tmp))
-                (pp_trivial_exp (Var tmp)) (pp_trivial_exp (Var reg)))
-      | None -> ())
-
-let pp_call_args tid args =
-  let args =
-    Seq.fold args ~init:"" ~f:(fun prev arg ->
-        let var = Arg.lhs arg in
-        match Arg.intent arg with
-        | Some i -> (
-            match i with
-            | In ->
-                let var =
-                  create_reg
-                    ~name:("reg_" ^ Var.name var)
-                    ~tid ~typ:(Var.typ var)
-                in
-
-                sprintf "%s %s %s," prev (var_type var)
-                  (pp_trivial_exp (Var var))
-            | Out -> prev
-            | Both ->
-                let var =
-                  create_reg
-                    ~name:("ptr_" ^ Var.name var)
-                    ~tid ~typ:(Var.typ var)
-                in
-                sprintf "%s %s %s," prev
-                  (trivial_exp_type (Var var))
-                  (pp_trivial_exp (Var var)))
-        | None -> prev)
-  in
-  if args = "" then "" else String.sub args 0 (String.length args - 1)
-
-let pp_concat ppf (var, exp1, exp2) =
-  let temp_var1 = pp_trivial_exp (Var var) ^ "_tmp1" in
-  let temp_var2 = pp_trivial_exp (Var var) ^ "_tmp2" in
-  let temp_var3 = pp_trivial_exp (Var var) ^ "_tmp3" in
-  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var1 (trivial_exp_type exp1)
-    (pp_trivial_exp exp1) (var_type var);
-  fprintf ppf "\t%s = shl %s %s, %d\n" temp_var2 (var_type var) temp_var1
-    (exp_type_size exp2);
-  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var3 (trivial_exp_type exp2)
-    (pp_trivial_exp exp2) (var_type var);
-  fprintf ppf "\t%s = and %s %s, %s\n" (pp_trivial_exp (Var var)) (var_type var)
-    temp_var2 temp_var3
-
-let pp_extract ppf (var, hi, lo, exp) =
-  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
-  fprintf ppf "\t%s = lshr %s %s, %d\n" temp_var (trivial_exp_type exp)
-    (pp_trivial_exp exp) lo;
-  let result_size = hi - lo + 1 in
-  fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_trivial_exp (Var var))
-    (trivial_exp_type exp) temp_var result_size
-
-let pp_load ppf (var, mem, addr, size) =
-  let size_type = size_type size in
-  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
-  fprintf ppf "\t%s = getelementptr %s, %s %s, %s %s\n" temp_var
-    (trivial_exp_type mem) (pp_mem_type mem) (pp_trivial_exp mem)
-    (trivial_exp_type addr) (pp_trivial_exp addr);
-  fprintf ppf "\t%s = load %s, %s %s\n" (pp_trivial_exp (Var var)) size_type
-    (pp_mem_type mem) temp_var
-
-let pp_store ppf (tid, mem, addr, data) =
-  let temp_var = pp_tid ~suffix:"_tmp" tid in
-  fprintf ppf "\t%s = getelementptr %s, %s %s, %s %s\n" temp_var
-    (trivial_exp_type mem) (pp_mem_type mem) (pp_trivial_exp mem)
-    (trivial_exp_type addr) (pp_trivial_exp addr);
-  fprintf ppf "\tstore %s %s, %s %s\n" (trivial_exp_type data)
-    (pp_trivial_exp data) (pp_mem_type mem) temp_var
-
 let pp_cond ppf cond tid =
-  match cond with
-  | Int i ->
-      fprintf ppf "\t%s = add i1 %s , 0\n" (pp_tid tid)
-        (Int64.to_string (Word.to_int64_exn i))
-  | Var _ -> fprintf ppf "\t%s = %a\n" (pp_tid tid) pp_exp cond
-  | _ -> failwith "pp cond: non-trivial expression"
+  let cond_var = create_virtual ~name:"cond" ~tid ~typ:(Imm 1) in
+  pp_exp ppf cond_var cond
 
 let pp_func tid =
   let sub =
@@ -375,7 +427,7 @@ let pp_branches ppf branches =
     let cond_var =
       create_virtual ~name:"cond" ~tid:(Term.tid br1) ~typ:(Imm 1)
     in
-    fprintf ppf "\t%s = %a\n" (pp_trivial_exp (Var cond_var)) pp_exp cond;
+    pp_exp ppf cond_var cond;
     fprintf ppf "\tbr i1 %s, label %%%s, label %%%s\n"
       (pp_trivial_exp (Var cond_var))
       (pp_label jmp_target) (pp_label else_target))
@@ -396,7 +448,7 @@ let pp_return tid return_reg ppf _ =
           ~name:("reg_" ^ Var.name !ret_reg)
           ~tid ~typ:(Var.typ !ret_reg)
       in
-      fprintf ppf "\t%s = %a\n" (pp_trivial_exp (Var res)) pp_exp
+      pp_exp ppf res
         (Exp.substitute (Var !ret_reg) (Var new_ret) (Arg.rhs return_reg))
 
 type cf_type = Br | Ret | Call | Int | CallVoid | CallRet
@@ -417,78 +469,65 @@ let cf_type control_flow =
                   (StrMap.find_opt (Tid.name tid) !subs)
               in
               let ret = ret_arg args in
-              fprintf err_formatter "%s -- %b \n" (Tid.name tid) ret;
               if ret then Call else CallVoid
           | Indirect _ -> Call)
       | None -> CallRet)
   | Int _ -> Int
 
-let pp_cast (var, cast, i, exp) =
-  let var_name = pp_trivial_exp (Var var) in
-  match cast with
-  | UNSIGNED ->
-      sprintf "%s = zext %s %s to i%d" var_name (trivial_exp_type exp)
-        (pp_trivial_exp exp) i
-  | SIGNED ->
-      sprintf "%s = sext %s %s to i%d" var_name (trivial_exp_type exp)
-        (pp_trivial_exp exp) i
-  | HIGH ->
-      sprintf "%s_tmp = lshr %s %s, %d" var_name (trivial_exp_type exp)
-        (pp_trivial_exp exp)
-        (exp_type_size exp - i)
-      ^ "\n\t"
-      ^ sprintf "%s = trunc %s %s_tmp to i%d" var_name (trivial_exp_type exp)
-          var_name i
-  | LOW ->
-      sprintf "%s = trunc %s %s to i%d" var_name (trivial_exp_type exp)
-        (pp_trivial_exp exp) i
-
 let pp_def ppf def =
   let var = Def.lhs def in
-  let var_name = pp_trivial_exp (Var var) in
-  let expr = Def.rhs def in
-  match expr with
-  | BinOp (op, e1, e2) ->
-      pp_binop (op, e1, e2) |> fprintf ppf "\t%s = %s \n" var_name
-  | UnOp (op, e) -> pp_unop (op, e) |> fprintf ppf "\t%s = %s \n" var_name
-  | Cast (cast, i, exp) -> pp_cast (var, cast, i, exp) |> fprintf ppf "\t%s \n"
-  | Load (mem, addr, _, size) -> pp_load ppf (var, mem, addr, size)
-  | Concat (exp1, exp2) -> pp_concat ppf (var, exp1, exp2)
-  | Extract (hi, lo, exp) -> pp_extract ppf (var, hi, lo, exp)
-  | Var _ ->
-      if is_mem var then ()
-      else
-        let t = var_type var in
-        pp_trivial_exp expr |> fprintf ppf "\t%s = add %s %s, 0 \n" var_name t
-  | Int _ ->
-      pp_trivial_exp expr
-      |> fprintf ppf "\t%s = add %s %s, 0 \n" var_name (var_type var)
-  | Store (mem, addr, data, _, _) -> pp_store ppf (Term.tid def, mem, addr, data)
-  | Unknown _ -> ()
-  | _ ->
-      fprintf ppf "Not trivial expression\n";
-      pp_trivial_exp expr |> fprintf ppf "\t%s = %s \n" var_name
+  match Def.rhs def with Unknown _ -> () | _ -> pp_exp ppf var (Def.rhs def)
+
+let ready_call_args ppf tid args =
+  Seq.iter args ~f:(fun arg ->
+      match Arg.intent arg with
+      | Some i -> (
+          match i with
+          | Out -> ()
+          | In | Both ->
+              let var = Arg.lhs arg in
+              let var =
+                create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
+              in
+              let exp = Exp.map (correct_registers tid !regs) (Arg.rhs arg) in
+              pp_exp ppf var exp)
+      | None -> ())
+
+let pp_call_args tid args =
+  let args =
+    Seq.fold args ~init:"" ~f:(fun prev arg ->
+        let var = Arg.lhs arg in
+        let var = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
+        match Arg.intent arg with
+        | Some i -> (
+            match i with
+            | In ->
+                sprintf "%s %s %s," prev (var_type var)
+                  (pp_trivial_exp (Var var))
+            | Out -> prev
+            | Both ->
+                sprintf "%s %s %s," prev (var_type var)
+                  (pp_trivial_exp (Var var)))
+        | None -> prev)
+  in
+  if args = "" then "" else String.sub args 0 (String.length args - 1)
 
 let pp_func_call blk_tid ret_var fallthrough target ppf =
   let args =
     Base.Option.value_exn ~message:"pp_func_call: sub not found"
       (StrMap.find_opt (Tid.name target) !subs)
   in
-  Seq.iter args ~f:(fun arg -> fprintf err_formatter "%s\n" (Arg.str () arg));
   let ret = ret_arg args in
   match ret with
   | true ->
-      ready_args ppf blk_tid args;
+      ready_call_args ppf blk_tid args;
       fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
         (pp_trivial_exp (Var ret_var))
         (var_type ret_var) (pp_func target)
         (pp_call_args blk_tid args);
-      let store_exp = set_reg !ret_reg (Var ret_var) in
-      let store_def = Def.create cpu_regs store_exp in
-      pp_def ppf store_def;
       fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
   | false ->
-      ready_args ppf blk_tid args;
+      ready_call_args ppf blk_tid args;
       fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
         (pp_call_args blk_tid args);
       fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
@@ -512,12 +551,10 @@ let pp_phi ppf phi =
     let vals = Phi.values phi in
     let values =
       Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) ->
-          sprintf "%s [%s,%%%s]," prev (pp_trivial_exp exp) (pp_label tid))
+          sprintf "%s [%s,%%%s]," prev (pp_trivial_exp_exn exp) (pp_label tid))
     in
     let values = String.sub values 0 (String.length values - 1) in
-    fprintf ppf "\t%s = phi %s %s\n" var_name
-      (trivial_exp_type (Var var))
-      values
+    fprintf ppf "\t%s = phi %s %s\n" var_name (var_type var) values
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
@@ -556,25 +593,6 @@ let pp_elts returns_value blk ppf elts =
       in
       pp_call tid returns_value res ppf call
 
-let pp_args args =
-  let args =
-    Seq.fold args ~init:"" ~f:(fun prev arg ->
-        let var = Arg.lhs arg in
-        match Arg.intent arg with
-        | Some i -> (
-            match i with
-            | In ->
-                sprintf "%s %s %s," prev (var_type var)
-                  (pp_trivial_exp (Var var))
-            | Out -> prev
-            | Both ->
-                sprintf "%s %s %s," prev (pp_mem_type (Var var))
-                  (pp_trivial_exp (Var var)))
-        | None -> prev)
-  in
-  if args = "" then "" else String.sub args 0 (String.length args - 1)
-(* remove last comma *)
-
 let update_args sub =
   let builder =
     Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
@@ -598,9 +616,11 @@ let update_stack sub =
         Blk.Builder.init ~same_tid:true ~copy_phis:true ~copy_jmps:true blk
       in
       Seq.iter (Term.enum def_t blk) ~f:(fun def ->
-          let e = Def.rhs def in
-          let e = Exp.map (base_exp_sub !mem !stack) e in
-          Blk.Builder.add_def builder (Def.with_rhs def e));
+          if is_mem (Def.lhs def) then ()
+          else
+            let e = Def.rhs def in
+            let e = Exp.map (base_exp_sub !mem !stack) e in
+            Blk.Builder.add_def builder (Def.with_rhs def e));
       Blk.Builder.result builder)
 
 let update_rets sub =
@@ -642,46 +662,43 @@ let update_rets sub =
   Sub.Builder.result sub_builder
 
 let update_main lenght sub =
-  if Sub.name sub = "main" then (
+  if Sub.name sub = "main" then
     let entry_tid =
       Base.Option.value_exn ~message:"Main function has no blocks"
         (Sub.to_graph sub |> Graphs.Tid.Node.succs Graphs.Tid.start |> Seq.hd)
     in
-    let reg = !sp in
-    let sub =
-      Term.map blk_t sub ~f:(fun blk ->
-          if Term.tid blk = entry_tid then (
-            let builder =
-              Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk
-            in
-            (let data =
-               Bil.Int (Word.of_int ~width:(var_size reg) (lenght - 1))
-             in
-             let def = Def.create reg (set_reg reg data) in
-             Blk.Builder.add_def builder def);
-            Term.enum def_t blk
-            |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
-            Blk.Builder.result builder)
-          else blk)
-    in
-    let sub_builder =
-      Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
-    in
-    Seq.iter (Term.enum blk_t sub) ~f:(fun blk ->
-        Sub.Builder.add_blk sub_builder blk);
-    Sub.Builder.add_arg sub_builder
-      (Arg.create ~intent:Out !ret_reg (Var !ret_reg));
-    Sub.Builder.result sub_builder)
+    Term.map blk_t sub ~f:(fun blk ->
+        if Term.tid blk = entry_tid then (
+          let builder = Blk.Builder.init ~copy_phis:false ~copy_jmps:true blk in
+          Base.List.iter !regs ~f:(fun reg ->
+              let data =
+                if reg = !sp then
+                  Bil.Int (Word.of_int ~width:(var_size reg) (lenght - 1))
+                else Bil.Int (Word.of_int ~width:(var_size reg) 0)
+              in
+              let reg =
+                create_reg ~name:(Var.name reg) ~tid:(Term.tid blk)
+                  ~typ:(Var.typ reg)
+              in
+              let def = Def.create reg data in
+              Blk.Builder.add_def builder def);
+          Term.enum def_t blk
+          |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
+          Blk.Builder.result builder)
+        else blk)
   else sub
 
 let transfer_regs sub =
   Term.map blk_t sub ~f:(fun blk ->
       let tid = Term.tid blk in
-      let reg_map = ref Var.Map.empty in
-      let ret_reg_var =
-        create_reg ~name:(Var.name !ret_reg) ~tid ~typ:(Var.typ !ret_reg)
+      let reg_map =
+        ref
+        @@ Base.List.fold !regs ~init:Var.Map.empty ~f:(fun map base ->
+            let reg =
+              create_reg ~name:(Var.name base) ~tid ~typ:(Var.typ base)
+            in
+            Var.Map.add_exn map ~key:base ~data:reg)
       in
-      reg_map := Var.Map.add_exn !reg_map ~key:!ret_reg ~data:ret_reg_var;
       let blk =
         Base.List.fold ~init:blk !regs ~f:(fun blk base ->
             let ver = ref 0 in
@@ -691,9 +708,6 @@ let transfer_regs sub =
             Blk.map_elts blk ~def:(fun def ->
                 let var = Def.lhs def in
                 let exp = Def.rhs def in
-                if has_var base exp && not (Var.Map.mem !reg_map base) then
-                  reg_map := Var.Map.add_exn !reg_map ~key:base ~data:reg
-                else ();
                 let def =
                   Def.with_rhs def
                     (Exp.map (base_exp_sub base (Var.with_index reg !ver)) exp)
@@ -716,33 +730,90 @@ let transfer_regs sub =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
           ~copy_jmps:true blk
       in
-      Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
-          let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in
-          let def = Def.create var (get_reg key) in
-          Blk.Builder.add_def builder def);
+      let cfg = Sub.to_graph sub in
+      let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
+      if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
+        Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
+            let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in
+            let phi_rhs =
+              Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
+                  if tid = Graphs.Tid.start then
+                    let reg_var =
+                      Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
+                    in
+                    (Term.tid blk, Bil.Var reg_var) :: prev
+                  else
+                    let reg_var =
+                      create_reg
+                        ~name:("reg_" ^ Var.name key)
+                        ~tid ~typ:(Var.typ key)
+                    in
+                    (tid, Bil.Var reg_var) :: prev)
+            in
+            let phi = Phi.of_list var phi_rhs in
+            Blk.Builder.add_phi builder phi)
+      else if not (Sub.name sub = "main") then (
+        fprintf err_formatter "Warning: register map is empty %s\n\n\n\n\n\n"
+          (Sub.name sub);
+        Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
+            let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in
+            let reg_var =
+              Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
+            in
+            let def = Def.create var (Var reg_var) in
+            Blk.Builder.add_def builder def))
+      else fprintf err_formatter "\n\n\n\n\n MAIN FUNCTIPN \n\n\n\n\n";
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
           match (cf_type (Term.enum jmp_t blk), Var.same key !ret_reg) with
-          | Call, true -> ()
+          | Call, true ->
+              let reg_var =
+                create_reg ~name:("ret_" ^ Var.name key) ~tid ~typ:(Var.typ key)
+              in
+              let def = Def.create reg_var (Var data) in
+              Blk.Builder.add_def builder def
           | _, _ ->
               let reg_var =
                 create_reg ~name:("reg_" ^ Var.name key) ~tid ~typ:(Var.typ key)
               in
               let def = Def.create reg_var (Var data) in
-              let store_def = Def.create cpu_regs (set_reg key (Var reg_var)) in
-              Blk.Builder.add_def builder def;
-              Blk.Builder.add_def builder store_def);
+              Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
+let pp_ret ppf sub =
+  let args = StrMap.find (Term.tid sub |> Tid.name) !subs in
+  let ret = ret_arg args in
+  if ret then fprintf ppf "%s" (var_type !ret_reg) else fprintf ppf "void"
+
+let pp_func_args args =
+  let args =
+    Seq.fold args ~init:"" ~f:(fun prev arg ->
+        let var = Arg.lhs arg in
+        Var.pp err_formatter var;
+        match Arg.intent arg with
+        | Some i -> (
+            match i with
+            | In ->
+                sprintf "%s %s %s," prev (var_type var)
+                  (pp_trivial_exp (Var var))
+            | Out -> prev
+            | Both ->
+                sprintf "%s %s %s," prev (var_type var)
+                  (pp_trivial_exp (Var var)))
+        | None -> prev)
+  in
+  if args = "" then "" else String.sub args 0 (String.length args - 1)
+
 let pp_sub ppf sub =
-  let args = Term.enum arg_t sub in
+  fprintf err_formatter "%a" Sub.pp sub;
+  let args = StrMap.find (Term.tid sub |> Tid.name) !subs in
   let blks = Term.enum blk_t sub in
   let ret = ret_arg args in
-  fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret args
+  fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret sub
     (pp_func @@ Term.tid sub)
-    (pp_args args) (pp_body ret) blks
+    (pp_func_args args) (pp_body ret) blks
 
 let libc_calls libc sub =
   not
@@ -757,12 +828,8 @@ let print_sections p =
 
 let pp_prog proj ppf prog =
   let target = Project.target proj in
-  Program.pp err_formatter prog;
   print_sections proj;
   let mem = get_global_memory proj in
-  for i = 8196 to 8204 do
-    fprintf err_formatter "%c" (Char.chr mem.(i))
-  done;
   let stack = Base.Array.init 1024 ~f:(fun _ -> 0) in
   let mem = Array.append mem stack in
   let data =
@@ -787,8 +854,6 @@ let pp_prog proj ppf prog =
   let reachable =
     reachable_funcs prog main_sub |> SubSet.filter (libc_calls libc)
   in
-  SubSet.iter (fun sub -> fprintf err_formatter "%s" (Sub.name sub)) reachable;
-  Program.pp err_formatter prog;
   SubSet.iter (fun sub -> set_sub sub) reachable;
   let updated_subs =
     SubSet.map
@@ -797,7 +862,6 @@ let pp_prog proj ppf prog =
         |> update_stack |> transfer_regs |> update_main length)
       reachable
   in
-  fprintf ppf "@cpu = addrspace(1) global [650 x i8]  zeroinitializer \n";
   fprintf ppf "@stack = addrspace(0) global [%d x i8] [ %s ]\n" length data;
   SubSet.iter (fprintf ppf "@[%a@]@\n" pp_sub) updated_subs
 
@@ -814,6 +878,9 @@ let pp ppf proj =
     | Ok p -> p
     | Error _ -> failwith "pp: pass failed"
   in
+  let dis = Project.disasm proj in
+  Disasm.insns dis
+  |> Seq.iter ~f:(fun (_, insn) -> fprintf err_formatter "%a\n" Insn.pp insn);
   fprintf ppf "@[%a@]" (pp_prog proj) (Project.program proj)
 
 let main proj =
@@ -821,6 +888,7 @@ let main proj =
   pp ppf proj
 
 let () =
+  Bil.select_passes [];
   Extension.declare @@ fun _ctxt ->
   Project.register_pass' main;
   Ok ()

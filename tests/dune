@@ -1,4 +1,4 @@
 (tests
- (names parser_test gnu64abi_test)
+ (names parser_test gnu64abi_test cdecl_gnu_test)
  (libraries convlir bap)
  )

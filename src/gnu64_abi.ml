@@ -1,5 +1,6 @@
 open Decl_parser
 open Bap.Std
+open Bap.Std.Bil.Types
 
 type typeclass =
   | INT
@@ -59,7 +60,7 @@ type regs_state = {
   avl_xmm_reg_offset : int;
 }
 
-let arg_regs (ts : functype list) =
+let arg_regs (ts : functype list) (_ : functype) =
   let rdi = Var.create "RDI" (Imm 64) in
   let rsi = Var.create "RSI" (Imm 64) in
   let rdx = Var.create "RDX" (Imm 64) in
@@ -85,7 +86,7 @@ let arg_regs (ts : functype list) =
           let new_reg = Base.List.hd_exn !int_regs in
           regs_state := { !regs_state with avl_int_reg = new_reg };
           int_regs := Base.List.tl_exn !int_regs;
-          (new_reg, In) :: acc
+          (Var new_reg, Imm 64) :: acc
       | PTR ->
           if !is_sse then (
             let new_reg = Base.List.hd_exn !vec_regs in
@@ -94,7 +95,7 @@ let arg_regs (ts : functype list) =
           let new_reg = Base.List.hd_exn !int_regs in
           regs_state := { !regs_state with avl_int_reg = new_reg };
           int_regs := Base.List.tl_exn !int_regs;
-          (new_reg, Both) :: acc
+          (Var new_reg, Imm 64) :: acc
       | MEMORY ->
           if !is_sse then (
             let new_reg = Base.List.hd_exn !vec_regs in
@@ -106,7 +107,7 @@ let arg_regs (ts : functype list) =
           regs_state := { !regs_state with avl_xmm_reg = new_reg };
           regs_state := { !regs_state with avl_xmm_reg_offset = 64 };
           vec_regs := Base.List.tl_exn !vec_regs;
-          (new_reg, In) :: acc
+          (Var new_reg, Imm 128) :: acc
       | SSEUP ->
           let reg = !regs_state.avl_xmm_reg in
           if !regs_state.avl_xmm_reg_offset = 64 then (

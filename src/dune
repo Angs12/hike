@@ -1,7 +1,7 @@
 (library
   (name convlir)
   (public_name convlir)
-  (preprocess (pps ppx_bap))
+  (preprocess (pps ppx_bap ))
   (libraries
     bap
     bap-core-theory

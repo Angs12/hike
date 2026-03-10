@@ -53,6 +53,10 @@ declare i32 @ferror(ptr noundef) #1
 
 declare i32 @putchar(i32 noundef) #2
 
+declare ptr @malloc(i64 noundef) #2
+
+declare void @free(ptr noundef) #2
+
 declare i32 @puts(ptr noundef) #2
 
 declare noalias ptr @fopen(ptr noundef, ptr noundef) #2

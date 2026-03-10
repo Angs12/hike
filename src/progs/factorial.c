@@ -1,5 +1,5 @@
-#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int global = 4;
 
@@ -21,7 +21,8 @@ int main() {
   int fact = factorial(global);
   int t = getchar();
   putchar(t);
-  putchar('\n');
-  puts("Hello World");
+  // puts("Hello World");
+  int *p = malloc(sizeof(int));
+  // puts("Hello World");
   return inc(fact, 0, 0, 0, 0, 0, 1);
 }

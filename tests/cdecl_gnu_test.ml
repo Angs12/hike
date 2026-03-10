@@ -10,8 +10,8 @@ let libc_functions : funcdef Libcmap.t =
 let print_libc libc =
   Libcmap.iter
     (fun key (data : Decl_parser.funcdef) ->
-      let ret = Gnu64_abi.return_regs data.return in
-      let args = Gnu64_abi.arg_regs data.args data.return in
+      let ret = Cdecl_gnu_abi.return_regs data.return in
+      let args = Cdecl_gnu_abi.arg_regs data.args data.return in
       fprintf std_formatter "fn %s " key;
       List.iter (fun a -> fprintf std_formatter " %a " Exp.pp a) args;
       fprintf std_formatter " -> ";
@@ -20,5 +20,5 @@ let print_libc libc =
     libc
 
 let () =
-  print_endline "Testing gnu64 abi ";
+  print_endline "Testing cdecl abi for unix systems";
   libc_functions |> print_libc
