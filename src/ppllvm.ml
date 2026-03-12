@@ -4,6 +4,7 @@ open Bap_main
 open Bap.Std.Bil.Types
 open Regular.Std
 open Reachable_funcs
+open Bap_core_theory
 open Bap_main.Extension.Command
 open Format
 module StrMap = Map.Make (String)
@@ -58,11 +59,26 @@ let set_sub sub =
                 free_vars))
         !subs
 
-let set_libc libc =
+module type Abi = sig
+  val return : Decl_parser.functype -> var list
+
+  val args :
+    Decl_parser.functype list -> Decl_parser.functype -> (exp * typ) list
+end
+
+let set_libc target libc =
+  let abi =
+    if Theory.Target.matches target "x86_64-gnu-elf" then
+      (module Gnu64_abi : Abi)
+    else if Theory.Target.matches target "i686-gnu-elf" then
+      (module Cdecl_gnu_abi : Abi)
+    else failwith "abi not supported"
+  in
+  let module Abi = (val abi : Abi) in
   Libcmap.iter
     (fun name (data : Decl_parser.funcdef) ->
-      let ret = Gnu64_abi.return_regs data.return in
-      let args = Gnu64_abi.arg_regs data.args data.return in
+      let ret = Abi.return data.return in
+      let args = Abi.args data.args data.return in
       let func_decl =
         Seq.of_list
           (List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret
@@ -85,17 +101,6 @@ let pp_label tid =
         else c)
   in
   "blk_" ^ sub (Tid.name tid)
-
-let pp_tid ?(prefix = "") ?(suffix = "") tid =
-  let sub =
-    String.map (fun c ->
-        if c = '#' then '_'
-        else if c = '.' then '_'
-        else if c = '%' then '_'
-        else if c = '@' then '_'
-        else c)
-  in
-  sprintf "%%%s%s%s" prefix (sub (Tid.name tid)) suffix
 
 let create_var ~is_virtual ~name ~typ ~tid =
   let sub =
@@ -169,6 +174,7 @@ let pp_trivial_exp exp =
         if c = '#' then '_'
         else if c = '.' then '_'
         else if c = '%' then '_'
+        else if c = '\\' then '_'
         else c)
   in
   match exp with
@@ -774,7 +780,7 @@ let transfer_regs sub =
                 Def.create reg (Var reg_var)
             in
             Blk.Builder.add_def builder def)
-      else fprintf err_formatter "\n\n\n\n\n MAIN FUNCTIPN \n\n\n\n\n";
+      else ();
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
@@ -803,7 +809,6 @@ let pp_func_args args =
   let args =
     Seq.fold args ~init:"" ~f:(fun prev arg ->
         let var = Arg.lhs arg in
-        Var.pp err_formatter var;
         match Arg.intent arg with
         | Some i -> (
             match i with
@@ -819,7 +824,6 @@ let pp_func_args args =
   if args = "" then "" else String.sub args 0 (String.length args - 1)
 
 let pp_sub ppf sub =
-  fprintf err_formatter "%a" Sub.pp sub;
   let args = StrMap.find (Term.tid sub |> Tid.name) !subs in
   let blks = Term.enum blk_t sub in
   let ret = ret_arg args in
@@ -827,10 +831,9 @@ let pp_sub ppf sub =
     (pp_func @@ Term.tid sub)
     (pp_func_args args) (pp_body ret) blks
 
-let libc_calls libc sub =
-  not
-    (Libcmap.mem (Sub.name sub) libc
-    || Base.String.is_substring ~substring:":external" (Sub.name sub))
+let is_libc libc sub =
+  Libcmap.mem (Sub.name sub) libc
+  || Base.String.is_substring ~substring:":external" (Sub.name sub)
 
 let print_sections p =
   Project.memory p |> Memmap.to_sequence
@@ -858,24 +861,24 @@ let pp_prog proj ppf prog =
   set_stack target;
   set_sp target;
   set_mem target;
-  set_libc libc;
-  (* convert only functions that are reachable from main *)
-  let main_sub =
-    Term.enum sub_t prog |> Seq.find_exn ~f:(fun sub -> Sub.name sub = "main")
+  set_libc target libc;
+  let main =
+    Base.Option.value_exn ~message:"Main function not found"
+      (Term.enum sub_t prog |> Seq.find ~f:(fun sub -> Sub.name sub = "main"))
   in
-  let reachable =
-    reachable_funcs prog main_sub |> SubSet.filter (libc_calls libc)
-  in
-  SubSet.iter (fun sub -> set_sub sub) reachable;
-  let updated_subs =
-    SubSet.map
-      (fun sub ->
-        sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
-        |> update_stack |> transfer_regs |> update_main length)
-      reachable
+  let reachable_funcs = Reachable_funcs.reachable_funcs prog main in
+  let prog =
+    Term.filter_map sub_t prog ~f:(fun sub ->
+        if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then None
+        else (
+          set_sub sub;
+          Sub.pp err_formatter sub;
+          Some
+            (sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
+           |> update_stack |> transfer_regs |> update_main length)))
   in
   fprintf ppf "@stack = addrspace(0) global [%d x i8] [ %s ]\n" length data;
-  SubSet.iter (fprintf ppf "@[%a@]@\n" pp_sub) updated_subs
+  Seq.iter ~f:(fprintf ppf "@[%a@]@\n" pp_sub) (Term.enum sub_t prog)
 
 let pp ppf proj =
   let pass =
@@ -890,9 +893,6 @@ let pp ppf proj =
     | Ok p -> p
     | Error _ -> failwith "pp: pass failed"
   in
-  let dis = Project.disasm proj in
-  Disasm.insns dis
-  |> Seq.iter ~f:(fun (_, insn) -> fprintf err_formatter "%a\n" Insn.pp insn);
   fprintf ppf "@[%a@]" (pp_prog proj) (Project.program proj)
 
 let main input_program output _ =

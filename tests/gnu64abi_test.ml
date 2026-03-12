@@ -8,12 +8,13 @@ let libc_functions : funcdef Libcmap.t =
   parse_header_file "../../../tests/stdio_headers.ll"
 
 let print_libc libc =
+  let module Abi = Gnu64_abi.Gnu64_abi in
   Libcmap.iter
     (fun key (data : Decl_parser.funcdef) ->
-      let ret = Gnu64_abi.return_regs data.return in
-      let args = Gnu64_abi.arg_regs data.args data.return in
+      let ret = Abi.return data.return in
+      let args = Abi.args data.args data.return in
       fprintf std_formatter "fn %s " key;
-      List.iter (fun a -> fprintf std_formatter " %a " Exp.pp a) args;
+      List.iter (fun (a, _) -> fprintf std_formatter " %a " Exp.pp a) args;
       fprintf std_formatter " -> ";
       List.iter (fun r -> fprintf std_formatter " %a " Var.pp r) ret;
       fprintf std_formatter "\n")

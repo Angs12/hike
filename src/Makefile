@@ -23,22 +23,29 @@ compileO3_fizzbuzz:
 	bap ./progs/fizzbuzz_3 -L ./plugins --pass=ppllvm  1> fizzbuzz.ll
 	clang -Oz -fno-slp-vectorize -o fizzbuzz_llvmO3 fizzbuzz.ll
 
-compile32:
-	gcc -O0 -m32 -o ./progs/factorial32  ./progs/factorial.c
-	bap ./progs/factorial32 -L ./plugins --pass=ppllvm 1> factorial.ll
+compile32_O3:
+	gcc -O3 -m32 -o ./progs/factorial32_3  ./progs/factorial.c
+	bap convlir -L ./plugins ./progs/factorial32_3 factorial.ll
 	cat stdio_headers.ll factorial.ll > converted.ll
-	clang -O0 -o factorial_llvm32 converted.ll
+	clang -O3 -o factorial_llvm32O3 converted.ll 
+
+compile32_O0:
+	gcc -O0 -m32 -o ./progs/factorial32_0  ./progs/factorial.c
+	bap convlir -L ./plugins ./progs/factorial32_0 factorial.ll
+	cat stdio_headers.ll factorial.ll > converted.ll
+	clang -O3 -o factorial_llvm32O0 converted.ll 
 
 compileO0_fact:
 	gcc -O0 -o ./progs/factorial_0  ./progs/factorial.c
 	bap convlir -L ./plugins ./progs/factorial_0 factorial.ll
 	cat stdio_headers.ll factorial.ll > converted.ll
-	clang -mno-avx -O3 -fno-slp-vectorize -fno-vectorize -o factorial_llvmO0 converted.ll 
+	clang -O3 -o factorial_llvmO0 converted.ll 
 
 compileO3_fact:
 	gcc -O3 -o ./progs/factorial_3  ./progs/factorial.c
-	bap ./progs/factorial_3 -L ./plugins --pass=ppllvm  1> factorial.ll
-	clang -mno-avx -O3 -fno-slp-vectorize -fno-vectorize -o factorial_llvmO3 factorial.ll 
+	bap convlir -L ./plugins ./progs/factorial_3 factorial.ll
+	cat stdio_headers.ll factorial.ll > converted.ll
+	clang -mno-avx -O3 -fno-slp-vectorize -fno-vectorize -o factorial_llvmO3 converted.ll 
 
 compile_gcc:
 	gcc -O3 -o ./progs/factorial_gcc  ./progs/factorial.c

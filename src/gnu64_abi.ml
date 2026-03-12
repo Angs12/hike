@@ -9,37 +9,14 @@ type typeclass =
   | SSEUP
   | X87
   | X87UP
-  | COMPLEX_X87
+  (* | COMPLEX_X87 *)
   | NOCLASS
   | MEMORY
-
-(* let arg_aggregate_classification (ts : typeclass list) : typeclass = *)
-(*   let classify cl1 cl2 = *)
-(*     match (cl1, cl2) with *)
-(*     | INT, INT -> INT *)
-(*     | SSE, SSE -> SSE *)
-(*     | SSEUP, SSEUP -> SSEUP *)
-(*     | X87, X87 -> X87 *)
-(*     | X87UP, X87UP -> X87UP *)
-(*     | COMPLEX_X87, COMPLEX_X87 -> COMPLEX_X87 *)
-(*     | NOCLASS, NOCLASS -> NOCLASS *)
-(*     | MEMORY, MEMORY -> MEMORY *)
-(*     | NOCLASS, _ -> cl2 *)
-(*     | _, NOCLASS -> cl1 *)
-(*     | MEMORY, _ -> MEMORY *)
-(*     | _, MEMORY -> MEMORY *)
-(*     | INT, _ -> INT *)
-(*     | _, INT -> INT *)
-(*     | X87UP, _ | X87, _ | COMPLEX_X87, _ -> MEMORY *)
-(*     | _, X87UP | _, X87 | _, COMPLEX_X87 -> MEMORY *)
-(*     | _ -> SSE *)
-(*   in *)
-(*   INT *)
 
 let arg_type_classification (ts : functype list) : typeclass list =
   let classify t accum =
     match t with
-    | Void -> accum
+    | Void -> NOCLASS :: accum
     | Pointer -> PTR :: accum
     | Int n -> if n <= 64 then INT :: accum else SSE :: accum
     | Half -> SSE :: accum
@@ -60,7 +37,36 @@ type regs_state = {
   avl_xmm_reg_offset : int;
 }
 
-let arg_regs (ts : functype list) (_ : functype) =
+let return (t : functype) : var list =
+  let cls = arg_type_classification [ t ] in
+  let rax = Var.create "RAX" (Imm 64) in
+  let rdx = Var.create "RDX" (Imm 64) in
+  let xmm0 = Var.create "XMM0" (Imm 128) in
+  (* let xmm1 = Var.create "XMM1" (Imm 128) in *)
+  let st0 = Var.create "ST0" (Imm 80) in
+  (* let st1 = Var.create "ST1" (Imm 80) in *)
+  let regs_state =
+    ref { avl_int_reg = rax; avl_xmm_reg = xmm0; avl_xmm_reg_offset = 0 }
+  in
+  Base.List.fold cls ~init:[] ~f:(fun acc cl ->
+      match cl with
+      | INT | PTR ->
+          let new_reg = !regs_state.avl_int_reg in
+          regs_state := { !regs_state with avl_int_reg = rdx };
+          new_reg :: acc
+      | SSE ->
+          let new_reg = !regs_state.avl_xmm_reg in
+          regs_state := { !regs_state with avl_xmm_reg = new_reg };
+          new_reg :: acc
+      | SSEUP -> acc
+      | X87 -> st0 :: acc
+      | X87UP -> acc
+      (* | COMPLEX_X87 -> st0 :: st1 :: acc *)
+      | NOCLASS -> acc
+      | MEMORY -> rax :: acc)
+(* TODO *)
+
+let args (ts : functype list) (_ : functype) =
   let rdi = Var.create "RDI" (Imm 64) in
   let rsi = Var.create "RSI" (Imm 64) in
   let rdx = Var.create "RDX" (Imm 64) in
@@ -118,7 +124,7 @@ let arg_regs (ts : functype list) (_ : functype) =
             regs_state := { !regs_state with avl_xmm_reg_offset = 0 };
             vec_regs := reg :: !vec_regs;
             failwith "TODO add sseup arguments")
-      | X87 | X87UP | COMPLEX_X87 ->
+      | X87 | X87UP ->
           if !is_sse then (
             let new_reg = Base.List.hd_exn !vec_regs in
             regs_state := { !regs_state with avl_xmm_reg = new_reg };
@@ -126,32 +132,3 @@ let arg_regs (ts : functype list) (_ : functype) =
           failwith "TODO add x87 arguments"
       | NOCLASS -> acc)
   |> List.rev
-
-let return_regs (t : functype) : var list =
-  let cls = arg_type_classification [ t ] in
-  let rax = Var.create "RAX" (Imm 64) in
-  let rdx = Var.create "RDX" (Imm 64) in
-  let xmm0 = Var.create "XMM0" (Imm 128) in
-  (* let xmm1 = Var.create "XMM1" (Imm 128) in *)
-  let st0 = Var.create "ST0" (Imm 80) in
-  let st1 = Var.create "ST1" (Imm 80) in
-  let regs_state =
-    ref { avl_int_reg = rax; avl_xmm_reg = xmm0; avl_xmm_reg_offset = 0 }
-  in
-  Base.List.fold cls ~init:[] ~f:(fun acc cl ->
-      match cl with
-      | INT | PTR ->
-          let new_reg = !regs_state.avl_int_reg in
-          regs_state := { !regs_state with avl_int_reg = rdx };
-          new_reg :: acc
-      | SSE ->
-          let new_reg = !regs_state.avl_xmm_reg in
-          regs_state := { !regs_state with avl_xmm_reg = new_reg };
-          new_reg :: acc
-      | SSEUP -> acc
-      | X87 -> st0 :: acc
-      | X87UP -> acc
-      | COMPLEX_X87 -> st0 :: st1 :: acc
-      | NOCLASS -> acc
-      | MEMORY -> rax :: acc)
-(* TODO *)

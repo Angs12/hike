@@ -6,11 +6,17 @@ open Bap.Std.Bil.Types
 let ret_reg = ref @@ Var.create "DUMMY" (Imm 1)
 
 let set_ret_reg target =
-  let abi = Theory.Target.abi target in
-  if abi = Theory.Abi.gnu then ret_reg := Var.create "RAX" (Imm 64)
-  else failwith "unsupported target"
+  Format.fprintf Format.err_formatter "Target :%a\n" Theory.Target.pp target;
+  let reg =
+    if Theory.Target.matches target "i686-gnu-elf" then
+      Var.create "EAX" (Imm 32)
+    else if Theory.Target.matches target "x86_64-gnu-elf" then
+      Var.create "RAX" (Imm 64)
+    else failwith "unsupported target"
+  in
+  Format.fprintf Format.err_formatter "ret_reg: %a\n" Var.pp reg;
+  ret_reg := reg
 
-let cpu_regs = Var.create "cpu" (Mem (`r32, Size.of_int_exn 8))
 let mem = ref @@ Var.create "DUMMY" (Mem (`r32, Size.of_int_exn 8))
 
 let set_mem target =
