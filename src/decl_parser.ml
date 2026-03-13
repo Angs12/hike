@@ -49,14 +49,15 @@ let extract_arg_type (s : string) : string =
 let parse_decl (line : string) : (string * funcdef) option =
   if not (String.is_prefix ~prefix:"declare" line) then None
   else
-    match
-      (String.index line '@', String.index line '(', String.rindex line ')')
-    with
-    | Some name_start, Some paren_start, Some paren_end -> (
+    match (String.index line '@', String.rindex line ')') with
+    | Some name_start, Some paren_end -> (
         try
           let name_start = name_start + 1 in
           let name_end =
             Option.value_exn (String.index_from line name_start '(')
+          in
+          let paren_start =
+            Option.value_exn (String.index_from line name_end '(')
           in
           let name =
             String.sub line ~pos:name_start ~len:(name_end - name_start)

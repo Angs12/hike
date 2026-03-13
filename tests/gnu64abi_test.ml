@@ -8,7 +8,7 @@ let libc_functions : funcdef Libcmap.t =
   parse_header_file "../../../tests/stdio_headers.ll"
 
 let print_libc libc =
-  let module Abi = Gnu64_abi.Gnu64_abi in
+  let module Abi = Gnu64_abi in
   Libcmap.iter
     (fun key (data : Decl_parser.funcdef) ->
       let ret = Abi.return data.return in

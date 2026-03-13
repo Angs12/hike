@@ -35,11 +35,23 @@ compile32_O0:
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o factorial_llvm32O0 converted.ll 
 
+compile32_O0_struct:
+	gcc -O0 -m32 -o ./progs/struct32_0  ./progs/struct.c
+	bap convlir -L ./plugins ./progs/struct32_0 struct.ll
+	cat stdio_headers.ll struct.ll > converted.ll
+	clang -O3 -o struct32O0 converted.ll 
+
 compileO0_fact:
 	gcc -O0 -o ./progs/factorial_0  ./progs/factorial.c
 	bap convlir -L ./plugins ./progs/factorial_0 factorial.ll
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o factorial_llvmO0 converted.ll 
+
+compileO0_struct:
+	gcc -O0 -o ./progs/struct_0  ./progs/struct.c
+	bap convlir -L ./plugins ./progs/struct_0 struct.ll
+	cat stdio_headers.ll struct.ll > converted.ll
+	clang -O3 -o structO0 converted.ll
 
 compileO3_fact:
 	gcc -O3 -o ./progs/factorial_3  ./progs/factorial.c

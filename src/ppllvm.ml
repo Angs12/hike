@@ -134,8 +134,7 @@ let pp_mem_type mem =
       match Var.typ v with
       | Mem _ ->
           if Var.name v = "stack" then "ptr addrspace(0)"
-          else if Var.name v = "cpu" then "ptr addrspace(1)"
-          else "ptr addrspace(2)"
+          else "ptr addrspace(1)"
       | _ -> failwith "pp mem type: non-mem var")
   | _ -> failwith "pp mem type: non-var expression"
 

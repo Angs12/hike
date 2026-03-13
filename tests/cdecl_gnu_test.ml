@@ -8,7 +8,7 @@ let libc_functions : funcdef Libcmap.t =
   parse_header_file "../../../tests/stdio_headers.ll"
 
 let print_libc libc =
-  let module Abi = Cdecl_gnu_abi.Cdecl_gnu in
+  let module Abi = Cdecl_gnu_abi in
   Libcmap.iter
     (fun key (data : Decl_parser.funcdef) ->
       let ret = Abi.return data.return in
