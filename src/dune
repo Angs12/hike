@@ -3,6 +3,7 @@
   (public_name convlir)
   (preprocess (pps ppx_bap ))
   (libraries
+    str
     bap
     bap-core-theory
     bap-future

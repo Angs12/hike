@@ -23,15 +23,10 @@ let rec ll_type_to_functype (s : string) : functype =
   match s with
   | "void" -> Void
   | "ptr" -> Pointer
-  | "float" -> Float
-  | "double" -> Double
-  | "half" -> Half
-  | "bfloat" -> Bfloat
-  | "x86_fp80" -> X86fp80
-  | "ppc_fp128" -> PPCfp128
-  | "x86_amx" -> X86amx
   | t ->
-      if String.length t > 0 && Char.equal (String.get t 0) 'i' then
+      if String.length t >= 4 && String.is_prefix ~prefix:"ptr " t then
+        Pointer
+      else if String.length t > 0 && Char.equal (String.get t 0) 'i' then
         Int (int_of_string (String.sub t ~pos:1 ~len:(String.length t - 1)))
       else if String.length t > 0 && Char.equal (String.get t 0) '{' then
         let inner = String.sub t ~pos:1 ~len:(String.length t - 2) in
