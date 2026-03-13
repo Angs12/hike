@@ -12,6 +12,7 @@ module ExpMap = Map.Make (Exp)
 module Libcmap = Map.Make (String)
 
 type trivial_exp = Var of Var.t | Int of Word.t
+type function_decl = string * Decl_parser.functype
 
 let subs = ref StrMap.empty
 
@@ -41,22 +42,24 @@ let set_sub sub =
   if Term.tid sub |> Tid.name = "@main" then
     subs :=
       StrMap.add "@main"
-        (Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
+        ( Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)),
+          Decl_parser.Int 64 )
         !subs
   else
     let free_vars = free_vars sub in
     subs :=
       StrMap.add
         (Term.tid sub |> Tid.name)
-        (Seq.of_list
-           (Arg.create ~intent:Out !ret_reg (Var !ret_reg)
-           :: Base.List.map
-                ~f:(fun reg ->
-                  let arg_var =
-                    Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
-                  in
-                  Arg.create ~intent:In arg_var (Var reg))
-                free_vars))
+        ( Seq.of_list
+            (Arg.create ~intent:Out !ret_reg (Var !ret_reg)
+            :: Base.List.map
+                 ~f:(fun reg ->
+                   let arg_var =
+                     Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
+                   in
+                   Arg.create ~intent:In arg_var (Var reg))
+                 free_vars),
+          Decl_parser.Int 64 )
         !subs
 
 module type Abi = sig
@@ -88,7 +91,7 @@ let set_libc target libc =
                 Arg.create ~intent:In arg_var a)
               args)
       in
-      subs := StrMap.add ("@" ^ name) func_decl !subs)
+      subs := StrMap.add ("@" ^ name) (func_decl, data.return) !subs)
     libc
 
 let pp_label tid =
@@ -404,9 +407,7 @@ let label_tid label =
   | Direct tid -> tid
   | Indirect _ -> failwith "label_tid: indirect label"
 
-let ret_arg args =
-  Seq.exists args ~f:(fun arg ->
-      match Arg.intent arg with Some Out -> true | _ -> false)
+let ret_type func_decl = snd func_decl
 
 let pp_cond ppf cond tid =
   let cond_var = create_virtual ~name:"cond" ~tid ~typ:(Imm 1) in
@@ -474,14 +475,14 @@ let cf_type control_flow =
       match Call.return c with
       | Some _ -> (
           match Call.target c with
-          | Direct tid ->
-              let args =
+          | Direct tid -> (
+              let func_decl =
                 Base.Option.value_exn
                   ~message:(sprintf "cf_type: sub %s not found" (Tid.name tid))
                   (StrMap.find_opt (Tid.name tid) !subs)
               in
-              let ret = ret_arg args in
-              if ret then Call else CallVoid
+              let ret = ret_type func_decl in
+              match ret with Decl_parser.Void -> CallVoid | _ -> Call)
           | Indirect _ -> Call)
       | None -> CallRet)
   | Int _ -> Int
@@ -491,7 +492,8 @@ let pp_def ppf def =
   match Def.rhs def with Unknown _ -> () | _ -> pp_exp ppf var (Def.rhs def)
 
 let ready_call_args ppf tid args =
-  Seq.iter args ~f:(fun arg ->
+  fst args
+  |> Seq.iter ~f:(fun arg ->
       match Arg.intent arg with
       | Some i -> (
           match i with
@@ -507,7 +509,8 @@ let ready_call_args ppf tid args =
 
 let pp_call_args tid args =
   let args =
-    Seq.fold args ~init:"" ~f:(fun prev arg ->
+    fst args
+    |> Seq.fold ~init:"" ~f:(fun prev arg ->
         let var = Arg.lhs arg in
         let var = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
         match Arg.intent arg with
@@ -525,32 +528,43 @@ let pp_call_args tid args =
   if args = "" then "" else String.sub args 0 (String.length args - 1)
 
 let pp_func_call blk_tid ret_var fallthrough target ppf =
-  let args =
+  let func_decl =
     Base.Option.value_exn ~message:"pp_func_call: sub not found"
       (StrMap.find_opt (Tid.name target) !subs)
   in
-  let ret = ret_arg args in
+  let ret = ret_type func_decl in
+  ready_call_args ppf blk_tid func_decl;
   match ret with
-  | true ->
-      ready_call_args ppf blk_tid args;
+  | Decl_parser.Int _ ->
       fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
         (pp_trivial_exp (Var ret_var))
         (var_type ret_var) (pp_func target)
-        (pp_call_args blk_tid args);
+        (pp_call_args blk_tid func_decl);
       fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-  | false ->
-      ready_call_args ppf blk_tid args;
+  | Void ->
       fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
-        (pp_call_args blk_tid args);
+        (pp_call_args blk_tid func_decl);
       fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
+  | Decl_parser.Pointer ->
+      fprintf ppf "\t%s_tmp = call ptr addrspace(0) %s(%s)\n"
+        (pp_trivial_exp (Var ret_var))
+        (pp_func target)
+        (pp_call_args blk_tid func_decl);
+      fprintf ppf "\t%s = ptrtoint ptr addrspace(0) %s_tmp to i64\n"
+        (pp_trivial_exp (Var ret_var))
+        (pp_trivial_exp (Var ret_var));
+      (* TODO: correct size*)
+      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
+  | _ -> failwith "pp_call: non-trivial return type"
 
-let pp_call tid returns_value ret ppf call =
+let pp_call tid func_decl ret ppf call =
   match (Call.return call, Call.target call) with
   | None, _ -> (
-      match returns_value with
-      | true ->
-          fprintf ppf "\tret %s %s\n" (var_type ret) (pp_trivial_exp (Var ret))
-      | false -> fprintf ppf "\tret void\n")
+      match snd func_decl with
+      | Decl_parser.Void -> fprintf ppf "\tret void\n"
+      | Decl_parser.Int n ->
+          fprintf ppf "\tret i%d %s\n" n (pp_trivial_exp (Var ret))
+      | _ -> failwith "pp_call: non-trivial return type")
   | Some (Direct ret_label), Direct target_label ->
       pp_func_call tid ret ret_label target_label ppf
   | _, _ -> fprintf ppf "\tCALL\n"
@@ -585,7 +599,7 @@ let base_exp_sub base_var sub =
     method! map_var var = if Var.same var base_var then Var sub else Var var
   end
 
-let pp_elts returns_value blk ppf elts =
+let pp_elts func_decl blk ppf elts =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   Seq.iter elts ~f:(function
@@ -603,7 +617,7 @@ let pp_elts returns_value blk ppf elts =
           ~name:("reg_" ^ Var.name !ret_reg)
           ~tid ~typ:(Var.typ !ret_reg)
       in
-      pp_call tid returns_value res ppf call
+      pp_call tid func_decl res ppf call
 
 let update_args sub =
   let builder =
@@ -612,11 +626,11 @@ let update_args sub =
   Seq.iter (Term.enum blk_t sub) ~f:(fun blk -> Sub.Builder.add_blk builder blk);
   Sub.Builder.result builder
 
-let pp_body ret ppf =
+let pp_body func_decl ppf =
   Seq.iter ~f:(fun blk ->
       fprintf ppf "\n%s:\n%a\n"
         (pp_label (Term.tid blk))
-        (pp_elts ret blk) (Blk.elts blk))
+        (pp_elts func_decl blk) (Blk.elts blk))
 
 let entry_blk_tid sub =
   let blks = Term.enum blk_t sub in
@@ -801,12 +815,16 @@ let transfer_regs sub =
 
 let pp_ret ppf sub =
   let args = StrMap.find (Term.tid sub |> Tid.name) !subs in
-  let ret = ret_arg args in
-  if ret then fprintf ppf "%s" (var_type !ret_reg) else fprintf ppf "void"
+  let ret = ret_type args in
+  match ret with
+  | Decl_parser.Int n -> fprintf ppf "i%d" n
+  | Decl_parser.Void -> fprintf ppf "void"
+  | _ -> failwith "pp_ret: non-trivial return type"
 
 let pp_func_args args =
   let args =
-    Seq.fold args ~init:"" ~f:(fun prev arg ->
+    fst args
+    |> Seq.fold ~init:"" ~f:(fun prev arg ->
         let var = Arg.lhs arg in
         match Arg.intent arg with
         | Some i -> (
@@ -823,12 +841,11 @@ let pp_func_args args =
   if args = "" then "" else String.sub args 0 (String.length args - 1)
 
 let pp_sub ppf sub =
-  let args = StrMap.find (Term.tid sub |> Tid.name) !subs in
+  let func_decl = StrMap.find (Term.tid sub |> Tid.name) !subs in
   let blks = Term.enum blk_t sub in
-  let ret = ret_arg args in
   fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret sub
     (pp_func @@ Term.tid sub)
-    (pp_func_args args) (pp_body ret) blks
+    (pp_func_args func_decl) (pp_body func_decl) blks
 
 let is_libc libc sub =
   Libcmap.mem (Sub.name sub) libc
