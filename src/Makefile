@@ -10,14 +10,19 @@ clean:
 	bapbuild -clean
 	dune clean
 	find ./progs -type f -not -name '*.c' -not -name '*.h' -delete
-	rm factorial_llvm*
-	rm converted.ll
-	rm factorial.ll
+	rm -rf plugins
+	rm -f factorial_llvm*
+	rm -f fizzbuzz_llvm*
+	rm -f struct.ll
+	rm -f fizzbuzz.ll
+	rm -f converted.ll
+	rm -f factorial.ll
 
 compileO0_fizzbuzz:
-	gcc -O0 -fno-pie -o ./progs/fizzbuzz_0  ./progs/fizzbuzz.c
-	bap ./progs/fizzbuzz_0 -L ./plugins --pass=ppllvm  1> fizzbuzz.ll
-	clang -Oz -fno-slp-vectorize -o fizzbuzz_llvmO0 fizzbuzz.ll
+	gcc -O0 -o ./progs/fizzbuzz_0 ./progs/fizzbuzz.c
+	bap convlir -L ./plugins ./progs/fizzbuzz_0 fizzbuzz.ll
+	cat stdio_headers.ll fizzbuzz.ll > converted.ll
+	clang -O3 -o fizzbuzz_llvmO0 converted.ll
 
 compileO3_fizzbuzz:
 	gcc -O3 -fno-pie -o ./progs/fizzbuzz_3  ./progs/fizzbuzz.c

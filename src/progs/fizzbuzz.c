@@ -1,32 +1,42 @@
 #include <stdint.h>
 #include <stdio.h>
 
-int fizzBuzz(int n) {
-  int fizz = 0;
-  int buzz = 0;
-  int fizzbuzz = 0;
+void fizzBuzz(int n) {
   for (int i = 1; i <= n; ++i) {
     // Check if i is divisible by both 3 and 5
     if (i % 3 == 0 && i % 5 == 0) {
-      // Print "FizzBuzz"
-      fizzbuzz++;
+      putchar('F');
+      putchar('i');
+      putchar('z');
+      putchar('z');
+      putchar(' ');
+      putchar('B');
+      putchar('u');
+      putchar('z');
+      putchar('z');
+      putchar('\n');
     }
     // Check if i is divisible by 3
     else if (i % 3 == 0) {
-      // Print "Fizz"
-      fizz++;
+      putchar('F');
+      putchar('i');
+      putchar('z');
+      putchar('z');
+      putchar('\n');
     }
     // Check if i is divisible by 5
     else if (i % 5 == 0) {
-      // Print "Buzz"
-      buzz++;
+      putchar('B');
+      putchar('u');
+      putchar('z');
+      putchar('z');
+      putchar('\n');
     }
   }
-  return fizz + buzz + fizzbuzz;
 }
 
 int main() {
-  int n = 10;
-  int f = fizzBuzz(n);
-  return f;
+  int n = 100;
+  fizzBuzz(n);
+  return 0;
 }
