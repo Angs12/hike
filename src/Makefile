@@ -9,6 +9,7 @@ llvm:
 clean:
 	bapbuild -clean
 	dune clean
+	find ./progs -type f -not -name '*.c' -not -name '*.h' -delete
 	rm factorial_llvm*
 	rm converted.ll
 	rm factorial.ll

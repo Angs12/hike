@@ -287,20 +287,19 @@ let pp_extract ppf (var, hi, lo, exp) =
   fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_trivial_exp (Var var))
     (pp_type exp) temp_var result_size
 
-let pp_load ppf (var, mem, addr, size) =
-  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
-  fprintf ppf "\t%s = getelementptr i8, %s %s, %s %s\n" temp_var
-    (pp_mem_type mem) (pp_trivial_exp mem) (pp_type addr) (pp_trivial_exp addr);
-  fprintf ppf "\t%s = load i%d, %s %s\n" (pp_trivial_exp (Var var))
-    (Size.in_bits size) (pp_mem_type mem) temp_var
+let pp_load ppf (var, _, addr, size) =
+  let temp_var = pp_trivial_exp (Var var) ^ "_ptr" in
+  fprintf ppf "\t%s = inttoptr %s %s to ptr\n" temp_var (pp_type addr)
+    (pp_trivial_exp addr);
+  fprintf ppf "\t%s = load i%d, ptr %s\n" (pp_trivial_exp (Var var))
+    (Size.in_bits size) temp_var
 
 let pp_store ppf (mem, addr, data) =
   let temp_var = Var.create ~is_virtual:true ~fresh:true "" (ptr_type mem) in
-  fprintf ppf "\t%s = getelementptr i8, %s %s, %s %s\n"
+  fprintf ppf "\t%s = inttoptr %s %s to ptr\n"
     (pp_trivial_exp (Var temp_var))
-    (pp_mem_type mem) (pp_trivial_exp mem) (pp_type addr) (pp_trivial_exp addr);
-  fprintf ppf "\tstore %s %s, %s %s\n" (pp_type data) (pp_trivial_exp data)
-    (pp_mem_type mem)
+    (pp_type addr) (pp_trivial_exp addr);
+  fprintf ppf "\tstore %s %s, ptr %s\n" (pp_type data) (pp_trivial_exp data)
     (pp_trivial_exp (Var temp_var))
 
 let pp_cast ppf (var, cast, i, exp) =
@@ -393,9 +392,14 @@ let rec pp_exp ?res ppf exp : trivial_exp =
 
 let pp_exp ppf res (exp : exp) =
   match exp with
-  | Var v ->
-      fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
-        (pp_type (Var res)) (pp_trivial_exp (Var v))
+  | Var v -> (
+      match Var.typ v with
+      | Imm _ | Unk ->
+          fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
+            (pp_type (Var res)) (pp_trivial_exp (Var v))
+      | Mem _ ->
+          fprintf ppf "\t%s = ptrtoint ptr %s to i64\n"
+            (pp_trivial_exp (Var res)) (pp_trivial_exp (Var v)))
   | Int i ->
       fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
         (pp_type (Var res))
@@ -697,17 +701,28 @@ let update_main lenght sub =
         if Term.tid blk = entry_tid then (
           let builder = Blk.Builder.init ~copy_phis:false ~copy_jmps:true blk in
           Base.List.iter !regs ~f:(fun reg ->
-              let data =
-                if reg = !sp then
-                  Bil.Int (Word.of_int ~width:(var_size reg) (lenght - 1))
-                else Bil.Int (Word.of_int ~width:(var_size reg) 0)
-              in
-              let reg =
+              let reg_var =
                 create_reg ~name:(Var.name reg) ~tid:(Term.tid blk)
                   ~typ:(Var.typ reg)
               in
-              let def = Def.create reg data in
-              Blk.Builder.add_def builder def);
+              if reg = !sp then (
+                let data =
+                  Bil.Int (Word.of_int ~width:(var_size reg_var) (lenght - 1))
+                in
+                let ptr =
+                  create_reg
+                    ~name:(Var.name reg ^ "_ptr")
+                    ~tid:(Term.tid blk) ~typ:(Var.typ reg)
+                in
+                let def = Def.create ptr (Var !stack) in
+                Blk.Builder.add_def builder def;
+                let exp = Bil.binop Bil.PLUS (Bil.Var ptr) data in
+                let def = Def.create reg_var exp in
+                Blk.Builder.add_def builder def)
+              else
+                let data = Bil.Int (Word.of_int ~width:(var_size reg_var) 0) in
+                let def = Def.create reg_var data in
+                Blk.Builder.add_def builder def);
           Term.enum def_t blk
           |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
           Blk.Builder.result builder)

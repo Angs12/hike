@@ -22,7 +22,8 @@ let rec type_size (t : functype) : int =
       Base.List.fold_left ts ~init:0 ~f:(fun acc t -> acc + type_size t)
 
 let arg_type_classification (ts : functype list) : typeclass list =
-  Base.List.map ts ~f:(fun t -> MEMORY (type_size t))
+  Base.List.filter_map ts ~f:(fun t ->
+      match t with Void -> None | _ -> Some (MEMORY (type_size t)))
 
 let ret_classification (t : functype) : retclass =
   if type_size t <= 32 then RET else HIDDEN
