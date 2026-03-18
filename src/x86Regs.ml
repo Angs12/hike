@@ -9,7 +9,7 @@ let set_ret_reg target =
   Format.fprintf Format.err_formatter "Target :%a\n" Theory.Target.pp target;
   let reg =
     if Theory.Target.matches target "i686-gnu-elf" then
-      Var.create "EAX" (Imm 32)
+      Var.create "EAX" (Imm 64)
     else if Theory.Target.matches target "x86_64-gnu-elf" then
       Var.create "RAX" (Imm 64)
     else failwith "unsupported target"
@@ -56,8 +56,12 @@ let set_regs target =
   in
   regs :=
     Theory.Target.regs target |> Base.Set.to_list |> Base.List.map ~f:Var.reify
-    |> Base.List.filter ~f:(fun reg ->
-        not (Base.List.mem flags reg ~equal:Var.same))
+    |> Base.List.filter_map ~f:(fun reg ->
+        let reg =
+          if Var.typ reg = Imm 32 then Var.create (Var.name reg) (Imm 64)
+          else reg
+        in
+        if List.mem reg flags then None else Some reg)
 
 let set_stack target =
   let byte = Theory.Target.byte target in

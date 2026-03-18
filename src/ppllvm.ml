@@ -10,28 +10,104 @@ open Format
 module StrMap = Map.Make (String)
 module ExpMap = Map.Make (Exp)
 module Libcmap = Map.Make (String)
+module KB = Bap_knowledge.Knowledge
+
+let llvm_ptr_tag =
+  Value.Tag.register ~name:"llvm-ptr"
+    ~uuid:"6d1cdeb3-22c8-11f1-b8fa-f4a80dc1b6bb"
+    (module Core.Unit)
+
+let return_arg_tag =
+  Value.Tag.register ~name:"return-arg"
+    ~uuid:"60b819ea-22cb-11f1-ba62-f4a80dc1b6bb"
+    (module Core.Unit)
+
+module LlvmType = struct
+  let package = "convlir"
+
+  type tag = Category
+  type sort = unit
+  type types = Ptr | Int | Float | Void
+
+  let name = "llvm-types"
+  let desc = "A class representing types in LLVM IR"
+  let index = ()
+  let type_cls : (tag, sort) KB.cls = KB.Class.declare name index ~package ~desc
+
+  let type_domain : types KB.Domain.t =
+    KB.Domain.flat "llvm-types-domain" ~empty:Float
+      ~equal:(fun t1 t2 ->
+        match (t1, t2) with
+        | Int, Int -> true
+        | Ptr, Ptr -> true
+        | Float, Float -> true
+        | Void, Void -> true
+        | _, _ -> false)
+      ~inspect:(fun t ->
+        match t with
+        | Int -> Sexplib.Sexp.Atom "int"
+        | Ptr -> Sexplib.Sexp.Atom "ptr"
+        | Float -> Sexplib.Sexp.Atom "float"
+        | Void -> Sexplib.Sexp.Atom "void")
+
+  let typ : (tag, types) KB.slot =
+    KB.Class.property type_cls "type" type_domain ~package
+end
+
+let () =
+  Toplevel.exec
+    begin
+      let open KB.Syntax in
+      let* typ = KB.Object.create LlvmType.type_cls in
+      let* () = KB.provide LlvmType.typ typ LlvmType.Ptr in
+      let* typ = KB.collect LlvmType.typ typ in
+      (match typ with
+      | Ptr -> fprintf err_formatter "Ptr@."
+      | Int -> fprintf err_formatter "Int@."
+      | Float -> fprintf err_formatter "Float@."
+      | Void -> fprintf err_formatter "Void@.");
+
+      KB.return ()
+    end
 
 type trivial_exp = Var of Var.t | Int of Word.t
 type function_decl = string * Decl_parser.functype
 
 let subs = ref StrMap.empty
 
-let get_global_memory proj =
-  let m = Project.memory proj in
-  let lenght =
-    Word.( - )
-      (Base.Option.value_exn (Memmap.max_addr m))
-      (Base.Option.value_exn (Memmap.min_addr m))
-    |> Word.to_int_exn
+let get_section_mem name proj =
+  let mem, _ =
+    Project.memory proj |> Memmap.to_sequence
+    |> Seq.find_exn ~f:(fun (_, v) ->
+        Base.Option.value_map (Value.get Image.section v) ~default:false
+          ~f:(fun n -> String.equal n name))
   in
-  let memory = Base.Array.init (lenght + 1) ~f:(fun _ -> 0) in
-  Project.memory proj |> Memmap.to_sequence
-  |> Seq.iter ~f:(fun (mem, _) ->
-      Memory.iteri ~word_size:`r8 mem ~f:(fun index v ->
-          memory.(Word.to_int_exn index) <- Word.to_int_exn v));
-  memory
+  mem
+
+let get_section name proj =
+  let mem, _ =
+    Project.memory proj |> Memmap.to_sequence
+    |> Seq.find_exn ~f:(fun (_, v) ->
+        Base.Option.value_map (Value.get Image.section v) ~default:false
+          ~f:(fun n -> String.equal n name))
+  in
+  let lenght = Memory.length mem in
+  let min_addr = Memory.min_addr mem in
+  let arr = Base.Array.init lenght ~f:(fun _ -> 0) in
+  Memory.iteri ~word_size:`r8 mem ~f:(fun index v ->
+      arr.(Word.to_int_exn (Word.( - ) index min_addr)) <- Word.to_int_exn v);
+  arr
+
+let print_sections p =
+  Project.memory p |> Memmap.to_sequence
+  |> Seq.iter ~f:(fun (mem, x) ->
+      Base.Option.iter (Value.get Image.section x) ~f:(fun name ->
+          fprintf err_formatter "Section: %s@.%a@." name Memory.pp mem))
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
+
+let var_size var =
+  match Var.typ var with Imm n -> n | _ -> failwith "pp exp type: non-imm var"
 
 let free_vars sub =
   Sub.free_vars sub
@@ -42,39 +118,44 @@ let set_sub sub =
   if Term.tid sub |> Tid.name = "@main" then
     subs :=
       StrMap.add "@main"
-        ( Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)),
-          Decl_parser.Int 64 )
+        (Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
         !subs
   else
     let free_vars = free_vars sub in
+    let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
+    let ret = Term.set_attr ret return_arg_tag () in
     subs :=
       StrMap.add
         (Term.tid sub |> Tid.name)
-        ( Seq.of_list
-            (Arg.create ~intent:Out !ret_reg (Var !ret_reg)
-            :: Base.List.map
-                 ~f:(fun reg ->
-                   let arg_var =
-                     Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
-                   in
-                   Arg.create ~intent:In arg_var (Var reg))
-                 free_vars),
-          Decl_parser.Int 64 )
+        (Seq.of_list
+           (ret
+           :: Base.List.map
+                ~f:(fun reg ->
+                  let arg_var =
+                    Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
+                  in
+                  Arg.create ~intent:In arg_var (Var reg))
+                free_vars))
         !subs
 
 module type Abi = sig
   val return : Decl_parser.functype -> var list
 
   val args :
-    Decl_parser.functype list -> Decl_parser.functype -> (exp * typ) list
+    Decl_parser.functype list -> Decl_parser.functype -> (exp * intent) list
 end
+
+let arg_type (exp : exp) =
+  match exp with
+  | Int i -> Imm (Word.bitwidth i)
+  | Var v -> Var.typ v
+  | Load (_, _, _, size) -> Imm (Size.in_bits size)
+  | _ -> failwith "pp exp type: non-imm var"
 
 let set_libc target libc =
   let abi =
     if Theory.Target.matches target "x86_64-gnu-elf" then
       (module Gnu64_abi : Abi)
-    else if Theory.Target.matches target "i686-gnu-elf" then
-      (module Cdecl_gnu_abi : Abi)
     else failwith "abi not supported"
   in
   let module Abi = (val abi : Abi) in
@@ -86,12 +167,14 @@ let set_libc target libc =
         Seq.of_list
           (List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret
           @ List.mapi
-              (fun i (a, typ) ->
-                let arg_var = Var.create (name ^ sprintf "arg%d" i) typ in
-                Arg.create ~intent:In arg_var a)
+              (fun i (a, intent) ->
+                let arg_var =
+                  Var.create (name ^ sprintf "arg%d" i) (arg_type a)
+                in
+                Arg.create ~intent arg_var a)
               args)
       in
-      subs := StrMap.add ("@" ^ name) (func_decl, data.return) !subs)
+      subs := StrMap.add ("@" ^ name) func_decl !subs)
     libc
 
 let pp_label tid =
@@ -118,6 +201,7 @@ let create_var ~is_virtual ~name ~typ ~tid =
 
 let create_reg ~name ~typ ~tid = create_var ~is_virtual:false ~name ~typ ~tid
 let create_virtual ~name ~typ ~tid = create_var ~is_virtual:true ~name ~typ ~tid
+let stack_len = 2048
 
 let correct_registers tid regs =
   object
@@ -210,9 +294,6 @@ let binop_str op =
   | LE -> "icmp ule"
   | SLE -> "icmp sle"
 
-let var_size var =
-  match Var.typ var with Imm n -> n | _ -> failwith "pp exp type: non-imm var"
-
 let word_type word = Imm (Word.bitwidth word)
 let exp_type exp = match exp with Int i -> word_type i | Var v -> Var.typ v
 
@@ -222,21 +303,19 @@ let var_type var =
   | _ -> failwith "var_type : non-imm var"
 
 let exps_type (exp1 : trivial_exp) (exp2 : trivial_exp) =
-  if exp_type exp1 = exp_type exp2 then exp_type exp1
-  else
-    failwith
-    @@ sprintf "exps_type: non-equal types: %s::%s and %s::%s"
-         (pp_trivial_exp exp1)
-         (Type.str () (exp_type exp1))
-         (pp_trivial_exp exp2)
-         (Type.str () (exp_type exp2))
+  let t1 = exp_type exp1 in
+  let t2 = exp_type exp2 in
+  Type.max t1 t2
+
+let type_str t =
+  match t with Imm n -> sprintf "i%d" n | _ -> failwith "type_str"
 
 let pp_types exp1 exp2 =
-  match exps_type exp1 exp2 with
-  | Imm n -> sprintf "i%d" n
-  | _ -> failwith "pp types: non-trivial type"
+  let t1 = exp_type exp1 in
+  let t2 = exp_type exp2 in
+  type_str @@ Type.max t1 t2
 
-let pp_type exp = pp_types exp exp
+let pp_type exp = type_str @@ exp_type exp
 
 let pp_binop (op, e1, e2) =
   sprintf "%s %s %s, %s" (binop_str op) (pp_types e1 e2) (pp_trivial_exp e1)
@@ -398,8 +477,9 @@ let pp_exp ppf res (exp : exp) =
           fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
             (pp_type (Var res)) (pp_trivial_exp (Var v))
       | Mem _ ->
-          fprintf ppf "\t%s = ptrtoint ptr %s to i64\n"
-            (pp_trivial_exp (Var res)) (pp_trivial_exp (Var v)))
+          fprintf ppf "\t%s = ptrtoint ptr %s to %s\n"
+            (pp_trivial_exp (Var res)) (pp_trivial_exp (Var v))
+            (var_type !ret_reg))
   | Int i ->
       fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
         (pp_type (Var res))
@@ -410,8 +490,6 @@ let label_tid label =
   match label with
   | Direct tid -> tid
   | Indirect _ -> failwith "label_tid: indirect label"
-
-let ret_type func_decl = snd func_decl
 
 let pp_cond ppf cond tid =
   let cond_var = create_virtual ~name:"cond" ~tid ~typ:(Imm 1) in
@@ -468,6 +546,17 @@ let pp_return tid return_reg ppf _ =
       pp_exp ppf res
         (Exp.substitute (Var !ret_reg) (Var new_ret) (Arg.rhs return_reg))
 
+let is_void tid =
+  let args =
+    Base.Option.value_exn
+      ~message:(sprintf "is_void: sub %s not found" (Tid.name tid))
+      (StrMap.find_opt (Tid.name tid) !subs)
+  in
+  Seq.for_all args ~f:(fun arg ->
+      match Arg.intent arg with
+      | Some i -> ( match i with In -> true | Out -> false | Both -> true)
+      | None -> true)
+
 type cf_type = Br | Ret | Call | Int | CallVoid | CallRet
 
 let cf_type control_flow =
@@ -479,14 +568,7 @@ let cf_type control_flow =
       match Call.return c with
       | Some _ -> (
           match Call.target c with
-          | Direct tid -> (
-              let func_decl =
-                Base.Option.value_exn
-                  ~message:(sprintf "cf_type: sub %s not found" (Tid.name tid))
-                  (StrMap.find_opt (Tid.name tid) !subs)
-              in
-              let ret = ret_type func_decl in
-              match ret with Decl_parser.Void -> CallVoid | _ -> Call)
+          | Direct tid -> if is_void tid then CallVoid else Call
           | Indirect _ -> Call)
       | None -> CallRet)
   | Int _ -> Int
@@ -495,83 +577,78 @@ let pp_def ppf def =
   let var = Def.lhs def in
   match Def.rhs def with Unknown _ -> () | _ -> pp_exp ppf var (Def.rhs def)
 
-let ready_call_args ppf tid args =
-  fst args
-  |> Seq.iter ~f:(fun arg ->
+let ready_call_args ppf sub_tid tid =
+  let args =
+    Base.Option.value_exn
+      ~message:(sprintf "ready_call_args: sub %s not found" (Tid.name sub_tid))
+      (StrMap.find_opt (Tid.name sub_tid) !subs)
+  in
+  Seq.iter args ~f:(fun arg ->
       match Arg.intent arg with
       | Some i -> (
           match i with
           | Out -> ()
-          | In | Both ->
+          | In ->
               let var = Arg.lhs arg in
               let var =
                 create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
               in
               let exp = Exp.map (correct_registers tid !regs) (Arg.rhs arg) in
-              pp_exp ppf var exp)
+              pp_exp ppf var exp
+          | Both ->
+              let var = Arg.lhs arg in
+              let tmp_var =
+                create_reg ~name:(Var.name var ^ "_tmp") ~tid ~typ:(Var.typ var)
+              in
+              let var =
+                create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
+              in
+              let exp = Exp.map (correct_registers tid !regs) (Arg.rhs arg) in
+              pp_exp ppf tmp_var exp;
+              fprintf ppf "\t%s = call zeroext %s @_address_map_(%s %s)\n"
+                (pp_trivial_exp (Var var)) (var_type var) (var_type tmp_var)
+                (pp_trivial_exp (Var tmp_var)))
       | None -> ())
 
-let pp_call_args tid args =
+let pp_args sub_tid tid =
   let args =
-    fst args
-    |> Seq.fold ~init:"" ~f:(fun prev arg ->
+    Base.Option.value_exn
+      ~message:(sprintf "pp_args: sub %s not found" (Tid.name sub_tid))
+      (StrMap.find_opt (Tid.name sub_tid) !subs)
+  in
+  let args =
+    Seq.fold args ~init:"" ~f:(fun prev arg ->
         let var = Arg.lhs arg in
         let var = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
         match Arg.intent arg with
         | Some i -> (
             match i with
-            | In ->
+            | In | Both ->
                 sprintf "%s %s %s," prev (var_type var)
                   (pp_trivial_exp (Var var))
-            | Out -> prev
-            | Both ->
-                sprintf "%s %s %s," prev (var_type var)
-                  (pp_trivial_exp (Var var)))
+            | Out -> prev)
         | None -> prev)
   in
   if args = "" then "" else String.sub args 0 (String.length args - 1)
 
 let pp_func_call blk_tid ret_var fallthrough target ppf =
-  let func_decl =
-    Base.Option.value_exn ~message:"pp_func_call: sub not found"
-      (StrMap.find_opt (Tid.name target) !subs)
-  in
-  let ret = ret_type func_decl in
-  ready_call_args ppf blk_tid func_decl;
-  match ret with
-  | Decl_parser.Int _ ->
-      fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
-        (pp_trivial_exp (Var ret_var))
-        (var_type ret_var) (pp_func target)
-        (pp_call_args blk_tid func_decl);
-      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-  | Void ->
-      fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
-        (pp_call_args blk_tid func_decl);
-      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-  | Decl_parser.Pointer ->
-      fprintf ppf "\t%s_tmp = call ptr addrspace(0) %s(%s)\n"
-        (pp_trivial_exp (Var ret_var))
-        (pp_func target)
-        (pp_call_args blk_tid func_decl);
-      fprintf ppf "\t%s = ptrtoint ptr addrspace(0) %s_tmp to i64\n"
-        (pp_trivial_exp (Var ret_var))
-        (pp_trivial_exp (Var ret_var));
-      (* TODO: correct size*)
-      fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-  | _ -> failwith "pp_call: non-trivial return type"
+  ready_call_args ppf target blk_tid;
+  if not @@ is_void target then
+    fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
+      (pp_trivial_exp (Var ret_var))
+      (var_type ret_var) (pp_func target) (pp_args target blk_tid)
+  else
+    fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
+      (pp_args target blk_tid);
+  fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
 
-let pp_call tid func_decl ret ppf call =
+let pp_call blk_tid ret ppf call =
   match (Call.return call, Call.target call) with
-  | None, _ -> (
-      match snd func_decl with
-      | Decl_parser.Void -> fprintf ppf "\tret void\n"
-      | Decl_parser.Int n ->
-          fprintf ppf "\tret i%d %s\n" n (pp_trivial_exp (Var ret))
-      | _ -> failwith "pp_call: non-trivial return type")
+  | None, _ ->
+      fprintf ppf "\tret %s %s\n" (pp_type (Var ret)) (pp_trivial_exp (Var ret))
   | Some (Direct ret_label), Direct target_label ->
-      pp_func_call tid ret ret_label target_label ppf
-  | _, _ -> fprintf ppf "\tCALL\n"
+      pp_func_call blk_tid ret ret_label target_label ppf
+  | _, _ -> failwith "pp_call: non-trivial return type"
 
 let pp_phi ppf phi =
   let var = Phi.lhs phi in
@@ -603,7 +680,7 @@ let base_exp_sub base_var sub =
     method! map_var var = if Var.same var base_var then Var sub else Var var
   end
 
-let pp_elts func_decl blk ppf elts =
+let pp_elts blk ppf elts =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   Seq.iter elts ~f:(function
@@ -621,7 +698,7 @@ let pp_elts func_decl blk ppf elts =
           ~name:("reg_" ^ Var.name !ret_reg)
           ~tid ~typ:(Var.typ !ret_reg)
       in
-      pp_call tid func_decl res ppf call
+      pp_call tid res ppf call
 
 let update_args sub =
   let builder =
@@ -630,11 +707,11 @@ let update_args sub =
   Seq.iter (Term.enum blk_t sub) ~f:(fun blk -> Sub.Builder.add_blk builder blk);
   Sub.Builder.result builder
 
-let pp_body func_decl ppf =
+let pp_body ppf =
   Seq.iter ~f:(fun blk ->
       fprintf ppf "\n%s:\n%a\n"
         (pp_label (Term.tid blk))
-        (pp_elts func_decl blk) (Blk.elts blk))
+        (pp_elts blk) (Blk.elts blk))
 
 let entry_blk_tid sub =
   let blks = Term.enum blk_t sub in
@@ -673,7 +750,8 @@ let update_rets sub =
             | Direct _ ->
                 let temp_builder = Blk.Builder.create () in
                 Blk.Builder.add_jmp temp_builder
-                  (Jmp.create_ret (Indirect (Var (Var.create "ret" (Imm 64)))));
+                  (Jmp.create_ret
+                     (Indirect (Var (Var.create "ret" (Var.typ !ret_reg)))));
                 let new_blk = Blk.Builder.result temp_builder in
                 new_blks := new_blk :: !new_blks;
                 let call = Call.with_return call (Direct (Term.tid new_blk)) in
@@ -691,7 +769,7 @@ let update_rets sub =
       Sub.Builder.add_arg sub_builder arg);
   Sub.Builder.result sub_builder
 
-let update_main lenght sub =
+let update_main sub =
   if Sub.name sub = "main" then
     let entry_tid =
       Base.Option.value_exn ~message:"Main function has no blocks"
@@ -707,7 +785,8 @@ let update_main lenght sub =
               in
               if reg = !sp then (
                 let data =
-                  Bil.Int (Word.of_int ~width:(var_size reg_var) (lenght - 1))
+                  Bil.Int
+                    (Word.of_int ~width:(var_size reg_var) (stack_len - 1))
                 in
                 let ptr =
                   create_reg
@@ -802,10 +881,12 @@ let transfer_regs sub =
                 let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
                 Def.create reg data
               else
-                let reg_var =
-                  Var.create (Sub.name sub ^ Var.name var) (Var.typ var)
+                let arg_var =
+                  create_reg
+                    ~name:(Sub.name sub ^ Var.name var)
+                    ~tid:(Term.tid sub) ~typ:(Var.typ var)
                 in
-                Def.create reg (Var reg_var)
+                Def.create reg (Var arg_var)
             in
             Blk.Builder.add_def builder def)
       else ();
@@ -828,105 +909,160 @@ let transfer_regs sub =
               Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
-let pp_ret ppf sub =
-  let args = StrMap.find (Term.tid sub |> Tid.name) !subs in
-  let ret = ret_type args in
-  match ret with
-  | Decl_parser.Int n -> fprintf ppf "i%d" n
-  | Decl_parser.Void -> fprintf ppf "void"
-  | _ -> failwith "pp_ret: non-trivial return type"
-
-let pp_func_args args =
-  let args =
-    fst args
-    |> Seq.fold ~init:"" ~f:(fun prev arg ->
-        let var = Arg.lhs arg in
-        match Arg.intent arg with
-        | Some i -> (
-            match i with
-            | In ->
-                sprintf "%s %s %s," prev (var_type var)
-                  (pp_trivial_exp (Var var))
-            | Out -> prev
-            | Both ->
-                sprintf "%s %s %s," prev (var_type var)
-                  (pp_trivial_exp (Var var)))
-        | None -> prev)
-  in
-  if args = "" then "" else String.sub args 0 (String.length args - 1)
+let pp_ret ppf () = fprintf ppf "%s" (pp_type (Var !ret_reg))
 
 let pp_sub ppf sub =
-  let func_decl = StrMap.find (Term.tid sub |> Tid.name) !subs in
   let blks = Term.enum blk_t sub in
-  fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret sub
+  let tid = Term.tid sub in
+  fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret ()
     (pp_func @@ Term.tid sub)
-    (pp_func_args func_decl) (pp_body func_decl) blks
+    (pp_args tid tid) pp_body blks
 
 let is_libc libc sub =
   Libcmap.mem (Sub.name sub) libc
   || Base.String.is_substring ~substring:":external" (Sub.name sub)
 
-let print_sections p =
-  Project.memory p |> Memmap.to_sequence
-  |> Seq.iter ~f:(fun (mem, x) ->
-      Base.Option.iter (Value.get Image.section x) ~f:(fun name ->
-          fprintf err_formatter "Section: %s@.%a@." name Memory.pp mem))
-
-let pp_prog proj ppf prog =
-  let target = Project.target proj in
-  print_sections proj;
-  let mem = get_global_memory proj in
-  let stack = Base.Array.init 1024 ~f:(fun _ -> 0) in
-  let mem = Array.append mem stack in
+let arr2llvm arr =
   let data =
-    Base.Array.fold ~init:"" ~f:(fun acc v -> acc ^ sprintf "i8 %d," v) mem
+    Base.Array.fold ~init:"" ~f:(fun acc v -> acc ^ sprintf "i8 %d," v) arr
   in
   (* remove last comma *)
   let data =
     if data = "" then "" else String.sub data 0 (String.length data - 1)
   in
-  let length = Array.length mem in
-  let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
+  data
+
+let pp_global ~is_const ppf mem name =
+  let str = arr2llvm mem in
+  match is_const with
+  | true ->
+      fprintf ppf "@%s = addrspace(0) constant [%d x i8] [ %s ]\n" name
+        (Array.length mem) str
+  | false ->
+      fprintf ppf "@%s = addrspace(0) global [%d x i8] [ %s ]\n" name
+        (Array.length mem) str
+
+let get_bil_pass name =
+  Base.List.find_exn ~f:(fun pass -> Bil.Pass.name pass = name) (Bil.passes ())
+
+let get_pass name =
+  Project.find_pass name
+  |> Base.Option.value_exn ~message:("pass " ^ name ^ " not found")
+
+let run_pass proj name =
+  let pass = get_pass name in
+  Project.Pass.run_exn pass proj
+
+let pp_prog ppf prog =
+  Seq.iter ~f:(fprintf ppf "@[%a@]@\n" pp_sub) (Term.enum sub_t prog)
+
+let setup proj libc =
+  let target = Project.target proj in
   set_ret_reg target;
   set_regs target;
   set_stack target;
   set_sp target;
   set_mem target;
-  set_libc target libc;
+  set_libc target libc
+
+let pp_address_map ppf target data_mem rodata_mem =
+  fprintf ppf
+    "\n\
+    \    define i%d @_address_map_(i%d %%ptr) {\n\
+    \        %%is_rodata1 = icmp uge i%d %%ptr, u%a\n\
+    \        %%is_rodata2 = icmp ule i%d %%ptr, u%a\n\
+    \        %%is_rodata = and i1 %%is_rodata1, %%is_rodata2\n\n\
+    \        %%is_data1 = icmp uge i%d %%ptr, u%a\n\
+    \        %%is_data2 = icmp ule i%d %%ptr, u%a\n\
+    \        %%is_data = and i1 %%is_data1, %%is_data2\n\n\
+    \        br i1 %%is_rodata, label %%isrodata , label %%fallthrough1\n\n\
+    \        \n\
+    \        fallthrough1:\n\
+    \        br i1 %%is_data, label %%isdata, label %%fallthrough2\n\n\
+    \        fallthrough2:\n\
+    \        ret i64 %%ptr\n\n\
+    \        isrodata:\n\
+    \        %%rodata_ptr = ptrtoint ptr @rodata to i%d\n\
+    \        %%rodata_offset = sub i%d %%ptr, u%a\n\
+    \        %%rodata_addr = add i%d %%rodata_ptr, %%rodata_offset\n\
+    \        ret i64 %%rodata_addr\n\n\
+    \        isdata:\n\
+    \        %%data_ptr = ptrtoint ptr @data to i%d\n\
+    \        %%data_offset = sub i%d %%ptr, u%a\n\
+    \        %%data_addr = add i%d %%data_ptr, %%data_offset\n\
+    \        ret i64 %%data_addr\n\
+    \    }\n\n\
+    \    "
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    Word.pp
+    (Memory.min_addr rodata_mem)
+    (Theory.Target.bits target)
+    Word.pp
+    (Memory.max_addr rodata_mem)
+    (Theory.Target.bits target)
+    Word.pp (Memory.min_addr data_mem)
+    (Theory.Target.bits target)
+    Word.pp (Memory.max_addr data_mem)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    Word.pp
+    (Memory.min_addr rodata_mem)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    Word.pp (Memory.min_addr data_mem)
+    (Theory.Target.bits target)
+
+let pp ppf proj =
+  let proj = run_pass proj "trivial-condition-form" in
+  (* print_sections proj; *)
+  Project.passes ()
+  |> Base.List.iter ~f:(fun pass ->
+      fprintf err_formatter "Project pass :: %s \n" (Project.Pass.name pass));
+  let rodata = get_section ".rodata" proj in
+  let data = get_section ".data" proj in
+  let stack = Base.Array.init stack_len ~f:(fun _ -> 0) in
+  let prog = Project.program proj in
   let main =
     Base.Option.value_exn ~message:"Main function not found"
       (Term.enum sub_t prog |> Seq.find ~f:(fun sub -> Sub.name sub = "main"))
   in
   let reachable_funcs = Reachable_funcs.reachable_funcs prog main in
-  let prog =
-    Term.filter_map sub_t prog ~f:(fun sub ->
-        if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then None
-        else (
-          set_sub sub;
-          Sub.pp err_formatter sub;
-          Some
-            (sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
-           |> update_stack |> transfer_regs |> update_main length)))
-  in
-  fprintf ppf "@stack = addrspace(0) global [%d x i8] [ %s ]\n" length data;
-  Seq.iter ~f:(fprintf ppf "@[%a@]@\n" pp_sub) (Term.enum sub_t prog)
-
-let pp ppf proj =
-  let pass =
-    Project.find_pass "trivial-condition-form" |> fun pass ->
-    match pass with
-    | Some pass -> pass
-    | None -> failwith "pp: trivial-condition-form pass not found"
-  in
-  let open Result in
+  let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
+  setup proj libc;
   let proj =
-    match Project.Pass.run pass proj with
-    | Ok p -> p
-    | Error _ -> failwith "pp: pass failed"
+    Project.map_program proj ~f:(fun prog ->
+        Term.filter_map sub_t prog ~f:(fun sub ->
+            if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then
+              None
+            else (
+              set_sub sub;
+              (* Sub.pp err_formatter sub; *)
+              Some
+                (sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
+               |> update_stack |> transfer_regs |> update_main))))
   in
-  fprintf ppf "@[%a@]" (pp_prog proj) (Project.program proj)
+  (* let prog = Project.program proj in *)
+  (* Program.pp err_formatter prog; *)
+  pp_global ~is_const:true ppf rodata "rodata";
+  pp_global ~is_const:false ppf data "data";
+  pp_global ~is_const:false ppf stack "stack";
+  pp_address_map ppf (Project.target proj)
+    (get_section_mem ".data" proj)
+    (get_section_mem ".rodata" proj);
+  fprintf ppf "@[%a@]" pp_prog (Project.program proj)
 
 let main input_program output _ =
+  Bil.passes ()
+  |> Base.List.iter ~f:(fun pass ->
+      fprintf err_formatter "Bil pass :: %s \n" (Bil.Pass.name pass));
+  let passes =
+    Base.List.map ~f:get_bil_pass
+      [ "prune-dead-virtuals"; "constant-folding"; "constant-propagation" ]
+  in
+  Bil.select_passes passes;
   let ppf = Out_channel.open_text output |> Format.formatter_of_out_channel in
   let loader = "llvm" in
   let proj =

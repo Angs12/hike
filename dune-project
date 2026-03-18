@@ -27,11 +27,32 @@
   ("add topics" "to describe" your project)))
 
 (package
+ (name fold_consts)
+ (synopsis "A short synopsis")
+ (description "A longer description")
+ (depends ocaml)
+ (tags
+  ("add topics" "to describe" your project)))
+
+(package
  (name convlir)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends ocaml)
  (tags
   ("add topics" "to describe" your project)))
+
+(package
+ (name ppllvm)
+ (synopsis "A BAP plugin for dumping symbol information")
+ (tags (bap bap-plugin))
+ (depends
+  (bap-std (= :version))
+  (core_kernel (and (>= v0.14) (< v0.16)))
+  (graphlib (= :version))
+  (bap-common (= :version))
+  (ppx_bap (= :version))
+  (regular (= :version))))
+
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html

@@ -92,7 +92,7 @@ let args (ts : functype list) (_ : functype) =
           let new_reg = Base.List.hd_exn !int_regs in
           regs_state := { !regs_state with avl_int_reg = new_reg };
           int_regs := Base.List.tl_exn !int_regs;
-          (Var new_reg, Imm 64) :: acc
+          (Var new_reg, In) :: acc
       | PTR ->
           if !is_sse then (
             let new_reg = Base.List.hd_exn !vec_regs in
@@ -101,7 +101,7 @@ let args (ts : functype list) (_ : functype) =
           let new_reg = Base.List.hd_exn !int_regs in
           regs_state := { !regs_state with avl_int_reg = new_reg };
           int_regs := Base.List.tl_exn !int_regs;
-          (Var new_reg, Imm 64) :: acc
+          (Var new_reg, Both) :: acc
       | MEMORY ->
           if !is_sse then (
             let new_reg = Base.List.hd_exn !vec_regs in
@@ -113,7 +113,7 @@ let args (ts : functype list) (_ : functype) =
           regs_state := { !regs_state with avl_xmm_reg = new_reg };
           regs_state := { !regs_state with avl_xmm_reg_offset = 64 };
           vec_regs := Base.List.tl_exn !vec_regs;
-          (Var new_reg, Imm 128) :: acc
+          (Var new_reg, In) :: acc
       | SSEUP ->
           let reg = !regs_state.avl_xmm_reg in
           if !regs_state.avl_xmm_reg_offset = 64 then (

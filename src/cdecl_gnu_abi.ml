@@ -8,7 +8,7 @@ type retclass = RET | HIDDEN
 let rec type_size (t : functype) : int =
   match t with
   | Void -> 0
-  | Pointer -> 32
+  | Pointer -> 64
   | Int n -> n
   | Half -> 16
   | Bfloat -> 32
@@ -31,8 +31,8 @@ let ret_classification (t : functype) : retclass =
 let args (ts : functype list) (ret : functype) =
   let args = arg_type_classification ts in
   let args = if ret_classification ret = RET then args else MEMORY 32 :: args in
-  let sp = Var.create "ESP" (Imm 32) in
-  let mem = Var.create "stack" (Mem (`r32, Size.r8)) in
+  let sp = Var.create "ESP" (Imm 64) in
+  let mem = Var.create "stack" (Mem (`r64, Size.r8)) in
   (* skip return adress from stack *)
   let sp = Bil.BinOp (PLUS, Var sp, Int (Word.of_int ~width:32 4)) in
   Base.List.mapi args ~f:(fun i (MEMORY n) ->
@@ -41,5 +41,5 @@ let args (ts : functype list) (ret : functype) =
       (Load (Var mem, sp, BigEndian, Size.of_int_exn arg_size), Imm arg_size))
 
 let return (t : functype) : var list =
-  let eax = Var.create "EAX" (Imm 32) in
+  let eax = Var.create "EAX" (Imm 64) in
   match t with Void -> [] | _ -> [ eax ]

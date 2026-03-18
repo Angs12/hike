@@ -4,7 +4,7 @@ sim:
 
 llvm:
 	bapbuild ppllvm.plugin -pkg z3
-	bapbundle install -destdir ./plugins/ ./ppllvm.plugin
+	bapbundle install -destdir ./plugins ppllvm.plugin
 
 clean:
 	bapbuild -clean
@@ -20,9 +20,9 @@ clean:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o ./progs/fizzbuzz_0 ./progs/fizzbuzz.c
-	bap convlir -L ./plugins ./progs/fizzbuzz_0 fizzbuzz.ll
+	bap convlir -L ./plugins ./progs/fizzbuzz_0 fizzbuzz.ll --optimization-level=1
 	cat stdio_headers.ll fizzbuzz.ll > converted.ll
-	clang -O3 -o fizzbuzz_llvmO0 converted.ll
+	clang -O3 -o fizzbuzz_llvmO0 converted.ll 
 
 compileO3_fizzbuzz:
 	gcc -O3 -fno-pie -o ./progs/fizzbuzz_3  ./progs/fizzbuzz.c
@@ -49,7 +49,7 @@ compile32_O0_struct:
 
 compileO0_fact:
 	gcc -O0 -o ./progs/factorial_0  ./progs/factorial.c
-	bap convlir -L ./plugins ./progs/factorial_0 factorial.ll
+	bap convlir -L ./plugins ./progs/factorial_0 factorial.ll --optimization-level=1
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o factorial_llvmO0 converted.ll 
 
