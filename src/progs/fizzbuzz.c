@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+int n = 100;
+
 void fizzBuzz(int n) {
   for (int i = 1; i <= n; ++i) {
     // Check if i is divisible by both 3 and 5
@@ -19,7 +21,6 @@ void fizzBuzz(int n) {
 }
 
 int main() {
-  int n = 100;
   puts("FizzBuzz\n");
   puts("Fizz\n");
   puts("Buzz\n");

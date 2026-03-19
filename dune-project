@@ -27,14 +27,6 @@
   ("add topics" "to describe" your project)))
 
 (package
- (name fold_consts)
- (synopsis "A short synopsis")
- (description "A longer description")
- (depends ocaml)
- (tags
-  ("add topics" "to describe" your project)))
-
-(package
  (name convlir)
  (synopsis "A short synopsis")
  (description "A longer description")
@@ -45,6 +37,7 @@
 (package
  (name ppllvm)
  (synopsis "A BAP plugin for dumping symbol information")
+ (allow_empty)
  (tags (bap bap-plugin))
  (depends
   (bap-std (= :version))

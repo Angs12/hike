@@ -19,8 +19,9 @@ int main() {
   int fact = factorial(4);
   int t = getchar();
   putchar(t);
-  // puts("Hello World");
+  puts("Hello World");
   int *p = malloc(sizeof(int));
-  // puts("Hello World");
-  return inc(fact, 0, 0, 0, 0, 0, 1);
+  puts("Hello World");
+  inc(fact, 0, 0, 0, 0, 0, 1);
+  return 0;
 }

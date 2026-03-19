@@ -12,67 +12,6 @@ module ExpMap = Map.Make (Exp)
 module Libcmap = Map.Make (String)
 module KB = Bap_knowledge.Knowledge
 
-let llvm_ptr_tag =
-  Value.Tag.register ~name:"llvm-ptr"
-    ~uuid:"6d1cdeb3-22c8-11f1-b8fa-f4a80dc1b6bb"
-    (module Core.Unit)
-
-let return_arg_tag =
-  Value.Tag.register ~name:"return-arg"
-    ~uuid:"60b819ea-22cb-11f1-ba62-f4a80dc1b6bb"
-    (module Core.Unit)
-
-module LlvmType = struct
-  let package = "convlir"
-
-  type tag = Category
-  type sort = unit
-  type types = Ptr | Int | Float | Void
-
-  let name = "llvm-types"
-  let desc = "A class representing types in LLVM IR"
-  let index = ()
-  let type_cls : (tag, sort) KB.cls = KB.Class.declare name index ~package ~desc
-
-  let type_domain : types KB.Domain.t =
-    KB.Domain.flat "llvm-types-domain" ~empty:Float
-      ~equal:(fun t1 t2 ->
-        match (t1, t2) with
-        | Int, Int -> true
-        | Ptr, Ptr -> true
-        | Float, Float -> true
-        | Void, Void -> true
-        | _, _ -> false)
-      ~inspect:(fun t ->
-        match t with
-        | Int -> Sexplib.Sexp.Atom "int"
-        | Ptr -> Sexplib.Sexp.Atom "ptr"
-        | Float -> Sexplib.Sexp.Atom "float"
-        | Void -> Sexplib.Sexp.Atom "void")
-
-  let typ : (tag, types) KB.slot =
-    KB.Class.property type_cls "type" type_domain ~package
-end
-
-let () =
-  Toplevel.exec
-    begin
-      let open KB.Syntax in
-      let* typ = KB.Object.create LlvmType.type_cls in
-      let* () = KB.provide LlvmType.typ typ LlvmType.Ptr in
-      let* typ = KB.collect LlvmType.typ typ in
-      (match typ with
-      | Ptr -> fprintf err_formatter "Ptr@."
-      | Int -> fprintf err_formatter "Int@."
-      | Float -> fprintf err_formatter "Float@."
-      | Void -> fprintf err_formatter "Void@.");
-
-      KB.return ()
-    end
-
-type trivial_exp = Var of Var.t | Int of Word.t
-type function_decl = string * Decl_parser.functype
-
 let subs = ref StrMap.empty
 
 let get_section_mem name proj =
@@ -123,7 +62,6 @@ let set_sub sub =
   else
     let free_vars = free_vars sub in
     let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
-    let ret = Term.set_attr ret return_arg_tag () in
     subs :=
       StrMap.add
         (Term.tid sub |> Tid.name)
@@ -201,7 +139,8 @@ let create_var ~is_virtual ~name ~typ ~tid =
 
 let create_reg ~name ~typ ~tid = create_var ~is_virtual:false ~name ~typ ~tid
 let create_virtual ~name ~typ ~tid = create_var ~is_virtual:true ~name ~typ ~tid
-let stack_len = 2048
+let stack_len = 0x2048
+let stack_off = 0x5000
 
 let correct_registers tid regs =
   object
@@ -236,25 +175,7 @@ let ptr_type exp =
 
 let size_type size = Imm (Size.in_bits size)
 
-let pp_trivial_exp_exn exp =
-  let sub =
-    String.map (fun c ->
-        if c = '#' then '_'
-        else if c = '.' then '_'
-        else if c = '%' then '_'
-        else c)
-  in
-  match exp with
-  | Bil.Var v -> (
-      match Var.typ v with
-      | Imm _ | Unk -> sprintf "%%var_%s" (sub (Var.name v))
-      | Mem _ ->
-          if Var.name v = "stack" then "@stack"
-          else sprintf "%%%s" (sub (Var.name v)))
-  | Int i -> Int64.to_string (Word.to_int64_exn i)
-  | _ -> failwith "pp trivial exp : non-trivial exp"
-
-let pp_trivial_exp exp =
+let pp_var v =
   let sub =
     String.map (fun c ->
         if c = '#' then '_'
@@ -263,14 +184,19 @@ let pp_trivial_exp exp =
         else if c = '\\' then '_'
         else c)
   in
+  match Var.typ v with
+  | Imm _ | Unk -> sprintf "%%var_%s" (sub (Var.name v))
+  | Mem _ ->
+      if Var.name v = "stack" then "@stack"
+      else sprintf "%%%s" (sub (Var.name v))
+
+let pp_int i = Int64.to_string (Word.to_int64_exn i)
+
+let pp_trivial_exp_exn exp =
   match exp with
-  | Var v -> (
-      match Var.typ v with
-      | Imm _ | Unk -> sprintf "%%var_%s" (sub (Var.name v))
-      | Mem _ ->
-          if Var.name v = "stack" then "@stack"
-          else sprintf "%%%s" (sub (Var.name v)))
+  | Var v -> pp_var v
   | Int i -> Int64.to_string (Word.to_int64_exn i)
+  | _ -> failwith "pp trivial exp : non-trivial exp"
 
 let binop_str op =
   match op with
@@ -295,112 +221,107 @@ let binop_str op =
   | SLE -> "icmp sle"
 
 let word_type word = Imm (Word.bitwidth word)
-let exp_type exp = match exp with Int i -> word_type i | Var v -> Var.typ v
+let var_type v = Var.typ v
 
-let var_type var =
+let pp_var_type var =
   match Var.typ var with
   | Imm n -> sprintf "i%d" n
-  | _ -> failwith "var_type : non-imm var"
+  | _ -> failwith "pp_var_type : non-imm var"
 
-let exps_type (exp1 : trivial_exp) (exp2 : trivial_exp) =
-  let t1 = exp_type exp1 in
-  let t2 = exp_type exp2 in
+let exps_type var1 var2 =
+  let t1 = var_type var1 in
+  let t2 = var_type var2 in
   Type.max t1 t2
 
 let type_str t =
   match t with Imm n -> sprintf "i%d" n | _ -> failwith "type_str"
 
-let pp_types exp1 exp2 =
-  let t1 = exp_type exp1 in
-  let t2 = exp_type exp2 in
-  type_str @@ Type.max t1 t2
+let pp_types var1 var2 = type_str @@ exps_type var1 var2
 
-let pp_type exp = type_str @@ exp_type exp
+let pp_binop (op, v1, v2) =
+  sprintf "%s %s %s, %s" (binop_str op) (pp_types v1 v2) (pp_var v1) (pp_var v2)
 
-let pp_binop (op, e1, e2) =
-  sprintf "%s %s %s, %s" (binop_str op) (pp_types e1 e2) (pp_trivial_exp e1)
-    (pp_trivial_exp e2)
+let all_ones v =
+  match Var.typ v with
+  | Imm n -> Word.ones n
+  | _ -> failwith "pp all ones: non-imm var"
 
-let all_ones (exp : trivial_exp) =
-  match exp with
-  | Int i -> Word.ones @@ Word.bitwidth i
-  | Var v -> (
-      match Var.typ v with
-      | Imm n -> Word.ones n
-      | _ -> failwith "pp all ones: non-imm var")
-
-let pp_unop ((op, e) : unop * trivial_exp) =
+let pp_unop ((op, v) : unop * var) =
   match op with
-  | NEG -> sprintf "sub %s 0, %s" (pp_type e) (pp_trivial_exp e)
+  | NEG -> sprintf "sub %s 0, %s" (pp_var_type v) (pp_var v)
   | NOT ->
-      sprintf "xor %s %s, %s" (pp_type e)
-        (Int64.to_string (Word.to_int64_exn (all_ones e)))
-        (pp_trivial_exp e)
+      sprintf "xor %s %s, %s" (pp_var_type v)
+        (Int64.to_string (Word.to_int64_exn (all_ones v)))
+        (pp_var v)
 
-let exp_type_size (exp : trivial_exp) =
-  match exp with
-  | Int i -> Word.bitwidth i
-  | Var v -> (
-      match Var.typ v with
-      | Imm n -> n
-      | _ -> failwith "pp exp type: non-imm var")
+let pp_concat ppf (var, v1, v2) =
+  let temp_var1 = pp_var var ^ "_tmp1" in
+  let temp_var2 = pp_var var ^ "_tmp2" in
+  let temp_var3 = pp_var var ^ "_tmp3" in
+  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var1 (pp_var_type v1) (pp_var v1)
+    (pp_var_type var);
+  fprintf ppf "\t%s = shl %s %s, %s\n" temp_var2 (pp_var_type var) temp_var1
+    (pp_var_type v2);
+  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var3 (pp_var_type v2) (pp_var v2)
+    (pp_var_type var);
+  fprintf ppf "\t%s = and %s %s, %s\n" (pp_var var) (pp_var_type var) temp_var2
+    temp_var3
 
-let pp_concat ppf ((var, exp1, exp2) : var * trivial_exp * trivial_exp) =
-  let temp_var1 = pp_trivial_exp (Var var) ^ "_tmp1" in
-  let temp_var2 = pp_trivial_exp (Var var) ^ "_tmp2" in
-  let temp_var3 = pp_trivial_exp (Var var) ^ "_tmp3" in
-  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var1 (pp_type exp1)
-    (pp_trivial_exp exp1) (var_type var);
-  fprintf ppf "\t%s = shl %s %s, %d\n" temp_var2 (var_type var) temp_var1
-    (exp_type_size exp2);
-  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var3 (pp_type exp2)
-    (pp_trivial_exp exp2) (var_type var);
-  fprintf ppf "\t%s = and %s %s, %s\n" (pp_trivial_exp (Var var)) (var_type var)
-    temp_var2 temp_var3
-
-let pp_extract ppf (var, hi, lo, exp) =
-  let temp_var = pp_trivial_exp (Var var) ^ "_tmp" in
-  fprintf ppf "\t%s = lshr %s %s, %d\n" temp_var (pp_type exp)
-    (pp_trivial_exp exp) lo;
+let pp_extract ppf (res, hi, lo, var) =
+  let temp_var = pp_var res ^ "_tmp" in
+  fprintf ppf "\t%s = lshr %s %s, %d\n" temp_var (pp_var_type var) (pp_var var)
+    lo;
   let result_size = hi - lo + 1 in
-  fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_trivial_exp (Var var))
-    (pp_type exp) temp_var result_size
+  fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_var res) (pp_var_type var)
+    temp_var result_size
 
-let pp_load ppf (var, _, addr, size) =
-  let temp_var = pp_trivial_exp (Var var) ^ "_ptr" in
-  fprintf ppf "\t%s = inttoptr %s %s to ptr\n" temp_var (pp_type addr)
-    (pp_trivial_exp addr);
-  fprintf ppf "\t%s = load i%d, ptr %s\n" (pp_trivial_exp (Var var))
-    (Size.in_bits size) temp_var
+let pp_address_map_call ppf res_var var =
+  fprintf ppf "\t%s = call zeroext %s @_address_map_(%s %s)\n" (pp_var res_var)
+    (pp_var_type var) (pp_var_type var) (pp_var var)
 
-let pp_store ppf (mem, addr, data) =
-  let temp_var = Var.create ~is_virtual:true ~fresh:true "" (ptr_type mem) in
-  fprintf ppf "\t%s = inttoptr %s %s to ptr\n"
-    (pp_trivial_exp (Var temp_var))
-    (pp_type addr) (pp_trivial_exp addr);
-  fprintf ppf "\tstore %s %s, ptr %s\n" (pp_type data) (pp_trivial_exp data)
-    (pp_trivial_exp (Var temp_var))
+let pp_inttoptr ppf addr =
+  let ptr_var = pp_var addr ^ "_ptr" in
+  fprintf ppf "\t%s = inttoptr %s %s to ptr\n" ptr_var (pp_var_type addr)
+    (pp_var addr);
+  ptr_var
 
-let pp_cast ppf (var, cast, i, exp) =
-  let var_name = pp_trivial_exp (Var var) in
+let pp_load ppf (var, ptr_typ, addr, size) =
+  let temp_var = Var.create ~is_virtual:true ~fresh:true "" ptr_typ in
+  pp_address_map_call ppf temp_var addr;
+  let ptr_var = pp_inttoptr ppf temp_var in
+  fprintf ppf "\t%s = load i%d, ptr %s\n" (pp_var var) (Size.in_bits size)
+    ptr_var
+
+let pp_store ppf (ptr_typ, addr, data) =
+  let temp_var = Var.create ~is_virtual:true ~fresh:true "" ptr_typ in
+  pp_address_map_call ppf temp_var addr;
+  let ptr_var = pp_inttoptr ppf temp_var in
+  fprintf ppf "\tstore %s %s, ptr %s\n" (pp_var_type data) (pp_var data) ptr_var
+
+let pp_cast ppf (res, cast, i, var) =
   match cast with
   | UNSIGNED ->
-      fprintf ppf "\t%s = zext %s %s to i%d\n" var_name (pp_type exp)
-        (pp_trivial_exp exp) i
+      fprintf ppf "\t%s = zext %s %s to i%d\n" (pp_var res) (pp_var_type var)
+        (pp_var var) i
   | SIGNED ->
-      fprintf ppf "\t%s = sext %s %s to i%d\n" var_name (pp_type exp)
-        (pp_trivial_exp exp) i
+      fprintf ppf "\t%s = sext %s %s to i%d\n" (pp_var res) (pp_var_type var)
+        (pp_var var) i
   | HIGH ->
-      fprintf ppf "\t%s_tmp = lshr %s %s, %d\n" var_name (pp_type exp)
-        (pp_trivial_exp exp)
-        (exp_type_size exp - i);
-      fprintf ppf "\t%s = trunc %s %s_tmp to i%d\n" var_name (pp_type exp)
-        var_name i
+      fprintf ppf "\t%s_tmp = lshr %s %s, %d\n" (pp_var res) (pp_var_type var)
+        (pp_var var)
+        (var_size var - 1);
+      fprintf ppf "\t%s = trunc %s %s_tmp to i%d\n" (pp_var res)
+        (pp_var_type var) (pp_var res) i
   | LOW ->
-      fprintf ppf "\t%s = trunc %s %s to i%d\n" var_name (pp_type exp)
-        (pp_trivial_exp exp) i
+      fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_var res) (pp_var_type var)
+        (pp_var var) i
 
-let rec pp_exp ?res ppf exp : trivial_exp =
+let exp_cast trivial_exp : exp =
+  match trivial_exp with
+  | Var v -> Var v
+  | _ -> failwith "exp_cast: non-trivial exp"
+
+let rec pp_exp ?res ppf exp : var =
   match exp with
   | BinOp (op, e1, e2) ->
       let var1 = pp_exp ppf e1 in
@@ -410,19 +331,32 @@ let rec pp_exp ?res ppf exp : trivial_exp =
           ~default:
             (Var.create ~is_virtual:true ~fresh:true "" (exps_type var1 var2))
       in
-      fprintf ppf "\t%s = %s\n" (pp_trivial_exp (Var res))
-        (pp_binop (op, var1, var2));
-      Var res
+      fprintf ppf "\t%s = %s\n" (pp_var res) (pp_binop (op, var1, var2));
+      res
   | UnOp (op, e) ->
       let var = pp_exp ppf e in
       let res =
         Option.value res
-          ~default:(Var.create ~is_virtual:true ~fresh:true "" (exp_type var))
+          ~default:(Var.create ~is_virtual:true ~fresh:true "" (var_type var))
       in
-      fprintf ppf "\t%s = %s\n" (pp_trivial_exp (Var res)) (pp_unop (op, var));
-      Var res
-  | Var v -> Var v
-  | Int i -> Int i
+      fprintf ppf "\t%s = %s\n" (pp_var res) (pp_unop (op, var));
+      res
+  | Var v -> (
+      match res with
+      | None -> v
+      | Some res ->
+          fprintf ppf "\t%s = add %s %s, 0\n" (pp_var res) (pp_var_type res)
+            (pp_var v);
+          res)
+  | Int i ->
+      let res =
+        Option.value res
+          ~default:
+            (Var.create ~is_virtual:true ~fresh:true "" (Imm (Word.bitwidth i)))
+      in
+      fprintf ppf "\t%s = add %s %s, 0\n" (pp_var res) (pp_var_type res)
+        (pp_int i);
+      res
   | Cast (cast, i, exp) ->
       let exp = pp_exp ppf exp in
       let res =
@@ -430,16 +364,16 @@ let rec pp_exp ?res ppf exp : trivial_exp =
           ~default:(Var.create ~is_virtual:true ~fresh:true "" (Imm i))
       in
       pp_cast ppf (res, cast, i, exp);
-      Var res
+      res
   | Load (mem, addr, _, size) ->
-      let mem = pp_exp ppf mem in
+      pp_exp ppf mem |> ignore;
       let addr = pp_exp ppf addr in
       let res =
         Option.value res
           ~default:(Var.create ~is_virtual:true ~fresh:true "" (size_type size))
       in
-      pp_load ppf (res, mem, addr, size);
-      Var res
+      pp_load ppf (res, ptr_type mem, addr, size);
+      res
   | Concat (exp1, exp2) ->
       let exp1 = pp_exp ppf exp1 in
       let exp2 = pp_exp ppf exp2 in
@@ -447,10 +381,10 @@ let rec pp_exp ?res ppf exp : trivial_exp =
         Option.value res
           ~default:
             (Var.create ~is_virtual:true ~fresh:true ""
-               (Imm (exp_type_size exp1 + exp_type_size exp2)))
+               (Imm (var_size exp1 + var_size exp2)))
       in
       pp_concat ppf (res, exp1, exp2);
-      Var res
+      res
   | Extract (hi, lo, exp) ->
       let exp = pp_exp ppf exp in
       let res =
@@ -459,32 +393,31 @@ let rec pp_exp ?res ppf exp : trivial_exp =
             (Var.create ~is_virtual:true ~fresh:true "" (Imm (hi - lo + 1)))
       in
       pp_extract ppf (res, hi, lo, exp);
-      Var res
+      res
   | Store (mem, addr, data, _, _) ->
-      let mem = pp_exp ppf mem in
+      pp_exp ppf mem |> ignore;
       let addr = pp_exp ppf addr in
       let data = pp_exp ppf data in
-      pp_store ppf (mem, addr, data);
-      mem
+      pp_store ppf (ptr_type mem, addr, data);
+      Var.create "DUMMY" (Imm 1)
+  (* | Let (var, exp, body) -> *)
+  (*     let unique_var = *)
+  (*       Var.create ~is_virtual:true ~fresh:true "" (exp_type (Var var)) *)
+  (*     in *)
+  (*     pp_exp ~res:unique_var ppf exp |> ignore; *)
+  (*     let body = Exp.substitute (Var var) (Var unique_var) body in *)
+  (*     let body_res = pp_exp ppf body in *)
+  (*     let res = *)
+  (*       Option.value res *)
+  (*         ~default: *)
+  (*           (Var.create ~is_virtual:true ~fresh:true "" (exp_type body_res)) *)
+  (*     in *)
+  (*     pp_exp ~res ppf (exp_cast body_res) |> ignore; *)
+  (*     Var res *)
   | Unknown _ -> failwith "pp_exp: Unknown expression"
-  | _ -> failwith "pp_exp: Ite and Let expressions"
+  | _ -> failwith "pp_exp: Ite expressions"
 
-let pp_exp ppf res (exp : exp) =
-  match exp with
-  | Var v -> (
-      match Var.typ v with
-      | Imm _ | Unk ->
-          fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
-            (pp_type (Var res)) (pp_trivial_exp (Var v))
-      | Mem _ ->
-          fprintf ppf "\t%s = ptrtoint ptr %s to %s\n"
-            (pp_trivial_exp (Var res)) (pp_trivial_exp (Var v))
-            (var_type !ret_reg))
-  | Int i ->
-      fprintf ppf "\t%s = add %s %s, 0\n" (pp_trivial_exp (Var res))
-        (pp_type (Var res))
-        (Word.to_int64_exn i |> Int64.to_string)
-  | _ -> pp_exp ~res ppf exp |> ignore
+let pp_exp ppf res (exp : exp) = pp_exp ~res ppf exp |> ignore
 
 let label_tid label =
   match label with
@@ -523,8 +456,7 @@ let pp_branches ppf branches =
       create_virtual ~name:"cond" ~tid:(Term.tid br1) ~typ:(Imm 1)
     in
     pp_exp ppf cond_var cond;
-    fprintf ppf "\tbr i1 %s, label %%%s, label %%%s\n"
-      (pp_trivial_exp (Var cond_var))
+    fprintf ppf "\tbr i1 %s, label %%%s, label %%%s\n" (pp_var cond_var)
       (pp_label jmp_target) (pp_label else_target))
   else failwith "pp_branches: more than 2 branches"
 
@@ -606,8 +538,8 @@ let ready_call_args ppf sub_tid tid =
               let exp = Exp.map (correct_registers tid !regs) (Arg.rhs arg) in
               pp_exp ppf tmp_var exp;
               fprintf ppf "\t%s = call zeroext %s @_address_map_(%s %s)\n"
-                (pp_trivial_exp (Var var)) (var_type var) (var_type tmp_var)
-                (pp_trivial_exp (Var tmp_var)))
+                (pp_var var) (pp_var_type var) (pp_var_type tmp_var)
+                (pp_var tmp_var))
       | None -> ())
 
 let pp_args sub_tid tid =
@@ -624,8 +556,7 @@ let pp_args sub_tid tid =
         | Some i -> (
             match i with
             | In | Both ->
-                sprintf "%s %s %s," prev (var_type var)
-                  (pp_trivial_exp (Var var))
+                sprintf "%s %s %s," prev (pp_var_type var) (pp_var var)
             | Out -> prev)
         | None -> prev)
   in
@@ -634,9 +565,8 @@ let pp_args sub_tid tid =
 let pp_func_call blk_tid ret_var fallthrough target ppf =
   ready_call_args ppf target blk_tid;
   if not @@ is_void target then
-    fprintf ppf "\t%s = call zeroext %s %s(%s)\n"
-      (pp_trivial_exp (Var ret_var))
-      (var_type ret_var) (pp_func target) (pp_args target blk_tid)
+    fprintf ppf "\t%s = call zeroext %s %s(%s)\n" (pp_var ret_var)
+      (pp_var_type ret_var) (pp_func target) (pp_args target blk_tid)
   else
     fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
       (pp_args target blk_tid);
@@ -644,8 +574,7 @@ let pp_func_call blk_tid ret_var fallthrough target ppf =
 
 let pp_call blk_tid ret ppf call =
   match (Call.return call, Call.target call) with
-  | None, _ ->
-      fprintf ppf "\tret %s %s\n" (pp_type (Var ret)) (pp_trivial_exp (Var ret))
+  | None, _ -> fprintf ppf "\tret %s %s\n" (pp_var_type ret) (pp_var ret)
   | Some (Direct ret_label), Direct target_label ->
       pp_func_call blk_tid ret ret_label target_label ppf
   | _, _ -> failwith "pp_call: non-trivial return type"
@@ -654,25 +583,16 @@ let pp_phi ppf phi =
   let var = Phi.lhs phi in
   if is_mem var || Base.List.mem !regs var ~equal:Var.same then ()
   else
-    let var_name = pp_trivial_exp (Var var) in
     let vals = Phi.values phi in
     let values =
       Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) ->
           sprintf "%s [%s,%%%s]," prev (pp_trivial_exp_exn exp) (pp_label tid))
     in
     let values = String.sub values 0 (String.length values - 1) in
-    fprintf ppf "\t%s = phi %s %s\n" var_name (var_type var) values
+    fprintf ppf "\t%s = phi %s %s\n" (pp_var var) (pp_var_type var) values
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
-
-let has_var var exp =
-  (object
-     inherit [bool] Exp.visitor
-     method! enter_var v flag = if Var.same v var || flag then true else false
-  end)
-    #visit_exp
-    exp false
 
 let base_exp_sub base_var sub =
   object
@@ -726,7 +646,7 @@ let update_stack sub =
           if is_mem (Def.lhs def) then ()
           else
             let e = Def.rhs def in
-            let e = Exp.map (base_exp_sub !mem !stack) e in
+            let e = Exp.substitute (Var !mem) (Var !stack) e in
             Blk.Builder.add_def builder (Def.with_rhs def e));
       Blk.Builder.result builder)
 
@@ -783,25 +703,15 @@ let update_main sub =
                 create_reg ~name:(Var.name reg) ~tid:(Term.tid blk)
                   ~typ:(Var.typ reg)
               in
-              if reg = !sp then (
-                let data =
+              let data =
+                if reg = !sp then
                   Bil.Int
-                    (Word.of_int ~width:(var_size reg_var) (stack_len - 1))
-                in
-                let ptr =
-                  create_reg
-                    ~name:(Var.name reg ^ "_ptr")
-                    ~tid:(Term.tid blk) ~typ:(Var.typ reg)
-                in
-                let def = Def.create ptr (Var !stack) in
-                Blk.Builder.add_def builder def;
-                let exp = Bil.binop Bil.PLUS (Bil.Var ptr) data in
-                let def = Def.create reg_var exp in
-                Blk.Builder.add_def builder def)
-              else
-                let data = Bil.Int (Word.of_int ~width:(var_size reg_var) 0) in
-                let def = Def.create reg_var data in
-                Blk.Builder.add_def builder def);
+                    (Word.of_int ~width:(var_size reg_var)
+                       (stack_len - 1 + 0x5000))
+                else Bil.Int (Word.of_int ~width:(var_size reg_var) 0)
+              in
+              let def = Def.create reg_var data in
+              Blk.Builder.add_def builder def);
           Term.enum def_t blk
           |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
           Blk.Builder.result builder)
@@ -909,7 +819,7 @@ let transfer_regs sub =
               Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
-let pp_ret ppf () = fprintf ppf "%s" (pp_type (Var !ret_reg))
+let pp_ret ppf () = fprintf ppf "%s" (pp_var_type !ret_reg)
 
 let pp_sub ppf sub =
   let blks = Term.enum blk_t sub in
@@ -975,22 +885,32 @@ let pp_address_map ppf target data_mem rodata_mem =
     \        %%is_data1 = icmp uge i%d %%ptr, u%a\n\
     \        %%is_data2 = icmp ule i%d %%ptr, u%a\n\
     \        %%is_data = and i1 %%is_data1, %%is_data2\n\n\
+    \        %%is_stack1 = icmp uge i%d %%ptr, %d\n\
+    \        %%is_stack2 = icmp ule i%d %%ptr, %d\n\
+    \        %%is_stack = and i1 %%is_stack1, %%is_stack2\n\n\
     \        br i1 %%is_rodata, label %%isrodata , label %%fallthrough1\n\n\
     \        \n\
     \        fallthrough1:\n\
     \        br i1 %%is_data, label %%isdata, label %%fallthrough2\n\n\
     \        fallthrough2:\n\
-    \        ret i64 %%ptr\n\n\
+    \        br i1 %%is_stack, label %%isstack, label %%fallthrough3\n\n\
+    \        fallthrough3:\n\
+    \        ret i%d %%ptr\n\n\
     \        isrodata:\n\
     \        %%rodata_ptr = ptrtoint ptr @rodata to i%d\n\
     \        %%rodata_offset = sub i%d %%ptr, u%a\n\
     \        %%rodata_addr = add i%d %%rodata_ptr, %%rodata_offset\n\
-    \        ret i64 %%rodata_addr\n\n\
+    \        ret i%d %%rodata_addr\n\n\
     \        isdata:\n\
     \        %%data_ptr = ptrtoint ptr @data to i%d\n\
     \        %%data_offset = sub i%d %%ptr, u%a\n\
     \        %%data_addr = add i%d %%data_ptr, %%data_offset\n\
-    \        ret i64 %%data_addr\n\
+    \        ret i%d %%data_addr\n\
+    \        isstack:\n\n\
+    \        %%stack_ptr = ptrtoint ptr @stack to i%d\n\
+    \        %%stack_offset = sub i%d %%ptr, %d\n\
+    \        %%stack_addr = add i%d %%stack_ptr, %%stack_offset\n\
+    \        ret i%d %%stack_addr\n\
     \    }\n\n\
     \    "
     (Theory.Target.bits target)
@@ -1006,13 +926,25 @@ let pp_address_map ppf target data_mem rodata_mem =
     (Theory.Target.bits target)
     Word.pp (Memory.max_addr data_mem)
     (Theory.Target.bits target)
+    stack_off
+    (Theory.Target.bits target)
+    (stack_off + stack_len - 1)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
     (Theory.Target.bits target)
     Word.pp
     (Memory.min_addr rodata_mem)
     (Theory.Target.bits target)
     (Theory.Target.bits target)
     (Theory.Target.bits target)
+    (Theory.Target.bits target)
     Word.pp (Memory.min_addr data_mem)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    (Theory.Target.bits target)
+    stack_off
+    (Theory.Target.bits target)
     (Theory.Target.bits target)
 
 let pp ppf proj =
