@@ -55,9 +55,16 @@ let free_vars sub =
 
 let set_sub sub =
   if Term.tid sub |> Tid.name = "@main" then
+    let rdi = Var.create "mainRDI" (Imm 64) in
+    let rsi = Var.create "mainRSI" (Imm 64) in
     subs :=
       StrMap.add "@main"
-        (Seq.singleton (Arg.create ~intent:Out !ret_reg (Var !ret_reg)))
+        (Seq.of_list
+           [
+             Arg.create ~intent:In rdi (Var rdi);
+             Arg.create ~intent:In rsi (Var rsi);
+             Arg.create ~intent:Out !ret_reg (Var !ret_reg);
+           ])
         !subs
   else
     let free_vars = free_vars sub in
@@ -697,21 +704,28 @@ let update_main sub =
     in
     Term.map blk_t sub ~f:(fun blk ->
         if Term.tid blk = entry_tid then (
-          let builder = Blk.Builder.init ~copy_phis:false ~copy_jmps:true blk in
-          Base.List.iter !regs ~f:(fun reg ->
-              let reg_var =
-                create_reg ~name:(Var.name reg) ~tid:(Term.tid blk)
-                  ~typ:(Var.typ reg)
-              in
-              let data =
-                if reg = !sp then
-                  Bil.Int
-                    (Word.of_int ~width:(var_size reg_var)
-                       (stack_len - 1 + 0x5000))
-                else Bil.Int (Word.of_int ~width:(var_size reg_var) 0)
-              in
-              let def = Def.create reg_var data in
-              Blk.Builder.add_def builder def);
+          let builder = Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk in
+          let arg_var_fp =
+            create_reg
+              ~name:(Sub.name sub ^ Var.name !fp)
+              ~tid:(Term.tid sub) ~typ:(Var.typ !fp)
+          in
+          let arg_var_sp =
+            create_reg
+              ~name:(Sub.name sub ^ Var.name !sp)
+              ~tid:(Term.tid sub) ~typ:(Var.typ !sp)
+          in
+          let sp_def =
+            Def.create arg_var_sp
+              (Bil.Int
+                 (Word.of_int ~width:(var_size !sp) (stack_len - 1 + stack_off)))
+          in
+          let fp_def =
+            Def.create arg_var_fp
+              (Bil.Int (Word.of_int ~width:(var_size !fp) 0))
+          in
+          Blk.Builder.add_def builder sp_def;
+          Blk.Builder.add_def builder fp_def;
           Term.enum def_t blk
           |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
           Blk.Builder.result builder)
@@ -762,44 +776,47 @@ let transfer_regs sub =
       in
       let cfg = Sub.to_graph sub in
       let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
-      if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
-        Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
-            let var = create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) in
-            let phi_rhs =
-              Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
-                  if tid = Graphs.Tid.start then
-                    let reg_var =
-                      Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
-                    in
-                    (Term.tid blk, Bil.Var reg_var) :: prev
-                  else
-                    let reg_var =
-                      create_reg
-                        ~name:("reg_" ^ Var.name key)
-                        ~tid ~typ:(Var.typ key)
-                    in
-                    (tid, Bil.Var reg_var) :: prev)
-            in
-            let phi = Phi.of_list var phi_rhs in
-            Blk.Builder.add_phi builder phi)
-      else if not (Sub.name sub = "main") then
-        let free_vars = free_vars sub in
-        Base.List.iter !regs ~f:(fun var ->
-            let reg = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
-            let def =
-              if not @@ Base.List.mem free_vars var ~equal:Var.same then
-                let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
-                Def.create reg data
-              else
-                let arg_var =
-                  create_reg
-                    ~name:(Sub.name sub ^ Var.name var)
-                    ~tid:(Term.tid sub) ~typ:(Var.typ var)
-                in
-                Def.create reg (Var arg_var)
-            in
-            Blk.Builder.add_def builder def)
-      else ();
+      (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
+         Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
+             let var =
+               create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key)
+             in
+             let phi_rhs =
+               Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
+                   if tid = Graphs.Tid.start then
+                     let reg_var =
+                       Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
+                     in
+                     (Term.tid blk, Bil.Var reg_var) :: prev
+                   else
+                     let reg_var =
+                       create_reg
+                         ~name:("reg_" ^ Var.name key)
+                         ~tid ~typ:(Var.typ key)
+                     in
+                     (tid, Bil.Var reg_var) :: prev)
+             in
+             let phi = Phi.of_list var phi_rhs in
+             Blk.Builder.add_phi builder phi)
+       else
+         let free_vars = free_vars sub in
+         Base.List.iter !regs ~f:(fun var ->
+             let reg =
+               create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
+             in
+             let def =
+               if not @@ Base.List.mem free_vars var ~equal:Var.same then
+                 let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
+                 Def.create reg data
+               else
+                 let arg_var =
+                   create_reg
+                     ~name:(Sub.name sub ^ Var.name var)
+                     ~tid:(Term.tid sub) ~typ:(Var.typ var)
+                 in
+                 Def.create reg (Var arg_var)
+             in
+             Blk.Builder.add_def builder def));
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
@@ -872,6 +889,7 @@ let setup proj libc =
   set_regs target;
   set_stack target;
   set_sp target;
+  set_fp target;
   set_mem target;
   set_libc target libc
 

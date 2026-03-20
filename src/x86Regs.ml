@@ -31,12 +31,19 @@ let set_mem target =
 
 let stack = ref @@ Var.create "DUMMY" (Mem (`r32, Size.of_int_exn 8))
 let sp = ref @@ Var.create "DUMMY" (Imm 1)
+let fp = ref @@ Var.create "DUMMY" (Imm 1)
 let regs = ref []
 
 let set_sp target =
   sp :=
     Base.Option.value_exn ~message:"set_sp: stack pointer not found"
       (Theory.Target.reg target stack_pointer)
+    |> Var.reify
+
+let set_fp target =
+  fp :=
+    Base.Option.value_exn ~message:"set_fp: frame pointer not found"
+      (Theory.Target.reg target frame_pointer)
     |> Var.reify
 
 let set_regs target =

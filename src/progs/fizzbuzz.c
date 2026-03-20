@@ -20,10 +20,10 @@ void fizzBuzz(int n) {
   }
 }
 
-int main() {
+int main(int argc, char **argv) {
   puts("FizzBuzz\n");
   puts("Fizz\n");
   puts("Buzz\n");
-  fizzBuzz(n);
+  fizzBuzz(argc);
   return 0;
 }
