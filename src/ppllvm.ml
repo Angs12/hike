@@ -41,47 +41,44 @@ let print_sections p =
   Project.memory p |> Memmap.to_sequence
   |> Seq.iter ~f:(fun (mem, x) ->
       Base.Option.iter (Value.get Image.section x) ~f:(fun name ->
-          fprintf err_formatter "Section: %s@.%a@." name Memory.pp mem))
+          eprintf "Section: %s@.%a@." name Memory.pp mem))
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 let var_size var =
-  match Var.typ var with Imm n -> n | _ -> failwith "pp exp type: non-imm var"
+  match Var.typ var with Imm n -> n | _ -> failwith "var size: non-imm var"
 
 let free_vars sub =
   Sub.free_vars sub
   |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
   |> Var.Set.to_list
 
+let sanitize_name =
+  Base.String.filter ~f:(fun c ->
+      if c = '#' then false
+      else if c = '.' then false
+      else if c = '%' then false
+      else if c = '\\' then false
+      else if c = '\\' then false
+      else if c = '@' then false
+      else true)
+
 let set_sub sub =
-  if Term.tid sub |> Tid.name = "@main" then
-    let rdi = Var.create "mainRDI" (Imm 64) in
-    let rsi = Var.create "mainRSI" (Imm 64) in
-    subs :=
-      StrMap.add "@main"
-        (Seq.of_list
-           [
-             Arg.create ~intent:In rdi (Var rdi);
-             Arg.create ~intent:In rsi (Var rsi);
-             Arg.create ~intent:Out !ret_reg (Var !ret_reg);
-           ])
-        !subs
-  else
-    let free_vars = free_vars sub in
-    let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
-    subs :=
-      StrMap.add
-        (Term.tid sub |> Tid.name)
-        (Seq.of_list
-           (ret
-           :: Base.List.map
-                ~f:(fun reg ->
-                  let arg_var =
-                    Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
-                  in
-                  Arg.create ~intent:In arg_var (Var reg))
-                free_vars))
-        !subs
+  let free_vars = free_vars sub in
+  let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
+  subs :=
+    StrMap.add
+      (Term.tid sub |> Tid.name)
+      (Seq.of_list
+         (ret
+         :: Base.List.map
+              ~f:(fun reg ->
+                let arg_var =
+                  Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
+                in
+                Arg.create ~intent:In arg_var (Var reg))
+              free_vars))
+      !subs
 
 module type Abi = sig
   val return : Decl_parser.functype -> var list
@@ -97,7 +94,9 @@ let arg_type (exp : exp) =
   | Load (_, _, _, size) -> Imm (Size.in_bits size)
   | _ -> failwith "pp exp type: non-imm var"
 
-let set_libc target libc =
+let ll_funcs = ref @@ StrMap.empty
+
+let set_libc llvm_ctx llvm_module target libc =
   let abi =
     if Theory.Target.matches target "x86_64-gnu-elf" then
       (module Gnu64_abi : Abi)
@@ -106,6 +105,9 @@ let set_libc target libc =
   let module Abi = (val abi : Abi) in
   Libcmap.iter
     (fun name (data : Decl_parser.funcdef) ->
+      let fn_typ = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
+      let fn = Llvm.declare_function (sanitize_name name) fn_typ llvm_module in
+      ll_funcs := StrMap.add name (fn, fn_typ) !ll_funcs;
       let ret = Abi.return data.return in
       let args = Abi.args data.args data.return in
       let func_decl =
@@ -122,27 +124,14 @@ let set_libc target libc =
       subs := StrMap.add ("@" ^ name) func_decl !subs)
     libc
 
-let pp_label tid =
-  let sub =
-    String.map (fun c ->
-        if c = '#' then '_'
-        else if c = '.' then '_'
-        else if c = '%' then '_'
-        else if c = '@' then '_'
-        else c)
-  in
-  "blk_" ^ sub (Tid.name tid)
+let bb_reg_name reg tid =
+  sanitize_name @@ "reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
+
+let bb_arg_name arg tid =
+  sanitize_name @@ "arg" ^ Var.name arg ^ "_" ^ Tid.name tid
 
 let create_var ~is_virtual ~name ~typ ~tid =
-  let sub =
-    String.map (fun c ->
-        if c = '#' then '_'
-        else if c = '.' then '_'
-        else if c = '%' then '_'
-        else if c = '@' then '_'
-        else c)
-  in
-  Var.create ~is_virtual (sub name ^ "_" ^ sub (Tid.name tid)) typ
+  Var.create ~is_virtual (sanitize_name @@ name ^ "_" ^ Tid.name tid) typ
 
 let create_reg ~name ~typ ~tid = create_var ~is_virtual:false ~name ~typ ~tid
 let create_virtual ~name ~typ ~tid = create_var ~is_virtual:true ~name ~typ ~tid
@@ -161,329 +150,224 @@ let correct_registers tid regs =
       else Var var
   end
 
-let pp_mem_type mem =
-  match mem with
-  | Var v -> (
-      match Var.typ v with
-      | Mem _ ->
-          if Var.name v = "stack" then "ptr addrspace(0)"
-          else "ptr addrspace(1)"
-      | _ -> failwith "pp mem type: non-mem var")
-  | _ -> failwith "pp mem type: non-var expression"
-
-let ptr_type exp =
-  match exp with
-  | Var v -> (
-      match Var.typ v with
-      | Mem (`r32, _) -> Imm 32
-      | Mem (`r64, _) -> Imm 64
-      | _ -> failwith "pp ptr type: non-mem var")
-  | _ -> failwith "pp ptr type: non-var expression"
-
-let size_type size = Imm (Size.in_bits size)
-
-let pp_var v =
-  let sub =
-    String.map (fun c ->
-        if c = '#' then '_'
-        else if c = '.' then '_'
-        else if c = '%' then '_'
-        else if c = '\\' then '_'
-        else c)
-  in
-  match Var.typ v with
-  | Imm _ | Unk -> sprintf "%%var_%s" (sub (Var.name v))
-  | Mem _ ->
-      if Var.name v = "stack" then "@stack"
-      else sprintf "%%%s" (sub (Var.name v))
-
-let pp_int i = Int64.to_string (Word.to_int64_exn i)
-
-let pp_trivial_exp_exn exp =
-  match exp with
-  | Var v -> pp_var v
-  | Int i -> Int64.to_string (Word.to_int64_exn i)
-  | _ -> failwith "pp trivial exp : non-trivial exp"
-
-let binop_str op =
-  match op with
-  | PLUS -> "add"
-  | MINUS -> "sub"
-  | TIMES -> "mul"
-  | DIVIDE -> "udiv"
-  | SDIVIDE -> "sdiv"
-  | MOD -> "urem"
-  | SMOD -> "srem"
-  | AND -> "and"
-  | OR -> "or"
-  | XOR -> "xor"
-  | LSHIFT -> "shl"
-  | RSHIFT -> "lshr"
-  | ARSHIFT -> "ashr"
-  | EQ -> "icmp eq"
-  | NEQ -> "icmp ne"
-  | LT -> "icmp ult"
-  | SLT -> "icmp slt"
-  | LE -> "icmp ule"
-  | SLE -> "icmp sle"
-
-let word_type word = Imm (Word.bitwidth word)
-let var_type v = Var.typ v
-
-let pp_var_type var =
+let var_lltype llvm_ctx var =
   match Var.typ var with
-  | Imm n -> sprintf "i%d" n
-  | _ -> failwith "pp_var_type : non-imm var"
+  | Imm n -> Llvm.integer_type llvm_ctx n
+  | _ -> failwith "var_lltype : non-imm var"
 
-let exps_type var1 var2 =
-  let t1 = var_type var1 in
-  let t2 = var_type var2 in
-  Type.max t1 t2
-
-let type_str t =
-  match t with Imm n -> sprintf "i%d" n | _ -> failwith "type_str"
-
-let pp_types var1 var2 = type_str @@ exps_type var1 var2
-
-let pp_binop (op, v1, v2) =
-  sprintf "%s %s %s, %s" (binop_str op) (pp_types v1 v2) (pp_var v1) (pp_var v2)
-
-let all_ones v =
-  match Var.typ v with
-  | Imm n -> Word.ones n
-  | _ -> failwith "pp all ones: non-imm var"
-
-let pp_unop ((op, v) : unop * var) =
+let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
   match op with
-  | NEG -> sprintf "sub %s 0, %s" (pp_var_type v) (pp_var v)
-  | NOT ->
-      sprintf "xor %s %s, %s" (pp_var_type v)
-        (Int64.to_string (Word.to_int64_exn (all_ones v)))
-        (pp_var v)
+  | PLUS -> Llvm.build_add llvm_val1 llvm_val2 res_name llvm_builder
+  | MINUS -> Llvm.build_sub llvm_val1 llvm_val1 res_name llvm_builder
+  | TIMES -> Llvm.build_mul llvm_val1 llvm_val2 res_name llvm_builder
+  | DIVIDE -> Llvm.build_udiv llvm_val1 llvm_val2 res_name llvm_builder
+  | SDIVIDE -> Llvm.build_sdiv llvm_val1 llvm_val2 res_name llvm_builder
+  | MOD -> Llvm.build_urem llvm_val1 llvm_val2 res_name llvm_builder
+  | SMOD -> Llvm.build_srem llvm_val1 llvm_val2 res_name llvm_builder
+  | AND -> Llvm.build_and llvm_val1 llvm_val2 res_name llvm_builder
+  | OR -> Llvm.build_or llvm_val1 llvm_val2 res_name llvm_builder
+  | XOR -> Llvm.build_xor llvm_val1 llvm_val2 res_name llvm_builder
+  | LSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 res_name llvm_builder
+  | RSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 res_name llvm_builder
+  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 res_name llvm_builder
+  | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 res_name llvm_builder
+  | NEQ ->
+      Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 res_name llvm_builder
+  | LT ->
+      Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 res_name llvm_builder
+  | SLT ->
+      Llvm.build_icmp Llvm.Icmp.Slt llvm_val1 llvm_val2 res_name llvm_builder
+  | LE ->
+      Llvm.build_icmp Llvm.Icmp.Ule llvm_val1 llvm_val2 res_name llvm_builder
+  | SLE ->
+      Llvm.build_icmp Llvm.Icmp.Sle llvm_val1 llvm_val2 res_name llvm_builder
 
-let pp_concat ppf (var, v1, v2) =
-  let temp_var1 = pp_var var ^ "_tmp1" in
-  let temp_var2 = pp_var var ^ "_tmp2" in
-  let temp_var3 = pp_var var ^ "_tmp3" in
-  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var1 (pp_var_type v1) (pp_var v1)
-    (pp_var_type var);
-  fprintf ppf "\t%s = shl %s %s, %s\n" temp_var2 (pp_var_type var) temp_var1
-    (pp_var_type v2);
-  fprintf ppf "\t%s = zext %s %s to %s\n" temp_var3 (pp_var_type v2) (pp_var v2)
-    (pp_var_type var);
-  fprintf ppf "\t%s = and %s %s, %s\n" (pp_var var) (pp_var_type var) temp_var2
-    temp_var3
+let create_unop llvm_builder res_name (op, llvm_val) =
+  match op with
+  | NEG -> Llvm.build_neg llvm_val res_name llvm_builder
+  | NOT -> Llvm.build_not llvm_val res_name llvm_builder
 
-let pp_extract ppf (res, hi, lo, var) =
-  let temp_var = pp_var res ^ "_tmp" in
-  fprintf ppf "\t%s = lshr %s %s, %d\n" temp_var (pp_var_type var) (pp_var var)
-    lo;
+let create_concat llvm_builder (res_name, llvm_var1, llvm_var2) =
+  let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.size_of in
+  let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.size_of in
+  let result_typ =
+    Llvm.const_add llvm_var1_size llvm_var2_size |> Llvm.type_of
+  in
+  let zext_var1 = Llvm.build_zext llvm_var1 result_typ "" llvm_builder in
+  let shl_var1 = Llvm.build_shl zext_var1 llvm_var2_size "" llvm_builder in
+  let zext_var2 = Llvm.build_zext llvm_var2 result_typ "" llvm_builder in
+  Llvm.build_or shl_var1 zext_var2 res_name llvm_builder
+
+let create_extract llvm_ctx llvm_builder (res_name, hi, lo, llvm_var) =
+  let temp_var =
+    Llvm.build_lshr llvm_var
+      (Llvm.const_int (Llvm.type_of llvm_var) lo)
+      "" llvm_builder
+  in
   let result_size = hi - lo + 1 in
-  fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_var res) (pp_var_type var)
-    temp_var result_size
+  Llvm.build_trunc temp_var
+    (Llvm.integer_type llvm_ctx result_size)
+    res_name llvm_builder
 
-let pp_address_map_call ppf res_var var =
-  fprintf ppf "\t%s = call zeroext %s @_address_map_(%s %s)\n" (pp_var res_var)
-    (pp_var_type var) (pp_var_type var) (pp_var var)
+let create_address_map_call llvm_ctx llvm_module llvm_builder llvm_var =
+  let fn_typ =
+    Llvm.function_type
+      (Llvm.integer_type llvm_ctx !ptrsize)
+      [| Llvm.integer_type llvm_ctx !ptrsize |]
+  in
+  let fn =
+    Llvm.lookup_function "_address_map_" llvm_module
+    |> Base.Option.value_exn ~message:"_address_map_ not found"
+  in
+  Llvm.build_call fn_typ fn [| llvm_var |] "" llvm_builder
 
-let pp_inttoptr ppf addr =
-  let ptr_var = pp_var addr ^ "_ptr" in
-  fprintf ppf "\t%s = inttoptr %s %s to ptr\n" ptr_var (pp_var_type addr)
-    (pp_var addr);
-  ptr_var
+let create_inttoptr llvm_ctx llvm_builder llvm_val =
+  Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
-let pp_load ppf (var, ptr_typ, addr, size) =
-  let temp_var = Var.create ~is_virtual:true ~fresh:true "" ptr_typ in
-  pp_address_map_call ppf temp_var addr;
-  let ptr_var = pp_inttoptr ppf temp_var in
-  fprintf ppf "\t%s = load i%d, ptr %s\n" (pp_var var) (Size.in_bits size)
-    ptr_var
+let create_load llvm_ctx llvm_module llvm_builder (var_name, addr, size) =
+  let addr = create_address_map_call llvm_ctx llvm_module llvm_builder addr in
+  let addr_ptr = create_inttoptr llvm_ctx llvm_builder addr in
+  Llvm.build_load
+    (Llvm.integer_type llvm_ctx size)
+    addr_ptr var_name llvm_builder
 
-let pp_store ppf (ptr_typ, addr, data) =
-  let temp_var = Var.create ~is_virtual:true ~fresh:true "" ptr_typ in
-  pp_address_map_call ppf temp_var addr;
-  let ptr_var = pp_inttoptr ppf temp_var in
-  fprintf ppf "\tstore %s %s, ptr %s\n" (pp_var_type data) (pp_var data) ptr_var
+let create_store llvm_ctx llvm_module llvm_builder (llvm_var, addr) =
+  let addr = create_address_map_call llvm_ctx llvm_module llvm_builder addr in
+  let addr_ptr = create_inttoptr llvm_ctx llvm_builder addr in
+  Llvm.build_store llvm_var addr_ptr llvm_builder
 
-let pp_cast ppf (res, cast, i, var) =
+let create_cast llvm_ctx llvm_builder res_name (cast, i, llvm_val) =
   match cast with
   | UNSIGNED ->
-      fprintf ppf "\t%s = zext %s %s to i%d\n" (pp_var res) (pp_var_type var)
-        (pp_var var) i
+      Llvm.build_zext llvm_val
+        (Llvm.integer_type llvm_ctx i)
+        res_name llvm_builder
   | SIGNED ->
-      fprintf ppf "\t%s = sext %s %s to i%d\n" (pp_var res) (pp_var_type var)
-        (pp_var var) i
+      Llvm.build_sext llvm_val
+        (Llvm.integer_type llvm_ctx i)
+        res_name llvm_builder
   | HIGH ->
-      fprintf ppf "\t%s_tmp = lshr %s %s, %d\n" (pp_var res) (pp_var_type var)
-        (pp_var var)
-        (var_size var - 1);
-      fprintf ppf "\t%s = trunc %s %s_tmp to i%d\n" (pp_var res)
-        (pp_var_type var) (pp_var res) i
+      (Llvm.build_lshr llvm_val
+         (Llvm.const_int (Llvm.type_of llvm_val)
+            (Llvm.integer_bitwidth (Llvm.type_of llvm_val) - i))
+         "" llvm_builder
+      |> Llvm.build_trunc)
+        (Llvm.integer_type llvm_ctx i)
+        res_name llvm_builder
   | LOW ->
-      fprintf ppf "\t%s = trunc %s %s to i%d\n" (pp_var res) (pp_var_type var)
-        (pp_var var) i
+      Llvm.build_trunc llvm_val
+        (Llvm.integer_type llvm_ctx i)
+        res_name llvm_builder
 
-let exp_cast trivial_exp : exp =
-  match trivial_exp with
-  | Var v -> Var v
-  | _ -> failwith "exp_cast: non-trivial exp"
+let sub_llvars = ref @@ StrMap.empty
+let llvar_from_name name = StrMap.find name !sub_llvars
 
-let rec pp_exp ?res ppf exp : var =
+let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
+  let res_name = Base.Option.value res ~default:"" in
   match exp with
   | BinOp (op, e1, e2) ->
-      let var1 = pp_exp ppf e1 in
-      let var2 = pp_exp ppf e2 in
-      let res =
-        Option.value res
-          ~default:
-            (Var.create ~is_virtual:true ~fresh:true "" (exps_type var1 var2))
-      in
-      fprintf ppf "\t%s = %s\n" (pp_var res) (pp_binop (op, var1, var2));
-      res
+      let var1 = create_exp llvm_ctx llvm_module llvm_builder e1 in
+      let var2 = create_exp llvm_ctx llvm_module llvm_builder e2 in
+      create_binop llvm_builder res_name (op, var1, var2)
   | UnOp (op, e) ->
-      let var = pp_exp ppf e in
-      let res =
-        Option.value res
-          ~default:(Var.create ~is_virtual:true ~fresh:true "" (var_type var))
-      in
-      fprintf ppf "\t%s = %s\n" (pp_var res) (pp_unop (op, var));
-      res
+      let var = create_exp llvm_ctx llvm_module llvm_builder e in
+      create_unop llvm_builder res_name (op, var)
   | Var v -> (
+      let llvm_var = StrMap.find (Var.name v) !sub_llvars in
       match res with
-      | None -> v
-      | Some res ->
-          fprintf ppf "\t%s = add %s %s, 0\n" (pp_var res) (pp_var_type res)
-            (pp_var v);
-          res)
+      | Some res_name ->
+          Llvm.build_add llvm_var
+            (Llvm.const_int (Llvm.type_of llvm_var) 0)
+            res_name llvm_builder
+      | None -> llvm_var)
   | Int i ->
-      let res =
-        Option.value res
-          ~default:
-            (Var.create ~is_virtual:true ~fresh:true "" (Imm (Word.bitwidth i)))
-      in
-      fprintf ppf "\t%s = add %s %s, 0\n" (pp_var res) (pp_var_type res)
-        (pp_int i);
-      res
+      Llvm.const_of_int64
+        (Llvm.integer_type llvm_ctx (Word.bitwidth i))
+        (Word.to_int64_exn i) true
   | Cast (cast, i, exp) ->
-      let exp = pp_exp ppf exp in
-      let res =
-        Option.value res
-          ~default:(Var.create ~is_virtual:true ~fresh:true "" (Imm i))
-      in
-      pp_cast ppf (res, cast, i, exp);
-      res
-  | Load (mem, addr, _, size) ->
-      pp_exp ppf mem |> ignore;
-      let addr = pp_exp ppf addr in
-      let res =
-        Option.value res
-          ~default:(Var.create ~is_virtual:true ~fresh:true "" (size_type size))
-      in
-      pp_load ppf (res, ptr_type mem, addr, size);
-      res
+      let var = create_exp llvm_ctx llvm_module llvm_builder exp in
+      create_cast llvm_ctx llvm_builder res_name (cast, i, var)
   | Concat (exp1, exp2) ->
-      let exp1 = pp_exp ppf exp1 in
-      let exp2 = pp_exp ppf exp2 in
-      let res =
-        Option.value res
-          ~default:
-            (Var.create ~is_virtual:true ~fresh:true ""
-               (Imm (var_size exp1 + var_size exp2)))
-      in
-      pp_concat ppf (res, exp1, exp2);
-      res
+      let llvm_var1 = create_exp llvm_ctx llvm_module llvm_builder exp1 in
+      let llvm_var2 = create_exp llvm_ctx llvm_module llvm_builder exp2 in
+      create_concat llvm_builder (res_name, llvm_var1, llvm_var2)
   | Extract (hi, lo, exp) ->
-      let exp = pp_exp ppf exp in
-      let res =
-        Option.value res
-          ~default:
-            (Var.create ~is_virtual:true ~fresh:true "" (Imm (hi - lo + 1)))
+      let llvm_var = create_exp llvm_ctx llvm_module llvm_builder exp in
+      create_extract llvm_ctx llvm_builder (res_name, hi, lo, llvm_var)
+  | Store (_, addr, data, _, _) ->
+      let addr = create_exp llvm_ctx llvm_module llvm_builder addr in
+      let data = create_exp llvm_ctx llvm_module llvm_builder data in
+      create_store llvm_ctx llvm_module llvm_builder (data, addr)
+  | Load (_, addr, _, size) ->
+      let addr = create_exp llvm_ctx llvm_module llvm_builder addr in
+      create_load llvm_ctx llvm_module llvm_builder
+        (res_name, addr, Size.in_bits size)
+  | Let (var, exp, body) ->
+      let unique_var =
+        Var.create ~is_virtual:true ~fresh:true "" (Var.typ var)
       in
-      pp_extract ppf (res, hi, lo, exp);
-      res
-  | Store (mem, addr, data, _, _) ->
-      pp_exp ppf mem |> ignore;
-      let addr = pp_exp ppf addr in
-      let data = pp_exp ppf data in
-      pp_store ppf (ptr_type mem, addr, data);
-      Var.create "DUMMY" (Imm 1)
-  (* | Let (var, exp, body) -> *)
-  (*     let unique_var = *)
-  (*       Var.create ~is_virtual:true ~fresh:true "" (exp_type (Var var)) *)
-  (*     in *)
-  (*     pp_exp ~res:unique_var ppf exp |> ignore; *)
-  (*     let body = Exp.substitute (Var var) (Var unique_var) body in *)
-  (*     let body_res = pp_exp ppf body in *)
-  (*     let res = *)
-  (*       Option.value res *)
-  (*         ~default: *)
-  (*           (Var.create ~is_virtual:true ~fresh:true "" (exp_type body_res)) *)
-  (*     in *)
-  (*     pp_exp ~res ppf (exp_cast body_res) |> ignore; *)
-  (*     Var res *)
-  | Unknown _ -> failwith "pp_exp: Unknown expression"
+      let v =
+        create_exp ~res:(Var.name unique_var) llvm_ctx llvm_module llvm_builder
+          exp
+      in
+      sub_llvars := StrMap.add (Var.name unique_var) v !sub_llvars;
+      let body = Exp.substitute (Var var) (Var unique_var) body in
+      create_exp ~res:res_name llvm_ctx llvm_module llvm_builder body
+  | Unknown (str, _) -> failwith @@ sprintf "Unknown: %s\n" str
   | _ -> failwith "pp_exp: Ite expressions"
 
-let pp_exp ppf res (exp : exp) = pp_exp ~res ppf exp |> ignore
+let goto_label_exn jmp =
+  match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
+
+let call_exn jmp =
+  match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
 
 let label_tid label =
   match label with
   | Direct tid -> tid
   | Indirect _ -> failwith "label_tid: indirect label"
 
-let pp_cond ppf cond tid =
-  let cond_var = create_virtual ~name:"cond" ~tid ~typ:(Imm 1) in
-  pp_exp ppf cond_var cond
+let llbb_from_tid fn tid =
+  let bbs = Llvm.basic_blocks fn in
+  Base.Array.find_exn bbs ~f:(fun bb ->
+      Llvm.value_of_block bb |> Llvm.value_name = Tid.name tid)
 
-let pp_func tid =
-  let sub =
-    String.map (fun c ->
-        if c = '#' then '_'
-        else if c = '.' then '_'
-        else if c = '%' then '_'
-        else c)
-  in
-  sprintf "%s" (sub (Tid.name tid))
-
-let goto_label_exn jmp =
-  match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
-
-let pp_branches ppf branches =
-  if Seq.length branches = 1 then
+let create_branches llvm_ctx llvm_module llvm_builder fn branches =
+  if Seq.length branches = 1 then (* unconditional branch *)
     let br = Seq.hd_exn branches in
-    let jmp_target = Jmp.kind br |> goto_label_exn |> label_tid in
-    fprintf ppf "\tbr label %%%s\n" (pp_label jmp_target)
-  else if Seq.length branches = 2 then (
+    let jmp__target = Jmp.kind br |> goto_label_exn |> label_tid in
+    let bb = llbb_from_tid fn jmp__target in
+    Llvm.build_br bb llvm_builder |> ignore
+  else if Seq.length branches = 2 then
+    (* conditional branch *)
     let br1 = Seq.hd_exn branches in
     let else_jmp = Seq.to_list branches |> Base.List.last_exn in
-    let jmp_target = Jmp.kind br1 |> goto_label_exn |> label_tid in
-    let else_target = Jmp.kind else_jmp |> goto_label_exn |> label_tid in
+    let true_target = Jmp.kind br1 |> goto_label_exn |> label_tid in
+    let false_target = Jmp.kind else_jmp |> goto_label_exn |> label_tid in
+    let true_bb = llbb_from_tid fn true_target in
+    let false_bb = llbb_from_tid fn false_target in
     let cond = Jmp.cond br1 in
-    let cond_var =
-      create_virtual ~name:"cond" ~tid:(Term.tid br1) ~typ:(Imm 1)
-    in
-    pp_exp ppf cond_var cond;
-    fprintf ppf "\tbr i1 %s, label %%%s, label %%%s\n" (pp_var cond_var)
-      (pp_label jmp_target) (pp_label else_target))
+    let cond_res = create_exp llvm_ctx llvm_module llvm_builder cond in
+    Llvm.build_cond_br cond_res true_bb false_bb llvm_builder |> ignore
   else failwith "pp_branches: more than 2 branches"
 
-let pp_return tid return_reg ppf _ =
-  match return_reg with
-  | None -> ()
-  | Some return_reg ->
-      let res =
-        create_reg
-          ~name:("res_" ^ Var.name !ret_reg)
-          ~tid
-          ~typ:(Var.typ (Arg.lhs return_reg))
-      in
-      let new_ret =
-        create_reg
-          ~name:("reg_" ^ Var.name !ret_reg)
-          ~tid ~typ:(Var.typ !ret_reg)
-      in
-      pp_exp ppf res
-        (Exp.substitute (Var !ret_reg) (Var new_ret) (Arg.rhs return_reg))
+(* let pp_return tid return_reg ppf _ = *)
+(*   match return_reg with *)
+(*   | None -> () *)
+(*   | Some return_reg -> *)
+(*       let res = *)
+(*         create_reg *)
+(*           ~name:("res_" ^ Var.name !ret_reg) *)
+(*           ~tid *)
+(*           ~typ:(Var.typ (Arg.lhs return_reg)) *)
+(*       in *)
+(*       let new_ret = *)
+(*         create_reg *)
+(*           ~name:("reg_" ^ Var.name !ret_reg) *)
+(*           ~tid ~typ:(Var.typ !ret_reg) *)
+(*       in *)
+(*       pp_exp ppf res *)
+(*         (Exp.substitute (Var !ret_reg) (Var new_ret) (Arg.rhs return_reg)) *)
 
 let is_void tid =
   let args =
@@ -512,91 +396,99 @@ let cf_type control_flow =
       | None -> CallRet)
   | Int _ -> Int
 
-let pp_def ppf def =
+let create_def llvm_ctx llvm_module llvm_builder def =
   let var = Def.lhs def in
-  match Def.rhs def with Unknown _ -> () | _ -> pp_exp ppf var (Def.rhs def)
+  let res =
+    create_exp ~res:(Var.name var) llvm_ctx llvm_module llvm_builder
+      (Def.rhs def)
+  in
+  sub_llvars := StrMap.add (Var.name var) res !sub_llvars
 
-let ready_call_args ppf sub_tid tid =
+let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
   let args =
     Base.Option.value_exn
-      ~message:(sprintf "ready_call_args: sub %s not found" (Tid.name sub_tid))
-      (StrMap.find_opt (Tid.name sub_tid) !subs)
+      ~message:(sprintf "ready_call_args: sub %s not found" (Tid.name call_tid))
+      (StrMap.find_opt (Tid.name call_tid) !subs)
   in
-  Seq.iter args ~f:(fun arg ->
+  Seq.fold ~init:[] args ~f:(fun arg_list arg ->
       match Arg.intent arg with
       | Some i -> (
           match i with
-          | Out -> ()
+          | Out -> arg_list
           | In ->
               let var = Arg.lhs arg in
-              let var =
-                create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
+              let exp =
+                Exp.map (correct_registers blk_tid !regs) (Arg.rhs arg)
               in
-              let exp = Exp.map (correct_registers tid !regs) (Arg.rhs arg) in
-              pp_exp ppf var exp
+              let arg = create_exp llvm_ctx llvm_module llvm_builder exp in
+              Llvm.set_value_name (bb_arg_name var blk_tid) arg;
+              arg :: arg_list
           | Both ->
               let var = Arg.lhs arg in
-              let tmp_var =
-                create_reg ~name:(Var.name var ^ "_tmp") ~tid ~typ:(Var.typ var)
+              let exp =
+                Exp.map (correct_registers blk_tid !regs) (Arg.rhs arg)
               in
-              let var =
-                create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
+              let res = create_exp llvm_ctx llvm_module llvm_builder exp in
+              let arg =
+                create_address_map_call llvm_ctx llvm_module llvm_builder res
               in
-              let exp = Exp.map (correct_registers tid !regs) (Arg.rhs arg) in
-              pp_exp ppf tmp_var exp;
-              fprintf ppf "\t%s = call zeroext %s @_address_map_(%s %s)\n"
-                (pp_var var) (pp_var_type var) (pp_var_type tmp_var)
-                (pp_var tmp_var))
-      | None -> ())
+              Llvm.set_value_name (bb_arg_name var blk_tid) arg;
+              arg :: arg_list)
+      | None -> arg_list)
 
-let pp_args sub_tid tid =
+let create_arg_types llvm_ctx sub_tid =
   let args =
     Base.Option.value_exn
       ~message:(sprintf "pp_args: sub %s not found" (Tid.name sub_tid))
       (StrMap.find_opt (Tid.name sub_tid) !subs)
   in
+  Seq.to_array args
+  |> Base.Array.filter_map ~f:(fun arg ->
+      let var = Arg.lhs arg in
+      match Arg.intent arg with
+      | Some i -> (
+          match i with
+          | In | Both -> Some (var_lltype llvm_ctx var)
+          | Out -> None)
+      | None -> None)
+
+let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
+    fallthrough target =
   let args =
-    Seq.fold args ~init:"" ~f:(fun prev arg ->
-        let var = Arg.lhs arg in
-        let var = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
-        match Arg.intent arg with
-        | Some i -> (
-            match i with
-            | In | Both ->
-                sprintf "%s %s %s," prev (pp_var_type var) (pp_var var)
-            | Out -> prev)
-        | None -> prev)
+    create_call_args llvm_ctx llvm_module llvm_builder target blk_tid
   in
-  if args = "" then "" else String.sub args 0 (String.length args - 1)
+  let func_name = sanitize_name @@ Tid.name target in
+  let fn, fn_typ = StrMap.find func_name !ll_funcs in
+  let ret_var =
+    Llvm.build_call fn_typ fn (Array.of_list args)
+      (bb_reg_name !ret_reg blk_tid)
+      llvm_builder
+  in
+  sub_llvars := StrMap.add (bb_reg_name !ret_reg blk_tid) ret_var !sub_llvars;
+  let bb = llbb_from_tid current_fn fallthrough in
+  Llvm.build_br bb llvm_builder |> ignore
 
-let pp_func_call blk_tid ret_var fallthrough target ppf =
-  ready_call_args ppf target blk_tid;
-  if not @@ is_void target then
-    fprintf ppf "\t%s = call zeroext %s %s(%s)\n" (pp_var ret_var)
-      (pp_var_type ret_var) (pp_func target) (pp_args target blk_tid)
-  else
-    fprintf ppf "\tcall %s %s(%s)\n" "void" (pp_func target)
-      (pp_args target blk_tid);
-  fprintf ppf "\tbr label %%%s\n" (pp_label fallthrough)
-
-let pp_call blk_tid ret ppf call =
+let create_call llvm_ctx llvm_module llvm_builder fn blk_tid call =
   match (Call.return call, Call.target call) with
-  | None, _ -> fprintf ppf "\tret %s %s\n" (pp_var_type ret) (pp_var ret)
+  | None, _ ->
+      let ret_var = llvar_from_name (bb_reg_name !ret_reg blk_tid) in
+      Llvm.build_ret ret_var llvm_builder |> ignore
   | Some (Direct ret_label), Direct target_label ->
-      pp_func_call blk_tid ret ret_label target_label ppf
+      create_func_call llvm_ctx llvm_module llvm_builder fn blk_tid ret_label
+        target_label
   | _, _ -> failwith "pp_call: non-trivial return type"
 
-let pp_phi ppf phi =
-  let var = Phi.lhs phi in
-  if is_mem var || Base.List.mem !regs var ~equal:Var.same then ()
-  else
-    let vals = Phi.values phi in
-    let values =
-      Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) ->
-          sprintf "%s [%s,%%%s]," prev (pp_trivial_exp_exn exp) (pp_label tid))
-    in
-    let values = String.sub values 0 (String.length values - 1) in
-    fprintf ppf "\t%s = phi %s %s\n" (pp_var var) (pp_var_type var) values
+(* let pp_phi ppf phi = *)
+(*   let var = Phi.lhs phi in *)
+(*   if is_mem var || Base.List.mem !regs var ~equal:Var.same then () *)
+(*   else *)
+(*     let vals = Phi.values phi in *)
+(*     let values = *)
+(*       Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) -> *)
+(*           sprintf "%s [%s,%%%s]," prev (pp_trivial_exp_exn exp) (pp_label tid)) *)
+(*     in *)
+(*     let values = String.sub values 0 (String.length values - 1) in *)
+(*     fprintf ppf "\t%s = phi %s %s\n" (pp_var var) (pp_var_type var) values *)
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
@@ -607,38 +499,12 @@ let base_exp_sub base_var sub =
     method! map_var var = if Var.same var base_var then Var sub else Var var
   end
 
-let pp_elts blk ppf elts =
-  let control_flow = Term.enum jmp_t blk in
-  let tid = Term.tid blk in
-  Seq.iter elts ~f:(function
-    | `Phi phi -> fprintf ppf "%a" pp_phi phi
-    | `Def def -> fprintf ppf "%a" pp_def def
-    | _ -> ());
-  match cf_type control_flow with
-  | Br -> pp_branches ppf control_flow
-  | Ret -> failwith "pp_elts: RET not implemented"
-  | Int -> failwith "pp_elts: INT not implemented"
-  | Call | CallVoid | CallRet ->
-      let call = Seq.hd_exn control_flow |> call_exn in
-      let res =
-        create_reg
-          ~name:("reg_" ^ Var.name !ret_reg)
-          ~tid ~typ:(Var.typ !ret_reg)
-      in
-      pp_call tid res ppf call
-
 let update_args sub =
   let builder =
     Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
   in
   Seq.iter (Term.enum blk_t sub) ~f:(fun blk -> Sub.Builder.add_blk builder blk);
   Sub.Builder.result builder
-
-let pp_body ppf =
-  Seq.iter ~f:(fun blk ->
-      fprintf ppf "\n%s:\n%a\n"
-        (pp_label (Term.tid blk))
-        (pp_elts blk) (Blk.elts blk))
 
 let entry_blk_tid sub =
   let blks = Term.enum blk_t sub in
@@ -774,49 +640,56 @@ let transfer_regs sub =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
           ~copy_jmps:true blk
       in
-      let cfg = Sub.to_graph sub in
-      let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
-      (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
-         Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
-             let var =
-               create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key)
-             in
-             let phi_rhs =
-               Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
-                   if tid = Graphs.Tid.start then
-                     let reg_var =
-                       Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
-                     in
-                     (Term.tid blk, Bil.Var reg_var) :: prev
-                   else
-                     let reg_var =
-                       create_reg
-                         ~name:("reg_" ^ Var.name key)
-                         ~tid ~typ:(Var.typ key)
-                     in
-                     (tid, Bil.Var reg_var) :: prev)
-             in
-             let phi = Phi.of_list var phi_rhs in
-             Blk.Builder.add_phi builder phi)
-       else
-         let free_vars = free_vars sub in
-         Base.List.iter !regs ~f:(fun var ->
-             let reg =
-               create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var)
-             in
-             let def =
-               if not @@ Base.List.mem free_vars var ~equal:Var.same then
-                 let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
-                 Def.create reg data
-               else
-                 let arg_var =
-                   create_reg
-                     ~name:(Sub.name sub ^ Var.name var)
-                     ~tid:(Term.tid sub) ~typ:(Var.typ var)
-                 in
-                 Def.create reg (Var arg_var)
-             in
-             Blk.Builder.add_def builder def));
+      (* let cfg = Sub.to_graph sub in *)
+      (* let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in *)
+      Base.List.iter !regs ~f:(fun var ->
+          let reg = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
+          let def =
+            let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
+            Def.create reg data
+          in
+          Blk.Builder.add_def builder def);
+      (* (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then *)
+      (*    Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ -> *)
+      (*        let var = *)
+      (*          create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) *)
+      (*        in *)
+      (*        let phi_rhs = *)
+      (*          Seq.fold blk_incoming ~init:[] ~f:(fun prev tid -> *)
+      (*              if tid = Graphs.Tid.start then *)
+      (*                let reg_var = *)
+      (*                  Var.create (Sub.name sub ^ Var.name key) (Var.typ key) *)
+      (*                in *)
+      (*                (Term.tid blk, Bil.Var reg_var) :: prev *)
+      (*              else *)
+      (*                let reg_var = *)
+      (*                  create_reg *)
+      (*                    ~name:("reg_" ^ Var.name key) *)
+      (*                    ~tid ~typ:(Var.typ key) *)
+      (*                in *)
+      (*                (tid, Bil.Var reg_var) :: prev) *)
+      (*        in *)
+      (*        let phi = Phi.of_list var phi_rhs in *)
+      (*        Blk.Builder.add_phi builder phi) *)
+      (*  else *)
+      (*    let free_vars = free_vars sub in *)
+      (*    Base.List.iter !regs ~f:(fun var -> *)
+      (*        let reg = *)
+      (*          create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) *)
+      (*        in *)
+      (*        let def = *)
+      (*          if not @@ Base.List.mem free_vars var ~equal:Var.same then *)
+      (*            let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in *)
+      (*            Def.create reg data *)
+      (*          else *)
+      (*            let arg_var = *)
+      (*              create_reg *)
+      (*                ~name:(Sub.name sub ^ Var.name var) *)
+      (*                ~tid:(Term.tid sub) ~typ:(Var.typ var) *)
+      (*            in *)
+      (*            Def.create reg (Var arg_var) *)
+      (*        in *)
+      (*        Blk.Builder.add_def builder def)); *)
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
@@ -836,38 +709,68 @@ let transfer_regs sub =
               Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
-let pp_ret ppf () = fprintf ppf "%s" (pp_var_type !ret_reg)
+let create_ret llvm_ctx = Llvm.integer_type llvm_ctx (var_size !ret_reg)
 
-let pp_sub ppf sub =
-  let blks = Term.enum blk_t sub in
+let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
+  (* create the basic blocks *)
+  Seq.iter blks ~f:(fun blk ->
+      Llvm.append_block llvm_ctx (Term.name blk) fn |> ignore);
+  (* populate them with instructions *)
+  Seq.iter blks ~f:(fun blk ->
+      let bb = llbb_from_tid fn (Term.tid blk) in
+      Llvm.position_at_end bb llvm_builder;
+      Blk.elts blk
+      |> Seq.iter ~f:(fun elt ->
+          match elt with
+          | `Def def -> create_def llvm_ctx llvm_module llvm_builder def
+          | `Phi _ -> ()
+          | `Jmp _ -> ());
+      let control_flow = Term.enum jmp_t blk in
+      match cf_type control_flow with
+      | Br -> create_branches llvm_ctx llvm_module llvm_builder fn control_flow
+      | Ret -> failwith "jmp: RET not implemented"
+      | Int -> failwith "jmp: INT not implemented"
+      | Call | CallVoid | CallRet ->
+          let call = Seq.hd_exn control_flow |> call_exn in
+          create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call)
+(* let res = *)
+(*   create_reg *)
+(*     ~name:("reg_" ^ Var.name !ret_reg) *)
+(*     ~tid ~typ:(Var.typ !ret_reg) *)
+(* in *)
+(* pp_call blk ppf call res) *)
+
+let create_fun llvm_ctx llvm_module sub =
   let tid = Term.tid sub in
-  fprintf ppf "@[<2>define %a %s(%s) {@\n%a@]@\n}" pp_ret ()
-    (pp_func @@ Term.tid sub)
-    (pp_args tid tid) pp_body blks
+  let ret_typ = create_ret llvm_ctx in
+  let args_typ = create_arg_types llvm_ctx tid in
+  let fn_typ = Llvm.function_type ret_typ args_typ in
+  let fn = Llvm.define_function (Sub.name sub) fn_typ llvm_module in
+  ll_funcs := StrMap.add (Sub.name sub) (fn, fn_typ) !ll_funcs
+
+let create_sub llvm_ctx llvm_module sub =
+  let blks = Term.enum blk_t sub in
+  let fn =
+    Llvm.lookup_function (Sub.name sub) llvm_module
+    |> Base.Option.value_exn ~message:"create sub : function not found"
+  in
+  let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
+  (* reset sub_llvars *)
+  sub_llvars := StrMap.empty;
+  create_basicblocks llvm_ctx llvm_module llvm_builder blks fn
 
 let is_libc libc sub =
   Libcmap.mem (Sub.name sub) libc
   || Base.String.is_substring ~substring:":external" (Sub.name sub)
 
-let arr2llvm arr =
-  let data =
-    Base.Array.fold ~init:"" ~f:(fun acc v -> acc ^ sprintf "i8 %d," v) arr
-  in
-  (* remove last comma *)
-  let data =
-    if data = "" then "" else String.sub data 0 (String.length data - 1)
-  in
-  data
+let create_llvm_i8array llvm_ctx arr =
+  Base.Array.map arr ~f:(fun v -> Llvm.const_int (Llvm.i8_type llvm_ctx) v)
+  |> Llvm.const_array
+       (Llvm.array_type (Llvm.i8_type llvm_ctx) (Array.length arr))
 
-let pp_global ~is_const ppf mem name =
-  let str = arr2llvm mem in
-  match is_const with
-  | true ->
-      fprintf ppf "@%s = addrspace(0) constant [%d x i8] [ %s ]\n" name
-        (Array.length mem) str
-  | false ->
-      fprintf ppf "@%s = addrspace(0) global [%d x i8] [ %s ]\n" name
-        (Array.length mem) str
+let create_global ~is_const llvm_ctx llvm_module mem name =
+  Llvm.define_global name (create_llvm_i8array llvm_ctx mem) llvm_module
+  |> Llvm.set_global_constant is_const
 
 let get_bil_pass name =
   Base.List.find_exn ~f:(fun pass -> Bil.Pass.name pass = name) (Bil.passes ())
@@ -880,10 +783,11 @@ let run_pass proj name =
   let pass = get_pass name in
   Project.Pass.run_exn pass proj
 
-let pp_prog ppf prog =
-  Seq.iter ~f:(fprintf ppf "@[%a@]@\n" pp_sub) (Term.enum sub_t prog)
+let create_prog llvm_ctx llvm_module prog =
+  Seq.iter ~f:(create_fun llvm_ctx llvm_module) (Term.enum sub_t prog);
+  Seq.iter ~f:(create_sub llvm_ctx llvm_module) (Term.enum sub_t prog)
 
-let setup proj libc =
+let setup llvm_ctx llvm_module proj libc =
   let target = Project.target proj in
   set_ret_reg target;
   set_regs target;
@@ -891,89 +795,105 @@ let setup proj libc =
   set_sp target;
   set_fp target;
   set_mem target;
-  set_libc target libc
+  set_ptrsize target;
+  set_libc llvm_ctx llvm_module target libc
 
-let pp_address_map ppf target data_mem rodata_mem =
-  fprintf ppf
-    "\n\
-    \    define i%d @_address_map_(i%d %%ptr) {\n\
-    \        %%is_rodata1 = icmp uge i%d %%ptr, u%a\n\
-    \        %%is_rodata2 = icmp ule i%d %%ptr, u%a\n\
-    \        %%is_rodata = and i1 %%is_rodata1, %%is_rodata2\n\n\
-    \        %%is_data1 = icmp uge i%d %%ptr, u%a\n\
-    \        %%is_data2 = icmp ule i%d %%ptr, u%a\n\
-    \        %%is_data = and i1 %%is_data1, %%is_data2\n\n\
-    \        %%is_stack1 = icmp uge i%d %%ptr, %d\n\
-    \        %%is_stack2 = icmp ule i%d %%ptr, %d\n\
-    \        %%is_stack = and i1 %%is_stack1, %%is_stack2\n\n\
-    \        br i1 %%is_rodata, label %%isrodata , label %%fallthrough1\n\n\
-    \        \n\
-    \        fallthrough1:\n\
-    \        br i1 %%is_data, label %%isdata, label %%fallthrough2\n\n\
-    \        fallthrough2:\n\
-    \        br i1 %%is_stack, label %%isstack, label %%fallthrough3\n\n\
-    \        fallthrough3:\n\
-    \        ret i%d %%ptr\n\n\
-    \        isrodata:\n\
-    \        %%rodata_ptr = ptrtoint ptr @rodata to i%d\n\
-    \        %%rodata_offset = sub i%d %%ptr, u%a\n\
-    \        %%rodata_addr = add i%d %%rodata_ptr, %%rodata_offset\n\
-    \        ret i%d %%rodata_addr\n\n\
-    \        isdata:\n\
-    \        %%data_ptr = ptrtoint ptr @data to i%d\n\
-    \        %%data_offset = sub i%d %%ptr, u%a\n\
-    \        %%data_addr = add i%d %%data_ptr, %%data_offset\n\
-    \        ret i%d %%data_addr\n\
-    \        isstack:\n\n\
-    \        %%stack_ptr = ptrtoint ptr @stack to i%d\n\
-    \        %%stack_offset = sub i%d %%ptr, %d\n\
-    \        %%stack_addr = add i%d %%stack_ptr, %%stack_offset\n\
-    \        ret i%d %%stack_addr\n\
-    \    }\n\n\
-    \    "
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    Word.pp
-    (Memory.min_addr rodata_mem)
-    (Theory.Target.bits target)
-    Word.pp
-    (Memory.max_addr rodata_mem)
-    (Theory.Target.bits target)
-    Word.pp (Memory.min_addr data_mem)
-    (Theory.Target.bits target)
-    Word.pp (Memory.max_addr data_mem)
-    (Theory.Target.bits target)
-    stack_off
-    (Theory.Target.bits target)
-    (stack_off + stack_len - 1)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    Word.pp
-    (Memory.min_addr rodata_mem)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    Word.pp (Memory.min_addr data_mem)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
-    stack_off
-    (Theory.Target.bits target)
-    (Theory.Target.bits target)
+let create_address_map llvm_ctx llvm_module target data_mem rodata_mem =
+  let ptr_size = Theory.Target.bits target in
+  let rodata_min_addr = Memory.min_addr rodata_mem |> Word.to_int64_exn in
+  let rodata_max_addr = Memory.max_addr rodata_mem |> Word.to_int64_exn in
+  let data_min_addr = Memory.min_addr data_mem |> Word.to_int64_exn in
+  let data_max_addr = Memory.max_addr data_mem |> Word.to_int64_exn in
+  let stack_min_addr = stack_off in
+  let stack_max_addr = stack_off + stack_len - 1 in
+  let fn_typ =
+    Llvm.function_type
+      (Llvm.integer_type llvm_ctx ptr_size)
+      [| Llvm.pointer_type llvm_ctx |]
+  in
+  let addr_map_fun = Llvm.define_function "_address_map_" fn_typ llvm_module in
+  let entry_block = Llvm.append_block llvm_ctx "entry" addr_map_fun in
+  let llvm_builder = Llvm.builder_at_end llvm_ctx entry_block in
+  let ptr = Llvm.param addr_map_fun 0 in
+  let is_rodata1 =
+    Llvm.build_icmp Llvm.Icmp.Uge ptr
+      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) rodata_min_addr false)
+      "" llvm_builder
+  in
+  let is_rodata2 =
+    Llvm.build_icmp Llvm.Icmp.Ule ptr
+      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) rodata_max_addr false)
+      "" llvm_builder
+  in
+  let is_rodata = Llvm.build_and is_rodata1 is_rodata2 "" llvm_builder in
+  let is_data1 =
+    Llvm.build_icmp Llvm.Icmp.Uge ptr
+      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) data_min_addr false)
+      "" llvm_builder
+  in
+  let is_data2 =
+    Llvm.build_icmp Llvm.Icmp.Ule ptr
+      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) data_max_addr false)
+      "" llvm_builder
+  in
+  let is_data = Llvm.build_and is_data1 is_data2 "" llvm_builder in
+  let is_stack1 =
+    Llvm.build_icmp Llvm.Icmp.Uge ptr
+      (Llvm.const_int (Llvm.i64_type llvm_ctx) stack_min_addr)
+      "" llvm_builder
+  in
+  let is_stack2 =
+    Llvm.build_icmp Llvm.Icmp.Ule ptr
+      (Llvm.const_int (Llvm.i64_type llvm_ctx) stack_max_addr)
+      "" llvm_builder
+  in
+  let is_stack = Llvm.build_and is_stack1 is_stack2 "" llvm_builder in
+  let fallthrough1 = Llvm.append_block llvm_ctx "fallthrough1" addr_map_fun in
+  let isrodata = Llvm.append_block llvm_ctx "isrodata" addr_map_fun in
+  let fallthrough2 = Llvm.append_block llvm_ctx "fallthrough2" addr_map_fun in
+  let fallthrough3 = Llvm.append_block llvm_ctx "fallthrough3" addr_map_fun in
+  let isdata = Llvm.append_block llvm_ctx "isdata" addr_map_fun in
+  let isstack = Llvm.append_block llvm_ctx "isstack" addr_map_fun in
+  Llvm.build_cond_br is_rodata isrodata fallthrough1 llvm_builder |> ignore;
+  let llvm_builder = Llvm.builder_at_end llvm_ctx fallthrough1 in
+  Llvm.build_cond_br is_data isdata fallthrough2 llvm_builder |> ignore;
+  let llvm_builder = Llvm.builder_at_end llvm_ctx fallthrough2 in
+  Llvm.build_cond_br is_stack isstack fallthrough3 llvm_builder |> ignore;
+  let llvm_builder = Llvm.builder_at_end llvm_ctx fallthrough3 in
+  Llvm.build_ret ptr llvm_builder |> ignore;
+  let llvm_builder = Llvm.builder_at_end llvm_ctx isrodata in
+  let rodata_ptr =
+    Llvm.build_ptrtoint ptr (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  in
+  let rodata_offset = Llvm.build_sub ptr rodata_ptr "" llvm_builder in
+  let rodata_addr = Llvm.build_add rodata_ptr rodata_offset "" llvm_builder in
+  Llvm.build_ret rodata_addr llvm_builder |> ignore;
+  let llvm_builder = Llvm.builder_at_end llvm_ctx isdata in
+  let data_ptr =
+    Llvm.build_ptrtoint ptr (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  in
+  let data_offset = Llvm.build_sub ptr data_ptr "" llvm_builder in
+  let data_addr = Llvm.build_add data_ptr data_offset "" llvm_builder in
+  Llvm.build_ret data_addr llvm_builder |> ignore;
+  let llvm_builder = Llvm.builder_at_end llvm_ctx isstack in
+  let stack_ptr =
+    Llvm.build_ptrtoint ptr (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  in
+  let stack_offset = Llvm.build_sub ptr stack_ptr "" llvm_builder in
+  let stack_addr = Llvm.build_add stack_ptr stack_offset "" llvm_builder in
+  Llvm.build_ret stack_addr llvm_builder |> ignore
 
-let pp ppf proj =
+let pp proj =
   let proj = run_pass proj "trivial-condition-form" in
+  let proj = run_pass proj "optimization" in
   (* print_sections proj; *)
   Project.passes ()
   |> Base.List.iter ~f:(fun pass ->
-      fprintf err_formatter "Project pass :: %s \n" (Project.Pass.name pass));
+      eprintf "Project pass :: %s \n" (Project.Pass.name pass));
   let rodata = get_section ".rodata" proj in
   let data = get_section ".data" proj in
   let stack = Base.Array.init stack_len ~f:(fun _ -> 0) in
+  Term.enum sub_t (Project.program proj) |> Seq.iter ~f:(fun sub -> set_sub sub);
   let prog = Project.program proj in
   let main =
     Base.Option.value_exn ~message:"Main function not found"
@@ -981,45 +901,51 @@ let pp ppf proj =
   in
   let reachable_funcs = Reachable_funcs.reachable_funcs prog main in
   let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
-  setup proj libc;
+  let llvm_ctx = Llvm.create_context () in
+  let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
+  setup llvm_ctx llvm_module proj libc;
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->
             if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then
               None
-            else (
-              set_sub sub;
-              (* Sub.pp err_formatter sub; *)
+            else
               Some
-                (sub |> update_args |> update_rets |> Sub.ssa |> Sub.flatten
-               |> update_stack |> transfer_regs |> update_main))))
+                (sub |> update_args |> update_rets |> Sub.ssa |> update_stack
+               |> transfer_regs)))
   in
-  (* let prog = Project.program proj in *)
-  (* Program.pp err_formatter prog; *)
-  pp_global ~is_const:true ppf rodata "rodata";
-  pp_global ~is_const:false ppf data "data";
-  pp_global ~is_const:false ppf stack "stack";
-  pp_address_map ppf (Project.target proj)
+  create_global ~is_const:true llvm_ctx llvm_module rodata "rodata";
+  create_global ~is_const:false llvm_ctx llvm_module data "data";
+  create_global ~is_const:false llvm_ctx llvm_module stack "stack";
+  eprintf "llvm module created\n";
+  create_address_map llvm_ctx llvm_module (Project.target proj)
     (get_section_mem ".data" proj)
     (get_section_mem ".rodata" proj);
-  fprintf ppf "@[%a@]" pp_prog (Project.program proj)
+  create_prog llvm_ctx llvm_module (Project.program proj);
+  Llvm.dump_module llvm_module;
+  Llvm.dispose_module llvm_module;
+  Llvm.dispose_context llvm_ctx
 
-let main input_program output _ =
+let main input_program _ _ =
   Bil.passes ()
   |> Base.List.iter ~f:(fun pass ->
-      fprintf err_formatter "Bil pass :: %s \n" (Bil.Pass.name pass));
+      eprintf "Bil pass :: %s \n" (Bil.Pass.name pass));
   let passes =
     Base.List.map ~f:get_bil_pass
-      [ "prune-dead-virtuals"; "constant-folding"; "constant-propagation" ]
+      [
+        "bnf1";
+        "constant-folding";
+        "constant-propagation";
+        "prune-dead-virtuals";
+      ]
   in
   Bil.select_passes passes;
-  let ppf = Out_channel.open_text output |> Format.formatter_of_out_channel in
   let loader = "llvm" in
   let proj =
     Project.create @@ Project.Input.load input_program ~loader
     |> Core.Or_error.ok_exn
   in
-  pp ppf proj;
+  pp proj;
   Ok ()
 
 let features_used =

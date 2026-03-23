@@ -5,7 +5,7 @@ sim:
 	bapbundle install sim.plugin
 
 llvm:
-	bapbuild ppllvm.plugin -pkg z3
+	bapbuild ppllvm.plugin -pkg z3 -pkg llvm
 	bapbundle install -destdir ./plugins ppllvm.plugin
 
 clean:
@@ -45,7 +45,7 @@ runtest_struct:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o $(PROGSFOLDER)fizzbuzz_0 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --optimization-level=1
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --optimization-level=2
 	cat stdio_headers.ll fizzbuzz.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO0 converted.ll
 

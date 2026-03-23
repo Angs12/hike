@@ -32,7 +32,9 @@ let set_mem target =
 let stack = ref @@ Var.create "DUMMY" (Mem (`r32, Size.of_int_exn 8))
 let sp = ref @@ Var.create "DUMMY" (Imm 1)
 let fp = ref @@ Var.create "DUMMY" (Imm 1)
+let ptrsize = ref @@ 0
 let regs = ref []
+let set_ptrsize target = ptrsize := Theory.Target.bits target
 
 let set_sp target =
   sp :=

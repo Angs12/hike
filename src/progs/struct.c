@@ -13,7 +13,6 @@ int main(int argc, char *argv[]) {
   // for (int i = 0; i < a->len; i++) {
   //   putchar(a->data[i]);
   // }
-  putchar('\n');
   free(a->data);
   free(a);
   puts("This function doesn't need newline.\n");

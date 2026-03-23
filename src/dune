@@ -4,7 +4,10 @@
   (preprocess (pps ppx_bap ))
   (libraries
     str
+    unix
+    yojson
     bap
+    llvm
     bap-core-theory
     bap-future
     bap-knowledge
