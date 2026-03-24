@@ -9,10 +9,21 @@ open Bap_main.Extension.Command
 open Format
 module StrMap = Map.Make (String)
 module ExpMap = Map.Make (Exp)
-module Libcmap = Map.Make (String)
 module KB = Bap_knowledge.Knowledge
 
 let subs = ref StrMap.empty
+
+let get_args sub_tid =
+  snd
+  @@ Base.Option.value_exn
+       ~message:(sprintf "get_args : sub %s not found" (Tid.name sub_tid))
+       (StrMap.find_opt (Tid.name sub_tid) !subs)
+
+let get_rets sub_tid =
+  fst
+  @@ Base.Option.value_exn
+       ~message:(sprintf "get_rets : sub %s not found" (Tid.name sub_tid))
+       (StrMap.find_opt (Tid.name sub_tid) !subs)
 
 let get_section_mem name proj =
   let mem, _ =
@@ -63,22 +74,76 @@ let sanitize_name =
       else if c = '@' then false
       else true)
 
-let set_sub sub =
+let var_lltype llvm_ctx var =
+  match Var.typ var with
+  | Imm n -> Llvm.integer_type llvm_ctx n
+  | _ -> failwith "var_lltype : non-imm var"
+
+let bb_reg_name reg tid =
+  sanitize_name @@ "reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
+
+let bb_arg_name arg tid =
+  sanitize_name @@ "arg" ^ Var.name arg ^ "_" ^ Tid.name tid
+
+let bb_var_name var tid = sanitize_name @@ Var.name var ^ "_" ^ Tid.name tid
+
+let create_var base ~typ ~tid =
+  Var.create ~is_virtual:false (bb_var_name base tid) typ
+
+let create_reg base ~typ ~tid =
+  Var.create ~is_virtual:false (bb_var_name base tid) typ
+
+let create_arg base ~typ ~tid =
+  Var.create ~is_virtual:true (bb_var_name base tid) typ
+
+let create_ret base ~typ ~tid =
+  Var.create ~is_virtual:false (bb_var_name base tid) typ
+
+let create_ret_type llvm_ctx = Llvm.integer_type llvm_ctx (var_size !ret_reg)
+let sub_llvars = ref @@ StrMap.empty
+let ll_funcs = ref @@ StrMap.empty
+let llvar_from_name name = StrMap.find name !sub_llvars
+
+let create_arg_types llvm_ctx sub_tid =
+  let args = get_args sub_tid in
+  Base.List.to_array args
+  |> Base.Array.map ~f:(fun arg ->
+      let var = Arg.lhs arg in
+      var_lltype llvm_ctx var)
+
+let set_arg_names fn sub_tid =
+  let args = get_args sub_tid in
+  Base.List.iteri args ~f:(fun i arg ->
+      let param = Llvm.param fn i in
+      Llvm.set_value_name (bb_arg_name (Arg.lhs arg) sub_tid) param)
+
+let create_fun llvm_ctx llvm_module sub =
+  let tid = Term.tid sub in
+  let ret_typ = create_ret_type llvm_ctx in
+  let args_typ = create_arg_types llvm_ctx tid in
+  let fn_typ = Llvm.function_type ret_typ args_typ in
+  let fn = Llvm.define_function (Sub.name sub) fn_typ llvm_module in
+  set_arg_names fn tid;
+  Llvm.iter_params
+    (fun param ->
+      let name = Llvm.value_name param in
+      Stdio.print_endline name;
+      sub_llvars := StrMap.add name param !sub_llvars)
+    fn;
+  ll_funcs := StrMap.add (Sub.name sub) (fn, fn_typ) !ll_funcs
+
+let set_sub llvm_ctx llvm_module sub =
   let free_vars = free_vars sub in
   let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
   subs :=
     StrMap.add
       (Term.tid sub |> Tid.name)
-      (Seq.of_list
-         (ret
-         :: Base.List.map
-              ~f:(fun reg ->
-                let arg_var =
-                  Var.create (Sub.name sub ^ Var.name reg) (Var.typ reg)
-                in
-                Arg.create ~intent:In arg_var (Var reg))
-              free_vars))
-      !subs
+      ( [ ret ],
+        Base.List.map
+          ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+          free_vars )
+      !subs;
+  create_fun llvm_ctx llvm_module sub
 
 module type Abi = sig
   val return : Decl_parser.functype -> var list
@@ -94,8 +159,6 @@ let arg_type (exp : exp) =
   | Load (_, _, _, size) -> Imm (Size.in_bits size)
   | _ -> failwith "pp exp type: non-imm var"
 
-let ll_funcs = ref @@ StrMap.empty
-
 let set_libc llvm_ctx llvm_module target libc =
   let abi =
     if Theory.Target.matches target "x86_64-gnu-elf" then
@@ -103,7 +166,7 @@ let set_libc llvm_ctx llvm_module target libc =
     else failwith "abi not supported"
   in
   let module Abi = (val abi : Abi) in
-  Libcmap.iter
+  StrMap.iter
     (fun name (data : Decl_parser.funcdef) ->
       let fn_typ = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
       let fn = Llvm.declare_function (sanitize_name name) fn_typ llvm_module in
@@ -111,30 +174,18 @@ let set_libc llvm_ctx llvm_module target libc =
       let ret = Abi.return data.return in
       let args = Abi.args data.args data.return in
       let func_decl =
-        Seq.of_list
-          (List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret
-          @ List.mapi
-              (fun i (a, intent) ->
-                let arg_var =
-                  Var.create (name ^ sprintf "arg%d" i) (arg_type a)
-                in
-                Arg.create ~intent arg_var a)
-              args)
+        ( List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret,
+          List.mapi
+            (fun i (a, intent) ->
+              let arg_var =
+                Var.create (name ^ sprintf "arg%d" i) (arg_type a)
+              in
+              Arg.create ~intent arg_var a)
+            args )
       in
       subs := StrMap.add ("@" ^ name) func_decl !subs)
     libc
 
-let bb_reg_name reg tid =
-  sanitize_name @@ "reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
-
-let bb_arg_name arg tid =
-  sanitize_name @@ "arg" ^ Var.name arg ^ "_" ^ Tid.name tid
-
-let create_var ~is_virtual ~name ~typ ~tid =
-  Var.create ~is_virtual (sanitize_name @@ name ^ "_" ^ Tid.name tid) typ
-
-let create_reg ~name ~typ ~tid = create_var ~is_virtual:false ~name ~typ ~tid
-let create_virtual ~name ~typ ~tid = create_var ~is_virtual:true ~name ~typ ~tid
 let stack_len = 0x2048
 let stack_off = 0x5000
 
@@ -143,17 +194,11 @@ let correct_registers tid regs =
     inherit Exp.mapper
 
     method! map_var var =
-      if Var.same var !ret_reg then
-        Var (create_reg ~name:("ret_" ^ Var.name var) ~tid ~typ:(Var.typ var))
+      if Var.same var !ret_reg then Var (create_ret var ~tid ~typ:(Var.typ var))
       else if Base.List.mem regs var ~equal:Var.same then
-        Var (create_reg ~name:("reg_" ^ Var.name var) ~tid ~typ:(Var.typ var))
+        Var (create_reg var ~tid ~typ:(Var.typ var))
       else Var var
   end
-
-let var_lltype llvm_ctx var =
-  match Var.typ var with
-  | Imm n -> Llvm.integer_type llvm_ctx n
-  | _ -> failwith "var_lltype : non-imm var"
 
 let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
   match op with
@@ -259,9 +304,6 @@ let create_cast llvm_ctx llvm_builder res_name (cast, i, llvm_val) =
         (Llvm.integer_type llvm_ctx i)
         res_name llvm_builder
 
-let sub_llvars = ref @@ StrMap.empty
-let llvar_from_name name = StrMap.find name !sub_llvars
-
 let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
   let res_name = Base.Option.value res ~default:"" in
   match exp with
@@ -273,7 +315,13 @@ let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
       let var = create_exp llvm_ctx llvm_module llvm_builder e in
       create_unop llvm_builder res_name (op, var)
   | Var v -> (
-      let llvm_var = StrMap.find (Var.name v) !sub_llvars in
+      let llvm_var =
+        StrMap.find_opt (Var.name v) !sub_llvars
+        |> Base.Option.value_exn
+             ~message:
+               ("var " ^ Var.name v ^ " not found" ^ "\n"
+               ^ Llvm.string_of_llmodule llvm_module)
+      in
       match res with
       | Some res_name ->
           Llvm.build_add llvm_var
@@ -351,34 +399,7 @@ let create_branches llvm_ctx llvm_module llvm_builder fn branches =
     Llvm.build_cond_br cond_res true_bb false_bb llvm_builder |> ignore
   else failwith "pp_branches: more than 2 branches"
 
-(* let pp_return tid return_reg ppf _ = *)
-(*   match return_reg with *)
-(*   | None -> () *)
-(*   | Some return_reg -> *)
-(*       let res = *)
-(*         create_reg *)
-(*           ~name:("res_" ^ Var.name !ret_reg) *)
-(*           ~tid *)
-(*           ~typ:(Var.typ (Arg.lhs return_reg)) *)
-(*       in *)
-(*       let new_ret = *)
-(*         create_reg *)
-(*           ~name:("reg_" ^ Var.name !ret_reg) *)
-(*           ~tid ~typ:(Var.typ !ret_reg) *)
-(*       in *)
-(*       pp_exp ppf res *)
-(*         (Exp.substitute (Var !ret_reg) (Var new_ret) (Arg.rhs return_reg)) *)
-
-let is_void tid =
-  let args =
-    Base.Option.value_exn
-      ~message:(sprintf "is_void: sub %s not found" (Tid.name tid))
-      (StrMap.find_opt (Tid.name tid) !subs)
-  in
-  Seq.for_all args ~f:(fun arg ->
-      match Arg.intent arg with
-      | Some i -> ( match i with In -> true | Out -> false | Both -> true)
-      | None -> true)
+let is_void tid = get_rets tid = []
 
 type cf_type = Br | Ret | Call | Int | CallVoid | CallRet
 
@@ -404,13 +425,10 @@ let create_def llvm_ctx llvm_module llvm_builder def =
   in
   sub_llvars := StrMap.add (Var.name var) res !sub_llvars
 
+(* TODO *)
 let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
-  let args =
-    Base.Option.value_exn
-      ~message:(sprintf "ready_call_args: sub %s not found" (Tid.name call_tid))
-      (StrMap.find_opt (Tid.name call_tid) !subs)
-  in
-  Seq.fold ~init:[] args ~f:(fun arg_list arg ->
+  let args = get_args call_tid in
+  Base.List.fold ~init:[] args ~f:(fun arg_list arg ->
       match Arg.intent arg with
       | Some i -> (
           match i with
@@ -435,22 +453,6 @@ let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
               Llvm.set_value_name (bb_arg_name var blk_tid) arg;
               arg :: arg_list)
       | None -> arg_list)
-
-let create_arg_types llvm_ctx sub_tid =
-  let args =
-    Base.Option.value_exn
-      ~message:(sprintf "pp_args: sub %s not found" (Tid.name sub_tid))
-      (StrMap.find_opt (Tid.name sub_tid) !subs)
-  in
-  Seq.to_array args
-  |> Base.Array.filter_map ~f:(fun arg ->
-      let var = Arg.lhs arg in
-      match Arg.intent arg with
-      | Some i -> (
-          match i with
-          | In | Both -> Some (var_lltype llvm_ctx var)
-          | Out -> None)
-      | None -> None)
 
 let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
     fallthrough target =
@@ -478,17 +480,21 @@ let create_call llvm_ctx llvm_module llvm_builder fn blk_tid call =
         target_label
   | _, _ -> failwith "pp_call: non-trivial return type"
 
-(* let pp_phi ppf phi = *)
-(*   let var = Phi.lhs phi in *)
-(*   if is_mem var || Base.List.mem !regs var ~equal:Var.same then () *)
-(*   else *)
-(*     let vals = Phi.values phi in *)
-(*     let values = *)
-(*       Seq.fold vals ~init:"" ~f:(fun prev (tid, exp) -> *)
-(*           sprintf "%s [%s,%%%s]," prev (pp_trivial_exp_exn exp) (pp_label tid)) *)
-(*     in *)
-(*     let values = String.sub values 0 (String.length values - 1) in *)
-(*     fprintf ppf "\t%s = phi %s %s\n" (pp_var var) (pp_var_type var) values *)
+let create_phi llvm_ctx llvm_module llvm_builder fn phi =
+  let var = Phi.lhs phi in
+  if is_mem var || Base.List.mem !regs var ~equal:Var.same then ()
+  else
+    let vals = Phi.values phi in
+    let values =
+      Seq.fold vals ~init:[] ~f:(fun val_list (tid, exp) ->
+          ( create_exp llvm_ctx llvm_module llvm_builder exp,
+            llbb_from_tid fn tid )
+          :: val_list)
+    in
+    let res =
+      Llvm.build_phi values (sanitize_name @@ Var.name var) llvm_builder
+    in
+    sub_llvars := StrMap.add (sanitize_name @@ Var.name var) res !sub_llvars
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
@@ -523,6 +529,7 @@ let update_stack sub =
             Blk.Builder.add_def builder (Def.with_rhs def e));
       Blk.Builder.result builder)
 
+(* TODO *)
 let update_rets sub =
   let sub_builder =
     Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
@@ -572,14 +579,10 @@ let update_main sub =
         if Term.tid blk = entry_tid then (
           let builder = Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk in
           let arg_var_fp =
-            create_reg
-              ~name:(Sub.name sub ^ Var.name !fp)
-              ~tid:(Term.tid sub) ~typ:(Var.typ !fp)
+            create_arg !fp ~typ:(Var.typ !fp) ~tid:(Term.tid sub)
           in
           let arg_var_sp =
-            create_reg
-              ~name:(Sub.name sub ^ Var.name !sp)
-              ~tid:(Term.tid sub) ~typ:(Var.typ !sp)
+            create_arg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
           in
           let sp_def =
             Def.create arg_var_sp
@@ -604,17 +607,13 @@ let transfer_regs sub =
       let reg_map =
         ref
         @@ Base.List.fold !regs ~init:Var.Map.empty ~f:(fun map base ->
-            let reg =
-              create_reg ~name:(Var.name base) ~tid ~typ:(Var.typ base)
-            in
+            let reg = create_reg base ~typ:(Var.typ base) ~tid in
             Var.Map.add_exn map ~key:base ~data:reg)
       in
       let blk =
         Base.List.fold ~init:blk !regs ~f:(fun blk base ->
             let ver = ref 0 in
-            let reg =
-              create_reg ~name:(Var.name base) ~tid ~typ:(Var.typ base)
-            in
+            let reg = create_reg base ~typ:(Var.typ base) ~tid in
             Blk.map_elts blk ~def:(fun def ->
                 let var = Def.lhs def in
                 let exp = Def.rhs def in
@@ -640,76 +639,53 @@ let transfer_regs sub =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
           ~copy_jmps:true blk
       in
-      (* let cfg = Sub.to_graph sub in *)
-      (* let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in *)
-      Base.List.iter !regs ~f:(fun var ->
-          let reg = create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) in
-          let def =
-            let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in
-            Def.create reg data
-          in
-          Blk.Builder.add_def builder def);
-      (* (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then *)
-      (*    Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ -> *)
-      (*        let var = *)
-      (*          create_reg ~name:(Var.name key) ~tid ~typ:(Var.typ key) *)
-      (*        in *)
-      (*        let phi_rhs = *)
-      (*          Seq.fold blk_incoming ~init:[] ~f:(fun prev tid -> *)
-      (*              if tid = Graphs.Tid.start then *)
-      (*                let reg_var = *)
-      (*                  Var.create (Sub.name sub ^ Var.name key) (Var.typ key) *)
-      (*                in *)
-      (*                (Term.tid blk, Bil.Var reg_var) :: prev *)
-      (*              else *)
-      (*                let reg_var = *)
-      (*                  create_reg *)
-      (*                    ~name:("reg_" ^ Var.name key) *)
-      (*                    ~tid ~typ:(Var.typ key) *)
-      (*                in *)
-      (*                (tid, Bil.Var reg_var) :: prev) *)
-      (*        in *)
-      (*        let phi = Phi.of_list var phi_rhs in *)
-      (*        Blk.Builder.add_phi builder phi) *)
-      (*  else *)
-      (*    let free_vars = free_vars sub in *)
-      (*    Base.List.iter !regs ~f:(fun var -> *)
-      (*        let reg = *)
-      (*          create_reg ~name:(Var.name var) ~tid ~typ:(Var.typ var) *)
-      (*        in *)
-      (*        let def = *)
-      (*          if not @@ Base.List.mem free_vars var ~equal:Var.same then *)
-      (*            let data = Bil.Int (Word.of_int ~width:(var_size var) 0) in *)
-      (*            Def.create reg data *)
-      (*          else *)
-      (*            let arg_var = *)
-      (*              create_reg *)
-      (*                ~name:(Sub.name sub ^ Var.name var) *)
-      (*                ~tid:(Term.tid sub) ~typ:(Var.typ var) *)
-      (*            in *)
-      (*            Def.create reg (Var arg_var) *)
-      (*        in *)
-      (*        Blk.Builder.add_def builder def)); *)
+      let cfg = Sub.to_graph sub in
+      let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
+      (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
+         Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
+             let var = create_reg key ~typ:(Var.typ key) ~tid in
+             let phi_rhs =
+               Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
+                   if tid = Graphs.Tid.start then
+                     let reg_var =
+                       Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
+                     in
+                     (Term.tid blk, Bil.Var reg_var) :: prev
+                   else
+                     let reg_var = create_reg key ~typ:(Var.typ key) ~tid in
+                     (tid, Bil.Var reg_var) :: prev)
+             in
+             let phi = Phi.of_list var phi_rhs in
+             Blk.Builder.add_phi builder phi)
+       else
+         let free_vars = free_vars sub in
+         Base.List.iter !regs ~f:(fun base ->
+             let reg = create_reg base ~typ:(Var.typ base) ~tid in
+             let def =
+               if not @@ Base.List.mem free_vars base ~equal:Var.same then
+                 let data = Bil.Int (Word.of_int ~width:(var_size base) 0) in
+                 Def.create reg data
+               else
+                 let arg =
+                   create_arg base ~typ:(Var.typ base) ~tid:(Term.tid sub)
+                 in
+                 Def.create reg (Var arg)
+             in
+             Blk.Builder.add_def builder def));
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
           match (cf_type (Term.enum jmp_t blk), Var.same key !ret_reg) with
           | Call, true ->
-              let reg_var =
-                create_reg ~name:("ret_" ^ Var.name key) ~tid ~typ:(Var.typ key)
-              in
-              let def = Def.create reg_var (Var data) in
+              let ret_var = create_ret key ~typ:(Var.typ key) ~tid in
+              let def = Def.create ret_var (Var data) in
               Blk.Builder.add_def builder def
           | _, _ ->
-              let reg_var =
-                create_reg ~name:("reg_" ^ Var.name key) ~tid ~typ:(Var.typ key)
-              in
+              let reg_var = create_reg key ~typ:(Var.typ key) ~tid in
               let def = Def.create reg_var (Var data) in
               Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
-
-let create_ret llvm_ctx = Llvm.integer_type llvm_ctx (var_size !ret_reg)
 
 let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
   (* create the basic blocks *)
@@ -723,7 +699,7 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
       |> Seq.iter ~f:(fun elt ->
           match elt with
           | `Def def -> create_def llvm_ctx llvm_module llvm_builder def
-          | `Phi _ -> ()
+          | `Phi phi -> create_phi llvm_ctx llvm_module llvm_builder fn phi
           | `Jmp _ -> ());
       let control_flow = Term.enum jmp_t blk in
       match cf_type control_flow with
@@ -733,20 +709,6 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
       | Call | CallVoid | CallRet ->
           let call = Seq.hd_exn control_flow |> call_exn in
           create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call)
-(* let res = *)
-(*   create_reg *)
-(*     ~name:("reg_" ^ Var.name !ret_reg) *)
-(*     ~tid ~typ:(Var.typ !ret_reg) *)
-(* in *)
-(* pp_call blk ppf call res) *)
-
-let create_fun llvm_ctx llvm_module sub =
-  let tid = Term.tid sub in
-  let ret_typ = create_ret llvm_ctx in
-  let args_typ = create_arg_types llvm_ctx tid in
-  let fn_typ = Llvm.function_type ret_typ args_typ in
-  let fn = Llvm.define_function (Sub.name sub) fn_typ llvm_module in
-  ll_funcs := StrMap.add (Sub.name sub) (fn, fn_typ) !ll_funcs
 
 let create_sub llvm_ctx llvm_module sub =
   let blks = Term.enum blk_t sub in
@@ -756,11 +718,12 @@ let create_sub llvm_ctx llvm_module sub =
   in
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
   (* reset sub_llvars *)
+  (* TODO *)
   sub_llvars := StrMap.empty;
   create_basicblocks llvm_ctx llvm_module llvm_builder blks fn
 
 let is_libc libc sub =
-  Libcmap.mem (Sub.name sub) libc
+  StrMap.mem (Sub.name sub) libc
   || Base.String.is_substring ~substring:":external" (Sub.name sub)
 
 let create_llvm_i8array llvm_ctx arr =
@@ -784,7 +747,6 @@ let run_pass proj name =
   Project.Pass.run_exn pass proj
 
 let create_prog llvm_ctx llvm_module prog =
-  Seq.iter ~f:(create_fun llvm_ctx llvm_module) (Term.enum sub_t prog);
   Seq.iter ~f:(create_sub llvm_ctx llvm_module) (Term.enum sub_t prog)
 
 let setup llvm_ctx llvm_module proj libc =
@@ -893,26 +855,26 @@ let pp proj =
   let rodata = get_section ".rodata" proj in
   let data = get_section ".data" proj in
   let stack = Base.Array.init stack_len ~f:(fun _ -> 0) in
-  Term.enum sub_t (Project.program proj) |> Seq.iter ~f:(fun sub -> set_sub sub);
+  let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
+  let llvm_ctx = Llvm.create_context () in
+  let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
+  setup llvm_ctx llvm_module proj libc;
   let prog = Project.program proj in
   let main =
     Base.Option.value_exn ~message:"Main function not found"
       (Term.enum sub_t prog |> Seq.find ~f:(fun sub -> Sub.name sub = "main"))
   in
   let reachable_funcs = Reachable_funcs.reachable_funcs prog main in
-  let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
-  let llvm_ctx = Llvm.create_context () in
-  let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
-  setup llvm_ctx llvm_module proj libc;
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->
             if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then
               None
-            else
+            else (
+              set_sub llvm_ctx llvm_module sub;
               Some
                 (sub |> update_args |> update_rets |> Sub.ssa |> update_stack
-               |> transfer_regs)))
+               |> transfer_regs))))
   in
   create_global ~is_const:true llvm_ctx llvm_module rodata "rodata";
   create_global ~is_const:false llvm_ctx llvm_module data "data";

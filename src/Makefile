@@ -51,31 +51,31 @@ compileO0_fizzbuzz:
 
 compileO2_fizzbuzz:
 	gcc -O2 -o $(PROGSFOLDER)fizzbuzz_2 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_2 fizzbuzz.ll --optimization-level=1
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_2 fizzbuzz.ll --optimization-level=2
 	cat stdio_headers.ll fizzbuzz.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO2 converted.ll
 
 compileO3_fizzbuzz:
 	gcc -O3 -o $(PROGSFOLDER)fizzbuzz_3 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_3 fizzbuzz.ll --optimization-level=1
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_3 fizzbuzz.ll --optimization-level=2
 	cat stdio_headers.ll fizzbuzz.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO3 converted.ll
 
 compileO0_fact:
 	gcc -O0 -o $(PROGSFOLDER)factorial_0  $(PROGSFOLDER)factorial.c
-	bap convlir -L ./plugins $(PROGSFOLDER)factorial_0 factorial.ll --optimization-level=1
+	bap convlir -L ./plugins $(PROGSFOLDER)factorial_0 factorial.ll --optimization-level=2
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)factorial_llvmO0 converted.ll
 
 compileO2_fact:
 	gcc -O2 -o $(PROGSFOLDER)factorial_2  $(PROGSFOLDER)factorial.c
-	bap convlir -L ./plugins $(PROGSFOLDER)factorial_2 factorial.ll --optimization-level=1
+	bap convlir -L ./plugins $(PROGSFOLDER)factorial_2 factorial.ll --optimization-level=2
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)factorial_llvmO2 converted.ll
 
 compileO3_fact:
 	gcc -O3 -o $(PROGSFOLDER)factorial_3  $(PROGSFOLDER)factorial.c
-	bap convlir -L ./plugins $(PROGSFOLDER)factorial_3 factorial.ll --optimization-level=1
+	bap convlir -L ./plugins $(PROGSFOLDER)factorial_3 factorial.ll --optimization-level=2
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)factorial_llvmO3 converted.ll
 
