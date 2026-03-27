@@ -62,6 +62,7 @@ let var_size var =
 let free_vars sub =
   Sub.free_vars sub
   |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
+  |> Var.Set.filter ~f:(fun var -> not @@ Var.same var !ret_reg)
   |> Var.Set.to_list
 
 let sanitize_name =
@@ -82,8 +83,14 @@ let var_lltype llvm_ctx var =
 let bb_reg_name reg tid =
   sanitize_name @@ "reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
 
+let bb_phi_reg_name reg tid =
+  sanitize_name @@ "phi_reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
+
 let bb_arg_name arg tid =
   sanitize_name @@ "arg" ^ Var.name arg ^ "_" ^ Tid.name tid
+
+let bb_ret_name arg tid =
+  sanitize_name @@ "ret_" ^ Var.name arg ^ "_" ^ Tid.name tid
 
 let bb_var_name var tid = sanitize_name @@ Var.name var ^ "_" ^ Tid.name tid
 
@@ -91,13 +98,16 @@ let create_var base ~typ ~tid =
   Var.create ~is_virtual:false (bb_var_name base tid) typ
 
 let create_reg base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_var_name base tid) typ
+  Var.create ~is_virtual:false (bb_reg_name base tid) typ
 
 let create_arg base ~typ ~tid =
-  Var.create ~is_virtual:true (bb_var_name base tid) typ
+  Var.create ~is_virtual:false (bb_arg_name base tid) typ
 
 let create_ret base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_var_name base tid) typ
+  Var.create ~is_virtual:false (bb_ret_name base tid) typ
+
+let create_phi_reg base ~typ ~tid =
+  Var.create ~is_virtual:false (bb_phi_reg_name base tid) typ
 
 let create_ret_type llvm_ctx = Llvm.integer_type llvm_ctx (var_size !ret_reg)
 let sub_llvars = ref @@ StrMap.empty
@@ -117,6 +127,21 @@ let set_arg_names fn sub_tid =
       let param = Llvm.param fn i in
       Llvm.set_value_name (bb_arg_name (Arg.lhs arg) sub_tid) param)
 
+let add_args_to_vars fn =
+  Llvm.iter_params
+    (fun param ->
+      let name = Llvm.value_name param in
+      sub_llvars := StrMap.add name param !sub_llvars)
+    fn
+
+let add_regs_to_vars llvm_ctx blk_tid =
+  Base.List.iter !regs ~f:(fun reg ->
+      sub_llvars :=
+        StrMap.add
+          (bb_phi_reg_name reg blk_tid)
+          (Llvm.undef (var_lltype llvm_ctx reg))
+          !sub_llvars)
+
 let create_fun llvm_ctx llvm_module sub =
   let tid = Term.tid sub in
   let ret_typ = create_ret_type llvm_ctx in
@@ -124,25 +149,32 @@ let create_fun llvm_ctx llvm_module sub =
   let fn_typ = Llvm.function_type ret_typ args_typ in
   let fn = Llvm.define_function (Sub.name sub) fn_typ llvm_module in
   set_arg_names fn tid;
-  Llvm.iter_params
-    (fun param ->
-      let name = Llvm.value_name param in
-      Stdio.print_endline name;
-      sub_llvars := StrMap.add name param !sub_llvars)
-    fn;
   ll_funcs := StrMap.add (Sub.name sub) (fn, fn_typ) !ll_funcs
 
 let set_sub llvm_ctx llvm_module sub =
   let free_vars = free_vars sub in
   let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
-  subs :=
-    StrMap.add
-      (Term.tid sub |> Tid.name)
-      ( [ ret ],
-        Base.List.map
-          ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-          free_vars )
-      !subs;
+  if Term.tid sub |> Tid.name = "@main" then
+    let rdi = Var.create "RDI" (Imm 64) in
+    let rsi = Var.create "RSI" (Imm 64) in
+    subs :=
+      StrMap.add
+        (Term.tid sub |> Tid.name)
+        ( [ ret ],
+          [
+            Arg.create ~intent:In rdi (Var rdi);
+            Arg.create ~intent:In rsi (Var rsi);
+          ] )
+        !subs
+  else
+    subs :=
+      StrMap.add
+        (Term.tid sub |> Tid.name)
+        ( [ ret ],
+          Base.List.map
+            ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+            free_vars )
+        !subs;
   create_fun llvm_ctx llvm_module sub
 
 module type Abi = sig
@@ -168,11 +200,17 @@ let set_libc llvm_ctx llvm_module target libc =
   let module Abi = (val abi : Abi) in
   StrMap.iter
     (fun name (data : Decl_parser.funcdef) ->
-      let fn_typ = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
-      let fn = Llvm.declare_function (sanitize_name name) fn_typ llvm_module in
-      ll_funcs := StrMap.add name (fn, fn_typ) !ll_funcs;
       let ret = Abi.return data.return in
       let args = Abi.args data.args data.return in
+      let ret_typ = Decl_parser.functype_to_lltype llvm_ctx data.return in
+      let args_typ =
+        Base.List.map
+          ~f:(fun typ -> Decl_parser.functype_to_lltype llvm_ctx typ)
+          data.args
+      in
+      let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
+      let fn = Llvm.declare_function (sanitize_name name) fn_typ llvm_module in
+      ll_funcs := StrMap.add name (fn, fn_typ) !ll_funcs;
       let func_decl =
         ( List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret,
           List.mapi
@@ -196,14 +234,14 @@ let correct_registers tid regs =
     method! map_var var =
       if Var.same var !ret_reg then Var (create_ret var ~tid ~typ:(Var.typ var))
       else if Base.List.mem regs var ~equal:Var.same then
-        Var (create_reg var ~tid ~typ:(Var.typ var))
+        Var (create_phi_reg var ~tid ~typ:(Var.typ var))
       else Var var
   end
 
 let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
   match op with
   | PLUS -> Llvm.build_add llvm_val1 llvm_val2 res_name llvm_builder
-  | MINUS -> Llvm.build_sub llvm_val1 llvm_val1 res_name llvm_builder
+  | MINUS -> Llvm.build_sub llvm_val1 llvm_val2 res_name llvm_builder
   | TIMES -> Llvm.build_mul llvm_val1 llvm_val2 res_name llvm_builder
   | DIVIDE -> Llvm.build_udiv llvm_val1 llvm_val2 res_name llvm_builder
   | SDIVIDE -> Llvm.build_sdiv llvm_val1 llvm_val2 res_name llvm_builder
@@ -270,16 +308,18 @@ let create_inttoptr llvm_ctx llvm_builder llvm_val =
   Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
 let create_load llvm_ctx llvm_module llvm_builder (var_name, addr, size) =
-  let addr = create_address_map_call llvm_ctx llvm_module llvm_builder addr in
-  let addr_ptr = create_inttoptr llvm_ctx llvm_builder addr in
-  Llvm.build_load
-    (Llvm.integer_type llvm_ctx size)
-    addr_ptr var_name llvm_builder
+  let addr =
+    (* create_address_map_call llvm_ctx llvm_module llvm_builder addr *)
+    create_inttoptr llvm_ctx llvm_builder addr
+  in
+  Llvm.build_load (Llvm.integer_type llvm_ctx size) addr var_name llvm_builder
 
 let create_store llvm_ctx llvm_module llvm_builder (llvm_var, addr) =
-  let addr = create_address_map_call llvm_ctx llvm_module llvm_builder addr in
-  let addr_ptr = create_inttoptr llvm_ctx llvm_builder addr in
-  Llvm.build_store llvm_var addr_ptr llvm_builder
+  let addr =
+    (* create_address_map_call llvm_ctx llvm_module llvm_builder addr *)
+    create_inttoptr llvm_ctx llvm_builder addr
+  in
+  Llvm.build_store llvm_var addr llvm_builder
 
 let create_cast llvm_ctx llvm_builder res_name (cast, i, llvm_val) =
   match cast with
@@ -318,9 +358,7 @@ let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
       let llvm_var =
         StrMap.find_opt (Var.name v) !sub_llvars
         |> Base.Option.value_exn
-             ~message:
-               ("var " ^ Var.name v ^ " not found" ^ "\n"
-               ^ Llvm.string_of_llmodule llvm_module)
+             ~message:("var " ^ Var.name v ^ " not found" ^ "\n")
       in
       match res with
       | Some res_name ->
@@ -428,28 +466,17 @@ let create_def llvm_ctx llvm_module llvm_builder def =
 (* TODO *)
 let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
   let args = get_args call_tid in
-  Base.List.fold ~init:[] args ~f:(fun arg_list arg ->
+  Base.List.fold_right ~init:[] args ~f:(fun arg arg_list ->
       match Arg.intent arg with
       | Some i -> (
           match i with
           | Out -> arg_list
-          | In ->
+          | In | Both ->
               let var = Arg.lhs arg in
               let exp =
                 Exp.map (correct_registers blk_tid !regs) (Arg.rhs arg)
               in
               let arg = create_exp llvm_ctx llvm_module llvm_builder exp in
-              Llvm.set_value_name (bb_arg_name var blk_tid) arg;
-              arg :: arg_list
-          | Both ->
-              let var = Arg.lhs arg in
-              let exp =
-                Exp.map (correct_registers blk_tid !regs) (Arg.rhs arg)
-              in
-              let res = create_exp llvm_ctx llvm_module llvm_builder exp in
-              let arg =
-                create_address_map_call llvm_ctx llvm_module llvm_builder res
-              in
               Llvm.set_value_name (bb_arg_name var blk_tid) arg;
               arg :: arg_list)
       | None -> arg_list)
@@ -459,21 +486,32 @@ let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
   let args =
     create_call_args llvm_ctx llvm_module llvm_builder target blk_tid
   in
-  let func_name = sanitize_name @@ Tid.name target in
-  let fn, fn_typ = StrMap.find func_name !ll_funcs in
-  let ret_var =
-    Llvm.build_call fn_typ fn (Array.of_list args)
-      (bb_reg_name !ret_reg blk_tid)
-      llvm_builder
-  in
-  sub_llvars := StrMap.add (bb_reg_name !ret_reg blk_tid) ret_var !sub_llvars;
-  let bb = llbb_from_tid current_fn fallthrough in
-  Llvm.build_br bb llvm_builder |> ignore
+  if is_void target then (
+    let func_name = sanitize_name @@ Tid.name target in
+    let fn, fn_typ = StrMap.find func_name !ll_funcs in
+    Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder |> ignore;
+    let bb = llbb_from_tid current_fn fallthrough in
+    Llvm.build_br bb llvm_builder |> ignore)
+  else
+    let func_name = sanitize_name @@ Tid.name target in
+    let fn, fn_typ = StrMap.find func_name !ll_funcs in
+    let ret_var =
+      Llvm.build_call fn_typ fn (Array.of_list args)
+        (bb_phi_reg_name !ret_reg blk_tid)
+        llvm_builder
+    in
+    Llvm.add_call_site_attr ret_var
+      (Llvm.create_enum_attr llvm_ctx "zeroext" 0L)
+      Llvm.AttrIndex.Return;
+    sub_llvars :=
+      StrMap.add (bb_phi_reg_name !ret_reg blk_tid) ret_var !sub_llvars;
+    let bb = llbb_from_tid current_fn fallthrough in
+    Llvm.build_br bb llvm_builder |> ignore
 
 let create_call llvm_ctx llvm_module llvm_builder fn blk_tid call =
   match (Call.return call, Call.target call) with
   | None, _ ->
-      let ret_var = llvar_from_name (bb_reg_name !ret_reg blk_tid) in
+      let ret_var = llvar_from_name (bb_phi_reg_name !ret_reg blk_tid) in
       Llvm.build_ret ret_var llvm_builder |> ignore
   | Some (Direct ret_label), Direct target_label ->
       create_func_call llvm_ctx llvm_module llvm_builder fn blk_tid ret_label
@@ -515,19 +553,6 @@ let update_args sub =
 let entry_blk_tid sub =
   let blks = Term.enum blk_t sub in
   Term.tid (Seq.hd_exn blks)
-
-let update_stack sub =
-  Term.map blk_t sub ~f:(fun blk ->
-      let builder =
-        Blk.Builder.init ~same_tid:true ~copy_phis:true ~copy_jmps:true blk
-      in
-      Seq.iter (Term.enum def_t blk) ~f:(fun def ->
-          if is_mem (Def.lhs def) then ()
-          else
-            let e = Def.rhs def in
-            let e = Exp.substitute (Var !mem) (Var !stack) e in
-            Blk.Builder.add_def builder (Def.with_rhs def e));
-      Blk.Builder.result builder)
 
 (* TODO *)
 let update_rets sub =
@@ -584,11 +609,14 @@ let update_main sub =
           let arg_var_sp =
             create_arg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
           in
-          let sp_def =
-            Def.create arg_var_sp
-              (Bil.Int
-                 (Word.of_int ~width:(var_size !sp) (stack_len - 1 + stack_off)))
+          let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
+          let stack_exp =
+            Bil.BinOp
+              ( Bil.PLUS,
+                Bil.Var stack_ptr,
+                Bil.Int (Word.of_int ~width:(var_size !sp) (stack_len - 1)) )
           in
+          let sp_def = Def.create arg_var_sp stack_exp in
           let fp_def =
             Def.create arg_var_fp
               (Bil.Int (Word.of_int ~width:(var_size !fp) 0))
@@ -642,18 +670,12 @@ let transfer_regs sub =
       let cfg = Sub.to_graph sub in
       let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
       (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
-         Var.Map.iteri !reg_map ~f:(fun ~key ~data:_ ->
-             let var = create_reg key ~typ:(Var.typ key) ~tid in
+         Base.List.iter !regs ~f:(fun base ->
+             let var = create_reg base ~typ:(Var.typ base) ~tid in
              let phi_rhs =
                Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
-                   if tid = Graphs.Tid.start then
-                     let reg_var =
-                       Var.create (Sub.name sub ^ Var.name key) (Var.typ key)
-                     in
-                     (Term.tid blk, Bil.Var reg_var) :: prev
-                   else
-                     let reg_var = create_reg key ~typ:(Var.typ key) ~tid in
-                     (tid, Bil.Var reg_var) :: prev)
+                   let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
+                   (tid, Bil.Var reg_var) :: prev)
              in
              let phi = Phi.of_list var phi_rhs in
              Blk.Builder.add_phi builder phi)
@@ -682,15 +704,12 @@ let transfer_regs sub =
               let def = Def.create ret_var (Var data) in
               Blk.Builder.add_def builder def
           | _, _ ->
-              let reg_var = create_reg key ~typ:(Var.typ key) ~tid in
+              let reg_var = create_phi_reg key ~typ:(Var.typ key) ~tid in
               let def = Def.create reg_var (Var data) in
               Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
 let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
-  (* create the basic blocks *)
-  Seq.iter blks ~f:(fun blk ->
-      Llvm.append_block llvm_ctx (Term.name blk) fn |> ignore);
   (* populate them with instructions *)
   Seq.iter blks ~f:(fun blk ->
       let bb = llbb_from_tid fn (Term.tid blk) in
@@ -710,7 +729,12 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
           let call = Seq.hd_exn control_flow |> call_exn in
           create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call)
 
-let create_sub llvm_ctx llvm_module sub =
+let initialize_bbs llvm_ctx blks fn =
+  (* create the basic blocks *)
+  Seq.iter blks ~f:(fun blk ->
+      Llvm.append_block llvm_ctx (Term.name blk) fn |> ignore)
+
+let create_sub llvm_ctx llvm_module stack_ptr sub =
   let blks = Term.enum blk_t sub in
   let fn =
     Llvm.lookup_function (Sub.name sub) llvm_module
@@ -718,8 +742,18 @@ let create_sub llvm_ctx llvm_module sub =
   in
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
   (* reset sub_llvars *)
-  (* TODO *)
   sub_llvars := StrMap.empty;
+  (* add stack_ptr to llvars *)
+  sub_llvars :=
+    StrMap.add "stack_ptr"
+      (Llvm.build_ptrtoint stack_ptr (Llvm.i64_type llvm_ctx) "" llvm_builder)
+      !sub_llvars;
+  (* add args to llvars *)
+  add_args_to_vars fn;
+  initialize_bbs llvm_ctx blks fn;
+  (* go from entry to first bb *)
+  Llvm.build_br (llbb_from_tid fn (entry_blk_tid sub)) llvm_builder |> ignore;
+  Seq.iter blks ~f:(fun blk -> add_regs_to_vars llvm_ctx (Term.tid blk));
   create_basicblocks llvm_ctx llvm_module llvm_builder blks fn
 
 let is_libc libc sub =
@@ -728,12 +762,17 @@ let is_libc libc sub =
 
 let create_llvm_i8array llvm_ctx arr =
   Base.Array.map arr ~f:(fun v -> Llvm.const_int (Llvm.i8_type llvm_ctx) v)
-  |> Llvm.const_array
-       (Llvm.array_type (Llvm.i8_type llvm_ctx) (Array.length arr))
+  |> Llvm.const_array (Llvm.i8_type llvm_ctx)
 
 let create_global ~is_const llvm_ctx llvm_module mem name =
-  Llvm.define_global name (create_llvm_i8array llvm_ctx mem) llvm_module
-  |> Llvm.set_global_constant is_const
+  let ret =
+    Llvm.declare_global
+      (Llvm.array_type (Llvm.i8_type llvm_ctx) (Array.length mem))
+      name llvm_module
+  in
+  Llvm.set_initializer (create_llvm_i8array llvm_ctx mem) ret;
+  Llvm.set_global_constant is_const ret;
+  ret
 
 let get_bil_pass name =
   Base.List.find_exn ~f:(fun pass -> Bil.Pass.name pass = name) (Bil.passes ())
@@ -746,8 +785,8 @@ let run_pass proj name =
   let pass = get_pass name in
   Project.Pass.run_exn pass proj
 
-let create_prog llvm_ctx llvm_module prog =
-  Seq.iter ~f:(create_sub llvm_ctx llvm_module) (Term.enum sub_t prog)
+let create_prog llvm_ctx llvm_module prog stack_ptr =
+  Seq.iter ~f:(create_sub llvm_ctx llvm_module stack_ptr) (Term.enum sub_t prog)
 
 let setup llvm_ctx llvm_module proj libc =
   let target = Project.target proj in
@@ -760,21 +799,17 @@ let setup llvm_ctx llvm_module proj libc =
   set_ptrsize target;
   set_libc llvm_ctx llvm_module target libc
 
-let create_address_map llvm_ctx llvm_module target data_mem rodata_mem =
+let create_address_map llvm_ctx llvm_module target rodata_ptr data_ptr
+    rodata_mem data_mem =
   let ptr_size = Theory.Target.bits target in
+  let ptr_typ = Llvm.integer_type llvm_ctx ptr_size in
   let rodata_min_addr = Memory.min_addr rodata_mem |> Word.to_int64_exn in
   let rodata_max_addr = Memory.max_addr rodata_mem |> Word.to_int64_exn in
   let data_min_addr = Memory.min_addr data_mem |> Word.to_int64_exn in
   let data_max_addr = Memory.max_addr data_mem |> Word.to_int64_exn in
-  let stack_min_addr = stack_off in
-  let stack_max_addr = stack_off + stack_len - 1 in
-  let fn_typ =
-    Llvm.function_type
-      (Llvm.integer_type llvm_ctx ptr_size)
-      [| Llvm.pointer_type llvm_ctx |]
-  in
+  let fn_typ = Llvm.function_type ptr_typ [| ptr_typ |] in
   let addr_map_fun = Llvm.define_function "_address_map_" fn_typ llvm_module in
-  let entry_block = Llvm.append_block llvm_ctx "entry" addr_map_fun in
+  let entry_block = Llvm.entry_block addr_map_fun in
   let llvm_builder = Llvm.builder_at_end llvm_ctx entry_block in
   let ptr = Llvm.param addr_map_fun 0 in
   let is_rodata1 =
@@ -784,68 +819,50 @@ let create_address_map llvm_ctx llvm_module target data_mem rodata_mem =
   in
   let is_rodata2 =
     Llvm.build_icmp Llvm.Icmp.Ule ptr
-      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) rodata_max_addr false)
+      (Llvm.const_of_int64 ptr_typ rodata_max_addr false)
       "" llvm_builder
   in
   let is_rodata = Llvm.build_and is_rodata1 is_rodata2 "" llvm_builder in
   let is_data1 =
     Llvm.build_icmp Llvm.Icmp.Uge ptr
-      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) data_min_addr false)
+      (Llvm.const_of_int64 ptr_typ data_min_addr false)
       "" llvm_builder
   in
   let is_data2 =
     Llvm.build_icmp Llvm.Icmp.Ule ptr
-      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) data_max_addr false)
+      (Llvm.const_of_int64 ptr_typ data_max_addr false)
       "" llvm_builder
   in
   let is_data = Llvm.build_and is_data1 is_data2 "" llvm_builder in
-  let is_stack1 =
-    Llvm.build_icmp Llvm.Icmp.Uge ptr
-      (Llvm.const_int (Llvm.i64_type llvm_ctx) stack_min_addr)
-      "" llvm_builder
-  in
-  let is_stack2 =
-    Llvm.build_icmp Llvm.Icmp.Ule ptr
-      (Llvm.const_int (Llvm.i64_type llvm_ctx) stack_max_addr)
-      "" llvm_builder
-  in
-  let is_stack = Llvm.build_and is_stack1 is_stack2 "" llvm_builder in
   let fallthrough1 = Llvm.append_block llvm_ctx "fallthrough1" addr_map_fun in
   let isrodata = Llvm.append_block llvm_ctx "isrodata" addr_map_fun in
   let fallthrough2 = Llvm.append_block llvm_ctx "fallthrough2" addr_map_fun in
-  let fallthrough3 = Llvm.append_block llvm_ctx "fallthrough3" addr_map_fun in
   let isdata = Llvm.append_block llvm_ctx "isdata" addr_map_fun in
-  let isstack = Llvm.append_block llvm_ctx "isstack" addr_map_fun in
   Llvm.build_cond_br is_rodata isrodata fallthrough1 llvm_builder |> ignore;
   let llvm_builder = Llvm.builder_at_end llvm_ctx fallthrough1 in
   Llvm.build_cond_br is_data isdata fallthrough2 llvm_builder |> ignore;
   let llvm_builder = Llvm.builder_at_end llvm_ctx fallthrough2 in
-  Llvm.build_cond_br is_stack isstack fallthrough3 llvm_builder |> ignore;
-  let llvm_builder = Llvm.builder_at_end llvm_ctx fallthrough3 in
   Llvm.build_ret ptr llvm_builder |> ignore;
   let llvm_builder = Llvm.builder_at_end llvm_ctx isrodata in
-  let rodata_ptr =
-    Llvm.build_ptrtoint ptr (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  let rodata_ptr = Llvm.build_ptrtoint rodata_ptr ptr_typ "" llvm_builder in
+  let rodata_offset =
+    Llvm.build_sub ptr
+      (Llvm.const_of_int64 ptr_typ rodata_min_addr false)
+      "" llvm_builder
   in
-  let rodata_offset = Llvm.build_sub ptr rodata_ptr "" llvm_builder in
   let rodata_addr = Llvm.build_add rodata_ptr rodata_offset "" llvm_builder in
   Llvm.build_ret rodata_addr llvm_builder |> ignore;
   let llvm_builder = Llvm.builder_at_end llvm_ctx isdata in
-  let data_ptr =
-    Llvm.build_ptrtoint ptr (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  let data_ptr = Llvm.build_ptrtoint data_ptr ptr_typ "" llvm_builder in
+  let data_offset =
+    Llvm.build_sub ptr
+      (Llvm.const_of_int64 ptr_typ data_min_addr false)
+      "" llvm_builder
   in
-  let data_offset = Llvm.build_sub ptr data_ptr "" llvm_builder in
   let data_addr = Llvm.build_add data_ptr data_offset "" llvm_builder in
-  Llvm.build_ret data_addr llvm_builder |> ignore;
-  let llvm_builder = Llvm.builder_at_end llvm_ctx isstack in
-  let stack_ptr =
-    Llvm.build_ptrtoint ptr (Llvm.pointer_type llvm_ctx) "" llvm_builder
-  in
-  let stack_offset = Llvm.build_sub ptr stack_ptr "" llvm_builder in
-  let stack_addr = Llvm.build_add stack_ptr stack_offset "" llvm_builder in
-  Llvm.build_ret stack_addr llvm_builder |> ignore
+  Llvm.build_ret data_addr llvm_builder |> ignore
 
-let pp proj =
+let pp proj output_program =
   let proj = run_pass proj "trivial-condition-form" in
   let proj = run_pass proj "optimization" in
   (* print_sections proj; *)
@@ -854,7 +871,7 @@ let pp proj =
       eprintf "Project pass :: %s \n" (Project.Pass.name pass));
   let rodata = get_section ".rodata" proj in
   let data = get_section ".data" proj in
-  let stack = Base.Array.init stack_len ~f:(fun _ -> 0) in
+  let stack = Base.Array.create ~len:stack_len 0 in
   let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
@@ -865,30 +882,43 @@ let pp proj =
       (Term.enum sub_t prog |> Seq.find ~f:(fun sub -> Sub.name sub = "main"))
   in
   let reachable_funcs = Reachable_funcs.reachable_funcs prog main in
+  SubSet.iter
+    (fun sub ->
+      if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then ()
+      else (
+        Sub.pp err_formatter sub;
+        set_sub llvm_ctx llvm_module sub))
+    reachable_funcs;
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->
             if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then
               None
-            else (
-              set_sub llvm_ctx llvm_module sub;
+            else
               Some
-                (sub |> update_args |> update_rets |> Sub.ssa |> update_stack
-               |> transfer_regs))))
+                (sub |> update_args |> update_rets |> Sub.ssa |> transfer_regs
+               |> update_main)))
   in
-  create_global ~is_const:true llvm_ctx llvm_module rodata "rodata";
-  create_global ~is_const:false llvm_ctx llvm_module data "data";
-  create_global ~is_const:false llvm_ctx llvm_module stack "stack";
+  let rodata_ptr =
+    create_global ~is_const:true llvm_ctx llvm_module rodata "rodata"
+  in
+  let data_ptr =
+    create_global ~is_const:false llvm_ctx llvm_module data "data"
+  in
+  let stack_ptr =
+    create_global ~is_const:false llvm_ctx llvm_module stack "stack"
+  in
   eprintf "llvm module created\n";
-  create_address_map llvm_ctx llvm_module (Project.target proj)
-    (get_section_mem ".data" proj)
-    (get_section_mem ".rodata" proj);
-  create_prog llvm_ctx llvm_module (Project.program proj);
-  Llvm.dump_module llvm_module;
+  (* create_address_map llvm_ctx llvm_module (Project.target proj) rodata_ptr *)
+  (*   data_ptr *)
+  (*   (get_section_mem ".rodata" proj) *)
+  (*   (get_section_mem ".data" proj); *)
+  create_prog llvm_ctx llvm_module (Project.program proj) stack_ptr;
+  Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
 
-let main input_program _ _ =
+let main input_program output_program _ =
   Bil.passes ()
   |> Base.List.iter ~f:(fun pass ->
       eprintf "Bil pass :: %s \n" (Bil.Pass.name pass));
@@ -907,7 +937,7 @@ let main input_program _ _ =
     Project.create @@ Project.Input.load input_program ~loader
     |> Core.Or_error.ok_exn
   in
-  pp proj;
+  pp proj output_program;
   Ok ()
 
 let features_used =

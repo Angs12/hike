@@ -45,9 +45,8 @@ runtest_struct:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o $(PROGSFOLDER)fizzbuzz_0 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --optimization-level=2
-	cat stdio_headers.ll fizzbuzz.ll > converted.ll
-	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO0 converted.ll
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --optimization-level=3
+	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO0 fizzbuzz.ll
 
 compileO2_fizzbuzz:
 	gcc -O2 -o $(PROGSFOLDER)fizzbuzz_2 $(PROGSFOLDER)fizzbuzz.c
@@ -81,9 +80,8 @@ compileO3_fact:
 
 compileO0_struct:
 	gcc -O0 -o $(PROGSFOLDER)struct_0  $(PROGSFOLDER)struct.c
-	bap convlir -L ./plugins $(PROGSFOLDER)struct_0 struct.ll
-	cat stdio_headers.ll struct.ll > converted.ll
-	clang -O3 -o $(PROGSFOLDER)struct_llvmO0 converted.ll
+	bap convlir -L ./plugins $(PROGSFOLDER)struct_0 struct.ll --optimization-level=2
+	clang -O3 -o $(PROGSFOLDER)struct_llvmO0 struct.ll
 
 compileO2_struct:
 	gcc -O2 -o $(PROGSFOLDER)struct_2  $(PROGSFOLDER)struct.c

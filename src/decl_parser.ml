@@ -17,6 +17,23 @@ type functype =
 type funcdef = { return : functype; args : functype list }
 type libcmap = funcdef Map.Make(String).t
 
+let rec functype_to_lltype llvm_ctx functype =
+  match functype with
+  | Void -> Llvm.void_type llvm_ctx
+  | Pointer -> Llvm.pointer_type llvm_ctx
+  | Int n -> Llvm.integer_type llvm_ctx n
+  | Half -> Llvm.float_type llvm_ctx (*TODO: half type *)
+  | Bfloat -> Llvm.float_type llvm_ctx (*TODO: bfloat type *)
+  | Float -> Llvm.float_type llvm_ctx
+  | Double -> Llvm.double_type llvm_ctx
+  | FP128 -> Llvm.fp128_type llvm_ctx
+  | X86fp80 -> Llvm.x86fp80_type llvm_ctx
+  | PPCfp128 -> Llvm.ppc_fp128_type llvm_ctx
+  | X86amx -> Llvm.x86_mmx_type llvm_ctx
+  | Struct types ->
+      let lltys = Base.List.map types ~f:(functype_to_lltype llvm_ctx) in
+      Llvm.struct_type llvm_ctx (Base.List.to_array lltys)
+
 open Core
 
 let rec ll_type_to_functype (s : string) : functype =
@@ -24,8 +41,7 @@ let rec ll_type_to_functype (s : string) : functype =
   | "void" -> Void
   | "ptr" -> Pointer
   | t ->
-      if String.length t >= 4 && String.is_prefix ~prefix:"ptr " t then
-        Pointer
+      if String.length t >= 4 && String.is_prefix ~prefix:"ptr " t then Pointer
       else if String.length t > 0 && Char.equal (String.get t 0) 'i' then
         Int (int_of_string (String.sub t ~pos:1 ~len:(String.length t - 1)))
       else if String.length t > 0 && Char.equal (String.get t 0) '{' then

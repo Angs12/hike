@@ -9,7 +9,7 @@ let set_ret_reg target =
   Format.fprintf Format.err_formatter "Target :%a\n" Theory.Target.pp target;
   let reg =
     if Theory.Target.matches target "i686-gnu-elf" then
-      Var.create "EAX" (Imm 64)
+      Var.create "EAX" (Imm 32)
     else if Theory.Target.matches target "x86_64-gnu-elf" then
       Var.create "RAX" (Imm 64)
     else failwith "unsupported target"
@@ -49,28 +49,8 @@ let set_fp target =
     |> Var.reify
 
 let set_regs target =
-  let flags =
-    [
-      Var.create "CF" (Imm 1);
-      Var.create "PF" (Imm 1);
-      Var.create "AF" (Imm 1);
-      Var.create "ZF" (Imm 1);
-      Var.create "SF" (Imm 1);
-      Var.create "TF" (Imm 1);
-      Var.create "IF" (Imm 1);
-      Var.create "DF" (Imm 1);
-      Var.create "OF" (Imm 1);
-      Var.create "PF" (Imm 1);
-    ]
-  in
   regs :=
     Theory.Target.regs target |> Base.Set.to_list |> Base.List.map ~f:Var.reify
-    |> Base.List.filter_map ~f:(fun reg ->
-        let reg =
-          if Var.typ reg = Imm 32 then Var.create (Var.name reg) (Imm 64)
-          else reg
-        in
-        if List.mem reg flags then None else Some reg)
 
 let set_stack target =
   let byte = Theory.Target.byte target in

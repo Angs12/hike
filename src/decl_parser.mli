@@ -16,3 +16,4 @@ type funcdef = { return : functype; args : functype list }
 type libcmap = funcdef Map.Make(String).t
 
 val parse_header_file : string -> libcmap
+val functype_to_lltype : Llvm.llcontext -> functype -> Llvm.lltype
