@@ -33,7 +33,7 @@ let stack = ref @@ Var.create "DUMMY" (Mem (`r32, Size.of_int_exn 8))
 let sp = ref @@ Var.create "DUMMY" (Imm 1)
 let fp = ref @@ Var.create "DUMMY" (Imm 1)
 let ptrsize = ref @@ 0
-let regs = ref []
+let base_regs = ref []
 let set_ptrsize target = ptrsize := Theory.Target.bits target
 
 let set_sp target =
@@ -49,7 +49,7 @@ let set_fp target =
     |> Var.reify
 
 let set_regs target =
-  regs :=
+  base_regs :=
     Theory.Target.regs target |> Base.Set.to_list |> Base.List.map ~f:Var.reify
 
 let set_stack target =
@@ -61,3 +61,21 @@ let set_stack target =
     | _ -> failwith "stack: non-32 or 64 bits"
   in
   stack := Var.create "stack" (Mem (bits, Size.of_int_exn byte))
+
+let resolve_alias target reg =
+  let sort = Var.sort reg in
+  let name = Var.name reg in
+  let theory_var = Theory.Var.define sort name in
+  Option.bind (Theory.Target.unalias target theory_var) Theory.Origin.cast_sub
+
+let theory_regs target = Theory.Target.regs target |> Base.Set.to_list
+
+let basis_regs target =
+  let all_theory_regs = theory_regs target in
+  let is_basis reg =
+    match Theory.Target.unalias target reg with None -> true | Some _ -> false
+  in
+  let basis_theory_regs = List.filter is_basis all_theory_regs in
+  List.map (fun r -> Var.reify r) basis_theory_regs
+
+let set_base_regs target = base_regs := basis_regs target

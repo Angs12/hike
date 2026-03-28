@@ -17,11 +17,8 @@ unsigned int factorial(unsigned int N) {
 
 int main() {
   int fact = factorial(4);
-  int t = getchar();
-  putchar(t);
   puts("Hello World");
   int *p = malloc(sizeof(int));
   puts("Hello World");
-  inc(fact, 0, 0, 0, 0, 0, 1);
-  return 0;
+  return inc(fact, 0, 0, 0, 0, 0, 1);
 }
