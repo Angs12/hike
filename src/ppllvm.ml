@@ -48,12 +48,6 @@ let get_section name proj =
       arr.(Word.to_int_exn (Word.( - ) index min_addr)) <- Word.to_int_exn v);
   arr
 
-let print_sections p =
-  Project.memory p |> Memmap.to_sequence
-  |> Seq.iter ~f:(fun (mem, x) ->
-      Base.Option.iter (Value.get Image.section x) ~f:(fun name ->
-          eprintf "Section: %s@.%a@." name Memory.pp mem))
-
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 let var_size var =
@@ -134,14 +128,6 @@ let add_args_to_vars fn =
       let name = Llvm.value_name param in
       sub_llvars := StrMap.add name param !sub_llvars)
     fn
-
-let add_regs_to_vars llvm_ctx blk_tid =
-  Base.List.iter !base_regs ~f:(fun reg ->
-      sub_llvars :=
-        StrMap.add
-          (bb_phi_reg_name reg blk_tid)
-          (Llvm.undef (var_lltype llvm_ctx reg))
-          !sub_llvars)
 
 let create_fun llvm_ctx llvm_module sub =
   let tid = Term.tid sub in
@@ -226,7 +212,6 @@ let set_libc llvm_ctx llvm_module target libc =
     libc
 
 let stack_len = 0x2048
-let stack_off = 0x5000
 
 let unaliased_reg_exp var =
   let resolved = X86Regs.resolve_alias !target_ref var in
@@ -538,21 +523,23 @@ let create_call llvm_ctx llvm_module llvm_builder fn blk_tid call =
         target_label
   | _, _ -> failwith "pp_call: non-trivial return type"
 
-let create_phi llvm_ctx llvm_module llvm_builder fn phi =
+let update_phis llvm_ctx llvm_module llvm_builder fn phi =
   let var = Phi.lhs phi in
-  if is_mem var || Base.List.mem !base_regs var ~equal:Var.same then ()
-  else
-    let vals = Phi.values phi in
-    let values =
-      Seq.fold vals ~init:[] ~f:(fun val_list (tid, exp) ->
-          ( create_exp llvm_ctx llvm_module llvm_builder exp,
-            llbb_from_tid fn tid )
-          :: val_list)
-    in
-    let res =
-      Llvm.build_phi values (sanitize_name @@ Var.name var) llvm_builder
-    in
-    sub_llvars := StrMap.add (sanitize_name @@ Var.name var) res !sub_llvars
+  let vals = Phi.values phi in
+  let phi_llvar = llvar_from_name (sanitize_name @@ Var.name var) in
+  Seq.iter vals ~f:(fun (tid, exp) ->
+      Llvm.add_incoming
+        (create_exp llvm_ctx llvm_module llvm_builder exp, llbb_from_tid fn tid)
+        phi_llvar)
+
+let create_empty_phi llvm_ctx llvm_builder phi =
+  let var = Phi.lhs phi in
+  let res =
+    Llvm.build_empty_phi (var_lltype llvm_ctx var)
+      (sanitize_name @@ Var.name var)
+      llvm_builder
+  in
+  sub_llvars := StrMap.add (sanitize_name @@ Var.name var) res !sub_llvars
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
@@ -738,7 +725,7 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
       |> Seq.iter ~f:(fun elt ->
           match elt with
           | `Def def -> create_def llvm_ctx llvm_module llvm_builder def
-          | `Phi phi -> create_phi llvm_ctx llvm_module llvm_builder fn phi
+          | `Phi phi -> create_empty_phi llvm_ctx llvm_builder phi
           | `Jmp _ -> ());
       let control_flow = Term.enum jmp_t blk in
       match cf_type control_flow with
@@ -747,7 +734,15 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder blks fn =
       | Int -> failwith "jmp: INT not implemented"
       | Call | CallVoid | CallRet ->
           let call = Seq.hd_exn control_flow |> call_exn in
-          create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call)
+          create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call);
+  Seq.iter blks ~f:(fun blk ->
+      let bb = llbb_from_tid fn (Term.tid blk) in
+      Llvm.position_at_end bb llvm_builder;
+      Blk.elts blk
+      |> Seq.iter ~f:(fun elt ->
+          match elt with
+          | `Phi phi -> update_phis llvm_ctx llvm_module llvm_builder fn phi
+          | _ -> ()))
 
 let initialize_bbs llvm_ctx blks fn =
   (* create the basic blocks *)
@@ -773,7 +768,6 @@ let create_sub llvm_ctx llvm_module stack_ptr sub =
   initialize_bbs llvm_ctx blks fn;
   (* go from entry to first bb *)
   Llvm.build_br (llbb_from_tid fn (entry_blk_tid sub)) llvm_builder |> ignore;
-  Seq.iter blks ~f:(fun blk -> add_regs_to_vars llvm_ctx (Term.tid blk));
   create_basicblocks llvm_ctx llvm_module llvm_builder blks fn
 
 let is_libc libc sub =
@@ -886,7 +880,6 @@ let create_address_map llvm_ctx llvm_module target rodata_ptr data_ptr
 let pp proj output_program =
   let proj = run_pass proj "trivial-condition-form" in
   let proj = run_pass proj "optimization" in
-  (* print_sections proj; *)
   Project.passes ()
   |> Base.List.iter ~f:(fun pass ->
       eprintf "Project pass :: %s \n" (Project.Pass.name pass));
@@ -904,9 +897,7 @@ let pp proj output_program =
   SubSet.iter
     (fun sub ->
       if is_libc libc sub || not (SubSet.mem sub reachable_funcs) then ()
-      else (
-        Sub.pp err_formatter sub;
-        set_sub llvm_ctx llvm_module sub))
+      else set_sub llvm_ctx llvm_module sub)
     reachable_funcs;
   let proj =
     Project.map_program proj ~f:(fun prog ->
@@ -915,8 +906,8 @@ let pp proj output_program =
               None
             else
               Some
-                (sub |> update_args |> update_rets |> Sub.ssa |> transfer_regs
-               |> update_main)))
+                (sub |> unalias_sub |> update_args |> update_rets |> Sub.ssa
+               |> transfer_regs |> update_main)))
   in
   let stack_ptr =
     create_global ~is_const:false llvm_ctx llvm_module stack "stack"
