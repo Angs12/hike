@@ -262,8 +262,8 @@ let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
   | AND -> Llvm.build_and llvm_val1 llvm_val2 res_name llvm_builder
   | OR -> Llvm.build_or llvm_val1 llvm_val2 res_name llvm_builder
   | XOR -> Llvm.build_xor llvm_val1 llvm_val2 res_name llvm_builder
-  | LSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 res_name llvm_builder
-  | RSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 res_name llvm_builder
+  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 res_name llvm_builder
+  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 res_name llvm_builder
   | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 res_name llvm_builder
   | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 res_name llvm_builder
   | NEQ ->
