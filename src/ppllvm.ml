@@ -1,5 +1,4 @@
 open Bap.Std
-open X86Regs
 open Bap_main
 open Bap.Std.Bil.Types
 open Regular.Std
@@ -8,6 +7,7 @@ open Bap_main.Extension.Command
 open Format
 open Bil2llvm
 open Convutils
+open Targetutils
 module StrMap = Map.Make (String)
 
 let get_section_mem name proj =
@@ -38,20 +38,22 @@ let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 let free_vars sub =
   Sub.free_vars sub
   |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
-  |> Var.Set.filter ~f:(fun var -> not @@ Var.same var !ret_reg)
   |> Var.Set.to_list
-
-let target_ref = ref Theory.Target.unknown
 
 let set_sub llvm_ctx llvm_module sub =
   let free_vars = free_vars sub in
-  let ret = Arg.create ~intent:Out !ret_reg (Var !ret_reg) in
+  let rets =
+    (if Theory.Target.matches !target_ref "x86_64-gnu-elf" then
+       Calling_conventions.x86_64_sysv.return_regs
+     else [])
+    |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
+  in
   if Term.name sub = "@main" then
     let rdi = Var.create "RDI" (Imm 64) in
     let rsi = Var.create "RSI" (Imm 64) in
     subs :=
       StrMap.add (Term.name sub)
-        ( [ ret ],
+        ( [],
           [
             Arg.create ~intent:In rdi (Var rdi);
             Arg.create ~intent:In rsi (Var rsi);
@@ -60,7 +62,7 @@ let set_sub llvm_ctx llvm_module sub =
   else
     subs :=
       StrMap.add (Term.name sub)
-        ( [ ret ],
+        ( rets,
           Base.List.map
             ~f:(fun reg ->
               if Var.same reg !sp || Var.same reg !fp then
@@ -120,7 +122,7 @@ let set_libc llvm_ctx llvm_module target libc =
 let stack_len = 0x2048
 
 let unaliased_reg_exp var =
-  let resolved = X86Regs.resolve_alias !target_ref var in
+  let resolved = Targetutils.resolve_alias !target_ref var in
   match resolved with
   | None -> Bil.Var var
   | Some origin ->
@@ -173,8 +175,7 @@ let update_rets sub =
             | Direct _ ->
                 let temp_builder = Blk.Builder.create () in
                 Blk.Builder.add_jmp temp_builder
-                  (Jmp.create_ret
-                     (Indirect (Var (Var.create "ret" (Var.typ !ret_reg)))));
+                  (Jmp.create_ret (Indirect (Var (Var.create "ret" Unk))));
                 let new_blk = Blk.Builder.result temp_builder in
                 new_blks := new_blk :: !new_blks;
                 let call = Call.with_return call (Direct (Term.tid new_blk)) in
@@ -293,16 +294,20 @@ let transfer_regs sub =
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
+      let rets =
+        match cf_type (Term.enum jmp_t blk) with
+        | Call sub_tid -> get_rets sub_tid
+        | _ -> []
+      in
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
-          match (cf_type (Term.enum jmp_t blk), Var.same key !ret_reg) with
-          | Call, true ->
-              let ret_var = create_ret key ~typ:(Var.typ key) ~tid in
-              let def = Def.create ret_var (Var data) in
-              Blk.Builder.add_def builder def
-          | _, _ ->
-              let reg_var = create_phi_reg key ~typ:(Var.typ key) ~tid in
-              let def = Def.create reg_var (Var data) in
-              Blk.Builder.add_def builder def);
+          if is_ret_reg rets key then
+            let ret_var = create_ret key ~typ:(Var.typ key) ~tid in
+            let def = Def.create ret_var (Var data) in
+            Blk.Builder.add_def builder def
+          else
+            let reg_var = create_phi_reg key ~typ:(Var.typ key) ~tid in
+            let def = Def.create reg_var (Var data) in
+            Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
 let is_external sub =
@@ -330,14 +335,12 @@ let should_filter sub =
 
 let setup llvm_ctx llvm_module proj libc =
   let target = Project.target proj in
-  target_ref := target;
-  set_ret_reg target;
+  set_target_ref target;
+  set_ptrsize target;
   set_base_regs target;
   set_stack target;
-  set_sp target;
   set_fp target;
-  set_mem target;
-  set_ptrsize target;
+  set_sp target;
   set_libc llvm_ctx llvm_module target libc
 
 let pp proj output_program =

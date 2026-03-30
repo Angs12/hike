@@ -1,7 +1,7 @@
 open Bap.Std.Bil.Types
 open Bap.Std
 open Format
-open X86Regs
+open Targetutils
 module StrMap = Map.Make (String)
 
 let subs : (Arg.t list * Arg.t list) StrMap.t ref = ref StrMap.empty
@@ -31,7 +31,7 @@ let label_tid label =
   | Direct tid -> tid
   | Indirect _ -> failwith "label_tid: indirect label"
 
-type cf_type = Br | Ret | Call | Int | CallVoid | CallRet
+type cf_type = Br | Ret | Call of Tid.t | Int | CallVoid | CallRet
 
 let cf_type control_flow =
   let br = Seq.hd_exn control_flow in
@@ -42,8 +42,8 @@ let cf_type control_flow =
       match Call.return c with
       | Some _ -> (
           match Call.target c with
-          | Direct tid -> if is_void tid then CallVoid else Call
-          | Indirect _ -> Call)
+          | Direct tid -> if is_void tid then CallVoid else Call tid
+          | Indirect _ -> failwith "cf_type: indirect call")
       | None -> CallRet)
   | Int _ -> Int
 
@@ -110,12 +110,17 @@ let create_ret base ~typ ~tid =
 let create_phi_reg base ~typ ~tid =
   Var.create ~is_virtual:false (bb_phi_reg_name base tid) typ
 
-let correct_registers tid =
+let is_ret_reg rets var =
+  Option.is_some
+  @@ Base.List.find rets ~f:(fun ret -> Var.same (Arg.lhs ret) var)
+
+let correct_registers sub_tid tid =
+  let rets = get_rets sub_tid in
   object
     inherit Exp.mapper
 
     method! map_var var =
-      if Var.same var !ret_reg then Var (create_ret var ~tid ~typ:(Var.typ var))
+      if is_ret_reg rets var then Var (create_ret var ~tid ~typ:(Var.typ var))
       else if Base.List.mem !base_regs var ~equal:Var.same then
         Var (create_phi_reg var ~tid ~typ:(Var.typ var))
       else Var var
