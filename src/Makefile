@@ -5,7 +5,7 @@ sim:
 	bapbundle install sim.plugin
 
 llvm:
-	bapbuild ppllvm.plugin -pkg z3 -pkg llvm
+	bapbuild ppllvm.plugin -pkg z3 -pkg llvm 
 	bapbundle install -destdir ./plugins ppllvm.plugin
 
 clean:
@@ -45,42 +45,42 @@ runtest_struct:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o $(PROGSFOLDER)fizzbuzz_0 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --optimization-level=3
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --glibc-runtime-enable
 	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO0 fizzbuzz.ll
 
 compileO2_fizzbuzz:
 	gcc -O2 -o $(PROGSFOLDER)fizzbuzz_2 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_2 fizzbuzz.ll --optimization-level=2
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_2 fizzbuzz.ll 
 	cat stdio_headers.ll fizzbuzz.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO2 converted.ll
 
 compileO3_fizzbuzz:
 	gcc -O3 -o $(PROGSFOLDER)fizzbuzz_3 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_3 fizzbuzz.ll --optimization-level=2
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_3 fizzbuzz.ll 
 	cat stdio_headers.ll fizzbuzz.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO3 converted.ll
 
 compileO0_fact:
 	gcc -O0 -o $(PROGSFOLDER)factorial_0  $(PROGSFOLDER)factorial.c
-	bap convlir -L ./plugins $(PROGSFOLDER)factorial_0 factorial.ll --optimization-level=2
+	bap convlir -L ./plugins $(PROGSFOLDER)factorial_0 factorial.ll 
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)factorial_llvmO0 converted.ll
 
 compileO2_fact:
 	gcc -O2 -o $(PROGSFOLDER)factorial_2  $(PROGSFOLDER)factorial.c
-	bap convlir -L ./plugins $(PROGSFOLDER)factorial_2 factorial.ll --optimization-level=2
+	bap convlir -L ./plugins $(PROGSFOLDER)factorial_2 factorial.ll 
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)factorial_llvmO2 converted.ll
 
 compileO3_fact:
 	gcc -O3 -o $(PROGSFOLDER)factorial_3  $(PROGSFOLDER)factorial.c
-	bap convlir -L ./plugins $(PROGSFOLDER)factorial_3 factorial.ll --optimization-level=2
+	bap convlir -L ./plugins $(PROGSFOLDER)factorial_3 factorial.ll 
 	cat stdio_headers.ll factorial.ll > converted.ll
 	clang -O3 -o $(PROGSFOLDER)factorial_llvmO3 converted.ll
 
 compileO0_struct:
 	gcc -O0 -o $(PROGSFOLDER)struct_0  $(PROGSFOLDER)struct.c
-	bap convlir -L ./plugins $(PROGSFOLDER)struct_0 struct.ll --optimization-level=2
+	bap convlir -L ./plugins $(PROGSFOLDER)struct_0 struct.ll 
 	clang -O3 -o $(PROGSFOLDER)struct_llvmO0 struct.ll
 
 compileO2_struct:

@@ -12,7 +12,6 @@
     bap-future
     bap-knowledge
     bap-main
-    bap-beagle
     bitvec
     bitvec-order
     core_kernel
