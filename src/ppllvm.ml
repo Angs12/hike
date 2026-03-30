@@ -62,7 +62,10 @@ let set_sub llvm_ctx llvm_module sub =
       StrMap.add (Term.name sub)
         ( [ ret ],
           Base.List.map
-            ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+            ~f:(fun reg ->
+              if Var.same reg !sp || Var.same reg !fp then
+                Arg.create ~intent:Both reg (Var reg)
+              else Arg.create ~intent:In reg (Var reg))
             free_vars )
         !subs;
   create_fun llvm_ctx llvm_module sub

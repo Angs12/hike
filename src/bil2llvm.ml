@@ -27,7 +27,8 @@ let create_arg_types llvm_ctx sub_tid =
   Base.List.to_array args
   |> Base.Array.map ~f:(fun arg ->
       let var = Arg.lhs arg in
-      var_lltype llvm_ctx var)
+      if Arg.intent arg = Some Both then Llvm.pointer_type llvm_ctx
+      else var_lltype llvm_ctx var)
 
 let set_arg_names fn sub_tid =
   let args = get_args sub_tid in
@@ -35,11 +36,26 @@ let set_arg_names fn sub_tid =
       let param = Llvm.param fn i in
       Llvm.set_value_name (bb_arg_name (Arg.lhs arg) sub_tid) param)
 
-let add_args_to_vars fn =
+let set_arg_attrs llvm_ctx fn sub_tid =
+  let args = get_args sub_tid in
+  Base.List.iteri args ~f:(fun i arg ->
+      if Arg.intent arg = Some Both then
+        let attr = Llvm.create_enum_attr llvm_ctx "noalias" 0L in
+        Llvm.add_function_attr fn attr (Llvm.AttrIndex.Param i))
+
+let add_args_to_vars llvm_ctx llvm_builder fn =
   Llvm.iter_params
     (fun param ->
       let name = Llvm.value_name param in
-      sub_llvars := StrMap.add name param !sub_llvars)
+      match Llvm.classify_type (Llvm.type_of param) with
+      | Llvm.TypeKind.Pointer ->
+          sub_llvars :=
+            StrMap.add name
+              (Llvm.build_ptrtoint param
+                 (Llvm.integer_type llvm_ctx !ptrsize)
+                 "" llvm_builder)
+              !sub_llvars
+      | _ -> sub_llvars := StrMap.add name param !sub_llvars)
     fn
 
 let add_regs_to_vars llvm_ctx blk_tid =
@@ -54,6 +70,7 @@ let create_fun llvm_ctx llvm_module sub =
   let fn_typ = Llvm.function_type ret_typ args_typ in
   let fn = Llvm.define_function (Sub.name sub) fn_typ llvm_module in
   set_arg_names fn tid;
+  set_arg_attrs llvm_ctx fn tid;
   ll_funcs := StrMap.add (Sub.name sub) (fn, fn_typ) !ll_funcs
 
 let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
@@ -337,7 +354,7 @@ let create_sub llvm_ctx llvm_module stack_ptr sub =
       (Llvm.build_ptrtoint stack_ptr (Llvm.i64_type llvm_ctx) "" llvm_builder)
       !sub_llvars;
   (* add args to llvars *)
-  add_args_to_vars fn;
+  add_args_to_vars llvm_ctx llvm_builder fn;
   (* add regs to llvars *)
   Seq.iter blks ~f:(fun blk -> add_regs_to_vars llvm_ctx (Term.tid blk));
   initialize_bbs llvm_ctx blks fn;
