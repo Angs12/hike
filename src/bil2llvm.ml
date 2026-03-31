@@ -11,17 +11,17 @@ let llvar_from_name name = StrMap.find name !sub_llvars
 let typ_lltype llvm_ctx typ =
   match typ with
   | Imm n -> Llvm.integer_type llvm_ctx n
-  | _ -> failwith "typ_lltype : non-imm typ"
+  | _ -> Llvm.pointer_type llvm_ctx
 
 let var_lltype llvm_ctx var = typ_lltype llvm_ctx (Var.typ var)
 
 let llbb_from_tid fn tid =
   let bbs = Llvm.basic_blocks fn in
   Base.Array.find_exn bbs ~f:(fun bb ->
-      Llvm.value_of_block bb |> Llvm.value_name = Tid.name tid)
+      Llvm.value_of_block bb |> Llvm.value_name = sanitize_name @@ Tid.name tid)
 
-let create_ret_type llvm_ctx sub =
-  let rets = get_rets (Term.tid sub) in
+let create_ret_type llvm_ctx sub_tid =
+  let rets = get_rets sub_tid in
   match rets with
   | [] -> Llvm.void_type llvm_ctx
   | [ ret ] -> var_lltype llvm_ctx (Arg.lhs ret)
@@ -56,6 +56,7 @@ let add_args_to_vars llvm_ctx llvm_builder fn =
   Llvm.iter_params
     (fun param ->
       let name = Llvm.value_name param in
+      Format.eprintf "Adding %s to llvars\n" name;
       match Llvm.classify_type (Llvm.type_of param) with
       | Llvm.TypeKind.Pointer ->
           sub_llvars :=
@@ -72,15 +73,27 @@ let add_regs_to_vars llvm_ctx blk_tid =
       let undef = Llvm.undef (var_lltype llvm_ctx reg) in
       sub_llvars := StrMap.add (bb_reg_name reg blk_tid) undef !sub_llvars)
 
-let create_fun llvm_ctx llvm_module sub =
-  let tid = Term.tid sub in
-  let ret_typ = create_ret_type llvm_ctx sub in
-  let args_typ = create_arg_types llvm_ctx tid in
+let create_fun_declaration llvm_ctx llvm_module sub_tid =
+  let ret_typ = create_ret_type llvm_ctx sub_tid in
+  let args_typ = create_arg_types llvm_ctx sub_tid in
   let fn_typ = Llvm.function_type ret_typ args_typ in
-  let fn = Llvm.define_function (Sub.name sub) fn_typ llvm_module in
-  set_arg_names fn tid;
-  set_arg_attrs llvm_ctx fn tid;
-  ll_funcs := StrMap.add (Sub.name sub) (fn, fn_typ) !ll_funcs
+  let fn =
+    Llvm.declare_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
+  in
+  ll_funcs :=
+    StrMap.add (sanitize_name @@ Tid.name sub_tid) (fn, fn_typ) !ll_funcs
+
+let create_fun llvm_ctx llvm_module sub_tid =
+  let ret_typ = create_ret_type llvm_ctx sub_tid in
+  let args_typ = create_arg_types llvm_ctx sub_tid in
+  let fn_typ = Llvm.function_type ret_typ args_typ in
+  let fn =
+    Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
+  in
+  set_arg_names fn sub_tid;
+  set_arg_attrs llvm_ctx fn sub_tid;
+  ll_funcs :=
+    StrMap.add (sanitize_name @@ Tid.name sub_tid) (fn, fn_typ) !ll_funcs
 
 let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
   match op with
@@ -221,9 +234,14 @@ let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
 let create_branches llvm_ctx llvm_module llvm_builder fn branches =
   if Seq.length branches = 1 then (* unconditional branch *)
     let br = Seq.hd_exn branches in
-    let jmp__target = Jmp.kind br |> goto_label_exn |> label_tid in
-    let bb = llbb_from_tid fn jmp__target in
-    Llvm.build_br bb llvm_builder |> ignore
+    let jmp_target = Jmp.kind br |> goto_label_exn in
+    match jmp_target with
+    | Direct tid ->
+        let bb = llbb_from_tid fn tid in
+        Llvm.build_br bb llvm_builder |> ignore
+    | Indirect exp ->
+        let target_val = create_exp llvm_ctx llvm_module llvm_builder exp in
+        Llvm.build_indirect_br target_val 1 llvm_builder |> ignore
   else if Seq.length branches = 2 then
     (* conditional branch *)
     let br1 = Seq.hd_exn branches in
@@ -262,14 +280,21 @@ let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
               arg :: arg_list)
       | None -> arg_list)
 
+let get_func llvm_ctx llvm_module tid =
+  let name = sanitize_name @@ Tid.name tid in
+  if StrMap.mem name !ll_funcs then StrMap.find name !ll_funcs
+  else (
+    Format.eprintf "get_func: function %s not found" name;
+    create_fun_declaration llvm_ctx llvm_module tid;
+    StrMap.find name !ll_funcs)
+
 let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
     fallthrough target =
   let args =
     create_call_args llvm_ctx llvm_module llvm_builder target blk_tid
   in
   let rets = get_rets target in
-  let func_name = sanitize_name @@ Tid.name target in
-  let fn, fn_typ = StrMap.find func_name !ll_funcs in
+  let fn, fn_typ = get_func llvm_ctx llvm_module target in
   let bb = llbb_from_tid current_fn fallthrough in
   (match rets with
   | [] ->
@@ -354,10 +379,9 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder sub blks fn =
       let control_flow = Term.enum jmp_t blk in
       match cf_type control_flow with
       | Br -> create_branches llvm_ctx llvm_module llvm_builder fn control_flow
-      | Ret -> failwith "jmp: RET not implemented"
       | Int -> failwith "jmp: INT not implemented"
-      | CallRet -> create_return llvm_builder sub (Term.tid blk)
-      | Call _ | CallVoid ->
+      | Ret -> create_return llvm_builder sub (Term.tid blk)
+      | CallFun _ | CallFunVoid ->
           let call = Seq.hd_exn control_flow |> call_exn in
           create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call);
   Seq.iter blks ~f:(fun blk ->
@@ -372,12 +396,12 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder sub blks fn =
 let initialize_bbs llvm_ctx blks fn =
   (* create the basic blocks *)
   Seq.iter blks ~f:(fun blk ->
-      Llvm.append_block llvm_ctx (Term.name blk) fn |> ignore)
+      Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn |> ignore)
 
 let create_sub llvm_ctx llvm_module stack_ptr sub =
   let blks = Term.enum blk_t sub in
   let fn =
-    Llvm.lookup_function (Sub.name sub) llvm_module
+    Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module
     |> Base.Option.value_exn ~message:"create sub : function not found"
   in
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in

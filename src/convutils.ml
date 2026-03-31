@@ -7,16 +7,18 @@ module StrMap = Map.Make (String)
 let subs : (Arg.t list * Arg.t list) StrMap.t ref = ref StrMap.empty
 
 let get_args sub_tid =
-  snd
-  @@ Base.Option.value_exn
-       ~message:(sprintf "get_args : sub %s not found" (Tid.name sub_tid))
-       (StrMap.find_opt (Tid.name sub_tid) !subs)
+  match StrMap.find_opt (Tid.name sub_tid) !subs with
+  | Some (_, args) -> args
+  | None ->
+      eprintf "get_args : sub %s not found\n" (Tid.name sub_tid);
+      []
 
 let get_rets sub_tid =
-  fst
-  @@ Base.Option.value_exn
-       ~message:(sprintf "get_rets : sub %s not found" (Tid.name sub_tid))
-       (StrMap.find_opt (Tid.name sub_tid) !subs)
+  match StrMap.find_opt (Tid.name sub_tid) !subs with
+  | Some (rets, _) -> rets
+  | None ->
+      eprintf "get_rets : sub %s not found\n" (Tid.name sub_tid);
+      []
 
 let var_size var =
   match Var.typ var with Imm n -> n | _ -> failwith "var size: non-imm var"
@@ -31,7 +33,7 @@ let label_tid label =
   | Direct tid -> tid
   | Indirect _ -> failwith "label_tid: indirect label"
 
-type cf_type = Br | Ret | Call of Tid.t | Int | CallVoid | CallRet
+type cf_type = Br | Ret | CallFun of Tid.t | Int | CallFunVoid
 
 let cf_type control_flow =
   let br = Seq.hd_exn control_flow in
@@ -42,9 +44,9 @@ let cf_type control_flow =
       match Call.return c with
       | Some _ -> (
           match Call.target c with
-          | Direct tid -> if is_void tid then CallVoid else Call tid
+          | Direct tid -> if is_void tid then CallFunVoid else CallFun tid
           | Indirect _ -> failwith "cf_type: indirect call")
-      | None -> CallRet)
+      | None -> Ret)
   | Int _ -> Int
 
 let call_exn jmp =
@@ -72,7 +74,6 @@ let sanitize_name =
       if c = '#' then false
       else if c = '.' then false
       else if c = '%' then false
-      else if c = '\\' then false
       else if c = '\\' then false
       else if c = '@' then false
       else true)

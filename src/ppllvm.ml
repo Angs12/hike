@@ -70,7 +70,7 @@ let set_sub llvm_ctx llvm_module sub =
               else Arg.create ~intent:In reg (Var reg))
             free_vars )
         !subs;
-  create_fun llvm_ctx llvm_module sub
+  create_fun llvm_ctx llvm_module (Term.tid sub)
 
 module type Abi = sig
   val return : Decl_parser.functype -> var list
@@ -165,7 +165,7 @@ let update_rets sub =
         let builder = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
         let control_flow = Term.enum jmp_t blk in
         (match cf_type control_flow with
-        | CallRet -> (
+        | Ret -> (
             let jmp =
               Base.Option.value_exn ~message:"ret jmp not found"
                 (Term.first jmp_t blk)
@@ -228,6 +228,29 @@ let update_main sub =
         else blk)
   else sub
 
+let update_exp reg_map exp =
+  Var.Map.fold reg_map ~init:exp ~f:(fun ~key ~data exp ->
+      Exp.map (base_exp_sub key data) exp)
+
+let update_var reg_map var =
+  Var.Map.fold !reg_map ~init:var ~f:(fun ~key ~data var ->
+      if Var.same var key then (
+        let new_index = Var.index data + 1 in
+        reg_map :=
+          Var.Map.change !reg_map key ~f:(fun _ ->
+              Some (Var.with_index data new_index));
+        Var.with_index data new_index)
+      else var)
+
+let update_label reg_map label =
+  match label with
+  | Direct _ -> label
+  | Indirect exp -> Indirect (update_exp !reg_map exp)
+
+let update_jmp_cond reg_map jmp =
+  let cond = Jmp.cond jmp in
+  Jmp.with_cond jmp (update_exp !reg_map cond)
+
 let transfer_regs sub =
   Term.map blk_t sub ~f:(fun blk ->
       let tid = Term.tid blk in
@@ -238,29 +261,21 @@ let transfer_regs sub =
             Var.Map.add_exn map ~key:base ~data:reg)
       in
       let blk =
-        Base.List.fold ~init:blk !base_regs ~f:(fun blk base ->
-            let ver = ref 0 in
-            let reg = create_reg base ~typ:(Var.typ base) ~tid in
-            Blk.map_elts blk ~def:(fun def ->
-                let var = Def.lhs def in
-                let exp = Def.rhs def in
-                let def =
-                  Def.with_rhs def
-                    (Exp.map (base_exp_sub base (Var.with_index reg !ver)) exp)
-                in
-                let def =
-                  if Var.same var base then (
-                    let tmp =
-                      Def.with_lhs def (Var.with_index reg (!ver + 1))
-                    in
-                    reg_map :=
-                      Var.Map.change !reg_map (Var.base var) ~f:(fun _ ->
-                          Some (Var.with_index reg (!ver + 1)));
-                    ver := !ver + 1;
-                    tmp)
-                  else def
-                in
-                def))
+        Blk.map_elts blk ~def:(fun def ->
+            let var = Def.lhs def in
+            let def = Def.map_exp ~f:(update_exp !reg_map) def in
+            Def.with_lhs def (update_var reg_map var))
+        |> Blk.map_elts ~jmp:(fun jmp ->
+            (match Jmp.kind jmp with
+              | Call call ->
+                  Jmp.with_kind jmp
+                    (Call
+                       (Call.with_target call
+                          (update_label reg_map (Call.target call))))
+              | Goto label ->
+                  Jmp.with_kind jmp (Goto (update_label reg_map label))
+              | _ -> jmp)
+            |> update_jmp_cond reg_map)
       in
       let builder =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
@@ -296,7 +311,7 @@ let transfer_regs sub =
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
       let rets =
         match cf_type (Term.enum jmp_t blk) with
-        | Call sub_tid -> get_rets sub_tid
+        | CallFun sub_tid -> get_rets sub_tid
         | _ -> []
       in
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
@@ -357,10 +372,7 @@ let pp proj output_program =
   let prog = Project.program proj in
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
-      if should_filter sub then ()
-      else (
-        eprintf "Sub %s\n" (Term.name sub);
-        set_sub llvm_ctx llvm_module sub));
+      if should_filter sub then () else set_sub llvm_ctx llvm_module sub);
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->

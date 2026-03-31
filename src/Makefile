@@ -13,10 +13,6 @@ clean:
 	dune clean
 	find ./progs -type f -not -name '*.c' -not -name '*.h' -delete
 	rm -rf plugins
-	rm -f struct.ll
-	rm -f fizzbuzz.ll
-	rm -f converted.ll
-	rm -f factorial.ll
 
 test: compileO0_fizzbuzz compileO0_fact compileO0_struct 
 factorial_test: compileO0_fact compileO2_fact compileO3_fact
@@ -45,8 +41,9 @@ runtest_struct:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o $(PROGSFOLDER)fizzbuzz_0 $(PROGSFOLDER)fizzbuzz.c
+	strip $(PROGSFOLDER)fizzbuzz_0
 	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --glibc-runtime-enable
-	clang -O3 -o $(PROGSFOLDER)fizzbuzz_llvmO0 fizzbuzz.ll
+	clang -O3 -c fizzbuzz.ll -o $(PROGSFOLDER)fizzbuzz_llvmO0.o 
 
 compileO2_fizzbuzz:
 	gcc -O2 -o $(PROGSFOLDER)fizzbuzz_2 $(PROGSFOLDER)fizzbuzz.c
