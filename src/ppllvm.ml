@@ -389,10 +389,7 @@ let pp proj output_program =
   let prog = Project.program proj in
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
-      if should_filter proj sub then ()
-      else (
-        eprintf "Sub name :: %s \n" (Sub.name sub);
-        set_sub llvm_ctx llvm_module sub));
+      if should_filter proj sub then () else set_sub llvm_ctx llvm_module sub);
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->

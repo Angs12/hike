@@ -107,9 +107,21 @@ let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   | AND -> Llvm.build_and llvm_val1 llvm_val2 "" llvm_builder
   | OR -> Llvm.build_or llvm_val1 llvm_val2 "" llvm_builder
   | XOR -> Llvm.build_xor llvm_val1 llvm_val2 "" llvm_builder
-  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 "" llvm_builder
-  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 "" llvm_builder
-  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 "" llvm_builder
+  | LSHIFT ->
+      let v2 =
+        Llvm.build_sext llvm_val2 (Llvm.type_of llvm_val1) "" llvm_builder
+      in
+      Llvm.build_shl llvm_val1 v2 "" llvm_builder
+  | RSHIFT ->
+      let v2 =
+        Llvm.build_sext llvm_val2 (Llvm.type_of llvm_val1) "" llvm_builder
+      in
+      Llvm.build_lshr llvm_val1 v2 "" llvm_builder
+  | ARSHIFT ->
+      let v2 =
+        Llvm.build_sext llvm_val2 (Llvm.type_of llvm_val1) "" llvm_builder
+      in
+      Llvm.build_ashr llvm_val1 v2 "" llvm_builder
   | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 "" llvm_builder
   | NEQ -> Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 "" llvm_builder
   | LT -> Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 "" llvm_builder
@@ -122,14 +134,15 @@ let create_unop llvm_builder (op, llvm_val) =
   | NEG -> Llvm.build_neg llvm_val "" llvm_builder
   | NOT -> Llvm.build_not llvm_val "" llvm_builder
 
-let create_concat llvm_builder (llvm_var1, llvm_var2) =
-  let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.size_of in
-  let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.size_of in
+let create_concat llvm_ctx llvm_builder (llvm_var1, llvm_var2) =
+  let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
+  let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.integer_bitwidth in
   let result_typ =
-    Llvm.const_add llvm_var1_size llvm_var2_size |> Llvm.type_of
+    Llvm.integer_type llvm_ctx (llvm_var1_size + llvm_var2_size)
   in
+  let llvm_var2_sizeof = Llvm.const_int result_typ llvm_var2_size in
   let zext_var1 = Llvm.build_zext llvm_var1 result_typ "" llvm_builder in
-  let shl_var1 = Llvm.build_shl zext_var1 llvm_var2_size "" llvm_builder in
+  let shl_var1 = Llvm.build_shl zext_var1 llvm_var2_sizeof "" llvm_builder in
   let zext_var2 = Llvm.build_zext llvm_var2 result_typ "" llvm_builder in
   Llvm.build_or shl_var1 zext_var2 "" llvm_builder
 
@@ -162,13 +175,13 @@ let create_cast llvm_ctx llvm_builder (cast, i, llvm_val) =
   | SIGNED ->
       Llvm.build_sext llvm_val (Llvm.integer_type llvm_ctx i) "" llvm_builder
   | HIGH ->
-      (Llvm.build_lshr llvm_val
-         (Llvm.const_int (Llvm.type_of llvm_val)
-            (Llvm.integer_bitwidth (Llvm.type_of llvm_val) - i))
-         "" llvm_builder
-      |> Llvm.build_trunc)
-        (Llvm.integer_type llvm_ctx i)
-        "" llvm_builder
+      let lshr =
+        Llvm.build_lshr llvm_val
+          (Llvm.const_int (Llvm.type_of llvm_val)
+             (Llvm.integer_bitwidth (Llvm.type_of llvm_val) - i))
+          "" llvm_builder
+      in
+      Llvm.build_trunc lshr (Llvm.integer_type llvm_ctx i) "" llvm_builder
   | LOW ->
       Llvm.build_trunc llvm_val (Llvm.integer_type llvm_ctx i) "" llvm_builder
 
@@ -189,16 +202,17 @@ let rec create_exp llvm_ctx llvm_module llvm_builder exp =
           Llvm.dump_module llvm_module;
           failwith @@ "Variable " ^ Var.name v ^ " not found")
   | Int i ->
-      Llvm.const_of_int64
+      Llvm.const_int_of_string
         (Llvm.integer_type llvm_ctx (Word.bitwidth i))
-        (Word.to_int64_exn i) true
+        (Word.to_bitvec i |> Bitvec.to_string)
+        16
   | Cast (cast, i, exp) ->
       let var = create_exp llvm_ctx llvm_module llvm_builder exp in
       create_cast llvm_ctx llvm_builder (cast, i, var)
   | Concat (exp1, exp2) ->
       let llvm_var1 = create_exp llvm_ctx llvm_module llvm_builder exp1 in
       let llvm_var2 = create_exp llvm_ctx llvm_module llvm_builder exp2 in
-      create_concat llvm_builder (llvm_var1, llvm_var2)
+      create_concat llvm_ctx llvm_builder (llvm_var1, llvm_var2)
   | Extract (hi, lo, exp) ->
       let llvm_var = create_exp llvm_ctx llvm_module llvm_builder exp in
       create_extract llvm_ctx llvm_builder (hi, lo, llvm_var)
@@ -217,8 +231,12 @@ let rec create_exp llvm_ctx llvm_module llvm_builder exp =
       sub_llvars := StrMap.add (Var.name unique_var) v !sub_llvars;
       let body = Exp.substitute (Var var) (Var unique_var) body in
       create_exp llvm_ctx llvm_module llvm_builder body
+  | Ite (cond, true_exp, false_exp) ->
+      let cond = create_exp llvm_ctx llvm_module llvm_builder cond in
+      let true_exp = create_exp llvm_ctx llvm_module llvm_builder true_exp in
+      let false_exp = create_exp llvm_ctx llvm_module llvm_builder false_exp in
+      Llvm.build_select cond true_exp false_exp "" llvm_builder
   | Unknown (_, typ) -> Llvm.undef (typ_lltype llvm_ctx typ)
-  | _ -> failwith "pp_exp: Ite expressions"
 
 let create_branches llvm_ctx llvm_module llvm_builder fn branches =
   if Seq.length branches = 1 then (* unconditional branch *)
