@@ -193,9 +193,13 @@ let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
   | UnOp (op, e) ->
       let var = create_exp llvm_ctx llvm_module llvm_builder e in
       create_unop llvm_builder res_name (op, var)
-  | Var v ->
-      StrMap.find_opt (Var.name v) !sub_llvars
-      |> Base.Option.value_exn ~message:("var " ^ Var.name v ^ " not found")
+  | Var v -> (
+      let i = StrMap.find_opt (Var.name v) !sub_llvars in
+      match i with
+      | Some i -> i
+      | None ->
+          Llvm.dump_module llvm_module;
+          failwith @@ "Variable " ^ Var.name v ^ " not found")
   | Int i ->
       Llvm.const_of_int64
         (Llvm.integer_type llvm_ctx (Word.bitwidth i))
@@ -287,6 +291,39 @@ let get_func llvm_ctx llvm_module tid =
     Format.eprintf "get_func: function %s not found" name;
     create_fun_declaration llvm_ctx llvm_module tid;
     StrMap.find name !ll_funcs)
+
+let create_indirect_call llvm_ctx llvm_module llvm_builder current_fun blk_tid
+    call =
+  let target = Call.target call |> label_exp in
+  let fallthrough =
+    Call.return call
+    |> Base.Option.value_exn ~message:"Create call: expected call got return"
+    |> label_tid
+  in
+  let target_exp = create_exp llvm_ctx llvm_module llvm_builder target in
+  let func_ptr = create_inttoptr llvm_ctx llvm_builder target_exp in
+  let _, fn_typ =
+    get_func llvm_ctx llvm_module (Tid.for_name "indirect_call")
+  in
+  let bb = llbb_from_tid current_fun fallthrough in
+  let rets = get_rets (Tid.for_name "indirect_call") in
+  let args =
+    create_call_args llvm_ctx llvm_module llvm_builder
+      (Tid.for_name "indirect_call")
+      blk_tid
+  in
+  let ret_struct =
+    Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
+  in
+  Base.List.iteri rets ~f:(fun i ret ->
+      let ret_val =
+        Llvm.build_extractvalue ret_struct i
+          (bb_phi_reg_name (Arg.lhs ret) blk_tid)
+          llvm_builder
+      in
+      sub_llvars :=
+        StrMap.add (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_val !sub_llvars);
+  Llvm.build_br bb llvm_builder |> ignore
 
 let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
     fallthrough target =
@@ -381,6 +418,10 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder sub blks fn =
       | Br -> create_branches llvm_ctx llvm_module llvm_builder fn control_flow
       | Int -> failwith "jmp: INT not implemented"
       | Ret -> create_return llvm_builder sub (Term.tid blk)
+      | CallIndirect ->
+          let call = Seq.hd_exn control_flow |> call_exn in
+          create_indirect_call llvm_ctx llvm_module llvm_builder fn
+            (Term.tid blk) call
       | CallFun _ | CallFunVoid ->
           let call = Seq.hd_exn control_flow |> call_exn in
           create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call);

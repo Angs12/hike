@@ -11,6 +11,7 @@ let target_ref = ref Theory.Target.unknown
 let ptrsize = ref 0
 let set_target_ref target = target_ref := target
 let set_ptrsize size = ptrsize := Theory.Target.bits size
+let more_regs = [ Var.create "FS_BASE" (Imm 64); Var.create "GS_BASE" (Imm 64) ]
 
 let set_sp target =
   sp :=
@@ -50,4 +51,4 @@ let basis_regs target =
   let basis_theory_regs = List.filter is_basis all_theory_regs in
   Base.List.map ~f:Var.reify basis_theory_regs
 
-let set_base_regs target = base_regs := basis_regs target
+let set_base_regs target = base_regs := basis_regs target @ more_regs

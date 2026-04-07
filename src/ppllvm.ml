@@ -312,6 +312,10 @@ let transfer_regs sub =
       let rets =
         match cf_type (Term.enum jmp_t blk) with
         | CallFun sub_tid -> get_rets sub_tid
+        | CallIndirect ->
+            Calling_conventions.x86_64_sysv.return_regs
+            |> Base.List.map ~f:(fun reg ->
+                Arg.create ~intent:Out reg (Var reg))
         | _ -> []
       in
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
@@ -334,7 +338,6 @@ let filter_subs =
     "_fini";
     "__cxa_finalize";
     "_start";
-    "intrinsic:hlt";
     "__libc_start_main";
     "register_tm_clones";
     "deregister_tm_clones";
@@ -342,50 +345,66 @@ let filter_subs =
     "frame_dummy";
   ]
 
-let should_filter sub =
+let should_filter proj sub =
+  let symtab = Project.symbols proj in
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
   || Term.has_attr sub Sub.intrinsic
+  || Option.is_none (Symtab.find_by_name symtab (Sub.name sub))
 
-let setup llvm_ctx llvm_module proj libc =
+let setup proj =
   let target = Project.target proj in
   set_target_ref target;
   set_ptrsize target;
   set_base_regs target;
   set_stack target;
   set_fp target;
-  set_sp target;
-  set_libc llvm_ctx llvm_module target libc
+  set_sp target
+(* set_libc llvm_ctx llvm_module target libc *)
+
+let remove_plt proj =
+  let plt = get_section_mem ".plt" proj in
+  let plt_syms = Symtab.intersecting (Project.symbols proj) plt in
+  Base.List.fold plt_syms ~init:(Project.symbols proj)
+    ~f:(fun syms (name, blk, addr) ->
+      eprintf "Removimg PLT symbol %s \n" name;
+      Symtab.remove syms (name, blk, addr))
+  |> Project.with_symbols proj
 
 let pp proj output_program =
   let proj = run_pass proj "trivial-condition-form" in
-  let proj = run_pass proj "glibc-runtime" in
+  (* let proj = run_pass proj "glibc-runtime" in *)
+  let sym = Project.symbols proj in
+  Symtab.to_sequence sym
+  |> Seq.iter ~f:(fun (name, _, _) -> eprintf "%s\n" name);
   Project.passes ()
   |> Base.List.iter ~f:(fun pass ->
       eprintf "Project pass :: %s \n" (Project.Pass.name pass));
   let stack = Base.Array.create ~len:stack_len 0 in
-  let libc = Decl_parser.parse_header_file "stdio_headers.ll" in
+  (* let libc = Decl_parser.parse_header_file "stdio_headers.ll" in *)
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
-  setup llvm_ctx llvm_module proj libc;
+  setup proj;
   let prog = Project.program proj in
   Term.enum sub_t prog
   |> Seq.iter ~f:(fun sub ->
-      if should_filter sub then () else set_sub llvm_ctx llvm_module sub);
+      if should_filter proj sub then ()
+      else (
+        eprintf "Sub name :: %s \n" (Sub.name sub);
+        set_sub llvm_ctx llvm_module sub));
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->
-            if should_filter sub then None
+            if should_filter proj sub then None
             else
               Some
-                (sub |> unalias_sub |> update_args |> update_rets |> Sub.ssa
-               |> transfer_regs |> update_main)))
+                (sub |> unalias_sub |> update_args |> Sub.ssa |> transfer_regs
+               |> update_main)))
   in
   let stack_ptr =
     create_global ~is_const:false llvm_ctx llvm_module stack "stack"
   in
-  eprintf "llvm module created\n";
   create_prog llvm_ctx llvm_module (Project.program proj) stack_ptr;
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
@@ -408,7 +427,7 @@ let main input_program output_program _ =
   let loader = "llvm" in
   let proj =
     Project.create @@ Project.Input.load input_program ~loader
-    |> Core.Or_error.ok_exn
+    |> Core.Or_error.ok_exn |> remove_plt
   in
   pp proj output_program;
   Ok ()

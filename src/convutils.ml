@@ -1,24 +1,36 @@
 open Bap.Std.Bil.Types
 open Bap.Std
+open Bap_core_theory
 open Format
 open Targetutils
 module StrMap = Map.Make (String)
 
 let subs : (Arg.t list * Arg.t list) StrMap.t ref = ref StrMap.empty
 
+let get_calling_convention () =
+  if Theory.Target.matches !target_ref "x86_64-gnu-elf" then
+    Calling_conventions.x86_64_sysv
+  else failwith "abi not supported"
+
 let get_args sub_tid =
   match StrMap.find_opt (Tid.name sub_tid) !subs with
   | Some (_, args) -> args
   | None ->
       eprintf "get_args : sub %s not found\n" (Tid.name sub_tid);
-      []
+      let callconv = get_calling_convention () in
+      Base.List.map
+        ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+        callconv.param_regs
 
 let get_rets sub_tid =
   match StrMap.find_opt (Tid.name sub_tid) !subs with
   | Some (rets, _) -> rets
   | None ->
       eprintf "get_rets : sub %s not found\n" (Tid.name sub_tid);
-      []
+      let callconv = get_calling_convention () in
+      Base.List.map
+        ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
+        callconv.return_regs
 
 let var_size var =
   match Var.typ var with Imm n -> n | _ -> failwith "var size: non-imm var"
@@ -33,7 +45,12 @@ let label_tid label =
   | Direct tid -> tid
   | Indirect _ -> failwith "label_tid: indirect label"
 
-type cf_type = Br | Ret | CallFun of Tid.t | Int | CallFunVoid
+let label_exp label =
+  match label with
+  | Direct _ -> failwith "label_exp: direct label"
+  | Indirect exp -> exp
+
+type cf_type = Br | Ret | CallFun of Tid.t | Int | CallFunVoid | CallIndirect
 
 let cf_type control_flow =
   let br = Seq.hd_exn control_flow in
@@ -45,7 +62,7 @@ let cf_type control_flow =
       | Some _ -> (
           match Call.target c with
           | Direct tid -> if is_void tid then CallFunVoid else CallFun tid
-          | Indirect _ -> failwith "cf_type: indirect call")
+          | Indirect _ -> CallIndirect)
       | None -> Ret)
   | Int _ -> Int
 
