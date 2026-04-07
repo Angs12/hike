@@ -95,39 +95,34 @@ let create_fun llvm_ctx llvm_module sub_tid =
   ll_funcs :=
     StrMap.add (sanitize_name @@ Tid.name sub_tid) (fn, fn_typ) !ll_funcs
 
-let create_binop llvm_builder res_name (op, llvm_val1, llvm_val2) =
+let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   match op with
-  | PLUS -> Llvm.build_add llvm_val1 llvm_val2 res_name llvm_builder
-  | MINUS -> Llvm.build_sub llvm_val1 llvm_val2 res_name llvm_builder
-  | TIMES -> Llvm.build_mul llvm_val1 llvm_val2 res_name llvm_builder
-  | DIVIDE -> Llvm.build_udiv llvm_val1 llvm_val2 res_name llvm_builder
-  | SDIVIDE -> Llvm.build_sdiv llvm_val1 llvm_val2 res_name llvm_builder
-  | MOD -> Llvm.build_urem llvm_val1 llvm_val2 res_name llvm_builder
-  | SMOD -> Llvm.build_srem llvm_val1 llvm_val2 res_name llvm_builder
-  | AND -> Llvm.build_and llvm_val1 llvm_val2 res_name llvm_builder
-  | OR -> Llvm.build_or llvm_val1 llvm_val2 res_name llvm_builder
-  | XOR -> Llvm.build_xor llvm_val1 llvm_val2 res_name llvm_builder
-  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 res_name llvm_builder
-  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 res_name llvm_builder
-  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 res_name llvm_builder
-  | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 res_name llvm_builder
-  | NEQ ->
-      Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 res_name llvm_builder
-  | LT ->
-      Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 res_name llvm_builder
-  | SLT ->
-      Llvm.build_icmp Llvm.Icmp.Slt llvm_val1 llvm_val2 res_name llvm_builder
-  | LE ->
-      Llvm.build_icmp Llvm.Icmp.Ule llvm_val1 llvm_val2 res_name llvm_builder
-  | SLE ->
-      Llvm.build_icmp Llvm.Icmp.Sle llvm_val1 llvm_val2 res_name llvm_builder
+  | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
+  | MINUS -> Llvm.build_sub llvm_val1 llvm_val2 "" llvm_builder
+  | TIMES -> Llvm.build_mul llvm_val1 llvm_val2 "" llvm_builder
+  | DIVIDE -> Llvm.build_udiv llvm_val1 llvm_val2 "" llvm_builder
+  | SDIVIDE -> Llvm.build_sdiv llvm_val1 llvm_val2 "" llvm_builder
+  | MOD -> Llvm.build_urem llvm_val1 llvm_val2 "" llvm_builder
+  | SMOD -> Llvm.build_srem llvm_val1 llvm_val2 "" llvm_builder
+  | AND -> Llvm.build_and llvm_val1 llvm_val2 "" llvm_builder
+  | OR -> Llvm.build_or llvm_val1 llvm_val2 "" llvm_builder
+  | XOR -> Llvm.build_xor llvm_val1 llvm_val2 "" llvm_builder
+  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 "" llvm_builder
+  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 "" llvm_builder
+  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 "" llvm_builder
+  | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 "" llvm_builder
+  | NEQ -> Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 "" llvm_builder
+  | LT -> Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 "" llvm_builder
+  | SLT -> Llvm.build_icmp Llvm.Icmp.Slt llvm_val1 llvm_val2 "" llvm_builder
+  | LE -> Llvm.build_icmp Llvm.Icmp.Ule llvm_val1 llvm_val2 "" llvm_builder
+  | SLE -> Llvm.build_icmp Llvm.Icmp.Sle llvm_val1 llvm_val2 "" llvm_builder
 
-let create_unop llvm_builder res_name (op, llvm_val) =
+let create_unop llvm_builder (op, llvm_val) =
   match op with
-  | NEG -> Llvm.build_neg llvm_val res_name llvm_builder
-  | NOT -> Llvm.build_not llvm_val res_name llvm_builder
+  | NEG -> Llvm.build_neg llvm_val "" llvm_builder
+  | NOT -> Llvm.build_not llvm_val "" llvm_builder
 
-let create_concat llvm_builder (res_name, llvm_var1, llvm_var2) =
+let create_concat llvm_builder (llvm_var1, llvm_var2) =
   let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.size_of in
   let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.size_of in
   let result_typ =
@@ -136,9 +131,9 @@ let create_concat llvm_builder (res_name, llvm_var1, llvm_var2) =
   let zext_var1 = Llvm.build_zext llvm_var1 result_typ "" llvm_builder in
   let shl_var1 = Llvm.build_shl zext_var1 llvm_var2_size "" llvm_builder in
   let zext_var2 = Llvm.build_zext llvm_var2 result_typ "" llvm_builder in
-  Llvm.build_or shl_var1 zext_var2 res_name llvm_builder
+  Llvm.build_or shl_var1 zext_var2 "" llvm_builder
 
-let create_extract llvm_ctx llvm_builder (res_name, hi, lo, llvm_var) =
+let create_extract llvm_ctx llvm_builder (hi, lo, llvm_var) =
   let temp_var =
     Llvm.build_lshr llvm_var
       (Llvm.const_int (Llvm.type_of llvm_var) lo)
@@ -147,29 +142,25 @@ let create_extract llvm_ctx llvm_builder (res_name, hi, lo, llvm_var) =
   let result_size = hi - lo + 1 in
   Llvm.build_trunc temp_var
     (Llvm.integer_type llvm_ctx result_size)
-    res_name llvm_builder
+    "" llvm_builder
 
 let create_inttoptr llvm_ctx llvm_builder llvm_val =
   Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
-let create_load llvm_ctx llvm_builder (var_name, addr, size) =
+let create_load llvm_ctx llvm_builder (addr, size) =
   let addr = create_inttoptr llvm_ctx llvm_builder addr in
-  Llvm.build_load (Llvm.integer_type llvm_ctx size) addr var_name llvm_builder
+  Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
 
 let create_store llvm_ctx llvm_builder (llvm_var, addr) =
   let addr = create_inttoptr llvm_ctx llvm_builder addr in
   Llvm.build_store llvm_var addr llvm_builder
 
-let create_cast llvm_ctx llvm_builder res_name (cast, i, llvm_val) =
+let create_cast llvm_ctx llvm_builder (cast, i, llvm_val) =
   match cast with
   | UNSIGNED ->
-      Llvm.build_zext llvm_val
-        (Llvm.integer_type llvm_ctx i)
-        res_name llvm_builder
+      Llvm.build_zext llvm_val (Llvm.integer_type llvm_ctx i) "" llvm_builder
   | SIGNED ->
-      Llvm.build_sext llvm_val
-        (Llvm.integer_type llvm_ctx i)
-        res_name llvm_builder
+      Llvm.build_sext llvm_val (Llvm.integer_type llvm_ctx i) "" llvm_builder
   | HIGH ->
       (Llvm.build_lshr llvm_val
          (Llvm.const_int (Llvm.type_of llvm_val)
@@ -177,22 +168,19 @@ let create_cast llvm_ctx llvm_builder res_name (cast, i, llvm_val) =
          "" llvm_builder
       |> Llvm.build_trunc)
         (Llvm.integer_type llvm_ctx i)
-        res_name llvm_builder
+        "" llvm_builder
   | LOW ->
-      Llvm.build_trunc llvm_val
-        (Llvm.integer_type llvm_ctx i)
-        res_name llvm_builder
+      Llvm.build_trunc llvm_val (Llvm.integer_type llvm_ctx i) "" llvm_builder
 
-let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
-  let res_name = Base.Option.value res ~default:"" in
+let rec create_exp llvm_ctx llvm_module llvm_builder exp =
   match exp with
   | BinOp (op, e1, e2) ->
       let var1 = create_exp llvm_ctx llvm_module llvm_builder e1 in
       let var2 = create_exp llvm_ctx llvm_module llvm_builder e2 in
-      create_binop llvm_builder res_name (op, var1, var2)
+      create_binop llvm_builder (op, var1, var2)
   | UnOp (op, e) ->
       let var = create_exp llvm_ctx llvm_module llvm_builder e in
-      create_unop llvm_builder res_name (op, var)
+      create_unop llvm_builder (op, var)
   | Var v -> (
       let i = StrMap.find_opt (Var.name v) !sub_llvars in
       match i with
@@ -206,32 +194,29 @@ let rec create_exp ?res llvm_ctx llvm_module llvm_builder exp =
         (Word.to_int64_exn i) true
   | Cast (cast, i, exp) ->
       let var = create_exp llvm_ctx llvm_module llvm_builder exp in
-      create_cast llvm_ctx llvm_builder res_name (cast, i, var)
+      create_cast llvm_ctx llvm_builder (cast, i, var)
   | Concat (exp1, exp2) ->
       let llvm_var1 = create_exp llvm_ctx llvm_module llvm_builder exp1 in
       let llvm_var2 = create_exp llvm_ctx llvm_module llvm_builder exp2 in
-      create_concat llvm_builder (res_name, llvm_var1, llvm_var2)
+      create_concat llvm_builder (llvm_var1, llvm_var2)
   | Extract (hi, lo, exp) ->
       let llvm_var = create_exp llvm_ctx llvm_module llvm_builder exp in
-      create_extract llvm_ctx llvm_builder (res_name, hi, lo, llvm_var)
+      create_extract llvm_ctx llvm_builder (hi, lo, llvm_var)
   | Store (_, addr, data, _, _) ->
       let addr = create_exp llvm_ctx llvm_module llvm_builder addr in
       let data = create_exp llvm_ctx llvm_module llvm_builder data in
       create_store llvm_ctx llvm_builder (data, addr)
   | Load (_, addr, _, size) ->
       let addr = create_exp llvm_ctx llvm_module llvm_builder addr in
-      create_load llvm_ctx llvm_builder (res_name, addr, Size.in_bits size)
+      create_load llvm_ctx llvm_builder (addr, Size.in_bits size)
   | Let (var, exp, body) ->
       let unique_var =
         Var.create ~is_virtual:true ~fresh:true "" (Var.typ var)
       in
-      let v =
-        create_exp ~res:(Var.name unique_var) llvm_ctx llvm_module llvm_builder
-          exp
-      in
+      let v = create_exp llvm_ctx llvm_module llvm_builder exp in
       sub_llvars := StrMap.add (Var.name unique_var) v !sub_llvars;
       let body = Exp.substitute (Var var) (Var unique_var) body in
-      create_exp ~res:res_name llvm_ctx llvm_module llvm_builder body
+      create_exp llvm_ctx llvm_module llvm_builder body
   | Unknown (_, typ) -> Llvm.undef (typ_lltype llvm_ctx typ)
   | _ -> failwith "pp_exp: Ite expressions"
 
@@ -261,10 +246,7 @@ let create_branches llvm_ctx llvm_module llvm_builder fn branches =
 
 let create_def llvm_ctx llvm_module llvm_builder def =
   let var = Def.lhs def in
-  let res =
-    create_exp ~res:(Var.name var) llvm_ctx llvm_module llvm_builder
-      (Def.rhs def)
-  in
+  let res = create_exp llvm_ctx llvm_module llvm_builder (Def.rhs def) in
   sub_llvars := StrMap.add (Var.name var) res !sub_llvars
 
 let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
