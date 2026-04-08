@@ -9,6 +9,7 @@ open Bil2llvm
 open Convutils
 open Targetutils
 module StrMap = Map.Make (String)
+module StrSet = Set.Make (String)
 
 let get_section_mem name proj =
   let mem, _ =
@@ -72,53 +73,6 @@ let set_sub llvm_ctx llvm_module sub =
         !subs;
   create_fun llvm_ctx llvm_module (Term.tid sub)
 
-module type Abi = sig
-  val return : Decl_parser.functype -> var list
-
-  val args :
-    Decl_parser.functype list -> Decl_parser.functype -> (exp * intent) list
-end
-
-let arg_type (exp : exp) =
-  match exp with
-  | Int i -> Imm (Word.bitwidth i)
-  | Var v -> Var.typ v
-  | Load (_, _, _, size) -> Imm (Size.in_bits size)
-  | _ -> failwith "pp exp type: non-imm var"
-
-let set_libc llvm_ctx llvm_module target libc =
-  let abi =
-    if Theory.Target.matches target "x86_64-gnu-elf" then
-      (module Gnu64_abi : Abi)
-    else failwith "abi not supported"
-  in
-  let module Abi = (val abi : Abi) in
-  StrMap.iter
-    (fun name (data : Decl_parser.funcdef) ->
-      let ret = Abi.return data.return in
-      let args = Abi.args data.args data.return in
-      let ret_typ = Decl_parser.functype_to_lltype llvm_ctx data.return in
-      let args_typ =
-        Base.List.map
-          ~f:(fun typ -> Decl_parser.functype_to_lltype llvm_ctx typ)
-          data.args
-      in
-      let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
-      let fn = Llvm.declare_function (sanitize_name name) fn_typ llvm_module in
-      ll_funcs := StrMap.add name (fn, fn_typ) !ll_funcs;
-      let func_decl =
-        ( List.map (fun r -> Arg.create ~intent:Out r (Var r)) ret,
-          List.mapi
-            (fun i (a, intent) ->
-              let arg_var =
-                Var.create (name ^ sprintf "arg%d" i) (arg_type a)
-              in
-              Arg.create ~intent arg_var a)
-            args )
-      in
-      subs := StrMap.add ("@" ^ name) func_decl !subs)
-    libc
-
 let stack_len = 0x2048
 
 let unaliased_reg_exp var =
@@ -146,13 +100,6 @@ let unalias_sub sub =
           let rhs = Def.rhs def in
           let new_rhs = mapper#map_exp rhs in
           Def.with_rhs def new_rhs))
-
-let update_args sub =
-  let builder =
-    Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
-  in
-  Seq.iter (Term.enum blk_t sub) ~f:(fun blk -> Sub.Builder.add_blk builder blk);
-  Sub.Builder.result builder
 
 (* TODO *)
 let update_rets sub =
@@ -345,13 +292,14 @@ let filter_subs =
     "frame_dummy";
   ]
 
-let should_filter proj sub =
-  let symtab = Project.symbols proj in
+let should_filter syms sub =
+  Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub);
+  flush stderr;
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
   || Term.has_attr sub Sub.intrinsic
-  || Option.is_none (Symtab.find_by_name symtab (Sub.name sub))
+  || (not @@ StrSet.mem (Sub.name sub) syms)
 
 let setup proj =
   let target = Project.target proj in
@@ -361,7 +309,6 @@ let setup proj =
   set_stack target;
   set_fp target;
   set_sp target
-(* set_libc llvm_ctx llvm_module target libc *)
 
 let remove_plt proj =
   let plt = get_section_mem ".plt" proj in
@@ -374,7 +321,6 @@ let remove_plt proj =
 
 let pp proj output_program =
   let proj = run_pass proj "trivial-condition-form" in
-  (* let proj = run_pass proj "glibc-runtime" in *)
   let sym = Project.symbols proj in
   Symtab.to_sequence sym
   |> Seq.iter ~f:(fun (name, _, _) -> eprintf "%s\n" name);
@@ -382,22 +328,28 @@ let pp proj output_program =
   |> Base.List.iter ~f:(fun pass ->
       eprintf "Project pass :: %s \n" (Project.Pass.name pass));
   let stack = Base.Array.create ~len:stack_len 0 in
-  (* let libc = Decl_parser.parse_header_file "stdio_headers.ll" in *)
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   setup proj;
-  let prog = Project.program proj in
-  Term.enum sub_t prog
-  |> Seq.iter ~f:(fun sub ->
-      if should_filter proj sub then () else set_sub llvm_ctx llvm_module sub);
+  let syms =
+    Symtab.to_sequence (Project.symbols proj)
+    |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
+        StrSet.add name set)
+  in
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->
-            if should_filter proj sub then None
-            else
-              Some
-                (sub |> unalias_sub |> update_args |> Sub.ssa |> transfer_regs
-               |> update_main)))
+            if should_filter syms sub then None
+            else (
+              set_sub llvm_ctx llvm_module sub;
+              Some sub)))
+  in
+  let proj =
+    Project.map_program proj ~f:(fun prog ->
+        Term.map sub_t prog ~f:(fun sub ->
+            Printf.eprintf "Preparing sub %s\n" (Term.name sub);
+            flush stderr;
+            sub |> unalias_sub |> transfer_regs |> update_main))
   in
   let stack_ptr =
     create_global ~is_const:false llvm_ctx llvm_module stack "stack"

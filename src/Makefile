@@ -41,9 +41,8 @@ runtest_struct:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o $(PROGSFOLDER)fizzbuzz_0 $(PROGSFOLDER)fizzbuzz.c
-	# strip $(PROGSFOLDER)fizzbuzz_0
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll --glibc-runtime-enable
-	clang -O3 fizzbuzz.ll -o $(PROGSFOLDER)fizzbuzz_llvmO0.o 
+	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll
+	clang -O3 fizzbuzz.ll -o $(PROGSFOLDER)fizzbuzz_llvmO0
 
 compileO2_fizzbuzz:
 	gcc -O2 -o $(PROGSFOLDER)fizzbuzz_2 $(PROGSFOLDER)fizzbuzz.c

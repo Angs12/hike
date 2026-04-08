@@ -56,7 +56,6 @@ let add_args_to_vars llvm_ctx llvm_builder fn =
   Llvm.iter_params
     (fun param ->
       let name = Llvm.value_name param in
-      Format.eprintf "Adding %s to llvars\n" name;
       match Llvm.classify_type (Llvm.type_of param) with
       | Llvm.TypeKind.Pointer ->
           sub_llvars :=
@@ -204,8 +203,7 @@ let rec create_exp llvm_ctx llvm_module llvm_builder exp =
   | Int i ->
       Llvm.const_int_of_string
         (Llvm.integer_type llvm_ctx (Word.bitwidth i))
-        (Word.to_bitvec i |> Bitvec.to_string)
-        16
+        (Word.string_of_value i) 16
   | Cast (cast, i, exp) ->
       let var = create_exp llvm_ctx llvm_module llvm_builder exp in
       create_cast llvm_ctx llvm_builder (cast, i, var)
@@ -288,7 +286,6 @@ let get_func llvm_ctx llvm_module tid =
   let name = sanitize_name @@ Tid.name tid in
   if StrMap.mem name !ll_funcs then StrMap.find name !ll_funcs
   else (
-    Format.eprintf "get_func: function %s not found" name;
     create_fun_declaration llvm_ctx llvm_module tid;
     StrMap.find name !ll_funcs)
 
@@ -440,6 +437,8 @@ let initialize_bbs llvm_ctx blks fn =
       Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn |> ignore)
 
 let create_sub llvm_ctx llvm_module stack_ptr sub =
+  Printf.eprintf "Converting sub %s\n" (Term.name sub);
+  flush stderr;
   let blks = Term.enum blk_t sub in
   let fn =
     Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module

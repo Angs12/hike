@@ -16,7 +16,6 @@ let get_args sub_tid =
   match StrMap.find_opt (Tid.name sub_tid) !subs with
   | Some (_, args) -> args
   | None ->
-      eprintf "get_args : sub %s not found\n" (Tid.name sub_tid);
       let callconv = get_calling_convention () in
       Base.List.map
         ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
@@ -26,7 +25,6 @@ let get_rets sub_tid =
   match StrMap.find_opt (Tid.name sub_tid) !subs with
   | Some (rets, _) -> rets
   | None ->
-      eprintf "get_rets : sub %s not found\n" (Tid.name sub_tid);
       let callconv = get_calling_convention () in
       Base.List.map
         ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
