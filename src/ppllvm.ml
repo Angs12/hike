@@ -198,6 +198,28 @@ let update_jmp_cond reg_map jmp =
   let cond = Jmp.cond jmp in
   Jmp.with_cond jmp (update_exp !reg_map cond)
 
+let simplify_jmps sub =
+  let new_sub =
+    Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
+  in
+  Term.enum blk_t sub
+  |> Seq.iter ~f:(fun blk ->
+      let jmps = Term.enum jmp_t blk in
+      if Seq.length jmps = 1 then Sub.Builder.add_blk new_sub blk
+      else
+        let blk = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
+        Seq.iter jmps ~f:(fun jmp ->
+            if is_goto jmp then Blk.Builder.add_jmp blk jmp
+            else
+              let cond = Jmp.cond jmp in
+              let new_jmp = Jmp.with_cond jmp (Int (Word.one 1)) in
+              let new_blk = Blk.create ~jmps:[ new_jmp ] () in
+              Sub.Builder.add_blk new_sub new_blk;
+              let goto = Jmp.create_goto ~cond (Direct (Term.tid new_blk)) in
+              Blk.Builder.add_jmp blk goto);
+        Sub.Builder.add_blk new_sub (Blk.Builder.result blk));
+  Sub.Builder.result new_sub
+
 let transfer_regs sub =
   Term.map blk_t sub ~f:(fun blk ->
       let tid = Term.tid blk in
@@ -256,14 +278,16 @@ let transfer_regs sub =
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
+      let calls = get_calls blk in
       let rets =
-        match cf_type (Term.enum jmp_t blk) with
-        | CallFun sub_tid -> get_rets sub_tid
-        | CallIndirect ->
-            Calling_conventions.x86_64_sysv.return_regs
-            |> Base.List.map ~f:(fun reg ->
-                Arg.create ~intent:Out reg (Var reg))
-        | _ -> []
+        Base.List.fold calls ~init:[] ~f:(fun acc call ->
+            match call with
+            | Some tid -> get_rets tid @ acc
+            | None ->
+                (Calling_conventions.x86_64_sysv.return_regs
+                |> Base.List.map ~f:(fun reg ->
+                    Arg.create ~intent:Out reg (Var reg)))
+                @ acc)
       in
       Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
           if is_ret_reg rets key then
@@ -349,7 +373,7 @@ let pp proj output_program =
         Term.map sub_t prog ~f:(fun sub ->
             Printf.eprintf "Preparing sub %s\n" (Term.name sub);
             flush stderr;
-            sub |> unalias_sub |> transfer_regs |> update_main))
+            sub |> unalias_sub |> simplify_jmps |> transfer_regs |> update_main))
   in
   let stack_ptr =
     create_global ~is_const:false llvm_ctx llvm_module stack "stack"
@@ -373,6 +397,9 @@ let main input_program output_program _ =
       ]
   in
   Bil.select_passes passes;
+  Image.available_backends ()
+  |> Base.List.iter ~f:(fun backend ->
+      eprintf "Available backend: %s\n" backend);
   let loader = "llvm" in
   let proj =
     Project.create @@ Project.Input.load input_program ~loader

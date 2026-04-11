@@ -1,7 +1,6 @@
 open Bap.Std.Bil.Types
 open Bap.Std
 open Bap_core_theory
-open Format
 open Targetutils
 module StrMap = Map.Make (String)
 
@@ -48,7 +47,19 @@ let label_exp label =
   | Direct _ -> failwith "label_exp: direct label"
   | Indirect exp -> exp
 
-type cf_type = Br | Ret | CallFun of Tid.t | Int | CallFunVoid | CallIndirect
+type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
+
+let get_calls blk =
+  Seq.fold (Term.enum jmp_t blk) ~init:[] ~f:(fun acc jmp ->
+      match Jmp.kind jmp with
+      | Call c -> (
+          match Call.return c with
+          | Some (Direct tid) -> Some tid :: acc
+          | Some (Indirect _) -> None :: acc
+          | None -> acc)
+      | _ -> acc)
+
+let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
 let cf_type control_flow =
   let br = Seq.hd_exn control_flow in
@@ -59,9 +70,10 @@ let cf_type control_flow =
       match Call.return c with
       | Some _ -> (
           match Call.target c with
-          | Direct tid -> if is_void tid then CallFunVoid else CallFun tid
+          | Direct tid -> if is_void tid then CallFunVoid else CallFun
           | Indirect _ -> CallIndirect)
-      | None -> Ret)
+      | None -> (
+          match Call.target c with Indirect _ -> Ret | Direct _ -> CallFun))
   | Int _ -> Int
 
 let call_exn jmp =
@@ -108,8 +120,8 @@ let bb_ret_name arg tid =
 let bb_var_name var tid = sanitize_name @@ Var.name var ^ "_" ^ Tid.name tid
 
 let entry_blk_tid sub =
-  let blks = Term.enum blk_t sub in
-  Term.tid (Seq.hd_exn blks)
+  let cfg = Sub.to_graph sub in
+  Graphs.Tid.Node.succs Graphs.Tid.start cfg |> Seq.hd_exn
 
 let create_var base ~typ ~tid =
   Var.create ~is_virtual:false (bb_var_name base tid) typ

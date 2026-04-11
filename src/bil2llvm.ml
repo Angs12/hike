@@ -329,7 +329,6 @@ let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
   in
   let rets = get_rets target in
   let fn, fn_typ = get_func llvm_ctx llvm_module target in
-  let bb = llbb_from_tid current_fn fallthrough in
   (match rets with
   | [] ->
       Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder |> ignore
@@ -358,7 +357,11 @@ let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
             StrMap.add
               (bb_phi_reg_name (Arg.lhs ret) blk_tid)
               ret_val !sub_llvars));
-  Llvm.build_br bb llvm_builder |> ignore
+  match fallthrough with
+  | Some fallthrough ->
+      let bb = llbb_from_tid current_fn fallthrough in
+      Llvm.build_br bb llvm_builder |> ignore
+  | None -> Llvm.build_unreachable llvm_builder |> ignore
 
 let create_return llvm_builder cur_sub blk_tid =
   let rets =
@@ -373,11 +376,7 @@ let create_return llvm_builder cur_sub blk_tid =
 
 let create_call llvm_ctx llvm_module llvm_builder fn blk_tid call =
   let target = Call.target call |> label_tid in
-  let fallthrough =
-    Call.return call
-    |> Base.Option.value_exn ~message:"Create call: expected call got return"
-    |> label_tid
-  in
+  let fallthrough = Option.map label_tid (Call.return call) in
   create_func_call llvm_ctx llvm_module llvm_builder fn blk_tid fallthrough
     target
 
@@ -419,7 +418,7 @@ let create_basicblocks llvm_ctx llvm_module llvm_builder sub blks fn =
           let call = Seq.hd_exn control_flow |> call_exn in
           create_indirect_call llvm_ctx llvm_module llvm_builder fn
             (Term.tid blk) call
-      | CallFun _ | CallFunVoid ->
+      | CallFun | CallFunVoid ->
           let call = Seq.hd_exn control_flow |> call_exn in
           create_call llvm_ctx llvm_module llvm_builder fn (Term.tid blk) call);
   Seq.iter blks ~f:(fun blk ->
