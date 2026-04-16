@@ -189,15 +189,6 @@ let update_var reg_map var =
         Var.with_index data new_index)
       else var)
 
-let update_label reg_map label =
-  match label with
-  | Direct _ -> label
-  | Indirect exp -> Indirect (update_exp !reg_map exp)
-
-let update_jmp_cond reg_map jmp =
-  let cond = Jmp.cond jmp in
-  Jmp.with_cond jmp (update_exp !reg_map cond)
-
 let simplify_jmps sub =
   let new_sub =
     Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
@@ -234,17 +225,8 @@ let transfer_regs sub =
             let var = Def.lhs def in
             let def = Def.map_exp ~f:(update_exp !reg_map) def in
             Def.with_lhs def (update_var reg_map var))
-        |> Blk.map_elts ~jmp:(fun jmp ->
-            (match Jmp.kind jmp with
-              | Call call ->
-                  Jmp.with_kind jmp
-                    (Call
-                       (Call.with_target call
-                          (update_label reg_map (Call.target call))))
-              | Goto label ->
-                  Jmp.with_kind jmp (Goto (update_label reg_map label))
-              | _ -> jmp)
-            |> update_jmp_cond reg_map)
+        |> Blk.map_exp ~skip:[ `def; `phi ] ~f:(fun exp ->
+            update_exp !reg_map exp)
       in
       let builder =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
@@ -373,7 +355,7 @@ let pp proj output_program =
         Term.map sub_t prog ~f:(fun sub ->
             Printf.eprintf "Preparing sub %s\n" (Term.name sub);
             flush stderr;
-            sub |> unalias_sub |> simplify_jmps |> transfer_regs |> update_main))
+            sub |> simplify_jmps |> transfer_regs |> update_main))
   in
   let stack_ptr =
     create_global ~is_const:false llvm_ctx llvm_module stack "stack"

@@ -4,6 +4,8 @@ open Bap_core_theory
 open Targetutils
 module StrMap = Map.Make (String)
 
+let sub_local_llvars : Llvm.llvalue StrMap.t ref = ref StrMap.empty
+let sub_global_llvars : Llvm.llvalue StrMap.t ref = ref StrMap.empty
 let subs : (Arg.t list * Arg.t list) StrMap.t ref = ref StrMap.empty
 
 let get_calling_convention () =
@@ -47,17 +49,55 @@ let label_exp label =
   | Direct _ -> failwith "label_exp: direct label"
   | Indirect exp -> exp
 
+let sanitize_name =
+  Base.String.filter ~f:(fun c ->
+      if c = '#' then false
+      else if c = '.' then false
+      else if c = '%' then false
+      else if c = '\\' then false
+      else if c = '@' then false
+      else true)
+
 type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
 let get_calls blk =
   Seq.fold (Term.enum jmp_t blk) ~init:[] ~f:(fun acc jmp ->
       match Jmp.kind jmp with
       | Call c -> (
-          match Call.return c with
-          | Some (Direct tid) -> Some tid :: acc
-          | Some (Indirect _) -> None :: acc
-          | None -> acc)
+          match Call.target c with
+          | Direct tid -> Some tid :: acc
+          | Indirect _ -> (
+              match Call.return c with
+              | Some (Direct tid) -> Some tid :: acc
+              | Some (Indirect _) -> None :: acc
+              | None -> acc))
       | _ -> acc)
+
+let clear_local_llvars () = sub_local_llvars := StrMap.empty
+let clear_global_llvars () = sub_global_llvars := StrMap.empty
+
+let insert_sub_global_llvar name value =
+  sub_global_llvars := StrMap.add (sanitize_name name) value !sub_global_llvars
+
+let get_sub_global_llvar name =
+  let name = sanitize_name name in
+  if StrMap.mem name !sub_global_llvars then StrMap.find name !sub_global_llvars
+  else failwith @@ "Global Variable " ^ name ^ " not found"
+
+let insert_llvar var value =
+  if Var.is_virtual var then
+    sub_local_llvars :=
+      StrMap.add (sanitize_name @@ Var.name var) value !sub_local_llvars
+  else
+    sub_global_llvars :=
+      StrMap.add (sanitize_name @@ Var.name var) value !sub_global_llvars
+
+let get_llvar var =
+  let name = sanitize_name @@ Var.name var in
+  if StrMap.mem name !sub_local_llvars then StrMap.find name !sub_local_llvars
+  else if StrMap.mem name !sub_global_llvars then
+    StrMap.find name !sub_global_llvars
+  else failwith @@ "Local Variable " ^ name ^ " not found"
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
@@ -95,15 +135,6 @@ let get_pass name =
 let run_pass proj name =
   let pass = get_pass name in
   Project.Pass.run_exn pass proj
-
-let sanitize_name =
-  Base.String.filter ~f:(fun c ->
-      if c = '#' then false
-      else if c = '.' then false
-      else if c = '%' then false
-      else if c = '\\' then false
-      else if c = '@' then false
-      else true)
 
 let bb_reg_name reg tid =
   sanitize_name @@ "reg_" ^ Var.name reg ^ "_" ^ Tid.name tid

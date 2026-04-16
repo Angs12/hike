@@ -4,9 +4,7 @@ open Targetutils
 open Convutils
 module StrMap = Map.Make (String)
 
-let sub_llvars = ref @@ StrMap.empty
 let ll_funcs = ref @@ StrMap.empty
-let llvar_from_name name = StrMap.find name !sub_llvars
 
 let typ_lltype llvm_ctx typ =
   match typ with
@@ -58,19 +56,17 @@ let add_args_to_vars llvm_ctx llvm_builder fn =
       let name = Llvm.value_name param in
       match Llvm.classify_type (Llvm.type_of param) with
       | Llvm.TypeKind.Pointer ->
-          sub_llvars :=
-            StrMap.add name
-              (Llvm.build_ptrtoint param
-                 (Llvm.integer_type llvm_ctx !ptrsize)
-                 "" llvm_builder)
-              !sub_llvars
-      | _ -> sub_llvars := StrMap.add name param !sub_llvars)
+          insert_sub_global_llvar name
+            (Llvm.build_ptrtoint param
+               (Llvm.integer_type llvm_ctx !ptrsize)
+               "" llvm_builder)
+      | _ -> insert_sub_global_llvar name param)
     fn
 
 let add_regs_to_vars llvm_ctx blk_tid =
   Base.List.iter !base_regs ~f:(fun reg ->
       let undef = Llvm.undef (var_lltype llvm_ctx reg) in
-      sub_llvars := StrMap.add (bb_reg_name reg blk_tid) undef !sub_llvars)
+      insert_sub_global_llvar (bb_reg_name reg blk_tid) undef)
 
 let create_fun_declaration llvm_ctx llvm_module sub_tid =
   let ret_typ = create_ret_type llvm_ctx sub_tid in
@@ -193,13 +189,7 @@ let rec create_exp llvm_ctx llvm_module llvm_builder exp =
   | UnOp (op, e) ->
       let var = create_exp llvm_ctx llvm_module llvm_builder e in
       create_unop llvm_builder (op, var)
-  | Var v -> (
-      let i = StrMap.find_opt (Var.name v) !sub_llvars in
-      match i with
-      | Some i -> i
-      | None ->
-          Llvm.dump_module llvm_module;
-          failwith @@ "Variable " ^ Var.name v ^ " not found")
+  | Var v -> get_llvar v
   | Int i ->
       Llvm.const_int_of_string
         (Llvm.integer_type llvm_ctx (Word.bitwidth i))
@@ -226,7 +216,7 @@ let rec create_exp llvm_ctx llvm_module llvm_builder exp =
         Var.create ~is_virtual:true ~fresh:true "" (Var.typ var)
       in
       let v = create_exp llvm_ctx llvm_module llvm_builder exp in
-      sub_llvars := StrMap.add (Var.name unique_var) v !sub_llvars;
+      insert_llvar unique_var v;
       let body = Exp.substitute (Var var) (Var unique_var) body in
       create_exp llvm_ctx llvm_module llvm_builder body
   | Ite (cond, true_exp, false_exp) ->
@@ -263,7 +253,7 @@ let create_branches llvm_ctx llvm_module llvm_builder fn branches =
 let create_def llvm_ctx llvm_module llvm_builder def =
   let var = Def.lhs def in
   let res = create_exp llvm_ctx llvm_module llvm_builder (Def.rhs def) in
-  sub_llvars := StrMap.add (Var.name var) res !sub_llvars
+  insert_llvar var res
 
 let create_call_args llvm_ctx llvm_module llvm_builder call_tid blk_tid =
   let args = get_args call_tid in
@@ -318,8 +308,7 @@ let create_indirect_call llvm_ctx llvm_module llvm_builder current_fun blk_tid
           (bb_phi_reg_name (Arg.lhs ret) blk_tid)
           llvm_builder
       in
-      sub_llvars :=
-        StrMap.add (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_val !sub_llvars);
+      insert_sub_global_llvar (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_val);
   Llvm.build_br bb llvm_builder |> ignore
 
 let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
@@ -341,8 +330,7 @@ let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
       Llvm.add_call_site_attr ret_var
         (Llvm.create_enum_attr llvm_ctx "zeroext" 0L)
         Llvm.AttrIndex.Return;
-      sub_llvars :=
-        StrMap.add (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_var !sub_llvars
+      insert_sub_global_llvar (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_var
   | rets ->
       let ret_struct =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
@@ -353,10 +341,9 @@ let create_func_call llvm_ctx llvm_module llvm_builder current_fn blk_tid
               (bb_phi_reg_name (Arg.lhs ret) blk_tid)
               llvm_builder
           in
-          sub_llvars :=
-            StrMap.add
-              (bb_phi_reg_name (Arg.lhs ret) blk_tid)
-              ret_val !sub_llvars));
+          insert_sub_global_llvar
+            (bb_phi_reg_name (Arg.lhs ret) blk_tid)
+            ret_val));
   match fallthrough with
   | Some fallthrough ->
       let bb = llbb_from_tid current_fn fallthrough in
@@ -367,7 +354,7 @@ let create_return llvm_builder cur_sub blk_tid =
   let rets =
     get_rets (Term.tid cur_sub)
     |> Base.List.map ~f:(fun ret ->
-        llvar_from_name (bb_phi_reg_name (Arg.lhs ret) blk_tid))
+        get_sub_global_llvar (bb_phi_reg_name (Arg.lhs ret) blk_tid))
   in
   match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -383,7 +370,7 @@ let create_call llvm_ctx llvm_module llvm_builder fn blk_tid call =
 let update_phis llvm_ctx llvm_module llvm_builder fn phi =
   let var = Phi.lhs phi in
   let vals = Phi.values phi in
-  let phi_llvar = llvar_from_name (sanitize_name @@ Var.name var) in
+  let phi_llvar = get_llvar var in
   Seq.iter vals ~f:(fun (tid, exp) ->
       Llvm.add_incoming
         (create_exp llvm_ctx llvm_module llvm_builder exp, llbb_from_tid fn tid)
@@ -396,7 +383,19 @@ let create_empty_phi llvm_ctx llvm_builder phi =
       (sanitize_name @@ Var.name var)
       llvm_builder
   in
-  sub_llvars := StrMap.add (sanitize_name @@ Var.name var) res !sub_llvars
+  insert_llvar var res
+
+let setup_llvars llvm_ctx llvm_builder blks fn stack_ptr =
+  (* reset sub_llvars *)
+  clear_local_llvars ();
+  clear_global_llvars ();
+  (* add stack_ptr to llvars *)
+  insert_sub_global_llvar "stack_ptr"
+    (Llvm.build_ptrtoint stack_ptr (Llvm.i64_type llvm_ctx) "" llvm_builder);
+  (* add args to llvars *)
+  add_args_to_vars llvm_ctx llvm_builder fn;
+  (* add regs to llvars *)
+  Seq.iter blks ~f:(fun blk -> add_regs_to_vars llvm_ctx (Term.tid blk))
 
 let create_basicblocks llvm_ctx llvm_module llvm_builder sub blks fn =
   (* populate them with instructions *)
@@ -444,18 +443,8 @@ let create_sub llvm_ctx llvm_module stack_ptr sub =
     |> Base.Option.value_exn ~message:"create sub : function not found"
   in
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-  (* reset sub_llvars *)
-  sub_llvars := StrMap.empty;
-  (* add stack_ptr to llvars *)
-  sub_llvars :=
-    StrMap.add "stack_ptr"
-      (Llvm.build_ptrtoint stack_ptr (Llvm.i64_type llvm_ctx) "" llvm_builder)
-      !sub_llvars;
-  (* add args to llvars *)
-  add_args_to_vars llvm_ctx llvm_builder fn;
-  (* add regs to llvars *)
-  Seq.iter blks ~f:(fun blk -> add_regs_to_vars llvm_ctx (Term.tid blk));
   initialize_bbs llvm_ctx blks fn;
+  setup_llvars llvm_ctx llvm_builder blks fn stack_ptr;
   (* go from entry to first bb *)
   Llvm.build_br (llbb_from_tid fn (entry_blk_tid sub)) llvm_builder |> ignore;
   create_basicblocks llvm_ctx llvm_module llvm_builder sub blks fn
