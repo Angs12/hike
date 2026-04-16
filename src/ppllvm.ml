@@ -8,6 +8,7 @@ open Format
 open Bil2llvm
 open Convutils
 open Targetutils
+module Reader = Monads.Std.Monad.Reader
 module StrMap = Map.Make (String)
 module StrSet = Set.Make (String)
 
@@ -41,7 +42,7 @@ let free_vars sub =
   |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
   |> Var.Set.to_list
 
-let set_sub llvm_ctx llvm_module sub =
+let set_sub sub =
   let free_vars = free_vars sub in
   let rets =
     (if Theory.Target.matches !target_ref "x86_64-gnu-elf" then
@@ -71,7 +72,7 @@ let set_sub llvm_ctx llvm_module sub =
               else Arg.create ~intent:In reg (Var reg))
             free_vars )
         !subs;
-  create_fun llvm_ctx llvm_module (Term.tid sub)
+  create_fun (Term.tid sub)
 
 let stack_len = 0x2048
 
@@ -347,7 +348,7 @@ let pp proj output_program =
         Term.filter_map sub_t prog ~f:(fun sub ->
             if should_filter syms sub then None
             else (
-              set_sub llvm_ctx llvm_module sub;
+              Reader.run (set_sub sub) (llvm_ctx, llvm_module);
               Some sub)))
   in
   let proj =
@@ -360,7 +361,9 @@ let pp proj output_program =
   let stack_ptr =
     create_global ~is_const:false llvm_ctx llvm_module stack "stack"
   in
-  create_prog llvm_ctx llvm_module (Project.program proj) stack_ptr;
+  Reader.run
+    (create_prog (Project.program proj) stack_ptr)
+    (llvm_ctx, llvm_module);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx

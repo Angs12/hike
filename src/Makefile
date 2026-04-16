@@ -5,7 +5,7 @@ sim:
 	bapbundle install sim.plugin
 
 llvm:
-	bapbuild ppllvm.plugin -pkg z3 -pkg llvm 
+	bapbuild ppllvm.plugin -pkg z3 -pkg llvm
 	bapbundle install -destdir ./plugins ppllvm.plugin
 
 clean:

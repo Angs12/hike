@@ -4,6 +4,7 @@
   (preprocess (pps ppx_bap ))
   (libraries
     str
+    landmarks
     unix
     yojson
     bap
