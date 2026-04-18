@@ -6,7 +6,10 @@ module StrMap = Map.Make (String)
 
 let sub_local_llvars : Llvm.llvalue StrMap.t ref = ref StrMap.empty
 let sub_global_llvars : Llvm.llvalue StrMap.t ref = ref StrMap.empty
-let subs : (Arg.t list * Arg.t list) StrMap.t ref = ref StrMap.empty
+let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
+
+let insert_sub_sig tid ~rets ~args =
+  subs := Tid.Map.add_exn !subs ~key:tid ~data:(rets, args)
 
 let get_calling_convention () =
   if Theory.Target.matches !target_ref "x86_64-gnu-elf" then
@@ -14,7 +17,7 @@ let get_calling_convention () =
   else failwith "abi not supported"
 
 let get_args sub_tid =
-  match StrMap.find_opt (Tid.name sub_tid) !subs with
+  match Tid.Map.find !subs sub_tid with
   | Some (_, args) -> args
   | None ->
       let callconv = get_calling_convention () in
@@ -23,7 +26,7 @@ let get_args sub_tid =
         callconv.param_regs
 
 let get_rets sub_tid =
-  match StrMap.find_opt (Tid.name sub_tid) !subs with
+  match Tid.Map.find !subs sub_tid with
   | Some (rets, _) -> rets
   | None ->
       let callconv = get_calling_convention () in
@@ -37,7 +40,8 @@ let var_size var =
 let goto_label_exn jmp =
   match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
 
-let is_void tid = get_rets tid = []
+(* Stub for now *)
+let is_void _ = false
 
 let label_tid label =
   match label with

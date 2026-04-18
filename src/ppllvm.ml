@@ -50,28 +50,26 @@ let set_sub sub =
      else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in
-  if Term.name sub = "@main" then
-    let rdi = Var.create "RDI" (Imm 64) in
-    let rsi = Var.create "RSI" (Imm 64) in
-    subs :=
-      StrMap.add (Term.name sub)
-        ( [],
-          [
-            Arg.create ~intent:In rdi (Var rdi);
-            Arg.create ~intent:In rsi (Var rsi);
-          ] )
-        !subs
-  else
-    subs :=
-      StrMap.add (Term.name sub)
-        ( rets,
-          Base.List.map
-            ~f:(fun reg ->
-              if Var.same reg !sp || Var.same reg !fp then
-                Arg.create ~intent:Both reg (Var reg)
-              else Arg.create ~intent:In reg (Var reg))
-            free_vars )
-        !subs;
+  (if Term.name sub = "@main" then
+     let rdi = Var.create "RDI" (Imm 64) in
+     let rsi = Var.create "RSI" (Imm 64) in
+     let args =
+       [
+         Arg.create ~intent:In rdi (Var rdi);
+         Arg.create ~intent:In rsi (Var rsi);
+       ]
+     in
+     insert_sub_sig (Term.tid sub) ~rets ~args
+   else
+     let args =
+       Base.List.map
+         ~f:(fun reg ->
+           if Var.same reg !sp || Var.same reg !fp then
+             Arg.create ~intent:Both reg (Var reg)
+           else Arg.create ~intent:In reg (Var reg))
+         free_vars
+     in
+     insert_sub_sig (Term.tid sub) ~rets ~args);
   create_fun (Term.tid sub)
 
 let stack_len = 0x2048
