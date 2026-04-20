@@ -80,8 +80,12 @@ let get_calls blk =
 let clear_local_llvars () = sub_local_llvars := StrMap.empty
 let clear_global_llvars () = sub_global_llvars := StrMap.empty
 
-let insert_sub_global_llvar name value =
+let insert_sub_global_name name value =
   sub_global_llvars := StrMap.add (sanitize_name name) value !sub_global_llvars
+
+let insert_sub_global_var var value =
+  sub_global_llvars :=
+    StrMap.add (sanitize_name @@ Var.name var) value !sub_global_llvars
 
 let get_sub_global_llvar name =
   let name = sanitize_name name in
@@ -101,7 +105,9 @@ let get_llvar var =
   if StrMap.mem name !sub_local_llvars then StrMap.find name !sub_local_llvars
   else if StrMap.mem name !sub_global_llvars then
     StrMap.find name !sub_global_llvars
-  else failwith @@ "Local Variable " ^ name ^ " not found"
+  else (
+    StrMap.iter (fun k _ -> print_endline k) !sub_local_llvars;
+    failwith @@ "Local Variable " ^ name ^ " not found")
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
@@ -174,9 +180,9 @@ let create_phi_reg base ~typ ~tid =
   Var.create ~is_virtual:false (bb_phi_reg_name base tid) typ
 
 let is_ret_reg rets var =
-  Option.is_some
-  @@ Base.List.find rets ~f:(fun ret -> Var.same (Arg.lhs ret) var)
+  Base.List.exists rets ~f:(fun ret -> Var.same (Arg.lhs ret) var)
 
+(* TODO *)
 let correct_registers sub_tid tid =
   let rets = get_rets sub_tid in
   object

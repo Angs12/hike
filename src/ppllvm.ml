@@ -326,9 +326,6 @@ let remove_plt proj =
 
 let pp proj output_program =
   let proj = run_pass proj "trivial-condition-form" in
-  let sym = Project.symbols proj in
-  Symtab.to_sequence sym
-  |> Seq.iter ~f:(fun (name, _, _) -> eprintf "%s\n" name);
   Project.passes ()
   |> Base.List.iter ~f:(fun pass ->
       eprintf "Project pass :: %s \n" (Project.Pass.name pass));
