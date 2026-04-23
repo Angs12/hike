@@ -100,78 +100,39 @@ let unalias_sub sub =
           let new_rhs = mapper#map_exp rhs in
           Def.with_rhs def new_rhs))
 
-(* TODO *)
-let update_rets sub =
-  let sub_builder =
-    Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
-  in
-  let new_blks = ref [] in
-  let sub =
-    Term.map blk_t sub ~f:(fun blk ->
-        let builder = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
-        let control_flow = Term.enum jmp_t blk in
-        (match cf_type control_flow with
-        | Ret -> (
-            let jmp =
-              Base.Option.value_exn ~message:"ret jmp not found"
-                (Term.first jmp_t blk)
-            in
-            let call = jmp |> call_exn in
-            match Call.target call with
-            | Direct _ ->
-                let temp_builder = Blk.Builder.create () in
-                Blk.Builder.add_jmp temp_builder
-                  (Jmp.create_ret (Indirect (Var (Var.create "ret" Unk))));
-                let new_blk = Blk.Builder.result temp_builder in
-                new_blks := new_blk :: !new_blks;
-                let call = Call.with_return call (Direct (Term.tid new_blk)) in
-                Blk.Builder.add_jmp builder (Jmp.create_call call)
-            | Indirect _ -> Blk.Builder.add_jmp builder jmp)
-        | _ ->
-            Seq.iter (Term.enum jmp_t blk) ~f:(fun jmp ->
-                Blk.Builder.add_jmp builder jmp));
-        Blk.Builder.result builder)
-  in
-  Seq.iter (Term.enum blk_t sub) ~f:(fun blk ->
-      Sub.Builder.add_blk sub_builder blk);
-  Base.List.iter !new_blks ~f:(fun blk -> Sub.Builder.add_blk sub_builder blk);
-  Seq.iter (Term.enum arg_t sub) ~f:(fun arg ->
-      Sub.Builder.add_arg sub_builder arg);
-  Sub.Builder.result sub_builder
-
 let update_main sub =
   if Sub.name sub = "main" then
-    let entry_tid =
-      Base.Option.value_exn ~message:"Main function has no blocks"
-        (Sub.to_graph sub |> Graphs.Tid.Node.succs Graphs.Tid.start |> Seq.hd)
-    in
-    Term.map blk_t sub ~f:(fun blk ->
-        if Term.tid blk = entry_tid then (
-          let builder = Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk in
-          let arg_var_fp =
-            create_arg !fp ~typ:(Var.typ !fp) ~tid:(Term.tid sub)
-          in
-          let arg_var_sp =
-            create_arg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
-          in
-          let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
-          let stack_exp =
-            Bil.BinOp
-              ( Bil.PLUS,
-                Bil.Var stack_ptr,
-                Bil.Int (Word.of_int ~width:(var_size !sp) (stack_len - 1)) )
-          in
-          let sp_def = Def.create arg_var_sp stack_exp in
-          let fp_def =
-            Def.create arg_var_fp
-              (Bil.Int (Word.of_int ~width:(var_size !fp) 0))
-          in
-          Blk.Builder.add_def builder sp_def;
-          Blk.Builder.add_def builder fp_def;
-          Term.enum def_t blk
-          |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
-          Blk.Builder.result builder)
-        else blk)
+    let entry_tid = entry_blk_tid sub in
+    Term.change blk_t sub entry_tid (fun blk ->
+        match blk with
+        | None -> None
+        | Some blk ->
+            let builder =
+              Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk
+            in
+            let arg_var_fp =
+              create_arg !fp ~typ:(Var.typ !fp) ~tid:(Term.tid sub)
+            in
+            let arg_var_sp =
+              create_arg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
+            in
+            let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
+            let stack_exp =
+              Bil.BinOp
+                ( Bil.PLUS,
+                  Bil.Var stack_ptr,
+                  Bil.Int (Word.of_int ~width:(var_size !sp) (stack_len - 1)) )
+            in
+            let sp_def = Def.create arg_var_sp stack_exp in
+            let fp_def =
+              Def.create arg_var_fp
+                (Bil.Int (Word.of_int ~width:(var_size !fp) 0))
+            in
+            Blk.Builder.add_def builder sp_def;
+            Blk.Builder.add_def builder fp_def;
+            Term.enum def_t blk
+            |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
+            Some (Blk.Builder.result builder))
   else sub
 
 let update_exp reg_map exp =

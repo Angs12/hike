@@ -318,20 +318,12 @@ let create_def llvm_builder def =
 let create_call_args llvm_builder call_tid blk_tid =
   let open Reader in
   let args = get_args call_tid in
-  Reader.List.filter_map args ~f:(fun arg ->
-      match Arg.intent arg with
-      | Some i -> (
-          match i with
-          | Out -> return None
-          | In | Both ->
-              let var = Arg.lhs arg in
-              let exp =
-                Exp.map (correct_registers call_tid blk_tid) (Arg.rhs arg)
-              in
-              let* arg = create_exp llvm_builder exp in
-              Llvm.set_value_name (bb_arg_name var blk_tid) arg;
-              return (Some arg))
-      | None -> return None)
+  Reader.List.map args ~f:(fun arg ->
+      let var = Arg.lhs arg in
+      let exp = Exp.map (correct_registers call_tid blk_tid) (Arg.rhs arg) in
+      let* arg = create_exp llvm_builder exp in
+      Llvm.set_value_name (bb_arg_name var blk_tid) arg;
+      return arg)
 
 let get_func tid =
   let open Reader in
