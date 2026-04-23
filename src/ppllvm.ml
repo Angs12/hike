@@ -111,10 +111,10 @@ let update_main sub =
               Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk
             in
             let arg_var_fp =
-              create_arg !fp ~typ:(Var.typ !fp) ~tid:(Term.tid sub)
+              create_reg !fp ~typ:(Var.typ !fp) ~tid:(Term.tid sub)
             in
             let arg_var_sp =
-              create_arg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
+              create_reg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
             in
             let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
             let stack_exp =
@@ -205,18 +205,17 @@ let transfer_regs sub =
              let phi = Phi.of_list var phi_rhs in
              Blk.Builder.add_phi builder phi)
        else
-         let free_vars = free_vars sub in
-         Base.List.iter !base_regs ~f:(fun base ->
-             if Base.List.mem free_vars base ~equal:Var.same then
-               let reg = create_reg base ~typ:(Var.typ base) ~tid in
-               let def =
-                 let arg =
-                   create_arg base ~typ:(Var.typ base) ~tid:(Term.tid sub)
-                 in
-                 Def.create reg (Var arg)
+         let args = get_args (Term.tid sub) in
+         Base.List.iter args ~f:(fun arg ->
+             let base = Arg.lhs arg in
+             let reg = create_reg base ~typ:(Var.typ base) ~tid in
+             let def =
+               let arg =
+                 create_arg base ~typ:(Var.typ base) ~tid:(Term.tid sub)
                in
-               Blk.Builder.add_def builder def
-             else ()));
+               Def.create reg (Var arg)
+             in
+             Blk.Builder.add_def builder def));
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
