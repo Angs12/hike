@@ -8,14 +8,14 @@ module StrMap = Map.Make (String)
 let ll_funcs = ref @@ StrMap.empty
 let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
 
-let typ_lltype typ =
+let typ_lltype_m typ =
   let open Reader in
   let* llvm_ctx, _ = read () in
   match typ with
   | Imm n -> return @@ Llvm.integer_type llvm_ctx n
   | _ -> return @@ Llvm.pointer_type llvm_ctx
 
-let var_lltype var = typ_lltype (Var.typ var)
+let var_lltype var = typ_lltype_m (Var.typ var)
 let llbb_from_tid tid = Tid.Map.find_exn !ll_bbs tid
 
 let create_ret_type sub_tid =
@@ -44,7 +44,7 @@ let set_arg_names fn sub_tid =
   let args = get_args sub_tid in
   Base.List.iteri args ~f:(fun i arg ->
       let param = Llvm.param fn i in
-      Llvm.set_value_name (bb_arg_name (Arg.lhs arg) sub_tid) param)
+      Llvm.set_value_name (Var.name (Arg.lhs arg)) param)
 
 let set_arg_attrs fn sub_tid =
   let args = get_args sub_tid in
@@ -275,7 +275,7 @@ let rec create_exp llvm_builder exp =
       let* false_exp = create_exp llvm_builder false_exp in
       return @@ Llvm.build_select cond true_exp false_exp "" llvm_builder
   | Unknown (_, typ) ->
-      let* typ = typ_lltype typ in
+      let* typ = typ_lltype_m typ in
       return @@ Llvm.undef typ
 
 let create_branches llvm_builder branches =
@@ -437,16 +437,13 @@ let create_empty_phi llvm_builder phi =
   insert_sub_global_var var res;
   return ()
 
-let setup_llvars llvm_builder stack_ptr blks fn () =
-  let open Reader in
-  let* llvm_ctx, _ = read () in
+let setup_llvars llvm_builder stack_ptr fn () =
   (* reset sub_llvars *)
   clear_local_llvars ();
   clear_global_llvars ();
   (* add stack_ptr to llvars *)
-  insert_sub_global_name "stack_ptr"
-    (Llvm.build_ptrtoint stack_ptr (Llvm.i64_type llvm_ctx) "" llvm_builder);
-  add_regs_to_vars blks () >>= add_args_to_vars llvm_builder fn
+  insert_sub_global_name "stack_ptr" stack_ptr;
+  add_args_to_vars llvm_builder fn ()
 
 let update_phis blks () =
   let open Reader in
@@ -487,12 +484,42 @@ let populate_blks blks sub () =
       create_elts llvm_builder blk ()
       >>= create_control_flow llvm_builder blk sub)
 
+(* go from entry to first bb *)
+let exit_entry llvm_builder sub () =
+  Reader.return
+  @@ Llvm.build_br (llbb_from_tid (entry_blk_tid sub)) llvm_builder
+
+let build_entry_block llvm_builder sub () =
+  let open Reader in
+  (* Can remove in the future *)
+  let args =
+    get_args (Term.tid sub)
+    @
+    if Term.name sub = "@main" then
+      let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
+      [ Arg.create !sp (Var stack_ptr) ]
+    else []
+  in
+  let tid = Graphs.Tid.start in
+  Reader.List.iter !base_regs ~f:(fun base ->
+      let reg = create_phi_reg base ~typ:(Var.typ base) ~tid in
+      let arg =
+        Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) base)
+      in
+      let llval =
+        match arg with
+        | Some arg -> create_exp llvm_builder (Arg.rhs arg)
+        | None -> !$Llvm.undef (var_lltype base)
+      in
+      !$(insert_sub_global_var reg) llval)
+  >>= exit_entry llvm_builder sub
+  |> void
+
 let create_basicblocks llvm_builder sub blks () =
-  (* go from entry to first bb *)
-  Llvm.build_br (llbb_from_tid (entry_blk_tid sub)) llvm_builder |> ignore;
   (* populate them with instructions *)
   let open Reader in
-  populate_blks blks sub () >>= update_phis blks
+  build_entry_block llvm_builder sub ()
+  >>= populate_blks blks sub >>= update_phis blks
 
 let initialize_bbs blks fn () =
   let open Reader in
@@ -504,6 +531,8 @@ let initialize_bbs blks fn () =
         Tid.Map.add_exn ~key:(Term.tid blk)
           ~data:(Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn)
           !ll_bbs);
+  ll_bbs :=
+    Tid.Map.add_exn !ll_bbs ~key:Graphs.Tid.start ~data:(Llvm.entry_block fn);
   return ()
 
 let create_sub stack_ptr sub =
@@ -518,7 +547,7 @@ let create_sub stack_ptr sub =
   in
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
   initialize_bbs blks fn ()
-  >>= setup_llvars llvm_builder stack_ptr blks fn
+  >>= setup_llvars llvm_builder stack_ptr fn
   >>= create_basicblocks llvm_builder sub blks
 
 let create_llvm_i8array llvm_ctx arr =

@@ -100,40 +100,18 @@ let unalias_sub sub =
           let new_rhs = mapper#map_exp rhs in
           Def.with_rhs def new_rhs))
 
-let update_main sub =
-  if Sub.name sub = "main" then
-    let entry_tid = entry_blk_tid sub in
-    Term.change blk_t sub entry_tid (fun blk ->
-        match blk with
-        | None -> None
-        | Some blk ->
-            let builder =
-              Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk
-            in
-            let arg_var_fp =
-              create_reg !fp ~typ:(Var.typ !fp) ~tid:(Term.tid sub)
-            in
-            let arg_var_sp =
-              create_reg !sp ~typ:(Var.typ !sp) ~tid:(Term.tid sub)
-            in
-            let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
-            let stack_exp =
-              Bil.BinOp
-                ( Bil.PLUS,
-                  Bil.Var stack_ptr,
-                  Bil.Int (Word.of_int ~width:(var_size !sp) (stack_len - 1)) )
-            in
-            let sp_def = Def.create arg_var_sp stack_exp in
-            let fp_def =
-              Def.create arg_var_fp
-                (Bil.Int (Word.of_int ~width:(var_size !fp) 0))
-            in
-            Blk.Builder.add_def builder sp_def;
-            Blk.Builder.add_def builder fp_def;
-            Term.enum def_t blk
-            |> Seq.iter ~f:(fun def -> Blk.Builder.add_def builder def);
-            Some (Blk.Builder.result builder))
-  else sub
+let create_stack_ptr llvm_ctx llvm_module =
+  let stack = Base.Array.create ~len:stack_len 0 in
+  let stack_ptr =
+    create_global ~is_const:false llvm_ctx llvm_module stack "stack"
+  in
+  let offset =
+    Llvm.const_int (typ_lltype llvm_ctx (Var.typ !sp)) (stack_len - 1)
+  in
+  let stack_ptr =
+    Llvm.const_ptrtoint stack_ptr (typ_lltype llvm_ctx (Var.typ !sp))
+  in
+  Llvm.const_add stack_ptr offset
 
 let update_exp reg_map exp =
   Var.Map.fold reg_map ~init:exp ~f:(fun ~key ~data exp ->
@@ -194,28 +172,15 @@ let transfer_regs sub =
       in
       let cfg = Sub.to_graph sub in
       let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
-      (if not (Seq.to_list blk_incoming = [ Graphs.Tid.start ]) then
-         Base.List.iter !base_regs ~f:(fun base ->
-             let var = create_reg base ~typ:(Var.typ base) ~tid in
-             let phi_rhs =
-               Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
-                   let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
-                   (tid, Bil.Var reg_var) :: prev)
-             in
-             let phi = Phi.of_list var phi_rhs in
-             Blk.Builder.add_phi builder phi)
-       else
-         let args = get_args (Term.tid sub) in
-         Base.List.iter args ~f:(fun arg ->
-             let base = Arg.lhs arg in
-             let reg = create_reg base ~typ:(Var.typ base) ~tid in
-             let def =
-               let arg =
-                 create_arg base ~typ:(Var.typ base) ~tid:(Term.tid sub)
-               in
-               Def.create reg (Var arg)
-             in
-             Blk.Builder.add_def builder def));
+      Base.List.iter !base_regs ~f:(fun base ->
+          let var = create_reg base ~typ:(Var.typ base) ~tid in
+          let phi_rhs =
+            Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
+                let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
+                (tid, Bil.Var reg_var) :: prev)
+          in
+          let phi = Phi.of_list var phi_rhs in
+          Blk.Builder.add_phi builder phi);
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
           match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
@@ -289,10 +254,10 @@ let pp proj output_program =
   Project.passes ()
   |> Base.List.iter ~f:(fun pass ->
       eprintf "Project pass :: %s \n" (Project.Pass.name pass));
-  let stack = Base.Array.create ~len:stack_len 0 in
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   setup proj;
+  let stack_ptr = create_stack_ptr llvm_ctx llvm_module in
   let syms =
     Symtab.to_sequence (Project.symbols proj)
     |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
@@ -311,11 +276,10 @@ let pp proj output_program =
         Term.map sub_t prog ~f:(fun sub ->
             Printf.eprintf "Preparing sub %s\n" (Term.name sub);
             flush stderr;
-            sub |> simplify_jmps |> transfer_regs |> update_main))
+            sub |> simplify_jmps |> Sub.ssa |> transfer_regs))
   in
-  let stack_ptr =
-    create_global ~is_const:false llvm_ctx llvm_module stack "stack"
-  in
+  Llvm.dump_value stack_ptr;
+  flush stderr;
   Reader.run
     (create_prog (Project.program proj) stack_ptr)
     (llvm_ctx, llvm_module);

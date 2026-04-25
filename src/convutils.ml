@@ -16,6 +16,11 @@ let get_calling_convention () =
     Calling_conventions.x86_64_sysv
   else failwith "abi not supported"
 
+let typ_lltype llvm_ctx typ =
+  match typ with
+  | Imm n -> Llvm.integer_type llvm_ctx n
+  | _ -> Llvm.pointer_type llvm_ctx
+
 let get_args sub_tid =
   match Tid.Map.find !subs sub_tid with
   | Some (_, args) -> args
