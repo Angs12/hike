@@ -149,24 +149,6 @@ let simplify_jmps sub =
         Sub.Builder.add_blk new_sub (Blk.Builder.result blk));
   Sub.Builder.result new_sub
 
-let transfer_regs sub =
-  Term.map blk_t sub ~f:(fun blk ->
-      let builder =
-        Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:true
-          ~copy_jmps:true blk
-      in
-      let cfg = Sub.to_graph sub in
-      let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
-      Base.List.iter !base_regs ~f:(fun base ->
-          let phi_rhs =
-            Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
-                let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
-                (tid, Bil.Var reg_var) :: prev)
-          in
-          let phi = Phi.of_list base phi_rhs in
-          Blk.Builder.add_phi builder phi);
-      Blk.Builder.result builder)
-
 let is_external sub =
   Base.String.is_substring ~substring:":external" (Sub.name sub)
 
@@ -237,7 +219,7 @@ let pp proj output_program =
         Term.map sub_t prog ~f:(fun sub ->
             Printf.eprintf "Preparing sub %s\n" (Term.name sub);
             flush stderr;
-            sub |> simplify_jmps |> transfer_regs))
+            sub |> simplify_jmps))
   in
   Reader.run
     (create_prog (Project.program proj) stack_ptr)

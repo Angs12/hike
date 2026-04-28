@@ -393,28 +393,14 @@ let create_call llvm_builder blk_tid call =
   let fallthrough = Option.map label_tid (Call.return call) in
   create_func_call llvm_builder blk_tid fallthrough target
 
-let create_phi_exp blk_tid exp =
-  match exp with
-  | Var v -> get_phi_reg blk_tid v
-  | _ -> failwith "Phi exp is not a register"
-
-let update_phi blk_tid phi =
+let update_phi blk_incoming blk_tid =
   let open Reader in
-  let var = Phi.lhs phi in
-  let vals = Phi.values phi in
-  let phi_llvar = get_phi blk_tid var in
-  Seq.iter vals ~f:(fun (tid, exp) ->
-      let exp = create_phi_exp tid exp in
-      return @@ Llvm.add_incoming (exp, llbb_from_tid tid) phi_llvar)
-
-let create_empty_phi llvm_builder blk_tid phi =
-  let open Reader in
-  let var = Phi.lhs phi in
-  let* typ = var_lltype var in
-  let res = Llvm.build_empty_phi typ "" llvm_builder in
-  insert_phi blk_tid var res;
-  insert_var var res;
-  return ()
+  List.iter !base_regs ~f:(fun base ->
+      let phi_llvar = get_phi blk_tid base in
+      Seq.iter blk_incoming ~f:(fun tid ->
+          let phi_reg = get_phi_reg tid base in
+          Llvm.add_incoming (phi_reg, llbb_from_tid tid) phi_llvar;
+          return ()))
 
 let setup_llvars llvm_builder stack_ptr fn () =
   (* reset sub_llvars *)
@@ -424,19 +410,18 @@ let setup_llvars llvm_builder stack_ptr fn () =
   insert_llval_name "stack_ptr" stack_ptr;
   add_args_to_vars llvm_builder fn ()
 
-let update_phis blks () =
+let update_phis blks sub () =
   let open Reader in
+  let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
-      Blk.elts blk
-      |> Seq.iter ~f:(fun elt ->
-          match elt with `Phi phi -> update_phi blk_tid phi | _ -> return ()))
+      let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
+      update_phi blk_incoming blk_tid)
 
 let save_regs blk_tid () =
   let open Reader in
   Base.List.iter !base_regs ~f:(fun base ->
-      let reg = create_phi_reg base ~typ:(Var.typ base) ~tid:blk_tid in
-      insert_phi_reg blk_tid reg (get_llval base));
+      insert_phi_reg blk_tid base (get_llval base));
   return ()
 
 let create_control_flow llvm_builder blk sub () =
@@ -452,14 +437,22 @@ let create_control_flow llvm_builder blk sub () =
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call llvm_builder (Term.tid blk) call
 
+let transfer_regs llvm_builder blk_tid () =
+  let open Reader in
+  List.iter !base_regs ~f:(fun base ->
+      let* typ = var_lltype base in
+      let res = Llvm.build_empty_phi typ "" llvm_builder in
+      insert_phi blk_tid base res;
+      insert_var base res;
+      return ())
+
 let create_elts llvm_builder blk () =
   let open Reader in
-  let blk_tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
       | `Def def -> create_def llvm_builder def
-      | `Phi phi -> create_empty_phi llvm_builder blk_tid phi
+      | `Phi _ -> return ()
       | `Jmp _ -> return ())
 
 let populate_blks blks sub () =
@@ -469,7 +462,8 @@ let populate_blks blks sub () =
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (llbb_from_tid (Term.tid blk))
       in
-      create_elts llvm_builder blk ()
+      transfer_regs llvm_builder (Term.tid blk) ()
+      >>= create_elts llvm_builder blk
       >>= create_control_flow llvm_builder blk sub
       >>= save_regs (Term.tid blk))
 
@@ -492,7 +486,6 @@ let build_entry_block llvm_builder sub () =
   let tid = Graphs.Tid.start in
   init_blk_llvals tid;
   Reader.List.iter !base_regs ~f:(fun base ->
-      let reg = create_phi_reg base ~typ:(Var.typ base) ~tid in
       let arg =
         Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) base)
       in
@@ -501,7 +494,7 @@ let build_entry_block llvm_builder sub () =
         | Some arg -> create_exp llvm_builder (Arg.rhs arg)
         | None -> !$Llvm.undef (var_lltype base)
       in
-      !$(insert_phi_reg tid reg) llval)
+      !$(insert_phi_reg tid base) llval)
   >>= exit_entry llvm_builder sub
   |> void
 
@@ -535,7 +528,7 @@ let create_sub stack_ptr sub =
   setup_llvars llvm_builder stack_ptr fn ()
   >>= initialize_bbs blks fn
   >>= build_entry_block llvm_builder sub
-  >>= populate_blks blks sub >>= update_phis blks
+  >>= populate_blks blks sub >>= update_phis blks sub
 
 let create_llvm_i8array llvm_ctx arr =
   Base.Array.map arr ~f:(fun v -> Llvm.const_int (Llvm.i8_type llvm_ctx) v)
