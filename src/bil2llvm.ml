@@ -72,16 +72,6 @@ let add_args_to_vars llvm_builder fn () =
          | _ -> insert_sub_global_name name param)
        fn
 
-let add_regs_to_vars blks () =
-  let open Reader in
-  Seq.iter blks ~f:(fun blk ->
-      let blk_tid = Term.tid blk in
-      Reader.List.iter !base_regs ~f:(fun reg ->
-          let* typ = var_lltype reg in
-          let undef = Llvm.undef typ in
-          insert_sub_global_name (bb_reg_name reg blk_tid) undef;
-          return ()))
-
 let create_fun_declaration sub_tid =
   let open Reader in
   let* _, llvm_module = read () in
@@ -266,7 +256,7 @@ let rec create_exp llvm_builder exp =
         Var.create ~is_virtual:true ~fresh:true "" (Var.typ var)
       in
       let* v = create_exp llvm_builder exp in
-      insert_llvar unique_var v;
+      insert_sub_local_var unique_var v;
       let body = Exp.substitute (Var var) (Var unique_var) body in
       create_exp llvm_builder body
   | Ite (cond, true_exp, false_exp) ->
@@ -312,17 +302,16 @@ let create_def llvm_builder def =
   let open Reader in
   let var = Def.lhs def in
   let* res = create_exp llvm_builder (Def.rhs def) in
-  insert_llvar var res;
+  if Term.has_attr def is_phi_reg then insert_sub_global_var var res
+  else insert_sub_local_var var res;
   return ()
 
-let create_call_args llvm_builder call_tid blk_tid =
+let create_call_args llvm_builder call_tid _ =
   let open Reader in
   let args = get_args call_tid in
   Reader.List.map args ~f:(fun arg ->
-      let var = Arg.lhs arg in
-      let exp = Exp.map (correct_registers call_tid blk_tid) (Arg.rhs arg) in
+      let exp = Arg.rhs arg in
       let* arg = create_exp llvm_builder exp in
-      Llvm.set_value_name (bb_arg_name var blk_tid) arg;
       return arg)
 
 let get_func tid =
@@ -353,12 +342,8 @@ let create_indirect_call llvm_builder blk_tid call =
     Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
   in
   Base.List.iteri rets ~f:(fun i ret ->
-      let ret_val =
-        Llvm.build_extractvalue ret_struct i
-          (bb_phi_reg_name (Arg.lhs ret) blk_tid)
-          llvm_builder
-      in
-      insert_sub_global_name (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_val);
+      let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
+      insert_sub_local_var (Arg.lhs ret) ret_val);
   Llvm.build_br bb llvm_builder |> ignore;
   return ()
 
@@ -373,25 +358,19 @@ let create_func_call llvm_builder blk_tid fallthrough target =
       Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder |> ignore
   | [ ret ] ->
       let ret_var =
-        Llvm.build_call fn_typ fn (Array.of_list args)
-          (bb_phi_reg_name (Arg.lhs ret) blk_tid)
-          llvm_builder
+        Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
       Llvm.add_call_site_attr ret_var
         (Llvm.create_enum_attr llvm_ctx "zeroext" 0L)
         Llvm.AttrIndex.Return;
-      insert_sub_global_name (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_var
+      insert_sub_local_var (Arg.lhs ret) ret_var
   | rets ->
       let ret_struct =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
       Base.List.iteri rets ~f:(fun i ret ->
-          let ret_val =
-            Llvm.build_extractvalue ret_struct i
-              (bb_phi_reg_name (Arg.lhs ret) blk_tid)
-              llvm_builder
-          in
-          insert_sub_global_name (bb_phi_reg_name (Arg.lhs ret) blk_tid) ret_val));
+          let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
+          insert_sub_local_var (Arg.lhs ret) ret_val));
   (match fallthrough with
   | Some fallthrough ->
       let bb = llbb_from_tid fallthrough in
@@ -399,11 +378,10 @@ let create_func_call llvm_builder blk_tid fallthrough target =
   | None -> Llvm.build_unreachable llvm_builder |> ignore);
   return ()
 
-let create_return llvm_builder cur_sub blk_tid =
+let create_return llvm_builder cur_sub _ =
   let rets =
     get_rets (Term.tid cur_sub)
-    |> Base.List.map ~f:(fun ret ->
-        get_sub_global_llvar (bb_phi_reg_name (Arg.lhs ret) blk_tid))
+    |> Base.List.map ~f:(fun ret -> get_sub_local_var (Arg.lhs ret))
   in
   (match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -416,31 +394,31 @@ let create_call llvm_builder blk_tid call =
   let fallthrough = Option.map label_tid (Call.return call) in
   create_func_call llvm_builder blk_tid fallthrough target
 
-let update_phi phi =
+let update_phi blk_phis phi =
   let open Reader in
   let var = Phi.lhs phi in
   let vals = Phi.values phi in
-  let phi_llvar = get_llvar var in
+  let phi_llvar = get_phi blk_phis var in
   let* llvm_ctx, _ = read () in
   let llvm_builder = Llvm.builder_before llvm_ctx phi_llvar in
   Seq.iter vals ~f:(fun (tid, exp) ->
       let* exp = create_exp llvm_builder exp in
       return @@ Llvm.add_incoming (exp, llbb_from_tid tid) phi_llvar)
 
-let create_empty_phi llvm_builder phi =
+let create_empty_phi llvm_builder blk_phis phi =
   let open Reader in
   let var = Phi.lhs phi in
   let* typ = var_lltype var in
-  let res =
-    Llvm.build_empty_phi typ (sanitize_name @@ Var.name var) llvm_builder
-  in
-  insert_sub_global_var var res;
+  let res = Llvm.build_empty_phi typ "" llvm_builder in
+  insert_sub_local_var var res;
+  blk_phis := StrMap.add (sanitize_name @@ Var.name var) res !blk_phis;
   return ()
 
 let setup_llvars llvm_builder stack_ptr fn () =
   (* reset sub_llvars *)
   clear_local_llvars ();
   clear_global_llvars ();
+  clear_blk_phi_llvars ();
   (* add stack_ptr to llvars *)
   insert_sub_global_name "stack_ptr" stack_ptr;
   add_args_to_vars llvm_builder fn ()
@@ -448,9 +426,10 @@ let setup_llvars llvm_builder stack_ptr fn () =
 let update_phis blks () =
   let open Reader in
   Seq.iter blks ~f:(fun blk ->
+      let blk_phis = get_phis (Term.tid blk) in
       Blk.elts blk
       |> Seq.iter ~f:(fun elt ->
-          match elt with `Phi phi -> update_phi phi | _ -> return ()))
+          match elt with `Phi phi -> update_phi blk_phis phi | _ -> return ()))
 
 let create_control_flow llvm_builder blk sub () =
   let control_flow = Term.enum jmp_t blk in
@@ -467,11 +446,12 @@ let create_control_flow llvm_builder blk sub () =
 
 let create_elts llvm_builder blk () =
   let open Reader in
+  let blk_phis = get_phis (Term.tid blk) in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
       | `Def def -> create_def llvm_builder def
-      | `Phi phi -> create_empty_phi llvm_builder phi
+      | `Phi phi -> create_empty_phi llvm_builder blk_phis phi
       | `Jmp _ -> return ())
 
 let populate_blks blks sub () =
@@ -515,12 +495,6 @@ let build_entry_block llvm_builder sub () =
   >>= exit_entry llvm_builder sub
   |> void
 
-let create_basicblocks llvm_builder sub blks () =
-  (* populate them with instructions *)
-  let open Reader in
-  build_entry_block llvm_builder sub ()
-  >>= populate_blks blks sub >>= update_phis blks
-
 let initialize_bbs blks fn () =
   let open Reader in
   let* llvm_ctx, _ = read () in
@@ -548,7 +522,8 @@ let create_sub stack_ptr sub =
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
   initialize_bbs blks fn ()
   >>= setup_llvars llvm_builder stack_ptr fn
-  >>= create_basicblocks llvm_builder sub blks
+  >>= build_entry_block llvm_builder sub
+  >>= populate_blks blks sub >>= update_phis blks
 
 let create_llvm_i8array llvm_ctx arr =
   Base.Array.map arr ~f:(fun v -> Llvm.const_int (Llvm.i8_type llvm_ctx) v)

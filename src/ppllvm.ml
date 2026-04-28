@@ -152,58 +152,25 @@ let simplify_jmps sub =
 let transfer_regs sub =
   Term.map blk_t sub ~f:(fun blk ->
       let tid = Term.tid blk in
-      let reg_map =
-        ref
-        @@ Base.List.fold !base_regs ~init:Var.Map.empty ~f:(fun map base ->
-            let reg = create_reg base ~typ:(Var.typ base) ~tid in
-            Var.Map.add_exn map ~key:base ~data:reg)
-      in
-      let blk =
-        Blk.map_elts blk ~def:(fun def ->
-            let var = Def.lhs def in
-            let def = Def.map_exp ~f:(update_exp !reg_map) def in
-            Def.with_lhs def (update_var reg_map var))
-        |> Blk.map_exp ~skip:[ `def; `phi ] ~f:(fun exp ->
-            update_exp !reg_map exp)
-      in
       let builder =
-        Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:false
+        Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:true
           ~copy_jmps:true blk
       in
       let cfg = Sub.to_graph sub in
       let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
       Base.List.iter !base_regs ~f:(fun base ->
-          let var = create_reg base ~typ:(Var.typ base) ~tid in
           let phi_rhs =
             Seq.fold blk_incoming ~init:[] ~f:(fun prev tid ->
                 let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
                 (tid, Bil.Var reg_var) :: prev)
           in
-          let phi = Phi.of_list var phi_rhs in
+          let phi = Phi.of_list base phi_rhs in
           Blk.Builder.add_phi builder phi);
-      Blk.elts blk
-      |> Seq.iter ~f:(fun elt ->
-          match elt with `Def def -> Blk.Builder.add_def builder def | _ -> ());
-      let calls = get_calls blk in
-      let rets =
-        Base.List.fold calls ~init:[] ~f:(fun acc call ->
-            match call with
-            | Some tid -> get_rets tid @ acc
-            | None ->
-                (Calling_conventions.x86_64_sysv.return_regs
-                |> Base.List.map ~f:(fun reg ->
-                    Arg.create ~intent:Out reg (Var reg)))
-                @ acc)
-      in
-      Var.Map.iteri !reg_map ~f:(fun ~key ~data ->
-          if is_ret_reg rets key then
-            let ret_var = create_ret key ~typ:(Var.typ key) ~tid in
-            let def = Def.create ret_var (Var data) in
-            Blk.Builder.add_def builder def
-          else
-            let reg_var = create_phi_reg key ~typ:(Var.typ key) ~tid in
-            let def = Def.create reg_var (Var data) in
-            Blk.Builder.add_def builder def);
+      Base.List.iter !base_regs ~f:(fun base ->
+          let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
+          let def = Def.create reg_var (Var base) in
+          let def = Term.set_attr def is_phi_reg () in
+          Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
 let is_external sub =
@@ -276,10 +243,8 @@ let pp proj output_program =
         Term.map sub_t prog ~f:(fun sub ->
             Printf.eprintf "Preparing sub %s\n" (Term.name sub);
             flush stderr;
-            sub |> simplify_jmps |> Sub.ssa |> transfer_regs))
+            sub |> simplify_jmps |> transfer_regs))
   in
-  Llvm.dump_value stack_ptr;
-  flush stderr;
   Reader.run
     (create_prog (Project.program proj) stack_ptr)
     (llvm_ctx, llvm_module);

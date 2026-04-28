@@ -4,9 +4,17 @@ open Bap_core_theory
 open Targetutils
 module StrMap = Map.Make (String)
 
-let sub_local_llvars : Llvm.llvalue StrMap.t ref = ref StrMap.empty
-let sub_global_llvars : Llvm.llvalue StrMap.t ref = ref StrMap.empty
+type llvalue_map = Llvm.llvalue StrMap.t
+
+let sub_local_llvars : llvalue_map ref = ref StrMap.empty
+let sub_blk_phi_llvars : llvalue_map ref Tid.Map.t ref = ref Tid.Map.empty
+let sub_global_llvars : llvalue_map ref = ref StrMap.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
+
+let is_phi_reg =
+  Value.Tag.register ~uuid:"a49163fc-42fb-11f1-b2b1-f4a80dc1b6bb"
+    ~name:"is_phi_reg"
+    (module Core.Unit)
 
 let insert_sub_sig tid ~rets ~args =
   subs := Tid.Map.add_exn !subs ~key:tid ~data:(rets, args)
@@ -69,20 +77,8 @@ let sanitize_name =
 
 type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
-let get_calls blk =
-  Seq.fold (Term.enum jmp_t blk) ~init:[] ~f:(fun acc jmp ->
-      match Jmp.kind jmp with
-      | Call c -> (
-          match Call.target c with
-          | Direct tid -> Some tid :: acc
-          | Indirect _ -> (
-              match Call.return c with
-              | Some (Direct tid) -> Some tid :: acc
-              | Some (Indirect _) -> None :: acc
-              | None -> acc))
-      | _ -> acc)
-
 let clear_local_llvars () = sub_local_llvars := StrMap.empty
+let clear_blk_phi_llvars () = sub_blk_phi_llvars := Tid.Map.empty
 let clear_global_llvars () = sub_global_llvars := StrMap.empty
 
 let insert_sub_global_name name value =
@@ -92,27 +88,42 @@ let insert_sub_global_var var value =
   sub_global_llvars :=
     StrMap.add (sanitize_name @@ Var.name var) value !sub_global_llvars
 
-let get_sub_global_llvar name =
+let insert_sub_local_var var value =
+  sub_local_llvars :=
+    StrMap.add (sanitize_name @@ Var.name var) value !sub_local_llvars
+
+let get_phi blk_phis var = StrMap.find (sanitize_name @@ Var.name var) !blk_phis
+
+let get_phis blk_tid =
+  match Tid.Map.find !sub_blk_phi_llvars blk_tid with
+  | Some llvals -> llvals
+  | None ->
+      let phis = ref StrMap.empty in
+      sub_blk_phi_llvars :=
+        Tid.Map.add_exn !sub_blk_phi_llvars ~key:blk_tid ~data:phis;
+      phis
+
+let get_sub_global_name name =
   let name = sanitize_name name in
   if StrMap.mem name !sub_global_llvars then StrMap.find name !sub_global_llvars
   else failwith @@ "Global Variable " ^ name ^ " not found"
 
-let insert_llvar var value =
-  if Var.is_virtual var then
-    sub_local_llvars :=
-      StrMap.add (sanitize_name @@ Var.name var) value !sub_local_llvars
-  else
-    sub_global_llvars :=
-      StrMap.add (sanitize_name @@ Var.name var) value !sub_global_llvars
+let get_sub_global_var var =
+  let name = sanitize_name @@ Var.name var in
+  if StrMap.mem name !sub_global_llvars then StrMap.find name !sub_global_llvars
+  else failwith @@ "Global Variable " ^ name ^ " not found"
+
+let get_sub_local_var var =
+  let name = sanitize_name @@ Var.name var in
+  if StrMap.mem name !sub_local_llvars then StrMap.find name !sub_local_llvars
+  else failwith @@ "Local Variable " ^ name ^ " not found"
 
 let get_llvar var =
   let name = sanitize_name @@ Var.name var in
   if StrMap.mem name !sub_local_llvars then StrMap.find name !sub_local_llvars
   else if StrMap.mem name !sub_global_llvars then
     StrMap.find name !sub_global_llvars
-  else (
-    StrMap.iter (fun k _ -> print_endline k) !sub_local_llvars;
-    failwith @@ "Local Variable " ^ name ^ " not found")
+  else failwith @@ "Variable " ^ name ^ " not found"
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
@@ -157,45 +168,12 @@ let bb_reg_name reg tid =
 let bb_phi_reg_name reg tid =
   sanitize_name @@ "phi_reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
 
-let bb_arg_name arg tid =
-  sanitize_name @@ "arg" ^ Var.name arg ^ "_" ^ Tid.name tid
-
-let bb_ret_name arg tid =
-  sanitize_name @@ "ret_" ^ Var.name arg ^ "_" ^ Tid.name tid
-
-let bb_var_name var tid = sanitize_name @@ Var.name var ^ "_" ^ Tid.name tid
-
 let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in
   Graphs.Tid.Node.succs Graphs.Tid.start cfg |> Seq.hd_exn
 
-let create_var base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_var_name base tid) typ
-
 let create_reg base ~typ ~tid =
   Var.create ~is_virtual:false (bb_reg_name base tid) typ
 
-let create_arg base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_arg_name base tid) typ
-
-let create_ret base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_ret_name base tid) typ
-
 let create_phi_reg base ~typ ~tid =
   Var.create ~is_virtual:false (bb_phi_reg_name base tid) typ
-
-let is_ret_reg rets var =
-  Base.List.exists rets ~f:(fun ret -> Var.same (Arg.lhs ret) var)
-
-(* TODO *)
-let correct_registers sub_tid tid =
-  let rets = get_rets sub_tid in
-  object
-    inherit Exp.mapper
-
-    method! map_var var =
-      if is_ret_reg rets var then Var (create_ret var ~tid ~typ:(Var.typ var))
-      else if Base.List.mem !base_regs var ~equal:Var.same then
-        Var (create_phi_reg var ~tid ~typ:(Var.typ var))
-      else Var var
-  end
