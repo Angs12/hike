@@ -151,7 +151,6 @@ let simplify_jmps sub =
 
 let transfer_regs sub =
   Term.map blk_t sub ~f:(fun blk ->
-      let tid = Term.tid blk in
       let builder =
         Blk.Builder.init ~same_tid:true ~copy_phis:false ~copy_defs:true
           ~copy_jmps:true blk
@@ -166,11 +165,6 @@ let transfer_regs sub =
           in
           let phi = Phi.of_list base phi_rhs in
           Blk.Builder.add_phi builder phi);
-      Base.List.iter !base_regs ~f:(fun base ->
-          let reg_var = create_phi_reg base ~typ:(Var.typ base) ~tid in
-          let def = Def.create reg_var (Var base) in
-          let def = Term.set_attr def is_phi_reg () in
-          Blk.Builder.add_def builder def);
       Blk.Builder.result builder)
 
 let is_external sub =

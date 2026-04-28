@@ -5,10 +5,10 @@ open Targetutils
 module StrMap = Map.Make (String)
 
 type llvalue_map = Llvm.llvalue StrMap.t
+type blk_llvals = { phis : llvalue_map ref; regs : llvalue_map ref }
 
-let sub_local_llvars : llvalue_map ref = ref StrMap.empty
-let sub_blk_phi_llvars : llvalue_map ref Tid.Map.t ref = ref Tid.Map.empty
-let sub_global_llvars : llvalue_map ref = ref StrMap.empty
+let sub_llvars : llvalue_map ref = ref StrMap.empty
+let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
 
 let is_phi_reg =
@@ -77,53 +77,53 @@ let sanitize_name =
 
 type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
-let clear_local_llvars () = sub_local_llvars := StrMap.empty
-let clear_blk_phi_llvars () = sub_blk_phi_llvars := Tid.Map.empty
-let clear_global_llvars () = sub_global_llvars := StrMap.empty
+let clear_sub_llvars () = sub_llvars := StrMap.empty
+let clear_blk_llvars () = blk_llvals := Tid.Map.empty
 
-let insert_sub_global_name name value =
-  sub_global_llvars := StrMap.add (sanitize_name name) value !sub_global_llvars
+let insert_llval_name name value =
+  sub_llvars := StrMap.add (sanitize_name name) value !sub_llvars
 
-let insert_sub_global_var var value =
-  sub_global_llvars :=
-    StrMap.add (sanitize_name @@ Var.name var) value !sub_global_llvars
+let insert_var var value =
+  sub_llvars := StrMap.add (sanitize_name @@ Var.name var) value !sub_llvars
 
-let insert_sub_local_var var value =
-  sub_local_llvars :=
-    StrMap.add (sanitize_name @@ Var.name var) value !sub_local_llvars
+let init_blk_llvals blk_tid =
+  let phis = ref StrMap.empty in
+  let regs = ref StrMap.empty in
+  blk_llvals := Tid.Map.add_exn !blk_llvals ~key:blk_tid ~data:{ phis; regs }
 
-let get_phi blk_phis var = StrMap.find (sanitize_name @@ Var.name var) !blk_phis
+let insert_phi blk_tid var value =
+  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
+  blk_llvals.phis :=
+    StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.phis)
 
-let get_phis blk_tid =
-  match Tid.Map.find !sub_blk_phi_llvars blk_tid with
-  | Some llvals -> llvals
+let insert_phi_reg blk_tid var value =
+  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
+  blk_llvals.regs :=
+    StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.regs)
+
+let get_phi_reg blk_tid var =
+  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
+  match StrMap.find_opt (sanitize_name @@ Var.name var) !(blk_llvals.regs) with
+  | Some v -> v
   | None ->
-      let phis = ref StrMap.empty in
-      sub_blk_phi_llvars :=
-        Tid.Map.add_exn !sub_blk_phi_llvars ~key:blk_tid ~data:phis;
-      phis
+      failwith @@ "Phi reg "
+      ^ (sanitize_name @@ Var.name var)
+      ^ " not found at blk " ^ Tid.name blk_tid
 
-let get_sub_global_name name =
-  let name = sanitize_name name in
-  if StrMap.mem name !sub_global_llvars then StrMap.find name !sub_global_llvars
-  else failwith @@ "Global Variable " ^ name ^ " not found"
+let get_phi blk_tid var =
+  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
+  match StrMap.find_opt (sanitize_name @@ Var.name var) !(blk_llvals.phis) with
+  | Some v -> v
+  | None ->
+      failwith @@ "Phi "
+      ^ (sanitize_name @@ Var.name var)
+      ^ " not found at blk " ^ Tid.name blk_tid
 
-let get_sub_global_var var =
+let get_llval var =
   let name = sanitize_name @@ Var.name var in
-  if StrMap.mem name !sub_global_llvars then StrMap.find name !sub_global_llvars
-  else failwith @@ "Global Variable " ^ name ^ " not found"
-
-let get_sub_local_var var =
-  let name = sanitize_name @@ Var.name var in
-  if StrMap.mem name !sub_local_llvars then StrMap.find name !sub_local_llvars
-  else failwith @@ "Local Variable " ^ name ^ " not found"
-
-let get_llvar var =
-  let name = sanitize_name @@ Var.name var in
-  if StrMap.mem name !sub_local_llvars then StrMap.find name !sub_local_llvars
-  else if StrMap.mem name !sub_global_llvars then
-    StrMap.find name !sub_global_llvars
-  else failwith @@ "Variable " ^ name ^ " not found"
+  match StrMap.find_opt name !sub_llvars with
+  | Some v -> v
+  | None -> failwith @@ "Variable " ^ name ^ " not found"
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
