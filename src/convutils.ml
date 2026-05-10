@@ -11,11 +11,6 @@ let sub_llvars : llvalue_map ref = ref StrMap.empty
 let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
 
-let is_phi_reg =
-  Value.Tag.register ~uuid:"a49163fc-42fb-11f1-b2b1-f4a80dc1b6bb"
-    ~name:"is_phi_reg"
-    (module Core.Unit)
-
 let insert_sub_sig tid ~rets ~args =
   subs := Tid.Map.add_exn !subs ~key:tid ~data:(rets, args)
 
@@ -28,6 +23,12 @@ let typ_lltype llvm_ctx typ =
   match typ with
   | Imm n -> Llvm.integer_type llvm_ctx n
   | _ -> Llvm.pointer_type llvm_ctx
+
+let get_direct_call jmp =
+  match Jmp.kind jmp with
+  | Call c -> (
+      match Call.target c with Direct target -> Some target | _ -> None)
+  | _ -> None
 
 let get_args sub_tid =
   match Tid.Map.find !subs sub_tid with

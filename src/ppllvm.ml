@@ -127,6 +127,37 @@ let update_var reg_map var =
         Var.with_index data new_index)
       else var)
 
+let get_intrinsic_defs sub =
+  match Term.first blk_t sub with
+  | None -> Seq.empty
+  | Some blk -> Term.enum def_t blk
+
+let inline_intrinsics prog sub =
+  let cfg = Sub.to_cfg sub in
+  Seq.fold (Graphs.Ir.edges cfg) ~init:cfg ~f:(fun cfg edge ->
+      let src = Graphs.Ir.Edge.src edge |> Graphs.Ir.Node.label in
+      let jmp = Graphs.Ir.Edge.jmp edge in
+      let dst = Graphs.Ir.Edge.dst edge |> Graphs.Ir.Node.label in
+      match get_direct_call jmp with
+      | None -> cfg
+      | Some call_tid ->
+          let sub = Term.find sub_t prog call_tid |> Base.Option.value_exn in
+          if Term.has_attr sub Sub.intrinsic then (
+            let intrinsic_defs = get_intrinsic_defs sub in
+            let builder =
+              Blk.Builder.init ~same_tid:true ~copy_defs:true ~copy_jmps:false
+                ~copy_phis:true src
+            in
+            Seq.iter intrinsic_defs ~f:(fun def ->
+                Blk.Builder.add_def builder def);
+            Seq.iter (Term.enum jmp_t dst) ~f:(fun jmp ->
+                Blk.Builder.add_jmp builder jmp);
+            let b = Blk.Builder.result builder in
+            Graphs.Ir.Node.remove (Graphs.Ir.Edge.dst edge) cfg
+            |> Graphs.Ir.Node.update (Graphs.Ir.Edge.src edge) b)
+          else cfg)
+  |> Sub.of_cfg
+
 let simplify_jmps sub =
   let new_sub =
     Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) ()
@@ -211,6 +242,7 @@ let pp proj output_program =
         Term.filter_map sub_t prog ~f:(fun sub ->
             if should_filter syms sub then None
             else (
+              (* let sub = inline_intrinsics prog sub in *)
               Reader.run (set_sub sub) (llvm_ctx, llvm_module);
               Some sub)))
   in
@@ -229,19 +261,19 @@ let pp proj output_program =
   Llvm.dispose_context llvm_ctx
 
 let main input_program output_program _ =
-  Bil.passes ()
-  |> Base.List.iter ~f:(fun pass ->
-      eprintf "Bil pass :: %s \n" (Bil.Pass.name pass));
-  let passes =
-    Base.List.map ~f:get_bil_pass
-      [
-        "bnf1";
-        "constant-folding";
-        "constant-propagation";
-        "prune-dead-virtuals";
-      ]
-  in
-  Bil.select_passes passes;
+  (* Bil.passes () *)
+  (* |> Base.List.iter ~f:(fun pass -> *)
+  (*     eprintf "Bil pass :: %s \n" (Bil.Pass.name pass)); *)
+  (* let passes = *)
+  (*   Base.List.map ~f:get_bil_pass *)
+  (*     [ *)
+  (*       "bnf1"; *)
+  (*       "constant-folding"; *)
+  (*       "constant-propagation"; *)
+  (*       "prune-dead-virtuals"; *)
+  (*     ] *)
+  (* in *)
+  (* Bil.select_passes passes; *)
   Image.available_backends ()
   |> Base.List.iter ~f:(fun backend ->
       eprintf "Available backend: %s\n" backend);

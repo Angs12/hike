@@ -4,9 +4,7 @@
   (preprocess (pps ppx_bap ))
   (libraries
     str
-    landmarks
     unix
-    yojson
     bap
     llvm
     bap-core-theory
@@ -17,5 +15,4 @@
     bitvec-order
     core_kernel
     monads
-    re
     ogre))
