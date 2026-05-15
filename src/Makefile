@@ -6,7 +6,7 @@ sim:
 
 llvm:
 	bapbuild ppllvm.plugin -pkg z3 -pkg llvm
-	bapbundle install -destdir ./plugins ppllvm.plugin
+	bapbundle install ppllvm.plugin
 
 clean:
 	bapbuild -clean
