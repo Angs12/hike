@@ -13,13 +13,10 @@ module StrMap = Map.Make (String)
 module StrSet = Set.Make (String)
 
 let get_section_mem name proj =
-  let mem, _ =
-    Project.memory proj |> Memmap.to_sequence
-    |> Seq.find_exn ~f:(fun (_, v) ->
-        Base.Option.value_map (Value.get Image.section v) ~default:false
-          ~f:(fun n -> String.equal n name))
-  in
-  mem
+  Project.memory proj |> Memmap.to_sequence
+  |> Seq.find ~f:(fun (_, v) ->
+      Base.Option.value_map (Value.get Image.section v) ~default:false
+        ~f:(fun n -> String.equal n name))
 
 let get_section name proj =
   let mem, _ =
@@ -216,12 +213,15 @@ let setup proj =
 
 let remove_plt proj =
   let plt = get_section_mem ".plt" proj in
-  let plt_syms = Symtab.intersecting (Project.symbols proj) plt in
-  Base.List.fold plt_syms ~init:(Project.symbols proj)
-    ~f:(fun syms (name, blk, addr) ->
-      eprintf "Removimg PLT symbol %s \n" name;
-      Symtab.remove syms (name, blk, addr))
-  |> Project.with_symbols proj
+  match plt with
+  | None -> proj
+  | Some (plt, _) ->
+      let plt_syms = Symtab.intersecting (Project.symbols proj) plt in
+      Base.List.fold plt_syms ~init:(Project.symbols proj)
+        ~f:(fun syms (name, blk, addr) ->
+          eprintf "Removimg PLT symbol %s \n" name;
+          Symtab.remove syms (name, blk, addr))
+      |> Project.with_symbols proj
 
 let pp proj output_program =
   let proj = run_pass proj "trivial-condition-form" in
