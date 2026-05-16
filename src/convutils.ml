@@ -171,7 +171,20 @@ let bb_phi_reg_name reg tid =
 
 let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in
-  Graphs.Tid.Node.succs Graphs.Tid.start cfg |> Seq.hd_exn
+  let entry_blks = Graphs.Tid.Node.succs Graphs.Tid.start cfg in
+  let entry_blks =
+    Seq.filter entry_blks ~f:(fun tid -> not (tid = Graphs.Tid.exit))
+  in
+  match Seq.length entry_blks with
+  | 0 -> failwith "entry_blk_tid: no entry blk"
+  | 1 -> Seq.hd_exn entry_blks
+  | _ -> failwith "entry_blk_tid: multiple entry blks"
+
+let is_empty sub =
+  let cfg = Sub.to_graph sub in
+  Seq.is_empty
+    (Graphs.Tid.Node.succs Graphs.Tid.start cfg
+    |> Seq.filter ~f:(fun tid -> not (tid = Graphs.Tid.exit)))
 
 let create_reg base ~typ ~tid =
   Var.create ~is_virtual:false (bb_reg_name base tid) typ

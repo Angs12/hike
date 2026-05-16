@@ -507,7 +507,7 @@ let initialize_bbs blks fn () =
       let tid = Term.tid blk in
       init_blk_llvals tid;
       ll_bbs :=
-        Tid.Map.add_exn ~key:(Term.tid blk)
+        Tid.Map.add_exn ~key:tid
           ~data:(Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn)
           !ll_bbs);
   ll_bbs :=
@@ -516,19 +516,23 @@ let initialize_bbs blks fn () =
 
 let create_sub stack_ptr sub =
   let open Reader in
-  let* llvm_ctx, llvm_module = read () in
-  Printf.eprintf "Converting sub %s\n" (Term.name sub);
-  flush stderr;
-  let blks = Term.enum blk_t sub in
-  let fn =
-    Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module
-    |> Base.Option.value_exn ~message:"create sub : function not found"
-  in
-  let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-  setup_llvars llvm_builder stack_ptr fn ()
-  >>= initialize_bbs blks fn
-  >>= build_entry_block llvm_builder sub
-  >>= populate_blks blks sub >>= update_phis blks sub
+  if is_empty sub then (
+    Format.eprintf "Skipping sub %s, has no blks\n" (Term.name sub);
+    return ())
+  else
+    let* llvm_ctx, llvm_module = read () in
+    Printf.eprintf "Converting sub %s\n" (Term.name sub);
+    flush stderr;
+    let blks = Term.enum blk_t sub in
+    let fn =
+      Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module
+      |> Base.Option.value_exn ~message:"create sub : function not found"
+    in
+    let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
+    setup_llvars llvm_builder stack_ptr fn ()
+    >>= initialize_bbs blks fn
+    >>= build_entry_block llvm_builder sub
+    >>= populate_blks blks sub >>= update_phis blks sub
 
 let create_llvm_i8array llvm_ctx arr =
   Base.Array.map arr ~f:(fun v -> Llvm.const_int (Llvm.i8_type llvm_ctx) v)
