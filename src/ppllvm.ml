@@ -193,13 +193,29 @@ let filter_subs =
     "frame_dummy";
   ]
 
-let should_filter syms sub =
+let calls_intrinsic sub prog =
+  let cfg = Sub.to_cfg sub in
+  let edges = Graphs.Ir.edges cfg in
+  Seq.exists edges ~f:(fun edge ->
+      let sub_called = Graphs.Ir.Edge.jmp edge in
+      match Jmp.kind sub_called with
+      | Call call -> (
+          match Call.target call with
+          | Indirect _ -> false
+          | Direct tid ->
+              let term = Term.find sub_t prog tid in
+              Base.Option.value_map term ~default:false ~f:(fun term ->
+                  Term.has_attr term Sub.intrinsic))
+      | _ -> false)
+
+let should_filter syms prog sub =
   Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub);
   flush stderr;
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
   || Term.has_attr sub Sub.intrinsic
+  || calls_intrinsic sub prog
   || (not @@ StrSet.mem (Sub.name sub) syms)
 
 let setup proj =
@@ -240,7 +256,7 @@ let pp proj output_program =
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.filter_map sub_t prog ~f:(fun sub ->
-            if should_filter syms sub then None
+            if should_filter syms prog sub then None
             else (
               (* let sub = inline_intrinsics prog sub in *)
               Reader.run (set_sub sub) (llvm_ctx, llvm_module);
