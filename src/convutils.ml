@@ -9,6 +9,7 @@ type blk_llvals = { phis : llvalue_map ref; regs : llvalue_map ref }
 
 let sub_llvars : llvalue_map ref = ref StrMap.empty
 let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
+let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
 
 let insert_sub_sig tid ~rets ~args =
@@ -80,6 +81,12 @@ type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
 let clear_sub_llvars () = sub_llvars := StrMap.empty
 let clear_blk_llvars () = blk_llvals := Tid.Map.empty
+let clear_bbs () = ll_bbs := Tid.Map.empty
+
+let insert_bb tid llvm_bb =
+  ll_bbs := Tid.Map.add_exn !ll_bbs ~key:tid ~data:llvm_bb
+
+let get_bb tid = Tid.Map.find_exn !ll_bbs tid
 
 let insert_llval_name name value =
   sub_llvars := StrMap.add (sanitize_name name) value !sub_llvars

@@ -6,7 +6,6 @@ module Reader = Monads.Std.Monad.Reader
 module StrMap = Map.Make (String)
 
 let ll_funcs = ref @@ StrMap.empty
-let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
 
 let typ_lltype_m typ =
   let open Reader in
@@ -16,7 +15,6 @@ let typ_lltype_m typ =
   | _ -> return @@ Llvm.pointer_type llvm_ctx
 
 let var_lltype var = typ_lltype_m (Var.typ var)
-let llbb_from_tid tid = Tid.Map.find_exn !ll_bbs tid
 
 let create_ret_type sub_tid =
   let open Reader in
@@ -277,7 +275,7 @@ let create_branches llvm_builder branches =
     let jmp_target = Jmp.kind br |> goto_label_exn in
     match jmp_target with
     | Direct tid ->
-        let bb = llbb_from_tid tid in
+        let bb = get_bb tid in
         Llvm.build_br bb llvm_builder |> ignore;
         Reader.return ()
     | Indirect exp ->
@@ -290,8 +288,8 @@ let create_branches llvm_builder branches =
     let else_jmp = Seq.to_list branches |> Base.List.last_exn in
     let true_target = Jmp.kind br1 |> goto_label_exn |> label_tid in
     let false_target = Jmp.kind else_jmp |> goto_label_exn |> label_tid in
-    let true_bb = llbb_from_tid true_target in
-    let false_bb = llbb_from_tid false_target in
+    let true_bb = get_bb true_target in
+    let false_bb = get_bb false_target in
     let cond = Jmp.cond br1 in
     let* cond_res = create_exp llvm_builder cond in
     Llvm.build_cond_br cond_res true_bb false_bb llvm_builder |> ignore;
@@ -332,7 +330,7 @@ let create_indirect_call llvm_builder blk_tid call =
   let* target_exp = create_exp llvm_builder target in
   let* func_ptr = create_inttoptr llvm_builder target_exp in
   let* _, fn_typ = get_func (Tid.for_name "indirect_call") in
-  let bb = llbb_from_tid fallthrough in
+  let bb = get_bb fallthrough in
   let rets = get_rets (Tid.for_name "indirect_call") in
   let* args =
     create_call_args llvm_builder (Tid.for_name "indirect_call") blk_tid
@@ -372,7 +370,7 @@ let create_func_call llvm_builder blk_tid fallthrough target =
           insert_var (Arg.lhs ret) ret_val));
   (match fallthrough with
   | Some fallthrough ->
-      let bb = llbb_from_tid fallthrough in
+      let bb = get_bb fallthrough in
       Llvm.build_br bb llvm_builder |> ignore
   | None -> Llvm.build_unreachable llvm_builder |> ignore);
   return ()
@@ -399,7 +397,7 @@ let update_phi blk_incoming blk_tid =
       let phi_llvar = get_phi blk_tid base in
       Seq.iter blk_incoming ~f:(fun tid ->
           let phi_reg = get_phi_reg tid base in
-          Llvm.add_incoming (phi_reg, llbb_from_tid tid) phi_llvar;
+          Llvm.add_incoming (phi_reg, get_bb tid) phi_llvar;
           return ()))
 
 let setup_llvars llvm_builder stack_ptr fn () =
@@ -459,9 +457,7 @@ let populate_blks blks sub () =
   let open Reader in
   let* llvm_ctx, _ = read () in
   Seq.iter blks ~f:(fun blk ->
-      let llvm_builder =
-        Llvm.builder_at_end llvm_ctx (llbb_from_tid (Term.tid blk))
-      in
+      let llvm_builder = Llvm.builder_at_end llvm_ctx (get_bb (Term.tid blk)) in
       transfer_regs llvm_builder (Term.tid blk) ()
       >>= create_elts llvm_builder blk
       >>= create_control_flow llvm_builder blk sub
@@ -469,8 +465,7 @@ let populate_blks blks sub () =
 
 (* go from entry to first bb *)
 let exit_entry llvm_builder sub () =
-  Reader.return
-  @@ Llvm.build_br (llbb_from_tid (entry_blk_tid sub)) llvm_builder
+  Reader.return @@ Llvm.build_br (get_bb (entry_blk_tid sub)) llvm_builder
 
 let build_entry_block llvm_builder sub () =
   let open Reader in
@@ -502,16 +497,13 @@ let initialize_bbs blks fn () =
   let open Reader in
   let* llvm_ctx, _ = read () in
   (* create the basic blocks *)
-  ll_bbs := Tid.Map.empty;
+  clear_bbs ();
   Bap.Std.Seq.iter blks ~f:(fun blk ->
       let tid = Term.tid blk in
       init_blk_llvals tid;
-      ll_bbs :=
-        Tid.Map.add_exn ~key:tid
-          ~data:(Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn)
-          !ll_bbs);
-  ll_bbs :=
-    Tid.Map.add_exn !ll_bbs ~key:Graphs.Tid.start ~data:(Llvm.entry_block fn);
+      insert_bb tid
+        (Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn));
+  insert_bb Graphs.Tid.start (Llvm.entry_block fn);
   return ()
 
 let create_sub stack_ptr sub =
