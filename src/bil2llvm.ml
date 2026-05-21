@@ -514,7 +514,6 @@ let create_sub stack_ptr sub =
   else
     let* llvm_ctx, llvm_module = read () in
     Printf.eprintf "Converting sub %s\n" (Term.name sub);
-    flush stderr;
     let blks = Term.enum blk_t sub in
     let fn =
       Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module

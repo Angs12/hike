@@ -204,13 +204,18 @@ let calls_intrinsic sub prog =
           | Indirect _ -> false
           | Direct tid ->
               let term = Term.find sub_t prog tid in
-              Base.Option.value_map term ~default:false ~f:(fun term ->
-                  Term.has_attr term Sub.intrinsic))
+              if
+                Base.Option.value_map term ~default:false ~f:(fun term ->
+                    Term.has_attr term Sub.intrinsic)
+              then (
+                eprintf "Function %s calls intrinsic %s\n" (Sub.name sub)
+                  (Sub.name (Base.Option.value_exn term));
+                true)
+              else false)
       | _ -> false)
 
 let should_filter syms prog sub =
   Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub);
-  flush stderr;
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
@@ -239,11 +244,7 @@ let remove_plt proj =
           Symtab.remove syms (name, blk, addr))
       |> Project.with_symbols proj
 
-let pp proj output_program =
-  let proj = run_pass proj "trivial-condition-form" in
-  Project.passes ()
-  |> Base.List.iter ~f:(fun pass ->
-      eprintf "Project pass :: %s \n" (Project.Pass.name pass));
+let convert_binary proj output_program =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   setup proj;
@@ -266,7 +267,6 @@ let pp proj output_program =
     Project.map_program proj ~f:(fun prog ->
         Term.map sub_t prog ~f:(fun sub ->
             Printf.eprintf "Preparing sub %s\n" (Term.name sub);
-            flush stderr;
             sub |> simplify_jmps))
   in
   Reader.run
@@ -277,19 +277,7 @@ let pp proj output_program =
   Llvm.dispose_context llvm_ctx
 
 let main input_program output_program _ =
-  (* Bil.passes () *)
-  (* |> Base.List.iter ~f:(fun pass -> *)
-  (*     eprintf "Bil pass :: %s \n" (Bil.Pass.name pass)); *)
-  (* let passes = *)
-  (*   Base.List.map ~f:get_bil_pass *)
-  (*     [ *)
-  (*       "bnf1"; *)
-  (*       "constant-folding"; *)
-  (*       "constant-propagation"; *)
-  (*       "prune-dead-virtuals"; *)
-  (*     ] *)
-  (* in *)
-  (* Bil.select_passes passes; *)
+  eprintf "Converting binary: %s \n" input_program;
   Image.available_backends ()
   |> Base.List.iter ~f:(fun backend ->
       eprintf "Available backend: %s\n" backend);
@@ -298,22 +286,10 @@ let main input_program output_program _ =
     Project.create @@ Project.Input.load input_program ~loader
     |> Core.Or_error.ok_exn |> remove_plt
   in
-  pp proj output_program;
+  convert_binary proj output_program;
   Ok ()
 
-let features_used =
-  [
-    "semantics";
-    "function-starts";
-    "disassembler";
-    "lifter";
-    "symbolizer";
-    "rooter";
-    "reconstructor";
-    "brancher";
-    "loader";
-    "abi";
-  ]
+let requires = [ "llvm"; "disassemble"; "lifter"; "bil"; "semantics" ]
 
 let input =
   Extension.Command.argument
@@ -328,6 +304,6 @@ let output =
 let () =
   Extension.Command.declare "convlir"
     (args $ input $ output)
-    main ~doc:"Convert a binary to LLVM IR" ~requires:features_used
+    main ~doc:"Convert a binary to LLVM IR" ~requires
 
 let () = Extension.declare ~provides:[ "command" ] (fun _ -> Ok ())
