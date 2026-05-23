@@ -177,10 +177,15 @@ let bb_phi_reg_name reg tid =
   sanitize_name @@ "phi_reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
 
 let entry_blk_tid sub =
-  let entry_blk = Term.enum blk_t sub |> Seq.min_elt ~compare:Blk.compare in
+  let cfg = Sub.to_graph sub in
+  let entry_blks = Graphs.Tid.Node.succs Graphs.Tid.start cfg in
+  let entry_blks =
+    Seq.filter entry_blks ~f:(fun tid -> not (tid = Graphs.Tid.exit))
+  in
+  let entry_blk = Seq.min_elt entry_blks ~compare:Tid.compare in
   match entry_blk with
-  | Some blk -> Term.tid blk
   | None -> failwith "entry_blk_tid: no entry blk"
+  | Some tid -> tid
 
 let is_empty sub =
   let cfg = Sub.to_graph sub in

@@ -193,34 +193,29 @@ let filter_subs =
     "frame_dummy";
   ]
 
-let calls_intrinsic sub prog =
-  let cfg = Sub.to_cfg sub in
-  let edges = Graphs.Ir.edges cfg in
-  Seq.exists edges ~f:(fun edge ->
-      let sub_called = Graphs.Ir.Edge.jmp edge in
-      match Jmp.kind sub_called with
-      | Call call -> (
-          match Call.target call with
-          | Indirect _ -> false
-          | Direct tid ->
-              let term = Term.find sub_t prog tid in
-              if
-                Base.Option.value_map term ~default:false ~f:(fun term ->
-                    Term.has_attr term Sub.intrinsic)
-              then (
-                eprintf "Function %s calls intrinsic %s\n" (Sub.name sub)
-                  (Sub.name (Base.Option.value_exn term));
-                true)
-              else false)
-      | _ -> false)
+let calls_intrinsic prog =
+  let callgraph = Program.to_graph prog in
+  let visit_edge _ edge filter_set =
+    let caller = Graphs.Callgraph.Edge.src edge in
+    let callee = Graphs.Callgraph.Edge.dst edge in
+    let term = Term.find sub_t prog callee in
+    if
+      Base.Option.value_map term ~default:false ~f:(fun term ->
+          Term.has_attr term Sub.intrinsic)
+    then Tid.Set.add filter_set caller
+    else filter_set
+  in
+  Graphlib.Std.Graphlib.depth_first_search
+    (module Graphs.Callgraph)
+    callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
 
-let should_filter syms prog sub =
+let should_filter filter_set syms sub =
   Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub);
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
   || Term.has_attr sub Sub.intrinsic
-  || calls_intrinsic sub prog
+  || Tid.Set.mem filter_set (Term.tid sub)
   || (not @@ StrSet.mem (Sub.name sub) syms)
 
 let setup proj =
@@ -256,8 +251,9 @@ let convert_binary proj output_program =
   in
   let proj =
     Project.map_program proj ~f:(fun prog ->
+        let filter_set = calls_intrinsic prog in
         Term.filter_map sub_t prog ~f:(fun sub ->
-            if should_filter syms prog sub then None
+            if should_filter filter_set syms sub then None
             else (
               (* let sub = inline_intrinsics prog sub in *)
               Reader.run (set_sub sub) (llvm_ctx, llvm_module);
