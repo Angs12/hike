@@ -5,7 +5,7 @@ sim:
 	bapbundle install sim.plugin
 
 llvm:
-	bapbuild ppllvm.plugin -pkg z3 -pkg llvm
+	bapbuild ppllvm.plugin -pkg llvm
 	bapbundle install ppllvm.plugin
 
 clean:
@@ -41,7 +41,7 @@ runtest_struct:
 
 compileO0_fizzbuzz:
 	gcc -O0 -o $(PROGSFOLDER)fizzbuzz_0 $(PROGSFOLDER)fizzbuzz.c
-	bap convlir -L ./plugins $(PROGSFOLDER)fizzbuzz_0 fizzbuzz.ll
+	bap --pass=ppllvm-convlir --ppllvm-o fizzbuzz.ll $(PROGSFOLDER)fizzbuzz_0
 	clang -O3 fizzbuzz.ll -o $(PROGSFOLDER)fizzbuzz_llvmO0
 
 compileO2_fizzbuzz:

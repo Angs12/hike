@@ -3,8 +3,6 @@ open Bap_main
 open Bap.Std.Bil.Types
 open Regular.Std
 open Bap_core_theory
-open Bap_main.Extension.Command
-open Format
 open Bil2llvm
 open Convutils
 open Targetutils
@@ -210,7 +208,7 @@ let calls_intrinsic prog =
     callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
 
 let should_filter filter_set syms sub =
-  Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub);
+  (* Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub); *)
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
@@ -235,11 +233,11 @@ let remove_plt proj =
       let plt_syms = Symtab.intersecting (Project.symbols proj) plt in
       Base.List.fold plt_syms ~init:(Project.symbols proj)
         ~f:(fun syms (name, blk, addr) ->
-          eprintf "Removimg PLT symbol %s \n" name;
+          (* eprintf "Removimg PLT symbol %s \n" name; *)
           Symtab.remove syms (name, blk, addr))
       |> Project.with_symbols proj
 
-let convert_binary proj output_program =
+let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   setup proj;
@@ -262,7 +260,7 @@ let convert_binary proj output_program =
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.map sub_t prog ~f:(fun sub ->
-            Printf.eprintf "Preparing sub %s\n" (Term.name sub);
+            (* Printf.eprintf "Preparing sub %s\n" (Term.name sub); *)
             sub |> simplify_jmps))
   in
   Reader.run
@@ -272,34 +270,15 @@ let convert_binary proj output_program =
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
 
-let main input_program output_program _ =
-  eprintf "Converting binary: %s \n" input_program;
-  Image.available_backends ()
-  |> Base.List.iter ~f:(fun backend ->
-      eprintf "Available backend: %s\n" backend);
-  let loader = "llvm" in
-  let proj =
-    Project.create @@ Project.Input.load input_program ~loader
-    |> Core.Or_error.ok_exn |> remove_plt
-  in
-  convert_binary proj output_program;
-  Ok ()
-
-let requires = [ "llvm"; "disassemble"; "lifter"; "bil"; "semantics" ]
-
-let input =
-  Extension.Command.argument
-    Extension.Type.("input file" %: string)
-    ~doc:"Executable to convert to LLVM IR"
+let requires = []
 
 let output =
-  Extension.Command.argument
+  Extension.Configuration.parameter ~aliases:[ "o"; "output" ]
     Extension.Type.("output file" %: string)
-    ~doc:"File to output LLVM IR"
+    "output-file" ~doc:"File to output LLVM IR"
 
 let () =
-  Extension.Command.declare "convlir"
-    (args $ input $ output)
-    main ~doc:"Convert a binary to LLVM IR" ~requires
-
-let () = Extension.declare ~provides:[ "command" ] (fun _ -> Ok ())
+  Extension.declare (fun ctx ->
+      let output_file = Extension.Configuration.get ctx output in
+      Project.register_pass' ~name:"convlir" (convert_binary output_file);
+      Ok ())

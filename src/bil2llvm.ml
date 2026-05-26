@@ -85,7 +85,7 @@ let create_fun_declaration sub_tid =
 
 let create_fun sub_tid =
   let open Reader in
-  let* _, llvm_module = read () in
+  let* llvm_ctx, llvm_module = read () in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
@@ -93,6 +93,8 @@ let create_fun sub_tid =
     Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
   in
   set_arg_names fn sub_tid;
+  let attr = Llvm.create_enum_attr llvm_ctx "alwaysinline" 0L in
+  Llvm.add_function_attr fn attr Llvm.AttrIndex.Function;
   ll_funcs :=
     StrMap.add (sanitize_name @@ Tid.name sub_tid) (fn, fn_typ) !ll_funcs;
   set_arg_attrs fn sub_tid >>= return
@@ -513,7 +515,7 @@ let create_sub stack_ptr sub =
     return ())
   else
     let* llvm_ctx, llvm_module = read () in
-    Printf.eprintf "Converting sub %s\n" (Term.name sub);
+    (* Printf.eprintf "Converting sub %s\n" (Term.name sub); *)
     let blks = Term.enum blk_t sub in
     let fn =
       Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module
