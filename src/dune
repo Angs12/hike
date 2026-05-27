@@ -1,6 +1,6 @@
 (library
-  (name convlir)
-  (public_name convlir)
+  (name hike)
+  (public_name hike)
   (preprocess (pps ppx_bap ))
   (libraries
     str
