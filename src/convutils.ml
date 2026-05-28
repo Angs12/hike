@@ -10,6 +10,7 @@ type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
 let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
+let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 let str_map_find name map =
   match StrMap.find_opt name map with
@@ -62,6 +63,10 @@ let get_rets sub_tid =
       Base.List.map
         ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
         callconv.return_regs
+
+let ret_set () =
+  let callconv = get_calling_convention () in
+  Var.Set.of_list callconv.return_regs
 
 let var_size var =
   match Var.typ var with Imm n -> n | _ -> failwith "var size: non-imm var"

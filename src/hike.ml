@@ -30,8 +30,6 @@ let get_section name proj =
       arr.(Word.to_int_exn (Word.( - ) index min_addr)) <- Word.to_int_exn v);
   arr
 
-let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
-
 let free_vars sub =
   Sub.free_vars sub
   |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
