@@ -5,12 +5,26 @@ open Targetutils
 module StrMap = Map.Make (String)
 
 type llvalue_map = Llvm.llvalue StrMap.t
-type blk_llvals = { phis : llvalue_map ref; regs : llvalue_map ref }
+type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 
-let sub_llvars : llvalue_map ref = ref StrMap.empty
 let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
 let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
+
+let str_map_find name map =
+  match StrMap.find_opt name map with
+  | Some v -> v
+  | None -> failwith @@ "StrMap.find_exn: " ^ name
+
+let blk_llvals_find map tid =
+  match Tid.Map.find map tid with
+  | Some v -> v
+  | None -> failwith @@ "blk_llvals.find_exn: " ^ Tid.name tid
+
+let bb_find map tid =
+  match Tid.Map.find map tid with
+  | Some v -> v
+  | None -> failwith @@ "bb_find_exn: " ^ Tid.name tid
 
 let insert_sub_sig tid ~rets ~args =
   subs := Tid.Map.add_exn !subs ~key:tid ~data:(rets, args)
@@ -79,47 +93,26 @@ let sanitize_name =
 
 type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
-let clear_sub_llvars () = sub_llvars := StrMap.empty
-let clear_blk_llvars () = blk_llvals := Tid.Map.empty
+let clear_blk_llvals () = blk_llvals := Tid.Map.empty
 let clear_bbs () = ll_bbs := Tid.Map.empty
 
 let insert_bb tid llvm_bb =
   ll_bbs := Tid.Map.add_exn !ll_bbs ~key:tid ~data:llvm_bb
 
-let get_bb tid = Tid.Map.find_exn !ll_bbs tid
-
-let insert_llval_name name value =
-  sub_llvars := StrMap.add (sanitize_name name) value !sub_llvars
-
-let insert_var var value =
-  sub_llvars := StrMap.add (sanitize_name @@ Var.name var) value !sub_llvars
+let get_bb tid = bb_find !ll_bbs tid
 
 let init_blk_llvals blk_tid =
   let phis = ref StrMap.empty in
-  let regs = ref StrMap.empty in
-  blk_llvals := Tid.Map.add_exn !blk_llvals ~key:blk_tid ~data:{ phis; regs }
+  let locals = ref StrMap.empty in
+  blk_llvals := Tid.Map.add_exn !blk_llvals ~key:blk_tid ~data:{ phis; locals }
 
 let insert_phi blk_tid var value =
-  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
+  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
   blk_llvals.phis :=
     StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.phis)
 
-let insert_phi_reg blk_tid var value =
-  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
-  blk_llvals.regs :=
-    StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.regs)
-
-let get_phi_reg blk_tid var =
-  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
-  match StrMap.find_opt (sanitize_name @@ Var.name var) !(blk_llvals.regs) with
-  | Some v -> v
-  | None ->
-      failwith @@ "Phi reg "
-      ^ (sanitize_name @@ Var.name var)
-      ^ " not found at blk " ^ Tid.name blk_tid
-
 let get_phi blk_tid var =
-  let blk_llvals = Tid.Map.find_exn !blk_llvals blk_tid in
+  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
   match StrMap.find_opt (sanitize_name @@ Var.name var) !(blk_llvals.phis) with
   | Some v -> v
   | None ->
@@ -127,11 +120,30 @@ let get_phi blk_tid var =
       ^ (sanitize_name @@ Var.name var)
       ^ " not found at blk " ^ Tid.name blk_tid
 
-let get_llval var =
+let insert_local_name blk_tid name value =
+  let name = sanitize_name name in
+  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
+  blk_llvals.locals := StrMap.add name value !(blk_llvals.locals)
+
+let insert_local blk_tid var value =
+  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
+  blk_llvals.locals :=
+    StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.locals)
+
+let get_local blk_tid var =
   let name = sanitize_name @@ Var.name var in
-  match StrMap.find_opt name !sub_llvars with
+  let blk_vars = blk_llvals_find !blk_llvals blk_tid in
+  StrMap.find_opt name !(blk_vars.locals)
+
+let get_local_exn blk_tid var =
+  let name = sanitize_name @@ Var.name var in
+  let blk_vars = blk_llvals_find !blk_llvals blk_tid in
+  let tmp = StrMap.find_opt name !(blk_vars.locals) in
+  match tmp with
   | Some v -> v
-  | None -> failwith @@ "Variable " ^ name ^ " not found"
+  | None ->
+      failwith @@ "Var with name " ^ name ^ " not found in block: "
+      ^ Tid.name blk_tid
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 

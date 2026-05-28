@@ -54,7 +54,7 @@ let set_arg_attrs fn sub_tid =
         Llvm.add_function_attr fn attr (Llvm.AttrIndex.Param i));
   return ()
 
-let add_args_to_vars llvm_builder fn () =
+let add_args_to_vars llvm_builder blk_tid fn () =
   let open Reader in
   let* llvm_ctx, _ = read () in
   return
@@ -63,11 +63,11 @@ let add_args_to_vars llvm_builder fn () =
          let name = Llvm.value_name param in
          match Llvm.classify_type (Llvm.type_of param) with
          | Llvm.TypeKind.Pointer ->
-             insert_llval_name name
+             insert_local_name blk_tid name
                (Llvm.build_ptrtoint param
                   (Llvm.integer_type llvm_ctx !ptrsize)
                   "" llvm_builder)
-         | _ -> insert_llval_name name param)
+         | _ -> insert_local_name blk_tid name param)
        fn
 
 let create_fun_declaration sub_tid =
@@ -222,53 +222,53 @@ let create_immidiate word =
        (Word.string_of_value word)
        16
 
-let rec create_exp llvm_builder exp =
+let rec create_exp llvm_builder blk_tid exp =
   let open Reader in
   match exp with
   | BinOp (op, e1, e2) ->
-      let* var1 = create_exp llvm_builder e1 in
-      let* var2 = create_exp llvm_builder e2 in
+      let* var1 = create_exp llvm_builder blk_tid e1 in
+      let* var2 = create_exp llvm_builder blk_tid e2 in
       create_binop llvm_builder (op, var1, var2)
   | UnOp (op, e) ->
-      let* var = create_exp llvm_builder e in
+      let* var = create_exp llvm_builder blk_tid e in
       create_unop llvm_builder (op, var)
-  | Var v -> return @@ get_llval v
+  | Var v -> return @@ get_local_exn blk_tid v
   | Int i -> create_immidiate i
   | Cast (cast, i, exp) ->
-      let* var = create_exp llvm_builder exp in
+      let* var = create_exp llvm_builder blk_tid exp in
       create_cast llvm_builder (cast, i, var)
   | Concat (exp1, exp2) ->
-      let* llvm_var1 = create_exp llvm_builder exp1 in
-      let* llvm_var2 = create_exp llvm_builder exp2 in
+      let* llvm_var1 = create_exp llvm_builder blk_tid exp1 in
+      let* llvm_var2 = create_exp llvm_builder blk_tid exp2 in
       create_concat llvm_builder (llvm_var1, llvm_var2)
   | Extract (hi, lo, exp) ->
-      let* llvm_var = create_exp llvm_builder exp in
+      let* llvm_var = create_exp llvm_builder blk_tid exp in
       create_extract llvm_builder (hi, lo, llvm_var)
   | Store (_, addr, data, _, _) ->
-      let* addr = create_exp llvm_builder addr in
-      let* data = create_exp llvm_builder data in
+      let* addr = create_exp llvm_builder blk_tid addr in
+      let* data = create_exp llvm_builder blk_tid data in
       create_store llvm_builder (data, addr)
   | Load (_, addr, _, size) ->
-      let* addr = create_exp llvm_builder addr in
+      let* addr = create_exp llvm_builder blk_tid addr in
       create_load llvm_builder (addr, Size.in_bits size)
   | Let (var, exp, body) ->
       let unique_var =
         Var.create ~is_virtual:true ~fresh:true "" (Var.typ var)
       in
-      let* v = create_exp llvm_builder exp in
-      insert_var unique_var v;
+      let* v = create_exp llvm_builder blk_tid exp in
+      insert_local blk_tid unique_var v;
       let body = Exp.substitute (Var var) (Var unique_var) body in
-      create_exp llvm_builder body
+      create_exp llvm_builder blk_tid body
   | Ite (cond, true_exp, false_exp) ->
-      let* cond = create_exp llvm_builder cond in
-      let* true_exp = create_exp llvm_builder true_exp in
-      let* false_exp = create_exp llvm_builder false_exp in
+      let* cond = create_exp llvm_builder blk_tid cond in
+      let* true_exp = create_exp llvm_builder blk_tid true_exp in
+      let* false_exp = create_exp llvm_builder blk_tid false_exp in
       return @@ Llvm.build_select cond true_exp false_exp "" llvm_builder
   | Unknown (_, typ) ->
       let* typ = typ_lltype_m typ in
       return @@ Llvm.undef typ
 
-let create_branches llvm_builder branches =
+let create_branches blk_tid llvm_builder branches =
   let open Reader in
   let open Bap.Std in
   if Seq.length branches = 1 then (* unconditional branch *)
@@ -281,7 +281,7 @@ let create_branches llvm_builder branches =
         Llvm.build_br bb llvm_builder |> ignore;
         Reader.return ()
     | Indirect exp ->
-        let* target_val = create_exp llvm_builder exp in
+        let* target_val = create_exp llvm_builder blk_tid exp in
         Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
         Reader.return ())
   else if Seq.length branches = 2 then (
@@ -293,33 +293,33 @@ let create_branches llvm_builder branches =
     let true_bb = get_bb true_target in
     let false_bb = get_bb false_target in
     let cond = Jmp.cond br1 in
-    let* cond_res = create_exp llvm_builder cond in
+    let* cond_res = create_exp llvm_builder blk_tid cond in
     Llvm.build_cond_br cond_res true_bb false_bb llvm_builder |> ignore;
     Reader.return ())
   else failwith "pp_branches: more than 2 branches"
 
-let create_def llvm_builder def =
+let create_def blk_tid llvm_builder def =
   let open Reader in
   let var = Def.lhs def in
-  let* res = create_exp llvm_builder (Def.rhs def) in
-  insert_var var res;
+  let* res = create_exp llvm_builder blk_tid (Def.rhs def) in
+  insert_local blk_tid var res;
   return ()
 
-let create_call_args llvm_builder call_tid _ =
+let create_call_args blk_tid llvm_builder call_tid =
   let open Reader in
   let args = get_args call_tid in
   Reader.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
-      let* arg = create_exp llvm_builder exp in
+      let* arg = create_exp llvm_builder blk_tid exp in
       return arg)
 
 let get_func tid =
   let open Reader in
   let name = sanitize_name @@ Tid.name tid in
-  if StrMap.mem name !ll_funcs then return @@ StrMap.find name !ll_funcs
+  if StrMap.mem name !ll_funcs then return @@ str_map_find name !ll_funcs
   else
     let* _ = create_fun_declaration tid in
-    return @@ StrMap.find name !ll_funcs
+    return @@ str_map_find name !ll_funcs
 
 let create_indirect_call llvm_builder blk_tid call =
   let open Reader in
@@ -329,27 +329,27 @@ let create_indirect_call llvm_builder blk_tid call =
     |> Base.Option.value_exn ~message:"Create call: expected call got return"
     |> label_tid
   in
-  let* target_exp = create_exp llvm_builder target in
+  let* target_exp = create_exp llvm_builder blk_tid target in
   let* func_ptr = create_inttoptr llvm_builder target_exp in
   let* _, fn_typ = get_func (Tid.for_name "indirect_call") in
   let bb = get_bb fallthrough in
   let rets = get_rets (Tid.for_name "indirect_call") in
   let* args =
-    create_call_args llvm_builder (Tid.for_name "indirect_call") blk_tid
+    create_call_args blk_tid llvm_builder (Tid.for_name "indirect_call")
   in
   let ret_struct =
     Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
   in
   Base.List.iteri rets ~f:(fun i ret ->
       let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
-      insert_var (Arg.lhs ret) ret_val);
+      insert_local blk_tid (Arg.lhs ret) ret_val);
   Llvm.build_br bb llvm_builder |> ignore;
   return ()
 
 let create_func_call llvm_builder blk_tid fallthrough target =
   let open Reader in
   let* llvm_ctx, _ = read () in
-  let* args = create_call_args llvm_builder target blk_tid in
+  let* args = create_call_args blk_tid llvm_builder target in
   let rets = get_rets target in
   let* fn, fn_typ = get_func target in
   (match rets with
@@ -362,14 +362,14 @@ let create_func_call llvm_builder blk_tid fallthrough target =
       Llvm.add_call_site_attr ret_var
         (Llvm.create_enum_attr llvm_ctx "zeroext" 0L)
         Llvm.AttrIndex.Return;
-      insert_var (Arg.lhs ret) ret_var
+      insert_local blk_tid (Arg.lhs ret) ret_var
   | rets ->
       let ret_struct =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
       Base.List.iteri rets ~f:(fun i ret ->
           let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
-          insert_var (Arg.lhs ret) ret_val));
+          insert_local blk_tid (Arg.lhs ret) ret_val));
   (match fallthrough with
   | Some fallthrough ->
       let bb = get_bb fallthrough in
@@ -377,10 +377,10 @@ let create_func_call llvm_builder blk_tid fallthrough target =
   | None -> Llvm.build_unreachable llvm_builder |> ignore);
   return ()
 
-let create_return llvm_builder cur_sub _ =
+let create_return blk_tid llvm_builder cur_sub =
   let rets =
     get_rets (Term.tid cur_sub)
-    |> Base.List.map ~f:(fun ret -> get_llval (Arg.lhs ret))
+    |> Base.List.map ~f:(fun ret -> get_local_exn blk_tid (Arg.lhs ret))
   in
   (match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -398,17 +398,12 @@ let update_phi blk_incoming blk_tid =
   List.iter !base_regs ~f:(fun base ->
       let phi_llvar = get_phi blk_tid base in
       Seq.iter blk_incoming ~f:(fun tid ->
-          let phi_reg = get_phi_reg tid base in
-          Llvm.add_incoming (phi_reg, get_bb tid) phi_llvar;
-          return ()))
-
-let setup_llvars llvm_builder stack_ptr fn () =
-  (* reset sub_llvars *)
-  clear_blk_llvars ();
-  clear_sub_llvars ();
-  (* add stack_ptr to llvars *)
-  insert_llval_name "stack_ptr" stack_ptr;
-  add_args_to_vars llvm_builder fn ()
+          let phi_reg = get_local tid base in
+          match phi_reg with
+          | Some phi_reg ->
+              Llvm.add_incoming (phi_reg, get_bb tid) phi_llvar;
+              return ()
+          | None -> failwith "update_phi: phi_reg not found"))
 
 let update_phis blks sub () =
   let open Reader in
@@ -418,18 +413,13 @@ let update_phis blks sub () =
       let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
       update_phi blk_incoming blk_tid)
 
-let save_regs blk_tid () =
-  let open Reader in
-  Base.List.iter !base_regs ~f:(fun base ->
-      insert_phi_reg blk_tid base (get_llval base));
-  return ()
-
 let create_control_flow llvm_builder blk sub () =
   let control_flow = Term.enum jmp_t blk in
+  let tid = Term.tid blk in
   match cf_type control_flow with
-  | Br -> create_branches llvm_builder control_flow
+  | Br -> create_branches tid llvm_builder control_flow
   | Int -> failwith "jmp: INT not implemented"
-  | Ret -> create_return llvm_builder sub (Term.tid blk)
+  | Ret -> create_return tid llvm_builder sub
   | CallIndirect ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_indirect_call llvm_builder (Term.tid blk) call
@@ -443,15 +433,16 @@ let transfer_regs llvm_builder blk_tid () =
       let* typ = var_lltype base in
       let res = Llvm.build_empty_phi typ "" llvm_builder in
       insert_phi blk_tid base res;
-      insert_var base res;
+      insert_local blk_tid base res;
       return ())
 
 let create_elts llvm_builder blk () =
   let open Reader in
+  let tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
-      | `Def def -> create_def llvm_builder def
+      | `Def def -> create_def tid llvm_builder def
       | `Phi _ -> return ()
       | `Jmp _ -> return ())
 
@@ -462,14 +453,13 @@ let populate_blks blks sub () =
       let llvm_builder = Llvm.builder_at_end llvm_ctx (get_bb (Term.tid blk)) in
       transfer_regs llvm_builder (Term.tid blk) ()
       >>= create_elts llvm_builder blk
-      >>= create_control_flow llvm_builder blk sub
-      >>= save_regs (Term.tid blk))
+      >>= create_control_flow llvm_builder blk sub)
 
 (* go from entry to first bb *)
 let exit_entry llvm_builder sub () =
   Reader.return @@ Llvm.build_br (get_bb (entry_blk_tid sub)) llvm_builder
 
-let build_entry_block llvm_builder sub () =
+let build_entry_block llvm_builder stack_ptr sub fn () =
   let open Reader in
   (* Can remove in the future *)
   let args =
@@ -481,31 +471,31 @@ let build_entry_block llvm_builder sub () =
     else []
   in
   let tid = Graphs.Tid.start in
-  init_blk_llvals tid;
+  (* add stack_ptr to llvars *)
+  insert_local_name tid "stack_ptr" stack_ptr;
   Reader.List.iter !base_regs ~f:(fun base ->
       let arg =
         Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) base)
       in
       let llval =
         match arg with
-        | Some arg -> create_exp llvm_builder (Arg.rhs arg)
+        | Some arg -> create_exp llvm_builder tid (Arg.rhs arg)
         | None -> !$Llvm.undef (var_lltype base)
       in
-      !$(insert_phi_reg tid base) llval)
+      !$(insert_local tid base) llval)
   >>= exit_entry llvm_builder sub
   |> void
 
-let initialize_bbs blks fn () =
+let initialize_bbs llvm_builder blks fn () =
   let open Reader in
   let* llvm_ctx, _ = read () in
   (* create the basic blocks *)
-  clear_bbs ();
+  insert_bb Graphs.Tid.start (Llvm.entry_block fn);
   Bap.Std.Seq.iter blks ~f:(fun blk ->
       let tid = Term.tid blk in
       init_blk_llvals tid;
       insert_bb tid
         (Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn));
-  insert_bb Graphs.Tid.start (Llvm.entry_block fn);
   return ()
 
 let create_sub stack_ptr sub =
@@ -522,9 +512,13 @@ let create_sub stack_ptr sub =
       |> Base.Option.value_exn ~message:"create sub : function not found"
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-    setup_llvars llvm_builder stack_ptr fn ()
-    >>= initialize_bbs blks fn
-    >>= build_entry_block llvm_builder sub
+    (* reset llvals and bbs *)
+    clear_bbs ();
+    clear_blk_llvals ();
+    init_blk_llvals Graphs.Tid.start;
+    initialize_bbs llvm_builder blks fn ()
+    >>= add_args_to_vars llvm_builder Graphs.Tid.start fn
+    >>= build_entry_block llvm_builder stack_ptr sub fn
     >>= populate_blks blks sub >>= update_phis blks sub
 
 let create_llvm_i8array llvm_ctx arr =
