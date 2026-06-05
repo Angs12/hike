@@ -6,6 +6,7 @@ open Bap_core_theory
 open Bil2llvm
 open Convutils
 open Targetutils
+open Printf
 module Reader = Monads.Std.Monad.Reader
 module StrMap = Map.Make (String)
 module StrSet = Set.Make (String)
@@ -16,19 +17,15 @@ let get_section_mem name proj =
       Base.Option.value_map (Value.get Image.section v) ~default:false
         ~f:(fun n -> String.equal n name))
 
-let get_section name proj =
-  let mem, _ =
-    Project.memory proj |> Memmap.to_sequence
-    |> Seq.find_exn ~f:(fun (_, v) ->
-        Base.Option.value_map (Value.get Image.section v) ~default:false
-          ~f:(fun n -> String.equal n name))
-  in
-  let lenght = Memory.length mem in
-  let min_addr = Memory.min_addr mem in
-  let arr = Base.Array.init lenght ~f:(fun _ -> 0) in
-  Memory.iteri ~word_size:`r8 mem ~f:(fun index v ->
-      arr.(Word.to_int_exn (Word.( - ) index min_addr)) <- Word.to_int_exn v);
-  arr
+let get_section_data =
+  Option.map begin fun (mem, _) ->
+      let length = Memory.length mem in
+      let min_addr = Memory.min_addr mem in
+      let arr = Base.Array.init length ~f:(fun _ -> 0) in
+      Memory.iteri ~word_size:`r8 mem ~f:(fun index v ->
+          arr.(Word.to_int_exn (Word.( - ) index min_addr)) <- Word.to_int_exn v);
+      (arr, Memory.min_addr mem, Memory.max_addr mem)
+    end
 
 let free_vars sub =
   Sub.free_vars sub
@@ -105,6 +102,22 @@ let create_stack_ptr llvm_ctx llvm_module =
     Llvm.const_ptrtoint stack_ptr (typ_lltype llvm_ctx (Var.typ !sp))
   in
   Llvm.const_add stack_ptr offset
+
+let create_section llvm_ctx llvm_module proj section_type ~is_const =
+  let name, llvm_name =
+    match section_type with
+    | DATA -> (".data", "data")
+    | RODATA -> (".rodata", "rodata")
+    | BSS -> (".bss", "bss")
+  in
+  match get_section_mem name proj |> get_section_data with
+  | None -> failwith @@ "create_section: section " ^ name ^ " not found"
+  | Some (arr, min_addr, max_addr) ->
+      let base = create_global ~is_const llvm_ctx llvm_module arr llvm_name in
+      eprintf "Section %s has length %d\n" name (Array.length arr);
+      eprintf "Section %s has min addr %s\n" name (Word.to_string min_addr);
+      eprintf "Section %s has max addr %s\n" name (Word.to_string max_addr);
+      { base; min_addr; max_addr }
 
 let update_exp reg_map exp =
   Var.Map.fold reg_map ~init:exp ~f:(fun ~key ~data exp ->
@@ -206,7 +219,6 @@ let calls_intrinsic prog =
     callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
 
 let should_filter filter_set syms sub =
-  (* Printf.eprintf "Checking sub %s if it should be filtered\n" (Sub.name sub); *)
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
   || is_external sub || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
@@ -230,40 +242,55 @@ let remove_plt proj =
   | Some (plt, _) ->
       let plt_syms = Symtab.intersecting (Project.symbols proj) plt in
       Base.List.fold plt_syms ~init:(Project.symbols proj)
-        ~f:(fun syms (name, blk, addr) ->
-          (* eprintf "Removimg PLT symbol %s \n" name; *)
-          Symtab.remove syms (name, blk, addr))
+        ~f:(fun syms (name, blk, addr) -> Symtab.remove syms (name, blk, addr))
       |> Project.with_symbols proj
 
 let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   setup proj;
+  eprintf "Creating stack pointer\n";
   let stack_ptr = create_stack_ptr llvm_ctx llvm_module in
+  let data_section =
+    create_section llvm_ctx llvm_module proj DATA ~is_const:false
+  in
+  (* let bss_section = *)
+  (*   create_section llvm_ctx llvm_module proj ".bss" ~is_const:false *)
+  (* in *)
+  let rodata_section =
+    create_section llvm_ctx llvm_module proj RODATA ~is_const:true
+  in
+  eprintf "Getting symbols\n";
   let syms =
     Symtab.to_sequence (Project.symbols proj)
     |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
         StrSet.add name set)
   in
+  eprintf "Filtering subs\n";
   let proj =
     Project.map_program proj ~f:(fun prog ->
         let filter_set = calls_intrinsic prog in
         Term.filter_map sub_t prog ~f:(fun sub ->
-            if should_filter filter_set syms sub then None
+            if should_filter filter_set syms sub then (
+              eprintf "Skipping sub %s\n" (Sub.name sub);
+              None)
             else (
               (* let sub = inline_intrinsics prog sub in *)
-              Reader.run (set_sub sub) (llvm_ctx, llvm_module);
+              eprintf "Inlining sub %s\n" (Sub.name sub);
+              Reader.run (set_sub sub)
+                (llvm_ctx, llvm_module, [ data_section; rodata_section ]);
               Some sub)))
   in
   let proj =
     Project.map_program proj ~f:(fun prog ->
         Term.map sub_t prog ~f:(fun sub ->
-            (* Printf.eprintf "Preparing sub %s\n" (Term.name sub); *)
+            eprintf "Preparing sub %s\n" (Term.name sub);
             sub |> simplify_jmps))
   in
+  eprintf "Creating program\n";
   Reader.run
     (create_prog (Project.program proj) stack_ptr)
-    (llvm_ctx, llvm_module);
+    (llvm_ctx, llvm_module, [ data_section; rodata_section ]);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx

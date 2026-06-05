@@ -12,6 +12,9 @@ let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
 let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
+type section = { base : Llvm.llvalue; min_addr : addr; max_addr : addr }
+type section_type = DATA | RODATA | BSS
+
 let str_map_find name map =
   match StrMap.find_opt name map with
   | Some v -> v

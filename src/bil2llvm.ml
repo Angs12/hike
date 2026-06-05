@@ -9,7 +9,7 @@ let ll_funcs = ref @@ StrMap.empty
 
 let typ_lltype_m typ =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   match typ with
   | Imm n -> return @@ Llvm.integer_type llvm_ctx n
   | _ -> return @@ Llvm.pointer_type llvm_ctx
@@ -18,7 +18,7 @@ let var_lltype var = typ_lltype_m (Var.typ var)
 
 let create_ret_type sub_tid =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   let rets = get_rets sub_tid in
   match rets with
   | [] -> return @@ Llvm.void_type llvm_ctx
@@ -31,7 +31,7 @@ let create_ret_type sub_tid =
 
 let create_arg_types sub_tid =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   let args = get_args sub_tid in
   Reader.List.map args ~f:(fun arg ->
       let var = Arg.lhs arg in
@@ -47,7 +47,7 @@ let set_arg_names fn sub_tid =
 let set_arg_attrs fn sub_tid =
   let args = get_args sub_tid in
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   Base.List.iteri args ~f:(fun i arg ->
       if Arg.intent arg = Some Both then
         let attr = Llvm.create_enum_attr llvm_ctx "noalias" 0L in
@@ -56,7 +56,7 @@ let set_arg_attrs fn sub_tid =
 
 let add_args_to_vars llvm_builder blk_tid fn () =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   return
   @@ Llvm.iter_params
        (fun param ->
@@ -72,7 +72,7 @@ let add_args_to_vars llvm_builder blk_tid fn () =
 
 let create_fun_declaration sub_tid =
   let open Reader in
-  let* _, llvm_module = read () in
+  let* _, llvm_module, _ = read () in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
@@ -85,7 +85,7 @@ let create_fun_declaration sub_tid =
 
 let create_fun sub_tid =
   let open Reader in
-  let* llvm_ctx, llvm_module = read () in
+  let* llvm_ctx, llvm_module, _ = read () in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
@@ -144,7 +144,7 @@ let create_unop llvm_builder (op, llvm_val) =
 
 let create_concat llvm_builder (llvm_var1, llvm_var2) =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
   let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.integer_bitwidth in
   let result_typ =
@@ -158,7 +158,7 @@ let create_concat llvm_builder (llvm_var1, llvm_var2) =
 
 let create_extract llvm_builder (hi, lo, llvm_var) =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   let temp_var =
     Llvm.build_lshr llvm_var
       (Llvm.const_int (Llvm.type_of llvm_var) lo)
@@ -172,16 +172,48 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
 
 let create_inttoptr llvm_builder llvm_val =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   return
   @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
 let create_load llvm_builder (addr, size) =
   let open Reader in
-  let* llvm_ctx, _ = read () in
-  let* addr = create_inttoptr llvm_builder addr in
-  return
-  @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
+  let* llvm_ctx, _, sections = read () in
+  if Llvm.is_constant addr then
+    let addr =
+      Llvm.int64_of_const addr
+      |> Base.Option.value_exn ~message:"Const addr is not an int"
+      |> Word.of_int64 ~width:64
+    in
+    let section =
+      Format.eprintf "Section list size is: %d\n" (Base.List.length sections);
+      Base.List.find sections ~f:(fun section ->
+          Printf.eprintf "Section min addr: %a, addr: %a , max addr: %a\n"
+            Word.ppo section.min_addr Word.ppo addr Word.ppo section.max_addr;
+          Llvm.dump_value section.base;
+          prerr_newline ();
+          Word.between ~low:section.min_addr addr ~high:section.max_addr)
+    in
+    match section with
+    | None -> failwith "load: addr not found"
+    | Some section ->
+        let offset =
+          Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+            (Word.sub addr section.min_addr |> Word.to_int64_exn)
+            false
+        in
+        let addr =
+          Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
+            llvm_builder
+        in
+        return
+        @@ Llvm.build_load
+             (Llvm.integer_type llvm_ctx size)
+             addr "" llvm_builder
+  else
+    let* addr = create_inttoptr llvm_builder addr in
+    return
+    @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
 
 let create_store llvm_builder (llvm_var, addr) =
   let open Reader in
@@ -190,7 +222,7 @@ let create_store llvm_builder (llvm_var, addr) =
 
 let create_cast llvm_builder (cast, i, llvm_val) =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   match cast with
   | UNSIGNED ->
       return
@@ -215,7 +247,7 @@ let create_cast llvm_builder (cast, i, llvm_val) =
 
 let create_immidiate word =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   return
   @@ Llvm.const_int_of_string
        (Llvm.integer_type llvm_ctx (Word.bitwidth word))
@@ -351,7 +383,7 @@ let create_indirect_call llvm_builder blk_tid call =
 
 let create_func_call llvm_builder blk_tid fallthrough target =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   let* args = create_call_args blk_tid llvm_builder target in
   let rets = get_rets target in
   let* fn, fn_typ = get_func target in
@@ -451,7 +483,7 @@ let create_elts llvm_builder blk () =
 
 let populate_blks transfer_vars blks sub () =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder = Llvm.builder_at_end llvm_ctx (get_bb (Term.tid blk)) in
       transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
@@ -501,7 +533,7 @@ let sub_transfer_vars blks =
 
 let initialize_bbs llvm_builder blks fn () =
   let open Reader in
-  let* llvm_ctx, _ = read () in
+  let* llvm_ctx, _, _ = read () in
   (* create the basic blocks *)
   insert_bb Graphs.Tid.start (Llvm.entry_block fn);
   Bap.Std.Seq.iter blks ~f:(fun blk ->
@@ -517,7 +549,7 @@ let create_sub stack_ptr sub =
     Format.eprintf "Skipping sub %s, has no blks\n" (Term.name sub);
     return ())
   else
-    let* llvm_ctx, llvm_module = read () in
+    let* llvm_ctx, llvm_module, _ = read () in
     Printf.eprintf "Converting sub %s\n" (Term.name sub);
     let blks = Term.enum blk_t sub in
     let fn =
