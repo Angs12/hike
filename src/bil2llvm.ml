@@ -521,8 +521,8 @@ let build_entry_block llvm_builder transfer_vars stack_ptr sub fn () =
     get_args (Term.tid sub)
     @
     if Term.name sub = "@main" then
-      let stack_ptr = Var.create "stack_ptr" (Var.typ !sp) in
-      [ Arg.create !sp (Var stack_ptr) ]
+      let stack_ptr = Var.create "stack_ptr" (Var.typ (sp !target_ref)) in
+      [ Arg.create (sp !target_ref) (Var stack_ptr) ]
     else []
   in
   let tid = Graphs.Tid.start in
@@ -548,7 +548,8 @@ let sub_transfer_vars blks =
       Var.Set.union reg_set blk_free)
     ~init:Var.Set.empty
   |> Var.Set.union (ret_set ())
-  |> Var.Set.filter ~f:(fun var -> not @@ is_mem var)
+  |> Var.Set.filter ~f:(fun var ->
+      (not @@ is_mem var) || Var.same var (pc !target_ref))
   |> Var.Set.to_list
 
 let initialize_bbs llvm_builder blks fn () =

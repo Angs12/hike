@@ -60,8 +60,8 @@ let set_sub sub =
      let args =
        Base.List.map
          ~f:(fun reg ->
-           if Var.same reg !sp || Var.same reg !fp then
-             Arg.create ~intent:Both reg (Var reg)
+           if Var.same reg (sp !target_ref) || Var.same reg (fp !target_ref)
+           then Arg.create ~intent:Both reg (Var reg)
            else Arg.create ~intent:In reg (Var reg))
          free_vars
      in
@@ -86,7 +86,8 @@ let unalias_sub sub =
       inherit Exp.mapper
 
       method! map_var v =
-        if Base.List.mem !base_regs v ~equal:Var.same then unaliased_reg_exp v
+        if Base.List.mem (base_regs !target_ref) v ~equal:Var.same then
+          unaliased_reg_exp v
         else Bil.Var v
     end
   in
@@ -102,10 +103,13 @@ let create_stack_ptr llvm_ctx llvm_module =
       "stack"
   in
   let offset =
-    Llvm.const_int (typ_lltype llvm_ctx (Var.typ !sp)) (stack_len - 1)
+    Llvm.const_int
+      (typ_lltype llvm_ctx (Var.typ (sp !target_ref)))
+      (stack_len - 1)
   in
   let stack_ptr =
-    Llvm.const_ptrtoint stack_ptr (typ_lltype llvm_ctx (Var.typ !sp))
+    Llvm.const_ptrtoint stack_ptr
+      (typ_lltype llvm_ctx (Var.typ (sp !target_ref)))
   in
   Llvm.const_add stack_ptr offset
 
@@ -271,11 +275,7 @@ let should_filter filter_set syms sub =
 let setup proj =
   let target = Project.target proj in
   set_target_ref target;
-  set_ptrsize target;
-  set_base_regs target;
-  set_stack target;
-  set_fp target;
-  set_sp target
+  set_ptrsize target
 
 let remove_plt proj =
   let plt = get_section_mem ".plt" proj in
