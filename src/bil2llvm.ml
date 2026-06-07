@@ -186,12 +186,7 @@ let create_load llvm_builder (addr, size) =
       |> Word.of_int64 ~width:64
     in
     let section =
-      Format.eprintf "Section list size is: %d\n" (Base.List.length sections);
       Base.List.find sections ~f:(fun section ->
-          Printf.eprintf "Section min addr: %a, addr: %a , max addr: %a\n"
-            Word.ppo section.min_addr Word.ppo addr Word.ppo section.max_addr;
-          Llvm.dump_value section.base;
-          prerr_newline ();
           Word.between ~low:section.min_addr addr ~high:section.max_addr)
     in
     match section with
@@ -217,8 +212,33 @@ let create_load llvm_builder (addr, size) =
 
 let create_store llvm_builder (llvm_var, addr) =
   let open Reader in
-  let* addr = create_inttoptr llvm_builder addr in
-  return @@ Llvm.build_store llvm_var addr llvm_builder
+  let* llvm_ctx, _, sections = read () in
+  if Llvm.is_constant addr then
+    let addr =
+      Llvm.int64_of_const addr
+      |> Base.Option.value_exn ~message:"Const addr is not an int"
+      |> Word.of_int64 ~width:64
+    in
+    let section =
+      Base.List.find sections ~f:(fun section ->
+          Word.between ~low:section.min_addr addr ~high:section.max_addr)
+    in
+    match section with
+    | None -> failwith "load: addr not found"
+    | Some section ->
+        let offset =
+          Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+            (Word.sub addr section.min_addr |> Word.to_int64_exn)
+            false
+        in
+        let addr =
+          Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
+            llvm_builder
+        in
+        return @@ Llvm.build_store llvm_var addr llvm_builder
+  else
+    let* addr = create_inttoptr llvm_builder addr in
+    return @@ Llvm.build_store llvm_var addr llvm_builder
 
 let create_cast llvm_builder (cast, i, llvm_val) =
   let open Reader in
@@ -572,6 +592,10 @@ let create_llvm_i8array llvm_ctx arr =
   Base.Array.map arr ~f:(fun v -> Llvm.const_int (Llvm.i8_type llvm_ctx) v)
   |> Llvm.const_array (Llvm.i8_type llvm_ctx)
 
+let create_empty_llvm_i8array llvm_ctx size =
+  Array.init size (fun _ -> Llvm.const_int (Llvm.i8_type llvm_ctx) 0)
+  |> Llvm.const_array (Llvm.i8_type llvm_ctx)
+
 let create_global ~is_const llvm_ctx llvm_module mem name =
   let ret =
     Llvm.declare_global
@@ -580,6 +604,17 @@ let create_global ~is_const llvm_ctx llvm_module mem name =
   in
   Llvm.set_initializer (create_llvm_i8array llvm_ctx mem) ret;
   Llvm.set_global_constant is_const ret;
+  ret
+
+let create_uninitialized_global llvm_ctx llvm_module size name =
+  let size = Int64.to_int size in
+  let ret =
+    Llvm.declare_global
+      (Llvm.array_type (Llvm.i8_type llvm_ctx) size)
+      name llvm_module
+  in
+  Llvm.set_initializer (create_empty_llvm_i8array llvm_ctx size) ret;
+  Llvm.set_global_constant false ret;
   ret
 
 let create_prog prog stack_ptr =

@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 const long long int foo = 0;
-int bar = 10;
+int bar;
 
 void fizzBuzz(int n) {
   for (int i = 0; i <= n; ++i) {
@@ -26,6 +26,7 @@ void fizzBuzz(int n) {
 }
 
 int main(int argc, char **argv) {
+  bar = 10;
   fizzBuzz(argc + bar);
   return foo;
 }
