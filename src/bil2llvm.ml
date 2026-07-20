@@ -618,5 +618,8 @@ let create_uninitialized_global llvm_ctx llvm_module size name =
   Llvm.set_global_constant false ret;
   ret
 
-let create_prog prog stack_ptr =
-  Reader.Seq.iter ~f:(create_sub stack_ptr) (Term.enum sub_t prog)
+let create_prog llvm_ctx llvm_module section_list stack_ptr proj =
+  Seq.iter
+    ~f:(fun s ->
+      Reader.run (create_sub stack_ptr s) (llvm_ctx, llvm_module, section_list))
+    (Term.enum sub_t (Project.program proj))
