@@ -115,69 +115,35 @@ let create_stack_ptr llvm_ctx llvm_module =
 
 let create_initialized_section llvm_ctx llvm_module proj section_type ~is_const
     =
-  let name, llvm_name =
-    match section_type with
-    | DATA -> (".data", "data")
-    | RODATA -> (".rodata", "rodata")
-    | BSS ->
-        eprintf
-          "Warning:: Creating initialized BSS section, section cannot be \
-           created, this is probably a bug\n";
-        (".bss", "bss")
-  in
+  let llvm_name = section_type_to_string section_type in
+  let name = "." ^ llvm_name in
   get_section_mem name proj |> get_section_data
   |> Option.map (fun (arr, min_addr, max_addr) ->
       let base = create_global ~is_const llvm_ctx llvm_module arr llvm_name in
       eprintf "Section %s has length %d\n" name (Array.length arr);
-      eprintf "Section %s has min addr %s\n" name (Word.to_string min_addr);
-      eprintf "Section %s has max addr %s\n" name (Word.to_string max_addr);
+      eprintf "Section %s has min addr %a\n" name Word.ppo min_addr;
+      eprintf "Section %s has max addr %a\n" name Word.ppo max_addr;
       { base; min_addr; max_addr })
 
 type 'a region = { addr : int64; size : int64; info : 'a }
 
 let create_uninitialized_section llvm_ctx llvm_module proj section_type
     region_info =
-  let name, llvm_name =
-    match section_type with
-    | DATA ->
-        eprintf
-          "Warning:: Creating uninitialized DATA section, section will be \
-           empty, this is probably a bug\n";
-        (".data", "data")
-    | RODATA ->
-        eprintf
-          "Warning:: Creating uninitialized RODATA section, section will be \
-           empty, this is probably a bug\n";
-        (".rodata", "rodata")
-    | BSS -> (".bss", "bss")
-  in
+  let llvm_name = section_type_to_string section_type in
+  let name = "." ^ llvm_name in
   Seq.find region_info ~f:(fun { info; _ } -> info = name)
   |> Option.map (fun { addr; size; _ } ->
-      let min_addr = Word.of_int64 ~width:64 addr in
-      let max_addr =
-        Word.of_int64 ~width:64 Int64.(add addr @@ sub size Int64.one)
-      in
-      eprintf "Section %s has length %Ld\n" name size;
-      eprintf "Section %s has min addr %a\n" name Word.ppo min_addr;
-      eprintf "Section %s has max addr %a\n" name Word.ppo max_addr;
       let base =
         create_uninitialized_global llvm_ctx llvm_module size llvm_name
       in
+      let addr = Int64.to_int addr in
+      let size = Int64.to_int size in
+      let min_addr = Word.of_int ~width:64 addr in
+      let max_addr = Word.of_int ~width:64 (addr + size - 1) in
+      eprintf "Section %s has length %d\n" name size;
+      eprintf "Section %s has min addr %a\n" name Word.ppo min_addr;
+      eprintf "Section %s has max addr %a\n" name Word.ppo max_addr;
       { base; min_addr; max_addr })
-
-let update_exp reg_map exp =
-  Var.Map.fold reg_map ~init:exp ~f:(fun ~key ~data exp ->
-      Exp.map (base_exp_sub key data) exp)
-
-let update_var reg_map var =
-  Var.Map.fold !reg_map ~init:var ~f:(fun ~key ~data var ->
-      if Var.same var key then (
-        let new_index = Var.index data + 1 in
-        reg_map :=
-          Var.Map.change !reg_map key ~f:(fun _ ->
-              Some (Var.with_index data new_index));
-        Var.with_index data new_index)
-      else var)
 
 let get_intrinsic_defs sub =
   match Term.first blk_t sub with
@@ -232,9 +198,6 @@ let simplify_jmps sub =
         Sub.Builder.add_blk new_sub (Blk.Builder.result blk));
   Sub.Builder.result new_sub
 
-let is_external sub =
-  Base.String.is_substring ~substring:":external" (Sub.name sub)
-
 let filter_subs =
   [
     "_init";
@@ -266,7 +229,7 @@ let calls_intrinsic prog =
 
 let should_filter filter_set syms sub =
   Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
-  || is_external sub || Term.has_attr sub Sub.stub
+  || Term.has_attr sub Sub.stub
   || Term.has_attr sub Sub.extern
   || Term.has_attr sub Sub.intrinsic
   || Tid.Set.mem filter_set (Term.tid sub)
@@ -302,9 +265,30 @@ let get_named_region_info proj =
     let open Ogre.Monad_infix in
     Ogre.collect quary
   in
-  fst
-    (Ogre.run regions (Project.specification proj)
-    |> Core_kernel.Or_error.ok_exn)
+  fst (Ogre.run regions (Project.specification proj) |> Core.Or_error.ok_exn)
+
+let filter_subs proj =
+  let syms =
+    Symtab.to_sequence (Project.symbols proj)
+    |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
+        StrSet.add name set)
+  in
+  Project.map_program proj ~f:(fun prog ->
+      let filter_set = calls_intrinsic prog in
+      Term.filter_map sub_t prog ~f:(fun sub ->
+          if should_filter filter_set syms sub then (
+            eprintf "Skipping sub %s\n" (Sub.name sub);
+            None)
+          else
+            (* Intrinsics have wrong semantics, for now skip the functions that call an intrinsic and do not inline them *)
+            (* let sub = inline_intrinsics prog sub in *)
+            Some (sub |> simplify_jmps)))
+
+let init_subs llvm_ctx llvm_module section_list proj =
+  Term.enum sub_t (Project.program proj)
+  |> Seq.iter ~f:(fun sub ->
+      Reader.run (set_sub sub) (llvm_ctx, llvm_module, section_list));
+  proj
 
 let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
@@ -313,48 +297,54 @@ let convert_binary output_program proj =
   eprintf "Creating stack pointer\n";
   let stack_ptr = create_stack_ptr llvm_ctx llvm_module in
   let regions = get_named_region_info proj in
-  eprintf "Creating sections\n";
+  Seq.iter regions ~f:(fun { addr; size; info } ->
+      eprintf "Named region %s has addr %Ld and size %Ld\n" info addr size);
+  eprintf "Creating data section\n";
   let data_section =
     create_initialized_section llvm_ctx llvm_module proj DATA ~is_const:false
   in
+  eprintf "Creating rodata section\n";
   let rodata_section =
     create_initialized_section llvm_ctx llvm_module proj RODATA ~is_const:true
   in
+  eprintf "Creating bss section\n";
   let bss_section =
     create_uninitialized_section llvm_ctx llvm_module proj BSS regions
   in
+  eprintf "Creating got section\n";
+  let got_section =
+    create_initialized_section llvm_ctx llvm_module proj GOT ~is_const:true
+  in
+  eprintf "Creating gotplt section\n";
+  let gotplt_section =
+    create_initialized_section llvm_ctx llvm_module proj GOTPLT ~is_const:true
+  in
+  eprintf "Creating rodata_rel section\n";
+  let rodata_rel_section =
+    create_initialized_section llvm_ctx llvm_module proj RODATA_REL
+      ~is_const:true
+  in
   eprintf "Getting symbols\n";
-  let syms =
-    Symtab.to_sequence (Project.symbols proj)
-    |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
-        StrSet.add name set)
-  in
   let section_list =
-    Base.List.filter_opt [ data_section; rodata_section; bss_section ]
+    Base.List.filter_mapi
+      ~f:(fun i section ->
+        match section with
+        | None ->
+            eprintf "Warning: section : %d was not found in binary\n" i;
+            None
+        | Some _ -> section)
+      [
+        data_section;
+        rodata_section;
+        got_section;
+        gotplt_section;
+        bss_section;
+        rodata_rel_section;
+      ]
   in
-  eprintf "Filtering subs\n";
-  let proj =
-    Project.map_program proj ~f:(fun prog ->
-        let filter_set = calls_intrinsic prog in
-        Term.filter_map sub_t prog ~f:(fun sub ->
-            if should_filter filter_set syms sub then (
-              eprintf "Skipping sub %s\n" (Sub.name sub);
-              None)
-            else (
-              (* let sub = inline_intrinsics prog sub in *)
-              Reader.run (set_sub sub) (llvm_ctx, llvm_module, section_list);
-              Some sub)))
-  in
-  let proj =
-    Project.map_program proj ~f:(fun prog ->
-        Term.map sub_t prog ~f:(fun sub ->
-            eprintf "Preparing sub %s\n" (Term.name sub);
-            sub |> simplify_jmps))
-  in
-  eprintf "Creating program\n";
-  Reader.run
-    (create_prog (Project.program proj) stack_ptr)
-    (llvm_ctx, llvm_module, section_list);
+  filter_subs proj
+  |> init_subs llvm_ctx llvm_module section_list
+  |> create_prog llvm_ctx llvm_module section_list stack_ptr;
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
