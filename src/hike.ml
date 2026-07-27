@@ -1,13 +1,11 @@
 open Bap.Std
 open Bap_main
 open Bap.Std.Bil.Types
-open Regular.Std
 open Bap_core_theory
 open Bil2llvm
 open Convutils
 open Targetutils
 open Printf
-module Reader = Monads.Std.Monad.Reader
 module StrMap = Map.Make (String)
 module StrSet = Set.Make (String)
 
@@ -285,9 +283,16 @@ let filter_subs proj =
             Some (sub |> simplify_jmps)))
 
 let init_subs llvm_ctx llvm_module section_list proj =
-  Term.enum sub_t (Project.program proj)
-  |> Seq.iter ~f:(fun sub ->
-      Reader.run (set_sub sub) (llvm_ctx, llvm_module, section_list));
+  Toplevel.exec begin
+    KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
+      KB.Context.with_var llvm_module_var llvm_module (fun () ->
+        KB.Context.with_var section_list_var section_list (fun () ->
+          KB.Seq.iter (Term.enum sub_t (Project.program proj)) ~f:(fun sub ->
+            set_sub sub)
+        )
+      )
+    )
+  end;
   proj
 
 let convert_binary output_program proj =
