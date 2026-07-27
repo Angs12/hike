@@ -2,14 +2,23 @@ open Bap.Std.Bil.Types
 open Bap.Std
 open Targetutils
 open Convutils
-module Reader = Monads.Std.Monad.Reader
+module KB = Bap_knowledge.Knowledge
+open KB.Syntax
 module StrMap = Map.Make (String)
 
 let ll_funcs = ref @@ StrMap.empty
 
+(* Knowledge context variables — replaces the Reader monad environment triple *)
+let llvm_ctx_var : Llvm.llcontext KB.Context.var =
+  KB.Context.declare ~package:"hike" "llvm-ctx" (KB.return (Obj.magic 0))
+let llvm_module_var : Llvm.llmodule KB.Context.var =
+  KB.Context.declare ~package:"hike" "llvm-module" (KB.return (Obj.magic 0))
+let section_list_var : section list KB.Context.var =
+  KB.Context.declare ~package:"hike" "section-list" (KB.return [])
+
 let typ_lltype_m typ =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   match typ with
   | Imm n -> return @@ Llvm.integer_type llvm_ctx n
   | _ -> return @@ Llvm.pointer_type llvm_ctx
@@ -17,23 +26,23 @@ let typ_lltype_m typ =
 let var_lltype var = typ_lltype_m (Var.typ var)
 
 let create_ret_type sub_tid =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   let rets = get_rets sub_tid in
   match rets with
   | [] -> return @@ Llvm.void_type llvm_ctx
   | [ ret ] -> var_lltype (Arg.lhs ret)
   | rets ->
       let* rets_typs =
-        Reader.List.map rets ~f:(fun ret -> var_lltype (Arg.lhs ret))
+        KB.List.map rets ~f:(fun ret -> var_lltype (Arg.lhs ret))
       in
       return @@ Llvm.struct_type llvm_ctx (Array.of_list rets_typs)
 
 let create_arg_types sub_tid =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   let args = get_args sub_tid in
-  Reader.List.map args ~f:(fun arg ->
+  KB.List.map args ~f:(fun arg ->
       let var = Arg.lhs arg in
       if Arg.intent arg = Some Both then return @@ Llvm.pointer_type llvm_ctx
       else var_lltype var)
@@ -46,8 +55,8 @@ let set_arg_names fn sub_tid =
 
 let set_arg_attrs fn sub_tid =
   let args = get_args sub_tid in
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   Base.List.iteri args ~f:(fun i arg ->
       if Arg.intent arg = Some Both then
         let attr = Llvm.create_enum_attr llvm_ctx "noalias" 0L in
@@ -55,8 +64,8 @@ let set_arg_attrs fn sub_tid =
   return ()
 
 let add_args_to_vars llvm_builder blk_tid fn () =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   return
   @@ Llvm.iter_params
        (fun param ->
@@ -71,8 +80,8 @@ let add_args_to_vars llvm_builder blk_tid fn () =
        fn
 
 let create_fun_declaration sub_tid =
-  let open Reader in
-  let* _, llvm_module, _ = read () in
+  let open KB in
+  let* llvm_module = Context.get llvm_module_var in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
@@ -84,8 +93,9 @@ let create_fun_declaration sub_tid =
   return ()
 
 let create_fun sub_tid =
-  let open Reader in
-  let* llvm_ctx, llvm_module, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* llvm_module = Context.get llvm_module_var in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
@@ -100,7 +110,7 @@ let create_fun sub_tid =
   set_arg_attrs fn sub_tid >>= return
 
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
-  Reader.return
+  KB.return
   @@
   match op with
   | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
@@ -136,15 +146,15 @@ let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   | SLE -> Llvm.build_icmp Llvm.Icmp.Sle llvm_val1 llvm_val2 "" llvm_builder
 
 let create_unop llvm_builder (op, llvm_val) =
-  Reader.return
+  KB.return
   @@
   match op with
   | NEG -> Llvm.build_neg llvm_val "" llvm_builder
   | NOT -> Llvm.build_not llvm_val "" llvm_builder
 
 let create_concat llvm_builder (llvm_var1, llvm_var2) =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
   let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.integer_bitwidth in
   let result_typ =
@@ -157,8 +167,8 @@ let create_concat llvm_builder (llvm_var1, llvm_var2) =
   return @@ Llvm.build_or shl_var1 zext_var2 "" llvm_builder
 
 let create_extract llvm_builder (hi, lo, llvm_var) =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   let temp_var =
     Llvm.build_lshr llvm_var
       (Llvm.const_int (Llvm.type_of llvm_var) lo)
@@ -171,14 +181,15 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
        "" llvm_builder
 
 let create_inttoptr llvm_builder llvm_val =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   return
   @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
 let create_load llvm_builder (addr, size) =
-  let open Reader in
-  let* llvm_ctx, _, sections = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* sections = Context.get section_list_var in
   if Llvm.is_constant addr then
     let addr =
       Llvm.int64_of_const addr
@@ -211,8 +222,9 @@ let create_load llvm_builder (addr, size) =
     @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
 
 let create_store llvm_builder (llvm_var, addr) =
-  let open Reader in
-  let* llvm_ctx, _, sections = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* sections = Context.get section_list_var in
   if Llvm.is_constant addr then
     let addr =
       Llvm.int64_of_const addr
@@ -241,8 +253,8 @@ let create_store llvm_builder (llvm_var, addr) =
     return @@ Llvm.build_store llvm_var addr llvm_builder
 
 let create_cast llvm_builder (cast, i, llvm_val) =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   match cast with
   | UNSIGNED ->
       return
@@ -266,8 +278,8 @@ let create_cast llvm_builder (cast, i, llvm_val) =
            "" llvm_builder
 
 let create_immidiate word =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   return
   @@ Llvm.const_int_of_string
        (Llvm.integer_type llvm_ctx (Word.bitwidth word))
@@ -275,7 +287,7 @@ let create_immidiate word =
        16
 
 let rec create_exp llvm_builder blk_tid exp =
-  let open Reader in
+  let open KB in
   match exp with
   | BinOp (op, e1, e2) ->
       let* var1 = create_exp llvm_builder blk_tid e1 in
@@ -324,7 +336,7 @@ let rec create_exp llvm_builder blk_tid exp =
       return @@ Llvm.poison typ
 
 let create_branches blk_tid llvm_builder branches =
-  let open Reader in
+  let open KB in
   let open Bap.Std in
   if Seq.length branches = 1 then (* unconditional branch *)
     (
@@ -334,11 +346,11 @@ let create_branches blk_tid llvm_builder branches =
     | Direct tid ->
         let bb = get_bb tid in
         Llvm.build_br bb llvm_builder |> ignore;
-        Reader.return ()
+        KB.return ()
     | Indirect exp ->
         let* target_val = create_exp llvm_builder blk_tid exp in
         Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
-        Reader.return ())
+        KB.return ())
   else if Seq.length branches = 2 then (
     (* conditional branch *)
     let br1 = Seq.hd_exn branches in
@@ -350,26 +362,26 @@ let create_branches blk_tid llvm_builder branches =
     let cond = Jmp.cond br1 in
     let* cond_res = create_exp llvm_builder blk_tid cond in
     Llvm.build_cond_br cond_res true_bb false_bb llvm_builder |> ignore;
-    Reader.return ())
+    KB.return ())
   else failwith "pp_branches: more than 2 branches"
 
 let create_def blk_tid llvm_builder def =
-  let open Reader in
+  let open KB in
   let var = Def.lhs def in
   let* res = create_exp llvm_builder blk_tid (Def.rhs def) in
   insert_local blk_tid var res;
   return ()
 
 let create_call_args blk_tid llvm_builder call_tid =
-  let open Reader in
+  let open KB in
   let args = get_args call_tid in
-  Reader.List.map args ~f:(fun arg ->
+  KB.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
       let* arg = create_exp llvm_builder blk_tid exp in
       return arg)
 
 let get_func tid =
-  let open Reader in
+  let open KB in
   let name = sanitize_name @@ Tid.name tid in
   if StrMap.mem name !ll_funcs then return @@ str_map_find name !ll_funcs
   else
@@ -377,7 +389,7 @@ let get_func tid =
     return @@ str_map_find name !ll_funcs
 
 let create_indirect_call llvm_builder blk_tid call =
-  let open Reader in
+  let open KB in
   let target = Call.target call |> label_exp in
   let fallthrough =
     Call.return call
@@ -402,8 +414,8 @@ let create_indirect_call llvm_builder blk_tid call =
   return ()
 
 let create_func_call llvm_builder blk_tid fallthrough target =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   let* args = create_call_args blk_tid llvm_builder target in
   let rets = get_rets target in
   let* fn, fn_typ = get_func target in
@@ -441,7 +453,7 @@ let create_return blk_tid llvm_builder cur_sub =
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
   | [ ret ] -> Llvm.build_ret ret llvm_builder |> ignore
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore);
-  Reader.return ()
+  KB.return ()
 
 let create_call llvm_builder blk_tid call =
   let target = Call.target call |> label_tid in
@@ -449,8 +461,8 @@ let create_call llvm_builder blk_tid call =
   create_func_call llvm_builder blk_tid fallthrough target
 
 let update_phi transfer_vars blk_incoming blk_tid =
-  let open Reader in
-  Reader.List.iter transfer_vars ~f:(fun var ->
+  let open KB in
+  KB.List.iter transfer_vars ~f:(fun var ->
       let phi_llvar = get_phi blk_tid var in
       Seq.iter blk_incoming ~f:(fun tid ->
           let phi_reg = get_local tid var in
@@ -461,7 +473,7 @@ let update_phi transfer_vars blk_incoming blk_tid =
           | None -> failwith "update_phi: phi_reg not found"))
 
 let update_phis transfer_vars blks sub () =
-  let open Reader in
+  let open KB in
   let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
@@ -483,8 +495,8 @@ let create_control_flow llvm_builder blk sub () =
       create_call llvm_builder (Term.tid blk) call
 
 let transfer_with_phis transfer_vars llvm_builder blk_tid () =
-  let open Reader in
-  Reader.List.iter transfer_vars ~f:(fun var ->
+  let open KB in
+  KB.List.iter transfer_vars ~f:(fun var ->
       let* typ = var_lltype var in
       let res = Llvm.build_empty_phi typ "" llvm_builder in
       insert_phi blk_tid var res;
@@ -492,7 +504,7 @@ let transfer_with_phis transfer_vars llvm_builder blk_tid () =
       return ())
 
 let create_elts llvm_builder blk () =
-  let open Reader in
+  let open KB in
   let tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
@@ -502,8 +514,8 @@ let create_elts llvm_builder blk () =
       | `Jmp _ -> return ())
 
 let populate_blks transfer_vars blks sub () =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder = Llvm.builder_at_end llvm_ctx (get_bb (Term.tid blk)) in
       transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
@@ -512,10 +524,10 @@ let populate_blks transfer_vars blks sub () =
 
 (* go from entry to first bb *)
 let exit_entry llvm_builder sub () =
-  Reader.return @@ Llvm.build_br (get_bb (entry_blk_tid sub)) llvm_builder
+  KB.return @@ Llvm.build_br (get_bb (entry_blk_tid sub)) llvm_builder
 
 let build_entry_block llvm_builder transfer_vars stack_ptr sub fn () =
-  let open Reader in
+  let open KB in
   (* Can remove in the future *)
   let args =
     get_args (Term.tid sub)
@@ -528,7 +540,7 @@ let build_entry_block llvm_builder transfer_vars stack_ptr sub fn () =
   let tid = Graphs.Tid.start in
   (* add stack_ptr to llvals*)
   insert_local_name tid "stack_ptr" stack_ptr;
-  Reader.List.iter transfer_vars ~f:(fun var ->
+  KB.List.iter transfer_vars ~f:(fun var ->
       let arg =
         Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) var)
       in
@@ -553,8 +565,8 @@ let sub_transfer_vars blks =
   |> Var.Set.to_list
 
 let initialize_bbs llvm_builder blks fn () =
-  let open Reader in
-  let* llvm_ctx, _, _ = read () in
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
   (* create the basic blocks *)
   insert_bb Graphs.Tid.start (Llvm.entry_block fn);
   Bap.Std.Seq.iter blks ~f:(fun blk ->
@@ -565,12 +577,13 @@ let initialize_bbs llvm_builder blks fn () =
   return ()
 
 let create_sub stack_ptr sub =
-  let open Reader in
+  let open KB in
   if is_empty sub then (
     Format.eprintf "Skipping sub %s, has no blks\n" (Term.name sub);
     return ())
   else
-    let* llvm_ctx, llvm_module, _ = read () in
+    let* llvm_ctx = Context.get llvm_ctx_var in
+    let* llvm_module = Context.get llvm_module_var in
     Printf.eprintf "Converting sub %s\n" (Term.name sub);
     let blks = Term.enum blk_t sub in
     let fn =
@@ -619,7 +632,13 @@ let create_uninitialized_global llvm_ctx llvm_module size name =
   ret
 
 let create_prog llvm_ctx llvm_module section_list stack_ptr proj =
-  Seq.iter
-    ~f:(fun s ->
-      Reader.run (create_sub stack_ptr s) (llvm_ctx, llvm_module, section_list))
-    (Term.enum sub_t (Project.program proj))
+  Toplevel.exec begin
+    KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
+      KB.Context.with_var llvm_module_var llvm_module (fun () ->
+        KB.Context.with_var section_list_var section_list (fun () ->
+          KB.Seq.iter (Term.enum sub_t (Project.program proj)) ~f:(fun s ->
+            create_sub stack_ptr s)
+        )
+      )
+    )
+  end
