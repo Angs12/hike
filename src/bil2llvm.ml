@@ -11,8 +11,10 @@ let ll_funcs = ref @@ StrMap.empty
 (* Knowledge context variables — replaces the Reader monad environment triple *)
 let llvm_ctx_var : Llvm.llcontext KB.Context.var =
   KB.Context.declare ~package:"hike" "llvm-ctx" (KB.return (Obj.magic 0))
+
 let llvm_module_var : Llvm.llmodule KB.Context.var =
   KB.Context.declare ~package:"hike" "llvm-module" (KB.return (Obj.magic 0))
+
 let section_list_var : section list KB.Context.var =
   KB.Context.declare ~package:"hike" "section-list" (KB.return [])
 
@@ -190,67 +192,16 @@ let create_load llvm_builder (addr, size) =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* sections = Context.get section_list_var in
-  if Llvm.is_constant addr then
-    let addr =
-      Llvm.int64_of_const addr
-      |> Base.Option.value_exn ~message:"Const addr is not an int"
-      |> Word.of_int64 ~width:64
-    in
-    let section =
-      Base.List.find sections ~f:(fun section ->
-          Word.between ~low:section.min_addr addr ~high:section.max_addr)
-    in
-    match section with
-    | None -> failwith "load: addr not found"
-    | Some section ->
-        let offset =
-          Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-            (Word.sub addr section.min_addr |> Word.to_int64_exn)
-            false
-        in
-        let addr =
-          Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
-            llvm_builder
-        in
-        return
-        @@ Llvm.build_load
-             (Llvm.integer_type llvm_ctx size)
-             addr "" llvm_builder
-  else
-    let* addr = create_inttoptr llvm_builder addr in
-    return
-    @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
+  let* addr = create_inttoptr llvm_builder addr in
+  return
+  @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
 
 let create_store llvm_builder (llvm_var, addr) =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* sections = Context.get section_list_var in
-  if Llvm.is_constant addr then
-    let addr =
-      Llvm.int64_of_const addr
-      |> Base.Option.value_exn ~message:"Const addr is not an int"
-      |> Word.of_int64 ~width:64
-    in
-    let section =
-      Base.List.find sections ~f:(fun section ->
-          Word.between ~low:section.min_addr addr ~high:section.max_addr)
-    in
-    match section with
-    | None -> failwith "load: addr not found"
-    | Some section ->
-        let offset =
-          Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-            (Word.sub addr section.min_addr |> Word.to_int64_exn)
-            false
-        in
-        let addr =
-          Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
-            llvm_builder
-        in
-        return @@ Llvm.build_store llvm_var addr llvm_builder
-  else
-    let* addr = create_inttoptr llvm_builder addr in
-    return @@ Llvm.build_store llvm_var addr llvm_builder
+  let* addr = create_inttoptr llvm_builder addr in
+  return @@ Llvm.build_store llvm_var addr llvm_builder
 
 let create_cast llvm_builder (cast, i, llvm_val) =
   let open KB in
@@ -335,6 +286,62 @@ let rec create_exp llvm_builder blk_tid exp =
       let* typ = typ_lltype_m typ in
       return @@ Llvm.poison typ
 
+let resolve_addr llvm_builder addr =
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* sections = Context.get section_list_var in
+  let section =
+    Base.List.find sections ~f:(fun section ->
+        Word.between ~low:section.min_addr addr ~high:section.max_addr)
+  in
+  match section with
+  | None -> failwith "load: addr not found"
+  | Some section ->
+      let offset =
+        Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+          (Word.sub addr section.min_addr |> Word.to_int64_exn)
+          false
+      in
+      return
+      @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
+           llvm_builder
+
+let rec create_rip_relative_addr llvm_builder blk_tid exp =
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* sections = Context.get section_list_var in
+  match exp with
+  | Bil.Int w ->
+      let* addr = resolve_addr llvm_builder w in
+      return
+      @@ Llvm.build_ptrtoint addr (Llvm.i64_type llvm_ctx) "" llvm_builder
+  | Store (_, addr, data, _, _) ->
+      let* addr = create_exp llvm_builder blk_tid addr in
+      let addr =
+        Llvm.int64_of_const addr
+        |> Base.Option.value_exn ~message:"Const addr is not an int"
+        |> Word.of_int64 ~width:64
+      in
+      let* addr = resolve_addr llvm_builder addr in
+      let* data = create_exp llvm_builder blk_tid data in
+      return @@ Llvm.build_store data addr llvm_builder
+  | Load (_, addr, _, size) ->
+      let* addr = create_exp llvm_builder blk_tid addr in
+      let addr =
+        Llvm.int64_of_const addr
+        |> Base.Option.value_exn ~message:"Const addr is not an int"
+        |> Word.of_int64 ~width:64
+      in
+      let* addr = resolve_addr llvm_builder addr in
+      let size = Size.in_bits size in
+      return
+      @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr "" llvm_builder
+  | Cast (cast, i, (Load _ as load)) ->
+      (* RIP-relative movzx/movsx: RDX := pad:64[mem[0x401C, el]:u32] *)
+      let* v = create_rip_relative_addr llvm_builder blk_tid load in
+      create_cast llvm_builder (cast, i, v)
+  | _ -> create_exp llvm_builder blk_tid exp
+
 let create_branches blk_tid llvm_builder branches =
   let open KB in
   let open Bap.Std in
@@ -368,7 +375,13 @@ let create_branches blk_tid llvm_builder branches =
 let create_def blk_tid llvm_builder def =
   let open KB in
   let var = Def.lhs def in
-  let* res = create_exp llvm_builder blk_tid (Def.rhs def) in
+  let v = Def.value def in
+  let exp = Def.rhs def in
+  let* res =
+    if KB.Value.get rip_relative_addr v then
+      create_rip_relative_addr llvm_builder blk_tid exp
+    else create_exp llvm_builder blk_tid exp
+  in
   insert_local blk_tid var res;
   return ()
 
@@ -632,13 +645,12 @@ let create_uninitialized_global llvm_ctx llvm_module size name =
   ret
 
 let create_prog llvm_ctx llvm_module section_list stack_ptr proj =
-  Toplevel.exec begin
-    KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
-      KB.Context.with_var llvm_module_var llvm_module (fun () ->
-        KB.Context.with_var section_list_var section_list (fun () ->
-          KB.Seq.iter (Term.enum sub_t (Project.program proj)) ~f:(fun s ->
-            create_sub stack_ptr s)
-        )
-      )
-    )
-  end
+  Toplevel.exec
+    begin
+      KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
+          KB.Context.with_var llvm_module_var llvm_module (fun () ->
+              KB.Context.with_var section_list_var section_list (fun () ->
+                  KB.Seq.iter
+                    (Term.enum sub_t (Project.program proj))
+                    ~f:(fun s -> create_sub stack_ptr s))))
+    end
