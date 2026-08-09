@@ -2,9 +2,8 @@ open Bap.Std.Bil.Types
 open Bap.Std
 open Bap_core_theory
 open Targetutils
-module StrMap = Map.Make (String)
 
-type llvalue_map = Llvm.llvalue StrMap.t
+type llvalue_map = Llvm.llvalue Var.Map.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 
 let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
@@ -22,11 +21,6 @@ let section_type_to_string = function
   | GOT -> "got"
   | GOTPLT -> "got.plt"
   | RODATA_REL -> "data.rel.ro"
-
-let str_map_find name map =
-  match StrMap.find_opt name map with
-  | Some v -> v
-  | None -> failwith @@ "StrMap.find_exn: " ^ name
 
 let blk_llvals_find map tid =
   match Tid.Map.find map tid with
@@ -98,15 +92,6 @@ let label_exp label =
   | Direct _ -> failwith "label_exp: direct label"
   | Indirect exp -> exp
 
-let sanitize_name =
-  Base.String.filter ~f:(fun c ->
-      if c = '#' then false
-      else if c = '.' then false
-      else if c = '%' then false
-      else if c = '\\' then false
-      else if c = '@' then false
-      else true)
-
 type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
 let clear_blk_llvals () = blk_llvals := Tid.Map.empty
@@ -118,47 +103,37 @@ let insert_bb tid llvm_bb =
 let get_bb tid = bb_find !ll_bbs tid
 
 let init_blk_llvals blk_tid =
-  let phis = ref StrMap.empty in
-  let locals = ref StrMap.empty in
+  let phis = ref Var.Map.empty in
+  let locals = ref Var.Map.empty in
   blk_llvals := Tid.Map.add_exn !blk_llvals ~key:blk_tid ~data:{ phis; locals }
 
 let insert_phi blk_tid var value =
   let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  blk_llvals.phis :=
-    StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.phis)
+  blk_llvals.phis := Var.Map.add_exn !(blk_llvals.phis) ~key:var ~data:value
 
 let get_phi blk_tid var =
   let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  match StrMap.find_opt (sanitize_name @@ Var.name var) !(blk_llvals.phis) with
+  match Var.Map.find !(blk_llvals.phis) var with
   | Some v -> v
   | None ->
-      failwith @@ "Phi "
-      ^ (sanitize_name @@ Var.name var)
-      ^ " not found at blk " ^ Tid.name blk_tid
-
-let insert_local_name blk_tid name value =
-  let name = sanitize_name name in
-  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  blk_llvals.locals := StrMap.add name value !(blk_llvals.locals)
+      failwith @@ "Phi " ^ Var.name var ^ " not found at blk "
+      ^ Tid.name blk_tid
 
 let insert_local blk_tid var value =
   let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  blk_llvals.locals :=
-    StrMap.add (sanitize_name @@ Var.name var) value !(blk_llvals.locals)
+  blk_llvals.locals := Var.Map.set !(blk_llvals.locals) ~key:var ~data:value
 
 let get_local blk_tid var =
-  let name = sanitize_name @@ Var.name var in
   let blk_vars = blk_llvals_find !blk_llvals blk_tid in
-  StrMap.find_opt name !(blk_vars.locals)
+  Var.Map.find !(blk_vars.locals) var
 
 let get_local_exn blk_tid var =
-  let name = sanitize_name @@ Var.name var in
   let blk_vars = blk_llvals_find !blk_llvals blk_tid in
-  let tmp = StrMap.find_opt name !(blk_vars.locals) in
+  let tmp = Var.Map.find !(blk_vars.locals) var in
   match tmp with
   | Some v -> v
   | None ->
-      failwith @@ "Var with name " ^ name ^ " not found in block: "
+      failwith @@ "Var with name " ^ Var.name var ^ " not found in block: "
       ^ Tid.name blk_tid
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
@@ -198,12 +173,6 @@ let run_pass proj name =
   let pass = get_pass name in
   Project.Pass.run_exn pass proj
 
-let bb_reg_name reg tid =
-  sanitize_name @@ "reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
-
-let bb_phi_reg_name reg tid =
-  sanitize_name @@ "phi_reg_" ^ Var.name reg ^ "_" ^ Tid.name tid
-
 let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in
   let entry_blks = Graphs.Tid.Node.succs Graphs.Tid.start cfg in
@@ -220,9 +189,3 @@ let is_empty sub =
   Seq.is_empty
     (Graphs.Tid.Node.succs Graphs.Tid.start cfg
     |> Seq.filter ~f:(fun tid -> not (tid = Graphs.Tid.exit)))
-
-let create_reg base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_reg_name base tid) typ
-
-let create_phi_reg base ~typ ~tid =
-  Var.create ~is_virtual:false (bb_phi_reg_name base tid) typ
