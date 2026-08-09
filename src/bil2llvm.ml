@@ -4,11 +4,9 @@ open Targetutils
 open Convutils
 module KB = Bap_knowledge.Knowledge
 open KB.Syntax
-module StrMap = Map.Make (String)
 
-let ll_funcs = ref @@ StrMap.empty
+let ll_funcs : Llvm.llvalue Tid.Map.t ref = ref Tid.Map.empty
 
-(* Knowledge context variables — replaces the Reader monad environment triple *)
 let llvm_ctx_var : Llvm.llcontext KB.Context.var =
   KB.Context.declare ~package:"hike" "llvm-ctx" (KB.return (Obj.magic 0))
 
@@ -65,20 +63,28 @@ let set_arg_attrs fn sub_tid =
         Llvm.add_function_attr fn attr (Llvm.AttrIndex.Param i));
   return ()
 
-let add_args_to_vars llvm_builder blk_tid fn () =
+let add_args_to_vars llvm_builder blk_tid sub_tid fn () =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
+  let args = get_args sub_tid in
   return
   @@ Llvm.iter_params
        (fun param ->
-         let name = Llvm.value_name param in
-         match Llvm.classify_type (Llvm.type_of param) with
-         | Llvm.TypeKind.Pointer ->
-             insert_local_name blk_tid name
-               (Llvm.build_ptrtoint param
-                  (Llvm.integer_type llvm_ctx !ptrsize)
-                  "" llvm_builder)
-         | _ -> insert_local_name blk_tid name param)
+         let arg =
+           Base.List.find_exn args ~f:(fun arg ->
+               Base.String.equal
+                 (Var.name (Arg.lhs arg))
+                 (Llvm.value_name param))
+         in
+         let value =
+           match Llvm.classify_type (Llvm.type_of param) with
+           | Llvm.TypeKind.Pointer ->
+               Llvm.build_ptrtoint param
+                 (Llvm.integer_type llvm_ctx !ptrsize)
+                 "" llvm_builder
+           | _ -> param
+         in
+         insert_local blk_tid (Arg.lhs arg) value)
        fn
 
 let create_fun_declaration sub_tid =
@@ -87,11 +93,8 @@ let create_fun_declaration sub_tid =
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
-  let fn =
-    Llvm.declare_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
-  in
-  ll_funcs :=
-    StrMap.add (sanitize_name @@ Tid.name sub_tid) (fn, fn_typ) !ll_funcs;
+  let fn = Llvm.declare_function (Tid.name sub_tid) fn_typ llvm_module in
+  ll_funcs := Tid.Map.add_exn !ll_funcs ~key:sub_tid ~data:fn;
   return ()
 
 let create_fun sub_tid =
@@ -101,14 +104,9 @@ let create_fun sub_tid =
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
-  let fn =
-    Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
-  in
+  let fn = Llvm.define_function (Tid.name sub_tid) fn_typ llvm_module in
   set_arg_names fn sub_tid;
-  (* let attr = Llvm.create_enum_attr llvm_ctx "alwaysinline" 0L in *)
-  (* Llvm.add_function_attr fn attr Llvm.AttrIndex.Function; *)
-  ll_funcs :=
-    StrMap.add (sanitize_name @@ Tid.name sub_tid) (fn, fn_typ) !ll_funcs;
+  ll_funcs := Tid.Map.add_exn !ll_funcs ~key:sub_tid ~data:fn;
   set_arg_attrs fn sub_tid >>= return
 
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
@@ -270,9 +268,8 @@ let rec create_exp llvm_builder blk_tid exp =
       let* addr = create_exp llvm_builder blk_tid addr in
       create_load llvm_builder (addr, Size.in_bits size)
   | Let (var, exp, body) ->
-      let unique_var =
-        Var.create ~is_virtual:true ~fresh:true "" (Var.typ var)
-      in
+      let* tv = Bap_core_theory.Theory.Var.fresh (Var.sort var) in
+      let unique_var = Var.reify tv in
       let* v = create_exp llvm_builder blk_tid exp in
       insert_local blk_tid unique_var v;
       let body = Exp.substitute (Var var) (Var unique_var) body in
@@ -395,11 +392,11 @@ let create_call_args blk_tid llvm_builder call_tid =
 
 let get_func tid =
   let open KB in
-  let name = sanitize_name @@ Tid.name tid in
-  if StrMap.mem name !ll_funcs then return @@ str_map_find name !ll_funcs
-  else
-    let* _ = create_fun_declaration tid in
-    return @@ str_map_find name !ll_funcs
+  match Tid.Map.find !ll_funcs tid with
+  | Some v -> return v
+  | None ->
+      let* _ = create_fun_declaration tid in
+      return @@ Tid.Map.find_exn !ll_funcs tid
 
 let create_indirect_call llvm_builder blk_tid call =
   let open KB in
@@ -411,7 +408,8 @@ let create_indirect_call llvm_builder blk_tid call =
   in
   let* target_exp = create_exp llvm_builder blk_tid target in
   let* func_ptr = create_inttoptr llvm_builder target_exp in
-  let* _, fn_typ = get_func (Tid.for_name "indirect_call") in
+  let* fn = get_func (Tid.for_name "indirect_call") in
+  let fn_typ = Llvm.type_of fn in
   let bb = get_bb fallthrough in
   let rets = get_rets (Tid.for_name "indirect_call") in
   let* args =
@@ -431,7 +429,8 @@ let create_func_call llvm_builder blk_tid fallthrough target =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* args = create_call_args blk_tid llvm_builder target in
   let rets = get_rets target in
-  let* fn, fn_typ = get_func target in
+  let* fn = get_func target in
+  let fn_typ = Llvm.type_of fn in
   (match rets with
   | [] ->
       Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder |> ignore
@@ -542,17 +541,19 @@ let exit_entry llvm_builder sub () =
 let build_entry_block llvm_builder transfer_vars stack_ptr sub fn () =
   let open KB in
   (* Can remove in the future *)
+  let stack_var =
+    Var.create ~fresh:true "stack_ptr" (Var.typ (sp !target_ref))
+  in
   let args =
     get_args (Term.tid sub)
     @
     if Term.name sub = "@main" then
-      let stack_ptr = Var.create "stack_ptr" (Var.typ (sp !target_ref)) in
-      [ Arg.create (sp !target_ref) (Var stack_ptr) ]
+      [ Arg.create (sp !target_ref) (Var stack_var) ]
     else []
   in
   let tid = Graphs.Tid.start in
   (* add stack_ptr to llvals*)
-  insert_local_name tid "stack_ptr" stack_ptr;
+  insert_local tid stack_var stack_ptr;
   KB.List.iter transfer_vars ~f:(fun var ->
       let arg =
         Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) var)
@@ -585,8 +586,7 @@ let initialize_bbs llvm_builder blks fn () =
   Bap.Std.Seq.iter blks ~f:(fun blk ->
       let tid = Term.tid blk in
       init_blk_llvals tid;
-      insert_bb tid
-        (Llvm.append_block llvm_ctx (sanitize_name @@ Term.name blk) fn));
+      insert_bb tid (Llvm.append_block llvm_ctx (Term.name blk) fn));
   return ()
 
 let create_sub stack_ptr sub =
@@ -600,7 +600,7 @@ let create_sub stack_ptr sub =
     Printf.eprintf "Converting sub %s\n" (Term.name sub);
     let blks = Term.enum blk_t sub in
     let fn =
-      Llvm.lookup_function (sanitize_name @@ Term.name sub) llvm_module
+      Tid.Map.find !ll_funcs (Term.tid sub)
       |> Base.Option.value_exn ~message:"create sub : function not found"
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
@@ -610,7 +610,7 @@ let create_sub stack_ptr sub =
     let transfer_vars = sub_transfer_vars blks in
     init_blk_llvals Graphs.Tid.start;
     initialize_bbs llvm_builder blks fn ()
-    >>= add_args_to_vars llvm_builder Graphs.Tid.start fn
+    >>= add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn
     >>= build_entry_block llvm_builder transfer_vars stack_ptr sub fn
     >>= populate_blks transfer_vars blks sub
     >>= update_phis transfer_vars blks sub
