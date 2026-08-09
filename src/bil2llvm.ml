@@ -109,8 +109,49 @@ let create_fun sub_tid =
   ll_funcs := Tid.Map.add_exn !ll_funcs ~key:sub_tid ~data:fn;
   set_arg_attrs fn sub_tid >>= return
 
+(* LLVM requires both operands of a binop to have the same type, while BIL
+   allows operations on expressions of different sizes. Extend the narrower
+   operand to the wider type so the generated instruction is well-typed.
+   Signed ops sign-extend the narrower operand, everything else zero-extends
+   (matching BIL's bitvector size-coercion semantics). *)
+let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
+  let open KB in
+  let is_integer v =
+    match Llvm.classify_type (Llvm.type_of v) with
+    | Llvm.TypeKind.Integer -> true
+    | _ -> false
+  in
+  let typ1 = Llvm.type_of llvm_val1 in
+  let typ2 = Llvm.type_of llvm_val2 in
+  if (not (is_integer llvm_val1)) || not (is_integer llvm_val2) then
+    return (llvm_val1, llvm_val2)
+  else
+    let size1 = Llvm.integer_bitwidth typ1 in
+    let size2 = Llvm.integer_bitwidth typ2 in
+    if size1 = size2 then return (llvm_val1, llvm_val2)
+    else
+      let target_typ = if size1 >= size2 then typ1 else typ2 in
+      let build_cast =
+        match op with
+        | SDIVIDE | SMOD | ARSHIFT | SLT | SLE -> Llvm.build_sext
+        | _ -> Llvm.build_zext
+      in
+      let llvm_val1 =
+        if size1 < size2 then build_cast llvm_val1 target_typ "" llvm_builder
+        else llvm_val1
+      in
+      let llvm_val2 =
+        if size2 < size1 then build_cast llvm_val2 target_typ "" llvm_builder
+        else llvm_val2
+      in
+      return (llvm_val1, llvm_val2)
+
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
-  KB.return
+  let open KB in
+  let* llvm_val1, llvm_val2 =
+    coerce_to_same_type llvm_builder op llvm_val1 llvm_val2
+  in
+  return
   @@
   match op with
   | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
@@ -123,21 +164,9 @@ let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   | AND -> Llvm.build_and llvm_val1 llvm_val2 "" llvm_builder
   | OR -> Llvm.build_or llvm_val1 llvm_val2 "" llvm_builder
   | XOR -> Llvm.build_xor llvm_val1 llvm_val2 "" llvm_builder
-  | LSHIFT ->
-      let v2 =
-        Llvm.build_sext llvm_val2 (Llvm.type_of llvm_val1) "" llvm_builder
-      in
-      Llvm.build_shl llvm_val1 v2 "" llvm_builder
-  | RSHIFT ->
-      let v2 =
-        Llvm.build_sext llvm_val2 (Llvm.type_of llvm_val1) "" llvm_builder
-      in
-      Llvm.build_lshr llvm_val1 v2 "" llvm_builder
-  | ARSHIFT ->
-      let v2 =
-        Llvm.build_sext llvm_val2 (Llvm.type_of llvm_val1) "" llvm_builder
-      in
-      Llvm.build_ashr llvm_val1 v2 "" llvm_builder
+  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 "" llvm_builder
+  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 "" llvm_builder
+  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 "" llvm_builder
   | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 "" llvm_builder
   | NEQ -> Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 "" llvm_builder
   | LT -> Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 "" llvm_builder
