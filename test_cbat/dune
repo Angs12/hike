@@ -1,0 +1,44 @@
+(test
+ (name test_cbat)
+ (flags
+  (:standard -alert -deprecated))
+ (libraries
+  hike
+  bap
+  cbat_vsa
+  cbat_vsa_domain
+  graphlib
+  core_kernel
+  bap-future)
+ (preprocess
+  (pps ppx_bap)))
+
+(executable
+ (name corpus_watch)
+ (libraries
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core_kernel
+  bap-future
+  threads)
+ (flags
+  (:standard -g -alert -deprecated)))
+
+(executable
+ (name precision_probe)
+ (libraries
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core_kernel
+  bap-future
+  threads)
+ (flags
+  (:standard -g -alert -deprecated)))
