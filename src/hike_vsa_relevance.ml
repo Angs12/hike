@@ -31,14 +31,13 @@ let is_sp (target : Theory.Target.t) (v : var) : bool =
 (* Normalize a variable to its base form for map/set keys. *)
 let base_var (v : var) : var = Var.base v
 
-(* Check if [e] is a non-literal size expression. *)
-let non_literal_size = function Bil.Int _ -> false | _ -> true
-
-(* Check if an RHS expression represents SP - non_literal_size. *)
-let alloc_rhs (sp : var) (e : exp) : bool =
+(* Check if [e] has the shape of a memory Load or Store (including Cast-wrapped). *)
+let is_stack_load_store (e : exp) : bool =
   match e with
-  | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
-      Var.same a sp && non_literal_size size
+  | Bil.Load _
+  | Bil.Store _
+  | Bil.Cast (_, _, Bil.Load _)
+  | Bil.Cast (_, _, Bil.Store _) -> true
   | _ -> false
 
 (* Helper 1: collect def maps using a Term.visitor pass. *)
@@ -138,7 +137,8 @@ let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
           (Graphlib.Std.Solution.get sol (Term.tid blk))
       in
       Term.enum def_t blk |> Seq.fold ~init:acc ~f:(fun acc d ->
-          if Core.Set.exists (def_uses d) ~f:(fun x -> Core.Set.mem d_at x)
+          if is_stack_load_store (Def.rhs d)
+             && Core.Set.exists (def_uses d) ~f:(fun x -> Core.Set.mem d_at x)
           then Core.Set.add acc (Term.tid d)
           else acc))
 
@@ -191,23 +191,34 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
 (* Helper 4: detect dynamic allocations (VLA / alloca). *)
 let detect_dynamic_alloc (sp : var) (sub : sub term)
     (def_of_lhs : def term Var.Map.t) : Tid.Set.t =
-  let dyn_alloc_tids (d : def term) : Tid.Set.t =
-    let lhs = Def.lhs d in
-    match Def.rhs d with
-    | _ when Var.same lhs sp && alloc_rhs sp (Def.rhs d) ->
-        Tid.Set.singleton (Term.tid d)
-    | Bil.Var tmp when Var.same lhs sp ->
-        (match Core.Map.find def_of_lhs (base_var tmp) with
-         | Some d' when alloc_rhs sp (Def.rhs d') ->
-             Tid.Set.of_list [ Term.tid d; Term.tid d' ]
-         | _ -> Tid.Set.empty)
-    | _ -> Tid.Set.empty
+  let non_literal_size = function Bil.Int _ -> false | _ -> true in
+  let is_alloc_exp (e : exp) : bool =
+    match e with
+    | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
+        Var.same (base_var a) (base_var sp) && non_literal_size size
+    | _ -> false
   in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
-      Term.enum def_t blk
-      |> Seq.fold ~init:acc ~f:(fun acc d ->
-          Core.Set.union acc (dyn_alloc_tids d)))
+  let v =
+    object
+      inherit [Tid.Set.t] Term.visitor
+      method! visit_def d acc =
+        let lhs = Def.lhs d in
+        if Var.same (base_var lhs) (base_var sp) then
+          let rhs = Def.rhs d in
+          if is_alloc_exp rhs then
+            Core.Set.add acc (Term.tid d)
+          else
+            match rhs with
+            | Bil.Var tmp ->
+                (match Core.Map.find def_of_lhs (base_var tmp) with
+                 | Some d' when is_alloc_exp (Def.rhs d') ->
+                     Core.Set.add (Core.Set.add acc (Term.tid d)) (Term.tid d')
+                 | _ -> acc)
+            | _ -> acc
+        else acc
+    end
+  in
+  v#visit_sub sub Tid.Set.empty
 
 (* Tag every stack-relevant def in [sub] with [relevant], [stack_access], and [dynamic_alloc] as appropriate. *)
 let analyze (sp : var) (sub : sub term) : sub term =
@@ -218,23 +229,13 @@ let analyze (sp : var) (sub : sub term) : sub term =
     Core.Set.mem sp_relative_tids (Term.tid d)
   in
   let tagged_defs = backward_slice g sub defs_of rhs_bases is_stack_access in
-  let is_arg_setup (d : def term) : bool =
-    match Var.typ (Def.lhs d) with
-    | Type.Imm 64 ->
-      (match Var.name (Def.lhs d) with
-       | "RDI" | "RSI" | "RDX" | "RCX" | "R8" | "R9" -> true
-       | _ -> false)
-    | _ -> false
-  in
   let alloc_tids = detect_dynamic_alloc sp sub def_of_lhs in
   sub
   |> Term.map blk_t ~f:(fun b ->
       Term.map def_t b ~f:(fun d ->
           let d =
-            if
-              Core.Set.mem tagged_defs d || is_arg_setup d
-              || Core.Set.mem alloc_tids (Term.tid d)
-            then Term.set_attr d relevant ()
+            if Core.Set.mem tagged_defs d then
+              Term.set_attr d relevant ()
             else d
           in
           let d =

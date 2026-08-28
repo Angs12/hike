@@ -300,13 +300,13 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-28 16:35 EEST — Relevance cleanup 01 (.mli + stack_access rename + 4 pure helpers split)**
+**Last verified: 2026-08-28 16:43 EEST — Relevance cleanup 02 (BAP-API hardcodes + is_stack_load_store + dynamic_alloc visitor)**
 
-This commit implements Ticket 01 of the Relevance Cleanup series:
-- Created `src/hike_vsa_relevance.mli` exposing `stack_access`, `relevant`, `dynamic_alloc`, `has_stack_access`, `is_sp`, and `analyze`.
-- Renamed `direct_sp` -> `stack_access` with a fresh UUID (`44f5cc3f-d8a4-472e-8930-435eea4b6a1d`) and dropped the old name without alias.
-- Split `src/hike_vsa_relevance.ml` into four pure helpers: `collect_def_maps` (via single `Term.visitor`), `forward_vars` (SP-only fixpoint with `Var.base` helper and invariant comments), `backward_slice` (reverse fixpoint from stack_access seeds), and `detect_dynamic_alloc`.
-- Updated all consumers in `hike_vsa.ml`, `hike_stack_to_locals.ml`, `bil2llvm.ml`, and test fixtures in `test_cbat.ml`.
+This commit implements Ticket 02 of the Relevance Cleanup series:
+- Deleted `is_arg_setup` hardcode from `Hike_vsa_relevance.analyze` so call-arg setups only stay relevant if they flow into a `stack_access`.
+- Replaced `alloc_rhs` and indirect VLA manual loops with a clean `Term.visitor`-based `detect_dynamic_alloc` using `Targetutils.sp`/`Var.same` (no `"RSP"` strings).
+- Added `is_stack_load_store : exp -> bool` helper in `Hike_vsa_relevance` and `.mli` matching `Load`/`Store`/`Cast-Load`/`Cast-Store`, centralizing the memory access shape check used as the `stack_access` predicate.
+- Ensured all gates remain 100% green.
 
 Corpus emits with **3 surviving `hike: guarded:` u128 warnings**
 (va_arg_mixed/@consume_mixed, va_arg_vacopy/@two_pass,
