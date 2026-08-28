@@ -49,21 +49,21 @@ let k_range_of (ws : Ws.t) (rsp_ws : Ws.t) : (int64 * int64) option =
       Some (Int64.sub alo rhi, Int64.sub ahi rlo)
   | _ -> None
 
-(* [has_relevant_tags sub]: Does ANY def of [sub] carry the [relevant] or [direct_sp] tag? *)
+(* [has_relevant_tags sub]: Does ANY def of [sub] carry the [relevant] or [stack_access] tag? *)
 let has_relevant_tags (sub : sub term) : bool =
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun b ->
       Term.enum def_t b
       |> Seq.exists ~f:(fun d ->
           Term.has_attr d Cbat_vsa_utils.relevant
-          || Term.has_attr d Relevance.direct_sp))
+          || Term.has_attr d Relevance.stack_access))
 
-(* [has_direct_sp_tags sub]: Does ANY def of [sub] carry the [direct_sp] tag (an actual direct SP-relative stack access)? *)
-let has_direct_sp_tags (sub : sub term) : bool =
+(* [has_stack_access_tags sub]: Does ANY def of [sub] carry the [stack_access] tag (an actual direct SP-relative stack access)? *)
+let has_stack_access_tags (sub : sub term) : bool =
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun b ->
       Term.enum def_t b
-      |> Seq.exists ~f:(fun d -> Term.has_attr d Relevance.direct_sp))
+      |> Seq.exists ~f:(fun d -> Term.has_attr d Relevance.stack_access))
 
 (* M2 (ADR 0004): per-call-site stack-arg values removed — hike_stack ptr threading replaces arity. *)
 let call_stack_args_of_sub (_sp : var) (_sub : sub term)
@@ -72,8 +72,8 @@ let call_stack_args_of_sub (_sp : var) (_sub : sub term)
 (* [offsets_of_sub sub]: The per-def offset interval tags of [sub]'s Load/Store defs, in block-then-def order (see the header contract). *)
 let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
   let sub' = if has_relevant_tags sub then sub else Relevance.analyze sp sub in
-  (* A sub with NO direct-SP stack accesses produces an empty offset set regardless of the fixpoint result (only [direct_sp]-tagged Load/Store defs yield offset tags). *)
-  if not (has_direct_sp_tags sub') then
+  (* A sub with NO direct-SP stack accesses produces an empty offset set regardless of the fixpoint result (only [stack_access]-tagged Load/Store defs yield offset tags). *)
+  if not (has_stack_access_tags sub') then
     { Convutils.offsets = []; k_ranges = []; regions = []; degraded = false;
       call_stack_args = []; vla_bounds = [] }
   else
@@ -112,11 +112,11 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
   let raw, kraw =
     Term.enum blk_t sub'
     |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
-        (* Walk only the block's defs up to and including its LAST direct_sp Load/Store def — the state advance after it can affect no tag (the address/k-range denotations read the PRE-def state), and a block with NO stack access contributes nothing and skips the walk entirely. *)
+        (* Walk only the block's defs up to and including its LAST stack_access Load/Store def — the state advance after it can affect no tag (the address/k-range denotations read the PRE-def state), and a block with NO stack access contributes nothing and skips the walk entirely. *)
         let defs = Term.enum def_t blk |> Seq.to_list in
         let last_tagged =
           Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-              if Term.has_attr d Relevance.direct_sp then Some i else acc)
+              if Term.has_attr d Relevance.stack_access then Some i else acc)
         in
         match last_tagged with
         | None -> (acc, kacc)
@@ -136,7 +136,7 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
                    | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
                    | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
                      when
-                       Term.has_attr d Relevance.direct_sp
+                       Term.has_attr d Relevance.stack_access
                        && not (pointer_value_addr st_before addr) ->
                      let addr' =
                        Vsa.rewrite_addr
@@ -342,7 +342,7 @@ let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : 
         let defs = Term.enum def_t blk |> Seq.to_list in
         let last_tagged =
           Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-              if Term.has_attr d Relevance.direct_sp then Some i else acc)
+              if Term.has_attr d Relevance.stack_access then Some i else acc)
         in
         match last_tagged with
         | None -> (acc, kacc)
@@ -362,7 +362,7 @@ let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : 
                    | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
                    | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
                      when
-                       Term.has_attr d Relevance.direct_sp
+                       Term.has_attr d Relevance.stack_access
                        && not (pointer_value_addr st_before addr) ->
                      let addr' =
                        Vsa.rewrite_addr

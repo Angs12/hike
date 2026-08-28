@@ -5578,8 +5578,8 @@ let () =
   let tagged =
     Term.map blk_t tagged ~f:(fun b ->
         Term.map def_t b ~f:(fun d ->
-            if Term.has_attr d Relevance.direct_sp then d
-            else Term.set_attr d Relevance.direct_sp ()))
+            if Term.has_attr d Relevance.stack_access then d
+            else Term.set_attr d Relevance.stack_access ()))
   in
   let span = (-16L, -16L) in
   let info : Cu.vsa_info =
@@ -6406,8 +6406,8 @@ let () =
     let tagged =
       Term.map blk_t tagged ~f:(fun b ->
           Term.map def_t b ~f:(fun d ->
-              if Term.has_attr d Relevance.direct_sp then d
-              else Term.set_attr d Relevance.direct_sp ()))
+              if Term.has_attr d Relevance.stack_access then d
+              else Term.set_attr d Relevance.stack_access ()))
     in
     let sub' = Stl.stack_to_locals tagged in
     Term.enum blk_t sub'

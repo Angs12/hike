@@ -736,9 +736,9 @@ let is_abi_visible sub_info def =
      | _ -> false)
   | _ -> false
 
-(* [addr_is_stack def]: Is [def] a stack access — the [direct_sp] tag the relevance pass set on exactly the direct-SP-address Load/Store (and Cast-wrapped) defs (the D-2f L1 lane), CONJOINED with (a) the mem-access rhs shape (the. *)
+(* [addr_is_stack def]: Is [def] a stack access — the [stack_access] tag the relevance pass set on exactly the direct-SP-address Load/Store (and Cast-wrapped) defs (the D-2f L1 lane), CONJOINED with (a) the mem-access rhs shape (the. *)
 let addr_is_stack def =
-  Term.has_attr def Hike_vsa_relevance.direct_sp
+  Term.has_attr def Hike_vsa_relevance.stack_access
   && match Def.rhs def with
      | Bil.Load (_, a, _, _)
      | Bil.Store (_, a, _, _, _)
