@@ -3,8 +3,9 @@ open Bap_core_theory
 open Theory.Role.Register
 open Bap.Std.Bil.Types
 
-let target_ref = ref Theory.Target.unknown
-let ptrsize = ref 0
+let addr_size_bits target =
+  if Theory.Target.is_unknown target then 0
+  else Theory.Target.data_addr_size target
 
 let sp target =
   Base.Option.value_exn ~message:"set_sp: stack pointer not found"
@@ -18,11 +19,8 @@ let fp target =
 
 let pc target =
   if Theory.Target.matches target "x86_64-gnu-elf" then
-    Var.create "RIP" (Imm 64)
+    Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
   else failwith "pc: PC not defined for this target"
-
-let set_target_ref target = target_ref := target
-let set_ptrsize size = ptrsize := Theory.Target.bits size
 
 let resolve_alias target reg =
   let sort = Var.sort reg in
@@ -33,9 +31,7 @@ let resolve_alias target reg =
 let theory_regs target = Theory.Target.regs target |> Base.Set.to_list
 
 let base_regs target =
-  let all_theory_regs = theory_regs target in
-  let is_basis reg =
-    match Theory.Target.unalias target reg with None -> true | Some _ -> false
-  in
-  let basis_theory_regs = List.filter is_basis all_theory_regs in
-  Base.List.map ~f:Var.reify basis_theory_regs
+  theory_regs target
+  |> Base.List.filter ~f:(fun reg ->
+      Option.is_none (Theory.Target.unalias target reg))
+  |> Base.List.map ~f:Var.reify
