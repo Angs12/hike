@@ -1,0 +1,59 @@
+; Phase 0 build skeleton for the CBAT VSA port (see README.md).
+;
+; cbat_vsa_domain: CLP / abstract-value core. Unwrapped so that
+; cbat_vsa (the BIR fixpoint library) can reference these modules
+; unqualified — dune does not auto-open wrapped dependency libraries.
+; cbat_vsa_utils lives here because cbat_clp and
+; cbat_clp_set_composite depend on it (a cycle would result otherwise).
+;
+; Note: the domain library still links `bap` because Bap.Std is the
+; only provider of the Word API used here (Bap.Std.Word = Bap_bitvector,
+; internal to bap-std; the `bitvec` package has no Word module and a
+; monadic API). See the Phase 0 report for per-module seam decisions.
+;
+; ppx: the upstream 5-ppx set (ppx_deriving, ppx_bin_prot, ppx_sexp_conv,
+; ppx_compare, ppx_fields_conv) fails under dune 3.23 because the
+; opam-installed ppx_deriving 6.0.3 is not marked (kind ppx_rewriter) —
+; "Ppx dependency on a non-ppx library". Fallback per plan: ppx_bap,
+; which bundles ppx_bin_prot/ppx_sexp_conv/ppx_compare/ppx_fields_conv.
+
+(library
+ (name cbat_vsa_domain)
+ (public_name hike.cbat_vsa_domain)
+ (wrapped false)
+ (flags
+  (:standard -alert -deprecated))
+ (ocamlopt_flags
+  (:standard -O3))
+ (modules
+  cbat_clp
+  cbat_word_ops
+  cbat_fin_set
+  cbat_lattice_intf
+  cbat_map_lattice
+  cbat_clp_set_composite
+  cbat_wordset_intf
+  cbat_vsa_utils
+  cbat_word
+  cbat_thresholds)
+ (libraries bap bitvec bitvec-order core core_kernel monads hashcons)
+ (preprocess
+  (pps ppx_bap)))
+
+(library
+ (name cbat_vsa)
+ (public_name hike.cbat_vsa)
+ (flags
+  (:standard -alert -deprecated))
+ (ocamlopt_flags
+  (:standard -O3))
+ (modules
+  cbat_vsa
+  cbat_interval_tree
+  cbat_ai_memmap
+  cbat_ai_representation
+  cbat_back_edges
+  cbat_contextual_fixpoint)
+ (libraries bap cbat_vsa_domain bitvec core core_kernel monads hashcons)
+ (preprocess
+  (pps ppx_bap)))
