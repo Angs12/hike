@@ -1,0 +1,15 @@
+/tmp/opencode/check_sem_failures.sh: line 10: read-only: command not found
+=== semantic-gate failures — 14:31:42 ===
+bitfield_struct        OUT_DIFF(28b_vs_28b)
+factorial              RC_DIFF(lrc=176 nrc=25)
+many_args              OUT_DIFF(10b_vs_18b)
+mixed_fp_int           OUT_DIFF(14b_vs_13b)
+nested_struct          OUT_DIFF(32b_vs_31b)
+/tmp/opencode/check_sem_failures.sh: line 19: 760718 Segmentation fault         timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/out_${f}_lifted" > "$OUT/out_${f}_lifted.out" 2>&1
+ptr_chain              RC_DIFF(lrc=139 nrc=0)
+/tmp/opencode/check_sem_failures.sh: line 19: 760730 Segmentation fault         timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/out_${f}_lifted" > "$OUT/out_${f}_lifted.out" 2>&1
+rec_struct             RC_DIFF(lrc=139 nrc=0)
+struct_by_value        OUT_DIFF(39b_vs_34b)
+va_arg_mixed           OUT_DIFF(154b_vs_154b)
+va_arg_vacopy          OUT_DIFF(86b_vs_103b)
+variadic               OUT_DIFF(10b_vs_10b)

@@ -187,10 +187,17 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
             else (100, n)
         in
         Base.List.filter free_vars ~f:(fun reg ->
+            let n = Var.name (Var.base reg) in
+            let is_callee_saved =
+              Base.List.mem
+                ["RBX"; "R12"; "R13"; "R14"; "R15"]
+                n ~equal:String.equal
+            in
             not
               (Var.same reg (sp target)
               || Var.same reg (fp target)
-              || Base.String.is_prefix (Var.name (Var.base reg)) ~prefix:"intrinsic:"))
+              || is_callee_saved
+              || Base.String.is_prefix n ~prefix:"intrinsic:"))
         |> Base.List.sort ~compare:(fun a b ->
             let ra, na = rank_of_var a in
             let rb, nb = rank_of_var b in

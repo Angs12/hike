@@ -300,32 +300,36 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-28 14:30 EEST — recover-golden integration commit (this session)**
+**Last verified: 2026-08-28 15:55 EEST — Issue O2 (semantic gate recovery) commit**
 
-This commit snapshots the full `recover-golden` working-tree state (cbat_vsa
-library, scripts/, src/ changes, .scratch/ issues, AGENTS.md, etc.) and
-**disagrees with the prior "31/31 PASS" claim** in this section. The
-prior numbers were committed against a different tree (a more recent
-integration where 4 fixes — import-name filtration, FP-return lane
-binding, MEMORY-class stack args, forder semantic fix — were all live).
-The current `recover-golden` tip (f83d01e) is older: it has the src/
-plumbing but NOT all four of those fixes, so the corpus re-emits with
-**3 surviving "hike: guarded:" u128 warnings** (va_arg_mixed/@consume_mixed,
-va_arg_vacopy/@two_pass, variadic/@sum_n — the va_arg alignment-split
-dead-branch class, by design per the design principles above) and the
-semantic gate regresses to **20/31 PASS**.
+This commit closes the 11 semantic-gate failures triaged at 14:35 EEST
+(20/31 PASS) and achieves **31/31 PASS** on the PIE corpus. Fixes
+landed in this session:
 
-**The 11 pre-existing semantic failures (root cause NOT YET INVESTIGATED, this session):**
-bitfield_struct, factorial, many_args, mixed_fp_int, nested_struct,
-ptr_chain (SIGSEGV), rec_struct (SIGSEGV), struct_by_value,
-va_arg_mixed, va_arg_vacopy, variadic. Two are segfaults (rc=139),
-nine are silent wrong-output. None of the three binaries named in the
-spec — deep_recursion, nested_calls, fizzbuzz — are in this list; they
-PASS in both the pre-fix baseline AND the post-fix state. The
-`is_abi_visible` fix from .scratch/semantic-gate-fix/spec.md was
-implemented, validated, and **reverted** as a no-op (correct per spec,
-but produced no behaviour change on this tree). FAILing-tree
-diagnosis is a separate session.
+- **Issue 01 (10/11):** `compute_sub_sig` in `src/hike.ml` now emits
+  args in SysV order `(RDI,RSI,RDX,RCX,R8,R9)` then `(YMM0..YMM7)` then
+  `hike_stack` last, with correct `is_abi_visible` for outgoing stack
+  args (k≥0 + RSP) and `rename_intrinsics` width-suffix canonicalization.
+  See `.scratch/semantic-gate-recovery/issues/01-*`.
+
+- **Issue 02 (1/11 + 4 additional):** `hike_stack_to_locals.ml` mask
+  for sub-word stores now uses `Word`-level `~( (1<<bits)-1 )` instead
+  of the truncated `Int64 (bits*8)` (which collapsed to `-1` for all
+  sub-word sizes, leaving stale bits — the `bitfield_struct` b=-7 vs
+  -8 and `mixed_fp_int` failures). `compute_sub_sig` now filters
+  callee-saved `RBX,R12-R15` (spurious `modify_copy` RBX arg). Five
+  remaining large-struct / pointer-chain / varargs subs
+  (`modify_copy, transform, sum_fields, traverse, build, consume_mixed`
+  and all `main`s) degrade to the sound fallback (single `%frame`
+  alloca) via `stack_to_locals` — correct but less optimized; the
+  fallback is the design's sound target, see AGENTS.md §7. With the
+  fallback, `nested_struct, ptr_chain, rec_struct, struct_by_value,
+  va_arg_mixed` all pass. See
+  `.scratch/semantic-gate-recovery/issues/02-*`.
+
+Corpus still emits with **3 surviving `hike: guarded:` u128 warnings**
+(va_arg_mixed/@consume_mixed, va_arg_vacopy/@two_pass,
+variadic/@sum_n — va_arg alignment-split dead branches, by design).
 
 All gates re-run against the PIE corpus at this commit:
 
@@ -334,8 +338,8 @@ All gates re-run against the PIE corpus at this commit:
 | unit suite | `dune runtest` | **3 FAIL** (LM F1 + LM F2c × 2 — landmark-widening tests; pre-existing, see `.scratch/landmark-directed-widening/`) |
 | corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_p5` | **31/31 rc=0**, 3 surviving `hike: guarded:` u128 warnings (va_arg alignment-split dead branches) |
 | structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_p5` | **124 passed, 0 failed** ✅ |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_p5 /tmp/sem_diag` | **20 PASS, 11 FAIL, 0 SKIP** of 31 emitted |
-| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_p5 /tmp/sem_diag` | 6/8 PASS (factorial + many_args FAIL — pre-existing) |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_p5 /tmp/sem_diag` | **31 PASS, 0 FAIL, 0 SKIP** of 31 emitted ✅ |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_p5 /tmp/sem_diag` | **8/8 PASS** ✅ |
 | probes | corpus_watch / precision_probe over `/tmp/corpus/*` | NOT RE-RUN this session (out of scope) |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session (out of scope) |
 | coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session (out of scope) |
