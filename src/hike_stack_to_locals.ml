@@ -246,7 +246,7 @@ let stack_to_locals (sub : sub term) : sub term =
         Term.enum def_t blk
         |> Seq.fold ~init:acc ~f:(fun acc d ->
             if
-              not (Term.has_attr d Hike_vsa_relevance.direct_sp)
+              not (Term.has_attr d Hike_vsa_relevance.stack_access)
               || is_abi_visible d
             then acc
             else
@@ -278,7 +278,7 @@ let stack_to_locals (sub : sub term) : sub term =
     object
       inherit Term.mapper
       method! map_def (d : def term) : def term =
-        if not (Term.has_attr d Hike_vsa_relevance.direct_sp) then d
+        if not (Term.has_attr d Hike_vsa_relevance.stack_access) then d
         else if is_abi_visible d || saves_incoming_reg d then d
         else
           match Core.Map.find tag_of (Term.tid d) with

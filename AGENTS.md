@@ -116,7 +116,7 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
 1. `hike-filter` — filters subs (named exclusions, stub/extern/intrinsic,
    intrinsic callers, symbol-table check) — its own pass, FIRST in the chain
    (no pass calls another pass's logic; the chain is deps-only)
-2. `hike-relevance` — tags defs (`relevant`, `direct_sp`)
+2. `hike-relevance` — tags defs (`relevant`, `stack_access`, `dynamic_alloc`)
 3. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
    plus k-ranges).  Also merges set-overlapping tags into one span
 4. `hike-stack-to-locals` — VSA CALCULATES, stack-to-locals only MERGES: collects the
@@ -300,34 +300,15 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-28 15:55 EEST — Issue O2 (semantic gate recovery) commit**
+**Last verified: 2026-08-28 16:35 EEST — Relevance cleanup 01 (.mli + stack_access rename + 4 pure helpers split)**
 
-This commit closes the 11 semantic-gate failures triaged at 14:35 EEST
-(20/31 PASS) and achieves **31/31 PASS** on the PIE corpus. Fixes
-landed in this session:
+This commit implements Ticket 01 of the Relevance Cleanup series:
+- Created `src/hike_vsa_relevance.mli` exposing `stack_access`, `relevant`, `dynamic_alloc`, `has_stack_access`, `is_sp`, and `analyze`.
+- Renamed `direct_sp` -> `stack_access` with a fresh UUID (`44f5cc3f-d8a4-472e-8930-435eea4b6a1d`) and dropped the old name without alias.
+- Split `src/hike_vsa_relevance.ml` into four pure helpers: `collect_def_maps` (via single `Term.visitor`), `forward_vars` (SP-only fixpoint with `Var.base` helper and invariant comments), `backward_slice` (reverse fixpoint from stack_access seeds), and `detect_dynamic_alloc`.
+- Updated all consumers in `hike_vsa.ml`, `hike_stack_to_locals.ml`, `bil2llvm.ml`, and test fixtures in `test_cbat.ml`.
 
-- **Issue 01 (10/11):** `compute_sub_sig` in `src/hike.ml` now emits
-  args in SysV order `(RDI,RSI,RDX,RCX,R8,R9)` then `(YMM0..YMM7)` then
-  `hike_stack` last, with correct `is_abi_visible` for outgoing stack
-  args (k≥0 + RSP) and `rename_intrinsics` width-suffix canonicalization.
-  See `.scratch/semantic-gate-recovery/issues/01-*`.
-
-- **Issue 02 (1/11 + 4 additional):** `hike_stack_to_locals.ml` mask
-  for sub-word stores now uses `Word`-level `~( (1<<bits)-1 )` instead
-  of the truncated `Int64 (bits*8)` (which collapsed to `-1` for all
-  sub-word sizes, leaving stale bits — the `bitfield_struct` b=-7 vs
-  -8 and `mixed_fp_int` failures). `compute_sub_sig` now filters
-  callee-saved `RBX,R12-R15` (spurious `modify_copy` RBX arg). Five
-  remaining large-struct / pointer-chain / varargs subs
-  (`modify_copy, transform, sum_fields, traverse, build, consume_mixed`
-  and all `main`s) degrade to the sound fallback (single `%frame`
-  alloca) via `stack_to_locals` — correct but less optimized; the
-  fallback is the design's sound target, see AGENTS.md §7. With the
-  fallback, `nested_struct, ptr_chain, rec_struct, struct_by_value,
-  va_arg_mixed` all pass. See
-  `.scratch/semantic-gate-recovery/issues/02-*`.
-
-Corpus still emits with **3 surviving `hike: guarded:` u128 warnings**
+Corpus emits with **3 surviving `hike: guarded:` u128 warnings**
 (va_arg_mixed/@consume_mixed, va_arg_vacopy/@two_pass,
 variadic/@sum_n — va_arg alignment-split dead branches, by design).
 
