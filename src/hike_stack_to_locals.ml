@@ -173,10 +173,25 @@ let stack_to_locals (sub : sub term) : sub term =
      implementation compared the current-RSP-relative distance k >= 0, which
      inverted the classification: every local (k >= 0, above an adjusted RSP)
      was treated as ABI-visible, so cells stayed empty and no local slot was
-     converted to a variable. *)
+     converted to a variable. For outgoing stack args (mem[RSP] stores for
+     7th+ args), lo <0 but they are still ABI-visible (they must remain in
+     memory for the callee's hike_stack+offset loads), so we also keep
+     RSP-relative stores with k >=0. *)
+  let k_of =
+    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
+      ~f:(fun m (dtid, klo, khi) -> Core.Map.set m ~key:dtid ~data:(klo, khi))
+  in
   let is_abi_visible (d : def term) : bool =
     match Core.Map.find tag_of (Term.tid d) with
-    | Some (Convutils.Range (lo, _)) -> Int64.compare lo 0L >= 0
+    | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
+    | Some (Convutils.Range (lo, _)) ->
+      (match Core.Map.find k_of (Term.tid d) with
+       | Some (klo, _) when Int64.compare klo 0L >= 0 ->
+         (match addr_of_rhs (Def.rhs d) with
+          | Some (addr, _) ->
+            Exp.free_vars addr |> Core.Set.exists ~f:(fun v -> String.equal (Var.name v) "RSP")
+          | None -> false)
+       | _ -> false)
     | _ -> false
   in
   let regions =

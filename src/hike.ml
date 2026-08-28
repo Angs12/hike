@@ -173,10 +173,30 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
         else []
       in
       let args =
+        let rank_of_var (v : var) : int * string =
+          let n = Var.name (Var.base v) in
+          let int_order = ["RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9"] in
+          match Base.List.findi int_order ~f:(fun _ s -> String.equal s n) with
+          | Some (i, _) -> (i, n)
+          | None ->
+            if Base.String.is_prefix n ~prefix:"YMM" then
+              (try
+                 let num = int_of_string (String.sub n 3 (String.length n - 3)) in
+                 if 0 <= num && num < 8 then (6 + num, n) else (100, n)
+               with _ -> (100, n))
+            else (100, n)
+        in
         Base.List.filter free_vars ~f:(fun reg ->
             not
               (Var.same reg (sp target)
-              || Var.same reg (fp target)))
+              || Var.same reg (fp target)
+              || Base.String.is_prefix (Var.name (Var.base reg)) ~prefix:"intrinsic:"))
+        |> Base.List.sort ~compare:(fun a b ->
+            let ra, na = rank_of_var a in
+            let rb, nb = rank_of_var b in
+            match Int.compare ra rb with
+            | 0 -> String.compare na nb
+            | c -> c)
         |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
         |> fun regs -> regs @ hike_stack_arg
       in
@@ -249,6 +269,29 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
          else None)
   |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) ->
          Int64.compare (Int64.of_int a) (Int64.of_int b))
+
+let rename_intrinsics sub =
+  let rename_var v =
+    let n = Var.name v in
+    if Base.String.is_prefix n ~prefix:"intrinsic:" then
+      let w = match Var.typ v with Imm w -> w | Mem _ -> 0 | Unk -> 0 in
+      Var.create (Printf.sprintf "%s_%d" n w) (Var.typ v)
+    else v
+  in
+  let exp_mapper = object
+    inherit Exp.mapper
+    method! map_var v = Bil.Var (rename_var v)
+  end in
+  Term.map blk_t sub ~f:(fun blk ->
+    Term.map def_t blk ~f:(fun d ->
+      let lhs = Def.lhs d in
+      let rhs = Def.rhs d in
+      let lhs' = rename_var lhs in
+      let rhs' = exp_mapper#map_exp rhs in
+      if Var.same lhs lhs' && Exp.equal rhs rhs' then d
+      else Def.with_lhs (Def.with_rhs d rhs') lhs'
+    )
+  )
 
 let simplify_jmps sub =
   let new_sub =
@@ -354,7 +397,7 @@ let filter_subs proj =
             eprintf "Skipping sub %s\n" (Sub.name sub);
             None)
           else
-            Some (sub |> simplify_jmps)))
+            Some (sub |> rename_intrinsics |> simplify_jmps)))
 
 (* The per-project setup + the sub FILTER are their OWN pass (see the registration below) — no pass calls another pass's logic directly; the chain is expressed in the ~deps of each registration and bap runs them in order. *)
 
