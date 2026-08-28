@@ -6,3 +6,7 @@ src/node_modules/
 hike.plugin
 gdb.txt
 lm_test.ml
+# zz_scratch_probe/ holds 1-byte stubs for debug-only probe executables
+# (stage_timer, conv_diag, vsa_debug, etc.). The real driver content
+# lives in ~/.agents/skills/implement/agents/; the stubs are noise.
+zz_scratch_probe/
