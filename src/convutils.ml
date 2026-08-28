@@ -1,18 +1,83 @@
 open Bap.Std.Bil.Types
 open Bap.Std
 open Bap_core_theory
-open Targetutils
 
 type llvalue_map = Llvm.llvalue Var.Map.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 
-let blk_llvals : blk_llvals Tid.Map.t ref = ref Tid.Map.empty
-let ll_bbs : Llvm.llbasicblock Tid.Map.t ref = ref Tid.Map.empty
-let subs : (Arg.t list * Arg.t list) Tid.Map.t ref = ref Tid.Map.empty
+type emit_ctx = {
+  symtab : Symtab.t option;
+  text_section : (int array * int64 * int64) option;
+  section_remap : (int64 * int64 * Llvm.llvalue) list;
+  copy_relocs : int64 list;
+  target : Theory.Target.t;
+  ptrsize : int;
+  addr_bits : int;
+  ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
+  subs : (Arg.t list * Arg.t list) Tid.Map.t;
+  blk_llvals : blk_llvals Tid.Map.t ref;
+  ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
+  guarded_warned : Tid.Set.t ref;
+}
+
+let empty_emit_ctx () : emit_ctx =
+  {
+    symtab = None;
+    text_section = None;
+    section_remap = [];
+    copy_relocs = [];
+    target = Theory.Target.unknown;
+    ptrsize = 0;
+    addr_bits = 0;
+    ll_funcs = ref Tid.Map.empty;
+    subs = Tid.Map.empty;
+    blk_llvals = ref Tid.Map.empty;
+    ll_bbs = ref Tid.Map.empty;
+    guarded_warned = ref Tid.Set.empty;
+  }
+
+module Vsa = struct
+  open Core_kernel[@@warning "-D"]
+
+  type vsa_kind = Range of int64 * int64 | Infinite of int64 * int64 | VLA of Tid.t
+  [@@deriving equal]
+
+  type region = {
+    id : int;
+    span : int64 * int64;
+    members : (Tid.t * (int64 * int64)) list;
+    convertible : bool;
+    max_width : int;
+  }
+  [@@deriving equal]
+
+  type vsa_info = {
+    offsets : (Tid.t * vsa_kind) list;
+    k_ranges : (Tid.t * int64 * int64) list;
+    regions : region list;
+    degraded : bool;
+    call_stack_args : (Tid.t * (int * int64) list) list;
+    vla_bounds : (Tid.t * (int64 * int64)) list;
+  }
+  [@@deriving equal]
+end
+include Vsa
+
+(* Hidden stack-threading parameter: callee's entry RSP passed by caller. *)
+let hike_stack_var : var =
+  Var.create ~is_virtual:false ~fresh:false "hike_stack" (Type.Imm 64)
+
+let kind_lo = function
+  | Range (lo, _) | Infinite (lo, _) -> lo
+  | VLA _ -> 0L
+
+let is_positive_kind (kind : vsa_kind) : bool =
+  Int64.compare (kind_lo kind) 0L > 0
+
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 type section = { base : Llvm.llvalue; min_addr : word; max_addr : word }
-type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL
+type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL | TEXT
 
 let section_type_to_string = function
   | DATA -> "data"
@@ -21,22 +86,33 @@ let section_type_to_string = function
   | GOT -> "got"
   | GOTPLT -> "got.plt"
   | RODATA_REL -> "data.rel.ro"
+  | TEXT -> "text"
 
 let blk_llvals_find map tid =
-  match Tid.Map.find map tid with
+  match Core.Map.find map tid with
   | Some v -> v
   | None -> failwith @@ "blk_llvals.find_exn: " ^ Tid.name tid
 
+(* Strip BAP tid prefixes (@, #, ., etc.) for LLVM names. *)
+let sanitize_name =
+  Base.String.filter ~f:(fun c ->
+      if c = '#' then false
+      else if c = '.' then false
+      else if c = '%' then false
+      else if c = '\\' then false
+      else if c = '@' then false
+      else true)
+
 let bb_find map tid =
-  match Tid.Map.find map tid with
+  match Core.Map.find map tid with
   | Some v -> v
   | None -> failwith @@ "bb_find_exn: " ^ Tid.name tid
 
-let insert_sub_sig tid ~rets ~args =
-  subs := Tid.Map.add_exn !subs ~key:tid ~data:(rets, args)
+let add_sub_sig subs tid ~rets ~args =
+  Core.Map.add_exn subs ~key:tid ~data:(rets, args)
 
-let get_calling_convention () =
-  if Theory.Target.matches !target_ref "x86_64-gnu-elf" then
+let get_calling_convention ctx =
+  if Theory.Target.matches ctx.target "x86_64-gnu-elf" then
     Calling_conventions.x86_64_sysv
   else failwith "abi not supported"
 
@@ -51,26 +127,26 @@ let get_direct_call jmp =
       match Call.target c with Direct target -> Some target | _ -> None)
   | _ -> None
 
-let get_args sub_tid =
-  match Tid.Map.find !subs sub_tid with
+let get_args ctx sub_tid =
+  match Core.Map.find ctx.subs sub_tid with
   | Some (_, args) -> args
   | None ->
-      let callconv = get_calling_convention () in
+      let callconv = get_calling_convention ctx in
       Base.List.map
         ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
         callconv.param_regs
 
-let get_rets sub_tid =
-  match Tid.Map.find !subs sub_tid with
+let get_rets ctx sub_tid =
+  match Core.Map.find ctx.subs sub_tid with
   | Some (rets, _) -> rets
   | None ->
-      let callconv = get_calling_convention () in
+      let callconv = get_calling_convention ctx in
       Base.List.map
         ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
         callconv.return_regs
 
-let ret_set () =
-  let callconv = get_calling_convention () in
+let ret_set ctx =
+  let callconv = get_calling_convention ctx in
   Var.Set.of_list callconv.return_regs
 
 let var_size var =
@@ -79,7 +155,6 @@ let var_size var =
 let goto_label_exn jmp =
   match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
 
-(* Stub for now *)
 let is_void _ = false
 
 let label_tid label =
@@ -94,42 +169,43 @@ let label_exp label =
 
 type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
 
-let clear_blk_llvals () = blk_llvals := Tid.Map.empty
-let clear_bbs () = ll_bbs := Tid.Map.empty
+let clear_blk_llvals ctx = ctx.blk_llvals := Tid.Map.empty
+let clear_bbs ctx = ctx.ll_bbs := Tid.Map.empty
 
-let insert_bb tid llvm_bb =
-  ll_bbs := Tid.Map.add_exn !ll_bbs ~key:tid ~data:llvm_bb
+let insert_bb ctx tid llvm_bb =
+  ctx.ll_bbs := Core.Map.add_exn !(ctx.ll_bbs) ~key:tid ~data:llvm_bb
 
-let get_bb tid = bb_find !ll_bbs tid
+let get_bb ctx tid = bb_find !(ctx.ll_bbs) tid
 
-let init_blk_llvals blk_tid =
+let init_blk_llvals ctx blk_tid =
   let phis = ref Var.Map.empty in
   let locals = ref Var.Map.empty in
-  blk_llvals := Tid.Map.add_exn !blk_llvals ~key:blk_tid ~data:{ phis; locals }
+  ctx.blk_llvals :=
+    Core.Map.add_exn !(ctx.blk_llvals) ~key:blk_tid ~data:{ phis; locals }
 
-let insert_phi blk_tid var value =
-  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  blk_llvals.phis := Var.Map.add_exn !(blk_llvals.phis) ~key:var ~data:value
+let insert_phi ctx blk_tid var value =
+  let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  blk_llvals.phis := Core.Map.add_exn !(blk_llvals.phis) ~key:var ~data:value
 
-let get_phi blk_tid var =
-  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  match Var.Map.find !(blk_llvals.phis) var with
+let get_phi ctx blk_tid var =
+  let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  match Core.Map.find !(blk_llvals.phis) var with
   | Some v -> v
   | None ->
       failwith @@ "Phi " ^ Var.name var ^ " not found at blk "
       ^ Tid.name blk_tid
 
-let insert_local blk_tid var value =
-  let blk_llvals = blk_llvals_find !blk_llvals blk_tid in
-  blk_llvals.locals := Var.Map.set !(blk_llvals.locals) ~key:var ~data:value
+let insert_local ctx blk_tid var value =
+  let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  blk_llvals.locals := Core.Map.set !(blk_llvals.locals) ~key:var ~data:value
 
-let get_local blk_tid var =
-  let blk_vars = blk_llvals_find !blk_llvals blk_tid in
-  Var.Map.find !(blk_vars.locals) var
+let get_local ctx blk_tid var =
+  let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  Core.Map.find !(blk_vars.locals) var
 
-let get_local_exn blk_tid var =
-  let blk_vars = blk_llvals_find !blk_llvals blk_tid in
-  let tmp = Var.Map.find !(blk_vars.locals) var in
+let get_local_exn ctx blk_tid var =
+  let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  let tmp = Core.Map.find !(blk_vars.locals) var in
   match tmp with
   | Some v -> v
   | None ->

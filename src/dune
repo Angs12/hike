@@ -1,7 +1,16 @@
 (library
   (name hike)
   (public_name hike)
-  (preprocess (pps ppx_bap ))
+  (flags
+  (:standard
+   -alert
+   -deprecated
+   -w
+   +a-4-9-27-29-32-39-40-41-42-44-45-48-58-59-60-70))
+  (ocamlopt_flags
+  (:standard -O3))
+  (preprocess
+  (pps ppx_bap))
   (libraries
     str
     unix
@@ -13,6 +22,9 @@
     bap-main
     bitvec
     bitvec-order
+    core
     core_kernel
     monads
-    ogre))
+    ogre
+    hike.cbat_vsa
+    hike.cbat_vsa_domain))

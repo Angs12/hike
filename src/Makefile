@@ -1,7 +1,7 @@
 PROGSFOLDER=./progs/
 
 hike:
-	bapbuild hike.plugin -pkg llvm
+	bapbuild hike.plugin -pkg llvm -pkg hike.cbat_vsa
 	bapbundle install hike.plugin
 
 clean:
