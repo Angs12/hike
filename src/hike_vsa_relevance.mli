@@ -27,6 +27,10 @@ val has_stack_access : def term -> bool
 (** [is_sp target var] tests if [var] is the stack pointer for [target]. *)
 val is_sp : Theory.Target.t -> var -> bool
 
+(** [is_stack_load_store exp] checks if [exp] has the shape of a memory Load or Store
+    (including Cast-wrapped Load/Store). *)
+val is_stack_load_store : exp -> bool
+
 (** [analyze sp sub] performs forward reachability from [sp] followed by
     backward slice to tag defs in [sub] with [stack_access], [relevant],
     and [dynamic_alloc]. *)
