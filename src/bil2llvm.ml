@@ -716,17 +716,25 @@ let find_def_tag sub_info def =
       Base.List.find_map info.Convutils.offsets ~f:(fun (dtid, kind) ->
           if Tid.equal dtid (Term.tid def) then Some kind else None))
 
-(* [is_abi_visible k]: The SINGLE classification rule the emission shares with the stack-to-locals pass — k = addr − RSP at the def, the CURRENT-RSP-relative offset the vsa pass computed ([Convutils.vsa_info.k_ranges], the same list. *)
-let is_abi_visible (k : (int64 * int64) option) : bool =
-  match k with
-  | Some (klo, _) -> Int64.compare klo 0L >= 0
-  | None -> false
-
 (* [find_def_k sub_tid def]: the def's k-range from the vsa pass's [k_ranges] (absent -> None, the conservative local treatment). *)
 let find_def_k sub_info def =
   Base.Option.bind sub_info ~f:(fun info ->
       Base.List.find_map info.Convutils.k_ranges ~f:(fun (dtid, klo, khi) ->
           if Tid.equal dtid (Term.tid def) then Some (klo, khi) else None))
+
+(* [is_abi_visible sub_info def]: The SINGLE classification rule the emission shares with the stack-to_locals pass — lo is the entry-relative offset (addr - entry RSP). Incoming args have lo >=0, locals lo <0. Outgoing stack args (mem[RSP] for 7th+ args) have lo <0 but k >=0 and RSP-relative, so they are also ABI-visible and must remain in memory for the callee's hike_stack+offset loads. *)
+let is_abi_visible sub_info def =
+  match find_def_tag sub_info def with
+  | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
+  | Some (Convutils.Range (lo, _)) ->
+    (match find_def_k sub_info def with
+     | Some (klo, _) when Int64.compare klo 0L >= 0 ->
+       (match Def.rhs def with
+        | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) | Bil.Cast (_, _, Bil.Load (_, addr, _, _)) | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) ->
+          Exp.free_vars addr |> Core.Set.exists ~f:(fun v -> String.equal (Var.name v) "RSP")
+        | _ -> false)
+     | _ -> false)
+  | _ -> false
 
 (* [addr_is_stack def]: Is [def] a stack access — the [direct_sp] tag the relevance pass set on exactly the direct-SP-address Load/Store (and Cast-wrapped) defs (the D-2f L1 lane), CONJOINED with (a) the mem-access rhs shape (the. *)
 let addr_is_stack def =
@@ -922,7 +930,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
               (match fr.stack with
               | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
               | None -> create_exp llvm_builder blk_tid exp)
-            else if Int64.compare lo 0L >= 0 && is_abi_visible (find_def_k sub_info def) then
+            else if is_abi_visible sub_info def then
               (match Def.rhs def with
               | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
                   let* addr_v = create_exp llvm_builder blk_tid addr in
@@ -943,7 +951,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
                 (match fr.stack with
                 | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
                 | None -> create_exp llvm_builder blk_tid exp)
-            else if Int64.compare lo 0L >= 0 && is_abi_visible (find_def_k sub_info def) then
+            else if is_abi_visible sub_info def then
                 (match Def.rhs def with
                 | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
                     let* addr_v = create_exp llvm_builder blk_tid addr in
@@ -1010,7 +1018,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
           (match fr.stack with
            | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
            | None -> create_exp llvm_builder blk_tid exp)
-        else if is_abi_visible (find_def_k sub_info def) then
+        else if is_abi_visible sub_info def then
           (* The OUTGOING cell (k = addr − RSP at the def ≥ 0, lo ≤ 0): the caller's arg-area stores AND the sub's own pushes at [RSP] — the TRUE runtime address is the rhs's own address expression (the emitted RSP local — exact;. *)
           (match Def.rhs def with
            | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
@@ -1346,8 +1354,19 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
   let arg_value (i : int) : Llvm.llvalue KB.t =
-    let arg = Base.List.nth_exn args i in
-    create_exp llvm_builder blk_tid (Arg.rhs arg)
+    (* Resolve x-operand from the most-recent intrinsic:xN_* def in blk (width-suffixed). *)
+    let prefix = Printf.sprintf "intrinsic:x%d_" i in
+    let x_def_opt =
+      Term.enum def_t blk
+      |> Base.Sequence.to_list
+      |> Base.List.filter ~f:(fun d -> Base.String.is_prefix (Var.name (Def.lhs d)) ~prefix)
+      |> Base.List.last
+    in
+    match x_def_opt with
+    | Some d -> create_exp llvm_builder blk_tid (Def.rhs d)
+    | None ->
+      let arg = Base.List.nth_exn args i in
+      create_exp llvm_builder blk_tid (Arg.rhs arg)
   in
   let result =
     match op with
@@ -1390,7 +1409,29 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   in
   let* r = result in
   (match get_rets ctx target with
-   | [ ret ] -> insert_local ctx blk_tid (Arg.lhs ret) r
+   | [ ret ] ->
+     insert_local ctx blk_tid (Arg.lhs ret) r;
+     (* Bind every consumer-width view of y0 (y0_64/y0_32/y0_1) — the BIR after rename_intrinsics has distinct y0_* lanes, but the soft-float result is a single i64/i32 value that must be visible at all widths. *)
+     let y0_64 = Var.create "intrinsic:y0_64" (Imm 64) in
+     let y0_32 = Var.create "intrinsic:y0_32" (Imm 32) in
+     let y0_1 = Var.create "intrinsic:y0_1" (Imm 1) in
+     let r_ty = Llvm.type_of r in
+     let r_bits = try Llvm.integer_bitwidth r_ty with _ -> 64 in
+     (* y0_64 *)
+     if not (Var.same (Arg.lhs ret) y0_64) then (
+       let v64 = if r_bits = 64 then r else if r_bits > 64 then Llvm.build_trunc r (Llvm.i64_type llvm_ctx) "" llvm_builder else Llvm.build_zext r (Llvm.i64_type llvm_ctx) "" llvm_builder in
+       insert_local ctx blk_tid y0_64 v64
+     );
+     (* y0_32 *)
+     if not (Var.same (Arg.lhs ret) y0_32) then (
+       let v32 = if r_bits = 32 then r else if r_bits > 32 then Llvm.build_trunc r (Llvm.i32_type llvm_ctx) "" llvm_builder else Llvm.build_zext r (Llvm.i32_type llvm_ctx) "" llvm_builder in
+       insert_local ctx blk_tid y0_32 v32
+     );
+     (* y0_1 *)
+     if not (Var.same (Arg.lhs ret) y0_1) then (
+       let v1 = if r_bits = 1 then r else if r_bits > 1 then Llvm.build_trunc r (Llvm.i1_type llvm_ctx) "" llvm_builder else Llvm.build_zext r (Llvm.i1_type llvm_ctx) "" llvm_builder in
+       insert_local ctx blk_tid y0_1 v1
+     )
    | _ -> ());
   (match fallthrough with
    | Some ft ->
