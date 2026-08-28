@@ -191,11 +191,14 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
 (* Helper 4: detect dynamic allocations (VLA / alloca). *)
 let detect_dynamic_alloc (sp : var) (sub : sub term)
     (def_of_lhs : def term Var.Map.t) : Tid.Set.t =
+  let sp_base = base_var sp in
+  let is_sp_var (v : var) : bool = Var.same (base_var v) sp_base in
+  let find_def (v : var) : def term option = Core.Map.find def_of_lhs (base_var v) in
   let non_literal_size = function Bil.Int _ -> false | _ -> true in
-  let is_alloc_exp (e : exp) : bool =
+  let is_dynamic_sp_decrement (e : exp) : bool =
     match e with
     | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
-        Var.same (base_var a) (base_var sp) && non_literal_size size
+        is_sp_var a && non_literal_size size
     | _ -> false
   in
   let v =
@@ -203,15 +206,15 @@ let detect_dynamic_alloc (sp : var) (sub : sub term)
       inherit [Tid.Set.t] Term.visitor
       method! visit_def d acc =
         let lhs = Def.lhs d in
-        if Var.same (base_var lhs) (base_var sp) then
+        if is_sp_var lhs then
           let rhs = Def.rhs d in
-          if is_alloc_exp rhs then
+          if is_dynamic_sp_decrement rhs then
             Core.Set.add acc (Term.tid d)
           else
             match rhs with
             | Bil.Var tmp ->
-                (match Core.Map.find def_of_lhs (base_var tmp) with
-                 | Some d' when is_alloc_exp (Def.rhs d') ->
+                (match find_def tmp with
+                 | Some d' when is_dynamic_sp_decrement (Def.rhs d') ->
                      Core.Set.add (Core.Set.add acc (Term.tid d)) (Term.tid d')
                  | _ -> acc)
             | _ -> acc
