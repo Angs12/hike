@@ -2793,10 +2793,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       in
       if should_record then
         (match head_opt with
-        | Some h -> Cbat_landmarks.record_landmark_for_head ~head:h v w;
-                   let succ = Word.succ w in if not (Word.is_zero succ) then Cbat_landmarks.record_landmark_for_head ~head:h v succ
-        | None -> Cbat_landmarks.record_landmark v w;
-                  let succ = Word.succ w in if not (Word.is_zero succ) then Cbat_landmarks.record_landmark v succ)
+        | Some h ->
+                   let succ = Word.succ w in
+                   if not (Word.is_zero succ) then Cbat_landmarks.record_landmark_for_head ~head:h v ~bound:succ ~is_upper:false ~dist:1
+                   else Cbat_landmarks.record_landmark_for_head ~head:h v ~bound:w ~is_upper:false ~dist:1
+        | None ->
+                  if not (Word.is_zero (Word.succ w)) then Cbat_landmarks.record_landmark v ~bound:(Word.succ w) ~is_upper:false ~dist:1
+                  else Cbat_landmarks.record_landmark v ~bound:w ~is_upper:false ~dist:1)
     | Bil.BinOp (_, a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
     | Bil.UnOp (_, a) -> walk_exp_for_head head_opt a
     | Bil.Cast (_, _, a) -> walk_exp_for_head head_opt a
