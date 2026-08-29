@@ -57,7 +57,9 @@ val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 val widen_join_threshold : (int * Bap.Std.word list) list -> t -> t -> t
 
 (* SiftAbs H3 — selective widen: only vars in [need] are widened, others joined. *)
-val selective_widen_join_threshold : (int * Bap.Std.word list) list -> need:Var.Set.t -> t -> t -> t
+val selective_widen_join_threshold : ?head:Tid.t option -> (int * Bap.Std.word list) list -> need:Var.Set.t -> t -> t -> t
+val selective_widen_extrapolate : need:Var.Set.t -> steps:int -> t -> t -> t
+val selective_widen : need:Var.Set.t -> t -> t -> t
 
 (* SiftAbs H3 — selective fixpoint detection: only vars in [need] are checked. *)
 val equal_need : need:Var.Set.t -> t -> t -> bool

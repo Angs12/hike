@@ -35,7 +35,8 @@
   cbat_wordset_intf
   cbat_vsa_utils
   cbat_word
-  cbat_thresholds)
+  cbat_thresholds
+   cbat_landmarks)
  (libraries bap bitvec bitvec-order core core_kernel monads hashcons)
  (preprocess
   (pps ppx_bap)))
