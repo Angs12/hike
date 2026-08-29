@@ -2864,8 +2864,25 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
           let res = match Cbat_landmarks.lm_calc_steps v with
             | `Finite n ->
               AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming
-            | `Zero | `Inf ->
+            | `Zero ->
+              (* A new landmark was added in the last traversal (its dist_p
+                 is still infinity); the paper's left branch of Figure 3
+                 takes "normal fixpoint computation" and lets the analysis
+                 make another pass so this landmark can acquire a second
+                 measurement. The natural join converges when the
+                 trace-partitioning's taken-edge refinement bounds the
+                 body. *)
               AI.join old incoming
+            | `Inf ->
+              (* No landmarks have been acquired at all for this cycle;
+                 the paper's right branch of Figure 3 applies standard
+                 widening (Cousot-Halbwachs, the ∞-arm of Listing 4).
+                 The head's bound widens to TOP in finite steps; the
+                 trace-partitioning's taken-edge refinement still bounds
+                 the live range on the guard's positive side. The
+                 previous [AI.join] here was unsound for unbounded-growth
+                 loops (the natural join diverges). *)
+              AI.widen_join old incoming
           in
           Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
           Cbat_landmarks.widening_at_head := None;
