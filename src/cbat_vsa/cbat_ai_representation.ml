@@ -18,7 +18,6 @@ module MapLattice = Cbat_map_lattice
 module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
 module Utils = Cbat_vsa_utils
-let max_int = Sys.max_array_length (* approx; we use 1 lsl 40 via Cbat_landmarks *)
 
 (* The full abstract representation for the value set analysis *)
 
@@ -324,7 +323,14 @@ let selective_widen_join_threshold ?(head:Tid.t option=None) (ladders : (int * w
     { memories; words; frame = join_opt ~widen:true e1.frame e2.frame
     }
 
-(* Landmark-directed extrapolation (Simon & King Listing 4) — per-var steps. *)
+(* Landmark-directed extrapolation (Simon & King Listing 4) — per-var steps.
+   [steps] is the consumption rate from [Cbat_landmarks.lm_calc_steps]:
+   a non-negative integer extrapolates by that many iterations (Listing 4);
+   a NEGATIVE value is the paper's "infinite" arm — fall through to plain
+   [WordSet.widen_join], which is Cousot-Halbwachs widening (the ∞-arm
+   of Listing 4, dropping unstable bounds). [head] scopes landmark
+   lookup to the innermost enclosing WTO cycle; pass [None] to apply
+   the per-var steps in isolation (the headless use case). *)
 let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
   if Core.Set.is_empty need then join e1 e2
   else if WordEnv.equal e1.words WordEnv.bottom then e2
