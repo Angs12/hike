@@ -15,9 +15,10 @@ let set_addr_bits (n : int) : unit = Vsa.set_addr_bits n
 (* sibling inside the hike library — reference DIRECTLY (the [Hike__.Hike_vsa_relevance] alias is only for OUTSIDE consumers). *)
 module Relevance = Hike_vsa_relevance
 
-(* [classify ws]: Range, Infinite (widening), or VLA (dynamic size def tid). *)
+(* [classify ws]: Range, Infinite (widening), Unbounded (top), Dead (bottom), or VLA (dynamic size def tid). *)
 let classify ?(vla_tid : tid option = None) (ws : Ws.t) : Convutils.vsa_kind option =
-  if Ws.is_top ws || Ws.is_bottom ws then None
+  if Ws.is_top ws then Some Convutils.Unbounded
+  else if Ws.is_bottom ws then Some Convutils.Dead
   else
     match Ws.min_elem ws, Ws.max_elem ws with
     | Some lo, Some hi ->
@@ -28,8 +29,8 @@ let classify ?(vla_tid : tid option = None) (ws : Ws.t) : Convutils.vsa_kind opt
            Some (Convutils.VLA (Option.get vla_tid))
          else if is_inf then Some (Convutils.Infinite (lo, hi))
          else Some (Convutils.Range (lo, hi))
-       | _ -> None)
-    | _ -> None
+       | _ -> Some Convutils.Unbounded)
+    | _ -> Some Convutils.Unbounded
 
 (* [bounds_of ws]: the signed int64 (lo, hi) bounds of a WordSet, or None when it is top/bottom/empty (the classify pre-conditions). *)
 let bounds_of (ws : Ws.t) : (int64 * int64) option =
@@ -94,20 +95,6 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
   in
   let degraded = has_indirect_jumps in
   let tags = Vsa.partitioned_states sub' sol views in
-  (* A Load/Store whose address is NOT frame-derived (rewrite_addr returned it unchanged — its base var has no frame fact) AND does not name RSP/RBP is a runtime POINTER-VALUE deref (the va_arg/argument-deref class, [RAX :=. *)
-  let pointer_value_addr (st : AI.t) (addr : exp) : bool =
-    let rewritten =
-      not
-        (Exp.equal
-           (Vsa.rewrite_addr (Vsa.frame_of_state st) addr) addr)
-    in
-    if rewritten then false
-    else
-      Exp.free_vars addr
-      |> Core.Set.for_all ~f:(fun v ->
-          let n = Var.name v in
-          not (String.equal n "RSP" || String.equal n "RBP"))
-  in
   (* The per-def walk: the sequential state (the block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the two tag accumulators thread through ONE nested fold — no refs. *)
   let raw, kraw =
     Term.enum blk_t sub'
@@ -135,9 +122,7 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
                    | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
                    | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
                    | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
-                     when
-                       Term.has_attr d Relevance.stack_access
-                       && not (pointer_value_addr st_before addr) ->
+                     when Term.has_attr d Relevance.stack_access ->
                      let addr' =
                        Vsa.rewrite_addr
                          (Vsa.frame_of_state st_before) addr in
@@ -179,8 +164,18 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
                                 | None -> kacc
                               in
                               (st, acc, kacc)
-                          | None -> (st, acc, kacc))
-                      | Error _ -> (st, acc, kacc))
+                          | None ->
+                              let ws = Ws.top 64 in
+                              let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
+                              (st, acc, kacc))
+                      | Error _ ->
+                          let ws = Ws.top 64 in
+                          let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
+                          (st, acc, kacc))
+                   | _ when Term.has_attr d Relevance.stack_access ->
+                       let ws = Ws.top 64 in
+                       let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
+                       (st, acc, kacc)
                    | _ -> (st, acc, kacc))
         in
         (acc, kacc))
@@ -190,11 +185,17 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
   let span_of = function
     | Convutils.Range (lo, hi) -> (lo, hi)
     | Convutils.Infinite (lo, hi) -> (Int64.min lo hi, Int64.max lo hi)
-    | Convutils.VLA _ -> (0L, 0L)
+    | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (0L, 0L)
   in
   let merged_tags : Convutils.vsa_kind Tid.Map.t =
+    let bounded, unbounded_or_dead =
+      Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
+          match kind with
+          | Convutils.Range _ | Convutils.Infinite _ | Convutils.VLA _ -> true
+          | Convutils.Unbounded | Convutils.Dead -> false)
+    in
     let items =
-      Base.List.map raw ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
+      Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
     in
     (* Maximal overlap components via Ws.overlap (transitive closure).
        S1 coarser: any overlapping WordSets merge; bridging via a new item
@@ -211,12 +212,15 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
           in
           components (new_comp :: non_overlapping) rest
     in
-    Base.List.fold_left (components [] items) ~init:Tid.Map.empty
+    let init_map =
+      Base.List.fold unbounded_or_dead ~init:Tid.Map.empty ~f:(fun acc (dtid, kind, _) ->
+          Core.Map.set acc ~key:dtid ~data:kind)
+    in
+    Base.List.fold_left (components [] items) ~init:init_map
       ~f:(fun acc comp ->
         match comp with
         | [ (dtid, kind, _) ] -> Core.Map.set acc ~key:dtid ~data:kind
         | _ ->
-            (* Option B fix : the span fold MUST start from the FIRST member's span — the (0L, 0L) init polluted every merged range with the origin 0 (min(0, lo) and max(0, hi) made every negative-span component's merged tag Range(lo,. *)
             let lo, hi =
               match comp with
               | (_, k0, _) :: rest ->
@@ -297,8 +301,16 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
         (Sub.name sub') n;
       None
   with
-  | None -> { Convutils.offsets = []; k_ranges = []; regions = []; degraded = true;
-              call_stack_args = []; vla_bounds = [] }
+  | None ->
+      let offsets =
+        Term.enum blk_t sub'
+        |> Seq.concat_map ~f:(Term.enum def_t)
+        |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.stack_access)
+        |> Seq.map ~f:(fun d -> (Term.tid d, Convutils.Unbounded))
+        |> Seq.to_list
+      in
+      { Convutils.offsets; k_ranges = []; regions = []; degraded = true;
+        call_stack_args = []; vla_bounds = [] }
   | Some (sol, views) ->
       Hike_kb.add_sol (Term.tid sub) sol;
       finish sol views
@@ -309,6 +321,17 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
      Printf.fprintf oc "%s\t%d\t%.3f\n" (Sub.name sub') (Term.length blk_t sub') dt_probe;
      close_out oc
    with _ -> ());
+  (* 100% VSA Tagging Assertion: Every stack_access def MUST be present in info.offsets *)
+  let tagged_tids =
+    Base.List.fold probe_res.Convutils.offsets ~init:Tid.Set.empty ~f:(fun s (t, _) ->
+        Core.Set.add s t)
+  in
+  Term.enum blk_t sub'
+  |> Seq.iter ~f:(fun blk ->
+      Term.enum def_t blk
+      |> Seq.iter ~f:(fun d ->
+          if Term.has_attr d Relevance.stack_access then
+            assert (Core.Set.mem tagged_tids (Term.tid d))));
   probe_res
 
 let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : Convutils.vsa_info =
@@ -402,8 +425,18 @@ let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : 
                                 | None -> kacc
                               in
                               (st, acc, kacc)
-                          | None -> (st, acc, kacc))
-                      | Error _ -> (st, acc, kacc))
+                          | None ->
+                              let ws = Ws.top 64 in
+                              let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
+                              (st, acc, kacc))
+                      | Error _ ->
+                          let ws = Ws.top 64 in
+                          let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
+                          (st, acc, kacc))
+                   | _ when Term.has_attr d Relevance.stack_access ->
+                       let ws = Ws.top 64 in
+                       let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
+                       (st, acc, kacc)
                    | _ -> (st, acc, kacc))
         in
         (acc, kacc))
@@ -412,11 +445,17 @@ let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : 
   let span_of = function
     | Convutils.Range (lo, hi) -> (lo, hi)
     | Convutils.Infinite (lo, hi) -> (Int64.min lo hi, Int64.max lo hi)
-    | Convutils.VLA _ -> (0L, 0L)
+    | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (0L, 0L)
+  in
+  let bounded, unbounded_or_dead =
+    Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
+        match kind with
+        | Convutils.Range _ | Convutils.Infinite _ | Convutils.VLA _ -> true
+        | Convutils.Unbounded | Convutils.Dead -> false)
   in
   let merged_tags : Convutils.vsa_kind Tid.Map.t =
     let items =
-      Base.List.map raw ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
+      Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
     in
     let rec components acc = function
       | [] -> acc
@@ -430,7 +469,11 @@ let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : 
           in
           components (new_comp :: non_overlapping) rest
     in
-    Base.List.fold_left (components [] items) ~init:Tid.Map.empty
+    let init_map =
+      Base.List.fold unbounded_or_dead ~init:Tid.Map.empty ~f:(fun acc (dtid, kind, _) ->
+          Core.Map.set acc ~key:dtid ~data:kind)
+    in
+    Base.List.fold_left (components [] items) ~init:init_map
       ~f:(fun acc comp ->
         match comp with
         | [ (dtid, kind, _) ] -> Core.Map.set acc ~key:dtid ~data:kind

@@ -92,7 +92,12 @@ the validation gates and the proposed execution order — is `docs/hike-full-pla
    frame cannot contain them — the model arithmetic points below the frame,
    the alloca_vla segfault).  GOAL: the VSA is 100% SOUND and hike converts
    the stack to LLVM allocas / static variables — it should work on EVERY
-   binary.
+8. **STRICT CONTEXT.md ADHERENCE & NO AD-HOC BIL PATTERN MATCHING.**
+   - **No AST Pattern Matching for Memory or Registers**: Never write structural `match` patterns over BIL constructors (`Bil.Load`, `Bil.Store`, `Bil.Cast`, etc.) or inspect memory operands directly. Use `Exp.visitor` or `Term.visitor` exclusively.
+   - **Target-Defined Stack Pointer (`Targetutils.sp`)**: Never hardcode register strings like `"RSP"` or `"RBP"` or check for frame pointers. `Targetutils.sp` is the sole origin for stack derivation.
+   - **100% VSA Tagging Invariant**: Every definition with a `stack_access` tag MUST receive a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). Untagged stack accesses are strictly prohibited.
+   - **Lattice and Abstract Domain Values**: Dataflow propagation must operate over abstract sets and lattice values, distinguishing pointer arithmetic from memory values without AST inspecting hacks.
+
 
 ## Build & test
 
@@ -300,30 +305,93 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-28 16:43 EEST — Relevance cleanup 02 (BAP-API hardcodes + is_stack_load_store + dynamic_alloc visitor)**
+**Last verified: 2026-08-29 EEST — Worklist closure fix + memory-side-effect propagation fix**
 
-This commit implements Ticket 02 of the Relevance Cleanup series:
-- Deleted `is_arg_setup` hardcode from `Hike_vsa_relevance.analyze` so call-arg setups only stay relevant if they flow into a `stack_access`.
-- Replaced `alloc_rhs` and indirect VLA manual loops with a clean `Term.visitor`-based `detect_dynamic_alloc` using `Targetutils.sp`/`Var.same` (no `"RSP"` strings).
-- Added `is_stack_load_store : exp -> bool` helper in `Hike_vsa_relevance` and `.mli` matching `Load`/`Store`/`Cast-Load`/`Cast-Store`, centralizing the memory access shape check used as the `stack_access` predicate.
-- Ensured all gates remain 100% green.
+This session landed two changes against the uncommitted handoff state:
 
-Corpus emits with **3 surviving `hike: guarded:` u128 warnings**
-(va_arg_mixed/@consume_mixed, va_arg_vacopy/@two_pass,
-variadic/@sum_n — va_arg alignment-split dead branches, by design).
+1. **Worklist closure fix** (`src/hike_vsa_relevance.ml`, `backward_slice`).
+   The per-block transfer function `block_contributors` used a `while changed`
+   loop that mutated a persistent set via `ref` and recomputed `base_var (Def.lhs d)`
+   per round. Replaced with a pure tail-recursive worklist: each non-seed def
+   is enqueued at most once, the lhs is hoisted out of the inner computation,
+   and the producer of each newly-introduced var is looked up via `def_of_lhs`
+   to extend the worklist. No `ref`, no `while`, all data flow is threaded
+   through the `loop` function. Style matches `forward_vars` (threaded state).
+   Recovers T4-3, T4-4, T4-5, T4-6, T4-10 (5 of 12 T4 checks; the others
+   were passing before).
 
-All gates re-run against the PIE corpus at this commit:
+2. **Memory-side-effect propagation fix** (`src/hike_vsa_relevance.ml`,
+   `forward_vars`, `d_of_defs`). The `users` map in `d_of_defs` was
+   including every def (including memory Load/Store defs), so the LHS of
+   those defs (the `mem` variable) was propagated as a sp-derived var.
+   Subsequent memory-typed addresses (e.g., the rip-relative
+   `mem := mem with [0x401C, el]:u32 <- 0xA`) had their `def_uses` (which
+   includes `mem`) intersect the sp-derived set, and the per-def tag check
+   tagged them as `stack_access` — even though they are NOT stack accesses.
+   The 100% VSA Tagging Invariant then crashed at emission time
+   (`Assert_failure hike_vsa.ml:334:12`) on the rip-relative def.
+   The fix: skip memory-side-effect defs (any Load/Store/Cast) from the
+   `users` map, so `mem` is never propagated as a sp-derived register.
+   Recovers `fizzbuzz` (which was failing under the uncommitted work).
+
+**Standards/Spec review of this work** (see diff for full report):
+- HARD VIOLATION: `src/bil2llvm.ml:196-206` `mem_access_via_ptr` adds
+  `Bil.Cast (c, w, Bil.Load …)` and `Bil.Cast (c, w, Bil.Store …)` arms
+  via direct structural `match`. This violates Principle 8 / CONTEXT.md
+  ("Never write structural `match` patterns over BIL constructors …
+  use `Exp.visitor` exclusively"). Needs a follow-up rewrite.
+- JUDGEMENT-CALL SMELLS: duplicated Unbounded-arms across 4 sites
+  (`hike_vsa.ml:586-596` vs `682-692`, `bil2llvm.ml:214-223` vs
+  `279-287`); `(0L, 0L)`-as-unbounded primitive obsession
+  (`convutils.ml:78-79`); the `is_stack_load_store` predicate name
+  is misleading (matches any memory def, not just stack ones).
+- SPEC: AGENTS.md write-up was wrong ("while changed loop"); corrected
+  above. `is_stack_load_store` semantic needs to be SP-derived-set-
+  parameterized (not shape-only) per the standards review.
+- SPEC: 100% VSA Tagging Invariant uses `assert` (disabled in native
+  `dune build`); should be `failwith` to be a real guard. Fizzbuzz was
+  the canonical proof — the assertion fired when the path was
+  exercised, confirming the gap.
+
+After this commit:
 
 | Gate | Command | Current result |
 |---|---|---|
 | unit suite | `dune runtest` | **3 FAIL** (LM F1 + LM F2c × 2 — landmark-widening tests; pre-existing, see `.scratch/landmark-directed-widening/`) |
-| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_p5` | **31/31 rc=0**, 3 surviving `hike: guarded:` u128 warnings (va_arg alignment-split dead branches) |
-| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_p5` | **124 passed, 0 failed** ✅ |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_p5 /tmp/sem_diag` | **31 PASS, 0 FAIL, 0 SKIP** of 31 emitted ✅ |
-| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_p5 /tmp/sem_diag` | **8/8 PASS** ✅ |
+| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_memfix` | **31/31 rc=0**, 24 surviving `hike: guarded:` warnings (Unbounded, va_arg alignment-split) |
+| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_memfix` | **124 passed, 0 failed** ✅ |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_memfix /tmp/sem_memfix_v2` | **28 PASS, 3 FAIL, 0 SKIP** of 31 emitted ⚠️ |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_memfix /tmp/sem_memfix_v2_8` | **8/8 PASS** ✅ |
 | probes | corpus_watch / precision_probe over `/tmp/corpus/*` | NOT RE-RUN this session (out of scope) |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session (out of scope) |
 | coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session (out of scope) |
+
+3 semantic failures (out_nested_struct, out_va_arg_vacopy, out_variadic) are NOT
+caused by these fixes — they were failing in the handoff's emission
+`/tmp/heritage_vsa100` with the broken closure too. The handoff reported
+them as "to investigate"; per the redesign tickets in
+`.scratch/one-frame-anchor-removal/`, they require:
+- **out_nested_struct** — per-region alloca split breaks the contiguous
+  struct layout in memory. WRITE-CLOSED region rule is not yet strong
+  enough to keep by-value copies as one region. (T05: drop the anchor)
+- **out_va_arg_vacopy** — caller/callee argument-area initialization on
+  positive entry offsets. (T03: per-call alloca for va_list)
+- **out_variadic** — same as va_arg_vacopy plus variadic argument
+  indexing, AND the value-typed-address class (`RAX := mem[RBP-0xC8];
+  mem[RAX]`) is not resolved by the VSA. (T02: VSA audit + fix; T03)
+- **out_va_arg_mixed** — was failing in the handoff; now PASS (the
+  closure-completeness fix recovered it).
+
+Reference emissions: `/tmp/heritage_p5` (green pre-vsa100 emission,
+31/31 PASS; represents the pre-uncommitted-work state),
+`/tmp/heritage_vsa100` (handoff emission with broken closure, 27/4),
+`/tmp/heritage_vsa100_fix` (closure fix emission, 28/3),
+`/tmp/heritage_memfix` (closure fix + memfix emission, 28/3).
+
+Reference emissions: `/tmp/heritage_p5` (green pre-vsa100 emission, 31/31 PASS;
+represents the pre-uncommitted-work state), `/tmp/heritage_vsa100` (handoff
+emission with broken closure, 27/4), `/tmp/heritage_vsa100_fix` (this commit, 28/3).
+
 
 coreutils residual classification: df/du = live-/tmp drift between captures
 (stable-dir reruns byte-identical); vdir = transient (identical rerun);

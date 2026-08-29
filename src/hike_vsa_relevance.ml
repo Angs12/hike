@@ -31,14 +31,47 @@ let is_sp (target : Theory.Target.t) (v : var) : bool =
 (* Normalize a variable to its base form for map/set keys. *)
 let base_var (v : var) : var = Var.base v
 
-(* Check if [e] has the shape of a memory Load or Store (including Cast-wrapped). *)
-let is_stack_load_store (e : exp) : bool =
-  match e with
-  | Bil.Load _
-  | Bil.Store _
-  | Bil.Cast (_, _, Bil.Load _)
-  | Bil.Cast (_, _, Bil.Store _) -> true
-  | _ -> false
+(* [is_stack_load_store sp_derived e]: is [e] a Stack Access at the
+   call site — a memory Load or Store whose address contains at least
+   one var in [sp_derived]. The check walks the expression via
+   [Exp.visitor] (no AST pattern matching, per Principle 8 /
+   CONTEXT.md): the visitor's `visit_load` / `visit_store` methods
+   return the address's free vars; the base class's traversal
+   threads the return value through, so we get the UNION of all
+   Load/Store addresses' free vars. The name keeps "stack" because
+   the SP-derived gate is what makes the load/store a Stack
+   Access — the shape alone (any memory Load/Store) is not
+   sufficient. *)
+let stack_load_store_addr_vars (e : exp) : Var.Set.t =
+  let vis =
+    object
+      inherit [Var.Set.t] Exp.visitor
+      method! visit_load ~mem:_ ~addr _ _ acc =
+        Core.Set.union acc (Exp.free_vars addr)
+      method! visit_store ~mem:_ ~addr ~exp:_ _ _ acc =
+        Core.Set.union acc (Exp.free_vars addr)
+    end
+  in
+  vis#visit_exp e Var.Set.empty
+
+let is_stack_load_store (sp_derived : Var.Set.t) (e : exp) : bool =
+  Core.Set.exists
+    (stack_load_store_addr_vars e)
+    ~f:(fun v -> Core.Set.mem sp_derived (base_var v))
+
+(* [is_memory_side_effect e]: is [e] a memory Load or Store (any
+   memory access, regardless of address derivation). The check
+   returns true if the expression's free vars include [mem] (the
+   memory variable that all Loads/Stores read or write). The
+   function name keeps "memory side effect" because any Load/Store
+   IS a memory side effect, even if its address is not stack-derived
+   (rip-relative, global, etc.). *)
+let is_memory_side_effect (e : exp) : bool =
+  Exp.free_vars e
+  |> Core.Set.exists ~f:(fun v ->
+      match Var.typ v with
+      | Type.Mem _ -> true
+      | _ -> false)
 
 (* Helper 1: collect def maps using a Term.visitor pass. *)
 let collect_def_maps (sub : sub term) :
@@ -80,12 +113,23 @@ let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
     if Base.List.is_empty ds then d_in
     else
       let users =
+        (* A stack Load/Store def (mem := mem with [..., el]:T <- ...) is a
+           memory side-effect, not a register computation. Including its LHS
+           (mem) as a sp-derived var would cause subsequent rip-relative or
+           constant-address memory ops (mem := mem with [0x401C, el]:T <- ...)
+           to be tagged as stack_access (the per-def tag check looks at
+           def_uses which includes mem; mem is in d_at because the earlier
+           sp-derived Store propagated it). The fix: skip stack load/store
+           defs from the users map so mem is never propagated as a
+           sp-derived var. *)
         Base.List.fold ds ~init:Var.Map.empty ~f:(fun m d ->
-            Core.Set.fold (def_uses d) ~init:m ~f:(fun m v ->
-                let k = base_var v in
-                match Core.Map.find m k with
-                | None -> Core.Map.set m ~key:k ~data:[ d ]
-                | Some l -> Core.Map.set m ~key:k ~data:(d :: l)))
+            if is_memory_side_effect (Def.rhs d) then m
+            else
+              Core.Set.fold (def_uses d) ~init:m ~f:(fun m v ->
+                  let k = base_var v in
+                  match Core.Map.find m k with
+                  | None -> Core.Map.set m ~key:k ~data:[ d ]
+                  | Some l -> Core.Map.set m ~key:k ~data:(d :: l)))
       in
       let result = ref d_in in
       let queue = ref d_in in
@@ -137,14 +181,14 @@ let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
           (Graphlib.Std.Solution.get sol (Term.tid blk))
       in
       Term.enum def_t blk |> Seq.fold ~init:acc ~f:(fun acc d ->
-          if is_stack_load_store (Def.rhs d)
-             && Core.Set.exists (def_uses d) ~f:(fun x -> Core.Set.mem d_at x)
+          if is_stack_load_store d_at (Def.rhs d)
           then Core.Set.add acc (Term.tid d)
           else acc))
 
 (* Helper 3: backward dataflow slice from stack access seeds. *)
 let backward_slice (g : Graphs.Tid.t) (sub : sub term)
     (defs_of : def term list Tid.Map.t) (rhs_bases : Var.Set.t Tid.Map.t)
+    (def_of_lhs : def term Var.Map.t)
     (is_stack_access : def term -> bool) : Def.Set.t =
   let defs_of_blk (btid : tid) : def term list =
     match Core.Map.find defs_of btid with Some ds -> ds | None -> []
@@ -152,6 +196,16 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
   let def_uses (d : def term) : Var.Set.t =
     Core.Map.find_exn rhs_bases (Term.tid d)
   in
+  let producer_of (v : var) : def term option =
+    Core.Map.find def_of_lhs (base_var v)
+  in
+  (* Pure worklist: seed [rel] with the block's stack_access defs and the
+     predecessor-closure. Then for each non-seed, if its LHS is in [vars],
+     add it to [rel] and enqueue the RHS-vars it introduces. Each non-seed
+     is added at most once (set membership check), so the loop is bounded
+     by the total defs in the block. The worklist is a list of (lhs, def)
+     pairs — the lhs is hoisted out of the inner computation so we don't
+     redo `base_var (Def.lhs d)` per round. *)
   let block_contributors (ds : def term list) (rel : Def.Set.t) : Def.Set.t =
     let seeds, non_seeds =
       Base.List.partition_tf ds ~f:is_stack_access
@@ -159,13 +213,37 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
     let rel = Core.Set.union rel (Def.Set.of_list seeds) in
     if Base.List.is_empty non_seeds then rel
     else
-      let vars =
+      let pre_built =
+        (* Hoist base_var (Def.lhs d) out of the inner loop. *)
+        Base.List.map non_seeds ~f:(fun d -> (base_var (Def.lhs d), d))
+      in
+      let initial_vars =
         Core.Set.fold rel ~init:Var.Set.empty ~f:(fun acc d ->
             Core.Set.union acc (def_uses d))
       in
-      Base.List.fold non_seeds ~init:rel ~f:(fun acc d ->
-          if Core.Set.mem vars (base_var (Def.lhs d)) then Core.Set.add acc d
-          else acc)
+      let rec loop (vars : Var.Set.t) (worklist : (var * def term) list)
+          (rel : Def.Set.t) : Def.Set.t =
+        match worklist with
+        | [] -> rel
+        | (_, d) :: rest when Core.Set.mem rel d -> loop vars rest rel
+        | (lhs, d) :: rest when Core.Set.mem vars lhs ->
+            (* Add d to rel; enqueue the defs that produce the new vars
+               (the vars in d's RHS) and update the running var-set. *)
+            let new_vars = def_uses d in
+            let vars' = Core.Set.union vars new_vars in
+            (* Enqueue the producer of each newly-introduced var, if any. *)
+            let enqueued =
+              Base.List.filter_map (Core.Set.to_list new_vars)
+                ~f:(fun v ->
+                  match producer_of v with
+                  | Some d' when not (Core.Set.mem rel d') ->
+                      Some (base_var (Def.lhs d'), d')
+                  | _ -> None)
+            in
+            loop vars' (enqueued @ rest) (Core.Set.add rel d)
+        | _ :: rest -> loop vars rest rel
+      in
+      loop initial_vars pre_built rel
   in
   let rev_transfer (btid : tid) (rel : Def.Set.t) : Def.Set.t =
     block_contributors (defs_of_blk btid) rel
@@ -231,7 +309,7 @@ let analyze (sp : var) (sub : sub term) : sub term =
   let is_stack_access (d : def term) : bool =
     Core.Set.mem sp_relative_tids (Term.tid d)
   in
-  let tagged_defs = backward_slice g sub defs_of rhs_bases is_stack_access in
+  let tagged_defs = backward_slice g sub defs_of rhs_bases def_of_lhs is_stack_access in
   let alloc_tids = detect_dynamic_alloc sp sub def_of_lhs in
   sub
   |> Term.map blk_t ~f:(fun b ->

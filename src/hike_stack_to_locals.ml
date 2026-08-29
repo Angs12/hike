@@ -48,7 +48,7 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
         match kind with
         | Convutils.Range (lo, hi) ->
             Core.Map.set m ~key:dtid ~data:(lo, hi)
-        | Convutils.Infinite _ | Convutils.VLA _ -> m)
+        | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> m)
   in
   let overlap (lo1 : int64) (hi1 : int64) (lo2 : int64) (hi2 : int64) :
       bool =
@@ -367,7 +367,7 @@ let stack_to_locals (sub : sub term) : sub term =
                 Def.with_rhs (Def.with_lhs d arr) rhs
               else Def.with_rhs d rhs
           | Some (Convutils.Range _) -> d (* not convertible: keep in memory *)
-          | Some (Convutils.Infinite _) -> d
+          | Some (Convutils.Infinite _) | Some Convutils.Unbounded | Some Convutils.Dead -> d
           | Some (Convutils.VLA _) -> d
           | None -> d
     end

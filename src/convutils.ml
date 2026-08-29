@@ -39,7 +39,12 @@ let empty_emit_ctx () : emit_ctx =
 module Vsa = struct
   open Core_kernel[@@warning "-D"]
 
-  type vsa_kind = Range of int64 * int64 | Infinite of int64 * int64 | VLA of Tid.t
+  type vsa_kind =
+    | Range of int64 * int64
+    | Infinite of int64 * int64
+    | Unbounded
+    | Dead
+    | VLA of Tid.t
   [@@deriving equal]
 
   type region = {
@@ -69,7 +74,7 @@ let hike_stack_var : var =
 
 let kind_lo = function
   | Range (lo, _) | Infinite (lo, _) -> lo
-  | VLA _ -> 0L
+  | Unbounded | Dead | VLA _ -> 0L
 
 let is_positive_kind (kind : vsa_kind) : bool =
   Int64.compare (kind_lo kind) 0L > 0
