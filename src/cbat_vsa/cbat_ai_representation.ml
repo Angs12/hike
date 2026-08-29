@@ -356,46 +356,9 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
                         paper's Inf arm) *)
                      WordSet.widen_join data_old data_new
                    else
-                     let width = WordSet.bitwidth data_old in
-                     let lo' = List.filter entries ~f:(fun e -> not e.Cbat_landmarks.is_upper) in
-                     let hi' = List.filter entries ~f:(fun e -> e.Cbat_landmarks.is_upper) in
-                     let lo_base = match WordSet.min_elem data_new with Some w -> w | None -> Word.zero width in
-                     let hi_base = match WordSet.max_elem data_new with Some w -> w | None -> Word.zero width in
-                     let extrap_lo =
-                       match lo' with
-                       | _ :: _ ->
-                         let min_dist = List.fold lo' ~init:(1 lsl 40)
-                           ~f:(fun acc e -> match e.Cbat_landmarks.dist with
-                               | Some d -> min acc d | None -> acc) in
-                         let w_dist = Word.of_int ~width min_dist in
-                         let w_steps = Word.of_int ~width steps in
-                         let delta = Word.mul w_dist w_steps in
-                         if Word.compare delta (Word.zero width) = 0 then lo_base
-                         else
-                           let v = Word.sub lo_base delta in
-                           if Word.compare v lo_base > 0 then lo_base else v
-                       | [] -> lo_base
-                     in
-                     let extrap_hi =
-                       match hi' with
-                       | _ :: _ ->
-                         let max_dist = List.fold hi' ~init:0
-                           ~f:(fun acc e -> match e.Cbat_landmarks.dist with
-                               | Some d -> max acc d | None -> acc) in
-                         let w_dist = Word.of_int ~width max_dist in
-                         let w_steps = Word.of_int ~width steps in
-                         let delta = Word.mul w_dist w_steps in
-                         let v = Word.add hi_base delta in
-                         if Word.compare v hi_base < 0 then
-                           (* overflow -> infinite arm (Listing 4): word_max *)
-                           Word.ones width
-                         else v
-                       | [] -> hi_base
-                     in
-                     let lo = if Word.compare extrap_lo lo_base > 0 then extrap_lo else lo_base in
-                     let hi = if Word.compare extrap_hi hi_base < 0 then extrap_hi else hi_base in
-                     if Word.compare lo hi > 0 then WordSet.widen_join data_old data_new
-                     else WordSet.of_clp (Cbat_clp.interval ~width lo hi))
+                     (* Delegate to Cbat_landmarks.translate_to — the single
+                        per-head translation routine (Listing 4 wrapping). *)
+                     Cbat_landmarks.translate_to ~steps data_old data_new entries)
               | None ->
                 if steps < 0 then WordSet.widen_join data_old data_new
                 else WordSet.extrapolate_steps ~steps data_old data_new

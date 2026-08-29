@@ -2838,11 +2838,11 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       else
         let outs = List.map preds ~f:(fun p ->
             let head_opt = Hashtbl.find block_to_head p in
-            Cbat_landmarks.current_head := head_opt;
+            Cbat_landmarks.widening_at_head := head_opt;
             let p_entry = get p in
             let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) (denote_call stack) ctx ~source:p p_entry in
             let res = out_fn ~target:v in
-            Cbat_landmarks.current_head := None;
+            Cbat_landmarks.widening_at_head := None;
             res) in
         match List.reduce outs ~f:AI.join with
         | Some j -> j
@@ -2853,15 +2853,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       else if Core.Set.mem heads v && !total_processed > 10 then
         if !Cbat_landmarks.is_lm_sub then begin
           let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
-          Cbat_landmarks.current_head := Some v;
+          Cbat_landmarks.widening_at_head := Some v;
           Cbat_landmarks.lm_advance v;
           let steps = match Cbat_landmarks.lm_calc_steps v with `Zero -> 0 | `Inf -> -1 | `Finite n -> n in
           let res =
             if steps = 0 then AI.join old incoming
             else AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:(max steps 0) old incoming
           in
-          Cbat_landmarks.clear_head_and_descendants v;
-          Cbat_landmarks.current_head := None;
+          Cbat_landmarks.clear_head v;
+          Cbat_landmarks.widening_at_head := None;
           res
         end else begin
           let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
