@@ -2855,10 +2855,17 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
           let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
           Cbat_landmarks.widening_at_head := Some v;
           Cbat_landmarks.lm_advance v;
-          let steps = match Cbat_landmarks.lm_calc_steps v with `Zero -> 0 | `Inf -> -1 | `Finite n -> n in
-          let res =
-            if steps = 0 then AI.join old incoming
-            else AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:(max steps 0) old incoming
+          (* [lm_calc_steps] returns [Zero] when a landmark is awaiting its
+             second measurement and [Inf] when no landmark has two
+             measurements; in both cases the paper's extrapolation cannot
+             yet produce a finite steps estimate, so we let the analysis
+             make another pass to acquire the second measurement (join).
+             Only a [Finite n] result drives the extrapolate path. *)
+          let res = match Cbat_landmarks.lm_calc_steps v with
+            | `Finite n ->
+              AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming
+            | `Zero | `Inf ->
+              AI.join old incoming
           in
           Cbat_landmarks.clear_head v;
           Cbat_landmarks.widening_at_head := None;
