@@ -2867,7 +2867,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             | `Zero | `Inf ->
               AI.join old incoming
           in
-          Cbat_landmarks.clear_head v;
+          Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
           Cbat_landmarks.widening_at_head := None;
           res
         end else begin
