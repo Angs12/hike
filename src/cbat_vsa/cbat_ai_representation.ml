@@ -324,7 +324,7 @@ let selective_widen_join_threshold ?(head:Tid.t option=None) (ladders : (int * w
     }
 
 (* Landmark-directed extrapolation (Simon & King Listing 4) — per-var steps. *)
-let selective_widen_extrapolate ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
+let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
   if Core.Set.is_empty need then join e1 e2
   else if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
@@ -338,8 +338,24 @@ let selective_widen_extrapolate ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 
         else
           let data_res =
             if Core.Set.mem need (Var.base key) then
-              if steps < 0 then WordSet.widen_join data_old data_new
-              else WordSet.extrapolate_steps ~steps data_old data_new
+              match head with
+              | Some h ->
+                let extra = Cbat_landmarks.landmarks_for_head h key in
+                let extra = List.filter extra ~f:(fun w -> Word.bitwidth w = WordSet.bitwidth data_old) in
+                if not (List.is_empty extra) then
+                  let max_extra = List.fold extra ~init:(List.hd_exn extra) ~f:(fun acc w -> if Word.compare w acc > 0 then w else acc) in
+                  let width = WordSet.bitwidth data_old in
+                  let lo =
+                    match WordSet.min_elem data_old, WordSet.min_elem data_new with
+                    | Some a, Some b -> if Word.compare a b < 0 then a else b
+                    | _ -> Word.zero width
+                  in
+                  WordSet.of_clp (Cbat_clp.interval ~width lo max_extra)
+                else if steps < 0 then WordSet.widen_join data_old data_new
+                else WordSet.extrapolate_steps ~steps data_old data_new
+              | None ->
+                if steps < 0 then WordSet.widen_join data_old data_new
+                else WordSet.extrapolate_steps ~steps data_old data_new
             else
               WordSet.join data_old data_new
           in

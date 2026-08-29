@@ -24,11 +24,13 @@ let current_lm_head : Tid.t option ref = current_head
 let landmark_env : (Tid.t, (Var.t * Word.t * int * int option) list) Hashtbl.t ref =
   ref (Hashtbl.create (module Tid))
 
+let is_lm_sub : bool ref = ref false
 let head_table : (Tid.t, (Var.t, Word.t list) Hashtbl.t) Hashtbl.t = Hashtbl.create (module Tid)
 
 let clear () = Hashtbl.clear table; Hashtbl.clear head_table
 
 let clear_head (_head : Tid.t) = Hashtbl.clear table; Hashtbl.clear head_table
+let clear_head_and_descendants (h:Tid.t) = clear_head h
 
 let record_landmark_for_head ~(head:Tid.t) (v : var) (bound : Word.t) : unit =
   let tbl =
