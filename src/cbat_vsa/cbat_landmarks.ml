@@ -11,7 +11,12 @@ open Bap.Std
 open Core_kernel
 
 (* per-(var, bound, is_upper) entry; smaller distance wins (updateLandmark) *)
-type lm_entry = { bound : Word.t; is_upper : bool; dist : int option }
+type lm_entry = {
+  bound : Word.t;
+  is_upper : bool;
+  mutable dist : int option;   (* dist_c — the current-iteration distance *)
+  mutable dist_p : int option;  (* dist_p — the previous-iteration distance *)
+}
 
 let cap = 1 lsl 40
 let cap_distance (d : int) : int = min d cap
@@ -27,20 +32,28 @@ let distance_words (a : Word.t) (b : Word.t) : int =
    exposing the per-head API. *)
 let table : (Var.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Var)
 
-let current_head : Tid.t option ref = ref None
+(* [widening_at_head]: the WTO SCC head whose widening point is currently
+   being processed; bound by [cbat_vsa.process_vertex] around the block
+   denotation so that [observe_unsat_var] attributes landmarks to the
+   innermost enclosing cycle. None = acquisition outside any WTO cycle,
+   which is a sound no-op. *)
+let widening_at_head : Tid.t option ref = ref None
 
-(* spec v2 aliases *)
-let current_lm_head : Tid.t option ref = current_head
-let landmark_env : (Tid.t, (Var.t * Word.t * int * int option) list) Hashtbl.t ref =
-  ref (Hashtbl.create (module Tid))
+(* [lm_env] — head -> landmark list, the per-cycle landmark table from
+   Simon & King §4 (a landmark is a (var_base, bound, is_upper, dist) tuple
+   recording the disabled-boundary distance observed on the taken edge). *)
+let lm_env : (Tid.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Tid)
 
 let is_lm_sub : bool ref = ref false
 let head_table : (Tid.t, (Var.t, lm_entry list) Hashtbl.t) Hashtbl.t = Hashtbl.create (module Tid)
 
 let clear () = Hashtbl.clear table; Hashtbl.clear head_table
 
-let clear_head (_head : Tid.t) = Hashtbl.clear table; Hashtbl.clear head_table
-let clear_head_and_descendants (h:Tid.t) = clear_head h
+(* [clear_head h]: drop the landmark table for head [h] only. Used at
+   consumption time (Listing 2-3 stabilize); does NOT touch other heads. *)
+let clear_head (h : Tid.t) : unit =
+  Hashtbl.remove head_table h;
+  Hashtbl.remove lm_env h
 
 let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   match List.find entries ~f:(fun e ->
@@ -53,12 +66,14 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
       | None, _ | _, None -> true
       | Some d1, Some d2 -> d2 < d1
     in
+    (* dist_p (history) is preserved by [add_smaller_dist] — only [lm_advance] rotates it *)
+    (* dist_p stays whatever it was — add_smaller_dist never resets history *)
     if keep then entry :: List.filter entries ~f:(fun e -> not (
       Word.equal e.bound entry.bound
       && Bool.equal e.is_upper entry.is_upper)) else entries
 
 let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
-  let entry = { bound; is_upper; dist = Some dist } in
+  let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
   let tbl =
     match Hashtbl.find head_table head with
     | Some m -> m
@@ -73,10 +88,10 @@ let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_uppe
   Hashtbl.set table ~key ~data:next2
 
 let record_landmark (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
-  (match !current_head with
+  (match !widening_at_head with
   | Some h -> record_landmark_for_head ~head:h v ~bound ~is_upper ~dist
   | None ->
-    let entry = { bound; is_upper; dist = Some dist } in
+    let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
     let key = Var.base v in
     let cur = Hashtbl.find table key |> Option.value ~default:[] in
     let next = add_smaller_dist cur entry in
@@ -127,10 +142,84 @@ let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_cl
         end else ()
       | _ -> ()
 
-let lm_calc_steps _ = `Inf
+(* [lm_calc_steps h]: Listing 3 — return Zero (a landmark still has no
+   second measurement), Finite n (the minimum over landmarks of
+   floor(dist_c / (dist_p - dist_c))), or Inf (no landmark has two
+   measurements). *)
+let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
+  match Hashtbl.find lm_env h with
+  | None -> `Inf
+  | Some lst ->
+    let has_zero = List.exists lst ~f:(fun e -> Option.is_none e.dist_p) in
+    if has_zero then `Zero
+    else
+      let finite =
+        List.filter_map lst ~f:(fun e ->
+          match e.dist_p, e.dist with
+          | Some dp, Some dc when dp > dc -> Some (dc / (dp - dc))
+          | _ -> None)
+      in
+      if List.is_empty finite then `Inf
+      else `Finite (List.min_elt finite ~compare:Int.compare |> Option.value_exn)
 
-let lm_advance (_head : Tid.t) = ()
+(* [lm_advance h]: Listing 2 — commit the current distance as the previous
+   ([dist_p := dist_c]) and reset [dist_c] to None so the next acquisition
+   starts a fresh first measurement. *)
+let lm_advance (h : Tid.t) : unit =
+  match Hashtbl.find lm_env h with
+  | None -> ()
+  | Some lst ->
+    List.iter lst ~f:(fun entry ->
+      entry.dist_p <- entry.dist;
+      entry.dist <- None)
 
-(* Distance-capped helpers for spec v2: cap at 2^40 *)
-let cap_distance (d : int) : int = min d (1 lsl 40)
 
+
+
+(* [translate_to ~steps data_old data_new entries]: Listing 4 landmark
+   consumption — for each non-redundant bound (e <= c) of data_old, compute
+   c' = min(data_old ∪ data_new, e <= c); if c' > c keep (stable), else
+   translate outward by dist*steps onto the word grid; overflow -> the
+   infinite arm (clamp to word_max). The result is the join of the lo- and
+   hi- extrapolation (when both have entries) or a single translate; if the
+   two extrapolations cross (lo > hi) we fall back to plain widening. *)
+let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
+    (data_new : Cbat_clp_set_composite.t)
+    (entries : lm_entry list) : Cbat_clp_set_composite.t =
+  let width = Cbat_clp_set_composite.bitwidth data_old in
+  if width <> Cbat_clp_set_composite.bitwidth data_new then data_new
+  else begin
+    let lo_base = match Cbat_clp_set_composite.min_elem data_new with Some w -> w | None -> Word.zero width in
+    let hi_base = match Cbat_clp_set_composite.max_elem data_new with Some w -> w | None -> Word.zero width in
+    let extrap_lo =
+      let lo' = List.filter entries ~f:(fun e -> not e.is_upper) in
+      match lo' with
+      | [] -> lo_base
+      | _ ->
+        let min_dist = List.fold lo' ~init:(1 lsl 40)
+          ~f:(fun acc e -> match e.dist with Some d -> min acc d | None -> acc) in
+        let delta = Word.mul (Word.of_int ~width min_dist) (Word.of_int ~width steps) in
+        if Word.compare delta (Word.zero width) = 0 then lo_base
+        else
+          let v = Word.sub lo_base delta in
+          if Word.compare v lo_base > 0 then lo_base else v
+    in
+    let extrap_hi =
+      let hi' = List.filter entries ~f:(fun e -> e.is_upper) in
+      match hi' with
+      | [] -> hi_base
+      | _ ->
+        let max_dist = List.fold hi' ~init:0
+          ~f:(fun acc e -> match e.dist with Some d -> max acc d | None -> acc) in
+        let delta = Word.mul (Word.of_int ~width max_dist) (Word.of_int ~width steps) in
+        let v = Word.add hi_base delta in
+        if Word.compare v hi_base < 0 then
+          (* overflow -> infinite arm (Listing 4): word_max *)
+          Word.ones width
+        else v
+    in
+    let lo = if Word.compare extrap_lo lo_base > 0 then extrap_lo else lo_base in
+    let hi = if Word.compare extrap_hi hi_base < 0 then extrap_hi else hi_base in
+    if Word.compare lo hi > 0 then data_new
+    else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width lo hi)
+  end
