@@ -18,6 +18,7 @@ module MapLattice = Cbat_map_lattice
 module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
 module Utils = Cbat_vsa_utils
+let max_int = Sys.max_array_length (* approx; we use 1 lsl 40 via Cbat_landmarks *)
 
 (* The full abstract representation for the value set analysis *)
 
@@ -287,9 +288,9 @@ let selective_widen_join_threshold ?(head:Tid.t option=None) (ladders : (int * w
       let extra =
         match head with
         | Some h ->
-          let per = Cbat_landmarks.landmarks_for_head h key in
-          if List.is_empty per then Cbat_landmarks.landmarks_for key else per
-        | None -> Cbat_landmarks.landmarks_for key
+          let per = Cbat_landmarks.bounds_for_head h key in
+          if List.is_empty per then Cbat_landmarks.bounds_for key else per
+        | None -> Cbat_landmarks.bounds_for key
       in
       let extra = List.filter extra ~f:(fun w -> Word.bitwidth w = WordSet.bitwidth ws) in
       if List.is_empty extra then Option.value ~default:[]
@@ -340,19 +341,61 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
             if Core.Set.mem need (Var.base key) then
               match head with
               | Some h ->
-                let extra = Cbat_landmarks.landmarks_for_head h key in
-                let extra = List.filter extra ~f:(fun w -> Word.bitwidth w = WordSet.bitwidth data_old) in
-                if not (List.is_empty extra) then
-                  let max_extra = List.fold extra ~init:(List.hd_exn extra) ~f:(fun acc w -> if Word.compare w acc > 0 then w else acc) in
-                  let width = WordSet.bitwidth data_old in
-                  let lo =
-                    match WordSet.min_elem data_old, WordSet.min_elem data_new with
-                    | Some a, Some b -> if Word.compare a b < 0 then a else b
-                    | _ -> Word.zero width
-                  in
-                  WordSet.of_clp (Cbat_clp.interval ~width lo max_extra)
-                else if steps < 0 then WordSet.widen_join data_old data_new
-                else WordSet.extrapolate_steps ~steps data_old data_new
+                let entries = Cbat_landmarks.entries_for_head h key in
+                let entries = List.filter entries ~f:(fun e -> Word.bitwidth e.Cbat_landmarks.bound = WordSet.bitwidth data_old) in
+                (match entries with
+                 | [] ->
+                   if steps < 0 then WordSet.widen_join data_old data_new
+                   else WordSet.extrapolate_steps ~steps data_old data_new
+                 | _ ->
+                   (* Listing 4: apply each landmark's dist as a per-bound translate.
+                      When steps finite, the landmark path translates by dist*steps (rounded outward).
+                      The landmark bound is the clamp; overflow -> infinite arm. *)
+                   if steps < 0 then
+                     (* No steps from lm_calc_steps -> fall through to widen_join (the
+                        paper's Inf arm) *)
+                     WordSet.widen_join data_old data_new
+                   else
+                     let width = WordSet.bitwidth data_old in
+                     let lo' = List.filter entries ~f:(fun e -> not e.Cbat_landmarks.is_upper) in
+                     let hi' = List.filter entries ~f:(fun e -> e.Cbat_landmarks.is_upper) in
+                     let lo_base = match WordSet.min_elem data_new with Some w -> w | None -> Word.zero width in
+                     let hi_base = match WordSet.max_elem data_new with Some w -> w | None -> Word.zero width in
+                     let extrap_lo =
+                       match lo' with
+                       | _ :: _ ->
+                         let min_dist = List.fold lo' ~init:(1 lsl 40)
+                           ~f:(fun acc e -> match e.Cbat_landmarks.dist with
+                               | Some d -> min acc d | None -> acc) in
+                         let w_dist = Word.of_int ~width min_dist in
+                         let w_steps = Word.of_int ~width steps in
+                         let delta = Word.mul w_dist w_steps in
+                         if Word.compare delta (Word.zero width) = 0 then lo_base
+                         else
+                           let v = Word.sub lo_base delta in
+                           if Word.compare v lo_base > 0 then lo_base else v
+                       | [] -> lo_base
+                     in
+                     let extrap_hi =
+                       match hi' with
+                       | _ :: _ ->
+                         let max_dist = List.fold hi' ~init:0
+                           ~f:(fun acc e -> match e.Cbat_landmarks.dist with
+                               | Some d -> max acc d | None -> acc) in
+                         let w_dist = Word.of_int ~width max_dist in
+                         let w_steps = Word.of_int ~width steps in
+                         let delta = Word.mul w_dist w_steps in
+                         let v = Word.add hi_base delta in
+                         if Word.compare v hi_base < 0 then
+                           (* overflow -> infinite arm (Listing 4): word_max *)
+                           Word.ones width
+                         else v
+                       | [] -> hi_base
+                     in
+                     let lo = if Word.compare extrap_lo lo_base > 0 then extrap_lo else lo_base in
+                     let hi = if Word.compare extrap_hi hi_base < 0 then extrap_hi else hi_base in
+                     if Word.compare lo hi > 0 then WordSet.widen_join data_old data_new
+                     else WordSet.of_clp (Cbat_clp.interval ~width lo hi))
               | None ->
                 if steps < 0 then WordSet.widen_join data_old data_new
                 else WordSet.extrapolate_steps ~steps data_old data_new
