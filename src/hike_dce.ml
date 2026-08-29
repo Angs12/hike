@@ -83,9 +83,6 @@ let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
     let plan = Bil2llvm.region_split_plan def_tags (Some info) sub in
     plan <> []
 
-(* Keep if lhs is used, is a memory store, is an ABI register, or is an intrinsic var.
-   For precise subs, SP/hike_stack/sp_value defs are dead even if in used (Q2, Q5).
-   RBP as GPR is not explicitly erased; it will be deleted if derived from SP and SP is erased. *)
 let keep ?(precise=false) ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
   else

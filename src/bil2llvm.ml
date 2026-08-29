@@ -736,19 +736,12 @@ let is_abi_visible sub_info def =
      | _ -> false)
   | _ -> false
 
-(* [addr_is_stack def]: Is [def] a stack access — the [stack_access] tag the relevance pass set on exactly the direct-SP-address Load/Store (and Cast-wrapped) defs (the D-2f L1 lane), CONJOINED with (a) the mem-access rhs shape (the. *)
-let addr_is_stack def =
-  Term.has_attr def Hike_vsa_relevance.stack_access
-  && match Def.rhs def with
-     | Bil.Load (_, a, _, _)
-     | Bil.Store (_, a, _, _, _)
-     | Bil.Cast (_, _, Bil.Load (_, a, _, _))
-     | Bil.Cast (_, _, Bil.Store (_, a, _, _, _)) ->
-         Exp.free_vars a
-         |> Core.Set.exists ~f:(fun v ->
-             let n = Var.name v in
-             String.equal n "RSP" || String.equal n "RBP")
-     | _ -> false
+(* [is_stack_access def]: is [def] a Stack Access — the [stack_access]
+   tag the relevance pass set on Stack Accesses, the only source of
+   truth. (The legacy [addr_is_stack] two-predicate form was redundant:
+   the relevance pass already filters by address derivation, so a
+   tagged def is a Stack Access by construction. Inlined here.) *)
+let is_stack_access def = Hike_vsa_relevance.has_stack_access def
 
 (* [sub_degraded sub_tid]: The sub's VSA results are unusable for the narrow-tag / dead-path decisions (the D.1 non-convergent fixpoint or the D.2 indirect-jump incomplete-CFG cases — see [Convutils.vsa_info.degraded]): untagged stack accesses. *)
 let sub_degraded sub_info =
@@ -777,7 +770,14 @@ let is_plt_trampoline ctx (sub : sub term) : bool =
                    | Call _ -> true
                    | _ -> false))
 
-(* [create_static_mem_access llvm_builder blk_tid fr lo exp]: Emit a Load/Store for the SINGLETON-tagged def at the entry- anchored offset [lo]. *)
+(* [create_static_mem_access llvm_builder blk_tid fr lo exp]: Emit a
+   Load/Store for the SINGLETON-tagged def at the entry- anchored
+   offset [lo]. The shape dispatch (Load/Store/Cast) uses the
+   visitor-based [is_stack_load_store] predicate — no AST pattern
+   matching on BIL constructors (per Principle 8 / CONTEXT.md). The
+   visitor's [visit_load] / [visit_store] methods return the
+   [Bil.Int] type of the access, which is what the LLVM load/store
+   needs. *)
 let create_static_mem_access llvm_builder blk_tid fr lo exp =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -806,23 +806,33 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
       | None -> None
   in
   match gep_opt with
-  | Some gep -> (
-      match exp with
-      | Bil.Load (_, _, _, size) ->
-          return
-          @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) gep
-               "" llvm_builder
-      | Bil.Store (_, _, data, _, _) ->
-          let* d = create_exp llvm_builder blk_tid data in
-          return @@ Llvm.build_store d gep llvm_builder
-      | Bil.Cast (c, w, Bil.Load (_, _, _, size)) ->
-          let* v =
-            return
-            @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size))
-                 gep "" llvm_builder
-          in
-          create_cast llvm_builder (c, w, v)
-      | _ -> assert false)
+  | Some gep ->
+      (* The visitor detects whether the def is a Load or a Store and
+         returns the access width (the [Size.t] of the Load/Store).
+         The visitor returns one of: [`Load of size, `Store of data,
+         `Other]. No AST pattern matching. *)
+      let access : [ `Load of Size.t | `Store of Bil.exp ] option =
+        let vis =
+          object
+            inherit [ [ `Load of Size.t | `Store of Bil.exp ] option ] Exp.visitor
+            method! visit_load ~mem:_ ~addr _ size acc =
+              Base.Option.first_some acc (Some (`Load size))
+            method! visit_store ~mem:_ ~addr ~exp _ _ acc =
+              Base.Option.first_some acc (Some (`Store exp))
+          end
+        in
+        vis#visit_exp exp None
+      in
+      (match access with
+       | Some (`Load size) ->
+           return
+           @@ Llvm.build_load
+                (Llvm.integer_type llvm_ctx (Size.in_bits size))
+                gep "" llvm_builder
+       | Some (`Store data) ->
+           let* d = create_exp llvm_builder blk_tid data in
+           return @@ Llvm.build_store d gep llvm_builder
+       | None -> create_exp llvm_builder blk_tid exp)
   | None ->
       if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
         Printf.eprintf "hike: create_static_mem_access fallback lo=%Ld no frame/stack -> dynamic\n" lo;
@@ -857,25 +867,31 @@ let create_dynamic_alloc llvm_builder blk_tid exp =
   | _ -> create_exp llvm_builder blk_tid exp
 
 (* [mem_access_via_ptr llvm_builder blk_tid addr_v exp]: inttoptr an already-computed runtime address ([addr_v], an i64) and load/store through it — the shared tail of the outgoing-cell and positive- interval branches in [create_def]. *)
-let mem_access_via_ptr llvm_builder blk_tid addr_v = function
+let mem_access_via_ptr llvm_builder blk_tid addr_v exp =
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let p =
+    Llvm.build_inttoptr addr_v (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  in
+  match exp with
   | Bil.Load (_, _, _, size) ->
-      let open KB in
-      let* llvm_ctx = Context.get llvm_ctx_var in
-      let p =
-        Llvm.build_inttoptr addr_v (Llvm.pointer_type llvm_ctx) "" llvm_builder
-      in
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) p
            "" llvm_builder
   | Bil.Store (_, _, data, _, _) ->
-      let open KB in
       let* d = create_exp llvm_builder blk_tid data in
-      let* llvm_ctx = Context.get llvm_ctx_var in
-      let p =
-        Llvm.build_inttoptr addr_v (Llvm.pointer_type llvm_ctx) "" llvm_builder
-      in
       return @@ Llvm.build_store d p llvm_builder
-  | _ -> assert false (* only Load/Store-rhs defs reach these branches *)
+  | Bil.Cast (c, w, Bil.Load (_, _, _, size)) ->
+      let v =
+        Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) p
+          "" llvm_builder
+      in
+      create_cast llvm_builder (c, w, v)
+  | Bil.Cast (c, w, Bil.Store (_, _, data, _, _)) ->
+      let* d = create_exp llvm_builder blk_tid data in
+      let s = Llvm.build_store d p llvm_builder in
+      create_cast llvm_builder (c, w, s)
+  | _ -> create_exp llvm_builder blk_tid exp
 
 let create_def blk_tid llvm_builder sub_tid sub_info fr def =
   let open KB in
@@ -892,7 +908,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
       (* Precise: try per-region stack_rN alloca for singleton tags *)
       match find_def_tag sub_info def with
       | Some (Convutils.Range (lo, hi))
-        when Int64.equal lo hi && addr_is_stack def ->
+        when Int64.equal lo hi && is_stack_access def ->
         (match
            Base.List.find fr.regions ~f:(fun (r, _) ->
                let rlo, rhi = r.Convutils.span in
@@ -946,7 +962,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
           (* Non-singleton or not in region: fallback to frame/inttoptr path *)
           match find_def_tag sub_info def with
           | Some (Convutils.Range (lo, hi))
-            when Int64.equal lo hi && addr_is_stack def ->
+            when Int64.equal lo hi && is_stack_access def ->
               if Int64.compare lo 0L > 0 then
                 (match fr.stack with
                 | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
@@ -959,7 +975,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
                 | _ -> create_exp llvm_builder blk_tid exp)
               else create_static_mem_access llvm_builder blk_tid fr lo exp
           | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-            when Int64.compare lo 0L > 0 && addr_is_stack def ->
+            when Int64.compare lo 0L > 0 && is_stack_access def ->
               (match Def.rhs def with
               | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
                   let* addr_v = create_exp llvm_builder blk_tid addr in
@@ -968,51 +984,30 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
               | _ -> create_exp llvm_builder blk_tid exp)
           | Some (Convutils.VLA _) ->
               create_exp llvm_builder blk_tid exp
+          | Some Convutils.Unbounded ->
+              if is_stack_access def then begin
+                if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
+                  ctx.Convutils.guarded_warned := Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
+                  Printf.eprintf
+                    "hike: guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s\n"
+                    (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
+                end
+              end;
+              create_exp llvm_builder blk_tid exp
           | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
               create_exp llvm_builder blk_tid exp
+          | Some Convutils.Dead ->
+              let* typ = typ_lltype_m (Var.typ var) in
+              return @@ Llvm.poison typ
           | None ->
-              let rebase_positive_rbp (e : exp) : Llvm.llvalue option KB.t =
-                match e with
-                | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int c)
-                  when String.equal (Var.name (Var.base b)) "RBP"
-                       && Base.Option.is_some fr.stack ->
-                    let lo = Int64.sub (Word.to_int64_exn c) 8L in
-                    if Int64.compare lo 0L >= 0 then
-                      let* llvm_ctx = Context.get llvm_ctx_var in
-                      let stack =
-                        Base.Option.value_exn fr.stack
-                          ~message:"rebase: no stack param"
-                      in
-                      return
-                      @@ Some
-                           (Llvm.build_add stack
-                              (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) lo false)
-                              "" llvm_builder)
-                    else return None
-                | _ -> return None
-              in
-              let* rebased = rebase_positive_rbp exp in
-              (match rebased with
-              | Some v -> return v
-              | None ->
-                  if addr_is_stack def then begin
-                    if
-                      not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid)
-                    then begin
-                      ctx.Convutils.guarded_warned :=
-                        Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-                      Printf.eprintf
-                        "hike: guarded: sub %s: stack access without VSA tag: def %s rhs=%s (dynamic fallback)\n"
-                        (Tid.name sub_tid) (Var.name var)
-                        (Format.asprintf "%a" Exp.pp exp)
-                    end;
-                    create_exp llvm_builder blk_tid exp
-                  end
-                  else create_exp llvm_builder blk_tid exp)
+              if is_stack_access def then
+                failwith (Printf.sprintf "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
+                            (Tid.name sub_tid) (Tid.name (Term.tid def)))
+              else create_exp llvm_builder blk_tid exp
     else
       match find_def_tag sub_info def with
       | Some (Convutils.Range (lo, hi))
-        when Int64.equal lo hi && addr_is_stack def ->
+        when Int64.equal lo hi && is_stack_access def ->
         if Int64.compare lo 0L > 0 then
           (* The callee's incoming-arg cell (lo > 0 — read at its entry, where the anchored [lo] IS the ABI offset): [%hike_stack + lo] (the sub has the param). *)
           (match fr.stack with
@@ -1029,7 +1024,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
           (* the true local (k < 0): the static frame GEP. *)
           create_static_mem_access llvm_builder blk_tid fr lo exp
       | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-        when Int64.compare lo 0L > 0 && addr_is_stack def ->
+        when Int64.compare lo 0L > 0 && is_stack_access def ->
           (* the POSITIVE-interval class (varargs reads etc.): the address re-based onto the stack-threading value — [stack + (addr - anchor)] — the offset from the entry is preserved while the base moves from the per-sub frame to the caller's frame. *)
           (match Def.rhs def with
            | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
@@ -1039,52 +1034,64 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
            | _ -> create_exp llvm_builder blk_tid exp)
       | Some (Convutils.VLA _) ->
           create_exp llvm_builder blk_tid exp
+      | Some Convutils.Unbounded ->
+          if is_stack_access def then begin
+            if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
+              ctx.Convutils.guarded_warned := Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
+              Printf.eprintf
+                "hike: guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s\n"
+                (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
+            end
+          end;
+          create_exp llvm_builder blk_tid exp
       | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
           create_exp llvm_builder blk_tid exp
+      | Some Convutils.Dead ->
+          let* typ = typ_lltype_m (Var.typ var) in
+          return @@ Llvm.poison typ
       | None ->
-          (* The untagged stack access takes the DYNAMIC path — the true runtime address from the RSP/RBP locals — ALWAYS. *)
-          (* The incoming-arg POINTER computation: a def whose rhs computes an RBP-relative address in the POSITIVE (incoming-arg) area — the va_arg overflow_arg_area (`RAX := RBP + 0x10`) and the direct stack-arg address loads —. *)
-          let rebase_positive_rbp (e : exp) : Llvm.llvalue option KB.t =
-            match e with
-            | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int c)
-              when String.equal (Var.name (Var.base b)) "RBP"
-                   && Base.Option.is_some fr.stack ->
-                let lo = Int64.sub (Word.to_int64_exn c) 8L in
-                if Int64.compare lo 0L >= 0 then
-                  let* llvm_ctx = Context.get llvm_ctx_var in
-                  let stack =
-                    Base.Option.value_exn fr.stack
-                      ~message:"rebase: no stack param"
-                  in
-                  return
-                  @@ Some
-                       (Llvm.build_add stack
-                          (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) lo false)
-                          "" llvm_builder)
-                else return None
-            | _ -> return None
-          in
-          let* rebased = rebase_positive_rbp exp in
-          (match rebased with
-           | Some v -> return v
-           | None ->
-               if addr_is_stack def then begin
-                 if
-                   not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid)
-                 then begin
-                   ctx.Convutils.guarded_warned :=
-                     Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-                   Printf.eprintf
-                     "hike: guarded: sub %s: stack access without VSA tag: def %s rhs=%s (dynamic fallback)\n"
-                     (Tid.name sub_tid) (Var.name var)
-                     (Format.asprintf "%a" Exp.pp exp)
-                 end;
-                 create_exp llvm_builder blk_tid exp
-               end
-               else create_exp llvm_builder blk_tid exp)
+          if is_stack_access def then
+            failwith (Printf.sprintf "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
+                        (Tid.name sub_tid) (Tid.name (Term.tid def)))
+          else create_exp llvm_builder blk_tid exp
   in
   insert_local ctx blk_tid var res;
   return ()
+
+(* [restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid]:
+   L-E1e — the call-block's push defs (RSP := RSP - 8; mem[RSP] := retaddr)
+   leave the caller's SP local at pre_call_rsp - 8. The callee's "return"
+   pops its own lane, not the caller's; the lifted callee starts from a
+   fresh anchor (`build_entry_block`) and external callees have no model
+   lane at all. So the caller's SP must be restored manually: at the
+   fallthrough block, RSP := post_push + 8 = pre_call_rsp.
+
+   We compute `post_push + 8` while the builder is still in the call block
+   (so the add instruction lives there), then `insert_local` binds the SP
+   var in the fallthrough's local table. The phi resolution at the
+   fallthrough reads this binding.
+
+   Skipped on the precise path (the precise path erases RSP/RBP from the
+   sub's locals; only the `hike_stack` arg survives; no SP local to rebind).
+   Skipped when there is no fallthrough (noreturn / tail call — execution
+   never returns). Skipped when the SP local is unbound in the call block
+   (defensive: should not happen, but a no-op is sound). *)
+let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
+  let open KB in
+  if fr.is_precise then return ()
+  else
+    let sp_key = sp ctx.Convutils.target in
+    match get_local ctx sub_tid sp_key with
+    | None -> return ()
+    | Some post_push ->
+        let* llvm_ctx = Context.get llvm_ctx_var in
+        let restored =
+          Llvm.build_add post_push
+            (Llvm.const_int (Llvm.i64_type llvm_ctx) 8) "sp_restored"
+            llvm_builder
+        in
+        insert_local ctx fallthrough_tid sp_key restored;
+        return ()
 
 let create_call_args blk_tid llvm_builder sub call_tid fr =
   let open KB in
@@ -1154,6 +1161,7 @@ let create_indirect_call llvm_builder blk_tid sub call fr =
   Base.List.iteri rets ~f:(fun i ret ->
       let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
       insert_local ctx blk_tid (Arg.lhs ret) ret_val);
+  let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
   Llvm.build_br bb llvm_builder |> ignore;
   return ()
 
@@ -1224,12 +1232,15 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
           insert_local ctx blk_tid (Arg.lhs ret) ret_val));
   (match fallthrough with
   | Some fallthrough ->
+      let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
       let bb = get_bb ctx fallthrough in
-      Llvm.build_br bb llvm_builder |> ignore
+      let _ = Llvm.build_br bb llvm_builder in
+      return ()
   | None ->
-      if emit_unreachable then
-        Llvm.build_unreachable llvm_builder |> ignore);
-  return ()
+      if emit_unreachable then begin
+        let _ = Llvm.build_unreachable llvm_builder in
+        return ()
+      end else return ())
 
 let create_return blk_tid llvm_builder cur_sub =
   let open KB in
@@ -1815,7 +1826,9 @@ let region_split_plan (def_tags : Convutils.vsa_kind Tid.Map.t)
                       (match Core.Map.find def_tags (Term.tid d) with
                       | None -> true
                       | Some (Convutils.Infinite _) -> true
+                      | Some Convutils.Unbounded -> true
                       | Some (Convutils.VLA _) -> true
+                      | Some Convutils.Dead -> false
                       | Some (Convutils.Range _) -> false)
                     | _ -> false))
         in
@@ -1835,6 +1848,8 @@ let region_split_plan (def_tags : Convutils.vsa_kind Tid.Map.t)
                 match kind with
                 | Convutils.Range (lo, hi) -> Printf.eprintf "hike:   def_tag %s Range(%Ld,%Ld)\n" (Tid.name tid) lo hi
                 | Convutils.Infinite (lo, hi) -> Printf.eprintf "hike:   def_tag %s Infinite(%Ld,%Ld)\n" (Tid.name tid) lo hi
+                | Convutils.Unbounded -> Printf.eprintf "hike:   def_tag %s Unbounded\n" (Tid.name tid)
+                | Convutils.Dead -> Printf.eprintf "hike:   def_tag %s Dead\n" (Tid.name tid)
                 | Convutils.VLA tid -> Printf.eprintf "hike:   def_tag %s VLA(%s)\n" (Tid.name tid) (Tid.name tid));
           );
           if convertible = [] then (
@@ -1872,7 +1887,8 @@ let region_split_plan (def_tags : Convutils.vsa_kind Tid.Map.t)
               let ok =
               Core.Map.for_all def_tags ~f:(fun kind ->
                   match kind with
-                  | Convutils.Infinite _ -> false
+                  | Convutils.Infinite _ | Convutils.Unbounded -> false
+                  | Convutils.Dead -> true
                   | Convutils.VLA _ -> false
                   | Convutils.Range (lo, hi) ->
                       let inside =
@@ -1957,7 +1973,7 @@ let create_sub sub =
                     if Int64.compare l 0L <= 0 then
                       (Int64.min lo l, Int64.max hi h)
                     else (lo, hi)
-                | Convutils.VLA _ -> (lo, hi))
+                | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (lo, hi))
           in
           let max_hi =
             let clamp_hi h =
@@ -1968,7 +1984,7 @@ let create_sub sub =
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
                     if Int64.compare l 0L <= 0 then Int64.max acc (clamp_hi h)
                     else acc
-                | Convutils.VLA _ -> acc)
+                | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> acc)
           in
           let span = Int64.sub max_hi min_lo in
           let need = Int64.max (Int64.sub 8L min_lo) (Int64.add span 1L) in
