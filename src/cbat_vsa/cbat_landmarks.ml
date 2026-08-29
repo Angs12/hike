@@ -116,10 +116,8 @@ let entries_for_head (head : Tid.t) (v : var) : lm_entry list =
 let entries_for (v : var) : lm_entry list =
   Hashtbl.find table (Var.base v) |> Option.value ~default:[]
 
-(* Compatibility shims for the spec's naming — all map to the same table. *)
+(* Compatibility shims for the spec's naming. *)
 let heads_of_wto _ = Tid.Set.empty
-
-let observe_unsat _ _ = ()
 
 (* Acquisition helper: called from meet_var when meet is empty. Records the
    disabled boundary (the cstr's extremum outside p) as a landmark for the
