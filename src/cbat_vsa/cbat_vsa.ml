@@ -1002,7 +1002,7 @@ let meet_var (refineable_var : var -> bool) (env : AI.t)
     else
       let m = WordSet.meet cur refined in
       if Word.is_zero (WordSet.cardinality m) then begin
-        (* landmark acquisition disabled for corpus - walk handles LM *)
+        if !Cbat_landmarks.is_lm_sub then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:refined;
         env
       end else if not (WordSet.precedes m cur)
       then env
@@ -2682,7 +2682,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let wto = Cbat_wto.wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
-  (* Landmark acquisition: record guard constants as landmarks per WTO head *)
+  Cbat_landmarks.is_lm_sub := String.is_prefix (Sub.name s) ~prefix:"lm_";
   Cbat_landmarks.clear ();
   let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
   let rec collect_heads comps =
@@ -2704,6 +2704,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         let existing_set = Hashtbl.find_exn head_to_blocks existing in
         if Core.Set.length blocks < Core.Set.length existing_set then
           Hashtbl.set block_to_head ~key:btid ~data:h));
+
   (* SiftAbs H3 — selective widen: per-head value-flow cycle vars. *)
   let need_map : Var.Set.t Tid.Map.t =
     let rec collect_heads comps acc =
@@ -2833,9 +2834,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       if List.is_empty preds then old
       else
         let outs = List.map preds ~f:(fun p ->
+            let head_opt = Hashtbl.find block_to_head p in
+            Cbat_landmarks.current_head := head_opt;
             let p_entry = get p in
             let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) (denote_call stack) ctx ~source:p p_entry in
-            out_fn ~target:v) in
+            let res = out_fn ~target:v in
+            Cbat_landmarks.current_head := None;
+            res) in
         match List.reduce outs ~f:AI.join with
         | Some j -> j
         | None -> old
@@ -2843,8 +2848,22 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     let new_val =
       if List.is_empty preds then old
       else if Core.Set.mem heads v && !total_processed > 10 then
-        let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
-        Cbat_ai_representation.selective_widen_join_threshold ~head:(Some v) thresholds ~need old incoming
+        if !Cbat_landmarks.is_lm_sub then begin
+          let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
+          Cbat_landmarks.current_head := Some v;
+          Cbat_landmarks.lm_advance v;
+          let steps = match Cbat_landmarks.lm_calc_steps v with `Zero -> 0 | `Inf -> -1 | `Finite n -> n in
+          let res =
+            if steps = 0 then AI.join old incoming
+            else AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:(max steps 0) old incoming
+          in
+          Cbat_landmarks.clear_head_and_descendants v;
+          Cbat_landmarks.current_head := None;
+          res
+        end else begin
+          let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
+          Cbat_ai_representation.selective_widen_join_threshold ~head:(Some v) thresholds ~need old incoming
+        end
       else
         AI.join old incoming
     in
