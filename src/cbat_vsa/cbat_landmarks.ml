@@ -49,11 +49,21 @@ let head_table : (Tid.t, (Var.t, lm_entry list) Hashtbl.t) Hashtbl.t = Hashtbl.c
 
 let clear () = Hashtbl.clear table; Hashtbl.clear head_table
 
-(* [clear_head h]: drop the landmark table for head [h] only. Used at
-   consumption time (Listing 2-3 stabilize); does NOT touch other heads. *)
-let clear_head (h : Tid.t) : unit =
+(* [clear_head h blocks]: drop the landmark tables for head [h] AND every
+   block in [blocks] (the head's full SCC — its inner-SCC members and
+   any strict descendants of [h] in the WTO tree, per spec Q9). After
+   consumption at [h], the inner-SCC landmarks are obsolete: Bourdoncle's
+   WTO order is "inner before outer," so any inner cycle has already
+   been stabilized by the time [h]'s widening fires, and its recorded
+   measurements would be re-fired as the second measurement of [h]'s
+   landmark table if not cleared. Called from the widening-point
+   transition in [cbat_vsa.process_vertex]. *)
+let clear_head (h : Tid.t) (blocks : Tid.Set.t) : unit =
   Hashtbl.remove head_table h;
-  Hashtbl.remove lm_env h
+  Hashtbl.remove lm_env h;
+  Core.Set.iter blocks ~f:(fun btid ->
+    Hashtbl.remove head_table btid;
+    Hashtbl.remove lm_env btid)
 
 let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   match List.find entries ~f:(fun e ->
