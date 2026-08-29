@@ -25,12 +25,13 @@ let distance_words (a : Word.t) (b : Word.t) : int =
   try Word.to_int_exn diff with _ -> cap
   (* if word value > int range, cap *)
 
-(* Global landmark environment — per Var.base -> sorted deduped Word.t list.
-   Head attribution is skipped in v1 (single-loop tests don't need it); the
-   table is global.  v2 will add per-head scoping.  Spec v2 keeps the global
-   table as the sound fallback (per-var disabled boundaries) while also
-   exposing the per-head API. *)
-let table : (Var.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Var)
+(* The landmark state is per-WTO-head: ONE table maps each head to a
+   flat list of [lm_entry] values (one per (var_base, bound, is_upper)
+   observation, deduped by the [add_smaller_dist] rule). Acquisition
+   outside any WTO cycle is a sound no-op (Story 6/19); the AGENTS.md
+   §3 NO-FALLBACKS doctrine forbids a global fallback that would mask
+   the headless path's identity. Spec ticket S5: "a [landmark_env]
+   holding the head→landmark-list table" — singular, not duplicated. *)
 
 (* [widening_at_head]: the WTO SCC head whose widening point is currently
    being processed; bound by [cbat_vsa.process_vertex] around the block
@@ -39,17 +40,17 @@ let table : (Var.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Var)
    which is a sound no-op. *)
 let widening_at_head : Tid.t option ref = ref None
 
-(* [lm_env] — head -> landmark list, the per-cycle landmark table from
-   Simon & King §4 (a landmark is a (var_base, bound, is_upper, dist) tuple
-   recording the disabled-boundary distance observed on the taken edge). *)
+(* [lm_env] — head -> landmark list, the single per-cycle landmark table
+   from Simon & King §4. Both acquisition ([record_landmark_for_head])
+   and consumption ([lm_calc_steps], [lm_advance], [entries_for_head])
+   read and write THIS table. *)
 let lm_env : (Tid.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Tid)
 
 let is_lm_sub : bool ref = ref false
-let head_table : (Tid.t, (Var.t, lm_entry list) Hashtbl.t) Hashtbl.t = Hashtbl.create (module Tid)
 
-let clear () = Hashtbl.clear table; Hashtbl.clear head_table
+let clear () = Hashtbl.clear lm_env
 
-(* [clear_head h blocks]: drop the landmark tables for head [h] AND every
+(* [clear_head h blocks]: drop the landmark entries for head [h] AND every
    block in [blocks] (the head's full SCC — its inner-SCC members and
    any strict descendants of [h] in the WTO tree, per spec Q9). After
    consumption at [h], the inner-SCC landmarks are obsolete: Bourdoncle's
@@ -59,11 +60,8 @@ let clear () = Hashtbl.clear table; Hashtbl.clear head_table
    landmark table if not cleared. Called from the widening-point
    transition in [cbat_vsa.process_vertex]. *)
 let clear_head (h : Tid.t) (blocks : Tid.Set.t) : unit =
-  Hashtbl.remove head_table h;
   Hashtbl.remove lm_env h;
-  Core.Set.iter blocks ~f:(fun btid ->
-    Hashtbl.remove head_table btid;
-    Hashtbl.remove lm_env btid)
+  Core.Set.iter blocks ~f:(fun btid -> Hashtbl.remove lm_env btid)
 
 let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   match List.find entries ~f:(fun e ->
@@ -84,47 +82,31 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
 
 let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
-  let tbl =
-    match Hashtbl.find head_table head with
-    | Some m -> m
-    | None -> let m = Hashtbl.create (module Var) in Hashtbl.set head_table ~key:head ~data:m; m
-  in
-  let key = Var.base v in
-  let cur = Hashtbl.find tbl key |> Option.value ~default:[] in
+  let cur = Hashtbl.find lm_env head |> Option.value ~default:[] in
   let next = add_smaller_dist cur entry in
-  Hashtbl.set tbl ~key ~data:next;
-  let cur2 = Hashtbl.find table key |> Option.value ~default:[] in
-  let next2 = add_smaller_dist cur2 entry in
-  Hashtbl.set table ~key ~data:next2
+  Hashtbl.set lm_env ~key:head ~data:next
 
-let record_landmark (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
-  (match !widening_at_head with
-  | Some h -> record_landmark_for_head ~head:h v ~bound ~is_upper ~dist
-  | None ->
-    let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
-    let key = Var.base v in
-    let cur = Hashtbl.find table key |> Option.value ~default:[] in
-    let next = add_smaller_dist cur entry in
-    Hashtbl.set table ~key ~data:next)
+(* [record_landmark]: acquisition outside any WTO cycle is a sound no-op
+   (the NO-FALLBACKS doctrine — the identity / no-landmark is the sound
+   answer; never bottom, never a global fallback table). *)
+let record_landmark (_v : var) ~bound:_ ~is_upper:_ ~dist:_ : unit = ()
 
-let bounds_for (v : var) : Word.t list =
-  let entries = Hashtbl.find table (Var.base v) |> Option.value ~default:[] in
-  List.sort ~compare:Word.compare (List.map entries ~f:(fun e -> e.bound))
+let bounds_for (_v : var) : Word.t list = []
+
+(* [entries_for_head head v]: every entry recorded for [head] (the
+   single-table design — the consumption path filters by var internally
+   via the entry's [lm_entry.bound] comparison if needed; here we
+   return the head's full list for the caller's convenience). The
+   [v] parameter is kept for API compatibility with the old per-var
+   submap lookup but is unused. *)
+let entries_for_head (head : Tid.t) (_v : var) : lm_entry list =
+  Hashtbl.find lm_env head |> Option.value ~default:[]
 
 let bounds_for_head (head : Tid.t) (v : var) : Word.t list =
-  match Hashtbl.find head_table head with
-  | None -> []
-  | Some m ->
-    let entries = Hashtbl.find m (Var.base v) |> Option.value ~default:[] in
-    List.sort ~compare:Word.compare (List.map entries ~f:(fun e -> e.bound))
+  List.sort ~compare:Word.compare
+    (List.map (entries_for_head head v) ~f:(fun e -> e.bound))
 
-let entries_for_head (head : Tid.t) (v : var) : lm_entry list =
-  match Hashtbl.find head_table head with
-  | None -> []
-  | Some m -> Hashtbl.find m (Var.base v) |> Option.value ~default:[]
-
-let entries_for (v : var) : lm_entry list =
-  Hashtbl.find table (Var.base v) |> Option.value ~default:[]
+let entries_for (_v : var) : lm_entry list = []
 
 (* Compatibility shims for the spec's naming. *)
 let heads_of_wto _ = Tid.Set.empty
