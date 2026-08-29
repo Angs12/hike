@@ -1060,6 +1060,59 @@ let widen_join (p1 : t) (p2 : t) =
     else infinite ((base_of p2), step)
   else join p1 p2
 
+let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
+  if is_bottom p1 then top (bitwidth p2)
+  else if subset p1 p2 then
+    if equal p1 p2 then p1
+    else if steps < 0 then widen_join p1 p2
+    else
+      match min_elem p1, max_elem p1, min_elem p2, max_elem p2 with
+      | Some lo1, Some hi1, Some lo2, Some hi2 ->
+        let width = bitwidth p2 in
+        let step = step_of p2 in
+        if W.is_zero step then top width
+        else
+          let lo_unstable = W.compare lo2 lo1 < 0 in
+          let hi_unstable = W.compare hi2 hi1 > 0 in
+          let lo_growth = if lo_unstable then Some (W.sub lo1 lo2) else None in
+          let hi_growth = if hi_unstable then Some (W.sub hi2 hi1) else None in
+          let extrap_lo = match lo_growth with
+            | None -> lo2
+            | Some g ->
+              let steps_w = Word.of_int ~width steps in
+              let delta = W.mul g steps_w in
+              let v = W.sub lo2 delta in
+              let c = nearest_inf_succ v (base_of p2) step in
+              if W.compare c lo2 > 0 then lo2 else c
+          in
+          let extrap_hi = match hi_growth with
+            | None -> hi2
+            | Some g ->
+              let steps_w = Word.of_int ~width steps in
+              let delta = W.mul g steps_w in
+              let v = W.add hi2 delta in
+              if W.compare v hi2 < 0 then (* overflow wraps *)
+                (* translation escaping word -> infinite arm *)
+                Word.ones width
+              else
+                let f = nearest_inf_pred v (base_of p2) step in
+                if W.compare f hi2 < 0 then hi2 else f
+          in
+          if W.compare extrap_lo lo2 > 0 || W.compare extrap_hi hi2 < 0 then
+            widen_join p1 p2
+          else
+            let try_create lo hi =
+              try create lo ~step ~cardn:(cardn_from_bounds lo step hi)
+              with _ -> widen_join p1 p2
+            in
+            (* if no unstable bound, keep p2; else extrapolated *)
+            if not lo_unstable && not hi_unstable then p2
+            else if lo_unstable && hi_unstable then try_create extrap_lo extrap_hi
+            else if hi_unstable then try_create lo2 extrap_hi
+            else try_create extrap_lo hi2
+      | _ -> widen_join p1 p2
+  else join p1 p2
+
 (* Thresholded widening (hike addition — the Astrée-style bounded extrapolation; docs/widening-thresholds-plan.md). *)
 let widen_join_threshold (ladder : word list) (p1 : t) (p2 : t) : t =
   if subset p1 p2 then

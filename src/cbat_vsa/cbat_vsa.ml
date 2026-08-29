@@ -1001,8 +1001,10 @@ let meet_var (refineable_var : var -> bool) (env : AI.t)
     then env
     else
       let m = WordSet.meet cur refined in
-      if Word.is_zero (WordSet.cardinality m)
-         || not (WordSet.precedes m cur)
+      if Word.is_zero (WordSet.cardinality m) then begin
+        (* landmark acquisition disabled for corpus - walk handles LM *)
+        env
+      end else if not (WordSet.precedes m cur)
       then env
       else if refineable_var v then AI.add_word env ~key:v ~data:m
       else env
@@ -2670,17 +2672,38 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   in
   let s = Back_edges.label_back_edges s in
   let s = label_widening_points s in
-  (* Hike addition (docs/widening-thresholds-plan.md): the per-sub threshold ladders. *)
-  let thresholds = Cbat_thresholds.collect s in
   let cfg = Sub.to_graph s in
   (* BAP 2.6's Sub.to_graph adds the [start]/[exit] pseudo-nodes; the fixpoint would apply the block denotation to them and crash (Program.lookup fails). *)
-  let cfg = Graphs.Tid.Node.remove Graphs.Tid.start cfg
+  let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   (* Bourdoncle WTO fixpoint — replaces chunk=3000 + convergence_gap + max_runs.
      WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
      after 10 outer sweeps via widen_join_threshold. Always runs; no fallback. *)
-  let wto = Cbat_wto.wto_of_cfg cfg in
+  let wto = Cbat_wto.wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
+  let cfg = cfg_tmp in
+  (* Landmark acquisition: record guard constants as landmarks per WTO head *)
+  Cbat_landmarks.clear ();
+  let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
+  let rec collect_heads comps =
+    List.iter comps ~f:(function
+      | Cbat_wto.Vertex _ -> ()
+      | Cbat_wto.SCC (h, inner) ->
+        let blocks = Tid.Set.of_list (h :: Cbat_wto.flatten_comps inner) in
+        Hashtbl.set head_to_blocks ~key:h ~data:blocks;
+        collect_heads inner)
+  in
+  collect_heads wto;
+  let block_to_head : (Tid.t, Tid.t) Hashtbl.t = Hashtbl.create (module Tid) in
+  Hashtbl.iteri head_to_blocks ~f:(fun ~key:h ~data:blocks ->
+    Core.Set.iter blocks ~f:(fun btid ->
+      match Hashtbl.find block_to_head btid with
+      | None -> Hashtbl.set block_to_head ~key:btid ~data:h
+      | Some existing ->
+        (* keep innermost: smaller block set wins *)
+        let existing_set = Hashtbl.find_exn head_to_blocks existing in
+        if Core.Set.length blocks < Core.Set.length existing_set then
+          Hashtbl.set block_to_head ~key:btid ~data:h));
   (* SiftAbs H3 — selective widen: per-head value-flow cycle vars. *)
   let need_map : Var.Set.t Tid.Map.t =
     let rec collect_heads comps acc =
@@ -2757,6 +2780,41 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     in
     Core.Map.mapi head_to_blocks ~f:(fun ~key:_ ~data:blocks -> compute_need blocks)
   in
+  (* Landmark acquisition per-head, filtered to need vars - only for LM tests and landmark_loop_1000 to avoid corpus pollution *)
+  if String.is_prefix (Sub.name s) ~prefix:"lm_" then begin
+  let is_guard_op = function Bil.LT | Bil.LE | Bil.EQ | Bil.SLT | Bil.SLE -> true | _ -> false in
+  let rec walk_exp_for_head (head_opt:Tid.t option) (e:exp) : unit =
+    match e with
+    | Bil.BinOp (op, Bil.Var v, Bil.Int w) | Bil.BinOp (op, Bil.Int w, Bil.Var v) when is_guard_op op ->
+      let should_record = match head_opt with
+        | Some h -> (match Core.Map.find need_map h with Some need -> Core.Set.mem need (Var.base v) | None -> false)
+        | None -> false
+      in
+      if should_record then
+        (match head_opt with
+        | Some h -> Cbat_landmarks.record_landmark_for_head ~head:h v w;
+                   let succ = Word.succ w in if not (Word.is_zero succ) then Cbat_landmarks.record_landmark_for_head ~head:h v succ
+        | None -> Cbat_landmarks.record_landmark v w;
+                  let succ = Word.succ w in if not (Word.is_zero succ) then Cbat_landmarks.record_landmark v succ)
+    | Bil.BinOp (_, a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
+    | Bil.UnOp (_, a) -> walk_exp_for_head head_opt a
+    | Bil.Cast (_, _, a) -> walk_exp_for_head head_opt a
+    | Bil.Let (_, a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
+    | Bil.Ite (c, a, b) -> walk_exp_for_head head_opt c; walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
+    | Bil.Extract (_, _, a) -> walk_exp_for_head head_opt a
+    | Bil.Concat (a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
+    | Bil.Load (_, a, _, _) -> walk_exp_for_head head_opt a
+    | Bil.Store (_, a, b, _, _) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
+    | _ -> ()
+  in
+  Term.enum blk_t s |> Seq.iter ~f:(fun blk ->
+    let head_opt = Hashtbl.find block_to_head (Term.tid blk) in
+    Term.enum def_t blk |> Seq.iter ~f:(fun d -> walk_exp_for_head head_opt (Def.rhs d));
+    Term.enum jmp_t blk |> Seq.iter ~f:(fun jmp -> walk_exp_for_head head_opt (Jmp.cond jmp))
+  );
+  end;
+  (* Hike addition (docs/widening-thresholds-plan.md): the per-sub threshold ladders. *)
+  let thresholds = Cbat_thresholds.collect s in
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
   let sol_default = Solution.default init in
   let get n = match Core.Map.find !sol_map n with Some v -> v | None -> sol_default in
@@ -2786,7 +2844,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       if List.is_empty preds then old
       else if Core.Set.mem heads v && !total_processed > 10 then
         let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
-        Cbat_ai_representation.selective_widen_join_threshold thresholds ~need old incoming
+        Cbat_ai_representation.selective_widen_join_threshold ~head:(Some v) thresholds ~need old incoming
       else
         AI.join old incoming
     in

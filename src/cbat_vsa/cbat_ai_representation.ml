@@ -278,14 +278,25 @@ let widen_join_threshold (ladders : (int * word list) list) (e1 : t) (e2 : t) : 
   }
 
 (* SiftAbs H3 — selective widen: only vars in [need] (value-flow cycle) are widened, others are joined. *)
-let selective_widen_join_threshold (ladders : (int * word list) list) ~(need : Var.Set.t) (e1 : t) (e2 : t) : t =
+let selective_widen_join_threshold ?(head:Tid.t option=None) (ladders : (int * word list) list) ~(need : Var.Set.t) (e1 : t) (e2 : t) : t =
   if Core.Set.is_empty need then join e1 e2
   else if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
   else
-    let ladder_for ws =
-      Option.value ~default:[]
+    let ladder_for ws key =
+      let extra =
+        match head with
+        | Some h ->
+          let per = Cbat_landmarks.landmarks_for_head h key in
+          if List.is_empty per then Cbat_landmarks.landmarks_for key else per
+        | None -> Cbat_landmarks.landmarks_for key
+      in
+      let extra = List.filter extra ~f:(fun w -> Word.bitwidth w = WordSet.bitwidth ws) in
+      if List.is_empty extra then Option.value ~default:[]
         (List.Assoc.find ladders (WordSet.bitwidth ws) ~equal:Int.equal)
+      else
+        let max_extra = List.fold extra ~init:(List.hd_exn extra) ~f:(fun acc w -> if Word.compare w acc > 0 then w else acc) in
+        [max_extra]
     in
     let words =
       let acc = ref WordEnv.top in
@@ -296,7 +307,7 @@ let selective_widen_join_threshold (ladders : (int * word list) list) ~(need : V
         else
           let data_res =
             if Core.Set.mem need (Var.base key) then
-              WordSet.widen_join_threshold (ladder_for data_old) data_old data_new
+              WordSet.widen_join_threshold (ladder_for data_old key) data_old data_new
             else
               WordSet.join data_old data_new
           in
@@ -311,6 +322,38 @@ let selective_widen_join_threshold (ladders : (int * word list) list) ~(need : V
     in
     { memories; words; frame = join_opt ~widen:true e1.frame e2.frame
     }
+
+(* Landmark-directed extrapolation (Simon & King Listing 4) — per-var steps. *)
+let selective_widen_extrapolate ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
+  if Core.Set.is_empty need then join e1 e2
+  else if WordEnv.equal e1.words WordEnv.bottom then e2
+  else if WordEnv.equal e2.words WordEnv.bottom then e1
+  else
+    let words =
+      let acc = ref WordEnv.top in
+      WordEnv.fold e1.words ~init:() ~f:(fun ~key ~data:data_old () ->
+        let idx = WordSet.bitwidth data_old in
+        let data_new = WordEnv.find idx e2.words key in
+        if WordSet.is_top data_new then ()
+        else
+          let data_res =
+            if Core.Set.mem need (Var.base key) then
+              if steps < 0 then WordSet.widen_join data_old data_new
+              else WordSet.extrapolate_steps ~steps data_old data_new
+            else
+              WordSet.join data_old data_new
+          in
+          if not (WordSet.is_top data_res) then
+            acc := WordEnv.add !acc ~key ~data:data_res
+      );
+      !acc
+    in
+    let memories = MemEnv.widen_join e1.memories e2.memories in
+    { memories; words; frame = join_opt ~widen:true e1.frame e2.frame
+    }
+
+let selective_widen ~(need : Var.Set.t) (e1 : t) (e2 : t) : t =
+  selective_widen_extrapolate ~need ~steps:(-1) e1 e2
 
 let equal_need ~(need : Var.Set.t) (e1 : t) (e2 : t) : bool =
   if Core.Set.is_empty need then true
