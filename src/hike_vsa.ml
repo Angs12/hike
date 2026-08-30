@@ -283,7 +283,7 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
   in
   let base_info = { Convutils.offsets; k_ranges; regions = []; degraded;
                     call_stack_args = []; vla_bounds = [] } in
-  let regions = Hike_stack_to_locals.regions_of_sub sub' base_info in
+  let regions = Hike_stack_to_locals.regions_of_sub sp sub' base_info in
   let call_stack_args = call_stack_args_of_sub sp sub' tags in
   { Convutils.offsets; k_ranges; regions; degraded; call_stack_args; vla_bounds }
   in
@@ -540,7 +540,7 @@ let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : 
   in
   let base_info = { Convutils.offsets; k_ranges; regions = []; degraded;
                     call_stack_args = []; vla_bounds = [] } in
-  let regions = Hike_stack_to_locals.regions_of_sub sub base_info in
+  let regions = Hike_stack_to_locals.regions_of_sub sp sub base_info in
   let call_stack_args = call_stack_args_of_sub sp sub part in
   { Convutils.offsets; k_ranges; regions; degraded; call_stack_args; vla_bounds }
 

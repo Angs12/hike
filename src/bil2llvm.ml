@@ -772,12 +772,15 @@ let is_plt_trampoline ctx (sub : sub term) : bool =
 
 (* [create_static_mem_access llvm_builder blk_tid fr lo exp]: Emit a
    Load/Store for the SINGLETON-tagged def at the entry- anchored
-   offset [lo]. The shape dispatch (Load/Store/Cast) uses the
-   visitor-based [is_stack_load_store] predicate — no AST pattern
-   matching on BIL constructors (per Principle 8 / CONTEXT.md). The
-   visitor's [visit_load] / [visit_store] methods return the
-   [Bil.Int] type of the access, which is what the LLVM load/store
-   needs. *)
+   offset [lo] — the MAP SOLUTION at the emitter: ONE [Exp.mapper]
+   replaces ONLY the matched memory node with a marker var whose local
+   is the built GEP access; ALL enclosing structure (the cast-wrapped
+   [pad:64[mem[RBP-4]:u32]] keeps its cast — [create_cast] then emits
+   the zext right at the load; loads nested in binops keep the binop)
+   is preserved and emitted by the ordinary [create_exp]. No AST
+   pattern matching on BIL constructors beyond the marker dispatch
+   (the node finder is the [Exp.visitor], per Principle 8 /
+   CONTEXT.md). *)
 let create_static_mem_access llvm_builder blk_tid fr lo exp =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -807,31 +810,64 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
   in
   match gep_opt with
   | Some gep ->
-      (* The visitor detects whether the def is a Load or a Store and
-         returns the access width (the [Size.t] of the Load/Store).
-         The visitor returns one of: [`Load of size, `Store of data,
-         `Other]. No AST pattern matching. *)
-      let access : [ `Load of Size.t | `Store of Bil.exp ] option =
+      (* The FIRST memory node of the rhs (the tagged access), found
+         visitor-based; its address expression identifies every node
+         of the SAME access (uniform-address def shapes). *)
+      let access : [ `Load of exp * Size.t | `Store of exp * exp * Size.t ] option =
         let vis =
           object
-            inherit [ [ `Load of Size.t | `Store of Bil.exp ] option ] Exp.visitor
+            inherit
+              [ [ `Load of exp * Size.t | `Store of exp * exp * Size.t ] option ]
+              Exp.visitor
             method! visit_load ~mem:_ ~addr _ size acc =
-              Base.Option.first_some acc (Some (`Load size))
-            method! visit_store ~mem:_ ~addr ~exp _ _ acc =
-              Base.Option.first_some acc (Some (`Store exp))
+              Base.Option.first_some acc (Some (`Load (addr, size)))
+            method! visit_store ~mem:_ ~addr ~exp _ size acc =
+              Base.Option.first_some acc (Some (`Store (addr, exp, size)))
           end
         in
         vis#visit_exp exp None
       in
       (match access with
-       | Some (`Load size) ->
-           return
-           @@ Llvm.build_load
-                (Llvm.integer_type llvm_ctx (Size.in_bits size))
-                gep "" llvm_builder
-       | Some (`Store data) ->
+       | Some (`Load (addr, size)) ->
+           let marker =
+             Var.create ~is_virtual:true ~fresh:false "hike_acc"
+               (Type.Imm (Size.in_bits size))
+           in
+           let acc_v =
+             Llvm.build_load
+               (Llvm.integer_type llvm_ctx (Size.in_bits size))
+               gep "" llvm_builder
+           in
+           insert_local ctx blk_tid marker acc_v;
+           let v =
+             object
+               inherit Exp.mapper
+               method! map_load ~mem ~addr:a e s =
+                 if Exp.equal a addr && Size.equal s size then Bil.Var marker
+                 else Bil.Load (mem, a, e, s)
+             end
+           in
+           create_exp llvm_builder blk_tid (v#map_exp exp)
+       | Some (`Store (addr, data, size)) ->
+           let marker =
+             Var.create ~is_virtual:true ~fresh:false "hike_acc"
+               (Type.Imm (Size.in_bits size))
+           in
            let* d = create_exp llvm_builder blk_tid data in
-           return @@ Llvm.build_store d gep llvm_builder
+           let _ : Llvm.llvalue = Llvm.build_store d gep llvm_builder in
+           (* the store's value semantics: the stored data (a store
+              node as a value binds the data, never the void store
+              instruction — the badref chain). *)
+           insert_local ctx blk_tid marker d;
+           let v =
+             object
+               inherit Exp.mapper
+               method! map_store ~mem ~addr:a ~exp:x e s =
+                 if Exp.equal a addr && Size.equal s size then Bil.Var marker
+                 else Bil.Store (mem, a, x, e, s)
+             end
+           in
+           create_exp llvm_builder blk_tid (v#map_exp exp)
        | None -> create_exp llvm_builder blk_tid exp)
   | None ->
       if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
@@ -1785,7 +1821,6 @@ let region_split_plan (def_tags : Convutils.vsa_kind Tid.Map.t)
   match info_opt with
   | None -> []
   | Some info when info.Convutils.degraded -> []
-  | Some info when String.equal (Sub.name sub) "main" -> []
   | Some info ->
       let has_frame_ptr =
         let defs =

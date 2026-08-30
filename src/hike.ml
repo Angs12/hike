@@ -667,7 +667,7 @@ let () =
                  let info =
                    { info with
                      Convutils.regions =
-                       Hike_stack_to_locals.regions_of_sub sub info }
+                       Hike_stack_to_locals.regions_of_sub (sp (Project.target proj)) sub info }
                  in
                  if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
                    Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
@@ -685,7 +685,8 @@ let () =
            let proj =
              Project.map_program proj ~f:(fun prog ->
                  Term.map sub_t prog
-                   ~f:Hike_stack_to_locals.stack_to_locals)
+                   ~f:(Hike_stack_to_locals.stack_to_locals
+                         (sp (Project.target proj))))
            in
            (if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
               Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->

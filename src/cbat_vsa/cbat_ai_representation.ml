@@ -237,6 +237,10 @@ let add_word (e : t) ~(key : var) ~(data : wordset) : t =
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset = WordEnv.find i env.words v
 let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t = MemEnv.find i env.memories v
 
+(* [fold_words f init env]: fold over the [words] env map, threading [init] through [f]. *)
+let fold_words (f : var -> wordset -> 'a -> 'a) (init : 'a) (env : t) : 'a =
+  WordEnv.fold env.words ~init ~f:(fun ~key ~data acc -> f key data acc)
+
 (* Printing *)
 
 let pp ppf (e : t) =
@@ -295,8 +299,17 @@ let selective_widen_join_threshold ?(head:Tid.t option=None) (ladders : (int * w
       if List.is_empty extra then Option.value ~default:[]
         (List.Assoc.find ladders (WordSet.bitwidth ws) ~equal:Int.equal)
       else
-        let max_extra = List.fold extra ~init:(List.hd_exn extra) ~f:(fun acc w -> if Word.compare w acc > 0 then w else acc) in
-        [max_extra]
+        (* Landmark bounds are EXTRAS — they can only TIGHTEN the geometric
+           threshold (the [max_extra = max of all extras] picks the WORST
+           bound, which over-bounds). The fix: combine the extras with the
+           geometric rungs, then pick the MIN of the union — the landmark
+           bound can only pull the rung DOWN (tighter), never up (looser). *)
+        let geometric = Option.value ~default:[]
+          (List.Assoc.find ladders (WordSet.bitwidth ws) ~equal:Int.equal) in
+        let all_extras = extra @ geometric in
+        let min_extra = List.fold all_extras ~init:(List.hd_exn all_extras)
+          ~f:(fun acc w -> if Word.compare w acc < 0 then w else acc) in
+        [min_extra]
     in
     let words =
       let acc = ref WordEnv.top in
