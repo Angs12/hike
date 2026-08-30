@@ -94,10 +94,16 @@ f.in ⊔= refine_edge(edge P→f, False-cstr)   # fallthrough, refined by ¬c
 # raw P.out is NOT separately joined — joining both would collapse to raw
 ```
 
-**NEQ / non-convex guards:** `comparison_constraint` returns `None` on the
-True side, so the *taken* edge gets **identity** and the fallthrough gets the
-`EQ` interval. This is the inherited -O2 `w_big` loop-counter limitation; it is
-**not a regression** of this change.
+**NEQ guards (re-verified 2026-08-30):** a *decoded* `jne` guard (`~ZF` →
+NEQ) refines the **taken** edge exactly — `decoder_constraint`'s NEQ row is
+the two-piece `TOP − {c}` with the exclusion of `c` at the meet — and `jz`
+(`ZF` → EQ) pins the taken edge to `{c}`; the fallthrough gets the complement
+via `complement_guard_op`. The `None` sound-stop survives only for
+**non-decoded** NEQ comparison guards (`comparison_constraint`'s `Bil.NEQ`
+row, the non-convex two-sided class): there the taken edge is identity and
+the fallthrough gets `EQ`. The decoded rows are part of the
+landmark-consumption work whose strict F1-NEQ acceptance test (head max = K
+exactly) is green on the current tree; §5 preserves that chain.
 
 ---
 
@@ -111,7 +117,12 @@ True side, so the *taken* edge gets **identity** and the fallthrough gets the
   `Cbat_landmarks.widening_at_head` is already bound around
   `denote_block_with_stores` (so active during the inline walk).
 - `assume_jump_cond_with_group`'s shallow `apply_operand_constraint` pre-step
-  is **subsumed** by the deep walk; its landmark-acquisition side-effect stays.
+  is **KEPT, not replaced** — the deep walk is added on top of it. The shallow
+  step (guard-var meet + the `constrain_def_chain` walk whose MINUS row lets a
+  jne-guarded counter stabilize AT the landmark — the green F1-NEQ chain) is
+  cheap; both paths share `constrain_def_chain`, but end-to-end equivalence of
+  the deep walk alone is unverified, so the pre-step stays. Landmark
+  acquisition (`observe_unsat_var` inside the meets) fires from both paths.
 
 ---
 
@@ -158,11 +169,30 @@ refinement can cascade into downstream refinements within the same pass).
 - `edge_views_of` (Phase B post-pass driver),
 - `partitioned_states` (per-block TAG-state folder),
 - the `edge_view` record type (`taken` / `fallthrough` views),
+- the `_with_views` wrapper,
 - their callers.
 
 Code comments that cite the deleted machinery's `§`-numbers
 (`§1.2`, `§1.4`, `§2.2`, `§2.4`) are now **historical** and must be cleaned
 during implementation.
+
+**Blast radius beyond `src/` (verified 2026-08-30):** the deleted names are
+public API and test fixtures, not just dead production code —
+
+- `cbat_vsa.mli` exposes `edge_view`, `edge_views_of`, `partitioned_states`,
+  and the wrapper; the `.mli` entries go with the bodies. After any
+  `cbat_vsa*.mli` change the corpus re-emission must run
+  `cd src && bapbuild -clean && make` (the stale-interface gotcha).
+- The unit suite calls the wrapper at several fixtures and builds views via
+  `edge_views_of` (the view-lookup helpers); the R6/G3 tests assert **per-edge
+  view** properties (taken = the `TOP−{c}` arc, fallthrough = `{c}` exactly).
+  Deleting Phase B means MIGRATING these tests to the inline-refined
+  IN-states — and a multi-predecessor block's IN-state is the JOIN of its
+  incoming refined edges, so a per-edge assertion stays faithful only on
+  single-predecessor destinations.
+- The precision probe computes exactness from the wrapper +
+  `partitioned_states`; it migrates to IN-state reads. The corpus watcher is
+  already on the solution-only engine — unaffected.
 
 ---
 
@@ -187,10 +217,16 @@ during implementation.
 
 ## 10. Known limitations (recorded, not regressions)
 
-1. **NEQ / non-convex guards** — `comparison_constraint` returns `None` on the
-   True side; taken edge identity, fallthrough gets `EQ`. The -O2 `w_big`
-   loop-counter class. Inherited from the current code.
-2. **Cost** — the deep walk runs on **every forward iteration** (no
+1. **NEQ, non-decoded** — for guards the jcc decoder does not recognize,
+   `comparison_constraint`'s `Bil.NEQ` row returns `None`; taken edge
+   identity, fallthrough gets `EQ`. (Decoded `jne`/`jz` guards refine exactly
+   — see §4.) The -O2 `w_big` residual class. Inherited.
+2. **Per-edge views collapse at joins** — the fused design refines the JOINED
+   destination IN-state; a multi-predecessor block loses the per-edge
+   partition (a loop head is the join of the entry-refined and
+   back-edge-refined states). Fine for offset extraction; per-edge view
+   assertions in tests must pick single-predecessor targets.
+3. **Cost** — the deep walk runs on **every forward iteration** (no
    change-driven cache; deliberately accepted). On the small validation corpus
    this is fine; large binaries may be slow. A future change-driven cache
    (re-run an edge's walk only when its source OUT-state changed) would bound

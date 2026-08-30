@@ -19,7 +19,7 @@ Acceptance criteria:
 - [ ] Corpus emission is byte-identical to 02 (no precision change).
 - [ ] Measurable cost reduction on a representative binary (e.g. `stage_timer.exe`
       wall-time before/after).
-- [ ] Gates green (see README).
+- [ ] Gates green (see README): `dune runtest` all pass; `run_corpus.sh` 32/32
+      rc=0; `check_allocas.sh` 128/0; semantics parity (29/3 + 8/8).
 
-Gate: `dune runtest` all pass; `run_corpus.sh` 31/31 rc=0; `check_allocas.sh` 124/0;
-`semantic/run_semantic_all.sh` + `run_semantic.sh` parity (identical emission to 02).
+Gate: identical emission to 02, measurably faster fixpoint.

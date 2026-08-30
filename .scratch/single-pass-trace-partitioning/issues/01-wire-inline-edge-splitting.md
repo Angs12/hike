@@ -31,10 +31,20 @@ Acceptance criteria:
       compile* but are uncalled.
 - [ ] Landmark acquisition still fires (the walk's meets trigger `observe_unsat_var`;
       `widening_at_head` is bound around the block walk).
-- [ ] NEQ / non-convex guards: taken edge gets identity, fallthrough gets the
-      `EQ` complement (inherited limitation, not a regression).
-- [ ] Gates green (see README); emission parity with current (3 known pre-existing
-      semantic failures explicitly out of scope).
+- [ ] The shallow jcc-decoder pre-step (`apply_operand_constraint` in
+      `assume_jump_cond_with_group`) is KEPT — the deep walk is added on top, the
+      shallow step is not removed (it carries the green F1-NEQ stabilization
+      chain: guard-var meet + the `constrain_def_chain` MINUS-row walk; both
+      paths share `constrain_def_chain` but deep-only equivalence is unverified).
+- [ ] NEQ guards: DECODED `jne` refines the taken edge to the exact `TOP − {c}`
+      (exclusion at the meet), `jz` pins taken to `{c}`; only NON-decoded NEQ
+      guards fall back to taken-identity (the `comparison_constraint` `Bil.NEQ`
+      `None` row).
+- [ ] Gates green (see README); emission parity with the current tree's own
+      fresh emission (32 binaries — expected 32/32 rc=0, structural asserts
+      128/0, semantics 29/3 + 8/8; the 3 known pre-existing semantic failures
+      explicitly out of scope).
 
-Gate: `dune runtest` all pass; `run_corpus.sh` 31/31 rc=0; `check_allocas.sh` 124/0;
-`semantic/run_semantic_all.sh` + `run_semantic.sh` parity.
+Gate: `dune runtest` all pass; `run_corpus.sh` 32/32 rc=0; `check_allocas.sh` 128/0;
+`semantic/run_semantic_all.sh` + `run_semantic.sh` parity (incl. the strict
+F1-NEQ `max==K` unit check staying green).
