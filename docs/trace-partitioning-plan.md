@@ -41,13 +41,13 @@ jump**:
 
 1. `denote_block_with_stores` computes `postcond = denote_defs b env`, then
    calls `denote_jump`.
-2. In `denote_jump`, for a **`Bil.If(c, t, f)`** jmp:
-   - derive the True/False constraint lists via `edge_constraints`;
-   - run `refine_edge` for the `P→t` edge (True side) and the `P→f` edge
-     (False side = complement);
-   - join each refined env into the destination block's IN-state.
-3. For an **unconditional `Jmp` / `Call`**: identity — `S.in ⊔= P.out`
-   (no refine). Calls keep their existing frame-keeping call abstraction.
+2. In `denote_jump`, the transfer is driven by the **BAP IR graph**:
+   - compute `g = Sub.to_cfg sub` ONCE at fixpoint entry (free projection);
+   - for each out-edge `e` of the current block: derive seeds from the
+     **accumulated** `Graphs.Ir.Edge.cond e g` (NOT the jmp's own cond),
+     run the deep backward walk, join into `Dst(e).in`;
+   - the uniform rule covers conditional, unconditional, and chain-tail
+     edges (a lone goto's cond is `1` = identity).
 
 `static_graph_vsa_with_views` is renamed (drops `_with_views`) and returns
 just `sol` — there is no `views` value anymore.
@@ -104,6 +104,53 @@ row, the non-convex two-sided class): there the taken edge is identity and
 the fallthrough gets `EQ`. The decoded rows are part of the
 landmark-consumption work whose strict F1-NEQ acceptance test (head max = K
 exactly) is green on the current tree; §5 preserves that chain.
+
+### Condition chains — the accumulated path condition (user directive, 2026-08-30; BAP-native, tested)
+
+In BAP the gotos are like `when c1 goto l1; when c2 goto l2; goto l3` —
+**multiple jmp terms in ONE block**, first-true-wins (switch semantics).
+**For a cond in a chain, every previous cond that was not true must be used
+to refine** — when the last cond is TRUE, the previous negative conds are
+used. Verified by probe (2026-08-30, `Graphs.Ir.Edge.cond` on a KBIL
+fixture): **BAP's IR-graph API accumulates the conds NATIVELY** —
+
+```
+edge chain→l2:  own = c2                     acc = c2 & ~c1
+edge chain→l3:  own = 1  (unconditional)      acc = ~c1 & ~c2
+```
+
+`Sub.to_cfg sub : Graphs.Ir.t` is a free projection of the same sub, and
+`Graphs.Ir.Edge.cond : edge -> graph -> exp` computes the **accumulated path
+condition** per edge ("takes into account all conditions preceding the
+edge") — including on the trailing unconditional goto. The design therefore
+needs NO chain-specific machinery:
+
+1. **THE UNIFORM TRANSFER RULE:** every out-edge `e` of block `B` transfers
+   `deep_refine(B.out, Edge.cond e g, sol)` into `Dst(e).in` — conditional,
+   unconditional, and chain-tail edges alike. A lone `goto` has cond `1`
+   (identity). The taken/fallthrough two-refinement falls out: for
+   `when c goto A; goto B`, edge→A carries `c`, edge→B carries `~c` —
+   computed by BAP, not by us. **Invariant: no out-edge may skip its
+   refinement** — skipping a chain carrier silently drops its negative for
+   every downstream cond.
+2. **Inter-block chains** (else-if ladders, one hop per block) accumulate
+   NATURALLY through the state flow: each hop's fallthrough edge is refined
+   by its own (Edge-computed) negation, so the state arriving at the next
+   hop already carries the previous negatives; the last cond's refinement
+   applies to the accumulated state. No explicit walk-back.
+3. **THE ONE NEW RULE** (`edge_constraints` extension): `Edge.cond` emits
+   *syntactic* forms — `~(x op c)` and `&`-conjunctions. Required arms:
+   - **NOT-unwrap**: `~(x op c)` → the complement row (`NEQ→EQ`, `EQ→NEQ`,
+     `LT→GE`, `LE→GT`, `SLT→SGE`, `SLE→SGT` — `complement_guard_op` has the
+     guard_op rows already);
+   - **AND-conjoin**: each conjunct independently seeds constraint derivation
+     over the same env (intersection).
+   Everything else consumes the accumulated cond through the existing seed
+   machinery unchanged.
+4. **Precompute once:** the accumulated conds are STATIC per sub (they do
+   not depend on the solution) — compute `Sub.to_cfg` and every edge's
+   `Edge.cond` once at fixpoint entry, cache per (block, edge), never
+   re-derive per iteration.
 
 ---
 
@@ -208,7 +255,8 @@ public API and test fixtures, not just dead production code —
 | `constrain_cell_on_trace` | trace-exact cell meet (`Mem.meet_range`), cell-gate replacement |
 | `decoded_condition` | decodes compound -O0 jcc idioms to guard ops |
 | `decoder_constraint` | the nine-row guard→constraint map |
-| `complement_guard_op` | complement of a guard op (False-side derivation) |
+| `complement_guard_op` | complement of a guard op (the NOT-unwrap rows for `Edge.cond`'s syntactic `~(x op c)`) |
+| `Graphs.Ir.Edge.cond` | **BAP-native accumulated path condition** per edge (`Sub.to_cfg`) — includes the preceding when-chain negatives; the fused transfer's input |
 | ~~`edge_views_of`~~ | **DELETED** |
 | ~~`partitioned_states`~~ | **DELETED** |
 | ~~`edge_view`~~ | **DELETED** |

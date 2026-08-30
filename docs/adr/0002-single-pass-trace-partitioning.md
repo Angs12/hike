@@ -4,11 +4,21 @@
 
 Replace the two-phase VSA — a forward Bourdoncle-WTO fixpoint **plus** a Phase B
 post-pass (`edge_views_of` → `refine_edge` → `partitioned_states`) — with a
-**single coupled pass**. At every conditional GOTO (`Bil.If(c, t, f)`), run the
-**deep backward walk** (`refine_edge` / `reverse_def_walk` + `constrain_cell_on_trace`)
-*inline in `denote_jump`*, transferring the two refined environments — taken
-refined by `c`, fallthrough refined by `¬c` — into the destination blocks' IN-states.
-**Phase B is deleted.**
+**single coupled pass**. Every out-edge of every block runs the **deep backward
+walk** (`refine_edge` / `reverse_def_walk` + `constrain_cell_on_trace`) *inline in
+`denote_jump`*, transferring the edge-refined environment into the destination
+block's IN-state. **Phase B is deleted.**
+
+The edge refinement input is BAP's **accumulated edge condition**
+(`Graphs.Ir.Edge.cond` via `Sub.to_cfg`): in BAP the when-chain
+(`when c1 goto l1; when c2 goto l2; goto l3`) is a block with multiple jmp
+terms (first-true-wins), and `Edge.cond` — probe-verified 2026-08-30 — computes
+each edge's path condition including every previous cond's negation
+(`c2 & ~c1`; the unconditional tail carries `~c1 & ~c2`). This satisfies the
+user directive ("for a cond every previous cond that was not true must refine;
+when the last cond is TRUE the previous negative conds are used") natively —
+one uniform rule for conditional, unconditional, and chain-tail edges, no
+chain-specific machinery.
 
 ## Context
 

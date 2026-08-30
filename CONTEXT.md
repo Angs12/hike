@@ -26,8 +26,11 @@ _Avoid_: restriction pass, taint, slice pass
 **Trace-Partitioning (single-pass)**: Making a block's entry abstract state aware of the branch condition on its incoming edge, so the analysis is branch-sensitive rather than branch-blind; realized as one coupled pass where the deep backward walk runs inline at every conditional GOTO.
 _Avoid_: Phase B, post-pass, `edge_views_of` (deleted), `partitioned_states` (deleted), `edge_view` (deleted)
 
-**Edge-Splitting**: At a conditional jump, computing two refined successor inputs (taken refined by the condition, fallthrough by its negation) and transferring each to its destination block.
-_Avoid_: edge view, branch partition
+**Edge-Splitting**: At a block's out-edges, computing per-edge refined successor inputs via the edge's Accumulated Condition (taken by its own cond, chain and fallthrough edges by the previous conds' negations) and transferring each to its destination block.
+_Avoid_: edge view, branch partition, taken/fallthrough views (the old per-edge Phase B record)
+
+**Accumulated Condition**: The per-edge path condition BAP's IR graph computes (`Graphs.Ir.Edge.cond`): the edge's own guard conjoined with the negation of every preceding when-guard in the same block — including on unconditional chain-tail gotos.
+_Avoid_: chain side-conditions, path predicate, the jmp's own cond
 
 **Inverse Denotation (Deep Walk)**: The backward derivation of a block's pre-state from a post-edge constraint, via producer subtraction (`cstr' = cstr ∩ post(v)`) and trace-exact cell meets; what `refine_edge` computes inline at each jump.
 _Avoid_: inverse_denote_exp (the shallow production no-op), guard-meet-only
