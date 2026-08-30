@@ -33,10 +33,8 @@ val is_bottom : t -> bool
 
 val subset : t -> t -> bool
 
-(* * [widen_join_threshold ladder p1 p2] — thresholded widening (the Astrée-style bounded extrapolation; docs/widening-thresholds-plan.md). *)
 val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t
-val widen_join_threshold : word list -> t -> t -> t
 
 
 

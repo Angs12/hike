@@ -237,10 +237,6 @@ let add_word (e : t) ~(key : var) ~(data : wordset) : t =
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset = WordEnv.find i env.words v
 let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t = MemEnv.find i env.memories v
 
-(* [fold_words f init env]: fold over the [words] env map, threading [init] through [f]. *)
-let fold_words (f : var -> wordset -> 'a -> 'a) (init : 'a) (env : t) : 'a =
-  WordEnv.fold env.words ~init ~f:(fun ~key ~data acc -> f key data acc)
-
 (* Printing *)
 
 let pp ppf (e : t) =
@@ -267,74 +263,11 @@ let widen_join (e1 : t) (e2 : t) : t =
     frame = join_opt ~widen:true e1.frame e2.frame
   }
 
-(* Hike addition (docs/widening-thresholds-plan.md): the thresholded widen — THE widening of the production fixpoint. *)
-let widen_join_threshold (ladders : (int * word list) list) (e1 : t) (e2 : t) : t =
-  let ladder_for ws =
-    Option.value ~default:[]
-      (List.Assoc.find ladders (WordSet.bitwidth ws) ~equal:Int.equal)
-  in
-  { memories = MemEnv.widen_join_op
-      (Mem.widen_join_threshold ladders) e1.memories e2.memories;
-    words = WordEnv.widen_join_op
-      (fun ws1 ws2 -> WordSet.widen_join_threshold (ladder_for ws1) ws1 ws2)
-      e1.words e2.words;
-    frame = join_opt ~widen:true e1.frame e2.frame
-  }
-
-(* SiftAbs H3 — selective widen: only vars in [need] (value-flow cycle) are widened, others are joined. *)
-let selective_widen_join_threshold ?(head:Tid.t option=None) (ladders : (int * word list) list) ~(need : Var.Set.t) (e1 : t) (e2 : t) : t =
-  if Core.Set.is_empty need then join e1 e2
-  else if WordEnv.equal e1.words WordEnv.bottom then e2
-  else if WordEnv.equal e2.words WordEnv.bottom then e1
-  else
-    let ladder_for ws key =
-      let extra =
-        match head with
-        | Some h ->
-          let per = Cbat_landmarks.bounds_for_head h key in
-          if List.is_empty per then Cbat_landmarks.bounds_for key else per
-        | None -> Cbat_landmarks.bounds_for key
-      in
-      let extra = List.filter extra ~f:(fun w -> Word.bitwidth w = WordSet.bitwidth ws) in
-      if List.is_empty extra then Option.value ~default:[]
-        (List.Assoc.find ladders (WordSet.bitwidth ws) ~equal:Int.equal)
-      else
-        (* Landmark bounds are EXTRAS — they can only TIGHTEN the geometric
-           threshold (the [max_extra = max of all extras] picks the WORST
-           bound, which over-bounds). The fix: combine the extras with the
-           geometric rungs, then pick the MIN of the union — the landmark
-           bound can only pull the rung DOWN (tighter), never up (looser). *)
-        let geometric = Option.value ~default:[]
-          (List.Assoc.find ladders (WordSet.bitwidth ws) ~equal:Int.equal) in
-        let all_extras = extra @ geometric in
-        let min_extra = List.fold all_extras ~init:(List.hd_exn all_extras)
-          ~f:(fun acc w -> if Word.compare w acc < 0 then w else acc) in
-        [min_extra]
-    in
-    let words =
-      let acc = ref WordEnv.top in
-      WordEnv.fold e1.words ~init:() ~f:(fun ~key ~data:data_old () ->
-        let idx = WordSet.bitwidth data_old in
-        let data_new = WordEnv.find idx e2.words key in
-        if WordSet.is_top data_new then ()
-        else
-          let data_res =
-            if Core.Set.mem need (Var.base key) then
-              WordSet.widen_join_threshold (ladder_for data_old key) data_old data_new
-            else
-              WordSet.join data_old data_new
-          in
-          if not (WordSet.is_top data_res) then
-            acc := WordEnv.add !acc ~key ~data:data_res
-      );
-      !acc
-    in
-    let memories =
-      (* Memory widen is needed whenever a cycled word var flows to an address; if any word needs widen, widen memory too, else join. *)
-      MemEnv.widen_join_op (Mem.widen_join_threshold ladders) e1.memories e2.memories
-    in
-    { memories; words; frame = join_opt ~widen:true e1.frame e2.frame
-    }
+(* The threshold-ladder widening (widen_join_threshold / selective_widen_join_threshold) is
+   DELETED (the landmark decision, 2026-08-30): the paper's ∞-arm is STANDARD widening
+   ([widen_join] — Cousot-Halbwachs, unstable bounds to TOP); "no normal finite widening,
+   only landmarks". With it went Cbat_thresholds, Mem.widen_join_threshold,
+   WordSet.widen_join_threshold, Clp.widen_join_threshold. *)
 
 (* Landmark-directed extrapolation (Simon & King Listing 4) — per-var steps.
    [steps] is the consumption rate from [Cbat_landmarks.lm_calc_steps]:
@@ -392,9 +325,6 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
     let memories = MemEnv.widen_join e1.memories e2.memories in
     { memories; words; frame = join_opt ~widen:true e1.frame e2.frame
     }
-
-let selective_widen ~(need : Var.Set.t) (e1 : t) (e2 : t) : t =
-  selective_widen_extrapolate ~need ~steps:(-1) e1 e2
 
 let equal_need ~(need : Var.Set.t) (e1 : t) (e2 : t) : bool =
   if Core.Set.is_empty need then true

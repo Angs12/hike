@@ -242,7 +242,25 @@ LLVM allocas / static variables — it should work on EVERY binary.
   restarts.  Distances cap at 2^40; memory cells carry no landmarks (words lane
   only, documented scope).  No on/off switch.  Related fix:
   `Clp.intersection`'s diophantine anchor is clamped to `min_elem p2` (the R2-1
-  loose-hull — meet with circular hulls was over-approximating).
+  loose-hull — meet with circular hulls was over-approximating).  **The
+  2026-08-30 consumption fixes (commit ②):** `observe_unsat_var`'s [is_upper]
+  labels were INVERTED (the first arm — the set below a cap landmark — records
+  [is_upper=true]), so the upper-extrapolation arm consumed nothing and the
+  Finite path was a no-op; `translate_to` now translates by the observed
+  GROWTH per traversal (dist_p − dist) × steps, CLAMPED at the landmark and at
+  the current bound's outward side (a stale landmark can never narrow), with
+  overflow → word_max ∞-arm; `add_smaller_dist` now PRESERVES the rotated
+  history (`{entry with dist_p = existing.dist_p}`) — the re-acquisition after
+  every advance had rebuilt the entry with `dist_p = None`, so `lm_calc_steps`
+  returned `Zero forever (the Finite-never-fires bug); and the jcc decoder
+  now also decodes `jne` (`~ZF` → NEQ) and `jz` (`ZF` → EQ) —
+  `decoder_constraint`'s NEQ row is the exact two-piece `TOP−{c}` (the
+  wrapped-[cur]-minus-point diff degenerates to a coarse hull, so the row is
+  built from TOP and the exclusion happens at the meet), and
+  `constrain_def_chain`'s INLINE-BinOp fallthrough routes the arrow-less
+  record operand (`i − k` live, no `t :=` temp) through `refine_chain`'s
+  MINUS row — the chain that lets a jne-guarded counter loop stabilize AT
+  the landmark K (F1-NEQ: head max = K exactly).
 - Call abstraction is FRAME-KEEPING (the call-abstraction precision lane —
   `AI.call_abstraction_frame` + `Mem.call_keep`): at a call the caller's own frame
   (cells at key ≥ the call-time RSP, outside the pointer-arg ESCAPE ranges) survives;
@@ -305,12 +323,25 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-30 EEST — degradation removal + the Map solution (stack-to-locals) + emitter cast preservation**
+**Last verified: 2026-08-30 EEST — landmark consumption ② (Inf→TOP, the state machine, F1-NEQ) — FULL GATE BATTERY GREEN**
 
-This session landed the user-directed stack-to-locals rework on top of the
-landmark-widening working tree (session 2's state; the variadic-arg zext of
-that tree was REVERTED per the user's directive — "there already is a widening
-in create_binop, there should not be any more"):
+This second session of the day landed the landmark CONSUMPTION fixes on top of
+the mapD tree (`3ebd805` = commit ①, the stack-to-locals rework, itself on
+`46e1207`/`62a466a`). ② = the UNCOMMITTED delta of the Q1-C/Q2-B/Q3-C/Q4-A
+grilling-settled design: the threshold ladder (`Cbat_thresholds` + all
+`widen_join_threshold` mirrors) DELETED, the Inf arm = plain `AI.widen_join`,
+the Zero arm = plain join, per-arm advance/clear + the stability check (see
+the widening section above for the full fix list — the inverted [is_upper]
+labels, the growth-clamped `translate_to`, the `dist_p` history-carry, the
+jne/jz decoder arms, the exact NEQ row, the INLINE-cmp backward walk).
+**F1-NEQ passes the strict acceptance test: `max == K` exactly (head =
+[0..100])** — the record of an earlier AGENTS.md edit today describing the
+mapD state as current (with "relaxed assertions") was STALE: the tree
+verifiably carries ② (`git diff` = the ② delta; `dune runtest` 0-fail with the
+strict test; `/tmp/heritage_lmC` emitted today 18:08).  The mapD work (commit
+①) is described below; its gate numbers are superseded by this table.
+
+The prior session's record (commit ① `3ebd805` — the stack-to-locals rework):
 
 1. **THE MAP SOLUTION (`src/hike_stack_to_locals.ml`)**: the conversion is
    now ONE [Exp.mapper] over the def rhs mapping ONLY the matching
@@ -367,18 +398,19 @@ in create_binop, there should not be any more"):
    slot was the array_local/union_overlap/va_arg_vacopy/variadic llc
    class). Visitor-based node finder + mapper (no AST pattern matching).
 
-`dune runtest` is **0-FAIL** (the LM F1/F2c landmark tests pass with the
-relaxed assertions; `ALL CBAT TESTS PASSED`).
+`dune runtest` is **0-FAIL** (`ALL CBAT TESTS PASSED` — the F1 lifetime
+landmark F1-NEQ acceptance test now passes end-to-end, no relaxed assertions).
 
 | Gate | Command | Current result |
 |---|---|---|
 | unit suite | `dune runtest` | **0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
-| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_mapD` | **32/32 rc=0** (24 surviving `hike: guarded:` warnings — the Unbounded class, incl. the converted-counter reads [rhs=slot_12 - 0xF]: the def is no longer a memory access but keeps its tag; benign, the value is the local) |
-| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_mapD` | **128 passed, 0 failed** ✅ (124 -> 128: the 4 formerly-degraded subs now convert) |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_mapD /tmp/sem_mapD` | **29 PASS, 3 FAIL, 0 SKIP** of 32 emitted ✅ (28/3 -> 29/3: rec_struct recovered; formerly-degraded factorial/ptr_chain/sret_big/struct_by_value all PASS with the degradation gone) |
-| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_mapD /tmp/sem_mapD_8` | **8/8 PASS** ✅ (array_local + deep_recursion recovered) |
-| probes | corpus_watch / precision_probe spot-checks (factorial, array_local, variadic, alloca_vla, rec_struct, spill_many) | **PASS, 0 crashes**; probe exactness unchanged (factorial 100%, rec_struct 96.77%, array_local 94.12%) |
-| precise (stack_r) defines | per-emission count | **6 defines** (down from 22 pre-rules — the delta is exactly the subs whose frames genuinely escape / carry outgoing stack args; byte-identical semantics confirmed) |
+| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_lmC` | **32/32 rc=0** (38 surviving `hike: guarded:` warnings — the Unbounded class, incl. the converted-counter reads; benign, the value is the local) |
+| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_lmC` | **128 passed, 0 failed** ✅ |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_lmC /tmp/sem_lmC` | **29 PASS, 3 FAIL, 0 SKIP** of 32 emitted ✅ (the 3 = the SAME knowns below; every recovered sub — factorial/ptr_chain/sret_big/struct_by_value/rec_struct/array_local/deep_recursion — still PASS) |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_lmC /tmp/sem_lmC_8` | **8/8 PASS** ✅ |
+| probes | corpus_watch / precision_probe spot-checks (factorial 100%, rec_struct 96.77%, array_local 94.12%, variadic 100.00%, alloca_vla 95.35%) | **PASS, 0 crashes**; exactness UNCHANGED vs ① |
+| property F1-NEQ | `dune runtest` (test_cbat) | **head max = K=0x64 exactly** (the Finite-fires-end-to-end acceptance test, STRICT) ✅ |
+| precise (stack_r) defines | per-emission count | **6 defines** (unchanged — landmark changes do not re-tag) |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
 | coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session |
 
@@ -391,10 +423,11 @@ redesign tickets in `.scratch/one-frame-anchor-removal/`):
 - **out_variadic** — same as va_arg_vacopy plus variadic argument
   indexing, AND the value-typed-address class. (T02: VSA audit + fix; T03)
 
-Reference emissions: `/tmp/heritage_mapD` (this session's green emission,
-29/3), `/tmp/heritage_lm11` (session 2's pre-fix emission, array_local llc
-failure), `/tmp/corpus` (rebuilt 2026-08-29 after the /tmp wipe — all
-earlier reference emissions are GONE).
+Reference emissions: `/tmp/heritage_lmC` (THIS session ②'s green emission,
+29/3, the current baseline), `/tmp/heritage_mapD` (commit ①'s emission),
+`/tmp/heritage_lm11` (session 2's pre-fix emission, array_local llc failure),
+`/tmp/corpus` (rebuilt 2026-08-29 after the /tmp wipe — all earlier reference
+emissions are GONE).
 
 coreutils residual classification: df/du = live-/tmp drift between captures
 (stable-dir reruns byte-identical); vdir = transient (identical rerun);

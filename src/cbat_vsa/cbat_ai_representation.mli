@@ -52,15 +52,8 @@ val add_memory : t -> key:var -> data:Cbat_ai_memmap.t -> t
 
 val find_word : WordSet.idx -> t -> var -> WordSet.t
 val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
-val fold_words : (Bap.Std.var -> WordSet.t -> 'a -> 'a) -> 'a -> t -> 'a
 
-(* hike addition (docs/widening-thresholds-plan.md): the thresholded widen — THE widening of the production fixpoint. [ladders] is a (bitwidth -> sorted rung list) assoc; word and memory cells widen against their width's ladder, the frame relation keeps the widened join. *)
-val widen_join_threshold : (int * Bap.Std.word list) list -> t -> t -> t
-
-(* SiftAbs H3 — selective widen: only vars in [need] are widened, others joined. *)
-val selective_widen_join_threshold : ?head:Tid.t option -> (int * Bap.Std.word list) list -> need:Var.Set.t -> t -> t -> t
 val selective_widen_extrapolate : ?head:Tid.t option -> need:Var.Set.t -> steps:int -> t -> t -> t
-val selective_widen : need:Var.Set.t -> t -> t -> t
 
 (* SiftAbs H3 — selective fixpoint detection: only vars in [need] are checked. *)
 val equal_need : need:Var.Set.t -> t -> t -> bool

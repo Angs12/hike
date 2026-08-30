@@ -26,7 +26,7 @@ module type S_indexed = sig
 
   include Cbat_lattice_intf.S_indexed with type t := t and type idx := idx
 
-  (* widening with a caller-supplied per-key operator (the thresholded widen, docs/widening-thresholds-plan.md). *)
+  (* widening with a caller-supplied per-key operator (the old thresholded widen is gone). *)
   val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
 
   (* replaces the value at the given key with the meet of it and the new input value. *)
@@ -49,7 +49,7 @@ module type S = sig
 
   include Cbat_lattice_intf.S with type t := t
 
-  (* widening with a caller-supplied per-key operator (the thresholded widen, docs/widening-thresholds-plan.md). *)
+  (* widening with a caller-supplied per-key operator (the old thresholded widen is gone). *)
   val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
 
   (* replaces the value at the given key with the meet of it and the new input value. *)
