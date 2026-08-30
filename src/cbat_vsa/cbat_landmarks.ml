@@ -46,8 +46,6 @@ let widening_at_head : Tid.t option ref = ref None
    read and write THIS table. *)
 let lm_env : (Tid.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Tid)
 
-let is_lm_sub : bool ref = ref false
-
 let clear () = Hashtbl.clear lm_env
 
 (* [clear_head h blocks]: drop the landmark entries for head [h] AND every
@@ -113,29 +111,55 @@ let heads_of_wto _ = Tid.Set.empty
 
 (* Acquisition helper: called from meet_var when meet is empty. Records the
    disabled boundary (the cstr's extremum outside p) as a landmark for the
-   current var. *)
+   INNERMOST ENCLOSING WTO CYCLE HEAD (the [widening_at_head] ref, bound by
+   [cbat_vsa.process_vertex] around the block denotation — Simon & King §4
+   "landmarks of the enclosing WTO cycle"). The recording goes to the head's
+   per-head landmark table via [record_landmark_for_head]; the no-arg
+   [record_landmark] is reserved for acquisition outside any WTO cycle (the
+   sound no-op identity per the AGENTS.md §3 NO-FALLBACKS doctrine — a
+   headless var carries no landmark, and we never fall back to a global
+   landmark table). *)
 let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : unit =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then ()
   else
     let m = Cbat_clp_set_composite.meet p cstr in
     if not (Cbat_clp_set_composite.is_bottom m) then ()
     else
-      match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
+      match !widening_at_head,
+            Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
             Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with
-      | Some p_min, Some p_max, Some c_min, Some c_max ->
+      | None, _, _, _, _ ->
+        (* Acquisition outside any WTO cycle is a sound no-op (the AGENTS.md
+           §3 NO-FALLBACKS identity; never bottom, never a global fallback). *)
+        ()
+      | Some h, Some p_min, Some p_max, Some c_min, Some c_max ->
         if Word.(<) p_max c_min then begin
           let d = distance_words p_max c_min in
-          record_landmark v ~bound:c_min ~is_upper:false ~dist:(cap_distance d)
+          record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:false ~dist:(cap_distance d)
         end else if Word.(>) p_min c_max then begin
           let d = distance_words c_max p_min in
-          record_landmark v ~bound:c_max ~is_upper:true ~dist:(cap_distance d)
+          (match Word.to_int64 c_max with
+           | Ok b ->
+             Printf.eprintf "[LM-RECORD] v=%s bound=%Ld dist=%d is_upper=true\n%!"
+               (Var.name v) b d
+           | _ -> ());
+          record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:true ~dist:(cap_distance d)
         end else ()
-      | _ -> ()
+      | Some _, _, _, _, _ -> ()
 
-(* [lm_calc_steps h]: Listing 3 — return Zero (a landmark still has no
-   second measurement), Finite n (the minimum over landmarks of
-   floor(dist_c / (dist_p - dist_c))), or Inf (no landmark has two
-   measurements). *)
+(* [lm_calc_steps h]: Listing 3 — paper's "calc no. of iterations" arm.
+   Three returns:
+   - `Zero: a landmark still has no second measurement (dist_p is None).
+     The "normal fixpoint computation" should resume so the landmark can
+     acquire its second measurement on the next pass — the user's directive
+     ("widen to the landmark, i.e K!") is satisfied when the FIRST
+     extrapolation fires; this Zero return is the in-between state.
+   - `Finite n: all landmarks have two measurements (dist_p finite).
+     The minimum over landmarks of floor(dist_c / (dist_p - dist_c)) is
+     the closest-landmark rank — the propagation rate that drives
+     Listing 4's extrapolation.
+   - `Inf: no landmarks at all (or no landmark with dist_p finite) —
+     the paper's standard widening applies (the ∞-arm of Listing 4). *)
 let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
   match Hashtbl.find lm_env h with
   | None -> `Inf
@@ -151,6 +175,22 @@ let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
       in
       if List.is_empty finite then `Inf
       else `Finite (List.min_elt finite ~compare:Int.compare |> Option.value_exn)
+
+(* [smallest_bound_for h]: the minimum [bound] of all landmarks recorded for
+   head [h] — the "smallest landmark" the user wants widening to refine to.
+   Used by the `Zero` and `Inf` arms: when the fixpoint is unstable (Zero)
+   or has no landmarks (Inf), widen to this bound so the head NEVER grows
+   past the smallest recorded landmark. The paper's algorithm handles this
+   implicitly (the standard widening applies and the trace-partitioning
+   stabilizes the head); we make it explicit so the user's directive is
+   observable. *)
+let smallest_bound_for (h : Tid.t) : Word.t option =
+  match Hashtbl.find lm_env h with
+  | None | Some [] -> None
+  | Some lst ->
+    let min_w (a : Word.t) (b : Word.t) : Word.t =
+      if Word.compare a b < 0 then a else b in
+    Some (List.fold lst ~init:(List.hd_exn lst).bound ~f:(fun acc e -> min_w acc e.bound))
 
 (* [lm_advance h]: Listing 2 — commit the current distance as the previous
    ([dist_p := dist_c]) and reset [dist_c] to None so the next acquisition

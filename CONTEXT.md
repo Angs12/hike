@@ -23,6 +23,18 @@ _Avoid_: "RSP" string, RBP, frame pointer
 **Relevance Analysis**: The forward-then-backward analysis that tags Stack Accesses and then their Relevance closure.
 _Avoid_: restriction pass, taint, slice pass
 
+**Trace-Partitioning (single-pass)**: Making a block's entry abstract state aware of the branch condition on its incoming edge, so the analysis is branch-sensitive rather than branch-blind; realized as one coupled pass where the deep backward walk runs inline at every conditional GOTO.
+_Avoid_: Phase B, post-pass, `edge_views_of` (deleted), `partitioned_states` (deleted), `edge_view` (deleted)
+
+**Edge-Splitting**: At a conditional jump, computing two refined successor inputs (taken refined by the condition, fallthrough by its negation) and transferring each to its destination block.
+_Avoid_: edge view, branch partition
+
+**Inverse Denotation (Deep Walk)**: The backward derivation of a block's pre-state from a post-edge constraint, via producer subtraction (`cstr' = cstr ∩ post(v)`) and trace-exact cell meets; what `refine_edge` computes inline at each jump.
+_Avoid_: inverse_denote_exp (the shallow production no-op), guard-meet-only
+
+**TAG State**: A per-block abstract state already refined by its incoming edge conditions; in the single-pass design this is simply the block's IN-state in the VSA solution.
+_Avoid_: partitioned state, per-edge view
+
 **100% VSA Tagging Invariant**: Every definition carrying a `Stack Access` tag is guaranteed to have a corresponding `VSA Info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). Untagged stack accesses are prohibited.
 
 ### VSA Classifications

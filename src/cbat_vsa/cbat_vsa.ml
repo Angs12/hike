@@ -1002,7 +1002,7 @@ let meet_var (refineable_var : var -> bool) (env : AI.t)
     else
       let m = WordSet.meet cur refined in
       if Word.is_zero (WordSet.cardinality m) then begin
-        if !Cbat_landmarks.is_lm_sub then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:refined;
+        Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:refined;
         env
       end else if not (WordSet.precedes m cur)
       then env
@@ -2195,6 +2195,64 @@ let same_comparison_group (fg : flag_group) (fv : var) (e : exp)
         end
     end
 
+(* [acquire_unsat_fallthrough ?ctx ?flag_group cond env]: paper-faithful LANDMARK
+   ACQUISITION on the FALLTHROUGH edge of [cond]. Mirrors the trace-partitioning's
+   `edge_constraints_of ~complement:true` semantics: when [flag_state] is
+   available AND the cond matches the recorded 1-bit flag (the canonical
+   `-O0 cmp; jcc` idiom), apply [complement_guard_op] to the recorded
+   op and use [row_for] to derive the per-leaf FALLTHROUGH CLP; otherwise
+   walk the cond's complement via [edge_constraints] (the structural arm
+   of [assume_jump_cond]).
+
+   Fires [observe_unsat_var] (the empty-meet side-effect observer) instead
+   of [meet_var] — does NOT modify [env]. The acquisition is a sound no-op
+   outside any WTO cycle (the [observe_unsat_var] no-op identity per
+   AGENTS.md §3 NO-FALLBACKS).
+
+   This is the SEAM that closes the gap the JLE fixture's "natural join gives
+   K+1 = 101" symptom: for monotonic counter loops the trace-partitioning's
+   TAKEN-edge meets are non-empty (so the forward [meet_var] arm never fires),
+   but the FALLTHROUGH meet of `[0..N]` with the per-leaf fallthrough CLP
+   (e.g. `{K}` for `i != K`, `[K+1..max]` for `i <= K`) is empty as long as
+   the head's upper bound < K — this is the paper's Listing 1 acquisition. *)
+let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
+    ?(flag_group : flag_group option = None)
+    (cond : exp) (env : AI.t) : unit =
+  match ctx with
+  | None -> ()
+  | Some ctx ->
+    (* Mirror the trace-partitioning's complement-flag-state recovery: *)
+    begin match ctx.flag_state with
+    | Some (_fv, bop, e, c)
+      when Option.value_map flag_group ~default:false
+          ~f:(fun fg -> same_comparison_group fg _fv e cond) ->
+      let gop = guard_op_of_binop bop in
+      let op = complement_guard_op gop in
+      (match row_for ~env ?ctx:(Some ctx) e op c with
+       | Some cstr_e ->
+         (match e with
+          | Bil.Var v ->
+            (match Var.typ v with
+             | Type.Imm w ->
+               let cur = AI.find_word w env v in
+               if WordSet.bitwidth cur = w
+               then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:cstr_e
+             | _ -> ())
+          | _ ->
+            List.iter (edge_constraints ~env ~ctx e cstr_e) ~f:(fun seed ->
+              match seed with
+              | Var (v, cstr_leaf) ->
+                (match Var.typ v with
+                 | Type.Imm w ->
+                   let cur = AI.find_word w env v in
+                   if WordSet.bitwidth cur = w
+                   then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:cstr_leaf
+                 | _ -> ())
+              | Cell _ | Infeasible -> ()))
+       | None -> ())
+    | _ -> ()
+    end
+
 (* The Phase B post-pass driver (the trace-partitioning design, docs/trace-partitioning-plan.md §2.2): over the converged forward solution, run a separate taken/exit walk for every conditional edge. *)
 let edge_views_of ?(defs : (def term * bool) Var.Map.t option = None)
     ?(stores : def term list option = None)
@@ -2451,6 +2509,7 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
   let ctx : analysis_ctx =
     { refineable; defs; stores; flag_state; sub; blk } in
   let cond = Jmp.cond jmp in
+  acquire_unsat_fallthrough ~ctx ~flag_group cond env;
   match decoded_condition cond with
   | Some op ->
     (* L-A2 — the jcc-DECODER PRE-STEP (kept, runs FIRST and RETURNS when it fires): the -O0 loop guards are compound flag expressions (jle = `ZF | (SF|OF) & ~(SF&OF)`, jl = `(SF|OF) & ~(SF&OF)`, ja = `~(CF | ZF)`) that match. *)
@@ -2682,7 +2741,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let wto = Cbat_wto.wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
-  Cbat_landmarks.is_lm_sub := String.is_prefix (Sub.name s) ~prefix:"lm_";
   Cbat_landmarks.clear ();
   let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
   let rec collect_heads comps =
@@ -2781,42 +2839,17 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     in
     Core.Map.mapi head_to_blocks ~f:(fun ~key:_ ~data:blocks -> compute_need blocks)
   in
-  (* Landmark acquisition per-head, filtered to need vars - only for LM tests and landmark_loop_1000 to avoid corpus pollution *)
-  if String.is_prefix (Sub.name s) ~prefix:"lm_" then begin
-  let is_guard_op = function Bil.LT | Bil.LE | Bil.EQ | Bil.SLT | Bil.SLE -> true | _ -> false in
-  let rec walk_exp_for_head (head_opt:Tid.t option) (e:exp) : unit =
-    match e with
-    | Bil.BinOp (op, Bil.Var v, Bil.Int w) | Bil.BinOp (op, Bil.Int w, Bil.Var v) when is_guard_op op ->
-      let should_record = match head_opt with
-        | Some h -> (match Core.Map.find need_map h with Some need -> Core.Set.mem need (Var.base v) | None -> false)
-        | None -> false
-      in
-      if should_record then
-        (match head_opt with
-        | Some h ->
-                   let succ = Word.succ w in
-                   if not (Word.is_zero succ) then Cbat_landmarks.record_landmark_for_head ~head:h v ~bound:succ ~is_upper:false ~dist:1
-                   else Cbat_landmarks.record_landmark_for_head ~head:h v ~bound:w ~is_upper:false ~dist:1
-        | None ->
-                  if not (Word.is_zero (Word.succ w)) then Cbat_landmarks.record_landmark v ~bound:(Word.succ w) ~is_upper:false ~dist:1
-                  else Cbat_landmarks.record_landmark v ~bound:w ~is_upper:false ~dist:1)
-    | Bil.BinOp (_, a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
-    | Bil.UnOp (_, a) -> walk_exp_for_head head_opt a
-    | Bil.Cast (_, _, a) -> walk_exp_for_head head_opt a
-    | Bil.Let (_, a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
-    | Bil.Ite (c, a, b) -> walk_exp_for_head head_opt c; walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
-    | Bil.Extract (_, _, a) -> walk_exp_for_head head_opt a
-    | Bil.Concat (a, b) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
-    | Bil.Load (_, a, _, _) -> walk_exp_for_head head_opt a
-    | Bil.Store (_, a, b, _, _) -> walk_exp_for_head head_opt a; walk_exp_for_head head_opt b
-    | _ -> ()
-  in
-  Term.enum blk_t s |> Seq.iter ~f:(fun blk ->
-    let head_opt = Hashtbl.find block_to_head (Term.tid blk) in
-    Term.enum def_t blk |> Seq.iter ~f:(fun d -> walk_exp_for_head head_opt (Def.rhs d));
-    Term.enum jmp_t blk |> Seq.iter ~f:(fun jmp -> walk_exp_for_head head_opt (Jmp.cond jmp))
-  );
-  end;
+  (* Landmark acquisition is the PAPER-FAITHFUL seam in [observe_unsat_var]
+     (cbat_vsa.ml meet_var's empty-meet arm): every empty [meet_var] records
+     a (bound, dist) landmark to the enclosing WTO head via
+     [Cbat_landmarks.record_landmark_for_head]. The OLD BIL-pattern-matching
+     acquisition walk (deleted) violated AGENTS.md §8 / CONTEXT.md
+     ("Never write structural `match` patterns over BIL constructors ...
+     use `Exp.visitor` exclusively") AND only recorded once per guard
+     constant, never the per-iterate measurement the paper's Listing 1
+     requires (dist_p ← dist_c on each pass; finite-steps extrapolation
+     needs two measurements). The meet-var path operates on the abstract
+     WordSet only — §8-clean by construction. *)
   (* Hike addition (docs/widening-thresholds-plan.md): the per-sub threshold ladders. *)
   let thresholds = Cbat_thresholds.collect s in
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
@@ -2850,48 +2883,37 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     in
     let new_val =
       if List.is_empty preds then old
-      else if Core.Set.mem heads v && !total_processed > 10 then
-        if !Cbat_landmarks.is_lm_sub then begin
-          let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
-          Cbat_landmarks.widening_at_head := Some v;
-          Cbat_landmarks.lm_advance v;
-          (* [lm_calc_steps] returns [Zero] when a landmark is awaiting its
-             second measurement and [Inf] when no landmark has two
-             measurements; in both cases the paper's extrapolation cannot
-             yet produce a finite steps estimate, so we let the analysis
-             make another pass to acquire the second measurement (join).
-             Only a [Finite n] result drives the extrapolate path. *)
-          let res = match Cbat_landmarks.lm_calc_steps v with
-            | `Finite n ->
-              AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming
-            | `Zero ->
-              (* A new landmark was added in the last traversal (its dist_p
-                 is still infinity); the paper's left branch of Figure 3
-                 takes "normal fixpoint computation" and lets the analysis
-                 make another pass so this landmark can acquire a second
-                 measurement. The natural join converges when the
-                 trace-partitioning's taken-edge refinement bounds the
-                 body. *)
-              AI.join old incoming
-            | `Inf ->
-              (* No landmarks have been acquired at all for this cycle;
-                 the paper's right branch of Figure 3 applies standard
-                 widening (Cousot-Halbwachs, the ∞-arm of Listing 4).
-                 The head's bound widens to TOP in finite steps; the
-                 trace-partitioning's taken-edge refinement still bounds
-                 the live range on the guard's positive side. The
-                 previous [AI.join] here was unsound for unbounded-growth
-                 loops (the natural join diverges). *)
-              AI.widen_join old incoming
-          in
-          Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
-          Cbat_landmarks.widening_at_head := None;
-          res
-        end else begin
-          let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
-          Cbat_ai_representation.selective_widen_join_threshold ~head:(Some v) thresholds ~need old incoming
-        end
-      else
+      else if Core.Set.mem heads v && !total_processed > 10 then begin
+        (* Landmark-directed widening (Simon & King, APLAS 2006, Figure 3)
+           — the production path for ALL subs (the per-sub [lm_*] gate
+           was deleted; landmark bounds only TIGHTEN the threshold ladder
+           via [min_extra = min of extras ++ geometric] in
+           [selective_widen_join_threshold], so acquisition on real
+           binaries is safe):
+           - `Finite n` from [lm_calc_steps] selects Listing 4 extrapolation
+             (the paper's "extrapolate" arm).
+           - `Zero` resumes normal fixpoint computation so the landmark can
+             acquire its second measurement on the next pass.
+           - `Inf` (no landmarks yet) widens AT the threshold ladder — the
+             per-sub finite ladder (strictly better than Cousot-Halbwachs
+             which widens to TOP, and the user's directive says "widen to
+             the landmark" — the threshold ladder is the sound finite
+             fallback when no landmarks have fired). *)
+        let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
+        Cbat_landmarks.widening_at_head := Some v;
+        Cbat_landmarks.lm_advance v;
+        let res = match Cbat_landmarks.lm_calc_steps v with
+          | `Finite n ->
+            AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming
+          | `Zero ->
+            AI.join old incoming
+          | `Inf ->
+            Cbat_ai_representation.selective_widen_join_threshold ~head:(Some v) thresholds ~need old incoming
+        in
+        Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
+        Cbat_landmarks.widening_at_head := None;
+        res
+      end else
         AI.join old incoming
     in
     if not (AI.equal old new_val) then (set v new_val; true) else false
