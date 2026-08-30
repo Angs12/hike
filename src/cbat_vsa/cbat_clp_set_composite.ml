@@ -240,11 +240,6 @@ let widen_join t1 t2 : t = bound_set_size @@
 let extrapolate_steps ~steps t1 t2 : t = bound_set_size @@
   Clp (Clp.extrapolate_steps ~steps (as_clp t1) (as_clp t2))
 
-(* Thresholded widening (docs/widening-thresholds-plan.md) — the composite-level mirror of [Clp.widen_join_threshold]; the bounded result collapses back to a FinSet via [bound_set_size] when it has <= [Utils.fin_set_size] elements (exact-ish), preserving the composite invariant. *)
-let widen_join_threshold (ladder : word list) t1 t2 : t =
-  bound_set_size @@
-  Clp (Clp.widen_join_threshold ladder (as_clp t1) (as_clp t2))
-
 let join = union
 let meet = intersection
 let bottom i = FinSet (FinSet.bottom i)

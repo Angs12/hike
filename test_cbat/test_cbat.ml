@@ -28,12 +28,6 @@ module W = Word
 module Clp = Cbat_clp
 module Fs = Cbat_fin_set
 
-(* Compatibility shims for old API removed in landmark port *)
-module Shim = struct
-  let selective_widen_stub ~need ~reach_mem a b = Cbat_vsa.AI.join a b
-  let selective_widen_extrapolate_stub ~need ~reach_mem ~steps a b = Cbat_vsa.AI.join a b
-end
-
 module Wo = Cbat_word_ops
 module Ws = Cbat_clp_set_composite
 
@@ -1000,20 +994,20 @@ let () =
   check "EX1: widen_join contains join (extrapolate stub)" (Clp.subset g9 r1);
   check "EX1b: the extrapolation contains the join (soundness)" (Clp.subset g9 r1);
   let r2 = Clp.widen_join q9 g9 in
-  check "EX2: widen_join sound (stub for steps=0)" (Clp.subset g9 r2);
+  check "EX2: widen_join sound" (Clp.subset g9 r2);
   let d1 = Clp.create (W.neg (w32 16)) ~step:(w32 8) ~cardn:(w32 1) in
   let d2 = Clp.create (W.neg (w32 24)) ~step:(w32 8) ~cardn:(w32 2) in
   let r3 = Clp.widen_join d1 d2 in
-  check "EX3: widen_join sound (stub)" (Clp.subset d2 r3);
-  check "EX4: widen_join idempotent (stub)" (Clp.equal (Clp.widen_join g9 g9) g9);
+  check "EX3: widen_join sound" (Clp.subset d2 r3);
+  check "EX4: widen_join idempotent" (Clp.equal (Clp.widen_join g9 g9) g9);
   let big1 = Clp.interval ~width:64 (w64 0) (Word.of_int ~width:64 0x100000000) in
   let big2 = Clp.interval ~width:64 (w64 0) (Word.of_int ~width:64 0x10000000000) in
   let r5 = Clp.widen_join big1 big2 in
-  check "EX5: widen_join sound (stub)" (Clp.subset big2 r5);
+  check "EX5: widen_join sound" (Clp.subset big2 r5);
   let s1 = Clp.interval ~width:32 (w32 0) (w32 0) in
   let s2 = Clp.create (w32 0) ~step:(w32 3) ~cardn:(w32 2) in
   let r6 = Clp.widen_join s1 s2 in
-  check "EX6: widen_join sound (stub)" (Clp.subset s2 r6);
+  check "EX6: widen_join sound" (Clp.subset s2 r6);
   ()
 
 (* --- 11. Phase 2 change E1: the SP anchor (set_stack_0) ---------------- REMOVED (the
@@ -7024,9 +7018,7 @@ let () =
       cfg
   in
   check "property R7 solution: every cycle block's materialized value is the transferred constant"
-    (Graphlib.Std.Solution.get sol a_tid = 42 && Graphlib.Std.Solution.get sol b_tid = 42);
-  check "property R7 rounds: the constant-transfer cycle converges BEFORE the 256-step cap (stub)"
-    true
+    (Graphlib.Std.Solution.get sol a_tid = 42 && Graphlib.Std.Solution.get sol b_tid = 42)
 
 (* --- 32. R12/G4 region-split emission (Stage 1/2) --------------- *)
 (* The emitter's Stage-1 gate and Stage-2a size logic are pure predicates
@@ -7687,10 +7679,11 @@ let () =
    fixpoint pass.
 
    F1 RED baseline (captured pre-fix, this exact fixture): the counter's head-state bound converged
-   to 127 (the geometric rung 8*2^4-1 — K=100 sits between rungs); post-fix it converges at exactly
-   K+1 = 101, the TRUE least fixpoint of the loop. (The header's failing comparison executes with i
-   = K+1, so "head <= K" is not satisfiable by ANY sound analysis AT THE HEAD; the honest <= K
-   property lives on the guard-continue edge and is asserted via the taken view.) *)
+   to 127 (the geometric rung 8*2^4-1 — K=100 sits between rungs). The current behavior is pinned by
+   the F1 test below (head = TOP via the ∞-arm, sound) and the F1-NEQ test (head max = K exactly, the
+   landmark Finite path firing end-to-end). (The header's failing comparison executes with i = K+1, so
+   "head <= K" is not satisfiable by ANY sound analysis AT THE HEAD; the honest <= K property lives on
+   the guard-continue edge and is asserted via the taken view.) *)
 
 (* [lm_jle_loop ~k1 ?k2]: the corpus jle shape (mk_l39_loop's register- counter variant), chained
    over TWO loops sharing one counter when [k2] is given: ENTRY i:=0; L1: cmp i,k1 flags; jle B1
@@ -7834,25 +7827,22 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   let sub = tag_all (Sub.Builder.result sub_b) in
   (sub, l1_tid, b1_tid)
 
-(* F1 (property LM): the head-widening machinery converges per Simon & King
-   Figure 3. For the K=100 counter loop, the spec's design expects the head
-   bound to land at K+1 = 101 (the true least fixpoint). This requires
-   landmarks to be acquired at the guard's negative side, which for the
-   current trace-partitioning design happens via the empty-meet path in
-   [meet_var] / [observe_unsat_var]. With the current implementation, the
-   trace-partitioning's [assume_jump_cond] refines the var directly to the
-   guard's positive range on the taken edge — the meet is never empty, no
-   landmarks are recorded, and [lm_calc_steps] returns [Inf]. Per the
-   paper's Figure 3 right branch, [Inf] applies standard widening
-   ([Cousot-Halbwachs]), so the head widens to TOP. Per the user's
-   directive "When landmarks fail just widen to TOP!" — the LANDMARK path
-   is the widening path; the threshold ladder is gone; the head widens to
-   TOP in finite steps. The K+1 = 101 bound is the LM F1 IDEAL; the
-   trace-partitioning's taken-edge refinement achieves it on the LIVE
-   RANGE when the head is finite. When the head is TOP, the taken view's
-   bound is lost too (the assume_jump_cond refine on TOP is itself TOP in
-   the CLP sense — the whole-domain lattice join identity). This is the
-   sound, expected behavior. *)
+(* F1 (property LM): the head-widening machinery per Simon & King Figure 3 —
+   the JLE-counter fixture `for (i = 0; i <= K; i++)` (K=100). The guard's
+   FALLTHROUGH acquisition fires: while the head is [0..N] with N < K, the
+   complement [i >= K] row meets it to BOTTOM, recording K with its distance
+   ([observe_unsat_var]'s empty-meet path), and the Finite arm extrapolates
+   the head onto the landmark. The head STILL lands at TOP, for a different
+   reason than pre-②: the JLE TAKEN row is [0..K] INCLUSIVE (the <= guard has
+   no point-exclusion), so the body's i++ pushes the head to K+1; the next
+   unstable visit — the landmark table having been cleared by the Finite arm
+   (Q3=C) and no new empty meet forming (the fallthrough meet is {K} once the
+   head contains K) — takes the paper's ∞-arm: plain [widen_join] to TOP
+   (Cousot-Halbwachs). The K+1 = 101 least fixpoint needs a re-acquisition
+   seam (the landmark surviving into the overshoot visit) — a precision lane,
+   not the current behavior. This test pins only the sound invariants (the
+   head's lower bound, and the taken view's lower bound); F1-NEQ below is the
+   fixture whose guard DOES refine exactly, and it pins max == K. *)
 let () =
   let sub, l1_tid, b1_tid, _ = lm_jle_loop ~k1:(w32 100) () in
   let prog' = Program.create ~subs:[ sub ] () in
@@ -7861,10 +7851,6 @@ let () =
   in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-  (* the head widens per the paper's Figure 3 — either by finite-step
-     landmark extrapolation (when landmarks are present, the K+1 ideal) or
-     by standard widening to TOP (the ∞-arm, the sound over-approximation).
-     Both are sound. *)
   check
     "property LM F1: the head's lower bound is the entry constant 0"
     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
@@ -7880,14 +7866,14 @@ let () =
    `while (i != K) i++`. The trace-partitioning's taken-edge refinement is
    the two-piece `TOP - {K}` arc, which cannot bound the head's upper end
    — the body always increments, so the head's natural join grows without
-   bound. Landmarks are the precision mechanism (the paper's Listing 1).
-   The standard x86 codegen emits the flag-state recovery binding `(zf, EQ,
-   (i - K == 0), 0)` — the [acquire_unsat_fallthrough] flag-state arm
-   extracts the (lm_ne_i, EQ, K) inequality via the MINUS operand row.
-   Today this is a SOUNDNESS SMOKE TEST: the head's lower bound (entry
-   constant) is asserted; the landmark extrapolation target (max = K) is
-   left as future work pending the indirect-cmp-form flag-state recovery
-   translation (the temp `lm_ne_t` vs program `lm_ne_i` mismatch). *)
+   bound. Landmarks are the ONLY precision mechanism (the paper's
+   Listing 1/3/4 chain): the guard's disabled fallthrough records the
+   excluded boundary (i = K) as a landmark; the second traversal measures
+   the growth; [lm_calc_steps] returns Finite; Listing 4 extrapolates the
+   head's upper bound ONTO the landmark. THE ACCEPTANCE TEST of the
+   Finite-fires-end-to-end lane: the head lands at [0, K] (max == K) —
+   the paper's Q10 example shape. The lower bound (the entry constant)
+   is the soundness floor. *)
 let () =
   let k = w32 100 in
   let sub, l1_tid, _ = lm_jne_loop ~k () in
@@ -7897,13 +7883,12 @@ let () =
   in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-  (* The head's lower bound (entry constant) is asserted — landmarks are
-     sound for this property (the natural join's lower end is stable). The
-     upper bound via landmark extrapolation is the future-work precision
-     lane for indirect-cmp flag-state forms. *)
   check
     "property LM F1-NEQ: the head's lower bound is the entry constant 0"
     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+  check
+    "property LM F1-NEQ: the head's upper bound is the landmark K (Finite extrapolation fired end-to-end)"
+    (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
   ()
 
 (* F2a (unit): landmark CONSUMPTION semantics at the CLP level — [Clp.widen_join] translates
@@ -7913,26 +7898,22 @@ let () =
   let p1 = Clp.interval ~width:32 (w32 0) (w32 100) in
   let p2 = Clp.interval ~width:32 (w32 0) (w32 101) in
   let r = Clp.widen_join p1 p2 in
-  check "property LM F2a: widen_join sound (stub)" (Clp.subset p2 r);
-  check "property LM F2a: widen_join sound 2 (stub)" (Clp.subset p2 r);
-  check "property LM F2a: widen_join sound 3 (stub)" (Clp.subset p1 r);
-  check "property LM F2a: widen_join sound 4 (stub)" (Clp.subset p2 r);
-  check "property LM F2a: widen_join sound 5 (stub)" (Clp.subset p1 r);
-  ()
-let () =
-  (* F2b stub: old selective_widen API consolidated *)
-  check "property LM F2b: selective_widen stub" true;
-  check "property LM F2b: selective_widen stub 2" true;
-  check "property LM F2b: selective_widen stub 3" true;
+  check "property LM F2a: widen_join sound" (Clp.subset p2 r);
+  check "property LM F2a: widen_join sound 2" (Clp.subset p2 r);
+  check "property LM F2a: widen_join sound 3" (Clp.subset p1 r);
+  check "property LM F2a: widen_join sound 4" (Clp.subset p2 r);
+  check "property LM F2a: widen_join sound 5" (Clp.subset p1 r);
   ()
 (* F2c (property): ACQUISITION + PER-CYCLE scoping END-TO-END — two sequential
-    loops sharing one counter, guarded at TWO bounds (40, 100). Per the user's
-    directive ("When landmarks fail just widen to TOP!") the LANDMARK path's
-    [Inf] arm gives TOP; the precise K+1 = 41 / K+1 = 101 is the IDEAL when
-    landmarks fire. With the current acquisition, the meet is never empty
-    (the trace-partitioning refines the var directly), so landmarks never
-    fire and the heads widen to TOP. The sound over-approximation is
-    accepted; the K+1 ideal is a separate precision lane. *)
+    loops sharing one counter, guarded at TWO bounds (40, 100). Both heads
+    land at TOP by the same JLE mechanism as F1 (the leap comment): the
+    fallthrough acquisition fires and the Finite arm extrapolates onto each
+    loop's own landmark, but the inclusive <= taken row lets the body
+    overshoot, the cleared table (Q3=C) leaves the next unstable visit on the
+    [Inf] arm, and plain [widen_join] widens to TOP (sound). The per-cycle
+    scoping is what these assertions pin: each head's landmarks (and hence its
+    Finite extrapolation) are scoped to its OWN WTO cycle, so both loops
+    acquire independently; the lower bounds (0) are the sound invariants. *)
 let () =
   let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
   let prog' = Program.create ~subs:[ sub ] () in

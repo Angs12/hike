@@ -32,7 +32,7 @@ module type S_indexed = sig
 
   include Lattice.S_indexed with type t := t and type idx := idx
 
-  (* widening with a caller-supplied per-key operator (the thresholded widen, docs/widening-thresholds-plan.md). *)
+  (* widening with a caller-supplied per-key operator (the old thresholded widen is gone). *)
   val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
 
   (* replaces the value at the given key with the meet of it and the new input value. *)
@@ -55,7 +55,7 @@ module type S = sig
 
   include Lattice.S with type t := t
 
-  (* widening with a caller-supplied per-key operator (the thresholded widen, docs/widening-thresholds-plan.md). *)
+  (* widening with a caller-supplied per-key operator (the old thresholded widen is gone). *)
   val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
 
   (* replaces the value at the given key with the meet of it and the new input value. *)
@@ -140,7 +140,9 @@ module Make_indexed_from_map
 
   let join : t -> t -> t = lift_join (join' L.join)
   let widen_join = lift_join (join' L.widen_join)
-  (* hike addition (docs/widening-thresholds-plan.md): widening with a caller-supplied per-key operator — the thresholded widen rides through this. *)
+  (* hike addition: widening with a caller-supplied per-key operator (the
+     per-head landmark extrapolation rides through this; the thresholded
+     widen is gone). *)
   let widen_join_op (w : L.t -> L.t -> L.t) : t -> t -> t = lift_join (join' w)
 
   let op_add op (m : map) ~key:key ~data:data : t =

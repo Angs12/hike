@@ -48,8 +48,6 @@ module Val : sig
   val join_at : idx -> t -> t -> t
   val meet_at : idx -> t -> t -> t
 
-  (* hike addition (docs/widening-thresholds-plan.md): thresholded cell widen. *)
-  val widen_join_threshold : (int * word list) list -> t -> t -> t
 
   val join_poly : t -> t -> t
   val meet_poly : t -> t -> t
@@ -72,5 +70,3 @@ val meet_range : t -> key:Key.t -> data:Val.t -> t
 (* Hike addition (the call-abstraction precision lane): the caller-frame-preserving call abstraction — keep every cell whose key is >= [keep_lo] (the caller's own locals; the callee's frame is below the call-time RSP) and. *)
 val call_keep : t -> keep_lo:Bap.Std.word -> escape:(Bap.Std.word * Bap.Std.word) list -> t
 
-(* hike addition (docs/widening-thresholds-plan.md): thresholded memory widen — [ladders] is the per-bitwidth rung ladder assoc. *)
-val widen_join_threshold : (int * word list) list -> t -> t -> t

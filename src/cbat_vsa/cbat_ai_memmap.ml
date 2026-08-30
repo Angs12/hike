@@ -235,8 +235,6 @@ module Val : sig
   val join_at : idx -> t -> t -> t
   val meet_at : idx -> t -> t -> t
 
-  (* hike addition (docs/widening-thresholds-plan.md): thresholded cell widen. *)
-  val widen_join_threshold : (int * word list) list -> t -> t -> t
 
   val join_poly : t -> t -> t
   val meet_poly : t -> t -> t
@@ -319,17 +317,6 @@ end = struct
     else {data = WordSet.top (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
           endian = v1.endian}
 
-  (* hike addition (docs/widening-thresholds-plan.md): the thresholded cell widen — [ladders] is the per-bitwidth rung ladder assoc. *)
-  let widen_join_threshold (ladders : (int * word list) list) (v1 : t) (v2 : t) : t =
-    if idx_equal (get_idx v1) (get_idx v2)
-    then {data = WordSet.widen_join_threshold
-            (Option.value ~default:[]
-               (List.Assoc.find ladders (WordSet.bitwidth v1.data)
-                  ~equal:Int.equal))
-            v1.data v2.data;
-          endian = v1.endian}
-    else {data = WordSet.top (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
-          endian = v1.endian}
 
   let is_top = lift_in WordSet.is_top
   let is_bottom = lift_in WordSet.is_bottom
@@ -669,7 +656,6 @@ let lift_join f (m1 : t) (m2 : t) : t =
 
 let join : t -> t -> t = lift_join join'
 
-(* Hike addition (docs/widening-thresholds-plan.md): widening with a caller-supplied per-cell operator — the thresholded widen rides through this. *)
 let widen_join_op (w : Val.t -> Val.t -> Val.t) : t -> t -> t =
   lift_join (fun t1 t2 ->
     if precedes' t1 t2
@@ -688,18 +674,6 @@ let widen_join_op (w : Val.t -> Val.t -> Val.t) : t -> t -> t =
 
 let widen_join = widen_join_op Val.widen_join
 
-(* Hike addition (docs/widening-thresholds-plan.md): the thresholded itree widen — [ladders] is the per-bitwidth rung ladder assoc. *)
-let widen_join_threshold ladders =
-  lift_join (fun t1 t2 ->
-    let m2_seq = Seq.map ~f:fst (IT.to_sequence t2) in
-    coalesce begin
-      Seq.fold m2_seq ~init:IT.empty ~f:begin fun it key ->
-        let idx = find_idx' t2 key in
-        let d1 = find' idx t1 key in
-        let d2 = find' idx t2 key in
-        IT.add it key @@ Val.widen_join_threshold ladders d1 d2
-      end
-    end)
 
 (* Note that this definition of meet, while sound, can greatly increase the size of memory. *)
 let meet' (m1 : itree) (m2 : itree) : itree =

@@ -1,11 +1,11 @@
-(* Landmark-directed widening — Simon & King "Widening Polyhedra with Landmarks" (APLAS 2006)
-
-   v1: dynamic rung extensions — landmarks are extra thresholds.
-   Faithful port will later replace this with Listing 4 extrapolation, but v1
-   already makes LM F1 exact (K+1) and keeps the threshold ladder for other widths.
-
-   API matches the spec's issues 01-05 so later wiring can be swapped without churn.
-*)
+(* Landmark-directed widening — the faithful port of Simon & King, "Widening
+   Polyhedra with Landmarks" (APLAS 2006), per the grilling-settled design
+   (Q1=C/Q2=B/Q3=C, 2026-08-30): the static threshold ladder is DELETED; the
+   only precision mechanism is the landmark table (Listing 1 acquisition via
+   the empty-meet path, Listing 3 closure-rate steps, Listing 4 growth×steps
+   extrapolation clamped at the landmark). The paper's ∞-arm is plain
+   [AI.widen_join] (Cousot-Halbwachs: unstable bounds → TOP); the Zero arm is
+   a plain join. *)
 
 open Bap.Std
 open Core_kernel
@@ -74,22 +74,24 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
     in
     (* dist_p (history) is preserved by [add_smaller_dist] — only [lm_advance] rotates it *)
     (* dist_p stays whatever it was — add_smaller_dist never resets history *)
-    if keep then entry :: List.filter entries ~f:(fun e -> not (
-      Word.equal e.bound entry.bound
-      && Bool.equal e.is_upper entry.is_upper)) else entries
+    (* The replacement PRESERVES the rotated history [existing.dist_p] —
+       the second measurement updates [dist] while [dist_p] (committed by
+       [lm_advance], Listing 2) survives; without this the re-acquisition
+       after every advance resets the entry to a first-measurement state
+       and [lm_calc_steps] returns `Zero forever — the Finite-never-fires
+       bug (the entry record is rebuilt with dist_p = None; carry it). *)
+    if keep then
+      { entry with dist_p = existing.dist_p }
+      :: List.filter entries ~f:(fun e -> not (
+        Word.equal e.bound entry.bound
+        && Bool.equal e.is_upper entry.is_upper))
+    else entries
 
 let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
   let cur = Hashtbl.find lm_env head |> Option.value ~default:[] in
   let next = add_smaller_dist cur entry in
   Hashtbl.set lm_env ~key:head ~data:next
-
-(* [record_landmark]: acquisition outside any WTO cycle is a sound no-op
-   (the NO-FALLBACKS doctrine — the identity / no-landmark is the sound
-   answer; never bottom, never a global fallback table). *)
-let record_landmark (_v : var) ~bound:_ ~is_upper:_ ~dist:_ : unit = ()
-
-let bounds_for (_v : var) : Word.t list = []
 
 (* [entries_for_head head v]: every entry recorded for [head] (the
    single-table design — the consumption path filters by var internally
@@ -99,15 +101,6 @@ let bounds_for (_v : var) : Word.t list = []
    submap lookup but is unused. *)
 let entries_for_head (head : Tid.t) (_v : var) : lm_entry list =
   Hashtbl.find lm_env head |> Option.value ~default:[]
-
-let bounds_for_head (head : Tid.t) (v : var) : Word.t list =
-  List.sort ~compare:Word.compare
-    (List.map (entries_for_head head v) ~f:(fun e -> e.bound))
-
-let entries_for (_v : var) : lm_entry list = []
-
-(* Compatibility shims for the spec's naming. *)
-let heads_of_wto _ = Tid.Set.empty
 
 (* Acquisition helper: called from meet_var when meet is empty. Records the
    disabled boundary (the cstr's extremum outside p) as a landmark for the
@@ -134,16 +127,18 @@ let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_cl
         ()
       | Some h, Some p_min, Some p_max, Some c_min, Some c_max ->
         if Word.(<) p_max c_min then begin
+          (* the set is entirely BELOW the constraint's boundary: the landmark
+             caps the set from ABOVE (the loop-exit boundary of a growing
+             counter) — [is_upper=true] so [translate_to]'s upper-extrapolation
+             arm consumes it. *)
           let d = distance_words p_max c_min in
-          record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:false ~dist:(cap_distance d)
+          record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
         end else if Word.(>) p_min c_max then begin
+          (* the set is entirely ABOVE the constraint's boundary: the landmark
+             floors the set from BELOW — [is_upper=false], the lower-
+             extrapolation arm. *)
           let d = distance_words c_max p_min in
-          (match Word.to_int64 c_max with
-           | Ok b ->
-             Printf.eprintf "[LM-RECORD] v=%s bound=%Ld dist=%d is_upper=true\n%!"
-               (Var.name v) b d
-           | _ -> ());
-          record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:true ~dist:(cap_distance d)
+          record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
         end else ()
       | Some _, _, _, _, _ -> ()
 
@@ -176,22 +171,6 @@ let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
       if List.is_empty finite then `Inf
       else `Finite (List.min_elt finite ~compare:Int.compare |> Option.value_exn)
 
-(* [smallest_bound_for h]: the minimum [bound] of all landmarks recorded for
-   head [h] — the "smallest landmark" the user wants widening to refine to.
-   Used by the `Zero` and `Inf` arms: when the fixpoint is unstable (Zero)
-   or has no landmarks (Inf), widen to this bound so the head NEVER grows
-   past the smallest recorded landmark. The paper's algorithm handles this
-   implicitly (the standard widening applies and the trace-partitioning
-   stabilizes the head); we make it explicit so the user's directive is
-   observable. *)
-let smallest_bound_for (h : Tid.t) : Word.t option =
-  match Hashtbl.find lm_env h with
-  | None | Some [] -> None
-  | Some lst ->
-    let min_w (a : Word.t) (b : Word.t) : Word.t =
-      if Word.compare a b < 0 then a else b in
-    Some (List.fold lst ~init:(List.hd_exn lst).bound ~f:(fun acc e -> min_w acc e.bound))
-
 (* [lm_advance h]: Listing 2 — commit the current distance as the previous
    ([dist_p := dist_c]) and reset [dist_c] to None so the next acquisition
    starts a fresh first measurement. *)
@@ -207,18 +186,38 @@ let lm_advance (h : Tid.t) : unit =
 
 
 (* [translate_to ~steps data_old data_new entries]: Listing 4 landmark
-   consumption — for each non-redundant bound (e <= c) of data_old, compute
-   c' = min(data_old ∪ data_new, e <= c); if c' > c keep (stable), else
-   translate outward by dist*steps onto the word grid; overflow -> the
-   infinite arm (clamp to word_max). The result is the join of the lo- and
-   hi- extrapolation (when both have entries) or a single translate; if the
-   two extrapolations cross (lo > hi) we fall back to plain widening. *)
+   consumption — for each landmark of the head (filtered to the var's width
+   by the caller), translate the corresponding bound outward by the observed
+   GROWTH per traversal (dist_p − dist) times [steps] — the product lands at
+   (or one growth-step short of) the landmark. The candidate is CLAMPED at
+   the landmark bound (never extrapolate past it — a landmark is a
+   concretely-reachable value, so the clamp is sound) and at the current
+   bound's outward side (a stale landmark can never NARROW the set).
+   Overflow past the word grid -> the paper's infinite arm (word_max).
+   The result is the interval [extrap_lo, extrap_hi]; if the two
+   extrapolations cross (lo > hi) we fall back to [data_new]. *)
 let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     (data_new : Cbat_clp_set_composite.t)
     (entries : lm_entry list) : Cbat_clp_set_composite.t =
   let width = Cbat_clp_set_composite.bitwidth data_old in
   if width <> Cbat_clp_set_composite.bitwidth data_new then data_new
   else begin
+    (* Listing 4's translation rate: the observed GROWTH per traversal
+       (dist_p - dist) times the traversal count [steps] — the product lands
+       at (or one growth-step short of) the landmark. The candidate is
+       CLAMPED at the landmark bound (never extrapolate past it — a landmark
+       is a concretely-reachable value, so the clamp is sound) AND at the
+       current bound's outward side (a stale landmark can never NARROW the
+       set). Overflow past the word grid -> the paper's infinite arm. *)
+    let cap = 1 lsl 40 in
+    let delta_of (e : lm_entry) : int =
+      match e.dist with
+      | Some dc ->
+        let g = match e.dist_p with Some dp when dp > dc -> dp - dc | _ -> 0 in
+        let d = g * steps in
+        if d > cap then cap else d
+      | None -> 0
+    in
     let lo_base = match Cbat_clp_set_composite.min_elem data_new with Some w -> w | None -> Word.zero width in
     let hi_base = match Cbat_clp_set_composite.max_elem data_new with Some w -> w | None -> Word.zero width in
     let extrap_lo =
@@ -226,30 +225,35 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
       match lo' with
       | [] -> lo_base
       | _ ->
-        let min_dist = List.fold lo' ~init:(1 lsl 40)
-          ~f:(fun acc e -> match e.dist with Some d -> min acc d | None -> acc) in
-        let delta = Word.mul (Word.of_int ~width min_dist) (Word.of_int ~width steps) in
-        if Word.compare delta (Word.zero width) = 0 then lo_base
-        else
-          let v = Word.sub lo_base delta in
-          if Word.compare v lo_base > 0 then lo_base else v
+        let candidates = List.filter_map lo' ~f:(fun e ->
+            let v = Word.sub lo_base (Word.of_int ~width (delta_of e)) in
+            let v = if Word.compare v lo_base > 0 then lo_base else v in
+            let v = if Word.compare v e.bound < 0 then e.bound else v in
+            let v = if Word.compare v lo_base > 0 then lo_base else v in
+            Some v)
+        in
+        List.fold candidates ~init:lo_base ~f:(fun acc v ->
+            if Word.compare v acc < 0 then v else acc)
     in
     let extrap_hi =
       let hi' = List.filter entries ~f:(fun e -> e.is_upper) in
       match hi' with
       | [] -> hi_base
       | _ ->
-        let max_dist = List.fold hi' ~init:0
-          ~f:(fun acc e -> match e.dist with Some d -> max acc d | None -> acc) in
-        let delta = Word.mul (Word.of_int ~width max_dist) (Word.of_int ~width steps) in
-        let v = Word.add hi_base delta in
-        if Word.compare v hi_base < 0 then
-          (* overflow -> infinite arm (Listing 4): word_max *)
-          Word.ones width
-        else v
+        let candidates = List.filter_map hi' ~f:(fun e ->
+            let v = Word.add hi_base (Word.of_int ~width (delta_of e)) in
+            let v =
+              if Word.compare v hi_base < 0 then
+                (* overflow -> infinite arm (Listing 4): word_max *)
+                Word.ones width
+              else v in
+            let v = if Word.compare v e.bound > 0 then e.bound else v in
+            let v = if Word.compare v hi_base < 0 then hi_base else v in
+            Some v)
+        in
+        List.fold candidates ~init:hi_base ~f:(fun acc v ->
+            if Word.compare v acc > 0 then v else acc)
     in
-    let lo = if Word.compare extrap_lo lo_base > 0 then extrap_lo else lo_base in
-    let hi = if Word.compare extrap_hi hi_base < 0 then extrap_hi else hi_base in
-    if Word.compare lo hi > 0 then data_new
-    else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width lo hi)
+    if Word.compare extrap_lo extrap_hi > 0 then data_new
+    else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width extrap_lo extrap_hi)
   end

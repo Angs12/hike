@@ -1113,50 +1113,6 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
       | _ -> widen_join p1 p2
   else join p1 p2
 
-(* Thresholded widening (hike addition — the Astrée-style bounded extrapolation; docs/widening-thresholds-plan.md). *)
-let widen_join_threshold (ladder : word list) (p1 : t) (p2 : t) : t =
-  if subset p1 p2 then
-    if equal p1 p2 then p1
-    else if is_infinite p2 then infinite ((base_of p2), (step_of p2))
-    else
-      match min_elem p2, max_elem p2 with
-      | None, _ | _, None -> infinite ((base_of p2), (step_of p2))
-      | Some lo, Some hi ->
-        let lo_unstable, hi_unstable =
-          match min_elem p1, max_elem p1 with
-          | Some lo1, Some hi1 ->
-            W.compare lo lo1 < 0, W.compare hi hi1 > 0
-          | _ -> false, false
-        in
-        let width = bitwidth p2 in
-        let half = dom_size ~width (width - 1) in
-        (* Strict rung search. Max side: the first rung [hi <= r <= half] whose lattice floor lands strictly above [hi]. Min side: the first rung [half < r <= lo] (scanning descending) whose lattice ceil lands strictly below [lo]. Past the hemisphere boundary the search stops (None). *)
-        let rec find_hi = function
-          | [] -> None
-          | r :: rest ->
-            if W.compare r hi < 0 then find_hi rest
-            else if W.compare r half > 0 then None
-            else
-              let f = nearest_inf_pred r (base_of p2) (step_of p2) in
-              if W.compare f hi > 0 then Some f else find_hi rest
-        and find_lo = function
-          | [] -> None
-          | r :: rest ->
-            if W.compare r lo > 0 then find_lo rest
-            else if W.compare r half <= 0 then None
-            else
-              let c = nearest_inf_succ r (base_of p2) (step_of p2) in
-              if W.compare c lo < 0 then Some c else find_lo rest
-        in
-        let lo' = if lo_unstable then find_lo (List.rev ladder)
-          else Some lo in
-        let hi' = if hi_unstable then find_hi ladder else Some hi in
-        (match lo', hi' with
-         | Some lo', Some hi' ->
-           create lo' ~step:(step_of p2)
-                      ~cardn:(cardn_from_bounds lo' (step_of p2) hi')
-         | _ -> infinite (base_of p2, step_of p2))
-  else join p1 p2
 
 (* Implement the Value interface *)
 

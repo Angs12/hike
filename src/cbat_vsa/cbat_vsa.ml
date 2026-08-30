@@ -584,7 +584,7 @@ let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
 (* --- Hike port fix (Phase 2, change D4): branch-assume --------------- [reachable_jumps] only FILTERS edges by definitely-true/false conditions; no state refinement happens on taken edges, so loop counters join to [0,∞) -> top -> the runtime arm. *)
 
 (* L-A1 — the jcc DECODER (recognition layer) ------------ The -O0 lifted loop guards are COMPOUND flag expressions (the canonical per-cmp emission, BIR-verified by the oracle, ora-6): `#t := e - c; CF := e < c; OF :=. *)
-type guard_op = ULT | ULE | UGT | UGE | EQ | SLT | SLE | SGT | SGE
+type guard_op = ULT | ULE | UGT | UGE | EQ | NEQ | SLT | SLE | SGT | SGE
 
 let decoded_condition (cond : exp) : guard_op option =
   (* [is_flag name e]: [e] is the flag var named [name] (Var.name equality — the lifter names the 1-bit flags CF/ZF/SF/OF). *)
@@ -612,6 +612,14 @@ let decoded_condition (cond : exp) : guard_op option =
     when is_flag "CF" cf && is_flag "ZF" zf ->
     (* ja: ~(CF | ZF) — unsigned e > c *)
     Some UGT
+  | Bil.UnOp (Bil.NOT, zf) when is_flag "ZF" zf ->
+    (* jne: ~ZF — e != c. The NEQ row ([decoder_constraint]'s two-piece
+       complement) refines the taken edge to [cur ∖ {c}] — the rule that
+       lets a `while (i != K)` head stabilize AT the landmark K. *)
+    Some NEQ
+  | Bil.Var _ as zf when is_flag "ZF" zf ->
+    (* jz: ZF — e == c (the flag-SET edge of the record). *)
+    Some EQ
   | _ -> None
 
 (* L-S2 (oracle item 10) — [interval_clp_of ~width ~cardn base]: the shared step-1 CLP-interval construction for [comparison_constraint]'s rows and [interval_of_bounds] (None on cardn 0 / WordSet top; the (width+1)-bit cardn — pinned convention). *)
@@ -690,6 +698,21 @@ let decoder_constraint ?(cur : wordset option = None)
   | ULT -> comparison_constraint ~cur Bil.LT c
   | ULE -> comparison_constraint ~cur Bil.LE c
   | EQ -> comparison_constraint ~cur Bil.EQ c
+  | NEQ ->
+    (* x != c — the two-piece complement, EXACT in the wordset domain: the
+       full-domain-minus-a-point is a wrapped hull the CLP represents
+       exactly for every c (TOP is linear-canonical, so the composite diff
+       is exact here — unlike the diff of a WRAPPED [cur], whose clp_diff_
+       finset singleton branch derives the step across the value seam and
+       degenerates to a coarse grid). The exclusion of [c] from the
+       operand's own value set happens at the MEET: the backward MINUS
+       propagation shifts the hull exactly ([TOP-{c0}] + k = TOP-{c0+k}),
+       and [meet_var] intersects it with the var's (linear) state — the
+       refinement that lets a jne-guarded counter loop stabilize AT the
+       landmark K. *)
+    let cstr =
+      WordSet.diff (WordSet.top (Word.bitwidth c)) (WordSet.singleton c) in
+    if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
   | SLT -> comparison_constraint ~cur ~known_nonneg Bil.SLT c
   | SLE -> comparison_constraint ~cur ~known_nonneg Bil.SLE c
   | UGT ->
@@ -1154,6 +1177,15 @@ and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
            ignore ct; env
          | Bil.Int _ -> env
          | _ -> env)
+  | Bil.BinOp (op, a, b) ->
+    (* the INLINE compared expression (the cmp+je/jne lift WITHOUT a temp:
+       the record's [e] IS the arithmetic, e.g. [zf := (i - k) == 0] —
+       [apply_operand_constraint] lands here with [e] a BinOp): the
+       constraint on the EXPRESSION decomposes through the same producer
+       rows the def-chain walk uses for the temp shape ([refine_chain] —
+       the MINUS row of [i - k ∈ TOP-{0}] shifts to [i ∈ TOP-{k}], whose
+       meet with the linear head state is the jne-loop stabilization). *)
+    refine_chain ~defs refineable_var ~visited env op a b cstr
   | _ -> env
 
 
@@ -1687,15 +1719,16 @@ let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
   | Bil.LT -> ULT
   | Bil.LE -> ULE
   | Bil.EQ -> EQ
+  | Bil.NEQ -> NEQ
   | Bil.SLT -> SLT
   | Bil.SLE -> SLE
   | _ -> EQ
 
-(* [complement_guard_op op]: the FALSE-edge guard_op (the complement of the TRUE-edge row): ULT <-> UGE, ULE <-> UGT, EQ -> (EQ; NEQ is handled separately), SLT <-> SGE, SLE <-> SGT. The BIL-comparison entry point is [complement_binop_guard] below. *)
+(* [complement_guard_op op]: the FALSE-edge guard_op (the complement of the TRUE-edge row): ULT <-> UGE, ULE <-> UGT, EQ -> (EQ; the EQ complement is the two-piece NEQ row, which the acquisition's always-complement must NOT produce — the EQ row is what the fallthrough of a NOT-flag cond asserts — so EQ complements to itself here), NEQ <-> EQ, SLT <-> SGE, SLE <-> SGT. The BIL-comparison entry point is [complement_binop_guard] below. *)
 let complement_guard_op (op : guard_op) : guard_op = match op with
   | ULT -> UGE | ULE -> UGT
   | UGT -> ULT | UGE -> ULE
-  | EQ -> EQ
+  | EQ -> EQ | NEQ -> EQ
   | SLT -> SGE | SLE -> SGT
   | SGT -> SLT | SGE -> SLE
 
@@ -1709,7 +1742,7 @@ let flip_guard_op (op : guard_op) : guard_op = match op with
   | ULE -> UGE | UGE -> ULE
   | SLT -> SGT | SGT -> SLT
   | SLE -> SGE | SGE -> SLE
-  | EQ -> EQ
+  | EQ -> EQ | NEQ -> NEQ
 
 (* [guard_constraint w op c]: The TRUE-edge row on the operand of (e op c) — the complete set (docs/trace-partitioning-plan.md §4.1): the two-piece signed rows (the non-negativity gates REMOVED — the negative half is always < c signed), the UGT/UGE/SGT/SGE direct rows. *)
 let guard_constraint (w : int) (op : guard_op) (c : word)
@@ -1719,6 +1752,10 @@ let guard_constraint (w : int) (op : guard_op) (c : word)
   let iv lo hi = interval_of_bounds w lo hi in
   match op with
   | EQ -> Some (WordSet.singleton c)
+  | NEQ ->
+    (* the two-piece complement (no [cur] here — the full domain minus the point) *)
+    (match WordSet.diff (WordSet.top w) (WordSet.singleton c) with
+     | d -> if Cbat_clp_set_composite.is_bottom d then None else Some d)
   | ULT ->
     (if Word.is_zero c then None
      else iv (Word.zero w) (Word.pred c))
@@ -2148,17 +2185,29 @@ let flag_state_of_block (b : blk term) :
       | Type.Imm 1 -> Core.Map.set g ~key:(Var.base lhs) ~data:(lhs, d)
       | Type.Imm _ | Type.Mem _ | Type.Unk -> g
     end in
-  (* the t-def for the record's (e, c) — structural equality *)
+  (* the t-def for the record's (e, c) — structural equality. TWO shapes:
+     (1) the TEMP shape [t := e - c] (the canonical -O0 cmp: the flag defs
+         reference [t]); (2) the INLINE shape — no temp exists; the record's
+         own flag def IS the comparison ([zf := (e == c)] of a
+         [BinOp (EQ, e, Int c)] record — the cmp+je/jne lift without a
+         temp): the flag def binds [cmp] itself. *)
   let cmp =
     match record with
     | None -> None
     | Some (_, _, e, c) ->
-      List.find ds ~f:begin fun d ->
+      let temp_shape (d : def term) : bool =
         match Def.rhs d with
         | Bil.BinOp (Bil.MINUS, e', Bil.Int c') ->
           Exp.equal e' e && Word.equal c' c
-        | _ -> false
-      end in
+        | _ -> false in
+      let inline_shape (d : def term) : bool =
+        match Def.rhs d with
+        | Bil.BinOp ((Bil.EQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE), e', Bil.Int c') ->
+          Exp.equal e' e && Word.equal c' c
+        | _ -> false in
+      match List.find ds ~f:temp_shape with
+      | Some d -> Some d
+      | None -> List.find ds ~f:inline_shape in
   (record, { flags; cmp })
 
 (* L-A2 — [same_comparison_group fg fv e cond]: the same-comparison GATE for the compound-guard (jcc-decoder) arm of [assume_jump_cond] (the oracle's Q3(d) group extension). *)
@@ -2223,9 +2272,12 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
   | Some ctx ->
     (* Mirror the trace-partitioning's complement-flag-state recovery: *)
     begin match ctx.flag_state with
-    | Some (_fv, bop, e, c)
-      when Option.value_map flag_group ~default:false
-          ~f:(fun fg -> same_comparison_group fg _fv e cond) ->
+    | Some (_fv, bop, e, c) ->
+      let gate_ok =
+        Option.value_map flag_group ~default:false
+          ~f:(fun fg -> same_comparison_group fg _fv e cond) in
+      if gate_ok then begin
+      let bop = bop and e = e and c = c in
       let gop = guard_op_of_binop bop in
       let op = complement_guard_op gop in
       (match row_for ~env ?ctx:(Some ctx) e op c with
@@ -2250,7 +2302,8 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
                  | _ -> ())
               | Cell _ | Infeasible -> ()))
        | None -> ())
-    | _ -> ()
+      end else ()
+      | None -> ()
     end
 
 (* The Phase B post-pass driver (the trace-partitioning design, docs/trace-partitioning-plan.md §2.2): over the converged forward solution, run a separate taken/exit walk for every conditional edge. *)
@@ -2737,7 +2790,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   (* Bourdoncle WTO fixpoint — replaces chunk=3000 + convergence_gap + max_runs.
      WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
-     after 10 outer sweeps via widen_join_threshold. Always runs; no fallback. *)
+     after 10 warmup sweeps (landmark-directed: Finite extrapolates, Zero
+     advances and joins, Inf standard-widens). Always runs; no fallback. *)
   let wto = Cbat_wto.wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
@@ -2850,8 +2904,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
      requires (dist_p ← dist_c on each pass; finite-steps extrapolation
      needs two measurements). The meet-var path operates on the abstract
      WordSet only — §8-clean by construction. *)
-  (* Hike addition (docs/widening-thresholds-plan.md): the per-sub threshold ladders. *)
-  let thresholds = Cbat_thresholds.collect s in
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
   let sol_default = Solution.default init in
   let get n = match Core.Map.find !sol_map n with Some v -> v | None -> sol_default in
@@ -2884,35 +2936,57 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     let new_val =
       if List.is_empty preds then old
       else if Core.Set.mem heads v && !total_processed > 10 then begin
+        (* THE STABILITY CHECK (Figure 3's gate: "if stability has not yet
+           been achieved"): the widening-point equation Q = Q ⊔ ⊔preds is
+           SATISFIED when the preds' join is already contained in [old]
+           — [AI.equal old (AI.join old incoming)] holds exactly when
+           [incoming ⊑ old] (join idempotence). A stable head returns
+           [old] with NO landmark side effects: no [lm_advance] rotation
+           (each rotation consumes a measurement — a stable-visit
+           rotation would reset the two-measurement cycle forever) and
+           no widening (the value cannot change anyway). Equality with
+           [incoming] alone would NOT do: after a head widens, the preds
+           join STRICTLY below it, so equality-vs-incoming would misfire
+           on every stable visit. *)
+        if AI.equal old (AI.join old incoming) then old
+        else begin
         (* Landmark-directed widening (Simon & King, APLAS 2006, Figure 3)
-           — the production path for ALL subs (the per-sub [lm_*] gate
-           was deleted; landmark bounds only TIGHTEN the threshold ladder
-           via [min_extra = min of extras ++ geometric] in
-           [selective_widen_join_threshold], so acquisition on real
-           binaries is safe):
-           - `Finite n` from [lm_calc_steps] selects Listing 4 extrapolation
-             (the paper's "extrapolate" arm).
-           - `Zero` resumes normal fixpoint computation so the landmark can
-             acquire its second measurement on the next pass.
-           - `Inf` (no landmarks yet) widens AT the threshold ladder — the
-             per-sub finite ladder (strictly better than Cousot-Halbwachs
-             which widens to TOP, and the user's directive says "widen to
-             the landmark" — the threshold ladder is the sound finite
-             fallback when no landmarks have fired). *)
+           — the production path for ALL subs (the per-sub [lm_*] gate was
+           deleted; acquisition is unconditional):
+           - `Finite n` — every landmark of this head has two
+             measurements: Listing 4 EXTRAPOLATION
+             ([selective_widen_extrapolate ~steps:n] — the paper's right
+             branch), then "clear all landmarks" (the branch's exit,
+             Fig. 3): [clear_head] fires ONLY here (clearing on Zero/Inf
+             would empty the table before any consumption — the
+             Finite-never-fires bug).
+           - `Zero` — a landmark still lacks its second measurement:
+             Listing 2 [lm_advance] (commit dist as dist_p) then NORMAL
+             fixpoint computation resumes ([AI.join] — the left branch)
+             so the next traversal acquires the second measurement.
+           - `Inf` — no landmarks at this head: the paper's ∞-arm,
+             STANDARD widening ([AI.widen_join] — Cousot-Halbwachs:
+             unstable bounds go to TOP). The threshold ladder is GONE
+             (the user's directive "No normal widening ONLY LANDMARKS" —
+             the ladder was normal finite widening); the >10 warmup
+             below gives acquisition the traversals it needs before
+             this arm can fire, so guarded heads reach Finite instead. *)
         let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
         Cbat_landmarks.widening_at_head := Some v;
-        Cbat_landmarks.lm_advance v;
         let res = match Cbat_landmarks.lm_calc_steps v with
           | `Finite n ->
-            AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming
+            let r = AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming in
+            Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
+            r
           | `Zero ->
+            Cbat_landmarks.lm_advance v;
             AI.join old incoming
           | `Inf ->
-            Cbat_ai_representation.selective_widen_join_threshold ~head:(Some v) thresholds ~need old incoming
+            AI.widen_join old incoming
         in
-        Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
         Cbat_landmarks.widening_at_head := None;
         res
+        end
       end else
         AI.join old incoming
     in
