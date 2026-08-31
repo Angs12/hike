@@ -853,7 +853,7 @@ let rec run_binary (path : string) : bin_report =
     | Ok proj ->
       let prog = Project.program proj in
       let bname = Filename.basename path in
-      let sp = Hike.Target.sp (Project.target proj) in
+      let sp = Hike.Abi.sp (Project.target proj) in
       Term.enum sub_t prog
       |> Seq.iter ~f:(fun sub ->
           r.nsubs <- r.nsubs + 1;

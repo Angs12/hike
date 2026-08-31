@@ -2,7 +2,7 @@
 
    Everything a consumer needs crosses this seam. Consumers (test_cbat, the
    probe drivers, and any future tool) refer to these modules as
-   [Hike.Target], [Hike.Relevance], [Hike.Vsa], ... — never by the dune-internal
+   [Hike.Abi], [Hike.Relevance], [Hike.Vsa], ... — never by the dune-internal
    [Hike__X] names, and never through the generated [Hike__.X] wrapper (whose
    resolution is unreliable).
 
@@ -11,32 +11,25 @@
    by plain name) and under bapbuild (flat: every module is a top-level module
    of the plugin), so ONE interface serves both builds.
 
-   [Calling_conventions] is deliberately not exported (one target's data,
-   reached through the pass), nor are the pass-pipeline internals in this
-   file's implementation ([filter_subs], [compute_sub_sig], [convert_binary],
-   ...). [Hike_kb] IS exported, as [Kb] below — its join-domain slot is the
-   supported way to hand per-sub VSA results across the pass chain. *)
+   [Calling_conventions] is gone — the ABI facts live in the standalone
+   [Abi] module (exported below), the sole origin of every register list
+   and register predicate in the tree. Nor are the pass-pipeline internals
+   in this file's implementation ([filter_subs], [compute_sub_sig],
+   [convert_binary], ...) exported. [Hike_kb] IS exported, as [Kb] below —
+   its join-domain slot is the supported way to hand per-sub VSA results
+   across the pass chain. *)
 
 open Bap.Std
 open Bap_core_theory
 
-(** Target-derived registers and sizes.
+(** Target-derived registers, sizes, and calling-convention facts.
 
-    [Target.sp] is the SOLE origin for Stack Access derivation — never
-    hardcode a register name. *)
-module Target : sig
-  (** [sp target]: the stack pointer register. *)
-  val sp : Theory.Target.t -> var
-
-  (** [fp target]: the frame pointer register (a GPR, not an SP alias). *)
-  val fp : Theory.Target.t -> var
-
-  (** [pc target]: the program counter register (x86_64 only). *)
-  val pc : Theory.Target.t -> var
-
-  (** [addr_size_bits target]: the address width in bits; 0 when unknown. *)
-  val addr_size_bits : Theory.Target.t -> int
-end
+    The SOLE origin for stack derivation and register identity — never
+    hardcode a register name (AGENTS.md Principle 8). [Abi.sp] is the stack
+    pointer; [Abi.of_target] yields the convention record. Its own library
+    (hike.abi) sits at the bottom of the dependency lattice, shared by the
+    vendored VSA libraries and this one. *)
+module Abi = Hike_abi
 
 (** Relevance Analysis — Stack Access tagging and the relevance closure.
 

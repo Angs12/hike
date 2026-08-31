@@ -4,6 +4,7 @@
 
 open Bap.Std
 open Bap_core_theory
+module Abi = Hike_abi
 
 [@@@alert "-deprecated"]
 
@@ -26,7 +27,7 @@ let has_stack_access (d : def term) : bool =
   Term.has_attr d stack_access
 
 let is_sp (target : Theory.Target.t) (v : var) : bool =
-  Var.same v (Targetutils.sp target)
+  Var.same v (Abi.sp target)
 
 (* Normalize a variable to its base form for map/set keys. *)
 let base_var (v : var) : var = Var.base v

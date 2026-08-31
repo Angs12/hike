@@ -1,6 +1,7 @@
 open Bap.Std.Bil.Types
 open Bap.Std
-open Targetutils
+open Hike_abi
+module Abi = Hike_abi
 open Convutils
 module KB = Bap_knowledge.Knowledge
 module Vsa = Cbat_vsa
@@ -1297,8 +1298,8 @@ let rec has_32bit_extract (e : exp) : bool =
   | Bil.Cast (_, _, e') -> has_32bit_extract e'
   | _ -> false
 
-(* [cast_source_width sub blk]: The source width of the [cast_sfloat] call in [blk] — 32 when the [intrinsic:x0] def's rhs reveals a 32-bit source (the register-extract shape OR an 8-byte load from an RBP slot that was WRITTEN as u32 — the `cvtsi2sdl addr` memory-operand shape), else 64. *)
-let cast_source_width (sub : sub term) (blk : blk term) : int =
+(* [cast_source_width ~abi sub blk]: The source width of the [cast_sfloat] call in [blk] — 32 when the [intrinsic:x0] def's rhs reveals a 32-bit source (the register-extract shape OR an 8-byte load from an FP slot that was WRITTEN as u32 — the `cvtsi2sdl addr` memory-operand shape), else 64. *)
+let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
   let u32_slots =
     Term.enum blk_t sub
     |> Seq.fold ~init:[] ~f:(fun acc b ->
@@ -1308,9 +1309,9 @@ let cast_source_width (sub : sub term) (blk : blk term) : int =
             | Bil.Store (_, addr, _, _, s) when Size.in_bits s = 32 -> (
                 match addr with
                 | Bil.BinOp (Bil.PLUS, Bil.Var bv, Bil.Int w)
-                  when String.equal (Var.name (Var.base bv)) "RBP" ->
+                  when Abi.is_fp abi (Var.base bv) ->
                     Word.to_int64_exn w :: acc
-                | Bil.Var bv when String.equal (Var.name (Var.base bv)) "RBP" ->
+                | Bil.Var bv when Abi.is_fp abi (Var.base bv) ->
                     0L :: acc
                 | _ -> acc)
             | _ -> acc))
@@ -1327,7 +1328,7 @@ let cast_source_width (sub : sub term) (blk : blk term) : int =
       | Bil.Load (_, addr, _, _) -> (
           match addr with
           | Bil.BinOp (Bil.PLUS, Bil.Var bv, Bil.Int w)
-            when String.equal (Var.name (Var.base bv)) "RBP" ->
+            when Abi.is_fp abi (Var.base bv) ->
               if Base.List.mem ~equal:Int64.equal u32_slots (Word.to_int64_exn w)
               then 32
               else 64
@@ -1361,6 +1362,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
+  let abi = Abi.of_target ctx.Convutils.target in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -1387,7 +1389,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         build_fp_binop llvm_builder op a b
     | SFLOAT ->
         let* x = arg_value 0 in
-        let width = cast_source_width sub blk in
+        let width = cast_source_width ~abi sub blk in
         if width = 32 then
           let* t =
             KB.return
@@ -1654,14 +1656,11 @@ let build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo =
   in
   (Some frame, min_lo, anchor_idx, anchor_i64)
 
-let degraded_geometry (sub : sub term) : int64 * int64 * int64 =
+let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
   let max_dec = ref 0L in
   let max_neg = ref 0L in
   let max_pos = ref 0L in
-  let is_sp_or_fp v =
-    let n = Var.name (Var.base v) in
-    String.equal n "RSP" || String.equal n "RBP"
-  in
+  let is_sp_or_fp v = Abi.is_stack_reg abi (Var.base v) in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
       Term.enum def_t blk
@@ -1692,8 +1691,9 @@ let degraded_geometry (sub : sub term) : int64 * int64 * int64 =
           | _ -> ())));
   (!max_dec, !max_neg, !max_pos)
 
-let degraded_dims (sub : sub term) : int64 * int64 * int64 * int64 =
-  let max_dec, max_neg, max_pos = degraded_geometry sub in
+let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
+    (sub : sub term) : int64 * int64 * int64 * int64 =
+  let max_dec, max_neg, max_pos = degraded_geometry ~abi sub in
   let deepest = Int64.max max_dec max_neg in
   let deepest = Int64.max deepest 8L in
   let need = Int64.add deepest 8L in
@@ -1777,6 +1777,7 @@ let create_sub sub =
     (* reset llvals and bbs *)
     clear_bbs ctx;
     clear_blk_llvals ctx;
+    let abi = Abi.of_target ctx.Convutils.target in
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn in
     (* The per-sub VSA frame: the tag span [min_lo, max_hi] of [Convutils.vsa_offsets] — every stack access of the sub lands in this alloca (the singleton GEPs and the interval-path dynamic addresses both). *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
@@ -1796,7 +1797,7 @@ let create_sub sub =
         match tags with
         | [] ->
           if sub_degraded sub_info then
-            let n, _, _, anchor_idx = degraded_dims sub in
+            let n, _, _, anchor_idx = degraded_dims ~abi sub in
             let frame, _, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx (Int64.neg n) in
             (frame, Int64.neg n, anchor_idx, anchor_i64)
           else (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
