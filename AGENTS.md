@@ -44,6 +44,7 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    diagnostic — temporary debug prints, env-gated instrumentation, profiling
    drivers, and analysis-forensics tools alike.  It provides the debug
    executables:
+   - `zz_scratch_probe/audit02.exe` (legacy harness entry, default profile),
    - `zz_scratch_probe/vsa_debug.exe` (fixture traces, views, live maps),
    - `zz_scratch_probe/wbig_diag.exe` (w_big address inspection),
    - `zz_scratch_probe/stage_timer.exe` (per-stage pipeline wall-time
@@ -51,9 +52,13 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
      stack_to_locals / dce — the profiling driver),
    - `zz_scratch_probe/conv_diag.exe` (fixpoint NON-CONVERGENCE diagnosis:
      prints the first still-growing (block, successor), the widening-point
-     set, the failing blocks' BIR, and the gap successor's words/memory).
-   NEVER add temporary debug prints / env-gated `Sys.getenv` instrumentation
-   to production `src/` or `src/cbat_vsa/` code — keep the production sources
+     set, the failing blocks' BIR, and the gap successor's words/memory),
+   - `zz_scratch_probe/dump_tags.exe` (vsa_info tag + split_plan dump).
+   The dead one-shot stubs (probe_loop, probe_cell, dump_bil, probe_wbig2)
+   were deleted in the 2026-08-31 harness restoration — they duplicated the
+   above probes' functions.  NEVER add temporary debug prints / env-gated
+   `Sys.getenv` instrumentation to production `src/` or `src/cbat_vsa/` code —
+   keep the production sources
    clean; use or extend the debug harness instead.  Build/run:
 
    ```sh
@@ -76,16 +81,15 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    used instead.  `.pi-lens.json`'s `ignore` list is empty.
    They build in every profile (never installed, never used by production);
    the other debug executables keep `enabled_if` (they only use `cbat_vsa`).
-   **DOC BUG (recorded 2026-08-31, not yet fixed): every probe executable
-   documented in this file is currently UNBUILDABLE** — `zz_scratch_probe/dune`
-   declares only `audit02`; the probe `.ml` files (`dump_tags`, `stage_timer`,
-   `vsa_debug`, `conv_diag`, `wbig_diag`, `probe_loop`, `probe_cell`,
-   `dump_bil`, `probe_wbig2`, …) have NO dune stanza at the root (the
-   `edgecond`/`irgraph`/`r6view` subdirs have their own). The documented
-   probe commands fail with `Don't know how to build`. Restoring the root
-   dune stanza list (and the `vsa-debug` profile declaration, which is NOT
-   in `dune-project` either) is a prerequisite for the §5 coreutils
-   differential in `.scratch/restriction-removal/spec.md`.
+      All probe executables documented in this section now BUILD and RUN
+   (harness restored 2026-08-31 — see section "Running the test probes"):
+   the `dune-project` declares the `vsa-debug` profile, and
+   `zz_scratch_probe/dune` carries the full stanza list. The dead stubs
+   (probe_loop, probe_cell, dump_bil, probe_wbig2) were deleted rather than
+   ported — they duplicated `audit02`/`dump_tags`/`stage_timer`/`conv_diag`/
+   `wbig_diag`.
+
+
 7. **THE STACK IS LLVM ALLOCAS — SOUND FALLBACK FIRST, PRECISION FOR
    OPTIMIZATION (the user's endgame directive, 2026-08-16).**  Every stack
    access's emission target is a REAL LLVM alloca (or a static variable) —
@@ -326,7 +330,8 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-31 EEST (late evening) — the ABI module (Item 5, partial: `Targetutils` + `Calling_conventions` deleted, replaced by the standalone `Hike_abi` library; all register lists/predicates route through `Abi`; cbat_vsa's 5 inline x86 lists now read the record) — FULL GATE BATTERY GREEN, identical to the Finding-1/KB-fix baseline**
+**Last verified: 2026-08-31 EEST (early morning) — the ABI module + debug harness
+restoration — FULL GATE BATTERY GREEN, identical semantics**
 
 **The ABI refactor (this session, on the KB-fix tree, commit-by-commit green):
 one `Hike_abi` library (unwrapped, bottom of the lattice: hike_abi ←
@@ -821,15 +826,13 @@ dune exec --profile vsa-debug zz_scratch_probe/vsa_debug.exe -- d4
 
 ```sh
 B=/tmp/corpus/factorial
-dune exec zz_scratch_probe/probe_loop.exe       -- "$B"
-dune exec zz_scratch_probe/probe_cell.exe       -- "$B" main
-dune exec zz_scratch_probe/dump_tags.exe        -- "$B" main
-dune exec zz_scratch_probe/dump_bil.exe         -- "$B" main
+dune exec zz_scratch_probe/audit02.exe        -- "$B"          # legacy harness entry (default profile)
+dune exec zz_scratch_probe/dump_tags.exe      -- "$B" main
+dune exec zz_scratch_probe/dump_bil.exe       -- "$B" main     # [REMOVED — dup of dump_tags]
 # vsa-debug profile only:
 dune exec --profile vsa-debug zz_scratch_probe/wbig_diag.exe -- "$B"
-dune exec zz_scratch_probe/probe_wbig2.exe      -- "$B"
-dune exec test_cbat/corpus_watch.exe            -- "$B"
-dune exec test_cbat/precision_probe.exe         -- "$B"
+dune exec zz_scratch_probe/stage_timer.exe    -- "$B"          # per-stage wall-time breakdown
+dune exec zz_scratch_probe/conv_diag.exe      -- "$B"          # fixpoint non-convergence
 ```
 
 ### Timing + non-convergence diagnosis (default profile)
