@@ -13,8 +13,10 @@ differential (ticket 04) has its comparison point. NO code changes whatsoever.
 Acceptance criteria:
 - [ ] `scripts/coreutils_pipeline.sh` run to completion on the current tree
       (the installed plugin matches the tree: `dune build @install && dune
-      install && cd src && make` first), output under
-      `/tmp/opencode/restriction-removal/baseline-coreutils`.
+      install && cd src && bapbuild -clean && make` — dune install FIRST,
+      THEN bapbuild -clean: bapbuild links the INSTALLED hike.cbat_vsa, so a
+      plain `make` after a cbat_vsa change silently ships a stale plugin),
+      output under `/tmp/opencode/restriction-removal/baseline-coreutils`.
 - [ ] A per-sub wall-time record (and stage breakdown where the pipeline
       provides one: lift / llc+link / run) saved to
       `/tmp/opencode/restriction-removal/baseline.md` — include the semantic
