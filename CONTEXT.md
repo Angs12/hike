@@ -6,22 +6,24 @@ Hike lifts x86-64 ELF binaries to LLVM IR, splitting the flat stack into LLVM al
 
 ### Stack model
 
-**Stack Access**: A def whose right-hand side is a memory Load or Store whose address is derived from the Stack Pointer.
-_Avoid_: direct_sp, stack reference, SP-relative def
+**Stack Access**: A Load/Store def whose address the VSA proves frame-resident: either directly (an affine address over frame-derived registers — a widened frame-affine address still counts) or through a reloaded address (a bounded value set contained in the frame neighborhood — subset, never intersect; a top or heap-valued address is not frame-resident).
+_Avoid_: direct_sp, stack reference, SP-relative def, relevance tag, syntactic SP-derivation
 
-**Relevance**: The exact set of defs and phis that transitively contribute a value to the address of a Stack Access.
-_Avoid_: reachable, live, dependency closure, arg-setup
+**Frame-Residency Proof**: The VSA's own evidence that a Load/Store address lives in the stack frame — the two channels (direct affine-over-frame-derived, or a reloaded bounded subset of the frame neighborhood). The sole origin of the Stack Access classification.
+_Avoid_: relevance, taint, seeding pass, syntactic SP-derivation
 
 **Dynamic Allocation**: A definition that decrements the Stack Pointer by a non-literal size (VLA / alloca).
 _Avoid_: VLA size def, runtime alloc, variable stack growth
 
-**Stack Pointer (SP)**: The target-defined stack-pointer register (`Targetutils.sp`), the sole origin for Stack Access derivation.
+**Stack Pointer (SP)**: The target-defined stack-pointer register (`Targetutils.sp`), the sole origin for stack-derivation.
 _Avoid_: "RSP" string, RBP, frame pointer
 
 ### Analysis passes
 
-**Relevance Analysis**: The forward-then-backward analysis that tags Stack Accesses and then their Relevance closure.
-_Avoid_: restriction pass, taint, slice pass
+**Library Seam** (`Hike.*`): The `hike` library's one public interface (`src/hike.mli`): `Hike.Target`, `Hike.Relevance`, `Hike.Vsa`, `Hike.Stack_to_locals`, `Hike.Kb`, `Hike.Convutils`, `Hike.Bil2llvm`. Consumers name these modules and nothing else — the entry point `Hike` is the plugin's pass pipeline, not a namespace.
+_Avoid_: `Hike__X` (the dune-internal name), `Hike__.X` (the generated wrapper alias, whose resolution is unreliable)
+
+**Stack-Access Seeding**: The VSA's classification of each Load/Store def as a Stack Access via the Frame-Residency Proof, emitted as `vsa_info` — the only carrier of stack-access-ness. No separate pass computes it.
 
 **Trace-Partitioning (single-pass)**: Making a block's entry abstract state aware of the branch condition on its incoming edge, so the analysis is branch-sensitive rather than branch-blind; realized as one coupled pass where the deep backward walk runs inline at every conditional GOTO.
 _Avoid_: Phase B, post-pass, `edge_views_of` (deleted), `partitioned_states` (deleted), `edge_view` (deleted)
@@ -38,7 +40,7 @@ _Avoid_: inverse_denote_exp (the shallow production no-op), guard-meet-only
 **TAG State**: A per-block abstract state already refined by its incoming edge conditions; in the single-pass design this is simply the block's IN-state in the VSA solution.
 _Avoid_: partitioned state, per-edge view
 
-**100% VSA Tagging Invariant**: Every definition carrying a `Stack Access` tag is guaranteed to have a corresponding `VSA Info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). Untagged stack accesses are prohibited.
+**100% VSA Tagging Invariant (structural)**: A Load/Store def is a Stack Access iff it carries a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). The classification is one mechanism — there is no second tag to diverge from it.
 
 ### VSA Classifications
 

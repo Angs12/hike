@@ -43,7 +43,7 @@ let rsp_var : var =
 
 (* Relevance restriction (user design, ora-4, reworked per ora-5 / P2d-1b, and the 2026-08-10 simplification): a per-def Unit- payload tag. *)
 
-(* P2d-1b (lane A) — the per-def relevance tag (Unit payload; mirror the [back_edge] registration in cbat_back_edges.ml:18; the uuid is fresh, distinct from [do_widen] (cbat_vsa.ml:31-33) and [back_edge]). *)
+(* P2d-1b (lane A) — the per-def relevance tag (Unit payload; the uuid is fresh and distinct from every other tag in the library). The former [back_edge]/[do_widen] neighbours are gone: the WTO fixpoint computes its widening points from the WTO head set, so the back-edge labelling pass was deleted. *)
 let relevant = Value.Tag.register (module Unit)
     ~name:"relevant"
     ~uuid:"58a2e009-3d14-4c7d-ba75-42f9de98dc30"

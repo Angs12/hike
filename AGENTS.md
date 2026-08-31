@@ -2,12 +2,15 @@
 
 BAP (OCaml/dune) plugin that lifts x86-64 ELF binaries to LLVM IR (the `hike-convlir`
 pass), backed by a vendored port of CBAT's value-set analysis (`src/cbat_vsa/`).
-There is no README; `docs/*.md` and `.slim/deepwork/*.md` (gitignored but searchable
-via `.ignore`) are the design record.  The single source of truth for every
-workstream — the stack-model endgame (Phase 1 dynamic allocas, Phase 2
-region-split allocas, Phase 3 statics), the Option-B correctness fixes, and the
-O-series performance work (O1 done, O2-O4 approved-pending, O5-O7 planned) with
-the validation gates and the proposed execution order — is `docs/hike-full-plan.md`.
+There is no README; `docs/*.md` and `docs/adr/*.md` are the design record.
+**DOC BUG (recorded 2026-08-31):** `docs/hike-full-plan.md` — the "single
+source of truth" for the stack-model endgame, the Option-B fixes, and the
+O-series performance plan (O1 done, O2-O4 approved-pending, O5-O7 planned)
+— is GONE and was NEVER COMMITTED (no git history; the O-series proposals
+are unrecoverable from the repo). `.slim/deepwork/*.md` is likewise absent.
+The surviving plan record is `docs/trace-partitioning-plan.md`,
+`docs/adr/`, and `.scratch/*/`. The O-series was partially succeeded by the
+coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
 
 ## Design principles (NON-NEGOTIABLE)
 
@@ -74,6 +77,16 @@ the validation gates and the proposed execution order — is `docs/hike-full-pla
    used instead.  `.pi-lens.json`'s `ignore` list is empty.
    They build in every profile (never installed, never used by production);
    the other debug executables keep `enabled_if` (they only use `cbat_vsa`).
+   **DOC BUG (recorded 2026-08-31, not yet fixed): every probe executable
+   documented in this file is currently UNBUILDABLE** — `zz_scratch_probe/dune`
+   declares only `audit02`; the probe `.ml` files (`dump_tags`, `stage_timer`,
+   `vsa_debug`, `conv_diag`, `wbig_diag`, `probe_loop`, `probe_cell`,
+   `dump_bil`, `probe_wbig2`, …) have NO dune stanza at the root (the
+   `edgecond`/`irgraph`/`r6view` subdirs have their own). The documented
+   probe commands fail with `Don't know how to build`. Restoring the root
+   dune stanza list (and the `vsa-debug` profile declaration, which is NOT
+   in `dune-project` either) is a prerequisite for the §5 coreutils
+   differential in `.scratch/restriction-removal/spec.md`.
 7. **THE STACK IS LLVM ALLOCAS — SOUND FALLBACK FIRST, PRECISION FOR
    OPTIMIZATION (the user's endgame directive, 2026-08-16).**  Every stack
    access's emission target is a REAL LLVM alloca (or a static variable) —
@@ -121,7 +134,13 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
 1. `hike-filter` — filters subs (named exclusions, stub/extern/intrinsic,
    intrinsic callers, symbol-table check) — its own pass, FIRST in the chain
    (no pass calls another pass's logic; the chain is deps-only)
-2. `hike-relevance` — tags defs (`relevant`, `stack_access`, `dynamic_alloc`)
+2. `hike-relevance` — tags defs (`relevant`, `stack_access`, `dynamic_alloc`).
+   **REMOVAL SPEC'D (2026-08-31, not yet implemented):** per
+   `docs/adr/0003-remove-restriction-vsa-seeding.md` +
+   `.scratch/restriction-removal/spec.md`, this pass is DELETED — every def
+   denoted; `vsa_info` (the VSA's two-channel frame-residency proof) becomes
+   the only carrier of stack-access-ness; VLA detection moves into
+   `cbat_vsa`; `hike-vsa`'s dep becomes `hike-filter`
 3. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
    plus k-ranges).  Also merges set-overlapping tags into one span
 4. `hike-stack-to-locals` — VSA CALCULATES, stack-to-locals only MERGES: collects the
@@ -189,12 +208,7 @@ LLVM allocas / static variables — it should work on EVERY binary.
 - Two dune libs: `hike.cbat_vsa_domain` (unwrapped `Cbat_*` modules) and `hike.cbat_vsa`
   (wrapped; re-exports `AI`/`Mem`/`WordSet`). Only `ppx_bap` works under dune 3.23 —
   the upstream 5-ppx set fails to link.
-- The restriction is **tag-only** (the 2026-08-10 simplification): there is NO
-  `restriction_enabled` switch. `denote_def` skips untagged defs unconditionally — the
-  per-def `relevant` tag presence IS the restriction. Production arms it by running
-  `Hike_vsa_relevance.analyze` in `hike-relevance` (every production sub is tagged before
-  the fixpoint). A raw untagged `static_graph_vsa` tracks nothing — synthetic unit
-  fixtures must `tag_all` their subs or run them through `Relevance.analyze`.
+- The restriction is **tag-only** — **REMOVAL SPEC'D (2026-08-31, not yet implemented)**: `docs/adr/0003-remove-restriction-vsa-seeding.md` + `.scratch/restriction-removal/spec.md` delete the `relevant` tag, the `hike-relevance` pass, and the backward-lane refineable gates entirely; `vsa_info` (the VSA's two-channel frame-residency proof) becomes the only carrier of stack-access-ness. Until it lands, the tag-only restriction stands: `denote_def` skips untagged defs unconditionally — the per-def `relevant` tag presence IS the restriction. Production arms it by running `Hike_vsa_relevance.analyze` in `hike-relevance` (every production sub is tagged before the fixpoint). A raw untagged `static_graph_vsa` tracks nothing — synthetic unit fixtures must `tag_all` their subs or run them through `Relevance.analyze`.
 - Backward refinement (the L3a/L3c/L-B/M5 lanes, the trace-partitioning design —
   `docs/trace-partitioning-plan.md`): GATE-FREE.  The refinement runs in the Phase B
   post-pass (`edge_views_of` over the converged solution) — the taken/fallthrough
@@ -204,18 +218,7 @@ LLVM allocas / static variables — it should work on EVERY binary.
   (`operand_constraints`, `def_constraints`); a rule's identity (top / no constraint)
   is the sound answer, never a gate or a bottom.  The forward relevance restriction
   (tag-only) is a forward-domain property, untouched.
-- Keep the `set_stack_0` anchor tag; the fixpoint runs in 32-ROUND CHUNKS with a
-  CONVERGENCE VERIFICATION between chunks (`convergence_gap` — one extra transfer
-  round per chunk checking every CFG successor already contains the merged
-  outgoing state) and monotone re-runs up to 64 chunks (2048 rounds; the D.1 fix,
-  2026-08-16).  The old silent `~steps:256` cap is GONE as a single-run bound: the
-  contextual fixpoint's equality compares `Dep` values by identity so a run always
-  iterates its full cap, and slow chains (sequential loops summing past a chunk)
-  continue across chunks.  A chain STILL growing after 2048 rounds raises
-  `Fixpoint_not_converged` — production (`Hike_vsa.offsets_of_sub`) degrades the
-  sub soundly (no tags, every stack access stays real memory) with a warning;
-  `conv_diag.exe` pinpoints the growing block.  `not_implemented` always degrades
-  to top with a logged warning.
+- Keep the `set_stack_0` anchor tag; the fixpoint is a **Bourdoncle WTO fixpoint** (landed after the chunked design — the old "32-round chunks + `convergence_gap` + 64-chunk cap / `Fixpoint_not_converged` at 2048 rounds" text is STALE): WTO ordering stabilizes inner SCCs before outer, widening only at WTO heads after 10 warmup sweeps (landmark-directed: `Finite` extrapolates, `Zero` advances and joins, `Inf` standard-widens), always runs, no fallback (`cbat_vsa.ml:2791`). `not_implemented` always degrades to top with a logged warning.
 - Widening is LANDMARK-DIRECTED — the FAITHFUL port of Simon & King, "Widening
   Polyhedra with Landmarks" (APLAS 2006), landed 2026-08-23 (v2 replaced the v1
   "rung-extension + two-pass restart" sketch; the static threshold ladder /
@@ -286,9 +289,10 @@ LLVM allocas / static variables — it should work on EVERY binary.
   class), -O2 31/31 rc=0; check_allocas 120/0 (-O0) and 124/0 (-O2); semantic
   harness 8/8 PASS.
 - Drivers: `dune exec test_cbat/corpus_watch.exe -- <bin>`, `dune exec test_cbat/precision_probe.exe -- <bin>`.
-- Env toggles: `HIKE_VSA_DEBUG` (hike.ml stderr), `HIKE_VSA_RESTRICTION=0` (corpus_watch
-  only — skips `analyze`, so the untagged fixpoint tracks nothing: the baseline),
-  `HIKE_VSA_DIAG_BOTTOM=1` (precision_probe only).  (`HIKE_VSA_ANCHOR=1` and the
+- Env toggles: `HIKE_VSA_DEBUG` (hike.ml stderr), `HIKE_VSA_DIAG_BOTTOM=1`
+  (precision_probe only).  (`HIKE_VSA_RESTRICTION=0` exists ONLY in
+  corpus_watch — precision_probe removed it (an OFF run crashes) — and it is
+  DELETED by the restriction-removal spec.  `HIKE_VSA_ANCHOR=1` and the
   probe's anchored-entry mode were removed 2026-08-13 with the VSA's
   unanchored-mode flag — the frame-correct rewrite is always on.)
 
@@ -323,11 +327,49 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-30 EEST — landmark consumption ② (Inf→TOP, the state machine, F1-NEQ) — FULL GATE BATTERY GREEN**
+**Last verified: 2026-08-31 EEST — Finding 1 (the stack-plan triple) — FULL GATE BATTERY GREEN, byte-for-baseline-equivalent semantically**
+
+**Finding 1 landed (uncommitted, on the 2026-08-30 ② tree + this tree's
+in-flight `hike.mli` work): the stack model decision now has ONE producer.**
+`Hike_stack_to_locals.split_plan` owns it; `regions_of_sub`'s per-region
+`convertible` flag carries the escape gate; the decision travels in the new
+`Convutils.vsa_info.stack_plan` field; and `Hike_stack_to_locals`,
+`Hike_dce` and `Bil2llvm` are its three CONSUMERS. `Bil2llvm.region_split_
+plan` is DELETED (its whole-sub rules — degraded, escape, unbounded access,
+VLA overlap, inside/disjoint tag coverage, region size — moved to the
+producer); the emitter's `create_def` collapsed from nine near-duplicate arms
+(a precise arm + a verbatim non-precise copy) to one shared `mem_access`
+dispatcher; `hike_dce` no longer imports the emitter (`is_precise_sub` reads
+`stack_plan`); the two `is_abi_visible` copies are now one rule the emitter
+calls; and `hike.ml`'s second `regions_of_sub` call (which overwrote the
+first) is gone — regions are computed once per sub. Net: **−318 lines**.
+
+Two unification notes for the next reader:
+- The escape rule is **per-region**, NOT whole-sub — `stack_to_locals`
+  consults `convertible` even on the fallback path, so moving the escape
+  gate into `split_plan` alone made `rec_struct` regress (28/32 → fixed
+  by keeping it in `regions_of_sub`, to which it is now passed as
+  `~frame_escaped`).
+- The two escape analyses that used to disagree (`sp_escaped` here vs the
+  emitter's `frame_ptr_value_def`/`has_frame_ptr`) are unified as
+  `frame_escapes` = `sp_escaped || frame_addr_alias`. The alias half is
+  NEW coverage (the bare-copy `v := RSP; t := mem[v]` class the emitter's
+  generalized predicate caught and `sp_escaped` did not) — that is why
+  5 binaries now convert MORE slots (fewer `poison` phis) while all
+  semantics stay byte-identical.
+
+**Gate results: identical to the 2026-08-30 baseline (29/3), and the 8/8
+oracle passes.** Emitted IR differs from `/tmp/heritage_lmC` on 8 of 32
+binaries, ALL in the "fewer poison phis / more real slot stores" direction
+(strictly more precise), with identical `stack_r` alloca counts (7).
+Production `Sys.getenv` debug gates dropped 16 → 6.
+
 
 This second session of the day landed the landmark CONSUMPTION fixes on top of
 the mapD tree (`3ebd805` = commit ①, the stack-to-locals rework, itself on
-`46e1207`/`62a466a`). ② = the UNCOMMITTED delta of the Q1-C/Q2-B/Q3-C/Q4-A
+`46e1207`/`62a466a`). ② = the consumption-fix delta as COMMITTED `6dd9cce`
+(on `5ae223b`; tree clean — the "uncommitted" description in earlier edits
+was STALE). The Q1-C/Q2-B/Q3-C/Q4-A
 grilling-settled design: the threshold ladder (`Cbat_thresholds` + all
 `widen_join_threshold` mirrors) DELETED, the Inf arm = plain `AI.widen_join`,
 the Zero arm = plain join, per-arm advance/clear + the stability check (see
@@ -404,11 +446,11 @@ landmark F1-NEQ acceptance test now passes end-to-end, no relaxed assertions).
 | Gate | Command | Current result |
 |---|---|---|
 | unit suite | `dune runtest` | **0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
-| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_lmC` | **32/32 rc=0** (38 surviving `hike: guarded:` warnings — the Unbounded class, incl. the converted-counter reads; benign, the value is the local) |
-| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_lmC` | **128 passed, 0 failed** ✅ |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_lmC /tmp/sem_lmC` | **29 PASS, 3 FAIL, 0 SKIP** of 32 emitted ✅ (the 3 = the SAME knowns below; every recovered sub — factorial/ptr_chain/sret_big/struct_by_value/rec_struct/array_local/deep_recursion — still PASS) |
-| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_lmC /tmp/sem_lmC_8` | **8/8 PASS** ✅ |
-| probes | corpus_watch / precision_probe spot-checks (factorial 100%, rec_struct 96.77%, array_local 94.12%, variadic 100.00%, alloca_vla 95.35%) | **PASS, 0 crashes**; exactness UNCHANGED vs ① |
+| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_f1f` | **32/32 rc=0** (this session's Finding-1 emission; surviving `hike: guarded:` warnings = the Unbounded class, benign) |
+| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_f1f` | **128 passed, 0 failed** ✅ |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_f1f /tmp/sem_f1f` | **29 PASS, 3 FAIL, 0 SKIP** of 32 emitted ✅ (the 3 = the SAME knowns below; every recovered sub — factorial/ptr_chain/sret_big/struct_by_value/rec_struct/array_local/deep_recursion — still PASS) |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_f1f /tmp/sem_f1f8` | **8/8 PASS** ✅ |
+| probes | corpus_watch / precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
 | property F1-NEQ | `dune runtest` (test_cbat) | **head max = K=0x64 exactly** (the Finite-fires-end-to-end acceptance test, STRICT) ✅ |
 | precise (stack_r) defines | per-emission count | **6 defines** (unchanged — landmark changes do not re-tag) |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |

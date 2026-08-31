@@ -722,19 +722,15 @@ let find_def_k sub_info def =
       Base.List.find_map info.Convutils.k_ranges ~f:(fun (dtid, klo, khi) ->
           if Tid.equal dtid (Term.tid def) then Some (klo, khi) else None))
 
-(* [is_abi_visible sub_info def]: The SINGLE classification rule the emission shares with the stack-to_locals pass — lo is the entry-relative offset (addr - entry RSP). Incoming args have lo >=0, locals lo <0. Outgoing stack args (mem[RSP] for 7th+ args) have lo <0 but k >=0 and RSP-relative, so they are also ABI-visible and must remain in memory for the callee's hike_stack+offset loads. *)
-let is_abi_visible sub_info def =
-  match find_def_tag sub_info def with
-  | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
-  | Some (Convutils.Range (lo, _)) ->
-    (match find_def_k sub_info def with
-     | Some (klo, _) when Int64.compare klo 0L >= 0 ->
-       (match Def.rhs def with
-        | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) | Bil.Cast (_, _, Bil.Load (_, addr, _, _)) | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) ->
-          Exp.free_vars addr |> Core.Set.exists ~f:(fun v -> String.equal (Var.name v) "RSP")
-        | _ -> false)
-     | _ -> false)
-  | _ -> false
+(* [is_abi_visible ctx sub_info def]: does the access touch caller/callee-visible
+   storage? Finding 1: this is NO LONGER a second copy of the rule — it is
+   [Hike_stack_to_locals]'s, the module that owns the stack model. The emitter
+   is a consumer. *)
+let is_abi_visible ctx sub_info def =
+  match sub_info with
+  | None -> false
+  | Some info ->
+      Hike_stack_to_locals.abi_visibility_of (sp ctx.Convutils.target) info def
 
 (* [is_stack_access def]: is [def] a Stack Access — the [stack_access]
    tag the relevance pass set on Stack Accesses, the only source of
@@ -929,167 +925,135 @@ let mem_access_via_ptr llvm_builder blk_tid addr_v exp =
       create_cast llvm_builder (c, w, s)
   | _ -> create_exp llvm_builder blk_tid exp
 
+(* [region_of_offset regions lo]: the ALLOCATED region ([stack_rN]) whose
+   span contains the singleton offset [lo] — the split model's access
+   resolution. The region list is exactly the plan the vsa pass produced
+   ([stack_plan_of]), so this is a lookup, never a decision. *)
+let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
+    (lo : int64) : (Convutils.region * Llvm.llvalue) option =
+  Base.List.find regions ~f:(fun (r, _) ->
+      let rlo, rhi = r.Convutils.span in
+      Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
+
+(* [mem_access ...]: THE per-access memory dispatcher — the ONE place the
+   emitter classifies how a tagged stack access resolves to storage. Both
+   the split model's region misses and the whole fallback model route
+   here, so the classification exists once (previously the precise and
+   non-precise arms of [create_def] each carried a near-verbatim copy —
+   Finding 1). The classification itself is the VSA's (the tag) plus the
+   ABI-visibility rule; this function only EXECUTES it. *)
+let mem_access llvm_builder blk_tid sub_tid sub_info fr (def : def term)
+    (exp : exp) =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  let var = Def.lhs def in
+  match find_def_tag sub_info def with
+  | Some (Convutils.Range (lo, hi))
+    when Int64.equal lo hi && is_stack_access def ->
+      if Int64.compare lo 0L > 0 then
+        (* The callee's incoming-arg cell (lo > 0 — read at its entry,
+           where the anchored [lo] IS the ABI offset): [%hike_stack + lo]. *)
+        (match fr.stack with
+        | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
+        | None -> create_exp llvm_builder blk_tid exp)
+      else if is_abi_visible ctx sub_info def then
+        (* The OUTGOING cell (k = addr − RSP at the def ≥ 0, lo ≤ 0): the
+           caller's arg-area stores AND the sub's own pushes at [RSP] —
+           the TRUE runtime address is the rhs's own address expression. *)
+        (match Def.rhs def with
+        | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
+            let* addr_v = create_exp llvm_builder blk_tid addr in
+            mem_access_via_ptr llvm_builder blk_tid addr_v exp
+        | _ -> create_exp llvm_builder blk_tid exp)
+      else
+        (* the true local (k < 0): the static frame GEP. *)
+        create_static_mem_access llvm_builder blk_tid fr lo exp
+  | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
+    when Int64.compare lo 0L > 0 && is_stack_access def ->
+      (* The POSITIVE-interval class (varargs reads etc.): the address
+         re-based onto the stack-threading value — [stack + (addr -
+         anchor)] — the offset from the entry is preserved while the base
+         moves from the per-sub frame to the caller's frame. *)
+      (match Def.rhs def with
+      | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
+          let* addr_v = create_exp llvm_builder blk_tid addr in
+          let* addr_v = rebase_addr llvm_builder fr addr_v in
+          mem_access_via_ptr llvm_builder blk_tid addr_v exp
+      | _ -> create_exp llvm_builder blk_tid exp)
+  | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
+  | Some Convutils.Unbounded ->
+      if is_stack_access def then begin
+        if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
+          ctx.Convutils.guarded_warned :=
+            Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
+          Printf.eprintf
+            "hike: guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s\n"
+            (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
+        end
+      end;
+      create_exp llvm_builder blk_tid exp
+  | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
+      create_exp llvm_builder blk_tid exp
+  | Some Convutils.Dead ->
+      let* typ = typ_lltype_m (Var.typ var) in
+      return @@ Llvm.poison typ
+  | None ->
+      if is_stack_access def then
+        failwith
+          (Printf.sprintf
+             "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
+             (Tid.name sub_tid) (Tid.name (Term.tid def)))
+      else create_exp llvm_builder blk_tid exp
+
 let create_def blk_tid llvm_builder sub_tid sub_info fr def =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
   let v = Def.value def in
   let exp = Def.rhs def in
+  let _ = (ctx, var) in
   let* res =
     if Term.has_attr def Hike_vsa_relevance.dynamic_alloc then
       create_dynamic_alloc llvm_builder blk_tid exp
     else if KB.Value.get rip_relative_addr v then
       create_rip_relative_addr llvm_builder blk_tid exp
     else if fr.is_precise then
-      (* Precise: try per-region stack_rN alloca for singleton tags *)
-      match find_def_tag sub_info def with
-      | Some (Convutils.Range (lo, hi))
-        when Int64.equal lo hi && is_stack_access def ->
-        (match
-           Base.List.find fr.regions ~f:(fun (r, _) ->
-               let rlo, rhi = r.Convutils.span in
-               Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
-         with
-        | Some (r, base) ->
-            let offset = Int64.sub lo (fst r.Convutils.span) in
-            let* llvm_ctx = Context.get llvm_ctx_var in
-            let gep =
-              Llvm.build_gep (Llvm.i8_type llvm_ctx) base
-                [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]
-                "" llvm_builder
-            in
-            (match Def.rhs def with
-            | Bil.Load (_, _, _, s) ->
-                return
-                @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits s)) gep
-                     "" llvm_builder
-            | Bil.Store (_, _, data, _, _) ->
-                let* d = create_exp llvm_builder blk_tid data in
-                return @@ Llvm.build_store d gep llvm_builder
-            | Bil.Cast (c, w, Bil.Load (_, _, _, s)) ->
-                let v =
-                  Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits s)) gep
+      (* SPLIT model: the plan's regions are the storage. A singleton
+         access inside an allocated region is a [stack_rN] GEP; every
+         other shape falls through to the shared dispatcher below (one
+         classification, not a second copy of it). *)
+      (match find_def_tag sub_info def with
+       | Some (Convutils.Range (lo, hi))
+         when Int64.equal lo hi && is_stack_access def ->
+           (match region_of_offset fr.regions lo with
+            | Some (r, base) ->
+                let offset = Int64.sub lo (fst r.Convutils.span) in
+                let* llvm_ctx = Context.get llvm_ctx_var in
+                let gep =
+                  Llvm.build_gep (Llvm.i8_type llvm_ctx) base
+                    [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]
                     "" llvm_builder
                 in
-                create_cast llvm_builder (c, w, v)
-            | _ -> create_exp llvm_builder blk_tid exp)
-        | None ->
-            if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None && Int64.compare lo 0L < 0 then
-              Printf.eprintf "hike: precise miss lo=%Ld not in convertible regions %d (sub %s def %s)\n" lo
-                (Base.List.length fr.regions) (Tid.name sub_tid) (Var.name (Def.lhs def));
-            (* M2: incoming (lo>0) via hike_stack GEP, no stack_arg_N *)
-            if Int64.compare lo 0L > 0 then
-              (match fr.stack with
-              | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
-              | None -> create_exp llvm_builder blk_tid exp)
-            else if is_abi_visible sub_info def then
-              (match Def.rhs def with
-              | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-                  let* addr_v = create_exp llvm_builder blk_tid addr in
-                  mem_access_via_ptr llvm_builder blk_tid addr_v exp
-              | _ -> create_exp llvm_builder blk_tid exp)
-            else (
-              if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None && Int64.compare lo 0L < 0 then
-                Printf.eprintf "hike: precise unexpected mem_access for lo=%Ld (sub %s def %s) -> static fallback\n" lo
-                  (Tid.name sub_tid) (Var.name (Def.lhs def));
-              create_static_mem_access llvm_builder blk_tid fr lo exp)
-            )
-      | _ ->
-          (* Non-singleton or not in region: fallback to frame/inttoptr path *)
-          match find_def_tag sub_info def with
-          | Some (Convutils.Range (lo, hi))
-            when Int64.equal lo hi && is_stack_access def ->
-              if Int64.compare lo 0L > 0 then
-                (match fr.stack with
-                | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
-                | None -> create_exp llvm_builder blk_tid exp)
-            else if is_abi_visible sub_info def then
                 (match Def.rhs def with
-                | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-                    let* addr_v = create_exp llvm_builder blk_tid addr in
-                    mem_access_via_ptr llvm_builder blk_tid addr_v exp
+                | Bil.Load (_, _, _, s) ->
+                    return
+                    @@ Llvm.build_load
+                         (Llvm.integer_type llvm_ctx (Size.in_bits s))
+                         gep "" llvm_builder
+                | Bil.Store (_, _, data, _, _) ->
+                    let* d = create_exp llvm_builder blk_tid data in
+                    return @@ Llvm.build_store d gep llvm_builder
+                | Bil.Cast (c, w, Bil.Load (_, _, _, s)) ->
+                    let v =
+                      Llvm.build_load
+                        (Llvm.integer_type llvm_ctx (Size.in_bits s))
+                        gep "" llvm_builder
+                    in
+                    create_cast llvm_builder (c, w, v)
                 | _ -> create_exp llvm_builder blk_tid exp)
-              else create_static_mem_access llvm_builder blk_tid fr lo exp
-          | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-            when Int64.compare lo 0L > 0 && is_stack_access def ->
-              (match Def.rhs def with
-              | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-                  let* addr_v = create_exp llvm_builder blk_tid addr in
-                  let* addr_v = rebase_addr llvm_builder fr addr_v in
-                  mem_access_via_ptr llvm_builder blk_tid addr_v exp
-              | _ -> create_exp llvm_builder blk_tid exp)
-          | Some (Convutils.VLA _) ->
-              create_exp llvm_builder blk_tid exp
-          | Some Convutils.Unbounded ->
-              if is_stack_access def then begin
-                if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
-                  ctx.Convutils.guarded_warned := Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-                  Printf.eprintf
-                    "hike: guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s\n"
-                    (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
-                end
-              end;
-              create_exp llvm_builder blk_tid exp
-          | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
-              create_exp llvm_builder blk_tid exp
-          | Some Convutils.Dead ->
-              let* typ = typ_lltype_m (Var.typ var) in
-              return @@ Llvm.poison typ
-          | None ->
-              if is_stack_access def then
-                failwith (Printf.sprintf "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
-                            (Tid.name sub_tid) (Tid.name (Term.tid def)))
-              else create_exp llvm_builder blk_tid exp
-    else
-      match find_def_tag sub_info def with
-      | Some (Convutils.Range (lo, hi))
-        when Int64.equal lo hi && is_stack_access def ->
-        if Int64.compare lo 0L > 0 then
-          (* The callee's incoming-arg cell (lo > 0 — read at its entry, where the anchored [lo] IS the ABI offset): [%hike_stack + lo] (the sub has the param). *)
-          (match fr.stack with
-           | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
-           | None -> create_exp llvm_builder blk_tid exp)
-        else if is_abi_visible sub_info def then
-          (* The OUTGOING cell (k = addr − RSP at the def ≥ 0, lo ≤ 0): the caller's arg-area stores AND the sub's own pushes at [RSP] — the TRUE runtime address is the rhs's own address expression (the emitted RSP local — exact;. *)
-          (match Def.rhs def with
-           | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-               let* addr_v = create_exp llvm_builder blk_tid addr in
-               mem_access_via_ptr llvm_builder blk_tid addr_v exp
-           | _ -> create_exp llvm_builder blk_tid exp)
-        else
-          (* the true local (k < 0): the static frame GEP. *)
-          create_static_mem_access llvm_builder blk_tid fr lo exp
-      | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-        when Int64.compare lo 0L > 0 && is_stack_access def ->
-          (* the POSITIVE-interval class (varargs reads etc.): the address re-based onto the stack-threading value — [stack + (addr - anchor)] — the offset from the entry is preserved while the base moves from the per-sub frame to the caller's frame. *)
-          (match Def.rhs def with
-           | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-               let* addr_v = create_exp llvm_builder blk_tid addr in
-               let* addr_v = rebase_addr llvm_builder fr addr_v in
-               mem_access_via_ptr llvm_builder blk_tid addr_v exp
-           | _ -> create_exp llvm_builder blk_tid exp)
-      | Some (Convutils.VLA _) ->
-          create_exp llvm_builder blk_tid exp
-      | Some Convutils.Unbounded ->
-          if is_stack_access def then begin
-            if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
-              ctx.Convutils.guarded_warned := Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-              Printf.eprintf
-                "hike: guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s\n"
-                (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
-            end
-          end;
-          create_exp llvm_builder blk_tid exp
-      | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
-          create_exp llvm_builder blk_tid exp
-      | Some Convutils.Dead ->
-          let* typ = typ_lltype_m (Var.typ var) in
-          return @@ Llvm.poison typ
-      | None ->
-          if is_stack_access def then
-            failwith (Printf.sprintf "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
-                        (Tid.name sub_tid) (Tid.name (Term.tid def)))
-          else create_exp llvm_builder blk_tid exp
+            | None -> mem_access llvm_builder blk_tid sub_tid sub_info fr def exp)
+       | _ -> mem_access llvm_builder blk_tid sub_tid sub_info fr def exp)
+    else mem_access llvm_builder blk_tid sub_tid sub_info fr def exp
   in
   insert_local ctx blk_tid var res;
   return ()
@@ -1746,6 +1710,30 @@ let degraded_dims (sub : sub term) : int64 * int64 * int64 * int64 =
   let anchor_idx = Int64.sub n 8L in
   (n, grown, max_pos, anchor_idx)
 
+(* ------------------------------------------------------------------ *)
+(* THE STACK MODEL DECISION — this module is a CONSUMER.                *)
+(*                                                                     *)
+(* [Hike_stack_to_locals.split_plan] is the single producer; the        *)
+(* emitter reads the result it carried in [Convutils.stack_plan] and     *)
+(* ALLOCATES what the plan says. The whole-sub rules (degraded,         *)
+(* SP-escape, untagged/Infinite/Unbounded/VLA accesses, VLA overlap,    *)
+(* the inside/disjoint tag coverage, the region size guard) previously  *)
+(* lived here as [region_split_plan] with a SECOND, different escape    *)
+(* analysis; they are gone from the emitter — one producer, three       *)
+(* consumers (Finding 1).                                              *)
+(* ------------------------------------------------------------------ *)
+
+(* [stack_plan_of sub_info]: the sub's stack model decision — the regions
+   that become per-region [stack_rN] allocas, or [[]] for the sound
+   single-frame fallback. *)
+let stack_plan_of (sub_info : Convutils.vsa_info option) : Convutils.split_plan =
+  match sub_info with
+  | None -> []
+  | Some info -> info.Convutils.stack_plan
+
+(* [region_bytes r]: the alloca size of region [r] (16-aligned, at least
+   one byte). The one geometric fact the emitter still owns — the
+   analysis-side size GUARD ([region_size_ok]) lives with the producer. *)
 let region_bytes (r : Convutils.region) : int64 =
   let lo, hi = r.Convutils.span in
   let span_len = Int64.add (Int64.sub hi lo) 1L in
@@ -1754,10 +1742,8 @@ let region_bytes (r : Convutils.region) : int64 =
   let r = Int64.rem raw 16L in
   if Int64.equal r 0L then raw else Int64.add raw (Int64.sub 16L r)
 
-let region_size_ok (r : Convutils.region) : bool =
-  let b = region_bytes r in
-  Int64.compare b 0L > 0 && Int64.compare b 67108864L <= 0
-
+(* [def_tags_of info_opt]: the per-def VSA tag map (the tag lookup the
+   emitter needs for its own per-access dispatch). *)
 let def_tags_of (info_opt : Convutils.vsa_info option) : Convutils.vsa_kind Tid.Map.t =
   match info_opt with
   | None -> Tid.Map.empty
@@ -1765,194 +1751,6 @@ let def_tags_of (info_opt : Convutils.vsa_info option) : Convutils.vsa_kind Tid.
       Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty ~f:(fun m (tid, k) ->
           Core.Map.set m ~key:tid ~data:k)
 
-let rec exp_contains_sp (e : exp) : bool =
-  match e with
-  | Bil.Var v ->
-      let n = Var.name (Var.base v) in
-      String.equal n "RSP" || String.equal n "RBP"
-  | Bil.BinOp (_, a, b) -> exp_contains_sp a || exp_contains_sp b
-  | Bil.UnOp (_, a) -> exp_contains_sp a
-  | Bil.Cast (_, _, a) -> exp_contains_sp a
-  | Bil.Extract (_, _, a) -> exp_contains_sp a
-  | Bil.Concat (a, b) -> exp_contains_sp a || exp_contains_sp b
-  | Bil.Let (_, a, b) -> exp_contains_sp a || exp_contains_sp b
-  | Bil.Ite (c, a, b) -> exp_contains_sp c || exp_contains_sp a || exp_contains_sp b
-  | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _) -> exp_contains_sp a
-  | _ -> false
-
-let frame_ptr_value_def (d : def term) : bool =
-  let lhs = Def.lhs d in
-  if Convutils.is_mem lhs then false
-  else
-    let n = Var.name (Var.base lhs) in
-    if String.equal n "RSP" || String.equal n "RBP" then false
-    else exp_contains_sp (Def.rhs d)
-
-let is_frame_var (target : var) (w : var) : bool =
-  Var.same w target || Var.same w (Var.base target)
-
-let rec may_be_bare_frame_var (env : exp Var.Map.t) (v : var) (e : exp) : bool =
-  match e with
-  | Bil.Var w ->
-      if is_frame_var v w then true
-      else (
-        match Core.Map.find env w with
-        | Some e' -> may_be_bare_frame_var env v e'
-        | None -> false)
-  | Bil.Ite (_, t, f) ->
-      may_be_bare_frame_var env v t || may_be_bare_frame_var env v f
-  | Bil.Let (x, e1, e2) ->
-      let env' = Core.Map.set env ~key:x ~data:e1 in
-      may_be_bare_frame_var env' v e2
-  | Bil.Cast (_, _, e') -> may_be_bare_frame_var env v e'
-  | Bil.Extract (_, _, e') -> may_be_bare_frame_var env v e'
-  | _ -> false
-
-let mem_addr_of_rhs (rhs : exp) : exp option =
-  match rhs with
-  | Bil.Load (_, addr, _, _) -> Some addr
-  | Bil.Store (_, addr, _, _, _) -> Some addr
-  | Bil.Cast (_, _, Bil.Load (_, addr, _, _)) -> Some addr
-  | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) -> Some addr
-  | _ -> None
-
-let region_split_plan (def_tags : Convutils.vsa_kind Tid.Map.t)
-    (info_opt : Convutils.vsa_info option) (sub : sub term) : Convutils.region list =
-  match info_opt with
-  | None -> []
-  | Some info when info.Convutils.degraded -> []
-  | Some info ->
-      let has_frame_ptr =
-        let defs =
-          Term.enum blk_t sub
-          |> Seq.concat_map ~f:(Term.enum def_t)
-          |> Seq.to_list
-        in
-        let pt_defs = Base.List.filter defs ~f:frame_ptr_value_def in
-        Base.List.exists pt_defs ~f:(fun d ->
-            let v = Def.lhs d in
-            Base.List.exists defs ~f:(fun d2 ->
-                match mem_addr_of_rhs (Def.rhs d2) with
-                | Some addr -> may_be_bare_frame_var Var.Map.empty v addr
-                | None -> false))
-      in
-      if has_frame_ptr then (
-        if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-          Printf.eprintf "hike: region_split_plan %s: has_frame_ptr true -> []\n" (Sub.name sub);
-        [])
-      else
-        let has_bad =
-          Term.enum blk_t sub
-          |> Seq.exists ~f:(fun blk ->
-              Term.enum def_t blk
-              |> Seq.exists ~f:(fun d ->
-                  let is_stack_mem =
-                    match Def.rhs d with
-                    | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _)
-                    | Bil.Cast (_, _, Bil.Load (_, a, _, _))
-                    | Bil.Cast (_, _, Bil.Store (_, a, _, _, _)) ->
-                        exp_contains_sp a
-                    | _ -> false
-                  in
-                  if not is_stack_mem then false
-                  else
-                    match Def.rhs d with
-                    | Bil.Load _ | Bil.Store _ | Bil.Cast (_, _, Bil.Load _) | Bil.Cast (_, _, Bil.Store _) ->
-                      (match Core.Map.find def_tags (Term.tid d) with
-                      | None -> true
-                      | Some (Convutils.Infinite _) -> true
-                      | Some Convutils.Unbounded -> true
-                      | Some (Convutils.VLA _) -> true
-                      | Some Convutils.Dead -> false
-                      | Some (Convutils.Range _) -> false)
-                    | _ -> false))
-        in
-        if has_bad then (
-          if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-            Printf.eprintf "hike: region_split_plan %s: has_bad true -> []\n" (Sub.name sub);
-          [])
-        else
-          let regions = info.Convutils.regions in
-          let convertible = Base.List.filter regions ~f:(fun r -> r.Convutils.convertible) in
-          if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then (
-            Printf.eprintf "hike: region_split_plan %s: regions %d convertible %d\n" (Sub.name sub) (List.length regions) (List.length convertible);
-            Base.List.iter regions ~f:(fun r ->
-                Printf.eprintf "hike:   region %d span=(%Ld,%Ld) convertible=%b members=%d max_width=%d\n"
-                  r.Convutils.id (fst r.Convutils.span) (snd r.Convutils.span) r.Convutils.convertible (List.length r.Convutils.members) r.Convutils.max_width);
-            Base.List.iter (Core.Map.to_alist def_tags) ~f:(fun (tid, kind) ->
-                match kind with
-                | Convutils.Range (lo, hi) -> Printf.eprintf "hike:   def_tag %s Range(%Ld,%Ld)\n" (Tid.name tid) lo hi
-                | Convutils.Infinite (lo, hi) -> Printf.eprintf "hike:   def_tag %s Infinite(%Ld,%Ld)\n" (Tid.name tid) lo hi
-                | Convutils.Unbounded -> Printf.eprintf "hike:   def_tag %s Unbounded\n" (Tid.name tid)
-                | Convutils.Dead -> Printf.eprintf "hike:   def_tag %s Dead\n" (Tid.name tid)
-                | Convutils.VLA tid -> Printf.eprintf "hike:   def_tag %s VLA(%s)\n" (Tid.name tid) (Tid.name tid));
-          );
-          if convertible = [] then (
-            if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-              Printf.eprintf "hike: region_split_plan %s: convertible empty (regions %d) -> []\n" (Sub.name sub) (List.length regions);
-            [])
-          else
-            let vla_overlaps =
-              Base.List.exists info.vla_bounds ~f:(fun (_, (lo, hi)) ->
-                let max_size = hi in
-                if Int64.compare max_size 0L <= 0 then false
-                else
-                  let vla_lo = Int64.neg max_size in
-                  let vla_hi = -1L in
-                  Base.List.exists convertible ~f:(fun r ->
-                    let rlo, rhi = r.span in
-                    not (Int64.compare vla_hi rlo < 0 || Int64.compare vla_lo rhi > 0))
-              )
-            in
-            let has_vla_tag =
-              Term.enum blk_t sub
-              |> Seq.exists ~f:(fun blk ->
-                  Term.enum def_t blk |> Seq.exists ~f:(fun d -> Term.has_attr d Hike_vsa_relevance.dynamic_alloc))
-            in
-            let should_degrade_vla =
-              if vla_overlaps then true
-              else if has_vla_tag && Base.List.is_empty info.vla_bounds then true
-              else false
-            in
-            if should_degrade_vla then (
-              if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-                Printf.eprintf "hike: region_split_plan %s: VLA overlaps convertible -> [] (VLA disjoint)\n" (Sub.name sub);
-              [])
-            else
-              let ok =
-              Core.Map.for_all def_tags ~f:(fun kind ->
-                  match kind with
-                  | Convutils.Infinite _ | Convutils.Unbounded -> false
-                  | Convutils.Dead -> true
-                  | Convutils.VLA _ -> false
-                  | Convutils.Range (lo, hi) ->
-                      let inside =
-                        Base.List.exists convertible ~f:(fun r ->
-                            let rlo, rhi = r.Convutils.span in
-                            Int64.compare lo rlo >= 0 && Int64.compare hi rhi <= 0)
-                      in
-                      let disjoint =
-                        Base.List.for_all convertible ~f:(fun r ->
-                            let rlo, rhi = r.Convutils.span in
-                            Int64.compare hi rlo < 0 || Int64.compare lo rhi > 0)
-                      in
-                      let res =
-                        if Int64.compare lo 0L < 0 then inside
-                        else inside || disjoint
-                      in
-                      if not res && Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-                        Printf.eprintf "hike:   not ok tag Range(%Ld,%Ld) inside=%b disjoint=%b res=%b\n" lo hi inside disjoint res;
-                      res)
-            in
-            if not ok then (
-              if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-                Printf.eprintf "hike: region_split_plan %s: not ok (def_tags not inside/disjoint) -> [] (regions %d convertible %d)\n" (Sub.name sub) (List.length regions) (List.length convertible);
-              [])
-            else if not (Base.List.for_all convertible ~f:region_size_ok) then (
-              if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-                Printf.eprintf "hike: region_split_plan %s: region_size_ok false -> []\n" (Sub.name sub);
-              [])
-            else convertible
 
 let create_sub sub =
   let open KB in
@@ -1987,8 +1785,10 @@ let create_sub sub =
       |> Base.Option.map ~f:(fun info -> info.Convutils.offsets)
       |> Base.Option.value ~default:[]
     in
-    let def_tags = def_tags_of sub_info in
-    let plan = region_split_plan def_tags sub_info sub in
+    (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
+       [Hike_stack_to_locals.split_plan] produced it in the vsa pass and
+       carried it in [vsa_info.stack_plan]. *)
+    let plan = stack_plan_of sub_info in
     let is_precise = plan <> [] in
     let frame, min_lo, anchor_idx, anchor_i64 =
       if is_precise then (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)

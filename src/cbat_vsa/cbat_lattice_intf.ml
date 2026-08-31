@@ -114,25 +114,3 @@ module Free_index_val (L : S_val) : S_indexed_val
   let pp = L.pp
 
 end
-
-(* a simple 2-element lattice with true as top and false as bottom *)
-module BoolLattice : sig
-
-  type t = bool [@@deriving bin_io, sexp, compare]
-  include S_val with type t := t
-
-end = struct
-
-  type t = bool[@@deriving bin_io, sexp, compare]
-
-  let top = true
-  let bottom = false
-  let meet a b = a && b
-  let join a b = a || b
-  let widen_join = join
-  let equal = Bool.(=)
-  let precedes a b = (not a) || b (* definition of classical implication *)
-
-  let pp ppf (b : t) = Format.fprintf ppf (if b then "top" else "bottom")
-
-end

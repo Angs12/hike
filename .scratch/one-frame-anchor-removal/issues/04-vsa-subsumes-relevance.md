@@ -1,9 +1,19 @@
 # 04: VSA lattice subsumes the relevance pass (wide refactor — expand–contract)
 
-**What to build:** The relevance pass (`src/hike_vsa_relevance.ml`) and
+**Status: SUPERSEDED (2026-08-31)** by
+`.scratch/restriction-removal/spec.md` +
+`docs/adr/0003-remove-restriction-vsa-seeding.md` — the restriction is
+REMOVED entirely (every def denoted) and the seeding half is succeeded by
+the VSA's own two-channel frame-residency proof (`vsa_info` is the only
+carrier of stack-access-ness; the syntactic forward pass is deleted, not
+moved into the lattice). The AI state does NOT grow an `sp_derived_vars`
+field: the frame relation already computes the same fact. This ticket is
+kept for the record only; do not implement it.
+
+**What to build (superseded):** The relevance pass (`src/hike_vsa_relevance.ml`) and
 the VSA's `denote_def` filter are now a single analysis: the AI state
-carries `sp_derived_vars` as part of its lattice, and the VSA's
-transfer function updates both the abstract state AND the sp-derived
+carries `sp_derived_vars` as part of its lattice, and the VSA's transfer
+function updates both the abstract state AND the sp-derived
 set in one pass. The relevance pass's `forward_vars` and
 `backward_slice` fixpoints are GONE; the VSA's value-tracking IS the
 relevance analysis. `hike_vsa_relevance.ml` shrinks to ~100 LOC:

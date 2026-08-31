@@ -24,7 +24,6 @@ module WordSet = Cbat_clp_set_composite
 module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word_ops
 module Utils = Cbat_vsa_utils
-module Back_edges = Cbat_back_edges
 
 (* Bourdoncle WTO — inlined from cbat_wto.ml to avoid separate-file merlin config. *)
 module Wto = struct
@@ -153,11 +152,6 @@ let mem_idx addr_sz addressable_sz : Mem.idx =
       (if !addr_bits_ref > 0 then !addr_bits_ref else Size.in_bits addr_sz);
     Mem.addressable_width = Size.in_bits addressable_sz }
 
-(* a tag used in the analysis to indicate when to widen a precondition state *)
-let do_widen = Value.Tag.register (module Unit)
-    ~name:"widen state on recompute"
-    ~uuid:"a8050d49-f451-4684-afbd-97c013dd8e4d"
-
 let jmp_target (j : jmp term) : tid option =
   let mlbl = match Jmp.kind j with
     | Call c -> Some (Call.target c)
@@ -168,21 +162,6 @@ let jmp_target (j : jmp term) : tid option =
     match lbl with
     | Direct tid -> Some tid
     | Indirect _ -> None
-  end
-
-let label_widening_points (sub : sub term) : sub term =
-  let open Monads.Std.Monad.Option.Syntax in
-  Term.enum blk_t sub
-  |> Seq.concat_map ~f:(Term.enum jmp_t)
-  |> Seq.fold ~init:sub ~f:begin fun sub jmp ->
-    if Term.has_attr jmp Back_edges.back_edge then
-      Option.value ~default:sub begin
-        Term.get_attr jmp Back_edges.back_edge >>= fun () ->
-        jmp_target jmp >>= fun tid ->
-        let set_do_widen blk = Term.set_attr blk do_widen () in
-        !!(Term.change blk_t sub tid (Option.map ~f:set_do_widen))
-      end
-    else sub
   end
 
 type wordset = WordSet.t
@@ -2782,8 +2761,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         end
       end
   in
-  let s = Back_edges.label_back_edges s in
-  let s = label_widening_points s in
   let cfg = Sub.to_graph s in
   (* BAP 2.6's Sub.to_graph adds the [start]/[exit] pseudo-nodes; the fixpoint would apply the block denotation to them and crash (Program.lookup fails). *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
@@ -3011,13 +2988,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     !any_changed
   in
   ignore (stabilize_comps wto);
-  let result = Solution.create !sol_map sol_default in
-  (try
-     let oc = open_out_gen [Open_append; Open_creat] 0o644 "/tmp/vsa_steps.txt" in
-     Printf.fprintf oc "%s\t%d\t%d\n" (Sub.name s) (Term.length blk_t s) !total_processed;
-     close_out oc
-   with _ -> ());
-  result
+  Solution.create !sol_map sol_default
 
 (* the view-carrying entry point. The legacy [static_graph_vsa] API remains solution-only for callers that have not migrated yet; Phase-B consumers must use this entry point so the computed views are not discarded at the analysis boundary. *)
 let static_graph_vsa_with_views (stack : tid list) (ctx : Program.t)
