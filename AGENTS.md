@@ -327,7 +327,43 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-31 EEST — Finding 1 (the stack-plan triple) — FULL GATE BATTERY GREEN, byte-for-baseline-equivalent semantically**
+**Last verified: 2026-08-31 EEST (evening) — the KB-store fix (join domain + dead limbs) — FULL GATE BATTERY GREEN, identical to the Finding-1 baseline**
+
+**The KB-store fix (this session, on the Finding-1 tree): the vsa-info KB
+slot's silent drop is gone.** `Hike_kb`'s slot domain is now MAP EXTENSION
+(order) / MAP UNION (join): a provide that adds subs the map lacks is a
+monotone update, a re-provide of the same map is idempotent, and two
+DIFFERENT infos for one sub raise a loud `Toplevel.Conflict` (the
+`Vsa_info_conflict` extension + `KB.Conflict.register_printer` — the KB's
+own `Non_monotonic_update` machinery, not a hand-rolled guard). Two dead
+limbs deleted: the write-only `vsa_sol_tbl` Hashtbl (`vsa_sol` /
+`provide_sol` / `add_sol` — one writer, zero readers repo-wide; every
+sub's fixpoint solution was retained process-globally for nothing) and the
+always-`[]` `Convutils.vsa_info.call_stack_args` field (the M2 removal —
+record, the `call_stack_args_of_sub` function, all 7 record literals).
+The vsa pass's re-entrancy guard (`hike.ml`) STAYS as an
+idempotence/perf guard (its stale "M2 (ADR 0004)" comment rewritten — the
+join domain makes a second run's provide idempotent-or-conflict, so the
+skip is pure fixpoint-cost avoidance, NOT a soundness gate). Docs fixed to
+the join-domain contract: the `hike.mli` `Kb` doc (the write-once caveat
+is gone), the header's self-contradictory "Deliberately NOT exported:
+[Hike_kb]" sentence ([Hike_kb] IS exported as `module Kb`), and the A4
+test comment (the fixtures still BORROW C1's entry — providing their own
+info under C1's tid would now conflict; minimal-change doctrine keeps the
+borrowing). Per the user's directive, NO unit tests were added for the
+join/order machinery itself — BAP's KB is upstream-tested; the domain is
+exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
+
+| Gate | Command | Current result |
+|---|---|---|
+| unit suite | `dune runtest --force` | **0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
+| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_kb` | **32/32 rc=0** (surviving `hike: guarded:` warnings = the Unbounded class, benign) |
+| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_kb` | **128 passed, 0 failed** ✅ |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb` | **29 PASS, 3 FAIL** of 32 emitted ✅ (the 3 = the SAME knowns below) |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb8` | **8/8 PASS** ✅ |
+| probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
+| FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
+| coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session |
 
 **Finding 1 landed (uncommitted, on the 2026-08-30 ② tree + this tree's
 in-flight `hike.mli` work): the stack model decision now has ONE producer.**

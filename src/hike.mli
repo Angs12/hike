@@ -11,11 +11,11 @@
    by plain name) and under bapbuild (flat: every module is a top-level module
    of the plugin), so ONE interface serves both builds.
 
-   Deliberately NOT exported: [Hike_kb] (process-global KB state — consumers
-   that need it should take the value as a parameter), [Calling_conventions]
-   (one target's data, reached through the pass), and the pass-pipeline
-   internals in this file's implementation ([filter_subs], [compute_sub_sig],
-   [convert_binary], ...). *)
+   [Calling_conventions] is deliberately not exported (one target's data,
+   reached through the pass), nor are the pass-pipeline internals in this
+   file's implementation ([filter_subs], [compute_sub_sig], [convert_binary],
+   ...). [Hike_kb] IS exported, as [Kb] below — its join-domain slot is the
+   supported way to hand per-sub VSA results across the pass chain. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -155,13 +155,15 @@ module Stack_to_locals : sig
   val is_precise : Convutils.vsa_info -> bool
 end
 
-(** The per-sub VSA result store — process-global KB state.
+(** The per-sub VSA result store — one KB slot with a JOIN domain.
 
-    CAVEAT: [provide] is WRITE-ONCE per process (a second, different map is
-    silently discarded), so pinning more than one sub's info in a single test
-    process requires borrowing one sub's tid. Prefer taking the map as a
-    parameter; this module exists because the production pass chain hands off
-    through the KB. *)
+    [vsa_info] is a KB property on the hike run class whose domain is
+    MAP EXTENSION (order) and MAP UNION (join): a provide that only adds
+    subs the map lacks is a monotone update, a re-write of the same map
+    is idempotent, and two DIFFERENT [vsa_info]s for the same sub raise
+    [Toplevel.Conflict] — the KB's own conflict machinery, never a
+    silent drop. Multiple subs (and multiple provides) accumulate;
+    tests no longer need to borrow tids. *)
 module Kb = Hike_kb
 
 (** Shared pass/emitter vocabulary, re-exported wholesale: the [vsa_info] and
