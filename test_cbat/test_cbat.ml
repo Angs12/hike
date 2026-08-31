@@ -3174,10 +3174,31 @@ let () =
   let ctx4 = Program.create ~subs:[ sub4 ] () in
   let sol4 = Vsa.static_graph_vsa [] ctx4 sub4 (Vsa.init_sol ~entry:(anchored_entry ()) sub4) in
   let cell4 = l3c1_cell_of m4 (Graphlib.Std.Solution.get sol4 b_tid) in
+  (* MIGRATED (ticket 01, the single-pass trace partitioning,
+     docs/trace-partitioning-plan.md §2/§4.3): the pin used to assert the
+     solution's body-IN cell stays TOP — the observable of the SHALLOW
+     lane's single-def gate ([constrain_def_chain]'s [unique] stop), the
+     only refinement that reached the raw solution pre-inline.  The fused
+     design makes the block IN-state the TAG state: the inline deep walk
+     ([refine_edge]) refines the TAKEN edge — [v < 10] over the header's
+     [v := t − 1] (the header's OWN def, the per-def PRODUCER SUBTRACTION
+     handling the multi-def base soundly — the walk never had the unique
+     gate; the per-def subtraction is its documented multi-def mechanism)
+     — so [t ∈ [1,10]] meets the load cell.  The window is EXACT for the
+     taken trace (the cell is never stored in this fixture: X = 0 gives
+     v = 0xFFFFFFFF (exit), X ≥ 11 gives v ≥ 10 (exit) — the body is
+     entered only from X ∈ [1,10]).  The shallow lane's single-def gate
+     itself is untouched (KEPT — [constrain_def_chain]). *)
   check
-    "L3c1-4: the single-def gate — a compared var whose base has TWO defs stops the walk (no cell \
-     refinement)"
-    (Ws.is_top cell4);
+    "L3c1-4 (migrated, single-pass §2): the multi-def base refines through the \
+     per-block producer subtraction — the body-IN cell is the EXACT taken-edge \
+     window [1,10] (1 ∈, 10 ∈, 0 ∉, 11 ∉; non-top)"
+    ((not (Ws.is_top cell4))
+    && (not (Ws.is_bottom cell4))
+    && Ws.elem (w32 1) cell4
+    && Ws.elem (w32 10) cell4
+    && not (Ws.elem (w32 0) cell4)
+    && not (Ws.elem (w32 11) cell4));
   (* L3c1-5: direct assume_jump_cond WITHOUT ?defs — the flag-state step is gated on ?defs: the flag
      meet still applies (the pre-L3c behavior) but no cell refinement happens. *)
   let sub5, _, jmp5 = mk_l3c1_loop ~extra_header_defs:[] in
@@ -5084,18 +5105,43 @@ let () =
     && match Ws.min_elem cell3 with Some w -> Word.( >= ) w (w32 11) | None -> false);
   (* R2-4: the NESTED-BinOp operand chain — `when (t * 8) < 512 goto BODY` (the compared exp is
      BinOp TIMES of t := Load[RBP-8]). The SOUND TIMES rule (M5): the exact slice [0, 63] applies
-     only when the operand provably cannot wrap; over the walk's unbounded operand the wrapped
-     classes hull to the domain = the identity, so the cell is not narrowed. (The pre-M5 no-wrap
-     slice was unsound — a t with t·8 mod 2^32 ∈ [0,511] outside [0,63], e.g. t = 2^29, also
-     satisfies the guard.) The M6 tag computation's constrained operand fires the exact slice. *)
+     only when the operand provably cannot wrap; over an unbounded operand the wrapped classes
+     hull to the domain = the identity (the pre-M5 no-wrap slice was UNSOUND — a t with
+     t·8 mod 2^32 ∈ [0,511] outside [0,63], e.g. t = 2^29, also satisfies the guard), so the
+     row fires ONLY on a bounded operand.  Pre-inline (the forward-only solution + the M6 tag
+     computation) the raw solution's counter was the only refinement source and this pin asserted
+     the identity; the single-pass design (ticket 01) runs the deep walk INSIDE the fixpoint, so
+     the operand IS bounded when the row evaluates and the exact slice fires — the cascade the
+     ADR predicted.  The M5 no-wrap SOUNDNESS is unchanged ([operand_constraints]' [wrap_limit]
+     gate). *)
   let sub4, body4 =
     mk_r2_loop ~seed:(w32 63) ~seed2:None ~body_op:Bil.PLUS ~body_k:(w32 1) ~mk_cond:(fun ~t ->
         Bil.BinOp (Bil.LT, Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (w32 8)), Bil.Int (w32 512)))
   in
   check
-    "R2-4: the NESTED-BinOp operand chain `(t * 8) < 512` — the TIMES rule over an unbounded \
-     operand is the identity (sound; the cell is not bounded by the multiplier)"
-    (not (l39_bounded (r2_run sub4 body4) (w32 63)));
+    "R2-4 (migrated, single-pass §2): the NESTED-BinOp chain `(t * 8) < 512` — the inline walk \
+     bounds the operand, the exact TIMES no-wrap slice fires, and the body-IN cell is the EXACT \
+     singleton {63} (the loop exits at t = 64; 63 ∈, 62 ∉, 64 ∉; non-top)"
+    (let cell = r2_run sub4 body4 in
+     (* MIGRATED (ticket 01, the single-pass trace partitioning,
+        docs/trace-partitioning-plan.md §2/§4.3): the pin used to assert
+        the cell is NOT bounded — the M5 TIMES rule's IDENTITY case over
+        the WALK's unbounded operand (pre-inline the raw solution's
+        counter widened past the row's no-wrap gate).  The fused design
+        runs the deep walk INSIDE the fixpoint, so the operand IS bounded
+        when the row evaluates (the head settles at {63,64}) and the
+        EXACT no-wrap slice [0,63] fires on the TAKEN edge — the
+        refinement the ADR predicted ("a refinement can cascade into
+        downstream refinements within the same pass").  The result is
+        EXACT: the loop exits at t = 64 (64·8 = 512 ≮ 512), so the body is
+        entered only with the cell = 63 — the body-IN cell is the
+        singleton {63}, strictly sounder-precise than the old top.  The M5
+        no-wrap SOUNDNESS (never slicing an unbounded operand) is
+        unchanged — [operand_constraints]' [wrap_limit] gate is what fired
+        here. *)
+     (not (Ws.is_top cell))
+     && (not (Ws.is_bottom cell))
+     && Ws.equal cell (Ws.singleton (w32 63)));
   ()
 
 (* --- M5: the complete-rule pins (docs/trace-partitioning-plan.md §4) - one pin per rule the M5
@@ -7930,8 +7976,183 @@ let () =
     (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
   ()
 
+(* ================================================================== *)
+(* Ticket 01 — the single-pass trace partitioning (docs/trace-partitioning- *)
+(* plan.md §2/§4.3): the forward fixpoint is branch-sensitive end-to-end.   *)
+(* Every out-edge of every block transfers a branch-refined successor      *)
+(* entry state, the refinement driven by BAP's ACCUMULATED edge condition   *)
+(* ([Graphs.Ir.Edge.cond] via [Sub.to_cfg]): for a when-chain               *)
+(* `when c1 goto l1; when c2 goto l2; goto l3` the l2 edge carries          *)
+(* `c2 & ~c1` and the unconditional tail edge carries `~c1 & ~c2`           *)
+(* (probe-verified 2026-08-30) — a cond in a chain is refined by every      *)
+(* previous cond that was not true.  The consumer reads the refined         *)
+(* per-block IN-states directly from the converged solution (no Phase B).  *)
+(* ================================================================== *)
+
+(* [mk_when_chain]: PROLOGUE: RBP := RSP; goto S1.  S1: f1 := g1 (a free 1-bit
+   var); when f1 goto E1; goto S2.  S2: f2 := g2; when f2 goto E2; goto E3.
+   E1: m := mem[RBP-8] <- 5; goto CHAIN.  E2: <- 15; goto CHAIN.  E3: <- 25;
+   goto CHAIN.  CHAIN: x := Load[RBP-8]; when (x < 10) goto L1; when (x < 20)
+   goto L2; goto L3.  The split ladder's guards are 1-bit FREE vars (TOP), so
+   every split edge is LIVE ([reachable_jumps] yields both), and the three
+   store paths join at the chain: the cell = {5, 15, 25} — every edge of the
+   when-chain is LIVE and the accumulated conds PARTITION the set exactly:
+   edge→L1 = `x < 10` = {5}, edge→L2 = `x < 20 & ~(x < 10)` = {15}, the tail
+   = `~(x < 10) & ~(x < 20)` = {25}.  (A sub has ONE entry — [init_sol]
+   seeds only [Term.first blk_t] — so the three seeds MUST be routed through
+   a single entry via the TOP-guarded ladder, not three entry blocks.)
+   Returns (sub, l1 tid, l2 tid, l3 tid, chain tid, x). *)
+let mk_when_chain () : sub term * tid * tid * tid * tid * var =
+  let m = memv "wc_m" in
+  let rbp = v64 "RBP" in
+  let x = Var.create ~is_virtual:false ~fresh:false "wc_x" (Type.Imm 32) in
+  let g1 = v1 "wc_g1" in
+  let g2 = v1 "wc_g2" in
+  let f1 = v1 "wc_f1" in
+  let f2 = v1 "wc_f2" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
+  let c1 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)) in
+  let c2 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 20)) in
+  let mk_store_blk (k : word) : blk term =
+    let b = Blk.Builder.create () in
+    Blk.Builder.add_def b
+      (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int k, LittleEndian, `r32)));
+    Blk.Builder.result b in
+  let mk_jmp_blk () : blk term = Blk.Builder.result (Blk.Builder.create ()) in
+  let prologue0 =
+    let b = Blk.Builder.create () in
+    Blk.Builder.add_def b (Def.create rbp (Bil.Var (v64 "RSP")));
+    Blk.Builder.result b in
+  let s1_0 = mk_jmp_blk () in
+  let s2_0 = mk_jmp_blk () in
+  let e1_0 = mk_store_blk (w32 5) in
+  let e2_0 = mk_store_blk (w32 15) in
+  let e3_0 = mk_store_blk (w32 25) in
+  let chain_b = Blk.Builder.create () in
+  Blk.Builder.add_def chain_b (Def.create x load_e);
+  let chain0 = Blk.Builder.result chain_b in
+  let l1_0 = mk_jmp_blk () in
+  let l2_0 = mk_jmp_blk () in
+  let l3_0 = mk_jmp_blk () in
+  let chain_tid = Term.tid chain0 in
+  let l1_tid = Term.tid l1_0 in
+  let l2_tid = Term.tid l2_0 in
+  let l3_tid = Term.tid l3_0 in
+  let prologue_b = Blk.Builder.init ~copy_defs:true prologue0 in
+  Blk.Builder.add_jmp prologue_b (Jmp.create (Goto (Direct (Term.tid s1_0))));
+  let s1_b = Blk.Builder.init ~copy_defs:true s1_0 in
+  Blk.Builder.add_def s1_b (Def.create f1 (Bil.Var g1));
+  Blk.Builder.add_jmp s1_b (Jmp.create ~cond:(Bil.Var f1) (Goto (Direct (Term.tid e1_0))));
+  Blk.Builder.add_jmp s1_b (Jmp.create (Goto (Direct (Term.tid s2_0))));
+  let s2_b = Blk.Builder.init ~copy_defs:true s2_0 in
+  Blk.Builder.add_def s2_b (Def.create f2 (Bil.Var g2));
+  Blk.Builder.add_jmp s2_b (Jmp.create ~cond:(Bil.Var f2) (Goto (Direct (Term.tid e2_0))));
+  Blk.Builder.add_jmp s2_b (Jmp.create (Goto (Direct (Term.tid e3_0))));
+  let mk_goto (b0 : blk term) (dst : tid) : blk term =
+    let b = Blk.Builder.init ~copy_defs:true b0 in
+    Blk.Builder.add_jmp b (Jmp.create (Goto (Direct dst)));
+    Blk.Builder.result b in
+  let e1 = mk_goto e1_0 chain_tid in
+  let e2 = mk_goto e2_0 chain_tid in
+  let e3 = mk_goto e3_0 chain_tid in
+  let chain_b = Blk.Builder.init ~copy_defs:true chain0 in
+  Blk.Builder.add_jmp chain_b (Jmp.create ~cond:c1 (Goto (Direct l1_tid)));
+  Blk.Builder.add_jmp chain_b (Jmp.create ~cond:c2 (Goto (Direct l2_tid)));
+  Blk.Builder.add_jmp chain_b (Jmp.create (Goto (Direct l3_tid)));
+  let l1 = mk_goto l1_0 l1_tid in
+  let l2 = mk_goto l2_0 l2_tid in
+  let l3 = mk_goto l3_0 l3_tid in
+  let sub_b = Sub.Builder.create ~name:"wc_chain" () in
+  List.iter (Sub.Builder.add_blk sub_b)
+    [ Blk.Builder.result prologue_b; Blk.Builder.result s1_b; Blk.Builder.result s2_b;
+      e1; e2; e3; Blk.Builder.result chain_b; l1; l2; l3 ];
+  let sub = tag_all (Sub.Builder.result sub_b) in
+  (sub, l1_tid, l2_tid, l3_tid, chain_tid, x)
+
+(* T01-1 (ticket 01, §4.3 — THE ACCUMULATED-COND ACCEPTANCE TEST): the
+   when-chain fixture above, run through the PRODUCTION engine.  The fused
+   transfer refines EVERY out-edge by its ACCUMULATED cond — the mid-chain
+   edge by `c2 & ~c1` (NOT merely the jmp's own cond `c2`, which over {5,15,25}
+   is satisfied by BOTH 5 and 15) and the unconditional chain TAIL by
+   `~c1 & ~c2` (whose own cond is the vacuous `1`).  Each single-predecessor
+   target's IN-state is its edge's refined state, so the per-edge windows are
+   directly observable in the solution: L1.in x = {5}, L2.in x = {15},
+   L3.in x = {25} — exactly.  A jmp's-own-cond implementation would give
+   L2.in x = {5, 15} (no ~c1) and L3.in x = {5, 15, 25} (the identity on the
+   unconditional tail); an implementation skipping the tail edge would give
+   L3.in x = {5, 15, 25} as well. *)
+let () =
+  let sub, l1_tid, l2_tid, l3_tid, _chain_tid, x = mk_when_chain () in
+  let prog' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let in_x (t : tid) : Ws.t = AI.find_word 32 (Graphlib.Std.Solution.get sol t) x in
+  check
+    "T01-1a (when-chain): the FIRST edge's IN-state is refined by its own cond \
+     (x < 10 over {5,15,25} = {5} exactly)"
+    (Ws.equal (in_x l1_tid) (Ws.singleton (w32 5)));
+  check
+    "T01-1b (when-chain): the MID-CHAIN edge's IN-state is refined by the \
+     ACCUMULATED `c2 & ~c1`, not the jmp's own cond (x = {15} exactly — not \
+     {5,15})"
+    (Ws.equal (in_x l2_tid) (Ws.singleton (w32 15)));
+  check
+    "T01-1c (when-chain): the unconditional chain TAIL's IN-state is refined \
+     by the accumulated negatives `~c1 & ~c2` (x = {25} exactly — the \
+     identity transfer would give the full {5,15,25})"
+    (Ws.equal (in_x l3_tid) (Ws.singleton (w32 25)));
+  ()
+
+(* T01-2 (ticket 01, §4.3 — the uniform-rule identity): a lone UNCONDITIONAL
+   goto's accumulated cond is the literal TRUE (`Edge.cond`'s own-cond of a
+   no-cond jmp, simplified) — the identity transfer, no seeds, no deep walk.
+   The fixpoint must be UNCHANGED by the fused machinery on such a fixture:
+   the successor's IN-state equals the predecessor's post state, exactly as
+   the forward-only engine computed it (no spurious refinement, no bottom, no
+   divergence).  The fixture: ENTRY: m := mem[RBP-8] <- {3}; jmp MID.  MID:
+   jmp EXIT.  EXIT: (empty).  A straight line — the IN-states must be the
+   plainly-denoted states ({3}'s store effects), with the cell's value {3}
+   readable at EXIT exactly as at MID. *)
+let () =
+  let m = memv "t01_m" in
+  let rbp = v64 "RBP" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let entry_b = Blk.Builder.create () in
+  let mid_b = Blk.Builder.create () in
+  let exit_b = Blk.Builder.create () in
+  Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var (v64 "RSP")));
+  Blk.Builder.add_def entry_b
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (w32 3), LittleEndian, `r32)));
+  let mid0 = Blk.Builder.result mid_b in
+  let exit0 = Blk.Builder.result exit_b in
+  let mid_tid = Term.tid mid0 in
+  let exit_tid = Term.tid exit0 in
+  let entry_b = Blk.Builder.init ~copy_defs:true (Blk.Builder.result entry_b) in
+  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct mid_tid)));
+  let mid_b = Blk.Builder.init ~copy_defs:true mid0 in
+  Blk.Builder.add_jmp mid_b (Jmp.create (Goto (Direct exit_tid)));
+  let sub_b = Sub.Builder.create ~name:"t01_straight" () in
+  List.iter (Sub.Builder.add_blk sub_b)
+    [ Blk.Builder.result entry_b; Blk.Builder.result mid_b; exit0 ];
+  let sub = tag_all (Sub.Builder.result sub_b) in
+  let prog' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let cell_at (t : tid) : Ws.t =
+    match
+      Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32))
+        (Graphlib.Std.Solution.get sol t)
+    with
+    | Ok ws -> ws
+    | Error _ -> Ws.top 32 in
+  check
+    "T01-2 (uniform rule): a lone unconditional goto's accumulated cond is the \
+     literal TRUE — the identity transfer: EXIT's IN-state equals MID's \
+     (both read the stored {3} exactly; no spurious refinement, no bottom)"
+    (Ws.equal (cell_at mid_tid) (Ws.singleton (w32 3))
+     && Ws.equal (cell_at exit_tid) (Ws.singleton (w32 3)));
+  ()
+
 let () =
   print_endline
     (if !failures = 0 then "ALL CBAT TESTS PASSED" else Printf.sprintf "%d FAILURES" !failures);
   exit (if !failures = 0 then 0 else 1)
-
