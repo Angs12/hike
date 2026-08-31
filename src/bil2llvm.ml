@@ -1302,6 +1302,9 @@ let native_fp_op (name : string) : native_fp option =
      result.  LLVM: fcmp olt (the rne suffix is rounding-neutral —
      comparisons do not round). *)
   | "intrinsic:forder_rne_ieee754_binary" -> Some FORDER
+  (* the UNSUFFIXED spelling occurs too (the legacy-name class, like the
+     width-suffixed variants): the same ordered FP less-than. *)
+  | "intrinsic:forder_ieee754_binary" -> Some FORDER
   (* The x86 halt: BAP's x86-common.lisp [HLT] = (intrinsic 'hlt) — the
      privileged halt, a faulting/trap edge in user mode — the SAME trap
      model as the [@interrupt:*] calls (the lifter emits
