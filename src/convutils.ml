@@ -1,6 +1,7 @@
 open Bap.Std.Bil.Types
 open Bap.Std
 open Bap_core_theory
+module Abi = Hike_abi
 
 type llvalue_map = Llvm.llvalue Var.Map.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
@@ -76,7 +77,6 @@ module Vsa = struct
     regions : region list;
     stack_plan : split_plan;
     degraded : bool;
-    call_stack_args : (Tid.t * (int * int64) list) list;
     vla_bounds : (Tid.t * (int64 * int64)) list;
   }
   [@@deriving equal]
@@ -132,9 +132,7 @@ let add_sub_sig subs tid ~rets ~args =
   Core.Map.add_exn subs ~key:tid ~data:(rets, args)
 
 let get_calling_convention ctx =
-  if Theory.Target.matches ctx.target "x86_64-gnu-elf" then
-    Calling_conventions.x86_64_sysv
-  else failwith "abi not supported"
+  Abi.of_target ctx.target
 
 let get_args ctx sub_tid =
   match Core.Map.find ctx.subs sub_tid with
@@ -143,7 +141,7 @@ let get_args ctx sub_tid =
       let callconv = get_calling_convention ctx in
       Base.List.map
         ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-        callconv.param_regs
+        (callconv.int_param_regs @ callconv.vector_param_regs)
 
 let get_rets ctx sub_tid =
   match Core.Map.find ctx.subs sub_tid with

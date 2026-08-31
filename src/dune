@@ -26,5 +26,6 @@
     core_kernel
     monads
     ogre
+    hike.hike_abi
     hike.cbat_vsa
     hike.cbat_vsa_domain))

@@ -13,6 +13,7 @@
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
+module Abi = Hike_abi
 
 (* Target-derived SP/FP: the sole origin for stack derivation (AGENTS.md
    Principle 8 — never hardcode a register name). [sp] is passed in by the
@@ -23,7 +24,7 @@ open Bap_core_theory
 let fp_of (target : Theory.Target.t) : var option =
   if Theory.Target.is_unknown target then None
   else
-    match Targetutils.fp target with
+    match Abi.fp target with
     | v -> Some v
     | exception _ -> None
 
@@ -62,12 +63,13 @@ let arr_of (lo : int64) (hi : int64) : var =
     (Type.Mem (Size.addr_of_int_exn 64, Size.of_int_exn 8))
 
 (* Defs that save incoming register args; keep them in memory so va_arg pointer reads alias correctly. *)
-let saves_incoming_reg (d : def term) : bool =
+let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
+  let param_regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs in
   match Def.rhs d with
   | Bil.Store (_, _, data, _, _) -> (
       match data with
       | Bil.Var v ->
-          Base.List.exists Calling_conventions.x86_64_sysv.param_regs
+          Base.List.exists param_regs
             ~f:(fun r -> Var.same r (Var.base v))
       | _ -> false)
   | _ -> false
@@ -179,7 +181,7 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
        and sit in the same call block — they are dead model traffic,
        never an escape. *)
     let is_arg_reg (v : var) : bool =
-      Base.List.exists Calling_conventions.x86_64_sysv.param_regs
+      Base.List.exists (Abi.param_regs target)
         ~f:(fun r -> Var.same r (base_var v))
     in
     Term.enum blk_t sub
@@ -250,6 +252,12 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
         | Convutils.Range (lo, hi) ->
             Core.Map.set m ~key:dtid ~data:(lo, hi)
         | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> m)
+  in
+  let abi =
+    (* TOTAL: the unit fixtures analyze [Theory.Target.unknown], which has
+       no convention record — fall back to the x86_64 record's vars (the
+       fixture sp is the "RSP"-named var either way). *)
+    Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
   in
   let overlap (lo1 : int64) (hi1 : int64) (lo2 : int64) (hi2 : int64) :
       bool =
@@ -344,8 +352,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
         | Some (addr, _) ->
             let rsp_rel =
               Exp.free_vars addr
-              |> Core.Set.exists ~f:(fun v ->
-                     String.equal (Var.name v) "RSP")
+              |> Core.Set.exists ~f:(Abi.is_sp_t target)
             in
             (* the tag's ENTRY-relative offset lo < 0 (below the
                entry rsp — the pushed outgoing-arg cell, e.g. the
@@ -478,7 +485,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
             let res = Base.List.for_all members ~f:(fun (mtid, (lo, _)) ->
                 Int64.compare lo 0L < 0
                 && (match Core.Map.find def_of_tid mtid with
-                    | Some md -> not (saves_incoming_reg md)
+                    | Some md -> not (saves_incoming_reg abi md)
                     | None -> true)
                 (* the member's own access must be DIRECT-CONSTANT
                    ([mem[RBP - 4]]): an INDEXED/DYNAMIC address
@@ -512,7 +519,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
               Printf.eprintf "hike:   (sub %s)\n" (Sub.name sub);
               Base.List.iter members ~f:(fun (mtid, (lo, hi)) ->
                   let k_str = match Core.Map.find k_of mtid with Some (klo, khi) -> Printf.sprintf "(%Ld,%Ld)" klo khi | None -> "None" in
-                  let saves = match Core.Map.find def_of_tid mtid with Some md -> saves_incoming_reg md | None -> false in
+                  let saves = match Core.Map.find def_of_tid mtid with Some md -> saves_incoming_reg abi md | None -> false in
                   Printf.eprintf "hike:   member %s (%Ld,%Ld) k=%s saves=%b\n" (Tid.name mtid) lo hi k_str saves);
             );
             res
@@ -844,8 +851,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     |> Base.Option.value
          ~default:
            { Convutils.offsets = []; k_ranges = []; regions = [];
-             stack_plan = []; degraded = false;
-             call_stack_args = []; vla_bounds = [] }
+             stack_plan = []; degraded = false; vla_bounds = [] }
   in
   let tag_of =
     Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty

@@ -15,6 +15,7 @@ include Core_kernel
 open Bap.Std
 open Graphlib.Std
 open Cbat_vsa_utils
+module Abi = Hike_abi
 
 module CG = Graphs.Callgraph
 module CFG = Graphs.Tid
@@ -719,9 +720,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     let w = Word.bitwidth n in
     w > 0
     && Word.(<) n (Word_ops.half w) in
-  let stack_anchor (v : var) : bool =
-    let n = Var.name v in
-    String.equal n "RSP" || String.equal n "RBP" in
+  let stack_anchor (v : var) : bool = Abi.is_stack_reg Abi.x86_64_sysv v in
   (* [cells]: the cell addrs under consideration (re-entry -> TRUE, the induction hypothesis, seeded); [vars]: the def-lhs vars already followed (re-entry -> FALSE — a cycle has no base). Both are the threaded helper param through the [Var]/[PLUS] recursion. *)
   let rec walk (cells : Exp.Set.t) (vars : Exp.Set.t) (e : exp) : bool =
     match e with
@@ -1024,7 +1023,7 @@ let rec constrain_cell
     let addr_opt =
       if
         Exp.free_vars addr
-        |> Core.Set.exists ~f:(fun v -> String.equal (Var.name v) "RSP")
+        |> Core.Set.exists ~f:(Abi.is_sp Abi.x86_64_sysv)
       then None
       else
         let a' = rewrite_addr (AI.frame_of env) addr in
@@ -2596,15 +2595,12 @@ let denote_jump ?refineable ?preserved ?defs ?stores
         | Some (Direct _) ->
           (* P2d-1b (lane B) — relevance-restricted call handling (user design, ora-5): when the restriction is engaged, a call (direct AND indirect — the same abstraction, which is better than the [AI.top] below for indirect. *)
           begin
-            let rsp =
-              Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
+            let rsp = Abi.x86_64_sysv.sp in
             (* Hike addition (the call-abstraction precision lane — the whole-memory-top gap fix): the pointer-argument ESCAPE set — the value sets of the SysV integer/pointer arg registers at the call, plus the caller's own frame boundary (the post-push RSP). *)
             let escape =
               (* The pointer-argument ESCAPE set: the SysV integer/pointer arg registers WRITTEN IN THIS CALL BLOCK (the -O0 arg setup lives in the call block). *)
-              List.filter_map [ "RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9" ]
-                ~f:(fun n ->
-                  let v = Var.create ~is_virtual:false ~fresh:false
-                      n (Type.Imm 64) in
+              List.filter_map Abi.x86_64_sysv.int_param_regs
+                ~f:(fun v ->
                   let written =
                     Term.enum def_t b |> Seq.exists ~f:(fun d ->
                         Var.same (Def.lhs d) v) in
@@ -2714,9 +2710,7 @@ let stores_of_sub (s : sub term) : def term list =
 (* P2d-1b (lane B) — the per-sub preserved var set for the call abstraction (user design, ora-5): {RSP, RBP, RBX, R12, R13, R14, R15} (the call+ret identity registers and the callee-saved registers; built like the fork —. *)
 let preserved_of_sub (s : sub term) : Var.Set.t =
   let regs =
-    [ "RSP"; "RBP"; "RBX"; "R12"; "R13"; "R14"; "R15" ]
-    |> List.map ~f:(fun n ->
-        Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64))
+    Abi.x86_64_sysv.sp :: Abi.x86_64_sysv.fp :: Abi.x86_64_sysv.callee_saved
     |> Var.Set.of_list in
   let virt =
     Term.enum blk_t s

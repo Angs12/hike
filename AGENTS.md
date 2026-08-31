@@ -44,6 +44,7 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    diagnostic — temporary debug prints, env-gated instrumentation, profiling
    drivers, and analysis-forensics tools alike.  It provides the debug
    executables:
+   - `zz_scratch_probe/audit02.exe` (legacy harness entry, default profile),
    - `zz_scratch_probe/vsa_debug.exe` (fixture traces, views, live maps),
    - `zz_scratch_probe/wbig_diag.exe` (w_big address inspection),
    - `zz_scratch_probe/stage_timer.exe` (per-stage pipeline wall-time
@@ -51,9 +52,13 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
      stack_to_locals / dce — the profiling driver),
    - `zz_scratch_probe/conv_diag.exe` (fixpoint NON-CONVERGENCE diagnosis:
      prints the first still-growing (block, successor), the widening-point
-     set, the failing blocks' BIR, and the gap successor's words/memory).
-   NEVER add temporary debug prints / env-gated `Sys.getenv` instrumentation
-   to production `src/` or `src/cbat_vsa/` code — keep the production sources
+     set, the failing blocks' BIR, and the gap successor's words/memory),
+   - `zz_scratch_probe/dump_tags.exe` (vsa_info tag + split_plan dump).
+   The dead one-shot stubs (probe_loop, probe_cell, dump_bil, probe_wbig2)
+   were deleted in the 2026-08-31 harness restoration — they duplicated the
+   above probes' functions.  NEVER add temporary debug prints / env-gated
+   `Sys.getenv` instrumentation to production `src/` or `src/cbat_vsa/` code —
+   keep the production sources
    clean; use or extend the debug harness instead.  Build/run:
 
    ```sh
@@ -69,24 +74,22 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    dune exec --profile vsa-debug zz_scratch_probe/stage_timer.exe -- <bin>
    <subname>` (the stage_timer links `-g`, so DWARF call graphs work).
    NOTE: stage_timer.ml and conv_diag.ml reference the `hike` library via its
-   FLAT internal module names (`Hike__Targetutils`, `Hike__Hike_vsa`, ...),
-   NOT the `Hike__.Targetutils` wrapper-namespace form — the ocamllsp
+   FLAT internal module names (`Hike__Hike_vsa`, ...) — the ocamllsp
    resolution of the `Hike__` wrapper module (the `module Hike__ = struct
    end` shadow that dune emits for a library whose name collides with its
    main module) is unreliable, so the flat names (direct `.cmi` lookup) are
    used instead.  `.pi-lens.json`'s `ignore` list is empty.
    They build in every profile (never installed, never used by production);
    the other debug executables keep `enabled_if` (they only use `cbat_vsa`).
-   **DOC BUG (recorded 2026-08-31, not yet fixed): every probe executable
-   documented in this file is currently UNBUILDABLE** — `zz_scratch_probe/dune`
-   declares only `audit02`; the probe `.ml` files (`dump_tags`, `stage_timer`,
-   `vsa_debug`, `conv_diag`, `wbig_diag`, `probe_loop`, `probe_cell`,
-   `dump_bil`, `probe_wbig2`, …) have NO dune stanza at the root (the
-   `edgecond`/`irgraph`/`r6view` subdirs have their own). The documented
-   probe commands fail with `Don't know how to build`. Restoring the root
-   dune stanza list (and the `vsa-debug` profile declaration, which is NOT
-   in `dune-project` either) is a prerequisite for the §5 coreutils
-   differential in `.scratch/restriction-removal/spec.md`.
+      All probe executables documented in this section now BUILD and RUN
+   (harness restored 2026-08-31 — see section "Running the test probes"):
+   the `dune-project` declares the `vsa-debug` profile, and
+   `zz_scratch_probe/dune` carries the full stanza list. The dead stubs
+   (probe_loop, probe_cell, dump_bil, probe_wbig2) were deleted rather than
+   ported — they duplicated `audit02`/`dump_tags`/`stage_timer`/`conv_diag`/
+   `wbig_diag`.
+
+
 7. **THE STACK IS LLVM ALLOCAS — SOUND FALLBACK FIRST, PRECISION FOR
    OPTIMIZATION (the user's endgame directive, 2026-08-16).**  Every stack
    access's emission target is a REAL LLVM alloca (or a static variable) —
@@ -107,7 +110,7 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    the stack to LLVM allocas / static variables — it should work on EVERY
 8. **STRICT CONTEXT.md ADHERENCE & NO AD-HOC BIL PATTERN MATCHING.**
    - **No AST Pattern Matching for Memory or Registers**: Never write structural `match` patterns over BIL constructors (`Bil.Load`, `Bil.Store`, `Bil.Cast`, etc.) or inspect memory operands directly. Use `Exp.visitor` or `Term.visitor` exclusively.
-   - **Target-Defined Stack Pointer (`Targetutils.sp`)**: Never hardcode register strings like `"RSP"` or `"RBP"` or check for frame pointers. `Targetutils.sp` is the sole origin for stack derivation.
+   - **Target-Defined Stack Pointer (`Abi.sp`)**: Never hardcode register strings like `"RSP"` or `"RBP"` or check for frame pointers. `Abi.sp` is the sole origin for stack derivation. (2026-08-31: `Targetutils` and `Calling_conventions` are DELETED — the standalone `Hike_abi` library (unwrapped, module `Abi` inside each consumer via a one-line alias; exported as `Hike.Abi`) is the ONLY home of register lists, register predicates, and convention facts, shared by the vendored VSA libraries and production. NOTE: the module must never be named `Abi` at the LIBRARY level — BAP ships its own core `abi` plugin (module `Abi`, dynlinked into every bap process), and a bundle-internal `Abi` fails at load with "interface mismatch on Abi"; hence the library/module `hike_abi`/`Hike_abi`.)
    - **100% VSA Tagging Invariant**: Every definition with a `stack_access` tag MUST receive a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). Untagged stack accesses are strictly prohibited.
    - **Lattice and Abstract Domain Values**: Dataflow propagation must operate over abstract sets and lattice values, distinguishing pointer arithmetic from memory values without AST inspecting hacks.
 
@@ -327,7 +330,62 @@ AGENTS.md whose "current state" disagrees with the tree is a doc BUG — the nex
 will trust these numbers to distinguish its own regressions from inherited ones (the
 2026-08-26 rename_intrinsics incident below is exactly that failure mode).
 
-**Last verified: 2026-08-31 EEST — Finding 1 (the stack-plan triple) — FULL GATE BATTERY GREEN, byte-for-baseline-equivalent semantically**
+**Last verified: 2026-08-31 EEST (early morning) — the ABI module + debug harness
+restoration — FULL GATE BATTERY GREEN, identical semantics**
+
+**The ABI refactor (this session, on the KB-fix tree, commit-by-commit green):
+one `Hike_abi` library (unwrapped, bottom of the lattice: hike_abi ←
+cbat_vsa_domain ← cbat_vsa ← hike) owns the `abi` record (sp/fp,
+int/vector param regs, return regs, callee-saved), the `x86_64_sysv` value,
+the var predicates (`is_sp`/`is_fp`/`is_stack_reg`/`is_preserved`), and the
+ex-Targetutils target-derived registers (`sp`/`fp`/`pc`/`addr_size_bits`/
+`resolve_alias`/regs) + `of_target`. All consumers migrated: hike.ml,
+bil2llvm (`cast_source_width`/`degraded_geometry`/`degraded_dims` now take
+`~abi`, threaded from the emit ctx), hike_stack_to_locals, hike_dce,
+convutils, hike_vsa_relevance, and cbat_vsa's 5 inline x86 sites (the call
+abstraction's rsp/escape/preserved lists, the `constrain_cell` RSP test,
+`prove_nonneg`'s stack anchor). Zero `"RSP"`/`"RBP"` strings left in src/
+outside `hike_abi/hike_abi.ml`. GOTCHA (cost two failed plugin loads): the
+library/module must NOT be named `abi`/`Abi` — BAP's own core `abi` plugin
+(module `Abi`) is dynlinked into every bap process and wins the name
+("interface mismatch on Abi"); the library is `hike_abi`, the module
+`Hike_abi`, exported to consumers as `Hike.Abi` via a plain alias.**
+
+**The KB-store fix (prior session, on the Finding-1 tree): the vsa-info KB
+slot's silent drop is gone.** `Hike_kb`'s slot domain is now MAP EXTENSION
+(order) / MAP UNION (join): a provide that adds subs the map lacks is a
+monotone update, a re-provide of the same map is idempotent, and two
+DIFFERENT infos for one sub raise a loud `Toplevel.Conflict` (the
+`Vsa_info_conflict` extension + `KB.Conflict.register_printer` — the KB's
+own `Non_monotonic_update` machinery, not a hand-rolled guard). Two dead
+limbs deleted: the write-only `vsa_sol_tbl` Hashtbl (`vsa_sol` /
+`provide_sol` / `add_sol` — one writer, zero readers repo-wide; every
+sub's fixpoint solution was retained process-globally for nothing) and the
+always-`[]` `Convutils.vsa_info.call_stack_args` field (the M2 removal —
+record, the `call_stack_args_of_sub` function, all 7 record literals).
+The vsa pass's re-entrancy guard (`hike.ml`) STAYS as an
+idempotence/perf guard (its stale "M2 (ADR 0004)" comment rewritten — the
+join domain makes a second run's provide idempotent-or-conflict, so the
+skip is pure fixpoint-cost avoidance, NOT a soundness gate). Docs fixed to
+the join-domain contract: the `hike.mli` `Kb` doc (the write-once caveat
+is gone), the header's self-contradictory "Deliberately NOT exported:
+[Hike_kb]" sentence ([Hike_kb] IS exported as `module Kb`), and the A4
+test comment (the fixtures still BORROW C1's entry — providing their own
+info under C1's tid would now conflict; minimal-change doctrine keeps the
+borrowing). Per the user's directive, NO unit tests were added for the
+join/order machinery itself — BAP's KB is upstream-tested; the domain is
+exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
+
+| Gate | Command | Current result |
+|---|---|---|
+| unit suite | `dune runtest --force` | **0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
+| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_kb` | **32/32 rc=0** (surviving `hike: guarded:` warnings = the Unbounded class, benign) |
+| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_kb` | **128 passed, 0 failed** ✅ |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb` | **29 PASS, 3 FAIL** of 32 emitted ✅ (the 3 = the SAME knowns below) |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb8` | **8/8 PASS** ✅ |
+| probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
+| FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
+| coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session |
 
 **Finding 1 landed (uncommitted, on the 2026-08-30 ② tree + this tree's
 in-flight `hike.mli` work): the stack model decision now has ONE producer.**
@@ -768,15 +826,13 @@ dune exec --profile vsa-debug zz_scratch_probe/vsa_debug.exe -- d4
 
 ```sh
 B=/tmp/corpus/factorial
-dune exec zz_scratch_probe/probe_loop.exe       -- "$B"
-dune exec zz_scratch_probe/probe_cell.exe       -- "$B" main
-dune exec zz_scratch_probe/dump_tags.exe        -- "$B" main
-dune exec zz_scratch_probe/dump_bil.exe         -- "$B" main
+dune exec zz_scratch_probe/audit02.exe        -- "$B"          # legacy harness entry (default profile)
+dune exec zz_scratch_probe/dump_tags.exe      -- "$B" main
+dune exec zz_scratch_probe/dump_bil.exe       -- "$B" main     # [REMOVED — dup of dump_tags]
 # vsa-debug profile only:
 dune exec --profile vsa-debug zz_scratch_probe/wbig_diag.exe -- "$B"
-dune exec zz_scratch_probe/probe_wbig2.exe      -- "$B"
-dune exec test_cbat/corpus_watch.exe            -- "$B"
-dune exec test_cbat/precision_probe.exe         -- "$B"
+dune exec zz_scratch_probe/stage_timer.exe    -- "$B"          # per-stage wall-time breakdown
+dune exec zz_scratch_probe/conv_diag.exe      -- "$B"          # fixpoint non-convergence
 ```
 
 ### Timing + non-convergence diagnosis (default profile)
@@ -814,7 +870,7 @@ runs lifted vs native, and byte-diffs stdout.  Needs `llc` + `gcc`.
   the restored two-pass D-2f tagger) is the ONLY copy.  `test_cbat/` and the
   `zz_scratch_probe/` debug probes link the wrapped `hike` library and reach it via
   the flat `Hike__Hike_vsa_relevance` name (or `Hike__.Hike_vsa_relevance`), passing
-  `sp` explicitly (`Targetutils.sp (Project.target proj)` / a fixture's `v64 "RSP"`).
+  `sp` explicitly (`Hike.Abi.sp (Project.target proj)` / a fixture's `v64 "RSP"`).
   The old single-pass copies in `test_cbat/` and `zz_scratch_probe/` were deleted.
 - `docs/vsa-usage.md` §2 is stale: it claims the VSA is not wired into the production pass.
   The relevance/vsa/stack-to-locals/dce passes now ship inside `hike-convlir`; §1's
