@@ -79,10 +79,15 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
       call_stack_args = []; vla_bounds = [] }
   else
   let prog' = Program.create ~subs:[ sub' ] () in
-  (* The trace-partitioned tags (docs/trace-partitioning-plan.md §1.4/§2.4): the fixpoint runs with the views (the Phase B post-pass), and the per-block TAG states come from [partitioned_states] — the invariant met with the. *)
-  (* The per-def walk (finish): the sequential state (the block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the two tag accumulators thread through ONE nested fold — no refs. *)
-  let finish (sol : Vsa.vsa_sol) (views : Vsa.edge_view list) :
-      Convutils.vsa_info =
+  (* The single-pass trace-partitioning (docs/trace-partitioning-plan.md §2/§7 — ticket 01): the
+     forward fixpoint is branch-sensitive END-TO-END (the deep walk runs INLINE at every
+     out-edge, driven by the ACCUMULATED [Graphs.Ir.Edge.cond]), so the per-block TAG state IS
+     the block's IN-state in the converged solution — there is no Phase B post-pass to run
+     ([partitioned_states]/[edge_views_of] stay defined for the migration window but are no
+     longer invoked from production).  The per-def walk (finish): the sequential state (the
+     block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the
+     two tag accumulators thread through ONE nested fold — no refs. *)
+  let finish (sol : Vsa.vsa_sol) : Convutils.vsa_info =
   (* A sub with an INDIRECT JUMP ([Goto/Ret (Indirect _)]) has an INCOMPLETE CFG — the lifter could not resolve the jump-table targets — so a bottom block state does NOT prove unreachability (the target blocks are stranded, their accesses would be mislabeled dead-path). *)
   let has_indirect_jumps =
     Term.enum blk_t sub'
@@ -94,7 +99,9 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
             | _ -> false))
   in
   let degraded = has_indirect_jumps in
-  let tags = Vsa.partitioned_states sub' sol views in
+  (* §7: each block's TAG state is its IN-state read directly from the converged solution —
+     the joined edge-refined predecessor outputs (the fused design's branch-sensitivity). *)
+  let tags = sol in
   (* The per-def walk: the sequential state (the block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the two tag accumulators thread through ONE nested fold — no refs. *)
   let raw, kraw =
     Term.enum blk_t sub'
@@ -126,7 +133,7 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
                      let addr' =
                        Vsa.rewrite_addr
                          (Vsa.frame_of_state st_before) addr in
-                     (* The address's free vars are denoted with the PARTITIONED state's values (the invariant ∩ the enclosing guards' iterate/exit constraints), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
+                     (* The address's free vars are denoted with the block's TAG state's values (the IN-state read from the converged solution — the fused design's branch-sensitive state, refined inline by the accumulated edge conds), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
                      let st_tag =
                        Exp.free_vars addr'
                        |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
@@ -137,7 +144,7 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
                                     (Term.tid blk)) v in
                              let cur = AI.find_word w acc v in
                              let mm = Ws.meet cur tag_v in
-                             (* Option B/c fix : a TOP sequential value is NOT refined by the M6 meet — the partitioned state's value at the block is the JOIN over all paths (e.g. *)
+                             (* Option B/c fix : a TOP sequential value is NOT refined by the M6 meet — the tag state's value at the block is the JOIN over all paths (e.g. *)
                              if Ws.is_top cur && Word.is_one (Ws.cardinality mm)
                                 || Word.is_zero (Ws.cardinality mm)
                                 || Ws.equal mm cur
@@ -293,7 +300,7 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
   (* the solve driver: run the fixpoint; a non-convergent fixpoint (D.1) degrades the sub soundly — no tags, every stack access stays real memory (the emitter's dynamic path). *)
   match
     try
-      Some (Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub'))
+      Some (Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub'))
     with Vsa.Fixpoint_not_converged (n, _, _) ->
       (* The fixpoint did not converge — the partial solution is an UNDER-APPROXIMATION; narrow offset tags computed from it would exclude reachable values (unsound). *)
       Printf.eprintf
@@ -311,9 +318,9 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
       in
       { Convutils.offsets; k_ranges = []; regions = []; degraded = true;
         call_stack_args = []; vla_bounds = [] }
-  | Some (sol, views) ->
+  | Some sol ->
       Hike_kb.add_sol (Term.tid sub) sol;
-      finish sol views
+      finish sol
   in
   let dt_probe = Unix.gettimeofday () -. t0_probe in
   (try
