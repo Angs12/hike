@@ -56,10 +56,25 @@ module Vsa = struct
   }
   [@@deriving equal]
 
+  (* THE STACK MODEL DECISION for a sub: [plan <> []] means the sub's
+     stack is SPLIT into per-region [stack_rN] allocas (the optimized
+     shape — every convertible access became a BIL local and every
+     surviving memory access resolves inside a region); [plan = []]
+     means ONE big [%frame] alloca covers all of it (the SOUND FALLBACK,
+     always correct, unoptimized).
+
+     Computed ONCE by [Hike_stack_to_locals.split_plan] — Finding 1:
+     the decision has ONE producer and three CONSUMERS ([Hike_stack_to_
+     locals], [Hike_dce], [Bil2llvm]). It is a property of the
+     PRE-rewrite sub (the converted slots vanish once stack-to-locals
+     runs), so the vsa pass computes it and carries it here. *)
+  type split_plan = region list [@@deriving equal]
+
   type vsa_info = {
     offsets : (Tid.t * vsa_kind) list;
     k_ranges : (Tid.t * int64 * int64) list;
     regions : region list;
+    stack_plan : split_plan;
     degraded : bool;
     call_stack_args : (Tid.t * (int * int64) list) list;
     vla_bounds : (Tid.t * (int64 * int64)) list;
@@ -121,17 +136,6 @@ let get_calling_convention ctx =
     Calling_conventions.x86_64_sysv
   else failwith "abi not supported"
 
-let typ_lltype llvm_ctx typ =
-  match typ with
-  | Imm n -> Llvm.integer_type llvm_ctx n
-  | _ -> Llvm.pointer_type llvm_ctx
-
-let get_direct_call jmp =
-  match Jmp.kind jmp with
-  | Call c -> (
-      match Call.target c with Direct target -> Some target | _ -> None)
-  | _ -> None
-
 let get_args ctx sub_tid =
   match Core.Map.find ctx.subs sub_tid with
   | Some (_, args) -> args
@@ -153,9 +157,6 @@ let get_rets ctx sub_tid =
 let ret_set ctx =
   let callconv = get_calling_convention ctx in
   Var.Set.of_list callconv.return_regs
-
-let var_size var =
-  match Var.typ var with Imm n -> n | _ -> failwith "var size: non-imm var"
 
 let goto_label_exn jmp =
   match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
@@ -208,15 +209,6 @@ let get_local ctx blk_tid var =
   let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
   Core.Map.find !(blk_vars.locals) var
 
-let get_local_exn ctx blk_tid var =
-  let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
-  let tmp = Core.Map.find !(blk_vars.locals) var in
-  match tmp with
-  | Some v -> v
-  | None ->
-      failwith @@ "Var with name " ^ Var.name var ^ " not found in block: "
-      ^ Tid.name blk_tid
-
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
 let cf_type control_flow =
@@ -236,23 +228,6 @@ let cf_type control_flow =
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
-
-let base_exp_sub base_var sub =
-  object
-    inherit Exp.mapper
-    method! map_var var = if Var.same var base_var then Var sub else Var var
-  end
-
-let get_bil_pass name =
-  Base.List.find_exn ~f:(fun pass -> Bil.Pass.name pass = name) (Bil.passes ())
-
-let get_pass name =
-  Project.find_pass name
-  |> Base.Option.value_exn ~message:("pass " ^ name ^ " not found")
-
-let run_pass proj name =
-  let pass = get_pass name in
-  Project.Pass.run_exn pass proj
 
 let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in

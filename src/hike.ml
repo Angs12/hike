@@ -6,6 +6,22 @@ open Bil2llvm
 open Convutils
 open Targetutils
 open Printf
+
+(* ------------------------------------------------------------------------- *)
+(* The public interface ([src/hike.mli]): four curated modules, re-exported
+   under their plain names. Plain-name aliases resolve identically under dune
+   (wrapped — siblings see each other by plain name, as the [open]s above
+   already rely on) and under bapbuild (flat — every module is top-level), so
+   one interface serves both builds. Consumers write [Hike.Target.sp], never
+   [Hike__Targetutils.sp] and never the generated [Hike__.Targetutils] alias. *)
+module Target = Targetutils
+module Relevance = Hike_vsa_relevance
+module Vsa = Hike_vsa
+module Stack_to_locals = Hike_stack_to_locals
+module Kb = Hike_kb
+module Convutils = Convutils
+module Bil2llvm = Bil2llvm
+
 module StrMap = Map.Make (String)
 module StrSet = Set.Make (String)
 
@@ -660,14 +676,14 @@ let () =
              KB.Seq.iter
                (Term.enum sub_t (Project.program proj))
                ~f:(fun sub ->
+                 (* The per-sub VSA result INCLUDING the stack model
+                    decision: [offsets_of_sub] computes the regions and
+                    the split plan once, on the PRE-stack-to-locals sub
+                    (the converted slots vanish later, so no consumer
+                    can recompute them). *)
                  let info =
-                   Hike_vsa.offsets_of_sub (sp (Project.target proj)) sub
-                 in
-                 (* compute the regions ONCE here (on the PRE-stack-to-locals sub — the converted slots vanish later, so the emitter cannot recompute them) and store them alongside the tags. *)
-                 let info =
-                   { info with
-                     Convutils.regions =
-                       Hike_stack_to_locals.regions_of_sub (sp (Project.target proj)) sub info }
+                   Hike_vsa.offsets_of_sub (Project.target proj)
+                     (sp (Project.target proj)) sub
                  in
                  if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
                    Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
@@ -686,7 +702,7 @@ let () =
              Project.map_program proj ~f:(fun prog ->
                  Term.map sub_t prog
                    ~f:(Hike_stack_to_locals.stack_to_locals
-                         (sp (Project.target proj))))
+                         (Project.target proj) (sp (Project.target proj))))
            in
            (if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
               Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->

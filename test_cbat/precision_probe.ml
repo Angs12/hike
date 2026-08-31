@@ -189,7 +189,7 @@ module W = Word
    [Hike_vsa_relevance] is hike's production relevance pass
    (src/hike_vsa_relevance.ml), reached through the wrapped [hike]
    library's flat module name; [sp] comes from the project target. *)
-module Relevance = Hike__Hike_vsa_relevance
+module Relevance = Hike.Relevance
 
 (* [diag_on]: default OFF; HIKE_VSA_DIAG_BOTTOM=1 enables the L2a
    diagnostic mode — one DIAG line per bottom word def plus a per-sub
@@ -853,7 +853,7 @@ let rec run_binary (path : string) : bin_report =
     | Ok proj ->
       let prog = Project.program proj in
       let bname = Filename.basename path in
-      let sp = Hike__Targetutils.sp (Project.target proj) in
+      let sp = Hike.Target.sp (Project.target proj) in
       Term.enum sub_t prog
       |> Seq.iter ~f:(fun sub ->
           r.nsubs <- r.nsubs + 1;

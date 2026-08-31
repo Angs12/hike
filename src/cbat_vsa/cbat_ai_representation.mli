@@ -55,9 +55,6 @@ val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 
 val selective_widen_extrapolate : ?head:Tid.t option -> need:Var.Set.t -> steps:int -> t -> t -> t
 
-(* SiftAbs H3 — selective fixpoint detection: only vars in [need] are checked. *)
-val equal_need : need:Var.Set.t -> t -> t -> bool
-
 (* P2d-1b (lane A) — Call-ABI abstraction of an abstract state: the `preserved` words (matched by [Var.same]) keep their value-sets, every other word is TOPed, and memory is set to TOP entirely (a red-zone partition is. *)
 val call_abstraction : preserved:Var.Set.t -> t -> t
 

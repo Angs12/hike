@@ -39,7 +39,7 @@ module Vsa = Cbat_vsa
    behavior).  [Hike_vsa_relevance] is hike's production relevance pass
    (src/hike_vsa_relevance.ml), reached through the wrapped [hike]
    library's flat module name; [sp] comes from the project target. *)
-module Relevance = Hike__Hike_vsa_relevance
+module Relevance = Hike.Relevance
 
 (* [restriction_on]: default ON; HIKE_VSA_RESTRICTION=0 disables. *)
 let restriction_on () : bool =
@@ -102,7 +102,7 @@ let run_binary (path : string) : bin_report =
       r
     | Ok proj ->
       let prog = Project.program proj in
-      let sp = Hike__Targetutils.sp (Project.target proj) in
+      let sp = Hike.Target.sp (Project.target proj) in
       Term.enum sub_t prog
       |> Seq.iter ~f:(fun sub ->
           let tid = Term.tid sub in

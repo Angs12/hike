@@ -1,5 +1,6 @@
 (test
  (name test_cbat)
+ (modules test_cbat)
  (flags
   (:standard -alert -deprecated))
  (libraries
@@ -42,3 +43,9 @@
   threads)
  (flags
   (:standard -g -alert -deprecated)))
+(test
+ (name test_relevance)
+ (modules test_relevance)
+ (libraries hike bap bap-core-theory core_kernel)
+ (preprocess (pps ppx_bap)))
+

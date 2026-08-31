@@ -1,6 +1,7 @@
 (* Src/hike_vsa.ml — the VSA tag-EXTRACTION module of the hike library. *)
 
 open Bap.Std
+open Bap_core_theory
 module KB = Bap_knowledge.Knowledge
 
 module AI = Cbat_vsa.AI
@@ -12,7 +13,10 @@ module Ws = Cbat_clp_set_composite
 let set_addr_bits (n : int) : unit = Vsa.set_addr_bits n
 
 (* the RSP identity var for the k-range computation is the TARGET's stack pointer ([Targetutils.sp]) — threaded in as the [sp] argument of [offsets_of_sub] (R2: no [target_ref] global; the caller derives it from [Project.target] once and passes it down). *)
-(* sibling inside the hike library — reference DIRECTLY (the [Hike__.Hike_vsa_relevance] alias is only for OUTSIDE consumers). *)
+(* sibling inside the hike library — reference DIRECTLY by plain name (the
+   [Hike.Relevance] alias in hike.ml/hike.mli is the library's public seam for
+   OUTSIDE consumers; inside, plain names are the one form that resolves
+   under both dune (wrapped) and bapbuild (flat). *)
 module Relevance = Hike_vsa_relevance
 
 (* [classify ws]: Range, Infinite (widening), Unbounded (top), Dead (bottom), or VLA (dynamic size def tid). *)
@@ -70,13 +74,16 @@ let has_stack_access_tags (sub : sub term) : bool =
 let call_stack_args_of_sub (_sp : var) (_sub : sub term)
     (_tags : (tid, AI.t) Graphlib.Std.Solution.t) : (Tid.t * (int * int64) list) list = []
 
-(* [offsets_of_sub sub]: The per-def offset interval tags of [sub]'s Load/Store defs, in block-then-def order (see the header contract). *)
-let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
+(* [offsets_of_sub target sp sub]: The per-def offset interval tags of [sub]'s Load/Store defs, in block-then-def order (see the header contract), PLUS the sub's STACK MODEL DECISION ([Convutils.stack_plan] — the per-region split or the single-frame fallback).
+
+   [target] is threaded in so the stack model's SP/FP derivation comes from [Targetutils] (AGENTS.md Principle 8 — never hardcode a register name); [sp] is [Targetutils.sp target]. *)
+let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
+    Convutils.vsa_info =
   let sub' = if has_relevant_tags sub then sub else Relevance.analyze sp sub in
   (* A sub with NO direct-SP stack accesses produces an empty offset set regardless of the fixpoint result (only [stack_access]-tagged Load/Store defs yield offset tags). *)
   if not (has_stack_access_tags sub') then
-    { Convutils.offsets = []; k_ranges = []; regions = []; degraded = false;
-      call_stack_args = []; vla_bounds = [] }
+    { Convutils.offsets = []; k_ranges = []; regions = []; stack_plan = [];
+      degraded = false; call_stack_args = []; vla_bounds = [] }
   else
   let prog' = Program.create ~subs:[ sub' ] () in
   (* The trace-partitioned tags (docs/trace-partitioning-plan.md §1.4/§2.4): the fixpoint runs with the views (the Phase B post-pass), and the per-block TAG states come from [partitioned_states] — the invariant met with the. *)
@@ -281,14 +288,27 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
               | Error _ -> None)
         ) |> Seq.to_list
   in
-  let base_info = { Convutils.offsets; k_ranges; regions = []; degraded;
-                    call_stack_args = []; vla_bounds = [] } in
-  let regions = Hike_stack_to_locals.regions_of_sub sp sub' base_info in
-  let call_stack_args = call_stack_args_of_sub sp sub' tags in
-  { Convutils.offsets; k_ranges; regions; degraded; call_stack_args; vla_bounds }
+  let base_info =
+    { Convutils.offsets; k_ranges; regions = []; stack_plan = []; degraded;
+      call_stack_args = []; vla_bounds = [] }
   in
-  (* TEMP PROBE: per-sub fixpoint timing *)
-  let t0_probe = Unix.gettimeofday () in
+  (* The ESCAPE verdict — computed ONCE per sub and shared by the
+     region convertibility rule and (through it) the plan. *)
+  let frame_escaped = Hike_stack_to_locals.frame_escapes sp target sub' in
+  let regions =
+    Hike_stack_to_locals.regions_of_sub sp target sub' base_info ~frame_escaped
+  in
+  let call_stack_args = call_stack_args_of_sub sp sub' tags in
+  let base =
+    { Convutils.offsets; k_ranges; regions; stack_plan = []; degraded;
+      call_stack_args; vla_bounds }
+  in
+  (* THE STACK MODEL DECISION — computed ONCE, here, on the PRE-rewrite
+     sub (Finding 1): [Hike_stack_to_locals.split_plan] is its single
+     producer; the stack-to-locals rewrite, dce and the emitter are its
+     consumers (they read [info.stack_plan]). *)
+  { base with Convutils.stack_plan = Hike_stack_to_locals.split_plan sp target sub' base }
+  in
   let probe_res =
   (* the solve driver: run the fixpoint; a non-convergent fixpoint (D.1) degrades the sub soundly — no tags, every stack access stays real memory (the emitter's dynamic path). *)
   match
@@ -309,18 +329,12 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
         |> Seq.map ~f:(fun d -> (Term.tid d, Convutils.Unbounded))
         |> Seq.to_list
       in
-      { Convutils.offsets; k_ranges = []; regions = []; degraded = true;
-        call_stack_args = []; vla_bounds = [] }
+      { Convutils.offsets; k_ranges = []; regions = []; stack_plan = [];
+        degraded = true; call_stack_args = []; vla_bounds = [] }
   | Some (sol, views) ->
       Hike_kb.add_sol (Term.tid sub) sol;
       finish sol views
   in
-  let dt_probe = Unix.gettimeofday () -. t0_probe in
-  (try
-     let oc = open_out_gen [Open_append; Open_creat] 0o644 "/tmp/vsa_timing.txt" in
-     Printf.fprintf oc "%s\t%d\t%.3f\n" (Sub.name sub') (Term.length blk_t sub') dt_probe;
-     close_out oc
-   with _ -> ());
   (* 100% VSA Tagging Assertion: Every stack_access def MUST be present in info.offsets *)
   let tagged_tids =
     Base.List.fold probe_res.Convutils.offsets ~init:Tid.Set.empty ~f:(fun s (t, _) ->
@@ -333,215 +347,5 @@ let offsets_of_sub (sp : var) (sub : sub term) : Convutils.vsa_info =
           if Term.has_attr d Relevance.stack_access then
             assert (Core.Set.mem tagged_tids (Term.tid d))));
   probe_res
-
-let offsets_from_partitioned (sp : var) (sub : sub term) (part : Vsa.vsa_sol) : Convutils.vsa_info =
-  let has_indirect_jumps =
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        Term.enum jmp_t blk
-        |> Seq.exists ~f:(fun j ->
-            match Jmp.kind j with
-            | Goto (Indirect _) | Ret (Indirect _) -> true
-            | _ -> false))
-  in
-  let degraded = has_indirect_jumps in
-  let tags = part in
-  let pointer_value_addr (st : AI.t) (addr : exp) : bool =
-    let rewritten =
-      not
-        (Exp.equal
-           (Vsa.rewrite_addr (Vsa.frame_of_state st) addr) addr)
-    in
-    if rewritten then false
-    else
-      Exp.free_vars addr
-      |> Core.Set.for_all ~f:(fun v ->
-          let n = Var.name v in
-          not (String.equal n "RSP" || String.equal n "RBP"))
-  in
-  let raw, kraw =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
-        let defs = Term.enum def_t blk |> Seq.to_list in
-        let last_tagged =
-          Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-              if Term.has_attr d Relevance.stack_access then Some i else acc)
-        in
-        match last_tagged with
-        | None -> (acc, kacc)
-        | Some i ->
-        let defs' = Base.List.take defs (i + 1) in
-        let _, acc, kacc =
-          Base.List.fold_left defs'
-            ~init:(Graphlib.Std.Solution.get tags (Term.tid blk), acc, kacc)
-            ~f:(fun (st, acc, kacc) d ->
-                 let st_before = st in
-                 let st = Vsa.denote_def d st in
-                 if KB.Value.get rip_relative_addr (Def.value d) then
-                   (st, acc, kacc)
-                 else
-                   match Def.rhs d with
-                   | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
-                   | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
-                   | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
-                     when
-                       Term.has_attr d Relevance.stack_access
-                       && not (pointer_value_addr st_before addr) ->
-                     let addr' =
-                       Vsa.rewrite_addr
-                         (Vsa.frame_of_state st_before) addr in
-                     let st_tag =
-                       Exp.free_vars addr'
-                       |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
-                           match Var.typ v with
-                           | Type.Imm w ->
-                             let tag_v = AI.find_word w
-                                 (Graphlib.Std.Solution.get tags
-                                    (Term.tid blk)) v in
-                             let cur = AI.find_word w acc v in
-                             let mm = Ws.meet cur tag_v in
-                             if Ws.is_top cur && Word.is_one (Ws.cardinality mm)
-                                || Word.is_zero (Ws.cardinality mm)
-                                || Ws.equal mm cur
-                             then acc
-                             else AI.add_word acc ~key:v ~data:mm
-                           | Type.Mem _ | Type.Unk -> acc)
-                       |> fun acc -> acc in
-                     (match
-                        Vsa.denote_imm_exp
-                          addr' st_tag
-                      with
-                      | Ok ws -> (
-                          match classify ws with
-                          | Some kind ->
-                              let acc = (Term.tid d, kind, ws) :: acc in
-                              let kacc =
-                                match
-                                  k_range_of ws
-                                    (Vsa.AI.find_word 64 st_before sp)
-                                with
-                                | Some (klo, khi) ->
-                                    (Term.tid d, klo, khi) :: kacc
-                                | None -> kacc
-                              in
-                              (st, acc, kacc)
-                          | None ->
-                              let ws = Ws.top 64 in
-                              let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
-                              (st, acc, kacc))
-                      | Error _ ->
-                          let ws = Ws.top 64 in
-                          let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
-                          (st, acc, kacc))
-                   | _ when Term.has_attr d Relevance.stack_access ->
-                       let ws = Ws.top 64 in
-                       let acc = (Term.tid d, Convutils.Unbounded, ws) :: acc in
-                       (st, acc, kacc)
-                   | _ -> (st, acc, kacc))
-        in
-        (acc, kacc))
-  in
-  let raw = List.rev raw in
-  let span_of = function
-    | Convutils.Range (lo, hi) -> (lo, hi)
-    | Convutils.Infinite (lo, hi) -> (Int64.min lo hi, Int64.max lo hi)
-    | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (0L, 0L)
-  in
-  let bounded, unbounded_or_dead =
-    Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
-        match kind with
-        | Convutils.Range _ | Convutils.Infinite _ | Convutils.VLA _ -> true
-        | Convutils.Unbounded | Convutils.Dead -> false)
-  in
-  let merged_tags : Convutils.vsa_kind Tid.Map.t =
-    let items =
-      Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
-    in
-    let rec components acc = function
-      | [] -> acc
-      | (dtid, kind, ws) :: rest ->
-          let overlapping, non_overlapping =
-            Base.List.partition_tf acc ~f:(fun comp ->
-                Base.List.exists comp ~f:(fun (_, _, ws') -> Ws.overlap ws ws'))
-          in
-          let new_comp =
-            (dtid, kind, ws) :: Base.List.concat overlapping
-          in
-          components (new_comp :: non_overlapping) rest
-    in
-    let init_map =
-      Base.List.fold unbounded_or_dead ~init:Tid.Map.empty ~f:(fun acc (dtid, kind, _) ->
-          Core.Map.set acc ~key:dtid ~data:kind)
-    in
-    Base.List.fold_left (components [] items) ~init:init_map
-      ~f:(fun acc comp ->
-        match comp with
-        | [ (dtid, kind, _) ] -> Core.Map.set acc ~key:dtid ~data:kind
-        | _ ->
-            let lo, hi =
-              match comp with
-              | (_, k0, _) :: rest ->
-                let slo0, shi0 = span_of k0 in
-                Base.List.fold_left rest ~init:(slo0, shi0)
-                  ~f:(fun (l, h) (_, k, _) ->
-                    let slo, shi = span_of k in
-                    (Int64.min l slo, Int64.max h shi))
-              | [] -> (0L, 0L)
-            in
-            Base.List.fold_left comp ~init:acc
-              ~f:(fun acc (dtid, _, _) ->
-                Core.Map.set acc ~key:dtid
-                  ~data:(Convutils.Range (lo, hi))))
-  in
-  let offsets =
-      Base.List.map raw ~f:(fun (dtid, kind, _) ->
-          match Core.Map.find merged_tags dtid with
-          | Some k -> (dtid, k)
-          | None -> (dtid, kind)) in
-  let k_ranges = List.rev kraw in
-  let vla_bounds =
-    Term.enum blk_t sub
-    |> Seq.concat_map ~f:(fun blk ->
-        let blk_tid = Term.tid blk in
-        Term.enum def_t blk
-        |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.dynamic_alloc)
-        |> Seq.filter_map ~f:(fun d ->
-            let size_opt =
-              match Def.rhs d with
-              | Bil.BinOp (Bil.MINUS, Bil.Var v, size) when Var.same v sp -> Some size
-              | Bil.Var tmp ->
-                let def_of_lhs =
-                  Term.enum blk_t sub
-                  |> Seq.concat_map ~f:(Term.enum def_t)
-                  |> Seq.fold ~init:Var.Map.empty ~f:(fun m d -> Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
-                in
-                (match Core.Map.find def_of_lhs (Var.base tmp) with
-                 | Some d' -> (
-                     match Def.rhs d' with
-                     | Bil.BinOp (Bil.MINUS, Bil.Var v, size) when Var.same v sp -> Some size
-                     | _ -> None)
-                 | None -> None)
-              | _ -> None
-            in
-            match size_opt with
-            | None -> None
-            | Some size ->
-              let st = Graphlib.Std.Solution.get part blk_tid in
-              match Vsa.denote_imm_exp size st with
-              | Ok ws -> (
-                  match Ws.min_elem ws, Ws.max_elem ws with
-                  | Some lo, Some hi -> (
-                      match Word.to_int64 lo, Word.to_int64 hi with
-                      | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
-                      | _ -> None)
-                  | _ -> None)
-              | Error _ -> None)
-        ) |> Seq.to_list
-  in
-  let base_info = { Convutils.offsets; k_ranges; regions = []; degraded;
-                    call_stack_args = []; vla_bounds = [] } in
-  let regions = Hike_stack_to_locals.regions_of_sub sp sub base_info in
-  let call_stack_args = call_stack_args_of_sub sp sub part in
-  { Convutils.offsets; k_ranges; regions; degraded; call_stack_args; vla_bounds }
 
 (* M2 (ADR 0004): arity_of_sub and arity_map_of_prog removed — no stack-arg arity, M2 hike_stack ptr only. *)

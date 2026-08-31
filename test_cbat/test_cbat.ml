@@ -24,6 +24,7 @@
    Run: dune runtest (test_cbat/test_cbat.ml). *)
 
 open Bap.Std
+open Bap_core_theory
 module W = Word
 module Clp = Cbat_clp
 module Fs = Cbat_fin_set
@@ -1413,8 +1414,8 @@ let () =
    sub and via fixpoint behavior on tagged subs. *)
 (* [Hike_vsa_relevance] is hike's production relevance pass
    (src/hike_vsa_relevance.ml, the restored two-pass tagger) — reached
-   through the wrapped [hike] library's flat module name. *)
-module Relevance = Hike__Hike_vsa_relevance
+   through the library's public interface. *)
+module Relevance = Hike.Relevance
 
 let v64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64)
 let v1 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 1)
@@ -5523,11 +5524,11 @@ let () =
 
 (* --- regression tests C1..C4 ------------------------------------------- *)
 
-module Kb = Hike__Hike_kb
-module Stl = Hike__Hike_stack_to_locals
-module Cu = Hike__Convutils
-module B2l = Hike__Bil2llvm
-module Hv = Hike__Hike_vsa
+module Kb = Hike.Kb
+module Stl = Hike.Stack_to_locals
+module Cu = Hike.Convutils
+module B2l = Hike.Bil2llvm
+module Hv = Hike.Vsa
 
 (* [q64]: a full-range 64-bit word (the [w64] helper takes a native int, which cannot carry the high
    half or negatives). *)
@@ -5591,13 +5592,13 @@ let () =
             Cu.max_width = 64;
           };
         ];
-      degraded = false;
+      stack_plan = []; degraded = false;
       call_stack_args = []; vla_bounds = [];
     }
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
-  let sub' = Stl.stack_to_locals sp tagged in
+  let sub' = Stl.stack_to_locals Theory.Target.unknown sp tagged in
   let masks =
     Term.enum blk_t sub'
     |> Seq.concat_map ~f:(Term.enum def_t)
@@ -5780,10 +5781,11 @@ let () =
   Sub.Builder.add_blk sub_b exit0;
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
-    { Cu.offsets; k_ranges = []; regions = []; degraded = false; call_stack_args = []; vla_bounds = [] }
+    { Cu.offsets; k_ranges = []; regions = []; stack_plan = []; degraded = false;
+      call_stack_args = []; vla_bounds = [] }
   in
   let convertible_of info dtid =
-    Stl.regions_of_sub (v64 "RSP") sub info
+    Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
     |> List.filter (fun r -> List.exists (fun (t, _) -> Tid.equal t dtid) r.Cu.members)
     |> function
     | [ r ] -> Some r.Cu.convertible
@@ -5869,7 +5871,7 @@ let () =
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
   let tagged = Relevance.analyze sp sub in
-  let info = Hv.offsets_of_sub sp tagged in
+  let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid =
     List.filter (fun (t, _) -> Tid.equal t dtid) info.Cu.offsets |> function
     | [ (_, k) ] -> Some k
@@ -5951,7 +5953,7 @@ let () =
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
   let tagged = Relevance.analyze sp sub in
-  let info = Hv.offsets_of_sub sp tagged in
+  let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid =
     List.filter (fun (t', _) -> Tid.equal t' dtid) info.Cu.offsets |> function
     | [ (_, k) ] -> Some k
@@ -6077,7 +6079,7 @@ let () =
               Term.set_attr d Cbat_vsa_utils.relevant ()
             else d))
   in
-  let info = Hv.offsets_of_sub sp tagged in
+  let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid =
     List.filter (fun (tt, _) -> Tid.equal tt dtid) info.Cu.offsets |> function
     | [ (_, k) ] -> Some k
@@ -6157,7 +6159,7 @@ let () =
   let sub = Sub.Builder.result sub_b in
   (* the production path: analyze's tags AS-IS — no manual re-tagging *)
   let tagged = Relevance.analyze sp sub in
-  let info = Hv.offsets_of_sub sp tagged in
+  let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid =
     List.filter (fun (tt, _) -> Tid.equal tt dtid) info.Cu.offsets |> function
     | [ (_, k) ] -> Some k
@@ -6403,7 +6405,7 @@ let () =
               if Term.has_attr d Relevance.stack_access then d
               else Term.set_attr d Relevance.stack_access ()))
     in
-    let sub' = Stl.stack_to_locals sp tagged in
+    let sub' = Stl.stack_to_locals Theory.Target.unknown sp tagged in
     Term.enum blk_t sub'
     |> Seq.concat_map ~f:(Term.enum def_t)
     |> Seq.to_list
@@ -6980,8 +6982,10 @@ let () =
 
 (* --- property R7: the contextual fixpoint detects stabilization ------- *)
 
-(* [Cfp]: the contextual-fixpoint module via the flat internal name (the wrapped-library sibling
-   access — the Hike__ pattern; the module is not re-exported by cbat_vsa.mli). *)
+(* [Cfp]: the contextual-fixpoint module. Reached via cbat_vsa's internal
+   wrapper name because cbat_vsa.mli does not re-export it — a gap in THAT
+   library's interface, not in hike's (whose entry points all go through
+   [Hike.*]). *)
 module Cfp = Cbat_vsa__Cbat_contextual_fixpoint
 
 let () =
@@ -7023,8 +7027,8 @@ let () =
 (* --- 32. R12/G4 region-split emission (Stage 1/2) --------------- *)
 (* The emitter's Stage-1 gate and Stage-2a size logic are pure predicates
    over vsa_info + defs.  These checks call the PRODUCTION bil2llvm
-   functions (region_bytes / region_size_ok, reached through the flat
-   Hike__Bil2llvm name like every other production entry point here) on
+   functions (region_bytes / region_size_ok, reached through the public
+   Hike.Bil2llvm alias like every other production entry point here) on
    synthetic vsa_info records, and pin ALGORITHM-INDEPENDENT properties —
    positivity + 16-byte alignment, domination of the raw payload,
    monotonicity in span/max_width, cap behavior — instead of duplicating
@@ -7035,7 +7039,7 @@ let () =
   (* fixtures: the INPUTS stay literal — they define the test cases. *)
   let r_sing =
     {
-      Hike__Convutils.id = 0;
+      Hike.Convutils.id = 0;
       span = (-16L, -16L);
       members = [];
       convertible = true;
@@ -7044,11 +7048,11 @@ let () =
   in
   (* interval [ -32, -1 ] span 32, maxw 64 *)
   let r_interval =
-    { Hike__Convutils.id = 1; span = (-32L, -1L); members = []; convertible = true; max_width = 64 }
+    { Hike.Convutils.id = 1; span = (-32L, -1L); members = []; convertible = true; max_width = 64 }
   in
   let r_huge =
     {
-      Hike__Convutils.id = 2;
+      Hike.Convutils.id = 2;
       span = (0L, 0x2000000L);
       members = [];
       convertible = true;
@@ -7059,21 +7063,21 @@ let () =
      member width, unrounded. This is the requirement the alloca must dominate, not a mirror of the
      implementation (the implementation rounds up; that rounding is exactly what the properties
      below pin without replaying it). *)
-  let raw_bytes (r : Hike__Convutils.region) : int64 =
-    let lo, hi = r.Hike__Convutils.span in
+  let raw_bytes (r : Hike.Convutils.region) : int64 =
+    let lo, hi = r.Hike.Convutils.span in
     Int64.div
       (Int64.mul
          (Int64.add (Int64.sub hi lo) 1L)
-         (Int64.of_int (Int.max 8 r.Hike__Convutils.max_width)))
+         (Int64.of_int (Int.max 8 r.Hike.Convutils.max_width)))
       8L
   in
   let widen_span r d =
     {
       r with
-      Hike__Convutils.span = (fst r.Hike__Convutils.span, Int64.add (snd r.Hike__Convutils.span) d);
+      Hike.Convutils.span = (fst r.Hike.Convutils.span, Int64.add (snd r.Hike.Convutils.span) d);
     }
   in
-  let with_width r wd = { r with Hike__Convutils.max_width = wd } in
+  let with_width r wd = { r with Hike.Convutils.max_width = wd } in
   (* R12-1: every emitted alloca size is positive and 16-byte aligned *)
   check "R12-1: region_bytes positive and 16-byte aligned (fixtures)"
     (List.for_all
@@ -7102,14 +7106,18 @@ let () =
     (List.for_all
        (fun r ->
          let b0 = B2l.region_bytes r in
-         let b1 = B2l.region_bytes (with_width r (2 * r.Hike__Convutils.max_width)) in
-         let b2 = B2l.region_bytes (with_width r (16 * r.Hike__Convutils.max_width)) in
+         let b1 = B2l.region_bytes (with_width r (2 * r.Hike.Convutils.max_width)) in
+         let b2 = B2l.region_bytes (with_width r (16 * r.Hike.Convutils.max_width)) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
-  (* R12-5: the cap guard — production region_size_ok admits the small fixtures and rejects the huge
-     span (before any multiply can wrap) *)
+  (* R12-5: the cap guard — production region_size_ok (now in Stack_to_locals, the split
+     decision's owner) admits the small fixtures and rejects the huge span (before any
+     multiply can wrap) *)
+  (* R12-5: the cap guard — [Stack_to_locals] owns the size guard now (it is part of the
+     split decision, not of the emission geometry; Finding 1). *)
   check "R12-5: region_size_ok true for small fixtures, false for huge span"
-    (B2l.region_size_ok r_sing && B2l.region_size_ok r_interval && not (B2l.region_size_ok r_huge));
+    (Stl.region_size_ok r_sing && Stl.region_size_ok r_interval
+     && not (Stl.region_size_ok r_huge));
   ()
 
 let () =
@@ -7120,7 +7128,7 @@ let () =
   let tid1 = mk_tid () and tid2 = mk_tid () in
   let r1 =
     {
-      Hike__Convutils.id = 0;
+      Hike.Convutils.id = 0;
       span = (-16L, -16L);
       members = [ (tid1, (-16L, -16L)) ];
       convertible = true;
@@ -7129,7 +7137,7 @@ let () =
   in
   let r2 =
     {
-      Hike__Convutils.id = 1;
+      Hike.Convutils.id = 1;
       span = (-32L, -32L);
       members = [ (tid2, (-32L, -32L)) ];
       convertible = true;
@@ -7139,36 +7147,36 @@ let () =
   let convertible = [ r1; r2 ] in
   let info =
     {
-      Hike__Convutils.offsets =
-        [ (tid1, Hike__Convutils.Range (-16L, -16L)); (tid2, Hike__Convutils.Range (-32L, -32L)) ];
+      Hike.Convutils.offsets =
+        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
       k_ranges = [ (tid1, -40L, -10L); (tid2, -50L, -20L) ];
       regions = convertible;
-      degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
     }
   in
   let covered (lo, hi) =
     Base.List.exists convertible ~f:(fun r ->
-        let rlo, rhi = r.Hike__Convutils.span in
+        let rlo, rhi = r.Hike.Convutils.span in
         Int64.compare rlo lo <= 0 && Int64.compare hi rhi <= 0)
   in
   let all_covered =
-    Base.List.for_all info.Hike__Convutils.offsets ~f:(fun (_, k) ->
-        match k with Hike__Convutils.Range (lo, hi) -> covered (lo, hi) | _ -> false)
+    Base.List.for_all info.Hike.Convutils.offsets ~f:(fun (_, k) ->
+        match k with Hike.Convutils.Range (lo, hi) -> covered (lo, hi) | _ -> false)
   in
   check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
     all_covered;
   (* R12-6: gate rejects when an offset is Infinite (unbounded -> not covered) *)
   let info_inf =
-    { info with Hike__Convutils.offsets = [ (tid1, Hike__Convutils.Infinite (-16L, -16L)) ] }
+    { info with Hike.Convutils.offsets = [ (tid1, Hike.Convutils.Infinite (-16L, -16L)) ] }
   in
   let all_covered_inf =
-    Base.List.for_all info_inf.Hike__Convutils.offsets ~f:(fun (_, k) ->
-        match k with Hike__Convutils.Range (lo, hi) -> covered (lo, hi) | _ -> false)
+    Base.List.for_all info_inf.Hike.Convutils.offsets ~f:(fun (_, k) ->
+        match k with Hike.Convutils.Range (lo, hi) -> covered (lo, hi) | _ -> false)
   in
   check "R12-6: gate rejects Infinite tag (unbounded -> not covered)" (not all_covered_inf);
   (* R12-7: gate rejects when degraded *)
-  let info_deg = { info with Hike__Convutils.degraded = true; call_stack_args = []; vla_bounds = [] } in
-  check "R12-7: degraded sub never qualifies" info_deg.Hike__Convutils.degraded;
+  let info_deg = { info with Hike.Convutils.degraded = true; call_stack_args = []; vla_bounds = [] } in
+  check "R12-7: degraded sub never qualifies" info_deg.Hike.Convutils.degraded;
   ()
 
 let () =
@@ -7196,19 +7204,20 @@ let () =
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let info =
     {
-      Hike__Convutils.offsets =
-        [ (tid1, Hike__Convutils.Range (-16L, -16L)); (tid2, Hike__Convutils.Range (-32L, -32L)) ];
+      Hike.Convutils.offsets =
+        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
       k_ranges = [ (tid1, -20L, -10L); (tid2, -40L, -20L) ];
       regions = [];
-      degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
     }
   in
-  let regions = Hike__.Hike_stack_to_locals.regions_of_sub (v64 "RSP") sub info in
-  let conv = Base.List.filter regions ~f:(fun r -> r.Hike__Convutils.convertible) in
+  let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+        ~frame_escaped:false in
+  let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
     (List.length conv = 2
-    && Base.List.exists conv ~f:(fun r -> r.Hike__Convutils.span = (-16L, -16L))
-    && Base.List.exists conv ~f:(fun r -> r.Hike__Convutils.span = (-32L, -32L)));
+    && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-16L, -16L))
+    && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-32L, -32L)));
   ()
 
 let () =
@@ -7236,21 +7245,22 @@ let () =
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let info =
     {
-      Hike__Convutils.offsets =
+      Hike.Convutils.offsets =
         [
-          (tid1, Hike__Convutils.Range (-32L, -16L));
-          (tid2, Hike__Convutils.Range (-24L, -8L));
+          (tid1, Hike.Convutils.Range (-32L, -16L));
+          (tid2, Hike.Convutils.Range (-24L, -8L));
         ];
       k_ranges = [ (tid1, -40L, -10L); (tid2, -30L, -5L) ];
       regions = [];
-      degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
     }
   in
-  let regions = Hike__.Hike_stack_to_locals.regions_of_sub (v64 "RSP") sub info in
-  let conv = Base.List.filter regions ~f:(fun r -> r.Hike__Convutils.convertible) in
+  let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+        ~frame_escaped:false in
+  let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
   check "R12-8b: two overlapping intervals produce one convertible region with span (-32,-8)"
     (List.length conv = 1
-    && Base.List.exists conv ~f:(fun r -> r.Hike__Convutils.span = (-32L, -8L)));
+    && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-32L, -8L)));
 
   ()
 
@@ -7284,7 +7294,7 @@ let () =
   let tid_stack = Term.tid d_stack in
   let region =
     {
-      Hike__Convutils.id = 0;
+      Hike.Convutils.id = 0;
       span = (-16L, -16L);
       members = [ (tid_stack, (-16L, -16L)) ];
       convertible = true;
@@ -7293,28 +7303,33 @@ let () =
   in
   let info =
     {
-      Hike__Convutils.offsets = [ (tid_stack, Hike__Convutils.Range (-16L, -16L)) ];
+      Hike.Convutils.offsets = [ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ];
       k_ranges = [ (tid_stack, -20L, -10L) ];
       regions = [ region ];
-      degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
     }
   in
-  let plan = B2l.region_split_plan (B2l.def_tags_of (Some info)) (Some info) sub in
+  (* Finding 1: the decision moved to [Stack_to_locals.split_plan] — the emitter's
+     [region_split_plan] (with its own weaker frame_ptr escape analysis) is gone. The
+     escape rule that rejects this sub is the unified [frame_escapes], consulted as a
+     PER-REGION convertibility rule (so it also governs the fallback path's conversion). *)
+  let info = { info with Hike.Convutils.regions =
+      Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+        ~frame_escaped:(Stl.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
+  let plan = Stl.split_plan (v64 "RSP") Theory.Target.unknown sub info in
   check
-    "property R12b: bare copy v := RSP makes region_split_plan REJECT the sub (wholly %frame) — \
-     via generalized frame_ptr_value_def"
+    "property R12b: bare copy v := RSP makes split_plan REJECT the sub (wholly %frame) — \
+     via Stack_to_locals.frame_escapes (per-region convertibility)"
     (plan = []);
-  (* also pin the predicate directly — the bare copy is a frame-derived pointer value, while RSP :=
-     RSP and mem-lhs are excluded *)
-  let d_rsp_self = Def.create rsp (Bil.Var rsp) in
-  let m2 = memv "r12b_m2" in
-  let d_mem = Def.create m2 (Bil.Var rsp) in
+  (* also pin the escape predicates directly. The bare copy is caught by the ALIAS half of
+     the unified rule ([frame_addr_alias] — a memory access reads through the materialized
+     frame pointer), not by the value-escape half; the union [frame_escapes] is what
+     [split_plan] consults. *)
   check
-    "property R12b: frame_ptr_value_def is true for bare `v := RSP` and false for `RSP := RSP` / \
-     `mem := RSP`"
-    (B2l.frame_ptr_value_def d_copy
-    && (not (B2l.frame_ptr_value_def d_rsp_self))
-    && not (B2l.frame_ptr_value_def d_mem));
+    "property R12b: frame_escapes is true for a sub containing a bare `v := RSP` copy \
+     (the alias half of the unified rule catches it)"
+    (Stl.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
+     && Stl.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
   ()
 
 let () =

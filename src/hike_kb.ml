@@ -35,32 +35,6 @@ let provide (vmap : Convutils.vsa_info Tid.Map.t) : unit =
   else if Core.Map.equal Convutils.equal_vsa_info cur vmap then ()
   else ()
 
-(* Arity map: per-sub stack-arg slot count from the pre-pass (ADR 0002). *)
-let arity_info_slot =
-  KB.Class.property ~package:"hike" run_cls "arity-info"
-    (KB.Domain.flat
-       ~empty:Tid.Map.empty
-       ~equal:(Core.Map.equal Int.equal)
-       "hike:arity-info")
-
-let arity_info () : int Tid.Map.t =
-  let r = ref Tid.Map.empty in
-  Toplevel.exec
-    (KB.bind (KB.Object.read run_cls "hike-run") ~f:(fun obj ->
-         KB.bind (KB.collect arity_info_slot obj) ~f:(fun m ->
-             r := m;
-             KB.return ())));
-  !r
-
-let provide_arity (amap : int Tid.Map.t) : unit =
-  let cur = arity_info () in
-  if Core.Map.is_empty cur then
-    Toplevel.exec
-      (KB.bind (KB.Object.read run_cls "hike-run") ~f:(fun obj ->
-           KB.provide arity_info_slot obj amap))
-  else if Core.Map.equal Int.equal cur amap then ()
-  else ()
-
 (* VSA solution map: per-sub fixpoint solution (for precise stack-arg Mem at call sites) *)
 let vsa_sol_tbl : (Tid.t, Cbat_vsa.vsa_sol) Hashtbl.t = Hashtbl.create 16
 

@@ -326,17 +326,6 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
     { memories; words; frame = join_opt ~widen:true e1.frame e2.frame
     }
 
-let equal_need ~(need : Var.Set.t) (e1 : t) (e2 : t) : bool =
-  if Core.Set.is_empty need then true
-  else
-    Core.Set.for_all need ~f:(fun v ->
-      match Var.typ v with
-      | Type.Imm w ->
-          let ws1 = find_word w e1 v in
-          let ws2 = find_word w e2 v in
-          WordSet.equal ws1 ws2
-      | Type.Mem _ | Type.Unk -> true)
-
 let meet (e1 : t) (e2 : t) : t =
   let memories = MemEnv.meet e1.memories e2.memories in
   let words = WordEnv.meet e1.words e2.words in

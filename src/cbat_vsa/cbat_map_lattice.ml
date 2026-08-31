@@ -18,7 +18,6 @@ module Sexpable = Core_kernel.Sexpable
 module Fn = Core_kernel.Fn
 module Value = Bap.Std.Value
 module Lattice = Cbat_lattice_intf
-module BL = Lattice.BoolLattice
 
 (* An (indexed) Map lattice represents the lifting of an (indexed) complete lattice to a finite map onto elements of that (indexed) lattice. It includes the ability to map "the rest" of the elements to either top or bottom in the underlying (indexed) complete lattice. *)
 
@@ -31,9 +30,6 @@ module type S_indexed = sig
   type idx
 
   include Lattice.S_indexed with type t := t and type idx := idx
-
-  (* widening with a caller-supplied per-key operator (the old thresholded widen is gone). *)
-  val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
 
   (* replaces the value at the given key with the meet of it and the new input value. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
@@ -54,9 +50,6 @@ module type S = sig
   type t
 
   include Lattice.S with type t := t
-
-  (* widening with a caller-supplied per-key operator (the old thresholded widen is gone). *)
-  val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
 
   (* replaces the value at the given key with the meet of it and the new input value. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
@@ -143,7 +136,6 @@ module Make_indexed_from_map
   (* hike addition: widening with a caller-supplied per-key operator (the
      per-head landmark extrapolation rides through this; the thresholded
      widen is gone). *)
-  let widen_join_op (w : L.t -> L.t -> L.t) : t -> t -> t = lift_join (join' w)
 
   let op_add op (m : map) ~key:key ~data:data : t =
     let idx = L.get_idx data in

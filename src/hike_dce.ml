@@ -74,14 +74,18 @@ let is_sp_value_def (target : Theory.Target.t) (d : def term) : bool =
 let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
   is_sp target (Def.lhs d)
 
-(* Precise predicate for RSP erasure (ADR 0001 Q1/A, Q2): wired to Bil2llvm.region_split_plan (R12) — replaces simplified has_bad_tag/has_sp_value. *)
+(* Precise predicate for RSP erasure (ADR 0001 Q1/A, Q2): the sub uses the
+   SPLIT stack model (per-region [stack_rN] allocas) — its SP/hike_stack
+   defs are dead.
+
+   Finding 1: the decision is READ from [Convutils.stack_plan], the single
+   result [Hike_stack_to_locals.split_plan] produced in the vsa pass. This
+   pass is a CONSUMER — it no longer imports the emitter's
+   [region_split_plan] to re-derive a BIL-level fact. *)
 let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
   | None -> false
-  | Some info ->
-    let def_tags = Tid.Map.of_alist_exn info.Convutils.offsets in
-    let plan = Bil2llvm.region_split_plan def_tags (Some info) sub in
-    plan <> []
+  | Some info -> Hike_stack_to_locals.is_precise info
 
 let keep ?(precise=false) ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
