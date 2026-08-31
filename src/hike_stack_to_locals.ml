@@ -844,8 +844,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     |> Base.Option.value
          ~default:
            { Convutils.offsets = []; k_ranges = []; regions = [];
-             stack_plan = []; degraded = false;
-             call_stack_args = []; vla_bounds = [] }
+             stack_plan = []; degraded = false; vla_bounds = [] }
   in
   let tag_of =
     Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty

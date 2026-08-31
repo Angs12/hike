@@ -5593,7 +5593,7 @@ let () =
           };
         ];
       stack_plan = []; degraded = false;
-      call_stack_args = []; vla_bounds = [];
+      vla_bounds = [];
     }
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
@@ -5782,7 +5782,7 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
     { Cu.offsets; k_ranges = []; regions = []; stack_plan = []; degraded = false;
-      call_stack_args = []; vla_bounds = [] }
+      vla_bounds = [] }
   in
   let convertible_of info dtid =
     Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
@@ -6350,11 +6350,13 @@ let () =
   ()
 
 (* remediation A4a/A4b (hardening pins, expected green immediately): the narrow-store OR-mask width
-   for the remaining slot widths — u8 and u32 (regression C1 pinned u16). The KB's vsa-info slot is
-   WRITE-ONCE per process ([Hike_kb.provide] keeps only the FIRST map — C1's), so these pins BORROW
-   C1's surviving entry: the fixtures' defs are created with C1's exact def tids and their sub with
-   C1's sub tid (read back from [Kb.vsa_info ()]), so C1's already-provided info drives
-   [stack_to_locals]' rewrite for the new widths. No KB write. *)
+   for the remaining slot widths — u8 and u32 (regression C1 pinned u16). The KB's vsa-info slot has
+   a JOIN domain (map extension/union — see [Hike_kb]): provides accumulate, and a second info for
+   the SAME sub tid is a loud [Toplevel.Conflict], not a silent drop. These pins still BORROW C1's
+   entry (the fixtures' defs are created with C1's exact def tids and their sub with C1's sub tid,
+   read back from [Kb.vsa_info ()]) because they exercise the SAME sub's info — providing their own
+   map under that tid would now conflict, and minimal-change doctrine keeps the borrowing. No KB
+   write. *)
 let () =
   let rsp = v64 "RSP" in
   (* the single surviving entry is C1's (its two offsets share one Range) *)
@@ -7151,7 +7153,7 @@ let () =
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
       k_ranges = [ (tid1, -40L, -10L); (tid2, -50L, -20L) ];
       regions = convertible;
-      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; vla_bounds = [];
     }
   in
   let covered (lo, hi) =
@@ -7175,7 +7177,7 @@ let () =
   in
   check "R12-6: gate rejects Infinite tag (unbounded -> not covered)" (not all_covered_inf);
   (* R12-7: gate rejects when degraded *)
-  let info_deg = { info with Hike.Convutils.degraded = true; call_stack_args = []; vla_bounds = [] } in
+  let info_deg = { info with Hike.Convutils.degraded = true; vla_bounds = [] } in
   check "R12-7: degraded sub never qualifies" info_deg.Hike.Convutils.degraded;
   ()
 
@@ -7208,7 +7210,7 @@ let () =
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
       k_ranges = [ (tid1, -20L, -10L); (tid2, -40L, -20L) ];
       regions = [];
-      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; vla_bounds = [];
     }
   in
   let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
@@ -7252,7 +7254,7 @@ let () =
         ];
       k_ranges = [ (tid1, -40L, -10L); (tid2, -30L, -5L) ];
       regions = [];
-      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; vla_bounds = [];
     }
   in
   let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
@@ -7306,7 +7308,7 @@ let () =
       Hike.Convutils.offsets = [ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ];
       k_ranges = [ (tid_stack, -20L, -10L) ];
       regions = [ region ];
-      stack_plan = []; degraded = false; call_stack_args = []; vla_bounds = [];
+      stack_plan = []; degraded = false; vla_bounds = [];
     }
   in
   (* Finding 1: the decision moved to [Stack_to_locals.split_plan] — the emitter's

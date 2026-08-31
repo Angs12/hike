@@ -70,9 +70,6 @@ let has_stack_access_tags (sub : sub term) : bool =
       Term.enum def_t b
       |> Seq.exists ~f:(fun d -> Term.has_attr d Relevance.stack_access))
 
-(* M2 (ADR 0004): per-call-site stack-arg values removed — hike_stack ptr threading replaces arity. *)
-let call_stack_args_of_sub (_sp : var) (_sub : sub term)
-    (_tags : (tid, AI.t) Graphlib.Std.Solution.t) : (Tid.t * (int * int64) list) list = []
 
 (* [offsets_of_sub target sp sub]: The per-def offset interval tags of [sub]'s Load/Store defs, in block-then-def order (see the header contract), PLUS the sub's STACK MODEL DECISION ([Convutils.stack_plan] — the per-region split or the single-frame fallback).
 
@@ -83,7 +80,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* A sub with NO direct-SP stack accesses produces an empty offset set regardless of the fixpoint result (only [stack_access]-tagged Load/Store defs yield offset tags). *)
   if not (has_stack_access_tags sub') then
     { Convutils.offsets = []; k_ranges = []; regions = []; stack_plan = [];
-      degraded = false; call_stack_args = []; vla_bounds = [] }
+      degraded = false; vla_bounds = [] }
   else
   let prog' = Program.create ~subs:[ sub' ] () in
   (* The trace-partitioned tags (docs/trace-partitioning-plan.md §1.4/§2.4): the fixpoint runs with the views (the Phase B post-pass), and the per-block TAG states come from [partitioned_states] — the invariant met with the. *)
@@ -290,7 +287,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   in
   let base_info =
     { Convutils.offsets; k_ranges; regions = []; stack_plan = []; degraded;
-      call_stack_args = []; vla_bounds = [] }
+      vla_bounds = [] }
   in
   (* The ESCAPE verdict — computed ONCE per sub and shared by the
      region convertibility rule and (through it) the plan. *)
@@ -298,10 +295,9 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let regions =
     Hike_stack_to_locals.regions_of_sub sp target sub' base_info ~frame_escaped
   in
-  let call_stack_args = call_stack_args_of_sub sp sub' tags in
   let base =
     { Convutils.offsets; k_ranges; regions; stack_plan = []; degraded;
-      call_stack_args; vla_bounds }
+      vla_bounds }
   in
   (* THE STACK MODEL DECISION — computed ONCE, here, on the PRE-rewrite
      sub (Finding 1): [Hike_stack_to_locals.split_plan] is its single
@@ -330,10 +326,8 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
         |> Seq.to_list
       in
       { Convutils.offsets; k_ranges = []; regions = []; stack_plan = [];
-        degraded = true; call_stack_args = []; vla_bounds = [] }
-  | Some (sol, views) ->
-      Hike_kb.add_sol (Term.tid sub) sol;
-      finish sol views
+        degraded = true; vla_bounds = [] }
+  | Some (sol, views) -> finish sol views
   in
   (* 100% VSA Tagging Assertion: Every stack_access def MUST be present in info.offsets *)
   let tagged_tids =

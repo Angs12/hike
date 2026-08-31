@@ -664,7 +664,14 @@ let () =
       (* Per-sub VSA tag computation (registered pass "vsa", depends on "hike-relevance" — the relevance pass already filtered + tagged, so this pass runs on the already-filtered program). *)
       Project.register_pass ~name:"vsa" ~deps:[ "hike-relevance" ] ~runonce:true
         (fun proj ->
-           (* M2 (ADR 0004): single fixpoint, no arity pre-pass — hike_stack threading replaces stack_arg_N. *)
+           (* Idempotence/perf guard (NOT a soundness gate): the vsa-info slot's
+              domain is now map extension/union, so a second run's provide
+              would be idempotent (the same map) or a loud conflict (a genuine
+              double-analysis bug the KB would surface) — but re-running the
+              whole VSA fixpoint just to re-provide the same map is pure
+              waste, so skip it. The M2 single-fixpoint-per-sub design holds:
+              with the slot non-empty, every sub here already has its
+              analysis. *)
            let cur = Hike_kb.vsa_info () in
            if not (Core.Map.is_empty cur) then (
              if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then

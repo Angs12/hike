@@ -76,7 +76,6 @@ module Vsa = struct
     regions : region list;
     stack_plan : split_plan;
     degraded : bool;
-    call_stack_args : (Tid.t * (int * int64) list) list;
     vla_bounds : (Tid.t * (int64 * int64)) list;
   }
   [@@deriving equal]
