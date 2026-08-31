@@ -1,6 +1,6 @@
 # 02 — Delete Phase B (dead code + rename + comment cleanup)
 
-**Status:** ready-for-agent
+**Status:** done (2026-08-31, wt-02 — see /tmp/opencode/single-pass-trace-partitioning/report-02.md)
 **Depends on:** 01
 **Blocks:** 03
 
