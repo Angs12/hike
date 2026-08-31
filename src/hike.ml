@@ -4,7 +4,8 @@ open Bap.Std.Bil.Types
 open Bap_core_theory
 open Bil2llvm
 open Convutils
-open Targetutils
+open Hike_abi
+module Abi = Hike_abi
 open Printf
 
 (* ------------------------------------------------------------------------- *)
@@ -12,9 +13,8 @@ open Printf
    under their plain names. Plain-name aliases resolve identically under dune
    (wrapped — siblings see each other by plain name, as the [open]s above
    already rely on) and under bapbuild (flat — every module is top-level), so
-   one interface serves both builds. Consumers write [Hike.Target.sp], never
-   [Hike__Targetutils.sp] and never the generated [Hike__.Targetutils] alias. *)
-module Target = Targetutils
+   one interface serves both builds. Consumers write [Hike.Abi.sp], never
+   a dune-internal [Hike__Abi] form. *)
 module Relevance = Hike_vsa_relevance
 module Vsa = Hike_vsa
 module Stack_to_locals = Hike_stack_to_locals
@@ -58,10 +58,10 @@ let is_llvm_x86_intrinsic (term : sub term) : bool =
   Term.has_attr term Sub.intrinsic && Seq.is_empty (Term.enum blk_t term)
 
 let fp_returning (sub : sub term) : bool =
-  let is_ymm n = Base.String.is_prefix n ~prefix:"YMM" in
+  let is_ymm n = Base.String.is_prefix n ~prefix:Abi.vector_param_prefix in
   let is_value_reg v =
     let n = Var.name (Var.base v) in
-    Base.List.mem ["RAX"; "EAX"; "RDX"; "EDX"] n ~equal:String.equal
+    Base.List.mem Abi.value_return_names n ~equal:String.equal
     || is_ymm n
   in
   let is_epilogue blk =
@@ -103,18 +103,16 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
   let free_vars = free_vars sub in
   let rets =
     (if Theory.Target.matches target "x86_64-gnu-elf" then
-       Calling_conventions.x86_64_sysv.return_regs
+       Abi.return_regs target
      else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in
   let rets =
     (* The FP-return member: a double-returning callee (the -O0 `return <double-expr>` leaves the value in XMM0 with NO RAX binding — the model's [return_regs] are integer-only) delivers the value via [%YMM0] in the ret. *)
     if fp_returning sub then
+      let ymm0 = Base.List.nth_exn (Abi.vector_param_regs target) 0 in
       rets
-      @ [
-          Arg.create ~intent:Out (Calling_conventions.r256 "YMM0")
-            (Var (Calling_conventions.r256 "YMM0"));
-        ]
+      @ [ Arg.create ~intent:Out ymm0 (Var ymm0) ]
     else rets
   in
   let rets, args =
@@ -142,8 +140,9 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
       (rets, args)
     end
   else if Term.name sub = "@main" then
-     let rdi = Var.create "RDI" (Imm 64) in
-     let rsi = Var.create "RSI" (Imm 64) in
+     let abi = Abi.of_target target in
+     let rdi = Base.List.nth_exn abi.int_param_regs 0 in
+     let rsi = Base.List.nth_exn abi.int_param_regs 1 in
      let args =
        [
          Arg.create ~intent:In rdi (Var rdi);
@@ -165,7 +164,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
           let rec has_pos (e : exp) : bool =
             match e with
             | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int c)
-              when Var.same b (Targetutils.fp target) ->
+              when Var.same b (Abi.fp target) ->
                 Int64.compare (Int64.sub (Word.to_int64_exn c) 8L) 0L >= 0
             | Bil.BinOp (_, a, b) -> has_pos a || has_pos b
             | Bil.Cast (_, _, e') -> has_pos e'
@@ -191,11 +190,11 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
       let args =
         let rank_of_var (v : var) : int * string =
           let n = Var.name (Var.base v) in
-          let int_order = ["RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9"] in
+          let int_order = Base.List.map (Abi.int_param_regs target) ~f:Var.name in
           match Base.List.findi int_order ~f:(fun _ s -> String.equal s n) with
           | Some (i, _) -> (i, n)
           | None ->
-            if Base.String.is_prefix n ~prefix:"YMM" then
+            if Base.String.is_prefix n ~prefix:Abi.vector_param_prefix then
               (try
                  let num = int_of_string (String.sub n 3 (String.length n - 3)) in
                  if 0 <= num && num < 8 then (6 + num, n) else (100, n)
@@ -205,9 +204,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
         Base.List.filter free_vars ~f:(fun reg ->
             let n = Var.name (Var.base reg) in
             let is_callee_saved =
-              Base.List.mem
-                ["RBX"; "R12"; "R13"; "R14"; "R15"]
-                n ~equal:String.equal
+              Abi.is_callee_saved_t target reg
             in
             not
               (Var.same reg (sp target)
@@ -236,7 +233,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
      in
      let args =
        if is_plt_trampoline then
-         Base.List.map Calling_conventions.x86_64_sysv.param_regs
+         Base.List.map (Abi.param_regs target)
            ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
        else args
      in

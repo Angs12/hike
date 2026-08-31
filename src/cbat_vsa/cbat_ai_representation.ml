@@ -12,6 +12,7 @@
 (* ************************************************************************* *)
 
 open !Core_kernel
+module Abi = Hike_abi
 include Bap.Std
 include Cbat_vsa_utils
 module MapLattice = Cbat_map_lattice
@@ -163,11 +164,11 @@ let frame_precedes (f1 : frame option) (f2 : frame option) : bool =
 
 (* [seed_frame]: the entry-state frame — the ORIGIN definition: the sub's entry RSP has offset 0 (in BOTH anchored and unanchored runs; the origin is the entry RSP, not an assumption about its absolute value). Seeded by [Cbat_vsa.init_sol]. *)
 let seed_frame : frame option =
-  Some [ (Var.base rsp_var, { fconst = WordSet.singleton (Word.zero 64); fvars = [] }) ]
+  Some [ (Var.base Abi.x86_64_sysv.sp, { fconst = WordSet.singleton (Word.zero 64); fvars = [] }) ]
 
 (* [frame_add_rsp f]: The call-revert — the callee's ret pops exactly the retaddr the caller pushed, so RSP's offset restores by +8 (the L-E1 matched-pair semantics, applied to the state's frame at the call-abstraction site in cbat_vsa.ml). *)
 let frame_add_rsp (f : frame option) : frame option =
-  let rsp = frame_key rsp_var in
+  let rsp = frame_key Abi.x86_64_sysv.sp in
   let eight = WordSet.singleton (Word.of_int ~width:64 8) in
   match f with
   | None -> None

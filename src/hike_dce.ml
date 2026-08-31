@@ -1,20 +1,21 @@
 (* Dead-code elimination for the hike pipeline. Replaces the lifted return epilogue (indirect noreturn call) with a var-free form, then iteratively removes defs whose lhs is never used. Memory writes and ABI registers are always kept.
-   RSP erasure on the precise path uses BAP-derived SP (Targetutils.sp), not hardcoded strings.
+   RSP erasure on the precise path uses BAP-derived SP (Abi.sp), not hardcoded strings.
    RBP is not explicitly erased; it is deleted by the fixpoint if derived from RSP (RBP:=RSP) and RSP is erased. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
+module Abi = Hike_abi
 
-(* ABI registers that may be read implicitly by calls. *)
-let is_ret_reg (v : var) : bool =
-  Base.List.exists Calling_conventions.x86_64_sysv.return_regs
+(* ABI registers that may be read implicitly by calls (Abi is the sole origin). *)
+let is_ret_reg (target : Theory.Target.t) (v : var) : bool =
+  Base.List.exists (Abi.return_regs target)
     ~f:(fun r -> Var.same r (Var.base v))
 
-let is_call_reg (v : var) : bool =
+let is_call_reg (target : Theory.Target.t) (v : var) : bool =
   let regs =
-    Calling_conventions.x86_64_sysv.param_regs
-    @ Calling_conventions.x86_64_sysv.return_regs
+    Abi.param_regs target
+    @ Abi.return_regs target
   in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 
@@ -52,7 +53,7 @@ let is_intrinsic_var (v : var) : bool =
 let is_hike_stack (v : var) : bool = Var.same v Convutils.hike_stack_var
 
 let is_sp (target : Theory.Target.t) (v : var) : bool =
-  Var.same v (Targetutils.sp target)
+  Var.same v (Abi.sp target)
 
 let rec sp_value_exp (target : Theory.Target.t) (e : exp) : bool =
   match e with
@@ -91,8 +92,8 @@ let keep ?(precise=false) ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
   else
     let lhs = Def.lhs d in
-    Core.Set.mem used lhs || is_ret_reg lhs || Convutils.is_mem lhs
-    || is_call_reg lhs || is_intrinsic_var lhs
+    Core.Set.mem used lhs || is_ret_reg target lhs || Convutils.is_mem lhs
+    || is_call_reg target lhs || is_intrinsic_var lhs
 
 let def_count (sub : sub term) : int =
   Term.enum blk_t sub

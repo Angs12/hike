@@ -1,0 +1,9 @@
+(library
+ (name hike_abi)
+ (public_name hike.hike_abi)
+ (wrapped false)
+ (flags
+  (:standard -alert -deprecated))
+ (modules hike_abi)
+ (libraries bap bap-core-theory bitvec core))
+
