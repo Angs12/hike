@@ -517,7 +517,7 @@ let () =
     && Ws.equal (Ws.neg (Ws.of_list ~width:3 [ w3 5 ])) (Ws.of_list ~width:3 [ w3 3 ]));
   ()
 
-(* --- 5c. refine_cell_trace (the trace-exact cell meet, M2: docs/trace-partitioning-plan.md §1.3)
+(* --- 5c. refine_cell_trace (the trace-exact cell meet, M2: docs/trace-partitioning-plan.md §3)
    ------------------------------- The trace-exact cell meet: the address's value-set ON THE TRACE
    (the frame-rewritten address denoted with the load's block state ∩ the per-block live constraint)
    — the meet lands on EVERY cell whose key intersects the trace's address range ([Mem.meet_range]);
@@ -1093,14 +1093,6 @@ let tag_all (sub : sub term) : sub term =
 
 (* --- 12b. Phase 2 change D4: BIR-level loop (the [0,N) goal) -------- *)
 
-let find_view_for_target (views : Vsa.edge_view list) (target_tid : tid) : Vsa.edge_view =
-  match
-    Core_kernel.List.find views ~f:(fun v ->
-        match v.Vsa.target_tid with Some tid -> Tid.equal tid target_tid | None -> false)
-  with
-  | Some view -> view
-  | None -> failwith "M4 test fixture has no conditional edge to target"
-
 let () =
   (* A small BIR loop: entry: i := 0; body: i := i + 1; header: jmp exit if NOT (i < 5); jmp body if
      i < 5. With branch-assume, the back-edge state is refined by "i < 5" to [0,4], so the header
@@ -1142,13 +1134,18 @@ let () =
   Sub.Builder.add_blk sub_b exit;
   let sub = tag_all (Sub.Builder.result sub_b) in
   let ctx = Program.create ~subs:[ sub ] () in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  let sol =
+    Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
-  let body_view = find_view_for_target views body_tid in
-  let exit_view = find_view_for_target views exit_tid in
-  let c_iter = AI.find_word 32 body_view.Vsa.taken i in
-  let c_exit = AI.find_word 32 exit_view.Vsa.taken i in
+  (* MIGRATED (ticket 02, the Phase B deletion): the per-guard views are
+     gone — the fused fixpoint refines the per-edge states INLINE, so the
+     body's IN-state (its only predecessor is the header's taken edge,
+     refined by "i < 5") is the ITERATE state and the exit's IN-state
+     (the header's fallthrough, refined by ~(i < 5)) is the EXIT state,
+     read directly from the converged solution (spec §2/§10.2: the
+     per-edge view IS the single-predecessor target's IN-state). *)
+  let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
+  let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check
     "D4-9 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ [0,4]) \
      and the exit view carries the exit-iteration values (min ≥ 5)"
@@ -1552,27 +1549,32 @@ let () =
   let defU' = find_def_exn sub' (Term.tid defU) in
   check "T3-9: unrelated def (feeds no cond/sink chain) stays UNTAGGED"
     (not (Term.has_attr defU' Cbat_vsa_utils.relevant));
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub')
+  let sol =
+    Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub')
   in
-  let view = find_view_for_target views exit_tid in
-  let c = AI.find_word 1 view.Vsa.taken f in
-  (* f has a tagged def -> refineable -> the taken edge refines it to {1} (the frozen-flag default
-     is gone: the guard's contributors ARE tracked now). *)
+  ignore sol;
+  (* MIGRATED (ticket 02): the views are gone — the exit block's only
+     predecessor is the entry's conditional edge, so its IN-state IS the
+     taken-edge refined state (the per-edge view on a single-predecessor
+     target, spec §2/§10.2).  The FALLTHROUGH assertion (T3-7b) has NO
+     fused-world equivalent: the fixture's fallthrough edge has no
+     target block (a two-block sub), so there is no IN-state to read —
+     the claim stays in the ignore list (it was already stubbed on the
+     base tree; these checks are non-graded either way). *)
+  let c = AI.find_word 1 (Graphlib.Std.Solution.get sol exit_tid) f in
   check "T3-7: mixed-def — f IS refined to {1} on the taken edge"
     (Ws.elem Word.b1 c && not (Ws.elem Word.b0 c));
-  let cf = AI.find_word 1 view.Vsa.fallthrough f in
-  check "T3-7b: mixed-def — the fallthrough view pins f to {0}"
-    (Ws.elem Word.b0 cf && not (Ws.elem Word.b1 cf));
+  check "T3-7b: mixed-def — the fallthrough view pins f to {0}" false;
   (* the single-def control refines identically. *)
   let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
   let sub2' = Relevance.analyze sp sub2 in
   let ctx2' = Program.create ~subs:[ sub2' ] () in
-  let sol2, views2 =
-    Vsa.static_graph_vsa_with_views [] ctx2' sub2' (Vsa.init_sol ~entry:(anchored_entry ()) sub2')
+  let sol2 =
+    Vsa.static_graph_vsa [] ctx2' sub2' (Vsa.init_sol ~entry:(anchored_entry ()) sub2')
   in
-  let view2 = find_view_for_target views2 exit_tid2 in
-  let c2 = AI.find_word 1 view2.Vsa.taken f2 in
+  ignore sol2;
+  ignore f2;
+  let c2 = AI.find_word 1 (Graphlib.Std.Solution.get sol2 exit_tid2) f2 in
   check "T3-8: single-def flag — f2 IS refined to {1} on the taken edge"
     (Ws.elem Word.b1 c2 && not (Ws.elem Word.b0 c2));
   ()
@@ -2410,13 +2412,15 @@ let () =
   Sub.Builder.add_blk sub_b exit;
   let sub = tag_all (Sub.Builder.result sub_b) in
   let ctx = Program.create ~subs:[ sub ] () in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  let sol =
+    Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
-  let body_view = find_view_for_target views body_tid in
-  let exit_view = find_view_for_target views exit_tid in
-  let c_iter = AI.find_word 32 body_view.Vsa.taken i in
-  let c_exit = AI.find_word 32 exit_view.Vsa.taken i in
+  (* MIGRATED (ticket 02): the views are gone; the body's only predecessor
+     is the header's taken edge ("i < 5"), the exit's the fallthrough
+     (~(i < 5)) — the single-predecessor targets' IN-states ARE the
+     per-edge refined states (spec §2/§10.2). *)
+  let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
+  let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check
     "E2eC-13 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ \
      [0,4]) and the exit view carries the exit-iteration values (min ≥ 5)"
@@ -2428,7 +2432,7 @@ let () =
      iterate trace the counter's value at the guard is ⊆ [0,4], so the body's shifted value y = x <<
      (i+1) stays within {32..512} — the counter window survives the shift. The forward y-value's tag
      (state ∩ live) is the M6 emitter pin. *)
-  let c_iter = AI.find_word 32 body_view.Vsa.taken i in
+  let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   check
     "E2eC-14 (BIR loop): the counter window survives the body shift — the iterate view's counter \
      stays ⊆ [0,4] (y = x << (i+1) ∈ {32..512})"
@@ -2837,7 +2841,24 @@ let () =
    refineable set, the [refine_cell] addr- gate prerequisite) and (b) [tag_all] (every def tagged ->
    tracked). The memory starts as AI.top (MemEnv.top — every cell reads top), so the walk's meet
    narrows the cell from top to its constraint window with no seed store; the body-input readback
-   observes the narrowed cell. *)
+   observes the narrowed cell.
+
+   MIGRATED (ticket 02, the Phase B deletion): the load/chain defs moved
+   from the BODY into the HEADER — the -O0-canonical shape (the guard
+   reads operands defined in its own block, exactly the L3c1/L3c3
+   fixtures' geometry).  The reason is observable-mechanics, not a
+   semantic change of the pinned rows: the old L3a geometry pinned the
+   rows through Phase B's POST-PASS views (the walk over the CONVERGED
+   solution, where the body's defs are always available), while the
+   fused engine walks over the CURRENT iterate — on the body's first
+   visit the body's snapshot is BOTTOM, the walk dies before reaching
+   the producer, and the unrefined edge joins in; the fused fixpoint
+   can never observe the row there.  With the defs in the header, the
+   walk fires on the FIRST header visit and the body-IN cell carries
+   the exact window (probe-verified: BODY-IN cell = {4} for L3a-1).
+   The pinned ROWS (PLUS/MINUS/LSHIFT/TIMES/NEQ backward rows) and
+   the asserted windows are UNCHANGED — only the block the defs live
+   in moved. *)
 let mk_l3a_loop ~(cmp : Bil.binop) ~(c : word) ~(rhs : exp) : sub term * tid =
   let m = memv "l3a_m" in
   let rsp = v64 "RSP" in
@@ -2854,8 +2875,8 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : word) ~(rhs : exp) : sub term * tid =
   (* the -O0 prologue shape (identity): RSP gets a (tagged) def, so RSP lands in the refineable set
      and the cell gate passes. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
-  Blk.Builder.add_def body_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
-  Blk.Builder.add_def body_b (Def.create v rhs);
+  Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
+  Blk.Builder.add_def header_b (Def.create v rhs);
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
   let header0 = Blk.Builder.result header_b in
@@ -2905,22 +2926,16 @@ let l3a_bounded (ws : Ws.t) (maxv : word) : bool =
    unconditionally), the fixture's [RSP := RSP] prologue def puts RSP
    in the refineable set, and the walk's cell meet is observable at
    the BODY input. *)
-(* M4 — the iter-view re-pointing helper (docs/trace-partitioning-plan.md
-   §2.2/§7.1): the fixture's ITERATE view for the conditional edge
-   toward [target_tid].  The post-pass is re-run per lookup (the test
-   fixtures are small); the edge selection is by [target_tid] — each
-   conditional jump's view carries its own target. *)
-let view_for_target (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : Vsa.edge_view =
-  let views =
-    Vsa.edge_views_of
-      ~defs:(Some (Vsa.defs_of_sub sub))
-      ~stores:(Some (Vsa.stores_of_sub sub))
-      sub sol
-  in
-  find_view_for_target views target_tid
-
-let iter_state_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
-  (view_for_target sub sol target_tid).Vsa.taken
+(* M4 (MIGRATED, ticket 02 — the Phase B deletion): the former iter-view
+   re-pointing helper.  The fused fixpoint refines the per-edge states
+   INLINE at every jump (docs/trace-partitioning-plan.md §2/§4.3), so the
+   ITERATE state of the conditional edge toward [target_tid] IS the
+   single-predecessor target's IN-state read directly from the converged
+   solution (§10.2: every fixture passing a target here has exactly ONE
+   predecessor — the guard block's taken edge — so the IN-state read is
+   faithful to the per-edge view the old post-pass computed). *)
+let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
+  Graphlib.Std.Solution.get sol target_tid
 
 let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_of : AI.t -> Ws.t) :
     Ws.t =
@@ -4167,8 +4182,8 @@ let () =
      accumulated). *)
   let sub1, body1, hdr1 = mk_l3b1_loop () in
   let ctx1 = Program.create ~subs:[ sub1 ] () in
-  let sol1, views1 =
-    Vsa.static_graph_vsa_with_views [] ctx1 sub1 (Vsa.init_sol ~entry:(anchored_entry ()) sub1)
+  let sol1 =
+    Vsa.static_graph_vsa [] ctx1 sub1 (Vsa.init_sol ~entry:(anchored_entry ()) sub1)
   in
   let st1 = Graphlib.Std.Solution.get sol1 body1 in
   check
@@ -4176,17 +4191,18 @@ let () =
      solution state (pre-fix the [RSP-8] point-key pile was 16-17 — the restored equal-lower hull \
      union)"
     (l3b_cells_of (memv "l3b1_m") st1 <= 3);
-  let body_view = find_view_for_target views1 body1 in
-  let exit_view =
-    match
-      Core_kernel.List.find views1 ~f:(fun v ->
-          match v.Vsa.target_tid with Some tid -> not (Tid.equal tid body1) | None -> false)
-    with
-    | Some v -> v
-    | None -> failwith "S-1: no exit-edge view"
+  (* MIGRATED (ticket 02, the Phase B deletion): the exit-edge view is
+     the EXIT block's IN-state (its only predecessor is the header's
+     fallthrough edge, refined inline by ~(t < 8)); the iterate view is
+     the BODY's IN-state (the header's taken edge).  The exit block is
+     the fixture's 4th (last) block. *)
+  let exit1 =
+    match Term.enum blk_t sub1 |> Seq.to_list with
+    | [ _; _; _; e ] -> e
+    | _ -> failwith "S-1: fixture block layout changed"
   in
-  let icell = l3b1_cell_of body_view.Vsa.taken in
-  let ecell = l3b1_cell_of exit_view.Vsa.taken in
+  let icell = l3b1_cell_of (Graphlib.Std.Solution.get sol1 body1) in
+  let ecell = l3b1_cell_of (Graphlib.Std.Solution.get sol1 (Term.tid exit1)) in
   check
     "S-1b: the partition — the iterate view's cell is the loop-body values (⊆ [0,7], non-top) and \
      the exit view's cell carries the exit-iteration value (8 survives)"
@@ -5228,35 +5244,39 @@ let () =
     && Ws.elem (w32 0xFFFFFFFA) cell5
     && Ws.elem (w32 0xFFFFFFFB) cell5
     && not (Ws.elem (w32 0xFFFFFFFD) cell5));
-  (* M5-6: the Var-identity — `f := g; if f goto exit`: the walk's live set at the guard block
-     carries (g, {1}). *)
-  let f = v1 "m5_f" in
-  let g = v1 "m5_g" in
-  let entry_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create f (Bil.Var g));
-  let entry0 = Blk.Builder.result entry_b in
-  let exit0 = Blk.Builder.result exit_b in
-  let entry_tid = Term.tid entry0 in
-  let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create ~cond:(Bil.Var f) (Goto (Direct exit_tid)));
-  let sub_b = Sub.Builder.create ~name:"m5_ident" () in
-  Sub.Builder.add_blk sub_b (Blk.Builder.result entry_b);
-  Sub.Builder.add_blk sub_b exit0;
-  let sub = tag_all (Sub.Builder.result sub_b) in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] (Program.create ~subs:[ sub ] ()) sub
-      (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  (* M5-6 (MIGRATED, ticket 02 — the Phase B deletion): the Var-identity
+      rule.  The OLD pin read the walk's internal LIVE SET through Phase
+      B's [view.live_taken] (`f := g; if f goto exit` puts (g, {1}) in
+      the guard block's live set) — an observable that died with the
+      views.  The fused-world pin keeps the SAME precision claim (the
+      identity row — [def_constraints]' [Bil.Var g] arm — propagates
+      the constraint from v to the copied var, so the walk REACHES the
+      producer behind it) and makes it observable END-TO-END like the
+      M5 siblings: `v := t` (the identity) between the Load and the
+      guard `if (v < 10)` — the same iterating shape as L3c3-1, so the
+      window is measurable against the store-only join.
+      The walk: Var (v, [0,10)) -> [reverse_def_walk]'s
+      producer subtraction -> [def_constraints]' identity row ->
+      (t, [0,10)) joins the live set -> t's Load def -> the CELL at
+      RBP-8 meets the window.
+      The body's only predecessor is the header's taken edge, so the
+      body-IN cell is the iterate state's cell = [0,9] BOUNDED — the
+      DISCRIMINATOR: the store-only natural join is [0,10] (the seeded
+      0, the body's u = t+1 stores, the exit at t = 10), so WITHOUT the
+      identity row (the walk stops at v — no pairs derived, no cell
+      meet) the cell keeps the stored 10 and the max ≤ 9 assertion
+      fails. *)
+  let t_id = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
+  let sub6, body6 =
+    mk_l3c3_loop
+      ~seed:(Some (w32 0))
+      ~chain:(Bil.Var t_id)
+      ~cmp:Bil.LT ~c:(w32 10) ~body_k:(w32 1)
   in
-  ignore sol;
-  let view = find_view_for_target views exit_tid in
-  let live = Graphlib.Std.Solution.get view.Vsa.live_taken entry_tid in
-  let cg = match Core.Map.find live (Var.base g) with Some ws -> ws | None -> Ws.top 1 in
+  let cell6 = l3c3_run sub6 body6 in
   check
-    "M5-6: the Var-identity rule — `f := g; if f goto exit` puts (g, {1}) in the guard block's \
-     live set"
-    (Ws.elem Word.b1 cg && not (Ws.elem Word.b0 cg));
+    "M5-6: the Var-identity rule — `v := t; if (v < 10)` — the walk propagates the [0,10) window      through the identity to the loaded cell (the body-IN cell is bounded ≤ [0,9] — the store-only      join would be [0,10])"
+    (l3c2_bounded cell6 (w32 9));
   ()
 
 (* --- O4(c) agreement pins: CLP Int64 fast path vs Big fallback --------
@@ -5422,7 +5442,7 @@ let () =
 
    These lock the OBSERVABLE behavior of every operation that routes through
    [Cbat_ai_memmap.op_add'] — [add] (singleton store_merge / range join), [meet_add], [join_add],
-   [meet_range] — so the single-pass meet-into-range rewrite (deep plan §1.3) must reproduce them
+   [meet_range] — so the single-pass meet-into-range rewrite (deep plan §3) must reproduce them
    BYTE-IDENTICALLY. The six groups from the plan:
 
    (a) a key fully inside one node (interval_diff = `two) (b) a key spanning several nodes exactly
@@ -6132,31 +6152,40 @@ let () =
   check "R6: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
   (* the per-guard views: the taken view must constrain i to the ARC {x : x <> 9} (= diff(top,{9}) —
-     one CLP), the fallthrough view (the flag-clear trace) pins i to {9}. *)
+     one CLP), the fallthrough view (the flag-clear trace) pins i to {9}.
+     MIGRATED (ticket 02, the Phase B deletion): the views are gone.  The
+     FALLTHROUGH claim is assertable in the fused world — the EXIT block's
+     only predecessor is the loop's tail edge, whose ACCUMULATED cond is
+     the negation of the when's (i = 9), so the exit's IN-state pins i to
+     {9}.  The TAKEN claim has NO fused-world equivalent: its only target
+     is the LOOP block, a multi-predecessor head whose IN-state is the
+     JOIN of the entry edge and the refined back edge (spec §10.2) — the
+     per-edge partition collapses by construction; the check stays in the
+     ignore list (already stubbed on the base tree), its body now the
+     sound floor (the entry constant survives the join). *)
   let prog' = Program.create ~subs:[ tagged ] () in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged)
+  let sol =
+    Vsa.static_graph_vsa [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged)
   in
   ignore sol;
-  let view = find_view_for_target views loop_tid in
-  let taken_i = AI.find_word 32 view.Vsa.taken i in
-  let fall_i = AI.find_word 32 view.Vsa.fallthrough i in
-  let arc = Ws.diff (Ws.top 32) (Ws.singleton (w32 9)) in
+  let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol loop_tid) i in
   check
     "R6: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals \
      diff(top,{9}))"
-    ((not (Ws.is_top taken_i)) && Ws.equal taken_i arc);
+    (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+  let exit_i = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check "R6: the NEQ guard's FALLTHROUGH view pins the counter to {9} exactly"
-    (Ws.equal fall_i (Ws.singleton (w32 9)));
+    (Ws.equal exit_i (Ws.singleton (w32 9)));
   ()
 
 (* G3 (Stage A): the PRODUCTION relevance path must keep FLAG-INDIRECTED guards refineable WITHOUT
    manual re-tagging. Identical geometry to the R6 Stage-2 fixture above, but [Relevance.analyze]'s
    tags are used AS-IS — no [tag_relevant] workaround. The backward lane must seed jump-condition
    variables as live roots so the flag def (which feeds no stack sink) is tagged and the NEQ guard
-   refines instead of being pruned to the invariant view. Before the fix this failed: the untagged
-   flag var left the guard outside [refineable] (cbat_vsa.ml edge_views_of's tag-relevance pruning),
-   so both views collapsed to the loop-invariant state — taken not the arc, fallthrough not pinned
+   refines instead of being pruned to the invariant state. Before the fix this failed: the untagged
+   flag var left the guard outside [refineable] (the pre-fusion Phase B walk's tag-relevance
+   pruning — deleted with Phase B, ticket 02), so both edge states collapsed to the
+   loop-invariant state — taken not the arc, fallthrough not pinned
    to {9}. *)
 let () =
   let rsp = v64 "RSP" in
@@ -6212,20 +6241,25 @@ let () =
   check "G3: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
   let prog' = Program.create ~subs:[ tagged ] () in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged)
+  let sol =
+    Vsa.static_graph_vsa [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged)
   in
   ignore sol;
-  let view = find_view_for_target views loop_tid in
-  let taken_i = AI.find_word 32 view.Vsa.taken i in
-  let fall_i = AI.find_word 32 view.Vsa.fallthrough i in
-  let arc = Ws.diff (Ws.top 32) (Ws.singleton (w32 9)) in
+  (* MIGRATED (ticket 02): same shape as the R6 Stage-2 fixture above —
+     the FALLTHROUGH claim reads the EXIT block's single-predecessor
+     IN-state (the accumulated tail cond i = 9); the TAKEN claim's only
+     target is the multi-predecessor loop head (the join collapses the
+     per-edge arc, spec §10.2), so its body is the sound floor (the
+     entry constant survives the join) and the claim stays in the
+     ignore list. *)
+  let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol loop_tid) i in
   check
     "G3: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals \
      diff(top,{9}))"
-    ((not (Ws.is_top taken_i)) && Ws.equal taken_i arc);
+    (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+  let exit_i = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check "G3: the NEQ guard's FALLTHROUGH view pins the counter to {9} exactly"
-    (Ws.equal fall_i (Ws.singleton (w32 9)));
+    (Ws.equal exit_i (Ws.singleton (w32 9)));
   ()
 
 (* --- remediation batch A1..A4 (the Oracle REMEDIATE findings) ---------- *)
@@ -7892,16 +7926,18 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
 let () =
   let sub, l1_tid, b1_tid, _ = lm_jle_loop ~k1:(w32 100) () in
   let prog' = Program.create ~subs:[ sub ] () in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  let sol =
+    Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
   check
     "property LM F1: the head's lower bound is the entry constant 0"
     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
-  let view = find_view_for_target views b1_tid in
-  let taken_i = AI.find_word 32 view.Vsa.taken i in
+  (* MIGRATED (ticket 02, the Phase B deletion): the taken view's state
+     is the body's IN-state (b1's only predecessor is the head's taken
+     edge — single-predecessor, spec §2/§10.2), read from the solution. *)
+  let taken_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
   check
     "property LM F1: the taken view's lower bound is the entry constant 0"
     (match Ws.min_elem taken_i with Some lo -> W.equal lo (w32 0) | None -> false);
@@ -7924,8 +7960,8 @@ let () =
   let k = w32 100 in
   let sub, l1_tid, _ = lm_jne_loop ~k () in
   let prog' = Program.create ~subs:[ sub ] () in
-  let sol, _ =
-    Vsa.static_graph_vsa_with_views [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  let sol =
+    Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
