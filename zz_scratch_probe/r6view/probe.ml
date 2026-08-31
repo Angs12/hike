@@ -70,15 +70,15 @@ let () =
             else d))
   in
   let prog' = Program.create ~subs:[ tagged ] () in
-  let sol, views = Vsa.static_graph_vsa_with_views [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged) in
+  let sol = Vsa.static_graph_vsa [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged) in
   Printf.printf "head(loop) i = %s\n" (pp_ws (AI.find_word 32 (Graphlib.Std.Solution.get sol loop_tid) i));
   Printf.printf "head(loop) t = %s\n" (pp_ws (AI.find_word 1 (Graphlib.Std.Solution.get sol loop_tid) t));
-  List.iter views ~f:(fun (v : Vsa.edge_view) ->
-    Printf.printf "view guard=%s target=%s taken.i=%s fall.i=%s\n"
-      (Tid.to_string v.Vsa.guard_tid)
-      (match v.Vsa.target_tid with Some x -> Tid.to_string x | None -> "exit")
-      (pp_ws (AI.find_word 32 v.Vsa.taken i))
-      (pp_ws (AI.find_word 32 v.Vsa.fallthrough i)));
+  (* The fused world has no per-edge views: the head's IN-state is the JOIN of
+     the entry + refined back edges; the single-predecessor EXIT block's
+     IN-state IS the fallthrough edge's refined state (the accumulated cond
+     carries i = 9). *)
+  Printf.printf "exit(per-edge fallthrough) i = %s\n"
+    (pp_ws (AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i));
   (* What does edge_constraints produce for the bare-flag cond? *)
   let blk_state = Vsa.denote_defs loop (Graphlib.Std.Solution.get sol loop_tid) in
   let ctx : Vsa.analysis_ctx =

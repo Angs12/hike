@@ -1203,7 +1203,7 @@ and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
         | _ -> env)
    | None -> env
 
-(* [constrain_cell_on_trace ~st ~live env ~mem ~addr ~size ~endian cstr]: The TRACE-EXACT cell meet (the trace-partitioning design, docs/trace-partitioning-plan.md §1.3) — the cell gate's replacement. *)
+(* [constrain_cell_on_trace ~st ~live env ~mem ~addr ~size ~endian cstr]: The TRACE-EXACT cell meet (the trace-partitioning design, docs/trace-partitioning-plan.md §3) — the cell gate's replacement. *)
 let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
     (env : AI.t) ~(mem : exp) ~(addr : exp) ~(size : Size.t)
     ~(endian : endian) (cstr : wordset) : AI.t =
@@ -1600,7 +1600,24 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
               | _ -> ()));
   !live
 
-(* [refine_edge ~sol ~defs ~stores env sub blk seeds]: The COMPLETE backward traversal — the Graphlib fixpoint over the REVERSED CFG ([~rev:true] — the live sets flow from the guard to the PREDECESSORS, the per-edge [~target] routing the phi sources) until the live sets. *)
+(* [refine_edge ~sol ~defs ~stores env sub blk seeds]: The COMPLETE backward traversal — the Graphlib fixpoint over the REVERSED CFG ([~rev:true] — the live sets flow from the guard to the PREDECESSORS, the per-edge [~target] routing the phi sources) until the live sets.
+    The [Var] seeds NEVER meet the carried env's word values here (the
+    INLINE policy, ticket 02 — Phase B's post-pass contract was deleted
+    with it): a word-value meet is a claim about a var's SSA VALUE, and
+    a successor block can REDEFINE that var with an UNTAGGED def (the
+    tag-only restriction skips it unconditionally — [denote_def]) — the
+    lifted 1-bit FLAGS are exactly this class (`ZF := e == c` feeding no
+    stack sink).  Met inline, the flag's stale refined value ({1})
+    survives the skip, the successor's `reachable_jumps` then evaluates
+    its OWN compound guard over the stale flag as DEFINITELY-TRUE,
+    kills the chain's tail edge, and bottoms a LIVE block (the
+    rec_struct %be1/%bfb Dead→poison regression).  The gated env meet
+    belongs to the CALLER ([refine_edge_inline] applies it, gated on the
+    all-defs-tagged guarantee — see its own comment).  The seeds ALWAYS
+    join the LIVE set: the backward walk derives the operand constraints
+    through [reverse_def_walk]'s producer subtraction, which consults
+    the CURRENT solution and is re-derived at every iteration — no
+    stale-value carry. *)
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ?(defs : (def term * bool) Var.Map.t option = None)
     ?(stores : def term list option = None)
@@ -1615,16 +1632,15 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
     let seed_constraints, env0 =
       List.fold seeds ~init:(Live.empty, env) ~f:(fun (m, e) -> function
           | Var (v, c) ->
-            (* The guard's own edge constraint meets the view env ONCE: on the taken trace the compared operand satisfies [c]. A width-mismatched or unchanged meet leaves the env as-is; a disjoint meet makes the trace's view bottom (no state on this edge satisfies the constraint). *)
-            let e' = match Var.typ v with
-              | Type.Imm w ->
-                let cur = AI.find_word w e v in
-                let m2 = WordSet.meet cur c in
-                if Word.is_zero (WordSet.cardinality m2) then AI.bottom
-                else if WordSet.equal m2 cur then e
-                else AI.add_word e ~key:v ~data:m2
-              | Type.Mem _ | Type.Unk -> e in
-            Live.add v c m, e'
+            (* NO env meet (the inline policy — see the function comment):
+               a mid-fixpoint env is an UNDER-APPROXIMATION of the final
+               one, so a DISJOINT meet with a derived row is a premature
+               DEADNESS claim — the seed joins the LIVE set only, and
+               the backward walk re-derives the constraint against the
+               CURRENT solution at every iteration, so the refinement
+               fires once the iterate grows to meet it (NO-BOTTOM,
+               docs/trace-partitioning-plan.md §4.3 / AGENTS.md §3). *)
+            Live.add v c m, e
           | Cell (mem, addr, size, endian, cstr) ->
             m, constrain_cell_on_trace ~st:env ~live:m e
               ~mem:mem ~addr:addr ~size:size ~endian:endian cstr
@@ -1721,6 +1737,24 @@ let flip_guard_op (op : guard_op) : guard_op = match op with
   | SLT -> SGT | SGT -> SLT
   | SLE -> SGE | SGE -> SLE
   | EQ -> EQ | NEQ -> NEQ
+
+(* [negate_guard_op op]: the TRUE logical negation of a guard op —
+   [complement_guard_op]'s inequality rows are the same, but its EQ
+   self-complement (EQ -> EQ) is the ACQUISITION lane's always-complement
+   idiom ([acquire_unsat_fallthrough] receives the NEGATED-flag cond, so
+   its "complement" row is the flag-TRUE row), NOT the semantic negation.
+   The single-pass edge-splitting (docs/trace-partitioning-plan.md §4.3)
+   needs the negation itself: a decoded `jne` guard (`~ZF`, the record
+   `ZF := (e == c)`) asserts `e <> c` on its taken edge — the exact
+   two-piece `TOP - {c}` row of [decoder_constraint]'s NEQ arm — and
+   pinning `e` to `{c}` there would EXCLUDE every reachable value but c
+   (unsound).  EQ <-> NEQ; the inequalities flip. *)
+let negate_guard_op (op : guard_op) : guard_op = match op with
+  | ULT -> UGE | ULE -> UGT
+  | UGT -> ULT | UGE -> ULE
+  | EQ -> NEQ | NEQ -> EQ
+  | SLT -> SGE | SLE -> SGT
+  | SGT -> SLT | SGE -> SLE
 
 (* [guard_constraint w op c]: The TRUE-edge row on the operand of (e op c) — the complete set (docs/trace-partitioning-plan.md §4.1): the two-piece signed rows (the non-negativity gates REMOVED — the negative half is always < c signed), the UGT/UGE/SGT/SGE direct rows. *)
 let guard_constraint (w : int) (op : guard_op) (c : word)
@@ -1987,9 +2021,43 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
          && not (WordSet.elem Word.b0 cstr)
       then [ Infeasible ]
       else !acc
+    | Bil.AND ->
+      (* §4.3 AND-CONJOIN (the [Edge.cond] lane): BAP's accumulated path
+         condition conjoins the guards with [Bil.AND] ([c2 & ~c1]), and a
+         conjoined guard is TRUE only when EVERY conjunct is true — each
+         one independently seeds the SAME env, so the conjunction
+         transfers whole (the seed application meets each into the state,
+         the intersection).  SOUND ONLY on the forced-TRUE singleton:
+         [a & b = 1 -> a = 1 AND b = 1] is exact, but [a & b = 0] is the
+         DISJUNCTION [a = 0 OR b = 0] — conjoining there would exclude
+         reachable values (unsound), and a 1-bit TOP carries no
+         information; both take the producer row below (the identity /
+         the mask rows — the sound fallback, never a stop).  [Bil.AND] as
+         a PRODUCER op (a bitwise AND producing a value that must land in
+         a WIDER [cstr]) is the producer catch-all's role — the two roles
+         are kept disjoint by the {1} test. *)
+      if WordSet.bitwidth cstr = 1
+         && WordSet.elem Word.b1 cstr
+         && not (WordSet.elem Word.b0 cstr)
+      then
+        edge_constraints ~env ?ctx a cstr @ edge_constraints ~env ?ctx b cstr
+      else
+        (match denote_operand env a, denote_operand env b with
+         | Some a_ws, Some b_ws ->
+           (match operand_constraints op cstr a_ws b_ws with
+            | a', b' ->
+              let acc = ref [] in
+              (match a' with
+               | Some a_c -> acc := edge_constraints ~env ?ctx a a_c @ !acc
+               | None -> ());
+              (match b' with
+               | Some b_c -> acc := edge_constraints ~env ?ctx b b_c @ !acc
+               | None -> ());
+              !acc)
+         | _ -> [])
     | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
     | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
-    | Bil.AND | Bil.OR | Bil.XOR ->
+    | Bil.OR | Bil.XOR ->
       (* the producer rows ([operand_constraints]) on the operands + the recursion into each operand's structure *)
       (match denote_operand env a, denote_operand env b with
        | Some a_ws, Some b_ws ->
@@ -2011,8 +2079,44 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     (* e IS a load: the cell edge_constraint — the trace-exact meet in the dataflow *)
     [ Cell (m, a, s, en, cstr) ]
   | Bil.UnOp (Bil.NOT, e) ->
-    (* the bijection row — no gates (the {1}-singleton gate and the comparison-shape stop are removed) *)
-    edge_constraints ~env ?ctx e (WordSet.lnot cstr)
+    (* the bijection row — no gates (the {1}-singleton gate and the comparison-shape stop are removed). *)
+    let base = edge_constraints ~env ?ctx e (WordSet.lnot cstr) in
+    (* §4.3 NOT-UNWRAP (the [Edge.cond] lane): [Edge.cond] NEGATES a
+       chain's preceding conds ([c2 & ~c1]; the tail carries [~c1 & ~c2]),
+       and in the -O0 lift a cond is a BARE 1-BIT FLAG (`jne` = [~ZF],
+       `jz` = [ZF]) whose own value carries no comparison structure — the
+       flag's {0} seed alone refines nothing (the boolean def is the
+       comparison-producer identity).  The recorded flag STATE (the
+       block's last understood comparison, [flag_state_of_block]) binds
+       the flag to its underlying [e op c]: the NEGATED-flag edge asserts
+       the NEGATED comparison — [negate_guard_op] (the TRUE negation,
+       EQ <-> NEQ; [complement_guard_op]'s EQ self-complement is the
+       acquisition lane's flag-idiom, NOT the semantic negation — using
+       it here would pin a `jne` counter to `{c}`, unsound).  This is
+       exactly the row the SHALLOW pre-step's decoder arm applies
+       ([assume_jump_cond_with_group]); the deep walk re-derives it from
+       the ACCUMULATED cond, where the negation arrives wrapped around
+       the flag var rather than as the decoder's own idiom.  A BIL
+       comparison inner is NOT unwrapped — its explicit `` `False ``
+       rows (already fired by [base] above) are the complement; unwrapping
+       it again would double-negate (an unsound flip).  Un-derivable
+       forms keep the [base] seeds — the identity is the sound fallback,
+       never a stop, never bottom (docs/trace-partitioning-plan.md §4.3). *)
+    let unwrap () : edge_constraint list =
+      match ctx, e with
+      | Some ({ flag_state = Some (fv, op, e0, c0); _ }), Bil.Var v
+        when Var.same fv v ->
+        (* ~(flag) = the flag CLEAR edge = the recorded comparison FALSE:
+           [row_for] on the NEGATED op — the record's OWN op (LT/LE/EQ/
+           SLT/SLE, any understood comparison), the mirror of the
+           positive bare-flag arm above (a decoded `jne`'s taken edge is
+           the exact two-piece `TOP - {c}`; `jz`'s complement pins {c};
+           `~CF` of `CF := t < 10` gives the UGE row [10, max]). *)
+        (match row_for ~env ?ctx e0 (negate_guard_op (guard_op_of_binop op)) c0 with
+         | Some cstr -> edge_constraints ~env ?ctx e0 cstr
+         | None -> [])
+      | _ -> [] in
+    base @ unwrap ()
   | Bil.UnOp (Bil.NEG, e) ->
     edge_constraints ~env ?ctx e (WordSet.neg cstr)
   | Bil.Cast (ct, sz, a) ->
@@ -2053,19 +2157,6 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     edge_constraints ~env ?ctx u cstr
 
 
-(* The per-guard views (the trace-partitioning design, docs/trace-partitioning-plan.md §1.2): the two views of one guard — the ITERATE view (the taken-edge trace: the guard's invariant state refined by the walk) and the. *)
-type edge_view = {
-  guard_tid : tid;
-  (* the edge whose condition defines this view; the target lets clients distinguish the taken/body edge from the fallthrough edge when a BAP block contains the explicit complementary pair of jumps. *)
-  target_tid : tid option;
-  taken : AI.t;
-  fallthrough : AI.t;
-  live_taken : (tid, Live.t) Solution.t;
-  live_fallthrough : (tid, Live.t) Solution.t;
-}
-
-
-
 (* The direct-API backward refinement ([inverse_denote_exp]) is the M3 collector ([edge_constraints]) applied at the leaves — see the function's own comment below; this historical block (the pre- Refactor-1b structural walker) was deleted 2026-08-15. *)
 
 (* L-S2 (oracle item 8) — [refineable_var_of refineable v]: the verbatim refineability closure of [inverse_denote_exp] and [assume_jump_cond] (restriction OFF -> true; ON -> base in set). *)
@@ -2090,7 +2181,7 @@ let apply_operand_constraint
        constrain_def_chain ~defs:dm refineable_var env e cstr)
 
 (* [inverse_denote_exp ?ctx cond cstr env]: Refine [env] under the taken-edge constraint [cstr] on [cond], walking the CONDITION STRUCTURE (the mirror of [denote_exp]) and recursing into sub-expressions; the leaves call the existing backward kernels. *)
-(* [inverse_denote_exp ?ctx cond cstr env]: Refine [env] under the taken-edge constraint [cstr] on [cond] — the DIRECT-API backward refinement (the fixpoint path no-ops below: Phase B — [edge_views_of] — owns the refinement there; the [sub = Some _] marker makes. *)
+(* [inverse_denote_exp ?ctx cond cstr env]: Refine [env] under the taken-edge constraint [cstr] on [cond] — the DIRECT-API backward refinement (the fixpoint path no-ops below: the INLINE deep refinement — [refine_edge_inline] at the jump — owns the refinement there; the [sub = Some _] marker makes the direct call a no-op so production never bypasses the fused transfer). *)
 let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
     (cstr : wordset) (env : AI.t) : AI.t =
   match ctx with
@@ -2284,247 +2375,6 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
       | None -> ()
     end
 
-(* The Phase B post-pass driver (the trace-partitioning design, docs/trace-partitioning-plan.md §2.2): over the converged forward solution, run a separate taken/exit walk for every conditional edge. *)
-let edge_views_of ?(defs : (def term * bool) Var.Map.t option = None)
-    ?(stores : def term list option = None)
-    (s : sub term) (sol : (tid, AI.t) Solution.t) : edge_view list =
-  match defs with
-  | None -> []
-  | Some _ ->
-    (* The C9-style TAG-RELEVANCE PRUNING : the Phase B per-guard backward walks ([refine_edge]) are the dominant post-pass cost on big subs (measured: ~25s partitioned on date's parse_datetime_body without pruning). *)
-    let refineable =
-      (* the inline [refineable_of_sub] (defined later in the file): the vars with at least one RELEVANT def — the vars the merged tagging tracks. *)
-      Term.enum blk_t s
-      |> Seq.concat_map ~f:(Term.enum def_t)
-      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
-          let v = Var.base (Def.lhs d) in
-          if Term.has_attr d Utils.relevant then Core.Set.add acc v else acc)
-    in
-    let tag_relevant (cond : exp) : bool =
-      Exp.free_vars cond
-      |> Core.Set.exists ~f:(fun v ->
-          Core.Set.mem refineable (Var.base v))
-    in
-    Term.enum blk_t s
-    |> Seq.concat_map ~f:(fun b ->
-        (* [Solution.get] is the block-entry invariant. Guards are evaluated after the block's defs, so Phase B must derive the edge constraints from the block-post state; this is essential for loads/producer chains and Var-vs-Var rows whose operands are defined in the guard block itself. *)
-        let blk_state =
-          denote_defs b (Solution.get sol (Term.tid b)) in
-        let flag_state, flag_group = flag_state_of_block b in
-        let ctx : analysis_ctx =
-          { refineable = None; defs; stores; flag_state;
-            sub = Some s; blk = Some b } in
-        let edge_constraints_of (cond : exp) ~(complement : bool)
-              : edge_constraint list =
-          let recorded_op =
-            match flag_state with
-            | Some (fv, bop, e, _) ->
-              let gop = guard_op_of_binop bop in
-              (match cond with
-               | Bil.Var v when Var.same fv v -> Some gop
-               | Bil.UnOp (Bil.NOT, Bil.Var v)
-                 when Var.same fv v -> Some (complement_guard_op gop)
-               | _ ->
-                 (match decoded_condition cond with
-                  | Some decoded
-                    when same_comparison_group flag_group fv e cond ->
-                    Some decoded
-                  | _ -> None))
-            | None -> None in
-          match recorded_op with
-          | Some op ->
-            let op = if complement then complement_guard_op op else op in
-            (match flag_state with
-             | Some (_, _, e, c) ->
-               (match row_for ~env:blk_state ~ctx e op c with
-                | Some cstr -> edge_constraints ~env:blk_state ~ctx e cstr
-                | None -> [Infeasible])
-             | None -> [Infeasible])
-          | None ->
-            let e = if complement then Bil.UnOp (Bil.NOT, cond) else cond in
-            edge_constraints ~env:blk_state ~ctx e
-              (WordSet.singleton Word.b1) in
-        Term.enum jmp_t b
-        |> Seq.filter_map ~f:(fun j ->
-            let cond = Jmp.cond j in
-            match cond with
-            | Bil.Int w when Word.(w = Word.b1) -> None
-            | _ when not (tag_relevant cond) ->
-                (* the guard cannot affect any tag — the invariant view (the sound both-trace fallback) instead of the backward walks. *)
-                Some { guard_tid = Term.tid b;
-                       target_tid = jmp_target j;
-                       taken = blk_state;
-                       fallthrough = blk_state;
-                       live_taken = Solution.create Tid.Map.empty Var.Map.empty;
-                       live_fallthrough =
-                         Solution.create Tid.Map.empty Var.Map.empty }
-            | _ ->
-              let taken = edge_constraints_of cond ~complement:false in
-              let fallthrough = edge_constraints_of cond ~complement:true in
-              let taken_env, live_taken =
-                refine_edge ~sol ~defs ~stores
-                  blk_state s b taken in
-              let fallthrough_env, live_fallthrough =
-                refine_edge ~sol ~defs ~stores
-                  blk_state s b fallthrough in
-              Some { guard_tid = Term.tid b;
-                     target_tid = jmp_target j;
-                     taken = taken_env; fallthrough = fallthrough_env;
-                     live_taken;
-                     live_fallthrough }))
-    |> Seq.to_list
-
-(* The per-block TAG states (docs/trace-partitioning-plan.md §1.4). *)
-let partitioned_states (s : sub term) (sol : (tid, AI.t) Solution.t)
-    (views : edge_view list) : (tid, AI.t) Solution.t =
-  let cfg =
-    Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph s)
-    |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  (* [reach guard target]: the blocks reachable from [target] in the forward CFG without passing [guard]. *)
-  let reach (guard : tid) (target : tid) : Tid.Set.t =
-    let seen = ref Tid.Set.empty in
-    let rec go = function
-      | [] -> ()
-      | n :: rest ->
-        if Core.Set.mem !seen n || Tid.equal n guard then go rest
-        else begin
-          seen := Core.Set.add !seen n;
-          let next = Graphs.Tid.Node.succs n cfg |> Seq.to_list in
-          go (rest @ next)
-        end in
-    go [ target ];
-    !seen in
-  (* group the views by guard block *)
-  let by_guard =
-    List.fold views ~init:Tid.Map.empty ~f:(fun m v ->
-        match Core.Map.find m v.guard_tid with
-        | Some vs -> Core.Map.set m ~key:v.guard_tid ~data:(v :: vs)
-        | None -> Core.Map.set m ~key:v.guard_tid ~data:[ v ]) in
-  (* per guard: (the iterate view, the iterate region, the exit region); the iterate view is the one whose target reaches back to the guard (the loop-back) — a single-edge guard's target region is the iterate region, with no explicit fallthrough region. *)
-  let regions = ref [] in
-  Core.Map.iteri by_guard ~f:(fun ~key:g ~data:gviews ->
-      let gviews = List.rev gviews in
-      match gviews with
-      | [] -> ()
-      | [ v ] ->
-        regions := (v, reach g (Option.value ~default:g v.target_tid),
-                    Tid.Set.empty) :: !regions
-      | v1 :: v2 :: _ ->
-        let t1 = Option.value ~default:g v1.target_tid in
-        let t2 = Option.value ~default:g v2.target_tid in
-        let r1 = reach g t1 in
-        if Core.Set.mem r1 g then
-          (* v1's target loops back: v1 is the iterate edge *)
-          regions := (v1, r1, reach g t2) :: !regions
-        else
-          regions := (v2, reach g t2, r1) :: !regions);
-  let meet_live (st : AI.t) (live : Live.t) : AI.t =
-    Core.Map.fold live ~init:st ~f:(fun ~key:v ~data:cstr acc ->
-        match Var.typ v with
-        | Type.Imm w when WordSet.bitwidth cstr = w ->
-          let cur = AI.find_word w acc v in
-          let m = WordSet.meet cur cstr in
-          (* a disjoint meet keeps the invariant (a sound over-approximation — never a bottom state that would silently drop the block's tags) *)
-          if Word.is_zero (WordSet.cardinality m)
-             || WordSet.equal m cur
-          then acc
-          else AI.add_word acc ~key:v ~data:m
-        | Type.Imm _ -> acc
-        | Type.Mem _ | Type.Unk -> acc) in
-  (* : the cell-denotation cache SHARED across every [meet_cells] call of this [partitioned_states] run — the same load shape (view × m × a × en × sz) repeats per (region × block × load-def), and the per-call cache (the first O3 attempt) missed the cross-block repetition. *)
-  let cell_cache :
-      (tid * exp * exp * endian * Size.t * WordSet.t) list ref =
-    ref []
-  in
-  let same_en a b =
-    match (a, b) with
-    | LittleEndian, LittleEndian | BigEndian, BigEndian -> true
-    | _ -> false
-  in
-  let same_size (a : Size.t) (b : Size.t) : bool =
-    Size.compare a b = 0
-  in
-  (* [meet_cells st view]: The iterate-region Load defs inherit their cells' view-env constraints (the guard's load-chain meets in the view env) — the loaded var's value on the trace IS the cell's value, so the tag meets the cell's view-env value into the loaded var. *)
-  (* Lite (the partitioned-stage redundancy fix): [meet_cells] is called once PER iterate-region block [btid] with that block's own state. *)
-  let meet_cells (st : AI.t) (view : edge_view) (b : blk term) : AI.t =
-    (* [meet_load acc v cell_ws]: meet the cell's constraint [cell_ws] (at the load's width) into the loaded var [v], widening it to [v]'s width when the load is cast-wrapped (the -O0 `pad:64[Load r32]` index shape — the 32-bit constraint zero-extends into the 64-bit index). *)
-    let meet_load (acc : AI.t) (v : var) (cell_ws : WordSet.t) : AI.t =
-      match Var.typ v with
-      | Type.Imm w ->
-        let c =
-          if WordSet.bitwidth cell_ws = w then cell_ws
-          else if WordSet.bitwidth cell_ws < w
-          then WordSet.cast Bil.UNSIGNED w cell_ws
-          else WordSet.top w in
-        if WordSet.is_top c then acc
-        else
-          let cur = AI.find_word w acc v in
-          let mm = WordSet.meet cur c in
-          if Word.is_zero (WordSet.cardinality mm)
-             || WordSet.equal mm cur
-          then acc
-          else AI.add_word acc ~key:v ~data:mm
-      | Type.Mem _ | Type.Unk -> acc in
-    (* [cell_of acc m a en sz]: The cell's value in the VIEW env (the guard's load-chain meets) — denoted exactly as the fixpoint reads it, so the alignment/width rules match. *)
-    let cell_of (acc : AI.t) (m : exp) (a : exp)
-        (en : endian) (sz : Size.t) : WordSet.t option =
-      let g = view.guard_tid in
-      match
-        Base.List.find !cell_cache ~f:(fun (g', m', a', en', sz', _) ->
-            Tid.equal g g' && Exp.equal m m' && Exp.equal a a'
-            && same_en en en' && same_size sz sz')
-      with
-      | Some (_, _, _, _, _, ws) -> Some ws
-      | None -> (
-          match
-            denote_imm_exp
-              (Bil.Load (m, rewrite_addr (AI.frame_of acc) a, en, sz))
-              view.taken
-          with
-          | Ok ws when not (WordSet.is_top ws) ->
-              cell_cache := (g, m, a, en, sz, ws) :: !cell_cache;
-              Some ws
-          | Ok _ | Error _ -> None)
-    in
-    Term.enum def_t b
-    |> Seq.fold ~init:st ~f:(fun acc d ->
-        match Def.rhs d with
-            | Bil.Cast (_, _, Bil.Load (m, a, en, sz))
-            | Bil.Load (m, a, en, sz) ->
-              (match cell_of acc m a en sz with
-               | Some ws ->
-                 (* Meet into the loaded var AND the tag state's memory cell — the emitter's sequential walk re-denotes [v := Load(cell)] and must read the constrained cell, not the solution's widened one. *)
-                 let acc = meet_load acc (Def.lhs d) ws in
-                 constrain_cell_on_trace
-                   ~st:acc ~live:Live.empty
-                   acc ~mem:m ~addr:a ~size:sz ~endian:en ws
-               | None -> acc)
-            | _ -> acc) in
-  let m =
-    Term.enum blk_t s
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-        let btid = Term.tid b in
-        let st = Solution.get sol btid in
-        let in_it = List.exists !regions ~f:(fun (_, r_it, _) ->
-            Core.Set.mem r_it btid) in
-        let in_ex = List.exists !regions ~f:(fun (_, _, r_ex) ->
-            Core.Set.mem r_ex btid) in
-        let st' =
-          if in_it && not in_ex then
-            List.fold !regions ~init:st ~f:(fun acc (v, r_it, _) ->
-                if Core.Set.mem r_it btid
-                then meet_cells (meet_live acc (Solution.get v.live_taken btid)) v b
-                else acc)
-          else if in_ex && not in_it then
-            List.fold !regions ~init:st ~f:(fun acc (v, _, r_ex) ->
-                if Core.Set.mem r_ex btid
-                then meet_live acc (Solution.get v.live_fallthrough btid)
-                else acc)
-          else st in
-        Core.Map.set m ~key:btid ~data:st')
-  in
-  Solution.create m AI.top
-
 (* Refines [env] for the taken edge of the conditional jump [jmp]: the concrete states on the taken edge are exactly those where [Jmp.cond jmp] evaluates to true, so the refined state must over-approximate { s in env | cond(s) = true }. *)
 let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     ?(defs : (def term * bool) Var.Map.t option)
@@ -2571,12 +2421,173 @@ let assume_jump_cond ?(refineable : Var.Set.t option)
   assume_jump_cond_with_group ?refineable ?defs ~flag_state
     env jmp
 
+(* ================================================================== *)
+(* The single-pass trace-partitioning transfer (docs/trace-partitioning- *)
+(* plan.md §2/§4.3 — the fused per-edge refinement): BAP's IR graph     *)
+(* ([Sub.to_cfg]) carries the ACCUMULATED path condition of every      *)
+(* out-edge ([Graphs.Ir.Edge.cond e g] — probe-verified 2026-08-30:    *)
+(* for `when c1 goto l1; when c2 goto l2; goto l3` the l2 edge carries  *)
+(* `c2 & ~c1` and the unconditional tail carries `~c1 & ~c2`), so the  *)
+(* when-chain directive (a cond is refined by every previous cond that *)
+(* was not true) is BAP-native — no chain-specific machinery. The       *)
+(* conds are STATIC per sub: precompute ONCE at fixpoint entry          *)
+(* ([edge_conds_of]), never re-derive per iteration (§4.3 rule 4).     *)
+(* ================================================================== *)
 
-(* Computes the denotation of the jumps of a basic block. *)
+(* [edge_cond]: one out-edge's precomputed refinement input — the edge's
+   jmp term (the per-jmp-kind transfer — the frame-keeping call
+   abstraction, the Goto target filter, bottom for the unreachable —
+   stays keyed to the jmp, exactly as today) plus its ACCUMULATED
+   condition (the deep walk's input). *)
+type edge_cond = {
+  cond_of_edge : jmp term;
+  acc_cond : exp;
+}
+
+(* [edge_conds_of sub]: the per-sub static edge table — block tid -> jmp
+   tid -> the edge's (jmp, accumulated cond).  ONE pass over the IR graph
+   ([Sub.to_cfg], a free projection with NO start/exit pseudo-nodes),
+   [Edge.cond] computed for every edge; the jmp terms are correlated by
+   [Edge.tid = Term.tid (Edge.jmp e)] (probe-verified).  Call/Ret
+   (Indirect) and Int jumps carry no IR edge (they stay keyed to their
+   jmp term only — the deep refinement is the identity for them, the
+   sound fallback). *)
+let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
+  let ircfg = Sub.to_cfg sub in
+  let tbl : (Tid.t, edge_cond Tid.Map.t) Hashtbl.t =
+    Hashtbl.create (module Tid) in
+  Graphs.Ir.edges ircfg
+  |> Seq.iter ~f:(fun e ->
+      let src = Graphs.Ir.Node.label (Graphs.Ir.Edge.src e) in
+      let jmp = Graphs.Ir.Edge.jmp e in
+      let jt = Term.tid jmp in
+      let by_jmp =
+        match Hashtbl.find tbl (Term.tid src) with
+        | None -> Tid.Map.empty
+        | Some m -> m in
+      let by_jmp =
+        Core.Map.set by_jmp ~key:jt
+          ~data:{ cond_of_edge = jmp; acc_cond = Graphs.Ir.Edge.cond e ircfg } in
+      Hashtbl.set tbl ~key:(Term.tid src) ~data:by_jmp);
+  Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
+      Core.Map.set acc ~key ~data)
+
+(* [refine_edge_inline ~sol ~defs ~stores ~flag_state ~flag_group ~sub b
+   env jmp acc_cond]: the DEEP per-edge refinement, inlined at the jump
+   (§2 step 2 / §4.3): derive the leaf seeds from the edge's ACCUMULATED
+   cond ([edge_constraints] — the AND-conjoin and NOT-unwrap arms) over
+   the state the SHALLOW pre-step already refined ([assume_jump_cond_
+   with_group] is KEPT — the deep walk is added ON TOP, it does not
+   replace it: the shallow step carries the green F1-NEQ stabilization
+   chain — the guard-var meet + [constrain_def_chain]'s MINUS row), and
+   run the existing backward walk ([refine_edge]) over the CURRENT
+   solution.  The identity (no seeds) is the sound fallback — never
+   bottom, never a stop. *)
+let refine_edge_inline
+    ~(sol : (tid, AI.t) Solution.t)
+    ~(defs : (def term * bool) Var.Map.t option)
+    ~(stores : def term list option)
+    ~(flag_state : (var * Bil.binop * exp * word) option)
+    ~(flag_group : flag_group option)
+    ?(refineable : Var.Set.t option)
+    ~(sub : sub term)
+    (b : blk term) (env : AI.t) (acc_cond : exp) : AI.t =
+  let ctx : analysis_ctx =
+    { refineable = None; defs; stores; flag_state;
+      sub = Some sub; blk = Some b } in
+  let seeds = edge_constraints ~env ~ctx acc_cond (WordSet.singleton Word.b1) in
+  (* LANDMARKS (§5): the walk's meets fire [observe_unsat_var]; the walk
+     runs INSIDE the engine's [widening_at_head] binding (the engine sets
+     it around the block denotation), so acquisition attributes to the
+     right head — no re-binding here. *)
+  (* NO BOTTOM (§4.3 / AGENTS.md §3): an [Infeasible] seed is a DEADNESS
+     claim — mid-fixpoint it can only arise from a DERIVED row (a row
+     conditioned on the CURRENT iterate's value-sets, e.g. the producer
+     rows' pre-image on a CONSTANT operand excluding the constant), never
+     from the syntactic literal-FALSE cond ([reachable_jumps] already
+     filters those before the refinement).  A premature deadness claim
+     bottom on a live edge FREEZES the coupled fixpoint below the truth
+     — the head stops receiving the edge's contribution and the solution
+     becomes an UNDER-approximation (the F1-NEQ freeze class: the taken
+     edge of a `jne` loop bottomed on every early iterate, pinning the
+     head at [0..2] < [0..100]).  The identity — drop the seed, keep the
+     state — is the sound fallback, never a stop. *)
+  let seeds =
+    List.filter seeds ~f:(fun s -> match s with Infeasible -> false | _ -> true) in
+  match seeds with
+  | [] -> env
+  | _ ->
+    (* THE GATED ENV MEET (§2/§4.3): a seed's word-value meet is a claim
+       about a var's SSA VALUE, applied through [meet_var]'s REFINEABLE
+       gate (the domain's own discipline — a var with at least one
+       RELEVANT-tagged def; the lifted 1-bit FLAGS feeding no stack sink
+       are untagged).  An UNGATED meet is a STALE-VALUE hazard through
+       the tag-only restriction: [denote_def] skips an untagged def
+       unconditionally, so a successor block can REDEFINE the var (its
+       own `ZF := e == c` cmp) while the met {1} SURVIVES the skip —
+       [reachable_jumps] then evaluates the successor's compound guard
+       over the stale flag as DEFINITELY-TRUE, kills the when-chain's
+       tail edge, and bottoms a LIVE block (the rec_struct regression:
+       %be1 bottom -> the member def tagged Dead -> emitter poison ->
+       the lifted binary computing wrong values).  The gate excludes
+       exactly the vars whose redefinitions the restriction skips;
+       [meet_var] also fires [observe_unsat_var] on the empty-meet arm —
+       the LANDMARK acquisition seam (§5). *)
+    (* THE ALL-DEFS-TAGGED GUARANTEE (the stale-value hazard's exact
+       discriminator): the env meet is safe IFF every redefinition of the
+       var goes through [denote_def] — i.e. the base's defs are ALL
+       relevant-tagged (the tag-only restriction denotes a tagged def
+       normally; it SKIPS an untagged one unconditionally).  A var with
+       one untagged def anywhere in the sub can be redefined by a skip,
+       letting the stale met value survive into the successor's own
+       guard evaluation ([reachable_jumps] over a stale flag -> a
+       compound jle evaluates definitely-true -> the chain's tail edge
+       dies -> the block bottoms -> the member def tags Dead -> emitter
+       poison -> WRONG VALUES: the rec_struct/fizzbuzz_safe regression
+       class).  The [refineable] gate alone is INSUFFICIENT — it only
+       says the base has SOME tagged def (Relevance.analyze's flag lane
+       tags the flag defs of a guarded loop); a mixed base still carries
+       the hazard.  Bases with any untagged def drop the env meet (the
+       seed stays in the LIVE set — the walk's own derivation is
+       unaffected); [meet_var] fires [observe_unsat_var] on the
+       empty-meet arm, the LANDMARK acquisition seam (§5). *)
+    let all_tagged : Var.Set.t =
+      Term.enum blk_t sub
+      |> Seq.concat_map ~f:(Term.enum def_t)
+      |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+          let k = Var.base (Def.lhs d) in
+          let tagged = Term.has_attr d Utils.relevant in
+          match Core.Map.find m k with
+          | None -> Core.Map.set m ~key:k ~data:tagged
+          | Some true -> m
+          | Some false -> Core.Map.set m ~key:k ~data:false)
+      |> Core.Map.filter ~f:Fn.id
+      |> Core.Map.keys
+      |> Var.Set.of_list in
+    let refineable_var (v : var) : bool = refineable_var_of refineable v in
+    let env =
+      List.fold seeds ~init:env ~f:(fun e -> function
+          | Var (v, c) ->
+            if Core.Set.mem all_tagged (Var.base v)
+            then meet_var refineable_var e v c
+            else e
+          | Cell _ | Infeasible -> e) in
+    (* The seeds join the LIVE set (the backward walk's input — the
+       operand-constraint derivation through [reverse_def_walk]'s
+       producer subtraction, re-derived against the CURRENT solution at
+       every iteration: no stale-value carry); [refine_edge] performs
+       the walk and the trace-exact CELL meets (sound to transfer: a
+       store overwrites the cell). *)
+    let refined, _live =
+      refine_edge ~sol ~defs ~stores env sub b seeds in
+    refined
+
+(* Computes the denotation of a basic block's jumps. *)
 let denote_jump ?refineable ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
     ?(sub : sub term option = None)
+    ?edge_conds ?sol
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (b : blk term)  (env : AI.t) ~(target : tid) : AI.t =
   Term.enum jmp_t b
@@ -2586,6 +2597,33 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     let env =
       assume_jump_cond_with_group ?refineable ?defs ?stores ~flag_state
         ~flag_group ~sub ~blk:(Some b) env jmp in
+    (* §2/§4.3 THE INLINE DEEP REFINEMENT (added ON TOP of the shallow
+       pre-step above — KEPT, it carries the green F1-NEQ stabilization
+       chain): the transfer is driven by the edge's ACCUMULATED condition
+       ([Graphs.Ir.Edge.cond], the when-chain negatives included), not
+       the jmp's own cond.  Precomputed ONCE per sub ([edge_conds_of] at
+       fixpoint entry); the deep walk ([refine_edge]) runs over the
+       CURRENT solution.  Only the REFINEMENT INPUT switches to the
+       accumulated cond — the per-jmp-kind transfer below (the
+       frame-keeping call abstraction + the L-E1 RSP +8 matched-pair
+       restore, the Goto target filter, bottom for the unreachable) is
+       KEYED TO THE JMP TERM exactly as today.  Call/Int jmps carry no
+       IR edge (the identity — the sound fallback); no table, no sol, or
+       an un-seeding cond keeps the shallow-refined env (the identity). *)
+    let env =
+      match edge_conds, sol, sub with
+      | Some tbl, Some snap, Some s ->
+        let acc_cond =
+          Core.Map.find tbl (Term.tid b)
+          |> Option.bind ~f:(fun by_jmp ->
+              Core.Map.find by_jmp (Term.tid jmp))
+          |> Option.map ~f:(fun ec -> ec.acc_cond) in
+        (match acc_cond with
+         | Some acc_cond ->
+           refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
+             ~flag_group ?refineable ~sub:s b env acc_cond
+         | None -> env)
+      | _ -> env in
     (* E2e-B, ora-7 — remove hot-loop eprintf; gate per-hit event log (the old debug line flushed stderr on EVERY Call denotation, per fixpoint iteration). *)
     let inspect_call c =
       match Call.return c with
@@ -2644,6 +2682,8 @@ let denote_jump ?refineable ?preserved ?defs ?stores
 (* L-D1 — the internal, stores-aware block denotation (the per-sub store list for the provenance-based SLE/SLT gate, see [stores_of_sub]); the fixpoint path ([static_graph_vsa]) calls it with ~stores (absent -> the decoder arm's [known_nonneg] stays false). *)
 let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(sub : sub term option = None)
+    ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
+    ?(sol : (tid, AI.t) Solution.t option = None)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t) : target:tid -> AI.t =
  match (Program.lookup blk_t ctx source) with
@@ -2652,7 +2692,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
      (* L3c-1 — the per-block flag-state record (the BLP design): the last understood comparison that set a flag in scope in THIS block, for the bare-flag arm of [assume_jump_cond] (flag-indirected guards). *)
      let flag_state, flag_group = flag_state_of_block b in
      denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
-       ~flag_group:(Some flag_group) ~sub denote_call b postcond
+       ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol denote_call b postcond
    | None -> invalid_arg "source tid does not represent block"
 
 type vsa_sol = (tid, AI.t) Solution.t
@@ -2755,6 +2795,16 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         end
       end
   in
+  (* §4.3 rule 4 — PRECOMPUTE ONCE: the per-sub static edge table (the IR
+     graph via [Sub.to_cfg] + every edge's ACCUMULATED cond), computed at
+     fixpoint entry and threaded through [denote_block_with_stores] like
+     [defs]/[stores]; the conds do not depend on the solution, so they are
+     never re-derived per iteration.  The engine's WTO/cfg below keeps
+     [Sub.to_graph] exactly as before — the IR graph is ADDITIONAL, for
+     the edge conds only.  (The Back_edges/label_widening_points rewrites
+     are deleted on this line — the engine widens at WTO heads; the
+     conds are tag-independent.) *)
+  let edge_conds = edge_conds_of s in
   let cfg = Sub.to_graph s in
   (* BAP 2.6's Sub.to_graph adds the [start]/[exit] pseudo-nodes; the fixpoint would apply the block denotation to them and crash (Program.lookup fails). *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
@@ -2889,6 +2939,11 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     end;
     let old = get v in
     let preds = CFG.Node.preds v cfg |> Seq.to_list in
+    (* §4.3 — the CURRENT-solution snapshot for the inline deep walk: a
+       Solution over the persistent [sol_map] ([Solution.create] wraps the
+       map — O(1)), taken once per vertex visit; the map does not change
+       inside the visit, so every pred's walk reads the same state. *)
+    let sol_snap = Solution.create !sol_map sol_default in
     let incoming =
       if List.is_empty preds then old
       else
@@ -2896,8 +2951,9 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             let head_opt = Hashtbl.find block_to_head p in
             Cbat_landmarks.widening_at_head := head_opt;
             let p_entry = get p in
-            let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) (denote_call stack) ctx ~source:p p_entry in
+            let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds) ~sol:(Some sol_snap) (denote_call stack) ctx ~source:p p_entry in
             let res = out_fn ~target:v in
+
             Cbat_landmarks.widening_at_head := None;
             res) in
         match List.reduce outs ~f:AI.join with
@@ -2984,12 +3040,3 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   ignore (stabilize_comps wto);
   Solution.create !sol_map sol_default
 
-(* the view-carrying entry point. The legacy [static_graph_vsa] API remains solution-only for callers that have not migrated yet; Phase-B consumers must use this entry point so the computed views are not discarded at the analysis boundary. *)
-let static_graph_vsa_with_views (stack : tid list) (ctx : Program.t)
-    (s : Sub.t) (init : vsa_sol) : vsa_sol * edge_view list =
-  let result = static_graph_vsa stack ctx s init in
-  let views =
-    edge_views_of
-      ~defs:(Some (defs_of_sub s))
-      ~stores:(Some (stores_of_sub s)) s result in
-  result, views

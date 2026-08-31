@@ -575,12 +575,12 @@ let collect_stats (bname : string) (sub' : sub term)
       (* Per-block entry state from the fixpoint solution (the fixpoint
          runs to convergence — the former E7 budget-expired all-top
          degradation was removed; handled gracefully by the buckets). *)
-      (* M6 — the per-block TAG state (the invariant met with the
-         enclosing guards' iterate/exit live constraints per the trace
-         membership, [partitioned_states]) — the walk's addresses are
-         denoted with the partitioned state so the loop-body
-         dynamic-index accesses carry the index's iterate constraint
-         (the w_big class leaves the bucket). *)
+      (* M6 (MIGRATED, ticket 02) — the per-block TAG state is the block's
+         IN-state in the converged solution (the fused fixpoint refines
+         the per-edge states inline; [tags = sol]): the walk's addresses
+         are denoted with the IN-state so the loop-body dynamic-index
+         accesses carry the index's iterate constraint (the w_big class
+         leaves the bucket). *)
       let st0 = Graphlib.Std.Solution.get tags (Term.tid b) in
       (* WYSINWYX-2 (the in-state port): the frame relation lives IN
          the state — [denote_def] reads it for the address rewrite and
@@ -643,12 +643,13 @@ let collect_stats (bname : string) (sub' : sub term)
              let stack = is_stack_addr a in
              let a' =
                Vsa.rewrite_addr (Vsa.frame_of_state st_before) a in
-             (* M6 — the partitioned tag: the address's free vars are
-                denoted with the PARTITIONED state's values (the
-                invariant ∩ the enclosing guards' iterate/exit live
-                constraints), not the sequentially re-denoted ones —
-                the loop-body index var `RAX := Load(cell)` would
-                otherwise read the solution's widened cell. *)
+             (* M6 (MIGRATED, ticket 02) — the IN-state tag: the
+                address's free vars are denoted with the block's
+                IN-state values (the fused fixpoint's branch-sensitive
+                state, refined inline by the accumulated edge conds),
+                not the sequentially re-denoted ones — the loop-body
+                index var `RAX := Load(cell)` would otherwise read the
+                solution's widened cell. *)
              let st_tag =
                Exp.free_vars a'
                |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
@@ -892,11 +893,19 @@ and run_sub (sp : var) (prog : program term) (bname : string)
     let sub' = Relevance.analyze sp sub in
     let prog' = Program.create ~subs:[ sub' ] () in
     let t0 = Unix.gettimeofday () in
-    let sol, views =
-      Vsa.static_graph_vsa_with_views [] prog' sub' (init_sol_of sub') in
+    let sol =
+      Vsa.static_graph_vsa [] prog' sub' (init_sol_of sub') in
     let t1 = Unix.gettimeofday () in
-    let st = collect_stats bname sub' sol
-        (Vsa.partitioned_states sub' sol views) in
+    (* MIGRATED (ticket 02, the Phase B deletion): the per-block TAG state
+       is the block's IN-state read directly from the converged solution —
+       the fused fixpoint refines the per-edge states INLINE (the deep
+       walk at every out-edge, driven by the ACCUMULATED
+       [Graphs.Ir.Edge.cond]), so [tags = sol]: the walk's addresses are
+       denoted with the IN-state so the loop-body dynamic-index accesses
+       carry the index's iterate constraint (the w_big class leaves the
+       bucket).  (The consumer [Hike_vsa.offsets_of_sub] reads the same
+       way — docs/trace-partitioning-plan.md §7.) *)
+    let st = collect_stats bname sub' sol sol in
     st.Sub_stats.sub_ms <- int_of_float ((t1 -. t0) *. 1000.0);
     Ok st
   with e ->
