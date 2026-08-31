@@ -648,32 +648,42 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
       return addr
   | Store (_, addr, data, _, _) ->
       let* addr = create_exp llvm_builder blk_tid addr in
-      let addr =
-        Llvm.int64_of_const addr
-        |> Base.Option.value_exn ~message:"Const addr is not an int"
-        |> Word.of_int64 ~width:64
-      in
-      let* addr = resolve_addr llvm_builder addr in
-      let* data = create_exp llvm_builder blk_tid data in
-      return @@ Llvm.build_store data addr llvm_builder
+      (match Llvm.int64_of_const addr with
+       | Some i64 ->
+           let* addr = resolve_addr llvm_builder (Word.of_int64 ~width:64 i64) in
+           let* data = create_exp llvm_builder blk_tid data in
+           return @@ Llvm.build_store data addr llvm_builder
+       | None ->
+           (* The folded address is an i64 CONSTANT EXPRESSION — the remapped
+              section/global pointer ([int64_of_const] reads only
+              ConstantInt).  A SIMPLE store through it: [create_store]'s
+              inttoptr + store — the constant carries the remap and LLVM
+              folds inttoptr(ptrtoint(gep)) back into the GEP.  Never a
+              crash on a live address (the old [value_exn] died here on the
+              got-slot loads: mem[0x291F8] in .bss via a global GEP). *)
+           let* data = create_exp llvm_builder blk_tid data in
+           create_store llvm_builder (data, addr))
   | Load (_, addr, _, size) ->
       let* addr = create_exp llvm_builder blk_tid addr in
-      let addr =
-        Llvm.int64_of_const addr
-        |> Base.Option.value_exn ~message:"Const addr is not an int"
-        |> Word.of_int64 ~width:64
-      in
-      let addr_i64 = Word.to_int64_exn addr in
-      let size = Size.in_bits size in
-      (* The inline .text constant-pool: a .text load is read at compile time (function entry -> [ptrtoint @fn]; data -> the integer), NOT a @text global GEP (that gives fptr_table raw misaligned pointers). *)
-      let* loaded =
-        match
-          text_load_constant ctx llvm_builder llvm_ctx llvm_module addr size
-        with
-        | Some c -> return c
-        | None -> section_load llvm_builder llvm_ctx addr addr_i64 size
-      in
-      return loaded
+      (match Llvm.int64_of_const addr with
+       | Some i64 ->
+           let addr = Word.of_int64 ~width:64 i64 in
+           let addr_i64 = Word.to_int64_exn addr in
+           let size = Size.in_bits size in
+           (* The inline .text constant-pool: a .text load is read at compile time (function entry -> [ptrtoint @fn]; data -> the integer), NOT a @text global GEP (that gives fptr_table raw misaligned pointers). *)
+           let* loaded =
+             match
+               text_load_constant ctx llvm_builder llvm_ctx llvm_module addr size
+             with
+             | Some c -> return c
+             | None -> section_load llvm_builder llvm_ctx addr addr_i64 size
+           in
+           return loaded
+       | None ->
+           (* The SIMPLE load (see the Store arm): [create_load]'s inttoptr
+              + load on the already-remapped constant expression — LLVM
+              folds it; never a crash on a live address. *)
+           create_load llvm_builder (addr, Size.in_bits size))
   | Cast (cast, i, (Load _ as load)) ->
       (* RIP-relative movzx/movsx: RDX := pad:64[mem[0x401C, el]:u32] *)
       let* v = create_rip_relative_addr llvm_builder blk_tid load in
@@ -1274,7 +1284,7 @@ let create_interrupt llvm_builder =
   KB.return ()
 
 (* The FP-intrinsic → native LLVM FP-op mapping (the user's design, 2026-08-16): BAP declares the x86 FP instructions as CALLS to the [intrinsic:*] soft-float subs. *)
-type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
+type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | FHLT
 
 let fp_intrinsic_name = strip_at
 
@@ -1287,6 +1297,16 @@ let native_fp_op (name : string) : native_fp option =
   | "intrinsic:frem_rne_ieee754_binary" -> Some FREM
   | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
   | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
+  (* The FP-ORDERED predicate: BAP's ieee754.lisp [forder_rne_ieee754_binary]
+     = (set y0 (<. x0 x1)) with [:result 1] — the FP less-than, a 1-bit
+     result.  LLVM: fcmp olt (the rne suffix is rounding-neutral —
+     comparisons do not round). *)
+  | "intrinsic:forder_rne_ieee754_binary" -> Some FORDER
+  (* The x86 halt: BAP's x86-common.lisp [HLT] = (intrinsic 'hlt) — the
+     privileged halt, a faulting/trap edge in user mode — the SAME trap
+     model as the [@interrupt:*] calls (the lifter emits
+     [call @intrinsic:hlt] for hlt/ud2-class instructions). *)
+  | "intrinsic:hlt" -> Some FHLT
   | _ -> None
 
 (* [has_32bit_extract e]: the [intrinsic:x0] setup for the i32→double casts — the lifter's `63:0[31:0[RAX]]` shape reveals the 32-bit source (the sign-extension the soft-float needs). *)
@@ -1353,6 +1373,7 @@ let build_fp_binop llvm_builder op a b =
     | FDIV -> Llvm.build_fdiv da db "" llvm_builder
     | FREM -> Llvm.build_frem da db "" llvm_builder
     | SFLOAT | SINT -> assert false
+    | FORDER | FHLT -> assert false
   in
   return
   @@ Llvm.build_bitcast d (Llvm.i64_type llvm_ctx) "" llvm_builder
@@ -1419,6 +1440,33 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
           @@ Llvm.build_fptosi d (Llvm.i64_type llvm_ctx) "" llvm_builder
         in
         return r
+    | FORDER ->
+        (* BAP's forder (ieee754.lisp: (set y0 (<. x0 x1)), [:result 1]) —
+           the ORDERED FP less-than driving the COMISS/UCOMISS flag rows.
+           DIRECT mapping: the plain fcmp olt instruction on the
+           bitcast-to-double operands (comparisons do not round; the
+           SNaN-exception COMISS/UCOMISS difference is unmodeled by BAP —
+           the quiet form is exact).  Result zext'd to i64 so the
+           y0_64/y0_32/y0_1 views all read it. *)
+        let* a = arg_value 0 in
+        let* b = arg_value 1 in
+        let bitcast v =
+          if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Integer then
+            Llvm.build_bitcast v (Llvm.double_type llvm_ctx) "" llvm_builder
+          else v
+        in
+        let* p =
+          KB.return
+          @@ Llvm.build_fcmp Llvm.Fcmp.Olt (bitcast a) (bitcast b) ""
+               llvm_builder
+        in
+        return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
+    | FHLT ->
+        (* (intrinsic 'hlt) \u2014 the x86 halt: the same trap model as the
+           [@interrupt:*] edges (llvm.trap + unreachable); the result lanes
+           bind nothing (the call never returns). *)
+        let* () = create_interrupt llvm_builder in
+        return (Llvm.poison (Llvm.i64_type llvm_ctx))
   in
   let* r = result in
   (match get_rets ctx target with
@@ -1455,6 +1503,53 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
        ignore (Llvm.build_unreachable llvm_builder);
        KB.return ())
 
+(* [create_external_intrinsic_call]: the unmapped-intrinsic floor (the
+   sound degradation): declare the callee as an EXTERNAL function (all-args
+   i64, matching the model interface) and emit the call; the result lanes
+   read poison (get_local's missing-binding path).  A loud [guarded:]
+   warning is printed at the call site.  Never a crash on a live
+   conversion. *)
+let create_external_intrinsic_call llvm_builder blk_tid sub call name fr =
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* llvm_module = Context.get llvm_module_var in
+  let* ctx = Context.get emit_ctx_var in
+  let target = Call.target call |> label_tid in
+  let args = get_args ctx target in
+  let n_args = Base.List.length args in
+  let fn_ty = Llvm.function_type (Llvm.i64_type llvm_ctx)
+      (Array.init n_args (fun _ -> Llvm.i64_type llvm_ctx)) in
+  let callee = Llvm.declare_function name fn_ty llvm_module in
+  let* arg_vals =
+    KB.List.map ~f:(fun a ->
+        let* v = create_exp llvm_builder blk_tid (Arg.rhs a) in
+        let v_ty = Llvm.type_of v in
+        let ty_cls = Llvm.classify_type v_ty in
+        if ty_cls = Llvm.TypeKind.Integer
+           && Llvm.integer_bitwidth v_ty < 64 then
+          KB.return @@ Llvm.build_zext v (Llvm.i64_type llvm_ctx) ""
+            llvm_builder
+        else if ty_cls = Llvm.TypeKind.Integer
+                && Llvm.integer_bitwidth v_ty > 64 then
+          KB.return @@ Llvm.build_trunc v (Llvm.i64_type llvm_ctx) ""
+            llvm_builder
+        else KB.return v)
+      args
+  in
+  let r = Llvm.build_call fn_ty callee
+      (Array.of_list arg_vals) "" llvm_builder in
+  (match get_rets ctx target with
+   | [ ret ] -> insert_local ctx blk_tid (Arg.lhs ret) r
+   | _ -> ());
+  (match Option.map label_tid (Call.return call) with
+   | Some ft ->
+       let bb = get_bb ctx ft in
+       ignore (Llvm.build_br bb llvm_builder);
+       KB.return ()
+   | None ->
+       ignore (Llvm.build_unreachable llvm_builder);
+       KB.return ())
+
 let create_call llvm_builder blk_tid blk sub call fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -1467,11 +1562,23 @@ let create_call llvm_builder blk_tid blk sub call fr =
     match native_fp_op name with
     | Some op -> create_native_fp_call llvm_builder blk_tid blk sub call op
     | None ->
-        (* FAIL LOUDLY on an unmapped intrinsic (the no-silent-fallback doctrine): an [intrinsic:*] call hike cannot map to a native op — the x87 80-bit [llvm-x86_64:*] class surfaced by [--bil-enable-intrinsics=:unknown], or any. *)
-        if Base.String.is_prefix name ~prefix:"intrinsic:" then
-          failwith
-            (Printf.sprintf "hike: unmapped intrinsic call: %s (in sub %s)" name
-               (Tid.name (Term.tid sub)))
+        (* An unmapped [intrinsic:*] call: SOUND DEGRADATION (the
+           not_implemented-degrades-to-top doctrine) — a loud warning,
+           then the call emits as an EXTERNAL declaration + call; the result
+           lanes read poison (the missing-binding path — the same treatment
+           every other unknown extern gets).  The x87 80-bit [llvm-x86_64:*]
+           class surfaced by [--bil-enable-intrinsics=:unknown] lands here;
+           the old loud [failwith] killed the WHOLE pass on the first such
+           call, aborting every later sub's conversion.  Correct wherever
+           the value is genuinely unused; where used, the poison is the
+           documented gap — never a silent wrong value. *)
+        if Base.String.is_prefix name ~prefix:"intrinsic:" then begin
+          Printf.eprintf
+            "hike: guarded: unmapped intrinsic call: %s (in sub %s) - emitting \
+             as external; result lanes are poison\n"
+            name (Tid.name (Term.tid sub));
+          create_external_intrinsic_call llvm_builder blk_tid sub call name fr
+        end
         else (
         (* The PLT-TRAMPOLINE callers (the model's atexit/setlocale class): the BAP rewrote the PLT stub into `...; call @real with noreturn` — the noreturn marking is a LIFTER heuristic (the stub's jmp-through-GOT tail-call looks like a noreturn edge), but the REAL callee (__cxa_atexit) RETURNS. *)
         match Call.return call with
