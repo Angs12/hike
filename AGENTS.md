@@ -321,6 +321,22 @@ LLVM allocas / static variables — it should work on EVERY binary.
   DT_TEXTREL under `-pie`), NOT a corpus fallback; see run_semantic.sh's header.
 - `semantic/run_semantic_all.sh` → the same native-vs-lifted gate over EVERY emitted
   `out_*.ll` (not just the fixed 8-bin set); 15 s timeout per run.
+- `semantic/run_semantic_opt.sh` → the OPTIMIZATION-SAFETY gate (2026-09-01): the
+  same native-vs-lifted equivalence but with `opt-21 -O2` inserted between rename
+  and llc — what a real consumer's optimizer does to the module must not change the
+  lifted binary's behavior.  STRICT (exit 1, no allowlist, no exemptions); on
+  failure it AUTO-BISECTS every single pass (`mem2reg sroa instcombine …`) and
+  prints the full broken-by list (a `CRASH` marker = opt crashed on that pass,
+  the fixpoint class).  Keeps `<name>_renamed.ll`/`<name>_opt.ll` as reproducible
+  artifacts.  The pinned optimizer is `opt-21` (system LLVM 21; the emitter binding
+  is 19.1.7 — the gate deliberately tests the modern consumer; NO FALLBACK if
+  opt-21 is missing).  BORN RED at 23/32: the 9 = 6 opt-INDUCED failures that are
+  green at -O0 (the poison-phi + model-SP-lane classes — the optimizability
+  review 2026-09-01: fizzbuzz, fptr_table, mixed_fp_int, setjmp_longjmp,
+  struct_arr_dynidx, union_overlap) + the 3 pre-existing -O0 knowns
+  (nested_struct, variadic, va_arg_vacopy, tickets T02/T03/T05 — listed, NOT
+  exempted).  The red row is the work-list for the optimizability program
+  (candidates: poison-phi definedness, the call-push lane re-addressing).
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
@@ -382,6 +398,7 @@ exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
 | corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_kb` | **32/32 rc=0** (surviving `hike: guarded:` warnings = the Unbounded class, benign) |
 | structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_kb` | **128 passed, 0 failed** ✅ |
 | semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb` | **29 PASS, 3 FAIL** of 32 emitted ✅ (the 3 = the SAME knowns below) |
+| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_opt` | **23 PASS, 9 FAIL — RED (born 2026-09-01)** 🔴: 6 opt-induced (fizzbuzz, fptr_table, mixed_fp_int, setjmp_longjmp, struct_arr_dynidx, union_overlap — poison-phi + model-SP-lane classes) + the 3 -O0 knowns. NO exemptions; the red list IS the optimizability program's work-list. Auto-bisect maps: instcombine-alone = poison class; instcombine(CRASH) = fixpoint class; all-passes-red = pre-broken at -O0. |
 | semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb8` | **8/8 PASS** ✅ |
 | probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
