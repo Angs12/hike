@@ -2652,11 +2652,6 @@ type refine_ctx = {
      computed against NARROWER upstream states (unsound in the widening
      direction). *)
   rc_out_cache : transfer_hit Tid.Map.t Tid.Map.t;
-  (* [rc_hits]/[rc_misses]: C1's instrumentation, carried as STATE (the
-     engine threads the updated context back out — see [process_vertex]).
-     Zero cost in production beyond the two [Int.succ] calls. *)
-  rc_hits : int;
-  rc_misses : int;
 }
 
 (* [call_facts_of_block b]: the STATIC per-block call facts (C2) — the arg
@@ -2697,74 +2692,46 @@ let snapshot_out_reads (reads : Tid.Set.t) (rc : refine_ctx)
     : (Tid.t * int) list =
   Core.Set.to_list reads |> List.map ~f:(fun t -> (t, ver_of rc t))
 
-(* [acquire_of_blocks rc ctx b env]: REPLAY the block's LANDMARK
-   ACQUISITION side effects (C1).
+(* [replay_acquisition ~denote_jump_acq]: REPLAY a block's LANDMARK
+   ACQUISITION side effects on a cache hit (Q1 — the correctness fix for
+   the C1 transfer memo).
 
-   [denote_jump] fires [Cbat_landmarks.observe_unsat_var] on the way to
-   its result — twice: once in [acquire_unsat_fallthrough] (the
-   NEGATED-cond arm, over the cond's leaves) and once in the jcc-decoder
-   arm of [assume_jump_cond_with_group]. Acquisition is a genuine
-   OBSERVABLE EFFECT: it records a (bound, distance) measurement, and two
-   measurements are what turns [lm_calc_steps] `Zero into `Finite — the
-   widening arm.  Suppressing it on a cache hit (the obvious reading of
-   "skip the recomputation") would change the widening: NOT
-   byte-identical, and unsound in the narrowing direction.
+   THE PROBLEM. [denote_jump] fires [Cbat_landmarks.observe_unsat_var]
+   from THREE sites, and they are NOT redundant — different constraint,
+   different op, different env:
 
-   So the memo caches the COMPUTATION and replays the ACQUISITION. The
-   replay re-runs exactly the two acquisition sites over the block's jmps
-   and throws the resulting state away — cheap relative to the denotation
-   it replaces (no def denotation, no deep walk, no join), and identical
-   in effect.
+     (a) [acquire_unsat_fallthrough]  the recorded comparison (e, c) with
+         [complement_guard_op] — the FALLTHROUGH row — over the INCOMING
+         env (fired before the shallow step refines).
+     (b) [meet_var] in [refine_edge_inline]'s gated env meet (cbat_vsa
+         .ml:1008) — the TAKEN-edge seeds from the ACCUMULATED acc_cond,
+         whose NOT-unwrap arm uses [negate_guard_op] — over the POST-
+         shallow-refine env.
+     (c) [meet_var] in [apply_operand_constraint] (the jcc-decoder arm of
+         [assume_jump_cond_with_group]) — [decoder_constraint]'s row over
+         the recorded (e, c).
 
-   This is the same discipline ticket 03 used for the deep walk's cache
-   unit: the walk is side-effect-free, so it caches outright; the part
-   WITH side effects is replayed rather than skipped. *)
-(* [acquire_of_block ~refineable ~flag_state ~flag_group ~defs ~stores ~sub
-   b env]: REPLAY the block's LANDMARK ACQUISITION side effects (C1).
+   Acquisition is load-bearing: it records a (bound, distance)
+   measurement, and TWO measurements are what turns [lm_calc_steps]
+   `Zero into `Finite — i.e. it DECIDES THE WIDENING ARM. Dropping
+   observations is not byte-identical and is unsound in the narrowing
+   direction (the ticket-03 failure mode: Finite -> Zero).
 
-   [denote_jump]'s only observable effect beyond the returned state is the
-   LANDMARK ACQUISITION: [acquire_unsat_fallthrough], fired per jump inside
-   [assume_jump_cond_with_group].  Acquisition is load-bearing — it records
-   a (bound, distance) measurement, and TWO measurements are what turns
-   [lm_calc_steps] `Zero into `Finite — the widening arm.  Suppressing it
-   on a cache hit (the naive reading of "skip the recomputation") would
-   change the widening: not byte-identical, and unsound in the narrowing
-   direction.
+   THE FIX. Do not hand-roll the sites (a previous attempt re-derived
+   only (a) — and got it wrong). Instead REPLAY THE REAL PIPELINE: run
+   the same [denote_jump] with the deep walk DISABLED. That covers all
+   three sites by construction and cannot drift from the real path,
+   because it IS the real path minus one side-effect-free step.
 
-   So the memo caches the COMPUTATION and REPLAYS the ACQUISITION.  The
-   replay must match the real path on two points, both of which a naive
-   "re-run the loop" gets wrong:
+   The walk is disabled by a flag [denote_jump] already understands
+   ([~no_walk]) rather than by a separate code path. Cost: the def
+   denotations and the per-jump shallow step and env meet, but NO deep
+   walk and no join — strictly cheaper than the transfer it replaces.
 
-   (1) the JUMP SEQUENCE is [reachable_jumps env], not [Term.enum jmp_t b]
-       — the same filter, over the same env, in the same order;
-   (2) the ENV is the SEQUENTIALLY REFINED one: [assume_jump_cond_with_group]
-       runs first (it is the call that fires the acquisition, so the two are
-       one step in the real path), and its result is the next jump's input.
-
-   The replay therefore re-runs the shallow step's ACQUISITION-SHAPED part
-   over the same fold and discards the returned envs — it costs no deep
-   walk, no def denotation, and no join, but it fires every observation the
-   real transfer would have fired, on the same states. *)
-let acquire_of_block ?(refineable : Var.Set.t option)
-    ~(flag_state : (var * Bil.binop * exp * word) option)
-    ~(flag_group : flag_group option)
-    ~(defs : (def term * bool) Var.Map.t)
-    ~(stores : def term list) ~(sub : sub term)
-    (b : blk term) (env : AI.t) : unit =
-  let ctx_of (fs : (var * Bil.binop * exp * word) option)
-      (blk : blk term option) : analysis_ctx =
-    { refineable; defs = Some defs; stores = Some stores;
-      flag_state = fs; sub = Some sub; blk } in
-  (* The acquisition fires at the ENTRY of [assume_jump_cond_with_group],
-     BEFORE it refines — over the incoming env.  So the replay does the same:
-     fire, then advance the env for the next jump's filter. *)
-  Seq.fold (reachable_jumps env (Term.enum jmp_t b)) ~init:()
-    ~f:(fun () jmp ->
-        let cond = Jmp.cond jmp in
-        acquire_unsat_fallthrough ~ctx:(ctx_of flag_state (Some b))
-          ~flag_group cond env;
-        ())
-  |> ignore
+   LEVER (why this is nearly free in practice): [observe_unsat_var] is a
+   NO-OP outside a WTO head (cbat_landmarks.ml: the [widening_at_head =
+   None] arm returns immediately), so when the transfer runs outside a
+   head there is nothing to replay and the caller skips this entirely. *)
 
 (* [refine_edge_inline ~sol ~defs ~stores ~flag_state ~flag_group ~sub b
    env jmp acc_cond]: the DEEP per-edge refinement, inlined at the jump
@@ -2948,7 +2915,7 @@ let refine_edge_inline
               (both are keyed on the same versions), so the transfer's
               accumulator gains only the source block — already seeded by
               the engine. *)
-           (hit.rh_result, Some { rc with rc_hits = rc.rc_hits + 1 }, Tid.Set.empty)
+           (hit.rh_result, Some rc, Tid.Set.empty)
          | _ ->
            let walk_reads = ref (Tid.Set.singleton bt) in
            let refined, _live =
@@ -2958,7 +2925,6 @@ let refine_edge_inline
                    env sub b seeds) in
            let rc =
              { rc with
-               rc_misses = rc.rc_misses + 1;
                rc_cache =
                  Core.Map.set rc.rc_cache ~key:bt
                    ~data:(match Core.Map.find rc.rc_cache bt with
@@ -2982,6 +2948,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
     ?(sub : sub term option = None)
+    ?(no_walk : bool option)
     ?edge_conds ?sol ?rctx
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (b : blk term)  (env : AI.t) ~(target : tid)
@@ -3024,6 +2991,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
               are safe to skip: an Indirect goto/ret returns [env] for any
               target, so it must keep computing. *)
            let discarded =
+             Option.value ~default:false no_walk ||
              match Jmp.kind jmp with
              | Goto (Direct tid) | Ret (Direct tid) ->
                compare_tid target tid <> 0
@@ -3123,6 +3091,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
     ?(rctx : refine_ctx option = None)
+    ?(no_walk : bool option)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t)
     : target:tid -> AI.t * refine_ctx option * Tid.Set.t =
@@ -3149,8 +3118,8 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
      fun ~target ->
        let (res, rctx', reads) =
          denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
-           ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol ?rctx denote_call b
-           postcond ~target in
+           ~flag_group:(Some flag_group) ~sub ?no_walk ?edge_conds ?sol ?rctx
+           denote_call b postcond ~target in
        (res, rctx', Core.Set.add reads (Term.tid b))
    | None -> fun ~target ->
        ignore (invalid_arg "source tid does not represent block");
@@ -3308,8 +3277,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
           Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
     rc_out_cache = Tid.Map.empty;
-    rc_hits = 0;
-    rc_misses = 0;
   } in
   (* Bourdoncle WTO fixpoint — replaces chunk=3000 + convergence_gap + max_runs.
      WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
@@ -3504,21 +3471,30 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
               in
               match cached with
               | Some hit ->
-                (* HIT — replay the acquisition, reuse the computation. *)
-                (match Program.lookup blk_t ctx p with
-                 | Some pb ->
-                   let flag_state, flag_group =
-                     match Core.Map.find rc.rc_flag_states p with
-                     | Some fs -> fs
-                     | None -> flag_state_of_block pb in
-                   (* [refineable] threads in: the decoder arm's meet is
-                      refineable-gated, and the gate is part of what the
-                      real transfer observed. *)
-                   acquire_of_block ~refineable ~flag_state
-                     ~flag_group:(Some flag_group)
-                     ~defs ~stores ~sub:s pb p_entry
-                 | None -> ());
-                rc_cell := { rc with rc_hits = rc.rc_hits + 1 };
+                (* HIT — replay the acquisition, reuse the computation.
+                   Q1: the replay is the REAL transfer with the deep walk
+                   DISABLED ([~no_walk:true] -> [denote_jump]'s [discarded]
+                   arm): it covers ALL THREE [observe_unsat_var] sites (the
+                   fallthrough row in [acquire_unsat_fallthrough], the
+                   gated env meet in [refine_edge_inline], the decoder arm
+                   in [apply_operand_constraint]) by construction and
+                   cannot drift from the real path — see the
+                   acquisition-replay comment above [refine_edge_inline].
+                   The replay runs ONLY inside a WTO head ([head_opt] was
+                   bound into [Cbat_landmarks.widening_at_head] just
+                   above): outside a head [observe_unsat_var] no-ops, so
+                   there is nothing to replay. *)
+                (if Option.is_some head_opt then
+                   match Program.lookup blk_t ctx p with
+                   | Some _pb ->
+                     ignore (denote_block_with_stores ~refineable ~preserved
+                               ~defs ~stores ~sub:(Some s)
+                               ~edge_conds:(Some edge_conds)
+                               ~sol:(Some sol_snap) ~rctx:(Some rc)
+                               ~no_walk:true (denote_call stack) ctx
+                               ~source:p p_entry ~target:v)
+                   | None -> ());
+
                 hit.th_result
               | None ->
                 let (res, rc', reads) =
@@ -3538,7 +3514,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                     Core.Map.set by_target ~key:v ~data:entry in
                 rc_cell :=
                   { (Option.value ~default:rc rc') with
-                    rc_misses = rc.rc_misses + 1;
                     rc_out_cache =
                       Core.Map.set rc.rc_out_cache ~key:p ~data:by_target' };
                 res) in
