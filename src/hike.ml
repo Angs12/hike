@@ -417,7 +417,11 @@ let filter_subs proj =
             eprintf "Skipping sub %s\n" (Sub.name sub);
             None)
           else
-            Some (sub |> rename_intrinsics |> simplify_jmps)))
+            Some
+              (sub
+              |> Hike_model_clean.clean_sub (Project.target proj)
+              |> rename_intrinsics
+              |> simplify_jmps)))
 
 (* The per-project setup + the sub FILTER are their OWN pass (see the registration below) — no pass calls another pass's logic directly; the chain is expressed in the ~deps of each registration and bap runs them in order. *)
 

@@ -309,7 +309,13 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* the solve driver: run the fixpoint; a non-convergent fixpoint (D.1) degrades the sub soundly — no tags, every stack access stays real memory (the emitter's dynamic path). *)
   match
     try
-      Some (Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub'))
+      (* RETADDR_PUSH_MODELED=false (Candidate 3 commit 1): hike-filter's
+         [Hike_model_clean] deleted the call-adjacent retaddr push pairs
+         BEFORE this pass — the caller's RSP lane is flat across calls and
+         the [+8] matched-pair restoration would drift it per call. *)
+      Some
+        (Vsa.static_graph_vsa_with_views ~retaddr_push_modeled:false [] prog'
+           sub' (Vsa.init_sol sub'))
     with Vsa.Fixpoint_not_converged (n, _, _) ->
       (* The fixpoint did not converge — the partial solution is an UNDER-APPROXIMATION; narrow offset tags computed from it would exclude reachable values (unsound). *)
       Printf.eprintf
