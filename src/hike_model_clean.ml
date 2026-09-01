@@ -235,11 +235,36 @@ let clean_prologue (target : Theory.Target.t) (sp : var)
          && is_sp_delta8 sp (Base.List.nth_exn defs (i + 1))
          && is_store_at_sp sp (Base.List.nth_exn defs (i + 2))
     then
+      (* The [mov rbp,rsp] follows the WHOLE push sequence — the -O0
+         prologue pushes r13/r12/rbx AFTER rbp before the mov ([#t:=RBP;
+         dec; store; #t:=R13; dec; store; ...; RBP := RSP]) — so the
+         scan must skip not just interleaved flag defs but FURTHER PUSH
+         PAIRS and the frame-alloc [subq]'s cluster ([#t := RSP; dec-k;
+         flags...]).  Positional, no value-shape tricks: it skips flag
+         defs, temp-copies, sp-deltas, stores-at-sp, and sp/fp-derived
+         loads/stores (the alloc cluster's own members), stopping at the
+         first real body def.  The rewrite fires ONLY if the mov is
+         found; else the whole cluster is KEPT (sound beats optimal). *)
       let rec mov m =
         if m >= n then None
-        else if is_flag_def (Base.List.nth_exn defs m) then mov (m + 1)
-        else if is_rbp_assign_rsp (Base.List.nth_exn defs m) then Some m
-        else None
+        else
+          let d = Base.List.nth_exn defs m in
+          if is_rbp_assign_rsp d then Some m
+          else if
+            is_flag_def d
+            || is_temp_copy d
+            || is_sp_delta8 sp d
+            || is_store_at_sp sp d
+            || (Convutils.is_mem (Def.lhs d)
+               && (match Def.rhs d with
+                  | Bil.Load (_, a, _, _)
+                  | Bil.Store (_, a, _, _, _) ->
+                      Base.Set.exists ~f:(fun v ->
+                          Abi.is_stack_reg (Abi.of_target target) v)
+                          (Exp.free_vars a)
+                  | _ -> false))
+          then mov (m + 1)
+          else None
       in
       (match mov (i + 3) with
        | Some m ->
