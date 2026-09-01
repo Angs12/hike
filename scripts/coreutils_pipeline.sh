@@ -138,11 +138,11 @@ do_lift() {
     [ "${RETIME:-0}" = "1" ] && : > "$TIMES"
     touch "$TIMES"
     local total=0 ok=0
-    # PARALLEL lift (LIFT_JOBS, default nproc): each binary's bap run is
-    # single-threaded and independent (own .ll/.bap.log/TSV row), so the
-    # stage scales linearly across cores. Results are appended under a
-    # per-worker lock-free scheme: each worker writes its own partial log,
-    # concatenated at the end.
+    # SERIAL ONLY (user directive 2026-09-01: parallel bap lifts OOM the
+    # box — one big-binary lift peaks ~1 GB and nproc of them blow the
+    # 15 GB limit; this is exactly the 90/103-era crash). The old
+    # LIFT_JOBS/nproc parallelism is DELETED — no env var, no xargs -P: one
+    # lift at a time, always.
     [ -d "$IR" ] || mkdir -p "$IR"
     local pending=()
     for b in "$BINS"/*; do
@@ -154,31 +154,12 @@ do_lift() {
         fi
         pending+=("$name")
     done
-    note "lift: $ok/$total already emitted; lifting ${#pending[@]} remaining on ${LIFT_JOBS:-$JOBS} workers"
+    note "lift: $ok/$total already emitted; lifting ${#pending[@]} remaining SERIALLY (one at a time — parallel lifts OOM)"
     if [ "${#pending[@]}" -gt 0 ]; then
-        printf '%s\n' "${pending[@]}" > "$WORK/.lift_pending"
-        cat > "$WORK/.lift_one" <<'EOS'
-#!/usr/bin/env bash
-set -u
-name="$1"
-BINS="$2"; IR="$3"; OUT="$4"; TIMES="$5"; LLOG="$6"
-b="$BINS/$name"; ll="$IR/out_$name.ll"
-t0=$(date +%s.%N)
-if timeout 600 bap "$b" --pass=hike-convlir \
-       --hike-output-file="$ll" > "$OUT/$name.bap.log" 2>&1 \
-   && [ -s "$ll" ]; then
-    echo "OK   $name" >> "$LLOG"
-    t1=$(date +%s.%N)
-    awk -v n="$name" -v a="$t0" -v b="$t1" 'BEGIN{printf "%s\t%.2f\n", n, b-a}' >> "$TIMES"
-else
-    echo "FAIL $name ($(grep -m1 -oE 'hike:.*|The pass .* failed.*' "$OUT/$name.bap.log" | head -c 160))" >> "$LLOG"
-    rm -f "$ll"
-fi
-EOS
-        chmod +x "$WORK/.lift_one"
-        local before; before=$(grep -c '^OK' "$LIFT_LOG" 2>/dev/null || echo 0)
-        xargs -a "$WORK/.lift_pending" -P "${LIFT_JOBS:-$JOBS}" -I{}               "$WORK/.lift_one" {} "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
-        wait
+        local name
+        for name in "${pending[@]}"; do
+            "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
+        done
         ok=$(( $(grep -c '^OK' "$LIFT_LOG") ))
     fi
     note "lift: $ok/$total emitted OK (details: $LIFT_LOG; timings: $TIMES)"
