@@ -392,44 +392,73 @@ borrowing). Per the user's directive, NO unit tests were added for the
 join/order machinery itself — BAP's KB is upstream-tested; the domain is
 exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
 
-**Last verified: 2026-09-01 EEST — the poison-phi definedness fix (Candidate 2
-of the optimizability program) — FULL GATE BATTERY GREEN, opt gate 23→24**
+**Last verified: 2026-09-02 EEST — MEM-FISSION landed (per-region BIL mem vars) — FULL GATE BATTERY GREEN, opt gate 24→26**
 
-**The fix (on the finding1 worktree, same session as the opt gate): never-defined
-transfer vars no longer get phi lanes, and no phi incoming is poison.**
-`collect_sub_data` now computes a DEFINEDNESS closure in its existing fold
-(defs' lhs ∪ callee ret regs ∪ indirect-call `return_regs` ∪ sub args ∪ sp/fp,
-including BIL `Phi` lhs for completeness) and filters the transfer set with it:
-a var the sub can never define gets NO phi lane (reads fall to `create_exp`'s
-None arm); a var defined later keeps its lane with `[ undef, %entry ]` — the
-honest model of the caller's register state, NOT poison (UB that folds into
-live results under instcombine). All five emission poison sites converted to
-`undef` except the deliberate VSA-Dead path. New warning class `hike: undef-read:`
-(data reads individually, deduped per block+var; the structural model-ABI
-lanes — phantom YMM call args, RDX ret member — aggregate into one per-sub
-summary line, classified via `Abi.is_vector_param_reg`/`is_return_reg`, no
-string matching) — it joins `hike: guarded:` in run_corpus.sh's diagnostics
-table. `check_allocas.sh` gained check (e): zero entry-edge poison phis.
-GOTCHA discovered en route: the def-set must NEVER be unioned INTO the transfer
-set (only filter with it) — unioning it exploded the phi system with
-width-mixed synthetic-slot lanes and produced the va_arg_mixed
-i32-into-i64-phi llc error (fixed same session). Measured: **689 → 0 poison
-phis** corpus-wide (was the single largest UB source), 283 honest `undef`
-entry incomings, `mixed_fp_int` flips the opt gate green (the proven
-poison-class member); the 5 remaining opt-induced failures are all
-instcombine-family = the model-SP-lane/push class (Candidate 3's domain).
+**Mem-fission (this session, commits 6cc2c86 + 499bb36 on finding1-stack-plan):
+the storage decision lives in the BIL, and DCE deletes dead stores
+naturally.**  The architecture arc: the Candidate-3 model-clean WIP (the
+positional push deletions + their compensations — the mov rewrite, the
+VSA retaddr flag, the sp-8 hike_stack compensation, the restore
+tombstone) was REVERTED in full (its 3 regressions — many_args/sret_big/
+struct_by_value — were all one class: the store/load cell-split, one def
+classified differently across blocks, machine-proven in IR and asm);
+the superseding design (.scratch/mem-fission/research.md — 565 cited
+lines, the BIL-multi-mem feasibility against BAP's own sources) keeps
+the BIL MACHINE-ACCURATE end-to-end and adds three mechanisms:
+(1) stack_to_locals fissions every CONVERTIBLE ranged region to a
+per-region mem var (`region_mem id` = `stack_rN_mem`) AND rewrites the
+address base (`region_base id` = `stack_rN_base`, entry-bound to the
+region alloca's cell-0): `mem[RBP + i*4 - 0x70]` becomes
+`Load(stack_rN_mem, stack_rN_base + i*4 - 0x70)` — BOTH operands name
+the region, the cell-split class closes BY CONSTRUCTION.  Singletons
+keep the slot-var degenerate (bit-identical).  The ONE positional rule
+(`last_push_tids_of`: the call block's last stack def = the retaddr
+push) exempts the dead push cell from ABI visibility, so it fissions
+into a never-loaded region — reusing the tail-set's own walk, no new
+classifier; (2) hike_dce two-tier: a region mem var's defs survive iff
+the var has a LOAD-ROOT (Load-side mem uses only; Store-side uses never
+count — the self-keep the fission deletes); the lifter's `mem` keeps
+the always-keep (ABI/external/outgoing traffic); (3) bil2llvm's
+name-keyed dispatch: `stack_rN_mem` operands route through the fission
+arms, the region base binds to the alloca cell-0 at create_sub, and the
+definedness closure's name rule threads the base vars.  Measured (base
+-> fission): retaddr push stores 112->92 (fizzbuzz 8->1, mixed_fp_int
+2->0, fptr_table 2->0, landmark_loop_1000 1->0, rmw_oob 1->0,
+array_local 1->0, deep_recursion 4->2, setjmp_longjmp 10->7,
+setjmp_loop 4->3); inttoptr 844->802 (landmark_loop_1000 3->0,
+deep_recursion 9->4, fizzbuzz 12->3); **opt gate 24->26** (fizzbuzz +
+fptr_table FLIPPED GREEN — the dead push stores no longer alias the
+caller's frame under instcombine).  GOTCHAs recorded: the base vars
+need phi lanes (Candidate 2's definedness closure would otherwise
+filter them — the name rule admits them); region mems must NOT be
+zero-initialized (their cells ride the alloca's original bytes).
 
 | Gate | Command | Current result |
 |---|---|---|
-| unit suite | `dune runtest --force` | **0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
-| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_c2` | **32/32 rc=0** ✅ (surviving diagnostics = `hike: guarded:` Unbounded class + the new `hike: undef-read:` class: 173 individual data reads, 58 per-sub ABI summaries) |
-| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_c2` | **160 passed, 0 failed** ✅ (new check (e): 0 entry-edge poison phis, corpus-wide 0) |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_c2 /tmp/sem_c2` | **29 PASS, 3 FAIL** of 32 emitted ✅ (the 3 = the SAME knowns below) |
-| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh /tmp/corpus /tmp/heritage_c2 /tmp/sem_opt_c2` | **24 PASS, 8 FAIL** 🔴→🟡 (born 23/9; `mixed_fp_int` FLIPPED GREEN — the proven poison-class member; the 5 remaining opt-induced = fizzbuzz, fptr_table, setjmp_longjmp, struct_arr_dynidx, union_overlap, ALL instcombine-family = the model-SP-lane/push class, Candidate 3's domain; + the 3 -O0 knowns) |
-| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_c2 /tmp/sem_c2_8` | **8/8 PASS** ✅ |
+| unit suite | `dune runtest --force` | **480 checks, 0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
+| corpus emission | `bash scripts/run_corpus.sh <corpus> <emissions/fission>` | **32/32 rc=0** ✅ |
+| structural asserts | `bash scripts/check_allocas.sh <emissions/fission>` | **160 passed, 0 failed** ✅ |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh ...` | **29 PASS, 3 FAIL** ✅ (the SAME knowns — zero regressions vs base) |
+| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh ...` | **26 PASS, 6 FAIL** 🟡 (24→26: fizzbuzz + fptr_table FLIPPED GREEN; the remaining opt-induced = setjmp_longjmp, struct_arr_dynidx, union_overlap — genuinely runtime-addressed lanes; + the 3 -O0 knowns) |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh ...` | **8/8 PASS** ✅ |
 | probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
 | coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session |
+
+**Reference artifacts (durable — /tmp wiped twice):** worktree
+`/home/tovpr/backup/hike-finding1` (branch finding1-stack-plan); corpus
+`/home/tovpr/backup/hike-corpus`; emissions `/home/tovpr/backup/emissions/{base,fission}`;
+semantic outputs `/home/tovpr/backup/sem-*`.
+
+**The surviving branch program (finding1-stack-plan):** ee916b1 the opt
+gate → d599193 the poison-phi definedness fix (689→0 poison phis, opt
+gate 23→24) → 6cc2c86 the model-clean revert + the native_fp_op suffix
+rows (the fresh corpus's sse-binary names) → 499bb36 mem-fission (this
+commit).  The 3 -O0 knowns (nested_struct, va_arg_vacopy, variadic —
+T02/T03/T05) are unchanged.  The natural follow-ups: the remaining
+opt-induced classes (runtime-addressed lanes), and stack-args-as-params
+(the many_args family's push-only tails keep the conservative outgoing
+block by design until then).
 
 **Finding 1 landed (uncommitted, on the 2026-08-30 ② tree + this tree's
 in-flight `hike.mli` work): the stack model decision now has ONE producer.**

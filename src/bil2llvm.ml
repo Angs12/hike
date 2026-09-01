@@ -338,14 +338,12 @@ let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
       in
       return (llvm_val1, llvm_val2)
 
-(* MEM-FISSION (2026-09-02) — the name-keyed region dispatch (the
-   design's Q3 decision: the NAME is the convention, matching
-   [Hike_stack_to_locals.region_mem]).  A Load/Store whose mem operand
-   is [stack_rN_mem] takes the fission path: the address is already
-   region-relative ([stack_rN_base + index]), the base var's local is
-   bound to the region alloca's cell-0 PTR at [create_sub]'s region
-   creation — the add/GEP machinery then produces the inbounds access
-   with no tag consultation. *)
+(* The name-keyed region dispatch (mem-fission): a Load/Store whose mem
+   operand is [stack_rN_mem] is a fissioned access — its address is
+   region-relative ([stack_rN_base + index]; the base var's local is
+   the region alloca's cell-0, bound at [create_sub]'s region
+   creation), so the ordinary address emission lands inside the region
+   alloca with no tag consultation. *)
 let is_region_mem_exp (e : exp) : bool =
   match e with
   | Bil.Var v ->
@@ -666,12 +664,8 @@ let rec create_exp llvm_builder blk_tid exp =
       let* llvm_var = create_exp llvm_builder blk_tid exp in
       create_extract llvm_builder (hi, lo, llvm_var)
   | Store (m, addr, data, _, _) when is_region_mem_exp m ->
-      (* MEM-FISSION (2026-09-02): the store's mem operand IS a region
-         var — route by NAME to the region's alloca: emit the address
-         (the fissioned [stack_rN_base + index] form — the base var's
-         local is the ptr-bound cell-0, the index is ordinary arithmetic
-         on it; [create_binop] emits add on the ptr) and store through
-         it.  The alloca IS the storage; no tag consultation. *)
+      (* a fissioned store: the region var names the storage; the
+         region-relative address lands inside the region alloca. *)
       let* addr = create_exp llvm_builder blk_tid addr in
       let* data = create_exp llvm_builder blk_tid data in
       create_store llvm_builder (data, addr)
@@ -2024,14 +2018,11 @@ let create_sub sub =
             (r, base))
       else []
     in
-    (* MEM-FISSION (2026-09-02): bind each region's BASE var
-       ([stack_rN_base], the fissioned addresses' base operand) to the
-       region alloca's cell-0 PTR — the fissioned address [base + index]
-       then lowers to an add/GEP directly on the alloca.  The binding
-       lives in the ENTRY pseudo-block so every read of the base var
-       resolves here (the phi machinery threads it as an ordinary
-       transfer var — never-defined + never-an-arg would otherwise read
-       undef). *)
+    (* Bind each region's BASE var ([stack_rN_base]) to the region
+       alloca's cell-0 PTR in the entry pseudo-block — every fissioned
+       address's [base + index] then lowers inside the alloca (the phi
+       machinery threads the base var via the definedness closure's
+       name rule). *)
     let* () =
       let rec bind_regions = function
         | [] -> return ()

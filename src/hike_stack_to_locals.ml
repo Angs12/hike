@@ -57,26 +57,23 @@ let slot_of (lo : int64) (bits : int) : var =
     (Printf.sprintf "slot_%Ld" (Int64.abs lo))
     (Type.Imm bits)
 
-(* MEM-FISSION (2026-09-02) — the per-region mem vars (the research's
-   VERDICT (a)/(d): the fission shape ALREADY ships via [arr_of]; this
-   renames it to the design's convention and adds the region BASE var
-   that carries the alloca's cell-0 in the address rewrite).
+(* MEM-FISSION (2026-09-02) — the per-region mem vars.
 
    [region_mem id]: the region's OWN memory — every Load/Store whose
    address lies in region [id] reads/writes THIS var.  The emitter's
    name-keyed dispatch routes it to the region alloca; the two-tier DCE
    (load-roots only) sees a var whose ONLY uses are Load mem-operands —
-   a never-loaded region's stores die in one sweep round.
+   a never-loaded region's stores die in one sweep round (the retaddr
+   push cells: dead model traffic, deleted naturally).
 
    [region_base id]: the region's cell-0 address var (Imm 64 in BIL;
    ptr-bound at emission to the alloca).  The fission rewrite moves the
    ADDRESS into region-relative coordinates: [mem[RBP + i*4 - 0x70]]
-   becomes [Load(stack_rN_mem, stack_rN_base + i*4 + k)] — BOTH operands
-   name the region, closing the store/load cell-split class (the
-   many_args bug: one path's frame GEP vs another's raw lane, same cell).
-   The base var rides the ordinary transfer-var machinery (it is
-   defined-by-none, so it must bind at entry — see bil2llvm's fission
-   dispatch). *)
+   becomes [Load(stack_rN_mem, stack_rN_base + i*4 - 0x70)] — BOTH
+   operands name the region, closing the store/load cell-split class
+   (the many_args bug: one path's frame GEP vs another's raw lane for
+   the same cell).  The base var is entry-bound (see bil2llvm's region
+   binding + the definedness closure's name rule). *)
 let region_mem (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "stack_r%d_mem" id)
@@ -85,13 +82,6 @@ let region_mem (id : int) : var =
 let region_base (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "stack_r%d_base" id) (Type.Imm 64)
-
-(* The legacy span-named shape, kept for any external consumer of the
-   old names (probes, older emissions' diffs). *)
-let arr_of (lo : int64) (hi : int64) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (Printf.sprintf "arr_%Ld_%Ld" lo hi)
-    (Type.Mem (Size.addr_of_int_exn 64, Size.of_int_exn 8))
 
 (* Defs that save incoming register args; keep them in memory so va_arg pointer reads alias correctly. *)
 let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
@@ -629,20 +619,15 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
    Finding 1: this rule had TWO copies (here and in [Bil2llvm]); the
    emitter now calls this one. [sp] is the target's stack pointer.
 
-   MEM-FISSION (2026-09-02): the [?last_push_tids] argument EXEMPTS the
-   call-tail's LAST stack def — the RETADDR PUSH ([RSP := RSP - 8;
-   mem[RSP] := retaddr], BAP's call expansion).  The positional fact is
-   [outgoing_tail_tids]' own (the call block's last stack def, computed
-   by the SAME [is_real_call] walk): the pushed cell is read by NOBODY in
-   the lifted world (the callee's epilogue pop dies with
-   [ret_replacement]; the lifted callee returns via a real LLVM ret), so
-   the push store is DEAD MODEL TRAFFIC, not ABI-visible.  Exempting it
-   lets its cell form its own never-loaded region, which the fission
-   gives a [stack_rN_mem] var with ZERO Load-roots — and the two-tier
-   DCE (load-roots only) deletes the store chain naturally.  The REAL
-   outgoing-arg stores (the 7th-arg pushes, EARLIER in the tail) keep
-   [is_abi_visible] = true and stay on [mem].  [last_push_tids] defaults
-   to empty (the emitter's [abi_visibility_of] — unchanged behavior). *)
+   The [?last_push_tids] set exempts the RETADDR PUSH (the call-tail's
+   last stack def — [last_push_tids_of]): dead model traffic in the
+   lifted world (the callee's epilogue pop dies with [ret_replacement];
+   the lifted callee returns via a real LLVM ret), so its cell fissions
+   into a never-loaded region and the two-tier DCE deletes the store.
+   The REAL outgoing-arg stores (the 7th-arg pushes, EARLIER in the
+   tail) stay ABI-visible.  The set defaults to empty ([abi_visibility_of]
+   — the emitter runs post-fission, where the push defs are already
+   rewritten or deleted). *)
 let is_abi_visible ?(last_push_tids = Tid.Set.empty) (sp : var)
     ~(tag_of : Convutils.vsa_kind Tid.Map.t)
     ~(k_of : (int64 * int64) Tid.Map.t) (d : def term) : bool =
@@ -1073,17 +1058,20 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     sub#map_exp addr
   in
   (* THE MAP SOLUTION: one [Exp.mapper] over the def rhs mapping ONLY the
-     memory nodes — every load/store whose address matches a converted
-     cell becomes a read/write of the cell's local, and ALL enclosing
-     structure (casts, binops, ites, lets) is preserved: the emitter's
-     [create_cast] / [coerce_to_same_type] then produce the widening at
-     exactly the BIL type boundaries — no emitter-side promotion, no
-     whole-rhs replacement. A scalar (Imm-typed) local read of width
-     smaller than the slot is wrapped in [Cast (LOW, bits, Var local)] so
-     the load width survives; a Mem-typed (array) local keeps the
-     Load/Store form with the local as the memory base. Stores narrower
-     than the scalar slot splice via the read-modify-write shim (keep the
-     untouched high bytes). *)
+     memory nodes, in the conversion's three-way shape:
+     - [`Slot] (the singleton degenerate): a scalar (Imm-typed) local
+       read of width smaller than the slot is wrapped in
+       [Cast (LOW, bits, Var local)] so the load width survives; stores
+       narrower than the scalar slot splice via the read-modify-write
+       shim (keep the untouched high bytes);
+     - [`Region (id, base)] (mem-fission): BOTH operands are rewritten —
+       the mem var becomes [region_mem id], the address's sp/fp-derived
+       base becomes [region_base id];
+     - everything else: untouched.
+     ALL enclosing structure (casts, binops, ites, lets) is preserved:
+     the emitter's [create_cast] / [coerce_to_same_type] produce the
+     widening at exactly the BIL type boundaries — no emitter-side
+     promotion, no whole-rhs replacement. *)
   let map_exp_cells (e : exp) : exp =
     let v =
       object
@@ -1097,13 +1085,13 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
              the region-relative address. *)
           match shape_of_addr addr with
           | Some (`Slot local) -> (
+              (* slot_of is Imm-only — the catch-all is unreachable. *)
               match Var.typ local with
               | Type.Imm w ->
                   let bits = Size.in_bits s in
                   if bits < w then Bil.Cast (Bil.LOW, bits, Bil.Var local)
                   else Bil.Var local
-              | Type.Unk -> Bil.Var local
-              | Type.Mem _ -> Bil.Load (Bil.Var local, addr, e, s))
+              | Type.Unk | Type.Mem _ -> Bil.Var local)
           | Some (`Region (id, base)) ->
               Bil.Load
                 ( Bil.Var (region_mem id),
@@ -1121,7 +1109,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
           match shape_of_addr addr with
           | Some (`Slot local) -> (
               match Var.typ local with
-              | Type.Mem _ -> Bil.Store (Bil.Var local, addr, data, e, s)
               | Type.Imm w ->
                   let bits = Size.in_bits s in
                   if bits < w then
@@ -1140,7 +1127,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                         Bil.BinOp (Bil.AND, Bil.Var local, Bil.Int mask),
                         Bil.Cast (Bil.UNSIGNED, w, data)), e, s)
                   else Bil.Store (mem, addr, data, e, s)
-              | Type.Unk -> Bil.Store (mem, addr, data, e, s))
+              | Type.Unk | Type.Mem _ -> Bil.Store (mem, addr, data, e, s))
           | Some (`Region (id, base)) ->
               Bil.Store
                 ( Bil.Var (region_mem id),
@@ -1190,8 +1177,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
         Def.with_rhs (Def.with_lhs d (region_mem id)) (map_rhs d)
     | Some (s, `Slot local) -> (
         match Var.typ local with
-        | Type.Mem _ ->
-            Def.with_rhs (Def.with_lhs d local) (map_rhs d)
         | Type.Imm w -> (
             match store_data_of_rhs (Def.rhs d) with
             | Some (data, wrap) ->
@@ -1226,7 +1211,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 (* a load as a mem-lhs def's rhs does not occur; the
                    mapped rhs is the sound answer. *)
                 Def.with_rhs d (map_rhs d))
-        | Type.Unk -> Def.with_rhs d (map_rhs d))
+        | Type.Unk | Type.Mem _ -> Def.with_rhs d (map_rhs d))
     | None -> Def.with_rhs d (map_rhs d)
   in
   let sub' = Term.map blk_t sub ~f:(fun blk ->

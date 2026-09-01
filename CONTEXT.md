@@ -42,6 +42,14 @@ _Avoid_: partitioned state, per-edge view
 
 **100% VSA Tagging Invariant (structural)**: A Load/Store def is a Stack Access iff it carries a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). The classification is one mechanism — there is no second tag to diverge from it.
 
+### Mem-fission
+
+**Region Mem** (`stack_rN_mem`): the per-region BIL memory var every fissioned access reads/writes — the storage decision carried in the BIL itself. Recognized by name (the fission convention), routed to the region's alloca, and swept by the load-roots DCE rule: a region's stores survive iff some Load reads its var.
+_Avoid_: arr_of (the deleted pre-fission name), tag-consultation at emission
+
+**Region Base** (`stack_rN_base`): the region's cell-0 address var, entry-bound to the alloca; the fissioned address `[base + index]` keeps the original index arithmetic with the base naming the region. Both operands of a fissioned access name the region — a split storage (one path's alloca GEP vs another's raw lane for the same cell) is unrepresentable.
+_Avoid_: sp-lane arithmetic for fissioned members
+
 ### VSA Classifications
 
 **Range**: A bounded stack offset interval `[lo, hi]` where `lo` and `hi` are known integers.
