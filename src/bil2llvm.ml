@@ -1332,11 +1332,28 @@ let fp_intrinsic_name = strip_at
 
 let native_fp_op (name : string) : native_fp option =
   match fp_intrinsic_name name with
+  (* The width-suffixed names (the sse-binary TABLE FIX — mainline adce4dd,
+     ported to this branch: sse-convert always appended (symbol-of-size rt);
+     sse-binary now does too — the SS class (rt=32) and the SD class
+     (rt=64) are DISTINCT callee subs, the width knowable from the name
+     alone; the unsuffixed legacy spellings stay mapped). *)
+  | "intrinsic:fmul_rne_ieee754_binary_64" -> Some FMUL
+  | "intrinsic:fmul_rne_ieee754_binary_32" -> Some FMUL
+  | "intrinsic:fadd_rne_ieee754_binary_64" -> Some FADD
+  | "intrinsic:fadd_rne_ieee754_binary_32" -> Some FADD
+  | "intrinsic:fsub_rne_ieee754_binary_64" -> Some FSUB
+  | "intrinsic:fsub_rne_ieee754_binary_32" -> Some FSUB
+  | "intrinsic:fdiv_rne_ieee754_binary_64" -> Some FDIV
+  | "intrinsic:fdiv_rne_ieee754_binary_32" -> Some FDIV
+  | "intrinsic:frem_rne_ieee754_binary_64" -> Some FREM
+  | "intrinsic:frem_rne_ieee754_binary_32" -> Some FREM
   | "intrinsic:fmul_rne_ieee754_binary" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary" -> Some FADD
   | "intrinsic:fsub_rne_ieee754_binary" -> Some FSUB
   | "intrinsic:fdiv_rne_ieee754_binary" -> Some FDIV
   | "intrinsic:frem_rne_ieee754_binary" -> Some FREM
+  | "intrinsic:forder_ieee754_binary_64" -> Some FADD
+  | "intrinsic:forder_ieee754_binary" -> Some FADD
   | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
   | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
   | _ -> None
