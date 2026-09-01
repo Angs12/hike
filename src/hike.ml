@@ -290,28 +290,15 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
   |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) ->
          Int64.compare (Int64.of_int a) (Int64.of_int b))
 
-let rename_intrinsics sub =
-  let rename_var v =
-    let n = Var.name v in
-    if Base.String.is_prefix n ~prefix:"intrinsic:" then
-      let w = match Var.typ v with Imm w -> w | Mem _ -> 0 | Unk -> 0 in
-      Var.create (Printf.sprintf "%s_%d" n w) (Var.typ v)
-    else v
-  in
-  let exp_mapper = object
-    inherit Exp.mapper
-    method! map_var v = Bil.Var (rename_var v)
-  end in
-  Term.map blk_t sub ~f:(fun blk ->
-    Term.map def_t blk ~f:(fun d ->
-      let lhs = Def.lhs d in
-      let rhs = Def.rhs d in
-      let lhs' = rename_var lhs in
-      let rhs' = exp_mapper#map_exp rhs in
-      if Var.same lhs lhs' && Exp.equal rhs rhs' then d
-      else Def.with_lhs (Def.with_rhs d rhs') lhs'
-    )
-  )
+(* [rename_intrinsics DELETED 2026-09-01, the user directive: "keep the
+   suffix for the intrinsics themselves, remove the intrinsic variable
+   renames, do not rely on string matching" — the width lives in the
+   TYPES: the emitter's local/phi maps key on (name, width) (Convutils's
+   width-aware [wvar]), the FP arms derive widths from the callee's
+   declared interface types and the operand VALUES (Bil2llvm's
+   [fp_intrinsic_sizes]) — no rename pass, no string-width parsing, no
+   block prefix scans. The X1-c lane-separation problem the rename once
+   solved is now structural. *)
 
 let simplify_jmps sub =
   let new_sub =
@@ -417,7 +404,7 @@ let filter_subs proj =
             eprintf "Skipping sub %s\n" (Sub.name sub);
             None)
           else
-            Some (sub |> rename_intrinsics |> simplify_jmps)))
+            Some (sub |> simplify_jmps)))
 
 (* The per-project setup + the sub FILTER are their OWN pass (see the registration below) — no pass calls another pass's logic directly; the chain is expressed in the ~deps of each registration and bap runs them in order. *)
 

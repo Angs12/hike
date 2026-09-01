@@ -589,10 +589,35 @@ let rec create_exp llvm_builder blk_tid exp =
   | UnOp (op, e) ->
       let* var = create_exp llvm_builder blk_tid e in
       create_unop llvm_builder (op, var)
-  | Var v -> (
-      match get_local ctx blk_tid v with
-      | Some v -> return v
-      | None -> !$Llvm.poison (typ_lltype_m (Var.typ v)))
+  | Var v ->
+      (* WIDTH-FAMILY FALLBACK (the wvar design's consumer side): the
+         local maps key on (name, width) so same-name/different-width
+         lanes stay distinct, but ONE BIL value is still ONE number — a
+         read of [v] at its occurrence's declared width, when the
+         binding happened at another width of the same BASE (the FP
+         result bound at its result width, the consumer reading the
+         32-bit splice view), must find it: probe the family (all bound
+         widths of the same base) and adjust to the requested width. A
+         miss at every width is the true unbound case — poison, never a
+         silent wrong value. *)
+      (match get_local ctx blk_tid v with
+       | Some x -> return x
+       | None ->
+           let* llvm_ctx' = Context.get llvm_ctx_var in
+           let want_w =
+             match Var.typ v with Type.Imm w -> w | _ -> 64
+           in
+           match Convutils.probe_local_family ctx blk_tid v ~want_w with
+           | Some (val_at_w, bound_w) ->
+               let want_ty = Llvm.integer_type llvm_ctx' want_w in
+               if bound_w = want_w then return val_at_w
+               else if bound_w > want_w then
+                 return
+                 @@ Llvm.build_trunc val_at_w want_ty "" llvm_builder
+               else
+                 return
+                 @@ Llvm.build_zext val_at_w want_ty "" llvm_builder
+           | None -> !$Llvm.poison (typ_lltype_m (Var.typ v)))
   | Int i -> create_immidiate i
   | Cast (cast, i, exp) ->
       let* var = create_exp llvm_builder blk_tid exp in
@@ -1313,21 +1338,32 @@ let fp_intrinsic_name = strip_at
 
 let native_fp_op (name : string) : native_fp option =
   match fp_intrinsic_name name with
+  (* The width-suffixed names (the sse-binary TABLE FIX: sse-convert
+     always appended (symbol-of-size rt); sse-binary now does too — the
+     SS class (rt=32) and the SD class (rt=64) are DISTINCT callee
+     subs, the width knowable from the name alone). *)
+  | "intrinsic:fmul_rne_ieee754_binary_64" -> Some FMUL
+  | "intrinsic:fmul_rne_ieee754_binary_32" -> Some FMUL
+  | "intrinsic:fadd_rne_ieee754_binary_64" -> Some FADD
+  | "intrinsic:fadd_rne_ieee754_binary_32" -> Some FADD
+  | "intrinsic:fsub_rne_ieee754_binary_64" -> Some FSUB
+  | "intrinsic:fsub_rne_ieee754_binary_32" -> Some FSUB
+  | "intrinsic:fdiv_rne_ieee754_binary_64" -> Some FDIV
+  | "intrinsic:fdiv_rne_ieee754_binary_32" -> Some FDIV
+  | "intrinsic:frem_rne_ieee754_binary_64" -> Some FREM
+  | "intrinsic:frem_rne_ieee754_binary_32" -> Some FREM
+  | "intrinsic:forder_rne_ieee754_binary_64" -> Some FORDER
+  | "intrinsic:forder_rne_ieee754_binary_32" -> Some FORDER
+  | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
+  | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
+  (* The unsuffixed legacy spellings (pre-table-fix lifts; both widths —
+     the SS/SD classes collapsed into one name, the width then comes
+     from the interface temp's suffix via [x_width]). *)
   | "intrinsic:fmul_rne_ieee754_binary" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary" -> Some FADD
   | "intrinsic:fsub_rne_ieee754_binary" -> Some FSUB
   | "intrinsic:fdiv_rne_ieee754_binary" -> Some FDIV
   | "intrinsic:frem_rne_ieee754_binary" -> Some FREM
-  | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
-  | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
-  (* The FP-ORDERED predicate: BAP's ieee754.lisp [forder_rne_ieee754_binary]
-     = (set y0 (<. x0 x1)) with [:result 1] — the FP less-than, a 1-bit
-     result.  LLVM: fcmp olt (the rne suffix is rounding-neutral —
-     comparisons do not round). *)
-  | "intrinsic:forder_rne_ieee754_binary" -> Some FORDER
-  (* the UNSUFFIXED spelling occurs too (the legacy-name class, like the
-     width-suffixed variants): the same ordered FP less-than. *)
-  | "intrinsic:forder_ieee754_binary" -> Some FORDER
   (* The x86 halt: BAP's x86-common.lisp [HLT] = (intrinsic 'hlt) — the
      privileged halt, a faulting/trap edge in user mode — the SAME trap
      model as the [@interrupt:*] calls (the lifter emits
@@ -1381,12 +1417,30 @@ let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
           | _ -> 64)
       | _ -> 64)
 
-let build_fp_binop llvm_builder op a b =
+(* [build_fp_binop llvm_builder op a b ~w]: the width-aware FP binop. [w] is
+   the operand bitwidth read from the INTRINSIC NAME (the width-suffixed
+   interface temp [intrinsic:x0_<w>] — the SS class is 32, the SD class 64;
+   BAP's Lisp table shares one callee NAME per op, so the operand temp's
+   suffix is the only width source). i32 -> float, else double; the result
+   bitcasts back to the SAME integer width (a 32-bit op yields i32). The
+   old always-double bitcast emitted invalid IR ([bitcast i32 to double])
+   on every -O0 f32/SS binary — 27/103 coreutils died at llc. *)
+(* [fp_ty_of llvm_ctx w]: the FP type of width [w] (32 -> float, else
+   double) and the int lane of width [w] (32 -> i32, else i64) — the two
+   width-derived types every arm needs. *)
+let fp_ty_of (llvm_ctx : Llvm.llcontext) (w : int) :
+    Llvm.lltype * Llvm.lltype =
+  ( (if w <= 32 then Llvm.float_type llvm_ctx
+     else Llvm.double_type llvm_ctx),
+    (if w <= 32 then Llvm.i32_type llvm_ctx else Llvm.i64_type llvm_ctx) )
+
+let build_fp_binop llvm_builder op a b ~(w : int) =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
+  let fp_ty, ret_ty = fp_ty_of llvm_ctx w in
   let bitcast v =
     if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Integer then
-      Llvm.build_bitcast v (Llvm.double_type llvm_ctx) "" llvm_builder
+      Llvm.build_bitcast v fp_ty "" llvm_builder
     else v
   in
   let da = bitcast a in
@@ -1398,11 +1452,49 @@ let build_fp_binop llvm_builder op a b =
     | FSUB -> Llvm.build_fsub da db "" llvm_builder
     | FDIV -> Llvm.build_fdiv da db "" llvm_builder
     | FREM -> Llvm.build_frem da db "" llvm_builder
-    | SFLOAT | SINT -> assert false
-    | FORDER | FHLT -> assert false
+    | SFLOAT | SINT | FORDER | FHLT -> assert false
   in
   return
-  @@ Llvm.build_bitcast d (Llvm.i64_type llvm_ctx) "" llvm_builder
+  @@ Llvm.build_bitcast d ret_ty "" llvm_builder
+
+(* [fp_intrinsic_sizes target blk]: the (INPUT WIDTH, RESULT WIDTH) of an
+   FP intrinsic call, ONE source of truth for every FP mapping arm.
+   Priority: (1) the CALLEE NAME's width suffix (the sse-binary TABLE FIX
+   — sse-convert always appended (symbol-of-size rt), sse-binary now does
+   too, so a post-fix lift names the SS class ..._32 and the SD class
+   ..._64; the authoritative source); (2) the width-suffixed interface
+   temp [intrinsic:x0_<w>]'s LHS TYPE (the pre-table-fix legacy lifts
+   where SS/SD collapse into one callee name). (64, 64) when neither is
+   present (the direct-API default).
+   The INPUT width types the OPERAND bitcast (i32 -> float / i64 ->
+   double); the RESULT width types the VALUE lane (a 32-bit op's result
+   binds i32 — the y0_32 lane — never an i64 raw). *)
+(* [fp_intrinsic_sizes target ret]: the (INPUT WIDTH, RESULT WIDTH) of an
+   FP intrinsic call — DERIVED FROM TYPES, not strings (the user
+   directive 2026-09-01: no rename pass, no name-suffix reliance): the
+   RESULT width is the RET LANE's declared [Var.typ] (the callee's own
+   output declaration — the interface var the table's defun defines);
+   the INPUT width is the callee's FIRST ARG LANE's declared type (its
+   input interface var). The op dispatch (native_fp_op) still matches the
+   callee NAME (the intrinsic's identity — the table's naming is
+   authoritative for WHICH op), but NO width ever comes from parsing a
+   name: the operands' widths come from their VALUES, the lanes' from
+   their declared types. *)
+let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
+    int * int =
+  let arg_w (i : int) : int =
+    match Base.List.nth args i with
+    | Some a -> (
+        match Var.typ (Arg.lhs a) with Type.Imm w -> w | _ -> 64)
+    | None -> 64
+  in
+  let res_w =
+    match rets with
+    | r :: _ -> (
+        match Var.typ (Arg.lhs r) with Type.Imm w -> w | _ -> 64)
+    | [] -> 64
+  in
+  (arg_w 0, res_w)
 
 (* [create_native_fp_call llvm_builder blk_tid blk sub call op]: the mapped FP-intrinsic call — no function call, the native LLVM FP op inline, the result bound to [intrinsic:y0]. *)
 let create_native_fp_call llvm_builder blk_tid blk sub call op =
@@ -1413,72 +1505,123 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
+  (* ONE width source for every arm ([fp_intrinsic_sizes]): the input
+     width (the operand bitcast) and the result width (the value lane) —
+     BOTH from the callee's declared interface TYPES, no name parse, no
+     rename dependence. *)
+  let rets = get_rets ctx target in
+  let in_w, res_w = fp_intrinsic_sizes args rets in
   let arg_value (i : int) : Llvm.llvalue KB.t =
-    (* Resolve x-operand from the most-recent intrinsic:xN_* def in blk (width-suffixed). *)
-    let prefix = Printf.sprintf "intrinsic:x%d_" i in
+    (* Resolve the operand from the callee's declared ARG VAR (the true
+       interface — [intrinsic:xN], unsuffixed after the rename deletion):
+       the most-recent def of THAT var in the block (the caller's arg
+       setup), else the Arg's own rhs. No prefix string matching. *)
+    let arg = Base.List.nth_exn args i in
+    let av = Var.base (Arg.lhs arg) in
     let x_def_opt =
       Term.enum def_t blk
       |> Base.Sequence.to_list
-      |> Base.List.filter ~f:(fun d -> Base.String.is_prefix (Var.name (Def.lhs d)) ~prefix)
+      |> Base.List.filter ~f:(fun d -> Var.same (Var.base (Def.lhs d)) av)
       |> Base.List.last
     in
     match x_def_opt with
     | Some d -> create_exp llvm_builder blk_tid (Def.rhs d)
-    | None ->
-      let arg = Base.List.nth_exn args i in
-      create_exp llvm_builder blk_tid (Arg.rhs arg)
+    | None -> create_exp llvm_builder blk_tid (Arg.rhs arg)
   in
   let result =
     match op with
     | FMUL | FADD | FSUB | FDIV | FREM ->
+        (* The operand width from the VALUES (the ground truth): the
+           signature's arg lane is declared u64 by the defun globals even
+           for the SS class ([31:0[YMM0]] splices a u32 value) — the
+           resolved operand's own bitwidth is the only reliable source
+           (the chmod FSUB-at-f32 site: i32 operands, u64 signature). *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
-        build_fp_binop llvm_builder op a b
+        let w_of v =
+          match Llvm.classify_type (Llvm.type_of v) with
+          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
+          | _ -> in_w
+        in
+        let w = min (w_of a) (w_of b) in
+        build_fp_binop llvm_builder op a b ~w
     | SFLOAT ->
+        (* cast_sfloat (the int -> FP direction; CVTSI2SD/SS-class): the
+           SOURCE int width from [cast_source_width] (the 32-bit
+           sign-extension shape), the FP type and result LANE from the
+           intrinsic's own width ([fp_intrinsic_sizes] — a 32-bit
+           cast_sfloat yields an i32 lane, the y0_32 writeback). *)
         let* x = arg_value 0 in
-        let width = cast_source_width ~abi sub blk in
-        if width = 32 then
-          let* t =
-            KB.return
-            @@ Llvm.build_trunc x (Llvm.i32_type llvm_ctx) "" llvm_builder
-          in
-          let* d =
-            KB.return
-            @@ Llvm.build_sitofp t (Llvm.double_type llvm_ctx) "" llvm_builder
-          in
-          return
-          @@ Llvm.build_bitcast d (Llvm.i64_type llvm_ctx) "" llvm_builder
-        else
-          let* d =
-            KB.return
-            @@ Llvm.build_sitofp x (Llvm.double_type llvm_ctx) "" llvm_builder
-          in
-          return
-          @@ Llvm.build_bitcast d (Llvm.i64_type llvm_ctx) "" llvm_builder
-    | SINT ->
-        let* x = arg_value 0 in
+        let src_w = cast_source_width ~abi sub blk in
+        let int_src_ty =
+          if src_w = 32 then Llvm.i32_type llvm_ctx
+          else Llvm.i64_type llvm_ctx
+        in
+        let x =
+          if src_w = 32
+             && Llvm.classify_type (Llvm.type_of x) = Llvm.TypeKind.Integer
+             && Llvm.integer_bitwidth (Llvm.type_of x) > 32
+          then Llvm.build_trunc x int_src_ty "" llvm_builder
+          else x
+        in
+        (* the TARGET FP type and result lane both from res_w (the name's
+           target — the convert class converts TO it). *)
+        let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
         let* d =
           KB.return
-          @@ Llvm.build_bitcast x (Llvm.double_type llvm_ctx) "" llvm_builder
+          @@ Llvm.build_sitofp x tgt_fp_ty "" llvm_builder
+        in
+        return
+        @@ Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
+    | SINT ->
+        (* cast_sint (the FP -> int direction; CVTTSS2SI/CVTTSD2SI): the
+           FP TYPE from the OPERAND VALUE's own bitwidth (the resolved
+           [arg_value] — i32 means the SS class's f32 source: the call
+           block's x0 temp may live in a DIFFERENT block after
+           [simplify_jmps] isolated the call jmp, so the block scan is
+           unreliable; the value itself is the ground truth); the int
+           RESULT LANE from the RESULT width (the name's target — _64
+           converts to i64, _32 to i32). The two widths are
+           independent in the convert class. *)
+        let* x = arg_value 0 in
+        let src_w =
+          match Llvm.classify_type (Llvm.type_of x) with
+          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of x)
+          | _ -> in_w
+        in
+        let src_fp_ty, _ = fp_ty_of llvm_ctx src_w in
+        let _, res_lane_ty = fp_ty_of llvm_ctx res_w in
+        let* d =
+          KB.return
+          @@ Llvm.build_bitcast x src_fp_ty "" llvm_builder
         in
         let* r =
           KB.return
-          @@ Llvm.build_fptosi d (Llvm.i64_type llvm_ctx) "" llvm_builder
+          @@ Llvm.build_fptosi d res_lane_ty "" llvm_builder
         in
         return r
     | FORDER ->
         (* BAP's forder (ieee754.lisp: (set y0 (<. x0 x1)), [:result 1]) —
            the ORDERED FP less-than driving the COMISS/UCOMISS flag rows.
-           DIRECT mapping: the plain fcmp olt instruction on the
-           bitcast-to-double operands (comparisons do not round; the
-           SNaN-exception COMISS/UCOMISS difference is unmodeled by BAP —
-           the quiet form is exact).  Result zext'd to i64 so the
-           y0_64/y0_32/y0_1 views all read it. *)
+           DIRECT mapping: the plain fcmp olt on the width-aware bitcast
+           operands (i32 -> float, the SS class [UCOMISS rt=32]; else
+           double, the SD class [UCOMISD rt=64] — the width from the
+           intrinsic NAME's interface temp, see [x_width]; comparisons do
+           not round; the SNaN-exception COMISS/UCOMISS difference is
+           unmodeled by BAP — the quiet form is exact).  Result zext'd to
+           i64 so the y0_64/y0_32/y0_1 views all read it. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
+        let w_of v =
+          match Llvm.classify_type (Llvm.type_of v) with
+          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
+          | _ -> in_w
+        in
+        let w = min (w_of a) (w_of b) in
+        let src_fp_ty, _ = fp_ty_of llvm_ctx w in
         let bitcast v =
           if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Integer then
-            Llvm.build_bitcast v (Llvm.double_type llvm_ctx) "" llvm_builder
+            Llvm.build_bitcast v src_fp_ty "" llvm_builder
           else v
         in
         let* p =
@@ -1497,28 +1640,53 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let* r = result in
   (match get_rets ctx target with
    | [ ret ] ->
-     insert_local ctx blk_tid (Arg.lhs ret) r;
-     (* Bind every consumer-width view of y0 (y0_64/y0_32/y0_1) — the BIR after rename_intrinsics has distinct y0_* lanes, but the soft-float result is a single i64/i32 value that must be visible at all widths. *)
-     let y0_64 = Var.create "intrinsic:y0_64" (Imm 64) in
-     let y0_32 = Var.create "intrinsic:y0_32" (Imm 32) in
-     let y0_1 = Var.create "intrinsic:y0_1" (Imm 1) in
-     let r_ty = Llvm.type_of r in
-     let r_bits = try Llvm.integer_bitwidth r_ty with _ -> 64 in
-     (* y0_64 *)
-     if not (Var.same (Arg.lhs ret) y0_64) then (
-       let v64 = if r_bits = 64 then r else if r_bits > 64 then Llvm.build_trunc r (Llvm.i64_type llvm_ctx) "" llvm_builder else Llvm.build_zext r (Llvm.i64_type llvm_ctx) "" llvm_builder in
-       insert_local ctx blk_tid y0_64 v64
-     );
-     (* y0_32 *)
-     if not (Var.same (Arg.lhs ret) y0_32) then (
-       let v32 = if r_bits = 32 then r else if r_bits > 32 then Llvm.build_trunc r (Llvm.i32_type llvm_ctx) "" llvm_builder else Llvm.build_zext r (Llvm.i32_type llvm_ctx) "" llvm_builder in
-       insert_local ctx blk_tid y0_32 v32
-     );
-     (* y0_1 *)
-     if not (Var.same (Arg.lhs ret) y0_1) then (
-       let v1 = if r_bits = 1 then r else if r_bits > 1 then Llvm.build_trunc r (Llvm.i1_type llvm_ctx) "" llvm_builder else Llvm.build_zext r (Llvm.i1_type llvm_ctx) "" llvm_builder in
-       insert_local ctx blk_tid y0_1 v1
-     )
+     (* The primary ret lane bound WIDTH-AWARE (the chmod root cause): the
+        lane's declared width ([Var.typ] — u64 for the SD-class ret,
+        u32 for an SS-class writeback lane) must match the value's width,
+        else the raw result lands in a differently-typed lane and the
+        join's phi for it reads a wrong-width value (llc "'%N' defined
+        with type 'i32' but expected 'i64'" — the ret IS often the
+        y0_64 lane, so the old blind bind also SKIPPED the zext
+        view-binding below via its [Var.same] guard). Same adjustment as
+        the view-bindings: zext/trunc once, at the definition site. *)
+     let lane_w =
+       match Var.typ (Arg.lhs ret) with Type.Imm w -> w | _ -> 64
+     in
+     let r_bits = try Llvm.integer_bitwidth (Llvm.type_of r) with _ -> 64 in
+     let r_lane =
+       if r_bits = lane_w then r
+       else if r_bits > lane_w then
+         Llvm.build_trunc r (Llvm.integer_type llvm_ctx lane_w) "" llvm_builder
+       else
+         Llvm.build_zext r (Llvm.integer_type llvm_ctx lane_w) ""
+           llvm_builder
+     in
+     insert_local ctx blk_tid (Arg.lhs ret) r_lane;
+     (* The OTHER consumer-width views of y0 — the RET LANES the callee
+       declares beyond the primary ([intrinsic:y0] at each declared
+       width, e.g. the 1-bit flag view of a compare): bind each from the
+       VALUE, width-adjusted at the definition site. No synthesized
+       y0_N string vars (the rename era is gone): every lane is a
+       declared Arg of the callee's signature. *)
+     Base.List.iter rets ~f:(fun ret2 ->
+         if Var.same (Arg.lhs ret2) (Arg.lhs ret) then ()
+         else begin
+           let lw =
+             match Var.typ (Arg.lhs ret2) with
+             | Type.Imm w -> w
+             | _ -> 64
+           in
+           let v =
+             if r_bits = lw then r
+             else if r_bits > lw then
+               Llvm.build_trunc r (Llvm.integer_type llvm_ctx lw) ""
+                 llvm_builder
+             else
+               Llvm.build_zext r (Llvm.integer_type llvm_ctx lw) ""
+                 llvm_builder
+           in
+           insert_local ctx blk_tid (Arg.lhs ret2) v
+         end)
    | _ -> ());
   (match fallthrough with
    | Some ft ->
@@ -1653,9 +1821,63 @@ let update_phi transfer_vars blk_incoming blk_tid =
 let update_phis transfer_vars blks sub () =
   let open KB in
   let cfg = Sub.to_graph sub in
+  (* The per-(pred, target) EDGE MULTIPLICITY: the number of the pred's
+     JMP TERMS targeting the block (1 for a plain goto; 2 for a
+     same-target conditional [If(c, L, L)]; absent = the entry fallthrough
+     edge, multiplicity 1). *)
+  let edge_count : (Tid.t, (Tid.t, int) EHashtbl.t) EHashtbl.t =
+    EHashtbl.create (module Tid)
+  in
+  let bump (ptid : Tid.t) (t : Tid.t) : unit =
+    let inner =
+      match EHashtbl.find edge_count ptid with
+      | Some h -> h
+      | None ->
+          let h = EHashtbl.create (module Tid) in
+          EHashtbl.set edge_count ~key:ptid ~data:h;
+          h
+    in
+    let cur =
+      match EHashtbl.find inner t with
+      | Some n -> n
+      | None -> 0
+    in
+    EHashtbl.set inner ~key:t ~data:(cur + 1)
+  in
+  let count_edges (pb : blk term) : unit KB.t =
+    let ptid = Term.tid pb in
+    Term.enum jmp_t pb
+    |> Seq.iter ~f:(fun j ->
+        match Jmp.kind j with
+        | Goto (Direct t) | Ret (Direct t) -> return (bump ptid t)
+        | _ -> return ())
+  in
+  ignore (Term.enum blk_t sub |> Seq.iter ~f:count_edges);
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
-      let blk_incoming = Graphs.Tid.Node.preds (Term.tid blk) cfg in
+      (* EDGE-MULTISET preds: BAP's [Graphs.Tid.Node.preds] is the
+         per-block SET (including the ENTRY fallthrough edge, which has
+         no jmp term); LLVM's CFG is a multigraph — the phi needs ONE
+         ENTRY PER EDGE ("PHINode should have one entry for each
+         predecessor"). Each graph pred expands by its edge count (>= 1
+         by construction; absent = the entry edge, 1). No CFG
+         modification: the phi matches the CFG as emitted. *)
+      let blk_incoming =
+        Graphs.Tid.Node.preds blk_tid cfg
+        |> Base.Sequence.to_list
+        |> Base.List.concat_map ~f:(fun ptid ->
+            let n =
+              match
+                EHashtbl.find edge_count ptid
+                |> Base.Option.bind ~f:(fun h ->
+                    EHashtbl.find h blk_tid)
+              with
+              | Some n -> n
+              | None -> 1
+            in
+            Base.List.init n ~f:(fun _ -> ptid))
+        |> Base.Sequence.of_list
+      in
       update_phi transfer_vars blk_incoming blk_tid)
 
 (* [create_control_flow ...]: see [create_interrupt] above — the Int jmp (a trap edge) emits the same trap + unreachable. *)
