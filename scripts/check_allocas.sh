@@ -30,6 +30,9 @@
 #       Defines containing no alloca/load/store are exempt (provably
 #       stack-free).  A mismatch means the emitter changed shape
 #       underneath this script.
+#   (e) NO ENTRY-EDGE POISON PHIS — a phi incoming [ poison, %entry ]
+#       is UB that folds into live results under opt (the 2026-09-01
+#       optimizability review).  Must be 0 in every module.
 #   INFO (non-failing): per-module count of INTTOPTR-DERIVED LOADS —
 #       loads whose pointer operand is an `inttoptr ... to ptr` result
 #       (the model-frame RSP-arithmetic access path).  Visibility only;
@@ -202,6 +205,25 @@ for ll in "$OUT_DIR"/out_*.ll; do
     FAIL=$((FAIL + 1))
   else
     echo "PASS $name: (d) frame/stack_r shape ok (precise=stack_r-only, degraded=frame-only)"
+    PASS=$((PASS + 1))
+  fi
+
+  # (e) NO ENTRY-EDGE POISON PHIS: a phi incoming [ poison, %entry ]
+  #     is UB that folds into live results under instcombine (the
+  #     2026-09-01 optimizability review: 689 corpus-wide made
+  #     opt -O2 silently miscompile 6 binaries).  The definedness
+  #     closure in the emitter's transfer-set computation keeps them
+  #     extinct: never-defined vars get no phi lane at all; vars
+  #     defined later get [ undef, %entry ] (caller register state —
+  #     an unspecified value, NOT poison).  Deliberate poison on
+  #     VSA-dead (unreachable) paths is a different emission site and
+  #     may still appear — the assert keys the ENTRY-EDGE form only.
+  n_poison_entry="$(grep -c 'phi .*\[ poison, %entry' "$ll")"
+  if [ "$n_poison_entry" -gt 0 ]; then
+    echo "FAIL $name: (e) $n_poison_entry entry-edge poison phi(s) — UB folds under opt"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS $name: (e) 0 entry-edge poison phis"
     PASS=$((PASS + 1))
   fi
 

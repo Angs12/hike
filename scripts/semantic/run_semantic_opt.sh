@@ -5,16 +5,18 @@
 # consumer (llc -O2, clang -O2, an inliner) does to the module must
 # not change the lifted binary's behavior — this gate proves it.
 #
-# BORN RED (2026-09-01): 23/32 PASS.  The 9 failures are the gate's
-# work-list, not an excuse to widen: 6 are opt-INDUCED on IR that is
-# green at -O0 (fizzbuzz, fptr_table, struct_arr_dynidx, union_overlap,
-# mixed_fp_int, setjmp_longjmp — the poison-phi and model-SP-lane
-# classes, see the 2026-09-01 optimizability review), 3 are the
-# pre-existing -O0 knowns (nested_struct, variadic, va_arg_vacopy —
-# tickets T02/T03/T05 in .scratch/one-frame-anchor-removal/, they fail
-# run_semantic_all.sh identically and are listed here for completeness,
-# NOT exempted).  There is no allowlist and no exemption logic: every
-# red binary is red, every failure line carries its cause.
+# Born 2026-09-01 at 23/32; the poison-phi definedness fix (same day,
+# below) flipped mixed_fp_int — the proven poison-class member — to
+# 24/32.  The remaining failures are the gate's work-list, not an
+# excuse to widen: 5 are opt-INDUCED and all instcombine-family (the
+# model-SP-lane/push class: fizzbuzz, fptr_table, setjmp_longjmp,
+# struct_arr_dynidx, union_overlap — see the 2026-09-01 optimizability
+# review), 3 are the pre-existing -O0 knowns (nested_struct, variadic,
+# va_arg_vacopy — tickets T02/T03/T05 in .scratch/one-frame-anchor-
+# removal/, they fail run_semantic_all.sh identically and are listed
+# here for completeness, NOT exempted).  There is no allowlist and no
+# exemption logic: every red binary is red, every failure line carries
+# its cause.
 #
 # opt version: pinned to opt-21 (system LLVM 21).  The emitter's OCaml
 # binding is 19.1.7, but the gate tests what MODERN consumers do; the

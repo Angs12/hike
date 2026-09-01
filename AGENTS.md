@@ -330,13 +330,13 @@ LLVM allocas / static variables — it should work on EVERY binary.
   the fixpoint class).  Keeps `<name>_renamed.ll`/`<name>_opt.ll` as reproducible
   artifacts.  The pinned optimizer is `opt-21` (system LLVM 21; the emitter binding
   is 19.1.7 — the gate deliberately tests the modern consumer; NO FALLBACK if
-  opt-21 is missing).  BORN RED at 23/32: the 9 = 6 opt-INDUCED failures that are
-  green at -O0 (the poison-phi + model-SP-lane classes — the optimizability
-  review 2026-09-01: fizzbuzz, fptr_table, mixed_fp_int, setjmp_longjmp,
-  struct_arr_dynidx, union_overlap) + the 3 pre-existing -O0 knowns
-  (nested_struct, variadic, va_arg_vacopy, tickets T02/T03/T05 — listed, NOT
-  exempted).  The red row is the work-list for the optimizability program
-  (candidates: poison-phi definedness, the call-push lane re-addressing).
+  opt-21 is missing).  Born 23/32 on 2026-09-01; the poison-phi definedness fix
+  (same day) flipped `mixed_fp_int` to **24/32** — the remaining 5 opt-induced
+  failures are all instcombine-family (the model-SP-lane/push class — the
+  optimizability program's next candidate: the call-push lane re-addressing)
+  + the 3 pre-existing -O0 knowns (nested_struct, variadic, va_arg_vacopy,
+  tickets T02/T03/T05 — listed, NOT exempted).  The red list is the work-list
+  for the optimizability program.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
@@ -392,14 +392,41 @@ borrowing). Per the user's directive, NO unit tests were added for the
 join/order machinery itself — BAP's KB is upstream-tested; the domain is
 exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
 
+**Last verified: 2026-09-01 EEST — the poison-phi definedness fix (Candidate 2
+of the optimizability program) — FULL GATE BATTERY GREEN, opt gate 23→24**
+
+**The fix (on the finding1 worktree, same session as the opt gate): never-defined
+transfer vars no longer get phi lanes, and no phi incoming is poison.**
+`collect_sub_data` now computes a DEFINEDNESS closure in its existing fold
+(defs' lhs ∪ callee ret regs ∪ indirect-call `return_regs` ∪ sub args ∪ sp/fp,
+including BIL `Phi` lhs for completeness) and filters the transfer set with it:
+a var the sub can never define gets NO phi lane (reads fall to `create_exp`'s
+None arm); a var defined later keeps its lane with `[ undef, %entry ]` — the
+honest model of the caller's register state, NOT poison (UB that folds into
+live results under instcombine). All five emission poison sites converted to
+`undef` except the deliberate VSA-Dead path. New warning class `hike: undef-read:`
+(data reads individually, deduped per block+var; the structural model-ABI
+lanes — phantom YMM call args, RDX ret member — aggregate into one per-sub
+summary line, classified via `Abi.is_vector_param_reg`/`is_return_reg`, no
+string matching) — it joins `hike: guarded:` in run_corpus.sh's diagnostics
+table. `check_allocas.sh` gained check (e): zero entry-edge poison phis.
+GOTCHA discovered en route: the def-set must NEVER be unioned INTO the transfer
+set (only filter with it) — unioning it exploded the phi system with
+width-mixed synthetic-slot lanes and produced the va_arg_mixed
+i32-into-i64-phi llc error (fixed same session). Measured: **689 → 0 poison
+phis** corpus-wide (was the single largest UB source), 283 honest `undef`
+entry incomings, `mixed_fp_int` flips the opt gate green (the proven
+poison-class member); the 5 remaining opt-induced failures are all
+instcombine-family = the model-SP-lane/push class (Candidate 3's domain).
+
 | Gate | Command | Current result |
 |---|---|---|
 | unit suite | `dune runtest --force` | **0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
-| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_kb` | **32/32 rc=0** (surviving `hike: guarded:` warnings = the Unbounded class, benign) |
-| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_kb` | **128 passed, 0 failed** ✅ |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb` | **29 PASS, 3 FAIL** of 32 emitted ✅ (the 3 = the SAME knowns below) |
-| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_opt` | **23 PASS, 9 FAIL — RED (born 2026-09-01)** 🔴: 6 opt-induced (fizzbuzz, fptr_table, mixed_fp_int, setjmp_longjmp, struct_arr_dynidx, union_overlap — poison-phi + model-SP-lane classes) + the 3 -O0 knowns. NO exemptions; the red list IS the optimizability program's work-list. Auto-bisect maps: instcombine-alone = poison class; instcombine(CRASH) = fixpoint class; all-passes-red = pre-broken at -O0. |
-| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_kb /tmp/sem_kb8` | **8/8 PASS** ✅ |
+| corpus emission | `bash scripts/run_corpus.sh /tmp/corpus /tmp/heritage_c2` | **32/32 rc=0** ✅ (surviving diagnostics = `hike: guarded:` Unbounded class + the new `hike: undef-read:` class: 173 individual data reads, 58 per-sub ABI summaries) |
+| structural asserts | `bash scripts/check_allocas.sh /tmp/heritage_c2` | **160 passed, 0 failed** ✅ (new check (e): 0 entry-edge poison phis, corpus-wide 0) |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh /tmp/corpus /tmp/heritage_c2 /tmp/sem_c2` | **29 PASS, 3 FAIL** of 32 emitted ✅ (the 3 = the SAME knowns below) |
+| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh /tmp/corpus /tmp/heritage_c2 /tmp/sem_opt_c2` | **24 PASS, 8 FAIL** 🔴→🟡 (born 23/9; `mixed_fp_int` FLIPPED GREEN — the proven poison-class member; the 5 remaining opt-induced = fizzbuzz, fptr_table, setjmp_longjmp, struct_arr_dynidx, union_overlap, ALL instcombine-family = the model-SP-lane/push class, Candidate 3's domain; + the 3 -O0 knowns) |
+| semantics (8-bin) | `bash scripts/semantic/run_semantic.sh /tmp/corpus /tmp/heritage_c2 /tmp/sem_c2_8` | **8/8 PASS** ✅ |
 | probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
 | coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session |

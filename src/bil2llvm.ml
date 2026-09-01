@@ -574,6 +574,38 @@ let create_immidiate word =
            (Word.string_of_value word)
            16
 
+(* [warn_undef_read ctx var blk_tid]: the [hike: undef-read:] anomaly
+   class — a read of a var that no phi lane and no def ever binds in
+   this block (the never-defined class of the definedness closure).  The
+   native semantics is "whatever the caller left in that register" —
+   modeled as [undef].  DATA reads warn individually (deduped per
+   (block, var) so a loop does not spam); the structural model-ABI
+   lanes — the phantom YMM args of extern fallback signatures and the
+   RDX ret member — are classified via the ABI record and only COUNTED
+   into the per-sub summary [create_sub] prints (removing them is
+   Candidate 4's [abi_shape] work; warning each individually would bury
+   the real anomalies in ~208 corpus-wide duplicates). *)
+let warn_undef_read ctx var blk_tid =
+  let v = Var.base var in
+  let abi = Abi.of_target ctx.Convutils.target in
+  let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
+  let sub_key = blk_tid in
+  let warned_vars =
+    match Core.Map.find !(ctx.Convutils.undef_warned) sub_key with
+    | Some r -> r
+    | None ->
+        let r = ref Var.Set.empty in
+        ctx.Convutils.undef_warned :=
+          Core.Map.set !(ctx.Convutils.undef_warned) ~key:sub_key ~data:r;
+        r
+  in
+  if not (Core.Set.mem !warned_vars v) then begin
+    warned_vars := Core.Set.add !warned_vars v;
+    if not is_lane then
+      Printf.eprintf "hike: undef-read: blk %s: var %s never defined\n"
+        (Tid.name blk_tid) (Var.name v)
+  end
+
 let rec create_exp llvm_builder blk_tid exp =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -588,7 +620,20 @@ let rec create_exp llvm_builder blk_tid exp =
   | Var v -> (
       match get_local ctx blk_tid v with
       | Some v -> return v
-      | None -> !$Llvm.poison (typ_lltype_m (Var.typ v)))
+      | None ->
+          (* A read of a var with NO binding in this block — for a var
+             dropped from the transfer set (never defined anywhere in
+             the sub, the definedness closure of [collect_sub_data])
+             or read before any def in a block that defines it.  The
+             native register state at this point is "whatever the
+             caller left there" — modeled as [undef], NOT [poison]:
+             poison is UB and folds into live results under
+             instcombine (the 2026-09-01 optimizability review); undef
+             is merely an unspecified value.  [hike: undef-read:] is
+             the greppable anomaly class (per-sub ABI-lane reads are
+             aggregated by [create_sub] instead of warned here). *)
+          warn_undef_read ctx v blk_tid;
+          !$Llvm.undef (typ_lltype_m (Var.typ v)))
   | Int i -> create_immidiate i
   | Cast (cast, i, exp) ->
       let* var = create_exp llvm_builder blk_tid exp in
@@ -1114,7 +1159,10 @@ let create_call_args blk_tid llvm_builder sub call_tid fr =
         | Some v -> return v
         | None ->
             let* llvm_ctx = Context.get llvm_ctx_var in
-            return @@ Llvm.poison (Llvm.i64_type llvm_ctx)
+            (* the hidden [hike_stack] arg with NO threading lane at this
+               call site — the caller's frame pointer, unspecified here:
+               [undef], not [poison] (no UB to fold; see [create_exp]). *)
+            return @@ Llvm.undef (Llvm.i64_type llvm_ctx)
       else if extern && is_fp_param (Arg.lhs arg) then
         (* the FP arg of an EXTERN call (printf-style): the model's YMM local (i256) must reach the real ABI's XMM register — emit `bitcast (trunc i256 to i64) to double`. Model-to- model calls keep the i256 pass-through (their stored signatures bind the YMM params directly). *)
         let* v = create_exp llvm_builder blk_tid exp in
@@ -1211,8 +1259,11 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
            insert_local ctx blk_tid (Arg.lhs ret) i;
            (match rets with
             | _ :: rd :: _ ->
+                (* the RDX member of a float/double-returning extern: the
+                   native RDX is untouched by the callee — the caller's
+                   state, [undef] not [poison] (see [create_exp]). *)
                 insert_local ctx blk_tid (Arg.lhs rd)
-                  (Llvm.poison (Llvm.i64_type llvm_ctx))
+                  (Llvm.undef (Llvm.i64_type llvm_ctx))
             | _ -> ()))
   | _, [] ->
       Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder |> ignore
@@ -1248,12 +1299,13 @@ let create_return blk_tid llvm_builder cur_sub =
   let* ctx = Context.get emit_ctx_var in
   let* rets =
     KB.List.map (get_rets ctx (Term.tid cur_sub)) ~f:(fun ret ->
-        (* the [%YMM0] FP-return member (the model subs' rets carry it so a double-returning callee — the -O0 `return expr` leaves the value in XMM0 with NO RAX binding — delivers the value to the caller). An int-returning callee never defines YMM0 — poison. *)
+        (* the [%YMM0] FP-return member (the model subs' rets carry it so a double-returning callee — the -O0 `return expr` leaves the value in XMM0 with NO RAX binding — delivers the value to the caller). An int-returning callee never defines YMM0 — [undef] (the caller's register state, not [poison]: UB folds under instcombine). *)
         match get_local ctx blk_tid (Arg.lhs ret) with
         | Some v -> return v
         | None ->
             let* typ = var_lltype (Arg.lhs ret) in
-            return @@ Llvm.poison typ)
+            warn_undef_read ctx (Arg.lhs ret) blk_tid;
+            return @@ Llvm.undef typ)
   in
   (match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -1579,7 +1631,12 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
       let llval =
         match arg with
         | Some arg -> create_exp llvm_builder tid (Arg.rhs arg)
-        | None -> !$Llvm.poison (var_lltype var)
+        | None ->
+            (* a transfer var the sub DOES define (in the definedness
+               closure) but that is not a function arg: its entry-edge
+               value is the caller's register state — [undef], not
+               [poison] (no UB to fold; see [create_exp]'s None arm). *)
+            !$Llvm.undef (var_lltype var)
       in
       !$(insert_local ctx tid var) llval)
   >>= fun () ->
@@ -1606,34 +1663,102 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
   )
 
 (* R4 — single-pass per-sub data: create each LLVM basic block + its llval map AND accumulate the register-transfer set in ONE walk over [blks] (previously [initialize_bbs] and [sub_transfer_vars] each enumerated [blks] separately). *)
-let collect_sub_data ctx llvm_ctx blks fn =
+let collect_sub_data ctx llvm_ctx blks fn sub =
   insert_bb ctx Graphs.Tid.start (Llvm.entry_block fn);
   init_blk_llvals ctx Graphs.Tid.start;
-  (* The per-sub register-transfer set: the block free vars ∪ the call-ARG registers (the BIR call jmp carries no argument list — a call's args are the callee's signature vars, read at the call but INVISIBLE to the. *) 
-  Seq.fold blks
-    ~f:(fun reg_set blk ->
-      let tid = Term.tid blk in
-      init_blk_llvals ctx tid;
-      insert_bb ctx tid (Llvm.append_block llvm_ctx (Term.name blk) fn);
-      let blk_free = Blk.free_vars blk in
-      let call_args =
-        Term.enum jmp_t blk
-        |> Seq.fold ~init:Var.Set.empty ~f:(fun acc jmp ->
-            match Jmp.kind jmp with
-            | Call c -> (
-                match Call.target c with
-                | Direct ctid ->
-                    let args = get_args ctx ctid in
-                    Base.List.fold args ~init:acc ~f:(fun acc arg ->
-                        Core.Set.add acc (Var.base (Arg.lhs arg)))
-                | Indirect _ -> acc)
-            | _ -> acc)
-      in
-      Core.Set.union reg_set (Core.Set.union blk_free call_args))
-    ~init:Var.Set.empty
+  (* The per-sub register-transfer set: the block free vars ∪ the call-ARG registers (the BIR call jmp carries no argument list — a call's args are the callee's signature vars, read at the call but INVISIBLE to the. *)
+  (* The DEFINEDNESS closure, accumulated in the SAME fold: a transfer var
+     only gets a phi lane if the sub can actually produce a value for it.
+     [def_set] = the BIL defs' lhs (post-DCE); [ret_set'] = the ret regs of
+     every direct callee (their call sites BIND those lanes via
+     [create_func_call]'s extractvalue + [insert_local] — no BIL def) and
+     the full [return_regs] under any indirect call (the fallback callee
+     binds every ret reg the same way).  A lane outside this closure is
+     NEVER defined: its phi carried literal [poison] at the entry edge
+     (the [build_entry_block] None arm) — UB that folds into live results
+     under instcombine (the 2026-09-01 optimizability review).  Reads of
+     such a var now fall to [create_exp]'s None arm: [undef] + the
+     [hike: undef-read:] warning — the honest model of "whatever the
+     caller left in that register". *)
+  let defined_and_transfered =
+    Seq.fold blks
+      ~f:(fun (reg_set, def_set) blk ->
+        let tid = Term.tid blk in
+        init_blk_llvals ctx tid;
+        insert_bb ctx tid (Llvm.append_block llvm_ctx (Term.name blk) fn);
+        let blk_free = Blk.free_vars blk in
+        let call_args, call_rets =
+          Term.enum jmp_t blk
+          |> Seq.fold ~init:(Var.Set.empty, Var.Set.empty) ~f:(fun (acc, rets) jmp ->
+              match Jmp.kind jmp with
+              | Call c -> (
+                  let rets, args =
+                    match Call.target c with
+                    | Direct ctid ->
+                        ( Base.List.fold (get_rets ctx ctid) ~init:rets
+                            ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg))),
+                          get_args ctx ctid )
+                    | Indirect _ ->
+                        (* the indirect-call fallback callee binds every
+                           ret reg of the convention ([convutils]'s fallback) *)
+                        ( Core.Set.union rets (ret_set ctx),
+                          [] )
+                  in
+                  ( Base.List.fold args ~init:acc ~f:(fun acc arg ->
+                        Core.Set.add acc (Var.base (Arg.lhs arg))),
+                    rets ))
+              | _ -> (acc, rets))
+        in
+        let blk_defs =
+          Blk.elts blk
+          |> Seq.fold ~init:Var.Set.empty ~f:(fun acc elt ->
+                 match elt with
+                 | `Def def -> Core.Set.add acc (Var.base (Def.lhs def))
+                 (* BIL Phi nodes are not emitted ([create_elts] skips them)
+                    but their lhs IS a definedness source — completeness over
+                    every element form; today's lifted x86 BIL never carries
+                    them, a future producer must not silently lose its lane. *)
+                 | `Phi phi -> Core.Set.add acc (Var.base (Phi.lhs phi))
+                 | _ -> acc)
+        in
+        ( Core.Set.union (Core.Set.union reg_set (Core.Set.union blk_free call_args))
+            call_rets,
+          Core.Set.union (Core.Set.union def_set blk_defs) call_rets ))
+      ~init:(Var.Set.empty, Var.Set.empty)
+  in
+  let reg_set, def_set = defined_and_transfered in
+  let arg_set =
+    Base.List.fold (get_args ctx (Term.tid sub)) ~init:Var.Set.empty
+      ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg)))
+  in
+  (* NOTE: [def_set] (and the callee [call_rets] it unions) is a
+     DEFINEDNESS witness for the filter below — it must NEVER be unioned
+     into the transfer set itself: defs' lhs vars that are not read
+     across a block boundary are not transfer vars, and adding them
+     explodes the phi system with width-mixed synthetic-slot lanes (the
+     va_arg_mixed i32-slot-binding-into-i64-phi crash: a stack_to_locals
+     slot var binds an i32 load where the var's phi is i64). *)
+  reg_set
   |> Core.Set.union (ret_set ctx)
+  |> Core.Set.union arg_set
   |> Core.Set.filter ~f:(fun var ->
-      (not @@ is_mem var) || Var.same var (pc ctx.Convutils.target))
+      ((not @@ is_mem var) || Var.same var (pc ctx.Convutils.target))
+      (* keep sp/fp: [build_entry_block] binds them at the entry edge
+         (anchor_i64 / fp anchor) on the degraded path, and on precise
+         subs [create_call_args] threads [hike_stack] — never sp — but
+         their lanes are ret-set-independent and cheap to keep. *)
+      || Var.same var (sp ctx.Convutils.target)
+      || Var.same var (fp ctx.Convutils.target))
+  |> Core.Set.filter ~f:(fun var ->
+      (* the phi-lane filter: never-defined vars drop out of the transfer
+         set entirely (their phis, all 689 corpus-wide, were fully-poison);
+         vars the sub CAN define keep their lanes — [build_entry_block]'s
+         None arm gives them [undef] instead of [poison] at the entry
+         edge (caller register state, not UB). *)
+      Core.Set.mem def_set var
+      || Core.Set.mem arg_set var
+      || Var.same var (sp ctx.Convutils.target)
+      || Var.same var (fp ctx.Convutils.target))
   |> Core.Set.to_list
 
 
@@ -1778,7 +1903,7 @@ let create_sub sub =
     clear_bbs ctx;
     clear_blk_llvals ctx;
     let abi = Abi.of_target ctx.Convutils.target in
-    let transfer_vars = collect_sub_data ctx llvm_ctx blks fn in
+    let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
     (* The per-sub VSA frame: the tag span [min_lo, max_hi] of [Convutils.vsa_offsets] — every stack access of the sub lands in this alloca (the singleton GEPs and the interval-path dynamic addresses both). *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
     let tags =
@@ -1852,6 +1977,25 @@ let create_sub sub =
     >>= build_entry_block llvm_builder transfer_vars fr sub fn
     >>= fun fr -> populate_blks transfer_vars blks sub sub_info fr ()
     >>= update_phis transfer_vars blks sub
+    >>= fun () ->
+    (* the per-sub [hike: undef-read:] ABI-lane summary: the structural
+       model-ABI reads (phantom YMM call args, the RDX ret member) were
+       COUNTED, not individually warned, by [warn_undef_read] — one line
+       here keeps them visible without burying the data-read anomalies.
+       Removing the lanes outright is the [abi_shape] work (Candidate 4). *)
+    let sub_tid = Term.tid sub in
+    let lane_reads =
+      Core.Map.fold !(ctx.Convutils.undef_warned) ~init:Var.Set.empty
+        ~f:(fun ~key:_ ~data:warned_vars acc ->
+          Core.Set.union acc !warned_vars)
+      |> Core.Set.filter ~f:(fun v ->
+             let abi = Abi.of_target ctx.Convutils.target in
+             Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v)
+    in
+    if not (Core.Set.is_empty lane_reads) then
+      Printf.eprintf "hike: undef-read: sub %s: %d never-defined model-ABI lane read(s) [undef]\n"
+        (Tid.name sub_tid) (Core.Set.length lane_reads);
+    return ()
 
 let create_empty_llvm_i8array llvm_ctx size =
   Array.init size (fun _ -> Llvm.const_int (Llvm.i8_type llvm_ctx) 0)

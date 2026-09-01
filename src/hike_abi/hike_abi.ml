@@ -53,6 +53,16 @@ let is_callee_saved (t : t) (v : var) : bool =
   Base.List.exists t.callee_saved ~f:(Var.same v)
 let is_preserved (t : t) (v : var) : bool =
   is_stack_reg t v || is_callee_saved t v
+(* the model-ABI structural lanes: the vector param registers (the
+   phantom YMM args of the extern fallback signature) and the integer
+   return registers (the RDX member of the {i64,i64} model return).
+   A never-defined read of one of these is STRUCTURAL (the model ABI
+   carries the whole register file), not an anomaly — the [hike:
+   undef-read:] class aggregates them per-sub instead of warning each. *)
+let is_vector_param_reg (t : t) (v : var) : bool =
+  Base.List.exists t.vector_param_regs ~f:(Var.same v)
+let is_return_reg (t : t) (v : var) : bool =
+  Base.List.exists t.return_regs ~f:(Var.same v)
 
 (* ------------------------------------------------------------------ *)
 (* Target-derived registers and sizes (ex-Targetutils)                 *)
