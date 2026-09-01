@@ -342,11 +342,14 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
     Base.List.fold probe_res.Convutils.offsets ~init:Tid.Set.empty ~f:(fun s (t, _) ->
         Core.Set.add s t)
   in
-  (* TEMPORARY MEASUREMENT PATCH (2026-09-01, reverted after the timing runs):
-     the 100% assert is neutralized to a warning so the full-conversion timing
-     over ALL functions can complete (the assert fires after the sub's fixpoint
-     cost is paid — the timing is undistorted). The warning enumerates the
-     violating subs: data for the PARKED later fix. *)
+  (* The 100% VSA TAGGING INVARIANT CHECK (PARKED 2026-09-01 by the user:
+     "That is a later fix, not now" — the assert crashed the big-binary
+     conversions; see the ticket
+     .scratch/100-invariant-gaps/01-diagnose-and-fix.md): neutralized to a
+     WARNED gap that enumerates the violating sub+def so the conversions
+     complete soundly (non-seeding is the raw-memory fallback; no unsound
+     conversion happens). Restoring the hard invariant is the ticket's
+     first step. *)
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun blk ->
       Term.enum def_t blk

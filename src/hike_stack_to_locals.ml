@@ -549,7 +549,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
       :: acc)
   |> Base.List.rev
 
-(* [abis_visible sp ~tag_of ~k_of d]: THE ABI-vibility rule — does this
+(* [is_abi_visible sp ~tag_of ~k_of d]: THE ABI-VISIBILITY rule — does this
    access touch storage the CALLER or CALLEE can see, so it must stay in
    real memory (never a private [stack_rN] alloca)?
 
@@ -802,20 +802,19 @@ let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term) :
 
    The whole-sub rules, in order:
    1. a degraded / non-convergent VSA falls back (no tags to trust);
-   2. an untagged / [Infinite] / [Unbounded] / [VLA] access — no bound,
-      so no sized alloca can hold it;
+   2. an untagged / [Infinite] / [Unbounded] / [VLA] stack access has
+      no bound — its storage cannot be a sized alloca (the write-closed
+      rule: a sub with one cannot split at all);
       (the ESCAPE rule is NOT a whole-sub rule: it is a PER-REGION
       convertibility rule — see [regions_of_sub]. [stack_to_locals]
       consults [convertible] even on the fallback path, so the escape
       gate must live with the region flag, not here.)
-   3. an untagged / [Infinite] / [Unbounded] / [VLA] stack access has
-      no bound — its storage cannot be a sized alloca;
-   4. no convertible region means nothing to split;
-   5. a VLA overlapping a convertible region splits the storage;
-   6. every tagged access must lie INSIDE a convertible region (or,
+   3. no convertible region means nothing to split;
+   4. a VLA overlapping a convertible region splits the storage;
+   5. every tagged access must lie INSIDE a convertible region (or,
       for the positive/incoming-arg offsets, be disjoint from all of
       them — those read the caller's frame through [hike_stack]);
-   7. the region alloca sizes must be sane. *)
+   6. the region alloca sizes must be sane. *)
 let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : Convutils.split_plan =
   if info.Convutils.degraded then []

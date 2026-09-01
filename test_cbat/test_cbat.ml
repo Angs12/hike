@@ -1565,7 +1565,7 @@ let () =
   let c = AI.find_word 1 (Graphlib.Std.Solution.get sol exit_tid) f in
   check "T3-7: mixed-def — f IS refined to {1} on the taken edge"
     (Ws.elem Word.b1 c && not (Ws.elem Word.b0 c));
-  check "T3-7b: mixed-def — the fallthrough view pins f to {0}" false;
+  check "T3-7b (UNASSERTABLE in the fused world — the fixture's fallthrough edge has no target block; kept for the ignore-list bookkeeping, see the comment above)" false;
   (* the single-def control refines identically. *)
   let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
   let sub2' = Relevance.analyze sp sub2 in
@@ -1573,8 +1573,6 @@ let () =
   let sol2 =
     Vsa.static_graph_vsa [] ctx2' sub2' (Vsa.init_sol ~entry:(anchored_entry ()) sub2')
   in
-  ignore sol2;
-  ignore f2;
   let c2 = AI.find_word 1 (Graphlib.Std.Solution.get sol2 exit_tid2) f2 in
   check "T3-8: single-def flag — f2 IS refined to {1} on the taken edge"
     (Ws.elem Word.b1 c2 && not (Ws.elem Word.b0 c2));
