@@ -34,6 +34,34 @@ let ret_replacement (j : jmp term) : jmp term =
       | _ -> j)
   | _ -> j
 
+(* MEM-FISSION (2026-09-02) — the region mem vars ([stack_rN_mem],
+   [hike_stack_to_locals]'s fission): recognized by NAME CONVENTION (the
+   design's decision — deterministic, greppable, no plumbing). *)
+let is_region_mem (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
+  && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+
+(* The LOAD-ROOTS set: vars read as a Load's mem OPERAND (plus every
+   non-store read — jmp/phi/bare-Var uses — BNF1 never produces bare
+   mem reads, but the sweep is sound either way).  A fissioned region
+   var's store-to-store chains do NOT self-keep through this set: a
+   Store's mem-operand use is a WRITE-position use, invisible here.
+   [used_of] (below) keeps the ordinary global union for everything
+   else — the region vars are special-cased ONLY in [keep]. *)
+let load_roots_of (sub : sub term) : Var.Set.t =
+  let roots =
+    object
+      inherit [Var.Set.t] Term.visitor
+      method! visit_load ~mem ~addr:_ _ _ acc =
+        Core.Set.union acc (Exp.free_vars mem)
+      (* jmps / phis read vars as a whole — count them (they cannot
+         appear as a bare mem read per BNF1, but counting is sound). *)
+      method! visit_jmp j acc = Core.Set.union acc (Jmp.free_vars j)
+      method! visit_phi p acc = Core.Set.union acc (Phi.free_vars p)
+    end
+  in
+  roots#visit_sub sub Var.Set.empty
+
 (* Vars referenced by any def, jmp, or phi in the sub. *)
 let used_of (sub : sub term) : Var.Set.t =
   let v =
@@ -88,12 +116,27 @@ let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   | None -> false
   | Some info -> Hike_stack_to_locals.is_precise info
 
-let keep ?(precise=false) ~target (d : def term) (used : Var.Set.t) : bool =
+(* MEM-FISSION — the two-tier keep (the design's Q4): a def whose lhs
+   is a REGION mem var survives iff its var has a LOAD-ROOT somewhere
+   (a Load from the same var exists in the sub); Store-side mem uses do
+   not count (that is the self-keep the fission deletes).  The lifter's
+   own [mem] KEEPS the unconditional is_mem keep — it carries the
+   ABI/external/outgoing traffic the callee reads (the sub-local
+   used-set cannot see those).  [load_roots] is threaded by
+   [sweep_fixpoint]. *)
+let keep ?(precise=false) ?(load_roots=Var.Set.empty)
+    ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
   else
     let lhs = Def.lhs d in
-    Core.Set.mem used lhs || is_ret_reg target lhs || Convutils.is_mem lhs
-    || is_call_reg target lhs || is_intrinsic_var lhs
+    if is_region_mem lhs then
+      Core.Set.mem load_roots lhs
+      (* a fissioned store with no loads from its var: DEAD — the whole
+         chain (store-to-store rewrites) dies together in one sweep
+         round; the fixpoint loop re-runs to stability. *)
+    else
+      Core.Set.mem used lhs || is_ret_reg target lhs || Convutils.is_mem lhs
+      || is_call_reg target lhs || is_intrinsic_var lhs
 
 let def_count (sub : sub term) : int =
   Term.enum blk_t sub
@@ -104,9 +147,13 @@ let def_count (sub : sub term) : int =
 let rec sweep_fixpoint ~target (sub : sub term) : sub term =
   let precise = is_precise_sub target sub in
   let used = used_of sub in
+  (* MEM-FISSION: the load-roots set (recomputed per round — a removed
+     load can un-root a chain, and the fixpoint handles the cascade). *)
+  let load_roots = load_roots_of sub in
   let sub' =
     Term.map blk_t sub ~f:(fun blk ->
-        Term.filter def_t blk ~f:(fun d -> keep ~precise ~target d used))
+        Term.filter def_t blk ~f:(fun d ->
+            keep ~precise ~load_roots ~target d used))
   in
   if def_count sub' = def_count sub then sub' else sweep_fixpoint ~target sub'
 
