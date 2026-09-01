@@ -1121,21 +1121,23 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
    sub's locals; only the `hike_stack` arg survives; no SP local to rebind).
    Skipped when there is no fallthrough (noreturn / tail call — execution
    never returns). Skipped when the SP local is unbound in the call block
-   (defensive: should not happen, but a no-op is sound).
-
-   DELETED 2026-09-01 (Candidate 3 commit 1): [Hike_model_clean] (hike-filter
-   stage 1) deletes the call-adjacent retaddr push pair BEFORE emission, so
-   the caller's SP local is FLAT across calls — there is no push to undo,
-   and a [+8] here would drift the lane UP per call (the exact L-E1e bug
-   class this function was built to fix; the mainline EDGE-KEYED dominance
-   fix addressed where the restored value must live for multi-call-pred
-   fallthroughs — with the restore gone entirely, that question is moot).
-   The [+8] compensation the convention still needs lives ONE place now:
-   [create_call_args] threads [sp - 8] as the callee's hike_stack. *)
+   (defensive: should not happen, but a no-op is sound). *)
 let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
   let open KB in
-  let _ = (llvm_builder, ctx, sub_tid, fr, fallthrough_tid) in
-  return ()
+  if fr.is_precise then return ()
+  else
+    let sp_key = sp ctx.Convutils.target in
+    match get_local ctx sub_tid sp_key with
+    | None -> return ()
+    | Some post_push ->
+        let* llvm_ctx = Context.get llvm_ctx_var in
+        let restored =
+          Llvm.build_add post_push
+            (Llvm.const_int (Llvm.i64_type llvm_ctx) 8) "sp_restored"
+            llvm_builder
+        in
+        insert_local ctx fallthrough_tid sp_key restored;
+        return ()
 
 let create_call_args blk_tid llvm_builder sub call_tid fr =
   let open KB in
@@ -1146,29 +1148,10 @@ let create_call_args blk_tid llvm_builder sub call_tid fr =
   KB.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
       if Var.same (Arg.lhs arg) Convutils.hike_stack_var then
-        (* M2: thread hike_stack — precise caller passes its own hike_stack (no current RSP), degraded passes current RSP.
-           CANDIDATE 3 COMPENSATION (2026-09-01): [Hike_model_clean] deleted the
-           call-adjacent retaddr push pair in hike-filter, so the caller's SP
-           local at the call is the PRE-push value — but the callee's baked
-           [+8] arg tags assume the retaddr cell sits directly below the args
-           (hike_stack = the would-be POST-push sp).  Thread [sp - 8]:
-           machine-arithmetic — the caller's arg pushes end at sp, the
-           first stack arg lives at [sp] and [sp - 8 + 8] lands exactly
-           there.  One [sub] per call; the lane itself stays flat. *)
-        let* v_opt =
-          if fr.is_precise then
-            KB.return (get_local ctx blk_tid Convutils.hike_stack_var)
-          else
-            match get_local ctx blk_tid (sp ctx.Convutils.target) with
-            | Some spv ->
-                let* llvm_ctx = Context.get llvm_ctx_var in
-                let base =
-                  Llvm.build_sub spv
-                    (Llvm.const_int (Llvm.i64_type llvm_ctx) 8)
-                    "hike_stack_arg" llvm_builder
-                in
-                KB.return (Some base)
-            | None -> KB.return None
+        (* M2: thread hike_stack — precise caller passes its own hike_stack (no current RSP), degraded passes current RSP. *)
+        let v_opt =
+          if fr.is_precise then get_local ctx blk_tid Convutils.hike_stack_var
+          else get_local ctx blk_tid (sp ctx.Convutils.target)
         in
         let v_opt = match v_opt with Some _ -> v_opt | None -> get_local ctx blk_tid Convutils.hike_stack_var in
         let v_opt = match v_opt with Some _ -> v_opt | None -> get_local ctx blk_tid (sp ctx.Convutils.target) in
@@ -1349,28 +1332,11 @@ let fp_intrinsic_name = strip_at
 
 let native_fp_op (name : string) : native_fp option =
   match fp_intrinsic_name name with
-  (* The width-suffixed names (the sse-binary TABLE FIX — mainline adce4dd,
-     ported to this branch: sse-convert always appended (symbol-of-size rt);
-     sse-binary now does too — the SS class (rt=32) and the SD class
-     (rt=64) are DISTINCT callee subs, the width knowable from the name
-     alone; the unsuffixed legacy spellings stay mapped). *)
-  | "intrinsic:fmul_rne_ieee754_binary_64" -> Some FMUL
-  | "intrinsic:fmul_rne_ieee754_binary_32" -> Some FMUL
-  | "intrinsic:fadd_rne_ieee754_binary_64" -> Some FADD
-  | "intrinsic:fadd_rne_ieee754_binary_32" -> Some FADD
-  | "intrinsic:fsub_rne_ieee754_binary_64" -> Some FSUB
-  | "intrinsic:fsub_rne_ieee754_binary_32" -> Some FSUB
-  | "intrinsic:fdiv_rne_ieee754_binary_64" -> Some FDIV
-  | "intrinsic:fdiv_rne_ieee754_binary_32" -> Some FDIV
-  | "intrinsic:frem_rne_ieee754_binary_64" -> Some FREM
-  | "intrinsic:frem_rne_ieee754_binary_32" -> Some FREM
   | "intrinsic:fmul_rne_ieee754_binary" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary" -> Some FADD
   | "intrinsic:fsub_rne_ieee754_binary" -> Some FSUB
   | "intrinsic:fdiv_rne_ieee754_binary" -> Some FDIV
   | "intrinsic:frem_rne_ieee754_binary" -> Some FREM
-  | "intrinsic:forder_ieee754_binary_64" -> Some FADD
-  | "intrinsic:forder_ieee754_binary" -> Some FADD
   | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
   | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
   | _ -> None
