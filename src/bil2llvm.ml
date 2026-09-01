@@ -1870,16 +1870,16 @@ let update_phi transfer_vars blk_incoming blk_tid =
               return ()
           | None -> failwith "update_phi: phi_reg not found"))
 
-let update_phis transfer_vars blks sub () =
-  let open KB in
-  let cfg = Sub.to_graph sub in
-  (* The per-(pred, target) EDGE MULTIPLICITY: the number of the pred's
-     JMP TERMS targeting the block (1 for a plain goto; 2 for a
-     same-target conditional [If(c, L, L)]; absent = the entry fallthrough
-     edge, multiplicity 1). *)
-  let edge_count : (Tid.t, (Tid.t, int) EHashtbl.t) EHashtbl.t =
-    EHashtbl.create (module Tid)
-  in
+(* [edge_counts_of_sub sub]: the per-(pred, target) JMP-TERM multiplicity —
+   PURE, EAGER, OUTSIDE any monad (KB's Seq.iter composes lazily: the
+   2026-09-01 in-monad form never ran its [bump] effects, edge_count
+   stayed empty, and the same-target-conditional preds never duplicated
+   — csplit/du/expr/factor/nl/ptx/tac at llc). One entry per emitted
+   terminator edge: a plain goto -> 1; a both-edges same-target
+   conditional ([If(c, L, L)]) -> 2. *)
+let edge_counts_of_sub (sub : sub term) :
+    (Tid.t, (Tid.t, int) EHashtbl.t) EHashtbl.t =
+  let edge_count = EHashtbl.create (module Tid) in
   let bump (ptid : Tid.t) (t : Tid.t) : unit =
     let inner =
       match EHashtbl.find edge_count ptid with
@@ -1889,31 +1889,34 @@ let update_phis transfer_vars blks sub () =
           EHashtbl.set edge_count ~key:ptid ~data:h;
           h
     in
-    let cur =
-      match EHashtbl.find inner t with
-      | Some n -> n
-      | None -> 0
-    in
+    let cur = match EHashtbl.find inner t with Some n -> n | None -> 0 in
     EHashtbl.set inner ~key:t ~data:(cur + 1)
   in
-  let count_edges (pb : blk term) : unit KB.t =
-    let ptid = Term.tid pb in
-    Term.enum jmp_t pb
-    |> Seq.iter ~f:(fun j ->
-        match Jmp.kind j with
-        | Goto (Direct t) | Ret (Direct t) -> return (bump ptid t)
-        | _ -> return ())
-  in
-  ignore (Term.enum blk_t sub |> Seq.iter ~f:count_edges);
+  Term.enum blk_t sub
+  |> Seq.iter ~f:(fun pb ->
+      let ptid = Term.tid pb in
+      Term.enum jmp_t pb
+      |> Seq.iter ~f:(fun j ->
+          match Jmp.kind j with
+          | Goto (Direct t) | Ret (Direct t) -> bump ptid t
+          | _ -> ()));
+  edge_count
+
+let update_phis transfer_vars blks sub () =
+  let open KB in
+  let edge_count = edge_counts_of_sub sub in
+  let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
       (* EDGE-MULTISET preds: BAP's [Graphs.Tid.Node.preds] is the
          per-block SET (including the ENTRY fallthrough edge, which has
          no jmp term); LLVM's CFG is a multigraph — the phi needs ONE
          ENTRY PER EDGE ("PHINode should have one entry for each
-         predecessor"). Each graph pred expands by its edge count (>= 1
-         by construction; absent = the entry edge, 1). No CFG
-         modification: the phi matches the CFG as emitted. *)
+         predecessor": a same-target conditional emits cond_br(L, L)
+         and LLVM lists the pred TWICE). Each graph pred expands by its
+         [edge_counts_of_sub] multiplicity (>= 1 by construction;
+         absent = the entry edge, 1). No CFG modification: the phi
+         matches the CFG as emitted. *)
       let blk_incoming =
         Graphs.Tid.Node.preds blk_tid cfg
         |> Base.Sequence.to_list
@@ -1921,8 +1924,7 @@ let update_phis transfer_vars blks sub () =
             let n =
               match
                 EHashtbl.find edge_count ptid
-                |> Base.Option.bind ~f:(fun h ->
-                    EHashtbl.find h blk_tid)
+                |> Base.Option.bind ~f:(fun h -> EHashtbl.find h blk_tid)
               with
               | Some n -> n
               | None -> 1
@@ -1950,6 +1952,28 @@ let create_control_flow llvm_builder blk sub fr () =
   | CallFun | CallFunVoid ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call llvm_builder (Term.tid blk) blk sub call fr
+
+let transfer_with_phis transfer_vars llvm_builder blk_tid () =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  KB.List.iter transfer_vars ~f:(fun var ->
+      let* typ = var_lltype var in
+      let res = Llvm.build_empty_phi typ "" llvm_builder in
+      insert_phi ctx blk_tid var res;
+      insert_local ctx blk_tid var res;
+      return ())
+
+let create_elts llvm_builder blk sub_tid sub_info fr () =
+  let open KB in
+  let tid = Term.tid blk in
+  Blk.elts blk
+  |> Seq.iter ~f:(fun elt ->
+      match elt with
+      | `Def def -> create_def tid llvm_builder sub_tid sub_info fr def
+      | `Phi _ -> return ()
+      | `Jmp _ -> return ())
+
+
 
 let transfer_with_phis transfer_vars llvm_builder blk_tid () =
   let open KB in
