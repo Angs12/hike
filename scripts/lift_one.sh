@@ -8,7 +8,7 @@ name="$1"
 BINS="$2"; IR="$3"; OUT="$4"; TIMES="$5"; LLOG="$6"
 b="$BINS/$name"; ll="$IR/out_$name.ll"
 t0=$(date +%s.%N)
-if timeout 600 bap "$b" --pass=hike-convlir \
+if timeout 600 bap "$b" --no-cache --pass=hike-convlir \
        --hike-output-file="$ll" > "$OUT/$name.bap.log" 2>&1 \
    && [ -s "$ll" ]; then
     echo "OK   $name" >> "$LLOG"
