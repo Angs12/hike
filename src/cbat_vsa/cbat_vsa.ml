@@ -3539,7 +3539,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
            [incoming] alone would NOT do: after a head widens, the preds
            join STRICTLY below it, so equality-vs-incoming would misfire
            on every stable visit. *)
-        if Stages.time `Equal (fun () -> AI.equal old (AI.join old incoming))
+        (* F4 — bound the join ONCE: the stability check, the `Zero`
+           arm, and the non-head else branch all consume
+           [AI.join old incoming]. Computing it three times triples the
+           record join (memories + words + frame) at every unstable
+           head visit. [j] is the exact same value in all three sites. *)
+        let j = AI.join old incoming in
+        if Stages.time `Equal (fun () -> AI.equal old j)
         then old
         else begin
         (* Landmark-directed widening (Simon & King, APLAS 2006, Figure 3)
@@ -3572,7 +3578,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             r
           | `Zero ->
             Cbat_landmarks.lm_advance v;
-            AI.join old incoming
+            j
           | `Inf ->
             Stages.time `Widen (fun () -> AI.widen_join old incoming)
         in
@@ -3580,6 +3586,9 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         res
         end
       end else
+        (* F4 — the non-head path: a single bare join; [j] is scoped to
+           the head branch above, so recompute here (one join, same as
+           before the reuse). *)
         AI.join old incoming
     in
     if not (AI.equal old new_val) then (set v new_val; true) else false
