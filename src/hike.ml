@@ -157,7 +157,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
         let vsa_positive =
           Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
           |> Base.Option.value_map ~default:false ~f:(fun info ->
-              Base.List.exists info.Convutils.offsets ~f:(fun (_, kind) ->
+              Core.Map.exists info.Convutils.offsets ~f:(fun kind ->
                   Convutils.is_positive_kind kind))
         in
         let bil_positive =
@@ -691,7 +691,7 @@ let () =
                  in
                  if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
                    Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
-                     (Sub.name sub) (List.length info.Convutils.offsets);
+                     (Sub.name sub) (Core.Map.length info.Convutils.offsets);
                  acc := Core.Map.set !acc ~key:(Term.tid sub) ~data:info;
                  KB.return ())
            end;
@@ -711,7 +711,7 @@ let () =
            (if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
               Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->
                   Printf.eprintf "hike: stl: %d tag(s)\n"
-                    (List.length info.Convutils.offsets)));
+                    (Core.Map.length info.Convutils.offsets)));
            proj);
       (* The emitting pass: runs last, on the filtered + stack-to-locals + VSA-tagged project its deps deliver (the dep chain enforces vsa -> stack-to-locals -> convlir). *)
       (* The aggressive DCE — [Hike_dce.dce] eliminates the lifted RETURN epilogue (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn` — the emitter emits a real LLVM [ret] anyway; the retaddr slot read drops out of the free-vars-as- args signature with it) and sweeps never-used defs. *)

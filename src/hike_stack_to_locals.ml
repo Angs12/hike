@@ -240,17 +240,14 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
 let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) ~(frame_escaped : bool) :
     Convutils.region list =
-  (* C4 — the shared DERIVED INDEX ([Convutils.index_of]): one builder,
-     one representation. *)
-  let idx = Convutils.index_of info in
-  let k_of = idx.Convutils.k_of in
+  (* [offsets]/[k_ranges] are MAPS: [k_of] is the record's own field (no
+     refold), and [ranges] filters [offsets] in one pass. *)
+  let k_of = info.Convutils.k_ranges in
   let ranges : (int64 * int64) Tid.Map.t =
-    Base.List.fold_left info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) ->
-        match kind with
-        | Convutils.Range (lo, hi) ->
-            Core.Map.set m ~key:dtid ~data:(lo, hi)
-        | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> m)
+    Core.Map.filter_map info.Convutils.offsets ~f:(fun kind ->
+      match kind with
+      | Convutils.Range (lo, hi) -> Some (lo, hi)
+      | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> None)
   in
   let abi =
     (* TOTAL: the unit fixtures analyze [Theory.Target.unknown], which has
@@ -581,17 +578,7 @@ let is_abi_visible (sp : var)
    sub's [vsa_info] — the form the emitter uses. *)
 let abi_visibility_of (sp : var) (info : Convutils.vsa_info) :
     def term -> bool =
-  let idx = Convutils.index_of info in
-  is_abi_visible sp ~tag_of:idx.Convutils.tag_of ~k_of:idx.Convutils.k_of
-
-(* [abi_visibility_of_index sp idx]: the SAME rule over a PRE-BUILT index
-   (C4). The [vsa_info] form above is kept for the consumers that already
-   hold the record; the emitter — which calls the rule per def — builds
-   the index once per sub and uses this form, so the tag/k-range maps are
-   no longer rebuilt on every call. *)
-let abi_visibility_of_index (sp : var) (idx : Convutils.vsa_index) :
-    def term -> bool =
-  is_abi_visible sp ~tag_of:idx.Convutils.tag_of ~k_of:idx.Convutils.k_of
+  is_abi_visible sp ~tag_of:info.Convutils.offsets ~k_of:info.Convutils.k_ranges
 
 (* ------------------------------------------------------------------ *)
 (* THE STACK MODEL DECISION — the single producer ([split_plan]).       *)
@@ -709,7 +696,7 @@ let frame_addr_alias (sp : var) (target : Theory.Target.t) (sub : sub term) :
    would straddle two allocations). *)
 let vla_overlaps_convertible (info : Convutils.vsa_info)
     (convertible : Convutils.region list) : bool =
-  Base.List.exists info.Convutils.vla_bounds ~f:(fun (_, (_lo, hi)) ->
+  Core.Map.exists info.Convutils.vla_bounds ~f:(fun (_lo, hi) ->
       let max_size = hi in
       if Int64.compare max_size 0L <= 0 then false
       else
@@ -735,8 +722,8 @@ let has_vla_dynamic_alloc (sub : sub term) : bool =
    (its storage would straddle the private alloca and the frame). *)
 let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
-  (* C4 — the shared index (see [regions_of_sub]). *)
-  let tag_of = (Convutils.index_of info).Convutils.tag_of in
+  (* the record's own map (see [regions_of_sub]). *)
+  let tag_of = info.Convutils.offsets in
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
          Term.enum def_t blk
@@ -760,8 +747,8 @@ let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
 let tags_inside_or_disjoint (info : Convutils.vsa_info)
     (convertible : Convutils.region list) : bool =
   Core.Map.for_all
-    (* C4 — the shared index (see [regions_of_sub]). *)
-    (Convutils.index_of info).Convutils.tag_of
+    (* the record's own map (see [regions_of_sub]). *)
+    info.Convutils.offsets
     ~f:(fun kind ->
       match kind with
       | Convutils.Infinite _ | Convutils.Unbounded -> false
@@ -828,7 +815,7 @@ let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
       let should_degrade_vla =
         vla_overlaps_convertible info convertible
         || (has_vla_dynamic_alloc sub
-           && Base.List.is_empty info.Convutils.vla_bounds)
+           && Core.Map.is_empty info.Convutils.vla_bounds)
       in
       if should_degrade_vla then []
       else if not (tags_inside_or_disjoint info convertible) then []
@@ -848,19 +835,17 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
     |> Base.Option.value
          ~default:
-           { Convutils.offsets = []; k_ranges = []; regions = [];
-             stack_plan = []; degraded = false; vla_bounds = [] }
+           Convutils.empty_vsa_info
   in
-  (* C4 — the shared index (see [regions_of_sub]). *)
-  let idx0 = Convutils.index_of info in
-  let tag_of = idx0.Convutils.tag_of in
+  (* the record's own maps (see [regions_of_sub]). *)
+  let tag_of = info.Convutils.offsets in
   (* lo >= 0 means the access is in the incoming-arg area (entry-relative
      offset); keep it in memory. Local stack slots have lo < 0. For
      outgoing stack args (mem[RSP] stores for 7th+ args), lo <0 but they
      are still ABI-visible (they must remain in memory for the callee's
      hike_stack+offset loads), so we also keep RSP-relative stores with
      k >=0. *)
-  let k_of = idx0.Convutils.k_of in
+  let k_of = info.Convutils.k_ranges in
   (* ONE ABI-visibility rule (Finding 1) — the module-level
      [is_abi_visible], the same one the emitter calls. *)
   let is_abi_visible = is_abi_visible sp ~tag_of ~k_of in

@@ -729,27 +729,26 @@ let create_branches blk_tid llvm_builder branches =
    tag, singleton (lo = hi) and interval (lo < hi) alike — the split
    happens in [create_def].
 
-   C4 — the lookup is now O(log n) into the per-sub DERIVED INDEX
-   ([Convutils.vsa_index], built once where the sub's [vsa_info] is
-   already in hand) instead of a linear [List.find_map] over every tag of
-   the sub: the emitter called this per def, so the old shape was
-   O(defs x tags) per sub (3781 defs x 331 tags on ls's hot sub). *)
-let find_def_tag (idx : Convutils.vsa_index) (def : def term) =
-  Core.Map.find idx.Convutils.tag_of (Term.tid def)
+   C4 — [offsets] is a MAP keyed by the def's tid, so this is an O(log n)
+   lookup instead of a linear scan of every tag of the sub: the emitter
+   calls it per def, so the old list shape was O(defs x tags) per sub
+   (3781 defs x 331 tags on ls's hot sub). *)
+let find_def_tag (idx : Convutils.vsa_info) (def : def term) =
+  Core.Map.find idx.Convutils.offsets (Term.tid def)
 
-(* [find_def_k idx def]: the def's k-range (absent -> None, the conservative local treatment). C4 — the indexed form (see [find_def_tag]). *)
-let find_def_k (idx : Convutils.vsa_index) (def : def term) =
-  Core.Map.find idx.Convutils.k_of (Term.tid def)
+(* [find_def_k idx def]: the def's k-range (absent -> None, the conservative local treatment). C4 — a map lookup (see [find_def_tag]). *)
+let find_def_k (idx : Convutils.vsa_info) (def : def term) =
+  Core.Map.find idx.Convutils.k_ranges (Term.tid def)
 
 (* [is_abi_visible ctx ~idx def]: does the access touch caller/callee-visible
    storage? Finding 1: this is NO LONGER a second copy of the rule — it is
    [Hike_stack_to_locals]'s, the module that owns the stack model. The emitter
    is a consumer.
 
-   C4 — the rule is formed ONCE per sub over the index ([abi_visibility_
-   of_index]) instead of rebuilding the tag/k-range maps on every call. *)
-let is_abi_visible ctx ~(idx : Convutils.vsa_index) (def : def term) =
-  Hike_stack_to_locals.abi_visibility_of_index (sp ctx.Convutils.target) idx def
+   C4 — the rule reads the record's own maps, so nothing is rebuilt per
+   call. *)
+let is_abi_visible ctx ~(idx : Convutils.vsa_info) (def : def term) =
+  Hike_stack_to_locals.abi_visibility_of (sp ctx.Convutils.target) idx def
 
 (* [is_stack_access def]: is [def] a Stack Access — the [stack_access]
    tag the relevance pass set on Stack Accesses, the only source of
@@ -961,7 +960,7 @@ let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
    non-precise arms of [create_def] each carried a near-verbatim copy —
    Finding 1). The classification itself is the VSA's (the tag) plus the
    ABI-visibility rule; this function only EXECUTES it. *)
-let mem_access llvm_builder blk_tid sub_tid sub_info ~(idx : Convutils.vsa_index) fr
+let mem_access llvm_builder blk_tid sub_tid sub_info ~(idx : Convutils.vsa_info) fr
     (def : def term) (exp : exp) =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -1024,7 +1023,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info ~(idx : Convutils.vsa_index
              (Tid.name sub_tid) (Tid.name (Term.tid def)))
       else create_exp llvm_builder blk_tid exp
 
-let create_def blk_tid llvm_builder sub_tid sub_info ~(idx : Convutils.vsa_index) fr def =
+let create_def blk_tid llvm_builder sub_tid sub_info ~(idx : Convutils.vsa_info) fr def =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
@@ -1691,7 +1690,7 @@ let transfer_with_phis transfer_vars llvm_builder blk_tid () =
       insert_local ctx blk_tid var res;
       return ())
 
-let create_elts llvm_builder blk sub_tid sub_info ~(idx : Convutils.vsa_index) fr () =
+let create_elts llvm_builder blk sub_tid sub_info ~(idx : Convutils.vsa_info) fr () =
   let open KB in
   let tid = Term.tid blk in
   Blk.elts blk
@@ -1701,7 +1700,7 @@ let create_elts llvm_builder blk sub_tid sub_info ~(idx : Convutils.vsa_index) f
       | `Phi _ -> return ()
       | `Jmp _ -> return ())
 
-let populate_blks transfer_vars blks sub sub_info ~(idx : Convutils.vsa_index) fr () =
+let populate_blks transfer_vars blks sub sub_info ~(idx : Convutils.vsa_info) fr () =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
@@ -1897,10 +1896,8 @@ let region_bytes (r : Convutils.region) : int64 =
   if Int64.equal r 0L then raw else Int64.add raw (Int64.sub 16L r)
 
 (* DELETED (C4): [def_tags_of] — the per-def tag map the emitter's dispatch
-   needed. It had NO callers (the dead fix the architecture review found);
-   [find_def_tag] now reads [Convutils.vsa_index.tag_of], built once per
-   sub by [Convutils.index_of], so the function is superseded as well as
-   unused. *)
+   needed. It had NO callers (the dead fix the architecture review found),
+   and it is now superseded outright: [info.offsets] IS that map. *)
 
 
 let create_sub sub =
@@ -1932,15 +1929,13 @@ let create_sub sub =
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn in
     (* The per-sub VSA frame: the tag span [min_lo, max_hi] of [Convutils.vsa_offsets] — every stack access of the sub lands in this alloca (the singleton GEPs and the interval-path dynamic addresses both). *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
-    (* C4 — the per-sub DERIVED INDEX: built ONCE here (the emitter's
-       per-def lookups are O(log n) into it, not a scan of the tag
-       lists). *)
-    let idx = Convutils.index_of_opt sub_info in
-    let tags =
-      sub_info
-      |> Base.Option.map ~f:(fun info -> info.Convutils.offsets)
-      |> Base.Option.value ~default:[]
-    in
+    (* C4 — the sub's [vsa_info] (or the empty one): the emitter's
+       per-def lookups read its [offsets] map directly. *)
+    let idx =
+      Base.Option.value sub_info ~default:Convutils.empty_vsa_info in
+    (* C4 — [tags] is the record's own [offsets] MAP (the emitter's
+       per-def lookups read it directly; the span below folds it). *)
+    let tags = idx.Convutils.offsets in
     (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
        [Hike_stack_to_locals.split_plan] produced it in the vsa pass and
        carried it in [vsa_info.stack_plan]. *)
@@ -1949,16 +1944,16 @@ let create_sub sub =
     let frame, min_lo, anchor_idx, anchor_i64 =
       if is_precise then (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else
-        match tags with
-        | [] ->
+        if Core.Map.is_empty tags then
           if sub_degraded sub_info then
             let n, _, _, anchor_idx = degraded_dims ~abi sub in
             let frame, _, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx (Int64.neg n) in
             (frame, Int64.neg n, anchor_idx, anchor_i64)
           else (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-        | _ ->
+        else
           let min_lo, max_hi =
-            Base.List.fold tags ~init:(0L, 0L) ~f:(fun (lo, hi) (_, kind) ->
+            Core.Map.fold tags ~init:(0L, 0L)
+              ~f:(fun ~key:_ ~data:kind (lo, hi) ->
                 match kind with
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
                     if Int64.compare l 0L <= 0 then
@@ -1970,7 +1965,7 @@ let create_sub sub =
             let clamp_hi h =
               if Int64.compare h 0x40000000L > 0 then min_lo else h
             in
-            Base.List.fold tags ~init:0L ~f:(fun acc (_, kind) ->
+            Core.Map.fold tags ~init:0L ~f:(fun ~key:_ ~data:kind acc ->
                 match kind with
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
                     if Int64.compare l 0L <= 0 then Int64.max acc (clamp_hi h)

@@ -41,7 +41,7 @@ let () =
           let info = Hike.Vsa.offsets_of_sub target sp sub in
           let dt = Unix.gettimeofday () -. t0 in
           let ntags =
-            List.length info.Hike.Convutils.offsets
+            Core.Map.length info.Hike.Convutils.offsets
           in
           (dt, name, nblk, ndefs, ntags))
         subs

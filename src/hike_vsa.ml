@@ -79,8 +79,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let sub' = if has_relevant_tags sub then sub else Relevance.analyze sp sub in
   (* A sub with NO direct-SP stack accesses produces an empty offset set regardless of the fixpoint result (only [stack_access]-tagged Load/Store defs yield offset tags). *)
   if not (has_stack_access_tags sub') then
-    { Convutils.offsets = []; k_ranges = []; regions = []; stack_plan = [];
-      degraded = false; vla_bounds = [] }
+    Convutils.empty_vsa_info
   else
   let prog' = Program.create ~subs:[ sub' ] () in
   (* The single-pass trace-partitioning (docs/trace-partitioning-plan.md §2/§7 — ticket 01): the
@@ -249,15 +248,18 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
                   ~data:(Convutils.Range (lo, hi))))
   in
   let offsets =
-      Base.List.map raw ~f:(fun (dtid, kind, _) ->
-          match Core.Map.find merged_tags dtid with
-          | Some k -> (dtid, k)
-          | None -> (dtid, kind)) in
-  let k_ranges = List.rev kraw in
+      Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->
+          let k = match Core.Map.find merged_tags dtid with
+            | Some k -> k
+            | None -> kind in
+          Core.Map.set m ~key:dtid ~data:k) in
+  let k_ranges =
+    Base.List.fold kraw ~init:Tid.Map.empty
+      ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) in
   let vla_bounds =
     Term.enum blk_t sub'
     |> Seq.concat_map ~f:(fun blk ->
-        let blk_tid = Term.tid blk in
+        (let blk_tid = Term.tid blk in
         Term.enum def_t blk
         |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.dynamic_alloc)
         |> Seq.filter_map ~f:(fun d ->
@@ -290,12 +292,13 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
                       | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
                       | _ -> None)
                   | _ -> None)
-              | Error _ -> None)
-        ) |> Seq.to_list
+              | Error _ -> None)))
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (dtid, b) ->
+           Core.Map.set m ~key:dtid ~data:b)
   in
   let base_info =
     { Convutils.offsets; k_ranges; regions = []; stack_plan = []; degraded;
-      vla_bounds = [] }
+      vla_bounds = Tid.Map.empty }
   in
   (* The ESCAPE verdict — computed ONCE per sub and shared by the
      region convertibility rule and (through it) the plan. *)
@@ -330,17 +333,15 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
         Term.enum blk_t sub'
         |> Seq.concat_map ~f:(Term.enum def_t)
         |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.stack_access)
-        |> Seq.map ~f:(fun d -> (Term.tid d, Convutils.Unbounded))
-        |> Seq.to_list
-      in
-      { Convutils.offsets; k_ranges = []; regions = []; stack_plan = [];
-        degraded = true; vla_bounds = [] }
+        |> Seq.fold ~init:Tid.Map.empty ~f:(fun m d ->
+               Core.Map.set m ~key:(Term.tid d) ~data:Convutils.Unbounded) in
+      Convutils.{ empty_vsa_info with offsets; degraded = true }
   | Some sol -> finish sol
   in
   (* 100% VSA Tagging Assertion: Every stack_access def MUST be present in info.offsets *)
   let tagged_tids =
-    Base.List.fold probe_res.Convutils.offsets ~init:Tid.Set.empty ~f:(fun s (t, _) ->
-        Core.Set.add s t)
+    Core.Map.fold probe_res.Convutils.offsets ~init:Tid.Set.empty
+      ~f:(fun ~key:t ~data:_ s -> Core.Set.add s t)
   in
   (* The 100% VSA TAGGING INVARIANT CHECK (PARKED 2026-09-01 by the user:
      "That is a later fix, not now" — the assert crashed the big-binary

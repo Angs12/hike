@@ -32,10 +32,8 @@ let () =
     in
     let tagged = Hike.Relevance.analyze sp sub in
     let info = Hike.Vsa.offsets_of_sub target sp tagged in
-    let kind_of =
-      Base.List.fold info.Hike.Convutils.offsets ~init:Tid.Map.empty
-        ~f:(fun m (tid, k) -> Core_kernel.Map.set m ~key:tid ~data:k)
-    in
+    (* the per-def tag map is the record's own field (C4). *)
+    let kind_of = info.Hike.Convutils.offsets in
     Term.enum blk_t tagged
     |> Seq.iter ~f:(fun b ->
         Term.enum def_t b
