@@ -1332,7 +1332,7 @@ let create_interrupt llvm_builder =
   KB.return ()
 
 (* The FP-intrinsic → native LLVM FP-op mapping (the user's design, 2026-08-16): BAP declares the x86 FP instructions as CALLS to the [intrinsic:*] soft-float subs. *)
-type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | FHLT
+type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | FHLT | ISNAN
 
 let fp_intrinsic_name = strip_at
 
@@ -1354,6 +1354,19 @@ let native_fp_op (name : string) : native_fp option =
   | "intrinsic:frem_rne_ieee754_binary_32" -> Some FREM
   | "intrinsic:forder_rne_ieee754_binary_64" -> Some FORDER
   | "intrinsic:forder_rne_ieee754_binary_32" -> Some FORDER
+  (* is_nan (ieee754.lisp: (set y0 (is-nan x0)) [:result 1] — the NaN
+     predicate, called by the COMISS/UCOMISS flag rows via
+     compare-floats): DIRECT — fcmp uno x0, x0 (unordered: true iff
+     x0 is NaN, the exact predicate at any width). *)
+  | "intrinsic:is_nan_rne_ieee754_binary_64" -> Some ISNAN
+  | "intrinsic:is_nan_rne_ieee754_binary_32" -> Some ISNAN
+  | "intrinsic:is_nan_ieee754_binary" -> Some ISNAN
+  | "intrinsic:is_nan_rne_ieee754_binary" -> Some ISNAN
+  (* the UNSUFFIXED spellings (the sse table's compare-floats/is-nan
+     emit bare ieee754 names for the COMISS class): the same ordered
+     less-than / NaN predicate. *)
+  | "intrinsic:forder_ieee754_binary" -> Some FORDER
+  | "intrinsic:forder_rne_ieee754_binary" -> Some FORDER
   | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
   | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
   (* The unsuffixed legacy spellings (pre-table-fix lifts; both widths —
@@ -1468,7 +1481,7 @@ let build_fp_binop llvm_builder op a b ~(w : int) =
     | FSUB -> Llvm.build_fsub da db "" llvm_builder
     | FDIV -> Llvm.build_fdiv da db "" llvm_builder
     | FREM -> Llvm.build_frem da db "" llvm_builder
-    | SFLOAT | SINT | FORDER | FHLT -> assert false
+    | SFLOAT | SINT | FORDER | FHLT | ISNAN -> assert false
   in
   return
   @@ Llvm.build_bitcast d ret_ty "" llvm_builder
@@ -1644,6 +1657,29 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
           KB.return
           @@ Llvm.build_fcmp Llvm.Fcmp.Olt (bitcast a) (bitcast b) ""
                llvm_builder
+        in
+        return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
+    | ISNAN ->
+        (* (set y0 (is-nan x0)) [:result 1]: DIRECT — fcmp uno x0, x0
+           (unordered with itself: true iff NaN — the exact predicate
+           at any width; the SNaN-exception difference is unmodeled by
+           BAP, the quiet form is exact). Result zext'd to i64 so every
+           ret lane reads it. *)
+        let* x = arg_value 0 in
+        let w =
+          match Llvm.classify_type (Llvm.type_of x) with
+          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of x)
+          | _ -> in_w
+        in
+        let src_fp_ty, _ = fp_ty_of llvm_ctx w in
+        let xf =
+          if Llvm.classify_type (Llvm.type_of x) = Llvm.TypeKind.Integer then
+            Llvm.build_bitcast x src_fp_ty "" llvm_builder
+          else x
+        in
+        let* p =
+          KB.return
+          @@ Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
         in
         return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | FHLT ->
