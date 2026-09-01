@@ -2617,6 +2617,17 @@ type refine_ctx = {
      block's defs TWICE on every denotation; hoisted once per run. *)
   rc_flag_states :
     ((var * Bil.binop * exp * word) option * flag_group) Tid.Map.t;
+  (* STATIC PER-BLOCK CALL FACTS (C2, the remaining half): the two
+     predicates [inspect_call] re-derived on EVERY call denotation by
+     SCANNING THE BLOCK'S DEFS 7 TIMES:
+       [cf_written]  — the SysV integer/pointer arg registers the block
+                       writes (one [Term.enum def_t b] scan PER register —
+                       6 scans);
+       [cf_pushed]   — does the block write RSP (the push evidence — a
+                       7th scan).
+     Both are PURE FUNCTIONS OF THE BLOCK: the [env]-dependent half (the
+     [AI.find_word] lookups) stays at the call site. *)
+  rc_call_facts : (var list * bool) Tid.Map.t;
   (* THE BLOCK-TRANSFER MEMO (C1): source blk tid -> target tid -> the
      read-set-stamped entry ([transfer_hit]).
 
@@ -2645,6 +2656,18 @@ type refine_ctx = {
   rc_hits : int;
   rc_misses : int;
 }
+
+(* [call_facts_of_block b]: the STATIC per-block call facts (C2) — the arg
+   registers the block writes and whether it writes RSP. A pure function of
+   the block, so the run context computes it once per block. *)
+let call_facts_of_block (b : blk term) : var list * bool =
+  let defs = Term.enum def_t b |> Seq.to_list in
+  let written =
+    List.filter Abi.x86_64_sysv.int_param_regs ~f:(fun v ->
+        List.exists defs ~f:(fun d -> Var.same (Def.lhs d) v)) in
+  let rsp = Abi.x86_64_sysv.sp in
+  let pushed = List.exists defs ~f:(fun d -> Var.same (Def.lhs d) rsp) in
+  (written, pushed)
 
 (* [ver_of rc t]: the block's current solution version — 0 = never [set]
    (its stored value is the run's FIXED init/default and cannot have
@@ -2989,26 +3012,39 @@ let denote_jump ?refineable ?preserved ?defs ?stores
           begin
             let rsp = Abi.x86_64_sysv.sp in
             (* Hike addition (the call-abstraction precision lane — the whole-memory-top gap fix): the pointer-argument ESCAPE set — the value sets of the SysV integer/pointer arg registers at the call, plus the caller's own frame boundary (the post-push RSP). *)
+            (* C2 — the ESCAPE SET: WHICH registers this block writes is
+               STATIC ([rc_call_facts]); only their VALUES (the
+               [AI.find_word] lookups) depend on [env]. The old code
+               re-scanned the block's defs once per param register on
+               every call denotation. *)
             let escape =
-              (* The pointer-argument ESCAPE set: the SysV integer/pointer arg registers WRITTEN IN THIS CALL BLOCK (the -O0 arg setup lives in the call block). *)
-              List.filter_map Abi.x86_64_sysv.int_param_regs
-                ~f:(fun v ->
-                  let written =
-                    Term.enum def_t b |> Seq.exists ~f:(fun d ->
-                        Var.same (Def.lhs d) v) in
-                  if written then Some (AI.find_word 64 env v)
-                  else None) in
+              let written =
+                match rctx with
+                | Some rc -> (
+                  match Core.Map.find rc.rc_call_facts (Term.tid b) with
+                  | Some (w, _) -> w
+                  | None -> fst (call_facts_of_block b))
+                | None ->
+                  List.filter Abi.x86_64_sysv.int_param_regs ~f:(fun v ->
+                      Term.enum def_t b |> Seq.exists ~f:(fun d ->
+                          Var.same (Def.lhs d) v)) in
+              List.map written ~f:(fun v -> AI.find_word 64 env v) in
             let abs =
               AI.call_abstraction_frame
                 ~preserved:(Option.value ~default:Var.Set.empty preserved)
                 ~rsp:(AI.find_word 64 env rsp)
                 ~escape env in
             (* L-E1 (ora-9 Item 2, user-prioritized) — the matched-pair RSP restoration on the ON-path return edge: the caller models the push as defs (RSP := RSP − 8; mem[RSP] := retaddr; call) and the callee's ret — the pop (t :=. *)
+            (* C2 — the PUSH EVIDENCE is static too (see [escape]). *)
             let pushed =
-              (* The push evidence: the call block WRITES RSP — the [RSP := RSP − 8] decrement (the fixture's minimal push) or the retaddr store at [RSP] (the real lifted calls' push pair). *)
-              Term.enum def_t b
-              |> Seq.exists ~f:(fun d ->
-                  Var.same (Def.lhs d) rsp) in
+              match rctx with
+              | Some rc -> (
+                match Core.Map.find rc.rc_call_facts (Term.tid b) with
+                | Some (_, p) -> p
+                | None -> snd (call_facts_of_block b))
+              | None ->
+                Term.enum def_t b
+                |> Seq.exists ~f:(fun d -> Var.same (Def.lhs d) rsp) in
             if pushed then begin
               let abs =
                 AI.add_word abs ~key:rsp
@@ -3229,6 +3265,10 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       Term.enum blk_t s
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
           Core.Map.set m ~key:(Term.tid b) ~data:(flag_state_of_block b));
+    rc_call_facts =
+      Term.enum blk_t s
+      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+          Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
     rc_out_cache = Tid.Map.empty;
     rc_hits = 0;
     rc_misses = 0;
