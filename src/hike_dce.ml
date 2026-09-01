@@ -1,4 +1,4 @@
-(* Dead-code elimination for the hike pipeline. Replaces the lifted return epilogue (indirect noreturn call) with a var-free form, then iteratively removes defs whose lhs is never used. Memory writes and ABI registers are always kept.
+(* Dead-code elimination for the hike pipeline. Replaces the lifted return epilogue (indirect noreturn call) with a var-free form, then iteratively removes defs whose lhs is never used. Memory writes and ABI registers are always kept — EXCEPT the fissioned region mem vars ([stack_rN_mem], mem-fission 2026-09-02): those survive iff some Load reads them (the load-roots rule), so never-loaded store chains (the retaddr pushes) die together in one sweep round.
    RSP erasure on the precise path uses BAP-derived SP (Abi.sp), not hardcoded strings.
    RBP is not explicitly erased; it is deleted by the fixpoint if derived from RSP (RBP:=RSP) and RSP is erased. *)
 
@@ -34,20 +34,18 @@ let ret_replacement (j : jmp term) : jmp term =
       | _ -> j)
   | _ -> j
 
-(* MEM-FISSION (2026-09-02) — the region mem vars ([stack_rN_mem],
-   [hike_stack_to_locals]'s fission): recognized by NAME CONVENTION (the
-   design's decision — deterministic, greppable, no plumbing). *)
+(* The fissioned region mem vars ([stack_rN_mem]) — recognized by name
+   convention (deterministic, greppable, no plumbing). *)
 let is_region_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
-(* The LOAD-ROOTS set: vars read as a Load's mem OPERAND (plus every
-   non-store read — jmp/phi/bare-Var uses — BNF1 never produces bare
-   mem reads, but the sweep is sound either way).  A fissioned region
-   var's store-to-store chains do NOT self-keep through this set: a
-   Store's mem-operand use is a WRITE-position use, invisible here.
-   [used_of] (below) keeps the ordinary global union for everything
-   else — the region vars are special-cased ONLY in [keep]. *)
+(* The LOAD-ROOTS set: vars read as a Load's mem OPERAND, plus jmp/phi
+   reads.  A fissioned var's store-to-store chains do NOT self-keep
+   through it (a Store's mem-operand use is write-position, invisible
+   here) — [used_of] remains the ordinary global union for everything
+   else. *)
+
 let load_roots_of (sub : sub term) : Var.Set.t =
   let roots =
     object
@@ -116,14 +114,11 @@ let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   | None -> false
   | Some info -> Hike_stack_to_locals.is_precise info
 
-(* MEM-FISSION — the two-tier keep (the design's Q4): a def whose lhs
-   is a REGION mem var survives iff its var has a LOAD-ROOT somewhere
-   (a Load from the same var exists in the sub); Store-side mem uses do
-   not count (that is the self-keep the fission deletes).  The lifter's
-   own [mem] KEEPS the unconditional is_mem keep — it carries the
-   ABI/external/outgoing traffic the callee reads (the sub-local
-   used-set cannot see those).  [load_roots] is threaded by
-   [sweep_fixpoint]. *)
+(* The TWO-TIER keep: a region mem var's def survives iff the var has
+   a load-root; the lifter's [mem] keeps the unconditional is_mem keep
+   (ABI/external/outgoing traffic — the sub-local used-set cannot see
+   the callee's reads).  [load_roots] is threaded by [sweep_fixpoint],
+   recomputed per round (a removed load can un-root a chain). *)
 let keep ?(precise=false) ?(load_roots=Var.Set.empty)
     ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false

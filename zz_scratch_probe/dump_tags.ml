@@ -36,6 +36,22 @@ let () =
       Base.List.fold info.Hike.Convutils.offsets ~init:Tid.Map.empty
         ~f:(fun m (tid, k) -> Core_kernel.Map.set m ~key:tid ~data:k)
     in
+    (* mem-fission (2026-09-02): the REGION column — the region id whose
+       span contains the def's tag (the fission's per-region mem var /
+       alloca).  "-" when the def belongs to no region (the fallback
+       path). *)
+    let region_of =
+      Base.List.fold info.Hike.Convutils.regions ~init:Tid.Map.empty
+        ~f:(fun m r ->
+          Base.List.fold r.Hike.Convutils.members ~init:m
+            ~f:(fun m (tid, _) ->
+              Core_kernel.Map.set m ~key:tid
+                ~data:
+                  (if r.Hike.Convutils.convertible then
+                     Printf.sprintf "r%d" r.Hike.Convutils.id
+                   else
+                     Printf.sprintf "-r%d" r.Hike.Convutils.id)))
+    in
     Term.enum blk_t tagged
     |> Seq.iter ~f:(fun b ->
         Term.enum def_t b
@@ -53,5 +69,11 @@ let () =
               | Some k -> vsa_kind_to_string k
               | None -> "-"
             in
-            Printf.printf "%s\t%s\t%s\t%s\n"
-              (Tid.to_string (Term.tid d)) (Var.name (Def.lhs d)) tags kind))
+            let region =
+              match Core_kernel.Map.find region_of (Term.tid d) with
+              | Some r -> r
+              | None -> "-"
+            in
+            Printf.printf "%s\t%s\t%s\t%s\t%s\n"
+              (Tid.to_string (Term.tid d)) (Var.name (Def.lhs d)) tags kind
+              region))
