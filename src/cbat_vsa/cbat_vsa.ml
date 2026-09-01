@@ -1676,6 +1676,16 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               ~mem:mem ~addr:addr ~size:size ~endian:endian cstr
           | Infeasible -> m, AI.bottom) in
     let env = ref env0 in
+    (* L2 instrumentation — the pop counter: [refine_edge]'s transfer
+       closure fires exactly once per Kildall POP, so a closure-local
+       counter is the exact pop count without touching Graphlib. The
+       debug adapter commits it once per walk ([bump_walk_pops]) with
+       the distinct-blocks count (the ticket-03 read-set — the visited
+       set) and the truncation bit (Kildall stops at [~steps:256]
+       pops — a SILENT truncation: the live sets are sound but coarser
+       than the least fixpoint). The PROD adapter's [bump_walk_pops] is
+       the identity, so production behavior is unchanged. *)
+    let pops = ref 0 in
     let live_sol =
       Cbat_contextual_fixpoint.fixpoint (module Graphs.Tid)
         ~init:(Solution.create (Tid.Map.singleton (Term.tid blk) seed_constraints)
@@ -1684,6 +1694,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
         ~steps:256 ~rev:true
         ~f:(fun ~source:n ->
             fun live ->
+              incr pops;
               (* Ticket 03 — the read-set recording (see [refine_edge]'s
                  own comment): every block the closure visits is recorded
                  (conservative superset of the true [Solution.get] reads). *)
@@ -1705,6 +1716,19 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               | None -> fun ~target:_ -> live)
         ~step:(fun _ _ -> fun _ x' -> x')
         cfg in
+    (* L2 instrumentation — commit this walk's schedule metrics.  The
+       truncation bit: Kildall's [iters] counts POPS ([step] runs once
+       per pop; the [~steps] bound caps it), so [pops = 256] means the
+       cap was reached — the walk may be unconverged.  The blocks count
+       is the read-set (the visited set) when the accumulator was
+       passed, else 0 (the [reads = None] direct-API path). *)
+    Stages.bump_walk_pops
+      ~pops:!pops
+      ~blocks:(match reads with
+          | Some r -> Core.Set.length !r
+          | None -> 0)
+      ~truncated:(!pops >= 256)
+      ();
     (* The guard block's own value in the fixpoint is the raw seed (the init's [Const] — a block with no predecessors never gets its walk instantiated). *)
     let live_sol =
       match Term.find blk_t sub (Term.tid blk) with
@@ -3436,6 +3460,14 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let total_processed = ref 0 in
   let max_steps = 6000 in
   let process_vertex (v : Tid.t) : bool =
+    (* L2 instrumentation — the SCAFFOLD bucket: the whole per-visit body
+       in ONE timer.  The inner stage timers ([`Denote]/[`Join]/...) nest
+       inside and capture their own time, so scaffold = visit total −
+       (denote + join + equal + widen + walk): the engine glue that sat
+       in NO bucket before (the pred listing, the C1 read-set
+       bookkeeping, the sol snapshot creation, the version bumps, the
+       landmark bindings).  The PROD adapter's [time] is the identity. *)
+    Stages.time `Scaffold (fun () ->
     incr total_processed;
     if !total_processed > max_steps then begin
       let sol = Solution.create !sol_map sol_default in
@@ -3627,7 +3659,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
            before the reuse). *)
         AI.join old incoming
     in
-    if not (AI.equal old new_val) then (set v new_val; true) else false
+    if not (AI.equal old new_val) then (set v new_val; true) else false)
   in
   let rec stabilize_comps (comps : Cbat_wto.comp list) : bool =
     let changed = ref false in
