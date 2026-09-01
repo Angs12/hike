@@ -6,6 +6,10 @@ module Abi = Hike_abi
 type llvalue_map = Llvm.llvalue Var.Map.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 
+(* [EHashtbl]: Core's Hashtbl under the deprecated-name alert the strict
+   build treats as an error — the same disarm [module Vsa] uses. *)
+module EHashtbl = Core_kernel.Hashtbl[@warning "-D"]
+
 type emit_ctx = {
   symtab : Symtab.t option;
   text_section : (int array * int64 * int64) option;
@@ -19,6 +23,16 @@ type emit_ctx = {
   blk_llvals : blk_llvals Tid.Map.t ref;
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
   guarded_warned : Tid.Set.t ref;
+  (* L-E1e FIX (the tty/cat dominance bug): EDGE-KEYED SP-restore
+     bindings — (pred_tid, fallthrough_tid) -> the post-push+8 value
+     computed IN the pred (call) block. The fallthrough's per-BLOCK
+     table can hold only ONE binding per var, so two call preds of the
+     same join clobber each other (the last-emitted restore wins and
+     its add does not dominate the join's phis — llc "Instruction does
+     not dominate all uses"). The edge key makes each pred's restore
+     independent; [Bil2llvm.update_phi] consults it before the pred's
+     plain binding. *)
+  edge_sp_restores : (Tid.t, (Tid.t, Llvm.llvalue) EHashtbl.t) EHashtbl.t ref;
 }
 
 let empty_emit_ctx () : emit_ctx =
@@ -35,6 +49,7 @@ let empty_emit_ctx () : emit_ctx =
     blk_llvals = ref Tid.Map.empty;
     ll_bbs = ref Tid.Map.empty;
     guarded_warned = ref Tid.Set.empty;
+    edge_sp_restores = ref (EHashtbl.create (module Tid));
   }
 
 module Vsa = struct

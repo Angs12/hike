@@ -3,6 +3,10 @@ open Bap.Std
 open Hike_abi
 module Abi = Hike_abi
 open Convutils
+
+(* [EHashtbl]: Core's Hashtbl under the deprecated-name alert (see
+   [Convutils.EHashtbl]). *)
+module EHashtbl = Core_kernel.Hashtbl[@warning "-D"]
 module KB = Bap_knowledge.Knowledge
 module Vsa = Cbat_vsa
 module AI = Cbat_vsa.AI
@@ -1101,7 +1105,26 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
             (Llvm.const_int (Llvm.i64_type llvm_ctx) 8) "sp_restored"
             llvm_builder
         in
-        insert_local ctx fallthrough_tid sp_key restored;
+        (* L-E1e FIX (the tty/cat dominance bug): bind EDGE-KEYED —
+           (call block, fallthrough) -> restored. The old plain
+           [insert_local ctx fallthrough_tid] clobbered the fallthrough's
+           ONE per-block binding whenever TWO call preds share the join
+           (the last-emitted restore won; its add did not dominate the
+           join's phis — llc "Instruction does not dominate all uses",
+           90/103 coreutils). [update_phi] reads this table per pred
+           edge; the add stays in the CALL block (dominating its edge by
+           construction). The plain fallthrough binding is still written
+           when the entry is UNSET (single-pred joins keep the old fast
+           path; a later edge binding wins at the phi). *)
+        (match EHashtbl.find !(ctx.edge_sp_restores) sub_tid with
+         | Some inner -> EHashtbl.set inner ~key:fallthrough_tid ~data:restored
+         | None ->
+             let inner = EHashtbl.create (module Tid) in
+             EHashtbl.set inner ~key:fallthrough_tid ~data:restored;
+             EHashtbl.set !(ctx.edge_sp_restores) ~key:sub_tid ~data:inner);
+        (match get_local ctx fallthrough_tid sp_key with
+         | None -> insert_local ctx fallthrough_tid sp_key restored
+         | Some _ -> ());
         return ()
 
 let create_call_args blk_tid llvm_builder sub call_tid fr =
@@ -1600,10 +1623,27 @@ let create_call llvm_builder blk_tid blk sub call fr =
 let update_phi transfer_vars blk_incoming blk_tid =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
+  (* L-E1e FIX: the per-pred SP value consults the EDGE-KEYED restore
+     table first — (pred_tid, this blk) -> the post-push+8 computed in
+     the pred (call) block. Two call preds of one join each carry their
+     own restore; the fallthrough's plain per-block binding would
+     resolve all preds to the LAST-written value (non-dominating —
+     the tty/cat bug). *)
+  let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
+    if Var.same var (sp ctx.Convutils.target) then
+      match EHashtbl.find !(ctx.edge_sp_restores) pred_tid with
+      | Some inner -> EHashtbl.find inner blk_tid
+      | None -> None
+    else None
+  in
   KB.List.iter transfer_vars ~f:(fun var ->
       let phi_llvar = get_phi ctx blk_tid var in
       Seq.iter blk_incoming ~f:(fun tid ->
-          let phi_reg = get_local ctx tid var in
+          let phi_reg =
+            match edge_val tid var with
+            | Some v -> Some v
+            | None -> get_local ctx tid var
+          in
           match phi_reg with
           | Some phi_reg ->
               Llvm.add_incoming (phi_reg, get_bb ctx tid) phi_llvar;
