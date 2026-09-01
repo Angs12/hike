@@ -362,8 +362,19 @@ let calls_intrinsic prog =
     callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
 
 let should_filter filter_set syms sub =
-  (* an emittable intrinsic (the FP-soft-float models) is NEVER filtered — not even when a later pass marks it [Sub.stub] (the stub marking is the no-symbol heuristic, not a body absence; the soft-float bodies are real BIL and must be emitted). *)
-  if is_emittable_intrinsic sub then false
+  (* an emittable intrinsic is NEVER filtered — EXCEPT the MAPPED FP
+     soft-float models ([Bil2llvm.native_fp_op] matches their names):
+     their FP semantics are INLINED at every call site by
+     [Bil2llvm.create_native_fp_call] (the width-aware native FP ops),
+     so emitting the lifted body would (a) bypass the inlining (a plain
+     direct call — the 2026-09-01 chgrp/100-binary regression: the
+     sse-binary TABLE FIX gave every _32/_64 intrinsic a real defun
+     body, the callers stopped inlining, and the emitted 64-bit
+     soft-float bodies computed wrong-width IR — [bitcast i32 to
+     double] inside the callee defines), and (b) duplicate the
+     semantics. Filter them: the call sites carry the truth. *)
+  if is_emittable_intrinsic sub
+     && not (Bil2llvm.native_fp_op (Sub.name sub) <> None) then false
   else
     Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
     || Term.has_attr sub Sub.stub
