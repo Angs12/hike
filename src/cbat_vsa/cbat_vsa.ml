@@ -2794,8 +2794,28 @@ let refine_edge_inline
     ?(rctx : refine_ctx option)
     ~(jt : Tid.t)
     ~(sub : sub term)
+    ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
     : AI.t * refine_ctx option * Tid.Set.t =
+  (* [~discarded]: the caller has already determined that THIS jump's
+     transfer result is DISCARDED (the jmp-kind arms below return
+     [AI.bottom] for it: a Direct goto/ret whose target != the requested
+     one, or a Direct call to a different callee).
+
+     Q2 (the performance lane): when the result is discarded, the DEEP
+     WALK is pure waste — but ONLY the walk. Everything else here is
+     KEPT, because it is NOT side-effect-free:
+
+       - the seed derivation: cheap, and needed for the env meet below;
+       - the GATED ENV MEET: fires [Cbat_landmarks.observe_unsat_var]
+         through [meet_var] (cbat_vsa.ml:1008). That is the landmark
+         ACQUISITION seam — the paper's Listing 1 — and it decides the
+         widening arm. Skipping it changes the widening: not
+         byte-identical, and unsound in the narrowing direction.
+       - the walk: side-effect-free (no [meet_var]; its meets are cell
+         meets — see the ticket-03 argument at :2550).
+
+     So [~discarded] gates exactly the walk, and nothing else. *)
   (* EXPLICIT STATE: the (possibly updated) run context comes back out
      alongside the refined env, together with the set of blocks the walk
      visited (the transfer's read-set contribution). The [rctx = None]
@@ -2913,6 +2933,8 @@ let refine_edge_inline
        the blocks THIS transfer's walks visit, seeded with the source block
        by the engine. *)
     let walk env seeds : AI.t * refine_ctx option * Tid.Set.t =
+      if discarded then (env, rctx, Tid.Set.empty)
+      else
       match rctx, defs with
       | Some rc, Some _ ->
         let bt = Term.tid b in
@@ -2997,10 +3019,23 @@ let denote_jump ?refineable ?preserved ?defs ?stores
           |> Option.map ~f:(fun ec -> ec.acc_cond) in
         (match acc_cond with
          | Some acc_cond ->
+           (* Q2 — is this jump's RESULT discarded? Mirrors EXACTLY the
+              arms below that return [AI.bottom] for it. Only those shapes
+              are safe to skip: an Indirect goto/ret returns [env] for any
+              target, so it must keep computing. *)
+           let discarded =
+             match Jmp.kind jmp with
+             | Goto (Direct tid) | Ret (Direct tid) ->
+               compare_tid target tid <> 0
+             | Call c ->
+               (match Call.return c with
+                | Some (Direct tid) -> compare_tid target tid <> 0
+                | Some (Indirect _) | None -> false)
+             | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false in
            let env', rctx', reads' =
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
                ~flag_group ?refineable ?rctx ~jt:(Term.tid jmp)
-               ~sub:s b env acc_cond in
+               ~sub:s ~discarded b env acc_cond in
            (env', rctx', Core.Set.union reads reads')
          | None -> (env, rctx, reads))
       | _ -> (env, rctx, reads) in
