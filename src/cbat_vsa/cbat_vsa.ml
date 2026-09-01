@@ -2574,6 +2574,7 @@ let assume_jump_cond ?(refineable : Var.Set.t option)
 
 (* Computes the denotation of the jumps of a basic block. *)
 let denote_jump ?refineable ?preserved ?defs ?stores
+    ?(retaddr_push_modeled = true)
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
     ?(sub : sub term option = None)
@@ -2613,8 +2614,10 @@ let denote_jump ?refineable ?preserved ?defs ?stores
                 ~escape env in
             (* L-E1 (ora-9 Item 2, user-prioritized) — the matched-pair RSP restoration on the ON-path return edge: the caller models the push as defs (RSP := RSP − 8; mem[RSP] := retaddr; call) and the callee's ret — the pop (t :=. *)
             let pushed =
-              (* The push evidence: the call block WRITES RSP — the [RSP := RSP − 8] decrement (the fixture's minimal push) or the retaddr store at [RSP] (the real lifted calls' push pair). *)
-              Term.enum def_t b
+              (* The push evidence: the call block WRITES RSP — the [RSP := RSP − 8] decrement (the fixture's minimal push) or the retaddr store at [RSP] (the real lifted calls' push pair).
+                 RETADDR_PUSH_MODELED (2026-09-01, Candidate 3 commit 1): the [+8] below models the callee's ret popping the retaddr cell — a pop the call abstraction never sees. [Hike_model_clean] (hike-filter stage 1) deletes the call-adjacent retaddr push pair in the PRODUCTION pipeline, so production passes [~retaddr_push_modeled:false] (the only RSP writes left in call blocks are real arg pushes, and their pops are the caller's own cleanup defs — modeled directly; a [+8] there drifts the abstract RSP per call). The default [true] keeps the raw-library contract the L-E1 fixtures pin. *)
+              retaddr_push_modeled
+              && Term.enum def_t b
               |> Seq.exists ~f:(fun d ->
                   Var.same (Def.lhs d) rsp) in
             if pushed then begin
@@ -2643,6 +2646,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
 (* Computes the denotation of a block in a context-sensitive way, dependent on which block is next reached. *)
 (* L-D1 — the internal, stores-aware block denotation (the per-sub store list for the provenance-based SLE/SLT gate, see [stores_of_sub]); the fixpoint path ([static_graph_vsa]) calls it with ~stores (absent -> the decoder arm's [known_nonneg] stays false). *)
 let denote_block_with_stores ?refineable ?preserved ?defs ?stores
+    ?(retaddr_push_modeled = true)
     ?(sub : sub term option = None)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t) : target:tid -> AI.t =
@@ -2651,7 +2655,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
      let postcond = denote_defs b env in
      (* L3c-1 — the per-block flag-state record (the BLP design): the last understood comparison that set a flag in scope in THIS block, for the bare-flag arm of [assume_jump_cond] (flag-indirected guards). *)
      let flag_state, flag_group = flag_state_of_block b in
-     denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
+     denote_jump ?refineable ?preserved ?defs ?stores ~retaddr_push_modeled ~flag_state
        ~flag_group:(Some flag_group) ~sub denote_call b postcond
    | None -> invalid_arg "source tid does not represent block"
 
@@ -2726,7 +2730,7 @@ let preserved_of_sub (s : sub term) : Var.Set.t =
     end in
   Core.Set.union regs virt
 
-let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
+let rec static_graph_vsa ?(retaddr_push_modeled = true) (stack : tid list) (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
   (* P2d-1b (lane B) — per-sub sets, computed ONCE at fixpoint entry from the (analyze-tagged) sub: the refineable vars for [assume_jump_cond] and the preserved vars for the call abstraction (see [refineable_of_sub]/[preserved_of_sub]). *)
   let refineable = refineable_of_sub s in
   let preserved = preserved_of_sub s in
@@ -2742,7 +2746,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     | Some sub ->
       if List.mem stack (Term.tid s) ~equal:Tid.equal && List.length stack > 6 then AI.top else begin
         (* P2d-1b (lane A transitional) — the caller's relevant-vars capture and the caller-alias union were deleted with the refs (ora-5 removes the caller-union: lane B replaces this whole recursion with the call abstraction gated on [Utils.restriction_enabled]). *)
-        let fun_sol = static_graph_vsa (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
+        let fun_sol = static_graph_vsa ~retaddr_push_modeled (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
         sub
         |> Term.enum blk_t
         |> Seq.fold ~init:AI.bottom ~f: begin fun acc blk ->
@@ -2985,9 +2989,9 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   Solution.create !sol_map sol_default
 
 (* the view-carrying entry point. The legacy [static_graph_vsa] API remains solution-only for callers that have not migrated yet; Phase-B consumers must use this entry point so the computed views are not discarded at the analysis boundary. *)
-let static_graph_vsa_with_views (stack : tid list) (ctx : Program.t)
+let static_graph_vsa_with_views ?(retaddr_push_modeled = true) (stack : tid list) (ctx : Program.t)
     (s : Sub.t) (init : vsa_sol) : vsa_sol * edge_view list =
-  let result = static_graph_vsa stack ctx s init in
+  let result = static_graph_vsa ~retaddr_push_modeled stack ctx s init in
   let views =
     edge_views_of
       ~defs:(Some (defs_of_sub s))

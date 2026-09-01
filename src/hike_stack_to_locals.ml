@@ -306,27 +306,6 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
      noreturn INDIRECT call: it passes NO arguments (it is the
      return continuation), so an epilogue block is NOT a call block
      (the prologue push inside it must not land in any tail). *)
-  let outgoing_tail_tids : Tid.Set.t =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
-           if
-             Term.enum jmp_t blk
-             |> Seq.exists ~f:is_real_call
-           then
-             let defs = Term.enum def_t blk |> Seq.to_list in
-             let is_stack d = Term.has_attr d Hike_vsa_relevance.stack_access in
-             let last =
-               Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-                   if is_stack d then Some i else acc)
-             in
-             match last with
-             | Some i ->
-                 Base.List.take defs i
-                 |> Base.List.fold_left ~init:acc ~f:(fun acc d ->
-                         Core.Set.add acc (Term.tid d))
-             | None -> acc
-           else acc)
-  in
    (* [has_outgoing_stack_args]: does the sub have ANY call-tail stack
       store (the ABI lane with real callee-visible traffic)? — the sub
       granularity gate for region splitting. Only RSP-relative STORES
@@ -389,8 +368,25 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
              then
                Term.enum def_t blk
                |> Seq.exists ~f:(fun d ->
-                      Core.Set.mem outgoing_tail_tids (Term.tid d)
-                      && is_outgoing_store d)
+                      (* CANDIDATE 3 (2026-09-01): the tail-set
+                         membership is DROPPED — [is_outgoing_store]'s
+                         own tests are the discriminator.  The tail-set
+                         boundary existed to exclude the RETADDR PUSH
+                         (the call block's last stack def pre-clean);
+                         [Hike_model_clean] deleted that pair in
+                         hike-filter, so the boundary now excludes the
+                         OUTGOING-ARG STORE itself whenever it is the
+                         block's last stack def (the push-only call
+                         block: [sub sp,8; store arg; call] — the
+                         factorial/many_args class: main converted
+                         precise, stored its 7th arg into a PRIVATE
+                         stack_r alloca the callee could not read).
+                         The prologue push-rbp pair — the other
+                         RSP-relative negative-lo store the tail kept
+                         out — is likewise deleted by rule 2.  What
+                         remains RSP-relative + lo<0 + k>=0 in a REAL
+                         call block is exactly the outgoing traffic. *)
+                      is_outgoing_store d)
              else false))
   in
   (* THE SP-ESCAPE RULE (the rec_struct class): a stack-frame address
