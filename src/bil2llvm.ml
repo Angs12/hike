@@ -1371,6 +1371,22 @@ let native_fp_op (name : string) : native_fp option =
   | "intrinsic:hlt" -> Some FHLT
   | _ -> None
 
+(* [is_inline_fp_intrinsic name]: does the intrinsic name map to an
+   INLINE FP op (the arithmetic/compare/convert class — everything in
+   [native_fp_op] EXCEPT FHLT)? Such subs are FILTERED from emission
+   (their semantics inline at the call sites); [FHLT] (the x86 halt) is
+   EXCLUDED — it is a TRAP-class intrinsic like the [@interrupt:*] edges:
+   filtering it changes REACHABILITY (its [call ... with return] keeps
+   the following blocks live; a filtered callee made the call site
+   treat the block as noreturn and DCE deleted the loop body — the
+   factorial/list/many_args/sret_big 25/7 regression). *)
+let is_inline_fp_intrinsic (name : string) : bool =
+  match native_fp_op name with
+  | Some FHLT -> false
+  | Some _ -> true
+  | None -> false
+
+
 (* [has_32bit_extract e]: the [intrinsic:x0] setup for the i32→double casts — the lifter's `63:0[31:0[RAX]]` shape reveals the 32-bit source (the sign-extension the soft-float needs). *)
 let rec has_32bit_extract (e : exp) : bool =
   match e with

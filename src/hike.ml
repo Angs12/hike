@@ -362,19 +362,21 @@ let calls_intrinsic prog =
     callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
 
 let should_filter filter_set syms sub =
-  (* an emittable intrinsic is NEVER filtered — EXCEPT the MAPPED FP
-     soft-float models ([Bil2llvm.native_fp_op] matches their names):
-     their FP semantics are INLINED at every call site by
-     [Bil2llvm.create_native_fp_call] (the width-aware native FP ops),
-     so emitting the lifted body would (a) bypass the inlining (a plain
-     direct call — the 2026-09-01 chgrp/100-binary regression: the
-     sse-binary TABLE FIX gave every _32/_64 intrinsic a real defun
-     body, the callers stopped inlining, and the emitted 64-bit
-     soft-float bodies computed wrong-width IR — [bitcast i32 to
-     double] inside the callee defines), and (b) duplicate the
-     semantics. Filter them: the call sites carry the truth. *)
-  if is_emittable_intrinsic sub
-     && not (Bil2llvm.native_fp_op (Sub.name sub) <> None) then false
+  (* An emittable intrinsic is NEVER filtered (X1-c): the FP-soft-float
+     models must stay in the program — [init_subs] stores their
+     SIGNATURE in the table (the calls' arg/ret shapes derive from it)
+     and SKIPS their [create_fun] (no LLVM function is defined for the
+     native_fp_op-mapped names — see init_subs' comment); the call
+     sites INLINE via [create_call]/[native_fp_op]. The 2026-09-01
+     attempt to filter the mapped class here broke BOTH directions:
+     filtering [intrinsic:hlt] changed REACHABILITY (its with-return
+     call keeps the following blocks live — DCE deleted the loop body;
+     the factorial/list/many_args/sret_big 25/7 regression), and
+     filtering the FP class dropped the sigs from callers' reach
+     (union_overlap/va_arg_mixed — the arity fallback). The body-not-
+     emitted property belongs to [init_subs]'s create_fun skip, not
+     here. *)
+  if is_emittable_intrinsic sub then false
   else
     Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
     || Term.has_attr sub Sub.stub
