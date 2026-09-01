@@ -2581,6 +2581,21 @@ type refine_hit = {
 type transfer_hit = {
   th_reads : (Tid.t * int) list;
   th_result : AI.t;
+  (* F2 — did this transfer's LANDMARK ACQUISITION fire?  Set at the
+     single choke point every firing acquisition passes through
+     ([Cbat_landmarks.record_landmark_for_head] — all three
+     [observe_unsat_var] sites of the jump path funnel there).  On a
+     version-valid hit the transfer's inputs are [AI.equal]-identical,
+     hence so is [observe_unsat_var]'s FIRING CONDITION (empty meet over
+     the var's value set + the statically-bound [widening_at_head]): a
+     re-fire would write the same (bound, is_upper, dist) entry again,
+     and [add_smaller_dist] keeps the smaller distance — an identical
+     re-fire is idempotent.  The flag therefore gates the Q1 REPLAY, not
+     the acquisition: when nothing fired, there is nothing to replay and
+     the hit returns the cached result directly.  When the flag is true
+     the replay stays the REAL no-walk pipeline ([~no_walk:true] — the
+     Q1 discipline: never hand-roll the sites). *)
+  th_fired : bool;
 }
 
 (* The per-fixpoint-run ANALYSIS CONTEXT (per sub, like [edge_conds]) —
@@ -3483,8 +3498,18 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                    The replay runs ONLY inside a WTO head ([head_opt] was
                    bound into [Cbat_landmarks.widening_at_head] just
                    above): outside a head [observe_unsat_var] no-ops, so
-                   there is nothing to replay. *)
-                (if Option.is_some head_opt then
+                   there is nothing to replay.
+
+                   F2 — the ACQUISITION-FIRED LATCH: when the original
+                   transfer fired NOTHING (th_fired = false), the replay
+                   is pure waste — on a version-valid hit the transfer's
+                   inputs are [AI.equal]-identical, hence so is every
+                   firing condition, hence the replay would fire nothing
+                   either.  Skip it and return the cached result
+                   directly.  When [th_fired], the replay stays the REAL
+                   no-walk pipeline (the Q1 discipline: never hand-roll
+                   the sites). *)
+                (if Option.is_some head_opt && hit.th_fired then
                    match Program.lookup blk_t ctx p with
                    | Some _pb ->
                      ignore (denote_block_with_stores ~refineable ~preserved
@@ -3497,16 +3522,27 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
 
                 hit.th_result
               | None ->
+                (* F2 — latch the acquisition around the ORIGINAL
+                   transfer: [end_fired_latch] restores the outer count
+                   and reports whether THIS transfer fired anything
+                   (all firing sites funnel through
+                   [Cbat_landmarks.record_landmark_for_head], the single
+                   choke point).  The latch is what makes the hit path's
+                   skip observationally identical: nothing fired =>
+                   nothing to replay. *)
+                let flatch = Cbat_landmarks.start_fired_latch () in
                 let (res, rc', reads) =
                   denote_block_with_stores ~refineable ~preserved ~defs
                     ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
                     ~sol:(Some sol_snap) ~rctx:(Some rc) (denote_call stack)
                     ctx ~source:p p_entry ~target:v in
+                let fired = Cbat_landmarks.end_fired_latch flatch in
                 (* The transfer's read-set: the source block's IN-state
                    (the env INPUT) plus every block its walk visited. *)
                 let reads = Core.Set.add reads p in
                 let entry =
-                  { th_reads = snapshot_out_reads reads rc; th_result = res } in
+                  { th_reads = snapshot_out_reads reads rc;
+                    th_result = res; th_fired = fired } in
                 let by_target' =
                   match by_target with
                   | None -> Tid.Map.singleton v entry
