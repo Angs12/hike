@@ -1600,7 +1600,7 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
               | _ -> ()));
   !live
 
-(* [refine_edge ~sol ~defs ~stores env sub blk seeds]: The COMPLETE backward traversal — the Graphlib fixpoint over the REVERSED CFG ([~rev:true] — the live sets flow from the guard to the PREDECESSORS, the per-edge [~target] routing the phi sources) until the live sets.
+(* [refine_edge ~sol ~defs ~stores ?reads env sub blk seeds]: The COMPLETE backward traversal — the Graphlib fixpoint over the REVERSED CFG ([~rev:true] — the live sets flow from the guard to the PREDECESSORS, the per-edge [~target] routing the phi sources) until the live sets.
     The [Var] seeds NEVER meet the carried env's word values here (the
     INLINE policy, ticket 02 — Phase B's post-pass contract was deleted
     with it): a word-value meet is a claim about a var's SSA VALUE, and
@@ -1617,18 +1617,39 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
     join the LIVE set: the backward walk derives the operand constraints
     through [reverse_def_walk]'s producer subtraction, which consults
     the CURRENT solution and is re-derived at every iteration — no
-    stale-value carry. *)
+    stale-value carry.
+
+    Ticket 03 — [?reads]: the CHANGE-DRIVEN CACHE's read-set
+    accumulator.  The walk reads the solution at every block it visits
+    (the producer subtraction's [denote_def d (Solution.get sol (Term.tid
+    blk))], [def_constraints]'s Load arm, [route_phi_constraints]' cell
+    meets), so the walk's RESULT is a deterministic function of (env,
+    seeds, defs [static], sol RESTRICTED to the visited blocks).  The
+    recording is a CONSERVATIVE SUPERSET of the true reads (a block
+    visited with an empty live set reads nothing but is recorded
+    anyway) — over-recording only costs invalidation precision, never
+    soundness.  The visited set is the right granularity because every
+    [Solution.get] in the walk is keyed by the visited block's tid. *)
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ?(defs : (def term * bool) Var.Map.t option = None)
     ?(stores : def term list option = None)
+    ?(reads : Tid.Set.t ref option = None)
+    ?(walk_cfg : Graphs.Tid.t option = None)
     (env : AI.t) (sub : sub term) (blk : blk term)
     (seeds : edge_constraint list) : AI.t * (tid, Live.t) Solution.t =
   match defs with
   | None -> env, Solution.create Tid.Map.empty Live.empty
   | Some defs_map ->
+    (* Ticket 03 — the walk's CFG is the same pseudo-node-free [Sub.to_graph]
+       projection the engine computes at fixpoint entry; [~walk_cfg] passes
+       the hoisted one (the [None] arm — the direct-API path — rebuilds it
+       exactly as before). *)
     let cfg =
-      Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
-      |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+      match walk_cfg with
+      | Some g -> g
+      | None ->
+        Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
+        |> Graphs.Tid.Node.remove Graphs.Tid.exit in
     let seed_constraints, env0 =
       List.fold seeds ~init:(Live.empty, env) ~f:(fun (m, e) -> function
           | Var (v, c) ->
@@ -1654,6 +1675,11 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
         ~steps:256 ~rev:true
         ~f:(fun ~source:n ->
             fun live ->
+              (* Ticket 03 — the read-set recording (see [refine_edge]'s
+                 own comment): every block the closure visits is recorded
+                 (conservative superset of the true [Solution.get] reads). *)
+              Option.iter reads ~f:(fun r ->
+                  r := Core.Set.add !r n);
               match Term.find blk_t sub n with
               | Some b ->
                 (* The guard block's own constraints are part of its walk INPUT (joined with the incoming live), so the guard's defs are walked over the seed — a fixture whose guard block defines the compared operand (e.g. *)
@@ -2472,6 +2498,104 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
   Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
       Core.Map.set acc ~key ~data)
 
+(* ================================================================== *)
+(* Ticket 03 — the CHANGE-DRIVEN CACHE (the big-binary cost lane):    *)
+(* the deep per-edge refinement ([refine_edge_inline]) runs on EVERY  *)
+(* visit of every successor of every guarded block — the dominant     *)
+(* cost of the big-binary conversion (stage_timer: the fixpoint is    *)
+(* ~92% of a hot sub's producer time).  The cache re-runs the deep    *)
+(* WALK only when its inputs CHANGED.                                 *)
+(*                                                                    *)
+(* THE VALIDITY ARGUMENT (the soundness core — WHY the version check *)
+(* is exactly the ticket's AI.equal key, and why it is also NECESSARY): *)
+(* - The walk's result is a deterministic function of (env, seeds,    *)
+(*   defs/stores/sub/blk [per-run static], and the solution RESTRICTED*)
+(*   to the blocks the walk READS — [reverse_def_walk]'s producer     *)
+(*   subtraction [denote_def d (Solution.get sol (Term.tid blk))],    *)
+(*   [def_constraints]'s Load arm and [route_phi_constraints]' cell   *)
+(*   meets all read [Solution.get sol (Term.tid blk)] of the visited *)
+(*   blocks).  The env itself is a pure function of the source block's*)
+(*   IN-state ([process_vertex] computes [p_entry = get p] ->         *)
+(*   [denote_defs] -> the shallow pre-step — no other input), and the  *)
+(*   seeds are pure in (env, the static acc_cond).                    *)
+(* - The engine's [set v new_val] fires ONLY under the stability gate *)
+(*   [not (AI.equal old new_val)] ([process_vertex]'s last line), so  *)
+(*   a block's version being unchanged is EXACTLY [AI.equal]-identity *)
+(*   of its stored state: the version counter IS the AI.equal check   *)
+(*   (the widening head's [AI.equal old (AI.join old incoming)] model *)
+(*   the ticket names), hoisted to O(1).                              *)
+(* - The recorded read-set is the CONSERVATIVE SUPERSET of the true  *)
+(*   reads (the visited blocks; a block visited with an empty live set *)
+(*   reads nothing but is recorded anyway — over-recording only costs *)
+(*   invalidation precision, never soundness).  The source block is   *)
+(*   pre-seeded into the read-set, which makes the entry also cover   *)
+(*   the env input (its IN-state version).  A tid NEVER [set] reads   *)
+(*   the run's fixed init/default (version 0) — it becomes >= 1 on    *)
+(*   the first [set], invalidating any entry recorded at 0.           *)
+(* - THE CACHE UNIT IS THE WALK ONLY ([refine_edge]); the seed        *)
+(*   derivation and the GATED ENV MEET run EVERY visit — the meet's   *)
+(*   empty-meet arm fires [observe_unsat_var] (the LANDMARK           *)
+(*   acquisition cycle), and a skipped re-acquisition after            *)
+(*   [lm_advance] would flip [lm_calc_steps] from [Finite] to [Zero] *)
+(*   and change the widening arm: NOT byte-identical.  The walk       *)
+(*   itself fires NO [meet_var]/[observe_unsat_var] (its meets are    *)
+(*   cell meets via [Mem.meet_range] — verified), so caching it is    *)
+(*   side-effect-free.  The not_implemented degradation prints are   *)
+(*   input-deterministic and the corpus emits none (byte-identity of *)
+(*   the err files is unaffected).                                    *)
+(* - Per-run, per-sub: created at [static_graph_vsa] entry like       *)
+(*   [edge_conds] (never shared across runs; a nested run — the      *)
+(*   OFF-path [denote_call] recursion — builds its own), so no stale  *)
+(*   cross-run reuse is possible.                                     *)
+(* ================================================================== *)
+
+(* ONE cache entry: the walk's result for one (source block, jmp) edge,
+   with the exact input identities it was computed against. *)
+type refine_hit = {
+  (* the walk's read-set (the visited blocks), stamped with the per-block
+     solution VERSIONS at compute time — the reuse check *)
+  rh_reads : (Tid.t * int) list;
+  (* [refine_edge]'s result (the walk-refined env) *)
+  rh_result : AI.t;
+}
+
+(* The per-fixpoint-run cache context (per sub, like [edge_conds]). *)
+type refine_ctx = {
+  (* the HOISTED all-defs-tagged set (was a per-call fold over the whole
+     sub's defs — O(sub) per refinement on big subs) *)
+  rc_all_tagged : Var.Set.t;
+  (* block tid -> its IN-state's version; bumped by the engine's [set]
+     ONLY on a real [AI.equal] change (see the validity argument) *)
+  rc_versions : (Tid.t, int) Hashtbl.t;
+  (* the CURRENT walk's read-set accumulator (scratch; reset+pre-seeded
+     with the source block before each cached walk) *)
+  rc_reads : Tid.Set.t ref;
+  (* the walk's CFG (the sub's [Sub.to_graph] minus the start/exit
+     pseudo-nodes — IDENTICAL to the engine's [cfg]; hoisted, was
+     rebuilt per walk) *)
+  rc_walk_cfg : Graphs.Tid.t;
+  (* source blk tid -> jmp tid -> the cached walk *)
+  rc_cache : refine_hit Tid.Map.t Tid.Map.t ref;
+}
+
+(* [ver_of rc t]: the block's current solution version — 0 = never [set]
+   (its stored value is the run's FIXED init/default and cannot have
+   changed since the run started, so 0 is a stable identity). *)
+let ver_of (rc : refine_ctx) (t : Tid.t) : int =
+  match Hashtbl.find rc.rc_versions t with
+  | Some v -> v
+  | None -> 0
+
+(* [reads_valid rc reads]: every recorded (block, version) still matches —
+   i.e. NO block the walk read has changed state since the cached run. *)
+let reads_valid (rc : refine_ctx) (reads : (Tid.t * int) list) : bool =
+  List.for_all reads ~f:(fun (t, v) -> ver_of rc t = v)
+
+(* [snapshot_reads rc]: the version-stamped read-set of the walk that just
+   finished (the accumulator's current content). *)
+let snapshot_reads (rc : refine_ctx) : (Tid.t * int) list =
+  Core.Set.to_list !(rc.rc_reads) |> List.map ~f:(fun t -> (t, ver_of rc t))
+
 (* [refine_edge_inline ~sol ~defs ~stores ~flag_state ~flag_group ~sub b
    env jmp acc_cond]: the DEEP per-edge refinement, inlined at the jump
    (§2 step 2 / §4.3): derive the leaf seeds from the edge's ACCUMULATED
@@ -2482,7 +2606,14 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
    chain — the guard-var meet + [constrain_def_chain]'s MINUS row), and
    run the existing backward walk ([refine_edge]) over the CURRENT
    solution.  The identity (no seeds) is the sound fallback — never
-   bottom, never a stop. *)
+   bottom, never a stop.
+
+    Ticket 03 — [?rctx] + [~jt]: the CHANGE-DRIVEN CACHE.  The walk runs
+    ONCE per (source block, jmp tid) and is REUSED while its inputs are
+    unchanged (the read-set's per-block solution versions — see the
+    [refine_ctx] block for the validity argument); [~jt] is the jmp's tid
+    (the cache key's second component).  The seed derivation and the
+    gated env meet are NOT cached (every visit, exactly as before). *)
 let refine_edge_inline
     ~(sol : (tid, AI.t) Solution.t)
     ~(defs : (def term * bool) Var.Map.t option)
@@ -2490,6 +2621,8 @@ let refine_edge_inline
     ~(flag_state : (var * Bil.binop * exp * word) option)
     ~(flag_group : flag_group option)
     ?(refineable : Var.Set.t option)
+    ?(rctx : refine_ctx option)
+    ~(jt : Tid.t)
     ~(sub : sub term)
     (b : blk term) (env : AI.t) (acc_cond : exp) : AI.t =
   let ctx : analysis_ctx =
@@ -2550,21 +2683,35 @@ let refine_edge_inline
        the hazard.  Bases with any untagged def drop the env meet (the
        seed stays in the LIVE set — the walk's own derivation is
        unaffected); [meet_var] fires [observe_unsat_var] on the
-       empty-meet arm, the LANDMARK acquisition seam (§5). *)
+       empty-meet arm, the LANDMARK acquisition seam (§5).
+
+       Ticket 03 — the set is TAG-STATIC per sub (the relevance tags are
+       set by [Relevance.analyze] before the fixpoint and never change
+       during the run), so it is HOISTED into the per-run [rctx]
+       ([static_graph_vsa] computes it once like [refineable]/[defs]);
+       the [rctx = None] arm (the direct-API/test path, no fixpoint)
+       computes it on demand exactly as before. *)
     let all_tagged : Var.Set.t =
-      Term.enum blk_t sub
-      |> Seq.concat_map ~f:(Term.enum def_t)
-      |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-          let k = Var.base (Def.lhs d) in
-          let tagged = Term.has_attr d Utils.relevant in
-          match Core.Map.find m k with
-          | None -> Core.Map.set m ~key:k ~data:tagged
-          | Some true -> m
-          | Some false -> Core.Map.set m ~key:k ~data:false)
-      |> Core.Map.filter ~f:Fn.id
-      |> Core.Map.keys
-      |> Var.Set.of_list in
+      match rctx with
+      | Some rc -> rc.rc_all_tagged
+      | None ->
+        Term.enum blk_t sub
+        |> Seq.concat_map ~f:(Term.enum def_t)
+        |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+            let k = Var.base (Def.lhs d) in
+            let tagged = Term.has_attr d Utils.relevant in
+            match Core.Map.find m k with
+            | None -> Core.Map.set m ~key:k ~data:tagged
+            | Some true -> m
+            | Some false -> Core.Map.set m ~key:k ~data:false)
+        |> Core.Map.filter ~f:Fn.id
+        |> Core.Map.keys
+        |> Var.Set.of_list in
     let refineable_var (v : var) : bool = refineable_var_of refineable v in
+    (* The gated env meet runs on EVERY visit (NOT cached — see the cache
+       block's comment: its empty-meet arm is the landmark ACQUISITION
+       seam, and a skipped re-acquisition after [lm_advance] would change
+       the widening arm). *)
     let env =
       List.fold seeds ~init:env ~f:(fun e -> function
           | Var (v, c) ->
@@ -2572,22 +2719,66 @@ let refine_edge_inline
             then meet_var refineable_var e v c
             else e
           | Cell _ | Infeasible -> e) in
-    (* The seeds join the LIVE set (the backward walk's input — the
-       operand-constraint derivation through [reverse_def_walk]'s
-       producer subtraction, re-derived against the CURRENT solution at
-       every iteration: no stale-value carry); [refine_edge] performs
-       the walk and the trace-exact CELL meets (sound to transfer: a
-       store overwrites the cell). *)
-    let refined, _live =
-      refine_edge ~sol ~defs ~stores env sub b seeds in
-    refined
+    (* THE CHANGE-DRIVEN CACHE (ticket 03): the seeds join the LIVE set
+       and [refine_edge] runs the WALK — the expensive part (a reverse-CFG
+       fixpoint over the sub).  The walk is cached per (source block, jmp
+       tid), keyed on the walk's INPUT identity: the read-set's per-block
+       solution versions (which — via the engine's [AI.equal]-gated [set]
+       — also covers the source block's env, pre-seeded into the read-set).
+       The seed derivation and the gated env meet above are OUTSIDE the
+       cache (cheap, and the meet carries the acquisition side effects);
+       the walk itself is side-effect-free (no [meet_var] — its meets are
+       cell meets), so skipping a repeat of an input-identical walk is
+       observationally identical.  A walk whose inputs changed recomputes
+       and re-records.  No [rctx] + [defs] (the direct-API/test path) or
+       a read-set miss keeps the exact uncached behavior. *)
+    let walk env seeds : AI.t =
+      match rctx, defs with
+      | Some rc, Some _ ->
+        let bt = Term.tid b in
+        let cached =
+          Option.(
+            let by_blk = Core.Map.find !(rc.rc_cache) bt in
+            bind by_blk ~f:(fun by_jmp -> Core.Map.find by_jmp jt)) in
+        (match cached with
+         | Some hit when reads_valid rc hit.rh_reads -> hit.rh_result
+         | _ ->
+           (* MISS: re-seed the read-set accumulator (the source block's
+              own state is an input — its IN-state version), run the walk
+              (which records the blocks it visits), stamp the read-set
+              with the current versions, and record the entry. *)
+           rc.rc_reads := Tid.Set.singleton bt;
+           let refined, _live =
+             refine_edge ~sol ~defs ~stores ~reads:(Some rc.rc_reads)
+               ~walk_cfg:(Some rc.rc_walk_cfg)
+               env sub b seeds in
+           rc.rc_cache :=
+             Core.Map.set !(rc.rc_cache) ~key:bt
+               ~data:(match Core.Map.find !(rc.rc_cache) bt with
+                   | None -> Tid.Map.singleton jt
+                       { rh_reads = snapshot_reads rc; rh_result = refined }
+                   | Some by_jmp ->
+                     Core.Map.set by_jmp ~key:jt
+                       ~data:{ rh_reads = snapshot_reads rc; rh_result = refined });
+           refined)
+      | _ ->
+        (* The seeds join the LIVE set (the backward walk's input — the
+           operand-constraint derivation through [reverse_def_walk]'s
+           producer subtraction, re-derived against the CURRENT solution at
+           every iteration: no stale-value carry); [refine_edge] performs
+           the walk and the trace-exact CELL meets (sound to transfer: a
+           store overwrites the cell). *)
+        let refined, _live =
+          refine_edge ~sol ~defs ~stores env sub b seeds in
+        refined in
+    walk env seeds
 
 (* Computes the denotation of a basic block's jumps. *)
 let denote_jump ?refineable ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
     ?(sub : sub term option = None)
-    ?edge_conds ?sol
+    ?edge_conds ?sol ?rctx
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (b : blk term)  (env : AI.t) ~(target : tid) : AI.t =
   Term.enum jmp_t b
@@ -2609,7 +2800,9 @@ let denote_jump ?refineable ?preserved ?defs ?stores
        restore, the Goto target filter, bottom for the unreachable) is
        KEYED TO THE JMP TERM exactly as today.  Call/Int jmps carry no
        IR edge (the identity — the sound fallback); no table, no sol, or
-       an un-seeding cond keeps the shallow-refined env (the identity). *)
+       an un-seeding cond keeps the shallow-refined env (the identity).
+       Ticket 03 — [?rctx] threads the per-run CHANGE-DRIVEN CACHE (the
+       walk keyed per (source block, jmp tid); see [refine_ctx]). *)
     let env =
       match edge_conds, sol, sub with
       | Some tbl, Some snap, Some s ->
@@ -2621,7 +2814,8 @@ let denote_jump ?refineable ?preserved ?defs ?stores
         (match acc_cond with
          | Some acc_cond ->
            refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
-             ~flag_group ?refineable ~sub:s b env acc_cond
+             ~flag_group ?refineable ?rctx ~jt:(Term.tid jmp)
+             ~sub:s b env acc_cond
          | None -> env)
       | _ -> env in
     (* E2e-B, ora-7 — remove hot-loop eprintf; gate per-hit event log (the old debug line flushed stderr on EVERY Call denotation, per fixpoint iteration). *)
@@ -2684,6 +2878,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(sub : sub term option = None)
     ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
+    ?(rctx : refine_ctx option = None)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t) : target:tid -> AI.t =
  match (Program.lookup blk_t ctx source) with
@@ -2692,7 +2887,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
      (* L3c-1 — the per-block flag-state record (the BLP design): the last understood comparison that set a flag in scope in THIS block, for the bare-flag arm of [assume_jump_cond] (flag-indirected guards). *)
      let flag_state, flag_group = flag_state_of_block b in
      denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
-       ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol denote_call b postcond
+       ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol ?rctx denote_call b postcond
    | None -> invalid_arg "source tid does not represent block"
 
 type vsa_sol = (tid, AI.t) Solution.t
@@ -2809,6 +3004,34 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* BAP 2.6's Sub.to_graph adds the [start]/[exit] pseudo-nodes; the fixpoint would apply the block denotation to them and crash (Program.lookup fails). *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+  (* Ticket 03 — the per-run CHANGE-DRIVEN-CACHE context: the hoisted
+     all-defs-tagged set (was an O-sub fold per refinement), the per-block
+     solution VERSION table (bumped by [set] only on a real [AI.equal]
+     change — the O(1) form of the ticket's [AI.equal] key), the current
+     walk's read-set accumulator, the walk's CFG (the same pseudo-node-free
+     [Sub.to_graph] projection the engine uses — hoisted, [refine_edge]
+     used to rebuild it per walk), and the (source blk, jmp) -> walk-result
+     table.  Per-run and per-sub: a nested run (the OFF-path [denote_call]
+     recursion) builds its own — no cross-run reuse is possible. *)
+  let rctx : refine_ctx = {
+    rc_all_tagged =
+      Term.enum blk_t s
+      |> Seq.concat_map ~f:(Term.enum def_t)
+      |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+          let k = Var.base (Def.lhs d) in
+          let tagged = Term.has_attr d Utils.relevant in
+          match Core.Map.find m k with
+          | None -> Core.Map.set m ~key:k ~data:tagged
+          | Some true -> m
+          | Some false -> Core.Map.set m ~key:k ~data:false)
+      |> Core.Map.filter ~f:Fn.id
+      |> Core.Map.keys
+      |> Var.Set.of_list;
+    rc_versions = Hashtbl.create (module Tid);
+    rc_reads = ref Tid.Set.empty;
+    rc_walk_cfg = cfg_tmp;
+    rc_cache = ref Tid.Map.empty;
+  } in
   (* Bourdoncle WTO fixpoint — replaces chunk=3000 + convergence_gap + max_runs.
      WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
      after 10 warmup sweeps (landmark-directed: Finite extrapolates, Zero
@@ -2928,7 +3151,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
   let sol_default = Solution.default init in
   let get n = match Core.Map.find !sol_map n with Some v -> v | None -> sol_default in
-  let set n v = sol_map := Core.Map.set !sol_map ~key:n ~data:v in
+  (* Ticket 03 — [set] bumps the block's VERSION: the version table is the
+     cache's O(1) [AI.equal] key (the caller invokes [set] ONLY under
+     [not (AI.equal old new_val)] — the stability gate — so an unchanged
+     version is EXACTLY identity of the stored state; see [refine_ctx]). *)
+  let set n v =
+    sol_map := Core.Map.set !sol_map ~key:n ~data:v;
+    match Hashtbl.find rctx.rc_versions n with
+    | None -> Hashtbl.set rctx.rc_versions ~key:n ~data:1
+    | Some k -> Hashtbl.set rctx.rc_versions ~key:n ~data:(k + 1) in
   let total_processed = ref 0 in
   let max_steps = 6000 in
   let process_vertex (v : Tid.t) : bool =
@@ -2951,7 +3182,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             let head_opt = Hashtbl.find block_to_head p in
             Cbat_landmarks.widening_at_head := head_opt;
             let p_entry = get p in
-            let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds) ~sol:(Some sol_snap) (denote_call stack) ctx ~source:p p_entry in
+            let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds) ~sol:(Some sol_snap) ~rctx:(Some rctx) (denote_call stack) ctx ~source:p p_entry in
             let res = out_fn ~target:v in
 
             Cbat_landmarks.widening_at_head := None;
