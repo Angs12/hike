@@ -17,6 +17,8 @@ open Graphlib.Std
 open Cbat_vsa_utils
 module Abi = Hike_abi
 
+module Stages = Cbat_vsa_stages
+
 module CG = Graphs.Callgraph
 module CFG = Graphs.Tid
 
@@ -2928,9 +2930,10 @@ let refine_edge_inline
          | _ ->
            let walk_reads = ref (Tid.Set.singleton bt) in
            let refined, _live =
-             refine_edge ~sol ~defs ~stores ~reads:(Some walk_reads)
-               ~walk_cfg:(Some rc.rc_walk_cfg)
-               env sub b seeds in
+             Stages.time `Walk (fun () ->
+                 refine_edge ~sol ~defs ~stores ~reads:(Some walk_reads)
+                   ~walk_cfg:(Some rc.rc_walk_cfg)
+                   env sub b seeds) in
            let rc =
              { rc with
                rc_misses = rc.rc_misses + 1;
@@ -3412,6 +3415,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       | None -> Core.Map.set rc.rc_versions ~key:n ~data:1
       | Some k -> Core.Map.set rc.rc_versions ~key:n ~data:(k + 1) in
     rc_cell := { rc with rc_versions = versions } in
+  Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = 6000 in
   let process_vertex (v : Tid.t) : bool =
@@ -3452,7 +3456,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                returns the updated context and the read-set), store it
                back. *)
             let rc = !rc_cell in
-            let res =
+            let res = Stages.time `Denote (fun () ->
               (* rc_out_cache: block -> target -> the read-set-stamped
                  entry.  A stale read-set misses automatically (no
                  invalidation walk — the stale entry is simply never read
@@ -3502,12 +3506,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                     rc_misses = rc.rc_misses + 1;
                     rc_out_cache =
                       Core.Map.set rc.rc_out_cache ~key:p ~data:by_target' };
-                res in
+                res) in
             Cbat_landmarks.widening_at_head := None;
             res) in
-        match List.reduce outs ~f:AI.join with
-        | Some j -> j
-        | None -> old
+        (Stages.time `Join (fun () ->
+           match List.reduce outs ~f:AI.join with
+           | Some j -> j
+           | None -> old))
     in
     let new_val =
       if List.is_empty preds then old
@@ -3524,7 +3529,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
            [incoming] alone would NOT do: after a head widens, the preds
            join STRICTLY below it, so equality-vs-incoming would misfire
            on every stable visit. *)
-        if AI.equal old (AI.join old incoming) then old
+        if Stages.time `Equal (fun () -> AI.equal old (AI.join old incoming))
+        then old
         else begin
         (* Landmark-directed widening (Simon & King, APLAS 2006, Figure 3)
            — the production path for ALL subs (the per-sub [lm_*] gate was
@@ -3551,14 +3557,14 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         Cbat_landmarks.widening_at_head := Some v;
         let res = match Cbat_landmarks.lm_calc_steps v with
           | `Finite n ->
-            let r = AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming in
+            let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming) in
             Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
             r
           | `Zero ->
             Cbat_landmarks.lm_advance v;
             AI.join old incoming
           | `Inf ->
-            AI.widen_join old incoming
+            Stages.time `Widen (fun () -> AI.widen_join old incoming)
         in
         Cbat_landmarks.widening_at_head := None;
         res
@@ -3587,5 +3593,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     !any_changed
   in
   ignore (stabilize_comps wto);
+  Stages.report (Sub.name s);
   Solution.create !sol_map sol_default
 

@@ -22,6 +22,13 @@ module AI = Cbat_ai_representation
 (* Hike port fix (Phase 2): re-export the memory abstraction alongside [AI] so the wrapped library exposes it under the main module (the sibling modules are only reachable through dune's generated [Cbat_vsa__] wrapper otherwise). *)
 module Mem = Cbat_ai_memmap
 
+(* The per-stage profiling interface (the Q6 harness) — re-exported so the
+   debug probes can read the counters. Production links the NO-OP adapter
+   ([cbat_vsa_stages_prod.ml]), so [Stages.enabled = false] and every
+   [Stages.time] is the identity there; only the vsa-debug profile links
+   the timing adapter. See src/cbat_vsa/dune and AGENTS.md §6. *)
+module Stages = Cbat_vsa_stages
+
 type vsa_sol = (tid, AI.t) Solution.t
 
 (* Raised by [static_graph_vsa] when the fixpoint's verification round finds the solution still changing at the [~steps] cap — the solution would be an under-approximation and must not feed the narrow-tag decisions (see. *)
