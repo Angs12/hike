@@ -2908,7 +2908,7 @@ let init_sol ?entry (sub : sub term) =
   (* Other than the first block, we assume that other blocks can only be reached via flow in the CFG. If the CFG is partial, this will produce an unsound result. (Note, however, that iterated VSA with explicit edge introduction can overcome this) *)
   Solution.create base_map AI.bottom
 
-(* E2e-A, ora-7 — the call handling below is NOT "highly unoptimal": the call abstraction (the ON path, gated on [Utils.restriction_enabled]) is the production treatment; the recursion below is the OFF-path fallback. *)
+(* E2e-A, ora-7 — the call handling below is NOT "highly unoptimal": the call abstraction (the ON path) is the production treatment; the recursion below is the OFF-path fallback. *)
 
 (* The per-sub refineable var set for the relevance restriction — { v | v has a def tagged [Utils.relevant] } (the merged single-pass forward D-set tagging: relevant = RSP-derived at its position ∪ the resets ∪ L-E2. *)
 let refineable_of_sub (s : sub term) : Var.Set.t =
@@ -2976,7 +2976,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     | None -> invalid_arg "sub tid does not represent a subroutine"
     | Some sub ->
       if List.mem stack (Term.tid s) ~equal:Tid.equal && List.length stack > 6 then AI.top else begin
-        (* P2d-1b (lane A transitional) — the caller's relevant-vars capture and the caller-alias union were deleted with the refs (ora-5 removes the caller-union: lane B replaces this whole recursion with the call abstraction gated on [Utils.restriction_enabled]). *)
+        (* P2d-1b (lane A transitional) — the caller's relevant-vars capture and the caller-alias union were deleted with the refs (ora-5 removes the caller-union: lane B replaces this whole recursion with the call abstraction). *)
         let fun_sol = static_graph_vsa (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
         sub
         |> Term.enum blk_t

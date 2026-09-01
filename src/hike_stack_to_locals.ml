@@ -98,8 +98,8 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   in
   (* [derived]: the vars whose values are sp/fp-derived — SP, FP (when the
      target declares one) and every temp defined from them through
-     every temp defined from them through ARITHMETIC (BinOp/Cast/
-     Extract/Concat); a LOAD's result is NOT derived (a value read
+     ARITHMETIC (BinOp/Cast/Extract/Concat); a LOAD's result is NOT
+     derived (a value read
      from memory is not an address expression on the frame), and a
      memory side-effect's lhs ([mem]) is not derived. Computed as a
      block-local fixpoint via the def chain (the -O0 shape computes
