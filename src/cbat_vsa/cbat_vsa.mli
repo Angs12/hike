@@ -104,17 +104,6 @@ val init_sol : ?entry:AI.t ->  sub term -> vsa_sol
 val defs_of_sub : sub term -> (def term * bool) Var.Map.t
 val stores_of_sub : sub term -> def term list
 
-(* [~retaddr_push_modeled] (default [true]): whether the call abstraction
-   restores RSP by +8 on the return edge — modeling the callee's ret
-   popping the retaddr cell that a push-carrying caller pushed. The
-   PRODUCTION pipeline (hike) passes [false]: [Hike_model_clean] deletes
-   the call-adjacent retaddr push pair before the VSA runs, so a +8 would
-   drift the abstract RSP per call (the only remaining call-block RSP
-   writes are real arg pushes whose pops are the caller's own defs).
-   The raw-library contract (the L-E1 fixtures) keeps the default. *)
-val static_graph_vsa :
-  ?retaddr_push_modeled:bool ->
-  tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
-val static_graph_vsa_with_views :
-  ?retaddr_push_modeled:bool ->
-  tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol * edge_view list
+val static_graph_vsa : tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
+val static_graph_vsa_with_views : tid list -> Program.t -> Sub.t -> vsa_sol ->
+  vsa_sol * edge_view list
