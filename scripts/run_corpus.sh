@@ -10,6 +10,11 @@
 #   hike: guarded: <sub>: ...      unresolvable access -> poison/drop, warned
 #                                  (the line ends with its "(dynamic
 #                                  fallback)" note)
+#   hike: undef-read: ...          a read of a never-defined var -> [undef]
+#                                  (data reads warn individually, deduped per
+#                                  block+var; the structural model-ABI lanes
+#                                  aggregate into one per-sub summary line —
+#                                  the 2026-09-01 poison-phi fix)
 #
 # The heritage-model diagnostics ("heritage ok", "heritage gate rejected",
 # "heritage failed", "hike: range-diff", "hike: stack-args cross-check")
@@ -59,7 +64,7 @@ for f in $BINS; do
   [ -f "$OUT/err_$f.txt" ] || continue
   rc=$(cat "$OUT/rc_$f.txt" 2>/dev/null || echo n/a)
   echo "===== $f (rc=$rc)"
-  diags="$(grep -E "hike: guarded:" "$OUT/err_$f.txt" 2>/dev/null)"
+  diags="$(grep -E "hike: (guarded|undef-read):" "$OUT/err_$f.txt" 2>/dev/null)"
   if [ -n "$diags" ]; then
     printf '%s\n' "$diags" | sed 's/^/  /'
   else

@@ -19,6 +19,11 @@ type emit_ctx = {
   blk_llvals : blk_llvals Tid.Map.t ref;
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
   guarded_warned : Tid.Set.t ref;
+  (* the [hike: undef-read:] dedup: one warning line per (sub, var) —
+     data reads warn individually (deduped here), the model-ABI lanes
+     (YMM phantom call args, RDX ret member) are aggregated into one
+     per-sub summary line by [create_sub] at the end of emission. *)
+  undef_warned : Var.Set.t ref Tid.Map.t ref;
 }
 
 let empty_emit_ctx () : emit_ctx =
@@ -35,6 +40,7 @@ let empty_emit_ctx () : emit_ctx =
     blk_llvals = ref Tid.Map.empty;
     ll_bbs = ref Tid.Map.empty;
     guarded_warned = ref Tid.Set.empty;
+    undef_warned = ref Tid.Map.empty;
   }
 
 module Vsa = struct
