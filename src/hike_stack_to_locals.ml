@@ -240,11 +240,10 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
 let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) ~(frame_escaped : bool) :
     Convutils.region list =
-  let k_of =
-    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
-      ~f:(fun m (dtid, klo, khi) ->
-        Core.Map.set m ~key:dtid ~data:(klo, khi))
-  in
+  (* C4 — the shared DERIVED INDEX ([Convutils.index_of]): one builder,
+     one representation. *)
+  let idx = Convutils.index_of info in
+  let k_of = idx.Convutils.k_of in
   let ranges : (int64 * int64) Tid.Map.t =
     Base.List.fold_left info.Convutils.offsets ~init:Tid.Map.empty
       ~f:(fun m (dtid, kind) ->
@@ -582,15 +581,17 @@ let is_abi_visible (sp : var)
    sub's [vsa_info] — the form the emitter uses. *)
 let abi_visibility_of (sp : var) (info : Convutils.vsa_info) :
     def term -> bool =
-  let tag_of =
-    Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind)
-  in
-  let k_of =
-    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
-      ~f:(fun m (dtid, klo, khi) -> Core.Map.set m ~key:dtid ~data:(klo, khi))
-  in
-  is_abi_visible sp ~tag_of ~k_of
+  let idx = Convutils.index_of info in
+  is_abi_visible sp ~tag_of:idx.Convutils.tag_of ~k_of:idx.Convutils.k_of
+
+(* [abi_visibility_of_index sp idx]: the SAME rule over a PRE-BUILT index
+   (C4). The [vsa_info] form above is kept for the consumers that already
+   hold the record; the emitter — which calls the rule per def — builds
+   the index once per sub and uses this form, so the tag/k-range maps are
+   no longer rebuilt on every call. *)
+let abi_visibility_of_index (sp : var) (idx : Convutils.vsa_index) :
+    def term -> bool =
+  is_abi_visible sp ~tag_of:idx.Convutils.tag_of ~k_of:idx.Convutils.k_of
 
 (* ------------------------------------------------------------------ *)
 (* THE STACK MODEL DECISION — the single producer ([split_plan]).       *)
@@ -734,10 +735,8 @@ let has_vla_dynamic_alloc (sub : sub term) : bool =
    (its storage would straddle the private alloca and the frame). *)
 let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
-  let tag_of =
-    Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind)
-  in
+  (* C4 — the shared index (see [regions_of_sub]). *)
+  let tag_of = (Convutils.index_of info).Convutils.tag_of in
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
          Term.enum def_t blk
@@ -761,8 +760,8 @@ let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
 let tags_inside_or_disjoint (info : Convutils.vsa_info)
     (convertible : Convutils.region list) : bool =
   Core.Map.for_all
-    (Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-       ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind))
+    (* C4 — the shared index (see [regions_of_sub]). *)
+    (Convutils.index_of info).Convutils.tag_of
     ~f:(fun kind ->
       match kind with
       | Convutils.Infinite _ | Convutils.Unbounded -> false
@@ -852,20 +851,16 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
            { Convutils.offsets = []; k_ranges = []; regions = [];
              stack_plan = []; degraded = false; vla_bounds = [] }
   in
-  let tag_of =
-    Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind)
-  in
+  (* C4 — the shared index (see [regions_of_sub]). *)
+  let idx0 = Convutils.index_of info in
+  let tag_of = idx0.Convutils.tag_of in
   (* lo >= 0 means the access is in the incoming-arg area (entry-relative
      offset); keep it in memory. Local stack slots have lo < 0. For
      outgoing stack args (mem[RSP] stores for 7th+ args), lo <0 but they
      are still ABI-visible (they must remain in memory for the callee's
      hike_stack+offset loads), so we also keep RSP-relative stores with
      k >=0. *)
-  let k_of =
-    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
-      ~f:(fun m (dtid, klo, khi) -> Core.Map.set m ~key:dtid ~data:(klo, khi))
-  in
+  let k_of = idx0.Convutils.k_of in
   (* ONE ABI-visibility rule (Finding 1) — the module-level
      [is_abi_visible], the same one the emitter calls. *)
   let is_abi_visible = is_abi_visible sp ~tag_of ~k_of in

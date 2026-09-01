@@ -95,6 +95,42 @@ module Vsa = struct
     vla_bounds : (Tid.t * (int64 * int64)) list;
   }
   [@@deriving equal]
+
+  (* THE DERIVED INDEX of a [vsa_info] (C4, the performance-architecture
+     lane): [offsets] and [k_ranges] are association LISTS — the natural
+     shape for the producer (VSA tag order, [@@deriving equal] for the KB
+     join domain) but the wrong shape for the CONSUMERS, which look up one
+     def at a time. Every consumer was therefore folding the lists into
+     Tid.Maps, and the emitter did it PER DEF ([find_def_tag],
+     [abi_visibility_of]) — O(defs x tags) per sub.
+
+     The index is built ONCE per sub (where the consumer already has the
+     [vsa_info] in hand) and threaded down. It is deliberately NOT part of
+     [vsa_info]: it is derived data with no independent meaning, and
+     keeping it out leaves the KB payload (and its [equal]/join) exactly
+     as it is — no change to the provide/join contract. *)
+  type vsa_index = {
+    tag_of : vsa_kind Tid.Map.t;
+    k_of : (int64 * int64) Tid.Map.t;
+  }
+
+  (* [index_of info]: build the index (once per sub). *)
+  let index_of (info : vsa_info) : vsa_index =
+    { tag_of =
+        Base.List.fold info.offsets ~init:Tid.Map.empty
+          ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind);
+      k_of =
+        Base.List.fold info.k_ranges ~init:Tid.Map.empty
+          ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) }
+
+  (* [empty_index]: the index of NO tags (the [sub_info = None] path — the
+     conservative "no tag, no k-range" answer every lookup already gives). *)
+  let empty_index : vsa_index = { tag_of = Tid.Map.empty; k_of = Tid.Map.empty }
+
+  (* [index_of_opt info_opt]: [None] -> [empty_index] (the optional-info
+     seam the emitter threads). *)
+  let index_of_opt (info_opt : vsa_info option) : vsa_index =
+    match info_opt with None -> empty_index | Some info -> index_of info
 end
 include Vsa
 
