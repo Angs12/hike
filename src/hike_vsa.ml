@@ -83,10 +83,16 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       degraded = false; vla_bounds = [] }
   else
   let prog' = Program.create ~subs:[ sub' ] () in
-  (* The trace-partitioned tags (docs/trace-partitioning-plan.md §1.4/§2.4): the fixpoint runs with the views (the Phase B post-pass), and the per-block TAG states come from [partitioned_states] — the invariant met with the. *)
-  (* The per-def walk (finish): the sequential state (the block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the two tag accumulators thread through ONE nested fold — no refs. *)
-  let finish (sol : Vsa.vsa_sol) (views : Vsa.edge_view list) :
-      Convutils.vsa_info =
+  (* The single-pass trace-partitioning (docs/trace-partitioning-plan.md §2/§7 — ticket 01): the
+     forward fixpoint is branch-sensitive END-TO-END (the deep walk runs INLINE at every
+     out-edge, driven by the ACCUMULATED [Graphs.Ir.Edge.cond]), so the per-block TAG state IS
+     the block's IN-state in the converged solution — the Phase B post-pass is deleted
+     (ticket 02: the view machinery is gone from the library; the solution-only
+     [static_graph_vsa] is THE entry point).  The per-def walk (finish): the sequential
+     state (the
+     block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the
+     two tag accumulators thread through ONE nested fold — no refs. *)
+  let finish (sol : Vsa.vsa_sol) : Convutils.vsa_info =
   (* A sub with an INDIRECT JUMP ([Goto/Ret (Indirect _)]) has an INCOMPLETE CFG — the lifter could not resolve the jump-table targets — so a bottom block state does NOT prove unreachability (the target blocks are stranded, their accesses would be mislabeled dead-path). *)
   let has_indirect_jumps =
     Term.enum blk_t sub'
@@ -98,7 +104,9 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
             | _ -> false))
   in
   let degraded = has_indirect_jumps in
-  let tags = Vsa.partitioned_states sub' sol views in
+  (* §7: each block's TAG state is its IN-state read directly from the converged solution —
+     the joined edge-refined predecessor outputs (the fused design's branch-sensitivity). *)
+  let tags = sol in
   (* The per-def walk: the sequential state (the block input [st], advanced def-by-def exactly like the fixpoint's [denote_defs]) and the two tag accumulators thread through ONE nested fold — no refs. *)
   let raw, kraw =
     Term.enum blk_t sub'
@@ -130,7 +138,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
                      let addr' =
                        Vsa.rewrite_addr
                          (Vsa.frame_of_state st_before) addr in
-                     (* The address's free vars are denoted with the PARTITIONED state's values (the invariant ∩ the enclosing guards' iterate/exit constraints), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
+                     (* The address's free vars are denoted with the block's TAG state's values (the IN-state read from the converged solution — the fused design's branch-sensitive state, refined inline by the accumulated edge conds), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
                      let st_tag =
                        Exp.free_vars addr'
                        |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
@@ -141,7 +149,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
                                     (Term.tid blk)) v in
                              let cur = AI.find_word w acc v in
                              let mm = Ws.meet cur tag_v in
-                             (* Option B/c fix : a TOP sequential value is NOT refined by the M6 meet — the partitioned state's value at the block is the JOIN over all paths (e.g. *)
+                             (* Option B/c fix : a TOP sequential value is NOT refined by the M6 meet — the tag state's value at the block is the JOIN over all paths (e.g. *)
                              if Ws.is_top cur && Word.is_one (Ws.cardinality mm)
                                 || Word.is_zero (Ws.cardinality mm)
                                 || Ws.equal mm cur
@@ -309,7 +317,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* the solve driver: run the fixpoint; a non-convergent fixpoint (D.1) degrades the sub soundly — no tags, every stack access stays real memory (the emitter's dynamic path). *)
   match
     try
-      Some (Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub'))
+      Some (Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub'))
     with Vsa.Fixpoint_not_converged (n, _, _) ->
       (* The fixpoint did not converge — the partial solution is an UNDER-APPROXIMATION; narrow offset tags computed from it would exclude reachable values (unsound). *)
       Printf.eprintf
@@ -327,19 +335,29 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       in
       { Convutils.offsets; k_ranges = []; regions = []; stack_plan = [];
         degraded = true; vla_bounds = [] }
-  | Some (sol, views) -> finish sol views
+  | Some sol -> finish sol
   in
   (* 100% VSA Tagging Assertion: Every stack_access def MUST be present in info.offsets *)
   let tagged_tids =
     Base.List.fold probe_res.Convutils.offsets ~init:Tid.Set.empty ~f:(fun s (t, _) ->
         Core.Set.add s t)
   in
+  (* The 100% VSA TAGGING INVARIANT CHECK (PARKED 2026-09-01 by the user:
+     "That is a later fix, not now" — the assert crashed the big-binary
+     conversions; see the ticket
+     .scratch/100-invariant-gaps/01-diagnose-and-fix.md): neutralized to a
+     WARNED gap that enumerates the violating sub+def so the conversions
+     complete soundly (non-seeding is the raw-memory fallback; no unsound
+     conversion happens). Restoring the hard invariant is the ticket's
+     first step. *)
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun blk ->
       Term.enum def_t blk
       |> Seq.iter ~f:(fun d ->
-          if Term.has_attr d Relevance.stack_access then
-            assert (Core.Set.mem tagged_tids (Term.tid d))));
+          if Term.has_attr d Relevance.stack_access
+             && not (Core.Set.mem tagged_tids (Term.tid d)) then
+            Printf.eprintf "hike: 100%%-invariant gap (PARKED): sub %s def %s untagged\n"
+              (Sub.name sub') (Tid.to_string (Term.tid d))));
   probe_res
 
 (* M2 (ADR 0004): arity_of_sub and arity_map_of_prog removed — no stack-arg arity, M2 hike_stack ptr only. *)

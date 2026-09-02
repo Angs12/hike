@@ -60,16 +60,15 @@ let all_subs (prog : program term) : sub term list =
 
 (* [analyze_and_fixpoint sp prog sub]: the consumer contract (the
    corpus_watch / precision_probe shape): relevance-tag [sub], rebuild the
-   program with the tagged sub, run the fixpoint WITH the Phase-B views.
-   Returns (tagged sub, solution, edge views). *)
+   program with the tagged sub, run the solution-only fixpoint (the fused
+   single-pass engine — the refinement is inline at the jumps; the old
+   Phase-B views are deleted). Returns (tagged sub, solution). *)
 let analyze_and_fixpoint (sp : var) (prog : program term) (sub : sub term)
-    : sub term * Vsa.vsa_sol * Vsa.edge_view list =
+    : sub term * Vsa.vsa_sol =
   let sub' = Hike.Relevance.analyze sp sub in
   let prog' = Program.create ~subs:[ sub' ] () in
-  let sol, views =
-    Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub')
-  in
-  (sub', sol, views)
+  let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
+  (sub', sol)
 
 (* ---- WordSet / direct printing ---- *)
 
