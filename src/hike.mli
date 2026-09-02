@@ -70,7 +70,9 @@ module Vsa : sig
 
   (** [offsets_of_sub target sp sub]: the per-def stack offset ranges,
       k-ranges, merged regions, the stack model decision, and the VLA
-      bounds of [sub]. Runs the relevance analysis first if [sub] carries
+      bounds of [sub] — the [offsets]/[k_ranges] fields of the result
+      are the precomputed per-def index maps (arch C2: no consumer folds
+      them). Runs the relevance analysis first if [sub] carries
       no tags.
 
       [target] is threaded in so all stack derivation comes from
