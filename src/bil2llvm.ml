@@ -811,11 +811,14 @@ let create_branches blk_tid llvm_builder branches =
     KB.return ())
   else failwith "pp_branches: more than 2 branches"
 
-(* [find_def_tag sub_tid def]: Vsa_kind option — the VSA tag of [def] from [Convutils.vsa_info]: ANY tag, singleton (lo = hi) and interval (lo < hi) alike — the split happens in [create_def]. *)
+(* [find_def_tag sub_tid def]: Vsa_kind option — the VSA tag of [def] from
+   [Convutils.vsa_info]: ANY tag, singleton (lo = hi) and interval (lo < hi)
+   alike — the split happens in [create_def].  ONE map find (arch C2: the
+   record's [offsets] field IS the index map — the old per-def linear
+   [find_map] over the association list died with it). *)
 let find_def_tag sub_info def =
   Base.Option.bind sub_info ~f:(fun info ->
-      Base.List.find_map info.Convutils.offsets ~f:(fun (dtid, kind) ->
-          if Tid.equal dtid (Term.tid def) then Some kind else None))
+      Core.Map.find info.Convutils.offsets (Term.tid def))
 
 (* [is_abi_visible ctx sub_info def]: does the access touch caller/callee-visible
    storage? Finding 1: this is NO LONGER a second copy of the rule — it is
@@ -2355,10 +2358,11 @@ let create_sub sub =
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
     (* The per-sub VSA frame: the tag span [min_lo, max_hi] of [Convutils.vsa_offsets] — every stack access of the sub lands in this alloca (the singleton GEPs and the interval-path dynamic addresses both). *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
-    let tags =
-      sub_info
-      |> Base.Option.map ~f:(fun info -> info.Convutils.offsets)
-      |> Base.Option.value ~default:[]
+    (* The tag map for the frame-span folds (arch C2: [Map.fold] — sorted
+       key order; the span is order-independent). *)
+    let tags = match sub_info with
+      | Some info -> info.Convutils.offsets
+      | None -> Tid.Map.empty
     in
     (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
        [Hike_stack_to_locals.split_plan] produced it in the vsa pass and
@@ -2367,17 +2371,18 @@ let create_sub sub =
     let is_precise = plan <> [] in
     let frame, min_lo, anchor_idx, anchor_i64 =
       if is_precise then (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-      else
-        match tags with
-        | [] ->
-          if sub_degraded sub_info then
+      else if Core.Map.is_empty tags then begin
+          if sub_degraded sub_info then begin
             let n, _, _, anchor_idx = degraded_dims ~abi sub in
             let frame, _, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx (Int64.neg n) in
             (frame, Int64.neg n, anchor_idx, anchor_i64)
+          end
           else (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-        | _ ->
+        end
+        else begin
           let min_lo, max_hi =
-            Base.List.fold tags ~init:(0L, 0L) ~f:(fun (lo, hi) (_, kind) ->
+            Core.Map.fold tags ~init:(0L, 0L)
+              ~f:(fun ~key:_ ~data:kind (lo, hi) ->
                 match kind with
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
                     if Int64.compare l 0L <= 0 then
@@ -2389,7 +2394,8 @@ let create_sub sub =
             let clamp_hi h =
               if Int64.compare h 0x40000000L > 0 then min_lo else h
             in
-            Base.List.fold tags ~init:0L ~f:(fun acc (_, kind) ->
+            Core.Map.fold tags ~init:0L
+              ~f:(fun ~key:_ ~data:kind acc ->
                 match kind with
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
                     if Int64.compare l 0L <= 0 then Int64.max acc (clamp_hi h)
@@ -2404,6 +2410,7 @@ let create_sub sub =
           in
           let anchor_idx = Int64.sub n 8L in
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo
+        end
     in
     let regions =
       if is_precise then

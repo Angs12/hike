@@ -32,10 +32,7 @@ let () =
     in
     let tagged = Hike.Relevance.analyze sp sub in
     let info = Hike.Vsa.offsets_of_sub target sp tagged in
-    let kind_of =
-      Base.List.fold info.Hike.Convutils.offsets ~init:Tid.Map.empty
-        ~f:(fun m (tid, k) -> Core_kernel.Map.set m ~key:tid ~data:k)
-    in
+    let kind_of = info.Hike.Convutils.offsets in
     (* mem-fission (2026-09-02): the REGION column — the region id whose
        span contains the def's tag (the fission's per-region mem var /
        alloca).  "-" when the def belongs to no region (the fallback
