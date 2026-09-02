@@ -79,12 +79,30 @@ module Vsa : sig
     Theory.Target.t -> var -> sub term -> Convutils.vsa_info
 end
 
+(** Dead-code elimination — the aggressive sweep lane.
+
+    The interface is [dce] alone: the keep rule (the two-tier region-mem
+    rule, the SP-erasure on the precise path, the always-keeps for ABI
+    and memory traffic), the load-roots set, and the return-epilogue
+    rewrite are the implementation, observable through [dce] on BIL
+    fixtures. TOTAL over targets (a target without a convention record
+    falls back to the x86_64 SysV facts). *)
+module Dce : sig
+  (** [dce ~target sub]: replace the lifted RETURN epilogue (the indirect
+      noreturn call) with a var-free target, then iteratively sweep defs
+      whose lhs nothing uses. Subs carrying the [Sub.intrinsic] attribute
+      pass through unchanged. *)
+  val dce :
+    target:Theory.Target.t -> sub term -> sub term
+end
+
 (** Stack-to-locals — and the OWNER OF THE STACK MODEL DECISION.
 
     [split_plan] is the single producer of "does this sub's stack split
     into per-region [stack_rN] allocas, or fall back to one big
-    [%frame]?" Its consumers are [stack_to_locals] itself,
-    [Hike_dce.is_precise_sub] and [Bil2llvm] — no consumer re-derives it. *)
+    [%frame]?" Its consumers are [stack_to_locals] itself, the DCE lane
+    ({!Dce} — the SP-erasure keep) and [Bil2llvm] — no consumer
+    re-derives it. *)
 module Stack_to_locals : sig
   (** [stack_to_locals target sp sub]: rewrite constant-offset stack
       accesses to named locals, per the plan the vsa pass computed. *)

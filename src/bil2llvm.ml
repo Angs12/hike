@@ -1872,7 +1872,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
            call, aborting every later sub's conversion.  Correct wherever
            the value is genuinely unused; where used, the poison is the
            documented gap — never a silent wrong value. *)
-        if Base.String.is_prefix name ~prefix:"intrinsic:" then begin
+        if Convutils.is_intrinsic_name name then begin
           Printf.eprintf
             "hike: guarded: unmapped intrinsic call: %s (in sub %s) - emitting \
              as external; result lanes are poison\n"

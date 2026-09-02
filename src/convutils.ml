@@ -141,6 +141,14 @@ let is_positive_kind (kind : vsa_kind) : bool =
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
+(* [is_intrinsic_name s]: the ONE name fact for the FP-intrinsic interface
+   vars and the mapped-intrinsic subs (the [intrinsic:xN] / [intrinsic:yN]
+   temps, the [intrinsic:*] sub names). Previously three hand-typed
+   prefix tests (hike_dce's var form, bil2llvm's sub-name form, hike.ml's
+   free-var filter) — one fact, one home. *)
+let is_intrinsic_name (s : string) : bool =
+  Base.String.is_prefix s ~prefix:"intrinsic:"
+
 type section = { base : Llvm.llvalue; min_addr : word; max_addr : word }
 type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL | TEXT
 
