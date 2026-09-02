@@ -146,6 +146,18 @@ module Stack_to_locals : sig
   (** [is_precise info]: does [info]'s sub use the split model? — the
       consumer-side read of the decision. *)
   val is_precise : Convutils.vsa_info -> bool
+
+  (** The fission var producers + recognizers (mem-fission): the naming
+      convention ([stack_rN_mem] / [stack_rN_base]) is THIS module's
+      implementation detail. [region_mem id] / [region_base id] mint the
+      vars; [is_region_mem] / [is_region_base] read them back. Consumers
+      (the DCE lane's two-tier keep, the emitter's fission dispatch and
+      its φ-lane name rule) import the predicates instead of re-typing
+      the string grammar. *)
+  val region_mem : int -> var
+  val region_base : int -> var
+  val is_region_mem : var -> bool
+  val is_region_base : var -> bool
 end
 
 (** The per-sub VSA result store — one KB slot with a JOIN domain.
