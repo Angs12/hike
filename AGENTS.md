@@ -410,12 +410,26 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
-**Last verified: 2026-09-03 EEST — principle #6's compile-out regime + the
-dune-built plugin, branch `diag-channel` (worktree
-`/tmp/opencode/wt-diag`, off main 40955da) — BATTERY GREEN, IR
-BYTE-IDENTICAL to main 32/32, ZERO env reads, ZERO direct prints outside
-Hike_diag, instrumentation verified compiled OUT (production .pp.ml
-greps 0) and compiled IN under vsa-debug (greps 1)**
+**Last verified: 2026-09-03 EEST (morning) — MAIN @ 87c9b86 — THE TRIPLE
+MERGE: the optimizability program (mem-fission, opt gate, FP-table fix,
+arch-c1c6) + the 2026-09-02 architecture-review program (candidates
+#3/#2/#5/#1: mk_rctx, the Cbat_memo module, the Cbat_wto module, the
+cbat_extraction submodule, the hike_stack_model split, ADR 0005) + the
+diag-channel regime (Hike_diag, cppo compile-out, the build blocker,
+the DUNE-BUILT PLUGIN) — BATTERY GREEN, IR BYTE-IDENTICAL to a fresh
+main control 32/32 (the only err_ diffs: the Q11 progress-print
+deletions — the merged tree is cleaner), 30/2 at BOTH -O0 and opt -O2,
+160/0 allocas, 0 unmapped intrinsics, ZERO env reads**
+
+The merge resolution record (both commits' messages carry the full
+detail): the fission body + the review topology; C2 + empty_vsa_info
+with vla_bounds unified on the MAP; the stages debug adapter's report
+behind #ifdef VSA_DEBUG (the adapter the blocker never met); the
+plugin-clash postmortem (the Hashtbl.add_exn crash = the legacy
+bapbundle zip + the dune plugin both installed — fixed by the regime's
+recipe: `bapbundle remove hike` then `dune build @install && dune
+install`). The INHERITED-STATE note below is RESOLVED (main's merge
+completed; this IS it).
 
 **The arc (the grilling-settled design, 17 questions, one session):**
 the user directive "the instrumentation should not be compiled in the
