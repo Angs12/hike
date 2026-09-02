@@ -49,6 +49,7 @@
  (modules
   cbat_vsa
   cbat_memo
+  cbat_wto
   cbat_interval_tree
   cbat_ai_memmap
   cbat_ai_representation

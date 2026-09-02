@@ -28,118 +28,22 @@ module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word_ops
 module Utils = Cbat_vsa_utils
 
-(* Bourdoncle WTO — inlined from cbat_wto.ml to avoid separate-file merlin config. *)
-module Wto = struct
-  type comp =
-    | Vertex of Tid.t
-    | SCC of Tid.t * comp list
-
-  let rec flatten_comps (cs : comp list) : Tid.t list =
-    List.concat_map cs ~f:(function
-        | Vertex v -> [v]
-        | SCC (h, inner) -> h :: flatten_comps inner)
-
-  let rec heads_of_comps (cs : comp list) : Tid.Set.t =
-    List.fold cs ~init:Tid.Set.empty ~f:(fun acc -> function
-        | Vertex _ -> acc
-        | SCC (h, inner) ->
-          let acc = Core.Set.add acc h in
-          Core.Set.union acc (heads_of_comps inner))
-
-  let rec pp_comp (fmt : Format.formatter) (c : comp) : unit =
-    match c with
-    | Vertex v -> Format.fprintf fmt "%s" (Tid.to_string v)
-    | SCC (h, inner) ->
-      Format.fprintf fmt "(%s %a)" (Tid.to_string h)
-        (Format.pp_print_list ~pp_sep:(fun fmt () -> Format.fprintf fmt " ") pp_comp) inner
-
-  let scc_partition
-      (nodes : Tid.t list)
-      (succ : Tid.t -> Tid.t list)
-      (pred : Tid.t -> Tid.t list)
-    : Tid.t list list =
-    let node_set = Tid.Set.of_list nodes in
-    let visited = ref Tid.Set.empty in
-    let order = ref [] in
-    let rec dfs1 (n : Tid.t) : unit =
-      if not (Core.Set.mem !visited n) then begin
-        visited := Core.Set.add !visited n;
-        List.iter (succ n) ~f:(fun m ->
-            if Core.Set.mem node_set m then dfs1 m);
-        order := n :: !order
-      end
-    in
-    List.iter nodes ~f:dfs1;
-    let visited2 = ref Tid.Set.empty in
-    let comps = ref [] in
-    List.iter !order ~f:(fun n ->
-        if not (Core.Set.mem !visited2 n) then begin
-          let cur = ref [] in
-          let rec dfs2 (x : Tid.t) : unit =
-            if not (Core.Set.mem !visited2 x) then begin
-              visited2 := Core.Set.add !visited2 x;
-              cur := x :: !cur;
-              List.iter (pred x) ~f:(fun p ->
-                  if Core.Set.mem node_set p then dfs2 p)
-            end
-          in
-          dfs2 n;
-          comps := !cur :: !comps
-        end);
-    !comps
-
-  let wto_of_cfg (cfg : Graphs.Tid.t) : comp list =
-    let all_nodes = Graphs.Tid.nodes cfg |> Seq.to_list in
-    if List.is_empty all_nodes then [] else
-      let succ_all (n : Tid.t) : Tid.t list =
-        Graphs.Tid.Node.succs n cfg |> Seq.to_list in
-      let pred_all (n : Tid.t) : Tid.t list =
-        Graphs.Tid.Node.preds n cfg |> Seq.to_list in
-      let rpo_index : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
-      begin
-        let visited = ref Tid.Set.empty in
-        let order = ref [] in
-        let rec dfs (n : Tid.t) : unit =
-          if not (Core.Set.mem !visited n) then begin
-            visited := Core.Set.add !visited n;
-            List.iter (succ_all n) ~f:dfs;
-            order := n :: !order
-          end
-        in
-        List.iter all_nodes ~f:dfs;
-        List.iteri !order ~f:(fun i n -> Hashtbl.set rpo_index ~key:n ~data:i)
-      end;
-      let get_rpo (n : Tid.t) : int =
-        Hashtbl.find rpo_index n |> Option.value ~default:Int.max_value in
-      let has_self_loop (n : Tid.t) : bool =
-        List.mem (succ_all n) n ~equal:Tid.equal in
-      let rec wto_rec (nodes : Tid.t list) : comp list =
-        if List.is_empty nodes then [] else
-          let node_set = Tid.Set.of_list nodes in
-          let succ (n : Tid.t) : Tid.t list =
-            List.filter (succ_all n) ~f:(fun m -> Core.Set.mem node_set m) in
-          let pred (n : Tid.t) : Tid.t list =
-            List.filter (pred_all n) ~f:(fun m -> Core.Set.mem node_set m) in
-          let sccs = scc_partition nodes succ pred in
-          let sccs_sorted =
-            List.sort sccs ~compare:(fun a b ->
-                let ma = List.map a ~f:get_rpo |> List.min_elt ~compare:Int.compare |> Option.value ~default:Int.max_value in
-                let mb = List.map b ~f:get_rpo |> List.min_elt ~compare:Int.compare |> Option.value ~default:Int.max_value in
-                Int.compare ma mb) in
-          List.concat_map sccs_sorted ~f:(fun scc ->
-              match scc with
-              | [v] when not (has_self_loop v) -> [Vertex v]
-              | _ ->
-                let head =
-                  List.min_elt scc ~compare:(fun a b -> Int.compare (get_rpo a) (get_rpo b))
-                  |> Option.value_exn in
-                let rest = List.filter scc ~f:(fun n -> not (Tid.equal n head)) in
-                let inner = wto_rec rest in
-                [SCC (head, inner)])
-      in
-      wto_rec all_nodes
-end
-module Cbat_wto = Wto
+(* ARCH-5 — the Bourdoncle WTO is its OWN MODULE now ([cbat_wto.ml],
+   directly tested; accessor-polymorphic — see its header).  This is
+   the GRAPHS ADAPTER: the engine's cfg, passed as the two accessors.
+   The reversed ordering (the L2 walk schedule's backward fixpoint) is
+   the accessors SWAPPED — [wto ~succ:preds_of ~pred:succs_of] — a
+   call-shape on this same adapter. *)
+(* ARCH-5 — the GRAPHS ADAPTER (a plain function; the sibling module
+   [cbat_wto] is in scope by its plain name): the engine's cfg,
+   passed as the two accessors.  The reversed ordering (the L2 walk
+   schedule's backward fixpoint) is the accessors SWAPPED — a
+   call-shape on this same adapter. *)
+let wto_of_cfg (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
+  Cbat_wto.wto
+    ~nodes:(Graphs.Tid.nodes cfg |> Seq.to_list)
+    ~succ:(fun n -> Graphs.Tid.Node.succs n cfg |> Seq.to_list)
+    ~pred:(fun n -> Graphs.Tid.Node.preds n cfg |> Seq.to_list)
 
 (* ARCH-2 — the version-keyed memo module (one discipline, two
    instantiations: the walk memo and the transfer memo).  See
@@ -3329,7 +3233,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
      WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
      after 10 warmup sweeps (landmark-directed: Finite extrapolates, Zero
      advances and joins, Inf standard-widens). Always runs; no fallback. *)
-  let wto = Cbat_wto.wto_of_cfg cfg_tmp in
+  let wto = wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
   Cbat_landmarks.clear ();

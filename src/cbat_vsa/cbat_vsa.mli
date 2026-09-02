@@ -29,6 +29,7 @@ module Mem = Cbat_ai_memmap
    the timing adapter. See src/cbat_vsa/dune and AGENTS.md §6. *)
 module Stages = Cbat_vsa_stages
 
+
 type vsa_sol = (tid, AI.t) Solution.t
 
 (* Raised by [static_graph_vsa] when the fixpoint's verification round finds the solution still changing at the [~steps] cap — the solution would be an under-approximation and must not feed the narrow-tag decisions (see. *)

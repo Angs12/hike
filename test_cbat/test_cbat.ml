@@ -8202,6 +8202,127 @@ let () =
      && Ws.equal (cell_at exit_tid) (Ws.singleton (w32 3)));
   ()
 
+(* ============ ARCH-5: the WTO module's direct tests ============ *)
+(* The flat module name (the Cbat_vsa__ wrapper prefix) — the Cfp
+   precedent; the wrapped library's plain re-export is not visible
+   here (the Hike_abi gotcha class). *)
+module Cbat_wto = Cbat_vsa__Cbat_wto
+(* The Bourdoncle ordering was inline in [cbat_vsa.ml] and consumed
+   untested for its whole life; the module extraction (review
+   candidate #5) adds these.  Hand-built accessors over fresh tids —
+   no BAP graph plumbing (the accessor-polymorphic payoff).  The
+   graphs mirror Bourdoncle's own paper figures where noted. *)
+
+let () =
+  (* helpers: a directed graph as a succ function + the derived pred *)
+  let mk_graph edges =
+    let succ n =
+      List.filter (fun (a, _) -> Tid.equal a n) edges
+      |> List.map (fun (_, b) -> b) in
+    let pred n =
+      List.filter (fun (_, b) -> Tid.equal b n) edges
+      |> List.map (fun (a, _) -> a) in
+    succ, pred in
+  let is_vertex = function Cbat_wto.Vertex _ -> true | _ -> false in
+  (* the heads, derived locally from the structure (the tests assert on
+     the component shape, not any set library) *)
+  let rec heads_of = function
+    | [] -> []
+    | Cbat_wto.Vertex _ :: tl -> heads_of tl
+    | Cbat_wto.SCC (hh, inner) :: tl -> hh :: heads_of (inner @ tl) in
+  let as_scc = function Cbat_wto.SCC (h, inner) -> Some (h, inner) | _ -> None in
+
+  (* WTO-1 — the DAG: every node is a Vertex, the order is a topological
+     one (a successor never precedes its predecessor). *)
+  let a = Tid.create () and b = Tid.create () and c = Tid.create () in
+  let d = Tid.create () and e = Tid.create () in
+  let succ, pred = mk_graph [(a, b); (b, c); (a, d); (d, c); (c, e)] in
+  let w = Cbat_wto.wto ~nodes:[a; b; c; d; e] ~succ ~pred in
+  let flat = Cbat_wto.flatten_comps w in
+  let pos n =
+    let rec go i = function
+      | [] -> -1
+      | x :: _ when Tid.equal x n -> i
+      | _ :: tl -> go (i + 1) tl in
+    go 0 flat in
+  check "WTO-1 (DAG): all vertices, topological"
+    (List.for_all is_vertex w
+     && pos a < pos b && pos b < pos c && pos a < pos d && pos d < pos c
+     && pos c < pos e);
+
+  (* WTO-2 — a simple cycle: ONE SCC whose head is the RPO-minimal entry;
+     [heads_of_comps] = exactly the head (Theorem 3's set). *)
+  let h = Tid.create () and x = Tid.create () and y = Tid.create () in
+  let succ, pred = mk_graph [(h, x); (x, y); (y, h)] in
+  let w = Cbat_wto.wto ~nodes:[h; x; y] ~succ ~pred in
+  check "WTO-2 (cycle): one SCC, head = seed-minimal, heads = {head}"
+    (match w with
+     | [Cbat_wto.SCC (hh, inner)] ->
+       Tid.equal hh h
+       && List.for_all is_vertex inner
+       && (match heads_of w with [h'] -> Tid.equal h' hh | _ -> false)
+     | _ -> false);
+
+  (* WTO-3 — the self-loop singleton: [v] with v -> v is an SCC (Bourdoncle
+     §2: a one-node cycle is a component), NOT a Vertex. *)
+  let v = Tid.create () in
+  let succ, pred = mk_graph [(v, v)] in
+  let w = Cbat_wto.wto ~nodes:[v] ~succ ~pred in
+  check "WTO-3 (self-loop): SCC not Vertex"
+    (match w with
+     | [Cbat_wto.SCC (vv, [])] -> Tid.equal vv v
+     | _ -> false);
+
+  (* WTO-4 — NESTED cycles (Bourdoncle fig. 1's shape): the outer SCC's
+     head is the outer entry; the inner SCC nests INSIDE it; both heads
+     appear in [heads_of_comps]. *)
+  let o = Tid.create () and i = Tid.create () in
+  let m = Tid.create () and n = Tid.create () in
+  let succ, pred = mk_graph [(o, i); (i, m); (m, n); (n, i); (m, o)] in
+  let w = Cbat_wto.wto ~nodes:[o; i; m; n] ~succ ~pred in
+  let heads_of_w = heads_of w in
+  let mem_h n = List.exists (Tid.equal n) heads_of_w in
+  check "WTO-4 (nested): outer head o, inner head i, both in heads"
+    (match as_scc (List.hd w) with
+     | Some (hh, inner) ->
+       Tid.equal hh o
+       && mem_h o && mem_h i
+       && (match List.filter_map as_scc inner with
+           | [ (ih, _) ] -> Tid.equal ih i
+           | _ -> false)
+     | None -> false);
+
+  (* WTO-5 — THE REVERSED CALL-SHAPE (the L2 payoff): swapping the two
+     accessors builds the REVERSED ordering — no new code, no copy.
+     On a 3-cycle entered at [p], the reversed ordering is still one
+     SCC covering all three nodes (the cycle is symmetric under
+     reversal), with its own head (the reversed traversal's entry);
+     the decisive property is the SHAPE (one component, all members)
+     plus the head set being a valid widening-point set for the
+     reversed direction. *)
+  let p = Tid.create () and q = Tid.create () and r = Tid.create () in
+  let succ, pred = mk_graph [(p, q); (q, r); (r, p)] in
+  let rev = Cbat_wto.wto ~nodes:[p; q; r] ~succ:pred ~pred:succ in
+  check "WTO-5 (reversed call-shape): one SCC covering the cycle, own head set"
+    (match rev with
+     | [Cbat_wto.SCC (hh, inner)] ->
+       List.length (Cbat_wto.flatten_comps inner) = 2
+       && (match heads_of rev with [h'] -> Tid.equal h' hh | _ -> false)
+     | _ -> false);
+
+
+  (* WTO-6 — the head choice is the SEED-ORDER minimum inside the SCC
+     (the documented convention): a cycle entered at [e2] seeded
+     [e2; e1] still picks [e2] (the first seed = the minimal backward
+     RPO index), not [e1]. *)
+  let e1 = Tid.create () and e2 = Tid.create () and e3 = Tid.create () in
+  let succ, pred = mk_graph [(e2, e1); (e1, e3); (e3, e2)] in
+  let w = Cbat_wto.wto ~nodes:[e2; e1; e3] ~succ ~pred in
+  check "WTO-6 (head = seed-minimal backward-RPO)"
+    (match w with
+     | [Cbat_wto.SCC (hh, _)] -> Tid.equal hh e2
+     | _ -> false)
+
 let () =
   print_endline
     (if !failures = 0 then "ALL CBAT TESTS PASSED" else Printf.sprintf "%d FAILURES" !failures);
