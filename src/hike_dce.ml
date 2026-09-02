@@ -1,22 +1,43 @@
 (* Dead-code elimination for the hike pipeline. Replaces the lifted return epilogue (indirect noreturn call) with a var-free form, then iteratively removes defs whose lhs is never used. Memory writes and ABI registers are always kept — EXCEPT the fissioned region mem vars ([stack_rN_mem], mem-fission 2026-09-02): those survive iff some Load reads them (the load-roots rule), so never-loaded store chains (the retaddr pushes) die together in one sweep round.
    RSP erasure on the precise path uses BAP-derived SP (Abi.sp), not hardcoded strings.
-   RBP is not explicitly erased; it is deleted by the fixpoint if derived from RSP (RBP:=RSP) and RSP is erased. *)
+   RBP is not explicitly erased; it is deleted by the fixpoint if derived from RSP (RBP:=RSP) and RSP is erased.
+
+   The module's interface is [dce] alone ([hike_dce.mli]) — the keep rule,
+   the two-tier region-mem rule, the load-roots set and the epilogue
+   rewrite are all observable through it on BIL fixtures. The ABI lane is
+   TOTAL (the [of_target_opt ~default:x86_64_sysv] fallback — the unit
+   fixtures run [Theory.Target.unknown]), so [dce] never raises on a
+   target without a convention record; the SP-erasure lane is skipped
+   there (no stack pointer to erase), which is the sound identity for a
+   fixture with no SP-relative traffic. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
 
+(* TOTAL: the ABI record for [target], or the x86_64 SysV record for a
+   target that declares no convention (the unit fixtures'
+   [Theory.Target.unknown] — its fixture sp is the "RSP"-named var
+   either way, so the register facts still resolve by name). *)
+let abi_of (target : Theory.Target.t) : Abi.t =
+  Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
+
+(* SP lookup made total the same way: the target's own stack pointer, or
+   the record's (the fixtures' "RSP"); a target that declares no stack
+   pointer at all also falls back (cf. [fp_of] in stack_to_locals). *)
+let sp_of (target : Theory.Target.t) : var =
+  match Abi.sp target with
+  | v -> v
+  | exception _ -> (abi_of target).Abi.sp
+
 (* ABI registers that may be read implicitly by calls (Abi is the sole origin). *)
 let is_ret_reg (target : Theory.Target.t) (v : var) : bool =
-  Base.List.exists (Abi.return_regs target)
-    ~f:(fun r -> Var.same r (Var.base v))
+  Abi.is_return_reg (abi_of target) (Var.base v)
 
 let is_call_reg (target : Theory.Target.t) (v : var) : bool =
-  let regs =
-    Abi.param_regs target
-    @ Abi.return_regs target
-  in
+  let abi = abi_of target in
+  let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 
 (* Replace an indirect noreturn call (return idiom) with a var-free target. *)
@@ -34,9 +55,9 @@ let ret_replacement (j : jmp term) : jmp term =
       | _ -> j)
   | _ -> j
 
-(* The fissioned region mem vars ([stack_rN_mem]): recognized through the
-    producer module's predicate ([Hike_stack_to_locals.is_region_mem]: the
-    naming convention is that module's fact, not a grammar every consumer
+(* The fissioned region mem vars ([stack_rN_mem]): recognized through
+    the producer module's predicate ([Hike_stack_to_locals.is_region_mem]:
+    the naming convention is that module's fact, not a grammar every consumer
     re-types). *)
 let is_region_mem (v : var) : bool =
   Hike_stack_to_locals.is_region_mem v
@@ -73,14 +94,15 @@ let used_of (sub : sub term) : Var.Set.t =
   in
   v#visit_sub sub Var.Set.empty
 
-(* FP intrinsic interface vars ([intrinsic:xN] / [intrinsic:yN]). *)
+(* FP intrinsic interface vars ([intrinsic:xN] / [intrinsic:yN]) — the
+   ONE name fact ([Convutils.is_intrinsic_name]). *)
 let is_intrinsic_var (v : var) : bool =
-  Base.String.is_prefix (Var.name (Var.base v)) ~prefix:"intrinsic:"
+  Convutils.is_intrinsic_name (Var.name (Var.base v))
 
 let is_hike_stack (v : var) : bool = Var.same v Convutils.hike_stack_var
 
 let is_sp (target : Theory.Target.t) (v : var) : bool =
-  Var.same v (Abi.sp target)
+  Var.same v (sp_of target)
 
 let rec sp_value_exp (target : Theory.Target.t) (e : exp) : bool =
   match e with
@@ -116,10 +138,10 @@ let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   | Some info -> Hike_stack_to_locals.is_precise info
 
 (* The TWO-TIER keep: a region mem var's def survives iff the var has
-   a load-root; the lifter's [mem] keeps the unconditional is_mem keep
-   (ABI/external/outgoing traffic — the sub-local used-set cannot see
-   the callee's reads).  [load_roots] is threaded by [sweep_fixpoint],
-   recomputed per round (a removed load can un-root a chain). *)
+    a load-root; the lifter's [mem] keeps the unconditional is_mem keep
+    (ABI/external/outgoing traffic — the sub-local used-set cannot see
+    the callee's reads).  [load_roots] is threaded by [sweep_fixpoint],
+    recomputed per round (a removed load can un-root a chain). *)
 let keep ?(precise=false) ?(load_roots=Var.Set.empty)
     ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false

@@ -17,6 +17,7 @@ open Printf
    a dune-internal [Hike__Abi] form. *)
 module Relevance = Hike_vsa_relevance
 module Vsa = Hike_vsa
+module Dce = Hike_dce
 module Stack_to_locals = Hike_stack_to_locals
 module Kb = Hike_kb
 module Convutils = Convutils
@@ -210,7 +211,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
               (Var.same reg (sp target)
               || Var.same reg (fp target)
               || is_callee_saved
-              || Base.String.is_prefix n ~prefix:"intrinsic:"))
+              || Convutils.is_intrinsic_name n))
         |> Base.List.sort ~compare:(fun a b ->
             let ra, na = rank_of_var a in
             let rb, nb = rank_of_var b in
