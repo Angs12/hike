@@ -141,6 +141,26 @@ module Wto = struct
 end
 module Cbat_wto = Wto
 
+(* ARCH-2 — the version-keyed memo module (one discipline, two
+   instantiations: the walk memo and the transfer memo).  See
+   [cbat_memo.ml]'s header for the stamp/validity/stale-overwrite
+   argument. *)
+module Cbat_memo = Cbat_memo
+
+(* ARCH-2 — the two instantiations.  [Walk_memo]: the backward walk's
+   refined env per (source block, jmp tid).  [Transfer_memo]: the
+   block transfer's result + the F2 acquisition-fired flag per
+   (source block, target).  Both take their value module inline (the
+   review's functorized call — one variable each); the version
+   oracle is threaded per call (see [cbat_memo.mli]). *)
+module Walk_memo = Cbat_memo.Make (struct
+  type t = AI.t
+end)
+
+module Transfer_memo = Cbat_memo.Make (struct
+  type t = AI.t * bool
+end)
+
 (* Raised by [static_graph_vsa] when the fixpoint's verification round finds the solution STILL CHANGING at the [~steps] cap — the returned solution would be an under-approximation (states reachable only on longer paths are missing), so it must not be consumed for the narrow-tag decisions. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
   * (tid * tid) option
@@ -1549,45 +1569,6 @@ type flag_group = {
   (* [t := e - c]: For the RECORD's (e, c), by structural equality ([Exp.equal] on the operand, [Word.equal] on the constant — the BIR reuses the SSA var/exp objects, so the equality is exact); None = no such def in the block = the gate fails (the flags cannot be bound to the record's comparison). *)
 }
 
-(* ONE cache entry: the walk's result for one (source block, jmp) edge,
-   with the exact input identities it was computed against. *)
-type refine_hit = {
-  (* the walk's read-set (the visited blocks), stamped with the per-block
-     solution VERSIONS at compute time — the reuse check *)
-  rh_reads : (Tid.t * int) list;
-  (* [refine_edge]'s result (the walk-refined env) *)
-  rh_result : AI.t;
-}
-
-(* ONE block-transfer memo entry: the transferred state for one
-   (source block, target) edge, with the exact input identities it was
-   computed against — the transfer's READ-SET (the blocks whose solution
-   states it read: the source block's IN-state, plus every block the deep
-   walk visited), stamped with their versions at compute time.
-
-   This is ticket 03's [refine_hit] generalised from the WALK to the whole
-   TRANSFER, for the same reason: the transfer reads the solution at
-   UPSTREAM blocks, so an in-state-only key would reuse results computed
-   against narrower upstream states. *)
-type transfer_hit = {
-  th_reads : (Tid.t * int) list;
-  th_result : AI.t;
-  (* F2 — did this transfer's LANDMARK ACQUISITION fire?  Set at the
-     single choke point every firing acquisition passes through
-     ([Cbat_landmarks.record_landmark_for_head] — all three
-     [observe_unsat_var] sites of the jump path funnel there).  On a
-     version-valid hit the transfer's inputs are [AI.equal]-identical,
-     hence so is [observe_unsat_var]'s FIRING CONDITION (empty meet over
-     the var's value set + the statically-bound [widening_at_head]): a
-     re-fire would write the same (bound, is_upper, dist) entry again,
-     and [add_smaller_dist] keeps the smaller distance — an identical
-     re-fire is idempotent.  The flag therefore gates the Q1 REPLAY, not
-     the acquisition: when nothing fired, there is nothing to replay and
-     the hit returns the cached result directly.  When the flag is true
-     the replay stays the REAL no-walk pipeline ([~no_walk:true] — the
-     Q1 discipline: never hand-roll the sites). *)
-  th_fired : bool;
-}
 
 (* The per-fixpoint-run ANALYSIS CONTEXT (per sub, like [edge_conds]) —
    the deep module behind the engine's one interface: every fact whose
@@ -1615,8 +1596,10 @@ type refine_ctx = {
      pseudo-nodes — IDENTICAL to the engine's [cfg]; hoisted, was
      rebuilt per walk) *)
   rc_walk_cfg : Graphs.Tid.t;
-  (* source blk tid -> jmp tid -> the cached walk *)
-  rc_cache : refine_hit Tid.Map.t Tid.Map.t;
+  (* source blk tid -> jmp tid -> the cached walk — ARCH-2: the
+     WALK MEMO instantiation ([Walk_memo]; the entry record and the
+     stamp/validity discipline live in [Cbat_memo]). *)
+  rc_cache : Walk_memo.t;
 
   (* ---- the performance-architecture lane (2026-09-01, C2) ---- *)
 
@@ -1637,7 +1620,9 @@ type refine_ctx = {
      [AI.find_word] lookups) stays at the call site. *)
   rc_call_facts : (var list * bool) Tid.Map.t;
   (* THE BLOCK-TRANSFER MEMO (C1): source blk tid -> target tid -> the
-     read-set-stamped entry ([transfer_hit]).
+     memoized transfer ([Transfer_memo] — the value is the transferred
+     state + the F2 acquisition-fired flag; the read-set stamping and
+     validity discipline live in [Cbat_memo]).
 
      The transfer [denote_block_with_stores ... ~source:p (get p)] is a
      PURE FUNCTION of (the block, its in-state) — its only observable
@@ -1657,7 +1642,9 @@ type refine_ctx = {
      at UPSTREAM blocks, so an in-state-only key would reuse results
      computed against NARROWER upstream states (unsound in the widening
      direction). *)
-  rc_out_cache : transfer_hit Tid.Map.t Tid.Map.t;
+  (* ARCH-2: the TRANSFER MEMO instantiation ([Transfer_memo]; the
+     value is the transferred state + the F2 acquisition-fired flag). *)
+  rc_out_cache : Transfer_memo.t;
 }
 
 (* [reverse_def_walk ~defs ~refineable_var env live blk]: The reverse-def walk of one block — the defs in REVERSE order, the def inverse at each live lhs (the lhs leaves the live set, the rhs's derived pairs join it); a def whose lhs is not live is skipped. *)
@@ -2739,7 +2726,7 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     |> Var.Set.of_list;
   rc_versions = Tid.Map.empty;
   rc_walk_cfg = cfg;
-  rc_cache = Tid.Map.empty;
+  rc_cache = Walk_memo.empty;
   rc_flag_states =
     Term.enum blk_t s
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
@@ -2748,7 +2735,7 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     Term.enum blk_t s
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
-  rc_out_cache = Tid.Map.empty;
+  rc_out_cache = Transfer_memo.empty;
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =
@@ -2756,23 +2743,13 @@ let ver_of (rc : refine_ctx) (t : Tid.t) : int =
   | Some v -> v
   | None -> 0
 
-(* [reads_valid rc reads]: every recorded (block, version) still matches —
-   i.e. NO block the walk read has changed state since the cached run. *)
-let reads_valid (rc : refine_ctx) (reads : (Tid.t * int) list) : bool =
-  List.for_all reads ~f:(fun (t, v) -> ver_of rc t = v)
+(* ARCH-2 — [reads_valid]/[snapshot_reads]/[snapshot_out_reads] are
+   DELETED: the discipline they each implemented half of (the walk's
+   twin, the transfer's twin — byte-identical bodies) is ONE module
+   now ([Cbat_memo]: [valid]/[stamp], threaded per call with the
+   context's [ver_of]).  [ver_of] stays — the memo's callers
+   partially apply it as the version oracle. *)
 
-(* [snapshot_reads rc]: the version-stamped read-set of the walk that just
-   finished (the accumulator's current content). *)
-let snapshot_reads (reads : Tid.Set.t) (rc : refine_ctx) : (Tid.t * int) list =
-  Core.Set.to_list reads |> List.map ~f:(fun t -> (t, ver_of rc t))
-
-(* [snapshot_out_reads rc]: the version-stamped read-set of the BLOCK
-   TRANSFER that just finished (C1) — the source block's IN-state version
-   plus every block the deep walk visited, all accumulated into
-   [rc_out_reads] by [refine_edge_inline]. *)
-let snapshot_out_reads (reads : Tid.Set.t) (rc : refine_ctx)
-    : (Tid.t * int) list =
-  Core.Set.to_list reads |> List.map ~f:(fun t -> (t, ver_of rc t))
 
 (* [replay_acquisition ~denote_jump_acq]: REPLAY a block's LANDMARK
    ACQUISITION side effects on a cache hit (Q1 — the correctness fix for
@@ -2983,18 +2960,18 @@ let refine_edge_inline
       | Some _ ->
         let rc = rctx in
         let bt = Term.tid b in
-        let cached =
-          Option.(
-            let by_blk = Core.Map.find rc.rc_cache bt in
-            bind by_blk ~f:(fun by_jmp -> Core.Map.find by_jmp jt)) in
-        (match cached with
-         | Some hit when reads_valid rc hit.rh_reads ->
+        (* ARCH-2 — the WALK MEMO: [find] carries the whole discipline
+           (the version-stamped read-set, the validity check, the
+           stale-miss); the closure only distinguishes hit/miss now. *)
+        let version = ver_of rc in
+        (match Walk_memo.find ~version rc.rc_cache bt jt with
+         | Some refined ->
            (* HIT: the walk's own read-set is a SUBSET of the transfer's
               (both are keyed on the same versions), so the transfer's
               accumulator gains only the source block — already seeded by
               the engine. *)
-           (hit.rh_result, Some rc, Tid.Set.empty)
-         | _ ->
+           (refined, Some rc, Tid.Set.empty)
+         | None ->
            let walk_reads = ref (Tid.Set.singleton bt) in
            let refined, _live =
              Stages.time `Walk (fun () ->
@@ -3004,16 +2981,8 @@ let refine_edge_inline
            let rc =
              { rc with
                rc_cache =
-                 Core.Map.set rc.rc_cache ~key:bt
-                   ~data:(match Core.Map.find rc.rc_cache bt with
-                       | None ->
-                         Tid.Map.singleton jt
-                           { rh_reads = snapshot_reads !walk_reads rc;
-                             rh_result = refined }
-                       | Some by_jmp ->
-                         Core.Map.set by_jmp ~key:jt
-                           ~data:{ rh_reads = snapshot_reads !walk_reads rc;
-                                   rh_result = refined }) } in
+                 Walk_memo.add ~version rc.rc_cache bt jt
+                   ~reads:!walk_reads refined } in
            (refined, Some rc, !walk_reads))
       | None ->
         let refined, _live =
@@ -3550,86 +3519,76 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                returns the updated context and the read-set), store it
                back. *)
             let rc = !rc_cell in
-            let res = Stages.time `Denote (fun () ->
-              (* rc_out_cache: block -> target -> the read-set-stamped
-                 entry.  A stale read-set misses automatically (no
-                 invalidation walk — the stale entry is simply never read
-                 again, and it is overwritten by the next recompute). *)
-              let by_target = Core.Map.find rc.rc_out_cache p in
-              let cached =
-                Option.bind by_target ~f:(fun by_target ->
-                    Core.Map.find by_target v)
-                |> Option.filter ~f:(fun hit -> reads_valid rc hit.th_reads)
-              in
-              match cached with
-              | Some hit ->
-                (* HIT — replay the acquisition, reuse the computation.
-                   Q1: the replay is the REAL transfer with the deep walk
-                   DISABLED ([~no_walk:true] -> [denote_jump]'s [discarded]
-                   arm): it covers ALL THREE [observe_unsat_var] sites (the
-                   fallthrough row in [acquire_unsat_fallthrough], the
-                   gated env meet in [refine_edge_inline], the decoder arm
-                   in [apply_operand_constraint]) by construction and
-                   cannot drift from the real path — see the
-                   acquisition-replay comment above [refine_edge_inline].
-                   The replay runs ONLY inside a WTO head ([head_opt] was
-                   bound into [Cbat_landmarks.widening_at_head] just
-                   above): outside a head [observe_unsat_var] no-ops, so
-                   there is nothing to replay.
+             let res = Stages.time `Denote (fun () ->
+               (* ARCH-2 — the TRANSFER MEMO: [find] carries the whole
+                  discipline (the version-stamped read-set, the validity
+                  check, the stale-miss — no invalidation walk; a stale
+                  entry is simply never read again, and it is overwritten
+                  by the next recompute).  The value is the transferred
+                  state + the F2 acquisition-fired flag. *)
+               let version = ver_of rc in
+               match Transfer_memo.find ~version rc.rc_out_cache p v with
+               | Some (hit_res, fired) ->
+                 (* HIT — replay the acquisition, reuse the computation.
+                    Q1: the replay is the REAL transfer with the deep walk
+                    DISABLED ([~no_walk:true] -> [denote_jump]'s [discarded]
+                    arm): it covers ALL THREE [observe_unsat_var] sites (the
+                    fallthrough row in [acquire_unsat_fallthrough], the
+                    gated env meet in [refine_edge_inline], the decoder arm
+                    in [apply_operand_constraint]) by construction and
+                    cannot drift from the real path — see the
+                    acquisition-replay comment above [refine_edge_inline].
+                    The replay runs ONLY inside a WTO head ([head_opt] was
+                    bound into [Cbat_landmarks.widening_at_head] just
+                    above): outside a head [observe_unsat_var] no-ops, so
+                    there is nothing to replay.
 
-                   F2 — the ACQUISITION-FIRED LATCH: when the original
-                   transfer fired NOTHING (th_fired = false), the replay
-                   is pure waste — on a version-valid hit the transfer's
-                   inputs are [AI.equal]-identical, hence so is every
-                   firing condition, hence the replay would fire nothing
-                   either.  Skip it and return the cached result
-                   directly.  When [th_fired], the replay stays the REAL
-                   no-walk pipeline (the Q1 discipline: never hand-roll
-                   the sites). *)
-                (if Option.is_some head_opt && hit.th_fired then
-                   match Program.lookup blk_t ctx p with
-                   | Some _pb ->
-                     ignore (denote_block_with_stores ~refineable ~preserved
-                               ~defs ~stores ~sub:(Some s)
-                               ~edge_conds:(Some edge_conds)
-                               ~sol:(Some sol_snap) ~rctx:rc
-                               ~no_walk:true (denote_call stack) ctx
-                               ~source:p p_entry ~target:v)
-                   | None -> ());
+                    F2 — the ACQUISITION-FIRED LATCH: when the original
+                    transfer fired NOTHING (fired = false), the replay
+                    is pure waste — on a version-valid hit the transfer's
+                    inputs are [AI.equal]-identical, hence so is every
+                    firing condition, hence the replay would fire nothing
+                    either.  Skip it and return the cached result
+                    directly.  When fired, the replay stays the REAL
+                    no-walk pipeline (the Q1 discipline: never hand-roll
+                    the sites). *)
+                 (if Option.is_some head_opt && fired then
+                    match Program.lookup blk_t ctx p with
+                    | Some _pb ->
+                      ignore (denote_block_with_stores ~refineable ~preserved
+                                ~defs ~stores ~sub:(Some s)
+                                ~edge_conds:(Some edge_conds)
+                                ~sol:(Some sol_snap) ~rctx:rc
+                                ~no_walk:true (denote_call stack) ctx
+                                ~source:p p_entry ~target:v)
+                    | None -> ());
 
-                hit.th_result
-              | None ->
-                (* F2 — latch the acquisition around the ORIGINAL
-                   transfer: [end_fired_latch] restores the outer count
-                   and reports whether THIS transfer fired anything
-                   (all firing sites funnel through
-                   [Cbat_landmarks.record_landmark_for_head], the single
-                   choke point).  The latch is what makes the hit path's
-                   skip observationally identical: nothing fired =>
-                   nothing to replay. *)
-                let flatch = Cbat_landmarks.start_fired_latch () in
-                let (res, rc', reads) =
-                  denote_block_with_stores ~refineable ~preserved ~defs
-                    ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
-                    ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
-                    ctx ~source:p p_entry ~target:v in
-                let fired = Cbat_landmarks.end_fired_latch flatch in
-                (* The transfer's read-set: the source block's IN-state
-                   (the env INPUT) plus every block its walk visited. *)
-                let reads = Core.Set.add reads p in
-                let entry =
-                  { th_reads = snapshot_out_reads reads rc;
-                    th_result = res; th_fired = fired } in
-                let by_target' =
-                  match by_target with
-                  | None -> Tid.Map.singleton v entry
-                  | Some by_target ->
-                    Core.Map.set by_target ~key:v ~data:entry in
-                rc_cell :=
-                  { (Option.value ~default:rc rc') with
-                    rc_out_cache =
-                      Core.Map.set rc.rc_out_cache ~key:p ~data:by_target' };
-                res) in
+                 hit_res
+               | None ->
+                 (* F2 — latch the acquisition around the ORIGINAL
+                    transfer: [end_fired_latch] restores the outer count
+                    and reports whether THIS transfer fired anything
+                    (all firing sites funnel through
+                    [Cbat_landmarks.record_landmark_for_head], the single
+                    choke point).  The latch is what makes the hit path's
+                    skip observationally identical: nothing fired =>
+                    nothing to replay. *)
+                 let flatch = Cbat_landmarks.start_fired_latch () in
+                 let (res, rc', reads) =
+                   denote_block_with_stores ~refineable ~preserved ~defs
+                     ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
+                     ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
+                     ctx ~source:p p_entry ~target:v in
+                 let fired = Cbat_landmarks.end_fired_latch flatch in
+                 (* The transfer's read-set: the source block's IN-state
+                    (the env INPUT) plus every block its walk visited. *)
+                 let reads = Core.Set.add reads p in
+                 rc_cell :=
+                   { (Option.value ~default:rc rc') with
+                     rc_out_cache =
+                       Transfer_memo.add ~version rc.rc_out_cache p v
+                         ~reads (res, fired) };
+                 res) in
             Cbat_landmarks.widening_at_head := None;
             res) in
         (Stages.time `Join (fun () ->
