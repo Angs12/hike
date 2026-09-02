@@ -817,12 +817,6 @@ let find_def_tag sub_info def =
       Base.List.find_map info.Convutils.offsets ~f:(fun (dtid, kind) ->
           if Tid.equal dtid (Term.tid def) then Some kind else None))
 
-(* [find_def_k sub_tid def]: the def's k-range from the vsa pass's [k_ranges] (absent -> None, the conservative local treatment). *)
-let find_def_k sub_info def =
-  Base.Option.bind sub_info ~f:(fun info ->
-      Base.List.find_map info.Convutils.k_ranges ~f:(fun (dtid, klo, khi) ->
-          if Tid.equal dtid (Term.tid def) then Some (klo, khi) else None))
-
 (* [is_abi_visible ctx sub_info def]: does the access touch caller/callee-visible
    storage? Finding 1: this is NO LONGER a second copy of the rule — it is
    [Hike_stack_to_locals]'s, the module that owns the stack model. The emitter
@@ -2330,15 +2324,6 @@ let region_bytes (r : Convutils.region) : int64 =
   let raw = if Int64.compare raw 0L <= 0 then 1L else raw in
   let r = Int64.rem raw 16L in
   if Int64.equal r 0L then raw else Int64.add raw (Int64.sub 16L r)
-
-(* [def_tags_of info_opt]: the per-def VSA tag map (the tag lookup the
-   emitter needs for its own per-access dispatch). *)
-let def_tags_of (info_opt : Convutils.vsa_info option) : Convutils.vsa_kind Tid.Map.t =
-  match info_opt with
-  | None -> Tid.Map.empty
-  | Some info ->
-      Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty ~f:(fun m (tid, k) ->
-          Core.Map.set m ~key:tid ~data:k)
 
 
 let create_sub sub =

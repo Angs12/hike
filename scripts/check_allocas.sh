@@ -165,10 +165,11 @@ for ll in "$OUT_DIR"/out_*.ll; do
   fi
 
   # (d) PER-FUNCTION stack-frame alloca (R12/G4 Stage 3b) — FULL ERASURE.
-  #     Precise subs (those with `stack_rN` allocas, per `region_split_plan`) must have
-  #     ZERO `%frame` (frame-erased, per ADR 0001); degraded subs must have exactly ONE
-  #     `%frame = alloca [N x i8], align 16`.  A `define` with `stack_rN` is precise,
-  #     one without is degraded.  Stack-free defines (no alloca/load/store) are exempt.
+  #     Precise subs (those with `stack_rN` allocas, per the vsa_info stack_plan
+  #     the VSA pass computed) must have ZERO `%frame` (frame-erased, per ADR 0001);
+  #     degraded subs must have exactly ONE `%frame = alloca [N x i8], align 16`.
+  #     A `define` with `stack_rN` is precise, one without is degraded.
+  #     Stack-free defines (no alloca/load/store) are exempt.
   n_bad="$(awk '
     BEGIN { in_define=0; has_stack_r=0; has_frame=0; has_mem=0; bad=0 }
     /^define / {

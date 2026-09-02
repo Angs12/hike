@@ -360,4 +360,4 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
               (Sub.name sub') (Tid.to_string (Term.tid d))));
   probe_res
 
-(* M2 (ADR 0004): arity_of_sub and arity_map_of_prog removed — no stack-arg arity, M2 hike_stack ptr only. *)
+(* M2: arity_of_sub and arity_map_of_prog removed — no stack-arg arity, M2 hike_stack ptr only. *)

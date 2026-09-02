@@ -177,7 +177,7 @@ module Kb = Hike_kb
 module Convutils = Convutils
 
 (** The LLVM emitter, re-exported for the geometry the tests pin
-    ([region_bytes], [degraded_dims], [def_tags_of]).
+    ([region_bytes], [degraded_dims]).
 
     The emitter is a CONSUMER of the stack model decision — the decision
     itself is {!Stack_to_locals.split_plan}. *)
