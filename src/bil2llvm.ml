@@ -1406,6 +1406,10 @@ let fp_intrinsic_name = strip_at
 
 let native_fp_op (name : string) : native_fp option =
   match fp_intrinsic_name name with
+  (* The width-suffixed names (the sse-binary TABLE FIX: sse-convert
+     always appended (symbol-of-size rt); sse-binary now does too — the
+     SS class (rt=32) and the SD class (rt=64) are DISTINCT callee
+     subs, the width knowable from the name alone). *)
   | "intrinsic:fmul_rne_ieee754_binary_64" -> Some FMUL
   | "intrinsic:fmul_rne_ieee754_binary_32" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary_64" -> Some FADD
@@ -1416,11 +1420,37 @@ let native_fp_op (name : string) : native_fp option =
   | "intrinsic:fdiv_rne_ieee754_binary_32" -> Some FDIV
   | "intrinsic:frem_rne_ieee754_binary_64" -> Some FREM
   | "intrinsic:frem_rne_ieee754_binary_32" -> Some FREM
+  | "intrinsic:forder_rne_ieee754_binary_64" -> Some FORDER
+  | "intrinsic:forder_rne_ieee754_binary_32" -> Some FORDER
+  (* is_nan (ieee754.lisp: (set y0 (is-nan x0)) [:result 1] — the NaN
+     predicate, called by the COMISS/UCOMISS flag rows via
+     compare-floats): DIRECT — fcmp uno x0, x0 (unordered: true iff
+     x0 is NaN, the exact predicate at any width). *)
+  | "intrinsic:is_nan_rne_ieee754_binary_64" -> Some ISNAN
+  | "intrinsic:is_nan_rne_ieee754_binary_32" -> Some ISNAN
+  | "intrinsic:is_nan_ieee754_binary" -> Some ISNAN
+  | "intrinsic:is_nan_rne_ieee754_binary" -> Some ISNAN
+  (* the UNSUFFIXED spellings (the sse table's compare-floats/is-nan
+     emit bare ieee754 names for the COMISS class): the same ordered
+     less-than / NaN predicate. *)
+  | "intrinsic:forder_ieee754_binary" -> Some FORDER
+  | "intrinsic:forder_rne_ieee754_binary" -> Some FORDER
+  | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
+  | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
+  (* The unsuffixed legacy spellings (pre-table-fix lifts; both widths —
+     the SS/SD classes collapsed into one name, the width is then taken
+     from the interface temp's TYPE, not the name — see
+     [fp_intrinsic_sizes]). *)
   | "intrinsic:fmul_rne_ieee754_binary" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary" -> Some FADD
   | "intrinsic:fsub_rne_ieee754_binary" -> Some FSUB
   | "intrinsic:fdiv_rne_ieee754_binary" -> Some FDIV
   | "intrinsic:frem_rne_ieee754_binary" -> Some FREM
+  (* The x86 halt: BAP's x86-common.lisp [HLT] = (intrinsic 'hlt) — the
+     privileged halt, a faulting/trap edge in user mode — the SAME trap
+     model as the [@interrupt:*] calls (the lifter emits
+     [call @intrinsic:hlt] for hlt/ud2-class instructions). *)
+  | "intrinsic:hlt" -> Some FHLT
   | _ -> None
 
 (* [is_inline_fp_intrinsic name]: does the intrinsic name map to an
@@ -1525,19 +1555,7 @@ let build_fp_binop llvm_builder op a b ~(w : int) =
   return
   @@ Llvm.build_bitcast d ret_ty "" llvm_builder
 
-(* [fp_intrinsic_sizes target blk]: the (INPUT WIDTH, RESULT WIDTH) of an
-   FP intrinsic call, ONE source of truth for every FP mapping arm.
-   Priority: (1) the CALLEE NAME's width suffix (the sse-binary TABLE FIX
-   — sse-convert always appended (symbol-of-size rt), sse-binary now does
-   too, so a post-fix lift names the SS class ..._32 and the SD class
-   ..._64; the authoritative source); (2) the width-suffixed interface
-   temp [intrinsic:x0_<w>]'s LHS TYPE (the pre-table-fix legacy lifts
-   where SS/SD collapse into one callee name). (64, 64) when neither is
-   present (the direct-API default).
-   The INPUT width types the OPERAND bitcast (i32 -> float / i64 ->
-   double); the RESULT width types the VALUE lane (a 32-bit op's result
-   binds i32 — the y0_32 lane — never an i64 raw). *)
-(* [fp_intrinsic_sizes target ret]: the (INPUT WIDTH, RESULT WIDTH) of an
+(* [fp_intrinsic_sizes args rets]: the (INPUT WIDTH, RESULT WIDTH) of an
    FP intrinsic call — DERIVED FROM TYPES, not strings (the user
    directive 2026-09-01: no rename pass, no name-suffix reliance): the
    RESULT width is the RET LANE's declared [Var.typ] (the callee's own
@@ -1673,11 +1691,14 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
            the ORDERED FP less-than driving the COMISS/UCOMISS flag rows.
            DIRECT mapping: the plain fcmp olt on the width-aware bitcast
            operands (i32 -> float, the SS class [UCOMISS rt=32]; else
-           double, the SD class [UCOMISD rt=64] — the width from the
-           intrinsic NAME's interface temp, see [x_width]; comparisons do
-           not round; the SNaN-exception COMISS/UCOMISS difference is
-           unmodeled by BAP — the quiet form is exact).  Result zext'd to
-           i64 so the y0_64/y0_32/y0_1 views all read it. *)
+           double, the SD class [UCOMISD rt=64]). The width comes from the
+           OPERANDS' TYPES ([w_of], the min of the two), NOT from the
+           intrinsic name — NO width is ever parsed from a name (the
+           type-derived directive; [fp_intrinsic_sizes] supplies the
+           declared widths). Comparisons do not round; the
+           SNaN-exception COMISS/UCOMISS difference is unmodeled by BAP
+           — the quiet form is exact).  Result zext'd to i64 so the
+           y0_64/y0_32/y0_1 views all read it. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
         let w_of v =
