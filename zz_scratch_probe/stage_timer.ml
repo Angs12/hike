@@ -9,8 +9,10 @@
 
    Pass 2 — the decomposition the Hike seam exposes, on the SAME sub (a
    second fixpoint): analyze / fixpoint+views / partitioned. The
-   walk+merge / stack_to_locals / dce stages are INSIDE offsets_of_sub and
-   are not separable through the seam — they are labeled, not faked.
+   walk+merge (tag) stage is INSIDE offsets_of_sub and is not
+   separable through the seam — it is labeled, not faked.
+   [stack_to_locals] and [dce] are SEPARATE pipeline passes (not inside
+   the producer); time them with the pipeline, not with this probe.
 
    Pair with `perf record --call-graph dwarf -- dune exec
    zz_scratch_probe/stage_timer.exe -- <bin> <subname>` (the exe links -g). *)
@@ -64,7 +66,8 @@ let () =
     let t_part = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE (merged, no post-pass)     %8.3fs\n" t_part;
 
-    Printf.printf "STAGE walk+merge / stack_to_locals / dce   (inside offsets_of_sub — not separable through the Hike seam)\n";
+    Printf.printf "STAGE walk+merge (tags)         (inside offsets_of_sub — not separable through the Hike seam)\n";
+    Printf.printf "STAGE stack_to_locals / dce     (separate pipeline passes — time via the pipeline, not this probe)\n";
     Printf.printf "TOTAL (pass 1, production)      %8.3fs\n" t_total;
     Printf.printf "TOTAL (pass 2, decomposition)   %8.3fs   (analyze+fixpoint+views+partitioned)\n"
       (t_analyze +. t_fix +. t_part)

@@ -112,11 +112,11 @@ let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
       | _ -> false)
   | _ -> false
 
-(* Compute stack regions: S1 coarser (ADR 0004) — maximal overlap components with
-   rlo=min lo, rhi=max hi. Convertible if every member has lo<0 and is not an
-   incoming-register save; overlapping Ranges merge (not identical). Infinite
-   tags excluded from normal regions — S2 caps them to one big stack_rN in the
-   emitter; VLA excluded. *)
+(* Compute stack regions: maximal overlap components with rlo=min lo,
+   rhi=max hi (the coarser-hull merge). Convertible if every member has
+   lo<0 and is not an incoming-register save; overlapping Ranges merge
+   (not identical). Infinite tags excluded from normal regions — the
+   emitter caps them to one big stack_rN; VLA excluded. *)
 let is_real_call (j : jmp term) : bool =
   match Jmp.kind j with
   | Call c -> (
@@ -475,16 +475,14 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
      frame address, so the slot it points into must stay in the model
      frame (converting it to a private stack_rN alloca would rebind
      the storage the escaped pointer still points into — the callee
-     reads garbage). [escaped_addr_tids]: the defs of the sub whose
-     stack STORE stores an address-bearing value that derives from
-     SP/FP (the escaped-pointer WRITES — [cur.next := RBP-0x30-class]
-     is a plain spill of an escaped address and stays convertible;
-     what must stay memory is what the ADDRESS ESCAPE makes reachable),
-     and the defs whose STACK ADDRESS is passed as a call arg. Both
-     compute to: ANY stack traffic escapes when an sp/fp-derived
-     expression reaches a call argument or a memory store's DATA —
-     conservative, sound, no precision loss for the common case (no
-     program that never takes a frame address ever trips it). *)
+     reads garbage). Implemented as two existential checks over the
+     sub ([call_arg_escapes], [store_data_escapes] below): ANY stack
+     traffic escapes when an sp/fp-derived expression reaches a call
+     argument or a memory store's DATA — conservative, sound, no
+     precision loss for the common case (no program that never takes
+     a frame address ever trips it).  A plain spill of an escaped
+     address ([cur.next := RBP-0x30]) stays convertible: what must
+     stay memory is what the ADDRESS ESCAPE makes reachable. *)
   (* [is_direct_const_addr addr]: is the access address a DIRECT
      constant-offset frame access — [sp/fp ± const] (or a bare const),
      with NO index var and NO derived temp: the address the VSA proved
@@ -642,9 +640,15 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
    the lifted callee returns via a real LLVM ret), so its cell fissions
    into a never-loaded region and the two-tier DCE deletes the store.
    The REAL outgoing-arg stores (the 7th-arg pushes, EARLIER in the
-   tail) stay ABI-visible.  The set defaults to empty ([abi_visibility_of]
-   — the emitter runs post-fission, where the push defs are already
-   rewritten or deleted). *)
+   tail) stay ABI-visible.  The set defaults to empty: [abi_visibility_of]
+   (the emitter's form) does NOT thread it — in the production pipeline
+   the pass ORDER carries the exemption (hike-stack-to-locals runs
+   before hike-dce and hike-convlir: the push defs the fission rewrote
+   are region-mem stores the DCE load-roots rule deletes, and the ones
+   that stayed Slot-converted are already REWRITTEN to ordinary slot
+   defs, so neither kind reaches the emitter as a stack access; a
+   caller that runs emission WITHOUT those passes gets the conservative
+   ABI-visible answer, which is sound). *)
 let is_abi_visible ?(last_push_tids = Tid.Set.empty) (sp : var)
     ~(tag_of : Convutils.vsa_kind Tid.Map.t)
     ~(k_of : (int64 * int64) Tid.Map.t) (d : def term) : bool =
@@ -872,9 +876,11 @@ let tags_inside_or_disjoint (info : Convutils.vsa_info)
 
    Finding 1: this is the UNIFIED rule. It replaces the two analyses
    that previously disagreed in both directions — [sp_escaped] (the
-   stack-to-locals rule: a derived value reaching a call argument or a
-   stored data value) and the emitter's [has_frame_ptr] (a derived value
-   reaching a memory ADDRESS, the bare-copy class). Either one makes the
+   old stack-to-locals rule: a derived value reaching a call argument
+   or a stored data value) and the emitter's DELETED has_frame_ptr
+   check (a derived value reaching a memory ADDRESS, the bare-copy
+   class; removed with the emitter's old region-split plan in the
+   Finding-1 commit). Either one makes the
    frame reachable from outside the sub, and a sub whose frame is
    reachable cannot split: a private [stack_rN] alloca would rebind the
    storage an outside pointer still points into. *)

@@ -53,8 +53,8 @@ let load_roots_of (sub : sub term) : Var.Set.t =
       inherit [Var.Set.t] Term.visitor
       method! visit_load ~mem ~addr:_ _ _ acc =
         Core.Set.union acc (Exp.free_vars mem)
-      (* jmps / phis read vars as a whole — count them (they cannot
-         appear as a bare mem read per BNF1, but counting is sound). *)
+      (* jmps / phis read vars as a whole — count them (a jmp/phi var
+         read is not a bare mem-operand read, but counting is sound). *)
       method! visit_jmp j acc = Core.Set.union acc (Jmp.free_vars j)
       method! visit_phi p acc = Core.Set.union acc (Phi.free_vars p)
     end
@@ -102,14 +102,14 @@ let is_sp_value_def (target : Theory.Target.t) (d : def term) : bool =
 let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
   is_sp target (Def.lhs d)
 
-(* Precise predicate for RSP erasure (ADR 0001 Q1/A, Q2): the sub uses the
+(* Precise predicate for RSP erasure: the sub uses the
    SPLIT stack model (per-region [stack_rN] allocas) — its SP/hike_stack
    defs are dead.
 
    Finding 1: the decision is READ from [Convutils.stack_plan], the single
    result [Hike_stack_to_locals.split_plan] produced in the vsa pass. This
-   pass is a CONSUMER — it no longer imports the emitter's
-   [region_split_plan] to re-derive a BIL-level fact. *)
+   pass is a CONSUMER — it no longer imports the emitter's deleted
+   region-split logic to re-derive a BIL-level fact. *)
 let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
   | None -> false
@@ -139,7 +139,7 @@ let def_count (sub : sub term) : int =
   |> Seq.fold ~init:0 ~f:(fun n blk ->
       n + Seq.length (Term.enum def_t blk))
 
-(* Iteratively remove unused defs until fixpoint. For precise subs, SP/hike_stack/sp_value are dead (Q2, Q5). *)
+(* Iteratively remove unused defs until fixpoint. For precise subs, SP/hike_stack/sp_value are dead. *)
 let rec sweep_fixpoint ~target (sub : sub term) : sub term =
   let precise = is_precise_sub target sub in
   let used = used_of sub in

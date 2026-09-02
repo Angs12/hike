@@ -151,7 +151,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
      in
       (rets, args)
    else
-       (* M2 (ADR 0004): single ptr %hike_stack replaces trailing i64 stack_arg_N arity.
+       (* M2: single ptr %hike_stack replaces trailing i64 stack_arg_N arity.
          Subs with incoming stack args (lo>0, positive offsets) get hike_stack; main exempt. *)
       let has_positive =
         let vsa_positive =

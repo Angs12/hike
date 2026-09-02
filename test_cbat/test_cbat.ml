@@ -7201,11 +7201,35 @@ let () =
   ()
 
 let () =
-  (* R12-5: full-coverage gate — synthetic vsa_info with two disjoint singleton convertible regions;
-     every tagged offset lies within one of them -> gate qualifies. Uses the same covered/disjoint
-     logic as bil2llvm's region_split_plan. *)
-  let mk_tid () = Tid.create () in
-  let tid1 = mk_tid () and tid2 = mk_tid () in
+  (* R12-5/6/7: the full-coverage gate of the stack model decision —
+     asserted through the REAL interface ([Stl.split_plan], the single
+     producer Finding 1 installed), not a local re-implementation of its
+     covered/disjoint logic (the old test duplicated the rule and could
+     drift; split_plan is the seam the pipeline actually consults).
+
+     Fixture: one sub whose two tagged cells load from RSP-16 and RSP-32
+     (two disjoint singleton regions), so the coverage rule is the only
+     thing that can flip the verdict. *)
+  let rsp = v64 "RSP" in
+  let m = memv "r125_m" in
+  let t1 = v64 "r125_t1" in
+  let t2 = v64 "r125_t2" in
+  let b = Blk.Builder.create () in
+  let d1 =
+    Def.create t1
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)), LittleEndian, `r32))
+  in
+  let d2 =
+    Def.create t2
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 32)), LittleEndian, `r32))
+  in
+  Blk.Builder.add_def b d1;
+  Blk.Builder.add_def b d2;
+  let blk = Blk.Builder.result b in
+  let sb = Sub.Builder.create ~name:"r125_coverage" () in
+  Sub.Builder.add_blk sb blk;
+  let sub = Sub.Builder.result sb in
+  let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let r1 =
     {
       Hike.Convutils.id = 0;
@@ -7224,39 +7248,32 @@ let () =
       max_width = 32;
     }
   in
-  let convertible = [ r1; r2 ] in
+  let plan_of info = Stl.split_plan rsp Theory.Target.unknown sub info in
   let info =
     {
       Hike.Convutils.offsets =
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
       k_ranges = [ (tid1, -40L, -10L); (tid2, -50L, -20L) ];
-      regions = convertible;
+      regions = [ r1; r2 ];
       stack_plan = []; degraded = false; vla_bounds = [];
     }
   in
-  let covered (lo, hi) =
-    Base.List.exists convertible ~f:(fun r ->
-        let rlo, rhi = r.Hike.Convutils.span in
-        Int64.compare rlo lo <= 0 && Int64.compare hi rhi <= 0)
-  in
-  let all_covered =
-    Base.List.for_all info.Hike.Convutils.offsets ~f:(fun (_, k) ->
-        match k with Hike.Convutils.Range (lo, hi) -> covered (lo, hi) | _ -> false)
-  in
   check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
-    all_covered;
-  (* R12-6: gate rejects when an offset is Infinite (unbounded -> not covered) *)
+    (Cu.equal_split_plan (plan_of info) [ r1; r2 ]);
+  (* R12-6: gate rejects when an offset is Infinite (unbounded -> no sized
+     storage: the write-closed rule forces the fallback) *)
   let info_inf =
-    { info with Hike.Convutils.offsets = [ (tid1, Hike.Convutils.Infinite (-16L, -16L)) ] }
+    {
+      info with
+      Hike.Convutils.offsets =
+        [ (tid1, Hike.Convutils.Infinite (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
+    }
   in
-  let all_covered_inf =
-    Base.List.for_all info_inf.Hike.Convutils.offsets ~f:(fun (_, k) ->
-        match k with Hike.Convutils.Range (lo, hi) -> covered (lo, hi) | _ -> false)
-  in
-  check "R12-6: gate rejects Infinite tag (unbounded -> not covered)" (not all_covered_inf);
-  (* R12-7: gate rejects when degraded *)
+  check "R12-6: gate rejects Infinite tag (unbounded -> not covered)"
+    (plan_of info_inf = []);
+  (* R12-7: gate rejects when degraded (no tags to trust) *)
   let info_deg = { info with Hike.Convutils.degraded = true; vla_bounds = [] } in
-  check "R12-7: degraded sub never qualifies" info_deg.Hike.Convutils.degraded;
+  check "R12-7: degraded sub never qualifies" (plan_of info_deg = []);
   ()
 
 let () =
