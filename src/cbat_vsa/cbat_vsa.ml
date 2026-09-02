@@ -51,6 +51,7 @@ let wto_of_cfg (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
    argument. *)
 module Cbat_memo = Cbat_memo
 
+
 (* ARCH-2 — the two instantiations.  [Walk_memo]: the backward walk's
    refined env per (source block, jmp tid).  [Transfer_memo]: the
    block transfer's result + the F2 acquisition-fired flag per
@@ -3603,3 +3604,337 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   Stages.report (Sub.name s);
   Solution.create !sol_map sol_default
 
+(* ================================================================== *)
+(* ARCH-1 (review #1) — THE TAG-EXTRACTION SUBMODULE: the per-def    *)
+(* classification walk (the M6 meet discipline), the kind enum (the  *)
+(* pass layer's [Convutils.vsa_kind] ALIASES [kind] — one enum, no    *)
+(* mapping layer), the k-range arithmetic, the set-overlap merge,    *)
+(* and the VLA idiom matcher.  Formerly [hike_vsa.ml]'s [finish]     *)
+(* internals plus [precision_probe]'s 100-line copy of the same walk. *)
+(*                                                                    *)
+(* A SUBMODULE (not a sibling file): the walk IS the fixpoint's own  *)
+(* primitives ([denote_def]/[rewrite_addr]/[frame_of_state]/         *)
+(* [denote_imm_exp]), and the main module of a wrapped library is     *)
+(* unreachable from its siblings — a cycle by construction.  A        *)
+(* POST-PASS over the converged solution (not fused into the         *)
+(* fixpoint: the walk's per-def state is a THIRD discipline — the     *)
+(* sequential chain met with the block's converged IN-state values). *)
+(* ================================================================== *)
+module Cbat_extraction = struct
+(* The classification vocabulary — the pass layer's [vsa_kind] home.
+   [@@deriving equal] so [convutils] and its consumers keep the
+   structural equality the maps' [equal] folds use. *)
+type kind =
+  | Range of int64 * int64
+  | Infinite of int64 * int64
+  | Unbounded
+  | Dead
+  | VLA of Tid.t
+[@@deriving equal]
+
+(* [classify ?vla_tid ws]: Range, Infinite (widening), Unbounded
+   (top), Dead (bottom), or VLA (dynamic size def tid) — a pure
+   WordSet-to-kind function. *)
+let classify ?vla_tid (ws : WordSet.t) : kind option =
+  if WordSet.is_top ws then Some Unbounded
+  else if WordSet.is_bottom ws then Some Dead
+  else
+    match WordSet.min_elem ws, WordSet.max_elem ws with
+    | Some lo, Some hi ->
+      (match Word.to_int64 lo, Word.to_int64 hi with
+       | Ok lo, Ok hi ->
+         let is_inf = WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 in
+         if is_inf && Option.is_some vla_tid then
+           Some (VLA (Option.value_exn vla_tid))
+         else if is_inf then Some (Infinite (lo, hi))
+         else Some (Range (lo, hi))
+       | _ -> Some Unbounded)
+    | _ -> Some Unbounded
+
+(* [bounds_of ws]: the signed int64 (lo, hi) bounds, or None when
+   top/bottom/empty (the classify pre-conditions). *)
+let bounds_of (ws : WordSet.t) : (int64 * int64) option =
+  if WordSet.is_top ws || WordSet.is_bottom ws then None
+  else
+    match WordSet.min_elem ws, WordSet.max_elem ws with
+    | Some lo, Some hi -> (
+        match Word.to_int64 lo, Word.to_int64 hi with
+        | Ok lo, Ok hi -> Some (lo, hi)
+        | _ -> None)
+    | _ -> None
+
+(* [k_range_of ws rsp_ws]: the ABI-visible k-range (k = addr - RSP at
+   the def — the arg area is k >= 0).  Interval arithmetic on the
+   signed bounds: k_min = addr_lo - rsp_hi, k_max = addr_hi - rsp_lo. *)
+let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
+    (int64 * int64) option =
+  match bounds_of ws, bounds_of rsp_ws with
+  | Some (alo, ahi), Some (rlo, rhi) ->
+      Some (Stdlib.Int64.sub alo rhi, Stdlib.Int64.sub ahi rlo)
+  | _ -> None
+
+(* [stack_address_of_rhs]: the ADDRESS of a stack access rhs — the
+   visitor-free structural read the walk dispatches on (Load/Store,
+   either bare or under the [pad]-style Cast the lifter emits).
+   None = the def is not a memory access. *)
+let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
+  match rhs with
+  | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
+  | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
+  | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) -> Some addr
+  | _ -> None
+
+(* [st_tag_of ~tags blk addr' st_before]: the M6 tag-state meet — the
+   address's free vars denoted with the block's IN-state values (the
+   converged solution's), met into the sequential state with the
+   genuine-subset gate: a TOP sequential value is NOT refined by the
+   meet (the tag state's value at the block is the JOIN over all
+   paths); an EMPTY meet and an UNCHANGED value also keep the
+   sequential state.  THE ONE HOME of the meet discipline
+   ([precision_probe]'s former copy adopted the production gate
+   2026-09-02 — the git archaeology showed the Option B/c fix never
+   reached the probe; a divergence of accident, not intent). *)
+let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
+    (addr' : exp) (st_before : AI.t) : AI.t =
+  Exp.free_vars addr'
+  |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
+      match Var.typ v with
+      | Type.Imm w ->
+        let tag_v = AI.find_word w
+            (Solution.get tags (Term.tid blk)) v in
+        let cur = AI.find_word w acc v in
+        let mm = WordSet.meet cur tag_v in
+        if WordSet.is_top cur
+           && Word.is_one (WordSet.cardinality mm)
+           || Word.is_zero (WordSet.cardinality mm)
+           || WordSet.equal mm cur
+        then acc
+        else AI.add_word acc ~key:v ~data:mm
+      | Type.Mem _ | Type.Unk -> acc)
+
+(* [extract ~sp ~stack_access ~sol sub]: the per-def classification
+   over the CONVERGED solution [sol].  [stack_access] is the
+   relevance tag predicate (the pass layer's tag; threaded as a
+   function so this module owns no tag dependency); [sp] is the
+   target's stack pointer (the k-range origin).
+
+   THE WALK (the M6 discipline, verbatim from hike_vsa's former
+   [finish]): per block, only up to and including the block's LAST
+   stack-access def (the state advance after it can affect no tag);
+   the sequential state starts at the block's converged IN-state and
+   advances [denote_def] per def; each TAGGED def's address is
+   rewritten by the frame relation of the PRE-def state, and its
+   operands are MET with the block's IN-state values (a TOP
+   sequential value is NOT refined by the meet; an empty meet and an
+   unchanged value keep the sequential state).
+
+   Returns: (offsets, k_ranges, vla_bounds) — the kind map keyed by
+   def tid (the set-overlap MERGE applied: the defs whose address
+   WordSets overlap merge into the spanning [Range]), the k-range
+   map, and the dynamic-allocation size bounds. *)
+let rec extract ~(sp : var) ~(stack_access : def term -> bool)
+    ~(dynamic_alloc : def term -> bool)
+    ~(sol : (tid, AI.t) Solution.t)
+    (sub : sub term) :
+    kind Tid.Map.t * (int64 * int64) Tid.Map.t
+    * (int64 * int64) Tid.Map.t =
+  let tags = sol in
+  let raw, kraw =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
+        (* Walk only the block's defs up to and including its LAST
+           stack_access def — the state advance after it can affect no
+           tag (the address/k-range denotations read the PRE-def
+           state), and a block with NO stack access contributes
+           nothing and skips the walk entirely. *)
+        let defs = Term.enum def_t blk |> Seq.to_list in
+        let last_tagged =
+          Base.List.foldi defs ~init:None ~f:(fun i acc d ->
+              if stack_access d then Some i else acc)
+        in
+        match last_tagged with
+        | None -> (acc, kacc)
+        | Some i ->
+        let defs' = Base.List.take defs (i + 1) in
+        let _, acc, kacc =
+          Base.List.fold_left defs'
+            ~init:(Solution.get tags (Term.tid blk), acc, kacc)
+            ~f:(fun (st, acc, kacc) d ->
+                 let st_before = st in
+                 let st = denote_def d st in
+                 match stack_address_of_rhs (Def.rhs d) with
+                 | Some addr when stack_access d ->
+                     let addr' =
+                       rewrite_addr (frame_of_state st_before) addr in
+                     (* The address's free vars are denoted with the block's TAG state's values (the IN-state read from the converged solution — the fused design's branch-sensitive state, refined inline by the accumulated edge conds), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
+                     let st_tag = st_tag_of ~tags blk addr' st_before in
+                     (match
+                        denote_imm_exp
+                          (* WYSINWYX-2 (the in-state relation) — the address is REWRITTEN to its offset-from-origin expression (the frame relation carried in the state) before denotation: the tags are the SP-relative OFFSETS, sourced from the relation rather than the anchored value-sets. *)
+                          addr' st_tag
+                      with
+                      | Ok ws -> (
+                          match classify ws with
+                          | Some kind ->
+                              let acc = (Term.tid d, kind, ws) :: acc in
+                              let kacc =
+                                match
+                                  k_range_of ws
+                                    (AI.find_word 64 st_before sp)
+                                with
+                                | Some (klo, khi) ->
+                                    (Term.tid d, klo, khi) :: kacc
+                                | None -> kacc
+                              in
+                              (st, acc, kacc)
+                          | None ->
+                              let ws = WordSet.top 64 in
+                              let acc = (Term.tid d, Unbounded, ws) :: acc in
+                              (st, acc, kacc))
+                      | Error _ ->
+                          let ws = WordSet.top 64 in
+                          let acc = (Term.tid d, Unbounded, ws) :: acc in
+                          (st, acc, kacc))
+                 | None when stack_access d ->
+                     let ws = WordSet.top 64 in
+                     let acc = (Term.tid d, Unbounded, ws) :: acc in
+                     (st, acc, kacc)
+                 | _ -> (st, acc, kacc))
+        in
+        (acc, kacc))
+  in
+  let raw = List.rev raw in
+  (* THE SET-OVERLAP MERGE: the defs whose address WordSets OVERLAP (the domain's membership test — a direct singleton {c} overlaps the indexed CLP {base + step*k} iff c is in its residue class, so `a[1] = 5` and `a[i]` merge). *)
+  let span_of = function
+    | Range (lo, hi) -> (lo, hi)
+    | Infinite (lo, hi) -> (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
+    | Unbounded | Dead | VLA _ -> (0L, 0L)
+  in
+  let merged_tags : kind Tid.Map.t =
+    let bounded, unbounded_or_dead =
+      Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
+          match kind with
+          | Range _ | Infinite _ | VLA _ -> true
+          | Unbounded | Dead -> false)
+    in
+    let items =
+      Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
+    in
+    (* Maximal overlap components via WordSet.overlap (transitive closure).
+       S1 coarser: any overlapping WordSets merge; bridging via a new item
+       merges all comps that overlap it. *)
+    let rec components acc = function
+      | [] -> acc
+      | (dtid, kind, ws) :: rest ->
+          let overlapping, non_overlapping =
+            Base.List.partition_tf acc ~f:(fun comp ->
+                Base.List.exists comp ~f:(fun (_, _, ws') -> WordSet.overlap ws ws'))
+          in
+          let new_comp =
+            (dtid, kind, ws) :: Base.List.concat overlapping
+          in
+          components (new_comp :: non_overlapping) rest
+    in
+    let init_map =
+      Base.List.fold unbounded_or_dead ~init:Tid.Map.empty ~f:(fun acc (dtid, kind, _) ->
+          Core.Map.set acc ~key:dtid ~data:kind)
+    in
+    Base.List.fold_left (components [] items) ~init:init_map
+      ~f:(fun acc comp ->
+        match comp with
+        | [ (dtid, kind, _) ] -> Core.Map.set acc ~key:dtid ~data:kind
+        | _ ->
+            let lo, hi =
+              match comp with
+              | (_, k0, _) :: rest ->
+                let slo0, shi0 = span_of k0 in
+                Base.List.fold_left rest ~init:(slo0, shi0)
+                  ~f:(fun (l, h) (_, k, _) ->
+                    let slo, shi = span_of k in
+                    (Stdlib.Int64.min l slo, Stdlib.Int64.max h shi))
+              | [] -> (0L, 0L) (* unreachable: comp is non-empty *)
+            in
+            Base.List.fold_left comp ~init:acc
+              ~f:(fun acc (dtid, _, _) ->
+                  Core.Map.set acc ~key:dtid ~data:(Range (lo, hi))))
+  in
+  let offsets =
+      Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->
+          let k = match Core.Map.find merged_tags dtid with
+            | Some k -> k
+            | None -> kind in
+          Core.Map.set m ~key:dtid ~data:k) in
+  let k_ranges =
+    Base.List.fold kraw ~init:Tid.Map.empty
+      ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) in
+  let vla_bounds =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun blk ->
+        let blk_tid = Term.tid blk in
+        Term.enum def_t blk
+        |> Seq.filter ~f:dynamic_alloc
+        |> Seq.filter_map ~f:(fun d ->
+            match vla_size_of_rhs sp sub (Def.rhs d) with
+            | None -> None
+            | Some size ->
+                let st = Solution.get tags blk_tid in
+                match denote_imm_exp size st with
+                | Ok ws -> (
+                    match WordSet.min_elem ws, WordSet.max_elem ws with
+                    | Some lo, Some hi -> (
+                        match Word.to_int64 lo, Word.to_int64 hi with
+                        | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
+                        | _ -> None)
+                    | _ -> None)
+                | Error _ -> None))
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (dtid, b) ->
+           Core.Map.set m ~key:dtid ~data:b)
+  in
+  (offsets, k_ranges, vla_bounds)
+
+(* [vla_size_of_rhs sp sub rhs] — the let-..-and partner of [extract];
+   the comment between the binding and its [and] would break the
+   pair, hence this position: the DYNAMIC-ALLOCATION size expression —
+   the `RSP := RSP - size` idiom, direct or indirect (the
+   `RSP := tmp` where `tmp := RSP - size` form), or None.  The ONE
+   home of the idiom matcher (hike_vsa_relevance's
+   [detect_dynamic_alloc] delegates here — the duplication the
+   architecture exploration flagged closes). *)
+(* [vla_decrement_p sp_base rhs]: the SHARED two-line VLA idiom test —
+   is [rhs] a `RSP := RSP - size` with a NON-LITERAL size (the dynamic
+   allocation shape)?  The ONE fact both roles consume:
+   [hike_vsa_relevance.detect_dynamic_alloc] (the visitor that
+   collects the def SET, incl. the indirect tmp def) and
+   [vla_size_of_rhs] (the SIZE extractor for a KNOWN dynamic-alloc
+   def).  The roles stay separate (set vs expression); the SHAPE is
+   one fact. *)
+and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
+  match rhs with
+  | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
+      Var.same (Var.base a) sp_base
+      && (match size with Bil.Int _ -> false | _ -> true)
+  | _ -> false
+
+and vla_size_of_rhs (sp : var) (sub : sub term) (rhs : Bil.exp) :
+    Bil.exp option =
+  let def_of_lhs =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+        Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
+  in
+  match rhs with
+  | Bil.BinOp (Bil.MINUS, Bil.Var _, size) when vla_decrement_p (Var.base sp) rhs ->
+      Some size
+  | Bil.Var tmp -> (
+      match Core.Map.find def_of_lhs (Var.base tmp) with
+      | Some d' -> (
+          match Def.rhs d' with
+          | Bil.BinOp (Bil.MINUS, Bil.Var _, size)
+            when vla_decrement_p (Var.base sp) (Def.rhs d') ->
+              Some size
+          | _ -> None)
+      | None -> None)
+  | _ -> None
+
+end

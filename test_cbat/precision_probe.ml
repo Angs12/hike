@@ -650,20 +650,15 @@ let collect_stats (bname : string) (sub' : sub term)
                 not the sequentially re-denoted ones — the loop-body
                 index var `RAX := Load(cell)` would otherwise read the
                 solution's widened cell. *)
+             (* ARCH-1 — the M6 meet is THE MODULE's ([st_tag_of]):
+                the production genuine-subset gate (a TOP sequential
+                value is NOT refined) — the probe's former inline copy
+                predated the Option B/c fix and kept refining TOPs;
+                the divergence was an accident of history (the fix
+                never reached this file), not an intent difference.
+                Bucket numbers re-baselined with this commit. *)
              let st_tag =
-               Exp.free_vars a'
-               |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
-                   match Var.typ v with
-                   | Type.Imm w ->
-                     let tag_v = AI.find_word w
-                         (Graphlib.Std.Solution.get tags (Term.tid b)) v in
-                     let cur = AI.find_word w acc v in
-                     let m = Ws.meet cur tag_v in
-                     if Word.is_zero (Ws.cardinality m)
-                        || Ws.equal m cur
-                     then acc
-                     else AI.add_word acc ~key:v ~data:m
-                   | Type.Mem _ | Type.Unk -> acc) in
+               Vsa.Cbat_extraction.st_tag_of ~tags b a' st_before in
              (match Vsa.denote_imm_exp a' st_tag with
               | Error _ ->
                 s.Sub_stats.ld_denote_err <- s.Sub_stats.ld_denote_err + 1

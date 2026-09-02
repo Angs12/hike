@@ -55,7 +55,12 @@ let empty_emit_ctx () : emit_ctx =
 module Vsa = struct
   open Core_kernel[@@warning "-D"]
 
-  type vsa_kind =
+  (* ARCH-1 — the enum's physical home is the extraction module (the
+     cbat_vsa library, where the producer lives); this is the ALIAS
+     the ~60 constructor references ([Convutils.Range] etc.) compile
+     through unchanged.  [equal_kind] is derived at the definition
+     site; the [equal] name below keeps the old references. *)
+  type vsa_kind = Cbat_vsa.Cbat_extraction.kind =
     | Range of int64 * int64
     | Infinite of int64 * int64
     | Unbounded

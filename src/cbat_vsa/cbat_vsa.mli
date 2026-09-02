@@ -22,6 +22,69 @@ module AI = Cbat_ai_representation
 (* Hike port fix (Phase 2): re-export the memory abstraction alongside [AI] so the wrapped library exposes it under the main module (the sibling modules are only reachable through dune's generated [Cbat_vsa__] wrapper otherwise). *)
 module Mem = Cbat_ai_memmap
 
+(* ARCH-1 — the tag-EXTRACTION module (the vsa_info producer's
+   extraction half; the review's #1): the M6 classification walk over
+   the converged solution, the kind arithmetic, the set-overlap
+   merge, and the VLA idiom matcher.  The pass layer's
+   [Convutils.vsa_kind] ALIASES [Cbat_extraction.kind] — one enum,
+   no mapping layer. *)
+module Cbat_extraction : sig
+  (* The classification vocabulary — the pass layer's [vsa_kind] home
+     (aliased there; [equal] derived here once). *)
+  type kind =
+    | Range of int64 * int64
+    | Infinite of int64 * int64
+    | Unbounded
+    | Dead
+    | VLA of Tid.t
+  [@@deriving equal]
+
+  (* [classify ?vla_tid ws]: Range / Infinite / Unbounded (top) / Dead
+     (bottom) / VLA — the pure WordSet-to-kind function. *)
+  val classify : ?vla_tid:tid -> WordSet.t -> kind option
+
+  (* [bounds_of ws]: the signed (lo, hi) bounds, None when top/bottom. *)
+  val bounds_of : WordSet.t -> (int64 * int64) option
+
+  (* [k_range_of ws rsp_ws]: the ABI-visible k-range
+     (k_min = addr_lo - rsp_hi, k_max = addr_hi - rsp_lo). *)
+  val k_range_of : WordSet.t -> WordSet.t -> (int64 * int64) option
+
+  (* [stack_address_of_rhs rhs]: the ADDRESS of a stack-access rhs
+     (Load/Store, bare or under the lifter's pad-style Cast), None
+     otherwise. *)
+  val stack_address_of_rhs : Bil.exp -> Bil.exp option
+
+  (* [st_tag_of ~tags blk addr' st_before]: the M6 tag-state meet
+     (the address's free vars met with the block's IN-state values,
+     the genuine-subset gate) — the ONE home of the meet discipline. *)
+  val st_tag_of :
+    tags:(tid, AI.t) Solution.t ->
+    blk term -> exp -> AI.t -> AI.t
+
+  (* [extract ~sp ~stack_access ~dynamic_alloc ~sol sub]: the per-def
+     classification over the converged [sol] — the M6 walk, then the
+     SET-OVERLAP MERGE.  The predicates are threaded as functions (the
+     pass layer's relevance tags; no tag dependency here). *)
+  val extract :
+    sp:var ->
+    stack_access:(def term -> bool) ->
+    dynamic_alloc:(def term -> bool) ->
+    sol:(tid, AI.t) Solution.t ->
+    sub term ->
+    kind Tid.Map.t * (int64 * int64) Tid.Map.t
+    * (int64 * int64) Tid.Map.t
+
+  (* [vla_decrement_p sp_base rhs]: the SHARED VLA idiom test (a
+     non-literal `RSP := RSP - size` shape) — one fact, two roles. *)
+  val vla_decrement_p : var -> Bil.exp -> bool
+
+  (* [vla_size_of_rhs sp sub rhs]: the dynamic-allocation size
+     expression — the `RSP := RSP - size` idiom, direct or indirect,
+     or None.  The ONE home of the idiom matcher. *)
+  val vla_size_of_rhs : var -> sub term -> Bil.exp -> Bil.exp option
+end
+
 (* The per-stage profiling interface (the Q6 harness) — re-exported so the
    debug probes can read the counters. Production links the NO-OP adapter
    ([cbat_vsa_stages_prod.ml]), so [Stages.enabled = false] and every
