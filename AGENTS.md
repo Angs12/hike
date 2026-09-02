@@ -392,7 +392,9 @@ borrowing). Per the user's directive, NO unit tests were added for the
 join/order machinery itself — BAP's KB is upstream-tested; the domain is
 exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
 
-**Last verified: 2026-09-02 EEST — MEM-FISSION landed (per-region BIL mem vars) — FULL GATE BATTERY GREEN, opt gate 24→26**
+**Last verified: 2026-09-02 EEST — MERGED TO MAIN (the optimizability program:
+opt gate + poison-phi definedness + mem-fission) — BATTERY GREEN, 30/2 at BOTH
+-O0 and opt -O2 — the opt-induced failure class is EMPTY on the merged tree**
 
 **Mem-fission (this session, commits 6cc2c86 + 499bb36 on finding1-stack-plan):
 the storage decision lives in the BIL, and DCE deletes dead stores
@@ -438,8 +440,8 @@ zero-initialized (their cells ride the alloca's original bytes).
 | unit suite | `dune runtest --force` | **480 checks, 0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
 | corpus emission | `bash scripts/run_corpus.sh <corpus> <emissions/fission>` | **32/32 rc=0** ✅ |
 | structural asserts | `bash scripts/check_allocas.sh <emissions/fission>` | **160 passed, 0 failed** ✅ |
-| semantics (all) | `bash scripts/semantic/run_semantic_all.sh ...` | **29 PASS, 3 FAIL** ✅ (the SAME knowns — zero regressions vs base) |
-| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh ...` | **26 PASS, 6 FAIL** 🟡 (24→26: fizzbuzz + fptr_table FLIPPED GREEN; the remaining opt-induced = setjmp_longjmp, struct_arr_dynidx, union_overlap — genuinely runtime-addressed lanes; + the 3 -O0 knowns) |
+| semantics (all) | `bash scripts/semantic/run_semantic_all.sh ...` | **30 PASS, 2 FAIL** ✅ (the merged tree beats both parents: mainline's fixes + the fission recovered `nested_struct` — a former -O0 known; the remaining 2 = va_arg_vacopy + variadic, tickets T02/T03) |
+| **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh ...` | **30 PASS, 2 FAIL** ✅ (identical to -O0 — the opt-induced class is EMPTY on the merged tree: the fission's dead-push deletion + mainline's edge-keyed restore together close the SP-lane classes; the remaining 2 are the -O0 knowns, failing identically at both levels) |
 | semantics (8-bin) | `bash scripts/semantic/run_semantic.sh ...` | **8/8 PASS** ✅ |
 | probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
