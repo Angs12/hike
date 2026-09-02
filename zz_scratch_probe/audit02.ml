@@ -74,9 +74,9 @@ let audit_sub (sp : var) (sub : sub term) : unit =
   then ()
   else begin
     let prog' = Program.create ~subs:[ sub' ] () in
-    let sol, views =
-      Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub') in
-    let tags = Vsa.partitioned_states sub' sol views in
+    let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
+    let tags = sol in
+    ignore tags;
     (* The PROD verdict for cross-checking the replica *)
     let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp sub' in
     let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in

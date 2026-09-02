@@ -3,8 +3,36 @@ open Bap.Std
 open Bap_core_theory
 module Abi = Hike_abi
 
-type llvalue_map = Llvm.llvalue Var.Map.t
+(* [wvar]: the WIDTH-AWARE var identity — BAP's [Var] compares by NAME
+   only (the X1-c width-blindness), so a sub that carries the same
+   [intrinsic:y0] at two widths (an SS and an SD call in one body) maps
+   them to ONE llvalue slot: the f32 result overwrote/collided with the
+   f64 lane's, and every consumer read the wrong width (the chmod
+   class). Keying the emitter's local/phi maps on (name, width) makes
+   the lanes STRUCTURALLY distinct — derived from the var's own type,
+   no string suffixes, no rename pass (the rename_intrinsics crutch is
+   deleted). *)
+type wvar = WVar of Var.t * int
+
+let wvar_of (v : Var.t) : wvar =
+  let w = match Var.typ v with Imm w -> w | Mem _ -> 0 | Unk -> 0 in
+  WVar (v, w)
+
+module WVar = struct
+  type t = wvar
+  let compare (WVar (a, wa)) (WVar (b, wb)) =
+    let c = Var.compare a b in
+    if c <> 0 then c else Int.compare wa wb
+end
+
+module WVarMap = Map.Make (WVar)
+
+type llvalue_map = Llvm.llvalue WVarMap.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
+
+(* [EHashtbl]: Core's Hashtbl under the deprecated-name alert the strict
+   build treats as an error — the same disarm [module Vsa] uses. *)
+module EHashtbl = Core_kernel.Hashtbl[@warning "-D"]
 
 type emit_ctx = {
   symtab : Symtab.t option;
@@ -24,6 +52,16 @@ type emit_ctx = {
      (YMM phantom call args, RDX ret member) are aggregated into one
      per-sub summary line by [create_sub] at the end of emission. *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
+  (* L-E1e FIX (the tty/cat dominance bug): EDGE-KEYED SP-restore
+     bindings — (pred_tid, fallthrough_tid) -> the post-push+8 value
+     computed IN the pred (call) block. The fallthrough's per-BLOCK
+     table can hold only ONE binding per var, so two call preds of the
+     same join clobber each other (the last-emitted restore wins and
+     its add does not dominate the join's phis — llc "Instruction does
+     not dominate all uses"). The edge key makes each pred's restore
+     independent; [Bil2llvm.update_phi] consults it before the pred's
+     plain binding. *)
+  edge_sp_restores : (Tid.t, (Tid.t, Llvm.llvalue) EHashtbl.t) EHashtbl.t ref;
 }
 
 let empty_emit_ctx () : emit_ctx =
@@ -41,6 +79,7 @@ let empty_emit_ctx () : emit_ctx =
     ll_bbs = ref Tid.Map.empty;
     guarded_warned = ref Tid.Set.empty;
     undef_warned = ref Tid.Map.empty;
+    edge_sp_restores = ref (EHashtbl.create (module Tid));
   }
 
 module Vsa = struct
@@ -188,18 +227,18 @@ let insert_bb ctx tid llvm_bb =
 let get_bb ctx tid = bb_find !(ctx.ll_bbs) tid
 
 let init_blk_llvals ctx blk_tid =
-  let phis = ref Var.Map.empty in
-  let locals = ref Var.Map.empty in
+  let phis = ref WVarMap.empty in
+  let locals = ref WVarMap.empty in
   ctx.blk_llvals :=
     Core.Map.add_exn !(ctx.blk_llvals) ~key:blk_tid ~data:{ phis; locals }
 
 let insert_phi ctx blk_tid var value =
   let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
-  blk_llvals.phis := Core.Map.add_exn !(blk_llvals.phis) ~key:var ~data:value
+  blk_llvals.phis := WVarMap.add (wvar_of var) value !(blk_llvals.phis)
 
 let get_phi ctx blk_tid var =
   let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
-  match Core.Map.find !(blk_llvals.phis) var with
+  match WVarMap.find_opt (wvar_of var) !(blk_llvals.phis) with
   | Some v -> v
   | None ->
       failwith @@ "Phi " ^ Var.name var ^ " not found at blk "
@@ -207,11 +246,43 @@ let get_phi ctx blk_tid var =
 
 let insert_local ctx blk_tid var value =
   let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
-  blk_llvals.locals := Core.Map.set !(blk_llvals.locals) ~key:var ~data:value
+  blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals)
 
 let get_local ctx blk_tid var =
   let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
-  Core.Map.find !(blk_vars.locals) var
+  WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
+
+(* [probe_local_family ctx blk_tid v ~want_w]: the WIDTH-FAMILY probe — a
+   binding of [v]'s BASE at a DIFFERENT width (the FP result bound at its
+   result width; the consumer reads the 32-bit splice view). Returns
+   (the bound value, its width) — preferring an exact want_w binding,
+   else the WIDEST bound width of the same base (the most information);
+   None when the base is unbound at every width. The CALLER adjusts the
+   width (zext/trunc): one BIL value is one number regardless of the
+   lane it was bound at. *)
+let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
+    (Llvm.llvalue * int) option =
+  let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  let base = Var.base v in
+  let bindings =
+    WVarMap.bindings !(blk_vars.locals)
+    |> List.filter (fun ((WVar (bv, _w)), _) -> Var.same bv base)
+    |> List.map (fun ((WVar (_, w)), value) -> (w, value))
+  in
+  match
+    List.sort (fun (w1, _) (w2, _) -> compare w2 w1) bindings
+  with
+  | [] -> None
+  | (w, value) :: _ ->
+      Some
+        ( value,
+          match List.assoc_opt want_w bindings with
+          | Some exact -> (
+              match exact with
+              | _ ->
+                  (* prefer the exact-width binding when present *)
+                  if List.mem_assoc want_w bindings then want_w else w)
+          | None -> w )
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 

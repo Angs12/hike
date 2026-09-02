@@ -33,7 +33,7 @@ let () =
     |> List.iter (fun sub ->
         try
           let n = ref 0 in
-          let sub', sol, _ = analyze_and_fixpoint sp prog sub in
+          let sub', sol = analyze_and_fixpoint sp prog sub in
           let info = Hike.Vsa.offsets_of_sub target sp sub' in
           let kind_of =
             Base.List.fold info.Hike.Convutils.offsets ~init:Tid.Map.empty

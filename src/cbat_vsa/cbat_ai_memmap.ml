@@ -475,7 +475,7 @@ let join_add : t -> key:Key.t -> data:Val.t -> t = op_add Val.join_poly
 (* Adds the new value by meeting it with prior overlapping values *)
 let meet_add : t -> key:Key.t -> data:Val.t -> t = op_add Val.meet_poly
 
-(* [meet_range m ~key ~data]: The RANGED meet (the trace-partitioning subtraction substrate, docs/trace-partitioning-plan.md §1.3) — meet [data] into every cell of [m] whose key intersects [key]: the overlapping cells' values meet [data] (the. *)
+(* [meet_range m ~key ~data]: The RANGED meet (the trace-partitioning subtraction substrate, docs/trace-partitioning-plan.md §3) — meet [data] into every cell of [m] whose key intersects [key]: the overlapping cells' values meet [data] (the. *)
 let meet_range (m : t) ~key ~data : t = meet_add m ~key ~data
 
 (* [call_keep m ~keep_lo ~escape]: The caller-frame-preserving call abstraction (the fix for the precision gap where every call topped the WHOLE memory — docs/trace-partitioning-plan.md §10, the "call abstraction" lane). *)

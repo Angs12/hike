@@ -1,5 +1,0 @@
-(executable
- (name probe)
- (libraries hike bap core_kernel bap-future threads graphlib cbat_vsa cbat_vsa_domain)
- (flags (:standard -g -alert -deprecated))
- (preprocess (pps ppx_bap)))

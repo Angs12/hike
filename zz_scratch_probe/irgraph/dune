@@ -1,5 +1,0 @@
-(executable
- (name main)
- (libraries bap core_kernel bap-future threads)
- (flags (:standard -g -alert -deprecated))
- (preprocess (pps ppx_bap)))

@@ -65,8 +65,8 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
   let sp = Hike.Abi.x86_64_sysv.sp in
   let sub' = Hike.Relevance.analyze sp sub in
   let prog' = Program.create ~subs:[ sub' ] () in
-  let sol, _views =
-    Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub')
+  let sol =
+    Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub')
   in
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->
@@ -93,8 +93,8 @@ let run_binary (path : string) (name : string) : unit =
     | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] - %s not found" name)
   in
   Printf.printf "=== binary %s (%s) ===\n" (Filename.basename path) (Sub.name sub);
-  let sub', sol, views = analyze_and_fixpoint sp prog sub in
-  Printf.printf "%d edge view(s)\n" (List.length views);
+  let sub', sol = analyze_and_fixpoint sp prog sub in
+  Printf.printf "(fused single-pass: no views — the per-block IN-states are the solution)\n";
   let vars = lhs_vars_of sub' in
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->

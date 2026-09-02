@@ -64,7 +64,7 @@ include Value.S with type t := t
 include Cbat_map_lattice.S_indexed with module Val := Val and module Key := Key and
 type t := t and type idx := idx
 
-(* Hike addition (the trace-partitioning design, docs/trace-partitioning-plan.md §1.3): the RANGED meet — meet [data] into every cell whose key intersects [key]: the overlapping cells meet [data], the gaps within [key]. *)
+(* Hike addition (the trace-partitioning design, docs/trace-partitioning-plan.md §3): the RANGED meet — meet [data] into every cell whose key intersects [key]: the overlapping cells meet [data], the gaps within [key]. *)
 val meet_range : t -> key:Key.t -> data:Val.t -> t
 
 (* Hike addition (the call-abstraction precision lane): the caller-frame-preserving call abstraction — keep every cell whose key is >= [keep_lo] (the caller's own locals; the callee's frame is below the call-time RSP) and. *)

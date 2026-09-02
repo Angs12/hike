@@ -52,16 +52,17 @@ let () =
 
     let prog' = Program.create ~subs:[ sub' ] () in
     let t0 = Unix.gettimeofday () in
-    let sol, views =
-      Vsa.static_graph_vsa_with_views [] prog' sub' (Vsa.init_sol sub')
-    in
+    let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
     let t_fix = Unix.gettimeofday () -. t0 in
-    Printf.printf "STAGE fixpoint+views            %8.3fs\n" t_fix;
+    Printf.printf "STAGE fixpoint (inline refines) %8.3fs\n" t_fix;
 
+    (* The fused world: the refinement is INLINE in the fixpoint (there is no
+       separate partitioned-states stage); the per-block TAG states are the
+       solution's IN-states. *)
     let t0 = Unix.gettimeofday () in
-    let _tags = Vsa.partitioned_states sub' sol views in
+    let _tags = sol in
     let t_part = Unix.gettimeofday () -. t0 in
-    Printf.printf "STAGE partitioned               %8.3fs\n" t_part;
+    Printf.printf "STAGE (merged, no post-pass)     %8.3fs\n" t_part;
 
     Printf.printf "STAGE walk+merge / stack_to_locals / dce   (inside offsets_of_sub — not separable through the Hike seam)\n";
     Printf.printf "TOTAL (pass 1, production)      %8.3fs\n" t_total;
