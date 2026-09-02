@@ -108,6 +108,12 @@ let gc_major_words () =
 let gc_promoted_words () =
   (Gc.quick_stat ()).Gc.promoted_words -. (!gc0).Gc.promoted_words
 
+(* The report print sits behind the cppo guard (principle #6's build
+   blocker): this adapter is linked ONLY in the vsa-debug profile,
+   where [VSA_DEBUG] is defined — the block compiles in exactly where
+   the adapter is used, and every non-vsa-debug build eliminates it
+   from the text stream. *)
+#ifdef VSA_DEBUG
 let report (label : string) : unit =
   Printf.printf
     "STAGES %s: denote %7.3fs/%d  join %7.3fs/%d  equal %7.3fs/%d  \
@@ -119,3 +125,4 @@ let report (label : string) : unit =
     !t_glue !glue_calls
     label !walk_pops !walk_blocks !walk_truncs !walk_max_pops
     label (gc_minor_words ()) (gc_major_words ()) (gc_promoted_words ())
+#endif

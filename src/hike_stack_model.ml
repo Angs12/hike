@@ -580,14 +580,17 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                         (match addr_of_rhs (Def.rhs md) with
                          | Some (addr, _) ->
                              let ok = is_direct_const_addr ~sp ~target addr in
-                             if not ok && Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
+#ifdef VSA_DEBUG
+                             if not ok then
                                Printf.eprintf "hike:   member %s NOT direct: addr=%s\n"
                                  (Tid.name mtid)
                                  (Format.asprintf "%a" Exp.pp addr);
+#endif
                              ok
                          | None -> true)
                     | None -> true)) in
-            if not res && Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then (
+#ifdef VSA_DEBUG
+            if not res then (
               let lo0, hi0 = span in
               Printf.eprintf "hike: region %d span=(%Ld,%Ld) NOT convertible: members=%d\n" i lo0 hi0 (List.length members);
               Printf.eprintf "hike:   (sub %s)\n" (Sub.name sub);
@@ -596,6 +599,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                   let saves = match Core.Map.find def_of_tid mtid with Some md -> saves_incoming_reg abi md | None -> false in
                   Printf.eprintf "hike:   member %s (%Ld,%Ld) k=%s saves=%b\n" (Tid.name mtid) lo hi k_str saves);
             );
+#endif
             res
             && not (Lazy.force has_outgoing_stack_args)
             (* The ESCAPE gate is a PER-REGION convertibility rule (it

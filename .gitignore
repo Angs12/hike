@@ -10,3 +10,4 @@ lm_test.ml
 # 2026-08-31 (the "1-byte stubs" era ended with the Item-1 recontruction).
 # Only its dune _build is ignored.
 zz_scratch_probe/_build/
+_build-debug/
