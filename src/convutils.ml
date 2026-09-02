@@ -84,7 +84,7 @@ module Vsa = struct
      means ONE big [%frame] alloca covers all of it (the SOUND FALLBACK,
      always correct, unoptimized).
 
-     Computed ONCE by [Hike_stack_to_locals.split_plan] — Finding 1:
+     Computed ONCE by [Hike_stack_model.split_plan] — Finding 1:
      the decision has ONE producer and three CONSUMERS ([Hike_stack_to_
      locals], [Hike_dce], [Bil2llvm]). It is a property of the
      PRE-rewrite sub (the converted slots vanish once stack-to-locals

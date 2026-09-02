@@ -17,6 +17,7 @@ open Printf
    a dune-internal [Hike__Abi] form. *)
 module Relevance = Hike_vsa_relevance
 module Vsa = Hike_vsa
+module Stack_model = Hike_stack_model
 module Stack_to_locals = Hike_stack_to_locals
 module Kb = Hike_kb
 module Convutils = Convutils

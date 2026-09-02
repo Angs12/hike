@@ -5589,6 +5589,7 @@ let () =
 (* --- regression tests C1..C4 ------------------------------------------- *)
 
 module Kb = Hike.Kb
+module Sm = Hike.Stack_model
 module Stl = Hike.Stack_to_locals
 module Cu = Hike.Convutils
 module B2l = Hike.Bil2llvm
@@ -5849,7 +5850,7 @@ let () =
     Cu.{ empty_vsa_info with offsets = Tid.Map.of_alist_exn offsets }
   in
   let convertible_of info dtid =
-    Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
+    Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
     |> List.filter (fun r -> List.exists (fun (t, _) -> Tid.equal t dtid) r.Cu.members)
     |> function
     | [ r ] -> Some r.Cu.convertible
@@ -7192,8 +7193,8 @@ let () =
   (* R12-5: the cap guard — [Stack_to_locals] owns the size guard now (it is part of the
      split decision, not of the emission geometry; Finding 1). *)
   check "R12-5: region_size_ok true for small fixtures, false for huge span"
-    (Stl.region_size_ok r_sing && Stl.region_size_ok r_interval
-     && not (Stl.region_size_ok r_huge));
+    (Sm.region_size_ok r_sing && Sm.region_size_ok r_interval
+     && not (Sm.region_size_ok r_huge));
   ()
 
 let () =
@@ -7290,7 +7291,7 @@ let () =
       stack_plan = []; degraded = false; vla_bounds = Tid.Map.empty;
     }
   in
-  let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
   let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
@@ -7333,7 +7334,7 @@ let () =
       stack_plan = []; degraded = false; vla_bounds = Tid.Map.empty;
     }
   in
-  let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
   let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
   check "R12-8b: two overlapping intervals produce one convertible region with span (-32,-8)"
@@ -7393,9 +7394,9 @@ let () =
      escape rule that rejects this sub is the unified [frame_escapes], consulted as a
      PER-REGION convertibility rule (so it also governs the fallback path's conversion). *)
   let info = { info with Hike.Convutils.regions =
-      Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-        ~frame_escaped:(Stl.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
-  let plan = Stl.split_plan (v64 "RSP") Theory.Target.unknown sub info in
+      Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+        ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
+  let plan = Sm.split_plan (v64 "RSP") Theory.Target.unknown sub info in
   check
     "property R12b: bare copy v := RSP makes split_plan REJECT the sub (wholly %frame) — \
      via Stack_to_locals.frame_escapes (per-region convertibility)"
@@ -7407,8 +7408,8 @@ let () =
   check
     "property R12b: frame_escapes is true for a sub containing a bare `v := RSP` copy \
      (the alias half of the unified rule catches it)"
-    (Stl.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
-     && Stl.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
+    (Sm.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
+     && Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
   ()
 
 let () =

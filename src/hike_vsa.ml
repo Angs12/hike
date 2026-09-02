@@ -92,9 +92,9 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   in
   (* The ESCAPE verdict — computed ONCE per sub and shared by the
      region convertibility rule and (through it) the plan. *)
-  let frame_escaped = Hike_stack_to_locals.frame_escapes sp target sub' in
+  let frame_escaped = Hike_stack_model.frame_escapes sp target sub' in
   let regions =
-    Hike_stack_to_locals.regions_of_sub sp target sub' base_info ~frame_escaped
+    Hike_stack_model.regions_of_sub sp target sub' base_info ~frame_escaped
   in
   let base =
     { Convutils.offsets; k_ranges; regions; stack_plan = []; degraded;
@@ -104,7 +104,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
      sub (Finding 1): [Hike_stack_to_locals.split_plan] is its single
      producer; the stack-to-locals rewrite, dce and the emitter are its
      consumers (they read [info.stack_plan]). *)
-  { base with Convutils.stack_plan = Hike_stack_to_locals.split_plan sp target sub' base }
+  { base with Convutils.stack_plan = Hike_stack_model.split_plan sp target sub' base }
   in
   let probe_res =
   (* the solve driver: run the fixpoint; a non-convergent fixpoint (D.1) degrades the sub soundly — no tags, every stack access stays real memory (the emitter's dynamic path). *)

@@ -748,7 +748,7 @@ let find_def_k (idx : Convutils.vsa_info) (def : def term) =
    C4 — the rule reads the record's own maps, so nothing is rebuilt per
    call. *)
 let is_abi_visible ctx ~(idx : Convutils.vsa_info) (def : def term) =
-  Hike_stack_to_locals.abi_visibility_of (sp ctx.Convutils.target) idx def
+  Hike_stack_model.abi_visibility_of (sp ctx.Convutils.target) idx def
 
 (* [is_stack_access def]: is [def] a Stack Access — the [stack_access]
    tag the relevance pass set on Stack Accesses, the only source of
@@ -1866,7 +1866,7 @@ let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
 (* ------------------------------------------------------------------ *)
 (* THE STACK MODEL DECISION — this module is a CONSUMER.                *)
 (*                                                                     *)
-(* [Hike_stack_to_locals.split_plan] is the single producer; the        *)
+(* [Hike_stack_model.split_plan] is the single producer; the        *)
 (* emitter reads the result it carried in [Convutils.stack_plan] and     *)
 (* ALLOCATES what the plan says. The whole-sub rules (degraded,         *)
 (* SP-escape, untagged/Infinite/Unbounded/VLA accesses, VLA overlap,    *)
@@ -1937,7 +1937,7 @@ let create_sub sub =
        per-def lookups read it directly; the span below folds it). *)
     let tags = idx.Convutils.offsets in
     (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
-       [Hike_stack_to_locals.split_plan] produced it in the vsa pass and
+       [Hike_stack_model.split_plan] produced it in the vsa pass and
        carried it in [vsa_info.stack_plan]. *)
     let plan = stack_plan_of sub_info in
     let is_precise = plan <> [] in

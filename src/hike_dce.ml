@@ -86,7 +86,7 @@ let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
 let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
   | None -> false
-  | Some info -> Hike_stack_to_locals.is_precise info
+  | Some info -> Hike_stack_model.is_precise info
 
 let keep ?(precise=false) ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
