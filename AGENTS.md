@@ -418,6 +418,36 @@ emits a CORRECT soft-float sub, so stdout stayed byte-identical, and the 3
 affected binaries are NOT in the 8-bin oracle — **a "surviving diagnostic" is
 not a passing gate.** Grep the emissions for `unmapped intrinsic` when
 changing the FP-intrinsic table.
+**Last verified: 2026-09-02 EEST (night) — arch C1+C6+C4 on branch `arch-c1c6`
+(worktree `/home/tovpr/backup/hike-arch`; C4 = commit 8743bb9, on the
+a5680df-rebased C1+C6 tree) — BATTERY GREEN, 490 checks, IR
+BYTE-IDENTICAL to main 32/32, the FP-table fix (c484e13) carried**
+
+**C4 (8743bb9): the DCE pass gets a real interface.** `hike_dce` had 16
+visible lets, no `.mli`, ZERO tests, and was untestable BY CONSTRUCTION
+(every ABI query went through `Abi.sp`/`of_target`, which RAISE on
+`Theory.Target.unknown` — the fixture target). Now: `hike_dce.mli`
+exports `dce` ALONE (exported through the seam as `Hike.Dce` — the
+phantom `is_precise_sub` doc ref in hike.mli is fixed); the ABI lane is
+TOTAL (`abi_of`/`sp_of` fall back to the x86_64 SysV record, the stl
+`fp_of` pattern); duplicates deleted (`is_ret_reg` → `Abi.is_return_reg`;
+the `intrinsic:` prefix is ONE fact, `Convutils.is_intrinsic_name`,
+serving dce + bil2llvm's call dispatch + hike.ml's free-var filter);
+`sp_value_exp` STAYS (not a duplicate of stl's `exp_contains_sp` —
+different Load/Store semantics, now documented). Six fixture tests
+through the new seam (D0-D5: totality+sweep, the epilogue rewrite with
+negative controls, the always-keeps, the two-tier region-mem rule, the
+precise-path SP-erasure with the production-shaped control, the
+`Sub.intrinsic` passthrough). TEST-FIXTURE GOTCHAs recorded: a fission
+load whose RESULT is unused dies itself and UN-ROOTS the chain (the
+documented cascade — root it with a jmp cond read); a non-precise
+`hike_stack` def needs the PRODUCTION use shape (the incoming-arg load
+at `[hike_stack + k]`) to survive the sweep. Gates: **490 ok** + 6 xfail
+(484 + 6 new); corpus 32/32 rc=0; unmapped intrinsics 0; check_allocas
+160/0; semantic 30/2, 30/2, 8/8 (the T02/T03 knowns only); probes 10/10
++ all debug executables build; **IR byte-identical to main a5680df,
+32/32**. The installed plugin points at the arch-c1c6 build.
+
 **Last verified: 2026-09-02 EEST (evening) — arch C1+C6 on branch `arch-c1c6`
 (worktree `/home/tovpr/backup/hike-arch`; rebased onto main a5680df after the
 c484e13 FP-table fix — the IR-identity control was against a217289-era main,
