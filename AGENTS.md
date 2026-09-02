@@ -39,11 +39,62 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    precision is acceptable; an unsound narrowing (excluding a reachable value) is a
    bug — it is the array_local-class semantic failure.  The 8/8 semantic harness is
    the oracle.
-6. **Debug instrumentation lives in the debug build ONLY.**  The `vsa-debug` Dune
-   profile (compile-time, enabled_if) is the sanctioned home for EVERYTHING
-   diagnostic — temporary debug prints, env-gated instrumentation, profiling
-   drivers, and analysis-forensics tools alike.  It provides the debug
-   executables:
+6. **Debug instrumentation is NOT COMPILED INTO the production binary**
+   (restated 2026-09-03, branch `diag-channel` — the grilling-settled regime;
+   the old text is below for the record).  The line is: any RUNTIME-VARIABLE
+   behavior is debug; production emits FIXED diagnostics only, through ONE
+   sanctioned channel:
+   - **`Hike_diag` (src/hike_diag.ml) is the ONLY output channel in `src/`**
+     — `Hike_diag.warn` prepends the load-bearing `hike:` prefix (the family
+     `run_corpus.sh` greps).  The vendored library keeps BAP's `Event.Log`
+     (its `not_implemented` eprintf duplicate is DELETED — one channel).
+     Direct `eprintf`/`print_endline`/`printf` anywhere else in production
+     sources is a VIOLATION; operator-facing control belongs in a BAP pass
+     parameter (`--hike-output-file`), NEVER an env var.
+   - **Debug output lives behind cppo's `#ifdef VSA_DEBUG ... #endif`** in the
+     .ml source (line-level, already in the switch).  The chain is
+     `src/cppo_preprocess.sh`: `cppo [-D VSA_DEBUG] | ppx-jane -impl -`,
+     keyed by dune's `%{profile}` — in every non-vsa-debug build the blocks
+     VANISH from the text stream before the compiler ever sees them.  ppx-jane
+     IS the old `pps ppx_bap` driver (it regenerates `[@@deriving equal]`'s
+     `equal_vsa_kind` etc.), so cppo must run BEFORE it, never replace it.
+   - **The build BLOCKS violations** (`src/check_instrumentation.sh`, wired
+     into `src/dune` on aliases `all` and `install`): rule 1 = zero-exemption
+     grep for env reads (`Sys.getenv` in any form); rule 2 = comment-aware
+     scan for direct prints outside `Hike_diag` (lines inside `#ifdef
+     VSA_DEBUG` are skipped — that IS the sanctioned mechanism; `sprintf`/
+     `asprintf` are fine).  `dune build` and `dune build @install` both fail
+     rc=1 on a violation.
+   - **The debug build is opt-in and cheap**: `dune build --build-dir
+     _build-debug --profile vsa-debug ...` — its own build dir, so neither
+     build evicts the other (measured: without this, every profile switch is
+     a FULL 10-22s rebuild in both directions; with it, switching is
+     incremental).  Forensics prints (the region-NOT-convertible dump, the
+     member-NOT-direct print, the vsa/stl tag counts) fire only there.
+   - **The plugin is built by DUNE ENTIRELY** (`(plugin (name hike)
+     (libraries hike) (site (bap-common plugins)))` in src/dune, since
+     2026-09-03): bapbuild/bapbundle are RETIRED — bapbuild compiles through
+     its own ocamlfind pipeline and could not see dune's preprocessing (a raw
+     `#ifdef` reached the OCaml parser), and its stale-module-cache class is
+     the 2026-09-02 poison-phi incident.  ONE pipeline owns everything.
+     PREREQ: the `llvm` package ships no `llvm.cmxs`/META (a plugin
+     dynlinking Llvm symbols fails) — `src/backfill_llvm_cmxs.sh` builds it
+     with bapbundle's own recipe (`ocamlopt -shared -linkall llvm.cmxa
+     libllvm_*.a`, byte-identical 501008 bytes) and backfills the switch's
+     `lib/llvm/`; run once (idempotent) after installing the llvm package.
+     The old `hike.plugin` bundle zip must be removed (`bapbundle remove
+     hike`) or bap loads BOTH and dies (`Hashtbl.add_exn got key already
+     present hike`).
+   - `src/record_provenance.sh` (wired into the Makefile `hike` target)
+     writes `<plugin>.provenance` (tree, git describe, src sha16, bundle
+     sha16) NEXT TO the installed plugin — battery.sh verifies it before
+     running gates; an mtime-based check cannot catch a plugin built from a
+     DIFFERENT tree (measured: identical sources, stale artifacts, mtime
+     warning silent, corpus rc=0 — only the -O0/-O2 semantic agreement
+     caught it).
+
+   The debug executables (build in every profile; `enabled_if` vsa-debug for
+   vsa_debug/wbig_diag; NEVER installed, NEVER on a production path):
    - `zz_scratch_probe/audit02.exe` (legacy harness entry, default profile),
    - `zz_scratch_probe/vsa_debug.exe` (fixture traces, views, live maps),
    - `zz_scratch_probe/wbig_diag.exe` (w_big address inspection),
@@ -62,11 +113,12 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    clean; use or extend the debug harness instead.  Build/run:
 
    ```sh
-   dune build --profile vsa-debug zz_scratch_probe/vsa_debug.exe
-   dune exec --profile vsa-debug zz_scratch_probe/vsa_debug.exe -- d4
-   dune exec --profile vsa-debug zz_scratch_probe/wbig_diag.exe -- /tmp/corpus/<bin>
-   dune exec --profile vsa-debug zz_scratch_probe/stage_timer.exe -- <bin> <subname>
-   dune exec --profile vsa-debug zz_scratch_probe/conv_diag.exe -- <bin> <subname>
+   # the debug build keeps its own dir — neither build evicts the other:
+   dune build --build-dir _build-debug --profile vsa-debug zz_scratch_probe/vsa_debug.exe
+   dune exec --build-dir _build-debug --profile vsa-debug zz_scratch_probe/vsa_debug.exe -- d4
+   dune exec --build-dir _build-debug --profile vsa-debug zz_scratch_probe/wbig_diag.exe -- /tmp/corpus/<bin>
+   dune exec --build-dir _build-debug --profile vsa-debug zz_scratch_probe/stage_timer.exe -- <bin> <subname>
+   dune exec --build-dir _build-debug --profile vsa-debug zz_scratch_probe/conv_diag.exe -- <bin> <subname>
    ```
 
    Profiling (use perf when `kernel.perf_event_paranoid` allows — else the
@@ -119,13 +171,23 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
 
 - Root is a dune workspace (`src/`, `test_cbat/`, `zz_scratch_probe/`): `dune build`,
   `dune runtest` (plain-OCaml 315-check suite, no oUnit; prints `ALL CBAT TESTS PASSED`).
-- The plugin bundle is the real artifact and must be installed to the opam switch first:
-  `dune build @install && dune install`, then `cd src && make` (= `bapbuild hike.plugin -pkg llvm -pkg hike.cbat_vsa` + `bapbundle install hike.plugin`).
-- **A stale installed plugin silently runs old code** — after any source change, rebuild
-  and reinstall the bundle before running the corpus. **When a library interface changed
-  (any `cbat_vsa*` .mli), plain `make` is NOT enough**: bapbuild reuses its cached module
-  compiles (hike.ml's mtime is unchanged), shipping a stale interface — run
-  `cd src && bapbuild -clean && make` (the 2026-08-13 interface-mismatch gotcha).
+- The plugin is built BY DUNE ENTIRELY (since 2026-09-03, branch
+  `diag-channel`): the `(plugin (name hike) (libraries hike) (site
+  (bap-common plugins)))` stanza in `src/dune` + `dune build @install && dune
+  install`. bapbuild/bapbundle are RETIRED (bapbuild compiles through its own
+  ocamlfind pipeline — it could not see dune's cppo preprocessing, and its
+  stale-module-cache class is the 2026-09-02 poison-phi incident; one
+  pipeline owns everything now, so the old `bapbuild -clean` ritual and the
+  2026-08-13 interface-mismatch gotcha are structurally gone).
+  PREREQ (once per switch, idempotent): `bash src/backfill_llvm_cmxs.sh` —
+  the `llvm` opam package ships no `llvm.cmxs`/META, so the plugin's Llvm
+  symbols cannot dynlink without the backfill (the script builds it with
+  bapbundle's own recipe). Remove any legacy bundle first:
+  `bapbundle remove hike` (both installed = `Hashtbl.add_exn` at load).
+  After any source change: `dune build @install && dune install` — dune's
+  content-hash cache is SOUND (it recompiles exactly what changed; there is
+  no second cache to go stale), and `src/record_provenance.sh` (the Makefile
+  `hike` target) writes the provenance record the battery verifies.
 - Run: `bap <bin> --pass=hike-convlir --hike-output-file=out.ll` (`--hike-output` also works).
 - Toolchain lives in `shell.nix`, but it is stale: its `make sim` hook has no Makefile
   target (ignore that hook; `nix-shell` will fail at the end of setup).
@@ -292,8 +354,10 @@ LLVM allocas / static variables — it should work on EVERY binary.
   class), -O2 31/31 rc=0; check_allocas 120/0 (-O0) and 124/0 (-O2); semantic
   harness 8/8 PASS.
 - Drivers: `dune exec test_cbat/corpus_watch.exe -- <bin>`, `dune exec test_cbat/precision_probe.exe -- <bin>`.
-- Env toggles: `HIKE_VSA_DEBUG` (hike.ml stderr), `HIKE_VSA_DIAG_BOTTOM=1`
-  (precision_probe only).  (`HIKE_VSA_RESTRICTION=0` exists ONLY in
+- Env toggles: NONE in production (since 2026-09-03 — `HIKE_VSA_DEBUG`
+  is deleted, and the build blocker bans every env read in src/; debug
+  output is compiled in only under `--profile vsa-debug`). Test/probe
+  code only: `HIKE_VSA_DIAG_BOTTOM=1` (precision_probe).  (`HIKE_VSA_RESTRICTION=0` exists ONLY in
   corpus_watch — precision_probe removed it (an OFF run crashes) — and it is
   DELETED by the restriction-removal spec.  `HIKE_VSA_ANCHOR=1` and the
   probe's anchored-entry mode were removed 2026-08-13 with the VSA's
@@ -339,6 +403,85 @@ LLVM allocas / static variables — it should work on EVERY binary.
   for the optimizability program.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-03 EEST — principle #6's compile-out regime + the
+dune-built plugin, branch `diag-channel` (worktree
+`/tmp/opencode/wt-diag`, off main 40955da) — BATTERY GREEN, IR
+BYTE-IDENTICAL to main 32/32, ZERO env reads, ZERO direct prints outside
+Hike_diag, instrumentation verified compiled OUT (production .pp.ml
+greps 0) and compiled IN under vsa-debug (greps 1)**
+
+**The arc (the grilling-settled design, 17 questions, one session):**
+the user directive "the instrumentation should not be compiled in the
+production binary" restated principle #6 as COMPILE-TIME ELIMINATION.
+Mechanism facts established by experiment first: ppx_optcomp is DEAD
+for this (no `-D`; `[%import]` fails in dune's ppx sandbox), cppo (in
+the switch) works end-to-end (`#ifdef VSA_DEBUG` lines, `-D` keyed by
+dune's `%{profile}` through `src/cppo_preprocess.sh`), and ppx-jane IS
+the old `pps ppx_bap` driver (it regenerates `[@@deriving equal]`'s
+`equal_vsa_kind` — cppo must run BEFORE it, never replace it).
+
+- **`Hike_diag` (src/hike_diag.ml) is the ONE production channel.**
+  `Hike_diag.warn` prepends the `hike:` prefix `run_corpus.sh` greps.
+  Migrated in: the section-not-found warning (hike.ml), the Unbounded
+  guarded warning, the unmapped-intrinsic warning, both undef-read
+  warnings (bil2llvm), the not-converged and 100%-invariant-gap warnings
+  (hike_vsa).  The cbat_vsa `not_implemented` raw-stderr duplicate is
+  DELETED (BAP's Event.Log keeps it; nothing grepped the copy — corpus
+  err_*.txt carries only guarded/undef-read lines, verified).
+- **Deleted as noise (per Q11 triage, confirmed):** 12 hike.ml
+  section/symbol progress prints, 3 bil2llvm per-sub traces, the per-hit
+  `create_load DYN addr=` dump, and ALL 6 `HIKE_VSA_DEBUG` env gates.
+- **Gated behind `#ifdef VSA_DEBUG` (the valuable forensics):** the
+  region-NOT-convertible dump + member-NOT-direct print (stl), the
+  create_static_mem_access fallback print (bil2llvm), the vsa/stl
+  tag-count prints (hike.ml, incl. the vsa-guard skip note).
+- **The blocker** (`src/check_instrumentation.sh`, aliases `all` +
+  `install`): zero-exemption env-read ban + comment-aware direct-print
+  ban; VERIFIED red (injected violation → `dune build` rc=1, both rules
+  fire) and green (rc=0, `@install` too).
+- **Cheap debug builds:** `--build-dir _build-debug --profile vsa-debug`
+  (measured thrash without it: full 10-22s rebuild EVERY switch, both
+  directions, zero shared cache).
+- **The plugin is DUNE-BUILT now** (user directive): `(plugin (name
+  hike) (libraries hike) (site (bap-common plugins)))` in src/dune,
+  `(using dune_site 0.1)` in dune-project.  bapbuild/bapbundle RETIRED
+  — bapbuild's own ocamlfind pipeline could not see the cppo stanza (a
+  raw `#ifdef` reached the parser: Syntax error at hike.ml:662).  The
+  `llvm` package ships no `llvm.cmxs`/META;
+  `src/backfill_llvm_cmxs.sh` builds it (bapbundle's recipe, byte-
+  identical 501008 bytes) and backfills the switch; the legacy
+  `hike.plugin` zip must be removed (`bapbundle remove hike`) or bap
+  loads both and dies (`Hashtbl.add_exn ... hike`).
+- **Provenance:** `src/record_provenance.sh` (Makefile `hike` target)
+  writes `<plugin>.provenance` — tree, git describe, src sha16, bundle
+  sha16 — for the battery to verify; mtime checking CANNOT catch a
+  plugin from a different tree (measured 2026-09-02: identical sources,
+  22 poison phis, mtime warning silent, corpus rc=0).
+
+| Gate | Result |
+|---|---|
+| unit suite | **467 ok / 0 xfail / 0 XPASS / 0 FAIL** (`ALL CBAT TESTS PASSED` both suites; the strict harness passes OUTRIGHT on this tree) |
+| corpus emission | **32/32 rc=0** |
+| **IR byte-identity vs main 40955da control** | **IDENTICAL 32/32** (the strongest control: every deletion/gating/channel migration changed ZERO emitted bytes) |
+| structural asserts | **160 passed, 0 failed** |
+| semantics (all) | **30 PASS, 2 FAIL** (va_arg_vacopy + variadic, T02/T03) |
+| optimization-safety (opt) | **30 PASS, 2 FAIL** — identical to -O0 (the opt-induced class is EMPTY) |
+| semantics (8-bin) | **8/8 PASS** (this branch predates the gate-collapse on `battery-merged`) |
+| unmapped intrinsics | **0** |
+| probes | precision_probe factorial/alloca_vla + corpus_watch array_local — **PASS, 0 crashes** |
+| blocker red path | injected `Sys.getenv_opt` violation → `dune build` **rc=1**, both rules fire; clean → rc=0 |
+| compile-out proof | production `hike.pp.ml`/`hike_stack_to_locals.pp.ml` grep the forensics strings → **0 hits**; `_build-debug` copies → **1 hit each** |
+
+INHERITED-STATE NOTE (2026-09-03): main's worktree is currently MID-MERGE
+with an unresolved conflict in `test_cbat/test_cbat.ml` (14 `<<<<<<<`
+markers — `UU` in git status; main's `dune runtest` cannot run). This
+branch is off `40955da` (pre-conflict) and is NOT affected; when main's
+merge completes, rebase this branch and re-run the unit suite against
+the reconciled test count. This branch also predates `battery-merged`
+(2026-09-02: the battery driver + the three-gate semantic collapse) —
+the two branches touch DISJOINT files (src/ + dune vs test_cbat/ +
+scripts/) and should merge cleanly.
 
 **Directive (NON-NEGOTIABLE):** after every change to `src/` or `src/cbat_vsa/`, re-run
 ALL gates below and rewrite this section with fresh numbers and a fresh timestamp. An

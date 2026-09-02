@@ -6,7 +6,10 @@ open Bil2llvm
 open Convutils
 open Hike_abi
 module Abi = Hike_abi
-open Printf
+(* [open Printf] REMOVED 2026-09-03: production hike.ml emits through
+   [Hike_diag] only; the three remaining Printf.eprintf callsites are
+   inside #ifdef VSA_DEBUG blocks (compiled out — the open would be
+   "unused" in every production build and -w +a makes that an error). *)
 
 (* ------------------------------------------------------------------------- *)
 (* The public interface ([src/hike.mli]): four curated modules, re-exported
@@ -261,9 +264,6 @@ let create_uninitialized_section llvm_ctx llvm_module proj section_type
       let size = Int64.to_int size in
       let min_addr = Word.of_int ~width:64 addr in
       let max_addr = Word.of_int ~width:64 (addr + size - 1) in
-      eprintf "Section %s has length %d\n" name size;
-      eprintf "Section %s has min addr %a\n" name Word.ppo min_addr;
-      eprintf "Section %s has max addr %a\n" name Word.ppo max_addr;
       { base; min_addr; max_addr })
 
 (* [get_copy_relocations proj]: The COPY-RELOCATED bss symbols — the Ogre [llvm:name-reference] rows whose fixup falls inside the .bss (the R_X86_64_COPY class: the .bss slots the DYNAMIC LINKER fills with the real symbol's data at startup — the stdout/stderr FILE structs). *)
@@ -414,9 +414,8 @@ let filter_subs proj =
   Project.map_program proj ~f:(fun prog ->
       let filter_set = calls_intrinsic prog in
       Term.filter_map sub_t prog ~f:(fun sub ->
-          if should_filter filter_set syms sub then (
-            eprintf "Skipping sub %s\n" (Sub.name sub);
-            None)
+          if should_filter filter_set syms sub then
+            None
           else
             Some (sub |> simplify_jmps)))
 
@@ -458,28 +457,20 @@ let convert_binary output_program proj =
   let ptrsize = Theory.Target.bits target in
   let addr_bits = addr_size_bits target in
   let regions = get_named_region_info proj in
-  Seq.iter regions ~f:(fun { addr; size; info } ->
-      eprintf "Named region %s has addr %Ld and size %Ld\n" info addr size);
   (* pass 1: the data-section GLOBALS (typed [n x i64] so the pointer-slot initializers can hold [ptrtoint] constants) — the initializers themselves are set in pass 3, AFTER the subs exist (the function-pointer slots reference the defined functions). *)
   let mk_section section_type ~is_const =
     let llvm_name = section_type_to_string section_type in
     let name = "." ^ llvm_name in
     get_section_mem name proj |> get_section_data
     |> Option.map (fun (arr, min_addr, max_addr) ->
-        eprintf "Section %s has length %d\n" name (Array.length arr);
-        eprintf "Section %s has min addr %a\n" name Word.ppo min_addr;
-        eprintf "Section %s has max addr %a\n" name Word.ppo max_addr;
         let base =
           Bil2llvm.create_section_global llvm_ctx llvm_module
             (Array.length arr) llvm_name ~is_const
         in
         (arr, min_addr, max_addr, base))
   in
-  eprintf "Creating data section\n";
   let data_section = mk_section DATA ~is_const:false in
-  eprintf "Creating rodata section\n";
   let rodata_section = mk_section RODATA ~is_const:true in
-  eprintf "Creating bss section\n";
   let bss_region =
     Seq.find regions ~f:(fun { info; _ } -> String.equal info ".bss")
   in
@@ -544,11 +535,8 @@ let convert_binary output_program proj =
                && (not (Base.List.mem loads_and_stores a ~equal:Int64.equal))))
     | None -> []
   in
-  eprintf "Creating got section\n";
   let got_section = mk_section GOT ~is_const:true in
-  eprintf "Creating gotplt section\n";
   let gotplt_section = mk_section GOTPLT ~is_const:true in
-  eprintf "Creating rodata_rel section\n";
   let rodata_rel_section = mk_section RODATA_REL ~is_const:true in
   (* The .text inline constant-pool (see Bil2llvm.create_load / create_rip_relative_addr): stashed into [text_section_ref] and NOT added to section_list/section_remap_ref, so compile-time .text loads (the constant-pool / format-string reads -- e.g. *)
   let text_section = mk_section TEXT ~is_const:true in
@@ -556,7 +544,6 @@ let convert_binary output_program proj =
     Base.Option.map text_section ~f:(fun (arr, min, max, _base) ->
       (arr, Word.to_int64_exn min, Word.to_int64_exn max))
   in
-  eprintf "Getting symbols\n";
   (* the NATIVE function-pointer remap table: the symbol table's (addr → name) lookup lets the emitter turn native function-address constants (the `atexit (close_stdout)` arg) into the LIFTED functions' addresses ([ptrtoint @close_stdout]) — see [Bil2llvm.create_immidiate]. *)
   let symtab_val = Some (Project.symbols proj) in
   (* the DATA-section pointer-slot remap: every section's native (min, max) → the lifted global — [Bil2llvm.set_section_initializer] rewrites the slots holding native addresses. *)
@@ -595,7 +582,7 @@ let convert_binary output_program proj =
       ~f:(fun i section ->
         match section with
         | None ->
-            eprintf "Warning: section : %d was not found in binary\n" i;
+            Hike_diag.warn "section %d was not found in binary" i;
             None
         | Some s -> Some s)
       [
@@ -672,8 +659,9 @@ let () =
               analysis. *)
            let cur = Hike_kb.vsa_info () in
            if not (Core.Map.is_empty cur) then (
-             if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-               Printf.eprintf "hike: vsa guard: skip second run (cur %d)\n" (Core.Map.length cur);
+#ifdef VSA_DEBUG
+             Printf.eprintf "hike: vsa guard: skip second run (cur %d)\n" (Core.Map.length cur);
+#endif
              proj)
            else
              let acc = ref Tid.Map.empty in
@@ -690,9 +678,10 @@ let () =
                    Hike_vsa.offsets_of_sub (Project.target proj)
                      (sp (Project.target proj)) sub
                  in
-                 if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-                   Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
-                     (Sub.name sub) (Core.Map.length info.Convutils.offsets);
+#ifdef VSA_DEBUG
+                 Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
+                   (Sub.name sub) (Core.Map.length info.Convutils.offsets);
+#endif
                  acc := Core.Map.set !acc ~key:(Term.tid sub) ~data:info;
                  KB.return ())
            end;
@@ -709,10 +698,11 @@ let () =
                    ~f:(Hike_stack_to_locals.stack_to_locals
                          (Project.target proj) (sp (Project.target proj))))
            in
-           (if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-              Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->
-                  Printf.eprintf "hike: stl: %d tag(s)\n"
-                    (Core.Map.length info.Convutils.offsets)));
+#ifdef VSA_DEBUG
+           Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->
+               Printf.eprintf "hike: stl: %d tag(s)\n"
+                 (Core.Map.length info.Convutils.offsets));
+#endif
            proj);
       (* The emitting pass: runs last, on the filtered + stack-to-locals + VSA-tagged project its deps deliver (the dep chain enforces vsa -> stack-to-locals -> convlir). *)
       (* The aggressive DCE — [Hike_dce.dce] eliminates the lifted RETURN epilogue (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn` — the emitter emits a real LLVM [ret] anyway; the retaddr slot read drops out of the free-vars-as- args signature with it) and sweeps never-used defs. *)

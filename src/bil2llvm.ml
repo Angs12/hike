@@ -519,9 +519,6 @@ let create_load llvm_builder (addr, size) =
   | _ ->
       (* addr is not a constant -> inttoptr + load. *)
       let* addr = create_inttoptr llvm_builder addr in
-      (match Llvm.int64_of_const addr with
-       | Some v -> Printf.eprintf "hike: create_load DYN addr=%Ld\n" v
-       | None -> ());
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr ""
            llvm_builder
@@ -619,7 +616,7 @@ let warn_undef_read ctx var blk_tid =
   if not (Core.Set.mem !warned_vars v) then begin
     warned_vars := Core.Set.add !warned_vars v;
     if not is_lane then
-      Printf.eprintf "hike: undef-read: blk %s: var %s never defined\n"
+      Hike_diag.warn "undef-read: blk %s: var %s never defined"
         (Tid.name blk_tid) (Var.name v)
   end
 
@@ -964,8 +961,9 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
            create_exp llvm_builder blk_tid (v#map_exp exp)
        | None -> create_exp llvm_builder blk_tid exp)
   | None ->
-      if Sys.getenv_opt "HIKE_VSA_DEBUG" <> None then
-        Printf.eprintf "hike: create_static_mem_access fallback lo=%Ld no frame/stack -> dynamic\n" lo;
+#ifdef VSA_DEBUG
+      Printf.eprintf "hike: create_static_mem_access fallback lo=%Ld no frame/stack -> dynamic\n" lo;
+#endif
       create_exp llvm_builder blk_tid exp
 
 (* The three-way emission branch of the UNFLAGGED defs (the rip_relative_addr branch stays above): - SINGLETON tag (lo = hi): the const-GEP static access into the per-sub frame. *)
@@ -1084,8 +1082,11 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr (def : def term)
         if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
           ctx.Convutils.guarded_warned :=
             Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-          Printf.eprintf
-            "hike: guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s\n"
+          (* The prefixed eprintf text is the contract [run_corpus.sh]
+             greps for — migrated verbatim into [Hike_diag.warn], which
+             prepends the [hike:] prefix. *)
+          Hike_diag.warn
+            "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
             (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
         end
       end;
@@ -1876,9 +1877,8 @@ let create_call llvm_builder blk_tid blk sub call fr =
            the value is genuinely unused; where used, the poison is the
            documented gap — never a silent wrong value. *)
         if Convutils.is_intrinsic_name name then begin
-          Printf.eprintf
-            "hike: guarded: unmapped intrinsic call: %s (in sub %s) - emitting \
-             as external; result lanes are poison\n"
+          Hike_diag.warn
+            "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
             name (Tid.name (Term.tid sub));
           create_external_intrinsic_call llvm_builder blk_tid sub call name fr
         end
@@ -2331,20 +2331,15 @@ let region_bytes (r : Convutils.region) : int64 =
 
 let create_sub sub =
   let open KB in
-  if is_empty sub then (
-    Format.eprintf "Skipping sub %s, has no blks\n" (Term.name sub);
-    return ())
+  if is_empty sub then return ()
   else if
     (* the NATIVE-FP-mapped intrinsic subs: their calls are intercepted in [create_call] (the LLVM FP op inline); the soft-float body is never emitted (dead weight — the mapped calls never reach it). *)
     Base.Option.is_some (native_fp_op (Tid.name (Term.tid sub)))
-  then (
-    Printf.eprintf "Skipping sub %s (native LLVM FP op)\n" (Term.name sub);
-    return ())
+  then return ()
   else
     let* llvm_ctx = Context.get llvm_ctx_var in
     let* llvm_module = Context.get llvm_module_var in
     let* ctx = Context.get emit_ctx_var in
-    Printf.eprintf "Converting sub %s\n" (Term.name sub);
     let blks = Term.enum blk_t sub in
     let fn, _ =
       Core.Map.find !(ctx.Convutils.ll_funcs) (Term.tid sub)
@@ -2464,7 +2459,8 @@ let create_sub sub =
              Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v)
     in
     if not (Core.Set.is_empty lane_reads) then
-      Printf.eprintf "hike: undef-read: sub %s: %d never-defined model-ABI lane read(s) [undef]\n"
+      Hike_diag.warn
+        "undef-read: sub %s: %d never-defined model-ABI lane read(s) [undef]"
         (Tid.name sub_tid) (Core.Set.length lane_reads);
     return ()
 
