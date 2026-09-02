@@ -418,6 +418,28 @@ emits a CORRECT soft-float sub, so stdout stayed byte-identical, and the 3
 affected binaries are NOT in the 8-bin oracle — **a "surviving diagnostic" is
 not a passing gate.** Grep the emissions for `unmapped intrinsic` when
 changing the FP-intrinsic table.
+**Last verified: 2026-09-02 EEST (late night) — arch C1+C6+C4+C2 on branch
+`arch-c1c6` (C2 = commit 243ef22) — BATTERY GREEN, 490 checks, IR
+BYTE-IDENTICAL to main 32/32**
+
+**C2 (243ef22): `vsa_info` IS the precomputed view.** The record's
+`offsets`/`k_ranges` fields ARE the per-def Tid maps now (Tid → kind,
+Tid → (klo,khi)), built ONCE at the producer — the record stops being
+"raw lists + know how to index them". Deleted: five consumer folds in
+stl, the emitter's per-def O(n) `find_def_tag` scan (ONE map find per
+stack access now), hike.ml's `has_positive`, and the three probes'
+`kind_of` folds. Constructors: `Convutils.mk_vsa_info` (the one
+list-taking fold — fixtures/probes) + `mk_vsa_info_maps` (the producer
+tail). `equal_vsa_info` is hand-written (maps); entry ORDER left
+equality with the lists — and the tree's ONE order dependence (the A4
+test's positional `List.nth` borrow over C1's walk-order offsets) died
+with it (sorted-tid keys now). The record STAYS the KB slot's per-sub
+value — that is what vsa_info is FOR (the join/conflict domain); no
+second view type. Gates: 490 ok + 6 xfail (identical count); corpus
+32/32 rc=0; unmapped intrinsics 0; check_allocas 160/0; semantic
+30/2, 30/2, 8/8 (T02/T03 only); probes 10/10; IR byte-identical to
+main a5680df 32/32.
+
 **Last verified: 2026-09-02 EEST (night) — arch C1+C6+C4 on branch `arch-c1c6`
 (worktree `/home/tovpr/backup/hike-arch`; C4 = commit 8743bb9, on the
 a5680df-rebased C1+C6 tree) — BATTERY GREEN, 490 checks, IR
