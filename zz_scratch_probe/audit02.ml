@@ -80,16 +80,17 @@ let audit_sub (sp : var) (sub : sub term) : unit =
     (* The PROD verdict for cross-checking the replica *)
     let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp sub' in
     let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
-    List.iter (fun (tid, k) ->
-        (match k with Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid () | _ -> ()))
-      info.offsets;
+    Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
+        match k with
+        | Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid ()
+        | _ -> ());
     let prod_unbounded_count = Hashtbl.length prod_unbounded in
     let sa_count = Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
                    |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.stack_access)
                    |> Seq.length in
     Printf.printf "=== sub %s (%s) — stack_access=%d offsets=%d Unbounded(PROD)=%d ===\n"
       (Sub.name sub') (Tid.to_string (Term.tid sub'))
-      sa_count (List.length info.offsets) prod_unbounded_count;
+      sa_count (Core.Map.length info.offsets) prod_unbounded_count;
     Term.enum blk_t sub'
     |> Seq.iter ~f:(fun blk ->
         let defs = Term.enum def_t blk |> Seq.to_list in

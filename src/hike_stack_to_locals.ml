@@ -310,18 +310,14 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
 let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) ~(frame_escaped : bool) :
     Convutils.region list =
-  let k_of =
-    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
-      ~f:(fun m (dtid, klo, khi) ->
-        Core.Map.set m ~key:dtid ~data:(klo, khi))
-  in
+  let k_of = info.Convutils.k_ranges in
   let ranges : (int64 * int64) Tid.Map.t =
-    Base.List.fold_left info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) ->
+    Core.Map.filter_map info.Convutils.offsets
+      ~f:(fun (kind : Convutils.vsa_kind) ->
         match kind with
-        | Convutils.Range (lo, hi) ->
-            Core.Map.set m ~key:dtid ~data:(lo, hi)
-        | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> m)
+        | Convutils.Range (lo, hi) -> Some (lo, hi)
+        | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead
+        | Convutils.VLA _ -> None)
   in
   let abi =
     (* TOTAL: the unit fixtures analyze [Theory.Target.unknown], which has
@@ -669,18 +665,11 @@ let is_abi_visible ?(last_push_tids = Tid.Set.empty) (sp : var)
   | _ -> false
 
 (* [abi_visibility_of sp info]: the [is_abi_visible] closure over one
-   sub's [vsa_info] — the form the emitter uses. *)
+   sub's [vsa_info] — the form the emitter uses.  The maps ARE the
+   record's precomputed fields now (arch C2: no fold). *)
 let abi_visibility_of (sp : var) (info : Convutils.vsa_info) :
     def term -> bool =
-  let tag_of =
-    Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind)
-  in
-  let k_of =
-    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
-      ~f:(fun m (dtid, klo, khi) -> Core.Map.set m ~key:dtid ~data:(klo, khi))
-  in
-  is_abi_visible sp ~tag_of ~k_of
+  is_abi_visible sp ~tag_of:info.Convutils.offsets ~k_of:info.Convutils.k_ranges
 
 (* ------------------------------------------------------------------ *)
 (* THE STACK MODEL DECISION — the single producer ([split_plan]).       *)
@@ -824,17 +813,13 @@ let has_vla_dynamic_alloc (sub : sub term) : bool =
    (its storage would straddle the private alloca and the frame). *)
 let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
-  let tag_of =
-    Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind)
-  in
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
          Term.enum def_t blk
          |> Seq.exists ~f:(fun d ->
                 is_stack_mem sp target (Def.rhs d)
                 &&
-                match Core.Map.find tag_of (Term.tid d) with
+                match Core.Map.find info.Convutils.offsets (Term.tid d) with
                 | None -> true
                 | Some (Convutils.Infinite _) -> true
                 | Some Convutils.Unbounded -> true
@@ -850,10 +835,7 @@ let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
    storage, so it forces the fallback. *)
 let tags_inside_or_disjoint (info : Convutils.vsa_info)
     (convertible : Convutils.region list) : bool =
-  Core.Map.for_all
-    (Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-       ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind))
-    ~f:(fun kind ->
+  Core.Map.for_all info.Convutils.offsets ~f:(fun (kind : Convutils.vsa_kind) ->
       match kind with
       | Convutils.Infinite _ | Convutils.Unbounded -> false
       | Convutils.Dead -> true
@@ -941,23 +923,19 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
     |> Base.Option.value
          ~default:
-           { Convutils.offsets = []; k_ranges = []; regions = [];
-             stack_plan = []; degraded = false; vla_bounds = [] }
+           (Convutils.mk_vsa_info ~offsets:[] ~k_ranges:[] ~regions:[]
+              ~stack_plan:[] ~degraded:false ~vla_bounds:[])
   in
-  let tag_of =
-    Base.List.fold info.Convutils.offsets ~init:Tid.Map.empty
-      ~f:(fun m (dtid, kind) -> Core.Map.set m ~key:dtid ~data:kind)
-  in
+  (* The tag/k index maps ARE the record's fields (arch C2 — no folds):
+     [info.offsets] is [tag_of], [info.k_ranges] is [k_of]. *)
+  let tag_of = info.Convutils.offsets in
   (* lo >= 0 means the access is in the incoming-arg area (entry-relative
      offset); keep it in memory. Local stack slots have lo < 0. For
      outgoing stack args (mem[RSP] stores for 7th+ args), lo <0 but they
      are still ABI-visible (they must remain in memory for the callee's
      hike_stack+offset loads), so we also keep RSP-relative stores with
      k >=0. *)
-  let k_of =
-    Base.List.fold info.Convutils.k_ranges ~init:Tid.Map.empty
-      ~f:(fun m (dtid, klo, khi) -> Core.Map.set m ~key:dtid ~data:(klo, khi))
-  in
+  let k_of = info.Convutils.k_ranges in
   (* MEM-FISSION: the retaddr-push exemption — the same positional rule
      the region planner uses.  With the push store exempt from ABI
      visibility, its cell converts with its region and the fission gives

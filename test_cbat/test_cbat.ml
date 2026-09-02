@@ -5642,11 +5642,11 @@ let () =
   in
   let span = (-16L, -16L) in
   let info : Cu.vsa_info =
-    {
-      Cu.offsets =
-        [ (Term.tid def_wide, Cu.Range (-16L, -16L)); (Term.tid def_narrow, Cu.Range (-16L, -16L)) ];
-      k_ranges = [];
-      regions =
+    Cu.mk_vsa_info
+      ~offsets:
+        [ (Term.tid def_wide, Cu.Range (-16L, -16L)); (Term.tid def_narrow, Cu.Range (-16L, -16L)) ]
+      ~k_ranges:[]
+      ~regions:
         [
           {
             Cu.id = 0;
@@ -5655,10 +5655,8 @@ let () =
             Cu.convertible = true;
             Cu.max_width = 64;
           };
-        ];
-      stack_plan = []; degraded = false;
-      vla_bounds = [];
-    }
+        ]
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
@@ -5845,8 +5843,8 @@ let () =
   Sub.Builder.add_blk sub_b exit0;
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
-    { Cu.offsets; k_ranges = []; regions = []; stack_plan = []; degraded = false;
-      vla_bounds = [] }
+    Cu.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[] ~stack_plan:[]
+      ~degraded:false ~vla_bounds:[]
   in
   let convertible_of info dtid =
     Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
@@ -5936,11 +5934,7 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid =
-    List.filter (fun (t, _) -> Tid.equal t dtid) info.Cu.offsets |> function
-    | [ (_, k) ] -> Some k
-    | _ -> None
-  in
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check
     "regression C4a: the indexed loop-body store carries an offset tag (fixture locates the \
      Infinite class)"
@@ -6018,11 +6012,7 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid =
-    List.filter (fun (t', _) -> Tid.equal t' dtid) info.Cu.offsets |> function
-    | [ (_, k) ] -> Some k
-    | _ -> None
-  in
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   (* CONTROL (must hold pre AND post): the indexed/ranged member keeps its own kind through the
      merge. *)
   check "property R11 control: the indexed member keeps its own kind through the merge"
@@ -6144,11 +6134,7 @@ let () =
             else d))
   in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid =
-    List.filter (fun (tt, _) -> Tid.equal tt dtid) info.Cu.offsets |> function
-    | [ (_, k) ] -> Some k
-    | _ -> None
-  in
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check "R6: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
   (* the per-guard views: the taken view must constrain i to the ARC {x : x <> 9} (= diff(top,{9}) —
@@ -6233,11 +6219,7 @@ let () =
   (* the production path: analyze's tags AS-IS — no manual re-tagging *)
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid =
-    List.filter (fun (tt, _) -> Tid.equal tt dtid) info.Cu.offsets |> function
-    | [ (_, k) ] -> Some k
-    | _ -> None
-  in
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check "G3: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
   let prog' = Program.create ~subs:[ tagged ] () in
@@ -6444,8 +6426,16 @@ let () =
       ~f:(fun ~key ~data acc -> match acc with _, None -> (key, Some data) | _ -> acc)
     |> fun (t, i) -> match i with Some i -> (t, i) | None -> assert false
   in
-  let c1_def_tids = List.map fst c1_info.Cu.offsets in
-  let lo = match c1_info.Cu.offsets with (_, Cu.Range (l, _)) :: _ -> l | _ -> assert false in
+  (* arch C2: [offsets] is the precomputed map — the borrow reads it by
+     sorted-tid key now (the old positional [List.nth] over the walk-order
+     list was the ONE order dependence in the tree; the two tids are
+     distinct so the take is order-independent). *)
+  let c1_def_tids = c1_info.Cu.offsets |> Core.Map.keys |> List.rev in
+  let lo =
+    match Core.Map.min_elt c1_info.Cu.offsets with
+    | Some (_, Cu.Range (l, _)) -> l
+    | _ -> assert false
+  in
   let masks_of (sz : size) (data : int64) : word list =
     let m = memv "a4_m" in
     let def_wide =
@@ -7250,13 +7240,12 @@ let () =
   in
   let plan_of info = Stl.split_plan rsp Theory.Target.unknown sub info in
   let info =
-    {
-      Hike.Convutils.offsets =
-        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
-      k_ranges = [ (tid1, -40L, -10L); (tid2, -50L, -20L) ];
-      regions = [ r1; r2 ];
-      stack_plan = []; degraded = false; vla_bounds = [];
-    }
+    Hike.Convutils.mk_vsa_info
+      ~offsets:
+        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
+      ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
+      ~regions:[ r1; r2 ]
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   in
   check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
     (Cu.equal_split_plan (plan_of info) [ r1; r2 ]);
@@ -7266,7 +7255,9 @@ let () =
     {
       info with
       Hike.Convutils.offsets =
-        [ (tid1, Hike.Convutils.Infinite (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
+        Tid.Map.of_alist_exn
+          [ (tid1, Hike.Convutils.Infinite (-16L, -16L));
+            (tid2, Hike.Convutils.Range (-32L, -32L)) ];
     }
   in
   check "R12-6: gate rejects Infinite tag (unbounded -> not covered)"
@@ -7300,13 +7291,11 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let info =
-    {
-      Hike.Convutils.offsets =
-        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ];
-      k_ranges = [ (tid1, -20L, -10L); (tid2, -40L, -20L) ];
-      regions = [];
-      stack_plan = []; degraded = false; vla_bounds = [];
-    }
+    Hike.Convutils.mk_vsa_info
+      ~offsets:
+        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
+      ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   in
   let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
@@ -7341,16 +7330,14 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let info =
-    {
-      Hike.Convutils.offsets =
+    Hike.Convutils.mk_vsa_info
+      ~offsets:
         [
           (tid1, Hike.Convutils.Range (-32L, -16L));
           (tid2, Hike.Convutils.Range (-24L, -8L));
-        ];
-      k_ranges = [ (tid1, -40L, -10L); (tid2, -30L, -5L) ];
-      regions = [];
-      stack_plan = []; degraded = false; vla_bounds = [];
-    }
+        ]
+      ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   in
   let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
@@ -7399,12 +7386,10 @@ let () =
     }
   in
   let info =
-    {
-      Hike.Convutils.offsets = [ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ];
-      k_ranges = [ (tid_stack, -20L, -10L) ];
-      regions = [ region ];
-      stack_plan = []; degraded = false; vla_bounds = [];
-    }
+    Hike.Convutils.mk_vsa_info
+      ~offsets:[ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ]
+      ~k_ranges:[ (tid_stack, -20L, -10L) ]
+      ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   in
   (* Finding 1: the decision moved to [Stack_to_locals.split_plan] — the emitter's
      [region_split_plan] (with its own weaker frame_ptr escape analysis) is gone. The
@@ -8463,14 +8448,9 @@ let () =
     }
   in
   let info =
-    {
-      Hike.Convutils.offsets = [];
-      k_ranges = [];
-      regions = [ region ];
-      stack_plan = [ region ];
-      degraded = false;
-      vla_bounds = [];
-    }
+    Hike.Convutils.mk_vsa_info ~offsets:[] ~k_ranges:[]
+      ~regions:[ region ] ~stack_plan:[ region ]
+      ~degraded:false ~vla_bounds:[]
   in
   Kb.provide (Tid.Map.singleton (Term.tid precise_sub) info);
   let precise' = Hike.Dce.dce ~target:Theory.Target.unknown precise_sub in

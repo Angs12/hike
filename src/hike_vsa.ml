@@ -79,8 +79,8 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let sub' = if has_relevant_tags sub then sub else Relevance.analyze sp sub in
   (* A sub with NO direct-SP stack accesses produces an empty offset set regardless of the fixpoint result (only [stack_access]-tagged Load/Store defs yield offset tags). *)
   if not (has_stack_access_tags sub') then
-    { Convutils.offsets = []; k_ranges = []; regions = []; stack_plan = [];
-      degraded = false; vla_bounds = [] }
+    Convutils.mk_vsa_info ~offsets:[] ~k_ranges:[] ~regions:[]
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   else
   let prog' = Program.create ~subs:[ sub' ] () in
   (* The single-pass trace-partitioning (docs/trace-partitioning-plan.md §2/§7 — ticket 01): the
@@ -172,7 +172,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
                                     (Vsa.AI.find_word 64 st_before sp)
                                 with
                                 | Some (klo, khi) ->
-                                    (Term.tid d, klo, khi) :: kacc
+                                    (Term.tid d, (klo, khi)) :: kacc
                                 | None -> kacc
                               in
                               (st, acc, kacc)
@@ -249,11 +249,14 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
                   ~data:(Convutils.Range (lo, hi))))
   in
   let offsets =
-      Base.List.map raw ~f:(fun (dtid, kind, _) ->
+      Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->
           match Core.Map.find merged_tags dtid with
-          | Some k -> (dtid, k)
-          | None -> (dtid, kind)) in
-  let k_ranges = List.rev kraw in
+          | Some k -> Core.Map.set m ~key:dtid ~data:k
+          | None -> Core.Map.set m ~key:dtid ~data:kind) in
+  let k_ranges : (int64 * int64) Tid.Map.t =
+    Base.List.fold_left (List.rev kraw) ~init:Tid.Map.empty
+      ~f:(fun m (tid, kr) -> Core.Map.set m ~key:tid ~data:kr)
+  in
   let vla_bounds =
     Term.enum blk_t sub'
     |> Seq.concat_map ~f:(fun blk ->
@@ -293,9 +296,9 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
               | Error _ -> None)
         ) |> Seq.to_list
   in
+  let mk = Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded in
   let base_info =
-    { Convutils.offsets; k_ranges; regions = []; stack_plan = []; degraded;
-      vla_bounds = [] }
+    mk ~regions:[] ~stack_plan:[] ~vla_bounds:[]
   in
   (* The ESCAPE verdict — computed ONCE per sub and shared by the
      region convertibility rule and (through it) the plan. *)
@@ -303,16 +306,12 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let regions =
     Hike_stack_to_locals.regions_of_sub sp target sub' base_info ~frame_escaped
   in
-  let base =
-    { Convutils.offsets; k_ranges; regions; stack_plan = []; degraded;
-      vla_bounds }
-  in
+  let base = mk ~regions ~vla_bounds ~stack_plan:[] in
   (* THE STACK MODEL DECISION — computed ONCE, here, on the PRE-rewrite
      sub (Finding 1): [Hike_stack_to_locals.split_plan] is its single
      producer; the stack-to-locals rewrite, dce and the emitter are its
      consumers (they read [info.stack_plan]). *)
-  { base with Convutils.stack_plan = Hike_stack_to_locals.split_plan sp target sub' base }
-  in
+  { base with Convutils.stack_plan = Hike_stack_to_locals.split_plan sp target sub' base }  in
   let probe_res =
   (* the solve driver: run the fixpoint; a non-convergent fixpoint (D.1) degrades the sub soundly — no tags, every stack access stays real memory (the emitter's dynamic path). *)
   match
@@ -333,15 +332,12 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
         |> Seq.map ~f:(fun d -> (Term.tid d, Convutils.Unbounded))
         |> Seq.to_list
       in
-      { Convutils.offsets; k_ranges = []; regions = []; stack_plan = [];
-        degraded = true; vla_bounds = [] }
+      Convutils.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[]
+        ~stack_plan:[] ~degraded:true ~vla_bounds:[]
   | Some sol -> finish sol
   in
   (* 100% VSA Tagging Assertion: Every stack_access def MUST be present in info.offsets *)
-  let tagged_tids =
-    Base.List.fold probe_res.Convutils.offsets ~init:Tid.Set.empty ~f:(fun s (t, _) ->
-        Core.Set.add s t)
-  in
+  let tagged_tids = probe_res.Convutils.offsets |> Core.Map.keys |> Tid.Set.of_list in
   (* The 100% VSA TAGGING INVARIANT CHECK (PARKED 2026-09-01 by the user:
      "That is a later fix, not now" — the assert crashed the big-binary
      conversions; see the ticket
