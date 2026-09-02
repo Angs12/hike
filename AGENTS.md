@@ -392,9 +392,32 @@ borrowing). Per the user's directive, NO unit tests were added for the
 join/order machinery itself — BAP's KB is upstream-tested; the domain is
 exercised end-to-end by the corpus battery. Net: ~+85/−53 lines.
 
-**Last verified: 2026-09-02 EEST — MERGED TO MAIN (the optimizability program:
-opt gate + poison-phi definedness + mem-fission) — BATTERY GREEN, 30/2 at BOTH
--O0 and opt -O2 — the opt-induced failure class is EMPTY on the merged tree**
+**Last verified: 2026-09-02 EEST (late) — MAIN @ c484e13 — the FP-intrinsic
+table regression FIXED — BATTERY GREEN, 30/2 at BOTH -O0 and opt -O2, no gate
+moved**
+
+**The native_fp_op merge regression is FIXED (commit c484e13, this session).**
+The merge `a7b7a6a` silently dropped 11 of the 26 rows of
+[Bil2llvm.native_fp_op] — a both-sides-changed drop. It took the BRANCH
+parent's table and then lost even the branch's own forder/cast_* rows,
+leaving 15 rows producing only FMUL/FADD/FSUB/FDIV/FREM. Consequence: 5 of the
+10 [native_fp] constructors were never built, so the SFLOAT/SINT/FORDER/ISNAN/
+FHLT arms of [create_native_fp_call] (~103 lines) were unreachable, and every
+cvtsi2sd/cvttsd2si, every COMISS/COMISD compare and hlt degraded to
+`hike: guarded: unmapped intrinsic call` with POISON result lanes. Measured:
+**9 warnings** across mixed_fp_int / union_overlap / va_arg_mixed, and
+mixed_fp_int emitted **0** native sitofp/uitofp where the pre-merge tree
+emitted 5 (replaced by 5 soft-float calls). Fixed by restoring all 26 rows
+from the MAINLINE parent `cef072a`, which is authoritative (it carries
+`b7b2dae`'s is_nan + unsuffixed-forder rows, and HEAD's call arms are already
+the mainline's TYPE-DERIVED versions taking `~abi`). Now: **0** unmapped
+intrinsics, 5 native sitofp, 0 soft-float calls, 29 of 32 binaries
+byte-identical (only the 3 affected ones changed).
+LESSON (the reason this survived a recorded-green battery): the degradation
+emits a CORRECT soft-float sub, so stdout stayed byte-identical, and the 3
+affected binaries are NOT in the 8-bin oracle — **a "surviving diagnostic" is
+not a passing gate.** Grep the emissions for `unmapped intrinsic` when
+changing the FP-intrinsic table.
 
 **Mem-fission (this session, commits 6cc2c86 + 499bb36 on finding1-stack-plan):
 the storage decision lives in the BIL, and DCE deletes dead stores
@@ -439,6 +462,7 @@ zero-initialized (their cells ride the alloca's original bytes).
 |---|---|---|
 | unit suite | `dune runtest --force` | **480 checks, 0 FAIL** (`ALL CBAT TESTS PASSED`) ✅ |
 | corpus emission | `bash scripts/run_corpus.sh <corpus> <emissions/fission>` | **32/32 rc=0** ✅ |
+| **unmapped FP intrinsics** | `grep -rh "unmapped intrinsic" <emissions>/*.txt` | **0** ✅ (was **9** before c484e13 — the merge regression; see below) |
 | structural asserts | `bash scripts/check_allocas.sh <emissions/fission>` | **160 passed, 0 failed** ✅ |
 | semantics (all) | `bash scripts/semantic/run_semantic_all.sh ...` | **30 PASS, 2 FAIL** ✅ (the merged tree beats both parents: mainline's fixes + the fission recovered `nested_struct` — a former -O0 known; the remaining 2 = va_arg_vacopy + variadic, tickets T02/T03) |
 | **optimization-safety** | `bash scripts/semantic/run_semantic_opt.sh ...` | **30 PASS, 2 FAIL** ✅ (identical to -O0 — the opt-induced class is EMPTY on the merged tree: the fission's dead-push deletion + mainline's edge-keyed restore together close the SP-lane classes; the remaining 2 are the -O0 knowns, failing identically at both levels) |
@@ -446,6 +470,14 @@ zero-initialized (their cells ride the alloca's original bytes).
 | probes | precision_probe spot-checks (factorial, rec_struct, array_local, variadic, alloca_vla) | **PASS, 0 crashes** ✅ |
 | FP micro-suite | fm2/fm4/fm6/fmc8 native-vs-lifted | NOT RE-RUN this session |
 | coreutils PIE (103) | `coreutils_pipeline.sh` lift+test | NOT RE-RUN this session |
+
+All numbers above are from the tree at **c484e13** (main), re-measured this
+session against `/tmp/corpus` (32 binaries, built 2026-09-01). The two semantic
+gates were run against BOTH the pre-fix and post-fix emissions: **30 PASS /
+2 FAIL with the SAME two binaries** either way, so c484e13 fixes a real
+regression without moving any gate. Emissions: `/tmp/opencode/em_before`
+(pre-fix), `/tmp/opencode/em_after` (post-fix, 29/32 byte-identical to
+before).
 
 **Reference artifacts (durable — /tmp wiped twice):** worktree
 `/home/tovpr/backup/hike-finding1` (branch finding1-stack-plan); corpus
