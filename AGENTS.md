@@ -418,6 +418,50 @@ emits a CORRECT soft-float sub, so stdout stayed byte-identical, and the 3
 affected binaries are NOT in the 8-bin oracle — **a "surviving diagnostic" is
 not a passing gate.** Grep the emissions for `unmapped intrinsic` when
 changing the FP-intrinsic table.
+**Last verified: 2026-09-02 EEST (final) — MERGED TO MAIN (82311d7, the
+arch C1+C6+C4+C2 fast-forward) + candidate 3 SKIPPED BY MEASUREMENT —
+BATTERY GREEN ON MAIN, 490 checks, IR byte-identical to BOTH the branch
+emission AND the pre-merge main control, 32/32**
+
+**Candidate 3 (the shape_of_addr linear-scan + mapper-hoisting item)
+WILL NOT BE DONE (user decision, 2026-09-02; the measurement that
+justified it — probe `stl_timer`, deleted after the run, never
+committed):**
+- **The perf pitch is DEAD.** stl is 0-4ms/binary over the corpus, 35ms
+  (sort, 452 subs) / 45ms (grep, 475) / 140ms (gcc-12, 1494 subs) on
+  real PIE binaries — against offsets lanes of 2.5-21s. stl+dce ≈ 1-2%
+  of the per-binary time; a 10x speedup saves ~100ms of 21s.
+- **What the census DID find (recorded here so a future review does not
+  re-run it):** duplicate addresses are the COMMON case — 60-70% of
+  tagged defs share an Exp.equal address with another def (grep
+  6022/8768, gcc-12 19559/28400). [shape_of_addr]'s assoc-list
+  find_map returns the FIRST match in the consed list = the LAST def in
+  walk order — a silent LAST-WINS rule over potentially divergent tags
+  (two same-address defs in different blocks can carry different
+  regions/shapes). The corpus binaries' duplicates happen to AGREE, so
+  the behavior is correct-but-accidental; no unit fixture pins it. If a
+  future same-address divergence bug surfaces, the pin to write is:
+  two Exp.equal-address defs, divergent tags (one singleton-Slot, one
+  interval-Region), assert the later def's shape serves both.
+- **[merge_loop] (regions_of_sub) is the actual measurable hot spot**
+  (16.7ms max-per-sub on grep, 703 items — vs stl's 2.9ms) but its
+  component order DETERMINES the region ids (stack_rN names): any
+  algorithm change (e.g. sort-and-sweep) renumbers regions corpus-wide
+  and breaks IR byte-identity — a deliberate re-baseline session, never
+  a rider.
+- BAP facts the measurement established (probe-verified):
+  [Exp.hash] + [Exp.compare] both exist (Regular.S); structurally-equal
+  exps are NOT physically equal (no lifter hash-consing); Filliâtre's
+  hashcons lib is already linked into the plugin if ever needed.
+
+**Merged to main (fast-forward, no conflicts; main's parallel-session
+untracked scratch untouched): C1 (the fission name is ONE fact) + C6
+(comment debt, every reference names a real thing) + C4 (the DCE pass
+gets a real interface — hike_dce.mli, Hike.Dce, total ABI lane, 6
+fixture tests D0-D5) + C2 (vsa_info IS the precomputed view — the
+offsets/k_ranges fields are the Tid maps). The installed plugin is
+MAIN's build (rebuilt + reinstalled post-merge).**
+
 **Last verified: 2026-09-02 EEST (late night) — arch C1+C6+C4+C2 on branch
 `arch-c1c6` (C2 = commit 243ef22) — BATTERY GREEN, 490 checks, IR
 BYTE-IDENTICAL to main 32/32**
@@ -468,7 +512,8 @@ at `[hike_stack + k]`) to survive the sweep. Gates: **490 ok** + 6 xfail
 (484 + 6 new); corpus 32/32 rc=0; unmapped intrinsics 0; check_allocas
 160/0; semantic 30/2, 30/2, 8/8 (the T02/T03 knowns only); probes 10/10
 + all debug executables build; **IR byte-identical to main a5680df,
-32/32**. The installed plugin points at the arch-c1c6 build.
+32/32**. (The plugin-pointer note is superseded: post-merge, the
+installed plugin is MAIN's build.)
 
 **Last verified: 2026-09-02 EEST (evening) — arch C1+C6 on branch `arch-c1c6`
 (worktree `/home/tovpr/backup/hike-arch`; rebased onto main a5680df after the
