@@ -3484,9 +3484,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       if List.is_empty preds then old
       else
         let outs = List.map preds ~f:(fun p ->
-            let head_opt = Hashtbl.find block_to_head p in
-            Cbat_landmarks.widening_at_head := head_opt;
-            let p_entry = get p in
+            (* L2 sub-attribution — the per-pred SCAFFOLDING (the head
+               attribution lookup, the landmark head binding, the pred's
+               in-state [get]): pure glue, previously in no bucket. *)
+            let head_opt, p_entry =
+              Stages.time `Glue (fun () ->
+                let head_opt = Hashtbl.find block_to_head p in
+                Cbat_landmarks.widening_at_head := head_opt;
+                let p_entry = get p in
+                (head_opt, p_entry)) in
             (* C1 — THE BLOCK-TRANSFER MEMO: the transfer is a pure
                function of (the block, its in-state), and [ver_of rctx p]
                is the in-state's O(1) [AI.equal] identity (the engine
@@ -3611,8 +3617,12 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
            arm, and the non-head else branch all consume
            [AI.join old incoming]. Computing it three times triples the
            record join (memories + words + frame) at every unstable
-           head visit. [j] is the exact same value in all three sites. *)
-        let j = AI.join old incoming in
+           head visit. [j] is the exact same value in all three sites.
+           L2 attribution — this join (and the non-head twin below) was
+           NEVER in a stage bucket: the [Join] timer only wrapped the
+           incoming join over the preds' outs. Timed now, so the Join
+           bucket is ALL joins and the scaffold-glue reading is honest. *)
+        let j = Stages.time `Join (fun () -> AI.join old incoming) in
         if Stages.time `Equal (fun () -> AI.equal old j)
         then old
         else begin
@@ -3656,10 +3666,18 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       end else
         (* F4 — the non-head path: a single bare join; [j] is scoped to
            the head branch above, so recompute here (one join, same as
-           before the reuse). *)
-        AI.join old incoming
+           before the reuse).
+           L2 attribution — timed now (see the F4 comment above): the
+           non-head visit join was also never in a bucket. *)
+        Stages.time `Join (fun () -> AI.join old incoming)
     in
-    if not (AI.equal old new_val) then (set v new_val; true) else false)
+    (* L2 attribution — the final stability [AI.equal] (the [set] gate)
+       was never in a bucket either: the [Equal] timer only wrapped the
+       head stability check. Timed now; every record compare is
+       accounted.  The [set] path (the sol_map write + the version
+       bump + the context rebind) is [Glue]. *)
+    if not (Stages.time `Equal (fun () -> AI.equal old new_val))
+    then (Stages.time `Glue (fun () -> set v new_val); true) else false)
   in
   let rec stabilize_comps (comps : Cbat_wto.comp list) : bool =
     let changed = ref false in

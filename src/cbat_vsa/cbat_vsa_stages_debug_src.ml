@@ -49,19 +49,28 @@ let walk_max_pops = ref 0
 let t_scaffold = ref 0.
 let scaffold_calls = ref 0
 
+let t_glue = ref 0.
+let glue_calls = ref 0
+
+(* The GC snapshot at [reset] — the allocation-delta baseline for the
+   sub-attribution's GC hypothesis (see [report]). *)
+let gc0 = ref (Gc.quick_stat ())
+
 let reset () =
   denote_calls := 0; join_calls := 0; equal_calls := 0; widen_calls := 0;
   walk_calls := 0;
   t_denote := 0.; t_join := 0.; t_equal := 0.; t_widen := 0.;
   t_walk := 0.;
   walk_pops := 0; walk_blocks := 0; walk_truncs := 0; walk_max_pops := 0;
-  t_scaffold := 0.; scaffold_calls := 0
+  t_scaffold := 0.; scaffold_calls := 0;
+  t_glue := 0.; glue_calls := 0;
+  gc0 := Gc.quick_stat ()
 
 (* [time which f]: run [f], accumulating its wall time into [which]'s
    total. The clock read is [Unix.gettimeofday] (~50ns) — negligible
    against the operations being timed (a block denotation, an AI.join,
    a widening). *)
-let time (which : [ `Denote | `Equal | `Join | `Scaffold | `Walk | `Widen ])
+let time (which : [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Widen ])
     (f : unit -> 'a) : 'a =
   let t0 = Unix.gettimeofday () in
   let r = f () in
@@ -72,7 +81,8 @@ let time (which : [ `Denote | `Equal | `Join | `Scaffold | `Walk | `Widen ])
    | `Equal -> incr equal_calls; t_equal := !t_equal +. dt
    | `Widen -> incr widen_calls; t_widen := !t_widen +. dt
    | `Walk -> incr walk_calls; t_walk := !t_walk +. dt
-   | `Scaffold -> incr scaffold_calls; t_scaffold := !t_scaffold +. dt);
+   | `Scaffold -> incr scaffold_calls; t_scaffold := !t_scaffold +. dt
+   | `Glue -> incr glue_calls; t_glue := !t_glue +. dt);
   r
 
 (* [bump_walk_pops n]: record [n] pops of ONE walk's Kildall (the
@@ -86,11 +96,26 @@ let bump_walk_pops ~(pops : int) ~(blocks : int) ~(truncated : bool) () : unit =
   if truncated then incr walk_truncs;
   if pops > !walk_max_pops then walk_max_pops := pops
 
+(* [report label]: the per-stage totals, call counts, the walk-schedule
+   census, and the GC allocation deltas since [reset] (the L2
+   sub-attribution's GC hypothesis: if the glue remainder is mostly
+   major-GC slices landing in the mutator, the major-allocated delta
+   correlates with it). *)
+let gc_minor_words () =
+  (Gc.quick_stat ()).Gc.minor_words -. (!gc0).Gc.minor_words
+let gc_major_words () =
+  (Gc.quick_stat ()).Gc.major_words -. (!gc0).Gc.major_words
+let gc_promoted_words () =
+  (Gc.quick_stat ()).Gc.promoted_words -. (!gc0).Gc.promoted_words
+
 let report (label : string) : unit =
   Printf.printf
     "STAGES %s: denote %7.3fs/%d  join %7.3fs/%d  equal %7.3fs/%d  \
-     widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d\n\
-     WALKS %s: pops %d  blocks %d  truncs %d  max_pops %d\n%!"
+     widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d  glue %7.3fs/%d\n\
+     WALKS %s: pops %d  blocks %d  truncs %d  max_pops %d\n\
+     GC %s: minor %.0f  major %.0f  promoted %.0f\n%!"
     label !t_denote !denote_calls !t_join !join_calls !t_equal !equal_calls
     !t_widen !widen_calls !t_walk !walk_calls !t_scaffold !scaffold_calls
+    !t_glue !glue_calls
     label !walk_pops !walk_blocks !walk_truncs !walk_max_pops
+    label (gc_minor_words ()) (gc_major_words ()) (gc_promoted_words ())

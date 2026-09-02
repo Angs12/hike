@@ -27,9 +27,12 @@ let walk_max_pops = ref 0
 let t_scaffold = ref 0.
 let scaffold_calls = ref 0
 
+let t_glue = ref 0.
+let glue_calls = ref 0
+
 let reset () = ()
 
-let time (_which : [ `Denote | `Equal | `Join | `Scaffold | `Walk | `Widen ])
+let time (_which : [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Widen ])
     (f : unit -> 'a) : 'a = f ()
 
 let bump_walk_pops ~pops:_ ~blocks:_ ~truncated:_ () = ()

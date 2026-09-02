@@ -35,13 +35,22 @@ val walk_max_pops : int ref
 val t_scaffold : float ref
 val scaffold_calls : int ref
 
+(* L2 sub-attribution — the GLUE sub-bucket (the scaffold's remainder
+   after every named stage): the visit prologue (the [get], the Graphlib
+   pred listing, the sol snapshot), the per-pred landmark bindings, and
+   the [set] path (the version bump + the sol_map write + the context
+   rebind).  In production this is the identity. *)
+val t_glue : float ref
+val glue_calls : int ref
+
 (* [reset ()]: zero every counter (once per sub, at fixpoint entry). *)
 val reset : unit -> unit
 
 (* [time which f]: run [f], accumulating its wall time into [which]'s
    total. In the no-op adapter this is exactly [f ()]. *)
 val time :
-  [ `Denote | `Equal | `Join | `Scaffold | `Walk | `Widen ] -> (unit -> 'a) -> 'a
+  [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Widen ] ->
+  (unit -> 'a) -> 'a
 
 (* [bump_walk_pops ~pops ~blocks ~truncated ()]: commit ONE walk's
    schedule metrics (the debug adapter counts pops in the transfer
