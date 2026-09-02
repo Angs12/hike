@@ -66,7 +66,10 @@ module Vsa = struct
     | Unbounded
     | Dead
     | VLA of Tid.t
-  [@@deriving equal]
+  (* one deriver only: the module's [equal_kind] is the definition;
+     [equal_vsa_kind] aliases it for the vsa_info record's
+     [@@deriving equal] (the deriver references this name). *)
+  let equal_vsa_kind = Cbat_vsa.Cbat_extraction.equal_kind
 
   type region = {
     id : int;
