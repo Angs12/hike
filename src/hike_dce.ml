@@ -34,11 +34,12 @@ let ret_replacement (j : jmp term) : jmp term =
       | _ -> j)
   | _ -> j
 
-(* The fissioned region mem vars ([stack_rN_mem]) — recognized by name
-   convention (deterministic, greppable, no plumbing). *)
+(* The fissioned region mem vars ([stack_rN_mem]): recognized through the
+    producer module's predicate ([Hike_stack_to_locals.is_region_mem]: the
+    naming convention is that module's fact, not a grammar every consumer
+    re-types). *)
 let is_region_mem (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
-  && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+  Hike_stack_to_locals.is_region_mem v
 
 (* The LOAD-ROOTS set: vars read as a Load's mem OPERAND, plus jmp/phi
    reads.  A fissioned var's store-to-store chains do NOT self-keep

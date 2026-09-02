@@ -347,12 +347,12 @@ let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
    region-relative ([stack_rN_base + index]; the base var's local is
    the region alloca's cell-0, bound at [create_sub]'s region
    creation), so the ordinary address emission lands inside the region
-   alloca with no tag consultation. *)
+   alloca with no tag consultation.  The recognizer is the producer
+   module's ([Hike_stack_to_locals.is_region_mem]) — the naming
+   convention is that module's fact, not a grammar re-typed here. *)
 let is_region_mem_exp (e : exp) : bool =
   match e with
-  | Bil.Var v ->
-      Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
-      && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+  | Bil.Var v -> Hike_stack_to_locals.is_region_mem v
   | _ -> false
 
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
@@ -2214,12 +2214,12 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
          MEM-FISSION: the region BASE vars ([stack_rN_base]) are
          entry-bound (the emitter's region-alloca binding) and read in
          every block whose addresses fissioned — they need their lanes
-         like [hike_stack]; the NAME convention identifies them (the
+         like [hike_stack]; the producer module's recognizer
+         ([Hike_stack_to_locals.is_region_base]) identifies them (the
          design's Q3).  The region MEM vars are Mem-sorted — already
          excluded by the is_mem filter above. *)
       Core.Set.mem def_set var
-      || Base.String.is_suffix (Var.name var) ~suffix:"_base"
-         && Base.String.is_prefix (Var.name var) ~prefix:"stack_r"
+      || Hike_stack_to_locals.is_region_base var
       || Core.Set.mem arg_set var
       || Var.same var (sp ctx.Convutils.target)
       || Var.same var (fp ctx.Convutils.target))

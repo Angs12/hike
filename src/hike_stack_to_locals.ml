@@ -83,6 +83,23 @@ let region_base (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "stack_r%d_base" id) (Type.Imm 64)
 
+(* The RECOGNIZERS of the fission vars — the name convention is THIS
+   module's implementation detail: the two producers above mint the names,
+   these predicates read them back, and every consumer (the DCE lane's
+   two-tier keep, the emitter's fission dispatch and its φ-lane name rule)
+   imports them instead of re-typing the string grammar (one fact, one
+   home — the three hand-typed parsers that previously drifted
+   independently are gone).  The grammar is deliberately the loose
+   prefix/suffix form the consumers always used — this is a
+   single-sourcing, not a semantic change. *)
+let is_region_mem (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
+  && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+
+let is_region_base (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
+  && Base.String.is_suffix (Var.name v) ~suffix:"_base"
+
 (* Defs that save incoming register args; keep them in memory so va_arg pointer reads alias correctly. *)
 let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
   let param_regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs in
