@@ -597,7 +597,7 @@ let collect_stats (bname : string) (sub' : sub term)
       |> Seq.iter ~f:(fun d ->
           let st_before = !st in
           (* Sequential def denotation, exactly like the fixpoint
-             (denote_defs, cbat_vsa.ml:350-359). *)
+             ([denote_defs]). *)
           st := Vsa.denote_def d !st;
           (* Def-value metric: only word lhs (Type.Imm w — skip
              Type.Mem and Type.Unk lhs, no width to index find_word).

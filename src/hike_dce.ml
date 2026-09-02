@@ -80,7 +80,7 @@ let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
    defs are dead.
 
    Finding 1: the decision is READ from [Convutils.stack_plan], the single
-   result [Hike_stack_to_locals.split_plan] produced in the vsa pass. This
+   result [Hike_stack_model.split_plan] produced in the vsa pass. This
    pass is a CONSUMER — it no longer imports the emitter's
    [region_split_plan] to re-derive a BIL-level fact. *)
 let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =

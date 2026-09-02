@@ -2603,9 +2603,9 @@ let () =
 
 (* --- 28. P3 anchor tag (ora-2-approved): the RSP := 0 anchor under the relevance restriction
    ---------------------------------------------- hike port fix (P3 precision, ora-2-approved): the
-   set_stack_0 anchor def (cbat_vsa.ml:576-586, the unsound_stack model convention RSP := 0) was
+   set_stack_0 anchor def (cbat_vsa.ml, [set_stack_0] (the unsound_stack model convention RSP := 0)) was
    UNTAGGED, so under the relevance restriction denote_def skipped it (the skip guard,
-   cbat_vsa.ml:333-335) and the entry state degraded to AI.top with RSP = top — measured 0%
+   cbat_vsa.ml, [reachable_jumps]) and the entry state degraded to AI.top with RSP = top — measured 0%
    stack-address resolution at -O0. The fix tags the anchor at its definition site (Term.set_attr
    ... Utils.relevant ()); the tag is inert when the restriction is off (the guard's first conjunct
    is false — OFF stays byte-identical). (a) pins the ON mechanism: the fixpoint's entry INPUT state
@@ -2647,9 +2647,9 @@ let () =
    ora-2): FinSet.cardinality converted the element count at the SET's bitwidth
    (cbat_fin_set.ml:35-37), so the full 1-bit domain {0,1} (length 2) read cardn 0 = EMPTY. The
    composite's is_bottom is cardinality-based (cbat_clp_set_composite.ml:143), so every {0,1} value
-   read bottom: bool_top (= WordSet.top 1, cbat_vsa.ml:86), val_top (Type.Imm 1) (:206-214), the map
+   read bottom: bool_top (= WordSet.top 1, cbat_vsa.ml, the bool_top definition), val_top (Type.Imm 1) (cbat_vsa.ml, [val_top]), the map
    default read (cbat_map_lattice.ml:167-172), and every comparison overlap result. The EQ/NEQ
-   guards (cbat_vsa.ml:108/:120) fired on the wrapped cardn and stored genuine bool_bottom ->
+   guards (cbat_vsa.ml, the genuine-subset guards) fired on the wrapped cardn and stored genuine bool_bottom ->
    flag-gated edges pruned by reachable_jumps (:365-372) — unsound pruning of live blocks (measured
    class-5 population: 5618 all-defs bottom_live, 1099 tagged). The fix matches the CLP convention
    (cbat_clp.ml:158-161): the cardinality is a (width+1)-bit word, so the full domain reads 2^width
@@ -2824,7 +2824,7 @@ let () =
    L3a-4/L3a-5 pins).
 
    NOTE (adaptations): the fixtures use the UNSIGNED LT (and one EQ) guards —
-   [constraint_of_compare] (cbat_vsa.ml:395-416) returns None for signed comparisons (SLT/SLE) and
+   [constraint_of_compare] (cbat_vsa.ml, [constraint_of_compare]) returns None for signed comparisons (SLT/SLE) and
    NEQ by design (doubt -> no walk); L3a-6 pins that doubt path with NEQ. The PLUS pin uses EQ(v,
    5): for a "+1 with LT(v, 10)" chain the row's lo - b_max underflows the width (the true
    constraint {-1} ∪ [0,8] is not a single interval) — the row soundly stops on the wrap, so the pin
@@ -4099,7 +4099,7 @@ let mk_l3b1_loop () : sub term * tid * tid =
    re-splits the hull into point stores and the top-drop eats it (the find' alignment gate,
    cbat_ai_memmap.ml:528-534: a query whose start is not cell-start-aligned reads top); (3) the
    entry guard must be UNRESOLVABLE — a provably-true guard prunes the false branch
-   (reachable_jumps, cbat_vsa.ml:373-380), and two plain unconditional Gotos from the entry do not
+   (reachable_jumps, cbat_vsa.ml, [reachable_jumps]), and two plain unconditional Gotos from the entry do not
    both reach their targets through the fixpoint (B stayed bottom) — an unconstrained flag (i = top
    -> the LT evaluates {0,1}) keeps both edges live. ENTRY: if (i < 1) goto A else goto B (i
    unconstrained = top -> both edges live). A: m := mem[RSP-8] <- 7; m := mem[RSP-7] <- 7; jmp

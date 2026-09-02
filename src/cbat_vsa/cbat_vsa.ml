@@ -2739,7 +2739,7 @@ let refine_edge_inline
 
        - the seed derivation: cheap, and needed for the env meet below;
        - the GATED ENV MEET: fires [Cbat_landmarks.observe_unsat_var]
-         through [meet_var] (cbat_vsa.ml:1008). That is the landmark
+         through [meet_var] (cbat_vsa.ml, the empty-meet arm). That is the landmark
          ACQUISITION seam — the paper's Listing 1 — and it decides the
          widening arm. Skipping it changes the widening: not
          byte-identical, and unsound in the narrowing direction.

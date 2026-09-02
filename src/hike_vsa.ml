@@ -101,7 +101,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       vla_bounds }
   in
   (* THE STACK MODEL DECISION — computed ONCE, here, on the PRE-rewrite
-     sub (Finding 1): [Hike_stack_to_locals.split_plan] is its single
+     sub (Finding 1): [Hike_stack_model.split_plan] is its single
      producer; the stack-to-locals rewrite, dce and the emitter are its
      consumers (they read [info.stack_plan]). *)
   { base with Convutils.stack_plan = Hike_stack_model.split_plan sp target sub' base }

@@ -742,7 +742,7 @@ let find_def_k (idx : Convutils.vsa_info) (def : def term) =
 
 (* [is_abi_visible ctx ~idx def]: does the access touch caller/callee-visible
    storage? Finding 1: this is NO LONGER a second copy of the rule — it is
-   [Hike_stack_to_locals]'s, the module that owns the stack model. The emitter
+   [Hike_stack_model]'s, the module that owns the stack model (arch review #1 part 2 — the REWRITE stays in [Hike_stack_to_locals]). The emitter
    is a consumer.
 
    C4 — the rule reads the record's own maps, so nothing is rebuilt per
