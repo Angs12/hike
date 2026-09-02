@@ -1,5 +1,7 @@
 (lang dune 3.23)
 
+(using dune_site 0.1)
+
 (name hike)
 
 (generate_opam_files true)

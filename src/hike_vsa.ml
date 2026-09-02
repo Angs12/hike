@@ -108,8 +108,8 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       Some (Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub'))
     with Vsa.Fixpoint_not_converged (n, _, _) ->
       (* The fixpoint did not converge — the partial solution is an UNDER-APPROXIMATION; narrow offset tags computed from it would exclude reachable values (unsound). *)
-      Printf.eprintf
-        "hike: vsa: sub %s: fixpoint not converged in %d iterations — degraded (no tags, dynamic stack)\n"
+      Hike_diag.warn
+        "vsa: sub %s: fixpoint not converged in %d iterations — degraded (no tags, dynamic stack)"
         (Sub.name sub') n;
       None
   with
@@ -139,7 +139,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       |> Seq.iter ~f:(fun d ->
           if Term.has_attr d Relevance.stack_access
              && not (Core.Set.mem tagged_tids (Term.tid d)) then
-            Printf.eprintf "hike: 100%%-invariant gap (PARKED): sub %s def %s untagged\n"
+            Hike_diag.warn "100%%-invariant gap (PARKED): sub %s def %s untagged"
               (Sub.name sub') (Tid.to_string (Term.tid d))));
   probe_res
 

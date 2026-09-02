@@ -10,7 +10,8 @@
   (ocamlopt_flags
   (:standard -O3))
   (preprocess
-  (pps ppx_bap))
+  (action
+   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file})))
   (libraries
     str
     unix
@@ -29,3 +30,32 @@
     hike.hike_abi
     hike.cbat_vsa
     hike.cbat_vsa_domain))
+
+; Principle #6's build-time blocker: the production build FAILS on any
+; environment read in src/, or any direct print outside the sanctioned
+; channels (Hike_diag / Event.Log). Runs on every [dune build] and every
+; [dune build @install] (both aliases verified to fire the rule).
+; Zero exemptions by design (see check_instrumentation.sh).
+(rule
+ (alias all)
+ (deps (source_tree .))
+ (action
+  (run %{workspace_root}/src/check_instrumentation.sh .)))
+
+(rule
+ (alias install)
+ (deps (source_tree .))
+ (action
+  (run %{workspace_root}/src/check_instrumentation.sh .)))
+
+; The bap plugin bundle (2026-09-03: replaces bapbuild/bapbundle entirely —
+; bapbuild compiles through its OWN ocamlfind pipeline and could not see
+; dune's cppo preprocessing; one pipeline now owns everything, and the
+; bapbuild stale-artifact class (the 2026-09-02 poison-phi incident) is
+; structurally gone). [site (bap-common plugins)] installs it where bap
+; dynloads plugins from; [package hike] ties it to the hike opam package.
+(plugin
+ (name hike)
+ (package hike)
+ (libraries hike)
+ (site (bap-common plugins)))

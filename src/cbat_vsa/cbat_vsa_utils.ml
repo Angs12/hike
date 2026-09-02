@@ -21,11 +21,13 @@ exception NotImplemented of string
 let not_implemented ?(top : 'a option) component : 'a = match top with
   | None -> raise (NotImplemented component)
   | Some tp ->
+    (* ONE production channel: BAP's own Event.Log (section cbat_vsa).
+       The old raw [Format.eprintf] copy is DELETED (2026-09-02, principle
+       #6: one sanctioned output — [Hike_diag] in src/, Event.Log here in
+       the vendored library); nothing greps the stderr copy. *)
     Bap.Std.Event.Log.message Bap.Std.Event.Log.Warning
       ~section:"cbat_vsa"
       "not_implemented: %s (degrading to top)" component;
-    Format.eprintf "hike: cbat_vsa: not_implemented %s (degrading to top)@."
-      component;
     tp
 
 (* Determines the maximum number of elements in an exact set abstraction. *)
