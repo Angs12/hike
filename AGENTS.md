@@ -418,6 +418,46 @@ emits a CORRECT soft-float sub, so stdout stayed byte-identical, and the 3
 affected binaries are NOT in the 8-bin oracle — **a "surviving diagnostic" is
 not a passing gate.** Grep the emissions for `unmapped intrinsic` when
 changing the FP-intrinsic table.
+**Last verified: 2026-09-02 EEST (evening) — arch C1+C6 on branch `arch-c1c6`
+(worktree `/home/tovpr/backup/hike-arch`; rebased onto main a5680df after the
+c484e13 FP-table fix — the IR-identity control was against a217289-era main,
+PRE-fix, so the 3 FP-affected binaries' IR is expected to change with the
+rebase) — BATTERY GREEN on the pre-rebase tree**
+
+The architecture-review follow-ups (candidates 1 + 6 of the review at
+`/tmp/opencode/architecture-review-20260902-051945.html`), two commits:
+
+- **C1 (e85ed8d): the fission name is ONE fact.** The `stack_rN_mem` /
+  `stack_rN_base` naming convention had three hand-typed string parsers
+  (`hike_dce.is_region_mem`, `bil2llvm.is_region_mem_exp`, and the
+  φ-lane's inline prefix/suffix test); `Hike_stack_to_locals` now exports
+  `is_region_mem` / `is_region_base` next to the producers, and every
+  consumer imports them. The predicates also joined `hike.mli`'s
+  `Stack_to_locals` signature (the convention is constructible and
+  recognizable through the library seam — tests can build fission vars
+  one way). Grammar deliberately unchanged — pure single-sourcing.
+- **C6 (3fa2257): comment debt + dead code.** Nine stale references fixed
+  (the nonexistent "ADR 0004" ×3, the never-implemented
+  `escaped_addr_tids`, the wrong `abi_visibility_of` pipeline claim, the
+  deleted `has_frame_ptr`/`region_split_plan` refs in dce + check_allocas,
+  the Q1/A-Q2-Q5 dialogue labels, BNF1, stage_timer's wrong claim that
+  stl/dce run inside `offsets_of_sub`); dead `bil2llvm.def_tags_of` +
+  `find_def_k` deleted; test R12-5/6/7 now asserts through the REAL
+  seam (`Stl.split_plan` on a BIL fixture + derived `equal_split_plan`)
+  instead of re-implementing the covered/disjoint rule locally.
+
+Verification: `dune runtest --force` **484 ok + 6 xfail, ALL PASSED**
+(484 = main's count; the R12-5/6/7 rewrite kept the count); corpus
+**32/32 rc=0**; check_allocas **160/0**; semantic-all **30 PASS / 2
+FAIL** (va_arg_vacopy + variadic, T02/T03); opt gate **30/2 identical**
+(opt-induced class still empty); 8-bin **8/8**; precision_probe +
+corpus_watch spot-checks **0 crashes**; **IR byte-identical to a fresh
+control emission from unmodified main, 32/32** (the `emissions/fission`
+reference is PRE-MERGE and unusable as an identity oracle — its
+SP-restore phi names differ; emit a fresh main control instead).
+NOTE: the installed plugin currently points at the arch-c1c6 build —
+rebuild+reinstall when switching back to main.
+
 
 **Mem-fission (this session, commits 6cc2c86 + 499bb36 on finding1-stack-plan):
 the storage decision lives in the BIL, and DCE deletes dead stores
