@@ -145,7 +145,13 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
    the only carrier of stack-access-ness; VLA detection moves into
    `cbat_vsa`; `hike-vsa`'s dep becomes `hike-filter`
 3. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
-   plus k-ranges).  Also merges set-overlapping tags into one span
+   plus k-ranges) by COMPOSING the ONE producer chain (arch review #1, ADR 0005):
+   `fixpoint → Cbat_vsa.Cbat_extraction.extract` (the M6 classification walk, the kind
+   enum — `Convutils.vsa_kind`'s physical home — the k-range arithmetic, the
+   set-overlap merge, the VLA matcher) `→ Hike_stack_model.{frame_escapes, regions_of_sub,
+   split_plan}` (the pure stack model, split from the rewrite pass).  The record is built
+   complete at one site; `hike_vsa` keeps only the pass policy (Relevance tagging, the
+   degraded/non-converged arms, the 100%-invariant gap WARN)
 4. `hike-stack-to-locals` — VSA CALCULATES, stack-to-locals only MERGES: collects the
    VSA's per-access stack ranges (the `vsa_info.offsets` tags — the value-based (lo, hi)
    the addresses fall into; `Infinite (lo, hi)` becomes its span), MERGES the

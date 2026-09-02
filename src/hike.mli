@@ -98,18 +98,15 @@ module Dce : sig
     target:Theory.Target.t -> sub term -> sub term
 end
 
-(** Stack-to-locals — and the OWNER OF THE STACK MODEL DECISION.
-
-    [split_plan] is the single producer of "does this sub's stack split
-    into per-region [stack_rN] allocas, or fall back to one big
-    [%frame]?" Its consumers are [stack_to_locals] itself, the DCE lane
-    ({!Dce} — the SP-erasure keep) and [Bil2llvm] — no consumer
-    re-derives it. *)
-module Stack_to_locals : sig
-  (** [stack_to_locals target sp sub]: rewrite constant-offset stack
-      accesses to named locals, per the plan the vsa pass computed. *)
-  val stack_to_locals : Theory.Target.t -> var -> sub term -> sub term
-
+(** The PURE STACK MODEL (arch review #1 part 2, merged with the
+    mem-fission's evolution) — the decision functions extracted from
+    the former stack_to_locals file: the single producer of "does this
+    sub's stack split into per-region [stack_rN] allocas, or fall back
+    to one big [%frame]?" Its consumers are the [Stack_to_locals]
+    rewrite, the DCE lane ({!Dce} — the SP-erasure keep and the
+    two-tier region-mem rule) and [Bil2llvm] — no consumer re-derives
+    it. *)
+module Stack_model : sig
   (** [regions_of_sub sp target sub info ~frame_escaped]: merge [info]'s
       overlapping access ranges into Stack Regions (the connected
       components of the overlap graph), flagging each one's
@@ -180,6 +177,15 @@ module Stack_to_locals : sig
   val is_region_base : var -> bool
 end
 
+(** Stack-to-locals — THE REWRITE PASS (arch review #1 part 2): the
+    [Exp.mapper] conversion of stack accesses to named locals, per the
+    plan {!Stack_model.split_plan} computed in the vsa pass. *)
+module Stack_to_locals : sig
+  (** [stack_to_locals target sp sub]: rewrite constant-offset stack
+      accesses to named locals, per the plan the vsa pass computed. *)
+  val stack_to_locals : Theory.Target.t -> var -> sub term -> sub term
+end
+
 (** The per-sub VSA result store — one KB slot with a JOIN domain.
 
     [vsa_info] is a KB property on the hike run class whose domain is
@@ -200,5 +206,5 @@ module Convutils = Convutils
     ([region_bytes], [degraded_dims]).
 
     The emitter is a CONSUMER of the stack model decision — the decision
-    itself is {!Stack_to_locals.split_plan}. *)
+    itself is {!Stack_model.split_plan}. *)
 module Bil2llvm = Bil2llvm

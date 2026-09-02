@@ -6,7 +6,7 @@
    Usage: dune exec zz_scratch_probe/audit02.exe -- <binary> [subname]
      - subname defaults to "main"; pass "ALL" to scan every sub
      - prints, for every stack_access def that production classifies
-       Unbounded, the per-step audit data from hike_vsa.ml's per-def walk
+       Unbounded, the per-step audit data from the extraction's per-def walk (cbat_vsa's [Cbat_extraction] — the ONE home since arch review #1)
        so we can tell which of the four root causes the ticket enumerates
        actually fires:
          1. rewrite_addr returned the address unchanged
@@ -83,8 +83,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
     Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
         match k with
         | Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid ()
-        | _ -> ());
-    let prod_unbounded_count = Hashtbl.length prod_unbounded in
+        | _ -> ());    let prod_unbounded_count = Hashtbl.length prod_unbounded in
     let sa_count = Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
                    |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.stack_access)
                    |> Seq.length in

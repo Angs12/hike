@@ -48,10 +48,33 @@
   (:standard -O3))
  (modules
   cbat_vsa
+  cbat_memo
+  cbat_wto
   cbat_interval_tree
   cbat_ai_memmap
   cbat_ai_representation
-  cbat_contextual_fixpoint)
+  cbat_contextual_fixpoint
+  cbat_vsa_stages)
  (libraries bap hike_abi cbat_vsa_domain bitvec core core_kernel monads hashcons)
  (preprocess
   (pps ppx_bap)))
+
+; THE PER-STAGE PROFILING ADAPTERS (the Q6 harness).
+;
+; [cbat_vsa_stages] is the ONE interface [cbat_vsa.ml] calls. Two adapters
+; implement it, selected by profile and copied to that generated name:
+;   - vsa-debug  -> cbat_vsa_stages_debug_src.ml  (times and accumulates)
+;   - everything -> cbat_vsa_stages_prod.ml       (no-ops, erased)
+; Production therefore pays nothing — no refs, no clock reads, no env
+; lookups (AGENTS.md §6).
+(rule
+ (enabled_if (= %{profile} vsa-debug))
+ (targets cbat_vsa_stages.ml)
+ (action
+  (copy cbat_vsa_stages_debug_src.ml cbat_vsa_stages.ml)))
+
+(rule
+ (enabled_if (<> %{profile} vsa-debug))
+ (targets cbat_vsa_stages.ml)
+ (action
+  (copy cbat_vsa_stages_prod.ml cbat_vsa_stages.ml)))

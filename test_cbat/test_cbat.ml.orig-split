@@ -2603,9 +2603,9 @@ let () =
 
 (* --- 28. P3 anchor tag (ora-2-approved): the RSP := 0 anchor under the relevance restriction
    ---------------------------------------------- hike port fix (P3 precision, ora-2-approved): the
-   set_stack_0 anchor def (cbat_vsa.ml:576-586, the unsound_stack model convention RSP := 0) was
+   set_stack_0 anchor def (cbat_vsa.ml, [set_stack_0] (the unsound_stack model convention RSP := 0)) was
    UNTAGGED, so under the relevance restriction denote_def skipped it (the skip guard,
-   cbat_vsa.ml:333-335) and the entry state degraded to AI.top with RSP = top — measured 0%
+   cbat_vsa.ml, [reachable_jumps]) and the entry state degraded to AI.top with RSP = top — measured 0%
    stack-address resolution at -O0. The fix tags the anchor at its definition site (Term.set_attr
    ... Utils.relevant ()); the tag is inert when the restriction is off (the guard's first conjunct
    is false — OFF stays byte-identical). (a) pins the ON mechanism: the fixpoint's entry INPUT state
@@ -2647,9 +2647,9 @@ let () =
    ora-2): FinSet.cardinality converted the element count at the SET's bitwidth
    (cbat_fin_set.ml:35-37), so the full 1-bit domain {0,1} (length 2) read cardn 0 = EMPTY. The
    composite's is_bottom is cardinality-based (cbat_clp_set_composite.ml:143), so every {0,1} value
-   read bottom: bool_top (= WordSet.top 1, cbat_vsa.ml:86), val_top (Type.Imm 1) (:206-214), the map
+   read bottom: bool_top (= WordSet.top 1, cbat_vsa.ml, the bool_top definition), val_top (Type.Imm 1) (cbat_vsa.ml, [val_top]), the map
    default read (cbat_map_lattice.ml:167-172), and every comparison overlap result. The EQ/NEQ
-   guards (cbat_vsa.ml:108/:120) fired on the wrapped cardn and stored genuine bool_bottom ->
+   guards (cbat_vsa.ml, the genuine-subset guards) fired on the wrapped cardn and stored genuine bool_bottom ->
    flag-gated edges pruned by reachable_jumps (:365-372) — unsound pruning of live blocks (measured
    class-5 population: 5618 all-defs bottom_live, 1099 tagged). The fix matches the CLP convention
    (cbat_clp.ml:158-161): the cardinality is a (width+1)-bit word, so the full domain reads 2^width
@@ -2824,7 +2824,7 @@ let () =
    L3a-4/L3a-5 pins).
 
    NOTE (adaptations): the fixtures use the UNSIGNED LT (and one EQ) guards —
-   [constraint_of_compare] (cbat_vsa.ml:395-416) returns None for signed comparisons (SLT/SLE) and
+   [constraint_of_compare] (cbat_vsa.ml, [constraint_of_compare]) returns None for signed comparisons (SLT/SLE) and
    NEQ by design (doubt -> no walk); L3a-6 pins that doubt path with NEQ. The PLUS pin uses EQ(v,
    5): for a "+1 with LT(v, 10)" chain the row's lo - b_max underflows the width (the true
    constraint {-1} ∪ [0,8] is not a single interval) — the row soundly stops on the wrap, so the pin
@@ -4099,7 +4099,7 @@ let mk_l3b1_loop () : sub term * tid * tid =
    re-splits the hull into point stores and the top-drop eats it (the find' alignment gate,
    cbat_ai_memmap.ml:528-534: a query whose start is not cell-start-aligned reads top); (3) the
    entry guard must be UNRESOLVABLE — a provably-true guard prunes the false branch
-   (reachable_jumps, cbat_vsa.ml:373-380), and two plain unconditional Gotos from the entry do not
+   (reachable_jumps, cbat_vsa.ml, [reachable_jumps]), and two plain unconditional Gotos from the entry do not
    both reach their targets through the fixpoint (B stayed bottom) — an unconstrained flag (i = top
    -> the LT evaluates {0,1}) keeps both edges live. ENTRY: if (i < 1) goto A else goto B (i
    unconstrained = top -> both edges live). A: m := mem[RSP-8] <- 7; m := mem[RSP-7] <- 7; jmp
@@ -5589,6 +5589,7 @@ let () =
 (* --- regression tests C1..C4 ------------------------------------------- *)
 
 module Kb = Hike.Kb
+module Sm = Hike.Stack_model
 module Stl = Hike.Stack_to_locals
 module Cu = Hike.Convutils
 module B2l = Hike.Bil2llvm
@@ -5646,8 +5647,7 @@ let () =
       ~offsets:
         [ (Term.tid def_wide, Cu.Range (-16L, -16L)); (Term.tid def_narrow, Cu.Range (-16L, -16L)) ]
       ~k_ranges:[]
-      ~regions:
-        [
+      ~regions:        [
           {
             Cu.id = 0;
             Cu.span;
@@ -5656,8 +5656,7 @@ let () =
             Cu.max_width = 64;
           };
         ]
-      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-  in
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[]  in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
   let sub' = Stl.stack_to_locals Theory.Target.unknown sp tagged in
@@ -5844,10 +5843,9 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
     Cu.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_bounds:[]
-  in
+      ~degraded:false ~vla_bounds:[]  in
   let convertible_of info dtid =
-    Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
+    Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
     |> List.filter (fun r -> List.exists (fun (t, _) -> Tid.equal t dtid) r.Cu.members)
     |> function
     | [ r ] -> Some r.Cu.convertible
@@ -5934,8 +5932,7 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
-  check
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in  check
     "regression C4a: the indexed loop-body store carries an offset tag (fixture locates the \
      Infinite class)"
     (kind_of (Term.tid def_idx_store) <> None);
@@ -6012,8 +6009,7 @@ let () =
   let sub = Sub.Builder.result sub_b in
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
-  (* CONTROL (must hold pre AND post): the indexed/ranged member keeps its own kind through the
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in  (* CONTROL (must hold pre AND post): the indexed/ranged member keeps its own kind through the
      merge. *)
   check "property R11 control: the indexed member keeps its own kind through the merge"
     (kind_of (Term.tid def_idx_store) <> None);
@@ -6134,8 +6130,7 @@ let () =
             else d))
   in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
-  check "R6: the jne-counter loop's indexed store carries an offset tag"
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in  check "R6: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
   (* the per-guard views: the taken view must constrain i to the ARC {x : x <> 9} (= diff(top,{9}) —
      one CLP), the fallthrough view (the flag-clear trace) pins i to {9}.
@@ -6219,8 +6214,7 @@ let () =
   (* the production path: analyze's tags AS-IS — no manual re-tagging *)
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
-  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
-  check "G3: the jne-counter loop's indexed store carries an offset tag"
+  let kind_of dtid = Core.Map.find info.Cu.offsets dtid in  check "G3: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
   let prog' = Program.create ~subs:[ tagged ] () in
   let sol =
@@ -6433,8 +6427,7 @@ let () =
   let c1_def_tids = c1_info.Cu.offsets |> Core.Map.keys |> List.rev in
   let lo =
     match Core.Map.min_elt c1_info.Cu.offsets with
-    | Some (_, Cu.Range (l, _)) -> l
-    | _ -> assert false
+    | Some (_, Cu.Range (l, _)) -> l    | _ -> assert false
   in
   let masks_of (sz : size) (data : int64) : word list =
     let m = memv "a4_m" in
@@ -7186,13 +7179,13 @@ let () =
   (* R12-5: the cap guard — [Stack_to_locals] owns the size guard now (it is part of the
      split decision, not of the emission geometry; Finding 1). *)
   check "R12-5: region_size_ok true for small fixtures, false for huge span"
-    (Stl.region_size_ok r_sing && Stl.region_size_ok r_interval
-     && not (Stl.region_size_ok r_huge));
+    (Sm.region_size_ok r_sing && Sm.region_size_ok r_interval
+     && not (Sm.region_size_ok r_huge));
   ()
 
 let () =
   (* R12-5/6/7: the full-coverage gate of the stack model decision —
-     asserted through the REAL interface ([Stl.split_plan], the single
+     asserted through the REAL interface ([Sm.split_plan], the single
      producer Finding 1 installed), not a local re-implementation of its
      covered/disjoint logic (the old test duplicated the rule and could
      drift; split_plan is the seam the pipeline actually consults).
@@ -7238,15 +7231,14 @@ let () =
       max_width = 32;
     }
   in
-  let plan_of info = Stl.split_plan rsp Theory.Target.unknown sub info in
+  let plan_of info = Sm.split_plan rsp Theory.Target.unknown sub info in
   let info =
     Hike.Convutils.mk_vsa_info
       ~offsets:
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
       ~regions:[ r1; r2 ]
-      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-  in
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[]  in
   check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
     (Cu.equal_split_plan (plan_of info) [ r1; r2 ]);
   (* R12-6: gate rejects when an offset is Infinite (unbounded -> no sized
@@ -7263,9 +7255,8 @@ let () =
   check "R12-6: gate rejects Infinite tag (unbounded -> not covered)"
     (plan_of info_inf = []);
   (* R12-7: gate rejects when degraded (no tags to trust) *)
-  let info_deg = { info with Hike.Convutils.degraded = true; vla_bounds = [] } in
-  check "R12-7: degraded sub never qualifies" (plan_of info_deg = []);
-  ()
+  let info_deg = { info with Hike.Convutils.degraded = true; vla_bounds = Tid.Map.empty } in
+  check "R12-7: degraded sub never qualifies" (plan_of info_deg = []);  ()
 
 let () =
   (* R12-8: regions_of_sub — two disjoint singleton offsets at -16 and -32 become two separate
@@ -7295,9 +7286,8 @@ let () =
       ~offsets:
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-  in
-  let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]  in
+  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
   let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
@@ -7337,9 +7327,8 @@ let () =
           (tid2, Hike.Convutils.Range (-24L, -8L));
         ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-  in
-  let regions = Hike.Stack_to_locals.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]  in
+  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
   let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
   check "R12-8b: two overlapping intervals produce one convertible region with span (-32,-8)"
@@ -7389,16 +7378,15 @@ let () =
     Hike.Convutils.mk_vsa_info
       ~offsets:[ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ]
       ~k_ranges:[ (tid_stack, -20L, -10L) ]
-      ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-  in
+      ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[]  in
   (* Finding 1: the decision moved to [Stack_to_locals.split_plan] — the emitter's
      [region_split_plan] (with its own weaker frame_ptr escape analysis) is gone. The
      escape rule that rejects this sub is the unified [frame_escapes], consulted as a
      PER-REGION convertibility rule (so it also governs the fallback path's conversion). *)
   let info = { info with Hike.Convutils.regions =
-      Stl.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-        ~frame_escaped:(Stl.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
-  let plan = Stl.split_plan (v64 "RSP") Theory.Target.unknown sub info in
+      Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+        ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
+  let plan = Sm.split_plan (v64 "RSP") Theory.Target.unknown sub info in
   check
     "property R12b: bare copy v := RSP makes split_plan REJECT the sub (wholly %frame) — \
      via Stack_to_locals.frame_escapes (per-region convertibility)"
@@ -7410,8 +7398,8 @@ let () =
   check
     "property R12b: frame_escapes is true for a sub containing a bare `v := RSP` copy \
      (the alias half of the unified rule catches it)"
-    (Stl.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
-     && Stl.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
+    (Sm.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
+     && Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
   ()
 
 let () =
@@ -8350,8 +8338,8 @@ let () =
      (b) the same chain with ONE load survives.  The vars are built with
      the PUBLIC producers ([Stack_to_locals.region_mem] /
      [region_base]) — the same convention the rewrite mints. *)
-  let sm = Hike.Stack_to_locals.region_mem 0 in
-  let base = Hike.Stack_to_locals.region_base 0 in
+  let sm = Hike.Stack_model.region_mem 0 in
+  let base = Hike.Stack_model.region_base 0 in
   let mk_store off dat =
     Def.create sm
       (Bil.Store
@@ -8486,7 +8474,6 @@ let () =
     (List.length (dce_defs sub') = 1
     && Var.equal (Def.lhs ((match dce_defs sub' with d :: _ -> d | [] -> assert false))) x);
   ()
-
 let () =
   print_endline
     (if !failures = 0 then "ALL CBAT TESTS PASSED" else Printf.sprintf "%d FAILURES" !failures);

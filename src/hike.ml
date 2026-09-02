@@ -18,6 +18,7 @@ open Printf
 module Relevance = Hike_vsa_relevance
 module Vsa = Hike_vsa
 module Dce = Hike_dce
+module Stack_model = Hike_stack_model
 module Stack_to_locals = Hike_stack_to_locals
 module Kb = Hike_kb
 module Convutils = Convutils

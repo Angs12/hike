@@ -85,13 +85,21 @@ let empty_emit_ctx () : emit_ctx =
 module Vsa = struct
   open Core_kernel[@@warning "-D"]
 
-  type vsa_kind =
+  (* ARCH-1 — the enum's physical home is the extraction module (the
+     cbat_vsa library, where the producer lives); this is the ALIAS
+     the ~60 constructor references ([Convutils.Range] etc.) compile
+     through unchanged.  [equal_kind] is derived at the definition
+     site; the [equal] name below keeps the old references. *)
+  type vsa_kind = Cbat_vsa.Cbat_extraction.kind =
     | Range of int64 * int64
     | Infinite of int64 * int64
     | Unbounded
     | Dead
     | VLA of Tid.t
-  [@@deriving equal]
+  (* one deriver only: the module's [equal_kind] is the definition;
+     [equal_vsa_kind] aliases it for the vsa_info record's
+     [@@deriving equal] (the deriver references this name). *)
+  let equal_vsa_kind = Cbat_vsa.Cbat_extraction.equal_kind
 
   type region = {
     id : int;
@@ -109,31 +117,38 @@ module Vsa = struct
      means ONE big [%frame] alloca covers all of it (the SOUND FALLBACK,
      always correct, unoptimized).
 
-     Computed ONCE by [Hike_stack_to_locals.split_plan] — Finding 1:
+     Computed ONCE by [Hike_stack_model.split_plan] — Finding 1:
      the decision has ONE producer and three CONSUMERS ([Hike_stack_to_
      locals], [Hike_dce], [Bil2llvm]). It is a property of the
      PRE-rewrite sub (the converted slots vanish once stack-to-locals
      runs), so the vsa pass computes it and carries it here. *)
   type split_plan = region list [@@deriving equal]
 
-  (* THE PER-SUB VSA RESULT — and THE PRECOMPUTED VIEW (arch C2): the
-     [offsets] and [k_ranges] fields ARE the per-def index maps (Tid ->
-     kind / Tid -> (klo, khi)), not the raw association lists.  Every
-     consumer previously re-folded those lists into exactly these maps
-     (five fold sites in stack_to_locals, the emitter's per-def
-     [find_def_tag] scan, hike.ml, the probes) — one fold per sub, at
-     the ONE producer, instead.  Build records with [mk_vsa_info]; the
-     fields are read with [Core.Map.find] / iterated with [Core.Map.fold]
-     (sorted-key order — NO consumer depends on the old walk order; the
-     one that appeared to (the A4 test's positional borrow) is
-     order-independent and was fixed with it). *)
+  (* THE PER-SUB VSA RESULT — and THE PRECOMPUTED VIEW (arch C2, arch
+     review #1): the [offsets] and [k_ranges] fields ARE the per-def
+     index maps (Tid -> kind / Tid -> (klo, khi)), not the raw
+     association lists.  Each is a per-DEF fact (one tag, one k-range,
+     one VLA bound per def), so a map is what they are; the old
+     association-list shape made every per-def lookup a linear scan and
+     pushed a private refold into each consumer (five fold sites in
+     stack_to_locals, the emitter's per-def [find_def_tag] scan,
+     hike.ml, the probes).  One fold per sub, at the ONE producer,
+     instead.  Build records with [mk_vsa_info] (the list-taking seam
+     for fixtures/probes) or [mk_vsa_info_maps] (the producer's tail —
+     the extraction returns maps); the fields are read with
+     [Core.Map.find] / iterated with [Core.Map.fold] (sorted-key order
+     — NO consumer depends on the old walk order; the one that appeared
+     to (the A4 test's positional borrow) is order-independent and was
+     fixed with it).  [equal_vsa_info] is hand-written over maps (same
+     strictness modulo entry ORDER), so the KB join domain (and its
+     [Vsa_info_conflict] detection) is unaffected. *)
   type vsa_info = {
     offsets : vsa_kind Tid.Map.t;
     k_ranges : (int64 * int64) Tid.Map.t;
     regions : region list;
     stack_plan : split_plan;
     degraded : bool;
-    vla_bounds : (Tid.t * (int64 * int64)) list;
+    vla_bounds : (int64 * int64) Tid.Map.t;
   }
 
   (* [equal_vsa_info]: hand-written (the derived version cannot index
@@ -144,10 +159,11 @@ module Vsa = struct
   let equal_krange ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
     Int64.equal a1 a2 && Int64.equal b1 b2
 
-  let equal_vla_bound
-      ((t1, (a1, b1)) : Tid.t * (int64 * int64))
-      ((t2, (a2, b2)) : Tid.t * (int64 * int64)) : bool =
-    Tid.equal t1 t2 && Int64.equal a1 a2 && Int64.equal b1 b2
+  (* vla_bounds is a MAP (the extraction's shape — consistent with
+     offsets/k_ranges): the pair-equality goes through [Core.Map.equal]. *)
+  let equal_vla_bound ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) :
+      bool =
+    Int64.equal a1 a2 && Int64.equal b1 b2
 
   let equal_vsa_info (i1 : vsa_info) (i2 : vsa_info) : bool =
     Core.Map.equal equal_vsa_kind i1.offsets i2.offsets
@@ -155,11 +171,10 @@ module Vsa = struct
     && Base.List.equal equal_region i1.regions i2.regions
     && Base.List.equal equal_region i1.stack_plan i2.stack_plan
     && Bool.equal i1.degraded i2.degraded
-    && Base.List.equal equal_vla_bound i1.vla_bounds i2.vla_bounds
+    && Core.Map.equal equal_vla_bound i1.vla_bounds i2.vla_bounds
 
   (* [mk_vsa_info_maps]: the map-taking constructor — the vsa producer's
-     tail path (its [offsets] fold over the merged-tag walk is already a
-     map). *)
+     tail path (the extraction returns maps). *)
   let mk_vsa_info_maps ~offsets ~k_ranges ~regions ~stack_plan ~degraded
       ~vla_bounds : vsa_info =
     { offsets; k_ranges; regions; stack_plan; degraded; vla_bounds }
@@ -178,7 +193,18 @@ module Vsa = struct
       ~k_ranges:
         (Base.List.fold_left k_ranges ~init:Tid.Map.empty
            ~f:(fun m (tid, klo, khi) -> Core.Map.set m ~key:tid ~data:(klo, khi)))
-      ~regions ~stack_plan ~degraded ~vla_bounds
+      ~regions ~stack_plan ~degraded
+      ~vla_bounds:
+        (Base.List.fold_left vla_bounds ~init:Tid.Map.empty
+           ~f:(fun m (tid, (a, b)) -> Core.Map.set m ~key:tid ~data:(a, b)))
+
+  (* [empty_vsa_info]: the no-tags info (the [sub_info = None] default
+     and the "nothing stack-relevant here" answer) — the one-liner over
+     the map constructor (arch review #1's convenience kept; the
+     fixtures and probes read it). *)
+  let empty_vsa_info : vsa_info =
+    mk_vsa_info_maps ~offsets:Tid.Map.empty ~k_ranges:Tid.Map.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:Tid.Map.empty
 end
 include Vsa
 
