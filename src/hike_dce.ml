@@ -56,11 +56,11 @@ let ret_replacement (j : jmp term) : jmp term =
   | _ -> j
 
 (* The fissioned region mem vars ([stack_rN_mem]): recognized through
-    the producer module's predicate ([Hike_stack_to_locals.is_region_mem]:
+    the producer module's predicate ([Hike_stack_model.is_region_mem]:
     the naming convention is that module's fact, not a grammar every consumer
     re-types). *)
 let is_region_mem (v : var) : bool =
-  Hike_stack_to_locals.is_region_mem v
+  Hike_stack_model.is_region_mem v
 
 (* The LOAD-ROOTS set: vars read as a Load's mem OPERAND, plus jmp/phi
    reads.  A fissioned var's store-to-store chains do NOT self-keep
@@ -129,13 +129,15 @@ let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
    defs are dead.
 
    Finding 1: the decision is READ from [Convutils.stack_plan], the single
-   result [Hike_stack_to_locals.split_plan] produced in the vsa pass. This
-   pass is a CONSUMER — it no longer imports the emitter's deleted
-   region-split logic to re-derive a BIL-level fact. *)
+   result [Hike_stack_model.split_plan] produced in the vsa pass (the
+   model module since arch review #1 part 2 — the rewrite stays in
+   [Hike_stack_to_locals]). This pass is a CONSUMER — it no longer
+   imports the emitter's deleted region-split logic to re-derive a
+   BIL-level fact. *)
 let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
   | None -> false
-  | Some info -> Hike_stack_to_locals.is_precise info
+  | Some info -> Hike_stack_model.is_precise info
 
 (* The TWO-TIER keep: a region mem var's def survives iff the var has
     a load-root; the lifter's [mem] keeps the unconditional is_mem keep

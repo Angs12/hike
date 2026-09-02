@@ -273,12 +273,11 @@ let detect_dynamic_alloc (sp : var) (sub : sub term)
   let sp_base = base_var sp in
   let is_sp_var (v : var) : bool = Var.same (base_var v) sp_base in
   let find_def (v : var) : def term option = Core.Map.find def_of_lhs (base_var v) in
-  let non_literal_size = function Bil.Int _ -> false | _ -> true in
+  (* ARCH-1 — the SHAPE test is the extraction module's ONE fact
+     ([vla_decrement_p]); this visitor keeps its own ROLE (collecting
+     the def set, the indirect tmp def included). *)
   let is_dynamic_sp_decrement (e : exp) : bool =
-    match e with
-    | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
-        is_sp_var a && non_literal_size size
-    | _ -> false
+    Cbat_vsa.Cbat_extraction.vla_decrement_p sp_base e
   in
   let v =
     object

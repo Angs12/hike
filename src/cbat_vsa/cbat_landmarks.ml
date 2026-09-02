@@ -87,7 +87,39 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
         && Bool.equal e.is_upper entry.is_upper))
     else entries
 
+(* F2 — the ACQUISITION-FIRED LATCH.  [fired_count] is a bare int ref
+   (NOT part of the landmark table): it counts
+   [record_landmark_for_head] calls since the last reset — i.e., within
+   the transfer the caller is about to run (the ORIGINAL transfer at
+   memo-fill time, or the Q1 replay on a hit).  The C1 caller resets it
+   around the transfer and reads the delta, so the memo entry can record
+   whether the transfer it cached fired any acquisition.
+
+   RE-ENTRANCY: a transfer cannot re-enter a nested run in the current
+   tree — [denote_jump] never applies its [denote_call] parameter (the
+   ON-path call abstraction [inspect_call] handles every Call jmp; the
+   OFF-path recursion at [static_graph_vsa] is reached only from its own
+   fold, never from inside a transfer) — so the process-global counter
+   sees only the one transfer's firings.  The save/restore discipline is
+   kept anyway ([start_fired_latch] returns the outer count,
+   [end_fired_latch] restores it): it costs two int ops, and it keeps
+   the latch exact if [denote_call] is ever wired back into the jump
+   path (a nested run firing into its own tables would otherwise pollute
+   the outer entry's flag). *)
+let fired_count : int ref = ref 0
+let start_fired_latch () : int = !fired_count
+let end_fired_latch (base : int) : bool =
+  let fired = !fired_count > base in
+  fired_count := base;
+  fired
+
 let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
+  (* F2 — the ACQUISITION-FIRED counter, bumped at this single choke
+     point (every firing [observe_unsat_var] site funnels here — the
+     fallthrough row, the gated env meet, and the jcc-decoder arm).  The
+     record itself is written exactly as before, unconditionally — the
+     replay decision belongs to the caller, never here. *)
+  fired_count := !fired_count + 1;
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
   let cur = Hashtbl.find lm_env head |> Option.value ~default:[] in
   let next = add_smaller_dist cur entry in

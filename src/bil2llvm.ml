@@ -348,11 +348,11 @@ let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
    the region alloca's cell-0, bound at [create_sub]'s region
    creation), so the ordinary address emission lands inside the region
    alloca with no tag consultation.  The recognizer is the producer
-   module's ([Hike_stack_to_locals.is_region_mem]) — the naming
+   module's ([Hike_stack_model.is_region_mem]) — the naming
    convention is that module's fact, not a grammar re-typed here. *)
 let is_region_mem_exp (e : exp) : bool =
   match e with
-  | Bil.Var v -> Hike_stack_to_locals.is_region_mem v
+  | Bil.Var v -> Hike_stack_model.is_region_mem v
   | _ -> false
 
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
@@ -811,24 +811,30 @@ let create_branches blk_tid llvm_builder branches =
     KB.return ())
   else failwith "pp_branches: more than 2 branches"
 
-(* [find_def_tag sub_tid def]: Vsa_kind option — the VSA tag of [def] from
-   [Convutils.vsa_info]: ANY tag, singleton (lo = hi) and interval (lo < hi)
-   alike — the split happens in [create_def].  ONE map find (arch C2: the
-   record's [offsets] field IS the index map — the old per-def linear
-   [find_map] over the association list died with it). *)
+(* [find_def_tag sub_info def]: Vsa_kind option — the VSA tag of [def]
+   from [Convutils.vsa_info]: ANY tag, singleton (lo = hi) and interval
+   (lo < hi) alike — the split happens in [create_def].  ONE map find
+   (arch C2 + C4: the record's [offsets] field IS the index map — the
+   old per-def linear scan died with it; the [None]-info case short-
+   circuits the [Base.Option.bind]). *)
 let find_def_tag sub_info def =
   Base.Option.bind sub_info ~f:(fun info ->
       Core.Map.find info.Convutils.offsets (Term.tid def))
 
+(* [find_def_k] DELETED (main's C6 + the merge): the k-range lookup is
+   the record's own [k_ranges] map — the one caller folded into it. *)
+
 (* [is_abi_visible ctx sub_info def]: does the access touch caller/callee-visible
    storage? Finding 1: this is NO LONGER a second copy of the rule — it is
-   [Hike_stack_to_locals]'s, the module that owns the stack model. The emitter
-   is a consumer. *)
+   [Hike_stack_model]'s, the module that owns the stack model (arch
+   review #1 part 2 — the REWRITE stays in [Hike_stack_to_locals]). The
+   emitter is a consumer.  (Main's C2 shape: the [sub_info] option
+   short-circuits; the rule reads the record's own maps.) *)
 let is_abi_visible ctx sub_info def =
   match sub_info with
   | None -> false
   | Some info ->
-      Hike_stack_to_locals.abi_visibility_of (sp ctx.Convutils.target) info def
+      Hike_stack_model.abi_visibility_of (sp ctx.Convutils.target) info def
 
 (* [is_stack_access def]: is [def] a Stack Access — the [stack_access]
    tag the relevance pass set on Stack Accesses, the only source of
@@ -1040,8 +1046,10 @@ let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
    non-precise arms of [create_def] each carried a near-verbatim copy —
    Finding 1). The classification itself is the VSA's (the tag) plus the
    ABI-visibility rule; this function only EXECUTES it. *)
-let mem_access llvm_builder blk_tid sub_tid sub_info fr (def : def term)
-    (exp : exp) =
+let mem_access llvm_builder blk_tid sub_tid sub_info fr
+    (def : def term) (exp : exp) =
+  (* main's C2 shape: the tag/k lookups go through the [sub_info] option;
+     the old separate [~idx] parameter (C4's threading) folded into it. *)
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
@@ -1104,6 +1112,8 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr (def : def term)
       else create_exp llvm_builder blk_tid exp
 
 let create_def blk_tid llvm_builder sub_tid sub_info fr def =
+  (* main's C2 shape: the tag lookups go through [sub_info]; the old
+     separate [~idx] (C4's threading) folded into the option. *)
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
@@ -2030,28 +2040,6 @@ let create_elts llvm_builder blk sub_tid sub_info fr () =
       | `Phi _ -> return ()
       | `Jmp _ -> return ())
 
-
-
-let transfer_with_phis transfer_vars llvm_builder blk_tid () =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  KB.List.iter transfer_vars ~f:(fun var ->
-      let* typ = var_lltype var in
-      let res = Llvm.build_empty_phi typ "" llvm_builder in
-      insert_phi ctx blk_tid var res;
-      insert_local ctx blk_tid var res;
-      return ())
-
-let create_elts llvm_builder blk sub_tid sub_info fr () =
-  let open KB in
-  let tid = Term.tid blk in
-  Blk.elts blk
-  |> Seq.iter ~f:(fun elt ->
-      match elt with
-      | `Def def -> create_def tid llvm_builder sub_tid sub_info fr def
-      | `Phi _ -> return ()
-      | `Jmp _ -> return ())
-
 let populate_blks transfer_vars blks sub sub_info fr () =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -2212,11 +2200,11 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
          entry-bound (the emitter's region-alloca binding) and read in
          every block whose addresses fissioned — they need their lanes
          like [hike_stack]; the producer module's recognizer
-         ([Hike_stack_to_locals.is_region_base]) identifies them (the
+         ([Hike_stack_model.is_region_base]) identifies them (the
          design's Q3).  The region MEM vars are Mem-sorted — already
          excluded by the is_mem filter above. *)
       Core.Set.mem def_set var
-      || Hike_stack_to_locals.is_region_base var
+      || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
       || Var.same var (sp ctx.Convutils.target)
       || Var.same var (fp ctx.Convutils.target))
@@ -2299,7 +2287,7 @@ let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
 (* ------------------------------------------------------------------ *)
 (* THE STACK MODEL DECISION — this module is a CONSUMER.                *)
 (*                                                                     *)
-(* [Hike_stack_to_locals.split_plan] is the single producer; the        *)
+(* [Hike_stack_model.split_plan] is the single producer; the        *)
 (* emitter reads the result it carried in [Convutils.stack_plan] and     *)
 (* ALLOCATES what the plan says. The whole-sub rules (degraded,         *)
 (* SP-escape, untagged/Infinite/Unbounded/VLA accesses, VLA overlap,    *)
@@ -2363,24 +2351,21 @@ let create_sub sub =
     let tags = match sub_info with
       | Some info -> info.Convutils.offsets
       | None -> Tid.Map.empty
-    in
-    (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
-       [Hike_stack_to_locals.split_plan] produced it in the vsa pass and
+    in    (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
+       [Hike_stack_model.split_plan] produced it in the vsa pass and
        carried it in [vsa_info.stack_plan]. *)
     let plan = stack_plan_of sub_info in
     let is_precise = plan <> [] in
     let frame, min_lo, anchor_idx, anchor_i64 =
       if is_precise then (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else if Core.Map.is_empty tags then begin
-          if sub_degraded sub_info then begin
-            let n, _, _, anchor_idx = degraded_dims ~abi sub in
+          if sub_degraded sub_info then begin            let n, _, _, anchor_idx = degraded_dims ~abi sub in
             let frame, _, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx (Int64.neg n) in
             (frame, Int64.neg n, anchor_idx, anchor_i64)
           end
           else (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
         end
-        else begin
-          let min_lo, max_hi =
+        else begin          let min_lo, max_hi =
             Core.Map.fold tags ~init:(0L, 0L)
               ~f:(fun ~key:_ ~data:kind (lo, hi) ->
                 match kind with
@@ -2395,8 +2380,7 @@ let create_sub sub =
               if Int64.compare h 0x40000000L > 0 then min_lo else h
             in
             Core.Map.fold tags ~init:0L
-              ~f:(fun ~key:_ ~data:kind acc ->
-                match kind with
+              ~f:(fun ~key:_ ~data:kind acc ->                match kind with
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
                     if Int64.compare l 0L <= 0 then Int64.max acc (clamp_hi h)
                     else acc
@@ -2435,7 +2419,7 @@ let create_sub sub =
       let rec bind_regions = function
         | [] -> return ()
         | (r, base) :: rest ->
-            let base_var = Hike_stack_to_locals.region_base r.Convutils.id in
+            let base_var = Hike_stack_model.region_base r.Convutils.id in
             insert_local ctx Graphs.Tid.start base_var base;
             bind_regions rest
       in

@@ -1,0 +1,20 @@
+; The workspace-wide env stanzas live here (NOT in dune-project: profiles
+; are not dune-project fields — see commit e9c8d95 and d4d31a5).
+;
+; [vsa-debug] is the sanctioned home for EVERYTHING diagnostic (AGENTS.md
+; §6): temporary debug prints, env-gated instrumentation, profiling
+; drivers, and analysis forensics. Select it with
+;
+;   dune build --profile vsa-debug <target>
+;   dune exec  --profile vsa-debug <target> -- <args>
+;
+; Production builds (the default `dev` profile, and `release`) carry none
+; of it: the [enabled_if (= %{profile} vsa-debug)] stanzas compile to
+; nothing there, and cbat_vsa's per-stage profiling counters link the
+; no-op adapter instead.
+(env
+ (vsa-debug
+  (flags
+   (:standard -g -alert -deprecated))
+  (ocamlopt_flags
+   (:standard -O3))))

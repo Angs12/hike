@@ -48,8 +48,7 @@ let () =
                      Printf.sprintf "r%d" r.Hike.Convutils.id
                    else
                      Printf.sprintf "-r%d" r.Hike.Convutils.id)))
-    in
-    Term.enum blk_t tagged
+    in    Term.enum blk_t tagged
     |> Seq.iter ~f:(fun b ->
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->

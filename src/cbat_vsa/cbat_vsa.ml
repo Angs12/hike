@@ -17,6 +17,8 @@ open Graphlib.Std
 open Cbat_vsa_utils
 module Abi = Hike_abi
 
+module Stages = Cbat_vsa_stages
+
 module CG = Graphs.Callgraph
 module CFG = Graphs.Tid
 
@@ -26,118 +28,43 @@ module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word_ops
 module Utils = Cbat_vsa_utils
 
-(* Bourdoncle WTO — inlined from cbat_wto.ml to avoid separate-file merlin config. *)
-module Wto = struct
-  type comp =
-    | Vertex of Tid.t
-    | SCC of Tid.t * comp list
+(* ARCH-5 — the Bourdoncle WTO is its OWN MODULE now ([cbat_wto.ml],
+   directly tested; accessor-polymorphic — see its header).  This is
+   the GRAPHS ADAPTER: the engine's cfg, passed as the two accessors.
+   The reversed ordering (the L2 walk schedule's backward fixpoint) is
+   the accessors SWAPPED — [wto ~succ:preds_of ~pred:succs_of] — a
+   call-shape on this same adapter. *)
+(* ARCH-5 — the GRAPHS ADAPTER (a plain function; the sibling module
+   [cbat_wto] is in scope by its plain name): the engine's cfg,
+   passed as the two accessors.  The reversed ordering (the L2 walk
+   schedule's backward fixpoint) is the accessors SWAPPED — a
+   call-shape on this same adapter. *)
+let wto_of_cfg (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
+  Cbat_wto.wto
+    ~nodes:(Graphs.Tid.nodes cfg |> Seq.to_list)
+    ~succ:(fun n -> Graphs.Tid.Node.succs n cfg |> Seq.to_list)
+    ~pred:(fun n -> Graphs.Tid.Node.preds n cfg |> Seq.to_list)
 
-  let rec flatten_comps (cs : comp list) : Tid.t list =
-    List.concat_map cs ~f:(function
-        | Vertex v -> [v]
-        | SCC (h, inner) -> h :: flatten_comps inner)
+(* ARCH-2 — the version-keyed memo module (one discipline, two
+   instantiations: the walk memo and the transfer memo).  See
+   [cbat_memo.ml]'s header for the stamp/validity/stale-overwrite
+   argument. *)
+module Cbat_memo = Cbat_memo
 
-  let rec heads_of_comps (cs : comp list) : Tid.Set.t =
-    List.fold cs ~init:Tid.Set.empty ~f:(fun acc -> function
-        | Vertex _ -> acc
-        | SCC (h, inner) ->
-          let acc = Core.Set.add acc h in
-          Core.Set.union acc (heads_of_comps inner))
 
-  let rec pp_comp (fmt : Format.formatter) (c : comp) : unit =
-    match c with
-    | Vertex v -> Format.fprintf fmt "%s" (Tid.to_string v)
-    | SCC (h, inner) ->
-      Format.fprintf fmt "(%s %a)" (Tid.to_string h)
-        (Format.pp_print_list ~pp_sep:(fun fmt () -> Format.fprintf fmt " ") pp_comp) inner
+(* ARCH-2 — the two instantiations.  [Walk_memo]: the backward walk's
+   refined env per (source block, jmp tid).  [Transfer_memo]: the
+   block transfer's result + the F2 acquisition-fired flag per
+   (source block, target).  Both take their value module inline (the
+   review's functorized call — one variable each); the version
+   oracle is threaded per call (see [cbat_memo.mli]). *)
+module Walk_memo = Cbat_memo.Make (struct
+  type t = AI.t
+end)
 
-  let scc_partition
-      (nodes : Tid.t list)
-      (succ : Tid.t -> Tid.t list)
-      (pred : Tid.t -> Tid.t list)
-    : Tid.t list list =
-    let node_set = Tid.Set.of_list nodes in
-    let visited = ref Tid.Set.empty in
-    let order = ref [] in
-    let rec dfs1 (n : Tid.t) : unit =
-      if not (Core.Set.mem !visited n) then begin
-        visited := Core.Set.add !visited n;
-        List.iter (succ n) ~f:(fun m ->
-            if Core.Set.mem node_set m then dfs1 m);
-        order := n :: !order
-      end
-    in
-    List.iter nodes ~f:dfs1;
-    let visited2 = ref Tid.Set.empty in
-    let comps = ref [] in
-    List.iter !order ~f:(fun n ->
-        if not (Core.Set.mem !visited2 n) then begin
-          let cur = ref [] in
-          let rec dfs2 (x : Tid.t) : unit =
-            if not (Core.Set.mem !visited2 x) then begin
-              visited2 := Core.Set.add !visited2 x;
-              cur := x :: !cur;
-              List.iter (pred x) ~f:(fun p ->
-                  if Core.Set.mem node_set p then dfs2 p)
-            end
-          in
-          dfs2 n;
-          comps := !cur :: !comps
-        end);
-    !comps
-
-  let wto_of_cfg (cfg : Graphs.Tid.t) : comp list =
-    let all_nodes = Graphs.Tid.nodes cfg |> Seq.to_list in
-    if List.is_empty all_nodes then [] else
-      let succ_all (n : Tid.t) : Tid.t list =
-        Graphs.Tid.Node.succs n cfg |> Seq.to_list in
-      let pred_all (n : Tid.t) : Tid.t list =
-        Graphs.Tid.Node.preds n cfg |> Seq.to_list in
-      let rpo_index : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
-      begin
-        let visited = ref Tid.Set.empty in
-        let order = ref [] in
-        let rec dfs (n : Tid.t) : unit =
-          if not (Core.Set.mem !visited n) then begin
-            visited := Core.Set.add !visited n;
-            List.iter (succ_all n) ~f:dfs;
-            order := n :: !order
-          end
-        in
-        List.iter all_nodes ~f:dfs;
-        List.iteri !order ~f:(fun i n -> Hashtbl.set rpo_index ~key:n ~data:i)
-      end;
-      let get_rpo (n : Tid.t) : int =
-        Hashtbl.find rpo_index n |> Option.value ~default:Int.max_value in
-      let has_self_loop (n : Tid.t) : bool =
-        List.mem (succ_all n) n ~equal:Tid.equal in
-      let rec wto_rec (nodes : Tid.t list) : comp list =
-        if List.is_empty nodes then [] else
-          let node_set = Tid.Set.of_list nodes in
-          let succ (n : Tid.t) : Tid.t list =
-            List.filter (succ_all n) ~f:(fun m -> Core.Set.mem node_set m) in
-          let pred (n : Tid.t) : Tid.t list =
-            List.filter (pred_all n) ~f:(fun m -> Core.Set.mem node_set m) in
-          let sccs = scc_partition nodes succ pred in
-          let sccs_sorted =
-            List.sort sccs ~compare:(fun a b ->
-                let ma = List.map a ~f:get_rpo |> List.min_elt ~compare:Int.compare |> Option.value ~default:Int.max_value in
-                let mb = List.map b ~f:get_rpo |> List.min_elt ~compare:Int.compare |> Option.value ~default:Int.max_value in
-                Int.compare ma mb) in
-          List.concat_map sccs_sorted ~f:(fun scc ->
-              match scc with
-              | [v] when not (has_self_loop v) -> [Vertex v]
-              | _ ->
-                let head =
-                  List.min_elt scc ~compare:(fun a b -> Int.compare (get_rpo a) (get_rpo b))
-                  |> Option.value_exn in
-                let rest = List.filter scc ~f:(fun n -> not (Tid.equal n head)) in
-                let inner = wto_rec rest in
-                [SCC (head, inner)])
-      in
-      wto_rec all_nodes
-end
-module Cbat_wto = Wto
+module Transfer_memo = Cbat_memo.Make (struct
+  type t = AI.t * bool
+end)
 
 (* Raised by [static_graph_vsa] when the fixpoint's verification round finds the solution STILL CHANGING at the [~steps] cap — the returned solution would be an under-approximation (states reachable only on longer paths are missing), so it must not be consumed for the narrow-tag decisions. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
@@ -1538,6 +1465,93 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
      | None -> [])
   | _ -> []
 
+
+(* L-A2 — the per-block flag GROUP. *)
+type flag_group = {
+  flags : (var * def term) Var.Map.t;
+  (* the block's 1-bit defs (the lifter's flag vars), keyed by [Var.base] lhs: (lhs, def) pairs — the defs the gate looks up for the idiom flags *)
+  cmp : def term option;
+  (* [t := e - c]: For the RECORD's (e, c), by structural equality ([Exp.equal] on the operand, [Word.equal] on the constant — the BIR reuses the SSA var/exp objects, so the equality is exact); None = no such def in the block = the gate fails (the flags cannot be bound to the record's comparison). *)
+}
+
+
+(* The per-fixpoint-run ANALYSIS CONTEXT (per sub, like [edge_conds]) —
+   the deep module behind the engine's one interface: every fact whose
+   lifetime is the fixpoint run lives here, built once at
+   [static_graph_vsa] entry and read O(1) by the engine.
+
+   Its two halves:
+   - STATIC FACTS (a pure function of the block — no state at all):
+     [rc_all_tagged], [rc_flag_states].
+   - CHANGE-DRIVEN CACHES (a pure function of state inputs, keyed by the
+     per-block solution VERSION — O(1) [AI.equal] identity):
+     [rc_cache] (the deep walk) and [rc_out_cache] (the block transfer).
+
+   [rc_versions] is the oracle both caches share: the engine's [set]
+   bumps a block's version ONLY under [not (AI.equal old new_val)], so an
+   unchanged version is EXACTLY identity of the stored state. *)
+type refine_ctx = {
+  (* the HOISTED all-defs-tagged set (was a per-call fold over the whole
+     sub's defs — O(sub) per refinement on big subs) *)
+  rc_all_tagged : Var.Set.t;
+  (* block tid -> its IN-state's version; bumped by the engine's [set]
+     ONLY on a real [AI.equal] change (see the validity argument) *)
+  rc_versions : int Tid.Map.t;
+  (* the walk's CFG (the sub's [Sub.to_graph] minus the start/exit
+     pseudo-nodes — IDENTICAL to the engine's [cfg]; hoisted, was
+     rebuilt per walk) *)
+  rc_walk_cfg : Graphs.Tid.t;
+  (* source blk tid -> jmp tid -> the cached walk — ARCH-2: the
+     WALK MEMO instantiation ([Walk_memo]; the entry record and the
+     stamp/validity discipline live in [Cbat_memo]). *)
+  rc_cache : Walk_memo.t;
+
+  (* ---- the performance-architecture lane (2026-09-01, C2) ---- *)
+
+  (* STATIC PER-BLOCK FACTS (C2): [flag_state_of_block]'s result — a pure
+     function of the block ([Term.tid blk] -> the pair). It RE-SCANNED the
+     block's defs TWICE on every denotation; hoisted once per run. *)
+  rc_flag_states :
+    ((var * Bil.binop * exp * word) option * flag_group) Tid.Map.t;
+  (* STATIC PER-BLOCK CALL FACTS (C2, the remaining half): the two
+     predicates [inspect_call] re-derived on EVERY call denotation by
+     SCANNING THE BLOCK'S DEFS 7 TIMES:
+       [cf_written]  — the SysV integer/pointer arg registers the block
+                       writes (one [Term.enum def_t b] scan PER register —
+                       6 scans);
+       [cf_pushed]   — does the block write RSP (the push evidence — a
+                       7th scan).
+     Both are PURE FUNCTIONS OF THE BLOCK: the [env]-dependent half (the
+     [AI.find_word] lookups) stays at the call site. *)
+  rc_call_facts : (var list * bool) Tid.Map.t;
+  (* THE BLOCK-TRANSFER MEMO (C1): source blk tid -> target tid -> the
+     memoized transfer ([Transfer_memo] — the value is the transferred
+     state + the F2 acquisition-fired flag; the read-set stamping and
+     validity discipline live in [Cbat_memo]).
+
+     The transfer [denote_block_with_stores ... ~source:p (get p)] is a
+     PURE FUNCTION of (the block, its in-state) — its only observable
+     effects beyond the returned state are the LANDMARK ACQUISITION
+     calls ([observe_unsat_var], fired from [acquire_unsat_fallthrough]
+     inside [assume_jump_cond_with_group]).  The C2 design therefore
+     REPLAYS the acquisition on a hit instead of suppressing it (see
+     [acquire_of_block]): the cached computation is skipped, never the
+     acquisition.
+
+     The inner [target] key exists because the transfer returns a
+     per-successor FUNCTION — a block with k successors was re-denoting
+     every def k times per sweep.
+
+     VALIDITY is the READ-SET's version identity (the SAME discipline
+     ticket 03 proved for the walk cache): the transfer reads the solution
+     at UPSTREAM blocks, so an in-state-only key would reuse results
+     computed against NARROWER upstream states (unsound in the widening
+     direction). *)
+  (* ARCH-2: the TRANSFER MEMO instantiation ([Transfer_memo]; the
+     value is the transferred state + the F2 acquisition-fired flag). *)
+  rc_out_cache : Transfer_memo.t;
+}
+
 (* [reverse_def_walk ~defs ~refineable_var env live blk]: The reverse-def walk of one block — the defs in REVERSE order, the def inverse at each live lhs (the lhs leaves the live set, the rhs's derived pairs join it); a def whose lhs is not live is skipped. *)
 let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
     ~(sol : (tid, AI.t) Solution.t)
@@ -1631,12 +1645,19 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
     soundness.  The visited set is the right granularity because every
     [Solution.get] in the walk is keyed by the visited block's tid. *)
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
+    ~(rctx : refine_ctx)
     ?(defs : (def term * bool) Var.Map.t option = None)
     ?(stores : def term list option = None)
     ?(reads : Tid.Set.t ref option = None)
-    ?(walk_cfg : Graphs.Tid.t option = None)
     (env : AI.t) (sub : sub term) (blk : blk term)
     (seeds : edge_constraint list) : AI.t * (tid, Live.t) Solution.t =
+  (* NOTE ON STATE: the visited set is accumulated inside the Graphlib
+     closure, whose [~f] contract has nowhere to thread extra state. The
+     accumulator is therefore CLOSURE-LOCAL: it is created here, filled by
+     the closure, and its content is handed back through [?reads] — an
+     explicit out-parameter the caller OWNS (the caller passes the ref in
+     and reads the set out). No long-lived mutable state escapes the call,
+     and the caller is free to pass a fresh ref per run. *)
   match defs with
   | None -> env, Solution.create Tid.Map.empty Live.empty
   | Some defs_map ->
@@ -1644,12 +1665,10 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
        projection the engine computes at fixpoint entry; [~walk_cfg] passes
        the hoisted one (the [None] arm — the direct-API path — rebuilds it
        exactly as before). *)
-    let cfg =
-      match walk_cfg with
-      | Some g -> g
-      | None ->
-        Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
-        |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+    (* ARCH-3 — [?walk_cfg] DELETED: the walk closure threads the run
+       context's hoisted [rc_walk_cfg]; the on-demand rebuild (the
+       former [None] arm) dies with the context-less path. *)
+    let cfg = rctx.rc_walk_cfg in
     let seed_constraints, env0 =
       List.fold seeds ~init:(Live.empty, env) ~f:(fun (m, e) -> function
           | Var (v, c) ->
@@ -1667,6 +1686,16 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               ~mem:mem ~addr:addr ~size:size ~endian:endian cstr
           | Infeasible -> m, AI.bottom) in
     let env = ref env0 in
+    (* L2 instrumentation — the pop counter: [refine_edge]'s transfer
+       closure fires exactly once per Kildall POP, so a closure-local
+       counter is the exact pop count without touching Graphlib. The
+       debug adapter commits it once per walk ([bump_walk_pops]) with
+       the distinct-blocks count (the ticket-03 read-set — the visited
+       set) and the truncation bit (Kildall stops at [~steps:256]
+       pops — a SILENT truncation: the live sets are sound but coarser
+       than the least fixpoint). The PROD adapter's [bump_walk_pops] is
+       the identity, so production behavior is unchanged. *)
+    let pops = ref 0 in
     let live_sol =
       Cbat_contextual_fixpoint.fixpoint (module Graphs.Tid)
         ~init:(Solution.create (Tid.Map.singleton (Term.tid blk) seed_constraints)
@@ -1675,6 +1704,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
         ~steps:256 ~rev:true
         ~f:(fun ~source:n ->
             fun live ->
+              incr pops;
               (* Ticket 03 — the read-set recording (see [refine_edge]'s
                  own comment): every block the closure visits is recorded
                  (conservative superset of the true [Solution.get] reads). *)
@@ -1696,6 +1726,19 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               | None -> fun ~target:_ -> live)
         ~step:(fun _ _ -> fun _ x' -> x')
         cfg in
+    (* L2 instrumentation — commit this walk's schedule metrics.  The
+       truncation bit: Kildall's [iters] counts POPS ([step] runs once
+       per pop; the [~steps] bound caps it), so [pops = 256] means the
+       cap was reached — the walk may be unconverged.  The blocks count
+       is the read-set (the visited set) when the accumulator was
+       passed, else 0 (the [reads = None] direct-API path). *)
+    Stages.bump_walk_pops
+      ~pops:!pops
+      ~blocks:(match reads with
+          | Some r -> Core.Set.length !r
+          | None -> 0)
+      ~truncated:(!pops >= 256)
+      ();
     (* The guard block's own value in the fixpoint is the raw seed (the init's [Const] — a block with no predecessors never gets its walk instantiated). *)
     let live_sol =
       match Term.find blk_t sub (Term.tid blk) with
@@ -2226,13 +2269,6 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
 
 (* L3c-1 — the flag-state record (the Laporte / Blazy-Laporte-Pichardie design): per BLOCK, the (flag var, op, e, c) of the LAST in-scope 1-bit def whose rhs is a comparison [e op c] the walk understands (comparison_constraint's LT/LE/EQ/SLT/SLE vs constant — L3c-2 added the signed rows). *)
 
-(* L-A2 — the per-block flag GROUP. *)
-type flag_group = {
-  flags : (var * def term) Var.Map.t;
-  (* the block's 1-bit defs (the lifter's flag vars), keyed by [Var.base] lhs: (lhs, def) pairs — the defs the gate looks up for the idiom flags *)
-  cmp : def term option;
-  (* [t := e - c]: For the RECORD's (e, c), by structural equality ([Exp.equal] on the operand, [Word.equal] on the constant — the BIR reuses the SSA var/exp objects, so the equality is exact); None = no such def in the block = the gate fails (the flags cannot be bound to the record's comparison). *)
-}
 
 let flag_state_of_block (b : blk term) :
     (var * Bil.binop * exp * word) option * flag_group =
@@ -2549,52 +2585,117 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
 (*   cross-run reuse is possible.                                     *)
 (* ================================================================== *)
 
-(* ONE cache entry: the walk's result for one (source block, jmp) edge,
-   with the exact input identities it was computed against. *)
-type refine_hit = {
-  (* the walk's read-set (the visited blocks), stamped with the per-block
-     solution VERSIONS at compute time — the reuse check *)
-  rh_reads : (Tid.t * int) list;
-  (* [refine_edge]'s result (the walk-refined env) *)
-  rh_result : AI.t;
-}
 
-(* The per-fixpoint-run cache context (per sub, like [edge_conds]). *)
-type refine_ctx = {
-  (* the HOISTED all-defs-tagged set (was a per-call fold over the whole
-     sub's defs — O(sub) per refinement on big subs) *)
-  rc_all_tagged : Var.Set.t;
-  (* block tid -> its IN-state's version; bumped by the engine's [set]
-     ONLY on a real [AI.equal] change (see the validity argument) *)
-  rc_versions : (Tid.t, int) Hashtbl.t;
-  (* the CURRENT walk's read-set accumulator (scratch; reset+pre-seeded
-     with the source block before each cached walk) *)
-  rc_reads : Tid.Set.t ref;
-  (* the walk's CFG (the sub's [Sub.to_graph] minus the start/exit
-     pseudo-nodes — IDENTICAL to the engine's [cfg]; hoisted, was
-     rebuilt per walk) *)
-  rc_walk_cfg : Graphs.Tid.t;
-  (* source blk tid -> jmp tid -> the cached walk *)
-  rc_cache : refine_hit Tid.Map.t Tid.Map.t ref;
-}
+
+(* [call_facts_of_block b]: the STATIC per-block call facts (C2) — the arg
+   registers the block writes and whether it writes RSP. A pure function of
+   the block, so the run context computes it once per block. *)
+let call_facts_of_block (b : blk term) : var list * bool =
+  let defs = Term.enum def_t b |> Seq.to_list in
+  let written =
+    List.filter Abi.x86_64_sysv.int_param_regs ~f:(fun v ->
+        List.exists defs ~f:(fun d -> Var.same (Def.lhs d) v)) in
+  let rsp = Abi.x86_64_sysv.sp in
+  let pushed = List.exists defs ~f:(fun d -> Var.same (Def.lhs d) rsp) in
+  (written, pushed)
 
 (* [ver_of rc t]: the block's current solution version — 0 = never [set]
    (its stored value is the run's FIXED init/default and cannot have
    changed since the run started, so 0 is a stable identity). *)
+(* ARCH-3 — [mk_rctx ~cfg s]: the ONE constructor of the per-run
+   analysis context.  Owns every STATIC fact a dual-path consumer
+   needs (the all-defs-tagged set, the per-block flag states, the
+   per-block call facts) plus the EMPTY change-driven caches (the
+   version table, the walk cfg, the two memos).  Extracted from the
+   engine's former literal so the direct-API/test path — which used to
+   pass [rctx = None] and RECOMPUTE each fact on demand at every use —
+   builds the same hoisted tables once per call.  The per-sub statics
+   are pure functions of the (analyze-tagged) sub; [cfg] is the
+   pseudo-node-free [Sub.to_graph] projection the walk uses (passed by
+   the engine, which already builds it; a direct-API caller passes the
+   same shape).  Per-run and per-sub: a nested run builds its own — no
+   cross-run reuse. *)
+let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
+  rc_all_tagged =
+    Term.enum blk_t s
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+        let k = Var.base (Def.lhs d) in
+        let tagged = Term.has_attr d Utils.relevant in
+        match Core.Map.find m k with
+        | None -> Core.Map.set m ~key:k ~data:tagged
+        | Some true -> m
+        | Some false -> Core.Map.set m ~key:k ~data:false)
+    |> Core.Map.filter ~f:Fn.id
+    |> Core.Map.keys
+    |> Var.Set.of_list;
+  rc_versions = Tid.Map.empty;
+  rc_walk_cfg = cfg;
+  rc_cache = Walk_memo.empty;
+  rc_flag_states =
+    Term.enum blk_t s
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+        Core.Map.set m ~key:(Term.tid b) ~data:(flag_state_of_block b));
+  rc_call_facts =
+    Term.enum blk_t s
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+        Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
+  rc_out_cache = Transfer_memo.empty;
+}
+
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =
-  match Hashtbl.find rc.rc_versions t with
+  match Core.Map.find rc.rc_versions t with
   | Some v -> v
   | None -> 0
 
-(* [reads_valid rc reads]: every recorded (block, version) still matches —
-   i.e. NO block the walk read has changed state since the cached run. *)
-let reads_valid (rc : refine_ctx) (reads : (Tid.t * int) list) : bool =
-  List.for_all reads ~f:(fun (t, v) -> ver_of rc t = v)
+(* ARCH-2 — [reads_valid]/[snapshot_reads]/[snapshot_out_reads] are
+   DELETED: the discipline they each implemented half of (the walk's
+   twin, the transfer's twin — byte-identical bodies) is ONE module
+   now ([Cbat_memo]: [valid]/[stamp], threaded per call with the
+   context's [ver_of]).  [ver_of] stays — the memo's callers
+   partially apply it as the version oracle. *)
 
-(* [snapshot_reads rc]: the version-stamped read-set of the walk that just
-   finished (the accumulator's current content). *)
-let snapshot_reads (rc : refine_ctx) : (Tid.t * int) list =
-  Core.Set.to_list !(rc.rc_reads) |> List.map ~f:(fun t -> (t, ver_of rc t))
+
+(* [replay_acquisition ~denote_jump_acq]: REPLAY a block's LANDMARK
+   ACQUISITION side effects on a cache hit (Q1 — the correctness fix for
+   the C1 transfer memo).
+
+   THE PROBLEM. [denote_jump] fires [Cbat_landmarks.observe_unsat_var]
+   from THREE sites, and they are NOT redundant — different constraint,
+   different op, different env:
+
+     (a) [acquire_unsat_fallthrough]  the recorded comparison (e, c) with
+         [complement_guard_op] — the FALLTHROUGH row — over the INCOMING
+         env (fired before the shallow step refines).
+     (b) [meet_var] in [refine_edge_inline]'s gated env meet (cbat_vsa
+         .ml:1008) — the TAKEN-edge seeds from the ACCUMULATED acc_cond,
+         whose NOT-unwrap arm uses [negate_guard_op] — over the POST-
+         shallow-refine env.
+     (c) [meet_var] in [apply_operand_constraint] (the jcc-decoder arm of
+         [assume_jump_cond_with_group]) — [decoder_constraint]'s row over
+         the recorded (e, c).
+
+   Acquisition is load-bearing: it records a (bound, distance)
+   measurement, and TWO measurements are what turns [lm_calc_steps]
+   `Zero into `Finite — i.e. it DECIDES THE WIDENING ARM. Dropping
+   observations is not byte-identical and is unsound in the narrowing
+   direction (the ticket-03 failure mode: Finite -> Zero).
+
+   THE FIX. Do not hand-roll the sites (a previous attempt re-derived
+   only (a) — and got it wrong). Instead REPLAY THE REAL PIPELINE: run
+   the same [denote_jump] with the deep walk DISABLED. That covers all
+   three sites by construction and cannot drift from the real path,
+   because it IS the real path minus one side-effect-free step.
+
+   The walk is disabled by a flag [denote_jump] already understands
+   ([~no_walk]) rather than by a separate code path. Cost: the def
+   denotations and the per-jump shallow step and env meet, but NO deep
+   walk and no join — strictly cheaper than the transfer it replaces.
+
+   LEVER (why this is nearly free in practice): [observe_unsat_var] is a
+   NO-OP outside a WTO head (cbat_landmarks.ml: the [widening_at_head =
+   None] arm returns immediately), so when the transfer runs outside a
+   head there is nothing to replay and the caller skips this entirely. *)
 
 (* [refine_edge_inline ~sol ~defs ~stores ~flag_state ~flag_group ~sub b
    env jmp acc_cond]: the DEEP per-edge refinement, inlined at the jump
@@ -2621,10 +2722,35 @@ let refine_edge_inline
     ~(flag_state : (var * Bil.binop * exp * word) option)
     ~(flag_group : flag_group option)
     ?(refineable : Var.Set.t option)
-    ?(rctx : refine_ctx option)
+    ~(rctx : refine_ctx)
     ~(jt : Tid.t)
     ~(sub : sub term)
-    (b : blk term) (env : AI.t) (acc_cond : exp) : AI.t =
+    ~(discarded : bool)
+    (b : blk term) (env : AI.t) (acc_cond : exp)
+    : AI.t * refine_ctx option * Tid.Set.t =
+  (* [~discarded]: the caller has already determined that THIS jump's
+     transfer result is DISCARDED (the jmp-kind arms below return
+     [AI.bottom] for it: a Direct goto/ret whose target != the requested
+     one, or a Direct call to a different callee).
+
+     Q2 (the performance lane): when the result is discarded, the DEEP
+     WALK is pure waste — but ONLY the walk. Everything else here is
+     KEPT, because it is NOT side-effect-free:
+
+       - the seed derivation: cheap, and needed for the env meet below;
+       - the GATED ENV MEET: fires [Cbat_landmarks.observe_unsat_var]
+         through [meet_var] (cbat_vsa.ml, the empty-meet arm). That is the landmark
+         ACQUISITION seam — the paper's Listing 1 — and it decides the
+         widening arm. Skipping it changes the widening: not
+         byte-identical, and unsound in the narrowing direction.
+       - the walk: side-effect-free (no [meet_var]; its meets are cell
+         meets — see the ticket-03 argument at :2550).
+
+     So [~discarded] gates exactly the walk, and nothing else. *)
+  (* EXPLICIT STATE: the (possibly updated) run context comes back out
+     alongside the refined env, together with the set of blocks the walk
+     visited (the transfer's read-set contribution). The [rctx = None]
+     arm — the direct-API/test path — returns None unchanged. *)
   let ctx : analysis_ctx =
     { refineable = None; defs; stores; flag_state;
       sub = Some sub; blk = Some b } in
@@ -2648,7 +2774,7 @@ let refine_edge_inline
   let seeds =
     List.filter seeds ~f:(fun s -> match s with Infeasible -> false | _ -> true) in
   match seeds with
-  | [] -> env
+  | [] -> (env, Some rctx, Tid.Set.empty)
   | _ ->
     (* THE GATED ENV MEET (§2/§4.3): a seed's word-value meet is a claim
        about a var's SSA VALUE, applied through [meet_var]'s REFINEABLE
@@ -2691,22 +2817,12 @@ let refine_edge_inline
        ([static_graph_vsa] computes it once like [refineable]/[defs]);
        the [rctx = None] arm (the direct-API/test path, no fixpoint)
        computes it on demand exactly as before. *)
-    let all_tagged : Var.Set.t =
-      match rctx with
-      | Some rc -> rc.rc_all_tagged
-      | None ->
-        Term.enum blk_t sub
-        |> Seq.concat_map ~f:(Term.enum def_t)
-        |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-            let k = Var.base (Def.lhs d) in
-            let tagged = Term.has_attr d Utils.relevant in
-            match Core.Map.find m k with
-            | None -> Core.Map.set m ~key:k ~data:tagged
-            | Some true -> m
-            | Some false -> Core.Map.set m ~key:k ~data:false)
-        |> Core.Map.filter ~f:Fn.id
-        |> Core.Map.keys
-        |> Var.Set.of_list in
+    (* ARCH-3 — the table is always there: [refine_edge_inline] takes a
+       REQUIRED [~rctx] now (the caller built it via [mk_rctx] — the
+       engine at fixpoint entry, a direct-API/test caller once per
+       call), so the former [None] on-demand recompute of the sub's
+       tagged set deletes. *)
+    let all_tagged : Var.Set.t = rctx.rc_all_tagged in
     let refineable_var (v : var) : bool = refineable_var_of refineable v in
     (* The gated env meet runs on EVERY visit (NOT cached — see the cache
        block's comment: its empty-meet arm is the landmark ACQUISITION
@@ -2732,45 +2848,51 @@ let refine_edge_inline
        observationally identical.  A walk whose inputs changed recomputes
        and re-records.  No [rctx] + [defs] (the direct-API/test path) or
        a read-set miss keeps the exact uncached behavior. *)
-    let walk env seeds : AI.t =
-      match rctx, defs with
-      | Some rc, Some _ ->
+    (* [walk]: the cached deep walk (ticket 03) + the C1 transfer read-set.
+       EXPLICIT STATE: [st] is the run context threaded in and the pair
+       (result, updated context) is threaded out; [seed_reads] accumulates
+       the blocks THIS transfer's walks visit, seeded with the source block
+       by the engine. *)
+    (* ARCH-3 — [rctx] required: the [None/None] direct-API arm of this
+       cache (the uncached [refine_edge] call) is REACHABLE ONLY when
+       [defs] is None ([denote_jump]'s own option); the engine always
+       passes [Some defs], so the cache is the engine path and the
+       None-defs arm keeps the uncached walk for the no-defs caller. *)
+    let walk env seeds : AI.t * refine_ctx option * Tid.Set.t =
+      if discarded then (env, Some rctx, Tid.Set.empty)
+      else
+      match defs with
+      | Some _ ->
+        let rc = rctx in
         let bt = Term.tid b in
-        let cached =
-          Option.(
-            let by_blk = Core.Map.find !(rc.rc_cache) bt in
-            bind by_blk ~f:(fun by_jmp -> Core.Map.find by_jmp jt)) in
-        (match cached with
-         | Some hit when reads_valid rc hit.rh_reads -> hit.rh_result
-         | _ ->
-           (* MISS: re-seed the read-set accumulator (the source block's
-              own state is an input — its IN-state version), run the walk
-              (which records the blocks it visits), stamp the read-set
-              with the current versions, and record the entry. *)
-           rc.rc_reads := Tid.Set.singleton bt;
+        (* ARCH-2 — the WALK MEMO: [find] carries the whole discipline
+           (the version-stamped read-set, the validity check, the
+           stale-miss); the closure only distinguishes hit/miss now. *)
+        let version = ver_of rc in
+        (match Walk_memo.find ~version rc.rc_cache bt jt with
+         | Some refined ->
+           (* HIT: the walk's own read-set is a SUBSET of the transfer's
+              (both are keyed on the same versions), so the transfer's
+              accumulator gains only the source block — already seeded by
+              the engine. *)
+           (refined, Some rc, Tid.Set.empty)
+         | None ->
+           let walk_reads = ref (Tid.Set.singleton bt) in
            let refined, _live =
-             refine_edge ~sol ~defs ~stores ~reads:(Some rc.rc_reads)
-               ~walk_cfg:(Some rc.rc_walk_cfg)
-               env sub b seeds in
-           rc.rc_cache :=
-             Core.Map.set !(rc.rc_cache) ~key:bt
-               ~data:(match Core.Map.find !(rc.rc_cache) bt with
-                   | None -> Tid.Map.singleton jt
-                       { rh_reads = snapshot_reads rc; rh_result = refined }
-                   | Some by_jmp ->
-                     Core.Map.set by_jmp ~key:jt
-                       ~data:{ rh_reads = snapshot_reads rc; rh_result = refined });
-           refined)
-      | _ ->
-        (* The seeds join the LIVE set (the backward walk's input — the
-           operand-constraint derivation through [reverse_def_walk]'s
-           producer subtraction, re-derived against the CURRENT solution at
-           every iteration: no stale-value carry); [refine_edge] performs
-           the walk and the trace-exact CELL meets (sound to transfer: a
-           store overwrites the cell). *)
+             Stages.time `Walk (fun () ->
+                 refine_edge ~sol ~rctx:rc ~defs ~stores
+                   ~reads:(Some walk_reads)
+                   env sub b seeds) in
+           let rc =
+             { rc with
+               rc_cache =
+                 Walk_memo.add ~version rc.rc_cache bt jt
+                   ~reads:!walk_reads refined } in
+           (refined, Some rc, !walk_reads))
+      | None ->
         let refined, _live =
-          refine_edge ~sol ~defs ~stores env sub b seeds in
-        refined in
+          refine_edge ~sol ~rctx:rctx ~defs ~stores env sub b seeds in
+        (refined, Some rctx, Tid.Set.empty) in
     walk env seeds
 
 (* Computes the denotation of a basic block's jumps. *)
@@ -2778,12 +2900,21 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
     ?(sub : sub term option = None)
-    ?edge_conds ?sol ?rctx
+    ?(no_walk : bool option)
+    ?edge_conds ?sol
+    ~(rctx : refine_ctx)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
-    (b : blk term)  (env : AI.t) ~(target : tid) : AI.t =
-  Term.enum jmp_t b
-  |> reachable_jumps env
-  |> Seq.map ~f:begin fun jmp ->
+    (b : blk term)  (env : AI.t) ~(target : tid)
+    : AI.t * refine_ctx option * Tid.Set.t =
+  (* EXPLICIT STATE: the fold threads (env, run context, the union of the
+     walks' read-sets) across the block's jumps. [AI.join] over the per-jump
+     results is folded in too, so the accumulator is the join-so-far.
+     ARCH-3 — the accumulator is the OPTION-THREADED view (the updated
+     context a jump's refinement may produce); the REQUIRED [~rctx] param
+     is bound once here as [rc0] for the read-only sites ([inspect_call]'s
+     hoisted call-facts lookup) that do not thread updates. *)
+  let rc0 = rctx in
+  let per_jump (acc, rctx, reads) jmp =
     (* Refine the state for the taken edge by the jump's condition (see [assume_jump_cond]). *)
     let env =
       assume_jump_cond_with_group ?refineable ?defs ?stores ~flag_state
@@ -2803,7 +2934,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
        an un-seeding cond keeps the shallow-refined env (the identity).
        Ticket 03 — [?rctx] threads the per-run CHANGE-DRIVEN CACHE (the
        walk keyed per (source block, jmp tid); see [refine_ctx]). *)
-    let env =
+    let env, rctx, reads =
       match edge_conds, sol, sub with
       | Some tbl, Some snap, Some s ->
         let acc_cond =
@@ -2813,11 +2944,34 @@ let denote_jump ?refineable ?preserved ?defs ?stores
           |> Option.map ~f:(fun ec -> ec.acc_cond) in
         (match acc_cond with
          | Some acc_cond ->
-           refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
-             ~flag_group ?refineable ?rctx ~jt:(Term.tid jmp)
-             ~sub:s b env acc_cond
-         | None -> env)
-      | _ -> env in
+           (* Q2 — is this jump's RESULT discarded? Mirrors EXACTLY the
+              arms below that return [AI.bottom] for it. Only those shapes
+              are safe to skip: an Indirect goto/ret returns [env] for any
+              target, so it must keep computing. *)
+           let discarded =
+             Option.value ~default:false no_walk ||
+             match Jmp.kind jmp with
+             | Goto (Direct tid) | Ret (Direct tid) ->
+               compare_tid target tid <> 0
+             | Call c ->
+               (match Call.return c with
+                | Some (Direct tid) -> compare_tid target tid <> 0
+                | Some (Indirect _) | None -> false)
+             | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false in
+           (* ARCH-3 — the accumulator threads the OPTION view (a jump
+              may update the run context); the callee takes the PLAIN
+              context (its [~rctx] is required).  Unwrap: the accumulator
+              is [Some] always — the fold's init is [Some rctx] and every
+              arm returns a [Some]-shaped value (the callee's return is
+              option-wrapped too). *)
+           let env', rctx', reads' =
+             refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
+               ~flag_group ?refineable
+               ~rctx:(Option.value ~default:rc0 rctx) ~jt:(Term.tid jmp)
+               ~sub:s ~discarded b env acc_cond in
+           (env', rctx', Core.Set.union reads reads')
+         | None -> (env, rctx, reads))
+      | _ -> (env, rctx, reads) in
     (* E2e-B, ora-7 — remove hot-loop eprintf; gate per-hit event log (the old debug line flushed stderr on EVERY Call denotation, per fixpoint iteration). *)
     let inspect_call c =
       match Call.return c with
@@ -2829,26 +2983,32 @@ let denote_jump ?refineable ?preserved ?defs ?stores
           begin
             let rsp = Abi.x86_64_sysv.sp in
             (* Hike addition (the call-abstraction precision lane — the whole-memory-top gap fix): the pointer-argument ESCAPE set — the value sets of the SysV integer/pointer arg registers at the call, plus the caller's own frame boundary (the post-push RSP). *)
+            (* C2 — the ESCAPE SET: WHICH registers this block writes is
+               STATIC ([rc_call_facts]); only their VALUES (the
+               [AI.find_word] lookups) depend on [env]. The old code
+               re-scanned the block's defs once per param register on
+               every call denotation. *)
             let escape =
-              (* The pointer-argument ESCAPE set: the SysV integer/pointer arg registers WRITTEN IN THIS CALL BLOCK (the -O0 arg setup lives in the call block). *)
-              List.filter_map Abi.x86_64_sysv.int_param_regs
-                ~f:(fun v ->
-                  let written =
-                    Term.enum def_t b |> Seq.exists ~f:(fun d ->
-                        Var.same (Def.lhs d) v) in
-                  if written then Some (AI.find_word 64 env v)
-                  else None) in
+              (* ARCH-3 — [rctx] is required: the hoisted call-facts
+                 table is always there; only the TABLE-MISS arm stays
+                 (impossible from [mk_rctx], cheap when it fires). *)
+              let written =
+                match Core.Map.find rc0.rc_call_facts (Term.tid b) with
+                | Some (w, _) -> w
+                | None -> fst (call_facts_of_block b) in
+              List.map written ~f:(fun v -> AI.find_word 64 env v) in
             let abs =
               AI.call_abstraction_frame
                 ~preserved:(Option.value ~default:Var.Set.empty preserved)
                 ~rsp:(AI.find_word 64 env rsp)
                 ~escape env in
             (* L-E1 (ora-9 Item 2, user-prioritized) — the matched-pair RSP restoration on the ON-path return edge: the caller models the push as defs (RSP := RSP − 8; mem[RSP] := retaddr; call) and the callee's ret — the pop (t :=. *)
+            (* C2 — the PUSH EVIDENCE is static too (see [escape]). *)
+            (* ARCH-3 — same collapse as [written] above. *)
             let pushed =
-              (* The push evidence: the call block WRITES RSP — the [RSP := RSP − 8] decrement (the fixture's minimal push) or the retaddr store at [RSP] (the real lifted calls' push pair). *)
-              Term.enum def_t b
-              |> Seq.exists ~f:(fun d ->
-                  Var.same (Def.lhs d) rsp) in
+              match Core.Map.find rc0.rc_call_facts (Term.tid b) with
+              | Some (_, p) -> p
+              | None -> snd (call_facts_of_block b) in
             if pushed then begin
               let abs =
                 AI.add_word abs ~key:rsp
@@ -2858,37 +3018,70 @@ let denote_jump ?refineable ?preserved ?defs ?stores
               AI.set_frame abs (AI.frame_add_rsp (AI.frame_of abs))
             end else abs
           end in
-    begin match Jmp.kind jmp with
+    (* the per-jump transfer result: the jmp-kind arms below, paired with
+       the threaded (context, read-set). *)
+    let env_res, rctx, reads =
+      match Jmp.kind jmp with
       | Int _ ->
         (* NOT_IMPLEMENTED IMPLEMENTATION (lane B, ora-2): an interrupt/trap edge is an unknown EXTERNAL callee (kernel / signal handler). *)
-        AI.call_abstraction
-          ~preserved:(Option.value ~default:Var.Set.empty preserved) env
-      | Call c -> inspect_call c
+        (AI.call_abstraction
+           ~preserved:(Option.value ~default:Var.Set.empty preserved) env,
+         rctx, reads)
+      | Call c -> (inspect_call c, rctx, reads)
       | Goto (Direct tid)
-      | Ret (Direct tid) ->  if compare_tid target tid = 0 then env else AI.bottom
+      | Ret (Direct tid) ->
+        ((if compare_tid target tid = 0 then env else AI.bottom), rctx, reads)
       | Goto (Indirect _)
-      | Ret (Indirect _) -> env
-      end
-  end
-  |> Seq.fold ~init:AI.bottom ~f:AI.join
+      | Ret (Indirect _) -> (env, rctx, reads) in
+    (AI.join acc env_res, rctx, reads) in
+  Seq.fold (reachable_jumps env (Term.enum jmp_t b))
+    ~init:(AI.bottom, Some rctx, Tid.Set.empty)
+    ~f:per_jump
 
 (* Computes the denotation of a block in a context-sensitive way, dependent on which block is next reached. *)
+
+
+
+
 (* L-D1 — the internal, stores-aware block denotation (the per-sub store list for the provenance-based SLE/SLT gate, see [stores_of_sub]); the fixpoint path ([static_graph_vsa]) calls it with ~stores (absent -> the decoder arm's [known_nonneg] stays false). *)
 let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(sub : sub term option = None)
     ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
-    ?(rctx : refine_ctx option = None)
+    ~(rctx : refine_ctx)
+    ?(no_walk : bool option)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
-    (ctx : program term) ~(source : tid) (env : AI.t) : target:tid -> AI.t =
+    (ctx : program term) ~(source : tid) (env : AI.t)
+    : target:tid -> AI.t * refine_ctx option * Tid.Set.t =
+ (* EXPLICIT STATE: the returned function TAKES the run context and gives it
+    back updated, alongside the transferred state and the blocks the walk
+    read.  The old signature was [target:tid -> AI.t]; the context is now a
+    parameter of the same call rather than a mutable field. *)
  match (Program.lookup blk_t ctx source) with
    | Some b ->
      let postcond = denote_defs b env in
-     (* L3c-1 — the per-block flag-state record (the BLP design): the last understood comparison that set a flag in scope in THIS block, for the bare-flag arm of [assume_jump_cond] (flag-indirected guards). *)
-     let flag_state, flag_group = flag_state_of_block b in
-     denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
-       ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol ?rctx denote_call b postcond
-   | None -> invalid_arg "source tid does not represent block"
+     (* L3c-1 — the per-block flag-state record (the BLP design): the last understood comparison that set a flag in scope in THIS block, for the bare-flag arm of [assume_jump_cond] (flag-indirected guards).
+
+        C2 — the pair is a PURE FUNCTION OF THE BLOCK ([flag_state_of_block]
+        re-scanned the block's defs TWICE per denotation), so the run
+        context carries it; the [None] arm (the direct-API/test path,
+        no fixpoint) computes it on demand exactly as before. *)
+     (* ARCH-3 — [rctx] required: the hoisted flag-state table is
+        always there (the table-miss arm stays, as above). *)
+     let flag_state, flag_group =
+       match Core.Map.find rctx.rc_flag_states (Term.tid b) with
+       | Some fs -> fs
+       | None -> flag_state_of_block b in
+     fun ~target ->
+       let (res, rctx', reads) =
+         denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
+           ~flag_group:(Some flag_group) ~sub ?no_walk ?edge_conds ?sol
+           ~rctx
+           denote_call b postcond ~target in
+       (res, rctx', Core.Set.add reads (Term.tid b))
+   | None -> fun ~target ->
+       ignore (invalid_arg "source tid does not represent block");
+       (AI.bottom, Some rctx, Tid.Set.empty)
 
 type vsa_sol = (tid, AI.t) Solution.t
 
@@ -2978,15 +3171,32 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       if List.mem stack (Term.tid s) ~equal:Tid.equal && List.length stack > 6 then AI.top else begin
         (* P2d-1b (lane A transitional) — the caller's relevant-vars capture and the caller-alias union were deleted with the refs (ora-5 removes the caller-union: lane B replaces this whole recursion with the call abstraction). *)
         let fun_sol = static_graph_vsa (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
+        (* ARCH-3 — the nested fold denoted the callee's blocks with the
+           CALLER's [refineable]/[preserved]/[defs]/[stores] and no
+           context (the former [rctx = None] direct path, recomputing
+           every static fact per block).  It now builds ONE callee-keyed
+           context via [mk_rctx] (the callee's own pseudo-node-free cfg
+           projection) and passes it — the same tables the nested
+           [static_graph_vsa] run builds internally.  This OFF-path is
+           dead in practice ([denote_jump] never applies [denote_call]
+           — traced 2026-09-01) but kept for the byte-identical
+           baseline; correctness over cost here. *)
+        let callee_cfg =
+          Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
+          |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+        let callee_rctx = mk_rctx ~cfg:callee_cfg sub in
         sub
         |> Term.enum blk_t
         |> Seq.fold ~init:AI.bottom ~f: begin fun acc blk ->
           let source = Term.tid blk in
           let precond = Solution.get fun_sol source in
            AI.join acc @@
-           denote_block_with_stores ~refineable ~preserved ~defs ~stores
-             ~sub:(Some s)
-             (denote_call (Term.tid sub::stack)) ctx ~source precond ~target
+           let (res, _, _) =
+             denote_block_with_stores ~refineable ~preserved ~defs ~stores
+               ~sub:(Some s) ~rctx:callee_rctx
+               (denote_call (Term.tid sub::stack)) ctx ~source precond
+               ~target in
+           res
         end
       end
   in
@@ -3004,39 +3214,27 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* BAP 2.6's Sub.to_graph adds the [start]/[exit] pseudo-nodes; the fixpoint would apply the block denotation to them and crash (Program.lookup fails). *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  (* Ticket 03 — the per-run CHANGE-DRIVEN-CACHE context: the hoisted
-     all-defs-tagged set (was an O-sub fold per refinement), the per-block
-     solution VERSION table (bumped by [set] only on a real [AI.equal]
-     change — the O(1) form of the ticket's [AI.equal] key), the current
-     walk's read-set accumulator, the walk's CFG (the same pseudo-node-free
-     [Sub.to_graph] projection the engine uses — hoisted, [refine_edge]
-     used to rebuild it per walk), and the (source blk, jmp) -> walk-result
-     table.  Per-run and per-sub: a nested run (the OFF-path [denote_call]
-     recursion) builds its own — no cross-run reuse is possible. *)
-  let rctx : refine_ctx = {
-    rc_all_tagged =
-      Term.enum blk_t s
-      |> Seq.concat_map ~f:(Term.enum def_t)
-      |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-          let k = Var.base (Def.lhs d) in
-          let tagged = Term.has_attr d Utils.relevant in
-          match Core.Map.find m k with
-          | None -> Core.Map.set m ~key:k ~data:tagged
-          | Some true -> m
-          | Some false -> Core.Map.set m ~key:k ~data:false)
-      |> Core.Map.filter ~f:Fn.id
-      |> Core.Map.keys
-      |> Var.Set.of_list;
-    rc_versions = Hashtbl.create (module Tid);
-    rc_reads = ref Tid.Set.empty;
-    rc_walk_cfg = cfg_tmp;
-    rc_cache = ref Tid.Map.empty;
-  } in
+  (* ARCH-3 — the run context is ALWAYS constructed, via the ONE
+     constructor [mk_rctx] (defined above the dual-path consumers): the
+     static facts — the all-defs-tagged set, the per-block flag states,
+     the per-block call facts — and the EMPTY change-driven caches, with
+     the walk's cfg passed in (the same pseudo-node-free projection the
+     engine builds here).  This literal was [mk_rctx]'s body; the
+     constructor now also serves the direct-API/test path (the callers
+     that used to pass [rctx = None] and recompute the facts on
+     demand), so the [Some rc -> hoisted lookup | None -> recompute]
+     dual paths DELETE — every consumer reads the tables, exactly one
+     place builds them.  The per-block TABLE-MISS arms stay (a [Some]
+     context whose table lacks a block — impossible from [mk_rctx],
+     which scans every block — still computes that block's fact on the
+     spot; the NO-FALLBACKS doctrine governs the LATTICE, not a
+     lookup). *)
+  let rctx = mk_rctx ~cfg:cfg_tmp s in
   (* Bourdoncle WTO fixpoint — replaces chunk=3000 + convergence_gap + max_runs.
      WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
      after 10 warmup sweeps (landmark-directed: Finite extrapolates, Zero
      advances and joins, Inf standard-widens). Always runs; no fallback. *)
-  let wto = Cbat_wto.wto_of_cfg cfg_tmp in
+  let wto = wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
   Cbat_landmarks.clear ();
@@ -3155,14 +3353,34 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
      cache's O(1) [AI.equal] key (the caller invokes [set] ONLY under
      [not (AI.equal old new_val)] — the stability gate — so an unchanged
      version is EXACTLY identity of the stored state; see [refine_ctx]). *)
+  (* EXPLICIT STATE (the user's directive: no scattered refs).  The run
+     context is ONE value threaded through the engine: [rc_cell] holds the
+     CURRENT context, [process_vertex] takes it and stores the updated one
+     back. A single cell (rather than one ref per field) keeps the
+     "here is the state, hand it on" discipline visible at the seam while
+     leaving the engine's pre-existing [sol_map] ref untouched (the
+     fixpoint's own state — out of scope for this change). *)
+  let rc_cell = ref rctx in
   let set n v =
     sol_map := Core.Map.set !sol_map ~key:n ~data:v;
-    match Hashtbl.find rctx.rc_versions n with
-    | None -> Hashtbl.set rctx.rc_versions ~key:n ~data:1
-    | Some k -> Hashtbl.set rctx.rc_versions ~key:n ~data:(k + 1) in
+    let rc = !rc_cell in
+    let versions =
+      match Core.Map.find rc.rc_versions n with
+      | None -> Core.Map.set rc.rc_versions ~key:n ~data:1
+      | Some k -> Core.Map.set rc.rc_versions ~key:n ~data:(k + 1) in
+    rc_cell := { rc with rc_versions = versions } in
+  Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = 6000 in
   let process_vertex (v : Tid.t) : bool =
+    (* L2 instrumentation — the SCAFFOLD bucket: the whole per-visit body
+       in ONE timer.  The inner stage timers ([`Denote]/[`Join]/...) nest
+       inside and capture their own time, so scaffold = visit total −
+       (denote + join + equal + widen + walk): the engine glue that sat
+       in NO bucket before (the pred listing, the C1 read-set
+       bookkeeping, the sol snapshot creation, the version bumps, the
+       landmark bindings).  The PROD adapter's [time] is the identity. *)
+    Stages.time `Scaffold (fun () ->
     incr total_processed;
     if !total_processed > max_steps then begin
       let sol = Solution.create !sol_map sol_default in
@@ -3179,17 +3397,109 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       if List.is_empty preds then old
       else
         let outs = List.map preds ~f:(fun p ->
-            let head_opt = Hashtbl.find block_to_head p in
-            Cbat_landmarks.widening_at_head := head_opt;
-            let p_entry = get p in
-            let out_fn = denote_block_with_stores ~refineable ~preserved ~defs ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds) ~sol:(Some sol_snap) ~rctx:(Some rctx) (denote_call stack) ctx ~source:p p_entry in
-            let res = out_fn ~target:v in
+            (* L2 sub-attribution — the per-pred SCAFFOLDING (the head
+               attribution lookup, the landmark head binding, the pred's
+               in-state [get]): pure glue, previously in no bucket. *)
+            let head_opt, p_entry =
+              Stages.time `Glue (fun () ->
+                let head_opt = Hashtbl.find block_to_head p in
+                Cbat_landmarks.widening_at_head := head_opt;
+                let p_entry = get p in
+                (head_opt, p_entry)) in
+            (* C1 — THE BLOCK-TRANSFER MEMO: the transfer is a pure
+               function of (the block, its in-state), and [ver_of rctx p]
+               is the in-state's O(1) [AI.equal] identity (the engine
+               bumps it in [set] only on a real change).  A version-identical
+               visit reuses the stored per-target result.
 
+               The ACQUISITION IS REPLAYED, NOT SKIPPED ([acquire_of_block]
+               — the two [observe_unsat_var] sites of [denote_jump]):
+               landmark acquisition decides the WIDENING ARM, so a
+               suppressed re-acquisition is not byte-identical and is
+               unsound in the narrowing direction.  Cached: the def
+               denotations, the flag-state scan (now hoisted by C2), the
+               seed derivation, the gated env meet, the deep walk, and the
+               per-jmp transfer. *)
+            (* EXPLICIT STATE: read the context, run the transfer (which
+               returns the updated context and the read-set), store it
+               back. *)
+            let rc = !rc_cell in
+             let res = Stages.time `Denote (fun () ->
+               (* ARCH-2 — the TRANSFER MEMO: [find] carries the whole
+                  discipline (the version-stamped read-set, the validity
+                  check, the stale-miss — no invalidation walk; a stale
+                  entry is simply never read again, and it is overwritten
+                  by the next recompute).  The value is the transferred
+                  state + the F2 acquisition-fired flag. *)
+               let version = ver_of rc in
+               match Transfer_memo.find ~version rc.rc_out_cache p v with
+               | Some (hit_res, fired) ->
+                 (* HIT — replay the acquisition, reuse the computation.
+                    Q1: the replay is the REAL transfer with the deep walk
+                    DISABLED ([~no_walk:true] -> [denote_jump]'s [discarded]
+                    arm): it covers ALL THREE [observe_unsat_var] sites (the
+                    fallthrough row in [acquire_unsat_fallthrough], the
+                    gated env meet in [refine_edge_inline], the decoder arm
+                    in [apply_operand_constraint]) by construction and
+                    cannot drift from the real path — see the
+                    acquisition-replay comment above [refine_edge_inline].
+                    The replay runs ONLY inside a WTO head ([head_opt] was
+                    bound into [Cbat_landmarks.widening_at_head] just
+                    above): outside a head [observe_unsat_var] no-ops, so
+                    there is nothing to replay.
+
+                    F2 — the ACQUISITION-FIRED LATCH: when the original
+                    transfer fired NOTHING (fired = false), the replay
+                    is pure waste — on a version-valid hit the transfer's
+                    inputs are [AI.equal]-identical, hence so is every
+                    firing condition, hence the replay would fire nothing
+                    either.  Skip it and return the cached result
+                    directly.  When fired, the replay stays the REAL
+                    no-walk pipeline (the Q1 discipline: never hand-roll
+                    the sites). *)
+                 (if Option.is_some head_opt && fired then
+                    match Program.lookup blk_t ctx p with
+                    | Some _pb ->
+                      ignore (denote_block_with_stores ~refineable ~preserved
+                                ~defs ~stores ~sub:(Some s)
+                                ~edge_conds:(Some edge_conds)
+                                ~sol:(Some sol_snap) ~rctx:rc
+                                ~no_walk:true (denote_call stack) ctx
+                                ~source:p p_entry ~target:v)
+                    | None -> ());
+
+                 hit_res
+               | None ->
+                 (* F2 — latch the acquisition around the ORIGINAL
+                    transfer: [end_fired_latch] restores the outer count
+                    and reports whether THIS transfer fired anything
+                    (all firing sites funnel through
+                    [Cbat_landmarks.record_landmark_for_head], the single
+                    choke point).  The latch is what makes the hit path's
+                    skip observationally identical: nothing fired =>
+                    nothing to replay. *)
+                 let flatch = Cbat_landmarks.start_fired_latch () in
+                 let (res, rc', reads) =
+                   denote_block_with_stores ~refineable ~preserved ~defs
+                     ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
+                     ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
+                     ctx ~source:p p_entry ~target:v in
+                 let fired = Cbat_landmarks.end_fired_latch flatch in
+                 (* The transfer's read-set: the source block's IN-state
+                    (the env INPUT) plus every block its walk visited. *)
+                 let reads = Core.Set.add reads p in
+                 rc_cell :=
+                   { (Option.value ~default:rc rc') with
+                     rc_out_cache =
+                       Transfer_memo.add ~version rc.rc_out_cache p v
+                         ~reads (res, fired) };
+                 res) in
             Cbat_landmarks.widening_at_head := None;
             res) in
-        match List.reduce outs ~f:AI.join with
-        | Some j -> j
-        | None -> old
+        (Stages.time `Join (fun () ->
+           match List.reduce outs ~f:AI.join with
+           | Some j -> j
+           | None -> old))
     in
     let new_val =
       if List.is_empty preds then old
@@ -3206,7 +3516,18 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
            [incoming] alone would NOT do: after a head widens, the preds
            join STRICTLY below it, so equality-vs-incoming would misfire
            on every stable visit. *)
-        if AI.equal old (AI.join old incoming) then old
+        (* F4 — bound the join ONCE: the stability check, the `Zero`
+           arm, and the non-head else branch all consume
+           [AI.join old incoming]. Computing it three times triples the
+           record join (memories + words + frame) at every unstable
+           head visit. [j] is the exact same value in all three sites.
+           L2 attribution — this join (and the non-head twin below) was
+           NEVER in a stage bucket: the [Join] timer only wrapped the
+           incoming join over the preds' outs. Timed now, so the Join
+           bucket is ALL joins and the scaffold-glue reading is honest. *)
+        let j = Stages.time `Join (fun () -> AI.join old incoming) in
+        if Stages.time `Equal (fun () -> AI.equal old j)
+        then old
         else begin
         (* Landmark-directed widening (Simon & King, APLAS 2006, Figure 3)
            — the production path for ALL subs (the per-sub [lm_*] gate was
@@ -3233,22 +3554,33 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         Cbat_landmarks.widening_at_head := Some v;
         let res = match Cbat_landmarks.lm_calc_steps v with
           | `Finite n ->
-            let r = AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming in
+            let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:(Some v) ~need ~steps:n old incoming) in
             Cbat_landmarks.clear_head v (Hashtbl.find_exn head_to_blocks v);
             r
           | `Zero ->
             Cbat_landmarks.lm_advance v;
-            AI.join old incoming
+            j
           | `Inf ->
-            AI.widen_join old incoming
+            Stages.time `Widen (fun () -> AI.widen_join old incoming)
         in
         Cbat_landmarks.widening_at_head := None;
         res
         end
       end else
-        AI.join old incoming
+        (* F4 — the non-head path: a single bare join; [j] is scoped to
+           the head branch above, so recompute here (one join, same as
+           before the reuse).
+           L2 attribution — timed now (see the F4 comment above): the
+           non-head visit join was also never in a bucket. *)
+        Stages.time `Join (fun () -> AI.join old incoming)
     in
-    if not (AI.equal old new_val) then (set v new_val; true) else false
+    (* L2 attribution — the final stability [AI.equal] (the [set] gate)
+       was never in a bucket either: the [Equal] timer only wrapped the
+       head stability check. Timed now; every record compare is
+       accounted.  The [set] path (the sol_map write + the version
+       bump + the context rebind) is [Glue]. *)
+    if not (Stages.time `Equal (fun () -> AI.equal old new_val))
+    then (Stages.time `Glue (fun () -> set v new_val); true) else false)
   in
   let rec stabilize_comps (comps : Cbat_wto.comp list) : bool =
     let changed = ref false in
@@ -3269,5 +3601,340 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     !any_changed
   in
   ignore (stabilize_comps wto);
+  Stages.report (Sub.name s);
   Solution.create !sol_map sol_default
 
+(* ================================================================== *)
+(* ARCH-1 (review #1) — THE TAG-EXTRACTION SUBMODULE: the per-def    *)
+(* classification walk (the M6 meet discipline), the kind enum (the  *)
+(* pass layer's [Convutils.vsa_kind] ALIASES [kind] — one enum, no    *)
+(* mapping layer), the k-range arithmetic, the set-overlap merge,    *)
+(* and the VLA idiom matcher.  Formerly [hike_vsa.ml]'s [finish]     *)
+(* internals plus [precision_probe]'s 100-line copy of the same walk. *)
+(*                                                                    *)
+(* A SUBMODULE (not a sibling file): the walk IS the fixpoint's own  *)
+(* primitives ([denote_def]/[rewrite_addr]/[frame_of_state]/         *)
+(* [denote_imm_exp]), and the main module of a wrapped library is     *)
+(* unreachable from its siblings — a cycle by construction.  A        *)
+(* POST-PASS over the converged solution (not fused into the         *)
+(* fixpoint: the walk's per-def state is a THIRD discipline — the     *)
+(* sequential chain met with the block's converged IN-state values). *)
+(* ================================================================== *)
+module Cbat_extraction = struct
+(* The classification vocabulary — the pass layer's [vsa_kind] home.
+   [@@deriving equal] so [convutils] and its consumers keep the
+   structural equality the maps' [equal] folds use. *)
+type kind =
+  | Range of int64 * int64
+  | Infinite of int64 * int64
+  | Unbounded
+  | Dead
+  | VLA of Tid.t
+[@@deriving equal]
+
+(* [classify ?vla_tid ws]: Range, Infinite (widening), Unbounded
+   (top), Dead (bottom), or VLA (dynamic size def tid) — a pure
+   WordSet-to-kind function. *)
+let classify ?vla_tid (ws : WordSet.t) : kind option =
+  if WordSet.is_top ws then Some Unbounded
+  else if WordSet.is_bottom ws then Some Dead
+  else
+    match WordSet.min_elem ws, WordSet.max_elem ws with
+    | Some lo, Some hi ->
+      (match Word.to_int64 lo, Word.to_int64 hi with
+       | Ok lo, Ok hi ->
+         let is_inf = WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 in
+         if is_inf && Option.is_some vla_tid then
+           Some (VLA (Option.value_exn vla_tid))
+         else if is_inf then Some (Infinite (lo, hi))
+         else Some (Range (lo, hi))
+       | _ -> Some Unbounded)
+    | _ -> Some Unbounded
+
+(* [bounds_of ws]: the signed int64 (lo, hi) bounds, or None when
+   top/bottom/empty (the classify pre-conditions). *)
+let bounds_of (ws : WordSet.t) : (int64 * int64) option =
+  if WordSet.is_top ws || WordSet.is_bottom ws then None
+  else
+    match WordSet.min_elem ws, WordSet.max_elem ws with
+    | Some lo, Some hi -> (
+        match Word.to_int64 lo, Word.to_int64 hi with
+        | Ok lo, Ok hi -> Some (lo, hi)
+        | _ -> None)
+    | _ -> None
+
+(* [k_range_of ws rsp_ws]: the ABI-visible k-range (k = addr - RSP at
+   the def — the arg area is k >= 0).  Interval arithmetic on the
+   signed bounds: k_min = addr_lo - rsp_hi, k_max = addr_hi - rsp_lo. *)
+let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
+    (int64 * int64) option =
+  match bounds_of ws, bounds_of rsp_ws with
+  | Some (alo, ahi), Some (rlo, rhi) ->
+      Some (Stdlib.Int64.sub alo rhi, Stdlib.Int64.sub ahi rlo)
+  | _ -> None
+
+(* [stack_address_of_rhs]: the ADDRESS of a stack access rhs — the
+   visitor-free structural read the walk dispatches on (Load/Store,
+   either bare or under the [pad]-style Cast the lifter emits).
+   None = the def is not a memory access. *)
+let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
+  match rhs with
+  | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
+  | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
+  | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) -> Some addr
+  | _ -> None
+
+(* [st_tag_of ~tags blk addr' st_before]: the M6 tag-state meet — the
+   address's free vars denoted with the block's IN-state values (the
+   converged solution's), met into the sequential state with the
+   genuine-subset gate: a TOP sequential value is NOT refined by the
+   meet (the tag state's value at the block is the JOIN over all
+   paths); an EMPTY meet and an UNCHANGED value also keep the
+   sequential state.  THE ONE HOME of the meet discipline
+   ([precision_probe]'s former copy adopted the production gate
+   2026-09-02 — the git archaeology showed the Option B/c fix never
+   reached the probe; a divergence of accident, not intent). *)
+let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
+    (addr' : exp) (st_before : AI.t) : AI.t =
+  Exp.free_vars addr'
+  |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
+      match Var.typ v with
+      | Type.Imm w ->
+        let tag_v = AI.find_word w
+            (Solution.get tags (Term.tid blk)) v in
+        let cur = AI.find_word w acc v in
+        let mm = WordSet.meet cur tag_v in
+        if WordSet.is_top cur
+           && Word.is_one (WordSet.cardinality mm)
+           || Word.is_zero (WordSet.cardinality mm)
+           || WordSet.equal mm cur
+        then acc
+        else AI.add_word acc ~key:v ~data:mm
+      | Type.Mem _ | Type.Unk -> acc)
+
+(* [extract ~sp ~stack_access ~sol sub]: the per-def classification
+   over the CONVERGED solution [sol].  [stack_access] is the
+   relevance tag predicate (the pass layer's tag; threaded as a
+   function so this module owns no tag dependency); [sp] is the
+   target's stack pointer (the k-range origin).
+
+   THE WALK (the M6 discipline, verbatim from hike_vsa's former
+   [finish]): per block, only up to and including the block's LAST
+   stack-access def (the state advance after it can affect no tag);
+   the sequential state starts at the block's converged IN-state and
+   advances [denote_def] per def; each TAGGED def's address is
+   rewritten by the frame relation of the PRE-def state, and its
+   operands are MET with the block's IN-state values (a TOP
+   sequential value is NOT refined by the meet; an empty meet and an
+   unchanged value keep the sequential state).
+
+   Returns: (offsets, k_ranges, vla_bounds) — the kind map keyed by
+   def tid (the set-overlap MERGE applied: the defs whose address
+   WordSets overlap merge into the spanning [Range]), the k-range
+   map, and the dynamic-allocation size bounds. *)
+let rec extract ~(sp : var) ~(stack_access : def term -> bool)
+    ~(dynamic_alloc : def term -> bool)
+    ~(sol : (tid, AI.t) Solution.t)
+    (sub : sub term) :
+    kind Tid.Map.t * (int64 * int64) Tid.Map.t
+    * (int64 * int64) Tid.Map.t =
+  let tags = sol in
+  let raw, kraw =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
+        (* Walk only the block's defs up to and including its LAST
+           stack_access def — the state advance after it can affect no
+           tag (the address/k-range denotations read the PRE-def
+           state), and a block with NO stack access contributes
+           nothing and skips the walk entirely. *)
+        let defs = Term.enum def_t blk |> Seq.to_list in
+        let last_tagged =
+          Base.List.foldi defs ~init:None ~f:(fun i acc d ->
+              if stack_access d then Some i else acc)
+        in
+        match last_tagged with
+        | None -> (acc, kacc)
+        | Some i ->
+        let defs' = Base.List.take defs (i + 1) in
+        let _, acc, kacc =
+          Base.List.fold_left defs'
+            ~init:(Solution.get tags (Term.tid blk), acc, kacc)
+            ~f:(fun (st, acc, kacc) d ->
+                 let st_before = st in
+                 let st = denote_def d st in
+                 match stack_address_of_rhs (Def.rhs d) with
+                 | Some addr when stack_access d ->
+                     let addr' =
+                       rewrite_addr (frame_of_state st_before) addr in
+                     (* The address's free vars are denoted with the block's TAG state's values (the IN-state read from the converged solution — the fused design's branch-sensitive state, refined inline by the accumulated edge conds), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
+                     let st_tag = st_tag_of ~tags blk addr' st_before in
+                     (match
+                        denote_imm_exp
+                          (* WYSINWYX-2 (the in-state relation) — the address is REWRITTEN to its offset-from-origin expression (the frame relation carried in the state) before denotation: the tags are the SP-relative OFFSETS, sourced from the relation rather than the anchored value-sets. *)
+                          addr' st_tag
+                      with
+                      | Ok ws -> (
+                          match classify ws with
+                          | Some kind ->
+                              let acc = (Term.tid d, kind, ws) :: acc in
+                              let kacc =
+                                match
+                                  k_range_of ws
+                                    (AI.find_word 64 st_before sp)
+                                with
+                                | Some (klo, khi) ->
+                                    (Term.tid d, klo, khi) :: kacc
+                                | None -> kacc
+                              in
+                              (st, acc, kacc)
+                          | None ->
+                              let ws = WordSet.top 64 in
+                              let acc = (Term.tid d, Unbounded, ws) :: acc in
+                              (st, acc, kacc))
+                      | Error _ ->
+                          let ws = WordSet.top 64 in
+                          let acc = (Term.tid d, Unbounded, ws) :: acc in
+                          (st, acc, kacc))
+                 | None when stack_access d ->
+                     let ws = WordSet.top 64 in
+                     let acc = (Term.tid d, Unbounded, ws) :: acc in
+                     (st, acc, kacc)
+                 | _ -> (st, acc, kacc))
+        in
+        (acc, kacc))
+  in
+  let raw = List.rev raw in
+  (* THE SET-OVERLAP MERGE: the defs whose address WordSets OVERLAP (the domain's membership test — a direct singleton {c} overlaps the indexed CLP {base + step*k} iff c is in its residue class, so `a[1] = 5` and `a[i]` merge). *)
+  let span_of = function
+    | Range (lo, hi) -> (lo, hi)
+    | Infinite (lo, hi) -> (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
+    | Unbounded | Dead | VLA _ -> (0L, 0L)
+  in
+  let merged_tags : kind Tid.Map.t =
+    let bounded, unbounded_or_dead =
+      Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
+          match kind with
+          | Range _ | Infinite _ | VLA _ -> true
+          | Unbounded | Dead -> false)
+    in
+    let items =
+      Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
+    in
+    (* Maximal overlap components via WordSet.overlap (transitive closure).
+       S1 coarser: any overlapping WordSets merge; bridging via a new item
+       merges all comps that overlap it. *)
+    let rec components acc = function
+      | [] -> acc
+      | (dtid, kind, ws) :: rest ->
+          let overlapping, non_overlapping =
+            Base.List.partition_tf acc ~f:(fun comp ->
+                Base.List.exists comp ~f:(fun (_, _, ws') -> WordSet.overlap ws ws'))
+          in
+          let new_comp =
+            (dtid, kind, ws) :: Base.List.concat overlapping
+          in
+          components (new_comp :: non_overlapping) rest
+    in
+    let init_map =
+      Base.List.fold unbounded_or_dead ~init:Tid.Map.empty ~f:(fun acc (dtid, kind, _) ->
+          Core.Map.set acc ~key:dtid ~data:kind)
+    in
+    Base.List.fold_left (components [] items) ~init:init_map
+      ~f:(fun acc comp ->
+        match comp with
+        | [ (dtid, kind, _) ] -> Core.Map.set acc ~key:dtid ~data:kind
+        | _ ->
+            let lo, hi =
+              match comp with
+              | (_, k0, _) :: rest ->
+                let slo0, shi0 = span_of k0 in
+                Base.List.fold_left rest ~init:(slo0, shi0)
+                  ~f:(fun (l, h) (_, k, _) ->
+                    let slo, shi = span_of k in
+                    (Stdlib.Int64.min l slo, Stdlib.Int64.max h shi))
+              | [] -> (0L, 0L) (* unreachable: comp is non-empty *)
+            in
+            Base.List.fold_left comp ~init:acc
+              ~f:(fun acc (dtid, _, _) ->
+                  Core.Map.set acc ~key:dtid ~data:(Range (lo, hi))))
+  in
+  let offsets =
+      Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->
+          let k = match Core.Map.find merged_tags dtid with
+            | Some k -> k
+            | None -> kind in
+          Core.Map.set m ~key:dtid ~data:k) in
+  let k_ranges =
+    Base.List.fold kraw ~init:Tid.Map.empty
+      ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) in
+  let vla_bounds =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun blk ->
+        let blk_tid = Term.tid blk in
+        Term.enum def_t blk
+        |> Seq.filter ~f:dynamic_alloc
+        |> Seq.filter_map ~f:(fun d ->
+            match vla_size_of_rhs sp sub (Def.rhs d) with
+            | None -> None
+            | Some size ->
+                let st = Solution.get tags blk_tid in
+                match denote_imm_exp size st with
+                | Ok ws -> (
+                    match WordSet.min_elem ws, WordSet.max_elem ws with
+                    | Some lo, Some hi -> (
+                        match Word.to_int64 lo, Word.to_int64 hi with
+                        | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
+                        | _ -> None)
+                    | _ -> None)
+                | Error _ -> None))
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (dtid, b) ->
+           Core.Map.set m ~key:dtid ~data:b)
+  in
+  (offsets, k_ranges, vla_bounds)
+
+(* [vla_size_of_rhs sp sub rhs] — the let-..-and partner of [extract];
+   the comment between the binding and its [and] would break the
+   pair, hence this position: the DYNAMIC-ALLOCATION size expression —
+   the `RSP := RSP - size` idiom, direct or indirect (the
+   `RSP := tmp` where `tmp := RSP - size` form), or None.  The ONE
+   home of the idiom matcher (hike_vsa_relevance's
+   [detect_dynamic_alloc] delegates here — the duplication the
+   architecture exploration flagged closes). *)
+(* [vla_decrement_p sp_base rhs]: the SHARED two-line VLA idiom test —
+   is [rhs] a `RSP := RSP - size` with a NON-LITERAL size (the dynamic
+   allocation shape)?  The ONE fact both roles consume:
+   [hike_vsa_relevance.detect_dynamic_alloc] (the visitor that
+   collects the def SET, incl. the indirect tmp def) and
+   [vla_size_of_rhs] (the SIZE extractor for a KNOWN dynamic-alloc
+   def).  The roles stay separate (set vs expression); the SHAPE is
+   one fact. *)
+and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
+  match rhs with
+  | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
+      Var.same (Var.base a) sp_base
+      && (match size with Bil.Int _ -> false | _ -> true)
+  | _ -> false
+
+and vla_size_of_rhs (sp : var) (sub : sub term) (rhs : Bil.exp) :
+    Bil.exp option =
+  let def_of_lhs =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+        Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
+  in
+  match rhs with
+  | Bil.BinOp (Bil.MINUS, Bil.Var _, size) when vla_decrement_p (Var.base sp) rhs ->
+      Some size
+  | Bil.Var tmp -> (
+      match Core.Map.find def_of_lhs (Var.base tmp) with
+      | Some d' -> (
+          match Def.rhs d' with
+          | Bil.BinOp (Bil.MINUS, Bil.Var _, size)
+            when vla_decrement_p (Var.base sp) (Def.rhs d') ->
+              Some size
+          | _ -> None)
+      | None -> None)
+  | _ -> None
+
+end
