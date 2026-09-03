@@ -65,6 +65,8 @@ type refine_ctx = {
   (* Memoized block transfers with replayed acquisition. *)
   (* Transfer memo. *)
   rc_out_cache : Transfer_memo.t;
+  (* May-read vars per block entry; the GC keep-sets. *)
+  rc_live_in : Var.Set.t Tid.Map.t;
 }
 
 (* Last understood flag-setting comparison. *)
@@ -182,6 +184,56 @@ let call_facts_of_block (b : blk term) : var list * bool =
   let pushed = List.exists defs ~f:(fun d -> Var.same (Def.lhs d) rsp) in
   (written, pushed)
 
+(* Backward may-liveness over base-normalized vars. *)
+let block_uses (b : blk term) : Var.Set.t =
+  let base acc v = Core.Set.add acc (Var.base v) in
+  let u =
+    Core.Set.fold (Blk.free_vars b) ~init:Var.Set.empty
+      ~f:(fun acc v -> base acc v) in
+  Term.enum phi_t b
+  |> Seq.fold ~init:u ~f:(fun acc ph ->
+      Core.Set.fold (Phi.free_vars ph) ~init:acc
+        ~f:(fun acc v -> base acc v))
+
+(* Word-typed lhs vars defined in the block. *)
+let block_defs (b : blk term) : Var.Set.t =
+  Term.enum def_t b
+  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+      match Var.typ (Def.lhs d) with
+      | Type.Imm _ -> Core.Set.add acc (Var.base (Def.lhs d))
+      | Type.Mem _ | Type.Unk -> acc)
+
+(* Live-in vars per block; fixpoint over successor unions. *)
+let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
+    Var.Set.t Tid.Map.t =
+  let blocks = Term.enum blk_t s |> Seq.to_list in
+  let find m tid =
+    Option.value ~default:Var.Set.empty (Core.Map.find m tid) in
+  let uses =
+    List.fold blocks ~init:Tid.Map.empty ~f:(fun m b ->
+        Core.Map.set m ~key:(Term.tid b) ~data:(block_uses b)) in
+  let defs =
+    List.fold blocks ~init:Tid.Map.empty ~f:(fun m b ->
+        Core.Map.set m ~key:(Term.tid b) ~data:(block_defs b)) in
+  let live = ref Tid.Map.empty in
+  let rec loop () =
+    let changed = ref false in
+    List.iter (List.rev blocks) ~f:(fun b ->
+        let bt = Term.tid b in
+        let out =
+          Graphs.Tid.Node.succs bt cfg |> Seq.fold ~init:Var.Set.empty
+            ~f:(fun acc t -> Core.Set.union acc (find !live t)) in
+        let inn =
+          Core.Set.union (find uses bt)
+            (Core.Set.diff out (find defs bt)) in
+        if not (Core.Set.equal inn (find !live bt)) then begin
+          live := Core.Map.set !live ~key:bt ~data:inn;
+          changed := true
+        end);
+    if !changed then loop () in
+  loop ();
+  !live
+
 (* Block version; 0 means never set. *)
 (* Per-run analysis context. *)
 let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
@@ -210,6 +262,7 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
   rc_out_cache = Transfer_memo.empty;
+  rc_live_in = live_in_of_sub s cfg;
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =

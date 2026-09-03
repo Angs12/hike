@@ -58,6 +58,9 @@ module type S = sig
 
   (* Fold stored bindings. *)
   val fold : t -> init:'a -> f:(key:Key.t -> data:Val.t -> 'a -> 'a) -> 'a
+
+  (* Drop stored bindings the keeper rejects; bottom stays bottom. *)
+  val filter_keys : t -> f:(Key.t -> bool) -> t
 end
 
 module type S_indexed_val = sig

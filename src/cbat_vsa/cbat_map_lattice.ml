@@ -63,6 +63,9 @@ module type S = sig
 
   (* Fold stored bindings. *)
   val fold : t -> init:'a -> f:(key:Key.t -> data:Val.t -> 'a -> 'a) -> 'a
+
+  (* Drop stored bindings the keeper rejects; bottom stays bottom. *)
+  val filter_keys : t -> f:(Key.t -> bool) -> t
 end
 
 module type S_indexed_val = sig
@@ -159,6 +162,10 @@ module Make_indexed_from_map
   let fold (t : t) ~init ~f =
     Option.value_map t ~default:init ~f:(fun m ->
       Map.fold m ~init ~f:(fun ~key ~data acc -> f ~key ~data acc))
+
+  (* Drop stored bindings the keeper rejects; bottom stays bottom. *)
+  let filter_keys (t : t) ~(f : Key.t -> bool) : t =
+    Option.map t ~f:(fun m -> Map.filter_keys m ~f)
 
   (* No stored tops. *)
   let canonize' (m : map) : map = m

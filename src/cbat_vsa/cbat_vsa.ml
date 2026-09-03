@@ -2731,6 +2731,11 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                        Cbat_runctx.Transfer_memo.add ~version rc.rc_out_cache p v
                          ~reads (res, fired) };
                  res) in
+            (* Dead bindings never reach the join. *)
+            let keep =
+              Option.value ~default:Var.Set.empty
+                (Core.Map.find rc.rc_live_in v) in
+            let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
             Cbat_landmarks.widening_at_head := None;
             res) in
         (Stages.time `Join (fun () ->
