@@ -43,32 +43,29 @@ let ret_replacement (j : jmp term) : jmp term =
 let is_region_mem (v : var) : bool =
   Hike_stack_model.is_region_mem v
 
-(* Vars read as Load mem operands, plus jmp/phi reads. *)
-
-let load_roots_of (sub : sub term) : Var.Set.t =
-  let roots =
-    object
-      inherit [Var.Set.t] Term.visitor
-      method! visit_load ~mem ~addr:_ _ _ acc =
-        Core.Set.union acc (Exp.free_vars mem)
-      
-      method! visit_jmp j acc = Core.Set.union acc (Jmp.free_vars j)
-      method! visit_phi p acc = Core.Set.union acc (Phi.free_vars p)
-    end
-  in
-  roots#visit_sub sub Var.Set.empty
-
-(* Vars used by any def, jmp, or phi. *)
-let used_of (sub : sub term) : Var.Set.t =
+(* Vars read as Load mem operands, plus jmp/phi reads; and vars used by
+   any def, jmp, or phi. One visitor returns both: every jmp/phi read
+   lands in both sets, def rhss in used, Load mems in roots. *)
+let used_and_roots_of (sub : sub term) : Var.Set.t * Var.Set.t =
   let v =
-    object
-      inherit [Var.Set.t] Term.visitor
-      method! visit_def d used = Core.Set.union used (Def.free_vars d)
-      method! visit_jmp j used = Core.Set.union used (Jmp.free_vars j)
-      method! visit_phi p used = Core.Set.union used (Phi.free_vars p)
+    object (self)
+      inherit [Var.Set.t * Var.Set.t] Term.visitor
+      method! visit_def d (used, roots) =
+        (* Explicit descent into the rhs: overriding visit_def prunes
+           the default traversal, and visit_load below relies on it. *)
+        self#visit_exp (Def.rhs d)
+          (Core.Set.union used (Def.free_vars d), roots)
+      method! visit_load ~mem ~addr:_ _ _ (used, roots) =
+        (used, Core.Set.union roots (Exp.free_vars mem))
+      method! visit_jmp j (used, roots) =
+        let fvs = Jmp.free_vars j in
+        (Core.Set.union used fvs, Core.Set.union roots fvs)
+      method! visit_phi p (used, roots) =
+        let fvs = Phi.free_vars p in
+        (Core.Set.union used fvs, Core.Set.union roots fvs)
     end
   in
-  v#visit_sub sub Var.Set.empty
+  v#visit_sub sub (Var.Set.empty, Var.Set.empty)
 
 (* Tests for intrinsic interface vars. *)
 let is_intrinsic_var (v : var) : bool =
@@ -99,8 +96,9 @@ let is_sp_value_def (target : Theory.Target.t) (d : def term) : bool =
 let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
   is_sp target (Def.lhs d)
 
-(* True when the sub uses the split model. *)
-let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
+(* True when the sub uses the split model. Hoisted out of the sweep by
+   [dce]: the KB entry cannot change while defs are only removed. *)
+let is_precise_sub (sub : sub term) : bool =
   match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
   | None -> false
   | Some info -> Hike_stack_model.is_precise info
@@ -118,23 +116,22 @@ let keep ?(precise=false) ?(load_roots=Var.Set.empty)
       Core.Set.mem used lhs || is_ret_reg target lhs || Convutils.is_mem lhs
       || is_call_reg target lhs || is_intrinsic_var lhs
 
-let def_count (sub : sub term) : int =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:0 ~f:(fun n blk ->
-      n + Seq.length (Term.enum def_t blk))
-
-(* Sweeps unused defs to fixpoint. *)
-let rec sweep_fixpoint ~target (sub : sub term) : sub term =
-  let precise = is_precise_sub target sub in
-  let used = used_of sub in
-  
-  let load_roots = load_roots_of sub in
+(* Sweeps unused defs to fixpoint. One sub walk per round: the used/roots
+   sets and the removal flag come out of the single filter pass (the old
+   shape paid used_of + load_roots_of + def_count walks plus a KB read
+   per round). Load-roots are still recomputed per round — a removed load
+   un-roots a chain, and the fixpoint handles the cascade. *)
+let rec sweep_fixpoint ~target ~precise (sub : sub term) : sub term =
+  let used, load_roots = used_and_roots_of sub in
+  let changed = ref false in
   let sub' =
     Term.map blk_t sub ~f:(fun blk ->
         Term.filter def_t blk ~f:(fun d ->
-            keep ~precise ~load_roots ~target d used))
+            let keep = keep ~precise ~load_roots ~target d used in
+            if not keep then changed := true;
+            keep))
   in
-  if def_count sub' = def_count sub then sub' else sweep_fixpoint ~target sub'
+  if !changed then sweep_fixpoint ~target ~precise sub' else sub'
 
 (* Rewrites returns, then sweeps. Intrinsics pass through. *)
 let dce ~target (sub : sub term) : sub term =
@@ -146,4 +143,5 @@ let dce ~target (sub : sub term) : sub term =
         method! map_jmp j = ret_replacement j
       end
     in
-    mapper#map_sub sub |> sweep_fixpoint ~target
+    let precise = is_precise_sub sub in
+    mapper#map_sub sub |> sweep_fixpoint ~target ~precise
