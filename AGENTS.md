@@ -410,8 +410,8 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
-**Last verified: 2026-09-03 EEST — comment concision pass (78 files,
-+1970/−6394, comments only) — BATTERY GREEN, identical behavior**
+**Last verified: 2026-09-03 EEST — comment concision pass (83 files,
++2175/−6394, comments only) — BATTERY GREEN, identical behavior**
 
 Every code comment rewritten to the minimum: what the current code does,
 present tense, 1–2 lines. All history deleted (phases, ora-/ticket refs,
