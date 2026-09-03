@@ -2296,7 +2296,6 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     ?(no_walk : bool option)
     ?edge_conds ?sol
     ~(rctx : Cbat_runctx.refine_ctx)
-    (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (b : blk term)  (env : AI.t) ~(target : tid)
     : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
   (* Fold joins per-jump results. *)
@@ -2408,7 +2407,6 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(sol : (tid, AI.t) Solution.t option = None)
     ~(rctx : Cbat_runctx.refine_ctx)
     ?(no_walk : bool option)
-    (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t)
     : target:tid -> AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
  (* Threaded context plus read set. *)
@@ -2426,7 +2424,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
          denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
            ~flag_group:(Some flag_group) ~sub ?no_walk ?edge_conds ?sol
            ~rctx
-           denote_call b postcond ~target in
+           b postcond ~target in
        (res, rctx', Core.Set.add reads (Term.tid b))
    | None -> fun ~target ->
        ignore (invalid_arg "source tid does not represent block");
@@ -2512,34 +2510,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* Store list computed once. *)
   let stores = stores_of_sub s in
   (* Frame facts computed once. *)
-  (* Recursion is fallback. *)
-  let rec denote_call stack ~sub env ~target =
-    match (Program.lookup sub_t ctx sub) with
-    | None -> invalid_arg "sub tid does not represent a subroutine"
-    | Some sub ->
-      if List.mem stack (Term.tid s) ~equal:Tid.equal && List.length stack > 6 then AI.top else begin
-        
-        let fun_sol = static_graph_vsa (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
-        (* Nested runs build callee contexts. *)
-        let callee_cfg =
-          Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-        let callee_rctx = Cbat_runctx.mk_rctx ~cfg:callee_cfg sub in
-        sub
-        |> Term.enum blk_t
-        |> Seq.fold ~init:AI.bottom ~f: begin fun acc blk ->
-          let source = Term.tid blk in
-          let precond = Solution.get fun_sol source in
-           AI.join acc @@
-           let (res, _, _) =
-             denote_block_with_stores ~refineable ~preserved ~defs ~stores
-               ~sub:(Some s) ~rctx:callee_rctx
-               (denote_call (Term.tid sub::stack)) ctx ~source precond
-               ~target in
-           res
-        end
-      end
-  in
   (* Per-sub static edge table. *)
   let edge_conds = edge_conds_of s in
   let cfg = Sub.to_graph s in
@@ -2700,7 +2670,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                                 ~defs ~stores ~sub:(Some s)
                                 ~edge_conds:(Some edge_conds)
                                 ~sol:(Some sol_snap) ~rctx:rc
-                                ~no_walk:true (denote_call stack) ctx
+                                ~no_walk:true ctx
                                 ~source:p p_entry ~target:v)
                     | None -> ());
 
@@ -2711,7 +2681,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                  let (res, rc', reads) =
                    denote_block_with_stores ~refineable ~preserved ~defs
                      ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
-                     ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
+                     ~sol:(Some sol_snap) ~rctx:rc
                      ctx ~source:p p_entry ~target:v in
                  let fired = Cbat_landmarks.end_fired_latch flatch in
                  (* Read set covers inputs. *)
