@@ -1545,19 +1545,17 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
           | None -> 0)
       ~truncated:(!pops >= 256)
       ();
-    (* Guard with no preds keeps the seed. *)
-    let live_sol =
-      match Term.find blk_t sub (Term.tid blk) with
-      | Some gb ->
-        let walked =
-          reverse_def_walk ~defs:defs_map ~sol env
+    (* Guard with no preds keeps the seed. The walk runs for its [env]
+       side effects (cell meets commit through the ref); the derived
+       solution is discarded by both callers, so no derive. *)
+    (match Term.find blk_t sub (Term.tid blk) with
+     | Some gb ->
+       ignore
+         (reverse_def_walk ~defs:defs_map ~sol env
             (Live.join (Solution.get live_sol (Term.tid blk))
-               seed_constraints) gb in
-        Solution.derive live_sol
-          ~f:(fun n _ ->
-              if Tid.equal n (Term.tid blk) then Some walked else None)
-          Live.empty
-      | None -> live_sol in
+               seed_constraints) gb
+           : Live.t)
+     | None -> ());
     !env, live_sol
 
 (* Backward-walk context record. *)
