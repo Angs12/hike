@@ -147,30 +147,16 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
      in
       (rets, args)
    else
-       (* Subs with incoming stack args take [hike_stack]. *)
+       (* Subs with incoming stack args take [hike_stack]. The VSA verdict
+         is the SOLE origin (review #2 grill): the hand-rolled BIL walk
+         that used to OR a second opinion here is deleted — two
+         mechanisms that can disagree are worse than one, and absent
+         info already defaults to false. *)
       let has_positive =
-        let vsa_positive =
-          Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
-          |> Base.Option.value_map ~default:false ~f:(fun info ->
-              Core.Map.exists info.Convutils.offsets ~f:(fun kind ->
-                  Convutils.is_positive_kind kind))
-        in
-        let bil_positive =
-          let rec has_pos (e : exp) : bool =
-            match e with
-            | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int c)
-              when Var.same b (Abi.fp target) ->
-                Int64.compare (Int64.sub (Word.to_int64_exn c) 8L) 0L >= 0
-            | Bil.BinOp (_, a, b) -> has_pos a || has_pos b
-            | Bil.Cast (_, _, e') -> has_pos e'
-            | _ -> false
-          in
-          Term.enum blk_t sub
-          |> Seq.exists ~f:(fun blk ->
-              Term.enum def_t blk
-              |> Seq.exists ~f:(fun d -> has_pos (Def.rhs d)))
-        in
-        vsa_positive || bil_positive
+        Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
+        |> Base.Option.value_map ~default:false ~f:(fun info ->
+            Core.Map.exists info.Convutils.offsets ~f:(fun kind ->
+                Convutils.is_positive_kind kind))
       in
       let is_main =
         String.equal (Sub.name sub) "@main"
