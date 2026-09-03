@@ -978,30 +978,30 @@ let run_regions () =
   check "R12-1: region_bytes positive and 16-byte aligned (fixtures)"
     (List.for_all
        (fun r ->
-         let b = B2l.region_bytes r in
+         let b = Hike.Stack_model.region_bytes r in
          Int64.compare b 0L > 0 && Int64.rem b 16L = 0L)
        [ r_sing; r_interval ]);
   (* R12-2: alloca covers raw payload. *)
   check "R12-2: region_bytes >= raw payload bytes"
     (List.for_all
-       (fun r -> Int64.compare (B2l.region_bytes r) (raw_bytes r) >= 0)
+       (fun r -> Int64.compare (Hike.Stack_model.region_bytes r) (raw_bytes r) >= 0)
        [ r_sing; r_interval ]);
   (* R12-3: monotone in span. *)
   check "R12-3: region_bytes monotone in span (strict under +16 cells)"
     (List.for_all
        (fun r ->
-         let b0 = B2l.region_bytes r in
-         let b1 = B2l.region_bytes (widen_span r 1L) in
-         let b2 = B2l.region_bytes (widen_span r 16L) in
+         let b0 = Hike.Stack_model.region_bytes r in
+         let b1 = Hike.Stack_model.region_bytes (widen_span r 1L) in
+         let b2 = Hike.Stack_model.region_bytes (widen_span r 16L) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
   (* R12-4: monotone in max_width. *)
   check "R12-4: region_bytes monotone in max_width (strict under x16)"
     (List.for_all
        (fun r ->
-         let b0 = B2l.region_bytes r in
-         let b1 = B2l.region_bytes (with_width r (2 * r.Hike.Convutils.max_width)) in
-         let b2 = B2l.region_bytes (with_width r (16 * r.Hike.Convutils.max_width)) in
+         let b0 = Hike.Stack_model.region_bytes r in
+         let b1 = Hike.Stack_model.region_bytes (with_width r (2 * r.Hike.Convutils.max_width)) in
+         let b2 = Hike.Stack_model.region_bytes (with_width r (16 * r.Hike.Convutils.max_width)) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
   (* R12-5: cap guard admits small fixtures, rejects huge span. *)

@@ -106,7 +106,6 @@ let set_section_initializer ctx llvm_ctx llvm_module g arr min_addr =
 (* Per-sub frame state. *)
 type sub_frame = {
   frame : Llvm.llvalue option;
-  min_lo : int64;
   (* Anchor byte index. *)
   anchor_idx : int64;
   anchor_i64 : Llvm.llvalue;
@@ -1736,7 +1735,7 @@ let create_control_flow llvm_builder blk sub fr () =
   | CallIndirect ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_indirect_call llvm_builder (Term.tid blk) call fr
-  | CallFun | CallFunVoid ->
+  | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call llvm_builder (Term.tid blk) blk sub call fr
 
@@ -1893,7 +1892,7 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
 
 
 (* Allocates the per-sub frame. *)
-let build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo =
+let build_frame_anchor llvm_ctx llvm_builder n anchor_idx =
   let frame =
     Llvm.build_alloca
       (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int n))
@@ -1909,7 +1908,7 @@ let build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo =
     Llvm.build_ptrtoint anchor (Llvm.i64_type llvm_ctx) "anchor_i64"
       llvm_builder
   in
-  (Some frame, min_lo, anchor_idx, anchor_i64)
+  (Some frame, anchor_idx, anchor_i64)
 
 let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
   let max_dec = ref 0L in
@@ -1978,16 +1977,6 @@ let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
 
 
 
-(* Returns the region alloca size. *)
-let region_bytes (r : Convutils.region) : int64 =
-  let lo, hi = r.Convutils.span in
-  let span_len = Int64.add (Int64.sub hi lo) 1L in
-  let raw = Int64.div (Int64.mul span_len (Int64.of_int r.Convutils.max_width)) 8L in
-  let raw = if Int64.compare raw 0L <= 0 then 1L else raw in
-  let r = Int64.rem raw 16L in
-  if Int64.equal r 0L then raw else Int64.add raw (Int64.sub 16L r)
-
-
 let create_sub sub =
   let open KB in
   if is_empty sub then return ()
@@ -2023,15 +2012,15 @@ let create_sub sub =
       | Some info -> info.Convutils.stack_plan
     in
     let is_precise = plan <> [] in
-    let frame, min_lo, anchor_idx, anchor_i64 =
-      if is_precise then (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
+    let frame, anchor_idx, anchor_i64 =
+      if is_precise then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else if Core.Map.is_empty tags then begin
           if Base.Option.value_map sub_info ~default:false ~f:(fun info ->
                 info.Convutils.degraded) then begin            let n, _, _, anchor_idx = degraded_dims ~abi sub in
-            let frame, _, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx (Int64.neg n) in
-            (frame, Int64.neg n, anchor_idx, anchor_i64)
+            let frame, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx in
+            (frame, anchor_idx, anchor_i64)
           end
-          else (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
+          else (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
         end
         else begin          let min_lo, max_hi =
             Core.Map.fold tags ~init:(0L, 0L)
@@ -2061,13 +2050,13 @@ let create_sub sub =
             Int64.mul (Int64.div n 16L) 16L
           in
           let anchor_idx = Int64.sub n 8L in
-          build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo
+          build_frame_anchor llvm_ctx llvm_builder n anchor_idx
         end
     in
     let regions =
       if is_precise then
         Base.List.mapi plan ~f:(fun _ r ->
-            let n = region_bytes r in
+            let n = Hike_stack_model.region_bytes r in
             let base =
               Llvm.build_alloca
                 (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int n))
@@ -2090,7 +2079,7 @@ let create_sub sub =
       bind_regions regions
     in
     let fr : sub_frame =
-      { frame; min_lo; anchor_idx; anchor_i64; stack = None; regions; is_precise }
+      { frame; anchor_idx; anchor_i64; stack = None; regions; is_precise }
     in
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= build_entry_block llvm_builder transfer_vars fr sub fn

@@ -415,7 +415,6 @@ let convert_binary output_program proj =
   setup proj;
   let target = Project.target proj in
   let ptrsize = Theory.Target.bits target in
-  let addr_bits = addr_size_bits target in
   let regions = get_named_region_info proj in
   (* Pass 1: data-section globals. *)
   let mk_section section_type ~is_const =
@@ -564,7 +563,6 @@ let convert_binary output_program proj =
       copy_relocs = copy_reloc_addrs_val;
       target;
       ptrsize;
-      addr_bits;
     }
   in
   let ctx, proj' = init_subs ctx llvm_ctx llvm_module section_list proj in

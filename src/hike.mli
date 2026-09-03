@@ -24,7 +24,6 @@ module Relevance : sig
   val has_stack_access : def term -> bool
 
   (** Tests for the stack pointer. *)
-  val is_sp : Theory.Target.t -> var -> bool
 end
 
 (** Per-sub stack offset ranges. *)
