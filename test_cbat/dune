@@ -1,6 +1,6 @@
 (test
- (name test_cbat)
- (modules test_cbat)
+ (name test_main)
+ (modules test_main test_common test_domains test_seed test_vsa test_backward test_regression test_properties test_dce)
  (flags
   (:standard -alert -deprecated))
  (libraries
