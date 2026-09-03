@@ -2416,7 +2416,7 @@ let refine_edge_inline
     ~(sub : sub term)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
-    : AI.t * refine_ctx option * Tid.Set.t =
+    : AI.t * refine_ctx * Tid.Set.t =
   
   (* Threaded context plus visited set. *)
   let ctx : analysis_ctx =
@@ -2428,7 +2428,7 @@ let refine_edge_inline
   let seeds =
     List.filter seeds ~f:(fun s -> match s with Infeasible -> false | _ -> true) in
   match seeds with
-  | [] -> (env, Some rctx, Tid.Set.empty)
+  | [] -> (env, rctx, Tid.Set.empty)
   | _ ->
     
     
@@ -2446,8 +2446,8 @@ let refine_edge_inline
     
     (* Cached walk with threaded context. *)
     (* No-defs callers keep the uncached walk. *)
-    let walk env seeds : AI.t * refine_ctx option * Tid.Set.t =
-      if discarded then (env, Some rctx, Tid.Set.empty)
+    let walk env seeds : AI.t * refine_ctx * Tid.Set.t =
+      if discarded then (env, rctx, Tid.Set.empty)
       else
       match defs with
       | Some _ ->
@@ -2458,7 +2458,7 @@ let refine_edge_inline
         (match Walk_memo.find ~version rc.rc_cache bt jt with
          | Some refined ->
            (* Walk reads subset the transfer reads. *)
-           (refined, Some rc, Tid.Set.empty)
+           (refined, rc, Tid.Set.empty)
          | None ->
            let walk_reads = ref (Tid.Set.singleton bt) in
            let refined, _live =
@@ -2471,11 +2471,11 @@ let refine_edge_inline
                rc_cache =
                  Walk_memo.add ~version rc.rc_cache bt jt
                    ~reads:!walk_reads refined } in
-           (refined, Some rc, !walk_reads))
+           (refined, rc, !walk_reads))
       | None ->
         let refined, _live =
           refine_edge ~sol ~rctx:rctx ~defs ~stores env sub b seeds in
-        (refined, Some rctx, Tid.Set.empty) in
+        (refined, rctx, Tid.Set.empty) in
     walk env seeds
 
 (* Denotation of a block's jumps. *)
@@ -2488,7 +2488,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     ~(rctx : refine_ctx)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (b : blk term)  (env : AI.t) ~(target : tid)
-    : AI.t * refine_ctx option * Tid.Set.t =
+    : AI.t * refine_ctx * Tid.Set.t =
   (* Fold joins per-jump results. *)
   let rc0 = rctx in
   let per_jump (acc, rctx, reads) jmp =
@@ -2522,7 +2522,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
            let env', rctx', reads' =
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
                ~flag_group ?refineable
-               ~rctx:(Option.value ~default:rc0 rctx) ~jt:(Term.tid jmp)
+               ~rctx:rctx ~jt:(Term.tid jmp)
                ~sub:s ~discarded b env acc_cond in
            (env', rctx', Core.Set.union reads reads')
          | None -> (env, rctx, reads))
@@ -2583,7 +2583,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
       | Ret (Indirect _) -> (env, rctx, reads) in
     (AI.join acc env_res, rctx, reads) in
   Seq.fold (reachable_jumps env (Term.enum jmp_t b))
-    ~init:(AI.bottom, Some rctx, Tid.Set.empty)
+    ~init:(AI.bottom, rctx, Tid.Set.empty)
     ~f:per_jump
 
 (* Block denotation toward a target. *)
@@ -2600,7 +2600,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(no_walk : bool option)
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t)
-    : target:tid -> AI.t * refine_ctx option * Tid.Set.t =
+    : target:tid -> AI.t * refine_ctx * Tid.Set.t =
  (* Threaded context plus read set. *)
  match (Program.lookup blk_t ctx source) with
    | Some b ->
@@ -2620,7 +2620,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
        (res, rctx', Core.Set.add reads (Term.tid b))
    | None -> fun ~target ->
        ignore (invalid_arg "source tid does not represent block");
-       (AI.bottom, Some rctx, Tid.Set.empty)
+       (AI.bottom, rctx, Tid.Set.empty)
 
 type vsa_sol = (tid, AI.t) Solution.t
 
@@ -2914,7 +2914,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                  (* Read set covers inputs. *)
                  let reads = Core.Set.add reads p in
                  rc_cell :=
-                   { (Option.value ~default:rc rc') with
+                   { rc' with
                      rc_out_cache =
                        Transfer_memo.add ~version rc.rc_out_cache p v
                          ~reads (res, fired) };
