@@ -215,8 +215,12 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
         |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
         |> fun regs -> regs @ hike_stack_arg
       in
-     (* PLT stubs take the full param list. *)
-     let is_plt_trampoline =
+     (* PLT stubs take the full param list. Signature-shape rule (args = []
+        + any call): distinct from the emitter's BIL-shape rule
+        (Bil2llvm.is_plt_trampoline: no reg free-vars + call) — the two
+        run on different inputs (pre-DCE raw sub vs post-DCE sub) and must
+        not be merged blindly. *)
+     let is_plt_sig =
        args = []
        && Term.enum blk_t sub
           |> Seq.exists ~f:(fun blk ->
@@ -227,7 +231,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
                         | _ -> false))
      in
      let args =
-       if is_plt_trampoline then
+       if is_plt_sig then
          Base.List.map (Abi.param_regs target)
            ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
        else args
@@ -488,8 +492,9 @@ let convert_binary output_program proj =
        let loads_and_stores : int64 list =
          Term.enum sub_t (Project.program proj) |> Seq.to_list
          |> Base.List.concat_map ~f:(fun sub ->
+             let stores = slot_stores sub in
              Base.List.filter (slot_loads sub) ~f:(fun v ->
-                 Base.List.mem (slot_stores sub) v ~equal:Int64.equal))
+                 Base.List.mem stores v ~equal:Int64.equal))
        in
        let stores_only : int64 list =
          Term.enum sub_t (Project.program proj) |> Seq.to_list

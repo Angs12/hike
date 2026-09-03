@@ -82,10 +82,11 @@ let is_real_call (j : jmp term) : bool =
 
 (* Tests whether a frame address escapes. *)
 
-(* Last stack def per call block. *)
-let last_push_tids_of (sub : sub term) : Tid.Set.t =
+(* Shared walk: per call block, the def list with the last stack-access
+   def's index. Both positional rules below are complements of it. *)
+let call_block_stack_tails (sub : sub term) : (def term list * int option) list =
   Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
+  |> Seq.fold ~init:[] ~f:(fun acc blk ->
          if
            Term.enum jmp_t blk
            |> Seq.exists ~f:is_real_call
@@ -96,11 +97,16 @@ let last_push_tids_of (sub : sub term) : Tid.Set.t =
              Base.List.foldi defs ~init:None ~f:(fun i acc d ->
                  if is_stack d then Some i else acc)
            in
-           match last with
-           | Some i ->
-               Core.Set.add acc (Term.tid (Base.List.nth_exn defs i))
-           | None -> acc
+           (defs, last) :: acc
          else acc)
+
+(* Last stack def per call block. *)
+let last_push_tids_of (sub : sub term) : Tid.Set.t =
+  Base.List.fold_left (call_block_stack_tails sub) ~init:Tid.Set.empty
+    ~f:(fun acc (defs, last) ->
+      match last with
+      | Some i -> Core.Set.add acc (Term.tid (Base.List.nth_exn defs i))
+      | None -> acc)
 
 let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   bool =
@@ -259,25 +265,14 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
   (* Call-tail defs are the outgoing-arg area. *)
   (* Tests for calls passing stack args. *)
   let outgoing_tail_tids : Tid.Set.t =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
-           if
-             Term.enum jmp_t blk
-             |> Seq.exists ~f:is_real_call
-           then
-             let defs = Term.enum def_t blk |> Seq.to_list in
-             let is_stack d = Term.has_attr d Hike_vsa_relevance.stack_access in
-             let last =
-               Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-                   if is_stack d then Some i else acc)
-             in
-             match last with
-             | Some i ->
-                 Base.List.take defs i
-                 |> Base.List.fold_left ~init:acc ~f:(fun acc d ->
-                         Core.Set.add acc (Term.tid d))
-             | None -> acc
-           else acc)
+    Base.List.fold_left (call_block_stack_tails sub) ~init:Tid.Set.empty
+      ~f:(fun acc (defs, last) ->
+        match last with
+        | Some i ->
+            Base.List.take defs i
+            |> Base.List.fold_left ~init:acc ~f:(fun acc d ->
+                    Core.Set.add acc (Term.tid d))
+        | None -> acc)
   in
    (* Tests for call-tail stack stores. *)
   (* Tests for RSP-relative stores below entry RSP. *)

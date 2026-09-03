@@ -139,7 +139,7 @@ let var_lltype var = typ_lltype_m (Var.typ var)
 
 (* Tests for FP arg registers. *)
 let is_fp_param (v : var) : bool =
-  Base.String.is_prefix (Var.name (Var.base v)) ~prefix:"YMM"
+  Base.String.is_prefix (Var.name (Var.base v)) ~prefix:Abi.vector_param_prefix
 
 let is_extern ctx (sub_tid : tid) : bool =
   not (Core.Map.mem ctx.Convutils.subs sub_tid)
@@ -341,12 +341,6 @@ let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
       in
       return (llvm_val1, llvm_val2)
 
-(* Routes fissioned accesses to region allocas. *)
-let is_region_mem_exp (e : exp) : bool =
-  match e with
-  | Bil.Var v -> Hike_stack_model.is_region_mem v
-  | _ -> false
-
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   let open KB in
   let* llvm_val1, llvm_val2 =
@@ -430,14 +424,16 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
       @@ Llvm.build_trunc temp_var
            (Llvm.integer_type llvm_ctx result_size) "" llvm_builder
 
+(* Finds the section containing a word address. *)
+let section_of_addr sections (addr : word) =
+  Base.List.find sections ~f:(fun section ->
+      Word.between ~low:section.min_addr addr ~high:section.max_addr)
+
 let resolve_addr llvm_builder addr =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* sections = Context.get section_list_var in
-  let section =
-    Base.List.find sections ~f:(fun section ->
-        Word.between ~low:section.min_addr addr ~high:section.max_addr)
-  in
+  let section = section_of_addr sections addr in
   match section with
   | None -> failwith "load: addr not found"
   | Some section ->
@@ -496,10 +492,7 @@ let create_load llvm_builder (addr, size) =
         with
         | Some c -> return c
         | None ->
-            if
-              Base.List.exists sections ~f:(fun section ->
-                  Word.between ~low:section.min_addr addr_w
-                    ~high:section.max_addr)
+            if Option.is_some (section_of_addr sections addr_w)
             then section_load llvm_builder llvm_ctx addr_w v size
             else
               let* ptr = create_inttoptr llvm_builder addr in
@@ -519,11 +512,9 @@ let create_store llvm_builder (llvm_var, addr) =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* sections = Context.get section_list_var in
   match Llvm.int64_of_const addr with
-  | Some v when
-      Base.List.exists sections ~f:(fun section ->
-          Word.between ~low:section.min_addr
-            (Word.of_int64 ~width:64 v) ~high:section.max_addr)
-    ->
+  | Some v
+    when Option.is_some
+           (section_of_addr sections (Word.of_int64 ~width:64 v)) ->
       let* base = resolve_addr llvm_builder (Word.of_int64 ~width:64 v) in
       return @@ Llvm.build_store llvm_var base llvm_builder
   | _ ->
@@ -649,19 +640,14 @@ let rec create_exp llvm_builder blk_tid exp =
   | Extract (hi, lo, exp) ->
       let* llvm_var = create_exp llvm_builder blk_tid exp in
       create_extract llvm_builder (hi, lo, llvm_var)
-  | Store (m, addr, data, _, _) when is_region_mem_exp m ->
-      (* Fissioned stores use region storage. *)
-      let* addr = create_exp llvm_builder blk_tid addr in
-      let* data = create_exp llvm_builder blk_tid data in
-      create_store llvm_builder (data, addr)
+  (* Fissioned AND ordinary memory ops emit identically: the rewrite
+     already materialized region storage into the address, so by emission
+     there is nothing left to dispatch on (the former mem-operand guard
+     arms were byte-identical to these fallthroughs and are deleted). *)
   | Store (_, addr, data, _, _) ->
       let* addr = create_exp llvm_builder blk_tid addr in
       let* data = create_exp llvm_builder blk_tid data in
       create_store llvm_builder (data, addr)
-  | Load (m, addr, _, size) when is_region_mem_exp m ->
-      (* Same routing for loads. *)
-      let* addr = create_exp llvm_builder blk_tid addr in
-      create_load llvm_builder (addr, Size.in_bits size)
   | Load (_, addr, _, size) ->
       let* addr = create_exp llvm_builder blk_tid addr in
       create_load llvm_builder (addr, Size.in_bits size)
@@ -1451,17 +1437,18 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
     | Some d -> create_exp llvm_builder blk_tid (Def.rhs d)
     | None -> create_exp llvm_builder blk_tid (Arg.rhs arg)
   in
+  (* Integer width of a value, defaulting to the declared input width. *)
+  let w_of v =
+    match Llvm.classify_type (Llvm.type_of v) with
+    | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
+    | _ -> in_w
+  in
   let result =
     match op with
     | FMUL | FADD | FSUB | FDIV | FREM ->
         (* Operand width comes from values. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
-        let w_of v =
-          match Llvm.classify_type (Llvm.type_of v) with
-          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
-          | _ -> in_w
-        in
         let w = min (w_of a) (w_of b) in
         build_fp_binop llvm_builder op a b ~w
     | SFLOAT ->
@@ -1510,11 +1497,6 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         (* Ordered less-than via fcmp olt. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
-        let w_of v =
-          match Llvm.classify_type (Llvm.type_of v) with
-          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
-          | _ -> in_w
-        in
         let w = min (w_of a) (w_of b) in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
         let bitcast v =
