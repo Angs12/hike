@@ -27,15 +27,15 @@ module Utils = Cbat_vsa_utils
 module Map_lattice = Cbat_map_lattice
 module Word_ops = Cbat_word_ops
 
-(* * We assume that all memories are byte-addressable. *)
+(* Memories are byte-addressable. *)
 let addressable_width = 8
 
 module Key = struct
-  (* invariant: lo <= hi TODO: allow empty intervals? TODO: use Clps/WordSets? *)
-  (* ALL address points are NATIVE — the program architecture's address size (the Target's [data_addr_size], set at production setup) is at most the host native word (64 bits): addresses cannot be larger, so no big-int key. *)
+  (* Invariant: lo <= hi. *)
+  (* Points fit in 64 bits; no big-int key. *)
   type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
-  type t = {lo : point; hi : point} [@@deriving bin_io, sexp]  (* the unsigned total order: width first (widths never mix within a map; the tiebreak is defensive), then the unsigned value. Uses the STDLIB Int64 (Stdlib.Int64) — Base's Int64 renames the bit ops and lacks [unsigned_compare]. *)
+  type t = {lo : point; hi : point} [@@deriving bin_io, sexp]  (* Unsigned order: width, then value. *)
   let compare_point (p1 : point) (p2 : point) : int =
     let c = Int.compare p1.pwidth p2.pwidth in
     if c <> 0 then c else Stdlib.Int64.unsigned_compare p1.pvalue p2.pvalue
@@ -47,14 +47,14 @@ module Key = struct
   let ge (p1 : point) (p2 : point) : bool = compare_point p1 p2 >= 0
   let min (p1 : point) (p2 : point) : point = if le p1 p2 then p1 else p2
   let max (p1 : point) (p2 : point) : point = if ge p1 p2 then p1 else p2
-  (* NB: bare [=] is int-monomorphic in this scope (Base's top-level [include Int.O] shadows it) — int64 equality must be qualified. *)
+  (* Int64 equality must be qualified. *)
   let is_zero (p : point) : bool = Stdlib.Int64.equal p.pvalue 0L
 
-  (* the low [w]-bit mask (w <= 64; w = 64 -> all ones) *)
+  (* Low [w]-bit mask. *)
   let mask (w : int) : int64 =
     if w >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L w)
 
-  (* wrap-around successor/predecessor at [pwidth] (Word.succ/pred semantics: max succ -> 0, 0 pred -> max) *)
+  (* Wrapping successor/predecessor. *)
   let succ (p : point) : point =
     {pwidth = p.pwidth;
      pvalue = if p.pwidth >= 64 then Stdlib.Int64.succ p.pvalue
@@ -64,7 +64,7 @@ module Key = struct
      pvalue = if p.pwidth >= 64 then Stdlib.Int64.pred p.pvalue
               else Stdlib.Int64.logand (Stdlib.Int64.pred p.pvalue) (mask p.pwidth)}
 
-  (* [of_word w]: A native point from an address word. *)
+  (* Point from an address word. *)
   let of_word (w : word) : point option =
     let bw = Word.bitwidth w in
     if bw <= 64 then
@@ -73,7 +73,7 @@ module Key = struct
       | Error _ -> None
     else None
 
-  (* [(hi - lo) mod m = 0] — the [find'] key-alignment check. [m] is the cell index width (a power of two, <= 64), so the mod is the low-bit mask; the subtraction is the unsigned wrap subtraction (lo <= hi by construction — min/max of the same pair). *)
+  (* Alignment check for [find']. *)
   let aligned_mod (lo : point) (hi : point) (m : int) : bool =
     Stdlib.Int64.equal
       (Stdlib.Int64.logand (Stdlib.Int64.sub hi.pvalue lo.pvalue) (mask m)) 0L
@@ -84,13 +84,13 @@ module Key = struct
         (lo, hi) (fun (lo, hi) -> Sexp.List[sexp_of_point lo;
                                             sexp_of_point hi])
 
-  (* The upper point is the last (byte) address that is writable at this key. *)
+  (* Last writable byte. *)
   let upper (k : t) : point = k.hi
 
-  (* The first writable byte is at the lowest address in the key *)
+  (* First writable byte. *)
   let lower (k : t) : point = k.lo
 
-  (* This function does not consider the widths since it compares the lowest writable addresses in the keys. *)
+  (* Compares lowest addresses; ignores widths. *)
   let compare (k1 : t) (k2 : t) : int =
     compare_point (lower k1) (lower k2)
 
@@ -106,10 +106,10 @@ module Key = struct
     WordSet.max_elem p >>= fun hi_w ->
     (match of_word lo_w, of_word hi_w with
      | Some lo, Some hi when le lo hi -> Some {lo; hi}
-     | Some lo, Some hi -> Some {lo = hi; hi = lo} (* hull is order-independent *)
+     | Some lo, Some hi -> Some {lo = hi; hi = lo} (* order-independent hull *)
      | _ -> None)
 
-  (* Produces a key that contains all addresses in both inputs. *)
+  (* Hull of both inputs. *)
   let union (k1 : t) (k2 : t) : t =
     {lo = min (lower k1) (lower k2);
      hi = max (upper k1) (upper k2)}
@@ -121,7 +121,7 @@ module Key = struct
 
   type 'a up_to_two = [`none | `one of 'a | `two of 'a * 'a]
 
-  (* resulting intervals may not be ordered *)
+  (* Results may be unordered. *)
   let interval_diff (k1 : t) (k2 : t) : t up_to_two =
     if lt (lower k1) (lower k2) then
       if lt (upper k1) (lower k2) then `one k1
@@ -133,22 +133,22 @@ module Key = struct
       if gt (upper k1) (upper k2) then
         `one {lo=succ k2.hi; hi=k1.hi}
       else `none
-    else `one k1 (* lower k1 > upper k2 *)
+    else `one k1 (* disjoint *)
 
-  (* Takes an ordered sequence of key-value pairs and returns an ordered sequence of the gaps between them paired with the input value within the bounds of k. TODO: check all cases at the bounds (hi = 0xFFF...) *)
+  (* Gaps between cells within [k]. *)
   let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
-    (* compute what (and whether) the next lower point is *)
+    (* Next point, if any. *)
     let next_pt pt =
       let next = succ pt in
       Option.some_if (not (is_zero next)) next in
-    (* given a low point to start from, generate the next element in the sequence. *)
+    (* Next gap from a start point. *)
     let running_step' pt (k',_) =
       let hi = min k.hi k'.lo in
       if gt pt k.hi then Seq.Step.Done
       else if le pt hi then Seq.Step.Yield
           {value = ({lo=pt; hi}, v); state = next_pt hi}
       else Seq.Step.Skip {state = next_pt (max hi pt)} in
-    (* computes the last gap after the input sequence ends *)
+    (* Final gap. *)
     let finishing_step' pt =
       if le pt k.hi then Seq.Step.Yield
           {value = ({lo = pt; hi = k.hi}, v); state = next_pt k.hi}
@@ -183,16 +183,16 @@ module Key = struct
       let res = {lo=k2.lo;hi=pred k1.lo} in
       let newK2 = {lo=k1.lo;hi=k2.hi} in
       Right, res, Some (Seq_ME.Both (k1, newK2))
-    else if lt k1.hi k2.hi then (* k1.lo = k2.lo *)
+    else if lt k1.hi k2.hi then (* equal lows *)
       let newK2 = {lo=succ k1.hi;hi=k2.hi} in
       Both_sides, k1, Some (Seq_ME.Right newK2)
     else if lt k2.hi k1.hi then
       let newK1 = {lo=succ k2.hi;hi=k1.hi} in
       Both_sides, k2, Some (Seq_ME.Left newK1)
-    else (* k1.hi = k2.hi *)
+    else (* equal highs *)
       Both_sides, k1, None
 
-  (* takes two ordered sequences of non-overlapping keys and returns an ordered sequence of non-overlapping keys with the side they came from. *)
+  (* Merge two key sequences with sides. *)
   let seq_product (s1 : t seq) (s2 : t seq) : (side * t) seq =
     let combined = Seq.merge_with_duplicates s1 s2 ~compare:compare in
     Seq.unfold_step ~init:combined ~f:begin fun s ->
@@ -214,7 +214,7 @@ module Key = struct
 
 end
 
-(* Represents the values stored at each key in an internal interval tree. Contains a WordSet and ancillary data. *)
+(* Value stored at each key. *)
 module Val : sig
 
   type t [@@deriving bin_io, sexp, compare]
@@ -287,7 +287,7 @@ end = struct
   let top (w, e : idx) : t = {data = WordSet.top w; endian = e}
   let bottom (w, e : idx) : t = {data = WordSet.bottom w; endian = e}
 
-  (* Ported from the prior-art cbat_value_set fork. *)
+  
   let equal v1 v2 =
     if idx_equal (get_idx v1) (get_idx v2)
     then WordSet.equal v1.data v2.data
@@ -298,7 +298,7 @@ end = struct
     then WordSet.precedes v1.data v2.data
     else false
 
-  (* Joining/meeting two memory cells whose indices (width, endian) differ is unsound to perform directly: cells of the same width but different endianness (or different widths above the addressable unit) represent incompatible abstractions. *)
+  (* Mismatched indices meet/join to top/bottom of the max width. *)
   let join (v1 : t) (v2 : t) : t =
     if idx_equal (get_idx v1) (get_idx v2)
     then {data = WordSet.join v1.data v2.data; endian = v1.endian}
@@ -324,7 +324,7 @@ end = struct
   let pp ppf (v : t) =
     Format.fprintf ppf "@[%s %a@]" (Word_ops.endian_string v.endian) WordSet.pp v.data
 
-  (* Helper function; splits a WordSet into a sequence of WordSets of length w. w should be a factor of p's width. *)
+  (* Split a set into width-[w] pieces. *)
   let segment_wordset (p : WordSet.t) (w : int) : WordSet.t seq =
     let p_sz = WordSet.bitwidth p in
     assert(w mod addressable_width = 0);
@@ -333,7 +333,7 @@ end = struct
       let hi = lo + (w - 1) in
       if lo >= p_sz then None
       else if hi >= p_sz then
-        (* E2e-A, ora-7 — provably unreachable: the only call site (:365, [cast_seq]) is guarded by [p_sz mod sz = 0], and [replicate_wordset] guarantees [p_sz mod sz = 0] — so the loop always lands exactly on p_sz. *)
+        (* Unreachable: sizes divide evenly. *)
         Utils.not_implemented ~top:None
           "Wordset segmented by non-factor size"
       else Option.return (WordSet.extract ~hi ~lo p, hi + 1)
@@ -341,20 +341,20 @@ end = struct
 
   let reverse_seq : 'a seq -> 'a seq = Fn.compose Seq.of_list Seq.to_list_rev
 
-(* Returns a sequence of values ordered from lowest address to highest *)
-(* TODO: fold into cast_seq? *)
+(* Values lowest address first. *)
+
 let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
     let sz = if Bitvector.compare_endian e v.endian = 0 then sz else addressable_width in
     let w, e = get_idx v in
     let top = Seq.singleton @@ WordSet.top sz in
     if w = sz then
-      (* The same-width fast path — the common case (a cell read at its stored width) skips the segment/sequence machinery entirely; the profiled hot path is ZArith/GC in the bitvector ops, and the Seq/segment wrapper multiplied it. *)
+      (* Same width: direct. *)
       Seq.singleton v.data
     else if w < sz then
-      (* A value of width [w] read at the WIDER width [sz] — the unknown high (LE) / low (BE) bytes are NOT the value's own bytes. *)
+      (* Wider read: unknown bytes. *)
       top
     else if WordSet.bitwidth v.data mod sz > 0 then
-      (* Lane C — non-divisor geometry has NO sound precise form: zero-padding the value to the next multiple would claim zero for the pad bits on a wider read (the memory there is unknown — unsound); padding with unknowns is. *)
+      (* Non-divisor width: top. *)
       Utils.not_implemented ~top
         (Printf.sprintf "%i-val cast to incompatible size %i" w sz)
     else let wordset_seq = segment_wordset v.data sz in
@@ -370,7 +370,7 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
       && Bitvector.compare_endian e v1.endian = 0
       && Bitvector.compare_endian e v2.endian = 0
     then
-      (* The same-width fast path — the common same-width cell join/meet skips the cast/zip/sequence machinery (precision-identical: the generic path's single segment pair is the direct op). *)
+      (* Same width: direct. *)
       Seq.singleton (op v1.data v2.data)
     else
     let seq1 = cast_seq (sz, e) v1 in
@@ -391,7 +391,7 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
       && Bitvector.compare_endian e v1.endian = 0
       && Bitvector.compare_endian e v2.endian = 0
     then
-      (* The same-width direct op — the profiled hot path (the find'/join_at cell reads) skips the segment placement + join machinery entirely. *)
+      (* Same width: direct. *)
       create (op v1.data v2.data) e
     else
     let wordset_seq  = op_at_seq op (sz, e) v1 v2 in
@@ -408,7 +408,7 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
     |> Seq.reduce_exn ~f:WordSet.join
     |> fun p -> create p e
 
-  (* Computes the op of two tree values with possibly differring indices. The result has the maximum of the two values' sizes. Note that this operation is not commutative since it has the endianness of the right argument. *)
+  (* Op at the max width with the right endianness. *)
   let op_poly (op : WordSet.t -> WordSet.t -> WordSet.t) (v1 : t) (v2 : t) : t =
     let w1, _ = get_idx v1 in
     let w2, _ = get_idx v2 in
@@ -440,14 +440,14 @@ let bottom (i : idx) : t =
   assert(i.addressable_width = addressable_width);
   {itree=None; width=i.addr_width}
 
-(* A note on complexity: A number of the operations used internally are linear in the number of overlaps in the tree. *)
+(* Many ops are linear in overlaps. *)
 
-(* dynamic keys implementation *)
-(* TODO: issues: endianness, width. Current implementation does not handle variable endianness or width properly. These must be addressed. TODO: performance: the add functions all sometimes split existing intervals. This might usually work, but could cause pathological blowup *)
 
-(* TODO: Currently, some memory entries are repeated. This should not affect the results, but is an unnecessary use of memory. Fix this. *)
+
+
+
 let op_add' op (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
-  (* Single-pass: collect the intersecting cells AND remove them in ONE pruned descent (the O2 rewrite — the old code made two separate [intersections] + [remove_intersections] traversals of the same spine). *)
+  (* Collect and remove intersections in one descent. *)
   let ints, rest = IT.collect_remove_intersections m k in
   let gaps = Key.gaps (Val.top (Val.get_idx d)) k ints in
   let overlaps = Seq.append gaps ints in
@@ -455,9 +455,9 @@ let op_add' op (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t 
     Seq.fold overlaps ~init:rest ~f:begin fun rest (k',d') ->
       let newD = op d d' in
       let k_int = Key.intersection k k' in
-      (* Update the range of the key that overlaps the add *)
+      (* Overlapping range. *)
       let rest = IT.add rest k_int newD in
-      (* Replace the range(s) of the key that do not overlap *)
+      (* Non-overlapping ranges. *)
       match Key.interval_diff k' k with
       | `none -> rest
       | `one k1 -> IT.add rest k1 d'
@@ -469,21 +469,21 @@ let op_add op (m : t) : key:Key.t -> data:Val.t -> t = match m.itree with
   | None -> fun ~key:_ ~data:_ -> {itree=None; width=m.width}
   | Some t -> op_add' op t m.width
 
-(* Adds the new value by joining it with prior overlapping values *)
+(* Join-add. *)
 let join_add : t -> key:Key.t -> data:Val.t -> t = op_add Val.join_poly
 
-(* Adds the new value by meeting it with prior overlapping values *)
+(* Meet-add. *)
 let meet_add : t -> key:Key.t -> data:Val.t -> t = op_add Val.meet_poly
 
-(* [meet_range m ~key ~data]: The RANGED meet (the trace-partitioning subtraction substrate, docs/trace-partitioning-plan.md §3) — meet [data] into every cell of [m] whose key intersects [key]: the overlapping cells' values meet [data] (the. *)
+(* Meet [data] into intersecting cells. *)
 let meet_range (m : t) ~key ~data : t = meet_add m ~key ~data
 
-(* [call_keep m ~keep_lo ~escape]: The caller-frame-preserving call abstraction (the fix for the precision gap where every call topped the WHOLE memory — docs/trace-partitioning-plan.md §10, the "call abstraction" lane). *)
+(* Keep cells at/above [keep_lo] outside [escape]. *)
 let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
   match m.itree with
   | None -> m
   | Some it ->
-    (* the caller-side words convert to native points ONCE; a word wider than the native 64 bits is un-keyable -> no refinement (the sound over-approximation). *)
+    (* Unkeyable words keep the input. *)
     let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
         match Key.of_word lo, Key.of_word hi with
         | Some lo, Some hi -> Some (lo, hi)
@@ -501,7 +501,7 @@ let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
        {itree = Some kept; width = m.width}
      | _ -> m)
 
-(* [store_merge d d']: The width-aware point-store merge (the fix for the heritage "op is unsound in the case that d' is longer than d" TODO). *)
+(* Width-aware point-store merge. *)
 let store_merge (d : Val.t) (d' : Val.t) : Val.t =
   let w = WordSet.bitwidth (Val.data d) in
   let w' = WordSet.bitwidth (Val.data d') in
@@ -509,7 +509,7 @@ let store_merge (d : Val.t) (d' : Val.t) : Val.t =
     let _, e = Val.get_idx d in
     let _, e' = Val.get_idx d' in
     if Bitvector.compare_endian e e' = 0 then
-      (* (d' & mask_hi) | zext(d) — the low [w] bits replaced, the high bits kept. The mask: bits [0, w) cleared. *)
+      (* Low bits replaced, high bits kept. *)
       let mask =
         WordSet.lnot
           (WordSet.cast Bil.UNSIGNED w'
@@ -522,23 +522,23 @@ let store_merge (d : Val.t) (d' : Val.t) : Val.t =
     else d
   else d
 
-(* Adds the new value by overwriting the prior value if it can only be written to one location and joining it with the prior overlapping values otherwise. *)
+(* Point store overwrites; else joins. *)
 let add (m : t) ~key : data:Val.t -> t =
   if Key.equal (Key.lower key) (Key.upper key) then op_add store_merge m ~key
   else join_add m ~key
 
-(* [fold_intersections ~default m k ~f]: fold over the key's intersecting cells, seeded with the first — the [find']/ [find_idx'] scaffold ([f] receives the first cell, the full intersection sequence, and its tail). *)
+(* Fold intersecting cells. *)
 let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)
     ~(f : Val.t -> (Key.t * Val.t) seq -> (Key.t * Val.t) seq -> 'a) : 'a =
   let ints = IT.intersections m k in
   Option.value_map ~default (Seq.next ints) ~f:(fun ((_, hd), tl) ->
       f hd ints tl)
 
-(* Retrieves a WORDSET representing the set of possible values stored at the given key and with the given index. *)
+(* Values stored at a key. *)
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
   fold_intersections ~default:(Val.top i) m k ~f:(fun hd ints _ ->
-    (* Mapping back over ints will cause join_at i to be called every time. This ensures that the result has the correct width even when there is only one intersection. *)
+    (* Join each cell so the width is exact. *)
     Seq.fold ints ~init:hd ~f:(fun v (k',v') ->
         let lo_key_start = Key.min (Key.lower k) (Key.lower k') in
         let hi_key_start = Key.max (Key.lower k) (Key.lower k') in
@@ -549,7 +549,7 @@ let find (i : Val.idx) (m : t) (k : Key.t) = match m.itree with
   | None -> Val.bottom i
   | Some t -> find' i t k
 
-(* Retrieves the index of values referenced at the given key. *)
+(* Index of values at a key. *)
 let find_idx' (m : itree) (k : Key.t) : Val.idx =
   fold_intersections ~default:Val.Idx.top m k ~f:(fun hd _ tl ->
     Seq.map ~f:(Fn.compose Val.get_idx snd) tl
@@ -559,12 +559,12 @@ let find_idx (m : t) (k : Key.t) : Val.idx = match m.itree with
   | None -> Val.Idx.top
   | Some t -> find_idx' t k
 
-(* Note that the behavior of precedes is non-intuitive due to the definition of Wordset union. *)
+(* Order via cellwise precedes. *)
 let precedes' (m1 : itree) (m2 : itree) : bool =
   let m1_seq = IT.to_sequence m1 in
   let m2_seq = IT.to_sequence m2 in
   Seq.for_all m1_seq ~f: begin fun (k, v) ->
-    (* If the key overlaps a space, v must precede m2's default *)
+    (* Gaps precede the default. *)
     (IT.dominates m2 k ||
      Val.precedes v (Val.top (Val.get_idx v))) &&
     Seq.for_all (IT.intersections m2 k) ~f:begin fun (_,v') ->
@@ -572,7 +572,7 @@ let precedes' (m1 : itree) (m2 : itree) : bool =
     end
   end &&
   Seq.for_all m2_seq ~f: begin fun (k, v) ->
-    (* If the key overlaps a space, m2's default must precede v *)
+    (* Default precedes gaps. *)
     (IT.dominates m2 k ||
      Val.precedes (Val.top (Val.get_idx v)) v) &&
     Seq.for_all (IT.intersections m2 k) ~f:begin fun (_,v') ->
@@ -587,11 +587,11 @@ let precedes (m1 : t) (m2 : t) : bool =
   | Some _, None -> false
   | Some t1, Some t2 -> precedes' t1 t2
 
-(* TODO: check *)
+
 let equal' (m1 : itree) (m2 : itree) : bool =
   Seq.for_all (IT.to_sequence m1) ~f: begin fun (key, d1) ->
     let d2 = find' (Val.get_idx d1) m2 key in
-    (* d1 = find ... m1 key since all keys are disjoint *)
+    (* Keys are disjoint. *)
     Val.equal d1 d2
   end && Seq.for_all (IT.to_sequence m2) ~f: begin fun (key, d2) ->
     let d1 = find' (Val.get_idx d2) m1 key in
@@ -602,20 +602,20 @@ let equal (m1 : t) (m2 : t) : bool =
   assert(m1.width = m2.width);
   Option.equal equal' m1.itree m2.itree
 
-(* Note that this definition of join, while sound, can greatly increase the size of memory. *)
-(* A7e, loop attempt 11 (user-approved; the A7d deep-profile root cause) — drop TOP-VALUED cells from join'/widen_join' results. *)
-(* One-pass per-merge canonize (the merged strip_tops + coalesce; user directive, ora-1): (1) drop top-valued cells inline (the A7e strip — absent=top, so a dropped cell is read-equivalent; dropping never creates. *)
+(* Join may grow the tree. *)
+
+(* Drop top cells; merge adjacent ones. *)
 let coalesce (it : itree) : itree =
   IT.to_sequence it
   |> Seq.fold ~init:(IT.empty, None) ~f:(fun (acc, pending) (k, v) ->
       if Val.equal v (Val.top (Val.get_idx v))
-      then (acc, pending) (* inline top drop *)
+      then (acc, pending) (* drop top *)
       else match pending with
         | None -> (acc, Some (k, v))
         | Some (pk, pv) when Key.equal (Key.lower k) (Key.lower pk) ->
             (acc, Some ({Key.lo = Key.lower pk;
                          Key.hi = Key.max (Key.upper pk) (Key.upper k)},
-                        Val.join_poly pv v)) (* equal-lower merge *)
+                        Val.join_poly pv v)) (* merge *)
         | Some (pk, pv) when Val.equal pv v &&
             (let nxt = Key.succ (Key.upper pk) in
              not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
@@ -624,13 +624,13 @@ let coalesce (it : itree) : itree =
   |> fun (acc, pending) ->
   Option.fold ~init:acc pending ~f:(fun acc (k, v) -> IT.add acc k v)
 
-(* [fold_keys op m1 m2]: the seq_product key walk shared by the join and the meet — per section of the merged key sequence, compute the best index compatible with all of the data at the key and combine the two sides' values with [op]. *)
+(* Shared key walk for join and meet. *)
 let fold_keys (op : Val.t -> Val.t -> Val.t) (m1 : itree) (m2 : itree) : itree =
   let m1_seq = Seq.map ~f:fst (IT.to_sequence m1) in
   let m2_seq = Seq.map ~f:fst (IT.to_sequence m2) in
   let keys = Key.seq_product m1_seq m2_seq in
   Seq.fold keys ~init:IT.empty ~f: begin fun it (s, key) ->
-    (* Get the best index compatible with all of the data stored at this key *)
+    (* Best index for this key. *)
     let idx = match s with
       | Key.Left -> find_idx' m1 key
       | Key.Right -> find_idx' m2 key
@@ -652,7 +652,7 @@ let lift_join f (m1 : t) (m2 : t) : t =
   | Some t1, Some t2 -> {itree=Some (f t1 t2); width=m1.width}
   | Some _, None -> m1
   | None, Some _ -> m2
-  | None, None -> m1 (* m1 = m2 = bottom *)
+  | None, None -> m1 (* both bottom *)
 
 let join : t -> t -> t = lift_join join'
 
@@ -675,7 +675,7 @@ let widen_join_op (w : Val.t -> Val.t -> Val.t) : t -> t -> t =
 let widen_join = widen_join_op Val.widen_join
 
 
-(* Note that this definition of meet, while sound, can greatly increase the size of memory. *)
+(* Meet may grow the tree. *)
 let meet' (m1 : itree) (m2 : itree) : itree =
   fold_keys Val.meet m1 m2
 
@@ -686,7 +686,7 @@ let meet (m1 : t) (m2 : t) : t =
   | None, _ -> {itree=None; width=m1.width}
   | _, None -> {itree=None; width=m1.width}
 
-(* TODO: the pp filter does not produce a unique form (byte-endianness, maybe more). *)
+
 let pp ppf (m : t) : unit =
   let itree = Option.map m.itree ~f:(IT.filter ~f:(fun d ->
       not (Val.equal d (Val.top (Val.get_idx d))))) in

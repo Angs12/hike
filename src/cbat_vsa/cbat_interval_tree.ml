@@ -52,7 +52,7 @@ module Make(Interval : Interval) = struct
   type point = Interval.point [@@deriving compare, sexp_of]
 
 
-  (* Instead of a usual [Empty|Node of _] we use [node option] type to represent the tree. *)
+  (* Trees are [node option]. *)
   type +'a node = {
     lhs : 'a node option;
     rhs : 'a node option;
@@ -103,17 +103,17 @@ module Make(Interval : Interval) = struct
   let bal l x d r =
     let hl,hr = height l, height r in
     if hl > hr + 2 then
-      (* left too heavy: [l] is necessarily non-empty (hl > hr + 2 >= 2), and the rotation's inner child is forced too (see below). *)
+      (* Left too heavy; rotation children exist. *)
       let t = Option.value_exn l in
       if height t.lhs >= height t.rhs then
         create t.lhs t.key t.data (create t.rhs x d r)
       else
-        (* height t.lhs < height t.rhs forces t.rhs non-empty (as a valid AVL node |Δheight| <= 1, so height t.rhs >= 1). *)
+        (* Inner child exists. *)
         let rhs = Option.value_exn t.rhs in
         create (create t.lhs t.key t.data rhs.lhs) rhs.key rhs.data
           (create rhs.rhs x d r)
     else if hr > hl + 2 then
-      (* right too heavy: [r] is necessarily non-empty, and the rotation's inner child is forced too (symmetric). *)
+      (* Right too heavy; rotation children exist. *)
       let t = Option.value_exn r in
       if height t.rhs >= height t.lhs then
         create (create l x d t.lhs) t.key t.data t.rhs
@@ -223,7 +223,7 @@ module Make(Interval : Interval) = struct
     Interval.(Point.(lower x = lower y) && Point.(upper x = upper y))
 
 
-  (* This will remove the exact matches. Note: since we allow equal bindings in map we should move through all sub-tree, but it will be still logarithmic. *)
+  (* Removes exact matches. *)
 
   let rec remove map mem = match map with
     | None -> None
@@ -247,7 +247,7 @@ module Make(Interval : Interval) = struct
       ~leave_if:can't_be_in_tree
       ~remove_if:has_intersections
 
-  (* [collect_remove_intersections map mem]: The combined collect+remove — returns the intersecting cells IN-ORDER (identical to [intersections]) and the tree with them removed (identical to [remove_intersections]), in ONE pruned descent instead of two. *)
+  (* Collect and remove intersections in one descent. *)
   let collect_remove_intersections map mem =
     let rec go = function
       | None -> (Seq.empty, None)
@@ -292,8 +292,8 @@ module Make(Interval : Interval) = struct
     in
     start |> go |> run
 
-  (* we do not use include Container.Make(...) per the jane street *)
-  (* `core_kernel` `container.ml` best practice documentation *)
+  (* Custom container wrapper. *)
+
   module C = Container.Make(
     struct
       type 'a t = 'a node option

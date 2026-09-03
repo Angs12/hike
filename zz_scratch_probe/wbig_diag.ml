@@ -1,18 +1,5 @@
-(* wbig_diag - the w_big ADDRESS inspection driver (the -O0 corpus window
-   >= 2^63 class). Recreated 2026-08-31 (Item 1 of the architecture
-   program); vsa-debug profile only.
-
-   Usage: wbig_diag.exe <binary>
-
-   For EVERY sub: runs the production producer ([Hike.Vsa.offsets_of_sub])
-   and the full fixpoint, walks its defs re-applying [Vsa.denote_def]
-   (the precision_probe walk shape) and prints one line per def whose
-   ADDRESS WordSet has a window >= 2^63 (the w_big class): sub, blk, def
-   lhs, the rhs, the address value-set bounds, and whether a call jmp
-   exists in the same block. Ends with a per-sub w_big count. Per-sub
-   try/with like corpus_watch: an assert in offsets_of_sub on an
-   unfiltered sub (the 100% tagging assertion is not vacuous on subs the
-   production FILTER skips) is reported and skipped, never fatal. *)
+(* Prints one line per def whose address window is >= 2^63, plus per-sub counts.
+   Usage: wbig_diag.exe <binary>; unfiltered subs that fail tagging report and skip. *)
 
 open Bap.Std
 open Probe_common

@@ -1,11 +1,4 @@
-(* test_relevance.ml — fixture tests locking the two-tag contract for the returning reader.
-
-   Tasks from 04-fixture-test-gates.md:
-   - (a) SP-derived Load + chain v := RSP + k; w := v + c proves stack_access ⊆ relevant and phi contribution
-   - (b) RBP := RSP then Load(RBP) proves RBP alone does NOT seed, only SP does; also RDI := 0 alone proves NOT relevant unless it flows into (a).
-
-   Style mirrors test_cbat.ml: check name bool, failures counter, final line.
-*)
+(* Fixture tests for the two-tag contract: stack_access ⊆ relevant. *)
 
 open Bap.Std
 
@@ -19,19 +12,8 @@ let w64 = Word.of_int ~width:64
 let failures = ref 0
 let xfailures = ref 0
 
-(* [xfail_names]: the assertions that document KNOWN-BROKEN behaviour. They
-   are reported as "xfail" (and counted) instead of being silenced, so the
-   gate is honest about what it does not yet prove.
-
-   Both entries are ONE root cause: [Hike.Relevance.analyze] walks [def_t]
-   only — it has no [phi_t] case anywhere, so a Stack Access whose address
-   arrives through a phi is never tagged. CONTEXT.md defines Relevance over
-   "defs and phis"; the implementation covers defs. Sound (an untagged access
-   stays real memory) but imprecise.
-     - a2: the phi-join fixture (address = phi(RSP+8, RSP+16)).
-     - b5: the post-reload case is the SAME gap seen from the other side — the
-       reload's result var is SP-derived in neither channel, and the phi-less
-       walk has no way to re-derive it. *)
+(* Known-broken: [analyze] walks [def_t] only — no [phi_t] case, so phi-carried
+   addresses stay untagged (a2), as do their reloads (b5). Reported, never silenced. *)
 let xfail_names =
   [ "a2: phi-join Load is stack_access (phi propagated SP-derived)"
   ; "a2: Load is relevant"
@@ -43,7 +25,7 @@ let xfail_names =
 
 let check (name : string) (b : bool) : unit =
   if List.mem name xfail_names then (
-    (* Known-broken: report the REAL outcome, never fake a pass. *)
+    (* Report the real outcome, never fake a pass. *)
     if b then (
       Printf.printf "XPASS: %s (was expected to fail — reclassify!)\n" name;
       incr failures)
@@ -80,9 +62,7 @@ let check_stack_access_subset_relevant (sub : sub term) : bool =
   all_defs sub |> List.for_all (fun d ->
       if has_stack_access d then is_relevant_def d else true)
 
-(* Fixture (a1): single-block chain v := RSP + k; w := v + c; t := Load(m, w)
-   Proves stack_access ⊆ relevant and transitive relevance through chain within same block.
-*)
+(* Fixture a1: v := RSP + k; w := v + c; t := Load(m, w). *)
 let mk_chain_sub () : sub term * def term * def term * def term =
   let v = Var.create ~is_virtual:true ~fresh:false "a_v" (Type.Imm 64) in
   let w = Var.create ~is_virtual:true ~fresh:false "a_w" (Type.Imm 64) in
@@ -113,9 +93,7 @@ let () =
   check "a1: w := v + c is relevant (flows into stack access)" (is_relevant_def w');
   check "a1: v := RSP + k is relevant (transitive chain, same block)" (is_relevant_def v')
 
-(* Fixture (a2): phi contribution — two predecessors each define x := RSP + const, join has phi w := phi(x1,x2), Load(w).
-   Proves phi path propagates SP-derived through phi and marks sources relevant.
-*)
+(* Fixture a2: phi joins two SP-derived defs; Load reads the phi. *)
 let mk_phi_sub () : sub term * def term * def term * phi term * def term =
   let x1 = Var.create ~is_virtual:true ~fresh:false "p_x1" (Type.Imm 64) in
   let x2 = Var.create ~is_virtual:true ~fresh:false "p_x2" (Type.Imm 64) in
@@ -126,7 +104,6 @@ let mk_phi_sub () : sub term * def term * def term * phi term * def term =
   let def_x1 = Def.create x1 (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Int (w64 8))) in
   let def_x2 = Def.create x2 (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Int (w64 16))) in
   let def_load = Def.create t (Bil.Load (Bil.Var m, Bil.Var w, LittleEndian, `r64)) in
-  (* blocks *)
   let b1_b = Blk.Builder.create () in
   let b2_b = Blk.Builder.create () in
   let join_b = Blk.Builder.create () in
@@ -136,7 +113,6 @@ let mk_phi_sub () : sub term * def term * def term * phi term * def term =
   let b2_tmp = Blk.Builder.result b2_b in
   let tid1 = Term.tid b1_tmp in
   let tid2 = Term.tid b2_tmp in
-  (* phi w := phi(b1:x1, b2:x2) *)
   let phi_w = Phi.of_list w [(tid1, Bil.Var x1); (tid2, Bil.Var x2)] in
   Blk.Builder.add_phi join_b phi_w;
   Blk.Builder.add_def join_b def_load;
@@ -144,7 +120,6 @@ let mk_phi_sub () : sub term * def term * def term * phi term * def term =
   let join_tid = Term.tid join_tmp in
   let b1_tid = tid1 in
   let b2_tid = tid2 in
-  (* rebuild with jumps *)
   let entry_b2 = Blk.Builder.create () in
   Blk.Builder.add_jmp entry_b2 (Jmp.create ~cond:(Bil.Var f) (Goto (Direct b1_tid)));
   Blk.Builder.add_jmp entry_b2 (Jmp.create ~cond:(Bil.UnOp (Bil.NOT, Bil.Var f)) (Goto (Direct b2_tid)));
@@ -161,7 +136,6 @@ let mk_phi_sub () : sub term * def term * def term * phi term * def term =
   Sub.Builder.add_blk sub_b b2_2;
   Sub.Builder.add_blk sub_b join_tmp;
   let sub = Sub.Builder.result sub_b in
-  (* fetch actual phi from join_tmp *)
   let actual_phi =
     match Term.enum phi_t join_tmp |> Seq.to_list with
     | [ph] -> ph
@@ -187,7 +161,7 @@ let () =
    | Some ph -> check "a2: phi w is relevant (phi contribution)" (is_relevant_phi ph)
    | None -> check "a2: phi w is relevant (phi contribution)" false)
 
-(* Fixture (b1): RBP alone does NOT seed — Load(RBP) where RBP := 42 (not SP-derived) *)
+(* Fixture b1: RBP := 42; Load(RBP) — RBP alone does not seed. *)
 let mk_rbp_alone_sub () : sub term * def term * def term =
   let m = Var.create ~is_virtual:false ~fresh:false "b1_m" (Type.Mem (`r64, `r8)) in
   let t = Var.create ~is_virtual:true ~fresh:false "b1_t" (Type.Imm 64) in
@@ -212,7 +186,7 @@ let () =
   check "b1: Load(RBP) not relevant" (not (is_relevant_def load'));
   check "b1: stack_access ⊆ relevant vacuously holds" (check_stack_access_subset_relevant sub')
 
-(* Fixture (b2): RBP := RSP then Load(RBP) — proves SP seeds, RBP derived via SP is stack_access *)
+(* Fixture b2: RBP := RSP; Load(RBP) — SP seeds via RBP. *)
 let mk_rbp_via_sp_sub () : sub term * def term * def term =
   let m = Var.create ~is_virtual:false ~fresh:false "b2_m" (Type.Mem (`r64, `r8)) in
   let t = Var.create ~is_virtual:true ~fresh:false "b2_t" (Type.Imm 64) in
@@ -237,7 +211,7 @@ let () =
   check "b2: Load is relevant" (is_relevant_def load');
   check "b2: stack_access ⊆ relevant holds" (check_stack_access_subset_relevant sub')
 
-(* Fixture (b2b): multi-block RBP prologue — entry defines RBP:=RSP, successor loads via RBP *)
+(* Fixture b2b: RBP := RSP in entry; load in successor. *)
 let mk_rbp_multiblock_sub () : sub term * def term * def term =
   let m = Var.create ~is_virtual:false ~fresh:false "b2b_m" (Type.Mem (`r64, `r8)) in
   let t = Var.create ~is_virtual:true ~fresh:false "b2b_t" (Type.Imm 64) in
@@ -268,7 +242,7 @@ let () =
   check "b2b: multi-block Load(RBP-8) is stack_access" (has_stack_access load');
   check "b2b: multi-block stack_access ⊆ relevant holds" (check_stack_access_subset_relevant sub')
 
-(* Fixture (b3): RDI := 0 alone — proves NOT relevant unless flows into stack access *)
+(* Fixture b3: RDI := 0 alone — relevant only if it flows into a stack access. *)
 let mk_rdi_alone_sub () : sub term * def term =
   let def_rdi = Def.create rdi (Bil.Int (w64 0)) in
   let b = Blk.Builder.create () in
@@ -287,7 +261,7 @@ let () =
   check "b3: RDI :=0 alone not stack_access" (not (has_stack_access rdi'));
   check "b3: stack_access ⊆ relevant vacuously holds" (check_stack_access_subset_relevant sub')
 
-(* Fixture (b4): RDI :=0 flows into SP-derived address: RDI:=0; v:=RSP+RDI; Load(v) *)
+(* Fixture b4: RDI := 0; v := RSP + RDI; Load(v). *)
 let mk_rdi_flow_sub () : sub term * def term * def term * def term =
   let v = Var.create ~is_virtual:true ~fresh:false "b4_v" (Type.Imm 64) in
   let t = Var.create ~is_virtual:true ~fresh:false "b4_t" (Type.Imm 64) in
@@ -316,34 +290,23 @@ let () =
   check "b4: RDI :=0 becomes relevant when it flows into SP-derived address" (is_relevant_def rdi');
   check "b4: stack_access ⊆ relevant holds" (check_stack_access_subset_relevant sub')
 
-(* Fixture (b5): Reload clears SP-derived status.
-   RBP := RSP; RAX := RBP - 8; X := mem[RAX - 4];
-   RAX := mem[RBP - 16];   <-- reload from memory
-   T := mem[RAX]           <-- NOT stack_access (RAX lost SP-derived status)
-   The pre-reload mem[RAX-4] IS stack_access (RAX is SP-derived at that point).
-   The post-reload mem[RAX] is NOT stack_access because the LOAD into RAX
-   clears its SP-derived status — the loaded value may be a heap pointer. *)
+(* Fixture b5: a reload from memory clears SP-derived status; the pre-reload access stays tagged. *)
 let mk_reload_clears_sub () : sub term * def term * def term * def term * def term * def term =
   let rax = Var.create ~is_virtual:false ~fresh:false "RAX" (Type.Imm 64) in
   let x = Var.create ~is_virtual:true ~fresh:false "b5_x" (Type.Imm 64) in
   let t = Var.create ~is_virtual:true ~fresh:false "b5_t" (Type.Imm 64) in
   let m = Var.create ~is_virtual:false ~fresh:false "b5_m" (Type.Mem (`r64, `r8)) in
-  (* RBP := RSP *)
   let def_rbp = Def.create rbp (Bil.Var sp) in
-  (* RAX := RBP - 8 *)
   let def_rax1 = Def.create rax
       (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8))) in
-  (* X := mem[RAX - 4]  (pre-reload: RAX is SP-derived, this IS stack_access) *)
   let def_x = Def.create x
       (Bil.Load (Bil.Var m,
                  Bil.BinOp (Bil.MINUS, Bil.Var rax, Bil.Int (w64 4)),
                  LittleEndian, `r64)) in
-  (* RAX := mem[RBP - 16]  (reload from memory — clears RAX's SP-derived status) *)
   let def_rax2 = Def.create rax
       (Bil.Load (Bil.Var m,
                  Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 16)),
                  LittleEndian, `r64)) in
-  (* T := mem[RAX]  (post-reload: RAX is NOT SP-derived, NOT stack_access) *)
   let def_t = Def.create t
       (Bil.Load (Bil.Var m, Bil.Var rax, LittleEndian, `r64)) in
   let b = Blk.Builder.create () in

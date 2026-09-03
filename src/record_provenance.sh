@@ -1,27 +1,14 @@
 #!/usr/bin/env bash
-# record_provenance.sh — write the build identity NEXT TO the installed
-# plugin bundle, so a consumer (scripts/battery.sh) can verify the plugin
-# it is about to test was built from THIS tree — by CONTENT, not mtime.
-#
-# Why (measured 2026-09-02): an installed hike.plugin built from stale
-# bapbuild artifacts emitted 22 entry-edge poison phis while every
-# SOURCE was byte-identical to the fixed tree; corpus emission stayed
-# rc=0 and the mtime-based stale-plugin warning stayed silent (the rogue
-# plugin was NEWER than every source). Only the -O0/-opt -O2 semantic
-# agreement caught it. [bapbuild -clean] in the Makefile kills the class
-# by construction; this record covers the wrong-tree class — a plugin
-# installed from a DIFFERENT worktree must not be mistaken for this one.
-#
-# The record names the bundle CONTENT hash (the zip file's sha256), the
-# source tree's git identity, and the tree path. battery.sh compares all
-# three and FAILS the run on mismatch.
+# Writes the build identity next to the installed plugin, so battery.sh
+# verifies the tested plugin was built from this tree (by content, not
+# mtime). Records bundle content hash, git identity, and tree path;
+# battery.sh fails on mismatch.
 
 set -euo pipefail
 
 PLUGIN_DST="${HIKE_PLUGIN_DST:-}"
 if [ -z "$PLUGIN_DST" ]; then
-  # locate the installed bundle the way bapbundle does: the active switch's
-  # bap plugin directory
+  # locate the installed bundle via the active switch's plugin dir
   for base in "${OPAM_SWITCH_PREFIX:-}" "$(opam switch show --safe 2>/dev/null | sed "s|^|$HOME/.opam/|")" "$HOME/.opam"; do
     [ -n "$base" ] || continue
     cand=$(find "$base/lib/bap-common/plugins" -maxdepth 1 -name 'hike.plugin' 2>/dev/null | head -1)

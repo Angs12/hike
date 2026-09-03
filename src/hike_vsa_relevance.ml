@@ -1,6 +1,4 @@
-(* Relevance analysis: tags defs that contribute to stack accesses.
-   Forward pass tracks vars derived from SP; backward pass collects defs that flow into stack accesses.
-   Also detects dynamic allocas (RSP decrements with non-literal size). *)
+(* Tags defs feeding stack accesses; detects dynamic allocas. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -8,16 +6,16 @@ module Abi = Hike_abi
 
 [@@@alert "-deprecated"]
 
-(* Tags a def whose address uses an SP-derived var (a stack access). *)
+(* Tags stack access defs. *)
 let stack_access =
   Value.Tag.register
     (module Core_kernel.Unit)
     ~name:"stack_access" ~uuid:"44f5cc3f-d8a4-472e-8930-435eea4b6a1d"
 
-(* Re-export relevant tag from Cbat_vsa_utils. *)
+
 let relevant = Cbat_vsa_utils.relevant
 
-(* Tags runtime-sized stack allocations (VLA/alloca). *)
+(* Tags dynamic allocas. *)
 let dynamic_alloc =
   Value.Tag.register
     (module Core_kernel.Unit)
@@ -29,20 +27,10 @@ let has_stack_access (d : def term) : bool =
 let is_sp (target : Theory.Target.t) (v : var) : bool =
   Var.same v (Abi.sp target)
 
-(* Normalize a variable to its base form for map/set keys. *)
+
 let base_var (v : var) : var = Var.base v
 
-(* [is_stack_load_store sp_derived e]: is [e] a Stack Access at the
-   call site — a memory Load or Store whose address contains at least
-   one var in [sp_derived]. The check walks the expression via
-   [Exp.visitor] (no AST pattern matching, per Principle 8 /
-   CONTEXT.md): the visitor's `visit_load` / `visit_store` methods
-   return the address's free vars; the base class's traversal
-   threads the return value through, so we get the UNION of all
-   Load/Store addresses' free vars. The name keeps "stack" because
-   the SP-derived gate is what makes the load/store a Stack
-   Access — the shape alone (any memory Load/Store) is not
-   sufficient. *)
+(* Tests for a stack access expression. *)
 let stack_load_store_addr_vars (e : exp) : Var.Set.t =
   let vis =
     object
@@ -60,13 +48,7 @@ let is_stack_load_store (sp_derived : Var.Set.t) (e : exp) : bool =
     (stack_load_store_addr_vars e)
     ~f:(fun v -> Core.Set.mem sp_derived (base_var v))
 
-(* [is_memory_side_effect e]: is [e] a memory Load or Store (any
-   memory access, regardless of address derivation). The check
-   returns true if the expression's free vars include [mem] (the
-   memory variable that all Loads/Stores read or write). The
-   function name keeps "memory side effect" because any Load/Store
-   IS a memory side effect, even if its address is not stack-derived
-   (rip-relative, global, etc.). *)
+(* Tests for any memory access. *)
 let is_memory_side_effect (e : exp) : bool =
   Exp.free_vars e
   |> Core.Set.exists ~f:(fun v ->
@@ -74,7 +56,7 @@ let is_memory_side_effect (e : exp) : bool =
       | Type.Mem _ -> true
       | _ -> false)
 
-(* Helper 1: collect def maps using a Term.visitor pass. *)
+(* Collects def maps. *)
 let collect_def_maps (sub : sub term) :
     (def term list Tid.Map.t * Var.Set.t Tid.Map.t * def term Var.Map.t) =
   let v =
@@ -100,7 +82,7 @@ let collect_def_maps (sub : sub term) :
   in
   v#visit_sub sub (Tid.Map.empty, Tid.Map.empty, Var.Map.empty)
 
-(* Helper 2: forward dataflow to find SP-derived vars and direct stack accesses. *)
+(* Finds SP-derived vars and stack accesses. *)
 let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
     (defs_of : def term list Tid.Map.t) (rhs_bases : Var.Set.t Tid.Map.t) :
     Tid.Set.t =
@@ -114,15 +96,7 @@ let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
     if Base.List.is_empty ds then d_in
     else
       let users =
-        (* A stack Load/Store def (mem := mem with [..., el]:T <- ...) is a
-           memory side-effect, not a register computation. Including its LHS
-           (mem) as a sp-derived var would cause subsequent rip-relative or
-           constant-address memory ops (mem := mem with [0x401C, el]:T <- ...)
-           to be tagged as stack_access (the per-def tag check looks at
-           def_uses which includes mem; mem is in d_at because the earlier
-           sp-derived Store propagated it). The fix: skip stack load/store
-           defs from the users map so mem is never propagated as a
-           sp-derived var. *)
+        (* Skips memory defs so [mem] never propagates as derived. *)
         Base.List.fold ds ~init:Var.Map.empty ~f:(fun m d ->
             if is_memory_side_effect (Def.rhs d) then m
             else
@@ -161,11 +135,7 @@ let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
   let transfer (btid : tid) (d_in : Var.Set.t) : Var.Set.t =
     d_of_defs (defs_of_blk btid) d_in
   in
-  (* Forward fixpoint: Monotone forward propagation of SP-derived vars.
-     - start: entry block (Graphs.Tid.start)
-     - init: singleton SP base var at start, empty elsewhere
-     - merge: set union (join on branching paths)
-     - equal: set equality *)
+  (* Forward fixpoint over SP-derived vars. *)
   let sol : (tid, Var.Set.t) Graphlib.Std.Solution.t =
     Graphlib.Std.Graphlib.fixpoint (module Graphs.Tid)
       ~start:Graphs.Tid.start
@@ -186,7 +156,7 @@ let forward_vars (sp : var) (g : Graphs.Tid.t) (sub : sub term)
           then Core.Set.add acc (Term.tid d)
           else acc))
 
-(* Helper 3: backward dataflow slice from stack access seeds. *)
+(* Backward slice from stack accesses. *)
 let backward_slice (g : Graphs.Tid.t) (sub : sub term)
     (defs_of : def term list Tid.Map.t) (rhs_bases : Var.Set.t Tid.Map.t)
     (def_of_lhs : def term Var.Map.t)
@@ -200,13 +170,7 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
   let producer_of (v : var) : def term option =
     Core.Map.find def_of_lhs (base_var v)
   in
-  (* Pure worklist: seed [rel] with the block's stack_access defs and the
-     predecessor-closure. Then for each non-seed, if its LHS is in [vars],
-     add it to [rel] and enqueue the RHS-vars it introduces. Each non-seed
-     is added at most once (set membership check), so the loop is bounded
-     by the total defs in the block. The worklist is a list of (lhs, def)
-     pairs — the lhs is hoisted out of the inner computation so we don't
-     redo `base_var (Def.lhs d)` per round. *)
+  (* Worklist slice within one block. *)
   let block_contributors (ds : def term list) (rel : Def.Set.t) : Def.Set.t =
     let seeds, non_seeds =
       Base.List.partition_tf ds ~f:is_stack_access
@@ -215,7 +179,7 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
     if Base.List.is_empty non_seeds then rel
     else
       let pre_built =
-        (* Hoist base_var (Def.lhs d) out of the inner loop. *)
+        
         Base.List.map non_seeds ~f:(fun d -> (base_var (Def.lhs d), d))
       in
       let initial_vars =
@@ -228,11 +192,10 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
         | [] -> rel
         | (_, d) :: rest when Core.Set.mem rel d -> loop vars rest rel
         | (lhs, d) :: rest when Core.Set.mem vars lhs ->
-            (* Add d to rel; enqueue the defs that produce the new vars
-               (the vars in d's RHS) and update the running var-set. *)
+            (* Adds [d] and enqueues its producers. *)
             let new_vars = def_uses d in
             let vars' = Core.Set.union vars new_vars in
-            (* Enqueue the producer of each newly-introduced var, if any. *)
+            
             let enqueued =
               Base.List.filter_map (Core.Set.to_list new_vars)
                 ~f:(fun v ->
@@ -249,12 +212,7 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
   let rev_transfer (btid : tid) (rel : Def.Set.t) : Def.Set.t =
     block_contributors (defs_of_blk btid) rel
   in
-  (* Backward fixpoint: Reverse propagation of defs flowing into stack access seeds.
-     - rev: true (walk predecessors from exit)
-     - start: exit block (Graphs.Tid.exit)
-     - init: empty Def.Set everywhere
-     - merge: set union (join on merging paths)
-     - equal: set equality *)
+  (* Backward fixpoint over contributing defs. *)
   let rev_sol : (tid, Def.Set.t) Graphlib.Std.Solution.t =
     Graphlib.Std.Graphlib.fixpoint (module Graphs.Tid)
       ~rev:true ~start:Graphs.Tid.exit
@@ -267,15 +225,13 @@ let backward_slice (g : Graphs.Tid.t) (sub : sub term)
   |> fun acc ->
      Core.Set.union acc (Graphlib.Std.Solution.get rev_sol Graphs.Tid.start)
 
-(* Helper 4: detect dynamic allocations (VLA / alloca). *)
+(* Detects dynamic allocas. *)
 let detect_dynamic_alloc (sp : var) (sub : sub term)
     (def_of_lhs : def term Var.Map.t) : Tid.Set.t =
   let sp_base = base_var sp in
   let is_sp_var (v : var) : bool = Var.same (base_var v) sp_base in
   let find_def (v : var) : def term option = Core.Map.find def_of_lhs (base_var v) in
-  (* ARCH-1 — the SHAPE test is the extraction module's ONE fact
-     ([vla_decrement_p]); this visitor keeps its own ROLE (collecting
-     the def set, the indirect tmp def included). *)
+  (* Shape test lives in [Cbat_extraction]. *)
   let is_dynamic_sp_decrement (e : exp) : bool =
     Cbat_vsa.Cbat_extraction.vla_decrement_p sp_base e
   in
@@ -301,7 +257,7 @@ let detect_dynamic_alloc (sp : var) (sub : sub term)
   in
   v#visit_sub sub Tid.Set.empty
 
-(* Tag every stack-relevant def in [sub] with [relevant], [stack_access], and [dynamic_alloc] as appropriate. *)
+(* Tags [sub] with all three tags. *)
 let analyze (sp : var) (sub : sub term) : sub term =
   let g = Sub.to_graph sub in
   let defs_of, rhs_bases, def_of_lhs = collect_def_maps sub in

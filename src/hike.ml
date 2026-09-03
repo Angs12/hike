@@ -6,18 +6,9 @@ open Bil2llvm
 open Convutils
 open Hike_abi
 module Abi = Hike_abi
-(* [open Printf] REMOVED 2026-09-03: production hike.ml emits through
-   [Hike_diag] only; the three remaining Printf.eprintf callsites are
-   inside #ifdef VSA_DEBUG blocks (compiled out — the open would be
-   "unused" in every production build and -w +a makes that an error). *)
 
-(* ------------------------------------------------------------------------- *)
-(* The public interface ([src/hike.mli]): four curated modules, re-exported
-   under their plain names. Plain-name aliases resolve identically under dune
-   (wrapped — siblings see each other by plain name, as the [open]s above
-   already rely on) and under bapbuild (flat — every module is top-level), so
-   one interface serves both builds. Consumers write [Hike.Abi.sp], never
-   a dune-internal [Hike__Abi] form. *)
+
+(* Public re-exports; consumers use [Hike.Abi], etc. *)
 module Relevance = Hike_vsa_relevance
 module Vsa = Hike_vsa
 module Dce = Hike_dce
@@ -51,14 +42,14 @@ let free_vars sub =
   |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
   |> Core.Set.to_list
 
-(* [is_intrinsic term]: R7 — attribute-preserving mappers guarantee [Sub.intrinsic] survives all term rebuilds (Term.mapper does [{t with self}], Def.with_* preserves dict), so the canonical check is the attribute alone. *)
+(* Tests the [Sub.intrinsic] attribute. *)
 let is_intrinsic (term : sub term) : bool =
   Term.has_attr term Sub.intrinsic
 
 let is_emittable_intrinsic (term : sub term) : bool =
   is_intrinsic term && not (Seq.is_empty (Term.enum blk_t term))
 
-(* [is_llvm_x86_intrinsic term]: R7 — was a name-prefix hack ([intrinsic:llvm-x86_64:*]). *)
+(* Tests for bodyless LLVM intrinsics. *)
 let is_llvm_x86_intrinsic (term : sub term) : bool =
   Term.has_attr term Sub.intrinsic && Seq.is_empty (Term.enum blk_t term)
 
@@ -113,7 +104,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in
   let rets =
-    (* The FP-return member: a double-returning callee (the -O0 `return <double-expr>` leaves the value in XMM0 with NO RAX binding — the model's [return_regs] are integer-only) delivers the value via [%YMM0] in the ret. *)
+    (* Double returns arrive via [%YMM0]. *)
     if fp_returning sub then
       let ymm0 = Base.List.nth_exn (Abi.vector_param_regs target) 0 in
       rets
@@ -122,7 +113,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
   in
   let rets, args =
     if is_emittable_intrinsic sub then begin
-    (* The FP-soft-float intrinsic models: the signature is the MODEL's own interface, not the SysV regs — args = the input vars the body reads ([intrinsic:xN] — the free vars), rets = the output vars the body defines ([intrinsic:yN] — the def lhs vars that are not themselves inputs). *)
+    (* Intrinsic signature is the model's own interface. *)
     let args =
       Base.List.map free_vars ~f:(fun reg ->
           Arg.create ~intent:In reg (Var reg))
@@ -156,8 +147,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
      in
       (rets, args)
    else
-       (* M2: single ptr %hike_stack replaces trailing i64 stack_arg_N arity.
-         Subs with incoming stack args (lo>0, positive offsets) get hike_stack; main exempt. *)
+       (* Subs with incoming stack args take [hike_stack]. *)
       let has_positive =
         let vsa_positive =
           Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
@@ -225,7 +215,7 @@ let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
         |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
         |> fun regs -> regs @ hike_stack_arg
       in
-     (* The PLT-TRAMPOLINE subs (the BAP-resolved PLT stubs — the atexit/setlocale class): their BIL is `...; call @real with noreturn` and their free vars are just {mem} — the stub never READS the incoming register state, so. *)
+     (* PLT stubs take the full param list. *)
      let is_plt_trampoline =
        args = []
        && Term.enum blk_t sub
@@ -267,7 +257,7 @@ let create_uninitialized_section llvm_ctx llvm_module proj section_type
       let max_addr = Word.of_int ~width:64 (addr + size - 1) in
       { base; min_addr; max_addr })
 
-(* [get_copy_relocations proj]: The COPY-RELOCATED bss symbols — the Ogre [llvm:name-reference] rows whose fixup falls inside the .bss (the R_X86_64_COPY class: the .bss slots the DYNAMIC LINKER fills with the real symbol's data at startup — the stdout/stderr FILE structs). *)
+(* Collects copy-relocated bss slots. *)
 let get_copy_relocations proj ~bss_addr ~bss_size =
   let open Ogre in
   let at = Type.("at" %: int) in
@@ -292,15 +282,7 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
   |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) ->
          Int64.compare (Int64.of_int a) (Int64.of_int b))
 
-(* [rename_intrinsics DELETED 2026-09-01, the user directive: "keep the
-   suffix for the intrinsics themselves, remove the intrinsic variable
-   renames, do not rely on string matching" — the width lives in the
-   TYPES: the emitter's local/phi maps key on (name, width) (Convutils's
-   width-aware [wvar]), the FP arms derive widths from the callee's
-   declared interface types and the operand VALUES (Bil2llvm's
-   [fp_intrinsic_sizes]) — no rename pass, no string-width parsing, no
-   block prefix scans. The X1-c lane-separation problem the rename once
-   solved is now structural. *)
+
 
 let simplify_jmps sub =
   let new_sub =
@@ -324,11 +306,11 @@ let simplify_jmps sub =
               let goto = Jmp.create_goto ~cond (Direct (Term.tid new_blk)) in
               Blk.Builder.add_jmp blk_builder goto);
         let new_blk = Blk.Builder.result blk_builder in
-        (* Builder starts from empty dict — copy block attrs. *)
+        (* Copies block attrs. *)
         let new_blk = Term.with_attrs new_blk (Term.attrs blk) in
         Sub.Builder.add_blk new_sub new_blk);
   let res = Sub.Builder.result new_sub in
-  (* Builder starts from empty dict — copy sub attrs (intrinsic/stub/extern). *)
+  (* Copies sub attrs. *)
   Term.with_attrs res (Term.attrs sub)
 
 let filter_subs =
@@ -344,7 +326,7 @@ let filter_subs =
     "frame_dummy";
   ]
 
-(* The FP-soft-float intrinsic class : BAP models x86 FP instructions (mulsd/addsd/divsd/ subsd/cvtsi2sd/cvttsd2si) as CALLS to `intrinsic:*` subs whose bodies are bit-precise IEEE-754 soft-float BIL (the. *)
+(* FP instructions modeled as soft-float calls. *)
 let calls_intrinsic prog =
   let callgraph = Program.to_graph prog in
   let visit_edge _ edge filter_set =
@@ -364,20 +346,7 @@ let calls_intrinsic prog =
     callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
 
 let should_filter filter_set syms sub =
-  (* An emittable intrinsic is NEVER filtered (X1-c): the FP-soft-float
-     models must stay in the program — [init_subs] stores their
-     SIGNATURE in the table (the calls' arg/ret shapes derive from it)
-     and SKIPS their [create_fun] (no LLVM function is defined for the
-     native_fp_op-mapped names — see init_subs' comment); the call
-     sites INLINE via [create_call]/[native_fp_op]. The 2026-09-01
-     attempt to filter the mapped class here broke BOTH directions:
-     filtering [intrinsic:hlt] changed REACHABILITY (its with-return
-     call keeps the following blocks live — DCE deleted the loop body;
-     the factorial/list/many_args/sret_big 25/7 regression), and
-     filtering the FP class dropped the sigs from callers' reach
-     (union_overlap/va_arg_mixed — the arity fallback). The body-not-
-     emitted property belongs to [init_subs]'s create_fun skip, not
-     here. *)
+  (* Emittable intrinsics stay; their calls inline. *)
   if is_emittable_intrinsic sub then false
   else
     Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
@@ -389,7 +358,7 @@ let should_filter filter_set syms sub =
 
 let setup proj =
   let target = Project.target proj in
-  (* the memmap's native key width = the program architecture's address size (no hardcoded 64). *)
+  (* Forwards the address width. *)
   Hike_vsa.set_addr_bits (addr_size_bits target)
 
 let get_named_region_info proj =
@@ -420,10 +389,10 @@ let filter_subs proj =
           else
             Some (sub |> simplify_jmps)))
 
-(* The per-project setup + the sub FILTER are their OWN pass (see the registration below) — no pass calls another pass's logic directly; the chain is expressed in the ~deps of each registration and bap runs them in order. *)
+(* Setup and filter form their own pass. *)
 
 let init_subs ctx llvm_ctx llvm_module section_list proj =
-  (* The sub-signature table [ctx.subs] is filled ONCE here (set-once, then read-only during emission). *)
+  (* Fills the signature table once. *)
   let sigs =
     Term.enum sub_t (Project.program proj)
     |> Base.Sequence.to_list
@@ -441,7 +410,7 @@ let init_subs ctx llvm_ctx llvm_module section_list proj =
         KB.Context.with_var llvm_module_var llvm_module (fun () ->
           KB.Context.with_var section_list_var section_list (fun () ->
             KB.List.iter sigs ~f:(fun (sub, (rets, args)) ->
-                (* the NATIVE-FP-mapped intrinsics: the signature is stored (the calls' arg shapes derive from it) but the soft-float function is NOT defined — [create_sub] skips it (the calls are intercepted in [create_call] and emitted as native LLVM FP ops). *)
+                (* Mapped intrinsics store the sig but define no function. *)
                 if
                   Base.Option.is_none
                     (Bil2llvm.native_fp_op (Tid.name (Term.tid sub)))
@@ -458,7 +427,7 @@ let convert_binary output_program proj =
   let ptrsize = Theory.Target.bits target in
   let addr_bits = addr_size_bits target in
   let regions = get_named_region_info proj in
-  (* pass 1: the data-section GLOBALS (typed [n x i64] so the pointer-slot initializers can hold [ptrtoint] constants) — the initializers themselves are set in pass 3, AFTER the subs exist (the function-pointer slots reference the defined functions). *)
+  (* Pass 1: data-section globals. *)
   let mk_section section_type ~is_const =
     let llvm_name = section_type_to_string section_type in
     let name = "." ^ llvm_name in
@@ -490,11 +459,11 @@ let convert_binary output_program proj =
     | Some { addr; _ } ->
        let slot_addr (off, _) = Int64.add addr (Int64.of_int off) in
        let all = Base.List.map copy_relocs ~f:slot_addr in
-       (* The AUTHORITATIVE-write scan: a copy-reloc slot whose lifted stores do NOT participate in a same-sub read-modify-write mirror ([load slot; ...; store slot] — head's optarg) receives a fresh VALUE (the lifted. *)
+       (* Slots with authoritative writes get fresh values. *)
        let slot_of_addr (v : int64) : bool =
          Base.List.mem all v ~equal:Int64.equal
        in
-       (* the shared traversal: collect the copy-reloc-slot addresses a sub's memory defs reference via shape [f] (a constant- address Load or Store). *)
+       (* Collects slot addresses via shape [f]. *)
        let sub_def_slot_addrs ~(f : exp -> int64 option) (sub : sub term) =
          Term.enum blk_t sub |> Seq.to_list
          |> Base.List.concat_map ~f:(fun blk ->
@@ -515,7 +484,7 @@ let convert_binary output_program proj =
                if slot_of_addr v then Some v else None
            | _ -> None)
        in
-       (* per-slot: does any sub BOTH load and store it (in the SAME sub — the read-modify-write mirror)? *)
+       (* Tests for a same-sub load/store mirror. *)
        let loads_and_stores : int64 list =
          Term.enum sub_t (Project.program proj) |> Seq.to_list
          |> Base.List.concat_map ~f:(fun sub ->
@@ -530,7 +499,7 @@ let convert_binary output_program proj =
        if authoritative = [] then all
        else
          Base.List.filter all ~f:(fun a ->
-             (* a slot that some sub BOTH loads AND stores is the read-modify-write mirror — the &var shape survives, the through-load stays. Only stores-only slots become plain. *)
+             (* Mirrored slots keep the through-load. *)
              not
                (Base.List.mem authoritative a ~equal:Int64.equal
                && (not (Base.List.mem loads_and_stores a ~equal:Int64.equal))))
@@ -539,15 +508,15 @@ let convert_binary output_program proj =
   let got_section = mk_section GOT ~is_const:true in
   let gotplt_section = mk_section GOTPLT ~is_const:true in
   let rodata_rel_section = mk_section RODATA_REL ~is_const:true in
-  (* The .text inline constant-pool (see Bil2llvm.create_load / create_rip_relative_addr): stashed into [text_section_ref] and NOT added to section_list/section_remap_ref, so compile-time .text loads (the constant-pool / format-string reads -- e.g. *)
+  (* Stashes .text bytes for compile-time loads. *)
   let text_section = mk_section TEXT ~is_const:true in
   let text_section_val =
     Base.Option.map text_section ~f:(fun (arr, min, max, _base) ->
       (arr, Word.to_int64_exn min, Word.to_int64_exn max))
   in
-  (* the NATIVE function-pointer remap table: the symbol table's (addr → name) lookup lets the emitter turn native function-address constants (the `atexit (close_stdout)` arg) into the LIFTED functions' addresses ([ptrtoint @close_stdout]) — see [Bil2llvm.create_immidiate]. *)
+  (* Maps native function addresses to lifted functions. *)
   let symtab_val = Some (Project.symbols proj) in
-  (* the DATA-section pointer-slot remap: every section's native (min, max) → the lifted global — [Bil2llvm.set_section_initializer] rewrites the slots holding native addresses. *)
+  (* Maps native section addresses to lifted globals. *)
   let sec_lo_hi_base sec =
     Base.Option.map sec ~f:(fun (arr, min_addr, max_addr, base) ->
         let lo = Word.to_int64_exn min_addr in
@@ -608,7 +577,7 @@ let convert_binary output_program proj =
     }
   in
   let ctx, proj' = init_subs ctx llvm_ctx llvm_module section_list proj in
-  (* pass 2: the data-section INITIALIZERS — AFTER the subs exist, so the function-pointer slots resolve to the defined functions. *)
+  (* Pass 2: data-section initializers. *)
   Base.List.iter
     [
       data_section;
@@ -639,25 +608,18 @@ let () =
       Project.register_pass ~name:"filter" ~runonce:true
         (fun proj ->
            setup proj;
-           (* the per-project setup + the sub FILTER — its own pass, FIRST in the chain (the relevance pass's dep), so the relevance tagging and the VSA fixpoints never touch the subs that would be dropped anyway (the user's design). *)
+           (* Setup and filter run first. *)
            filter_subs proj);
-      (* The relevance analysis as its OWN always-run pass (registered pass "relevance", the D-2f L1 lane). *)
+      (* Relevance tagging pass. *)
       Project.register_pass ~name:"relevance" ~deps:[ "hike-filter" ] ~runonce:true
         (fun proj ->
            Project.map_program proj ~f:(fun prog ->
                Term.map sub_t prog
                  ~f:(Hike_vsa_relevance.analyze (sp (Project.target proj)))));
-      (* Per-sub VSA tag computation (registered pass "vsa", depends on "hike-relevance" — the relevance pass already filtered + tagged, so this pass runs on the already-filtered program). *)
+      (* VSA tag pass. *)
       Project.register_pass ~name:"vsa" ~deps:[ "hike-relevance" ] ~runonce:true
         (fun proj ->
-           (* Idempotence/perf guard (NOT a soundness gate): the vsa-info slot's
-              domain is now map extension/union, so a second run's provide
-              would be idempotent (the same map) or a loud conflict (a genuine
-              double-analysis bug the KB would surface) — but re-running the
-              whole VSA fixpoint just to re-provide the same map is pure
-              waste, so skip it. The M2 single-fixpoint-per-sub design holds:
-              with the slot non-empty, every sub here already has its
-              analysis. *)
+           (* Skips a second run; the slot already holds results. *)
            let cur = Hike_kb.vsa_info () in
            if not (Core.Map.is_empty cur) then (
 #ifdef VSA_DEBUG
@@ -670,11 +632,7 @@ let () =
              KB.Seq.iter
                (Term.enum sub_t (Project.program proj))
                ~f:(fun sub ->
-                 (* The per-sub VSA result INCLUDING the stack model
-                    decision: [offsets_of_sub] computes the regions and
-                    the split plan once, on the PRE-stack-to-locals sub
-                    (the converted slots vanish later, so no consumer
-                    can recompute them). *)
+                 (* Computes tags and plan on the pre-rewrite sub. *)
                  let info =
                    Hike_vsa.offsets_of_sub (Project.target proj)
                      (sp (Project.target proj)) sub
@@ -686,10 +644,10 @@ let () =
                  acc := Core.Map.set !acc ~key:(Term.tid sub) ~data:info;
                  KB.return ())
            end;
-           (* store every sub's tags into the project Knowledge Base in ONE write — the consumers (stack-to-locals / convlir) read it back via [Hike_kb.vsa_info ()] over the same global KB state (see hike_kb.ml). *)
+           (* Provides all tags in one write. *)
            Hike_kb.provide !acc;
            proj);
-      (* The BIL stack-to-locals pass (registered pass "stack-to-locals", the D-2c lane, oracle rev-2 — the user's design: free locals become function args through the EXISTING free-vars-as-args mechanism, zero new emitter code). *)
+      (* Stack-to-locals pass. *)
        Project.register_pass ~name:"stack-to-locals" ~runonce:true
         ~deps:[ "hike-vsa" ]
         (fun proj ->
@@ -705,8 +663,8 @@ let () =
                  (Core.Map.length info.Convutils.offsets));
 #endif
            proj);
-      (* The emitting pass: runs last, on the filtered + stack-to-locals + VSA-tagged project its deps deliver (the dep chain enforces vsa -> stack-to-locals -> convlir). *)
-      (* The aggressive DCE — [Hike_dce.dce] eliminates the lifted RETURN epilogue (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn` — the emitter emits a real LLVM [ret] anyway; the retaddr slot read drops out of the free-vars-as- args signature with it) and sweeps never-used defs. *)
+      (* Emission pass; runs last. *)
+      (* DCE pass. *)
       Project.register_pass ~name:"dce" ~runonce:true
         ~deps:[ "hike-stack-to-locals" ]
         (fun proj ->

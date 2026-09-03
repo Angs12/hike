@@ -1,4 +1,4 @@
-(* test_common: shared test infrastructure for the test_cbat suite — the check harness (failures counter, substring ignore-list), BIR fixture sugar (v64/memv/sp/find_def, tag_all, anchored_entry), stderr capture, and the unwrapped-domain module aliases. Every theme module opens this. *)
+(* Shared test infrastructure: check harness, BIR fixture sugar, stderr capture, domain aliases. *)
 open Bap.Std
 open Bap_core_theory
 
@@ -11,21 +11,17 @@ module Fs = Cbat_fin_set
 module Wo = Cbat_word_ops
 module Ws = Cbat_clp_set_composite
 
-(* Phase 2: the wrapped BIR-fixpoint library (see the dune comment). Its main module doubles as the
-   wrapper, so the sibling modules are re-exported by cbat_vsa.mli under the main module. *)
+(* Wrapped BIR-fixpoint library; siblings re-exported by cbat_vsa.mli. *)
 module AI = Cbat_vsa.AI
 module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 
-(* M3 (Phase 2 remediation): the memmap fusion pipeline under test. *)
+(* Memmap fusion pipeline under test. *)
 module MM = Cbat_vsa.Mem
 module MK = Cbat_vsa.Mem.Key
 module MV = Cbat_vsa.Mem.Val
 
-(* [anchored_entry]: the explicit ANCHORED entry state (RSP = {0}) — the fixtures' contract. The
-   production default is now the UNANCHORED entry (AI.top — the anchor was removed); the fixpoint-
-   running fixtures pass this explicitly so the backward-refinement raw-meet behavior (and the
-   pre-removal configuration) is pinned. *)
+(* Explicit anchored entry state (RSP = {0}); fixtures pass it to the fixpoint. *)
 let anchored_entry () : AI.t =
   let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
   let rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64) in
@@ -80,8 +76,7 @@ let contains_substring (hay : string) (needle : string) : bool =
   let rec go i = i + m <= n && (String.sub hay i m = needle || go (i + 1)) in
   m = 0 || go 0
 
-(* [capture_stderr f]: capture the stderr emitted by [f] (Format.eprintf writes through the
-   duplicated fd) and return it as a string. *)
+(* Capture stderr emitted by [f] as a string. *)
 let capture_stderr (f : unit -> unit) : string =
   let path = Filename.temp_file "cbat_cap" ".err" in
   let fd = Unix.openfile path [ Unix.O_WRONLY; Unix.O_TRUNC; Unix.O_CREAT ] 0o600 in
@@ -103,22 +98,15 @@ let capture_stderr (f : unit -> unit) : string =
   Sys.remove path;
   s
 
-(* [fired comp f]: did the not_implemented hit for [comp] emit its visible stderr line ("hike:
-   cbat_vsa: not_implemented <comp> (degrading to top)") while [f] ran? The per-hit line replaces
-   the removed E6 dedup table — the "did the guard fire" idiom. *)
+(* Did the not_implemented hit for [comp] log its stderr line while [f] ran? *)
 let fired (comp : string) (f : unit -> unit) : bool = contains_substring (capture_stderr f) comp
 let w32 = W.of_int ~width:32
 let w33 = W.of_int ~width:33
 let w64 = W.of_int ~width:64
 
-(* --- 1. CLP creation / bounds ------------------------------------------ *)
-
-(* create n (defaults) = the singleton {n} *)
+(* create n (defaults) = singleton {n} *)
 module IntLattice : Cbat_lattice_intf.S_val with type t = int = struct
-  (* Core_kernel is opened HERE ONLY: it supplies the bin_prot helpers (bin_shape_int &c.) the
-     [@@deriving bin_io] code references, and its Int-specialized (=)/(<=) are exactly right for an
-     int lattice. A file-wide open would shadow the polymorphic (=) for the whole test (see the
-     header note). *)
+  (* Local open: supplies bin_io helpers without shadowing (=) file-wide. *)
   open! Core_kernel
 
   type t = int [@@deriving bin_io, sexp, compare]
@@ -145,24 +133,20 @@ let v64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.I
 let v1 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 1)
 let memv (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Mem (`r64, `r8))
 
-(* [sp]: the stack pointer the fixtures use (base-matches every fixture's [v64 "RSP"] via
-   [Var.base]); passed to [Relevance.analyze sp sub]. *)
+(* Fixture stack pointer; passed to [Relevance.analyze sp sub]. *)
 let sp = v64 "RSP"
 
-(* [find_def]: look a def term up (by tid, preserved by set_attr) in a (possibly re-tagged) sub. *)
+(* Look a def up by tid in a (possibly re-tagged) sub. *)
 let find_def (sub : sub term) (tid : tid) : def term option =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(Term.enum def_t)
   |> Seq.find ~f:(fun d -> Tid.equal (Term.tid d) tid)
 
-(* [find_def_exn]: [find_def] that asserts (the fixtures guarantee the defs exist in the returned
-   sub — set_attr preserves tids). *)
+(* [find_def] that asserts; fixtures guarantee the def exists. *)
 let find_def_exn (sub : sub term) (tid : tid) : def term =
   match find_def sub tid with Some d -> d | None -> assert false
 
-(* T1 — the relevant tag: a registered Unit-payload tag (the [back_edge] registration idiom,
-   cbat_back_edges.ml:18) with a fixed uuid, and a set_attr/has_attr roundtrip on a def (presence of
-   the tag = relevant). *)
+(* Relevant tag: Unit-payload tag with fixed uuid; presence = relevant. *)
 module Kb = Hike.Kb
 module Sm = Hike.Stack_model
 module Stl = Hike.Stack_to_locals
@@ -170,5 +154,4 @@ module Cu = Hike.Convutils
 module B2l = Hike.Bil2llvm
 module Hv = Hike.Vsa
 
-(* [q64]: a full-range 64-bit word (the [w64] helper takes a native int, which cannot carry the high
-   half or negatives). *)
+(* Full-range 64-bit word; [w64] takes a native int. *)

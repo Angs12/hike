@@ -19,26 +19,26 @@ type t
 
 include Cbat_lattice_intf.S_val with type t := t
 
-(* WYSINWYX-2 — the a-priori frame relation carried IN the abstract state): a frame-derived register's offset-from-origin expression (origin = the sub's entry RSP), with the MUST-fact lattice semantics ([frame option]:. *)
+(* Offset-from-origin expression of a frame-derived register. *)
 type frame_term = {
-  fconst : WordSet.t;               (* constant part (CLP; usually a singleton) *)
+  fconst : WordSet.t;               (* constant part *)
   fvars : (var * int) list;         (* scaled non-derived registers *)
 }
 type frame = (var * frame_term) list
 
-(* [frame_of e]: the state's frame relation (None = the vacuous bottom state — the join identity). *)
+(* Frame relation of a state; None is bottom. *)
 val frame_of : t -> frame option
 
-(* [set_frame e f]: the state with the frame replaced (the transfer's write — see [Cbat_vsa.apply_frame_def]). *)
+(* State with the frame replaced. *)
 val set_frame : t -> frame option -> t
 
-(* [seed_frame]: the entry-state frame — the ORIGIN definition: the sub's entry RSP has offset 0 (both anchored and unanchored runs). Seeded by [Cbat_vsa.init_sol]. *)
+(* Entry-state frame: entry RSP has offset 0. *)
 val seed_frame : frame option
 
-(* [frame_add_rsp f]: the call-revert — RSP's offset restores by +8 (the L-E1 matched-pair semantics; applied at the call-abstraction site in cbat_vsa.ml). *)
+(* Restore RSP's offset by +8. *)
 val frame_add_rsp : frame option -> frame option
 
-(* The transfer's frame ops (Bil-free; the def-shape logic lives in [Cbat_vsa.apply_frame_def]). *)
+(* Bil-free frame ops. *)
 val frame_key : var -> var
 val frame_lookup : frame -> var -> frame_term option
 val frame_remove : frame -> var -> frame
@@ -55,9 +55,9 @@ val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 
 val selective_widen_extrapolate : ?head:Tid.t option -> need:Var.Set.t -> steps:int -> t -> t -> t
 
-(* P2d-1b (lane A) — Call-ABI abstraction of an abstract state: the `preserved` words (matched by [Var.same]) keep their value-sets, every other word is TOPed, and memory is set to TOP entirely (a red-zone partition is. *)
+(* Keep [preserved] words, top the rest and all memory. *)
 val call_abstraction : preserved:Var.Set.t -> t -> t
 
-(* Hike addition (the call-abstraction precision lane): like [call_abstraction], but the caller's own frame survives — cells at key >= [rsp] (the call-time, post-push RSP) and outside every [escape] range are kept; the. *)
+(* Like [call_abstraction]; keeps cells at key >= [rsp] outside [escape]. *)
 val call_abstraction_frame : preserved:Var.Set.t -> rsp:WordSet.t
   -> escape:WordSet.t list -> t -> t

@@ -1,32 +1,13 @@
 #!/usr/bin/env bash
-# check_instrumentation.sh — the build-time blocker for principle #6
-# (AGENTS.md: "Debug instrumentation lives in the debug build ONLY",
-# restated 2026-09-02: instrumentation is NOT COMPILED INTO the
-# production binary).
-#
+# Build-time blocker: debug instrumentation must not reach production.
 # Usage: check_instrumentation.sh <dir> [<dir>...]
-#
-# Two rules, both zero-exemption, both COMMENT-AWARE (OCaml comments are
-# stripped before matching — doc text that mentions the banned names is
-# fine, code that uses them is not):
-#
-#  1. NO environment reads. [Sys.getenv]/[Sys.getenv_opt] anywhere in
-#     production sources is a violation: any runtime-variable behavior is
-#     debug, and env-gated instrumentation is precisely what #6 bans.
-#     No allowlist — an operator-facing control belongs in a BAP pass
-#     parameter (the --hike-output-file mechanism), never an env var.
-#
-#  2. NO direct output outside the sanctioned channels. The permanent
-#     production family (the [hike:] warnings run_corpus.sh greps) goes
-#     through [Hike_diag] (src/) or BAP's [Event.Log] (the vendored
-#     cbat_vsa library); direct [eprintf]/[print_endline]/[Printf.printf]/
-#     [Format.printf] callsites elsewhere are violations. [sprintf]/
-#     [asprintf] are fine (string builders, not output). Lines inside a
-#     cppo [ #ifdef VSA_DEBUG ] block are skipped — that IS the sanctioned
-#     debug mechanism. [hike_diag.ml] is exempt by definition (it IS the
-#     channel).
-#
-# Exits 1 with the offending sites on violation, 0 when clean.
+# Two zero-exemption, comment-aware rules (OCaml comments strip first):
+#   1. No env reads (Sys.getenv etc.): runtime-variable behavior is debug;
+#      operator controls belong in BAP pass parameters, never env vars.
+#   2. No direct output outside Hike_diag (src/) or Event.Log (cbat_vsa);
+#      sprintf/asprintf are fine; lines inside #ifdef VSA_DEBUG skip;
+#      hike_diag.ml is exempt (it is the channel).
+# Exits 1 with offending sites, 0 when clean.
 
 set -u
 rc=0
@@ -36,7 +17,7 @@ import re, sys, os
 
 dirs = sys.argv[1:] or ["src"]
 
-# --- OCaml comment stripper (handles nesting) -------------------------------
+# OCaml comment stripper (handles nesting)
 def strip_comments(text):
     out = []
     i, depth, n = 0, 0, len(text)
@@ -48,7 +29,7 @@ def strip_comments(text):
         elif depth > 0 and text.startswith("*)", i):
             depth -= 1; i += 2; out.append(" " * 2)
         elif depth > 0 and text[i] == '"':
-            # string inside comment: irrelevant, skip
+            # strings inside comments need no handling
             i += 1; out.append(" ")
         else:
             out.append(text[i] if depth == 0 else

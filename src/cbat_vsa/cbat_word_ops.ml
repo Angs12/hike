@@ -16,7 +16,7 @@ module W = Word
 module Option = Core_kernel.Option
 open Cbat_vsa_utils
 
-(* Computes w1 * w2 at the sum of their bitwidths. This ensures that the result cannot overflow. Note that this operation is size-polymorphic *)
+(* Multiply at the summed width; cannot overflow. *)
 let mul_exact (w1 : word) (w2 : word) : word =
   let sz1 = W.bitwidth w1 in
   let sz2 = W.bitwidth w2 in
@@ -43,7 +43,7 @@ let lshift_exact (w : word) (i : int) : word =
   let w' = W.extract_exn ~hi:(width - 1) w in
   W.lshift w' wi
 
-(* Calculates the greatest common divisor of two words such that the result is not greater than the inputs. *)
+(* Bounded gcd. *)
 let bounded_gcd (w1 : word) (w2 : word) : word =
   let width = W.bitwidth w1 in
   assert (width = W.bitwidth w2);
@@ -51,13 +51,13 @@ let bounded_gcd (w1 : word) (w2 : word) : word =
   else if W.is_zero w2 then w1
   else W.gcd_exn w1 w2
 
-(* Performs an unsigned division that rounds updwards instead of downwards. *)
+(* Unsigned division rounding up. *)
 let cdiv a b : word = if W.is_zero (W.modulo a b)
     then W.div a b else W.succ (W.div a b)
 
 let is_one (w : word) : bool = W.is_zero (W.pred w)
 
-(* Computes the least solution x_0 to the linear Diophantine equation ax + by = c such that 0 <= x_0. All arguments must be the same size. Outputs a word of the same size as the inputs *)
+(* Least non-negative x solving ax + by = c. *)
 let bounded_diophantine (a : word) b c : (word * word) option =
   let size = W.bitwidth a in
   assert (size = W.bitwidth b);
@@ -70,21 +70,21 @@ let bounded_diophantine (a : word) b c : (word * word) option =
   else if W.is_zero b then
     if W.is_zero (W.modulo c a) then Some (W.div c a, zero) else None
   else
-    (* We have that ax + by = d. *)
+    (* Bezout coefficients. *)
     let d, unsigned_x, unsigned_y = W.gcdext_exn a b in
     let signed_x = W.signed unsigned_x in
     let signed_y = W.signed unsigned_y in
     let gcd_quotient = W.div c d in
-    (* these have width size * 2 *)
+    (* Double-width products. *)
     let signed_x0 = W.signed (mul_exact signed_x gcd_quotient) in
     let signed_y0 = W.signed (mul_exact signed_y gcd_quotient) in
     if not (W.is_zero (W.modulo c d)) then None
     else
-      (* All solutions have the form (x + k * b/d, y - k * a/d). again assuming that gcdext uses the euclidian algorithm, this produces x and y with minimum |x| and minimum |y| *)
+      (* Minimal-|x|,|y| solution pair. *)
       Some (W.extract_exn ~hi:(size-1) signed_x0,
             W.extract_exn ~hi:(size-1) signed_y0)
 
-(* Computes the smallest (positive) n : word and m : int such that w = 2^m * n via binary search *)
+(* Split w into odd part and power of two. *)
 let factor_2s (w : word) : word * int =
   let rec factor_help (hi : int) (lo : int) : int =
     if hi = lo then hi else
@@ -95,12 +95,12 @@ let factor_2s (w : word) : word * int =
   in
   let width = W.bitwidth w in
   let lo = factor_help (width - 1) 0 in
-  (* make sure the result has the same width as the input *)
+  (* Keep the input width. *)
   let hi = width - 1 + lo in
   W.extract_exn ~hi ~lo w, lo
 
 
-(* Computes the position of the leading 1-bit via binary search *)
+(* Position of the leading 1-bit. *)
 let lead_1_bit (w : word) : int option =
   let rec lead_help (hi : int) (lo : int) : int option =
     let open Monads.Std.Monad.Option.Syntax in
@@ -118,8 +118,8 @@ let count_initial_1s (w : word) : int = snd @@ factor_2s @@ W.lnot w
 let min w1 w2 : word = if W.(<) w1 w2 then w1 else w2
 let max w1 w2 : word = if W.(<) w1 w2 then w2 else w1
 
-(* returns the word 2^i with bitwidth width *)
-(* [dom_size]: / [half] rebuilt [W.lshift (W.one width) i] — GMP allocs — on every CLP op (canonize → is_infinite, the sign-detection paths). *)
+(* 2^i at [width] bits. *)
+(* Cached; hot on every CLP op. *)
 let dom_size_cache : (int * int, word) Hashtbl.t = Hashtbl.create 16
 let dom_size ?width (i : int) : word =
   let width = Option.value ~default:(i + 1) width in
@@ -130,7 +130,7 @@ let dom_size ?width (i : int) : word =
     Hashtbl.add dom_size_cache (i, width) w;
     w
 
-(* returns the word 2^(width-1) with bitwidth width *)
+(* 2^(width-1) at [width] bits. *)
 let half_cache : (int, word) Hashtbl.t = Hashtbl.create 8
 let half (width : int) : word =
   match Hashtbl.find_opt half_cache width with
@@ -142,18 +142,18 @@ let half (width : int) : word =
     Hashtbl.add half_cache width w;
     w
 
-(* Returns the word of the given bitwidth with the smallest integer difference from the word w. *)
+(* Closest value representable at [width] bits. *)
 let cap_at_width ~width (w : word) : word =
   let w_width = W.bitwidth w in
-  (* at the exact width the cap is the identity — skip the extract (the common [create] path: matched-width cardinals). *)
+  (* Exact width is the identity. *)
   if w_width = width then w
   else if w_width <= width then W.extract_exn ~hi:(width - 1) w else
-    (* Compute the largest width-bit number, stored in w_width bits *)
+    (* Largest width-bit number. *)
     let max_w = W.pred @@ dom_size ~width:w_width width in
     let res_val = min max_w w in
     W.extract_exn ~hi:(width - 1) res_val
 
-(* extends the word by a single high bit *)
+(* Extend by one high bit. *)
 let add_bit (w : word) : word =
   W.extract_exn ~hi:(W.bitwidth w) w
 

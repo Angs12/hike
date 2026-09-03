@@ -1,0 +1,13 @@
+(executable
+ (name edgemulti_probe)
+ (libraries
+  probe_common
+  bap
+  bap-main
+  core_kernel
+  bap-future
+  threads)
+ (flags
+  (:standard -g -alert -deprecated))
+ (preprocess
+  (pps ppx_bap)))

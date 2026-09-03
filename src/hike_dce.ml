@@ -1,37 +1,21 @@
-(* Dead-code elimination for the hike pipeline. Replaces the lifted return epilogue (indirect noreturn call) with a var-free form, then iteratively removes defs whose lhs is never used. Memory writes and ABI registers are always kept — EXCEPT the fissioned region mem vars ([stack_rN_mem], mem-fission 2026-09-02): those survive iff some Load reads them (the load-roots rule), so never-loaded store chains (the retaddr pushes) die together in one sweep round.
-   RSP erasure on the precise path uses BAP-derived SP (Abi.sp), not hardcoded strings.
-   RBP is not explicitly erased; it is deleted by the fixpoint if derived from RSP (RBP:=RSP) and RSP is erased.
-
-   The module's interface is [dce] alone ([hike_dce.mli]) — the keep rule,
-   the two-tier region-mem rule, the load-roots set and the epilogue
-   rewrite are all observable through it on BIL fixtures. The ABI lane is
-   TOTAL (the [of_target_opt ~default:x86_64_sysv] fallback — the unit
-   fixtures run [Theory.Target.unknown]), so [dce] never raises on a
-   target without a convention record; the SP-erasure lane is skipped
-   there (no stack pointer to erase), which is the sound identity for a
-   fixture with no SP-relative traffic. *)
+(* Sweeps dead defs; region mems survive iff loaded. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
 
-(* TOTAL: the ABI record for [target], or the x86_64 SysV record for a
-   target that declares no convention (the unit fixtures'
-   [Theory.Target.unknown] — its fixture sp is the "RSP"-named var
-   either way, so the register facts still resolve by name). *)
+(* ABI record, defaulting to x86_64 SysV. *)
 let abi_of (target : Theory.Target.t) : Abi.t =
   Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
 
-(* SP lookup made total the same way: the target's own stack pointer, or
-   the record's (the fixtures' "RSP"); a target that declares no stack
-   pointer at all also falls back (cf. [fp_of] in stack_to_locals). *)
+(* Stack pointer, defaulting to the record's. *)
 let sp_of (target : Theory.Target.t) : var =
   match Abi.sp target with
   | v -> v
   | exception _ -> (abi_of target).Abi.sp
 
-(* ABI registers that may be read implicitly by calls (Abi is the sole origin). *)
+(* Registers read implicitly by calls. *)
 let is_ret_reg (target : Theory.Target.t) (v : var) : bool =
   Abi.is_return_reg (abi_of target) (Var.base v)
 
@@ -40,7 +24,7 @@ let is_call_reg (target : Theory.Target.t) (v : var) : bool =
   let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 
-(* Replace an indirect noreturn call (return idiom) with a var-free target. *)
+(* Rewrites the return epilogue to a var-free target. *)
 let ret_replacement (j : jmp term) : jmp term =
   match Jmp.kind j with
   | Call c -> (
@@ -55,18 +39,11 @@ let ret_replacement (j : jmp term) : jmp term =
       | _ -> j)
   | _ -> j
 
-(* The fissioned region mem vars ([stack_rN_mem]): recognized through
-    the producer module's predicate ([Hike_stack_model.is_region_mem]:
-    the naming convention is that module's fact, not a grammar every consumer
-    re-types). *)
+(* Tests for region mem vars. *)
 let is_region_mem (v : var) : bool =
   Hike_stack_model.is_region_mem v
 
-(* The LOAD-ROOTS set: vars read as a Load's mem OPERAND, plus jmp/phi
-   reads.  A fissioned var's store-to-store chains do NOT self-keep
-   through it (a Store's mem-operand use is write-position, invisible
-   here) — [used_of] remains the ordinary global union for everything
-   else. *)
+(* Vars read as Load mem operands, plus jmp/phi reads. *)
 
 let load_roots_of (sub : sub term) : Var.Set.t =
   let roots =
@@ -74,15 +51,14 @@ let load_roots_of (sub : sub term) : Var.Set.t =
       inherit [Var.Set.t] Term.visitor
       method! visit_load ~mem ~addr:_ _ _ acc =
         Core.Set.union acc (Exp.free_vars mem)
-      (* jmps / phis read vars as a whole — count them (a jmp/phi var
-         read is not a bare mem-operand read, but counting is sound). *)
+      
       method! visit_jmp j acc = Core.Set.union acc (Jmp.free_vars j)
       method! visit_phi p acc = Core.Set.union acc (Phi.free_vars p)
     end
   in
   roots#visit_sub sub Var.Set.empty
 
-(* Vars referenced by any def, jmp, or phi in the sub. *)
+(* Vars used by any def, jmp, or phi. *)
 let used_of (sub : sub term) : Var.Set.t =
   let v =
     object
@@ -94,8 +70,7 @@ let used_of (sub : sub term) : Var.Set.t =
   in
   v#visit_sub sub Var.Set.empty
 
-(* FP intrinsic interface vars ([intrinsic:xN] / [intrinsic:yN]) — the
-   ONE name fact ([Convutils.is_intrinsic_name]). *)
+(* Tests for intrinsic interface vars. *)
 let is_intrinsic_var (v : var) : bool =
   Convutils.is_intrinsic_name (Var.name (Var.base v))
 
@@ -124,26 +99,13 @@ let is_sp_value_def (target : Theory.Target.t) (d : def term) : bool =
 let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
   is_sp target (Def.lhs d)
 
-(* Precise predicate for RSP erasure: the sub uses the
-   SPLIT stack model (per-region [stack_rN] allocas) — its SP/hike_stack
-   defs are dead.
-
-   Finding 1: the decision is READ from [Convutils.stack_plan], the single
-   result [Hike_stack_model.split_plan] produced in the vsa pass (the
-   model module since arch review #1 part 2 — the rewrite stays in
-   [Hike_stack_to_locals]). This pass is a CONSUMER — it no longer
-   imports the emitter's deleted region-split logic to re-derive a
-   BIL-level fact. *)
+(* True when the sub uses the split model. *)
 let is_precise_sub (_target : Theory.Target.t) (sub : sub term) : bool =
   match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
   | None -> false
   | Some info -> Hike_stack_model.is_precise info
 
-(* The TWO-TIER keep: a region mem var's def survives iff the var has
-    a load-root; the lifter's [mem] keeps the unconditional is_mem keep
-    (ABI/external/outgoing traffic — the sub-local used-set cannot see
-    the callee's reads).  [load_roots] is threaded by [sweep_fixpoint],
-    recomputed per round (a removed load can un-root a chain). *)
+(* Region mems survive iff loaded; [mem] always survives. *)
 let keep ?(precise=false) ?(load_roots=Var.Set.empty)
     ~target (d : def term) (used : Var.Set.t) : bool =
   if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
@@ -151,9 +113,7 @@ let keep ?(precise=false) ?(load_roots=Var.Set.empty)
     let lhs = Def.lhs d in
     if is_region_mem lhs then
       Core.Set.mem load_roots lhs
-      (* a fissioned store with no loads from its var: DEAD — the whole
-         chain (store-to-store rewrites) dies together in one sweep
-         round; the fixpoint loop re-runs to stability. *)
+      
     else
       Core.Set.mem used lhs || is_ret_reg target lhs || Convutils.is_mem lhs
       || is_call_reg target lhs || is_intrinsic_var lhs
@@ -163,12 +123,11 @@ let def_count (sub : sub term) : int =
   |> Seq.fold ~init:0 ~f:(fun n blk ->
       n + Seq.length (Term.enum def_t blk))
 
-(* Iteratively remove unused defs until fixpoint. For precise subs, SP/hike_stack/sp_value are dead. *)
+(* Sweeps unused defs to fixpoint. *)
 let rec sweep_fixpoint ~target (sub : sub term) : sub term =
   let precise = is_precise_sub target sub in
   let used = used_of sub in
-  (* MEM-FISSION: the load-roots set (recomputed per round — a removed
-     load can un-root a chain, and the fixpoint handles the cascade). *)
+  
   let load_roots = load_roots_of sub in
   let sub' =
     Term.map blk_t sub ~f:(fun blk ->
@@ -177,7 +136,7 @@ let rec sweep_fixpoint ~target (sub : sub term) : sub term =
   in
   if def_count sub' = def_count sub then sub' else sweep_fixpoint ~target sub'
 
-(* Run DCE: rewrite return calls, then sweep unused defs. Intrinsics are left unchanged. *)
+(* Rewrites returns, then sweeps. Intrinsics pass through. *)
 let dce ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else

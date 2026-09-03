@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# lift_one.sh — one coreutils binary's hike lift (the pipeline's serial
-# worker; kept as a standalone file since the 2026-09-01 serial-only
-# directive — the old xargs -P parallel form is DELETED, parallel lifts
-# OOM the box).
+# Lifts one coreutils binary; the pipeline calls it serially (parallel
+# lifts OOM the box).
 set -u
 name="$1"
 BINS="$2"; IR="$3"; OUT="$4"; TIMES="$5"; LLOG="$6"

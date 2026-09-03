@@ -15,7 +15,7 @@ open Graphlib.Std
 
 
 
-(* * An extension of the BAP fixpoint function that supports context-sensitive analysis. *)
+(* Context-sensitive fixpoint over BAP graphs. *)
 val fixpoint : (module Graph with type t = 'c
                               and type node = 'n) ->
   ?steps:int -> ?start:'n -> ?rev:bool ->

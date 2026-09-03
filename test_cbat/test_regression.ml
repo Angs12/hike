@@ -1,13 +1,12 @@
-(* test_regression: narrow-store/degraded-frame/outgoing-escape pins (C1-C4 + R11/R6/G3, run_creg), the Oracle remediation batch (A1-A4, run_remediation), and the R12 region-split emission gates (run_regions). KB order: run_creg provides C1's vsa_info entry; A4 borrows it. *)
+(* Narrow-store/degraded-frame/escape pins, remediation batch, region-split gates. *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
 
-(* --- regression tests C1..C4 ------------------------------------------- *)
+(* Regression tests C1-C4. *)
 let q64 (v : int64) : word = W.of_int64 ~width:64 v
 
-(* regression C1: the narrow-store OR-mask width (the mask must be computed at the SLOT width 64;
-   neg(1 << bits*8) with bits*8 >= 64 collapses to -1 and keeps the stale wide bytes). *)
+(* C1: narrow-store OR-mask width — mask computed at slot width 64. *)
 type c3_fixture = {
   c3_sub : sub term;
   c3_blk0 : blk term;
@@ -74,23 +73,11 @@ let mk_c3 () : c3_fixture =
   ignore callee;
   { c3_sub = caller; c3_blk0 = blk0; c3_blk1 = blk1; c3_post_tid = post_tid; c3_m = m }
 
-(* --- remediation batch A1..A4 (the Oracle REMEDIATE findings) ---------- *)
+(* Remediation batch A1-A4. *)
 
-(* remediation A1 (finding 1, the C3 escalation): the outgoing-slot store's data is TOP (RCX is
-   never written anywhere in the fixture) — the doubt must escalate to the sound whole-memory-top
-   fallback, not be silently skipped (an unknown stored value may be a pointer into ANY caller cell
-   — the stack-passed-pointer class). Geometry mirrors regression C3 exactly; only the stored data
-   differs. *)
-(* --- 32. R12/G4 region-split emission (Stage 1/2) --------------- *)
-(* The emitter's Stage-1 gate and Stage-2a size logic are pure predicates
-   over vsa_info + defs.  These checks call the PRODUCTION bil2llvm
-   functions (region_bytes / region_size_ok, reached through the public
-   Hike.Bil2llvm alias like every other production entry point here) on
-   synthetic vsa_info records, and pin ALGORITHM-INDEPENDENT properties —
-   positivity + 16-byte alignment, domination of the raw payload,
-   monotonicity in span/max_width, cap behavior — instead of duplicating
-   the formulas and asserting their literal outputs.  No binary needed,
-   no BAP init. *)
+(* A1: TOP-valued outgoing-slot store escalates to whole-memory-top fallback. *)
+(* R12/G4 region-split emission gates. *)
+(* Emission size logic pinned via production functions on synthetic records. *)
 
 let run_creg () =
 (  let rsp = v64 "RSP" in
@@ -172,8 +159,7 @@ let run_creg () =
     | _ -> false);
   ()
 
-(* regression C2: the degraded frame size must cover the sub's deepest literal stack access (a fixed
-   8192 bound ignores the evidence). *))
+(* C2: degraded frame covers the deepest literal access. *))
 ;
 (  let rsp = v64 "RSP" in
   let m = memv "c2_m" in
@@ -201,8 +187,7 @@ let run_creg () =
     (let n, _, _, _ = B2l.degraded_dims sub in
      Int64.compare n 0x4000L >= 0)
 
-(* regression C3: the call-abstraction escape set must include the outgoing-slot stores of the call
-   block (the callee may write its incoming stack args), not only the written arg registers. *))
+(* C3: escape set includes the call block's outgoing-slot stores. *))
 ;
 (  let fx = mk_c3 () in
   let sub' = Relevance.analyze sp fx.c3_sub in
@@ -239,8 +224,7 @@ let run_creg () =
     (not (Ws.equal (read64 post_ai (-16L)) (Ws.singleton (w64 0xBB))));
   ()
 
-(* regression C4b: an Infinite-span member whose normalized span equals its Range neighbor's span
-   must still block convertibility (the provenance, not the normalized numbers, decides). *))
+(* C4b: Infinite-span member blocks convertibility by provenance. *))
 ;
 (  let rsp = v64 "RSP" in
   let m = memv "c4b_m" in
@@ -296,9 +280,7 @@ let run_creg () =
     && convertible_of mixed (Term.tid b_mixed) = Some false);
   ()
 
-(* regression C4a: an Infinite-tagged def overlapping a concrete Range local keeps its Infinite kind
-   through the set-overlap merge (the merge must not overwrite the unbounded class with the merged
-   Range). *))
+(* C4a: Infinite tag survives the overlap merge. *))
 ;
 (  let rsp = v64 "RSP" in
   let i = Var.create ~is_virtual:false ~fresh:false "c4a_i" (Type.Imm 32) in
@@ -371,12 +353,7 @@ let run_creg () =
     (match kind_of (Term.tid def_idx_store) with Some (Cu.Infinite _) -> true | _ -> false);
   ()
 
-(* property R11 (PL2): the set-overlap merge must preserve EVERY member's original kind/span
-   verbatim — a PRECISE singleton Range member that merely overlaps a wider ranged access keeps its
-   exact span through the merge; the component hull lives ONLY in the region record, never
-   back-written into the per-def tags. Mirrors the regression-C4a pattern: the concrete store at
-   [RSP-16] shares the element -16 with the indexed loop-body store's class ([RSP + zext(i) - 32]
-   covers -16 when i = 16), so the two land in ONE overlap component. *))
+(* R11: overlap merge preserves every member's kind/span verbatim. *))
 ;
 (  let rsp = v64 "RSP" in
   let i = Var.create ~is_virtual:false ~fresh:false "r11_i" (Type.Imm 32) in
@@ -439,21 +416,15 @@ let run_creg () =
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
-  (* CONTROL (must hold pre AND post): the indexed/ranged member keeps its own kind through the
-     merge. *)
+  (* Control: indexed member keeps its kind. *)
   check "property R11 control: the indexed member keeps its own kind through the merge"
     (kind_of (Term.tid def_idx_store) <> None);
-  (* RED: the singleton's exact span survives the merge verbatim — currently the component hull
-     overwrites it. *)
+  (* Singleton's exact span survives un-hulled. *)
   check "property R11: the precise singleton Range(-16,-16) survives the overlap merge un-hulled"
     (kind_of (Term.tid def_singleton) = Some (Cu.Range (-16L, -16L)));
   ()
 
-(* R6 unit checks — the NEQ arc at the CLP/composite level: the construction {c+1, step 1, cardn 2^w
-   - 1} must survive create's normalization (finite, non-top, exact span), agree with the
-   edge-collector's diff(top,{c}) form, meet {c} to bottom (x = c necessarily — the taken path
-   genuinely infeasible, so bottom is SOUND), and survive a join with a stepped class without
-   collapsing to top. *))
+(* R6: NEQ arc pins at CLP/composite level. *))
 ;
 (  List.iter
     (fun w ->
@@ -481,8 +452,7 @@ let run_creg () =
           check
             ("R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) " ^ lbl)
             (Ws.is_bottom (Ws.meet arc_ws (Ws.singleton c)));
-          (* a stepped class inside the arc's linear span: the join stays a bounded CLP (sound hull;
-             never top) *)
+          (* Stepped class in the arc's span: join stays bounded, never top. *)
           let stepped =
             Clp.create
               (W.add base (W.of_int ~width:w 7))
@@ -496,12 +466,7 @@ let run_creg () =
         [ "lo"; "hi" ])
     [ 8; 16; 32; 64 ]
 
-(* R6 (Stage 2): the jne-counter loop — the -O0 guard shape is FLAG-INDIRECTED: `t := (i <> lim); if
-   t goto body`. The CLP domain is CIRCULAR over Z_2^w, so {x : x <> c} is exactly ONE arc — [c+1 ..
-   c-1] (step 1, cardn 2^w - 1) — and the flag-state recovery must derive it: the taken view
-   constrains the counter to the arc, the fallthrough view (flag clear) pins it to {lim} exactly.
-   Mirrors regression C4a's counter fixture (indexed loop-body store; offsets_of_sub runs the full
-   production pipeline). *))
+(* R6 Stage 2: jne-counter loop — taken view constrains to the arc, fallthrough pins {lim}. *))
 ;
 (  let rsp = v64 "RSP" in
   let i = Var.create ~is_virtual:false ~fresh:false "r6_i" (Type.Imm 32) in
@@ -526,8 +491,7 @@ let run_creg () =
   Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
   Blk.Builder.add_def loop_b def_idx_store;
   Blk.Builder.add_def loop_b def_inc;
-  (* the flag def comes AFTER the increment (a later def of a free var of the recorded operand would
-     clear the flag-state record) *)
+  (* Flag def after the increment (later def would clear the record). *)
   Blk.Builder.add_def loop_b def_flag;
   let entry0 = Blk.Builder.result entry_b in
   let loop0 = Blk.Builder.result loop_b in
@@ -548,10 +512,7 @@ let run_creg () =
   Sub.Builder.add_blk sub_b exit;
   let sub0 = Sub.Builder.result sub_b in
   let tagged_rel = Relevance.analyze sp sub0 in
-  (* The relevance pass does NOT tag 1-bit flag defs (they feed no stack sink), so [tag_relevant]
-     would prune the guard's views entirely. The R6 lane needs the GUARD's flag tracked: the fixture
-     re-tags the flag def explicitly (the same idiom as the L3c fixtures' [tag_all]), keeping
-     Relevance.analyze's tags (incl. direct_sp) for everything else. *)
+  (* Flag defs feed no stack sink: re-tag the guard's flag explicitly. *)
   let tagged =
     Term.map blk_t tagged_rel ~f:(fun b ->
         Term.map def_t b ~f:(fun d ->
@@ -563,18 +524,7 @@ let run_creg () =
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check "R6: the jne-counter loop's indexed store carries an offset tag"
     (kind_of (Term.tid def_idx_store) <> None);
-  (* the per-guard views: the taken view must constrain i to the ARC {x : x <> 9} (= diff(top,{9}) —
-     one CLP), the fallthrough view (the flag-clear trace) pins i to {9}.
-     MIGRATED (ticket 02, the Phase B deletion): the views are gone.  The
-     FALLTHROUGH claim is assertable in the fused world — the EXIT block's
-     only predecessor is the loop's tail edge, whose ACCUMULATED cond is
-     the negation of the when's (i = 9), so the exit's IN-state pins i to
-     {9}.  The TAKEN claim has NO fused-world equivalent: its only target
-     is the LOOP block, a multi-predecessor head whose IN-state is the
-     JOIN of the entry edge and the refined back edge (spec §10.2) — the
-     per-edge partition collapses by construction; the check stays in the
-     ignore list (already stubbed on the base tree), its body now the
-     sound floor (the entry constant survives the join). *)
+  (* Fallthrough reads the exit's single-predecessor IN-state; taken has no equivalent. *)
   let prog' = Program.create ~subs:[ tagged ] () in
   let sol =
     Vsa.static_graph_vsa [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged)
@@ -590,15 +540,7 @@ let run_creg () =
     (Ws.equal exit_i (Ws.singleton (w32 9)));
   ()
 
-(* G3 (Stage A): the PRODUCTION relevance path must keep FLAG-INDIRECTED guards refineable WITHOUT
-   manual re-tagging. Identical geometry to the R6 Stage-2 fixture above, but [Relevance.analyze]'s
-   tags are used AS-IS — no [tag_relevant] workaround. The backward lane must seed jump-condition
-   variables as live roots so the flag def (which feeds no stack sink) is tagged and the NEQ guard
-   refines instead of being pruned to the invariant state. Before the fix this failed: the untagged
-   flag var left the guard outside [refineable] (the pre-fusion Phase B walk's tag-relevance
-   pruning — deleted with Phase B, ticket 02), so both edge states collapsed to the
-   loop-invariant state — taken not the arc, fallthrough not pinned
-   to {9}. *))
+(* G3: production relevance path keeps flag-indirected guards refineable. *))
 ;
 (  let rsp = v64 "RSP" in
   let i = Var.create ~is_virtual:false ~fresh:false "g3_i" (Type.Imm 32) in
@@ -642,7 +584,7 @@ let run_creg () =
   Sub.Builder.add_blk sub_b loop;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  (* the production path: analyze's tags AS-IS — no manual re-tagging *)
+  (* Production path: analyze's tags as-is. *)
   let tagged = Relevance.analyze sp sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
@@ -653,13 +595,7 @@ let run_creg () =
     Vsa.static_graph_vsa [] prog' tagged (Vsa.init_sol ~entry:(anchored_entry ()) tagged)
   in
   ignore sol;
-  (* MIGRATED (ticket 02): same shape as the R6 Stage-2 fixture above —
-     the FALLTHROUGH claim reads the EXIT block's single-predecessor
-     IN-state (the accumulated tail cond i = 9); the TAKEN claim's only
-     target is the multi-predecessor loop head (the join collapses the
-     per-edge arc, spec §10.2), so its body is the sound floor (the
-     entry constant survives the join) and the claim stays in the
-     ignore list. *)
+  (* Fallthrough reads the exit IN-state; taken body is the sound floor. *)
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol loop_tid) i in
   check
     "G3: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals \
@@ -695,8 +631,7 @@ let run_remediation () =
   in
   let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x20))) in
   let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x30))) in
-  (* THE difference vs C3: the outgoing slot stores RCX, which NOTHING in the fixture ever writes —
-     its value set at the call is TOP. *)
+  (* Vs C3: outgoing slot stores unwritten RCX (TOP). *)
   let def_out =
     Def.create m
       (Bil.Store
@@ -757,9 +692,7 @@ let run_remediation () =
     (not (Ws.equal (read64 post_ai (-8L)) (Ws.singleton (w64 0xAA))));
   ()
 
-(* remediation A2 (finding 2a, composed depth): the degraded frame size must SUM the two depth
-   sources — an [RSP := RSP - k] decrement moves RSP, then a store at [RSP - k] reaches k below the
-   MOVED RSP, so the reach is dec + neg_disp, not max(dec, neg_disp). *))
+(* A2: degraded frame sums composed depth sources. *))
 ;
 (  let rsp = v64 "RSP" in
   let m = memv "a2_m" in
@@ -792,9 +725,7 @@ let run_remediation () =
      Int64.compare n 0x9010L >= 0);
   ()
 
-(* remediation A3 (finding 2b, positive headroom): a store at [RSP + k] lands at anchor + k, so the
-   degraded anchor index must retreat by the deepest POSITIVE displacement (and the alloca grow
-   accordingly), not sit at the bare n - 8. *))
+(* A3: degraded anchor retreats by deepest positive displacement. *))
 ;
 (  let rsp = v64 "RSP" in
   let m = memv "a3_m" in
@@ -825,27 +756,17 @@ let run_remediation () =
     (Int64.equal anchor_idx (Int64.sub (Int64.sub n 8L) 0x20L));
   ()
 
-(* remediation A4a/A4b (hardening pins, expected green immediately): the narrow-store OR-mask width
-   for the remaining slot widths — u8 and u32 (regression C1 pinned u16). The KB's vsa-info slot has
-   a JOIN domain (map extension/union — see [Hike_kb]): provides accumulate, and a second info for
-   the SAME sub tid is a loud [Toplevel.Conflict], not a silent drop. These pins still BORROW C1's
-   entry (the fixtures' defs are created with C1's exact def tids and their sub with C1's sub tid,
-   read back from [Kb.vsa_info ()]) because they exercise the SAME sub's info — providing their own
-   map under that tid would now conflict, and minimal-change doctrine keeps the borrowing. No KB
-   write. *))
+(* A4a/A4b: u8/u32 narrow-store OR-mask widths; fixtures borrow C1's KB entry (no KB write). *))
 ;
 (  let rsp = v64 "RSP" in
-  (* the single surviving entry is C1's (its two offsets share one Range) *)
+  (* Single surviving entry is C1's. *)
   let c1_sub_tid, c1_info =
     Core.Map.fold (Kb.vsa_info ())
       ~init:(Tid.create (), None)
       ~f:(fun ~key ~data acc -> match acc with _, None -> (key, Some data) | _ -> acc)
     |> fun (t, i) -> match i with Some i -> (t, i) | None -> assert false
   in
-  (* arch C2: [offsets] is the precomputed map — the borrow reads it by
-     sorted-tid key now (the old positional [List.nth] over the walk-order
-     list was the ONE order dependence in the tree; the two tids are
-     distinct so the take is order-independent). *)
+  (* Offsets map read by sorted-tid key (order-independent). *)
   let c1_def_tids = c1_info.Cu.offsets |> Core.Map.keys |> List.rev in
   let lo =
     match Core.Map.min_elt c1_info.Cu.offsets with
@@ -914,9 +835,7 @@ let run_remediation () =
     | _ -> false);
   ()
 
-(* remediation A4c (hardening pin, expected green immediately): the outgoing-slot escape ranges
-   cover EXACTLY the two adjacent slots' bytes — both slot cells drop post-call, and the neighbor
-   caller-frame cell OUTSIDE their extent survives untouched. *))
+(* A4c: escape ranges cover exactly the two slots' bytes. *))
 ;
 (  let rsp = v64 "RSP" in
   let fp = v64 "a4c_fp" in
@@ -936,8 +855,7 @@ let run_remediation () =
   Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
   let post0 = Blk.Builder.result post_b in
   let post_tid = Term.tid post0 in
-  (* the neighbor sits at [entry RSP - 0x18]: inside the caller's kept frame (call-time RSP =
-     -0x20), OUTSIDE both slots' byte extents ([RSP+16] = [-0x10,-0x9], [RSP+24] = [-0x8,-0x1]). *)
+  (* Neighbor at [entry RSP - 0x18]: inside kept frame, outside both slots. *)
   let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x18))) in
   let def_seed =
     Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (w64 0xAA), LittleEndian, `r64))
@@ -1017,7 +935,7 @@ let run_remediation () =
     (Ws.equal (read64 post_ai (-0x18L)) (Ws.singleton (w64 0xAA)));
   ())
 let run_regions () =
-(  (* fixtures: the INPUTS stay literal — they define the test cases. *)
+(  (* Fixture inputs stay literal — they define the cases. *)
   let r_sing =
     {
       Hike.Convutils.id = 0;
@@ -1027,7 +945,7 @@ let run_regions () =
       max_width = 32;
     }
   in
-  (* interval [ -32, -1 ] span 32, maxw 64 *)
+  (* Interval [-32,-1] span 32, maxw 64. *)
   let r_interval =
     { Hike.Convutils.id = 1; span = (-32L, -1L); members = []; convertible = true; max_width = 64 }
   in
@@ -1040,10 +958,7 @@ let run_regions () =
       max_width = 64;
     }
   in
-  (* [raw_bytes r]: the SPEC's payload size — the bytes the region's cells occupy at its widest
-     member width, unrounded. This is the requirement the alloca must dominate, not a mirror of the
-     implementation (the implementation rounds up; that rounding is exactly what the properties
-     below pin without replaying it). *)
+  (* Payload bytes at widest member width, unrounded — the alloca must dominate it. *)
   let raw_bytes (r : Hike.Convutils.region) : int64 =
     let lo, hi = r.Hike.Convutils.span in
     Int64.div
@@ -1059,20 +974,19 @@ let run_regions () =
     }
   in
   let with_width r wd = { r with Hike.Convutils.max_width = wd } in
-  (* R12-1: every emitted alloca size is positive and 16-byte aligned *)
+  (* R12-1: alloca sizes positive and 16-byte aligned. *)
   check "R12-1: region_bytes positive and 16-byte aligned (fixtures)"
     (List.for_all
        (fun r ->
          let b = B2l.region_bytes r in
          Int64.compare b 0L > 0 && Int64.rem b 16L = 0L)
        [ r_sing; r_interval ]);
-  (* R12-2: domination — the alloca covers the region's raw payload *)
+  (* R12-2: alloca covers raw payload. *)
   check "R12-2: region_bytes >= raw payload bytes"
     (List.for_all
        (fun r -> Int64.compare (B2l.region_bytes r) (raw_bytes r) >= 0)
        [ r_sing; r_interval ]);
-  (* R12-3: monotone in span — growing the span never shrinks the size; a +16-cell growth strictly
-     grows it (adding a multiple of 16 raw bytes cannot be absorbed by any rounding slack) *)
+  (* R12-3: monotone in span. *)
   check "R12-3: region_bytes monotone in span (strict under +16 cells)"
     (List.for_all
        (fun r ->
@@ -1081,8 +995,7 @@ let run_regions () =
          let b2 = B2l.region_bytes (widen_span r 16L) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
-  (* R12-4: monotone in max_width — wider members never shrink the size; a x16 width growth strictly
-     grows it (raw x16 dominates any slack) *)
+  (* R12-4: monotone in max_width. *)
   check "R12-4: region_bytes monotone in max_width (strict under x16)"
     (List.for_all
        (fun r ->
@@ -1091,25 +1004,13 @@ let run_regions () =
          let b2 = B2l.region_bytes (with_width r (16 * r.Hike.Convutils.max_width)) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
-  (* R12-5: the cap guard — production region_size_ok (now in Stack_to_locals, the split
-     decision's owner) admits the small fixtures and rejects the huge span (before any
-     multiply can wrap) *)
-  (* R12-5: the cap guard — [Stack_to_locals] owns the size guard now (it is part of the
-     split decision, not of the emission geometry; Finding 1). *)
+  (* R12-5: cap guard admits small fixtures, rejects huge span. *)
   check "R12-5: region_size_ok true for small fixtures, false for huge span"
     (Sm.region_size_ok r_sing && Sm.region_size_ok r_interval
      && not (Sm.region_size_ok r_huge));
   ())
 ;
-(  (* R12-5/6/7: the full-coverage gate of the stack model decision —
-     asserted through the REAL interface ([Sm.split_plan], the single
-     producer Finding 1 installed), not a local re-implementation of its
-     covered/disjoint logic (the old test duplicated the rule and could
-     drift; split_plan is the seam the pipeline actually consults).
-
-     Fixture: one sub whose two tagged cells load from RSP-16 and RSP-32
-     (two disjoint singleton regions), so the coverage rule is the only
-     thing that can flip the verdict. *)
+(  (* Full-coverage gate asserted through split_plan (the real producer). *)
   let rsp = v64 "RSP" in
   let m = memv "r125_m" in
   let t1 = v64 "r125_t1" in
@@ -1159,8 +1060,7 @@ let run_regions () =
   in
   check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
     (Cu.equal_split_plan (plan_of info) [ r1; r2 ]);
-  (* R12-6: gate rejects when an offset is Infinite (unbounded -> no sized
-     storage: the write-closed rule forces the fallback) *)
+  (* R12-6: Infinite offset rejected. *)
   let info_inf =
     {
       info with
@@ -1172,13 +1072,12 @@ let run_regions () =
   in
   check "R12-6: gate rejects Infinite tag (unbounded -> not covered)"
     (plan_of info_inf = []);
-  (* R12-7: gate rejects when degraded (no tags to trust) *)
+  (* R12-7: degraded sub never qualifies. *)
   let info_deg = { info with Hike.Convutils.degraded = true; vla_bounds = Tid.Map.empty } in
   check "R12-7: degraded sub never qualifies" (plan_of info_deg = []);
   ())
 ;
-(  (* R12-8: regions_of_sub — two disjoint singleton offsets at -16 and -32 become two separate
-     convertible regions (no overlap). *)
+(  (* R12-8: disjoint singletons become two regions. *)
   let rsp = v64 "RSP" in
   let m = memv "r12_m2" in
   let t1 = v64 "r12_t1b" in
@@ -1215,8 +1114,7 @@ let run_regions () =
     && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-32L, -32L)));
   ())
 ;
-(  (* R12-8b: S1 coarser — two overlapping intervals merge into one region with
-     span (-32,-8). *)
+(  (* R12-8b: overlapping intervals merge to span (-32,-8). *)
   let rsp = v64 "RSP" in
   let m = memv "r12b_overlap_m" in
   let t1 = v64 "r12b_o_t1" in
@@ -1256,13 +1154,7 @@ let run_regions () =
 
   ())
 ;
-(  (* property R12b (G4 finding 3 — the bare-copy evasion): a plain `v := RSP` (or RBP) copy
-     materializes a frame-derived pointer value; any subsequent `t := Load [v]` aliases region bytes
-     via that value. The old PLUS/MINUS-only frame_ptr_value_def missed the bare copy, so an
-     otherwise-region-eligible sub QUALIFIED unsoundly (stack_rN vs %frame divergence). The
-     generalized predicate `not mem-lhs && not RSP/RBP-lhs && sp_value rhs` must reject the sub
-     wholly to %frame. RED: old predicate -> plan = [region] (QUALIFIES) -> this check FAILS. GREEN:
-     generalized predicate -> plan = [] -> PASS. *)
+(  (* R12b: bare v := RSP copy rejects the sub wholly to %frame. *)
   let rsp = v64 "RSP" in
   let m = memv "r12b_m" in
   let v = v64 "r12b_v" in
@@ -1298,10 +1190,7 @@ let run_regions () =
       ~k_ranges:[ (tid_stack, -20L, -10L) ]
       ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
   in
-  (* Finding 1: the decision moved to [Stack_to_locals.split_plan] — the emitter's
-     [region_split_plan] (with its own weaker frame_ptr escape analysis) is gone. The
-     escape rule that rejects this sub is the unified [frame_escapes], consulted as a
-     PER-REGION convertibility rule (so it also governs the fallback path's conversion). *)
+  (* Decision lives in split_plan; escape is a per-region rule. *)
   let info = { info with Hike.Convutils.regions =
       Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
@@ -1310,10 +1199,7 @@ let run_regions () =
     "property R12b: bare copy v := RSP makes split_plan REJECT the sub (wholly %frame) — \
      via Stack_to_locals.frame_escapes (per-region convertibility)"
     (plan = []);
-  (* also pin the escape predicates directly. The bare copy is caught by the ALIAS half of
-     the unified rule ([frame_addr_alias] — a memory access reads through the materialized
-     frame pointer), not by the value-escape half; the union [frame_escapes] is what
-     [split_plan] consults. *)
+  (* Bare copy caught by the alias half ([frame_addr_alias]). *)
   check
     "property R12b: frame_escapes is true for a sub containing a bare `v := RSP` copy \
      (the alias half of the unified rule catches it)"
@@ -1321,9 +1207,7 @@ let run_regions () =
      && Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
   ())
 ;
-(  (* C10/C11 property: WordSet.overlap vs full intersection equivalence. For sampled pairs, overlap
-     must equal not (is_bottom (meet a b)). This pins the C10 direct-cardinality optimization
-     (singleton elem vs full intersection) to be sound and complete. *)
+(  (* C10/C11: overlap equals not-is_bottom-of-meet on sampled pairs. *)
   let pairs : (Ws.t * Ws.t) list =
     [
       (Ws.of_list ~width:32 [ w32 1; w32 2 ], Ws.of_list ~width:32 [ w32 2; w32 3 ]);
@@ -1347,36 +1231,21 @@ let run_regions () =
            overlap is_bottom)
         (overlap = not is_bottom))
     pairs;
-  (* also pin the width-mismatch convention (M1, Phase 2 remediation): width-mismatched sets share
-     no representable element, so [overlap] answers FALSE (exact disjointness) — and every consumer
-     that would turn that into a definite branch decision must treat the mismatch as can't-decide
-     FIRST (the cbat_vsa.ml decision sites guard [bitwidth = 1] / width equality before consulting
-     elem/overlap). Pinned for the FinSet/FinSet arm. *)
+  (* Width-mismatched overlap is false (exact disjointness). *)
   let a32 = Ws.of_list ~width:32 [ w32 1 ] in
   let a64 = Ws.of_list ~width:64 [ w64 1 ] in
   check "property WordSet.overlap width-mismatch → false (pinned convention, FinSet/FinSet)"
     (not (Ws.overlap a32 a64));
-  (* the MEET side deliberately does not follow: a mismatched meet returns the wider operand (never
-     bottom on a live path — principle 3), so the [overlap = ¬is_bottom ∘ meet] property is stated
-     for EQUAL widths only *)
+  (* Mismatched meet returns the wider operand (non-bottom). *)
   check "property WordSet.meet width-mismatch → wider operand (non-bottom)"
     (not (Ws.is_bottom (Ws.meet a32 a64)));
-  (* m6 (Phase 2 remediation): randomized small-width enumeration of the same property — [overlap =
-     ¬is_bottom ∘ meet]. Representation-aware: the generator tags each value's arm AFTER
-     bound_set_size demotion (small of_clp progressions and tiny tops land in the FinSet arm). The
-     FULL equality is asserted whenever the meet is FinSet-arm observable (at least one operand
-     FinSet — the composite meet of a FinSet-bearing pair is always a FinSet); for Clp/Clp pairs
-     only the SOUND half is asserted, because the composite [is_bottom] cannot see through the Clp
-     arm (hardcoded false, cbat_clp_set_composite.ml:267) while [overlap] answers exactly via
-     Clp.cardinality — a genuinely-disjoint big-CLP pair has overlap=false but
-     is_bottom(meet)=false. FINDING (recorded, not fixed here — file out of remediation scope): the
-     blind spot is SOUND (it under-reports bottom, never claims a live path dead). *)
+  (* m6: randomized small-width enumeration of the same property. *)
   Random.init 20260822;
   let failures_before_m6_overlap = !failures in
   let rand_ws (w : int) : Ws.t * [ `fs | `clp ] =
     match Random.int 4 with
     | 0 ->
-        (* a small explicit set — the FinSet arm (dupes dedup by of_list) *)
+        (* Small explicit set (FinSet arm). *)
         let n = 1 + Random.int 5 in
         let rec els acc i =
           if i <= 0 then acc
@@ -1384,14 +1253,14 @@ let run_regions () =
         in
         (Ws.of_list ~width:w (els [] n), `fs)
     | 1 ->
-        (* a random progression — cardn ≤ 6 demotes to FinSet, 11..40 stays Clp *)
+        (* Random progression. *)
         let base = W.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) in
         let step = W.of_int ~width:w (1 + Random.int 3) in
         let c = if Random.bool () then 1 + Random.int 6 else 11 + Random.int 30 in
         ( Ws.of_clp (Clp.create base ~step ~cardn:(W.of_int ~width:(w + 1) c)),
           if c <= 10 (* Utils.fin_set_size *) then `fs else `clp )
     | 2 ->
-        (* top demotes at w=3 (8 ≤ 10) but stays Clp at w=8 (256 > 10) *)
+        (* Top (demotes by width). *)
         (Ws.top w, if w <= 3 then `fs else `clp)
     | _ -> (Ws.singleton (W.of_int ~width:w (Random.bits () land ((1 lsl w) - 1))), `fs)
   in
@@ -1419,9 +1288,7 @@ let run_regions () =
        representation-aware)\n";
   ())
 ;
-(  (* C11 property: FinSet↔Clp round-trip equivalence (small sets ≤10). A FinSet converted to CLP via
-     Clp.of_list (FinSet.iter) and back via FinSet.of_list (Clp.iter) must be equal; similarly a
-     small CLP round-trip. *)
+(  (* C11: FinSet↔Clp round-trip equivalence on small sets. *)
   let fin_sets : Fs.t list =
     [
       Fs.of_list ~width:32 [ w32 1; w32 2; w32 3 ];
@@ -1457,13 +1324,7 @@ let run_regions () =
           (Printf.sprintf "property Clp->FinSet->Clp round-trip cardn %d" (W.to_int_exn cardn))
           (Clp.equal p p2))
     clps;
-  (* m6 (Phase 2 remediation): randomized enumeration of both round-trips. Sets are random
-     PROGRESSIONS (base + k*step mod 2^w, possibly wrapping the seam). FINDING (recorded,
-     adjudicated): [Clp.of_list] reconstructs a progression from the SORTED linear diff sequence, so
-     a CIRCULAR / multi-wrap progression gets a sound OVER-COVER, not an exact inverse — the
-     round-trip is therefore pinned as: (a) SOUNDNESS always (no element dropped, cardinality
-     non-decreasing), plus (b) EXACTNESS for the wrap-free arcs whose seam gap is a multiple of the
-     step (the shape the hand-picked C11 cases above pin). *)
+  (* m6: randomized round-trips — soundness always, exactness on wrap-free arcs. *)
   Random.init 20260822;
   let failures_before_m6_rt = !failures in
   for _i = 1 to 200 do
@@ -1475,7 +1336,7 @@ let run_regions () =
     let rec els acc k =
       if k = n then acc else els (W.of_int ~width:w ((base + (k * step)) mod dom) :: acc) (k + 1)
     in
-    (* exact-round-trip shape: no wrap AND the seam gap is step-multiple *)
+    (* Exact-round-trip shape: no wrap AND seam gap step-multiple. *)
     let wrap_free = base + ((n - 1) * step) < dom in
     let seam_ok = (dom - (base + ((n - 1) * step) - base)) mod step = 0 in
     let exact_shape = wrap_free && seam_ok in

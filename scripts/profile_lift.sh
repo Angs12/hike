@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Poor-man's lift profiler (perf_event_paranoid=3 blocks perf on this box):
-# repeatedly samples the running pipeline's stack via gdb batch backtraces
-# and aggregates the hottest OCaml frames.  Uses the dune-built stage_timer
-# (compiled with -g), so frames resolve to Hike__*/Cbat_* functions.
-#
+# Samples a running lift's stack via gdb batch backtraces.
 # Usage: profile_lift.sh <binary> [subname] [seconds-budget]
 set -u
 BIN="${1:?binary}"; SUB="${2:-main}"; BUDGET="${3:-90}"

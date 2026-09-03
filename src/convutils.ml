@@ -3,15 +3,7 @@ open Bap.Std
 open Bap_core_theory
 module Abi = Hike_abi
 
-(* [wvar]: the WIDTH-AWARE var identity — BAP's [Var] compares by NAME
-   only (the X1-c width-blindness), so a sub that carries the same
-   [intrinsic:y0] at two widths (an SS and an SD call in one body) maps
-   them to ONE llvalue slot: the f32 result overwrote/collided with the
-   f64 lane's, and every consumer read the wrong width (the chmod
-   class). Keying the emitter's local/phi maps on (name, width) makes
-   the lanes STRUCTURALLY distinct — derived from the var's own type,
-   no string suffixes, no rename pass (the rename_intrinsics crutch is
-   deleted). *)
+(* Vars keyed by (name, width). *)
 type wvar = WVar of Var.t * int
 
 let wvar_of (v : Var.t) : wvar =
@@ -30,8 +22,7 @@ module WVarMap = Map.Make (WVar)
 type llvalue_map = Llvm.llvalue WVarMap.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 
-(* [EHashtbl]: Core's Hashtbl under the deprecated-name alert the strict
-   build treats as an error — the same disarm [module Vsa] uses. *)
+(* Core Hashtbl with the deprecated warning off. *)
 module EHashtbl = Core_kernel.Hashtbl[@warning "-D"]
 
 type emit_ctx = {
@@ -47,20 +38,9 @@ type emit_ctx = {
   blk_llvals : blk_llvals Tid.Map.t ref;
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
   guarded_warned : Tid.Set.t ref;
-  (* the [hike: undef-read:] dedup: one warning line per (sub, var) —
-     data reads warn individually (deduped here), the model-ABI lanes
-     (YMM phantom call args, RDX ret member) are aggregated into one
-     per-sub summary line by [create_sub] at the end of emission. *)
+  (* Dedups [hike: undef-read:] warnings per (sub, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
-  (* L-E1e FIX (the tty/cat dominance bug): EDGE-KEYED SP-restore
-     bindings — (pred_tid, fallthrough_tid) -> the post-push+8 value
-     computed IN the pred (call) block. The fallthrough's per-BLOCK
-     table can hold only ONE binding per var, so two call preds of the
-     same join clobber each other (the last-emitted restore wins and
-     its add does not dominate the join's phis — llc "Instruction does
-     not dominate all uses"). The edge key makes each pred's restore
-     independent; [Bil2llvm.update_phi] consults it before the pred's
-     plain binding. *)
+  (* Edge-keyed SP restores: (pred, fallthrough) -> post-push+8 value. *)
   edge_sp_restores : (Tid.t, (Tid.t, Llvm.llvalue) EHashtbl.t) EHashtbl.t ref;
 }
 
@@ -85,20 +65,14 @@ let empty_emit_ctx () : emit_ctx =
 module Vsa = struct
   open Core_kernel[@@warning "-D"]
 
-  (* ARCH-1 — the enum's physical home is the extraction module (the
-     cbat_vsa library, where the producer lives); this is the ALIAS
-     the ~60 constructor references ([Convutils.Range] etc.) compile
-     through unchanged.  [equal_kind] is derived at the definition
-     site; the [equal] name below keeps the old references. *)
+  (* Alias of the kind enum in [Cbat_extraction]. *)
   type vsa_kind = Cbat_vsa.Cbat_extraction.kind =
     | Range of int64 * int64
     | Infinite of int64 * int64
     | Unbounded
     | Dead
     | VLA of Tid.t
-  (* one deriver only: the module's [equal_kind] is the definition;
-     [equal_vsa_kind] aliases it for the vsa_info record's
-     [@@deriving equal] (the deriver references this name). *)
+  (* Aliases [equal_kind] for [@@deriving equal]. *)
   let equal_vsa_kind = Cbat_vsa.Cbat_extraction.equal_kind
 
   type region = {
@@ -110,38 +84,10 @@ module Vsa = struct
   }
   [@@deriving equal]
 
-  (* THE STACK MODEL DECISION for a sub: [plan <> []] means the sub's
-     stack is SPLIT into per-region [stack_rN] allocas (the optimized
-     shape — every convertible access became a BIL local and every
-     surviving memory access resolves inside a region); [plan = []]
-     means ONE big [%frame] alloca covers all of it (the SOUND FALLBACK,
-     always correct, unoptimized).
-
-     Computed ONCE by [Hike_stack_model.split_plan] — Finding 1:
-     the decision has ONE producer and three CONSUMERS ([Hike_stack_to_
-     locals], [Hike_dce], [Bil2llvm]). It is a property of the
-     PRE-rewrite sub (the converted slots vanish once stack-to-locals
-     runs), so the vsa pass computes it and carries it here. *)
+  (* [plan <> []] splits into [stack_rN] allocas; [[]] uses one [%frame]. *)
   type split_plan = region list [@@deriving equal]
 
-  (* THE PER-SUB VSA RESULT — and THE PRECOMPUTED VIEW (arch C2, arch
-     review #1): the [offsets] and [k_ranges] fields ARE the per-def
-     index maps (Tid -> kind / Tid -> (klo, khi)), not the raw
-     association lists.  Each is a per-DEF fact (one tag, one k-range,
-     one VLA bound per def), so a map is what they are; the old
-     association-list shape made every per-def lookup a linear scan and
-     pushed a private refold into each consumer (five fold sites in
-     stack_to_locals, the emitter's per-def [find_def_tag] scan,
-     hike.ml, the probes).  One fold per sub, at the ONE producer,
-     instead.  Build records with [mk_vsa_info] (the list-taking seam
-     for fixtures/probes) or [mk_vsa_info_maps] (the producer's tail —
-     the extraction returns maps); the fields are read with
-     [Core.Map.find] / iterated with [Core.Map.fold] (sorted-key order
-     — NO consumer depends on the old walk order; the one that appeared
-     to (the A4 test's positional borrow) is order-independent and was
-     fixed with it).  [equal_vsa_info] is hand-written over maps (same
-     strictness modulo entry ORDER), so the KB join domain (and its
-     [Vsa_info_conflict] detection) is unaffected. *)
+  (* Per-def index maps: [offsets] and [k_ranges]. *)
   type vsa_info = {
     offsets : vsa_kind Tid.Map.t;
     k_ranges : (int64 * int64) Tid.Map.t;
@@ -151,16 +97,11 @@ module Vsa = struct
     vla_bounds : (int64 * int64) Tid.Map.t;
   }
 
-  (* [equal_vsa_info]: hand-written (the derived version cannot index
-     into Core's Map) — SAME strictness as the old list equality modulo
-     entry ORDER (two infos with the same entries are the same result;
-     the old list order was the deterministic walk order, so this only
-     ever merges facts that were identical anyway). *)
+  (* Hand-written equality over maps. *)
   let equal_krange ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
     Int64.equal a1 a2 && Int64.equal b1 b2
 
-  (* vla_bounds is a MAP (the extraction's shape — consistent with
-     offsets/k_ranges): the pair-equality goes through [Core.Map.equal]. *)
+  (* Pair equality via [Core.Map.equal]. *)
   let equal_vla_bound ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) :
       bool =
     Int64.equal a1 a2 && Int64.equal b1 b2
@@ -173,17 +114,12 @@ module Vsa = struct
     && Bool.equal i1.degraded i2.degraded
     && Core.Map.equal equal_vla_bound i1.vla_bounds i2.vla_bounds
 
-  (* [mk_vsa_info_maps]: the map-taking constructor — the vsa producer's
-     tail path (the extraction returns maps). *)
+  (* Builds info from maps. *)
   let mk_vsa_info_maps ~offsets ~k_ranges ~regions ~stack_plan ~degraded
       ~vla_bounds : vsa_info =
     { offsets; k_ranges; regions; stack_plan; degraded; vla_bounds }
 
-  (* [mk_vsa_info]: THE ONE FOLD — the association lists in, the record's
-     index maps out.  Every test fixture and probe crosses this seam;
-     nobody folds the lists themselves anymore.  (The vsa producer's
-     tail already HAS the maps — it uses [mk_vsa_info_maps] to avoid a
-     pointless list round-trip.) *)
+  (* Builds info from lists. *)
   let mk_vsa_info ~offsets ~k_ranges ~regions ~stack_plan ~degraded
       ~vla_bounds : vsa_info =
     mk_vsa_info_maps
@@ -198,17 +134,14 @@ module Vsa = struct
         (Base.List.fold_left vla_bounds ~init:Tid.Map.empty
            ~f:(fun m (tid, (a, b)) -> Core.Map.set m ~key:tid ~data:(a, b)))
 
-  (* [empty_vsa_info]: the no-tags info (the [sub_info = None] default
-     and the "nothing stack-relevant here" answer) — the one-liner over
-     the map constructor (arch review #1's convenience kept; the
-     fixtures and probes read it). *)
+  (* Info with no tags. *)
   let empty_vsa_info : vsa_info =
     mk_vsa_info_maps ~offsets:Tid.Map.empty ~k_ranges:Tid.Map.empty
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:Tid.Map.empty
 end
 include Vsa
 
-(* Hidden stack-threading parameter: callee's entry RSP passed by caller. *)
+(* Callee entry RSP passed by caller. *)
 let hike_stack_var : var =
   Var.create ~is_virtual:false ~fresh:false "hike_stack" (Type.Imm 64)
 
@@ -221,11 +154,7 @@ let is_positive_kind (kind : vsa_kind) : bool =
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
-(* [is_intrinsic_name s]: the ONE name fact for the FP-intrinsic interface
-   vars and the mapped-intrinsic subs (the [intrinsic:xN] / [intrinsic:yN]
-   temps, the [intrinsic:*] sub names). Previously three hand-typed
-   prefix tests (hike_dce's var form, bil2llvm's sub-name form, hike.ml's
-   free-var filter) — one fact, one home. *)
+(* Tests for [intrinsic:*] names. *)
 let is_intrinsic_name (s : string) : bool =
   Base.String.is_prefix s ~prefix:"intrinsic:"
 
@@ -246,7 +175,7 @@ let blk_llvals_find map tid =
   | Some v -> v
   | None -> failwith @@ "blk_llvals.find_exn: " ^ Tid.name tid
 
-(* Strip BAP tid prefixes (@, #, ., etc.) for LLVM names. *)
+(* Strips tid prefixes for LLVM names. *)
 let sanitize_name =
   Base.String.filter ~f:(fun c ->
       if c = '#' then false
@@ -340,14 +269,7 @@ let get_local ctx blk_tid var =
   let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
   WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
 
-(* [probe_local_family ctx blk_tid v ~want_w]: the WIDTH-FAMILY probe — a
-   binding of [v]'s BASE at a DIFFERENT width (the FP result bound at its
-   result width; the consumer reads the 32-bit splice view). Returns
-   (the bound value, its width) — preferring an exact want_w binding,
-   else the WIDEST bound width of the same base (the most information);
-   None when the base is unbound at every width. The CALLER adjusts the
-   width (zext/trunc): one BIL value is one number regardless of the
-   lane it was bound at. *)
+(* Finds [v]'s binding at another width. *)
 let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
     (Llvm.llvalue * int) option =
   let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
@@ -368,7 +290,7 @@ let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
           | Some exact -> (
               match exact with
               | _ ->
-                  (* prefer the exact-width binding when present *)
+                  
                   if List.mem_assoc want_w bindings then want_w else w)
           | None -> w )
 

@@ -1,18 +1,12 @@
-(* test_vsa: branch-assume/fixpoint smoke (D4/D5/D6/E3/E6), relevance+fixpoint wiring (T-series), foundations/seeds (F1/C1/RSP/W), degenerate casts and residue closure, anchor/L2b. *)
+(* Branch-assume/fixpoint smoke, relevance wiring, seeds, casts, anchor pins. *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
 
-(* --- 15b. Phase 2 change D6: fixpoint-level mixed-width smoke test --- *)
+(* Fixpoint-level mixed-width smoke test. *)
 
-(* A small cyclic BIR program: entry: i := 0; body: i := i + 1; header: jmp exit if i < t / jmp body
-   if NOT (i < t), where t is a never- defined 32-bit var (top(32)) — the doubt-valued condition
-   keeps BOTH edges live every round (unconditional gotos would not: reachable_jumps drops the
-   second jmp for lack of fall-through), and the back edge makes the body a widening point — the
-   counter is forced to top(32), a CLP, by ~iteration 11. The branch-assume refinement never fires
-   (the cond is BinOp(Var, Var), not BinOp(Var, Int)). [exit_defs] are extra defs placed in the exit
-   block (D6-14 uses this to exercise a mixed-width rshift on the widened counter). Returns (i,
-   program, sub, exit tid). *)
+(* Cyclic counter loop; doubt-valued cond keeps both edges live, back edge widens.
+   [exit_defs] adds defs to the exit block. Returns (i, program, sub, exit tid). *)
 let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub term * tid =
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let t = Var.create ~is_virtual:false ~fresh:false "t" (Type.Imm 32) in
@@ -54,25 +48,8 @@ let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub 
   let ctx = Program.create ~subs:[ sub ] () in
   (i, ctx, sub, exit_tid)
 
-(* --- 19. P2d-1b (lane B): relevance tags + fixpoint wiring -----------
-
-   The lane-A transitional pins are reworked to the REAL behavior:
-   [Relevance.analyze] tags the sub's defs (per-def Unit-payload tag
-   [Cbat_vsa_utils.relevant]) and returns the TAGGED sub — under the
-   tag-only design (2026-08-10) the tag presence IS the restriction
-   (denote_def skips untagged defs; there is no restriction_enabled
-   switch); [static_graph_vsa] computes
-   the per-sub refineable set { v | v has A def tagged [relevant] } and
-   the call-abstraction preserved set ({RSP,RBP,RBX,R12..R15} ∪ the
-   sub's virtual vars) at entry; [assume_jump_cond] refines only
-   refineable vars; [inspect_call] abstracts calls (direct AND
-   indirect) instead of recursing into callees on tagged subs.  The
-   re-added tag-based checks (closure, slot-overlap,
-   flag-cond, caller-alias) assert via [Term.has_attr] on the returned
-   sub and via fixpoint behavior on tagged subs. *)
-(* [Hike_vsa_relevance] is hike's production relevance pass
-   (src/hike_vsa_relevance.ml, the restored two-pass tagger) — reached
-   through the library's public interface. *)
+(* Relevance tags + fixpoint wiring: analyze tags defs; tag presence is the restriction. *)
+(* Production relevance pass, reached through the library interface. *)
 let mk_flag_sub ~(mixed : bool) :
     var * Program.t * sub term * tid * def term * def term option * def term =
   let f = v1 "t3_f" in
@@ -104,10 +81,7 @@ let mk_flag_sub ~(mixed : bool) :
   let ctx = Program.create ~subs:[ sub ] () in
   (f, ctx, sub, exit_tid, defA, (if mixed then Some defB else None), defU)
 
-(* T3 — the frozen-flag guard: [assume_jump_cond] refines a var only if it is in the per-sub
-   refineable set { v | v has a def tagged [relevant] } ([refineable_of_sub]; when the restriction
-   is on); OFF refines all. Under G3 (jump-cond seeding) a flag read by a jcc has tagged defs, so it
-   IS refined; the unrelated-def control below keeps the restriction's purpose pinned. *)
+(* T3: frozen-flag guard — assume_jump_cond refines only refineable vars. *)
 type caller_alias_fixture = {
   ca_ctx : Program.t;
   ca_sub : sub term;
@@ -136,8 +110,7 @@ let mk_caller_alias () : caller_alias_fixture =
   let v = v64 "t4_v" in
   let w = v64 "t4_w" in
   let w2 = v64 "t4_w2" in
-  (* callee: a single self-looping block; never analyzed on the enabled path (the call is
-     abstracted). *)
+  (* Callee: single self-looping block; never analyzed (call abstracted). *)
   let cb = Blk.Builder.create () in
   let cblk0 = Blk.Builder.result cb in
   let cb = Blk.Builder.init ~copy_defs:true cblk0 in
@@ -151,14 +124,7 @@ let mk_caller_alias () : caller_alias_fixture =
   let def_rbp = Def.create rbp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x1f00))) in
   let def_rdi = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 0x30))) in
   let def_rbx = Def.create rbx (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x40))) in
-  (* hike port: L-E1 (ora-9 Item 2) — the fixture now models the PUSH ([rsp := RSP - 8] right before
-     the call; the caller-side half of the push/ret matched pair the oracle's BIR verification found
-     in real lifted code). The ON-path call abstraction (restriction ON, the T4-7..12 checks below)
-     preserves RSP at the POST-PUSH value — the callee's pop is never modeled — so the L-E1
-     restoration (RSP := RSP + 8 on the return edge) is what makes the continuation RSP the TRUE
-     pre-push {0x2000} again (T4-9 below stays green with its ORIGINAL assertion: pre-L-E1 the
-     continuation would be truth − 8 = {0x1ff8}). Placed after the defs that use the pre-push RSP
-     (rbx := RSP + 0x40 must see {0x2000}). *)
+  (* Call PUSH model (rsp := RSP - 8); placed after defs using pre-push RSP. *)
   let def_push = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))) in
   let def_v =
     Def.create v
@@ -229,32 +195,11 @@ let mk_caller_alias () : caller_alias_fixture =
     ca_def_store_disjoint = def_store_disjoint;
   }
 
-(* T4 — the caller-alias soundness case via the CALL ABSTRACTION (the restriction is on): pre-call
-   the aliased slot holds {42} at the concrete address {0xd0}; across the call the callee may write
-   arbitrary memory, so the post-call reload reads TOP (sound), while RSP/RBP/callee-saved RBX keep
-   their value-sets and the caller-saved rdi is TOPed. Also: the OFF-path caller->callee recursion
-   still completes (byte-identical behavior). *)
-(* --- 20. P2d-1b (lane A): vendored foundations — map-lattice fold and call_abstraction
-   ---------------------------------------------- *)
+(* T4: caller-alias soundness — post-call reload reads TOP; RSP/RBP/RBX kept, rdi TOPed. *)
+(* F1: map-lattice fold visits explicitly-stored bindings only; absent = top. *)
+(* RSP-only relevance seeds: RBP enters only via RSP-derivation. *)
 
-(* F1 — Cbat_map_lattice.fold (added by lane A; fork-precedented). Folds over the explicitly-stored
-   bindings only; absent = top (cbat_map_lattice.ml [top]), so folding [top] visits nothing. *)
-(* --- 21. P2d-1c: RSP-only relevance seeds ------------------------------- hike port: P2d-1c, user
-   directive — RSP-only relevance seeds (RBP enters only via RSP-derivation): the seeds start from
-   the RSP-derived var set D = {RSP} ∪ { lhs d | some rhs var of d ∈ D } (forward fixpoint), so an
-   address is stack-relevant iff its base is RSP-derived. P21 (positive): the `RBP := RSP` prologue
-   puts RBP in D → rbp-relative accesses stay relevant (the -O0 regression pin). P22 (positive): an
-   INDEX var of an RSP-derived address is seeded ("and indexes of the addresses"). P23 (negative,
-   the point of this lane): a GPR-used RBP (`RBP := 42`, not RSP-derived) + load [RBP + idx*8] —
-   those address/index vars are NOT tagged, while the RSP-direct access [RSP - 8] IS. hike port:
-   L-D8 (user directive, 2026-08-08) — the two-pass tagging design replaces the L-D5b frame-base
-   var-name rule: the FORWARD D pass tags the defs that directly use RSP and RSP-derived vars, and
-   the BACKWARD W pass tags the address contributors. rbp := 42's rhs has no RSP-derived vars, so
-   the forward pass does NOT tag it — P23-1 returns to its ORIGINAL NOT-tagged assertion; P23-2..5
-   stay negative (no D vars on their rhs). *)
-
-(* [mk_rsp_prologue_sub]: the -O0 prologue [rbp := RSP] plus a load and an overlapping store at [rbp
-   - 0x30]. Returns (def_rbp, def_store, sub). *)
+(* -O0 prologue (rbp := RSP) + load + overlapping store. Returns (def_rbp, def_store, sub). *)
 let mk_rsp_prologue_sub () : def term * def term * sub term =
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
@@ -360,22 +305,9 @@ let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * s
   let sub = Sub.Builder.result sub_b in
   (def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub)
 
-(* --- 22. P2d-1d-B: per-block backward W (Graphlib.fixpoint ~rev:true) hike port: P2d-1d-B, user
-   directive — Graphlib.fixpoint backward dataflow. The flow-insensitive W worklist is gone: W is
-   now per block, computed by a BACKWARD fixpoint over the sub's CFG ([~rev:true] with [~start] at
-   the Graphs.Tid exit pseudo-node), so a var is relevant at a block only if its def-use chain is
-   reachable on a path THROUGH that block. F1 (the flow-sensitivity pin): a var relevant on ONE path
-   only — the rdi use (the store whose addr expr seeds rdi) is reachable only via B1 — so the def
-   rdi := Load in B1 is tagged while the sibling def rdi := 7 in B2 is NOT (the old flow-insensitive
-   W contained rdi globally and tagged BOTH). The per-block W preserves the earlier positives
-   verbatim — the P21/P22 checks (section 21) and the T3 frozen-flag checks (the G3 block) pin them
-   on the same [Relevance.analyze] path, so no separate F3/F4 re-checks are needed (they were
-   removed as exact duplicates). *)
+(* Per-block backward pass: a var is relevant at a block only on paths through it. *)
 
-(* [mk_one_path_sub]: entry: rbp := RSP, cond jmps to B1 and B2; B1: rdi := Load(m, [rbp - 0x30])
-   (the tracked load) then jmp to B_use; B2: rdi := 7 (dead-end — no jmp, connects to the exit
-   pseudo-node); B_use: Store(m2, [rdi + 8], 42) — the USE of rdi (its addr expr seeds rdi at
-   B_use), reachable only via B1. Returns (def_prologue, def_load, def_other, sub). *)
+(* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, sub). *)
 let mk_one_path_sub () : def term * def term * def term * sub term =
   let rsp = v64 "RSP" in
   let rbp = v64 "t22_rbp" in
@@ -448,34 +380,9 @@ let mk_high0_cast_sub () : var * Program.t * sub term * tid =
   let ctx = Program.create ~subs:[ sub ] () in
   (rax, ctx, sub, final_tid)
 
-(* --- 24. Loop attempt 1 (ora-7 free wins): E2e-H equal fast path + *)
-(*        E2e-B gated per-hit event log ----------------------------- *)
+(* Stack-only residue closure: heap-indexed stores fall out; top-addr stores skipped. *)
 
-(* --- 25. Loop attempt 2 (E2e-C): overshift three-way split ---------- *)
-(*        (bitvec overshift=zero semantics; the CLP arm now matches the *)
-(*        FinSet arm: cbat_clp.ml lshift/rshift/arshift)                *)
-
-(* --- 26. E2e-D: stack-only residue closure (loop attempt 3) ------------- hike port: E2e-D, loop
-   attempt 3 — stack-only residue (user directive: only the stack, not heap). Two closure sites:
-
-   1. [is_relevant_store]'s conservative arm (hike_vsa_relevance.ml): an address that cannot be
-   statically resolved to a slot is relevant iff SOME var of the address expr is RSP-derived at the
-   def's block (D_at(block) ∪ {RSP, RBP}). A heap-indexed store (`*(rdi + i*8)` with heap rdi) has
-   no RSP-derived var, so it falls out of W and its data var is not tracked (E1/E3 below).
-
-   2. The Store arm (cbat_vsa.ml): a store at a TOP abstract address is skipped unconditionally
-   (memory unchanged) — its key would be the FULL-RANGE cell {lo=0; hi=2^64-1}, which overlaps every
-   later cell (the interval-tree blowup cbat_ai_memmap.ml:447-449 warns about). The skip fires on
-   [WordSet.is_top addr] before any key lookup; there is no restriction switch (tag-only design).
-
-   E1: heap-indexed store exclusion. E2: the RSP-derived positive control (the D-check must NOT
-   de-tag an RSP-derived index store). E3: the top-address store drop. *)
-
-(* [mk_e2ed_heap_sub]: the heap-indexed store negative — entry: rdi := 0x400000 (a heap base, NOT
-   RSP-derived); i := 5; v := 99 (the store's data var); Store(m, rdi + i*8, v) — the address `rdi +
-   i*8` cannot be statically resolved to a slot (the TIMES index breaks the base+const shape) and
-   neither rdi nor i is RSP-derived. Returns (def_base, def_idx, def_data, def_store, sub, exit
-   tid). *)
+(* Heap-indexed store negative. Returns (def_base, def_idx, def_data, def_store, sub, exit tid). *)
 let mk_e2ed_heap_sub () : def term * def term * def term * def term * sub term * tid =
   let rdi = v64 "e2ed_rdi" in
   let i = v64 "e2ed_i" in
@@ -538,18 +445,9 @@ let mk_e2ed_rsp_store_sub () : def term * def term * def term * sub term * tid =
   let sub = Sub.Builder.result sub_b in
   (def_prologue, def_idx, def_store, sub, exit_tid)
 
-(* --- 28. P3 anchor tag (ora-2-approved): the RSP := 0 anchor under the relevance restriction
-   ---------------------------------------------- hike port fix (P3 precision, ora-2-approved): the
-   set_stack_0 anchor def (cbat_vsa.ml:576-586, the unsound_stack model convention RSP := 0) was
-   UNTAGGED, so under the relevance restriction denote_def skipped it (the skip guard,
-   cbat_vsa.ml:333-335) and the entry state degraded to AI.top with RSP = top — measured 0%
-   stack-address resolution at -O0. The fix tags the anchor at its definition site (Term.set_attr
-   ... Utils.relevant ()); the tag is inert when the restriction is off (the guard's first conjunct
-   is false — OFF stays byte-identical). (a) pins the ON mechanism: the fixpoint's entry INPUT state
-   must carry RSP = {0}; (b) pins the OFF path: still RSP = {0}, the pre-fix behavior. *)
+(* RSP := 0 anchor def is tagged, so the entry state carries RSP = {0}. *)
 
-(* One block, one trivial def — the smallest sub that runs the fixpoint (the D4-9 fixture shape,
-   test_cbat.ml:~581, minus the loop). *)
+(* Smallest sub running the fixpoint: one block, one trivial def. *)
 let mk_p3_anchor_sub () : sub term =
   let t = v64 "p3_t" in
   let b = Blk.Builder.create () in
@@ -559,32 +457,12 @@ let mk_p3_anchor_sub () : sub term =
   Sub.Builder.add_blk sub_b blk;
   Sub.Builder.result sub_b
 
-(* --- 29. L2b (ora-2): the FinSet cardinality wrap — {0,1} reads empty
-   ---------------------------------------------------------------------- hike port fix (L2b,
-   ora-2): FinSet.cardinality converted the element count at the SET's bitwidth
-   (cbat_fin_set.ml:35-37), so the full 1-bit domain {0,1} (length 2) read cardn 0 = EMPTY. The
-   composite's is_bottom is cardinality-based (cbat_clp_set_composite.ml:143), so every {0,1} value
-   read bottom: bool_top (= WordSet.top 1, cbat_vsa.ml:86), val_top (Type.Imm 1) (:206-214), the map
-   default read (cbat_map_lattice.ml:167-172), and every comparison overlap result. The EQ/NEQ
-   guards (cbat_vsa.ml:108/:120) fired on the wrapped cardn and stored genuine bool_bottom ->
-   flag-gated edges pruned by reachable_jumps (:365-372) — unsound pruning of live blocks (measured
-   class-5 population: 5618 all-defs bottom_live, 1099 tagged). The fix matches the CLP convention
-   (cbat_clp.ml:158-161): the cardinality is a (width+1)-bit word, so the full domain reads 2^width
-   correctly. After the fix the flag defs are {0,1} as a FinSet (is_top = false — the composite's
-   is_top is CLP-only; assert accordingly). This section pins: L2b-1 the domain cardinality, L2b-2
-   the EQ is_zero guard off a {0,1} operand, L2b-3 the lifted 1-bit flag value (the val_top
-   (Type.Imm 1) path — this BAP's Size has no `r1 (bap_size.ml:4-13), so the corpus's 1-bit flags
-   arrive as unknown[bits]:u1 defs, not 1-bit loads), L2b-4 the overlap-comparison bool_top result,
-   L2b-5 the flag-gated branch survival (direct reachable_jumps + a D4-9-shape loop fixpoint). *)
+(* FinSet cardinality reads at width+1 bits, so full {0,1} reads cardn 2, not empty. *)
 
-(* L2b-1: the full 1-bit domain reads cardn 2, not empty. *)
+(* L2b-1: full 1-bit domain reads cardn 2. *)
 let run () =
-(* --- 11. Phase 2 change E1: the SP anchor (set_stack_0) ---------------- REMOVED (the
-   base-independence endgame): the production default is the UNANCHORED entry (AI.top + the
-   frame-relation seed); the fixtures below pin the ANCHORED entry explicitly ([anchored_entry]) to
-   keep the backward-refinement raw-meet contract. The old E1-1 check (unsound_stack defaults to
-   true) died with the anchor. *)
-(* --- 12. Phase 2 change D4: branch-assume refinement ---------------- *)
+(* SP anchor removed: fixtures pin the anchored entry explicitly. *)
+(* Branch-assume refinement pins. *)
 (  let ivar = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let tgt = Tid.create () in
   let mk_jmp cond = Jmp.create ~cond (Goto (Direct tgt)) in
@@ -616,24 +494,20 @@ let run () =
   in
   check "D4-3: assume (x == 5) refines x to {5}"
     (Ws.min_elem c3 = Some (w32 5) && Ws.max_elem c3 = Some (w32 5));
-  (* doubt: constant condition -> untouched *)
   let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp (Bil.Int (w32 1)))) ivar in
   check "D4-4: doubt — constant condition keeps the state (top)" (Ws.is_top c4);
-  (* doubt: width-mismatched comparison (64-bit const vs 32-bit var) *)
   let c5 =
     AI.find_word 32
       (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (w64 5)))))
       ivar
   in
   check "D4-5: doubt — width-mismatched guard keeps the state (top)" (Ws.is_top c5);
-  (* doubt: NEQ is not a single-interval constraint *)
   let c6 =
     AI.find_word 32
       (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (w32 5)))))
       ivar
   in
   check "D4-6: doubt — NEQ guard keeps the state (top)" (Ws.is_top c6);
-  (* bare flag: taken edge forces v := {1}; NOT v forces v := {0} *)
   let fv = Var.create ~is_virtual:false ~fresh:false "zf" (Type.Imm 1) in
   let c7 =
     AI.find_word 1
@@ -651,15 +525,10 @@ let run () =
     (Ws.elem Word.b0 c8 && not (Ws.elem Word.b1 c8));
   ()
 
-(* [tag_all sub]: the always-on restriction needs every def of a fixture tagged — the untagged defs
-   are skipped unconditionally. *))
-(* --- 12b. Phase 2 change D4: BIR-level loop (the [0,N) goal) -------- *)
+(* Restriction needs every fixture def tagged; untagged defs are skipped. *))
+(* BIR-level loop: back-edge refined by "i < 5", exit bounded. *)
 ;
-(  (* A small BIR loop: entry: i := 0; body: i := i + 1; header: jmp exit if NOT (i < 5); jmp body if
-     i < 5. With branch-assume, the back-edge state is refined by "i < 5" to [0,4], so the header
-     chain converges to [1,5] within ~6 iterations — BEFORE the iteration-11 widening that would
-     force the counter to top(32). The counter at the exit edge is therefore bounded, strictly
-     tighter than top. *)
+(  (* Back-edge refined by "i < 5": header converges before widening fires. *)
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let iv = Bil.Var i in
   let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (w32 5)) in
@@ -698,13 +567,7 @@ let run () =
   let sol =
     Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
-  (* MIGRATED (ticket 02, the Phase B deletion): the per-guard views are
-     gone — the fused fixpoint refines the per-edge states INLINE, so the
-     body's IN-state (its only predecessor is the header's taken edge,
-     refined by "i < 5") is the ITERATE state and the exit's IN-state
-     (the header's fallthrough, refined by ~(i < 5)) is the EXIT state,
-     read directly from the converged solution (spec §2/§10.2: the
-     per-edge view IS the single-predecessor target's IN-state). *)
+  (* Per-edge states read from single-predecessor targets' IN-states. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check
@@ -715,11 +578,9 @@ let run () =
     && (not (Ws.is_top c_exit))
     && match Ws.min_elem c_exit with Some w -> Word.( >= ) w (w32 5) | None -> false);
   ())
-(* --- 13. Phase 2 change E3: Ite else-arm joins both arms ------------ *)
+(* Ite else-arm joins both arms. *)
 ;
-(  (* A {0,1}-valued (non-top, non-singleton) Ite condition must not kill the else value: the
-     denotation joins both arms. (A 1-bit condition is always top or a singleton, so a wider flag is
-     used to reach the else arm.) *)
+(  (* {0,1}-valued Ite cond must not kill the else value. *)
   let f32 = Var.create ~is_virtual:false ~fresh:false "flag32" (Type.Imm 32) in
   let env = AI.add_word AI.top ~key:f32 ~data:(Ws.of_list ~width:32 [ w32 0; w32 1 ]) in
   let e = Bil.Ite (Bil.Var f32, Bil.Int (w32 10), Bil.Int (w32 20)) in
@@ -730,15 +591,11 @@ let run () =
   | Error _ ->
       check "E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)" false;
       ())
-(* --- 14. Phase 2 change D5: rshift/arshift width guards ------------- *)
+(* rshift/arshift width handling: mixed widths compute, overshift is zero. *)
 ;
 (  let c32 = Clp.create (w32 16) in
   let c64 = Clp.create (w64 16) in
-  (* mixed-width operand pair: pre-fix, rshift_step's assert(sz1 = sz2)
-     aborted the analysis (the corpus crash at cbat_clp.ml:855) *)
-  (* hike port: lane A (ora-2) — the mixed-width guard is replaced by
-     coerce-to-max + shift + keep-low-bits; the same operand pair now
-     COMPUTES: 16 >> 16 = 0 (and arshift of the non-negative 16 = 0). *)
+  (* Mixed-width operands compute via coerce-to-max (16 >> 16 = 0). *)
   check
     "D5-1: CLP rshift on mixed-width operands COMPUTES (lane A) — {0} exactly, no assert, no top"
     (Clp.equal (Clp.rshift c32 c64) (Clp.create (w32 0)));
@@ -752,8 +609,7 @@ let run () =
      &&
      let a = Clp.arshift (Clp.create (w32 16)) (Clp.create (w32 2)) in
      Clp.min_elem a = Some (w32 4) && Clp.max_elem a = Some (w32 4));
-  (* amount guard (lshift-style): shift amount >= operand width. hike port: E2e-C — overshift is now
-     bitvec semantics ({0} exactly), NOT top (the D5 top-degradation is superseded). *)
+  (* Overshift amount (>= width) is bitvec zero, not top. *)
   check "D5-4: rshift by an amount >= the operand width -> {0} exactly (overshift=zero, no raise)"
     (let r = Clp.rshift (Clp.create (w32 1)) (Clp.create (w32 32)) in
      Clp.min_elem r = Some (w32 0)
@@ -764,8 +620,7 @@ let run () =
   check "D5-5: rshift by an amount < the operand width still computes"
     (let r = Clp.rshift (Clp.create (w32 8)) (Clp.create (w32 3)) in
      Clp.min_elem r = Some (w32 1) && Clp.max_elem r = Some (w32 1));
-  (* composite level: the corpus crash reached Clp.rshift via WordSet.rshift with two CLP operands
-     (cardinality > fin_set_size) *)
+  (* Composite level: mixed-width CLPs via WordSet. *)
   let big32 = Ws.of_list ~width:32 (List.init 11 (fun i -> w32 (i * 2))) in
   let big64 = Ws.of_list ~width:64 (List.init 11 (fun i -> w64 (i * 2))) in
   check "D5-6: composite rshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert"
@@ -776,7 +631,7 @@ let run () =
     (let r = Ws.rshift (Ws.singleton (w32 16)) (Ws.singleton (w32 2)) in
      Ws.elem (w32 4) r && (not (Ws.is_top r)) && not (Ws.is_bottom r));
   ())
-(* --- 15. Phase 2 change D6: coercing width helper ------------------- *)
+(* Coercing width helper: mismatched ops coerce, never raise. *)
 ;
 (  let p32 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
   let p64 = Clp.of_list ~width:64 [ w64 1; w64 2 ] in
@@ -820,19 +675,13 @@ let run () =
      Clp.bitwidth r = 32 && Clp.elem (w32 11) r && Clp.elem (w32 13) r);
   ())
 ;
-(  (* The exit def j := i >> 1 (a 64-bit shift amount) is denoted once i has widened to top(32):
-     composite Clp(32) x FinSet{1}_64 -> Clp.rshift hits the D5 mixed-width guard — the exact corpus
-     crash path (Assert_failure cbat_clp.ml:855). The fixpoint must return with j = top(32) (the
-     runtime arm). [find_word] defaults missing keys to top, so the guard's hit counter is asserted
-     too — the test is not vacuous. *)
+(  (* Exit state is block INPUT (j absent): denote the def to read the postcond. *)
   let j = Var.create ~is_virtual:false ~fresh:false "j" (Type.Imm 32) in
   let _, ctx, sub, exit_tid =
     mk_counter_loop ~exit_defs:(fun i ->
         [ Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (w64 1))) ])
   in
-  (* hike port: lane A (ora-2) — the mixed-width rshift now COMPUTES (the coercion replaces the top
-     degradation): the guard's per-hit line must NOT appear and the loop's j = i >> 1 resolves
-     non-top *)
+  (* Mixed-width rshift computes: no guard fire, j non-top. *)
   let comp = "rshift: mixed-width shift operands (32 and 64 bits)" in
   let fired_r =
     fired comp (fun () ->
@@ -840,8 +689,6 @@ let run () =
   in
   let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
-  (* the solution's exit state is the block INPUT (j absent) — denote the j def on it to read the
-     postcond *)
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let j_after =
     Vsa.denote_def
@@ -853,7 +700,7 @@ let run () =
   check "D6-14 (BIR loop): mixed-width rshift COMPUTES (lane A), no crash, no guard fire"
     ((not fired_r) && not (Ws.is_top (AI.find_word 32 j_after j)));
   ())
-(* --- 16. Phase 2 change D6b: FinSet lift2 default width ------------- *)
+(* FinSet lift2 default width: mismatched sets widen to 64, never raise. *)
 ;
 (  let f32 = Fs.of_list ~width:32 [ w32 1; w32 2 ] in
   let f64 = Fs.of_list ~width:64 [ w64 1; w64 2 ] in
@@ -872,7 +719,7 @@ let run () =
      Fs.equal (Fs.union a b) (Fs.of_list ~width:32 [ w32 1; w32 2; w32 3 ])
      && Fs.equal (Fs.intersection a b) (Fs.of_list ~width:32 [ w32 2 ]));
   ())
-(* --- 17. Phase 2 change E6: not_implemented logging (principle-6 purge) --- *)
+(* not_implemented logging: Event.Log only, stderr stays clean. *)
 ;
 (  let probe = "e6-log-probe" in
   let captured =
@@ -882,8 +729,7 @@ let run () =
   let probe_lines =
     String.split_on_char '\n' captured |> List.filter (fun l -> contains_substring l probe)
   in
-  (* the principle-6 purge (2026-08-22): the per-hit stderr eprintf is GONE — [not_implemented] logs
-     through the sanctioned BAP Event.Log ONLY; production stderr stays clean *)
+  (* not_implemented logs through BAP Event.Log only. *)
   check "E6-1: no per-hit stderr line naming the component (Event.Log only)"
     (List.length probe_lines = 0);
   check "E6-2: no not_implemented marker leaks to stderr at all"
@@ -903,9 +749,7 @@ let run () =
     (Term.has_attr d' Cbat_vsa_utils.relevant);
   ()
 
-(* T2 — the denote_def restriction (tag-only design): untagged defs are SKIPPED (the restriction —
-   the relevant tag = the forward-D-set tagging of the restored two-pass D-2f tagger); tagged defs
-   denote normally. *))
+(* T2: denote_def restriction — untagged defs skipped, tagged denoted. *))
 ;
 (  let iv = v64 "t2_iv" in
   let d = Def.create iv (Bil.Int (w64 7)) in
@@ -917,13 +761,7 @@ let run () =
     (Ws.equal (AI.find_word 64 e_tag iv) (Ws.singleton (w64 7)));
   ()
 
-(* [mk_flag_sub]: the frozen-flag fixture. entry: f := g (defA); f := h (defB, only when [mixed]); t
-   := Load(m, g + RSP) (defC — the stack access that seeds g into the tracked set via the
-   load-address rule); u := 42 (defU — shares NO cond/sink chain with anything: the unrelated-def
-   control); jmp exit if f. The jump condition reads f, so BOTH f-defs are jump-cond seeds of the
-   backward lane (the G3 guard-roots rule) and ARE tagged regardless of their rhs vars; f therefore
-   has a tagged def, enters the per-sub refineable set ({ v | v has a tagged def }), and the
-   taken/fallthrough views refine it. Returns (f, ctx, sub, exit tid, defA, defB option, defU). *))
+(* Frozen-flag fixture: f := g/h, stack-access load, unrelated-def control, jmp exit if f. *))
 ;
 (  let x = v64 "t3_x" in
   let tgt = Tid.create () in
@@ -945,12 +783,7 @@ let run () =
   check "T3-2: restriction ON + var NOT in the refineable set — NOT refined" (Ws.is_top c_out);
   ())
 ;
-(  (* G3 (jump-cond seeding): the jump condition reads f, so BOTH 1-bit flag defs (f := g / f := h)
-     are guard roots of the backward lane and ARE tagged — regardless of their rhs vars (the old "no
-     flag-cond exception" pins are gone). f therefore has a tagged def, enters the per-sub
-     refineable set ({ v | v has a tagged def }), and the taken/fallthrough views refine it. The
-     fixpoint runs on the TAGGED sub inside a program that carries the tagged sub (the consumer
-     contract). *)
+(  (* G3: jump-cond seeding — both flag defs tagged via the jump cond. *)
   let f, ctx, sub, exit_tid, defA, defB, defU = mk_flag_sub ~mixed:true in
   let sub' = Relevance.analyze sp sub in
   let ctx' = Program.create ~subs:[ sub' ] () in
@@ -963,8 +796,7 @@ let run () =
       check "T3-6: the mixed-def sibling IS tagged too (same lhs = jump-cond seed)"
         (Term.has_attr defB' Cbat_vsa_utils.relevant)
   | None -> check "T3-6: the mixed-def sibling IS tagged too (same lhs = jump-cond seed)" false);
-  (* the negative control: a def with NO cond/sink chain (a constant into an unused var) stays
-     untagged — the restriction still pins the analyzed set. *)
+  (* Unrelated def (no cond/sink chain) stays untagged. *)
   let defU' = find_def_exn sub' (Term.tid defU) in
   check "T3-9: unrelated def (feeds no cond/sink chain) stays UNTAGGED"
     (not (Term.has_attr defU' Cbat_vsa_utils.relevant));
@@ -972,19 +804,12 @@ let run () =
     Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub')
   in
   ignore sol;
-  (* MIGRATED (ticket 02): the views are gone — the exit block's only
-     predecessor is the entry's conditional edge, so its IN-state IS the
-     taken-edge refined state (the per-edge view on a single-predecessor
-     target, spec §2/§10.2).  The FALLTHROUGH assertion (T3-7b) has NO
-     fused-world equivalent: the fixture's fallthrough edge has no
-     target block (a two-block sub), so there is no IN-state to read —
-     the claim stays in the ignore list (it was already stubbed on the
-     base tree; these checks are non-graded either way). *)
+  (* Exit IN-state is the taken-edge refined state; the fallthrough edge has no target block. *)
   let c = AI.find_word 1 (Graphlib.Std.Solution.get sol exit_tid) f in
   check "T3-7: mixed-def — f IS refined to {1} on the taken edge"
     (Ws.elem Word.b1 c && not (Ws.elem Word.b0 c));
   check "T3-7b (UNASSERTABLE in the fused world — the fixture's fallthrough edge has no target block; kept for the ignore-list bookkeeping, see the comment above)" false;
-  (* the single-def control refines identically. *)
+  (* Single-def control refines identically. *)
   let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
   let sub2' = Relevance.analyze sp sub2 in
   let ctx2' = Program.create ~subs:[ sub2' ] () in
@@ -996,19 +821,10 @@ let run () =
     (Ws.elem Word.b1 c2 && not (Ws.elem Word.b0 c2));
   ()
 
-(* [mk_caller_alias]: the caller-alias fixture. Caller: entry defs RSP := 0x2000; rbp := RSP -
-   0x1f00 ({0x100}, sp-derived so the restored two-pass relevance tracks it); rdi := rbp - 0x30 (the
-   aliased address {0xd0}); rbx := RSP + 0x40 ({0x2040}); v := Load(m, RSP + 0x10); w2 := Load(m,
-   rbx + RSP); w := Load(m, rdi) (the tracked load); Store(m, rdi, 42) (TAGGED — sp-relative);
-   Store(m, rdi + 0x80, 43) (TAGGED — sp-relative; no slot filter in the two-pass design); then a
-   call to [callee] returning to the post block. Post block: r2 := Load(m, rdi) (TAGGED —
-   sp-relative via rdi). rdi and r2 are sub ARGS (formals; the two-pass relevance seeds only the
-   stack pointer, not arg vars). Returns the fixture record. *))
+(* Caller-alias fixture: aliased slot, tracked load, call, post reload. Returns the record. *))
 ;
 (  let fx = mk_caller_alias () in
   let sub' = Relevance.analyze sp fx.ca_sub in
-  (* tag assertions on the returned sub: the two-pass sp-derivation closure (every sp-relative def +
-     its contributors are tagged) *)
   let store' = find_def_exn sub' (Term.tid fx.ca_def_store) in
   check "T4-1: the store at the aliased address is tagged (sp-relative)"
     (Term.has_attr store' Cbat_vsa_utils.relevant);
@@ -1020,8 +836,7 @@ let run () =
   check "T4-3: rdi := rbp - 0x30 tagged (sp-derived via rbp)"
     (Term.has_attr rdi' Cbat_vsa_utils.relevant);
   check "T4-4: rbp := RSP - 0x1f00 tagged (sp-derived)" (Term.has_attr rbp' Cbat_vsa_utils.relevant);
-  (* pre-call state (the TAGGED entry block's denotation): the aliased address is concrete and the
-     slot holds {42} — makes the post-call reload check non-vacuous. *)
+  (* Pre-call state makes the post-call check non-vacuous. *)
   let entry_blk' =
     match Term.find blk_t sub' (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
   in
@@ -1039,8 +854,7 @@ let run () =
     (Ws.equal pre_val (Ws.singleton (w64 42)));
   check "T4-6: pre-call rdi is the concrete address {0xd0} (the alias)"
     (Ws.equal (AI.find_word 64 pre fx.ca_rdi) (Ws.singleton (w64 0xd0)));
-  (* the fixpoint on the tagged sub inside a program carrying the tagged sub (the consumer
-     contract), restriction ON *)
+  (* Fixpoint on the tagged sub, restriction ON. *)
   let ctx' = Program.create ~subs:[ sub' ] () in
   let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
   let post_ai = Graphlib.Std.Solution.get sol fx.ca_post_tid in
@@ -1068,9 +882,7 @@ let run () =
     (Map.fold Map.top ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc) = []);
   ()
 
-(* C1 — Cbat_ai_representation.call_abstraction (added by lane A; fork-shaped, no red-zone partition
-   — memory-top is the sound fixed point): preserved words (matched by Var.same) keep their
-   value-sets, every other word is TOPed, memory is TOPed entirely. *))
+(* C1: call_abstraction — preserved words kept, rest TOPed, memory TOPed. *))
 ;
 (  let x = v64 "c1_x" in
   let y = v64 "c1_y" in
@@ -1090,7 +902,6 @@ let run () =
   check "C1-3: RSP is preserved when it is in the preserved set"
     (Ws.equal (AI.find_word 64 e' rsp) (Ws.singleton (w64 0x10))
     && Ws.equal (AI.find_word 64 e' x) (Ws.singleton (w64 5)));
-  (* memories are TOPed: a stored value reads as top afterwards *)
   let m0 = memv "c1_m0" in
   let mkey =
     match Mem.Key.of_wordset (Ws.singleton (w64 0x10)) with Some k -> k | None -> assert false
@@ -1107,7 +918,6 @@ let run () =
     (Mem.equal
        (AI.find_memory { addr_width = 64; addressable_width = 8 } e_m m0)
        (Mem.top { addr_width = 64; addressable_width = 8 }));
-  (* virtual vars are preserved when in the set *)
   let vv = Var.create ~is_virtual:true ~fresh:false "c1_vv" (Type.Imm 64) in
   let env_v = AI.add_word AI.top ~key:vv ~data:(Ws.singleton (w64 3)) in
   let e_v = AI.call_abstraction ~preserved:(Var.Set.singleton vv) env_v in
@@ -1125,8 +935,7 @@ let run () =
     (Term.has_attr store' Cbat_vsa_utils.relevant);
   ()
 
-(* [mk_rsp_index_sub]: the RSP-derived base [rdi := RSP - 8] used as the base of [Load(m, rdi +
-   idx*8)] — the INDEX var idx of an RSP-derived address must be seeded. Returns (def_idx, sub). *))
+(* RSP-derived base with index; idx must be seeded. Returns (def_idx, sub). *))
 ;
 (  let def_idx, sub = mk_rsp_index_sub () in
   let sub' = Relevance.analyze sp sub in
@@ -1135,24 +944,12 @@ let run () =
     (Term.has_attr idx' Cbat_vsa_utils.relevant);
   ()
 
-(* [mk_gpr_rbp_sub]: the GPR-RBP negative — [rbp := 42] (NOT RSP-derived: no prologue), a load at
-   [rbp + idx*8] and a store at [rbp + 0x100] (resolvable, disjoint from any tracked slot), plus the
-   RSP-direct access [w := Load(m2, RSP - 8)] with an overlapping store [Store(m2, RSP - 8, 7)].
-   Returns (def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub). hike port: L-D8
-   (user directive, 2026-08-08) — the two-pass tagging design (the forward D pass tags defs whose
-   rhs directly uses RSP/RSP-derived vars; the backward W pass tags the address contributors) leaves
-   the GPR-RBP def [rbp := 42] UNTAGGED — its rhs is a literal, no D vars — so P23-1 asserts the
-   ORIGINAL NOT-tagged semantics (narrower than the L-D5b frame-base rule, which tagged every
-   RSP/RBP-lhs def); the remaining negatives (P23-2..5) also have no D vars on their rhs. *))
+(* GPR-RBP negative: rbp := 42 untagged; RSP-direct access tagged. *))
 ;
 (  let def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
   let sub' = Relevance.analyze sp sub in
   let rbp' = find_def_exn sub' (Term.tid def_rbp) in
-  (* hike port: L-D8 (user directive, 2026-08-08) — the two-pass tagging design: the forward pass
-     tags the defs that directly use RSP and RSP-derived vars (D_at of the def's block), the
-     backward pass tags the address contributors. rbp := 42's rhs is a literal — no D vars — so the
-     forward pass does NOT tag it (narrower than the L-D5b frame-base var-name rule, which tagged
-     every RSP/RBP-lhs def); P23-2..5 stay negative too. *)
+  (* Forward pass tags RSP-derived users; rbp := 42 has no D vars, stays untagged. *)
   check
     "P23-1: GPR RBP (rbp := 42, not RSP-derived) — def NOT tagged (the two-pass design: rbp := \
      42's rhs has no RSP-derived vars, so the forward pass does not tag it)"
@@ -1183,12 +980,7 @@ let run () =
   check "F1-3: one-path relevance — prologue def (rbp := RSP) tagged (feeds the B1-path load)"
     (Term.has_attr prologue' Cbat_vsa_utils.relevant);
   ())
-(* --- 23. D7 (ora-6): degenerate cast/extract guards ---------------- The corpus crash: the LLVM
-   lift emits target-size-0 casts — `RAX := high:0[RAX]` right after an FP-intrinsic call — and the
-   vendored [Clp.cast]/[extract_lo] asserted on them (Assert_failure cbat_clp.ml:1050:2;
-   union_overlap + va_arg_mixed, both modes). D7 makes the whole cast/extract family total:
-   degenerate sizes and indices degrade to top (sound over-approximations), and the shift-amount
-   guards compare INTEGER MAGNITUDES instead of width-wrapped words. *)
+(* Degenerate cast/extract sizes degrade to top; shift guards compare magnitudes. *)
 ;
 (  let c64 = Clp.create (w64 16) in
   let c32 = Clp.create (w32 16) in
@@ -1202,8 +994,7 @@ let run () =
   check "D7-7: Clp.extract ~hi:(-1) -> top (no raise)" (Clp.is_top (Clp.extract ~hi:(-1) c32));
   ())
 ;
-(  (* A FinSet singleton exercises the composite guard BEFORE the FinSet path (pre-fix, FinSet.cast
-     with sz=0 reached Bil.Apply.cast ct 0, out-of-range). *)
+(  (* FinSet singleton exercises the composite guard first. *)
   check "D7-8: composite cast HIGH sz=0 -> top(64) (CLP-backed top, not the FinSet.top stub)"
     (Ws.is_top (Ws.cast Bil.HIGH 0 (Ws.singleton (w64 16))));
   check "D7-9: composite extract hi<lo -> top(32)"
@@ -1212,26 +1003,20 @@ let run () =
     (Ws.is_top (Ws.extract ~hi:(-1) (Ws.singleton (w32 16))));
   ())
 ;
-(  (* SHIFT WRAP PIN (the oracle's repro): a 2-bit amount {2} against a 64-bit operand. Pre-D7, the
-     lshift guard compared at the amount's bitwidth — W.of_int 64 ~width:2 WRAPS to 0, so "2 >= 0"
-     fired spuriously (top). Post-D7 the guard compares integer magnitudes (both sides zero-extended
-     to >= 64 bits): no fire, the shift computes; and a genuine same-width fire still degrades to
-     top. *)
+(  (* 2-bit amount vs 64-bit operand: magnitudes compared, no spurious fire. *)
   let w2 = W.of_int ~width:2 in
   let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
   let lshift_comp = "During lshift, maximum element of CLP2 is >= CLP1's width" in
   let rshift_comp = "During rshift, maximum element of CLP2 is >= CLP1's width" in
   let arshift_comp = "During arshift, maximum element of CLP2 is >= CLP1's width" in
-  (* the "no fire" idiom: the guard's per-hit stderr line must NOT appear (replaces the removed
-     dedup-table hit-count idiom) *)
+  (* Guard's stderr line must NOT appear. *)
   let fire_l = fired lshift_comp (fun () -> ignore (Clp.lshift (Clp.create (w64 16)) amt2)) in
   let fire_r = fired rshift_comp (fun () -> ignore (Clp.rshift (Clp.create (w64 16)) amt2)) in
   let fire_a = fired arshift_comp (fun () -> ignore (Clp.arshift (Clp.create (w64 16)) amt2)) in
   let r = Clp.lshift (Clp.create (w64 16)) amt2 in
   check "D7-10: lshift 2-bit {2} amount vs 64-bit operand -> computes {64}, no spurious fire"
     (Clp.bitwidth r = 64 && Clp.min_elem r = Some (w64 64) && (not (Clp.is_top r)) && not fire_l);
-  (* hike port: E2e-C — the {40} >= 32 overshift class is now bitvec semantics ({0} exactly, no
-     guard fire), not top. *)
+  (* Overshift is bitvec zero ({0} exactly), no fire. *)
   check "D7-11: lshift overshift (6-bit {40} amount vs 32-bit operand) -> {0} exactly, no fire"
     (let r = Clp.lshift (Clp.create (w32 8)) (Clp.of_list ~width:6 [ W.of_int ~width:6 40 ]) in
      Clp.min_elem r = Some (w32 0)
@@ -1239,11 +1024,8 @@ let run () =
      && W.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && not fire_l);
-  (* rshift/arshift with the 2-bit amount hit the D5 mixed-width guard
-     first (sound top); the wrapped-compare guard itself must not fire *)
-  (* hike port: lane A (ora-2) — the 2-bit {2} amount now COERCES to
-     the operand's width and the shift computes {4}; the wrapped
-     compare guard still never fires. *)
+  (* 2-bit amounts take the mixed-width path (sound top); wrapped guard stays silent. *)
+  (* 2-bit amount coerces to operand width; shift computes. *)
   check
     "D7-12: rshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never \
      fires"
@@ -1252,9 +1034,7 @@ let run () =
     "D7-13: arshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never \
      fires"
     (Clp.equal (Clp.arshift (Clp.create (w64 16)) amt2) (Clp.create (w64 4)) && not fire_a);
-  (* hike port: E2e-C — the same-width {40} >= 32 overshift class is now bitvec semantics: rshift ->
-     {0} exactly; arshift of the nonnegative operand {8} -> {0} exactly (the sign-extension
-     image). *)
+  (* Same-width overshift: rshift/arshift give {0} exactly. *)
   check "D7-14: rshift/arshift overshift ({40} vs 32-bit) -> {0} exactly, no fire"
     (let r = Clp.rshift (Clp.create (w32 8)) (Clp.of_list ~width:32 [ w32 40 ]) in
      let a = Clp.arshift (Clp.create (w32 8)) (Clp.of_list ~width:32 [ w32 40 ]) in
@@ -1269,22 +1049,9 @@ let run () =
      && (not fire_r) && not fire_a);
   ()
 
-(* [mk_high0_cast_sub]: the exact corpus crash shape — a sub with `RAX := high:0[RAX]` (Bil.Cast
-   (HIGH, 0, RAX), target size 0, as the LLVM lift emits right after an FP-intrinsic call) in the
-   block that is the call's return target. The call has an INDIRECT target and a direct return
-   label: the OFF-path call denotation degrades an Indirect target to AI.top (the corpus
-   call-abstraction shape where RAX reads top(64), a CLP), and the CFG edge (the return label) feeds
-   the cast block — a noreturn call would leave the cast block with bottom input and the
-   same-block-goto pattern is dropped by [reachable_jumps] (one unconditional jmp per block). RAX is
-   never defined, so it reads as top(64). Pre-D7 the fixpoint asserts in Clp.extract_lo (lo=64 >=
-   width=64, cbat_clp.ml:1050); post-D7 it completes rc=0 with RAX = top(64). Returns (rax, ctx,
-   sub, final tid). *))
+(* Crash shape: RAX := high:0[RAX] in the call's return target. Returns (rax, ctx, sub, final tid). *))
 ;
-(  (* The restriction must be OFF: ON would skip the untagged cast def (denote_def's skip), making
-     the test vacuous (rax would read top without ever reaching Clp.cast). The corpus driver runs ON
-     with the def genuinely tagged; this unit shape reproduces the crash mechanically (cast of a
-     top(64) CLP) and the fixpoint completing with RAX = top(64) is the pin (pre-D7 it asserts in
-     Clp.extract_lo). *)
+(  (* Restriction stays OFF: ON would skip the untagged cast, making the test vacuous. *)
   let rax, ctx, sub, final_tid = mk_high0_cast_sub () in
   let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   let final_ai = Graphlib.Std.Solution.get sol final_tid in
@@ -1292,8 +1059,7 @@ let run () =
     (Ws.is_top (AI.find_word 64 final_ai rax));
   ())
 ;
-(  (* E2e-H: the CLP equal short-circuit (physical/structural) must not change any observable result
-     — same-value, structurally-equal, and unequal cases. *)
+(  (* E2e-H: equal short-circuit changes no observable result. *)
   let p = Clp.of_list ~width:32 [ w32 1; w32 2; w32 4 ] in
   check "E2eH-1: equal on the SAME CLP value (physical identity) -> true" (Clp.equal p p);
   let q = Clp.of_list ~width:32 [ w32 1; w32 2; w32 4 ] in
@@ -1304,8 +1070,7 @@ let run () =
     (not (Clp.equal p (Clp.top 64)));
   ())
 ;
-(  (* the "no fire" idiom (the D7-10 rework): the guard's per-hit stderr line must NOT appear for the
-     component string. *)
+(  (* Guard's stderr line must NOT appear. *)
   let lshift_comp = "During lshift, maximum element of CLP2 is >= CLP1's width" in
   let rshift_comp = "During rshift, maximum element of CLP2 is >= CLP1's width" in
   let arshift_comp = "During arshift, maximum element of CLP2 is >= CLP1's width" in
@@ -1328,8 +1093,7 @@ let run () =
     && (not (Clp.is_top r))
     && not (Clp.is_bottom r)
   in
-  (* case 2 (fully overshifted, min >= width): EXACTLY {0} for lshift/rshift — the memmap
-     segment-placement and va_arg amount class. *)
+  (* Fully overshifted (min >= width): exactly {0}. *)
   check "E2eC-1: lshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire"
     (is_zero_clp (Clp.lshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])) && not fire_l);
   check "E2eC-2: lshift {16} by multi-card overshift {64,68,72} stride 4 -> {0}, no fire"
@@ -1337,9 +1101,7 @@ let run () =
      is_zero_clp (Clp.lshift (Clp.create (w64 16)) amt) && not fire_l);
   check "E2eC-3: rshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire"
     (is_zero_clp (Clp.rshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])) && not fire_r);
-  (* case 2 arshift: the sign-extension image {0, all-ones} (2-element CLP: 0 and 2^64-1 at stride
-     2^64-1 — canonize's cardn-2 branch keeps it a genuine pair); pure sign classes collapse to {0}
-     / {all-ones} exactly, matching the FinSet arm's per-element bitvec semantics. *)
+  (* Overshift arshift: mixed-sign gives {0, all-ones}; pure signs collapse. *)
   check "E2eC-4: arshift overshift of a mixed-sign operand -> {0, all-ones}, no fire"
     (let mixed = Clp.of_list ~width:64 [ w64 1; W.lshift (w64 1) (w64 63) ] in
      let r = Clp.arshift mixed (Clp.of_list ~width:64 [ w64 64 ]) in
@@ -1361,9 +1123,7 @@ let run () =
      && W.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && not fire_a);
-  (* case 3 (straddling, min < width <= max): the exact path over the amount capped at width-1,
-     UNION the overshift class. The capped amount CLP is {min + j*step | j <= (width-1-min)/step} —
-     exactly the amount's elements below the width (non-wrapping tier). *)
+  (* Straddling (min < width <= max): capped exact path UNION overshift class. *)
   let straddle = Clp.create ~width:64 ~step:(w64 2) ~cardn:(W.of_int ~width:65 32) (w64 8) in
   check "E2eC-7: lshift {16} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}"
     (let r = Clp.lshift (Clp.create (w64 16)) straddle in
@@ -1392,25 +1152,14 @@ let run () =
      && Clp.elem (W.ones 64) r (* overshift: amount 70 *)
      && Clp.elem (W.neg (W.lshift (w64 1) (w64 55))) r (* amount 8: sign-ext of 2^63>>8 = -2^55 *)
      && not fire_a);
-  (* NOTE: the vendored exact path's step computation collapses
-     sign-extended saturated images to their base (rshift_step's
-     difference wraps negative near 2^64), so the full capped image of
-     the straddling arshift is NOT asserted element-wise here — the
-     collapse is pre-existing vendored behavior (previously masked by
-     the amount guard -> top), not introduced by the three-way split. *)
-  (* the corpus amount shape: a TOP amount (va_arg gp_offset/overflow
-     pointers read top).  Case 3's infinite tier caps to [0, width-1]
-     at the reachable stride (gcd(step, 2^64)); the result is the
-     stride class of the operand — strictly better than the old top,
-     and no guard fire. *)
+  (* Full capped image of straddling arshift not asserted element-wise (step collapse). *)
+  (* TOP amount caps to [0, width-1] at reachable stride. *)
   check
     "E2eC-10: lshift {16} by top(64) amount -> stride-class result (non-bottom, contains 0 and \
      16), no fire"
     (let r = Clp.lshift (Clp.create (w64 16)) (Clp.top 64) in
      (not (Clp.is_bottom r)) && Clp.elem (w64 0) r && Clp.elem (w64 16) r && not fire_l);
-  (* the array_local-PATTERN reproduction: memmap byte/word segment placement shifts by the segment
-     width (32-bit segments at i=1 -> shift by 32; 8-bit at i=1..7 -> shifts 8..56) — fully
-     overshifted against the segment-width operand -> EXACTLY {0}. *)
+  (* Segment-width shifts fully overshifted give exactly {0}. *)
   check "E2eC-11: array_local pattern — 32-bit operand shifted by {32} -> {0} exactly, no fire"
     (let r = Clp.lshift (Clp.create (w32 1)) (Clp.of_list ~width:32 [ w32 32 ]) in
      Clp.min_elem r = Some (w32 0)
@@ -1428,8 +1177,7 @@ let run () =
      && not fire_l);
   ()
 
-(* the D4-9-shaped BIR loop with a counter-shift: the [0,N) window must survive with a shift in the
-   loop body (the fixpoint-level pin). *))
+(* BIR loop with counter-shift: [0,N) window survives the shift. *))
 ;
 (  let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let x = Var.create ~is_virtual:false ~fresh:false "x" (Type.Imm 64) in
@@ -1445,8 +1193,7 @@ let run () =
   Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
   Blk.Builder.add_def entry_b (Def.create x (Bil.Int (w64 16)));
   Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
-  (* y := x << i — the counter-shift: the body increments i FIRST, so y = x << (i+1) = 16 << [1,5] =
-     {32..512}: the shift stays in case 1 (max amount 5 < width) and the [0,N) window survives. *)
+  (* Body increments first: y = x << (i+1) ∈ {32..512}, in case 1. *)
   Blk.Builder.add_def body_b (Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv)));
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
@@ -1476,10 +1223,7 @@ let run () =
   let sol =
     Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
-  (* MIGRATED (ticket 02): the views are gone; the body's only predecessor
-     is the header's taken edge ("i < 5"), the exit's the fallthrough
-     (~(i < 5)) — the single-predecessor targets' IN-states ARE the
-     per-edge refined states (spec §2/§10.2). *)
+  (* Single-predecessor IN-states are the per-edge refined states. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check
@@ -1489,10 +1233,7 @@ let run () =
     && (match Ws.max_elem c_iter with Some w -> Word.( <= ) w (w32 4) | None -> false)
     && (not (Ws.is_top c_exit))
     && match Ws.min_elem c_exit with Some w -> Word.( >= ) w (w32 5) | None -> false);
-  (* E2eC-14: the shifted value's [0,N) window — the shift amount is the counter itself: on the
-     iterate trace the counter's value at the guard is ⊆ [0,4], so the body's shifted value y = x <<
-     (i+1) stays within {32..512} — the counter window survives the shift. The forward y-value's tag
-     (state ∩ live) is the M6 emitter pin. *)
+  (* Shifted value's window: counter ⊆ [0,4] at the guard. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   check
     "E2eC-14 (BIR loop): the counter window survives the body shift — the iterate view's counter \
@@ -1513,9 +1254,7 @@ let run () =
   let base' = find_def_exn sub' (Term.tid def_base) in
   check "E2eD-3: the heap BASE def (rdi := 0x400000) — NOT tagged"
     (not (Term.has_attr base' Cbat_vsa_utils.relevant));
-  (* the fixpoint on the tagged sub (restriction armed by analyze — the merged single-pass design):
-     the heap-indexed store is NOT RSP-derived (rdi/i are not in the D-set) → untagged → its data
-     var is never denoted — reads top at the exit. *)
+  (* Heap store untagged: data never denoted, reads top at exit. *)
   let ctx' = Program.create ~subs:[ sub' ] () in
   let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
@@ -1524,10 +1263,7 @@ let run () =
     (Ws.is_top vv);
   ()
 
-(* [mk_e2ed_rsp_store_sub]: the RSP-derived positive control — entry: rbp := RSP (the prologue: rbp
-   enters D); i2 := 3; Store(m2, (rbp - 0x30) + i2*8, 42) — the same unresolvable addr SHAPE as E1,
-   but with rbp ∈ D_at(block): the D-check must keep it relevant. Returns (def_prologue, def_idx,
-   def_store, sub, exit tid). *))
+(* RSP-derived positive control: same shape, rbp ∈ D, stays relevant. *))
 ;
 (  let def_prologue, def_idx, def_store, sub, exit_tid = mk_e2ed_rsp_store_sub () in
   let sub' = Relevance.analyze sp sub in
@@ -1543,11 +1279,7 @@ let run () =
     (Term.has_attr prologue' Cbat_vsa_utils.relevant);
   ()
 
-(* E3 — the top-address store drop (the Store arm). Denote-level: env1 has a concrete cell at
-   {0x100} = {42}; the top-addr store (addr = Bil.Unknown -> WordSet.top, tagged manually so the tag
-   guard lets it through to the Store arm) is then denoted with the restriction ON (skipped — memory
-   unchanged; the load at the slot reads exactly the pre-store value) and OFF (the full-range cell
-   IS created — the pre-change behavior — and the load joins {42} ∪ {7}). *))
+(* E3: top-address store skipped ON (memory unchanged); full-range cell OFF. *))
 ;
 (  let m = memv "e2ed_m3" in
   let t = v64 "e2ed_t3" in
@@ -1565,8 +1297,7 @@ let run () =
   in
   let d2' = Term.set_attr d2 Cbat_vsa_utils.relevant () in
   let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (w64 0x100), LittleEndian, `r64)) in
-  (* the ON-path load must be tagged (as analyze would) — an untagged def is skipped by denote_def
-     under the restriction, leaving t at the map default (top) instead of the loaded value *)
+  (* Load must be tagged too, else denote skips it and t stays top. *)
   let dload' = Term.set_attr dload Cbat_vsa_utils.relevant () in
   let env2 = Vsa.denote_def d2' env1 in
   check "E2eD-7: restriction ON — a top-addr store is SKIPPED (memory state unchanged)"
@@ -1583,10 +1314,7 @@ let run () =
   let entry_tid_of (sub : sub term) : tid =
     match Term.first blk_t sub with Some b -> Term.tid b | None -> assert false
   in
-  (* (a) MECHANISM PIN — the production shape: Relevance.analyze arms the restriction, then the
-     fixpoint runs on the tagged sub. The entry INPUT state must carry RSP = {0} — the anchor
-     survived the untagged-def skip. Pre-fix this fails: the anchor was skipped, RSP absent from the
-     state, find_word's default = top. *)
+  (* Production shape: analyze arms restriction; entry input carries RSP = {0}. *)
   let sub = mk_p3_anchor_sub () in
   let sub' = Relevance.analyze sp sub in
   let prog' = Program.create ~subs:[ sub' ] () in
@@ -1609,8 +1337,7 @@ let run () =
     && Word.( = ) (Ws.cardinality full_l) (W.of_int ~width:2 2));
   ()
 
-(* L2b-2: EQ over a {0,1} operand — the is_zero guard (cbat_vsa.ml:108) must not fire on the
-   unwrapped cardn. *))
+(* L2b-2: EQ over {0,1} — is_zero guard sees unwrapped cardn. *))
 ;
 (  let zf = v1 "l2b_zf2" in
   let env = AI.add_word AI.top ~key:zf ~data:(Ws.of_list ~width:1 [ W.b0; W.b1 ]) in
@@ -1628,9 +1355,7 @@ let run () =
         false;
       ()
 
-(* L2b-3: the lifted 1-bit flag value — val_top (Type.Imm 1) via the unknown[bits]:u1 def (the
-   corpus flag shape; there is no `r1 Size in this BAP, so no 1-bit Load exists to exercise the load
-   path). *))
+(* L2b-3: lifted 1-bit flag value via unknown[bits]:u1 def. *))
 ;
 (  let pf = v1 "l2b_pf3" in
   let env_after = Vsa.denote_def (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top in
@@ -1639,8 +1364,7 @@ let run () =
     ((not (Ws.is_bottom ws)) && Word.( = ) (Ws.cardinality ws) (W.of_int ~width:2 2));
   ()
 
-(* L2b-4: overlap comparisons return bool_top ({0,1}), not bottom — LT(top64, top64) through the
-   max/min arm and EQ(0, top64) through the overlap arm. *))
+(* L2b-4: overlap comparisons return bool_top, not bottom. *))
 ;
 (  let x = v64 "l2b_x4" in
   let y = v64 "l2b_y4" in
@@ -1661,11 +1385,7 @@ let run () =
     (ok_lt && ok_eq);
   ()
 
-(* L2b-5: a flag-gated branch is not pruned. The flag comes from the real poisoned path: zf := EQ(0,
-   x) with x = top64 (overlap -> the {0,1} bool_top result). (a) reachable_jumps keeps a jump whose
-   condition is that stored flag (pre-fix the stored flag was genuinely empty -> Skip); (b) a
-   D4-9-shape loop with the flag-gated back-edge reaches the body (pre-fix both header edges were
-   pruned -> the body's solution input stayed AI.bottom). *))
+(* L2b-5: flag-gated branch survives — no unsound pruning. *))
 ;
 (  let zf = v1 "l2b_zf5" in
   let x = v64 "l2b_x5" in
@@ -1684,8 +1404,7 @@ let run () =
   let blk1' = Blk.Builder.result b1' in
   let jmp = match Term.enum jmp_t blk1' |> Seq.to_list with [ j ] -> j | _ -> assert false in
   let kept = Vsa.reachable_jumps flag_env (Seq.of_list [ jmp ]) |> Seq.to_list in
-  (* (b) the D4-9-shape loop: entry zf := EQ(0, x); header jmp body if zf / jmp exit if not zf; body
-     jmp back to header *)
+  (* (b) loop with flag-gated back-edge. *)
   let cnt = v64 "l2b_cnt5" in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
@@ -1729,7 +1448,6 @@ let run () =
     && List.length kept = 1
     && (not (AI.equal body_st AI.bottom))
     && (not (Ws.is_bottom body_flag))
-    (* the true-edge refinement (assume_jump_cond, restriction OFF refines all) narrows the {0,1}
-       flag to {1} on the taken edge — both {0,1} and the refined {1} contain b1 *)
+    (* Taken edge narrows {0,1} to {1}; both contain b1. *)
     && Ws.elem W.b1 body_flag);
   ())

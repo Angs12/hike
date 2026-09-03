@@ -1,40 +1,27 @@
-(* test_properties: soundness properties (logand R10b, interval-meet R5, contextual fixpoint R7), round-trip/overlap/of_list exactness, landmark loops + the F1-NEQ acceptance, and the Ticket-01 when-chain pins. *)
+(* Soundness properties, round-trips, landmark loops, when-chain pins. *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
 
-(* --- R10b: property test — logand soundness over a sampled operand corpus -- *)
+(* R10b: logand soundness over a sampled operand corpus. *)
 
-(* The SWEET-lineage CLP logand's general branch picks the result step from the operands' msb
-   structure; the step selection feeding the base/cardn computation carries the upstream TODO "this
-   last branch is a guess; it is not explained in the paper" (the range-sep helper in cbat_clp.ml,
-   since removed with [compute_range_sep]). An over-large chosen step would SKIP result elements —
-   an unsound narrowing. This block verifies the soundness direction EXECUTABLY over a sampled
-   operand corpus: for every sampled pair, EVERY elementwise AND of the enumerated operand elements
-   must be a member of the domain's logand result (the CLP layer AND the composite WordSet lift).
-   Over-approximation is allowed; excluding a reachable value FAILS. Pairs whose enumeration exceeds
-   the caps are SKIPPED (counted), never weakened. *)
+(* Every elementwise AND of enumerated operands must land in the logand result. *)
 
-let r10b_enum_cap = 1024 (* max enumerated elements per side *)
-let r10b_product_cap = 131072 (* max elementwise ANDs per pair *)
-let r10b_pairs = ref 0 (* pairs fully checked *)
-let r10b_skipped = ref 0 (* pairs skipped: enumeration/product caps *)
-let r10b_prefix = ref 0 (* pairs using a prefix-sampled (>cap) side *)
-let r10b_witnesses = ref 0 (* distinct elementwise ANDs checked *)
-let r10b_bad_clp = ref 0 (* pairs violating the CLP-layer containment *)
-let r10b_bad_ws = ref 0 (* pairs violating the composite containment *)
+let r10b_enum_cap = 1024 (* enum cap per side *)
+let r10b_product_cap = 131072 (* product cap per pair *)
+let r10b_pairs = ref 0 (* pairs checked *)
+let r10b_skipped = ref 0 (* pairs skipped by caps *)
+let r10b_prefix = ref 0 (* prefix-sampled sides *)
+let r10b_witnesses = ref 0 (* ANDs checked *)
+let r10b_bad_clp = ref 0 (* CLP violations *)
+let r10b_bad_ws = ref 0 (* composite violations *)
 
-(* [r10b_cardn_gt cap c]: cardinality word [c] > [cap] WITHOUT the width trap ([Wo.gt_int] builds
-   [cap] at [c]'s width — at widths where [cap] does not fit it wraps and the comparison lies). *)
+(* [c] > [cap] without the width trap. *)
 let r10b_cardn_gt (cap : int) (c : word) : bool =
   if W.bitwidth c >= 11 then Wo.gt_int c cap (* 1024 fits: unsigned cmp ok *)
   else W.to_int_exn c > cap
 
-(* [r10b_enum p]: ALL elements when cardinality <= cap (exact); otherwise a bounded prefix along the
-   progression from min_elem via strict nearest_succ steps (stop on wrap-past-max / stuck / cap) — a
-   sound partial witness set: the containment assertion stays exact per enumerated element. The bool
-   reports whether a prefix sample was used. NOTE: [Clp.nearest_succ i] returns [i] ITSELF when [i]
-   is a member (closest->= semantics), so the walk asks for the successor of [succ cur]. *)
+(* All elements when small; else a bounded prefix walk. Reports prefix use. *)
 let r10b_enum (p : Clp.t) : word list * bool =
   if r10b_cardn_gt r10b_enum_cap (Clp.cardinality p) then
     match Clp.min_elem p with
@@ -57,8 +44,7 @@ let r10b_enum (p : Clp.t) : word list * bool =
         go 0 m0 []
   else (Clp.iter p, false)
 
-(* [r10b_check_pair w l1 p1 l2 p2]: the containment assertion for one unordered pair (ground truth
-   computed once — AND is commutative). *)
+(* Containment assertion for one unordered pair. *)
 let r10b_check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp.t) : unit =
   let es1, pre1 = r10b_enum p1 in
   let es2, pre2 = r10b_enum p2 in
@@ -102,9 +88,7 @@ let r10b_check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp
     report "WordSet" !bad_ws
   end
 
-(* [r10b_operands w]: the sampled operand corpus at width [w] — singletons, contiguous ranges (incl.
-   the wrapped/circular interval), stepped classes (incl. cardn-2, odd steps, wrapping),
-   infinite/top classes. *)
+(* Sampled operand corpus at width [w]. *)
 let r10b_operands (w : int) : (string * Clp.t) list =
   let v n = W.of_int ~width:w n in
   let ones = W.ones w in
@@ -136,9 +120,7 @@ let r10b_operands (w : int) : (string * Clp.t) list =
     ("step12[4..]", Clp.create (v 4) ~step:(v 12) ~cardn:(v 9));
     ("two{8,24}", Clp.create (v 8) ~step:(v 16) ~cardn:(v 2));
     ("wrapstep{ones-4+8k}", Clp.create (W.sub ones (v 4)) ~step:(v 8) ~cardn:(v 4));
-    (* cardn-2 ANTIPODAL pairs (Stage 0b): the two elements are half a circle apart — {0, 2^(w-1)}
-       and {1, 1 + 2^(w-1)} — the class the arshift unwrap_signed note flags as
-       representation-fragile *)
+    (* Cardn-2 antipodal pairs (half circle apart). *)
     ("anti{0,half}", Clp.create (v 0) ~step:half ~cardn:(v 2));
     ("anti{1,1+half}", Clp.create (v 1) ~step:half ~cardn:(v 2));
     (* infinite / top classes *)
@@ -146,9 +128,7 @@ let r10b_operands (w : int) : (string * Clp.t) list =
     ("inf*4", Clp.create (v 0) ~step:(v 4) ~cardn:full_circle);
     ("inf*6@6", Clp.create (v 6) ~step:(v 6) ~cardn:full_circle);
   ]
-  (* Stage 0b: w=8 FULL-WRAP classes — spans that cross the seam the long way (the wrapped interval
-     [200,100] covers 157 elements around the circle; the stepped class wraps past 2^8). Only
-     sampled at w=8 where full-circle traversal is enumerable. *)
+  (* w=8 full-wrap classes (enumerable full-circle traversal). *)
   @
   if w = 8 then
     [
@@ -157,34 +137,21 @@ let r10b_operands (w : int) : (string * Clp.t) list =
     ]
   else []
 
-(* --- R5: property test — the step-1 interval meet is EXACT -------------- *)
+(* R5: step-1 interval meet is exact. *)
 
-(* The CLP domain is CIRCULAR over Z_2^w: a finite step-1 CLP is the circular interval [start,
-   start+len) (half-open; len <= 2^w - 1 after canonization — the full circle arrives as the
-   infinite class). The meet of two such intervals is computed here INDEPENDENTLY by modular
-   arithmetic at width w+1 (no diophantine anchoring, no hulling, no safe-operand fallback): the
-   intersection of [s1,s1+l1) and [s2,s2+l2) on the circle is Empty, one Arc, or — when each operand
-   sticks out of the other on both sides — Two pieces; in the two-piece case the OPTIMAL single-CLP
-   sound answer is the smaller-cardinality operand (any single arc containing both pieces must
-   bridge one of the two gaps, i.e. contain one whole operand; the smaller one is minimal). The
-   domain's [intersection] must equal this reference exactly. Equality is asserted with [Clp.equal]
-   against the freshly-built expected arc — sound because every producer funnels through the
-   canonizing [create] (representation-equivalent canonized forms of one step-1 arc do not exist:
-   the cardn-2 wrapped normalization maps back to the ascending form). Pairs involving stepped /
-   infinite classes are probed for SOUNDNESS only (every true common element survives). *)
+(* Reference meet computed independently by modular arithmetic at width w+1. *)
 
-let r5_checked = ref 0 (* exactness pairs fully checked *)
-let r5_two_piece = ref 0 (* pairs whose true meet is two pieces *)
-let r5_sound_pairs = ref 0 (* stepped/infinite-involved pairs probed *)
-let r5_bad = ref [] (* (width, class, detail) violations *)
+let r5_checked = ref 0 (* exactness pairs checked *)
+let r5_two_piece = ref 0 (* two-piece meets *)
+let r5_sound_pairs = ref 0 (* soundness probes *)
+let r5_bad = ref [] (* violations *)
 let r5_violation w cls detail = r5_bad := (w, cls, detail) :: !r5_bad
 
-(* [r5_cardn_gt cap c]: cardinality word > cap without the width trap. *)
+(* Cardinality word > cap without the width trap. *)
 let r5_cardn_gt (cap : int) (c : word) : bool =
   if W.bitwidth c >= 11 then Wo.gt_int c cap else W.to_int_exn c > cap
 
-(* [r5_ref_meet w s1 l1 s2 l2]: the reference circular-interval meet. Positions are w-bit words
-   (wrap = mod 2^w); lengths are (w+1)-bit words in [0, 2^w]. *)
+(* Reference circular-interval meet. *)
 let r5_ref_meet (w : int) (s1 : word) (l1 : word) (s2 : word) (l2 : word) :
     [ `Empty | `Arc of word * word | `TwoPiece ] =
   let ext x = W.extract_exn ~hi:w x in
@@ -225,11 +192,11 @@ let r5_ref_meet (w : int) (s1 : word) (l1 : word) (s2 : word) (l2 : word) :
       end
     end
 
-(* [r5_build w s l]: the step-1 CLP for the arc [s, s+l). *)
+(* Step-1 CLP for arc [s, s+l). *)
 let r5_build (w : int) (s : word) (l : word) : Clp.t =
   Clp.create ~width:w ~step:(W.one w) ~cardn:l s
 
-(* [r5_describe p]: a short set description for violation reports. *)
+(* Short set description for violation reports. *)
 let r5_describe (p : Clp.t) : string =
   if Clp.is_bottom p then "EMPTY"
   else if Clp.is_infinite p then "INFINITE"
@@ -241,7 +208,7 @@ let r5_describe (p : Clp.t) : string =
           (W.to_int64_exn lo) (W.to_int64_exn hi)
     | _ -> "?"
 
-(* [r5_check_exact w cls s1 l1 s2 l2]: one exactness pair. *)
+(* One exactness pair. *)
 let r5_check_exact (w : int) (cls : string) (s1 : word) (l1 : word) (s2 : word) (l2 : word) : unit =
   incr r5_checked;
   let p1 = r5_build w s1 l1 and p2 = r5_build w s2 l2 in
@@ -261,7 +228,7 @@ let r5_check_exact (w : int) (cls : string) (s1 : word) (l1 : word) (s2 : word) 
              (W.to_int64_exn l) (r5_describe res))
   | `TwoPiece ->
       incr r5_two_piece;
-      (* the optimal single-CLP hull = the smaller-cardinality operand *)
+      (* Optimal single-CLP hull = smaller operand. *)
       let small = if W.compare l1 l2 <= 0 then p1 else p2 in
       if not (Clp.equal res small) then
         r5_violation w cls
@@ -270,8 +237,7 @@ let r5_check_exact (w : int) (cls : string) (s1 : word) (l1 : word) (s2 : word) 
              (W.to_int64_exn s1) (W.to_int64_exn l1) (W.to_int64_exn s2) (W.to_int64_exn l2)
              (r5_describe small) (r5_describe res))
 
-(* [r5_walk_elems p cap]: up to [cap] elements from [min_elem] walking strict successors —
-   membership-exact even for the infinite classes. *)
+(* Up to [cap] elements from min_elem via strict successors. *)
 let r5_walk_elems (p : Clp.t) (cap : int) : word list =
   match Clp.min_elem p with
   | None -> []
@@ -286,8 +252,7 @@ let r5_walk_elems (p : Clp.t) (cap : int) : word list =
       in
       go 1 m0 []
 
-(* [r5_check_sound w cls p1 p2]: SOUNDNESS probe for stepped/infinite- involved pairs — every
-   enumerated element common to both operands must be a member of the meet result. *)
+(* Soundness probe for stepped/infinite pairs. *)
 let r5_check_sound (w : int) (cls : string) (p1 : Clp.t) (p2 : Clp.t) : unit =
   incr r5_sound_pairs;
   let res = Clp.intersection p1 p2 in
@@ -300,7 +265,7 @@ let r5_check_sound (w : int) (cls : string) (p1 : Clp.t) (p2 : Clp.t) : unit =
         (Printf.sprintf "%d true common element(s) lost (first %Lu)" (List.length bad)
            (W.to_int64_exn (List.hd bad)))
 
-(* deterministic sampling (fixed seed — reproducible runs) *)
+(* Fixed seed — reproducible runs. *)
 let r5_rand = Random.State.make [| 0x5EED2026; 0x00000D1C |]
 
 let r5_rand_word (bits : int) : Int64.t =
@@ -313,41 +278,20 @@ let r5_rand_word (bits : int) : Int64.t =
   in
   go 0L bits
 
-(* --- property R7: the contextual fixpoint detects stabilization ------- *)
+(* R7: contextual fixpoint detects stabilization. *)
 
-(* [Cfp]: the contextual-fixpoint module. Reached via cbat_vsa's internal
-   wrapper name because cbat_vsa.mli does not re-export it — a gap in THAT
-   library's interface, not in hike's (whose entry points all go through
-   [Hike.*]). *)
+(* Contextual-fixpoint module, via the internal wrapper name. *)
 module Cfp = Cbat_vsa__Cbat_contextual_fixpoint
 
-(* --- Lane Z v2: widening LANDMARKS — the FAITHFUL port of Simon & King, "Widening Polyhedra with
-   Landmarks" (APLAS 2006). A guard constraint whose meet with the current iterate comes back EMPTY
-   (the paper's unsatisfiable inequality — a behavior not yet enabled) records the excluded boundary
-   + its distance as a landmark of the enclosing WTO cycle. At the cycle's widening point the two
-   most recent distance measurements give the closure rate; the merge EXTRAPOLATES by the estimated
-   number of remaining traversals ([calcIterations], Listing 3 + [extrapolate], Listing 4) instead
-   of dropping unstable bounds — one jump to where the nearest disabled behavior enables, inside ONE
-   fixpoint pass.
+(* Widening landmarks: empty guard meets record landmarks; widening extrapolates. *)
 
-   F1 RED baseline (captured pre-fix, this exact fixture): the counter's head-state bound converged
-   to 127 (the geometric rung 8*2^4-1 — K=100 sits between rungs). The current behavior is pinned by
-   the F1 test below (head = TOP via the ∞-arm, sound) and the F1-NEQ test (head max = K exactly, the
-   landmark Finite path firing end-to-end). (The header's failing comparison executes with i = K+1, so
-   "head <= K" is not satisfiable by ANY sound analysis AT THE HEAD; the honest <= K property lives on
-   the guard-continue edge and is asserted via the taken view.) *)
-
-(* [lm_jle_loop ~k1 ?k2]: the corpus jle shape (mk_l39_loop's register- counter variant), chained
-   over TWO loops sharing one counter when [k2] is given: ENTRY i:=0; L1: cmp i,k1 flags; jle B1
-   else L2/EXIT; B1: i++; jmp L1; [L2: cmp i,k2 flags; jle B2 else EXIT; B2: i++; jmp L2]. Returns
-   (sub, l1 tid, b1 tid, l2 tid option). *)
+(* Corpus jle shape, one or two chained loops. Returns (sub, l1, b1, l2 option). *)
 let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid option =
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let iv = Bil.Var i in
-  (* [cmp_defs b c]: the canonical -O0 cmp emission into builder [b]; returns the block's jle
-     compound condition over its own flag defs. *)
+  (* Canonical -O0 cmp emission; returns the jle cond. *)
   let cmp_defs b (c : word) =
     let t = Var.create ~is_virtual:false ~fresh:false "lm_t" (Type.Imm 32) in
     let cf = v1 "CF" in
@@ -411,8 +355,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
   let sub_b = Sub.Builder.create ~name:"lm_landmark_counter" () in
   let l2_res = Blk.Builder.result l2_b in
   let b2_res = Blk.Builder.result b2_b in
-  (* drop the second loop entirely when unused: empty blocks (no defs, no jumps) in the sub break
-     the CFG/WTO plumbing *)
+  (* Drop the unused second loop: empty blocks break CFG/WTO plumbing. *)
   let keep_l2 = match k2 with Some _ -> true | None -> false in
   let entry = Blk.Builder.result entry_b in
   List.iter (Sub.Builder.add_blk sub_b)
@@ -422,17 +365,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
   let sub = tag_all (Sub.Builder.result sub_b) in
   (sub, l1_tid, b1_tid, match k2 with Some _ -> Some l2_tid | None -> None)
 
-(* [lm_jne_loop ~k]: the NEQ-counter loop — standard -O0 x86 flag-indirected jne:
-   `ENTRY i:=0; L1: t := i - k flags (cmp); zf := (t == 0); jne B1 (taken = zf = 0 = i != k,
-   fallthrough = zf = 1 = i == k); B1: i := i + 1; jmp L1; EXIT`. The body always increments,
-   so the head's natural join grows without bound — landmarks are the only precision
-   mechanism (the trace-partitioning's taken-edge refinement is the two-piece `TOP - {K}`
-   arc, which cannot bound the head's upper end). The fallthrough meet of cur=[0..N] with
-   {K} is empty as long as N < K, the paper's Listing 1 acquisition seam. The flag-state
-   recovery in [assume_jump_cond] binds `zf` back to the underlying `(lm_ne_i, NEQ, k)`
-   comparison so the structural [inverse_denote_exp] arm sees the 1-bit flag `zf` and the
-   acquisition walks it to the ORIGINAL `lm_ne_i` var via `apply_operand_constraint`.
-   Returns (sub, l1_tid, b1_tid). *)
+(* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
 let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
@@ -447,10 +380,7 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def l1_b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int k)));
-  (* Define ZF as the DIRECT comparison `(i - k == 0)` (NOT through the temp
-     `t`) — the flag-state recovery expects the compared operand to be the
-     program var, not a temp, so the recorded (fv, op, e, c) tuple binds
-     `e = lm_ne_i` (the right var for acquisition + consumption). *)
+  (* ZF compares the program var directly (recovery binds the right var). *)
   Blk.Builder.add_def l1_b
     (Def.create zf
        (Bil.BinOp
@@ -479,22 +409,7 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   let sub = tag_all (Sub.Builder.result sub_b) in
   (sub, l1_tid, b1_tid)
 
-(* F1 (property LM): the head-widening machinery per Simon & King Figure 3 —
-   the JLE-counter fixture `for (i = 0; i <= K; i++)` (K=100). The guard's
-   FALLTHROUGH acquisition fires: while the head is [0..N] with N < K, the
-   complement [i >= K] row meets it to BOTTOM, recording K with its distance
-   ([observe_unsat_var]'s empty-meet path), and the Finite arm extrapolates
-   the head onto the landmark. The head STILL lands at TOP, for a different
-   reason than pre-②: the JLE TAKEN row is [0..K] INCLUSIVE (the <= guard has
-   no point-exclusion), so the body's i++ pushes the head to K+1; the next
-   unstable visit — the landmark table having been cleared by the Finite arm
-   (Q3=C) and no new empty meet forming (the fallthrough meet is {K} once the
-   head contains K) — takes the paper's ∞-arm: plain [widen_join] to TOP
-   (Cousot-Halbwachs). The K+1 = 101 least fixpoint needs a re-acquisition
-   seam (the landmark surviving into the overshoot visit) — a precision lane,
-   not the current behavior. This test pins only the sound invariants (the
-   head's lower bound, and the taken view's lower bound); F1-NEQ below is the
-   fixture whose guard DOES refine exactly, and it pins max == K. *)
+(* F1: JLE-counter head lands at TOP (inclusive taken row overshoots); pins sound invariants. *)
 let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let m = memv "wc_m" in
   let rbp = v64 "RBP" in
@@ -563,21 +478,9 @@ let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let sub = tag_all (Sub.Builder.result sub_b) in
   (sub, l1_tid, l2_tid, l3_tid, chain_tid, x)
 
-(* T01-1 (ticket 01, §4.3 — THE ACCUMULATED-COND ACCEPTANCE TEST): the
-   when-chain fixture above, run through the PRODUCTION engine.  The fused
-   transfer refines EVERY out-edge by its ACCUMULATED cond — the mid-chain
-   edge by `c2 & ~c1` (NOT merely the jmp's own cond `c2`, which over {5,15,25}
-   is satisfied by BOTH 5 and 15) and the unconditional chain TAIL by
-   `~c1 & ~c2` (whose own cond is the vacuous `1`).  Each single-predecessor
-   target's IN-state is its edge's refined state, so the per-edge windows are
-   directly observable in the solution: L1.in x = {5}, L2.in x = {15},
-   L3.in x = {25} — exactly.  A jmp's-own-cond implementation would give
-   L2.in x = {5, 15} (no ~c1) and L3.in x = {5, 15, 25} (the identity on the
-   unconditional tail); an implementation skipping the tail edge would give
-   L3.in x = {5, 15, 25} as well. *)
+(* T01-1: accumulated-cond acceptance — mid edge by c2 & ~c1, tail by ~c1 & ~c2. *)
 let run_soundness () =
-(  (* same-width pairs across widths {8,16,32,64}: every unordered pair (incl. self-pairs) through
-     BOTH the CLP layer and the composite WordSet lift *)
+(  (* Same-width pairs across widths, CLP layer and composite lift. *)
   let per_width = ref [] in
   List.iter
     (fun w ->
@@ -593,9 +496,7 @@ let run_soundness () =
       go ops;
       per_width := (w, !r10b_pairs - before) :: !per_width)
     [ 8; 16; 32; 64 ];
-  (* mixed-width coercion pin: the domain zero-extends to the max width; ground truth =
-     zero-extended elementwise AND (the narrower sides of these pairs are <= 32 bits, so the int64
-     round-trip zero-extension is exact) *)
+  (* Mixed-width pin: domain zero-extends; ground truth = zero-extended AND. *)
   let zx w x = if W.bitwidth x = w then x else W.of_int64 ~width:w (W.to_int64_exn x) in
   let find w lbl = List.assoc lbl (r10b_operands w) in
   let check_mixed (wa, pa) (wb, pb) =
@@ -714,11 +615,7 @@ let run_soundness () =
      (widths 8/16/32/64)"
     (List.length !r5_bad = 0))
 ;
-(  (* A CONSTANT transfer over a 2-block cycle (A <-> B, unconditional gotos) stabilizes after a
-     couple of propagation rounds: the worklist must empty long before the ~steps:256 cap. Before
-     the ctxed_equal fix the Dep-vs-anything comparison returned false unconditionally, so every
-     propagation re-enqueued its successor and the loop always burned all 256 pops. The rounds_out
-     channel exposes the pops the loop actually consumed. *)
+(  (* Constant transfer over a 2-block cycle stabilizes in a couple of rounds. *)
   let a_b = Blk.Builder.create () in
   let b_b = Blk.Builder.create () in
   let a0 = Blk.Builder.result a_b in
@@ -749,18 +646,7 @@ let run_soundness () =
   check "property R7 solution: every cycle block's materialized value is the transferred constant"
     (Graphlib.Std.Solution.get sol a_tid = 42 && Graphlib.Std.Solution.get sol b_tid = 42))
 let run_roundtrip () =
-(* --- W1 / Lane Y (G4 follow-up): property of_list ----------------------- Round-trip over
-   REPRESENTABLE CLPs (create -> iter -> of_list) across widths {8,16,32,64} with steps {1..8}.
-   Enumeration is HARD-CAPPED at cardn <= 2048 (Clp.iter materializes the full element list —
-   uncapped cardn near 2^64 OOM'd attempt 1); wider-cardinality draws are skipped and COUNTED, never
-   enumerated. Assertions (Lane Y contract): - CONTAINMENT universally: every element of p survives
-   the rebuild (soundness — a wrap-gap-coarsened reconstruction is sound, never lossy; element loss
-   is a hard failure); - EXACTNESS asserted ONLY on FULL residue classes (cardn*step = 2^w — every
-   circular diff equals the step, nothing to coarsen): a full-class mismatch is a REAL of_list bug
-   and the run STOPS with a report; - non-full-class rebuilds are still compared, and any coarsened
-   result is counted and reported (expected 0 post-W1: the max circular diff — the wrap-around gap —
-   is excluded from the step GCD) without failing the suite; - plus soundness on ARBITRARY lists
-   (every input element satisfies elem). *)
+(* W1: of_list round-trip over representable CLPs. *)
 (  Random.init 20260823;
   let steps = [ 1; 2; 3; 4; 5; 6; 7; 8 ] in
   let widths = [ 8; 16; 32; 64 ] in
@@ -771,10 +657,9 @@ let run_roundtrip () =
   let cont_failures = ref 0 in
   let fc_failures = ref 0 in
   let coarsened = ref 0 in
-  (* cardn*step <= 2^w (int math is exact: prod <= 2048*8; w=64 never overflows) *)
+  (* cardn*step <= 2^w (exact int math). *)
   let fits w prod = w >= 64 || prod <= 1 lsl w in
-  (* uniform word over [0, 2^w): composed from <=30-bit draws (Random.int's bound is 2^30 — a bare 1
-     lsl w draw raises Invalid_argument at w >= 30) *)
+  (* Uniform word over [0, 2^w) from ≤30-bit draws. *)
   let rand_word w =
     if w <= 30 then W.of_int ~width:w (Random.int (1 lsl w))
     else begin
@@ -792,12 +677,10 @@ let run_roundtrip () =
   in
   let rand_base = rand_word in
   let rec replicate n f = if n = 0 then [] else f () :: replicate (n - 1) f in
-  (* 2^w as an int is exact for w <= 62; at w = 64 the full class needs cardn = 2^64/s — always over
-     the cap — so only the comparison against cardn*s (<= 16384) matters and any distinct sentinel
-     would do. *)
+  (* 2^w exact for w ≤ 62; at 64 only the comparison matters. *)
   let dom_of w = if w >= 64 then max_int else 1 lsl w in
   let one_case w base s cardn ~corner =
-    if cardn > enum_cap then incr skips (* hard enumeration cap *)
+    if cardn > enum_cap then incr skips (* hard cap *)
     else begin
       incr cases;
       let full_class = cardn * s = dom_of w in
@@ -807,7 +690,7 @@ let run_roundtrip () =
       in
       let elems = List.sort W.compare (Clp.iter p) in
       let rebuilt = Clp.of_list ~width:w elems in
-      (* CONTAINMENT — universal, hard: the rebuild may only coarsen. *)
+      (* Containment — universal, hard: rebuild may only coarsen. *)
       List.iter
         (fun e ->
           if not (Clp.elem e rebuilt) then begin
@@ -820,7 +703,7 @@ let run_roundtrip () =
         elems;
       if Clp.equal rebuilt p then ()
       else if full_class then begin
-        (* EXACTNESS gate — full residue class only; a miss is a real bug. *)
+        (* Exactness gate — full residue class only. *)
         incr fc_failures;
         Printf.printf
           "FAIL: property of_list full-residue-class round-trip inexact (w=%d base=%s step=%d \
@@ -835,8 +718,7 @@ let run_roundtrip () =
       let dom = 1 lsl w in
       List.iter
         (fun s ->
-          (* deterministic corners: the full class (cardn*step = 2^w) when reachable under the cap,
-             else the largest arc whose wrap gap is NOT step-aligned (s does not divide 2^w) *)
+          (* Deterministic corners: full class or largest non-aligned arc. *)
           if w <= 62 then begin
             let c_full = dom / s in
             if c_full * s = dom && c_full <= enum_cap then
@@ -844,7 +726,7 @@ let run_roundtrip () =
             else if c_full >= 1 && c_full <= enum_cap && c_full * s < dom then
               one_case w (rand_base w) s c_full ~corner:true
           end;
-          (* random representable CLPs, rejection-sampled on cardn*step <= 2^w *)
+          (* Random representable CLPs, rejection-sampled. *)
           ignore
             (replicate 40 (fun () ->
                  let rec draw tries =
@@ -860,8 +742,7 @@ let run_roundtrip () =
                  one_case w (rand_base w) s (draw 200) ~corner:false)))
         steps)
     widths;
-  (* Lane Y: a FULL-RESIDUE-CLASS exactness miss is a real of_list bug — stop the run and report
-     instead of folding into the suite tally. *)
+  (* Full-class miss is a real bug — stop and report. *)
   if !fc_failures > 0 then begin
     Printf.printf
       "STOP: property of_list: %d full-residue-class exactness failures — real of_list bug\n"
@@ -873,7 +754,7 @@ let run_roundtrip () =
      8/16/32/64)"
     (!cont_failures = 0 && !cases > 0);
   check "property of_list: full-class / misaligned-gap corners exercised" (!corners > 0);
-  (* soundness on ARBITRARY lists: every input element satisfies elem *)
+  (* Soundness on arbitrary lists. *)
   let arb_failures = ref 0 in
   ignore
     (replicate 300 (fun () ->
@@ -910,28 +791,14 @@ let run_landmarks () =
   check
     "property LM F1: the head's lower bound is the entry constant 0"
     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
-  (* MIGRATED (ticket 02, the Phase B deletion): the taken view's state
-     is the body's IN-state (b1's only predecessor is the head's taken
-     edge — single-predecessor, spec §2/§10.2), read from the solution. *)
+  (* Taken view's state is the body's IN-state. *)
   let taken_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
   check
     "property LM F1: the taken view's lower bound is the entry constant 0"
     (match Ws.min_elem taken_i with Some lo -> W.equal lo (w32 0) | None -> false);
   ()
 
-(* F1-NEQ (property LM, the NEQ-counter exercising case — the LANDMARK
-   fixture to validate the §8-compliant [acquire_unsat_fallthrough] path):
-   `while (i != K) i++`. The trace-partitioning's taken-edge refinement is
-   the two-piece `TOP - {K}` arc, which cannot bound the head's upper end
-   — the body always increments, so the head's natural join grows without
-   bound. Landmarks are the ONLY precision mechanism (the paper's
-   Listing 1/3/4 chain): the guard's disabled fallthrough records the
-   excluded boundary (i = K) as a landmark; the second traversal measures
-   the growth; [lm_calc_steps] returns Finite; Listing 4 extrapolates the
-   head's upper bound ONTO the landmark. THE ACCEPTANCE TEST of the
-   Finite-fires-end-to-end lane: the head lands at [0, K] (max == K) —
-   the paper's Q10 example shape. The lower bound (the entry constant)
-   is the soundness floor. *))
+(* F1-NEQ: NEQ-counter head lands at [0, K] (max == K) — Finite fires end-to-end. *))
 ;
 (  let k = w32 100 in
   let sub, l1_tid, _ = lm_jne_loop ~k () in
@@ -949,10 +816,9 @@ let run_landmarks () =
     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
   ()
 
-(* F2a (unit): landmark CONSUMPTION semantics at the CLP level — [Clp.widen_join] translates
-   an unstable bound by the observed growth · steps and never lands short of the join. *))
+(* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
-(  (* F2a stub: extrapolate_steps -> widen_join *)
+(  (* Widening soundness pins. *)
   let p1 = Clp.interval ~width:32 (w32 0) (w32 100) in
   let p2 = Clp.interval ~width:32 (w32 0) (w32 101) in
   let r = Clp.widen_join p1 p2 in
@@ -962,16 +828,7 @@ let run_landmarks () =
   check "property LM F2a: widen_join sound 4" (Clp.subset p2 r);
   check "property LM F2a: widen_join sound 5" (Clp.subset p1 r);
   ()
-(* F2c (property): ACQUISITION + PER-CYCLE scoping END-TO-END — two sequential
-    loops sharing one counter, guarded at TWO bounds (40, 100). Both heads
-    land at TOP by the same JLE mechanism as F1 (the leap comment): the
-    fallthrough acquisition fires and the Finite arm extrapolates onto each
-    loop's own landmark, but the inclusive <= taken row lets the body
-    overshoot, the cleared table (Q3=C) leaves the next unstable visit on the
-    [Inf] arm, and plain [widen_join] widens to TOP (sound). The per-cycle
-    scoping is what these assertions pin: each head's landmarks (and hence its
-    Finite extrapolation) are scoped to its OWN WTO cycle, so both loops
-    acquire independently; the lower bounds (0) are the sound invariants. *))
+(* F2c: acquisition + per-cycle scoping — landmarks scoped to their own WTO cycle. *))
 ;
 (  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
   let prog' = Program.create ~subs:[ sub ] () in
@@ -988,32 +845,9 @@ let run_landmarks () =
     (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
   ()
 
-(* ================================================================== *)
-(* Ticket 01 — the single-pass trace partitioning (docs/trace-partitioning- *)
-(* plan.md §2/§4.3): the forward fixpoint is branch-sensitive end-to-end.   *)
-(* Every out-edge of every block transfers a branch-refined successor      *)
-(* entry state, the refinement driven by BAP's ACCUMULATED edge condition   *)
-(* ([Graphs.Ir.Edge.cond] via [Sub.to_cfg]): for a when-chain               *)
-(* `when c1 goto l1; when c2 goto l2; goto l3` the l2 edge carries          *)
-(* `c2 & ~c1` and the unconditional tail edge carries `~c1 & ~c2`           *)
-(* (probe-verified 2026-08-30) — a cond in a chain is refined by every      *)
-(* previous cond that was not true.  The consumer reads the refined         *)
-(* per-block IN-states directly from the converged solution (no Phase B).  *)
-(* ================================================================== *)
+(* Single-pass trace partitioning: every out-edge transfers a branch-refined state. *)
 
-(* [mk_when_chain]: PROLOGUE: RBP := RSP; goto S1.  S1: f1 := g1 (a free 1-bit
-   var); when f1 goto E1; goto S2.  S2: f2 := g2; when f2 goto E2; goto E3.
-   E1: m := mem[RBP-8] <- 5; goto CHAIN.  E2: <- 15; goto CHAIN.  E3: <- 25;
-   goto CHAIN.  CHAIN: x := Load[RBP-8]; when (x < 10) goto L1; when (x < 20)
-   goto L2; goto L3.  The split ladder's guards are 1-bit FREE vars (TOP), so
-   every split edge is LIVE ([reachable_jumps] yields both), and the three
-   store paths join at the chain: the cell = {5, 15, 25} — every edge of the
-   when-chain is LIVE and the accumulated conds PARTITION the set exactly:
-   edge→L1 = `x < 10` = {5}, edge→L2 = `x < 20 & ~(x < 10)` = {15}, the tail
-   = `~(x < 10) & ~(x < 20)` = {25}.  (A sub has ONE entry — [init_sol]
-   seeds only [Term.first blk_t] — so the three seeds MUST be routed through
-   a single entry via the TOP-guarded ladder, not three entry blocks.)
-   Returns (sub, l1 tid, l2 tid, l3 tid, chain tid, x). *))
+(* When-chain fixture: split ladder seeds {5,15,25}; chain edges partition exactly. *))
 let run_chains () =
 (  let sub, l1_tid, l2_tid, l3_tid, _chain_tid, x = mk_when_chain () in
   let prog' = Program.create ~subs:[ sub ] () in
@@ -1035,16 +869,7 @@ let run_chains () =
     (Ws.equal (in_x l3_tid) (Ws.singleton (w32 25)));
   ()
 
-(* T01-2 (ticket 01, §4.3 — the uniform-rule identity): a lone UNCONDITIONAL
-   goto's accumulated cond is the literal TRUE (`Edge.cond`'s own-cond of a
-   no-cond jmp, simplified) — the identity transfer, no seeds, no deep walk.
-   The fixpoint must be UNCHANGED by the fused machinery on such a fixture:
-   the successor's IN-state equals the predecessor's post state, exactly as
-   the forward-only engine computed it (no spurious refinement, no bottom, no
-   divergence).  The fixture: ENTRY: m := mem[RBP-8] <- {3}; jmp MID.  MID:
-   jmp EXIT.  EXIT: (empty).  A straight line — the IN-states must be the
-   plainly-denoted states ({3}'s store effects), with the cell's value {3}
-   readable at EXIT exactly as at MID. *))
+(* T01-2: lone unconditional goto is the identity transfer. *))
 ;
 (  let m = memv "t01_m" in
   let rbp = v64 "RBP" in

@@ -1,28 +1,17 @@
-(* Abi — THE single home of target-derived registers and calling-convention
-   facts (AGENTS.md Principle 8: never hardcode a register name outside this
-   module). Replaces [Targetutils] (the register/sizes half) and
-   [Calling_conventions] (the convention half).
-
-   This is its OWN library (hike.abi, unwrapped) at the BOTTOM of the
-   dependency lattice — both the vendored VSA libraries and the hike
-   production library depend on it, so every register list, register
-   predicate, and convention fact in the tree crosses this one module. *)
+(* Sole home of target registers and calling-convention facts. *)
 
 open Bap.Std
 open Bap_core_theory
 open Theory.Role.Register
 open Bap.Std.Bil.Types
 
-(* ------------------------------------------------------------------ *)
-(* The convention record                                               *)
-(* ------------------------------------------------------------------ *)
-
+(* Convention record. *)
 type t = {
-  sp : var;                      (* the stack pointer *)
-  fp : var;                      (* the frame pointer *)
-  int_param_regs : var list;     (* the SysV integer/pointer arg registers *)
-  vector_param_regs : var list;  (* the FP/vector arg registers (YMM0-7) *)
-  return_regs : var list;        (* the integer return registers *)
+  sp : var;                      (* stack pointer *)
+  fp : var;                      (* frame pointer *)
+  int_param_regs : var list;     (* SysV integer/pointer arg registers *)
+  vector_param_regs : var list;  (* FP/vector arg registers (YMM0-7) *)
+  return_regs : var list;        (* integer return registers *)
   callee_saved : var list;       (* callee-saved GPRs; RBP carried as [fp] *)
 }
 
@@ -44,8 +33,7 @@ let x86_64_sysv : t =
     callee_saved = Base.List.map ~f:r64 [ "RBX"; "R12"; "R13"; "R14"; "R15" ];
   }
 
-(* Var-based predicates over the record ([Var.same] is base/name equality —
-   a fresh RSP var matches the record's, and the fixpoint's env, keys). *)
+(* Var-based predicates; Var.same compares names. *)
 let is_sp (t : t) (v : var) : bool = Var.same v t.sp
 let is_fp (t : t) (v : var) : bool = Var.same v t.fp
 let is_stack_reg (t : t) (v : var) : bool = is_sp t v || is_fp t v
@@ -53,20 +41,13 @@ let is_callee_saved (t : t) (v : var) : bool =
   Base.List.exists t.callee_saved ~f:(Var.same v)
 let is_preserved (t : t) (v : var) : bool =
   is_stack_reg t v || is_callee_saved t v
-(* the model-ABI structural lanes: the vector param registers (the
-   phantom YMM args of the extern fallback signature) and the integer
-   return registers (the RDX member of the {i64,i64} model return).
-   A never-defined read of one of these is STRUCTURAL (the model ABI
-   carries the whole register file), not an anomaly — the [hike:
-   undef-read:] class aggregates them per-sub instead of warning each. *)
+(* Structural model-ABI lanes; never-defined reads here aggregate per-sub. *)
 let is_vector_param_reg (t : t) (v : var) : bool =
   Base.List.exists t.vector_param_regs ~f:(Var.same v)
 let is_return_reg (t : t) (v : var) : bool =
   Base.List.exists t.return_regs ~f:(Var.same v)
 
-(* ------------------------------------------------------------------ *)
-(* Target-derived registers and sizes (ex-Targetutils)                 *)
-(* ------------------------------------------------------------------ *)
+(* Target-derived registers and sizes. *)
 
 let addr_size_bits target =
   if Theory.Target.is_unknown target then 0
@@ -101,20 +82,13 @@ let base_regs target =
       Option.is_none (Theory.Target.unalias target reg))
   |> Base.List.map ~f:Var.reify
 
-(* ------------------------------------------------------------------ *)
-(* Target -> record, plus convenience accessors. This is the ONLY way  *)
-(* a consumer outside this module touches a register list or predicate.*)
-(* ------------------------------------------------------------------ *)
+(* Only consumers reach register lists or predicates through here. *)
 
 let imm width = Imm width
 let r64 name = Var.create name (imm 64)
 let r256 name = Var.create name (imm 256)
 
-(* The one target this pipeline supports today; the record's vars are the
-   TARGET-derived sp/fp (interchangeable with the vendored record's vars by
-   NAME — [Var.same] is name-keyed). [of_target_opt] is TOTAL — None for a
-   target this pipeline has no record for (the unit fixtures'
-   [Theory.Target.unknown]); [of_target] is the checked accessor. *)
+(* x86_64-gnu-elf only. of_target_opt is total (None on unknown targets). *)
 let of_target_opt (target : Theory.Target.t) : t option =
   if Theory.Target.matches target "x86_64-gnu-elf" then
     Some
@@ -144,10 +118,8 @@ let is_fp_t target v = is_fp (of_target target) v
 let is_sp_or_fp_t target v = is_stack_reg (of_target target) v
 let is_callee_saved_t target v = is_callee_saved (of_target target) v
 
-(* The FP-return detector's value-register names: the integer return
-   registers plus their 32-bit views (the -O0 `return <double-expr>` shape
-   leaves no RAX binding; the XMM0/YMM0 lane is [vector_param_regs]). *)
+(* Value-register names for the FP-return detector. *)
 let value_return_names = [ "RAX"; "EAX"; "RDX"; "EDX" ]
 
-(* The vector-register name prefix (the [is_ymm] tests). *)
+(* Vector-register name prefix. *)
 let vector_param_prefix = "YMM"

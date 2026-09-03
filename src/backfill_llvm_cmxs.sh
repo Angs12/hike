@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
-# backfill_llvm_cmxs.sh — make the [llvm] package dynlinkable.
-#
-# The [llvm] opam package ships llvm.cma/cmxa + C archives but NO
-# llvm.cmxs and NO findlib META — so a dune-built plugin that (libraries
-# llvm) cannot dynlink (hike.cmxs: undefined symbol llvm_int64_of_const).
-# bapbuild hid this by building llvm.cmxs INSIDE the bundle at pack time;
-# with the plugin built by dune (2026-09-03) the workspace builds the
-# identical object instead — the recipe is byte-for-byte bapbundle's own
-# (ocamlopt -shared -linkall llvm.cmxa libllvm_*.a).
-#
-# Idempotent: re-runs only rebuild the cmxs when the cmxa/C archives are
-# newer. Errors are LOUD (no silent skip — a plugin that dynlinks against
-# a stale llvm is yesterday's poison-phi class).
+# Makes the [llvm] package dynlinkable (it ships no llvm.cmxs/META).
+# Builds llvm.cmxs with bapbundle's own recipe. Idempotent: rebuilds
+# only when the cmxa/C archives are newer; errors are loud.
 set -euo pipefail
 
 LLVM_DIR="$(ocamlfind query llvm 2>/dev/null || true)"
@@ -20,7 +10,7 @@ if [ -z "$LLVM_DIR" ]; then
   exit 1
 fi
 
-# find the toolchain
+# Toolchain lookup.
 OCAMLOPT="${OCAMLOPT:-ocamlopt.opt}"
 if ! command -v "$OCAMLOPT" >/dev/null 2>&1; then OCAMLOPT=ocamlopt; fi
 
@@ -35,7 +25,7 @@ echo "backfill_llvm_cmxs: building $LLVM_DIR/llvm.cmxs (bapbundle's recipe)" >&2
   "$LLVM_DIR/llvm.cmxa" \
   $(ls "$LLVM_DIR"/libllvm_*.a)
 
-# the missing findlib META (backfilled; upstream ships none)
+# Upstream ships no META; backfill it.
 if [ ! -f "$LLVM_DIR/META" ]; then
   cat > "$LLVM_DIR/META" <<'METAEOF'
 version = "backfill"

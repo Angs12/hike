@@ -1,27 +1,10 @@
-(* conv_diag - the fixpoint NON-CONVERGENCE / widening-quality diagnosis
-   driver. Recreated 2026-08-31 (Item 1 of the architecture program).
-
-   Usage: conv_diag.exe <binary> [subname]   (default subname "main")
-
-   Prints, for the named sub:
-     - the fixpoint verdict: CONVERGED, or the [Fixpoint_not_converged]
-       payload (round count + the first still-growing (block, successor))
-       should the WTO fixpoint abort;
-     - the WIDENING-POINT set: the cyclic-SCC heads of the CFG (each
-       cycle's entry - the set the WTO head selection comes from), found
-       by reachability (a back-edge DFS);
-     - each widening point's block BIR (its defs and jmps);
-     - the "gap successor" state at each widening point: the fixpoint's
-       entry state for the head, printed as its def-lhs vars' word-sets.
-
-   The WTO fixpoint always runs and (for the corpus) converges; the
-   cycle-head report is the stable diagnostic for WIDENING QUALITY: every
-   loop-carried var of every cycle should be BOUNDED (finite CLP), not TOP. *)
+(* Reports fixpoint verdict, widening-point set, head BIR, and head states.
+   Usage: conv_diag.exe <binary> [subname] (default "main"). *)
 
 open Bap.Std
 open Probe_common
 
-(* The Direct-jump CFG successors of a block. *)
+(* Direct-jump CFG successors of a block. *)
 let succs (blk : blk term) : tid list =
   Term.enum jmp_t blk
   |> Seq.filter_map ~f:(fun j ->
@@ -44,7 +27,7 @@ let succs_of (cfg : (tid * tid list) list) (t : tid) : tid list =
   | Some ts -> ts
   | None -> []
 
-(* [reachable cfg a b]: is [b] reachable from [a]? *)
+(* Reachability in the CFG. *)
 let reachable (cfg : (tid * tid list) list) (start : tid) (target : tid) :
     bool =
   let rec go seen = function
@@ -59,9 +42,7 @@ let reachable (cfg : (tid * tid list) list) (start : tid) (target : tid) :
 let on_cycle (cfg : (tid * tid list) list) (t : tid) : bool =
   Base.List.exists (succs_of cfg t) ~f:(fun s -> reachable cfg s t)
 
-(* [cyclic_heads cfg]: one (head, members) per cyclic SCC; the head is the
-   lexicographically smallest Tid name in the cycle (a deterministic
-   widening-point representative). *)
+(* One (head, members) per cyclic SCC; head is the smallest Tid name. *)
 let cyclic_heads (cfg : (tid * tid list) list) : (tid * tid list) list =
   let cyc =
     Base.List.filter_map cfg ~f:(fun (t, _) ->

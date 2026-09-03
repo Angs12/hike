@@ -1,4 +1,4 @@
-(* test_domains: the abstract-domain unit pins — CLP creation/bounds, join/meet/widen, FinSet, Map lattice, word ops (run_base); Ws.diff totality; policy/degrade/meet-wrap/div-totality/widen + Lane-Z extrapolation (run_policy); CLP Int64-vs-Big agreement (run_agreement). *)
+(* Abstract-domain unit pins: CLP, FinSet, Map, word ops, diff, policy, widening, Int64/Big agreement. *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
@@ -16,28 +16,10 @@ let clp1 =
 (* create b ~step ~cardn = {b + step*i | 0 <= i < cardn} *)
 let clp2 = Clp.create ~width:32 ~step:(w32 2) ~cardn:(w33 5) (w32 10)
 
-(* --- O4(c) agreement pins: CLP Int64 fast path vs Big fallback --------
+(* Int64-vs-Big agreement pins: [clp_agree] asserts equal + cardn + elems + extrema,
+   the path-independent contract every representation must satisfy. *)
 
-   These pin the ORACLE semantics the Int64 fast path must reproduce EXACTLY. Today there is only
-   the Big (GMP-word) path, so each pin is green against that reference. When O4(c) lands (the
-   internal `type rep = I64 of ... | Big of ...` in cbat_clp.ml), the SAME checks must stay green
-   with the value routed through BOTH representations:
-
-   - the [clp_agree] helper is the direct two-path comparison (equal + canonized cardinality + the
-   same sorted element list + the same extrema); wire it once [Clp] exposes a test-only rep hook
-   (e.g. [Clp.debug_force_rep `Big t] / [Clp.debug_force_rep `I64 t] or an [as_big : t -> t] that
-   round-trips an I64 value to its Big twin). - the [check]s below are the representation-boundary
-   traps: unsigned 64-bit wrap, the 2^64-cardinality Big fallback, the step-0 and cardn 0/1/2
-   canonize branches, the is_infinite wrap, and the R2-1 intersection anchor clamp. A fast path that
-   disagrees with Big on ANY of these is a bug, not a precision improvement.
-
-   The [clp_agree] algebraic pins (commutativity / idempotence) are the path-independent contract:
-   they hold for every correct representation, so a value that passes on Big and fails on I64
-   pinpoints the disagreeing op immediately. *)
-
-(* [clp_agree name a b]: two CLPs agree iff they are [equal], have the same canonized cardinality,
-   enumerate the same element set, and share the same extrema. The direct oracle for the fast-path
-   landing; today it also asserts the lattice identities hold on the Big path alone. *)
+(* Two CLPs agree: equal, same cardn, same elems, same extrema. *)
 let clp_agree (name : string) (a : Clp.t) (b : Clp.t) : unit =
   let elems p = List.sort compare (Clp.iter p) in
   check (name ^ " [equal]") (Clp.equal a b);
@@ -75,7 +57,6 @@ let run_base () =
     (let t = Clp.top 32 in
      Clp.is_top t && (not (Clp.is_bottom t)) && Clp.subset clp1 t && Clp.subset t t);
   ())
-(* --- 2. join / meet / widen -------------------------------------------- *)
 ;
 (  let s5 = Clp.create (w32 5) in
   let s9 = Clp.create (w32 9) in
@@ -90,9 +71,7 @@ let run_base () =
   check "CLP11: top absorbs in join" (Clp.is_top (Clp.join s5 (Clp.top 32)));
   check "CLP19: join of equal single points is the point" (Clp.equal (Clp.join s5 s5) s5);
 
-  (* overlapping meet: {10,12,14,16,18} n {14,16,18} = {14,16,18} exactly. (The pair {16,17,18,19}
-     is deliberately avoided: the vendored CLP intersection's base can wrap past 0 there and it
-     bails to bottom — upstream behavior, not exercised here.) *)
+  (* Overlapping meet: {10,12,14,16,18} n {14,16,18} = {14,16,18} exactly. *)
   let q = Clp.of_list ~width:32 [ w32 14; w32 16; w32 18 ] in
   let m = Clp.meet clp2 q in
   check "CLP12: meet of overlapping intervals: intersection members only"
@@ -115,7 +94,6 @@ let run_base () =
   check "CLP18: widen_join p p = p; widen_join bottom {5} = top"
     (Clp.equal (Clp.widen_join s5 s5) s5 && Clp.is_top (Clp.widen_join (Clp.bottom 32) s5));
   ())
-(* --- 3. Fin_set ops (incl. delta #1) ----------------------------------- *)
 ;
 (  let s = Fs.of_list ~width:32 [ w32 1; w32 2; w32 3 ] in
   check "FS1: of_list basics (cardn/bitwidth/min/max/elem)"
@@ -161,8 +139,7 @@ let run_base () =
      && Fs.bitwidth (Fs.cast Bil.UNSIGNED 64 one) = 64
      && Fs.bitwidth (Fs.concat one (Fs.singleton (W.of_int ~width:16 1))) = 48);
 
-  (* Delta #1 (cbat_fin_set.ml lift2_pred): a width mismatch must yield false, not an assert abort
-     (the analysis stays total). *)
+  (* Width mismatch yields false, not an assert abort. *)
   let f32 = Fs.of_list ~width:32 [ w32 1; w32 2 ] in
   let f64 = Fs.of_list ~width:64 [ w64 1; w64 2 ] in
   check "FS9 (delta #1): equal on width-mismatched sets is false (no assert)"
@@ -170,7 +147,6 @@ let run_base () =
   check "FS9 (delta #1): precedes on width-mismatched sets is false"
     ((not (Fs.precedes f32 f64)) && not (Fs.precedes f64 f32));
   ())
-(* --- 4. Map lattice ----------------------------------------------------- *)
 ;
 (  check "ML1: add on bottom stays bottom" (Map.equal (Map.add Map.bottom ~key:0 ~data:1) Map.bottom);
   check "ML2: join_add/meet_add on bottom stay bottom"
@@ -199,7 +175,6 @@ let run_base () =
     && (not (Map.precedes Map.top Map.bottom))
     && Map.precedes (Map.add Map.top ~key:1 ~data:2) (Map.add Map.top ~key:1 ~data:3));
   ())
-(* --- 5. Word ops -------------------------------------------------------- *)
 ;
 (  check "WO1: dom_size i ~width:w = 2^i as a w-bit word (zero if w = i)"
     (W.to_int_exn (Wo.dom_size 3 ~width:4) = 8
@@ -241,30 +216,21 @@ let run_base () =
     W.bitwidth l = 12 && W.to_int_exn l = 16);
   check "WO7: gt_int" (Wo.gt_int (W.of_int ~width:8 7) 5 && not (Wo.gt_int (W.of_int ~width:8 3) 5));
   ())
-(* --- 5b. diff (the trace-partitioning subtraction substrate, M1: docs/trace-partitioning-plan.md
-   §1.1) -------------------------------- The set difference [diff a b] — TOTAL on every domain
-   (CLP, FinSet, composite) and every input: exact when the difference is representable (the
-   contiguous-run removal — the CLP's circularity represents the two flanking progressions as one
-   wrapped progression), the identity otherwise — the sound over-approximation (γ(diff a b) ⊇ γ(a) \
-   γ(b), diff a b ⊆ a element-wise), never a stop, never an under-approximation. [lnot]/[neg] (the
-   plan's bitnot/neg) already existed and are pinned here for the contract. *)
+(* Set difference: exact when representable, identity otherwise — never a stop. *)
 ;
 (  let w3 = W.of_int ~width:3 in
-  (* the w32 interval builder: [lo, hi] (step 1) *)
+  (* Interval builder: [lo, hi] step 1. *)
   let int32 ~lo ~hi =
     Clp.create ~width:32 ~step:(w32 1) ~cardn:(W.of_int ~width:33 (hi - lo + 1)) (w32 lo)
   in
-  (* W1: the INTERIOR run of a finite arc — the remainder is two pieces (a CLP's circle wraps at
-     2^w, not at the arc's end): the identity — the sound over-approximation (γ ⊇ a\b, the result ⊆
-     a), never an under-approximation. *)
+  (* W1: interior run is two pieces — identity. *)
   let a = int32 ~lo:0 ~hi:9 in
   let b = int32 ~lo:3 ~hi:5 in
   check
     "W1: [0,9] \\ [3,5] — the interior run is two pieces, not one CLP: the identity (the sound \
      over-approximation)"
     (Clp.equal (Clp.diff a b) a && Clp.subset (Clp.diff a b) a);
-  (* W1b: the boundary-touch runs are ONE CLP — exact: the run at the start [0,9] \\ [0,2] = {3..9};
-     the run at the end [0,9] \\ [7,9] = {0..6}. *)
+  (* W1b: boundary-touch runs are exact single CLPs. *)
   let d_s = Clp.diff a (int32 ~lo:0 ~hi:2) in
   let d_e = Clp.diff a (int32 ~lo:7 ~hi:9) in
   check "W1b: the boundary-touch runs are exact — [0,9] \\ [0,2] = {3..9}; [0,9] \\ [7,9] = {0..6}"
@@ -276,8 +242,7 @@ let run_base () =
     && Clp.elem (w32 0) d_e
     && Clp.elem (w32 6) d_e
     && not (Clp.elem (w32 7) d_e));
-  (* W2: the NEQ shape — the full domain minus a singleton: the wrapped complement {c+1, …, c−1},
-     cardn 2^64 − 1, exact. *)
+  (* W2: full domain minus singleton = wrapped complement. *)
   let c = w64 0x2a in
   let d2 = Clp.diff (Clp.top 64) (Clp.create c) in
   check "W2: full64 \\ {0x2a} = the wrapped complement (cardn 2^64 − 1, exact)"
@@ -286,7 +251,7 @@ let run_base () =
     && Clp.elem (w64 0x2b) d2
     && Clp.elem (w64 0x29) d2
     && not (Clp.elem c d2));
-  (* W3: the bottom/absorption cases — trivial on every input *)
+  (* W3: bottom/absorption cases. *)
   check
     "W3: the bottom/absorption — diff bottom a = bottom; diff a bottom = a; diff a a = bottom; the \
      singleton cases"
@@ -295,9 +260,7 @@ let run_base () =
     && Clp.is_bottom (Clp.diff a a)
     && Clp.is_bottom (Clp.diff (Clp.create (w32 5)) (Clp.create (w32 5)))
     && Clp.equal (Clp.diff (Clp.create (w32 5)) (Clp.create (w32 7))) (Clp.create (w32 5)));
-  (* W4: the diff contract on the exact cases (the boundary-touch and the full-circle forms) —
-     disjoint from the subtracted part (element-wise: the CLP intersection's wrap-fallback
-     over-approximates), ⊆ a, complete (a\b ⊆ diff) *)
+  (* W4: diff contract on exact cases — disjoint, ⊆ a, complete. *)
   check "W4: the diff contract — (diff a b) ∩ b = ∅ element-wise; diff ⊆ a; a\\b ⊆ diff"
     (List.for_all (fun w -> not (Clp.elem w (int32 ~lo:0 ~hi:2))) (Clp.iter d_s)
     && Clp.subset d_s a
@@ -307,8 +270,7 @@ let run_base () =
     && List.for_all (fun w -> not (Clp.elem w (int32 ~lo:7 ~hi:9))) (Clp.iter d_e)
     && Clp.subset d_e a
     && not (Clp.elem c (Clp.diff (Clp.top 64) (Clp.create c))));
-  (* W5: the gapped subtraction is NOT a run — the identity (the sound over-approximation; the
-     disjointness is precision-only there) *)
+  (* W5: gapped subtraction is the identity. *)
   let a5 = Clp.create ~width:32 ~step:(w32 2) ~cardn:(w33 5) (w32 0) in
   (* {0,2,4,6,8} *)
   let b5 = Clp.create ~width:32 ~step:(w32 4) ~cardn:(w33 3) (w32 0) in
@@ -316,8 +278,7 @@ let run_base () =
   check
     "W5: the gapped subtraction is the identity — {0,2,4,6,8} \\ {0,4,8} = {0,2,4,6,8} (not a run)"
     (Clp.equal (Clp.diff a5 b5) a5);
-  (* W6: the singleton removal — exact at the boundaries; the interior singleton is two pieces — the
-     identity *)
+  (* W6: singleton removal — exact at boundaries, identity inside. *)
   let a6 = int32 ~lo:0 ~hi:10 in
   let d6b = Clp.diff a6 (Clp.create (w32 0)) in
   let d6e = Clp.diff a6 (Clp.create (w32 10)) in
@@ -332,8 +293,7 @@ let run_base () =
     && Clp.elem (w32 0) d6e
     && (not (Clp.elem (w32 10) d6e))
     && Clp.equal d6i a6);
-  (* W7: the FinSet diffs — exact; the mixed-width pair shares no elements (the left set
-     unchanged) *)
+  (* W7: FinSet diffs — exact; mixed-width pair shares nothing. *)
   check "W7: the FinSet diffs — exact; the mixed-width pair shares no elements"
     (Ws.equal
        (Ws.diff (Ws.of_list ~width:32 [ w32 1; w32 2; w32 3 ]) (Ws.of_list ~width:32 [ w32 2 ]))
@@ -346,8 +306,7 @@ let run_base () =
     && Ws.equal
          (Ws.diff (Ws.of_list ~width:32 [ w32 1; w32 2 ]) (Ws.of_list ~width:64 [ w64 1; w64 2 ]))
          (Ws.of_list ~width:32 [ w32 1; w32 2 ]));
-  (* W8: the Clp\FinSet — the boundary-touch runs removed exactly; the interior run (two pieces) and
-     the gaps fall back to the identity (never an under-approximation) *)
+  (* W8: Clp\\FinSet — boundary runs exact; interior and gaps fall back to identity. *)
   let p8 = Ws.of_clp (int32 ~lo:0 ~hi:10) in
   let d8 = Ws.diff p8 (Ws.of_list ~width:32 [ w32 0; w32 1; w32 2 ]) in
   check "W8: the Clp\\FinSet — the boundary-touch run removed exactly: [0,10] \\ {0,1,2} = {3..10}"
@@ -363,8 +322,7 @@ let run_base () =
   let d8c = Ws.diff p8 (Ws.of_list ~width:32 [ w32 3; w32 5 ]) in
   check "W8c: the Clp\\FinSet with gaps — the identity (the sound over-approximation)"
     (Ws.equal d8c p8);
-  (* W9: lnot/neg (the plan's bitnot/neg — the existing exact mirror rows) — the CLP mirrors, the
-     top fixed points, the singleton mirrors *)
+  (* W9: lnot/neg exact mirror rows. *)
   let l9 = Clp.create ~width:3 ~step:(w3 2) ~cardn:(W.of_int ~width:4 3) (w3 0) in
   (* {0,2,4} *)
   check
@@ -384,7 +342,7 @@ let run_base () =
     && Ws.equal (Ws.neg (Ws.of_list ~width:3 [ w3 5 ])) (Ws.of_list ~width:3 [ w3 3 ]));
   ())
 let run_policy () =
-(* --- 6. Policy #5 (delta #2, cbat_vsa_utils.ml) ------------------------ *)
+(* not_implemented degrades to top and logs. *)
 (  check "P5: not_implemented ~top degrades to top without raising"
     (Cbat_vsa_utils.not_implemented ~top:42 "policy5-probe" = 42);
   let raised f =
@@ -396,9 +354,7 @@ let run_policy () =
   check "P5: not_implemented without a top still raises NotImplemented"
     (raised (fun () -> Cbat_vsa_utils.not_implemented "no-top-probe"));
 
-  (* every hit must be LOGGED (a precision investigation target), not silently swallowed: subscribe
-     to the Bap event stream (the same stream Bap.Std.Event.Log.message posts to — the "Bap Log" the
-     vendored modules reach through Bap.Std) and check the warning. *)
+  (* Every hit logs; subscribe to the BAP event stream and check. *)
   let hits = ref [] in
   Bap_future.Std.Stream.observe Bap.Std.Event.stream (fun ev ->
       match ev with
@@ -410,21 +366,18 @@ let run_policy () =
        (fun (sec, msg) -> sec = "cbat_vsa" && contains_substring msg "policy5-log-probe")
        !hits);
   ())
-(* --- 7. Phase 2 change A: CLP meet wrap -> safe operand (not bottom) *)
+(* CLP meet wrap returns the safe operand, not bottom. *)
 ;
 (  let a = Clp.of_list ~width:32 [ w32 10; w32 12; w32 14; w32 16; w32 18 ] in
   let b = Clp.of_list ~width:32 [ w32 16; w32 17; w32 18; w32 19 ] in
-  (* This pair was deliberately avoided in section 2 (see the comment there): the least diophantine
-     solution of the intersection wraps past 0 and the vendored intersection bailed to bottom —
-     "unreachable" on a live path. Now it must return the safe (wider) operand, {10,12,14,16,18},
-     which contains the true intersection {16,18}. *)
+  (* Wrapping intersection returns the wider operand containing the true meet. *)
   let m = Clp.meet a b in
   check "A1: meet wrap {10..18} n {16..19} is NOT bottom (live path)" (not (Clp.is_bottom m));
   check "A1: ... and still contains the true intersection {16,18}"
     (Clp.elem (w32 16) m && Clp.elem (w32 18) m);
   check "A1: ... it is the wider operand {10,12,14,16,18} (over-approx)"
     (Clp.elem (w32 10) m && Clp.elem (w32 12) m && Clp.elem (w32 14) m);
-  (* Second wrap pair, both operands finite: {3,4,5} n {0,2,4} = {4}. *)
+  (* Second wrap pair, both finite: {3,4,5} n {0,2,4} = {4}. *)
   let m2 =
     Clp.meet
       (Clp.of_list ~width:32 [ w32 3; w32 4; w32 5 ])
@@ -432,14 +385,13 @@ let run_policy () =
   in
   check "A2: wrap {3,4,5} n {0,2,4} not bottom, contains 4"
     ((not (Clp.is_bottom m2)) && Clp.elem (w32 4) m2);
-  (* Genuinely-empty meets must still be bottom (only the WRAP case changes; the emptiness checks
-     are untouched). *)
+  (* Genuinely-empty meets stay bottom. *)
   check "A3: genuinely disjoint meets are still bottom (unchanged)"
     (Clp.is_bottom (Clp.meet (Clp.create (w32 10)) (Clp.create (w32 11))));
   check "A3: bottom is still the meet zero; top the meet identity"
     (Clp.is_bottom (Clp.meet clp2 (Clp.bottom 32)) && Clp.equal (Clp.meet clp2 (Clp.top 32)) clp2);
   ())
-(* --- 8. Phase 2 change B: div/sdiv by a set containing 0 -> top ----- *)
+(* div/sdiv by a set containing 0 returns top. *)
 ;
 (  let d1 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
   let d0 = Clp.of_list ~width:32 [ w32 0; w32 1 ] in
@@ -452,7 +404,7 @@ let run_policy () =
     (let r = Clp.div (Clp.create (w32 10)) (Clp.create (w32 2)) in
      Clp.min_elem r = Some (w32 5) && Clp.max_elem r = Some (w32 5));
   ())
-(* --- 9. Phase 2 change C (D1): width-mismatch totality -------------- *)
+(* Width-mismatch totality: mismatched ops return safe values, never raise. *)
 ;
 (  let f32 = Fs.of_list ~width:32 [ w32 1; w32 2 ] in
   let f64 = Fs.of_list ~width:64 [ w64 1; w64 2 ] in
@@ -473,7 +425,7 @@ let run_policy () =
      let b = Ws.of_list ~width:32 [ w32 2; w32 3 ] in
      Ws.equal (Ws.meet a b) (Ws.of_list ~width:32 [ w32 2 ]));
   ())
-(* --- 10. Phase 2 change D2: widen_join subset-assert fallbacks ------- *)
+(* widen_join fallbacks: non-subset inputs join instead of asserting. *)
 ;
 (  let s5 = Clp.create (w32 5) in
   let s9 = Clp.create (w32 9) in
@@ -484,7 +436,7 @@ let run_policy () =
     (Clp.equal (Clp.widen_join s5 s5) s5);
   check "D2-3: CLP widen_join of a subset pair still widens (bottom {5} -> top)"
     (Clp.is_top (Clp.widen_join (Clp.bottom 32) s5));
-  (* memmap level, guards #2/#3: Val cells with mismatched indices *)
+  (* Val cells with mismatched indices. *)
   let v32 = Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) LittleEndian in
   let v64 = Mem.Val.create (Ws.of_list ~width:64 [ w64 1 ]) LittleEndian in
   let vbe = Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) BigEndian in
@@ -501,7 +453,7 @@ let run_policy () =
   check "D2-8: Val ops on matching indices still work (no regression)"
     (let v1 = Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) LittleEndian in
      Mem.Val.equal v1 v32 && Ws.elem (w32 1) (Mem.Val.data (Mem.Val.join v1 v32)));
-  (* memmap level: widen_join' on non-preceding maps falls back to join' *)
+  (* widen_join on non-preceding maps falls back to join. *)
   let key_of ws = match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of" in
   let mk_mem ~key ~data =
     let k = key_of key in
@@ -523,13 +475,9 @@ let run_policy () =
   check "D2-10: Mem.widen_join of equal maps stays equal (no regression)"
     (Mem.equal (Mem.widen_join m1 m1) m1);
   ())
-(* --- 10b. Lane Z v2: the Simon & King extrapolation (EX suite) -------- [Clp.widen_join] is
-   Listing 4 of "Widening Polyhedra with Landmarks" specialized to 1-D progressions: stable bounds
-   kept, unstable bounds translated by (growth observed in the join) · steps, rounded OUTWARD onto
-   the join's progression grid; a translation escaping the word takes the infinite (∞-steps) arm. *)
+(* Landmark extrapolation: stable bounds kept, unstable translated by growth·steps. *)
 ;
-(  (* EX1-EX6: extrapolate_steps API was consolidated into widen_join in the
-     landmark-direct port. Stub to keep build green — soundness checks remain. *)
+(  (* Widening soundness pins: widen_join contains the join. *)
   let q9 = Clp.interval ~width:32 (w32 0) (w32 1) in
   let g9 = Clp.interval ~width:32 (w32 0) (w32 2) in
   let r1 = Clp.widen_join q9 g9 in
@@ -558,13 +506,9 @@ let run_agreement () =
   let w64i (v : int64) = W.of_int64 ~width:64 v in
   let w63i (v : int64) = W.of_int64 ~width:63 v in
   let ones64 = w64i (-1L) in
-  (* 0xFFFF_FFFF_FFFF_FFFF *)
   let max63 = w63i Int64.max_int in
-  (* 2^63 − 1, the top bit of a 63-bit word *)
 
-  (* G1: a width-64 singleton whose value has the TOP BIT SET must be treated as an UNSIGNED pattern
-     — min/max/elem must NOT see it as negative. This is the exact unsigned-compare trap the I64
-     path inherits from [cbat_ai_memmap.Key]. *)
+  (* G1: width-64 singleton with top bit set stays unsigned. *)
   let c1 = Clp.create ones64 in
   check
     "O4c-1: width-64 singleton 0xFFFF_FFFF_FFFF_FFFF is unsigned — min = max = itself, elem holds, \
@@ -576,9 +520,7 @@ let run_agreement () =
     && (not (Clp.is_top c1))
     && not (Clp.is_bottom c1));
 
-  (* G2: [top 64] has cardn 2^64 — a 65-bit quantity that CANNOT fit an Int64 — so it is the
-     Big-fallback class. The I64 fit guard (width = 64 && cardn needs 65 bits -> Big) must classify
-     it, not truncate it. *)
+  (* G2: top 64 has cardn 2^64 — the Big-fallback class. *)
   let t64 = Clp.top 64 in
   check
     "O4c-2: top 64 is the 2^64-cardinality class — is_top/is_infinite, absorbs a singleton (the \
@@ -589,16 +531,14 @@ let run_agreement () =
     && Clp.elem ones64 t64
     && Clp.elem (w64 0) t64);
 
-  (* G3: [top 63] has cardn 2^63 — it FITS Int64 — so it is the I64-representable boundary. Same
-     semantics as the Big path. *)
+  (* G3: top 63 fits Int64 — the I64 boundary. *)
   let t63 = Clp.top 63 in
   check
     "O4c-3: top 63 is the 2^63-cardinality class (fits Int64 — the I64 boundary) — \
      is_top/is_infinite"
     (Clp.is_top t63 && Clp.is_infinite t63 && not (Clp.is_bottom t63));
 
-  (* G4: a width-63 singleton at 2^63 − 1 — the top bit of a 63-bit word set. No sign-extension to
-     width 64 may happen (the I64 path masks to 63 bits). *)
+  (* G4: width-63 singleton at 2^63−1 — no sign extension. *)
   let c4 = Clp.create max63 in
   check
     "O4c-4: width-63 singleton 2^63−1 is unsigned and exact (top bit of a 63-bit word; min = max = \
@@ -609,20 +549,17 @@ let run_agreement () =
     && (not (Clp.elem (w63 0) c4))
     && W.to_int64_exn max63 = Int64.max_int);
 
-  (* G5: 64-bit wrap ADD — {0xFFFF_FFFF_FFFF_FFFF} + {1} = {0}: the two's-complement int64 add wraps
-     exactly (no GMP sign carry). *)
+  (* G5: 64-bit wrap add — {0xFFFF_FFFF_FFFF_FFFF} + {1} = {0}. *)
   let a5 = Clp.add (Clp.create ones64) (Clp.create (w64 1)) in
   check "O4c-5: 64-bit wrap add — {0xFFFF_FFFF_FFFF_FFFF} + {1} = {0}"
     (Clp.equal a5 (Clp.create (w64 0)) && Clp.elem (w64 0) a5 && not (Clp.elem (w64 1) a5));
 
-  (* G6: 63-bit wrap SUB — {0} − {1} = {2^63 − 1}: the masked pred at pwidth < 64 (the Key.pred
-     idiom), not a sign-extended −1. *)
+  (* G6: 63-bit wrap sub — {0} − {1} = {2^63 − 1}. *)
   let a6 = Clp.sub (Clp.create (w63 0)) (Clp.create (w63 1)) in
   check "O4c-6: 63-bit wrap sub — {0} − {1} = {2^63 − 1}"
     (Clp.equal a6 (Clp.create max63) && Clp.elem max63 a6 && not (Clp.elem (w63 0) a6));
 
-  (* G7: the path-independent algebraic contract — a fast path that disagrees with Big on ANY of
-     these is a bug. *)
+  (* G7: path-independent algebraic contract. *)
   let p = Clp.create ~width:64 ~step:(w64 2) ~cardn:(W.of_int ~width:65 5) (w64 10) in
   let q = Clp.create ~width:64 ~step:(w64 4) ~cardn:(W.of_int ~width:65 3) (w64 6) in
   clp_agree "O4c-7a: add commutative" (Clp.add p q) (Clp.add q p);
@@ -630,8 +567,7 @@ let run_agreement () =
   clp_agree "O4c-7c: join commutative" (Clp.join p q) (Clp.join q p);
   clp_agree "O4c-7d: meet idempotent" (Clp.meet p p) p;
 
-  (* G8: step 0 with a nonzero cardn is a singleton — the canonize step-0 branch. (create's default
-     step is 1; a step-0 input must still canonize to the same singleton {10}.) *)
+  (* G8: step 0 canonizes to the singleton. *)
   let s8 = Clp.create ~width:32 ~step:(w32 0) ~cardn:(w33 1) (w32 10) in
   check "O4c-8: step 0 with cardn 1 canonizes to the singleton {10}"
     (Clp.equal s8 (Clp.create (w32 10))
@@ -639,13 +575,12 @@ let run_agreement () =
     && Clp.elem (w32 10) s8
     && not (Clp.elem (w32 11) s8));
 
-  (* G9: cardn 0 is the empty set — the canonize bottom branch. *)
+  (* G9: cardn 0 is bottom. *)
   let s9 = Clp.create ~width:32 ~step:(w32 1) ~cardn:(w33 0) (w32 10) in
   check "O4c-9: cardn 0 is bottom (empty iter, no min)"
     (Clp.is_bottom s9 && Clp.iter s9 = [] && Clp.min_elem s9 = None);
 
-  (* G10: cardn 2 whose step wraps past the base — the canonize cardn-2 flip puts the pair in
-     ascending order (e = base + step < base, so the representation flips to {e, step −2}). *)
+  (* G10: cardn-2 wrap flips the pair to ascending order. *)
   let s10 = Clp.create ~width:32 ~step:(w32 0xFFFFFFFE) ~cardn:(w33 2) (w32 0xFFFFFFF0) in
   check "O4c-10: cardn-2 wrap flips the pair to ascending order (min 0xFFFFFFEE, max 0xFFFFFFF0)"
     (Clp.min_elem s10 = Some (w32 0xFFFFFFEE)
@@ -654,8 +589,7 @@ let run_agreement () =
     && Clp.elem (w32 0xFFFFFFF0) s10
     && not (Clp.elem (w32 0xFFFFFFEF) s10));
 
-  (* G11: a step·cardn that reaches 2^w is the infinite class — 2·4 = 8 = 2^3 at width 3, so
-     {0,2,4,6} is infinite but NOT top (its step is 2, not 1). *)
+  (* G11: step·cardn = 2^w is infinite but not top. *)
   let s11 = Clp.create ~width:3 ~step:(w3 2) ~cardn:(w4 4) (w3 0) in
   check "O4c-11: step·cardn = 2^w (2·4 = 8 = 2^3) is infinite — {0,2,4,6}, cardn 4, 7 not in"
     (Clp.is_infinite s11
@@ -664,10 +598,7 @@ let run_agreement () =
     && Clp.elem (w3 6) s11
     && not (Clp.elem (w3 7) s11));
 
-  (* G12: the R2-1 intersection anchor clamp — meet a bounded cell with a circular hull. The
-     diophantine anchor would land at 0 (below p2's minimum 1 in the translated frame), which on the
-     translate-back produces the spurious top element 0xFFFFFFFF (the {0xFFFFFFFF} ∪ [0, n] loose
-     hull). The clamp steps the anchor up to the minimum, so the meet is {0..8} EXACTLY. *)
+  (* G12: intersection anchor clamps to the minimum — no spurious top element. *)
   let lo12 = Clp.create ~width:32 ~step:(w32 1) ~cardn:(w33 9) (w32 0) in
   let circ12 = Clp.create ~width:32 ~step:(w32 1) ~cardn:(w33 10) (w32 0xFFFFFFFF) in
   let m12 = Clp.meet lo12 circ12 in
@@ -680,23 +611,7 @@ let run_agreement () =
     && Clp.elem (w32 0) m12
     && Clp.elem (w32 8) m12);
   ())
-(* --- O2 (W1) op_add' contract pins: the six pre-rewrite groups ----------
-
-   These lock the OBSERVABLE behavior of every operation that routes through
-   [Cbat_ai_memmap.op_add'] — [add] (singleton store_merge / range join), [meet_add], [join_add],
-   [meet_range] — so the single-pass meet-into-range rewrite (deep plan §3) must reproduce them
-   BYTE-IDENTICALLY. The six groups from the plan:
-
-   (a) a key fully inside one node (interval_diff = `two) (b) a key spanning several nodes exactly
-   (c) ragged left/right partial overlaps (`none / `one left / `one right; `two is group (a)) (d)
-   the wrapping key (a circular WordSet -> the full span; and the hi = max succ-wrap guard in
-   [Key.gaps]) (e) the bottom map stays bottom (f) a width-mismatched [data] meets/joins per-cell
-   via [Val.meet_poly]/[Val.join_poly]
-
-   TWO SEMANTICS TO NOTE (both follow from [Key.gaps] passing [Val.top] as the gap value, then [op d
-   top] in the fold): - [meet_add] fills a fresh gap with [d] (meet d top = d), - [join_add] leaves
-   a fresh gap top (join d top = top). The pins assert both, so a rewrite that silently flips them
-   is caught. *)
+(* op_add contract pins: [meet_add] fills a fresh gap with d; [join_add] leaves it top. *)
 ;
 (  let idx32 = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
   let key_of ws =
@@ -707,18 +622,13 @@ let run_agreement () =
   let point c = key_of (Ws.singleton (w32 c)) in
   let range lo hi = key_of (Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi))) in
   let cell n = Mem.Val.create (Ws.singleton (w32 n)) LittleEndian in
-  (* [read32 m c] observes the value of the cell whose LO is [c] — the memmap's [find'] reads at a
-     cell's lower bound (the alignment check [Key.aligned_mod] returns top for an INTERIOR point or
-     a read whose lo differs from the cell's lo). The pins below read at cell-lo addresses only. *)
+  (* [find] reads at a cell's lower bound; interior reads are top. *)
   let read32 m c = Mem.Val.data (Mem.find (32, LittleEndian) m (point c)) in
   let empty = Mem.top idx32 in
-  (* build a RANGE cell with a REAL value via [meet_add] (meet d top = d — the clean builder;
-     [add]/[join_add] on a fresh range leave it top, the gap semantic below) *)
+  (* Range cell with real value via meet_add (meet d top = d). *)
   let range_cell lo hi n = Mem.meet_add empty ~key:(range lo hi) ~data:(cell n) in
 
-  (* (a) key fully inside one node — interval_diff = `two: both flanks keep the old value, the
-     middle joins the new. (The spurious top-valued [gaps] cell is not read here; the flank/middle
-     lo reads are the stable observations.) *)
+  (* (a) key inside one node: flanks keep old, middle joins new. *)
   let m = range_cell 10 20 1 in
   let m = Mem.join_add m ~key:(range 12 18) ~data:(cell 2) in
   check
@@ -731,11 +641,7 @@ let run_agreement () =
     && Ws.is_top (read32 m 9)
     && Ws.is_top (read32 m 21));
 
-  (* (b) key spanning several nodes exactly — each node joins the new value. The [gaps] cells
-     duplicate the node lo addresses (the gap hi = the next node's lo, an off-by-one in [Key.gaps]),
-     so every node-lo read is TOP — the {1,3}/{2,3} cells are observable only structurally (the
-     byte-identical gate). This pin locks that pollution shape so a rewrite that "fixes" it silently
-     is caught. *)
+  (* (b) key spanning nodes: node-lo reads are top (gap pollution). *)
   let m = Mem.meet_add (range_cell 10 12 1) ~key:(range 14 16) ~data:(cell 2) in
   let m = Mem.join_add m ~key:(range 10 16) ~data:(cell 3) in
   check
@@ -743,8 +649,7 @@ let run_agreement () =
      addresses, so the node lo reads are top (structural-only observation)"
     (Ws.is_top (read32 m 10) && Ws.is_top (read32 m 14) && Ws.is_top (read32 m 13));
 
-  (* (c1) ragged: the new key COVERS the node (interval_diff `none) — no flank, and [meet_add] fills
-     the fresh gap with [d] (meet d top = d). The gap cell's lo (0) is the clean read. *)
+  (* (c1) covering key: meet fills the fresh gap with d. *)
   let m = range_cell 10 20 1 in
   let m =
     Mem.meet_add m ~key:(range 0 30)
@@ -755,9 +660,7 @@ let run_agreement () =
      (meet fills it); the node narrows"
     (Ws.equal (read32 m 0) (Ws.of_list ~width:32 [ w32 1; w32 2 ]) && Ws.is_top (read32 m 15));
 
-  (* (c2) ragged left: the new key overlaps the node's LOW half (interval_diff `one) — the high
-     flank [16,20] keeps {1}, and [join_add] leaves the fresh left gap TOP (join d top = top, the
-     top-valued [gaps] cell pollutes the joined cell's lo 10). *)
+  (* (c2) low-half overlap: high flank keeps value; joined lo is top. *)
   let m = range_cell 10 20 1 in
   let m = Mem.join_add m ~key:(range 5 15) ~data:(cell 2) in
   check
@@ -767,8 +670,7 @@ let run_agreement () =
     && Ws.is_top (read32 m 10)
     && Ws.is_top (read32 m 7));
 
-  (* (c3) ragged right: the new key overlaps the node's HIGH half (interval_diff `one) — the low
-     flank [10,14] keeps {1}. *)
+  (* (c3) high-half overlap: low flank keeps value. *)
   let m = range_cell 10 20 1 in
   let m = Mem.join_add m ~key:(range 15 25) ~data:(cell 2) in
   check
@@ -778,10 +680,7 @@ let run_agreement () =
     && Ws.equal (read32 m 15) (Ws.of_list ~width:32 [ w32 1; w32 2 ])
     && Ws.is_top (read32 m 23));
 
-  (* (d1) the wrapping (circular) WordSet: {0xFFFFFFF0..0xFFFFFFFF, 0..0x0F} has min_elem 0 /
-     max_elem 0xFFFFFFFF, so Key.of_wordset approximates it as the FULL span [0, 0xFFFFFFFF] (lo =
-     0, hi = max — the documented wrap-set-as-whole-space behavior). Only the lo 0 is a clean read;
-     the interior addresses are misaligned. *)
+  (* (d1) circular WordSet approximates as the full span. *)
   let wrap_ws = Ws.of_clp (Clp.interval ~width:32 (w32 0xFFFFFFF0) (w32 0x0F)) in
   let m = Mem.meet_add empty ~key:(key_of wrap_ws) ~data:(cell 7) in
   check
@@ -791,9 +690,7 @@ let run_agreement () =
     && Ws.is_top (read32 m 0x50)
     && Ws.is_top (read32 m 0xFFFFFFF0));
 
-  (* (d2) the hi = max succ-wrap guard in [Key.gaps]: a key ending at 0xFFFFFFFF must not spill a
-     wrapped cell onto address 0. The finishing gap terminates at max ([next_pt max] = None via the
-     is_zero guard). *)
+  (* (d2) key ending at max spills no wrapped cell onto 0. *)
   let m = range_cell 10 20 1 in
   let m = Mem.meet_add m ~key:(range 10 0xFFFFFFFF) ~data:(cell 1) in
   check
@@ -801,8 +698,7 @@ let run_agreement () =
      wrapped spill at address 0)"
     (Ws.equal (read32 m 10) (Ws.singleton (w32 1)) && Ws.is_top (read32 m 0));
 
-  (* (e) the bottom map stays bottom under every op_add' entry point (the None-itree short-circuit
-     in [op_add]). *)
+  (* (e) bottom map stays bottom under every entry point. *)
   let bot = Mem.bottom idx32 in
   check "opadd-e: the bottom map stays bottom under add/meet_add/join_add/meet_range"
     (Mem.equal (Mem.add bot ~key:(point 10) ~data:(cell 1)) bot
@@ -810,9 +706,7 @@ let run_agreement () =
     && Mem.equal (Mem.join_add bot ~key:(range 0 20) ~data:(cell 1)) bot
     && Mem.equal (Mem.meet_range bot ~key:(range 0 20) ~data:(cell 1)) bot);
 
-  (* (f) a width-mismatched [data] meets per-cell via [Val.meet_poly] (widened to 64, no raise).
-     NOTE: the JOIN of a width-mismatched pair is TOP (the [op_at] idx-join fallback), so only the
-     meet is pinned as a clean value. *)
+  (* (f) width-mismatched data meets per-cell; joins to top. *)
   let m = range_cell 10 10 5 in
   let d64 = Mem.Val.create (Ws.singleton (w64 5)) LittleEndian in
   let m = Mem.meet_add m ~key:(point 10) ~data:d64 in
