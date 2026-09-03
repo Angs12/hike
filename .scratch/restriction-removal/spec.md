@@ -183,7 +183,7 @@ the hike-vsa pass; the detector still lives in `cbat_vsa`.)
 | `src/cbat_vsa/cbat_vsa.ml:2838` (`compute_need` filter) | Track every def in the SCC's value-flow cycle |
 | `src/cbat_vsa/cbat_vsa_utils.ml:47` (`relevant` tag) | DELETE |
 | `src/bil2llvm.ml:744` (`is_stack_access`) | Redefine: def carries any `vsa_info` tag |
-| `test_cbat/test_cbat.ml:1090` (`tag_all`) + manual `stack_access` fixtures (`:5576, 6404`) | DELETE `tag_all`; REWRITE the manual-tag fixtures to exercise channels 1/2 via actual def structure, or delete if the shape is unrepresentable |
+| `test_cbat/test_common.ml:138` (`tag_all`) + manual `stack_access` fixtures (`test_domains.ml:819`, `test_regression.ml:817`) | DELETE `tag_all`; REWRITE the manual-tag fixtures to exercise channels 1/2 via actual def structure, or delete if the shape is unrepresentable |
 | `test_cbat/corpus_watch.ml` (`HIKE_VSA_RESTRICTION`) | DELETE the toggle + its doc line |
 
 **Pre-fusion fallback hunk-map** (if ADR-0002's fusion has NOT landed when

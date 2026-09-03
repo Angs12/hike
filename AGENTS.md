@@ -493,12 +493,9 @@ the old `pps ppx_bap` driver (it regenerates `[@@deriving equal]`'s
 | blocker red path | injected `Sys.getenv_opt` violation → `dune build` **rc=1**, both rules fire; clean → rc=0 |
 | compile-out proof | production `hike.pp.ml`/`hike_stack_to_locals.pp.ml` grep the forensics strings → **0 hits**; `_build-debug` copies → **1 hit each** |
 
-INHERITED-STATE NOTE (2026-09-03): main's worktree is currently MID-MERGE
-with an unresolved conflict in `test_cbat/test_cbat.ml` (14 `<<<<<<<`
-markers — `UU` in git status; main's `dune runtest` cannot run). This
-branch is off `40955da` (pre-conflict) and is NOT affected; when main's
-merge completes, rebase this branch and re-run the unit suite against
-the reconciled test count. This branch also predates `battery-merged`
+INHERITED-STATE NOTE (2026-09-03, RESOLVED — main @ 87c9b86 completed the
+merge; this entry is now main's record): the mid-merge conflict in
+`test_cbat/test_cbat.ml` is reconciled. This branch also predates `battery-merged`
 (2026-09-02: the battery driver + the three-gate semantic collapse) —
 the two branches touch DISJOINT files (src/ + dune vs test_cbat/ +
 scripts/) and should merge cleanly.

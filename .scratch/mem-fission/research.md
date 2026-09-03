@@ -1,5 +1,12 @@
 # Research: per-region BIL mem vars ("mem fission") for hike
 
+> NOTE (2026-09-03): `test_cbat/test_cbat.ml` was split by tested logic into
+> `test_cbat/test_{common,domains,seed,vsa,backward,regression,properties,dce,main}.ml`
+> (entry: `test_main.ml`, runner calls theme `run ()`s in original order).
+> `file:line` refs below predate the split — resolve by theme:
+> BIR sugar/fixtures (`memv`, `v64`, `sp`) → `test_common.ml`;
+> T4 caller-alias fixtures → `test_vsa.ml`; O2/agreement pins → `test_domains.ml`.
+
 **Question.** Can hike give each stack region its own BIL mem var — rewriting
 `mem := mem with [RBP-4] <- x` to `stack_r0 := stack_r0 with [...] <- x` — so
 (a) DCE's used-set sweep naturally deletes never-loaded stores, and
