@@ -98,13 +98,12 @@ module Vsa = struct
   }
 
   (* Hand-written equality over maps. *)
-  let equal_krange ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
+  (* Pair equality, shared by both int64-pair maps. *)
+  let equal_int64_pair ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
     Int64.equal a1 a2 && Int64.equal b1 b2
 
-  (* Pair equality via [Core.Map.equal]. *)
-  let equal_vla_bound ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) :
-      bool =
-    Int64.equal a1 a2 && Int64.equal b1 b2
+  let equal_krange = equal_int64_pair
+  let equal_vla_bound = equal_int64_pair
 
   let equal_vsa_info (i1 : vsa_info) (i2 : vsa_info) : bool =
     Core.Map.equal equal_vsa_kind i1.offsets i2.offsets

@@ -769,11 +769,6 @@ let is_abi_visible ctx sub_info def =
 (* Tests the [stack_access] tag. *)
 let is_stack_access def = Hike_vsa_relevance.has_stack_access def
 
-(* Tests for unusable VSA results. *)
-let sub_degraded sub_info =
-  Base.Option.value_map sub_info ~default:false ~f:(fun info ->
-      info.Convutils.degraded)
-
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =
@@ -1016,7 +1011,6 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
   let var = Def.lhs def in
   let v = Def.value def in
   let exp = Def.rhs def in
-  let _ = (ctx, var) in
   let* res =
     if Term.has_attr def Hike_vsa_relevance.dynamic_alloc then
       create_dynamic_alloc llvm_builder blk_tid exp
@@ -1087,7 +1081,7 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
          | Some _ -> ());
         return ()
 
-let create_call_args blk_tid llvm_builder sub call_tid fr =
+let create_call_args blk_tid llvm_builder call_tid fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -1097,12 +1091,15 @@ let create_call_args blk_tid llvm_builder sub call_tid fr =
       let exp = Arg.rhs arg in
       if Var.same (Arg.lhs arg) Convutils.hike_stack_var then
         (* Threads [hike_stack] to callees. *)
-        let v_opt =
-          if fr.is_precise then get_local ctx blk_tid Convutils.hike_stack_var
-          else get_local ctx blk_tid (sp ctx.Convutils.target)
+        let first, second =
+          if fr.is_precise then Convutils.hike_stack_var, sp ctx.Convutils.target
+          else sp ctx.Convutils.target, Convutils.hike_stack_var
         in
-        let v_opt = match v_opt with Some _ -> v_opt | None -> get_local ctx blk_tid Convutils.hike_stack_var in
-        let v_opt = match v_opt with Some _ -> v_opt | None -> get_local ctx blk_tid (sp ctx.Convutils.target) in
+        let v_opt =
+          match get_local ctx blk_tid first with
+          | Some _ as v -> v
+          | None -> get_local ctx blk_tid second
+        in
         match v_opt with
         | Some v -> return v
         | None ->
@@ -1133,7 +1130,7 @@ let get_func tid =
   | None ->
       let* _ = create_fun_declaration tid in
       return @@ Core.Map.find_exn !(ctx.Convutils.ll_funcs) tid
-let create_indirect_call llvm_builder blk_tid sub call fr =
+let create_indirect_call llvm_builder blk_tid call fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let target = Call.target call |> label_exp in
@@ -1148,7 +1145,7 @@ let create_indirect_call llvm_builder blk_tid sub call fr =
   let bb = get_bb ctx fallthrough in
   let rets = get_rets ctx (Tid.for_name "indirect_call") in
   let* args =
-    create_call_args blk_tid llvm_builder sub (Tid.for_name "indirect_call") fr
+    create_call_args blk_tid llvm_builder (Tid.for_name "indirect_call") fr
   in
   let ret_struct =
     Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
@@ -1165,7 +1162,7 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  let* args = create_call_args blk_tid llvm_builder sub target fr in
+  let* args = create_call_args blk_tid llvm_builder target fr in
   let rets = get_rets ctx target in
   let* fn, fn_typ = get_func target in
   (match (fp_ret_kind_of_extern ctx target, rets) with
@@ -1308,14 +1305,6 @@ let native_fp_op (name : string) : native_fp option =
   (* Halt uses the trap model. *)
   | "intrinsic:hlt" -> Some FHLT
   | _ -> None
-
-(* Tests for inlineable FP intrinsics. *)
-let is_inline_fp_intrinsic (name : string) : bool =
-  match native_fp_op name with
-  | Some FHLT -> false
-  | Some _ -> true
-  | None -> false
-
 
 (* Tests for 32-bit sources. *)
 let rec has_32bit_extract (e : exp) : bool =
@@ -1582,7 +1571,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
        KB.return ())
 
 (* Emits unmapped intrinsics as extern calls. *)
-let create_external_intrinsic_call llvm_builder blk_tid sub call name fr =
+let create_external_intrinsic_call llvm_builder blk_tid call name =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
@@ -1632,7 +1621,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
     (* Interrupt calls trap. *)
     create_interrupt llvm_builder
   else
-    match native_fp_op name with
+    match native_fp_op (Tid.name target) with
     | Some op -> create_native_fp_call llvm_builder blk_tid blk sub call op
     | None ->
         (* Unmapped intrinsics warn and degrade. *)
@@ -1640,7 +1629,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
           Hike_diag.warn
             "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
             name (Tid.name (Term.tid sub));
-          create_external_intrinsic_call llvm_builder blk_tid sub call name fr
+          create_external_intrinsic_call llvm_builder blk_tid call name
         end
         else (
         (* PLT callers pass through returns. *)
@@ -1746,7 +1735,7 @@ let create_control_flow llvm_builder blk sub fr () =
   | Ret -> create_return tid llvm_builder sub
   | CallIndirect ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
-      create_indirect_call llvm_builder (Term.tid blk) sub call fr
+      create_indirect_call llvm_builder (Term.tid blk) call fr
   | CallFun | CallFunVoid ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call llvm_builder (Term.tid blk) blk sub call fr
@@ -1989,12 +1978,6 @@ let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
 
 
 
-(* Returns the sub stack plan. *)
-let stack_plan_of (sub_info : Convutils.vsa_info option) : Convutils.split_plan =
-  match sub_info with
-  | None -> []
-  | Some info -> info.Convutils.stack_plan
-
 (* Returns the region alloca size. *)
 let region_bytes (r : Convutils.region) : int64 =
   let lo, hi = r.Convutils.span in
@@ -2034,12 +2017,17 @@ let create_sub sub =
       | Some info -> info.Convutils.offsets
       | None -> Tid.Map.empty
     in    (* Consumes the stack plan. *)
-    let plan = stack_plan_of sub_info in
+    let plan =
+      match sub_info with
+      | None -> []
+      | Some info -> info.Convutils.stack_plan
+    in
     let is_precise = plan <> [] in
     let frame, min_lo, anchor_idx, anchor_i64 =
       if is_precise then (None, 0L, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else if Core.Map.is_empty tags then begin
-          if sub_degraded sub_info then begin            let n, _, _, anchor_idx = degraded_dims ~abi sub in
+          if Base.Option.value_map sub_info ~default:false ~f:(fun info ->
+                info.Convutils.degraded) then begin            let n, _, _, anchor_idx = degraded_dims ~abi sub in
             let frame, _, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx (Int64.neg n) in
             (frame, Int64.neg n, anchor_idx, anchor_i64)
           end
