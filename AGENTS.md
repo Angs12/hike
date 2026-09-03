@@ -426,11 +426,19 @@ corpus 32/32 rc=0, check_allocas 160/0, semantic-all 30/2/0,
 semantic-opt 30/2/0 (identical — opt-induced class empty), 0 unmapped
 intrinsics. Gated `#ifdef VSA_DEBUG` regions verified byte-identical.
 
-Known pre-existing issue found (NOT caused by this change, NOT fixed):
-`dune build --profile vsa-debug` fails in unmodified
-`src/cbat_vsa/cbat_vsa_stages.ml:69` (`Gc.quick_stat ... promoted_words`
-— gone in OCaml 5.x). The debug profile needs that fix before
-forensics builds work again.
+Fixed 2026-09-03 (review #2, candidate N1): the `promoted_words` field was
+NEVER gone (verified in the OCaml 5.3 toplevel — it exists and works). The
+real mechanism: `src/cbat_vsa/dune` copied the adapter verbatim with no cppo
+step, so the trailing `#ifdef VSA_DEBUG` parsed as a method call on the
+PRECEDING expression — `(!gc0).Gc.promoted_words #ifdef …` — hence "not an
+object; has type float" pointing at line 69, three lines above the guard.
+Fix: the cppo stanza mirrored into `src/cbat_vsa/dune`'s `cbat_vsa` library
+(cppo+ppx-jane replaces `pps ppx_bap`; driver-set equivalence verified
+against every deriving clause). Verified: vsa-debug build rc=0,
+vsa_debug.exe/wbig_diag.exe build and run, default profile rc=0 with the
+report body compiled out (0 forensics-string hits), `dune runtest` green,
+corpus 32/32 rc=0 and IR byte-identical 32/32 to the pre-fix control
+emission, check_allocas 160/0, 0 unmapped intrinsics.
 
 **Last verified: 2026-09-03 EEST (morning) — MAIN @ 87c9b86 — THE TRIPLE
 MERGE: the optimizability program (mem-fission, opt gate, FP-table fix,

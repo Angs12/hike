@@ -56,8 +56,16 @@
   cbat_contextual_fixpoint
   cbat_vsa_stages)
  (libraries bap hike_abi cbat_vsa_domain bitvec core core_kernel monads hashcons)
+ ; The cppo chain (mirrors src/dune's hike library): the stages debug
+ ; adapter carries #ifdef VSA_DEBUG, and without this stanza the raw
+ ; directive reaches the parser — the trailing #ifdef then parses as a
+ ; method call on the PRECEDING expression, surfacing far from the guard
+ ; (the vsa-debug "not an object" breakage). cppo+ppx-jane replaces pps
+ ; ppx_bap here (ppx-jane is the same Jane Street driver set, verified
+ ; against every deriving clause in this library).
  (preprocess
-  (pps ppx_bap)))
+  (action
+   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))
 
 ; THE PER-STAGE PROFILING ADAPTERS (the Q6 harness).
 ;
