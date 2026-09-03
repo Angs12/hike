@@ -2576,17 +2576,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         if Core.Set.length blocks < Core.Set.length existing_set then
           Hashtbl.set block_to_head ~key:btid ~data:h));
 
-  (* Widen cycle vars per head. *)
+  (* Widen cycle vars per head; folds the single walk above, no second table. *)
   let need_map : Var.Set.t Tid.Map.t =
-    let rec collect_heads comps acc =
-      List.fold comps ~init:acc ~f:(fun acc -> function
-        | Cbat_wto.Vertex _ -> acc
-        | Cbat_wto.SCC (h, inner) ->
-            let blocks = Tid.Set.of_list (h :: Cbat_wto.flatten_comps inner) in
-            let acc = Core.Map.set acc ~key:h ~data:blocks in
-            collect_heads inner acc)
-    in
-    let head_to_blocks = collect_heads wto Tid.Map.empty in
     let compute_need (blocks : Tid.Set.t) : Var.Set.t =
       let defs =
         Core.Set.to_list blocks
@@ -2650,7 +2641,9 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         !need
       end
     in
-    Core.Map.mapi head_to_blocks ~f:(fun ~key:_ ~data:blocks -> compute_need blocks)
+    Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
+      ~f:(fun ~key:h ~data:blocks acc ->
+        Core.Map.set acc ~key:h ~data:(compute_need blocks))
   in
   
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
