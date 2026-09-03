@@ -1,47 +1,14 @@
 #!/usr/bin/env bash
-# Phase 5 (validation) structural assertion for the heritage port
-# (H-R1 final state, post model deletion).
-#
-# NO-LEGACY design (the user's directive: "there should not be any legacy
-# paths"): the single-global-stack scheme is gone.  Qualifying subs emit
-# per-range stack_rN allocas (G4 region-split); most subs remain %frame-only
-# by the full-coverage soundness gate.  The @stack global no longer exists.
-# For every emitted .ll module assert:
-#
-#   (a) the module has >= 1 `stack_rN` alloca whenever it references the
-#       per-range scheme at all.  This used to be keyed on the
-#       "heritage ok <fn>" function list in stderr; the model that
-#       produced that list was deleted, so the check is now per-module:
-#       any %stack_rN reference (GEP base, ptrtoint base, ...) implies
-#       >= 1 `alloca [`.  A module with zero stack traffic trivially
-#       passes.
-#   (b) no `getelementptr` that indexes into a `stack_rN` alloca has an
-#       SP-DERIVED index (the dataflow ban, R12/G4 Stage 3a): an index
-#       that derives from an sp root (the entry anchor or the
-#       hike_stack param) is a region-routing bug.  Array regions
-#       legitimately use dynamic GEPs (loop counters), so the old
-#       constant-index ban was replaced by this dataflow ban;
-#   (c) the module contains NO reference to the @stack global AT ALL (the
-#       legacy path is gone — hike.ml's create_stack_ptr was removed);
-#   (d) every memory-touching `define` emits exactly ONE STACK-FRAME
-#       alloca of the emitted shape `%frame = alloca [N x i8],
-#       align 16` (the per-sub model frame — the sound fallback;
-#       convertible regions ADDITIONALLY emit stack_rN allocas).
-#       Defines containing no alloca/load/store are exempt (provably
-#       stack-free).  A mismatch means the emitter changed shape
-#       underneath this script.
-#   (e) NO ENTRY-EDGE POISON PHIS — a phi incoming [ poison, %entry ]
-#       is UB that folds into live results under opt (the 2026-09-01
-#       optimizability review).  Must be 0 in every module.
-#   INFO (non-failing): per-module count of INTTOPTR-DERIVED LOADS —
-#       loads whose pointer operand is an `inttoptr ... to ptr` result
-#       (the model-frame RSP-arithmetic access path).  Visibility only;
-#       becomes actionable when the G4 emitter converts accesses to
-#       stack_rN GEPs.
-#
-# Usage: check_allocas.sh <out_dir>
-#   out_dir contains out_<name>.ll from a corpus run (see run_corpus.sh).
-#   Exit 0 if every module passes, 1 otherwise.
+# Structural asserts over emitted .ll modules.
+# Usage: check_allocas.sh <out_dir> (holds out_<name>.ll; exit 0 iff all pass).
+#   (a) any %stack_rN reference implies >= 1 stack_rN alloca.
+#   (b) no GEP into a stack_rN alloca takes an sp-derived index
+#       (dynamic loop-counter indexes are fine).
+#   (c) no @stack global reference.
+#   (d) each memory-touching define has exactly one frame alloca shape
+#       (precise = stack_r-only, degraded = frame-only; stack-free exempt).
+#   (e) no entry-edge poison phis.
+# INFO: per-module inttoptr-derived load count (visibility only).
 
 set -u
 
@@ -52,9 +19,7 @@ PASS=0
 for ll in "$OUT_DIR"/out_*.ll; do
   name="$(basename "$ll" .ll)"
 
-  # (a) per-module stack_rN alloca presence (the heritage-ok function
-  #     list that used to key this check died with the model).  Any
-  #     %stack_rN reference implies >= 1 `alloca [`.
+  # (a) any %stack_rN reference implies >= 1 `alloca [`.
   n_refs="$(grep -c '%stack_r[0-9]' "$ll")"
   n_allocas="$(grep -c 'alloca \[' "$ll")"
   if [ "$n_refs" -gt 0 ] && [ "$n_allocas" -lt 1 ]; then
@@ -65,25 +30,15 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (b) no stack_rN GEP uses an sp-derived index (R12/G4 Stage 3a).
-  #     Array regions legitimately use DYNAMIC GEPs (e.g. %idx*scale), so
-  #     the old “constant index’’ ban is replaced by a dataflow ban: an
-  #     index that derives from an sp root (the entry anchor or the
-  #     hike_stack param) is a region-routing bug (the frame-relative
-  #     offset was not materialized as a constant nor a clean index).
-  #     Legitimate dynamic indexes (loop counters) are NOT sp-derived and
-  #     pass.  When no stack_r GEP exists the check is vacuously PASS.
-  #     KNOWN BLIND SPOT (Rider 2a): CHAIN propagates through add/mul/phi
-  #     but NOT through general sub-shaped dataflow (only the anchor-
-  #     cancellation carve-out `sub %addr,%anchor_i64` is recognized); a
-  #     sp-derived value reaching a stack_rN index via any other sub shape
-  #     evades this tripwire — the emission-side full-coverage gate +
-  #     coherence audit remain the primary guarantees.
+  # (b) no stack_rN GEP takes an sp-derived index.
+  #     Dynamic loop-counter indexes pass; sp roots are the entry
+  #     anchor and the hike_stack param.
+  #     Blind spot: CHAIN skips non-anchor sub shapes, so other
+  #     sub-routed sp values evade this tripwire.
   bad="$(awk '
     function chain(v) { return index(" " CHAIN " ", " " v " ") > 0 }
     function add(v)  { if (v != "" && !chain(v)) CHAIN = CHAIN " " v }
-    # roots: the sp-derived integer values — the entry anchor
-    # (ptrtoint of %frame) and the hike_stack param (the caller frame)
+    # sp roots: entry anchor (ptrtoint of %frame) and hike_stack param.
     /ptrtoint.*to i64/ {
       if (match($0, /%[A-Za-z0-9_.]+ = ptrtoint/)) {
         if (match($0, /^  %[^ ]+ = ptrtoint/)) { v = substr($0, 3, index(substr($0,3), " ")-1); add(v) }
@@ -98,16 +53,11 @@ for ll in "$OUT_DIR"/out_*.ll; do
         if (match($0, /^  %[0-9]+ = phi/)) { lhs = substr($0, 3, index(substr($0,3), " ")-1); add(lhs) }
       }
     }
-    # propagate through integer arithmetic: %L = OP i64 %R, ...  (and 2-arg forms)
-    # EXCEPTION: the region-offset pattern `sub i64 %addr, %anchor_i64`
-    # (and its `add` with the negated region_lo) computes the
-    # frame-relative offset; the result is NOT sp-derived (the anchor
-    # cancels the sp part, leaving the clean index).  Skip adding that
-    # LHS to CHAIN so legitimate dynamic array GEPs (idx*scale) are not
-    # flagged.  Any other arithmetic with a chain operand IS sp-derived.
+    # Arithmetic propagation, except the anchor-sub offset pattern
+    # (`sub %addr, %anchor_i64` yields a clean index, not sp-derived).
     /^  %[^ ]+ = (sub|add|mul|and|or|xor|shl|lshr|ashr) i64 %/ {
       if (match($0, /^  %[^ ]+/)) { lhs = substr($0, 3, index(substr($0,3), " ")-1) }
-      # anchor-sub cancellation: sub with %anchor_i64 is the offset, not sp-derived
+      # anchor-sub cancellation: the result is the offset, not sp-derived
       if (match($0, /sub i64/) && index($0, "%anchor_i64") > 0) { next }
       # find any %var after i64
       n = split($0, parts, "i64 ")
@@ -118,11 +68,11 @@ for ll in "$OUT_DIR"/out_*.ll; do
         }
       }
     }
-    # propagate through phi merges that mention a chain value
+    # phi merges mentioning a chain value propagate too
     /phi i64/ {
       if (match($0, /^  %[^ ]+ = phi/)) {
         lhs = substr($0, 3, index(substr($0,3), " ")-1)
-        # simple: if line contains a chain token, mark lhs
+        # mark lhs when the line holds a chain token
         tmp = $0
         while (match(tmp, /%[A-Za-z0-9_.]+/)) {
           tok = substr(tmp, RSTART, RLENGTH)
@@ -133,12 +83,10 @@ for ll in "$OUT_DIR"/out_*.ll; do
     }
     # violation: GEP into stack_r with a chain index
     /getelementptr.*%stack_r[0-9]+/ {
-      # extract the index operand: last i64 %X or i64 const
-      # pattern: getelementptr i8, ptr %stack_rN, i64 %X  or i64 123
+      # index operand follows "i64": const or %var
       line = $0
-      # remove up to stack_r (target/regex order matters: sub(regex, "", target))
+      # strip through the stack_r base (sub takes regex first)
       sub(/.*%stack_r[0-9]+, /, "", line)
-      # now line starts with "i64 %X" or "i64 123"
       if (match(line, /i64 %[A-Za-z0-9_.]+/)) {
         idx = substr(line, RSTART+4, RLENGTH-4)
         if (chain(idx)) print "sp-derived GEP index into stack_r: " idx " in: " $0
@@ -154,7 +102,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (c) NO @stack global reference AT ALL (no-legacy design).
+  # (c) no @stack global reference.
   n_stack="$(grep -c '@stack' "$ll")"
   if [ "$n_stack" -ne 0 ]; then
     echo "FAIL $name: (c) module references the legacy @stack global $n_stack time(s)"
@@ -164,12 +112,8 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (d) PER-FUNCTION stack-frame alloca (R12/G4 Stage 3b) — FULL ERASURE.
-  #     Precise subs (those with `stack_rN` allocas, per the vsa_info stack_plan
-  #     the VSA pass computed) must have ZERO `%frame` (frame-erased, per ADR 0001);
-  #     degraded subs must have exactly ONE `%frame = alloca [N x i8], align 16`.
-  #     A `define` with `stack_rN` is precise, one without is degraded.
-  #     Stack-free defines (no alloca/load/store) are exempt.
+  # (d) per-function frame shape: stack_r-only when precise,
+  #     frame-only when degraded; stack-free defines exempt.
   n_bad="$(awk '
     BEGIN { in_define=0; has_stack_r=0; has_frame=0; has_mem=0; bad=0 }
     /^define / {
@@ -209,16 +153,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (e) NO ENTRY-EDGE POISON PHIS: a phi incoming [ poison, %entry ]
-  #     is UB that folds into live results under instcombine (the
-  #     2026-09-01 optimizability review: 689 corpus-wide made
-  #     opt -O2 silently miscompile 6 binaries).  The definedness
-  #     closure in the emitter's transfer-set computation keeps them
-  #     extinct: never-defined vars get no phi lane at all; vars
-  #     defined later get [ undef, %entry ] (caller register state —
-  #     an unspecified value, NOT poison).  Deliberate poison on
-  #     VSA-dead (unreachable) paths is a different emission site and
-  #     may still appear — the assert keys the ENTRY-EDGE form only.
+  # (e) no entry-edge poison phis (UB that folds under opt).
   n_poison_entry="$(grep -c 'phi .*\[ poison, %entry' "$ll")"
   if [ "$n_poison_entry" -gt 0 ]; then
     echo "FAIL $name: (e) $n_poison_entry entry-edge poison phi(s) — UB folds under opt"
@@ -228,9 +163,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # INFO (non-failing): the per-module count of inttoptr-derived loads —
-  # loads whose pointer operand is an `inttoptr i64 %X to ptr` result
-  # (the model-frame RSP-arithmetic access path).  Pure visibility.
+  # INFO (non-failing): per-module inttoptr-derived load count.
   n_itop_loads="$(awk '
     /^  %[0-9]+ = inttoptr / {
       line = $0; sub(/^  /, "", line); split(line, a, " "); defs[a[1]] = 1

@@ -1,10 +1,5 @@
-(* subtimes — the per-sub cost-distribution driver (profiling, 2026-09-01:
-   the performance architecture pass). For EVERY sub of the project, run the
-   PRODUCTION per-sub path [Hike.Vsa.offsets_of_sub] (the exact function the
-   hike-vsa pass calls per sub) and print name / block count / def count /
-   wall time, sorted by time with the cumulative share. Usage:
-
-     dune exec zz_scratch_probe/subtimes.exe -- <binary> *)
+(* Per-sub cost distribution over the production per-sub path, slowest first.
+   Usage: subtimes.exe <binary> *)
 
 open Bap.Std
 open Probe_common
@@ -60,7 +55,7 @@ let () =
           dt (100.0 *. dt /. total) nblk ndefs ntags name;
         if i mod 20 = 0 then flush stdout)
       rows;
-    (* concentration: share of the slowest decile *)
+    (* Share of the slowest decile. *)
     let n = List.length rows in
     let head = ref 0.0 in
     List.iteri

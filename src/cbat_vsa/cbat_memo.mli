@@ -11,11 +11,7 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* The VERSION-KEYED MEMO interface (architecture review #2).  The
-   change-driven-cache discipline — stamp / validity / stale-overwrite
-   — has ONE owner; the walk memo and the transfer memo are
-   instantiations.  See [cbat_memo.ml]'s header for the discipline's
-   soundness argument (the ticket-03 version-oracle validity). *)
+(* Version-keyed memo; entries carry a stamped read-set. *)
 
 open Core_kernel
 open Bap.Std
@@ -27,8 +23,7 @@ end
 module Make (V : Value) : sig
   type value = V.t
 
-  (* ONE entry: the stamped read-set (internal to the discipline) +
-     the memoized value. *)
+  (* Stamped read-set plus value. *)
   type entry = {
     e_reads : (Tid.t * int) list;
     e_value : value;
@@ -38,22 +33,17 @@ module Make (V : Value) : sig
 
   val empty : t
 
-  (* The entry is reusable: every recorded (block, version) still
-     matches — no block the computation read has changed state.
-     [version] is the run context's oracle ([ver_of], partially
-     applied) — threaded per call, never captured, so the memo stays
-     pure and the context stays the single owner of state. *)
+  (* True when no recorded block changed state. *)
   val valid : version:(Tid.t -> int) -> entry -> bool
 
-  (* The version-stamped read-set of the computation that just
-     finished. *)
+  (* Stamp a finished computation's read-set. *)
   val stamp : version:(Tid.t -> int) -> Tid.Set.t -> (Tid.t * int) list
 
-  (* The memoized value iff the entry exists and is still valid. *)
+  (* Value of a live entry, if any. *)
   val find :
     version:(Tid.t -> int) -> t -> Tid.t -> Tid.t -> value option
 
-  (* Record the value with its read-set (stamped here). *)
+  (* Record a value with its read-set. *)
   val add :
     version:(Tid.t -> int) ->
     t -> Tid.t -> Tid.t -> reads:Tid.Set.t -> value -> t

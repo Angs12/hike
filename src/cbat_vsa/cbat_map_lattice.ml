@@ -19,7 +19,7 @@ module Fn = Core_kernel.Fn
 module Value = Bap.Std.Value
 module Lattice = Cbat_lattice_intf
 
-(* An (indexed) Map lattice represents the lifting of an (indexed) complete lattice to a finite map onto elements of that (indexed) lattice. It includes the ability to map "the rest" of the elements to either top or bottom in the underlying (indexed) complete lattice. *)
+(* Finite map onto a lattice; unmapped keys read the default. *)
 
 module type S_indexed = sig
 
@@ -31,14 +31,14 @@ module type S_indexed = sig
 
   include Lattice.S_indexed with type t := t and type idx := idx
 
-  (* replaces the value at the given key with the meet of it and the new input value. *)
+  (* Meet the new value into the key. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the join of it and the new input value. *)
+  (* Join the new value into the key. *)
   val join_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the new input value. *)
+  (* Overwrite the key. *)
   val add : t -> key:Key.t -> data:Val.t -> t
 
-  (* retrieves the value mapped to by the map. Note that this always gets a value since there is a default (either top or bottom). *)
+  (* Read a key; unmapped keys read the default. *)
   val find : Val.idx -> t -> Key.t -> Val.t
 
 end
@@ -51,17 +51,17 @@ module type S = sig
 
   include Lattice.S with type t := t
 
-  (* replaces the value at the given key with the meet of it and the new input value. *)
+  (* Meet the new value into the key. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the join of it and the new input value. *)
+  (* Join the new value into the key. *)
   val join_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the new input value. *)
+  (* Overwrite the key. *)
   val add : t -> key:Key.t -> data:Val.t -> t
 
-  (* retrieves the value mapped to by the map. Note that this always gets a value since there is a default (either top or bottom). *)
+  (* Read a key; unmapped keys read the default. *)
   val find : Val.idx -> t -> Key.t -> Val.t
 
-  (* folds over the explicitly-stored (non-default) bindings. *)
+  (* Fold stored bindings. *)
   val fold : t -> init:'a -> f:(key:Key.t -> data:Val.t -> 'a -> 'a) -> 'a
 end
 
@@ -79,7 +79,7 @@ module type S_val = sig
   include Value.S with type t := t
 end
 
-(* This functor is additionally parameterized by the map used so that Make_indexed_val (and potentially future functors) can use maps with additional functionality. *)
+(* Parameterized by the map implementation. *)
 module Make_indexed_from_map
     (K : Map.Key)
     (M : Map.S with type Key.t = K.t)
@@ -108,7 +108,7 @@ module Make_indexed_from_map
     | None, None -> None
 
   let meet' (m1 : map) (m2 : map) : map =
-    (* in cases where only one side has a value, we meet it with the otherwise of the other *)
+    (* One-sided keys meet the other side's default. *)
     let mFunc ~key:_ vs = match vs with
       | `Left v1 -> Some v1
       | `Right v2 -> Some v2
@@ -119,7 +119,7 @@ module Make_indexed_from_map
   let meet : t -> t -> t = lift_meet meet'
 
   let join' ljoin (m1 : map) (m2 : map) : map =
-    (* D1: sparse maps — fold over the smaller side intersection is cheaper than Map.merge which allocates for every key. *)
+    (* Fold the smaller side. *)
     if Map.length m1 < Map.length m2 then
       Map.fold m1 ~init:M.empty ~f:(fun ~key ~data acc ->
         match Map.find m2 key with
@@ -133,9 +133,7 @@ module Make_indexed_from_map
 
   let join : t -> t -> t = lift_join (join' L.join)
   let widen_join = lift_join (join' L.widen_join)
-  (* hike addition: widening with a caller-supplied per-key operator (the
-     per-head landmark extrapolation rides through this; the thresholded
-     widen is gone). *)
+  (* Widening with a caller-supplied per-key operator. *)
 
   let op_add op (m : map) ~key:key ~data:data : t =
     let idx = L.get_idx data in
@@ -157,16 +155,16 @@ module Make_indexed_from_map
     Option.value_map t ~default:(L.bottom idx)
       ~f:(fun m -> find' idx m k)
 
-  (* P2d-1b (lane A) — enumerate the explicitly-stored (non-default) bindings. *)
+  (* Enumerate stored bindings. *)
   let fold (t : t) ~init ~f =
     Option.value_map t ~default:init ~f:(fun m ->
       Map.fold m ~init ~f:(fun ~key ~data acc -> f ~key ~data acc))
 
-  (* canonize removed: add/join already never store top (Map.filter on top is identity) *)
+  (* No stored tops. *)
   let canonize' (m : map) : map = m
   let canonize : t -> t = Fn.id
 
-  (* [fold2_both branch m1 m2]: the both-sided [Map.fold2] scaffold shared by [precedes'] and [equal'] — each merged binding decides by [branch], conjunction over all bindings. *)
+  (* Shared fold for [precedes'] and [equal']. *)
   let fold2_both
       (branch : [ `Left of L.t | `Right of L.t | `Both of L.t * L.t ] -> bool)
       (m1 : map) (m2 : map) : bool =
@@ -175,7 +173,7 @@ module Make_indexed_from_map
   let precedes' (m1 : map) (m2 : map) : bool =
     fold2_both (function
         | `Both (a, b) -> L.precedes a b
-        | `Left _ -> true (* precedes top *)
+        | `Left _ -> true (* missing key reads top *)
         | `Right b -> L.equal b (L.top (L.get_idx b)))
       m1 m2
 

@@ -22,7 +22,7 @@ module FinSet = Cbat_fin_set
 type clp = Clp.t
 type fset = FinSet.t
 
-(* INVARIANT: Clps have cardinality > Utils.fin_set_size INVARIANT: FinSets have cardinality <= Utils.fin_set_size *)
+(* Large sets are Clps; small ones FinSets. *)
 type t = Clp of Clp.t | FinSet of FinSet.t [@@deriving bin_io, sexp, compare]
 type idx = int
 
@@ -51,7 +51,7 @@ let as_clp = function
   | Clp p -> p
   | FinSet s -> clp_of_finset s
 
-(* TODO: rename to canonize? *)
+
 let bound_set_size = function
   | Clp p -> if Word_ops.gt_int (Clp.cardinality p) Utils.fin_set_size
     then Clp p
@@ -101,9 +101,9 @@ let overlap t1 t2 : bool = match t1, t2 with
   | FinSet s, Clp p -> FinSet.overlap_generic (module Clp) s p
 
 let union = lift_binop Clp.union FinSet.union
-(* The definition below is more precise than 'lift_binop Clp.intersection FinSet.intersection' *)
+(* Precise meet across representations. *)
 let intersection (t1 : t) (t2 : t) : t =
-  (* A width-mismatched meet is an index error — return the wider (larger-bitwidth, hence less-precise) operand instead of asserting: a sound over-approximation of the (empty) intersection, never bottom on a live path (see cbat_fin_set.elem). *)
+  (* Width mismatch returns the wider operand. *)
   if bitwidth t1 <> bitwidth t2 then
     (if bitwidth t1 > bitwidth t2 then t1 else t2)
   else match t1, t2 with
@@ -112,7 +112,7 @@ let intersection (t1 : t) (t2 : t) : t =
   | Clp p, FinSet s
   | FinSet s, Clp p -> FinSet (FinSet.intersect_generic (module Clp) s p)
 
-(* [clp_diff_finset p s]: The CLP minus the finite set's elements — the contiguous-arc removal: the elements of [s] that lie in [p], when they form a contiguous arc of [p]'s circular progression (the circular consecutive pairs — EXACTLY ONE pair. *)
+(* CLP minus finite elements; exact for one contiguous arc. *)
 let clp_diff_finset (p : clp) (s : fset) : clp =
   if Clp.bitwidth p <> FinSet.bitwidth s then p
   else if Clp.is_bottom p then p
@@ -129,12 +129,12 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
       let c1 = Clp.cardinality p in
       if Word.(>=) cnt c1 then Clp.bottom width
       else begin
-        (* The STRICT successor of [e] in [p]'s circular order — the CLP's [nearest_succ] returns [e] itself when [e] ∈ [p] (the closest-≥ semantics), so the adjacency steps one past: the lnot-side predecessor of (lnot e − 1). *)
+        (* Strict successor in [p]'s circular order. *)
         let strict_succ (e : word) : word option =
           match Clp.nearest_pred (Word.pred (Word.lnot e)) (Clp.lnot p) with
           | Some w -> Some (Word.lnot w)
           | None -> None in
-        (* the circular consecutive pairs: the linear pairs plus the wrap pair (last, first); the singleton's pair is (x, x) *)
+        (* Consecutive pairs including the wrap pair. *)
         let pairs =
           match es with
           | [] -> []
@@ -152,13 +152,13 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
           List.partition_tf ~f:(fun pr -> not (adj pr)) pairs in
         match non_adj, adj_pairs with
         | [ (arc_end, arc_start) ], (e1', e2') :: _ ->
-          (* one gap pair: the arc from [arc_start] around to [arc_end]; the step = the first adjacent pair's difference *)
+          (* One gap: remainder is one CLP. *)
           let step = Word.sub e2' e1' in
           let cardn = Word.sub c1 cnt in
           if Clp.is_infinite p then
             Clp.create (Word.add arc_end step) ~step ~cardn
           else if Word.(>) arc_start arc_end then
-            (* the wrapping arc (crosses the seam): the remainder [arc_end+step, arc_start−step] — one interval *)
+            (* Wrapping remainder is one interval. *)
             Clp.create (Word.add arc_end step) ~step ~cardn
           else
             (match Clp.min_elem p, Clp.max_elem p with
@@ -170,7 +170,7 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
                else p
              | _ -> p)
         | [ (arc_end, arc_start) ], [] ->
-          (* the singleton run (n = 1): the step = the strict successor distance — the successor exists (c1 > n ≥ 1); the removal is one CLP when the element touches the arc's start/end or [p] is the full circle *)
+          (* Singleton run. *)
           (match strict_succ arc_end with
            | Some nxt ->
              let step = Word.sub nxt arc_end in
@@ -188,11 +188,11 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
                 | _ -> p)
            | None -> p)
         | _ ->
-          (* 0 gaps (the full circle — impossible here: n < c1) or 2+ gaps (not one arc): the identity — the sound over-approximation *)
+          (* Otherwise the identity. *)
           p
       end
 
-(* [diff]: The set difference — the FinSet cases exact; the Clp\Clp case via [Clp.diff] (the contiguous-run removal, else the identity); the mixed cases are NOT the [lift_binop] shape: the Clp\FinSet case removes only the FINITE. *)
+(* Set difference; inexact cases return the identity. *)
 let diff (t1 : t) (t2 : t) : t = match t1, t2 with
   | Clp p1, Clp p2 -> bound_set_size (Clp (Clp.diff p1 p2))
   | FinSet s1, FinSet s2 -> FinSet (FinSet.diff s1 s2)
@@ -227,7 +227,7 @@ let is_top = lift_consume Clp.is_top (fun _ -> false)
 let is_bottom = lift_consume (fun _ -> false) (Fn.compose Word.is_zero FinSet.cardinality)
 let is_infinite = lift_consume Clp.is_infinite (fun _ -> false)
 
-(* Lattice implementation *)
+(* Lattice. *)
 let precedes t1 t2 : bool = match t1, t2 with
   | Clp p1, Clp p2 -> Clp.precedes p1 p2
   | FinSet s1, FinSet s2 -> FinSet.precedes s1 s2
@@ -245,7 +245,7 @@ let meet = intersection
 let bottom i = FinSet (FinSet.bottom i)
 let top i = bound_set_size @@ Clp (Clp.top i)
 
-(* D7, ora-6 — degenerate cast/extract guard. *)
+(* Degenerate cast keeps top. *)
 let extract ?hi ?lo t =
   let lo_v = Option.value ~default:0 lo in
   if (match hi with Some h -> h < lo_v | None -> false)

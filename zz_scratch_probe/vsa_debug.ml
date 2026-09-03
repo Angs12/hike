@@ -1,22 +1,10 @@
-(* vsa_debug - the fixture/micro diagnostics + live-state inspection driver.
-   Recreated 2026-08-31 (Item 1 of the architecture program); vsa-debug
-   profile only. The BULK of the deep protocol debugging lives in the
-   test_cbat suite; this driver is the interactive complement: a fixture
-   runner (for loop-shaped micro-fixtures, no binary needed) and a binary
-   live-map tracer, both printing the per-block entry states and the
-   diverging (address, wordset) of the two running modes.
-
-   Usage (fixture mode): vsa_debug.exe d4
-   Usage (binary mode):  vsa_debug.exe <binary> [subname]
-
-   The d4 fixture is the classic counter loop (matches test_cbat.ml's
-   d4/d4_loop): [i] is threaded (i:=0, then i:=i+1) around a two-jump
-   header (exit-if-i<5, else body). *)
+(* Fixture runner (d4 counter loop) plus binary live-map tracer; vsa-debug only.
+   Usage: vsa_debug.exe d4 | vsa_debug.exe <binary> [subname] *)
 
 open Bap.Std
 open Probe_common
 
-(* --- the d4 counter-loop fixture builder (cf. test_cbat.ml's d4_loop) --- *)
+(* d4 counter-loop fixture: i:=0, then i:=i+1 around a two-jump header. *)
 let w32 n = Word.of_int ~width:32 n
 
 let fixture_d4 () : sub term =

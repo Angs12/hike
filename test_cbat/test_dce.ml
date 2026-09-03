@@ -1,32 +1,24 @@
-(* test_dce: the DCE pass pins D0-D5 through the Hike.Dce seam (extends C1's KB map — runs last). *)
+(* DCE pass pins D0-D5 through the Hike.Dce seam. *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
 
-(* --------------------------------------------------------------------- *)
-(* Dce — the DCE lane through its own interface ([Hike.Dce.dce], the      *)
-(* one-function seam hike_dce.mli installs). All fixtures run on          *)
-(* [Theory.Target.unknown], pinning the TOTAL ABI lane (the pre-4 pass    *)
-(* raised [Abi.sp: stack pointer not found] on this target — that is why  *)
-(* the pass had zero tests).                                              *)
-(* --------------------------------------------------------------------- *)
+(* Fixtures run on [Theory.Target.unknown], pinning the total ABI lane. *)
 
-(* [dce_defs sub']: the swept sub's defs, one list per block flattened. *)
+(* Swept sub's defs, one list per block flattened. *)
 let dce_defs (sub : sub term) : def term list =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(Term.enum def_t)
   |> Seq.to_list
 
-(* [dce_jmps sub']: the swept sub's jmps. *)
+(* Swept sub's jmps. *)
 let dce_jmps (sub : sub term) : jmp term list =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(Term.enum jmp_t)
   |> Seq.to_list
 
 let run () =
-(  (* D0: totality + the basic sweep — [dce] never raises on
-     [Theory.Target.unknown] (the x86_64 SysV-record fallback), and an
-     ordinary never-used def dies while a jmp-read def survives. *)
+(  (* D0: totality + basic sweep — unused def dies, jmp-read def survives. *)
   let a = v64 "d0_a" in
   let b = v64 "d0_b" in
   let dead = v64 "d0_dead" in
@@ -49,12 +41,8 @@ let run () =
     && not (Base.List.exists defs ~f:(fun d -> Var.equal (Def.lhs d) dead)));
   ())
 ;
-(  (* D1: the RETURN-EPILOGUE rewrite ([ret_replacement]) — an INDIRECT
-     call with NO return (the lifted `call #t with noreturn` idiom)
-     becomes the var-free [Unknown] target, so the popped-address def
-     dies with it. The NEGATIVE controls pin the discrimination: an
-     indirect call WITH a return (a real computed callee) and a DIRECT
-     call are left untouched. *)
+(  (* D1: return-epilogue rewrite — indirect noreturn call becomes var-free [Unknown].
+     Indirect with return and direct calls stay untouched. *)
   let t = v64 "d1_t" in
   let t2 = v64 "d1_t2" in
   let m = memv "d1_m" in
@@ -107,11 +95,7 @@ let run () =
     (List.length jmps = 3 && epilogue_rewritten && others_untouched && t_gone);
   ())
 ;
-(  (* D2: the ALWAYS-KEEPS — the return-register def (RAX), a
-     param-register def (RDI), a memory write (the lifter's mem), and an
-     FP-intrinsic interface var all survive the sweep even when nothing
-     in the sub reads them (calls read them IMPLICITLY — the sub-local
-     used-set cannot see the callee's reads). *)
+(  (* D2: always-keeps — return/param regs, memory writes, intrinsic vars survive unread. *)
   let rax = v64 "RAX" in
   let rdi = v64 "RDI" in
   let m = memv "d2_m" in
@@ -137,13 +121,7 @@ let run () =
     && Base.List.mem lhs_set ~equal:String.equal "intrinsic:x0");
   ())
 ;
-(  (* D3: the TWO-TIER region-mem rule (mem-fission) — a fissioned
-     [stack_rN_mem] var's defs survive iff some LOAD reads the var: (a)
-     a never-loaded store chain (the retaddr-push class) dies TOGETHER
-     (a Store's mem-operand use is write-position, never a load-root);
-     (b) the same chain with ONE load survives.  The vars are built with
-     the PUBLIC producers ([Stack_to_locals.region_mem] /
-     [region_base]) — the same convention the rewrite mints. *)
+(  (* D3: two-tier region-mem rule — a fissioned store chain dies iff no Load roots it. *)
   let sm = Hike.Stack_model.region_mem 0 in
   let base = Hike.Stack_model.region_base 0 in
   let mk_store off dat =
@@ -164,8 +142,7 @@ let run () =
   let sub_a = Sub.Builder.result sb_a in
   let sub_a' = Hike.Dce.dce ~target:Theory.Target.unknown sub_a in
   let dead_count = List.length (dce_defs sub_a') in
-  (* (b) loaded, and the load's RESULT is read (a jmp cond) — the whole
-     chain survives: the load roots the region var, the stores keep *)
+  (* (b) loaded with result read: the whole chain survives. *)
   let t = v64 "d3_t" in
   let bb_b = Blk.Builder.create () in
   Blk.Builder.add_def bb_b (mk_store 8 42);
@@ -189,11 +166,7 @@ let run () =
     (dead_count = 0 && live_count = 3);
   ())
 ;
-(  (* D4: SP-ERASURE on the precise path — a sub whose [vsa_info] carries
-     a non-empty [stack_plan] (the split model; [is_precise]) has its
-     SP defs, its [hike_stack] def, and its sp-VALUE defs erased
-     unconditionally (the emitter threads its own SP on that path); the
-     CONTROL sub (no KB entry — not precise) keeps them. *)
+(  (* D4: SP-erasure on the precise path; the control sub keeps everything. *)
   let sp_ = v64 "RSP" in
   let hstk = v64 "hike_stack" in
   let tmp = v64 "d4_tmp" in
@@ -201,11 +174,9 @@ let run () =
   let m = memv "d4_m" in
   let rsp_def = Def.create sp_ (Bil.BinOp (Bil.MINUS, Bil.Var sp_, Bil.Int (w64 16))) in
   let hstk_def = Def.create hstk (Bil.Var sp_) in
-  (* the sp-VALUE def (a temp computed FROM sp — erased on the precise
-     path; kept on the control only if something reads it) *)
+  (* Sp-value def: erased on the precise path. *)
   let tmp_def = Def.create tmp (Bil.BinOp (Bil.PLUS, Bil.Var sp_, Bil.Int (w64 8))) in
-  (* the callee's incoming-arg read at [hike_stack + 16] — the PRODUCTION
-     shape that keeps the hike_stack lane alive on the non-precise path *)
+  (* Incoming-arg read at [hike_stack + 16]: the production shape. *)
   let arg_def =
     Def.create arg_read
       (Bil.Load
@@ -229,8 +200,7 @@ let run () =
   in
   let precise_sub = mk_sub "d4_precise" in
   let ctl_sub = mk_sub "d4_ctl" in
-  (* provide the split-model plan for the precise sub ONLY (a KB map
-     EXTENSION — the join domain; the control sub stays absent) *)
+  (* Split-model plan for the precise sub only; the control stays absent. *)
   let region =
     {
       Hike.Convutils.id = 0;
@@ -253,18 +223,12 @@ let run () =
   in
   let pn = names precise' in
   let cn = names ctl' in
-  (* precise: RSP, hike_stack and the sp-value def are erased
-     UNCONDITIONALLY (RSP would otherwise survive self-sustained through
-     the hike_stack def's rhs — the unconditional lane is the point);
-     the ordinary chain [arg_read <- mem[hike_stack+16] <- jmp cond]
-     survives.  control: the whole lane stays. *)
+  (* Precise: SP/hike_stack/sp-value erased; control: the whole lane stays. *)
   check "D4: on the precise path (split stack_plan) SP/hike_stack/sp-value defs are erased; the control keeps them"
     (pn = [ "d4_arg_read" ] && cn = [ "RSP"; "hike_stack"; "d4_arg_read" ]);
   ())
 ;
-(  (* D5: the INTRINSIC passthrough — a sub carrying the [Sub.intrinsic]
-     attribute (the mapped FP-intrinsic stubs) passes through UNTOUCHED,
-     dead defs and all. *)
+(  (* D5: intrinsic passthrough — [Sub.intrinsic] subs pass through untouched. *)
   let x = v64 "d5_dead" in
   let bb = Blk.Builder.create () in
   Blk.Builder.add_def bb (Def.create x (Bil.Int (w64 9)));

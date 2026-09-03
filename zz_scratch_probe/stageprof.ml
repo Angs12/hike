@@ -1,17 +1,4 @@
-(* stageprof — the per-stage fixpoint breakdown (the Q6 harness).
-
-   WHY: the fixpoint's per-visit cost is (denotation + join + equal + widen)
-   plus the deep walk, and nothing in the tree could previously attribute
-   time between them — which is how three separate changes this session got
-   reported as "wins" while sitting inside measurement noise. The bar we
-   agreed: a change is a perf win only if a NAMED stage moves, measured as
-   the median of N interleaved rounds.
-
-   The counters only exist in the vsa-debug profile (the production build
-   links a no-op adapter), so this probe MUST run with:
-
-     dune exec --profile vsa-debug zz_scratch_probe/stageprof.exe -- <bin>
-
+(* Per-stage fixpoint cost breakdown; vsa-debug profile only.
    Usage: stageprof.exe <binary> [subname ...] *)
 
 open Bap.Std

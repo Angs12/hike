@@ -11,33 +11,7 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* The BOURDONCLE WEAK TOPOLOGICAL ORDERING — one module (architecture
-   review 2026-09-02, candidate #5).
-
-   Extracted verbatim from its former inline home in [cbat_vsa.ml]
-   (110 lines behind a "avoid separate-file merlin config" rationale —
-   the review's shallow-module finding), now DIRECTLY TESTED (the
-   engine consumed it untested for its whole life) and
-   ACCESSOR-POLYMORPHIC:
-
-   - [wto ~nodes ~succ ~pred] builds the ordering over PLAIN FUNCTIONS
-     (node lists), with NO BAP graph type in the interface.  The
-     engine's cfg adapter ([Cbat_wto.wto_of_cfg] in [cbat_vsa.ml]) is a
-     three-line wrapper passing Graphs accessors.
-
-   - THE REVERSED TWIN IS A CALL-SHAPE: the backward dataflow (the L2
-     walk schedule — [refine_edge]'s reversed CFG) passes
-     [~succ:preds ~pred:succs] and gets the REVERSED w.t.o. with zero
-     new code.  This is the card's whole point: the next consumer
-     composes instead of copying.
-
-   THE ALGORITHM (Bourdoncle, "Efficient chaotic iteration strategies
-   with widenings", 1993): recursive SCC partition; every singleton
-   without a self-loop is a [Vertex]; every non-trivial SCC picks its
-   head (the minimum backward-RPO index) and recurses into the rest.
-   The head set is Theorem 3's minimal admissible widening-point set;
-   the component tree drives the recursive iteration strategy
-   (Theorem 5: a component is stable when its head is). *)
+(* Bourdoncle weak topological ordering over plain accessors. Heads are the minimal widening-point set; swapped accessors build the reversed ordering. *)
 
 open Core_kernel
 open Bap.Std
@@ -65,9 +39,7 @@ let rec pp_comp (fmt : Format.formatter) (c : comp) : unit =
     Format.fprintf fmt "(%s %a)" (Tid.to_string h)
       (Format.pp_print_list ~pp_sep:(fun fmt () -> Format.fprintf fmt " ") pp_comp) inner
 
-(* [scc_partition nodes succ pred]: the recursive SCC partition
-   (Kosaraju shape: forward DFS for the finish order, reverse DFS for
-   the components).  Accessor-polymorphic — the graph never appears. *)
+(* Recursive SCC partition. *)
 let scc_partition
     (nodes : Tid.t list)
     (succ : Tid.t -> Tid.t list)
@@ -103,10 +75,7 @@ let scc_partition
       end);
   !comps
 
-(* [wto ~nodes ~succ ~pred]: the weak topological ordering.  [nodes]
-   seeds the traversal (their visit order fixes the backward-RPO index
-   the head choice uses); [succ]/[pred] are the edge accessors —
-   SWAPPED ACCESSORS BUILD THE REVERSED w.t.o. (see the header). *)
+(* WTO over plain accessors. *)
 let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)
     ~(pred : Tid.t -> Tid.t list) : comp list =
   if List.is_empty nodes then [] else

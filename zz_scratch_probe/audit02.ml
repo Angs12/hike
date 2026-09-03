@@ -1,19 +1,5 @@
-(* zz_scratch_probe/audit02.ml — forensics for ticket 02.
-
-   Diagnostic ONLY. Lives in zz_scratch_probe/ (the AGENTS.md §6 sanctioned
-   home), linked against the production `hike` library, never installed.
-
-   Usage: dune exec zz_scratch_probe/audit02.exe -- <binary> [subname]
-     - subname defaults to "main"; pass "ALL" to scan every sub
-     - prints, for every stack_access def that production classifies
-       Unbounded, the per-step audit data from the extraction's per-def walk (cbat_vsa's [Cbat_extraction] — the ONE home since arch review #1)
-       so we can tell which of the four root causes the ticket enumerates
-       actually fires:
-         1. rewrite_addr returned the address unchanged
-         2. rewrite succeeded but denote_imm_exp returned TOP
-         3. denote_imm_exp returned an error (val_as_imm failure)
-         4. the partitioned state's value for a free var differs from the
-            sequential one *)
+(* Dumps per-def audit data for PROD-Unbounded stack accesses.
+   Usage: audit02.exe <binary> [subname] (default "main", "ALL" scans all). *)
 
 open Bap.Std
 open Bap_core_theory
@@ -49,15 +35,9 @@ let dump_frame (label : string) (st : AI.t) : unit =
           Printf.printf "      %s: %s -> %s fvars=[%s]\n"
             label (Var.name v) (ws_str t.fconst) fvstr) f
 
-(* Walk a sub the same way hike_vsa.offsets_of_sub does, but for each
-   stack_access Load/Store def, also dump the four audit fields.
-   `on_unbounded` is invoked with each PROD-Unbounded stack_access def and
-   the audit data, so the caller can compare replica vs production. *)
+(* Walks the sub like offsets_of_sub; `on_unbounded` compares replica vs production. *)
 let audit_sub (sp : var) (sub : sub term) : unit =
-  (* Production calls `offsets_of_sub sp sub` on the post-filter sub.
-     Internally, offsets_of_sub calls Relevance.analyze if the sub
-     has no relevant tags. We mirror that: tag here, then offsets_of_sub
-     will reuse the tags (skipping its own analyze call). *)
+  (* Mirror production: tag here so offsets_of_sub reuses the tags. *)
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
   let sub' = Relevance.analyze sp sub in
@@ -77,7 +57,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
     let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
     let tags = sol in
     ignore tags;
-    (* The PROD verdict for cross-checking the replica *)
+    (* PROD verdict for cross-checking the replica. *)
     let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp sub' in
     let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
     Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
@@ -153,7 +133,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                               Printf.printf "    free var %s: cur(before)=%s tag=%s\n"
                                 (Var.name v) (ws_str cur) (ws_str tag_v)
                             | _ -> ());
-                        (* root-cause diagnosis from the four candidates *)
+                        (* Classify the failure from the four candidates. *)
                         let diag =
                           let addr_unchanged = Exp.equal addr addr' in
                           match ws_before, ws_tag with

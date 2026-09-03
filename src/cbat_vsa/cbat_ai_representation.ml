@@ -20,12 +20,12 @@ module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
 module Utils = Cbat_vsa_utils
 
-(* The full abstract representation for the value set analysis *)
+(* Abstract state: words, memories, frame. *)
 
 type wordset = WordSet.t
 
 
-(* Rename same to equal so that variables as keys to the environment are compared ignoring their indices (a peice of BAP metadata). TODO: is this right & is this sufficient? (maybe, no) *)
+(* Env keys compare by [Var.same]. *)
 module VarKey = struct
   include Var
   let equal = same
@@ -34,45 +34,18 @@ end
 module MemEnv = MapLattice.Make_indexed_val(VarKey)(Mem)
 module WordEnv = MapLattice.Make_indexed_val(VarKey)(WordSet)
 
-(* ------------------------------------------------------------------ *)
-(* Frame-relation facts (hike port: WYSINWYX-2 — the a-priori frame. *)
-(* relation carried IN the abstract state). *)
-(*  *)
-(* A FRAME-DERIVED register is one provably equal to the frame origin *)
-(* (the sub's entry RSP) plus an offset expression: *)
-(*  *)
-(* offset(X) = fconst + Σ k·fvar *)
-(*  *)
-(* — fconst: a CLP (usually a singleton); fvars: scaled non-derived *)
-(* registers (the -O0 index shapes). The relation [rbp = rsp + N] is *)
-(* entailed as [offset(RBP) − offset(RSP) = N]; both offsets share the *)
-(* origin, so addresses over either base normalize to the same key *)
-(* (the WYSINWYX a-loc unification). The facts are DERIVED from the *)
-(* def chain (a def [RBP := RSP ± k] earns RBP frame-base status; a *)
-(* GPR RBP gets nothing), and are MUST-facts over paths: the join *)
-(* keeps a fact only if every path derived it (a clobber on any path *)
-(* clears it below the merge). *)
-(*  *)
-(* LATTICE: [frame option] — None = the BOTTOM state (vacuously *)
-(* everything derived with the empty offset set), the JOIN IDENTITY *)
-(* ([None ⊔ x = x]): the value fixpoint's least-fixpoint ascent from *)
-(* bottom converges to the rich facts, and the relation consts widen *)
-(* with the fixpoint's own loop-head widening. Some [] = the TOP *)
-(* (nothing derived). The TRANSFER ([Cbat_vsa.apply_frame_def] — *)
-(* Bil-dependent, lives in cbat_vsa.ml) advances the state's frame *)
-(* through each def; the +8 call-revert is [frame_add_rsp]. *)
+(* Frame relation: offset(X) = fconst + sum k*fvar from the entry RSP. Must-facts; None is bottom. *)
 
-(* [frame_term]: the offset-from-origin expression of a derived *)
-(* register. *)
+(* Offset expression of a derived register. *)
 type frame_term = {
-  fconst : WordSet.t;               (* constant part (CLP; usually a singleton) *)
+  fconst : WordSet.t;               (* constant part *)
   fvars : (var * int) list;         (* scaled non-derived registers *)
 } [@@deriving bin_io, sexp, compare]
 
-(* [frame]: the per-state facts — absent var = not derived. *)
+(* Per-state facts; absent var is not derived. *)
 type frame = (var * frame_term) list [@@deriving bin_io, sexp, compare]
 
-(* [frame_key v]: the base-normalized lookup key (the Var.same env-key idiom). *)
+(* Base-normalized lookup key. *)
 let frame_key (v : var) : var = Var.base v
 
 let frame_lookup (f : frame) (v : var) : frame_term option =
@@ -84,7 +57,7 @@ let frame_remove (f : frame) (v : var) : frame =
 let frame_set (f : frame) (v : var) (t : frame_term) : frame =
   (frame_key v, t) :: frame_remove f v
 
-(* [frame_term_binop op t1 t2]: the MUST merge of two frame terms with the same expression shape — the consts combined with [op], the fvars kept from the first; a shape mismatch drops the fact (None). *)
+(* Merge consts when shapes agree; else drop. *)
 let frame_term_binop (op : wordset -> wordset -> wordset)
     (t1 : frame_term) (t2 : frame_term) : frame_term option =
   let eq_vs (v1, s1) (v2, s2) =
@@ -93,13 +66,13 @@ let frame_term_binop (op : wordset -> wordset -> wordset)
   then Some { fconst = op t1.fconst t2.fconst; fvars = t1.fvars }
   else None
 
-(* [frame_term_join ?widen]: the MUST join (consts unioned, or widened under [widen_join]). *)
+(* Join consts of same-shaped terms. *)
 let frame_term_join ?(widen = false) (t1 : frame_term) (t2 : frame_term)
     : frame_term option =
   frame_term_binop
     (if widen then WordSet.widen_join else WordSet.join) t1 t2
 
-(* [join_frames ?widen]: the MUST-fact merge — keep-if-both. *)
+(* Keep facts present on both sides. *)
 let join_frames ?widen (f1 : frame) (f2 : frame) : frame =
   List.filter_map f1 ~f:(fun (v, t1) ->
       match frame_lookup f2 v with
@@ -109,11 +82,11 @@ let join_frames ?widen (f1 : frame) (f2 : frame) : frame =
          | None -> None)
       | None -> None)
 
-(* [frame_term_meet]: the MUST meet — the consts intersected when the shapes agree. *)
+(* Meet consts of same-shaped terms. *)
 let frame_term_meet (t1 : frame_term) (t2 : frame_term) : frame_term option =
   frame_term_binop WordSet.meet t1 t2
 
-(* [meet_frames]: keep-if-either (a fact holding in EITHER state holds in their intersection); both present -> the term meet (shape mismatch keeps the first — sound, the S1 fact holds in S1 ∩ S2). *)
+(* Keep facts present on either side. *)
 let meet_frames (f1 : frame) (f2 : frame) : frame =
   let both =
     List.filter_map f1 ~f:(fun (v, t1) ->
@@ -143,30 +116,30 @@ let frame_opt_equal (f1 : frame option) (f2 : frame option) : bool =
   | Some a, Some b -> frame_equal a b
   | _ -> false
 
-(* [join_opt ?widen]: the LUB over [frame option] — None is the BOTTOM state (the join identity: every var vacuously derived with the empty offset set), so an unprocessed predecessor never pollutes a merge and the rich paths flow through loops. *)
+(* LUB; None is the identity. *)
 let join_opt ?widen (f1 : frame option) (f2 : frame option) : frame option =
   match f1, f2 with
   | None, x | x, None -> x
   | Some a, Some b -> Some (join_frames ?widen a b)
 
-(* [meet_opt]: the GLB over [frame option] — None (the bottom state) meets to None (the intersection with the empty state is empty). *)
+(* GLB; None meets to None. *)
 let meet_opt (f1 : frame option) (f2 : frame option) : frame option =
   match f1, f2 with
   | None, _ | _, None -> None
   | Some a, Some b -> Some (meet_frames a b)
 
-(* [frame_precedes]: the must-lattice order — bottom (None) precedes everything; Some a <= Some b iff the LUB of a and b is b. *)
+(* Must-lattice order. *)
 let frame_precedes (f1 : frame option) (f2 : frame option) : bool =
   match f1, f2 with
   | None, _ -> true
   | Some _, None -> false
   | Some a, Some b -> frame_equal (join_frames a b) b
 
-(* [seed_frame]: the entry-state frame — the ORIGIN definition: the sub's entry RSP has offset 0 (in BOTH anchored and unanchored runs; the origin is the entry RSP, not an assumption about its absolute value). Seeded by [Cbat_vsa.init_sol]. *)
+(* Entry frame: entry RSP has offset 0. *)
 let seed_frame : frame option =
   Some [ (Var.base Abi.x86_64_sysv.sp, { fconst = WordSet.singleton (Word.zero 64); fvars = [] }) ]
 
-(* [frame_add_rsp f]: The call-revert — the callee's ret pops exactly the retaddr the caller pushed, so RSP's offset restores by +8 (the L-E1 matched-pair semantics, applied to the state's frame at the call-abstraction site in cbat_vsa.ml). *)
+(* Restore RSP's offset by +8. *)
 let frame_add_rsp (f : frame option) : frame option =
   let rsp = frame_key Abi.x86_64_sysv.sp in
   let eight = WordSet.singleton (Word.of_int ~width:64 8) in
@@ -180,7 +153,7 @@ let frame_add_rsp (f : frame option) : frame option =
            else (v, t')))
      | None -> Some f)
 
-(* The transfer's record-update helpers (Bil-free; the def-shape logic lives in [Cbat_vsa.apply_frame_def]). *)
+(* Bil-free record updates. *)
 let frame_add_const (t : frame_term) (c : WordSet.t) : frame_term =
   { t with fconst = WordSet.add t.fconst c }
 
@@ -190,12 +163,10 @@ let frame_sub_const (t : frame_term) (c : WordSet.t) : frame_term =
 let frame_add_fvar (t : frame_term) (v : var) (k : int) : frame_term =
   { t with fvars = (frame_key v, k) :: t.fvars }
 
-(* ------------------------------------------------------------------ *)
-
 type t = {
   memories : MemEnv.t;
   words : WordEnv.t;
-  frame : frame option;             (* WYSINWYX-2: the in-state frame relation *)
+  frame : frame option;             (* frame relation *)
 } [@@deriving bin_io, sexp, compare]
 
 let top : t =
@@ -209,27 +180,27 @@ let bottom : t =
     frame = None;
   }
 
-(* if either the word env or mem env represents the empty set of states then this abstract state represents the empty set of states, i.e. bottom. Function in this module assume the inputs are canonized in this fashion. *)
-(* canonize removed: every AI is produced canonical — join/widen/meet handle bottom directly *)
+(* Empty word or memory env is bottom. *)
+
 
 let equal (e1 : t) e2 : bool =
   MemEnv.equal e1.memories e2.memories &&
   WordEnv.equal e1.words e2.words &&
   frame_opt_equal e1.frame e2.frame
 
-(* [frame_of e]: the state's frame relation (None = the vacuous bottom state). *)
+(* Frame relation of a state. *)
 let frame_of (e : t) : frame option = e.frame
 
-(* [set_frame e f]: the state with the frame replaced (the transfer's write — see [Cbat_vsa.apply_frame_def]). *)
+(* State with the frame replaced. *)
 let set_frame (e : t) (f : frame option) : t = { e with frame = f }
 
-(* adds a variable to the memories of the input env *)
+(* Add a memory binding. *)
 let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
   {memories = MemEnv.add e.memories ~key ~data;
    words = e.words;
    frame = e.frame}
 
-(* adds a variable to the words of the input env *)
+(* Add a word binding. *)
 let add_word (e : t) ~(key : var) ~(data : wordset) : t =
   {memories = e.memories;
    words = WordEnv.add e.words ~key ~data;
@@ -238,7 +209,7 @@ let add_word (e : t) ~(key : var) ~(data : wordset) : t =
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset = WordEnv.find i env.words v
 let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t = MemEnv.find i env.memories v
 
-(* Printing *)
+
 
 let pp ppf (e : t) =
   if equal e bottom then
@@ -264,20 +235,9 @@ let widen_join (e1 : t) (e2 : t) : t =
     frame = join_opt ~widen:true e1.frame e2.frame
   }
 
-(* The threshold-ladder widening (widen_join_threshold / selective_widen_join_threshold) is
-   DELETED (the landmark decision, 2026-08-30): the paper's ∞-arm is STANDARD widening
-   ([widen_join] — Cousot-Halbwachs, unstable bounds to TOP); "no normal finite widening,
-   only landmarks". With it went Cbat_thresholds, Mem.widen_join_threshold,
-   WordSet.widen_join_threshold, Clp.widen_join_threshold. *)
 
-(* Landmark-directed extrapolation (Simon & King Listing 4) — per-var steps.
-   [steps] is the consumption rate from [Cbat_landmarks.lm_calc_steps]:
-   a non-negative integer extrapolates by that many iterations (Listing 4);
-   a NEGATIVE value is the paper's "infinite" arm — fall through to plain
-   [WordSet.widen_join], which is Cousot-Halbwachs widening (the ∞-arm
-   of Listing 4, dropping unstable bounds). [head] scopes landmark
-   lookup to the innermost enclosing WTO cycle; pass [None] to apply
-   the per-var steps in isolation (the headless use case). *)
+
+(* Extrapolate [need] vars by [steps]; negative steps widen. *)
 let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
   if Core.Set.is_empty need then join e1 e2
   else if WordEnv.equal e1.words WordEnv.bottom then e2
@@ -301,16 +261,12 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
                    if steps < 0 then WordSet.widen_join data_old data_new
                    else WordSet.extrapolate_steps ~steps data_old data_new
                  | _ ->
-                   (* Listing 4: apply each landmark's dist as a per-bound translate.
-                      When steps finite, the landmark path translates by dist*steps (rounded outward).
-                      The landmark bound is the clamp; overflow -> infinite arm. *)
+                   (* Translate bounds toward landmarks. *)
                    if steps < 0 then
-                     (* No steps from lm_calc_steps -> fall through to widen_join (the
-                        paper's Inf arm) *)
+                     (* No steps: widen. *)
                      WordSet.widen_join data_old data_new
                    else
-                     (* Delegate to Cbat_landmarks.translate_to — the single
-                        per-head translation routine (Listing 4 wrapping). *)
+                     (* Landmark translation. *)
                      Cbat_landmarks.translate_to ~steps data_old data_new entries)
               | None ->
                 if steps < 0 then WordSet.widen_join data_old data_new
@@ -339,8 +295,8 @@ let precedes (e1 : t) (e2 : t) : bool =
   WordEnv.precedes e1.words e2.words &&
   frame_precedes e1.frame e2.frame
 
-(* P2d-1b (lane A) — Call-ABI abstraction of an abstract state (post-call, intra-procedural). *)
-(* [top_non_preserved ~preserved env]: the caller-saved (non-preserved) words of [env] set to TOP — the shared tail of [call_abstraction] and [call_abstraction_frame]. *)
+(* Post-call abstraction. *)
+(* Top caller-saved words. *)
 let top_non_preserved ~(preserved : Var.Set.t) (env : t) : WordEnv.t =
   WordEnv.fold env.words ~init:env.words
     ~f:(fun ~key ~data acc ->
@@ -351,7 +307,7 @@ let top_non_preserved ~(preserved : Var.Set.t) (env : t) : WordEnv.t =
 let call_abstraction ~(preserved : Var.Set.t) (env : t) : t =
   { memories = MemEnv.top; words = top_non_preserved ~preserved env; frame = env.frame }
 
-(* Hike addition (the call-abstraction precision lane — the fix for the whole-memory-top gap): like [call_abstraction], but the caller's OWN frame survives the call. *)
+(* Like [call_abstraction]; caller frame survives. *)
 let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : t) : t =
   let words' = top_non_preserved ~preserved env in

@@ -11,37 +11,34 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* Utility functions specific to this project but not associated with any particular piece of functionality. *)
+(* Small shared utilities. *)
 
 exception NotImplemented of string
 
-(* [NotImplemented]: raised only by [not_implemented] when no ~top fallback value is supplied (there is nothing else to return). The production call sites always pass ~top, so the raise is a development aid. *)
+(* Raised by [not_implemented] without a [~top] fallback. *)
 
-(* Call as a placeholder where a piece of code has not been written yet. *)
+(* Placeholder degrading to [~top]. *)
 let not_implemented ?(top : 'a option) component : 'a = match top with
   | None -> raise (NotImplemented component)
   | Some tp ->
-    (* ONE production channel: BAP's own Event.Log (section cbat_vsa).
-       The old raw [Format.eprintf] copy is DELETED (2026-09-02, principle
-       #6: one sanctioned output — [Hike_diag] in src/, Event.Log here in
-       the vendored library); nothing greps the stderr copy. *)
+    (* Log through Event.Log. *)
     Bap.Std.Event.Log.message Bap.Std.Event.Log.Warning
       ~section:"cbat_vsa"
       "not_implemented: %s (degrading to top)" component;
     tp
 
-(* Determines the maximum number of elements in an exact set abstraction. *)
+(* Max elements of an exact set. *)
 let fin_set_size : int = 10
 
-(* implements integer division rounding upwards *)
+(* Integer division rounding up. *)
 let cdiv (x : int) (y : int) : int = (x - 1)/y + 1
 
 open !Core_kernel
 open Bap.Std
 
-(* Relevance restriction (user design, ora-4, reworked per ora-5 / P2d-1b, and the 2026-08-10 simplification): a per-def Unit- payload tag. *)
+(* Per-def relevance tag. *)
 
-(* P2d-1b (lane A) — the per-def relevance tag (Unit payload; the uuid is fresh and distinct from every other tag in the library). The former [back_edge]/[do_widen] neighbours are gone: the WTO fixpoint computes its widening points from the WTO head set, so the back-edge labelling pass was deleted. *)
+(* Unit-payload relevance tag. *)
 let relevant = Value.Tag.register (module Unit)
     ~name:"relevant"
     ~uuid:"58a2e009-3d14-4c7d-ba75-42f9de98dc30"

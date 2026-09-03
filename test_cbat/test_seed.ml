@@ -1,16 +1,10 @@
-(* test_seed: the trace-exact cell meet (T1-T4) and the pure seed collector (S1-S15). *)
+(* Trace-exact cell meet (T1-T4) and pure seed collector (S1-S15). *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
 
 let run () =
-(* --- 5c. refine_cell_trace (the trace-exact cell meet, M2: docs/trace-partitioning-plan.md §3)
-   ------------------------------- The trace-exact cell meet: the address's value-set ON THE TRACE
-   (the frame-rewritten address denoted with the load's block state ∩ the per-block live constraint)
-   — the meet lands on EVERY cell whose key intersects the trace's address range ([Mem.meet_range]);
-   the cells OUTSIDE the range are untouched (the exit-side values survive — the subtraction). The
-   RSP-free/FVAR-free gate conditions become derived facts: an RSP-based address gets the offset via
-   the frame relation; a dynamic-index address gets the index's iterate constraint. *)
+(* Trace-exact cell meet: the trace's address range meets every intersecting cell; outside cells survive. *)
 (  let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
   let rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64) in
   let idx = Var.create ~is_virtual:true ~fresh:false "t_idx" (Type.Imm 64) in
@@ -45,9 +39,7 @@ let run () =
     let mv = AI.find_memory k st m in
     Mem.Val.data (Mem.find (64, LittleEndian) mv (key_of addr_ws))
   in
-  (* T1: the RSP-based same-block cell meet — the frame-correct offset via the block's frame
-     relation (the gate's RSP-free condition becomes a derived fact): [RSP - 8] with the frame's RSP
-     offset 0 meets the cell at the offset key {-8}. *)
+  (* T1: RSP-based meet — [RSP - 8] meets the cell at offset key {-8}. *)
   let st1 = add_cell (mk_state ()) (Ws.singleton (w64 (-8))) (iv ~lo:0 ~hi:20) in
   let env1 =
     Vsa.constrain_cell_on_trace ~st:st1 ~live:Var.Map.empty st1 ~mem:(Bil.Var m)
@@ -59,8 +51,7 @@ let run () =
      frame's RSP offset 0)"
     (let v = cell_at env1 (Ws.singleton (w64 (-8))) in
      Ws.elem (w64 9) v && not (Ws.elem (w64 15) v));
-  (* T2: the dynamic-index meet — the index's iterate constraint [0,4] confines the meet to the
-     trace's offsets {0..32}; the cell at 40 (the exit-side) is untouched. *)
+  (* T2: dynamic-index meet — iterate constraint [0,4] confines the meet; cell 40 survives. *)
   let st2 =
     let s = add_cell (mk_state ()) (Ws.singleton (w64 0)) (iv ~lo:0 ~hi:20) in
     add_cell s (Ws.singleton (w64 40)) (iv ~lo:0 ~hi:20)
@@ -78,8 +69,7 @@ let run () =
     (let v0 = cell_at env2 (Ws.singleton (w64 0)) in
      let v40 = cell_at env2 (Ws.singleton (w64 40)) in
      Ws.elem (w64 9) v0 && (not (Ws.elem (w64 15) v0)) && Ws.elem (w64 15) v40);
-  (* T3: the ranged meet's overlap boundary — the stored [0,64] cell splits: the overlapping part
-     [8,24] meets; the parts [0,8) and (24,64] keep the original. *)
+  (* T3: ranged meet — stored [0,64] splits; overlap [8,24] meets, rest keeps original. *)
   let st3 = add_cell (mk_state ()) (iv ~lo:0 ~hi:64) (iv ~lo:0 ~hi:20) in
   let st3 = AI.add_word st3 ~key:idx ~data:(iv ~lo:8 ~hi:24) in
   let live3 = Var.Map.singleton (Var.base idx) (iv ~lo:8 ~hi:24) in
@@ -99,8 +89,7 @@ let run () =
      && (not (Ws.elem (w64 15) v8))
      && Ws.elem (w64 15) v0
      && Ws.elem (w64 15) v24);
-  (* T4: the exit-side cells survive — the iterate range [0,32] meets; the exit-side offsets 40 and
-     80 (the ¬iterate values) are untouched. *)
+  (* T4: exit-side cells survive — offsets 40 and 80 untouched. *)
   let st4 =
     let s = add_cell (mk_state ()) (Ws.singleton (w64 0)) (iv ~lo:0 ~hi:20) in
     let s = add_cell s (Ws.singleton (w64 40)) (iv ~lo:0 ~hi:20) in
@@ -124,14 +113,7 @@ let run () =
      && Ws.elem (w64 15) v40
      && Ws.elem (w64 15) v80);
   ())
-(* --- 5e. collect_seeds (the pure seed collector, M3: docs/trace-partitioning-plan.md §3)
-   --------------------------------- The PURE constraint derivation: the guard's edge constraint
-   decomposed into the leaf seeds (no env mutation — the meets belong to the dataflow). TOTAL: every
-   shape has a row — the NEQ rows, the two-piece signed rows (the gates removed), the const-first
-   flips, the var-vs-var overlaps + the NEQ complements, the generic operands, the producer rows,
-   the load cell seeds, the NOT/NEG bijections, the cast rows, the flag-state recovery, the
-   Infeasible constant case, and the dual (the NOT-wrapped collector = the exit-walk's per-arm
-   complements). *)
+(* Pure seed collector: guard edge constraint decomposed into leaf seeds. *)
 ;
 (  let r32 = W.of_int ~width:32 in
   let t = Var.create ~is_virtual:true ~fresh:false "s_t" (Type.Imm 32) in
@@ -149,13 +131,13 @@ let run () =
       (Clp.create ~width:32 ~step:(r32 1) ~cardn:(W.of_int ~width:33 (hi - lo + 1)) (r32 lo))
   in
   let seeds_of cond = Vsa.edge_constraints ~env:(mk_env []) cond (Ws.singleton Word.b1) in
-  (* S1: the const-second EQ row -> the {c} Var seed *)
+  (* S1: const-second EQ. *)
   check "S1: EQ const-second -> the Var seed {10}"
     (match seeds_of (Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (r32 10))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 10) c && not (Ws.elem (r32 11) c)
     | _ -> false);
-  (* S2: the NEQ row -> the M1-diff complement (exact on the full circle) *)
+  (* S2: NEQ complement. *)
   check "S2: NEQ const-second -> the wrapped complement (10 ∉; 11, 9 ∈)"
     (match seeds_of (Bil.BinOp (Bil.NEQ, Bil.Var t, Bil.Int (r32 10))) with
     | [ Vsa.Var (v, c) ] ->
@@ -164,7 +146,7 @@ let run () =
         && Ws.elem (r32 11) c
         && Ws.elem (r32 9) c
     | _ -> false);
-  (* S3: the two-piece SLT row — the non-negativity gate REMOVED *)
+  (* S3: two-piece SLT. *)
   check "S3: SLT const-second -> the two-piece [0,3] ∪ [2^31, max] (no gate)"
     (match seeds_of (Bil.BinOp (Bil.SLT, Bil.Var t, Bil.Int (r32 4))) with
     | [ Vsa.Var (v, c) ] ->
@@ -173,13 +155,13 @@ let run () =
         && (not (Ws.elem (r32 4) c))
         && Ws.elem (r32 0x80000000) c
     | _ -> false);
-  (* S4: the const-first flip — (10 LT t) -> the UGT row [11, max] *)
+  (* S4: const-first flip. *)
   check "S4: const-first LT -> the UGT flip [11, max] (10 ∉; 11 ∈)"
     (match seeds_of (Bil.BinOp (Bil.LT, Bil.Int (r32 10), Bil.Var t)) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 11) c && not (Ws.elem (r32 10) c)
     | _ -> false);
-  (* S5: the var-vs-var LT overlap — t=[0,10], u={10} -> t ⊆ [0,9] *)
+  (* S5: var-vs-var LT overlap. *)
   let env5 = mk_env [ (t, iv ~lo:0 ~hi:10); (u, Ws.singleton (r32 10)) ] in
   let s5 =
     Vsa.edge_constraints ~env:env5 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Var u)) (Ws.singleton Word.b1)
@@ -188,8 +170,7 @@ let run () =
     (match var_seed s5 t with
     | Some c -> Ws.elem (r32 9) c && not (Ws.elem (r32 10) c)
     | None -> false);
-  (* S6: the var-vs-var NEQ — the complement of the EQ overlap (the interior singleton: the identity
-     — the sound over-approx) *)
+  (* S6: var-vs-var NEQ complement. *)
   let env6 = mk_env [ (t, iv ~lo:0 ~hi:10); (u, Ws.singleton (r32 5)) ] in
   let s6 =
     Vsa.edge_constraints ~env:env6
@@ -200,8 +181,7 @@ let run () =
     "S6: the var-vs-var NEQ — the t seed = the complement of the {5} overlap (the interior: the \
      identity — sound)"
     (match var_seed s6 t with Some c -> Ws.elem (r32 0) c && Ws.elem (r32 10) c | None -> false);
-  (* S7: the generic comparison (t LT (u+1)) — the rows apply with the operand's denoted value-set +
-     the recursion into the operand's producer *)
+  (* S7: generic comparison with producer recursion. *)
   let env7 = mk_env [ (t, iv ~lo:0 ~hi:10); (u, iv ~lo:0 ~hi:3) ] in
   let s7 =
     Vsa.edge_constraints ~env:env7
@@ -214,7 +194,7 @@ let run () =
     (match (var_seed s7 t, var_seed s7 u) with
     | Some ct, Some cu -> Ws.elem (r32 3) ct && (not (Ws.elem (r32 4) ct)) && Ws.elem (r32 1) cu
     | _ -> false);
-  (* S8: the producer row — ((t+1) < 10) -> the PLUS hull {−1} ∪ [0,8] on t *)
+  (* S8: producer PLUS hull. *)
   let env8 = mk_env [ (t, iv ~lo:0 ~hi:10) ] in
   let s8 =
     Vsa.edge_constraints ~env:env8
@@ -225,7 +205,7 @@ let run () =
     (match var_seed s8 t with
     | Some c -> Ws.elem (r32 8) c && (not (Ws.elem (r32 9) c)) && Ws.elem (r32 0xFFFFFFFF) c
     | None -> false);
-  (* S9: the load operand -> the Cell seed *)
+  (* S9: load operand gives Cell seed. *)
   let rsp64 = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
   check "S9: the Load operand -> the Cell seed ([0,9] on the cell)"
     (match
@@ -242,19 +222,19 @@ let run () =
      with
     | [ Vsa.Cell (_, _, _, _, cstr) ] -> Ws.elem (r32 9) cstr && not (Ws.elem (r32 10) cstr)
     | _ -> false);
-  (* S10: the NOT bijection — (NOT (t < 10)) -> the FALSE side UGE [10, max] — no gates *)
+  (* S10: NOT bijection. *)
   check "S10: the NOT bijection — the FALSE side UGE [10, max] (10 ∈; 9 ∉)"
     (match seeds_of (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (r32 10)))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 10) c && not (Ws.elem (r32 9) c)
     | _ -> false);
-  (* S11: the NEG row — (-t < 10) -> t ∈ neg [0,9] = {0, −1, …, −9} *)
+  (* S11: NEG row. *)
   check "S11: the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈"
     (match seeds_of (Bil.BinOp (Bil.LT, Bil.UnOp (Bil.NEG, Bil.Var t), Bil.Int (r32 10))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 0) c && Ws.elem (r32 0xFFFFFFFF) c
     | _ -> false);
-  (* S12: the flag-state recovery — CF := LT(t, 10); if CF: the recovered t seed [0,9] *)
+  (* S12: flag-state recovery. *)
   let ctx12 : Vsa.analysis_ctx =
     {
       refineable = None;
@@ -270,20 +250,18 @@ let run () =
     (match (var_seed s12 cf, var_seed s12 t) with
     | Some cc, Some ct -> Ws.elem Word.b1 cc && Ws.elem (r32 9) ct && not (Ws.elem (r32 10) ct)
     | _ -> false);
-  (* S13: the dual — the NOT-wrapped collector (the exit-walk's per-arm complements): (NOT (t = 10))
-     -> the NEQ complement *)
+  (* S13: NOT-wrapped dual. *)
   check "S13: the dual — NOT (t EQ 10) -> the NEQ complement (10 ∉; 11 ∈)"
     (match seeds_of (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (r32 10)))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && (not (Ws.elem (r32 10) c)) && Ws.elem (r32 11) c
     | _ -> false);
-  (* S14: the Infeasible constant case — the edge has no states *)
+  (* S14: infeasible constant. *)
   check "S14: the Infeasible constant — (Int 5) with {7} -> Infeasible; with {5} -> no seeds"
     (Vsa.edge_constraints ~env:(mk_env []) (Bil.Int (r32 5)) (Ws.singleton (r32 7))
      = [ Vsa.Infeasible ]
     && Vsa.edge_constraints ~env:(mk_env []) (Bil.Int (r32 5)) (Ws.singleton (r32 5)) = []);
-  (* S15: the cast rows — LOW: (cast LOW 8 t) = 5 -> the truncation hull [5, 5 + 2^32 − 2^8];
-     SIGNED: (cast SIGNED 64 t) < 0x100 -> the zero-extension [0, 0xFF] *)
+  (* S15: cast rows. *)
   let env15 =
     mk_env
       [

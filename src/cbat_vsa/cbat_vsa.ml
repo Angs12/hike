@@ -28,36 +28,19 @@ module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word_ops
 module Utils = Cbat_vsa_utils
 
-(* ARCH-5 — the Bourdoncle WTO is its OWN MODULE now ([cbat_wto.ml],
-   directly tested; accessor-polymorphic — see its header).  This is
-   the GRAPHS ADAPTER: the engine's cfg, passed as the two accessors.
-   The reversed ordering (the L2 walk schedule's backward fixpoint) is
-   the accessors SWAPPED — [wto ~succ:preds_of ~pred:succs_of] — a
-   call-shape on this same adapter. *)
-(* ARCH-5 — the GRAPHS ADAPTER (a plain function; the sibling module
-   [cbat_wto] is in scope by its plain name): the engine's cfg,
-   passed as the two accessors.  The reversed ordering (the L2 walk
-   schedule's backward fixpoint) is the accessors SWAPPED — a
-   call-shape on this same adapter. *)
+(* WTO over the engine cfg; swapped accessors reverse it. *)
+
 let wto_of_cfg (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
   Cbat_wto.wto
     ~nodes:(Graphs.Tid.nodes cfg |> Seq.to_list)
     ~succ:(fun n -> Graphs.Tid.Node.succs n cfg |> Seq.to_list)
     ~pred:(fun n -> Graphs.Tid.Node.preds n cfg |> Seq.to_list)
 
-(* ARCH-2 — the version-keyed memo module (one discipline, two
-   instantiations: the walk memo and the transfer memo).  See
-   [cbat_memo.ml]'s header for the stamp/validity/stale-overwrite
-   argument. *)
+(* Version-keyed memos for walk and transfer. *)
 module Cbat_memo = Cbat_memo
 
 
-(* ARCH-2 — the two instantiations.  [Walk_memo]: the backward walk's
-   refined env per (source block, jmp tid).  [Transfer_memo]: the
-   block transfer's result + the F2 acquisition-fired flag per
-   (source block, target).  Both take their value module inline (the
-   review's functorized call — one variable each); the version
-   oracle is threaded per call (see [cbat_memo.mli]). *)
+
 module Walk_memo = Cbat_memo.Make (struct
   type t = AI.t
 end)
@@ -66,15 +49,15 @@ module Transfer_memo = Cbat_memo.Make (struct
   type t = AI.t * bool
 end)
 
-(* Raised by [static_graph_vsa] when the fixpoint's verification round finds the solution STILL CHANGING at the [~steps] cap — the returned solution would be an under-approximation (states reachable only on longer paths are missing), so it must not be consumed for the narrow-tag decisions. *)
+(* Solution still changing at the step cap. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
   * (tid * tid) option
 
-(* [addr_bits_ref]: The program architecture's address size in bits (O1 — the Target-derived width, set by the production pass via [set_addr_bits] at project setup; 0 = not set, the BIL type's size is the fallback (unit tests run without a target). *)
+(* Address size in bits; 0 falls back to BIL width. *)
 let addr_bits_ref = ref 0
 let set_addr_bits (n : int) : unit = addr_bits_ref := n
 
-(* [mem_idx addr_sz addressable_sz]: The memory index of a memory type — the {addr_width; addressable_width} record built at every memory access site. *)
+(* Memory index of a memory type. *)
 let mem_idx addr_sz addressable_sz : Mem.idx =
   { Mem.addr_width =
       (if !addr_bits_ref > 0 then !addr_bits_ref else Size.in_bits addr_sz);
@@ -95,17 +78,17 @@ let jmp_target (j : jmp term) : tid option =
 type wordset = WordSet.t
 
 
-(* Denotations ========================================================= These functions are denotations of terms in BIR *)
 
 
-(* bitwidth is the width of the two inputs *)
+
+(* Widths of both inputs. *)
 let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   let btrue = WordSet.singleton Word.b1 in
   let bfalse = WordSet.singleton Word.b0 in
   let wordset_of_bool b = if b then btrue else bfalse in
   let bool_top = WordSet.top 1 in
   let bool_bottom = WordSet.bottom 1 in
-  (* [ordering ~signed ~le v1 v2]: The four ordering-comparison denotations (LT/LE/SLT/SLE) share one endpoint test — if every element of v1 orders below every element of v2 the result is definitely true, if v1's minimum does not order below v2's maximum. *)
+  (* Shared LT/LE/SLT/SLE endpoint test. *)
   let ordering ~(signed : bool) ~(le : bool) v1 v2 =
     let open Monads.Std.Monad.Option in
     let max_elem = if signed then WordSet.max_elem_signed else WordSet.max_elem in
@@ -125,7 +108,7 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
         else if Word.(>=) (sgn v1_min) (sgn v2_max) then return bfalse
         else return bool_top
     end in
-  (* [compare_eq ~negate v1 v2]: The shared EQ/NEQ decision — if either expression has no value, neither does the comparison result (bottom); two singletons are definitely-equal (or not); non-singletons that overlap may be true or false, disjoint non-singletons are definitely-false (EQ) / true (NEQ). *)
+  (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
     let v1Size = WordSet.cardinality v1 in
     let v2Size = WordSet.cardinality v2 in
@@ -185,49 +168,49 @@ let val_top : typ -> val_t = function
     `Mem (Mem.top k)
   | Type.Unk -> failwith "Error in val_top: typ is not representable by Type.t"
 
-(* ------------------------------------------------------------------ *)
-(* Frame-relation facts (hike port: WYSINWYX-1 — the a-priori frame. *)
-(* relation, stage 1). *)
-(*  *)
-(* [frame_facts_of_sub] derives, per block, the FRAME-DERIVED *)
-(* registers: registers provably equal to the frame origin (the *)
-(* sub's entry RSP) plus a constant plus a linear combination of *)
-(* non-derived registers. The relation is DERIVED from the def chain *)
-(* (syntactic — a def [RBP := RSP ± k] earns RBP frame-base status; *)
-(* a GPR RBP gets nothing) and is a MUST-fact over paths (a register *)
-(* is derived at a block only when every path reaching it derived *)
-(* the same expression shape — a clobber on any path clears it below *)
-(* the join). *)
-(*  *)
-(* The transfer mirrors the value-tracking of the fixpoint exactly: *)
-(* untagged defs are skipped (the same gate as [denote_def]), and a *)
-(* call restores RSP's offset by +8 (the retaddr pop — the L-E1 *)
-(* matched-pair semantics, restated syntactically). *)
-(*  *)
-(* Consumption: [rewrite_addr] rewrites a Load/Store address [X + c] *)
-(* (X derived, singleton const) into the equivalent OFFSET expression, *)
-(* so memory keys become base-independent (WYSINWYX a-loc unification: *)
-(* [rbp+c1] and [rsp+c2] hitting the same slot land on the same key *)
-(* whenever the relation is derived). With the entry origin (0) the *)
-(* rewritten key is set-equal to the direct key (byte-identical); *)
-(* with the production top entry it stays exact while RSP's *)
-(* value-set is top — the base-independence property the probe's *)
-(* anchored-vs-default invariance check asserts. *)
-(*  *)
-(* Soundness surface: the facts must mirror the value tracking EXACTLY *)
-(* (same defs — the relevance gate — same arithmetic); a divergence *)
-(* would make normalized keys disagree with direct keys (unsound). *)
-(* The singleton-const gate in [expr_of_term] is the safety margin: a *)
-(* non-singleton const (a join of differing prologue paths) falls *)
-(* back to the direct key instead of risking a mismatch. *)
 
-(* [apply_frame_def f d]: The effect of one def on the per-block facts. *)
+(* Frame-derived registers equal entry RSP plus an offset; must-facts. *)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(* Addresses rewrite to offsets for base-independent keys. *)
+
+
+
+
+
+
+
+
+
+(* Facts must mirror value tracking exactly. *)
+
+
+(* Non-singleton consts fall back to the direct key. *)
+
+
+
+(* Effect of one def on facts. *)
 let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
   if not (Term.has_attr d Utils.relevant) then f
   else
     let v = AI.frame_key (Def.lhs d) in
     let remove = AI.frame_remove f v in
-    (* [transfer ~shift y]: [v] inherits [y]'s fact shifted by [shift] (when y = v the fact is shifted in place); an absent fact removes. The copy rule shared by every BinOp arm. *)
+    (* Copy rule with shift. *)
     let transfer ~(shift : AI.frame_term -> AI.frame_term) (y : var)
         : AI.frame =
       if Var.equal y v then
@@ -238,7 +221,7 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
         match AI.frame_lookup f y with
         | Some t -> AI.frame_set f v (shift t)
         | None -> remove in
-    (* [if_not_derived z ~shift y]: the z-gate of the two-var arms — a derived [z] would double-count the origin, so [v] is removed; otherwise the transfer. *)
+    (* A derived [z] drops the fact. *)
     let if_not_derived (z : var)
         ~(shift : AI.frame_term -> AI.frame_term) (y : var) : AI.frame =
       if Option.is_some (AI.frame_lookup f z) then remove
@@ -256,7 +239,7 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
        | Bil.PLUS, Bil.Var y, Bil.Int k
        | Bil.PLUS, Bil.Int k, Bil.Var y
        | Bil.MINUS, Bil.Var y, Bil.Int k ->
-         (* v := y ± k: derived iff y derived *)
+         (* Derived iff y derived. *)
          let y = AI.frame_key y in
          let shift =
            match op with
@@ -265,24 +248,24 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
            | _ -> Fun.id in
          transfer ~shift y
        | Bil.PLUS, Bil.Var y, Bil.Var z ->
-         (* v := y + z (both orders): derived iff y derived and z NOT derived (a derived z would double-count the origin). *)
+         (* Derived iff y derived. *)
          let y = AI.frame_key y in
          let z = AI.frame_key z in
          if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z 1) y
        | Bil.MINUS, Bil.Var y, Bil.Var z ->
-         (* v := y - z: derived iff y derived and z NOT derived. *)
+         (* Derived iff y derived. *)
          let y = AI.frame_key y in
          let z = AI.frame_key z in
          if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-1)) y
        | Bil.PLUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k)
        | Bil.PLUS, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k), Bil.Var y ->
-         (* v := y + z*k (the -O0 scaled-index shape): derived iff y derived and z NOT derived (z's scale enters the offset). *)
+         (* Derived iff y derived. *)
          let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
          let y = AI.frame_key y in
          let z = AI.frame_key z in
          if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z k) y
        | Bil.MINUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k) ->
-         (* v := y - z*k: derived iff y derived and z NOT derived. *)
+         (* Derived iff y derived. *)
          let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
          let y = AI.frame_key y in
          let z = AI.frame_key z in
@@ -292,15 +275,15 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
     | Bil.Concat _ | Bil.Ite _ | Bil.UnOp _ | Bil.Let _ | Bil.Unknown _ ->
       remove
 
-(* [apply_frame_def f d]: The transfer over the option — None (the BOTTOM state, vacuously everything derived) stays bottom (the LUB identity); Some f advances via [apply_frame_def_list]. *)
+(* None stays bottom. *)
 let apply_frame_def (f : AI.frame option) (d : def term) : AI.frame option =
   match f with
   | None -> None
   | Some f -> Some (apply_frame_def_list f d)
 
-(* NOTE (dual address space REMOVED): the WYSINWYX-2 stack-space rebase (stack keys rebased into [2^63, 2^64), disjoint from the concrete keys) was removed — the analysis keys the SINGLE raw space: the frame-relative. *)
 
-(* [expr_of_term t k]: The offset expression for a derived register plus an additive literal [k] — a BIL expression denoting the offset-from-origin word set. *)
+
+(* Offset expression plus literal. *)
 let expr_of_term (t : AI.frame_term) (k : word) : exp option =
   match WordSet.min_elem t.fconst, WordSet.max_elem t.fconst with
   | Some lo, Some hi when Word.equal lo hi ->
@@ -311,7 +294,7 @@ let expr_of_term (t : AI.frame_term) (k : word) : exp option =
         else Bil.BinOp (Bil.MINUS, acc, scaled)))
   | _ -> None
 
-(* [rewrite_addr frame a]: Normalize a frame-derived Load/Store address to its offset-from-origin expression: every frame-derived sub-expression is replaced by its offset expression, and the derived-free residue (index arithmetic over GPRs,. *)
+(* Rewrite an address to its offset expression. *)
 let rewrite_addr (frame : AI.frame option) (a : exp) : exp =
   let find (v : var) : AI.frame_term option =
     match frame with
@@ -340,14 +323,14 @@ let rewrite_addr (frame : AI.frame option) (a : exp) : exp =
        | Some r1, Some r2 -> Some (Bil.BinOp (Bil.MINUS, r1, r2))
        | Some r1, None ->
          if derived_free e2 then Some (Bil.BinOp (Bil.MINUS, r1, e2)) else None
-       | None, Some _ -> None  (* e1 - derived: origin creep *)
+       | None, Some _ -> None  
        | None, None -> None)
     | _ -> None in
   match go a with
   | Some r -> r
   | None -> a
 
-(* [frame_rewrite_rhs frame e]: rewrite a Load/Store rhs's address. *)
+(* Rewrite an rhs address. *)
 let frame_rewrite_rhs (frame : AI.frame option) (e : exp) : exp =
   match e with
   | Bil.Load (m, a, en, s) ->
@@ -357,11 +340,11 @@ let frame_rewrite_rhs (frame : AI.frame option) (e : exp) : exp =
   | _ -> e
 
 
-(* Helper functions; define a denotation for expressions. Assumes that e has BIR type [Imm bitwidth] *)
-(* [frame]: one state's frame relation — the representation module's type (the in-state port: the relation lives in [AI.t]). *)
+
+(* Frame relation of a state. *)
 type frame = AI.frame
 
-(* [frame_of_state env]: the state's frame relation (None = the vacuous bottom state) — the in-state accessor for consumers. *)
+(* Frame relation of a state. *)
 let frame_of_state (env : AI.t) : frame option = AI.frame_of env
 
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
@@ -400,11 +383,11 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
     denote_exp u env >>= val_as_imm >>= fun v ->
-    (* E2e-D, loop attempt 3 — stack-only residue (user directive: only the stack, not heap). *)
+    
     if WordSet.is_top addr
     then return_mem mv
     else
-    (* Check that the store can be represented by a repeating sequence of vs *)
+    
     let v' = if WordSet.splits_by addr (Word.of_int ~width:sz (Size.in_bytes s))
       then v else WordSet.top sz in
     let data = Mem.Val.create v' e in
@@ -417,7 +400,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     if WordSet.is_top condv then val_join yesv nov
     else if WordSet.equal condv (WordSet.singleton Word.b1) then return yesv
     else if WordSet.equal condv (WordSet.singleton Word.b0) then return nov
-    (* A non-singleton, non-top condition (e.g. *)
+    
     else val_join yesv nov
   | Bil.Extract (hi, lo, e) ->
     denote_exp e env >>= val_as_imm >>= fun v ->
@@ -446,20 +429,20 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   denote_exp e env >>= val_as_imm
 
 let denote_def (df : def term) (env : AI.t) : AI.t =
-  (* The relevance RESTRICTION — a def is skipped entirely (its var and its memory effect are not tracked) iff it is not tagged [Utils.relevant]. *)
+  (* Untagged defs are skipped. *)
   if not (Term.has_attr df Utils.relevant)
   then env
   else
   let v = Def.lhs df in
   let e = Def.rhs df in
-  (* WYSINWYX-2 — the frame-relation address rewrite: a Load/Store address over a frame-derived register (the STATE's relation — carried in [AI.t] since the in-state port) denotes its offset-from-origin expression (base-independent key). *)
+  (* Addresses rewrite to offsets. *)
   let frame = AI.frame_of env in
   let e = frame_rewrite_rhs frame e in
-  (* WYSINWYX-3 (the value-side) — when the WHOLE rhs is a frame-derived affine expression (the [rewrite_addr] walk succeeds on it), its VALUE is the offset-from-origin expression: a frame-derived pointer value (lea'd, saved. *)
+  (* Frame-derived values denote offsets. *)
   let e = rewrite_addr frame e in
   exn_on_err @@
   let open Monad_type_error in
-  (* TODO: throw errors here or later? *)
+  
   denote_exp e env >>| fun ev ->
   (match ev with
    | `Word p -> AI.add_word env ~key:v ~data:p
@@ -467,18 +450,18 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
   |> fun env' ->
   AI.set_frame env' (apply_frame_def (AI.frame_of env) df)
 
-(* Computes the denotation of a block's def statements, i.e. the effect they have on the precondition abstraction. *)
+(* Denotation of a block's defs. *)
 let denote_defs (b : blk term) : AI.t -> AI.t =
-  (* E2e-A / Lane C — no phi nodes in the corpus (-O0 LLVM lift); BIR phis are removed by the pseudo-node cleanup. If one ever appears, the block-entry merge already approximates its value — the sound minimal fallback is the identity (the state unchanged), never a raise. *)
-  (* WYSINWYX-2 — the frame relation lives IN the state (the in-state port): [denote_def] reads it for the address rewrite and advances it through each def, so a def's rewrite sees the relation at THAT point (e.g. *)
+  (* Phis are the identity. *)
+  (* Frame advances through each def. *)
   fun env0 ->
     Term.enum def_t b
     |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def df env)
 
 
 
-(* Filters a sequence of jumps by which are reachable in the given environment *)
-(* TODO: use jump condition processing to make this more accurate *)
+(* Jumps reachable in the env. *)
+
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
     let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in
@@ -488,18 +471,18 @@ let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
     else Seq.Step.Skip {state = can_fall_through}
   end
 
-(* --- Hike port fix (Phase 2, change D4): branch-assume --------------- [reachable_jumps] only FILTERS edges by definitely-true/false conditions; no state refinement happens on taken edges, so loop counters join to [0,∞) -> top -> the runtime arm. *)
 
-(* L-A1 — the jcc DECODER (recognition layer) ------------ The -O0 lifted loop guards are COMPOUND flag expressions (the canonical per-cmp emission, BIR-verified by the oracle, ora-6): `#t := e - c; CF := e < c; OF :=. *)
+
+(* Flag-expression decoder for loop guards. *)
 type guard_op = ULT | ULE | UGT | UGE | EQ | NEQ | SLT | SLE | SGT | SGE
 
 let decoded_condition (cond : exp) : guard_op option =
-  (* [is_flag name e]: [e] is the flag var named [name] (Var.name equality — the lifter names the 1-bit flags CF/ZF/SF/OF). *)
+  (* True for the named flag var. *)
   let is_flag (name : string) (e : exp) : bool =
     match e with
     | Bil.Var v -> String.equal (Var.name v) name
     | _ -> false in
-  (* [xor_core e]: e = (SF | OF) & ~(SF & OF) — the signed-overflow XOR core shared by the jle and jl shapes. *)
+  (* Shared signed-overflow core. *)
   let xor_core (e : exp) : bool =
     match e with
     | Bil.BinOp (Bil.AND,
@@ -510,26 +493,24 @@ let decoded_condition (cond : exp) : guard_op option =
     | _ -> false in
   match cond with
   | Bil.BinOp (Bil.OR, zf, core) when is_flag "ZF" zf && xor_core core ->
-    (* jle: ZF | (SF|OF) & ~(SF&OF) — signed e <= c. NOTE (ora-6): the decoder emits the IDIOM'S OWN op (SLE), NEVER the record's op (LT) — reusing LT would wrongly exclude a = c. *)
+    (* Signed e <= c. *)
     Some SLE
   | core when xor_core core ->
-    (* jl: (SF|OF) & ~(SF&OF) — signed e < c *)
+    (* Signed e < c. *)
     Some SLT
   | Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.OR, cf, zf))
     when is_flag "CF" cf && is_flag "ZF" zf ->
-    (* ja: ~(CF | ZF) — unsigned e > c *)
+    (* Unsigned e > c. *)
     Some UGT
   | Bil.UnOp (Bil.NOT, zf) when is_flag "ZF" zf ->
-    (* jne: ~ZF — e != c. The NEQ row ([decoder_constraint]'s two-piece
-       complement) refines the taken edge to [cur ∖ {c}] — the rule that
-       lets a `while (i != K)` head stabilize AT the landmark K. *)
+    (* e != c; refines to cur minus {c}. *)
     Some NEQ
   | Bil.Var _ as zf when is_flag "ZF" zf ->
-    (* jz: ZF — e == c (the flag-SET edge of the record). *)
+    (* e == c. *)
     Some EQ
   | _ -> None
 
-(* L-S2 (oracle item 10) — [interval_clp_of ~width ~cardn base]: the shared step-1 CLP-interval construction for [comparison_constraint]'s rows and [interval_of_bounds] (None on cardn 0 / WordSet top; the (width+1)-bit cardn — pinned convention). *)
+(* Shared step-1 CLP interval. *)
 let interval_clp_of ~(width : int) ~(cardn : word) (base : word)
     : wordset option =
   if Word.is_zero cardn then None
@@ -538,7 +519,7 @@ let interval_clp_of ~(width : int) ~(cardn : word) (base : word)
         (Cbat_clp.create ~width ~step:(Word.one width) ~cardn base) in
     if WordSet.is_top ws then None else Some ws
 
-(* [comparison_constraint ?cur op c]: = the set of values [x] may take on the taken edge of a jump guarded by [x op c] (a BIL comparison of a variable against a constant), or [None] when the constraint is not a clean singleton / interval CLP (NEQ, signed. *)
+(* Values allowed on a taken edge. *)
 let comparison_constraint ?(cur : wordset option = None)
     ?(known_nonneg : bool = false)
     (op : Bil.binop) (c : word) : wordset option =
@@ -547,7 +528,7 @@ let comparison_constraint ?(cur : wordset option = None)
     if i < 0 then None else Some (Word.of_int ~width:(width + 1) i) in
   let int_of_word (w : word) : int option =
     try Some (Word.to_int_exn w) with _ -> None in
-  (* 2^(w-1) at [width]: the first word of the high (negative-signed) half — the non-negativity threshold *)
+  (* Non-negativity threshold. *)
   let half = Word_ops.half width in
   let provably_nonneg : bool =
     Option.value_map cur ~default:false ~f:(fun ws ->
@@ -563,32 +544,32 @@ let comparison_constraint ?(cur : wordset option = None)
           interval_clp_of ~width ~cardn (Word.zero width)))
   | Bil.EQ -> Some (WordSet.singleton c)
   | Bil.SLT ->
-    (* signed x < c *)
+    (* Signed less-than row. *)
     if Word.(>=) c half
     then interval_clp_of ~width ~cardn:(Word.sub c half) half
     else if provably_nonneg || known_nonneg
     then interval_clp_of ~width ~cardn:c (Word.zero width)
     else None
   | Bil.SLE ->
-    (* signed x <= c *)
+    (* Signed less-equal row. *)
     if Word.(>=) c half
     then interval_clp_of ~width ~cardn:(Word.succ (Word.sub c half)) half
     else if provably_nonneg || known_nonneg
     then interval_clp_of ~width ~cardn:(Word.succ c) (Word.zero width)
     else None
   | Bil.NEQ ->
-    (* L3c-5 — non-convex two-sided constraint (x < c or x > c): no single interval (cf. the ASE'21 inverse-semantics result); sound stop. *)
+    (* Two-sided constraints stay identity. *)
     None
   | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
   | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
   | Bil.AND | Bil.OR | Bil.XOR ->
-    (* L3c-5 — a PRODUCER op used as a comparison guard: the guard's denotation already produced its value set; no backward constraint; sound stop (the structural closure). *)
+    (* Producer guards stay identity. *)
     None
 
-(* ------------------------------------------------------------------ *)
-(* L3a — backward guard refinement (the backward_int_binop machinery, user-approved scope). *)
 
-(* [interval_of_bounds width lo hi]: The CLP interval [lo, hi] at [width] as a wordset, or None on doubt (width mismatch, lo > hi = wrap, full range). *)
+(* Backward guard refinement. *)
+
+(* CLP interval or None on doubt. *)
 let interval_of_bounds (width : int) (lo : word) (hi : word) : wordset option =
   if Word.bitwidth lo <> width || Word.bitwidth hi <> width then None
   else if Word.(>) lo hi then None
@@ -596,7 +577,7 @@ let interval_of_bounds (width : int) (lo : word) (hi : word) : wordset option =
     let ws = WordSet.of_clp (Cbat_clp.interval ~width lo hi) in
     if WordSet.is_top ws then None else Some ws
 
-(* L-A1 — [decoder_constraint ?cur op c]: the constraint rows for the jcc-decoder ops ([decoded_condition] above; the [guard_op] enum). *)
+(* Constraint rows for decoded ops. *)
 let decoder_constraint ?(cur : wordset option = None)
     ?(known_nonneg : bool = false)
     (op : guard_op) (c : word) : wordset option =
@@ -606,49 +587,39 @@ let decoder_constraint ?(cur : wordset option = None)
   | ULE -> comparison_constraint ~cur Bil.LE c
   | EQ -> comparison_constraint ~cur Bil.EQ c
   | NEQ ->
-    (* x != c — the two-piece complement, EXACT in the wordset domain: the
-       full-domain-minus-a-point is a wrapped hull the CLP represents
-       exactly for every c (TOP is linear-canonical, so the composite diff
-       is exact here — unlike the diff of a WRAPPED [cur], whose clp_diff_
-       finset singleton branch derives the step across the value seam and
-       degenerates to a coarse grid). The exclusion of [c] from the
-       operand's own value set happens at the MEET: the backward MINUS
-       propagation shifts the hull exactly ([TOP-{c0}] + k = TOP-{c0+k}),
-       and [meet_var] intersects it with the var's (linear) state — the
-       refinement that lets a jne-guarded counter loop stabilize AT the
-       landmark K. *)
+    (* NEQ is the exact two-piece complement. *)
     let cstr =
       WordSet.diff (WordSet.top (Word.bitwidth c)) (WordSet.singleton c) in
     if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
   | SLT -> comparison_constraint ~cur ~known_nonneg Bil.SLT c
   | SLE -> comparison_constraint ~cur ~known_nonneg Bil.SLE c
   | UGT ->
-    (* unsigned x > c = [c+1, 2^w) — exact, no gate *)
+    (* Unsigned greater-than row. *)
     let lo = Word.succ c in
     if Word.is_zero lo then None
     else interval_of_bounds width lo (Word.ones width)
   | UGE ->
-    (* unsigned x >= c = [c, 2^w) — exact, no gate *)
+    (* Unsigned greater-equal row. *)
     interval_of_bounds width c (Word.ones width)
   | SGT ->
-    (* signed x > c = [c+1, 2^w) — single piece, no gate (why: see the comment above — the >-pieces merge) *)
+    (* Signed greater-than row. *)
     let lo = Word.succ c in
     if Word.is_zero lo then None
     else interval_of_bounds width lo (Word.ones width)
   | SGE ->
-    (* signed x >= c = [c, 2^w) — single piece, no gate (see above) *)
+    (* Signed greater-equal row. *)
     interval_of_bounds width c (Word.ones width)
 
-(* L-D1 — [prove_nonneg ~defs ~stores e]: the PROVENANCE-based non-negativity proof that lets the SLT/SLE gate of [comparison_constraint] (its [?known_nonneg], added in this lane) accept the compared operand [e] even when the ABSTRACT current value set [cur] fails the [max_elem < 2^(w-1)] threshold. *)
+(* Provenance-based non-negativity proof. *)
 let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     ~(stores : def term list) (e : exp) : bool =
-  (* The signed-non-negative literal test: the MSB clear, i.e. *)
+  (* MSB-clear literals. *)
   let nonneg_word (n : word) : bool =
     let w = Word.bitwidth n in
     w > 0
     && Word.(<) n (Word_ops.half w) in
   let stack_anchor (v : var) : bool = Abi.is_stack_reg Abi.x86_64_sysv v in
-  (* [cells]: the cell addrs under consideration (re-entry -> TRUE, the induction hypothesis, seeded); [vars]: the def-lhs vars already followed (re-entry -> FALSE — a cycle has no base). Both are the threaded helper param through the [Var]/[PLUS] recursion. *)
+  (* Threaded cycle guards. *)
   let rec walk (cells : Exp.Set.t) (vars : Exp.Set.t) (e : exp) : bool =
     match e with
     | Bil.Int n -> nonneg_word n
@@ -657,7 +628,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
       let info = Core.Map.find defs (Var.base v) in
       let result =
         if seen then
-          (* A repeated variable may still be the load that closes the stack-cell induction. Follow that load with the existing [cells] memo; only a repeated non-load producer is a genuine unseeded value cycle. *)
+          (* Loads may close the induction. *)
           (match info with
            | Some (d, true) ->
              (match Def.rhs d with
@@ -678,7 +649,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
        | Bil.Int z when Word.is_zero z -> walk cells vars a
        | _ -> false)
     | Bil.BinOp (Bil.RSHIFT, _, Bil.Int k) ->
-      (* A logical right shift by a positive amount clears the sign bit. The zero-shift case is the operand identity. *)
+      (* Positive rshift clears the sign. *)
       (match Word.to_int k with
        | Ok n when n > 0 -> true
        | Ok 0 -> false
@@ -689,10 +660,10 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
        | Ok 0 -> walk cells vars a
        | _ -> false)
     | Bil.BinOp (Bil.TIMES, a, Bil.Int k) ->
-      (* The row below computes the producer pre-image; once the result trace is constrained, the multiplier row is the relevant non-negative recurrence. *)
+      (* Multiplier recurrence row. *)
       if Word.is_zero k then true else walk cells vars a
     | Bil.BinOp (Bil.DIVIDE, a, Bil.Int k) ->
-      (* Unsigned division by at least two has a non-negative signed result; division by one is the operand identity. *)
+      (* Division by 2+ is non-negative. *)
       (match Word.to_int k with
        | Ok n when n >= 2 -> true
        | Ok 1 -> walk cells vars a
@@ -708,7 +679,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     | Bil.BinOp (Bil.XOR, a, Bil.Int k)
       when Word.is_zero k -> walk cells vars a
     | Bil.Cast (Bil.HIGH, _, a) ->
-      (* HIGH of a non-negative source has its result sign bit clear. *)
+      (* HIGH of non-negative is non-negative. *)
       walk cells vars a
     | Bil.Load (_, addr, _, _) ->
       let anchored = Exp.free_vars addr |> Core.Set.for_all ~f:stack_anchor in
@@ -738,28 +709,28 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
   in
   walk Exp.Set.empty Exp.Set.empty e
 
-(* L-S2 (oracle item 9) — [known_nonneg_of ~defs ~stores e]: the [prove_nonneg] gate (const-second row / decoder pre-step); defs or stores absent -> false (pre-L-D1 byte-identity). *)
+(* Non-negativity gate. *)
 let known_nonneg_of ~(defs : (def term * bool) Var.Map.t option)
     ~(stores : def term list option) (e : exp) : bool =
   match defs, stores with
   | Some dm, Some ss -> prove_nonneg ~defs:dm ~stores:ss e
   | _ -> false
 
-(* L3c-3 — [circular_hull width lo hi]: the CIRCULAR hull [lo ... *)
+(* Circular hull. *)
 let circular_hull (width : int) (lo : word) (hi : word) : wordset option =
   if Word.bitwidth lo <> width || Word.bitwidth hi <> width then None
   else
     let ws = WordSet.of_clp (Cbat_clp.interval ~width lo hi) in
     if WordSet.is_top ws then None else Some ws
 
-(* [operand_constraints op cstr a_ws b_ws]: The operand-constraint rules for [v := op(a, b)] with the result constrained to [cstr]: return the constraint [a] (resp. *)
+(* Operand constraints for a constrained result. *)
 let operand_constraints (op : Bil.binop) (cstr : wordset)
     (a_ws : wordset) (b_ws : wordset) : wordset option * wordset option =
   let width = WordSet.bitwidth cstr in
   if WordSet.bitwidth a_ws <> width || WordSet.bitwidth b_ws <> width
   then None, None
   else
-    (* the no-wrap threshold for a constant multiplier/shift: the largest operand value whose scaled image does not wrap *)
+    (* No-wrap threshold. *)
     let wrap_limit (k : word) : word = Word.div (Word.ones width) k in
     let operand_bounded (limit : word) : bool =
       match WordSet.max_elem a_ws with
@@ -771,7 +742,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       if Word.is_zero r then q else Word.succ q in
     match op with
     | Bil.PLUS ->
-      (* V = a + b, v in [vlo,vhi]: a' = [vlo − b_max, vhi − b_min]; b' = [vlo − a_max, vhi − a_min]. *)
+      (* Plus: shift intervals by the other operand. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
          let a' = match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
@@ -785,7 +756,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
          a', b'
        | _ -> None, None)
     | Bil.MINUS ->
-      (* v = a − b: a' = [vlo + b_min, vhi + b_max]; b' = [a_min − vhi, a_max − vlo]. The wrapped bound (the underflow/overflow of the interval arithmetic) is the same circular hull construction as PLUS — sound. *)
+      (* Minus: shift intervals by the other operand. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
          let a' = match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
@@ -799,7 +770,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
          a', b'
        | _ -> None, None)
     | Bil.TIMES ->
-      (* V = a·k, k a literal. *)
+      (* Times by literal. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some k, Some k' when Word.(=) k k' ->
@@ -812,7 +783,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.LSHIFT ->
-      (* v = a << s: the operand rule a' = [vlo >> s, vhi >> s] (the inverse of the def-side rule; sound — [lo>>s, hi>>s] ⊇ the true {a | a·2^s ∈ [vlo,vhi]}). A variable shift hulls over the shift range: a' = [vlo >> s_max, vhi >> s_min] (the images are monotone in s). *)
+      (* Minus: shift intervals by the other operand. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some smin, Some smax ->
@@ -827,7 +798,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.RSHIFT | Bil.ARSHIFT ->
-      (* V = a >> s (logical) / a arshift s: the inverse a' = [vlo << s, (vhi+1) << s − 1] — the shifted-out top bits of a are unconstrained (checked via (vhi+1) ≤ 2^(w−s); the exact wrap yields a' = the domain). *)
+      (* Shift-right inverse. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some smin, Some smax ->
@@ -847,7 +818,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.DIVIDE ->
-      (* v = a / k: the inverse of the TIMES rule — a' = [vlo·k, (vhi+1)·k − 1] (exact: a/k = v ⟺ a ∈ [v·k, (v+1)·k − 1]). Sound only when (vhi+1)·k fits the width. A general divisor hulls over the range: [vlo·k_min, (vhi+1)·k_max − 1]. k = 0 -> the identity. *)
+      (* Minus: shift intervals by the other operand. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some kmin, Some kmax ->
@@ -866,14 +837,14 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.SDIVIDE ->
-      (* V = a sdiv k (k a literal): the signed-interval rule — a sdiv k = v ⟺ a ∈ [v·k, v·k + k − 1] (truncating toward zero), and the classes are contiguous over v, so a' = [slo·k, shi·k + k − 1] on the signed axis — the same circular interval on the word circle. *)
+      (* Signed-division inverse. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some k, Some k' when
            width <= 32 && Word.(=) k k' ->
          (match Word.to_int k with
           | Ok kk when kk > 0 ->
-            (* width <= 32: [to_int] is the signed 32-bit value and the products fit a 63-bit [int] — overflow-free *)
+            (* Small widths avoid overflow. *)
             (match Word.to_int vlo, Word.to_int vhi with
              | Ok slo, Ok shi ->
                let lo' = slo * kk in
@@ -886,10 +857,10 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.MOD | Bil.SMOD ->
-      (* v = a mod k: the true operand set is the periodic union ⋃_j [vlo + jk, vhi + jk] — hulled over j it spans the full domain for any modulus ≪ 2^w, i.e. the identity (sound; the L3c5-2 pin pins the non-refinement). *)
+      (* Minus: shift intervals by the other operand. *)
       None, None
     | Bil.AND | Bil.OR | Bil.XOR ->
-      (* The exact identities are real rules; a mask with any free bit (general m) makes the operand hull the full domain (the identity): a OR 0 = a -> a' = the constraint itself a XOR 0 = a -> a' = the constraint itself a AND. *)
+      (* Exact masks constrain; general masks stay identity. *)
       (match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some k, Some k' when Word.(=) k k' ->
          if Word.is_zero k then
@@ -903,10 +874,10 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
             | _ -> None, None)
          else None, None
        | _ -> None, None)
-    (* comparisons used as producers (EQ/NEQ/LT/LE/SLT/SLE): the def produces a boolean value — the operands are unconstrained (the identity; the guard's own rules constrain them on the guard edge, not through the boolean def) *)
+    (* Boolean producers stay identity. *)
     | _ -> None, None
 
-(* [denote_operand env e]: the current word value of an operand [e] for the row arithmetic, or None on doubt (non-word type, denote error). *)
+(* Current word value or None on doubt. *)
 let denote_operand (env : AI.t) (e : exp) : wordset option =
   match e with
   | Bil.Var v ->
@@ -919,7 +890,7 @@ let denote_operand (env : AI.t) (e : exp) : wordset option =
      | Ok ws -> Some ws
      | Error _ -> None)
 
-(* [meet_var refineable_var env v refined]: meet [refined] into var [v] with the genuine-subset discipline (skip on wrap / disjoint / empty and skip non-refineable vars) — the :487-495 pattern reused by the backward walk. Env unchanged on any doubt. *)
+(* Genuine-subset meet into a var. *)
 let meet_var (refineable_var : var -> bool) (env : AI.t)
     (v : var) (refined : wordset) : AI.t =
   match Var.typ v with
@@ -938,7 +909,7 @@ let meet_var (refineable_var : var -> bool) (env : AI.t)
       else env
   | Type.Mem _ | Type.Unk -> env
 
-(* [constrain_cell refineable_var env ~mem ~addr ~size ~endian cstr]: Meet the constraint [cstr] into the memory cell a load [mem := Load[addr, size, endian]] reads, mirroring the load denotation (denote_exp's Load arm :241-248: addr set -> Key -> Mem.find on the mem var's map, idx (resSize, endian)). *)
+(* Meet a constraint into a load cell. *)
 let rec constrain_cell
     (refineable_var : var -> bool) (env : AI.t)
     ~(mem : exp) ~(addr : exp) ~(size : Size.t) ~(endian : endian)
@@ -946,7 +917,7 @@ let rec constrain_cell
   if not (Exp.free_vars addr |> Core.Set.for_all ~f:refineable_var)
   then env
   else
-    (* WYSINWYX-2 (the re-keyed backward lane, always-on): the cell key is the REWRITTEN address (the offset-from-origin expression via the WALK's state frame — the SINGLE raw key space, the dual-space rebase was removed; the. *)
+    (* Cell keys use rewritten addresses. *)
     let addr_opt =
       if
         Exp.free_vars addr
@@ -988,7 +959,7 @@ let rec constrain_cell
        | Type.Imm _ | Type.Unk -> env)
     | _ -> env
 
-(* [refine_chain ~defs refineable_var ~visited env op a b cstr]: Apply the L3a row for [op] to the producer def [v := op(a, b)] (the result constrained to [cstr]) and refine the VAR operands (meet with the genuine-subset discipline, then recurse). *)
+(* Refine var operands through a producer def. *)
 and refine_chain ~(defs : (def term * bool) Var.Map.t)
     (refineable_var : var -> bool) ~(visited : Var.Set.t)
     (env : AI.t) (op : Bil.binop) (a : exp) (b : exp)
@@ -996,7 +967,7 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
   let width = WordSet.bitwidth cstr in
   match op with
   | Bil.LSHIFT ->
-    (* v = a << k with k a literal < width: a' = [lo >> k, hi >> k] (sound; imprecise on the low bits — the shifted-out bits are dropped rather than constrained) *)
+    (* Minus: shift intervals by the other operand. *)
     (match b with
      | Bil.Int k ->
        (match Word.to_int k with
@@ -1047,13 +1018,13 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
      | _ -> env)
   | _ -> env
 
-(* [constrain_def_chain ~defs refineable_var env e cstr]: Walk BACKWARD through the def chain of [e] from the taken-edge constraint [cstr] on [e], refining producers (meet + recursion). *)
+(* Refine producers backward through defs. *)
 and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
     (refineable_var : var -> bool) ?(visited : Var.Set.t = Var.Set.empty)
     (env : AI.t) (e : exp) (cstr : wordset) : AI.t =
   match e with
   | Bil.Load (m, a, en, s) ->
-    (* e IS a load: constrain the cell directly *)
+    (* Loads constrain the cell. *)
     constrain_cell refineable_var env ~mem:m ~addr:a ~size:s ~endian:en cstr
   | Bil.Var v ->
     let b = Var.base v in
@@ -1067,34 +1038,28 @@ and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
          else
            match Def.rhs d with
            | Bil.Load (m, a, en, s) ->
-             (* v := Load [cell]: the constraint on v IS the constraint on the cell (the re-keyed meet — [constrain_cell]'s always-on frame rewrite). *)
+             (* Load value is the cell value. *)
              constrain_cell refineable_var env ~mem:m
                ~addr:a ~size:s ~endian:en cstr
            | Bil.BinOp (op, a, b) ->
              refine_chain ~defs refineable_var
                ~visited:visited' env op a b cstr
            | Bil.Cast (Bil.HIGH, sz, a) ->
-             (* L3c-4 — the HIGH-extract producer: v := cast HIGH a (v's width = sz < a's width) — the constraint on v shifts up into a's width (see [refine_cast_high]). *)
+             (* HIGH-extract producer row. *)
              refine_cast_high ~defs refineable_var
                ~visited:visited' env a sz cstr
          | Bil.Cast (ct, _sz, _a) ->
-           (* L3c-5 — the remaining cast kinds are EXPLICIT sound stops (the structural closure): LOW is periodic (the low bits repeat every 2^sz — no closed-form on CLPs, cf. *)
+           (* Other casts stay identity. *)
            ignore ct; env
          | Bil.Int _ -> env
          | _ -> env)
   | Bil.BinOp (op, a, b) ->
-    (* the INLINE compared expression (the cmp+je/jne lift WITHOUT a temp:
-       the record's [e] IS the arithmetic, e.g. [zf := (i - k) == 0] —
-       [apply_operand_constraint] lands here with [e] a BinOp): the
-       constraint on the EXPRESSION decomposes through the same producer
-       rows the def-chain walk uses for the temp shape ([refine_chain] —
-       the MINUS row of [i - k ∈ TOP-{0}] shifts to [i ∈ TOP-{k}], whose
-       meet with the linear head state is the jne-loop stabilization). *)
+    (* Inline compares use producer rows. *)
     refine_chain ~defs refineable_var ~visited env op a b cstr
   | _ -> env
 
 
-(* L3c-4 — [refine_cast_high ~defs refineable_var ~visited env a sz cstr]: the HIGH-extract producer row for the def [v := cast HIGH a] with v's width [sz] and the constraint [cstr] on v: v ∈ [lo,hi] (N = sz bits) -> a ∈. *)
+(* HIGH-extract pre-image. *)
 and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
     (refineable_var : var -> bool) ~(visited : Var.Set.t)
     (env : AI.t) (a : exp) (sz : int) (cstr : wordset) : AI.t =
@@ -1130,7 +1095,7 @@ and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
         | _ -> env)
    | None -> env
 
-(* [constrain_cell_on_trace ~st ~live env ~mem ~addr ~size ~endian cstr]: The TRACE-EXACT cell meet (the trace-partitioning design, docs/trace-partitioning-plan.md §3) — the cell gate's replacement. *)
+(* Trace-exact cell meet. *)
 let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
     (env : AI.t) ~(mem : exp) ~(addr : exp) ~(size : Size.t)
     ~(endian : endian) (cstr : wordset) : AI.t =
@@ -1142,9 +1107,9 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
        let resSize = Size.in_bits size in
        if WordSet.bitwidth cstr <> resSize then env
        else
-         (* the frame-correct offset via the LOAD's block state frame *)
+         (* Offset via the load block state. *)
          let addr' = rewrite_addr (AI.frame_of st) addr in
-         (* the trace's var values: st's values ∩ the live constraints *)
+         (* Trace values meet live constraints. *)
          let st' =
            Exp.free_vars addr'
            |> Core.Set.fold ~init:st ~f:(fun acc v ->
@@ -1174,27 +1139,27 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
   | _ -> env
 
 (* ================================================================== *)
-(* The backward-refinement dataflow (the user design, 2026-08-13): *)
-(* the COMPLETE backward traversal. Given the taken-edge constraint *)
-(* [cstr] on the compared expression at the guard block, the *)
-(* refinement propagates BACKWARD through the defs: *)
-(* - the LIVE SET starts with the condition's (var, constraint) *)
-(* pairs (the seeds); *)
-(* - within a block, walk the defs in REVERSE order: a def whose *)
-(* lhs is live gets its INVERSE applied (the row / the cell *)
-(* meet — [def_constraints]); the lhs leaves the live set and the *)
-(* rhs's derived constraints join it; a def whose lhs is not *)
-(* live is SKIPPED; *)
-(* - the phi nodes: a live lhs propagates its constraint to the *)
-(* phi's source values (routed per predecessor edge); *)
-(* - across blocks: the live sets flow to the PREDECESSORS (the *)
-(* graph's reversed edges — the Graphlib fixpoint ~rev:true) *)
-(* until the live sets (and hence the env) stabilize. *)
-(* The env (the guard state) is refined in place (the meets); the *)
-(* meets are idempotent, so the env stabilizes with the live sets. *)
+(* Backward walk: seeds flow to predecessors until stable. *)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 (* ================================================================== *)
 
-(* the live set: var base -> the constraint it must satisfy. *)
+(* Live set: var base to constraint. *)
 module Live = struct
   type t = wordset Var.Map.t
 
@@ -1205,20 +1170,20 @@ module Live = struct
   let remove (key : var) (m : t) : t = Core.Map.remove m key
   let equal (m1 : t) (m2 : t) : bool = Core.Map.equal WordSet.equal m1 m2
 
-  (* the merge: a var live from several paths must satisfy the UNION of the per-path constraints (the value came from ONE path — it satisfies THAT path's constraint, so the union contains it — sound; the CLP union hull over-approximates the gap). *)
+  (* Merged constraints union; hulls over-approximate gaps. *)
   let join (m1 : t) (m2 : t) : t =
     Core.Map.merge m1 m2 ~f:(fun ~key:_ -> function
         | `Left c | `Right c -> Some c
         | `Both (c1, c2) -> Some (WordSet.union c1 c2))
 end
 
-(* The edge_constraint: a constraint the taken-edge trace imposes, ready for the dataflow: - [Var (v, cstr)]: the var must satisfy [cstr] on the trace — flows backward through the defs (the walk's live set); - [Cell (mem,. *)
+(* Taken-edge constraint for the dataflow. *)
 type edge_constraint =
   | Var of var * wordset
   | Cell of exp * exp * Size.t * endian * wordset
   | Infeasible
 
-(* [high_cast_constraint env a sz cstr]: the pure HIGH-extract row — [v := cast HIGH a] (v's width = sz < a's width), the constraint [cstr] on v -> the pre-image on [a] (the top (w−N) bits' value). Extracted from [refine_cast_high] (the row, without the walk). *)
+(* HIGH-extract pre-image. *)
 let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
     (cstr : wordset) : wordset option =
   match denote_operand env a with
@@ -1246,7 +1211,7 @@ let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
        | _ -> None)
   | None -> None
 
-(* [ext_cast_constraint ~is_signed env a cstr]: The UNSIGNED/SIGNED (zero-/sign-extension) row — [v := cast ct a] (a's width n < v's width w), the constraint [cstr] on v -> the pre-image on [a]: - UNSIGNED (zero-extension): a ∈ [lo, hi] ∩ [0, 2^n − 1] - SIGNED. *)
+(* Extension pre-image. *)
 let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
     (cstr : wordset) : wordset option =
   match denote_operand env a with
@@ -1265,11 +1230,11 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
        | Some lo, Some hi ->
          let pieces =
            if not is_signed then
-             (* zero-extension: a = v ∈ [0, 2^n − 1] *)
+             (* Zero-extension case. *)
              if Word.(>) lo maxn then []
              else [ (lo, Word.min hi maxn) ]
            else begin
-             (* sign-extension: the positive half (sext(a) = a) and the negative half (sext(a) = 2^w − 2^n + a) *)
+             (* Sign-extension halves. *)
              let pos =
                if Word.(>) lo (Word.pred half) then []
                else [ Word.max lo zero, Word.min hi (Word.pred half) ] in
@@ -1280,7 +1245,7 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
                let hi' = Word.min hi (Word.ones w) in
                if Word.(>) lo' hi' then []
                else
-                 (* a = v + 2^n (mod 2^w) — the wrap lands in [2^(n−1), 2^n − 1] *)
+                 (* Wrapped negative half. *)
                  [ Word.add lo' two_n, Word.add hi' two_n ] in
              pos @ neg
            end
@@ -1294,14 +1259,14 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
             let hi' =
               List.fold rest ~init:p1 ~f:(fun acc (_, h) ->
                   Word.max acc h) in
-            (* the pieces' words carry the WIDER constraint width [w] — truncate to the pre-image's width [n] (the pieces' values are < 2^n by construction — the truncation is the identity there; the BAP's mixed-width interval would otherwise reject the pair) *)
+            (* Truncate pieces to the operand width. *)
             interval_of_bounds n
               (Word.extract_exn ~hi:(n - 1) lo')
               (Word.extract_exn ~hi:(n - 1) hi'))
        | _ -> None)
   | None -> None
 
-(* [low_cast_constraint env a cstr]: The LOW-cast (truncation) row — v := cast LOW n a (v's width n < a's width w), the constraint [vlo, vhi] on v: the pre-image a's low n bits ∈ [vlo, vhi] — the pieces [vlo + j·2^n, vhi + j·2^n] hulled to the circular. *)
+(* Truncation pre-image. *)
 let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
     : wordset option =
   match denote_operand env a with
@@ -1312,7 +1277,7 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
     else
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
-         (* the constraint's words carry the width n — zero-extend to the pre-image's width w (the BAP's mixed-width arithmetic truncates to the narrowest — a wrong window) *)
+         (* Zero-extend to the operand width. *)
          let vlo_w = Word.extract_exn ~hi:(w - 1) vlo in
          let vhi_w = Word.extract_exn ~hi:(w - 1) vhi in
          let two_n =
@@ -1322,7 +1287,7 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
        | _ -> None)
   | None -> None
 
-(* [extract_constraint env a hi lo cstr]: the Extract(hi, lo, a) row — v's width n = hi − lo + 1, the constraint [vlo, vhi] on v: a's bits [hi..lo] ∈ [vlo, vhi] — the embedding [vlo << lo, (vhi+1) << lo − 1] hulled over the don't-care bits (the low bits 1, the bits above hi 1). *)
+(* Extract pre-image. *)
 let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     (cstr : wordset) : wordset option =
   match denote_operand env a with
@@ -1348,19 +1313,19 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
        | _ -> None)
   | None -> None
 
-(* [def_constraints ~refineable_var env d cstr]: The def-level inverse for the backward walk — [v := rhs] with the constraint [cstr] on v: refine the env (the cell meet for a Load producer, the word meets for the BinOp/Cast operands — refineable-gated) and return the. *)
+
 let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
     (d : def term) (blk : blk term) (live : Live.t) (cstr : wordset)
     : (var * wordset) list =
   match Def.rhs d with
   | Bil.Load (m, a, en, s) ->
-    (* The cell gets the constraint; the address vars are not constrained by the loaded value. *)
+    (* Cells only; addresses unconstrained. *)
     env := constrain_cell_on_trace
       ~st:(Solution.get sol (Term.tid blk)) ~live
       !env ~mem:m ~addr:a ~size:s ~endian:en cstr;
     []
   | Bil.BinOp (Bil.LSHIFT, a, b) ->
-    (* v = a << k with k a literal < width (the refine_chain LSHIFT row, ported to the dataflow): a' = [lo >> k, hi >> k] (sound; imprecise on the low bits) *)
+    (* Minus: shift intervals by the other operand. *)
     let width = WordSet.bitwidth cstr in
     (match b with
      | Bil.Int k -> (
@@ -1387,7 +1352,7 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
          | _ -> [])
      | _ -> [])
   | Bil.BinOp (op, a, b) ->
-    (* The pre-image pairs join the live set; the WORD values are NOT met into the view env here — the walk's fixpoint re-runs the inverse at every iteration and a repeated meet would drift the view (the D4 class: the iterate view lost {4} to the circular hull and gained the wrap). *)
+    
     (match denote_operand !env a, denote_operand !env b with
      | Some a_ws, Some b_ws ->
        (match operand_constraints op cstr a_ws b_ws with
@@ -1421,7 +1386,7 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
          | _ -> [])
      | None -> [])
   | Bil.Cast (Bil.LOW, _, a) ->
-    (* v := cast LOW a — the truncation rule: the pre-image is the periodic hull [vlo, vhi + 2^n − 1]-class (the constraint's words carry the truncated width; [low_cast_constraint] zero-extends them to the pre-image's width). *)
+    (* Truncation pre-image. *)
     (match low_cast_constraint !env a cstr with
      | Some a' -> (
          match a with
@@ -1429,20 +1394,20 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
          | _ -> [])
      | None -> [])
   | Bil.UnOp (Bil.NOT, a) ->
-    (* v := NOT a — the bijection: v ∈ cstr ⟺ a ∈ NOT cstr (the complement is exact on the wordset domain). *)
+    (* NOT is exact. *)
     (match a with
      | Bil.Var av -> [ (Var.base av, WordSet.lnot cstr) ]
      | _ -> [])
   | Bil.UnOp (Bil.NEG, a) ->
-    (* v := NEG a — the wrapped mirror: v ∈ cstr ⟺ a ∈ neg cstr. *)
+    (* NEG is exact. *)
     (match a with
      | Bil.Var av -> [ (Var.base av, WordSet.neg cstr) ]
      | _ -> [])
   | Bil.Var g ->
-    (* v := g — the identity: g ∈ cstr. *)
+    (* Copy is identity. *)
     [ (Var.base g, cstr) ]
   | Bil.Concat (a, b) ->
-    (* v := a ‖ b — the slice rules: the high part's constraint is the extracted high slice of cstr, the low part's the low slice. *)
+    (* Slice rules. *)
     (match a, b with
      | Bil.Var av, Bil.Var bv ->
        (match denote_operand !env b with
@@ -1456,7 +1421,7 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
         | None -> [])
      | _ -> [])
   | Bil.Extract (hi, lo, a) ->
-    (* v := Extract(hi, lo, a) — the embedding rule. *)
+    (* Extract rule. *)
     (match extract_constraint !env a hi lo cstr with
      | Some a' -> (
          match a with
@@ -1466,93 +1431,39 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
   | _ -> []
 
 
-(* L-A2 — the per-block flag GROUP. *)
+(* Per-block flag group. *)
 type flag_group = {
   flags : (var * def term) Var.Map.t;
-  (* the block's 1-bit defs (the lifter's flag vars), keyed by [Var.base] lhs: (lhs, def) pairs — the defs the gate looks up for the idiom flags *)
+  (* 1-bit defs by base lhs. *)
   cmp : def term option;
-  (* [t := e - c]: For the RECORD's (e, c), by structural equality ([Exp.equal] on the operand, [Word.equal] on the constant — the BIR reuses the SSA var/exp objects, so the equality is exact); None = no such def in the block = the gate fails (the flags cannot be bound to the record's comparison). *)
+  (* Record def by structural equality. *)
 }
 
 
-(* The per-fixpoint-run ANALYSIS CONTEXT (per sub, like [edge_conds]) —
-   the deep module behind the engine's one interface: every fact whose
-   lifetime is the fixpoint run lives here, built once at
-   [static_graph_vsa] entry and read O(1) by the engine.
-
-   Its two halves:
-   - STATIC FACTS (a pure function of the block — no state at all):
-     [rc_all_tagged], [rc_flag_states].
-   - CHANGE-DRIVEN CACHES (a pure function of state inputs, keyed by the
-     per-block solution VERSION — O(1) [AI.equal] identity):
-     [rc_cache] (the deep walk) and [rc_out_cache] (the block transfer).
-
-   [rc_versions] is the oracle both caches share: the engine's [set]
-   bumps a block's version ONLY under [not (AI.equal old new_val)], so an
-   unchanged version is EXACTLY identity of the stored state. *)
+(* Per-run analysis context. *)
 type refine_ctx = {
-  (* the HOISTED all-defs-tagged set (was a per-call fold over the whole
-     sub's defs — O(sub) per refinement on big subs) *)
+  (* All-defs-tagged set. *)
   rc_all_tagged : Var.Set.t;
-  (* block tid -> its IN-state's version; bumped by the engine's [set]
-     ONLY on a real [AI.equal] change (see the validity argument) *)
+  (* Per-block solution versions. *)
   rc_versions : int Tid.Map.t;
-  (* the walk's CFG (the sub's [Sub.to_graph] minus the start/exit
-     pseudo-nodes — IDENTICAL to the engine's [cfg]; hoisted, was
-     rebuilt per walk) *)
+  (* Walk CFG without pseudo-nodes. *)
   rc_walk_cfg : Graphs.Tid.t;
-  (* source blk tid -> jmp tid -> the cached walk — ARCH-2: the
-     WALK MEMO instantiation ([Walk_memo]; the entry record and the
-     stamp/validity discipline live in [Cbat_memo]). *)
+  (* Cached walks. *)
   rc_cache : Walk_memo.t;
 
-  (* ---- the performance-architecture lane (2026-09-01, C2) ---- *)
+  
 
-  (* STATIC PER-BLOCK FACTS (C2): [flag_state_of_block]'s result — a pure
-     function of the block ([Term.tid blk] -> the pair). It RE-SCANNED the
-     block's defs TWICE on every denotation; hoisted once per run. *)
+  (* Per-block flag states. *)
   rc_flag_states :
     ((var * Bil.binop * exp * word) option * flag_group) Tid.Map.t;
-  (* STATIC PER-BLOCK CALL FACTS (C2, the remaining half): the two
-     predicates [inspect_call] re-derived on EVERY call denotation by
-     SCANNING THE BLOCK'S DEFS 7 TIMES:
-       [cf_written]  — the SysV integer/pointer arg registers the block
-                       writes (one [Term.enum def_t b] scan PER register —
-                       6 scans);
-       [cf_pushed]   — does the block write RSP (the push evidence — a
-                       7th scan).
-     Both are PURE FUNCTIONS OF THE BLOCK: the [env]-dependent half (the
-     [AI.find_word] lookups) stays at the call site. *)
+  (* Per-block call facts. *)
   rc_call_facts : (var list * bool) Tid.Map.t;
-  (* THE BLOCK-TRANSFER MEMO (C1): source blk tid -> target tid -> the
-     memoized transfer ([Transfer_memo] — the value is the transferred
-     state + the F2 acquisition-fired flag; the read-set stamping and
-     validity discipline live in [Cbat_memo]).
-
-     The transfer [denote_block_with_stores ... ~source:p (get p)] is a
-     PURE FUNCTION of (the block, its in-state) — its only observable
-     effects beyond the returned state are the LANDMARK ACQUISITION
-     calls ([observe_unsat_var], fired from [acquire_unsat_fallthrough]
-     inside [assume_jump_cond_with_group]).  The C2 design therefore
-     REPLAYS the acquisition on a hit instead of suppressing it (see
-     [acquire_of_block]): the cached computation is skipped, never the
-     acquisition.
-
-     The inner [target] key exists because the transfer returns a
-     per-successor FUNCTION — a block with k successors was re-denoting
-     every def k times per sweep.
-
-     VALIDITY is the READ-SET's version identity (the SAME discipline
-     ticket 03 proved for the walk cache): the transfer reads the solution
-     at UPSTREAM blocks, so an in-state-only key would reuse results
-     computed against NARROWER upstream states (unsound in the widening
-     direction). *)
-  (* ARCH-2: the TRANSFER MEMO instantiation ([Transfer_memo]; the
-     value is the transferred state + the F2 acquisition-fired flag). *)
+  (* Memoized block transfers with replayed acquisition. *)
+  (* Transfer memo. *)
   rc_out_cache : Transfer_memo.t;
 }
 
-(* [reverse_def_walk ~defs ~refineable_var env live blk]: The reverse-def walk of one block — the defs in REVERSE order, the def inverse at each live lhs (the lhs leaves the live set, the rhs's derived pairs join it); a def whose lhs is not live is skipped. *)
+(* Reverse-def walk of one block. *)
 let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
     ~(sol : (tid, AI.t) Solution.t)
     (env : AI.t ref) (live : Live.t)
@@ -1562,11 +1473,11 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
   |> List.iter ~f:(fun d ->
       let v = Var.base (Def.lhs d) in
       match Live.find v !live with
-      | None -> ()   (* the lhs not live: skip *)
+      | None -> ()   (* Skip non-live lhs. *)
       | Some cstr ->
         match Core.Map.find defs v with
         | Some _ ->
-          (* the producer subtraction: the constraint applies only to the values THIS def produced *)
+          (* Constraints cover only produced values. *)
           let post_v =
             match Var.typ (Def.lhs d) with
             | Type.Imm w ->
@@ -1578,7 +1489,7 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
            | Some pv ->
              let cstr' = WordSet.meet cstr pv in
              if Word.is_zero (WordSet.cardinality cstr') then
-               (* the def produced nothing satisfying the constraint: its pre-image is empty — the lhs leaves the live set *)
+               (* Empty pre-image drops the lhs. *)
                live := Live.remove v !live
              else begin
                live := Live.remove v !live;
@@ -1590,7 +1501,7 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
         | _ -> ());
   !live
 
-(* [route_phi_constraints ~sol env target live blk]: The phi propagation for the edge toward [target] — a live phi lhs at the block's START propagates its constraint to the phi's source values whose predecessor tid is [target] (a Var source joins the live set; a Load. *)
+(* Phi propagation toward the target. *)
 let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
     (env : AI.t ref) (target : tid)
     (live : Live.t) (blk : blk term) : Live.t =
@@ -1607,43 +1518,14 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
               | Bil.Var sv ->
                 live := Live.add (Var.base sv) cstr !live
               | Bil.Load (m, a, en, s) ->
-                (* the trace-exact cell meet (M2) — the phi's load source's cell on this trace *)
+                
                 env := constrain_cell_on_trace
                   ~st:(Solution.get sol (Term.tid blk)) ~live:!live
                   !env ~mem:m ~addr:a ~size:s ~endian:en cstr
               | _ -> ()));
   !live
 
-(* [refine_edge ~sol ~defs ~stores ?reads env sub blk seeds]: The COMPLETE backward traversal — the Graphlib fixpoint over the REVERSED CFG ([~rev:true] — the live sets flow from the guard to the PREDECESSORS, the per-edge [~target] routing the phi sources) until the live sets.
-    The [Var] seeds NEVER meet the carried env's word values here (the
-    INLINE policy, ticket 02 — Phase B's post-pass contract was deleted
-    with it): a word-value meet is a claim about a var's SSA VALUE, and
-    a successor block can REDEFINE that var with an UNTAGGED def (the
-    tag-only restriction skips it unconditionally — [denote_def]) — the
-    lifted 1-bit FLAGS are exactly this class (`ZF := e == c` feeding no
-    stack sink).  Met inline, the flag's stale refined value ({1})
-    survives the skip, the successor's `reachable_jumps` then evaluates
-    its OWN compound guard over the stale flag as DEFINITELY-TRUE,
-    kills the chain's tail edge, and bottoms a LIVE block (the
-    rec_struct %be1/%bfb Dead→poison regression).  The gated env meet
-    belongs to the CALLER ([refine_edge_inline] applies it, gated on the
-    all-defs-tagged guarantee — see its own comment).  The seeds ALWAYS
-    join the LIVE set: the backward walk derives the operand constraints
-    through [reverse_def_walk]'s producer subtraction, which consults
-    the CURRENT solution and is re-derived at every iteration — no
-    stale-value carry.
 
-    Ticket 03 — [?reads]: the CHANGE-DRIVEN CACHE's read-set
-    accumulator.  The walk reads the solution at every block it visits
-    (the producer subtraction's [denote_def d (Solution.get sol (Term.tid
-    blk))], [def_constraints]'s Load arm, [route_phi_constraints]' cell
-    meets), so the walk's RESULT is a deterministic function of (env,
-    seeds, defs [static], sol RESTRICTED to the visited blocks).  The
-    recording is a CONSERVATIVE SUPERSET of the true reads (a block
-    visited with an empty live set reads nothing but is recorded
-    anyway) — over-recording only costs invalidation precision, never
-    soundness.  The visited set is the right granularity because every
-    [Solution.get] in the walk is keyed by the visited block's tid. *)
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : refine_ctx)
     ?(defs : (def term * bool) Var.Map.t option = None)
@@ -1651,50 +1533,24 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ?(reads : Tid.Set.t ref option = None)
     (env : AI.t) (sub : sub term) (blk : blk term)
     (seeds : edge_constraint list) : AI.t * (tid, Live.t) Solution.t =
-  (* NOTE ON STATE: the visited set is accumulated inside the Graphlib
-     closure, whose [~f] contract has nowhere to thread extra state. The
-     accumulator is therefore CLOSURE-LOCAL: it is created here, filled by
-     the closure, and its content is handed back through [?reads] — an
-     explicit out-parameter the caller OWNS (the caller passes the ref in
-     and reads the set out). No long-lived mutable state escapes the call,
-     and the caller is free to pass a fresh ref per run. *)
+  (* Visited set is closure-local. *)
   match defs with
   | None -> env, Solution.create Tid.Map.empty Live.empty
   | Some defs_map ->
-    (* Ticket 03 — the walk's CFG is the same pseudo-node-free [Sub.to_graph]
-       projection the engine computes at fixpoint entry; [~walk_cfg] passes
-       the hoisted one (the [None] arm — the direct-API path — rebuilds it
-       exactly as before). *)
-    (* ARCH-3 — [?walk_cfg] DELETED: the walk closure threads the run
-       context's hoisted [rc_walk_cfg]; the on-demand rebuild (the
-       former [None] arm) dies with the context-less path. *)
+    (* Walk reuses the hoisted CFG. *)
+    
     let cfg = rctx.rc_walk_cfg in
     let seed_constraints, env0 =
       List.fold seeds ~init:(Live.empty, env) ~f:(fun (m, e) -> function
           | Var (v, c) ->
-            (* NO env meet (the inline policy — see the function comment):
-               a mid-fixpoint env is an UNDER-APPROXIMATION of the final
-               one, so a DISJOINT meet with a derived row is a premature
-               DEADNESS claim — the seed joins the LIVE set only, and
-               the backward walk re-derives the constraint against the
-               CURRENT solution at every iteration, so the refinement
-               fires once the iterate grows to meet it (NO-BOTTOM,
-               docs/trace-partitioning-plan.md §4.3 / AGENTS.md §3). *)
+            
             Live.add v c m, e
           | Cell (mem, addr, size, endian, cstr) ->
             m, constrain_cell_on_trace ~st:env ~live:m e
               ~mem:mem ~addr:addr ~size:size ~endian:endian cstr
           | Infeasible -> m, AI.bottom) in
     let env = ref env0 in
-    (* L2 instrumentation — the pop counter: [refine_edge]'s transfer
-       closure fires exactly once per Kildall POP, so a closure-local
-       counter is the exact pop count without touching Graphlib. The
-       debug adapter commits it once per walk ([bump_walk_pops]) with
-       the distinct-blocks count (the ticket-03 read-set — the visited
-       set) and the truncation bit (Kildall stops at [~steps:256]
-       pops — a SILENT truncation: the live sets are sound but coarser
-       than the least fixpoint). The PROD adapter's [bump_walk_pops] is
-       the identity, so production behavior is unchanged. *)
+    (* Closure counts pops. *)
     let pops = ref 0 in
     let live_sol =
       Cbat_contextual_fixpoint.fixpoint (module Graphs.Tid)
@@ -1705,14 +1561,12 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
         ~f:(fun ~source:n ->
             fun live ->
               incr pops;
-              (* Ticket 03 — the read-set recording (see [refine_edge]'s
-                 own comment): every block the closure visits is recorded
-                 (conservative superset of the true [Solution.get] reads). *)
+              (* Visited blocks are recorded. *)
               Option.iter reads ~f:(fun r ->
                   r := Core.Set.add !r n);
               match Term.find blk_t sub n with
               | Some b ->
-                (* The guard block's own constraints are part of its walk INPUT (joined with the incoming live), so the guard's defs are walked over the seed — a fixture whose guard block defines the compared operand (e.g. *)
+                (* Guard defs walk over the seed. *)
                 let live =
                   if Tid.equal (Term.tid b) (Term.tid blk)
                   then Live.join live seed_constraints
@@ -1726,12 +1580,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               | None -> fun ~target:_ -> live)
         ~step:(fun _ _ -> fun _ x' -> x')
         cfg in
-    (* L2 instrumentation — commit this walk's schedule metrics.  The
-       truncation bit: Kildall's [iters] counts POPS ([step] runs once
-       per pop; the [~steps] bound caps it), so [pops = 256] means the
-       cap was reached — the walk may be unconverged.  The blocks count
-       is the read-set (the visited set) when the accumulator was
-       passed, else 0 (the [reads = None] direct-API path). *)
+    (* Commit walk metrics. *)
     Stages.bump_walk_pops
       ~pops:!pops
       ~blocks:(match reads with
@@ -1739,7 +1588,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
           | None -> 0)
       ~truncated:(!pops >= 256)
       ();
-    (* The guard block's own value in the fixpoint is the raw seed (the init's [Const] — a block with no predecessors never gets its walk instantiated). *)
+    (* Guard with no preds keeps the seed. *)
     let live_sol =
       match Term.find blk_t sub (Term.tid blk) with
       | Some gb ->
@@ -1754,30 +1603,30 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
       | None -> live_sol in
     !env, live_sol
 
-(* The per-sub/per-block ANALYSIS context of the backward walk, bundled into ONE record (the user's signature decision): refineable (the per-sub relevant set, [refineable_of_sub]), defs (the per-sub def-chain map), stores (the per-sub store list), flag_state (the per-block flag record). *)
+(* Backward-walk context record. *)
 type analysis_ctx = {
   refineable : Var.Set.t option;
   defs : (def term * bool) Var.Map.t option;
   stores : def term list option;
   flag_state : (var * Bil.binop * exp * word) option;
-  (* The backward-refinement dataflow : the sub + the guard block — the CFG the complete backward traversal runs over (both None for the direct API -> the traversal is skipped). *)
+  (* Sub and guard block of the walk. *)
   sub : sub term option;
   blk : blk term option;
 }
 
 
 (* ================================================================== *)
-(* the edge_constraint collector (the trace-partitioning design, *)
-(* docs/trace-partitioning-plan.md §3): the PURE constraint *)
-(* derivation. The guard's taken-edge constraint [cstr] on [cond] *)
-(* is decomposed into the leaf seeds for the backward dataflow (M4). *)
-(* The env is an INPUT (the guard's state — the value lookups the *)
-(* rows need); NOTHING is mutated (the meets belong to the dataflow). *)
-(* TOTAL: every shape has a row (the NO-FALLBACK doctrine — the *)
-(* identity / no-edge_constraint for the trivial shapes, never a stop). *)
+(* Leaf constraints of a guard; every shape has a row. *)
+
+
+
+
+
+
+
 (* ================================================================== *)
 
-(* [guard_op_of_binop op]: the BIL comparison op -> the guard_op (the greater-forms exist only in the internal enum). *)
+(* BIL op to guard op. *)
 let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
   | Bil.LT -> ULT
   | Bil.LE -> ULE
@@ -1787,7 +1636,7 @@ let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
   | Bil.SLE -> SLE
   | _ -> EQ
 
-(* [complement_guard_op op]: the FALSE-edge guard_op (the complement of the TRUE-edge row): ULT <-> UGE, ULE <-> UGT, EQ -> (EQ; the EQ complement is the two-piece NEQ row, which the acquisition's always-complement must NOT produce — the EQ row is what the fallthrough of a NOT-flag cond asserts — so EQ complements to itself here), NEQ <-> EQ, SLT <-> SGE, SLE <-> SGT. The BIL-comparison entry point is [complement_binop_guard] below. *)
+(* False-edge complement. *)
 let complement_guard_op (op : guard_op) : guard_op = match op with
   | ULT -> UGE | ULE -> UGT
   | UGT -> ULT | UGE -> ULE
@@ -1795,11 +1644,11 @@ let complement_guard_op (op : guard_op) : guard_op = match op with
   | SLT -> SGE | SLE -> SGT
   | SGT -> SLT | SGE -> SLE
 
-(* [complement_binop_guard op]: the FALSE-edge guard_op of a BIL comparison (via [guard_op_of_binop] — the NEQ / non-comparison inputs land on EQ, as before). *)
+(* False-edge of a BIL comparison. *)
 let complement_binop_guard (op : Bil.binop) : guard_op =
   complement_guard_op (guard_op_of_binop op)
 
-(* [flip_guard_op op]: the const-first flip — (c op e) becomes the row on e: ULT -> UGT, ULE -> UGE, SLT -> SGT, SLE -> SGE, EQ stays. *)
+(* Const-first flip. *)
 let flip_guard_op (op : guard_op) : guard_op = match op with
   | ULT -> UGT | UGT -> ULT
   | ULE -> UGE | UGE -> ULE
@@ -1807,17 +1656,7 @@ let flip_guard_op (op : guard_op) : guard_op = match op with
   | SLE -> SGE | SGE -> SLE
   | EQ -> EQ | NEQ -> NEQ
 
-(* [negate_guard_op op]: the TRUE logical negation of a guard op —
-   [complement_guard_op]'s inequality rows are the same, but its EQ
-   self-complement (EQ -> EQ) is the ACQUISITION lane's always-complement
-   idiom ([acquire_unsat_fallthrough] receives the NEGATED-flag cond, so
-   its "complement" row is the flag-TRUE row), NOT the semantic negation.
-   The single-pass edge-splitting (docs/trace-partitioning-plan.md §4.3)
-   needs the negation itself: a decoded `jne` guard (`~ZF`, the record
-   `ZF := (e == c)`) asserts `e <> c` on its taken edge — the exact
-   two-piece `TOP - {c}` row of [decoder_constraint]'s NEQ arm — and
-   pinning `e` to `{c}` there would EXCLUDE every reachable value but c
-   (unsound).  EQ <-> NEQ; the inequalities flip. *)
+
 let negate_guard_op (op : guard_op) : guard_op = match op with
   | ULT -> UGE | ULE -> UGT
   | UGT -> ULT | UGE -> ULE
@@ -1825,7 +1664,7 @@ let negate_guard_op (op : guard_op) : guard_op = match op with
   | SLT -> SGE | SLE -> SGT
   | SGT -> SLT | SGE -> SLE
 
-(* [guard_constraint w op c]: The TRUE-edge row on the operand of (e op c) — the complete set (docs/trace-partitioning-plan.md §4.1): the two-piece signed rows (the non-negativity gates REMOVED — the negative half is always < c signed), the UGT/UGE/SGT/SGE direct rows. *)
+
 let guard_constraint (w : int) (op : guard_op) (c : word)
     : wordset option =
   let maxw = Word.ones w in
@@ -1834,7 +1673,7 @@ let guard_constraint (w : int) (op : guard_op) (c : word)
   match op with
   | EQ -> Some (WordSet.singleton c)
   | NEQ ->
-    (* the two-piece complement (no [cur] here — the full domain minus the point) *)
+    (* Full domain minus the point. *)
     (match WordSet.diff (WordSet.top w) (WordSet.singleton c) with
      | d -> if Cbat_clp_set_composite.is_bottom d then None else Some d)
   | ULT ->
@@ -1867,7 +1706,7 @@ let guard_constraint (w : int) (op : guard_op) (c : word)
      else iv (Word.succ c) (Word.pred half))
   | SGE -> iv c (Word.pred half)
 
-(* [overlap_constraints op a_ws b_ws]: The var-vs-var / generic-comparison TRUE rows — the constraint on the LEFT operand from the RIGHT's extrema and vice versa (the L3c4 interval-overlap rows "as today", docs/trace-partitioning-plan.md §4.1) + the. *)
+
 let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
     : wordset option * wordset option =
   let w = WordSet.bitwidth a_ws in
@@ -1936,7 +1775,7 @@ let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
        x_cstr, y_cstr
      | _ -> None, None)
 
-(* [row_for ~env ~ctx e op c]: The taken-edge constraint on the operand [e] of (e op c) — [decoder_constraint] (the provenance- gated signed rows; a PROVEN non-negative operand gets the exact single piece, anything else the TOTAL two-piece rule — the. *)
+(* Taken-edge constraint on an operand. *)
 let row_for ~(env : AI.t) ?(ctx : analysis_ctx option)
     (e : exp) (op : guard_op) (c : word) : wordset option =
   let cur = match denote_imm_exp e env with
@@ -1950,15 +1789,15 @@ let row_for ~(env : AI.t) ?(ctx : analysis_ctx option)
      | Some cstr -> Some cstr
      | None -> guard_constraint (Word.bitwidth c) op c)
 
-(* [edge_constraints ~env ?ctx cond cstr]: The pure constraint derivation — the guard's edge constraint decomposed into the leaf seeds. *)
+(* Leaf seeds of a guard. *)
 let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     (cond : exp) (cstr : wordset) : edge_constraint list =
-  (* The signed rows are represented by the wordset domain as a two-piece set. *)
+  (* Signed rows are two-piece. *)
   match cond with
   | Bil.Var v ->
     begin match Var.typ v with
     | Type.Imm 1 ->
-      (* the bare-flag shape: the {1}/{0} edge_constraint + the flag-state recovery (the comparison constraint applies on the flag-SET edge) *)
+      (* Bare-flag shape with recovery. *)
       let seeds = ref [ Var (Var.base v, cstr) ] in
       if WordSet.bitwidth cstr = 1
          && WordSet.elem Word.b1 cstr
@@ -1979,7 +1818,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     | Type.Imm _ | Type.Mem _ | Type.Unk -> []
     end
   | Bil.Int c ->
-    (* the constant: the constraint disjoint -> the edge has NO states (the Bakhirkin case — the view becomes bottom) *)
+    (* Disjoint constants kill the edge. *)
     if WordSet.elem c cstr then [] else [ Infeasible ]
   | Bil.BinOp (op, a, b) ->
     begin match op with
@@ -1996,7 +1835,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
             | `False, Bil.NEQ ->
               Some (WordSet.singleton c0)
             | `False, Bil.EQ ->
-              (* the EQ's FALSE side = the NEQ complement (the complement_guard_op maps EQ to itself — the guard_op has no NEQ) *)
+              (* False EQ is NEQ. *)
               Some (WordSet.diff (WordSet.top (Word.bitwidth c0))
                       (WordSet.singleton c0))
             | `True, _ ->
@@ -2059,7 +1898,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
                 | None, None -> ())
            | _ -> ())
         | _ ->
-          (* the generic comparison (non-const non-var operands): the rows apply with the OTHER operand's denoted value-set, then the recursion into both operands' structures *)
+          (* Generic comparisons recurse both sides. *)
           (match denote_operand env a, denote_operand env b with
            | Some a_ws, Some b_ws ->
              let x_true, y_true = overlap_constraints op a_ws b_ws in
@@ -2091,20 +1930,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
       then [ Infeasible ]
       else !acc
     | Bil.AND ->
-      (* §4.3 AND-CONJOIN (the [Edge.cond] lane): BAP's accumulated path
-         condition conjoins the guards with [Bil.AND] ([c2 & ~c1]), and a
-         conjoined guard is TRUE only when EVERY conjunct is true — each
-         one independently seeds the SAME env, so the conjunction
-         transfers whole (the seed application meets each into the state,
-         the intersection).  SOUND ONLY on the forced-TRUE singleton:
-         [a & b = 1 -> a = 1 AND b = 1] is exact, but [a & b = 0] is the
-         DISJUNCTION [a = 0 OR b = 0] — conjoining there would exclude
-         reachable values (unsound), and a 1-bit TOP carries no
-         information; both take the producer row below (the identity /
-         the mask rows — the sound fallback, never a stop).  [Bil.AND] as
-         a PRODUCER op (a bitwise AND producing a value that must land in
-         a WIDER [cstr]) is the producer catch-all's role — the two roles
-         are kept disjoint by the {1} test. *)
+      
       if WordSet.bitwidth cstr = 1
          && WordSet.elem Word.b1 cstr
          && not (WordSet.elem Word.b0 cstr)
@@ -2127,7 +1953,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
     | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
     | Bil.OR | Bil.XOR ->
-      (* the producer rows ([operand_constraints]) on the operands + the recursion into each operand's structure *)
+      (* Producer rows plus recursion. *)
       (match denote_operand env a, denote_operand env b with
        | Some a_ws, Some b_ws ->
          (match operand_constraints op cstr a_ws b_ws with
@@ -2145,42 +1971,17 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
        | _ -> [])
     end
   | Bil.Load (m, a, en, s) ->
-    (* e IS a load: the cell edge_constraint — the trace-exact meet in the dataflow *)
+    
     [ Cell (m, a, s, en, cstr) ]
   | Bil.UnOp (Bil.NOT, e) ->
-    (* the bijection row — no gates (the {1}-singleton gate and the comparison-shape stop are removed). *)
+    (* Bijection row. *)
     let base = edge_constraints ~env ?ctx e (WordSet.lnot cstr) in
-    (* §4.3 NOT-UNWRAP (the [Edge.cond] lane): [Edge.cond] NEGATES a
-       chain's preceding conds ([c2 & ~c1]; the tail carries [~c1 & ~c2]),
-       and in the -O0 lift a cond is a BARE 1-BIT FLAG (`jne` = [~ZF],
-       `jz` = [ZF]) whose own value carries no comparison structure — the
-       flag's {0} seed alone refines nothing (the boolean def is the
-       comparison-producer identity).  The recorded flag STATE (the
-       block's last understood comparison, [flag_state_of_block]) binds
-       the flag to its underlying [e op c]: the NEGATED-flag edge asserts
-       the NEGATED comparison — [negate_guard_op] (the TRUE negation,
-       EQ <-> NEQ; [complement_guard_op]'s EQ self-complement is the
-       acquisition lane's flag-idiom, NOT the semantic negation — using
-       it here would pin a `jne` counter to `{c}`, unsound).  This is
-       exactly the row the SHALLOW pre-step's decoder arm applies
-       ([assume_jump_cond_with_group]); the deep walk re-derives it from
-       the ACCUMULATED cond, where the negation arrives wrapped around
-       the flag var rather than as the decoder's own idiom.  A BIL
-       comparison inner is NOT unwrapped — its explicit `` `False ``
-       rows (already fired by [base] above) are the complement; unwrapping
-       it again would double-negate (an unsound flip).  Un-derivable
-       forms keep the [base] seeds — the identity is the sound fallback,
-       never a stop, never bottom (docs/trace-partitioning-plan.md §4.3). *)
+    
     let unwrap () : edge_constraint list =
       match ctx, e with
       | Some ({ flag_state = Some (fv, op, e0, c0); _ }), Bil.Var v
         when Var.same fv v ->
-        (* ~(flag) = the flag CLEAR edge = the recorded comparison FALSE:
-           [row_for] on the NEGATED op — the record's OWN op (LT/LE/EQ/
-           SLT/SLE, any understood comparison), the mirror of the
-           positive bare-flag arm above (a decoded `jne`'s taken edge is
-           the exact two-piece `TOP - {c}`; `jz`'s complement pins {c};
-           `~CF` of `CF := t < 10` gives the UGE row [10, max]). *)
+        (* Clear edge uses the negated op. *)
         (match row_for ~env ?ctx e0 (negate_guard_op (guard_op_of_binop op)) c0 with
          | Some cstr -> edge_constraints ~env ?ctx e0 cstr
          | None -> [])
@@ -2189,7 +1990,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
   | Bil.UnOp (Bil.NEG, e) ->
     edge_constraints ~env ?ctx e (WordSet.neg cstr)
   | Bil.Cast (ct, sz, a) ->
-    (* the cast rows: HIGH/SIGNED/UNSIGNED/LOW *)
+    (* Cast rows. *)
     let pre = match ct with
       | Bil.HIGH -> high_cast_constraint env a sz cstr
       | Bil.SIGNED -> ext_cast_constraint ~is_signed:true env a cstr
@@ -2199,7 +2000,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
      | Some a' -> edge_constraints ~env ?ctx a a'
      | None -> [])
   | Bil.Concat (a, b) ->
-    (* the slice rows: the high part's constraint = the extracted high slice of the constraint; the low part's = the low slice *)
+    (* Slice rows. *)
     (match denote_operand env b with
      | Some b_ws ->
        let bw = WordSet.bitwidth b_ws in
@@ -2216,24 +2017,24 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
      | Some a' -> edge_constraints ~env ?ctx a a'
      | None -> [])
   | Bil.Ite (_, t, f) ->
-    (* the two-branch union: the constraint holds on the taken edge whichever branch produced the value *)
+    (* Union holds on either branch. *)
     edge_constraints ~env ?ctx t cstr @ edge_constraints ~env ?ctx f cstr
   | Bil.Let (_, _, e) ->
     edge_constraints ~env ?ctx e cstr
   | Bil.Unknown _ -> []
   | Bil.Store (_, _, u, _, _) ->
-    (* the value-side row: the cell's constraint transfers to the stored value's trace *)
+    (* Cell constraints transfer to stored values. *)
     edge_constraints ~env ?ctx u cstr
 
 
-(* The direct-API backward refinement ([inverse_denote_exp]) is the M3 collector ([edge_constraints]) applied at the leaves — see the function's own comment below; this historical block (the pre- Refactor-1b structural walker) was deleted 2026-08-15. *)
 
-(* L-S2 (oracle item 8) — [refineable_var_of refineable v]: the verbatim refineability closure of [inverse_denote_exp] and [assume_jump_cond] (restriction OFF -> true; ON -> base in set). *)
+
+(* Refineability closure. *)
 let refineable_var_of (refineable : Var.Set.t option) (v : var) : bool =
   Option.value_map refineable ~default:false
     ~f:(fun set -> Core.Set.mem set (Var.base v))
 
-(* L-S2 (oracle item 7) — [apply_operand_constraint ~defs refineable_var env e cstr]: the meet-if-Var-then-constrain_def_chain tail of the jcc-decoder pre-step (genuine-subset, refineable-gated meet; None defs -> env). *)
+
 let apply_operand_constraint
     ~(defs : (def term * bool) Var.Map.t option)
     (refineable_var : var -> bool) (env : AI.t) (e : exp) (cstr : wordset)
@@ -2249,8 +2050,8 @@ let apply_operand_constraint
      | _ ->
        constrain_def_chain ~defs:dm refineable_var env e cstr)
 
-(* [inverse_denote_exp ?ctx cond cstr env]: Refine [env] under the taken-edge constraint [cstr] on [cond], walking the CONDITION STRUCTURE (the mirror of [denote_exp]) and recursing into sub-expressions; the leaves call the existing backward kernels. *)
-(* [inverse_denote_exp ?ctx cond cstr env]: Refine [env] under the taken-edge constraint [cstr] on [cond] — the DIRECT-API backward refinement (the fixpoint path no-ops below: the INLINE deep refinement — [refine_edge_inline] at the jump — owns the refinement there; the [sub = Some _] marker makes the direct call a no-op so production never bypasses the fused transfer). *)
+(* Refine by a taken-edge constraint. *)
+(* Direct-API backward refinement. *)
 let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
     (cstr : wordset) (env : AI.t) : AI.t =
   match ctx with
@@ -2267,7 +2068,7 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
           constrain_cell refineable_var env ~mem ~addr ~size ~endian cstr
         | Infeasible -> env)
 
-(* L3c-1 — the flag-state record (the Laporte / Blazy-Laporte-Pichardie design): per BLOCK, the (flag var, op, e, c) of the LAST in-scope 1-bit def whose rhs is a comparison [e op c] the walk understands (comparison_constraint's LT/LE/EQ/SLT/SLE vs constant — L3c-2 added the signed rows). *)
+(* Last understood flag-setting comparison. *)
 
 
 let flag_state_of_block (b : blk term) :
@@ -2284,7 +2085,7 @@ let flag_state_of_block (b : blk term) :
     | d :: rest ->
       let lhs = Def.lhs d in
       let lhs_base = Var.base lhs in
-      (* (a) any def of a free var of the recorded operand clears *)
+      (* Operand clobber clears. *)
       let st =
         match st with
         | Some (fv, op, e, c)
@@ -2292,7 +2093,7 @@ let flag_state_of_block (b : blk term) :
               Var.same x lhs_base) ->
           None
         | _ -> st in
-      (* (b) a def of the flag var itself: an understood comparison re-binds; anything else clears *)
+      (* Flag rebinds or clears. *)
       let st =
         match st, Var.typ lhs, Def.rhs d with
         | Some (fv, _, _, _), Type.Imm 1, Bil.BinOp (op', e', Bil.Int c') ->
@@ -2307,7 +2108,7 @@ let flag_state_of_block (b : blk term) :
       go st rest
   in
   let record = go None ds in
-  (* the flag group: every 1-bit def, keyed by [Var.base] lhs *)
+  (* 1-bit defs by base. *)
   let flags =
     Term.enum def_t b
     |> Seq.fold ~init:Var.Map.empty ~f:begin fun g d ->
@@ -2316,12 +2117,7 @@ let flag_state_of_block (b : blk term) :
       | Type.Imm 1 -> Core.Map.set g ~key:(Var.base lhs) ~data:(lhs, d)
       | Type.Imm _ | Type.Mem _ | Type.Unk -> g
     end in
-  (* the t-def for the record's (e, c) — structural equality. TWO shapes:
-     (1) the TEMP shape [t := e - c] (the canonical -O0 cmp: the flag defs
-         reference [t]); (2) the INLINE shape — no temp exists; the record's
-         own flag def IS the comparison ([zf := (e == c)] of a
-         [BinOp (EQ, e, Int c)] record — the cmp+je/jne lift without a
-         temp): the flag def binds [cmp] itself. *)
+  (* Record def; temp or inline shape. *)
   let cmp =
     match record with
     | None -> None
@@ -2341,15 +2137,15 @@ let flag_state_of_block (b : blk term) :
       | None -> List.find ds ~f:inline_shape in
   (record, { flags; cmp })
 
-(* L-A2 — [same_comparison_group fg fv e cond]: the same-comparison GATE for the compound-guard (jcc-decoder) arm of [assume_jump_cond] (the oracle's Q3(d) group extension). *)
+(* Same-comparison gate. *)
 let same_comparison_group (fg : flag_group) (fv : var) (e : exp)
     (cond : exp) : bool =
-  (* [is_flag v]: [v] is one of the lifter's 1-bit flag names *)
+  (* True for flag vars. *)
   let is_flag (v : var) : bool =
     match Var.name v with
     | "CF" | "ZF" | "SF" | "OF" -> true
     | _ -> false in
-  (* the flags to check: every flag var mentioned in [cond], plus the record's own [fv] (its def is the record's understood comparison — the subset check passes trivially; included per the signature) *)
+  (* Flags in cond plus the record flag. *)
   let flag_vars =
     Exp.free_vars cond
     |> Core.Set.fold ~init:Var.Set.empty ~f:begin fun acc v ->
@@ -2369,39 +2165,20 @@ let same_comparison_group (fg : flag_group) (fv : var) (e : exp)
       | Some (_, d) ->
         Exp.free_vars (Def.rhs d)
         |> Core.Set.for_all ~f:begin fun w ->
-          (* w ∈ free_vars(e) ∪ {t}, by base equality ([Var.same] — the env-key idiom; the BIR reuses the SSA var objects) *)
+          (* Base-equal free vars. *)
           Core.Set.exists fvs_e ~f:(fun x -> Var.same w x)
           || Var.same w t
         end
     end
 
-(* [acquire_unsat_fallthrough ?ctx ?flag_group cond env]: paper-faithful LANDMARK
-   ACQUISITION on the FALLTHROUGH edge of [cond]. Mirrors the trace-partitioning's
-   `edge_constraints_of ~complement:true` semantics: when [flag_state] is
-   available AND the cond matches the recorded 1-bit flag (the canonical
-   `-O0 cmp; jcc` idiom), apply [complement_guard_op] to the recorded
-   op and use [row_for] to derive the per-leaf FALLTHROUGH CLP; otherwise
-   walk the cond's complement via [edge_constraints] (the structural arm
-   of [assume_jump_cond]).
 
-   Fires [observe_unsat_var] (the empty-meet side-effect observer) instead
-   of [meet_var] — does NOT modify [env]. The acquisition is a sound no-op
-   outside any WTO cycle (the [observe_unsat_var] no-op identity per
-   AGENTS.md §3 NO-FALLBACKS).
-
-   This is the SEAM that closes the gap the JLE fixture's "natural join gives
-   K+1 = 101" symptom: for monotonic counter loops the trace-partitioning's
-   TAKEN-edge meets are non-empty (so the forward [meet_var] arm never fires),
-   but the FALLTHROUGH meet of `[0..N]` with the per-leaf fallthrough CLP
-   (e.g. `{K}` for `i != K`, `[K+1..max]` for `i <= K`) is empty as long as
-   the head's upper bound < K — this is the paper's Listing 1 acquisition. *)
 let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
     ?(flag_group : flag_group option = None)
     (cond : exp) (env : AI.t) : unit =
   match ctx with
   | None -> ()
   | Some ctx ->
-    (* Mirror the trace-partitioning's complement-flag-state recovery: *)
+    
     begin match ctx.flag_state with
     | Some (_fv, bop, e, c) ->
       let gate_ok =
@@ -2437,7 +2214,7 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
       | None -> ()
     end
 
-(* Refines [env] for the taken edge of the conditional jump [jmp]: the concrete states on the taken edge are exactly those where [Jmp.cond jmp] evaluates to true, so the refined state must over-approximate { s in env | cond(s) = true }. *)
+(* Refine by a taken jump condition. *)
 let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     ?(defs : (def term * bool) Var.Map.t option)
     ?(stores : def term list option)
@@ -2446,16 +2223,16 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     ?(sub : sub term option = None)
     ?(blk : blk term option = None)
     (env : AI.t) (jmp : jmp term) : AI.t =
-  (* Relevance restriction (user design, ora-4, reworked per ora-5 / P2d-1b) — the frozen-flag guard: when the restriction is on, refine only vars in the per-sub relevant set (a skipped def's var would otherwise freeze at. *)
+  (* Refine only relevant vars. *)
   let refineable_var (v : var) : bool = refineable_var_of refineable v in
-  (* Refactor-1b (the arm collapse): the SIX shape arms of the pre- Refactor-1a [assume_jump_cond_with_group] and the decoder arm's manual wiring collapse to (a) the jcc-decoder idiom PRE-STEP below ([decoded_condition] ->. *)
+  
   let ctx : analysis_ctx =
     { refineable; defs; stores; flag_state; sub; blk } in
   let cond = Jmp.cond jmp in
   acquire_unsat_fallthrough ~ctx ~flag_group cond env;
   match decoded_condition cond with
   | Some op ->
-    (* L-A2 — the jcc-DECODER PRE-STEP (kept, runs FIRST and RETURNS when it fires): the -O0 loop guards are compound flag expressions (jle = `ZF | (SF|OF) & ~(SF&OF)`, jl = `(SF|OF) & ~(SF&OF)`, ja = `~(CF | ZF)`) that match. *)
+    (* Decoder pre-step runs first. *)
     begin match flag_state with
     | Some (fv, _, e, c)
       when Option.value_map flag_group ~default:false
@@ -2463,7 +2240,7 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
       let cur_e = match denote_imm_exp e env with
         | Ok ws -> Some ws
         | Error _ -> None in
-      (* L-D1 — the provenance-based non-negativity proof for the SLT/SLE gate: [e]'s def chain (a Load from the RSP/RBP-anchored loop slot, seeded and incremented) proves the true concretization is [0, ∞) even when [cur]'s. *)
+      (* Non-negativity proof for signed gates. *)
       let known_nonneg = known_nonneg_of ~defs ~stores e in
       (match decoder_constraint ~cur:cur_e ~known_nonneg op c with
        | Some cstr ->
@@ -2472,10 +2249,10 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     | _ -> env
     end
   | None ->
-    (* The general structural refinement: the taken edge forces the condition TRUE, so the {1} wordset at width 1 ([WordSet.singleton Word.b1]) is the forced value; [inverse_denote_exp ~ctx] decomposes [cond] through the M3. *)
+    (* Taken edge forces {1}. *)
     inverse_denote_exp ~ctx cond (WordSet.singleton Word.b1) env
 
-(* L-A2 — the exported [assume_jump_cond] (the L3c-1 signature, .mli-typed): the group-aware implementation is [assume_jump_cond_with_group] above; this wrapper OCCLUDES the ?flag_group parameter (OCaml rejects optional. *)
+(* Group-aware wrapper. *)
 let assume_jump_cond ?(refineable : Var.Set.t option)
     ?(defs : (def term * bool) Var.Map.t option)
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
@@ -2484,36 +2261,25 @@ let assume_jump_cond ?(refineable : Var.Set.t option)
     env jmp
 
 (* ================================================================== *)
-(* The single-pass trace-partitioning transfer (docs/trace-partitioning- *)
-(* plan.md §2/§4.3 — the fused per-edge refinement): BAP's IR graph     *)
-(* ([Sub.to_cfg]) carries the ACCUMULATED path condition of every      *)
-(* out-edge ([Graphs.Ir.Edge.cond e g] — probe-verified 2026-08-30:    *)
-(* for `when c1 goto l1; when c2 goto l2; goto l3` the l2 edge carries  *)
-(* `c2 & ~c1` and the unconditional tail carries `~c1 & ~c2`), so the  *)
-(* when-chain directive (a cond is refined by every previous cond that *)
-(* was not true) is BAP-native — no chain-specific machinery. The       *)
-(* conds are STATIC per sub: precompute ONCE at fixpoint entry          *)
-(* ([edge_conds_of]), never re-derive per iteration (§4.3 rule 4).     *)
+(* Per-edge refinement uses accumulated edge conds. *)
+
+
+
+
+
+
+
+
+
 (* ================================================================== *)
 
-(* [edge_cond]: one out-edge's precomputed refinement input — the edge's
-   jmp term (the per-jmp-kind transfer — the frame-keeping call
-   abstraction, the Goto target filter, bottom for the unreachable —
-   stays keyed to the jmp, exactly as today) plus its ACCUMULATED
-   condition (the deep walk's input). *)
+(* One edge's jmp plus accumulated cond. *)
 type edge_cond = {
   cond_of_edge : jmp term;
   acc_cond : exp;
 }
 
-(* [edge_conds_of sub]: the per-sub static edge table — block tid -> jmp
-   tid -> the edge's (jmp, accumulated cond).  ONE pass over the IR graph
-   ([Sub.to_cfg], a free projection with NO start/exit pseudo-nodes),
-   [Edge.cond] computed for every edge; the jmp terms are correlated by
-   [Edge.tid = Term.tid (Edge.jmp e)] (probe-verified).  Call/Ret
-   (Indirect) and Int jumps carry no IR edge (they stay keyed to their
-   jmp term only — the deep refinement is the identity for them, the
-   sound fallback). *)
+(* Per-sub static edge table. *)
 let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
   let ircfg = Sub.to_cfg sub in
   let tbl : (Tid.t, edge_cond Tid.Map.t) Hashtbl.t =
@@ -2535,61 +2301,59 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
       Core.Map.set acc ~key ~data)
 
 (* ================================================================== *)
-(* Ticket 03 — the CHANGE-DRIVEN CACHE (the big-binary cost lane):    *)
-(* the deep per-edge refinement ([refine_edge_inline]) runs on EVERY  *)
-(* visit of every successor of every guarded block — the dominant     *)
-(* cost of the big-binary conversion (stage_timer: the fixpoint is    *)
-(* ~92% of a hot sub's producer time).  The cache re-runs the deep    *)
-(* WALK only when its inputs CHANGED.                                 *)
-(*                                                                    *)
-(* THE VALIDITY ARGUMENT (the soundness core — WHY the version check *)
-(* is exactly the ticket's AI.equal key, and why it is also NECESSARY): *)
-(* - The walk's result is a deterministic function of (env, seeds,    *)
-(*   defs/stores/sub/blk [per-run static], and the solution RESTRICTED*)
-(*   to the blocks the walk READS — [reverse_def_walk]'s producer     *)
-(*   subtraction [denote_def d (Solution.get sol (Term.tid blk))],    *)
-(*   [def_constraints]'s Load arm and [route_phi_constraints]' cell   *)
-(*   meets all read [Solution.get sol (Term.tid blk)] of the visited *)
-(*   blocks).  The env itself is a pure function of the source block's*)
-(*   IN-state ([process_vertex] computes [p_entry = get p] ->         *)
-(*   [denote_defs] -> the shallow pre-step — no other input), and the  *)
-(*   seeds are pure in (env, the static acc_cond).                    *)
-(* - The engine's [set v new_val] fires ONLY under the stability gate *)
-(*   [not (AI.equal old new_val)] ([process_vertex]'s last line), so  *)
-(*   a block's version being unchanged is EXACTLY [AI.equal]-identity *)
-(*   of its stored state: the version counter IS the AI.equal check   *)
-(*   (the widening head's [AI.equal old (AI.join old incoming)] model *)
-(*   the ticket names), hoisted to O(1).                              *)
-(* - The recorded read-set is the CONSERVATIVE SUPERSET of the true  *)
-(*   reads (the visited blocks; a block visited with an empty live set *)
-(*   reads nothing but is recorded anyway — over-recording only costs *)
-(*   invalidation precision, never soundness).  The source block is   *)
-(*   pre-seeded into the read-set, which makes the entry also cover   *)
-(*   the env input (its IN-state version).  A tid NEVER [set] reads   *)
-(*   the run's fixed init/default (version 0) — it becomes >= 1 on    *)
-(*   the first [set], invalidating any entry recorded at 0.           *)
-(* - THE CACHE UNIT IS THE WALK ONLY ([refine_edge]); the seed        *)
-(*   derivation and the GATED ENV MEET run EVERY visit — the meet's   *)
-(*   empty-meet arm fires [observe_unsat_var] (the LANDMARK           *)
-(*   acquisition cycle), and a skipped re-acquisition after            *)
-(*   [lm_advance] would flip [lm_calc_steps] from [Finite] to [Zero] *)
-(*   and change the widening arm: NOT byte-identical.  The walk       *)
-(*   itself fires NO [meet_var]/[observe_unsat_var] (its meets are    *)
-(*   cell meets via [Mem.meet_range] — verified), so caching it is    *)
-(*   side-effect-free.  The not_implemented degradation prints are   *)
-(*   input-deterministic and the corpus emits none (byte-identity of *)
-(*   the err files is unaffected).                                    *)
-(* - Per-run, per-sub: created at [static_graph_vsa] entry like       *)
-(*   [edge_conds] (never shared across runs; a nested run — the      *)
-(*   OFF-path [denote_call] recursion — builds its own), so no stale  *)
-(*   cross-run reuse is possible.                                     *)
+(* Deep walk cached per (block, jmp). *)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 (* ================================================================== *)
 
 
 
-(* [call_facts_of_block b]: the STATIC per-block call facts (C2) — the arg
-   registers the block writes and whether it writes RSP. A pure function of
-   the block, so the run context computes it once per block. *)
+(* Static per-block call facts. *)
 let call_facts_of_block (b : blk term) : var list * bool =
   let defs = Term.enum def_t b |> Seq.to_list in
   let written =
@@ -2599,22 +2363,8 @@ let call_facts_of_block (b : blk term) : var list * bool =
   let pushed = List.exists defs ~f:(fun d -> Var.same (Def.lhs d) rsp) in
   (written, pushed)
 
-(* [ver_of rc t]: the block's current solution version — 0 = never [set]
-   (its stored value is the run's FIXED init/default and cannot have
-   changed since the run started, so 0 is a stable identity). *)
-(* ARCH-3 — [mk_rctx ~cfg s]: the ONE constructor of the per-run
-   analysis context.  Owns every STATIC fact a dual-path consumer
-   needs (the all-defs-tagged set, the per-block flag states, the
-   per-block call facts) plus the EMPTY change-driven caches (the
-   version table, the walk cfg, the two memos).  Extracted from the
-   engine's former literal so the direct-API/test path — which used to
-   pass [rctx = None] and RECOMPUTE each fact on demand at every use —
-   builds the same hoisted tables once per call.  The per-sub statics
-   are pure functions of the (analyze-tagged) sub; [cfg] is the
-   pseudo-node-free [Sub.to_graph] projection the walk uses (passed by
-   the engine, which already builds it; a direct-API caller passes the
-   same shape).  Per-run and per-sub: a nested run builds its own — no
-   cross-run reuse. *)
+(* Block version; 0 means never set. *)
+(* Per-run analysis context. *)
 let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
   rc_all_tagged =
     Term.enum blk_t s
@@ -2648,73 +2398,12 @@ let ver_of (rc : refine_ctx) (t : Tid.t) : int =
   | Some v -> v
   | None -> 0
 
-(* ARCH-2 — [reads_valid]/[snapshot_reads]/[snapshot_out_reads] are
-   DELETED: the discipline they each implemented half of (the walk's
-   twin, the transfer's twin — byte-identical bodies) is ONE module
-   now ([Cbat_memo]: [valid]/[stamp], threaded per call with the
-   context's [ver_of]).  [ver_of] stays — the memo's callers
-   partially apply it as the version oracle. *)
 
 
-(* [replay_acquisition ~denote_jump_acq]: REPLAY a block's LANDMARK
-   ACQUISITION side effects on a cache hit (Q1 — the correctness fix for
-   the C1 transfer memo).
 
-   THE PROBLEM. [denote_jump] fires [Cbat_landmarks.observe_unsat_var]
-   from THREE sites, and they are NOT redundant — different constraint,
-   different op, different env:
 
-     (a) [acquire_unsat_fallthrough]  the recorded comparison (e, c) with
-         [complement_guard_op] — the FALLTHROUGH row — over the INCOMING
-         env (fired before the shallow step refines).
-     (b) [meet_var] in [refine_edge_inline]'s gated env meet (cbat_vsa
-         .ml:1008) — the TAKEN-edge seeds from the ACCUMULATED acc_cond,
-         whose NOT-unwrap arm uses [negate_guard_op] — over the POST-
-         shallow-refine env.
-     (c) [meet_var] in [apply_operand_constraint] (the jcc-decoder arm of
-         [assume_jump_cond_with_group]) — [decoder_constraint]'s row over
-         the recorded (e, c).
 
-   Acquisition is load-bearing: it records a (bound, distance)
-   measurement, and TWO measurements are what turns [lm_calc_steps]
-   `Zero into `Finite — i.e. it DECIDES THE WIDENING ARM. Dropping
-   observations is not byte-identical and is unsound in the narrowing
-   direction (the ticket-03 failure mode: Finite -> Zero).
 
-   THE FIX. Do not hand-roll the sites (a previous attempt re-derived
-   only (a) — and got it wrong). Instead REPLAY THE REAL PIPELINE: run
-   the same [denote_jump] with the deep walk DISABLED. That covers all
-   three sites by construction and cannot drift from the real path,
-   because it IS the real path minus one side-effect-free step.
-
-   The walk is disabled by a flag [denote_jump] already understands
-   ([~no_walk]) rather than by a separate code path. Cost: the def
-   denotations and the per-jump shallow step and env meet, but NO deep
-   walk and no join — strictly cheaper than the transfer it replaces.
-
-   LEVER (why this is nearly free in practice): [observe_unsat_var] is a
-   NO-OP outside a WTO head (cbat_landmarks.ml: the [widening_at_head =
-   None] arm returns immediately), so when the transfer runs outside a
-   head there is nothing to replay and the caller skips this entirely. *)
-
-(* [refine_edge_inline ~sol ~defs ~stores ~flag_state ~flag_group ~sub b
-   env jmp acc_cond]: the DEEP per-edge refinement, inlined at the jump
-   (§2 step 2 / §4.3): derive the leaf seeds from the edge's ACCUMULATED
-   cond ([edge_constraints] — the AND-conjoin and NOT-unwrap arms) over
-   the state the SHALLOW pre-step already refined ([assume_jump_cond_
-   with_group] is KEPT — the deep walk is added ON TOP, it does not
-   replace it: the shallow step carries the green F1-NEQ stabilization
-   chain — the guard-var meet + [constrain_def_chain]'s MINUS row), and
-   run the existing backward walk ([refine_edge]) over the CURRENT
-   solution.  The identity (no seeds) is the sound fallback — never
-   bottom, never a stop.
-
-    Ticket 03 — [?rctx] + [~jt]: the CHANGE-DRIVEN CACHE.  The walk runs
-    ONCE per (source block, jmp tid) and is REUSED while its inputs are
-    unchanged (the read-set's per-block solution versions — see the
-    [refine_ctx] block for the validity argument); [~jt] is the jmp's tid
-    (the cache key's second component).  The seed derivation and the
-    gated env meet are NOT cached (every visit, exactly as before). *)
 let refine_edge_inline
     ~(sol : (tid, AI.t) Solution.t)
     ~(defs : (def term * bool) Var.Map.t option)
@@ -2728,106 +2417,25 @@ let refine_edge_inline
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
     : AI.t * refine_ctx option * Tid.Set.t =
-  (* [~discarded]: the caller has already determined that THIS jump's
-     transfer result is DISCARDED (the jmp-kind arms below return
-     [AI.bottom] for it: a Direct goto/ret whose target != the requested
-     one, or a Direct call to a different callee).
-
-     Q2 (the performance lane): when the result is discarded, the DEEP
-     WALK is pure waste — but ONLY the walk. Everything else here is
-     KEPT, because it is NOT side-effect-free:
-
-       - the seed derivation: cheap, and needed for the env meet below;
-       - the GATED ENV MEET: fires [Cbat_landmarks.observe_unsat_var]
-         through [meet_var] (cbat_vsa.ml, the empty-meet arm). That is the landmark
-         ACQUISITION seam — the paper's Listing 1 — and it decides the
-         widening arm. Skipping it changes the widening: not
-         byte-identical, and unsound in the narrowing direction.
-       - the walk: side-effect-free (no [meet_var]; its meets are cell
-         meets — see the ticket-03 argument at :2550).
-
-     So [~discarded] gates exactly the walk, and nothing else. *)
-  (* EXPLICIT STATE: the (possibly updated) run context comes back out
-     alongside the refined env, together with the set of blocks the walk
-     visited (the transfer's read-set contribution). The [rctx = None]
-     arm — the direct-API/test path — returns None unchanged. *)
+  
+  (* Threaded context plus visited set. *)
   let ctx : analysis_ctx =
     { refineable = None; defs; stores; flag_state;
       sub = Some sub; blk = Some b } in
   let seeds = edge_constraints ~env ~ctx acc_cond (WordSet.singleton Word.b1) in
-  (* LANDMARKS (§5): the walk's meets fire [observe_unsat_var]; the walk
-     runs INSIDE the engine's [widening_at_head] binding (the engine sets
-     it around the block denotation), so acquisition attributes to the
-     right head — no re-binding here. *)
-  (* NO BOTTOM (§4.3 / AGENTS.md §3): an [Infeasible] seed is a DEADNESS
-     claim — mid-fixpoint it can only arise from a DERIVED row (a row
-     conditioned on the CURRENT iterate's value-sets, e.g. the producer
-     rows' pre-image on a CONSTANT operand excluding the constant), never
-     from the syntactic literal-FALSE cond ([reachable_jumps] already
-     filters those before the refinement).  A premature deadness claim
-     bottom on a live edge FREEZES the coupled fixpoint below the truth
-     — the head stops receiving the edge's contribution and the solution
-     becomes an UNDER-approximation (the F1-NEQ freeze class: the taken
-     edge of a `jne` loop bottomed on every early iterate, pinning the
-     head at [0..2] < [0..100]).  The identity — drop the seed, keep the
-     state — is the sound fallback, never a stop. *)
+  
+  (* Infeasible seeds stay identity, never bottom. *)
   let seeds =
     List.filter seeds ~f:(fun s -> match s with Infeasible -> false | _ -> true) in
   match seeds with
   | [] -> (env, Some rctx, Tid.Set.empty)
   | _ ->
-    (* THE GATED ENV MEET (§2/§4.3): a seed's word-value meet is a claim
-       about a var's SSA VALUE, applied through [meet_var]'s REFINEABLE
-       gate (the domain's own discipline — a var with at least one
-       RELEVANT-tagged def; the lifted 1-bit FLAGS feeding no stack sink
-       are untagged).  An UNGATED meet is a STALE-VALUE hazard through
-       the tag-only restriction: [denote_def] skips an untagged def
-       unconditionally, so a successor block can REDEFINE the var (its
-       own `ZF := e == c` cmp) while the met {1} SURVIVES the skip —
-       [reachable_jumps] then evaluates the successor's compound guard
-       over the stale flag as DEFINITELY-TRUE, kills the when-chain's
-       tail edge, and bottoms a LIVE block (the rec_struct regression:
-       %be1 bottom -> the member def tagged Dead -> emitter poison ->
-       the lifted binary computing wrong values).  The gate excludes
-       exactly the vars whose redefinitions the restriction skips;
-       [meet_var] also fires [observe_unsat_var] on the empty-meet arm —
-       the LANDMARK acquisition seam (§5). *)
-    (* THE ALL-DEFS-TAGGED GUARANTEE (the stale-value hazard's exact
-       discriminator): the env meet is safe IFF every redefinition of the
-       var goes through [denote_def] — i.e. the base's defs are ALL
-       relevant-tagged (the tag-only restriction denotes a tagged def
-       normally; it SKIPS an untagged one unconditionally).  A var with
-       one untagged def anywhere in the sub can be redefined by a skip,
-       letting the stale met value survive into the successor's own
-       guard evaluation ([reachable_jumps] over a stale flag -> a
-       compound jle evaluates definitely-true -> the chain's tail edge
-       dies -> the block bottoms -> the member def tags Dead -> emitter
-       poison -> WRONG VALUES: the rec_struct/fizzbuzz_safe regression
-       class).  The [refineable] gate alone is INSUFFICIENT — it only
-       says the base has SOME tagged def (Relevance.analyze's flag lane
-       tags the flag defs of a guarded loop); a mixed base still carries
-       the hazard.  Bases with any untagged def drop the env meet (the
-       seed stays in the LIVE set — the walk's own derivation is
-       unaffected); [meet_var] fires [observe_unsat_var] on the
-       empty-meet arm, the LANDMARK acquisition seam (§5).
-
-       Ticket 03 — the set is TAG-STATIC per sub (the relevance tags are
-       set by [Relevance.analyze] before the fixpoint and never change
-       during the run), so it is HOISTED into the per-run [rctx]
-       ([static_graph_vsa] computes it once like [refineable]/[defs]);
-       the [rctx = None] arm (the direct-API/test path, no fixpoint)
-       computes it on demand exactly as before. *)
-    (* ARCH-3 — the table is always there: [refine_edge_inline] takes a
-       REQUIRED [~rctx] now (the caller built it via [mk_rctx] — the
-       engine at fixpoint entry, a direct-API/test caller once per
-       call), so the former [None] on-demand recompute of the sub's
-       tagged set deletes. *)
+    
+    
+    
     let all_tagged : Var.Set.t = rctx.rc_all_tagged in
     let refineable_var (v : var) : bool = refineable_var_of refineable v in
-    (* The gated env meet runs on EVERY visit (NOT cached — see the cache
-       block's comment: its empty-meet arm is the landmark ACQUISITION
-       seam, and a skipped re-acquisition after [lm_advance] would change
-       the widening arm). *)
+    
     let env =
       List.fold seeds ~init:env ~f:(fun e -> function
           | Var (v, c) ->
@@ -2835,29 +2443,9 @@ let refine_edge_inline
             then meet_var refineable_var e v c
             else e
           | Cell _ | Infeasible -> e) in
-    (* THE CHANGE-DRIVEN CACHE (ticket 03): the seeds join the LIVE set
-       and [refine_edge] runs the WALK — the expensive part (a reverse-CFG
-       fixpoint over the sub).  The walk is cached per (source block, jmp
-       tid), keyed on the walk's INPUT identity: the read-set's per-block
-       solution versions (which — via the engine's [AI.equal]-gated [set]
-       — also covers the source block's env, pre-seeded into the read-set).
-       The seed derivation and the gated env meet above are OUTSIDE the
-       cache (cheap, and the meet carries the acquisition side effects);
-       the walk itself is side-effect-free (no [meet_var] — its meets are
-       cell meets), so skipping a repeat of an input-identical walk is
-       observationally identical.  A walk whose inputs changed recomputes
-       and re-records.  No [rctx] + [defs] (the direct-API/test path) or
-       a read-set miss keeps the exact uncached behavior. *)
-    (* [walk]: the cached deep walk (ticket 03) + the C1 transfer read-set.
-       EXPLICIT STATE: [st] is the run context threaded in and the pair
-       (result, updated context) is threaded out; [seed_reads] accumulates
-       the blocks THIS transfer's walks visit, seeded with the source block
-       by the engine. *)
-    (* ARCH-3 — [rctx] required: the [None/None] direct-API arm of this
-       cache (the uncached [refine_edge] call) is REACHABLE ONLY when
-       [defs] is None ([denote_jump]'s own option); the engine always
-       passes [Some defs], so the cache is the engine path and the
-       None-defs arm keeps the uncached walk for the no-defs caller. *)
+    
+    (* Cached walk with threaded context. *)
+    (* No-defs callers keep the uncached walk. *)
     let walk env seeds : AI.t * refine_ctx option * Tid.Set.t =
       if discarded then (env, Some rctx, Tid.Set.empty)
       else
@@ -2865,16 +2453,11 @@ let refine_edge_inline
       | Some _ ->
         let rc = rctx in
         let bt = Term.tid b in
-        (* ARCH-2 — the WALK MEMO: [find] carries the whole discipline
-           (the version-stamped read-set, the validity check, the
-           stale-miss); the closure only distinguishes hit/miss now. *)
+        (* Memo handles validity. *)
         let version = ver_of rc in
         (match Walk_memo.find ~version rc.rc_cache bt jt with
          | Some refined ->
-           (* HIT: the walk's own read-set is a SUBSET of the transfer's
-              (both are keyed on the same versions), so the transfer's
-              accumulator gains only the source block — already seeded by
-              the engine. *)
+           (* Walk reads subset the transfer reads. *)
            (refined, Some rc, Tid.Set.empty)
          | None ->
            let walk_reads = ref (Tid.Set.singleton bt) in
@@ -2895,7 +2478,7 @@ let refine_edge_inline
         (refined, Some rctx, Tid.Set.empty) in
     walk env seeds
 
-(* Computes the denotation of a basic block's jumps. *)
+(* Denotation of a block's jumps. *)
 let denote_jump ?refineable ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
@@ -2906,34 +2489,14 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (b : blk term)  (env : AI.t) ~(target : tid)
     : AI.t * refine_ctx option * Tid.Set.t =
-  (* EXPLICIT STATE: the fold threads (env, run context, the union of the
-     walks' read-sets) across the block's jumps. [AI.join] over the per-jump
-     results is folded in too, so the accumulator is the join-so-far.
-     ARCH-3 — the accumulator is the OPTION-THREADED view (the updated
-     context a jump's refinement may produce); the REQUIRED [~rctx] param
-     is bound once here as [rc0] for the read-only sites ([inspect_call]'s
-     hoisted call-facts lookup) that do not thread updates. *)
+  (* Fold joins per-jump results. *)
   let rc0 = rctx in
   let per_jump (acc, rctx, reads) jmp =
-    (* Refine the state for the taken edge by the jump's condition (see [assume_jump_cond]). *)
+    (* Refine by the jump cond. *)
     let env =
       assume_jump_cond_with_group ?refineable ?defs ?stores ~flag_state
         ~flag_group ~sub ~blk:(Some b) env jmp in
-    (* §2/§4.3 THE INLINE DEEP REFINEMENT (added ON TOP of the shallow
-       pre-step above — KEPT, it carries the green F1-NEQ stabilization
-       chain): the transfer is driven by the edge's ACCUMULATED condition
-       ([Graphs.Ir.Edge.cond], the when-chain negatives included), not
-       the jmp's own cond.  Precomputed ONCE per sub ([edge_conds_of] at
-       fixpoint entry); the deep walk ([refine_edge]) runs over the
-       CURRENT solution.  Only the REFINEMENT INPUT switches to the
-       accumulated cond — the per-jmp-kind transfer below (the
-       frame-keeping call abstraction + the L-E1 RSP +8 matched-pair
-       restore, the Goto target filter, bottom for the unreachable) is
-       KEYED TO THE JMP TERM exactly as today.  Call/Int jmps carry no
-       IR edge (the identity — the sound fallback); no table, no sol, or
-       an un-seeding cond keeps the shallow-refined env (the identity).
-       Ticket 03 — [?rctx] threads the per-run CHANGE-DRIVEN CACHE (the
-       walk keyed per (source block, jmp tid); see [refine_ctx]). *)
+    (* Deep walk uses the accumulated cond. *)
     let env, rctx, reads =
       match edge_conds, sol, sub with
       | Some tbl, Some snap, Some s ->
@@ -2944,10 +2507,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
           |> Option.map ~f:(fun ec -> ec.acc_cond) in
         (match acc_cond with
          | Some acc_cond ->
-           (* Q2 — is this jump's RESULT discarded? Mirrors EXACTLY the
-              arms below that return [AI.bottom] for it. Only those shapes
-              are safe to skip: an Indirect goto/ret returns [env] for any
-              target, so it must keep computing. *)
+           (* Discard test mirrors bottom arms. *)
            let discarded =
              Option.value ~default:false no_walk ||
              match Jmp.kind jmp with
@@ -2958,12 +2518,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
                 | Some (Direct tid) -> compare_tid target tid <> 0
                 | Some (Indirect _) | None -> false)
              | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false in
-           (* ARCH-3 — the accumulator threads the OPTION view (a jump
-              may update the run context); the callee takes the PLAIN
-              context (its [~rctx] is required).  Unwrap: the accumulator
-              is [Some] always — the fold's init is [Some rctx] and every
-              arm returns a [Some]-shaped value (the callee's return is
-              option-wrapped too). *)
+           (* Accumulator threads optional context. *)
            let env', rctx', reads' =
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
                ~flag_group ?refineable
@@ -2972,26 +2527,20 @@ let denote_jump ?refineable ?preserved ?defs ?stores
            (env', rctx', Core.Set.union reads reads')
          | None -> (env, rctx, reads))
       | _ -> (env, rctx, reads) in
-    (* E2e-B, ora-7 — remove hot-loop eprintf; gate per-hit event log (the old debug line flushed stderr on EVERY Call denotation, per fixpoint iteration). *)
+    
     let inspect_call c =
       match Call.return c with
         | None -> AI.bottom
         | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
         | Some (Indirect _)
         | Some (Direct _) ->
-          (* P2d-1b (lane B) — relevance-restricted call handling (user design, ora-5): when the restriction is engaged, a call (direct AND indirect — the same abstraction, which is better than the [AI.top] below for indirect. *)
+          (* Relevance-restricted calls. *)
           begin
             let rsp = Abi.x86_64_sysv.sp in
-            (* Hike addition (the call-abstraction precision lane — the whole-memory-top gap fix): the pointer-argument ESCAPE set — the value sets of the SysV integer/pointer arg registers at the call, plus the caller's own frame boundary (the post-push RSP). *)
-            (* C2 — the ESCAPE SET: WHICH registers this block writes is
-               STATIC ([rc_call_facts]); only their VALUES (the
-               [AI.find_word] lookups) depend on [env]. The old code
-               re-scanned the block's defs once per param register on
-               every call denotation. *)
+            (* Escape set plus caller frame boundary. *)
+            (* Written registers are static. *)
             let escape =
-              (* ARCH-3 — [rctx] is required: the hoisted call-facts
-                 table is always there; only the TABLE-MISS arm stays
-                 (impossible from [mk_rctx], cheap when it fires). *)
+              
               let written =
                 match Core.Map.find rc0.rc_call_facts (Term.tid b) with
                 | Some (w, _) -> w
@@ -3002,9 +2551,9 @@ let denote_jump ?refineable ?preserved ?defs ?stores
                 ~preserved:(Option.value ~default:Var.Set.empty preserved)
                 ~rsp:(AI.find_word 64 env rsp)
                 ~escape env in
-            (* L-E1 (ora-9 Item 2, user-prioritized) — the matched-pair RSP restoration on the ON-path return edge: the caller models the push as defs (RSP := RSP − 8; mem[RSP] := retaddr; call) and the callee's ret — the pop (t :=. *)
-            (* C2 — the PUSH EVIDENCE is static too (see [escape]). *)
-            (* ARCH-3 — same collapse as [written] above. *)
+            (* RSP restores by +8 on returns. *)
+            
+            
             let pushed =
               match Core.Map.find rc0.rc_call_facts (Term.tid b) with
               | Some (_, p) -> p
@@ -3014,16 +2563,15 @@ let denote_jump ?refineable ?preserved ?defs ?stores
                 AI.add_word abs ~key:rsp
                   ~data:(WordSet.add (AI.find_word 64 abs rsp)
                            (WordSet.singleton (Word.of_int ~width:64 8))) in
-              (* WYSINWYX-2 (the in-state port) — the matched- pair restoration applied to the state's RELATION too: RSP's offset restores by +8 (the relation is path- invariant across calls modulo this). *)
+              (* Relation restores RSP by +8. *)
               AI.set_frame abs (AI.frame_add_rsp (AI.frame_of abs))
             end else abs
           end in
-    (* the per-jump transfer result: the jmp-kind arms below, paired with
-       the threaded (context, read-set). *)
+    (* Per-jump transfer results. *)
     let env_res, rctx, reads =
       match Jmp.kind jmp with
       | Int _ ->
-        (* NOT_IMPLEMENTED IMPLEMENTATION (lane B, ora-2): an interrupt/trap edge is an unknown EXTERNAL callee (kernel / signal handler). *)
+        (* Traps are external callees. *)
         (AI.call_abstraction
            ~preserved:(Option.value ~default:Var.Set.empty preserved) env,
          rctx, reads)
@@ -3038,12 +2586,12 @@ let denote_jump ?refineable ?preserved ?defs ?stores
     ~init:(AI.bottom, Some rctx, Tid.Set.empty)
     ~f:per_jump
 
-(* Computes the denotation of a block in a context-sensitive way, dependent on which block is next reached. *)
+(* Block denotation toward a target. *)
 
 
 
 
-(* L-D1 — the internal, stores-aware block denotation (the per-sub store list for the provenance-based SLE/SLT gate, see [stores_of_sub]); the fixpoint path ([static_graph_vsa]) calls it with ~stores (absent -> the decoder arm's [known_nonneg] stays false). *)
+(* Stores-aware block denotation. *)
 let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     ?(sub : sub term option = None)
     ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
@@ -3053,21 +2601,12 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
     (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t)
     : target:tid -> AI.t * refine_ctx option * Tid.Set.t =
- (* EXPLICIT STATE: the returned function TAKES the run context and gives it
-    back updated, alongside the transferred state and the blocks the walk
-    read.  The old signature was [target:tid -> AI.t]; the context is now a
-    parameter of the same call rather than a mutable field. *)
+ (* Threaded context plus read set. *)
  match (Program.lookup blk_t ctx source) with
    | Some b ->
      let postcond = denote_defs b env in
-     (* L3c-1 — the per-block flag-state record (the BLP design): the last understood comparison that set a flag in scope in THIS block, for the bare-flag arm of [assume_jump_cond] (flag-indirected guards).
-
-        C2 — the pair is a PURE FUNCTION OF THE BLOCK ([flag_state_of_block]
-        re-scanned the block's defs TWICE per denotation), so the run
-        context carries it; the [None] arm (the direct-API/test path,
-        no fixpoint) computes it on demand exactly as before. *)
-     (* ARCH-3 — [rctx] required: the hoisted flag-state table is
-        always there (the table-miss arm stays, as above). *)
+     (* Last understood flag-setting comparison. *)
+     
      let flag_state, flag_group =
        match Core.Map.find rctx.rc_flag_states (Term.tid b) with
        | Some fs -> fs
@@ -3086,24 +2625,24 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
 type vsa_sol = (tid, AI.t) Solution.t
 
 
-(* [default_entry]: The entry state of the UNANCHORED run — AI.top (the RSP := 0 anchor [set_stack_0] was REMOVED: the base-independence endgame — the frame relation (seeded by [init_sol]'s [seed_frame]) makes the stack addressing. *)
+(* Entry state is top. *)
 let default_entry () : AI.t = AI.top
 
-(* Set up the initial solution for a general VSA pass over a subroutine. Assumes that the inputs can be any valid values for their types. *)
+(* Initial solution of a sub. *)
 let init_sol ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = Term.first blk_t sub in
   let entry_state = Option.value ~default:(default_entry ()) entry in
-  (* WYSINWYX-2 (the in-state port) — the ORIGIN definition: the sub's entry RSP has offset 0 (in BOTH anchored and unanchored runs — the origin is the entry RSP, not an assumption about its absolute value). *)
+  (* Entry RSP has offset 0. *)
   let entry_state = AI.set_frame entry_state AI.seed_frame in
   let set_init sb = Map.set empty_map ~key:(Term.tid sb) ~data:entry_state in
   let base_map = Option.value_map ~default:empty_map ~f:set_init msb in
-  (* Other than the first block, we assume that other blocks can only be reached via flow in the CFG. If the CFG is partial, this will produce an unsound result. (Note, however, that iterated VSA with explicit edge introduction can overcome this) *)
+  (* Partial CFGs give unsound results. *)
   Solution.create base_map AI.bottom
 
-(* E2e-A, ora-7 — the call handling below is NOT "highly unoptimal": the call abstraction (the ON path) is the production treatment; the recursion below is the OFF-path fallback. *)
+(* Calls abstract; recursion is fallback. *)
 
-(* The per-sub refineable var set for the relevance restriction — { v | v has a def tagged [Utils.relevant] } (the merged single-pass forward D-set tagging: relevant = RSP-derived at its position ∪ the resets ∪ L-E2. *)
+(* Vars with tagged defs. *)
 let refineable_of_sub (s : sub term) : Var.Set.t =
   Term.enum blk_t s
   |> Seq.concat_map ~f:(Term.enum def_t)
@@ -3113,7 +2652,7 @@ let refineable_of_sub (s : sub term) : Var.Set.t =
     else acc
   end
 
-(* L3c-1 — the per-sub def-chain map for the backward guard refinement ([constrain_def_chain]): Var.base-normalized lhs -> (the def term that defines it, whether the base has EXACTLY ONE def in the sub). *)
+(* Per-sub def-chain map. *)
 let defs_of_sub (s : sub term) : (def term * bool) Var.Map.t =
   Term.enum blk_t s
   |> Seq.concat_map ~f:(Term.enum def_t)
@@ -3124,7 +2663,7 @@ let defs_of_sub (s : sub term) : (def term * bool) Var.Map.t =
     | Some _ -> Core.Map.set m ~key ~data:(d, false)
   end
 
-(* L-D1 — the per-sub STORE list for the SLE/SLT gate relaxation ([prove_nonneg]): every def whose rhs is a [Bil.Store] — the store sites ([Bil.Store (m, a, u, e, s)]: memory, address, value, endian, size — the [denote_def] constructor shape). *)
+(* Per-sub store list. *)
 let stores_of_sub (s : sub term) : def term list =
   Term.enum blk_t s
   |> Seq.concat_map ~f:(Term.enum def_t)
@@ -3135,7 +2674,7 @@ let stores_of_sub (s : sub term) : def term list =
   end
   |> Seq.to_list
 
-(* P2d-1b (lane B) — the per-sub preserved var set for the call abstraction (user design, ora-5): {RSP, RBP, RBX, R12, R13, R14, R15} (the call+ret identity registers and the callee-saved registers; built like the fork —. *)
+(* Preserved registers. *)
 let preserved_of_sub (s : sub term) : Var.Set.t =
   let regs =
     Abi.x86_64_sysv.sp :: Abi.x86_64_sysv.fp :: Abi.x86_64_sysv.callee_saved
@@ -3155,32 +2694,23 @@ let preserved_of_sub (s : sub term) : Var.Set.t =
   Core.Set.union regs virt
 
 let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
-  (* P2d-1b (lane B) — per-sub sets, computed ONCE at fixpoint entry from the (analyze-tagged) sub: the refineable vars for [assume_jump_cond] and the preserved vars for the call abstraction (see [refineable_of_sub]/[preserved_of_sub]). *)
+  (* Per-sub sets computed once. *)
   let refineable = refineable_of_sub s in
   let preserved = preserved_of_sub s in
-  (* L3a — the per-sub def-chain map for the backward guard refinement, computed once at fixpoint entry like [refineable] and threaded through [denote_block] (see [defs_of_sub]). Inert when no conditional jump constrains a def-chained expression. *)
+  (* Per-sub def-chain map. *)
   let defs = defs_of_sub s in
-  (* L-D1 — the per-sub store list for the provenance-based SLE/SLT gate ([prove_nonneg]), computed once at fixpoint entry like [defs] and threaded the same way (see [stores_of_sub]). *)
+  (* Store list computed once. *)
   let stores = stores_of_sub s in
-  (* WYSINWYX-1 — the per-sub frame facts (per-block frame-derived registers and offset expressions), computed ONCE at fixpoint entry like [defs]/[stores] and threaded through [denote_block_with_stores] for the Load/Store address rewrite (the relation itself lives IN the state — the in-state port). *)
-  (* E2e-A, ora-7 — the recursion below is the OFF-path fallback required for the byte-identical baseline (the ON path abstracts calls without recursing); keep. *)
+  (* Frame facts computed once. *)
+  (* Recursion is fallback. *)
   let rec denote_call stack ~sub env ~target =
     match (Program.lookup sub_t ctx sub) with
     | None -> invalid_arg "sub tid does not represent a subroutine"
     | Some sub ->
       if List.mem stack (Term.tid s) ~equal:Tid.equal && List.length stack > 6 then AI.top else begin
-        (* P2d-1b (lane A transitional) — the caller's relevant-vars capture and the caller-alias union were deleted with the refs (ora-5 removes the caller-union: lane B replaces this whole recursion with the call abstraction). *)
+        
         let fun_sol = static_graph_vsa (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
-        (* ARCH-3 — the nested fold denoted the callee's blocks with the
-           CALLER's [refineable]/[preserved]/[defs]/[stores] and no
-           context (the former [rctx = None] direct path, recomputing
-           every static fact per block).  It now builds ONE callee-keyed
-           context via [mk_rctx] (the callee's own pseudo-node-free cfg
-           projection) and passes it — the same tables the nested
-           [static_graph_vsa] run builds internally.  This OFF-path is
-           dead in practice ([denote_jump] never applies [denote_call]
-           — traced 2026-09-01) but kept for the byte-identical
-           baseline; correctness over cost here. *)
+        (* Nested runs build callee contexts. *)
         let callee_cfg =
           Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
           |> Graphs.Tid.Node.remove Graphs.Tid.exit in
@@ -3200,40 +2730,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         end
       end
   in
-  (* §4.3 rule 4 — PRECOMPUTE ONCE: the per-sub static edge table (the IR
-     graph via [Sub.to_cfg] + every edge's ACCUMULATED cond), computed at
-     fixpoint entry and threaded through [denote_block_with_stores] like
-     [defs]/[stores]; the conds do not depend on the solution, so they are
-     never re-derived per iteration.  The engine's WTO/cfg below keeps
-     [Sub.to_graph] exactly as before — the IR graph is ADDITIONAL, for
-     the edge conds only.  (The Back_edges/label_widening_points rewrites
-     are deleted on this line — the engine widens at WTO heads; the
-     conds are tag-independent.) *)
+  (* Per-sub static edge table. *)
   let edge_conds = edge_conds_of s in
   let cfg = Sub.to_graph s in
-  (* BAP 2.6's Sub.to_graph adds the [start]/[exit] pseudo-nodes; the fixpoint would apply the block denotation to them and crash (Program.lookup fails). *)
+  (* Pseudo-nodes never reach denotation. *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  (* ARCH-3 — the run context is ALWAYS constructed, via the ONE
-     constructor [mk_rctx] (defined above the dual-path consumers): the
-     static facts — the all-defs-tagged set, the per-block flag states,
-     the per-block call facts — and the EMPTY change-driven caches, with
-     the walk's cfg passed in (the same pseudo-node-free projection the
-     engine builds here).  This literal was [mk_rctx]'s body; the
-     constructor now also serves the direct-API/test path (the callers
-     that used to pass [rctx = None] and recompute the facts on
-     demand), so the [Some rc -> hoisted lookup | None -> recompute]
-     dual paths DELETE — every consumer reads the tables, exactly one
-     place builds them.  The per-block TABLE-MISS arms stay (a [Some]
-     context whose table lacks a block — impossible from [mk_rctx],
-     which scans every block — still computes that block's fact on the
-     spot; the NO-FALLBACKS doctrine governs the LATTICE, not a
-     lookup). *)
+  (* Run context built once per run. *)
   let rctx = mk_rctx ~cfg:cfg_tmp s in
-  (* Bourdoncle WTO fixpoint — replaces chunk=3000 + convergence_gap + max_runs.
-     WTO ordering stabilizes inner SCCs before outer; widen only at WTO heads
-     after 10 warmup sweeps (landmark-directed: Finite extrapolates, Zero
-     advances and joins, Inf standard-widens). Always runs; no fallback. *)
+  (* WTO fixpoint; inner SCCs stabilize first. *)
   let wto = wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
@@ -3254,12 +2759,12 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       match Hashtbl.find block_to_head btid with
       | None -> Hashtbl.set block_to_head ~key:btid ~data:h
       | Some existing ->
-        (* keep innermost: smaller block set wins *)
+        (* Innermost wins. *)
         let existing_set = Hashtbl.find_exn head_to_blocks existing in
         if Core.Set.length blocks < Core.Set.length existing_set then
           Hashtbl.set block_to_head ~key:btid ~data:h));
 
-  (* SiftAbs H3 — selective widen: per-head value-flow cycle vars. *)
+  (* Widen cycle vars per head. *)
   let need_map : Var.Set.t Tid.Map.t =
     let rec collect_heads comps acc =
       List.fold comps ~init:acc ~f:(fun acc -> function
@@ -3335,31 +2840,12 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     in
     Core.Map.mapi head_to_blocks ~f:(fun ~key:_ ~data:blocks -> compute_need blocks)
   in
-  (* Landmark acquisition is the PAPER-FAITHFUL seam in [observe_unsat_var]
-     (cbat_vsa.ml meet_var's empty-meet arm): every empty [meet_var] records
-     a (bound, dist) landmark to the enclosing WTO head via
-     [Cbat_landmarks.record_landmark_for_head]. The OLD BIL-pattern-matching
-     acquisition walk (deleted) violated AGENTS.md §8 / CONTEXT.md
-     ("Never write structural `match` patterns over BIL constructors ...
-     use `Exp.visitor` exclusively") AND only recorded once per guard
-     constant, never the per-iterate measurement the paper's Listing 1
-     requires (dist_p ← dist_c on each pass; finite-steps extrapolation
-     needs two measurements). The meet-var path operates on the abstract
-     WordSet only — §8-clean by construction. *)
+  
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
   let sol_default = Solution.default init in
   let get n = match Core.Map.find !sol_map n with Some v -> v | None -> sol_default in
-  (* Ticket 03 — [set] bumps the block's VERSION: the version table is the
-     cache's O(1) [AI.equal] key (the caller invokes [set] ONLY under
-     [not (AI.equal old new_val)] — the stability gate — so an unchanged
-     version is EXACTLY identity of the stored state; see [refine_ctx]). *)
-  (* EXPLICIT STATE (the user's directive: no scattered refs).  The run
-     context is ONE value threaded through the engine: [rc_cell] holds the
-     CURRENT context, [process_vertex] takes it and stores the updated one
-     back. A single cell (rather than one ref per field) keeps the
-     "here is the state, hand it on" discipline visible at the seam while
-     leaving the engine's pre-existing [sol_map] ref untouched (the
-     fixpoint's own state — out of scope for this change). *)
+  (* Versions key the caches. *)
+  (* Context threads through the engine. *)
   let rc_cell = ref rctx in
   let set n v =
     sol_map := Core.Map.set !sol_map ~key:n ~data:v;
@@ -3373,13 +2859,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let total_processed = ref 0 in
   let max_steps = 6000 in
   let process_vertex (v : Tid.t) : bool =
-    (* L2 instrumentation — the SCAFFOLD bucket: the whole per-visit body
-       in ONE timer.  The inner stage timers ([`Denote]/[`Join]/...) nest
-       inside and capture their own time, so scaffold = visit total −
-       (denote + join + equal + widen + walk): the engine glue that sat
-       in NO bucket before (the pred listing, the C1 read-set
-       bookkeeping, the sol snapshot creation, the version bumps, the
-       landmark bindings).  The PROD adapter's [time] is the identity. *)
+    (* Scaffold times engine glue. *)
     Stages.time `Scaffold (fun () ->
     incr total_processed;
     if !total_processed > max_steps then begin
@@ -3388,75 +2868,28 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     end;
     let old = get v in
     let preds = CFG.Node.preds v cfg |> Seq.to_list in
-    (* §4.3 — the CURRENT-solution snapshot for the inline deep walk: a
-       Solution over the persistent [sol_map] ([Solution.create] wraps the
-       map — O(1)), taken once per vertex visit; the map does not change
-       inside the visit, so every pred's walk reads the same state. *)
+    (* Snapshot for the deep walk. *)
     let sol_snap = Solution.create !sol_map sol_default in
     let incoming =
       if List.is_empty preds then old
       else
         let outs = List.map preds ~f:(fun p ->
-            (* L2 sub-attribution — the per-pred SCAFFOLDING (the head
-               attribution lookup, the landmark head binding, the pred's
-               in-state [get]): pure glue, previously in no bucket. *)
+            (* Per-pred glue. *)
             let head_opt, p_entry =
               Stages.time `Glue (fun () ->
                 let head_opt = Hashtbl.find block_to_head p in
                 Cbat_landmarks.widening_at_head := head_opt;
                 let p_entry = get p in
                 (head_opt, p_entry)) in
-            (* C1 — THE BLOCK-TRANSFER MEMO: the transfer is a pure
-               function of (the block, its in-state), and [ver_of rctx p]
-               is the in-state's O(1) [AI.equal] identity (the engine
-               bumps it in [set] only on a real change).  A version-identical
-               visit reuses the stored per-target result.
-
-               The ACQUISITION IS REPLAYED, NOT SKIPPED ([acquire_of_block]
-               — the two [observe_unsat_var] sites of [denote_jump]):
-               landmark acquisition decides the WIDENING ARM, so a
-               suppressed re-acquisition is not byte-identical and is
-               unsound in the narrowing direction.  Cached: the def
-               denotations, the flag-state scan (now hoisted by C2), the
-               seed derivation, the gated env meet, the deep walk, and the
-               per-jmp transfer. *)
-            (* EXPLICIT STATE: read the context, run the transfer (which
-               returns the updated context and the read-set), store it
-               back. *)
+            
+            (* Context threads through transfers. *)
             let rc = !rc_cell in
              let res = Stages.time `Denote (fun () ->
-               (* ARCH-2 — the TRANSFER MEMO: [find] carries the whole
-                  discipline (the version-stamped read-set, the validity
-                  check, the stale-miss — no invalidation walk; a stale
-                  entry is simply never read again, and it is overwritten
-                  by the next recompute).  The value is the transferred
-                  state + the F2 acquisition-fired flag. *)
+               (* Memo handles validity. *)
                let version = ver_of rc in
                match Transfer_memo.find ~version rc.rc_out_cache p v with
                | Some (hit_res, fired) ->
-                 (* HIT — replay the acquisition, reuse the computation.
-                    Q1: the replay is the REAL transfer with the deep walk
-                    DISABLED ([~no_walk:true] -> [denote_jump]'s [discarded]
-                    arm): it covers ALL THREE [observe_unsat_var] sites (the
-                    fallthrough row in [acquire_unsat_fallthrough], the
-                    gated env meet in [refine_edge_inline], the decoder arm
-                    in [apply_operand_constraint]) by construction and
-                    cannot drift from the real path — see the
-                    acquisition-replay comment above [refine_edge_inline].
-                    The replay runs ONLY inside a WTO head ([head_opt] was
-                    bound into [Cbat_landmarks.widening_at_head] just
-                    above): outside a head [observe_unsat_var] no-ops, so
-                    there is nothing to replay.
-
-                    F2 — the ACQUISITION-FIRED LATCH: when the original
-                    transfer fired NOTHING (fired = false), the replay
-                    is pure waste — on a version-valid hit the transfer's
-                    inputs are [AI.equal]-identical, hence so is every
-                    firing condition, hence the replay would fire nothing
-                    either.  Skip it and return the cached result
-                    directly.  When fired, the replay stays the REAL
-                    no-walk pipeline (the Q1 discipline: never hand-roll
-                    the sites). *)
+                 
                  (if Option.is_some head_opt && fired then
                     match Program.lookup blk_t ctx p with
                     | Some _pb ->
@@ -3470,14 +2903,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
 
                  hit_res
                | None ->
-                 (* F2 — latch the acquisition around the ORIGINAL
-                    transfer: [end_fired_latch] restores the outer count
-                    and reports whether THIS transfer fired anything
-                    (all firing sites funnel through
-                    [Cbat_landmarks.record_landmark_for_head], the single
-                    choke point).  The latch is what makes the hit path's
-                    skip observationally identical: nothing fired =>
-                    nothing to replay. *)
+                 (* Latch reports acquisition. *)
                  let flatch = Cbat_landmarks.start_fired_latch () in
                  let (res, rc', reads) =
                    denote_block_with_stores ~refineable ~preserved ~defs
@@ -3485,8 +2911,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                      ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
                      ctx ~source:p p_entry ~target:v in
                  let fired = Cbat_landmarks.end_fired_latch flatch in
-                 (* The transfer's read-set: the source block's IN-state
-                    (the env INPUT) plus every block its walk visited. *)
+                 (* Read set covers inputs. *)
                  let reads = Core.Set.add reads p in
                  rc_cell :=
                    { (Option.value ~default:rc rc') with
@@ -3504,52 +2929,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     let new_val =
       if List.is_empty preds then old
       else if Core.Set.mem heads v && !total_processed > 10 then begin
-        (* THE STABILITY CHECK (Figure 3's gate: "if stability has not yet
-           been achieved"): the widening-point equation Q = Q ⊔ ⊔preds is
-           SATISFIED when the preds' join is already contained in [old]
-           — [AI.equal old (AI.join old incoming)] holds exactly when
-           [incoming ⊑ old] (join idempotence). A stable head returns
-           [old] with NO landmark side effects: no [lm_advance] rotation
-           (each rotation consumes a measurement — a stable-visit
-           rotation would reset the two-measurement cycle forever) and
-           no widening (the value cannot change anyway). Equality with
-           [incoming] alone would NOT do: after a head widens, the preds
-           join STRICTLY below it, so equality-vs-incoming would misfire
-           on every stable visit. *)
-        (* F4 — bound the join ONCE: the stability check, the `Zero`
-           arm, and the non-head else branch all consume
-           [AI.join old incoming]. Computing it three times triples the
-           record join (memories + words + frame) at every unstable
-           head visit. [j] is the exact same value in all three sites.
-           L2 attribution — this join (and the non-head twin below) was
-           NEVER in a stage bucket: the [Join] timer only wrapped the
-           incoming join over the preds' outs. Timed now, so the Join
-           bucket is ALL joins and the scaffold-glue reading is honest. *)
+        (* Stable heads skip side effects. *)
+        (* Join computed once. *)
         let j = Stages.time `Join (fun () -> AI.join old incoming) in
         if Stages.time `Equal (fun () -> AI.equal old j)
         then old
         else begin
-        (* Landmark-directed widening (Simon & King, APLAS 2006, Figure 3)
-           — the production path for ALL subs (the per-sub [lm_*] gate was
-           deleted; acquisition is unconditional):
-           - `Finite n` — every landmark of this head has two
-             measurements: Listing 4 EXTRAPOLATION
-             ([selective_widen_extrapolate ~steps:n] — the paper's right
-             branch), then "clear all landmarks" (the branch's exit,
-             Fig. 3): [clear_head] fires ONLY here (clearing on Zero/Inf
-             would empty the table before any consumption — the
-             Finite-never-fires bug).
-           - `Zero` — a landmark still lacks its second measurement:
-             Listing 2 [lm_advance] (commit dist as dist_p) then NORMAL
-             fixpoint computation resumes ([AI.join] — the left branch)
-             so the next traversal acquires the second measurement.
-           - `Inf` — no landmarks at this head: the paper's ∞-arm,
-             STANDARD widening ([AI.widen_join] — Cousot-Halbwachs:
-             unstable bounds go to TOP). The threshold ladder is GONE
-             (the user's directive "No normal widening ONLY LANDMARKS" —
-             the ladder was normal finite widening); the >10 warmup
-             below gives acquisition the traversals it needs before
-             this arm can fire, so guarded heads reach Finite instead. *)
+        (* Finite extrapolates; Zero joins; Inf widens. *)
         let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
         Cbat_landmarks.widening_at_head := Some v;
         let res = match Cbat_landmarks.lm_calc_steps v with
@@ -3567,18 +2953,10 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         res
         end
       end else
-        (* F4 — the non-head path: a single bare join; [j] is scoped to
-           the head branch above, so recompute here (one join, same as
-           before the reuse).
-           L2 attribution — timed now (see the F4 comment above): the
-           non-head visit join was also never in a bucket. *)
+        (* Non-heads join once. *)
         Stages.time `Join (fun () -> AI.join old incoming)
     in
-    (* L2 attribution — the final stability [AI.equal] (the [set] gate)
-       was never in a bucket either: the [Equal] timer only wrapped the
-       head stability check. Timed now; every record compare is
-       accounted.  The [set] path (the sol_map write + the version
-       bump + the context rebind) is [Glue]. *)
+    (* Stability compare is timed. *)
     if not (Stages.time `Equal (fun () -> AI.equal old new_val))
     then (Stages.time `Glue (fun () -> set v new_val); true) else false)
   in
@@ -3605,25 +2983,23 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   Solution.create !sol_map sol_default
 
 (* ================================================================== *)
-(* ARCH-1 (review #1) — THE TAG-EXTRACTION SUBMODULE: the per-def    *)
-(* classification walk (the M6 meet discipline), the kind enum (the  *)
-(* pass layer's [Convutils.vsa_kind] ALIASES [kind] — one enum, no    *)
-(* mapping layer), the k-range arithmetic, the set-overlap merge,    *)
-(* and the VLA idiom matcher.  Formerly [hike_vsa.ml]'s [finish]     *)
-(* internals plus [precision_probe]'s 100-line copy of the same walk. *)
-(*                                                                    *)
-(* A SUBMODULE (not a sibling file): the walk IS the fixpoint's own  *)
-(* primitives ([denote_def]/[rewrite_addr]/[frame_of_state]/         *)
-(* [denote_imm_exp]), and the main module of a wrapped library is     *)
-(* unreachable from its siblings — a cycle by construction.  A        *)
-(* POST-PASS over the converged solution (not fused into the         *)
-(* fixpoint: the walk's per-def state is a THIRD discipline — the     *)
-(* sequential chain met with the block's converged IN-state values). *)
+(* Per-def classification over the converged solution. *)
+
+
+
+
+
+
+
+
+
+
+
+
+
 (* ================================================================== *)
 module Cbat_extraction = struct
-(* The classification vocabulary — the pass layer's [vsa_kind] home.
-   [@@deriving equal] so [convutils] and its consumers keep the
-   structural equality the maps' [equal] folds use. *)
+(* Classification vocabulary. *)
 type kind =
   | Range of int64 * int64
   | Infinite of int64 * int64
@@ -3632,9 +3008,7 @@ type kind =
   | VLA of Tid.t
 [@@deriving equal]
 
-(* [classify ?vla_tid ws]: Range, Infinite (widening), Unbounded
-   (top), Dead (bottom), or VLA (dynamic size def tid) — a pure
-   WordSet-to-kind function. *)
+(* Kind of a word set. *)
 let classify ?vla_tid (ws : WordSet.t) : kind option =
   if WordSet.is_top ws then Some Unbounded
   else if WordSet.is_bottom ws then Some Dead
@@ -3651,8 +3025,7 @@ let classify ?vla_tid (ws : WordSet.t) : kind option =
        | _ -> Some Unbounded)
     | _ -> Some Unbounded
 
-(* [bounds_of ws]: the signed int64 (lo, hi) bounds, or None when
-   top/bottom/empty (the classify pre-conditions). *)
+(* Signed bounds or None. *)
 let bounds_of (ws : WordSet.t) : (int64 * int64) option =
   if WordSet.is_top ws || WordSet.is_bottom ws then None
   else
@@ -3663,9 +3036,7 @@ let bounds_of (ws : WordSet.t) : (int64 * int64) option =
         | _ -> None)
     | _ -> None
 
-(* [k_range_of ws rsp_ws]: the ABI-visible k-range (k = addr - RSP at
-   the def — the arg area is k >= 0).  Interval arithmetic on the
-   signed bounds: k_min = addr_lo - rsp_hi, k_max = addr_hi - rsp_lo. *)
+(* ABI-visible k-range. *)
 let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
     (int64 * int64) option =
   match bounds_of ws, bounds_of rsp_ws with
@@ -3673,10 +3044,7 @@ let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
       Some (Stdlib.Int64.sub alo rhi, Stdlib.Int64.sub ahi rlo)
   | _ -> None
 
-(* [stack_address_of_rhs]: the ADDRESS of a stack access rhs — the
-   visitor-free structural read the walk dispatches on (Load/Store,
-   either bare or under the [pad]-style Cast the lifter emits).
-   None = the def is not a memory access. *)
+(* Address of a stack-access rhs. *)
 let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
   match rhs with
   | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
@@ -3684,16 +3052,7 @@ let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
   | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) -> Some addr
   | _ -> None
 
-(* [st_tag_of ~tags blk addr' st_before]: the M6 tag-state meet — the
-   address's free vars denoted with the block's IN-state values (the
-   converged solution's), met into the sequential state with the
-   genuine-subset gate: a TOP sequential value is NOT refined by the
-   meet (the tag state's value at the block is the JOIN over all
-   paths); an EMPTY meet and an UNCHANGED value also keep the
-   sequential state.  THE ONE HOME of the meet discipline
-   ([precision_probe]'s former copy adopted the production gate
-   2026-09-02 — the git archaeology showed the Option B/c fix never
-   reached the probe; a divergence of accident, not intent). *)
+
 let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
     (addr' : exp) (st_before : AI.t) : AI.t =
   Exp.free_vars addr'
@@ -3712,26 +3071,7 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
         else AI.add_word acc ~key:v ~data:mm
       | Type.Mem _ | Type.Unk -> acc)
 
-(* [extract ~sp ~stack_access ~sol sub]: the per-def classification
-   over the CONVERGED solution [sol].  [stack_access] is the
-   relevance tag predicate (the pass layer's tag; threaded as a
-   function so this module owns no tag dependency); [sp] is the
-   target's stack pointer (the k-range origin).
 
-   THE WALK (the M6 discipline, verbatim from hike_vsa's former
-   [finish]): per block, only up to and including the block's LAST
-   stack-access def (the state advance after it can affect no tag);
-   the sequential state starts at the block's converged IN-state and
-   advances [denote_def] per def; each TAGGED def's address is
-   rewritten by the frame relation of the PRE-def state, and its
-   operands are MET with the block's IN-state values (a TOP
-   sequential value is NOT refined by the meet; an empty meet and an
-   unchanged value keep the sequential state).
-
-   Returns: (offsets, k_ranges, vla_bounds) — the kind map keyed by
-   def tid (the set-overlap MERGE applied: the defs whose address
-   WordSets overlap merge into the spanning [Range]), the k-range
-   map, and the dynamic-allocation size bounds. *)
 let rec extract ~(sp : var) ~(stack_access : def term -> bool)
     ~(dynamic_alloc : def term -> bool)
     ~(sol : (tid, AI.t) Solution.t)
@@ -3742,11 +3082,7 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
   let raw, kraw =
     Term.enum blk_t sub
     |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
-        (* Walk only the block's defs up to and including its LAST
-           stack_access def — the state advance after it can affect no
-           tag (the address/k-range denotations read the PRE-def
-           state), and a block with NO stack access contributes
-           nothing and skips the walk entirely. *)
+        (* Walk ends at the last tagged def. *)
         let defs = Term.enum def_t blk |> Seq.to_list in
         let last_tagged =
           Base.List.foldi defs ~init:None ~f:(fun i acc d ->
@@ -3766,11 +3102,11 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
                  | Some addr when stack_access d ->
                      let addr' =
                        rewrite_addr (frame_of_state st_before) addr in
-                     (* The address's free vars are denoted with the block's TAG state's values (the IN-state read from the converged solution — the fused design's branch-sensitive state, refined inline by the accumulated edge conds), not the sequentially re-denoted ones — the loop-body index var [v := Load(cell)] would otherwise read the solution's widened cell (the w_big class). *)
+                     (* Addresses use tag-state values. *)
                      let st_tag = st_tag_of ~tags blk addr' st_before in
                      (match
                         denote_imm_exp
-                          (* WYSINWYX-2 (the in-state relation) — the address is REWRITTEN to its offset-from-origin expression (the frame relation carried in the state) before denotation: the tags are the SP-relative OFFSETS, sourced from the relation rather than the anchored value-sets. *)
+                          (* Addresses rewrite to offsets. *)
                           addr' st_tag
                       with
                       | Ok ws -> (
@@ -3804,7 +3140,7 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
         (acc, kacc))
   in
   let raw = List.rev raw in
-  (* THE SET-OVERLAP MERGE: the defs whose address WordSets OVERLAP (the domain's membership test — a direct singleton {c} overlaps the indexed CLP {base + step*k} iff c is in its residue class, so `a[1] = 5` and `a[i]` merge). *)
+  (* Overlapping addresses merge. *)
   let span_of = function
     | Range (lo, hi) -> (lo, hi)
     | Infinite (lo, hi) -> (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
@@ -3820,9 +3156,7 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
     let items =
       Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
     in
-    (* Maximal overlap components via WordSet.overlap (transitive closure).
-       S1 coarser: any overlapping WordSets merge; bridging via a new item
-       merges all comps that overlap it. *)
+    (* Transitive overlap components. *)
     let rec components acc = function
       | [] -> acc
       | (dtid, kind, ws) :: rest ->
@@ -3852,7 +3186,7 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
                   ~f:(fun (l, h) (_, k, _) ->
                     let slo, shi = span_of k in
                     (Stdlib.Int64.min l slo, Stdlib.Int64.max h shi))
-              | [] -> (0L, 0L) (* unreachable: comp is non-empty *)
+              | [] -> (0L, 0L) (* Non-empty components. *)
             in
             Base.List.fold_left comp ~init:acc
               ~f:(fun acc (dtid, _, _) ->
@@ -3892,22 +3226,8 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
   in
   (offsets, k_ranges, vla_bounds)
 
-(* [vla_size_of_rhs sp sub rhs] — the let-..-and partner of [extract];
-   the comment between the binding and its [and] would break the
-   pair, hence this position: the DYNAMIC-ALLOCATION size expression —
-   the `RSP := RSP - size` idiom, direct or indirect (the
-   `RSP := tmp` where `tmp := RSP - size` form), or None.  The ONE
-   home of the idiom matcher (hike_vsa_relevance's
-   [detect_dynamic_alloc] delegates here — the duplication the
-   architecture exploration flagged closes). *)
-(* [vla_decrement_p sp_base rhs]: the SHARED two-line VLA idiom test —
-   is [rhs] a `RSP := RSP - size` with a NON-LITERAL size (the dynamic
-   allocation shape)?  The ONE fact both roles consume:
-   [hike_vsa_relevance.detect_dynamic_alloc] (the visitor that
-   collects the def SET, incl. the indirect tmp def) and
-   [vla_size_of_rhs] (the SIZE extractor for a KNOWN dynamic-alloc
-   def).  The roles stay separate (set vs expression); the SHAPE is
-   one fact. *)
+(* Dynamic-allocation size expression. *)
+(* True for [RSP := RSP - size]. *)
 and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
   match rhs with
   | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->

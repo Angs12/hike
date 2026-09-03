@@ -13,7 +13,7 @@
 
 open Bap.Std
 
-(* * This module implements Circular Linear Progressions in the style of [1] "Executable Analysis using Abstract Interpretation with Circular Linear Progressions". *)
+(* Circular linear progressions. *)
 
 type t [@@deriving bin_io, sexp]
 
@@ -21,7 +21,7 @@ include Cbat_wordset_intf.S with type t := t
 
 val create : ?width:int -> ?step:word -> ?cardn: word -> word -> t
 
-(* [interval ~width ~lo ~hi]: the step-1 CLP [lo, hi] — the span cardinality via [cardn_from_bounds] (a wrapped pair, lo > hi, is the CIRCULAR interval — the [circular_hull] semantics; no full-domain gate here, the composite callers apply theirs). *)
+(* Step-1 CLP [lo, hi]; a wrapped pair is the circular interval. *)
 val interval : width:int -> word -> word -> t
 
 val nearest_pred : word -> t -> word option

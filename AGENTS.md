@@ -410,6 +410,28 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-03 EEST — comment concision pass (78 files,
++1970/−6394, comments only) — BATTERY GREEN, identical behavior**
+
+Every code comment rewritten to the minimum: what the current code does,
+present tense, 1–2 lines. All history deleted (phases, ora-/ticket refs,
+dates, removed/moved notes, port deltas, incident references, doc-path
+pointers, banner numbering). Verified comment-only three ways: (1) full
+`dune build` green (exercises cppo, the instrumentation blocker, all
+probes); (2) comment-stripped sources diffed against HEAD — zero
+non-comment changes (modulo heredoc false positives, cleared
+file-by-file); (3) test output byte-identical: cbat 467/467 names match
+(40 stubbed = 40, 0 FAIL), relevance 26/26. Full emission battery rerun:
+corpus 32/32 rc=0, check_allocas 160/0, semantic-all 30/2/0,
+semantic-opt 30/2/0 (identical — opt-induced class empty), 0 unmapped
+intrinsics. Gated `#ifdef VSA_DEBUG` regions verified byte-identical.
+
+Known pre-existing issue found (NOT caused by this change, NOT fixed):
+`dune build --profile vsa-debug` fails in unmodified
+`src/cbat_vsa/cbat_vsa_stages.ml:69` (`Gc.quick_stat ... promoted_words`
+— gone in OCaml 5.x). The debug profile needs that fix before
+forensics builds work again.
+
 **Last verified: 2026-09-03 EEST (morning) — MAIN @ 87c9b86 — THE TRIPLE
 MERGE: the optimizability program (mem-fission, opt gate, FP-table fix,
 arch-c1c6) + the 2026-09-02 architecture-review program (candidates

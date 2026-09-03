@@ -1,6 +1,4 @@
-(* test_main: the test_cbat entry point (renamed from test_cbat.ml's body per Q9 —
-   the stanza keeps (name test_cbat)). A thin runner: theme modules in original
-   file order, then the battery oracle line. *)
+(* Test entry point: theme modules in file order, then the battery oracle line. *)
 open Test_common
 
 let () =

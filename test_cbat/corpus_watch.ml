@@ -1,47 +1,16 @@
-(* test_cbat/corpus_watch.ml — CORPUS ASSERT-WATCH driver for the CBAT VSA
-   port (src/cbat_vsa/).
-
-   Usage:  dune exec test_cbat/corpus_watch.exe -- <binary> [<binary> ...]
-
-   For each binary on argv:
-     - load it as a BAP Project (Project.create (Project.Input.file
-       ~filename:path));
-     - enumerate ALL subs of the program;
-     - for EACH sub, run the full VSA fixpoint exactly the way the D4-9
-       test does (test_cbat/test_cbat.ml:581):
-         Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol sub)
-     - every sub's fixpoint run is wrapped in try/with; a crash is
-       reported with the exact exception (Assert_failure location, Failure
-       msg, Invalid_argument msg, anything else) and the backtrace.
-
-   The "hike: cbat_vsa: not_implemented <component> (degrading to top)"
-   warnings are Format.eprintf'd to stderr by the vendored code
-   (cbat_vsa_utils.ml, policy #5) and flow through untouched; the caller
-   script counts them per binary from the stderr file.
-
-   Exit code: 0 if no fixpoint crash and every binary loaded; 1 otherwise.
-   Per-binary wall-clock timeout (300s) is the caller script's business,
-   not the driver's. *)
+(* Corpus assert-watch driver: runs the full VSA fixpoint per sub of each argv binary.
+   Usage: dune exec test_cbat/corpus_watch.exe -- <binary> [<binary> ...] *)
 
 open Bap.Std
 
-(* Same module aliases as the D4-9 test (test_cbat.ml:44-46); the fixpoint
-   entry point is Cbat_vsa.static_graph_vsa. *)
 module AI = Cbat_vsa.AI
 module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 
-(* hike port: P2d-1b (lane B) — the relevance-restriction analyzer.
-   Each sub is run through [Hike_vsa_relevance.analyze] before the
-   fixpoint (it tags the relevant defs and arms the restriction
-   switch); the env toggle [HIKE_VSA_RESTRICTION=0] skips analyze
-   (restriction OFF measurement path, byte-identical to the pre-P2d
-   behavior).  [Hike_vsa_relevance] is hike's production relevance pass
-   (src/hike_vsa_relevance.ml), reached through the wrapped [hike]
-   library's flat module name; [sp] comes from the project target. *)
+(* Each sub runs through [Relevance.analyze] first; HIKE_VSA_RESTRICTION=0 skips it. *)
 module Relevance = Hike.Relevance
 
-(* [restriction_on]: default ON; HIKE_VSA_RESTRICTION=0 disables. *)
+(* Default ON; HIKE_VSA_RESTRICTION=0 disables. *)
 let restriction_on () : bool =
   match Sys.getenv_opt "HIKE_VSA_RESTRICTION" with
   | Some "0" -> false
@@ -49,7 +18,7 @@ let restriction_on () : bool =
 
 let () = Printexc.record_backtrace true
 
-(* A sub's fixpoint run is "suspiciously long" if it exceeds this. *)
+(* Slow-sub threshold, seconds. *)
 let slow_threshold = 10.0
 
 type outcome =
@@ -64,11 +33,7 @@ let describe_exn (e : exn) : string =
   | Invalid_argument msg -> Printf.sprintf "Invalid_argument(%s)" msg
   | _ -> Printexc.to_string e
 
-(* One sub, one full fixpoint — the D4-9 invocation shape, with the
-   relevance-analyze hookup: the sub is tagged by
-   [Relevance.analyze] first (which also arms the restriction), then
-   the fixpoint runs on the TAGGED sub inside a program carrying the
-   tagged sub (the consumer contract). *)
+(* One sub, one full fixpoint on the analyze-tagged sub. *)
 let run_sub (sp : var) (prog : program term) (sub : sub term) : outcome =
   let t0 = Unix.gettimeofday () in
   try
@@ -123,8 +88,7 @@ let run_binary (path : string) : bin_report =
       flush stdout;
       r
   with e ->
-    (* Project.create / enumeration blew up (it catches most things
-       itself, but not, e.g., the empty-input assert). *)
+    (* Project.create / enumeration blew up. *)
     r.nloadfail <- 1;
     Printf.printf "LOAD-FAIL\t%s\texception: %s\n" path (describe_exn e);
     flush stdout;
@@ -138,8 +102,7 @@ let () =
     flush stdout;
     exit 0
   | _ ->
-    (* Initializes the BAP environment (loads the installed plugins,
-       incl. the x86 disassembler backend). *)
+    (* Init the BAP environment (loads plugins, incl. the x86 backend). *)
      (match Bap_main.init ~argv:[|Sys.executable_name|] () with
       | Ok () -> ()
       | Error failed ->

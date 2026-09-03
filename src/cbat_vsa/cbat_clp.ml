@@ -32,17 +32,17 @@ let ( > ) = Stdlib.( > )
 let ( <= ) = Stdlib.( <= )
 let ( >= ) = Stdlib.( >= )
 
-(* A CLP {base; step; card} represents the following set: {base + n * step | 0 <= n < cardn}. *)
+(* {base + n*step | 0 <= n < cardn}. *)
 type t = { base : word; step : word; cardn : word; is_inf : bool }
 [@@deriving bin_io, sexp, compare]
 
-(* A1 : variant representation. *)
+
 let base_of (p : t) : word = p.base
 let step_of (p : t) : word = p.step
 let cardn_of (p : t) : word = p.cardn
 
-(* Creates a new CLP that ranges from base to base + step * (pred num) in increments of size step. *)
-(* [fit]: Was an unconditional [extract_exn ~hi:(width-1)] on base/step — a fresh GMP word per call — even when the operand was ALREADY at [width] (the norm: singleton / step-1 / matched-width arithmetic — every op result re-enters [create]). *)
+(* CLP from base stepping by step. *)
+
 let fit_to (width : int) (w : word) : word =
   if W.bitwidth w = width then w else W.extract_exn ~hi:(width - 1) w
 
@@ -51,7 +51,7 @@ let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
   let cardn_w = Cbat_word_ops.cap_at_width ~width:(width + 1) cardn in
   let base' = fit_to width base in
   let step' = fit_to width step in
-  (* Canonized by design: every value produced is canonical, so canonize is identity. *)
+  
   if W.is_zero cardn_w then
     {base = W.zero width; step = W.zero width; cardn = W.zero (width + 1); is_inf = false}
   else if W.is_zero step' || is_one cardn_w then
@@ -73,29 +73,29 @@ let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
       let cardn'' = dom_size ~width:(width + 1) (width - twos) in
       {base = base''; step = step''; cardn = cardn''; is_inf = true}
     else
-      (* A1 I64 fast path kept disabled (boxed int64 regressed +18% on 4.14) *)
+      
       {base = base'; step = step'; cardn = cardn_w; is_inf = false}
 
 let singleton w = create w
 
 let bitwidth (p : t) : int = W.bitwidth p.base
 
-(* Helper function; constructs a CLP from its lower bound, upper bound and step. *)
+
 let cardn_from_bounds base step e : word =
   let width = W.bitwidth base in
   assert(W.bitwidth step = width);
-  (* Compute the cardinality. Integer division (floor) produces the correct behavior. *)
+  
     if W.is_zero step then W.one (width + 1) else
     let div_by_step = W.div (W.sub e base) step in
-    (* extract adds an extra bit at the high end so that the call to succ never wraps to 0. *)
+    (* Extra bit so succ never wraps. *)
     W.succ (W.extract_exn ~hi:width div_by_step)
 
-(* [interval ~width ~lo ~hi]: the step-1 CLP [lo, hi] (the span cardinality via [cardn_from_bounds] — a wrapped pair, lo > hi, is the CIRCULAR interval). *)
+(* Step-1 CLP [lo, hi]; wrapped pair is circular. *)
 let interval ~(width : int) (lo : word) (hi : word) : t =
   create ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
 
-(* helper function; computes the minimum/canonical CLP to represent the set of words of the form b + sn for any integer n Note: returns a canonized result *)
+
 let infinite (b, s) : t =
   let width = W.bitwidth b in
   assert (width = W.bitwidth s);
@@ -106,15 +106,15 @@ let infinite (b, s) : t =
     let cardn = dom_size ~width:(width + 1) (width - twos) in
     create base ~step ~cardn
 
-(* helper function; determines whether a given CLP represents a set of the form {(b + s*i) % z | i in Nat} Note that in the terminology of this module, a set may be both infinite and finite. A set is both iff e + s = b % z where e is the end of the CLP and z is its bitwidth. *)
+
 let is_infinite (p : t) : bool = p.is_inf
 
-(* outputs a canonized CLP *)
+
 let bottom (width : int) : t =
   assert(width > 0);
   create ~width W.b0 ~cardn:W.b0
 
-(* [top] recomputed [infinite (zero, one)] per call — [factor_2s]/[dom_size]/[modulo] each time. The widths are few (8/16/32/64/128/256) and the top value is immutable — one cached [t] per width. *)
+(* Cached per width. *)
 let top_cache : (int, t) Hashtbl.t = Hashtbl.create 16
 
 let top (i : int) : t =
@@ -126,26 +126,26 @@ let top (i : int) : t =
     Hashtbl.add top_cache i t;
     t
 
-(* Canonized by design: every CLP is produced via [create] which is already canonical, so Big is identity. I64 is dead (A1 disabled) but kept for bin_io compatibility — normalize it via Big. *)
-(* canonize removed: every CLP is produced canonical via create — canonized by design *)
 
-(* Returns the cardinality of p as a sz+1 width word, where sz is the bitwidth of p. *)
+
+
+(* Cardinality as a (width+1)-bit word. *)
 let cardinality (p : t) : word = cardn_of p
 
-(* helper function; computes the last point in a finite CLP. Note that this function may return misleading results for an infinite CLP. The result will be a point on the CLP, but is in no way an 'end' since an infinite CLP has no notion of end. *)
+(* Last point; meaningless for infinite CLPs. *)
 let finite_end (p : t) : word option =
   let width = bitwidth p in
   let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
   if W.is_zero (cardn_of p) then None
   else Some (W.add (base_of p) (W.mul (step_of p) (W.pred n)))
 
-(* Note: this function is fully precise *)
+
 let lnot (p : t) : t =
-  (* We use the finite end even in the infinite case since it is always guaranteed to be some point on the CLP and for the infinite CLP, any point works as the base. *)
+  (* Any point works as the infinite base. *)
   Option.value_map ~default:(bottom (bitwidth p)) (finite_end p)
     ~f:(fun e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p))
 
-(* Returns a list containing all of the elements represented by the input CLP. *)
+
 let iter (p : t) : word list =
   let rec iter_acc b s n acc =
     if W.is_zero n then acc
@@ -153,7 +153,7 @@ let iter (p : t) : word list =
       iter_acc (W.add b s) s n' (b :: acc) in
   iter_acc (base_of p) (step_of p) (cardn_of p) []
 
-(* computes the closest element of p that precedes i, i.e. the first element reached by starting from i and decreasing. Assumes that the inputs have the same bitwidth. *)
+(* Closest element at or below i. *)
 let nearest_pred (i : word) (p : t) : word option =
   assert(bitwidth p = W.bitwidth i);
   let open Monads.Std.Monad.Option.Syntax in
@@ -167,7 +167,7 @@ let nearest_pred (i : word) (p : t) : word option =
     else if W.(>=) diff end' then !!(W.add end' (base_of p)) else
       !!(W.sub i rm)
 
-(* helper function; Some (nearest_inf_pred w b p) = nearest_pred w (infinite b p) *)
+
 let nearest_inf_pred (w : word) (base : word) (step : word) : word =
   if W.is_zero step then base else
     let diff = W.sub w base in
@@ -177,7 +177,7 @@ let nearest_inf_pred (w : word) (base : word) (step : word) : word =
 let nearest_succ (i : word) (p : t) : word option =
   Option.map ~f:W.lnot (nearest_pred (W.lnot i) (lnot p))
 
-(* helper function; Some (nearest_inf_succ w b p) = nearest_succ w (infinite b p) *)
+
 let nearest_inf_succ (w : word) (base : word) (step : word) : word =
   W.lnot (nearest_inf_pred (W.lnot w) (W.lnot base) step)
 
@@ -189,11 +189,11 @@ let min_elem (p : t) : word option =
   let min_wd = W.zero (bitwidth p) in
   nearest_succ min_wd p
 
-(* * The max elem of a signed CLP is going to be the nearest precedessor of (2^w / 2) - 1, where [w] is the bit-width of the words in the CLP. *)
+(* Max signed element. *)
 let max_elem_signed (p : t) : word option =
   nearest_pred (W.pred (half (bitwidth p))) p
 
-(* * The min elem of a signed CLP is going to be the nearest successor of (2^w / 2). Note that the returned word is unsigned. To see the signed value, use [W.signed word]. *)
+(* Min signed element. *)
 let min_elem_signed (p : t) : word option =
   nearest_succ (half (bitwidth p)) p
 
@@ -204,33 +204,33 @@ let splits_by (p : t) (w : word) : bool =
     min_elem p >>= fun min_p ->
     finite_end p >>= fun e ->
     if W.is_zero (step_of p) then !!true else
-      (* The Clp contains more than one element *)
+      (* Multi-element case. *)
       !!(divides w (step_of p) &&
-         (* if it wraps 0, w must divide the gap *)
+         (* Wrapping case. *)
          (W.(=) (base_of p) min_p ||
           divides w (W.sub e (base_of p))))
   end
 
-(* Decides membership in the set represented by the CLP *)
+(* Membership. *)
 let elem (i : word) (p : t) : bool =
   assert (W.bitwidth i = bitwidth p);
   match nearest_pred i p with
   | None -> false
   | Some j -> W.(=) i j
 
-(* Checks whether a given CLP is the top element of the lattice. Works by checking whether the step is coprime with the size of the domain since the domain can be seen as a cyclic group of the form (Z_(2^n), +). *)
+(* Top test via coprime step. *)
 let is_top (p : t) : bool = p = top (bitwidth p)
 
-(* decides whether the input represents the empty set *)
+(* Empty test. *)
 let is_bottom (p : t) : bool = W.is_zero (cardn_of p)
 
-(* determines whether two CLPs are equivalent. Much faster than subset. *)
+(* Equivalence; faster than subset. *)
 let equal (p1 : t) (p2 : t) : bool =
   if p1 == p2 then true
   else if bitwidth p1 <> bitwidth p2 then false
   else p1 = p2
 
-(* [unwrap_with ~default ~min ~max p]: rebase [p] onto the interval between its (signed or unsigned) extrema — the [unwrap] family's shared body. *)
+(* Rebase onto extrema interval. *)
 let unwrap_with ~(default : t) ~(min : t -> word option)
     ~(max : t -> word option) (p : t) : t =
   let open Monads.Std.Monad.Option.Syntax in
@@ -249,34 +249,34 @@ let unwrap_signed (p : t) : t =
   unwrap_with ~default:(top (bitwidth p))
     ~min:min_elem_signed ~max:max_elem_signed p
 
-(* helper function; takes two inclusive circular intervals and returns the smallest interval that is a superset of the two. Assumes that all inputs have the same bitwidth. *)
+(* Smallest circular hull of two intervals. *)
 let interval_union (a1,b1) (a2,b2) : (word * word) =
   let szInt = W.bitwidth a1 in
-  (* we translate both intervals by a1 so that one interval starts at 0 *)
+  
   let b1' = W.sub b1 a1 in
   let a2' = W.sub a2 a1 in
   let b2' = W.sub b2 a1 in
   let zero = W.zero szInt in
-  (* If b2' < a2', then the second interval wraps over the zero point and a1 is in the interval (a2,b2). Also, if a2' (and so also b2') is in the first interval, then the two wrap fully around the circle. *)
+  
   if W.(>=) b1' a2' && W.(<) b2' a2' then (b1, W.pred b1)
-  (* If a2' and b2' are both between 0 and b1' then a2 and b2 are between a1 and b1. Since the case above has been ruled out, the first interval subsumes the second. *)
+  
   else if W.(>=) b1' a2' && W.(>=) b1' b2' then (a1, b1)
-  (* By excluding the above two cases, we know that b2' is not in (0,b1'). Since a2' is, the intervals overlap and stretch from a1 to b2. *)
+  
   else if W.(>=) b1' a2' then (a1, b2)
-  (* In all following cases, a2' is not within (0, b1'). If b2' is, then the intervals overlap in the other direction and stretch from a2 to b1. *)
+  
   else if W.(<) b2' b1' then (a2, b1)
-  (* In all following cases, neither a2' or b2' are in (0, b1'). If b2' < a2' then (a2', b2') wraps around 0, so it must subsume (0, b1). *)
+  
   else if W.(<) b2' a2' then (a2, b2)
-  (* Otherwise, there are 2 gaps and we include the smaller one. *)
+  
   else if W.(>) (W.sub a2' b1') (W.sub zero b2') then (a2,b1)
   else (a1, b2)
 
 
-(* helper function; moves a CLP around the number circle without changing its cardinality or step size. *)
+(* Rotate without changing step/cardinality. *)
 let translate (p : t) i : t =
   create (W.add (base_of p) i) ~step:(step_of p) ~cardn:(cardn_of p)
 
-(* Helper function; Given two progressions with a start and a step size, computes the largest step size that contains both points and each point that they step to. *)
+(* Largest step covering both progressions. *)
 let common_step (b1,s1) (b2,s2) : word =
   let bDiff = if W.(>) b1 b2 then W.sub b1 b2 else W.sub b2 b1 in
   if W.is_zero s1 then bounded_gcd s2 bDiff
@@ -284,9 +284,9 @@ let common_step (b1,s1) (b2,s2) : word =
   else let gcdS = (bounded_gcd s1 s2) in
     bounded_gcd gcdS bDiff
 
-(* defines a partial order on CLPs in terms of the sets that they represent. *)
+(* Subset order. *)
 let subset (p1 : t) (p2 : t) : bool =
-  (* Width-mismatched CLPs are not provably related — false, never raise (the same pattern as cbat_fin_set.ml lift2_pred, D1). *)
+  (* Width mismatch compares false. *)
   if bitwidth p1 <> bitwidth p2 then false
   else
     let width = bitwidth p1 in
@@ -304,18 +304,18 @@ let subset (p1 : t) (p2 : t) : bool =
         singleton_elem || (in_bounds && step_and_overlap)
       end
 
-(* To find the start of the intersection, we need to find the first point base with the following constraints: base = (base_of p1) (mod (step_of p1)) base = (base_of p1) (mod (step_of p2)) base in [(base_of p1), e1] base in [(base_of p2), e2] where e1 and e2 are the ends of p1 and p2 respectively. *)
+(* First common point of both progressions. *)
 let intersection (p1 : t) (p2 : t) : t =
-  (* A width-mismatched meet returns the wider (larger-bitwidth, hence less-precise) operand — a sound over-approximation of the (empty) intersection, never raise (the same pattern as cbat_clp_set_composite.ml:109-121). *)
+  (* Width mismatch returns the wider operand. *)
   if bitwidth p1 <> bitwidth p2 then
     (if bitwidth p1 > bitwidth p2 then p1 else p2)
   else
     let width = bitwidth p1 in
     let bot = bottom width in
-    (* Canonize to ensure that the CLPs may be treated as finite in most cases and simplify other handling *)
-            (* ensure that (base_of p1) >= (base_of p2) so that neither end crosses (base_of p1) *)
+    
+            
     let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
-    (* Translate the CLPs so that p1 starts at 0 *)
+    
     let translation = (base_of p1) in
     let translated_p1 = translate p1 (W.neg (base_of p1)) in
     let translated_p2 = translate p2 (W.neg (base_of p1)) in
@@ -328,7 +328,7 @@ let intersection (p1 : t) (p2 : t) : t =
       finite_end p2 >>= fun e2 ->
         let step = W.lcm_exn (step_of p1) (step_of p2) in
         if W.is_zero step then begin
-          (* If there is no bounded LCM then s1 or s2 are 0. In other words, one of the inputs is a singleton. Thus the intersection is either equal to the singleton or empty. *)
+          (* Singleton case: exact or empty. *)
           if W.is_zero (step_of p2) then
             Option.some_if (elem (base_of p2) p1) () >>= fun _ ->
             !!(create (base_of p2))
@@ -365,7 +365,7 @@ let intersection (p1 : t) (p2 : t) : t =
 
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
-(* [diff p1 p2]: The set difference γ(p1) \ γ(p2) — TOTAL, exact whenever the difference is representable as a single CLP, and the identity (p1) otherwise — the sound over-approximation (γ(p1) ⊇ γ(p1) \ γ(p2)); never a stop, never an. *)
+(* Difference; exact when one CLP, else identity. *)
 let diff (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then p1
   else if is_bottom p1 then p1
@@ -385,10 +385,10 @@ let diff (p1 : t) (p2 : t) : t =
           let cardn = W.sub (cardn_of p1) (cardn_of i) in
           if W.is_zero cardn then bottom (bitwidth p1)
           else if is_infinite p1 then
-            (* the full circle: the run's removal wraps — the circular CLP with the arc's complement *)
+            (* Wrapping remainder. *)
             create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
           else
-            (* The finite arc: the remainder is one interval iff the run touches the arc's START (the remainder [i_end+step, end]) or the arc's END (the remainder [start, i_lo−step]); the interior run's remainder is TWO pieces — not one CLP (the CLP's circle wraps at 2^w, not at the arc's end) — the identity. *)
+            (* Remainder is one interval only at the edges. *)
             (match min_elem i, min_elem p1 with
              | Some i_lo, Some p_lo ->
                if W.(=) i_lo p_lo then
@@ -401,7 +401,7 @@ let diff (p1 : t) (p2 : t) : t =
              | _ -> p1)
 
 
-(* Approximates the union of the two abstracted sets. Input CLPs should have the same bitwidth. *)
+(* Union; same width expected. *)
 let union (p1 : t) ( p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
   else
@@ -415,7 +415,7 @@ let union (p1 : t) ( p2 : t) : t =
     end
 
 let add (p1 : t) (p2 : t) : t =
-  (* Coerce mixed-width operands to the max width (zero-extension is a sound over-approximation) — never raise. *)
+  (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
   Option.value_map ~default:(bottom sz) (finite_end p1) ~f:begin fun e1 ->
     Option.value_map ~default:(bottom sz) (finite_end p2) ~f:begin fun e2 ->
@@ -434,21 +434,21 @@ let add (p1 : t) (p2 : t) : t =
     end
   end
 
-(* Note: this function is fully precise *)
+
 let neg (p : t) : t =
-  (* We use the finite end even in the infinite case since it is always guaranteed to be some point on the CLP and for the infinite CLP, any point works as the base. *)
+  (* Any point works as the infinite base. *)
   Option.value_map ~default:(bottom (bitwidth p)) (finite_end p)
     ~f:(fun e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p))
 
 let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 
 let mul (p1 : t) (p2 : t) : t =
-  (* Coerce mixed-width operands to the max width (zero-extension is a sound over-approximation) — never raise. *)
+  (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
-  (* If either CLP is empty, return bottom *)
+  (* Empty operand gives bottom. *)
   Option.value_map ~default:(bottom sz) (finite_end p1) ~f:begin fun e1 ->
     Option.value_map ~default:(bottom sz) (finite_end p2) ~f:begin fun e2 ->
-      (* if either CLP is a singleton, we simply multiply each element of the other by its value This case is computed exactly. *)
+      (* Singleton case is exact. *)
       if W.is_zero (step_of p1) || is_one (cardn_of p1) then
         let base = W.mul (base_of p2) (base_of p1) in
         let step = W.mul (step_of p2) (base_of p1) in
@@ -496,7 +496,7 @@ let compute_l_s_b lsb1 lsb2 b1 b2 : int = if lsb1 < lsb2 then
     let interval =  W.extract_exn ~hi:(lsb1 - 1) ~lo:lsb2 b1 in
     let w, bit = factor_2s interval in
     if W.is_zero w then lsb1 else bit + lsb2
-  else lsb1  (* lsb1 = lsb2 *)
+  else lsb1  (* Equal low bits. *)
 
 
 
@@ -510,27 +510,27 @@ let compute_m_s_b msb1 msb2 b1 b2 : int = if msb1 > msb2 then
     Option.value_map ~default:msb1
       (lead_1_bit interval)
       ~f:(fun b -> b + msb1 + 1)
-  else msb1  (* msb1 = msb2 *)
+  else msb1  (* Equal high bits. *)
 
 
 let compute_range_sep msb msb1 msb2 b1 b2 : int = if msb1 > msb2
   then if msb = msb1 then lead_1_bit_run b2 ~hi:msb1 ~lo:(msb2 + 1) else msb + 1
   else if msb1 < msb2 then
     if msb = msb2 then lead_1_bit_run b1 ~hi:msb2 ~lo:(msb1 + 1) else msb + 1
-    (* TODO: this last branch is a guess; it is not explained in the paper Figure out whether it is correct. *)
+    (* TODO: verify this branch. *)
   else -1
 
 
-(* This algorithm closely follows the one in "Circular Linear Progressions in SWEET". It converts a CLP into an AP (terminology from the paper) by using the least non-wrapping superset. *)
+(* Bitwise op via non-wrapping superset. *)
 let logand (p1 : t) (p2 : t) : t =
-  (* Coerce mixed-width operands to the max width (zero-extension is a sound over-approximation) — never raise. *)
+  (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
   let bot = bottom sz in
   let cardn_two = W.of_int ~width:(sz + 1) 2 in
-  (* We canonize the inputs so that their n1 and n2 are their true cardinalities and they are finite *)
+  
   let cp1 = p1 in
   let cp2 = p2 in
-  (* We ensure that the cardinality of the second CLP is at least the cardinality of the first to collapse the two cases where once CLP has cardinality 1 and the other has cardinality 2. *)
+  
   let p1, p2 = if W.(<=) (cardinality cp1) (cardinality cp2)
     then (cp1, cp2) else (cp2, cp1) in
   let open Monads.Std.Monad.Option.Syntax in
@@ -539,7 +539,7 @@ let logand (p1 : t) (p2 : t) : t =
     else if W.is_one (cardn_of p1) && W.is_one (cardn_of p2) then
       !!(create (W.logand (base_of p1) (base_of p2)))
     else if W.is_one (cardn_of p1) && W.(=) (cardn_of p2) cardn_two then
-      (* CLPs can represent any two-element set exactly, so we compute the two elements of the set and return them. *)
+      (* Two-element case is exact. *)
       finite_end p2 >>= fun e2 ->
       let base = W.logand (base_of p1) (base_of p2) in
       let newE = W.logand (base_of p1) e2 in
@@ -554,12 +554,12 @@ let logand (p1 : t) (p2 : t) : t =
       let _, twos_in_s1 = factor_2s (step_of p1) in
       let _, twos_in_s2 = factor_2s (step_of p2) in
       let least_significant_bit_p1 = if W.is_one (cardn_of p1) then sz
-      (* since the CLP is canonized, if (cardn_of p1) > 1 then (step_of p1) <> 0 *)
+      
         else twos_in_s1 in
       let least_significant_bit_p2 = if W.is_one (cardn_of p2) then sz
-      (* since the CLP is canonized, if (cardn_of p2) > 1 then (step_of p2) <> 0 *)
+      
         else twos_in_s2 in
-      (* There is no most significant bit iff the cardinality is 1 *)
+      
       let most_significant_bit_p1 = Option.value ~default:(-1)
           (lead_1_bit (W.logxor min_elem_p1 max_elem_p1)) in
       let most_significant_bit_p2 = Option.value ~default:(-1)
@@ -573,7 +573,7 @@ let logand (p1 : t) (p2 : t) : t =
           most_significant_bit_p2
           min_elem_p1 min_elem_p2 in
       if l_s_b > m_s_b then
-        (* The result is a singleton *)
+        (* Singleton result. *)
         let base = W.logand min_elem_p1 min_elem_p2 in
         !!(create base)
       else
@@ -606,7 +606,7 @@ let logand (p1 : t) (p2 : t) : t =
         let b1_and_b2 = W.logand min_elem_p1 min_elem_p2 in
         let frac = cdiv (W.sub safe_lower_bound b1_and_b2) step in
         let base = W.add b1_and_b2 (W.mul step frac) in
-        (* TODO: use cardn_from_bounds *)
+        (* TODO: use cardn_from_bounds. *)
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
   end
@@ -614,23 +614,23 @@ let logand (p1 : t) (p2 : t) : t =
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
 
 let logxor (p1 : t) (p2 : t) : t =
-  (* Coerce mixed-width operands to the max width (zero-extension is a sound over-approximation) — never raise. *)
+  (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
   let two = create (W.of_int 2 ~width) in
   let approx1 = logor (logand p1 (lnot p2)) (logand (lnot p1) p2) in
-  (* equality taken from Hacker's Delight *)
+  (* Bitwise equality. *)
   let approx2 = sub (add p1 p2) (mul (logand p1 p2) two) in
-  (* since both approximations are sound, their intersection is sound *)
+  (* Meet of two sound approximations. *)
   intersection approx1 approx2
 
-(* E2e-C, loop attempt 2 — overshift three-way split (bitvec overshift=zero semantics; matches the FinSet arm, whose per-element shifts are the pinned bitvec.ml:225-253: lshift/rshift by an amount >= the operand width return ZERO; arshift returns the sign extension). *)
+(* Overshift: exact, overshifted, straddling. *)
 
-(* The arshift overshift image {0, 2^sz - 1} (sign-extension: msb 0 -> 0, msb 1 -> all-ones). *)
+(* Overshift image is sign extension. *)
 let overshift_sign_extend (sz : int) : t =
   create ~width:sz ~step:(W.ones sz)
     ~cardn:(W.of_int ~width:(sz + 1) 2) (W.zero sz)
 
-(* The overshift (amount >= width) result of [arshift] on operand [p]: per-element bitvec semantics — {0} when every element has msb 0, {all-ones} when every element has msb 1, {0, all-ones} otherwise. *)
+(* Overshift result per sign. *)
 let overshift_value (p : t) : t =
   let sz = bitwidth p in
   let half = dom_size ~width:sz (sz - 1) in
@@ -643,7 +643,7 @@ let overshift_value (p : t) : t =
   | false, true -> create (W.ones sz)
   | _ -> overshift_sign_extend sz
 
-(* [cap_amount p2 cap min_p2 e2]: The straddling case (min < width <= max) needs the subset of the amount CLP below the operand width. *)
+(* Straddling amounts cap below the width. *)
 let cap_amount (p2 : t) (cap : word) (min_p2 : word) (e2 : word) : t list =
   let sz2 = bitwidth p2 in
   let part ~step lo hi =
@@ -662,8 +662,8 @@ let cap_amount (p2 : t) (cap : word) (min_p2 : word) (e2 : word) : t list =
   else
     part ~step:(step_of p2) min_p2 cap
 
-(* Note: this operation accepts inputs of different sizes as per the BAP IR *)
-(* [split_shift ~sz1 ~overshift ~exact p2]: The overshift three-way split shared by [lshift]/[rshift]/[arshift] — the amount CLP is classified against the operand width by INTEGER MAGNITUDE (hike port: D7, ora-6 — the vendored compare built [W.of_int sz1. *)
+
+(* Overshift: exact, overshifted, straddling. *)
 let split_shift ~(sz1 : int) ~(overshift : t)
     ~(exact : t -> word -> word -> t) (p2 : t) : t option =
   let open Monads.Std.Monad.Option.Syntax in
@@ -674,13 +674,13 @@ let split_shift ~(sz1 : int) ~(overshift : t)
   let max_p2_i = W.extract_exn ~hi:(amount_w - 1) max_p2 in
   let min_p2_i = W.extract_exn ~hi:(amount_w - 1) min_p2 in
   if W.(<) max_p2_i width_i then
-    (* case 1: every amount < width — the exact path, unchanged *)
+    (* All amounts exact. *)
     !!(exact p2 min_p2 max_p2)
   else if W.(>=) min_p2_i width_i then
-    (* case 2: fully overshifted — the overshift class *)
+    (* All amounts overshifted. *)
     !!overshift
   else
-    (* case 3: straddling — the exact path over the amount capped at width-1 (per capped part), UNION the overshift class *)
+    (* Mixed amounts: capped exact plus overshift. *)
     let cap = W.of_int (sz1 - 1) ~width:(W.bitwidth min_p2) in
     let e2 = Option.value (finite_end p2) ~default:min_p2 in
     let parts = cap_amount p2 cap min_p2 e2 in
@@ -693,7 +693,7 @@ let lshift (p1 : t) (p2 : t) : t =
     let open Monads.Std.Monad.Option.Syntax in
   Option.value ~default:(bottom sz1) begin
     finite_end p1 >>= fun e1 ->
-    (* the vendored SWEET exact-path machinery, parameterized on the amount CLP and its endpoints: case 1 runs it on [p2] unchanged, case 3 runs it on each capped part. *)
+    (* Exact path per amount part. *)
     let exact_path (p2 : t) (min_p2 : word) (max_p2 : word) : t =
       let max_p2_int = W.to_int_exn max_p2 in
       let base = W.lshift (base_of p1) min_p2 in
@@ -702,12 +702,12 @@ let lshift (p1 : t) (p2 : t) : t =
         else W.lshift (bounded_gcd (base_of p1) (step_of p1)) min_p2 in
       let e_no_wrap = lshift_exact e1 max_p2_int in
       let e_width = W.bitwidth e_no_wrap in
-      (* same as cardn_from_bounds, but adapted to e_no_wrap's bitwidth *)
+      (* Cardinality at the wider width. *)
       let cardn = if W.is_zero step then W.one 1 else
           let base_ext = W.extract_exn ~hi:(e_width - 1) base in
           let step_ext = W.extract_exn ~hi:(e_width - 1) step in
           let div_by_step = W.div (W.sub e_no_wrap base_ext) step_ext in
-          (* extract adds an extra bit at the high end so that the call to succ never wraps to 0. *)
+          (* Extra bit so succ never wraps. *)
           W.succ (W.extract_exn ~hi:e_width div_by_step) in
       create base ~step ~cardn in
     split_shift ~sz1 ~overshift:(create (W.zero sz1))
@@ -715,7 +715,7 @@ let lshift (p1 : t) (p2 : t) : t =
   end
 
 let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
-  (* Both [rshift] and [arshift] guard on operand width before reaching here (the mixed-width path coerces both to a common width first), so [sz1 = sz2] is guaranteed — the (removed) assert was a post-guard internal invariant. *)
+  (* Widths match after coercion. *)
   let _, b1twos = factor_2s (base_of p1) in
   let _, s1twos = factor_2s (step_of p1) in
   let s1_divisible = W.(>=) (W.of_int s1twos ~width:sz1) e2 in
@@ -728,12 +728,12 @@ let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
       (rshift (base_of p1) @@ e2)
   else W.one sz1
 
-(* Note: [p1] and [p2] must have the same bitwidth, since this function depends on the [rshift_step] function above. *)
+(* Equal widths required. *)
 let rec rshift (p1 : t) (p2 : t) : t =
   let sz1 = bitwidth p1 in
   let sz2 = bitwidth p2 in
   if sz1 <> sz2 then
-    (* NOT_IMPLEMENTED IMPLEMENTATION (lane A, ora-2): the mixed-width guard is replaced by coerce-to-max + shift + extract. *)
+    (* Mixed widths coerce to max. *)
     let w = Stdlib.max sz1 sz2 in
     let ext_zero (p : t) : t =
       create ~width:w (base_of p) ~step:(step_of p) ~cardn:(cardn_of p) in
@@ -745,7 +745,7 @@ let rec rshift (p1 : t) (p2 : t) : t =
   let open Monads.Std.Monad.Option.Syntax in
   Option.value ~default:(bottom sz1) begin
     finite_end p1 >>= fun e1 ->
-    (* the vendored exact-path machinery (case 1 unchanged; case 3 runs it per capped part, with the amount's capped end) *)
+    (* Exact path per capped part. *)
     let exact_path (p2 : t) (e2 : word) : t =
       let base = W.rshift (base_of p1) e2 in
       if W.is_one (cardn_of p1) && W.is_one (cardn_of p2)
@@ -764,7 +764,7 @@ let rec arshift (p1 : t) (p2 : t) : t =
   let sz1 = bitwidth p1 in
   let sz2 = bitwidth p2 in
   if sz1 <> sz2 then
-    (* NOT_IMPLEMENTED IMPLEMENTATION (lane A, ora-2): the mixed-width guard is replaced by coerce-to-max + shift + extract. *)
+    (* Mixed widths coerce to max. *)
     let w = Stdlib.max sz1 sz2 in
     let halfw = half sz1 in
     let d = W.sub (W.ones w) (W.ones sz1) in
@@ -772,14 +772,14 @@ let rec arshift (p1 : t) (p2 : t) : t =
       match min_elem p1, max_elem p1 with
       | Some mn, Some mx ->
         if W.(<) mx halfw then
-          (* all-non-negative: the sign-extension is the value itself *)
+          (* Non-negative: identity. *)
           create ~width:w (base_of p1) ~step:(step_of p1) ~cardn:(cardn_of p1)
         else if W.(>=) mn halfw then
-          (* all-negative: the extension shifts the base by D *)
+          (* Negative: shift base. *)
           create ~width:w (W.add (W.extract_exn ~hi:(w - 1) (base_of p1)) d)
             ~step:(W.extract_exn ~hi:(w - 1) (step_of p1)) ~cardn:(cardn_of p1)
         else
-          (* mixed-sign: two-piece extension — sound top fallback *)
+          (* Mixed sign: top. *)
           top sz1
       | _ -> top sz1 in
     if is_top p1' then top sz1
@@ -790,14 +790,14 @@ let rec arshift (p1 : t) (p2 : t) : t =
       create ~width:sz1 (base_of shifted) ~step:(step_of shifted) ~cardn:(cardn_of shifted)
   else
   let zero = W.zero sz1 in
-  (* the canonized operand keeps the TRUE element set for the sign classification in [overshift_value]: [unwrap_signed] below rebases the CLP to signed order, which is not set-preserving for cardn-2 antipodal pairs (e.g. {1, 2^63} -> {2^63, 2^64-1}). *)
+  (* True set drives sign classification. *)
   let p1c = p1 in
   let p1 = unwrap_signed p1c in
   let p2 = unwrap p2 in
   let open Monads.Std.Monad.Option.Syntax in
   Option.value ~default:(bottom sz1) begin
     finite_end p1 >>= fun e1 ->
-    (* the vendored SWEET exact-path machinery (case 1 unchanged; case 3 runs it per capped part, with the amount's capped end) *)
+    (* Exact path per capped part. *)
     let exact_path (p2 : t) (e2 : word) : t =
       if W.is_one (cardn_of p1) && W.is_one (cardn_of p2)
       then
@@ -823,22 +823,22 @@ let rec arshift (p1 : t) (p2 : t) : t =
       p2
   end
 
-(* helper function; splits a CLP into two segments: one that contains all points from the base up to n inclusive and another that contains the rest. *)
+(* Split at n. *)
 let split_at_n (p : t) n : t * t =
-  (* The CLP is canonized so that it can be treated as finite *)
-  (* The first set extends to the highest point on the CLP up to e *)
+  
+  
   let cardn1 = min (cardn_from_bounds (base_of p) (step_of p) n) (cardn_of p) in
-  (* The second set contains all of the other elements *)
+  
   let cardn2 = W.sub (cardn_of p) cardn1 in
   let p2_base = nearest_inf_succ (W.succ n) (base_of p) (step_of p) in
   create (base_of p) ~step:(step_of p) ~cardn:cardn1,
   create p2_base ~step:(step_of p) ~cardn:cardn2
 
-(* Helper function; produces a result that contains exactly the elements of the input clp extended to the given width. *)
+(* Widen to the given width. *)
 let extract_exact ~width:(width : int) (p : t) : t * t =
   let p_width = bitwidth p in
   assert (width >= p_width);
-  (* The CLP is canonized so that infinite CLPs do not have to be treated specially. *)
+  
   let lastn = W.ones p_width in
   let p1, p2 = split_at_n p lastn in
   create ~width (base_of p1) ~step:(step_of p1) ~cardn:(cardn_of p1),
@@ -846,7 +846,7 @@ let extract_exact ~width:(width : int) (p : t) : t * t =
 
 let extract_lo ?(lo = 0) (p : t) : t =
   let width = bitwidth p in
-  (* D7, ora-6 — degenerate cast/extract guard. *)
+  (* Degenerate cast keeps top. *)
   if lo >= width then top width
   else begin
     let res_width = width - lo in
@@ -857,7 +857,7 @@ let extract_lo ?(lo = 0) (p : t) : t =
       let ext_lo w = W.extract_exn ~hi:(lo - 1) w in
       let base_mod_2lo = ext_lo (base_of p) in
       let step_mod_2lo = ext_lo (step_of p) in
-      (* If no carry is ever triggered, the low bits can be ignored. The low bits increase monotonically until they carry over into the high bits, so it suffices to show that the sum of the low bits never carries. Note that this computation assumes that (cardn_of p) > 0. *)
+      (* No-carry case ignores low bits. *)
       let max_step_effect = add_exact base_mod_2lo @@
         mul_exact step_mod_2lo (W.pred (cardn_of p)) in
       let carry_bound = dom_size ~width:(W.bitwidth max_step_effect) lo in
@@ -874,7 +874,7 @@ let extract_lo ?(lo = 0) (p : t) : t =
 let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
   let sz = bitwidth p in
   let hiv = Option.value ~default:(bitwidth p - 1) hi in
-  (* D7, ora-6 — degenerate cast/extract guard. A negative hi (a target-size-0 unsigned/low cast, ~hi:(-1)) would reach [create ~width:0] below (invalid_arg at :59), and the signed arm with hi >= sz is unspecified; top is a sound over-approximation in both cases. *)
+  (* Degenerate cast keeps top. *)
   if hiv < 0 then top sz
   else if not signed && hiv + 1 >= sz then
     let res1, res2 = extract_exact ~width:(hiv + 1) p in
@@ -883,20 +883,20 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
     create ~width:(hiv+1) (base_of p) ~step:(step_of p) ~cardn:(cardn_of p)
   else if hiv >= sz then top sz
   else
-    (* TODO: signed case is old; check and update *)
+    (* TODO: check the signed case. *)
     let ext =  W.extract_exn ~hi:hiv in
     let ext_signed w = W.extract_exn ~hi:hiv (W.signed w) in
     Option.value_map ~default:(bottom (hiv + 1)) (finite_end p) ~f:begin
       fun e ->
-        (* TODO: in particular this infinite case should be checked *)
+        (* TODO: check the infinite case. *)
         if is_infinite p then infinite (ext (base_of p), ext (step_of p))
         else
-          (* negmin is the number of the form 10*; the most negative number when interpreted as signed. When signed, its predecessor is the most positive (signed) number. *)
+          (* negmin precedes maxint. *)
           let negmin = half sz in
           let posmax = W.pred negmin in
           if elem negmin p && elem posmax p &&
              ((base_of p) <> negmin || e <> posmax) then
-            (* TODO: this case in highly nontrivial and will require a loss of precision. *)
+            
             not_implemented ~top:(top (hiv + 1))
               "extract signed crossing max signed int"
           else
@@ -904,7 +904,7 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
             let newE' = ext e' in
             let base = if signed then ext_signed (base_of p) else ext (base_of p) in
             let step = ext (step_of p) in
-            (* If newE' wraps around, then it encompasses the full circle *)
+            (* Wrap covers the full circle. *)
             if W.(<) newE' e' then infinite(base, step)
             else
               let cardn = cardn_from_bounds (W.zero (hiv + 1)) step newE' in
@@ -915,7 +915,7 @@ let extract_internal ?hi ?(lo = 0) ?(signed = false) (p : t) : t =
   let hi = Option.map hi ~f:(fun hi -> hi - lo) in
   extract_lo ~lo p |> extract_hi ~hi ~signed
 
-(* D7, ora-6 — degenerate cast/extract guard. *)
+(* Degenerate cast keeps top. *)
 let cast ct (sz : int) (p : t) : t =
   let width = bitwidth p in
   if sz <= 0 then
@@ -940,10 +940,10 @@ let concat (p1 : t) (p2 : t) : t =
   let p1'step = lshift_exact (step_of p1) width2 in
   let p1' = create p1'base ~step:p1'step ~cardn:(cardn_of p1) in
   let p2' = cast Bil.UNSIGNED width p2 in
-  (* TODO: bug in intersection? The following should work but does not on wrapping: (intersection (logor p1' p2') (add p1' p2')) *)
+  
   (add p1' p2')
 
-(* creates a CLP that soundly approximates the elements of the list *)
+(* Sound hull of a list. *)
 let of_list ~width l : t =
   assert (width > 0);
   let open Monads.Std.Monad.Option.Syntax in
@@ -959,7 +959,7 @@ let of_list ~width l : t =
              then i, d, bounded_gcd diff step
              else idx, diff, bounded_gcd d step) in
     let l = idx
-            (* "rotate" the list left by the index of the desired first element *)
+            (* Rotate to the first element. *)
             |> List.split_n l
             |> (fun (end_l, start_l) -> List.append start_l end_l) in
     List.hd l >>= fun base ->
@@ -969,9 +969,9 @@ let of_list ~width l : t =
     !!(create base ~step ~cardn)
   end
 
-(* Note: BAP uses Z.div (standard division truncating towards 0 and obeying the rule of signs) internally for signed division and Z.ediv (the Euclidean algorithm) for unsigned division. *)
+(* BAP div truncates; ediv is Euclidean. *)
 let div (p1 : t) (p2 : t) : t =
-  (* Coerce mixed-width operands to the max width (zero-extension is a sound over-approximation) — never raise. *)
+  (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
   let open Monads.Std.Monad.Option.Syntax in
   Option.value ~default:(bottom width) begin
@@ -979,7 +979,7 @@ let div (p1 : t) (p2 : t) : t =
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
     max_elem p2 >>= fun max_e2 ->
-    (* A divisor set that may contain 0 makes the division ill-defined on a live path; the vendored code raised NotImplemented here (a soundness-total transfer mislabeled unimplemented). *)
+    (* Zero divisor gives top. *)
     if elem (W.zero width) p2
     then !!(if W.is_one (cardinality p2) then bottom width else top width)
     else
@@ -989,7 +989,7 @@ let div (p1 : t) (p2 : t) : t =
                     W.is_zero (W.modulo (step_of p1) (base_of p2))
           then bounded_gcd (W.div (step_of p1) (base_of p2))
               (W.sub (W.div (base_of p1) (base_of p2)) base)
-              (* TODO: improve step precision in cases where every element of the divisor divides every element of the dividend *)
+              (* TODO: improve step precision. *)
           else W.one width in
       let cardn = cardn_from_bounds base step e in
       !!(create base ~step ~cardn)
@@ -997,9 +997,9 @@ let div (p1 : t) (p2 : t) : t =
 
 let sdiv (p1 : t) (p2 : t) : t =
   let wsdiv a b = W.div (W.signed a) (W.signed b) in
-  (* Coerce mixed-width operands to the max width (zero-extension is a sound over-approximation) — never raise. *)
+  (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
-  (* An INFINITE (unbounded) operand's signed-quotient set is unbounded. *)
+  (* Infinite operand gives unbounded quotient. *)
   if is_infinite p1 || is_infinite p2 then top width
   else
   let open Monads.Std.Monad.Option.Syntax in
@@ -1008,7 +1008,7 @@ let sdiv (p1 : t) (p2 : t) : t =
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
     max_elem p2 >>= fun max_e2 ->
-    (* See [div] — a divisor set that may contain 0 over-approximates to top (never raise); an exact {0} divisor is a provably dead path, so bottom is correct. *)
+    (* Zero divisor gives top; exact {0} is bottom. *)
     if elem (W.zero width) p2
     then !!(if W.is_one (cardinality p2) then bottom width else top width)
     else if W.is_one (cardinality p1) &&
@@ -1027,31 +1027,31 @@ let sdiv (p1 : t) (p2 : t) : t =
         max minmax @@
         max minmin @@
         max maxmax maxmin in
-      (* TODO: improve step accuracy *)
+      (* TODO: improve step accuracy. *)
       let step = W.one width in
       let cardn = cardn_from_bounds base step e in
       !!(create base ~step ~cardn)
   end
 
-(* implemented as per the "SWEET" paper *)
+
 let modulo (p1 : t) (p2 : t) : t =
   sub p1 (mul (div p1 p2) p2)
 
-(* implemented as per the "SWEET" paper *)
+
 let smodulo (p1 : t) (p2 : t) : t =
   sub p1 (mul (sdiv p1 p2) p2)
 
-(* Implement indexed lattice *)
+(* Lattice. *)
 type idx = int
 let get_idx = bitwidth
 let precedes = subset
 let join = union
 let meet = intersection
 
-(* TODO: There is still room for improvement on this *)
+
 let widen_join (p1 : t) (p2 : t) =
-  (* Widening is only sound on an ascending chain (p1 precedes p2); when the fixpoint's merge is not a superset of the previous state, the vendored assertion aborted the whole analysis. *)
-  (* Canonized by design: singleton has step 0, so infinite would be singleton not top — handle bottom->singleton widen to top explicitly. *)
+  (* Widening needs an ascending chain. *)
+  (* Bottom-to-singleton widens to top. *)
   if is_bottom p1 then top (bitwidth p2)
   else if subset p1 p2 then
     if equal p1 p2 then p1 else
@@ -1091,8 +1091,8 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
               let steps_w = Word.of_int ~width steps in
               let delta = W.mul g steps_w in
               let v = W.add hi2 delta in
-              if W.compare v hi2 < 0 then (* overflow wraps *)
-                (* translation escaping word -> infinite arm *)
+              if W.compare v hi2 < 0 then (* Overflow wraps. *)
+                (* Escaping translation goes infinite. *)
                 Word.ones width
               else
                 let f = nearest_inf_pred v (base_of p2) step in
@@ -1105,7 +1105,7 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
               try create lo ~step ~cardn:(cardn_from_bounds lo step hi)
               with _ -> widen_join p1 p2
             in
-            (* if no unstable bound, keep p2; else extrapolated *)
+            (* Stable bounds kept. *)
             if not lo_unstable && not hi_unstable then p2
             else if lo_unstable && hi_unstable then try_create extrap_lo extrap_hi
             else if hi_unstable then try_create lo2 extrap_hi
@@ -1114,9 +1114,9 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
   else join p1 p2
 
 
-(* Implement the Value interface *)
 
-(* NOTE: this compare function is solely for implementation of the value interface. *)
+
+
 let compare (p1 : t) (p2 : t) : int =
   let base_comp = W.compare (base_of p1) (base_of p2) in
   let step_comp = W.compare (step_of p1) (step_of p2) in
@@ -1158,7 +1158,7 @@ let t_of_sexp : Sexp.t -> t = function
   | Sexp.List _
   | Sexp.Atom _ -> failwith "Sexp not a CLP"
 
-(* Printing *)
+
 
 let pp ppf (p : t) =
   let width = bitwidth p in

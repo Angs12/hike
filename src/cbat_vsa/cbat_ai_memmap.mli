@@ -14,7 +14,7 @@
 open Core_kernel
 open Bap.Std
 
-(* * Cbat_ai_memmap Represents memory as an interval tree from ranges of addresses to CLPs with an endianness. *)
+(* Memory as an interval tree from address ranges to CLPs with endianness. *)
 
 module WordSet = Cbat_clp_set_composite
 
@@ -64,9 +64,9 @@ include Value.S with type t := t
 include Cbat_map_lattice.S_indexed with module Val := Val and module Key := Key and
 type t := t and type idx := idx
 
-(* Hike addition (the trace-partitioning design, docs/trace-partitioning-plan.md §3): the RANGED meet — meet [data] into every cell whose key intersects [key]: the overlapping cells meet [data], the gaps within [key]. *)
+(* Meet [data] into every cell whose key intersects [key]. *)
 val meet_range : t -> key:Key.t -> data:Val.t -> t
 
-(* Hike addition (the call-abstraction precision lane): the caller-frame-preserving call abstraction — keep every cell whose key is >= [keep_lo] (the caller's own locals; the callee's frame is below the call-time RSP) and. *)
+(* Keep cells at key >= [keep_lo] outside [escape]. *)
 val call_keep : t -> keep_lo:Bap.Std.word -> escape:(Bap.Std.word * Bap.Std.word) list -> t
 

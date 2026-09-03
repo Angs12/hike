@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# run_semantic_all.sh — semantic native-vs-lifted equivalence for EVERY
-# emitted corpus binary (the 8-bin run_semantic.sh list + the other 20).
-#
-# The corpus is PIE (ET_DYN, compile_corpus.sh since 2026-08-26); the
-# lifted-executable link stays -no-pie — see run_semantic.sh's header for
-# why that is a linker constraint of the harness artifact (baked @got.plt
-# constants + extern_weak .rodata refs → DT_TEXTREL), not a corpus fallback.
-#
+# Native-vs-lifted equivalence for EVERY emitted corpus binary.
 # Usage: run_semantic_all.sh [corpus_dir] [ir_dir] [out_dir]
-#   corpus_dir  default /tmp/corpus          (native binaries)
-#   ir_dir      default /tmp/heritage_p6     (the emitted out_*.ll)
-#   out_dir     default /tmp/sem_all
-#
-# Per out_<name>.ll: rename @main/@_dl_relocate_static_pie, llc -O0,
-# link with harness.c (+ setjmp_stub.S when the module uses setjmp/
-# longjmp), run lifted + native, byte-diff stdout, record rc.  Each
-# run is wrapped in a 15 s timeout (a lifted binary that infinite-loops
-# must not stall the batch).
+# Renames @main, llc -O0, links harness.c (+ setjmp_stub.S for setjmp
+# users), runs both with a 15 s timeout, byte-diffs stdout.
+# The lifted link stays -no-pie: a linker constraint of the harness
+# artifact (baked absolute constants + extern_weak refs reject DT_TEXTREL).
 
 set -u
 CORPUS="${1:-/tmp/corpus}"
@@ -70,8 +58,7 @@ for ll in "$IR"/out_*.ll; do
 			continue
 		}
 
-	# exec -a forces identical argv[0]: glibc usage messages print the
-	# program's own path, so raw invocation compares argv[0]s, not behavior.
+	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
 	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_lifted" >"$OUT/${base}_lifted.out" 2>&1
 	lrc=$?
 	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1

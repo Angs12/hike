@@ -1,47 +1,10 @@
 #!/usr/bin/env bash
-# run_semantic_opt.sh — the OPTIMIZATION-SAFETY gate: the same
-# native-vs-lifted equivalence as run_semantic_all.sh, but the emitted
-# IR is pushed through `opt -O2` between rename and llc.  What a real
-# consumer (llc -O2, clang -O2, an inliner) does to the module must
-# not change the lifted binary's behavior — this gate proves it.
-#
-# Born 2026-09-01 at 23/32; the poison-phi definedness fix (same day,
-# below) flipped mixed_fp_int — the proven poison-class member — to
-# 24/32.  The remaining failures are the gate's work-list, not an
-# excuse to widen: 5 are opt-INDUCED and all instcombine-family (the
-# model-SP-lane/push class: fizzbuzz, fptr_table, setjmp_longjmp,
-# struct_arr_dynidx, union_overlap — see the 2026-09-01 optimizability
-# review), 3 are the pre-existing -O0 knowns (nested_struct, variadic,
-# va_arg_vacopy — tickets T02/T03/T05 in .scratch/one-frame-anchor-
-# removal/, they fail run_semantic_all.sh identically and are listed
-# here for completeness, NOT exempted).  There is no allowlist and no
-# exemption logic: every red binary is red, every failure line carries
-# its cause.
-#
-# opt version: pinned to opt-21 (system LLVM 21).  The emitter's OCaml
-# binding is 19.1.7, but the gate tests what MODERN consumers do; the
-# 21 pipeline is a superset in practice (its instcombine is stricter —
-# it is the one that surfaces the fixpoint error class).  Both opt-19
-# and opt-21 exist on this machine; if opt-21 is missing, fail loudly
-# rather than silently falling back (NO FALLBACKS).
-#
+# Optimization-safety gate: native-vs-lifted equivalence with opt -O2
+# between rename and llc. Strict: no allowlist; failures auto-bisect
+# every pass in BISECT_PASSES and list each breaking pass (CRASH = opt
+# crashed). Keeps *_renamed.ll/*_opt.ll as repro artifacts.
+# Pins opt-21 (fails loudly when missing); exit 0 iff all pass.
 # Usage: run_semantic_opt.sh [corpus_dir] [ir_dir] [out_dir]
-#   corpus_dir  default /tmp/corpus        (native binaries)
-#   ir_dir      default /tmp/heritage_p6   (the emitted out_*.ll)
-#   out_dir     default /tmp/sem_opt       (kept artifacts: *_opt.ll,
-#                                           the post-opt IR, is the
-#                                           reproducible failure record)
-#
-# Per out_<name>.ll:
-#   1. rename @main -> @hike_main (harness collision), as always;
-#   2. opt -O2 -S          -> kept as <name>_opt.ll;
-#   3. llc -O0 + harness link, 15 s timeout, byte-diff vs native;
-#   4. on failure: AUTO-BISECT — each pass in BISECT_PASSES runs alone
-#      over the renamed IR, and EVERY failing pass is listed.  The
-#      multiplicity is the diagnosis: instcombine alone = the poison/
-#      canonicalization class; sroa+instcombine+inline together = the
-#      model-SP-lane class.  One extra opt run per pass, seconds each.
-# Exit: 0 iff every binary PASSes.
 
 set -u
 CORPUS="${1:-/tmp/corpus}"
@@ -50,17 +13,14 @@ OUT="${3:-/tmp/sem_opt}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
 
-# The pinned optimizer.  Plain `opt` on this machine is 21; pin the
-# explicit name so a future default switch cannot silently change the
-# gate's meaning.
+# Pinned optimizer; a default switch must not silently change the gate.
 OPT=opt-21
 command -v "$OPT" >/dev/null 2>&1 || {
 	echo "FATAL: $OPT not found (the gate pins the opt version; NO FALLBACKS)"
 	exit 2
 }
 
-# Single-pass bisect list.  A pass that CRASHES opt (the fixpoint class)
-# is a failure too — crash and miscompile are both "this pass broke it".
+# Single-pass bisect list; an opt crash counts as breaking too.
 BISECT_PASSES="mem2reg sroa instcombine simplifycfg dse inline function-attrs argpromotion globalopt early-cse"
 
 pass=0
@@ -91,7 +51,7 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
-	# The gate step itself.
+	# The gate step.
 	"$OPT" -O2 -S "$OUT/${base}_renamed.ll" -o "$OUT/${base}_opt.ll" 2>"$OUT/${base}_opt.err" || {
 		echo "FAIL $base (opt -O2): $(head -1 "$OUT/${base}_opt.err")"
 		fail=$((fail + 1))
@@ -117,8 +77,7 @@ for ll in "$IR"/out_*.ll; do
 			continue
 		}
 
-	# exec -a forces identical argv[0]: glibc usage messages print the
-	# program's own path, so raw invocation compares argv[0]s, not behavior.
+	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
 	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1
 	lrc=$?
 	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
@@ -132,7 +91,7 @@ for ll in "$IR"/out_*.ll; do
 	if [ "$lrc" -ne "$nrc" ] || ! cmp -s "$OUT/${base}_opt.out" "$OUT/${base}_native.out"; then
 		echo "FAIL $base (opt -O2; native rc=$nrc vs lifted rc=$lrc)"
 		diff "$OUT/${base}_native.out" "$OUT/${base}_opt.out" | head -3 | sed 's/^/    /'
-		# AUTO-BISECT: every pass that alone breaks this binary.
+		# Auto-bisect: list every pass that alone breaks this binary.
 		bisect_line="    broken by:"
 		any_bisect=0
 		for p in $BISECT_PASSES; do

@@ -4,8 +4,7 @@ open Hike_abi
 module Abi = Hike_abi
 open Convutils
 
-(* [EHashtbl]: Core's Hashtbl under the deprecated-name alert (see
-   [Convutils.EHashtbl]). *)
+(* Core Hashtbl with the deprecated warning off. *)
 module EHashtbl = Core_kernel.Hashtbl[@warning "-D"]
 module KB = Bap_knowledge.Knowledge
 module Vsa = Cbat_vsa
@@ -13,9 +12,9 @@ module AI = Cbat_vsa.AI
 module Mem = Cbat_vsa.Mem
 module Ws = Cbat_clp_set_composite
 
-(* The per-run emission context ([Convutils.emit_ctx], threaded as a KB Context var [emit_ctx_var]): the old module-level refs (ll_funcs / copy_reloc_addrs / symtab_ref / section_remap_ref / text_section_ref / guarded_warned) now live in that one record. *)
+(* Emission context threaded as a KB var. *)
 
-(* [lookup_native_fn llvm_module v]: The LLVM function whose object symbol starts at the native address [v] (the symtab [find_by_start]); None when [v] is not a function entry (or there is no symtab). *)
+(* Finds the LLVM function at a native address. *)
 let lookup_native_fn ctx llvm_module v =
   match ctx.Convutils.symtab with
   | Some symtab -> (
@@ -24,7 +23,7 @@ let lookup_native_fn ctx llvm_module v =
       | None -> None)
   | None -> None
 
-(* [remap_native_addr llvm_ctx llvm_module v]: a native address [v] to its lifted representation — a function entry (the symtab) as [ptrtoint @function], or a data-section address as [ptrtoint (@section + offset)]. None when [v] is not a known native address (raw data). *)
+(* Remaps a native address to its lifted value. *)
 let remap_native_addr ctx llvm_ctx llvm_module v =
   match lookup_native_fn ctx llvm_module v with
   | Some f -> Some (Llvm.const_ptrtoint f (Llvm.i64_type llvm_ctx))
@@ -45,7 +44,7 @@ let remap_native_addr ctx llvm_ctx llvm_module v =
           Some (Llvm.const_ptrtoint gep (Llvm.i64_type llvm_ctx))
       | None -> None)
 
-(* [create_section_global]: The DATA-section global, typed [n x i64] so the pointer slots can hold [ptrtoint] constants (the byte layout is preserved — the [n x i64] array's bytes are the section bytes in little-endian — and the byte-offset GEP loads ([resolve_addr]) read them unchanged). *)
+(* Declares a section global as [n x i64]. *)
 let create_section_global llvm_ctx llvm_module size name ~is_const =
   let n64 = (size + 7) / 8 in
   let ret =
@@ -56,7 +55,7 @@ let create_section_global llvm_ctx llvm_module size name ~is_const =
   Llvm.set_global_constant is_const ret;
   ret
 
-(* [text_load_constant]: The inline .text constant-pool -- see [text_section_ref]. *)
+(* Reads a stashed .text constant. *)
 let text_load_constant ctx llvm_builder llvm_ctx llvm_module addr w =
   let v = Word.to_int64_exn addr in
   match ctx.Convutils.text_section with
@@ -83,7 +82,7 @@ let text_load_constant ctx llvm_builder llvm_ctx llvm_module addr w =
       Some c
   | _ -> None
 
-(* [set_section_initializer]: the remapped i64-array initializer for the data-section global [g] built from the section BYTES [arr] (native base [min_addr]). Each 8-byte little-endian slot whose value is a native address is rewritten to the lifted address. *)
+(* Builds a remapped section initializer. *)
 let set_section_initializer ctx llvm_ctx llvm_module g arr min_addr =
   let n64 = (Array.length arr + 7) / 8 in
   let slot_at i =
@@ -104,11 +103,11 @@ let set_section_initializer ctx llvm_ctx llvm_module g arr min_addr =
   let slots = Array.init n64 slot_at in
   Llvm.set_initializer (Llvm.const_array (Llvm.i64_type llvm_ctx) slots) g
 
-(* The per-sub FRAME state, threaded through the emission (no global refs — a failure between reset and bind cannot leave stale state): - [frame]/[min_lo]: the per-sub alloca + its cell origin (the negative cells — the. *)
+(* Per-sub frame state. *)
 type sub_frame = {
   frame : Llvm.llvalue option;
   min_lo : int64;
-  (* [anchor_idx]: The ANCHOR's frame-relative byte index. *)
+  (* Anchor byte index. *)
   anchor_idx : int64;
   anchor_i64 : Llvm.llvalue;
   stack : Llvm.llvalue option;
@@ -124,7 +123,7 @@ let llvm_module_var : Llvm.llmodule KB.Context.var =
 let section_list_var : section list KB.Context.var =
   KB.Context.declare ~package:"hike" "section-list" (KB.return [])
 
-(* the per-run emission context: [Convutils.empty_emit_ctx ()] is only the declare-time default; the convlir pass fills the config and threads the SAME record through [init_subs] + [create_prog] via [KB.Context.with_var emit_ctx_var ctx]. *)
+(* Default emission context. *)
 let emit_ctx_var : Convutils.emit_ctx KB.Context.var =
   KB.Context.declare ~package:"hike" "emit-ctx"
     (KB.return (Convutils.empty_emit_ctx ()))
@@ -138,17 +137,17 @@ let typ_lltype_m typ =
 
 let var_lltype var = typ_lltype_m (Var.typ var)
 
-(* [is_fp_param v]: The model's FP argument registers (the 256-bit YMM0-7) — the extern-call fallback signature carries them so the FP args of a printf-style call reach the real ABI's XMM slots. *)
+(* Tests for FP arg registers. *)
 let is_fp_param (v : var) : bool =
   Base.String.is_prefix (Var.name (Var.base v)) ~prefix:"YMM"
 
 let is_extern ctx (sub_tid : tid) : bool =
   not (Core.Map.mem ctx.Convutils.subs sub_tid)
 
-(* [fp_ret_kind]: The return width of a floating-point-returning EXTERN. *)
+(* FP return width. *)
 type fp_ret_kind = FpFloat | FpDouble | FpLongDouble
 
-(* The DOUBLE-returning libm base names; the float ("f" suffix) and long-double ("l" suffix) variants are derived by suffix. *)
+(* Double-returning libm names. *)
 let fp_double_libm : string list =
   [ "acos"; "acosh"; "asin"; "asinh"; "atan"; "atan2"; "atanh"; "cbrt";
     "ceil"; "copysign"; "cos"; "cosh"; "drem"; "erf"; "erfc"; "exp";
@@ -265,7 +264,7 @@ let create_fun_declaration sub_tid =
   let* ctx = Context.get emit_ctx_var in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
-  (* the EXTERN declares are VARIADIC (printf-style: the real callee reads its FP args from the XMM save area per [%al]; LLVM computes the vector-arg count [al] for a call to a vararg function from the double-typed FP args). The model subs' stored signatures stay fixed-arity. *)
+  (* Extern declares are variadic. *)
   let fn_typ =
     if is_extern ctx sub_tid then
       Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
@@ -283,7 +282,7 @@ let create_fun sub_tid ~rets ~args =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let* ctx = Context.get emit_ctx_var in
-  (* The ret/arg types derive from the EXPLICIT [rets]/[args] (computed by the caller in [compute_sub_sig]) — NOT via [get_rets]/[get_args], which would read [ctx.subs] before this sub's signature has been added (the. *)
+  (* Uses explicit rets/args. *)
   let* ret_typ =
     match rets with
     | [] -> return @@ Llvm.void_type llvm_ctx
@@ -309,7 +308,7 @@ let create_fun sub_tid ~rets ~args =
     Core.Map.add_exn !(ctx.Convutils.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ);
   set_arg_attrs_of fn args >>= return
 
-(* LLVM requires both operands of a binop to have the same type, while BIL allows operations on expressions of different sizes. *)
+(* Coerces binop operands to one type. *)
 let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
   let open KB in
   let is_integer v =
@@ -342,14 +341,7 @@ let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
       in
       return (llvm_val1, llvm_val2)
 
-(* The name-keyed region dispatch (mem-fission): a Load/Store whose mem
-   operand is [stack_rN_mem] is a fissioned access — its address is
-   region-relative ([stack_rN_base + index]; the base var's local is
-   the region alloca's cell-0, bound at [create_sub]'s region
-   creation), so the ordinary address emission lands inside the region
-   alloca with no tag consultation.  The recognizer is the producer
-   module's ([Hike_stack_model.is_region_mem]) — the naming
-   convention is that module's fact, not a grammar re-typed here. *)
+(* Routes fissioned accesses to region allocas. *)
 let is_region_mem_exp (e : exp) : bool =
   match e with
   | Bil.Var v -> Hike_stack_model.is_region_mem v
@@ -390,7 +382,7 @@ let create_unop llvm_builder (op, llvm_val) =
   | NEG -> Llvm.build_neg llvm_val "" llvm_builder
   | NOT -> Llvm.build_not llvm_val "" llvm_builder
 
-(* [exp_size e]: The bitwidth of a BIL expression, used by the [Concat] emission to detect ZERO-WIDTH operands (the x86 lifter's `high:0[x]`/`low:0[x]` empty-extract concat patterns — an `Extract (hi, lo, _)` with hi < lo contributes 0. *)
+(* Returns an expression bitwidth. *)
 let rec exp_size (e : exp) : int =
   match e with
   | Bil.Extract (hi, lo, _) -> max 0 (hi - lo + 1)
@@ -420,7 +412,7 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
   let width = Llvm.integer_bitwidth (Llvm.type_of llvm_var) in
   let result_size = hi - lo + 1 in
   if lo >= width then
-    (* the extract lies entirely ABOVE the operand (e.g. bits 63..32 of a 32-bit value) — the result is zero. *)
+    (* Out-of-range extracts yield zero. *)
     return @@ Llvm.const_int (Llvm.integer_type llvm_ctx result_size) 0
   else
     let temp_var =
@@ -429,7 +421,7 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
         "" llvm_builder
     in
     if result_size >= width then
-      (* the extract range WIDENS the operand (e.g. `63:0[<32-bit>]` — BIL's Extract zero-extends past the operand's width) — zext, never a trunc. *)
+      (* Wide extracts zero-extend. *)
       return
       @@ Llvm.build_zext temp_var
            (Llvm.integer_type llvm_ctx result_size) "" llvm_builder
@@ -464,7 +456,7 @@ let create_inttoptr llvm_builder llvm_val =
   return
   @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
-(* [section_load]: the section-GEP load (with the copy-relocation through-load for bss) -- the fallback of [create_load] / [create_rip_relative_addr] when the address is NOT in the inline .text constant-pool. *)
+(* Section load with copy-reloc through-load. *)
 let section_load llvm_builder llvm_ctx addr addr_i64 size =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -473,7 +465,7 @@ let section_load llvm_builder llvm_ctx addr addr_i64 size =
     Base.List.exists ctx.Convutils.copy_relocs ~f:(fun a ->
         Int64.equal a addr_i64)
   then
-    (* the COPY-RELOCATED slot: the stored value is [ptrtoint (@extern)] -- load the pointer, then load the real value through it (the stdout FILE* -- the copy relocation's content). *)
+    (* Loads through copy-relocated pointers. *)
     let p =
       Llvm.build_load (Llvm.i64_type llvm_ctx) base "" llvm_builder
     in
@@ -496,7 +488,7 @@ let create_load llvm_builder (addr, size) =
   let* sections = Context.get section_list_var in
   match Llvm.int64_of_const addr with
   | Some v ->
-      (* the inline .text constant-pool: .text is NOT in [section_list] (no @text global), so read the stashed .text bytes first (function entries -> [ptrtoint @fn], data -> the inlined integer constant). *)
+      (* Reads stashed .text bytes first. *)
       let addr_w = Word.of_int64 ~width:64 v in
       let* pre =
         match
@@ -517,7 +509,7 @@ let create_load llvm_builder (addr, size) =
       in
       return pre
   | _ ->
-      (* addr is not a constant -> inttoptr + load. *)
+      (* Non-constant addresses use inttoptr. *)
       let* addr = create_inttoptr llvm_builder addr in
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr ""
@@ -570,8 +562,8 @@ let create_immidiate word =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let* ctx = Context.get emit_ctx_var in
-  (* The NATIVE function-pointer remap: a constant that EXACTLY matches a symbol-table function entry (the native `atexit (close_stdout)` arg 0x401d80 — the `mov $0x401d80,%rdi` lift) is emitted as the LIFTED function's. *)
-  (* The native-function-pointer remap only makes sense for <=64-bit words (a function pointer is a 64-bit address); a wider word (e.g. *)
+  (* Remaps native function constants. *)
+  (* Remap applies to <=64-bit words. *)
   let remapped =
     if Word.bitwidth word <= 64 then
       let v = Word.to_int64_exn word in
@@ -588,17 +580,7 @@ let create_immidiate word =
            (Word.string_of_value word)
            16
 
-(* [warn_undef_read ctx var blk_tid]: the [hike: undef-read:] anomaly
-   class — a read of a var that no phi lane and no def ever binds in
-   this block (the never-defined class of the definedness closure).  The
-   native semantics is "whatever the caller left in that register" —
-   modeled as [undef].  DATA reads warn individually (deduped per
-   (block, var) so a loop does not spam); the structural model-ABI
-   lanes — the phantom YMM args of extern fallback signatures and the
-   RDX ret member — are classified via the ABI record and only COUNTED
-   into the per-sub summary [create_sub] prints (removing them is
-   Candidate 4's [abi_shape] work; warning each individually would bury
-   the real anomalies in ~208 corpus-wide duplicates). *)
+(* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
   let v = Var.base var in
   let abi = Abi.of_target ctx.Convutils.target in
@@ -632,22 +614,7 @@ let rec create_exp llvm_builder blk_tid exp =
       let* var = create_exp llvm_builder blk_tid e in
       create_unop llvm_builder (op, var)
   | Var v -> (
-      (* The merged arm — both lanes:
-         (1) WIDTH-FAMILY FALLBACK (mainline, the wvar consumer side):
-         the local maps key on (name, width); a read of [v] at its
-         occurrence's width, when the binding happened at another width
-         of the same BASE (the FP result bound at its result width, the
-         consumer reading the 32-bit splice view), probes the family
-         (all bound widths of the same base) and adjusts to the
-         requested width.
-         (2) The true unbound case (finding1's Candidate 2): the var has
-         NO binding at ANY width — dropped from the transfer set (never
-         defined in the sub, the definedness closure) or read before any
-         def.  The native register state is "whatever the caller left
-         there" — [undef], NOT [poison]: poison is UB and folds into
-         live results under instcombine (the optimizability review);
-         [hike: undef-read:] is the greppable anomaly class (per-sub
-         ABI-lane reads are aggregated by [create_sub]). *)
+      (* Width-family fallback, else undef. *)
       match get_local ctx blk_tid v with
       | Some x -> return x
       | None ->
@@ -683,8 +650,7 @@ let rec create_exp llvm_builder blk_tid exp =
       let* llvm_var = create_exp llvm_builder blk_tid exp in
       create_extract llvm_builder (hi, lo, llvm_var)
   | Store (m, addr, data, _, _) when is_region_mem_exp m ->
-      (* a fissioned store: the region var names the storage; the
-         region-relative address lands inside the region alloca. *)
+      (* Fissioned stores use region storage. *)
       let* addr = create_exp llvm_builder blk_tid addr in
       let* data = create_exp llvm_builder blk_tid data in
       create_store llvm_builder (data, addr)
@@ -693,7 +659,7 @@ let rec create_exp llvm_builder blk_tid exp =
       let* data = create_exp llvm_builder blk_tid data in
       create_store llvm_builder (data, addr)
   | Load (m, addr, _, size) when is_region_mem_exp m ->
-      (* the same name-keyed routing on the load side. *)
+      (* Same routing for loads. *)
       let* addr = create_exp llvm_builder blk_tid addr in
       create_load llvm_builder (addr, Size.in_bits size)
   | Load (_, addr, _, size) ->
@@ -724,7 +690,7 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
   let* sections = Context.get section_list_var in
   match exp with
   | Bil.Int w ->
-      (* NATIVE address remap: function entry (symtab) -> [const_ptrtoint (@fn)]; data-section address -> [const_ptrtoint (section+offset)]; anything else (a .text data constant-pool address) -> the raw address. *)
+      (* Remaps function and section addresses. *)
       let v = Word.to_int64_exn w in
       let* addr =
         match remap_native_addr ctx llvm_ctx llvm_module v with
@@ -741,13 +707,7 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
            let* data = create_exp llvm_builder blk_tid data in
            return @@ Llvm.build_store data addr llvm_builder
        | None ->
-           (* The folded address is an i64 CONSTANT EXPRESSION — the remapped
-              section/global pointer ([int64_of_const] reads only
-              ConstantInt).  A SIMPLE store through it: [create_store]'s
-              inttoptr + store — the constant carries the remap and LLVM
-              folds inttoptr(ptrtoint(gep)) back into the GEP.  Never a
-              crash on a live address (the old [value_exn] died here on the
-              got-slot loads: mem[0x291F8] in .bss via a global GEP). *)
+           (* Stores through remapped constants. *)
            let* data = create_exp llvm_builder blk_tid data in
            create_store llvm_builder (data, addr))
   | Load (_, addr, _, size) ->
@@ -757,7 +717,7 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
            let addr = Word.of_int64 ~width:64 i64 in
            let addr_i64 = Word.to_int64_exn addr in
            let size = Size.in_bits size in
-           (* The inline .text constant-pool: a .text load is read at compile time (function entry -> [ptrtoint @fn]; data -> the integer), NOT a @text global GEP (that gives fptr_table raw misaligned pointers). *)
+           (* Reads .text loads at compile time. *)
            let* loaded =
              match
                text_load_constant ctx llvm_builder llvm_ctx llvm_module addr size
@@ -767,12 +727,10 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
            in
            return loaded
        | None ->
-           (* The SIMPLE load (see the Store arm): [create_load]'s inttoptr
-              + load on the already-remapped constant expression — LLVM
-              folds it; never a crash on a live address. *)
+           (* Loads via inttoptr on remapped constants. *)
            create_load llvm_builder (addr, Size.in_bits size))
   | Cast (cast, i, (Load _ as load)) ->
-      (* RIP-relative movzx/movsx: RDX := pad:64[mem[0x401C, el]:u32] *)
+      (* RIP-relative widening loads. *)
       let* v = create_rip_relative_addr llvm_builder blk_tid load in
       create_cast llvm_builder (cast, i, v)
   | _ -> create_exp llvm_builder blk_tid exp
@@ -781,7 +739,7 @@ let create_branches blk_tid llvm_builder branches =
   let open KB in
   let open Bap.Std in
   let* ctx = KB.Context.get emit_ctx_var in
-  if Seq.length branches = 1 then (* unconditional branch *)
+  if Seq.length branches = 1 then 
     (
     let br = Seq.hd_exn branches in
     let jmp_target = Jmp.kind br |> goto_label_exn in
@@ -795,7 +753,7 @@ let create_branches blk_tid llvm_builder branches =
         Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
         KB.return ())
   else if Seq.length branches = 2 then (
-    (* conditional branch *)
+    
     let br1 = Seq.hd_exn branches in
     let else_jmp = Seq.to_list branches |> Base.List.last_exn in
     let true_target = Jmp.kind br1 |> goto_label_exn |> label_tid in
@@ -808,44 +766,29 @@ let create_branches blk_tid llvm_builder branches =
     KB.return ())
   else failwith "pp_branches: more than 2 branches"
 
-(* [find_def_tag sub_info def]: Vsa_kind option — the VSA tag of [def]
-   from [Convutils.vsa_info]: ANY tag, singleton (lo = hi) and interval
-   (lo < hi) alike — the split happens in [create_def].  ONE map find
-   (arch C2 + C4: the record's [offsets] field IS the index map — the
-   old per-def linear scan died with it; the [None]-info case short-
-   circuits the [Base.Option.bind]). *)
+(* Looks up a def VSA tag. *)
 let find_def_tag sub_info def =
   Base.Option.bind sub_info ~f:(fun info ->
       Core.Map.find info.Convutils.offsets (Term.tid def))
 
-(* [find_def_k] DELETED (main's C6 + the merge): the k-range lookup is
-   the record's own [k_ranges] map — the one caller folded into it. *)
 
-(* [is_abi_visible ctx sub_info def]: does the access touch caller/callee-visible
-   storage? Finding 1: this is NO LONGER a second copy of the rule — it is
-   [Hike_stack_model]'s, the module that owns the stack model (arch
-   review #1 part 2 — the REWRITE stays in [Hike_stack_to_locals]). The
-   emitter is a consumer.  (Main's C2 shape: the [sub_info] option
-   short-circuits; the rule reads the record's own maps.) *)
+
+(* Tests for visible storage via the stack model. *)
 let is_abi_visible ctx sub_info def =
   match sub_info with
   | None -> false
   | Some info ->
       Hike_stack_model.abi_visibility_of (sp ctx.Convutils.target) info def
 
-(* [is_stack_access def]: is [def] a Stack Access — the [stack_access]
-   tag the relevance pass set on Stack Accesses, the only source of
-   truth. (The legacy [addr_is_stack] two-predicate form was redundant:
-   the relevance pass already filters by address derivation, so a
-   tagged def is a Stack Access by construction. Inlined here.) *)
+(* Tests the [stack_access] tag. *)
 let is_stack_access def = Hike_vsa_relevance.has_stack_access def
 
-(* [sub_degraded sub_tid]: The sub's VSA results are unusable for the narrow-tag / dead-path decisions (the D.1 non-convergent fixpoint or the D.2 indirect-jump incomplete-CFG cases — see [Convutils.vsa_info.degraded]): untagged stack accesses. *)
+(* Tests for unusable VSA results. *)
 let sub_degraded sub_info =
   Base.Option.value_map sub_info ~default:false ~f:(fun info ->
       info.Convutils.degraded)
 
-(* [is_plt_trampoline sub]: The BAP-resolved PLT stubs (the atexit/setlocale class) — a DEFINED sub whose BIL is `...; call @real with noreturn` — see the PLT-trampoline signature fix in hike.ml's [compute_sub_sig] and the noreturn-call fix in [create_call]. *)
+(* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =
     Sub.free_vars sub
@@ -867,17 +810,7 @@ let is_plt_trampoline ctx (sub : sub term) : bool =
                    | Call _ -> true
                    | _ -> false))
 
-(* [create_static_mem_access llvm_builder blk_tid fr lo exp]: Emit a
-   Load/Store for the SINGLETON-tagged def at the entry- anchored
-   offset [lo] — the MAP SOLUTION at the emitter: ONE [Exp.mapper]
-   replaces ONLY the matched memory node with a marker var whose local
-   is the built GEP access; ALL enclosing structure (the cast-wrapped
-   [pad:64[mem[RBP-4]:u32]] keeps its cast — [create_cast] then emits
-   the zext right at the load; loads nested in binops keep the binop)
-   is preserved and emitted by the ordinary [create_exp]. No AST
-   pattern matching on BIL constructors beyond the marker dispatch
-   (the node finder is the [Exp.visitor], per Principle 8 /
-   CONTEXT.md). *)
+(* Emits a singleton-tagged access. *)
 let create_static_mem_access llvm_builder blk_tid fr lo exp =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -907,9 +840,7 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
   in
   match gep_opt with
   | Some gep ->
-      (* The FIRST memory node of the rhs (the tagged access), found
-         visitor-based; its address expression identifies every node
-         of the SAME access (uniform-address def shapes). *)
+      (* Finds the first memory node. *)
       let access : [ `Load of exp * Size.t | `Store of exp * exp * Size.t ] option =
         let vis =
           object
@@ -952,9 +883,7 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
            in
            let* d = create_exp llvm_builder blk_tid data in
            let _ : Llvm.llvalue = Llvm.build_store d gep llvm_builder in
-           (* the store's value semantics: the stored data (a store
-              node as a value binds the data, never the void store
-              instruction — the badref chain). *)
+           (* Store nodes bind data, not void stores. *)
            insert_local ctx blk_tid marker d;
            let v =
              object
@@ -972,8 +901,8 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
 #endif
       create_exp llvm_builder blk_tid exp
 
-(* The three-way emission branch of the UNFLAGGED defs (the rip_relative_addr branch stays above): - SINGLETON tag (lo = hi): the const-GEP static access into the per-sub frame. *)
-(* [rebase_addr llvm_builder fr addr]: The positive-interval address re-base — [stack + (addr - anchor)]: the model's address (computed from the per-sub anchor-based RSP/RBP locals) minus the anchor = the offset from the sub's ENTRY; adding the. *)
+(* Singleton tags use const GEPs. *)
+(* Rebases positive-interval addresses onto the stack. *)
 let rebase_addr llvm_builder fr addr =
   let open KB in
   let stack =
@@ -983,7 +912,7 @@ let rebase_addr llvm_builder fr addr =
   let offset = Llvm.build_sub addr fr.anchor_i64 "arg_off" llvm_builder in
   return @@ Llvm.build_add stack offset "arg_addr" llvm_builder
 
-(* [create_dynamic_alloc llvm_builder blk_tid exp]: The stack-model Phase 1 emission — the runtime-sized stack allocation (VLA/alloca, the [dynamic_alloc]-tagged def) becomes a REAL LLVM dynamic alloca: `%vla = alloca i8, i64 <size>, align 16`, and the def's lhs (RSP for. *)
+(* Emits runtime-sized allocas. *)
 let create_dynamic_alloc llvm_builder blk_tid exp =
   let open KB in
   match exp with
@@ -1000,7 +929,7 @@ let create_dynamic_alloc llvm_builder blk_tid exp =
            llvm_builder
   | _ -> create_exp llvm_builder blk_tid exp
 
-(* [mem_access_via_ptr llvm_builder blk_tid addr_v exp]: inttoptr an already-computed runtime address ([addr_v], an i64) and load/store through it — the shared tail of the outgoing-cell and positive- interval branches in [create_def]. *)
+(* Loads/stores through a computed address. *)
 let mem_access_via_ptr llvm_builder blk_tid addr_v exp =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -1027,27 +956,17 @@ let mem_access_via_ptr llvm_builder blk_tid addr_v exp =
       create_cast llvm_builder (c, w, s)
   | _ -> create_exp llvm_builder blk_tid exp
 
-(* [region_of_offset regions lo]: the ALLOCATED region ([stack_rN]) whose
-   span contains the singleton offset [lo] — the split model's access
-   resolution. The region list is exactly the plan the vsa pass produced
-   ([stack_plan_of]), so this is a lookup, never a decision. *)
+(* Finds the region containing an offset. *)
 let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
     (lo : int64) : (Convutils.region * Llvm.llvalue) option =
   Base.List.find regions ~f:(fun (r, _) ->
       let rlo, rhi = r.Convutils.span in
       Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
 
-(* [mem_access ...]: THE per-access memory dispatcher — the ONE place the
-   emitter classifies how a tagged stack access resolves to storage. Both
-   the split model's region misses and the whole fallback model route
-   here, so the classification exists once (previously the precise and
-   non-precise arms of [create_def] each carried a near-verbatim copy —
-   Finding 1). The classification itself is the VSA's (the tag) plus the
-   ABI-visibility rule; this function only EXECUTES it. *)
+(* Dispatches tagged accesses to storage. *)
 let mem_access llvm_builder blk_tid sub_tid sub_info fr
     (def : def term) (exp : exp) =
-  (* main's C2 shape: the tag/k lookups go through the [sub_info] option;
-     the old separate [~idx] parameter (C4's threading) folded into it. *)
+  
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
@@ -1055,29 +974,23 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
   | Some (Convutils.Range (lo, hi))
     when Int64.equal lo hi && is_stack_access def ->
       if Int64.compare lo 0L > 0 then
-        (* The callee's incoming-arg cell (lo > 0 — read at its entry,
-           where the anchored [lo] IS the ABI offset): [%hike_stack + lo]. *)
+        (* Incoming-arg cells read via [hike_stack]. *)
         (match fr.stack with
         | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
         | None -> create_exp llvm_builder blk_tid exp)
       else if is_abi_visible ctx sub_info def then
-        (* The OUTGOING cell (k = addr − RSP at the def ≥ 0, lo ≤ 0): the
-           caller's arg-area stores AND the sub's own pushes at [RSP] —
-           the TRUE runtime address is the rhs's own address expression. *)
+        (* Outgoing cells use their own address. *)
         (match Def.rhs def with
         | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
             let* addr_v = create_exp llvm_builder blk_tid addr in
             mem_access_via_ptr llvm_builder blk_tid addr_v exp
         | _ -> create_exp llvm_builder blk_tid exp)
       else
-        (* the true local (k < 0): the static frame GEP. *)
+        (* Locals use static frame GEPs. *)
         create_static_mem_access llvm_builder blk_tid fr lo exp
   | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
     when Int64.compare lo 0L > 0 && is_stack_access def ->
-      (* The POSITIVE-interval class (varargs reads etc.): the address
-         re-based onto the stack-threading value — [stack + (addr -
-         anchor)] — the offset from the entry is preserved while the base
-         moves from the per-sub frame to the caller's frame. *)
+      (* Positive intervals rebase onto the stack. *)
       (match Def.rhs def with
       | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
           let* addr_v = create_exp llvm_builder blk_tid addr in
@@ -1090,9 +1003,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
         if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
           ctx.Convutils.guarded_warned :=
             Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-          (* The prefixed eprintf text is the contract [run_corpus.sh]
-             greps for — migrated verbatim into [Hike_diag.warn], which
-             prepends the [hike:] prefix. *)
+          (* Warning text is a grepped contract. *)
           Hike_diag.warn
             "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
             (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
@@ -1113,8 +1024,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
       else create_exp llvm_builder blk_tid exp
 
 let create_def blk_tid llvm_builder sub_tid sub_info fr def =
-  (* main's C2 shape: the tag lookups go through [sub_info]; the old
-     separate [~idx] (C4's threading) folded into the option. *)
+  
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
@@ -1127,10 +1037,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
     else if KB.Value.get rip_relative_addr v then
       create_rip_relative_addr llvm_builder blk_tid exp
     else if fr.is_precise then
-      (* SPLIT model: the plan's regions are the storage. A singleton
-         access inside an allocated region is a [stack_rN] GEP; every
-         other shape falls through to the shared dispatcher below (one
-         classification, not a second copy of it). *)
+      (* Split-model accesses use region GEPs. *)
       (match find_def_tag sub_info def with
        | Some (Convutils.Range (lo, hi))
          when Int64.equal lo hi && is_stack_access def ->
@@ -1167,24 +1074,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
   insert_local ctx blk_tid var res;
   return ()
 
-(* [restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid]:
-   L-E1e — the call-block's push defs (RSP := RSP - 8; mem[RSP] := retaddr)
-   leave the caller's SP local at pre_call_rsp - 8. The callee's "return"
-   pops its own lane, not the caller's; the lifted callee starts from a
-   fresh anchor (`build_entry_block`) and external callees have no model
-   lane at all. So the caller's SP must be restored manually: at the
-   fallthrough block, RSP := post_push + 8 = pre_call_rsp.
-
-   We compute `post_push + 8` while the builder is still in the call block
-   (so the add instruction lives there), then `insert_local` binds the SP
-   var in the fallthrough's local table. The phi resolution at the
-   fallthrough reads this binding.
-
-   Skipped on the precise path (the precise path erases RSP/RBP from the
-   sub's locals; only the `hike_stack` arg survives; no SP local to rebind).
-   Skipped when there is no fallthrough (noreturn / tail call — execution
-   never returns). Skipped when the SP local is unbound in the call block
-   (defensive: should not happen, but a no-op is sound). *)
+(* Restores SP after calls. *)
 let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
   let open KB in
   if fr.is_precise then return ()
@@ -1199,17 +1089,7 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
             (Llvm.const_int (Llvm.i64_type llvm_ctx) 8) "sp_restored"
             llvm_builder
         in
-        (* L-E1e FIX (the tty/cat dominance bug): bind EDGE-KEYED —
-           (call block, fallthrough) -> restored. The old plain
-           [insert_local ctx fallthrough_tid] clobbered the fallthrough's
-           ONE per-block binding whenever TWO call preds share the join
-           (the last-emitted restore won; its add did not dominate the
-           join's phis — llc "Instruction does not dominate all uses",
-           90/103 coreutils). [update_phi] reads this table per pred
-           edge; the add stays in the CALL block (dominating its edge by
-           construction). The plain fallthrough binding is still written
-           when the entry is UNSET (single-pred joins keep the old fast
-           path; a later edge binding wins at the phi). *)
+        (* Binds restores edge-keyed. *)
         (match EHashtbl.find !(ctx.edge_sp_restores) sub_tid with
          | Some inner -> EHashtbl.set inner ~key:fallthrough_tid ~data:restored
          | None ->
@@ -1230,7 +1110,7 @@ let create_call_args blk_tid llvm_builder sub call_tid fr =
   KB.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
       if Var.same (Arg.lhs arg) Convutils.hike_stack_var then
-        (* M2: thread hike_stack — precise caller passes its own hike_stack (no current RSP), degraded passes current RSP. *)
+        (* Threads [hike_stack] to callees. *)
         let v_opt =
           if fr.is_precise then get_local ctx blk_tid Convutils.hike_stack_var
           else get_local ctx blk_tid (sp ctx.Convutils.target)
@@ -1241,12 +1121,10 @@ let create_call_args blk_tid llvm_builder sub call_tid fr =
         | Some v -> return v
         | None ->
             let* llvm_ctx = Context.get llvm_ctx_var in
-            (* the hidden [hike_stack] arg with NO threading lane at this
-               call site — the caller's frame pointer, unspecified here:
-               [undef], not [poison] (no UB to fold; see [create_exp]). *)
+            (* Missing [hike_stack] lanes yield undef. *)
             return @@ Llvm.undef (Llvm.i64_type llvm_ctx)
       else if extern && is_fp_param (Arg.lhs arg) then
-        (* the FP arg of an EXTERN call (printf-style): the model's YMM local (i256) must reach the real ABI's XMM register — emit `bitcast (trunc i256 to i64) to double`. Model-to- model calls keep the i256 pass-through (their stored signatures bind the YMM params directly). *)
+        (* Lowers YMM args to doubles for externs. *)
         let* v = create_exp llvm_builder blk_tid exp in
         let* llvm_ctx = Context.get llvm_ctx_var in
         let* v =
@@ -1306,7 +1184,7 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
   let* fn, fn_typ = get_func target in
   (match (fp_ret_kind_of_extern ctx target, rets) with
   | Some kind, ret :: _ ->
-      (* The FP-returning extern: the real callee returns float/double/ x86_fp80 (XMM0 / x87 ST0), NOT the model's {i64,i64}. *)
+      (* Extern float returns bypass the model. *)
       let ret_val =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
@@ -1341,9 +1219,7 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
            insert_local ctx blk_tid (Arg.lhs ret) i;
            (match rets with
             | _ :: rd :: _ ->
-                (* the RDX member of a float/double-returning extern: the
-                   native RDX is untouched by the callee — the caller's
-                   state, [undef] not [poison] (see [create_exp]). *)
+                (* RDX of float externs stays undef. *)
                 insert_local ctx blk_tid (Arg.lhs rd)
                   (Llvm.undef (Llvm.i64_type llvm_ctx))
             | _ -> ()))
@@ -1381,7 +1257,7 @@ let create_return blk_tid llvm_builder cur_sub =
   let* ctx = Context.get emit_ctx_var in
   let* rets =
     KB.List.map (get_rets ctx (Term.tid cur_sub)) ~f:(fun ret ->
-        (* the [%YMM0] FP-return member (the model subs' rets carry it so a double-returning callee — the -O0 `return expr` leaves the value in XMM0 with NO RAX binding — delivers the value to the caller). An int-returning callee never defines YMM0 — [undef] (the caller's register state, not [poison]: UB folds under instcombine). *)
+        (* Missing YMM0 reads yield undef. *)
         match get_local ctx blk_tid (Arg.lhs ret) with
         | Some v -> return v
         | None ->
@@ -1395,7 +1271,7 @@ let create_return blk_tid llvm_builder cur_sub =
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore);
   return ()
 
-(* [create_interrupt llvm_builder]: The interrupt edge — the lifted `call @interrupt:#N with noreturn` (the hlt/ud2 trap class: BAP lifts `hlt` to a noreturn call to the [interrupt:#N] label, whose sub is filtered out of the program) and the genuine Int jmps. *)
+(* Emits trap edges. *)
 let create_interrupt llvm_builder =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -1407,17 +1283,14 @@ let create_interrupt llvm_builder =
   ignore (Llvm.build_unreachable llvm_builder);
   KB.return ()
 
-(* The FP-intrinsic → native LLVM FP-op mapping (the user's design, 2026-08-16): BAP declares the x86 FP instructions as CALLS to the [intrinsic:*] soft-float subs. *)
+(* Maps soft-float calls to native FP ops. *)
 type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | FHLT | ISNAN
 
 let fp_intrinsic_name = strip_at
 
 let native_fp_op (name : string) : native_fp option =
   match fp_intrinsic_name name with
-  (* The width-suffixed names (the sse-binary TABLE FIX: sse-convert
-     always appended (symbol-of-size rt); sse-binary now does too — the
-     SS class (rt=32) and the SD class (rt=64) are DISTINCT callee
-     subs, the width knowable from the name alone). *)
+  (* Width-suffixed intrinsic names. *)
   | "intrinsic:fmul_rne_ieee754_binary_64" -> Some FMUL
   | "intrinsic:fmul_rne_ieee754_binary_32" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary_64" -> Some FADD
@@ -1430,46 +1303,27 @@ let native_fp_op (name : string) : native_fp option =
   | "intrinsic:frem_rne_ieee754_binary_32" -> Some FREM
   | "intrinsic:forder_rne_ieee754_binary_64" -> Some FORDER
   | "intrinsic:forder_rne_ieee754_binary_32" -> Some FORDER
-  (* is_nan (ieee754.lisp: (set y0 (is-nan x0)) [:result 1] — the NaN
-     predicate, called by the COMISS/UCOMISS flag rows via
-     compare-floats): DIRECT — fcmp uno x0, x0 (unordered: true iff
-     x0 is NaN, the exact predicate at any width). *)
+  (* NaN predicate via fcmp uno. *)
   | "intrinsic:is_nan_rne_ieee754_binary_64" -> Some ISNAN
   | "intrinsic:is_nan_rne_ieee754_binary_32" -> Some ISNAN
   | "intrinsic:is_nan_ieee754_binary" -> Some ISNAN
   | "intrinsic:is_nan_rne_ieee754_binary" -> Some ISNAN
-  (* the UNSUFFIXED spellings (the sse table's compare-floats/is-nan
-     emit bare ieee754 names for the COMISS class): the same ordered
-     less-than / NaN predicate. *)
+  (* Unsuffixed compare names. *)
   | "intrinsic:forder_ieee754_binary" -> Some FORDER
   | "intrinsic:forder_rne_ieee754_binary" -> Some FORDER
   | "intrinsic:cast_sfloat_rne_ieee754_binary_64" -> Some SFLOAT
   | "intrinsic:cast_sint_rne_ieee754_binary_64" -> Some SINT
-  (* The unsuffixed legacy spellings (pre-table-fix lifts; both widths —
-     the SS/SD classes collapsed into one name, the width is then taken
-     from the interface temp's TYPE, not the name — see
-     [fp_intrinsic_sizes]). *)
+  (* Legacy unsuffixed names. *)
   | "intrinsic:fmul_rne_ieee754_binary" -> Some FMUL
   | "intrinsic:fadd_rne_ieee754_binary" -> Some FADD
   | "intrinsic:fsub_rne_ieee754_binary" -> Some FSUB
   | "intrinsic:fdiv_rne_ieee754_binary" -> Some FDIV
   | "intrinsic:frem_rne_ieee754_binary" -> Some FREM
-  (* The x86 halt: BAP's x86-common.lisp [HLT] = (intrinsic 'hlt) — the
-     privileged halt, a faulting/trap edge in user mode — the SAME trap
-     model as the [@interrupt:*] calls (the lifter emits
-     [call @intrinsic:hlt] for hlt/ud2-class instructions). *)
+  (* Halt uses the trap model. *)
   | "intrinsic:hlt" -> Some FHLT
   | _ -> None
 
-(* [is_inline_fp_intrinsic name]: does the intrinsic name map to an
-   INLINE FP op (the arithmetic/compare/convert class — everything in
-   [native_fp_op] EXCEPT FHLT)? Such subs are FILTERED from emission
-   (their semantics inline at the call sites); [FHLT] (the x86 halt) is
-   EXCLUDED — it is a TRAP-class intrinsic like the [@interrupt:*] edges:
-   filtering it changes REACHABILITY (its [call ... with return] keeps
-   the following blocks live; a filtered callee made the call site
-   treat the block as noreturn and DCE deleted the loop body — the
-   factorial/list/many_args/sret_big 25/7 regression). *)
+(* Tests for inlineable FP intrinsics. *)
 let is_inline_fp_intrinsic (name : string) : bool =
   match native_fp_op name with
   | Some FHLT -> false
@@ -1477,7 +1331,7 @@ let is_inline_fp_intrinsic (name : string) : bool =
   | None -> false
 
 
-(* [has_32bit_extract e]: the [intrinsic:x0] setup for the i32→double casts — the lifter's `63:0[31:0[RAX]]` shape reveals the 32-bit source (the sign-extension the soft-float needs). *)
+(* Tests for 32-bit sources. *)
 let rec has_32bit_extract (e : exp) : bool =
   match e with
   | Bil.Extract (31, _, _) -> true
@@ -1486,7 +1340,7 @@ let rec has_32bit_extract (e : exp) : bool =
   | Bil.Cast (_, _, e') -> has_32bit_extract e'
   | _ -> false
 
-(* [cast_source_width ~abi sub blk]: The source width of the [cast_sfloat] call in [blk] — 32 when the [intrinsic:x0] def's rhs reveals a 32-bit source (the register-extract shape OR an 8-byte load from an FP slot that was WRITTEN as u32 — the `cvtsi2sdl addr` memory-operand shape), else 64. *)
+(* Returns a cast source width. *)
 let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
   let u32_slots =
     Term.enum blk_t sub
@@ -1523,17 +1377,8 @@ let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
           | _ -> 64)
       | _ -> 64)
 
-(* [build_fp_binop llvm_builder op a b ~w]: the width-aware FP binop. [w] is
-   the operand bitwidth read from the INTRINSIC NAME (the width-suffixed
-   interface temp [intrinsic:x0_<w>] — the SS class is 32, the SD class 64;
-   BAP's Lisp table shares one callee NAME per op, so the operand temp's
-   suffix is the only width source). i32 -> float, else double; the result
-   bitcasts back to the SAME integer width (a 32-bit op yields i32). The
-   old always-double bitcast emitted invalid IR ([bitcast i32 to double])
-   on every -O0 f32/SS binary — 27/103 coreutils died at llc. *)
-(* [fp_ty_of llvm_ctx w]: the FP type of width [w] (32 -> float, else
-   double) and the int lane of width [w] (32 -> i32, else i64) — the two
-   width-derived types every arm needs. *)
+(* Builds a width-aware FP binop. *)
+(* Returns width-derived FP/int types. *)
 let fp_ty_of (llvm_ctx : Llvm.llcontext) (w : int) :
     Llvm.lltype * Llvm.lltype =
   ( (if w <= 32 then Llvm.float_type llvm_ctx
@@ -1563,17 +1408,7 @@ let build_fp_binop llvm_builder op a b ~(w : int) =
   return
   @@ Llvm.build_bitcast d ret_ty "" llvm_builder
 
-(* [fp_intrinsic_sizes args rets]: the (INPUT WIDTH, RESULT WIDTH) of an
-   FP intrinsic call — DERIVED FROM TYPES, not strings (the user
-   directive 2026-09-01: no rename pass, no name-suffix reliance): the
-   RESULT width is the RET LANE's declared [Var.typ] (the callee's own
-   output declaration — the interface var the table's defun defines);
-   the INPUT width is the callee's FIRST ARG LANE's declared type (its
-   input interface var). The op dispatch (native_fp_op) still matches the
-   callee NAME (the intrinsic's identity — the table's naming is
-   authoritative for WHICH op), but NO width ever comes from parsing a
-   name: the operands' widths come from their VALUES, the lanes' from
-   their declared types. *)
+(* Derives intrinsic widths from types. *)
 let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
     int * int =
   let arg_w (i : int) : int =
@@ -1590,7 +1425,7 @@ let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
   in
   (arg_w 0, res_w)
 
-(* [create_native_fp_call llvm_builder blk_tid blk sub call op]: the mapped FP-intrinsic call — no function call, the native LLVM FP op inline, the result bound to [intrinsic:y0]. *)
+(* Emits native FP ops inline. *)
 let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -1599,17 +1434,11 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
-  (* ONE width source for every arm ([fp_intrinsic_sizes]): the input
-     width (the operand bitcast) and the result width (the value lane) —
-     BOTH from the callee's declared interface TYPES, no name parse, no
-     rename dependence. *)
+  (* Widths come from declared types. *)
   let rets = get_rets ctx target in
   let in_w, res_w = fp_intrinsic_sizes args rets in
   let arg_value (i : int) : Llvm.llvalue KB.t =
-    (* Resolve the operand from the callee's declared ARG VAR (the true
-       interface — [intrinsic:xN], unsuffixed after the rename deletion):
-       the most-recent def of THAT var in the block (the caller's arg
-       setup), else the Arg's own rhs. No prefix string matching. *)
+    (* Resolves operands from declared arg vars. *)
     let arg = Base.List.nth_exn args i in
     let av = Var.base (Arg.lhs arg) in
     let x_def_opt =
@@ -1625,11 +1454,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let result =
     match op with
     | FMUL | FADD | FSUB | FDIV | FREM ->
-        (* The operand width from the VALUES (the ground truth): the
-           signature's arg lane is declared u64 by the defun globals even
-           for the SS class ([31:0[YMM0]] splices a u32 value) — the
-           resolved operand's own bitwidth is the only reliable source
-           (the chmod FSUB-at-f32 site: i32 operands, u64 signature). *)
+        (* Operand width comes from values. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
         let w_of v =
@@ -1640,11 +1465,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         let w = min (w_of a) (w_of b) in
         build_fp_binop llvm_builder op a b ~w
     | SFLOAT ->
-        (* cast_sfloat (the int -> FP direction; CVTSI2SD/SS-class): the
-           SOURCE int width from [cast_source_width] (the 32-bit
-           sign-extension shape), the FP type and result LANE from the
-           intrinsic's own width ([fp_intrinsic_sizes] — a 32-bit
-           cast_sfloat yields an i32 lane, the y0_32 writeback). *)
+        (* Int-to-FP casts use source width. *)
         let* x = arg_value 0 in
         let src_w = cast_source_width ~abi sub blk in
         let int_src_ty =
@@ -1658,8 +1479,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
           then Llvm.build_trunc x int_src_ty "" llvm_builder
           else x
         in
-        (* the TARGET FP type and result lane both from res_w (the name's
-           target — the convert class converts TO it). *)
+        (* Converts use result width. *)
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
         let* d =
           KB.return
@@ -1668,15 +1488,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         return
         @@ Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
     | SINT ->
-        (* cast_sint (the FP -> int direction; CVTTSS2SI/CVTTSD2SI): the
-           FP TYPE from the OPERAND VALUE's own bitwidth (the resolved
-           [arg_value] — i32 means the SS class's f32 source: the call
-           block's x0 temp may live in a DIFFERENT block after
-           [simplify_jmps] isolated the call jmp, so the block scan is
-           unreliable; the value itself is the ground truth); the int
-           RESULT LANE from the RESULT width (the name's target — _64
-           converts to i64, _32 to i32). The two widths are
-           independent in the convert class. *)
+        (* FP-to-int casts use operand width. *)
         let* x = arg_value 0 in
         let src_w =
           match Llvm.classify_type (Llvm.type_of x) with
@@ -1695,18 +1507,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         in
         return r
     | FORDER ->
-        (* BAP's forder (ieee754.lisp: (set y0 (<. x0 x1)), [:result 1]) —
-           the ORDERED FP less-than driving the COMISS/UCOMISS flag rows.
-           DIRECT mapping: the plain fcmp olt on the width-aware bitcast
-           operands (i32 -> float, the SS class [UCOMISS rt=32]; else
-           double, the SD class [UCOMISD rt=64]). The width comes from the
-           OPERANDS' TYPES ([w_of], the min of the two), NOT from the
-           intrinsic name — NO width is ever parsed from a name (the
-           type-derived directive; [fp_intrinsic_sizes] supplies the
-           declared widths). Comparisons do not round; the
-           SNaN-exception COMISS/UCOMISS difference is unmodeled by BAP
-           — the quiet form is exact).  Result zext'd to i64 so the
-           y0_64/y0_32/y0_1 views all read it. *)
+        (* Ordered less-than via fcmp olt. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
         let w_of v =
@@ -1728,11 +1529,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         in
         return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | ISNAN ->
-        (* (set y0 (is-nan x0)) [:result 1]: DIRECT — fcmp uno x0, x0
-           (unordered with itself: true iff NaN — the exact predicate
-           at any width; the SNaN-exception difference is unmodeled by
-           BAP, the quiet form is exact). Result zext'd to i64 so every
-           ret lane reads it. *)
+        (* NaN test via fcmp uno. *)
         let* x = arg_value 0 in
         let w =
           match Llvm.classify_type (Llvm.type_of x) with
@@ -1751,24 +1548,14 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         in
         return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | FHLT ->
-        (* (intrinsic 'hlt) \u2014 the x86 halt: the same trap model as the
-           [@interrupt:*] edges (llvm.trap + unreachable); the result lanes
-           bind nothing (the call never returns). *)
+        (* Halt traps without binding results. *)
         let* () = create_interrupt llvm_builder in
         return (Llvm.poison (Llvm.i64_type llvm_ctx))
   in
   let* r = result in
   (match get_rets ctx target with
    | [ ret ] ->
-     (* The primary ret lane bound WIDTH-AWARE (the chmod root cause): the
-        lane's declared width ([Var.typ] — u64 for the SD-class ret,
-        u32 for an SS-class writeback lane) must match the value's width,
-        else the raw result lands in a differently-typed lane and the
-        join's phi for it reads a wrong-width value (llc "'%N' defined
-        with type 'i32' but expected 'i64'" — the ret IS often the
-        y0_64 lane, so the old blind bind also SKIPPED the zext
-        view-binding below via its [Var.same] guard). Same adjustment as
-        the view-bindings: zext/trunc once, at the definition site. *)
+     (* Binds the primary ret lane width-aware. *)
      let lane_w =
        match Var.typ (Arg.lhs ret) with Type.Imm w -> w | _ -> 64
      in
@@ -1782,12 +1569,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
            llvm_builder
      in
      insert_local ctx blk_tid (Arg.lhs ret) r_lane;
-     (* The OTHER consumer-width views of y0 — the RET LANES the callee
-       declares beyond the primary ([intrinsic:y0] at each declared
-       width, e.g. the 1-bit flag view of a compare): bind each from the
-       VALUE, width-adjusted at the definition site. No synthesized
-       y0_N string vars (the rename era is gone): every lane is a
-       declared Arg of the callee's signature. *)
+     (* Binds remaining ret lanes width-adjusted. *)
      Base.List.iter rets ~f:(fun ret2 ->
          if Var.same (Arg.lhs ret2) (Arg.lhs ret) then ()
          else begin
@@ -1817,12 +1599,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
        ignore (Llvm.build_unreachable llvm_builder);
        KB.return ())
 
-(* [create_external_intrinsic_call]: the unmapped-intrinsic floor (the
-   sound degradation): declare the callee as an EXTERNAL function (all-args
-   i64, matching the model interface) and emit the call; the result lanes
-   read poison (get_local's missing-binding path).  A loud [guarded:]
-   warning is printed at the call site.  Never a crash on a live
-   conversion. *)
+(* Emits unmapped intrinsics as extern calls. *)
 let create_external_intrinsic_call llvm_builder blk_tid sub call name fr =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
@@ -1870,22 +1647,13 @@ let create_call llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in
   let name = Tid.name target |> fp_intrinsic_name in
   if Base.String.is_prefix (Tid.name target) ~prefix:"@interrupt:" then
-    (* the lifted interrupt edge: `call @interrupt:#N with noreturn` (the hlt/ud2 trap class — the callee sub is filtered out, so the call would be an undefined symbol). The trap model above. *)
+    (* Interrupt calls trap. *)
     create_interrupt llvm_builder
   else
     match native_fp_op name with
     | Some op -> create_native_fp_call llvm_builder blk_tid blk sub call op
     | None ->
-        (* An unmapped [intrinsic:*] call: SOUND DEGRADATION (the
-           not_implemented-degrades-to-top doctrine) — a loud warning,
-           then the call emits as an EXTERNAL declaration + call; the result
-           lanes read poison (the missing-binding path — the same treatment
-           every other unknown extern gets).  The x87 80-bit [llvm-x86_64:*]
-           class surfaced by [--bil-enable-intrinsics=:unknown] lands here;
-           the old loud [failwith] killed the WHOLE pass on the first such
-           call, aborting every later sub's conversion.  Correct wherever
-           the value is genuinely unused; where used, the poison is the
-           documented gap — never a silent wrong value. *)
+        (* Unmapped intrinsics warn and degrade. *)
         if Convutils.is_intrinsic_name name then begin
           Hike_diag.warn
             "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
@@ -1893,7 +1661,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
           create_external_intrinsic_call llvm_builder blk_tid sub call name fr
         end
         else (
-        (* The PLT-TRAMPOLINE callers (the model's atexit/setlocale class): the BAP rewrote the PLT stub into `...; call @real with noreturn` — the noreturn marking is a LIFTER heuristic (the stub's jmp-through-GOT tail-call looks like a noreturn edge), but the REAL callee (__cxa_atexit) RETURNS. *)
+        (* PLT callers pass through returns. *)
         match Call.return call with
         | Some l ->
             let fallthrough = Some (label_tid l) in
@@ -1910,12 +1678,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
 let update_phi transfer_vars blk_incoming blk_tid =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  (* L-E1e FIX: the per-pred SP value consults the EDGE-KEYED restore
-     table first — (pred_tid, this blk) -> the post-push+8 computed in
-     the pred (call) block. Two call preds of one join each carry their
-     own restore; the fallthrough's plain per-block binding would
-     resolve all preds to the LAST-written value (non-dominating —
-     the tty/cat bug). *)
+  (* Consults edge-keyed restores first. *)
   let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
     if Var.same var (sp ctx.Convutils.target) then
       match EHashtbl.find !(ctx.edge_sp_restores) pred_tid with
@@ -1937,13 +1700,7 @@ let update_phi transfer_vars blk_incoming blk_tid =
               return ()
           | None -> failwith "update_phi: phi_reg not found"))
 
-(* [edge_counts_of_sub sub]: the per-(pred, target) JMP-TERM multiplicity —
-   PURE, EAGER, OUTSIDE any monad (KB's Seq.iter composes lazily: the
-   2026-09-01 in-monad form never ran its [bump] effects, edge_count
-   stayed empty, and the same-target-conditional preds never duplicated
-   — csplit/du/expr/factor/nl/ptx/tac at llc). One entry per emitted
-   terminator edge: a plain goto -> 1; a both-edges same-target
-   conditional ([If(c, L, L)]) -> 2. *)
+(* Counts edge multiplicities. *)
 let edge_counts_of_sub (sub : sub term) :
     (Tid.t, (Tid.t, int) EHashtbl.t) EHashtbl.t =
   let edge_count = EHashtbl.create (module Tid) in
@@ -1975,15 +1732,7 @@ let update_phis transfer_vars blks sub () =
   let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
-      (* EDGE-MULTISET preds: BAP's [Graphs.Tid.Node.preds] is the
-         per-block SET (including the ENTRY fallthrough edge, which has
-         no jmp term); LLVM's CFG is a multigraph — the phi needs ONE
-         ENTRY PER EDGE ("PHINode should have one entry for each
-         predecessor": a same-target conditional emits cond_br(L, L)
-         and LLVM lists the pred TWICE). Each graph pred expands by its
-         [edge_counts_of_sub] multiplicity (>= 1 by construction;
-         absent = the entry edge, 1). No CFG modification: the phi
-         matches the CFG as emitted. *)
+      (* Phis need one entry per edge. *)
       let blk_incoming =
         Graphs.Tid.Node.preds blk_tid cfg
         |> Base.Sequence.to_list
@@ -2001,12 +1750,12 @@ let update_phis transfer_vars blks sub () =
       in
       update_phi transfer_vars blk_incoming blk_tid)
 
-(* [create_control_flow ...]: see [create_interrupt] above — the Int jmp (a trap edge) emits the same trap + unreachable. *)
+(* Int edges trap. *)
 let create_control_flow llvm_builder blk sub fr () =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
-    (* a def-only block with no jmps (the FP-soft-float intrinsic models: the single `intrinsic:y0 := <body>` def, no control flow) — the implicit return of the sub's rets. *)
+    (* Def-only blocks return implicitly. *)
     create_return tid llvm_builder sub
   else
   match cf_type control_flow with
@@ -2053,7 +1802,7 @@ let populate_blks transfer_vars blks sub sub_info fr () =
       >>= create_elts llvm_builder blk sub_tid sub_info fr
       >>= create_control_flow llvm_builder blk sub fr)
 
-(* go from entry to first bb *)
+
 let exit_entry llvm_builder sub () =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -2073,22 +1822,19 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
         match arg with
         | Some arg -> create_exp llvm_builder tid (Arg.rhs arg)
         | None ->
-            (* a transfer var the sub DOES define (in the definedness
-               closure) but that is not a function arg: its entry-edge
-               value is the caller's register state — [undef], not
-               [poison] (no UB to fold; see [create_exp]'s None arm). *)
+            (* Unbound transfer vars yield undef. *)
             !$Llvm.undef (var_lltype var)
       in
       !$(insert_local ctx tid var) llval)
   >>= fun () ->
   if fr.is_precise then (
-    (* M2: precise keeps hike_stack for incoming (lo>0) via GEP, RSP/RBP erased *)
+    (* Precise subs keep [hike_stack], erase SP. *)
     let fr = { fr with stack = get_local ctx tid Convutils.hike_stack_var } in
     exit_entry llvm_builder sub () >>= fun _ -> return fr
   ) else (
-  (* The sp/fp params are gone (compute_sub_sig filters RSP/RBP out of the arg list), so the transfer-vars loop above poisoned RSP/RBP — they are block-free vars but no longer args. *)
+  (* SP/FP are not args. *)
   insert_local ctx tid (sp ctx.Convutils.target) fr.anchor_i64;
-  (* the stack-threading param: the bound [hike_stack] argument (if the sub's signature has it) — the entry RSP, a real pointer into the CALLER's frame. The positive-offset (incoming-arg) accesses read it via [fr.stack]. *)
+  (* [hike_stack] is the caller entry RSP. *)
   let fr =
     { fr with stack = get_local ctx tid Convutils.hike_stack_var }
   in
@@ -2103,24 +1849,12 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
   >>= fun _ -> return fr
   )
 
-(* R4 — single-pass per-sub data: create each LLVM basic block + its llval map AND accumulate the register-transfer set in ONE walk over [blks] (previously [initialize_bbs] and [sub_transfer_vars] each enumerated [blks] separately). *)
+(* Builds blocks and transfer set in one walk. *)
 let collect_sub_data ctx llvm_ctx blks fn sub =
   insert_bb ctx Graphs.Tid.start (Llvm.entry_block fn);
   init_blk_llvals ctx Graphs.Tid.start;
-  (* The per-sub register-transfer set: the block free vars ∪ the call-ARG registers (the BIR call jmp carries no argument list — a call's args are the callee's signature vars, read at the call but INVISIBLE to the. *)
-  (* The DEFINEDNESS closure, accumulated in the SAME fold: a transfer var
-     only gets a phi lane if the sub can actually produce a value for it.
-     [def_set] = the BIL defs' lhs (post-DCE); [ret_set'] = the ret regs of
-     every direct callee (their call sites BIND those lanes via
-     [create_func_call]'s extractvalue + [insert_local] — no BIL def) and
-     the full [return_regs] under any indirect call (the fallback callee
-     binds every ret reg the same way).  A lane outside this closure is
-     NEVER defined: its phi carried literal [poison] at the entry edge
-     (the [build_entry_block] None arm) — UB that folds into live results
-     under instcombine (the 2026-09-01 optimizability review).  Reads of
-     such a var now fall to [create_exp]'s None arm: [undef] + the
-     [hike: undef-read:] warning — the honest model of "whatever the
-     caller left in that register". *)
+  (* Transfer set includes call-arg regs. *)
+  (* Phi lanes need definedness. *)
   let defined_and_transfered =
     Seq.fold blks
       ~f:(fun (reg_set, def_set) blk ->
@@ -2140,8 +1874,7 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
                             ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg))),
                           get_args ctx ctid )
                     | Indirect _ ->
-                        (* the indirect-call fallback callee binds every
-                           ret reg of the convention ([convutils]'s fallback) *)
+                        (* Indirect callees bind all ret regs. *)
                         ( Core.Set.union rets (ret_set ctx),
                           [] )
                   in
@@ -2155,10 +1888,7 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
           |> Seq.fold ~init:Var.Set.empty ~f:(fun acc elt ->
                  match elt with
                  | `Def def -> Core.Set.add acc (Var.base (Def.lhs def))
-                 (* BIL Phi nodes are not emitted ([create_elts] skips them)
-                    but their lhs IS a definedness source — completeness over
-                    every element form; today's lifted x86 BIL never carries
-                    them, a future producer must not silently lose its lane. *)
+                 (* Phi lhs counts as defined. *)
                  | `Phi phi -> Core.Set.add acc (Var.base (Phi.lhs phi))
                  | _ -> acc)
         in
@@ -2172,37 +1902,17 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
     Base.List.fold (get_args ctx (Term.tid sub)) ~init:Var.Set.empty
       ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg)))
   in
-  (* NOTE: [def_set] (and the callee [call_rets] it unions) is a
-     DEFINEDNESS witness for the filter below — it must NEVER be unioned
-     into the transfer set itself: defs' lhs vars that are not read
-     across a block boundary are not transfer vars, and adding them
-     explodes the phi system with width-mixed synthetic-slot lanes (the
-     va_arg_mixed i32-slot-binding-into-i64-phi crash: a stack_to_locals
-     slot var binds an i32 load where the var's phi is i64). *)
+  (* [def_set] never joins the transfer set. *)
   reg_set
   |> Core.Set.union (ret_set ctx)
   |> Core.Set.union arg_set
   |> Core.Set.filter ~f:(fun var ->
       ((not @@ is_mem var) || Var.same var (pc ctx.Convutils.target))
-      (* keep sp/fp: [build_entry_block] binds them at the entry edge
-         (anchor_i64 / fp anchor) on the degraded path, and on precise
-         subs [create_call_args] threads [hike_stack] — never sp — but
-         their lanes are ret-set-independent and cheap to keep. *)
+      (* Keeps SP/FP lanes. *)
       || Var.same var (sp ctx.Convutils.target)
       || Var.same var (fp ctx.Convutils.target))
   |> Core.Set.filter ~f:(fun var ->
-      (* the phi-lane filter: never-defined vars drop out of the transfer
-         set entirely (their phis, all 689 corpus-wide, were fully-poison);
-         vars the sub CAN define keep their lanes — [build_entry_block]'s
-         None arm gives them [undef] instead of [poison] at the entry
-         edge (caller register state, not UB).
-         MEM-FISSION: the region BASE vars ([stack_rN_base]) are
-         entry-bound (the emitter's region-alloca binding) and read in
-         every block whose addresses fissioned — they need their lanes
-         like [hike_stack]; the producer module's recognizer
-         ([Hike_stack_model.is_region_base]) identifies them (the
-         design's Q3).  The region MEM vars are Mem-sorted — already
-         excluded by the is_mem filter above. *)
+      (* Drops never-defined vars from transfer. *)
       Core.Set.mem def_set var
       || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
@@ -2211,7 +1921,7 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.to_list
 
 
-(* [build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo]: Allocates the per-sub [%frame] alloca ([n] bytes, 16-ALIGNED), GEPs to the anchor cell at [anchor_idx], and returns the [(frame, min_lo, anchor_idx, anchor_i64)] frame tuple. *)
+(* Allocates the per-sub frame. *)
 let build_frame_anchor llvm_ctx llvm_builder n anchor_idx min_lo =
   let frame =
     Llvm.build_alloca
@@ -2259,7 +1969,7 @@ let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
                     let need = Int64.add disp sz in
                     if Int64.compare need !max_pos > 0 then max_pos := need
               | Bil.Int w ->
-                  (* absolute address not relevant for frame size *)
+                  
                   ()
               | _ -> ())
           | _ -> ())));
@@ -2284,30 +1994,26 @@ let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
   let anchor_idx = Int64.sub n 8L in
   (n, grown, max_pos, anchor_idx)
 
-(* ------------------------------------------------------------------ *)
-(* THE STACK MODEL DECISION — this module is a CONSUMER.                *)
-(*                                                                     *)
-(* [Hike_stack_model.split_plan] is the single producer; the        *)
-(* emitter reads the result it carried in [Convutils.stack_plan] and     *)
-(* ALLOCATES what the plan says. The whole-sub rules (degraded,         *)
-(* SP-escape, untagged/Infinite/Unbounded/VLA accesses, VLA overlap,    *)
-(* the inside/disjoint tag coverage, the region size guard) previously  *)
-(* lived here as [region_split_plan] with a SECOND, different escape    *)
-(* analysis; they are gone from the emitter — one producer, three       *)
-(* consumers (Finding 1).                                              *)
-(* ------------------------------------------------------------------ *)
 
-(* [stack_plan_of sub_info]: the sub's stack model decision — the regions
-   that become per-region [stack_rN] allocas, or [[]] for the sound
-   single-frame fallback. *)
+(* Stack model decision is consumed here. *)
+
+
+
+
+
+
+
+
+
+
+
+(* Returns the sub stack plan. *)
 let stack_plan_of (sub_info : Convutils.vsa_info option) : Convutils.split_plan =
   match sub_info with
   | None -> []
   | Some info -> info.Convutils.stack_plan
 
-(* [region_bytes r]: the alloca size of region [r] (16-aligned, at least
-   one byte). The one geometric fact the emitter still owns — the
-   analysis-side size GUARD ([region_size_ok]) lives with the producer. *)
+(* Returns the region alloca size. *)
 let region_bytes (r : Convutils.region) : int64 =
   let lo, hi = r.Convutils.span in
   let span_len = Int64.add (Int64.sub hi lo) 1L in
@@ -2321,7 +2027,7 @@ let create_sub sub =
   let open KB in
   if is_empty sub then return ()
   else if
-    (* the NATIVE-FP-mapped intrinsic subs: their calls are intercepted in [create_call] (the LLVM FP op inline); the soft-float body is never emitted (dead weight — the mapped calls never reach it). *)
+    (* Skips soft-float bodies for mapped intrinsics. *)
     Base.Option.is_some (native_fp_op (Tid.name (Term.tid sub)))
   then return ()
   else
@@ -2334,21 +2040,18 @@ let create_sub sub =
       |> Base.Option.value_exn ~message:"create sub : function not found"
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-    (* reset llvals and bbs *)
+    
     clear_bbs ctx;
     clear_blk_llvals ctx;
     let abi = Abi.of_target ctx.Convutils.target in
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
-    (* The per-sub VSA frame: the tag span [min_lo, max_hi] of [Convutils.vsa_offsets] — every stack access of the sub lands in this alloca (the singleton GEPs and the interval-path dynamic addresses both). *)
+    (* Frame spans all tagged accesses. *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
-    (* The tag map for the frame-span folds (arch C2: [Map.fold] — sorted
-       key order; the span is order-independent). *)
+    
     let tags = match sub_info with
       | Some info -> info.Convutils.offsets
       | None -> Tid.Map.empty
-    in    (* THE STACK MODEL DECISION — consumed, not computed (Finding 1):
-       [Hike_stack_model.split_plan] produced it in the vsa pass and
-       carried it in [vsa_info.stack_plan]. *)
+    in    (* Consumes the stack plan. *)
     let plan = stack_plan_of sub_info in
     let is_precise = plan <> [] in
     let frame, min_lo, anchor_idx, anchor_i64 =
@@ -2405,11 +2108,7 @@ let create_sub sub =
             (r, base))
       else []
     in
-    (* Bind each region's BASE var ([stack_rN_base]) to the region
-       alloca's cell-0 PTR in the entry pseudo-block — every fissioned
-       address's [base + index] then lowers inside the alloca (the phi
-       machinery threads the base var via the definedness closure's
-       name rule). *)
+    (* Binds region bases to alloca cell-0. *)
     let* () =
       let rec bind_regions = function
         | [] -> return ()
@@ -2428,11 +2127,7 @@ let create_sub sub =
     >>= fun fr -> populate_blks transfer_vars blks sub sub_info fr ()
     >>= update_phis transfer_vars blks sub
     >>= fun () ->
-    (* the per-sub [hike: undef-read:] ABI-lane summary: the structural
-       model-ABI reads (phantom YMM call args, the RDX ret member) were
-       COUNTED, not individually warned, by [warn_undef_read] — one line
-       here keeps them visible without burying the data-read anomalies.
-       Removing the lanes outright is the [abi_shape] work (Candidate 4). *)
+    (* Summarizes model-ABI undef reads. *)
     let sub_tid = Term.tid sub in
     let lane_reads =
       Core.Map.fold !(ctx.Convutils.undef_warned) ~init:Var.Set.empty
@@ -2463,7 +2158,7 @@ let create_uninitialized_global llvm_ctx llvm_module size name =
   Llvm.set_global_constant false ret;
   ret
 
-(* [create_copy_reloc_bss ...]: The bss global with the COPY-RELOCATED slots initialized to the extern symbols' addresses (see [Hike.get_copy_relocations]). *)
+(* Builds bss with copy-relocated slots. *)
 let create_copy_reloc_bss llvm_ctx llvm_module size name copy_relocs =
   let size = Int64.to_int size in
   let n64 = (size + 7) / 8 in

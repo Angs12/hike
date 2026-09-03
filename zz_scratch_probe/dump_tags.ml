@@ -1,15 +1,5 @@
-(* dump_tags — the per-def TAG matrix (the tag-diff tool). Recreated
-   2026-08-31 (Item 1 of the architecture program).
-
-   Usage: dump_tags.exe <binary> [subname]   (default subname "main")
-
-   Runs [Hike.Relevance.analyze] on the named sub and
-   [Hike.Vsa.offsets_of_sub] (the full producer), then prints one TSV line
-   per def: tid, lhs, the tag set (relevant / stack_access / dynamic_alloc),
-   and — for a stack_access def — its vsa offset kind. Textual-diffing two
-   runs (before/after a change) is the intended use:
-
-     dump_tags.exe a bin | sort > a.tsv ; dump_tags.exe b bin | sort > b.tsv ; diff a.tsv b.tsv *)
+(* Prints one TSV line per def: tid, lhs, tags, offset kind, region.
+   Usage: dump_tags.exe <binary> [subname] (default "main"). Diff two runs to compare. *)
 
 open Bap.Std
 open Probe_common
@@ -33,10 +23,7 @@ let () =
     let tagged = Hike.Relevance.analyze sp sub in
     let info = Hike.Vsa.offsets_of_sub target sp tagged in
     let kind_of = info.Hike.Convutils.offsets in
-    (* mem-fission (2026-09-02): the REGION column — the region id whose
-       span contains the def's tag (the fission's per-region mem var /
-       alloca).  "-" when the def belongs to no region (the fallback
-       path). *)
+    (* Region id whose span holds the def's tag; "-" when in no region. *)
     let region_of =
       Base.List.fold info.Hike.Convutils.regions ~init:Tid.Map.empty
         ~f:(fun m r ->

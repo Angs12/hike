@@ -11,7 +11,7 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* * Operations that can be performed on (binary) words. *)
+(* Word operations. *)
 
 open Bap.Std
 
@@ -41,10 +41,10 @@ val lead_1_bit : word -> int option
 val min : word -> word -> word
 val max : word -> word -> word
 
-(* * Computes the domain size, i.e., the number of elements that can be represented with a CLP of words that are all [i]-bits wide. *)
+(* Number of values representable at [i] bits. *)
 val dom_size : ?width : int -> int -> word
 
-(* [half width]: 2^(width-1) at [width] bits — the first word of the high (negative-signed) half of the domain, the sign-bit threshold used by the signed-comparison rows and the sign-extension masks. *)
+(* 2^(width-1) at [width] bits. *)
 val half : int -> word
 
 val cap_at_width : width:int -> word -> word

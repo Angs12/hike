@@ -14,7 +14,7 @@
 open Core_kernel
 open Bap.Std
 
-(* An (indexed) Map lattice represents the lifting of an (indexed) complete lattice to a finite map onto elements of that (indexed) lattice. It includes the ability to map "the rest" of the elements to either top or bottom in the underlying (indexed) complete lattice. *)
+(* Finite map onto a lattice; unmapped keys read the default. *)
 
 module type S_indexed = sig
 
@@ -26,14 +26,14 @@ module type S_indexed = sig
 
   include Cbat_lattice_intf.S_indexed with type t := t and type idx := idx
 
-  (* replaces the value at the given key with the meet of it and the new input value. *)
+  (* Meet the new value into the key. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the join of it and the new input value. *)
+  (* Join the new value into the key. *)
   val join_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the new input value. *)
+  (* Overwrite the key. *)
   val add : t -> key:Key.t -> data:Val.t -> t
 
-  (* retrieves the value mapped to by the map. Note that this always gets a value since there is a default (either top or bottom). *)
+  (* Read a key; unmapped keys read the default. *)
   val find : Val.idx -> t -> Key.t -> Val.t
 
 end
@@ -46,17 +46,17 @@ module type S = sig
 
   include Cbat_lattice_intf.S with type t := t
 
-  (* replaces the value at the given key with the meet of it and the new input value. *)
+  (* Meet the new value into the key. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the join of it and the new input value. *)
+  (* Join the new value into the key. *)
   val join_add : t -> key:Key.t -> data:Val.t -> t
-  (* replaces the value at the given key with the new input value. *)
+  (* Overwrite the key. *)
   val add : t -> key:Key.t -> data:Val.t -> t
 
-  (* retrieves the value mapped to by the map. Note that this always gets a value since there is a default (either top or bottom). *)
+  (* Read a key; unmapped keys read the default. *)
   val find : Val.idx -> t -> Key.t -> Val.t
 
-  (* folds over the explicitly-stored (non-default) bindings. *)
+  (* Fold stored bindings. *)
   val fold : t -> init:'a -> f:(key:Key.t -> data:Val.t -> 'a -> 'a) -> 'a
 end
 

@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
-# Phase 5 (validation): compile the full test corpus PIE-ONLY (user
-# directive 2026-08-26: "only work on PIE with no fallbacks"): plain
-# gcc -O0 -fno-stack-protector = distro-style ET_DYN / PIE executables.
-# There is NO -no-pie mode anymore; every consumer of this corpus
-# (run_corpus.sh, check_allocas.sh, semantic/*, the probes) receives
-# ET_DYN inputs exclusively.
-#
-# Usage: compile_corpus.sh [out_dir]   (default /tmp/corpus)
-#
-# list.c is a library (no main) — linked with a trivial main stub.
-# The synth sources live in src/progs/synth/.
+# Builds the PIE-only test corpus (plain gcc -O0 -fno-stack-protector).
+# Usage: compile_corpus.sh [out_dir] (default /tmp/corpus)
 
 set -u
 
@@ -23,23 +14,20 @@ for f in *.c; do
   gcc -O0 -fno-stack-protector -o "$OUT/$name" "$f" || echo "FAIL $name"
 done
 
-# list.c: ADT library — needs a main stub to link.  The stub source
-# lives in $OUT/.build/ (NOT the corpus dir itself: run_corpus.sh and
-# the probes glob the corpus dir, and a stray .c there used to need a
-# `grep -v stub` band-aid in the listing below).
+# list.c needs a main stub; the stub lives in $OUT/.build/ so the
+# corpus dir holds binaries only.
 mkdir -p "$OUT/.build"
 printf 'int main(void){return 0;}\n' > "$OUT/.build/list_main_stub.c"
 gcc -O0 -fno-stack-protector -o "$OUT/list" list.c "$OUT/.build/list_main_stub.c" \
   || echo "FAIL list"
 
-# All synth sources (incl. new corpus-expansion tests) are picked up automatically.
+# synth sources are picked up automatically.
 for f in synth/*.c; do
   name="$(basename "$f" .c)"
   gcc -O0 -fno-stack-protector -o "$OUT/$name" "$f" || echo "FAIL $name"
 done
 
-# Guard: the corpus MUST be ET_DYN (PIE). An accidental non-PIE binary
-# here would silently reintroduce the ET_EXEC recipe downstream.
+# Guard: every binary must be ET_DYN (PIE).
 pie_fail=0
 for b in "$OUT"/*; do
   [ -x "$b" ] || continue

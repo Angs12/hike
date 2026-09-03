@@ -1,32 +1,11 @@
-(* Hike_stack_model — THE PURE STACK MODEL (architecture review
-   2026-09-02, candidate #1 part 2; MERGED 2026-09-03 with main's
-   mem-fission evolution): the decision functions
-   ([regions_of_sub], [split_plan], [frame_escapes],
-   [abi_visibility_of]), their shared rules ([is_abi_visible] with the
-   retaddr-push exemption, [last_push_tids_of], [region_bytes], the
-   escape analyses, the tag-coverage checks), the helpers they own, and
-   the FISSION naming convention ([region_mem]/[region_base] + their
-   recognizers — the one-fact names the DCE lane and the emitter
-   consume).  This was [hike_stack_to_locals]'s first 900 lines — the
-   model, not the pass: it reads NO KB, no Project, no pass state; its
-   inputs are the sub, the target, and the computed
-   [Convutils.vsa_info].  The REWRITE PASS ([stack_to_locals] — the
-   Exp.mapper conversion, the fission's `Slot/`Region conversion
-   table) stays in [hike_stack_to_locals] and imports this module;
-   [hike_vsa]'s [offsets_of_sub] composes this whole chain (the ONE
-   producer of the record). *)
+(* Pure stack model: regions, split plan, and escape rules. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
 
-(* Target-derived SP/FP: the sole origin for stack derivation (AGENTS.md
-   Principle 8 — never hardcode a register name). [sp] is passed in by the
-   passes; [fp_of] derives the frame pointer the same way, and returns
-   [None] for a target that declares none ([Theory.Target.unknown] — the
-   unit fixtures): such a target has SP-derived addresses only, which is
-   the sound (narrower) seed for the derivation closure below. *)
+(* Derives SP/FP from the target. *)
 let fp_of (target : Theory.Target.t) : var option =
   if Theory.Target.is_unknown target then None
   else
@@ -48,9 +27,7 @@ let addr_of_rhs (e : exp) : (exp * Size.t) option =
   | Bil.Cast (_, _, Bil.Store (_, a, _, _, s)) -> Some (a, s)
   | _ -> None
 
-(* The stored data of a (possibly cast-wrapped) store rhs, with the
-   wrapper that rebuilds the enclosing cast around the rewritten
-   store. *)
+(* Splits a store rhs into data and cast wrapper. *)
 let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
   match e with
   | Bil.Store (_, _, data, _, _) -> Some (data, fun x -> x)
@@ -63,23 +40,7 @@ let slot_of (lo : int64) (bits : int) : var =
     (Printf.sprintf "slot_%Ld" (Int64.abs lo))
     (Type.Imm bits)
 
-(* MEM-FISSION (2026-09-02) — the per-region mem vars.
-
-   [region_mem id]: the region's OWN memory — every Load/Store whose
-   address lies in region [id] reads/writes THIS var.  The emitter's
-   name-keyed dispatch routes it to the region alloca; the two-tier DCE
-   (load-roots only) sees a var whose ONLY uses are Load mem-operands —
-   a never-loaded region's stores die in one sweep round (the retaddr
-   push cells: dead model traffic, deleted naturally).
-
-   [region_base id]: the region's cell-0 address var (Imm 64 in BIL;
-   ptr-bound at emission to the alloca).  The fission rewrite moves the
-   ADDRESS into region-relative coordinates: [mem[RBP + i*4 - 0x70]]
-   becomes [Load(stack_rN_mem, stack_rN_base + i*4 - 0x70)] — BOTH
-   operands name the region, closing the store/load cell-split class
-   (the many_args bug: one path's frame GEP vs another's raw lane for
-   the same cell).  The base var is entry-bound (see bil2llvm's region
-   binding + the definedness closure's name rule). *)
+(* Region memory and base vars. *)
 let region_mem (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "stack_r%d_mem" id)
@@ -89,15 +50,7 @@ let region_base (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "stack_r%d_base" id) (Type.Imm 64)
 
-(* The RECOGNIZERS of the fission vars — the name convention is THIS
-   module's implementation detail: the two producers above mint the names,
-   these predicates read them back, and every consumer (the DCE lane's
-   two-tier keep, the emitter's fission dispatch and its φ-lane name rule)
-   imports them instead of re-typing the string grammar (one fact, one
-   home — the three hand-typed parsers that previously drifted
-   independently are gone).  The grammar is deliberately the loose
-   prefix/suffix form the consumers always used — this is a
-   single-sourcing, not a semantic change. *)
+(* Tests for fission var names. *)
 let is_region_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
@@ -106,7 +59,7 @@ let is_region_base (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_base"
 
-(* Defs that save incoming register args; keep them in memory so va_arg pointer reads alias correctly. *)
+(* Tests for incoming-arg saves. *)
 let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
   let param_regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs in
   match Def.rhs d with
@@ -118,11 +71,7 @@ let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
       | _ -> false)
   | _ -> false
 
-(* Compute stack regions: maximal overlap components with rlo=min lo,
-   rhi=max hi (the coarser-hull merge). Convertible if every member has
-   lo<0 and is not an incoming-register save; overlapping Ranges merge
-   (not identical). Infinite tags excluded from normal regions — the
-   emitter caps them to one big stack_rN; VLA excluded. *)
+
 let is_real_call (j : jmp term) : bool =
   match Jmp.kind j with
   | Call c -> (
@@ -131,21 +80,9 @@ let is_real_call (j : jmp term) : bool =
       | Indirect _ -> Option.is_some (Call.return c))
   | _ -> false
 
-(* [sp_escaped sp target sub]: does a stack-frame ADDRESS escape the
-   sub? See the SP-ESCAPE RULE comment below. *)
+(* Tests whether a frame address escapes. *)
 
-(* MEM-FISSION (2026-09-02) — [last_push_tids_of sub]: the call block's
-   LAST stack def per block with a real call — THE RETADDR PUSH's tids
-   (the same positional fact the exclusive tail-take excludes).  These
-   defs are the BAP call expansion's [RSP := RSP - 8; mem[RSP] :=
-   retaddr] pair: dead model traffic in the lifted world (the callee's
-   epilogue pop dies with [ret_replacement]; the lifted callee returns
-   via a real LLVM ret).  Consumed by [is_abi_visible]'s exemption —
-   exempting the push store lets its cell form its own never-loaded
-   region, which the fission gives a [stack_rN_mem] var with ZERO
-   Load-roots, and the two-tier DCE (load-roots only) deletes the store
-   chain naturally.  The ONE positional rule of the fission design, and
-   it reuses [is_real_call]'s own walk. *)
+(* Last stack def per call block. *)
 let last_push_tids_of (sub : sub term) : Tid.Set.t =
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
@@ -172,21 +109,12 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   let fp_bases =
     match fp_of target with Some fp -> [ base_var fp ] | None -> []
   in
-  (* [derived]: the vars whose values are sp/fp-derived — SP, FP (when the
-     target declares one) and every temp defined from them through
-     ARITHMETIC (BinOp/Cast/Extract/Concat); a LOAD's result is NOT
-     derived (a value read
-     from memory is not an address expression on the frame), and a
-     memory side-effect's lhs ([mem]) is not derived. Computed as a
-     block-local fixpoint via the def chain (the -O0 shape computes
-     the address in one def; the closure covers multi-def chains). *)
+  (* Vars derived via arithmetic, excluding loads. *)
   let derived : Var.Set.t ref =
     ref (Var.Set.of_list (sp_base :: fp_bases))
   in
   let is_memory_shape (e : exp) : bool =
-    (* a Load/Store anywhere in the rhs makes the def a memory
-       access — its lhs is a loaded value or the mem var, never an
-       address computation (visitor-based, per Principle 8). *)
+    (* Tests for Load/Store in rhs. *)
     let vis =
       object
         inherit [ bool ] Exp.visitor
@@ -218,20 +146,8 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
     if !changed then grow () else ()
   in
   grow ();
-  (* an sp/fp-derived value ESCAPES when it is (a) assigned to a
-     register in a CALL BLOCK (the -O0 arg setup: [RDI := RBP - 0x30]
-     right before [call] — the callee receives the frame address),
-     (b) stored as a memory store's DATA (the escaped-pointer
-     record), or (c) an indirect call's target. The push lane
-     ([RSP := RSP - 8], [mem[RSP] := retaddr]) is excluded: it is
-     dead model traffic (the lifted callee returns via a real LLVM
-     ret, never popping the model RSP). *)
-  (* [value_free_vars e]: the free vars of the VALUE [e] computes —
-     a Load/Store contributes NOTHING (the loaded/stored value is
-     not an address expression on the frame: [mem[RBP-8] + 1] as a
-     stored data has NO sp-derived vars — the RBP in the load's
-     ADDRESS is not part of the VALUE); a Store-as-value contributes
-     its data's vars (the store's value semantics is the data). *)
+  (* Derived values escape via call args, stored data, or indirect targets. *)
+  (* Free vars of the computed value. *)
   let rec value_free_vars (e : exp) : Var.Set.t =
     let vis =
       object
@@ -249,13 +165,7 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
         Core.Set.mem !derived (base_var v))
   in
   let call_arg_escapes =
-    (* only the ARGUMENT-REGISTER defs count (the SysV param regs —
-       [RDI/RSI/RDX/RCX/R8/R9] + the YMM FP args): a derived value
-       reaching an arg register is a frame address passed to the
-       callee. The push/pop FLAG defs ([OF := high:1[(#t ^ 8) &
-       (#t ^ RSP)]] of [RSP := RSP - 8]) reference derived temps
-       and sit in the same call block — they are dead model traffic,
-       never an escape. *)
+    (* Only argument-register defs count. *)
     let is_arg_reg (v : var) : bool =
       Base.List.exists (Abi.param_regs target)
         ~f:(fun r -> Var.same r (base_var v))
@@ -304,15 +214,7 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   in
   call_arg_escapes || store_data_escapes
 
-(* [regions_of_sub sp target sub info ~frame_escaped]: merge [info]'s
-   overlapping access ranges into Stack Regions, flagging each one's
-   convertibility.
-
-   [~frame_escaped] is the ESCAPE verdict for the sub (see
-   [frame_escapes] below), passed in rather than recomputed: it is a
-   per-region convertibility rule ([stack_to_locals] consults
-   [convertible] even on the fallback path) while [frame_escapes] itself
-   is defined later in the file. *)
+(* Merges overlapping ranges into regions. *)
 let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) ~(frame_escaped : bool) :
     Convutils.region list =
@@ -326,9 +228,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
         | Convutils.VLA _ -> None)
   in
   let abi =
-    (* TOTAL: the unit fixtures analyze [Theory.Target.unknown], which has
-       no convention record — fall back to the x86_64 record's vars (the
-       fixture sp is the "RSP"-named var either way). *)
+    (* Falls back to x86_64 SysV on unknown targets. *)
     Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
   in
   let overlap (lo1 : int64) (hi1 : int64) (lo2 : int64) (hi2 : int64) :
@@ -356,28 +256,8 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                       Core.Map.set m ~key:(Term.tid d) ~data:(Size.in_bits s)
                   | None -> m))
   in
-  (* The CALL-TAIL OUTGOING-ARG SET: in a call block, the stack defs from
-     the block's LAST stack def back to the retaddr push ([RSP := RSP - 8;
-     mem[RSP] := retaddr] — the lifter's final action before the call
-     edge) are the OUTGOING-ARG AREA: the callee reads them at
-     [hike_stack + (k+8)] (its entry-RSP view of the caller's arg slots).
-     They belong to the CALLER-CALLEE ABI LANE, which the callee reads
-     through the [hike_stack] pointer into the CALLER's model frame —
-     they must NOT convert to private stack_rN allocas (the callee would
-     read a different storage — the factorial inc(…) crash class), and a
-     sub with outgoing stack traffic cannot be region split at all (the
-     write-closed rule at sub granularity: the callee-facing lane
-     coheres in the model frame). The retaddr push itself is dead
-     traffic on the model lane (the lifted callee returns via a real
-     LLVM ret, never popping the model RSP) — it stays convertible. *)
-  (* [is_real_call j]: a call edge that passes outgoing stack args —
-     a DIRECT-target call (any return mode: a tail call still passes
-     its args) or an INDIRECT call WITH a return (a computed callee
-     that returns). The RETURN EPILOGUE ([#t := mem[RSP]; RSP :=
-     RSP + 8; call #t with noreturn] — the DCE lane's target) is a
-     noreturn INDIRECT call: it passes NO arguments (it is the
-     return continuation), so an epilogue block is NOT a call block
-     (the prologue push inside it must not land in any tail). *)
+  (* Call-tail defs are the outgoing-arg area. *)
+  (* Tests for calls passing stack args. *)
   let outgoing_tail_tids : Tid.Set.t =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
@@ -399,24 +279,8 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
              | None -> acc
            else acc)
   in
-   (* [has_outgoing_stack_args]: does the sub have ANY call-tail stack
-      store (the ABI lane with real callee-visible traffic)? — the sub
-      granularity gate for region splitting. Only RSP-relative STORES
-      count: the tail also holds the caller's own RBP-relative
-      arg-setup LOADS (reads of its locals feeding the register args),
-      which are ordinary convertible accesses. The retaddr push is NOT
-      counted: it is the call block's LAST stack def, which the tail
-      set already excludes (an Int-literal store at RSP inside the
-      tail is the 7th-arg STORE — real outgoing traffic, e.g.
-      [mem[RSP] := 1] of [inc(...,1)]). *)
-  (* [is_outgoing_store]: the RSP-relative stack STORE with a NEGATIVE
-     k-range (below the ENTRY rsp — the pushed outgoing-arg cell the
-     callee reads at [hike_stack + |k|]). The k-sign discriminates the
-     push/pop lane from the arg lane: the retaddr push sits AT the
-     current rsp (k = 0 — dead model traffic, the lifted callee
-     returns via a real LLVM ret), the 7th-arg store sits BELOW the
-     entry rsp (k < 0 — real callee-visible traffic, the
-     [inc(...,1)] class). *)
+   (* Tests for call-tail stack stores. *)
+  (* Tests for RSP-relative stores below entry RSP. *)
   let is_outgoing_store (d : def term) : bool =
     match store_data_of_rhs (Def.rhs d) with
     | Some (_data, _) -> (
@@ -426,14 +290,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
               Exp.free_vars addr
               |> Core.Set.exists ~f:(Abi.is_sp_t target)
             in
-            (* the tag's ENTRY-relative offset lo < 0 (below the
-               entry rsp — the pushed outgoing-arg cell, e.g. the
-               7th-arg store [mem[RSP] := 1] of [inc(...,1)] whose
-               tag is Range(-40,-40)) plus the k-range k >= 0 (AT
-               the current rsp — the pushed-arg shape). The
-               prologue push ([mem[RSP] := RBP]) also has lo<0
-               k>=0 — the discriminator is the TAIL membership: the
-               prologue is not in any call block's tail. *)
+            (* lo<0 and k>=0 marks pushed arg cells. *)
             let lo_neg =
               match Core.Map.find ranges (Term.tid d) with
               | Some (lo, _) -> Int64.compare lo 0L < 0
@@ -448,13 +305,8 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
         | None -> false)
     | None -> false
   in
-  (* LAZY: the whole-sub call-tail scan only matters when a region's
-     member rules admit conversion, and [regions_of_sub] runs once per
-     sub in the vsa pass. Computed at most once per call. *)
-  (* MEM-FISSION: the exemption is consumed at CONVERSION time
-     ([stack_to_locals]'s is_abi_visible) — the region planner's own
-     member rules (the direct-const address test) keep the push store's
-     region convertible or not on their own merits. *)
+  
+  (* Exemption applies at conversion time. *)
   let has_outgoing_stack_args : bool lazy_t =
     lazy
       (Term.enum blk_t sub
@@ -469,30 +321,8 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                       && is_outgoing_store d)
              else false))
   in
-  (* THE SP-ESCAPE RULE (the rec_struct class): a stack-frame address
-     ([RBP - 0x30] — the address of the caller's local struct) that
-     ESCAPES (is passed as a call argument or stored as data into
-     memory) makes the frame addressable from OUTSIDE the sub — the
-     callee (or a later dereference) reads the slot THROUGH the model
-     frame address, so the slot it points into must stay in the model
-     frame (converting it to a private stack_rN alloca would rebind
-     the storage the escaped pointer still points into — the callee
-     reads garbage). Implemented as two existential checks over the
-     sub ([call_arg_escapes], [store_data_escapes] below): ANY stack
-     traffic escapes when an sp/fp-derived expression reaches a call
-     argument or a memory store's DATA — conservative, sound, no
-     precision loss for the common case (no program that never takes
-     a frame address ever trips it).  A plain spill of an escaped
-     address ([cur.next := RBP-0x30]) stays convertible: what must
-     stay memory is what the ADDRESS ESCAPE makes reachable. *)
-  (* [is_direct_const_addr addr]: is the access address a DIRECT
-     constant-offset frame access — [sp/fp ± const] (or a bare const),
-     with NO index var and NO derived temp: the address the VSA proved
-     a constant offset ([RBP - 4]), the shape the per-cell conversion
-     rewrites. An INDEXED ([RBP + i*4 - 0x70]) or DYNAMIC ([RAX] of
-     [RAX := RBP - 0x30]) address reads/writes through the MODEL
-     FRAME at emission even when its VSA range is a singleton — the
-     write-closed rule needs the region's EVERY member direct. *)
+  (* Escaped frame addresses stay in the model frame. *)
+  (* Tests for [sp/fp +- const] addresses. *)
   let rec is_direct_const_addr ~(sp : var) ~(target : Theory.Target.t) (addr : exp) : bool =
     let base_var v = Var.base v in
     let is_base v = is_sp_or_fp sp target (base_var v) in
@@ -507,9 +337,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
   in
   let components : (tid * (int64 * int64)) list list =
     let items : (tid * (int64 * int64)) list = Core.Map.to_alist ranges in
-    (* Maximal overlap components: iterative merge of overlapping singles
-       until fixpoint. Two components overlap if any member of one overlaps
-       any member of the other (transitive closure). *)
+    (* Merges overlapping components to fixpoint. *)
     let components_overlap (c1 : (tid * (int64 * int64)) list)
         (c2 : (tid * (int64 * int64)) list) : bool =
       Base.List.exists c1 ~f:(fun (_, r1) ->
@@ -561,20 +389,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                 && (match Core.Map.find def_of_tid mtid with
                     | Some md -> not (saves_incoming_reg abi md)
                     | None -> true)
-                (* the member's own access must be DIRECT-CONSTANT
-                   ([mem[RBP - 4]]): an INDEXED/DYNAMIC address
-                   ([mem[RBP + i*4 - 0x70]], [mem[RAX]] with
-                   [RAX := RBP - 0x30]) reads/writes the MODEL FRAME
-                   at emission (the dynamic-inttoptr path) — if the
-                   same cell's direct accesses converted to the
-                   private alloca, the storage splits (the
-                   write-closed rule: together or not at all). The
-                   member-level tail exclusion is NOT needed: the ABI
-                   lane's k<0 RSP-relative stores already force the
-                   whole sub big-frame ([has_outgoing_stack_args]);
-                   the tail's other members (the arg-setup loads —
-                   reads of the caller's own locals) are ordinary
-                   convertible accesses. *)
+                (* Members use direct-constant addresses. *)
                 && (match Core.Map.find def_of_tid mtid with
                     | Some md ->
                         (match addr_of_rhs (Def.rhs md) with
@@ -602,14 +417,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
 #endif
             res
             && not (Lazy.force has_outgoing_stack_args)
-            (* The ESCAPE gate is a PER-REGION convertibility rule (it
-               belongs to [regions_of_sub], whose [convertible] flag
-               [stack_to_locals] consults even on the fallback path —
-               the cells it converts there must respect it too), NOT a
-               whole-sub rule of [split_plan]. The unified escape
-               analysis ([frame_escapes] — the value-escape half plus the
-               frame-address-alias half) is what replaced the two
-               analyses that used to disagree. *)
+            (* Escape is a per-region rule. *)
             && not frame_escaped
       in
       let max_width =
@@ -627,34 +435,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
       :: acc)
   |> Base.List.rev
 
-(* [is_abi_visible sp ~tag_of ~k_of d]: THE ABI-VISIBILITY rule — does this
-   access touch storage the CALLER or CALLEE can see, so it must stay in
-   real memory (never a private [stack_rN] alloca)?
-
-   [lo >= 0] is the incoming-arg area (entry-relative) — the callee's own
-   view of the args its caller pushed. [lo < 0] with [k >= 0] on an
-   SP-relative address is the OUTGOING-arg cell (the 7th-arg store of
-   [inc(...,1)] — the callee reads it at [hike_stack + |k|]). Local stack
-   slots are [lo < 0, k < 0].
-
-   Finding 1: this rule had TWO copies (here and in [Bil2llvm]); the
-   emitter now calls this one. [sp] is the target's stack pointer.
-
-   The [?last_push_tids] set exempts the RETADDR PUSH (the call-tail's
-   last stack def — [last_push_tids_of]): dead model traffic in the
-   lifted world (the callee's epilogue pop dies with [ret_replacement];
-   the lifted callee returns via a real LLVM ret), so its cell fissions
-   into a never-loaded region and the two-tier DCE deletes the store.
-   The REAL outgoing-arg stores (the 7th-arg pushes, EARLIER in the
-   tail) stay ABI-visible.  The set defaults to empty: [abi_visibility_of]
-   (the emitter's form) does NOT thread it — in the production pipeline
-   the pass ORDER carries the exemption (hike-stack-to-locals runs
-   before hike-dce and hike-convlir: the push defs the fission rewrote
-   are region-mem stores the DCE load-roots rule deletes, and the ones
-   that stayed Slot-converted are already REWRITTEN to ordinary slot
-   defs, so neither kind reaches the emitter as a stack access; a
-   caller that runs emission WITHOUT those passes gets the conservative
-   ABI-visible answer, which is sound). *)
+(* Tests for caller/callee-visible storage. *)
 let is_abi_visible ?(last_push_tids = Tid.Set.empty) (sp : var)
     ~(tag_of : Convutils.vsa_kind Tid.Map.t)
     ~(k_of : (int64 * int64) Tid.Map.t) (d : def term) : bool =
@@ -674,25 +455,22 @@ let is_abi_visible ?(last_push_tids = Tid.Set.empty) (sp : var)
       | _ -> false)
   | _ -> false
 
-(* [abi_visibility_of sp info]: the [is_abi_visible] closure over one
-   sub's [vsa_info] — the form the emitter uses.  The maps ARE the
-   record's precomputed fields now (arch C2: no fold). *)
+(* [is_abi_visible] over one sub. *)
 let abi_visibility_of (sp : var) (info : Convutils.vsa_info) :
     def term -> bool =
   is_abi_visible sp ~tag_of:info.Convutils.offsets ~k_of:info.Convutils.k_ranges
 
-(* ------------------------------------------------------------------ *)
-(* THE STACK MODEL DECISION — the single producer ([split_plan]).       *)
-(*                                                                     *)
-(* Ported here from [Bil2llvm.region_split_plan] (Finding 1). Every     *)
-(* rule below is a WHOLE-SUB rule: it either admits the sub's stack to  *)
-(* be split into per-region [stack_rN] allocas, or forces the sound     *)
-(* fallback (one big [%frame] alloca, correct but unoptimized). The      *)
-(* per-region [convertible] flag comes from [regions_of_sub] above.     *)
-(* ------------------------------------------------------------------ *)
 
-(* [region_bytes r]: the alloca size of region [r] — its span's cells at
-   [max_width] bits, 16-aligned, at least one byte. *)
+(* Stack model decision. *)
+
+
+
+
+
+
+
+
+(* Returns the region alloca size. *)
 let region_bytes (r : Convutils.region) : int64 =
   let lo, hi = r.Convutils.span in
   let span_len = Int64.add (Int64.sub hi lo) 1L in
@@ -701,19 +479,14 @@ let region_bytes (r : Convutils.region) : int64 =
   let r = Int64.rem raw 16L in
   if Int64.equal r 0L then raw else Int64.add raw (Int64.sub 16L r)
 
-(* [region_size_ok r]: the alloca size guard — positive and below the
-   64 MiB cap (an absurd span means the VSA did not converge; the
-   fallback frame covers it). *)
+(* Tests the region size guard. *)
 let region_size_ok (r : Convutils.region) : bool =
   let b = region_bytes r in
   Int64.compare b 0L > 0 && Int64.compare b 67108864L <= 0
 
-(* [is_stack_mem sp target e]: is [e] a stack-memory access — a
-   (possibly cast-wrapped) Load/Store whose ADDRESS derives from SP/FP? *)
+(* Tests for SP/FP-derived memory accesses. *)
 
-(* [exp_contains_sp sp target e]: does [e] reference the stack or frame
-   pointer? (The memory-node form: a Load/Store's ADDRESS only — the
-   loaded value is not an address expression.) *)
+(* Tests for SP/FP references. *)
 let rec exp_contains_sp (sp : var) (target : Theory.Target.t) (e : exp) :
     bool =
   match e with
@@ -771,11 +544,7 @@ let rec var_maybe_addr (env : exp Var.Map.t) (sp : var)
       var_maybe_addr env sp target v e'
   | _ -> false
 
-(* [frame_addr_alias sp target sub]: does some memory access in [sub]
-   read/write through a materialized frame pointer (the [v := RSP; t :=
-   mem[v]] class)? Then the frame is addressable through that value and
-   the sub keeps the model frame (the storage the alias points into must
-   not move to a private alloca). *)
+(* Tests for reads through a materialized frame pointer. *)
 let frame_addr_alias (sp : var) (target : Theory.Target.t) (sub : sub term) :
     bool =
   let defs =
@@ -790,14 +559,10 @@ let frame_addr_alias (sp : var) (target : Theory.Target.t) (sub : sub term) :
           | Some (addr, _) -> var_maybe_addr Var.Map.empty sp target v addr
           | None -> false))
 
-(* [vla_overlaps_convertible info convertible]: does the sub's dynamic
-   allocation overlap a convertible region? The VLA's real storage is a
-   runtime [alloca] (it cannot live in the static frame), so a region
-   that overlaps it must not split (the write-closed rule — the storage
-   would straddle two allocations). *)
+(* Tests whether a VLA overlaps a convertible region. *)
 let vla_overlaps_convertible (info : Convutils.vsa_info)
     (convertible : Convutils.region list) : bool =
-  (* vla_bounds is a MAP (the merged record's shape) — fold its values. *)
+  
   Core.Map.fold info.Convutils.vla_bounds ~init:false
     ~f:(fun ~key:_ ~data:(_lo, hi) acc ->
       acc
@@ -811,20 +576,14 @@ let vla_overlaps_convertible (info : Convutils.vsa_info)
             let rlo, rhi = r.Convutils.span in
             not (Int64.compare vla_hi rlo < 0 || Int64.compare vla_lo rhi > 0)))
 
-(* [has_vla_dynamic_alloc sub]: does the sub carry a [dynamic_alloc]
-   def (a runtime-sized SP decrement)? An unbounded VLA (no VSA bound)
-   overlaps everything by definition. *)
+(* Tests for [dynamic_alloc] defs. *)
 let has_vla_dynamic_alloc (sub : sub term) : bool =
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
          Term.enum def_t blk
          |> Seq.exists ~f:(fun d -> Term.has_attr d Hike_vsa_relevance.dynamic_alloc))
 
-(* [has_unbounded_access sub info]: does the sub have a stack memory
-   access the VSA could NOT bound — untagged, [Infinite], [Unbounded] or
-   [VLA]? Such an access has no sized storage: it stays in the model
-   frame, and (the write-closed rule) a sub with one cannot split at all
-   (its storage would straddle the private alloca and the frame). *)
+(* Tests for unboundable stack accesses. *)
 let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
   Term.enum blk_t sub
@@ -841,12 +600,7 @@ let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
                 | Some Convutils.Dead -> false
                 | Some (Convutils.Range _) -> false))
 
-(* [tags_inside_or_disjoint info convertible]: does EVERY tagged access
-   resolve inside a convertible region — or, for the positive
-   (incoming-arg) offsets, lie wholly disjoint from all of them (those
-   read the CALLER's frame through [hike_stack], never a [stack_rN])?
-   An access the plan's regions do not cover would read the wrong
-   storage, so it forces the fallback. *)
+(* Tests that tags resolve inside convertible regions. *)
 let tags_inside_or_disjoint (info : Convutils.vsa_info)
     (convertible : Convutils.region list) : bool =
   Core.Map.for_all info.Convutils.offsets ~f:(fun (kind : Convutils.vsa_kind) ->
@@ -867,42 +621,12 @@ let tags_inside_or_disjoint (info : Convutils.vsa_info)
           in
           if Int64.compare lo 0L < 0 then inside else inside || disjoint)
 
-(* [frame_escapes sp target sub]: is the sub's frame ADDRESSABLE FROM
-   OUTSIDE, so its stack must stay in the one model frame?
-
-   Finding 1: this is the UNIFIED rule. It replaces the two analyses
-   that previously disagreed in both directions — [sp_escaped] (the
-   old stack-to-locals rule: a derived value reaching a call argument
-   or a stored data value) and the emitter's DELETED has_frame_ptr
-   check (a derived value reaching a memory ADDRESS, the bare-copy
-   class; removed with the emitter's old region-split plan in the
-   Finding-1 commit). Either one makes the
-   frame reachable from outside the sub, and a sub whose frame is
-   reachable cannot split: a private [stack_rN] alloca would rebind the
-   storage an outside pointer still points into. *)
+(* Tests whether the frame is reachable from outside. *)
 let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term) :
     bool =
   sp_escaped sp target sub || frame_addr_alias sp target sub
 
-(* [split_plan sp target sub info]: THE stack model decision — the
-   convertible regions that become per-region [stack_rN] allocas, or
-   [[]] for the sound single-frame fallback.
-
-   The whole-sub rules, in order:
-   1. a degraded / non-convergent VSA falls back (no tags to trust);
-   2. an untagged / [Infinite] / [Unbounded] / [VLA] stack access has
-      no bound — its storage cannot be a sized alloca (the write-closed
-      rule: a sub with one cannot split at all);
-      (the ESCAPE rule is NOT a whole-sub rule: it is a PER-REGION
-      convertibility rule — see [regions_of_sub]. [stack_to_locals]
-      consults [convertible] even on the fallback path, so the escape
-      gate must live with the region flag, not here.)
-   3. no convertible region means nothing to split;
-   4. a VLA overlapping a convertible region splits the storage;
-   5. every tagged access must lie INSIDE a convertible region (or,
-      for the positive/incoming-arg offsets, be disjoint from all of
-      them — those read the caller's frame through [hike_stack]);
-   6. the region alloca sizes must be sane. *)
+(* Returns split regions, or [[]] for fallback. *)
 let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : Convutils.split_plan =
   if info.Convutils.degraded then []
@@ -924,10 +648,7 @@ let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
       else if not (Base.List.for_all convertible ~f:region_size_ok) then []
       else convertible
 
-(* [is_precise info]: does [info]'s sub use the split (per-region
-   alloca) model? — the consumer-side read of [split_plan] (the dce and
-   emitter gates). *)
+(* Tests for the split model. *)
 let is_precise (info : Convutils.vsa_info) : bool = info.Convutils.stack_plan <> []
 
-(* The stored data of a (possibly cast-wrapped) store rhs, with the
-   wrapper that rebuilds the enclosing cast around the rewritten store. *)
+

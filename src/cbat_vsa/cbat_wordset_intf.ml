@@ -18,11 +18,11 @@ module type S = sig
 
   include Value.S with type t := t
 
-  (* TODO: want to form a (pointed) semilattice w/ finset; take this out of intf? *)
+  
   include Cbat_lattice_intf.S_indexed
     with type t := t and type idx = int
 
-  (* TODO: what is/are the best constructor(s) to include? *)
+  
   val of_list : width:int -> word list -> t
   val singleton : word -> t
 
@@ -39,7 +39,7 @@ module type S = sig
   val nearest_pred : word -> t ->  word option
   val nearest_succ : word -> t ->  word option
 
-  (* Determines whether the set is spaced by a multiple of w when considered as an interval in the range [0..2^sz) *)
+  (* True when elements are spaced by a multiple of [w]. *)
   val splits_by : t -> word -> bool
 
   val elem : word -> t -> bool
@@ -48,11 +48,11 @@ module type S = sig
   val equal : t -> t -> bool
   val overlap : t -> t -> bool
 
-  (* TODO: these are aliases for lattice functions. Include or no? *)
+  
   val union : t -> t -> t
   val intersection : t -> t -> t
 
-  (* [diff a b]: The set difference γ(a) \ γ(b). *)
+  (* Set difference. *)
   val diff : t -> t -> t
 
   val add : t -> t -> t
@@ -79,4 +79,4 @@ module type S = sig
 
 end
 
-(* TODO: module Defaults *)
+

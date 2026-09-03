@@ -1,24 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end coreutils success-rate pipeline.
-#
-#   clone -> build (-O0, plain default-PIE — the corpus recipe since the
-#   2026-08-26 "PIE only, no fallbacks" directive) -> collect ELFs ->
-#   hike-lift every binary (bap --pass=hike-convlir) ->
-#   recompile the lifted IR (llc + harness) -> run native-vs-lifted ->
-#   print the SUCCESS RATE table.
-#
-# Idempotent/resumable: every stage skips work that already exists, so the
-# script can be re-run after an interruption or after a plugin rebuild
-# (delete $WORK/ir to force re-emission).
-#
-# Usage:
-#   coreutils_pipeline.sh [workdir] [stage]     # stage: all|clone|build|collect|lift|test|summary
-#
-# Defaults: workdir=/tmp/opencode/coreutils-test, stage=all
-#
-# The plugin must be the FRESH bundle (dune build @install && dune install;
-# cd src && make && bapbundle install) - a stale plugin silently lifts with
-# old code.  Needs: git, autoconf/automake (./bootstrap), make, bap, llc, gcc.
+# End-to-end coreutils pipeline: clone -> build -> collect ELFs -> lift ->
+# recompile -> native-vs-lifted success-rate table.
+# Resumable: each stage skips existing work (delete $WORK/ir to re-emit).
+# Usage: coreutils_pipeline.sh [workdir] [stage]
+#   stage: all|clone|build|collect|lift|test|summary (default all)
+#   workdir default /tmp/opencode/coreutils-test
+# Needs a fresh plugin, plus git, autoconf/automake, make, bap, llc, gcc.
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -48,14 +35,11 @@ do_clone() {
 }
 
 # ---------------------------------------------------------------- build ----
-# Fallback source: the GNU release tarball ships a PRE-GENERATED ./configure,
-# so it needs no bootstrap prerequisites (gperf/texinfo/gnulib).  Used when
-# the git-checkout bootstrap path fails on missing tools.
+# Release tarball ships pre-generated ./configure, so it builds without
+# bootstrap tools; used when the git-checkout bootstrap fails.
 TARBALL_URL="https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz"
 
-# PIE ONLY (user directive 2026-08-26): configure with plain gcc defaults
-# = distro-style ET_DYN / PIE executables. The old PIE=1 opt-in toggle and
-# its -fno-pie/-no-pie arm are deleted — there is no non-PIE mode.
+# Plain gcc defaults = PIE executables.
 CFLAGS_BUILD="-O0 -fno-stack-protector"
 
 build_configure_make() {   # $1 = source dir
@@ -82,7 +66,7 @@ do_build() {
     if [ -x "$CORE/src/ls" ] && [ -x "$CORE/src/cat" ]; then
         note "build: SKIP (already built -> $CORE/src)"; return 0; fi
 
-    # primary path: the GitHub checkout via gnulib bootstrap
+    # primary path: GitHub checkout via gnulib bootstrap
     if [ -d "$CORE/.git" ] || do_clone; then
         note "build: trying ./bootstrap (fetches gnulib; one-time)"
         if (cd "$CORE" && ./bootstrap --copy) >> "$WORK/bootstrap.log" 2>&1; then
@@ -124,13 +108,10 @@ do_collect() {
 }
 
 # ----------------------------------------------------------------- lift ----
-# Lift timing: every emission's wall-seconds lands in $WORK/lift_times.tsv
-# ("name<TAB>secs"), so per-binary and aggregate lift cost is reportable.
-# RETIME=1 forces re-emission of ALREADY-lifted binaries purely to measure
-# them (the default resumes and cannot time what it skips).
+# Lift wall-seconds land in $WORK/lift_times.tsv; RETIME=1 re-emits
+# already-lifted binaries purely to time them.
 do_lift() {
-    # [#perf 3] 64MB minor heap: the fixpoint's WordSet/AI churn was sending
-    # ~11% of cycles to the major GC (oldify/marking) in the date profile
+    # 64MB minor heap: fixpoint churn otherwise spends ~11% in major GC.
     export OCAMLRUNPARAM="${OCAMLRUNPARAM:-s=8M}"
     [ -d "$BINS" ] && [ "$(ls -A "$BINS" 2>/dev/null)" ] || { do_collect; } || return 1
     : > "$LIFT_LOG"
@@ -138,11 +119,7 @@ do_lift() {
     [ "${RETIME:-0}" = "1" ] && : > "$TIMES"
     touch "$TIMES"
     local total=0 ok=0
-    # SERIAL ONLY (user directive 2026-09-01: parallel bap lifts OOM the
-    # box — one big-binary lift peaks ~1 GB and nproc of them blow the
-    # 15 GB limit; this is exactly the 90/103-era crash). The old
-    # LIFT_JOBS/nproc parallelism is DELETED — no env var, no xargs -P: one
-    # lift at a time, always.
+    # Serial only: parallel lifts OOM the box (one big lift peaks ~1 GB).
     [ -d "$IR" ] || mkdir -p "$IR"
     local pending=()
     for b in "$BINS"/*; do
@@ -166,7 +143,7 @@ do_lift() {
     [ "$ok" -eq "$total" ]
 }
 
-# [lift-report]: aggregate the timings TSV - total, mean, p50/p90, top-10
+# Aggregates the timings TSV: total, mean, p50/p90, top-10.
 do_lift_report() {
     local tsv="$WORK/lift_times.tsv"
     [ -s "$tsv" ] || { note "lift-report: no timings ($tsv) - run RETIME=1 ... lift"; return 0; }
@@ -202,15 +179,13 @@ do_test() {
 
         local STUB="" GMP="" CRYPTO=""
         grep -q '@_setjmp\|@longjmp' "$ll" && STUB="$SEM/setjmp_stub.S"
-        # gnulib/GMP users (factor, md5sum, ...) reference __gmpz_* - the
-        # native binary linked libgmp, so the lifted link needs it too
+        # gnulib/GMP users need -lgmp, like the native link
         grep -q '@__gmp' "$ll" && GMP="-lgmp"
-        # gnulib can route hashing through libcrypto (MD5_/SHA*/EVP_* refs)
+        # gnulib hashing can route through libcrypto
         grep -qE '@(MD5_|SHA1_|SHA224_|SHA256_|SHA384_|SHA512_|EVP_)' "$ll" \
           && CRYPTO="-lcrypto"
-        # --allow-multiple-definition: statically-linked gnulib modules
-        # (dircolors, wc) define their own malloc/free - the harness's
-        # alignment wrappers must not collide-link against them
+        # --allow-multiple-definition: gnulib modules defining their own
+        # malloc/free must not collide with the harness wrappers
         if ! gcc -O0 -no-pie -o "$OUT/${name}_lifted" \
                  -Wl,--allow-multiple-definition \
                  "$OUT/${name}_lifted.o" "$SEM/harness.c" $STUB $GMP $CRYPTO 2>>"$OUT/$name.gcc.log"; then
@@ -219,38 +194,25 @@ do_test() {
         rm -f "$OUT/${name}_lifted.o"
         command -v strip >/dev/null && strip "$OUT/${name}_lifted" 2>/dev/null
 
-        # DISK GUARD: `yes`-class utilities write forever - cap both captures.
-        # CAP-ONLY (truncate shrinks, never grows): `truncate -s 1M` on a
-        # smaller file EXTENDS it with NULs, zero-padding every short capture
-        # to exactly 1MiB and polluting byte-diffs.
-        # SYMMETRIC argv[0]: BOTH sides run as "./<name>" FROM their mirrored
-        # dir, so argv[0] is the identical string "./<name>" on both sides -
-        # coreutils embeds the FULL argv[0] path in usage messages (the cut/
-        # basename-class false diffs).
+        # Cap captures: yes-class utilities write forever.
+        # Truncate only shrinks: -s 1M on a smaller file would NUL-pad it.
         caprun() { local o="$1" d="$2" n="$3"; local r=0
                    (cd "$d" && timeout 20 "./$n" > "$o.tmp" 2>&1); r=$?
                    local sz; sz=$(stat -c%s "$o.tmp" 2>/dev/null || echo 0)
                    [ "$sz" -gt 1048576 ] && truncate -s 1M "$o.tmp" 2>/dev/null
                    mv "$o.tmp" "$o"; return $r; }
 
-        # NORMALIZE known-NONDETERMINISTIC tokens before the byte-diff, so
-        # harness nondeterminism never masquerades as lift breakage (raw
-        # captures stay on disk for debugging):
-        #  - mktemp: the random suffix of /tmp/tmp.XXXXXXXXXX (both sides are
-        #    correct; the chars are per-run random).
-        #  - dd stats line: the wall-clock elapsed seconds and the derived
-        #    rate MANTISSA legitimately differ per run.  The rate UNIT is
-        #    KEPT visible: a kB/s-vs-QB/s disagreement (a real lift bug
-        #    class) still fails the diff after normalization.
+        # Normalize nondeterministic tokens before diffing (raw captures stay).
+        # mktemp suffixes are per-run random; dd elapsed/rate legitimately
+        # differ per run (the rate UNIT stays visible, so a real unit bug
+        # still fails).
         norm() { sed -E \
                    -e 's/tmp\.[A-Za-z0-9]{6,}/tmp.RANDOM/g' \
                    -e 's/(, )[0-9][0-9.eE+-]*( s, )[0-9][0-9.]*( [A-Za-z]*B\/s)$/\1ELAPSED\2RATE\3/' \
                    "$1" 2>/dev/null; }
 
         mkdir -p "$OUT/run/both"
-        # ONE shared dir: both sides run as "./<name>" from the SAME cwd -
-        # argv[0] is identical (coreutils embeds it in usage messages) and
-        # the environment's PWD is identical too (pwd/printenv class).
+        # One shared dir keeps argv[0] and PWD identical on both sides.
 
         cp -f "$native" "$OUT/run/both/$name"
         caprun "$OUT/${name}_native.stdout" "$OUT/run/both" "$name"; local nrc=$?
@@ -268,29 +230,17 @@ do_test() {
     note "test: PASS=$pass FAIL=$fail SKIP=$skip (details: $TEST_LOG)"
 }
 
-# ---------------------------------------------------------------- suite ----
-# THE REAL SEMANTICS ORACLE: coreutils' own test suite (make check), run
-# THREE-way:
-#   1. BASELINE : pristine built binaries  -> records environment failures
-#                 (root-only tests, missing locales, ...) that have nothing
-#                 to do with hike
-#   2. LIFTED   : same tree with src/* OVERWRITTEN by hike-lifted binaries
-#   3. DELTA    : lifted failures MINUS baseline failures = the honest
-#                 hike-caused breakage count
-#
-# Usage:  coreutils_pipeline.sh <work> suite          (baseline cached once)
-#         SUITE_FRESH=1 ... suite                     (redo the baseline)
+# Coreutils' own suite (make check), three-way: native baseline, lifted,
+# and the delta (lifted-minus-native failures = hike-caused breakage).
+# Usage: coreutils_pipeline.sh <work> suite (SUITE_FRESH=1 redoes baseline).
 do_suite() {
     [ -x "$CORE/src/ls" ] || { note "suite: build first"; return 1; }
     local suite_log="$WORK/suite"
     mkdir -p "$suite_log"
 
     run_check() { # $1 = tag for log names
-        # HELP2MAN/MAKEINFO=true: man/info regeneration EXECUTES the binaries
-        # under $(src) - with lifted binaries swapped in, help2man hit SIGSEGV
-        # (Error 139) and make aborted BEFORE coreutils' own tests/*.sh ran,
-        # leaving only gnulib unit tests in the log (the 441=441 mirage).
-        # Stubbing the doc tools makes check proceed to the real suite.
+        # Stub doc tools: regenerating man/info would execute the swapped-in
+        # binaries before the real tests run.
         note "suite[$1]: make -k check (doc tools stubbed; this takes a while)"
         (cd "$CORE" && timeout 5400 make -k check V=0 \
             HELP2MAN=true MAKEINFO=true TEXI2PDF=true TEXI2DVI=true) \
@@ -300,10 +250,7 @@ do_suite() {
         [ -z "$log" ] && log=$(find "$CORE" -name test-suite.log | head -1)
         cp -f "$log" "$suite_log/$1.test-suite.log" 2>/dev/null || {
             note "suite[$1]: no test-suite.log produced"; return 1; }
-        # GUARD: coreutils' own shell tests must be present, otherwise the
-        # counts only cover gnulib unit tests (measured before: 0 shell tests
-        # -> meaningless comparison).  Their result lines look like
-        # "PASS: tests/cp/some.sh" style entries in test-suite.log.
+        # Guard: the log must hold real shell tests, not gnulib-only coverage.
         local own
         own=$(grep -cE '^([A-Z]+): .*(tests/|/[a-z0-9_-]+\.sh)' "$suite_log/$1.test-suite.log")
         note "suite[$1]: coreutils-shell-test results in log: $own"

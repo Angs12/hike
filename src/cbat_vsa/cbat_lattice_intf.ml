@@ -20,12 +20,12 @@ module type S_semi = sig
   val top : t
   val join : t -> t -> t
 
-  (* Computes an approximation of the join of two lattices such that successive widening converges (reasonably quickly) to a fixpoint. This can be equivalent to join on lattices with small enough finite height. *)
+  (* Join approximation that makes widening converge. *)
   val widen_join : t -> t -> t
 
-  (* Gives a partial order for the lattice. *)
+  (* Partial order. *)
   val precedes : t -> t -> bool
-  (* Convenience function since equality can often be implemented more efficiently than precedes *)
+  (* Equality; cheaper than [precedes]. *)
   val equal : t -> t -> bool
 
 end
@@ -40,7 +40,7 @@ module type S = sig
 
 end
 
-(* Represents a family of lattices indexed by another type. The lattice structure is maintained over elements with the same index. Meet, join, and precedes should be expected to error if passed elements with different indices. *)
+(* Lattices indexed by another type; ops need equal indices. *)
 module type S_indexed = sig
   type t
   type idx
