@@ -2789,6 +2789,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* Versions key the caches. *)
   (* Context threads through the engine. *)
   let rc_cell = ref rctx in
+  (* Store plus version bump; the stability check below compares first. *)
   let set n v =
     sol_map := Core.Map.set !sol_map ~key:n ~data:v;
     let rc = !rc_cell in
@@ -2898,9 +2899,11 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         (* Non-heads join once. *)
         Stages.time `Join (fun () -> AI.join old incoming)
     in
-    (* Stability compare is timed. *)
-    if not (Stages.time `Equal (fun () -> AI.equal old new_val))
-    then (Stages.time `Glue (fun () -> set v new_val); true) else false)
+    (* Bump-only-on-change: physical sharing first, then the timed compare. *)
+    if phys_equal old new_val
+       || Stages.time `Equal (fun () -> AI.equal old new_val)
+    then false
+    else (Stages.time `Glue (fun () -> set v new_val); true))
   in
   let rec stabilize_comps (comps : Cbat_wto.comp list) : bool =
     let changed = ref false in
