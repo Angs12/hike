@@ -49,6 +49,11 @@ module Transfer_memo = Cbat_memo.Make (struct
   type t = AI.t * bool
 end)
 
+(* Shared produced-value maps, one per block per version. *)
+module Produced_memo = Cbat_memo.Block_map (struct
+  type t = WordSet.t
+end)
+
 (* Solution still changing at the step cap. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
   * (tid * tid) option
@@ -1450,14 +1455,48 @@ type refine_ctx = {
   (* Memoized block transfers with replayed acquisition. *)
   (* Transfer memo. *)
   rc_out_cache : Transfer_memo.t;
+  (* Shared produced-value maps, populated from either path. *)
+  rc_produced : Produced_memo.t ref;
 }
+
+(* Block version; 0 means never set. *)
+let ver_of (rc : refine_ctx) (t : Tid.t) : int =
+  match Core.Map.find rc.rc_versions t with
+  | Some v -> v
+  | None -> 0
+
+(* Produced lhs values of a block's defs under its entry state. *)
+let produced_map_of_block (entry : AI.t) (b : blk term)
+    : Produced_memo.value Tid.Map.t =
+  Term.enum def_t b
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m d ->
+      match Var.typ (Def.lhs d) with
+      | Type.Imm w ->
+        let pv = AI.find_word w (denote_def d entry) (Def.lhs d) in
+        Core.Map.set m ~key:(Term.tid d) ~data:pv
+      | Type.Mem _ | Type.Unk -> m)
+
+(* Shared produced-value map; one lookup per visit, stored on miss. *)
+let produced_map ~(rctx : refine_ctx) (entry : AI.t) (b : blk term)
+    : Produced_memo.value Tid.Map.t =
+  let bt = Term.tid b in
+  match Produced_memo.find ~version:(ver_of rctx) !(rctx.rc_produced) bt with
+  | Some m -> m
+  | None ->
+    let m = produced_map_of_block entry b in
+    rctx.rc_produced :=
+      Produced_memo.add !(rctx.rc_produced) bt ~ver:(ver_of rctx bt) m;
+    m
 
 (* Reverse-def walk of one block. *)
 let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
     ~(sol : (tid, AI.t) Solution.t)
+    ~(rctx : refine_ctx)
     (env : AI.t ref) (live : Live.t)
     (blk : blk term) : Live.t =
   let live = ref live in
+  let entry = Solution.get sol (Term.tid blk) in
+  let pmap = produced_map ~rctx entry blk in
   Term.enum def_t blk |> Seq.to_list |> List.rev
   |> List.iter ~f:(fun d ->
       let v = Var.base (Def.lhs d) in
@@ -1470,9 +1509,11 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
           let post_v =
             match Var.typ (Def.lhs d) with
             | Type.Imm w ->
-              Some (AI.find_word w
-                      (denote_def d (Solution.get sol (Term.tid blk)))
-                      (Def.lhs d))
+              let pv =
+                match Core.Map.find pmap (Term.tid d) with
+                | Some pv -> pv
+                | None -> AI.find_word w (denote_def d entry) (Def.lhs d) in
+              Some pv
             | Type.Mem _ | Type.Unk -> None in
           (match post_v with
            | Some pv ->
@@ -1561,7 +1602,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
                   then Live.join live seed_constraints
                   else live in
                 let base =
-                  reverse_def_walk ~defs:defs_map ~sol
+                  reverse_def_walk ~defs:defs_map ~sol ~rctx
                     env live b in
                 fun ~target:t ->
                   route_phi_constraints ~sol env t
@@ -1582,7 +1623,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
       match Term.find blk_t sub (Term.tid blk) with
       | Some gb ->
         let walked =
-          reverse_def_walk ~defs:defs_map ~sol env
+          reverse_def_walk ~defs:defs_map ~sol ~rctx env
             (Live.join (Solution.get live_sol (Term.tid blk))
                seed_constraints) gb in
         Solution.derive live_sol
@@ -2353,12 +2394,8 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
   rc_out_cache = Transfer_memo.empty;
+  rc_produced = ref Produced_memo.empty;
 }
-
-let ver_of (rc : refine_ctx) (t : Tid.t) : int =
-  match Core.Map.find rc.rc_versions t with
-  | Some v -> v
-  | None -> 0
 
 
 
@@ -2557,6 +2594,8 @@ let denote_block_with_stores ?preserved ?defs ?stores
  (* Threaded context plus read set. *)
  match (Program.lookup blk_t ctx source) with
    | Some b ->
+     (* First visitor under this version stores the produced map. *)
+     ignore (produced_map ~rctx env b);
      let postcond = denote_defs b env in
      (* Last understood flag-setting comparison. *)
      
