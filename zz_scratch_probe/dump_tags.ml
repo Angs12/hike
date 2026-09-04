@@ -20,8 +20,7 @@ let () =
       | Some s -> s
       | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] — %s not found" name)
     in
-    let tagged = Hike.Relevance.analyze sp sub in
-    let info = Hike.Vsa.offsets_of_sub target sp tagged in
+    let info = Hike.Vsa.offsets_of_sub target sp sub in
     let kind_of = info.Hike.Convutils.offsets in
     (* Region id whose span holds the def's tag; "-" when in no region. *)
     let region_of =
@@ -35,17 +34,18 @@ let () =
                      Printf.sprintf "r%d" r.Hike.Convutils.id
                    else
                      Printf.sprintf "-r%d" r.Hike.Convutils.id)))
-    in    Term.enum blk_t tagged
+    in    Term.enum blk_t sub
     |> Seq.iter ~f:(fun b ->
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->
+            (* Stack-ness is [vsa_info] membership (spec §2.2). *)
             let tags =
-              [ (Hike.Relevance.relevant, "relevant");
-                (Hike.Relevance.stack_access, "stack_access");
-                (Hike.Relevance.dynamic_alloc, "dynamic_alloc") ]
-              |> Base.List.filter_map ~f:(fun (t, n) ->
-                  if Term.has_attr d t then Some n else None)
-              |> Base.String.concat ~sep:","
+              (if Core_kernel.Map.mem info.Hike.Convutils.offsets (Term.tid d)
+               then "stack_access"
+               else "")
+              ^ (if Core_kernel.Map.mem info.Hike.Convutils.vla_bounds (Term.tid d)
+                 then ",dynamic_alloc"
+                 else "")
             in
             let kind =
               match Core_kernel.Map.find kind_of (Term.tid d) with

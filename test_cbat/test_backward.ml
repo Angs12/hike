@@ -20,7 +20,7 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : word) ~(rhs : exp) : sub term * tid =
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create v rhs);
@@ -47,7 +47,7 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : word) ~(rhs : exp) : sub term * tid =
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Cell at RBP-8 in [st], read back as the load denotation reads it. *)
@@ -75,10 +75,10 @@ let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_o
   cell_of (iter_state_of sub sol target_tid)
 
 let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
-  let sub' = Relevance.analyze sp sub in
-  let prog' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
-  iter_cell_of sub' sol body_tid l3a_cell_of
+  (* Gate-free (spec §2.1): the raw sub runs; every def is denoted. *)
+  let prog' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  iter_cell_of sub sol body_tid l3a_cell_of
 
 (* L3c-1: flag-state mechanism — bare-flag guards recover the comparison constraint. *)
 
@@ -94,7 +94,7 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) : sub term * tid * jmp ter
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (w32 10))));
@@ -123,7 +123,7 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) : sub term * tid * jmp ter
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   let jmp =
     match Term.enum jmp_t header |> Seq.to_list with [ j1; _ ] -> j1 | _ -> assert false
   in
@@ -196,7 +196,7 @@ let mk_l3c2_loop ~(prologue : bool) ~(seed : word option) ~(cmp : Bil.binop) ~(c
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Cell at RBP-8 in [st]. *)
@@ -245,7 +245,7 @@ let mk_l3c3_loop ~(seed : word option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : w
       Blk.Builder.add_def entry_b
         (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
   | None -> ());
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create v chain);
@@ -276,7 +276,7 @@ let mk_l3c3_loop ~(seed : word option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : w
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Cell at RBP-8 in [st]. *)
@@ -316,7 +316,7 @@ let mk_l3c4_loop ~(seed : word option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.b
       Blk.Builder.add_def entry_b
         (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
   | None -> ());
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create v chain);
@@ -347,7 +347,7 @@ let mk_l3c4_loop ~(seed : word option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.b
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Two-load Var-vs-Var shape. Returns (sub, body tid). *)
@@ -376,7 +376,7 @@ let mk_l3c4_vv_loop ~(seed : word option) ~(seed2 : word option) ~(cmp : Bil.bin
       Blk.Builder.add_def entry_b
         (Def.create m (Bil.Store (Bil.Var m, addr2, Bil.Int sv, LittleEndian, `r32)))
   | None -> ());
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create u (Bil.Load (Bil.Var m, addr2, LittleEndian, `r32)));
@@ -407,7 +407,7 @@ let mk_l3c4_vv_loop ~(seed : word option) ~(seed2 : word option) ~(cmp : Bil.bin
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Cell at RBP-8 in [st]. *)
@@ -446,7 +446,7 @@ let mk_l3c5_loop ~(seed : word option) ~(chain : exp option) ~(cond : exp) ~(bod
       Blk.Builder.add_def entry_b
         (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
   | None -> ());
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   (match chain with Some ch -> Blk.Builder.add_def header_b (Def.create v ch) | None -> ());
@@ -477,7 +477,7 @@ let mk_l3c5_loop ~(seed : word option) ~(chain : exp option) ~(cond : exp) ~(bod
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Cell at RBP-8 in [st]. *)
@@ -540,7 +540,7 @@ let mk_l3b1_loop () : sub term * tid * tid =
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid, header_tid)
 
 (* Diamond: both branches store {7} at [RSP-8]/[RSP-7]; merge unions them. Returns (sub, merge tid). *)
@@ -586,7 +586,7 @@ let mk_l3b4_diamond () : sub term * tid =
   Sub.Builder.add_blk sub_b a;
   Sub.Builder.add_blk sub_b b;
   Sub.Builder.add_blk sub_b merge;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, merge_tid)
 
 (* Cell count in [st]'s memory: counts "(height " sexp markers. *)
@@ -653,7 +653,7 @@ let mk_l39_loop ~(seed : word) ~(c : word) ~(body_op : Bil.binop) ~(body_k : wor
   let exit_b = Blk.Builder.create () in
   Blk.Builder.add_def entry_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int seed, LittleEndian, `r32)));
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   (* Canonical -O0 cmp emission, fixed order: temp, CF, OF, SF, ZF. *)
   Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int c)));
@@ -700,7 +700,7 @@ let mk_l39_loop ~(seed : word) ~(c : word) ~(body_op : Bil.binop) ~(body_k : wor
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Record-path fixture: bare-flag guard with unique def. Returns (sub, body tid). *)
@@ -718,7 +718,7 @@ let mk_l39b5_loop () : sub term * tid =
   let exit_b = Blk.Builder.create () in
   Blk.Builder.add_def entry_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (w32 0), LittleEndian, `r32)));
-  (* Prologue def: RSP lands in the refineable set. *)
+  (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create v (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, Bil.Var v, Bil.Int (w32 3))));
@@ -751,7 +751,7 @@ let mk_l39b5_loop () : sub term * tid =
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
 (* Cell at RBP-8 in [st]. *)
@@ -846,12 +846,11 @@ let mk_e1_flat_sub () : sub term * tid * var =
 
 (* ON-path fixpoint; RSP value-set at [tid]. *)
 let e1_rsp_at (sub : sub term) (tid : tid) (rsp : var) : Ws.t =
-  let sub' = Relevance.analyze sp sub in
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
+  let ctx' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   AI.find_word 64 (Graphlib.Std.Solution.get sol tid) rsp
 
-(* L-D6: RBP-anchored restriction-ON fixture — forward rule tags the dead epilogue def. *)
+(* L-D6: RBP-anchored gate-free fixture — the dead epilogue def is denoted too. *)
 
 (* RBP loop with dead epilogue def. Returns (sub, body tid). *)
 let mk_l6_rbp_loop () : sub term * tid =
@@ -950,9 +949,8 @@ let l6_cell_of (st : AI.t) : Ws.t =
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let sub' = Relevance.analyze sp sub in
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
+  let ctx' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   l6_cell_of (Graphlib.Std.Solution.get sol body_tid)
 
 (* Refactor-2 new-shape pins: inline-arithmetic, NOT-edge, const-first flip, nested BinOp. *)
@@ -1059,10 +1057,9 @@ let r2_cell_of (st : AI.t) : Ws.t =
 
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let sub' = Relevance.analyze sp sub in
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
-  iter_cell_of sub' sol body_tid r2_cell_of
+  let ctx' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  iter_cell_of sub sol body_tid r2_cell_of
 
 let run () =
 (  (* L3a-1: PLUS row — EQ(v,5) gives t' = {4}. *)
@@ -1743,12 +1740,9 @@ let run () =
 ;
 (  let sub, body = mk_l6_rbp_loop () in
   check
-    "L-D6: the fix-14 blocker — RBP-anchored restriction-ON (prologue RBP := RSP + the c=63 jle \
-     loop at RBP−8 + the dead epilogue RBP := mem[RSP]) — the two-pass design (L-D8): the \
-     FORWARD-D rule tags the epilogue def (its rhs uses RSP ∈ D), so RBP ∈ refineable and the jcc \
-     decoder's refine_cell addr gate binds the cell at RBP−8 to ⊆ [0, 64) at the BODY input — \
-     FAILS with the plain liveness rule (the epilogue def untagged → the all-defs-tagged gate \
-     excludes RBP → the addr gate rejects, 168/168)"
+    "L-D6 (gate-free, spec §2.1): the RBP-anchored loop (prologue RBP := RSP + the c=63 jle \
+     loop at RBP−8 + the dead epilogue RBP := mem[RSP]) — every def is denoted, so the jcc \
+     decoder's cell meet binds the cell at RBP−8 to ⊆ [0, 64) at the BODY input"
     (l39_bounded (l6_run sub body) (w32 63));
   ())
 ;

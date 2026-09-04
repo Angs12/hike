@@ -9,7 +9,6 @@ module Abi = Hike_abi
 
 
 (* Public re-exports; consumers use [Hike.Abi], etc. *)
-module Relevance = Hike_vsa_relevance
 module Vsa = Hike_vsa
 module Dce = Hike_dce
 module Stack_model = Hike_stack_model
@@ -601,14 +600,8 @@ let () =
            setup proj;
            (* Setup and filter run first. *)
            filter_subs proj);
-      (* Relevance tagging pass. *)
-      Project.register_pass ~name:"relevance" ~deps:[ "hike-filter" ] ~runonce:true
-        (fun proj ->
-           Project.map_program proj ~f:(fun prog ->
-               Term.map sub_t prog
-                 ~f:(Hike_vsa_relevance.analyze (sp (Project.target proj)))));
-      (* VSA tag pass. *)
-      Project.register_pass ~name:"vsa" ~deps:[ "hike-relevance" ] ~runonce:true
+      (* VSA tag pass; depends on the filter only (spec §2.1). *)
+      Project.register_pass ~name:"vsa" ~deps:[ "hike-filter" ] ~runonce:true
         (fun proj ->
            (* Skips a second run; the slot already holds results. *)
            let cur = Hike_kb.vsa_info () in

@@ -72,7 +72,7 @@ let () =
   | path :: rest ->
     let proj = load_project path in
     let prog = Project.program proj in
-    let sp = sp_of proj in
+    let _sp = sp_of proj in
     let name = match rest with n :: _ -> n | [] -> "main" in
     let sub =
       match find_sub prog name with
@@ -83,7 +83,7 @@ let () =
     in
     Printf.printf "=== conv_diag %s (%s) ===\n" (Filename.basename path)
       (Sub.name sub);
-    let sub' = Hike.Relevance.analyze sp sub in
+    let sub' = sub in
     let prog' = Program.create ~subs:[ sub' ] () in
     let sol =
       try Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub')

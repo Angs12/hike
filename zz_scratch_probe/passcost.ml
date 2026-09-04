@@ -1,4 +1,4 @@
-(* Times relevance, vsa, stl, dce per sub; counts DCE sweep rounds.
+(* Times seed-detect, vsa, stl, dce per sub; counts DCE sweep rounds.
    Usage: passcost.exe <binary>... CSV on stdout, summary on stderr. *)
 
 open Bap.Std
@@ -36,7 +36,7 @@ let () =
   init ();
   let args = List.tl (Array.to_list Sys.argv) in
   if Base.List.is_empty args then usage Sys.argv.(0) "<binary>...";
-  Printf.printf "binary,sub,ndefs,relevance_s,vsa_s,stl_s,dce_s,dce_rounds\n";
+  Printf.printf "binary,sub,ndefs,seed_s,vsa_s,stl_s,dce_s,dce_rounds\n";
   let tot = ref 0.0 in
   Base.List.iter args ~f:(fun path ->
       let proj = load_project path in
@@ -49,14 +49,16 @@ let () =
             |> Seq.fold ~init:0 ~f:(fun n blk ->
                    n + Seq.length (Term.enum def_t blk))
           in
-          let tagged, t_rel = time1 (fun () -> Hike.Relevance.analyze sp sub) in
+          let _alloc_tids, t_rel =
+            time1 (fun () -> Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
+          in
           let _info, t_vsa =
-            time1 (fun () -> Hike.Vsa.offsets_of_sub target sp tagged)
+            time1 (fun () -> Hike.Vsa.offsets_of_sub target sp sub)
           in
           (* stl and dce read the KB that offsets_of_sub populates. *)
           let stl_sub, t_stl =
             time1 (fun () ->
-                Hike.Stack_to_locals.stack_to_locals target sp tagged)
+                Hike.Stack_to_locals.stack_to_locals target sp sub)
           in
           let _dced, t_dce =
             time1 (fun () -> Hike__Hike_dce.dce ~target stl_sub)

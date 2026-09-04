@@ -18,9 +18,12 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let tag_of = info.Convutils.offsets in
   (* Incoming and outgoing arg accesses stay in memory. *)
   let k_of = info.Convutils.k_ranges in
-  (* The retaddr push stays convertible. *)
-  let last_push_tids = Model.last_push_tids_of sub in
-  
+  (* The retaddr push stays convertible. Stack-ness is [vsa_info]
+     membership (spec §2.2). *)
+  let last_push_tids =
+    Model.last_push_tids_of sub ~is_stack:(fun d ->
+        Core.Map.mem tag_of (Term.tid d))
+  in
   let is_abi_visible = Model.is_abi_visible sp ~tag_of ~k_of ~last_push_tids in
   (* Regions come from the VSA result. *)
   let regions =
@@ -69,10 +72,8 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     |> Seq.fold ~init:[] ~f:(fun acc blk ->
         Term.enum def_t blk
         |> Seq.fold ~init:acc ~f:(fun acc d ->
-            if
-              not (Term.has_attr d Hike_vsa_relevance.stack_access)
-              || is_abi_visible d
-            then acc
+            (* Conversion candidates carry a [vsa_info] tag (spec §2.2). *)
+            if is_abi_visible d then acc
             else
               match
                 ( Core.Map.find tag_of (Term.tid d),

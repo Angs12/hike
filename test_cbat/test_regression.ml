@@ -112,13 +112,7 @@ let run_creg () =
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b exit0;
   let sub = Sub.Builder.result sub_b in
-  let tagged = Relevance.analyze sp sub in
-  let tagged =
-    Term.map blk_t tagged ~f:(fun b ->
-        Term.map def_t b ~f:(fun d ->
-            if Term.has_attr d Relevance.stack_access then d
-            else Term.set_attr d Relevance.stack_access ()))
-  in
+  let tagged = sub in
   let span = (-16L, -16L) in
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
@@ -190,7 +184,7 @@ let run_creg () =
 (* C3: escape set includes the call block's outgoing-slot stores. *))
 ;
 (  let fx = mk_c3 () in
-  let sub' = Relevance.analyze sp fx.c3_sub in
+  let sub' = fx.c3_sub in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
     Vsa.denote_defs
@@ -340,7 +334,7 @@ let run_creg () =
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  let tagged = Relevance.analyze sp sub in
+  let tagged = sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check
@@ -413,7 +407,7 @@ let run_creg () =
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  let tagged = Relevance.analyze sp sub in
+  let tagged = sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   (* Control: indexed member keeps its kind. *)
@@ -511,15 +505,8 @@ let run_creg () =
   Sub.Builder.add_blk sub_b loop;
   Sub.Builder.add_blk sub_b exit;
   let sub0 = Sub.Builder.result sub_b in
-  let tagged_rel = Relevance.analyze sp sub0 in
-  (* Flag defs feed no stack sink: re-tag the guard's flag explicitly. *)
-  let tagged =
-    Term.map blk_t tagged_rel ~f:(fun b ->
-        Term.map def_t b ~f:(fun d ->
-            if Tid.equal (Term.tid d) (Term.tid def_flag) then
-              Term.set_attr d Cbat_vsa_utils.relevant ()
-            else d))
-  in
+  (* Gate-free (spec §2.1): the raw sub runs; every def is denoted. *)
+  let tagged = sub0 in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check "R6: the jne-counter loop's indexed store carries an offset tag"
@@ -584,8 +571,8 @@ let run_creg () =
   Sub.Builder.add_blk sub_b loop;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  (* Production path: analyze's tags as-is. *)
-  let tagged = Relevance.analyze sp sub in
+  (* Gate-free production path (spec §2.1). *)
+  let tagged = sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check "G3: the jne-counter loop's indexed store carries an offset tag"
@@ -663,7 +650,7 @@ let run_remediation () =
   Sub.Builder.add_blk sub_b post0;
   let caller = Sub.Builder.result sub_b in
   ignore callee;
-  let sub' = Relevance.analyze sp caller in
+  let sub' = caller in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
     Vsa.denote_defs
@@ -805,13 +792,7 @@ let run_remediation () =
     Sub.Builder.add_blk sub_b entry;
     Sub.Builder.add_blk sub_b exit0;
     let sub = Sub.Builder.result sub_b in
-    let tagged = Relevance.analyze sp sub in
-    let tagged =
-      Term.map blk_t tagged ~f:(fun b ->
-          Term.map def_t b ~f:(fun d ->
-              if Term.has_attr d Relevance.stack_access then d
-              else Term.set_attr d Relevance.stack_access ()))
-    in
+    let tagged = sub in
     let sub' = Stl.stack_to_locals Theory.Target.unknown sp tagged in
     Term.enum blk_t sub'
     |> Seq.concat_map ~f:(Term.enum def_t)
@@ -902,7 +883,7 @@ let run_remediation () =
   Sub.Builder.add_blk sub_b post0;
   let caller = Sub.Builder.result sub_b in
   ignore callee;
-  let sub' = Relevance.analyze sp caller in
+  let sub' = caller in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
     Vsa.denote_defs
