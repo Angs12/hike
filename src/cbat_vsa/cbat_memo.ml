@@ -65,3 +65,30 @@ module Make (V : Value) = struct
           | None -> Tid.Map.singleton inner e
           | Some by_inner -> Core.Map.set by_inner ~key:inner ~data:e)
 end
+
+(* Whole-map memo keyed by block; one map per block is retained and
+   replaced when the block's version changes. *)
+module Block_map (V : Value) = struct
+  type value = V.t
+
+  (* Stored version plus the whole definition-to-value map. *)
+  type entry = {
+    e_ver : int;
+    e_map : value Tid.Map.t;
+  }
+
+  type t = entry Tid.Map.t
+
+  let empty : t = Tid.Map.empty
+
+  (* Map of a block whose stored version still matches. *)
+  let find ~(version : Tid.t -> int) (t : t) (b : Tid.t)
+      : value Tid.Map.t option =
+    match Core.Map.find t b with
+    | Some e when e.e_ver = version b -> Some e.e_map
+    | Some _ | None -> None
+
+  (* Store a block's map, replacing any older version. *)
+  let add (t : t) (b : Tid.t) ~(ver : int) (map : value Tid.Map.t) : t =
+    Core.Map.set t ~key:b ~data:{ e_ver = ver; e_map = map }
+end
