@@ -172,8 +172,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   in
   (* Maps a def rhs. *)
   let map_rhs (d : def term) : exp = map_exp_cells (Def.rhs d) in
-  (* Maps a bare expression. *)
-  let v_map (e : exp) : exp = map_exp_cells e in
   (* Rebinds whole-access defs to their cell; maps nested loads elsewhere. *)
   let rewrite_def (d : def term) : def term =
     let whole_access =
@@ -196,7 +194,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
             | Some (data, wrap) ->
                 let bits = Size.in_bits s in
                 (* Stored data reads converted cells too. *)
-                let data = v_map data in
+                let data = map_exp_cells data in
                 let value =
                   if bits >= w then data
                   else

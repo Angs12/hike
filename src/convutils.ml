@@ -32,7 +32,6 @@ type emit_ctx = {
   copy_relocs : int64 list;
   target : Theory.Target.t;
   ptrsize : int;
-  addr_bits : int;
   ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
   subs : (Arg.t list * Arg.t list) Tid.Map.t;
   blk_llvals : blk_llvals Tid.Map.t ref;
@@ -52,7 +51,6 @@ let empty_emit_ctx () : emit_ctx =
     copy_relocs = [];
     target = Theory.Target.unknown;
     ptrsize = 0;
-    addr_bits = 0;
     ll_funcs = ref Tid.Map.empty;
     subs = Tid.Map.empty;
     blk_llvals = ref Tid.Map.empty;
@@ -98,13 +96,12 @@ module Vsa = struct
   }
 
   (* Hand-written equality over maps. *)
-  let equal_krange ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
+  (* Pair equality, shared by both int64-pair maps. *)
+  let equal_int64_pair ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
     Int64.equal a1 a2 && Int64.equal b1 b2
 
-  (* Pair equality via [Core.Map.equal]. *)
-  let equal_vla_bound ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) :
-      bool =
-    Int64.equal a1 a2 && Int64.equal b1 b2
+  let equal_krange = equal_int64_pair
+  let equal_vla_bound = equal_int64_pair
 
   let equal_vsa_info (i1 : vsa_info) (i2 : vsa_info) : bool =
     Core.Map.equal equal_vsa_kind i1.offsets i2.offsets
@@ -221,8 +218,6 @@ let ret_set ctx =
 let goto_label_exn jmp =
   match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
 
-let is_void _ = false
-
 let label_tid label =
   match label with
   | Direct tid -> tid
@@ -233,7 +228,7 @@ let label_exp label =
   | Direct _ -> failwith "label_exp: direct label"
   | Indirect exp -> exp
 
-type cf_type = Br | Ret | CallFun | Int | CallFunVoid | CallIndirect
+type cf_type = Br | Ret | CallFun | Int | CallIndirect
 
 let clear_blk_llvals ctx = ctx.blk_llvals := Tid.Map.empty
 let clear_bbs ctx = ctx.ll_bbs := Tid.Map.empty
@@ -287,11 +282,7 @@ let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
       Some
         ( value,
           match List.assoc_opt want_w bindings with
-          | Some exact -> (
-              match exact with
-              | _ ->
-                  
-                  if List.mem_assoc want_w bindings then want_w else w)
+          | Some _ -> want_w
           | None -> w )
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
@@ -305,7 +296,7 @@ let cf_type control_flow =
       match Call.return c with
       | Some _ -> (
           match Call.target c with
-          | Direct tid -> if is_void tid then CallFunVoid else CallFun
+          | Direct _ -> CallFun
           | Indirect _ -> CallIndirect)
       | None -> (
           match Call.target c with Indirect _ -> Ret | Direct _ -> CallFun))
