@@ -102,7 +102,7 @@ val denote_imm_exp : exp -> AI.t -> (WordSet.t, Type.error) Result.t
 val reachable_jumps : AI.t -> jmp term seq -> jmp term seq
 
 (* Refine a state by a taken jump condition. *)
-val assume_jump_cond : ?refineable:Var.Set.t ->
+val assume_jump_cond :
   ?defs:(def term * bool) Var.Map.t ->
   ?flag_state:(var * Bil.binop * exp * word) option ->
   AI.t -> jmp term -> AI.t
@@ -113,7 +113,6 @@ val constrain_cell_on_trace : st:AI.t -> live:WordSet.t Var.Map.t -> AI.t ->
 
 (* Leaf constraints of a guard. *)
 type analysis_ctx = {
-  refineable : Var.Set.t option;
   defs : (def term * bool) Var.Map.t option;
   stores : def term list option;
   flag_state : (var * Bil.binop * exp * word) option;

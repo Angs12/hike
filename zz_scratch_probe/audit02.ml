@@ -46,11 +46,11 @@ let audit_sub (sp : var) (sub : sub term) : unit =
       | Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid ()
       | _ -> ());
   let prod_unbounded_count = Hashtbl.length prod_unbounded in
-  let sa_count = Core.Map.length info.Hike.Convutils.offsets in
-  Printf.printf "=== sub %s (%s) — stack_access=%d offsets=%d Unbounded(PROD)=%d ===\n"
+  let stack_count = Core.Map.length info.Hike.Convutils.offsets in
+  Printf.printf "=== sub %s (%s) — stack=%d offsets=%d Unbounded(PROD)=%d ===\n"
     (Sub.name sub) (Tid.to_string (Term.tid sub))
-    sa_count (Core.Map.length info.offsets) prod_unbounded_count;
-  if sa_count = 0 then ()
+    stack_count (Core.Map.length info.offsets) prod_unbounded_count;
+  if stack_count = 0 then ()
   else begin
     let prog' = Program.create ~subs:[ sub ] () in
     let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub) in

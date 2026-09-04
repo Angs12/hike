@@ -41,7 +41,7 @@ let () =
             (* Stack-ness is [vsa_info] membership (spec §2.2). *)
             let tags =
               (if Core_kernel.Map.mem info.Hike.Convutils.offsets (Term.tid d)
-               then "stack_access"
+               then "stack"
                else "")
               ^ (if Core_kernel.Map.mem info.Hike.Convutils.vla_bounds (Term.tid d)
                  then ",dynamic_alloc"

@@ -768,7 +768,7 @@ let is_abi_visible ctx sub_info def =
 
 (* A stack access carries a [vsa_info] tag — the invariant is structural
    (spec §2.2): an access is a stack access iff it is tagged. *)
-let is_stack_access sub_info def = Option.is_some (find_def_tag sub_info def)
+let has_vsa_info sub_info def = Option.is_some (find_def_tag sub_info def)
 
 (* Tests for unusable VSA results. *)
 let sub_degraded sub_info =
@@ -959,7 +959,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
   let var = Def.lhs def in
   match find_def_tag sub_info def with
   | Some (Convutils.Range (lo, hi))
-    when Int64.equal lo hi && is_stack_access sub_info def ->
+    when Int64.equal lo hi && has_vsa_info sub_info def ->
       if Int64.compare lo 0L > 0 then
         (* Incoming-arg cells read via [hike_stack]. *)
         (match fr.stack with
@@ -976,7 +976,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
         (* Locals use static frame GEPs. *)
         create_static_mem_access llvm_builder blk_tid fr lo exp
   | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-    when Int64.compare lo 0L > 0 && is_stack_access sub_info def ->
+    when Int64.compare lo 0L > 0 && has_vsa_info sub_info def ->
       (* Positive intervals rebase onto the stack. *)
       (match Def.rhs def with
       | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
@@ -986,7 +986,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
       | _ -> create_exp llvm_builder blk_tid exp)
   | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
   | Some Convutils.Unbounded ->
-      if is_stack_access sub_info def then begin
+      if has_vsa_info sub_info def then begin
         if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
           ctx.Convutils.guarded_warned :=
             Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
@@ -1003,7 +1003,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
       let* typ = typ_lltype_m (Var.typ var) in
       return @@ Llvm.poison typ
   | None ->
-      if is_stack_access sub_info def then
+      if has_vsa_info sub_info def then
         failwith
           (Printf.sprintf
              "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
@@ -1028,7 +1028,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
       (* Split-model accesses use region GEPs. *)
       (match find_def_tag sub_info def with
        | Some (Convutils.Range (lo, hi))
-         when Int64.equal lo hi && is_stack_access sub_info def ->
+         when Int64.equal lo hi && has_vsa_info sub_info def ->
            (match region_of_offset fr.regions lo with
             | Some (r, base) ->
                 let offset = Int64.sub lo (fst r.Convutils.span) in

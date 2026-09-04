@@ -11,8 +11,7 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* Cbat_vsa_utils: small shared utilities. The [relevant] tag is deleted
-   (spec §2.1); every def is denoted. *)
+(* Cbat_vsa_utils: small shared utilities. Every def is denoted (spec §2.1). *)
 
 exception NotImplemented of string
 
