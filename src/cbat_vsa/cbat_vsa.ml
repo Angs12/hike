@@ -886,7 +886,7 @@ let denote_operand (env : AI.t) (e : exp) : wordset option =
      | Error _ -> None)
 
 (* Genuine-subset meet into a var; gate-free (spec §2.1). *)
-let meet_var (_refineable_var : var -> bool) (env : AI.t)
+let meet_var (env : AI.t)
     (v : var) (refined : wordset) : AI.t =
   match Var.typ v with
   | Type.Imm w ->
@@ -905,7 +905,7 @@ let meet_var (_refineable_var : var -> bool) (env : AI.t)
 
 (* Meet a constraint into a load cell; gate-free (spec §2.1). *)
 let rec constrain_cell
-    (_refineable_var : var -> bool) (env : AI.t)
+    (env : AI.t)
     ~(mem : exp) ~(addr : exp) ~(size : Size.t) ~(endian : endian)
     (cstr : wordset) : AI.t =
   (* Cell keys use rewritten addresses. *)
@@ -952,7 +952,7 @@ let rec constrain_cell
 
 (* Refine var operands through a producer def. *)
 and refine_chain ~(defs : (def term * bool) Var.Map.t)
-    (refineable_var : var -> bool) ~(visited : Var.Set.t)
+    ~(visited : Var.Set.t)
     (env : AI.t) (op : Bil.binop) (a : exp) (b : exp)
     (cstr : wordset) : AI.t =
   let width = WordSet.bitwidth cstr in
@@ -974,9 +974,9 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
                 (match interval_of_bounds width lo' hi' with
                  | Some a' ->
                    let env' = match a with
-                     | Bil.Var av -> meet_var refineable_var env av a'
+                     | Bil.Var av -> meet_var env av a'
                      | _ -> env in
-                   constrain_def_chain ~defs refineable_var
+                   constrain_def_chain ~defs
                      ~visited env' a a'
                  | None -> env)
               | _ -> env)
@@ -991,19 +991,19 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
        (match operand_constraints op cstr a_ws b_ws with
         | a', b' ->
           let env' = match a, a' with
-            | Bil.Var av, Some a_c -> meet_var refineable_var env av a_c
+            | Bil.Var av, Some a_c -> meet_var env av a_c
             | _ -> env in
           let env'' = match b, b' with
-            | Bil.Var bv, Some b_c -> meet_var refineable_var env' bv b_c
+            | Bil.Var bv, Some b_c -> meet_var env' bv b_c
             | _ -> env' in
           let env_a = match a, a' with
             | Bil.Var _, Some a_c ->
-              constrain_def_chain ~defs refineable_var
+              constrain_def_chain ~defs
                 ~visited env'' a a_c
             | _ -> env'' in
           (match b, b' with
            | Bil.Var _, Some b_c ->
-             constrain_def_chain ~defs refineable_var
+             constrain_def_chain ~defs
                ~visited env_a b b_c
            | _ -> env_a))
      | _ -> env)
@@ -1011,12 +1011,12 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
 
 (* Refine producers backward through defs. *)
 and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
-    (refineable_var : var -> bool) ?(visited : Var.Set.t = Var.Set.empty)
+    ?(visited : Var.Set.t = Var.Set.empty)
     (env : AI.t) (e : exp) (cstr : wordset) : AI.t =
   match e with
   | Bil.Load (m, a, en, s) ->
     (* Loads constrain the cell. *)
-    constrain_cell refineable_var env ~mem:m ~addr:a ~size:s ~endian:en cstr
+    constrain_cell env ~mem:m ~addr:a ~size:s ~endian:en cstr
   | Bil.Var v ->
     let b = Var.base v in
     if Core.Set.mem visited b then env
@@ -1030,14 +1030,14 @@ and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
            match Def.rhs d with
            | Bil.Load (m, a, en, s) ->
              (* Load value is the cell value. *)
-             constrain_cell refineable_var env ~mem:m
+             constrain_cell env ~mem:m
                ~addr:a ~size:s ~endian:en cstr
            | Bil.BinOp (op, a, b) ->
-             refine_chain ~defs refineable_var
+             refine_chain ~defs
                ~visited:visited' env op a b cstr
            | Bil.Cast (Bil.HIGH, sz, a) ->
              (* HIGH-extract producer row. *)
-             refine_cast_high ~defs refineable_var
+             refine_cast_high ~defs
                ~visited:visited' env a sz cstr
          | Bil.Cast (ct, _sz, _a) ->
            (* Other casts stay identity. *)
@@ -1046,13 +1046,13 @@ and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
          | _ -> env)
   | Bil.BinOp (op, a, b) ->
     (* Inline compares use producer rows. *)
-    refine_chain ~defs refineable_var ~visited env op a b cstr
+    refine_chain ~defs ~visited env op a b cstr
   | _ -> env
 
 
 (* HIGH-extract pre-image. *)
 and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
-    (refineable_var : var -> bool) ~(visited : Var.Set.t)
+    ~(visited : Var.Set.t)
     (env : AI.t) (a : exp) (sz : int) (cstr : wordset) : AI.t =
   match denote_operand env a with
   | Some a_ws ->
@@ -1078,9 +1078,9 @@ and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
              (match interval_of_bounds w lo_a hi_a with
               | Some a' ->
                 let env' = match a with
-                  | Bil.Var av -> meet_var refineable_var env av a'
+                  | Bil.Var av -> meet_var env av a'
                   | _ -> env in
-                constrain_def_chain ~defs refineable_var
+                constrain_def_chain ~defs
                   ~visited env' a a'
                | None -> env)
         | _ -> env)
@@ -1594,7 +1594,6 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
 
 (* Backward-walk context record. *)
 type analysis_ctx = {
-  refineable : Var.Set.t option;
   defs : (def term * bool) Var.Map.t option;
   stores : def term list option;
   flag_state : (var * Bil.binop * exp * word) option;
@@ -2015,26 +2014,20 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     (* Cell constraints transfer to stored values. *)
     edge_constraints ~env ?ctx u cstr
 
-
-
-
-(* Ticket 03 removes the [?refineable] parameters; the walks are un-gated. *)
-
-
 let apply_operand_constraint
     ~(defs : (def term * bool) Var.Map.t option)
-    (refineable_var : var -> bool) (env : AI.t) (e : exp) (cstr : wordset)
+    (env : AI.t) (e : exp) (cstr : wordset)
     : AI.t =
   match defs with
   | None -> env
   | Some dm ->
     (match e with
      | Bil.Var x ->
-       let env' = meet_var refineable_var env x cstr in
-       constrain_def_chain ~defs:dm refineable_var env'
+       let env' = meet_var env x cstr in
+       constrain_def_chain ~defs:dm env'
          (Bil.Var x) cstr
      | _ ->
-       constrain_def_chain ~defs:dm refineable_var env e cstr)
+       constrain_def_chain ~defs:dm env e cstr)
 
 (* Refine by a taken-edge constraint. *)
 (* Direct-API backward refinement. *)
@@ -2045,13 +2038,12 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
   | Some { sub = Some _; _ } -> env
   | Some ctx ->
     (* Gate-free (spec §2.1): every var refines. *)
-    let refineable_var (_ : var) : bool = true in
     List.fold (edge_constraints ~env ~ctx cond cstr) ~init:env
       ~f:(fun env seed ->
         match seed with
-        | Var (v, c) -> meet_var refineable_var env v c
+        | Var (v, c) -> meet_var env v c
         | Cell (mem, addr, size, endian, cstr) ->
-          constrain_cell refineable_var env ~mem ~addr ~size ~endian cstr
+          constrain_cell env ~mem ~addr ~size ~endian cstr
         | Infeasible -> env)
 
 (* Last understood flag-setting comparison. *)
@@ -2201,7 +2193,7 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
     end
 
 (* Refine by a taken jump condition. *)
-let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
+let assume_jump_cond_with_group
     ?(defs : (def term * bool) Var.Map.t option)
     ?(stores : def term list option)
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
@@ -2209,11 +2201,8 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     ?(sub : sub term option = None)
     ?(blk : blk term option = None)
     (env : AI.t) (jmp : jmp term) : AI.t =
-  (* Gate-free (spec §2.1): every var refines. *)
-  let refineable_var (_ : var) : bool = true in
-  
   let ctx : analysis_ctx =
-    { refineable; defs; stores; flag_state; sub; blk } in
+    { defs; stores; flag_state; sub; blk } in
   let cond = Jmp.cond jmp in
   acquire_unsat_fallthrough ~ctx ~flag_group cond env;
   match decoded_condition cond with
@@ -2230,7 +2219,7 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
       let known_nonneg = known_nonneg_of ~defs ~stores e in
       (match decoder_constraint ~cur:cur_e ~known_nonneg op c with
        | Some cstr ->
-         apply_operand_constraint ~defs refineable_var env e cstr
+         apply_operand_constraint ~defs env e cstr
        | None -> env)
     | _ -> env
     end
@@ -2239,11 +2228,11 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     inverse_denote_exp ~ctx cond (WordSet.singleton Word.b1) env
 
 (* Group-aware wrapper. *)
-let assume_jump_cond ?(refineable : Var.Set.t option)
+let assume_jump_cond
     ?(defs : (def term * bool) Var.Map.t option)
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     (env : AI.t) (jmp : jmp term) : AI.t =
-  assume_jump_cond_with_group ?refineable ?defs ~flag_state
+  assume_jump_cond_with_group ?defs ~flag_state
     env jmp
 
 (* ================================================================== *)
@@ -2383,7 +2372,6 @@ let refine_edge_inline
     ~(stores : def term list option)
     ~(flag_state : (var * Bil.binop * exp * word) option)
     ~(flag_group : flag_group option)
-    ?(refineable : Var.Set.t option)
     ~(rctx : refine_ctx)
     ~(jt : Tid.t)
     ~(sub : sub term)
@@ -2393,7 +2381,7 @@ let refine_edge_inline
   
   (* Threaded context plus visited set. *)
   let ctx : analysis_ctx =
-    { refineable = None; defs; stores; flag_state;
+    { defs; stores; flag_state;
       sub = Some sub; blk = Some b } in
   let seeds = edge_constraints ~env ~ctx acc_cond (WordSet.singleton Word.b1) in
   
@@ -2404,11 +2392,9 @@ let refine_edge_inline
   | [] -> (env, Some rctx, Tid.Set.empty)
   | _ ->
     (* Gate-free (spec §2.1): every seed meets. *)
-    let refineable_var (_ : var) : bool = true in
-    let _ = refineable in
     let env =
       List.fold seeds ~init:env ~f:(fun e -> function
-          | Var (v, c) -> meet_var refineable_var e v c
+          | Var (v, c) -> meet_var e v c
           | Cell _ | Infeasible -> e) in
     
     (* Cached walk with threaded context. *)
@@ -2446,7 +2432,7 @@ let refine_edge_inline
     walk env seeds
 
 (* Denotation of a block's jumps. *)
-let denote_jump ?refineable ?preserved ?defs ?stores
+let denote_jump ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : flag_group option = None)
     ?(sub : sub term option = None)
@@ -2461,7 +2447,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
   let per_jump (acc, rctx, reads) jmp =
     (* Refine by the jump cond. *)
     let env =
-      assume_jump_cond_with_group ?refineable ?defs ?stores ~flag_state
+      assume_jump_cond_with_group ?defs ?stores ~flag_state
         ~flag_group ~sub ~blk:(Some b) env jmp in
     (* Deep walk uses the accumulated cond. *)
     let env, rctx, reads =
@@ -2488,7 +2474,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
            (* Accumulator threads optional context. *)
            let env', rctx', reads' =
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
-               ~flag_group ?refineable
+               ~flag_group
                ~rctx:(Option.value ~default:rc0 rctx) ~jt:(Term.tid jmp)
                ~sub:s ~discarded b env acc_cond in
            (env', rctx', Core.Set.union reads reads')
@@ -2559,7 +2545,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
 
 
 (* Stores-aware block denotation. *)
-let denote_block_with_stores ?refineable ?preserved ?defs ?stores
+let denote_block_with_stores ?preserved ?defs ?stores
     ?(sub : sub term option = None)
     ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
@@ -2580,7 +2566,7 @@ let denote_block_with_stores ?refineable ?preserved ?defs ?stores
        | None -> flag_state_of_block b in
      fun ~target ->
        let (res, rctx', reads) =
-         denote_jump ?refineable ?preserved ?defs ?stores ~flag_state
+         denote_jump ?preserved ?defs ?stores ~flag_state
            ~flag_group:(Some flag_group) ~sub ?no_walk ?edge_conds ?sol
            ~rctx
            denote_call b postcond ~target in

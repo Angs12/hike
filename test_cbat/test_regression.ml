@@ -527,7 +527,7 @@ let run_creg () =
     (Ws.equal exit_i (Ws.singleton (w32 9)));
   ()
 
-(* G3: production relevance path keeps flag-indirected guards refineable. *))
+(* G3: gate-free flag-guard refinement (spec §2.1). *))
 ;
 (  let rsp = v64 "RSP" in
   let i = Var.create ~is_virtual:false ~fresh:false "g3_i" (Type.Imm 32) in

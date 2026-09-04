@@ -237,7 +237,6 @@ let run () =
   (* S12: flag-state recovery. *)
   let ctx12 : Vsa.analysis_ctx =
     {
-      refineable = None;
       defs = None;
       stores = None;
       flag_state = Some (cf, Bil.LT, Bil.Var t, r32 10);

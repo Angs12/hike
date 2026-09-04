@@ -80,7 +80,7 @@ let mk_flag_sub ~(mixed : bool) :
   let ctx = Program.create ~subs:[ sub ] () in
   (f, ctx, sub, exit_tid, defA, (if mixed then Some defB else None), defU)
 
-(* T3: frozen-flag guard — assume_jump_cond refines only refineable vars. *)
+(* T3: frozen-flag guard — assume_jump_cond refines every var, gate-free. *)
 type caller_alias_fixture = {
   ca_ctx : Program.t;
   ca_sub : sub term;
@@ -469,7 +469,7 @@ let run () =
   (* x < 5 taken -> x in [0,4] *)
   let c1 =
     AI.find_word 32
-      (Vsa.assume_jump_cond ~refineable:(Var.Set.singleton ivar) env
+      (Vsa.assume_jump_cond env
          (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (w32 5)))))
       ivar
   in
@@ -478,7 +478,7 @@ let run () =
   (* x <= 5 -> [0,5] *)
   let c2 =
     AI.find_word 32
-      (Vsa.assume_jump_cond ~refineable:(Var.Set.singleton ivar) env
+      (Vsa.assume_jump_cond env
          (mk_jmp (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (w32 5)))))
       ivar
   in
@@ -487,7 +487,7 @@ let run () =
   (* x == 5 -> {5} *)
   let c3 =
     AI.find_word 32
-      (Vsa.assume_jump_cond ~refineable:(Var.Set.singleton ivar) env
+      (Vsa.assume_jump_cond env
          (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (w32 5)))))
       ivar
   in
@@ -511,13 +511,13 @@ let run () =
   let fv = Var.create ~is_virtual:false ~fresh:false "zf" (Type.Imm 1) in
   let c7 =
     AI.find_word 1
-      (Vsa.assume_jump_cond ~refineable:(Var.Set.singleton fv) env (mk_jmp (Bil.Var fv)))
+      (Vsa.assume_jump_cond env (mk_jmp (Bil.Var fv)))
       fv
   in
   check "D4-7: assume (flag) forces the flag to {1}" (Ws.elem Word.b1 c7 && not (Ws.elem Word.b0 c7));
   let c8 =
     AI.find_word 1
-      (Vsa.assume_jump_cond ~refineable:(Var.Set.singleton fv) env
+      (Vsa.assume_jump_cond env
          (mk_jmp (Bil.UnOp (Bil.NOT, Bil.Var fv))))
       fv
   in
@@ -525,7 +525,7 @@ let run () =
     (Ws.elem Word.b0 c8 && not (Ws.elem Word.b1 c8));
   ()
 
-(* Restriction needs every fixture def tagged; untagged defs are skipped. *))
+(* Every fixture def is denoted; there is no tag gate. *))
 (* BIR-level loop: back-edge refined by "i < 5", exit bounded. *)
 ;
 (  (* Back-edge refined by "i < 5": header converges before widening fires. *)
@@ -735,7 +735,7 @@ let run () =
     && not (contains_substring captured "(degrading to top)"));
   ())
 ;
-(* T1 deleted (spec §2.1): the [relevant] tag is gone; every def is denoted. *)
+(* T1 deleted (spec §2.1): every def is denoted, no tag needed. *)
 (  let iv = v64 "t2_iv" in
   let d = Def.create iv (Bil.Int (w64 7)) in
   let e_den = Vsa.denote_def d AI.top in
@@ -750,7 +750,7 @@ let run () =
   let mk_jmp cond = Jmp.create ~cond (Goto (Direct tgt)) in
   let c_in =
     AI.find_word 64
-      (Vsa.assume_jump_cond ~refineable:(Var.Set.singleton x) AI.top
+      (Vsa.assume_jump_cond AI.top
          (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (w64 5)))))
       x
   in
@@ -758,11 +758,11 @@ let run () =
     (Ws.min_elem c_in = Some (w64 5) && Ws.max_elem c_in = Some (w64 5));
   let c_out =
     AI.find_word 64
-      (Vsa.assume_jump_cond ~refineable:Var.Set.empty AI.top
+      (Vsa.assume_jump_cond AI.top
          (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (w64 5)))))
       x
   in
-  check "T3-2: gate-free (spec §2.1) — an empty refineable set still refines to {5}"
+  check "T3-2: gate-free (spec §2.1) — the guard refines x to {5}"
     (Ws.min_elem c_out = Some (w64 5) && Ws.max_elem c_out = Some (w64 5));
   ())
 ;
