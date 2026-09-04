@@ -2241,7 +2241,7 @@ let refine_edge_inline
         let bt = Term.tid b in
         (* Memo handles validity. *)
         let version = Cbat_runctx.ver_of rc in
-        (match Cbat_runctx.Walk_memo.find ~version rc.rc_cache bt jt with
+        (match Cbat_runctx.Walk_memo.find ~version rc.rc_state.fs_cache bt jt with
          | Some refined ->
            (* Walk reads subset the transfer reads. *)
            (refined, rc, Tid.Set.empty)
@@ -2254,9 +2254,12 @@ let refine_edge_inline
                    env sub b seeds) in
            let rc =
              { rc with
-               rc_cache =
-                 Cbat_runctx.Walk_memo.add ~version rc.rc_cache bt jt
-                   ~reads:!walk_reads refined } in
+               rc_state =
+                 let st = rc.rc_state in
+                 { st with
+                   fs_cache =
+                     Cbat_runctx.Walk_memo.add ~version st.fs_cache bt jt
+                       ~reads:!walk_reads refined } } in
            (refined, rc, !walk_reads))
       | None ->
         let refined, _live =
@@ -2579,21 +2582,35 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         Core.Map.set acc ~key:h ~data:(compute_need blocks))
   in
   
-  let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
   let sol_default = Solution.default init in
-  let get n = match Core.Map.find !sol_map n with Some v -> v | None -> sol_default in
-  (* Versions key the caches. *)
-  (* Context threads through the engine. *)
-  let rc_cell = ref rctx in
+  (* The initial solution seeds the store; from here the store is the only
+     home for per-block values, versions, and the caches they key. *)
+  let rc_cell =
+    ref { rctx with
+          rc_state =
+            { rctx.rc_state with
+              fs_sol =
+                Solution.enum init
+                |> Seq.fold ~init:Tid.Map.empty
+                     ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v) } } in
+  let get n =
+    match Core.Map.find (!rc_cell).rc_state.fs_sol n with
+    | Some v -> v
+    | None -> sol_default in
   (* Store plus version bump; the stability check below compares first. *)
   let set n v =
-    sol_map := Core.Map.set !sol_map ~key:n ~data:v;
     let rc = !rc_cell in
+    let st = rc.rc_state in
     let versions =
-      match Core.Map.find rc.rc_versions n with
-      | None -> Core.Map.set rc.rc_versions ~key:n ~data:1
-      | Some k -> Core.Map.set rc.rc_versions ~key:n ~data:(k + 1) in
-    rc_cell := { rc with rc_versions = versions } in
+      match Core.Map.find st.fs_versions n with
+      | None -> Core.Map.set st.fs_versions ~key:n ~data:1
+      | Some k -> Core.Map.set st.fs_versions ~key:n ~data:(k + 1) in
+    rc_cell :=
+      { rc with
+        rc_state =
+          { st with
+            fs_sol = Core.Map.set st.fs_sol ~key:n ~data:v;
+            fs_versions = versions } } in
   Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = 6000 in
@@ -2602,13 +2619,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     Stages.time `Scaffold (fun () ->
     incr total_processed;
     if !total_processed > max_steps then begin
-      let sol = Solution.create !sol_map sol_default in
+      let sol = Solution.create (!rc_cell).rc_state.fs_sol sol_default in
       raise (Fixpoint_not_converged (max_steps, sol, None))
     end;
     let old = get v in
     let preds = CFG.Node.preds v cfg |> Seq.to_list in
     (* Snapshot for the deep walk. *)
-    let sol_snap = Solution.create !sol_map sol_default in
+    let sol_snap = Solution.create (!rc_cell).rc_state.fs_sol sol_default in
     let incoming =
       if List.is_empty preds then old
       else
@@ -2626,7 +2643,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
              let res = Stages.time `Denote (fun () ->
                (* Memo handles validity. *)
                let version = Cbat_runctx.ver_of rc in
-               match Cbat_runctx.Transfer_memo.find ~version rc.rc_out_cache p v with
+               match Cbat_runctx.Transfer_memo.find ~version rc.rc_state.fs_out_cache p v with
                | Some (hit_res, fired) ->
                  
                  (if Option.is_some head_opt && fired then
@@ -2652,11 +2669,16 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                  let fired = Cbat_landmarks.end_fired_latch flatch in
                  (* Read set covers inputs. *)
                  let reads = Core.Set.add reads p in
-                 rc_cell :=
+                 rc_cell := begin
+                   let st = rc'.rc_state in
                    { rc' with
-                     rc_out_cache =
-                       Cbat_runctx.Transfer_memo.add ~version rc.rc_out_cache p v
-                         ~reads (res, fired) };
+                     rc_state =
+                       { st with
+                         fs_out_cache =
+                           Cbat_runctx.Transfer_memo.add
+                             ~version st.fs_out_cache p v
+                             ~reads (res, fired) } }
+                 end;
                  res) in
             (* Dead bindings never reach the join. *)
             let keep =
@@ -2726,7 +2748,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   in
   ignore (stabilize_comps wto);
   Stages.report (Sub.name s);
-  Solution.create !sol_map sol_default
+  Solution.create (!rc_cell).rc_state.fs_sol sol_default
 
 (* ================================================================== *)
 (* Per-def classification over the converged solution. *)

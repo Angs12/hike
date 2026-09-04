@@ -45,24 +45,35 @@ type flag_group = {
 
 
 (* Per-run analysis context. *)
+(* Mutable per-analysis state: the solution values, the version counters
+   that key the memos, and the memos themselves.
+
+   This lives INSIDE [refine_ctx] rather than at module level because there
+   is more than one context: the fixpoint builds one per sub and the call
+   abstraction builds a fresh one per callee. Sharing memo entries between
+   them would be unsound — different subs reuse the same Tid keys for
+   different blocks. Each context owns its own. *)
+type fix_state = {
+  (* Per-block solution values. *)
+  fs_sol : AI.t Tid.Map.t;
+  (* Per-block versions; a bump means the value changed. *)
+  fs_versions : int Tid.Map.t;
+  (* Cached walks. *)
+  fs_cache : Walk_memo.t;
+  (* Memoized block transfers with replayed acquisition. *)
+  fs_out_cache : Transfer_memo.t;
+}
+
 type refine_ctx = {
-  (* Per-block solution versions. *)
-  rc_versions : int Tid.Map.t;
+  (* Mutable state, owned by this context. *)
+  rc_state : fix_state;
   (* Walk CFG without pseudo-nodes. *)
   rc_walk_cfg : Graphs.Tid.t;
-  (* Cached walks. *)
-  rc_cache : Walk_memo.t;
-
-  
-
   (* Per-block flag states. *)
   rc_flag_states :
     ((var * Bil.binop * exp * word) option * flag_group) Tid.Map.t;
   (* Per-block call facts. *)
   rc_call_facts : (var list * bool) Tid.Map.t;
-  (* Memoized block transfers with replayed acquisition. *)
-  (* Transfer memo. *)
-  rc_out_cache : Transfer_memo.t;
   (* May-read vars per block entry; the GC keep-sets. *)
   rc_live_in : Var.Set.t Tid.Map.t;
 }
@@ -235,9 +246,13 @@ let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
 (* Block version; 0 means never set. *)
 (* Per-run analysis context. *)
 let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
-  rc_versions = Tid.Map.empty;
+  rc_state = {
+    fs_sol = Tid.Map.empty;
+    fs_versions = Tid.Map.empty;
+    fs_cache = Walk_memo.empty;
+    fs_out_cache = Transfer_memo.empty;
+  };
   rc_walk_cfg = cfg;
-  rc_cache = Walk_memo.empty;
   rc_flag_states =
     Term.enum blk_t s
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
@@ -246,11 +261,10 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     Term.enum blk_t s
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
-  rc_out_cache = Transfer_memo.empty;
   rc_live_in = live_in_of_sub s cfg;
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =
-  match Core.Map.find rc.rc_versions t with
+  match Core.Map.find rc.rc_state.fs_versions t with
   | Some v -> v
   | None -> 0
