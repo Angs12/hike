@@ -209,6 +209,15 @@ let add_word (e : t) ~(key : var) ~(data : wordset) : t =
 let find_word (i : WordSet.idx) (env : t) (v : var) : wordset = WordEnv.find i env.words v
 let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t = MemEnv.find i env.memories v
 
+(* Drop dead virtual temps; machine regs are the ABI surface and stay.
+   Missing keys read top, so dropping only weakens. *)
+let gc (e : t) ~(keep : Var.Set.t) : t =
+  { e with
+    words =
+      WordEnv.filter_keys e.words ~f:(fun k ->
+          (not (Var.is_virtual k))
+          || Core.Set.mem keep (Var.base k)) }
+
 
 
 let pp ppf (e : t) =

@@ -36,18 +36,6 @@ let wto_of_cfg (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
     ~succ:(fun n -> Graphs.Tid.Node.succs n cfg |> Seq.to_list)
     ~pred:(fun n -> Graphs.Tid.Node.preds n cfg |> Seq.to_list)
 
-(* Version-keyed memos for walk and transfer. *)
-module Cbat_memo = Cbat_memo
-
-
-
-module Walk_memo = Cbat_memo.Make (struct
-  type t = AI.t
-end)
-
-module Transfer_memo = Cbat_memo.Make (struct
-  type t = AI.t * bool
-end)
 
 (* Solution still changing at the step cap. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
@@ -1424,36 +1412,6 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
   | _ -> []
 
 
-(* Per-block flag group. *)
-type flag_group = {
-  flags : (var * def term) Var.Map.t;
-  (* 1-bit defs by base lhs. *)
-  cmp : def term option;
-  (* Record def by structural equality. *)
-}
-
-
-(* Per-run analysis context. *)
-type refine_ctx = {
-  (* Per-block solution versions. *)
-  rc_versions : int Tid.Map.t;
-  (* Walk CFG without pseudo-nodes. *)
-  rc_walk_cfg : Graphs.Tid.t;
-  (* Cached walks. *)
-  rc_cache : Walk_memo.t;
-
-  
-
-  (* Per-block flag states. *)
-  rc_flag_states :
-    ((var * Bil.binop * exp * word) option * flag_group) Tid.Map.t;
-  (* Per-block call facts. *)
-  rc_call_facts : (var list * bool) Tid.Map.t;
-  (* Memoized block transfers with replayed acquisition. *)
-  (* Transfer memo. *)
-  rc_out_cache : Transfer_memo.t;
-}
-
 (* Reverse-def walk of one block. *)
 let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
     ~(sol : (tid, AI.t) Solution.t)
@@ -1521,7 +1479,7 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
 
 
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
-    ~(rctx : refine_ctx)
+    ~(rctx : Cbat_runctx.refine_ctx)
     ?(defs : (def term * bool) Var.Map.t option = None)
     ?(stores : def term list option = None)
     ?(reads : Tid.Set.t ref option = None)
@@ -1586,19 +1544,17 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
           | None -> 0)
       ~truncated:(!pops >= 256)
       ();
-    (* Guard with no preds keeps the seed. *)
-    let live_sol =
-      match Term.find blk_t sub (Term.tid blk) with
-      | Some gb ->
-        let walked =
-          reverse_def_walk ~defs:defs_map ~sol env
+    (* Guard with no preds keeps the seed. The walk runs for its [env]
+       side effects (cell meets commit through the ref); the derived
+       solution is discarded by both callers, so no derive. *)
+    (match Term.find blk_t sub (Term.tid blk) with
+     | Some gb ->
+       ignore
+         (reverse_def_walk ~defs:defs_map ~sol env
             (Live.join (Solution.get live_sol (Term.tid blk))
-               seed_constraints) gb in
-        Solution.derive live_sol
-          ~f:(fun n _ ->
-              if Tid.equal n (Term.tid blk) then Some walked else None)
-          Live.empty
-      | None -> live_sol in
+               seed_constraints) gb
+           : Live.t)
+     | None -> ());
     !env, live_sol
 
 (* Backward-walk context record. *)
@@ -2055,112 +2011,11 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
           constrain_cell env ~mem ~addr ~size ~endian cstr
         | Infeasible -> env)
 
-(* Last understood flag-setting comparison. *)
 
-
-let flag_state_of_block (b : blk term) :
-    (var * Bil.binop * exp * word) option * flag_group =
-  let ds = Term.enum def_t b |> Seq.to_list in
-  let understood (op : Bil.binop) : bool =
-    match op with
-    | Bil.LT | Bil.LE | Bil.EQ | Bil.SLT | Bil.SLE -> true
-    | _ -> false in
-  let rec go (st : (var * Bil.binop * exp * word) option)
-      (ds : def term list) : (var * Bil.binop * exp * word) option =
-    match ds with
-    | [] -> st
-    | d :: rest ->
-      let lhs = Def.lhs d in
-      let lhs_base = Var.base lhs in
-      (* Operand clobber clears. *)
-      let st =
-        match st with
-        | Some (fv, op, e, c)
-          when Exp.free_vars e |> Core.Set.exists ~f:(fun x ->
-              Var.same x lhs_base) ->
-          None
-        | _ -> st in
-      (* Flag rebinds or clears. *)
-      let st =
-        match st, Var.typ lhs, Def.rhs d with
-        | Some (fv, _, _, _), Type.Imm 1, Bil.BinOp (op', e', Bil.Int c') ->
-          if Var.same fv lhs_base then
-            (if understood op' then Some (lhs, op', e', c') else None)
-          else st
-        | Some (fv, _, _, _), Type.Imm 1, _ ->
-          if Var.same fv lhs_base then None else st
-        | None, Type.Imm 1, Bil.BinOp (op', e', Bil.Int c') ->
-          if understood op' then Some (lhs, op', e', c') else None
-        | _ -> st in
-      go st rest
-  in
-  let record = go None ds in
-  (* 1-bit defs by base. *)
-  let flags =
-    Term.enum def_t b
-    |> Seq.fold ~init:Var.Map.empty ~f:begin fun g d ->
-      let lhs = Def.lhs d in
-      match Var.typ lhs with
-      | Type.Imm 1 -> Core.Map.set g ~key:(Var.base lhs) ~data:(lhs, d)
-      | Type.Imm _ | Type.Mem _ | Type.Unk -> g
-    end in
-  (* Record def; temp or inline shape. *)
-  let cmp =
-    match record with
-    | None -> None
-    | Some (_, _, e, c) ->
-      let temp_shape (d : def term) : bool =
-        match Def.rhs d with
-        | Bil.BinOp (Bil.MINUS, e', Bil.Int c') ->
-          Exp.equal e' e && Word.equal c' c
-        | _ -> false in
-      let inline_shape (d : def term) : bool =
-        match Def.rhs d with
-        | Bil.BinOp ((Bil.EQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE), e', Bil.Int c') ->
-          Exp.equal e' e && Word.equal c' c
-        | _ -> false in
-      match List.find ds ~f:temp_shape with
-      | Some d -> Some d
-      | None -> List.find ds ~f:inline_shape in
-  (record, { flags; cmp })
-
-(* Same-comparison gate. *)
-let same_comparison_group (fg : flag_group) (fv : var) (e : exp)
-    (cond : exp) : bool =
-  (* True for flag vars. *)
-  let is_flag (v : var) : bool =
-    match Var.name v with
-    | "CF" | "ZF" | "SF" | "OF" -> true
-    | _ -> false in
-  (* Flags in cond plus the record flag. *)
-  let flag_vars =
-    Exp.free_vars cond
-    |> Core.Set.fold ~init:Var.Set.empty ~f:begin fun acc v ->
-      if is_flag v then Core.Set.add acc (Var.base v) else acc
-    end in
-  let flag_vars =
-    if is_flag fv then Core.Set.add flag_vars (Var.base fv)
-    else flag_vars in
-  match fg.cmp with
-  | None -> false
-  | Some td ->
-    let t = Def.lhs td in
-    let fvs_e = Exp.free_vars e in
-    Core.Set.for_all flag_vars ~f:begin fun v ->
-      match Core.Map.find fg.flags v with
-      | None -> false
-      | Some (_, d) ->
-        Exp.free_vars (Def.rhs d)
-        |> Core.Set.for_all ~f:begin fun w ->
-          (* Base-equal free vars. *)
-          Core.Set.exists fvs_e ~f:(fun x -> Var.same w x)
-          || Var.same w t
-        end
-    end
 
 
 let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
-    ?(flag_group : flag_group option = None)
+    ?(flag_group : Cbat_runctx.flag_group option = None)
     (cond : exp) (env : AI.t) : unit =
   match ctx with
   | None -> ()
@@ -2170,7 +2025,7 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
     | Some (_fv, bop, e, c) ->
       let gate_ok =
         Option.value_map flag_group ~default:false
-          ~f:(fun fg -> same_comparison_group fg _fv e cond) in
+          ~f:(fun fg -> Cbat_runctx.same_comparison_group fg _fv e cond) in
       if gate_ok then begin
       let bop = bop and e = e and c = c in
       let gop = guard_op_of_binop bop in
@@ -2206,7 +2061,7 @@ let assume_jump_cond_with_group
     ?(defs : (def term * bool) Var.Map.t option)
     ?(stores : def term list option)
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
-    ?(flag_group : flag_group option = None)
+    ?(flag_group : Cbat_runctx.flag_group option = None)
     ?(sub : sub term option = None)
     ?(blk : blk term option = None)
     (env : AI.t) (jmp : jmp term) : AI.t =
@@ -2220,7 +2075,7 @@ let assume_jump_cond_with_group
     begin match flag_state with
     | Some (fv, _, e, c)
       when Option.value_map flag_group ~default:false
-          ~f:(fun fg -> same_comparison_group fg fv e cond) ->
+          ~f:(fun fg -> Cbat_runctx.same_comparison_group fg fv e cond) ->
       let cur_e = match denote_imm_exp e env with
         | Ok ws -> Some ws
         | Error _ -> None in
@@ -2337,37 +2192,6 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
 
 
 
-(* Static per-block call facts. *)
-let call_facts_of_block (b : blk term) : var list * bool =
-  let defs = Term.enum def_t b |> Seq.to_list in
-  let written =
-    List.filter Abi.x86_64_sysv.int_param_regs ~f:(fun v ->
-        List.exists defs ~f:(fun d -> Var.same (Def.lhs d) v)) in
-  let rsp = Abi.x86_64_sysv.sp in
-  let pushed = List.exists defs ~f:(fun d -> Var.same (Def.lhs d) rsp) in
-  (written, pushed)
-
-(* Block version; 0 means never set. *)
-(* Per-run analysis context. *)
-let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
-  rc_versions = Tid.Map.empty;
-  rc_walk_cfg = cfg;
-  rc_cache = Walk_memo.empty;
-  rc_flag_states =
-    Term.enum blk_t s
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-        Core.Map.set m ~key:(Term.tid b) ~data:(flag_state_of_block b));
-  rc_call_facts =
-    Term.enum blk_t s
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
-        Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
-  rc_out_cache = Transfer_memo.empty;
-}
-
-let ver_of (rc : refine_ctx) (t : Tid.t) : int =
-  match Core.Map.find rc.rc_versions t with
-  | Some v -> v
-  | None -> 0
 
 
 
@@ -2380,13 +2204,13 @@ let refine_edge_inline
     ~(defs : (def term * bool) Var.Map.t option)
     ~(stores : def term list option)
     ~(flag_state : (var * Bil.binop * exp * word) option)
-    ~(flag_group : flag_group option)
-    ~(rctx : refine_ctx)
+    ~(flag_group : Cbat_runctx.flag_group option)
+    ~(rctx : Cbat_runctx.refine_ctx)
     ~(jt : Tid.t)
     ~(sub : sub term)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
-    : AI.t * refine_ctx option * Tid.Set.t =
+    : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
   
   (* Threaded context plus visited set. *)
   let ctx : analysis_ctx =
@@ -2398,7 +2222,7 @@ let refine_edge_inline
   let seeds =
     List.filter seeds ~f:(fun s -> match s with Infeasible -> false | _ -> true) in
   match seeds with
-  | [] -> (env, Some rctx, Tid.Set.empty)
+  | [] -> (env, rctx, Tid.Set.empty)
   | _ ->
     (* Gate-free (spec §2.1): every seed meets. *)
     let env =
@@ -2408,19 +2232,19 @@ let refine_edge_inline
     
     (* Cached walk with threaded context. *)
     (* No-defs callers keep the uncached walk. *)
-    let walk env seeds : AI.t * refine_ctx option * Tid.Set.t =
-      if discarded then (env, Some rctx, Tid.Set.empty)
+    let walk env seeds : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
+      if discarded then (env, rctx, Tid.Set.empty)
       else
       match defs with
       | Some _ ->
         let rc = rctx in
         let bt = Term.tid b in
         (* Memo handles validity. *)
-        let version = ver_of rc in
-        (match Walk_memo.find ~version rc.rc_cache bt jt with
+        let version = Cbat_runctx.ver_of rc in
+        (match Cbat_runctx.Walk_memo.find ~version rc.rc_cache bt jt with
          | Some refined ->
            (* Walk reads subset the transfer reads. *)
-           (refined, Some rc, Tid.Set.empty)
+           (refined, rc, Tid.Set.empty)
          | None ->
            let walk_reads = ref (Tid.Set.singleton bt) in
            let refined, _live =
@@ -2431,26 +2255,25 @@ let refine_edge_inline
            let rc =
              { rc with
                rc_cache =
-                 Walk_memo.add ~version rc.rc_cache bt jt
+                 Cbat_runctx.Walk_memo.add ~version rc.rc_cache bt jt
                    ~reads:!walk_reads refined } in
-           (refined, Some rc, !walk_reads))
+           (refined, rc, !walk_reads))
       | None ->
         let refined, _live =
           refine_edge ~sol ~rctx:rctx ~defs ~stores env sub b seeds in
-        (refined, Some rctx, Tid.Set.empty) in
+        (refined, rctx, Tid.Set.empty) in
     walk env seeds
 
 (* Denotation of a block's jumps. *)
 let denote_jump ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
-    ?(flag_group : flag_group option = None)
+    ?(flag_group : Cbat_runctx.flag_group option = None)
     ?(sub : sub term option = None)
     ?(no_walk : bool option)
     ?edge_conds ?sol
-    ~(rctx : refine_ctx)
-    (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
+    ~(rctx : Cbat_runctx.refine_ctx)
     (b : blk term)  (env : AI.t) ~(target : tid)
-    : AI.t * refine_ctx option * Tid.Set.t =
+    : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
   (* Fold joins per-jump results. *)
   let rc0 = rctx in
   let per_jump (acc, rctx, reads) jmp =
@@ -2484,7 +2307,7 @@ let denote_jump ?preserved ?defs ?stores
            let env', rctx', reads' =
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
                ~flag_group
-               ~rctx:(Option.value ~default:rc0 rctx) ~jt:(Term.tid jmp)
+               ~rctx:rctx ~jt:(Term.tid jmp)
                ~sub:s ~discarded b env acc_cond in
            (env', rctx', Core.Set.union reads reads')
          | None -> (env, rctx, reads))
@@ -2506,7 +2329,7 @@ let denote_jump ?preserved ?defs ?stores
               let written =
                 match Core.Map.find rc0.rc_call_facts (Term.tid b) with
                 | Some (w, _) -> w
-                | None -> fst (call_facts_of_block b) in
+                | None -> fst (Cbat_runctx.call_facts_of_block b) in
               List.map written ~f:(fun v -> AI.find_word 64 env v) in
             let abs =
               AI.call_abstraction_frame
@@ -2519,7 +2342,7 @@ let denote_jump ?preserved ?defs ?stores
             let pushed =
               match Core.Map.find rc0.rc_call_facts (Term.tid b) with
               | Some (_, p) -> p
-              | None -> snd (call_facts_of_block b) in
+              | None -> snd (Cbat_runctx.call_facts_of_block b) in
             if pushed then begin
               let abs =
                 AI.add_word abs ~key:rsp
@@ -2545,7 +2368,7 @@ let denote_jump ?preserved ?defs ?stores
       | Ret (Indirect _) -> (env, rctx, reads) in
     (AI.join acc env_res, rctx, reads) in
   Seq.fold (reachable_jumps env (Term.enum jmp_t b))
-    ~init:(AI.bottom, Some rctx, Tid.Set.empty)
+    ~init:(AI.bottom, rctx, Tid.Set.empty)
     ~f:per_jump
 
 (* Block denotation toward a target. *)
@@ -2558,11 +2381,10 @@ let denote_block_with_stores ?preserved ?defs ?stores
     ?(sub : sub term option = None)
     ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
-    ~(rctx : refine_ctx)
+    ~(rctx : Cbat_runctx.refine_ctx)
     ?(no_walk : bool option)
-    (denote_call : sub:tid -> AI.t -> target:tid -> AI.t)
     (ctx : program term) ~(source : tid) (env : AI.t)
-    : target:tid -> AI.t * refine_ctx option * Tid.Set.t =
+    : target:tid -> AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
  (* Threaded context plus read set. *)
  match (Program.lookup blk_t ctx source) with
    | Some b ->
@@ -2572,17 +2394,17 @@ let denote_block_with_stores ?preserved ?defs ?stores
      let flag_state, flag_group =
        match Core.Map.find rctx.rc_flag_states (Term.tid b) with
        | Some fs -> fs
-       | None -> flag_state_of_block b in
+       | None -> Cbat_runctx.flag_state_of_block b in
      fun ~target ->
        let (res, rctx', reads) =
          denote_jump ?preserved ?defs ?stores ~flag_state
            ~flag_group:(Some flag_group) ~sub ?no_walk ?edge_conds ?sol
            ~rctx
-           denote_call b postcond ~target in
+           b postcond ~target in
        (res, rctx', Core.Set.add reads (Term.tid b))
    | None -> fun ~target ->
        ignore (invalid_arg "source tid does not represent block");
-       (AI.bottom, Some rctx, Tid.Set.empty)
+       (AI.bottom, rctx, Tid.Set.empty)
 
 type vsa_sol = (tid, AI.t) Solution.t
 
@@ -2653,34 +2475,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* Store list computed once. *)
   let stores = stores_of_sub s in
   (* Frame facts computed once. *)
-  (* Recursion is fallback. *)
-  let rec denote_call stack ~sub env ~target =
-    match (Program.lookup sub_t ctx sub) with
-    | None -> invalid_arg "sub tid does not represent a subroutine"
-    | Some sub ->
-      if List.mem stack (Term.tid s) ~equal:Tid.equal && List.length stack > 6 then AI.top else begin
-        
-        let fun_sol = static_graph_vsa (Term.tid sub::stack) ctx sub (init_sol ~entry:env sub) in
-        (* Nested runs build callee contexts. *)
-        let callee_cfg =
-          Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph sub)
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-        let callee_rctx = mk_rctx ~cfg:callee_cfg sub in
-        sub
-        |> Term.enum blk_t
-        |> Seq.fold ~init:AI.bottom ~f: begin fun acc blk ->
-          let source = Term.tid blk in
-          let precond = Solution.get fun_sol source in
-           AI.join acc @@
-           let (res, _, _) =
-             denote_block_with_stores ~preserved ~defs ~stores
-               ~sub:(Some s) ~rctx:callee_rctx
-               (denote_call (Term.tid sub::stack)) ctx ~source precond
-               ~target in
-           res
-        end
-      end
-  in
   (* Per-sub static edge table. *)
   let edge_conds = edge_conds_of s in
   let cfg = Sub.to_graph s in
@@ -2688,7 +2482,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   (* Run context built once per run. *)
-  let rctx = mk_rctx ~cfg:cfg_tmp s in
+  let rctx = Cbat_runctx.mk_rctx ~cfg:cfg_tmp s in
   (* WTO fixpoint; inner SCCs stabilize first. *)
   let wto = wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
@@ -2715,17 +2509,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         if Core.Set.length blocks < Core.Set.length existing_set then
           Hashtbl.set block_to_head ~key:btid ~data:h));
 
-  (* Widen cycle vars per head. *)
+  (* Widen cycle vars per head; folds the single walk above, no second table. *)
   let need_map : Var.Set.t Tid.Map.t =
-    let rec collect_heads comps acc =
-      List.fold comps ~init:acc ~f:(fun acc -> function
-        | Cbat_wto.Vertex _ -> acc
-        | Cbat_wto.SCC (h, inner) ->
-            let blocks = Tid.Set.of_list (h :: Cbat_wto.flatten_comps inner) in
-            let acc = Core.Map.set acc ~key:h ~data:blocks in
-            collect_heads inner acc)
-    in
-    let head_to_blocks = collect_heads wto Tid.Map.empty in
     let compute_need (blocks : Tid.Set.t) : Var.Set.t =
       (* Every def in the cycle is tracked (spec §2.1). *)
       let defs =
@@ -2789,7 +2574,9 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         !need
       end
     in
-    Core.Map.mapi head_to_blocks ~f:(fun ~key:_ ~data:blocks -> compute_need blocks)
+    Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
+      ~f:(fun ~key:h ~data:blocks acc ->
+        Core.Map.set acc ~key:h ~data:(compute_need blocks))
   in
   
   let sol_map = ref (Solution.enum init |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v)) in
@@ -2838,8 +2625,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             let rc = !rc_cell in
              let res = Stages.time `Denote (fun () ->
                (* Memo handles validity. *)
-               let version = ver_of rc in
-               match Transfer_memo.find ~version rc.rc_out_cache p v with
+               let version = Cbat_runctx.ver_of rc in
+               match Cbat_runctx.Transfer_memo.find ~version rc.rc_out_cache p v with
                | Some (hit_res, fired) ->
                  
                  (if Option.is_some head_opt && fired then
@@ -2849,7 +2636,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                                 ~defs ~stores ~sub:(Some s)
                                 ~edge_conds:(Some edge_conds)
                                 ~sol:(Some sol_snap) ~rctx:rc
-                                ~no_walk:true (denote_call stack) ctx
+                                ~no_walk:true ctx
                                 ~source:p p_entry ~target:v)
                     | None -> ());
 
@@ -2860,17 +2647,22 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                  let (res, rc', reads) =
                    denote_block_with_stores ~preserved ~defs
                      ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
-                     ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
+                     ~sol:(Some sol_snap) ~rctx:rc
                      ctx ~source:p p_entry ~target:v in
                  let fired = Cbat_landmarks.end_fired_latch flatch in
                  (* Read set covers inputs. *)
                  let reads = Core.Set.add reads p in
                  rc_cell :=
-                   { (Option.value ~default:rc rc') with
+                   { rc' with
                      rc_out_cache =
-                       Transfer_memo.add ~version rc.rc_out_cache p v
+                       Cbat_runctx.Transfer_memo.add ~version rc.rc_out_cache p v
                          ~reads (res, fired) };
                  res) in
+            (* Dead bindings never reach the join. *)
+            let keep =
+              Option.value ~default:Var.Set.empty
+                (Core.Map.find rc.rc_live_in v) in
+            let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
             Cbat_landmarks.widening_at_head := None;
             res) in
         (Stages.time `Join (fun () ->

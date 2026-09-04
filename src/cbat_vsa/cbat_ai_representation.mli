@@ -53,6 +53,9 @@ val add_memory : t -> key:var -> data:Cbat_ai_memmap.t -> t
 val find_word : WordSet.idx -> t -> var -> WordSet.t
 val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 
+(* Drop dead virtual temps; machine regs are the ABI surface and stay. *)
+val gc : t -> keep:Var.Set.t -> t
+
 val selective_widen_extrapolate : ?head:Tid.t option -> need:Var.Set.t -> steps:int -> t -> t -> t
 
 (* Keep [preserved] words, top the rest and all memory. *)

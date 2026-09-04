@@ -6,11 +6,6 @@ module KB = Bap_knowledge.Knowledge
 
 let run_cls = KB.Class.declare ~package:"hike" "run" ()
 
-(* Compares two infos: equal or incomparable. *)
-let info_order (i1 : Convutils.vsa_info) (i2 : Convutils.vsa_info) :
-    KB.Order.partial =
-  if Convutils.equal_vsa_info i1 i2 then KB.Order.EQ else KB.Order.NC
-
 (* Conflicting infos for one sub. *)
 type KB.conflict += Vsa_info_conflict of Tid.t * Convutils.vsa_info * Convutils.vsa_info
 
@@ -28,11 +23,9 @@ let () =
 (* Joins two infos; differing infos conflict. *)
 let info_join (tid : Tid.t) (i1 : Convutils.vsa_info) (i2 : Convutils.vsa_info) :
     (Convutils.vsa_info, KB.conflict) result =
-  match info_order i1 i2 with
-  | EQ -> Ok i1
-  | NC -> Error (Vsa_info_conflict (tid, i1, i2))
-  | LT -> Ok i2
-  | GT -> Ok i1
+  (* Equality is the only order infos have; anything else conflicts. *)
+  if Convutils.equal_vsa_info i1 i2 then Ok i1
+  else Error (Vsa_info_conflict (tid, i1, i2))
 
 (* Orders maps by extension. *)
 let map_order (m1 : Convutils.vsa_info Tid.Map.t)
