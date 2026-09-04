@@ -816,6 +816,44 @@ let run_landmarks () =
     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
   ()
 
+(* F1-FT: fallthrough edge fixture — the walk-equals-vertex pin for the shared memo.
+   Same jne-counter loop as F1-NEQ (arrow-less [i - k] record operand through guarded
+   refinement — the landmark-consumption lane): the head pins the vertex-computed
+   values, the taken body pins its refined view, and the fallthrough exit pins the
+   walk-observed refined pre-state. A memo keying bug moves one side, not both. *))
+;
+(  let k = w32 100 in
+   let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol =
+     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+   in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let st tid = Graphlib.Std.Solution.get sol tid in
+   let head_i = AI.find_word 32 (st l1_tid) i in
+   check
+     "property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side of the pin)"
+     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+   check
+     "property LM F1-FT: the head's upper bound is the landmark K (vertex side of the pin)"
+     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
+   let body_i = AI.find_word 32 (st b1_tid) i in
+   check
+     "property LM F1-FT: the taken body's lower bound is the entry constant 0"
+     (match Ws.min_elem body_i with Some lo -> W.equal lo (w32 0) | None -> false);
+   check
+     "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the landmark)"
+     (match Ws.max_elem body_i with Some hi -> W.equal hi (W.pred k) | None -> false);
+   let exits =
+     Term.enum blk_t sub |> Seq.to_list |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
+   in
+   let exit_i =
+     match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
+   in
+   check "property LM F1-FT: the fallthrough exit pins the counter to {K} exactly (walk side of the pin)"
+     (Ws.equal exit_i (Ws.singleton k));
+   ()
+
 (* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
 (  (* Widening soundness pins. *)
