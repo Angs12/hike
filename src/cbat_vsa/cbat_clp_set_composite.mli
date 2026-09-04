@@ -13,9 +13,6 @@
 
 type t
 
-(* The CLP domain this set is built over. *)
-module Clp = Cbat_clp
-
 include Cbat_wordset_intf.S with type t := t
 
 val is_top : t -> bool
