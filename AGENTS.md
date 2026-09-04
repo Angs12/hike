@@ -85,8 +85,8 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
      The old `hike.plugin` bundle zip must be removed (`bapbundle remove
      hike`) or bap loads BOTH and dies (`Hashtbl.add_exn got key already
      present hike`).
-   - `src/record_provenance.sh` (wired into the Makefile `hike` target)
-     writes `<plugin>.provenance` (tree, git describe, src sha16, bundle
+   - `src/record_provenance.sh` (run after `dune build @install && dune
+     install`) writes `hike.cmxs.provenance` (tree, git describe, src sha16, bundle
      sha16) NEXT TO the installed plugin — battery.sh verifies it before
      running gates; an mtime-based check cannot catch a plugin built from a
      DIFFERENT tree (measured: identical sources, stale artifacts, mtime
@@ -186,11 +186,11 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
   `bapbundle remove hike` (both installed = `Hashtbl.add_exn` at load).
   After any source change: `dune build @install && dune install` — dune's
   content-hash cache is SOUND (it recompiles exactly what changed; there is
-  no second cache to go stale), and `src/record_provenance.sh` (the Makefile
-  `hike` target) writes the provenance record the battery verifies.
+  no second cache to go stale), and `src/record_provenance.sh` (run manually
+  after install) writes the provenance record the battery verifies.
 - Run: `bap <bin> --pass=hike-convlir --hike-output-file=out.ll` (`--hike-output` also works).
-- Toolchain lives in `shell.nix`, but it is stale: its `make sim` hook has no Makefile
-  target (ignore that hook; `nix-shell` will fail at the end of setup).
+- Toolchain lives in `shell.nix`, but it is stale (its setup hook fails at
+  the end; ignore).
 
 ## Pass pipeline (`src/hike.ml`)
 
@@ -551,8 +551,8 @@ the old `pps ppx_bap` driver (it regenerates `[@@deriving equal]`'s
   identical 501008 bytes) and backfills the switch; the legacy
   `hike.plugin` zip must be removed (`bapbundle remove hike`) or bap
   loads both and dies (`Hashtbl.add_exn ... hike`).
-- **Provenance:** `src/record_provenance.sh` (Makefile `hike` target)
-  writes `<plugin>.provenance` — tree, git describe, src sha16, bundle
+- **Provenance:** `src/record_provenance.sh` (run after `dune install`)
+  writes `hike.cmxs.provenance` — tree, git describe, src sha16, bundle
   sha16 — for the battery to verify; mtime checking CANNOT catch a
   plugin from a different tree (measured 2026-09-02: identical sources,
   22 poison phis, mtime warning silent, corpus rc=0).
@@ -1136,8 +1136,8 @@ computation/results are byte-exact on the passing subset).
   with sp restored post-call the store/load pair lands correctly.
   Root cause + fix: the L-E1e entry below.
 
-- `src/Makefile clean` deletes every non-`.c`/`.h` file under `src/progs/` — move artifacts
-  out first. `*.ll` is gitignored except `baselines/**`.
+- `src/progs/` artifacts: `*.ll` is gitignored except `baselines/**` (the
+  Makefile that once cleaned progs/ is deleted — dune owns the build).
 
 ### L-E1e — the emitter-side retaddr pop (landed 2026-08-25) — BUG A of the coreutils probe
 

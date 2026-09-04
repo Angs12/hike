@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# Writes the build identity next to the installed plugin, so battery.sh
+# Writes the build identity next to the installed dune plugin, so battery.sh
 # verifies the tested plugin was built from this tree (by content, not
-# mtime). Records bundle content hash, git identity, and tree path;
+# mtime). Records the plugin object hash, git identity, and tree path;
 # battery.sh fails on mismatch.
 
 set -euo pipefail
 
 PLUGIN_DST="${HIKE_PLUGIN_DST:-}"
 if [ -z "$PLUGIN_DST" ]; then
-  # locate the installed bundle via the active switch's plugin dir
+  # The plugin is built by dune (bapbuild retired): the dynlinked object is
+  # <switch>/lib/hike/hike.cmxs; the bap-common/plugins/hike/META stub only
+  # requires the hike package. Locate the object via the active switch.
   for base in "${OPAM_SWITCH_PREFIX:-}" "$(opam switch show --safe 2>/dev/null | sed "s|^|$HOME/.opam/|")" "$HOME/.opam"; do
     [ -n "$base" ] || continue
-    cand=$(find "$base/lib/bap-common/plugins" -maxdepth 1 -name 'hike.plugin' 2>/dev/null | head -1)
+    cand=$(find "$base/lib/hike" -maxdepth 1 -name 'hike.cmxs' 2>/dev/null | head -1)
     if [ -n "$cand" ]; then PLUGIN_DST="$cand"; break; fi
   done
 fi
-[ -n "$PLUGIN_DST" ] || { echo "record_provenance: no installed hike.plugin found" >&2; exit 1; }
+[ -n "$PLUGIN_DST" ] || { echo "record_provenance: no installed hike.cmxs found (did you run 'dune build @install && dune install'?)" >&2; exit 1; }
 
 TREE="$(cd "$(git rev-parse --show-toplevel)" && pwd)"
 GIT_DESC=$(git -C "$TREE" describe --always --dirty 2>/dev/null || echo unknown)
@@ -23,9 +25,9 @@ SRC_HASH=$(find "$TREE/src" -name '*.ml' -o -name '*.mli' -o -name 'dune' | sort
 BUNDLE_HASH=$(sha256sum "$PLUGIN_DST" | cut -c1-16)
 
 cat > "${PLUGIN_DST}.provenance" <<EOF
-# hike.plugin provenance — written by src/record_provenance.sh at install time.
+# hike plugin provenance — written by src/record_provenance.sh at install time.
 # battery.sh verifies these fields BEFORE running the gates; a mismatch
-# means the installed plugin is NOT this tree's build — rebuild (make hike).
+# means the installed plugin is NOT this tree's build — rebuild and reinstall.
 tree: $TREE
 git: $GIT_DESC
 src_sha16: $SRC_HASH
