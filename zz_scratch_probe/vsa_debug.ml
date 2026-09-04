@@ -51,12 +51,11 @@ let i_of (sub : sub term) : var =
 let run_one_fixture (name : string) (sub : sub term) : unit =
   Printf.printf "=== fixture %s ===\n" name;
   let sp = Hike.Abi.x86_64_sysv.sp in
-  let sub' = Hike.Relevance.analyze sp sub in
-  let prog' = Program.create ~subs:[ sub' ] () in
+  let prog' = Program.create ~subs:[ sub ] () in
   let sol =
-    Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub')
+    Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub)
   in
-  Term.enum blk_t sub'
+  Term.enum blk_t sub
   |> Seq.iter ~f:(fun b ->
       let st0 = Graphlib.Std.Solution.get sol (Term.tid b) in
       let st1 = ref st0 in
@@ -67,8 +66,8 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
           let post = Vsa.denote_def d pre in
           Printf.printf "    %s\n      pre : %s\n      post: %s\n"
             (def_to_string d)
-            (state_summary [ sp; i_of sub' ] pre)
-            (state_summary [ sp; i_of sub' ] post);
+            (state_summary [ sp; i_of sub ] pre)
+            (state_summary [ sp; i_of sub ] post);
           st1 := post))
 
 let run_binary (path : string) (name : string) : unit =

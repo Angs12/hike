@@ -6,7 +6,6 @@ open Bap_core_theory
 module AI = Cbat_vsa.AI
 module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
-module Relevance = Hike.Relevance
 
 let sp_of (proj : project) : var = Hike.Abi.sp (Project.target proj)
 
@@ -37,60 +36,40 @@ let dump_frame (label : string) (st : AI.t) : unit =
 
 (* Walks the sub like offsets_of_sub; `on_unbounded` compares replica vs production. *)
 let audit_sub (sp : var) (sub : sub term) : unit =
-  (* Mirror production: tag here so offsets_of_sub reuses the tags. *)
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
-  let sub' = Relevance.analyze sp sub in
-  let sa_count =
-    Term.enum blk_t sub'
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.stack_access)
-    |> Seq.length in
-  Printf.printf "  stack_access (probe): %d\n" sa_count;
-  ignore sub';
-  if not (Term.enum blk_t sub'
-          |> Seq.exists ~f:(fun b ->
-              Term.enum def_t b |> Seq.exists ~f:(fun d -> Term.has_attr d Relevance.stack_access)))
-  then ()
+  (* PROD verdict for cross-checking the replica. *)
+  let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp sub in
+  let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
+  Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
+      match k with
+      | Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid ()
+      | _ -> ());
+  let prod_unbounded_count = Hashtbl.length prod_unbounded in
+  let sa_count = Core.Map.length info.Hike.Convutils.offsets in
+  Printf.printf "=== sub %s (%s) — stack_access=%d offsets=%d Unbounded(PROD)=%d ===\n"
+    (Sub.name sub) (Tid.to_string (Term.tid sub))
+    sa_count (Core.Map.length info.offsets) prod_unbounded_count;
+  if sa_count = 0 then ()
   else begin
-    let prog' = Program.create ~subs:[ sub' ] () in
-    let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
+    let prog' = Program.create ~subs:[ sub ] () in
+    let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub) in
     let tags = sol in
     ignore tags;
-    (* PROD verdict for cross-checking the replica. *)
-    let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp sub' in
-    let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
-    Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
-        match k with
-        | Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid ()
-        | _ -> ());    let prod_unbounded_count = Hashtbl.length prod_unbounded in
-    let sa_count = Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
-                   |> Seq.filter ~f:(fun d -> Term.has_attr d Relevance.stack_access)
-                   |> Seq.length in
-    Printf.printf "=== sub %s (%s) — stack_access=%d offsets=%d Unbounded(PROD)=%d ===\n"
-      (Sub.name sub') (Tid.to_string (Term.tid sub'))
-      sa_count (Core.Map.length info.offsets) prod_unbounded_count;
-    Term.enum blk_t sub'
+    Term.enum blk_t sub
     |> Seq.iter ~f:(fun blk ->
         let defs = Term.enum def_t blk |> Seq.to_list in
-        let last_tagged =
-          Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-              if Term.has_attr d Relevance.stack_access then Some i else acc) in
-        match last_tagged with
-        | None -> ()
-        | Some i ->
-          let defs' = Base.List.take defs (i + 1) in
-          let _ =
-            Base.List.fold_left defs'
-              ~init:(Graphlib.Std.Solution.get tags (Term.tid blk))
-              ~f:(fun st d ->
-                   let st_before = st in
-                   let st_after = Vsa.denote_def d st in
-                   (match Def.rhs d with
-                    | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
-                    | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
-                    | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
-                      when Term.has_attr d Relevance.stack_access ->
+        let _ =
+          Base.List.fold_left defs
+            ~init:(Graphlib.Std.Solution.get tags (Term.tid blk))
+            ~f:(fun st d ->
+                 let st_before = st in
+                 let st_after = Vsa.denote_def d st in
+                 (match Def.rhs d with
+                  | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
+                  | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
+                  | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
+                    when Core.Map.mem info.Hike.Convutils.offsets (Term.tid d) ->
                       let is_prod_ub = Hashtbl.mem prod_unbounded (Term.tid d) in
                       if is_prod_ub then begin
                         let frame = Vsa.frame_of_state st_before in
