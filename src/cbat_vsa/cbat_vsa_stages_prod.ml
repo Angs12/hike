@@ -20,6 +20,13 @@ let scaffold_calls = ref 0
 let t_glue = ref 0.
 let glue_calls = ref 0
 
+(* Unused time refs; parity with the debug adapter. *)
+let t_denote = ref 0.
+let t_walk = ref 0.
+let t_join = ref 0.
+let t_widen = ref 0.
+let t_equal = ref 0.
+
 let reset () = ()
 
 let time (_which : [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Widen ])
@@ -28,3 +35,10 @@ let time (_which : [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Wid
 let bump_walk_pops ~pops:_ ~blocks:_ ~truncated:_ () = ()
 
 let report (_label : string) : unit = ()
+
+let stats () :
+    float * int * float * int * float * int * int * int * int * int * float =
+  (0., 0, 0., 0, 0., 0, 0, 0, 0, 0, 0.)
+
+let memo_stats () : int * int * int * int * int = (0, 0, 0, 0, 0)
+

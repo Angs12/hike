@@ -1308,11 +1308,13 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
 let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
     (d : def term) (blk : blk term) (live : Live.t) (cstr : wordset)
     : (var * wordset) list =
+  (* The block's state is fixed for this def. *)
+  let blk_state = Solution.get sol (Term.tid blk) in
   match Def.rhs d with
   | Bil.Load (m, a, en, s) ->
     (* Cells only; addresses unconstrained. *)
     env := constrain_cell_on_trace
-      ~st:(Solution.get sol (Term.tid blk)) ~live
+      ~st:blk_state ~live
       !env ~mem:m ~addr:a ~size:s ~endian:en cstr;
     []
   | Bil.BinOp (Bil.LSHIFT, a, b) ->
@@ -1458,8 +1460,9 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
     (env : AI.t ref) (live : Live.t)
     (blk : blk term) : Live.t =
   let live = ref live in
-  Term.enum def_t blk |> Seq.to_list |> List.rev
-  |> List.iter ~f:(fun d ->
+  (* The block's state is loop-invariant over its own defs. *)
+  let blk_state = Solution.get sol (Term.tid blk) in
+  List.iter (Term.enum def_t blk |> Seq.to_list |> List.rev) ~f:(fun d ->
       let v = Var.base (Def.lhs d) in
       match Live.find v !live with
       | None -> ()   (* Skip non-live lhs. *)
@@ -1471,7 +1474,7 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
             match Var.typ (Def.lhs d) with
             | Type.Imm w ->
               Some (AI.find_word w
-                      (denote_def d (Solution.get sol (Term.tid blk)))
+                      (denote_def d blk_state)
                       (Def.lhs d))
             | Type.Mem _ | Type.Unk -> None in
           (match post_v with
@@ -1495,6 +1498,8 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
     (env : AI.t ref) (target : tid)
     (live : Live.t) (blk : blk term) : Live.t =
   let live = ref live in
+  (* The block's state is loop-invariant over its own phis. *)
+  let blk_state = Solution.get sol (Term.tid blk) in
   Term.enum phi_t blk |> Seq.iter ~f:(fun ph ->
       let v = Var.base (Phi.lhs ph) in
       match Live.find v !live with
@@ -1509,7 +1514,7 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
               | Bil.Load (m, a, en, s) ->
                 
                 env := constrain_cell_on_trace
-                  ~st:(Solution.get sol (Term.tid blk)) ~live:!live
+                  ~st:blk_state ~live:!live
                   !env ~mem:m ~addr:a ~size:s ~endian:en cstr
               | _ -> ()));
   !live
@@ -1560,12 +1565,16 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
                   if Tid.equal (Term.tid b) (Term.tid blk)
                   then Live.join live seed_constraints
                   else live in
+                (* Nothing live propagates nothing: skip both walks. *)
+                if Core.Map.is_empty live then fun ~target:_ -> live
+                else begin
                 let base =
                   reverse_def_walk ~defs:defs_map ~sol
                     env live b in
                 fun ~target:t ->
                   route_phi_constraints ~sol env t
                     base b
+                end
               | None -> fun ~target:_ -> live)
         ~step:(fun _ _ -> fun _ x' -> x')
         cfg in
