@@ -27,9 +27,13 @@ val interval : width:int -> word -> word -> t
 val nearest_pred : word -> t -> word option
 val nearest_succ : word -> t -> word option
 
+(* Step-1 CLP from (base, step); circular when the progression wraps. *)
+val infinite : word * word -> t
+
 val is_top : t -> bool
 val is_infinite : t -> bool
 val is_bottom : t -> bool
+
 
 val subset : t -> t -> bool
 
