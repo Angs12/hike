@@ -48,25 +48,3 @@ module Make (V : Value) : sig
     version:(Tid.t -> int) ->
     t -> Tid.t -> Tid.t -> reads:Tid.Set.t -> value -> t
 end
-
-(* Whole-map memo keyed by block; one map per block is retained. *)
-module Block_map (V : Value) : sig
-  type value = V.t
-
-  (* Stored version plus the whole definition-to-value map. *)
-  type entry = {
-    e_ver : int;
-    e_map : value Tid.Map.t;
-  }
-
-  type t = entry Tid.Map.t
-
-  val empty : t
-
-  (* Map of a block whose stored version still matches. *)
-  val find :
-    version:(Tid.t -> int) -> t -> Tid.t -> value Tid.Map.t option
-
-  (* Store a block's map, replacing any older version. *)
-  val add : t -> Tid.t -> ver:int -> value Tid.Map.t -> t
-end
