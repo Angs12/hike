@@ -409,6 +409,37 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   let sub = Sub.Builder.result sub_b in
   (sub, l1_tid, b1_tid)
 
+(* VSK-02: acyclic diamond over a ranged counter; the entry state carries the
+   range, so the guard edges refine to absolute halves. Returns
+   (sub, guard_tid, then_tid, else_tid, x). *)
+let vsk_diamond () : sub term * tid * tid * tid * var =
+  let x = Var.create ~is_virtual:false ~fresh:false "vsk_x" (Type.Imm 32) in
+  let guard_e = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)) in
+  let entry_b = Blk.Builder.create () in
+  let guard_b = Blk.Builder.create () in
+  let then_b = Blk.Builder.create () in
+  let else_b = Blk.Builder.create () in
+  (* No defs on the entry->guard lane: the transfer is empty, so the
+     unconditional edge pins the early-exit identity exactly. *)
+  let entry0 = Blk.Builder.result entry_b in
+  let guard0 = Blk.Builder.result guard_b in
+  let then0 = Blk.Builder.result then_b in
+  let else0 = Blk.Builder.result else_b in
+  let guard_tid = Term.tid guard0 in
+  let then_tid = Term.tid then0 in
+  let else_tid = Term.tid else0 in
+  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
+  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct guard_tid)));
+  let guard_b = Blk.Builder.init ~copy_defs:true guard0 in
+  Blk.Builder.add_jmp guard_b (Jmp.create ~cond:guard_e (Goto (Direct then_tid)));
+  Blk.Builder.add_jmp guard_b
+    (Jmp.create ~cond:(Bil.UnOp (Bil.NOT, guard_e)) (Goto (Direct else_tid)));
+  let sub_b = Sub.Builder.create ~name:"vsk_diamond" () in
+  List.iter (Sub.Builder.add_blk sub_b)
+    [ Blk.Builder.result entry_b; Blk.Builder.result guard_b; then0; else0 ];
+  let sub = Sub.Builder.result sub_b in
+  (sub, guard_tid, then_tid, else_tid, x)
+
 (* F1: JLE-counter head lands at TOP (inclusive taken row overshoots); pins sound invariants. *)
 let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let m = memv "wc_m" in
@@ -852,6 +883,40 @@ let run_landmarks () =
    in
    check "property LM F1-FT: the fallthrough exit pins the counter to {K} exactly (walk side of the pin)"
      (Ws.equal exit_i (Ws.singleton k));
+   ()
+
+(* VSK-02: empty-seed/mixed-seed oracle — pins the existing early exit and the
+   mixed-seed refined values through the library seam. The diamond's entry
+   state carries x in [0,20]; the entry->guard edge is the empty-seed shape
+   (constant-true acc cond refines to the input state exactly), and the
+   guard's taken/fallthrough edges refine to the absolute halves. The identity
+   is against the seeded entry state (init_sol frames entry RSP at offset 0). *))
+;
+(  let sub, guard_tid, then_tid, else_tid, x = vsk_diamond () in
+   let range lo hi = Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi)) in
+   let entry = AI.add_word (anchored_entry ()) ~key:x ~data:(range 0 20) in
+   check "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit shape)"
+     (match Vsa.edge_constraints ~env:entry (Bil.Int W.b1) (Ws.singleton W.b1) with
+      | [] -> true
+      | _ -> false);
+   check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
+     (match
+        Vsa.edge_constraints ~env:entry
+          (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)))
+          (Ws.singleton W.b1)
+      with
+      | [ Vsa.Var (v, c) ] -> Var.name v = "vsk_x" && Ws.equal c (range 0 9)
+      | _ -> false);
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry sub) in
+   let st tid = Graphlib.Std.Solution.get sol tid in
+   check
+     "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state)"
+     (AI.equal (st guard_tid) (AI.set_frame entry AI.seed_frame));
+   check "property LM VSK-MIXED-TAKEN: the taken edge refines x to [0,9] exactly"
+     (Ws.equal (AI.find_word 32 (st then_tid) x) (range 0 9));
+   check "property LM VSK-MIXED-FALL: the fallthrough edge refines x to [10,20] exactly"
+     (Ws.equal (AI.find_word 32 (st else_tid) x) (range 10 20));
    ()
 
 (* F2a: landmark consumption at CLP level — never lands short of the join. *))
