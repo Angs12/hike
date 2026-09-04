@@ -15,6 +15,13 @@ val walk_blocks : int ref
 val walk_truncs : int ref
 val walk_max_pops : int ref
 
+(* Accumulated per-stage seconds. *)
+val t_denote : float ref
+val t_walk : float ref
+val t_join : float ref
+val t_widen : float ref
+val t_equal : float ref
+
 val t_scaffold : float ref
 val scaffold_calls : int ref
 
@@ -36,3 +43,13 @@ val bump_walk_pops :
 
 (* Print totals and call counts. *)
 val report : string -> unit
+
+(* Snapshot: denote_t, denote_n, walk_t, walk_n, join_t, join_n, pops,
+   blocks, truncs, max_pops, minor_words. No-ops return zeros. *)
+val stats :
+  unit ->
+  float * int * float * int * float * int * int * int * int * int * float
+
+(* Memo accounting: lookups, hits, stale, stores, empty-map lookups. *)
+val memo_stats : unit -> int * int * int * int * int
+

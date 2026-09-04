@@ -28,6 +28,7 @@ let glue_calls = ref 0
 let gc0 = ref (Gc.quick_stat ())
 
 let reset () =
+  Cbat_memo.reset_stats ();
   denote_calls := 0; join_calls := 0; equal_calls := 0; widen_calls := 0;
   walk_calls := 0;
   t_denote := 0.; t_join := 0.; t_equal := 0.; t_widen := 0.;
@@ -70,6 +71,17 @@ let gc_promoted_words () =
 
 (* Linked only in the vsa-debug profile. *)
 #ifdef VSA_DEBUG
+let stats () :
+    float * int * float * int * float * int * int * int * int * int * float =
+  ( !t_denote, !denote_calls, !t_walk, !walk_calls, !t_join, !join_calls,
+    !walk_pops, !walk_blocks, !walk_truncs, !walk_max_pops,
+    gc_minor_words () )
+
+(* Memo hit accounting, proxied from [Cbat_memo]. *)
+let memo_stats () : int * int * int * int * int =
+  ( !Cbat_memo.lookups, !Cbat_memo.hits, !Cbat_memo.stale,
+    !Cbat_memo.stores, !Cbat_memo.empty_lookups )
+
 let report (label : string) : unit =
   Printf.printf
     "STAGES %s: denote %7.3fs/%d  join %7.3fs/%d  equal %7.3fs/%d  \

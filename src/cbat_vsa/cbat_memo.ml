@@ -16,6 +16,17 @@
 open Core_kernel
 open Bap.Std
 
+#ifdef VSA_DEBUG
+(* Hit accounting, compiled out of production. *)
+let lookups = ref 0
+let hits = ref 0
+let stores = ref 0
+let stale = ref 0
+let empty_lookups = ref 0
+let reset_stats () =
+  lookups := 0; hits := 0; stores := 0; stale := 0; empty_lookups := 0
+#endif
+
 (* Memoized value type. *)
 module type Value = sig
   type t
@@ -48,17 +59,32 @@ module Make (V : Value) = struct
   (* Value of a live entry, if any. *)
   let find ~(version : Tid.t -> int) (t : t) (outer : Tid.t)
       (inner : Tid.t) : value option =
+#ifdef VSA_DEBUG
+    incr lookups;
+    if Core.Map.is_empty t then incr empty_lookups;
+#endif
     match Core.Map.find t outer with
     | None -> None
     | Some by_inner -> (
       match Core.Map.find by_inner inner with
       | None -> None
-      | Some e when valid ~version e -> Some e.e_value
-      | Some _ -> None)
+      | Some e when valid ~version e ->
+#ifdef VSA_DEBUG
+        incr hits;
+#endif
+        Some e.e_value
+      | Some _ ->
+#ifdef VSA_DEBUG
+        incr stale;
+#endif
+        None)
 
   (* Record a value with its read-set. *)
   let add ~(version : Tid.t -> int) (t : t) (outer : Tid.t)
       (inner : Tid.t) ~(reads : Tid.Set.t) (value : value) : t =
+#ifdef VSA_DEBUG
+    incr stores;
+#endif
     let e = { e_reads = stamp ~version reads; e_value = value } in
     Core.Map.set t ~key:outer
       ~data:(match Core.Map.find t outer with

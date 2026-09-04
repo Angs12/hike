@@ -13,6 +13,16 @@
 
 (* Version-keyed memo; entries carry a stamped read-set. *)
 
+#ifdef VSA_DEBUG
+(* Hit accounting; compiled out of production by cppo. *)
+val lookups : int ref
+val hits : int ref
+val stores : int ref
+val stale : int ref
+val empty_lookups : int ref
+val reset_stats : unit -> unit
+#endif
+
 open Core_kernel
 open Bap.Std
 
