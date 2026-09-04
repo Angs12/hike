@@ -204,76 +204,74 @@ let val_top : typ -> val_t = function
 
 
 
-(* Effect of one def on facts. *)
+(* Effect of one def on facts; every def is denoted (spec §2.1). *)
 let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
-  if not (Term.has_attr d Utils.relevant) then f
-  else
-    let v = AI.frame_key (Def.lhs d) in
-    let remove = AI.frame_remove f v in
-    (* Copy rule with shift. *)
-    let transfer ~(shift : AI.frame_term -> AI.frame_term) (y : var)
-        : AI.frame =
-      if Var.equal y v then
-        match AI.frame_lookup f v with
-        | Some t -> AI.frame_set f v (shift t)
-        | None -> remove
-      else
-        match AI.frame_lookup f y with
-        | Some t -> AI.frame_set f v (shift t)
-        | None -> remove in
-    (* A derived [z] drops the fact. *)
-    let if_not_derived (z : var)
-        ~(shift : AI.frame_term -> AI.frame_term) (y : var) : AI.frame =
-      if Option.is_some (AI.frame_lookup f z) then remove
-      else transfer ~shift y in
-    match Def.rhs d with
-    | Bil.Var y ->
-      let y = AI.frame_key y in
-      if Var.equal y v then f
-      else (match AI.frame_lookup f y with
-          | Some t -> AI.frame_set f v t
-          | None -> remove)
-    | Bil.Int _ -> remove
-    | Bil.BinOp (op, e1, e2) ->
-      (match op, e1, e2 with
-       | Bil.PLUS, Bil.Var y, Bil.Int k
-       | Bil.PLUS, Bil.Int k, Bil.Var y
-       | Bil.MINUS, Bil.Var y, Bil.Int k ->
-         (* Derived iff y derived. *)
-         let y = AI.frame_key y in
-         let shift =
-           match op with
-           | Bil.PLUS -> fun t -> AI.frame_add_const t (WordSet.singleton k)
-           | Bil.MINUS -> fun t -> AI.frame_sub_const t (WordSet.singleton k)
-           | _ -> Fun.id in
-         transfer ~shift y
-       | Bil.PLUS, Bil.Var y, Bil.Var z ->
-         (* Derived iff y derived. *)
-         let y = AI.frame_key y in
-         let z = AI.frame_key z in
-         if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z 1) y
-       | Bil.MINUS, Bil.Var y, Bil.Var z ->
-         (* Derived iff y derived. *)
-         let y = AI.frame_key y in
-         let z = AI.frame_key z in
-         if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-1)) y
-       | Bil.PLUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k)
-       | Bil.PLUS, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k), Bil.Var y ->
-         (* Derived iff y derived. *)
-         let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
-         let y = AI.frame_key y in
-         let z = AI.frame_key z in
-         if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z k) y
-       | Bil.MINUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k) ->
-         (* Derived iff y derived. *)
-         let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
-         let y = AI.frame_key y in
-         let z = AI.frame_key z in
-         if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-k)) y
-       | _ -> remove)
-    | Bil.Load _ | Bil.Store _ | Bil.Cast _ | Bil.Extract _
-    | Bil.Concat _ | Bil.Ite _ | Bil.UnOp _ | Bil.Let _ | Bil.Unknown _ ->
-      remove
+  let v = AI.frame_key (Def.lhs d) in
+  let remove = AI.frame_remove f v in
+  (* Copy rule with shift. *)
+  let transfer ~(shift : AI.frame_term -> AI.frame_term) (y : var)
+      : AI.frame =
+    if Var.equal y v then
+      match AI.frame_lookup f v with
+      | Some t -> AI.frame_set f v (shift t)
+      | None -> remove
+    else
+      match AI.frame_lookup f y with
+      | Some t -> AI.frame_set f v (shift t)
+      | None -> remove in
+  (* A derived [z] drops the fact. *)
+  let if_not_derived (z : var)
+      ~(shift : AI.frame_term -> AI.frame_term) (y : var) : AI.frame =
+    if Option.is_some (AI.frame_lookup f z) then remove
+    else transfer ~shift y in
+  match Def.rhs d with
+  | Bil.Var y ->
+    let y = AI.frame_key y in
+    if Var.equal y v then f
+    else (match AI.frame_lookup f y with
+        | Some t -> AI.frame_set f v t
+        | None -> remove)
+  | Bil.Int _ -> remove
+  | Bil.BinOp (op, e1, e2) ->
+    (match op, e1, e2 with
+     | Bil.PLUS, Bil.Var y, Bil.Int k
+     | Bil.PLUS, Bil.Int k, Bil.Var y
+     | Bil.MINUS, Bil.Var y, Bil.Int k ->
+       (* Derived iff y derived. *)
+       let y = AI.frame_key y in
+       let shift =
+         match op with
+         | Bil.PLUS -> fun t -> AI.frame_add_const t (WordSet.singleton k)
+         | Bil.MINUS -> fun t -> AI.frame_sub_const t (WordSet.singleton k)
+         | _ -> Fun.id in
+       transfer ~shift y
+     | Bil.PLUS, Bil.Var y, Bil.Var z ->
+       (* Derived iff y derived. *)
+       let y = AI.frame_key y in
+       let z = AI.frame_key z in
+       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z 1) y
+     | Bil.MINUS, Bil.Var y, Bil.Var z ->
+       (* Derived iff y derived. *)
+       let y = AI.frame_key y in
+       let z = AI.frame_key z in
+       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-1)) y
+     | Bil.PLUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k)
+     | Bil.PLUS, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k), Bil.Var y ->
+       (* Derived iff y derived. *)
+       let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
+       let y = AI.frame_key y in
+       let z = AI.frame_key z in
+       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z k) y
+     | Bil.MINUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k) ->
+       (* Derived iff y derived. *)
+       let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
+       let y = AI.frame_key y in
+       let z = AI.frame_key z in
+       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-k)) y
+     | _ -> remove)
+  | Bil.Load _ | Bil.Store _ | Bil.Cast _ | Bil.Extract _
+  | Bil.Concat _ | Bil.Ite _ | Bil.UnOp _ | Bil.Let _ | Bil.Unknown _ ->
+    remove
 
 (* None stays bottom. *)
 let apply_frame_def (f : AI.frame option) (d : def term) : AI.frame option =
@@ -429,10 +427,7 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   denote_exp e env >>= val_as_imm
 
 let denote_def (df : def term) (env : AI.t) : AI.t =
-  (* Untagged defs are skipped. *)
-  if not (Term.has_attr df Utils.relevant)
-  then env
-  else
+  (* Every def is denoted (spec §2.1); the restriction gate is deleted. *)
   let v = Def.lhs df in
   let e = Def.rhs df in
   (* Addresses rewrite to offsets. *)
@@ -890,8 +885,8 @@ let denote_operand (env : AI.t) (e : exp) : wordset option =
      | Ok ws -> Some ws
      | Error _ -> None)
 
-(* Genuine-subset meet into a var. *)
-let meet_var (refineable_var : var -> bool) (env : AI.t)
+(* Genuine-subset meet into a var; gate-free (spec §2.1). *)
+let meet_var (_refineable_var : var -> bool) (env : AI.t)
     (v : var) (refined : wordset) : AI.t =
   match Var.typ v with
   | Type.Imm w ->
@@ -905,59 +900,55 @@ let meet_var (refineable_var : var -> bool) (env : AI.t)
         env
       end else if not (WordSet.precedes m cur)
       then env
-      else if refineable_var v then AI.add_word env ~key:v ~data:m
-      else env
+      else AI.add_word env ~key:v ~data:m
   | Type.Mem _ | Type.Unk -> env
 
-(* Meet a constraint into a load cell. *)
+(* Meet a constraint into a load cell; gate-free (spec §2.1). *)
 let rec constrain_cell
-    (refineable_var : var -> bool) (env : AI.t)
+    (_refineable_var : var -> bool) (env : AI.t)
     ~(mem : exp) ~(addr : exp) ~(size : Size.t) ~(endian : endian)
     (cstr : wordset) : AI.t =
-  if not (Exp.free_vars addr |> Core.Set.for_all ~f:refineable_var)
-  then env
-  else
-    (* Cell keys use rewritten addresses. *)
-    let addr_opt =
-      if
-        Exp.free_vars addr
-        |> Core.Set.exists ~f:(Abi.is_sp Abi.x86_64_sysv)
-      then None
-      else
-        let a' = rewrite_addr (AI.frame_of env) addr in
-        if Exp.free_vars a' |> Core.Set.is_empty then Some a' else None in
-    match addr_opt with
-    | None -> env
-    | Some addr ->
-    match mem with
-    | Bil.Var m ->
-      (match Var.typ m with
-       | Type.Mem (addr_i, addressable_size) ->
-         let k = mem_idx addr_i addressable_size in
-         (match denote_imm_exp addr env with
-          | Error _ -> env
-          | Ok addr_ws ->
-            (match Mem.Key.of_wordset addr_ws with
-             | None -> env
-             | Some key ->
-               let resSize = Size.in_bits size in
-               if WordSet.bitwidth cstr <> resSize then env
+  (* Cell keys use rewritten addresses. *)
+  let addr_opt =
+    if
+      Exp.free_vars addr
+      |> Core.Set.exists ~f:(Abi.is_sp Abi.x86_64_sysv)
+    then None
+    else
+      let a' = rewrite_addr (AI.frame_of env) addr in
+      if Exp.free_vars a' |> Core.Set.is_empty then Some a' else None in
+  match addr_opt with
+  | None -> env
+  | Some addr ->
+  match mem with
+  | Bil.Var m ->
+    (match Var.typ m with
+     | Type.Mem (addr_i, addressable_size) ->
+       let k = mem_idx addr_i addressable_size in
+       (match denote_imm_exp addr env with
+        | Error _ -> env
+        | Ok addr_ws ->
+          (match Mem.Key.of_wordset addr_ws with
+           | None -> env
+           | Some key ->
+             let resSize = Size.in_bits size in
+             if WordSet.bitwidth cstr <> resSize then env
+             else
+               let mv = AI.find_memory k env m in
+               let cur = Mem.find (resSize, endian) mv key in
+               let cur_ws = Mem.Val.data cur in
+               let refined = WordSet.meet cur_ws cstr in
+               if Word.is_zero (WordSet.cardinality refined)
+                  || not (WordSet.precedes refined cur_ws)
+               then env
                else
-                 let mv = AI.find_memory k env m in
-                 let cur = Mem.find (resSize, endian) mv key in
-                 let cur_ws = Mem.Val.data cur in
-                 let refined = WordSet.meet cur_ws cstr in
-                 if Word.is_zero (WordSet.cardinality refined)
-                    || not (WordSet.precedes refined cur_ws)
-                 then env
-                 else
-                   let new_cell =
-                     Mem.Val.meet_at (resSize, endian) cur
-                       (Mem.Val.create cstr endian) in
-                   AI.add_memory env ~key:m
-                     ~data:(Mem.add mv ~key ~data:new_cell)))
-       | Type.Imm _ | Type.Unk -> env)
-    | _ -> env
+                 let new_cell =
+                   Mem.Val.meet_at (resSize, endian) cur
+                     (Mem.Val.create cstr endian) in
+                 AI.add_memory env ~key:m
+                   ~data:(Mem.add mv ~key ~data:new_cell)))
+     | Type.Imm _ | Type.Unk -> env)
+  | _ -> env
 
 (* Refine var operands through a producer def. *)
 and refine_chain ~(defs : (def term * bool) Var.Map.t)
@@ -1442,8 +1433,6 @@ type flag_group = {
 
 (* Per-run analysis context. *)
 type refine_ctx = {
-  (* All-defs-tagged set. *)
-  rc_all_tagged : Var.Set.t;
   (* Per-block solution versions. *)
   rc_versions : int Tid.Map.t;
   (* Walk CFG without pseudo-nodes. *)
@@ -2029,10 +2018,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
 
 
 
-(* Refineability closure. *)
-let refineable_var_of (refineable : Var.Set.t option) (v : var) : bool =
-  Option.value_map refineable ~default:false
-    ~f:(fun set -> Core.Set.mem set (Var.base v))
+(* Ticket 03 removes the [?refineable] parameters; the walks are un-gated. *)
 
 
 let apply_operand_constraint
@@ -2058,8 +2044,8 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
   | None -> env
   | Some { sub = Some _; _ } -> env
   | Some ctx ->
-    let refineable_var (v : var) : bool =
-      refineable_var_of ctx.refineable v in
+    (* Gate-free (spec §2.1): every var refines. *)
+    let refineable_var (_ : var) : bool = true in
     List.fold (edge_constraints ~env ~ctx cond cstr) ~init:env
       ~f:(fun env seed ->
         match seed with
@@ -2223,8 +2209,8 @@ let assume_jump_cond_with_group ?(refineable : Var.Set.t option)
     ?(sub : sub term option = None)
     ?(blk : blk term option = None)
     (env : AI.t) (jmp : jmp term) : AI.t =
-  (* Refine only relevant vars. *)
-  let refineable_var (v : var) : bool = refineable_var_of refineable v in
+  (* Gate-free (spec §2.1): every var refines. *)
+  let refineable_var (_ : var) : bool = true in
   
   let ctx : analysis_ctx =
     { refineable; defs; stores; flag_state; sub; blk } in
@@ -2366,19 +2352,6 @@ let call_facts_of_block (b : blk term) : var list * bool =
 (* Block version; 0 means never set. *)
 (* Per-run analysis context. *)
 let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
-  rc_all_tagged =
-    Term.enum blk_t s
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-        let k = Var.base (Def.lhs d) in
-        let tagged = Term.has_attr d Utils.relevant in
-        match Core.Map.find m k with
-        | None -> Core.Map.set m ~key:k ~data:tagged
-        | Some true -> m
-        | Some false -> Core.Map.set m ~key:k ~data:false)
-    |> Core.Map.filter ~f:Fn.id
-    |> Core.Map.keys
-    |> Var.Set.of_list;
   rc_versions = Tid.Map.empty;
   rc_walk_cfg = cfg;
   rc_cache = Walk_memo.empty;
@@ -2430,18 +2403,12 @@ let refine_edge_inline
   match seeds with
   | [] -> (env, Some rctx, Tid.Set.empty)
   | _ ->
-    
-    
-    
-    let all_tagged : Var.Set.t = rctx.rc_all_tagged in
-    let refineable_var (v : var) : bool = refineable_var_of refineable v in
-    
+    (* Gate-free (spec §2.1): every seed meets. *)
+    let refineable_var (_ : var) : bool = true in
+    let _ = refineable in
     let env =
       List.fold seeds ~init:env ~f:(fun e -> function
-          | Var (v, c) ->
-            if Core.Set.mem all_tagged (Var.base v)
-            then meet_var refineable_var e v c
-            else e
+          | Var (v, c) -> meet_var refineable_var e v c
           | Cell _ | Infeasible -> e) in
     
     (* Cached walk with threaded context. *)
@@ -2534,7 +2501,7 @@ let denote_jump ?refineable ?preserved ?defs ?stores
         | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
         | Some (Indirect _)
         | Some (Direct _) ->
-          (* Relevance-restricted calls. *)
+          (* Calls abstract; every caller's def is denoted. *)
           begin
             let rsp = Abi.x86_64_sysv.sp in
             (* Escape set plus caller frame boundary. *)
@@ -2642,16 +2609,6 @@ let init_sol ?entry (sub : sub term) =
 
 (* Calls abstract; recursion is fallback. *)
 
-(* Vars with tagged defs. *)
-let refineable_of_sub (s : sub term) : Var.Set.t =
-  Term.enum blk_t s
-  |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.fold ~init:Var.Set.empty ~f:begin fun acc d ->
-    if Term.has_attr d Utils.relevant then
-      Core.Set.add acc (Var.base (Def.lhs d))
-    else acc
-  end
-
 (* Per-sub def-chain map. *)
 let defs_of_sub (s : sub term) : (def term * bool) Var.Map.t =
   Term.enum blk_t s
@@ -2694,8 +2651,7 @@ let preserved_of_sub (s : sub term) : Var.Set.t =
   Core.Set.union regs virt
 
 let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
-  (* Per-sub sets computed once. *)
-  let refineable = refineable_of_sub s in
+  (* Per-sub sets computed once; the walks are un-gated (spec §2.1). *)
   let preserved = preserved_of_sub s in
   (* Per-sub def-chain map. *)
   let defs = defs_of_sub s in
@@ -2722,7 +2678,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
           let precond = Solution.get fun_sol source in
            AI.join acc @@
            let (res, _, _) =
-             denote_block_with_stores ~refineable ~preserved ~defs ~stores
+             denote_block_with_stores ~preserved ~defs ~stores
                ~sub:(Some s) ~rctx:callee_rctx
                (denote_call (Term.tid sub::stack)) ctx ~source precond
                ~target in
@@ -2776,13 +2732,13 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     in
     let head_to_blocks = collect_heads wto Tid.Map.empty in
     let compute_need (blocks : Tid.Set.t) : Var.Set.t =
+      (* Every def in the cycle is tracked (spec §2.1). *)
       let defs =
         Core.Set.to_list blocks
         |> List.concat_map ~f:(fun tid ->
             match Term.find blk_t s tid with
             | Some blk -> Term.enum def_t blk |> Seq.to_list
             | None -> [])
-        |> List.filter ~f:(fun d -> Term.has_attr d Utils.relevant)
       in
       let def_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
       if Core.Set.is_empty def_vars then Var.Set.empty
@@ -2893,7 +2849,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                  (if Option.is_some head_opt && fired then
                     match Program.lookup blk_t ctx p with
                     | Some _pb ->
-                      ignore (denote_block_with_stores ~refineable ~preserved
+                      ignore (denote_block_with_stores ~preserved
                                 ~defs ~stores ~sub:(Some s)
                                 ~edge_conds:(Some edge_conds)
                                 ~sol:(Some sol_snap) ~rctx:rc
@@ -2906,7 +2862,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                  (* Latch reports acquisition. *)
                  let flatch = Cbat_landmarks.start_fired_latch () in
                  let (res, rc', reads) =
-                   denote_block_with_stores ~refineable ~preserved ~defs
+                   denote_block_with_stores ~preserved ~defs
                      ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
                      ~sol:(Some sol_snap) ~rctx:rc (denote_call stack)
                      ctx ~source:p p_entry ~target:v in
@@ -3072,7 +3028,45 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
       | Type.Mem _ | Type.Unk -> acc)
 
 
-let rec extract ~(sp : var) ~(stack_access : def term -> bool)
+(* Frame neighborhood for channel 2: generous constants (spec §2.2). *)
+let frame_neighborhood : int64 * int64 = (-65536L, 65536L)
+
+(* Tests whether an address mentions a frame-tracked var. *)
+let mentions_frame_var (frame : frame option) (addr : exp) : bool =
+  match frame with
+  | None -> false
+  | Some f ->
+    Exp.free_vars addr
+    |> Core.Set.exists ~f:(fun v ->
+        Option.is_some (AI.frame_lookup f (AI.frame_key v)))
+
+(* Tests the two-channel frame-residency proof (spec §2.2). *)
+let is_seed (st_before : AI.t) (addr : exp) : bool =
+  let frame = frame_of_state st_before in
+  (* Channel 1 (direct): the address is affine over frame-derived registers,
+     widened or not; [Infinite] stays live. *)
+  if mentions_frame_var frame addr then true
+  else
+    (* Channel 2 (reloaded): the denoted address is bounded and a SUBSET of
+       the frame neighborhood — never intersection; non-seeding is sound. *)
+    match denote_imm_exp addr st_before with
+    | Error _ -> false
+    | Ok ws ->
+      if WordSet.is_top ws then false
+      else if WordSet.is_bottom ws then true
+      else if WordSet.is_infinite ws then false
+      else
+        match WordSet.min_elem ws, WordSet.max_elem ws with
+        | Some lo, Some hi -> (
+            match Word.to_int64 lo, Word.to_int64 hi with
+            | Ok lo, Ok hi ->
+              let nlo, nhi = frame_neighborhood in
+              Stdlib.Int64.compare lo nlo >= 0 && Stdlib.Int64.compare hi nhi <= 0
+            | _ -> false)
+        | _ -> false
+
+
+let rec extract ~(sp : var)
     ~(dynamic_alloc : def term -> bool)
     ~(sol : (tid, AI.t) Solution.t)
     (sub : sub term) :
@@ -3082,24 +3076,16 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
   let raw, kraw =
     Term.enum blk_t sub
     |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
-        (* Walk ends at the last tagged def. *)
+        (* Every def is denoted; seeding replaces the tag match. *)
         let defs = Term.enum def_t blk |> Seq.to_list in
-        let last_tagged =
-          Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-              if stack_access d then Some i else acc)
-        in
-        match last_tagged with
-        | None -> (acc, kacc)
-        | Some i ->
-        let defs' = Base.List.take defs (i + 1) in
         let _, acc, kacc =
-          Base.List.fold_left defs'
+          Base.List.fold_left defs
             ~init:(Solution.get tags (Term.tid blk), acc, kacc)
             ~f:(fun (st, acc, kacc) d ->
                  let st_before = st in
                  let st = denote_def d st in
                  match stack_address_of_rhs (Def.rhs d) with
-                 | Some addr when stack_access d ->
+                 | Some addr when is_seed st_before addr ->
                      let addr' =
                        rewrite_addr (frame_of_state st_before) addr in
                      (* Addresses use tag-state values. *)
@@ -3131,10 +3117,6 @@ let rec extract ~(sp : var) ~(stack_access : def term -> bool)
                           let ws = WordSet.top 64 in
                           let acc = (Term.tid d, Unbounded, ws) :: acc in
                           (st, acc, kacc))
-                 | None when stack_access d ->
-                     let ws = WordSet.top 64 in
-                     let acc = (Term.tid d, Unbounded, ws) :: acc in
-                     (st, acc, kacc)
                  | _ -> (st, acc, kacc))
         in
         (acc, kacc))
@@ -3256,5 +3238,42 @@ and vla_size_of_rhs (sp : var) (sub : sub term) (rhs : Bil.exp) :
           | _ -> None)
       | None -> None)
   | _ -> None
+
+(* Runtime-sized SP decrements — relocated unchanged from the deleted
+   relevance pass (spec §2.3); the hike-vsa pass calls it once per sub. *)
+and detect_dynamic_alloc (sp : var) (sub : sub term) : Tid.Set.t =
+  let sp_base = Var.base sp in
+  let def_of_lhs =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+        Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
+  in
+  let is_sp_var (v : var) : bool = Var.same (Var.base v) sp_base in
+  let find_def (v : var) : def term option = Core.Map.find def_of_lhs (Var.base v) in
+  let is_dynamic_sp_decrement (e : exp) : bool =
+    vla_decrement_p sp_base e
+  in
+  let v =
+    object
+      inherit [Tid.Set.t] Term.visitor
+      method! visit_def d acc =
+        let lhs = Def.lhs d in
+        if is_sp_var lhs then
+          let rhs = Def.rhs d in
+          if is_dynamic_sp_decrement rhs then
+            Core.Set.add acc (Term.tid d)
+          else
+            match rhs with
+            | Bil.Var tmp ->
+                (match find_def tmp with
+                 | Some d' when is_dynamic_sp_decrement (Def.rhs d') ->
+                     Core.Set.add (Core.Set.add acc (Term.tid d)) (Term.tid d')
+                 | _ -> acc)
+            | _ -> acc
+        else acc
+    end
+  in
+  v#visit_sub sub Tid.Set.empty
 
 end

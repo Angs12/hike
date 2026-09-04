@@ -766,8 +766,9 @@ let is_abi_visible ctx sub_info def =
   | Some info ->
       Hike_stack_model.abi_visibility_of (sp ctx.Convutils.target) info def
 
-(* Tests the [stack_access] tag. *)
-let is_stack_access def = Hike_vsa_relevance.has_stack_access def
+(* A stack access carries a [vsa_info] tag — the invariant is structural
+   (spec §2.2): an access is a stack access iff it is tagged. *)
+let is_stack_access sub_info def = Option.is_some (find_def_tag sub_info def)
 
 (* Tests for unusable VSA results. *)
 let sub_degraded sub_info =
@@ -958,7 +959,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
   let var = Def.lhs def in
   match find_def_tag sub_info def with
   | Some (Convutils.Range (lo, hi))
-    when Int64.equal lo hi && is_stack_access def ->
+    when Int64.equal lo hi && is_stack_access sub_info def ->
       if Int64.compare lo 0L > 0 then
         (* Incoming-arg cells read via [hike_stack]. *)
         (match fr.stack with
@@ -975,7 +976,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
         (* Locals use static frame GEPs. *)
         create_static_mem_access llvm_builder blk_tid fr lo exp
   | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-    when Int64.compare lo 0L > 0 && is_stack_access def ->
+    when Int64.compare lo 0L > 0 && is_stack_access sub_info def ->
       (* Positive intervals rebase onto the stack. *)
       (match Def.rhs def with
       | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
@@ -985,7 +986,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
       | _ -> create_exp llvm_builder blk_tid exp)
   | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
   | Some Convutils.Unbounded ->
-      if is_stack_access def then begin
+      if is_stack_access sub_info def then begin
         if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
           ctx.Convutils.guarded_warned :=
             Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
@@ -1002,14 +1003,14 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
       let* typ = typ_lltype_m (Var.typ var) in
       return @@ Llvm.poison typ
   | None ->
-      if is_stack_access def then
+      if is_stack_access sub_info def then
         failwith
           (Printf.sprintf
              "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
              (Tid.name sub_tid) (Tid.name (Term.tid def)))
       else create_exp llvm_builder blk_tid exp
 
-let create_def blk_tid llvm_builder sub_tid sub_info fr def =
+let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
   
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -1018,7 +1019,8 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
   let exp = Def.rhs def in
   let _ = (ctx, var) in
   let* res =
-    if Term.has_attr def Hike_vsa_relevance.dynamic_alloc then
+    (* Runtime-sized SP decrements become real allocas (spec §2.3). *)
+    if Core.Set.mem alloc_tids (Term.tid def) then
       create_dynamic_alloc llvm_builder blk_tid exp
     else if KB.Value.get rip_relative_addr v then
       create_rip_relative_addr llvm_builder blk_tid exp
@@ -1026,7 +1028,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr def =
       (* Split-model accesses use region GEPs. *)
       (match find_def_tag sub_info def with
        | Some (Convutils.Range (lo, hi))
-         when Int64.equal lo hi && is_stack_access def ->
+         when Int64.equal lo hi && is_stack_access sub_info def ->
            (match region_of_offset fr.regions lo with
             | Some (r, base) ->
                 let offset = Int64.sub lo (fst r.Convutils.span) in
@@ -1761,13 +1763,13 @@ let transfer_with_phis transfer_vars llvm_builder blk_tid () =
       insert_local ctx blk_tid var res;
       return ())
 
-let create_elts llvm_builder blk sub_tid sub_info fr () =
+let create_elts llvm_builder blk sub_tid sub_info fr alloc_tids () =
   let open KB in
   let tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
-      | `Def def -> create_def tid llvm_builder sub_tid sub_info fr def
+      | `Def def -> create_def tid llvm_builder sub_tid sub_info fr alloc_tids def
       | `Phi _ -> return ()
       | `Jmp _ -> return ())
 
@@ -1776,12 +1778,17 @@ let populate_blks transfer_vars blks sub sub_info fr () =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
   let sub_tid = Term.tid sub in
+  (* VLA detection runs once per sub on the emission shape (spec §2.3). *)
+  let alloc_tids =
+    Cbat_vsa.Cbat_extraction.detect_dynamic_alloc
+      (sp ctx.Convutils.target) sub
+  in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
       in
       transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
-      >>= create_elts llvm_builder blk sub_tid sub_info fr
+      >>= create_elts llvm_builder blk sub_tid sub_info fr alloc_tids
       >>= create_control_flow llvm_builder blk sub fr)
 
 

@@ -7,15 +7,6 @@ module AI = Cbat_vsa.AI
 module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 
-(* Each sub runs through [Relevance.analyze] first; HIKE_VSA_RESTRICTION=0 skips it. *)
-module Relevance = Hike.Relevance
-
-(* Default ON; HIKE_VSA_RESTRICTION=0 disables. *)
-let restriction_on () : bool =
-  match Sys.getenv_opt "HIKE_VSA_RESTRICTION" with
-  | Some "0" -> false
-  | _ -> true
-
 let () = Printexc.record_backtrace true
 
 (* Slow-sub threshold, seconds. *)
@@ -33,13 +24,12 @@ let describe_exn (e : exn) : string =
   | Invalid_argument msg -> Printf.sprintf "Invalid_argument(%s)" msg
   | _ -> Printexc.to_string e
 
-(* One sub, one full fixpoint on the analyze-tagged sub. *)
-let run_sub (sp : var) (prog : program term) (sub : sub term) : outcome =
+(* One sub, one full fixpoint on the raw sub (spec §2.1). *)
+let run_sub (_sp : var) (_prog : program term) (sub : sub term) : outcome =
   let t0 = Unix.gettimeofday () in
   try
-    let sub' = Relevance.analyze sp sub in
-    let prog' = Program.create ~subs:[ sub' ] () in
-    let _sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
+    let prog' = Program.create ~subs:[ sub ] () in
+    let _sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub) in
     let t1 = Unix.gettimeofday () in
     Ok (t1 -. t0)
   with e ->
@@ -109,8 +99,7 @@ let () =
         Format.eprintf "corpus_watch: BAP initialization failed: %a@\n%!"
           Bap_main.Extension.Error.pp failed;
         exit 1);
-    Printf.printf "=== corpus watch (relevance restriction %s) ===\n"
-      (if restriction_on () then "ON" else "OFF (HIKE_VSA_RESTRICTION=0)");
+    Printf.printf "=== corpus watch (gate-free) ===\n";
     flush stdout;
     let reports = List.map run_binary paths in
     Printf.printf "\n=== corpus watch summary ===\n";

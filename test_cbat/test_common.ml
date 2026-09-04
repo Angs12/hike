@@ -123,30 +123,15 @@ end
 
 module Map = Cbat_map_lattice.Make_val (IntLattice) (IntLattice)
 
-let tag_all (sub : sub term) : sub term =
-  Term.map blk_t sub ~f:(fun b ->
-      Term.map def_t b ~f:(fun d -> Term.set_attr d Cbat_vsa_utils.relevant ()))
-
-module Relevance = Hike.Relevance
+(* Every def is denoted (spec §2.1); all-tracked is the only mode. *)
 
 let v64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64)
 let v1 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 1)
 let memv (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Mem (`r64, `r8))
 
-(* Fixture stack pointer; passed to [Relevance.analyze sp sub]. *)
+(* Fixture stack pointer. *)
 let sp = v64 "RSP"
 
-(* Look a def up by tid in a (possibly re-tagged) sub. *)
-let find_def (sub : sub term) (tid : tid) : def term option =
-  Term.enum blk_t sub
-  |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.find ~f:(fun d -> Tid.equal (Term.tid d) tid)
-
-(* [find_def] that asserts; fixtures guarantee the def exists. *)
-let find_def_exn (sub : sub term) (tid : tid) : def term =
-  match find_def sub tid with Some d -> d | None -> assert false
-
-(* Relevant tag: Unit-payload tag with fixed uuid; presence = relevant. *)
 module Kb = Hike.Kb
 module Sm = Hike.Stack_model
 module Stl = Hike.Stack_to_locals

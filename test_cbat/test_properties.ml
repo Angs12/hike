@@ -362,7 +362,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
     ([ entry; Blk.Builder.result l1_b; Blk.Builder.result b1_b ]
     @ (if keep_l2 then [ l2_res; b2_res ] else [])
     @ [ exit0 ]);
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, l1_tid, b1_tid, match k2 with Some _ -> Some l2_tid | None -> None)
 
 (* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
@@ -406,7 +406,7 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   Blk.Builder.add_jmp b1_b (Jmp.create (Goto (Direct l1_tid)));
   let sub_b = Sub.Builder.create ~name:"lm_ne_landmark" () in
   List.iter (Sub.Builder.add_blk sub_b) [ Blk.Builder.result entry_b; Blk.Builder.result l1_b; Blk.Builder.result b1_b; exit0 ];
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, l1_tid, b1_tid)
 
 (* F1: JLE-counter head lands at TOP (inclusive taken row overshoots); pins sound invariants. *)
@@ -475,7 +475,7 @@ let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   List.iter (Sub.Builder.add_blk sub_b)
     [ Blk.Builder.result prologue_b; Blk.Builder.result s1_b; Blk.Builder.result s2_b;
       e1; e2; e3; Blk.Builder.result chain_b; l1; l2; l3 ];
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   (sub, l1_tid, l2_tid, l3_tid, chain_tid, x)
 
 (* T01-1: accumulated-cond acceptance — mid edge by c2 & ~c1, tail by ~c1 & ~c2. *)
@@ -891,7 +891,7 @@ let run_chains () =
   let sub_b = Sub.Builder.create ~name:"t01_straight" () in
   List.iter (Sub.Builder.add_blk sub_b)
     [ Blk.Builder.result entry_b; Blk.Builder.result mid_b; exit0 ];
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   let prog' = Program.create ~subs:[ sub ] () in
   let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   let cell_at (t : tid) : Ws.t =

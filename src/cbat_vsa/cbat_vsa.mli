@@ -50,10 +50,10 @@ module Cbat_extraction : sig
     tags:(tid, AI.t) Solution.t ->
     blk term -> exp -> AI.t -> AI.t
 
-  (* Per-def classification over [sol]. *)
+  (* Per-def classification over [sol]; the two-channel frame-residency
+     proof (spec §2.2) seeds accesses, replacing the deleted tag match. *)
   val extract :
     sp:var ->
-    stack_access:(def term -> bool) ->
     dynamic_alloc:(def term -> bool) ->
     sol:(tid, AI.t) Solution.t ->
     sub term ->
@@ -65,6 +65,9 @@ module Cbat_extraction : sig
 
   (* Size expression of a dynamic allocation, if any. *)
   val vla_size_of_rhs : var -> sub term -> Bil.exp -> Bil.exp option
+
+  (* Runtime-sized SP decrements (spec §2.3). *)
+  val detect_dynamic_alloc : var -> sub term -> Tid.Set.t
 end
 
 (* Re-exported profiling interface. *)

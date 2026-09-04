@@ -1,4 +1,4 @@
-(* Branch-assume/fixpoint smoke, relevance wiring, seeds, casts, anchor pins. *)
+(* Branch-assume/fixpoint smoke, channel pins, seeds, casts, anchor pins. *)
 open Bap.Std
 open Bap_core_theory
 open Test_common
@@ -44,12 +44,11 @@ let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub 
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   let ctx = Program.create ~subs:[ sub ] () in
   (i, ctx, sub, exit_tid)
 
-(* Relevance tags + fixpoint wiring: analyze tags defs; tag presence is the restriction. *)
-(* Production relevance pass, reached through the library interface. *)
+(* Flag-guard fixture: mixed vs single def shapes. *)
 let mk_flag_sub ~(mixed : bool) :
     var * Program.t * sub term * tid * def term * def term option * def term =
   let f = v1 "t3_f" in
@@ -197,10 +196,10 @@ let mk_caller_alias () : caller_alias_fixture =
 
 (* T4: caller-alias soundness — post-call reload reads TOP; RSP/RBP/RBX kept, rdi TOPed. *)
 (* F1: map-lattice fold visits explicitly-stored bindings only; absent = top. *)
-(* RSP-only relevance seeds: RBP enters only via RSP-derivation. *)
+(* RSP-anchored seeds: RBP enters only via RSP-derivation. *)
 
 (* -O0 prologue (rbp := RSP) + load + overlapping store. Returns (def_rbp, def_store, sub). *)
-let mk_rsp_prologue_sub () : def term * def term * sub term =
+let mk_rsp_prologue_sub () : def term * def term * def term * sub term =
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let m = memv "t21_m" in
@@ -228,9 +227,9 @@ let mk_rsp_prologue_sub () : def term * def term * sub term =
   let sub_b = Sub.Builder.create ~name:"t21_prologue" () in
   Sub.Builder.add_blk sub_b blk;
   let sub = Sub.Builder.result sub_b in
-  (def_rbp, def_store, sub)
+  (def_rbp, def_load, def_store, sub)
 
-let mk_rsp_index_sub () : def term * sub term =
+let mk_rsp_index_sub () : def term * def term * sub term =
   let rsp = v64 "RSP" in
   let rdi = v64 "t21_rdi" in
   let idx = v64 "t21_idx" in
@@ -254,7 +253,7 @@ let mk_rsp_index_sub () : def term * sub term =
   let sub_b = Sub.Builder.create ~name:"t21_idx" () in
   Sub.Builder.add_blk sub_b blk;
   let sub = Sub.Builder.result sub_b in
-  (def_idx, sub)
+  (def_idx, def_load, sub)
 
 let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * sub term =
   let rsp = v64 "RSP" in
@@ -264,7 +263,7 @@ let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * s
   let m2 = memv "t21_n_m2" in
   let v = v64 "t21_n_v" in
   let w = v64 "t21_n_w" in
-  let def_rbp = Def.create rbp (Bil.Int (w64 42)) in
+  let def_rbp = Def.create rbp (Bil.Int (w64 0x400000)) in
   let def_idx = Def.create idx (Bil.Int (w64 5)) in
   let def_load =
     Def.create v
@@ -305,10 +304,10 @@ let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * s
   let sub = Sub.Builder.result sub_b in
   (def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub)
 
-(* Per-block backward pass: a var is relevant at a block only on paths through it. *)
+(* One-path heap shapes: the use-store's address joins to TOP. *)
 
-(* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, sub). *)
-let mk_one_path_sub () : def term * def term * def term * sub term =
+(* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, def_use, sub). *)
+let mk_one_path_sub () : def term * def term * def term * def term * sub term =
   let rsp = v64 "RSP" in
   let rbp = v64 "t22_rbp" in
   let rdi = v64 "t22_rdi" in
@@ -350,7 +349,7 @@ let mk_one_path_sub () : def term * def term * def term * sub term =
   let sub_b = Sub.Builder.create ~name:"t22_onepath" () in
   List.iter (Sub.Builder.add_blk sub_b) [ entry; b1; b2; b_use ];
   let sub = Sub.Builder.result sub_b in
-  (def_prologue, def_load, def_other, sub)
+  (def_prologue, def_load, def_other, def_use, sub)
 
 let mk_high0_cast_sub () : var * Program.t * sub term * tid =
   let rax = Var.create ~is_virtual:false ~fresh:false "rax" (Type.Imm 64) in
@@ -507,7 +506,8 @@ let run () =
       (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (w32 5)))))
       ivar
   in
-  check "D4-6: doubt — NEQ guard keeps the state (top)" (Ws.is_top c6);
+  check "D4-6: gate-free (spec §2.1) — the NEQ guard refines to TOP−{5} (5 ∉, 0 ∈, non-top)"
+    ((not (Ws.is_top c6)) && (not (Ws.elem (w32 5) c6)) && Ws.elem (w32 0) c6);
   let fv = Var.create ~is_virtual:false ~fresh:false "zf" (Type.Imm 1) in
   let c7 =
     AI.find_word 1
@@ -562,7 +562,7 @@ let run () =
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   let ctx = Program.create ~subs:[ sub ] () in
   let sol =
     Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
@@ -692,9 +692,7 @@ let run () =
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let j_after =
     Vsa.denote_def
-      (Term.set_attr
-         (Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (w64 1))))
-         Cbat_vsa_utils.relevant ())
+      (Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (w64 1))))
       exit_ai
   in
   check "D6-14 (BIR loop): mixed-width rshift COMPUTES (lane A), no crash, no guard fire"
@@ -737,28 +735,12 @@ let run () =
     && not (contains_substring captured "(degrading to top)"));
   ())
 ;
-(  let t = Cbat_vsa_utils.relevant in
-  check "T1-1: relevant tag is registered under the name \"relevant\""
-    (String.equal (Value.Tag.name t) "relevant");
-  let iv = v64 "t1_iv" in
-  let d = Def.create iv (Bil.Int (w64 7)) in
-  check "T1-2: an untagged def reads as not relevant"
-    (not (Term.has_attr d Cbat_vsa_utils.relevant));
-  let d' = Term.set_attr d Cbat_vsa_utils.relevant () in
-  check "T1-3: set_attr roundtrip — the tagged def reads as relevant"
-    (Term.has_attr d' Cbat_vsa_utils.relevant);
-  ()
-
-(* T2: denote_def restriction — untagged defs skipped, tagged denoted. *))
-;
+(* T1 deleted (spec §2.1): the [relevant] tag is gone; every def is denoted. *)
 (  let iv = v64 "t2_iv" in
   let d = Def.create iv (Bil.Int (w64 7)) in
-  let e_skip = Vsa.denote_def d AI.top in
-  check "T2-1: untagged def — skipped (word stays top)" (Ws.is_top (AI.find_word 64 e_skip iv));
-  let d' = Term.set_attr d Cbat_vsa_utils.relevant () in
-  let e_tag = Vsa.denote_def d' AI.top in
-  check "T2-3: tagged def — denoted normally"
-    (Ws.equal (AI.find_word 64 e_tag iv) (Ws.singleton (w64 7)));
+  let e_den = Vsa.denote_def d AI.top in
+  check "T2-1: gate-free — every def is denoted, no tag needed"
+    (Ws.equal (AI.find_word 64 e_den iv) (Ws.singleton (w64 7)));
   ()
 
 (* Frozen-flag fixture: f := g/h, stack-access load, unrelated-def control, jmp exit if f. *))
@@ -772,7 +754,7 @@ let run () =
          (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (w64 5)))))
       x
   in
-  check "T3-1: restriction ON + var in the refineable set — refined to {5}"
+  check "T3-1: gate-free — the guard refines x to {5}"
     (Ws.min_elem c_in = Some (w64 5) && Ws.max_elem c_in = Some (w64 5));
   let c_out =
     AI.find_word 64
@@ -780,28 +762,15 @@ let run () =
          (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (w64 5)))))
       x
   in
-  check "T3-2: restriction ON + var NOT in the refineable set — NOT refined" (Ws.is_top c_out);
+  check "T3-2: gate-free (spec §2.1) — an empty refineable set still refines to {5}"
+    (Ws.min_elem c_out = Some (w64 5) && Ws.max_elem c_out = Some (w64 5));
   ())
 ;
-(  (* G3: jump-cond seeding — both flag defs tagged via the jump cond. *)
-  let f, ctx, sub, exit_tid, defA, defB, defU = mk_flag_sub ~mixed:true in
-  let sub' = Relevance.analyze sp sub in
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let defA' = find_def_exn sub' (Term.tid defA) in
-  check "T3-5: flag-cond def (1-bit lhs) IS tagged (jump-cond seeding)"
-    (Term.has_attr defA' Cbat_vsa_utils.relevant);
-  (match defB with
-  | Some defB ->
-      let defB' = find_def_exn sub' (Term.tid defB) in
-      check "T3-6: the mixed-def sibling IS tagged too (same lhs = jump-cond seed)"
-        (Term.has_attr defB' Cbat_vsa_utils.relevant)
-  | None -> check "T3-6: the mixed-def sibling IS tagged too (same lhs = jump-cond seed)" false);
-  (* Unrelated def (no cond/sink chain) stays untagged. *)
-  let defU' = find_def_exn sub' (Term.tid defU) in
-  check "T3-9: unrelated def (feeds no cond/sink chain) stays UNTAGGED"
-    (not (Term.has_attr defU' Cbat_vsa_utils.relevant));
+(  (* G3: gate-free flag-guard refinement (spec §2.1). *)
+  let f, ctx, sub, exit_tid, _, _, _ = mk_flag_sub ~mixed:true in
+  let ctx' = Program.create ~subs:[ sub ] () in
   let sol =
-    Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub')
+    Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   ignore sol;
   (* Exit IN-state is the taken-edge refined state; the fallthrough edge has no target block. *)
@@ -811,10 +780,9 @@ let run () =
   check "T3-7b (UNASSERTABLE in the fused world — the fixture's fallthrough edge has no target block; kept for the ignore-list bookkeeping, see the comment above)" false;
   (* Single-def control refines identically. *)
   let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
-  let sub2' = Relevance.analyze sp sub2 in
-  let ctx2' = Program.create ~subs:[ sub2' ] () in
+  let ctx2' = Program.create ~subs:[ sub2 ] () in
   let sol2 =
-    Vsa.static_graph_vsa [] ctx2' sub2' (Vsa.init_sol ~entry:(anchored_entry ()) sub2')
+    Vsa.static_graph_vsa [] ctx2' sub2 (Vsa.init_sol ~entry:(anchored_entry ()) sub2)
   in
   let c2 = AI.find_word 1 (Graphlib.Std.Solution.get sol2 exit_tid2) f2 in
   check "T3-8: single-def flag — f2 IS refined to {1} on the taken edge"
@@ -824,21 +792,10 @@ let run () =
 (* Caller-alias fixture: aliased slot, tracked load, call, post reload. Returns the record. *))
 ;
 (  let fx = mk_caller_alias () in
-  let sub' = Relevance.analyze sp fx.ca_sub in
-  let store' = find_def_exn sub' (Term.tid fx.ca_def_store) in
-  check "T4-1: the store at the aliased address is tagged (sp-relative)"
-    (Term.has_attr store' Cbat_vsa_utils.relevant);
-  let disjoint' = find_def_exn sub' (Term.tid fx.ca_def_store_disjoint) in
-  check "T4-2: the disjoint store is ALSO tagged (sp-relative; no slot filter)"
-    (Term.has_attr disjoint' Cbat_vsa_utils.relevant);
-  let rdi' = find_def_exn sub' (Term.tid fx.ca_def_rdi) in
-  let rbp' = find_def_exn sub' (Term.tid fx.ca_def_rbp) in
-  check "T4-3: rdi := rbp - 0x30 tagged (sp-derived via rbp)"
-    (Term.has_attr rdi' Cbat_vsa_utils.relevant);
-  check "T4-4: rbp := RSP - 0x1f00 tagged (sp-derived)" (Term.has_attr rbp' Cbat_vsa_utils.relevant);
+  let sub = fx.ca_sub in
   (* Pre-call state makes the post-call check non-vacuous. *)
   let entry_blk' =
-    match Term.find blk_t sub' (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
+    match Term.find blk_t sub (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
   in
   let pre = Vsa.denote_defs entry_blk' AI.top in
   let mkey =
@@ -854,9 +811,9 @@ let run () =
     (Ws.equal pre_val (Ws.singleton (w64 42)));
   check "T4-6: pre-call rdi is the concrete address {0xd0} (the alias)"
     (Ws.equal (AI.find_word 64 pre fx.ca_rdi) (Ws.singleton (w64 0xd0)));
-  (* Fixpoint on the tagged sub, restriction ON. *)
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
+  (* Gate-free fixpoint on the raw sub. *)
+  let ctx' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   let post_ai = Graphlib.Std.Solution.get sol fx.ca_post_tid in
   check "T4-7: caller-alias — the post-call reload reads TOP (sound)"
     (Ws.is_top (AI.find_word 64 post_ai fx.ca_r2));
@@ -925,60 +882,69 @@ let run () =
     (Ws.equal (AI.find_word 64 e_v vv) (Ws.singleton (w64 3)));
   ())
 ;
-(  let def_rbp, def_store, sub = mk_rsp_prologue_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let rbp' = find_def_exn sub' (Term.tid def_rbp) in
-  check "P21-1: RBP := RSP prologue def is tagged (RBP in D via the prologue)"
-    (Term.has_attr rbp' Cbat_vsa_utils.relevant);
-  let store' = find_def_exn sub' (Term.tid def_store) in
-  check "P21-2: store at [RBP - 0x30] overlaps the tracked load — tagged"
-    (Term.has_attr store' Cbat_vsa_utils.relevant);
+(  (* Channel-1 pin (spec §2.2): the prologue + frame-affine accesses seed. *)
+  let extract_of (sub : sub term) : Cu.vsa_kind Tid.Map.t =
+    let prog = Program.create ~subs:[ sub ] () in
+    let sol =
+      Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+    in
+    let offsets, _, _ =
+      Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+    in
+    offsets
+  in
+  let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
+  let tags = extract_of sub in
+  check "P21-1: channel 1 — the load at [RBP - 0x30] seeds Range(-48,-48)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
+  check "P21-2: channel 1 — the store at [RBP - 0x30] seeds Range(-48,-48)"
+    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-48L, -48L)));
   ()
 
-(* RSP-derived base with index; idx must be seeded. Returns (def_idx, sub). *))
+(* RSP-derived base with index; the indexed load seeds. *))
 ;
-(  let def_idx, sub = mk_rsp_index_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let idx' = find_def_exn sub' (Term.tid def_idx) in
-  check "P22-1: the INDEX var of an RSP-derived address is tagged (idx in W)"
-    (Term.has_attr idx' Cbat_vsa_utils.relevant);
+(  let _, def_load, sub = mk_rsp_index_sub () in
+  let prog = Program.create ~subs:[ sub ] () in
+  let sol =
+    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  in
+  let tags, _, _ =
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+  in
+  check "P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (32L, 32L)));
   ()
 
-(* GPR-RBP negative: rbp := 42 untagged; RSP-direct access tagged. *))
+(* Heap-shaped addresses do not seed; the RSP-direct access does. *))
 ;
-(  let def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let rbp' = find_def_exn sub' (Term.tid def_rbp) in
-  (* Forward pass tags RSP-derived users; rbp := 42 has no D vars, stays untagged. *)
-  check
-    "P23-1: GPR RBP (rbp := 42, not RSP-derived) — def NOT tagged (the two-pass design: rbp := \
-     42's rhs has no RSP-derived vars, so the forward pass does not tag it)"
-    (not (Term.has_attr rbp' Cbat_vsa_utils.relevant));
-  let idx' = find_def_exn sub' (Term.tid def_idx) in
-  check "P23-2: the INDEX of a non-RSP-derived address — NOT tagged"
-    (not (Term.has_attr idx' Cbat_vsa_utils.relevant));
-  let load' = find_def_exn sub' (Term.tid def_load) in
-  check "P23-3: the load at [rbp + idx*8] (a data access) — NOT tagged"
-    (not (Term.has_attr load' Cbat_vsa_utils.relevant));
-  let disjoint' = find_def_exn sub' (Term.tid def_store_disjoint) in
-  check "P23-4: the store at [rbp + 0x100] — NOT tagged (no tracked overlap)"
-    (not (Term.has_attr disjoint' Cbat_vsa_utils.relevant));
-  let store_rsp' = find_def_exn sub' (Term.tid def_store_rsp) in
-  check "P23-5: the RSP-direct store at [RSP - 8] — tagged (RSP access relevant)"
-    (Term.has_attr store_rsp' Cbat_vsa_utils.relevant);
+(  let _, _, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
+  let prog = Program.create ~subs:[ sub ] () in
+  let sol =
+    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  in
+  let tags, _, _ =
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+  in
+  check "P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded"
+    (Core.Map.find tags (Term.tid def_load) = None);
+  check "P23-2: channel 2 — the disjoint store at [rbp + 0x100] is NOT seeded"
+    (Core.Map.find tags (Term.tid def_store_disjoint) = None);
+  check "P23-3: channel 1 — the RSP-direct store at [RSP - 8] seeds Range(-8,-8)"
+    (Core.Map.find tags (Term.tid def_store_rsp) = Some (Cu.Range (-8L, -8L)));
   ())
 ;
-(  let def_prologue, def_load, def_other, sub = mk_one_path_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let load' = find_def_exn sub' (Term.tid def_load) in
-  check "F1-1: one-path relevance — def on the path to the use (rdi := Load in B1) tagged"
-    (Term.has_attr load' Cbat_vsa_utils.relevant);
-  let other' = find_def_exn sub' (Term.tid def_other) in
-  check "F1-2: one-path relevance — def off the path (rdi := 7 in B2) NOT tagged"
-    (not (Term.has_attr other' Cbat_vsa_utils.relevant));
-  let prologue' = find_def_exn sub' (Term.tid def_prologue) in
-  check "F1-3: one-path relevance — prologue def (rbp := RSP) tagged (feeds the B1-path load)"
-    (Term.has_attr prologue' Cbat_vsa_utils.relevant);
+(  let _, def_load, _, def_use, sub = mk_one_path_sub () in
+  let prog = Program.create ~subs:[ sub ] () in
+  let sol =
+    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  in
+  let tags, _, _ =
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+  in
+  check "F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
+  check "F1-2: channel 2 — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
+    (Core.Map.find tags (Term.tid def_use) = None);
   ())
 (* Degenerate cast/extract sizes degrade to top; shift guards compare magnitudes. *)
 ;
@@ -1218,7 +1184,7 @@ let run () =
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
-  let sub = tag_all (Sub.Builder.result sub_b) in
+  let sub = Sub.Builder.result sub_b in
   let ctx = Program.create ~subs:[ sub ] () in
   let sol =
     Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
@@ -1242,52 +1208,38 @@ let run () =
     && match Ws.max_elem c_iter with Some w -> Word.( <= ) w (w32 4) | None -> false);
   ())
 ;
-(  let def_base, def_idx, def_data, def_store, sub, exit_tid = mk_e2ed_heap_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let store' = find_def_exn sub' (Term.tid def_store) in
-  check
-    "E2eD-1: heap-indexed store (*(rdi + i*8), rdi NOT RSP-derived) — NOT tagged (falls out of W)"
-    (not (Term.has_attr store' Cbat_vsa_utils.relevant));
-  let data' = find_def_exn sub' (Term.tid def_data) in
-  check "E2eD-2: the heap store's DATA var def — NOT tagged (not tracked)"
-    (not (Term.has_attr data' Cbat_vsa_utils.relevant));
-  let base' = find_def_exn sub' (Term.tid def_base) in
-  check "E2eD-3: the heap BASE def (rdi := 0x400000) — NOT tagged"
-    (not (Term.has_attr base' Cbat_vsa_utils.relevant));
-  (* Heap store untagged: data never denoted, reads top at exit. *)
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
+(  (* Channel-2 negative (spec §2.2): the heap-indexed store never seeds. *)
+  let _, _, _, _, sub, exit_tid = mk_e2ed_heap_sub () in
+  (* Gate-free: every def is denoted, so the store's data var reads {99}. *)
+  let ctx' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
   let vv = AI.find_word 64 exit_ai (v64 "e2ed_v") in
-  check "E2eD-4: fixpoint — the heap store's data var reads TOP (not RSP-derived, never tracked)"
-    (Ws.is_top vv);
+  check "E2eD-4: gate-free — the heap store's data var is denoted ({99})"
+    (Ws.equal vv (Ws.singleton (w64 99)));
   ()
 
-(* RSP-derived positive control: same shape, rbp ∈ D, stays relevant. *))
+(* Channel-1 indexed-store pin: same shape seeds without any tagger. *))
 ;
-(  let def_prologue, def_idx, def_store, sub, exit_tid = mk_e2ed_rsp_store_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let store' = find_def_exn sub' (Term.tid def_store) in
-  check
-    "E2eD-5: RSP-derived store (*(rbp - 0x30 + i*8), rbp in D) — STILL tagged (positive control)"
-    (Term.has_attr store' Cbat_vsa_utils.relevant);
-  let idx' = find_def_exn sub' (Term.tid def_idx) in
-  check "E2eD-6: the INDEX var of the RSP-derived store — tagged (co-seeded)"
-    (Term.has_attr idx' Cbat_vsa_utils.relevant);
-  let prologue' = find_def_exn sub' (Term.tid def_prologue) in
-  check "E2eD-6b: the RBP := RSP prologue def — tagged"
-    (Term.has_attr prologue' Cbat_vsa_utils.relevant);
+(  let _, _, def_store, sub, _ = mk_e2ed_rsp_store_sub () in
+  let prog = Program.create ~subs:[ sub ] () in
+  let sol =
+    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+  in
+  let tags, _, _ =
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+  in
+  check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(-24,-24)"
+    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-24L, -24L)));
   ()
 
-(* E3: top-address store skipped ON (memory unchanged); full-range cell OFF. *))
+(* E3: top-address stores leave memory unchanged; the slot load reads through. *))
 ;
 (  let m = memv "e2ed_m3" in
   let t = v64 "e2ed_t3" in
   let d1 =
-    Term.set_attr
-      (Def.create m
-         (Bil.Store (Bil.Var m, Bil.Int (w64 0x100), Bil.Int (w64 42), LittleEndian, `r64)))
-      Cbat_vsa_utils.relevant ()
+    Def.create m
+      (Bil.Store (Bil.Var m, Bil.Int (w64 0x100), Bil.Int (w64 42), LittleEndian, `r64))
   in
   let env1 = Vsa.denote_def d1 AI.top in
   let d2 =
@@ -1295,17 +1247,14 @@ let run () =
       (Bil.Store
          (Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64), Bil.Int (w64 7), LittleEndian, `r64))
   in
-  let d2' = Term.set_attr d2 Cbat_vsa_utils.relevant () in
   let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (w64 0x100), LittleEndian, `r64)) in
-  (* Load must be tagged too, else denote skips it and t stays top. *)
-  let dload' = Term.set_attr dload Cbat_vsa_utils.relevant () in
-  let env2 = Vsa.denote_def d2' env1 in
-  check "E2eD-7: restriction ON — a top-addr store is SKIPPED (memory state unchanged)"
+  let env2 = Vsa.denote_def d2 env1 in
+  check "E2eD-7: gate-free — a top-addr store leaves memory unchanged"
     (AI.equal env2 env1);
-  let env3 = Vsa.denote_def dload' env2 in
+  let env3 = Vsa.denote_def dload env2 in
   let tv = AI.find_word 64 env3 t in
   check
-    "E2eD-8: restriction ON — the load at the slot reads exactly the pre-store value {42} (no \
+    "E2eD-8: gate-free — the load at the slot reads exactly the pre-store value {42} (no \
      full-range-cell pollution)"
     (Ws.equal tv (Ws.singleton (w64 42)));
   ())
@@ -1314,14 +1263,13 @@ let run () =
   let entry_tid_of (sub : sub term) : tid =
     match Term.first blk_t sub with Some b -> Term.tid b | None -> assert false
   in
-  (* Production shape: analyze arms restriction; entry input carries RSP = {0}. *)
+  (* Gate-free production shape: entry input carries RSP = {0}. *)
   let sub = mk_p3_anchor_sub () in
-  let sub' = Relevance.analyze sp sub in
-  let prog' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
-  let st = Graphlib.Std.Solution.get sol (entry_tid_of sub') in
+  let prog' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let st = Graphlib.Std.Solution.get sol (entry_tid_of sub) in
   check
-    "P3-1: restriction ON — the RSP := 0 anchor survives the untagged-def skip (entry input state \
+    "P3-1: gate-free — the RSP := 0 anchor is denoted (entry input state \
      carries RSP = {0})"
     (Ws.equal (AI.find_word 64 st rsp_var) (Ws.singleton (w64 0)));
   ())

@@ -1,31 +1,10 @@
-(* Public interface. Consumers use [Hike.Abi], [Hike.Relevance], etc. *)
+(* Public interface. Consumers use [Hike.Abi], [Hike.Vsa], etc. *)
 
 open Bap.Std
 open Bap_core_theory
 
 (** Register and convention facts. [Abi.sp] is the stack pointer. *)
 module Abi = Hike_abi
-
-(** Stack access tagging and relevance closure. *)
-module Relevance : sig
-  (** Tags a stack access def. *)
-  val stack_access : unit tag
-
-  (** Tags defs feeding a stack access. *)
-  val relevant : unit tag
-
-  (** Tags runtime-sized SP decrements. *)
-  val dynamic_alloc : unit tag
-
-  (** Tags [sub] with all three tags. *)
-  val analyze : var -> sub term -> sub term
-
-  (** Checks the [stack_access] tag. *)
-  val has_stack_access : def term -> bool
-
-  (** Tests for the stack pointer. *)
-  val is_sp : Theory.Target.t -> var -> bool
-end
 
 (** Per-sub stack offset ranges. *)
 module Vsa : sig

@@ -48,13 +48,12 @@ let find_sub (prog : program term) (name : string) : sub term option =
 let all_subs (prog : program term) : sub term list =
   Term.enum sub_t prog |> Seq.to_list
 
-(* Tag the sub and run the solution-only fixpoint. *)
-let analyze_and_fixpoint (sp : var) (prog : program term) (sub : sub term)
+(* Run the solution-only fixpoint on the raw sub (spec §2.1). *)
+let analyze_and_fixpoint (_sp : var) (_prog : program term) (sub : sub term)
     : sub term * Vsa.vsa_sol =
-  let sub' = Hike.Relevance.analyze sp sub in
-  let prog' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub') in
-  (sub', sol)
+  let prog' = Program.create ~subs:[ sub ] () in
+  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub) in
+  (sub, sol)
 
 (* Word-set printers. *)
 

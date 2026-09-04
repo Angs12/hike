@@ -1,6 +1,6 @@
 (* Precision measurement driver: per-sub fixpoint, TSV precision buckets + BIN rollup.
    Usage: dune exec test_cbat/precision_probe.exe -- <binary> [<binary> ...]
-   Restriction always ON; entry is [Vsa.init_sol sub'] (AI.top).
+   Gate-free: every def is denoted; entry is [Vsa.init_sol sub] (AI.top).
    Columns: binary, sub, sub_ms, 8 def, 9 tagged, 6 ld, 5 ldstk, 5 ldstk_w (see [row_of]).
    L2a diag mode (HIKE_VSA_DIAG_BOTTOM=1) adds DIAG/DIAG_SUM lines; OFF output is plain. *)
 
@@ -13,9 +13,6 @@ module Vsa = Cbat_vsa
 (* Set-composite domain of AI word values. *)
 module Ws = Cbat_clp_set_composite
 module W = Word
-
-(* Restriction-ON-only: run_sub always calls analyze. *)
-module Relevance = Hike.Relevance
 
 (* Default OFF; HIKE_VSA_DIAG_BOTTOM=1 enables L2a diag mode. *)
 let diag_on () : bool =
@@ -297,26 +294,12 @@ let collect_stats (bname : string) (sub' : sub term)
   (* L2a counters: bottom defs, live vs dead. *)
   let bottom_live = ref 0 in
   let bottom_dead = ref 0 in
-  (* Per-sub var (base-normalized) -> defs map. *)
-  let var_defs : (var, def term list) Hashtbl.t = Hashtbl.create 64 in
-  Term.enum blk_t sub'
-  |> Seq.iter ~f:(fun b ->
-      Term.enum def_t b
-      |> Seq.iter ~f:(fun d ->
-          let v = Var.base (Def.lhs d) in
-          let ds = Option.value ~default:[] (Hashtbl.find_opt var_defs v) in
-          Hashtbl.replace var_defs v (d :: ds)));
-  (* Stack iff name is RSP/RBP or has a relevant def. *)
-  let has_relevant_def (v : var) : bool =
-    let v = Var.base v in
-    match Hashtbl.find_opt var_defs v with
-    | None -> false
-    | Some ds -> List.exists (fun df -> Term.has_attr df Cbat_vsa_utils.relevant) ds in
+  (* Stack iff the name is RSP/RBP (spec §2.1: every def is denoted). *)
   let is_stack_addr (a : exp) : bool =
     Exp.free_vars a
     |> Core.Set.exists ~f:(fun v ->
         let n = Var.name v in
-        String.equal n "RSP" || String.equal n "RBP" || has_relevant_def v) in
+        String.equal n "RSP" || String.equal n "RBP") in
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->
       (* Per-block entry state from the fixpoint solution. *)
@@ -335,7 +318,8 @@ let collect_stats (bname : string) (sub' : sub term)
           (match Var.typ (Def.lhs d) with
            | Type.Imm w ->
              let ws = AI.find_word w !st (Def.lhs d) in
-             let tagged = Term.has_attr d Cbat_vsa_utils.relevant in
+              (* Gate-free: every def is denoted (spec §2.1). *)
+              let tagged = true in
              let b =
                match classify_def ws with
                | `Bottom ->
@@ -570,17 +554,16 @@ let rec run_binary (path : string) : bin_report =
     r
 
 (* One sub, one fixpoint + measurement walk. *)
-and run_sub (sp : var) (prog : program term) (bname : string)
+and run_sub (_sp : var) (_prog : program term) (bname : string)
     (sub : sub term) : outcome =
   try
-    let sub' = Relevance.analyze sp sub in
-    let prog' = Program.create ~subs:[ sub' ] () in
+    let prog' = Program.create ~subs:[ sub ] () in
     let t0 = Unix.gettimeofday () in
     let sol =
-      Vsa.static_graph_vsa [] prog' sub' (init_sol_of sub') in
+      Vsa.static_graph_vsa [] prog' sub (init_sol_of sub) in
     let t1 = Unix.gettimeofday () in
     (* Per-block TAG state is the IN-state ([tags = sol]). *)
-    let st = collect_stats bname sub' sol sol in
+    let st = collect_stats bname sub sol sol in
     st.Sub_stats.sub_ms <- int_of_float ((t1 -. t0) *. 1000.0);
     Ok st
   with e ->
@@ -601,7 +584,7 @@ let () =
        Format.eprintf "precision_probe: BAP initialization failed: %a@\n%!"
          Bap_main.Extension.Error.pp failed;
        exit 1);
-    Printf.printf "=== precision probe (restriction ON) ===\n";
+    Printf.printf "=== precision probe (gate-free) ===\n";
     flush stdout;
     let reports = List.map run_binary paths in
     Printf.printf "\n=== precision probe summary ===\n";

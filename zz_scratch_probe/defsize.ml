@@ -1,17 +1,17 @@
-(* Counts total/tagged/var-rhs defs per sub; vararm scales the map rebuild.
-   Usage: defsize.exe <binary>... Prints only subs with tagged > 0. *)
+(* Counts total/VLA/var-rhs defs per sub; vararm scales the map rebuild.
+   Usage: defsize.exe <binary>... Prints only subs with VLA defs > 0. *)
 
 open Bap.Std
 open Probe_common
 
-let count (sub : sub term) : int * int * int =
+let count (alloc_tids : Tid.Set.t) (sub : sub term) : int * int * int =
   Term.enum blk_t sub
   |> Seq.fold ~init:(0, 0, 0) ~f:(fun (total, tagged, vararm) blk ->
       Term.enum def_t blk
       |> Seq.fold ~init:(total, tagged, vararm)
           ~f:(fun (total, tagged, vararm) d ->
             let total = total + 1 in
-            if Term.has_attr d Hike.Relevance.dynamic_alloc then
+            if Core.Set.mem alloc_tids (Term.tid d) then
               let vararm =
                 match Def.rhs d with Bil.Var _ -> vararm + 1 | _ -> vararm
               in
@@ -31,8 +31,8 @@ let () =
       let sp = sp_of proj in
       let prog = Project.program proj in
       Base.List.iter (all_subs prog) ~f:(fun sub ->
-          let sub' = Hike.Relevance.analyze sp sub in
-          let total, tagged, vararm = count sub' in
+          let alloc_tids = Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub in
+          let total, tagged, vararm = count alloc_tids sub in
           if tagged > 0 then (
             let cost = vararm * total in
             let linear = total + vararm in

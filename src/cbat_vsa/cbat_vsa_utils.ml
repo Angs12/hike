@@ -11,7 +11,8 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* Small shared utilities. *)
+(* Cbat_vsa_utils: small shared utilities. The [relevant] tag is deleted
+   (spec §2.1); every def is denoted. *)
 
 exception NotImplemented of string
 
@@ -35,13 +36,6 @@ let cdiv (x : int) (y : int) : int = (x - 1)/y + 1
 
 open !Core_kernel
 open Bap.Std
-
-(* Per-def relevance tag. *)
-
-(* Unit-payload relevance tag. *)
-let relevant = Value.Tag.register (module Unit)
-    ~name:"relevant"
-    ~uuid:"58a2e009-3d14-4c7d-ba75-42f9de98dc30"
 
 let exn_on_err : ('a, Type.error) Result.t -> 'a = function
   | Ok e -> e
