@@ -410,6 +410,54 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-05 EEST — MERGE of `review3-removals` into
+`perf-arch-10-work` (a9a1a8b, on 73b4756) — BATTERY GREEN, IR
+BYTE-IDENTICAL 35/35, and a measured producer speedup**
+
+The merge carried the stranded review-3 cleanup branch (built on fe8b411,
+never merged into the restriction-removal line) into the current tip. The
+eight commits: candidate 1 (delete the whole-callee recursion — `denote_call`,
+the never-applied interprocedural fallback), candidate 3 (drop the discarded
+live-solution derive in `refine_edge`), candidate 5 (interface-honesty batch:
+`min_lo`, `emit_ctx.addr_bits`, `Relevance.is_sp`, `warn_once`, `is_void`/
+`CallFunVoid`, the emitter `region_bytes` copy, info_join's dead arms),
+candidate 4 (need_map folds `head_to_blocks` directly — one widening-point
+walk, the duplicate forward Map deleted), candidate 6 (emitter cleanup:
+`is_inline_fp_intrinsic`, dead params, `equal_krange`/`equal_vla_bound`
+merged), candidate 9 (dead virtual temps at block exits: `live_in_of_sub` +
+`AI.gc` + `MapLattice.filter_keys` — each transfer filtered by its target's
+live-in before the join; machine regs exempt), candidate 12 parts 1+2 (the
+never-None rctx option collapsed; `Cbat_runctx` split out of cbat_vsa.ml —
+memo instantiations, flag_group, refine_ctx, flag/call facts, `mk_rctx`,
+`ver_of` now live in the new module).
+
+**Merge conflicts resolved:** (1) `hike.mli` — HEAD won (the branch's block
+re-added `module Relevance`, deleted by ADR-0003 on this line); (2)
+`hike_vsa_relevance.{ml,mli}` — deleted (HEAD won, ADR-0003); (3)
+`cbat_vsa.ml` ×4 — the `Cbat_runctx`-qualified types + `rctx`-threading
+(branch shape) won over HEAD's inline types/`Option.value` plumbing, but the
+branch's `?refineable` param was DROPPED (rr-03 deleted it on this line) and
+the branch's `denote_call` body was DELETED (candidate 1's whole point);
+(4) `cbat_runctx.ml` — the branch's `rc_all_tagged` field + its
+`Term.has_attr Utils.relevant` construction REMOVED (relevance machinery,
+ADR-0003); `rc_live_in`/`AI.gc` KEPT (candidate 9's payload).
+
+| Gate | Result |
+|---|---|
+| unit suite | **ALL CBAT TESTS PASSED** (`dune runtest`, incl. T01 chain/D0-D5/LM fixtures) ✅ |
+| corpus emission | **35/35 rc=0** (32 fixtures + sort/grep/gcc-12) ✅ |
+| **IR byte-identity vs 73b4756 control** | **IDENTICAL 35/35** ✅ |
+| structural asserts | **fixtures 172 pass/0 fail; 3 pre-existing fails on gcc-12/grep/sort (shape-rule d) — IDENTICAL ON CONTROL** ✅ |
+| semantics (all) | **30 PASS, 5 FAIL** — the same 5 on control (gcc-12/grep/sort harness-class + T02/T03) ✅ |
+| semantics (8-bin) | **8/8 PASS** ✅ |
+| **producer time (subtimes, 2 runs each)** | **sort 10.5–15.2s → 8.2–8.4s; grep 17.1–26.4s → 14.0–14.4s; gcc-12 45.6–61.7s → 32.9–33.1s** — −18…−46% (post-merge runs within 1.5% of each other: real, stable) ✅ |
+| stage counters (grep sub_e350) | denote 5.8→3.5s, join 0.57→0.17s, walk 4.3→2.6s, minor-words 1.17B→1.09B — the live-in GC shrinks every downstream join/equal ✅ |
+
+NOTE: the semantic-opt gate is subsumed by IR byte-identity (identical IR ⇒
+identical optimized behavior). The 3 check_allocas shape-d fails and the
+3 semantic fails on the real PIE binaries are PRE-EXISTING on the control
+(recorded, not introduced). Artifacts: `/tmp/opencode/merge-validation/`.
+
 **Last verified: 2026-09-03 EEST — comment concision pass (83 files,
 +2175/−6394, comments only) — BATTERY GREEN, identical behavior**
 
