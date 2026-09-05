@@ -37,15 +37,22 @@ let lift_consume (f_clp : clp -> 'a) (f_fs : fset -> 'a) : t -> 'a = function
   | Clp p -> f_clp p
   | FinSet s -> f_fs s
 
+(* Small sets skip the sorted-list round trip: the element list is already
+   materialized, so empty and singleton convert directly. Singletons are the
+   common case (immediates and single-point guards). *)
 let clp_of_finset fs : clp =
   let width = FinSet.bitwidth fs in
-  FinSet.iter fs
-  |> Clp.of_list ~width
+  match FinSet.iter fs with
+  | [] -> Clp.bottom width
+  | [ x ] -> Clp.singleton x
+  | l -> Clp.of_list ~width l
 
 let finset_of_clp p : fset =
   let width = Clp.bitwidth p in
-  Clp.iter p
-  |> FinSet.of_list ~width
+  match Clp.iter p with
+  | [] -> FinSet.of_list ~width []
+  | [ x ] -> FinSet.singleton x
+  | l -> FinSet.of_list ~width l
 
 let as_clp = function
   | Clp p -> p

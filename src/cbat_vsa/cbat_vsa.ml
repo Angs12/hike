@@ -1338,16 +1338,12 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
      | Some a_ws, Some b_ws ->
        (match operand_constraints op cstr a_ws b_ws with
         | a', b' ->
-          let pairs = ref [] in
-          (match a, a' with
-           | Bil.Var av, Some a_c ->
-             pairs := (Var.base av, a_c) :: !pairs
-           | _ -> ());
-          (match b, b' with
-           | Bil.Var bv, Some b_c ->
-             pairs := (Var.base bv, b_c) :: !pairs
-           | _ -> ());
-          !pairs)
+          (match a, a', b, b' with
+           | Bil.Var av, Some a_c, Bil.Var bv, Some b_c ->
+             [ (Var.base av, a_c); (Var.base bv, b_c) ]
+           | Bil.Var av, Some a_c, _, _ -> [ (Var.base av, a_c) ]
+           | _, _, Bil.Var bv, Some b_c -> [ (Var.base bv, b_c) ]
+           | _ -> []))
      | _ -> [])
   | Bil.Cast (Bil.HIGH, sz, a) ->
     (match high_cast_constraint !env a sz cstr with
@@ -1751,7 +1747,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     begin match Var.typ v with
     | Type.Imm 1 ->
       (* Bare-flag shape with recovery. *)
-      let seeds = ref [ Var (Var.base v, cstr) ] in
+      let base = [ Var (Var.base v, cstr) ] in
       if WordSet.bitwidth cstr = 1
          && WordSet.elem Word.b1 cstr
       then
@@ -1761,12 +1757,11 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
            (match denote_imm_exp e0 env with
             | Ok cur_e ->
               (match row_for ~env ?ctx e0 (guard_op_of_binop op) c0 with
-               | Some cstr_e ->
-                 seeds := edge_constraints ~env ?ctx e0 cstr_e @ !seeds
-               | None -> ())
-            | Error _ -> ())
-         | _ -> ());
-      !seeds
+               | Some cstr_e -> edge_constraints ~env ?ctx e0 cstr_e @ base
+               | None -> base)
+            | Error _ -> base)
+         | _ -> base)
+      else base
     | Type.Imm w when w >= 2 -> [ Var (Var.base v, cstr) ]
     | Type.Imm _ | Type.Mem _ | Type.Unk -> []
     end
@@ -1776,8 +1771,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
   | Bil.BinOp (op, a, b) ->
     begin match op with
     | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE ->
-      let acc = ref [] in
-      let side (side : [ `True | `False ]) : unit =
+      let side (side : [ `True | `False ]) : edge_constraint list =
         match a, b with
         | _, Bil.Int c0 ->
           let cstr_opt =
@@ -1797,8 +1791,8 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
               row_for ~env ?ctx a (complement_binop_guard op) c0 in
           (match cstr_opt with
            | Some cstr_a ->
-             acc := edge_constraints ~env ?ctx a cstr_a @ !acc
-           | None -> ())
+             edge_constraints ~env ?ctx a cstr_a
+           | None -> [])
         | Bil.Int c0, e0 ->
           let cstr_opt =
             match side, op with
@@ -1816,8 +1810,8 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
               row_for ~env ?ctx e0 (flip_guard_op (complement_binop_guard op)) c0 in
           (match cstr_opt with
            | Some cstr_e ->
-             acc := edge_constraints ~env ?ctx e0 cstr_e @ !acc
-           | None -> ())
+             edge_constraints ~env ?ctx e0 cstr_e
+           | None -> [])
         | Bil.Var x, Bil.Var y ->
           (match Var.typ x, Var.typ y with
            | Type.Imm w, Type.Imm wy when w = wy ->
@@ -1825,7 +1819,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
              let cur_y = AI.find_word w env y in
              if WordSet.bitwidth cur_x <> w
                 || WordSet.bitwidth cur_y <> w
-             then ()
+             then []
              else
                let x_true, y_true = overlap_constraints op cur_x cur_y in
                let rows =
@@ -1840,16 +1834,15 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
                     | None -> None) in
                (match rows with
                 | Some xc, Some yc ->
-                  acc :=
-                    edge_constraints ~env ?ctx (Bil.Var x) xc
+                                      edge_constraints ~env ?ctx (Bil.Var x) xc
                     @ edge_constraints ~env ?ctx (Bil.Var y) yc
-                    @ !acc
+                   
                 | Some xc, None ->
-                  acc := edge_constraints ~env ?ctx (Bil.Var x) xc @ !acc
+                  edge_constraints ~env ?ctx (Bil.Var x) xc
                 | None, Some yc ->
-                  acc := edge_constraints ~env ?ctx (Bil.Var y) yc @ !acc
-                | None, None -> ())
-           | _ -> ())
+                  edge_constraints ~env ?ctx (Bil.Var y) yc
+                | None, None -> [])
+           | _ -> [])
         | _ ->
           (* Generic comparisons recurse both sides. *)
           (match denote_operand env a, denote_operand env b with
@@ -1867,21 +1860,20 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
                   | None -> None) in
              (match rows with
               | Some xc, Some yc ->
-                acc :=
-                  edge_constraints ~env ?ctx a xc
-                  @ edge_constraints ~env ?ctx b yc @ !acc
+                                  edge_constraints ~env ?ctx a xc
+                  @ edge_constraints ~env ?ctx b yc
               | Some xc, None ->
-                acc := edge_constraints ~env ?ctx a xc @ !acc
+                edge_constraints ~env ?ctx a xc
               | None, Some yc ->
-                acc := edge_constraints ~env ?ctx b yc @ !acc
-              | None, None -> ())
-           | _ -> ()) in
-      if WordSet.elem Word.b1 cstr then side `True;
-      if WordSet.elem Word.b0 cstr then side `False;
+                edge_constraints ~env ?ctx b yc
+              | None, None -> [])
+           | _ -> []) in
+      let t = if WordSet.elem Word.b1 cstr then side `True else [] in
+      let f = if WordSet.elem Word.b0 cstr then side `False else [] in
       if not (WordSet.elem Word.b1 cstr)
          && not (WordSet.elem Word.b0 cstr)
       then [ Infeasible ]
-      else !acc
+      else f @ t
     | Bil.AND ->
       
       if WordSet.bitwidth cstr = 1
@@ -1894,14 +1886,13 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
          | Some a_ws, Some b_ws ->
            (match operand_constraints op cstr a_ws b_ws with
             | a', b' ->
-              let acc = ref [] in
-              (match a' with
-               | Some a_c -> acc := edge_constraints ~env ?ctx a a_c @ !acc
-               | None -> ());
-              (match b' with
-               | Some b_c -> acc := edge_constraints ~env ?ctx b b_c @ !acc
-               | None -> ());
-              !acc)
+              let xs = match a' with
+                | Some a_c -> edge_constraints ~env ?ctx a a_c
+                | None -> [] in
+              let ys = match b' with
+                | Some b_c -> edge_constraints ~env ?ctx b b_c
+                | None -> [] in
+              xs @ ys)
          | _ -> [])
     | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
     | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
@@ -1911,16 +1902,13 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
        | Some a_ws, Some b_ws ->
          (match operand_constraints op cstr a_ws b_ws with
           | a', b' ->
-            let acc = ref [] in
-            (match a' with
-             | Some a_c ->
-               acc := edge_constraints ~env ?ctx a a_c @ !acc
-             | None -> ());
-            (match b' with
-             | Some b_c ->
-               acc := edge_constraints ~env ?ctx b b_c @ !acc
-             | None -> ());
-            !acc)
+            let xs = match a' with
+              | Some a_c -> edge_constraints ~env ?ctx a a_c
+              | None -> [] in
+            let ys = match b' with
+              | Some b_c -> edge_constraints ~env ?ctx b b_c
+              | None -> [] in
+            xs @ ys)
        | _ -> [])
     end
   | Bil.Load (m, a, en, s) ->
