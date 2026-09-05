@@ -39,20 +39,26 @@ not re-proposed: the identity rule must not be seed-local.
 
 ## 2. The design (grilling-settled, 10 questions)
 
-**One mechanism: a per-SCC walk-pop budget with a dynamic cap.**
+**One mechanism: a per-run walk-pop budget with a dynamic cap.**
+(C8 2026-09-05: was per-SCC; the recharge trigger moved to fixpoint start —
+item 2. The cap machinery — item 4 — is unchanged.)
 
 1. **The allowance:** `N = C × (out-edges of the SCC's member blocks)`, with
    `C = 1024` (conservative start; the A/B decides).
-2. **The lifetime:** per-SCC. The budget refills **once per
-   `stabilize_scc (h, inner)` ENTRY** (one allowance per SCC stabilization —
-   NOT per `loop()` round, NOT per widening event). Nested inner SCCs get
-   their own recharge when `stabilize_comps` recurses into them (each SCC
-   recharges its own allowance from its OWN edge count at its own entry).
+2. **The lifetime:** per-run. The budget refills **once at fixpoint
+   start** (`N = 1024 × the whole sub's out-edges`) — NOT per SCC.
+   (Amended by C8 2026-09-05: the per-SCC `stabilize_scc`-entry trigger
+   died with the recursive driver. A worklist has no "stabilization
+   episode" event — blocks visit and re-visit individually as successors
+   change, so there is no per-SCC entry point left for a refill to hang
+   on; per-SCC allowances would have nothing to refill on. The single
+   per-run recharge keeps the same shared cell, the same `budget_per_edge`
+   constant, and the same dynamic-cap enforcement.)
 3. **The cell:** an `int ref` in `Cbat_runctx.refine_ctx` — a new field
    `rc_walk_budget`. `refine_ctx` records are copied per memo-store
    (`{rc with ...}`); a `ref` field SHARES the cell across copies — exactly
-   the per-SCC semantics wanted (one shared budget cell per stabilization).
-4. **The enforcement — memo-first, dynamic cap:**
+   the single-shared-cell semantics wanted (one budget cell per run).
+4. **The enforcement — memo-first, dynamic cap (UNCHANGED by C8):**
    - the `Walk_memo.find` lookup runs FIRST (a hit is a free, real refinement —
      never refuse free precision);
    - on a miss, the walk launches with `~steps = min (256, !budget)`;
@@ -122,10 +128,9 @@ class — constructible through the existing seams):
 - `src/cbat_vsa/cbat_runctx.ml` — `refine_ctx` gains `rc_walk_budget : int
   ref`; `mk_rctx` initializes it (a fresh cell, contents = max_int: unused
   until a recharge sets it).
-- `src/cbat_vsa/cbat_vsa.ml` — the recharge site (`stabilize_scc` entry, in
-  `static_graph_vsa`'s loop; needs the SCC's member blocks → out-edge count —
-  `head_to_blocks` already maps head → block set; the edge count is
-  `List.length` of the blocks' jmp out-edges, computed ONCE per recharge);
+- `src/cbat_vsa/cbat_vsa.ml` — the recharge site (fixpoint start, C8: was
+  `stabilize_scc` entry; the whole sub's out-edge sum via `rc_out_edges`,
+  computed ONCE per run);
   the walk site (`refine_edge`'s caller in `refine_edge_inline`: memo-first
   order preserved, the `~steps` becomes the dynamic cap, the shared decrement
   hooks into the walk's pop accounting, and the budget-limited walk skips the

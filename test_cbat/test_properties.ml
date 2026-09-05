@@ -951,11 +951,9 @@ let run_landmarks () =
      (not (Ws.is_bottom head_i));
    ()
 
-(* F1-B2 (budget recharge): two sequential SCCs; each stabilizes with its
-   OWN walk allowance (the recharge fires at every stabilize_scc entry). The
-   pin: loop 2's landmark precision is INDEPENDENT of loop 1's walk spend -
-   if the budget were one shared pool that loop 1 drained, loop 2's head
-   would lose its lower bound 0 (the refinement it needs the walk for). *))
+(* F1-B2 (starvation-regression pin): two sequential SCCs under the ONE
+   global per-run walk allowance. The behavioral core: BOTH loops still
+   refine independently - loop 1's walk spend cannot starve loop 2. *))
 ;
 (  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
    let prog' = Program.create ~subs:[ sub ] () in
@@ -964,11 +962,11 @@ let run_landmarks () =
    let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
    let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
    check
-     "property LM F1-B2: loop 2's head lower bound is the entry constant 0 (its own SCC allowance, not loop 1's leftover)"
+     "property LM F1-B2: loop 2's head lower bound is the entry constant 0 (refined independently under the global budget - no starvation by loop 1's walk spend)"
      (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
    let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
    check
-     "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both SCCs refined)"
+     "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both loops refined independently)"
      (match Ws.min_elem i1 with Some lo -> W.equal lo (w32 0) | None -> false);
    ()
 

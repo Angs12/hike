@@ -92,3 +92,7 @@ the 256 cap always was; NO gates, NO skips (principles #2/#3). The
 seed-skip alternative was proven UNSOUND during the design grilling (a
 no-op Var seed can still produce new cell meets backward through a Load
 def or a Load-valued phi) — recorded so it is not re-proposed.
+C8 2026-09-05: the visit scheduler changed from WTO-recursive to a
+succ-seeded WTO-priority worklist (the per-SCC recharge trigger moved to a
+single per-run recharge at fixpoint start); the deep walk's inline placement
+at every conditional jump is unchanged.
