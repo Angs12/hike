@@ -410,6 +410,50 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-05 EEST — C8 WORKLIST DRIVER (branch `c8-worklist`,
+tickets 01+02 = commits `9784985`+`c99777c`) — BATTERY GREEN, corpus IR
+BYTE-IDENTICAL 32/32, grep −7%, and sub_4d2a CONVERGES (the C4 burn closes
+as a side effect)**
+
+The C8 lane (spec: `.scratch/c8-worklist/spec.md`, grilling-settled
+2026-09-05, 4 rounds / 13 questions): the recursive WTO driver
+(`stabilize_comps`/`stabilize_scc` — re-walk whole SCCs until quiet, 32–65%
+of visits changing nothing: e350 1,521/2,334 useless) replaced by a
+succ-seeded WTO-priority worklist (entry successors seeded; pop lowest WTO
+position; full `process_vertex` per dequeue; enqueue Tid-successors on
+change; the unchanged 6000-visit backstop). Dead blocks keep bottom
+(`init_sol` default — sound, dead code). Widening: per-head K=10 warmup
+(the landmark-ACQUISITION window — only the Inf arm can jump to TOP, and
+only with no landmarks acquired; per-head is uniformly more conservative
+than the global rule). C1 budget trigger moved per-SCC-entry → per-run
+fixpoint-start (no stabilization episodes exist in a worklist; enforcement
+half unchanged). F1-B2 amended to its behavioral core.
+
+**Measured (interleaved A/B, 2 rounds each side, same binaries):**
+
+| gate | control (`6a2d66b`) | worklist (`9784985`) |
+|---|---|---|
+| producer sort / grep | 13.43–13.45 / 21.82–22.10 s | 13.50–13.58 (**flat**) / 20.35–20.50 (**−7%**) |
+| e350 visits / pops | 2,334 / 342,548 | **996 (−57%) / 236,032 (−31%)**; denote 3,698→1,621, join 4,666→1,992, widen 61→10 |
+| 9f00 visits / pops | 975 / 135,210 | **441 (−55%) / 119,296 (−12%)** |
+| **tag counts (927 subs)** | — | **926 IDENTICAL; 1 moved = sub_4d2a: 798 Unbounded → 609 real** (see below) |
+| **tag kinds (all converged heavy subs)** | — | **IDENTICAL** (e350/8cb0/6b60/296a0/9f00/9570 byte-equal multisets) |
+| **corpus IR** | — | **byte-identical 32/32** |
+| corpus / check_allocas / semantic-all / semantic-opt / 8-bin | 32/32 · 160/0 · 30/2 · 30/2 · 8/8 | **identical to control on every gate** |
+
+**The sub_4d2a verdict (the tag gate's investigate-before-landing clause,
+resolved):** under the recursive driver the 544-node SCC burned all 6000
+visits re-walking unchanged blocks and raised `Fixpoint_not_converged`
+(degraded arm: 798 blanket-Unbounded tags, 4.79s). Under the worklist the
+same 6000-visit backstop is spent on DISTINCT blocks — the fixpoint
+COMPLETES (6.20s of real converging work) with 609 real tags (600 Ranges
+incl. 360× Range(-1120,0), 83 Dead, 2 Infinite). Strict precision
+IMPROVEMENT via convergence itself; ACCEPTED explicitly, tags re-baselined.
+Sort stays flat overall because 4d2a now does useful work instead of
+burning (this is the C4 class closing — a follow-up may tune it, not this
+lane). Suite: 467 ok (incl. amended F1-B2 + untouched B1/B3/B4).
+Artifacts: `/tmp/opencode/c8-ab/`.
+
 **Last verified: 2026-09-05 EEST — C1 WALK-POP BUDGET (branch `c1-walk-budget`,
 ticket 01 = commit `5ca6560`) — BATTERY GREEN, IR BYTE-IDENTICAL 35/35 (the
 strongest possible outcome for this gate class), grep −4.8% / gcc-12 −2.5%**
