@@ -1483,6 +1483,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ?(defs : (def term * bool) Var.Map.t option = None)
     ?(stores : def term list option = None)
     ?(reads : Tid.Set.t ref option = None)
+    ?(steps : int option = None)
     (env : AI.t) (sub : sub term) (blk : blk term)
     (seeds : edge_constraint list) : AI.t * (tid, Live.t) Solution.t =
   (* Visited set is closure-local. *)
@@ -1490,12 +1491,14 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
   | None -> env, Solution.create Tid.Map.empty Live.empty
   | Some defs_map ->
     (* Walk reuses the hoisted CFG. *)
-    
+
     let cfg = rctx.rc_walk_cfg in
+    (* The 256 default; the per-SCC budget may lower it. *)
+    let cap = Option.value ~default:256 steps in
     let seed_constraints, env0 =
       List.fold seeds ~init:(Live.empty, env) ~f:(fun (m, e) -> function
           | Var (v, c) ->
-            
+
             Live.add v c m, e
           | Cell (mem, addr, size, endian, cstr) ->
             m, constrain_cell_on_trace ~st:env ~live:m e
@@ -1509,10 +1512,13 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
         ~init:(Solution.create (Tid.Map.singleton (Term.tid blk) seed_constraints)
                  Live.empty)
         ~equal:Live.equal ~merge:Live.join
-        ~steps:256 ~rev:true
+        ~steps:cap ~rev:true
         ~f:(fun ~source:n ->
             fun live ->
               incr pops;
+              (* One pop spends one unit of the shared per-SCC budget. *)
+              rctx.rc_walk_budget :=
+                max 0 (pred !(rctx.rc_walk_budget));
               (* Visited blocks are recorded. *)
               Option.iter reads ~f:(fun r ->
                   r := Core.Set.add !r n);
@@ -1542,7 +1548,8 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
       ~blocks:(match reads with
           | Some r -> Core.Set.length !r
           | None -> 0)
-      ~truncated:(!pops >= 256)
+      ~truncated:(!pops >= cap)
+      ~budget_cap:cap
       ();
     (* Guard with no preds keeps the seed. The walk runs for its [env]
        side effects (cell meets commit through the ref); the derived
@@ -2247,16 +2254,24 @@ let refine_edge_inline
            (refined, rc, Tid.Set.empty)
          | None ->
            let walk_reads = ref (Tid.Set.singleton bt) in
+           (* Per-SCC budget caps the walk; the floor keeps the walk
+              launching (spec §2.4 — never skipped). *)
+           let budget = max 0 !(rc.rc_walk_budget) in
+           let cap = max 1 (min 256 budget) in
            let refined, _live =
              Stages.time `Walk (fun () ->
                  refine_edge ~sol ~rctx:rc ~defs ~stores
-                   ~reads:(Some walk_reads)
+                   ~reads:(Some walk_reads) ~steps:(Some cap)
                    env sub b seeds) in
+           (* A budget-limited walk is not memoized: the shortened
+              read-set would trap a future reader (spec §2.4). *)
            let rc =
-             { rc with
-               rc_cache =
-                 Cbat_runctx.Walk_memo.add ~version rc.rc_cache bt jt
-                   ~reads:!walk_reads refined } in
+             if cap >= 256 then
+               { rc with
+                 rc_cache =
+                   Cbat_runctx.Walk_memo.add ~version rc.rc_cache bt jt
+                     ~reads:!walk_reads refined }
+             else rc in
            (refined, rc, !walk_reads))
       | None ->
         let refined, _live =
@@ -2713,6 +2728,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         | Cbat_wto.SCC (h, inner) -> if stabilize_scc h inner then changed := true);
     !changed
   and stabilize_scc (h : Tid.t) (inner : Cbat_wto.comp list) : bool =
+    (* One walk-pop allowance per SCC stabilization (spec §2.2): the
+       shared budget cell recharges from the SCC's own edge count at
+       every entry, so nested SCCs get their own allowance. *)
+    let allowance =
+      Hashtbl.find_exn head_to_blocks h
+      |> Core.Set.fold ~init:0 ~f:(fun acc bt ->
+          acc + Option.value ~default:0
+            (Core.Map.find rctx.rc_out_edges bt)) in
+    rctx.rc_walk_budget := 1024 * allowance;
     let any_changed = ref false in
     let rec loop () =
       let ch = process_vertex h in

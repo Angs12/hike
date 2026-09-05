@@ -65,6 +65,10 @@ type refine_ctx = {
   rc_out_cache : Transfer_memo.t;
   (* May-read vars per block entry; the GC keep-sets. *)
   rc_live_in : Var.Set.t Tid.Map.t;
+  (* Per-SCC walk-pop budget; the ref shares one cell across ctx copies. *)
+  rc_walk_budget : int ref;
+  (* Per-block jmp out-edge counts; the budget allowance input. *)
+  rc_out_edges : int Tid.Map.t;
 }
 
 (* Last understood flag-setting comparison. *)
@@ -232,6 +236,16 @@ let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
   loop ();
   !live
 
+(* Count of a block's control-transfer out-edges; the walk-budget
+   allowance input. Every jmp kind carries a target (a conditional
+   block's guard jump and fallthrough both count — that is the CFG
+   out-degree of the block). *)
+let out_edge_count_of_block (b : blk term) : int =
+  Term.enum jmp_t b
+  |> Seq.fold ~init:0 ~f:(fun acc j ->
+      match Jmp.kind j with
+      | Goto _ | Ret _ | Call _ | Int _ -> acc + 1)
+
 (* Block version; 0 means never set. *)
 (* Per-run analysis context. *)
 let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
@@ -248,6 +262,13 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
         Core.Map.set m ~key:(Term.tid b) ~data:(call_facts_of_block b));
   rc_out_cache = Transfer_memo.empty;
   rc_live_in = live_in_of_sub s cfg;
+  (* Unused until the first per-SCC recharge sets it. *)
+  rc_walk_budget = ref max_int;
+  rc_out_edges =
+    Term.enum blk_t s
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+        Core.Map.set m ~key:(Term.tid b)
+          ~data:(out_edge_count_of_block b));
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =
