@@ -1004,7 +1004,86 @@ let run_landmarks () =
       | None -> false);
    ()
 
-(* F2a: landmark consumption at CLP level — never lands short of the join. *))
+(* F1-B4 (binding regime): the budget BINDS, and the soundness contract is
+   pinned in the binding direction. The walk's steps-DEPENDENT product is the
+   cell meet through a Load-producing def ([def_constraints] ->
+   [constrain_cell_on_trace] fires INSIDE the walk), so the fixture seeds a
+   Var constraint on a var whose guard-block def is a Load over a known cell
+   with a WIDE stored range. The unlimited walk meets the cell down to the
+   seed; a 2-pop budget-limited walk covers less — and the contract says the
+   limited result must COVER the unlimited one (coarsening, [precedes]),
+   never narrow it, never bottom a live block. The exported mk_rctx +
+   walk_budget seam constructs the context and drives the shared cell. *))
+;
+(  let k = w32 100 in
+   let sub0, l1_tid, _b1_tid = lm_jne_loop ~k () in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let mem = Var.create ~is_virtual:true ~fresh:false "f1b4_m" (Type.Mem (`r64, `r8)) in
+   (* Prepend to the guard block: t := Load[mem, RBP-8]; i := t.  The seed on
+      i walks backward through i's def to t's Load and meets the cell. *)
+   let guard_blk =
+     Term.enum blk_t sub0 |> Seq.to_list |> List.find (fun b -> Term.tid b = l1_tid) in
+   let gb = Blk.Builder.init ~copy_defs:true guard_blk in
+   let t = Var.create ~is_virtual:true ~fresh:false "f1b4_t" (Type.Imm 32) in
+   let rbp = v64 "RBP" in
+   Blk.Builder.add_def gb
+     (Def.create t
+        (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)),
+                   LittleEndian, `r32)));
+   Blk.Builder.add_def gb (Def.create i (Bil.Var t));
+   let sub_b = Sub.Builder.create ~name:"f1b4_sub" () in
+   Term.enum blk_t sub0 |> Seq.iter ~f:(fun b ->
+       if Term.tid b = l1_tid then Sub.Builder.add_blk sub_b (Blk.Builder.result gb)
+       else Sub.Builder.add_blk sub_b b);
+   let sub = Sub.Builder.result sub_b in
+   let cfg =
+     Sub.to_graph sub
+     |> Graphs.Tid.Node.remove Graphs.Tid.start
+     |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+   (* The entry — and therefore the solution snapshot the walk re-denotes
+      against — must carry the memory binding (a missing mem var reads the
+      map lattice's bottom and trips the width assert). *)
+   let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
+   (* RBP is anchored at 0, so RBP-8 wraps to the unsigned -8 key. *)
+   let key = match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
+     | Some k -> k | None -> failwith "F1-B4: bad key" in
+   let wide_mem =
+     Mem.add (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+       ~key ~data:(Mem.Val.create wide LittleEndian) in
+   let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
+   let sol =
+     Vsa.static_graph_vsa [] (Program.create ~subs:[ sub ] ())
+       sub (Vsa.init_sol ~entry sub) in
+   let rctx = Vsa.mk_rctx ~cfg sub in
+   let seeds = [ Vsa.Var (i, Ws.singleton k) ] in
+   let walk ~cell =
+     Vsa.walk_budget rctx := cell;
+     fst (Vsa.refine_edge ~sol ~rctx ~defs:(Some (Vsa.defs_of_sub sub))
+            ~stores:(Some (Vsa.stores_of_sub sub)) entry sub
+            (Blk.Builder.result gb) seeds) in
+   let cell_of env =
+     match Vsa.denote_imm_exp
+             (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
+                                                Bil.Int (w64 8)), LittleEndian, `r32))
+             env with
+     | Ok ws -> ws
+     | Error _ -> Ws.top 32 in
+   let full = walk ~cell:10_000 in
+   let limited = walk ~cell:2 in
+   let full_cell = cell_of full and limited_cell = cell_of limited in
+   check
+     "property LM F1-B4: the unlimited walk meets the cell (the fixture's precondition: the full walk moves the cell off its wide range)"
+     (Ws.precedes full_cell wide);
+   check
+     "property LM F1-B4: the binding budget's cell COVERS the unlimited result (coarsening, never narrowing — precedes)"
+     (Ws.precedes full_cell limited_cell);
+   check
+     "property LM F1-B4: the binding budget never manufactures bottom on a live block"
+     (not (Ws.is_bottom limited_cell));
+   check
+     "property LM F1-B4: the binding budget actually spent the cell (the shared budget hit 0)"
+     (0 = !(Vsa.walk_budget rctx));
+   ()(* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
 (  (* Widening soundness pins. *)
   let p1 = Clp.interval ~width:32 (w32 0) (w32 100) in

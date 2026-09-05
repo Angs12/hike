@@ -22,6 +22,10 @@ module Abi = Hike_abi
 module Utils = Cbat_vsa_utils
 module AI = Cbat_ai_representation
 
+(* The walk's default pop cap and the per-edge budget unit (spec §2.1/§2.2). *)
+let cap_default = 256
+let budget_per_edge = 1024
+
 (* Version-keyed memos for walk and transfer. *)
 
 

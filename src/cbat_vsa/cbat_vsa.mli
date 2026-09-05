@@ -127,6 +127,34 @@ type edge_constraint =
 
 val edge_constraints : env:AI.t -> ?ctx:analysis_ctx -> exp -> WordSet.t -> edge_constraint list
 
+(* The live-constraint map the backward walk propagates. *)
+module Live : sig
+  type t = WordSet.t Var.Map.t
+end
+
+(* Run context of one fixpoint run: per-block facts, the memos, the shared
+   per-SCC walk budget. Abstract; built by [mk_rctx], read by [walk_budget]. *)
+type refine_ctx
+
+(* The per-run context (the walk fixtures' construction seam). *)
+val mk_rctx : cfg:Graphs.Tid.t -> sub term -> refine_ctx
+
+(* The shared per-SCC walk-pop budget cell (the binding-regime seam). *)
+val walk_budget : refine_ctx -> int ref
+
+(* The deep backward walk: refines [env] by an edge's seed constraints,
+   bounded by [steps] (None = the 256 cap). Budget-limited walks spend the
+   shared cell; the live solution is the walk's internal propagation
+   record (both callers discard it). *)
+val refine_edge :
+  sol:(tid, AI.t) Solution.t ->
+  rctx:refine_ctx ->
+  ?defs:(def term * bool) Var.Map.t option ->
+  ?stores:def term list option ->
+  ?reads:Tid.Set.t ref option ->
+  ?steps:int option ->
+  AI.t -> sub term -> blk term -> edge_constraint list -> AI.t * (tid, Live.t) Solution.t
+
 val init_sol : ?entry:AI.t ->  sub term -> vsa_sol
 
 (* Per-sub def-chain map. *)

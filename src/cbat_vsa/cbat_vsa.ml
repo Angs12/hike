@@ -1494,7 +1494,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
 
     let cfg = rctx.rc_walk_cfg in
     (* The 256 default; the per-SCC budget may lower it. *)
-    let cap = Option.value ~default:256 steps in
+    let cap = Option.value ~default:Cbat_runctx.cap_default steps in
     let seed_constraints, env0 =
       List.fold seeds ~init:(Live.empty, env) ~f:(fun (m, e) -> function
           | Var (v, c) ->
@@ -2257,7 +2257,8 @@ let refine_edge_inline
            (* Per-SCC budget caps the walk; the floor keeps the walk
               launching (spec §2.4 — never skipped). *)
            let budget = max 0 !(rc.rc_walk_budget) in
-           let cap = max 1 (min 256 budget) in
+           let cap =
+             max 1 (min Cbat_runctx.cap_default budget) in
            let refined, _live =
              Stages.time `Walk (fun () ->
                  refine_edge ~sol ~rctx:rc ~defs ~stores
@@ -2266,7 +2267,7 @@ let refine_edge_inline
            (* A budget-limited walk is not memoized: the shortened
               read-set would trap a future reader (spec §2.4). *)
            let rc =
-             if cap >= 256 then
+             if cap >= Cbat_runctx.cap_default then
                { rc with
                  rc_cache =
                    Cbat_runctx.Walk_memo.add ~version rc.rc_cache bt jt
@@ -2274,8 +2275,13 @@ let refine_edge_inline
              else rc in
            (refined, rc, !walk_reads))
       | None ->
+        (* Uncached no-defs walk: spends from the same shared cell, so it is
+           bounded by it too (symmetric with the cached arm). *)
+        let budget = max 0 !(rctx.rc_walk_budget) in
+        let cap = max 1 (min Cbat_runctx.cap_default budget) in
         let refined, _live =
-          refine_edge ~sol ~rctx:rctx ~defs ~stores env sub b seeds in
+          refine_edge ~sol ~rctx:rctx ~defs ~stores ~steps:(Some cap)
+            env sub b seeds in
         (refined, rctx, Tid.Set.empty) in
     walk env seeds
 
@@ -2736,7 +2742,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       |> Core.Set.fold ~init:0 ~f:(fun acc bt ->
           acc + Option.value ~default:0
             (Core.Map.find rctx.rc_out_edges bt)) in
-    rctx.rc_walk_budget := 1024 * allowance;
+    rctx.rc_walk_budget := Cbat_runctx.budget_per_edge * allowance;
     let any_changed = ref false in
     let rec loop () =
       let ch = process_vertex h in
@@ -3091,3 +3097,8 @@ and detect_dynamic_alloc (sp : var) (sub : sub term) : Tid.Set.t =
   v#visit_sub sub Tid.Set.empty
 
 end
+
+(* Re-exports for the mli's fixture seam (the F1 family constructs these). *)
+type refine_ctx = Cbat_runctx.refine_ctx
+let mk_rctx = Cbat_runctx.mk_rctx
+let walk_budget (rc : refine_ctx) : int ref = rc.Cbat_runctx.rc_walk_budget
