@@ -122,17 +122,10 @@ module Make_indexed_from_map
   let meet : t -> t -> t = lift_meet meet'
 
   let join' ljoin (m1 : map) (m2 : map) : map =
-    (* Fold the smaller side. *)
-    if Map.length m1 < Map.length m2 then
-      Map.fold m1 ~init:M.empty ~f:(fun ~key ~data acc ->
-        match Map.find m2 key with
-        | Some d2 -> Map.set acc ~key ~data:(ljoin data d2)
-        | None -> acc)
-    else
-      Map.fold m2 ~init:M.empty ~f:(fun ~key ~data acc ->
-        match Map.find m1 key with
-        | Some d1 -> Map.set acc ~key ~data:(ljoin d1 data)
-        | None -> acc)
+    (* Intersecting join in one pass; one-sided keys are dropped. *)
+    Map.merge m1 m2 ~f:(fun ~key:_ -> function
+      | `Both (d1, d2) -> Some (ljoin d1 d2)
+      | `Left _ | `Right _ -> None)
 
   let join : t -> t -> t = lift_join (join' L.join)
   let widen_join = lift_join (join' L.widen_join)

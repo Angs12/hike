@@ -253,11 +253,10 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
   else if WordEnv.equal e2.words WordEnv.bottom then e1
   else
     let words =
-      let acc = ref WordEnv.top in
-      WordEnv.fold e1.words ~init:() ~f:(fun ~key ~data:data_old () ->
+      WordEnv.fold e1.words ~init:WordEnv.top ~f:(fun ~key ~data:data_old acc ->
         let idx = WordSet.bitwidth data_old in
         let data_new = WordEnv.find idx e2.words key in
-        if WordSet.is_top data_new then ()
+        if WordSet.is_top data_new then acc
         else
           let data_res =
             if Core.Set.mem need (Var.base key) then
@@ -283,10 +282,9 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
             else
               WordSet.join data_old data_new
           in
-          if not (WordSet.is_top data_res) then
-            acc := WordEnv.add !acc ~key ~data:data_res
-      );
-      !acc
+          if WordSet.is_top data_res then acc
+          else WordEnv.add acc ~key ~data:data_res
+      )
     in
     let memories = MemEnv.widen_join e1.memories e2.memories in
     { memories; words; frame = join_opt ~widen:true e1.frame e2.frame

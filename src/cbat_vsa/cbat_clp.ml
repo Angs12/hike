@@ -142,8 +142,9 @@ let finite_end (p : t) : word option =
 
 let lnot (p : t) : t =
   (* Any point works as the infinite base. *)
-  Option.value_map ~default:(bottom (bitwidth p)) (finite_end p)
-    ~f:(fun e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p))
+  match finite_end p with
+  | None -> bottom (bitwidth p)
+  | Some e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p)
 
 
 let iter (p : t) : word list =
@@ -231,22 +232,24 @@ let equal (p1 : t) (p2 : t) : bool =
   else p1 = p2
 
 (* Rebase onto extrema interval. *)
-let unwrap_with ~(default : t) ~(min : t -> word option)
+let unwrap_with ~(default : unit -> t) ~(min : t -> word option)
     ~(max : t -> word option) (p : t) : t =
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default begin
+  match begin
     min p >>= fun base ->
     max p >>= fun e ->
     let step = (step_of p) in
     let cardn = cardn_from_bounds base step e in
     !!(create base ~step ~cardn)
-  end
+  end with
+  | None -> default ()
+  | Some x -> x
 
 let unwrap (p : t) : t =
-  unwrap_with ~default:(bottom (bitwidth p)) ~min:min_elem ~max:max_elem p
+  unwrap_with ~default:(fun () -> bottom (bitwidth p)) ~min:min_elem ~max:max_elem p
 
 let unwrap_signed (p : t) : t =
-  unwrap_with ~default:(top (bitwidth p))
+  unwrap_with ~default:(fun () -> top (bitwidth p))
     ~min:min_elem_signed ~max:max_elem_signed p
 
 (* Smallest circular hull of two intervals. *)
@@ -311,9 +314,6 @@ let intersection (p1 : t) (p2 : t) : t =
     (if bitwidth p1 > bitwidth p2 then p1 else p2)
   else
     let width = bitwidth p1 in
-    let bot = bottom width in
-    
-            
     let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
     
     let translation = (base_of p1) in
@@ -323,7 +323,7 @@ let intersection (p1 : t) (p2 : t) : t =
     let p1_infinite = is_infinite p1 in
     let p2_infinite = is_infinite p2 in
     let open Monads.Std.Monad.Option.Syntax in
-    Option.value ~default:bot begin
+    (match begin
       finite_end p1 >>= fun e1 ->
       finite_end p2 >>= fun e2 ->
         let step = W.lcm_exn (step_of p1) (step_of p2) in
@@ -361,7 +361,9 @@ let intersection (p1 : t) (p2 : t) : t =
             !!safe_operand
           end
         end
-    end |> (fun p -> translate p translation)
+    end with
+    | None -> bottom width
+    | Some x -> x) |> (fun p -> translate p translation)
 
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
@@ -417,8 +419,12 @@ let union (p1 : t) ( p2 : t) : t =
 let add (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
-  Option.value_map ~default:(bottom sz) (finite_end p1) ~f:begin fun e1 ->
-    Option.value_map ~default:(bottom sz) (finite_end p2) ~f:begin fun e2 ->
+  match finite_end p1 with
+  | None -> bottom sz
+  | Some e1 ->
+    match finite_end p2 with
+    | None -> bottom sz
+    | Some e2 ->
       if W.is_zero (step_of p1) || is_one (cardn_of p1) then translate p2 (base_of p1)
       else if W.is_zero (step_of p2) || is_one (cardn_of p2) then translate p1 (base_of p2)
       else if is_infinite p1 || is_infinite p2 then
@@ -431,14 +437,14 @@ let add (p1 : t) (p2 : t) : t =
         let step = bounded_gcd (step_of p1) (step_of p2) in
         if W.(<) e' e1' then infinite (base, step)
         else let cardn = cardn_from_bounds (W.zero sz) step e' in create base ~step ~cardn
-    end
-  end
+
 
 
 let neg (p : t) : t =
   (* Any point works as the infinite base. *)
-  Option.value_map ~default:(bottom (bitwidth p)) (finite_end p)
-    ~f:(fun e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p))
+  match finite_end p with
+  | None -> bottom (bitwidth p)
+  | Some e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p)
 
 let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 
@@ -446,8 +452,12 @@ let mul (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
   (* Empty operand gives bottom. *)
-  Option.value_map ~default:(bottom sz) (finite_end p1) ~f:begin fun e1 ->
-    Option.value_map ~default:(bottom sz) (finite_end p2) ~f:begin fun e2 ->
+  match finite_end p1 with
+  | None -> bottom sz
+  | Some e1 ->
+    match finite_end p2 with
+    | None -> bottom sz
+    | Some e2 ->
       (* Singleton case is exact. *)
       if W.is_zero (step_of p1) || is_one (cardn_of p1) then
         let base = W.mul (base_of p2) (base_of p1) in
@@ -470,8 +480,7 @@ let mul (p1 : t) (p2 : t) : t =
           let fit = W.extract_exn ~hi:(sz - 1) in
           infinite (fit base, fit step)
         else create ~width:sz base ~step ~cardn
-    end
-  end
+
 
 
 let lead_1_bit_run (w : word) ~hi ~lo : int =
@@ -525,7 +534,6 @@ let compute_range_sep msb msb1 msb2 b1 b2 : int = if msb1 > msb2
 let logand (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
-  let bot = bottom sz in
   let cardn_two = W.of_int ~width:(sz + 1) 2 in
   
   let cp1 = p1 in
@@ -534,8 +542,8 @@ let logand (p1 : t) (p2 : t) : t =
   let p1, p2 = if W.(<=) (cardinality cp1) (cardinality cp2)
     then (cp1, cp2) else (cp2, cp1) in
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:bot begin
-    if W.is_zero (cardn_of p1) || W.is_zero (cardn_of p2) then !!bot
+  (match begin
+    if W.is_zero (cardn_of p1) || W.is_zero (cardn_of p2) then !!(bottom sz)
     else if W.is_one (cardn_of p1) && W.is_one (cardn_of p2) then
       !!(create (W.logand (base_of p1) (base_of p2)))
     else if W.is_one (cardn_of p1) && W.(=) (cardn_of p2) cardn_two then
@@ -609,7 +617,9 @@ let logand (p1 : t) (p2 : t) : t =
         (* TODO: use cardn_from_bounds. *)
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
-  end
+  end with
+  | None -> bottom sz
+  | Some x -> x)
 
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
 
@@ -691,7 +701,7 @@ let split_shift ~(sz1 : int) ~(overshift : t)
 let lshift (p1 : t) (p2 : t) : t =
   let sz1 = bitwidth p1 in
     let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:(bottom sz1) begin
+  (match begin
     finite_end p1 >>= fun e1 ->
     (* Exact path per amount part. *)
     let exact_path (p2 : t) (min_p2 : word) (max_p2 : word) : t =
@@ -712,7 +722,9 @@ let lshift (p1 : t) (p2 : t) : t =
       create base ~step ~cardn in
     split_shift ~sz1 ~overshift:(create (W.zero sz1))
       ~exact:exact_path p2
-  end
+  end with
+  | None -> bottom sz1
+  | Some x -> x)
 
 let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
   (* Widths match after coercion. *)
@@ -743,7 +755,7 @@ let rec rshift (p1 : t) (p2 : t) : t =
   let p1 = unwrap p1 in
   let p2 = unwrap p2 in
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:(bottom sz1) begin
+  (match begin
     finite_end p1 >>= fun e1 ->
     (* Exact path per capped part. *)
     let exact_path (p2 : t) (e2 : word) : t =
@@ -758,7 +770,9 @@ let rec rshift (p1 : t) (p2 : t) : t =
       ~exact:(fun p2 min_p2 _ ->
         exact_path p2 (Option.value ~default:min_p2 (finite_end p2)))
       p2
-  end
+  end with
+  | None -> bottom sz1
+  | Some x -> x)
 
 let rec arshift (p1 : t) (p2 : t) : t =
   let sz1 = bitwidth p1 in
@@ -795,7 +809,7 @@ let rec arshift (p1 : t) (p2 : t) : t =
   let p1 = unwrap_signed p1c in
   let p2 = unwrap p2 in
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:(bottom sz1) begin
+  (match begin
     finite_end p1 >>= fun e1 ->
     (* Exact path per capped part. *)
     let exact_path (p2 : t) (e2 : word) : t =
@@ -821,7 +835,9 @@ let rec arshift (p1 : t) (p2 : t) : t =
       ~exact:(fun p2 min_p2 _ ->
         exact_path p2 (Option.value ~default:min_p2 (finite_end p2)))
       p2
-  end
+  end with
+  | None -> bottom sz1
+  | Some x -> x)
 
 (* Split at n. *)
 let split_at_n (p : t) n : t * t =
@@ -851,8 +867,9 @@ let extract_lo ?(lo = 0) (p : t) : t =
   else begin
     let res_width = width - lo in
     if lo = 0 then p else
-      let default = bottom res_width in
-      Option.value_map ~default (finite_end p) ~f:begin fun e ->
+      match finite_end p with
+      | None -> bottom res_width
+      | Some e ->
       let base = W.extract_exn ~lo (base_of p) in
       let ext_lo w = W.extract_exn ~hi:(lo - 1) w in
       let base_mod_2lo = ext_lo (base_of p) in
@@ -868,7 +885,6 @@ let extract_lo ?(lo = 0) (p : t) : t =
         let step = W.one res_width in
         let cardn = cardn_from_bounds base step e in
         create base ~step ~cardn
-    end
   end
 
 let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
@@ -886,8 +902,9 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
     (* TODO: check the signed case. *)
     let ext =  W.extract_exn ~hi:hiv in
     let ext_signed w = W.extract_exn ~hi:hiv (W.signed w) in
-    Option.value_map ~default:(bottom (hiv + 1)) (finite_end p) ~f:begin
-      fun e ->
+    match finite_end p with
+    | None -> bottom (hiv + 1)
+    | Some e ->
         (* TODO: check the infinite case. *)
         if is_infinite p then infinite (ext (base_of p), ext (step_of p))
         else
@@ -909,7 +926,6 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
             else
               let cardn = cardn_from_bounds (W.zero (hiv + 1)) step newE' in
               create base ~step ~cardn
-    end
 
 let extract_internal ?hi ?(lo = 0) ?(signed = false) (p : t) : t =
   let hi = Option.map hi ~f:(fun hi -> hi - lo) in
@@ -947,7 +963,7 @@ let concat (p1 : t) (p2 : t) : t =
 let of_list ~width l : t =
   assert (width > 0);
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:(bottom width) begin
+  (match begin
     let l = List.map l ~f:(W.extract_exn ~hi:(width - 1) ~lo:0) in
     let l = List.sort ~compare:W.compare l in
     let diff_list = List.map2_exn l (rotate_list l) ~f:W.sub in
@@ -967,14 +983,16 @@ let of_list ~width l : t =
     let cardn = cardn_from_bounds base step e in
     assert(W.bitwidth base = width);
     !!(create base ~step ~cardn)
-  end
+  end with
+  | None -> bottom width
+  | Some x -> x)
 
 (* BAP div truncates; ediv is Euclidean. *)
 let div (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:(bottom width) begin
+  (match begin
     min_elem p1 >>= fun min_e1 ->
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
@@ -993,7 +1011,9 @@ let div (p1 : t) (p2 : t) : t =
           else W.one width in
       let cardn = cardn_from_bounds base step e in
       !!(create base ~step ~cardn)
-  end
+  end with
+  | None -> bottom width
+  | Some x -> x)
 
 let sdiv (p1 : t) (p2 : t) : t =
   let wsdiv a b = W.div (W.signed a) (W.signed b) in
@@ -1003,7 +1023,7 @@ let sdiv (p1 : t) (p2 : t) : t =
   if is_infinite p1 || is_infinite p2 then top width
   else
   let open Monads.Std.Monad.Option.Syntax in
-  Option.value ~default:(bottom width) begin
+  (match begin
     min_elem p1 >>= fun min_e1 ->
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
@@ -1031,7 +1051,9 @@ let sdiv (p1 : t) (p2 : t) : t =
       let step = W.one width in
       let cardn = cardn_from_bounds base step e in
       !!(create base ~step ~cardn)
-  end
+  end with
+  | None -> bottom width
+  | Some x -> x)
 
 
 let modulo (p1 : t) (p2 : t) : t =
