@@ -410,6 +410,58 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-05 EEST — C1 WALK-POP BUDGET (branch `c1-walk-budget`,
+ticket 01 = commit `5ca6560`) — BATTERY GREEN, IR BYTE-IDENTICAL 35/35 (the
+strongest possible outcome for this gate class), grep −4.8% / gcc-12 −2.5%**
+
+The C1 lane (spec: `.scratch/c1-walk-budget/spec.md`, grilling-settled
+2026-09-05): the deep backward walk (`refine_edge`) runs inline at every
+conditional jump (ADR-0002) bounded by `~steps:256`; on the worst converged
+subs 100% of walks truncate at the cap (grep sub_e350: 1,826 walks / 467k
+pops / 74% of fixpoint wall post-merge). The budget BOUNDS that cost without
+changing placement:
+
+- **The cell:** `rc_walk_budget : int ref` in `Cbat_runctx.refine_ctx`
+  (a ref field SHARES the cell across every `{rc with ...}` copy — the
+  per-SCC semantics for free). `rc_out_edges` (per-block jmp counts) built
+  ONCE in `mk_rctx` (the 73b756 per-visit-hashing lesson).
+- **The recharge:** at EVERY `stabilize_scc` entry, `budget := 1024 × Σ
+  (out-edges of the SCC's member blocks)` — one allowance per SCC
+  stabilization; nested SCCs recharge their own at their own entry.
+- **The enforcement (memo-first):** `Walk_memo.find` FIRST (a hit is free
+  precision — never refused); on a miss the walk launches with
+  `cap = max 1 (min 256 (max 0 !budget))`; the cell decrements per pop in the
+  walk's `f` callback (VERIFIED: one graphlib `steps` iteration == one
+  worklist pop — `graphlib_graph.ml:1402`, `iters` increments exactly when
+  `step` pops `Set.min_elt works`); a budget-limited walk (cap < 256) does
+  NOT `Walk_memo.add` (the empty-read-set trap); the zero-floor launches a
+  1-pop walk (the guard block's own-def walk) — NEVER a skip, NEVER a gate
+  (principles #2/#3: a shorter walk is the sound coarsening the 256 cap
+  always was).
+- **Instrumentation:** `bhits`/`psaved` on the STAGES line (vsa-debug only;
+  the prod adapter no-ops).
+- **DEAD, recorded (do not re-propose):** the seed-skip identity ("skip the
+  walk when no Var seed's meet changed env") is UNSOUND — a no-op seed can
+  still produce new CELL meets propagated backward through a Load def or a
+  Load-valued phi (`constrain_cell_on_trace` inside the walk). Spec §1.
+
+**Measured (A/B/A sandwich, 2 runs each side, interleaved):**
+
+| gate | control (`e4b309c`) | budget (`5ca6560`) |
+|---|---|---|
+| producer sort / grep / gcc-12 | 8.23–8.25 / 13.98–14.01 / 32.60–32.67 s | 8.14–8.17 (**−1.1%**) / 13.24–13.39 (**−4.8%**) / 31.79–31.86 (**−2.5%**) |
+| e350 walk lane | 2.43s / 1,826 walks / 467,456 pops | 2.08s / 1,613 walks / **342,548 pops (−26.7%)**, bhits 276, psaved 70,380 — arithmetic exact (1,337×256 + 276×1) |
+| 9f00 walk lane | 155,648 pops | **135,210 pops (−13.1%)**, bhits 42, psaved 10,710 |
+| **tag counts (all 2,421 subs)** | — | **IDENTICAL** (0 moved: sort 452, grep 475, gcc-12 1,494) |
+| **tag kinds (every budget-bound sub)** | — | **IDENTICAL** (e350/8cb0/6b60/296a0/9f00/9570/4d2a: byte-equal kind multisets) |
+| **IR** | — | **byte-identical 35/35** |
+| corpus / check_allocas / semantic-all / 8-bin | 35/35 · 172/3 · 30/5 · 8/8 | **identical to control on every gate** |
+
+The budget-limited walks' lost pops sat beyond what the TAG states consume —
+full behavior preservation AND the speedup. C=1024 held; no raise needed.
+Suite: 455 ok, output byte-identical to control. Artifacts:
+`/tmp/opencode/c1-ab/`.
+
 **Last verified: 2026-09-05 EEST — MERGE of `review3-removals` into
 `perf-arch-10-work` (a9a1a8b, on 73b4756) — BATTERY GREEN, IR
 BYTE-IDENTICAL 35/35, and a measured producer speedup**

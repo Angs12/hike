@@ -72,3 +72,23 @@ soundness questions (see `docs/trace-partitioning-plan.md`).
 - `bash scripts/check_allocas.sh <out>` (target: 124/0)
 - `bash scripts/semantic/run_semantic_all.sh` (target: 31/31)
 - `bash scripts/semantic/run_semantic.sh` (target: 8/8)
+
+## Addendum (2026-09-05): the walk is now budget-bounded per SCC
+
+The inline deep walk's cost is BOUNDED by the C1 walk-pop budget (spec:
+`.scratch/c1-walk-budget/spec.md`; the placement above is UNCHANGED — the
+walk still runs inline at every conditional jump). The budget does not
+change this ADR's semantics: a truncated walk was ALWAYS the sound
+coarsening (the `~steps:256` cap is this design's own precedent), and the
+budget only chooses where the cap lands — `min(256, remaining)` of a
+per-SCC allowance (`1024 × the SCC's out-edges`, recharged at every
+`stabilize_scc` entry, memo-first so free precision is never refused).
+Measured: grep −4.8% / gcc-12 −2.5% producer, e350's walk pops −26.7%
+(467,456 → 342,548, arithmetic exact against the bhits/psaved counters),
+tag counts and kinds IDENTICAL across all 2,421 real-binary subs, IR
+byte-identical 35/35 — the coarsening never crossed the TAG states. The
+soundness statement is one line: a shorter walk is the sound coarsening
+the 256 cap always was; NO gates, NO skips (principles #2/#3). The
+seed-skip alternative was proven UNSOUND during the design grilling (a
+no-op Var seed can still produce new cell meets backward through a Load
+def or a Load-valued phi) — recorded so it is not re-proposed.
