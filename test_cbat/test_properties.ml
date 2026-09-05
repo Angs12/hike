@@ -919,6 +919,91 @@ let run_landmarks () =
      (Ws.equal (AI.find_word 32 (st else_tid) x) (range 10 20));
    ()
 
+(* F1-B1 (budget soundness): the walk-pop budget is armed on every fixpoint
+   run; on this landmark loop the walks are the refinement carrier, so the
+   budget's soundness contract - a shorter walk is the sound coarsening the
+   256 cap always was, never a narrowing - is pinned by the same invariants
+   the unlimited walk must satisfy: the head lands at [0, K] (never above K,
+   never bottom) and the taken body lands at [0, K-1]. If a budget bug
+   NARROWED a state (the unsound direction) or manufactured bottom on a live
+   block, these exact-value pins move. *))
+;
+(  let k = w32 100 in
+   let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol =
+     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+   in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
+   let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
+   check
+     "property LM F1-B1: the budget-armed head's lower bound is the entry constant 0"
+     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+   check
+     "property LM F1-B1: the budget-armed head's upper bound is the landmark K (never narrowed, never blown past)"
+     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
+   check
+     "property LM F1-B1: the budget-armed taken body's upper bound is K-1 (the guard's exclusion survives)"
+     (match Ws.max_elem body_i with Some hi -> W.equal hi (W.pred k) | None -> false);
+   check
+     "property LM F1-B1: the budget never manufactures bottom on a live block (the head's state is inhabited)"
+     (not (Ws.is_bottom head_i));
+   ()
+
+(* F1-B2 (budget recharge): two sequential SCCs; each stabilizes with its
+   OWN walk allowance (the recharge fires at every stabilize_scc entry). The
+   pin: loop 2's landmark precision is INDEPENDENT of loop 1's walk spend -
+   if the budget were one shared pool that loop 1 drained, loop 2's head
+   would lose its lower bound 0 (the refinement it needs the walk for). *))
+;
+(  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
+   let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
+   let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
+   check
+     "property LM F1-B2: loop 2's head lower bound is the entry constant 0 (its own SCC allowance, not loop 1's leftover)"
+     (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
+   let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
+   check
+     "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both SCCs refined)"
+     (match Ws.min_elem i1 with Some lo -> W.equal lo (w32 0) | None -> false);
+   ()
+
+(* F1-B3 (budget memo-first): the Walk_memo is consulted BEFORE the budget
+   caps a walk, so a memoized refinement survives even when the allowance is
+   exhausted. The F1-FT walk-observed pin (the fallthrough exit holds {K}
+   exactly) runs with the budget armed; a budget-first ordering bug would
+   starve the late walks and the exit would coarsen. Re-runs the F1-FT shape
+   and pins the walk-delivered value. *))
+;
+(  let k = w32 100 in
+   let sub, _l1_tid, b1_tid = lm_jne_loop ~k () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol =
+     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+   in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let st tid = Graphlib.Std.Solution.get sol tid in
+   let exits =
+     Term.enum blk_t sub |> Seq.to_list
+     |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
+   in
+   let exit_i =
+     match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
+   in
+   check
+     "property LM F1-B3: the fallthrough exit pins the counter to {K} exactly (the memo-first walk delivery survives the budget)"
+     (Ws.equal exit_i (Ws.singleton k));
+   check
+     "property LM F1-B3: the taken body's refined view survives (upper bound K-1)"
+     (match Ws.max_elem (AI.find_word 32 (st b1_tid) i) with
+      | Some hi -> W.equal hi (W.pred k)
+      | None -> false);
+   ()
+
 (* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
 (  (* Widening soundness pins. *)
