@@ -952,13 +952,8 @@ let run_landmarks () =
    ()
 
 (* F1-B2 (starvation-regression pin): two sequential SCCs under the ONE
-   global per-run walk allowance (C8: the per-SCC recharge site died with the
-   recursive driver - a worklist has no stabilization episodes to refill on,
-   so the budget recharges once at fixpoint start). The behavioral core this
-   pins: BOTH loops still refine independently - loop 1's walk spend cannot
-   starve loop 2's refinement. If loop 2's head lost its lower bound 0 (the
-   refinement it needs the walk for), some loop would be starving the other.
-   The allowance is vast on fixtures, so these pins hold hugely. *))
+   global per-run walk allowance. The behavioral core: BOTH loops still
+   refine independently - loop 1's walk spend cannot starve loop 2. *))
 ;
 (  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
    let prog' = Program.create ~subs:[ sub ] () in

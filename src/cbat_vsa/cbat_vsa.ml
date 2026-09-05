@@ -2761,6 +2761,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
      completely, and changes enqueue Tid-CFG successors. *)
   let pending = ref Tid.Set.empty in
+  (* Entry itself is never seeded: init_sol pre-seeds its state. *)
   (match Term.first blk_t s with
   | None -> ()
   | Some entry ->
@@ -2777,16 +2778,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     | Some v ->
       pending := Core.Set.remove !pending v;
       Some v in
-  let rec drive () =
-    if !total_processed > max_steps then ()
-    else match pop_min () with
-      | None -> ()
-      | Some v ->
-        if process_vertex v then
-          Graphs.Tid.Node.succs v cfg
-          |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t);
-        drive () in
-  drive ();
+  let rec stabilize_worklist () =
+    match pop_min () with
+    | None -> ()
+    | Some v ->
+      if process_vertex v then
+        Graphs.Tid.Node.succs v cfg
+        |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t);
+      stabilize_worklist () in
+  stabilize_worklist ();
   Stages.report (Sub.name s);
   Solution.create (!rc_cell).rc_state.fs_sol sol_default
 
