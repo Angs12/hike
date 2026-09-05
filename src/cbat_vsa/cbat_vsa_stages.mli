@@ -15,6 +15,11 @@ val walk_blocks : int ref
 val walk_truncs : int ref
 val walk_max_pops : int ref
 
+(* Budget metrics: walks launched under the 256 cap and the pop delta
+   vs that cap for those walks. *)
+val budget_hits : int ref
+val pops_saved : int ref
+
 (* Accumulated per-stage seconds. *)
 val t_denote : float ref
 val t_walk : float ref
@@ -37,9 +42,10 @@ val time :
   [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Widen ] ->
   (unit -> 'a) -> 'a
 
-(* Commit one walk's schedule metrics. *)
+(* Commit one walk's schedule metrics; [budget_cap] is the steps cap the
+   walk ran under (the per-SCC budget may have lowered it below 256). *)
 val bump_walk_pops :
-  pops:int -> blocks:int -> truncated:bool -> unit -> unit
+  pops:int -> blocks:int -> truncated:bool -> budget_cap:int -> unit -> unit
 
 (* Print totals and call counts. *)
 val report : string -> unit

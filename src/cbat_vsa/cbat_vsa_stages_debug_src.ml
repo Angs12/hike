@@ -17,6 +17,8 @@ let walk_pops = ref 0
 let walk_blocks = ref 0
 let walk_truncs = ref 0
 let walk_max_pops = ref 0
+let budget_hits = ref 0
+let pops_saved = ref 0
 
 let t_scaffold = ref 0.
 let scaffold_calls = ref 0
@@ -34,6 +36,7 @@ let reset () =
   t_denote := 0.; t_join := 0.; t_equal := 0.; t_widen := 0.;
   t_walk := 0.;
   walk_pops := 0; walk_blocks := 0; walk_truncs := 0; walk_max_pops := 0;
+  budget_hits := 0; pops_saved := 0;
   t_scaffold := 0.; scaffold_calls := 0;
   t_glue := 0.; glue_calls := 0;
   gc0 := Gc.quick_stat ()
@@ -55,11 +58,16 @@ let time (which : [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Wide
   r
 
 (* Commit one walk's schedule metrics. *)
-let bump_walk_pops ~(pops : int) ~(blocks : int) ~(truncated : bool) () : unit =
+let bump_walk_pops ~(pops : int) ~(blocks : int) ~(truncated : bool)
+    ~(budget_cap : int) () : unit =
   walk_pops := !walk_pops + pops;
   walk_blocks := !walk_blocks + blocks;
   if truncated then incr walk_truncs;
-  if pops > !walk_max_pops then walk_max_pops := pops
+  if pops > !walk_max_pops then walk_max_pops := pops;
+  if budget_cap < 256 then begin
+    incr budget_hits;
+    pops_saved := !pops_saved + (256 - pops)
+  end
 
 (* Print totals, call counts, and GC deltas. *)
 let gc_minor_words () =
@@ -85,12 +93,14 @@ let memo_stats () : int * int * int * int * int =
 let report (label : string) : unit =
   Printf.printf
     "STAGES %s: denote %7.3fs/%d  join %7.3fs/%d  equal %7.3fs/%d  \
-     widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d  glue %7.3fs/%d\n\
+     widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d  glue %7.3fs/%d  \
+     bhits %d  psaved %d\n\
      WALKS %s: pops %d  blocks %d  truncs %d  max_pops %d\n\
      GC %s: minor %.0f  major %.0f  promoted %.0f\n%!"
     label !t_denote !denote_calls !t_join !join_calls !t_equal !equal_calls
     !t_widen !widen_calls !t_walk !walk_calls !t_scaffold !scaffold_calls
-    !t_glue !glue_calls
+    !t_glue !glue_calls !budget_hits !pops_saved
     label !walk_pops !walk_blocks !walk_truncs !walk_max_pops
     label (gc_minor_words ()) (gc_major_words ()) (gc_promoted_words ())
+
 #endif
