@@ -919,7 +919,171 @@ let run_landmarks () =
      (Ws.equal (AI.find_word 32 (st else_tid) x) (range 10 20));
    ()
 
-(* F2a: landmark consumption at CLP level — never lands short of the join. *))
+(* F1-B1 (budget soundness): the walk-pop budget is armed on every fixpoint
+   run; on this landmark loop the walks are the refinement carrier, so the
+   budget's soundness contract - a shorter walk is the sound coarsening the
+   256 cap always was, never a narrowing - is pinned by the same invariants
+   the unlimited walk must satisfy: the head lands at [0, K] (never above K,
+   never bottom) and the taken body lands at [0, K-1]. If a budget bug
+   NARROWED a state (the unsound direction) or manufactured bottom on a live
+   block, these exact-value pins move. *))
+;
+(  let k = w32 100 in
+   let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol =
+     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+   in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
+   let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
+   check
+     "property LM F1-B1: the budget-armed head's lower bound is the entry constant 0"
+     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+   check
+     "property LM F1-B1: the budget-armed head's upper bound is the landmark K (never narrowed, never blown past)"
+     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
+   check
+     "property LM F1-B1: the budget-armed taken body's upper bound is K-1 (the guard's exclusion survives)"
+     (match Ws.max_elem body_i with Some hi -> W.equal hi (W.pred k) | None -> false);
+   check
+     "property LM F1-B1: the budget never manufactures bottom on a live block (the head's state is inhabited)"
+     (not (Ws.is_bottom head_i));
+   ()
+
+(* F1-B2 (budget recharge): two sequential SCCs; each stabilizes with its
+   OWN walk allowance (the recharge fires at every stabilize_scc entry). The
+   pin: loop 2's landmark precision is INDEPENDENT of loop 1's walk spend -
+   if the budget were one shared pool that loop 1 drained, loop 2's head
+   would lose its lower bound 0 (the refinement it needs the walk for). *))
+;
+(  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
+   let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
+   let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
+   check
+     "property LM F1-B2: loop 2's head lower bound is the entry constant 0 (its own SCC allowance, not loop 1's leftover)"
+     (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
+   let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
+   check
+     "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both SCCs refined)"
+     (match Ws.min_elem i1 with Some lo -> W.equal lo (w32 0) | None -> false);
+   ()
+
+(* F1-B3 (budget memo-first): the Walk_memo is consulted BEFORE the budget
+   caps a walk, so a memoized refinement survives even when the allowance is
+   exhausted. The F1-FT walk-observed pin (the fallthrough exit holds {K}
+   exactly) runs with the budget armed; a budget-first ordering bug would
+   starve the late walks and the exit would coarsen. Re-runs the F1-FT shape
+   and pins the walk-delivered value. *))
+;
+(  let k = w32 100 in
+   let sub, _l1_tid, b1_tid = lm_jne_loop ~k () in
+   let prog' = Program.create ~subs:[ sub ] () in
+   let sol =
+     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+   in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let st tid = Graphlib.Std.Solution.get sol tid in
+   let exits =
+     Term.enum blk_t sub |> Seq.to_list
+     |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
+   in
+   let exit_i =
+     match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
+   in
+   check
+     "property LM F1-B3: the fallthrough exit pins the counter to {K} exactly (the memo-first walk delivery survives the budget)"
+     (Ws.equal exit_i (Ws.singleton k));
+   check
+     "property LM F1-B3: the taken body's refined view survives (upper bound K-1)"
+     (match Ws.max_elem (AI.find_word 32 (st b1_tid) i) with
+      | Some hi -> W.equal hi (W.pred k)
+      | None -> false);
+   ()
+
+(* F1-B4 (binding regime): the budget BINDS, and the soundness contract is
+   pinned in the binding direction. The walk's steps-DEPENDENT product is the
+   cell meet through a Load-producing def ([def_constraints] ->
+   [constrain_cell_on_trace] fires INSIDE the walk), so the fixture seeds a
+   Var constraint on a var whose guard-block def is a Load over a known cell
+   with a WIDE stored range. The unlimited walk meets the cell down to the
+   seed; a 2-pop budget-limited walk covers less — and the contract says the
+   limited result must COVER the unlimited one (coarsening, [precedes]),
+   never narrow it, never bottom a live block. The exported mk_rctx +
+   walk_budget seam constructs the context and drives the shared cell. *))
+;
+(  let k = w32 100 in
+   let sub0, l1_tid, _b1_tid = lm_jne_loop ~k () in
+   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+   let mem = Var.create ~is_virtual:true ~fresh:false "f1b4_m" (Type.Mem (`r64, `r8)) in
+   (* Prepend to the guard block: t := Load[mem, RBP-8]; i := t.  The seed on
+      i walks backward through i's def to t's Load and meets the cell. *)
+   let guard_blk =
+     Term.enum blk_t sub0 |> Seq.to_list |> List.find (fun b -> Term.tid b = l1_tid) in
+   let gb = Blk.Builder.init ~copy_defs:true guard_blk in
+   let t = Var.create ~is_virtual:true ~fresh:false "f1b4_t" (Type.Imm 32) in
+   let rbp = v64 "RBP" in
+   Blk.Builder.add_def gb
+     (Def.create t
+        (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)),
+                   LittleEndian, `r32)));
+   Blk.Builder.add_def gb (Def.create i (Bil.Var t));
+   let sub_b = Sub.Builder.create ~name:"f1b4_sub" () in
+   Term.enum blk_t sub0 |> Seq.iter ~f:(fun b ->
+       if Term.tid b = l1_tid then Sub.Builder.add_blk sub_b (Blk.Builder.result gb)
+       else Sub.Builder.add_blk sub_b b);
+   let sub = Sub.Builder.result sub_b in
+   let cfg =
+     Sub.to_graph sub
+     |> Graphs.Tid.Node.remove Graphs.Tid.start
+     |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+   (* The entry — and therefore the solution snapshot the walk re-denotes
+      against — must carry the memory binding (a missing mem var reads the
+      map lattice's bottom and trips the width assert). *)
+   let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
+   (* RBP is anchored at 0, so RBP-8 wraps to the unsigned -8 key. *)
+   let key = match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
+     | Some k -> k | None -> failwith "F1-B4: bad key" in
+   let wide_mem =
+     Mem.add (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+       ~key ~data:(Mem.Val.create wide LittleEndian) in
+   let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
+   let sol =
+     Vsa.static_graph_vsa [] (Program.create ~subs:[ sub ] ())
+       sub (Vsa.init_sol ~entry sub) in
+   let rctx = Vsa.mk_rctx ~cfg sub in
+   let seeds = [ Vsa.Var (i, Ws.singleton k) ] in
+   let walk ~cell =
+     Vsa.walk_budget rctx := cell;
+     fst (Vsa.refine_edge ~sol ~rctx ~defs:(Some (Vsa.defs_of_sub sub))
+            ~stores:(Some (Vsa.stores_of_sub sub)) entry sub
+            (Blk.Builder.result gb) seeds) in
+   let cell_of env =
+     match Vsa.denote_imm_exp
+             (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
+                                                Bil.Int (w64 8)), LittleEndian, `r32))
+             env with
+     | Ok ws -> ws
+     | Error _ -> Ws.top 32 in
+   let full = walk ~cell:10_000 in
+   let limited = walk ~cell:2 in
+   let full_cell = cell_of full and limited_cell = cell_of limited in
+   check
+     "property LM F1-B4: the unlimited walk meets the cell (the fixture's precondition: the full walk moves the cell off its wide range)"
+     (Ws.precedes full_cell wide);
+   check
+     "property LM F1-B4: the binding budget's cell COVERS the unlimited result (coarsening, never narrowing — precedes)"
+     (Ws.precedes full_cell limited_cell);
+   check
+     "property LM F1-B4: the binding budget never manufactures bottom on a live block"
+     (not (Ws.is_bottom limited_cell));
+   check
+     "property LM F1-B4: the binding budget actually spent the cell (the shared budget hit 0)"
+     (0 = !(Vsa.walk_budget rctx));
+   ()(* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
 (  (* Widening soundness pins. *)
   let p1 = Clp.interval ~width:32 (w32 0) (w32 100) in
