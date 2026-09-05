@@ -2623,10 +2623,19 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = 6000 in
+  (* Per-head visit counts; each head gets its own warmup window. *)
+  let head_visits : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
+  let head_warmed (v : Tid.t) : bool =
+    Option.value ~default:0 (Hashtbl.find head_visits v) > 10 in
   let process_vertex (v : Tid.t) : bool =
     (* Scaffold times engine glue. *)
     Stages.time `Scaffold (fun () ->
     incr total_processed;
+    (* This visit counts toward the head's own window, including itself. *)
+    if Core.Set.mem heads v then begin
+      let n = Option.value ~default:0 (Hashtbl.find head_visits v) in
+      Hashtbl.set head_visits ~key:v ~data:(n + 1)
+    end;
     if !total_processed > max_steps then begin
       let sol = Solution.create (!rc_cell).rc_state.fs_sol sol_default in
       raise (Fixpoint_not_converged (max_steps, sol, None))
@@ -2703,7 +2712,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     in
     let new_val =
       if List.is_empty preds then old
-      else if Core.Set.mem heads v && !total_processed > 10 then begin
+      else if Core.Set.mem heads v && head_warmed v then begin
         (* Stable heads skip side effects. *)
         (* Join computed once. *)
         let j = Stages.time `Join (fun () -> AI.join old incoming) in
@@ -2737,34 +2746,47 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     then false
     else (Stages.time `Glue (fun () -> set v new_val); true))
   in
-  let rec stabilize_comps (comps : Cbat_wto.comp list) : bool =
-    let changed = ref false in
-    List.iter comps ~f:(function
-        | Cbat_wto.Vertex v -> if process_vertex v then changed := true
-        | Cbat_wto.SCC (h, inner) -> if stabilize_scc h inner then changed := true);
-    !changed
-  and stabilize_scc (h : Tid.t) (inner : Cbat_wto.comp list) : bool =
-    (* One walk-pop allowance per SCC stabilization (spec §2.2): the
-       shared budget cell recharges from the SCC's own edge count at
-       every entry, so nested SCCs get their own allowance. *)
-    let allowance =
-      Hashtbl.find_exn head_to_blocks h
-      |> Core.Set.fold ~init:0 ~f:(fun acc bt ->
-          acc + Option.value ~default:0
-            (Core.Map.find rctx.rc_out_edges bt)) in
-    rctx.rc_walk_budget := Cbat_runctx.budget_per_edge * allowance;
-    let any_changed = ref false in
-    let rec loop () =
-      let ch = process_vertex h in
-      let ci = stabilize_comps inner in
-      if ch then any_changed := true;
-      if ci then any_changed := true;
-      if ch || ci then loop ()
-    in
-    loop ();
-    !any_changed
-  in
-  ignore (stabilize_comps wto);
+  (* WTO position index built once; the queue pops the lowest. *)
+  let pos_of =
+    List.mapi (Cbat_wto.flatten_comps wto) ~f:(fun i t -> (t, i))
+    |> List.fold ~init:Tid.Map.empty ~f:(fun m (t, i) ->
+        Core.Map.set m ~key:t ~data:i) in
+  let pos (v : Tid.t) : int =
+    Option.value ~default:Int.max_value (Core.Map.find pos_of v) in
+  (* One walk-pop allowance for the whole run. *)
+  let allowance =
+    Core.Map.fold rctx.rc_out_edges ~init:0
+      ~f:(fun ~key:_ ~data:n acc -> acc + n) in
+  rctx.rc_walk_budget := Cbat_runctx.budget_per_edge * allowance;
+  (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
+     completely, and changes enqueue Tid-CFG successors. *)
+  let pending = ref Tid.Set.empty in
+  (match Term.first blk_t s with
+  | None -> ()
+  | Some entry ->
+    Graphs.Tid.Node.succs (Term.tid entry) cfg
+    |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t));
+  let pop_min () =
+    let best =
+      Core.Set.fold !pending ~init:None ~f:(fun best t ->
+          match best with
+          | None -> Some t
+          | Some b -> if pos t < pos b then Some t else best) in
+    match best with
+    | None -> None
+    | Some v ->
+      pending := Core.Set.remove !pending v;
+      Some v in
+  let rec drive () =
+    if !total_processed > max_steps then ()
+    else match pop_min () with
+      | None -> ()
+      | Some v ->
+        if process_vertex v then
+          Graphs.Tid.Node.succs v cfg
+          |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t);
+        drive () in
+  drive ();
   Stages.report (Sub.name s);
   Solution.create (!rc_cell).rc_state.fs_sol sol_default
 
