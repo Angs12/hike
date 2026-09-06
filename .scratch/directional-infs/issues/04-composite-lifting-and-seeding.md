@@ -1,6 +1,6 @@
 # 04 — Composite Lifting & VSA Seeding
 
-**Status:** ready-for-agent  
+**Status:** closed  
 **Depends on:** 03  
 **Blocks:** 05  
 
@@ -12,13 +12,13 @@
   - `src/convutils.ml` (`is_positive_kind` at line ~149)
 
 **Tasks:**
-- [ ] In `src/cbat_vsa/cbat_clp_set_composite.ml`:
+- [x] In `src/cbat_vsa/cbat_clp_set_composite.ml`:
   - Expose directional predicates in module `WordSet`:
     - `is_ascending : t -> bool`
     - `is_descending : t -> bool`
     - `is_circular : t -> bool`
   - Ensure `clp_diff_finset` preserves directional bounds during guard meets and producer subtractions.
-- [ ] In `src/cbat_vsa/cbat_vsa.ml`:
+- [x] In `src/cbat_vsa/cbat_vsa.ml`:
   - Update `is_seed` (Channel 2):
     ```ocaml
     if WordSet.is_circular ws then false
@@ -28,7 +28,7 @@
       lo_i64 >= nlo && hi_i64 <= nhi
     ```
   - Verify `classify` passes `WordSet.min_elem ws` as `lo`, yielding `Infinite (8L, hi)` for `Ascending { base = 8; step = 8 }`.
-- [ ] Verify `is_positive_kind` in `src/convutils.ml` correctly recognizes `Infinite (8L, hi)` as positive ($8\text{L} > 0\text{L}$).
+- [x] Verify `is_positive_kind` in `src/convutils.ml` correctly recognizes `Infinite (8L, hi)` as positive ($8\text{L} > 0\text{L}$).
 
 **Verification:**
 - Run `zz_scratch_probe/vsa_ptr_diag.exe -- /tmp/corpus/variadic sum_n`:
