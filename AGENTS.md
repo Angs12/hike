@@ -414,7 +414,9 @@ LLVM allocas / static variables — it should work on EVERY binary.
 tickets 01+02+03+04+05 = commits `085f378`+`a124d97`+`858a33d`+`e518825`+`8281a8b`,
 plus article-6 `39ffcb6` (frame_addr_alias linear via inverted target set;
 A/B: gcc-12 alias 126→47ms) plus article-7 `09e2668` (copy-reloc slots
-as a named pure function, one walk was three, +8 fixture checks → 475 ok) —
+as a named pure function, one walk was three, +8 fixture checks → 475 ok)
+plus finding-1 `a0631c6` (per-pop block lookup via rc_blocks map;
+A/B: grep sub_e350 producer 1.935→1.62s, −16%) —
 BATTERY GREEN, IR BYTE-IDENTICAL 35/35 on every ticket**
 
 The cleanup-8 lane (spec: `.scratch/cleanup-8/spec.md`, grilling-settled
