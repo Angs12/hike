@@ -15,11 +15,16 @@ open Bap.Std
 
 (* Circular linear progressions. *)
 
+type direction = Finite | Ascending | Descending | Circular
+[@@deriving bin_io, sexp, compare]
+
 type t [@@deriving bin_io, sexp]
 
 include Cbat_wordset_intf.S with type t := t
 
 val create : ?width:int -> ?step:word -> ?cardn: word -> word -> t
+val create_ascending : width:int -> base:word -> step:word -> t
+val create_descending : width:int -> base:word -> step:word -> t
 
 (* Step-1 CLP [lo, hi]; a wrapped pair is the circular interval. *)
 val interval : width:int -> word -> word -> t
@@ -33,8 +38,12 @@ val infinite : word * word -> t
 val is_top : t -> bool
 val is_infinite : t -> bool
 val is_bottom : t -> bool
+val is_ascending : t -> bool
+val is_descending : t -> bool
+val is_circular : t -> bool
 
 val subset : t -> t -> bool
+val translate : t -> word -> t
 
 val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t
