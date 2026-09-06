@@ -1293,11 +1293,10 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
   | None -> None
 
 
-let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
-    (d : def term) (blk : blk term) (live : Live.t) (cstr : wordset)
+let def_constraints ~(blk_state : AI.t) (env : AI.t ref)
+    (d : def term) (live : Live.t) (cstr : wordset)
     : (var * wordset) list =
-  (* The block's state is fixed for this def. *)
-  let blk_state = Solution.get sol (Term.tid blk) in
+  (* The block's state is fixed for this def; the caller derived it. *)
   match Def.rhs d with
   | Bil.Load (m, a, en, s) ->
     (* Cells only; addresses unconstrained. *)
@@ -1416,7 +1415,8 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
   let live = ref live in
   (* The block's state is loop-invariant over its own defs. *)
   let blk_state = Solution.get sol (Term.tid blk) in
-  List.iter (Term.enum def_t blk |> Seq.to_list |> List.rev) ~f:(fun d ->
+  Term.enum ~rev:true def_t blk
+  |> Seq.iter ~f:(fun d ->
       let v = Var.base (Def.lhs d) in
       match Live.find v !live with
       | None -> ()   (* Skip non-live lhs. *)
@@ -1439,7 +1439,7 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
                live := Live.remove v !live
              else begin
                live := Live.remove v !live;
-               let pairs = def_constraints ~sol env d blk !live cstr' in
+               let pairs = def_constraints ~blk_state env d !live cstr' in
                List.iter pairs ~f:(fun (pv', pc) ->
                    live := Live.add pv' pc !live)
              end
@@ -2109,15 +2109,10 @@ let assume_jump_cond
 
 (* ================================================================== *)
 
-(* One edge's accumulated cond. *)
-type edge_cond = {
-  acc_cond : exp;
-}
-
-(* Per-sub static edge table. *)
-let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
+(* Per-sub static edge table: per (block, jmp) accumulated cond. *)
+let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
   let ircfg = Sub.to_cfg sub in
-  let tbl : (Tid.t, edge_cond Tid.Map.t) Hashtbl.t =
+  let tbl : (Tid.t, exp Tid.Map.t) Hashtbl.t =
     Hashtbl.create (module Tid) in
   Graphs.Ir.edges ircfg
   |> Seq.iter ~f:(fun e ->
@@ -2130,7 +2125,7 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
         | Some m -> m in
       let by_jmp =
         Core.Map.set by_jmp ~key:jt
-          ~data:{ acc_cond = Graphs.Ir.Edge.cond e ircfg } in
+          ~data:(Graphs.Ir.Edge.cond e ircfg) in
       Hashtbl.set tbl ~key:(Term.tid src) ~data:by_jmp);
   Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
       Core.Map.set acc ~key ~data)
@@ -2300,8 +2295,7 @@ let denote_jump ?preserved ?defs ?stores
         let acc_cond =
           Core.Map.find tbl (Term.tid b)
           |> Option.bind ~f:(fun by_jmp ->
-              Core.Map.find by_jmp (Term.tid jmp))
-          |> Option.map ~f:(fun ec -> ec.acc_cond) in
+              Core.Map.find by_jmp (Term.tid jmp)) in
         (match acc_cond with
          | Some acc_cond ->
            (* Discard test mirrors bottom arms. *)
@@ -2391,7 +2385,7 @@ let denote_jump ?preserved ?defs ?stores
 (* Stores-aware block denotation. *)
 let denote_block_with_stores ?preserved ?defs ?stores
     ?(sub : sub term option = None)
-    ?(edge_conds : edge_cond Tid.Map.t Tid.Map.t option = None)
+    ?(edge_conds : exp Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
     ~(rctx : Cbat_runctx.refine_ctx)
     ?(no_walk : bool option)
@@ -2499,6 +2493,14 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   let wto = wto_of_cfg cfg_tmp in
   let heads = Cbat_wto.heads_of_comps wto in
   let cfg = cfg_tmp in
+  (* Static predecessor lists; process_vertex reads these instead of
+     re-deriving them on every visit. *)
+  let preds_of =
+    Graphs.Tid.nodes cfg
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m v ->
+        Core.Map.set m ~key:v
+          ~data:(CFG.Node.preds v cfg |> Seq.to_list))
+  in
   Cbat_landmarks.clear ();
   let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
   let rec collect_heads comps =
@@ -2641,7 +2643,15 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       raise (Fixpoint_not_converged (max_steps, sol, None))
     end;
     let old = get v in
-    let preds = CFG.Node.preds v cfg |> Seq.to_list in
+    let preds =
+      Core.Map.find preds_of v |> Option.value ~default:[]
+    in
+    (* Dead bindings never reach the join; the keep-set depends only on
+       the visited block, not on the predecessor. *)
+    let keep =
+      Option.value ~default:Var.Set.empty
+        (Core.Map.find (!rc_cell).rc_live_in v)
+    in
     (* Snapshot for the deep walk. *)
     let sol_snap = Solution.create (!rc_cell).rc_state.fs_sol sol_default in
     let incoming =
@@ -2697,10 +2707,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                              ~reads (res, fired) } }
                  end;
                  res) in
-            (* Dead bindings never reach the join. *)
-            let keep =
-              Option.value ~default:Var.Set.empty
-                (Core.Map.find rc.rc_live_in v) in
             let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
             Cbat_landmarks.widening_at_head := None;
             res) in
