@@ -36,29 +36,90 @@ let ret_replacement (j : jmp term) : jmp term =
 let is_region_mem (v : var) : bool =
   Hike_stack_model.is_region_mem v
 
-(* Vars read as Load mem operands, plus jmp/phi reads; and vars used by
-   any def, jmp, or phi. One visitor returns both: every jmp/phi read
-   lands in both sets, def rhss in used, Load mems in roots. *)
-let used_and_roots_of (sub : sub term) : Var.Set.t * Var.Set.t =
+(* One-pass sweep census: the def index, the lhs reader map, and the
+   contributor counts behind [used]/[roots]. Jmp/phi mentions are
+   permanent (only defs are ever removed). [cnt]/[rcnt] count SURVIVING
+   defs mentioning each var, so a var leaves its set exactly when its
+   count hits zero outside [perm] — the cascade below then re-checks
+   precisely the defs whose [keep] verdict could have flipped. *)
+type sweep_census = {
+  defs : def term Tid.Map.t;
+  (* Defs whose lhs is the key var (re-check set when the var leaves). *)
+  by_lhs : Tid.Set.t Var.Map.t;
+  (* Rhs free vars per def (contributor counts for [used]). *)
+  fvs : Var.Set.t Tid.Map.t;
+  (* Load-mem free vars per def (contributor counts for [roots]). *)
+  lms : Var.Set.t Tid.Map.t;
+  cnt : int Var.Map.t;
+  rcnt : int Var.Map.t;
+  perm : Var.Set.t;
+}
+
+(* Free vars of every Load mem in one rhs. *)
+let load_mem_vars (rhs : exp) : Var.Set.t =
+  let acc = ref Var.Set.empty in
   let v =
-    object (self)
-      inherit [Var.Set.t * Var.Set.t] Term.visitor
-      method! visit_def d (used, roots) =
-        (* Explicit descent into the rhs: overriding visit_def prunes
-           the default traversal, and visit_load below relies on it. *)
-        self#visit_exp (Def.rhs d)
-          (Core.Set.union used (Def.free_vars d), roots)
-      method! visit_load ~mem ~addr:_ _ _ (used, roots) =
-        (used, Core.Set.union roots (Exp.free_vars mem))
-      method! visit_jmp j (used, roots) =
-        let fvs = Jmp.free_vars j in
-        (Core.Set.union used fvs, Core.Set.union roots fvs)
-      method! visit_phi p (used, roots) =
-        let fvs = Phi.free_vars p in
-        (Core.Set.union used fvs, Core.Set.union roots fvs)
+    object
+      inherit [unit] Exp.visitor
+      method! visit_load ~mem ~addr:_ _ _ () =
+        acc := Core.Set.union !acc (Exp.free_vars mem)
     end
   in
-  v#visit_sub sub (Var.Set.empty, Var.Set.empty)
+  v#visit_exp rhs ();
+  !acc
+
+let sweep_census_of (sub : sub term) : sweep_census =
+  let bump m v =
+    Core.Map.update m v ~f:(function None -> 1 | Some n -> n + 1)
+  in
+  let bump_all m vs = Core.Set.fold vs ~init:m ~f:(fun m v -> bump m v) in
+  let init =
+    {
+      defs = Tid.Map.empty;
+      by_lhs = Var.Map.empty;
+      fvs = Tid.Map.empty;
+      lms = Tid.Map.empty;
+      cnt = Var.Map.empty;
+      rcnt = Var.Map.empty;
+      perm = Var.Set.empty;
+    }
+  in
+  let census_blk acc blk =
+    let acc =
+      Term.enum def_t blk
+      |> Seq.fold ~init:acc ~f:(fun acc d ->
+          let tid = Term.tid d in
+          let lhs = Def.lhs d in
+          let fvs = Exp.free_vars (Def.rhs d) in
+          let lms = load_mem_vars (Def.rhs d) in
+          let by_lhs =
+            Core.Map.update acc.by_lhs lhs ~f:(function
+              | None -> Tid.Set.singleton tid
+              | Some s -> Core.Set.add s tid)
+          in
+          {
+            acc with
+            defs = Core.Map.set acc.defs ~key:tid ~data:d;
+            by_lhs;
+            fvs = Core.Map.set acc.fvs ~key:tid ~data:fvs;
+            lms = Core.Map.set acc.lms ~key:tid ~data:lms;
+            cnt = bump_all acc.cnt fvs;
+            rcnt = bump_all acc.rcnt lms;
+          })
+    in
+    let perm =
+      Term.enum jmp_t blk
+      |> Seq.fold ~init:acc.perm ~f:(fun s j ->
+          Core.Set.union s (Jmp.free_vars j))
+    in
+    let perm =
+      Term.enum phi_t blk
+      |> Seq.fold ~init:perm ~f:(fun s p ->
+          Core.Set.union s (Phi.free_vars p))
+    in
+    { acc with perm }
+  in
+  Term.enum blk_t sub |> Seq.fold ~init ~f:census_blk
 
 (* Tests for intrinsic interface vars. *)
 let is_intrinsic_var (v : var) : bool =
@@ -108,22 +169,85 @@ let keep ?(precise=false) ?(load_roots=Var.Set.empty)
       Core.Set.mem used lhs || is_ret_reg ~abi lhs || Convutils.is_mem lhs
       || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
-(* Sweeps unused defs to fixpoint. One sub walk per round: the used/roots
-   sets and the removal flag come out of the single filter pass (the old
-   shape paid used_of + load_roots_of + def_count walks plus a KB read
-   per round). Load-roots are still recomputed per round — a removed load
-   un-roots a chain, and the fixpoint handles the cascade. *)
-let rec sweep_fixpoint ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
-  let used, load_roots = used_and_roots_of sub in
-  let changed = ref false in
-  let sub' =
-    Term.map blk_t sub ~f:(fun blk ->
-        Term.filter def_t blk ~f:(fun d ->
-            let keep = keep ~precise ~load_roots ~abi d used in
-            if not keep then changed := true;
-            keep))
+(* Incremental sweep: one census walk, then a removal cascade. [used] and
+   [load_roots] start exact (permanent mentions plus every counted var)
+   and stay exact (a var leaves only when its last contributor is
+   removed), so each [keep] verdict equals the round version's verdict at
+   convergence — and each def is decided at most a handful of times
+   instead of once per round. Blocks that lose nothing keep their
+   physical block (no rebuild). *)
+let sweep_worklist ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
+  let census = sweep_census_of sub in
+  let dom m =
+    Core.Map.fold m ~init:Var.Set.empty ~f:(fun ~key:v ~data:_ acc ->
+        Core.Set.add acc v)
   in
-  if !changed then sweep_fixpoint ~abi ~precise sub' else sub'
+  let used = ref (Core.Set.union census.perm (dom census.cnt)) in
+  let load_roots = ref (Core.Set.union census.perm (dom census.rcnt)) in
+  let cnt = ref census.cnt in
+  let rcnt = ref census.rcnt in
+  let removed = ref Tid.Set.empty in
+  (* A contributor leaving can only flip defs whose lhs it is. *)
+  let readers_of v =
+    Core.Map.find census.by_lhs v |> Option.value ~default:Tid.Set.empty
+  in
+  let leave counts v =
+    match Core.Map.find !counts v with
+    | Some n when n > 1 ->
+        counts := Core.Map.set !counts ~key:v ~data:(n - 1);
+        false
+    | _ ->
+        counts := Core.Map.remove !counts v;
+        true
+  in
+  let rec drain = function
+    | [] -> ()
+    | tid :: rest -> (
+        match Core.Map.find census.defs tid with
+        | None -> drain rest
+        | Some d ->
+            if
+              Core.Set.mem !removed tid
+              || keep ~precise ~load_roots:!load_roots ~abi d !used
+            then drain rest
+            else begin
+              removed := Core.Set.add !removed tid;
+              let unuse counts set v q =
+                if leave counts v && not (Core.Set.mem census.perm v) then begin
+                  set := Core.Set.remove !set v;
+                  Core.Set.fold (readers_of v) ~init:q ~f:(fun q t ->
+                      t :: q)
+                end
+                else q
+              in
+              let rest =
+                Core.Set.fold
+                  (Core.Map.find census.fvs tid
+                  |> Option.value ~default:Var.Set.empty)
+                  ~init:rest
+                  ~f:(fun q v -> unuse cnt used v q)
+              in
+              let rest =
+                Core.Set.fold
+                  (Core.Map.find census.lms tid
+                  |> Option.value ~default:Var.Set.empty)
+                  ~init:rest
+                  ~f:(fun q m -> unuse rcnt load_roots m q)
+              in
+              drain rest
+            end)
+  in
+  drain (Core.Map.keys census.defs);
+  if Core.Set.is_empty !removed then sub
+  else
+    Term.map blk_t sub ~f:(fun blk ->
+        if
+          Term.enum def_t blk
+          |> Seq.exists ~f:(fun d -> Core.Set.mem !removed (Term.tid d))
+        then
+          Term.filter def_t blk ~f:(fun d ->
+              not (Core.Set.mem !removed (Term.tid d)))
+        else blk)
 
 (* Rewrites returns, then sweeps. Intrinsics pass through. *)
 let dce ~target (sub : sub term) : sub term =
@@ -137,4 +261,4 @@ let dce ~target (sub : sub term) : sub term =
     in
     let precise = is_precise_sub sub in
     let abi = abi_of target in
-    mapper#map_sub sub |> sweep_fixpoint ~abi ~precise
+    mapper#map_sub sub |> sweep_worklist ~abi ~precise
