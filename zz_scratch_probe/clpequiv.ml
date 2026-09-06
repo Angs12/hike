@@ -634,6 +634,97 @@ let () =
     incr checked;
     if Ws.Clp.is_infinite desc_single then
       bad "DIRECTIONAL: desc_single should canonicalize to Finite (not infinite)";
+
+    (* ---- Ticket 03 Operations: widen_join, subset, intersection, translate ---- *)
+    (* widen_join: stable lo -> Ascending *)
+    let p_8 = Ws.Clp.create ~width:w64 w_8 in
+    let p_8_16 = Ws.Clp.interval ~width:w64 w_8 (Word.of_int ~width:w64 16) in
+    let wj_asc = Ws.Clp.widen_join p_8 p_8_16 in
+    incr checked;
+    if not (Ws.Clp.is_ascending wj_asc) then
+      bad "TICKET03 widen_join: stable lo should widen to Ascending";
+    incr checked;
+    (match Ws.Clp.min_elem wj_asc with
+     | Some m when Word.equal m w_8 -> ()
+     | _ -> bad "TICKET03 widen_join: asc min_elem should be 8");
+
+    (* widen_join: stable hi -> Descending *)
+    let p_64 = Ws.Clp.create ~width:w64 w_64 in
+    let p_56_64 = Ws.Clp.interval ~width:w64 (Word.of_int ~width:w64 56) w_64 in
+    let wj_desc = Ws.Clp.widen_join p_64 p_56_64 in
+    incr checked;
+    if not (Ws.Clp.is_descending wj_desc) then
+      bad "TICKET03 widen_join: stable hi should widen to Descending";
+    incr checked;
+    (match Ws.Clp.max_elem wj_desc with
+     | Some m when Word.equal m w_64 -> ()
+     | _ -> bad "TICKET03 widen_join: desc max_elem should be 64");
+
+    (* subset *)
+    let p_8_16_s8 = Ws.Clp.create ~width:w64 ~step:w_8 ~cardn:(Word.of_int ~width:65 2) w_8 in
+    incr checked;
+    if not (Ws.Clp.subset p_8_16_s8 asc) then
+      bad "TICKET03 subset: {8, 16} with step 8 should be subset of Ascending[8, ..]";
+    let p_0 = Ws.Clp.create ~width:w64 (Word.zero w64) in
+    incr checked;
+    if Ws.Clp.subset p_0 asc then
+      bad "TICKET03 subset: {0} should NOT be subset of Ascending[8, ..]";
+    let p_56_64_s8 = Ws.Clp.create ~width:w64 ~step:w_8 ~cardn:(Word.of_int ~width:65 2) (Word.of_int ~width:w64 56) in
+    incr checked;
+    if not (Ws.Clp.subset p_56_64_s8 desc) then
+      bad "TICKET03 subset: {56, 64} with step 8 should be subset of Descending[.. 64]";
+    let asc_16 = Ws.Clp.create_ascending ~width:w64 ~base:(Word.of_int ~width:w64 16) ~step:w_8 in
+    incr checked;
+    if not (Ws.Clp.subset asc_16 asc) then
+      bad "TICKET03 subset: Ascending[16, ..] should be subset of Ascending[8, ..]";
+    incr checked;
+    if Ws.Clp.subset asc asc_16 then
+      bad "TICKET03 subset: Ascending[8, ..] should NOT be subset of Ascending[16, ..]";
+    incr checked;
+    if Ws.Clp.subset asc p_8_16_s8 then
+      bad "TICKET03 subset: Ascending should NOT be subset of Finite";
+    incr checked;
+    if Ws.Clp.subset (Ws.Clp.top w64) asc then
+      bad "TICKET03 subset: Top (Circular) should NOT be subset of Ascending";
+
+    (* intersection *)
+    let p_0_64 = Ws.Clp.interval ~width:w64 (Word.zero w64) w_64 in
+    let meet_asc_fin = Ws.Clp.intersection asc p_0_64 in
+    let expected_8_64 = Ws.Clp.create ~width:w64 ~step:w_8 ~cardn:(Word.of_int ~width:65 8) w_8 in
+    incr checked;
+    if not (Ws.Clp.equal meet_asc_fin expected_8_64) then
+      bad "TICKET03 intersection: Ascending[8, ..] ⊓ [0, 64] should be {8, 16, .., 64}";
+
+    let meet_asc_desc = Ws.Clp.intersection asc desc in
+    incr checked;
+    if not (Ws.Clp.equal meet_asc_desc expected_8_64) then
+      bad "TICKET03 intersection: Ascending[8, ..] ⊓ Descending[.. 64] should be {8, 16, .., 64}";
+
+    let desc_0 = Ws.Clp.create_descending ~width:w64 ~base:(Word.zero w64) ~step:w_8 in
+    let meet_disjoint = Ws.Clp.intersection asc desc_0 in
+    incr checked;
+    if not (Ws.Clp.is_bottom meet_disjoint) then
+      bad "TICKET03 intersection: Ascending[8, ..] ⊓ Descending[.. 0] should be bottom";
+
+    (* translate *)
+    let w_16 = Word.of_int ~width:w64 16 in
+    let trans_asc = Ws.Clp.translate asc w_16 in
+    incr checked;
+    if not (Ws.Clp.is_ascending trans_asc) then
+      bad "TICKET03 translate: non-wrapping translate on Ascending should remain Ascending";
+    incr checked;
+    (match Ws.Clp.min_elem trans_asc with
+     | Some m when Word.equal m (Word.of_int ~width:w64 24) -> ()
+     | _ -> bad "TICKET03 translate: base should be 24");
+
+    let trans_desc = Ws.Clp.translate desc w_16 in
+    incr checked;
+    if not (Ws.Clp.is_descending trans_desc) then
+      bad "TICKET03 translate: non-underflowing translate on Descending should remain Descending";
+    incr checked;
+    (match Ws.Clp.max_elem trans_desc with
+     | Some m when Word.equal m (Word.of_int ~width:w64 80) -> ()
+     | _ -> bad "TICKET03 translate: base should be 80");
   in
   check_directional ();
 

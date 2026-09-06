@@ -1,6 +1,6 @@
 # 03 — CLP Directional Operations: Widening, Meet, Subset, Translate
 
-**Status:** ready-for-agent  
+**Status:** completed
 **Depends on:** 02  
 **Blocks:** 04  
 
@@ -9,7 +9,7 @@
 - Domain file: `src/cbat_vsa/cbat_clp.ml` (`widen_join`, `subset`, `intersection`, `translate`, `join`, `equal`, `compare`)
 
 **Tasks:**
-- [ ] In `src/cbat_vsa/cbat_clp.ml`:
+- [x] In `src/cbat_vsa/cbat_clp.ml`:
   - **`widen_join`:** Implement stable-bound detection:
     - If `lo1 = lo2` and `hi2 > hi1` $\implies$ `create_ascending ~width ~base:lo1 ~step`.
     - If `hi1 = hi2` and `lo2 < lo1` $\implies$ `create_descending ~width ~base:hi1 ~step`.

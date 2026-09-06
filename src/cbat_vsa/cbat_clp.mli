@@ -43,6 +43,7 @@ val is_descending : t -> bool
 val is_circular : t -> bool
 
 val subset : t -> t -> bool
+val translate : t -> word -> t
 
 val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t
