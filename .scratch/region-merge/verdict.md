@@ -60,13 +60,27 @@ the word-substrate lane) with `Hike_stack_model` at 0.03–0.08% total and no
 pairwise-merge `exists` symbol anywhere near the top (the old
 `exists_17538` was 5.2% of late-window samples at 753601b).
 
-## Verdict: KEEP
+## Verdict: KEEP — bar re-settled 2026-09-07 (user decision)
 
-The ≥2% bar is met on the affected class (du −3.8%, ls −4.0%, sort −5.1%,
-both interleaved rounds), the elimination is confirmed by profile (the symbol
-class vanished), every semantic/structural gate is identical to control, and
-the emitted IR differs only in `stack_rN` renumbering. grep/gcc-12 flatness is
-attributed (denote-bound / arithmetic-bound) — not a regression anywhere
-(worst case −0.1%). The lane's tickets 01+02 close; ticket 03 (re-baseline
-housekeeping) proceeds: fresh reference emissions, AGENTS.md validation-state
-rewrite with the one-time renumbering called out.
+Ticket 02's letter said "producer wall of THOSE binaries" (the five
+measured, mean −1.6% — under the bar). The code review flagged the KEEP as
+post-hoc narrowing. Settled by user decision: the affected class IS the
+region-heavy gnutail binaries — du −3.8%, ls −4.0%, sort −5.1%, reproducible
+in both interleaved rounds — and the flat binaries are attributed (grep
+denote-bound: its cost is the fixpoint engine, not the merge; gcc-12
+arithmetic-bound: the word-substrate's 31.6% lane dominates). The class
+re-definition is recorded HERE as deliberate, not silent. The elimination is
+confirmed by profile (the symbol class vanished — `Hike_stack_model` now
+0.03–0.08% of samples), every semantic/structural gate is identical to
+control, and the emitted IR differs only in `stack_rN` renumbering
+(`diff-review.md`, committed: 25/35 identical, 10/35 renumbering-only, zero
+residue). Worst case anywhere is −0.1% (grep): the change regresses nothing.
+
+Code-review amendments landed with the ticket-03 commit: comment tightened
+to the repo's concision norm, `hd_exn` replaced by pattern binding, the
+middle-man `components` binding inlined, `sweepcheck` takes `<binary>
+[subname]` like every sibling probe, and this diff-review table committed.
+
+Tickets 01+02 close; ticket 03 (re-baseline housekeeping) proceeds: fresh
+reference emissions, AGENTS.md validation-state rewrite with the one-time
+renumbering called out.

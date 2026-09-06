@@ -335,12 +335,11 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     | Bil.Cast (_, _, e) -> is_direct_const_addr ~sp ~fp e
     | _ -> false
   in
-  (* Connected components of the interval-overlap graph, by sort-and-sweep.
-     Sort ascending on (lo, hi, tid); a range joins the component being built
-     when its lo <= the component's max hi (it then overlaps the member
-     holding that max — for every earlier member m, lo_m <= lo_j by the sort).
-     Deterministic: the (lo, hi, tid) order fixes member order and component
-     order, so region ids are stable run-to-run. *)
+  (* Connected components of the interval-overlap graph, by sort-and-sweep:
+     sort ascending on (lo, hi, tid); a range joins the current component
+     when its lo <= the component's max hi — it then overlaps the member
+     holding that max (lo_m <= lo_j holds for all earlier members by the
+     sort). The (lo, hi, tid) order fixes member and component order. *)
   let merge_components
       (items : (tid * (int64 * int64)) list)
       : (tid * (int64 * int64)) list list =
@@ -364,11 +363,10 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     in
     match sorted with
     | [] -> []
-    | (_, (_, hi0)) :: tl -> sweep [ Base.List.hd_exn sorted ] hi0 tl
+    | ((_, (_, hi0)) as x0) :: tl -> sweep [ x0 ] hi0 tl
   in
   let components : (tid * (int64 * int64)) list list =
-    let items : (tid * (int64 * int64)) list = Core.Map.to_alist ranges in
-    merge_components items
+    merge_components (Core.Map.to_alist ranges)
   in
   Base.List.foldi components ~init:[] ~f:(fun i acc members ->
       let span =
