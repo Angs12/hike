@@ -410,6 +410,37 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-06 EEST — CLEANUP-8 LANE (branch `cleanup-8`,
+tickets 01+02+03+04 = commits `085f378`+`a124d97`+`858a33d`+`e518825`) —
+BATTERY GREEN, IR BYTE-IDENTICAL 35/35 on every ticket**
+
+The cleanup-8 lane (spec: `.scratch/cleanup-8/spec.md`, grilling-settled
+2026-09-06, 3 rounds): dead fields/params deleted (01), VLA detection runs
+once and travels in `vsa_info.vla_alloc_tids` (02), ABI facts computed once
+and threaded as values (03), DCE sweep is a worklist over contributor
+counts (04 — A/B neutral, kept per review for the bounded-walk structure).
+
+| gate | control (753601b) | cleanup-8 tip (e518825) |
+|---|---|---|
+| unit suite | ALL CBAT TESTS PASSED (467 ok) | **identical** ✅ |
+| corpus emission | 35/35 rc=0 | **35/35 rc=0** ✅ |
+| **IR byte-identity vs control** | — | **IDENTICAL 35/35** (incl. err files, on every ticket) ✅ |
+| structural asserts | 172 pass / 3 fail (shape-d, pre-existing) | **identical** ✅ |
+| semantics (all) | 30 PASS / 5 FAIL (same 5) | **identical** ✅ |
+| optimization-safety (opt) | 30 PASS / 5 FAIL (same 5) | **identical** ✅ |
+| semantics (8-bin) | 8/8 PASS | **8/8 PASS** ✅ |
+| unmapped intrinsics | 0 fixtures / 26 gcc-12 pre-existing | **identical** ✅ |
+| fixpoint non-convergence | 0 | **0** ✅ |
+
+Measured side-notes (recorded in `.scratch/cleanup-8/spec.md`): the DCE
+worklist A/B is neutral (ls 0.20→0.21s, du 0.35→0.37s, cksum 0.22→0.26s —
+the census costs what the saved round cost); `Term.find`-per-pop
+(0.33–0.51s/heavy sub, 5–14% corpus) is real but SHELVED as its own lane;
+the int63 word substrate (`cbat_word.ml`, referee green 2.86M/0 mismatch)
+is parallel-session in-flight work, untouched. Dead-by-measurement on this
+lane: KB transport (0.001ms), stl model recompute (2ms), ABI-as-speed
+(~1ms), `Sub.to_graph`×3 (0.3%, skipped by decision).
+
 **Last verified: 2026-09-05 EEST — C8 WORKLIST DRIVER (branch `c8-worklist`,
 tickets 01+02 = commits `9784985`+`c99777c`) — BATTERY GREEN, corpus IR
 BYTE-IDENTICAL 32/32, grep −7%, and sub_4d2a CONVERGES (the C4 burn closes
