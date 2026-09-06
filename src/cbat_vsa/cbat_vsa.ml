@@ -1479,7 +1479,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ?(defs : (def term * bool) Var.Map.t option = None)
     ?(reads : Tid.Set.t ref option = None)
     ?(steps : int option = None)
-    (env : AI.t) (sub : sub term) (blk : blk term)
+    (env : AI.t) (blk : blk term)
     (seeds : edge_constraint list) : AI.t * (tid, Live.t) Solution.t =
   (* Visited set is closure-local. *)
   match defs with
@@ -1517,7 +1517,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               (* Visited blocks are recorded. *)
               Option.iter reads ~f:(fun r ->
                   r := Core.Set.add !r n);
-              match Term.find blk_t sub n with
+              match Core.Map.find rctx.rc_blocks n with
               | Some b ->
                 (* Guard defs walk over the seed. *)
                 let live =
@@ -1553,7 +1553,7 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
     (* Guard with no preds keeps the seed. The walk runs for its [env]
        side effects (cell meets commit through the ref); the derived
        solution is discarded by both callers, so no derive. *)
-    (match Term.find blk_t sub (Term.tid blk) with
+    (match Core.Map.find rctx.rc_blocks (Term.tid blk) with
      | Some gb ->
        ignore
          (reverse_def_walk ~defs:defs_map ~sol env
@@ -2198,7 +2198,6 @@ let refine_edge_inline
     ~(flag_group : Cbat_runctx.flag_group option)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(jt : Tid.t)
-    ~(sub : sub term)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
     : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
@@ -2246,7 +2245,7 @@ let refine_edge_inline
              Stages.time `Walk (fun () ->
                  refine_edge ~sol ~rctx:rc ~defs
                    ~reads:(Some walk_reads) ~steps:(Some cap)
-                   env sub b seeds) in
+                   env b seeds) in
            (* A budget-limited walk is not memoized: the shortened
               read-set would trap a future reader (spec §2.4). *)
            let rc =
@@ -2267,7 +2266,7 @@ let refine_edge_inline
         let cap = max 1 (min Cbat_runctx.cap_default budget) in
         let refined, _live =
           refine_edge ~sol ~rctx:rctx ~defs ~steps:(Some cap)
-            env sub b seeds in
+            env b seeds in
         (refined, rctx, Tid.Set.empty) in
     walk env seeds
 
@@ -2291,7 +2290,7 @@ let denote_jump ?preserved ?defs ?stores
     (* Deep walk uses the accumulated cond. *)
     let env, rctx, reads =
       match edge_conds, sol, sub with
-      | Some tbl, Some snap, Some s ->
+      | Some tbl, Some snap, Some _ ->
         let acc_cond =
           Core.Map.find tbl (Term.tid b)
           |> Option.bind ~f:(fun by_jmp ->
@@ -2314,7 +2313,7 @@ let denote_jump ?preserved ?defs ?stores
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
                ~flag_group
                ~rctx:rctx ~jt:(Term.tid jmp)
-               ~sub:s ~discarded b env acc_cond in
+               ~discarded b env acc_cond in
            (env', rctx', Core.Set.union reads reads')
          | None -> (env, rctx, reads))
       | _ -> (env, rctx, reads) in
@@ -2530,7 +2529,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       let defs =
         Core.Set.to_list blocks
         |> List.concat_map ~f:(fun tid ->
-            match Term.find blk_t s tid with
+            match Core.Map.find rctx.rc_blocks tid with
             | Some blk -> Term.enum def_t blk |> Seq.to_list
             | None -> [])
       in

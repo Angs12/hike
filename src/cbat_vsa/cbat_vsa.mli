@@ -153,7 +153,7 @@ val refine_edge :
   ?defs:(def term * bool) Var.Map.t option ->
   ?reads:Tid.Set.t ref option ->
   ?steps:int option ->
-  AI.t -> sub term -> blk term -> edge_constraint list -> AI.t * (tid, Live.t) Solution.t
+  AI.t -> blk term -> edge_constraint list -> AI.t * (tid, Live.t) Solution.t
 
 val init_sol : ?entry:AI.t ->  sub term -> vsa_sol
 

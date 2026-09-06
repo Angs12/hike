@@ -1057,7 +1057,7 @@ let run_landmarks () =
    let walk ~cell =
      Vsa.walk_budget rctx := cell;
      fst (Vsa.refine_edge ~sol ~rctx ~defs:(Some (Vsa.defs_of_sub sub))
-            entry sub
+            entry
             (Blk.Builder.result gb) seeds) in
    let cell_of env =
      match Vsa.denote_imm_exp
