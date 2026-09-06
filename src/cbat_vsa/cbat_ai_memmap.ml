@@ -534,16 +534,79 @@ let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)
   Option.value_map ~default (Seq.next ints) ~f:(fun ((_, hd), tl) ->
       f hd ints tl)
 
+let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
+    (ints : (Key.t * Val.t) list) : Val.t option =
+  if List.length ints < 2 then None
+  else
+    let sorted = List.sort ints ~compare:(fun (k1, _) (k2, _) ->
+        Key.compare_point (Key.lower k1) (Key.lower k2)) in
+    match sorted with
+    | [] -> None
+    | (first_k, first_v) :: _ ->
+      if not (Key.equal (Key.lower first_k) (Key.lower k)) then None
+      else
+        let first_w = WordSet.bitwidth (Val.data first_v) in
+        let first_end =
+          Stdlib.Int64.add (Key.lower first_k).pvalue
+            (Stdlib.Int64.of_int (first_w / 8 - 1)) in
+        let rec check_contiguous prev_end rest =
+          match rest with
+          | [] -> Some prev_end
+          | (next_k, next_v) :: rest' ->
+            let expected_start = Stdlib.Int64.succ prev_end in
+            if Stdlib.Int64.equal expected_start (Key.lower next_k).pvalue
+            then
+              let next_w = WordSet.bitwidth (Val.data next_v) in
+              let next_end =
+                Stdlib.Int64.add (Key.lower next_k).pvalue
+                  (Stdlib.Int64.of_int (next_w / 8 - 1)) in
+              check_contiguous next_end rest'
+            else None
+        in
+        match check_contiguous first_end (List.tl_exn sorted) with
+        | Some last_end when Stdlib.Int64.equal last_end (Key.upper k).pvalue ->
+          let assemble_piece (cell_k, cell_v) =
+            let offset_bytes =
+              Stdlib.Int64.sub (Key.lower cell_k).pvalue (Key.lower k).pvalue in
+            let bit_offset =
+              Stdlib.Int64.to_int (Stdlib.Int64.mul offset_bytes 8L) in
+            let cell_w = WordSet.bitwidth (Val.data cell_v) in
+            let shift_amt = match endian with
+              | LittleEndian -> bit_offset
+              | BigEndian -> req_width - bit_offset - cell_w in
+            let sized = WordSet.cast Bil.UNSIGNED req_width (Val.data cell_v) in
+            WordSet.lshift sized
+              (WordSet.singleton (Word.of_int ~width:req_width shift_amt))
+          in
+          let pieces = List.map sorted ~f:assemble_piece in
+          let assembled = List.reduce pieces ~f:WordSet.logor in
+          Option.map assembled ~f:(fun data -> Val.create data endian)
+        | _ -> None
+
 (* Values stored at a key. *)
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
-  fold_intersections ~default:(Val.top i) m k ~f:(fun hd ints _ ->
-    (* Join each cell so the width is exact. *)
-    Seq.fold ints ~init:hd ~f:(fun v (k',v') ->
-        let lo_key_start = Key.min (Key.lower k) (Key.lower k') in
-        let hi_key_start = Key.max (Key.lower k) (Key.lower k') in
-        let keys_aligned = Key.aligned_mod lo_key_start hi_key_start (fst i) in
-        if keys_aligned then Val.join_at i v v' else Val.top i))
+  let req_bytes = fst i / 8 in
+  let query_k =
+    if req_bytes > 1 && Key.equal (Key.lower k) (Key.upper k) then
+      let hi =
+        { (Key.lower k) with
+          pvalue =
+            Stdlib.Int64.add (Key.lower k).pvalue
+              (Stdlib.Int64.of_int (req_bytes - 1)) } in
+      { Key.lo = Key.lower k; hi }
+    else k in
+  let ints_list = Seq.to_list (IT.intersections m query_k) in
+  match try_assemble_cells i query_k ints_list with
+  | Some v -> v
+  | None ->
+    fold_intersections ~default:(Val.top i) m k ~f:(fun hd ints _ ->
+      (* Join each cell so the width is exact. *)
+      Seq.fold ints ~init:hd ~f:(fun v (k',v') ->
+          let lo_key_start = Key.min (Key.lower k) (Key.lower k') in
+          let hi_key_start = Key.max (Key.lower k) (Key.lower k') in
+          let keys_aligned = Key.aligned_mod lo_key_start hi_key_start (fst i) in
+          if keys_aligned then Val.join_at i v v' else Val.top i))
 
 let find (i : Val.idx) (m : t) (k : Key.t) = match m.itree with
   | None -> Val.bottom i

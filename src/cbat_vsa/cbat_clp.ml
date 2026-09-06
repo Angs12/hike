@@ -680,7 +680,21 @@ let diff (p1 : t) (p2 : t) : t =
         | Some i_end ->
           let cardn = W.sub (cardn_of p1) (cardn_of i) in
           if W.is_zero cardn then bottom (bitwidth p1)
-          else if is_infinite p1 then
+          else if is_ascending p1 then
+            match min_elem i with
+            | Some i_lo when W.(=) i_lo p1.base ->
+              let new_base = W.add i_end (step_of p1) in
+              if Word.(<) new_base i_end then bottom (bitwidth p1)
+              else create_ascending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
+            | _ -> p1
+          else if is_descending p1 then
+            match min_elem i with
+            | Some i_lo when W.(=) i_end p1.base ->
+              let new_base = W.sub i_lo (step_of p1) in
+              if Word.(>) new_base i_lo then bottom (bitwidth p1)
+              else create_descending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
+            | _ -> p1
+          else if is_circular p1 then
             (* Wrapping remainder. *)
             create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
           else

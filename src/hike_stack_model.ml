@@ -21,19 +21,39 @@ let is_sp_or_fp (sp : var) (target : Theory.Target.t) (v : var) : bool =
   | None -> false
 
 let addr_of_rhs (e : exp) : (exp * Size.t) option =
-  match e with
-  | Bil.Load (_, a, _, s) | Bil.Store (_, a, _, _, s) -> Some (a, s)
-  | Bil.Cast (_, _, Bil.Load (_, a, _, s))
-  | Bil.Cast (_, _, Bil.Store (_, a, _, _, s)) -> Some (a, s)
-  | _ -> None
+  let vis =
+    object
+      inherit [ (exp * Size.t) option ] Exp.visitor
+      method! visit_load ~mem:_ ~addr _ s acc =
+        Base.Option.first_some acc (Some (addr, s))
+      method! visit_store ~mem:_ ~addr ~exp:_ _ s acc =
+        Base.Option.first_some acc (Some (addr, s))
+    end
+  in
+  vis#visit_exp e None
 
-(* Splits a store rhs into data and cast wrapper. *)
+(* Splits a store rhs into data and cast wrapper using visitor/mapper. *)
 let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
-  match e with
-  | Bil.Store (_, _, data, _, _) -> Some (data, fun x -> x)
-  | Bil.Cast (c, w, Bil.Store (_, _, data, _, _)) ->
-      Some (data, fun x -> Bil.Cast (c, w, x))
-  | _ -> None
+  let vis =
+    object
+      inherit [ exp option ] Exp.visitor
+      method! visit_store ~mem:_ ~addr:_ ~exp:data _ _ acc =
+        Base.Option.first_some acc (Some data)
+    end
+  in
+  match vis#visit_exp e None with
+  | None -> None
+  | Some data ->
+      let wrap x =
+        let mapper =
+          object
+            inherit Exp.mapper
+            method! map_store ~mem:_ ~addr:_ ~exp:_ _ _ = x
+          end
+        in
+        mapper#map_exp e
+      in
+      Some (data, wrap)
 
 let slot_of (lo : int64) (bits : int) : var =
   Var.create ~is_virtual:false ~fresh:false
@@ -511,13 +531,9 @@ let rec exp_contains_sp (sp : var) (target : Theory.Target.t) (e : exp) :
   | _ -> false
 
 let is_stack_mem (sp : var) (target : Theory.Target.t) (e : exp) : bool =
-  match e with
-  | Bil.Load (_, a, _, _)
-  | Bil.Store (_, a, _, _, _)
-  | Bil.Cast (_, _, Bil.Load (_, a, _, _))
-  | Bil.Cast (_, _, Bil.Store (_, a, _, _, _)) ->
-      exp_contains_sp sp target a
-  | _ -> false
+  match addr_of_rhs e with
+  | Some (a, _) -> exp_contains_sp sp target a
+  | None -> false
 
 let frame_value_def (sp : var) (target : Theory.Target.t) (d : def term) :
     bool =

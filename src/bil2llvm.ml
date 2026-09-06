@@ -791,6 +791,70 @@ let is_plt_trampoline ctx (sub : sub term) : bool =
                    | Call _ -> true
                    | _ -> false))
 
+(* Finds the first memory node using Exp.visitor. *)
+type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
+
+let find_mem_node (exp : exp) : mem_node option =
+  let vis =
+    object
+      inherit [ mem_node option ] Exp.visitor
+      method! visit_load ~mem:_ ~addr _ size acc =
+        Base.Option.first_some acc (Some (`Load (addr, size)))
+      method! visit_store ~mem:_ ~addr ~exp:x _ size acc =
+        Base.Option.first_some acc (Some (`Store (addr, x, size)))
+    end
+  in
+  vis#visit_exp exp None
+
+let mem_node_addr = function
+  | `Load (addr, _) | `Store (addr, _, _) -> addr
+
+(* Dispatches memory load/store through a pointer using Exp.mapper. *)
+let mem_access_at_ptr llvm_builder blk_tid ptr exp =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  match find_mem_node exp with
+  | Some (`Load (addr, size)) ->
+      let marker =
+        Var.create ~is_virtual:true ~fresh:false "hike_acc"
+          (Type.Imm (Size.in_bits size))
+      in
+      let acc_v =
+        Llvm.build_load
+          (Llvm.integer_type llvm_ctx (Size.in_bits size))
+          ptr "" llvm_builder
+      in
+      insert_local ctx blk_tid marker acc_v;
+      let v =
+        object
+          inherit Exp.mapper
+          method! map_load ~mem ~addr:a e s =
+            if Exp.equal a addr && Size.equal s size then Bil.Var marker
+            else Bil.Load (mem, a, e, s)
+        end
+      in
+      create_exp llvm_builder blk_tid (v#map_exp exp)
+  | Some (`Store (addr, data, size)) ->
+      let marker =
+        Var.create ~is_virtual:true ~fresh:false "hike_acc"
+          (Type.Imm (Size.in_bits size))
+      in
+      let* d = create_exp llvm_builder blk_tid data in
+      let _ : Llvm.llvalue = Llvm.build_store d ptr llvm_builder in
+      (* Store nodes bind data, not void stores. *)
+      insert_local ctx blk_tid marker d;
+      let v =
+        object
+          inherit Exp.mapper
+          method! map_store ~mem ~addr:a ~exp:x e s =
+            if Exp.equal a addr && Size.equal s size then Bil.Var marker
+            else Bil.Store (mem, a, x, e, s)
+        end
+      in
+      create_exp llvm_builder blk_tid (v#map_exp exp)
+  | None -> create_exp llvm_builder blk_tid exp
+
 (* Emits a singleton-tagged access. *)
 let create_static_mem_access llvm_builder blk_tid fr lo exp =
   let open KB in
@@ -820,62 +884,7 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
       | None -> None
   in
   match gep_opt with
-  | Some gep ->
-      (* Finds the first memory node. *)
-      let access : [ `Load of exp * Size.t | `Store of exp * exp * Size.t ] option =
-        let vis =
-          object
-            inherit
-              [ [ `Load of exp * Size.t | `Store of exp * exp * Size.t ] option ]
-              Exp.visitor
-            method! visit_load ~mem:_ ~addr _ size acc =
-              Base.Option.first_some acc (Some (`Load (addr, size)))
-            method! visit_store ~mem:_ ~addr ~exp _ size acc =
-              Base.Option.first_some acc (Some (`Store (addr, exp, size)))
-          end
-        in
-        vis#visit_exp exp None
-      in
-      (match access with
-       | Some (`Load (addr, size)) ->
-           let marker =
-             Var.create ~is_virtual:true ~fresh:false "hike_acc"
-               (Type.Imm (Size.in_bits size))
-           in
-           let acc_v =
-             Llvm.build_load
-               (Llvm.integer_type llvm_ctx (Size.in_bits size))
-               gep "" llvm_builder
-           in
-           insert_local ctx blk_tid marker acc_v;
-           let v =
-             object
-               inherit Exp.mapper
-               method! map_load ~mem ~addr:a e s =
-                 if Exp.equal a addr && Size.equal s size then Bil.Var marker
-                 else Bil.Load (mem, a, e, s)
-             end
-           in
-           create_exp llvm_builder blk_tid (v#map_exp exp)
-       | Some (`Store (addr, data, size)) ->
-           let marker =
-             Var.create ~is_virtual:true ~fresh:false "hike_acc"
-               (Type.Imm (Size.in_bits size))
-           in
-           let* d = create_exp llvm_builder blk_tid data in
-           let _ : Llvm.llvalue = Llvm.build_store d gep llvm_builder in
-           (* Store nodes bind data, not void stores. *)
-           insert_local ctx blk_tid marker d;
-           let v =
-             object
-               inherit Exp.mapper
-               method! map_store ~mem ~addr:a ~exp:x e s =
-                 if Exp.equal a addr && Size.equal s size then Bil.Var marker
-                 else Bil.Store (mem, a, x, e, s)
-             end
-           in
-           create_exp llvm_builder blk_tid (v#map_exp exp)
-       | None -> create_exp llvm_builder blk_tid exp)
+  | Some gep -> mem_access_at_ptr llvm_builder blk_tid gep exp
   | None ->
 #ifdef VSA_DEBUG
       Printf.eprintf "hike: create_static_mem_access fallback lo=%Ld no frame/stack -> dynamic\n" lo;
@@ -886,12 +895,15 @@ let create_static_mem_access llvm_builder blk_tid fr lo exp =
 (* Rebases positive-interval addresses onto the stack. *)
 let rebase_addr llvm_builder fr addr =
   let open KB in
-  let stack =
-    Base.Option.value_exn fr.stack
-      ~message:"rebase_addr: positive interval but no stack param"
-  in
-  let offset = Llvm.build_sub addr fr.anchor_i64 "arg_off" llvm_builder in
-  return @@ Llvm.build_add stack offset "arg_addr" llvm_builder
+  match fr.stack with
+  | None -> return addr
+  | Some stack ->
+    let offset = Llvm.build_sub addr fr.anchor_i64 "arg_off" llvm_builder in
+    let* llvm_ctx = Context.get llvm_ctx_var in
+    let zero = Llvm.const_int (Llvm.i64_type llvm_ctx) 0 in
+    let is_caller = Llvm.build_icmp Llvm.Icmp.Sge offset zero "is_caller_arg" llvm_builder in
+    let caller_addr = Llvm.build_add stack offset "caller_addr" llvm_builder in
+    return @@ Llvm.build_select is_caller caller_addr addr "arg_addr" llvm_builder
 
 (* Emits runtime-sized allocas. *)
 let create_dynamic_alloc llvm_builder blk_tid exp =
@@ -917,25 +929,7 @@ let mem_access_via_ptr llvm_builder blk_tid addr_v exp =
   let p =
     Llvm.build_inttoptr addr_v (Llvm.pointer_type llvm_ctx) "" llvm_builder
   in
-  match exp with
-  | Bil.Load (_, _, _, size) ->
-      return
-      @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) p
-           "" llvm_builder
-  | Bil.Store (_, _, data, _, _) ->
-      let* d = create_exp llvm_builder blk_tid data in
-      return @@ Llvm.build_store d p llvm_builder
-  | Bil.Cast (c, w, Bil.Load (_, _, _, size)) ->
-      let v =
-        Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) p
-          "" llvm_builder
-      in
-      create_cast llvm_builder (c, w, v)
-  | Bil.Cast (c, w, Bil.Store (_, _, data, _, _)) ->
-      let* d = create_exp llvm_builder blk_tid data in
-      let s = Llvm.build_store d p llvm_builder in
-      create_cast llvm_builder (c, w, s)
-  | _ -> create_exp llvm_builder blk_tid exp
+  mem_access_at_ptr llvm_builder blk_tid p exp
 
 (* Finds the region containing an offset. *)
 let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
@@ -961,23 +955,23 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
         | None -> create_exp llvm_builder blk_tid exp)
       else if is_abi_visible ctx sub_info def then
         (* Outgoing cells use their own address. *)
-        (match Def.rhs def with
-        | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-            let* addr_v = create_exp llvm_builder blk_tid addr in
+        (match find_mem_node (Def.rhs def) with
+        | Some node ->
+            let* addr_v = create_exp llvm_builder blk_tid (mem_node_addr node) in
             mem_access_via_ptr llvm_builder blk_tid addr_v exp
-        | _ -> create_exp llvm_builder blk_tid exp)
+        | None -> create_exp llvm_builder blk_tid exp)
       else
         (* Locals use static frame GEPs. *)
         create_static_mem_access llvm_builder blk_tid fr lo exp
   | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-    when Int64.compare lo 0L > 0 && has_vsa_info sub_info def ->
+    when Int64.compare lo 0L >= 0 && has_vsa_info sub_info def ->
       (* Positive intervals rebase onto the stack. *)
-      (match Def.rhs def with
-      | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-          let* addr_v = create_exp llvm_builder blk_tid addr in
+      (match find_mem_node (Def.rhs def) with
+      | Some node ->
+          let* addr_v = create_exp llvm_builder blk_tid (mem_node_addr node) in
           let* addr_v = rebase_addr llvm_builder fr addr_v in
           mem_access_via_ptr llvm_builder blk_tid addr_v exp
-      | _ -> create_exp llvm_builder blk_tid exp)
+      | None -> create_exp llvm_builder blk_tid exp)
   | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
   | Some Convutils.Unbounded ->
       if has_vsa_info sub_info def then begin
@@ -1031,23 +1025,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
                     [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]
                     "" llvm_builder
                 in
-                (match Def.rhs def with
-                | Bil.Load (_, _, _, s) ->
-                    return
-                    @@ Llvm.build_load
-                         (Llvm.integer_type llvm_ctx (Size.in_bits s))
-                         gep "" llvm_builder
-                | Bil.Store (_, _, data, _, _) ->
-                    let* d = create_exp llvm_builder blk_tid data in
-                    return @@ Llvm.build_store d gep llvm_builder
-                | Bil.Cast (c, w, Bil.Load (_, _, _, s)) ->
-                    let v =
-                      Llvm.build_load
-                        (Llvm.integer_type llvm_ctx (Size.in_bits s))
-                        gep "" llvm_builder
-                    in
-                    create_cast llvm_builder (c, w, v)
-                | _ -> create_exp llvm_builder blk_tid exp)
+                 mem_access_at_ptr llvm_builder blk_tid gep exp
             | None -> mem_access llvm_builder blk_tid sub_tid sub_info fr def exp)
        | _ -> mem_access llvm_builder blk_tid sub_tid sub_info fr def exp)
     else mem_access llvm_builder blk_tid sub_tid sub_info fr def exp

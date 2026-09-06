@@ -13,13 +13,14 @@ module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
 
 let ws_str (w : Ws.t) : string =
-  if Ws.is_top w then "TOP"
-  else if Ws.is_bottom w then "BOTTOM"
-  else
-    let lo = match Ws.min_elem w with Some m -> Word.to_string m | None -> "?" in
-    let hi = match Ws.max_elem w with Some m -> Word.to_string m | None -> "?" in
-    if Ws.is_infinite w then Printf.sprintf "{%s..%s}^inf" lo hi
-    else Printf.sprintf "{%s..%s}" lo hi
+  let k =
+    if Ws.is_ascending w then "Ascending"
+    else if Ws.is_descending w then "Descending"
+    else if Ws.is_circular w then "Circular"
+    else if Ws.is_infinite w then "Infinite"
+    else "Finite"
+  in
+  Printf.sprintf "%s(%s)" k (Format.asprintf "%a" Ws.pp w)
 
 let exp_str (e : Bil.exp) : string = Format.asprintf "%a" Exp.pp e
 
@@ -27,16 +28,20 @@ let exp_str (e : Bil.exp) : string = Format.asprintf "%a" Exp.pp e
 let neighborhood : int64 * int64 = (-65536L, 65536L)
 
 let channel2_ok (ws : Ws.t) : bool =
-  if Ws.is_top ws then false
+  if Ws.is_top ws || Ws.is_circular ws then false
   else if Ws.is_bottom ws then true
-  else if Ws.is_infinite ws then false
   else
     match Ws.min_elem ws, Ws.max_elem ws with
     | Some lo, Some hi -> (
         match Word.to_int64 lo, Word.to_int64 hi with
         | Ok lo, Ok hi ->
             let nlo, nhi = neighborhood in
-            Stdlib.Int64.compare lo nlo >= 0 && Stdlib.Int64.compare hi nhi <= 0
+            if Ws.is_ascending ws then
+              Stdlib.Int64.compare lo 0L >= 0
+              && Stdlib.Int64.compare lo nhi <= 0
+            else
+              Stdlib.Int64.compare lo nlo >= 0
+              && Stdlib.Int64.compare hi nhi <= 0
         | _ -> false)
     | _ -> false
 
@@ -64,26 +69,27 @@ let audit (sp : var) (target : Theory.Target.t) (sub : sub term) : unit =
                     | Ok w -> w
                     | Error _ -> Ws.top 64 in
                   let ws_s = ws_str ws in
-                  (* Channel 1 proxy: rewrite_addr resolves the address's
-                     frame-tracked base (a var-only address rewriting to an
-                     offset expression means its base was frame-derived). *)
                   let ch1 = rewritten in
-                  (* Channel 2: the denoted addr is bounded, finite, in-neighborhood. *)
                   let ch2 = channel2_ok ws in
                   let tag =
                     match Core.Map.find info.Hike.Convutils.offsets (Term.tid d) with
                     | Some k -> Probe_common.vsa_kind_to_string k
                     | None -> "(untagged)" in
-                  (* The loaded-pointer lane: the deref's base var's value set. *)
                   let base_lane =
-                    match Def.rhs d with
-                    | Bil.Load (_, Bil.Var v, _, _)
-                    | Bil.Store (_, Bil.Var v, _, _, _) ->
+                    let load_var = match Def.rhs d with
+                      | Bil.Load (_, Bil.Var v, _, _)
+                      | Bil.Store (_, Bil.Var v, _, _, _)
+                      | Bil.Cast (_, _, Bil.Load (_, Bil.Var v, _, _))
+                      | Bil.Cast (_, _, Bil.Store (_, Bil.Var v, _, _, _)) -> Some v
+                      | _ -> None
+                    in
+                    match load_var with
+                    | Some v ->
                         Some
                           (Printf.sprintf " base[%s]=%s"
                              (Var.name v)
                              (ws_str (AI.find_word 64 st_before v)))
-                    | _ -> None in
+                    | None -> None in
                   Printf.printf
                     "  DEF %s: %-66s\n    addr=%s rewritten=%b ch1=%b ch2=%b(%s) tag=%s%s\n"
                     (Tid.to_string (Term.tid d))
