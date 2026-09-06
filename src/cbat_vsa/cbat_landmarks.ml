@@ -72,30 +72,33 @@ let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_uppe
 let entries_for_head (head : Tid.t) (_v : var) : lm_entry list =
   Hashtbl.find lm_env head |> Option.value ~default:[]
 
-(* Record an empty meet's disabled boundary at the enclosing head. *)
+(* Record an empty meet's disabled boundary at the enclosing head. The
+   head check comes first: outside a cycle the meet below is pure
+   computation whose result is discarded. *)
 let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : unit =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then ()
   else
-    let m = Cbat_clp_set_composite.meet p cstr in
-    if not (Cbat_clp_set_composite.is_bottom m) then ()
-    else
-      match !widening_at_head,
-            Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
-            Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with
-      | None, _, _, _, _ ->
-        (* Outside a cycle: no-op. *)
-        ()
-      | Some h, Some p_min, Some p_max, Some c_min, Some c_max ->
-        if Word.(<) p_max c_min then begin
-          (* Set below the boundary: upper landmark. *)
-          let d = distance_words p_max c_min in
-          record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
-        end else if Word.(>) p_min c_max then begin
-          (* Set above the boundary: lower landmark. *)
-          let d = distance_words c_max p_min in
-          record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
-        end else ()
-      | Some _, _, _, _, _ -> ()
+    match !widening_at_head with
+    | None ->
+      (* Outside a cycle: no-op. *)
+      ()
+    | Some h ->
+      let m = Cbat_clp_set_composite.meet p cstr in
+      if not (Cbat_clp_set_composite.is_bottom m) then ()
+      else
+        match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
+              Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with
+        | Some p_min, Some p_max, Some c_min, Some c_max ->
+          if Word.(<) p_max c_min then begin
+            (* Set below the boundary: upper landmark. *)
+            let d = distance_words p_max c_min in
+            record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
+          end else if Word.(>) p_min c_max then begin
+            (* Set above the boundary: lower landmark. *)
+            let d = distance_words c_max p_min in
+            record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
+          end else ()
+        | _ -> ()
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf widens. *)
 let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
