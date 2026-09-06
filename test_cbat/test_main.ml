@@ -16,6 +16,7 @@ let () =
   Test_properties.run_landmarks ();
   Test_properties.run_chains ();
   Test_dce.run ();
+  Test_bil2llvm.run ();
   print_endline
     (if !failures = 0 then "ALL CBAT TESTS PASSED" else Printf.sprintf "%d FAILURES" !failures);
   exit (if !failures = 0 then 0 else 1)

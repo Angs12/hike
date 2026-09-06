@@ -137,6 +137,10 @@ let typ_lltype_m typ =
 let var_lltype var = typ_lltype_m (Var.typ var)
 
 (* Tests for FP arg registers. *)
+(* Total on unknown targets: the x86_64 SysV record (the dce precedent). *)
+let emit_abi (target : Bap_core_theory.Theory.Target.t) : Abi.t =
+  Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
+
 let is_fp_param (v : var) : bool =
   Base.String.is_prefix (Var.name (Var.base v)) ~prefix:Abi.vector_param_prefix
 
@@ -573,7 +577,7 @@ let create_immidiate word =
 (* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
   let v = Var.base var in
-  let abi = Abi.of_target ctx.Convutils.target in
+  let abi = emit_abi ctx.Convutils.target in
   let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
   let sub_key = blk_tid in
   let warned_vars =
@@ -1406,7 +1410,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  let abi = Abi.of_target ctx.Convutils.target in
+  let abi = emit_abi ctx.Convutils.target in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -2004,7 +2008,7 @@ let create_sub sub =
     
     clear_bbs ctx;
     clear_blk_llvals ctx;
-    let abi = Abi.of_target ctx.Convutils.target in
+    let abi = emit_abi ctx.Convutils.target in
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
     (* Frame spans all tagged accesses. *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
@@ -2100,7 +2104,7 @@ let create_sub sub =
         ~f:(fun ~key:_ ~data:warned_vars acc ->
           Core.Set.union acc !warned_vars)
       |> Core.Set.filter ~f:(fun v ->
-             let abi = Abi.of_target ctx.Convutils.target in
+             let abi = emit_abi ctx.Convutils.target in
              Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v)
     in
     if not (Core.Set.is_empty lane_reads) then
@@ -2206,19 +2210,19 @@ let fp_returning (sub : sub term) : bool =
   | [] -> false
   | d :: _ -> is_ymm (Var.name (Var.base (Def.lhs d)))
 
-let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
-    Arg.t list * Arg.t list =
+let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
+    (sub : sub term) : Arg.t list * Arg.t list =
   let free_vars = free_vars sub in
   let rets =
     (if Bap_core_theory.Theory.Target.matches target "x86_64-gnu-elf" then
-       Abi.return_regs target
+       abi.return_regs
      else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in
   let rets =
     (* Double returns arrive via [%YMM0]. *)
     if fp_returning sub then
-      let ymm0 = Base.List.nth_exn (Abi.vector_param_regs target) 0 in
+      let ymm0 = Base.List.nth_exn abi.vector_param_regs 0 in
       rets
       @ [ Arg.create ~intent:Out ymm0 (Var ymm0) ]
     else rets
@@ -2248,7 +2252,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) (sub : sub term) 
       (rets, args)
     end
   else if Term.name sub = "@main" then
-     let abi = Abi.of_target target in
+     let abi = emit_abi target in
      let rdi = Base.List.nth_exn abi.int_param_regs 0 in
      let rsi = Base.List.nth_exn abi.int_param_regs 1 in
      let args =
@@ -2283,7 +2287,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) (sub : sub term) 
        let args =
          let rank_of_var (v : var) : int * string =
            let n = Var.name (Var.base v) in
-           let int_order = Base.List.map (Abi.int_param_regs target) ~f:Var.name in
+           let int_order = Base.List.map abi.int_param_regs ~f:Var.name in
            match Base.List.findi int_order ~f:(fun _ s -> String.equal s n) with
            | Some (i, _) -> (i, n)
            | None ->
@@ -2297,7 +2301,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) (sub : sub term) 
          Base.List.filter free_vars ~f:(fun reg ->
              let n = Var.name (Var.base reg) in
              let is_callee_saved =
-               Abi.is_callee_saved_t target reg
+               Abi.is_callee_saved abi reg
              in
              not
                (Var.same reg (sp target)
@@ -2330,7 +2334,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) (sub : sub term) 
       in
       let args =
         if is_plt_sig then
-          Base.List.map (Abi.param_regs target)
+          Base.List.map (abi.int_param_regs @ abi.vector_param_regs)
             ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
         else args
       in
@@ -2358,10 +2362,11 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     }
   in
   (* Signature collection fills the table once. *)
+  let abi = emit_abi target in
   let sigs =
     Term.enum sub_t prog
     |> Base.Sequence.to_list
-    |> Base.List.map ~f:(fun sub -> (sub, compute_sub_sig target sub))
+    |> Base.List.map ~f:(fun sub -> (sub, compute_sub_sig target ~abi sub))
   in
   let subs =
     Base.List.fold sigs ~init:ctx.Convutils.subs

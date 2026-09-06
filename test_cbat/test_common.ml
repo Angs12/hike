@@ -89,6 +89,7 @@ let capture_stderr (f : unit -> unit) : string =
      Unix.close saved;
      Sys.remove path;
      raise e);
+  flush stderr;
   Unix.dup2 saved Unix.stderr;
   Unix.close saved;
   let ic = open_in path in
