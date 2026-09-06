@@ -1,17 +1,15 @@
-# Ticket 03 — re-baseline housekeeping and closure
+# Ticket 03 — re-baseline housekeeping and closure — CLOSED 2026-09-07
 
-Only after ticket 02 says KEEP.
-
-1. **Fresh reference emissions**: the ticket-02 candidate emission
-   (`/tmp/opencode/rm1-em` or a clean re-run) becomes the tree's IR reference
-   (the re-armed byte-identity baseline). Record its path + the two-run
-   determinism proof in the verdict.
-2. **AGENTS.md**: rewrite CURRENT VALIDATION STATE with fresh numbers and a
-   fresh timestamp; call out the one-time renumbering (region ids are now
-   ascending-in-lo, tie-broken (lo, hi, tid); emissions pre-region-merge are
-   NOT byte-comparable — use the new reference).
-3. **spec.md**: append the closure note (verdict pointer, the collapse record
-   stands).
-4. **Commit discipline**: three commits (rewrite / A+B verdict / housekeeping),
-   each green; `git merge` order into main is a fast-forward if main is
-   unmoved.
+Done:
+1. Fresh reference emissions: `/tmp/opencode/rm1-ref` (plugin provenance
+   verified `src=b8a1ec0a`, tree a5a8d0b) — byte-identical 35/35 to
+   `rm1-em2` (the ticket-01 build's emission) across two independent
+   installs: the re-armed byte-identity baseline. Recorded in verdict.md.
+2. AGENTS.md: validation-state entry added (fresh timestamp, the one-time
+   renumbering called out with the re-baseline warning for future sessions).
+3. The verdict's CORRECTION note: the shared-opam-plugin hazard (the
+   parallel session's mid-lane install) invalidated one reference emission
+   attempt and exposed that control-side determinism was never measured —
+   both recorded.
+4. Commits: 8ac54a6 (rewrite) → 73bc0b1 (A/B verdict) → a5a8d0b (review
+   fixes) → this closure. Each green.

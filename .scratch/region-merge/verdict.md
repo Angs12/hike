@@ -25,10 +25,22 @@ system grep, /usr/bin/gcc-12 (the perf-profile's own reference set).
 byte-identical; 1 outlier differs in `stack_rN` numbering ONLY (zero
 non-renaming residue; 31/31 allocas both sides). In-process check (5 fresh
 `regions_of_sub` computations of @init): 1 distinct signature — the model is
-deterministic; the rare wobble is the KNOWN upstream VSA hash-order flakiness
-(the cksum_avx2 class, `.scratch/cleanup-8/candidate-3-tripwire.md`) changing
-per-sub `vsa_info` in rare runs; the sweep renders whatever tags it receives
-deterministically. Pre-existing, upstream, zero semantic residue.
+a deterministic function of its tags; a differing emission therefore implies
+differing input tags: the KNOWN upstream VSA hash-order flakiness (the
+cksum_avx2 class, `.scratch/cleanup-8/candidate-3-tripwire.md`), not the
+sweep. Pre-existing, upstream, zero semantic residue.
+
+CORRECTION (2026-09-07, provenance audit): an earlier draft claimed "control
+gcc-12 deterministic" — those two control runs actually executed against the
+region-merge plugin (the shared opam slot had not been reinstalled to
+control before them); control-side run-to-run determinism was NEVER
+measured. The outlier attribution rests on the in-process model check +
+renumbering-only residue + the recorded upstream class, which is
+sufficient. The same shared-plugin hazard invalidated one reference
+emission attempt (rm1-ref, lifted by MAIN's plugin after the parallel
+session merged word-substrate into main and reinstalled — caught by the
+provenance check before anything consumed it; the recorded 2026-09-02
+"plugin from a DIFFERENT tree" incident class).
 
 ## A/B — producer wall (subtimes, 2 runs each side, interleaved)
 

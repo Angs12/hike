@@ -65,3 +65,16 @@ emissions corpus-wide); A/B and determinism in 02 ride the same battery
 artifacts; 03 is docs + reference emissions. The 2% bar (user directive):
 if 02's A/B lands under 2% on the affected class, the lane reverts and records
 the non-finding — the battery result does not keep the change by itself.
+
+## Closure (2026-09-07)
+
+Lane COMPLETE on branch `region-merge` (8ac54a6 → 73bc0b1 → a5a8d0b →
+closure commit). KEEP verdict — the affected-class bar (du −3.8% / ls −4.0%
+/ sort −5.1%, both interleaved rounds, symbol elimination confirmed by
+profile) re-settled by user decision after the spec review flagged the
+ticket's five-binary letter; see verdict.md for the full record including
+the determinism CORRECTION and the shared-plugin hazard. Merge note: main
+moved to 04c454f (word-substrate merged) during the lane — merge is a
+NORMAL merge, not fast-forward; the lanes touch disjoint files
+(`hike_stack_model.ml` merge block vs the word layer) so conflicts are
+unlikely, but re-run the battery post-merge per doctrine.
