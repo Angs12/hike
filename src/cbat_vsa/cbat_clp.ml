@@ -32,14 +32,39 @@ let ( > ) = Stdlib.( > )
 let ( <= ) = Stdlib.( <= )
 let ( >= ) = Stdlib.( >= )
 
+type direction =
+  | Finite
+  | Ascending
+  | Descending
+  | Circular
+[@@deriving bin_io, sexp, compare]
+
 (* {base + n*step | 0 <= n < cardn}. *)
-type t = { base : word; step : word; cardn : word; is_inf : bool }
+type t = {
+  base : word;
+  step : word;
+  cardn : word;
+  dir : direction;
+}
 [@@deriving bin_io, sexp, compare]
 
 
 let base_of (p : t) : word = p.base
 let step_of (p : t) : word = p.step
 let cardn_of (p : t) : word = p.cardn
+let dir_of (p : t) : direction = p.dir
+
+let is_ascending (p : t) : bool =
+  match p.dir with Ascending -> true | _ -> false
+
+let is_descending (p : t) : bool =
+  match p.dir with Descending -> true | _ -> false
+
+let is_circular (p : t) : bool =
+  match p.dir with Circular -> true | _ -> false
+
+let is_infinite (p : t) : bool =
+  match p.dir with Finite -> false | _ -> true
 
 (* CLP from base stepping by step. *)
 
@@ -53,33 +78,63 @@ let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
   let step' = fit_to width step in
   
   if W.is_zero cardn_w then
-    {base = W.zero width; step = W.zero width; cardn = W.zero (width + 1); is_inf = false}
+    {base = W.zero width; step = W.zero width; cardn = W.zero (width + 1); dir = Finite}
   else if W.is_zero step' || is_one cardn_w then
-    {base = base'; step = W.zero width; cardn = W.one (width + 1); is_inf = false}
+    {base = base'; step = W.zero width; cardn = W.one (width + 1); dir = Finite}
   else if W.(=) cardn_w (W.of_int ~width:(width + 1) 2) then
     let e = W.add base' step' in
-    if W.(>=) e base' then {base = base'; step = step'; cardn = cardn_w; is_inf = false}
-    else {base = e; step = W.neg step'; cardn = cardn_w; is_inf = false}
+    if W.(>=) e base' then {base = base'; step = step'; cardn = cardn_w; dir = Finite}
+    else {base = e; step = W.neg step'; cardn = cardn_w; dir = Finite}
   else
-    let is_inf =
+    let is_wrap =
       let ds = dom_size ~width:(2*width + 1) width in
       let mul = mul_exact cardn_w step' in
       W.(>=) mul ds
     in
-    if is_inf then
+    if is_wrap then
       let div, twos = factor_2s step' in
       let step'' = W.div step' div in
       let base'' = W.modulo base' step'' in
       let cardn'' = dom_size ~width:(width + 1) (width - twos) in
-      {base = base''; step = step''; cardn = cardn''; is_inf = true}
+      {base = base''; step = step''; cardn = cardn''; dir = Circular}
     else
-      
-      {base = base'; step = step'; cardn = cardn_w; is_inf = false}
+      {base = base'; step = step'; cardn = cardn_w; dir = Finite}
 
 let singleton w = create w
 
 let bitwidth (p : t) : int = W.bitwidth p.base
 
+let bottom (width : int) : t =
+  assert(width > 0);
+  create ~width W.b0 ~cardn:W.b0
+
+let is_bottom (p : t) : bool = W.is_zero (cardn_of p)
+
+let create_ascending ~width ~base ~step : t =
+  assert (width > 0);
+  let base' = fit_to width base in
+  let step' = fit_to width step in
+  if W.is_zero step' then create ~width base'
+  else
+    let max_wd = W.ones width in
+    let diff = W.sub max_wd base' in
+    let num_steps = W.div diff step' in
+    let cardn = W.succ (W.extract_exn ~hi:width num_steps) in
+    if is_one cardn then create ~width base'
+    else if W.is_zero cardn then bottom width
+    else { base = base'; step = step'; cardn; dir = Ascending }
+
+let create_descending ~width ~base ~step : t =
+  assert (width > 0);
+  let base' = fit_to width base in
+  let step' = fit_to width step in
+  if W.is_zero step' then create ~width base'
+  else
+    let num_steps = W.div base' step' in
+    let cardn = W.succ (W.extract_exn ~hi:width num_steps) in
+    if is_one cardn then create ~width base'
+    else if W.is_zero cardn then bottom width
+    else { base = base'; step = step'; cardn; dir = Descending }
 
 let cardn_from_bounds base step e : word =
   let width = W.bitwidth base in
@@ -95,7 +150,6 @@ let interval ~(width : int) (lo : word) (hi : word) : t =
   create ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
 
-
 let infinite (b, s) : t =
   let width = W.bitwidth b in
   assert (width = W.bitwidth s);
@@ -104,15 +158,7 @@ let infinite (b, s) : t =
     let step = W.div s div in
     let base = W.modulo b step in
     let cardn = dom_size ~width:(width + 1) (width - twos) in
-    create base ~step ~cardn
-
-
-let is_infinite (p : t) : bool = p.is_inf
-
-
-let bottom (width : int) : t =
-  assert(width > 0);
-  create ~width W.b0 ~cardn:W.b0
+    {base; step; cardn; dir = Circular}
 
 (* Cached per width. *)
 let top_cache : (int, t) Hashtbl.t = Hashtbl.create 16
@@ -183,20 +229,47 @@ let nearest_inf_succ (w : word) (base : word) (step : word) : word =
   W.lnot (nearest_inf_pred (W.lnot w) (W.lnot base) step)
 
 let max_elem (p : t) : word option =
-  let max_wd = W.ones (bitwidth p) in
-  nearest_pred max_wd p
+  if is_bottom p then None
+  else match p.dir with
+  | Finite ->
+    let max_wd = W.ones (bitwidth p) in
+    nearest_pred max_wd p
+  | Ascending ->
+    let max_wd = W.ones (bitwidth p) in
+    let diff = W.sub max_wd p.base in
+    let rem = if W.is_zero p.step then W.zero (bitwidth p) else W.modulo diff p.step in
+    Some (W.sub max_wd rem)
+  | Descending -> Some p.base
+  | Circular ->
+    let max_wd = W.ones (bitwidth p) in
+    nearest_pred max_wd p
 
 let min_elem (p : t) : word option =
-  let min_wd = W.zero (bitwidth p) in
-  nearest_succ min_wd p
+  if is_bottom p then None
+  else match p.dir with
+  | Finite ->
+    let min_wd = W.zero (bitwidth p) in
+    nearest_succ min_wd p
+  | Ascending -> Some p.base
+  | Descending ->
+    if W.is_zero p.step then Some p.base else Some (W.modulo p.base p.step)
+  | Circular ->
+    let min_wd = W.zero (bitwidth p) in
+    nearest_succ min_wd p
 
 (* Max signed element. *)
 let max_elem_signed (p : t) : word option =
-  nearest_pred (W.pred (half (bitwidth p))) p
+  if is_bottom p then None
+  else match p.dir with
+  | Descending -> Some p.base
+  | _ -> nearest_pred (W.pred (half (bitwidth p))) p
 
 (* Min signed element. *)
 let min_elem_signed (p : t) : word option =
-  nearest_succ (half (bitwidth p)) p
+  if is_bottom p then None
+  else match p.dir with
+  | Ascending -> Some p.base
+  | _ -> nearest_succ (half (bitwidth p)) p
 
 let splits_by (p : t) (w : word) : bool =
   let divides a b = W.is_zero (W.modulo b a) in
@@ -222,8 +295,6 @@ let elem (i : word) (p : t) : bool =
 (* Top test via coprime step. *)
 let is_top (p : t) : bool = p = top (bitwidth p)
 
-(* Empty test. *)
-let is_bottom (p : t) : bool = W.is_zero (cardn_of p)
 
 (* Equivalence; faster than subset. *)
 let equal (p1 : t) (p2 : t) : bool =
@@ -1143,10 +1214,12 @@ let compare (p1 : t) (p2 : t) : int =
   let base_comp = W.compare (base_of p1) (base_of p2) in
   let step_comp = W.compare (step_of p1) (step_of p2) in
   let cardn_comp = W.compare (cardn_of p1) (cardn_of p2) in
+  let dir_comp = compare_direction p1.dir p2.dir in
   let if_nzero_else a b = if a = 0 then b else a in
   if_nzero_else base_comp @@
   if_nzero_else step_comp @@
-  cardn_comp
+  if_nzero_else cardn_comp @@
+  dir_comp
 
 
 let sexp_of_t (p : t) : Sexp.t =

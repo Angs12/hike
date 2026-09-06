@@ -562,5 +562,81 @@ let () =
           done
         done
       done);
+
+  (* ---- Directional CLP checks (Tickets 01 & 02) ----------------------- *)
+  let check_directional () =
+    let w64 = 64 in
+    let w_8 = Word.of_int ~width:w64 8 in
+    let asc = Ws.Clp.create_ascending ~width:w64 ~base:w_8 ~step:w_8 in
+    incr checked;
+    if not (Ws.Clp.is_ascending asc) then
+      bad "DIRECTIONAL: is_ascending asc should be true";
+    incr checked;
+    if not (Ws.Clp.is_infinite asc) then
+      bad "DIRECTIONAL: is_infinite asc should be true";
+    incr checked;
+    if Ws.Clp.is_descending asc then
+      bad "DIRECTIONAL: is_descending asc should be false";
+    incr checked;
+    if Ws.Clp.is_circular asc then
+      bad "DIRECTIONAL: is_circular asc should be false";
+    incr checked;
+    (match Ws.Clp.min_elem asc with
+     | Some m when Word.equal m w_8 -> ()
+     | Some m -> bad (Printf.sprintf "DIRECTIONAL: min_elem asc got %s expected %s" (show m) (show w_8))
+     | None -> bad "DIRECTIONAL: min_elem asc got None");
+    incr checked;
+    (match Ws.Clp.min_elem_signed asc with
+     | Some m when Word.equal m w_8 -> ()
+     | Some m -> bad (Printf.sprintf "DIRECTIONAL: min_elem_signed asc got %s expected %s" (show m) (show w_8))
+     | None -> bad "DIRECTIONAL: min_elem_signed asc got None");
+
+    (* Descending ray *)
+    let w_64 = Word.of_int ~width:w64 64 in
+    let desc = Ws.Clp.create_descending ~width:w64 ~base:w_64 ~step:w_8 in
+    incr checked;
+    if not (Ws.Clp.is_descending desc) then
+      bad "DIRECTIONAL: is_descending desc should be true";
+    incr checked;
+    if not (Ws.Clp.is_infinite desc) then
+      bad "DIRECTIONAL: is_infinite desc should be true";
+    incr checked;
+    if Ws.Clp.is_ascending desc then
+      bad "DIRECTIONAL: is_ascending desc should be false";
+    incr checked;
+    if Ws.Clp.is_circular desc then
+      bad "DIRECTIONAL: is_circular desc should be false";
+    incr checked;
+    (match Ws.Clp.max_elem desc with
+     | Some m when Word.equal m w_64 -> ()
+     | Some m -> bad (Printf.sprintf "DIRECTIONAL: max_elem desc got %s expected %s" (show m) (show w_64))
+     | None -> bad "DIRECTIONAL: max_elem desc got None");
+    incr checked;
+    (match Ws.Clp.max_elem_signed desc with
+     | Some m when Word.equal m w_64 -> ()
+     | Some m -> bad (Printf.sprintf "DIRECTIONAL: max_elem_signed desc got %s expected %s" (show m) (show w_64))
+     | None -> bad "DIRECTIONAL: max_elem_signed desc got None");
+
+    (* Canonicalization: cardn = 1 becomes Finite singleton *)
+    let max_val = Word.ones w64 in
+    let asc_single = Ws.Clp.create_ascending ~width:w64 ~base:max_val ~step:w_8 in
+    incr checked;
+    if Ws.Clp.is_ascending asc_single then
+      bad "DIRECTIONAL: asc_single should canonicalize to Finite (not ascending)";
+    incr checked;
+    if Ws.Clp.is_infinite asc_single then
+      bad "DIRECTIONAL: asc_single should canonicalize to Finite (not infinite)";
+
+    let desc_single = Ws.Clp.create_descending ~width:w64 ~base:(Word.of_int ~width:w64 7) ~step:w_8 in
+    incr checked;
+    if Ws.Clp.is_descending desc_single then
+      bad "DIRECTIONAL: desc_single should canonicalize to Finite (not descending)";
+    incr checked;
+    if Ws.Clp.is_infinite desc_single then
+      bad "DIRECTIONAL: desc_single should canonicalize to Finite (not infinite)";
+  in
+  check_directional ();
+
   Printf.printf "clpequiv: checked=%d mismatches=%d both-raised=%d\n"
-    !checked !mism !both_raised
+    !checked !mism !both_raised;
+  if !mism > 0 then exit 1
