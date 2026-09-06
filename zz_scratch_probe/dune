@@ -258,3 +258,22 @@
   (:standard -g -alert -deprecated))
  (preprocess
   (pps ppx_bap)))
+
+
+(executable
+ (name wordbench)
+ (modules wordbench)
+ (libraries
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core_kernel
+  graphlib
+  threads)
+ (flags
+  (:standard -g -alert -deprecated))
+ (preprocess
+  (pps ppx_bap)))

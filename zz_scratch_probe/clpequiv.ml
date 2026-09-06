@@ -17,12 +17,16 @@
    widths (1..64) plus a direct 64/65/129-bit sweep (129 = [dom_size
    ~width:(2*width+1)] and [mul_exact]'s summed width at width 64).
 
+   The same sweep cross-checks [Cbat_word] (the int63 substrate) against the
+   reference, over every op it exports (word-substrate T2).
+
    Usage: clpequiv.exe *)
 
 open Bap.Std
 open Probe_common
 module CKL = Core_kernel.List
 module Wo = Cbat_word_ops
+module CW = Cbat_word
 
 (* ========================================================================= *)
 (* CLP reference implementations, as they were before the change. *)
@@ -53,86 +57,86 @@ module Ref_word = struct
 
   (* Multiply at the summed width; cannot overflow. *)
   let mul_exact (w1 : word) (w2 : word) : word =
-    let sz1 = W.bitwidth w1 in
-    let sz2 = W.bitwidth w2 in
+    let sz1 = Word.bitwidth w1 in
+    let sz2 = Word.bitwidth w2 in
     let sz_ext = sz1 + sz2 in
-    let w1_ext = W.extract_exn ~hi:(sz_ext - 1) w1 in
-    let w2_ext = W.extract_exn ~hi:(sz_ext - 1) w2 in
-    W.mul w1_ext w2_ext
+    let w1_ext = Word.extract_exn ~hi:(sz_ext - 1) w1 in
+    let w2_ext = Word.extract_exn ~hi:(sz_ext - 1) w2 in
+    Word.mul w1_ext w2_ext
 
   let add_exact (w1 : word) (w2 : word) : word =
-    let sz1 = W.bitwidth w1 in
-    let sz2 = W.bitwidth w2 in
+    let sz1 = Word.bitwidth w1 in
+    let sz2 = Word.bitwidth w2 in
     let sz_ext = 1 + max sz1 sz2 in
-    let w1_ext = W.extract_exn ~hi:(sz_ext - 1) w1 in
-    let w2_ext = W.extract_exn ~hi:(sz_ext - 1) w2 in
-    W.add w1_ext w2_ext
+    let w1_ext = Word.extract_exn ~hi:(sz_ext - 1) w1 in
+    let w2_ext = Word.extract_exn ~hi:(sz_ext - 1) w2 in
+    Word.add w1_ext w2_ext
 
   let succ_exact (w : word) : word =
-    let width = W.bitwidth w in
-    W.succ @@ W.extract_exn ~hi:width w
+    let width = Word.bitwidth w in
+    Word.succ @@ Word.extract_exn ~hi:width w
 
   let lshift_exact (w : word) (i : int) : word =
-    let width = i + W.bitwidth w in
+    let width = i + Word.bitwidth w in
     let wi = W.of_int ~width i in
-    let w' = W.extract_exn ~hi:(width - 1) w in
-    W.lshift w' wi
+    let w' = Word.extract_exn ~hi:(width - 1) w in
+    Word.lshift w' wi
 
   (* Bounded gcd. *)
   let bounded_gcd (w1 : word) (w2 : word) : word =
-    let width = W.bitwidth w1 in
-    assert (width = W.bitwidth w2);
-    if W.is_zero w1 then w2
-    else if W.is_zero w2 then w1
-    else W.gcd_exn w1 w2
+    let width = Word.bitwidth w1 in
+    assert (width = Word.bitwidth w2);
+    if Word.is_zero w1 then w2
+    else if Word.is_zero w2 then w1
+    else Word.gcd_exn w1 w2
 
   (* Unsigned division rounding up. *)
-  let cdiv a b : word = if W.is_zero (W.modulo a b)
-    then W.div a b else W.succ (W.div a b)
+  let cdiv a b : word = if Word.is_zero (Word.modulo a b)
+    then Word.div a b else Word.succ (Word.div a b)
 
-  let is_one (w : word) : bool = W.is_zero (W.pred w)
+  let is_one (w : word) : bool = Word.is_zero (Word.pred w)
 
   (* Least non-negative x solving ax + by = c. *)
   let bounded_diophantine (a : word) b c : (word * word) option =
-    let size = W.bitwidth a in
-    assert (size = W.bitwidth b);
-    assert (size = W.bitwidth c);
+    let size = Word.bitwidth a in
+    assert (size = Word.bitwidth b);
+    assert (size = Word.bitwidth c);
     let zero = W.zero size in
-    if W.is_zero c then Some (zero, zero)
-    else if W.is_zero a && W.is_zero b then None
-    else if W.is_zero a then
-      if W.is_zero (W.modulo c b) then Some (zero, W.div c b) else None
-    else if W.is_zero b then
-      if W.is_zero (W.modulo c a) then Some (W.div c a, zero) else None
+    if Word.is_zero c then Some (zero, zero)
+    else if Word.is_zero a && Word.is_zero b then None
+    else if Word.is_zero a then
+      if Word.is_zero (Word.modulo c b) then Some (zero, Word.div c b) else None
+    else if Word.is_zero b then
+      if Word.is_zero (Word.modulo c a) then Some (Word.div c a, zero) else None
     else
       (* Bezout coefficients. *)
       let d, unsigned_x, unsigned_y = W.gcdext_exn a b in
-      let signed_x = W.signed unsigned_x in
-      let signed_y = W.signed unsigned_y in
-      let gcd_quotient = W.div c d in
+      let signed_x = Word.signed unsigned_x in
+      let signed_y = Word.signed unsigned_y in
+      let gcd_quotient = Word.div c d in
       (* Double-width products. *)
-      let signed_x0 = W.signed (mul_exact signed_x gcd_quotient) in
-      let signed_y0 = W.signed (mul_exact signed_y gcd_quotient) in
-      if not (W.is_zero (W.modulo c d)) then None
+      let signed_x0 = Word.signed (mul_exact signed_x gcd_quotient) in
+      let signed_y0 = Word.signed (mul_exact signed_y gcd_quotient) in
+      if not (Word.is_zero (Word.modulo c d)) then None
       else
         (* Minimal-|x|,|y| solution pair. *)
-        Some (W.extract_exn ~hi:(size-1) signed_x0,
-              W.extract_exn ~hi:(size-1) signed_y0)
+        Some (Word.extract_exn ~hi:(size-1) signed_x0,
+              Word.extract_exn ~hi:(size-1) signed_y0)
 
   (* Split w into odd part and power of two. *)
   let factor_2s (w : word) : word * int =
     let rec factor_help (hi : int) (lo : int) : int =
       if hi = lo then hi else
         let mid = (hi + lo) / 2 in
-        let lo_part = W.extract_exn ~hi:mid ~lo w in
-        if W.is_zero lo_part then factor_help hi (mid + 1)
+        let lo_part = Word.extract_exn ~hi:mid ~lo w in
+        if Word.is_zero lo_part then factor_help hi (mid + 1)
         else factor_help mid lo
     in
-    let width = W.bitwidth w in
+    let width = Word.bitwidth w in
     let lo = factor_help (width - 1) 0 in
     (* Keep the input width. *)
     let hi = width - 1 + lo in
-    W.extract_exn ~hi ~lo w, lo
+    Word.extract_exn ~hi ~lo w, lo
 
   (* 2^i at [width] bits. *)
   let dom_size_cache : (int * int, word) Hashtbl.t = Hashtbl.create 16
@@ -141,7 +145,7 @@ module Ref_word = struct
     match Hashtbl.find_opt dom_size_cache (i, width) with
     | Some w -> w
     | None ->
-      let w = W.lshift (W.one width) (W.of_int ~width i) in
+      let w = Word.lshift (W.one width) (W.of_int ~width i) in
       Hashtbl.add dom_size_cache (i, width) w;
       w
 
@@ -149,14 +153,14 @@ module Ref_word = struct
 
   (* Closest value representable at [width] bits. *)
   let cap_at_width ~width (w : word) : word =
-    let w_width = W.bitwidth w in
+    let w_width = Word.bitwidth w in
     (* Exact width is the identity. *)
     if w_width = width then w
-    else if w_width <= width then W.extract_exn ~hi:(width - 1) w else
+    else if w_width <= width then Word.extract_exn ~hi:(width - 1) w else
       (* Largest width-bit number. *)
-      let max_w = W.pred @@ dom_size ~width:w_width width in
+      let max_w = Word.pred @@ dom_size ~width:w_width width in
       let res_val = min max_w w in
-      W.extract_exn ~hi:(width - 1) res_val
+      Word.extract_exn ~hi:(width - 1) res_val
 end
 
 (* ========================================================================= *)
@@ -243,6 +247,169 @@ let () =
   (* Word of [width] bits holding [v] mod 2^width. *)
   let word_of_z (width : int) (v : Z.t) : word =
     Word.of_string (Printf.sprintf "%s:%d" (Z.to_string v) width)
+  in
+
+  (* ---- Cbat_word vs the reference ---------------------------------- *)
+
+  (* Both sides are compared as BAP words, so width and payload must agree:
+     the substrate's own [Small]/[Big] split is invisible here. *)
+  let cw_of (w : word) : CW.t = CW.of_word w in
+  let cw1 (nm : string) (rf : word -> word) (nf : CW.t -> CW.t) (w : word) =
+    incr checked;
+    let exp = (try Ok (rf w) with e -> Error e) in
+    let got = (try Ok (CW.to_word (nf (cw_of w))) with e -> Error e) in
+    match got, exp with
+    | Ok g, Ok e ->
+      if not (eqw g e) then
+        bad (Printf.sprintf "CW %s(%s): ref=%s cw=%s" nm (show w) (show e) (show g))
+    | Error _, Error _ -> incr both_raised
+    | Ok g, Error _ ->
+      bad (Printf.sprintf "CW %s(%s): cw=%s ref raised" nm (show w) (show g))
+    | Error _, Ok e ->
+      bad (Printf.sprintf "CW %s(%s): cw raised ref=%s" nm (show w) (show e))
+  in
+  let cw2 (nm : string) (rf : word -> word -> word) (nf : CW.t -> CW.t -> CW.t)
+      (a : word) (b : word) =
+    incr checked;
+    let exp = (try Ok (rf a b) with e -> Error e) in
+    let got = (try Ok (CW.to_word (nf (cw_of a) (cw_of b))) with e -> Error e) in
+    match got, exp with
+    | Ok g, Ok e ->
+      if not (eqw g e) then
+        bad (Printf.sprintf "CW %s(%s,%s): ref=%s cw=%s" nm (show a) (show b)
+               (show e) (show g))
+    | Error _, Error _ -> incr both_raised
+    | Ok g, Error _ ->
+      bad (Printf.sprintf "CW %s(%s,%s): cw=%s ref raised" nm (show a) (show b) (show g))
+    | Error _, Ok e ->
+      bad (Printf.sprintf "CW %s(%s,%s): cw raised ref=%s" nm (show a) (show b) (show e))
+  in
+  let cw1b (nm : string) (rf : word -> bool) (nf : CW.t -> bool) (w : word) =
+    incr checked;
+    let exp = (try Ok (rf w) with e -> Error e) in
+    let got = (try Ok (nf (cw_of w)) with e -> Error e) in
+    match got, exp with
+    | Ok g, Ok e ->
+      if not (Bool.equal g e) then
+        bad (Printf.sprintf "CW %s(%s): ref=%b cw=%b" nm (show w) e g)
+    | Error _, Error _ -> incr both_raised
+    | _ -> bad (Printf.sprintf "CW %s(%s): ref/cw disagreed on raising" nm (show w))
+  in
+  let sgn (i : int) : int = if i > 0 then 1 else if i < 0 then -1 else 0 in
+  let cwc (nm : string) (rf : word -> word -> int) (nf : CW.t -> CW.t -> int)
+      (a : word) (b : word) =
+    incr checked;
+    let exp = (try Ok (rf a b) with e -> Error e) in
+    let got = (try Ok (nf (cw_of a) (cw_of b)) with e -> Error e) in
+    match got, exp with
+    | Ok g, Ok e ->
+      if sgn g <> sgn e then
+        bad (Printf.sprintf "CW %s(%s,%s): ref=%d cw=%d" nm (show a) (show b) e g)
+    | Error _, Error _ -> incr both_raised
+    | _ -> bad (Printf.sprintf "CW %s(%s,%s): ref/cw disagreed on raising" nm (show a) (show b))
+  in
+  (* An op whose int result must match, with both-raised tolerated. *)
+  let cwi (nm : string) (rf : word -> int) (nf : CW.t -> int) (w : word) =
+    incr checked;
+    let exp = (try Ok (rf w) with e -> Error e) in
+    let got = (try Ok (nf (cw_of w)) with e -> Error e) in
+    match got, exp with
+    | Ok g, Ok e ->
+      if g <> e then bad (Printf.sprintf "CW %s(%s): ref=%d cw=%d" nm (show w) e g)
+    | Error _, Error _ -> incr both_raised
+    | _ -> bad (Printf.sprintf "CW %s(%s): ref/cw disagreed on raising" nm (show w))
+  in
+
+  (* Every op [Cbat_word] exports, against [Word] / [Ref_word]. *)
+  let check_cbat_word (width : int) (v1 : Z.t) (v2 : Z.t) =
+    let w1 = word_of_z width v1 in
+    let w2 = word_of_z width v2 in
+    let w3 = word_of_z width (Z.add v1 v2) in
+    cw2 "add" Word.add CW.add w1 w2;
+    cw2 "sub" Word.sub CW.sub w1 w2;
+    cw2 "mul" Word.mul CW.mul w1 w2;
+    cw2 "div" Word.div CW.div w1 w2;
+    cw2 "modulo" Word.modulo CW.modulo w1 w2;
+    cw2 "logand" Word.logand CW.logand w1 w2;
+    cw2 "logor" Word.logor CW.logor w1 w2;
+    cw2 "logxor" Word.logxor CW.logxor w1 w2;
+    cw2 "lshift" Word.lshift CW.lshift w1 w2;
+    cw2 "rshift" Word.rshift CW.rshift w1 w2;
+    cw2 "arshift" Word.arshift CW.arshift w1 w2;
+    cw2 "gcd_exn" Word.gcd_exn CW.gcd_exn w1 w2;
+    cw2 "lcm_exn" Word.lcm_exn CW.lcm_exn w1 w2;
+    cw2 "min" Word.min CW.min w1 w2;
+    cw2 "max" Word.max CW.max w1 w2;
+    cw2 "concat" Word.concat CW.concat w1 w2;
+    cw1 "neg" Word.neg CW.neg w1;
+    cw1 "lnot" Word.lnot CW.lnot w1;
+    cw1 "succ" Word.succ CW.succ w1;
+    cw1 "pred" Word.pred CW.pred w1;
+    cw1 "abs" Word.abs CW.abs w1;
+    cw1 "signed" Word.signed CW.signed w1;
+    cw1 "unsigned" Word.unsigned CW.unsigned w1;
+    cw1b "is_zero" Word.is_zero CW.is_zero w1;
+    cw1b "is_one" Word.is_one CW.is_one w1;
+    cwc "compare" Word.compare CW.compare w1 w2;
+    cwi "bitwidth" Word.bitwidth CW.bitwidth w1;
+    cwi "to_int_exn" Word.to_int_exn CW.to_int_exn w1;
+    cwi "to_int_exn" Word.to_int_exn CW.to_int_exn w2;
+    (* extract: the default-hi, a high slice and a low slice. *)
+    CKL.iter [ (width - 1, 0); (width - 1, Stdlib.max 0 (width / 2)); (width / 2, 0) ]
+      ~f:(fun (hi, lo) ->
+          if hi >= lo then
+            cw1 (Printf.sprintf "extract %d %d" hi lo)
+              (Word.extract_exn ~hi ~lo) (CW.extract_exn ~hi ~lo) w1);
+    (* the word_ops set *)
+    cw2 "mul_exact" Wo.mul_exact CW.mul_exact w1 w2;
+    cw2 "add_exact" Wo.add_exact CW.add_exact w1 w2;
+    cw1 "succ_exact" Wo.succ_exact CW.succ_exact w1;
+    CKL.iter [ 0; 1; 2; 3 ] ~f:(fun i ->
+        cw1 (Printf.sprintf "lshift_exact %d" i)
+          (fun w -> Wo.lshift_exact w i) (fun w -> CW.lshift_exact w i) w1);
+    cw2 "bounded_gcd" Wo.bounded_gcd CW.bounded_gcd w1 w2;
+    cw2 "cdiv" Wo.cdiv CW.cdiv w1 w2;
+    cw1b "is_one(ops)" Wo.is_one CW.is_one w1;
+    CKL.iter [ w1; w2; w3 ] ~f:(fun c ->
+        incr checked;
+        match
+          (try Ok (Wo.bounded_diophantine w1 w2 c) with e -> Error e),
+          (try Ok (CW.bounded_diophantine (cw_of w1) (cw_of w2) (cw_of c))
+           with e -> Error e)
+        with
+        | Ok (Some (rx, ry)), Ok (Some (px, py)) ->
+          let gx = CW.to_word px and gy = CW.to_word py in
+          if not (eqw rx gx && eqw ry gy) then
+            bad (Printf.sprintf "CW bounded_diophantine(%s,%s,%s): ref=(%s,%s) cw=(%s,%s)"
+                   (show w1) (show w2) (show c) (show rx) (show ry)
+                   (show gx) (show gy))
+        | Ok None, Ok None -> ()
+        | Error _, Error _ -> incr both_raised
+        | _ ->
+          bad (Printf.sprintf "CW bounded_diophantine(%s,%s,%s): shape differs"
+                 (show w1) (show w2) (show c)));
+    (let rf = Wo.factor_2s w1 and pf = CW.factor_2s (cw_of w1) in
+     incr checked;
+     if not (eqw (fst rf) (CW.to_word (fst pf)) && Stdlib.( = ) (snd rf) (snd pf)) then
+       bad (Printf.sprintf "CW factor_2s(%s): ref=(%s,%d) cw=(%s,%d)"
+              (show w1) (show (fst rf)) (snd rf) (show (CW.to_word (fst pf))) (snd pf)));
+    CKL.iter [ width; width + 1; 2 * width + 1 ] ~f:(fun tgt ->
+        let i = Z.to_int (Z.erem v1 (Z.of_int 8)) in
+        incr checked;
+        let rd = Wo.dom_size ~width:tgt i and pd = CW.dom_size ~width:tgt i in
+        if not (eqw rd (CW.to_word pd)) then
+          bad (Printf.sprintf "CW dom_size i=%d width=%d: ref=%s cw=%s"
+                 i tgt (show rd) (show (CW.to_word pd)));
+        incr checked;
+        let rc = Wo.cap_at_width ~width:tgt w1 and pc = CW.cap_at_width ~width:tgt (cw_of w1) in
+        if not (eqw rc (CW.to_word pc)) then
+          bad (Printf.sprintf "CW cap_at_width(%s) width=%d: ref=%s cw=%s"
+                 (show w1) tgt (show rc) (show (CW.to_word pc)));
+        incr checked;
+        let rh = Wo.half tgt and ph = CW.half tgt in
+        if not (eqw rh (CW.to_word ph)) then
+          bad (Printf.sprintf "CW half width=%d: ref=%s cw=%s" tgt (show rh)
+                 (show (CW.to_word ph))))
   in
 
   (* All the ops, over one (width, v1, v2) triple. *)
@@ -341,7 +508,9 @@ let () =
       in
       let vals : Z.t list = List.append small wide in
       CKL.iter vals ~f:(fun v1 ->
-          CKL.iter vals ~f:(fun v2 -> check_word_ops width v1 v2)));
+          CKL.iter vals ~f:(fun v2 ->
+              check_word_ops width v1 v2;
+              check_cbat_word width v1 v2)));
 
   (* ---- CLP sweep (the pre-existing harness) --------------------------- *)
 
@@ -373,8 +542,10 @@ let () =
             if not (Bool.equal (Ws.Clp.is_top p1) (ref_is_top p1)) then
               bad (Printf.sprintf "IS_TOP w=%d b=%d s=%d c=%d" w b1 s1 c1);
             (* the word ops, driven by the swept (base, step, cardn) *)
-            if c1 land 3 = 0 && s1 land 3 = 0 && b1 land 3 = 0 then
+            if c1 land 3 = 0 && s1 land 3 = 0 && b1 land 3 = 0 then begin
               check_word_ops w (Z.of_int b1) (Z.of_int s1);
+              check_cbat_word w (Z.of_int b1) (Z.of_int s1)
+            end;
             for b2 = 0 to n - 1 do
               let p2 =
                 Ws.Clp.create (Word.of_int ~width:w b2)
