@@ -162,7 +162,21 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
           (* One gap: remainder is one CLP. *)
           let step = Word.sub e2' e1' in
           let cardn = Word.sub c1 cnt in
-          if Clp.is_infinite p then
+          if Clp.is_ascending p then
+            match Clp.min_elem p with
+            | Some p_min when Word.(=) arc_start p_min ->
+              let new_base = Word.add arc_end step in
+              if Word.(<) new_base arc_end then Clp.bottom width
+              else Clp.create_ascending ~width ~base:new_base ~step
+            | _ -> p
+          else if Clp.is_descending p then
+            match Clp.max_elem p with
+            | Some p_max when Word.(=) arc_end p_max ->
+              let new_base = Word.sub arc_start step in
+              if Word.(>) new_base arc_start then Clp.bottom width
+              else Clp.create_descending ~width ~base:new_base ~step
+            | _ -> p
+          else if Clp.is_circular p then
             Clp.create (Word.add arc_end step) ~step ~cardn
           else if Word.(>) arc_start arc_end then
             (* Wrapping remainder is one interval. *)
@@ -182,7 +196,21 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
            | Some nxt ->
              let step = Word.sub nxt arc_end in
              let cardn = Word.sub c1 cnt in
-             if Clp.is_infinite p then
+             if Clp.is_ascending p then
+               match Clp.min_elem p with
+               | Some p_min when Word.(=) arc_start p_min ->
+                 let new_base = Word.add arc_end step in
+                 if Word.(<) new_base arc_end then Clp.bottom width
+                 else Clp.create_ascending ~width ~base:new_base ~step
+               | _ -> p
+             else if Clp.is_descending p then
+               match Clp.max_elem p with
+               | Some p_max when Word.(=) arc_end p_max ->
+                 let new_base = Word.sub arc_start step in
+                 if Word.(>) new_base arc_start then Clp.bottom width
+                 else Clp.create_descending ~width ~base:new_base ~step
+               | _ -> p
+             else if Clp.is_circular p then
                Clp.create (Word.add arc_end step) ~step ~cardn
              else
                (match Clp.min_elem p, Clp.max_elem p with
@@ -233,6 +261,9 @@ let concat = lift_binop Clp.concat FinSet.concat
 let is_top = lift_consume Clp.is_top (fun _ -> false)
 let is_bottom = lift_consume (fun _ -> false) (Fn.compose Word.is_zero FinSet.cardinality)
 let is_infinite = lift_consume Clp.is_infinite (fun _ -> false)
+let is_ascending = lift_consume Clp.is_ascending (fun _ -> false)
+let is_descending = lift_consume Clp.is_descending (fun _ -> false)
+let is_circular = lift_consume Clp.is_circular (fun _ -> false)
 
 (* Lattice. *)
 let precedes t1 t2 : bool = match t1, t2 with

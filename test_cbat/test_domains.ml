@@ -56,6 +56,29 @@ let run_base () =
   check "CLP6: top: is_top, not bottom, absorbs by subset"
     (let t = Clp.top 32 in
      Clp.is_top t && (not (Clp.is_bottom t)) && Clp.subset clp1 t && Clp.subset t t);
+  check "CLP7a: create_ascending basic properties and bounds"
+    (let asc = Clp.create_ascending ~width:64 ~base:(W.of_int ~width:64 8) ~step:(W.of_int ~width:64 8) in
+     Clp.is_ascending asc
+     && Clp.is_infinite asc
+     && not (Clp.is_descending asc)
+     && not (Clp.is_circular asc)
+     && Clp.min_elem asc = Some (W.of_int ~width:64 8)
+     && Clp.min_elem_signed asc = Some (W.of_int ~width:64 8));
+  check "CLP7b: create_descending basic properties and bounds"
+    (let desc = Clp.create_descending ~width:64 ~base:(W.of_int ~width:64 64) ~step:(W.of_int ~width:64 8) in
+     Clp.is_descending desc
+     && Clp.is_infinite desc
+     && not (Clp.is_ascending desc)
+     && not (Clp.is_circular desc)
+     && Clp.max_elem desc = Some (W.of_int ~width:64 64)
+     && Clp.max_elem_signed desc = Some (W.of_int ~width:64 64));
+  check "CLP7c: directional rays canonicalize singletons to Finite"
+    (let asc1 = Clp.create_ascending ~width:64 ~base:(W.ones 64) ~step:(W.of_int ~width:64 8) in
+     let desc1 = Clp.create_descending ~width:64 ~base:(W.of_int ~width:64 7) ~step:(W.of_int ~width:64 8) in
+     not (Clp.is_ascending asc1)
+     && not (Clp.is_infinite asc1)
+     && not (Clp.is_descending desc1)
+     && not (Clp.is_infinite desc1));
   ())
 ;
 (  let s5 = Clp.create (w32 5) in

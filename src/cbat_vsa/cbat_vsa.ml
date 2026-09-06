@@ -2896,13 +2896,18 @@ let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
       Some (Stdlib.Int64.sub alo rhi, Stdlib.Int64.sub ahi rlo)
   | _ -> None
 
-(* Address of a stack-access rhs. *)
+(* Address of a stack-access rhs using Exp.visitor. *)
 let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
-  match rhs with
-  | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
-  | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
-  | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _)) -> Some addr
-  | _ -> None
+  let vis =
+    object
+      inherit [ Bil.exp option ] Exp.visitor
+      method! visit_load ~mem:_ ~addr _ _ acc =
+        Base.Option.first_some acc (Some addr)
+      method! visit_store ~mem:_ ~addr ~exp:_ _ _ acc =
+        Base.Option.first_some acc (Some addr)
+    end
+  in
+  vis#visit_exp rhs None
 
 
 let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
@@ -2948,16 +2953,21 @@ let is_seed (st_before : AI.t) (addr : exp) : bool =
     match denote_imm_exp addr st_before with
     | Error _ -> false
     | Ok ws ->
-      if WordSet.is_top ws then false
+      if WordSet.is_top ws || WordSet.is_circular ws then false
       else if WordSet.is_bottom ws then true
-      else if WordSet.is_infinite ws then false
       else
         match WordSet.min_elem ws, WordSet.max_elem ws with
         | Some lo, Some hi -> (
             match Word.to_int64 lo, Word.to_int64 hi with
-            | Ok lo, Ok hi ->
+            | Ok lo_i64, Ok hi_i64 ->
               let nlo, nhi = frame_neighborhood in
-              Stdlib.Int64.compare lo nlo >= 0 && Stdlib.Int64.compare hi nhi <= 0
+              if WordSet.is_ascending ws then
+                (* Non-negative ascending ray pointing into caller stack frame *)
+                Stdlib.Int64.compare lo_i64 0L >= 0
+                && Stdlib.Int64.compare lo_i64 nhi <= 0
+              else
+                Stdlib.Int64.compare lo_i64 nlo >= 0
+                && Stdlib.Int64.compare hi_i64 nhi <= 0
             | _ -> false)
         | _ -> false
 
@@ -3029,8 +3039,8 @@ let rec extract ~(sp : var)
     let bounded, unbounded_or_dead =
       Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
           match kind with
-          | Range _ | Infinite _ | VLA _ -> true
-          | Unbounded | Dead -> false)
+          | Range _ -> true
+          | Infinite _ | Unbounded | Dead | VLA _ -> false)
     in
     let items =
       Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))

@@ -394,6 +394,7 @@ let should_filter filter_set syms sub =
     Base.List.mem ~equal:String.equal filter_subs (Sub.name sub)
     || Term.has_attr sub Sub.stub
     || Term.has_attr sub Sub.extern
+    || Term.has_attr sub Sub.entry_point
     || is_intrinsic sub
     || Core.Set.mem filter_set (Term.tid sub)
     || (not @@ StrSet.mem (Sub.name sub) syms)

@@ -32,14 +32,39 @@ let ( > ) = Stdlib.( > )
 let ( <= ) = Stdlib.( <= )
 let ( >= ) = Stdlib.( >= )
 
+type direction =
+  | Finite
+  | Ascending
+  | Descending
+  | Circular
+[@@deriving bin_io, sexp, compare]
+
 (* {base + n*step | 0 <= n < cardn}. *)
-type t = { base : word; step : word; cardn : word; is_inf : bool }
+type t = {
+  base : word;
+  step : word;
+  cardn : word;
+  dir : direction;
+}
 [@@deriving bin_io, sexp, compare]
 
 
 let base_of (p : t) : word = p.base
 let step_of (p : t) : word = p.step
 let cardn_of (p : t) : word = p.cardn
+let dir_of (p : t) : direction = p.dir
+
+let is_ascending (p : t) : bool =
+  match p.dir with Ascending -> true | _ -> false
+
+let is_descending (p : t) : bool =
+  match p.dir with Descending -> true | _ -> false
+
+let is_circular (p : t) : bool =
+  match p.dir with Circular -> true | _ -> false
+
+let is_infinite (p : t) : bool =
+  match p.dir with Finite -> false | _ -> true
 
 (* CLP from base stepping by step. *)
 
@@ -53,33 +78,87 @@ let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
   let step' = fit_to width step in
   
   if W.is_zero cardn_w then
-    {base = W.zero width; step = W.zero width; cardn = W.zero (width + 1); is_inf = false}
+    {base = W.zero width; step = W.zero width; cardn = W.zero (width + 1); dir = Finite}
   else if W.is_zero step' || is_one cardn_w then
-    {base = base'; step = W.zero width; cardn = W.one (width + 1); is_inf = false}
+    {base = base'; step = W.zero width; cardn = W.one (width + 1); dir = Finite}
   else if W.(=) cardn_w (W.of_int ~width:(width + 1) 2) then
     let e = W.add base' step' in
-    if W.(>=) e base' then {base = base'; step = step'; cardn = cardn_w; is_inf = false}
-    else {base = e; step = W.neg step'; cardn = cardn_w; is_inf = false}
+    if W.(>=) e base' then {base = base'; step = step'; cardn = cardn_w; dir = Finite}
+    else {base = e; step = W.neg step'; cardn = cardn_w; dir = Finite}
   else
-    let is_inf =
+    let is_wrap =
       let ds = dom_size ~width:(2*width + 1) width in
       let mul = mul_exact cardn_w step' in
       W.(>=) mul ds
     in
-    if is_inf then
+    if is_wrap then
       let div, twos = factor_2s step' in
       let step'' = W.div step' div in
       let base'' = W.modulo base' step'' in
       let cardn'' = dom_size ~width:(width + 1) (width - twos) in
-      {base = base''; step = step''; cardn = cardn''; is_inf = true}
+      {base = base''; step = step''; cardn = cardn''; dir = Circular}
     else
-      
-      {base = base'; step = step'; cardn = cardn_w; is_inf = false}
+      {base = base'; step = step'; cardn = cardn_w; dir = Finite}
 
 let singleton w = create w
 
 let bitwidth (p : t) : int = W.bitwidth p.base
 
+let bottom (width : int) : t =
+  assert(width > 0);
+  create ~width W.b0 ~cardn:W.b0
+
+let is_bottom (p : t) : bool = W.is_zero (cardn_of p)
+
+let infinite (b, s) : t =
+  let width = W.bitwidth b in
+  assert (width = W.bitwidth s);
+  if W.is_zero s then create b
+  else let div, twos = factor_2s s in
+    let step = W.div s div in
+    let base = W.modulo b step in
+    let cardn = dom_size ~width:(width + 1) (width - twos) in
+    {base; step; cardn; dir = Circular}
+
+(* Cached per width. *)
+let top_cache : (int, t) Hashtbl.t = Hashtbl.create 16
+
+let top (i : int) : t =
+  assert(i > 0);
+  match Hashtbl.find_opt top_cache i with
+  | Some t -> t
+  | None ->
+    let t = infinite (W.zero i, W.one i) in
+    Hashtbl.add top_cache i t;
+    t
+
+let create_ascending ~width ~base ~step : t =
+  assert (width > 0);
+  let base' = fit_to width base in
+  let step' = fit_to width step in
+  if W.is_zero step' then create ~width base'
+  else
+    let max_wd = W.ones width in
+    let diff = W.sub max_wd base' in
+    let num_steps = W.div diff step' in
+    let cardn = W.succ (W.extract_exn ~hi:width num_steps) in
+    if is_one cardn then create ~width base'
+    else if W.is_zero cardn then bottom width
+    else if W.equal cardn (dom_size ~width:(width + 1) width) then top width
+    else { base = base'; step = step'; cardn; dir = Ascending }
+
+let create_descending ~width ~base ~step : t =
+  assert (width > 0);
+  let base' = fit_to width base in
+  let step' = fit_to width step in
+  if W.is_zero step' then create ~width base'
+  else
+    let num_steps = W.div base' step' in
+    let cardn = W.succ (W.extract_exn ~hi:width num_steps) in
+    if is_one cardn then create ~width base'
+    else if W.is_zero cardn then bottom width
+    else if W.equal cardn (dom_size ~width:(width + 1) width) then top width
+    else { base = base'; step = step'; cardn; dir = Descending }
 
 let cardn_from_bounds base step e : word =
   let width = W.bitwidth base in
@@ -94,37 +173,6 @@ let cardn_from_bounds base step e : word =
 let interval ~(width : int) (lo : word) (hi : word) : t =
   create ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
-
-
-let infinite (b, s) : t =
-  let width = W.bitwidth b in
-  assert (width = W.bitwidth s);
-  if W.is_zero s then create b
-  else let div, twos = factor_2s s in
-    let step = W.div s div in
-    let base = W.modulo b step in
-    let cardn = dom_size ~width:(width + 1) (width - twos) in
-    create base ~step ~cardn
-
-
-let is_infinite (p : t) : bool = p.is_inf
-
-
-let bottom (width : int) : t =
-  assert(width > 0);
-  create ~width W.b0 ~cardn:W.b0
-
-(* Cached per width. *)
-let top_cache : (int, t) Hashtbl.t = Hashtbl.create 16
-
-let top (i : int) : t =
-  assert(i > 0);
-  match Hashtbl.find_opt top_cache i with
-  | Some t -> t
-  | None ->
-    let t = infinite (W.zero i, W.one i) in
-    Hashtbl.add top_cache i t;
-    t
 
 
 
@@ -183,20 +231,47 @@ let nearest_inf_succ (w : word) (base : word) (step : word) : word =
   W.lnot (nearest_inf_pred (W.lnot w) (W.lnot base) step)
 
 let max_elem (p : t) : word option =
-  let max_wd = W.ones (bitwidth p) in
-  nearest_pred max_wd p
+  if is_bottom p then None
+  else match p.dir with
+  | Finite ->
+    let max_wd = W.ones (bitwidth p) in
+    nearest_pred max_wd p
+  | Ascending ->
+    let max_wd = W.ones (bitwidth p) in
+    let diff = W.sub max_wd p.base in
+    let rem = if W.is_zero p.step then W.zero (bitwidth p) else W.modulo diff p.step in
+    Some (W.sub max_wd rem)
+  | Descending -> Some p.base
+  | Circular ->
+    let max_wd = W.ones (bitwidth p) in
+    nearest_pred max_wd p
 
 let min_elem (p : t) : word option =
-  let min_wd = W.zero (bitwidth p) in
-  nearest_succ min_wd p
+  if is_bottom p then None
+  else match p.dir with
+  | Finite ->
+    let min_wd = W.zero (bitwidth p) in
+    nearest_succ min_wd p
+  | Ascending -> Some p.base
+  | Descending ->
+    if W.is_zero p.step then Some p.base else Some (W.modulo p.base p.step)
+  | Circular ->
+    let min_wd = W.zero (bitwidth p) in
+    nearest_succ min_wd p
 
 (* Max signed element. *)
 let max_elem_signed (p : t) : word option =
-  nearest_pred (W.pred (half (bitwidth p))) p
+  if is_bottom p then None
+  else match p.dir with
+  | Descending -> Some p.base
+  | _ -> nearest_pred (W.pred (half (bitwidth p))) p
 
 (* Min signed element. *)
 let min_elem_signed (p : t) : word option =
-  nearest_succ (half (bitwidth p)) p
+  if is_bottom p then None
+  else match p.dir with
+  | Ascending -> Some p.base
+  | _ -> nearest_succ (half (bitwidth p)) p
 
 let splits_by (p : t) (w : word) : bool =
   let divides a b = W.is_zero (W.modulo b a) in
@@ -222,8 +297,6 @@ let elem (i : word) (p : t) : bool =
 (* Top test via coprime step. *)
 let is_top (p : t) : bool = p = top (bitwidth p)
 
-(* Empty test. *)
-let is_bottom (p : t) : bool = W.is_zero (cardn_of p)
 
 (* Equivalence; faster than subset. *)
 let equal (p1 : t) (p2 : t) : bool =
@@ -277,7 +350,25 @@ let interval_union (a1,b1) (a2,b2) : (word * word) =
 
 (* Rotate without changing step/cardinality. *)
 let translate (p : t) i : t =
-  create (W.add (base_of p) i) ~step:(step_of p) ~cardn:(cardn_of p)
+  let width = bitwidth p in
+  assert (W.bitwidth i = width);
+  if is_bottom p then p
+  else
+    let new_base = W.add (base_of p) i in
+    match p.dir with
+    | Finite -> create ~width new_base ~step:(step_of p) ~cardn:(cardn_of p)
+    | Ascending ->
+      if W.(<) new_base (base_of p) && W.(>) i (W.zero width) then
+        infinite (new_base, step_of p)
+      else
+        create_ascending ~width ~base:new_base ~step:(step_of p)
+    | Descending ->
+      if W.(>) new_base (base_of p) && W.(<) new_base i then
+        infinite (new_base, step_of p)
+      else
+        create_descending ~width ~base:new_base ~step:(step_of p)
+    | Circular ->
+      infinite (new_base, step_of p)
 
 (* Largest step covering both progressions. *)
 let common_step (b1,s1) (b2,s2) : word =
@@ -287,83 +378,286 @@ let common_step (b1,s1) (b2,s2) : word =
   else let gcdS = (bounded_gcd s1 s2) in
     bounded_gcd gcdS bDiff
 
+let subset_finite (p1 : t) (p2 : t) : bool =
+  let width = bitwidth p1 in
+  let nb2 = W.neg (base_of p2) in
+  let p1 = translate p1 nb2 in
+  let p2 = translate p2 nb2 in
+  let end1 = finite_end p1 and end2 = finite_end p2 in
+  begin match end1, end2 with
+  | None, _ -> true
+  | Some _, None -> false
+  | Some e1, Some e2 ->
+    let in_bounds = W.(<=) e1 e2 && W.(<=) (base_of p1) e2 in
+    let step_and_overlap = W.(=) (common_step ((base_of p1),(step_of p1)) (W.zero width, (step_of p2))) (step_of p2) in
+    let singleton_elem = is_one (cardn_of p1) && elem (base_of p1) p2 in
+    singleton_elem || (in_bounds && step_and_overlap)
+  end
+
 (* Subset order. *)
 let subset (p1 : t) (p2 : t) : bool =
-  (* Width mismatch compares false. *)
   if bitwidth p1 <> bitwidth p2 then false
+  else if is_bottom p1 then true
+  else if is_bottom p2 then false
+  else if p1 == p2 || equal p1 p2 then true
   else
-    let width = bitwidth p1 in
-    let nb2 = W.neg (base_of p2) in
-      let p1 = translate p1 nb2 in
-      let p2 = translate p2 nb2 in
-      let end1 = finite_end p1 and end2 = finite_end p2 in
-      begin match end1, end2 with
-      | None, _ -> true
-      | Some _, None -> false
-      | Some e1, Some e2 ->
-        let in_bounds = W.(<=) e1 e2 && W.(<=) (base_of p1) e2 in
-        let step_and_overlap = W.(=) (common_step ((base_of p1),(step_of p1)) (W.zero width, (step_of p2))) (step_of p2) in
-        let singleton_elem = is_one (cardn_of p1) && elem (base_of p1) p2 in
-        singleton_elem || (in_bounds && step_and_overlap)
+    let divides a b =
+      if W.is_zero a then W.is_zero b
+      else if W.is_zero b then true
+      else W.is_zero (W.modulo b a)
+    in
+    match p1.dir, p2.dir with
+    | Finite, Finite -> subset_finite p1 p2
+    | Finite, Ascending ->
+      (match min_elem p1, max_elem p1 with
+       | Some lo1, _ ->
+         W.(>=) lo1 p2.base &&
+         divides p2.step (step_of p1) &&
+         W.is_zero (W.modulo (W.sub lo1 p2.base) p2.step)
+       | _ -> false)
+    | Finite, Descending ->
+      (match min_elem p1, max_elem p1 with
+       | _, Some hi1 ->
+         W.(<=) hi1 p2.base &&
+         divides p2.step (step_of p1) &&
+         W.is_zero (W.modulo (W.sub p2.base hi1) p2.step)
+       | _ -> false)
+    | Ascending, Ascending ->
+      W.(>=) p1.base p2.base &&
+      divides p2.step p1.step &&
+      W.is_zero (W.modulo (W.sub p1.base p2.base) p2.step)
+    | Descending, Descending ->
+      W.(<=) p1.base p2.base &&
+      divides p2.step p1.step &&
+      W.is_zero (W.modulo (W.sub p2.base p1.base) p2.step)
+    | _, Circular ->
+      divides p2.step (step_of p1) &&
+      W.is_zero (W.modulo (W.sub (base_of p1) p2.base) p2.step)
+    | Circular, _ -> false
+    | (Ascending | Descending), Finite -> false
+    | Ascending, Descending | Descending, Ascending -> false
+
+let safe_lcm s1 s2 =
+  try
+    let step = W.lcm_exn s1 s2 in
+    if W.is_zero step then None else Some step
+  with _ -> None
+
+let solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound =
+  match safe_lcm s1 s2 with
+  | None -> None
+  | Some step ->
+    match bounded_diophantine s1 s2 (W.sub lo2 lo1) with
+    | None -> None
+    | Some (u, _) ->
+      let x0 = W.add lo1 (W.mul u s1) in
+      let x =
+        if W.(<) x0 min_bound then
+          let diff = W.sub min_bound x0 in
+          let q = W.div diff step in
+          let r = W.modulo diff step in
+          let k = if W.is_zero r then q else W.succ q in
+          W.add x0 (W.mul k step)
+        else
+          let diff = W.sub x0 min_bound in
+          let q = W.div diff step in
+          W.sub x0 (W.mul q step)
+      in
+      if W.(<) x min_bound then None
+      else Some (x, step)
+
+let solve_last_point_le ~lo1 ~s1 ~lo2 ~s2 ~max_bound =
+  match safe_lcm s1 s2 with
+  | None -> None
+  | Some step ->
+    match bounded_diophantine s1 s2 (W.sub lo2 lo1) with
+    | None -> None
+    | Some (u, _) ->
+      let x0 = W.add lo1 (W.mul u s1) in
+      let x =
+        if W.(>) x0 max_bound then
+          let diff = W.sub x0 max_bound in
+          let q = W.div diff step in
+          let r = W.modulo diff step in
+          let k = if W.is_zero r then q else W.succ q in
+          W.sub x0 (W.mul k step)
+        else
+          let diff = W.sub max_bound x0 in
+          let q = W.div diff step in
+          W.add x0 (W.mul q step)
+      in
+      if W.(>) x max_bound then None
+      else Some (x, step)
+
+let solve_grid_interval ~width ~lo1 ~s1 ~lo2 ~s2 ~min_bound ~max_bound : t =
+  if W.(>) min_bound max_bound then bottom width
+  else if W.is_zero s1 && W.is_zero s2 then
+    if W.(=) lo1 lo2 && W.(>=) lo1 min_bound && W.(<=) lo1 max_bound then
+      create ~width lo1
+    else bottom width
+  else if W.is_zero s1 then
+    if W.(>=) lo1 min_bound && W.(<=) lo1 max_bound &&
+       W.is_zero (W.modulo (W.sub lo1 lo2) s2) then
+      create ~width lo1
+    else bottom width
+  else if W.is_zero s2 then
+    if W.(>=) lo2 min_bound && W.(<=) lo2 max_bound &&
+       W.is_zero (W.modulo (W.sub lo2 lo1) s1) then
+      create ~width lo2
+    else bottom width
+  else
+    match solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound with
+    | None -> bottom width
+    | Some (x, step) ->
+      if W.(>) x max_bound then bottom width
+      else
+        let diff_hi = W.sub max_bound x in
+        let rem = W.modulo diff_hi step in
+        let hi' = W.sub max_bound rem in
+        let cardn = cardn_from_bounds x step hi' in
+        create x ~step ~cardn
+
+let solve_ascending_ascending ~width (p1 : t) (p2 : t) ~min_bound : t =
+  if W.is_zero p1.step then
+    (if elem p1.base p2 && W.(>=) p1.base min_bound then create ~width p1.base else bottom width)
+  else if W.is_zero p2.step then
+    (if elem p2.base p1 && W.(>=) p2.base min_bound then create ~width p2.base else bottom width)
+  else
+    match solve_first_point_ge ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound with
+    | None -> bottom width
+    | Some (x, step) -> create_ascending ~width ~base:x ~step
+
+let solve_descending_descending ~width (p1 : t) (p2 : t) ~max_bound : t =
+  if W.is_zero p1.step then
+    (if elem p1.base p2 && W.(<=) p1.base max_bound then create ~width p1.base else bottom width)
+  else if W.is_zero p2.step then
+    (if elem p2.base p1 && W.(<=) p2.base max_bound then create ~width p2.base else bottom width)
+  else
+    match solve_last_point_le ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~max_bound with
+    | None -> bottom width
+    | Some (x, step) -> create_descending ~width ~base:x ~step
+
+let solve_ascending_circular ~width (asc : t) (circ : t) : t =
+  if W.is_zero asc.step then
+    (if elem asc.base circ then create ~width asc.base else bottom width)
+  else if W.is_zero circ.step then bottom width
+  else
+    match solve_first_point_ge ~lo1:asc.base ~s1:asc.step ~lo2:circ.base ~s2:circ.step ~min_bound:asc.base with
+    | None -> bottom width
+    | Some (x, step) -> create_ascending ~width ~base:x ~step
+
+let solve_descending_circular ~width (desc : t) (circ : t) : t =
+  if W.is_zero desc.step then
+    (if elem desc.base circ then create ~width desc.base else bottom width)
+  else if W.is_zero circ.step then bottom width
+  else
+    match solve_last_point_le ~lo1:desc.base ~s1:desc.step ~lo2:circ.base ~s2:circ.step ~max_bound:desc.base with
+    | None -> bottom width
+    | Some (x, step) -> create_descending ~width ~base:x ~step
+
+let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
+  let width = bitwidth p1 in
+  let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
+  let translation = (base_of p1) in
+  let translated_p1 = translate p1 (W.neg (base_of p1)) in
+  let translated_p2 = translate p2 (W.neg (base_of p1)) in
+  let p1, p2 = translated_p1, translated_p2 in
+  let p1_infinite = is_infinite p1 in
+  let p2_infinite = is_infinite p2 in
+  let open Monads.Std.Monad.Option.Syntax in
+  (match begin
+    finite_end p1 >>= fun e1 ->
+    finite_end p2 >>= fun e2 ->
+      let step = W.lcm_exn (step_of p1) (step_of p2) in
+      if W.is_zero step then begin
+        (* Singleton case: exact or empty. *)
+        if W.is_zero (step_of p2) then
+          Option.some_if (elem (base_of p2) p1) () >>= fun _ ->
+          !!(create (base_of p2))
+        else
+          Option.some_if (elem (base_of p1) p2) () >>= fun _ ->
+          !! (create (base_of p1))
+      end else begin
+        bounded_diophantine (step_of p1) (step_of p2) (base_of p2) >>= fun (x,_) ->
+        let base = W.mul x (step_of p1) in
+        let base =
+          if p2_infinite then base
+          else match min_elem p2 with
+            | None -> base
+            | Some m when W.(<) base m ->
+              let w1 = width + 1 in
+              let d = W.extract_exn ~hi:width (W.sub m base) in
+              let s = W.extract_exn ~hi:width step in
+              let q = W.div d s in
+              let r = W.modulo d s in
+              let k = if W.is_zero r then q else W.succ q in
+              let up = W.add (W.extract_exn ~hi:width base) (W.mul k s) in
+              if W.(>=) up (dom_size ~width:w1 width) then W.ones width else W.extract_exn ~hi:(width - 1) up
+            | Some _ -> base in
+        let minE = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
+        if W.(<=) base minE then begin
+          let cardn = cardn_from_bounds base step minE in
+          !!(create base ~step ~cardn)
+        end else begin
+          let safe_operand = if subset p1 p2 then p2 else if subset p2 p1 then p1 else if W.(>=) (cardinality p1) (cardinality p2) then p1 else p2 in
+          !!safe_operand
+        end
       end
+  end with
+  | None -> bottom width
+  | Some x -> x) |> (fun p -> translate p translation)
 
 (* First common point of both progressions. *)
-let intersection (p1 : t) (p2 : t) : t =
+let rec intersection (p1 : t) (p2 : t) : t =
   (* Width mismatch returns the wider operand. *)
   if bitwidth p1 <> bitwidth p2 then
     (if bitwidth p1 > bitwidth p2 then p1 else p2)
   else
     let width = bitwidth p1 in
-    let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
-    
-    let translation = (base_of p1) in
-    let translated_p1 = translate p1 (W.neg (base_of p1)) in
-    let translated_p2 = translate p2 (W.neg (base_of p1)) in
-    let p1, p2 = translated_p1, translated_p2 in
-    let p1_infinite = is_infinite p1 in
-    let p2_infinite = is_infinite p2 in
-    let open Monads.Std.Monad.Option.Syntax in
-    (match begin
-      finite_end p1 >>= fun e1 ->
-      finite_end p2 >>= fun e2 ->
-        let step = W.lcm_exn (step_of p1) (step_of p2) in
-        if W.is_zero step then begin
-          (* Singleton case: exact or empty. *)
-          if W.is_zero (step_of p2) then
-            Option.some_if (elem (base_of p2) p1) () >>= fun _ ->
-            !!(create (base_of p2))
-          else
-            Option.some_if (elem (base_of p1) p2) () >>= fun _ ->
-            !! (create (base_of p1))
-        end else begin
-          bounded_diophantine (step_of p1) (step_of p2) (base_of p2) >>= fun (x,_) ->
-          let base = W.mul x (step_of p1) in
-          let base =
-            if p2_infinite then base
-            else match min_elem p2 with
-              | None -> base
-              | Some m when W.(<) base m ->
-                let w1 = width + 1 in
-                let d = W.extract_exn ~hi:width (W.sub m base) in
-                let s = W.extract_exn ~hi:width step in
-                let q = W.div d s in
-                let r = W.modulo d s in
-                let k = if W.is_zero r then q else W.succ q in
-                let up = W.add (W.extract_exn ~hi:width base) (W.mul k s) in
-                if W.(>=) up (dom_size ~width:w1 width) then W.ones width else W.extract_exn ~hi:(width - 1) up
-              | Some _ -> base in
-          let minE = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
-          if W.(<=) base minE then begin
-            let cardn = cardn_from_bounds base step minE in
-            !!(create base ~step ~cardn)
-          end else begin
-            let safe_operand = if subset p1 p2 then p2 else if subset p2 p1 then p1 else if W.(>=) (cardinality p1) (cardinality p2) then p1 else p2 in
-            !!safe_operand
-          end
-        end
-    end with
-    | None -> bottom width
-    | Some x -> x) |> (fun p -> translate p translation)
+    if is_bottom p1 || is_bottom p2 then bottom width
+    else if is_top p1 then p2
+    else if is_top p2 then p1
+    else if equal p1 p2 then p1
+    else match p1.dir, p2.dir with
+    | Finite, Finite -> intersection_finite_or_circular p1 p2
+    | Circular, Circular -> intersection_finite_or_circular p1 p2
+    | Ascending, Finite ->
+      (match min_elem p2, max_elem p2 with
+       | Some lo2, Some hi2 ->
+         let min_bound = W.max p1.base lo2 in
+         solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:(step_of p2) ~min_bound ~max_bound:hi2
+       | _ -> bottom width)
+    | Finite, Ascending -> intersection p2 p1
+    | Descending, Finite ->
+      (match min_elem p2, max_elem p2 with
+       | Some lo2, Some hi2 ->
+         let max_bound = W.min p1.base hi2 in
+         solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:(step_of p2) ~min_bound:lo2 ~max_bound
+       | _ -> bottom width)
+    | Finite, Descending -> intersection p2 p1
+    | Ascending, Ascending ->
+      let min_bound = W.max p1.base p2.base in
+      solve_ascending_ascending ~width p1 p2 ~min_bound
+    | Descending, Descending ->
+      let max_bound = W.min p1.base p2.base in
+      solve_descending_descending ~width p1 p2 ~max_bound
+    | Ascending, Descending ->
+      if W.(>) p1.base p2.base then bottom width
+      else
+        solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound:p1.base ~max_bound:p2.base
+    | Descending, Ascending -> intersection p2 p1
+    | Ascending, Circular ->
+      solve_ascending_circular ~width p1 p2
+    | Circular, Ascending -> intersection p2 p1
+    | Descending, Circular ->
+      solve_descending_circular ~width p1 p2
+    | Circular, Descending -> intersection p2 p1
+    | Finite, Circular ->
+      (match min_elem p1, max_elem p1 with
+       | Some lo1, Some hi1 ->
+         solve_grid_interval ~width ~lo1:p1.base ~s1:(step_of p1) ~lo2:p2.base ~s2:p2.step ~min_bound:lo1 ~max_bound:hi1
+       | _ -> bottom width)
+    | Circular, Finite -> intersection p2 p1
 
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
@@ -386,7 +680,21 @@ let diff (p1 : t) (p2 : t) : t =
         | Some i_end ->
           let cardn = W.sub (cardn_of p1) (cardn_of i) in
           if W.is_zero cardn then bottom (bitwidth p1)
-          else if is_infinite p1 then
+          else if is_ascending p1 then
+            match min_elem i with
+            | Some i_lo when W.(=) i_lo p1.base ->
+              let new_base = W.add i_end (step_of p1) in
+              if Word.(<) new_base i_end then bottom (bitwidth p1)
+              else create_ascending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
+            | _ -> p1
+          else if is_descending p1 then
+            match min_elem i with
+            | Some i_lo when W.(=) i_end p1.base ->
+              let new_base = W.sub i_lo (step_of p1) in
+              if Word.(>) new_base i_lo then bottom (bitwidth p1)
+              else create_descending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
+            | _ -> p1
+          else if is_circular p1 then
             (* Wrapping remainder. *)
             create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
           else
@@ -404,17 +712,55 @@ let diff (p1 : t) (p2 : t) : t =
 
 
 (* Union; same width expected. *)
-let union (p1 : t) ( p2 : t) : t =
+let union (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
   else
-  Option.value_map ~default:p2 (finite_end p1) ~f:begin fun e1 ->
-      Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
-        let base, newE = interval_union ((base_of p1), e1) ((base_of p2), e2) in
-        let step = common_step ((base_of p1), (step_of p1)) ((base_of p2), (step_of p2)) in
-        let cardn = cardn_from_bounds base step newE in
-        create base ~step ~cardn
+    let width = bitwidth p1 in
+    if is_bottom p1 then p2
+    else if is_bottom p2 then p1
+    else if is_top p1 || is_top p2 then top width
+    else if equal p1 p2 then p1
+    else match p1.dir, p2.dir with
+    | Finite, Finite ->
+      Option.value_map ~default:p2 (finite_end p1) ~f:begin fun e1 ->
+        Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
+          let base, newE = interval_union ((base_of p1), e1) ((base_of p2), e2) in
+          let step = common_step ((base_of p1), (step_of p1)) ((base_of p2), (step_of p2)) in
+          let cardn = cardn_from_bounds base step newE in
+          create base ~step ~cardn
+        end
       end
-    end
+    | Ascending, Ascending ->
+      let base = W.min p1.base p2.base in
+      let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
+      create_ascending ~width ~base ~step
+    | Descending, Descending ->
+      let base = W.max p1.base p2.base in
+      let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
+      create_descending ~width ~base ~step
+    | Ascending, Finite ->
+      let lo2 = Option.value (min_elem p2) ~default:p2.base in
+      let base = W.min p1.base lo2 in
+      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
+      create_ascending ~width ~base ~step
+    | Finite, Ascending ->
+      let lo1 = Option.value (min_elem p1) ~default:p1.base in
+      let base = W.min lo1 p2.base in
+      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
+      create_ascending ~width ~base ~step
+    | Descending, Finite ->
+      let hi2 = Option.value (max_elem p2) ~default:p2.base in
+      let base = W.max p1.base hi2 in
+      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
+      create_descending ~width ~base ~step
+    | Finite, Descending ->
+      let hi1 = Option.value (max_elem p1) ~default:p1.base in
+      let base = W.max hi1 p2.base in
+      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
+      create_descending ~width ~base ~step
+    | _ ->
+      let step = common_step (base_of p1, step_of p1) (base_of p2, step_of p2) in
+      infinite (base_of p1, step)
 
 let add (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
@@ -1071,15 +1417,29 @@ let join = union
 let meet = intersection
 
 
-let widen_join (p1 : t) (p2 : t) =
+let widen_join (p1 : t) (p2 : t) : t =
   (* Widening needs an ascending chain. *)
   (* Bottom-to-singleton widens to top. *)
   if is_bottom p1 then top (bitwidth p2)
   else if subset p1 p2 then
     if equal p1 p2 then p1 else
+    let width = bitwidth p2 in
     let step = step_of p2 in
-    if W.is_zero step then top (bitwidth p2)
-    else infinite ((base_of p2), step)
+    if W.is_zero step then top width
+    else
+      match min_elem p1, max_elem p1, min_elem p2, max_elem p2 with
+      | Some lo1, Some hi1, Some lo2, Some hi2 ->
+        let lo_stable = W.(=) lo1 lo2 in
+        let hi_stable = W.(=) hi1 hi2 in
+        let hi_grew = W.(>) hi2 hi1 in
+        let lo_grew = W.(<) lo2 lo1 in
+        if lo_stable && hi_grew then
+          create_ascending ~width ~base:lo1 ~step
+        else if hi_stable && lo_grew then
+          create_descending ~width ~base:hi1 ~step
+        else
+          infinite ((base_of p2), step)
+      | _ -> infinite ((base_of p2), step)
   else join p1 p2
 
 let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
@@ -1143,10 +1503,12 @@ let compare (p1 : t) (p2 : t) : int =
   let base_comp = W.compare (base_of p1) (base_of p2) in
   let step_comp = W.compare (step_of p1) (step_of p2) in
   let cardn_comp = W.compare (cardn_of p1) (cardn_of p2) in
+  let dir_comp = compare_direction p1.dir p2.dir in
   let if_nzero_else a b = if a = 0 then b else a in
   if_nzero_else base_comp @@
   if_nzero_else step_comp @@
-  cardn_comp
+  if_nzero_else cardn_comp @@
+  dir_comp
 
 
 let sexp_of_t (p : t) : Sexp.t =
