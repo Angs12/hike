@@ -532,42 +532,54 @@ let frame_value_def (sp : var) (fp : var option) (d : def term) :
   && (not (is_sp_or_fp sp fp lhs))
   && exp_contains_sp sp fp (Def.rhs d)
 
-let rec var_maybe_addr (env : exp Var.Map.t) (sp : var)
-    (fp : var option) (v : var) (e : exp) : bool =
+(* Address mentions any frame-derived var: [var_maybe_addr]'s per-pair
+   test lifted to a target set, so one address walk serves all targets
+   with early exit. Exactly equivalent at our call site: every target
+   comes from [frame_value_def], which excludes sp/fp lhs, so the old
+   sp/fp cross-match arm is dead; what remains is base-name equality,
+   and [Var.same x y = equal (base x) (base y)] makes set membership on
+   base vars exact. *)
+let rec addr_mentions_any (env : exp Var.Map.t) (targets : Var.Set.t)
+    (e : exp) : bool =
   match e with
   | Bil.Var w ->
-      (is_sp_or_fp sp fp w && is_sp_or_fp sp fp v)
-      || Var.same (Var.base w) (Var.base v)
+      Core.Set.mem targets (Var.base w)
       ||
       (match Core.Map.find env (Var.base w) with
-      | Some e' -> var_maybe_addr env sp fp v e'
+      | Some e' -> addr_mentions_any env targets e'
       | None -> false)
   | Bil.Ite (_, t, f) ->
-      var_maybe_addr env sp fp v t
-      || var_maybe_addr env sp fp v f
+      addr_mentions_any env targets t
+      || addr_mentions_any env targets f
   | Bil.Let (x, e1, e2) ->
       let env' = Core.Map.set env ~key:x ~data:e1 in
-      var_maybe_addr env' sp fp v e2
+      addr_mentions_any env' targets e2
   | Bil.Cast (_, _, e') | Bil.Extract (_, _, e') ->
-      var_maybe_addr env sp fp v e'
+      addr_mentions_any env targets e'
   | _ -> false
 
 (* Tests for reads through a materialized frame pointer. *)
 let frame_addr_alias (sp : var) (target : Theory.Target.t) (sub : sub term) :
     bool =
-  (* Frame pointer, resolved once for the per-def-pair scan below. *)
+  (* Frame pointer, resolved once for the scan below. *)
   let fp = fp_of target in
   let defs =
     Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list
   in
-  Base.List.exists defs ~f:(fun d ->
-      frame_value_def sp fp d
-      &&
-      let v = Def.lhs d in
-      Base.List.exists defs ~f:(fun d2 ->
-          match addr_of_rhs (Def.rhs d2) with
-          | Some (addr, _) -> var_maybe_addr Var.Map.empty sp fp v addr
-          | None -> false))
+  (* Frame-derived lhs vars (base), collected once. The old shape nested
+     the per-pair predicate inside the per-match scan (quadratic in the
+     number of matches times mem-address defs). *)
+  let frame_vars =
+    Base.List.fold_left defs ~init:Var.Set.empty ~f:(fun s d ->
+        if frame_value_def sp fp d then Core.Set.add s (Var.base (Def.lhs d))
+        else s)
+  in
+  if Core.Set.is_empty frame_vars then false
+  else
+    Base.List.exists defs ~f:(fun d ->
+        match addr_of_rhs (Def.rhs d) with
+        | Some (addr, _) -> addr_mentions_any Var.Map.empty frame_vars addr
+        | None -> false)
 
 (* Tests whether a VLA overlaps a convertible region. *)
 let vla_overlaps_convertible (info : Convutils.vsa_info)
