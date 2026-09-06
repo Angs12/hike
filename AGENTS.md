@@ -232,7 +232,10 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
    (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn`) with the var-free target so the
    popped-address def dies, then sweeps never-used defs to a fixpoint (the emitter emits a
    real LLVM `ret` regardless)
-6. `hike-convlir` — emits LLVM via `bil2llvm.ml`
+6. `hike-convlir` — emits LLVM via `bil2llvm.ml` through the ONE seam
+   `Bil2llvm.emit_program` (sig-collection + declarations + bodies all
+   inside; the KB context vars are internal — see `src/bil2llvm.mli` and
+   CONTEXT.md's Emission Entry)
 
 Tags are Tid-keyed and computed before emission; pass deps must stay prefixed (`hike-...`).
 
@@ -409,6 +412,81 @@ LLVM allocas / static variables — it should work on EVERY binary.
   for the optimizability program.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-07 EEST — THE EMITTER SEAM (branch `emit-seam`, 3
+commits `f963617`+`3ca542a`+`ed123a8`, off main @ `2e06efb`, worktree
+`/home/tovpr/backup/hike-emit`) — FULL BATTERY GREEN AT EVERY STEP, corpus
+IR BYTE-IDENTICAL 32/32, and the emitter gains its first unit seam: 75
+checks, ~29 of the 32 incident-class behaviors now pinned in the suite**
+
+The lane (grilling-settled 2026-09-06, 16 questions): bil2llvm.ml had 255
+visible lets, zero `.mli`, and exactly ONE (`degraded_dims`) reachable from
+the suite — every emitter regression shipped to the slow corpus gates or to
+hand-grepping emissions (the 2026-09-02 FP-table drop survived a green
+battery; only an emission grep caught it). Three commits, each gated on IR
+byte-identity vs a pre-lane control:
+
+- **1 (f963617): the fold.** `init_subs` + `compute_sub_sig` move from
+  hike.ml into bil2llvm.ml; the KB-var threading (`emit_ctx_var`/
+  `llvm_ctx_var`/`llvm_module_var`/`section_list_var`) and `create_fun`
+  declarations become internal. The new entry `Bil2llvm.emit_program
+  llvm_ctx llvm_module ~target ~ptrsize ~symtab ~text_section
+  ~section_remap ~copy_relocs sections prog` populates the ctx itself and
+  runs BOTH passes (sig-collection, body emission) inside. The intrinsic
+  predicates (`is_intrinsic`/`is_emittable_intrinsic`/
+  `is_llvm_x86_intrinsic`) are owned by the emitter now; hike.ml's filter
+  aliases them (one classification, two consumers). Section initializers
+  stay caller-side (they need the Project; `lookup_native_fn` reads only
+  the symtab, so the reordering is provably inert).
+- **2 (3ca542a): `src/bil2llvm.mli`.** The emitter's public surface drops
+  255 lets → 12 vals: `emit_program`, the section/global helpers
+  (`create_section_global`, `set_section_initializer`,
+  `create_uninitialized_global`, `create_copy_reloc_bss`), the FP
+  classification (`native_fp_op` + the `native_fp` type), `is_plt_trampoline`,
+  `degraded_dims`, and the three intrinsic facts. `hike.mli`'s
+  `module Bil2llvm = Bil2llvm` re-export now carries the constrained view.
+- **3 (ed123a8): `test_cbat/test_bil2llvm.ml`** — 75 checks driving the
+  REAL emitter over hand-built BIR (Theory.Target.unknown + ptrsize:64),
+  asserting on textual IR (`Llvm.string_of_llmodule`, the check_allocas
+  idiom): FP-TABLE every row (26/26 resolve; fadd_64/sfloat/sint/forder/
+  isnan/hlt emission fixtures assert the NATIVE op, not a soft-float call —
+  the c484e13 merge-drop class now caught in `dune runtest`), the
+  warned-poison regime (Unbounded warns via Hike_diag and still emits;
+  Dead → poison value, no warning), SP-RESTORE (+8 present, the L-E1e
+  class), CAST (the narrowing cast survives at the tagged store), and an
+  8-check substring-complete GOLDEN (load/store/icmp/br/ret/alloca/i64).
+  Fixture grammar learned (recorded in the test header): jmp targets must
+  be REAL blocks; call returns target a materialized continuation; a
+  conditional needs cond-Goto + fallthrough-Goto (a `Ret` with `~cond` is
+  not a branch); `capture_stderr` needed a `flush stderr` (the
+  Hike_diag eprintf buffer raced the fd swap).
+- **The ABI totality rider (settled mid-lane):** the first emission
+  fixture crashed `Abi.of_target`/`sp`/`pc` on `Theory.Target.unknown` —
+  the totality that existed only in hike_dce's local `abi_of` (C4,
+  2026-09-02) is now at the ROOT: `Hike_abi.of_target`/`sp`/`fp` fall
+  back to the `x86_64_sysv` record, `pc` returns a synthetic RIP. Real
+  targets return the same record as before (byte-identity proves it);
+  only the unknown-target crash path changed — which production never
+  reaches (bap always supplies the ELF's target).
+
+| Gate | Result |
+|---|---|
+| unit suite | `dune runtest --force` **542 ok, 0 FAIL** (467 baseline + 75 net — every new check is the emitter wing) ✅ |
+| corpus emission | **32/32 rc=0**, err streams identical ✅ |
+| **IR byte-identity vs pre-lane control** | **IDENTICAL 32/32** at EACH of the three commits ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (all) | **30 PASS, 2 FAIL** (va_arg_vacopy + variadic, T02/T03 knowns) ✅ |
+| optimization-safety (opt) | **30 PASS, 2 FAIL** — identical class to -O0 ✅ |
+| semantics (8-bin) | **8/8 PASS** ✅ |
+| probes | precision_probe factorial/alloca_vla + corpus_watch array_local — **PASS, 0 crashes** ✅ |
+| unmapped FP intrinsics in corpus | **0** (the wing's unit-level twin also pins it) ✅ |
+
+CONTEXT.md gains the **Emission Entry (`emit_program`)** term under the new
+"Emitter" section (the avoid-list names the pre-seam shapes: `create_prog`,
+caller-side `init_subs`, reaching the emitter's KB vars). AGENTS.md's pass
+pipeline + "Running the test probes" sections updated by this lane; the
+dce-test gotchas entry about `Tid.for_name` (mapped-intrinsic call targets)
+is new test vocabulary. Control + emissions: `/tmp/opencode/emit-lane/`.
 
 **Last verified: 2026-09-05 EEST — C8 WORKLIST DRIVER (branch `c8-worklist`,
 tickets 01+02 = commits `9784985`+`c99777c`) — BATTERY GREEN, corpus IR
@@ -1444,6 +1522,19 @@ runs lifted vs native, and byte-diffs stdout.  Needs `llc` + `gcc`.
 
 ## Gotchas
 
+- **Emitter fixture grammar (test_bil2llvm.ml, 2026-09-07):** hand-built BIR
+  that the EMITTER consumes must be CFG-honest, unlike dce/vsa fixtures:
+  (1) every `Goto`/`Call ~return` target must be a REAL block of the sub —
+  `Blk.Builder.create` mints its own tid, so build the target block FIRST and
+  use `Term.tid blk_result` (a fresh `Tid.create ()` dangles and dies in
+  `bb_find_exn`/`blk_llvals`); (2) a conditional is cond-`Goto` +
+  fallthrough-`Goto` (a `Ret` carrying `~cond` is not a branch —
+  `create_branches` calls `goto_label_exn` on the second jmp); (3) the
+  terminal `Ret (Direct tid)` never resolves its label (safe to mint fresh);
+  (4) mapped-intrinsic call targets are `Tid.for_name "intrinsic:<name>"`
+  (round-trips as `@intrinsic:<name>`; `fp_intrinsic_name` strips the `@`);
+  (5) `capture_stderr` asserts on STDERR — hold the IR in a ref if a check
+  needs both (the helper returns the captured text, not the emission).
 - `hike_vsa_relevance.ml` is single-sourced (R8, 2026-08-19): `src/` (production,
   the restored two-pass D-2f tagger) is the ONLY copy.  `test_cbat/` and the
   `zz_scratch_probe/` debug probes link the wrapped `hike` library and reach it via

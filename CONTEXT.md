@@ -42,6 +42,11 @@ _Avoid_: partitioned state, per-edge view
 
 **100% VSA Tagging Invariant (structural)**: A Load/Store def is a Stack Access iff it carries a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). The classification is one mechanism — there is no second tag to diverge from it.
 
+### Emitter
+
+**Emission Entry (`emit_program`)**: The emitter's single public operation: given a program term and the target-derived facts (target, pointer size, symbol table, text section, section remap, copy relocations, section list), it populates the emitter state and performs both internal passes — signature collection (the sub declarations) and body emission. Output is the side effect on the caller-owned LLVM module.
+_Avoid_: `create_prog` (the pre-seam name), `init_subs` (the caller-side pre-seam two-pass protocol), reaching the emitter's KB context vars from outside
+
 ### Mem-fission
 
 **Region Mem** (`stack_rN_mem`): the per-region BIL memory var every fissioned access reads/writes — the storage decision carried in the BIL itself. Recognized by name (the fission convention), routed to the region's alloca, and swept by the load-roots DCE rule: a region's stores survive iff some Load reads its var.
