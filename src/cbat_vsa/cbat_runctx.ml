@@ -84,6 +84,9 @@ type refine_ctx = {
   rc_walk_budget : int ref;
   (* Per-block jmp out-edge counts; the budget allowance input. *)
   rc_out_edges : int Tid.Map.t;
+  (* Block terms by tid; the walk's per-pop lookup (a linear Term.find
+     over the sub, ~95M Tid compares per heavy sub). *)
+  rc_blocks : blk term Tid.Map.t;
 }
 
 (* Last understood flag-setting comparison. *)
@@ -287,6 +290,10 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b)
           ~data:(out_edge_count_of_block b));
+  rc_blocks =
+    Term.enum blk_t s
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
+        Core.Map.set m ~key:(Term.tid b) ~data:b);
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =
