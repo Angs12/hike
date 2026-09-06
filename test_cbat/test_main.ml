@@ -12,6 +12,7 @@ let () =
   Test_regression.run_remediation ();
   Test_properties.run_soundness ();
   Test_regression.run_regions ();
+  Test_regression.run_copy_reloc ();
   Test_properties.run_roundtrip ();
   Test_properties.run_landmarks ();
   Test_properties.run_chains ();

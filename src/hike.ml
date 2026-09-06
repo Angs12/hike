@@ -271,6 +271,59 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
   |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) ->
          Int64.compare (Int64.of_int a) (Int64.of_int b))
 
+(* Copy-relocated BSS slots needing fresh values: relocated slots minus
+   slots with an authoritative same-sub store that no load mirrors.
+   Pure in (relocs, program). NOTE: the Load/Store matches below are
+   deliberately top-level-rhs-only — a load nested inside a larger
+   expression (e.g. an address computation) is NOT a slot access. An
+   [Exp.visitor] would fire on nested nodes and silently widen the set. *)
+let copy_reloc_slots ~bss_addr (copy_relocs : (int * string) list)
+    (prog : program term) : int64 list =
+  let all =
+    Base.List.map copy_relocs ~f:(fun (off, _) ->
+        Int64.add bss_addr (Int64.of_int off))
+  in
+  if all = [] then []
+  else
+    let slot_of_addr (v : int64) : bool =
+      Base.List.mem all v ~equal:Int64.equal
+    in
+    (* Per-sub (loads, stores) of relocated slots, in one walk. *)
+    let sub_slots (sub : sub term) : int64 list * int64 list =
+      Term.enum blk_t sub
+      |> Seq.fold ~init:([], []) ~f:(fun (loads, stores) blk ->
+          Term.enum def_t blk
+          |> Seq.fold ~init:(loads, stores) ~f:(fun (loads, stores) d ->
+              match Def.rhs d with
+              | Bil.Load (_, Bil.Int w, _, _) ->
+                  let v = Word.to_int64_exn w in
+                  ((if slot_of_addr v then v :: loads else loads), stores)
+              | Bil.Store (_, Bil.Int w, _, _, _) ->
+                  let v = Word.to_int64_exn w in
+                  (loads, (if slot_of_addr v then v :: stores else stores))
+              | _ -> (loads, stores)))
+    in
+    (* Mirroring is per-sub: a load keeps the through-load only when its
+       own sub stores the same slot. *)
+    let mirrored, stored =
+      Term.enum sub_t prog
+      |> Seq.fold ~init:([], []) ~f:(fun (mirrored, stored) sub ->
+          let loads, stores = sub_slots sub in
+          let mirrored =
+            Base.List.fold_left loads ~init:mirrored ~f:(fun m v ->
+                if Base.List.mem stores v ~equal:Int64.equal then v :: m
+                else m)
+          in
+          (mirrored, stores @ stored))
+    in
+    if stored = [] then all
+    else
+      Base.List.filter all ~f:(fun a ->
+          (* Mirrored slots keep the through-load. *)
+          not
+            (Base.List.mem stored a ~equal:Int64.equal
+            && not (Base.List.mem mirrored a ~equal:Int64.equal)))
+
 
 
 let simplify_jmps sub =
@@ -445,53 +498,7 @@ let convert_binary output_program proj =
   let copy_reloc_addrs_val =
     match bss_region with
     | Some { addr; _ } ->
-       let slot_addr (off, _) = Int64.add addr (Int64.of_int off) in
-       let all = Base.List.map copy_relocs ~f:slot_addr in
-       (* Slots with authoritative writes get fresh values. *)
-       let slot_of_addr (v : int64) : bool =
-         Base.List.mem all v ~equal:Int64.equal
-       in
-       (* Collects slot addresses via shape [f]. *)
-       let sub_def_slot_addrs ~(f : exp -> int64 option) (sub : sub term) =
-         Term.enum blk_t sub |> Seq.to_list
-         |> Base.List.concat_map ~f:(fun blk ->
-             Term.enum def_t blk |> Seq.to_list
-             |> Base.List.filter_map ~f:(fun d -> f (Def.rhs d)))
-       in
-       let slot_loads (sub : sub term) =
-         sub_def_slot_addrs sub ~f:(function
-           | Bil.Load (_, Bil.Int w, _, _) ->
-               let v = Word.to_int64_exn w in
-               if slot_of_addr v then Some v else None
-           | _ -> None)
-       in
-       let slot_stores (sub : sub term) =
-         sub_def_slot_addrs sub ~f:(function
-           | Bil.Store (_, Bil.Int w, _, _, _) ->
-               let v = Word.to_int64_exn w in
-               if slot_of_addr v then Some v else None
-           | _ -> None)
-       in
-       (* Tests for a same-sub load/store mirror. *)
-       let loads_and_stores : int64 list =
-         Term.enum sub_t (Project.program proj) |> Seq.to_list
-         |> Base.List.concat_map ~f:(fun sub ->
-             let stores = slot_stores sub in
-             Base.List.filter (slot_loads sub) ~f:(fun v ->
-                 Base.List.mem stores v ~equal:Int64.equal))
-       in
-       let stores_only : int64 list =
-         Term.enum sub_t (Project.program proj) |> Seq.to_list
-         |> Base.List.concat_map ~f:slot_stores
-       in
-       let authoritative = stores_only in
-       if authoritative = [] then all
-       else
-         Base.List.filter all ~f:(fun a ->
-             (* Mirrored slots keep the through-load. *)
-             not
-               (Base.List.mem authoritative a ~equal:Int64.equal
-               && (not (Base.List.mem loads_and_stores a ~equal:Int64.equal))))
+        copy_reloc_slots ~bss_addr:addr copy_relocs (Project.program proj)
     | None -> []
   in
   let got_section = mk_section GOT ~is_const:true in

@@ -74,3 +74,8 @@ module Convutils = Convutils
 
 (** LLVM emitter. *)
 module Bil2llvm = Bil2llvm
+
+(** Copy-relocated BSS slots needing fresh values, pure in (relocs,
+    program). Exported for direct fixture tests. *)
+val copy_reloc_slots :
+  bss_addr:int64 -> (int * string) list -> program term -> int64 list
