@@ -413,11 +413,11 @@ LLVM allocas / static variables — it should work on EVERY binary.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
-**Last verified: 2026-09-07 EEST — THE EMITTER SEAM (branch `emit-seam`, 3
-commits `f963617`+`3ca542a`+`ed123a8`, off main @ `2e06efb`, worktree
-`/home/tovpr/backup/hike-emit`) — FULL BATTERY GREEN AT EVERY STEP, corpus
-IR BYTE-IDENTICAL 32/32, and the emitter gains its first unit seam: 75
-checks, ~29 of the 32 incident-class behaviors now pinned in the suite**
+**Last verified: 2026-09-07 EEST — THE EMITTER SEAM (branch `emit-seam`, 5
+commits `f963617`+`3ca542a`+`ed123a8`+`152fef2`+`59bbd9c`, off main @
+`2e06efb`, worktree `/home/tovpr/backup/hike-emit`) — FULL BATTERY GREEN
+AT EVERY STEP, corpus IR BYTE-IDENTICAL 32/32, and the emitter gains its
+first unit seam: a 73-check wing, all 26 FP-table rows pinned at EMISSION**
 
 The lane (grilling-settled 2026-09-06, 16 questions): bil2llvm.ml had 255
 visible lets, zero `.mli`, and exactly ONE (`degraded_dims`) reachable from
@@ -445,21 +445,27 @@ byte-identity vs a pre-lane control:
   classification (`native_fp_op` + the `native_fp` type), `is_plt_trampoline`,
   `degraded_dims`, and the three intrinsic facts. `hike.mli`'s
   `module Bil2llvm = Bil2llvm` re-export now carries the constrained view.
-- **3 (ed123a8): `test_cbat/test_bil2llvm.ml`** — 75 checks driving the
-  REAL emitter over hand-built BIR (Theory.Target.unknown + ptrsize:64),
-  asserting on textual IR (`Llvm.string_of_llmodule`, the check_allocas
-  idiom): FP-TABLE every row (26/26 resolve; fadd_64/sfloat/sint/forder/
-  isnan/hlt emission fixtures assert the NATIVE op, not a soft-float call —
-  the c484e13 merge-drop class now caught in `dune runtest`), the
-  warned-poison regime (Unbounded warns via Hike_diag and still emits;
-  Dead → poison value, no warning), SP-RESTORE (+8 present, the L-E1e
-  class), CAST (the narrowing cast survives at the tagged store), and an
-  8-check substring-complete GOLDEN (load/store/icmp/br/ret/alloca/i64).
-  Fixture grammar learned (recorded in the test header): jmp targets must
-  be REAL blocks; call returns target a materialized continuation; a
+- **3 (ed123a8) + review fixes (59bbd9c): `test_cbat/test_bil2llvm.ml`** —
+  a 73-check wing driving the REAL emitter over hand-built BIR
+  (Theory.Target.unknown + ptrsize:64), asserting on textual IR
+  (`Llvm.string_of_llmodule`, the check_allocas idiom): FP-TABLE — every
+  one of the 26 rows pinned at EMISSION (the loop builds arity-correct
+  fixtures; a dropped row fails emission, not just mapping — the c484e13
+  merge-drop class now caught in `dune runtest`); the warned-poison regime
+  (Unbounded warns via Hike_diag and still emits; Dead → poison value, no
+  warning) + the undef-read lane (a never-defined register read warns and
+  becomes undef); SP-RESTORE pinned BY NAME (`%sp_restored = add <pushed>,
+  8` + the continuation's sp phi reads it — the L-E1e class); CAST (the
+  narrowing cast survives at the tagged store); and a 9-check
+  substring-complete GOLDEN whose fission region is pinned by name
+  (`stack_r0` alloca + the region-base GEP lane — singleton Range tags
+  via Kb.provide, the D4 fixture shape).
+  Fixture grammar learned (recorded in the Gotchas entry): jmp targets
+  must be REAL blocks; call returns target a materialized continuation; a
   conditional needs cond-Goto + fallthrough-Goto (a `Ret` with `~cond` is
-  not a branch); `capture_stderr` needed a `flush stderr` (the
-  Hike_diag eprintf buffer raced the fd swap).
+  not a branch); `capture_stderr` needed a `flush stderr` (the Hike_diag
+  eprintf buffer raced the fd swap), and it captures STDERR — hold the IR
+  in a ref when a check needs both.
 - **The ABI totality rider (settled mid-lane):** the first emission
   fixture crashed `Abi.of_target`/`sp`/`pc` on `Theory.Target.unknown` —
   the totality that existed only in hike_dce's local `abi_of` (C4,
@@ -467,11 +473,14 @@ byte-identity vs a pre-lane control:
   back to the `x86_64_sysv` record, `pc` returns a synthetic RIP. Real
   targets return the same record as before (byte-identity proves it);
   only the unknown-target crash path changed — which production never
-  reaches (bap always supplies the ELF's target).
+  reaches (bap always supplies the ELF's target). The review-fix commit
+  deleted the three duplicated fallback wrappers (`emit_abi` in bil2llvm,
+  `abi_of`/`sp_of` in hike_dce) — every consumer now calls the total
+  `Abi.of_target` directly.
 
 | Gate | Result |
 |---|---|
-| unit suite | `dune runtest --force` **542 ok, 0 FAIL** (467 baseline + 75 net — every new check is the emitter wing) ✅ |
+| unit suite | direct-exe runtest **543 ok, 0 FAIL** (470 baseline + 73 wing; direct-exe counts are the honest measure — dune's captured output truncates at ~787 lines and under-counts by 3) ✅ |
 | corpus emission | **32/32 rc=0**, err streams identical ✅ |
 | **IR byte-identity vs pre-lane control** | **IDENTICAL 32/32** at EACH of the three commits ✅ |
 | structural asserts | check_allocas **160 passed, 0 failed** ✅ |
