@@ -143,6 +143,21 @@ val mk_rctx : cfg:Graphs.Tid.t -> sub term -> refine_ctx
 (* The shared per-SCC walk-pop budget cell (the binding-regime seam). *)
 val walk_budget : refine_ctx -> int ref
 
+(* Candidate-1 overlap census record. In production builds the dump is
+   always empty (nothing is compiled in); vsa-debug builds accumulate
+   one record per executed backward walk. *)
+type walk_record = {
+  wr_guard : tid;
+  wr_jmp : tid;
+  wr_seq : int;
+  wr_nvar : int;
+  wr_ncell : int;
+  wr_reads : Tid.Set.t;
+}
+
+val walk_records_reset : unit -> unit
+val walk_records_dump : unit -> walk_record list
+
 (* The deep backward walk: refines [env] by an edge's seed constraints,
    bounded by [steps] (None = the 256 cap). Budget-limited walks spend the
    shared cell; the live solution is the walk's internal propagation

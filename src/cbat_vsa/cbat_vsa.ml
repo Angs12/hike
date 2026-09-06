@@ -2181,14 +2181,50 @@ let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
 
 (* ================================================================== *)
 
+(* Candidate-1 overlap census: per-walk records (guard block, jmp, seed
+   mix, visited-block set). Production builds see only the type and
+   no-op stubs below — nothing is compiled in (principle #6). *)
+type walk_record = {
+  wr_guard : Tid.t;
+  wr_jmp : Tid.t;
+  wr_seq : int;
+  wr_nvar : int;
+  wr_ncell : int;
+  wr_reads : Tid.Set.t;
+}
 
+#ifdef VSA_DEBUG
+let walk_records : walk_record list ref = ref []
+let walk_seq : int ref = ref 0
 
+let record_walk (bt : Tid.t) (jt : Tid.t)
+    (seeds : edge_constraint list) (reads : Tid.Set.t) : unit =
+  incr walk_seq;
+  let nvar = ref 0 and ncell = ref 0 in
+  List.iter seeds ~f:(function
+    | Var _ -> incr nvar
+    | Cell _ -> incr ncell
+    | Infeasible -> ());
+  walk_records :=
+    {
+      wr_guard = bt;
+      wr_jmp = jt;
+      wr_seq = !walk_seq;
+      wr_nvar = !nvar;
+      wr_ncell = !ncell;
+      wr_reads = reads;
+    }
+    :: !walk_records
 
+let walk_records_reset () =
+  walk_records := [];
+  walk_seq := 0
 
-
-
-
-
+let walk_records_dump () = List.rev !walk_records
+#else
+let walk_records_reset () = ()
+let walk_records_dump () : walk_record list = []
+#endif
 
 let refine_edge_inline
     ~(sol : (tid, AI.t) Solution.t)
@@ -2258,7 +2294,11 @@ let refine_edge_inline
                        Cbat_runctx.Walk_memo.add ~version st.fs_cache bt jt
                          ~reads:!walk_reads refined } }
              else rc in
-           (refined, rc, !walk_reads))
+           (let res = (refined, rc, !walk_reads) in
+#ifdef VSA_DEBUG
+            record_walk bt jt seeds !walk_reads;
+#endif
+            res))
       | None ->
         (* Uncached no-defs walk: spends from the same shared cell, so it is
            bounded by it too (symmetric with the cached arm). *)
