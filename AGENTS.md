@@ -413,7 +413,8 @@ LLVM allocas / static variables — it should work on EVERY binary.
 **Last verified: 2026-09-06 EEST — CLEANUP-8 LANE (branch `cleanup-8`,
 tickets 01+02+03+04+05 = commits `085f378`+`a124d97`+`858a33d`+`e518825`+`8281a8b`,
 plus article-6 `39ffcb6` (frame_addr_alias linear via inverted target set;
-A/B: gcc-12 alias 126→47ms) —
+A/B: gcc-12 alias 126→47ms) plus article-7 `09e2668` (copy-reloc slots
+as a named pure function, one walk was three, +8 fixture checks → 475 ok) —
 BATTERY GREEN, IR BYTE-IDENTICAL 35/35 on every ticket**
 
 The cleanup-8 lane (spec: `.scratch/cleanup-8/spec.md`, grilling-settled
@@ -424,7 +425,7 @@ counts (04 — A/B neutral, kept per review for the bounded-walk structure).
 
 | gate | control (753601b) | cleanup-8 tip (e518825) |
 |---|---|---|
-| unit suite | ALL CBAT TESTS PASSED (467 ok) | **identical** ✅ |
+| unit suite | ALL CBAT TESTS PASSED (475 ok, incl. 8 copy-reloc) | **identical** ✅ |
 | corpus emission | 35/35 rc=0 | **35/35 rc=0** ✅ |
 | **IR byte-identity vs control** | — | **IDENTICAL 35/35** (incl. err files, on every ticket) ✅ |
 | structural asserts | 172 pass / 3 fail (shape-d, pre-existing) | **identical** ✅ |
