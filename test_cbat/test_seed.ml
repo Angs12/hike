@@ -240,8 +240,7 @@ let run () =
       defs = None;
       stores = None;
       flag_state = Some (cf, Bil.LT, Bil.Var t, r32 10);
-      sub = None;
-      blk = None;
+      has_sub = false;
     }
   in
   let s12 = Vsa.edge_constraints ~env:(mk_env []) ~ctx:ctx12 (Bil.Var cf) (Ws.singleton Word.b1) in

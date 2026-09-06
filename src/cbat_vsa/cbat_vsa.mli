@@ -116,8 +116,7 @@ type analysis_ctx = {
   defs : (def term * bool) Var.Map.t option;
   stores : def term list option;
   flag_state : (var * Bil.binop * exp * word) option;
-  sub : sub term option;
-  blk : blk term option;
+  has_sub : bool;
 }
 
 type edge_constraint =
@@ -150,7 +149,6 @@ val refine_edge :
   sol:(tid, AI.t) Solution.t ->
   rctx:refine_ctx ->
   ?defs:(def term * bool) Var.Map.t option ->
-  ?stores:def term list option ->
   ?reads:Tid.Set.t ref option ->
   ?steps:int option ->
   AI.t -> sub term -> blk term -> edge_constraint list -> AI.t * (tid, Live.t) Solution.t

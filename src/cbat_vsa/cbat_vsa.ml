@@ -1477,7 +1477,6 @@ let route_phi_constraints ~(sol : (tid, AI.t) Solution.t)
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ?(defs : (def term * bool) Var.Map.t option = None)
-    ?(stores : def term list option = None)
     ?(reads : Tid.Set.t ref option = None)
     ?(steps : int option = None)
     (env : AI.t) (sub : sub term) (blk : blk term)
@@ -1538,12 +1537,16 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
               | None -> fun ~target:_ -> live)
         ~step:(fun _ _ -> fun _ x' -> x')
         cfg in
-    (* Commit walk metrics. *)
+    (* Commit walk metrics (debug-only; the production adapter drops them). *)
     Stages.bump_walk_pops
       ~pops:!pops
+#ifdef VSA_DEBUG
       ~blocks:(match reads with
           | Some r -> Core.Set.length !r
           | None -> 0)
+#else
+      ~blocks:0
+#endif
       ~truncated:(!pops >= cap)
       ~budget_cap:cap
       ();
@@ -1565,9 +1568,9 @@ type analysis_ctx = {
   defs : (def term * bool) Var.Map.t option;
   stores : def term list option;
   flag_state : (var * Bil.binop * exp * word) option;
-  (* Sub and guard block of the walk. *)
-  sub : sub term option;
-  blk : blk term option;
+  (* True when the ctx comes from a real walk: the direct-API refinement
+     ([inverse_denote_exp]) is then a no-op. *)
+  has_sub : bool;
 }
 
 
@@ -1995,7 +1998,7 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
     (cstr : wordset) (env : AI.t) : AI.t =
   match ctx with
   | None -> env
-  | Some { sub = Some _; _ } -> env
+  | Some { has_sub = true; _ } -> env
   | Some ctx ->
     (* Gate-free (spec §2.1): every var refines. *)
     List.fold (edge_constraints ~env ~ctx cond cstr) ~init:env
@@ -2058,10 +2061,9 @@ let assume_jump_cond_with_group
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : Cbat_runctx.flag_group option = None)
     ?(sub : sub term option = None)
-    ?(blk : blk term option = None)
     (env : AI.t) (jmp : jmp term) : AI.t =
   let ctx : analysis_ctx =
-    { defs; stores; flag_state; sub; blk } in
+    { defs; stores; flag_state; has_sub = Option.is_some sub } in
   let cond = Jmp.cond jmp in
   acquire_unsat_fallthrough ~ctx ~flag_group cond env;
   match decoded_condition cond with
@@ -2107,9 +2109,8 @@ let assume_jump_cond
 
 (* ================================================================== *)
 
-(* One edge's jmp plus accumulated cond. *)
+(* One edge's accumulated cond. *)
 type edge_cond = {
-  cond_of_edge : jmp term;
   acc_cond : exp;
 }
 
@@ -2129,7 +2130,7 @@ let edge_conds_of (sub : sub term) : edge_cond Tid.Map.t Tid.Map.t =
         | Some m -> m in
       let by_jmp =
         Core.Map.set by_jmp ~key:jt
-          ~data:{ cond_of_edge = jmp; acc_cond = Graphs.Ir.Edge.cond e ircfg } in
+          ~data:{ acc_cond = Graphs.Ir.Edge.cond e ircfg } in
       Hashtbl.set tbl ~key:(Term.tid src) ~data:by_jmp);
   Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
       Core.Map.set acc ~key ~data)
@@ -2209,8 +2210,7 @@ let refine_edge_inline
   
   (* Threaded context plus visited set. *)
   let ctx : analysis_ctx =
-    { defs; stores; flag_state;
-      sub = Some sub; blk = Some b } in
+    { defs; stores; flag_state; has_sub = true } in
   let seeds = edge_constraints ~env ~ctx acc_cond (WordSet.singleton Word.b1) in
   
   (* Infeasible seeds stay identity, never bottom. *)
@@ -2249,7 +2249,7 @@ let refine_edge_inline
              max 1 (min Cbat_runctx.cap_default budget) in
            let refined, _live =
              Stages.time `Walk (fun () ->
-                 refine_edge ~sol ~rctx:rc ~defs ~stores
+                 refine_edge ~sol ~rctx:rc ~defs
                    ~reads:(Some walk_reads) ~steps:(Some cap)
                    env sub b seeds) in
            (* A budget-limited walk is not memoized: the shortened
@@ -2271,7 +2271,7 @@ let refine_edge_inline
         let budget = max 0 !(rctx.rc_walk_budget) in
         let cap = max 1 (min Cbat_runctx.cap_default budget) in
         let refined, _live =
-          refine_edge ~sol ~rctx:rctx ~defs ~stores ~steps:(Some cap)
+          refine_edge ~sol ~rctx:rctx ~defs ~steps:(Some cap)
             env sub b seeds in
         (refined, rctx, Tid.Set.empty) in
     walk env seeds
@@ -2292,7 +2292,7 @@ let denote_jump ?preserved ?defs ?stores
     (* Refine by the jump cond. *)
     let env =
       assume_jump_cond_with_group ?defs ?stores ~flag_state
-        ~flag_group ~sub ~blk:(Some b) env jmp in
+        ~flag_group ~sub env jmp in
     (* Deep walk uses the accumulated cond. *)
     let env, rctx, reads =
       match edge_conds, sol, sub with
@@ -2669,8 +2669,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
                     | Some _pb ->
                       ignore (denote_block_with_stores ~preserved
                                 ~defs ~stores ~sub:(Some s)
-                                ~edge_conds:(Some edge_conds)
-                                ~sol:(Some sol_snap) ~rctx:rc
+                                ~rctx:rc
                                 ~no_walk:true ctx
                                 ~source:p p_entry ~target:v)
                     | None -> ());
