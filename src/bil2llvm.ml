@@ -1404,9 +1404,14 @@ let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
 (* Emits native FP ops inline. *)
 let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
-  let abi = Abi.of_target ctx.Convutils.target in
+  match op with
+  | FHLT ->
+      (* Halt traps without binding results or emitting fallthrough. *)
+      create_interrupt llvm_builder
+  | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | ISNAN ->
+      let* llvm_ctx = Context.get llvm_ctx_var in
+      let* ctx = Context.get emit_ctx_var in
+      let abi = Abi.of_target ctx.Convutils.target in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -1519,10 +1524,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
           @@ Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
         in
         return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
-    | FHLT ->
-        (* Halt traps without binding results. *)
-        let* () = create_interrupt llvm_builder in
-        return (Llvm.poison (Llvm.i64_type llvm_ctx))
+    | FHLT -> assert false
   in
   let* r = result in
   (match get_rets ctx target with
