@@ -411,7 +411,7 @@ LLVM allocas / static variables — it should work on EVERY binary.
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
 **Last verified: 2026-09-06 EEST — CLEANUP-8 LANE (branch `cleanup-8`,
-tickets 01+02+03+04 = commits `085f378`+`a124d97`+`858a33d`+`e518825`) —
+tickets 01+02+03+04+05 = commits `085f378`+`a124d97`+`858a33d`+`e518825`+`8281a8b`) —
 BATTERY GREEN, IR BYTE-IDENTICAL 35/35 on every ticket**
 
 The cleanup-8 lane (spec: `.scratch/cleanup-8/spec.md`, grilling-settled
