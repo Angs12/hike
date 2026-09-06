@@ -26,12 +26,15 @@ let has_mem_ops (sub : sub term) : bool =
 (* Computes [sub]'s offset tags and stack plan. *)
 let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
     Convutils.vsa_info =
+  let prog' = Program.create ~subs:[ sub ] () in
+  (* VLA detection runs once per sub (spec §2.3), ahead of every arm below:
+     even a memory-free sub can carry a dynamic SP decrement the emitter
+     must see, and the set travels in [vsa_info.vla_alloc_tids]. *)
+  let alloc_tids = Vsa.Cbat_extraction.detect_dynamic_alloc sp sub in
   (* Subs without memory ops yield no tags. *)
-  if not (has_mem_ops sub) then Convutils.empty_vsa_info
+  if not (has_mem_ops sub) then
+    Convutils.{ empty_vsa_info with vla_alloc_tids = alloc_tids }
   else
-    let prog' = Program.create ~subs:[ sub ] () in
-    (* VLA detection runs once per sub (spec §2.3). *)
-    let alloc_tids = Vsa.Cbat_extraction.detect_dynamic_alloc sp sub in
     (* Runs the fixpoint, then extracts tags def by def. *)
     let finish (sol : Vsa.vsa_sol) : Convutils.vsa_info =
       (* Indirect jumps leave the CFG incomplete. *)
@@ -48,11 +51,14 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       (* Extracts tags via [Cbat_extraction]. *)
       let offsets, k_ranges, vla_bounds =
         Vsa.Cbat_extraction.extract
-          ~sp ~sol
+          ~sp ~sol ~alloc_tids
           ~dynamic_alloc:(fun d -> Core.Set.mem alloc_tids (Term.tid d))
           sub
       in
-      let mk = Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded in
+      let mk =
+        Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded
+          ~vla_alloc_tids:alloc_tids
+      in
       let base_info = mk ~regions:[] ~vla_bounds ~stack_plan:[] in
       (* Escape verdict shared by regions and plan. *)
       let frame_escaped = Hike_stack_model.frame_escapes sp target sub in
@@ -86,7 +92,8 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
           |> Seq.fold ~init:Tid.Map.empty ~f:(fun m d ->
               Core.Map.set m ~key:(Term.tid d) ~data:Convutils.Unbounded)
         in
-        Convutils.{ empty_vsa_info with offsets; degraded = true }
+        Convutils.{ empty_vsa_info with offsets; degraded = true;
+                    vla_alloc_tids = alloc_tids }
       | Some sol -> finish sol
     in
     probe_res

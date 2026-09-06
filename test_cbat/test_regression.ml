@@ -129,7 +129,7 @@ let run_creg () =
             Cu.max_width = 64;
           };
         ]
-      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
@@ -248,7 +248,7 @@ let run_creg () =
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
     Cu.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_bounds:[]
+      ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let convertible_of info dtid =
     Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
@@ -1037,7 +1037,7 @@ let run_regions () =
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
       ~regions:[ r1; r2 ]
-      ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
     (Cu.equal_split_plan (plan_of info) [ r1; r2 ]);
@@ -1084,7 +1084,7 @@ let run_regions () =
       ~offsets:
         [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
@@ -1124,7 +1124,7 @@ let run_regions () =
           (tid2, Hike.Convutils.Range (-24L, -8L));
         ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
@@ -1169,7 +1169,7 @@ let run_regions () =
     Hike.Convutils.mk_vsa_info
       ~offsets:[ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ]
       ~k_ranges:[ (tid_stack, -20L, -10L) ]
-      ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   (* Decision lives in split_plan; escape is a per-region rule. *)
   let info = { info with Hike.Convutils.regions =

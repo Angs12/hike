@@ -578,13 +578,6 @@ let vla_overlaps_convertible (info : Convutils.vsa_info)
             let rlo, rhi = r.Convutils.span in
             not (Int64.compare vla_hi rlo < 0 || Int64.compare vla_lo rhi > 0)))
 
-(* Tests for runtime-sized SP decrements via the relocated detector
-   (spec §2.3). *)
-let has_vla_dynamic_alloc (sp : var) (sub : sub term) : bool =
-  not
-    (Core.Set.is_empty
-       (Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub))
-
 (* Tests for unboundable stack accesses. *)
 let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
@@ -642,7 +635,7 @@ let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
     else
       let should_degrade_vla =
         vla_overlaps_convertible info convertible
-        || (has_vla_dynamic_alloc sp sub
+        || (not (Core.Set.is_empty info.Convutils.vla_alloc_tids)
            && Core.Map.is_empty info.Convutils.vla_bounds)
       in
       if should_degrade_vla then []
