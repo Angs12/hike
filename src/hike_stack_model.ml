@@ -245,14 +245,6 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
   in
   (* Frame pointer, resolved once for the per-def/per-node family below. *)
   let fp = fp_of target in
-  let overlap (lo1 : int64) (hi1 : int64) (lo2 : int64) (hi2 : int64) :
-      bool =
-    Int64.compare lo1 hi2 <= 0 && Int64.compare lo2 hi1 <= 0
-  in
-  let ranges_overlap ((lo1, hi1) : int64 * int64)
-      ((lo2, hi2) : int64 * int64) : bool =
-    overlap lo1 hi1 lo2 hi2
-  in
   let def_of_tid : def term Tid.Map.t =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
@@ -343,41 +335,40 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     | Bil.Cast (_, _, e) -> is_direct_const_addr ~sp ~fp e
     | _ -> false
   in
+  (* Connected components of the interval-overlap graph, by sort-and-sweep.
+     Sort ascending on (lo, hi, tid); a range joins the component being built
+     when its lo <= the component's max hi (it then overlaps the member
+     holding that max — for every earlier member m, lo_m <= lo_j by the sort).
+     Deterministic: the (lo, hi, tid) order fixes member order and component
+     order, so region ids are stable run-to-run. *)
+  let merge_components
+      (items : (tid * (int64 * int64)) list)
+      : (tid * (int64 * int64)) list list =
+    let sorted =
+      Base.List.sort items
+        ~compare:(fun (t1, (lo1, hi1)) (t2, (lo2, hi2)) ->
+          let c = Int64.compare lo1 lo2 in
+          if c <> 0 then c
+          else
+            let c = Int64.compare hi1 hi2 in
+            if c <> 0 then c else Tid.compare t1 t2)
+    in
+    let rec sweep cur max_hi rest =
+      match rest with
+      | [] -> [ Base.List.rev cur ]
+      | ((_, (lo, hi)) as x) :: tl ->
+          if Int64.compare lo max_hi <= 0 then
+            sweep (x :: cur) (if Int64.compare hi max_hi > 0 then hi else max_hi) tl
+          else
+            Base.List.rev cur :: sweep [ x ] hi tl
+    in
+    match sorted with
+    | [] -> []
+    | (_, (_, hi0)) :: tl -> sweep [ Base.List.hd_exn sorted ] hi0 tl
+  in
   let components : (tid * (int64 * int64)) list list =
     let items : (tid * (int64 * int64)) list = Core.Map.to_alist ranges in
-    (* Merges overlapping components to fixpoint. *)
-    let components_overlap (c1 : (tid * (int64 * int64)) list)
-        (c2 : (tid * (int64 * int64)) list) : bool =
-      Base.List.exists c1 ~f:(fun (_, r1) ->
-          Base.List.exists c2 ~f:(fun (_, r2) -> ranges_overlap r1 r2))
-    in
-    let rec merge_loop comps =
-      let n = List.length comps in
-      let rec find_pair i =
-        if i >= n then None
-        else
-          let ci = List.nth comps i in
-          let rec find_j j =
-            if j >= n then find_pair (i + 1)
-            else if i = j then find_j (j + 1)
-            else
-              let cj = List.nth comps j in
-              if components_overlap ci cj then Some (i, j) else find_j (j + 1)
-          in
-          find_j (i + 1)
-      in
-      match find_pair 0 with
-      | None -> comps
-      | Some (i, j) ->
-          let ci = List.nth comps i and cj = List.nth comps j in
-          let merged = ci @ cj in
-          let comps' =
-            Base.List.filteri comps ~f:(fun k _ -> k <> i && k <> j)
-          in
-          merge_loop (merged :: comps')
-    in
-    let init = Base.List.map items ~f:(fun x -> [ x ]) in
-    merge_loop init
+    merge_components items
   in
   Base.List.foldi components ~init:[] ~f:(fun i acc members ->
       let span =
