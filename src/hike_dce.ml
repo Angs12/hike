@@ -5,22 +5,12 @@ open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
 
-(* ABI record, defaulting to x86_64 SysV. *)
-let abi_of (target : Theory.Target.t) : Abi.t =
-  Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
-
-(* Stack pointer, defaulting to the record's. *)
-let sp_of (target : Theory.Target.t) : var =
-  match Abi.sp target with
-  | v -> v
-  | exception _ -> (abi_of target).Abi.sp
-
 (* Registers read implicitly by calls. *)
 let is_ret_reg (target : Theory.Target.t) (v : var) : bool =
-  Abi.is_return_reg (abi_of target) (Var.base v)
+  Abi.is_return_reg (Abi.of_target target) (Var.base v)
 
 let is_call_reg (target : Theory.Target.t) (v : var) : bool =
-  let abi = abi_of target in
+  let abi = Abi.of_target target in
   let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 
@@ -74,7 +64,7 @@ let is_intrinsic_var (v : var) : bool =
 let is_hike_stack (v : var) : bool = Var.same v Convutils.hike_stack_var
 
 let is_sp (target : Theory.Target.t) (v : var) : bool =
-  Var.same v (sp_of target)
+  Var.same v (Abi.sp target)
 
 let rec sp_value_exp (target : Theory.Target.t) (e : exp) : bool =
   match e with

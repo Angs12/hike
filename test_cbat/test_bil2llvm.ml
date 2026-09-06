@@ -27,40 +27,33 @@ let emit_ir (subs : sub term list) : string =
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)
 
-let count_substr (s : string) (sub : string) : int =
-  let rec go i acc =
-    if i + String.length sub > String.length s then acc
-    else if String.sub s i (String.length sub) = sub then
-      go (i + String.length sub) (acc + 1)
-    else go (i + 1) acc
-  in
-  go 0 0
-
-(* Checks a must-contain and a must-NOT-contain pair. *)
-let check_ir_pair (name : string) (must : string) (must_not : string) (ir : string) : unit =
-  check name (contains_substring ir must && not (contains_substring ir must_not))
-
 (* ------------------------------------------------------------------ *)
 (* Family 1: the FP-intrinsic table — every row emits its native op.  *)
 (* ------------------------------------------------------------------ *)
 
 let ivar64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64)
 
+(* A terminal block: build-first so callers can reference its tid. *)
+let mk_exit_blk () : blk term =
+  let b0 = Blk.Builder.create () in
+  let b = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b0) in
+  Blk.Builder.add_jmp b (Jmp.create (Ret (Direct (Tid.create ()))));
+  Blk.Builder.result b
+
 (* One mapped-intrinsic call site, the production shape:
    [intrinsic:x0 := src; call @<name> with return <cont>; cont: ...]. *)
 let mk_fp_call_sub (intr : string) (arg_defs : def term list) : sub term =
   let callee_tid = Tid.for_name intr in
   let caller = Blk.Builder.create () in
-  let cont = Blk.Builder.create () in
-  let exit = Blk.Builder.create () in
-  let cont_tid = Tid.create () in
-  (* The builder assigns its own tid; use it as the return target. *)
-  let cont = Blk.Builder.init ~copy_defs:true (Blk.Builder.result cont) in
-  ignore cont_tid;
+  let exit_blk = mk_exit_blk () in
+  (* The writeback reads the ret lane, the production shape. *)
+  let cont0 = Blk.Builder.create () in
+  let cont = Blk.Builder.init ~copy_defs:true (Blk.Builder.result cont0) in
   Blk.Builder.add_def cont (Def.create (v64 "fp_wb") (Bil.Var (ivar64 "intrinsic:y0")));
   Blk.Builder.add_jmp cont
     (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var (v64 "fp_wb"), Bil.Int (w64 0)))
-       (Ret (Direct (Tid.create ()))));
+       (Goto (Direct (Term.tid exit_blk))));
+  Blk.Builder.add_jmp cont (Jmp.create (Goto (Direct (Term.tid exit_blk))));
   let cont_blk = Blk.Builder.result cont in
   let cont_tid = Term.tid cont_blk in
   List.iter (Blk.Builder.add_def caller) arg_defs;
@@ -71,7 +64,7 @@ let mk_fp_call_sub (intr : string) (arg_defs : def term list) : sub term =
   let sb = Sub.Builder.create ~name:"fp_caller" () in
   Sub.Builder.add_blk sb (Blk.Builder.result caller);
   Sub.Builder.add_blk sb cont_blk;
-  Sub.Builder.add_blk sb (Blk.Builder.result exit);
+  Sub.Builder.add_blk sb exit_blk;
   Sub.Builder.result sb
 
 (* The bodyless mapped-intrinsic stub (the model interface sig). *)
@@ -141,56 +134,46 @@ let string_of_natfp = function
   | B2l.ISNAN -> "ISNAN"
 
 let run_fp_table () =
-  (* Every row maps. *)
+  (* Every row maps to its constructor. *)
   List.iter
     (fun (name, op) ->
-      check ("FP-TABLE " ^ name ^ ": native_fp_op resolves")
-        (match B2l.native_fp_op ("@" ^ name) with Some _ -> true | None -> false);
       check ("FP-TABLE " ^ name ^ ": native_fp_op gives " ^ string_of_natfp op)
         (match B2l.native_fp_op ("@" ^ name) with
          | Some op' -> op' = op
          | None -> false))
+    fp_rows;
+  (* Every row EMITS its native op — a dropped row degrades to a soft-float
+     call without any warning difference, so emission is checked per row,
+     not sampled. Unary rows take one x-def, binary rows two. *)
+  let d0 = ivar64 "intrinsic:x0" in
+  let d1 = ivar64 "intrinsic:x1" in
+  let x0_def = Def.create d0 (Bil.Int (w64 0x4059)) in
+  let x1_def = Def.create d1 (Bil.Int (w64 0x4008)) in
+  let unary (op : B2l.native_fp) : bool =
+    match op with
+    | B2l.SFLOAT | B2l.SINT | B2l.ISNAN | B2l.FHLT -> true
+    | _ -> false
+  in
+  List.iter
+    (fun (name, op) ->
+      let arg_defs = if unary op then [ x0_def ] else [ x0_def; x1_def ] in
+      let ir = emit_ir (mk_fp_program name arg_defs) in
+      check ("FP-TABLE " ^ name ^ ": the native op is emitted")
+        (contains_substring ir (op_ir_string op)))
     fp_rows;
   (* Rows NOT in the table must not map. *)
   check "FP-TABLE: unmapped name returns None"
     (match B2l.native_fp_op "@intrinsic:not_a_real_intrinsic" with
      | None -> true
      | Some _ -> false);
-  (* One binop row emission: fadd_64 emits fadd, no soft-float call. *)
-  let x0 = ivar64 "intrinsic:x0" in
-  let x1 = ivar64 "intrinsic:x1" in
-  let d0 = Def.create x0 (Bil.Int (w64 0x4059)) in
-  let d1 = Def.create x1 (Bil.Int (w64 0x4008)) in
-  let subs = mk_fp_program "intrinsic:fadd_rne_ieee754_binary_64" [ d0; d1 ] in
-  let ir = emit_ir subs in
-  check_ir "FP-TABLE fadd_64: the native fadd is emitted (not a soft-float call)" "fadd" ir;
-  check "FP-TABLE fadd_64: no soft-float call survives"
-    (not (contains_substring ir "call") || not (contains_substring ir "@intrinsic:fadd"));
-  (* SFLOAT: sitofp emitted. *)
-  let ir_sfloat =
-    emit_ir (mk_fp_program "intrinsic:cast_sfloat_rne_ieee754_binary_64" [ d0 ])
-  in
-  check_ir "FP-TABLE sfloat_64: the native sitofp is emitted" "sitofp" ir_sfloat;
-  (* SINT: fptosi emitted. *)
-  let ir_sint =
-    emit_ir (mk_fp_program "intrinsic:cast_sint_rne_ieee754_binary_64" [ d0 ])
-  in
-  check_ir "FP-TABLE sint_64: the native fptosi is emitted" "fptosi" ir_sint;
-  (* FORDER: fcmp olt emitted. *)
-  let ir_forder =
+  (* fadd_64 also pins the no-soft-float-call half of the contract. *)
+  let ir_fadd =
     emit_ir
-      (mk_fp_program "intrinsic:forder_rne_ieee754_binary_64" [ d0; d1 ])
+      (mk_fp_program "intrinsic:fadd_rne_ieee754_binary_64" [ x0_def; x1_def ])
   in
-  check_ir "FP-TABLE forder_64: the native fcmp olt is emitted" "fcmp olt" ir_forder;
-  (* ISNAN: fcmp uno emitted. *)
-  let ir_isnan =
-    emit_ir (mk_fp_program "intrinsic:is_nan_rne_ieee754_binary_64" [ d0 ])
-  in
-  check_ir "FP-TABLE isnan_64: the native fcmp uno is emitted" "fcmp uno" ir_isnan;
-  (* FHLT: unreachable emitted. *)
-  let ir_hlt = emit_ir (mk_fp_program "intrinsic:hlt" []) in
-  check_ir "FP-TABLE hlt: the trap (unreachable) is emitted" "unreachable" ir_hlt;
-  (* A dropped row degrades loudly, the c484e13 class: a caller of an
+  check "FP-TABLE fadd_64: no soft-float call survives"
+    (not (contains_substring ir_fadd "call") || not (contains_substring ir_fadd "@intrinsic:fadd"));
+  (* A dropped table row degrades loudly: a caller of an
      unmapped name gets the guarded warning. *)
   let x0b = ivar64 "intrinsic:x0" in
   let db = Def.create x0b (Bil.Int (w64 7)) in
@@ -256,7 +239,28 @@ let run_poison () =
   check "POISON: the Dead-tagged access emits a poison value"
     (contains_substring !ir_holder2 "poison");
   check "POISON: the Dead-tagged access does NOT warn"
-    (not (contains_substring err_dead "hike: guarded:"))
+    (not (contains_substring err_dead "hike: guarded:"));
+  (* The undef-read lane: reading a never-defined register warns and the
+     value becomes undef. *)
+  let rax = v64 "RAX" in
+  let bb = Blk.Builder.create () in
+  let exit_blk = mk_exit_blk () in
+  Blk.Builder.add_jmp bb
+    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var rax, Bil.Int (w64 0)))
+       (Goto (Direct (Term.tid exit_blk))));
+  Blk.Builder.add_jmp bb (Jmp.create (Goto (Direct (Term.tid exit_blk))));
+  let sb = Sub.Builder.create ~name:"undef_read_sub" () in
+  Sub.Builder.add_blk sb (Blk.Builder.result bb);
+  Sub.Builder.add_blk sb exit_blk;
+  let sub = Sub.Builder.result sb in
+  let ir_holder3 = ref "" in
+  let err_und =
+    capture_stderr (fun () -> ir_holder3 := emit_ir [ sub ])
+  in
+  check "UNDEF: a never-defined register read warns through Hike_diag"
+    (contains_substring err_und "hike: undef-read:");
+  check "UNDEF: the never-defined read becomes undef"
+    (contains_substring !ir_holder3 "undef")
 
 (* Family 3: restore_sp_after_call idempotence (the L-E1e class).     *)
 (* ------------------------------------------------------------------ *)
@@ -267,10 +271,7 @@ let run_sp_restore () =
   let m = memv "sp_m" in
   let callee_tid = Tid.for_name "sp_callee" in
   let caller = Blk.Builder.create () in
-  let cont0 = Blk.Builder.create () in
-  let cont = Blk.Builder.init ~copy_defs:true (Blk.Builder.result cont0) in
-  Blk.Builder.add_jmp cont (Jmp.create (Ret (Direct (Tid.create ()))));
-  let cont_blk = Blk.Builder.result cont in
+  let cont_blk = mk_exit_blk () in
   let cont_tid = Term.tid cont_blk in
   (* The push: RSP := RSP - 8; mem[RSP] := retaddr — the lifted call shape. *)
   Blk.Builder.add_def caller (Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))));
@@ -291,9 +292,11 @@ let run_sp_restore () =
     Sub.Builder.result sb2
   in
   let ir = emit_ir [ caller; callee ] in
-  (* The restore emits an add of 8 after the call. *)
-  check "SP-RESTORE: after a call, the sp local rebinds (+8 present)"
-    (contains_substring ir "add i64")
+  (* The restore rebinds sp to post-push + 8, by name. *)
+  check "SP-RESTORE: the named sp_restored = add <pushed>, 8 is emitted"
+    (contains_substring ir "%sp_restored = add i64 ");
+  check "SP-RESTORE: the continuation's sp phi reads the restore (no net drift)"
+    (contains_substring ir "[ %sp_restored,")
 
 (* ------------------------------------------------------------------ *)
 (* Family 4: cast preservation at BIL type boundaries.                 *)
@@ -319,10 +322,7 @@ let run_casts () =
   let bb = Blk.Builder.create () in
   Blk.Builder.add_def bb d_src;
   Blk.Builder.add_def bb d_st;
-  let exit0 = Blk.Builder.create () in
-  let exit = Blk.Builder.init ~copy_defs:true (Blk.Builder.result exit0) in
-  Blk.Builder.add_jmp exit (Jmp.create (Ret (Direct (Tid.create ()))));
-  let exit_blk = Blk.Builder.result exit in
+  let exit_blk = mk_exit_blk () in
   Blk.Builder.add_jmp bb
     (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var src, Bil.Int (w64 0x7B)))
        (Goto (Direct (Term.tid exit_blk))));
@@ -358,10 +358,7 @@ let run_golden () =
   let d_ld = Def.create ld_var (Bil.Load (Bil.Var m, ld_addr, LittleEndian, `r64)) in
   let d_st = Def.create m (Bil.Store (Bil.Var m, st_addr, Bil.Var ld_var, LittleEndian, `r64)) in
   let d_val = Def.create st_val (Bil.BinOp (Bil.PLUS, Bil.Var ld_var, Bil.Int (w64 1))) in
-  let exit0 = Blk.Builder.create () in
-  let exit = Blk.Builder.init ~copy_defs:true (Blk.Builder.result exit0) in
-  Blk.Builder.add_jmp exit (Jmp.create (Ret (Direct (Tid.create ()))));
-  let exit_blk = Blk.Builder.result exit in
+  let exit_blk = mk_exit_blk () in
   let exit_tid = Term.tid exit_blk in
   let bb = Blk.Builder.create () in
   Blk.Builder.add_def bb d_ld;
@@ -401,7 +398,8 @@ let run_golden () =
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
   check_ir "GOLDEN: the golden sub emits a function define" "define" ir;
-  check_ir "GOLDEN: entry alloca lane (stack_rN or frame) present" "alloca" ir;
+  check_ir "GOLDEN: the fission region alloca is built by name" "stack_r0" ir;
+  check_ir "GOLDEN: the region base GEP lane is present" "getelementptr" ir;
   check_ir "GOLDEN: a load reaches the frame" "load" ir;
   check_ir "GOLDEN: a store reaches the frame" "store" ir;
   check_ir "GOLDEN: the jmp cond comparison emitted" "icmp" ir;

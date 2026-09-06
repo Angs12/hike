@@ -65,3 +65,6 @@ val degraded_dims :
 val is_intrinsic : sub term -> bool
 val is_emittable_intrinsic : sub term -> bool
 val is_llvm_x86_intrinsic : sub term -> bool
+
+(** Memory-excluded free vars of a sub. *)
+val free_vars : sub term -> var list

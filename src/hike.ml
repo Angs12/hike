@@ -36,12 +36,8 @@ let get_section_data =
       (arr, Memory.min_addr mem, Memory.max_addr mem)
     end
 
-let free_vars sub =
-  Sub.free_vars sub
-  |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
-  |> Core.Set.to_list
-
-(* Intrinsics are classified by the emitter; the filter shares the facts. *)
+(* Intrinsics and free-vars are owned by the emitter; the filter shares. *)
+let free_vars = Bil2llvm.free_vars
 let is_intrinsic = Bil2llvm.is_intrinsic
 let is_emittable_intrinsic = Bil2llvm.is_emittable_intrinsic
 let is_llvm_x86_intrinsic = Bil2llvm.is_llvm_x86_intrinsic
