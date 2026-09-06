@@ -93,6 +93,9 @@ module Vsa = struct
     stack_plan : split_plan;
     degraded : bool;
     vla_bounds : (int64 * int64) Tid.Map.t;
+    (* Dynamic-allocation defs (spec §2.3); the producer's one detection,
+       read by the stack model and the emitter instead of re-detecting. *)
+    vla_alloc_tids : Tid.Set.t;
   }
 
   (* Hand-written equality over maps. *)
@@ -110,15 +113,17 @@ module Vsa = struct
     && Base.List.equal equal_region i1.stack_plan i2.stack_plan
     && Bool.equal i1.degraded i2.degraded
     && Core.Map.equal equal_vla_bound i1.vla_bounds i2.vla_bounds
+    && Core.Set.equal i1.vla_alloc_tids i2.vla_alloc_tids
 
   (* Builds info from maps. *)
   let mk_vsa_info_maps ~offsets ~k_ranges ~regions ~stack_plan ~degraded
-      ~vla_bounds : vsa_info =
-    { offsets; k_ranges; regions; stack_plan; degraded; vla_bounds }
+      ~vla_bounds ~vla_alloc_tids : vsa_info =
+    { offsets; k_ranges; regions; stack_plan; degraded; vla_bounds;
+      vla_alloc_tids }
 
   (* Builds info from lists. *)
   let mk_vsa_info ~offsets ~k_ranges ~regions ~stack_plan ~degraded
-      ~vla_bounds : vsa_info =
+      ~vla_bounds ~vla_alloc_tids : vsa_info =
     mk_vsa_info_maps
       ~offsets:
         (Base.List.fold_left offsets ~init:Tid.Map.empty
@@ -130,11 +135,13 @@ module Vsa = struct
       ~vla_bounds:
         (Base.List.fold_left vla_bounds ~init:Tid.Map.empty
            ~f:(fun m (tid, (a, b)) -> Core.Map.set m ~key:tid ~data:(a, b)))
+      ~vla_alloc_tids
 
   (* Info with no tags. *)
   let empty_vsa_info : vsa_info =
     mk_vsa_info_maps ~offsets:Tid.Map.empty ~k_ranges:Tid.Map.empty
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:Tid.Map.empty
+      ~vla_alloc_tids:Tid.Set.empty
 end
 include Vsa
 

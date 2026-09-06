@@ -1766,10 +1766,11 @@ let populate_blks transfer_vars blks sub sub_info fr () =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
   let sub_tid = Term.tid sub in
-  (* VLA detection runs once per sub on the emission shape (spec §2.3). *)
+  (* VLA tids travel in vsa_info (spec §2.3): the producer detected them
+     once on the pre-rewrite sub. Missing info degrades to none. *)
   let alloc_tids =
-    Cbat_vsa.Cbat_extraction.detect_dynamic_alloc
-      (sp ctx.Convutils.target) sub
+    Base.Option.value_map sub_info ~default:Tid.Set.empty
+      ~f:(fun info -> info.Convutils.vla_alloc_tids)
   in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =

@@ -889,7 +889,7 @@ let run () =
       Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
     in
     let offsets, _, _ =
-      Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+      Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
     in
     offsets
   in
@@ -909,7 +909,7 @@ let run () =
     Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
   in
   check "P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (32L, 32L)));
@@ -923,7 +923,7 @@ let run () =
     Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
   in
   check "P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded"
     (Core.Map.find tags (Term.tid def_load) = None);
@@ -939,7 +939,7 @@ let run () =
     Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
   in
   check "F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
@@ -1227,7 +1227,7 @@ let run () =
     Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
   in
   let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~sol sub
+    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
   in
   check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(-24,-24)"
     (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-24L, -24L)));

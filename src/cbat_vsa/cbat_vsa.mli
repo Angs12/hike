@@ -55,6 +55,7 @@ module Cbat_extraction : sig
   val extract :
     sp:var ->
     dynamic_alloc:(def term -> bool) ->
+    alloc_tids:Tid.Set.t ->
     sol:(tid, AI.t) Solution.t ->
     sub term ->
     kind Tid.Map.t * (int64 * int64) Tid.Map.t
@@ -63,8 +64,9 @@ module Cbat_extraction : sig
   (* True for a non-literal [RSP := RSP - size]. *)
   val vla_decrement_p : var -> Bil.exp -> bool
 
-  (* Size expression of a dynamic allocation, if any. *)
-  val vla_size_of_rhs : var -> sub term -> Bil.exp -> Bil.exp option
+  (* Size expression of a dynamic allocation, if any. Takes the sub's
+     lhs-indexed defs; the caller builds it once. *)
+  val vla_size_of_rhs : var -> def term Var.Map.t -> Bil.exp -> Bil.exp option
 
   (* Runtime-sized SP decrements (spec §2.3). *)
   val detect_dynamic_alloc : var -> sub term -> Tid.Set.t
