@@ -13,10 +13,10 @@ let fp_of (target : Theory.Target.t) : var option =
     | v -> Some v
     | exception _ -> None
 
-let is_sp_or_fp (sp : var) (target : Theory.Target.t) (v : var) : bool =
+let is_sp_or_fp (sp : var) (fp : var option) (v : var) : bool =
   Var.same (Var.base v) (Var.base sp)
   ||
-  match fp_of target with
+  match fp with
   | Some fp -> Var.same (Var.base v) (Var.base fp)
   | None -> false
 
@@ -114,8 +114,9 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   bool =
   let base_var v = Var.base v in
   let sp_base = base_var sp in
+  let fp = fp_of target in
   let fp_bases =
-    match fp_of target with Some fp -> [ base_var fp ] | None -> []
+    match fp with Some fp -> [ base_var fp ] | None -> []
   in
   (* Vars derived via arithmetic, excluding loads. *)
   let derived : Var.Set.t ref =
@@ -154,6 +155,9 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
     if !changed then grow () else ()
   in
   grow ();
+  (* Argument registers, resolved once: Abi.param_regs raises on unknown
+     targets, and laziness preserves the old raise-on-first-use timing. *)
+  let arg_regs = lazy (Abi.param_regs target) in
   (* Derived values escape via call args, stored data, or indirect targets. *)
   (* Free vars of the computed value. *)
   let rec value_free_vars (e : exp) : Var.Set.t =
@@ -175,7 +179,7 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   let call_arg_escapes =
     (* Only argument-register defs count. *)
     let is_arg_reg (v : var) : bool =
-      Base.List.exists (Abi.param_regs target)
+      Base.List.exists (Lazy.force arg_regs)
         ~f:(fun r -> Var.same r (base_var v))
     in
     Term.enum blk_t sub
@@ -239,6 +243,8 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
     (* Falls back to x86_64 SysV on unknown targets. *)
     Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
   in
+  (* Frame pointer, resolved once for the per-def/per-node family below. *)
+  let fp = fp_of target in
   let overlap (lo1 : int64) (hi1 : int64) (lo2 : int64) (hi2 : int64) :
       bool =
     Int64.compare lo1 hi2 <= 0 && Int64.compare lo2 hi1 <= 0
@@ -290,7 +296,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
         | Some (addr, _) ->
             let rsp_rel =
               Exp.free_vars addr
-              |> Core.Set.exists ~f:(Abi.is_sp_t target)
+              |> Core.Set.exists ~f:(Abi.is_sp abi)
             in
             (* lo<0 and k>=0 marks pushed arg cells. *)
             let lo_neg =
@@ -325,16 +331,16 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
   in
   (* Escaped frame addresses stay in the model frame. *)
   (* Tests for [sp/fp +- const] addresses. *)
-  let rec is_direct_const_addr ~(sp : var) ~(target : Theory.Target.t) (addr : exp) : bool =
+  let rec is_direct_const_addr ~(sp : var) ~(fp : var option) (addr : exp) : bool =
     let base_var v = Var.base v in
-    let is_base v = is_sp_or_fp sp target (base_var v) in
+    let is_base v = is_sp_or_fp sp fp (base_var v) in
     match addr with
     | Bil.Int _ -> true
     | Bil.Var v -> is_base v
     | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Var v, Bil.Int _)
     | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Int _, Bil.Var v) ->
         is_base v
-    | Bil.Cast (_, _, e) -> is_direct_const_addr ~sp ~target e
+    | Bil.Cast (_, _, e) -> is_direct_const_addr ~sp ~fp e
     | _ -> false
   in
   let components : (tid * (int64 * int64)) list list =
@@ -396,7 +402,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                     | Some md ->
                         (match addr_of_rhs (Def.rhs md) with
                          | Some (addr, _) ->
-                             let ok = is_direct_const_addr ~sp ~target addr in
+                             let ok = is_direct_const_addr ~sp ~fp addr in
 #ifdef VSA_DEBUG
                              if not ok then
                                Printf.eprintf "hike:   member %s NOT direct: addr=%s\n"
@@ -489,76 +495,78 @@ let region_size_ok (r : Convutils.region) : bool =
 (* Tests for SP/FP-derived memory accesses. *)
 
 (* Tests for SP/FP references. *)
-let rec exp_contains_sp (sp : var) (target : Theory.Target.t) (e : exp) :
+let rec exp_contains_sp (sp : var) (fp : var option) (e : exp) :
     bool =
   match e with
-  | Bil.Var v -> is_sp_or_fp sp target v
+  | Bil.Var v -> is_sp_or_fp sp fp v
   | Bil.BinOp (_, a, b) ->
-      exp_contains_sp sp target a || exp_contains_sp sp target b
-  | Bil.UnOp (_, a) -> exp_contains_sp sp target a
-  | Bil.Cast (_, _, a) -> exp_contains_sp sp target a
-  | Bil.Extract (_, _, a) -> exp_contains_sp sp target a
+      exp_contains_sp sp fp a || exp_contains_sp sp fp b
+  | Bil.UnOp (_, a) -> exp_contains_sp sp fp a
+  | Bil.Cast (_, _, a) -> exp_contains_sp sp fp a
+  | Bil.Extract (_, _, a) -> exp_contains_sp sp fp a
   | Bil.Concat (a, b) ->
-      exp_contains_sp sp target a || exp_contains_sp sp target b
+      exp_contains_sp sp fp a || exp_contains_sp sp fp b
   | Bil.Let (_, a, b) ->
-      exp_contains_sp sp target a || exp_contains_sp sp target b
+      exp_contains_sp sp fp a || exp_contains_sp sp fp b
   | Bil.Ite (c, a, b) ->
-      exp_contains_sp sp target c
-      || exp_contains_sp sp target a
-      || exp_contains_sp sp target b
+      exp_contains_sp sp fp c
+      || exp_contains_sp sp fp a
+      || exp_contains_sp sp fp b
   | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _) ->
-      exp_contains_sp sp target a
+      exp_contains_sp sp fp a
   | _ -> false
 
-let is_stack_mem (sp : var) (target : Theory.Target.t) (e : exp) : bool =
+let is_stack_mem (sp : var) (fp : var option) (e : exp) : bool =
   match e with
   | Bil.Load (_, a, _, _)
   | Bil.Store (_, a, _, _, _)
   | Bil.Cast (_, _, Bil.Load (_, a, _, _))
   | Bil.Cast (_, _, Bil.Store (_, a, _, _, _)) ->
-      exp_contains_sp sp target a
+      exp_contains_sp sp fp a
   | _ -> false
 
-let frame_value_def (sp : var) (target : Theory.Target.t) (d : def term) :
+let frame_value_def (sp : var) (fp : var option) (d : def term) :
     bool =
   let lhs = Def.lhs d in
   (not (Convutils.is_mem lhs))
-  && (not (is_sp_or_fp sp target lhs))
-  && exp_contains_sp sp target (Def.rhs d)
+  && (not (is_sp_or_fp sp fp lhs))
+  && exp_contains_sp sp fp (Def.rhs d)
 
 let rec var_maybe_addr (env : exp Var.Map.t) (sp : var)
-    (target : Theory.Target.t) (v : var) (e : exp) : bool =
+    (fp : var option) (v : var) (e : exp) : bool =
   match e with
   | Bil.Var w ->
-      (is_sp_or_fp sp target w && is_sp_or_fp sp target v)
+      (is_sp_or_fp sp fp w && is_sp_or_fp sp fp v)
       || Var.same (Var.base w) (Var.base v)
       ||
       (match Core.Map.find env (Var.base w) with
-      | Some e' -> var_maybe_addr env sp target v e'
+      | Some e' -> var_maybe_addr env sp fp v e'
       | None -> false)
   | Bil.Ite (_, t, f) ->
-      var_maybe_addr env sp target v t
-      || var_maybe_addr env sp target v f
+      var_maybe_addr env sp fp v t
+      || var_maybe_addr env sp fp v f
   | Bil.Let (x, e1, e2) ->
       let env' = Core.Map.set env ~key:x ~data:e1 in
-      var_maybe_addr env' sp target v e2
+      var_maybe_addr env' sp fp v e2
   | Bil.Cast (_, _, e') | Bil.Extract (_, _, e') ->
-      var_maybe_addr env sp target v e'
+      var_maybe_addr env sp fp v e'
   | _ -> false
 
 (* Tests for reads through a materialized frame pointer. *)
 let frame_addr_alias (sp : var) (target : Theory.Target.t) (sub : sub term) :
     bool =
+  (* Frame pointer, resolved once for the per-def-pair scan below. *)
+  let fp = fp_of target in
   let defs =
     Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list
   in
   Base.List.exists defs ~f:(fun d ->
-      frame_value_def sp target d
+      frame_value_def sp fp d
       &&
       let v = Def.lhs d in
       Base.List.exists defs ~f:(fun d2 ->
           match addr_of_rhs (Def.rhs d2) with
-          | Some (addr, _) -> var_maybe_addr Var.Map.empty sp target v addr
+          | Some (addr, _) -> var_maybe_addr Var.Map.empty sp fp v addr
           | None -> false))
 
 (* Tests whether a VLA overlaps a convertible region. *)
@@ -579,13 +587,13 @@ let vla_overlaps_convertible (info : Convutils.vsa_info)
             not (Int64.compare vla_hi rlo < 0 || Int64.compare vla_lo rhi > 0)))
 
 (* Tests for unboundable stack accesses. *)
-let has_unbounded_access (sp : var) (target : Theory.Target.t) (sub : sub term)
+let has_unbounded_access (sp : var) (fp : var option) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
          Term.enum def_t blk
          |> Seq.exists ~f:(fun d ->
-                is_stack_mem sp target (Def.rhs d)
+                is_stack_mem sp fp (Def.rhs d)
                 &&
                 match Core.Map.find info.Convutils.offsets (Term.tid d) with
                 | None -> true
@@ -625,7 +633,7 @@ let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term) :
 let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : Convutils.split_plan =
   if info.Convutils.degraded then []
-  else if has_unbounded_access sp target sub info then []
+  else if has_unbounded_access sp (fp_of target) sub info then []
   else
     let regions = info.Convutils.regions in
     let convertible =

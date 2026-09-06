@@ -561,6 +561,9 @@ let convert_binary output_program proj =
       section_remap = section_remap_val;
       copy_relocs = copy_reloc_addrs_val;
       target;
+      abi = Abi.of_target target;
+      sp = Abi.sp target;
+      fp = Abi.fp target;
       ptrsize;
     }
   in

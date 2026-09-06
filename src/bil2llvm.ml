@@ -573,7 +573,7 @@ let create_immidiate word =
 (* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
   let v = Var.base var in
-  let abi = Abi.of_target ctx.Convutils.target in
+  let abi = ctx.Convutils.abi in
   let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
   let sub_key = blk_tid in
   let warned_vars =
@@ -763,7 +763,7 @@ let is_abi_visible ctx sub_info def =
   match sub_info with
   | None -> false
   | Some info ->
-      Hike_stack_model.abi_visibility_of (sp ctx.Convutils.target) info def
+      Hike_stack_model.abi_visibility_of ctx.Convutils.sp info def
 
 (* A stack access carries a [vsa_info] tag — the invariant is structural
    (spec §2.2): an access is a stack access iff it is tagged. *)
@@ -779,8 +779,8 @@ let is_plt_trampoline ctx (sub : sub term) : bool =
   let reg_vars =
     Base.List.filter free_vars ~f:(fun reg ->
         not
-          (Var.same reg (sp ctx.Convutils.target)
-          || Var.same reg (fp ctx.Convutils.target)))
+          (Var.same reg ctx.Convutils.sp
+          || Var.same reg ctx.Convutils.fp))
   in
   reg_vars = []
   && Term.enum blk_t sub
@@ -1060,7 +1060,7 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
   let open KB in
   if fr.is_precise then return ()
   else
-    let sp_key = sp ctx.Convutils.target in
+    let sp_key = ctx.Convutils.sp in
     match get_local ctx sub_tid sp_key with
     | None -> return ()
     | Some post_push ->
@@ -1093,8 +1093,8 @@ let create_call_args blk_tid llvm_builder call_tid fr =
       if Var.same (Arg.lhs arg) Convutils.hike_stack_var then
         (* Threads [hike_stack] to callees. *)
         let first, second =
-          if fr.is_precise then Convutils.hike_stack_var, sp ctx.Convutils.target
-          else sp ctx.Convutils.target, Convutils.hike_stack_var
+          if fr.is_precise then Convutils.hike_stack_var, ctx.Convutils.sp
+          else ctx.Convutils.sp, Convutils.hike_stack_var
         in
         let v_opt =
           match get_local ctx blk_tid first with
@@ -1406,7 +1406,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  let abi = Abi.of_target ctx.Convutils.target in
+  let abi = ctx.Convutils.abi in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -1652,7 +1652,7 @@ let update_phi transfer_vars blk_incoming blk_tid =
   let* ctx = Context.get emit_ctx_var in
   (* Consults edge-keyed restores first. *)
   let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
-    if Var.same var (sp ctx.Convutils.target) then
+    if Var.same var ctx.Convutils.sp then
       match EHashtbl.find !(ctx.edge_sp_restores) pred_tid with
       | Some inner -> EHashtbl.find inner blk_tid
       | None -> None
@@ -1811,7 +1811,7 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
     exit_entry llvm_builder sub () >>= fun _ -> return fr
   ) else (
   (* SP/FP are not args. *)
-  insert_local ctx tid (sp ctx.Convutils.target) fr.anchor_i64;
+  insert_local ctx tid ctx.Convutils.sp fr.anchor_i64;
   (* [hike_stack] is the caller entry RSP. *)
   let fr =
     { fr with stack = get_local ctx tid Convutils.hike_stack_var }
@@ -1822,7 +1822,7 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
     @@ Llvm.build_sub fr.anchor_i64 (Llvm.const_int (Llvm.i64_type llvm_ctx) 8)
          "" llvm_builder
   in
-  insert_local ctx tid (fp ctx.Convutils.target) fp_anchor;
+  insert_local ctx tid ctx.Convutils.fp fp_anchor;
   exit_entry llvm_builder sub ()
   >>= fun _ -> return fr
   )
@@ -1887,15 +1887,15 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.filter ~f:(fun var ->
       ((not @@ is_mem var) || Var.same var (pc ctx.Convutils.target))
       (* Keeps SP/FP lanes. *)
-      || Var.same var (sp ctx.Convutils.target)
-      || Var.same var (fp ctx.Convutils.target))
+      || Var.same var ctx.Convutils.sp
+      || Var.same var ctx.Convutils.fp)
   |> Core.Set.filter ~f:(fun var ->
       (* Drops never-defined vars from transfer. *)
       Core.Set.mem def_set var
       || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
-      || Var.same var (sp ctx.Convutils.target)
-      || Var.same var (fp ctx.Convutils.target))
+      || Var.same var ctx.Convutils.sp
+      || Var.same var ctx.Convutils.fp)
   |> Core.Set.to_list
 
 
@@ -2005,7 +2005,7 @@ let create_sub sub =
     
     clear_bbs ctx;
     clear_blk_llvals ctx;
-    let abi = Abi.of_target ctx.Convutils.target in
+    let abi = ctx.Convutils.abi in
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
     (* Frame spans all tagged accesses. *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
@@ -2101,7 +2101,7 @@ let create_sub sub =
         ~f:(fun ~key:_ ~data:warned_vars acc ->
           Core.Set.union acc !warned_vars)
       |> Core.Set.filter ~f:(fun v ->
-             let abi = Abi.of_target ctx.Convutils.target in
+             let abi = ctx.Convutils.abi in
              Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v)
     in
     if not (Core.Set.is_empty lane_reads) then

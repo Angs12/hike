@@ -50,12 +50,14 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* Conversion table: address -> slot or region shape. *)
   (* Returns the address base the region base replaces. *)
   let base_exp_of (addr : exp) : exp =
+    (* ABI record, resolved once: the per-node check below runs on
+       every address expression of every converted def. *)
+    let abi = Abi.of_target target in
+    let is_stack_reg v = Abi.is_stack_reg abi (Var.base v) in
     let is_sf (e : exp) : bool =
       match e with
-      | Bil.Var v ->
-          Abi.is_stack_reg (Abi.of_target target) (Var.base v)
-      | Bil.Cast (_, _, Bil.Var v) ->
-          Abi.is_stack_reg (Abi.of_target target) (Var.base v)
+      | Bil.Var v -> is_stack_reg v
+      | Bil.Cast (_, _, Bil.Var v) -> is_stack_reg v
       | _ -> false
     in
     let rec go (e : exp) : exp option =

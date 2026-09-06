@@ -31,6 +31,11 @@ type emit_ctx = {
   section_remap : (int64 * int64 * Llvm.llvalue) list;
   copy_relocs : int64 list;
   target : Theory.Target.t;
+  (* ABI projection of [target] — static per binary. Leaf code reads these
+     instead of reaching back into the target per def/exp (ticket 03). *)
+  abi : Abi.t;
+  sp : var;
+  fp : var;
   ptrsize : int;
   ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
   subs : (Arg.t list * Arg.t list) Tid.Map.t;
@@ -50,6 +55,9 @@ let empty_emit_ctx () : emit_ctx =
     section_remap = [];
     copy_relocs = [];
     target = Theory.Target.unknown;
+    abi = Abi.x86_64_sysv;
+    sp = Abi.x86_64_sysv.sp;
+    fp = Abi.x86_64_sysv.fp;
     ptrsize = 0;
     ll_funcs = ref Tid.Map.empty;
     subs = Tid.Map.empty;

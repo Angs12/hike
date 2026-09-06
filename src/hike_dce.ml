@@ -9,18 +9,11 @@ module Abi = Hike_abi
 let abi_of (target : Theory.Target.t) : Abi.t =
   Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
 
-(* Stack pointer, defaulting to the record's. *)
-let sp_of (target : Theory.Target.t) : var =
-  match Abi.sp target with
-  | v -> v
-  | exception _ -> (abi_of target).Abi.sp
-
 (* Registers read implicitly by calls. *)
-let is_ret_reg (target : Theory.Target.t) (v : var) : bool =
-  Abi.is_return_reg (abi_of target) (Var.base v)
+let is_ret_reg ~(abi : Abi.t) (v : var) : bool =
+  Abi.is_return_reg abi (Var.base v)
 
-let is_call_reg (target : Theory.Target.t) (v : var) : bool =
-  let abi = abi_of target in
+let is_call_reg ~(abi : Abi.t) (v : var) : bool =
   let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 
@@ -73,28 +66,27 @@ let is_intrinsic_var (v : var) : bool =
 
 let is_hike_stack (v : var) : bool = Var.same v Convutils.hike_stack_var
 
-let is_sp (target : Theory.Target.t) (v : var) : bool =
-  Var.same v (sp_of target)
+let is_sp ~(abi : Abi.t) (v : var) : bool = Abi.is_sp abi v
 
-let rec sp_value_exp (target : Theory.Target.t) (e : exp) : bool =
+let rec sp_value_exp ~(abi : Abi.t) (e : exp) : bool =
   match e with
-  | Bil.Var v -> is_sp target v
-  | Bil.BinOp (_, a, b) -> sp_value_exp target a || sp_value_exp target b
-  | Bil.UnOp (_, a) -> sp_value_exp target a
-  | Bil.Cast (_, _, a) -> sp_value_exp target a
-  | Bil.Extract (_, _, a) -> sp_value_exp target a
-  | Bil.Concat (a, b) -> sp_value_exp target a || sp_value_exp target b
-  | Bil.Let (_, a, b) -> sp_value_exp target a || sp_value_exp target b
-  | Bil.Ite (c, a, b) -> sp_value_exp target c || sp_value_exp target a || sp_value_exp target b
+  | Bil.Var v -> is_sp ~abi v
+  | Bil.BinOp (_, a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
+  | Bil.UnOp (_, a) -> sp_value_exp ~abi a
+  | Bil.Cast (_, _, a) -> sp_value_exp ~abi a
+  | Bil.Extract (_, _, a) -> sp_value_exp ~abi a
+  | Bil.Concat (a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
+  | Bil.Let (_, a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
+  | Bil.Ite (c, a, b) -> sp_value_exp ~abi c || sp_value_exp ~abi a || sp_value_exp ~abi b
   | _ -> false
 
-let is_sp_value_def (target : Theory.Target.t) (d : def term) : bool =
+let is_sp_value_def ~(abi : Abi.t) (d : def term) : bool =
   not (Convutils.is_mem (Def.lhs d))
-  && not (is_sp target (Var.base (Def.lhs d)))
-  && sp_value_exp target (Def.rhs d)
+  && not (is_sp ~abi (Var.base (Def.lhs d)))
+  && sp_value_exp ~abi (Def.rhs d)
 
-let is_sp_for_erasure (target : Theory.Target.t) (d : def term) : bool =
-  is_sp target (Def.lhs d)
+let is_sp_for_erasure ~(abi : Abi.t) (d : def term) : bool =
+  is_sp ~abi (Def.lhs d)
 
 (* True when the sub uses the split model. Hoisted out of the sweep by
    [dce]: the KB entry cannot change while defs are only removed. *)
@@ -105,33 +97,33 @@ let is_precise_sub (sub : sub term) : bool =
 
 (* Region mems survive iff loaded; [mem] always survives. *)
 let keep ?(precise=false) ?(load_roots=Var.Set.empty)
-    ~target (d : def term) (used : Var.Set.t) : bool =
-  if precise && (is_sp_for_erasure target d || is_hike_stack (Def.lhs d) || is_sp_value_def target d) then false
+    ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
+  if precise && (is_sp_for_erasure ~abi d || is_hike_stack (Def.lhs d) || is_sp_value_def ~abi d) then false
   else
     let lhs = Def.lhs d in
     if is_region_mem lhs then
       Core.Set.mem load_roots lhs
       
     else
-      Core.Set.mem used lhs || is_ret_reg target lhs || Convutils.is_mem lhs
-      || is_call_reg target lhs || is_intrinsic_var lhs
+      Core.Set.mem used lhs || is_ret_reg ~abi lhs || Convutils.is_mem lhs
+      || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
 (* Sweeps unused defs to fixpoint. One sub walk per round: the used/roots
    sets and the removal flag come out of the single filter pass (the old
    shape paid used_of + load_roots_of + def_count walks plus a KB read
    per round). Load-roots are still recomputed per round — a removed load
    un-roots a chain, and the fixpoint handles the cascade. *)
-let rec sweep_fixpoint ~target ~precise (sub : sub term) : sub term =
+let rec sweep_fixpoint ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
   let used, load_roots = used_and_roots_of sub in
   let changed = ref false in
   let sub' =
     Term.map blk_t sub ~f:(fun blk ->
         Term.filter def_t blk ~f:(fun d ->
-            let keep = keep ~precise ~load_roots ~target d used in
+            let keep = keep ~precise ~load_roots ~abi d used in
             if not keep then changed := true;
             keep))
   in
-  if !changed then sweep_fixpoint ~target ~precise sub' else sub'
+  if !changed then sweep_fixpoint ~abi ~precise sub' else sub'
 
 (* Rewrites returns, then sweeps. Intrinsics pass through. *)
 let dce ~target (sub : sub term) : sub term =
@@ -144,4 +136,5 @@ let dce ~target (sub : sub term) : sub term =
       end
     in
     let precise = is_precise_sub sub in
-    mapper#map_sub sub |> sweep_fixpoint ~target ~precise
+    let abi = abi_of target in
+    mapper#map_sub sub |> sweep_fixpoint ~abi ~precise
