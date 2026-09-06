@@ -26,9 +26,6 @@ val flatten_comps : comp list -> Tid.t list
 (* Heads of every nested SCC. *)
 val heads_of_comps : comp list -> Tid.Set.t
 
-(* One-line printer. *)
-val pp_comp : Format.formatter -> comp -> unit
-
 (* Recursive SCC partition. *)
 val scc_partition :
   Tid.t list -> (Tid.t -> Tid.t list) -> (Tid.t -> Tid.t list) ->

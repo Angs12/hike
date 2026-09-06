@@ -32,13 +32,6 @@ let rec heads_of_comps (cs : comp list) : Tid.Set.t =
         let acc = Core.Set.add acc h in
         Core.Set.union acc (heads_of_comps inner))
 
-let rec pp_comp (fmt : Format.formatter) (c : comp) : unit =
-  match c with
-  | Vertex v -> Format.fprintf fmt "%s" (Tid.to_string v)
-  | SCC (h, inner) ->
-    Format.fprintf fmt "(%s %a)" (Tid.to_string h)
-      (Format.pp_print_list ~pp_sep:(fun fmt () -> Format.fprintf fmt " ") pp_comp) inner
-
 (* Recursive SCC partition. *)
 let scc_partition
     (nodes : Tid.t list)
