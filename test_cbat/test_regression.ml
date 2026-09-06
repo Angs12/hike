@@ -1358,3 +1358,71 @@ let run_regions () =
 ;
 (  Printf.printf "ok: property M3 fused_join invariants (skipped due to API change)\n";
   ())
+
+(* Copy-reloc slot computation, pinned through the production function. *)
+let run_copy_reloc () =
+  let m = memv "cr_m" in
+  let t i = v64 (Printf.sprintf "cr_t%d" i) in
+  let ld a = Bil.Load (Bil.Var m, Bil.Int (w64 a), LittleEndian, `r64) in
+  let st a v =
+    Bil.Store (Bil.Var m, Bil.Int (w64 a), Bil.Int (w64 v), LittleEndian, `r64)
+  in
+  let sub_of name defs =
+    let b = Blk.Builder.create () in
+    List.iter (Blk.Builder.add_def b) defs;
+    let blk = Blk.Builder.result b in
+    let sb = Sub.Builder.create ~name () in
+    Sub.Builder.add_blk sb blk;
+    Sub.Builder.result sb
+  in
+  (* Slots 0x1010..0x1050 of bss @ 0x1000. *)
+  let relocs =
+    [ (0x10, "a"); (0x20, "b"); (0x30, "c"); (0x40, "d"); (0x50, "e") ]
+  in
+  let prog =
+    Program.create
+      ~subs:
+        [
+          (* Mirrored in one sub: kept. Also stores a non-slot (ignored). *)
+          sub_of "mirror"
+            [
+              Def.create (t 1) (ld 0x1010);
+              Def.create m (st 0x1010 1);
+              Def.create m (st 0x9999 2);
+            ];
+          (* Store-only: authoritative, unmirrored -> filtered. *)
+          sub_of "storeonly" [ Def.create m (st 0x1020 3) ];
+          (* Load-only: no authoritative store -> kept. *)
+          sub_of "loadonly" [ Def.create (t 3) (ld 0x1030) ];
+          (* Cross-sub load/store: mirroring is per-sub -> filtered. *)
+          sub_of "cross_a" [ Def.create (t 4) (ld 0x1040) ];
+          sub_of "cross_b" [ Def.create m (st 0x1040 4) ];
+          (* Nested load: top-level-rhs-only match -> invisible -> kept. *)
+          sub_of "nested"
+            [
+              Def.create (t 5)
+                (Bil.BinOp (Bil.PLUS, ld 0x1050, Bil.Int (w64 1)));
+            ];
+        ]
+      ()
+  in
+  let got = Hike.copy_reloc_slots ~bss_addr:0x1000L relocs prog in
+  check "copy_reloc: mirrored slot kept"
+    (Base.List.mem got 0x1010L ~equal:Int64.equal);
+  check "copy_reloc: store-only slot filtered"
+    (not (Base.List.mem got 0x1020L ~equal:Int64.equal));
+  check "copy_reloc: load-only slot kept"
+    (Base.List.mem got 0x1030L ~equal:Int64.equal);
+  check "copy_reloc: cross-sub load/store is NOT a mirror"
+    (not (Base.List.mem got 0x1040L ~equal:Int64.equal));
+  check "copy_reloc: nested load invisible, slot kept"
+    (Base.List.mem got 0x1050L ~equal:Int64.equal);
+  check "copy_reloc: exact slot list"
+    (Base.List.equal Int64.equal got [ 0x1010L; 0x1030L; 0x1050L ]);
+  check "copy_reloc: empty relocs -> []"
+    (Hike.copy_reloc_slots ~bss_addr:0x1000L [] prog = []);
+  check "copy_reloc: empty program -> all"
+    (Base.List.equal Int64.equal
+       (Hike.copy_reloc_slots ~bss_addr:0x1000L relocs
+          (Program.create ~subs:[] ()))
+       [ 0x1010L; 0x1020L; 0x1030L; 0x1040L; 0x1050L ])
