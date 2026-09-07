@@ -307,6 +307,115 @@ let subset (p1 : t) (p2 : t) : bool =
         singleton_elem || (in_bounds && step_and_overlap)
       end
 
+(* Circular step-1 arc (start, length) of a finite CLP; None otherwise.
+   [create] keeps step-1 shapes verbatim, so the arc is (base, cardn)
+   directly. Normalized edge shapes recover too: a singleton is a length-1
+   arc; the wrapped two-point pair is stored descending (base = the second
+   element, step = -1), which is the arc (base-1, 2). *)
+let step1_arc (p : t) : (word * word) option =
+  let width = bitwidth p in
+  if is_bottom p || is_infinite p then None
+  else if W.is_one (step_of p) then Some (base_of p, cardn_of p)
+  else if W.is_zero (step_of p) && is_one (cardn_of p) then
+    Some (base_of p, W.one (width + 1))
+  else if W.is_zero (W.succ (step_of p)) && W.(=) (cardn_of p) (W.of_int ~width:(width + 1) 2) then
+    Some (W.pred (base_of p), W.of_int ~width:(width + 1) 2)
+  else None
+
+(* Exact meet of two circular step-1 arcs; None when the true intersection
+   is two separate pieces (not representable as one CLP). All arithmetic at
+   width+1 bits so the wrap never overflows. *)
+let step1_intersection (width : int) (p1 : t) (p2 : t) : t option =
+  match step1_arc p1, step1_arc p2 with
+  | Some (s1, l1), Some (s2, l2) ->
+    let n = dom_size ~width:(width + 1) width in
+    if W.(>=) l1 n then Some p2
+    else if W.(>=) l2 n then Some p1
+    else if W.is_zero l1 || W.is_zero l2 then Some (bottom width)
+    else
+      let d = W.extract_exn ~hi:width (W.sub s2 s1) in
+      let e = W.add d l2 in
+      if W.(>=) d l1 then begin
+        (* B starts at/after A's end; only B's wrapped tail reaches into A. *)
+        if W.(<) e n then Some (bottom width)
+        else begin
+          let tail = W.sub e n in
+          let m = if W.(<=) tail l1 then tail else l1 in
+          if W.is_zero m then Some (bottom width)
+          else Some (create ~width s1 ~step:(W.one width) ~cardn:m)
+        end
+      end
+      else begin
+        (* B starts inside A. *)
+        if W.(<=) e n then begin
+          let m = if W.(<=) e l1 then e else l1 in
+          if W.(=) m d then Some (bottom width)
+          else Some (create ~width (W.add s1 d) ~step:(W.one width) ~cardn:(W.sub m d))
+        end
+        else begin
+          (* B wraps: pieces [d, l1) and [0, min(e-n, l1)). *)
+          let en = W.sub e n in
+          let piece = if W.(<=) en l1 then en else l1 in
+          if W.(>=) piece d then Some p1
+          else Some (if W.(<=) l1 l2 then p1 else p2)
+        end
+      end
+  | _ -> None
+
+(* Generic meet of two progressions: the diophantine-anchor lane. *)
+let generic_intersection (p1 : t) (p2 : t) : t =
+  let width = bitwidth p1 in
+  let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
+
+  let translation = (base_of p1) in
+  let translated_p1 = translate p1 (W.neg (base_of p1)) in
+  let translated_p2 = translate p2 (W.neg (base_of p1)) in
+  let p1, p2 = translated_p1, translated_p2 in
+  let p1_infinite = is_infinite p1 in
+  let p2_infinite = is_infinite p2 in
+  let open Monads.Std.Monad.Option.Syntax in
+  (match begin
+    finite_end p1 >>= fun e1 ->
+    finite_end p2 >>= fun e2 ->
+      let step = W.lcm_exn (step_of p1) (step_of p2) in
+      if W.is_zero step then begin
+        (* Singleton case: exact or empty. *)
+        if W.is_zero (step_of p2) then
+          Option.some_if (elem (base_of p2) p1) () >>= fun _ ->
+          !!(create (base_of p2))
+        else
+          Option.some_if (elem (base_of p1) p2) () >>= fun _ ->
+          !! (create (base_of p1))
+      end else begin
+        bounded_diophantine (step_of p1) (step_of p2) (base_of p2) >>= fun (x,_) ->
+        let base = W.mul x (step_of p1) in
+        let base =
+          if p2_infinite then base
+          else match min_elem p2 with
+            | None -> base
+            | Some m when W.(<) base m ->
+              let w1 = width + 1 in
+              let d = W.extract_exn ~hi:width (W.sub m base) in
+              let s = W.extract_exn ~hi:width step in
+              let q = W.div d s in
+              let r = W.modulo d s in
+              let k = if W.is_zero r then q else W.succ q in
+              let up = W.add (W.extract_exn ~hi:width base) (W.mul k s) in
+              if W.(>=) up (dom_size ~width:w1 width) then W.ones width else W.extract_exn ~hi:(width - 1) up
+            | Some _ -> base in
+        let minE = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
+        if W.(<=) base minE then begin
+          let cardn = cardn_from_bounds base step minE in
+          !!(create base ~step ~cardn)
+        end else begin
+          let safe_operand = if subset p1 p2 then p2 else if subset p2 p1 then p1 else if W.(>=) (cardinality p1) (cardinality p2) then p1 else p2 in
+          !!safe_operand
+        end
+      end
+  end with
+  | None -> bottom width
+  | Some x -> x) |> (fun p -> translate p translation)
+
 (* First common point of both progressions. *)
 let intersection (p1 : t) (p2 : t) : t =
   (* Width mismatch returns the wider operand. *)
@@ -314,56 +423,9 @@ let intersection (p1 : t) (p2 : t) : t =
     (if bitwidth p1 > bitwidth p2 then p1 else p2)
   else
     let width = bitwidth p1 in
-    let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
-    
-    let translation = (base_of p1) in
-    let translated_p1 = translate p1 (W.neg (base_of p1)) in
-    let translated_p2 = translate p2 (W.neg (base_of p1)) in
-    let p1, p2 = translated_p1, translated_p2 in
-    let p1_infinite = is_infinite p1 in
-    let p2_infinite = is_infinite p2 in
-    let open Monads.Std.Monad.Option.Syntax in
-    (match begin
-      finite_end p1 >>= fun e1 ->
-      finite_end p2 >>= fun e2 ->
-        let step = W.lcm_exn (step_of p1) (step_of p2) in
-        if W.is_zero step then begin
-          (* Singleton case: exact or empty. *)
-          if W.is_zero (step_of p2) then
-            Option.some_if (elem (base_of p2) p1) () >>= fun _ ->
-            !!(create (base_of p2))
-          else
-            Option.some_if (elem (base_of p1) p2) () >>= fun _ ->
-            !! (create (base_of p1))
-        end else begin
-          bounded_diophantine (step_of p1) (step_of p2) (base_of p2) >>= fun (x,_) ->
-          let base = W.mul x (step_of p1) in
-          let base =
-            if p2_infinite then base
-            else match min_elem p2 with
-              | None -> base
-              | Some m when W.(<) base m ->
-                let w1 = width + 1 in
-                let d = W.extract_exn ~hi:width (W.sub m base) in
-                let s = W.extract_exn ~hi:width step in
-                let q = W.div d s in
-                let r = W.modulo d s in
-                let k = if W.is_zero r then q else W.succ q in
-                let up = W.add (W.extract_exn ~hi:width base) (W.mul k s) in
-                if W.(>=) up (dom_size ~width:w1 width) then W.ones width else W.extract_exn ~hi:(width - 1) up
-              | Some _ -> base in
-          let minE = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
-          if W.(<=) base minE then begin
-            let cardn = cardn_from_bounds base step minE in
-            !!(create base ~step ~cardn)
-          end else begin
-            let safe_operand = if subset p1 p2 then p2 else if subset p2 p1 then p1 else if W.(>=) (cardinality p1) (cardinality p2) then p1 else p2 in
-            !!safe_operand
-          end
-        end
-    end with
-    | None -> bottom width
-    | Some x -> x) |> (fun p -> translate p translation)
+    match step1_intersection width p1 p2 with
+    | Some p -> p
+    | None -> generic_intersection p1 p2
 
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
