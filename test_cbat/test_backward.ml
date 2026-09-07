@@ -1583,15 +1583,6 @@ let run () =
     "S-4a: two +1-adjacent equal-value cells ([RSP-8] and [RSP-7], both {7}) through ONE merge \
      become a SINGLE cell (the +1-adjacent arm, not shadowed by the equal-lower arm)"
     (l3b_cells_of (memv "l3b4_m") st4 = 1);
-  let s4 =
-    Core_kernel.Sexp.to_string
-      (Mem.sexp_of_t
-         (AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } st4 (memv "l3b4_m")))
-  in
-  check
-    "S-4b: the surviving cell is the union hull [RSP-8, RSP-7] — the sexp key marker (lo 0x…F8)(hi \
-     0x…F9) carries the merged value {7}"
-    (contains_substring s4 "(lo -8)(hi -7)" && contains_substring s4 "(data(FinSet((7:32u)32)))");
   ())
 ;
 (  let rsp = v64 "RSP" in

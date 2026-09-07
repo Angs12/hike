@@ -31,42 +31,7 @@ let anchored_entry () : AI.t =
 let failures = ref 0
 
 let check (name : string) (b : bool) : unit =
-  let ignored_substrings =
-    [
-      "E6-1";
-      "E6-2";
-      "T3-5";
-      "T3-6";
-      "T3-7";
-      "T3-7b";
-      "T3-8";
-      "S-4b";
-      "regression C1";
-      "regression C2";
-      "regression C3";
-      "regression C4b";
-      "regression C4a";
-      "property R11";
-      "R6:";
-      "G3:";
-      "remediation A1";
-      "remediation A2";
-      "remediation A3";
-      "remediation A4a";
-      "remediation A4b";
-      "remediation A4c";
-      "property meet R5";
-      "property logand R10b";
-    ]
-  in
-  let is_ignored =
-    Base.List.exists ignored_substrings ~f:(fun needle ->
-        let n = String.length name and m = String.length needle in
-        let rec go i = i + m <= n && (String.sub name i m = needle || go (i + 1)) in
-        m = 0 || go 0)
-  in
-  if is_ignored then Printf.printf "ok: %s (stubbed)\n" name
-  else if b then Printf.printf "ok: %s\n" name
+  if b then Printf.printf "ok: %s\n" name
   else (
     Printf.printf "FAIL: %s\n" name;
     incr failures)

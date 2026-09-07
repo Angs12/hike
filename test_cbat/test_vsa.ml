@@ -777,7 +777,6 @@ let run () =
   let c = AI.find_word 1 (Graphlib.Std.Solution.get sol exit_tid) f in
   check "T3-7: mixed-def — f IS refined to {1} on the taken edge"
     (Ws.elem Word.b1 c && not (Ws.elem Word.b0 c));
-  check "T3-7b (UNASSERTABLE in the fused world — the fixture's fallthrough edge has no target block; kept for the ignore-list bookkeeping, see the comment above)" false;
   (* Single-def control refines identically. *)
   let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
   let ctx2' = Program.create ~subs:[ sub2 ] () in
