@@ -441,14 +441,14 @@ Region-merge EXPOSED it; it did not create it. Diagnosis = its own ticket.
 Also flagged: main's producer wall measured +80% vs c46454a (du ~26s →
 ~47s) — present before these lanes merged, needs its own perf lane.
 
-| gate (merged tree) | result |
+| gate (the fully-merged tree: honest stack + region-merge + tm-del) | result |
 |---|---|
-| dune runtest --force | **480 ok / 0 FAIL** (pre-18df839 count; re-verify after the honest-stack merge) |
+| dune runtest (incl. the clpequiv referee stanza) | **ALL PASSED**; direct-exe **483 ok / 0 FAIL** (the R12-9 sweep fixtures green post-word-migration) |
 | corpus + sort/grep/gcc-12 | **35/35 rc=0** |
-| IR vs the tm-del control | 26/35 identical, 9 renumbering-only, **zero residue** |
-| check_allocas | **172/3** = control's pre-existing shape-d |
-| semantic-all / opt (both emission runs) | **32/0/3** and **32/0/3** |
-| semantics 8-bin | **8/8** |
+| check_allocas | **172/3** = control's pre-existing shape-d (gcc-12:25, grep:3, sort:1) |
+| semantic-all (full suite, the promoted run_semantic.sh) | **32 PASS / 0 FAIL / 3 SKIP** |
+| optimization-safety (opt) | **32 PASS / 0 FAIL / 3 SKIP** |
+| unmapped intrinsics | **26**, identical lines to control (gcc-12's pre-existing class) |
 | two-run determinism | 26/35 byte-identical; 9 renumbering-only, zero residue (the exposed flake, above) |
 
 **Last verified: 2026-09-07 EEST — REGION-MERGE LANE (branch `region-merge`,

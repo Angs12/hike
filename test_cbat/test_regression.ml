@@ -1143,7 +1143,7 @@ let run_regions () =
   let mk name off =
     let t = v64 name in
     Def.create t
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 off)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 off))), LittleEndian, `r32))
   in
   let b = Blk.Builder.create () in
   (* a: [-64,-48] lone; b: [-32,-32]; c: [-40,-24] overlaps b (span
