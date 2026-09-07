@@ -72,7 +72,6 @@ let of_int ~width (v : int) : t =
   else if v >= 0 then Small (v, width, false)
   else mkz (Z.add (Z.shift_left Z.one width) (Z.of_int v)) width
 
-let of_int32 ?(width = 32) (v : int32) : t = of_int ~width (Int32.to_int v)
 let of_int64 ?(width = 64) (v : int64) : t = of_z (Z.of_int64 v) width
 
 let[@inline] is_zero (t : t) : bool =

@@ -163,6 +163,3 @@ let endian_string : Word.endian -> string = function
 
 let gt_int (w : W.t) (i : int) : bool =
   W.compare w (W.of_int ~width:(W.bitwidth w) i) > 0
-
-let lt_int (w : W.t) (i : int) : bool =
-  W.compare w (W.of_int ~width:(W.bitwidth w) i) < 0

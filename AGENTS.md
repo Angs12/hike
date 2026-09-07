@@ -1869,10 +1869,6 @@ runs lifted vs native, and byte-diffs stdout.  Needs `llc` + `gcc`.
   the flat `Hike__Hike_vsa_relevance` name (or `Hike__.Hike_vsa_relevance`), passing
   `sp` explicitly (`Hike.Abi.sp (Project.target proj)` / a fixture's `v64 "RSP"`).
   The old single-pass copies in `test_cbat/` and `zz_scratch_probe/` were deleted.
-- `docs/vsa-usage.md` §2 is stale: it claims the VSA is not wired into the production pass.
-  The relevance/vsa/stack-to-locals/dce passes now ship inside `hike-convlir`; §1's
-  `restriction_enabled` ref and the "279-check" count are stale too (tag-only design,
-  269 checks). §3 (drivers, API, expected numbers) and the env toggles are still accurate.
 
 ## Agent skills
 

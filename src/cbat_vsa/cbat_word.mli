@@ -39,7 +39,6 @@ val ones : int -> t
 val b0 : t
 val b1 : t
 val of_int : width:int -> int -> t
-val of_int32 : ?width:int -> int32 -> t
 val of_int64 : ?width:int -> int64 -> t
 
 val is_zero : t -> bool

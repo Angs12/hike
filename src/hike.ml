@@ -17,7 +17,6 @@ module Kb = Hike_kb
 module Convutils = Convutils
 module Bil2llvm = Bil2llvm
 
-module StrMap = Map.Make (String)
 module StrSet = Set.Make (String)
 
 let get_section_mem name proj =
@@ -387,8 +386,6 @@ let convert_binary output_program proj =
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
-
-let requires = []
 
 let output =
   Extension.Configuration.parameter ~aliases:[ "o"; "output" ]

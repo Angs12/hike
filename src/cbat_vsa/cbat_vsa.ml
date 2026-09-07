@@ -51,18 +51,6 @@ let mem_idx addr_sz addressable_sz : Mem.idx =
       (if !addr_bits_ref > 0 then !addr_bits_ref else Size.in_bits addr_sz);
     Mem.addressable_width = Size.in_bits addressable_sz }
 
-let jmp_target (j : jmp term) : tid option =
-  let mlbl = match Jmp.kind j with
-    | Call c -> Some (Call.target c)
-    | Goto lbl
-    | Ret lbl -> Some lbl
-    | Int _ -> None in
-  Option.bind mlbl ~f:begin fun lbl ->
-    match lbl with
-    | Direct tid -> Some tid
-    | Indirect _ -> None
-  end
-
 type wordset = WordSet.t
 
 
@@ -155,42 +143,6 @@ let val_top : typ -> val_t = function
     let k = mem_idx addr_sz addressable_sz in
     `Mem (Mem.top k)
   | Type.Unk -> failwith "Error in val_top: typ is not representable by Type.t"
-
-
-(* Frame-derived registers equal entry RSP plus an offset; must-facts. *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-(* Addresses rewrite to offsets for base-independent keys. *)
-
-
-
-
-
-
-
-
-
-(* Facts must mirror value tracking exactly. *)
-
-
-(* Non-singleton consts fall back to the direct key. *)
-
-
 
 (* Effect of one def on facts; every def is denoted (spec §2.1). *)
 let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
@@ -1123,27 +1075,6 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
      | Type.Imm _ | Type.Unk -> env)
   | _ -> env
 
-(* ================================================================== *)
-(* Backward walk: seeds flow to predecessors until stable. *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-(* ================================================================== *)
-
 (* Live set: var base to constraint. *)
 module Live = struct
   type t = wordset Var.Map.t
@@ -1577,18 +1508,6 @@ type analysis_ctx = {
      ([inverse_denote_exp]) is then a no-op. *)
   has_sub : bool;
 }
-
-
-(* ================================================================== *)
-(* Leaf constraints of a guard; every shape has a row. *)
-
-
-
-
-
-
-
-(* ================================================================== *)
 
 (* BIL op to guard op. *)
 let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
@@ -2105,19 +2024,6 @@ let assume_jump_cond
   assume_jump_cond_with_group ?defs ~flag_state
     env jmp
 
-(* ================================================================== *)
-(* Per-edge refinement uses accumulated edge conds. *)
-
-
-
-
-
-
-
-
-
-(* ================================================================== *)
-
 (* Per-sub static edge table: per (block, jmp) accumulated cond. *)
 let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
   let ircfg = Sub.to_cfg sub in
@@ -2138,57 +2044,6 @@ let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
       Hashtbl.set tbl ~key:(Term.tid src) ~data:by_jmp);
   Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
       Core.Map.set acc ~key ~data)
-
-(* ================================================================== *)
-(* Deep walk cached per (block, jmp). *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-(* ================================================================== *)
 
 (* Candidate-1 overlap census: per-walk records (guard block, jmp, seed
    mix, visited-block set). Production builds see only the type and
@@ -2801,23 +2656,6 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   stabilize_worklist ();
   Stages.report (Sub.name s);
   Solution.create (!rc_cell).rc_state.fs_sol sol_default
-
-(* ================================================================== *)
-(* Per-def classification over the converged solution. *)
-
-
-
-
-
-
-
-
-
-
-
-
-
-(* ================================================================== *)
 module Cbat_extraction = struct
 (* Classification vocabulary. *)
 type kind =
@@ -3010,9 +2848,7 @@ let rec extract ~(sp : var)
           | Range _ -> true
           | Infinite _ | Unbounded | Dead | VLA _ -> false)
     in
-    let items =
-      Base.List.map bounded ~f:(fun (dtid, kind, ws) -> (dtid, kind, ws))
-    in
+    let items = bounded in
     (* Transitive overlap components. *)
     let rec components acc = function
       | [] -> acc

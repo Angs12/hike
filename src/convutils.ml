@@ -157,10 +157,6 @@ include Vsa
 let hike_stack_var : var =
   Var.create ~is_virtual:false ~fresh:false "hike_stack" (Type.Imm 64)
 
-let kind_lo = function
-  | Range (lo, _) | Infinite (lo, _) -> lo
-  | Unbounded | Dead | VLA _ -> 0L
-
 let is_positive_kind = function
   | Range (lo, _) | Infinite (lo, _) -> Int64.compare lo 0L >= 0
   | Unbounded | Dead | VLA _ -> false

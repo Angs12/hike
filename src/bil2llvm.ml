@@ -765,10 +765,6 @@ let is_abi_visible ctx sub_info def =
   | Some info ->
       Hike_stack_model.abi_visibility_of ctx.Convutils.sp info def
 
-(* A stack access carries a [vsa_info] tag — the invariant is structural
-   (spec §2.2): an access is a stack access iff it is tagged. *)
-let has_vsa_info sub_info def = Option.is_some (find_def_tag sub_info def)
-
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =
@@ -939,15 +935,14 @@ let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
       Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
 
 (* Dispatches tagged accesses to storage. *)
-let mem_access llvm_builder blk_tid sub_tid sub_info fr
+let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
     (def : def term) (exp : exp) =
   
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
-  match find_def_tag sub_info def with
-  | Some (Convutils.Range (lo, hi))
-    when Int64.equal lo hi && has_vsa_info sub_info def ->
+  match def_tag with
+  | Some (Convutils.Range (lo, hi)) when Int64.equal lo hi ->
       if Int64.compare lo 0L > 0 then
         (* Incoming-arg cells read via [hike_stack]. *)
         (match fr.stack with
@@ -964,7 +959,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
         (* Locals use static frame GEPs. *)
         create_static_mem_access llvm_builder blk_tid fr lo exp
   | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-    when Int64.compare lo 0L >= 0 && has_vsa_info sub_info def ->
+    when Int64.compare lo 0L >= 0 ->
       (* Positive intervals rebase onto the stack. *)
       (match find_mem_node (Def.rhs def) with
       | Some node ->
@@ -974,15 +969,13 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
       | None -> create_exp llvm_builder blk_tid exp)
   | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
   | Some Convutils.Unbounded ->
-      if has_vsa_info sub_info def then begin
-        if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
-          ctx.Convutils.guarded_warned :=
-            Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
-          (* Warning text is a grepped contract. *)
-          Hike_diag.warn
-            "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
-            (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
-        end
+      if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
+        ctx.Convutils.guarded_warned :=
+          Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
+        (* Warning text is a grepped contract. *)
+        Hike_diag.warn
+          "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
+          (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
       end;
       create_exp llvm_builder blk_tid exp
   | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
@@ -990,13 +983,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr
   | Some Convutils.Dead ->
       let* typ = typ_lltype_m (Var.typ var) in
       return @@ Llvm.poison typ
-  | None ->
-      if has_vsa_info sub_info def then
-        failwith
-          (Printf.sprintf
-             "hike: 100%% VSA Tagging invariant violated: sub %s def %s has no VSA tag"
-             (Tid.name sub_tid) (Tid.name (Term.tid def)))
-      else create_exp llvm_builder blk_tid exp
+  | None -> create_exp llvm_builder blk_tid exp
 
 let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
   
@@ -1005,6 +992,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
   let var = Def.lhs def in
   let v = Def.value def in
   let exp = Def.rhs def in
+  let def_tag = find_def_tag sub_info def in
   let* res =
     (* Runtime-sized SP decrements become real allocas (spec §2.3). *)
     if Core.Set.mem alloc_tids (Term.tid def) then
@@ -1013,9 +1001,8 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
       create_rip_relative_addr llvm_builder blk_tid exp
     else if fr.is_precise then
       (* Split-model accesses use region GEPs. *)
-      (match find_def_tag sub_info def with
-       | Some (Convutils.Range (lo, hi))
-         when Int64.equal lo hi && has_vsa_info sub_info def ->
+      (match def_tag with
+       | Some (Convutils.Range (lo, hi)) when Int64.equal lo hi ->
            (match region_of_offset fr.regions lo with
             | Some (r, base) ->
                 let offset = Int64.sub lo (fst r.Convutils.span) in
@@ -1026,9 +1013,9 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
                     "" llvm_builder
                 in
                  mem_access_at_ptr llvm_builder blk_tid gep exp
-            | None -> mem_access llvm_builder blk_tid sub_tid sub_info fr def exp)
-       | _ -> mem_access llvm_builder blk_tid sub_tid sub_info fr def exp)
-    else mem_access llvm_builder blk_tid sub_tid sub_info fr def exp
+            | None -> mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp)
+       | _ -> mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp)
+    else mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp
   in
   insert_local ctx blk_tid var res;
   return ()

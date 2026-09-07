@@ -24,7 +24,6 @@ val lshift_exact : Cbat_word.t -> int -> Cbat_word.t
 val cdiv : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
 
 val gt_int : Cbat_word.t -> int -> bool
-val lt_int : Cbat_word.t -> int -> bool
 
 val is_one : Cbat_word.t -> bool
 
