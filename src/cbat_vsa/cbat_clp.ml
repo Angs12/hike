@@ -483,51 +483,21 @@ let mul (p1 : t) (p2 : t) : t =
 
 
 
-let lead_1_bit_run (w : word) ~hi ~lo : int =
-  let rec lead_help (hi : int) (lo : int) : int =
-    if hi = lo then hi else
-    let mid = (hi + lo) / 2 in
-    let hi_part = W.extract_exn ~hi ~lo:(mid + 1) w in
-    if W.is_zero (W.lnot hi_part) then lead_help mid lo
-    else lead_help hi (mid + 1)
-  in
-  assert(lo >= 0);
-  assert(hi >= lo);
-  (lead_help hi lo)  + 1
-
-
-
-let compute_l_s_b lsb1 lsb2 b1 b2 : int = if lsb1 < lsb2 then
-    let interval = W.extract_exn ~hi:(lsb2 - 1) ~lo:lsb1 b2 in
-    let w, bit = factor_2s interval in
-    if W.is_zero w then lsb2 else bit + lsb1
-  else if lsb1 > lsb2 then
-    let interval =  W.extract_exn ~hi:(lsb1 - 1) ~lo:lsb2 b1 in
-    let w, bit = factor_2s interval in
-    if W.is_zero w then lsb1 else bit + lsb2
-  else lsb1  (* Equal low bits. *)
-
-
-
-let compute_m_s_b msb1 msb2 b1 b2 : int = if msb1 > msb2 then
-    let interval = W.extract_exn ~hi:msb1 ~lo:(msb2 + 1) b2 in
-    Option.value_map ~default:msb2
-      (lead_1_bit interval)
-      ~f:(fun b -> b + msb2 + 1)
-  else if msb1 < msb2 then
-    let interval =  W.extract_exn ~hi:msb2 ~lo:(msb1 + 1) b1 in
-    Option.value_map ~default:msb1
-      (lead_1_bit interval)
-      ~f:(fun b -> b + msb1 + 1)
-  else msb1  (* Equal high bits. *)
-
-
-let compute_range_sep msb msb1 msb2 b1 b2 : int = if msb1 > msb2
-  then if msb = msb1 then lead_1_bit_run b2 ~hi:msb1 ~lo:(msb2 + 1) else msb + 1
-  else if msb1 < msb2 then
-    if msb = msb2 then lead_1_bit_run b1 ~hi:msb2 ~lo:(msb1 + 1) else msb + 1
-    (* TODO: verify this branch. *)
-  else -1
+(* Fixed bit positions of [p]: below the step's 2-power (the residue class)
+   and above the highest bit where [min_p] and [max_p] differ. *)
+let fixed_bits (p : t) (min_p : word) (max_p : word) : word =
+  let sz = bitwidth p in
+  let low_twos = if is_one (cardn_of p) then sz
+    else snd (factor_2s (step_of p)) in
+  let low = if low_twos = 0 then W.zero sz else
+    W.extract_exn ~hi:(sz - 1) (W.ones low_twos) in
+  let msb = Option.value ~default:(-1)
+      (lead_1_bit (W.logxor min_p max_p)) in
+  let high = if msb < 0 || msb >= sz - 1 then W.zero sz else
+    let sized = W.extract_exn ~hi:(sz - 1)
+        (W.ones (sz - msb - 1)) in
+    Word.lshift sized (W.of_int ~width:sz (msb + 1)) in
+  W.logor low high
 
 
 (* Bitwise op via non-wrapping superset. *)
@@ -559,62 +529,28 @@ let logand (p1 : t) (p2 : t) : t =
       max_elem p1 >>= fun max_elem_p1 ->
       min_elem p2 >>= fun min_elem_p2 ->
       max_elem p2 >>= fun max_elem_p2 ->
-      let _, twos_in_s1 = factor_2s (step_of p1) in
-      let _, twos_in_s2 = factor_2s (step_of p2) in
-      let least_significant_bit_p1 = if W.is_one (cardn_of p1) then sz
-      
-        else twos_in_s1 in
-      let least_significant_bit_p2 = if W.is_one (cardn_of p2) then sz
-      
-        else twos_in_s2 in
-      
-      let most_significant_bit_p1 = Option.value ~default:(-1)
-          (lead_1_bit (W.logxor min_elem_p1 max_elem_p1)) in
-      let most_significant_bit_p2 = Option.value ~default:(-1)
-          (lead_1_bit (W.logxor min_elem_p2 max_elem_p2)) in
-      let l_s_b = compute_l_s_b
-          least_significant_bit_p1
-          least_significant_bit_p2
-          min_elem_p1 min_elem_p2 in
-      let m_s_b = compute_m_s_b
-          most_significant_bit_p1
-          most_significant_bit_p2
-          min_elem_p1 min_elem_p2 in
-      if l_s_b > m_s_b then
-        (* Singleton result. *)
-        let base = W.logand min_elem_p1 min_elem_p2 in
-        !!(create base)
+      (* Bits fixed in both operands keep their AND value; a bit fixed to 0
+         in either operand is 0 in the result. On every such bit the result
+         agrees with [min_elem_p1 & min_elem_p2]. *)
+      let fixed1 = fixed_bits p1 min_elem_p1 max_elem_p1 in
+      let fixed2 = fixed_bits p2 min_elem_p2 max_elem_p2 in
+      let forced = W.logand fixed1 fixed2
+        |> W.logor (W.logand fixed1 (W.lnot min_elem_p1))
+        |> W.logor (W.logand fixed2 (W.lnot min_elem_p2)) in
+      let mask = W.lnot forced in
+      if W.is_zero mask then
+        (* No free bits: the result is the singleton AND of the minima. *)
+        !!(create (W.logand min_elem_p1 min_elem_p2))
       else
-        let range_sep = compute_range_sep m_s_b
-            most_significant_bit_p1
-            most_significant_bit_p2
-            min_elem_p1 min_elem_p2
-        in
-        let mask = if l_s_b >= range_sep then W.zero sz
-              else let ones = W.ones (range_sep - l_s_b) in
-                let sized_ones = W.extract_exn ~hi:(sz - 1) ones in
-                Word.lshift sized_ones (W.of_int ~width:sz l_s_b) in
         let safe_lower_bound =
-          W.logand min_elem_p1 min_elem_p2 |> W.logand (W.lnot mask) in
+          W.logand min_elem_p1 min_elem_p2 |> W.logand forced in
         let safe_upper_bound = W.logand max_elem_p1 max_elem_p2 |>
                                W.logor mask |>
                                W.min max_elem_p1 |>
                                W.min max_elem_p2 in
-        let twos_step = W.lshift (W.of_int 1 ~width:sz)
-            (W.of_int l_s_b ~width:sz) in
-        let step = if most_significant_bit_p1 > most_significant_bit_p2 &&
-                      m_s_b = most_significant_bit_p1 &&
-                      range_sep = l_s_b then
-            W.max (step_of p1) twos_step
-          else if most_significant_bit_p2 > most_significant_bit_p1 &&
-                      m_s_b = most_significant_bit_p2 &&
-                      range_sep = l_s_b then
-            W.max (step_of p2) twos_step
-          else twos_step in
-        let b1_and_b2 = W.logand min_elem_p1 min_elem_p2 in
-        let frac = cdiv (W.sub safe_lower_bound b1_and_b2) step in
-        let base = W.add b1_and_b2 (W.mul step frac) in
-        (* TODO: use cardn_from_bounds. *)
+        let _, l_s_b = factor_2s mask in
+        let step = W.lshift (W.one sz) (W.of_int ~width:sz l_s_b) in
+        let base = safe_lower_bound in
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
   end with
