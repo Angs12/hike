@@ -60,22 +60,24 @@ let text_load_constant ctx llvm_ctx llvm_module addr w =
   | Some (arr, tmin, tmax)
     when Int64.compare v tmin >= 0 && Int64.compare v tmax <= 0 ->
       let off = Int64.to_int (Int64.sub v tmin) in
-      let bytes = ref 0L in
-      for i = 0 to (w / 8) - 1 do
-        let b =
-          if off + i < Array.length arr then
-            Int64.of_int arr.(off + i) else 0L
-        in
-        bytes :=
-          Int64.logor !bytes
-            (Int64.shift_left b (i * 8))
-      done;
-      let remapped = lookup_native_fn ctx llvm_module !bytes in
+      let bytes =
+        Base.Sequence.fold
+          (Base.Sequence.range 0 (w / 8))
+          ~init:0L
+          ~f:(fun acc i ->
+            let b =
+              if off + i < Array.length arr then
+                Int64.of_int arr.(off + i)
+              else 0L
+            in
+            Int64.logor acc (Int64.shift_left b (i * 8)))
+      in
+      let remapped = lookup_native_fn ctx llvm_module bytes in
       let c =
         match remapped with
         | Some f -> Llvm.const_ptrtoint f (Llvm.i64_type llvm_ctx)
         | None ->
-            Llvm.const_of_int64 (Llvm.integer_type llvm_ctx w) !bytes false
+            Llvm.const_of_int64 (Llvm.integer_type llvm_ctx w) bytes false
       in
       Some c
   | _ -> None
@@ -84,19 +86,19 @@ let text_load_constant ctx llvm_ctx llvm_module addr w =
 let set_section_initializer ctx llvm_ctx llvm_module g arr min_addr =
   let n64 = (Array.length arr + 7) / 8 in
   let slot_at i =
-    let v = ref 0L in
-    for k = 7 downto 0 do
-      let b =
-        if (i * 8) + k < Array.length arr then
-          Int64.of_int arr.((i * 8) + k)
-        else 0L
-      in
-      v := Int64.logor (Int64.shift_left !v 8) b
-    done;
-    match remap_native_addr ctx llvm_ctx llvm_module !v with
+    let v =
+      Base.List.fold [ 7; 6; 5; 4; 3; 2; 1; 0 ] ~init:0L ~f:(fun acc k ->
+          let b =
+            if (i * 8) + k < Array.length arr then
+              Int64.of_int arr.((i * 8) + k)
+            else 0L
+          in
+          Int64.logor (Int64.shift_left acc 8) b)
+    in
+    match remap_native_addr ctx llvm_ctx llvm_module v with
     | Some c -> c
     | None ->
-        Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) !v false
+        Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) v false
   in
   let slots = Array.init n64 slot_at in
   Llvm.set_initializer (Llvm.const_array (Llvm.i64_type llvm_ctx) slots) g
@@ -124,6 +126,13 @@ let section_list_var : section list KB.Context.var =
 let emit_ctx_var : Convutils.emit_ctx KB.Context.var =
   KB.Context.declare ~package:"hike" "emit-ctx"
     (KB.return (Convutils.empty_emit_ctx ()))
+
+(* One reader for the context-get pairs opening most emitters. *)
+let emit_env () =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  return (ctx, llvm_ctx)
 
 let typ_lltype_m typ =
   let open KB in
@@ -160,6 +169,12 @@ let fp_double_parsing : string list = [ "atof"; "strtod"; "strtod_l" ]
 let fp_float_parsing : string list = [ "strtof"; "strtof_l" ]
 let fp_longdouble_parsing : string list = [ "strtold"; "strtold_l" ]
 
+(* Module-init membership sets for the extern-float classifier. *)
+let fp_double_libm_set = Base.Set.of_list (module Base.String) fp_double_libm
+let fp_double_parsing_set = Base.Set.of_list (module Base.String) fp_double_parsing
+let fp_float_parsing_set = Base.Set.of_list (module Base.String) fp_float_parsing
+let fp_longdouble_parsing_set = Base.Set.of_list (module Base.String) fp_longdouble_parsing
+
 let strip_at (name : string) : string =
   if String.length name > 0 && name.[0] = '@' then
     String.sub name 1 (String.length name - 1)
@@ -169,16 +184,16 @@ let fp_ret_kind_of_extern ctx (sub_tid : tid) : fp_ret_kind option =
   if not (is_extern ctx sub_tid) then None
   else
     let name = strip_at (Tid.name sub_tid) in
-    let mem = Base.List.mem ~equal:String.equal in
-    if mem fp_double_libm name then Some FpDouble
-    else if mem fp_double_parsing name then Some FpDouble
-    else if mem fp_float_parsing name then Some FpFloat
-    else if mem fp_longdouble_parsing name then Some FpLongDouble
+    if Base.Set.mem fp_double_libm_set name then Some FpDouble
+    else if Base.Set.mem fp_double_parsing_set name then Some FpDouble
+    else if Base.Set.mem fp_float_parsing_set name then Some FpFloat
+    else if Base.Set.mem fp_longdouble_parsing_set name then Some FpLongDouble
     else if String.length name > 1 then
       let last = name.[String.length name - 1] in
       let base = String.sub name 0 (String.length name - 1) in
-      if last = 'f' && mem fp_double_libm base then Some FpFloat
-      else if last = 'l' && mem fp_double_libm base then Some FpLongDouble
+      if last = 'f' && Base.Set.mem fp_double_libm_set base then Some FpFloat
+      else if last = 'l' && Base.Set.mem fp_double_libm_set base then
+        Some FpLongDouble
       else None
     else None
 
@@ -187,27 +202,34 @@ let fp_lltype llvm_ctx = function
   | FpDouble -> Llvm.double_type llvm_ctx
   | FpLongDouble -> Llvm.x86fp80_type llvm_ctx
 
-let create_ret_type sub_tid =
+(* Ret-type constructor shared by declarations and definitions. *)
+let ret_type_of_rets rets =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
+  match rets with
+  | [] -> return @@ Llvm.void_type llvm_ctx
+  | [ ret ] -> var_lltype (Arg.lhs ret)
+  | rets ->
+      let* rets_typs =
+        KB.List.map rets ~f:(fun ret -> var_lltype (Arg.lhs ret))
+      in
+      return @@ Llvm.struct_type llvm_ctx (Array.of_list rets_typs)
+
+(* Registers a declared/defined function in the emit context. *)
+let register_fn ctx sub_tid fn fn_typ =
+  ctx.Convutils.ll_funcs :=
+    Core.Map.add_exn !(ctx.Convutils.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ)
+
+let create_ret_type sub_tid =
+  let open KB in
+  let* ctx, llvm_ctx = emit_env () in
   match fp_ret_kind_of_extern ctx sub_tid with
   | Some kind -> return @@ fp_lltype llvm_ctx kind
-  | None ->
-      let rets = get_rets ctx sub_tid in
-      (match rets with
-       | [] -> return @@ Llvm.void_type llvm_ctx
-       | [ ret ] -> var_lltype (Arg.lhs ret)
-       | rets ->
-           let* rets_typs =
-             KB.List.map rets ~f:(fun ret -> var_lltype (Arg.lhs ret))
-           in
-           return @@ Llvm.struct_type llvm_ctx (Array.of_list rets_typs))
+  | None -> ret_type_of_rets (get_rets ctx sub_tid)
 
 let create_arg_types sub_tid =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   let args = get_args ctx sub_tid in
   KB.List.map args ~f:(fun arg ->
       let var = Arg.lhs arg in
@@ -232,8 +254,7 @@ let set_arg_attrs_of fn args =
 
 let add_args_to_vars llvm_builder blk_tid sub_tid fn () =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   let args = get_args ctx sub_tid in
   return
   @@ Llvm.iter_params
@@ -270,8 +291,7 @@ let create_fun_declaration sub_tid =
   let fn =
     Llvm.declare_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
   in
-  ctx.Convutils.ll_funcs :=
-    Core.Map.add_exn !(ctx.Convutils.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ);
+  register_fn ctx sub_tid fn fn_typ;
   return ()
 
 let create_fun sub_tid ~rets ~args =
@@ -280,16 +300,7 @@ let create_fun sub_tid ~rets ~args =
   let* llvm_module = Context.get llvm_module_var in
   let* ctx = Context.get emit_ctx_var in
   (* Uses explicit rets/args. *)
-  let* ret_typ =
-    match rets with
-    | [] -> return @@ Llvm.void_type llvm_ctx
-    | [ ret ] -> var_lltype (Arg.lhs ret)
-    | rets ->
-        let* rets_typs =
-          KB.List.map rets ~f:(fun ret -> var_lltype (Arg.lhs ret))
-        in
-        return @@ Llvm.struct_type llvm_ctx (Array.of_list rets_typs)
-  in
+  let* ret_typ = ret_type_of_rets rets in
   let* args_typ =
     KB.List.map args ~f:(fun arg ->
         let var = Arg.lhs arg in
@@ -301,8 +312,7 @@ let create_fun sub_tid ~rets ~args =
     Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ llvm_module
   in
   set_arg_names_of args fn;
-  ctx.Convutils.ll_funcs :=
-    Core.Map.add_exn !(ctx.Convutils.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ);
+  register_fn ctx sub_tid fn fn_typ;
   set_arg_attrs_of fn args >>= return
 
 (* Coerces binop operands to one type. *)
@@ -426,22 +436,26 @@ let section_of_addr sections (addr : word) =
   Base.List.find sections ~f:(fun section ->
       Word.between ~low:section.min_addr addr ~high:section.max_addr)
 
-let resolve_addr llvm_builder addr =
+(* GEPs into a found section (no scan). *)
+let resolve_addr_in llvm_builder section addr =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
+  let offset =
+    Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+      (Word.sub addr section.min_addr |> Word.to_int64_exn)
+      false
+  in
+  return
+  @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
+       llvm_builder
+
+let resolve_addr llvm_builder addr =
+  let open KB in
   let* sections = Context.get section_list_var in
   let section = section_of_addr sections addr in
   match section with
   | None -> failwith "load: addr not found"
-  | Some section ->
-      let offset =
-        Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-          (Word.sub addr section.min_addr |> Word.to_int64_exn)
-          false
-      in
-      return
-      @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) section.base [| offset |] ""
-           llvm_builder
+  | Some section -> resolve_addr_in llvm_builder section addr
 
 let create_inttoptr llvm_builder llvm_val =
   let open KB in
@@ -450,10 +464,9 @@ let create_inttoptr llvm_builder llvm_val =
   @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
 
 (* Section load with copy-reloc through-load. *)
-let section_load llvm_builder llvm_ctx addr addr_i64 size =
+let section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size =
   let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  let* base = resolve_addr llvm_builder addr in
+  let* base = resolve_addr_in llvm_builder section addr in
   if
     Base.List.exists ctx.Convutils.copy_relocs ~f:(fun a ->
         Int64.equal a addr_i64)
@@ -473,47 +486,73 @@ let section_load llvm_builder llvm_ctx addr addr_i64 size =
     @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) base ""
          llvm_builder
 
-let create_load llvm_builder (addr, size) =
+let section_load llvm_builder llvm_ctx addr addr_i64 size =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  let* sections = Context.get section_list_var in
+  match section_of_addr sections addr with
+  | None -> failwith "load: addr not found"
+  | Some section -> section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size
+
+(* Const-address loads: stashed .text bytes, then the found section, else
+   the fallback. The found section passes through (one scan). *)
+let const_addr_load llvm_builder addr_w size ~fallback =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let* ctx = Context.get emit_ctx_var in
   let* sections = Context.get section_list_var in
+  (* Reads stashed .text bytes first. *)
+  let v = Word.to_int64_exn addr_w in
+  match text_load_constant ctx llvm_ctx llvm_module addr_w size with
+  | Some c -> return c
+  | None -> (
+      match section_of_addr sections addr_w with
+      | Some section ->
+          section_load_in llvm_builder llvm_ctx ctx section addr_w v size
+      | None -> fallback ())
+
+(* Const-address stores into the found section, else the fallback. The
+   stored value arrives as a thunk so the section GEP keeps its emission
+   order ahead of value-lane instructions. *)
+let const_addr_store llvm_builder addr_w ~data ~fallback =
+  let open KB in
+  let* sections = Context.get section_list_var in
+  match section_of_addr sections addr_w with
+  | Some section ->
+      let* base = resolve_addr_in llvm_builder section addr_w in
+      let* llvm_var = data () in
+      return @@ Llvm.build_store llvm_var base llvm_builder
+  | None -> fallback ()
+
+let create_load llvm_builder (addr, size) =
+  let open KB in
   match Llvm.int64_of_const addr with
   | Some v ->
-      (* Reads stashed .text bytes first. *)
-      let addr_w = Word.of_int64 ~width:64 v in
-      let* pre =
-        match
-          text_load_constant ctx llvm_ctx llvm_module addr_w size
-        with
-        | Some c -> return c
-        | None ->
-            if Option.is_some (section_of_addr sections addr_w)
-            then section_load llvm_builder llvm_ctx addr_w v size
-            else
-              let* ptr = create_inttoptr llvm_builder addr in
-              return
-              @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) ptr ""
-                   llvm_builder
-      in
-      return pre
+      const_addr_load llvm_builder (Word.of_int64 ~width:64 v) size
+        ~fallback:(fun () ->
+          let* llvm_ctx = Context.get llvm_ctx_var in
+          let* ptr = create_inttoptr llvm_builder addr in
+          return
+          @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) ptr ""
+               llvm_builder)
   | _ ->
       (* Non-constant addresses use inttoptr. *)
       let* addr = create_inttoptr llvm_builder addr in
+      let* llvm_ctx = Context.get llvm_ctx_var in
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr ""
            llvm_builder
+
 let create_store llvm_builder (llvm_var, addr) =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* sections = Context.get section_list_var in
   match Llvm.int64_of_const addr with
-  | Some v
-    when Option.is_some
-           (section_of_addr sections (Word.of_int64 ~width:64 v)) ->
-      let* base = resolve_addr llvm_builder (Word.of_int64 ~width:64 v) in
-      return @@ Llvm.build_store llvm_var base llvm_builder
+  | Some v ->
+      const_addr_store llvm_builder (Word.of_int64 ~width:64 v)
+        ~data:(fun () -> KB.return llvm_var)
+        ~fallback:(fun () ->
+          let* addr = create_inttoptr llvm_builder addr in
+          return @@ Llvm.build_store llvm_var addr llvm_builder)
   | _ ->
       let* addr = create_inttoptr llvm_builder addr in
       return @@ Llvm.build_store llvm_var addr llvm_builder
@@ -670,7 +709,6 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let* ctx = Context.get emit_ctx_var in
-  let* sections = Context.get section_list_var in
   match exp with
   | Bil.Int w ->
       (* Remaps function and section addresses. *)
@@ -686,9 +724,13 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
       let* addr = create_exp llvm_builder blk_tid addr in
       (match Llvm.int64_of_const addr with
        | Some i64 ->
-           let* addr = resolve_addr llvm_builder (Word.of_int64 ~width:64 i64) in
-           let* data = create_exp llvm_builder blk_tid data in
-           return @@ Llvm.build_store data addr llvm_builder
+           let addr_w = Word.of_int64 ~width:64 i64 in
+           const_addr_store llvm_builder addr_w
+             ~data:(fun () -> create_exp llvm_builder blk_tid data)
+             ~fallback:(fun () ->
+               let* base = resolve_addr llvm_builder addr_w in
+               let* data = create_exp llvm_builder blk_tid data in
+               return @@ Llvm.build_store data base llvm_builder)
        | None ->
            (* Stores through remapped constants. *)
            let* data = create_exp llvm_builder blk_tid data in
@@ -697,18 +739,13 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
       let* addr = create_exp llvm_builder blk_tid addr in
       (match Llvm.int64_of_const addr with
        | Some i64 ->
-           let addr = Word.of_int64 ~width:64 i64 in
-           let addr_i64 = Word.to_int64_exn addr in
-           let size = Size.in_bits size in
+           let addr_w = Word.of_int64 ~width:64 i64 in
            (* Reads .text loads at compile time. *)
-           let* loaded =
-             match
-               text_load_constant ctx llvm_ctx llvm_module addr size
-             with
-             | Some c -> return c
-             | None -> section_load llvm_builder llvm_ctx addr addr_i64 size
-           in
-           return loaded
+           const_addr_load llvm_builder addr_w (Size.in_bits size)
+             ~fallback:(fun () ->
+               let* llvm_ctx = Context.get llvm_ctx_var in
+               section_load llvm_builder llvm_ctx addr_w i64
+                 (Size.in_bits size))
        | None ->
            (* Loads via inttoptr on remapped constants. *)
            create_load llvm_builder (addr, Size.in_bits size))
@@ -806,57 +843,71 @@ let mem_node_addr = function
 (* Name of the accumulator marker var the pointer-access lane binds. *)
 let marker_name = "hike_acc"
 
+(* Marker var for one pointer-access lane. *)
+let marker_of_size size =
+  Var.create ~is_virtual:true ~fresh:false marker_name
+    (Type.Imm (Size.in_bits size))
+
+(* Shared skeleton: bind the arm's value to the marker, then re-emit
+   with the arm's rewrite. Insertion order is the arm's order. *)
+let emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite =
+  let open KB in
+  let* v = emit () in
+  insert_local ctx blk_tid marker v;
+  create_exp llvm_builder blk_tid (rewrite marker)
+
 (* Dispatches memory load/store through a pointer using Exp.mapper. *)
 let mem_access_at_ptr llvm_builder blk_tid ptr exp =
   let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   match find_mem_node exp with
   | Some (`Load (addr, size)) ->
-      let marker =
-        Var.create ~is_virtual:true ~fresh:false marker_name
-          (Type.Imm (Size.in_bits size))
+      let marker = marker_of_size size in
+      let emit () =
+        KB.return
+        @@ Llvm.build_load
+             (Llvm.integer_type llvm_ctx (Size.in_bits size))
+             ptr "" llvm_builder
       in
-      let acc_v =
-        Llvm.build_load
-          (Llvm.integer_type llvm_ctx (Size.in_bits size))
-          ptr "" llvm_builder
+      let rewrite marker =
+        let v =
+          object
+            inherit Exp.mapper
+            method! map_load ~mem ~addr:a e s =
+              if Exp.equal a addr && Size.equal s size then Bil.Var marker
+              else Bil.Load (mem, a, e, s)
+          end
+        in
+        v#map_exp exp
       in
-      insert_local ctx blk_tid marker acc_v;
-      let v =
-        object
-          inherit Exp.mapper
-          method! map_load ~mem ~addr:a e s =
-            if Exp.equal a addr && Size.equal s size then Bil.Var marker
-            else Bil.Load (mem, a, e, s)
-        end
-      in
-      create_exp llvm_builder blk_tid (v#map_exp exp)
+      emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
   | Some (`Store (addr, data, size)) ->
-      let marker =
-        Var.create ~is_virtual:true ~fresh:false marker_name
-          (Type.Imm (Size.in_bits size))
+      let marker = marker_of_size size in
+      let emit () =
+        let open KB in
+        let* d = create_exp llvm_builder blk_tid data in
+        let _ : Llvm.llvalue = Llvm.build_store d ptr llvm_builder in
+        (* Store nodes bind data, not void stores. *)
+        return d
       in
-      let* d = create_exp llvm_builder blk_tid data in
-      let _ : Llvm.llvalue = Llvm.build_store d ptr llvm_builder in
-      (* Store nodes bind data, not void stores. *)
-      insert_local ctx blk_tid marker d;
-      let v =
-        object
-          inherit Exp.mapper
-          method! map_store ~mem ~addr:a ~exp:x e s =
-            if Exp.equal a addr && Size.equal s size then Bil.Var marker
-            else Bil.Store (mem, a, x, e, s)
-        end
+      let rewrite marker =
+        let v =
+          object
+            inherit Exp.mapper
+            method! map_store ~mem ~addr:a ~exp:x e s =
+              if Exp.equal a addr && Size.equal s size then Bil.Var marker
+              else Bil.Store (mem, a, x, e, s)
+          end
+        in
+        v#map_exp exp
       in
-      create_exp llvm_builder blk_tid (v#map_exp exp)
+      emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
   | None -> create_exp llvm_builder blk_tid exp
 
 (* Emits a singleton-tagged access. *)
 let create_static_mem_access llvm_builder blk_tid fr lo exp =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   let gep_opt =
     if Int64.compare lo 0L > 0 then
       match fr.stack with
@@ -1050,8 +1101,7 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
 
 let create_call_args blk_tid llvm_builder call_tid fr =
   let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   let args = get_args ctx call_tid in
   let extern = is_extern ctx call_tid in
   KB.List.map args ~f:(fun arg ->
@@ -1097,6 +1147,25 @@ let get_func tid =
   | None ->
       let* _ = create_fun_declaration tid in
       return @@ Core.Map.find_exn !(ctx.Convutils.ll_funcs) tid
+
+(* Binds a call's aggregate return into its ret lanes. *)
+let bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct =
+  Base.List.iteri rets ~f:(fun i ret ->
+      let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
+      insert_local ctx blk_tid (Arg.lhs ret) ret_val)
+
+(* Finishes a call with its fallthrough edge. *)
+let finish_call llvm_builder ctx fallthrough =
+  let open KB in
+  match fallthrough with
+  | Some ft ->
+      let bb = get_bb ctx ft in
+      ignore (Llvm.build_br bb llvm_builder);
+      return ()
+  | None ->
+      ignore (Llvm.build_unreachable llvm_builder);
+      return ()
+
 let create_indirect_call llvm_builder blk_tid call fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -1110,7 +1179,6 @@ let create_indirect_call llvm_builder blk_tid call fr =
   let* target_exp = create_exp llvm_builder blk_tid target in
   let* func_ptr = create_inttoptr llvm_builder target_exp in
   let* fn, fn_typ = get_func icall_tid in
-  let bb = get_bb ctx fallthrough in
   let rets = get_rets ctx icall_tid in
   let* args =
     create_call_args blk_tid llvm_builder icall_tid fr
@@ -1118,18 +1186,14 @@ let create_indirect_call llvm_builder blk_tid call fr =
   let ret_struct =
     Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
   in
-  Base.List.iteri rets ~f:(fun i ret ->
-      let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
-      insert_local ctx blk_tid (Arg.lhs ret) ret_val);
+  bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct;
   let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
-  Llvm.build_br bb llvm_builder |> ignore;
-  return ()
+  finish_call llvm_builder ctx (Some fallthrough)
 
 let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
     fallthrough target fr =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   let* args = create_call_args blk_tid llvm_builder target fr in
   let rets = get_rets ctx target in
   let* fn, fn_typ = get_func target in
@@ -1188,20 +1252,14 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
       let ret_struct =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
-      Base.List.iteri rets ~f:(fun i ret ->
-          let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
-          insert_local ctx blk_tid (Arg.lhs ret) ret_val));
+      bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct);
   (match fallthrough with
   | Some fallthrough ->
       let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
-      let bb = get_bb ctx fallthrough in
-      let _ = Llvm.build_br bb llvm_builder in
-      return ()
+      finish_call llvm_builder ctx (Some fallthrough)
   | None ->
-      if emit_unreachable then begin
-        let _ = Llvm.build_unreachable llvm_builder in
-        return ()
-      end else return ())
+      if emit_unreachable then finish_call llvm_builder ctx None
+      else return ())
 
 let create_return blk_tid llvm_builder cur_sub =
   let open KB in
@@ -1290,27 +1348,29 @@ let rec has_32bit_extract (e : exp) : bool =
 (* The x0 interface temp the width derivation reads. *)
 let x0_temp_name = "intrinsic:x0"
 
-let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
-  let u32_slots =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:[] ~f:(fun acc b ->
-        Term.enum def_t b
-        |> Seq.fold ~init:acc ~f:(fun acc d ->
-            match Def.rhs d with
-            | Bil.Store (_, addr, _, _, s) when Size.in_bits s = 32 -> (
-                match addr with
-                | Bil.BinOp (Bil.PLUS, Bil.Var bv, Bil.Int w)
-                  when Abi.is_fp abi (Var.base bv) ->
-                    Word.to_int64_exn w :: acc
-                | Bil.Var bv when Abi.is_fp abi (Var.base bv) ->
-                    0L :: acc
-                | _ -> acc)
-            | _ -> acc))
-  in
+(* 32-bit FP spill slots of a sub, computed once per sub. *)
+let u32_slots_of_sub ~(abi : Abi.t) (sub : sub term) : int64 list =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:[] ~f:(fun acc b ->
+         Term.enum def_t b
+         |> Seq.fold ~init:acc ~f:(fun acc d ->
+                match Def.rhs d with
+                | Bil.Store (_, addr, _, _, s) when Size.in_bits s = 32 -> (
+                    match addr with
+                    | Bil.BinOp (Bil.PLUS, Bil.Var bv, Bil.Int w)
+                      when Abi.is_fp abi (Var.base bv) ->
+                        Word.to_int64_exn w :: acc
+                    | Bil.Var bv when Abi.is_fp abi (Var.base bv) ->
+                        0L :: acc
+                    | _ -> acc)
+                | _ -> acc))
+
+(* Returns a cast source width from precomputed per-sub slots. *)
+let cast_source_width ~(abi : Abi.t) ~u32_slots (blk : blk term) : int =
   match
     Term.enum def_t blk
     |> Seq.find ~f:(fun d ->
-        String.equal (Var.name (Var.base (Def.lhs d))) x0_temp_name)
+           String.equal (Var.name (Var.base (Def.lhs d))) x0_temp_name)
   with
   | None -> 64
   | Some d -> (
@@ -1334,17 +1394,31 @@ let fp_ty_of (llvm_ctx : Llvm.llcontext) (w : int) :
      else Llvm.double_type llvm_ctx),
     (if w <= 32 then Llvm.i32_type llvm_ctx else Llvm.i64_type llvm_ctx) )
 
+(* Integer width of a value, defaulting to a declared width. *)
+let int_width_or default_w v =
+  match Llvm.classify_type (Llvm.type_of v) with
+  | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
+  | _ -> default_w
+
+(* Bitcasts integer lanes to an FP type; other lanes pass through. *)
+let bitcast_to_fp llvm_builder v fp_ty =
+  if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Integer then
+    Llvm.build_bitcast v fp_ty "" llvm_builder
+  else v
+
+(* Coerces an integer value of known width to a lane width. *)
+let coerce_int_width llvm_ctx llvm_builder ~bits v w =
+  if bits = w then v
+  else if bits > w then
+    Llvm.build_trunc v (Llvm.integer_type llvm_ctx w) "" llvm_builder
+  else Llvm.build_zext v (Llvm.integer_type llvm_ctx w) "" llvm_builder
+
 let build_fp_binop llvm_builder op a b ~(w : int) =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let fp_ty, ret_ty = fp_ty_of llvm_ctx w in
-  let bitcast v =
-    if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Integer then
-      Llvm.build_bitcast v fp_ty "" llvm_builder
-    else v
-  in
-  let da = bitcast a in
-  let db = bitcast b in
+  let da = bitcast_to_fp llvm_builder a fp_ty in
+  let db = bitcast_to_fp llvm_builder b fp_ty in
   let d =
     match op with
     | FMUL -> Llvm.build_fmul da db "" llvm_builder
@@ -1356,6 +1430,12 @@ let build_fp_binop llvm_builder op a b ~(w : int) =
   in
   return
   @@ Llvm.build_bitcast d ret_ty "" llvm_builder
+
+(* Operand temps of a block indexed by base var, last def wins. *)
+let temp_rhss_of_blk (blk : blk term) : exp Var.Map.t =
+  Term.enum def_t blk
+  |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+         Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:(Def.rhs d))
 
 (* Derives intrinsic widths from types. *)
 let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
@@ -1375,7 +1455,7 @@ let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
   (arg_w 0, res_w)
 
 (* Emits native FP ops inline. *)
-let create_native_fp_call llvm_builder blk_tid blk sub call op =
+let create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots =
   let open KB in
   match op with
   | FHLT ->
@@ -1391,26 +1471,18 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
   (* Widths come from declared types. *)
   let rets = get_rets ctx target in
   let in_w, res_w = fp_intrinsic_sizes args rets in
+  (* Operand temps indexed once per call. *)
+  let temp_rhss = temp_rhss_of_blk blk in
   let arg_value (i : int) : Llvm.llvalue KB.t =
     (* Resolves operands from declared arg vars. *)
     let arg = Base.List.nth_exn args i in
     let av = Var.base (Arg.lhs arg) in
-    let x_def_opt =
-      Term.enum def_t blk
-      |> Base.Sequence.to_list
-      |> Base.List.filter ~f:(fun d -> Var.same (Var.base (Def.lhs d)) av)
-      |> Base.List.last
-    in
-    match x_def_opt with
-    | Some d -> create_exp llvm_builder blk_tid (Def.rhs d)
+    match Core.Map.find temp_rhss av with
+    | Some rhs -> create_exp llvm_builder blk_tid rhs
     | None -> create_exp llvm_builder blk_tid (Arg.rhs arg)
   in
   (* Integer width of a value, defaulting to the declared input width. *)
-  let w_of v =
-    match Llvm.classify_type (Llvm.type_of v) with
-    | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of v)
-    | _ -> in_w
-  in
+  let w_of = int_width_or in_w in
   let result =
     match op with
     | FMUL | FADD | FSUB | FDIV | FREM ->
@@ -1422,7 +1494,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
     | SFLOAT ->
         (* Int-to-FP casts use source width. *)
         let* x = arg_value 0 in
-        let src_w = cast_source_width ~abi sub blk in
+        let src_w = cast_source_width ~abi ~u32_slots blk in
         let int_src_ty =
           if src_w = 32 then Llvm.i32_type llvm_ctx
           else Llvm.i64_type llvm_ctx
@@ -1445,11 +1517,7 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
     | SINT ->
         (* FP-to-int casts use operand width. *)
         let* x = arg_value 0 in
-        let src_w =
-          match Llvm.classify_type (Llvm.type_of x) with
-          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of x)
-          | _ -> in_w
-        in
+        let src_w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx src_w in
         let _, res_lane_ty = fp_ty_of llvm_ctx res_w in
         let* d =
@@ -1467,31 +1535,20 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
         let* b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
-        let bitcast v =
-          if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Integer then
-            Llvm.build_bitcast v src_fp_ty "" llvm_builder
-          else v
-        in
         let* p =
           KB.return
-          @@ Llvm.build_fcmp Llvm.Fcmp.Olt (bitcast a) (bitcast b) ""
-               llvm_builder
+          @@ Llvm.build_fcmp Llvm.Fcmp.Olt
+               (bitcast_to_fp llvm_builder a src_fp_ty)
+               (bitcast_to_fp llvm_builder b src_fp_ty)
+               "" llvm_builder
         in
         return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | ISNAN ->
         (* NaN test via fcmp uno. *)
         let* x = arg_value 0 in
-        let w =
-          match Llvm.classify_type (Llvm.type_of x) with
-          | Llvm.TypeKind.Integer -> Llvm.integer_bitwidth (Llvm.type_of x)
-          | _ -> in_w
-        in
+        let w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
-        let xf =
-          if Llvm.classify_type (Llvm.type_of x) = Llvm.TypeKind.Integer then
-            Llvm.build_bitcast x src_fp_ty "" llvm_builder
-          else x
-        in
+        let xf = bitcast_to_fp llvm_builder x src_fp_ty in
         let* p =
           KB.return
           @@ Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
@@ -1500,21 +1557,14 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
     | FHLT -> assert false
   in
   let* r = result in
-  (match get_rets ctx target with
+  (match rets with
    | [ ret ] ->
      (* Binds the primary ret lane width-aware. *)
      let lane_w =
        match Var.typ (Arg.lhs ret) with Type.Imm w -> w | _ -> 64
      in
      let r_bits = try Llvm.integer_bitwidth (Llvm.type_of r) with _ -> 64 in
-     let r_lane =
-       if r_bits = lane_w then r
-       else if r_bits > lane_w then
-         Llvm.build_trunc r (Llvm.integer_type llvm_ctx lane_w) "" llvm_builder
-       else
-         Llvm.build_zext r (Llvm.integer_type llvm_ctx lane_w) ""
-           llvm_builder
-     in
+     let r_lane = coerce_int_width llvm_ctx llvm_builder ~bits:r_bits r lane_w in
      insert_local ctx blk_tid (Arg.lhs ret) r_lane;
      (* Binds remaining ret lanes width-adjusted. *)
      Base.List.iter rets ~f:(fun ret2 ->
@@ -1525,26 +1575,11 @@ let create_native_fp_call llvm_builder blk_tid blk sub call op =
              | Type.Imm w -> w
              | _ -> 64
            in
-           let v =
-             if r_bits = lw then r
-             else if r_bits > lw then
-               Llvm.build_trunc r (Llvm.integer_type llvm_ctx lw) ""
-                 llvm_builder
-             else
-               Llvm.build_zext r (Llvm.integer_type llvm_ctx lw) ""
-                 llvm_builder
-           in
-           insert_local ctx blk_tid (Arg.lhs ret2) v
+           insert_local ctx blk_tid (Arg.lhs ret2)
+             (coerce_int_width llvm_ctx llvm_builder ~bits:r_bits r lw)
          end)
    | _ -> ());
-  (match fallthrough with
-   | Some ft ->
-       let bb = get_bb ctx ft in
-       ignore (Llvm.build_br bb llvm_builder);
-       KB.return ()
-   | None ->
-       ignore (Llvm.build_unreachable llvm_builder);
-       KB.return ())
+  finish_call llvm_builder ctx fallthrough
 
 (* Emits unmapped intrinsics as extern calls. *)
 let create_external_intrinsic_call llvm_builder blk_tid call name =
@@ -1561,17 +1596,11 @@ let create_external_intrinsic_call llvm_builder blk_tid call name =
   let* arg_vals =
     KB.List.map ~f:(fun a ->
         let* v = create_exp llvm_builder blk_tid (Arg.rhs a) in
-        let v_ty = Llvm.type_of v in
-        let ty_cls = Llvm.classify_type v_ty in
-        if ty_cls = Llvm.TypeKind.Integer
-           && Llvm.integer_bitwidth v_ty < 64 then
-          KB.return @@ Llvm.build_zext v (Llvm.i64_type llvm_ctx) ""
-            llvm_builder
-        else if ty_cls = Llvm.TypeKind.Integer
-                && Llvm.integer_bitwidth v_ty > 64 then
-          KB.return @@ Llvm.build_trunc v (Llvm.i64_type llvm_ctx) ""
-            llvm_builder
-        else KB.return v)
+        match Llvm.classify_type (Llvm.type_of v) with
+        | Llvm.TypeKind.Integer ->
+            let bits = Llvm.integer_bitwidth (Llvm.type_of v) in
+            KB.return @@ coerce_int_width llvm_ctx llvm_builder ~bits v 64
+        | _ -> KB.return v)
       args
   in
   let r = Llvm.build_call fn_ty callee
@@ -1579,16 +1608,9 @@ let create_external_intrinsic_call llvm_builder blk_tid call name =
   (match get_rets ctx target with
    | [ ret ] -> insert_local ctx blk_tid (Arg.lhs ret) r
    | _ -> ());
-  (match Option.map label_tid (Call.return call) with
-   | Some ft ->
-       let bb = get_bb ctx ft in
-       ignore (Llvm.build_br bb llvm_builder);
-       KB.return ()
-   | None ->
-       ignore (Llvm.build_unreachable llvm_builder);
-       KB.return ())
+  finish_call llvm_builder ctx (Option.map label_tid (Call.return call))
 
-let create_call llvm_builder blk_tid blk sub call fr =
+let create_call llvm_builder blk_tid blk sub call fr ~u32_slots =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let target = Call.target call |> label_tid in
@@ -1598,7 +1620,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
     create_interrupt llvm_builder
   else
     match native_fp_op (Tid.name target) with
-    | Some op -> create_native_fp_call llvm_builder blk_tid blk sub call op
+    | Some op -> create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots
     | None ->
         (* Unmapped intrinsics warn and degrade. *)
         if Convutils.is_intrinsic_name name then begin
@@ -1698,7 +1720,7 @@ let update_phis transfer_vars blks sub () =
       update_phi transfer_vars blk_incoming blk_tid)
 
 (* Int edges trap. *)
-let create_control_flow llvm_builder blk sub fr () =
+let create_control_flow llvm_builder blk sub fr ~u32_slots () =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
@@ -1714,7 +1736,7 @@ let create_control_flow llvm_builder blk sub fr () =
       create_indirect_call llvm_builder (Term.tid blk) call fr
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
-      create_call llvm_builder (Term.tid blk) blk sub call fr
+      create_call llvm_builder (Term.tid blk) blk sub call fr ~u32_slots
 
 let transfer_with_phis transfer_vars llvm_builder blk_tid () =
   let open KB in
@@ -1738,8 +1760,7 @@ let create_elts llvm_builder blk sub_tid sub_info fr alloc_tids () =
 
 let populate_blks transfer_vars blks sub sub_info fr () =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
+  let* ctx, llvm_ctx = emit_env () in
   let sub_tid = Term.tid sub in
   (* VLA tids travel in vsa_info (spec §2.3): the producer detected them
      once on the pre-rewrite sub. Missing info degrades to none. *)
@@ -1747,13 +1768,15 @@ let populate_blks transfer_vars blks sub sub_info fr () =
     Base.Option.value_map sub_info ~default:Tid.Set.empty
       ~f:(fun info -> info.Convutils.vla_alloc_tids)
   in
+  (* 32-bit FP spill slots, computed once per sub. *)
+  let u32_slots = u32_slots_of_sub ~abi:ctx.Convutils.abi sub in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
       in
       transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
       >>= create_elts llvm_builder blk sub_tid sub_info fr alloc_tids
-      >>= create_control_flow llvm_builder blk sub fr)
+      >>= create_control_flow llvm_builder blk sub fr ~u32_slots)
 
 
 let exit_entry llvm_builder sub () =
@@ -1893,57 +1916,15 @@ let build_frame_anchor llvm_ctx llvm_builder n anchor_idx =
   in
   (Some frame, anchor_idx, anchor_i64)
 
-let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
-  let max_dec = ref 0L in
-  let max_neg = ref 0L in
-  let max_pos = ref 0L in
-  let is_sp_or_fp v = Abi.is_stack_reg abi (Var.base v) in
-  Term.enum blk_t sub
-  |> Seq.iter ~f:(fun blk ->
-      Term.enum def_t blk
-      |> Seq.iter ~f:(fun d ->
-          (match Def.rhs d with
-          | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w) when is_sp_or_fp r ->
-              let k = Word.to_int64_exn w in
-              if Int64.compare k !max_dec > 0 then max_dec := k
-          | _ -> ());
-          (match Def.rhs d with
-          | Bil.Load (_, addr, _, s)
-          | Bil.Store (_, addr, _, _, s) ->
-              let sz = Int64.of_int (Size.in_bytes s) in
-              (match addr with
-              | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int w) when is_sp_or_fp b ->
-                  let disp = Word.to_int64_exn w in
-                  if Int64.compare disp 0L < 0 then
-                    let need = Int64.sub (Int64.neg disp) 0L in
-                    let need = Int64.add need sz in
-                    if Int64.compare need !max_neg > 0 then max_neg := need
-                  else
-                    let need = Int64.add disp sz in
-                    if Int64.compare need !max_pos > 0 then max_pos := need
-              | Bil.Int w ->
-                  
-                  ()
-              | _ -> ())
-          | _ -> ())));
-  (!max_dec, !max_neg, !max_pos)
-
 let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
     (sub : sub term) : int64 * int64 * int64 * int64 =
-  let max_dec, max_neg, max_pos = degraded_geometry ~abi sub in
+  let max_dec, max_neg, max_pos = Hike_stack_model.degraded_geometry ~abi sub in
   let deepest = Int64.max max_dec max_neg in
   let deepest = Int64.max deepest 8L in
   let need = Int64.add deepest 8L in
-  let n =
-    let r = Int64.rem need 16L in
-    if Int64.equal r 0L then need else Int64.add need (Int64.sub 16L r)
-  in
+  let n = Hike_stack_model.align16_up need in
   let n = Int64.max n 8192L in
-  let grown = Int64.add n max_pos in
-  let grown =
-    let r = Int64.rem grown 16L in
-    if Int64.equal r 0L then grown else Int64.add grown (Int64.sub 16L r)
-  in
+  let grown = Hike_stack_model.align16_up (Int64.add n max_pos) in
   let anchor_idx = Int64.sub n 8L in
   (n, grown, max_pos, anchor_idx)
 
@@ -2030,10 +2011,7 @@ let create_sub sub =
           in
           let span = Int64.sub max_hi min_lo in
           let need = Int64.max (Int64.sub 8L min_lo) (Int64.add span 1L) in
-          let n =
-            Int64.add need 15L |> fun n ->
-            Int64.mul (Int64.div n 16L) 16L
-          in
+          let n = Hike_stack_model.align16_up need in
           let anchor_idx = Int64.sub n 8L in
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx
         end
