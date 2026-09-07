@@ -106,3 +106,12 @@ module B2l = Hike.Bil2llvm
 module Hv = Hike.Vsa
 
 (* Full-range 64-bit word; [w64] takes a native int. *)
+
+(* Mem fixture: a singleton map holding one key/data cell. *)
+let key_of ws =
+  match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of"
+
+let mk_mem ~key ~data =
+  let k = key_of key in
+  let v = Mem.Val.create data LittleEndian in
+  Mem.add (Mem.top { Mem.addr_width = 32; Mem.addressable_width = 8 }) ~key:k ~data:v
