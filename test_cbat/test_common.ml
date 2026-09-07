@@ -1629,3 +1629,80 @@ let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
   let ctx' = Program.create ~subs:[ sub ] () in
   let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
   iter_cell_of sub sol body_tid r2_cell_of
+
+(* Regression fixtures (moved verbatim from test_regression.ml). *)
+type c3_fixture = {
+  c3_sub : sub term;
+  c3_blk0 : blk term;
+  c3_blk1 : blk term;
+  c3_post_tid : tid;
+  c3_m : var;
+}
+
+let mk_c3 () : c3_fixture =
+  let rsp = v64 "RSP" in
+  let fp = v64 "c3_fp" in
+  let rdi = v64 "RDI" in
+  let r2 = v64 "c3_r2" in
+  let m = memv "c3_m" in
+  let cb = Blk.Builder.create () in
+  let cblk0 = Blk.Builder.result cb in
+  let cb = Blk.Builder.init ~copy_defs:true cblk0 in
+  Blk.Builder.add_jmp cb (Jmp.create (Goto (Direct (Term.tid cblk0))));
+  let cblk = Blk.Builder.result cb in
+  let callee_b = Sub.Builder.create ~name:"c3_callee" () in
+  Sub.Builder.add_blk callee_b cblk;
+  let callee = Sub.Builder.result callee_b in
+  let callee_tid = Term.tid callee in
+  let post_b = Blk.Builder.create () in
+  Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
+  let post0 = Blk.Builder.result post_b in
+  let post_tid = Term.tid post0 in
+  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))) in
+  let def_seed =
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (w64 0xAA), LittleEndian, `r64))
+  in
+  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x20))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x30))) in
+  let def_out =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 16)),
+           Bil.Int (w64 0xBB),
+           LittleEndian,
+           `r64 ))
+  in
+  let b0 = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b0) [ def_fp; def_seed; def_prologue ];
+  let b00 = Blk.Builder.result b0 in
+  let b1 = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b1) [ def_rdi; def_out ];
+  let b10 = Blk.Builder.result b1 in
+  let b0' = Blk.Builder.init ~copy_defs:true b00 in
+  Blk.Builder.add_jmp b0' (Jmp.create (Goto (Direct (Term.tid b10))));
+  let b1' = Blk.Builder.init ~copy_defs:true b10 in
+  Blk.Builder.add_jmp b1'
+    (Jmp.create
+       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ())));
+  let blk0 = Blk.Builder.result b0' in
+  let blk1 = Blk.Builder.result b1' in
+  let sub_b = Sub.Builder.create ~name:"c3_caller" () in
+  Sub.Builder.add_arg sub_b (Arg.create rdi (Bil.Var rdi));
+  Sub.Builder.add_arg sub_b (Arg.create r2 (Bil.Var r2));
+  Sub.Builder.add_blk sub_b blk0;
+  Sub.Builder.add_blk sub_b blk1;
+  Sub.Builder.add_blk sub_b post0;
+  let caller = Sub.Builder.result sub_b in
+  ignore callee;
+  { c3_sub = caller; c3_blk0 = blk0; c3_blk1 = blk1; c3_post_tid = post_tid; c3_m = m }
+
+(* Store builder, MINUS/rsp-rooted with explicit size. *)
+let mk_store_minus m rsp lo data sz =
+  Def.create m
+    (Bil.Store
+       ( Bil.Var m,
+         Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 lo)),
+         Bil.Int (w64 data),
+         LittleEndian,
+         sz ))
