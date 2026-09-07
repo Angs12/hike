@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Architecture review — hike perf hot path</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+.seam { stroke-dasharray: 4 4; }
+.deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+.mass-iface { background:#f59e0b; } .mass-impl { background:#1e293b; }
+.bar { height:10px; border-radius:9999px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+<header class="space-y-3">
+<h1 class="font-serif text-4xl">hike — perf hot-path review</h1>
+<p class="text-sm text-slate-500">2026-09-04 (rr re-profile) · restriction-removal @ 3cd0dbf · perf 7.1.12, paranoid -1 · sort 452 subs / ~9s producer (~65% of 13.4s lift) · grep 475 subs / ~16s producer (~50% of 30.8s lift) · worst sub grep sub_e350 ~4.4s converged; sort sub_4d2a ~3.2s non-converged · source: .scratch/perf-profile/profile-2026-09-04-rr.md (replicates profile-2026-09-04.md §2–§5 method on the new tree; 1+2 replaced by measured roots 2026-09-04 eve)</p>
+<div class="bg-sky-50 border border-sky-300 rounded p-2 text-xs">Method note (rr): <span class="font-mono">perf record --call-graph dwarf</span> does not unwind the new-tree binary (0.4–0.7 frames/sample; fe8b411 control on the same workload: 12–18). Phase attribution below is by <span class="font-mono">stage_timer</span> decomposition + <span class="font-mono">Stages</span> counters, flat top-15 by <span class="font-mono">perf report --no-children</span>, refinement-inclusive check by <span class="font-mono">Stages walk</span> + live gdb stacks. Suspect: libunwind vs the new binary's <span class="font-mono">.eh_frame_hdr</span> path (gdb unwinds it fully) — undiagnosed, see profile §5/§8.</div>
+<div class="bg-amber-50 border border-amber-300 rounded p-2 text-xs">Home note: this report lived at <span class="font-mono">/tmp/architecture-review-20260904-151907.html</span> until a /tmp wipe took it (2026-09-04 eve). Rebuilt verbatim-plus-deltas at this durable path; treat THIS file as canonical.</div>
+<div class="flex gap-4 text-xs uppercase tracking-wider text-slate-500">
+<span><span class="inline-block w-4 h-4 border border-slate-400 align-middle"></span> module</span>
+<span><span class="inline-block w-8 border-t-2 border-dashed border-slate-400 align-middle"></span> seam</span>
+<span><span class="inline-block w-8 border-t-2 border-red-600 align-middle"></span> leakage</span>
+<span><span class="inline-block w-4 h-4 deep align-middle"></span> deep module</span>
+</div>
+</header>
+<section id="candidates" class="space-y-10">
+
+<article id="c1" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">1 · Shared per-block backward walk</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-emerald-600 text-white">Strong</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">replaces withdrawn relevance-set card</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_vsa.ml:1518-1569 refine_edge · :2447-2540 denote_jump per_jump loop · :2369-2431 refine_edge_inline · cbat_contextual_fixpoint.ml:49-65</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — one 256-step walk per edge, same cone</p>
+<pre class="mermaid">flowchart LR
+  eA["edge A seed"] --> wA["walk cone 256"]
+  eB["edge B seed"] --> wB["walk cone 256"]
+  wA --> tT["truncate"]
+  wB --> tT
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class wA,wB leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — one walk per block, unpack per edge</p>
+<pre class="mermaid">flowchart LR
+  jS["joined seeds"] --> wO["one walk cone"]
+  wO --> uA["edge A unpack"]
+  wO --> uB["edge B unpack"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class wO deepCls</pre></div>
+</div>
+<p><b>Problem:</b> Root of the 68%: each jump edge re-runs a nested reverse fixpoint from the same block over the same predecessor cone (1860 walks on e350, all truncating, memo 0/5280) — k edges explore one cone k times.</p>
+<p><b>Solution:</b> Deepen a per-block refinement module: join the edge seeds, run one walk, unpack per edge. Load-bearing unknown: measured walk_reads overlap across same-block jumps (shared CFG proves shared start, not shared pops).</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: seed-join policy concentrates in one module</li><li>leverage: one walk, every out-edge</li><li>tests hit one interface (multi-edge fixtures)</li></ul>
+<div class="bg-amber-50 border border-amber-300 rounded p-2 text-sm">Soundness caveat: joining seeds loses per-edge infeasibility (Cell meets are monotone but the joined seed is weaker) — the unpack must recover it or precision visibly moves, gated on F1-FT.</div>
+</article>
+
+<article id="c2" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">2 · Need-restricted joins and meets</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-amber-500 text-white">Worth exploring</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">replaces withdrawn worklist card</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_ai_representation.ml:166-296 env type + join/meet · cbat_map_lattice.ml:121-194 · need_map cbat_vsa.ml:2710-2783 · join sites :2866-2899</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — full-env folds per visit</p>
+<pre class="mermaid">flowchart LR
+  dD["denote and join"] --> fW["fold whole word env"]
+  dD --> fM["fold whole mem env"]
+  fW --> cC["cost scales with width"]
+  fM --> cC
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class fW,fM leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — join only the need set</p>
+<pre class="mermaid">flowchart LR
+  dD2["denote and join"] --> nS["need set filter"]
+  nS --> jR["restricted join"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class nS deepCls</pre></div>
+</div>
+<p><b>Problem:</b> Root of the +61% per-denote at flat counts: every def denoted means full word+mem envs on every visit, and join/meet/precedes fold whole maps (+30% minor words, GC ~14%). A value-flow need set exists but feeds only widening — plain joins never see it.</p>
+<p><b>Solution:</b> Deepen the value-domain interface with need-restricted join/meet (precedent: selective_widen_extrapolate already takes need), threading the existing need_map into the vertex join sites. Load-bearing unknown: words-vs-memory cost split (no counter separates them today).</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: width policy concentrates in one module</li><li>leverage: one filter, every join and meet</li><li>tests hit one interface (width fixtures)</li></ul>
+<div class="bg-amber-50 border border-amber-300 rounded p-2 text-sm">Soundness surface: need (cycle-SCC vars) and liveness (backward-walk vars) do not coincide — restricting a join to the wrong set is unsound narrowing, so the filter's exact set is the design, gated on the full battery plus IR identity.</div>
+</article>
+
+<article id="c3" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">3 · Non-convergence tripwire</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-amber-500 text-white">Worth exploring</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">local-substitutable</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_vsa.ml:2802-2809 · 6000-iter cap → src/hike_vsa.ml:66-90 degraded Unbounded arm (798 seed tags on sub_4d2a)</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — 3.2s burn, Unbounded verdict</p>
+<div class="flex items-end gap-1 h-24"><div class="w-10 bg-red-500" style="height:95%"></div><div class="w-10 bg-slate-300" style="height:8%"></div><div class="text-xs pl-2">6000 iters → Unbounded<br/>sub_4d2a: 35% of binary producer (was 76%)</div></div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — sound early exit</p>
+<div class="flex items-end gap-1 h-24"><div class="w-10 bg-emerald-600" style="height:30%"></div><div class="w-10 bg-slate-300" style="height:8%"></div><div class="text-xs pl-2">oscillation detector trips<br/>same Unbounded verdict</div></div></div>
+</div>
+<p><b>Problem:</b> The worst sort sub still burns ~3.2s over 6000 visits then degrades (now to 798 Unbounded seed-tags, not zero) — 100% waste w.r.t. precision, conv_diag still reports no gap pair. Smaller than before (35% of binary producer, was 76%) because the 7.5s backward slice around it is gone.</p>
+<p><b>Solution:</b> Deepen convergence detection: oscillation tripwire behind the fixpoint interface, same sound verdict. Open reframe (undecided): precision-first — if sub_4d2a is purely oscillating (no indirect-jump degradation), converging it buys ~800 tags → region splits, dwarfing the 3s; tripwire stays as backstop either way.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: stability logic concentrates in one module</li><li>leverage: one check, every widening head</li><li>tests hit one interface (oscillating fixtures)</li></ul>
+</article>
+
+<article id="c4" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">4 · Edge-refinement memo</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-emerald-600 text-white">Strong</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">measured 2026-09-04 — key fix neutral, reverted</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_vsa.ml:2369 refine_edge_inline → walk timer :2418 (Walk_memo :2411-2427) → refine_edge_inner (gdb: cbat_vsa.pp.ml:1367) → Cbat_contextual_fixpoint (~steps:256, always truncates)</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — nested fixpoint per edge</p>
+<pre class="mermaid">flowchart LR
+  eRef["refine edge inline"] --> nNest["nested fixpoint"]
+  nNest --> rWalk["reverse walk plus denote"]
+  rWalk --> dCon["def constraints"]
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class nNest,rWalk,dCon leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — memoised post-state</p>
+<pre class="mermaid">flowchart LR
+  eRef2["refine edge"] --> mCache["Post-state cache"]
+  mCache --> hHit["hit reuse"]
+  mCache --> cMiss["miss walk once"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class mCache deepCls</pre></div>
+</div>
+<p><b>Problem:</b> Inline edge refinement is now directly timed, not just sampled: Stages <span class="font-mono">walk</span> = 3.0s over 1860 walks, ALL truncating at the 256-pop cap = 68% of fixpoint wall (75% of denote) on grep sub_e350. Follow-up measurement: Walk_memo hits 0/5280 across slow subs — 100% version churn (540 of 626 pairs recur, 0 hits); seeds mixed-Var 67–91%, all-TOP ≤2.5% (seed-skipping dead); pops never below 65.</p>
+<p><b>Solution:</b> Deepen the refinement module: version-stable key via bump-only-on-change (MEASURED 2026-09-04 — neutral, verdict below; the audit showed bumps were already semantic, so the landed shape was the physical-equality fast path); oracle grows an empty/mixed-seed fixture beside F1-FT (landed, green, KEPT); adaptive cap stays sequenced after. Ticket 04 (new): delete the never-hitting Walk_memo outright — a 0-hit cache is overhead plus stale-hit risk, removal runs the identical miss path.</p>
+<div class="bg-sky-50 border border-sky-300 rounded p-2 text-sm">Measured 2026-09-04 (version-stable-key @ 4551cde vs c0d7ffd same-day control, same probes/subs): producer sort +0.35% / grep +0.16% (four-run means 15.61/15.55s, 26.68/26.63s); fresh slowest-sub splits e350 +1.5%, 4d2a −3.5%, 9f00 −1.5% (median), 9570 −0.4%; lift walls sort +4.8% / grep +2.8% (single samples, shared-zone contention caveats). Emission byte-identical 32/32 corpus + big-binary lifts, identical slowest-sub tag counts. Gates unchanged: unit 455 ok / 0 FAIL (jne-counter, F1-FT, new empty/mixed-seed fixture all green), corpus 32/32 rc=0, allocas 160/0, semantics 30/2 at the T02/T03 floor, probes crash-free. Full record: ticket-03 MEASUREMENT.md alongside the worktree outputs. <b>Verdict (fixed rule): revert-discipline-keep-fixture</b> — the fast path rarely fires because versions were already effectively semantic; the fixture stays as the early-exit pin. Walk-extent work NOT attempted here. Restriction-removal ticket 06 (atexit-handler value-loss, 14/94 coreutils) blocks that branch's merge — separate track, same DCE/signature root family.</div>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: refinement cost concentrates in one module</li><li>leverage: one cache, every Accumulated Condition edge</li><li>tests hit one interface (edge fixtures)</li></ul>
+</article>
+
+<article id="c5" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">5 · Hoisted transfer closures</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">Speculative</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">replaces absorbed transfer-reuse card</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_vsa.ml:2803-2902 Stages.time wrappers + :2850-2857 closure captures · cbat_contextual_fixpoint.ml:24-61 Dep wrappers · build flags -O3, no flambda proof</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — fresh closures per visit</p>
+<pre class="mermaid">flowchart LR
+  vV["vertex visit"] --> aA["alloc thunk plus f plus step"]
+  aA --> cC2["caml apply dispatch"]
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class aA leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — hoisted bodies, explicit records</p>
+<pre class="mermaid">flowchart LR
+  vV2["vertex visit"] --> hH["hoisted body"]
+  hH --> eE["explicit env record"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class hH deepCls</pre></div>
+</div>
+<p><b>Problem:</b> Root of the ~10% caml_apply2 self: every vertex visit allocates timing thunks plus Graphlib f/step closures plus contextual-merge wrappers, all closing over snapshots, contexts, and mutable refs — dispatch plus capture allocation on the hottest path.</p>
+<p><b>Solution:</b> Hoist and specialize behind the existing Stages seam (already the one-vs-two-adapter seam for timing cost): monomorphic timing lets, hoisted f/step bodies with explicit env records instead of nested captures. First step is measurement, not mechanism: prove flambda status of the shipped binary (repo shows only -O3) before deciding hoist-vs-rely-on-flambda.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: capture policy concentrates in one module</li><li>leverage: one hoist, every vertex and walk visit</li><li>tests hit one interface (no behavior change to pin)</li></ul>
+<div class="bg-amber-50 border border-amber-300 rounded p-2 text-sm">Capped payoff (rank 3): structural ~10% that shrinks further once fewer visits run — revisit only after the walk and width lanes land. The old transfer-reuse design lives on card 11 (tried, reverted, fixture kept).</div>
+</article>
+
+<article id="c6" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">6 · Value-domain join arena</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-emerald-600 text-white">Strong</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span></div>
+<p class="font-mono text-sm text-slate-600">Clp ops + AI.join · 275M minor words / 0.9s sub (+30% same-sub) · GC+alloc ~14% flat · IPC 2.72</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — temp big-ints per join</p>
+<pre class="mermaid">flowchart LR
+  jJoin["join"] --> zBig["bigint ops"]
+  zBig --> gGc["GC mark plus sweep"]
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class zBig,gGc leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — batched join behind one seam</p>
+<pre class="mermaid">flowchart LR
+  jJoin2["join"] --> A2["Arena module"]
+  A2 --> nTmp["no per-op temps"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class A2 deepCls</pre></div>
+</div>
+<p><b>Problem:</b> denote costs +61% at flat call counts on the same sub (0.542→0.871s / 1378 denotes); minor words +30% (212M→275M); GC+alloc ≈ 14% of the whole run with Zarith ≈ 5%+. IPC is 2.72 — the loop is healthy, the tax is heap traffic (Clp big-int temps + AI env joins).</p>
+<p><b>Solution:</b> Deepen the value-domain module: batch Clp/AI temporaries behind the join interface.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: allocation policy concentrates in one module</li><li>leverage: one join, all TAG State merges</li><li>tests hit one interface (join fixtures)</li></ul>
+</article>
+
+<article id="c7" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">7 · Versioned-cache module</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">Speculative</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">local-substitutable</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_memo.ml:37-66 · Make(V).empty/valid/stamp/find/add · Walk_memo + Transfer_memo</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — shallow, linear valid</p>
+<div class="text-xs">interface 50 lines / implementation 67 lines</div>
+<div class="bar mass-iface" style="width:75%"></div><div class="bar mass-impl" style="width:80%"></div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — O(1) validity</p>
+<div class="text-xs">interface: find/add over version stamps</div>
+<div class="bar mass-iface" style="width:25%"></div><div class="bar mass-impl" style="width:80%"></div></div>
+</div>
+<p><b>Problem:</b> Downgraded on the new tree: Cbat_memo already IS version-stamped (Walk_memo + Transfer_memo carry solution versions) — the O(1)-validity shape landed. The open question shrank to read-set granularity on the hottest path, which belongs with candidate 4.</p>
+<p><b>Solution:</b> Deepen the cache module: stamp-based O(1) validity; version function stays the only varying adapter.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: invalidation concentrates in one module</li><li>leverage: one cache, two instantiations</li><li>two adapters justify the seam (walk, transfer)</li></ul>
+</article>
+
+<article id="c8" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">8 · Schedule module owns block sets</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">Speculative</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_wto.ml:43-124 · scc_partition, wto · callers: cbat_vsa.ml:2746-2842 head_to_blocks, need_map</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — caller recomputes WTO sets</p>
+<pre class="mermaid">flowchart LR
+  wWto["WTO"] --> hHead["head to blocks recompute"]
+  hHead --> nNeed["need map recompute"]
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class hHead,nNeed leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — schedule serves sets</p>
+<pre class="mermaid">flowchart LR
+  wSch["Schedule module"] --> qSets["heads blocks needs"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class wSch deepCls</pre></div>
+</div>
+<p><b>Problem:</b> The WTO module is shallow (1:1 interface to implementation); callers reduplicate flatten/heads derivations per fixpoint.</p>
+<p><b>Solution:</b> Deepen the schedule module: own heads, block sets, and need sets behind one interface.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: ordering knowledge concentrates in one module</li><li>leverage: one schedule, fixpoint + landmarks</li><li>delete caller-side recomputation</li></ul>
+</article>
+
+<article id="c9" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">9 · Single-pass extraction</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-amber-500 text-white">Worth exploring</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_vsa.ml:2943+ Cbat_extraction.extract · overlap-merge :3127-3138, vla_bounds :3172-3179 · tail (extract+model) ≈ 5–10% of producer, timed</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — walk + quadratic merge + per-call maps</p>
+<pre class="mermaid">flowchart LR
+  xExt["extract"] --> dDen["re-denote per def"]
+  dDen --> mMerge["quadratic overlap"]
+  mMerge --> vMap["vla map rebuild per def"]
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class dDen,mMerge,vMap leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — indexed extraction</p>
+<pre class="mermaid">flowchart LR
+  xExt2["extract"] --> iIdx["one def index plus sweep merge"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class iIdx deepCls</pre></div>
+</div>
+<p><b>Problem:</b> Downgraded on the new tree: directly timed now — producer minus fixpoint minus seed leaves ~0.1–0.3s (5–10%) for extract+model+regions+split on the slowest subs. The quadratic-merge / per-call-map shapes are real code but not where time goes.</p>
+<p><b>Solution:</b> Deepen extraction: single def index, sweep-line overlap merge, shared Frame-Residency Proof inputs for Range/Infinite/Unbounded/Dead/VLA.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: merge policy concentrates in one module</li><li>leverage: one walk, offsets + k_ranges + vla_bounds</li><li>tests hit one interface (100% Tagging fixtures)</li></ul>
+</article>
+
+<article id="c10" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">10 · Indexed stack model</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">Speculative</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span></div>
+<p class="font-mono text-sm text-slate-600">src/hike_stack_model.ml:87-649 · merge_loop :341 O(n³) List.nth, sp_escaped grow :133 rescan, frame_addr_alias :543 defs×defs, def_of_tid :248 per-helper walks</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — repeated full-sub walks</p>
+<pre class="mermaid">flowchart LR
+  rReg["regions of sub"] --> wWalks["def index plus width plus tails walks"]
+  wWalks --> mLoop["merge loop"]
+  mLoop --> eEsc["escape rescan plus alias"]
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class wWalks,mLoop,eEsc leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — one index, one merge</p>
+<pre class="mermaid">flowchart LR
+  rMod["Stack model"] --> iShr["shared sub index"]
+  iShr --> pPlan["regions plus split plan"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class rMod deepCls</pre></div>
+</div>
+<p><b>Problem:</b> Downgraded on the new tree: same ~5–10% tail bucket as candidate 9 (model rides inside it), and the O(n³)/rescan claims are static-only — no measurement attributes time here. Revisit only after 4/11/6/3 land.</p>
+<p><b>Solution:</b> Deepen the stack-model module: one shared sub index feeds regions_of_sub, split_plan, and escape checks.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: indexing cost concentrates in one module</li><li>leverage: one index, model + rewrite + emit</li><li>tests hit one interface (Library Seam)</li></ul>
+</article>
+
+<article id="c11" class="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">11 · Self-seeding transfer tax (NEW on the rr tree)</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-emerald-600 text-white">Strong</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">measured 2026-09-04 — memo under-delivers</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">reverted — fixture kept</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_memo.ml: Block_map whole-map memo · src/cbat_vsa/cbat_vsa.ml:59 produced-value sharing · oracle F1-FT (walk-equals-vertex pin) green · producer +18% same-day (sort 8.78→10.38s, grep 15.13→17.92s)</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — denote every def, every visit</p>
+<pre class="mermaid">flowchart LR
+  vVtx["vertex visit"] --> dAll["denote all defs"]
+  dAll --> rRef["refine re-denotes"]
+  rRef --> dAll
+  classDef leakCls stroke:#dc2626,stroke-width:2px
+  class dAll,rRef leakCls</pre></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — one denotation, two readers</p>
+<pre class="mermaid">flowchart LR
+  vVtx2["vertex visit"] --> tMemo["Transfer memo"]
+  tMemo --> vRead["vertex reads"]
+  tMemo --> rRead["refine reads"]
+  classDef deepCls fill:#0f172a,color:#fff
+  class tMemo deepCls</pre></div>
+</div>
+<p><b>Problem:</b> The measured price of the relevance deletion: converged-sub fixpoints are +33–44% (e350 3.052→~4.4s, 9f00 0.641→~0.9s, 9570 0.547→~0.73s) at IDENTICAL denote/join/walk counts — pure per-denote inflation from denoting every def. This is the entire grep regression (+44% binary total).</p>
+<p><b>Solution:</b> Recover the perf WITHOUT a pass or a gate (ADR-0003 stands): internal transfer shapes only — first-visit denote-memo shared by the vertex path and the refinement re-walk (Transfer_memo currently serves vertices alone), skip provably-uniform defs inside denote, or both. Soundness bar: the walk must observe exactly the values the vertex path computes.</p>
+<p><b>Measured (2026-09-04, shared-memo @ 16e8f4a — absorbs <a href="#c5" class="underline">5</a>):</b> the merged candidate landed as ONE whole-map memo (Cbat_memo.Block_map: key (block, solution version), value the complete def→produced-value map; populate-on-miss from vertex transfer or deep walk, single lookup per visit, overwrite-on-bump eviction — exactly one map per block retained; the walk keeps its sequential structure, 256-cap extent, and live-set threading). Version discipline: the existing per-block solution-version map both paths share — no new stamp, one invalidation story; every mutation path must bump versions (audited at landing). Oracle: F1-NEQ stays green plus the new F1-FT fallthrough-shape fixture pinning walk-equals-vertex refined values through the library seam. Wall time (same probes, same subs, same-day 3cd0dbf control built alongside): producer sort 8.783→10.388s (+18.3%), grep 15.127→17.919s (+18.5%); slowest subs e350 +7.7%, 9f00 +13.7%; <b>zero subs improved on either binary</b> (125/0 sort, 149/0 grep) — the spec's worst-case arm with a heavier-than-map-find constant (whole-map build per visit; small subs regress most in %). Precision untouched: identical per-sub tag counts, IR byte-identical 32/32 vs the pre-memo reference, full gate battery green (unit 450 ok/0 FAIL, corpus 32/32 rc=0, allocas 160/0, semantics 30/2 + 30/2 at the T02/T03 floor, probes crash-free). Verdict: the memo is a pure cost regression, not a soundness event — the denotation-sharing arm is spent. Sequenced follow-up (NOT inline): seed-only walk-extent reduction against the unchanged baseline, gated on the F1-FT oracle plus probe deltas.</p>
+<p><b>Decision (2026-09-04, shared-memo @ c0d7ffd):</b> the memo merge (16e8f4a) is REVERTED; the F1-FT fixture merge stays (450 ok / 0 FAIL post-revert, fixture present). The denotation-sharing arm is closed — per-visit fixed overhead (whole-map build + lookup) beat the per-denote saving on every sub. Numbers record: MEASUREMENT.md alongside the ticket-03 worktree outputs.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: denotation policy concentrates in one module</li><li>leverage: one memo, vertex + all 1860 truncating walks</li><li>tests hit one interface (denote fixtures, no pass to tag)</li></ul>
+</article>
+
+<div class="pt-4 pb-1">
+<h3 class="font-serif text-2xl">Precision candidates — five verified gains, five next deepenings</h3>
+<p class="text-sm text-slate-500">Source: <span class="font-mono">.scratch/precision-gains/precision-2026-09-04.md</span> (all five VERIFIED from probe BIN + err-file diffs; all five <span class="font-mono">out_*.ll</span> byte-identical — warning-only diffs). Each card names the landed gain, then the next module-deepening on that mechanism.</p>
+</div>
+
+<article id="c12" class="bg-white rounded-xl border border-indigo-300 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">12 · Escape-range narrowing</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-amber-500 text-white">Worth exploring</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 border border-indigo-300">precision</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_ai_representation.ml:311-337 · call site cbat_vsa.ml:2492-2506 (re-located 2026-09-04 eve)</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — one TOP arg kills the frame (struct 72.97)</p>
+<div class="bar bg-red-500" style="width:73%"></div><div class="text-xs mt-1">ldstk exact 72.97 · 19 stack tops · MemEnv.top</div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After lane live — struct 100.00 · next: per-cell granularity</p>
+<div class="bar bg-emerald-600" style="width:100%"></div><div class="text-xs mt-1">tops 19→0 · list +20.36 same lane · sret_big +16.01 same lane</div></div>
+</div>
+<p><b>Problem:</b> Landed: escape reads real values, caller frame survives (struct/list/sret_big gains). Remaining: one TOP arg still forces whole-memory-top — per-cell granularity is the next depth.</p>
+<p><b>Solution:</b> Deepen the escape module: per-cell escape ranges behind its interface; the written-regs set and singleton-RSP rule stay the seam.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: escape policy concentrates in one module</li><li>leverage: one range rule, every call block</li><li>tests hit one interface (call-shape fixtures)</li></ul>
+<div class="bg-indigo-50 border border-indigo-200 rounded p-2 text-sm">Paper: WYSINWYX (TOPLAS 2010) §3, Figs. 9–11 — MergeAtEndCall keeps caller AR cells by default. Engineering-only: written-regs scope, singleton-RSP rule, whole-memory-top fallback.</div>
+<div class="bg-emerald-50 border border-emerald-300 rounded p-2 text-sm"><b>Researched 2026-09-04 eve</b> (.scratch/escape-narrowing/cand12-2026-09-04.md, verified 364 lines): corpus prize ~zero — ldstk_top is 1 corpus-wide (array_local widened load, no call precedes it; ctrl side re-corroborated from backup emissions, 38 Unbounded exact match) and sret_big w_big=1 is genuine escape (card 14). Remaining fallback firings (non-singleton RSP, genuinely-unknown args, traps) have no countable corpus cost. Value left: soundness hardening (full-containment kill test leans keep on partial overlaps) + UNKNOWN on bigger binaries. Structural find: the denote_call chain is dead one step further than drafted (nested callee fixpoint never runs — zero GMOD hits in src/). Paper-quote caveat stands (index excerpts, no end-to-end re-read).</div>
+</article>
+
+<article id="c13" class="bg-white rounded-xl border border-indigo-300 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">13 · Channel-2 generalization</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-amber-500 text-white">Worth exploring</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 border border-indigo-300">precision</span></div>
+<p class="font-mono text-sm text-slate-600">src/cbat_vsa/cbat_vsa.ml:3031-3032 · is_seed at :3043</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Before — indexed addresses unseeded (dynidx 89.47)</p>
+<div class="bar bg-red-500" style="width:89%"></div><div class="text-xs mt-1">@touch low:32[RAX] Unbounded · rewrite_addr fails</div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After ±64 KiB subset seeding — dynidx 100.00</p>
+<div class="bar bg-emerald-600" style="width:100%"></div><div class="text-xs mt-1">touch def_exact 7→21 · w_max 113→1 · Range</div></div>
+</div>
+<p><b>Problem:</b> Landed: bounded reloaded addresses inside the neighborhood seed (touch class). Remaining: the ±64 KiB constants and covered shapes are policy, not theory.</p>
+<p><b>Solution:</b> Deepen the seeding module: widen shapes and bounds empirically behind the SUBSET invariant, which never moves.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: seeding policy concentrates in one module</li><li>leverage: one invariant, every reloaded address</li><li>tests hit one interface (reload-shape fixtures)</li></ul>
+<div class="bg-indigo-50 border border-indigo-200 rounded p-2 text-sm">Paper: WYSINWYX §4.1 (indirect accesses need pointer value-sets) + §3 (stored values are offset sets). Engineering-only: SUBSET-never-intersection, ±64 KiB constants.</div>
+<div class="bg-emerald-50 border border-emerald-300 rounded p-2 text-sm"><b>Researched 2026-09-04 eve</b> (.scratch/channel2-generalization/cand13-2026-09-04.md): verdict ~zero — the entire unseeded class in measured binaries is 1 def (union_overlap byte store, likely-TOP itself), va_arg_mixed's TOPs are stale (clean on current tree), and the live imprecision is value-side (counter chains denote TOP), not seeding. Caution: widening bounds enlarges a real false-seed surface (small absolute addresses denote inside the neighborhood — needs an absolute-address pin first). If pursued: C-census, then Infinite-span option, bounds-widening last.</div>
+</article>
+
+<article id="c14" class="bg-white rounded-xl border border-indigo-300 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">14 · Per-call escaped-slot alloca</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">Speculative</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 border border-indigo-300">precision</span></div>
+<p class="font-mono text-sm text-slate-600">sret_big residual · open-ticket scale (T03)</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Now — sret_big 98.51, w_big = 1</p>
+<div class="bar bg-emerald-600" style="width:98%"></div><div class="text-xs mt-1">residual = the genuinely-escaped sret slot</div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">After — escaped slot gets its own alloca</p>
+<div class="bar bg-emerald-600" style="width:100%"></div><div class="text-xs mt-1">w_big 1→0 · caller frame fully split</div></div>
+</div>
+<p><b>Problem:</b> The escape lane is exactly right here — the leftover slot genuinely escapes, and the caller-frame model cannot hold it.</p>
+<p><b>Solution:</b> Deepen the stack-model module: per-call allocas for escaped slots; aligns with the open T03 ticket, not against it.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: escape storage concentrates in one module</li><li>leverage: one alloca rule, every sret/va_list shape</li><li>tests hit one interface (escape-shape fixtures)</li></ul>
+</article>
+
+<article id="c15" class="bg-white rounded-xl border border-indigo-300 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">15 · Value-side TOP elimination</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-amber-500 text-white">Worth exploring</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 border border-indigo-300">precision</span></div>
+<p class="font-mono text-sm text-slate-600">struct_by_value · union_overlap · array_local · open-ticket scale (T02)</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Landed — sbv 90.24→100.00 by coverage alone</p>
+<div class="bar bg-emerald-600" style="width:100%"></div><div class="text-xs mt-1">modify_copy call-free: gate deletion suffices</div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Remaining — 2 Unbounded: unbounded base, widened load</p>
+<div class="bar bg-red-500" style="width:6%"></div><div class="text-xs mt-1">union_overlap RAX-base · array_local RBP-padded</div></div>
+</div>
+<p><b>Problem:</b> Discriminator established: every fixed warning was denoted-but-TOP — a value-side deficit, and the two residuals are TOPs no seeding can reach.</p>
+<p><b>Solution:</b> Deepen value tracking behind the transfer interface (the T02 audit lane); seeding stays untouched.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: value precision concentrates in one module</li><li>leverage: one transfer, every denoted def</li><li>tests hit one interface (value-shape fixtures)</li></ul>
+<div class="bg-indigo-50 border border-indigo-200 rounded p-2 text-sm">Papers: Balakrishnan &amp; Reps, CC 2004 (transformers for every instruction, no slicing pre-pass) + Weiser, TSE 1984 (why the slice dropped the flows).</div>
+<div class="bg-emerald-50 border border-emerald-300 rounded p-2 text-sm"><b>Researched 2026-09-04 eve, refined by re-measurement on version-stable-key</b> (.scratch/value-side-tops/cand15-2026-09-04.md, 350+ lines, incremental): closable set is <b>12 defs across 3 binaries</b>, all denoted-but-TOP — union_overlap's 3 RAX-base loads (source-grounded; micro-cause open for T02), array_local's 1 indexed load (widening casualty at the later head — sibling store through the identical shape classifies bounded), struct_by_value main's 8 width-straddling pair-loads (find-prime misaligned arm tops fully bounded inputs — directly reassembly-closable). If all 12 close: guarded warnings 2→0 corpus-wide, ldstk_top 1→0, warnings-only emission diffs. Inherent (zero for this card): sbv word-TOPs + sret-store TOPs (opaque-callee/ABI-boundary → card 14), va_arg_mixed (re-measured zero address TOPs). Theory already met (CC04/Weiser) — gaps are implementation or absent-information boundaries; T02 untouched. Open honesty items: later-loop counter micro-cause, exact-13/b65p reconciliation (RSP-value paradox), one silent unseeded indexed store (coverage-side neighbor).</div>
+</article>
+
+<article id="c16" class="bg-white rounded-xl border border-indigo-300 p-6 space-y-4">
+<div class="flex items-center gap-2 flex-wrap"><h2 class="font-serif text-2xl">16 · Prove-dead propagation</h2>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-500 text-white">Speculative</span>
+<span class="text-xs px-2 py-1 rounded-full bg-slate-100 border">in-process</span>
+<span class="text-xs px-2 py-1 rounded-full bg-indigo-100 border border-indigo-300">precision</span></div>
+<p class="font-mono text-sm text-slate-600">consume_mixed · va_arg_mixed denominator watch item</p>
+<div class="grid md:grid-cols-2 gap-4">
+<div class="rounded-lg border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Landed — 10 addresses live→bottom-dead</p>
+<div class="bar bg-emerald-600" style="width:100%"></div><div class="text-xs mt-1">genuine-subset meets prove dead code</div></div>
+<div class="rounded-lg border border-emerald-600 p-4"><p class="text-xs uppercase tracking-wider text-slate-500 mb-2">Watch — va_arg_mixed full-ldst 87.37→78.49</p>
+<div class="bar bg-red-500" style="width:78%"></div><div class="text-xs mt-1">Channel-2 grows the denominator; two stay TOP</div></div>
+</div>
+<p><b>Problem:</b> Full denotation seeds more accesses (denominator grows per spec §2.4.4) while proven-dead addresses pool at bottom — the metric and the dead-code share one lane.</p>
+<p><b>Solution:</b> Deepen the meet module: propagate proven-dead past the meet so DCE and the metric read one verdict.</p>
+<ul class="list-disc pl-5 text-sm space-y-1"><li>locality: deadness concentrates in one module</li><li>leverage: one verdict, DCE + metric + region merge</li><li>tests hit one interface (dead-code fixtures)</li></ul>
+<div class="bg-indigo-50 border border-indigo-200 rounded p-2 text-sm">Paper: Cousot &amp; Cousot, POPL 1977 §§5–8 (meet = greatest lower bound; non-descending meet is a no-op). Engineering-only: the skip-itself policy.</div>
+</article>
+
+</section>
+<section id="top-recommendation" class="bg-slate-900 text-white rounded-xl p-8 space-y-3">
+<h2 class="font-serif text-3xl">Top recommendation — candidates 4 + 1 first</h2>
+<p class="text-slate-300">The dead cards are replaced by measured roots: the fixpoint transfer on converged subs is now attacked at its roots — shared per-block walks (<a href="#c1" class="underline">1</a>, Strong — the rank-1 root of the 68% refinement share, pending the walk_reads-overlap measurement) beside the version-stable key (<a href="#c4" class="underline">4</a>, Strong — 01 merged as the physical-equality fast path after the audit showed bumps already semantic; 02 fixture merged; 03 wall-time proof running under a fixed revert rule; Walk_memo deletion spec'd as ticket 04, pending 03). Then need-restricted joins (<a href="#c2" class="underline">2</a>, Worth exploring — the +61% width root, soundness surface explicit), the join arena (<a href="#c6" class="underline">6</a>) and the tripwire (<a href="#c3" class="underline">3</a>, precision-first reframe still open). Closed or demoted: <a href="#c5" class="underline">5</a> absorbed into <a href="#c11" class="underline">11</a> (tried, reverted, fixture kept) and reborn as hoisted closures (Speculative — flambda status first); extraction (<a href="#c9" class="underline">9</a>) and the stack model (<a href="#c10" class="underline">10</a>) share the ~5–10% tail; the versioned cache (<a href="#c7" class="underline">7</a>) folds into 4.</p>
+<p class="text-slate-300">Precision lane (all five verified, warning-only diffs): the escape lane paid wholesale (<a href="#c12" class="underline">12</a> — struct +27, list +20, sret_big +16; researched: corpus prize ~zero, value now soundness hardening), Channel-2 subset seeding closed the indexed class (<a href="#c13" class="underline">13</a> — dynidx +10.5; research running), full denotation covered the call-free remainder (<a href="#c15" class="underline">15</a> — sbv +9.8; research running). Next: per-cell escape granularity, Channel-2 shape/bound widening, and the T03 per-call alloca for the one genuinely-escaped sret slot (<a href="#c14" class="underline">14</a>).</p>
+<p class="text-slate-300">Merge-blocker on the sibling track: restriction-removal ticket 06 (atexit-handler value-loss — coreutils 14/94, bisected to the seeding change; fix in flight) blocks that branch's merge. Separate root family (DCE/signature), same doctrine (no gates).</p>
+</section>
+</main>
+</body>
+</html>

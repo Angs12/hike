@@ -431,6 +431,103 @@ stays visible where it happens).
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-07 EEST — HOTLOOPS MERGE (branch `hotloops-merge` =
+main @ 18df839 + region-merge + the Transfer_memo deletion; worktree
+/home/tovpr/backup/merge-hub) — MERGED-TREE BATTERY GREEN at both levels;
+the upstream fixpoint flake EXPOSED (renumbering-only), recorded with its
+own instrument**
+
+Merges into main's post-word-substrate tree (the honest stack: emitter
+seam, honest gate, fixture lib, Cbat_word domain — 505 ok / 2.86M referee
+at 18df839): (1) region-merge — sort-and-sweep `merge_components`, the
+stack-model merge quadratic deleted (A/B du −3.8% / ls −4.0% / sort −5.1%
+on the affected class; the `exists_17538` hotspot class gone). (2) The
+Transfer_memo deletion (dead by A/B: neutral ±0.8% on six binaries; the
+fired latch and the consumerless read-set threading with it; the §4
+stale-narrowing window closed by construction; byte-identity 35/35 was
+the stale-hit detector and it never fired).
+
+⚠ RE-BASELINE: region ids renumber corpus-wide (ascending-in-lo,
+tie-broken lo/hi/tid) — pre-region-merge emissions are NOT byte-comparable.
+
+**The determinism finding (NEW, has its own instrument — the `idstab`
+probe, committed):** the per-sub MODEL is deterministic (4/4
+cross-process identical regions/spans/ids/plan), but the PIPELINE
+occasionally emits a different convertible set for a sub (one tag wobbles
+run-to-run), which the renumbering surfaces as pure `stack_rN` renaming —
+zero non-renaming residue, both variants semantically green (32/0/3).
+Root-cause class: the documented upstream fixpoint hash-order flake
+(cksum_avx2 / gcc-12 — `.scratch/cleanup-8/candidate-3-tripwire.md`).
+Region-merge EXPOSED it; it did not create it. Diagnosis = its own ticket.
+
+Also flagged: main's producer wall measured +80% vs c46454a (du ~26s →
+~47s) — present before these lanes merged, needs its own perf lane.
+
+| gate (the fully-merged tree: honest stack + region-merge + tm-del) | result |
+|---|---|
+| dune runtest (incl. the clpequiv referee stanza) | **ALL PASSED**; direct-exe **483 ok / 0 FAIL** (the R12-9 sweep fixtures green post-word-migration) |
+| corpus + sort/grep/gcc-12 | **35/35 rc=0** |
+| check_allocas | **172/3** = control's pre-existing shape-d (gcc-12:25, grep:3, sort:1) |
+| semantic-all (full suite, the promoted run_semantic.sh) | **32 PASS / 0 FAIL / 3 SKIP** |
+| optimization-safety (opt) | **32 PASS / 0 FAIL / 3 SKIP** |
+| unmapped intrinsics | **26**, identical lines to control (gcc-12's pre-existing class) |
+| two-run determinism | 26/35 byte-identical; 9 renumbering-only, zero residue (the exposed flake, above) |
+
+**Last verified: 2026-09-07 EEST — REGION-MERGE LANE (branch `region-merge`,
+worktree `/home/tovpr/backup/region-merge`, off main @ c46454a; commits
+`8ac54a6` rewrite + `73bc0b1` A/B verdict + `a5a8d0b` review fixes) —
+BATTERY GREEN, semantics identical to control, IR renumbering-only —
+THE ONE-TIME REGION-ID RE-BASELINE**
+
+`Hike_stack_model.regions_of_sub`'s region merge (was `merge_loop`: pairwise
+component rescans, the `exists_17538` class = **5.2% of late-window perf
+samples**, the hottest hike symbol at 753601b) is now an O(n log n)
+**sort-and-sweep** (`merge_components`: sort ascending `(lo, hi, tid)`,
+sweep with running max-`hi`, join when `lo ≤ max_hi`). The partition is
+provably identical (both compute the connected components of the
+interval-overlap graph); only `stack_rN` ids renumber — now ascending in
+`lo`, tie-broken `(lo, hi, tid)`. Consumers are order-agnostic (map
+lookups, commutative folds, name-pattern matching). `merge_loop`,
+`components_overlap`, `overlap`, `ranges_overlap` deleted.
+
+**⚠ RE-BASELINE NOTE (the next session MUST read this): emissions from
+pre-region-merge trees are NOT byte-comparable (different `stack_rN`
+numbering). The IR byte-identity reference is now
+`/tmp/opencode/rm1-ref` + `rm1-em2` (35/35 byte-identical across two
+independent installs of this tree; 25/35 differ from c46454a control in
+renumbering ONLY, zero non-renaming residue — `.scratch/region-merge/
+diff-review.md`). Spec/verdict/tickets: `.scratch/region-merge/`.**
+
+| gate | result |
+|---|---|
+| unit suite | **477 ok / 0 FAIL** (new R12-9 sweep-partition + R12-9b in-model determinism fixtures) ✅ |
+| corpus emission | **35/35 rc=0** ✅ |
+| check_allocas | **172 pass / 3 fail** — gcc-12:25, grep:3, sort:1 — IDENTICAL counts and binaries to control (pre-existing shape-d class) ✅ |
+| semantics (all) | **30 PASS / 2 FAIL / 3 SKIP** — the T02/T03 knowns (va_arg_vacopy, variadic) ✅ |
+| semantics (8-bin) | **8/8 PASS** ✅ |
+| optimization-safety (opt) | **30 PASS / 2 FAIL** — identical to -O0 ✅ |
+| diff review vs control | 25/35 byte-identical, 10/35 `stack_rN` renumbering only, **zero non-renaming residue** ✅ |
+| determinism | 35/35 byte-identical across two installs (rm1-em2 vs rm1-ref); one earlier gcc-12 outlier attributed to the upstream VSA hash-order class (renumbering-only residue; in-process model check = 1 signature) — see verdict.md's CORRECTION note ✅ |
+
+**A/B (producer wall, subtimes, interleaved 2+2, taskset P-cores, each side
+its own `dune exec` build):** du −3.8%, ls −4.0%, sort −5.1% (both rounds),
+grep −0.1%, gcc-12 −0.6%; worst case −0.1% — no regression anywhere. Per-sub:
+du `__strftime_internal` 3.62→3.53s, grep `sub_e350` 1.80→1.73s. Perf
+spot-check (du): the pairwise-`exists` hotspot class is GONE;
+`Hike_stack_model` now 0.03–0.08% of samples (top symbols = the domain
+arithmetic lane, i.e. the word-substrate's target). The ≥2% bar was
+RE-SETTLED by user decision on the region-heavy gnutail class (du/ls/sort)
+after the spec review flagged the ticket's five-binary letter (mean −1.6%)
+as under-bar — recorded in verdict.md as a deliberate re-settlement.
+
+**GOTCHA (2026-09-07, hit twice): the shared opam plugin slot is a
+cross-session hazard.** The parallel word-substrate session merged into
+main and reinstalled the plugin mid-lane; one reference emission was lifted
+by MAIN's plugin (caught by `hike.cmxs.provenance` BEFORE consumption —
+check provenance before trusting any emission; `record_provenance.sh` after
+every install). The A/B never fell into this (per-worktree `dune exec`
+builds don't consult the installed plugin).
+
 **Last verified: 2026-09-07 EEST — MERGE of the honest stack (`emit-seam` +
 `honest-gate` + `fixture-lib` + clpequiv wiring) into `main` @ 18df839
 (word-substrate) — FULL BATTERY GREEN at a level NEITHER parent reached:

@@ -1,0 +1,1115 @@
+ok: CLP1: create n is a 32-bit singleton (bitwidth/min/max/cardn)
+ok: CLP1: elem of the singleton {10}
+ok: CLP2: interval {10,12,14,16,18}: bounds sane
+ok: CLP2: interval membership (14 in, 15 not in)
+ok: CLP2: iter enumerates the interval (descending; sorted = the set)
+ok: CLP2: cardinality equals the iter length (bounds sanity)
+ok: CLP3: of_list ~width:16 [3;1;2] -> {1,2,3} (sorted, deduped)
+ok: CLP4: of_list [] is bottom
+ok: CLP5: bottom: cardn 0, empty iter, no min elem
+ok: CLP6: top: is_top, not bottom, absorbs by subset
+ok: CLP8: join of disjoint singletons contains both operands
+ok: CLP8: join is above its operands (precedes = subset)
+ok: CLP9: join is commutative
+ok: CLP10: bottom is the join identity (both orders)
+ok: CLP11: top absorbs in join
+ok: CLP19: join of equal single points is the point
+ok: CLP12: meet of overlapping intervals: intersection members only
+ok: CLP13: top is the meet identity; bottom is the meet zero
+ok: CLP14: meet absorption: (p U q) n p = p
+ok: CLP15: meet of disjoint single points is bottom
+ok: CLP16: single-point meet: {10} n {10,12,14,16,18} = {10}
+ok: CLP17: meet is below join
+ok: CLP18: widen_join p p = p; widen_join bottom {5} = top
+ok: FS1: of_list basics (cardn/bitwidth/min/max/elem)
+ok: FS1: singleton
+ok: FS2: lift1 unops are involutive (neg, lnot)
+ok: FS3: lift2 union/intersection
+ok: FS4: join/meet are the lattice aliases of union/intersection
+ok: FS5: precedes/equal
+ok: FS6: bottom absorption
+ok: FS7: add: {1,2} + {10} = {11,12}
+ok: FS8: extract/cast/concat width sanity
+ok: FS9 (delta #1): equal on width-mismatched sets is false (no assert)
+ok: FS9 (delta #1): precedes on width-mismatched sets is false
+ok: ML1: add on bottom stays bottom
+ok: ML2: join_add/meet_add on bottom stay bottom
+ok: ML3: find on bottom/top returns bottom/top
+ok: ML4: meet/join top-bottom combos
+ok: ML5: add then find roundtrip; missing key reads top
+ok: ML6: join_add/meet_add merge with the stored value
+ok: ML7: equal/precedes on small maps
+ok: WO1: dom_size i ~width:w = 2^i as a w-bit word (zero if w = i)
+ok: WO2: cap_at_width keeps small words, saturates large ones
+ok: WO3: add_exact/mul_exact widen to the exact result
+ok: WO4: factor_2s pulls out the 2-power
+ok: WO5: lead_1_bit
+ok: WO6: is_one / succ_exact / lshift_exact
+ok: WO7: gt_int
+ok: W1: [0,9] \ [3,5] — the interior run is two pieces, not one CLP: the identity (the sound over-approximation)
+ok: W1b: the boundary-touch runs are exact — [0,9] \ [0,2] = {3..9}; [0,9] \ [7,9] = {0..6}
+ok: W2: full64 \ {0x2a} = the wrapped complement (cardn 2^64 − 1, exact)
+ok: W3: the bottom/absorption — diff bottom a = bottom; diff a bottom = a; diff a a = bottom; the singleton cases
+ok: W4: the diff contract — (diff a b) ∩ b = ∅ element-wise; diff ⊆ a; a\b ⊆ diff
+ok: W5: the gapped subtraction is the identity — {0,2,4,6,8} \ {0,4,8} = {0,2,4,6,8} (not a run)
+ok: W6: the singleton removal — the boundary singletons exact ([0,10] \ {0} = {1..10}; \ {10} = {0..9}); the interior singleton is the identity
+ok: W7: the FinSet diffs — exact; the mixed-width pair shares no elements
+ok: W8: the Clp\FinSet — the boundary-touch run removed exactly: [0,10] \ {0,1,2} = {3..10}
+ok: W8b: the Clp\FinSet interior run — the identity (the two pieces are not one CLP)
+ok: W8c: the Clp\FinSet with gaps — the identity (the sound over-approximation)
+ok: W9: lnot/neg — the exact mirror rows: lnot {0,2,4} = {7,5,3}; neg {0,2,4} = {0,6,4}; the top fixed; the singleton mirrors
+ok: T1: the RSP-based same-block cell meet — [RSP-8] meets the cell at the offset key (the frame's RSP offset 0)
+ok: T2: the dynamic-index meet — the index's iterate constraint [0,4] confines the meet to the cells {0..32}; the cell at 40 (the exit-side) is untouched
+ok: T3: the ranged meet's overlap boundary — the stored [0,64] cell splits: the overlapping part [8,24] meets; the parts [0,8) and (24,64] keep the original (the reads at the split's aligned points — the find' alignment semantics: an unaligned sub-region read returns top)
+ok: T4: the exit-side cells survive — the iterate range [0,32] meets; the exit-side offsets 40 and 80 (the ¬iterate values) are untouched
+ok: S1: EQ const-second -> the Var seed {10}
+ok: S2: NEQ const-second -> the wrapped complement (10 ∉; 11, 9 ∈)
+ok: S3: SLT const-second -> the two-piece [0,3] ∪ [2^31, max] (no gate)
+ok: S4: const-first LT -> the UGT flip [11, max] (10 ∉; 11 ∈)
+ok: S5: the var-vs-var LT overlap — t ∈ [0,9] (the u's max 10)
+ok: S6: the var-vs-var NEQ — the t seed = the complement of the {5} overlap (the interior: the identity — sound)
+ok: S7: the generic comparison — the t row from the (u+1) value-set [1,4] (t ⊆ [0,3]) + the u producer seed
+ok: S8: the producer PLUS row — the circular hull {0xFFFFFFFF} ∪ [0,8] on t
+ok: S9: the Load operand -> the Cell seed ([0,9] on the cell)
+ok: S10: the NOT bijection — the FALSE side UGE [10, max] (10 ∈; 9 ∉)
+ok: S11: the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈
+ok: S12: the flag-state recovery — the cf seed + the recovered t seed [0,9]
+ok: S13: the dual — NOT (t EQ 10) -> the NEQ complement (10 ∉; 11 ∈)
+ok: S14: the Infeasible constant — (Int 5) with {7} -> Infeasible; with {5} -> no seeds
+ok: S15a: the LOW cast row — the truncation hull [5, 5 + 2^32 − 2^8] (5 ∈; 5+0x100 ∈; 4 ∉)
+ok: S15b: the SIGNED ext row — the pre-image [0, 0xFF] (0xFF ∈; 0x100 ∉)
+ok: P5: not_implemented ~top degrades to top without raising
+ok: P5: not_implemented without a top still raises NotImplemented
+ok: P5: the top-path hit emits a warning log line (section cbat_vsa)
+ok: A1: meet wrap {10..18} n {16..19} is NOT bottom (live path)
+ok: A1: ... and still contains the true intersection {16,18}
+ok: A1: ... it is the wider operand {10,12,14,16,18} (over-approx)
+ok: A2: wrap {3,4,5} n {0,2,4} not bottom, contains 4
+ok: A3: genuinely disjoint meets are still bottom (unchanged)
+ok: A3: bottom is still the meet zero; top the meet identity
+ok: D3-1: div by a set containing 0 -> top, no raise
+ok: D3-2: sdiv by a set containing 0 -> top, no raise
+ok: D3-3: div by exactly {0} -> bottom (provably dead path)
+ok: D3-4: sdiv by exactly {0} -> bottom
+ok: D3-5: div by a nonzero singleton still computes (no regression)
+ok: D1-1: fin_set elem on a width-mismatched word -> false (no assert)
+ok: D1-2: fin_set overlap on width-mismatched sets -> false (no assert)
+ok: D1-3: fin_set nearest_pred on a width-mismatched word -> None
+ok: D1-4: intersect_generic width mismatch -> input unchanged (no assert)
+ok: D1-5: composite meet on width-mismatched sets -> no assert, not bottom
+ok: D1-6: composite meet on matching widths is still exact
+ok: D2-1: CLP widen_join of non-subset singletons -> join, no assert
+ok: D2-2: CLP widen_join of equal inputs is still the input
+ok: D2-3: CLP widen_join of a subset pair still widens (bottom {5} -> top)
+ok: D2-4: Val.equal/precedes on idx-mismatched cells -> false (no assert)
+ok: D2-5: Val.join on idx-mismatched cells -> top fallback (no assert)
+ok: D2-6: Val.meet on idx-mismatched cells -> bottom fallback (no assert)
+ok: D2-7: Val.widen_join on idx-mismatched cells -> top fallback (no assert)
+ok: D2-8: Val ops on matching indices still work (no regression)
+ok: D2-9: Mem.widen_join of non-preceding maps -> join fallback (no assert)
+ok: D2-10: Mem.widen_join of equal maps stays equal (no regression)
+ok: EX1: widen_join contains join (extrapolate stub)
+ok: EX1b: the extrapolation contains the join (soundness)
+ok: EX2: widen_join sound
+ok: EX3: widen_join sound
+ok: EX4: widen_join idempotent
+ok: EX5: widen_join sound
+ok: EX6: widen_join sound
+ok: D4-1: assume (x < 5) refines x to [0,4]
+ok: D4-2: assume (x <= 5) refines x to [0,5]
+ok: D4-3: assume (x == 5) refines x to {5}
+ok: D4-4: doubt — constant condition keeps the state (top)
+ok: D4-5: doubt — width-mismatched guard keeps the state (top)
+ok: D4-6: gate-free (spec §2.1) — the NEQ guard refines to TOP−{5} (5 ∉, 0 ∈, non-top)
+ok: D4-7: assume (flag) forces the flag to {1}
+ok: D4-8: assume (NOT flag) forces the flag to {0}
+ok: D4-9 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ [0,4]) and the exit view carries the exit-iteration values (min ≥ 5)
+ok: E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)
+ok: D5-1: CLP rshift on mixed-width operands COMPUTES (lane A) — {0} exactly, no assert, no top
+ok: D5-2: CLP arshift on mixed-width operands COMPUTES (lane A) — {0} exactly, no assert, no top
+ok: D5-3: CLP rshift/arshift on same-width singletons still exact
+ok: D5-4: rshift by an amount >= the operand width -> {0} exactly (overshift=zero, no raise)
+ok: D5-5: rshift by an amount < the operand width still computes
+ok: D5-6: composite rshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert
+ok: D5-7: composite arshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert
+ok: D5-8: composite rshift on same-width singletons still exact
+ok: D6-1: CLP equal on width-mismatched CLPs -> false (no raise)
+ok: D6-2: CLP subset on width-mismatched CLPs -> false (no raise)
+ok: D6-3: CLP intersection on width-mismatched CLPs -> wider operand
+ok: D6-4: CLP add on width-mismatched CLPs -> coerced result (no raise)
+ok: D6-5: CLP mul on width-mismatched CLPs -> coerced result (no raise)
+ok: D6-6: CLP logand on width-mismatched CLPs -> no raise, width 64
+ok: D6-7: CLP logxor on width-mismatched CLPs -> no raise, width 64
+ok: D6-8: CLP div on width-mismatched CLPs -> no raise, width 64
+ok: D6-9: CLP sdiv on width-mismatched CLPs -> no raise, width 64
+ok: D6-10: CLP union/join on width-mismatched CLPs -> no raise, width 64
+ok: D6-11: CLP widen_join on width-mismatched CLPs -> no raise
+ok: D6-12: CLP meet (alias) on width mismatch -> wider operand
+ok: D6-13: same-width CLP ops unaffected (regression)
+ok: D6-14 (BIR loop): mixed-width rshift COMPUTES (lane A), no crash, no guard fire
+ok: D6b-1: FinSet union on width-mismatched sets -> no assert, width 64
+ok: D6b-2: FinSet intersection on width-mismatched sets -> no assert, width 64
+ok: D6b-3: FinSet add on width-mismatched sets -> no assert, width 64
+ok: D6b-4: same-width FinSet union/intersection still exact (regression)
+ok: E6-1: no per-hit stderr line naming the component (Event.Log only) (stubbed)
+ok: E6-2: no not_implemented marker leaks to stderr at all (stubbed)
+ok: T2-1: gate-free — every def is denoted, no tag needed
+ok: T3-1: gate-free — the guard refines x to {5}
+ok: T3-2: gate-free (spec §2.1) — the guard refines x to {5}
+ok: T3-7: mixed-def — f IS refined to {1} on the taken edge (stubbed)
+ok: T3-7b (UNASSERTABLE in the fused world — the fixture's fallthrough edge has no target block; kept for the ignore-list bookkeeping, see the comment above) (stubbed)
+ok: T3-8: single-def flag — f2 IS refined to {1} on the taken edge (stubbed)
+ok: T4-5: pre-call the aliased slot holds {42} (non-vacuous pin)
+ok: T4-6: pre-call rdi is the concrete address {0xd0} (the alias)
+ok: T4-7: caller-alias — the post-call reload reads TOP (sound)
+ok: T4-8: post-call memory is TOP entirely (find_memory = Mem.top)
+ok: T4-9: RSP is preserved across the call
+ok: T4-10: RBP is preserved across the call
+ok: T4-11: callee-saved RBX is preserved across the call
+ok: T4-12: caller-saved rdi is TOPed across the call
+ok: F1-1: fold enumerates the explicitly-stored bindings (keys+data)
+ok: F1-2: fold over top (absent = top) visits nothing
+ok: C1-1: a preserved word keeps its value-set
+ok: C1-2: a non-preserved word is TOPed
+ok: C1-3: RSP is preserved when it is in the preserved set
+ok: C1-4: memory is TOPed entirely (a stored value reads as top)
+ok: C1-5: a virtual var is preserved when it is in the preserved set
+ok: P21-1: channel 1 — the load at [RBP - 0x30] seeds Range(-48,-48)
+ok: P21-2: channel 1 — the store at [RBP - 0x30] seeds Range(-48,-48)
+ok: P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)
+ok: P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded
+ok: P23-2: channel 2 — the disjoint store at [rbp + 0x100] is NOT seeded
+ok: P23-3: channel 1 — the RSP-direct store at [RSP - 8] seeds Range(-8,-8)
+ok: F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)
+ok: F1-2: channel 2 — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded
+ok: D7-1: Clp.cast HIGH sz=0 -> top(64), no raise
+ok: D7-2: Clp.cast HIGH sz>width -> top(64), no raise
+ok: D7-3: Clp.cast UNSIGNED sz=0 -> top(32), no raise
+ok: D7-4: Clp.cast SIGNED sz=0 -> top(32), no raise
+ok: D7-5: Clp.cast LOW sz=0 -> top(32), no raise
+ok: D7-6: Clp.extract ~lo:width -> top (no assert)
+ok: D7-7: Clp.extract ~hi:(-1) -> top (no raise)
+ok: D7-8: composite cast HIGH sz=0 -> top(64) (CLP-backed top, not the FinSet.top stub)
+ok: D7-9: composite extract hi<lo -> top(32)
+ok: D7-9b: composite extract hi<0 (lo defaults 0) -> top(32)
+ok: D7-10: lshift 2-bit {2} amount vs 64-bit operand -> computes {64}, no spurious fire
+ok: D7-11: lshift overshift (6-bit {40} amount vs 32-bit operand) -> {0} exactly, no fire
+ok: D7-12: rshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never fires
+ok: D7-13: arshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never fires
+ok: D7-14: rshift/arshift overshift ({40} vs 32-bit) -> {0} exactly, no fire
+ok: D7-15 (BIR): RAX := high:0[RAX] after a call — fixpoint completes rc=0, RAX = top(64)
+ok: E2eH-1: equal on the SAME CLP value (physical identity) -> true
+ok: E2eH-2: equal on structurally-equal separately-built CLPs -> true
+ok: E2eH-3: unequal CLPs still compare false (canonize path intact)
+ok: E2eH-4: width-mismatched CLPs still compare false, no raise
+ok: E2eC-1: lshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire
+ok: E2eC-2: lshift {16} by multi-card overshift {64,68,72} stride 4 -> {0}, no fire
+ok: E2eC-3: rshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire
+ok: E2eC-4: arshift overshift of a mixed-sign operand -> {0, all-ones}, no fire
+ok: E2eC-5: arshift overshift of a nonneg operand -> {0} exactly (sign-extension)
+ok: E2eC-6: arshift overshift of a negative operand -> {all-ones} exactly
+ok: E2eC-7: lshift {16} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}
+ok: E2eC-8: rshift {2^40} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}
+ok: E2eC-9: arshift {2^63} by straddling [8,70] step 2 -> non-top, contains capped base ∪ {all-ones}
+ok: E2eC-10: lshift {16} by top(64) amount -> stride-class result (non-bottom, contains 0 and 16), no fire
+ok: E2eC-11: array_local pattern — 32-bit operand shifted by {32} -> {0} exactly, no fire
+ok: E2eC-12: array_local pattern — 8-bit operand shifted by {8} -> {0} exactly, no fire
+ok: E2eC-13 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ [0,4]) and the exit view carries the exit-iteration values (min ≥ 5)
+ok: E2eC-14 (BIR loop): the counter window survives the body shift — the iterate view's counter stays ⊆ [0,4] (y = x << (i+1) ∈ {32..512})
+ok: E2eD-4: gate-free — the heap store's data var is denoted ({99})
+ok: E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(-24,-24)
+ok: E2eD-7: gate-free — a top-addr store leaves memory unchanged
+ok: E2eD-8: gate-free — the load at the slot reads exactly the pre-store value {42} (no full-range-cell pollution)
+ok: P3-1: gate-free — the RSP := 0 anchor is denoted (entry input state carries RSP = {0})
+ok: L2b-1: the full 1-bit domain {0,1} reads cardn 2 (non-bottom; the FinSet cardinality no longer wraps at the set width)
+ok: L2b-2: EQ over a {0,1} operand is {0,1} (bool_top), not bottom — the is_zero guard sees cardn 2
+ok: L2b-3: a lifted 1-bit flag def (val_top (Imm 1)) is {0,1} with cardn 2, not bottom
+ok: L2b-4: overlap comparisons (LT over two top64 operands; EQ(0, top64)) are {0,1} (bool_top), not bottom
+ok: L2b-5: a flag-gated branch survives — reachable_jumps keeps the {0,1}-flag jump and the loop body's solution input is non-bottom with a non-bottom flag (no unsound pruning)
+ok: L3a-1: backward guard refinement through PLUS — the cell at RBP-8 is bounded (⊆ [0,9]; the walk met {4} into the load cell)
+ok: L3a-2: backward guard refinement through MINUS — the cell at RBP-8 is bounded (⊆ [1,10]; the walk met [1,10] into the load cell)
+ok: L3a-3: backward guard refinement through LSHIFT-const — the cell at RBP-8 is bounded (⊆ [0,9]; 40>>2 = 10)
+ok: L3a-4: the TIMES rule over an unbounded operand is the identity (sound — the wrapped classes hull to the domain; the cell is not narrowed)
+ok: L3a-5: a NEQ guard is doubt (constraint_of_compare None) — no walk, the cell at RBP-8 stays top
+ok: L3c1-1: a flag-indirected guard (CF := LT(t, 10); if CF goto …) — the flag-state record recovers the constraint on t and the cell at RBP-8 is bounded (⊆ [0,9])
+ok: L3c1-2: a later def of the compared operand (t := 42) between the comparison and the jump invalidates the flag record — no cell refinement
+ok: L3c1-3: a non-comparison redefinition of the flag (CF := unknown) invalidates the flag record — no cell refinement
+ok: L3c1-4 (migrated, single-pass §2): the multi-def base refines through the per-block producer subtraction — the body-IN cell is the EXACT taken-edge window [1,10] (1 ∈, 10 ∈, 0 ∉, 11 ∉; non-top)
+ok: L3c1-5: direct assume_jump_cond without ?defs — the flag-state refinement is gated off (no cell refinement; the pre-L3c behavior)
+ok: L3c2-1: a direct SLT(t, 4) guard on a seeded non-negative counter — the signed row fires (the gate passes) and the cell at RBP-8 is bounded (⊆ [0,3])
+ok: L3c2-2: the two-piece SLT rule — a signed guard whose operand is not provably non-negative (top) still refines the cell to the two-piece [0, c−1] ∪ [2^31, max] (the gate is removed; no None stop)
+ok: L3c2-3: SLT(t, -1) (c < 0) is a single high interval [2^31, c-1] with no gate — the cell stays in the high half (the decrements into the low half are met away)
+ok: L3c2-4: the -O0 flag-indirected pattern (CF := SLT(t, 4); if CF goto …) — the flag-state record + the signed row bound the cell at RBP-8 (⊆ [0,3])
+ok: L3c2-5: trace-exact cell refinement — without the RBP prologue def the cell is still bounded by the SLT(4) iterate constraint
+ok: L3c3-1: the PLUS-HULL row — `v := t + 1; if SLT(v, 10)` — the wrapped hull {−1} ∪ [0,8] caps the cell at RBP-8 (bounded ⊆ [0,9])
+ok: L3c3-2: the TIMES rule over an unbounded operand is the identity (sound — the cell is not bounded by the multiplier)
+ok: L3c3-3: the RSHIFT-const row — `v := t >> 2; if SLT(v, 10)` — the cell at RBP-8 is bounded (⊆ [0,39]; 10<<2 = 40)
+ok: L3c3-4a: the ARSHIFT-const row with a provably non-negative operand — the cell at RBP-8 is bounded (⊆ [0,39])
+ok: L3c3-4b: the ARSHIFT gate — an operand not provably non-negative (top) does NOT refine (the cell stays top; sound stop)
+ok: L3c3-5: TIMES with k = 0 is a sound stop — the cell at RBP-8 stays top
+ok: L3c3-6: TIMES with an EQ singleton {5} and k = 8 (non-divisible) — the row is empty, no refinement (the cell is not a bounded set; the guard is genuinely dead — no t makes t*8 = 5 — the edge is pruned)
+ok: L3c4-1: the Var-vs-Var LT guard (`if (t < u) goto …`, u seeded {10}) — the interval-overlap row caps the cell at RBP-8 (⊆ [0,9])
+ok: L3c4-2: a TOP Var-vs-Var operand makes the refinement vacuous — the cell at RBP-8 stays unbounded (the semantic-top class, no wrong window)
+ok: L3c4-3: the DIVIDE-const row — `v := t / 2; if SLT(v, 10)` — the cell at RBP-8 is bounded (⊆ [0,19])
+ok: L3c4-4: the HIGH-extract producer row — `v := cast HIGH 8 t; if SLT(v, 10)` — the cell at RBP-8 is bounded (⊆ [0, 0x09FFFFFF]; the 2^28-straddling value is dropped)
+ok: L3c4-5: DIVIDE with k = 0 is a sound stop — no refinement (the cell is not a bounded set)
+ok: L3c5-1: the const-first guard arm — `if (10 = t) goto …` (EQ const-first) — the cell at RBP-8 is bounded (⊆ [0,10]; pinned to {10})
+ok: L3c5-2: the Tier-3 MOD row (periodic, no closed form) is a sound stop — no refinement (the cell is not a bounded set)
+ok: L3c5-3a: the AND-identity row — `v := t AND ~0` (≡ t) — the cell at RBP-8 is bounded (⊆ [0,9])
+ok: L3c5-3b: the OR-identity row — `v := t OR 0` (≡ t) — the cell at RBP-8 is bounded (⊆ [0,9])
+ok: L3c5-4: an Unknown condition — the fixpoint completes and assume_jump_cond keeps the env unchanged (the shrunk catch-all, never asserts)
+ok: A-1: mixed-width rshift (32-bit {0xFF} >> 64-bit {2}) is EXACTLY {0x3F} at 32 bits (no guard fire)
+ok: A-2: the 252-hit shape (32-bit >> 64-bit [0,40)) — the coerced three-way split yields a non-top, non-bottom result
+ok: A-3: mixed-width rshift overshift (32-bit >> 64-bit {40}) is EXACTLY {0} at 32 bits
+ok: A-4: mixed-width arshift sign-fill (32-bit {all-ones} arshift 64-bit {40}) is EXACTLY {all-ones} at 32 bits (the SIGN-extension)
+ok: A-5: the antipodal overshift image (64-bit {1, 2^63} arshift {70}) is {0, all-ones} (equal-width path, no coercion)
+ok: S-1a: the traverse shape (fixture F, the seeded RMW counter) collapses to <= 3 cells in the solution state (pre-fix the [RSP-8] point-key pile was 16-17 — the restored equal-lower hull union)
+ok: S-1b: the partition — the iterate view's cell is the loop-body values (⊆ [0,7], non-top) and the exit view's cell carries the exit-iteration value (8 survives)
+ok: S-4a: two +1-adjacent equal-value cells ([RSP-8] and [RSP-7], both {7}) through ONE merge become a SINGLE cell (the +1-adjacent arm, not shadowed by the equal-lower arm)
+ok: S-4b: the surviving cell is the union hull [RSP-8, RSP-7] — the sexp key marker (lo 0x…F8)(hi 0x…F9) carries the merged value {7} (stubbed)
+ok: B-1: an interrupt edge is an unknown external callee — the continuation keeps the RSP anchor ({0}) and the caller-saved rdi is topped (no AI.top degradation)
+ok: L-B1: the exact -O0 corpus block (t := Load-3; CF/SF/OF/ZF defs; the jle compound guard `ZF | (SF|OF) & ~(SF&OF)`) — the jcc decoder recovers the loop-counter constraint (SLE, c=3, gated) and the cell at RBP-8 is bounded (⊆ [0, 4))
+ok: L-B2: the jl compound guard `(SF|OF) & ~(SF&OF)` (signed e < c — excludes equality) — the decoder emits SLT and the cell at RBP-8 is bounded (⊆ [0, 3))
+ok: L-B3: the ja compound guard `~(CF | ZF)` (unsigned e > c) — the decoder emits UGT (c=3 -> [4, 2^w)) and the decrementing counter converges inside the constraint: the cell at RBP-8 has min_elem >= 4 and is not top
+ok: L-B4: the same-comparison gate — a second cmp in the header (a dead-CF-eliminated t2/OF2/SF2/ZF2 group referencing t2 := f - 5) makes the gate reject the mixed group — NO decoder refinement (the cell stays top)
+ok: L-B5: the RECORD path (bare `when CF` with CF := v < 3, v := Load[RBP-8] unique) survives the L-A2 wiring — the flag-state arm + the walk still refine the cell at RBP-8 (⊆ [0, 3))
+ok: L-D2: the WIDE-BOUND corpus shape (c=63, ascending counter seeded 0, crossing the i>10 widening threshold) — the L-D1 gate-relaxed refinement (provably_nonneg_operand proving the cell non-negative via the seed store) bounds the cell at RBP-8 (⊆ [0, 64), max ≤ 63) — FAILS pre-L-D1 (the SLE gate rejects the widened infinite CLP, the cell stays top)
+ok: E1-1: call-in-loop RSP stability — the ON-path matched-pair +8 (the callee's ret pops exactly the retaddr the caller pushed) keeps the header RSP at EXACTLY the pre-push {0x1000} (bounded, no drift — FAILS pre-L-E1: the header joins {−8k}/iteration and the i>10 widening makes the infinite descending CLP)
+ok: E1-2: straight-line call RSP exactness — the continuation RSP is EXACTLY the pre-call singleton {0x2000} (truth, not truth−8 = {0x1ff8} — FAILS pre-L-E1)
+ok: L-D6 (gate-free, spec §2.1): the RBP-anchored loop (prologue RBP := RSP + the c=63 jle loop at RBP−8 + the dead epilogue RBP := mem[RSP]) — every def is denoted, so the jcc decoder's cell meet binds the cell at RBP−8 to ⊆ [0, 64) at the BODY input
+ok: R2-1: the INLINE-ARITHMETIC condition `(t+1) < 64` (the compared exp is BinOp PLUS of t := Load[RBP-8]) — the producer-op recursion refines the (t+1) chain (guard row -> [0,64) on (t+1) -> the PLUS row's circular hull {−1} ∪ [0, 62] on t -> the Var -> refine_backward -> refine_cell) and the cell at RBP−8 is the 64-element hull (⊆ {−1} ∪ [0, 64); cardn 64; no middle value — FAILS pre-refactor: the chain unrefined, the cell stays the full domain/top)
+ok: R2-2: NOT-of-comparison `~(t < 5)` (the taken edge = t ≥ 5, the two-path seed cell {3, 8}) — the comparison-operand keep-env gate (the FALSE-edge guard) leaves the cell UNSHARPENED by the TRUE-edge row [0, 5): NOT bounded ⊆ [0, 4] (it is top/unbounded) — with the gate removed the wrong window drops the live values (the cell wrongly ⊆ [0, 4])
+ok: R2-3: the CONST-FIRST LT flip `10 < t` (Bil.BinOp (Bil.LT, Bil.Int 10, t)) — the flip (ora-9 Item 1(d)) dispatches on the guard_op enum (UGT): t > 10 unsigned -> [11, 2^w) and the DECREMENTING counter converges inside the constraint (non-top, min_elem ≥ 11) — FAILS on the current tree: the landed const-first arm is the EQ-only equivalence (LT const-first is still a sound stop), so the cell goes top
+ok: R2-4 (migrated, single-pass §2): the NESTED-BinOp chain `(t * 8) < 512` — the inline walk bounds the operand, the exact TIMES no-wrap slice fires, and the body-IN cell is the EXACT singleton {63} (the loop exits at t = 64; 63 ∈, 62 ∉, 64 ∉; non-top)
+ok: M5-1: the MINUS wrap hull — `v := t − ~0; if (v < 5)` refines the cell to the wrapped {0xFFFFFFFF, 0..3} (cardn 5; 0xFFFFFFFF ∈; 0 ∈; the wrap was handled, not emptied)
+ok: M5-2: the TIMES k=0 rule is the identity — `v := t * 0; if EQ(v, 0)` leaves the cell unconstrained (top)
+ok: M5-3: the XOR-~0 bijection — `v := t XOR ~0; if EQ(v, 5)` refines the cell to {~5} = {0xFFFFFFFA} (0xFFFFFFFA ∈, 5 ∉)
+ok: M5-4: the LOW-cast rule in the walk — `v := cast LOW 8 t; if EQ(v, 5)` bounds the cell to the truncation hull [5, 0xFFFFFF05] (5 ∈, 5+0x100 ∈, 4 ∉)
+ok: M5-5: the signed-division rule — `v := t sdiv 2; if EQ(v, −3)` refines the cell to {−6, −5} (0xFFFFFFFA ∈, 0xFFFFFFFB ∈, −3 ∉)
+ok: M5-6: the Var-identity rule — `v := t; if (v < 10)` — the walk propagates the [0,10) window      through the identity to the loaded cell (the body-IN cell is bounded ≤ [0,9] — the store-only      join would be [0,10])
+ok: O4c-1: width-64 singleton 0xFFFF_FFFF_FFFF_FFFF is unsigned — min = max = itself, elem holds, 0 not in
+ok: O4c-2: top 64 is the 2^64-cardinality class — is_top/is_infinite, absorbs a singleton (the Big fallback, not I64-truncated)
+ok: O4c-3: top 63 is the 2^63-cardinality class (fits Int64 — the I64 boundary) — is_top/is_infinite
+ok: O4c-4: width-63 singleton 2^63−1 is unsigned and exact (top bit of a 63-bit word; min = max = itself)
+ok: O4c-5: 64-bit wrap add — {0xFFFF_FFFF_FFFF_FFFF} + {1} = {0}
+ok: O4c-6: 63-bit wrap sub — {0} − {1} = {2^63 − 1}
+ok: O4c-7a: add commutative [equal]
+ok: O4c-7a: add commutative [cardn]
+ok: O4c-7a: add commutative [iter]
+ok: O4c-7a: add commutative [extrema]
+ok: O4c-7b: meet commutative [equal]
+ok: O4c-7b: meet commutative [cardn]
+ok: O4c-7b: meet commutative [iter]
+ok: O4c-7b: meet commutative [extrema]
+ok: O4c-7c: join commutative [equal]
+ok: O4c-7c: join commutative [cardn]
+ok: O4c-7c: join commutative [iter]
+ok: O4c-7c: join commutative [extrema]
+ok: O4c-7d: meet idempotent [equal]
+ok: O4c-7d: meet idempotent [cardn]
+ok: O4c-7d: meet idempotent [iter]
+ok: O4c-7d: meet idempotent [extrema]
+ok: O4c-8: step 0 with cardn 1 canonizes to the singleton {10}
+ok: O4c-9: cardn 0 is bottom (empty iter, no min)
+ok: O4c-10: cardn-2 wrap flips the pair to ascending order (min 0xFFFFFFEE, max 0xFFFFFFF0)
+ok: O4c-11: step·cardn = 2^w (2·4 = 8 = 2^3) is infinite — {0,2,4,6}, cardn 4, 7 not in
+ok: O4c-12: R2-1 — meet {0..8} with the circular hull {0xFFFFFFFF,0..8} = {0..8} exactly (no spurious 0xFFFFFFFF)
+ok: opadd-a: join a key fully inside one node — interval_diff `two (low flank lo 10 = {1}, middle lo 12 = {1,2}, high flank lo 19 = {1})
+ok: opadd-b: join a key spanning several nodes — the [gaps] cells duplicate the node lo addresses, so the node lo reads are top (structural-only observation)
+ok: opadd-c1: meet a key covering the node (interval_diff `none) — the fresh gap becomes {1,2} (meet fills it); the node narrows
+ok: opadd-c2: join a key overlapping the node's low half (interval_diff `one) — the high flank lo 16 keeps {1}; the joined cell's lo 10 is top (gap pollution)
+ok: opadd-c3: join a key overlapping the node's high half (interval_diff `one) — the low flank lo 10 keeps {1}, the joined cell lo 15 = {1,2}
+ok: opadd-d1: a circular WordSet -> Key.of_wordset is the FULL span [0, 0xFFFFFFFF] (lo 0 = {7}, interior 0x50 and 0xFFFFFFF0 are misaligned top)
+ok: opadd-d2: a key with hi = 0xFFFFFFFF — the finishing gap terminates at max (lo 10 = {1}; no wrapped spill at address 0)
+ok: opadd-e: the bottom map stays bottom under add/meet_add/join_add/meet_range
+ok: opadd-f: a 64-bit {5} meets a 32-bit {5} cell via meet_poly (widened to 64, no crash)
+ok: opadd-f2: a 64-bit {5} joins a 32-bit {5} cell -> top (the idx-mismatched join fallback), no crash
+ok: regression C1: the narrow elu16 store is rewritten to the slot OR-mask form (stubbed)
+ok: regression C1: the OR-mask constant is neg(1 << 16) = 0xFFFFFFFFFFFF0000 at width 64 (stubbed)
+ok: regression C2: the degraded frame covers the deepest literal access (>= 0x4000 bytes) (stubbed)
+ok: regression C3: pre-call the caller-frame cell [RSP-8] holds {0xAA} (non-vacuous pin) (stubbed)
+ok: regression C3: pre-call the outgoing slot [RSP+16] holds {0xBB} (non-vacuous pin) (stubbed)
+ok: regression C3: the caller-frame cell [RSP-8] survives the call with its value (frame not whole-memory-topped) (stubbed)
+ok: regression C3: the outgoing-slot cell [RSP+16] does NOT survive as the stored concrete value (stubbed)
+ok: regression C4b control: two identical Range members stay convertible=true (stubbed)
+ok: regression C4b: an Infinite-span member whose normalized span equals the Range span makes the component convertible=false (stubbed)
+ok: regression C4a: the indexed loop-body store carries an offset tag (fixture locates the Infinite class) (stubbed)
+ok: regression C4a: the Infinite tag survives the overlap merge (not overwritten by the merged Range) (stubbed)
+ok: property R11 control: the indexed member keeps its own kind through the merge (stubbed)
+ok: property R11: the precise singleton Range(-16,-16) survives the overlap merge un-hulled (stubbed)
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=8,lo
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=8,lo
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=8,lo
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=8,lo
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=8,hi
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=8,hi
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=8,hi
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=8,hi
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=16,lo
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=16,lo
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=16,lo
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=16,lo
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=16,hi
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=16,hi
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=16,hi
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=16,hi
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=32,lo
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=32,lo
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=32,lo
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=32,lo
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=32,hi
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=32,hi
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=32,hi
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=32,hi
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=64,lo
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=64,lo
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=64,lo
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=64,lo
+ok: R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 @w=64,hi
+ok: R6 unit: the NEQ arc equals diff(top,{c}) @w=64,hi
+ok: R6 unit: the arc's meet with {c} is bottom (genuinely infeasible) @w=64,hi
+ok: R6 unit: the arc survives a join with a stepped class (non-top) @w=64,hi
+ok: R6: the jne-counter loop's indexed store carries an offset tag (stubbed)
+ok: R6: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals diff(top,{9})) (stubbed)
+ok: R6: the NEQ guard's FALLTHROUGH view pins the counter to {9} exactly (stubbed)
+ok: G3: the jne-counter loop's indexed store carries an offset tag (stubbed)
+ok: G3: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals diff(top,{9})) (stubbed)
+ok: G3: the NEQ guard's FALLTHROUGH view pins the counter to {9} exactly (stubbed)
+ok: remediation A1: pre-call the seeded caller-frame cell [entry RSP-8] holds {0xAA} (non-vacuous pin) (stubbed)
+ok: remediation A1: the TOP-valued outgoing-slot store escalates — the seeded caller-frame cell does NOT survive the call (stubbed)
+ok: remediation A2: the degraded frame covers the COMPOSED depth (round16(dec + neg_disp + 16) = 0x9010) (stubbed)
+ok: remediation A3: the degraded anchor leaves headroom above the highest positive-disp access (n - 8 - 0x20) (stubbed)
+ok: remediation A4a: the u8 narrow-store OR-mask is neg(1 << 8) = 0xFFFFFFFFFFFFFF00 at width 64 (stubbed)
+ok: remediation A4b: the u32 narrow-store OR-mask is neg(1 << 32) = 0xFFFFFFFF00000000 at width 64 (stubbed)
+ok: remediation A4c: pre-call the neighbor cell [-0x18] holds {0xAA} and the slots hold their values (non-vacuous pins) (stubbed)
+ok: remediation A4c: BOTH adjacent outgoing-slot cells drop post-call (exact-extent containment) (stubbed)
+ok: remediation A4c: the neighbor cell OUTSIDE the slots' extent survives the call untouched (stubbed)
+  property logand VIOLATION (CLP) @w=8: [1,17] & [1,17]: 1 excluded value(s)
+    x=17 y=14 -> x&y=0 not in result
+  property logand VIOLATION (WordSet) @w=8: [1,17] & [1,17]: 1 excluded value(s)
+    x=17 y=14 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=8: [16,47] & [16,47]: 16 excluded value(s)
+    x=47 y=31 -> x&y=15 not in result
+    x=47 y=30 -> x&y=14 not in result
+    x=47 y=29 -> x&y=13 not in result
+  property logand VIOLATION (WordSet) @w=8: [16,47] & [16,47]: 16 excluded value(s)
+    x=47 y=31 -> x&y=15 not in result
+    x=47 y=30 -> x&y=14 not in result
+    x=47 y=29 -> x&y=13 not in result
+  property logand VIOLATION (CLP) @w=8: [16,47] & step3[1..]: 3 excluded value(s)
+    x=47 y=46 -> x&y=46 not in result
+    x=47 y=43 -> x&y=43 not in result
+    x=45 y=46 -> x&y=44 not in result
+  property logand VIOLATION (WordSet) @w=8: [16,47] & step3[1..]: 3 excluded value(s)
+    x=47 y=46 -> x&y=46 not in result
+    x=47 y=43 -> x&y=43 not in result
+    x=45 y=46 -> x&y=44 not in result
+  property logand VIOLATION (CLP) @w=8: [0,99] & evens[0..78]: 6 excluded value(s)
+    x=95 y=78 -> x&y=78 not in result
+    x=95 y=76 -> x&y=76 not in result
+    x=95 y=74 -> x&y=74 not in result
+  property logand VIOLATION (WordSet) @w=8: [0,99] & evens[0..78]: 6 excluded value(s)
+    x=95 y=78 -> x&y=78 not in result
+    x=95 y=76 -> x&y=76 not in result
+    x=95 y=74 -> x&y=74 not in result
+  property logand VIOLATION (CLP) @w=8: [0,99] & step8[8..]: 2 excluded value(s)
+    x=95 y=80 -> x&y=80 not in result
+    x=95 y=72 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=8: [0,99] & step8[8..]: 2 excluded value(s)
+    x=95 y=80 -> x&y=80 not in result
+    x=95 y=72 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=8: [0,99] & step5[3..]: 3 excluded value(s)
+    x=95 y=73 -> x&y=73 not in result
+    x=95 y=68 -> x&y=68 not in result
+    x=94 y=73 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=8: [0,99] & step5[3..]: 3 excluded value(s)
+    x=95 y=73 -> x&y=73 not in result
+    x=95 y=68 -> x&y=68 not in result
+    x=94 y=73 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=8: [0,99] & step16[8..]: 3 excluded value(s)
+    x=95 y=88 -> x&y=88 not in result
+    x=95 y=72 -> x&y=72 not in result
+    x=87 y=88 -> x&y=80 not in result
+  property logand VIOLATION (WordSet) @w=8: [0,99] & step16[8..]: 3 excluded value(s)
+    x=95 y=88 -> x&y=88 not in result
+    x=95 y=72 -> x&y=72 not in result
+    x=87 y=88 -> x&y=80 not in result
+  property logand VIOLATION (CLP) @w=8: [half-3,half+3] & [half-3,half+3]: 5 excluded value(s)
+    x=131 y=127 -> x&y=3 not in result
+    x=131 y=126 -> x&y=2 not in result
+    x=131 y=125 -> x&y=1 not in result
+  property logand VIOLATION (CLP) @w=8: [half-3,half+3] & wrapstep{ones-4+8k}: 1 excluded value(s)
+    x=128 y=19 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=8: [half-3,half+3] & anti{1,1+half}: 1 excluded value(s)
+    x=130 y=1 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=8: [ones-8,ones] & [ones-8,ones]: 7 excluded value(s)
+    x=254 y=247 -> x&y=246 not in result
+    x=253 y=247 -> x&y=245 not in result
+    x=252 y=247 -> x&y=244 not in result
+  property logand VIOLATION (CLP) @w=8: evens[0..78] & step8[8..]: 1 excluded value(s)
+    x=78 y=72 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=8: evens[0..78] & step8[8..]: 1 excluded value(s)
+    x=78 y=72 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=8: evens[0..78] & step12[4..]: 2 excluded value(s)
+    x=78 y=88 -> x&y=72 not in result
+    x=78 y=76 -> x&y=76 not in result
+  property logand VIOLATION (WordSet) @w=8: evens[0..78] & step12[4..]: 2 excluded value(s)
+    x=78 y=88 -> x&y=72 not in result
+    x=78 y=76 -> x&y=76 not in result
+  property logand VIOLATION (CLP) @w=8: step4[2..] & step3[1..]: 1 excluded value(s)
+    x=46 y=46 -> x&y=46 not in result
+  property logand VIOLATION (WordSet) @w=8: step4[2..] & step3[1..]: 1 excluded value(s)
+    x=46 y=46 -> x&y=46 not in result
+  property logand VIOLATION (CLP) @w=8: step8[8..] & step8[8..]: 1 excluded value(s)
+    x=80 y=40 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=8: step8[8..] & step5[3..]: 1 excluded value(s)
+    x=72 y=73 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=8: step8[8..] & step5[3..]: 1 excluded value(s)
+    x=72 y=73 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=8: step8[8..] & step16[8..]: 1 excluded value(s)
+    x=80 y=40 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=8: step8[8..] & step12[4..]: 2 excluded value(s)
+    x=80 y=88 -> x&y=80 not in result
+    x=72 y=88 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=8: step3[1..] & step3[1..]: 1 excluded value(s)
+    x=58 y=4 -> x&y=0 not in result
+  property logand VIOLATION (WordSet) @w=8: step3[1..] & step3[1..]: 1 excluded value(s)
+    x=58 y=4 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=8: step5[3..] & step5[3..]: 3 excluded value(s)
+    x=73 y=53 -> x&y=1 not in result
+    x=73 y=48 -> x&y=0 not in result
+    x=58 y=3 -> x&y=2 not in result
+  property logand VIOLATION (WordSet) @w=8: step5[3..] & step5[3..]: 3 excluded value(s)
+    x=73 y=53 -> x&y=1 not in result
+    x=73 y=48 -> x&y=0 not in result
+    x=58 y=3 -> x&y=2 not in result
+  property logand VIOLATION (CLP) @w=8: step5[3..] & step12[4..]: 2 excluded value(s)
+    x=73 y=88 -> x&y=72 not in result
+    x=68 y=100 -> x&y=68 not in result
+  property logand VIOLATION (WordSet) @w=8: step5[3..] & step12[4..]: 2 excluded value(s)
+    x=73 y=88 -> x&y=72 not in result
+    x=68 y=100 -> x&y=68 not in result
+  property logand VIOLATION (CLP) @w=8: step16[8..] & step12[4..]: 2 excluded value(s)
+    x=88 y=88 -> x&y=88 not in result
+    x=88 y=76 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=8: step12[4..] & step12[4..]: 1 excluded value(s)
+    x=100 y=16 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: [1,17] & [1,17]: 1 excluded value(s)
+    x=17 y=14 -> x&y=0 not in result
+  property logand VIOLATION (WordSet) @w=16: [1,17] & [1,17]: 1 excluded value(s)
+    x=17 y=14 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: [16,47] & [16,47]: 16 excluded value(s)
+    x=47 y=31 -> x&y=15 not in result
+    x=47 y=30 -> x&y=14 not in result
+    x=47 y=29 -> x&y=13 not in result
+  property logand VIOLATION (WordSet) @w=16: [16,47] & [16,47]: 16 excluded value(s)
+    x=47 y=31 -> x&y=15 not in result
+    x=47 y=30 -> x&y=14 not in result
+    x=47 y=29 -> x&y=13 not in result
+  property logand VIOLATION (CLP) @w=16: [16,47] & step3[1..]: 3 excluded value(s)
+    x=47 y=46 -> x&y=46 not in result
+    x=47 y=43 -> x&y=43 not in result
+    x=45 y=46 -> x&y=44 not in result
+  property logand VIOLATION (WordSet) @w=16: [16,47] & step3[1..]: 3 excluded value(s)
+    x=47 y=46 -> x&y=46 not in result
+    x=47 y=43 -> x&y=43 not in result
+    x=45 y=46 -> x&y=44 not in result
+  property logand VIOLATION (CLP) @w=16: [0,99] & evens[0..78]: 6 excluded value(s)
+    x=95 y=78 -> x&y=78 not in result
+    x=95 y=76 -> x&y=76 not in result
+    x=95 y=74 -> x&y=74 not in result
+  property logand VIOLATION (WordSet) @w=16: [0,99] & evens[0..78]: 6 excluded value(s)
+    x=95 y=78 -> x&y=78 not in result
+    x=95 y=76 -> x&y=76 not in result
+    x=95 y=74 -> x&y=74 not in result
+  property logand VIOLATION (CLP) @w=16: [0,99] & step8[8..]: 2 excluded value(s)
+    x=95 y=80 -> x&y=80 not in result
+    x=95 y=72 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=16: [0,99] & step8[8..]: 2 excluded value(s)
+    x=95 y=80 -> x&y=80 not in result
+    x=95 y=72 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=16: [0,99] & step5[3..]: 3 excluded value(s)
+    x=95 y=73 -> x&y=73 not in result
+    x=95 y=68 -> x&y=68 not in result
+    x=94 y=73 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=16: [0,99] & step5[3..]: 3 excluded value(s)
+    x=95 y=73 -> x&y=73 not in result
+    x=95 y=68 -> x&y=68 not in result
+    x=94 y=73 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=16: [0,99] & step16[8..]: 3 excluded value(s)
+    x=95 y=88 -> x&y=88 not in result
+    x=95 y=72 -> x&y=72 not in result
+    x=87 y=88 -> x&y=80 not in result
+  property logand VIOLATION (WordSet) @w=16: [0,99] & step16[8..]: 3 excluded value(s)
+    x=95 y=88 -> x&y=88 not in result
+    x=95 y=72 -> x&y=72 not in result
+    x=87 y=88 -> x&y=80 not in result
+  property logand VIOLATION (CLP) @w=16: [half-3,half+3] & [half-3,half+3]: 5 excluded value(s)
+    x=32771 y=32767 -> x&y=3 not in result
+    x=32771 y=32766 -> x&y=2 not in result
+    x=32771 y=32765 -> x&y=1 not in result
+  property logand VIOLATION (CLP) @w=16: [half-3,half+3] & wrapstep{ones-4+8k}: 1 excluded value(s)
+    x=32768 y=19 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: [half-3,half+3] & anti{1,1+half}: 1 excluded value(s)
+    x=32770 y=1 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: [ones-8,ones] & [ones-8,ones]: 7 excluded value(s)
+    x=65534 y=65527 -> x&y=65526 not in result
+    x=65533 y=65527 -> x&y=65525 not in result
+    x=65532 y=65527 -> x&y=65524 not in result
+  property logand VIOLATION (CLP) @w=16: evens[0..78] & step8[8..]: 1 excluded value(s)
+    x=78 y=72 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=16: evens[0..78] & step8[8..]: 1 excluded value(s)
+    x=78 y=72 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=16: evens[0..78] & step12[4..]: 2 excluded value(s)
+    x=78 y=88 -> x&y=72 not in result
+    x=78 y=76 -> x&y=76 not in result
+  property logand VIOLATION (WordSet) @w=16: evens[0..78] & step12[4..]: 2 excluded value(s)
+    x=78 y=88 -> x&y=72 not in result
+    x=78 y=76 -> x&y=76 not in result
+  property logand VIOLATION (CLP) @w=16: step4[2..] & step3[1..]: 1 excluded value(s)
+    x=46 y=46 -> x&y=46 not in result
+  property logand VIOLATION (WordSet) @w=16: step4[2..] & step3[1..]: 1 excluded value(s)
+    x=46 y=46 -> x&y=46 not in result
+  property logand VIOLATION (CLP) @w=16: step8[8..] & step8[8..]: 1 excluded value(s)
+    x=80 y=40 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: step8[8..] & step5[3..]: 1 excluded value(s)
+    x=72 y=73 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=16: step8[8..] & step5[3..]: 1 excluded value(s)
+    x=72 y=73 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=16: step8[8..] & step16[8..]: 1 excluded value(s)
+    x=80 y=40 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: step8[8..] & step12[4..]: 2 excluded value(s)
+    x=80 y=88 -> x&y=80 not in result
+    x=72 y=88 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=16: step3[1..] & step3[1..]: 1 excluded value(s)
+    x=58 y=4 -> x&y=0 not in result
+  property logand VIOLATION (WordSet) @w=16: step3[1..] & step3[1..]: 1 excluded value(s)
+    x=58 y=4 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=16: step5[3..] & step5[3..]: 3 excluded value(s)
+    x=73 y=53 -> x&y=1 not in result
+    x=73 y=48 -> x&y=0 not in result
+    x=58 y=3 -> x&y=2 not in result
+  property logand VIOLATION (WordSet) @w=16: step5[3..] & step5[3..]: 3 excluded value(s)
+    x=73 y=53 -> x&y=1 not in result
+    x=73 y=48 -> x&y=0 not in result
+    x=58 y=3 -> x&y=2 not in result
+  property logand VIOLATION (CLP) @w=16: step5[3..] & step12[4..]: 2 excluded value(s)
+    x=73 y=88 -> x&y=72 not in result
+    x=68 y=100 -> x&y=68 not in result
+  property logand VIOLATION (WordSet) @w=16: step5[3..] & step12[4..]: 2 excluded value(s)
+    x=73 y=88 -> x&y=72 not in result
+    x=68 y=100 -> x&y=68 not in result
+  property logand VIOLATION (CLP) @w=16: step16[8..] & step12[4..]: 2 excluded value(s)
+    x=88 y=88 -> x&y=88 not in result
+    x=88 y=76 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=16: step12[4..] & step12[4..]: 1 excluded value(s)
+    x=100 y=16 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=32: [1,17] & [1,17]: 1 excluded value(s)
+    x=17 y=14 -> x&y=0 not in result
+  property logand VIOLATION (WordSet) @w=32: [1,17] & [1,17]: 1 excluded value(s)
+    x=17 y=14 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=32: [16,47] & [16,47]: 16 excluded value(s)
+    x=47 y=31 -> x&y=15 not in result
+    x=47 y=30 -> x&y=14 not in result
+    x=47 y=29 -> x&y=13 not in result
+  property logand VIOLATION (WordSet) @w=32: [16,47] & [16,47]: 16 excluded value(s)
+    x=47 y=31 -> x&y=15 not in result
+    x=47 y=30 -> x&y=14 not in result
+    x=47 y=29 -> x&y=13 not in result
+  property logand VIOLATION (CLP) @w=32: [16,47] & step3[1..]: 3 excluded value(s)
+    x=47 y=46 -> x&y=46 not in result
+    x=47 y=43 -> x&y=43 not in result
+    x=45 y=46 -> x&y=44 not in result
+  property logand VIOLATION (WordSet) @w=32: [16,47] & step3[1..]: 3 excluded value(s)
+    x=47 y=46 -> x&y=46 not in result
+    x=47 y=43 -> x&y=43 not in result
+    x=45 y=46 -> x&y=44 not in result
+  property logand VIOLATION (CLP) @w=32: [0,99] & evens[0..78]: 6 excluded value(s)
+    x=95 y=78 -> x&y=78 not in result
+    x=95 y=76 -> x&y=76 not in result
+    x=95 y=74 -> x&y=74 not in result
+  property logand VIOLATION (WordSet) @w=32: [0,99] & evens[0..78]: 6 excluded value(s)
+    x=95 y=78 -> x&y=78 not in result
+    x=95 y=76 -> x&y=76 not in result
+    x=95 y=74 -> x&y=74 not in result
+  property logand VIOLATION (CLP) @w=32: [0,99] & step8[8..]: 2 excluded value(s)
+    x=95 y=80 -> x&y=80 not in result
+    x=95 y=72 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=32: [0,99] & step8[8..]: 2 excluded value(s)
+    x=95 y=80 -> x&y=80 not in result
+    x=95 y=72 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=32: [0,99] & step5[3..]: 3 excluded value(s)
+    x=95 y=73 -> x&y=73 not in result
+    x=95 y=68 -> x&y=68 not in result
+    x=94 y=73 -> x&y=72 not in result
+  property logand VIOLATION (WordSet) @w=32: [0,99] & step5[3..]: 3 excluded value(s)
+    x=95 y=73 -> x&y=73 not in result
+    x=95 y=68 -> x&y=68 not in result
+    x=94 y=73 -> x&y=72 not in result
+  property logand VIOLATION (CLP) @w=32: [0,99] & step16[8..]: 3 excluded value(s)
+    x=95 y=88 -> x&y=88 not in result
+    x=95 y=72 -> x&y=72 not in result
+    x=87 y=88 -> x&y=80 not in result
+  property logand VIOLATION (WordSet) @w=32: [0,99] & step16[8..]: 3 excluded value(s)
+    x=95 y=88 -> x&y=88 not in result
+    x=95 y=72 -> x&y=72 not in result
+    x=87 y=88 -> x&y=80 not in result
+  property logand VIOLATION (CLP) @w=32: [half-3,half+3] & [half-3,half+3]: 5 excluded value(s)
+    x=2147483651 y=2147483647 -> x&y=3 not in result
+    x=2147483651 y=2147483646 -> x&y=2 not in result
+    x=2147483651 y=2147483645 -> x&y=1 not in result
+  property logand VIOLATION (CLP) @w=32: [half-3,half+3] & wrapstep{ones-4+8k}: 1 excluded value(s)
+    x=2147483648 y=19 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=32: [half-3,half+3] & anti{1,1+half}: 1 excluded value(s)
+    x=2147483650 y=1 -> x&y=0 not in result
+  property logand VIOLATION (CLP) @w=32: [ones-8,ones] & [ones-8,ones]: 7 excluded value(s)
+    x=4294967294 y=4294967287 -> x&y=4294967286 not in result
+    x=4294967293 y=4294967287 -> x&y=4294967285 not in result
+    x=4294967292 y=4294967287 -> x&y=4294967284 not in result
+...TRUNCATED BY DUNE...
+  property meet VIOLATION @w=16 (rand): [35344,51798)&[22894,108): expected EMPTY, got {card=51798, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [17400,245)&[931,31): expected EMPTY, got {card=245, min=17400, max=17644}
+  property meet VIOLATION @w=16 (rand): [52893,30258)&[18480,186): expected EMPTY, got {card=30258, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [4411,50)&[18992,55): expected EMPTY, got {card=55, min=18992, max=19046}
+  property meet VIOLATION @w=16 (rand): [24951,34)&[55032,154): expected EMPTY, got {card=154, min=55032, max=55185}
+  property meet VIOLATION @w=16 (rand): [41953,7034)&[54004,69): expected EMPTY, got {card=7034, min=41953, max=48986}
+  property meet VIOLATION @w=16 (rand): [8448,2181)&[7474,57): expected EMPTY, got {card=2181, min=8448, max=10628}
+  property meet VIOLATION @w=16 (rand): [58781,3029)&[53944,41): expected EMPTY, got {card=3029, min=58781, max=61809}
+  property meet VIOLATION @w=16 (rand): [35283,185)&[64610,73): expected EMPTY, got {card=185, min=35283, max=35467}
+  property meet VIOLATION @w=16 (rand): [11226,200)&[8741,109): expected EMPTY, got {card=200, min=11226, max=11425}
+  property meet VIOLATION @w=16 (rand): [16556,121)&[25876,241): expected EMPTY, got {card=241, min=25876, max=26116}
+  property meet VIOLATION @w=16 (rand): [10001,12)&[38545,18044): expected EMPTY, got {card=18044, min=38545, max=56588}
+  property meet VIOLATION @w=16 (rand): [13265,42513)&[11184,78): expected EMPTY, got {card=42513, min=13265, max=55777}
+  property meet VIOLATION @w=16 (rand): [44548,72)&[58204,34): expected EMPTY, got {card=72, min=44548, max=44619}
+  property meet VIOLATION @w=16 (rand): [45418,74)&[9398,237): expected EMPTY, got {card=237, min=9398, max=9634}
+  property meet VIOLATION @w=16 (rand): [54391,113)&[12041,187): expected EMPTY, got {card=187, min=12041, max=12227}
+  property meet VIOLATION @w=16 (rand): [784,10)&[17073,95): expected EMPTY, got {card=95, min=17073, max=17167}
+  property meet VIOLATION @w=16 (rand): [40018,198)&[39464,30): expected EMPTY, got {card=198, min=40018, max=40215}
+  property meet VIOLATION @w=16 (rand): [34427,2)&[55011,5863): expected EMPTY, got {card=5863, min=55011, max=60873}
+  property meet VIOLATION @w=16 (rand): [46853,112)&[31986,21): expected EMPTY, got {card=112, min=46853, max=46964}
+  property meet VIOLATION @w=16 (rand): [54634,161)&[5252,223): expected EMPTY, got {card=223, min=5252, max=5474}
+  property meet VIOLATION @w=16 (rand): [34026,103)&[39022,9220): expected EMPTY, got {card=9220, min=39022, max=48241}
+  property meet VIOLATION @w=16 (rand): [38685,186)&[63552,189): expected EMPTY, got {card=189, min=63552, max=63740}
+  property meet VIOLATION @w=16 (rand): [6195,189)&[7540,116): expected EMPTY, got {card=189, min=6195, max=6383}
+  property meet VIOLATION @w=16 (rand): [39294,147)&[63665,210): expected EMPTY, got {card=210, min=63665, max=63874}
+  property meet VIOLATION @w=16 (rand): [49385,19980)&[11540,25793): expected EMPTY, got {card=25793, min=11540, max=37332}
+  property meet VIOLATION @w=16 (rand): [58402,104)&[65275,138): expected EMPTY, got {card=138, min=65275, max=65412}
+  property meet VIOLATION @w=16 (rand): [41812,203)&[22206,88): expected EMPTY, got {card=203, min=41812, max=42014}
+  property meet VIOLATION @w=16 (rand): [43173,9)&[17894,20): expected EMPTY, got {card=20, min=17894, max=17913}
+  property meet VIOLATION @w=16 (rand): [57073,84)&[17388,191): expected EMPTY, got {card=191, min=17388, max=17578}
+  property meet VIOLATION @w=16 (rand): [5518,18262)&[3798,255): expected EMPTY, got {card=18262, min=5518, max=23779}
+  property meet VIOLATION @w=16 (rand): [215,22)&[5769,12908): expected EMPTY, got {card=12908, min=5769, max=18676}
+  property meet VIOLATION @w=16 (rand): [44999,30)&[6552,124): expected EMPTY, got {card=124, min=6552, max=6675}
+  property meet VIOLATION @w=16 (rand): [12074,47)&[12457,55643): expected EMPTY, got {card=55643, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [25031,223)&[45620,107): expected EMPTY, got {card=223, min=25031, max=25253}
+  property meet VIOLATION @w=16 (rand): [32590,220)&[47124,9591): expected EMPTY, got {card=9591, min=47124, max=56714}
+  property meet VIOLATION @w=16 (rand): [23719,54)&[22350,194): expected EMPTY, got {card=194, min=22350, max=22543}
+  property meet VIOLATION @w=16 (rand): [57509,52)&[50191,238): expected EMPTY, got {card=238, min=50191, max=50428}
+  property meet VIOLATION @w=16 (rand): [46296,52918)&[35588,150): expected EMPTY, got {card=52918, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [59991,161)&[56641,198): expected EMPTY, got {card=198, min=56641, max=56838}
+  property meet VIOLATION @w=16 (rand): [2739,26)&[55327,157): expected EMPTY, got {card=157, min=55327, max=55483}
+  property meet VIOLATION @w=16 (rand): [10269,144)&[4080,13): expected EMPTY, got {card=144, min=10269, max=10412}
+  property meet VIOLATION @w=16 (rand): [43832,51606)&[37071,72): expected EMPTY, got {card=51606, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [10749,153)&[35205,62): expected EMPTY, got {card=153, min=10749, max=10901}
+  property meet VIOLATION @w=16 (rand): [11861,252)&[15381,170): expected EMPTY, got {card=252, min=11861, max=12112}
+  property meet VIOLATION @w=16 (rand): [1571,81)&[46229,86): expected EMPTY, got {card=86, min=46229, max=46314}
+  property meet VIOLATION @w=16 (rand): [3783,231)&[59261,12): expected EMPTY, got {card=231, min=3783, max=4013}
+  property meet VIOLATION @w=16 (rand): [8845,205)&[19949,188): expected EMPTY, got {card=205, min=8845, max=9049}
+  property meet VIOLATION @w=16 (rand): [20704,52504)&[19881,147): expected EMPTY, got {card=52504, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [46091,5686)&[3765,81): expected EMPTY, got {card=5686, min=46091, max=51776}
+  property meet VIOLATION @w=16 (rand): [9183,231)&[43770,15): expected EMPTY, got {card=231, min=9183, max=9413}
+  property meet VIOLATION @w=16 (rand): [30964,17210)&[20917,51): expected EMPTY, got {card=17210, min=30964, max=48173}
+  property meet VIOLATION @w=16 (rand): [1385,227)&[34238,16075): expected EMPTY, got {card=16075, min=34238, max=50312}
+  property meet VIOLATION @w=16 (rand): [30464,32)&[59639,196): expected EMPTY, got {card=196, min=59639, max=59834}
+  property meet VIOLATION @w=16 (rand): [42359,42831)&[41796,231): expected EMPTY, got {card=42831, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [51321,235)&[7659,94): expected EMPTY, got {card=235, min=51321, max=51555}
+  property meet VIOLATION @w=16 (rand): [14483,34)&[28877,19066): expected EMPTY, got {card=19066, min=28877, max=47942}
+  property meet VIOLATION @w=16 (rand): [60674,203)&[52710,166): expected EMPTY, got {card=203, min=60674, max=60876}
+  property meet VIOLATION @w=16 (rand): [10038,128)&[61390,54): expected EMPTY, got {card=128, min=10038, max=10165}
+  property meet VIOLATION @w=16 (rand): [16506,169)&[57480,15846): expected EMPTY, got {card=15846, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [55825,240)&[2940,235): expected EMPTY, got {card=240, min=55825, max=56064}
+  property meet VIOLATION @w=16 (rand): [8908,211)&[42012,143): expected EMPTY, got {card=211, min=8908, max=9118}
+  property meet VIOLATION @w=16 (rand): [14472,143)&[3477,49): expected EMPTY, got {card=143, min=14472, max=14614}
+  property meet VIOLATION @w=16 (rand): [18093,60)&[47877,121): expected EMPTY, got {card=121, min=47877, max=47997}
+  property meet VIOLATION @w=16 (rand): [29425,175)&[9912,74): expected EMPTY, got {card=175, min=29425, max=29599}
+  property meet VIOLATION @w=16 (rand): [15885,128)&[33120,107): expected EMPTY, got {card=128, min=15885, max=16012}
+  property meet VIOLATION @w=16 (rand): [61875,17)&[31460,244): expected EMPTY, got {card=244, min=31460, max=31703}
+  property meet VIOLATION @w=16 (rand): [61388,11)&[61845,88): expected EMPTY, got {card=88, min=61845, max=61932}
+  property meet VIOLATION @w=16 (rand): [36553,13086)&[20144,127): expected EMPTY, got {card=13086, min=36553, max=49638}
+  property meet VIOLATION @w=16 (rand): [53271,55)&[4229,27140): expected EMPTY, got {card=27140, min=4229, max=31368}
+  property meet VIOLATION @w=16 (rand): [13064,106)&[27182,36037): expected EMPTY, got {card=36037, min=27182, max=63218}
+  property meet VIOLATION @w=16 (rand): [40535,61)&[42206,16962): expected EMPTY, got {card=16962, min=42206, max=59167}
+  property meet VIOLATION @w=16 (rand): [41128,100)&[46367,145): expected EMPTY, got {card=145, min=46367, max=46511}
+  property meet VIOLATION @w=16 (rand): [57781,83)&[24346,111): expected EMPTY, got {card=111, min=24346, max=24456}
+  property meet VIOLATION @w=16 (rand): [62034,117)&[7482,231): expected EMPTY, got {card=231, min=7482, max=7712}
+  property meet VIOLATION @w=16 (rand): [6733,6599)&[30199,41868): expected EMPTY, got {card=41868, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [22134,214)&[34019,183): expected EMPTY, got {card=214, min=22134, max=22347}
+  property meet VIOLATION @w=16 (rand): [33970,124)&[34772,181): expected EMPTY, got {card=181, min=34772, max=34952}
+  property meet VIOLATION @w=16 (rand): [55155,4)&[22812,151): expected EMPTY, got {card=151, min=22812, max=22962}
+  property meet VIOLATION @w=16 (rand): [16945,171)&[39578,243): expected EMPTY, got {card=243, min=39578, max=39820}
+  property meet VIOLATION @w=16 (rand): [10319,6520)&[52095,62): expected EMPTY, got {card=6520, min=10319, max=16838}
+  property meet VIOLATION @w=16 (rand): [58634,255)&[35722,101): expected EMPTY, got {card=255, min=58634, max=58888}
+  property meet VIOLATION @w=16 (rand): [58542,70)&[40263,141): expected EMPTY, got {card=141, min=40263, max=40403}
+  property meet VIOLATION @w=16 (rand): [13991,138)&[3071,59): expected EMPTY, got {card=138, min=13991, max=14128}
+  property meet VIOLATION @w=16 (rand): [15347,6224)&[62372,124): expected EMPTY, got {card=6224, min=15347, max=21570}
+  property meet VIOLATION @w=16 (rand): [43572,36)&[20968,155): expected EMPTY, got {card=155, min=20968, max=21122}
+  property meet VIOLATION @w=16 (rand): [34591,247)&[40928,122): expected EMPTY, got {card=247, min=34591, max=34837}
+  property meet VIOLATION @w=16 (rand): [5960,6)&[4868,159): expected EMPTY, got {card=159, min=4868, max=5026}
+  property meet VIOLATION @w=16 (rand): [21299,48)&[47541,215): expected EMPTY, got {card=215, min=47541, max=47755}
+  property meet VIOLATION @w=16 (rand): [23607,185)&[42578,17455): expected EMPTY, got {card=17455, min=42578, max=60032}
+  property meet VIOLATION @w=16 (rand): [32681,24)&[55649,53): expected EMPTY, got {card=53, min=55649, max=55701}
+  property meet VIOLATION @w=16 (rand): [19189,207)&[26521,17196): expected EMPTY, got {card=17196, min=26521, max=43716}
+  property meet VIOLATION @w=16 (rand): [19252,111)&[35858,236): expected EMPTY, got {card=236, min=35858, max=36093}
+  property meet VIOLATION @w=16 (rand): [15316,1177)&[1557,179): expected EMPTY, got {card=1177, min=15316, max=16492}
+  property meet VIOLATION @w=16 (rand): [50506,56352)&[43482,97): expected EMPTY, got {card=56352, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [18248,220)&[7957,2): expected EMPTY, got {card=220, min=18248, max=18467}
+  property meet VIOLATION @w=16 (rand): [5157,198)&[6737,252): expected EMPTY, got {card=252, min=6737, max=6988}
+  property meet VIOLATION @w=16 (rand): [58392,105)&[13861,33709): expected EMPTY, got {card=33709, min=13861, max=47569}
+  property meet VIOLATION @w=16 (rand): [9536,244)&[38632,6806): expected EMPTY, got {card=6806, min=38632, max=45437}
+  property meet VIOLATION @w=16 (rand): [51761,156)&[57774,55485): expected EMPTY, got {card=55485, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [13927,80)&[6005,2243): expected EMPTY, got {card=2243, min=6005, max=8247}
+  property meet VIOLATION @w=16 (rand): [35251,216)&[18309,153): expected EMPTY, got {card=216, min=35251, max=35466}
+  property meet VIOLATION @w=16 (rand): [13841,48054)&[997,72): expected EMPTY, got {card=48054, min=13841, max=61894}
+  property meet VIOLATION @w=16 (rand): [50936,25138)&[35654,76): expected EMPTY, got {card=25138, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [14359,27)&[3624,92): expected EMPTY, got {card=92, min=3624, max=3715}
+  property meet VIOLATION @w=16 (rand): [18668,191)&[46207,153): expected EMPTY, got {card=191, min=18668, max=18858}
+  property meet VIOLATION @w=16 (rand): [62616,116)&[40191,246): expected EMPTY, got {card=246, min=40191, max=40436}
+  property meet VIOLATION @w=16 (rand): [10403,70)&[62242,146): expected EMPTY, got {card=146, min=62242, max=62387}
+  property meet VIOLATION @w=16 (rand): [10843,171)&[715,149): expected EMPTY, got {card=171, min=10843, max=11013}
+  property meet VIOLATION @w=16 (rand): [57099,118)&[50698,192): expected EMPTY, got {card=192, min=50698, max=50889}
+  property meet VIOLATION @w=16 (rand): [19019,54)&[33079,51): expected EMPTY, got {card=54, min=19019, max=19072}
+  property meet VIOLATION @w=16 (rand): [31301,189)&[27373,154): expected EMPTY, got {card=189, min=31301, max=31489}
+  property meet VIOLATION @w=16 (rand): [45401,179)&[10414,119): expected EMPTY, got {card=179, min=45401, max=45579}
+  property meet VIOLATION @w=16 (rand): [23345,64)&[31923,247): expected EMPTY, got {card=247, min=31923, max=32169}
+  property meet VIOLATION @w=16 (rand): [46440,113)&[28152,162): expected EMPTY, got {card=162, min=28152, max=28313}
+  property meet VIOLATION @w=16 (rand): [32215,239)&[63294,159): expected EMPTY, got {card=239, min=32215, max=32453}
+  property meet VIOLATION @w=16 (rand): [27896,222)&[19228,242): expected EMPTY, got {card=242, min=19228, max=19469}
+  property meet VIOLATION @w=16 (rand): [30742,226)&[23818,185): expected EMPTY, got {card=226, min=30742, max=30967}
+  property meet VIOLATION @w=16 (rand): [56451,134)&[11171,168): expected EMPTY, got {card=168, min=11171, max=11338}
+  property meet VIOLATION @w=16 (rand): [28327,87)&[44505,208): expected EMPTY, got {card=208, min=44505, max=44712}
+  property meet VIOLATION @w=16 (rand): [3742,233)&[3616,103): expected EMPTY, got {card=233, min=3742, max=3974}
+  property meet VIOLATION @w=16 (rand): [48360,242)&[20253,25272): expected EMPTY, got {card=25272, min=20253, max=45524}
+  property meet VIOLATION @w=16 (rand): [53444,221)&[43282,44): expected EMPTY, got {card=221, min=53444, max=53664}
+  property meet VIOLATION @w=16 (rand): [47631,28231)&[38082,91): expected EMPTY, got {card=28231, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [59038,92)&[59499,127): expected EMPTY, got {card=127, min=59499, max=59625}
+  property meet VIOLATION @w=16 (rand): [45954,119)&[31980,42): expected EMPTY, got {card=119, min=45954, max=46072}
+  property meet VIOLATION @w=16 (rand): [32089,37)&[53488,119): expected EMPTY, got {card=119, min=53488, max=53606}
+  property meet VIOLATION @w=16 (rand): [27820,82)&[42145,38757): expected EMPTY, got {card=38757, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [64965,177)&[58666,105): expected EMPTY, got {card=177, min=64965, max=65141}
+  property meet VIOLATION @w=16 (rand): [18617,97)&[50844,83): expected EMPTY, got {card=97, min=18617, max=18713}
+  property meet VIOLATION @w=16 (rand): [32485,37575)&[29473,42): expected EMPTY, got {card=37575, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [9379,122)&[37484,255): expected EMPTY, got {card=255, min=37484, max=37738}
+  property meet VIOLATION @w=16 (rand): [18279,25835)&[7269,59): expected EMPTY, got {card=25835, min=18279, max=44113}
+  property meet VIOLATION @w=16 (rand): [40177,25368)&[38228,37): expected EMPTY, got {card=25368, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [42560,47017)&[25814,201): expected EMPTY, got {card=47017, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [5893,121)&[55151,128): expected EMPTY, got {card=128, min=55151, max=55278}
+  property meet VIOLATION @w=16 (rand): [61776,241)&[57122,253): expected EMPTY, got {card=253, min=57122, max=57374}
+  property meet VIOLATION @w=16 (rand): [63978,223)&[19043,247): expected EMPTY, got {card=247, min=19043, max=19289}
+  property meet VIOLATION @w=16 (rand): [52640,152)&[9314,37): expected EMPTY, got {card=152, min=52640, max=52791}
+  property meet VIOLATION @w=16 (rand): [51778,84)&[43282,129): expected EMPTY, got {card=129, min=43282, max=43410}
+  property meet VIOLATION @w=16 (rand): [40881,26896)&[9764,10): expected EMPTY, got {card=26896, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [46471,119)&[11303,249): expected EMPTY, got {card=249, min=11303, max=11551}
+  property meet VIOLATION @w=16 (rand): [43477,250)&[37015,97): expected EMPTY, got {card=250, min=43477, max=43726}
+  property meet VIOLATION @w=16 (rand): [35960,10349)&[35095,98): expected EMPTY, got {card=10349, min=35960, max=46308}
+  property meet VIOLATION @w=16 (rand): [55631,50)&[62565,107): expected EMPTY, got {card=107, min=62565, max=62671}
+  property meet VIOLATION @w=16 (rand): [10375,20)&[52114,90): expected EMPTY, got {card=90, min=52114, max=52203}
+  property meet VIOLATION @w=16 (rand): [34038,216)&[53672,126): expected EMPTY, got {card=216, min=34038, max=34253}
+  property meet VIOLATION @w=16 (rand): [48707,10)&[40639,191): expected EMPTY, got {card=191, min=40639, max=40829}
+  property meet VIOLATION @w=16 (rand): [33223,226)&[25848,41): expected EMPTY, got {card=226, min=33223, max=33448}
+  property meet VIOLATION @w=16 (rand): [47873,79)&[43486,189): expected EMPTY, got {card=189, min=43486, max=43674}
+  property meet VIOLATION @w=16 (rand): [13404,90)&[46842,5145): expected EMPTY, got {card=5145, min=46842, max=51986}
+  property meet VIOLATION @w=16 (rand): [47124,34504)&[23057,85): expected EMPTY, got {card=34504, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [56102,134)&[29865,39): expected EMPTY, got {card=134, min=56102, max=56235}
+  property meet VIOLATION @w=16 (rand): [21082,10056)&[12312,135): expected EMPTY, got {card=10056, min=21082, max=31137}
+  property meet VIOLATION @w=16 (rand): [7649,90)&[19259,11046): expected EMPTY, got {card=11046, min=19259, max=30304}
+  property meet VIOLATION @w=16 (rand): [7331,147)&[46167,245): expected EMPTY, got {card=245, min=46167, max=46411}
+  property meet VIOLATION @w=16 (rand): [52381,18)&[42942,66): expected EMPTY, got {card=66, min=42942, max=43007}
+  property meet VIOLATION @w=16 (rand): [5810,47)&[52797,75): expected EMPTY, got {card=75, min=52797, max=52871}
+  property meet VIOLATION @w=16 (rand): [56727,32956)&[42563,81): expected EMPTY, got {card=32956, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [55970,15540)&[18925,255): expected EMPTY, got {card=15540, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [9880,10559)&[51221,59): expected EMPTY, got {card=10559, min=9880, max=20438}
+  property meet VIOLATION @w=16 (rand): [38532,85)&[38232,191): expected EMPTY, got {card=191, min=38232, max=38422}
+  property meet VIOLATION @w=16 (rand): [34561,15511)&[4442,163): expected EMPTY, got {card=15511, min=34561, max=50071}
+  property meet VIOLATION @w=16 (rand): [24677,93)&[61093,238): expected EMPTY, got {card=238, min=61093, max=61330}
+  property meet VIOLATION @w=16 (rand): [51522,16050)&[29732,71): expected EMPTY, got {card=16050, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [61175,193)&[60542,180): expected EMPTY, got {card=193, min=61175, max=61367}
+  property meet VIOLATION @w=16 (rand): [14964,11934)&[46922,26): expected EMPTY, got {card=11934, min=14964, max=26897}
+  property meet VIOLATION @w=16 (rand): [21915,87)&[6657,188): expected EMPTY, got {card=188, min=6657, max=6844}
+  property meet VIOLATION @w=16 (rand): [14777,46)&[26307,18): expected EMPTY, got {card=46, min=14777, max=14822}
+  property meet VIOLATION @w=16 (rand): [38190,191)&[25848,17): expected EMPTY, got {card=191, min=38190, max=38380}
+  property meet VIOLATION @w=16 (rand): [47882,179)&[17692,127): expected EMPTY, got {card=179, min=47882, max=48060}
+  property meet VIOLATION @w=16 (rand): [45905,137)&[52157,36): expected EMPTY, got {card=137, min=45905, max=46041}
+  property meet VIOLATION @w=16 (rand): [31721,9986)&[3614,147): expected EMPTY, got {card=9986, min=31721, max=41706}
+  property meet VIOLATION @w=16 (rand): [61387,31)&[961,48815): expected EMPTY, got {card=48815, min=961, max=49775}
+  property meet VIOLATION @w=16 (rand): [27444,26)&[3334,250): expected EMPTY, got {card=250, min=3334, max=3583}
+  property meet VIOLATION @w=16 (rand): [30573,230)&[54303,23932): expected EMPTY, got {card=23932, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [50902,345)&[26209,20230): expected EMPTY, got {card=20230, min=26209, max=46438}
+  property meet VIOLATION @w=16 (rand): [63570,250)&[16619,40298): expected EMPTY, got {card=40298, min=16619, max=56916}
+  property meet VIOLATION @w=16 (rand): [27189,225)&[30035,41928): expected EMPTY, got {card=41928, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [46374,31)&[39014,234): expected EMPTY, got {card=234, min=39014, max=39247}
+  property meet VIOLATION @w=16 (rand): [11099,218)&[49179,121): expected EMPTY, got {card=218, min=11099, max=11316}
+  property meet VIOLATION @w=16 (rand): [3377,86)&[17179,36736): expected EMPTY, got {card=36736, min=17179, max=53914}
+  property meet VIOLATION @w=16 (rand): [64510,11453)&[63772,15): expected EMPTY, got {card=11453, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [19519,6367)&[48315,10012): expected EMPTY, got {card=10012, min=48315, max=58326}
+  property meet VIOLATION @w=16 (rand): [47807,24)&[37857,5215): expected EMPTY, got {card=5215, min=37857, max=43071}
+  property meet VIOLATION @w=16 (rand): [36815,62280)&[28750,58320): TWO-PIECE, expected the smaller operand ({card=58320, min=0, max=65535}), got {card=50255, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [48409,16701)&[40143,212): expected EMPTY, got {card=16701, min=48409, max=65109}
+  property meet VIOLATION @w=16 (rand): [28244,204)&[32098,92): expected EMPTY, got {card=204, min=28244, max=28447}
+  property meet VIOLATION @w=16 (rand): [17737,3032)&[33138,31278): expected EMPTY, got {card=31278, min=33138, max=64415}
+  property meet VIOLATION @w=16 (rand): [49609,53870)&[18858,57280): TWO-PIECE, expected the smaller operand ({card=53870, min=0, max=65535}), got {card=26529, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [8935,176)&[33361,115): expected EMPTY, got {card=176, min=8935, max=9110}
+  property meet VIOLATION @w=16 (rand): [41574,1224)&[46895,8978): expected EMPTY, got {card=8978, min=46895, max=55872}
+  property meet VIOLATION @w=16 (rand): [7975,6154)&[36907,60): expected EMPTY, got {card=6154, min=7975, max=14128}
+  property meet VIOLATION @w=16 (rand): [22876,159)&[13635,201): expected EMPTY, got {card=201, min=13635, max=13835}
+  property meet VIOLATION @w=16 (rand): [63564,245)&[3471,191): expected EMPTY, got {card=245, min=63564, max=63808}
+  property meet VIOLATION @w=16 (rand): [52038,116)&[42829,70): expected EMPTY, got {card=116, min=52038, max=52153}
+  property meet VIOLATION @w=16 (rand): [16247,178)&[60894,135): expected EMPTY, got {card=178, min=16247, max=16424}
+  property meet VIOLATION @w=16 (rand): [61166,267)&[28449,208): expected EMPTY, got {card=267, min=61166, max=61432}
+  property meet VIOLATION @w=16 (rand): [13305,237)&[50924,27432): expected EMPTY, got {card=27432, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [38083,2586)&[58888,51): expected EMPTY, got {card=2586, min=38083, max=40668}
+  property meet VIOLATION @w=16 (rand): [39817,55)&[7946,225): expected EMPTY, got {card=225, min=7946, max=8170}
+  property meet VIOLATION @w=16 (rand): [7829,147)&[42839,71): expected EMPTY, got {card=147, min=7829, max=7975}
+  property meet VIOLATION @w=16 (rand): [51239,220)&[7211,86): expected EMPTY, got {card=220, min=51239, max=51458}
+  property meet VIOLATION @w=16 (rand): [10957,229)&[63251,183): expected EMPTY, got {card=229, min=10957, max=11185}
+  property meet VIOLATION @w=16 (rand): [63242,102)&[63726,252): expected EMPTY, got {card=252, min=63726, max=63977}
+  property meet VIOLATION @w=16 (rand): [32577,46417)&[20196,57): expected EMPTY, got {card=46417, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [17375,17)&[44784,187): expected EMPTY, got {card=187, min=44784, max=44970}
+  property meet VIOLATION @w=16 (rand): [18443,24776)&[13637,126): expected EMPTY, got {card=24776, min=18443, max=43218}
+  property meet VIOLATION @w=16 (rand): [9527,42498)&[20182,58936): TWO-PIECE, expected the smaller operand ({card=42498, min=9527, max=52024}), got {card=31843, min=20182, max=52024}
+  property meet VIOLATION @w=16 (rand): [53795,147)&[10756,244): expected EMPTY, got {card=244, min=10756, max=10999}
+  property meet VIOLATION @w=16 (rand): [25177,102)&[46457,184): expected EMPTY, got {card=184, min=46457, max=46640}
+  property meet VIOLATION @w=16 (rand): [19233,136)&[33478,59): expected EMPTY, got {card=136, min=19233, max=19368}
+  property meet VIOLATION @w=16 (rand): [42643,219)&[52570,23): expected EMPTY, got {card=219, min=42643, max=42861}
+  property meet VIOLATION @w=16 (rand): [52417,32)&[16832,207): expected EMPTY, got {card=207, min=16832, max=17038}
+  property meet VIOLATION @w=16 (rand): [25204,23)&[46694,72): expected EMPTY, got {card=72, min=46694, max=46765}
+  property meet VIOLATION @w=16 (rand): [25533,180)&[45764,84): expected EMPTY, got {card=180, min=25533, max=25712}
+  property meet VIOLATION @w=16 (rand): [4065,120)&[56535,217): expected EMPTY, got {card=217, min=56535, max=56751}
+  property meet VIOLATION @w=16 (rand): [22002,195)&[9220,104): expected EMPTY, got {card=195, min=22002, max=22196}
+  property meet VIOLATION @w=16 (rand): [35892,129)&[51811,42): expected EMPTY, got {card=129, min=35892, max=36020}
+  property meet VIOLATION @w=16 (rand): [11854,188)&[19460,38313): expected EMPTY, got {card=38313, min=19460, max=57772}
+  property meet VIOLATION @w=16 (rand): [9235,114)&[52738,130): expected EMPTY, got {card=130, min=52738, max=52867}
+  property meet VIOLATION @w=16 (rand): [26861,176)&[64493,128): expected EMPTY, got {card=176, min=26861, max=27036}
+  property meet VIOLATION @w=16 (rand): [17524,108)&[21762,254): expected EMPTY, got {card=254, min=21762, max=22015}
+  property meet VIOLATION @w=16 (rand): [31122,129)&[21390,188): expected EMPTY, got {card=188, min=21390, max=21577}
+  property meet VIOLATION @w=16 (rand): [8650,24653)&[4866,70): expected EMPTY, got {card=24653, min=8650, max=33302}
+  property meet VIOLATION @w=16 (rand): [59926,50113)&[53690,84): expected EMPTY, got {card=50113, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [55469,29219)&[12994,54173): TWO-PIECE, expected the smaller operand ({card=29219, min=0, max=65535}), got {card=11698, min=0, max=65535}
+  property meet VIOLATION @w=16 (rand): [9157,232)&[36515,234): expected EMPTY, got {card=234, min=36515, max=36748}
+  property meet VIOLATION @w=16 (rand): [34878,9)&[23233,51): expected EMPTY, got {card=51, min=23233, max=23283}
+  property meet VIOLATION @w=16 (rand): [1418,114)&[40107,172): expected EMPTY, got {card=172, min=40107, max=40278}
+  property meet VIOLATION @w=16 (rand): [23514,230)&[63409,99): expected EMPTY, got {card=230, min=23514, max=23743}
+  property meet VIOLATION @w=16 (rand): [400,6889)&[15469,39): expected EMPTY, got {card=6889, min=400, max=7288}
+  property meet VIOLATION @w=16 (rand): [64314,63)&[19810,37): expected EMPTY, got {card=63, min=64314, max=64376}
+  property meet VIOLATION @w=16 (nearfull-vs-small): [5,65535)&[3,4): TWO-PIECE, expected the smaller operand ({card=4, min=3, max=6}), got {card=2, min=5, max=6}
+  property meet VIOLATION @w=16 (touch-gap): [10,11)&[21,10): expected EMPTY, got {card=11, min=10, max=20}
+  property meet VIOLATION @w=16 (disjoint): [10,11)&[30,11): expected EMPTY, got {card=11, min=30, max=40}
+  property meet VIOLATION @w=8 (rand): [70,251)&[49,198): TWO-PIECE, expected the smaller operand ({card=198, min=49, max=246}), got {card=177, min=70, max=246}
+  property meet VIOLATION @w=8 (rand): [106,7)&[125,79): expected EMPTY, got {card=79, min=125, max=203}
+  property meet VIOLATION @w=8 (rand): [175,91)&[103,3): expected EMPTY, got {card=91, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [94,153)&[42,7): expected EMPTY, got {card=153, min=94, max=246}
+  property meet VIOLATION @w=8 (rand): [131,239)&[231,164): TWO-PIECE, expected the smaller operand ({card=164, min=0, max=255}), got {card=139, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [254,150)&[156,91): expected EMPTY, got {card=150, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [80,203)&[22,239): TWO-PIECE, expected the smaller operand ({card=203, min=0, max=255}), got {card=181, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [217,76)&[97,70): expected EMPTY, got {card=76, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [9,28)&[91,104): expected EMPTY, got {card=104, min=91, max=194}
+  property meet VIOLATION @w=8 (rand): [157,13)&[4,85): expected EMPTY, got {card=85, min=4, max=88}
+  property meet VIOLATION @w=8 (rand): [224,9)&[148,32): expected EMPTY, got {card=32, min=148, max=179}
+  property meet VIOLATION @w=8 (rand): [62,10)&[26,6): expected EMPTY, got {card=10, min=62, max=71}
+  property meet VIOLATION @w=8 (rand): [93,6)&[199,103): expected EMPTY, got {card=103, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [210,15)&[106,13): expected EMPTY, got {card=15, min=210, max=224}
+  property meet VIOLATION @w=8 (rand): [117,10)&[72,9): expected EMPTY, got {card=10, min=117, max=126}
+  property meet VIOLATION @w=8 (rand): [84,241)&[172,208): TWO-PIECE, expected the smaller operand ({card=208, min=0, max=255}), got {card=153, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [105,22)&[244,9): expected EMPTY, got {card=22, min=105, max=126}
+  property meet VIOLATION @w=8 (rand): [125,66)&[207,158): expected EMPTY, got {card=158, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [54,161)&[33,2): expected EMPTY, got {card=161, min=54, max=214}
+  property meet VIOLATION @w=8 (rand): [106,93)&[100,3): expected EMPTY, got {card=93, min=106, max=198}
+  property meet VIOLATION @w=8 (rand): [144,168)&[226,211): TWO-PIECE, expected the smaller operand ({card=168, min=0, max=255}), got {card=86, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [120,23)&[191,95): expected EMPTY, got {card=95, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [205,43)&[133,8): expected EMPTY, got {card=43, min=205, max=247}
+  property meet VIOLATION @w=8 (rand): [115,2)&[129,164): expected EMPTY, got {card=164, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [151,105)&[186,252): TWO-PIECE, expected the smaller operand ({card=105, min=151, max=255}), got {card=70, min=186, max=255}
+  property meet VIOLATION @w=8 (rand): [141,183)&[117,15): expected EMPTY, got {card=183, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [100,48)&[158,145): expected EMPTY, got {card=145, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [76,14)&[166,14): expected EMPTY, got {card=14, min=166, max=179}
+  property meet VIOLATION @w=8 (rand): [42,110)&[132,239): TWO-PIECE, expected the smaller operand ({card=110, min=42, max=151}), got {card=20, min=132, max=151}
+  property meet VIOLATION @w=8 (rand): [150,164)&[53,155): TWO-PIECE, expected the smaller operand ({card=155, min=53, max=207}), got {card=58, min=150, max=207}
+  property meet VIOLATION @w=8 (rand): [183,2)&[185,18): expected EMPTY, got {card=18, min=185, max=202}
+  property meet VIOLATION @w=8 (rand): [38,11)&[194,15): expected EMPTY, got {card=15, min=194, max=208}
+  property meet VIOLATION @w=8 (rand): [189,52)&[163,3): expected EMPTY, got {card=52, min=189, max=240}
+  property meet VIOLATION @w=8 (rand): [185,5)&[60,124): expected EMPTY, got {card=124, min=60, max=183}
+  property meet VIOLATION @w=8 (rand): [129,72)&[212,172): expected EMPTY, got {card=172, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [77,13)&[37,8): expected EMPTY, got {card=13, min=77, max=89}
+  property meet VIOLATION @w=8 (rand): [193,61)&[179,6): expected EMPTY, got {card=61, min=193, max=253}
+  property meet VIOLATION @w=8 (rand): [83,144)&[47,14): expected EMPTY, got {card=144, min=83, max=226}
+  property meet VIOLATION @w=8 (rand): [228,30)&[213,8): expected EMPTY, got {card=30, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [87,89)&[8,7): expected EMPTY, got {card=89, min=87, max=175}
+  property meet VIOLATION @w=8 (rand): [54,13)&[244,12): expected EMPTY, got {card=13, min=54, max=66}
+  property meet VIOLATION @w=8 (rand): [72,142)&[12,52): expected EMPTY, got {card=142, min=72, max=213}
+  property meet VIOLATION @w=8 (rand): [174,13)&[196,161): expected EMPTY, got {card=161, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [164,235)&[124,164): TWO-PIECE, expected the smaller operand ({card=164, min=0, max=255}), got {card=124, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [59,6)&[147,9): expected EMPTY, got {card=9, min=147, max=155}
+  property meet VIOLATION @w=8 (rand): [2,6)&[35,108): expected EMPTY, got {card=108, min=35, max=142}
+  property meet VIOLATION @w=8 (rand): [200,38)&[11,127): expected EMPTY, got {card=127, min=11, max=137}
+  property meet VIOLATION @w=8 (rand): [28,6)&[100,59): expected EMPTY, got {card=59, min=100, max=158}
+  property meet VIOLATION @w=8 (rand): [232,141)&[142,22): expected EMPTY, got {card=141, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [236,84)&[198,10): expected EMPTY, got {card=84, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [96,85)&[199,152): expected EMPTY, got {card=152, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [93,5)&[132,2): expected EMPTY, got {card=5, min=93, max=97}
+  property meet VIOLATION @w=8 (rand): [211,246)&[55,199): TWO-PIECE, expected the smaller operand ({card=199, min=55, max=253}), got {card=43, min=211, max=253}
+  property meet VIOLATION @w=8 (rand): [61,9)&[84,130): expected EMPTY, got {card=130, min=84, max=213}
+  property meet VIOLATION @w=8 (rand): [2,19)&[30,11): expected EMPTY, got {card=19, min=2, max=20}
+  property meet VIOLATION @w=8 (rand): [97,13)&[138,107): expected EMPTY, got {card=107, min=138, max=244}
+  property meet VIOLATION @w=8 (rand): [55,15)&[59,255): TWO-PIECE, expected the smaller operand ({card=15, min=55, max=69}), got {card=11, min=59, max=69}
+  property meet VIOLATION @w=8 (rand): [70,15)&[196,9): expected EMPTY, got {card=15, min=70, max=84}
+  property meet VIOLATION @w=8 (rand): [253,5)&[66,15): expected EMPTY, got {card=15, min=66, max=80}
+  property meet VIOLATION @w=8 (rand): [159,4)&[140,6): expected EMPTY, got {card=6, min=140, max=145}
+  property meet VIOLATION @w=8 (rand): [126,37)&[199,5): expected EMPTY, got {card=37, min=126, max=162}
+  property meet VIOLATION @w=8 (rand): [9,56)&[164,10): expected EMPTY, got {card=56, min=9, max=64}
+  property meet VIOLATION @w=8 (rand): [4,13)&[198,33): expected EMPTY, got {card=33, min=198, max=230}
+  property meet VIOLATION @w=8 (rand): [39,9)&[179,14): expected EMPTY, got {card=14, min=179, max=192}
+  property meet VIOLATION @w=8 (rand): [53,38)&[145,83): expected EMPTY, got {card=83, min=145, max=227}
+  property meet VIOLATION @w=8 (rand): [85,62)&[42,4): expected EMPTY, got {card=62, min=85, max=146}
+  property meet VIOLATION @w=8 (rand): [207,152)&[130,60): expected EMPTY, got {card=152, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [229,11)&[40,11): expected EMPTY, got {card=11, min=229, max=239}
+  property meet VIOLATION @w=8 (rand): [118,65)&[12,75): expected EMPTY, got {card=75, min=12, max=86}
+  property meet VIOLATION @w=8 (rand): [42,217)&[236,221): TWO-PIECE, expected the smaller operand ({card=217, min=0, max=255}), got {card=23, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [30,108)&[125,222): TWO-PIECE, expected the smaller operand ({card=108, min=30, max=137}), got {card=13, min=125, max=137}
+  property meet VIOLATION @w=8 (rand): [22,11)&[111,122): expected EMPTY, got {card=122, min=111, max=232}
+  property meet VIOLATION @w=8 (rand): [155,201)&[103,3): expected EMPTY, got {card=201, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [199,7)&[105,9): expected EMPTY, got {card=9, min=105, max=113}
+  property meet VIOLATION @w=8 (rand): [101,6)&[149,48): expected EMPTY, got {card=48, min=149, max=196}
+  property meet VIOLATION @w=8 (rand): [214,6)&[103,2): expected EMPTY, got {card=6, min=214, max=219}
+  property meet VIOLATION @w=8 (rand): [67,129)&[137,250): TWO-PIECE, expected the smaller operand ({card=129, min=67, max=195}), got {card=59, min=137, max=195}
+  property meet VIOLATION @w=8 (rand): [124,179)&[37,229): TWO-PIECE, expected the smaller operand ({card=179, min=0, max=255}), got {card=142, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [56,57)&[43,9): expected EMPTY, got {card=57, min=56, max=112}
+  property meet VIOLATION @w=8 (rand): [212,163)&[78,137): TWO-PIECE, expected the smaller operand ({card=137, min=78, max=214}), got {card=3, min=212, max=214}
+  property meet VIOLATION @w=8 (rand): [138,191)&[68,241): TWO-PIECE, expected the smaller operand ({card=191, min=0, max=255}), got {card=171, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [203,150)&[195,2): expected EMPTY, got {card=150, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [40,11)&[161,7): expected EMPTY, got {card=11, min=40, max=50}
+  property meet VIOLATION @w=8 (rand): [222,26)&[61,13): expected EMPTY, got {card=26, min=222, max=247}
+  property meet VIOLATION @w=8 (rand): [76,69)&[196,93): expected EMPTY, got {card=93, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [164,144)&[14,252): TWO-PIECE, expected the smaller operand ({card=144, min=0, max=255}), got {card=102, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [179,3)&[121,11): expected EMPTY, got {card=11, min=121, max=131}
+  property meet VIOLATION @w=8 (rand): [54,9)&[11,15): expected EMPTY, got {card=15, min=11, max=25}
+  property meet VIOLATION @w=8 (rand): [136,32)&[239,125): expected EMPTY, got {card=125, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [79,13)&[131,13): expected EMPTY, got {card=13, min=131, max=143}
+  property meet VIOLATION @w=8 (rand): [42,80)&[204,27): expected EMPTY, got {card=80, min=42, max=121}
+  property meet VIOLATION @w=8 (rand): [15,59)&[170,3): expected EMPTY, got {card=59, min=15, max=73}
+  property meet VIOLATION @w=8 (rand): [2,15)&[27,153): expected EMPTY, got {card=153, min=27, max=179}
+  property meet VIOLATION @w=8 (rand): [122,226)&[50,92): TWO-PIECE, expected the smaller operand ({card=92, min=50, max=141}), got {card=20, min=122, max=141}
+  property meet VIOLATION @w=8 (rand): [185,30)&[11,23): expected EMPTY, got {card=30, min=185, max=214}
+  property meet VIOLATION @w=8 (rand): [67,6)&[205,5): expected EMPTY, got {card=6, min=67, max=72}
+  property meet VIOLATION @w=8 (rand): [41,13)&[230,41): expected EMPTY, got {card=41, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [224,3)&[81,5): expected EMPTY, got {card=5, min=81, max=85}
+  property meet VIOLATION @w=8 (rand): [7,5)&[193,9): expected EMPTY, got {card=9, min=193, max=201}
+  property meet VIOLATION @w=8 (rand): [205,169)&[180,24): expected EMPTY, got {card=169, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [242,2)&[74,154): expected EMPTY, got {card=154, min=74, max=227}
+  property meet VIOLATION @w=8 (rand): [240,42)&[100,87): expected EMPTY, got {card=87, min=100, max=186}
+  property meet VIOLATION @w=8 (rand): [178,212)&[157,9): expected EMPTY, got {card=212, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [139,11)&[42,97): expected EMPTY, got {card=97, min=42, max=138}
+  property meet VIOLATION @w=8 (rand): [167,189)&[226,229): TWO-PIECE, expected the smaller operand ({card=189, min=0, max=255}), got {card=130, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [114,232)&[7,237): TWO-PIECE, expected the smaller operand ({card=232, min=0, max=255}), got {card=130, min=114, max=243}
+  property meet VIOLATION @w=8 (rand): [216,5)&[239,134): expected EMPTY, got {card=134, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [22,156)&[200,2): expected EMPTY, got {card=156, min=22, max=177}
+  property meet VIOLATION @w=8 (rand): [101,219)&[231,222): TWO-PIECE, expected the smaller operand ({card=219, min=0, max=255}), got {card=89, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [163,194)&[54,200): TWO-PIECE, expected the smaller operand ({card=194, min=0, max=255}), got {card=91, min=163, max=253}
+  property meet VIOLATION @w=8 (rand): [69,13)&[95,182): expected EMPTY, got {card=182, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [247,9)&[30,25): expected EMPTY, got {card=25, min=30, max=54}
+  property meet VIOLATION @w=8 (rand): [182,39)&[247,150): expected EMPTY, got {card=150, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [223,63)&[132,66): expected EMPTY, got {card=66, min=132, max=197}
+  property meet VIOLATION @w=8 (rand): [74,224)&[28,202): TWO-PIECE, expected the smaller operand ({card=202, min=28, max=229}), got {card=156, min=74, max=229}
+  property meet VIOLATION @w=8 (rand): [47,212)&[225,179): TWO-PIECE, expected the smaller operand ({card=179, min=0, max=255}), got {card=34, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [19,140)&[236,9): expected EMPTY, got {card=140, min=19, max=158}
+  property meet VIOLATION @w=8 (rand): [202,44)&[78,8): expected EMPTY, got {card=44, min=202, max=245}
+  property meet VIOLATION @w=8 (rand): [111,4)&[119,6): expected EMPTY, got {card=6, min=119, max=124}
+  property meet VIOLATION @w=8 (rand): [41,6)&[71,3): expected EMPTY, got {card=6, min=41, max=46}
+  property meet VIOLATION @w=8 (rand): [188,130)&[34,188): TWO-PIECE, expected the smaller operand ({card=130, min=0, max=255}), got {card=34, min=188, max=221}
+  property meet VIOLATION @w=8 (rand): [88,15)&[228,12): expected EMPTY, got {card=15, min=88, max=102}
+  property meet VIOLATION @w=8 (rand): [162,62)&[251,157): expected EMPTY, got {card=157, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [242,174)&[212,3): expected EMPTY, got {card=174, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [208,21)&[42,10): expected EMPTY, got {card=21, min=208, max=228}
+  property meet VIOLATION @w=8 (rand): [14,2)&[113,23): expected EMPTY, got {card=23, min=113, max=135}
+  property meet VIOLATION @w=8 (rand): [36,90)&[134,11): expected EMPTY, got {card=90, min=36, max=125}
+  property meet VIOLATION @w=8 (rand): [235,11)&[80,9): expected EMPTY, got {card=11, min=235, max=245}
+  property meet VIOLATION @w=8 (rand): [103,166)&[71,15): expected EMPTY, got {card=166, min=0, max=255}
+  property meet VIOLATION @w=8 (rand): [85,44)&[34,9): expected EMPTY, got {card=44, min=85, max=128}
+  property meet VIOLATION @w=8 (rand): [240,12)&[17,21): expected EMPTY, got {card=21, min=17, max=37}
+  property meet VIOLATION @w=8 (rand): [100,9)&[177,4): expected EMPTY, got {card=9, min=100, max=108}
+  property meet VIOLATION @w=8 (rand): [121,24)&[114,3): expected EMPTY, got {card=24, min=121, max=144}
+  property meet VIOLATION @w=8 (rand): [115,2)&[187,61): expected EMPTY, got {card=61, min=187, max=247}
+  property meet VIOLATION @w=8 (rand): [57,5)&[177,78): expected EMPTY, got {card=78, min=177, max=254}
+  property meet VIOLATION @w=8 (rand): [131,3)&[161,7): expected EMPTY, got {card=7, min=161, max=167}
+  property meet VIOLATION @w=8 (nearfull-vs-small): [5,255)&[3,4): TWO-PIECE, expected the smaller operand ({card=4, min=3, max=6}), got {card=2, min=5, max=6}
+  property meet VIOLATION @w=8 (wrap-vs-straight): [200,156)&[50,171): TWO-PIECE, expected the smaller operand ({card=156, min=0, max=255}), got {card=21, min=200, max=220}
+  property meet VIOLATION @w=8 (touch-gap): [10,11)&[21,10): expected EMPTY, got {card=11, min=10, max=20}
+  property meet VIOLATION @w=8 (disjoint): [10,11)&[30,11): expected EMPTY, got {card=11, min=30, max=40}
+ok: property meet R5: the step-1 interval meet equals the exact circular-interval reference (widths 8/16/32/64) (stubbed)
+ok: property R7 solution: every cycle block's materialized value is the transferred constant
+ok: R12-1: region_bytes positive and 16-byte aligned (fixtures)
+ok: R12-2: region_bytes >= raw payload bytes
+ok: R12-3: region_bytes monotone in span (strict under +16 cells)
+ok: R12-4: region_bytes monotone in max_width (strict under x16)
+ok: R12-5: region_size_ok true for small fixtures, false for huge span
+ok: R12-5: gate qualifies when every tagged offset is covered by a convertible region
+ok: R12-6: gate rejects Infinite tag (unbounded -> not covered)
+ok: R12-7: degraded sub never qualifies
+ok: R12-8: two disjoint singleton offsets produce two convertible regions
+ok: R12-8b: two overlapping intervals produce one convertible region with span (-32,-8)
+ok: property R12b: bare copy v := RSP makes split_plan REJECT the sub (wholly %frame) — via Stack_to_locals.frame_escapes (per-region convertibility)
+ok: property R12b: frame_escapes is true for a sub containing a bare `v := RSP` copy (the alias half of the unified rule catches it)
+ok: property WordSet.overlap vs meet is_bottom: overlap true = not is_bottom false
+ok: property WordSet.overlap vs meet is_bottom: overlap false = not is_bottom true
+ok: property WordSet.overlap vs meet is_bottom: overlap true = not is_bottom false
+ok: property WordSet.overlap vs meet is_bottom: overlap false = not is_bottom true
+ok: property WordSet.overlap vs meet is_bottom: overlap false = not is_bottom true
+ok: property WordSet.overlap vs meet is_bottom: overlap true = not is_bottom false
+ok: property WordSet.overlap vs meet is_bottom: overlap false = not is_bottom true
+ok: property WordSet.overlap width-mismatch → false (pinned convention, FinSet/FinSet)
+ok: property WordSet.meet width-mismatch → wider operand (non-bottom)
+ok: property m6 overlap = ¬is_bottom∘meet enumerated (300 random equal-width trials, representation-aware)
+ok: property FinSet->Clp->FinSet round-trip width 32 cardn 3
+ok: property FinSet->Clp->FinSet round-trip width 32 cardn 1
+ok: property FinSet->Clp->FinSet round-trip width 8 cardn 2
+ok: property FinSet->Clp->FinSet round-trip width 16 cardn 2
+ok: property FinSet->Clp->FinSet round-trip width 32 cardn 5
+ok: property Clp->FinSet->Clp round-trip cardn 3
+ok: property Clp->FinSet->Clp round-trip cardn 5
+ok: property Clp->FinSet->Clp round-trip cardn 3
+ok: property m6 FinSet↔Clp round-trips enumerated (200 random progression trials: soundness always, exactness on wrap-free arcs)
+ok: property M3 fused_join invariants (skipped due to API change)
+ok: property of_list: containment universal on representable CLPs (create/iter/of_list, widths 8/16/32/64)
+ok: property of_list: full-class / misaligned-gap corners exercised
+ok: property of_list: soundness on arbitrary lists (every input element satisfies elem)
+ok: property of_list: 1288 representable cases (8 corner injections, 11425 overflow/cap skips; 0 coarsened rebuilds — sound, expected 0 post-W1)
+ok: property LM F1: the head's lower bound is the entry constant 0
+ok: property LM F1: the taken view's lower bound is the entry constant 0
+ok: property LM F1-NEQ: the head's lower bound is the entry constant 0
+ok: property LM F1-NEQ: the head's upper bound is the landmark K (Finite extrapolation fired end-to-end)
+ok: property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side of the pin)
+ok: property LM F1-FT: the head's upper bound is the landmark K (vertex side of the pin)
+ok: property LM F1-FT: the taken body's lower bound is the entry constant 0
+ok: property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the landmark)
+ok: property LM F1-FT: the fallthrough exit pins the counter to {K} exactly (walk side of the pin)
+ok: property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit shape)
+ok: property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]
+ok: property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state)
+ok: property LM VSK-MIXED-TAKEN: the taken edge refines x to [0,9] exactly
+ok: property LM VSK-MIXED-FALL: the fallthrough edge refines x to [10,20] exactly
+ok: property LM F2a: widen_join sound
+ok: property LM F2a: widen_join sound 2
+ok: property LM F2a: widen_join sound 3
+ok: property LM F2a: widen_join sound 4
+ok: property LM F2a: widen_join sound 5
+ok: property LM F2c: loop 1's head lower bound is the entry constant 0
+ok: property LM F2c: loop 2's head lower bound is the entry constant 0
+ok: T01-1a (when-chain): the FIRST edge's IN-state is refined by its own cond (x < 10 over {5,15,25} = {5} exactly)
+ok: T01-1b (when-chain): the MID-CHAIN edge's IN-state is refined by the ACCUMULATED `c2 & ~c1`, not the jmp's own cond (x = {15} exactly — not {5,15})
+ok: T01-1c (when-chain): the unconditional chain TAIL's IN-state is refined by the accumulated negatives `~c1 & ~c2` (x = {25} exactly — the identity transfer would give the full {5,15,25})
+ok: T01-2 (uniform rule): a lone unconditional goto's accumulated cond is the literal TRUE — the identity transfer: EXIT's IN-state equals MID's (both read the stored {3} exactly; no spurious refinement, no bottom)
+ok: D0: dce is total on Theory.Target.unknown; a jmp-read chain survives, an unused def dies
+ok: D1: the indirect noreturn call (the lifted return epilogue) is rewritten var-free and its popped-address def dies
+ok: D2: ABI register defs, memory writes, and intrinsic interface vars always survive
+ok: D3: a fissioned region-mem store chain dies iff no Load roots it (the two-tier rule)
+ok: D4: on the precise path (split stack_plan) SP/hike_stack/sp-value defs are erased; the control keeps them
+ok: D5: a [Sub.intrinsic] sub passes through dce unchanged (dead defs and all)
+ALL CBAT TESTS PASSED
