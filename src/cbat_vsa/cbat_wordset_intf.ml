@@ -16,6 +16,9 @@ open Bap.Std
 module type S = sig
   type t [@@deriving bin_io, sexp]
 
+  (* The numeric substrate: Cbat_word.t in the domain's implementations. *)
+  type word = Cbat_word.t
+
   include Value.S with type t := t
 
   

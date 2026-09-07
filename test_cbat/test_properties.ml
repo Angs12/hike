@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+module W = Cbat_word
 
 (* R10b: logand soundness over a sampled operand corpus. *)
 
@@ -17,12 +18,12 @@ let r10b_bad_clp = ref 0 (* CLP violations *)
 let r10b_bad_ws = ref 0 (* composite violations *)
 
 (* [c] > [cap] without the width trap. *)
-let r10b_cardn_gt (cap : int) (c : word) : bool =
-  if W.bitwidth c >= 11 then Wo.gt_int c cap (* 1024 fits: unsigned cmp ok *)
-  else W.to_int_exn c > cap
+let r10b_cardn_gt (cap : int) (c : W.t) : bool =
+  if Cbat_word.bitwidth c >= 11 then Wo.gt_int c cap (* 1024 fits: unsigned cmp ok *)
+  else Cbat_word.to_int_exn c > cap
 
 (* All elements when small; else a bounded prefix walk. Reports prefix use. *)
-let r10b_enum (p : Clp.t) : word list * bool =
+let r10b_enum (p : Clp.t) : W.t list * bool =
   if r10b_cardn_gt r10b_enum_cap (Clp.cardinality p) then
     match Clp.min_elem p with
     | None -> ([], true)
@@ -31,11 +32,11 @@ let r10b_enum (p : Clp.t) : word list * bool =
         let rec go n cur acc =
           if n >= r10b_enum_cap then (List.rev acc, true)
           else
-            match Clp.nearest_succ (W.succ cur) p with
+            match Clp.nearest_succ (Cbat_word.succ cur) p with
             | None -> (List.rev (cur :: acc), true)
             | Some nxt ->
                 if
-                  W.equal nxt cur
+                  Cbat_word.equal nxt cur
                   || W.compare nxt cur <= 0
                   || match mx with Some mx -> W.compare nxt mx > 0 | None -> false
                 then (List.rev (cur :: acc), true)
@@ -61,7 +62,7 @@ let r10b_check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp
         List.iter
           (fun y ->
             let z = W.logand x y in
-            let k = W.to_int64_exn z in
+            let k = Cbat_word.to_int64_exn z in
             if not (Hashtbl.mem seen k) then begin
               Hashtbl.add seen k ();
               incr r10b_witnesses;
@@ -80,8 +81,8 @@ let r10b_check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp
           List.iteri
             (fun i (x, y, z) ->
               if i < 3 then
-                Printf.printf "    x=%Ld y=%Ld -> x&y=%Ld not in result\n" (W.to_int64_exn x)
-                  (W.to_int64_exn y) (W.to_int64_exn z))
+                Printf.printf "    x=%Ld y=%Ld -> x&y=%Ld not in result\n" (Cbat_word.to_int64_exn x)
+                  (Cbat_word.to_int64_exn y) (Cbat_word.to_int64_exn z))
             (List.rev bad)
     in
     report "CLP" !bad_c;
@@ -90,8 +91,8 @@ let r10b_check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp
 
 (* Sampled operand corpus at width [w]. *)
 let r10b_operands (w : int) : (string * Clp.t) list =
-  let v n = W.of_int ~width:w n in
-  let ones = W.ones w in
+  let v n = Cbat_word.of_int ~width:w n in
+  let ones = Cbat_word.ones w in
   let half = Wo.half w in
   let full_circle = Wo.dom_size ~width:(w + 1) w in
   [
@@ -107,8 +108,8 @@ let r10b_operands (w : int) : (string * Clp.t) list =
     ("[1,17]", Clp.interval ~width:w (v 1) (v 17));
     ("[16,47]", Clp.interval ~width:w (v 16) (v 47));
     ("[0,99]", Clp.interval ~width:w (v 0) (v 99));
-    ("[half-3,half+3]", Clp.interval ~width:w (W.sub half (v 3)) (W.add half (v 3)));
-    ("[ones-8,ones]", Clp.interval ~width:w (W.sub ones (v 8)) ones);
+    ("[half-3,half+3]", Clp.interval ~width:w (Cbat_word.sub half (v 3)) (Cbat_word.add half (v 3)));
+    ("[ones-8,ones]", Clp.interval ~width:w (Cbat_word.sub ones (v 8)) ones);
     ("wrap[ones-1,1]", Clp.interval ~width:w ones (v 1));
     (* stepped classes *)
     ("evens[0..78]", Clp.create (v 0) ~step:(v 2) ~cardn:(v 40));
@@ -119,7 +120,7 @@ let r10b_operands (w : int) : (string * Clp.t) list =
     ("step16[8..]", Clp.create (v 8) ~step:(v 16) ~cardn:(v 6));
     ("step12[4..]", Clp.create (v 4) ~step:(v 12) ~cardn:(v 9));
     ("two{8,24}", Clp.create (v 8) ~step:(v 16) ~cardn:(v 2));
-    ("wrapstep{ones-4+8k}", Clp.create (W.sub ones (v 4)) ~step:(v 8) ~cardn:(v 4));
+    ("wrapstep{ones-4+8k}", Clp.create (Cbat_word.sub ones (v 4)) ~step:(v 8) ~cardn:(v 4));
     (* Cardn-2 antipodal pairs (half circle apart). *)
     ("anti{0,half}", Clp.create (v 0) ~step:half ~cardn:(v 2));
     ("anti{1,1+half}", Clp.create (v 1) ~step:half ~cardn:(v 2));
@@ -148,53 +149,53 @@ let r5_bad = ref [] (* violations *)
 let r5_violation w cls detail = r5_bad := (w, cls, detail) :: !r5_bad
 
 (* Cardinality word > cap without the width trap. *)
-let r5_cardn_gt (cap : int) (c : word) : bool =
-  if W.bitwidth c >= 11 then Wo.gt_int c cap else W.to_int_exn c > cap
+let r5_cardn_gt (cap : int) (c : W.t) : bool =
+  if Cbat_word.bitwidth c >= 11 then Wo.gt_int c cap else Cbat_word.to_int_exn c > cap
 
 (* Reference circular-interval meet. *)
-let r5_ref_meet (w : int) (s1 : word) (l1 : word) (s2 : word) (l2 : word) :
-    [ `Empty | `Arc of word * word | `TwoPiece ] =
+let r5_ref_meet (w : int) (s1 : W.t) (l1 : W.t) (s2 : W.t) (l2 : W.t) :
+    [ `Empty | `Arc of W.t * W.t | `TwoPiece ] =
   let ext x = W.extract_exn ~hi:w x in
   (* zero-extend to w+1 *)
   let n = Wo.dom_size ~width:(w + 1) w in
   let l1 = ext l1 and l2 = ext l2 in
   if W.compare l1 n >= 0 then `Arc (s2, l2) (* A full circle: B *)
   else if W.compare l2 n >= 0 then `Arc (s1, l1) (* B full circle: A *)
-  else if W.compare l1 (W.zero (w + 1)) = 0 || W.compare l2 (W.zero (w + 1)) = 0 then `Empty
+  else if W.compare l1 (Cbat_word.zero (w + 1)) = 0 || W.compare l2 (Cbat_word.zero (w + 1)) = 0 then `Empty
   else
-    let d = W.sub s2 s1 in
+    let d = Cbat_word.sub s2 s1 in
     (* (s2 - s1) mod N, w bits *)
     let dl = ext d in
     if W.compare dl l1 >= 0 then
       (* B starts at/after A's end: only B's wrapped tail can reach A *)
-      begin if W.compare (W.add dl l2) n < 0 then `Empty
+      begin if W.compare (Cbat_word.add dl l2) n < 0 then `Empty
       else begin
-        let tail = W.sub (W.add dl l2) n in
+        let tail = Cbat_word.sub (Cbat_word.add dl l2) n in
         (* in [0, N) *)
         let m = if W.compare tail l1 <= 0 then tail else l1 in
-        if W.compare m (W.zero (w + 1)) <= 0 then `Empty else `Arc (s1, m)
+        if W.compare m (Cbat_word.zero (w + 1)) <= 0 then `Empty else `Arc (s1, m)
       end
       end
     else begin
       (* B starts strictly inside A *)
-      let e = W.add dl l2 in
+      let e = Cbat_word.add dl l2 in
       (* unwrapped end distance *)
       if W.compare e n <= 0 then begin
         (* B ends within one revolution: clip by A's end *)
         let m = if W.compare e l1 <= 0 then e else l1 in
-        `Arc (W.add s1 d, W.sub m dl)
+        `Arc (Cbat_word.add s1 d, Cbat_word.sub m dl)
       end
       else begin
         (* B wraps: P1 = [d, l1), P2 = [0, min(l1, e-N)), relative to s1 *)
-        let en = W.sub e n in
+        let en = Cbat_word.sub e n in
         let p = if W.compare en l1 <= 0 then en else l1 in
         if W.compare p dl >= 0 then `Arc (s1, l1) (* pieces touch: union = A *) else `TwoPiece
       end
     end
 
 (* Step-1 CLP for arc [s, s+l). *)
-let r5_build (w : int) (s : word) (l : word) : Clp.t =
-  Clp.create ~width:w ~step:(W.one w) ~cardn:l s
+let r5_build (w : int) (s : W.t) (l : W.t) : Clp.t =
+  Clp.create ~width:w ~step:(Cbat_word.one w) ~cardn:l s
 
 (* Short set description for violation reports. *)
 let r5_describe (p : Clp.t) : string =
@@ -204,12 +205,12 @@ let r5_describe (p : Clp.t) : string =
     match (Clp.min_elem p, Clp.max_elem p) with
     | Some lo, Some hi ->
         Printf.sprintf "{card=%Lu, min=%Lu, max=%Lu}"
-          (W.to_int64_exn (Clp.cardinality p))
-          (W.to_int64_exn lo) (W.to_int64_exn hi)
+          (Cbat_word.to_int64_exn (Clp.cardinality p))
+          (Cbat_word.to_int64_exn lo) (Cbat_word.to_int64_exn hi)
     | _ -> "?"
 
 (* One exactness pair. *)
-let r5_check_exact (w : int) (cls : string) (s1 : word) (l1 : word) (s2 : word) (l2 : word) : unit =
+let r5_check_exact (w : int) (cls : string) (s1 : W.t) (l1 : W.t) (s2 : W.t) (l2 : W.t) : unit =
   incr r5_checked;
   let p1 = r5_build w s1 l1 and p2 = r5_build w s2 l2 in
   let res = Clp.intersection p1 p2 in
@@ -217,15 +218,15 @@ let r5_check_exact (w : int) (cls : string) (s1 : word) (l1 : word) (s2 : word) 
   | `Empty ->
       if not (Clp.is_bottom res) then
         r5_violation w cls
-          (Printf.sprintf "[%Lu,%Lu)&[%Lu,%Lu): expected EMPTY, got %s" (W.to_int64_exn s1)
-             (W.to_int64_exn l1) (W.to_int64_exn s2) (W.to_int64_exn l2) (r5_describe res))
+          (Printf.sprintf "[%Lu,%Lu)&[%Lu,%Lu): expected EMPTY, got %s" (Cbat_word.to_int64_exn s1)
+             (Cbat_word.to_int64_exn l1) (Cbat_word.to_int64_exn s2) (Cbat_word.to_int64_exn l2) (r5_describe res))
   | `Arc (s, l) ->
       let expected = r5_build w s l in
       if not (Clp.equal res expected) then
         r5_violation w cls
-          (Printf.sprintf "[%Lu,%Lu)&[%Lu,%Lu): expected ARC {%Lu+%Lu}, got %s" (W.to_int64_exn s1)
-             (W.to_int64_exn l1) (W.to_int64_exn s2) (W.to_int64_exn l2) (W.to_int64_exn s)
-             (W.to_int64_exn l) (r5_describe res))
+          (Printf.sprintf "[%Lu,%Lu)&[%Lu,%Lu): expected ARC {%Lu+%Lu}, got %s" (Cbat_word.to_int64_exn s1)
+             (Cbat_word.to_int64_exn l1) (Cbat_word.to_int64_exn s2) (Cbat_word.to_int64_exn l2) (Cbat_word.to_int64_exn s)
+             (Cbat_word.to_int64_exn l) (r5_describe res))
   | `TwoPiece ->
       incr r5_two_piece;
       (* Optimal single-CLP hull = smaller operand. *)
@@ -234,18 +235,18 @@ let r5_check_exact (w : int) (cls : string) (s1 : word) (l1 : word) (s2 : word) 
         r5_violation w cls
           (Printf.sprintf
              "[%Lu,%Lu)&[%Lu,%Lu): TWO-PIECE, expected the smaller operand (%s), got %s"
-             (W.to_int64_exn s1) (W.to_int64_exn l1) (W.to_int64_exn s2) (W.to_int64_exn l2)
+             (Cbat_word.to_int64_exn s1) (Cbat_word.to_int64_exn l1) (Cbat_word.to_int64_exn s2) (Cbat_word.to_int64_exn l2)
              (r5_describe small) (r5_describe res))
 
 (* Up to [cap] elements from min_elem via strict successors. *)
-let r5_walk_elems (p : Clp.t) (cap : int) : word list =
+let r5_walk_elems (p : Clp.t) (cap : int) : W.t list =
   match Clp.min_elem p with
   | None -> []
   | Some m0 ->
       let rec go n cur acc =
         if n >= cap then List.rev acc
         else
-          match Clp.nearest_succ (W.succ cur) p with
+          match Clp.nearest_succ (Cbat_word.succ cur) p with
           | None -> List.rev (cur :: acc)
           | Some nxt ->
               if W.compare nxt cur <= 0 then List.rev (cur :: acc) else go (n + 1) nxt (cur :: acc)
@@ -263,7 +264,7 @@ let r5_check_sound (w : int) (cls : string) (p1 : Clp.t) (p2 : Clp.t) : unit =
   | _ ->
       r5_violation w cls
         (Printf.sprintf "%d true common element(s) lost (first %Lu)" (List.length bad)
-           (W.to_int64_exn (List.hd bad)))
+           (Cbat_word.to_int64_exn (List.hd bad)))
 
 (* Fixed seed — reproducible runs. *)
 let r5_rand = Random.State.make [| 0x5EED2026; 0x00000D1C |]
@@ -286,27 +287,28 @@ module Cfp = Cbat_vsa__Cbat_contextual_fixpoint
 (* Widening landmarks: empty guard meets record landmarks; widening extrapolates. *)
 
 (* Corpus jle shape, one or two chained loops. Returns (sub, l1, b1, l2 option). *)
-let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid option =
+let lm_jle_loop ~(k1 : W.t) ?(k2 : W.t option) () : sub term * tid * tid * tid option =
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let iv = Bil.Var i in
   (* Canonical -O0 cmp emission; returns the jle cond. *)
-  let cmp_defs b (c : word) =
+  let cmp_defs b (c : W.t) =
+    let cw = Cbat_word.to_word c in
     let t = Var.create ~is_virtual:false ~fresh:false "lm_t" (Type.Imm 32) in
     let cf = v1 "CF" in
     let ofv = v1 "OF" in
     let sf = v1 "SF" in
     let zf = v1 "ZF" in
-    Blk.Builder.add_def b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int c)));
-    Blk.Builder.add_def b (Def.create cf (Bil.BinOp (Bil.LT, iv, Bil.Int c)));
+    Blk.Builder.add_def b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int cw)));
+    Blk.Builder.add_def b (Def.create cf (Bil.BinOp (Bil.LT, iv, Bil.Int cw)));
     Blk.Builder.add_def b
       (Def.create ofv
          (Bil.Cast
             ( Bil.HIGH,
               1,
               Bil.BinOp
-                (Bil.AND, Bil.BinOp (Bil.XOR, iv, Bil.Int c), Bil.BinOp (Bil.XOR, iv, Bil.Var t)) )));
+                (Bil.AND, Bil.BinOp (Bil.XOR, iv, Bil.Int cw), Bil.BinOp (Bil.XOR, iv, Bil.Var t)) )));
     Blk.Builder.add_def b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
     Blk.Builder.add_def b (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero 32), Bil.Var t)));
     Test_backward.l39_jle zf sf ofv
@@ -317,7 +319,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
   let l2_b = Blk.Builder.create () in
   let b2_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   let cond1 = cmp_defs l1_b k1 in
   let cond2 = match k2 with Some c -> Some (cmp_defs l2_b c) | None -> None in
@@ -341,7 +343,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
        ~cond:(Bil.UnOp (Bil.NOT, cond1))
        (Goto (Direct (match k2 with Some _ -> l2_tid | None -> exit_tid))));
   let b1_b = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_def b1_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
+  Blk.Builder.add_def b1_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
   Blk.Builder.add_jmp b1_b (Jmp.create (Goto (Direct l1_tid)));
   let l2_b = Blk.Builder.init ~copy_defs:true l20 in
   (match cond2 with
@@ -350,7 +352,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
       Blk.Builder.add_jmp l2_b (Jmp.create ~cond:(Bil.UnOp (Bil.NOT, c2)) (Goto (Direct exit_tid)))
   | None -> ());
   let b2_b = Blk.Builder.init ~copy_defs:true b20 in
-  Blk.Builder.add_def b2_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
+  Blk.Builder.add_def b2_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
   Blk.Builder.add_jmp b2_b (Jmp.create (Goto (Direct l2_tid)));
   let sub_b = Sub.Builder.create ~name:"lm_landmark_counter" () in
   let l2_res = Blk.Builder.result l2_b in
@@ -366,7 +368,8 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
   (sub, l1_tid, b1_tid, match k2 with Some _ -> Some l2_tid | None -> None)
 
 (* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
-let lm_jne_loop ~(k : word) () : sub term * tid * tid =
+let lm_jne_loop ~(k : W.t) () : sub term * tid * tid =
+  let kw = Cbat_word.to_word k in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
@@ -377,15 +380,15 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   let l1_b = Blk.Builder.create () in
   let b1_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
-  Blk.Builder.add_def l1_b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int k)));
+  Blk.Builder.add_def l1_b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int kw)));
   (* ZF compares the program var directly (recovery binds the right var). *)
   Blk.Builder.add_def l1_b
     (Def.create zf
        (Bil.BinOp
           (Bil.EQ,
-           Bil.BinOp (Bil.MINUS, iv, Bil.Int k),
+           Bil.BinOp (Bil.MINUS, iv, Bil.Int kw),
            Bil.Int (Word.zero 32))));
   let cond_taken = Bil.UnOp (Bil.NOT, Bil.Var zf) in
   let cond_fallthrough = Bil.Var zf in
@@ -402,7 +405,7 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
   Blk.Builder.add_jmp l1_b (Jmp.create ~cond:cond_taken (Goto (Direct b1_tid)));
   Blk.Builder.add_jmp l1_b (Jmp.create ~cond:cond_fallthrough (Goto (Direct exit_tid)));
   let b1_b = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_def b1_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
+  Blk.Builder.add_def b1_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
   Blk.Builder.add_jmp b1_b (Jmp.create (Goto (Direct l1_tid)));
   let sub_b = Sub.Builder.create ~name:"lm_ne_landmark" () in
   List.iter (Sub.Builder.add_blk sub_b) [ Blk.Builder.result entry_b; Blk.Builder.result l1_b; Blk.Builder.result b1_b; exit0 ];
@@ -414,7 +417,7 @@ let lm_jne_loop ~(k : word) () : sub term * tid * tid =
    (sub, guard_tid, then_tid, else_tid, x). *)
 let vsk_diamond () : sub term * tid * tid * tid * var =
   let x = Var.create ~is_virtual:false ~fresh:false "vsk_x" (Type.Imm 32) in
-  let guard_e = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)) in
+  let guard_e = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))) in
   let entry_b = Blk.Builder.create () in
   let guard_b = Blk.Builder.create () in
   let then_b = Blk.Builder.create () in
@@ -449,14 +452,14 @@ let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let g2 = v1 "wc_g2" in
   let f1 = v1 "wc_f1" in
   let f2 = v1 "wc_f2" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
-  let c1 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)) in
-  let c2 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 20)) in
-  let mk_store_blk (k : word) : blk term =
+  let c1 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))) in
+  let c2 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 20))) in
+  let mk_store_blk (k : W.t) : blk term =
     let b = Blk.Builder.create () in
     Blk.Builder.add_def b
-      (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int k, LittleEndian, `r32)));
+      (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word k), LittleEndian, `r32)));
     Blk.Builder.result b in
   let mk_jmp_blk () : blk term = Blk.Builder.result (Blk.Builder.create ()) in
   let prologue0 =
@@ -528,7 +531,7 @@ let run_soundness () =
       per_width := (w, !r10b_pairs - before) :: !per_width)
     [ 8; 16; 32; 64 ];
   (* Mixed-width pin: domain zero-extends; ground truth = zero-extended AND. *)
-  let zx w x = if W.bitwidth x = w then x else W.of_int64 ~width:w (W.to_int64_exn x) in
+  let zx w x = if Cbat_word.bitwidth x = w then x else Cbat_word.of_int64 ~width:w (Cbat_word.to_int64_exn x) in
   let find w lbl = List.assoc lbl (r10b_operands w) in
   let check_mixed (wa, pa) (wb, pb) =
     let w = Stdlib.max wa wb in
@@ -563,11 +566,11 @@ let run_soundness () =
 ;
 (  List.iter
     (fun w ->
-      let v k = W.of_int ~width:w k in
-      let ones = W.ones w in
+      let v k = Cbat_word.of_int ~width:w k in
+      let ones = Cbat_word.ones w in
       let n = Wo.dom_size ~width:(w + 1) w in
       (* --- structured classes (deterministic, all widths) --- *)
-      let near_top k = W.sub ones (v k) in
+      let near_top k = Cbat_word.sub ones (v k) in
       let structured =
         [
           ("identical", v 10, v 41, v 10, v 41);
@@ -581,9 +584,9 @@ let run_soundness () =
           ("wrap-vs-straight", near_top 55, v 156, v 50, v 171);
           ("wrap-nested", near_top 55, v 156, near_top 35, v 96);
           ("wrap-two-piece", near_top 55, v 156, near_top 35, v 300);
-          ("nearfull-in", v 5, W.sub n (v 1), v 7, v 9);
-          ("nearfull-two-piece", v 5, W.sub n (v 1), v 4, W.sub n (v 1));
-          ("nearfull-vs-small", v 5, W.sub n (v 1), v 3, v 4);
+          ("nearfull-in", v 5, Cbat_word.sub n (v 1), v 7, v 9);
+          ("nearfull-two-piece", v 5, Cbat_word.sub n (v 1), v 4, Cbat_word.sub n (v 1));
+          ("nearfull-vs-small", v 5, Cbat_word.sub n (v 1), v 3, v 4);
           ("at-zero", v 0, v 9, v 8, v 9);
           ("across-seam", near_top 3, v 9, v 2, v 9);
         ]
@@ -598,15 +601,15 @@ let run_soundness () =
           else r5_rand_word w (* any *)
         in
         let x =
-          if w = 64 then W.of_int64 ~width:64 raw
-          else W.of_int64 ~width:w Int64.(logand raw (pred (shift_left 1L w)))
+          if w = 64 then Cbat_word.of_int64 ~width:64 raw
+          else Cbat_word.of_int64 ~width:w Int64.(logand raw (pred (shift_left 1L w)))
         in
-        if W.is_zero x then W.one (w + 1) else W.extract_exn ~hi:w x
+        if Cbat_word.is_zero x then Cbat_word.one (w + 1) else W.extract_exn ~hi:w x
       in
       let rand_start () =
         let raw = r5_rand_word w in
-        if w = 64 then W.of_int64 ~width:64 raw
-        else W.of_int64 ~width:w Int64.(logand raw (pred (shift_left 1L w)))
+        if w = 64 then Cbat_word.of_int64 ~width:64 raw
+        else Cbat_word.of_int64 ~width:w Int64.(logand raw (pred (shift_left 1L w)))
       in
       let k = if w <= 16 then 400 else if w = 32 then 200 else 80 in
       for _ = 1 to k do
@@ -692,7 +695,7 @@ let run_roundtrip () =
   let fits w prod = w >= 64 || prod <= 1 lsl w in
   (* Uniform word over [0, 2^w) from ≤30-bit draws. *)
   let rand_word w =
-    if w <= 30 then W.of_int ~width:w (Random.int (1 lsl w))
+    if w <= 30 then Cbat_word.of_int ~width:w (Random.int (1 lsl w))
     else begin
       let rec build acc shift left =
         if left = 0 then acc
@@ -703,7 +706,7 @@ let run_roundtrip () =
         end
       in
       let v = build 0L 0 w in
-      if w = 64 then W.of_int64 ~width:64 v else W.of_int ~width:w (Int64.to_int v)
+      if w = 64 then Cbat_word.of_int64 ~width:64 v else Cbat_word.of_int ~width:w (Int64.to_int v)
     end
   in
   let rand_base = rand_word in
@@ -717,7 +720,7 @@ let run_roundtrip () =
       let full_class = cardn * s = dom_of w in
       if corner then incr corners;
       let p =
-        Clp.create ~width:w ~step:(W.of_int ~width:w s) ~cardn:(W.of_int ~width:(w + 1) cardn) base
+        Clp.create ~width:w ~step:(Cbat_word.of_int ~width:w s) ~cardn:(Cbat_word.of_int ~width:(w + 1) cardn) base
       in
       let elems = List.sort W.compare (Clp.iter p) in
       let rebuilt = Clp.of_list ~width:w elems in
@@ -821,12 +824,12 @@ let run_landmarks () =
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
   check
     "property LM F1: the head's lower bound is the entry constant 0"
-    (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   (* Taken view's state is the body's IN-state. *)
   let taken_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
   check
     "property LM F1: the taken view's lower bound is the entry constant 0"
-    (match Ws.min_elem taken_i with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem taken_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   ()
 
 (* F1-NEQ: NEQ-counter head lands at [0, K] (max == K) — Finite fires end-to-end. *))
@@ -841,10 +844,10 @@ let run_landmarks () =
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
   check
     "property LM F1-NEQ: the head's lower bound is the entry constant 0"
-    (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   check
     "property LM F1-NEQ: the head's upper bound is the landmark K (Finite extrapolation fired end-to-end)"
-    (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
+    (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
   ()
 
 (* F1-FT: fallthrough edge fixture — the walk-equals-vertex pin for the shared memo.
@@ -864,17 +867,17 @@ let run_landmarks () =
    let head_i = AI.find_word 32 (st l1_tid) i in
    check
      "property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side of the pin)"
-     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+     (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
    check
      "property LM F1-FT: the head's upper bound is the landmark K (vertex side of the pin)"
-     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
+     (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
    let body_i = AI.find_word 32 (st b1_tid) i in
    check
      "property LM F1-FT: the taken body's lower bound is the entry constant 0"
-     (match Ws.min_elem body_i with Some lo -> W.equal lo (w32 0) | None -> false);
+     (match Ws.min_elem body_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
    check
      "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the landmark)"
-     (match Ws.max_elem body_i with Some hi -> W.equal hi (W.pred k) | None -> false);
+     (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
    let exits =
      Term.enum blk_t sub |> Seq.to_list |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
    in
@@ -896,13 +899,13 @@ let run_landmarks () =
    let range lo hi = Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi)) in
    let entry = AI.add_word (anchored_entry ()) ~key:x ~data:(range 0 20) in
    check "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit shape)"
-     (match Vsa.edge_constraints ~env:entry (Bil.Int W.b1) (Ws.singleton W.b1) with
+     (match Vsa.edge_constraints ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1) with
       | [] -> true
       | _ -> false);
    check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
      (match
         Vsa.edge_constraints ~env:entry
-          (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)))
+          (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
           (Ws.singleton W.b1)
       with
       | [ Vsa.Var (v, c) ] -> Var.name v = "vsk_x" && Ws.equal c (range 0 9)
@@ -939,13 +942,13 @@ let run_landmarks () =
    let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
    check
      "property LM F1-B1: the budget-armed head's lower bound is the entry constant 0"
-     (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+     (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
    check
      "property LM F1-B1: the budget-armed head's upper bound is the landmark K (never narrowed, never blown past)"
-     (match Ws.max_elem head_i with Some hi -> W.equal hi k | None -> false);
+     (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
    check
      "property LM F1-B1: the budget-armed taken body's upper bound is K-1 (the guard's exclusion survives)"
-     (match Ws.max_elem body_i with Some hi -> W.equal hi (W.pred k) | None -> false);
+     (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
    check
      "property LM F1-B1: the budget never manufactures bottom on a live block (the head's state is inhabited)"
      (not (Ws.is_bottom head_i));
@@ -963,11 +966,11 @@ let run_landmarks () =
    let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
    check
      "property LM F1-B2: loop 2's head lower bound is the entry constant 0 (refined independently under the global budget - no starvation by loop 1's walk spend)"
-     (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
+     (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
    let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
    check
      "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both loops refined independently)"
-     (match Ws.min_elem i1 with Some lo -> W.equal lo (w32 0) | None -> false);
+     (match Ws.min_elem i1 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
    ()
 
 (* F1-B3 (budget memo-first): the Walk_memo is consulted BEFORE the budget
@@ -998,7 +1001,7 @@ let run_landmarks () =
    check
      "property LM F1-B3: the taken body's refined view survives (upper bound K-1)"
      (match Ws.max_elem (AI.find_word 32 (st b1_tid) i) with
-      | Some hi -> W.equal hi (W.pred k)
+      | Some hi -> Cbat_word.equal hi (Cbat_word.pred k)
       | None -> false);
    ()
 
@@ -1026,7 +1029,7 @@ let run_landmarks () =
    let rbp = v64 "RBP" in
    Blk.Builder.add_def gb
      (Def.create t
-        (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)),
+        (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
                    LittleEndian, `r32)));
    Blk.Builder.add_def gb (Def.create i (Bil.Var t));
    let sub_b = Sub.Builder.create ~name:"f1b4_sub" () in
@@ -1062,7 +1065,7 @@ let run_landmarks () =
    let cell_of env =
      match Vsa.denote_imm_exp
              (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
-                                                Bil.Int (w64 8)), LittleEndian, `r32))
+                                                Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r32))
              env with
      | Ok ws -> ws
      | Error _ -> Ws.top 32 in
@@ -1104,10 +1107,10 @@ let run_landmarks () =
   let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
   check
     "property LM F2c: loop 1's head lower bound is the entry constant 0"
-    (match Ws.min_elem i1 with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem i1 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   check
     "property LM F2c: loop 2's head lower bound is the entry constant 0"
-    (match Ws.min_elem i2 with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   ()
 
 (* Single-pass trace partitioning: every out-edge transfers a branch-refined state. *)
@@ -1138,13 +1141,13 @@ let run_chains () =
 ;
 (  let m = memv "t01_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let entry_b = Blk.Builder.create () in
   let mid_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var (v64 "RSP")));
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (w32 3), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 3)), LittleEndian, `r32)));
   let mid0 = Blk.Builder.result mid_b in
   let exit0 = Blk.Builder.result exit_b in
   let mid_tid = Term.tid mid0 in

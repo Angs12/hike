@@ -12,12 +12,12 @@
 (* ************************************************************************* *)
 
 include Bap.Std
-module W = Word
+module W = Cbat_word
 module Option = Core_kernel.Option
 open Cbat_vsa_utils
 
 (* Multiply at the summed width; cannot overflow. *)
-let mul_exact (w1 : word) (w2 : word) : word =
+let mul_exact (w1 : W.t) (w2 : W.t) : W.t =
   let sz1 = W.bitwidth w1 in
   let sz2 = W.bitwidth w2 in
   let sz_ext = sz1 + sz2 in
@@ -25,7 +25,7 @@ let mul_exact (w1 : word) (w2 : word) : word =
   let w2_ext = W.extract_exn ~hi:(sz_ext - 1) w2 in
   W.mul w1_ext w2_ext
 
-let add_exact (w1 : word) (w2 : word) : word =
+let add_exact (w1 : W.t) (w2 : W.t) : W.t =
   let sz1 = W.bitwidth w1 in
   let sz2 = W.bitwidth w2 in
   let sz_ext = 1 + max sz1 sz2 in
@@ -33,18 +33,18 @@ let add_exact (w1 : word) (w2 : word) : word =
   let w2_ext = W.extract_exn ~hi:(sz_ext - 1) w2 in
   W.add w1_ext w2_ext
 
-let succ_exact (w : word) : word =
+let succ_exact (w : W.t) : W.t =
   let width = W.bitwidth w in
   W.succ @@ W.extract_exn ~hi:width w
 
-let lshift_exact (w : word) (i : int) : word =
+let lshift_exact (w : W.t) (i : int) : W.t =
   let width = i + W.bitwidth w in
   let wi = W.of_int ~width i in
   let w' = W.extract_exn ~hi:(width - 1) w in
   W.lshift w' wi
 
 (* Bounded gcd. *)
-let bounded_gcd (w1 : word) (w2 : word) : word =
+let bounded_gcd (w1 : W.t) (w2 : W.t) : W.t =
   let width = W.bitwidth w1 in
   assert (width = W.bitwidth w2);
   if W.is_zero w1 then w2
@@ -52,13 +52,13 @@ let bounded_gcd (w1 : word) (w2 : word) : word =
   else W.gcd_exn w1 w2
 
 (* Unsigned division rounding up. *)
-let cdiv a b : word = if W.is_zero (W.modulo a b)
+let cdiv a b : W.t = if W.is_zero (W.modulo a b)
     then W.div a b else W.succ (W.div a b)
 
-let is_one (w : word) : bool = W.is_zero (W.pred w)
+let is_one (w : W.t) : bool = W.is_zero (W.pred w)
 
 (* Least non-negative x solving ax + by = c. *)
-let bounded_diophantine (a : word) b c : (word * word) option =
+let bounded_diophantine (a : W.t) b c : (W.t * W.t) option =
   let size = W.bitwidth a in
   assert (size = W.bitwidth b);
   assert (size = W.bitwidth c);
@@ -85,7 +85,7 @@ let bounded_diophantine (a : word) b c : (word * word) option =
             W.extract_exn ~hi:(size-1) signed_y0)
 
 (* Split w into odd part and power of two. *)
-let factor_2s (w : word) : word * int =
+let factor_2s (w : W.t) : W.t * int =
   let rec factor_help (hi : int) (lo : int) : int =
     if hi = lo then hi else
       let mid = (hi + lo) / 2 in
@@ -101,7 +101,7 @@ let factor_2s (w : word) : word * int =
 
 
 (* Position of the leading 1-bit. *)
-let lead_1_bit (w : word) : int option =
+let lead_1_bit (w : W.t) : int option =
   let rec lead_help (hi : int) (lo : int) : int option =
     let open Monads.Std.Monad.Option.Syntax in
     Option.some_if (hi >= lo) () >>= fun _ ->
@@ -113,15 +113,15 @@ let lead_1_bit (w : word) : int option =
   in
   if W.is_zero w then None else lead_help ((W.bitwidth w) - 1) 0
 
-let count_initial_1s (w : word) : int = snd @@ factor_2s @@ W.lnot w
+let count_initial_1s (w : W.t) : int = snd @@ factor_2s @@ W.lnot w
 
-let min w1 w2 : word = if W.(<) w1 w2 then w1 else w2
-let max w1 w2 : word = if W.(<) w1 w2 then w2 else w1
+let min w1 w2 : W.t = if W.compare w1 w2 < 0 then w1 else w2
+let max w1 w2 : W.t = if W.compare w1 w2 < 0 then w2 else w1
 
 (* 2^i at [width] bits. *)
 (* Cached; hot on every CLP op. *)
-let dom_size_cache : (int * int, word) Hashtbl.t = Hashtbl.create 16
-let dom_size ?width (i : int) : word =
+let dom_size_cache : (int * int, W.t) Hashtbl.t = Hashtbl.create 16
+let dom_size ?width (i : int) : W.t =
   let width = Option.value ~default:(i + 1) width in
   match Hashtbl.find_opt dom_size_cache (i, width) with
   | Some w -> w
@@ -131,8 +131,8 @@ let dom_size ?width (i : int) : word =
     w
 
 (* 2^(width-1) at [width] bits. *)
-let half_cache : (int, word) Hashtbl.t = Hashtbl.create 8
-let half (width : int) : word =
+let half_cache : (int, W.t) Hashtbl.t = Hashtbl.create 8
+let half (width : int) : W.t =
   match Hashtbl.find_opt half_cache width with
   | Some w -> w
   | None ->
@@ -143,7 +143,7 @@ let half (width : int) : word =
     w
 
 (* Closest value representable at [width] bits. *)
-let cap_at_width ~width (w : word) : word =
+let cap_at_width ~width (w : W.t) : W.t =
   let w_width = W.bitwidth w in
   (* Exact width is the identity. *)
   if w_width = width then w
@@ -154,15 +154,15 @@ let cap_at_width ~width (w : word) : word =
     W.extract_exn ~hi:(width - 1) res_val
 
 (* Extend by one high bit. *)
-let add_bit (w : word) : word =
+let add_bit (w : W.t) : W.t =
   W.extract_exn ~hi:(W.bitwidth w) w
 
-let endian_string : W.endian -> string = function
+let endian_string : Word.endian -> string = function
   | BigEndian -> "BE"
   | LittleEndian -> "le"
 
-let gt_int (w : word) (i : int) : bool =
-  W.(>) w (W.of_int i ~width:(W.bitwidth w))
+let gt_int (w : W.t) (i : int) : bool =
+  W.compare w (W.of_int ~width:(W.bitwidth w) i) > 0
 
-let lt_int (w : word) (i : int) : bool =
-  W.(<) w (W.of_int i ~width:(W.bitwidth w))
+let lt_int (w : W.t) (i : int) : bool =
+  W.compare w (W.of_int ~width:(W.bitwidth w) i) < 0

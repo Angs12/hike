@@ -69,7 +69,7 @@ let ws_to_string (ws : Ws.t) : string =
   else
     match Ws.min_elem ws, Ws.max_elem ws with
     | Some lo, Some hi ->
-      Printf.sprintf "[%s .. %s]%s" (word_to_hex lo) (word_to_hex hi)
+      Printf.sprintf "[%s .. %s]%s" (word_to_hex (Cbat_word.to_word lo)) (word_to_hex (Cbat_word.to_word hi))
         (if Ws.is_infinite ws then " (infinite)" else "")
     | _ -> "?"
 
@@ -79,7 +79,7 @@ let ws_window_big (ws : Ws.t) : bool =
   else
     match Ws.min_elem ws, Ws.max_elem ws with
     | Some lo, Some hi ->
-      (match Word.to_int64 lo, Word.to_int64 hi with
+      (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
        | Ok lo, Ok hi -> Int64.compare (Int64.sub hi lo) 0L < 0
        | _ -> false)
     | _ -> false

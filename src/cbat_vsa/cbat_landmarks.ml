@@ -5,7 +5,7 @@ open Core_kernel
 
 (* Per-(var, bound, is_upper) entry; smaller distance wins. *)
 type lm_entry = {
-  bound : Word.t;
+  bound : Cbat_word.t;
   is_upper : bool;
   mutable dist : int option;   (* current distance *)
   mutable dist_p : int option;  (* previous distance *)
@@ -13,9 +13,9 @@ type lm_entry = {
 
 let cap = 1 lsl 40
 let cap_distance (d : int) : int = min d cap
-let distance_words (a : Word.t) (b : Word.t) : int =
-  let diff = Word.sub b a in
-  try Word.to_int_exn diff with _ -> cap
+let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
+  let diff = Cbat_word.sub b a in
+  try Cbat_word.to_int_exn diff with _ -> cap
   (* Cap unrepresentable distances. *)
 
 (* Per-head landmark table. *)
@@ -35,7 +35,7 @@ let clear_head (h : Tid.t) (blocks : Tid.Set.t) : unit =
 
 let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   match List.find entries ~f:(fun e ->
-      Word.equal e.bound entry.bound
+      Cbat_word.equal e.bound entry.bound
       && Bool.equal e.is_upper entry.is_upper) with
   | None -> entry :: entries
   | Some existing ->
@@ -48,7 +48,7 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
     if keep then
       { entry with dist_p = existing.dist_p }
       :: List.filter entries ~f:(fun e -> not (
-        Word.equal e.bound entry.bound
+        Cbat_word.equal e.bound entry.bound
         && Bool.equal e.is_upper entry.is_upper))
     else entries
 
@@ -60,7 +60,7 @@ let end_fired_latch (base : int) : bool =
   fired_count := base;
   fired
 
-let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
+let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
   (* Bumped on every acquisition. *)
   fired_count := !fired_count + 1;
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
@@ -86,11 +86,11 @@ let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_cl
         (* Outside a cycle: no-op. *)
         ()
       | Some h, Some p_min, Some p_max, Some c_min, Some c_max ->
-        if Word.(<) p_max c_min then begin
+        if Cbat_word.(<) p_max c_min then begin
           (* Set below the boundary: upper landmark. *)
           let d = distance_words p_max c_min in
           record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
-        end else if Word.(>) p_min c_max then begin
+        end else if Cbat_word.(>) p_min c_max then begin
           (* Set above the boundary: lower landmark. *)
           let d = distance_words c_max p_min in
           record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
@@ -143,22 +143,22 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
         if d > cap then cap else d
       | None -> 0
     in
-    let lo_base = match Cbat_clp_set_composite.min_elem data_new with Some w -> w | None -> Word.zero width in
-    let hi_base = match Cbat_clp_set_composite.max_elem data_new with Some w -> w | None -> Word.zero width in
+    let lo_base = match Cbat_clp_set_composite.min_elem data_new with Some w -> w | None -> Cbat_word.zero width in
+    let hi_base = match Cbat_clp_set_composite.max_elem data_new with Some w -> w | None -> Cbat_word.zero width in
     let extrap_lo =
       let lo' = List.filter entries ~f:(fun e -> not e.is_upper) in
       match lo' with
       | [] -> lo_base
       | _ ->
         let candidates = List.filter_map lo' ~f:(fun e ->
-            let v = Word.sub lo_base (Word.of_int ~width (delta_of e)) in
-            let v = if Word.compare v lo_base > 0 then lo_base else v in
-            let v = if Word.compare v e.bound < 0 then e.bound else v in
-            let v = if Word.compare v lo_base > 0 then lo_base else v in
+            let v = Cbat_word.sub lo_base (Cbat_word.of_int ~width (delta_of e)) in
+            let v = if Cbat_word.compare v lo_base > 0 then lo_base else v in
+            let v = if Cbat_word.compare v e.bound < 0 then e.bound else v in
+            let v = if Cbat_word.compare v lo_base > 0 then lo_base else v in
             Some v)
         in
         List.fold candidates ~init:lo_base ~f:(fun acc v ->
-            if Word.compare v acc < 0 then v else acc)
+            if Cbat_word.compare v acc < 0 then v else acc)
     in
     let extrap_hi =
       let hi' = List.filter entries ~f:(fun e -> e.is_upper) in
@@ -166,19 +166,19 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
       | [] -> hi_base
       | _ ->
         let candidates = List.filter_map hi' ~f:(fun e ->
-            let v = Word.add hi_base (Word.of_int ~width (delta_of e)) in
+            let v = Cbat_word.add hi_base (Cbat_word.of_int ~width (delta_of e)) in
             let v =
-              if Word.compare v hi_base < 0 then
+              if Cbat_word.compare v hi_base < 0 then
                 (* Overflow saturates. *)
-                Word.ones width
+                Cbat_word.ones width
               else v in
-            let v = if Word.compare v e.bound > 0 then e.bound else v in
-            let v = if Word.compare v hi_base < 0 then hi_base else v in
+            let v = if Cbat_word.compare v e.bound > 0 then e.bound else v in
+            let v = if Cbat_word.compare v hi_base < 0 then hi_base else v in
             Some v)
         in
         List.fold candidates ~init:hi_base ~f:(fun acc v ->
-            if Word.compare v acc > 0 then v else acc)
+            if Cbat_word.compare v acc > 0 then v else acc)
     in
-    if Word.compare extrap_lo extrap_hi > 0 then data_new
+    if Cbat_word.compare extrap_lo extrap_hi > 0 then data_new
     else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width extrap_lo extrap_hi)
   end

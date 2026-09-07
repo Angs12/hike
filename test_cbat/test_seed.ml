@@ -12,7 +12,7 @@ let run () =
   let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
   let iv ~lo ~hi =
     Ws.of_clp
-      (Clp.create ~width:64 ~step:(w64 1) ~cardn:(W.of_int ~width:65 (hi - lo + 1)) (w64 lo))
+      (Clp.create ~width:64 ~step:(w64 1) ~cardn:(Cbat_word.of_int ~width:65 (hi - lo + 1)) (w64 lo))
   in
   let frame_rsp_rbp =
     Some
@@ -43,7 +43,7 @@ let run () =
   let st1 = add_cell (mk_state ()) (Ws.singleton (w64 (-8))) (iv ~lo:0 ~hi:20) in
   let env1 =
     Vsa.constrain_cell_on_trace ~st:st1 ~live:Var.Map.empty st1 ~mem:(Bil.Var m)
-      ~addr:(Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8)))
+      ~addr:(Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))))
       ~size:`r64 ~endian:LittleEndian (iv ~lo:0 ~hi:9)
   in
   check
@@ -60,7 +60,7 @@ let run () =
   let live2 = Var.Map.singleton (Var.base idx) (iv ~lo:0 ~hi:4) in
   let env2 =
     Vsa.constrain_cell_on_trace ~st:st2 ~live:live2 st2 ~mem:(Bil.Var m)
-      ~addr:(Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (w64 8))))
+      ~addr:(Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (Cbat_word.to_word (w64 8)))))
       ~size:`r64 ~endian:LittleEndian (iv ~lo:0 ~hi:9)
   in
   check
@@ -99,7 +99,7 @@ let run () =
   let live4 = Var.Map.singleton (Var.base idx) (iv ~lo:0 ~hi:4) in
   let env4 =
     Vsa.constrain_cell_on_trace ~st:st4 ~live:live4 st4 ~mem:(Bil.Var m)
-      ~addr:(Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (w64 8))))
+      ~addr:(Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (Cbat_word.to_word (w64 8)))))
       ~size:`r64 ~endian:LittleEndian (iv ~lo:0 ~hi:9)
   in
   check
@@ -115,7 +115,7 @@ let run () =
   ())
 (* Pure seed collector: guard edge constraint decomposed into leaf seeds. *)
 ;
-(  let r32 = W.of_int ~width:32 in
+(  let r32 = Cbat_word.of_int ~width:32 in
   let t = Var.create ~is_virtual:true ~fresh:false "s_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:true ~fresh:false "s_u" (Type.Imm 32) in
   let cf = Var.create ~is_virtual:false ~fresh:false "s_cf" (Type.Imm 1) in
@@ -128,18 +128,18 @@ let run () =
   in
   let iv ~lo ~hi =
     Ws.of_clp
-      (Clp.create ~width:32 ~step:(r32 1) ~cardn:(W.of_int ~width:33 (hi - lo + 1)) (r32 lo))
+      (Clp.create ~width:32 ~step:(r32 1) ~cardn:(Cbat_word.of_int ~width:33 (hi - lo + 1)) (r32 lo))
   in
-  let seeds_of cond = Vsa.edge_constraints ~env:(mk_env []) cond (Ws.singleton Word.b1) in
+  let seeds_of cond = Vsa.edge_constraints ~env:(mk_env []) cond (Ws.singleton (Cbat_word.of_word Word.b1)) in
   (* S1: const-second EQ. *)
   check "S1: EQ const-second -> the Var seed {10}"
-    (match seeds_of (Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (r32 10))) with
+    (match seeds_of (Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (Cbat_word.to_word (r32 10)))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 10) c && not (Ws.elem (r32 11) c)
     | _ -> false);
   (* S2: NEQ complement. *)
   check "S2: NEQ const-second -> the wrapped complement (10 ∉; 11, 9 ∈)"
-    (match seeds_of (Bil.BinOp (Bil.NEQ, Bil.Var t, Bil.Int (r32 10))) with
+    (match seeds_of (Bil.BinOp (Bil.NEQ, Bil.Var t, Bil.Int (Cbat_word.to_word (r32 10)))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t)
         && (not (Ws.elem (r32 10) c))
@@ -148,7 +148,7 @@ let run () =
     | _ -> false);
   (* S3: two-piece SLT. *)
   check "S3: SLT const-second -> the two-piece [0,3] ∪ [2^31, max] (no gate)"
-    (match seeds_of (Bil.BinOp (Bil.SLT, Bil.Var t, Bil.Int (r32 4))) with
+    (match seeds_of (Bil.BinOp (Bil.SLT, Bil.Var t, Bil.Int (Cbat_word.to_word (r32 4)))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t)
         && Ws.elem (r32 3) c
@@ -157,14 +157,14 @@ let run () =
     | _ -> false);
   (* S4: const-first flip. *)
   check "S4: const-first LT -> the UGT flip [11, max] (10 ∉; 11 ∈)"
-    (match seeds_of (Bil.BinOp (Bil.LT, Bil.Int (r32 10), Bil.Var t)) with
+    (match seeds_of (Bil.BinOp (Bil.LT, Bil.Int (Cbat_word.to_word (r32 10)), Bil.Var t)) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 11) c && not (Ws.elem (r32 10) c)
     | _ -> false);
   (* S5: var-vs-var LT overlap. *)
   let env5 = mk_env [ (t, iv ~lo:0 ~hi:10); (u, Ws.singleton (r32 10)) ] in
   let s5 =
-    Vsa.edge_constraints ~env:env5 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Var u)) (Ws.singleton Word.b1)
+    Vsa.edge_constraints ~env:env5 (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Var u)) (Ws.singleton (Cbat_word.of_word Word.b1))
   in
   check "S5: the var-vs-var LT overlap — t ∈ [0,9] (the u's max 10)"
     (match var_seed s5 t with
@@ -175,7 +175,7 @@ let run () =
   let s6 =
     Vsa.edge_constraints ~env:env6
       (Bil.BinOp (Bil.NEQ, Bil.Var t, Bil.Var u))
-      (Ws.singleton Word.b1)
+      (Ws.singleton (Cbat_word.of_word Word.b1))
   in
   check
     "S6: the var-vs-var NEQ — the t seed = the complement of the {5} overlap (the interior: the \
@@ -185,8 +185,8 @@ let run () =
   let env7 = mk_env [ (t, iv ~lo:0 ~hi:10); (u, iv ~lo:0 ~hi:3) ] in
   let s7 =
     Vsa.edge_constraints ~env:env7
-      (Bil.BinOp (Bil.LT, Bil.Var t, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (r32 1))))
-      (Ws.singleton Word.b1)
+      (Bil.BinOp (Bil.LT, Bil.Var t, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (Cbat_word.to_word (r32 1)))))
+      (Ws.singleton (Cbat_word.of_word Word.b1))
   in
   check
     "S7: the generic comparison — the t row from the (u+1) value-set [1,4] (t ⊆ [0,3]) + the u \
@@ -198,8 +198,8 @@ let run () =
   let env8 = mk_env [ (t, iv ~lo:0 ~hi:10) ] in
   let s8 =
     Vsa.edge_constraints ~env:env8
-      (Bil.BinOp (Bil.LT, Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (r32 1)), Bil.Int (r32 10)))
-      (Ws.singleton Word.b1)
+      (Bil.BinOp (Bil.LT, Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word (r32 1))), Bil.Int (Cbat_word.to_word (r32 10))))
+      (Ws.singleton (Cbat_word.of_word Word.b1))
   in
   check "S8: the producer PLUS row — the circular hull {0xFFFFFFFF} ∪ [0,8] on t"
     (match var_seed s8 t with
@@ -214,23 +214,23 @@ let run () =
             ( Bil.LT,
               Bil.Load
                 ( Bil.Var m,
-                  Bil.BinOp (Bil.MINUS, Bil.Var rsp64, Bil.Int (W.of_int ~width:64 8)),
+                  Bil.BinOp (Bil.MINUS, Bil.Var rsp64, Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:64 8))),
                   LittleEndian,
                   `r32 ),
-              Bil.Int (r32 10) ))
-         (Ws.singleton Word.b1)
+              Bil.Int (Cbat_word.to_word (r32 10)) ))
+         (Ws.singleton (Cbat_word.of_word Word.b1))
      with
     | [ Vsa.Cell (_, _, _, _, cstr) ] -> Ws.elem (r32 9) cstr && not (Ws.elem (r32 10) cstr)
     | _ -> false);
   (* S10: NOT bijection. *)
   check "S10: the NOT bijection — the FALSE side UGE [10, max] (10 ∈; 9 ∉)"
-    (match seeds_of (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (r32 10)))) with
+    (match seeds_of (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (r32 10))))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 10) c && not (Ws.elem (r32 9) c)
     | _ -> false);
   (* S11: NEG row. *)
   check "S11: the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈"
-    (match seeds_of (Bil.BinOp (Bil.LT, Bil.UnOp (Bil.NEG, Bil.Var t), Bil.Int (r32 10))) with
+    (match seeds_of (Bil.BinOp (Bil.LT, Bil.UnOp (Bil.NEG, Bil.Var t), Bil.Int (Cbat_word.to_word (r32 10)))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && Ws.elem (r32 0) c && Ws.elem (r32 0xFFFFFFFF) c
     | _ -> false);
@@ -239,40 +239,40 @@ let run () =
     {
       defs = None;
       stores = None;
-      flag_state = Some (cf, Bil.LT, Bil.Var t, r32 10);
+      flag_state = Some (cf, Bil.LT, Bil.Var t, Cbat_word.to_word (r32 10));
       sub = None;
       blk = None;
     }
   in
-  let s12 = Vsa.edge_constraints ~env:(mk_env []) ~ctx:ctx12 (Bil.Var cf) (Ws.singleton Word.b1) in
+  let s12 = Vsa.edge_constraints ~env:(mk_env []) ~ctx:ctx12 (Bil.Var cf) (Ws.singleton (Cbat_word.of_word Word.b1)) in
   check "S12: the flag-state recovery — the cf seed + the recovered t seed [0,9]"
     (match (var_seed s12 cf, var_seed s12 t) with
-    | Some cc, Some ct -> Ws.elem Word.b1 cc && Ws.elem (r32 9) ct && not (Ws.elem (r32 10) ct)
+    | Some cc, Some ct -> Ws.elem Cbat_word.b1 cc && Ws.elem (r32 9) ct && not (Ws.elem (r32 10) ct)
     | _ -> false);
   (* S13: NOT-wrapped dual. *)
   check "S13: the dual — NOT (t EQ 10) -> the NEQ complement (10 ∉; 11 ∈)"
-    (match seeds_of (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (r32 10)))) with
+    (match seeds_of (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (Cbat_word.to_word (r32 10))))) with
     | [ Vsa.Var (v, c) ] ->
         Var.equal v (Var.base t) && (not (Ws.elem (r32 10) c)) && Ws.elem (r32 11) c
     | _ -> false);
   (* S14: infeasible constant. *)
   check "S14: the Infeasible constant — (Int 5) with {7} -> Infeasible; with {5} -> no seeds"
-    (Vsa.edge_constraints ~env:(mk_env []) (Bil.Int (r32 5)) (Ws.singleton (r32 7))
+    (Vsa.edge_constraints ~env:(mk_env []) (Bil.Int (Cbat_word.to_word (r32 5))) (Ws.singleton (r32 7))
      = [ Vsa.Infeasible ]
-    && Vsa.edge_constraints ~env:(mk_env []) (Bil.Int (r32 5)) (Ws.singleton (r32 5)) = []);
+    && Vsa.edge_constraints ~env:(mk_env []) (Bil.Int (Cbat_word.to_word (r32 5))) (Ws.singleton (r32 5)) = []);
   (* S15: cast rows. *)
   let env15 =
     mk_env
       [
         ( t,
-          Ws.of_clp (Clp.create ~width:32 ~step:(r32 1) ~cardn:(W.of_int ~width:33 0x10000) (r32 0))
+          Ws.of_clp (Clp.create ~width:32 ~step:(r32 1) ~cardn:(Cbat_word.of_int ~width:33 0x10000) (r32 0))
         );
       ]
   in
   let s15a =
     Vsa.edge_constraints ~env:env15
-      (Bil.BinOp (Bil.EQ, Bil.Cast (Bil.LOW, 8, Bil.Var t), Bil.Int (W.of_int ~width:8 5)))
-      (Ws.singleton Word.b1)
+      (Bil.BinOp (Bil.EQ, Bil.Cast (Bil.LOW, 8, Bil.Var t), Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:8 5))))
+      (Ws.singleton (Cbat_word.of_word Word.b1))
   in
   check "S15a: the LOW cast row — the truncation hull [5, 5 + 2^32 − 2^8] (5 ∈; 5+0x100 ∈; 4 ∉)"
     (match var_seed s15a t with
@@ -281,8 +281,8 @@ let run () =
   let env15b = mk_env [ (t, Ws.singleton (r32 0x100)) ] in
   let s15b =
     Vsa.edge_constraints ~env:env15b
-      (Bil.BinOp (Bil.LT, Bil.Cast (Bil.SIGNED, 64, Bil.Var t), Bil.Int (W.of_int ~width:64 0x100)))
-      (Ws.singleton Word.b1)
+      (Bil.BinOp (Bil.LT, Bil.Cast (Bil.SIGNED, 64, Bil.Var t), Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:64 0x100))))
+      (Ws.singleton (Cbat_word.of_word Word.b1))
   in
   check "S15b: the SIGNED ext row — the pre-image [0, 0xFF] (0xFF ∈; 0x100 ∉)"
     (match var_seed s15b t with

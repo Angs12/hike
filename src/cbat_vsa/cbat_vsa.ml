@@ -71,8 +71,8 @@ type wordset = WordSet.t
 
 (* Widths of both inputs. *)
 let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
-  let btrue = WordSet.singleton Word.b1 in
-  let bfalse = WordSet.singleton Word.b0 in
+  let btrue = WordSet.singleton (Cbat_word.b1) in
+  let bfalse = WordSet.singleton (Cbat_word.b0) in
   let wordset_of_bool b = if b then btrue else bfalse in
   let bool_top = WordSet.top 1 in
   let bool_bottom = WordSet.bottom 1 in
@@ -81,26 +81,26 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
     let open Monads.Std.Monad.Option in
     let max_elem = if signed then WordSet.max_elem_signed else WordSet.max_elem in
     let min_elem = if signed then WordSet.min_elem_signed else WordSet.min_elem in
-    let sgn = if signed then Word.signed else Fun.id in
+    let sgn = if signed then Cbat_word.signed else Fun.id in
     Option.value ~default:bool_top begin
       max_elem v1 >>= fun v1_max ->
       min_elem v1 >>= fun v1_min ->
       max_elem v2 >>= fun v2_max ->
       min_elem v2 >>= fun v2_min ->
       if le then
-        if Word.(<=) (sgn v1_max) (sgn v2_min) then return btrue
-        else if Word.(>) (sgn v1_min) (sgn v2_max) then return bfalse
+        if Cbat_word.(<=) (sgn v1_max) (sgn v2_min) then return btrue
+        else if Cbat_word.(>) (sgn v1_min) (sgn v2_max) then return bfalse
         else return bool_top
       else
-        if Word.(<) (sgn v1_max) (sgn v2_min) then return btrue
-        else if Word.(>=) (sgn v1_min) (sgn v2_max) then return bfalse
+        if Cbat_word.(<) (sgn v1_max) (sgn v2_min) then return btrue
+        else if Cbat_word.(>=) (sgn v1_min) (sgn v2_max) then return bfalse
         else return bool_top
     end in
   (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
     let v1Size = WordSet.cardinality v1 in
     let v2Size = WordSet.cardinality v2 in
-    if Word.is_zero v1Size || Word.is_zero v2Size then bool_bottom
+    if Cbat_word.is_zero v1Size || Cbat_word.is_zero v2Size then bool_bottom
     else if Word_ops.is_one v1Size && Word_ops.is_one v2Size then
       wordset_of_bool
         (if negate then not (WordSet.equal v1 v2) else WordSet.equal v1 v2)
@@ -229,8 +229,8 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
        let y = AI.frame_key y in
        let shift =
          match op with
-         | Bil.PLUS -> fun t -> AI.frame_add_const t (WordSet.singleton k)
-         | Bil.MINUS -> fun t -> AI.frame_sub_const t (WordSet.singleton k)
+         | Bil.PLUS -> fun t -> AI.frame_add_const t (WordSet.singleton (Cbat_word.of_word k))
+         | Bil.MINUS -> fun t -> AI.frame_sub_const t (WordSet.singleton (Cbat_word.of_word k))
          | _ -> Fun.id in
        transfer ~shift y
      | Bil.PLUS, Bil.Var y, Bil.Var z ->
@@ -246,13 +246,13 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
      | Bil.PLUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k)
      | Bil.PLUS, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k), Bil.Var y ->
        (* Derived iff y derived. *)
-       let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
+       let k = match Cbat_word.to_int (Cbat_word.of_word k) with Ok n -> n | Error _ -> 0 in
        let y = AI.frame_key y in
        let z = AI.frame_key z in
        if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z k) y
      | Bil.MINUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k) ->
        (* Derived iff y derived. *)
-       let k = match Word.to_int k with Ok n -> n | Error _ -> 0 in
+       let k = match Cbat_word.to_int (Cbat_word.of_word k) with Ok n -> n | Error _ -> 0 in
        let y = AI.frame_key y in
        let z = AI.frame_key z in
        if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-k)) y
@@ -270,12 +270,12 @@ let apply_frame_def (f : AI.frame option) (d : def term) : AI.frame option =
 
 
 (* Offset expression plus literal. *)
-let expr_of_term (t : AI.frame_term) (k : word) : exp option =
+let expr_of_term (t : AI.frame_term) (k : Cbat_word.t) : exp option =
   match WordSet.min_elem t.fconst, WordSet.max_elem t.fconst with
-  | Some lo, Some hi when Word.equal lo hi ->
-    let base = Word.add lo k in
-    Some (List.fold t.fvars ~init:(Bil.Int base) ~f:(fun acc (v, k') ->
-        let scaled = Bil.BinOp (Bil.TIMES, Bil.Var v, Bil.Int (Word.of_int ~width:64 k')) in
+  | Some lo, Some hi when Cbat_word.equal lo hi ->
+    let base = Cbat_word.add lo k in
+    Some (List.fold t.fvars ~init:(Bil.Int (Cbat_word.to_word base)) ~f:(fun acc (v, k') ->
+        let scaled = Bil.BinOp (Bil.TIMES, Bil.Var v, Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:64 k'))) in
         if k' >= 0 then Bil.BinOp (Bil.PLUS, acc, scaled)
         else Bil.BinOp (Bil.MINUS, acc, scaled)))
   | _ -> None
@@ -293,7 +293,7 @@ let rewrite_addr (frame : AI.frame option) (a : exp) : exp =
     match e with
     | Bil.Var x ->
       (match find x with
-       | Some t -> expr_of_term t (Word.zero 64)
+       | Some t -> expr_of_term t (Cbat_word.zero 64)
        | None -> None)
     | Bil.Int _ -> Some e
     | Bil.BinOp (Bil.PLUS, e1, e2) ->
@@ -347,7 +347,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
       return_mem @@ AI.find_memory k env v
     | Type.Unk -> failwith "Error in denote_exp: var type is not representable by Type.t"
     end
-  | Bil.Int bv -> return_imm @@ WordSet.singleton bv
+  | Bil.Int bv -> return_imm @@ WordSet.singleton (Cbat_word.of_word bv)
   | Bil.BinOp (op, e1, e2) ->
     denote_exp e1 env >>= val_as_imm >>= fun v1 ->
     denote_exp e2 env >>= val_as_imm >>= fun v2 ->
@@ -356,7 +356,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
     let resSize = Size.in_bits s in
-    if WordSet.splits_by addr (Word.of_int ~width:resSize (Size.in_bytes s))
+    if WordSet.splits_by addr (Cbat_word.of_int ~width:resSize (Size.in_bytes s))
     then Option.value_map ~default:(return_imm @@ WordSet.bottom resSize) (Mem.Key.of_wordset addr)
         ~f:(fun k -> Mem.find (resSize, e) mv k |> Mem.Val.data |> return_imm)
     else return_imm @@ WordSet.top resSize
@@ -374,7 +374,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     then return_mem mv
     else
     
-    let v' = if WordSet.splits_by addr (Word.of_int ~width:sz (Size.in_bytes s))
+    let v' = if WordSet.splits_by addr (Cbat_word.of_int ~width:sz (Size.in_bytes s))
       then v else WordSet.top sz in
     let data = Mem.Val.create v' e in
     return_mem @@ Option.value_map ~default:mv (Mem.Key.of_wordset addr)
@@ -384,8 +384,8 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp yes env >>= fun yesv ->
     denote_exp no env >>= fun nov ->
     if WordSet.is_top condv then val_join yesv nov
-    else if WordSet.equal condv (WordSet.singleton Word.b1) then return yesv
-    else if WordSet.equal condv (WordSet.singleton Word.b0) then return nov
+    else if WordSet.equal condv (WordSet.singleton (Cbat_word.b1)) then return yesv
+    else if WordSet.equal condv (WordSet.singleton Cbat_word.b0) then return nov
     
     else val_join yesv nov
   | Bil.Extract (hi, lo, e) ->
@@ -448,9 +448,9 @@ let denote_defs (b : blk term) : AI.t -> AI.t =
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
     let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in
-    let can_fall_through = WordSet.elem Word.b0 cond in
+    let can_fall_through = WordSet.elem Cbat_word.b0 cond in
     if not reachable then Seq.Step.Done
-    else if WordSet.elem Word.b1 cond then Seq.Step.Yield {value = jmp; state = can_fall_through}
+    else if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}
     else Seq.Step.Skip {state = can_fall_through}
   end
 
@@ -494,51 +494,51 @@ let decoded_condition (cond : exp) : guard_op option =
   | _ -> None
 
 (* Shared step-1 CLP interval. *)
-let interval_clp_of ~(width : int) ~(cardn : word) (base : word)
+let interval_clp_of ~(width : int) ~(cardn : Cbat_word.t) (base : Cbat_word.t)
     : wordset option =
-  if Word.is_zero cardn then None
+  if Cbat_word.is_zero cardn then None
   else
     let ws = WordSet.of_clp
-        (Cbat_clp.create ~width ~step:(Word.one width) ~cardn base) in
+        (Cbat_clp.create ~width ~step:(Cbat_word.one width) ~cardn base) in
     if WordSet.is_top ws then None else Some ws
 
 (* Values allowed on a taken edge. *)
 let comparison_constraint ?(cur : wordset option = None)
     ?(known_nonneg : bool = false)
-    (op : Bil.binop) (c : word) : wordset option =
-  let width = Word.bitwidth c in
-  let cardn_of_int (i : int) : word option =
-    if i < 0 then None else Some (Word.of_int ~width:(width + 1) i) in
-  let int_of_word (w : word) : int option =
-    try Some (Word.to_int_exn w) with _ -> None in
+    (op : Bil.binop) (c : Cbat_word.t) : wordset option =
+  let width = Cbat_word.bitwidth c in
+  let cardn_of_int (i : int) : Cbat_word.t option =
+    if i < 0 then None else Some (Cbat_word.of_int ~width:(width + 1) i) in
+  let int_of_word (w : Cbat_word.t) : int option =
+    try Some (Cbat_word.to_int_exn w) with _ -> None in
   (* Non-negativity threshold. *)
   let half = Word_ops.half width in
   let provably_nonneg : bool =
     Option.value_map cur ~default:false ~f:(fun ws ->
         match WordSet.max_elem ws with
         | None -> false
-        | Some m -> Word.(<) m half) in
+        | Some m -> Cbat_word.(<) m half) in
   match op with
   | Bil.LT -> Option.bind (int_of_word c) ~f:(fun i ->
       Option.bind (cardn_of_int i) ~f:(fun cardn ->
-          interval_clp_of ~width ~cardn (Word.zero width)))
+          interval_clp_of ~width ~cardn (Cbat_word.zero width)))
   | Bil.LE -> Option.bind (int_of_word c) ~f:(fun i ->
       Option.bind (cardn_of_int (i + 1)) ~f:(fun cardn ->
-          interval_clp_of ~width ~cardn (Word.zero width)))
+          interval_clp_of ~width ~cardn (Cbat_word.zero width)))
   | Bil.EQ -> Some (WordSet.singleton c)
   | Bil.SLT ->
     (* Signed less-than row. *)
-    if Word.(>=) c half
-    then interval_clp_of ~width ~cardn:(Word.sub c half) half
+    if Cbat_word.(>=) c half
+    then interval_clp_of ~width ~cardn:(Cbat_word.sub c half) half
     else if provably_nonneg || known_nonneg
-    then interval_clp_of ~width ~cardn:c (Word.zero width)
+    then interval_clp_of ~width ~cardn:c (Cbat_word.zero width)
     else None
   | Bil.SLE ->
     (* Signed less-equal row. *)
-    if Word.(>=) c half
-    then interval_clp_of ~width ~cardn:(Word.succ (Word.sub c half)) half
+    if Cbat_word.(>=) c half
+    then interval_clp_of ~width ~cardn:(Cbat_word.succ (Cbat_word.sub c half)) half
     else if provably_nonneg || known_nonneg
-    then interval_clp_of ~width ~cardn:(Word.succ c) (Word.zero width)
+    then interval_clp_of ~width ~cardn:(Cbat_word.succ c) (Cbat_word.zero width)
     else None
   | Bil.NEQ ->
     (* Two-sided constraints stay identity. *)
@@ -553,9 +553,9 @@ let comparison_constraint ?(cur : wordset option = None)
 (* Backward guard refinement. *)
 
 (* CLP interval or None on doubt. *)
-let interval_of_bounds (width : int) (lo : word) (hi : word) : wordset option =
-  if Word.bitwidth lo <> width || Word.bitwidth hi <> width then None
-  else if Word.(>) lo hi then None
+let interval_of_bounds (width : int) (lo : Cbat_word.t) (hi : Cbat_word.t) : wordset option =
+  if Cbat_word.bitwidth lo <> width || Cbat_word.bitwidth hi <> width then None
+  else if Cbat_word.(>) lo hi then None
   else
     let ws = WordSet.of_clp (Cbat_clp.interval ~width lo hi) in
     if WordSet.is_top ws then None else Some ws
@@ -563,8 +563,8 @@ let interval_of_bounds (width : int) (lo : word) (hi : word) : wordset option =
 (* Constraint rows for decoded ops. *)
 let decoder_constraint ?(cur : wordset option = None)
     ?(known_nonneg : bool = false)
-    (op : guard_op) (c : word) : wordset option =
-  let width = Word.bitwidth c in
+    (op : guard_op) (c : Cbat_word.t) : wordset option =
+  let width = Cbat_word.bitwidth c in
   match op with
   | ULT -> comparison_constraint ~cur Bil.LT c
   | ULE -> comparison_constraint ~cur Bil.LE c
@@ -572,40 +572,40 @@ let decoder_constraint ?(cur : wordset option = None)
   | NEQ ->
     (* NEQ is the exact two-piece complement. *)
     let cstr =
-      WordSet.diff (WordSet.top (Word.bitwidth c)) (WordSet.singleton c) in
+      WordSet.diff (WordSet.top (Cbat_word.bitwidth c)) (WordSet.singleton c) in
     if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
   | SLT -> comparison_constraint ~cur ~known_nonneg Bil.SLT c
   | SLE -> comparison_constraint ~cur ~known_nonneg Bil.SLE c
   | UGT ->
     (* Unsigned greater-than row. *)
-    let lo = Word.succ c in
-    if Word.is_zero lo then None
-    else interval_of_bounds width lo (Word.ones width)
+    let lo = Cbat_word.succ c in
+    if Cbat_word.is_zero lo then None
+    else interval_of_bounds width lo (Cbat_word.ones width)
   | UGE ->
     (* Unsigned greater-equal row. *)
-    interval_of_bounds width c (Word.ones width)
+    interval_of_bounds width c (Cbat_word.ones width)
   | SGT ->
     (* Signed greater-than row. *)
-    let lo = Word.succ c in
-    if Word.is_zero lo then None
-    else interval_of_bounds width lo (Word.ones width)
+    let lo = Cbat_word.succ c in
+    if Cbat_word.is_zero lo then None
+    else interval_of_bounds width lo (Cbat_word.ones width)
   | SGE ->
     (* Signed greater-equal row. *)
-    interval_of_bounds width c (Word.ones width)
+    interval_of_bounds width c (Cbat_word.ones width)
 
 (* Provenance-based non-negativity proof. *)
 let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     ~(stores : def term list) (e : exp) : bool =
   (* MSB-clear literals. *)
-  let nonneg_word (n : word) : bool =
-    let w = Word.bitwidth n in
+  let nonneg_word (n : Cbat_word.t) : bool =
+    let w = Cbat_word.bitwidth n in
     w > 0
-    && Word.(<) n (Word_ops.half w) in
+    && Cbat_word.(<) n (Word_ops.half w) in
   let stack_anchor (v : var) : bool = Abi.is_stack_reg Abi.x86_64_sysv v in
   (* Threaded cycle guards. *)
   let rec walk (cells : Exp.Set.t) (vars : Exp.Set.t) (e : exp) : bool =
     match e with
-    | Bil.Int n -> nonneg_word n
+    | Bil.Int n -> nonneg_word (Cbat_word.of_word n)
     | Bil.Var v ->
       let seen = Core.Set.mem vars e in
       let info = Core.Map.find defs (Var.base v) in
@@ -629,38 +629,43 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
       ra && rb
     | Bil.BinOp (Bil.MINUS, a, b) ->
       (match b with
-       | Bil.Int z when Word.is_zero z -> walk cells vars a
+       | Bil.Int z when Cbat_word.is_zero (Cbat_word.of_word z) -> walk cells vars a
        | _ -> false)
     | Bil.BinOp (Bil.RSHIFT, _, Bil.Int k) ->
+      let k = Cbat_word.of_word k in
       (* Positive rshift clears the sign. *)
-      (match Word.to_int k with
+      (match Cbat_word.to_int k with
        | Ok n when n > 0 -> true
        | Ok 0 -> false
        | _ -> false)
     | Bil.BinOp (Bil.ARSHIFT, a, Bil.Int k) ->
-      (match Word.to_int k with
+      let k = Cbat_word.of_word k in
+      (match Cbat_word.to_int k with
        | Ok n when n > 0 -> walk cells vars a
        | Ok 0 -> walk cells vars a
        | _ -> false)
     | Bil.BinOp (Bil.TIMES, a, Bil.Int k) ->
+      let k = Cbat_word.of_word k in
       (* Multiplier recurrence row. *)
-      if Word.is_zero k then true else walk cells vars a
+      if Cbat_word.is_zero k then true else walk cells vars a
     | Bil.BinOp (Bil.DIVIDE, a, Bil.Int k) ->
+      let k = Cbat_word.of_word k in
       (* Division by 2+ is non-negative. *)
-      (match Word.to_int k with
+      (match Cbat_word.to_int k with
        | Ok n when n >= 2 -> true
        | Ok 1 -> walk cells vars a
        | _ -> false)
     | Bil.BinOp (Bil.AND, a, Bil.Int k) ->
-      let w = Word.bitwidth k in
+      let k = Cbat_word.of_word k in
+      let w = Cbat_word.bitwidth k in
       let half = Word_ops.half w in
-      if Word.(<) k half then true
-      else if Word.(=) k (Word.ones w) then walk cells vars a
+      if Cbat_word.(<) k half then true
+      else if Cbat_word.(=) k (Cbat_word.ones w) then walk cells vars a
       else false
     | Bil.BinOp (Bil.OR, a, Bil.Int k)
-      when Word.is_zero k -> walk cells vars a
+      when Cbat_word.is_zero (Cbat_word.of_word k) -> walk cells vars a
     | Bil.BinOp (Bil.XOR, a, Bil.Int k)
-      when Word.is_zero k -> walk cells vars a
+      when Cbat_word.is_zero (Cbat_word.of_word k) -> walk cells vars a
     | Bil.Cast (Bil.HIGH, _, a) ->
       (* HIGH of non-negative is non-negative. *)
       walk cells vars a
@@ -678,7 +683,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
         end in
         let has_seed = List.exists matches ~f:begin fun d ->
           match Def.rhs d with
-          | Bil.Store (_, _, Bil.Int n, _, _) -> nonneg_word n
+          | Bil.Store (_, _, Bil.Int n, _, _) -> nonneg_word (Cbat_word.of_word n)
           | _ -> false
         end in
         let all_values = List.for_all matches ~f:begin fun d ->
@@ -700,8 +705,8 @@ let known_nonneg_of ~(defs : (def term * bool) Var.Map.t option)
   | _ -> false
 
 (* Circular hull. *)
-let circular_hull (width : int) (lo : word) (hi : word) : wordset option =
-  if Word.bitwidth lo <> width || Word.bitwidth hi <> width then None
+let circular_hull (width : int) (lo : Cbat_word.t) (hi : Cbat_word.t) : wordset option =
+  if Cbat_word.bitwidth lo <> width || Cbat_word.bitwidth hi <> width then None
   else
     let ws = WordSet.of_clp (Cbat_clp.interval ~width lo hi) in
     if WordSet.is_top ws then None else Some ws
@@ -714,15 +719,15 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
   then None, None
   else
     (* No-wrap threshold. *)
-    let wrap_limit (k : word) : word = Word.div (Word.ones width) k in
-    let operand_bounded (limit : word) : bool =
+    let wrap_limit (k : Cbat_word.t) : Cbat_word.t = Cbat_word.div (Cbat_word.ones width) k in
+    let operand_bounded (limit : Cbat_word.t) : bool =
       match WordSet.max_elem a_ws with
-      | Some m -> Word.(<=) m limit
+      | Some m -> Cbat_word.(<=) m limit
       | None -> false in
-    let ceil_div (k : word) (x : word) : word =
-      let q = Word.div x k in
-      let r = Word.modulo x k in
-      if Word.is_zero r then q else Word.succ q in
+    let ceil_div (k : Cbat_word.t) (x : Cbat_word.t) : Cbat_word.t =
+      let q = Cbat_word.div x k in
+      let r = Cbat_word.modulo x k in
+      if Cbat_word.is_zero r then q else Cbat_word.succ q in
     match op with
     | Bil.PLUS ->
       (* Plus: shift intervals by the other operand. *)
@@ -730,11 +735,11 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
        | Some vlo, Some vhi ->
          let a' = match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
            | Some bmin, Some bmax ->
-             circular_hull width (Word.sub vlo bmax) (Word.sub vhi bmin)
+             circular_hull width (Cbat_word.sub vlo bmax) (Cbat_word.sub vhi bmin)
            | _ -> None in
          let b' = match WordSet.min_elem a_ws, WordSet.max_elem a_ws with
            | Some amin, Some amax ->
-             circular_hull width (Word.sub vlo amax) (Word.sub vhi amin)
+             circular_hull width (Cbat_word.sub vlo amax) (Cbat_word.sub vhi amin)
            | _ -> None in
          a', b'
        | _ -> None, None)
@@ -744,11 +749,11 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
        | Some vlo, Some vhi ->
          let a' = match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
            | Some bmin, Some bmax ->
-             circular_hull width (Word.add vlo bmin) (Word.add vhi bmax)
+             circular_hull width (Cbat_word.add vlo bmin) (Cbat_word.add vhi bmax)
            | _ -> None in
          let b' = match WordSet.min_elem a_ws, WordSet.max_elem a_ws with
            | Some amin, Some amax ->
-             circular_hull width (Word.sub amin vhi) (Word.sub amax vlo)
+             circular_hull width (Cbat_word.sub amin vhi) (Cbat_word.sub amax vlo)
            | _ -> None in
          a', b'
        | _ -> None, None)
@@ -756,11 +761,11 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       (* Times by literal. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some vlo, Some vhi, Some k, Some k' when Word.(=) k k' ->
-         (match Word.to_int k with
+       | Some vlo, Some vhi, Some k, Some k' when Cbat_word.(=) k k' ->
+         (match Cbat_word.to_int k with
           | Ok kk when kk > 0 && operand_bounded (wrap_limit k) ->
             (match interval_of_bounds width (ceil_div k vlo)
-                     (Word.div vhi k) with
+                     (Cbat_word.div vhi k) with
              | Some a' -> Some a', None
              | None -> None, None)
           | _ -> None, None)
@@ -770,11 +775,11 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some smin, Some smax ->
-         (match Word.to_int smin, Word.to_int smax with
+         (match Cbat_word.to_int smin, Cbat_word.to_int smax with
           | Ok smin_i, Ok smax_i
             when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
-            let lo_a = Word.rshift vlo smax in
-            let hi_a = Word.rshift vhi smin in
+            let lo_a = Cbat_word.rshift vlo smax in
+            let hi_a = Cbat_word.rshift vhi smin in
             (match interval_of_bounds width lo_a hi_a with
              | Some a' -> Some a', None
              | None -> None, None)
@@ -785,16 +790,16 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some smin, Some smax ->
-         (match Word.to_int smin, Word.to_int smax with
+         (match Cbat_word.to_int smin, Cbat_word.to_int smax with
           | Ok smin_i, Ok smax_i
             when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
-            let hi1 = Word.succ vhi in
-            let mask = Word.lshift (Word.one width)
-                (Word.of_int ~width:width (width - smax_i)) in
-            if Word.(>) hi1 mask then None, None
+            let hi1 = Cbat_word.succ vhi in
+            let mask = Cbat_word.lshift (Cbat_word.one width)
+                (Cbat_word.of_int ~width:width (width - smax_i)) in
+            if Cbat_word.(>) hi1 mask then None, None
             else
-              let lo_a = Word.lshift vlo (Word.of_int ~width smin_i) in
-              let hi_a = Word.pred (Word.lshift hi1 (Word.of_int ~width smax_i)) in
+              let lo_a = Cbat_word.lshift vlo (Cbat_word.of_int ~width smin_i) in
+              let hi_a = Cbat_word.pred (Cbat_word.lshift hi1 (Cbat_word.of_int ~width smax_i)) in
               (match interval_of_bounds width lo_a hi_a with
                | Some a' -> Some a', None
                | None -> None, None)
@@ -805,15 +810,15 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some kmin, Some kmax ->
-         (match Word.to_int kmin, Word.to_int kmax with
+         (match Cbat_word.to_int kmin, Cbat_word.to_int kmax with
           | Ok kmin_i, Ok kmax_i when kmin_i > 0 && kmin_i <= kmax_i ->
-            let hi1 = Word.succ vhi in
-            let kmax_w = Word.of_int ~width kmax_i in
-            let limit = Word.div (Word.ones width) kmax_w in
-            if Word.(>) hi1 limit then None, None
+            let hi1 = Cbat_word.succ vhi in
+            let kmax_w = Cbat_word.of_int ~width kmax_i in
+            let limit = Cbat_word.div (Cbat_word.ones width) kmax_w in
+            if Cbat_word.(>) hi1 limit then None, None
             else
-              let lo_a = Word.mul vlo (Word.of_int ~width kmin_i) in
-              let hi_a = Word.pred (Word.mul hi1 kmax_w) in
+              let lo_a = Cbat_word.mul vlo (Cbat_word.of_int ~width kmin_i) in
+              let hi_a = Cbat_word.pred (Cbat_word.mul hi1 kmax_w) in
               (match interval_of_bounds width lo_a hi_a with
                | Some a' -> Some a', None
                | None -> None, None)
@@ -824,16 +829,16 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr,
              WordSet.min_elem b_ws, WordSet.max_elem b_ws with
        | Some vlo, Some vhi, Some k, Some k' when
-           width <= 32 && Word.(=) k k' ->
-         (match Word.to_int k with
+           width <= 32 && Cbat_word.(=) k k' ->
+         (match Cbat_word.to_int k with
           | Ok kk when kk > 0 ->
             (* Small widths avoid overflow. *)
-            (match Word.to_int vlo, Word.to_int vhi with
+            (match Cbat_word.to_int vlo, Cbat_word.to_int vhi with
              | Ok slo, Ok shi ->
                let lo' = slo * kk in
                let hi' = (shi + 1) * kk - 1 in
                (match circular_hull width
-                        (Word.of_int ~width lo') (Word.of_int ~width hi') with
+                        (Cbat_word.of_int ~width lo') (Cbat_word.of_int ~width hi') with
                 | Some a' -> Some a', None
                 | None -> None, None)
              | _ -> None, None)
@@ -845,12 +850,12 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
     | Bil.AND | Bil.OR | Bil.XOR ->
       (* Exact masks constrain; general masks stay identity. *)
       (match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some k, Some k' when Word.(=) k k' ->
-         if Word.is_zero k then
+       | Some k, Some k' when Cbat_word.(=) k k' ->
+         if Cbat_word.is_zero k then
            (match op with
             | Bil.OR | Bil.XOR -> Some cstr, None
             | _ -> None, None)
-         else if Word.(=) k (Word.ones width) then
+         else if Cbat_word.(=) k (Cbat_word.ones width) then
            (match op with
             | Bil.AND -> Some cstr, None
             | Bil.XOR -> Some (WordSet.lnot cstr), None
@@ -867,7 +872,7 @@ let denote_operand (env : AI.t) (e : exp) : wordset option =
     (match Var.typ v with
      | Type.Imm w -> Some (AI.find_word w env v)
      | _ -> None)
-  | Bil.Int w -> Some (WordSet.singleton w)
+  | Bil.Int w -> Some (WordSet.singleton (Cbat_word.of_word w))
   | _ ->
     (match denote_imm_exp e env with
      | Ok ws -> Some ws
@@ -883,7 +888,7 @@ let meet_var (env : AI.t)
     then env
     else
       let m = WordSet.meet cur refined in
-      if Word.is_zero (WordSet.cardinality m) then begin
+      if Cbat_word.is_zero (WordSet.cardinality m) then begin
         Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:refined;
         env
       end else if not (WordSet.precedes m cur)
@@ -926,7 +931,7 @@ let rec constrain_cell
                let cur = Mem.find (resSize, endian) mv key in
                let cur_ws = Mem.Val.data cur in
                let refined = WordSet.meet cur_ws cstr in
-               if Word.is_zero (WordSet.cardinality refined)
+               if Cbat_word.is_zero (WordSet.cardinality refined)
                   || not (WordSet.precedes refined cur_ws)
                then env
                else
@@ -949,7 +954,8 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
     (* Minus: shift intervals by the other operand. *)
     (match b with
      | Bil.Int k ->
-       (match Word.to_int k with
+       let k = Cbat_word.of_word k in
+       (match Cbat_word.to_int k with
         | Ok kk when kk >= 0 && kk < width ->
           (match WordSet.min_elem cstr, WordSet.max_elem cstr with
            | Some lo, Some hi ->
@@ -1051,18 +1057,18 @@ and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
       let shift = w - n in
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some lo, Some hi ->
-         let hi1 = Word.succ hi in
-         if Word.is_zero hi1 then env
+         let hi1 = Cbat_word.succ hi in
+         if Cbat_word.is_zero hi1 then env
          else
-           let lo_w = Word.extract_exn ~hi:(w - 1) lo in
-           let hi1_w = Word.extract_exn ~hi:(w - 1) hi1 in
-           let mask = Word.lshift (Word.one w)
-               (Word.of_int ~width:w n) in
-           if Word.(>) hi1_w mask then env
+           let lo_w = Cbat_word.extract_exn ~hi:(w - 1) lo in
+           let hi1_w = Cbat_word.extract_exn ~hi:(w - 1) hi1 in
+           let mask = Cbat_word.lshift (Cbat_word.one w)
+               (Cbat_word.of_int ~width:w n) in
+           if Cbat_word.(>) hi1_w mask then env
            else
-             let lo_a = Word.lshift lo_w (Word.of_int ~width:w shift) in
+             let lo_a = Cbat_word.lshift lo_w (Cbat_word.of_int ~width:w shift) in
              let hi_a =
-               Word.pred (Word.lshift hi1_w (Word.of_int ~width:w shift)) in
+               Cbat_word.pred (Cbat_word.lshift hi1_w (Cbat_word.of_int ~width:w shift)) in
              (match interval_of_bounds w lo_a hi_a with
               | Some a' ->
                 let env' = match a with
@@ -1099,7 +1105,7 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
                   | Type.Imm w ->
                     let cur = AI.find_word w acc v in
                     let m = WordSet.meet cur c in
-                    if Word.is_zero (WordSet.cardinality m)
+                    if Cbat_word.is_zero (WordSet.cardinality m)
                        || not (WordSet.precedes m cur)
                     then acc
                     else AI.add_word acc ~key:v ~data:m
@@ -1174,18 +1180,18 @@ let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
       let shift = w - n in
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some lo, Some hi ->
-         let hi1 = Word.succ hi in
-         if Word.is_zero hi1 then None
+         let hi1 = Cbat_word.succ hi in
+         if Cbat_word.is_zero hi1 then None
          else
-           let lo_w = Word.extract_exn ~hi:(w - 1) lo in
-           let hi1_w = Word.extract_exn ~hi:(w - 1) hi1 in
-           let mask = Word.lshift (Word.one w)
-               (Word.of_int ~width:w n) in
-           if Word.(>) hi1_w mask then None
+           let lo_w = Cbat_word.extract_exn ~hi:(w - 1) lo in
+           let hi1_w = Cbat_word.extract_exn ~hi:(w - 1) hi1 in
+           let mask = Cbat_word.lshift (Cbat_word.one w)
+               (Cbat_word.of_int ~width:w n) in
+           if Cbat_word.(>) hi1_w mask then None
            else
-             let lo_a = Word.lshift lo_w (Word.of_int ~width:w shift) in
+             let lo_a = Cbat_word.lshift lo_w (Cbat_word.of_int ~width:w shift) in
              let hi_a =
-               Word.pred (Word.lshift hi1_w (Word.of_int ~width:w shift)) in
+               Cbat_word.pred (Cbat_word.lshift hi1_w (Cbat_word.of_int ~width:w shift)) in
              interval_of_bounds w lo_a hi_a
        | _ -> None)
   | None -> None
@@ -1199,33 +1205,33 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
     let w = WordSet.bitwidth cstr in
     if w <= n then None
     else
-      let zero = Word.zero w in
+      let zero = Cbat_word.zero w in
       let two_n =
-        Word.lshift (Word.one w) (Word.of_int ~width:w n) in
+        Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w n) in
       let half =
-        Word.lshift (Word.one w) (Word.of_int ~width:w (n - 1)) in
-      let maxn = Word.pred two_n in
+        Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w (n - 1)) in
+      let maxn = Cbat_word.pred two_n in
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some lo, Some hi ->
          let pieces =
            if not is_signed then
              (* Zero-extension case. *)
-             if Word.(>) lo maxn then []
-             else [ (lo, Word.min hi maxn) ]
+             if Cbat_word.(>) lo maxn then []
+             else [ (lo, Cbat_word.min hi maxn) ]
            else begin
              (* Sign-extension halves. *)
              let pos =
-               if Word.(>) lo (Word.pred half) then []
-               else [ Word.max lo zero, Word.min hi (Word.pred half) ] in
+               if Cbat_word.(>) lo (Cbat_word.pred half) then []
+               else [ Cbat_word.max lo zero, Cbat_word.min hi (Cbat_word.pred half) ] in
              let neg =
                let neg_sext_lo =
-                 Word.sub (Word.ones w) (Word.pred half) in
-               let lo' = Word.max lo neg_sext_lo in
-               let hi' = Word.min hi (Word.ones w) in
-               if Word.(>) lo' hi' then []
+                 Cbat_word.sub (Cbat_word.ones w) (Cbat_word.pred half) in
+               let lo' = Cbat_word.max lo neg_sext_lo in
+               let hi' = Cbat_word.min hi (Cbat_word.ones w) in
+               if Cbat_word.(>) lo' hi' then []
                else
                  (* Wrapped negative half. *)
-                 [ Word.add lo' two_n, Word.add hi' two_n ] in
+                 [ Cbat_word.add lo' two_n, Cbat_word.add hi' two_n ] in
              pos @ neg
            end
          in
@@ -1234,14 +1240,14 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
           | (p0, p1) :: rest ->
             let lo' =
               List.fold rest ~init:p0 ~f:(fun acc (l, _) ->
-                  Word.min acc l) in
+                  Cbat_word.min acc l) in
             let hi' =
               List.fold rest ~init:p1 ~f:(fun acc (_, h) ->
-                  Word.max acc h) in
+                  Cbat_word.max acc h) in
             (* Truncate pieces to the operand width. *)
             interval_of_bounds n
-              (Word.extract_exn ~hi:(n - 1) lo')
-              (Word.extract_exn ~hi:(n - 1) hi'))
+              (Cbat_word.extract_exn ~hi:(n - 1) lo')
+              (Cbat_word.extract_exn ~hi:(n - 1) hi'))
        | _ -> None)
   | None -> None
 
@@ -1257,11 +1263,11 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
          (* Zero-extend to the operand width. *)
-         let vlo_w = Word.extract_exn ~hi:(w - 1) vlo in
-         let vhi_w = Word.extract_exn ~hi:(w - 1) vhi in
+         let vlo_w = Cbat_word.extract_exn ~hi:(w - 1) vlo in
+         let vhi_w = Cbat_word.extract_exn ~hi:(w - 1) vhi in
          let two_n =
-           Word.lshift (Word.one w) (Word.of_int ~width:w n) in
-         let hi_a = Word.add vhi_w (Word.sub (Word.ones w) two_n) in
+           Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w n) in
+         let hi_a = Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n) in
          interval_of_bounds w vlo_w hi_a
        | _ -> None)
   | None -> None
@@ -1277,17 +1283,17 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     else
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
-         let shift = Word.of_int ~width:w lo in
-         let lo_a = Word.lshift vlo shift in
+         let shift = Cbat_word.of_int ~width:w lo in
+         let lo_a = Cbat_word.lshift vlo shift in
          let hi_emb =
-           Word.pred (Word.lshift (Word.succ vhi) shift) in
+           Cbat_word.pred (Cbat_word.lshift (Cbat_word.succ vhi) shift) in
          let hi_a =
            if hi + 1 >= w then hi_emb
            else
-             Word.add hi_emb
-               (Word.sub (Word.ones w)
-                  (Word.lshift (Word.one w)
-                     (Word.of_int ~width:w (hi + 1)))) in
+             Cbat_word.add hi_emb
+               (Cbat_word.sub (Cbat_word.ones w)
+                  (Cbat_word.lshift (Cbat_word.one w)
+                     (Cbat_word.of_int ~width:w (hi + 1)))) in
          interval_of_bounds w lo_a hi_a
        | _ -> None)
   | None -> None
@@ -1309,17 +1315,16 @@ let def_constraints ~(sol : (tid, AI.t) Solution.t) (env : AI.t ref)
     (* Minus: shift intervals by the other operand. *)
     let width = WordSet.bitwidth cstr in
     (match b with
-     | Bil.Int k -> (
-         match Word.to_int k with
-         | Ok kk when kk >= 0 && kk < width -> (
-             match WordSet.min_elem cstr, WordSet.max_elem cstr with
-             | Some lo, Some hi ->
-               let lo_a =
-                 WordSet.rshift (WordSet.singleton lo)
-                   (WordSet.singleton k) in
-               let hi_a =
-                 WordSet.rshift (WordSet.singleton hi)
-                   (WordSet.singleton k) in
+     | Bil.Int k ->
+        let k = Cbat_word.of_word k in
+        (match Cbat_word.to_int k with
+         | Ok kk when kk >= 0 && kk < width ->
+           (match WordSet.min_elem cstr, WordSet.max_elem cstr with
+            | Some lo, Some hi ->
+              let lo_a =
+                WordSet.rshift (WordSet.singleton lo) (WordSet.singleton k) in
+              let hi_a =
+                WordSet.rshift (WordSet.singleton hi) (WordSet.singleton k) in
                (match WordSet.min_elem lo_a, WordSet.max_elem hi_a with
                 | Some lo', Some hi' -> (
                     match interval_of_bounds width lo' hi' with
@@ -1434,7 +1439,7 @@ let reverse_def_walk ~(defs : (def term * bool) Var.Map.t)
           (match post_v with
            | Some pv ->
              let cstr' = WordSet.meet cstr pv in
-             if Word.is_zero (WordSet.cardinality cstr') then
+             if Cbat_word.is_zero (WordSet.cardinality cstr') then
                (* Empty pre-image drops the lhs. *)
                live := Live.remove v !live
              else begin
@@ -1621,9 +1626,9 @@ let negate_guard_op (op : guard_op) : guard_op = match op with
   | SGT -> SLT | SGE -> SLE
 
 
-let guard_constraint (w : int) (op : guard_op) (c : word)
+let guard_constraint (w : int) (op : guard_op) (c : Cbat_word.t)
     : wordset option =
-  let maxw = Word.ones w in
+  let maxw = Cbat_word.ones w in
   let half = Word_ops.half w in
   let iv lo hi = interval_of_bounds w lo hi in
   match op with
@@ -1633,17 +1638,17 @@ let guard_constraint (w : int) (op : guard_op) (c : word)
     (match WordSet.diff (WordSet.top w) (WordSet.singleton c) with
      | d -> if Cbat_clp_set_composite.is_bottom d then None else Some d)
   | ULT ->
-    (if Word.is_zero c then None
-     else iv (Word.zero w) (Word.pred c))
-  | ULE -> iv (Word.zero w) c
+    (if Cbat_word.is_zero c then None
+     else iv (Cbat_word.zero w) (Cbat_word.pred c))
+  | ULE -> iv (Cbat_word.zero w) c
   | UGT ->
-    (if Word.(=) c maxw then None
-     else iv (Word.succ c) maxw)
+    (if Cbat_word.(=) c maxw then None
+     else iv (Cbat_word.succ c) maxw)
   | UGE -> iv c maxw
   | SLT ->
     let pos =
-      if Word.is_zero c then None
-      else iv (Word.zero w) (Word.pred c) in
+      if Cbat_word.is_zero c then None
+      else iv (Cbat_word.zero w) (Cbat_word.pred c) in
     (match iv half maxw with
      | Some neg ->
        Some (match pos with
@@ -1653,14 +1658,14 @@ let guard_constraint (w : int) (op : guard_op) (c : word)
   | SLE ->
     (match iv half maxw with
      | Some neg ->
-       (match iv (Word.zero w) c with
+       (match iv (Cbat_word.zero w) c with
         | Some lo -> Some (WordSet.union lo neg)
         | None -> Some neg)
-     | None -> iv (Word.zero w) c)
+     | None -> iv (Cbat_word.zero w) c)
   | SGT ->
-    (if Word.(=) c (Word.pred half) then None
-     else iv (Word.succ c) (Word.pred half))
-  | SGE -> iv c (Word.pred half)
+    (if Cbat_word.(=) c (Cbat_word.pred half) then None
+     else iv (Cbat_word.succ c) (Cbat_word.pred half))
+  | SGE -> iv c (Cbat_word.pred half)
 
 
 let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
@@ -1669,7 +1674,7 @@ let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
   if WordSet.bitwidth b_ws <> w then None, None
   else
     let half = Word_ops.half w in
-    let maxw = Word.ones w in
+    let maxw = Cbat_word.ones w in
     let signed =
       match op with Bil.SLT | Bil.SLE -> true | _ -> false in
     let mn_x =
@@ -1686,45 +1691,45 @@ let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
       else WordSet.max_elem a_ws in
     let provably_nonneg_x =
       match WordSet.max_elem a_ws with
-      | Some m -> Word.(<) m half
+      | Some m -> Cbat_word.(<) m half
       | None -> false in
     (match mn_x, mx_y, mn_y, mx_x with
      | Some mn_x, Some mx_y, Some mn_y, Some mx_x ->
        let x_cstr, y_cstr =
          match op with
          | Bil.LT ->
-           ((if Word.is_zero mx_y then None
-             else interval_of_bounds w (Word.zero w) (Word.pred mx_y)),
-            (if Word.(=) mn_x maxw then None
-             else interval_of_bounds w (Word.succ mn_x) maxw))
+           ((if Cbat_word.is_zero mx_y then None
+             else interval_of_bounds w (Cbat_word.zero w) (Cbat_word.pred mx_y)),
+            (if Cbat_word.(=) mn_x maxw then None
+             else interval_of_bounds w (Cbat_word.succ mn_x) maxw))
          | Bil.LE ->
-           (interval_of_bounds w (Word.zero w) mx_y,
+           (interval_of_bounds w (Cbat_word.zero w) mx_y,
             interval_of_bounds w mn_x maxw)
          | Bil.SLT ->
-           ((if Word.(>=) mx_y half then
-               interval_of_bounds w half (Word.pred mx_y)
+           ((if Cbat_word.(>=) mx_y half then
+               interval_of_bounds w half (Cbat_word.pred mx_y)
              else if provably_nonneg_x then
-               if Word.is_zero mx_y then None
-               else interval_of_bounds w (Word.zero w) (Word.pred mx_y)
+               if Cbat_word.is_zero mx_y then None
+               else interval_of_bounds w (Cbat_word.zero w) (Cbat_word.pred mx_y)
              else None),
-            (if Word.(>=) mn_x half then None
-             else interval_of_bounds w (Word.succ mn_x) (Word.pred half)))
+            (if Cbat_word.(>=) mn_x half then None
+             else interval_of_bounds w (Cbat_word.succ mn_x) (Cbat_word.pred half)))
          | Bil.SLE ->
-           ((if Word.(>=) mx_y half then
+           ((if Cbat_word.(>=) mx_y half then
                interval_of_bounds w half mx_y
              else if provably_nonneg_x then
-               interval_of_bounds w (Word.zero w) mx_y
+               interval_of_bounds w (Cbat_word.zero w) mx_y
              else None),
-            (if Word.(>=) mn_x half then None
-             else interval_of_bounds w mn_x (Word.pred half)))
+            (if Cbat_word.(>=) mn_x half then None
+             else interval_of_bounds w mn_x (Cbat_word.pred half)))
          | Bil.EQ ->
            let ov = WordSet.meet a_ws b_ws in
-           if Word.is_zero (WordSet.cardinality ov)
+           if Cbat_word.is_zero (WordSet.cardinality ov)
            then None, None
            else Some ov, Some ov
          | Bil.NEQ ->
            let ov = WordSet.meet a_ws b_ws in
-           if Word.is_zero (WordSet.cardinality ov)
+           if Cbat_word.is_zero (WordSet.cardinality ov)
            then Some a_ws, Some b_ws
            else Some (WordSet.diff a_ws ov), Some (WordSet.diff b_ws ov)
          | _ -> None, None in
@@ -1733,17 +1738,17 @@ let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
 
 (* Taken-edge constraint on an operand. *)
 let row_for ~(env : AI.t) ?(ctx : analysis_ctx option)
-    (e : exp) (op : guard_op) (c : word) : wordset option =
+    (e : exp) (op : guard_op) (c : Cbat_word.t) : wordset option =
   let cur = match denote_imm_exp e env with
     | Ok ws -> Some ws
     | Error _ -> None in
   match ctx with
-  | None -> guard_constraint (Word.bitwidth c) op c
+  | None -> guard_constraint (Cbat_word.bitwidth c) op c
   | Some { defs; stores; _ } ->
     let known_nonneg = known_nonneg_of ~defs ~stores e in
     (match decoder_constraint ~cur ~known_nonneg op c with
      | Some cstr -> Some cstr
-     | None -> guard_constraint (Word.bitwidth c) op c)
+     | None -> guard_constraint (Cbat_word.bitwidth c) op c)
 
 (* Leaf seeds of a guard. *)
 let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
@@ -1756,11 +1761,12 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
       (* Bare-flag shape with recovery. *)
       let base = [ Var (Var.base v, cstr) ] in
       if WordSet.bitwidth cstr = 1
-         && WordSet.elem Word.b1 cstr
+         && WordSet.elem Cbat_word.b1 cstr
       then
         (match ctx with
          | Some { flag_state = Some (fv, op, e0, c0); _ }
            when Var.same fv v ->
+           let c0 = Cbat_word.of_word c0 in
            (match denote_imm_exp e0 env with
             | Ok cur_e ->
               (match row_for ~env ?ctx e0 (guard_op_of_binop op) c0 with
@@ -1774,23 +1780,24 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
     end
   | Bil.Int c ->
     (* Disjoint constants kill the edge. *)
-    if WordSet.elem c cstr then [] else [ Infeasible ]
+    if WordSet.elem (Cbat_word.of_word c) cstr then [] else [ Infeasible ]
   | Bil.BinOp (op, a, b) ->
     begin match op with
     | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE ->
       let side (side : [ `True | `False ]) : edge_constraint list =
         match a, b with
         | _, Bil.Int c0 ->
+          let c0 = Cbat_word.of_word c0 in
           let cstr_opt =
             match side, op with
             | `True, Bil.NEQ ->
-              Some (WordSet.diff (WordSet.top (Word.bitwidth c0))
+              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
                       (WordSet.singleton c0))
             | `False, Bil.NEQ ->
               Some (WordSet.singleton c0)
             | `False, Bil.EQ ->
               (* False EQ is NEQ. *)
-              Some (WordSet.diff (WordSet.top (Word.bitwidth c0))
+              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
                       (WordSet.singleton c0))
             | `True, _ ->
               row_for ~env ?ctx a (guard_op_of_binop op) c0
@@ -1801,15 +1808,16 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
              edge_constraints ~env ?ctx a cstr_a
            | None -> [])
         | Bil.Int c0, e0 ->
+          let c0 = Cbat_word.of_word c0 in
           let cstr_opt =
             match side, op with
             | `True, Bil.NEQ ->
-              Some (WordSet.diff (WordSet.top (Word.bitwidth c0))
+              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
                       (WordSet.singleton c0))
             | `False, Bil.NEQ ->
               Some (WordSet.singleton c0)
             | `False, Bil.EQ ->
-              Some (WordSet.diff (WordSet.top (Word.bitwidth c0))
+              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
                       (WordSet.singleton c0))
             | `True, _ ->
               row_for ~env ?ctx e0 (flip_guard_op (guard_op_of_binop op)) c0
@@ -1875,17 +1883,17 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
                 edge_constraints ~env ?ctx b yc
               | None, None -> [])
            | _ -> []) in
-      let t = if WordSet.elem Word.b1 cstr then side `True else [] in
-      let f = if WordSet.elem Word.b0 cstr then side `False else [] in
-      if not (WordSet.elem Word.b1 cstr)
-         && not (WordSet.elem Word.b0 cstr)
+      let t = if WordSet.elem Cbat_word.b1 cstr then side `True else [] in
+      let f = if WordSet.elem Cbat_word.b0 cstr then side `False else [] in
+      if not (WordSet.elem Cbat_word.b1 cstr)
+         && not (WordSet.elem Cbat_word.b0 cstr)
       then [ Infeasible ]
       else f @ t
     | Bil.AND ->
       
       if WordSet.bitwidth cstr = 1
-         && WordSet.elem Word.b1 cstr
-         && not (WordSet.elem Word.b0 cstr)
+         && WordSet.elem Cbat_word.b1 cstr
+         && not (WordSet.elem Cbat_word.b0 cstr)
       then
         edge_constraints ~env ?ctx a cstr @ edge_constraints ~env ?ctx b cstr
       else
@@ -1929,6 +1937,7 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
       match ctx, e with
       | Some ({ flag_state = Some (fv, op, e0, c0); _ }), Bil.Var v
         when Var.same fv v ->
+        let c0 = Cbat_word.of_word c0 in
         (* Clear edge uses the negated op. *)
         (match row_for ~env ?ctx e0 (negate_guard_op (guard_op_of_binop op)) c0 with
          | Some cstr -> edge_constraints ~env ?ctx e0 cstr
@@ -2022,7 +2031,7 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
         Option.value_map flag_group ~default:false
           ~f:(fun fg -> Cbat_runctx.same_comparison_group fg _fv e cond) in
       if gate_ok then begin
-      let bop = bop and e = e and c = c in
+      let bop = bop and e = e and c = Cbat_word.of_word c in
       let gop = guard_op_of_binop bop in
       let op = complement_guard_op gop in
       (match row_for ~env ?ctx:(Some ctx) e op c with
@@ -2076,7 +2085,7 @@ let assume_jump_cond_with_group
         | Error _ -> None in
       (* Non-negativity proof for signed gates. *)
       let known_nonneg = known_nonneg_of ~defs ~stores e in
-      (match decoder_constraint ~cur:cur_e ~known_nonneg op c with
+      (match decoder_constraint ~cur:cur_e ~known_nonneg op (Cbat_word.of_word c) with
        | Some cstr ->
          apply_operand_constraint ~defs env e cstr
        | None -> env)
@@ -2084,7 +2093,7 @@ let assume_jump_cond_with_group
     end
   | None ->
     (* Taken edge forces {1}. *)
-    inverse_denote_exp ~ctx cond (WordSet.singleton Word.b1) env
+    inverse_denote_exp ~ctx cond (WordSet.singleton (Cbat_word.b1)) env
 
 (* Group-aware wrapper. *)
 let assume_jump_cond
@@ -2211,7 +2220,7 @@ let refine_edge_inline
   let ctx : analysis_ctx =
     { defs; stores; flag_state;
       sub = Some sub; blk = Some b } in
-  let seeds = edge_constraints ~env ~ctx acc_cond (WordSet.singleton Word.b1) in
+  let seeds = edge_constraints ~env ~ctx acc_cond (WordSet.singleton (Cbat_word.b1)) in
   
   (* Infeasible seeds stay identity, never bottom. *)
   let seeds =
@@ -2359,7 +2368,7 @@ let denote_jump ?preserved ?defs ?stores
               let abs =
                 AI.add_word abs ~key:rsp
                   ~data:(WordSet.add (AI.find_word 64 abs rsp)
-                           (WordSet.singleton (Word.of_int ~width:64 8))) in
+                           (WordSet.singleton (Cbat_word.of_int ~width:64 8))) in
               (* Relation restores RSP by +8. *)
               AI.set_frame abs (AI.frame_add_rsp (AI.frame_of abs))
             end else abs
@@ -2823,7 +2832,7 @@ let classify ?vla_tid (ws : WordSet.t) : kind option =
   else
     match WordSet.min_elem ws, WordSet.max_elem ws with
     | Some lo, Some hi ->
-      (match Word.to_int64 lo, Word.to_int64 hi with
+      (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
        | Ok lo, Ok hi ->
          let is_inf = WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 in
          if is_inf && Option.is_some vla_tid then
@@ -2839,7 +2848,7 @@ let bounds_of (ws : WordSet.t) : (int64 * int64) option =
   else
     match WordSet.min_elem ws, WordSet.max_elem ws with
     | Some lo, Some hi -> (
-        match Word.to_int64 lo, Word.to_int64 hi with
+        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
         | Ok lo, Ok hi -> Some (lo, hi)
         | _ -> None)
     | _ -> None
@@ -2877,8 +2886,8 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
         let cur = AI.find_word w acc v in
         let mm = WordSet.meet cur tag_v in
         if WordSet.is_top cur
-           && Word.is_one (WordSet.cardinality mm)
-           || Word.is_zero (WordSet.cardinality mm)
+           && Cbat_word.is_one (WordSet.cardinality mm)
+           || Cbat_word.is_zero (WordSet.cardinality mm)
            || WordSet.equal mm cur
         then acc
         else AI.add_word acc ~key:v ~data:mm
@@ -2914,7 +2923,7 @@ let is_seed (st_before : AI.t) (addr : exp) : bool =
       else
         match WordSet.min_elem ws, WordSet.max_elem ws with
         | Some lo, Some hi -> (
-            match Word.to_int64 lo, Word.to_int64 hi with
+            match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
             | Ok lo_i64, Ok hi_i64 ->
               let nlo, nhi = frame_neighborhood in
               if WordSet.is_ascending ws then
@@ -3060,7 +3069,7 @@ let rec extract ~(sp : var)
                 | Ok ws -> (
                     match WordSet.min_elem ws, WordSet.max_elem ws with
                     | Some lo, Some hi -> (
-                        match Word.to_int64 lo, Word.to_int64 hi with
+                        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
                         | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
                         | _ -> None)
                     | _ -> None)
