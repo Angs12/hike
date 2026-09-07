@@ -32,41 +32,60 @@ let rec heads_of_comps (cs : comp list) : Tid.Set.t =
         let acc = Core.Set.add acc h in
         Core.Set.union acc (heads_of_comps inner))
 
+(* Kosaraju SCC over any ordered key: the block-graph partition and the
+   widening-need var graph both call it (one interface, two adapters). *)
+module Scc (K : sig
+    type t
+    val compare : t -> t -> int
+  end) =
+struct
+  let partition (nodes : K.t list) (succ : K.t -> K.t list)
+      (pred : K.t -> K.t list) : K.t list list =
+    let eq a b = K.compare a b = 0 in
+    let mem x l = List.exists l ~f:(eq x) in
+    let node_set = nodes in
+    let visited = ref [] in
+    let order = ref [] in
+    let rec dfs1 (n : K.t) : unit =
+      if not (mem n !visited) then begin
+        visited := n :: !visited;
+        List.iter (succ n) ~f:(fun m ->
+            if mem m node_set then dfs1 m);
+        order := n :: !order
+      end
+    in
+    List.iter nodes ~f:dfs1;
+    let visited2 = ref [] in
+    let comps = ref [] in
+    List.iter !order ~f:(fun n ->
+        if not (mem n !visited2) then begin
+          let cur = ref [] in
+          let rec dfs2 (x : K.t) : unit =
+            if not (mem x !visited2) then begin
+              visited2 := x :: !visited2;
+              cur := x :: !cur;
+              List.iter (pred x) ~f:(fun p ->
+                  if mem p node_set then dfs2 p)
+            end
+          in
+          dfs2 n;
+          comps := !cur :: !comps
+        end);
+    !comps
+end
+
+module Tid_scc = Scc (struct
+    type t = Tid.t
+    let compare = Tid.compare
+  end)
+
 (* Recursive SCC partition. *)
 let scc_partition
     (nodes : Tid.t list)
     (succ : Tid.t -> Tid.t list)
     (pred : Tid.t -> Tid.t list)
   : Tid.t list list =
-  let node_set = Tid.Set.of_list nodes in
-  let visited = ref Tid.Set.empty in
-  let order = ref [] in
-  let rec dfs1 (n : Tid.t) : unit =
-    if not (Core.Set.mem !visited n) then begin
-      visited := Core.Set.add !visited n;
-      List.iter (succ n) ~f:(fun m ->
-          if Core.Set.mem node_set m then dfs1 m);
-      order := n :: !order
-    end
-  in
-  List.iter nodes ~f:dfs1;
-  let visited2 = ref Tid.Set.empty in
-  let comps = ref [] in
-  List.iter !order ~f:(fun n ->
-      if not (Core.Set.mem !visited2 n) then begin
-        let cur = ref [] in
-        let rec dfs2 (x : Tid.t) : unit =
-          if not (Core.Set.mem !visited2 x) then begin
-            visited2 := Core.Set.add !visited2 x;
-            cur := x :: !cur;
-            List.iter (pred x) ~f:(fun p ->
-                if Core.Set.mem node_set p then dfs2 p)
-          end
-        in
-        dfs2 n;
-        comps := !cur :: !comps
-      end);
-  !comps
+  Tid_scc.partition nodes succ pred
 
 (* WTO over plain accessors. *)
 let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)

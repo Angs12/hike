@@ -505,13 +505,22 @@ let comparison_constraint ?(cur : wordset option = None)
 
 (* Backward guard refinement. *)
 
-(* CLP interval or None on doubt. *)
+(* CLP interval or None on doubt; the lo>hi guard is load-bearing: this is
+   the NON-wrapping constructor. The wrapping twin below exists because the
+   backward PLUS/MINUS/SDIVIDE rows pin wrapped hulls (S8, L3c3-1, R2-1,
+   M5-1) — do not merge them; the one-line difference is the contract. *)
 let interval_of_bounds (width : int) (lo : Cbat_word.t) (hi : Cbat_word.t) : wordset option =
   if Cbat_word.bitwidth lo <> width || Cbat_word.bitwidth hi <> width then None
   else if Cbat_word.(>) lo hi then None
   else
     let ws = WordSet.of_clp (Cbat_clp.interval ~width lo hi) in
     if WordSet.is_top ws then None else Some ws
+
+(* TOP minus a point: the exact two-piece NEQ complement. *)
+let neq_complement (c : Cbat_word.t) : wordset option =
+  let cstr =
+    WordSet.diff (WordSet.top (Cbat_word.bitwidth c)) (WordSet.singleton c) in
+  if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
 
 (* Constraint rows for decoded ops. *)
 let decoder_constraint ?(cur : wordset option = None)
@@ -522,11 +531,7 @@ let decoder_constraint ?(cur : wordset option = None)
   | ULT -> comparison_constraint ~cur Bil.LT c
   | ULE -> comparison_constraint ~cur Bil.LE c
   | EQ -> comparison_constraint ~cur Bil.EQ c
-  | NEQ ->
-    (* NEQ is the exact two-piece complement. *)
-    let cstr =
-      WordSet.diff (WordSet.top (Cbat_word.bitwidth c)) (WordSet.singleton c) in
-    if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
+  | NEQ -> neq_complement c
   | SLT -> comparison_constraint ~cur ~known_nonneg Bil.SLT c
   | SLE -> comparison_constraint ~cur ~known_nonneg Bil.SLE c
   | UGT ->
@@ -657,7 +662,10 @@ let known_nonneg_of ~(defs : (def term * bool) Var.Map.t option)
   | Some dm, Some ss -> prove_nonneg ~defs:dm ~stores:ss e
   | _ -> false
 
-(* Circular hull. *)
+(* Wrapping CLP interval or None on doubt: the twin of the constructor
+   above MINUS the lo>hi guard (a wrapped pair is the circular interval).
+   Only the backward arithmetic rows call it; every other site wants the
+   non-wrapping contract. *)
 let circular_hull (width : int) (lo : Cbat_word.t) (hi : Cbat_word.t) : wordset option =
   if Cbat_word.bitwidth lo <> width || Cbat_word.bitwidth hi <> width then None
   else
@@ -831,6 +839,51 @@ let denote_operand (env : AI.t) (e : exp) : wordset option =
      | Ok ws -> Some ws
      | Error _ -> None)
 
+(* LSHIFT pre-image: shift the result interval back by the literal. *)
+let lshift_preimage (width : int) (k : Cbat_word.t) (cstr : wordset)
+    : wordset option =
+  match Cbat_word.to_int k with
+  | Ok kk when kk >= 0 && kk < width ->
+    (match WordSet.min_elem cstr, WordSet.max_elem cstr with
+     | Some lo, Some hi ->
+       let lo_a =
+         WordSet.rshift (WordSet.singleton lo) (WordSet.singleton k) in
+       let hi_a =
+         WordSet.rshift (WordSet.singleton hi) (WordSet.singleton k) in
+       (match WordSet.min_elem lo_a, WordSet.max_elem hi_a with
+        | Some lo', Some hi' -> interval_of_bounds width lo' hi'
+        | _ -> None)
+     | _ -> None)
+  | _ -> None
+
+(* HIGH-extract pre-image. *)
+let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
+    (cstr : wordset) : wordset option =
+  match denote_operand env a with
+  | Some a_ws ->
+    let w = WordSet.bitwidth a_ws in
+    let n = WordSet.bitwidth cstr in
+    if w <= n then None
+    else
+      let shift = w - n in
+      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
+       | Some lo, Some hi ->
+         let hi1 = Cbat_word.succ hi in
+         if Cbat_word.is_zero hi1 then None
+         else
+           let lo_w = Cbat_word.extract_exn ~hi:(w - 1) lo in
+           let hi1_w = Cbat_word.extract_exn ~hi:(w - 1) hi1 in
+           let mask = Cbat_word.lshift (Cbat_word.one w)
+               (Cbat_word.of_int ~width:w n) in
+           if Cbat_word.(>) hi1_w mask then None
+           else
+             let lo_a = Cbat_word.lshift lo_w (Cbat_word.of_int ~width:w shift) in
+             let hi_a =
+               Cbat_word.pred (Cbat_word.lshift hi1_w (Cbat_word.of_int ~width:w shift)) in
+             interval_of_bounds w lo_a hi_a
+       | _ -> None)
+  | None -> None
+
 (* Genuine-subset meet into a var; gate-free (spec §2.1). *)
 let meet_var (env : AI.t)
     (v : var) (refined : wordset) : AI.t =
@@ -907,28 +960,14 @@ and refine_chain ~(defs : (def term * bool) Var.Map.t)
     (* Minus: shift intervals by the other operand. *)
     (match b with
      | Bil.Int k ->
-       let k = Cbat_word.of_word k in
-       (match Cbat_word.to_int k with
-        | Ok kk when kk >= 0 && kk < width ->
-          (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-           | Some lo, Some hi ->
-             let lo_a =
-               WordSet.rshift (WordSet.singleton lo) (WordSet.singleton k) in
-             let hi_a =
-               WordSet.rshift (WordSet.singleton hi) (WordSet.singleton k) in
-             (match WordSet.min_elem lo_a, WordSet.max_elem hi_a with
-              | Some lo', Some hi' ->
-                (match interval_of_bounds width lo' hi' with
-                 | Some a' ->
-                   let env' = match a with
-                     | Bil.Var av -> meet_var env av a'
-                     | _ -> env in
-                   constrain_def_chain ~defs
-                     ~visited env' a a'
-                 | None -> env)
-              | _ -> env)
-           | _ -> env)
-        | _ -> env)
+       (match lshift_preimage width (Cbat_word.of_word k) cstr with
+        | Some a' ->
+          let env' = match a with
+            | Bil.Var av -> meet_var env av a'
+            | _ -> env in
+          constrain_def_chain ~defs
+            ~visited env' a a'
+        | None -> env)
      | _ -> env)
   | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
   | Bil.MOD | Bil.SMOD | Bil.AND | Bil.OR | Bil.XOR
@@ -997,41 +1036,18 @@ and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
   | _ -> env
 
 
-(* HIGH-extract pre-image. *)
+(* HIGH-extract producer row: the pure pre-image, met and recursed. *)
 and refine_cast_high ~(defs : (def term * bool) Var.Map.t)
     ~(visited : Var.Set.t)
     (env : AI.t) (a : exp) (sz : int) (cstr : wordset) : AI.t =
-  match denote_operand env a with
-  | Some a_ws ->
-    let w = WordSet.bitwidth a_ws in
-    let n = WordSet.bitwidth cstr in
-    if w <= n then env
-    else
-      let shift = w - n in
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some lo, Some hi ->
-         let hi1 = Cbat_word.succ hi in
-         if Cbat_word.is_zero hi1 then env
-         else
-           let lo_w = Cbat_word.extract_exn ~hi:(w - 1) lo in
-           let hi1_w = Cbat_word.extract_exn ~hi:(w - 1) hi1 in
-           let mask = Cbat_word.lshift (Cbat_word.one w)
-               (Cbat_word.of_int ~width:w n) in
-           if Cbat_word.(>) hi1_w mask then env
-           else
-             let lo_a = Cbat_word.lshift lo_w (Cbat_word.of_int ~width:w shift) in
-             let hi_a =
-               Cbat_word.pred (Cbat_word.lshift hi1_w (Cbat_word.of_int ~width:w shift)) in
-             (match interval_of_bounds w lo_a hi_a with
-              | Some a' ->
-                let env' = match a with
-                  | Bil.Var av -> meet_var env av a'
-                  | _ -> env in
-                constrain_def_chain ~defs
-                  ~visited env' a a'
-               | None -> env)
-        | _ -> env)
-   | None -> env
+  match high_cast_constraint env a sz cstr with
+  | None -> env
+  | Some a' ->
+    let env' = match a with
+      | Bil.Var av -> meet_var env av a'
+      | _ -> env in
+    constrain_def_chain ~defs
+      ~visited env' a a'
 
 (* Trace-exact cell meet. *)
 let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
@@ -1056,12 +1072,12 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
                | Some c ->
                  (match Var.typ v with
                   | Type.Imm w ->
-                    let cur = AI.find_word w acc v in
-                    let m = WordSet.meet cur c in
-                    if Cbat_word.is_zero (WordSet.cardinality m)
-                       || not (WordSet.precedes m cur)
-                    then acc
-                    else AI.add_word acc ~key:v ~data:m
+                     let cur = AI.find_word w acc v in
+                     let m = WordSet.meet cur c in
+                     if Cbat_word.is_zero (WordSet.cardinality m)
+                        || not (WordSet.precedes m cur)
+                     then acc
+                     else AI.add_word acc ~key:v ~data:m
                   | Type.Mem _ | Type.Unk -> acc)) in
          (match denote_imm_exp addr' st' with
           | Error _ -> env
@@ -1099,34 +1115,6 @@ type edge_constraint =
   | Var of var * wordset
   | Cell of exp * exp * Size.t * endian * wordset
   | Infeasible
-
-(* HIGH-extract pre-image. *)
-let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
-    (cstr : wordset) : wordset option =
-  match denote_operand env a with
-  | Some a_ws ->
-    let w = WordSet.bitwidth a_ws in
-    let n = WordSet.bitwidth cstr in
-    if w <= n then None
-    else
-      let shift = w - n in
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some lo, Some hi ->
-         let hi1 = Cbat_word.succ hi in
-         if Cbat_word.is_zero hi1 then None
-         else
-           let lo_w = Cbat_word.extract_exn ~hi:(w - 1) lo in
-           let hi1_w = Cbat_word.extract_exn ~hi:(w - 1) hi1 in
-           let mask = Cbat_word.lshift (Cbat_word.one w)
-               (Cbat_word.of_int ~width:w n) in
-           if Cbat_word.(>) hi1_w mask then None
-           else
-             let lo_a = Cbat_word.lshift lo_w (Cbat_word.of_int ~width:w shift) in
-             let hi_a =
-               Cbat_word.pred (Cbat_word.lshift hi1_w (Cbat_word.of_int ~width:w shift)) in
-             interval_of_bounds w lo_a hi_a
-       | _ -> None)
-  | None -> None
 
 (* Extension pre-image. *)
 let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
@@ -1247,26 +1235,12 @@ let def_constraints ~(blk_state : AI.t) (env : AI.t ref)
     let width = WordSet.bitwidth cstr in
     (match b with
      | Bil.Int k ->
-        let k = Cbat_word.of_word k in
-        (match Cbat_word.to_int k with
-         | Ok kk when kk >= 0 && kk < width ->
-           (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-            | Some lo, Some hi ->
-              let lo_a =
-                WordSet.rshift (WordSet.singleton lo) (WordSet.singleton k) in
-              let hi_a =
-                WordSet.rshift (WordSet.singleton hi) (WordSet.singleton k) in
-               (match WordSet.min_elem lo_a, WordSet.max_elem hi_a with
-                | Some lo', Some hi' -> (
-                    match interval_of_bounds width lo' hi' with
-                    | Some a' -> (
-                        match a with
-                        | Bil.Var av -> [ (Var.base av, a') ]
-                        | _ -> [])
-                    | None -> [])
-                | _ -> [])
-             | _ -> [])
-         | _ -> [])
+       (match lshift_preimage width (Cbat_word.of_word k) cstr with
+        | Some a' ->
+          (match a with
+           | Bil.Var av -> [ (Var.base av, a') ]
+           | _ -> [])
+        | None -> [])
      | _ -> [])
   | Bil.BinOp (op, a, b) ->
     
@@ -1556,10 +1530,7 @@ let guard_constraint (w : int) (op : guard_op) (c : Cbat_word.t)
   let iv lo hi = interval_of_bounds w lo hi in
   match op with
   | EQ -> Some (WordSet.singleton c)
-  | NEQ ->
-    (* Full domain minus the point. *)
-    (match WordSet.diff (WordSet.top w) (WordSet.singleton c) with
-     | d -> if Cbat_clp_set_composite.is_bottom d then None else Some d)
+  | NEQ -> neq_complement c
   | ULT ->
     (if Cbat_word.is_zero c then None
      else iv (Cbat_word.zero w) (Cbat_word.pred c))
@@ -1707,49 +1678,27 @@ let rec edge_constraints ~(env : AI.t) ?(ctx : analysis_ctx option)
   | Bil.BinOp (op, a, b) ->
     begin match op with
     | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE ->
+      (* Const on either side: the row, flipped for const-first. *)
+      let const_side (e : exp) (flip : bool) (side : [ `True | `False ])
+          (op : Bil.binop) (c : word) : edge_constraint list =
+        let c0 = Cbat_word.of_word c in
+        let row o = if flip then flip_guard_op o else o in
+        let cstr_opt =
+          match side, op with
+          | `True, Bil.NEQ -> neq_complement c0
+          | `False, Bil.NEQ -> Some (WordSet.singleton c0)
+          | `False, Bil.EQ -> neq_complement c0
+          | `True, _ ->
+            row_for ~env ?ctx e (row (guard_op_of_binop op)) c0
+          | `False, _ ->
+            row_for ~env ?ctx e (row (complement_binop_guard op)) c0 in
+        (match cstr_opt with
+         | Some cstr_e -> edge_constraints ~env ?ctx e cstr_e
+         | None -> []) in
       let side (side : [ `True | `False ]) : edge_constraint list =
         match a, b with
-        | _, Bil.Int c0 ->
-          let c0 = Cbat_word.of_word c0 in
-          let cstr_opt =
-            match side, op with
-            | `True, Bil.NEQ ->
-              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
-                      (WordSet.singleton c0))
-            | `False, Bil.NEQ ->
-              Some (WordSet.singleton c0)
-            | `False, Bil.EQ ->
-              (* False EQ is NEQ. *)
-              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
-                      (WordSet.singleton c0))
-            | `True, _ ->
-              row_for ~env ?ctx a (guard_op_of_binop op) c0
-            | `False, _ ->
-              row_for ~env ?ctx a (complement_binop_guard op) c0 in
-          (match cstr_opt with
-           | Some cstr_a ->
-             edge_constraints ~env ?ctx a cstr_a
-           | None -> [])
-        | Bil.Int c0, e0 ->
-          let c0 = Cbat_word.of_word c0 in
-          let cstr_opt =
-            match side, op with
-            | `True, Bil.NEQ ->
-              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
-                      (WordSet.singleton c0))
-            | `False, Bil.NEQ ->
-              Some (WordSet.singleton c0)
-            | `False, Bil.EQ ->
-              Some (WordSet.diff (WordSet.top (Cbat_word.bitwidth c0))
-                      (WordSet.singleton c0))
-            | `True, _ ->
-              row_for ~env ?ctx e0 (flip_guard_op (guard_op_of_binop op)) c0
-            | `False, _ ->
-              row_for ~env ?ctx e0 (flip_guard_op (complement_binop_guard op)) c0 in
-          (match cstr_opt with
-           | Some cstr_e ->
-             edge_constraints ~env ?ctx e0 cstr_e
-           | None -> [])
+        | _, Bil.Int c0 -> const_side a false side op c0
+        | Bil.Int c0, e0 -> const_side e0 true side op c0
         | Bil.Var x, Bil.Var y ->
           (match Var.typ x, Var.typ y with
            | Type.Imm w, Type.Imm wy when w = wy ->
@@ -1941,6 +1890,15 @@ let inverse_denote_exp ?(ctx : analysis_ctx option) (cond : exp)
 
 
 
+(* Record an unsat var observation from a refined constraint. *)
+let observe_refined (env : AI.t) (v : var) (cstr : wordset) : unit =
+  match Var.typ v with
+  | Type.Imm w ->
+    let cur = AI.find_word w env v in
+    if WordSet.bitwidth cur = w
+    then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:cstr
+  | _ -> ()
+
 let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
     ?(flag_group : Cbat_runctx.flag_group option = None)
     (cond : exp) (env : AI.t) : unit =
@@ -1960,23 +1918,11 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
       (match row_for ~env ?ctx:(Some ctx) e op c with
        | Some cstr_e ->
          (match e with
-          | Bil.Var v ->
-            (match Var.typ v with
-             | Type.Imm w ->
-               let cur = AI.find_word w env v in
-               if WordSet.bitwidth cur = w
-               then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:cstr_e
-             | _ -> ())
+          | Bil.Var v -> observe_refined env v cstr_e
           | _ ->
             List.iter (edge_constraints ~env ~ctx e cstr_e) ~f:(fun seed ->
               match seed with
-              | Var (v, cstr_leaf) ->
-                (match Var.typ v with
-                 | Type.Imm w ->
-                   let cur = AI.find_word w env v in
-                   if WordSet.bitwidth cur = w
-                   then Cbat_landmarks.observe_unsat_var v ~p:cur ~cstr:cstr_leaf
-                 | _ -> ())
+              | Var (v, cstr_leaf) -> observe_refined env v cstr_leaf
               | Cell _ | Infeasible -> ()))
        | None -> ())
       end else ()
@@ -2150,13 +2096,9 @@ let refine_edge_inline
               read-set would trap a future reader (spec §2.4). *)
            let rc =
              if cap >= Cbat_runctx.cap_default then
-               { rc with
-                 rc_state =
-                   let st = rc.rc_state in
-                   { st with
-                     fs_cache =
-                       Cbat_runctx.Walk_memo.add ~version st.fs_cache bt jt
-                         ~reads:!walk_reads refined } }
+               Cbat_runctx.with_cache rc
+                 (Cbat_runctx.Walk_memo.add ~version rc.rc_state.fs_cache
+                    bt jt ~reads:!walk_reads refined)
              else rc in
            (let res = (refined, rc) in
 #ifdef VSA_DEBUG
@@ -2444,45 +2386,24 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
               Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
               Hashtbl.add_multi pred_tbl ~key:u ~data:lhs
             end));
-        let var_nodes = Core.Set.to_list def_vars in
-        let visited = ref Var.Set.empty in
-        let order = ref [] in
-        let rec dfs1 v =
-          if not (Core.Set.mem !visited v) then begin
-            visited := Core.Set.add !visited v;
-            let succs = Hashtbl.find_multi succ_tbl v in
-            List.iter succs ~f:dfs1;
-            order := v :: !order
-          end
-        in
-        List.iter var_nodes ~f:dfs1;
-        let visited2 = ref Var.Set.empty in
-        let comps = ref [] in
-        List.iter !order ~f:(fun v ->
-          if not (Core.Set.mem !visited2 v) then begin
-            let cur = ref [] in
-            let rec dfs2 x =
-              if not (Core.Set.mem !visited2 x) then begin
-                visited2 := Core.Set.add !visited2 x;
-                cur := x :: !cur;
-                let preds = Hashtbl.find_multi pred_tbl x in
-                List.iter preds ~f:dfs2
-              end
-            in
-            dfs2 v;
-            comps := !cur :: !comps
-          end);
-        let need = ref Var.Set.empty in
-        List.iter !comps ~f:(fun comp ->
-          match comp with
-          | [v] ->
+        let module Var_scc = Cbat_wto.Scc (struct
+            type t = Var.t
+            let compare = Var.compare
+          end) in
+        let comps =
+          Var_scc.partition (Core.Set.to_list def_vars)
+            (Hashtbl.find_multi succ_tbl) (Hashtbl.find_multi pred_tbl) in
+        List.fold comps ~init:Var.Set.empty ~f:(fun need comp ->
+            match comp with
+            | [v] ->
               let succs = Hashtbl.find_multi succ_tbl v in
               if List.mem succs v ~equal:Var.equal then
-                need := Core.Set.add !need v
-          | vs when List.length vs > 1 ->
-              List.iter vs ~f:(fun v -> need := Core.Set.add !need v)
-          | _ -> ());
-        !need
+                Core.Set.add need v
+              else need
+            | vs when List.length vs > 1 ->
+              List.fold vs ~init:need ~f:(fun need v ->
+                  Core.Set.add need v)
+            | _ -> need)
       end
     in
     Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
@@ -2494,13 +2415,11 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (* The initial solution seeds the store; from here the store is the only
      home for per-block values, versions, and the caches they key. *)
   let rc_cell =
-    ref { rctx with
-          rc_state =
-            { rctx.rc_state with
-              fs_sol =
-                Solution.enum init
-                |> Seq.fold ~init:Tid.Map.empty
-                     ~f:(fun m (k,v) -> Core.Map.set m ~key:k ~data:v) } } in
+    ref
+      (Cbat_runctx.with_sol rctx
+         (Solution.enum init
+          |> Seq.fold ~init:Tid.Map.empty
+               ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v))) in
   let get n =
     match Core.Map.find (!rc_cell).rc_state.fs_sol n with
     | Some v -> v
@@ -2514,11 +2433,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       | None -> Core.Map.set st.fs_versions ~key:n ~data:1
       | Some k -> Core.Map.set st.fs_versions ~key:n ~data:(k + 1) in
     rc_cell :=
-      { rc with
-        rc_state =
-          { st with
-            fs_sol = Core.Map.set st.fs_sol ~key:n ~data:v;
-            fs_versions = versions } } in
+      Cbat_runctx.with_sol ~versions:(Some versions) rc
+        (Core.Map.set st.fs_sol ~key:n ~data:v) in
   Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = 6000 in
