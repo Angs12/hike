@@ -5,12 +5,6 @@ open Bap.Std
 open Bap_core_theory
 open Probe_common
 
-let time1 (f : unit -> 'a) : 'a * float =
-  let t0 = Unix.gettimeofday () in
-  let r = f () in
-  let t1 = Unix.gettimeofday () in
-  (r, t1 -. t0)
-
 (* Infers the round count from the def-count trajectory. *)
 let dce_rounds (target : Theory.Target.t) (sub : sub term) : int * int =
   let n0 =
@@ -50,18 +44,18 @@ let () =
                    n + Seq.length (Term.enum def_t blk))
           in
           let _alloc_tids, t_rel =
-            time1 (fun () -> Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
+            time (fun () -> Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
           in
           let _info, t_vsa =
-            time1 (fun () -> Hike.Vsa.offsets_of_sub target sp sub)
+            time (fun () -> Hike.Vsa.offsets_of_sub target sp sub)
           in
           (* stl and dce read the KB that offsets_of_sub populates. *)
           let stl_sub, t_stl =
-            time1 (fun () ->
+            time (fun () ->
                 Hike.Stack_to_locals.stack_to_locals target sp sub)
           in
           let _dced, t_dce =
-            time1 (fun () -> Hike__Hike_dce.dce ~target stl_sub)
+            time (fun () -> Hike__Hike_dce.dce ~target stl_sub)
           in
           let rounds, _ = dce_rounds target stl_sub in
           tot := !tot +. t_vsa;

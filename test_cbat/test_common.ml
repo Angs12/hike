@@ -1,9 +1,6 @@
 (* Shared test infrastructure: check harness, BIR fixture builders, stderr capture, emitter runner, domain aliases. *)
 open Bap.Std
 open Bap_core_theory
-
-open Bap.Std
-open Bap_core_theory
 module W = Word
 module Clp = Cbat_clp
 module Fs = Cbat_fin_set
@@ -17,7 +14,6 @@ module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 
 (* Memmap fusion pipeline under test. *)
-module MM = Cbat_vsa.Mem
 module MK = Cbat_vsa.Mem.Key
 module MV = Cbat_vsa.Mem.Val
 

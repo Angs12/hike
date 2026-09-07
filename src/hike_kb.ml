@@ -14,7 +14,7 @@ let () =
     | Vsa_info_conflict (tid, i1, i2) ->
         Some
           (Printf.sprintf
-             "hike: vsa-info conflict on sub %s: two different VSA results               were provided for the same sub (offsets %d vs %d) — the               analyses disagree, refusing to drop either"
+             "hike: vsa-info conflict on sub %s: two different VSA results were provided for the same sub (offsets %d vs %d) — the analyses disagree, refusing to drop either"
              (Tid.name tid)
              (Core.Map.length i1.Convutils.offsets)
              (Core.Map.length i2.Convutils.offsets))

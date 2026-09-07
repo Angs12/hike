@@ -60,15 +60,17 @@ let slot_of (lo : int64) (bits : int) : var =
     (Printf.sprintf "slot_%Ld" (Int64.abs lo))
     (Type.Imm bits)
 
-(* Region memory and base vars. *)
+(* Region memory and base vars; the alloca's emitted name. *)
+let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
+
 let region_mem (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (Printf.sprintf "stack_r%d_mem" id)
+    (region_name id ^ "_mem")
     (Type.Mem (Size.addr_of_int_exn 64, Size.of_int_exn 8))
 
 let region_base (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (Printf.sprintf "stack_r%d_base" id) (Type.Imm 64)
+    (region_name id ^ "_base") (Type.Imm 64)
 
 (* Tests for fission var names. *)
 let is_region_mem (v : var) : bool =

@@ -32,6 +32,12 @@ let load_project (path : string) : Project.t =
 
 let sp_of (proj : Project.t) : var = Hike.Abi.sp (Project.target proj)
 
+(* Run [f]; wall time in seconds. *)
+let time (f : unit -> 'a) : 'a * float =
+  let t0 = Unix.gettimeofday () in
+  let r = f () in
+  (r, Unix.gettimeofday () -. t0)
+
 (* Exact name match, else first name containing it. *)
 let find_sub (prog : program term) (name : string) : sub term option =
   let exact =

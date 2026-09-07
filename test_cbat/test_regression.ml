@@ -556,7 +556,7 @@ let run_regions () =
 (  (* Fixture inputs stay literal — they define the cases. *)
   let r_sing =
     {
-      Hike.Convutils.id = 0;
+      Cu.id = 0;
       span = (-16L, -16L);
       members = [];
       convertible = true;
@@ -565,11 +565,11 @@ let run_regions () =
   in
   (* Interval [-32,-1] span 32, maxw 64. *)
   let r_interval =
-    { Hike.Convutils.id = 1; span = (-32L, -1L); members = []; convertible = true; max_width = 64 }
+    { Cu.id = 1; span = (-32L, -1L); members = []; convertible = true; max_width = 64 }
   in
   let r_huge =
     {
-      Hike.Convutils.id = 2;
+      Cu.id = 2;
       span = (0L, 0x2000000L);
       members = [];
       convertible = true;
@@ -577,21 +577,21 @@ let run_regions () =
     }
   in
   (* Payload bytes at widest member width, unrounded — the alloca must dominate it. *)
-  let raw_bytes (r : Hike.Convutils.region) : int64 =
-    let lo, hi = r.Hike.Convutils.span in
+  let raw_bytes (r : Cu.region) : int64 =
+    let lo, hi = r.Cu.span in
     Int64.div
       (Int64.mul
          (Int64.add (Int64.sub hi lo) 1L)
-         (Int64.of_int (Int.max 8 r.Hike.Convutils.max_width)))
+         (Int64.of_int (Int.max 8 r.Cu.max_width)))
       8L
   in
   let widen_span r d =
     {
       r with
-      Hike.Convutils.span = (fst r.Hike.Convutils.span, Int64.add (snd r.Hike.Convutils.span) d);
+      Cu.span = (fst r.Cu.span, Int64.add (snd r.Cu.span) d);
     }
   in
-  let with_width r wd = { r with Hike.Convutils.max_width = wd } in
+  let with_width r wd = { r with Cu.max_width = wd } in
   (* R12-1: alloca sizes positive and 16-byte aligned. *)
   check "R12-1: region_bytes positive and 16-byte aligned (fixtures)"
     (List.for_all
@@ -618,8 +618,8 @@ let run_regions () =
     (List.for_all
        (fun r ->
          let b0 = Hike.Stack_model.region_bytes r in
-         let b1 = Hike.Stack_model.region_bytes (with_width r (2 * r.Hike.Convutils.max_width)) in
-         let b2 = Hike.Stack_model.region_bytes (with_width r (16 * r.Hike.Convutils.max_width)) in
+         let b1 = Hike.Stack_model.region_bytes (with_width r (2 * r.Cu.max_width)) in
+         let b2 = Hike.Stack_model.region_bytes (with_width r (16 * r.Cu.max_width)) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
   (* R12-5: cap guard admits small fixtures, rejects huge span. *)
@@ -651,7 +651,7 @@ let run_regions () =
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let r1 =
     {
-      Hike.Convutils.id = 0;
+      Cu.id = 0;
       span = (-16L, -16L);
       members = [ (tid1, (-16L, -16L)) ];
       convertible = true;
@@ -660,7 +660,7 @@ let run_regions () =
   in
   let r2 =
     {
-      Hike.Convutils.id = 1;
+      Cu.id = 1;
       span = (-32L, -32L);
       members = [ (tid2, (-32L, -32L)) ];
       convertible = true;
@@ -669,9 +669,9 @@ let run_regions () =
   in
   let plan_of info = Sm.split_plan rsp Theory.Target.unknown sub info in
   let info =
-    Hike.Convutils.mk_vsa_info
+    Cu.mk_vsa_info
       ~offsets:
-        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
+        [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
       ~regions:[ r1; r2 ]
       ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
@@ -682,16 +682,16 @@ let run_regions () =
   let info_inf =
     {
       info with
-      Hike.Convutils.offsets =
+      Cu.offsets =
         Tid.Map.of_alist_exn
-          [ (tid1, Hike.Convutils.Infinite (-16L, -16L));
-            (tid2, Hike.Convutils.Range (-32L, -32L)) ];
+          [ (tid1, Cu.Infinite (-16L, -16L));
+            (tid2, Cu.Range (-32L, -32L)) ];
     }
   in
   check "R12-6: gate rejects Infinite tag (unbounded -> not covered)"
     (plan_of info_inf = []);
   (* R12-7: degraded sub never qualifies. *)
-  let info_deg = { info with Hike.Convutils.degraded = true; vla_bounds = Tid.Map.empty } in
+  let info_deg = { info with Cu.degraded = true; vla_bounds = Tid.Map.empty } in
   check "R12-7: degraded sub never qualifies" (plan_of info_deg = []);
   ())
 ;
@@ -717,19 +717,19 @@ let run_regions () =
   let sub = Sub.Builder.result sub_b in
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let info =
-    Hike.Convutils.mk_vsa_info
+    Cu.mk_vsa_info
       ~offsets:
-        [ (tid1, Hike.Convutils.Range (-16L, -16L)); (tid2, Hike.Convutils.Range (-32L, -32L)) ]
+        [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
-  let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
+  let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
     (List.length conv = 2
-    && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-16L, -16L))
-    && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-32L, -32L)));
+    && Base.List.exists conv ~f:(fun r -> r.Cu.span = (-16L, -16L))
+    && Base.List.exists conv ~f:(fun r -> r.Cu.span = (-32L, -32L)));
   ())
 ;
 (  (* R12-8b: overlapping intervals merge to span (-32,-8). *)
@@ -754,21 +754,21 @@ let run_regions () =
   let sub = Sub.Builder.result sub_b in
   let tid1 = Term.tid d1 and tid2 = Term.tid d2 in
   let info =
-    Hike.Convutils.mk_vsa_info
+    Cu.mk_vsa_info
       ~offsets:
         [
-          (tid1, Hike.Convutils.Range (-32L, -16L));
-          (tid2, Hike.Convutils.Range (-24L, -8L));
+          (tid1, Cu.Range (-32L, -16L));
+          (tid2, Cu.Range (-24L, -8L));
         ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:false in
-  let conv = Base.List.filter regions ~f:(fun r -> r.Hike.Convutils.convertible) in
+  let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
   check "R12-8b: two overlapping intervals produce one convertible region with span (-32,-8)"
     (List.length conv = 1
-    && Base.List.exists conv ~f:(fun r -> r.Hike.Convutils.span = (-32L, -8L)));
+    && Base.List.exists conv ~f:(fun r -> r.Cu.span = (-32L, -8L)));
 
   ())
 ;
@@ -801,13 +801,13 @@ let run_regions () =
   Sub.Builder.add_blk sub_b blk;
   let sub = Sub.Builder.result sub_b in
   let info =
-    Hike.Convutils.mk_vsa_info
+    Cu.mk_vsa_info
       ~offsets:
-        [ (Term.tid d_a, Hike.Convutils.Range (-64L, -48L));
-          (Term.tid d_b, Hike.Convutils.Range (-32L, -32L));
-          (Term.tid d_c, Hike.Convutils.Range (-40L, -24L));
-          (Term.tid d_d, Hike.Convutils.Range (-16L, -16L));
-          (Term.tid d_e, Hike.Convutils.Range (32L, 40L)) ]
+        [ (Term.tid d_a, Cu.Range (-64L, -48L));
+          (Term.tid d_b, Cu.Range (-32L, -32L));
+          (Term.tid d_c, Cu.Range (-40L, -24L));
+          (Term.tid d_d, Cu.Range (-16L, -16L));
+          (Term.tid d_e, Cu.Range (32L, 40L)) ]
       ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
       ~vla_alloc_tids:Tid.Set.empty
   in
@@ -816,12 +816,12 @@ let run_regions () =
       ~frame_escaped:false
   in
   let tids_of r =
-    Base.List.map r.Hike.Convutils.members ~f:(fun (t, _) -> Tid.name t)
+    Base.List.map r.Cu.members ~f:(fun (t, _) -> Tid.name t)
   in
   (* Expected components: {a}, {b,c}, {d}, {e} — the chain b-c proves the
      running-max-hi join; the lone a/d/e prove the close-and-start split. *)
   let comps =
-    Base.List.map regions ~f:(fun r -> (r.Hike.Convutils.span, tids_of r))
+    Base.List.map regions ~f:(fun r -> (r.Cu.span, tids_of r))
   in
   let has span names =
     Base.List.exists comps ~f:(fun (s, ts) ->
@@ -841,7 +841,7 @@ let run_regions () =
     Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
       ~frame_escaped:false
   in
-  let spans_in_order rs = Base.List.map rs ~f:(fun r -> r.Hike.Convutils.span) in
+  let spans_in_order rs = Base.List.map rs ~f:(fun r -> r.Cu.span) in
   check "R12-9b: region ids deterministic across two runs (spans ascending in lo)"
     (spans_in_order regions = spans_in_order regions2
     && spans_in_order regions
@@ -871,7 +871,7 @@ let run_regions () =
   let tid_stack = Term.tid d_stack in
   let region =
     {
-      Hike.Convutils.id = 0;
+      Cu.id = 0;
       span = (-16L, -16L);
       members = [ (tid_stack, (-16L, -16L)) ];
       convertible = true;
@@ -879,13 +879,13 @@ let run_regions () =
     }
   in
   let info =
-    Hike.Convutils.mk_vsa_info
-      ~offsets:[ (tid_stack, Hike.Convutils.Range (-16L, -16L)) ]
+    Cu.mk_vsa_info
+      ~offsets:[ (tid_stack, Cu.Range (-16L, -16L)) ]
       ~k_ranges:[ (tid_stack, -20L, -10L) ]
       ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   (* Decision lives in split_plan; escape is a per-region rule. *)
-  let info = { info with Hike.Convutils.regions =
+  let info = { info with Cu.regions =
       Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
         ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
   let plan = Sm.split_plan (v64 "RSP") Theory.Target.unknown sub info in

@@ -179,10 +179,11 @@ let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
      | Bil.MINUS, Bil.Var y, Bil.Int k ->
        (* Derived iff y derived. *)
        let y = AI.frame_key y in
+       let c = WordSet.singleton (Cbat_word.of_word k) in
        let shift =
          match op with
-         | Bil.PLUS -> fun t -> AI.frame_add_const t (WordSet.singleton (Cbat_word.of_word k))
-         | Bil.MINUS -> fun t -> AI.frame_sub_const t (WordSet.singleton (Cbat_word.of_word k))
+         | Bil.PLUS -> fun t -> AI.frame_add_const t c
+         | Bil.MINUS -> fun t -> AI.frame_sub_const t c
          | _ -> Fun.id in
        transfer ~shift y
      | Bil.PLUS, Bil.Var y, Bil.Var z ->

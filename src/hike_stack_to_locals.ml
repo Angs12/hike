@@ -25,6 +25,9 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
         Core.Map.mem tag_of (Term.tid d))
   in
   let is_abi_visible = Model.is_abi_visible sp ~tag_of ~k_of ~last_push_tids in
+  (* ABI record, resolved once: the per-node check below runs on every
+     address expression of every converted def. *)
+  let abi = Abi.of_target target in
   (* Regions come from the VSA result. *)
   let regions =
     if info.Convutils.regions <> [] then info.Convutils.regions
@@ -50,9 +53,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* Conversion table: address -> slot or region shape. *)
   (* Returns the address base the region base replaces. *)
   let base_exp_of (addr : exp) : exp =
-    (* ABI record, resolved once: the per-node check below runs on
-       every address expression of every converted def. *)
-    let abi = Abi.of_target target in
     let is_stack_reg v = Abi.is_stack_reg abi (Var.base v) in
     let is_sf (e : exp) : bool =
       match e with

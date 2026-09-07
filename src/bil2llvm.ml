@@ -4,8 +4,6 @@ open Hike_abi
 module Abi = Hike_abi
 open Convutils
 
-(* Core Hashtbl with the deprecated warning off. *)
-module EHashtbl = Core_kernel.Hashtbl[@warning "-D"]
 module KB = Bap_knowledge.Knowledge
 module Vsa = Cbat_vsa
 module AI = Cbat_vsa.AI
@@ -56,7 +54,7 @@ let create_section_global llvm_ctx llvm_module size name ~is_const =
   ret
 
 (* Reads a stashed .text constant. *)
-let text_load_constant ctx llvm_builder llvm_ctx llvm_module addr w =
+let text_load_constant ctx llvm_ctx llvm_module addr w =
   let v = Word.to_int64_exn addr in
   match ctx.Convutils.text_section with
   | Some (arr, tmin, tmax)
@@ -487,7 +485,7 @@ let create_load llvm_builder (addr, size) =
       let addr_w = Word.of_int64 ~width:64 v in
       let* pre =
         match
-          text_load_constant ctx llvm_builder llvm_ctx llvm_module addr_w size
+          text_load_constant ctx llvm_ctx llvm_module addr_w size
         with
         | Some c -> return c
         | None ->
@@ -705,7 +703,7 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
            (* Reads .text loads at compile time. *)
            let* loaded =
              match
-               text_load_constant ctx llvm_builder llvm_ctx llvm_module addr size
+               text_load_constant ctx llvm_ctx llvm_module addr size
              with
              | Some c -> return c
              | None -> section_load llvm_builder llvm_ctx addr addr_i64 size
@@ -805,6 +803,9 @@ let find_mem_node (exp : exp) : mem_node option =
 let mem_node_addr = function
   | `Load (addr, _) | `Store (addr, _, _) -> addr
 
+(* Name of the accumulator marker var the pointer-access lane binds. *)
+let marker_name = "hike_acc"
+
 (* Dispatches memory load/store through a pointer using Exp.mapper. *)
 let mem_access_at_ptr llvm_builder blk_tid ptr exp =
   let open KB in
@@ -813,7 +814,7 @@ let mem_access_at_ptr llvm_builder blk_tid ptr exp =
   match find_mem_node exp with
   | Some (`Load (addr, size)) ->
       let marker =
-        Var.create ~is_virtual:true ~fresh:false "hike_acc"
+        Var.create ~is_virtual:true ~fresh:false marker_name
           (Type.Imm (Size.in_bits size))
       in
       let acc_v =
@@ -833,7 +834,7 @@ let mem_access_at_ptr llvm_builder blk_tid ptr exp =
       create_exp llvm_builder blk_tid (v#map_exp exp)
   | Some (`Store (addr, data, size)) ->
       let marker =
-        Var.create ~is_virtual:true ~fresh:false "hike_acc"
+        Var.create ~is_virtual:true ~fresh:false marker_name
           (Type.Imm (Size.in_bits size))
       in
       let* d = create_exp llvm_builder blk_tid data in
@@ -1099,6 +1100,7 @@ let get_func tid =
 let create_indirect_call llvm_builder blk_tid call fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
+  let icall_tid = Tid.for_name "indirect_call" in
   let target = Call.target call |> label_exp in
   let fallthrough =
     Call.return call
@@ -1107,11 +1109,11 @@ let create_indirect_call llvm_builder blk_tid call fr =
   in
   let* target_exp = create_exp llvm_builder blk_tid target in
   let* func_ptr = create_inttoptr llvm_builder target_exp in
-  let* fn, fn_typ = get_func (Tid.for_name "indirect_call") in
+  let* fn, fn_typ = get_func icall_tid in
   let bb = get_bb ctx fallthrough in
-  let rets = get_rets ctx (Tid.for_name "indirect_call") in
+  let rets = get_rets ctx icall_tid in
   let* args =
-    create_call_args blk_tid llvm_builder (Tid.for_name "indirect_call") fr
+    create_call_args blk_tid llvm_builder icall_tid fr
   in
   let ret_struct =
     Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
@@ -1220,13 +1222,16 @@ let create_return blk_tid llvm_builder cur_sub =
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore);
   return ()
 
+(* Name of the trap function trap edges declare. *)
+let trap_name = "llvm.trap"
+
 (* Emits trap edges. *)
 let create_interrupt llvm_builder =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let trap_ty = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
-  let trap = Llvm.declare_function "llvm.trap" trap_ty llvm_module in
+  let trap = Llvm.declare_function trap_name trap_ty llvm_module in
   ignore
     (Llvm.build_call trap_ty trap [||] "" llvm_builder);
   ignore (Llvm.build_unreachable llvm_builder);
@@ -1282,6 +1287,9 @@ let rec has_32bit_extract (e : exp) : bool =
   | _ -> false
 
 (* Returns a cast source width. *)
+(* The x0 interface temp the width derivation reads. *)
+let x0_temp_name = "intrinsic:x0"
+
 let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
   let u32_slots =
     Term.enum blk_t sub
@@ -1302,7 +1310,7 @@ let cast_source_width ~(abi : Abi.t) (sub : sub term) (blk : blk term) : int =
   match
     Term.enum def_t blk
     |> Seq.find ~f:(fun d ->
-        String.equal (Var.name (Var.base (Def.lhs d))) "intrinsic:x0")
+        String.equal (Var.name (Var.base (Def.lhs d))) x0_temp_name)
   with
   | None -> 64
   | Some d -> (
@@ -1961,7 +1969,6 @@ let create_sub sub =
   then return ()
   else
     let* llvm_ctx = Context.get llvm_ctx_var in
-    let* llvm_module = Context.get llvm_module_var in
     let* ctx = Context.get emit_ctx_var in
     let blks = Term.enum blk_t sub in
     let fn, _ =
@@ -1986,7 +1993,10 @@ let create_sub sub =
       | None -> []
       | Some info -> info.Convutils.stack_plan
     in
-    let is_precise = plan <> [] in
+    let is_precise =
+      Base.Option.value_map sub_info ~default:false
+        ~f:Hike_stack_model.is_precise
+    in
     let frame, anchor_idx, anchor_i64 =
       if is_precise then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else if Core.Map.is_empty tags then begin
@@ -2035,7 +2045,7 @@ let create_sub sub =
             let base =
               Llvm.build_alloca
                 (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int n))
-                (Printf.sprintf "stack_r%d" r.Convutils.id)
+                (Hike_stack_model.region_name r.Convutils.id)
                 llvm_builder
             in
             Llvm.set_alignment 16 base;
@@ -2177,6 +2187,8 @@ let fp_returning (sub : sub term) : bool =
 let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
     (sub : sub term) : Arg.t list * Arg.t list =
   let free_vars = free_vars sub in
+  (* Per-var ABI projection, hoisted out of the signature sort. *)
+  let int_order = Base.List.map abi.int_param_regs ~f:Var.name in
   let rets =
     (if Bap_core_theory.Theory.Target.matches target "x86_64-gnu-elf" then
        abi.return_regs
@@ -2216,7 +2228,6 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
       (rets, args)
     end
   else if Term.name sub = "@main" then
-     let abi = Abi.of_target target in
      let rdi = Base.List.nth_exn abi.int_param_regs 0 in
      let rsi = Base.List.nth_exn abi.int_param_regs 1 in
      let args =
@@ -2238,10 +2249,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              Core.Map.exists info.Convutils.offsets ~f:(fun kind ->
                  Convutils.is_positive_kind kind))
        in
-       let is_main =
-         String.equal (Sub.name sub) "@main"
-         || String.equal (Tid.name (Term.tid sub)) "@main"
-       in
+       let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
        let hike_stack_arg =
          if has_positive && not is_main then
            [ Arg.create ~intent:In Convutils.hike_stack_var
@@ -2251,7 +2259,6 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
        let args =
          let rank_of_var (v : var) : int * string =
            let n = Var.name (Var.base v) in
-           let int_order = Base.List.map abi.int_param_regs ~f:Var.name in
            match Base.List.findi int_order ~f:(fun _ s -> String.equal s n) with
            | Some (i, _) -> (i, n)
            | None ->
