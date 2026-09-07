@@ -30,6 +30,12 @@ One commit on `honest-gate`:
      R10b ×3) — UN-MUTED only (they stay red until tickets 02/03).
 4. `dune runtest` output after this commit: exactly 4 FAIL lines
    (the soundness checks), everything else ok.
+   **Amended 2026-09-07 (post-landing review):** the commit landed with
+   3 FAIL, not 4 — the mixed-width logand R10b site was already green
+   under the honest gate (its 8 sampled operand pairs did not trip the
+   unsound mask arm); the red set was logand CLP, logand WordSet, and
+   meet R5. The prediction was off by one; the end state after tickets
+   02+03 is green either way.
 5. Full battery: IR byte-identity 32/32 vs the pre-lane control
    (this commit must not touch production semantics — verify with the
    emission diff).

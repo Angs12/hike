@@ -431,6 +431,47 @@ stays visible where it happens).
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-07 EEST (late) — REVIEW FIXES of the honest-stack
+merge, on main @ 0343404 (the two-axis code-review findings, both axes) —
+BATTERY GREEN, emission BYTE-IDENTICAL to the same-tree control 35/35 (the
+plugin bundle sha16 EQUALS control's — the one src/ delta is whitespace)**
+
+The post-merge review (`18df839...14c8193`, fixed point `18df839`) ran as
+two parallel axes. Findings fixed here, all of them:
+
+- **Standards:** the orphan `emit_ir` comment in `test_bil2llvm.ml` (its
+  function moved to test_common in fixture-lib 08) deleted; the stray
+  blank line in `hike_dce.is_call_reg` (the file's only hunk, unrelated to
+  any ticket) deleted; `test_common.ml`'s header now names the emitter
+  runner and fixture builders it hosts.
+- **Spec (fixture-lib remainder):** the two same-file `mk_jmp` duplicates
+  in `test_vsa.ml` and `test_seed.ml`'s `mk_env` were builder-shaped
+  locals the lane's "move ALL builders" rule missed — `mk_env` moved
+  verbatim to `test_common.ml` (zero call-site churn, 12 sites), the
+  `mk_jmp` closure became `mk_jmp_to tgt cond` in `test_common.ml` (both
+  locals captured their own `tgt`; all 12 call sites pass it now).
+- **Spec (gate arithmetic):** honest-gate ticket 01 amended — the commit
+  landed with 3 FAIL, not the predicted 4 (the mixed-width R10b site was
+  green under the honest gate; red set = logand CLP, logand WordSet,
+  meet R5). End state after tickets 02+03 green either way.
+
+| gate (candidate vs SAME-TREE control, 35-binary corpus) | result |
+|---|---|
+| unit suite | direct-exe **507 ok, 0 FAIL** — A/B-stash-verified **count-neutral** (507 both sides; the +2 vs the honest-stack 505 = the hotloops T3 port) ✅ |
+| `dune runtest` (incl. referee stanza) | **ALL PASSED**, clpequiv **2,861,148 / 0** ✅ |
+| plugin provenance | bundle sha16 `1731ab257280939b` = control's (whitespace-only hike_dce delta) ✅ |
+| corpus emission | **35/35 rc=0**, emission **BYTE-IDENTICAL to control 35/35** (out + err + rc files) ✅ |
+| structural asserts | check_allocas **172 / 3** — the pre-existing shape-d class (gcc-12:25, grep:3, sort:1), identical on control ✅ |
+| semantics (-O0) | **32 PASS, 3 FAIL** (gcc-12/grep/sort, the pre-existing real-PIE harness class), identical on control ✅ |
+| optimization-safety (opt -O2) | **32 PASS, 3 FAIL** — identical to -O0 and to control ✅ |
+| unmapped FP intrinsics | **26** (gcc-12's pre-existing class), identical lines to control ✅ |
+| instrumentation blocker | **clean** ✅ |
+
+Artifacts: `/tmp/opencode/review-fix/{ctrl,cand,sem,semopt}`. NOTE: the
+hotloops entry below recorded the 3 real-PIE binaries as "SKIP" — under
+this corpus (natives present) they run and FAIL, the class the cleanup-8
+records carry; the numbers here are measured, not inherited.
+
 **Last verified: 2026-09-07 EEST — HOTLOOPS MERGE (branch `hotloops-merge` =
 main @ 18df839 + region-merge + the Transfer_memo deletion; worktree
 /home/tovpr/backup/merge-hub) — MERGED-TREE BATTERY GREEN at both levels;
