@@ -10,8 +10,6 @@ open Bap_core_theory
 module B2l = Hike.Bil2llvm
 module Cu = Hike.Convutils
 
-(* Emits a program of subs and returns the textual IR. *)
-
 (* The native op each table row must emit. *)
 let fp_rows : (string * B2l.native_fp) list =
   [

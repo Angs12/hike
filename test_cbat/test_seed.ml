@@ -112,7 +112,6 @@ let run () =
   let u = Var.create ~is_virtual:true ~fresh:false "s_u" (Type.Imm 32) in
   let cf = Var.create ~is_virtual:false ~fresh:false "s_cf" (Type.Imm 1) in
   let m = Var.create ~is_virtual:false ~fresh:false "s_m" (Type.Mem (`r32, `r8)) in
-  let mk_env binds = List.fold_left (fun e (v, ws) -> AI.add_word e ~key:v ~data:ws) AI.top binds in
   let var_seed seeds v =
     List.find_map
       (function Vsa.Var (v', c) when Var.equal v' (Var.base v) -> Some c | _ -> None)

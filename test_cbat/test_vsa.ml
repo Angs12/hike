@@ -17,13 +17,12 @@ let run () =
 (* Branch-assume refinement pins. *)
 (  let ivar = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let tgt = Tid.create () in
-  let mk_jmp cond = Jmp.create ~cond (Goto (Direct tgt)) in
   let env = AI.top in
   (* x < 5 taken -> x in [0,4] *)
   let c1 =
     AI.find_word 32
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+         (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-1: assume (x < 5) refines x to [0,4]"
@@ -32,7 +31,7 @@ let run () =
   let c2 =
     AI.find_word 32
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+         (mk_jmp_to tgt (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-2: assume (x <= 5) refines x to [0,5]"
@@ -41,22 +40,22 @@ let run () =
   let c3 =
     AI.find_word 32
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+         (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-3: assume (x == 5) refines x to {5}"
     (Ws.min_elem c3 = Some (w32 5) && Ws.max_elem c3 = Some (w32 5));
-  let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp (Bil.Int (Cbat_word.to_word (w32 1))))) ivar in
+  let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.Int (Cbat_word.to_word (w32 1))))) ivar in
   check "D4-4: doubt — constant condition keeps the state (top)" (Ws.is_top c4);
   let c5 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5))))))
+      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5))))))
       ivar
   in
   check "D4-5: doubt — width-mismatched guard keeps the state (top)" (Ws.is_top c5);
   let c6 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-6: gate-free (spec §2.1) — the NEQ guard refines to TOP−{5} (5 ∉, 0 ∈, non-top)"
@@ -64,14 +63,14 @@ let run () =
   let fv = Var.create ~is_virtual:false ~fresh:false "zf" (Type.Imm 1) in
   let c7 =
     AI.find_word 1
-      (Vsa.assume_jump_cond env (mk_jmp (Bil.Var fv)))
+      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.Var fv)))
       fv
   in
   check "D4-7: assume (flag) forces the flag to {1}" (Ws.elem Cbat_word.b1 c7 && not (Ws.elem Cbat_word.b0 c7));
   let c8 =
     AI.find_word 1
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.UnOp (Bil.NOT, Bil.Var fv))))
+         (mk_jmp_to tgt (Bil.UnOp (Bil.NOT, Bil.Var fv))))
       fv
   in
   check "D4-8: assume (NOT flag) forces the flag to {0}"
@@ -300,11 +299,10 @@ let run () =
 ;
 (  let x = v64 "t3_x" in
   let tgt = Tid.create () in
-  let mk_jmp cond = Jmp.create ~cond (Goto (Direct tgt)) in
   let c_in =
     AI.find_word 64
       (Vsa.assume_jump_cond AI.top
-         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
+         (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
       x
   in
   check "T3-1: gate-free — the guard refines x to {5}"
@@ -312,7 +310,7 @@ let run () =
   let c_out =
     AI.find_word 64
       (Vsa.assume_jump_cond AI.top
-         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
+         (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
       x
   in
   check "T3-2: gate-free (spec §2.1) — the guard refines x to {5}"

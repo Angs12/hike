@@ -14,7 +14,6 @@ let is_ret_reg ~(abi : Abi.t) (v : var) : bool =
   Abi.is_return_reg abi (Var.base v)
 
 let is_call_reg ~(abi : Abi.t) (v : var) : bool =
-
   let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 

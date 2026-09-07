@@ -1,4 +1,4 @@
-(* Shared test infrastructure: check harness, BIR fixture sugar, stderr capture, domain aliases. *)
+(* Shared test infrastructure: check harness, BIR fixture builders, stderr capture, emitter runner, domain aliases. *)
 open Bap.Std
 open Bap_core_theory
 
@@ -27,6 +27,9 @@ let anchored_entry () : AI.t =
   let rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64) in
   let e = AI.add_word AI.top ~key:rsp ~data:(Ws.singleton (Cbat_word.of_int ~width:64 0)) in
   AI.add_word e ~key:rbp ~data:(Ws.singleton (Cbat_word.of_int ~width:64 0))
+
+(* AI word environment from (var, word-set) binds over top. *)
+let mk_env binds = List.fold_left (fun e (v, ws) -> AI.add_word e ~key:v ~data:ws) AI.top binds
 
 let failures = ref 0
 
@@ -1815,6 +1818,9 @@ let emit_ir (subs : sub term list) : string =
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)
+
+(* A conditional/terminal jump to an explicit target tid. *)
+let mk_jmp_to tgt cond = Jmp.create ~cond (Goto (Direct tgt))
 
 (* ------------------------------------------------------------------ *)
 (* Family 1: the FP-intrinsic table — every row emits its native op.  *)
