@@ -17,16 +17,33 @@ Merges:
   the model, the emitter's node finder, and the extraction's address
   visitor (three implementations of "contains a memory node" today).
 
-Hoists:
-- The per-def fact index: the same defs are re-walked (address extraction,
-  store-data extraction, free vars, memory shape) by SIX consumers on one
-  sub — the region builder (three sites), both escape analyses, the
-  unbounded test, the ABI-visibility test, and the conversion pass's cell
-  fold; each extraction allocates a visitor object. One index built per
-  pass entry feeds them all. This is the ticket's perf item: measure with
-  the subtimes probe before/after; gate on byte-identity (the escape lane
-  was articles 6+7's subject — the remaining waste is the repeated
-  extraction, not the scans).
+Hoists (landed, scoped by measurement — see below):
+- The per-def fact index (`def_facts_of_sub`: addr, store-data exp,
+  mem-shape, free vars — one walk), feeding `sp_escaped` (kills the
+  per-round re-walks in the grow loop) and `regions_of_sub` (one walk
+  replaces the def-map + width walks AND the member/outgoing re-walks).
+  NOT fed to `frame_addr_alias` / `has_unbounded_access`: both are
+  single-pass with early exits (empty frame-vars, first unbounded def),
+  and a prebuilt index forfeits the exit — measured +1.4% on grep when
+  tried, reverted same session. The index is the no-early-exit shape
+  only.
+- The store-data extractor WITHOUT the wrapper closure (the model
+  never rewrites); the closure-allocating spelling stays in stl's
+  private use.
+
+The (sp, fp) → Abi.t threading: RESCOPED TO NOTHING, deliberately.
+`fp_of` returns None on unknown targets while the ABI record always
+carries an fp; the R12 fixtures run on unknown targets with RBP frame
+vars, so threading the record changes test behavior on unpinned
+shapes. The residue was already abi-native (cleanup-8's ctx.abi,
+ticket 03, ticket 06's geometry). Recorded so nobody re-proposes.
+
+Measured-decision (pop_min): DONE, non-finding by measurement.
+Temporary #ifdef counter (added, measured, reverted — never
+committed): grep sub_e350 (996 pops, the heaviest sub) scans
+7835 inner iterations at maxpend 14 (~8 compares/pop, two map finds
+each) — sub-millisecond against the 1.1s fixpoint (<0.1%). The
+scan stays.
 - ⚠ Do NOT fold the degraded-sub region recompute (the conversion pass's
   empty-info fallback) into the index — it is the degraded production path
   and measured at ~2 ms/binary; it stays.

@@ -20,6 +20,29 @@ let is_sp_or_fp (sp : var) (fp : var option) (v : var) : bool =
   | Some fp -> Var.same (Var.base v) (Var.base fp)
   | None -> false
 
+(* Tests for SP/FP references. *)
+let rec exp_contains_sp (sp : var) (fp : var option) (e : exp) :
+    bool =
+  match e with
+  | Bil.Var v -> is_sp_or_fp sp fp v
+  | Bil.BinOp (_, a, b) ->
+      exp_contains_sp sp fp a || exp_contains_sp sp fp b
+  | Bil.UnOp (_, a) -> exp_contains_sp sp fp a
+  | Bil.Cast (_, _, a) -> exp_contains_sp sp fp a
+  | Bil.Extract (_, _, a) -> exp_contains_sp sp fp a
+  | Bil.Concat (a, b) ->
+      exp_contains_sp sp fp a || exp_contains_sp sp fp b
+  | Bil.Let (_, a, b) ->
+      exp_contains_sp sp fp a || exp_contains_sp sp fp b
+  | Bil.Ite (c, a, b) ->
+      exp_contains_sp sp fp c
+      || exp_contains_sp sp fp a
+      || exp_contains_sp sp fp b
+  | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _) ->
+      exp_contains_sp sp fp a
+  | _ -> false
+
+
 let addr_of_rhs (e : exp) : (exp * Size.t) option =
   let vis =
     object
@@ -28,6 +51,18 @@ let addr_of_rhs (e : exp) : (exp * Size.t) option =
         Base.Option.first_some acc (Some (addr, s))
       method! visit_store ~mem:_ ~addr ~exp:_ _ s acc =
         Base.Option.first_some acc (Some (addr, s))
+    end
+  in
+  vis#visit_exp e None
+
+(* Stored data of a store rhs (no wrapper closure; the model never
+   rewrites, only tests). *)
+let store_data_exp_of_rhs (e : exp) : exp option =
+  let vis =
+    object
+      inherit [ exp option ] Exp.visitor
+      method! visit_store ~mem:_ ~addr:_ ~exp:data _ _ acc =
+        Base.Option.first_some acc (Some data)
     end
   in
   vis#visit_exp e None
@@ -132,8 +167,46 @@ let last_push_tids_of ~(is_stack : def term -> bool) (sub : sub term) :
       | Some i -> Core.Set.add acc (Term.tid (Base.List.nth_exn defs i))
       | None -> acc)
 
+(* Tests for a memory node in rhs (no accumulator games). *)
+let is_memory_shape (e : exp) : bool =
+  let vis =
+    object
+      inherit [ bool ] Exp.visitor
+      method! visit_load ~mem:_ ~addr:_ _ _ _ = true
+      method! visit_store ~mem:_ ~addr:_ ~exp:_ _ _ _ = true
+    end
+  in
+  vis#visit_exp e false
+
+(* Per-def facts, extracted once per pass entry: every consumer below used
+   to re-walk the same defs with addr_of_rhs / store_data_of_rhs /
+   is_memory_shape / Exp.free_vars (six consumers on one sub). *)
+type def_facts = {
+  def : def term;
+  addr : (exp * Size.t) option;
+  store_data : exp option;
+  mem_shape : bool;
+  free_vars : Var.Set.t;
+}
+
+let def_facts_of_sub (sub : sub term) : def_facts Tid.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+         Term.enum def_t blk
+         |> Seq.fold ~init:m ~f:(fun m d ->
+                let rhs = Def.rhs d in
+                Core.Map.set m ~key:(Term.tid d)
+                  ~data:
+                    {
+                      def = d;
+                      addr = addr_of_rhs rhs;
+                      store_data = store_data_exp_of_rhs rhs;
+                      mem_shape = is_memory_shape rhs;
+                      free_vars = Exp.free_vars rhs;
+                    }))
+
 let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
-  bool =
+    bool =
   let base_var v = Var.base v in
   let sp_base = base_var sp in
   let fp = fp_of target in
@@ -144,36 +217,25 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   let derived : Var.Set.t ref =
     ref (Var.Set.of_list (sp_base :: fp_bases))
   in
-  let is_memory_shape (e : exp) : bool =
-    (* Tests for Load/Store in rhs. *)
-    let vis =
-      object
-        inherit [ bool ] Exp.visitor
-        method! visit_load ~mem:_ ~addr:_ _ _ acc = acc || true
-        method! visit_store ~mem:_ ~addr:_ ~exp:_ _ _ acc = acc || true
-      end
-    in
-    vis#visit_exp e false
-  in
+  (* Per-def facts, extracted once: the grow loop below used to re-walk
+     every def per round. *)
+  let facts = def_facts_of_sub sub in
   let rec grow () =
     let changed = ref false in
-    Term.enum blk_t sub
-    |> Seq.iter ~f:(fun blk ->
-        Term.enum def_t blk
-        |> Seq.iter ~f:(fun d ->
-            let rhs = Def.rhs d in
-            if not (is_memory_shape rhs) then begin
-              let uses = Exp.free_vars rhs in
-              if
-                Core.Set.exists uses ~f:(fun v ->
-                    Core.Set.mem !derived (base_var v))
-              then begin
-                let lhs = base_var (Def.lhs d) in
-                if not (Core.Set.mem !derived lhs) then (
-                  derived := Core.Set.add !derived lhs;
-                  changed := true)
-              end
-            end));
+    Core.Map.iter facts ~f:(fun f ->
+        let d = f.def in
+        if not f.mem_shape then begin
+          let uses = f.free_vars in
+          if
+            Core.Set.exists uses ~f:(fun v ->
+                Core.Set.mem !derived (base_var v))
+          then begin
+            let lhs = base_var (Def.lhs d) in
+            if not (Core.Set.mem !derived lhs) then (
+              derived := Core.Set.add !derived lhs;
+              changed := true)
+          end
+        end);
     if !changed then grow () else ()
   in
   grow ();
@@ -214,9 +276,12 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
         else
           Term.enum def_t blk
           |> Seq.exists ~f:(fun d ->
-              is_arg_reg (Def.lhs d)
-              && not (is_memory_shape (Def.rhs d))
-              && exp_escapes (Def.rhs d))
+              match Core.Map.find facts (Term.tid d) with
+              | None -> false
+              | Some f ->
+                is_arg_reg (Def.lhs d)
+                && not f.mem_shape
+                && exp_escapes (Def.rhs d))
           || (Term.enum jmp_t blk
               |> Seq.exists ~f:(fun j ->
                   match Jmp.kind j with
@@ -231,20 +296,23 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
     |> Seq.exists ~f:(fun blk ->
         Term.enum def_t blk
         |> Seq.exists ~f:(fun d ->
-            match store_data_of_rhs (Def.rhs d) with
-            | Some (data, _) ->
+            match Core.Map.find facts (Term.tid d) with
+            | None -> false
+            | Some f -> (
+              match f.store_data with
+              | Some data ->
                 if exp_escapes data then
-                  match addr_of_rhs (Def.rhs d) with
+                  match f.addr with
                   | Some (addr, _) ->
-                      let bare_sp =
-                        match addr with
-                        | Bil.Var v -> Var.same (base_var v) sp_base
-                        | _ -> false
-                      in
-                      not bare_sp
+                    let bare_sp =
+                      match addr with
+                      | Bil.Var v -> Var.same (base_var v) sp_base
+                      | _ -> false
+                    in
+                    not bare_sp
                   | None -> false
                 else false
-            | None -> false))
+              | None -> false)))
   in
   call_arg_escapes || store_data_escapes
 
@@ -267,22 +335,16 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
   in
   (* Frame pointer, resolved once for the per-def/per-node family below. *)
   let fp = fp_of target in
+  (* One walk builds every per-def fact below (the def map, the widths,
+     and the member/outgoing re-walks all read it). *)
+  let facts = def_facts_of_sub sub in
   let def_of_tid : def term Tid.Map.t =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-           Term.enum def_t blk
-           |> Seq.fold ~init:m ~f:(fun m d ->
-                  Core.Map.set m ~key:(Term.tid d) ~data:d))
+    Core.Map.map facts ~f:(fun f -> f.def)
   in
-  let def_width : int Tid.Map.t =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-           Term.enum def_t blk
-           |> Seq.fold ~init:m ~f:(fun m d ->
-                  match addr_of_rhs (Def.rhs d) with
-                  | Some (_, s) ->
-                      Core.Map.set m ~key:(Term.tid d) ~data:(Size.in_bits s)
-                  | None -> m))
+  let def_width_of (mtid : tid) : int =
+    match Core.Map.find facts mtid with
+    | Some { addr = Some (_, s); _ } -> Size.in_bits s
+    | _ -> 64
   in
   (* Call-tail defs are the outgoing-arg area. *)
   (* Tests for calls passing stack args. *)
@@ -304,9 +366,12 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
    (* Tests for call-tail stack stores. *)
   (* Tests for RSP-relative stores below entry RSP. *)
   let is_outgoing_store (d : def term) : bool =
-    match store_data_of_rhs (Def.rhs d) with
-    | Some (_data, _) -> (
-        match addr_of_rhs (Def.rhs d) with
+    match Core.Map.find facts (Term.tid d) with
+    | None -> false
+    | Some f -> (
+      match f.store_data with
+      | Some _ -> (
+        match f.addr with
         | Some (addr, _) ->
             let rsp_rel =
               Exp.free_vars addr
@@ -325,7 +390,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
             in
             rsp_rel && lo_neg && k_pos
         | None -> false)
-    | None -> false
+    | None -> false)
   in
   
   (* Exemption applies at conversion time. *)
@@ -409,9 +474,9 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
                     | Some md -> not (saves_incoming_reg abi md)
                     | None -> true)
                 (* Members use direct-constant addresses. *)
-                && (match Core.Map.find def_of_tid mtid with
-                    | Some md ->
-                        (match addr_of_rhs (Def.rhs md) with
+                && (match Core.Map.find facts mtid with
+                    | Some f ->
+                        (match f.addr with
                          | Some (addr, _) ->
                              let ok = is_direct_const_addr ~sp ~fp addr in
 #ifdef VSA_DEBUG
@@ -441,8 +506,7 @@ let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
       in
       let max_width =
         Base.List.fold_left members ~init:0 ~f:(fun m (mtid, _) ->
-            Int.max m
-              (Option.value ~default:64 (Core.Map.find def_width mtid)))
+            Int.max m (def_width_of mtid))
       in
       {
         Convutils.id = i;
@@ -540,28 +604,6 @@ let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
 
 (* Tests for SP/FP-derived memory accesses. *)
 
-(* Tests for SP/FP references. *)
-let rec exp_contains_sp (sp : var) (fp : var option) (e : exp) :
-    bool =
-  match e with
-  | Bil.Var v -> is_sp_or_fp sp fp v
-  | Bil.BinOp (_, a, b) ->
-      exp_contains_sp sp fp a || exp_contains_sp sp fp b
-  | Bil.UnOp (_, a) -> exp_contains_sp sp fp a
-  | Bil.Cast (_, _, a) -> exp_contains_sp sp fp a
-  | Bil.Extract (_, _, a) -> exp_contains_sp sp fp a
-  | Bil.Concat (a, b) ->
-      exp_contains_sp sp fp a || exp_contains_sp sp fp b
-  | Bil.Let (_, a, b) ->
-      exp_contains_sp sp fp a || exp_contains_sp sp fp b
-  | Bil.Ite (c, a, b) ->
-      exp_contains_sp sp fp c
-      || exp_contains_sp sp fp a
-      || exp_contains_sp sp fp b
-  | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _) ->
-      exp_contains_sp sp fp a
-  | _ -> false
-
 let is_stack_mem (sp : var) (fp : var option) (e : exp) : bool =
   match addr_of_rhs e with
   | Some (a, _) -> exp_contains_sp sp fp a
@@ -643,6 +685,8 @@ let vla_overlaps_convertible (info : Convutils.vsa_info)
 (* Tests for unboundable stack accesses. *)
 let has_unbounded_access (sp : var) (fp : var option) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
+  (* Direct walk with early exit (no index: the single consumer stops at
+     the first unbounded def, which a prebuilt index would forfeit). *)
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
          Term.enum def_t blk

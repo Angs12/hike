@@ -81,15 +81,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 ( Core.Map.find tag_of (Term.tid d),
                   Model.addr_of_rhs (Def.rhs d) )
               with
-              | Some (Convutils.Range (lo, hi)), Some (addr, s)
-                when Int64.equal lo hi && region_convertible (Term.tid d) -> (
-                  match Core.Map.find region_by_tid (Term.tid d) with
-                  | Some r when Int64.equal (fst r.Convutils.span) (snd r.Convutils.span) ->
-                      (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc
-                  | Some r ->
-                      (addr, `Region (r.Convutils.id, base_exp_of addr)) :: acc
-                  | None -> (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc)
-              | Some (Convutils.Range _), Some (addr, _)
+              | Some (Convutils.Range (lo, hi)), Some (addr, _)
                 when region_convertible (Term.tid d) -> (
                   match Core.Map.find region_by_tid (Term.tid d) with
                   | Some r ->
@@ -97,7 +89,11 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                       if Int64.equal rlo rhi then
                         (addr, `Slot (Model.slot_of rlo (region_max_width (Term.tid d)))) :: acc
                       else (addr, `Region (r.Convutils.id, base_exp_of addr)) :: acc
-                  | None -> acc)
+                  | None ->
+                      (* Region-less singleton tag: the slot. *)
+                      if Int64.equal lo hi then
+                        (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc
+                      else acc)
               | _ -> acc))
   in
 
