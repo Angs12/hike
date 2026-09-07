@@ -423,6 +423,13 @@ measured to PASS and 16 to fail. It is deleted; see the honest-gate
 entry below.) A check that cannot be asserted is deleted, and its
 home — if any — is the corpus battery.
 
+`test_common.ml` is also the suite's shared fixture vocabulary (38
+top-level `mk_*` builders, consolidated from the 8 theme files by the
+fixture-lib lane — pure relocation, zero check added/removed/renamed).
+Builders produce BIR subs/blocks/defs and `vsa_info` values only; tests
+call `Kb.provide` explicitly at their own sites (the global KB write
+stays visible where it happens).
+
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
 **Last verified: 2026-09-07 EEST — THE HONEST GATE (branch `honest-gate`,
