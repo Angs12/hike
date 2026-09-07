@@ -1777,3 +1777,24 @@ let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   (sub, l1_tid, l2_tid, l3_tid, chain_tid, x)
 
 (* T01-1: accumulated-cond acceptance — mid edge by c2 & ~c1, tail by ~c1 & ~c2. *)
+
+(* Store builder, PLUS/base-rooted at fixed `r64 (the fission shape). *)
+let mk_store_plus sm base off dat =
+  Def.create sm
+    (Bil.Store
+       ( Bil.Var sm,
+         Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (w64 off)),
+         Bil.Int (w64 dat),
+         LittleEndian,
+         `r64 ))
+
+(* Single-block sub with a cond read (the D4 production shape). *)
+let mk_cond_sub nm defs cond_var =
+  let bb = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def bb) defs;
+  Blk.Builder.add_jmp bb
+    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var cond_var, Bil.Int (w64 0)))
+       (Goto (Direct (Tid.create ()))));
+  let sb = Sub.Builder.create ~name:nm () in
+  Sub.Builder.add_blk sb (Blk.Builder.result bb);
+  Sub.Builder.result sb

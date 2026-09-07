@@ -124,19 +124,10 @@ let run () =
 (  (* D3: two-tier region-mem rule — a fissioned store chain dies iff no Load roots it. *)
   let sm = Hike.Stack_model.region_mem 0 in
   let base = Hike.Stack_model.region_base 0 in
-  let mk_store off dat =
-    Def.create sm
-      (Bil.Store
-         ( Bil.Var sm,
-           Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (w64 off)),
-           Bil.Int (w64 dat),
-           LittleEndian,
-           `r64 ))
-  in
   (* (a) never loaded: both store-chain members die *)
   let bb_a = Blk.Builder.create () in
-  Blk.Builder.add_def bb_a (mk_store 8 42);
-  Blk.Builder.add_def bb_a (mk_store 16 43);
+  Blk.Builder.add_def bb_a (mk_store_plus sm base 8 42);
+  Blk.Builder.add_def bb_a (mk_store_plus sm base 16 43);
   let sb_a = Sub.Builder.create ~name:"d3_fission_dead" () in
   Sub.Builder.add_blk sb_a (Blk.Builder.result bb_a);
   let sub_a = Sub.Builder.result sb_a in
@@ -145,8 +136,8 @@ let run () =
   (* (b) loaded with result read: the whole chain survives. *)
   let t = v64 "d3_t" in
   let bb_b = Blk.Builder.create () in
-  Blk.Builder.add_def bb_b (mk_store 8 42);
-  Blk.Builder.add_def bb_b (mk_store 16 43);
+  Blk.Builder.add_def bb_b (mk_store_plus sm base 8 42);
+  Blk.Builder.add_def bb_b (mk_store_plus sm base 16 43);
   Blk.Builder.add_def bb_b
     (Def.create t
        (Bil.Load
@@ -185,21 +176,8 @@ let run () =
            LittleEndian,
            `r64 ))
   in
-  let mk_sub nm =
-    let bb = Blk.Builder.create () in
-    Blk.Builder.add_def bb rsp_def;
-    Blk.Builder.add_def bb hstk_def;
-    Blk.Builder.add_def bb tmp_def;
-    Blk.Builder.add_def bb arg_def;
-    Blk.Builder.add_jmp bb
-      (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var arg_read, Bil.Int (w64 0)))
-         (Goto (Direct (Tid.create ()))));
-    let sb = Sub.Builder.create ~name:nm () in
-    Sub.Builder.add_blk sb (Blk.Builder.result bb);
-    Sub.Builder.result sb
-  in
-  let precise_sub = mk_sub "d4_precise" in
-  let ctl_sub = mk_sub "d4_ctl" in
+  let precise_sub = mk_cond_sub "d4_precise" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
+  let ctl_sub = mk_cond_sub "d4_ctl" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
   (* Split-model plan for the precise sub only; the control stays absent. *)
   let region =
     {
