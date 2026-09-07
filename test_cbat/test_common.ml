@@ -115,3 +115,12 @@ let mk_mem ~key ~data =
   let k = key_of key in
   let v = Mem.Val.create data LittleEndian in
   Mem.add (Mem.top { Mem.addr_width = 32; Mem.addressable_width = 8 }) ~key:k ~data:v
+
+(* Seed fixture: entry state with RSP/RBP at {0} plus an explicit frame. *)
+let mk_seed_state rsp rbp frame () =
+  AI.set_frame
+    (AI.add_word
+       (AI.add_word AI.top ~key:rsp ~data:(Ws.singleton (w64 0)))
+       ~key:rbp
+       ~data:(Ws.singleton (w64 0)))
+    frame
