@@ -411,7 +411,84 @@ LLVM allocas / static variables — it should work on EVERY binary.
   tickets T02/T03/T05 — listed, NOT exempted).  The red list is the work-list
   for the optimizability program.
 
+## Test honesty
+
+The unit suite's `check` (test_cbat/test_common.ml) is a plain
+assert-and-count: a check either passes, fails, or is deleted. There is
+NO xfail, no stub, no substring-mute, and no other mechanism by which a
+check can print success without asserting. (A 22-entry
+`ignored_substrings` list used to short-circuit the harness: 38 sites
+printed `ok: … (stubbed)` while asserting nothing — of which 22 were
+measured to PASS and 16 to fail. It is deleted; see the honest-gate
+entry below.) A check that cannot be asserted is deleted, and its
+home — if any — is the corpus battery.
+
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-07 EEST — THE HONEST GATE (branch `honest-gate`,
+5 commits `b28a8a6`+meet+logand merges, off `emit-seam` @ `d5a7404`,
+worktree `/home/tovpr/backup/hike-emit`) — FULL BATTERY GREEN, corpus IR
+BYTE-IDENTICAL 32/32, ZERO muted checks, and the 2 unsound-narrowing
+property bugs FIXED: 494 ok / 0 FAIL / 0 VIOLATION lines**
+
+The lane (spec `.scratch/honest-gate/spec.md`, grilling-settled
+2026-09-07, 13 questions): the suite's `check` carried a 22-entry
+`ignored_substrings` list — 38 check sites printed `ok: … (stubbed)` and
+asserted nothing, and substring matching muted PASSING checks that
+shared a prefix with failing ones. The un-stub experiment measured the
+truth first: **22 of the 38 silently PASS, 16 are red**. (The
+predecessor lane `test-honesty` @ 4ee8498, 87 commits behind and
+unmerged, had classified several of the 22 as "ticketed known-broken"
+against pre-ADR-0003 machinery — that ledger is stale and is superseded.)
+
+- **1 (b28a8a6): the honest gate.** The mute mechanism is deleted
+  outright (no xfail); the 22 passing checks become honest `check`s —
+  reclaiming the C3 caller-frame pin, the A4c neighbor cell, the E6
+  stderr contract, the A4a/A4b OR-mask constants, the C1 slot rewrite,
+  T3-7/T3-8, the R6/G3 TAKEN pins, and the C4a/C4b/R11/A1/A4c
+  controls. Deleted (−342 lines): C2/A2/A3 (stale expectations of the
+  pre-fission per-access-sized degraded frame — `degraded_dims` is a
+  fixed 8192-byte floor, `n = max n 8192`, `anchor = n − 8`), T3-7b (a
+  dead fixture), the R6 AND G3 fixtures (byte-duplicates; their one red
+  pin each duplicates the GREEN F1-NEQ/F1-FT properties), and 7
+  model-work checks (C3-outgoing, C4a/C4b Infinite-merge, R11
+  un-hulled singleton, A1 escalation, A4c exact-extent, S-4b sexp key)
+  — the corpus battery is their only remaining evidence, by decision.
+  This commit landed DELIBERATELY RED at 491 ok / 3 FAIL: exactly the
+  soundness properties.
+- **2 (meet fix, `src/cbat_vsa/cbat_clp.ml`): exact step-1 circular
+  meet.** `intersection`'s generic lane solves in unwrapped space with
+  the diophantine anchor clamped to `min_elem p2`; for disjoint
+  circular intervals the anchor lands outside both arcs and the lane
+  falls into its `safe_operand` fallback, returning a full arc where
+  the true intersection is empty (the R2-1 loose-hull class). A new
+  exact step-1 lane is dispatched first (`step1_arc` +
+  `step1_intersection` at width+1 bits): EMPTY on disjoint, the exact
+  sub-arc otherwise, the smaller operand on two-piece. Brute-force
+  elementwise oracle sweeps (3969 pairs @ w=8, 1764 @ w=16): 0 lost
+  elements, 0 false bottoms.
+- **3 (logand fix, same file): the mask must cover every free bit.**
+  The bound construction was sound but the mask came from
+  `compute_range_sep`, whose equal-MSB arm returns the sentinel −1 →
+  an empty mask → bits that actually vary were claimed fixed
+  (`1&2=0 < 1&1=1`), excluding reachable elementwise ANDs. Replaced
+  with one `fixed_bits`: a bit is fixed below the step's 2-power or
+  above `lead_1_bit(min XOR max)`; a result bit is FORCED iff fixed in
+  both operands or fixed-to-0 in either, so `mask = ~forced` provably
+  covers every varying bit. `logor`/`logxor` inherit through
+  `lnot`/`logand`; the composite WordSet layer lifts `Clp.logand`.
+
+| Gate | Result |
+|---|---|
+| unit suite | direct-exe runtest **494 ok, 0 FAIL, 0 VIOLATION lines** (direct-exe is the honest count; dune's captured output truncates) ✅ |
+| corpus emission | **32/32 rc=0**, err streams identical ✅ |
+| **IR byte-identity vs control** | **IDENTICAL 32/32** — both domain fixes are precision-neutral on the corpus (tags trivially stable) ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (all) | **30 PASS, 2 FAIL** (va_arg_vacopy + variadic, T02/T03 knowns) ✅ |
+| optimization-safety (opt) | **30 PASS, 2 FAIL** — identical class to -O0 ✅ |
+| semantics (8-bin) | **8/8 PASS** ✅ |
+| probes | precision_probe factorial/alloca_vla + corpus_watch array_local — **PASS, 0 crashes** ✅ |
+| unmapped FP intrinsics | **0** ✅ |
 
 **Last verified: 2026-09-07 EEST — THE EMITTER SEAM (branch `emit-seam`, 5
 commits `f963617`+`3ca542a`+`ed123a8`+`152fef2`+`59bbd9c`, off main @
