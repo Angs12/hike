@@ -392,4 +392,5 @@ let () =
         done
       done);
   Printf.printf "clpequiv: checked=%d mismatches=%d both-raised=%d\n"
-    !checked !mism !both_raised
+    !checked !mism !both_raised;
+  if !mism > 0 then exit 1

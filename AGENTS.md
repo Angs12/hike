@@ -481,6 +481,7 @@ against pre-ADR-0003 machinery — that ledger is stale and is superseded.)
 | Gate | Result |
 |---|---|
 | unit suite | direct-exe runtest **494 ok, 0 FAIL, 0 VIOLATION lines** (direct-exe is the honest count; dune's captured output truncates) ✅ |
+| differential referee | `dune runtest` also runs `zz_scratch_probe/clpequiv.exe` as a `(test)` stanza (in-place promotion, candidate #3): **2,731,424 checks, 0 mismatches in ~6 s**, exit-gated (`if !mism > 0 then exit 1` — backported from main's extended version; the pending main-merge brings the 690-line T2 sweep under this already-wired gate). Red path verified by forced-mismatch injection (runtest rc=1, failure attributed to the stanza). Total `dune runtest` wall time ~8 s. ✅ |
 | corpus emission | **32/32 rc=0**, err streams identical ✅ |
 | **IR byte-identity vs control** | **IDENTICAL 32/32** — both domain fixes are precision-neutral on the corpus (tags trivially stable) ✅ |
 | structural asserts | check_allocas **160 passed, 0 failed** ✅ |
