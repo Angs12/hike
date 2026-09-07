@@ -411,26 +411,25 @@ let () =
 #endif
              proj)
            else
-             let acc = ref Tid.Map.empty in
-           Toplevel.exec begin
-             KB.Seq.iter
-               (Term.enum sub_t (Project.program proj))
-               ~f:(fun sub ->
-                 (* Computes tags and plan on the pre-rewrite sub. *)
-                 let info =
-                   Hike_vsa.offsets_of_sub (Project.target proj)
-                     (sp (Project.target proj)) sub
-                 in
+             (* Per-sub computation is pure; the map folds before the one
+                KB write (no monad-iter-plus-ref shape). *)
+             let acc =
+               Term.enum sub_t (Project.program proj)
+               |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
+                   (* Computes tags and plan on the pre-rewrite sub. *)
+                   let info =
+                     Hike_vsa.offsets_of_sub (Project.target proj)
+                       (sp (Project.target proj)) sub
+                   in
 #ifdef VSA_DEBUG
-                 Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
-                   (Sub.name sub) (Core.Map.length info.Convutils.offsets);
+                   Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
+                     (Sub.name sub) (Core.Map.length info.Convutils.offsets);
 #endif
-                 acc := Core.Map.set !acc ~key:(Term.tid sub) ~data:info;
-                 KB.return ())
-           end;
-           (* Provides all tags in one write. *)
-           Hike_kb.provide !acc;
-           proj);
+                   Core.Map.set acc ~key:(Term.tid sub) ~data:info)
+             in
+             (* Provides all tags in one write. *)
+             Hike_kb.provide acc;
+             proj);
       (* Stack-to-locals pass. *)
        Project.register_pass ~name:"stack-to-locals" ~runonce:true
         ~deps:[ "hike-vsa" ]

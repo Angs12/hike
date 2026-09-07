@@ -50,16 +50,14 @@ type sweep_census = {
 
 (* Free vars of every Load mem in one rhs. *)
 let load_mem_vars (rhs : exp) : Var.Set.t =
-  let acc = ref Var.Set.empty in
   let v =
     object
-      inherit [unit] Exp.visitor
-      method! visit_load ~mem ~addr:_ _ _ () =
-        acc := Core.Set.union !acc (Exp.free_vars mem)
+      inherit [Var.Set.t] Exp.visitor
+      method! visit_load ~mem ~addr:_ _ _ acc =
+        Core.Set.union acc (Exp.free_vars mem)
     end
   in
-  v#visit_exp rhs ();
-  !acc
+  v#visit_exp rhs Var.Set.empty
 
 let sweep_census_of (sub : sub term) : sweep_census =
   let bump m v =
