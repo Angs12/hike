@@ -27,6 +27,8 @@
   (:standard -O3))
  (modules
   cbat_clp
+  cbat_clp_core
+  cbat_clp_arith
   cbat_word
   cbat_fin_set
   cbat_lattice_intf
