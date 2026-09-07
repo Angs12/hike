@@ -24,7 +24,9 @@ let ws_str (w : Ws.t) : string =
 
 let exp_str (e : Bil.exp) : string = Format.asprintf "%a" Exp.pp e
 
-(* Replica of the exported-neighborhood channel-2 test (is_seed is internal). *)
+(* Replica of the exported-neighborhood channel-2 test (is_seed is internal).
+   Replica rule (pinned — owner decision keeps this probe): a replica-vs-production
+   divergence is investigated in production, never papered over in the replica. *)
 let neighborhood : int64 * int64 = (-65536L, 65536L)
 
 let channel2_ok (ws : Ws.t) : bool =

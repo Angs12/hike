@@ -16,6 +16,53 @@ let init () =
       Bap_main.Extension.Error.pp failed;
     exit 1
 
+(* Watcher-shell driver shared by corpus_watch and precision_probe.
+   Output contracts (the PASS lines, exit codes) are byte-compatible with the
+   pre-factoring drivers: scripts grep them. *)
+
+(* Exception description (byte-identical to the watchers' former local copy). *)
+let describe_exn (e : exn) : string =
+  match e with
+  | Assert_failure (file, line, col) ->
+    Printf.sprintf "Assert_failure (%s:%d:%d)" file line col
+  | Failure msg -> Printf.sprintf "Failure(%s)" msg
+  | Invalid_argument msg -> Printf.sprintf "Invalid_argument(%s)" msg
+  | _ -> Printexc.to_string e
+
+(* No-args usage (exit 0). *)
+let ws_usage (argv0 : string) : 'a =
+  Printf.printf "usage: %s <binary> [<binary> ...]\n" argv0;
+  flush stdout;
+  exit 0
+
+(* BAP init with a tool-named failure line. *)
+let ws_init (tool : string) : unit =
+  match Bap_main.init ~argv:[|Sys.executable_name|] () with
+  | Ok () -> ()
+  | Error failed ->
+    Format.eprintf "%s: BAP initialization failed: %a@\n%!" tool
+      Bap_main.Extension.Error.pp failed;
+    exit 1
+
+(* Load-failure lines (the LOAD-FAIL contract). *)
+let ws_load_fail (path : string) (e : Core_kernel.Error.t) : unit =
+  Printf.printf "LOAD-FAIL\t%s\t%s\n" path (Core_kernel.Error.to_string_hum e);
+  flush stdout
+
+let ws_load_exn (path : string) (e : exn) : unit =
+  Printf.printf "LOAD-FAIL\t%s\texception: %s\n" path (describe_exn e);
+  flush stdout
+
+(* TOTAL + PASS/FAIL lines and the exit code. *)
+let ws_finish ~(pass : string) ~(fail : string) (crashes : int) (loadfails : int) : 'a =
+  Printf.printf "TOTAL: %d crashes, %d load failures\n" crashes loadfails;
+  Printf.printf "%s\n" (if crashes = 0 && loadfails = 0 then pass else fail);
+  flush stdout;
+  exit (if crashes = 0 && loadfails = 0 then 0 else 1)
+
+(* DCE seam, aliased once here (no flat-name reach-throughs in probes). *)
+module Dce = Hike.Dce
+
 (* Print a usage line and exit 2. *)
 let usage (prog : string) (msg : string) : 'a =
   Printf.eprintf "usage: %s %s\n" prog msg;

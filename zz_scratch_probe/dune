@@ -22,6 +22,7 @@
  (name audit02)
  (modules audit02)
  (libraries
+  probe_common
   hike
   bap
   bap-core-theory
