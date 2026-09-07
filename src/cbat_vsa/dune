@@ -50,6 +50,8 @@
   (:standard -O3))
  (modules
   cbat_vsa
+  cbat_transfer
+  cbat_walk
   cbat_memo
   cbat_runctx
   cbat_wto
