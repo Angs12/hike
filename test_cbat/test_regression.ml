@@ -772,6 +772,82 @@ let run_regions () =
 
   ())
 ;
+(  (* R12-9: the sweep partition — designed overlap shape, four components.
+       Chains and singletons mix; the partition (which tids share a region)
+       is pinned, not the ids (ids are the deliberate renumbering surface). *)
+  let rsp = v64 "RSP" in
+  let m = memv "r12c_m" in
+  let mk name off =
+    let t = v64 name in
+    Def.create t
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 off))), LittleEndian, `r32))
+  in
+  let b = Blk.Builder.create () in
+  (* a: [-64,-48] lone; b: [-32,-32]; c: [-40,-24] overlaps b (span
+     (-40,-24) after min-lo/max-hi); d: [-16,-16] lone ([-40,-24] vs
+     [-16,-16]: -16 <= -24 false -> disjoint); e: [32,40] lone, far. *)
+  let d_a = mk "r12c_a" 48 in
+  let d_b = mk "r12c_b" 32 in
+  let d_c = mk "r12c_c" 24 in
+  let d_d = mk "r12c_d" 16 in
+  let d_e = mk "r12c_e" (-40) in
+  Blk.Builder.add_def b d_a;
+  Blk.Builder.add_def b d_b;
+  Blk.Builder.add_def b d_c;
+  Blk.Builder.add_def b d_d;
+  Blk.Builder.add_def b d_e;
+  let blk = Blk.Builder.result b in
+  let sub_b = Sub.Builder.create ~name:"r12c_sweep" () in
+  Sub.Builder.add_blk sub_b blk;
+  let sub = Sub.Builder.result sub_b in
+  let info =
+    Hike.Convutils.mk_vsa_info
+      ~offsets:
+        [ (Term.tid d_a, Hike.Convutils.Range (-64L, -48L));
+          (Term.tid d_b, Hike.Convutils.Range (-32L, -32L));
+          (Term.tid d_c, Hike.Convutils.Range (-40L, -24L));
+          (Term.tid d_d, Hike.Convutils.Range (-16L, -16L));
+          (Term.tid d_e, Hike.Convutils.Range (32L, 40L)) ]
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~vla_alloc_tids:Tid.Set.empty
+  in
+  let regions =
+    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+      ~frame_escaped:false
+  in
+  let tids_of r =
+    Base.List.map r.Hike.Convutils.members ~f:(fun (t, _) -> Tid.name t)
+  in
+  (* Expected components: {a}, {b,c}, {d}, {e} — the chain b-c proves the
+     running-max-hi join; the lone a/d/e prove the close-and-start split. *)
+  let comps =
+    Base.List.map regions ~f:(fun r -> (r.Hike.Convutils.span, tids_of r))
+  in
+  let has span names =
+    Base.List.exists comps ~f:(fun (s, ts) ->
+        s = span
+        && List.length ts = List.length names
+        && Base.List.for_all names ~f:(fun n ->
+               Base.List.mem ts ~equal:String.equal n))
+  in
+  check "R12-9: sweep partition — four components, b-c chain merged"
+    (List.length regions = 4
+    && has (-64L, -48L) [ Tid.name (Term.tid d_a) ]
+    && has (-40L, -24L) [ Tid.name (Term.tid d_b); Tid.name (Term.tid d_c) ]
+    && has (-16L, -16L) [ Tid.name (Term.tid d_d) ]
+    && has (32L, 40L) [ Tid.name (Term.tid d_e) ]);
+  (* Determinism: the (lo, hi, tid) tie-break makes ids stable run-to-run. *)
+  let regions2 =
+    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
+      ~frame_escaped:false
+  in
+  let spans_in_order rs = Base.List.map rs ~f:(fun r -> r.Hike.Convutils.span) in
+  check "R12-9b: region ids deterministic across two runs (spans ascending in lo)"
+    (spans_in_order regions = spans_in_order regions2
+    && spans_in_order regions
+       = [ (-64L, -48L); (-40L, -24L); (-16L, -16L); (32L, 40L) ]);
+  ())
+;
 (  (* R12b: bare v := RSP copy rejects the sub wholly to %frame. *)
   let rsp = v64 "RSP" in
   let m = memv "r12b_m" in

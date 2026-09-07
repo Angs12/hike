@@ -34,10 +34,6 @@ module Walk_memo = Cbat_memo.Make (struct
   type t = AI.t
 end)
 
-module Transfer_memo = Cbat_memo.Make (struct
-  type t = AI.t * bool
-end)
-
 
 (* Per-block flag group. *)
 type flag_group = {
@@ -64,8 +60,6 @@ type fix_state = {
   fs_versions : int Tid.Map.t;
   (* Cached walks. *)
   fs_cache : Walk_memo.t;
-  (* Memoized block transfers with replayed acquisition. *)
-  fs_out_cache : Transfer_memo.t;
 }
 
 type refine_ctx = {
@@ -271,7 +265,6 @@ let mk_rctx ~(cfg : Graphs.Tid.t) (s : sub term) : refine_ctx = {
     fs_sol = Tid.Map.empty;
     fs_versions = Tid.Map.empty;
     fs_cache = Walk_memo.empty;
-    fs_out_cache = Transfer_memo.empty;
   };
   rc_walk_cfg = cfg;
   rc_flag_states =
