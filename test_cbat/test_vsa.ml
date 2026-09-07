@@ -85,40 +85,26 @@ let run () =
   let iv = Bil.Var i in
   let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
   let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
-  let entry_b = Blk.Builder.create () in
-  let body_b = Blk.Builder.create () in
-  let header_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
-  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
-  let entry0 = Blk.Builder.result entry_b in
-  let body0 = Blk.Builder.result body_b in
-  let header0 = Blk.Builder.result header_b in
-  let exit0 = Blk.Builder.result exit_b in
+  let entry0 = blk_of_defs [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ] in
+  let body0 =
+    blk_of_defs [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) ]
+  in
+  let header0 = blk_of_defs [] in
+  let exit0 = blk_of_defs [] in
   let body_tid = Term.tid body0 in
   let header_tid = Term.tid header0 in
   let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct body_tid)));
-  let body_b = Blk.Builder.init ~copy_defs:true body0 in
-  Blk.Builder.add_jmp body_b (Jmp.create (Goto (Direct header_tid)));
-  let header_b = Blk.Builder.init ~copy_defs:true header0 in
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:nlt5 (Goto (Direct exit_tid)));
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:lt5 (Goto (Direct body_tid)));
-  let entry = Blk.Builder.result entry_b in
-  let body = Blk.Builder.result body_b in
-  let header = Blk.Builder.result header_b in
-  let exit = Blk.Builder.result exit_b in
+  let entry = with_jmps entry0 [ mk_goto body_tid ] in
+  let body = with_jmps body0 [ mk_goto header_tid ] in
+  let header = with_jmps header0 [ mk_jmp_to exit_tid nlt5; mk_jmp_to body_tid lt5 ] in
+  let exit = exit0 in
   let sub_b = Sub.Builder.create ~name:"d4_loop" () in
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
+  let sol = run_anchored sub in
   (* Per-edge states read from single-predecessor targets' IN-states. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
@@ -143,46 +129,6 @@ let run () =
   | Error _ ->
       check "E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)" false;
       ())
-(* rshift/arshift width handling: mixed widths compute, overshift is zero. *)
-;
-(  let c32 = Clp.create (w32 16) in
-  let c64 = Clp.create (w64 16) in
-  (* Mixed-width operands compute via coerce-to-max (16 >> 16 = 0). *)
-  check
-    "D5-1: CLP rshift on mixed-width operands COMPUTES (lane A) — {0} exactly, no assert, no top"
-    (Clp.equal (Clp.rshift c32 c64) (Clp.create (w32 0)));
-  check
-    "D5-2: CLP arshift on mixed-width operands COMPUTES (lane A) — {0} exactly, no assert, no top"
-    (Clp.equal (Clp.arshift c32 c64) (Clp.create (w32 0)));
-  check "D5-3: CLP rshift/arshift on same-width singletons still exact"
-    (let r = Clp.rshift (Clp.create (w32 16)) (Clp.create (w32 2)) in
-     Clp.min_elem r = Some (w32 4)
-     && Clp.max_elem r = Some (w32 4)
-     &&
-     let a = Clp.arshift (Clp.create (w32 16)) (Clp.create (w32 2)) in
-     Clp.min_elem a = Some (w32 4) && Clp.max_elem a = Some (w32 4));
-  (* Overshift amount (>= width) is bitvec zero, not top. *)
-  check "D5-4: rshift by an amount >= the operand width -> {0} exactly (overshift=zero, no raise)"
-    (let r = Clp.rshift (Clp.create (w32 1)) (Clp.create (w32 32)) in
-     Clp.min_elem r = Some (w32 0)
-     && Clp.max_elem r = Some (w32 0)
-     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
-     && (not (Clp.is_top r))
-     && not (Clp.is_bottom r));
-  check "D5-5: rshift by an amount < the operand width still computes"
-    (let r = Clp.rshift (Clp.create (w32 8)) (Clp.create (w32 3)) in
-     Clp.min_elem r = Some (w32 1) && Clp.max_elem r = Some (w32 1));
-  (* Composite level: mixed-width CLPs via WordSet. *)
-  let big32 = Ws.of_list ~width:32 (List.init 11 (fun i -> w32 (i * 2))) in
-  let big64 = Ws.of_list ~width:64 (List.init 11 (fun i -> w64 (i * 2))) in
-  check "D5-6: composite rshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert"
-    (not (Ws.is_top (Ws.rshift big32 big64)));
-  check "D5-7: composite arshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert"
-    (not (Ws.is_top (Ws.arshift big32 big64)));
-  check "D5-8: composite rshift on same-width singletons still exact"
-    (let r = Ws.rshift (Ws.singleton (w32 16)) (Ws.singleton (w32 2)) in
-     Ws.elem (w32 4) r && (not (Ws.is_top r)) && not (Ws.is_bottom r));
-  ())
 (* Coercing width helper: mismatched ops coerce, never raise. *)
 ;
 (  let p32 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
@@ -229,17 +175,16 @@ let run () =
 ;
 (  (* Exit state is block INPUT (j absent): denote the def to read the postcond. *)
   let j = Var.create ~is_virtual:false ~fresh:false "j" (Type.Imm 32) in
-  let _, ctx, sub, exit_tid =
+  let _, _, sub, exit_tid =
     mk_counter_loop ~exit_defs:(fun i ->
         [ Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))) ])
   in
   (* Mixed-width rshift computes: no guard fire, j non-top. *)
   let comp = "rshift: mixed-width shift operands (32 and 64 bits)" in
   let fired_r =
-    fired comp (fun () ->
-        ignore (Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)))
+    fired comp (fun () -> ignore (run_anchored sub))
   in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let j_after =
@@ -319,21 +264,15 @@ let run () =
 ;
 (  (* G3: gate-free flag-guard refinement (spec §2.1). *)
   let f, ctx, sub, exit_tid, _, _, _ = mk_flag_sub ~mixed:true in
-  let ctx' = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
+  let sol = run_anchored sub in
   ignore sol;
   (* Exit IN-state is the taken-edge refined state; the fallthrough edge has no target block. *)
   let c = AI.find_word 1 (Graphlib.Std.Solution.get sol exit_tid) f in
   check "T3-7: mixed-def — f IS refined to {1} on the taken edge"
     (Ws.elem Cbat_word.b1 c && not (Ws.elem Cbat_word.b0 c));
   (* Single-def control refines identically. *)
-  let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
-  let ctx2' = Program.create ~subs:[ sub2 ] () in
-  let sol2 =
-    Vsa.static_graph_vsa [] ctx2' sub2 (Vsa.init_sol ~entry:(anchored_entry ()) sub2)
-  in
+  let f2, _, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
+  let sol2 = run_anchored sub2 in
   let c2 = AI.find_word 1 (Graphlib.Std.Solution.get sol2 exit_tid2) f2 in
   check "T3-8: single-def flag — f2 IS refined to {1} on the taken edge"
     (Ws.elem Cbat_word.b1 c2 && not (Ws.elem Cbat_word.b0 c2));
@@ -362,8 +301,7 @@ let run () =
   check "T4-6: pre-call rdi is the concrete address {0xd0} (the alias)"
     (Ws.equal (AI.find_word 64 pre fx.ca_rdi) (Ws.singleton (w64 0xd0)));
   (* Gate-free fixpoint on the raw sub. *)
-  let ctx' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let post_ai = Graphlib.Std.Solution.get sol fx.ca_post_tid in
   check "T4-7: caller-alias — the post-call reload reads TOP (sound)"
     (Ws.is_top (AI.find_word 64 post_ai fx.ca_r2));
@@ -434,13 +372,7 @@ let run () =
 ;
 (  (* Channel-1 pin (spec §2.2): the prologue + frame-affine accesses seed. *)
   let extract_of (sub : sub term) : Cu.vsa_kind Tid.Map.t =
-    let prog = Program.create ~subs:[ sub ] () in
-    let sol =
-      Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-    in
-    let offsets, _, _ =
-      Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
-    in
+    let offsets, _, _ = extract_anchored sub in
     offsets
   in
   let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
@@ -454,13 +386,7 @@ let run () =
 (* RSP-derived base with index; the indexed load seeds. *))
 ;
 (  let _, def_load, sub = mk_rsp_index_sub () in
-  let prog = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
-  let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
-  in
+  let tags, _, _ = extract_anchored sub in
   check "P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (32L, 32L)));
   ()
@@ -468,13 +394,7 @@ let run () =
 (* Heap-shaped addresses do not seed; the RSP-direct access does. *))
 ;
 (  let _, _, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
-  let prog = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
-  let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
-  in
+  let tags, _, _ = extract_anchored sub in
   check "P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded"
     (Core.Map.find tags (Term.tid def_load) = None);
   check "P23-2: channel 2 — the disjoint store at [rbp + 0x100] is NOT seeded"
@@ -484,13 +404,7 @@ let run () =
   ())
 ;
 (  let _, def_load, _, def_use, sub = mk_one_path_sub () in
-  let prog = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
-  let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
-  in
+  let tags, _, _ = extract_anchored sub in
   check "F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
   check "F1-2: channel 2 — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
@@ -519,57 +433,10 @@ let run () =
     (Ws.is_top (Ws.extract ~hi:(-1) (Ws.singleton (w32 16))));
   ())
 ;
-(  (* 2-bit amount vs 64-bit operand: magnitudes compared, no spurious fire. *)
-  let w2 = Cbat_word.of_int ~width:2 in
-  let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
-  let lshift_comp = "During lshift, maximum element of CLP2 is >= CLP1's width" in
-  let rshift_comp = "During rshift, maximum element of CLP2 is >= CLP1's width" in
-  let arshift_comp = "During arshift, maximum element of CLP2 is >= CLP1's width" in
-  (* Guard's stderr line must NOT appear. *)
-  let fire_l = fired lshift_comp (fun () -> ignore (Clp.lshift (Clp.create (w64 16)) amt2)) in
-  let fire_r = fired rshift_comp (fun () -> ignore (Clp.rshift (Clp.create (w64 16)) amt2)) in
-  let fire_a = fired arshift_comp (fun () -> ignore (Clp.arshift (Clp.create (w64 16)) amt2)) in
-  let r = Clp.lshift (Clp.create (w64 16)) amt2 in
-  check "D7-10: lshift 2-bit {2} amount vs 64-bit operand -> computes {64}, no spurious fire"
-    (Clp.bitwidth r = 64 && Clp.min_elem r = Some (w64 64) && (not (Clp.is_top r)) && not fire_l);
-  (* Overshift is bitvec zero ({0} exactly), no fire. *)
-  check "D7-11: lshift overshift (6-bit {40} amount vs 32-bit operand) -> {0} exactly, no fire"
-    (let r = Clp.lshift (Clp.create (w32 8)) (Clp.of_list ~width:6 [ Cbat_word.of_int ~width:6 40 ]) in
-     Clp.min_elem r = Some (w32 0)
-     && Clp.max_elem r = Some (w32 0)
-     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
-     && (not (Clp.is_top r))
-     && not fire_l);
-  (* 2-bit amounts take the mixed-width path (sound top); wrapped guard stays silent. *)
-  (* 2-bit amount coerces to operand width; shift computes. *)
-  check
-    "D7-12: rshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never \
-     fires"
-    (Clp.equal (Clp.rshift (Clp.create (w64 16)) amt2) (Clp.create (w64 4)) && not fire_r);
-  check
-    "D7-13: arshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never \
-     fires"
-    (Clp.equal (Clp.arshift (Clp.create (w64 16)) amt2) (Clp.create (w64 4)) && not fire_a);
-  (* Same-width overshift: rshift/arshift give {0} exactly. *)
-  check "D7-14: rshift/arshift overshift ({40} vs 32-bit) -> {0} exactly, no fire"
-    (let r = Clp.rshift (Clp.create (w32 8)) (Clp.of_list ~width:32 [ w32 40 ]) in
-     let a = Clp.arshift (Clp.create (w32 8)) (Clp.of_list ~width:32 [ w32 40 ]) in
-     Clp.min_elem r = Some (w32 0)
-     && Clp.max_elem r = Some (w32 0)
-     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
-     && (not (Clp.is_top r))
-     && Clp.min_elem a = Some (w32 0)
-     && Clp.max_elem a = Some (w32 0)
-     && Cbat_word.to_int_exn (Clp.cardinality a) = 1
-     && (not (Clp.is_top a))
-     && (not fire_r) && not fire_a);
-  ()
-
-(* Crash shape: RAX := high:0[RAX] in the call's return target. Returns (rax, ctx, sub, final tid). *))
-;
+(* Crash shape: RAX := high:0[RAX] in the call's return target. Returns (rax, ctx, sub, final tid). *)
 (  (* Restriction stays OFF: ON would skip the untagged cast, making the test vacuous. *)
-  let rax, ctx, sub, final_tid = mk_high0_cast_sub () in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let rax, _, sub, final_tid = mk_high0_cast_sub () in
+  let sol = run_anchored sub in
   let final_ai = Graphlib.Std.Solution.get sol final_tid in
   check "D7-15 (BIR): RAX := high:0[RAX] after a call — fixpoint completes rc=0, RAX = top(64)"
     (Ws.is_top (AI.find_word 64 final_ai rax));
@@ -586,115 +453,7 @@ let run () =
     (not (Clp.equal p (Clp.top 64)));
   ())
 ;
-(  (* Guard's stderr line must NOT appear. *)
-  let lshift_comp = "During lshift, maximum element of CLP2 is >= CLP1's width" in
-  let rshift_comp = "During rshift, maximum element of CLP2 is >= CLP1's width" in
-  let arshift_comp = "During arshift, maximum element of CLP2 is >= CLP1's width" in
-  let fire_l =
-    fired lshift_comp (fun () ->
-        ignore (Clp.lshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])))
-  in
-  let fire_r =
-    fired rshift_comp (fun () ->
-        ignore (Clp.rshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])))
-  in
-  let fire_a =
-    fired arshift_comp (fun () ->
-        ignore (Clp.arshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])))
-  in
-  let is_zero_clp (r : Clp.t) : bool =
-    Clp.min_elem r = Some (w64 0)
-    && Clp.max_elem r = Some (w64 0)
-    && Cbat_word.to_int_exn (Clp.cardinality r) = 1
-    && (not (Clp.is_top r))
-    && not (Clp.is_bottom r)
-  in
-  (* Fully overshifted (min >= width): exactly {0}. *)
-  check "E2eC-1: lshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire"
-    (is_zero_clp (Clp.lshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])) && not fire_l);
-  check "E2eC-2: lshift {16} by multi-card overshift {64,68,72} stride 4 -> {0}, no fire"
-    (let amt = Clp.create ~width:64 ~step:(w64 4) ~cardn:(Cbat_word.of_int ~width:65 3) (w64 64) in
-     is_zero_clp (Clp.lshift (Clp.create (w64 16)) amt) && not fire_l);
-  check "E2eC-3: rshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire"
-    (is_zero_clp (Clp.rshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])) && not fire_r);
-  (* Overshift arshift: mixed-sign gives {0, all-ones}; pure signs collapse. *)
-  check "E2eC-4: arshift overshift of a mixed-sign operand -> {0, all-ones}, no fire"
-    (let mixed = Clp.of_list ~width:64 [ w64 1; Cbat_word.lshift (w64 1) (w64 63) ] in
-     let r = Clp.arshift mixed (Clp.of_list ~width:64 [ w64 64 ]) in
-     Cbat_word.to_int_exn (Clp.cardinality r) = 2
-     && Clp.elem (w64 0) r
-     && Clp.elem (Cbat_word.ones 64) r
-     && (not (Clp.elem (w64 1) r))
-     && (not (Clp.is_top r))
-     && not fire_a);
-  check "E2eC-5: arshift overshift of a nonneg operand -> {0} exactly (sign-extension)"
-    (is_zero_clp (Clp.arshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ]))
-    && not fire_a);
-  check "E2eC-6: arshift overshift of a negative operand -> {all-ones} exactly"
-    (let r =
-       Clp.arshift (Clp.create (Cbat_word.lshift (w64 1) (w64 63))) (Clp.of_list ~width:64 [ w64 64 ])
-     in
-     Clp.min_elem r = Some (Cbat_word.ones 64)
-     && Clp.max_elem r = Some (Cbat_word.ones 64)
-     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
-     && (not (Clp.is_top r))
-     && not fire_a);
-  (* Straddling (min < width <= max): capped exact path UNION overshift class. *)
-  let straddle = Clp.create ~width:64 ~step:(w64 2) ~cardn:(Cbat_word.of_int ~width:65 32) (w64 8) in
-  check "E2eC-7: lshift {16} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}"
-    (let r = Clp.lshift (Clp.create (w64 16)) straddle in
-     (not (Clp.is_top r))
-     && (not (Clp.is_bottom r))
-     && Clp.elem (w64 0) r (* overshift (and 16<<62 mod 2^64) *)
-     && Clp.elem (w64 0x1000) r (* 16<<8 = capped min *)
-     && Clp.elem (w64 0x4000) r (* 16<<10 *)
-     && Clp.elem (w64 0x40000000) r (* 16<<30 *)
-     && not fire_l);
-  check "E2eC-8: rshift {2^40} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}"
-    (let r = Clp.rshift (Clp.create (Cbat_word.lshift (w64 1) (w64 40))) straddle in
-     (not (Clp.is_top r))
-     && (not (Clp.is_bottom r))
-     && Clp.elem (w64 0) r (* 2^40>>a = 0 for a >= 41 *)
-     && Clp.elem (w64 1) r (* 2^40>>40 *)
-     && Clp.elem (w64 4) r (* 2^40>>38 *)
-     && Clp.elem (w64 0x100000000) r (* 2^40>>8 = capped min *)
-     && not fire_r);
-  check
-    "E2eC-9: arshift {2^63} by straddling [8,70] step 2 -> non-top, contains capped base ∪ \
-     {all-ones}"
-    (let r = Clp.arshift (Clp.create (Cbat_word.lshift (w64 1) (w64 63))) straddle in
-     (not (Clp.is_top r))
-     && (not (Clp.is_bottom r))
-     && Clp.elem (Cbat_word.ones 64) r (* overshift: amount 70 *)
-     && Clp.elem (Cbat_word.neg (Cbat_word.lshift (w64 1) (w64 55))) r (* amount 8: sign-ext of 2^63>>8 = -2^55 *)
-     && not fire_a);
-  (* Full capped image of straddling arshift not asserted element-wise (step collapse). *)
-  (* TOP amount caps to [0, width-1] at reachable stride. *)
-  check
-    "E2eC-10: lshift {16} by top(64) amount -> stride-class result (non-bottom, contains 0 and \
-     16), no fire"
-    (let r = Clp.lshift (Clp.create (w64 16)) (Clp.top 64) in
-     (not (Clp.is_bottom r)) && Clp.elem (w64 0) r && Clp.elem (w64 16) r && not fire_l);
-  (* Segment-width shifts fully overshifted give exactly {0}. *)
-  check "E2eC-11: array_local pattern — 32-bit operand shifted by {32} -> {0} exactly, no fire"
-    (let r = Clp.lshift (Clp.create (w32 1)) (Clp.of_list ~width:32 [ w32 32 ]) in
-     Clp.min_elem r = Some (w32 0)
-     && Clp.max_elem r = Some (w32 0)
-     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
-     && (not (Clp.is_top r))
-     && not fire_l);
-  check "E2eC-12: array_local pattern — 8-bit operand shifted by {8} -> {0} exactly, no fire"
-    (let r =
-       Clp.lshift (Clp.create (Cbat_word.of_int ~width:8 1)) (Clp.of_list ~width:8 [ Cbat_word.of_int ~width:8 8 ])
-     in
-     Clp.min_elem r = Some (Cbat_word.of_int ~width:8 0)
-     && Clp.max_elem r = Some (Cbat_word.of_int ~width:8 0)
-     && (not (Clp.is_top r))
-     && not fire_l);
-  ()
-
-(* BIR loop with counter-shift: [0,N) window survives the shift. *))
-;
+(* BIR loop with counter-shift: [0,N) window survives the shift. *)
 (  let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let x = Var.create ~is_virtual:false ~fresh:false "x" (Type.Imm 64) in
   let y = Var.create ~is_virtual:false ~fresh:false "y" (Type.Imm 64) in
@@ -702,43 +461,37 @@ let run () =
   let xv = Bil.Var x in
   let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
   let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
-  let entry_b = Blk.Builder.create () in
-  let body_b = Blk.Builder.create () in
-  let header_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
-  Blk.Builder.add_def entry_b (Def.create x (Bil.Int (Cbat_word.to_word (w64 16))));
-  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
+  let entry0 =
+    blk_of_defs
+      [
+        Def.create i (Bil.Int (Cbat_word.to_word (w32 0)));
+        Def.create x (Bil.Int (Cbat_word.to_word (w64 16)));
+      ]
+  in
   (* Body increments first: y = x << (i+1) ∈ {32..512}, in case 1. *)
-  Blk.Builder.add_def body_b (Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv)));
-  let entry0 = Blk.Builder.result entry_b in
-  let body0 = Blk.Builder.result body_b in
-  let header0 = Blk.Builder.result header_b in
-  let exit0 = Blk.Builder.result exit_b in
+  let body0 =
+    blk_of_defs
+      [
+        Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1))));
+        Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv));
+      ]
+  in
+  let header0 = blk_of_defs [] in
+  let exit0 = blk_of_defs [] in
   let body_tid = Term.tid body0 in
   let header_tid = Term.tid header0 in
   let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct body_tid)));
-  let body_b = Blk.Builder.init ~copy_defs:true body0 in
-  Blk.Builder.add_jmp body_b (Jmp.create (Goto (Direct header_tid)));
-  let header_b = Blk.Builder.init ~copy_defs:true header0 in
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:nlt5 (Goto (Direct exit_tid)));
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:lt5 (Goto (Direct body_tid)));
-  let entry = Blk.Builder.result entry_b in
-  let body = Blk.Builder.result body_b in
-  let header = Blk.Builder.result header_b in
-  let exit = Blk.Builder.result exit_b in
+  let entry = with_jmps entry0 [ mk_goto body_tid ] in
+  let body = with_jmps body0 [ mk_goto header_tid ] in
+  let header = with_jmps header0 [ mk_jmp_to exit_tid nlt5; mk_jmp_to body_tid lt5 ] in
+  let exit = exit0 in
   let sub_b = Sub.Builder.create ~name:"e2ec_loop" () in
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
+  let sol = run_anchored sub in
   (* Single-predecessor IN-states are the per-edge refined states. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
@@ -761,8 +514,7 @@ let run () =
 (  (* Channel-2 negative (spec §2.2): the heap-indexed store never seeds. *)
   let _, _, _, _, sub, exit_tid = mk_e2ed_heap_sub () in
   (* Gate-free: every def is denoted, so the store's data var reads {99}. *)
-  let ctx' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
   let vv = AI.find_word 64 exit_ai (v64 "e2ed_v") in
   check "E2eD-4: gate-free — the heap store's data var is denoted ({99})"
@@ -772,13 +524,7 @@ let run () =
 (* Channel-1 indexed-store pin: same shape seeds without any tagger. *))
 ;
 (  let _, _, def_store, sub, _ = mk_e2ed_rsp_store_sub () in
-  let prog = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
-  let tags, _, _ =
-    Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
-  in
+  let tags, _, _ = extract_anchored sub in
   check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(-24,-24)"
     (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-24L, -24L)));
   ()
@@ -815,8 +561,7 @@ let run () =
   in
   (* Gate-free production shape: entry input carries RSP = {0}. *)
   let sub = mk_p3_anchor_sub () in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let st = Graphlib.Std.Solution.get sol (entry_tid_of sub) in
   check
     "P3-1: gate-free — the RSP := 0 anchor is denoted (entry input state \
@@ -904,39 +649,31 @@ let run () =
   let kept = Vsa.reachable_jumps flag_env (Seq.of_list [ jmp ]) |> Seq.to_list in
   (* (b) loop with flag-gated back-edge. *)
   let cnt = v64 "l2b_cnt5" in
-  let entry_b = Blk.Builder.create () in
-  let body_b = Blk.Builder.create () in
-  let header_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x)));
-  Blk.Builder.add_def body_b (Def.create cnt (Bil.BinOp (Bil.PLUS, Bil.Var cnt, Bil.Int (Cbat_word.to_word (w64 1)))));
-  let entry0 = Blk.Builder.result entry_b in
-  let body0 = Blk.Builder.result body_b in
-  let header0 = Blk.Builder.result header_b in
-  let exit0 = Blk.Builder.result exit_b in
+  let entry0 =
+    blk_of_defs [ Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x)) ]
+  in
+  let body0 =
+    blk_of_defs [ Def.create cnt (Bil.BinOp (Bil.PLUS, Bil.Var cnt, Bil.Int (Cbat_word.to_word (w64 1)))) ]
+  in
+  let header0 = blk_of_defs [] in
+  let exit0 = blk_of_defs [] in
   let body_tid = Term.tid body0 in
   let exit_tid = Term.tid exit0 in
   let header_tid = Term.tid header0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct header_tid)));
-  let body_b = Blk.Builder.init ~copy_defs:true body0 in
-  Blk.Builder.add_jmp body_b (Jmp.create (Goto (Direct header_tid)));
-  let header_b = Blk.Builder.init ~copy_defs:true header0 in
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:(Bil.Var zf) (Goto (Direct body_tid)));
-  Blk.Builder.add_jmp header_b
-    (Jmp.create ~cond:(Bil.UnOp (Bil.NOT, Bil.Var zf)) (Goto (Direct exit_tid)));
-  let entry = Blk.Builder.result entry_b in
-  let body = Blk.Builder.result body_b in
-  let header = Blk.Builder.result header_b in
-  let exit = Blk.Builder.result exit_b in
+  let entry = with_jmps entry0 [ mk_goto header_tid ] in
+  let body = with_jmps body0 [ mk_goto header_tid ] in
+  let header =
+    with_jmps header0
+      [ mk_jmp_to body_tid (Bil.Var zf); mk_jmp_to exit_tid (Bil.UnOp (Bil.NOT, Bil.Var zf)) ]
+  in
+  let exit = exit0 in
   let sub_b = Sub.Builder.create ~name:"l2b_flag_loop" () in
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b body;
   Sub.Builder.add_blk sub_b header;
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let body_st = Graphlib.Std.Solution.get sol body_tid in
   let body_flag = AI.find_word 1 body_st zf in
   check

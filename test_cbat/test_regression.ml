@@ -92,14 +92,14 @@ let run_creg () =
 
 (* C3: escape set includes the call block's outgoing-slot stores. *))
 ;
-(  let fx = mk_c3 () in
-  let sub' = fx.c3_sub in
+(  let fx = mk_escape_caller ~pfx:"c3" ~fp_off:8 ~seed:0xAA ~outs:[ (16, C 0xBB) ] () in
+  let sub' = fx.es_sub in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
     Vsa.denote_defs
-      (blk_of (Term.tid fx.c3_blk1))
+      (blk_of (Term.tid fx.es_blk1))
       (Vsa.denote_defs
-         (blk_of (Term.tid fx.c3_blk0))
+         (blk_of (Term.tid fx.es_blk0))
          (AI.set_frame (anchored_entry ()) AI.seed_frame))
   in
   let read64 ai addr =
@@ -107,7 +107,7 @@ let run_creg () =
     | Some k ->
         Mem.Val.data
           (Mem.find (64, LittleEndian)
-             (AI.find_memory { addr_width = 64; addressable_width = 8 } ai fx.c3_m)
+             (AI.find_memory { addr_width = 64; addressable_width = 8 } ai fx.es_m)
              k)
     | None -> assert false
   in
@@ -115,9 +115,8 @@ let run_creg () =
     (Ws.equal (read64 st_pre (-8L)) (Ws.singleton (w64 0xAA)));
   check "regression C3: pre-call the outgoing slot [RSP+16] holds {0xBB} (non-vacuous pin)"
     (Ws.equal (read64 st_pre (-16L)) (Ws.singleton (w64 0xBB)));
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
-  let post_ai = Graphlib.Std.Solution.get sol fx.c3_post_tid in
+  let sol = run_anchored sub' in
+  let post_ai = Graphlib.Std.Solution.get sol fx.es_post_tid in
   check
     "regression C3: the caller-frame cell [RSP-8] survives the call with its value (frame not \
      whole-memory-topped)"
@@ -165,64 +164,7 @@ let run_creg () =
 
 (* C4a: Infinite tag survives the overlap merge. *))
 ;
-(  let rsp = v64 "RSP" in
-  let i = Var.create ~is_virtual:false ~fresh:false "c4a_i" (Type.Imm 32) in
-  let t = Var.create ~is_virtual:false ~fresh:false "c4a_t" (Type.Imm 32) in
-  let m = memv "c4a_m" in
-  let iv = Bil.Var i in
-  let lt = Bil.BinOp (Bil.LT, iv, Bil.Var t) in
-  let nlt = Bil.UnOp (Bil.NOT, lt) in
-  let idx_addr =
-    Bil.BinOp
-      ( Bil.PLUS,
-        Bil.Var rsp,
-        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
-  in
-  let def_idx_store =
-    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
-  in
-  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
-  let def_concrete =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
-           Bil.Int (Cbat_word.to_word (w64 9)),
-           LittleEndian,
-           `r64 ))
-  in
-  let entry_b = Blk.Builder.create () in
-  let body_b = Blk.Builder.create () in
-  let header_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
-  Blk.Builder.add_def body_b def_idx_store;
-  Blk.Builder.add_def body_b def_inc;
-  Blk.Builder.add_def exit_b def_concrete;
-  let entry0 = Blk.Builder.result entry_b in
-  let body0 = Blk.Builder.result body_b in
-  let header0 = Blk.Builder.result header_b in
-  let exit0 = Blk.Builder.result exit_b in
-  let body_tid = Term.tid body0 in
-  let header_tid = Term.tid header0 in
-  let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct body_tid)));
-  let body_b = Blk.Builder.init ~copy_defs:true body0 in
-  Blk.Builder.add_jmp body_b (Jmp.create (Goto (Direct header_tid)));
-  let header_b = Blk.Builder.init ~copy_defs:true header0 in
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:nlt (Goto (Direct exit_tid)));
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:lt (Goto (Direct body_tid)));
-  let entry = Blk.Builder.result entry_b in
-  let body = Blk.Builder.result body_b in
-  let header = Blk.Builder.result header_b in
-  let exit = Blk.Builder.result exit_b in
-  let sub_b = Sub.Builder.create ~name:"c4a_merge" () in
-  Sub.Builder.add_blk sub_b entry;
-  Sub.Builder.add_blk sub_b body;
-  Sub.Builder.add_blk sub_b header;
-  Sub.Builder.add_blk sub_b exit;
-  let sub = Sub.Builder.result sub_b in
+(  let sub, def_idx_store = mk_indexed_loop ~pfx:"c4a" in
   let tagged = sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
@@ -234,64 +176,7 @@ let run_creg () =
 
 (* R11: overlap merge preserves every member's kind/span verbatim. *))
 ;
-(  let rsp = v64 "RSP" in
-  let i = Var.create ~is_virtual:false ~fresh:false "r11_i" (Type.Imm 32) in
-  let t = Var.create ~is_virtual:false ~fresh:false "r11_t" (Type.Imm 32) in
-  let m = memv "r11_m" in
-  let iv = Bil.Var i in
-  let lt = Bil.BinOp (Bil.LT, iv, Bil.Var t) in
-  let nlt = Bil.UnOp (Bil.NOT, lt) in
-  let idx_addr =
-    Bil.BinOp
-      ( Bil.PLUS,
-        Bil.Var rsp,
-        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
-  in
-  let def_idx_store =
-    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
-  in
-  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
-  let def_singleton =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
-           Bil.Int (Cbat_word.to_word (w64 9)),
-           LittleEndian,
-           `r64 ))
-  in
-  let entry_b = Blk.Builder.create () in
-  let body_b = Blk.Builder.create () in
-  let header_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
-  Blk.Builder.add_def body_b def_idx_store;
-  Blk.Builder.add_def body_b def_inc;
-  Blk.Builder.add_def exit_b def_singleton;
-  let entry0 = Blk.Builder.result entry_b in
-  let body0 = Blk.Builder.result body_b in
-  let header0 = Blk.Builder.result header_b in
-  let exit0 = Blk.Builder.result exit_b in
-  let body_tid = Term.tid body0 in
-  let header_tid = Term.tid header0 in
-  let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct body_tid)));
-  let body_b = Blk.Builder.init ~copy_defs:true body0 in
-  Blk.Builder.add_jmp body_b (Jmp.create (Goto (Direct header_tid)));
-  let header_b = Blk.Builder.init ~copy_defs:true header0 in
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:nlt (Goto (Direct exit_tid)));
-  Blk.Builder.add_jmp header_b (Jmp.create ~cond:lt (Goto (Direct body_tid)));
-  let entry = Blk.Builder.result entry_b in
-  let body = Blk.Builder.result body_b in
-  let header = Blk.Builder.result header_b in
-  let exit = Blk.Builder.result exit_b in
-  let sub_b = Sub.Builder.create ~name:"r11_merge" () in
-  Sub.Builder.add_blk sub_b entry;
-  Sub.Builder.add_blk sub_b body;
-  Sub.Builder.add_blk sub_b header;
-  Sub.Builder.add_blk sub_b exit;
-  let sub = Sub.Builder.result sub_b in
+(  let sub, def_idx_store = mk_indexed_loop ~pfx:"r11" in
   let tagged = sub in
   let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
@@ -300,66 +185,14 @@ let run_creg () =
     (kind_of (Term.tid def_idx_store) <> None);
 
   ())
-
 let run_remediation () =
-(  let rsp = v64 "RSP" in
-  let fp = v64 "a1_fp" in
-  let rdi = v64 "RDI" in
+(  (* Vs C3: outgoing slot stores unwritten RCX (TOP). *)
   let rcx = v64 "RCX" in
-  let r2 = v64 "a1_r2" in
-  let m = memv "a1_m" in
-  let cb = Blk.Builder.create () in
-  let cblk0 = Blk.Builder.result cb in
-  let cb = Blk.Builder.init ~copy_defs:true cblk0 in
-  Blk.Builder.add_jmp cb (Jmp.create (Goto (Direct (Term.tid cblk0))));
-  let cblk = Blk.Builder.result cb in
-  let callee_b = Sub.Builder.create ~name:"a1_callee" () in
-  Sub.Builder.add_blk callee_b cblk;
-  let callee = Sub.Builder.result callee_b in
-  let callee_tid = Term.tid callee in
-  let post_b = Blk.Builder.create () in
-  Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
-  let post0 = Blk.Builder.result post_b in
-  let post_tid = Term.tid post0 in
-  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
-  let def_seed =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 0xAA)), LittleEndian, `r64))
-  in
-  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
-  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
-  (* Vs C3: outgoing slot stores unwritten RCX (TOP). *)
-  let def_out =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
-           Bil.Var rcx,
-           LittleEndian,
-           `r64 ))
-  in
-  let b0 = Blk.Builder.create () in
-  List.iter (Blk.Builder.add_def b0) [ def_fp; def_seed; def_prologue ];
-  let b00 = Blk.Builder.result b0 in
-  let b1 = Blk.Builder.create () in
-  List.iter (Blk.Builder.add_def b1) [ def_rdi; def_out ];
-  let b10 = Blk.Builder.result b1 in
-  let b0' = Blk.Builder.init ~copy_defs:true b00 in
-  Blk.Builder.add_jmp b0' (Jmp.create (Goto (Direct (Term.tid b10))));
-  let b1' = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_jmp b1'
-    (Jmp.create
-       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ())));
-  let blk0 = Blk.Builder.result b0' in
-  let blk1 = Blk.Builder.result b1' in
-  let sub_b = Sub.Builder.create ~name:"a1_caller" () in
-  Sub.Builder.add_arg sub_b (Arg.create rdi (Bil.Var rdi));
-  Sub.Builder.add_arg sub_b (Arg.create r2 (Bil.Var r2));
-  Sub.Builder.add_blk sub_b blk0;
-  Sub.Builder.add_blk sub_b blk1;
-  Sub.Builder.add_blk sub_b post0;
-  let caller = Sub.Builder.result sub_b in
-  ignore callee;
-  let sub' = caller in
+  let fx = mk_escape_caller ~pfx:"a1" ~fp_off:8 ~seed:0xAA ~outs:[ (16, R rcx) ] () in
+  let sub' = fx.es_sub in
+  let blk0 = fx.es_blk0 in
+  let blk1 = fx.es_blk1 in
+  let m = fx.es_m in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
     Vsa.denote_defs
@@ -379,8 +212,7 @@ let run_remediation () =
     "remediation A1: pre-call the seeded caller-frame cell [entry RSP-8] holds {0xAA} (non-vacuous \
      pin)"
     (Ws.equal (read64 st_pre (-8L)) (Ws.singleton (w64 0xAA)));
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let _sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
+  let _sol = run_anchored sub' in
 
   ()
 
@@ -459,72 +291,12 @@ let run_remediation () =
 
 (* A4c: escape ranges cover exactly the two slots' bytes. *))
 ;
-(  let rsp = v64 "RSP" in
-  let fp = v64 "a4c_fp" in
-  let rdi = v64 "RDI" in
-  let r2 = v64 "a4c_r2" in
-  let m = memv "a4c_m" in
-  let cb = Blk.Builder.create () in
-  let cblk0 = Blk.Builder.result cb in
-  let cb = Blk.Builder.init ~copy_defs:true cblk0 in
-  Blk.Builder.add_jmp cb (Jmp.create (Goto (Direct (Term.tid cblk0))));
-  let cblk = Blk.Builder.result cb in
-  let callee_b = Sub.Builder.create ~name:"a4c_callee" () in
-  Sub.Builder.add_blk callee_b cblk;
-  let callee = Sub.Builder.result callee_b in
-  let callee_tid = Term.tid callee in
-  let post_b = Blk.Builder.create () in
-  Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
-  let post0 = Blk.Builder.result post_b in
-  let post_tid = Term.tid post0 in
-  (* Neighbor at [entry RSP - 0x18]: inside kept frame, outside both slots. *)
-  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x18)))) in
-  let def_seed =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 0xAA)), LittleEndian, `r64))
-  in
-  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
-  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
-  let def_out1 =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
-           Bil.Int (Cbat_word.to_word (w64 0xBB)),
-           LittleEndian,
-           `r64 ))
-  in
-  let def_out2 =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 24))),
-           Bil.Int (Cbat_word.to_word (w64 0xDD)),
-           LittleEndian,
-           `r64 ))
-  in
-  let b0 = Blk.Builder.create () in
-  List.iter (Blk.Builder.add_def b0) [ def_fp; def_seed; def_prologue ];
-  let b00 = Blk.Builder.result b0 in
-  let b1 = Blk.Builder.create () in
-  List.iter (Blk.Builder.add_def b1) [ def_rdi; def_out1; def_out2 ];
-  let b10 = Blk.Builder.result b1 in
-  let b0' = Blk.Builder.init ~copy_defs:true b00 in
-  Blk.Builder.add_jmp b0' (Jmp.create (Goto (Direct (Term.tid b10))));
-  let b1' = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_jmp b1'
-    (Jmp.create
-       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ())));
-  let blk0 = Blk.Builder.result b0' in
-  let blk1 = Blk.Builder.result b1' in
-  let sub_b = Sub.Builder.create ~name:"a4c_caller" () in
-  Sub.Builder.add_arg sub_b (Arg.create rdi (Bil.Var rdi));
-  Sub.Builder.add_arg sub_b (Arg.create r2 (Bil.Var r2));
-  Sub.Builder.add_blk sub_b blk0;
-  Sub.Builder.add_blk sub_b blk1;
-  Sub.Builder.add_blk sub_b post0;
-  let caller = Sub.Builder.result sub_b in
-  ignore callee;
-  let sub' = caller in
+(  (* Neighbor at [entry RSP - 0x18]: inside kept frame, outside both slots. *)
+  let fx = mk_escape_caller ~pfx:"a4c" ~fp_off:0x18 ~seed:0xAA ~outs:[ (16, C 0xBB); (24, C 0xDD) ] () in
+  let sub' = fx.es_sub in
+  let blk0 = fx.es_blk0 in
+  let blk1 = fx.es_blk1 in
+  let m = fx.es_m in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
     Vsa.denote_defs
@@ -546,9 +318,8 @@ let run_remediation () =
     (Ws.equal (read64 st_pre (-0x18L)) (Ws.singleton (w64 0xAA))
     && Ws.equal (read64 st_pre (-0x10L)) (Ws.singleton (w64 0xBB))
     && Ws.equal (read64 st_pre (-0x8L)) (Ws.singleton (w64 0xDD)));
-  let ctx' = Program.create ~subs:[ sub' ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub' (Vsa.init_sol ~entry:(anchored_entry ()) sub') in
-  let post_ai = Graphlib.Std.Solution.get sol post_tid in
+  let sol = run_anchored sub' in
+  let post_ai = Graphlib.Std.Solution.get sol fx.es_post_tid in
   check "remediation A4c: the neighbor cell OUTSIDE the slots' extent survives the call untouched"
     (Ws.equal (read64 post_ai (-0x18L)) (Ws.singleton (w64 0xAA)));
   ())
@@ -899,174 +670,6 @@ let run_regions () =
      (the alias half of the unified rule catches it)"
     (Sm.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
      && Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
-  ())
-;
-(  (* C10/C11: overlap equals not-is_bottom-of-meet on sampled pairs. *)
-  let pairs : (Ws.t * Ws.t) list =
-    [
-      (Ws.of_list ~width:32 [ w32 1; w32 2 ], Ws.of_list ~width:32 [ w32 2; w32 3 ]);
-      (Ws.of_list ~width:32 [ w32 1 ], Ws.of_list ~width:32 [ w32 2 ]);
-      (Ws.top 32, Ws.of_list ~width:32 [ w32 5 ]);
-      ( Ws.of_list ~width:8 [ Cbat_word.of_int ~width:8 1; Cbat_word.of_int ~width:8 2 ],
-        Ws.of_list ~width:8 [ Cbat_word.of_int ~width:8 3 ] );
-      ( Ws.of_clp (Clp.create (w32 0) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 5)),
-        Ws.of_clp (Clp.create (w32 1) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 5)) );
-      (Ws.singleton (w32 10), Ws.of_list ~width:32 [ w32 10; w32 20 ]);
-      (Ws.singleton (w32 10), Ws.of_list ~width:32 [ w32 20; w32 30 ]);
-    ]
-  in
-  List.iter
-    (fun (a, b) ->
-      let overlap = Ws.overlap a b in
-      let meet = Ws.meet a b in
-      let is_bottom = Ws.is_bottom meet in
-      check
-        (Printf.sprintf "property WordSet.overlap vs meet is_bottom: overlap %b = not is_bottom %b"
-           overlap is_bottom)
-        (overlap = not is_bottom))
-    pairs;
-  (* Width-mismatched overlap is false (exact disjointness). *)
-  let a32 = Ws.of_list ~width:32 [ w32 1 ] in
-  let a64 = Ws.of_list ~width:64 [ w64 1 ] in
-  check "property WordSet.overlap width-mismatch → false (pinned convention, FinSet/FinSet)"
-    (not (Ws.overlap a32 a64));
-  (* Mismatched meet returns the wider operand (non-bottom). *)
-  check "property WordSet.meet width-mismatch → wider operand (non-bottom)"
-    (not (Ws.is_bottom (Ws.meet a32 a64)));
-  (* m6: randomized small-width enumeration of the same property. *)
-  Random.init 20260822;
-  let failures_before_m6_overlap = !failures in
-  let rand_ws (w : int) : Ws.t * [ `fs | `clp ] =
-    match Random.int 4 with
-    | 0 ->
-        (* Small explicit set (FinSet arm). *)
-        let n = 1 + Random.int 5 in
-        let rec els acc i =
-          if i <= 0 then acc
-          else els (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) :: acc) (i - 1)
-        in
-        (Ws.of_list ~width:w (els [] n), `fs)
-    | 1 ->
-        (* Random progression. *)
-        let base = Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) in
-        let step = Cbat_word.of_int ~width:w (1 + Random.int 3) in
-        let c = if Random.bool () then 1 + Random.int 6 else 11 + Random.int 30 in
-        ( Ws.of_clp (Clp.create base ~step ~cardn:(Cbat_word.of_int ~width:(w + 1) c)),
-          if c <= 10 (* Utils.fin_set_size *) then `fs else `clp )
-    | 2 ->
-        (* Top (demotes by width). *)
-        (Ws.top w, if w <= 3 then `fs else `clp)
-    | _ -> (Ws.singleton (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1))), `fs)
-  in
-  for _i = 1 to 300 do
-    let w = [| 3; 5; 8 |].(Random.int 3) in
-    let a, ta = rand_ws w in
-    let b, tb = rand_ws w in
-    if Ws.bitwidth a = Ws.bitwidth b then begin
-      let ov = Ws.overlap a b in
-      let mb = Ws.is_bottom (Ws.meet a b) in
-      if ov && mb then begin
-        Printf.printf "FAIL: property m6 overlap ⟹ meet non-bottom (w=%d, trial %d)\n" w _i;
-        incr failures
-      end;
-      if (ta = `fs || tb = `fs) && ov <> not mb then begin
-        Printf.printf
-          "FAIL: property m6 overlap = ¬is_bottom∘meet (FinSet-arm meet, w=%d, trial %d)\n" w _i;
-        incr failures
-      end
-    end
-  done;
-  if !failures = failures_before_m6_overlap then
-    Printf.printf
-      "ok: property m6 overlap = ¬is_bottom∘meet enumerated (300 random equal-width trials, \
-       representation-aware)\n";
-  ())
-;
-(  (* C11: FinSet↔Clp round-trip equivalence on small sets. *)
-  let fin_sets : Fs.t list =
-    [
-      Fs.of_list ~width:32 [ w32 1; w32 2; w32 3 ];
-      Fs.of_list ~width:32 [ w32 5 ];
-      Fs.of_list ~width:8 [ Cbat_word.of_int ~width:8 1; Cbat_word.of_int ~width:8 2 ];
-      Fs.of_list ~width:16 [ Cbat_word.of_int ~width:16 10; Cbat_word.of_int ~width:16 20 ];
-      Fs.of_list ~width:32 [ w32 0; w32 2; w32 4; w32 6; w32 8 ];
-    ]
-  in
-  List.iter
-    (fun s ->
-      let p = Clp.of_list ~width:(Fs.bitwidth s) (Fs.iter s) in
-      let s2 = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
-      check
-        (Printf.sprintf "property FinSet->Clp->FinSet round-trip width %d cardn %d" (Fs.bitwidth s)
-           (Cbat_word.to_int_exn (Fs.cardinality s)))
-        (Fs.equal s s2))
-    fin_sets;
-  let clps : Clp.t list =
-    [
-      Clp.create (w32 10) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 3);
-      Clp.create (w32 0) ~step:(w32 1) ~cardn:(Cbat_word.of_int ~width:33 5);
-      Clp.create (Cbat_word.of_int ~width:8 1) ~step:(Cbat_word.of_int ~width:8 1) ~cardn:(Cbat_word.of_int ~width:9 3);
-    ]
-  in
-  List.iter
-    (fun p ->
-      let cardn = Clp.cardinality p in
-      if (not (Cbat_word.is_zero cardn)) && Cbat_word.compare cardn (Cbat_word.of_int ~width:(Cbat_word.bitwidth cardn) 11) < 0 then
-        let s = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
-        let p2 = Clp.of_list ~width:(Fs.bitwidth s) (Fs.iter s) in
-        check
-          (Printf.sprintf "property Clp->FinSet->Clp round-trip cardn %d" (Cbat_word.to_int_exn cardn))
-          (Clp.equal p p2))
-    clps;
-  (* m6: randomized round-trips — soundness always, exactness on wrap-free arcs. *)
-  Random.init 20260822;
-  let failures_before_m6_rt = !failures in
-  for _i = 1 to 200 do
-    let w = [| 4; 8; 12 |].(Random.int 3) in
-    let dom = 1 lsl w in
-    let base = Random.int dom in
-    let step = 1 + Random.int 5 in
-    let n = 1 + Random.int 10 in
-    let rec els acc k =
-      if k = n then acc else els (Cbat_word.of_int ~width:w ((base + (k * step)) mod dom) :: acc) (k + 1)
-    in
-    (* Exact-round-trip shape: no wrap AND seam gap step-multiple. *)
-    let wrap_free = base + ((n - 1) * step) < dom in
-    let seam_ok = (dom - (base + ((n - 1) * step) - base)) mod step = 0 in
-    let exact_shape = wrap_free && seam_ok in
-    let subset s1 s2 = List.for_all (fun x -> Fs.elem x s2) s1 in
-    let expect b msg =
-      if not b then begin
-        Printf.printf "FAIL: property m6 %s (trial %d)\n" msg _i;
-        incr failures
-      end
-    in
-    (* FinSet -> Clp -> FinSet *)
-    let s = Fs.of_list ~width:w (els [] 0) in
-    let p = Clp.of_list ~width:(Fs.bitwidth s) (Fs.iter s) in
-    let s2 = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
-    expect (subset (Fs.iter s) s2) "FinSet->Clp->FinSet SOUND (s ⊆ s2)";
-    expect
-      (Cbat_word.compare (Fs.cardinality s) (Fs.cardinality s2) <= 0)
-      "FinSet->Clp->FinSet cardn non-decreasing";
-    if exact_shape then expect (Fs.equal s s2) "FinSet->Clp->FinSet EXACT (wrap-free arc)";
-    (* Clp -> FinSet -> Clp *)
-    let p3 =
-      Clp.create (Cbat_word.of_int ~width:w base) ~step:(Cbat_word.of_int ~width:w step)
-        ~cardn:(Cbat_word.of_int ~width:(w + 1) n)
-    in
-    let s3 = Fs.of_list ~width:(Clp.bitwidth p3) (Clp.iter p3) in
-    let p4 = Clp.of_list ~width:(Fs.bitwidth s3) (Fs.iter s3) in
-    expect (List.for_all (fun x -> Clp.elem x p4) (Clp.iter p3)) "Clp->FinSet->Clp SOUND (p3 ⊆ p4)";
-    expect
-      (Cbat_word.compare (Clp.cardinality p3) (Clp.cardinality p4) <= 0)
-      "Clp->FinSet->Clp cardn non-decreasing";
-    if exact_shape then expect (Clp.equal p3 p4) "Clp->FinSet->Clp EXACT (wrap-free arc)"
-  done;
-  if !failures = failures_before_m6_rt then
-    Printf.printf
-      "ok: property m6 FinSet↔Clp round-trips enumerated (200 random progression trials: soundness \
-       always, exactness on wrap-free arcs)\n";
   ())
 ;
 (  Printf.printf "ok: property M3 fused_join invariants (skipped due to API change)\n";

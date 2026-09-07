@@ -17,6 +17,7 @@
 (executable
  (name corpus_watch)
  (libraries
+  probe_common
   hike
   bap
   bap-core-theory
@@ -32,6 +33,7 @@
 (executable
  (name precision_probe)
  (libraries
+  probe_common
   hike
   bap
   bap-core-theory

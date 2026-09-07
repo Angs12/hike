@@ -13,7 +13,7 @@ let dce_rounds (target : Theory.Target.t) (sub : sub term) : int * int =
   in
   (* dce runs its own sweep to stability, so re-running it must be a no-op. *)
   let rec go sub prev_n rounds =
-    let sub' = Hike__Hike_dce.dce ~target sub in
+    let sub' = Dce.dce ~target sub in
     let n' =
       Term.enum blk_t sub'
       |> Seq.fold ~init:0 ~f:(fun n blk ->
@@ -55,7 +55,7 @@ let () =
                 Hike.Stack_to_locals.stack_to_locals target sp sub)
           in
           let _dced, t_dce =
-            time (fun () -> Hike__Hike_dce.dce ~target stl_sub)
+            time (fun () -> Dce.dce ~target stl_sub)
           in
           let rounds, _ = dce_rounds target stl_sub in
           tot := !tot +. t_vsa;

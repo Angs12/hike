@@ -27,6 +27,26 @@ let anchored_entry () : AI.t =
 (* AI word environment from (var, word-set) binds over top. *)
 let mk_env binds = List.fold_left (fun e (v, ws) -> AI.add_word e ~key:v ~data:ws) AI.top binds
 
+(* A conditional/terminal jump to an explicit target tid. *)
+let mk_jmp_to tgt cond = Jmp.create ~cond (Goto (Direct tgt))
+
+(* An unconditional jump to an explicit target tid. *)
+let mk_goto (tgt : tid) : jmp term = Jmp.create (Goto (Direct tgt))
+
+(* One block from a def list (phase 1 of the two-phase builder dance:
+   tids are captured from the result before jumps are wired). *)
+let blk_of_defs (defs : def term list) : blk term =
+  let b = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b) defs;
+  Blk.Builder.result b
+
+(* Wire jumps onto a phase-1 block (phase 2: re-init, add jumps). *)
+let with_jmps (b0 : blk term) (jmps : jmp term list) : blk term =
+  let b = Blk.Builder.init ~copy_defs:true b0 in
+  List.iter (Blk.Builder.add_jmp b) jmps;
+  Blk.Builder.result b
+
+
 let failures = ref 0
 
 let check (name : string) (b : bool) : unit =
@@ -198,6 +218,22 @@ let mk_flag_sub ~(mixed : bool) :
   let ctx = Program.create ~subs:[ sub ] () in
   (f, ctx, sub, exit_tid, defA, (if mixed then Some defB else None), defU)
 
+(* Single self-looping block sub (a never-analyzed callee; calls abstract it).
+   Shared by the alias-shape fixture below and the prologue/outgoing escape family. *)
+let mk_selfloop_callee (name : string) : sub term =
+  let cb = Blk.Builder.create () in
+  let cblk0 = Blk.Builder.result cb in
+  let cb = Blk.Builder.init ~copy_defs:true cblk0 in
+  Blk.Builder.add_jmp cb (Jmp.create (Goto (Direct (Term.tid cblk0))));
+  let cblk = Blk.Builder.result cb in
+  let callee_b = Sub.Builder.create ~name () in
+  Sub.Builder.add_blk callee_b cblk;
+  Sub.Builder.result callee_b
+
+(* Call jump with a return continuation. *)
+let mk_call_jmp (post_tid : tid) (callee_tid : tid) : jmp term =
+  Jmp.create (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ()))
+
 (* T3: frozen-flag guard — assume_jump_cond refines every var, gate-free. *)
 type caller_alias_fixture = {
   ca_ctx : Program.t;
@@ -228,14 +264,7 @@ let mk_caller_alias () : caller_alias_fixture =
   let w = v64 "t4_w" in
   let w2 = v64 "t4_w2" in
   (* Callee: single self-looping block; never analyzed (call abstracted). *)
-  let cb = Blk.Builder.create () in
-  let cblk0 = Blk.Builder.result cb in
-  let cb = Blk.Builder.init ~copy_defs:true cblk0 in
-  Blk.Builder.add_jmp cb (Jmp.create (Goto (Direct (Term.tid cblk0))));
-  let cblk = Blk.Builder.result cb in
-  let callee_b = Sub.Builder.create ~name:"t4_callee" () in
-  Sub.Builder.add_blk callee_b cblk;
-  let callee = Sub.Builder.result callee_b in
+  let callee = mk_selfloop_callee "t4_callee" in
   let callee_tid = Term.tid callee in
   let def_rsp = Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x2000))) in
   let def_rbp = Def.create rbp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x1f00)))) in
@@ -284,9 +313,7 @@ let mk_caller_alias () : caller_alias_fixture =
       def_store;
       def_store_disjoint;
     ];
-  Blk.Builder.add_jmp entry_b
-    (Jmp.create
-       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ())));
+  Blk.Builder.add_jmp entry_b (mk_call_jmp post_tid callee_tid);
   let entry = Blk.Builder.result entry_b in
   let caller_b = Sub.Builder.create ~name:"t4_caller" () in
   Sub.Builder.add_arg caller_b (Arg.create rdi (Bil.Var rdi));
@@ -312,7 +339,10 @@ let mk_caller_alias () : caller_alias_fixture =
     ca_def_store_disjoint = def_store_disjoint;
   }
 
-(* T4: caller-alias soundness — post-call reload reads TOP; RSP/RBP/RBX kept, rdi TOPed. *)
+(* T4: caller-alias soundness — post-call reload reads TOP; RSP/RBP/RBX kept, rdi TOPed.
+   The alias prologue (rdi through rbp, push def, dual mems) is a different
+   shape from the fp/outgoing escape family (mk_escape_caller); it shares only
+   the callee/call wiring above. *)
 (* F1: map-lattice fold visits explicitly-stored bindings only; absent = top. *)
 (* RSP-anchored seeds: RBP enters only via RSP-derivation. *)
 
@@ -618,23 +648,30 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * 
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st], read back as the load denotation reads it. *)
-let l3a_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l3a_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+(* Cell at [base-8] in [st], read back as the load denotation reads it. *)
+let cell_at (m : var) (base : var) (st : AI.t) : Ws.t =
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
 
 (* Finite non-top non-bottom set bounded above by [maxv]. *)
-let l3a_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
+let bounded_above (ws : Ws.t) (maxv : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
   && match Ws.max_elem ws with Some w -> Cbat_word.( <= ) w maxv | None -> false
 
 (* Tagged-sub fixpoint; walk's cell meet observable at BODY input. *)
 (* Iterate state of an edge is the single-predecessor target's IN-state. *)
+(* Anchored fixpoint run (defaults: the anchored entry; fixtures rely on it). *)
+let run_anchored (sub : sub term) : Vsa.vsa_sol =
+  let prog = Program.create ~subs:[ sub ] () in
+  Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
+
+(* Anchored fixpoint + extraction (defaults: anchored entry, empty alloc tids). *)
+let extract_anchored (sub : sub term) : Cu.vsa_kind Tid.Map.t * (int64 * int64) Tid.Map.t * (int64 * int64) Tid.Map.t =
+  let sol = run_anchored sub in
+  Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
 
@@ -644,9 +681,7 @@ let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_o
 
 let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
   (* Gate-free (spec §2.1): the raw sub runs; every def is denoted. *)
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  iter_cell_of sub sol body_tid l3a_cell_of
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3a_m") (v64 "RBP"))
 
 (* L3c-1: flag-state mechanism — bare-flag guards recover the comparison constraint. *)
 
@@ -696,20 +731,6 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) : sub term * tid * jmp ter
     match Term.enum jmp_t header |> Seq.to_list with [ j1; _ ] -> j1 | _ -> assert false
   in
   (sub, body_tid, jmp)
-
-(* Cell at RBP-8 in [st] (mem-var parameterized). *)
-let l3c1_cell_of (m : var) (st : AI.t) : Ws.t =
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
-(* Finite non-top non-bottom, max <= maxv. *)
-let l3c1_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
-  (not (Ws.is_top ws))
-  && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Cbat_word.( <= ) w maxv | None -> false
 
 (* L3c-2: signed comparison rows (SLT/SLE). *)
 
@@ -766,21 +787,6 @@ let mk_l3c2_loop ~(prologue : bool) ~(seed : Cbat_word.t option) ~(cmp : Bil.bin
   Sub.Builder.add_blk sub_b exit;
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
-
-(* Cell at RBP-8 in [st]. *)
-let l3c2_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l3c2_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
-(* Finite non-top non-bottom, max <= maxv. *)
-let l3c2_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
-  (not (Ws.is_top ws))
-  && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Cbat_word.( <= ) w maxv | None -> false
 
 (* Finite non-top non-bottom, all values in [lo, hi]. *)
 let l3c2_in_high (ws : Ws.t) (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
@@ -847,20 +853,9 @@ let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) 
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st]. *)
-let l3c3_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l3c3_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  iter_cell_of sub sol body_tid l3c3_cell_of
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (v64 "RBP"))
 
 (* L3c-4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
 
@@ -978,20 +973,9 @@ let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st]. *)
-let l3c4_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l3c4_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  iter_cell_of sub sol body_tid l3c4_cell_of
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") (v64 "RBP"))
 
 (* L3c-5: structural closure — identity rows, const-first arm, shrunk catch-all. *)
 
@@ -1048,20 +1032,9 @@ let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st]. *)
-let l3c5_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l3c5_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  iter_cell_of sub sol body_tid l3c5_cell_of
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (v64 "RBP"))
 
 (* Interrupt denotation: unknown external callee via call_abstraction. *)
 (* L-3b: coalesce equal-lower merge arm — piles collapse, reads preserved. *)
@@ -1169,15 +1142,6 @@ let l3b_cells_of (mv : var) (st : AI.t) : int =
   done;
   !n
 
-(* Cell at RBP-8 in [st]. *)
-let l3b1_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l3b1_m" in
-  let rsp = v64 "RSP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* L-B: jcc-decoder pins — exact -O0 corpus block fixture. *)
 
 (* jle/jl/ja guard nestings the decoder matcher accepts. *)
@@ -1198,6 +1162,24 @@ let l39_jl (sf : var) (ofv : var) : exp =
 
 let l39_ja (cf : var) (zf : var) : exp =
   Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.OR, Bil.Var cf, Bil.Var zf))
+
+(* Canonical -O0 cmp emission, fixed order: temp, CF, OF, SF, ZF (the decoder is order-sensitive). *)
+let mk_cmp_emission b ~(e : exp) ~(c : Cbat_word.t) ~(t : var) ~(cf : var) ~(ofv : var) ~(sf : var)
+    ~(zf : var) : unit =
+  Blk.Builder.add_def b (Def.create t (Bil.BinOp (Bil.MINUS, e, Bil.Int (Cbat_word.to_word c))));
+  Blk.Builder.add_def b (Def.create cf (Bil.BinOp (Bil.LT, e, Bil.Int (Cbat_word.to_word c))));
+  Blk.Builder.add_def b
+    (Def.create ofv
+       (Bil.Cast
+          ( Bil.HIGH,
+            1,
+            Bil.BinOp
+              ( Bil.AND,
+                Bil.BinOp (Bil.XOR, e, Bil.Int (Cbat_word.to_word c)),
+                Bil.BinOp (Bil.XOR, e, Bil.Var t) ) )));
+  Blk.Builder.add_def b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
+  Blk.Builder.add_def b
+    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Cbat_word.bitwidth c)), Bil.Var t)))
 
 (* Exact corpus block fixture: seeded store, canonical cmp emission, compound guard. Returns (sub, body tid). *)
 let mk_l39_loop ~(seed : Cbat_word.t) ~(c : Cbat_word.t) ~(body_op : Bil.binop) ~(body_k : Cbat_word.t)
@@ -1224,20 +1206,7 @@ let mk_l39_loop ~(seed : Cbat_word.t) ~(c : Cbat_word.t) ~(body_op : Bil.binop) 
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   (* Canonical -O0 cmp emission, fixed order: temp, CF, OF, SF, ZF. *)
-  Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int (Cbat_word.to_word c))));
-  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, load_e, Bil.Int (Cbat_word.to_word c))));
-  Blk.Builder.add_def header_b
-    (Def.create ofv
-       (Bil.Cast
-          ( Bil.HIGH,
-            1,
-            Bil.BinOp
-              ( Bil.AND,
-                Bil.BinOp (Bil.XOR, load_e, Bil.Int (Cbat_word.to_word c)),
-                Bil.BinOp (Bil.XOR, load_e, Bil.Var t) ) )));
-  Blk.Builder.add_def header_b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
-  Blk.Builder.add_def header_b
-    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Cbat_word.bitwidth c)), Bil.Var t)));
+  mk_cmp_emission header_b ~e:load_e ~c ~t ~cf ~ofv ~sf ~zf;
   List.iter (Blk.Builder.add_def header_b) (extra_header_defs m);
   Blk.Builder.add_def body_b (Def.create u (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def body_b
@@ -1322,26 +1291,9 @@ let mk_l39b5_loop () : sub term * tid =
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st]. *)
-let l39_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l39_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l39_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let ctx = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  iter_cell_of sub sol body_tid l39_cell_of
-
-(* Finite non-top non-bottom, max <= maxv. *)
-let l39_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
-  (not (Ws.is_top ws))
-  && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Cbat_word.( <= ) w maxv | None -> false
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") (v64 "RBP"))
 
 (* L-E1: ON-path matched-pair RSP restoration (RSP := RSP + 8 on return). *)
 
@@ -1414,9 +1366,7 @@ let mk_e1_flat_sub () : sub term * tid * var =
 
 (* ON-path fixpoint; RSP value-set at [tid]. *)
 let e1_rsp_at (sub : sub term) (tid : tid) (rsp : var) : Ws.t =
-  let ctx' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  AI.find_word 64 (Graphlib.Std.Solution.get sol tid) rsp
+  AI.find_word 64 (Graphlib.Std.Solution.get (run_anchored sub) tid) rsp
 
 (* L-D6: RBP-anchored gate-free fixture — the dead epilogue def is denoted too. *)
 
@@ -1445,20 +1395,7 @@ let mk_l6_rbp_loop () : sub term * tid =
   Blk.Builder.add_def entry_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32)));
   (* Canonical -O0 cmp emission, RBP-based. *)
-  Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int (Cbat_word.to_word c))));
-  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, load_e, Bil.Int (Cbat_word.to_word c))));
-  Blk.Builder.add_def header_b
-    (Def.create ofv
-       (Bil.Cast
-          ( Bil.HIGH,
-            1,
-            Bil.BinOp
-              ( Bil.AND,
-                Bil.BinOp (Bil.XOR, load_e, Bil.Int (Cbat_word.to_word c)),
-                Bil.BinOp (Bil.XOR, load_e, Bil.Var t) ) )));
-  Blk.Builder.add_def header_b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
-  Blk.Builder.add_def header_b
-    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Cbat_word.bitwidth c)), Bil.Var t)));
+  mk_cmp_emission header_b ~e:load_e ~c ~t ~cf ~ofv ~sf ~zf;
   Blk.Builder.add_def body_b (Def.create u (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def body_b
     (Def.create m
@@ -1506,20 +1443,9 @@ let mk_l6_rbp_loop () : sub term * tid =
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st]. *)
-let l6_cell_of (st : AI.t) : Ws.t =
-  let m = memv "l6_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let ctx' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  l6_cell_of (Graphlib.Std.Solution.get sol body_tid)
+  cell_at (memv "l6_m") (v64 "RBP") (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
 
 (* Refactor-2 new-shape pins: inline-arithmetic, NOT-edge, const-first flip, nested BinOp. *)
 
@@ -1614,61 +1540,94 @@ let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : B
   let sub = Sub.Builder.result sub_b in
   (sub, body_tid)
 
-(* Cell at RBP-8 in [st]. *)
-let r2_cell_of (st : AI.t) : Ws.t =
-  let m = memv "r2_m" in
-  let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
-
 (* ON-path fixpoint; BODY input cell at RBP-8. *)
 let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
-  let ctx' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] ctx' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  iter_cell_of sub sol body_tid r2_cell_of
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") (v64 "RBP"))
 
-(* Regression fixtures (moved verbatim from test_regression.ml). *)
-type c3_fixture = {
-  c3_sub : sub term;
-  c3_blk0 : blk term;
-  c3_blk1 : blk term;
-  c3_post_tid : tid;
-  c3_m : var;
+(* Indexed-loop twin (C4a/R11): i := 0; body indexed store + inc; exit singleton store.
+   The two tests differ only in the var-name prefix; the divergent pins stay in the tests. *)
+let mk_indexed_loop ~pfx : sub term * def term =
+  let rsp = v64 "RSP" in
+  let i = Var.create ~is_virtual:false ~fresh:false (pfx ^ "_i") (Type.Imm 32) in
+  let t = Var.create ~is_virtual:false ~fresh:false (pfx ^ "_t") (Type.Imm 32) in
+  let m = memv (pfx ^ "_m") in
+  let iv = Bil.Var i in
+  let lt = Bil.BinOp (Bil.LT, iv, Bil.Var t) in
+  let nlt = Bil.UnOp (Bil.NOT, lt) in
+  let idx_addr =
+    Bil.BinOp
+      ( Bil.PLUS,
+        Bil.Var rsp,
+        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
+  in
+  let def_idx_store =
+    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
+  in
+  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
+  let def_exit =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  let entry0 = blk_of_defs [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ] in
+  let body0 = blk_of_defs [ def_idx_store; def_inc ] in
+  let header0 = blk_of_defs [] in
+  let exit0 = blk_of_defs [ def_exit ] in
+  let body_tid = Term.tid body0 in
+  let header_tid = Term.tid header0 in
+  let exit_tid = Term.tid exit0 in
+  let sub_b = Sub.Builder.create ~name:(pfx ^ "_merge") () in
+  Sub.Builder.add_blk sub_b (with_jmps entry0 [ mk_goto body_tid ]);
+  Sub.Builder.add_blk sub_b (with_jmps body0 [ mk_goto header_tid ]);
+  Sub.Builder.add_blk sub_b (with_jmps header0 [ mk_jmp_to exit_tid nlt; mk_jmp_to body_tid lt ]);
+  Sub.Builder.add_blk sub_b exit0;
+  (Sub.Builder.result sub_b, def_idx_store)
+
+(* Escape fixtures (the caller/callee family): prologue + outgoing-slot shape. *)
+
+(* Outgoing-slot payload: a constant or a register's (possibly TOP) value. *)
+type escape_payload = C of int | R of var
+
+type escape_fixture = {
+  es_sub : sub term;
+  es_blk0 : blk term;
+  es_blk1 : blk term;
+  es_post_tid : tid;
+  es_m : var;
 }
 
-let mk_c3 () : c3_fixture =
+(* Caller/callee escape fixture: fp-seeded frame + prologue + outgoing slots
+   + call + post reload. The C3/A1/A4c near-copies differ only in the prefix,
+   the fp offset, and the outgoing payloads; the divergent pins stay in the tests. *)
+let mk_escape_caller ~pfx ~fp_off ~seed ~(outs : (int * escape_payload) list) () : escape_fixture =
   let rsp = v64 "RSP" in
-  let fp = v64 "c3_fp" in
+  let fp = v64 (pfx ^ "_fp") in
   let rdi = v64 "RDI" in
-  let r2 = v64 "c3_r2" in
-  let m = memv "c3_m" in
-  let cb = Blk.Builder.create () in
-  let cblk0 = Blk.Builder.result cb in
-  let cb = Blk.Builder.init ~copy_defs:true cblk0 in
-  Blk.Builder.add_jmp cb (Jmp.create (Goto (Direct (Term.tid cblk0))));
-  let cblk = Blk.Builder.result cb in
-  let callee_b = Sub.Builder.create ~name:"c3_callee" () in
-  Sub.Builder.add_blk callee_b cblk;
-  let callee = Sub.Builder.result callee_b in
+  let r2 = v64 (pfx ^ "_r2") in
+  let m = memv (pfx ^ "_m") in
+  let callee = mk_selfloop_callee (pfx ^ "_callee") in
   let callee_tid = Term.tid callee in
   let post_b = Blk.Builder.create () in
   Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
   let post0 = Blk.Builder.result post_b in
   let post_tid = Term.tid post0 in
-  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
+  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 fp_off)))) in
   let def_seed =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 0xAA)), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 seed)), LittleEndian, `r64))
   in
   let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
   let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
-  let def_out =
+  let def_out (off, p) =
+    let data = match p with C v -> Bil.Int (Cbat_word.to_word (w64 v)) | R v -> Bil.Var v in
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
-           Bil.Int (Cbat_word.to_word (w64 0xBB)),
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 off))),
+           data,
            LittleEndian,
            `r64 ))
   in
@@ -1676,17 +1635,15 @@ let mk_c3 () : c3_fixture =
   List.iter (Blk.Builder.add_def b0) [ def_fp; def_seed; def_prologue ];
   let b00 = Blk.Builder.result b0 in
   let b1 = Blk.Builder.create () in
-  List.iter (Blk.Builder.add_def b1) [ def_rdi; def_out ];
+  List.iter (Blk.Builder.add_def b1) (def_rdi :: List.map def_out outs);
   let b10 = Blk.Builder.result b1 in
   let b0' = Blk.Builder.init ~copy_defs:true b00 in
   Blk.Builder.add_jmp b0' (Jmp.create (Goto (Direct (Term.tid b10))));
   let b1' = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_jmp b1'
-    (Jmp.create
-       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ())));
+  Blk.Builder.add_jmp b1' (mk_call_jmp post_tid callee_tid);
   let blk0 = Blk.Builder.result b0' in
   let blk1 = Blk.Builder.result b1' in
-  let sub_b = Sub.Builder.create ~name:"c3_caller" () in
+  let sub_b = Sub.Builder.create ~name:(pfx ^ "_caller") () in
   Sub.Builder.add_arg sub_b (Arg.create rdi (Bil.Var rdi));
   Sub.Builder.add_arg sub_b (Arg.create r2 (Bil.Var r2));
   Sub.Builder.add_blk sub_b blk0;
@@ -1694,7 +1651,7 @@ let mk_c3 () : c3_fixture =
   Sub.Builder.add_blk sub_b post0;
   let caller = Sub.Builder.result sub_b in
   ignore callee;
-  { c3_sub = caller; c3_blk0 = blk0; c3_blk1 = blk1; c3_post_tid = post_tid; c3_m = m }
+  { es_sub = caller; es_blk0 = blk0; es_blk1 = blk1; es_post_tid = post_tid; es_m = m }
 
 (* Store builder, MINUS/rsp-rooted with explicit size. *)
 let mk_store_minus m rsp lo data sz =
@@ -1815,8 +1772,9 @@ let emit_ir (subs : sub term list) : string =
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)
 
-(* A conditional/terminal jump to an explicit target tid. *)
-let mk_jmp_to tgt cond = Jmp.create ~cond (Goto (Direct tgt))
+(* Blocks of a sub holding no jumps (the exit-block idiom). *)
+let exit_blocks_of (sub : sub term) : blk term list =
+  Term.enum blk_t sub |> Seq.to_list |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
 
 (* ------------------------------------------------------------------ *)
 (* Family 1: the FP-intrinsic table — every row emits its native op.  *)
