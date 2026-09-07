@@ -309,7 +309,7 @@ let lm_jle_loop ~(k1 : word) ?(k2 : word option) () : sub term * tid * tid * tid
                 (Bil.AND, Bil.BinOp (Bil.XOR, iv, Bil.Int c), Bil.BinOp (Bil.XOR, iv, Bil.Var t)) )));
     Blk.Builder.add_def b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
     Blk.Builder.add_def b (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero 32), Bil.Var t)));
-    Test_backward.l39_jle zf sf ofv
+    l39_jle zf sf ofv
   in
   let entry_b = Blk.Builder.create () in
   let l1_b = Blk.Builder.create () in
