@@ -14,7 +14,7 @@
 open !Core_kernel
 open Bap.Std
 
-module Word_ops = Cbat_word_ops
+module Word_ops = Cbat_word
 module Utils = Cbat_vsa_utils
 module Clp = Cbat_clp
 module FinSet = Cbat_fin_set

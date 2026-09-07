@@ -25,7 +25,7 @@ module Lattice = Cbat_lattice_intf
 module WordSet = Cbat_clp_set_composite
 module Utils = Cbat_vsa_utils
 module Map_lattice = Cbat_map_lattice
-module Word_ops = Cbat_word_ops
+module Word_ops = Cbat_word
 
 (* Memories are byte-addressable. *)
 let addressable_width = 8

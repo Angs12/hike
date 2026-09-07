@@ -102,7 +102,7 @@ val sexp_of_t : t -> Core_kernel.Sexp.t
 val t_of_sexp : Core_kernel.Sexp.t -> t
 include Core_kernel.Binable.S with type t := t
 
-(* The [Cbat_word_ops] set. *)
+(* The word-op set. *)
 
 val mul_exact : t -> t -> t
 val add_exact : t -> t -> t
@@ -122,3 +122,9 @@ val factor_2s : t -> t * int
 val dom_size : ?width:int -> int -> t
 val half : int -> t
 val cap_at_width : width:int -> t -> t
+
+val add_bit : t -> t
+val count_initial_1s : t -> int
+val lead_1_bit : t -> int option
+val gt_int : t -> int -> bool
+val endian_string : Word.endian -> string

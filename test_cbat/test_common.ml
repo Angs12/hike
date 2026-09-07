@@ -8,7 +8,7 @@ module W = Word
 module Clp = Cbat_clp
 module Fs = Cbat_fin_set
 
-module Wo = Cbat_word_ops
+module Wo = Cbat_word
 module Ws = Cbat_clp_set_composite
 
 (* Wrapped BIR-fixpoint library; siblings re-exported by cbat_vsa.mli. *)

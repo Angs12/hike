@@ -25,7 +25,7 @@ module CFG = Graphs.Tid
 module AI = Cbat_ai_representation
 module WordSet = Cbat_clp_set_composite
 module Mem = Cbat_ai_memmap
-module Word_ops = Cbat_word_ops
+module Word_ops = Cbat_word
 module Utils = Cbat_vsa_utils
 
 (* WTO over the engine cfg; swapped accessors reverse it. *)

@@ -28,7 +28,6 @@
  (modules
   cbat_clp
   cbat_word
-  cbat_word_ops
   cbat_fin_set
   cbat_lattice_intf
   cbat_map_lattice

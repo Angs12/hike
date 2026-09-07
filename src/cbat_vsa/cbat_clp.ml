@@ -20,7 +20,7 @@ module Option = Core_kernel.Option
 module Sexp = Core_kernel.Sexp
 module List = Core_kernel.List
 
-open !Cbat_word_ops
+open !Cbat_word
 open Core_kernel
 module Hashtbl = Stdlib.Hashtbl
 let min = Stdlib.min
@@ -75,7 +75,7 @@ let fit_to (width : int) (w : W.t) : W.t =
 
 let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
   let width = Option.value ~default:(W.bitwidth base) width in
-  let cardn_w = Cbat_word_ops.cap_at_width ~width:(width + 1) cardn in
+  let cardn_w = W.cap_at_width ~width:(width + 1) cardn in
   let base' = fit_to width base in
   let step' = fit_to width step in
   

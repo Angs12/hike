@@ -8,7 +8,7 @@
    The reference ("old") implementations are inlined below so this harness
    stays valid after the production ones are rewritten.
 
-   [Ref_word] holds the current [Cbat_word_ops] word implementations
+   [Ref_word] holds the pre-substrate word implementations (frozen)
    verbatim; the sweep cross-checks them against the unmodified production
    ops (word-substrate T1: the referee must be green while both sides are
    still identical).
@@ -25,7 +25,7 @@
 open Bap.Std
 open Probe_common
 module CKL = Core_kernel.List
-module Wo = Cbat_word_ops
+module Wo = Cbat_word
 module CW = Cbat_word
 
 (* ========================================================================= *)
@@ -48,7 +48,7 @@ let ops : (string * (Ws.Clp.t -> Ws.Clp.t -> Ws.Clp.t)) list =
   ; ("join", Ws.Clp.join); ("meet", Ws.Clp.meet) ]
 
 (* ========================================================================= *)
-(* Ref_word: the current Cbat_word_ops implementations, verbatim. *)
+(* Ref_word: the pre-substrate word implementations, verbatim. *)
 (* ========================================================================= *)
 
 module Ref_word = struct
