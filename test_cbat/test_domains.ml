@@ -477,12 +477,6 @@ let run_policy () =
     (let v1 = Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) LittleEndian in
      Mem.Val.equal v1 v32 && Ws.elem (w32 1) (Mem.Val.data (Mem.Val.join v1 v32)));
   (* widen_join on non-preceding maps falls back to join. *)
-  let key_of ws = match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of" in
-  let mk_mem ~key ~data =
-    let k = key_of key in
-    let v = Mem.Val.create data LittleEndian in
-    Mem.add (Mem.top { Mem.addr_width = 32; Mem.addressable_width = 8 }) ~key:k ~data:v
-  in
   let m1 = mk_mem ~key:(Ws.singleton (w32 0)) ~data:(Ws.of_list ~width:32 [ w32 1; w32 2 ]) in
   let m2 = mk_mem ~key:(Ws.singleton (w32 0)) ~data:(Ws.of_list ~width:32 [ w32 3; w32 4 ]) in
   let mw = Mem.widen_join m1 m2 in

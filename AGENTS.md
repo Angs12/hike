@@ -232,7 +232,10 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
    (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn`) with the var-free target so the
    popped-address def dies, then sweeps never-used defs to a fixpoint (the emitter emits a
    real LLVM `ret` regardless)
-6. `hike-convlir` — emits LLVM via `bil2llvm.ml`
+6. `hike-convlir` — emits LLVM via `bil2llvm.ml` through the ONE seam
+   `Bil2llvm.emit_program` (sig-collection + declarations + bodies all
+   inside; the KB context vars are internal — see `src/bil2llvm.mli` and
+   CONTEXT.md's Emission Entry)
 
 Tags are Tid-keyed and computed before emission; pass deps must stay prefixed (`hike-...`).
 
@@ -407,7 +410,225 @@ LLVM allocas / static variables — it should work on EVERY binary.
   tickets T02/T03/T05 — listed, NOT exempted).  The red list is the work-list
   for the optimizability program.
 
+## Test honesty
+
+The unit suite's `check` (test_cbat/test_common.ml) is a plain
+assert-and-count: a check either passes, fails, or is deleted. There is
+NO xfail, no stub, no substring-mute, and no other mechanism by which a
+check can print success without asserting. (A 22-entry
+`ignored_substrings` list used to short-circuit the harness: 38 sites
+printed `ok: … (stubbed)` while asserting nothing — of which 22 were
+measured to PASS and 16 to fail. It is deleted; see the honest-gate
+entry below.) A check that cannot be asserted is deleted, and its
+home — if any — is the corpus battery.
+
+`test_common.ml` is also the suite's shared fixture vocabulary (38
+top-level `mk_*` builders, consolidated from the 8 theme files by the
+fixture-lib lane — pure relocation, zero check added/removed/renamed).
+Builders produce BIR subs/blocks/defs and `vsa_info` values only; tests
+call `Kb.provide` explicitly at their own sites (the global KB write
+stays visible where it happens).
+
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-07 EEST — MERGE of the honest stack (`emit-seam` +
+`honest-gate` + `fixture-lib` + clpequiv wiring) into `main` @ 18df839
+(word-substrate) — FULL BATTERY GREEN at a level NEITHER parent reached:
+505 ok / 0 FAIL, referee 2.86M/0, semantics 32/32 at -O0 AND -O2**
+
+The merge (branch `merge-honest-to-main`, 7 conflicting files + 9
+auto-merged): main brought the word-substrate migration (`W =
+Cbat_word` across the domain, directional CLP, `~vla_alloc_tids`,
+`~abi`-threaded DCE, the 690-line clpequiv, copy-reloc checks) and the
+cleanup-8 lane; our stack brought the emitter seam, the honest gate +
+meet/logand fixes, the fixture consolidation, and the clpequiv runtest
+wiring. Conflict resolutions, each preserving both intents:
+
+- `cbat_clp.ml` (3 hunks): our exact step-1 meet lane dispatches FIRST
+  inside main's directional `intersection` (after the bottom/top/equal
+  guards, before the dir match — `Ascending`/`Descending` fall through
+  via `step1_arc`'s `is_infinite` guard); our `fixed_bits` replaces
+  main's `compute_l_s_b`/`compute_m_s_b`/`compute_range_sep` (+ deleted
+  `lead_1_bit_run`); our now-dead `generic_intersection` deleted
+  (main's `intersection_finite_or_circular` IS that lane). One-word
+  port: `Word.lshift` → `W.lshift` (W is `Cbat_word` here).
+- `hike_dce.ml` (2 hunks): main's `~abi`-threaded shape wins (cleanup-8
+  article-3 converted the whole file); our already-deleted `abi_of`
+  stays deleted.
+- Test files (9 hunks across backward/properties/regression/vsa): our
+  STRUCTURE (honest-gate deletions, fixture-lib moves to
+  `test_common.ml`) with main's WORD SPELLINGS (`Cbat_word.to_word`
+  at every `Bil.Int`, `Cbat_word.t` params, `Cbat_word.b1/b0`,
+  `~vla_alloc_tids:Tid.Set.empty` at all 11 `mk_vsa_info` sites) —
+  the compiler drove the migration to green.
+- `AGENTS.md`: both lane records kept, newest first.
+
+| Gate | Result |
+|---|---|
+| unit suite | direct-exe **505 ok, 0 FAIL** (every family present: emitter wing, honest-gate pins, main's R12/copy-reloc checks) ✅ |
+| differential referee | main's extended sweep as the wired `(test)` stanza: **2,861,148 checks, 0 mismatches** ✅ |
+| corpus emission | **32/32 rc=0** ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (all) | **32 PASS, 0 FAIL** — including the former T02/T03 knowns (va_arg_vacopy + variadic); strictly better than either parent (30/2) ✅ |
+| optimization-safety (opt) | **32 PASS, 0 FAIL** — identical ✅ |
+| probes | precision_probe + corpus_watch — **PASS, 0 crashes** ✅ |
+| unmapped FP intrinsics | **0** ✅ |
+| instrumentation blocker | clean ✅ |
+
+No byte-identity vs either parent is claimed (expected: the substrate
+migration legitimately re-codes words corpus-wide); the 32/32 behavioral
+equivalence at -O0 AND -O2 is the identity oracle here. Emissions:
+`/tmp/opencode/merge-battery/emit`.
+
+**Last verified: 2026-09-07 EEST — THE HONEST GATE (branch `honest-gate`,
+5 commits `b28a8a6`+meet+logand merges, off `emit-seam` @ `d5a7404`,
+worktree `/home/tovpr/backup/hike-emit`) — FULL BATTERY GREEN, corpus IR
+BYTE-IDENTICAL 32/32, ZERO muted checks, and the 2 unsound-narrowing
+property bugs FIXED: 494 ok / 0 FAIL / 0 VIOLATION lines**
+
+The lane (spec `.scratch/honest-gate/spec.md`, grilling-settled
+2026-09-07, 13 questions): the suite's `check` carried a 22-entry
+`ignored_substrings` list — 38 check sites printed `ok: … (stubbed)` and
+asserted nothing, and substring matching muted PASSING checks that
+shared a prefix with failing ones. The un-stub experiment measured the
+truth first: **22 of the 38 silently PASS, 16 are red**. (The
+predecessor lane `test-honesty` @ 4ee8498, 87 commits behind and
+unmerged, had classified several of the 22 as "ticketed known-broken"
+against pre-ADR-0003 machinery — that ledger is stale and is superseded.)
+
+- **1 (b28a8a6): the honest gate.** The mute mechanism is deleted
+  outright (no xfail); the 22 passing checks become honest `check`s —
+  reclaiming the C3 caller-frame pin, the A4c neighbor cell, the E6
+  stderr contract, the A4a/A4b OR-mask constants, the C1 slot rewrite,
+  T3-7/T3-8, the R6/G3 TAKEN pins, and the C4a/C4b/R11/A1/A4c
+  controls. Deleted (−342 lines): C2/A2/A3 (stale expectations of the
+  pre-fission per-access-sized degraded frame — `degraded_dims` is a
+  fixed 8192-byte floor, `n = max n 8192`, `anchor = n − 8`), T3-7b (a
+  dead fixture), the R6 AND G3 fixtures (byte-duplicates; their one red
+  pin each duplicates the GREEN F1-NEQ/F1-FT properties), and 7
+  model-work checks (C3-outgoing, C4a/C4b Infinite-merge, R11
+  un-hulled singleton, A1 escalation, A4c exact-extent, S-4b sexp key)
+  — the corpus battery is their only remaining evidence, by decision.
+  This commit landed DELIBERATELY RED at 491 ok / 3 FAIL: exactly the
+  soundness properties.
+- **2 (meet fix, `src/cbat_vsa/cbat_clp.ml`): exact step-1 circular
+  meet.** `intersection`'s generic lane solves in unwrapped space with
+  the diophantine anchor clamped to `min_elem p2`; for disjoint
+  circular intervals the anchor lands outside both arcs and the lane
+  falls into its `safe_operand` fallback, returning a full arc where
+  the true intersection is empty (the R2-1 loose-hull class). A new
+  exact step-1 lane is dispatched first (`step1_arc` +
+  `step1_intersection` at width+1 bits): EMPTY on disjoint, the exact
+  sub-arc otherwise, the smaller operand on two-piece. Brute-force
+  elementwise oracle sweeps (3969 pairs @ w=8, 1764 @ w=16): 0 lost
+  elements, 0 false bottoms.
+- **3 (logand fix, same file): the mask must cover every free bit.**
+  The bound construction was sound but the mask came from
+  `compute_range_sep`, whose equal-MSB arm returns the sentinel −1 →
+  an empty mask → bits that actually vary were claimed fixed
+  (`1&2=0 < 1&1=1`), excluding reachable elementwise ANDs. Replaced
+  with one `fixed_bits`: a bit is fixed below the step's 2-power or
+  above `lead_1_bit(min XOR max)`; a result bit is FORCED iff fixed in
+  both operands or fixed-to-0 in either, so `mask = ~forced` provably
+  covers every varying bit. `logor`/`logxor` inherit through
+  `lnot`/`logand`; the composite WordSet layer lifts `Clp.logand`.
+
+| Gate | Result |
+|---|---|
+| unit suite | direct-exe runtest **494 ok, 0 FAIL, 0 VIOLATION lines** (direct-exe is the honest count; dune's captured output truncates) ✅ |
+| differential referee | `dune runtest` also runs `zz_scratch_probe/clpequiv.exe` as a `(test)` stanza (in-place promotion, candidate #3): **2,731,424 checks, 0 mismatches in ~6 s**, exit-gated (`if !mism > 0 then exit 1` — backported from main's extended version; the pending main-merge brings the 690-line T2 sweep under this already-wired gate). Red path verified by forced-mismatch injection (runtest rc=1, failure attributed to the stanza). Total `dune runtest` wall time ~8 s. ✅ |
+| corpus emission | **32/32 rc=0**, err streams identical ✅ |
+| **IR byte-identity vs control** | **IDENTICAL 32/32** — both domain fixes are precision-neutral on the corpus (tags trivially stable) ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (all) | **30 PASS, 2 FAIL** (va_arg_vacopy + variadic, T02/T03 knowns) ✅ |
+| optimization-safety (opt) | **30 PASS, 2 FAIL** — identical class to -O0 ✅ |
+| semantics (8-bin) | **8/8 PASS** ✅ |
+| probes | precision_probe factorial/alloca_vla + corpus_watch array_local — **PASS, 0 crashes** ✅ |
+| unmapped FP intrinsics | **0** ✅ |
+
+**Last verified: 2026-09-07 EEST — THE EMITTER SEAM (branch `emit-seam`, 5
+commits `f963617`+`3ca542a`+`ed123a8`+`152fef2`+`59bbd9c`, off main @
+`2e06efb`, worktree `/home/tovpr/backup/hike-emit`) — FULL BATTERY GREEN
+AT EVERY STEP, corpus IR BYTE-IDENTICAL 32/32, and the emitter gains its
+first unit seam: a 73-check wing, all 26 FP-table rows pinned at EMISSION**
+
+The lane (grilling-settled 2026-09-06, 16 questions): bil2llvm.ml had 255
+visible lets, zero `.mli`, and exactly ONE (`degraded_dims`) reachable from
+the suite — every emitter regression shipped to the slow corpus gates or to
+hand-grepping emissions (the 2026-09-02 FP-table drop survived a green
+battery; only an emission grep caught it). Three commits, each gated on IR
+byte-identity vs a pre-lane control:
+
+- **1 (f963617): the fold.** `init_subs` + `compute_sub_sig` move from
+  hike.ml into bil2llvm.ml; the KB-var threading (`emit_ctx_var`/
+  `llvm_ctx_var`/`llvm_module_var`/`section_list_var`) and `create_fun`
+  declarations become internal. The new entry `Bil2llvm.emit_program
+  llvm_ctx llvm_module ~target ~ptrsize ~symtab ~text_section
+  ~section_remap ~copy_relocs sections prog` populates the ctx itself and
+  runs BOTH passes (sig-collection, body emission) inside. The intrinsic
+  predicates (`is_intrinsic`/`is_emittable_intrinsic`/
+  `is_llvm_x86_intrinsic`) are owned by the emitter now; hike.ml's filter
+  aliases them (one classification, two consumers). Section initializers
+  stay caller-side (they need the Project; `lookup_native_fn` reads only
+  the symtab, so the reordering is provably inert).
+- **2 (3ca542a): `src/bil2llvm.mli`.** The emitter's public surface drops
+  255 lets → 12 vals: `emit_program`, the section/global helpers
+  (`create_section_global`, `set_section_initializer`,
+  `create_uninitialized_global`, `create_copy_reloc_bss`), the FP
+  classification (`native_fp_op` + the `native_fp` type), `is_plt_trampoline`,
+  `degraded_dims`, and the three intrinsic facts. `hike.mli`'s
+  `module Bil2llvm = Bil2llvm` re-export now carries the constrained view.
+- **3 (ed123a8) + review fixes (59bbd9c): `test_cbat/test_bil2llvm.ml`** —
+  a 73-check wing driving the REAL emitter over hand-built BIR
+  (Theory.Target.unknown + ptrsize:64), asserting on textual IR
+  (`Llvm.string_of_llmodule`, the check_allocas idiom): FP-TABLE — every
+  one of the 26 rows pinned at EMISSION (the loop builds arity-correct
+  fixtures; a dropped row fails emission, not just mapping — the c484e13
+  merge-drop class now caught in `dune runtest`); the warned-poison regime
+  (Unbounded warns via Hike_diag and still emits; Dead → poison value, no
+  warning) + the undef-read lane (a never-defined register read warns and
+  becomes undef); SP-RESTORE pinned BY NAME (`%sp_restored = add <pushed>,
+  8` + the continuation's sp phi reads it — the L-E1e class); CAST (the
+  narrowing cast survives at the tagged store); and a 9-check
+  substring-complete GOLDEN whose fission region is pinned by name
+  (`stack_r0` alloca + the region-base GEP lane — singleton Range tags
+  via Kb.provide, the D4 fixture shape).
+  Fixture grammar learned (recorded in the Gotchas entry): jmp targets
+  must be REAL blocks; call returns target a materialized continuation; a
+  conditional needs cond-Goto + fallthrough-Goto (a `Ret` with `~cond` is
+  not a branch); `capture_stderr` needed a `flush stderr` (the Hike_diag
+  eprintf buffer raced the fd swap), and it captures STDERR — hold the IR
+  in a ref when a check needs both.
+- **The ABI totality rider (settled mid-lane):** the first emission
+  fixture crashed `Abi.of_target`/`sp`/`pc` on `Theory.Target.unknown` —
+  the totality that existed only in hike_dce's local `abi_of` (C4,
+  2026-09-02) is now at the ROOT: `Hike_abi.of_target`/`sp`/`fp` fall
+  back to the `x86_64_sysv` record, `pc` returns a synthetic RIP. Real
+  targets return the same record as before (byte-identity proves it);
+  only the unknown-target crash path changed — which production never
+  reaches (bap always supplies the ELF's target). The review-fix commit
+  deleted the three duplicated fallback wrappers (`emit_abi` in bil2llvm,
+  `abi_of`/`sp_of` in hike_dce) — every consumer now calls the total
+  `Abi.of_target` directly.
+
+| Gate | Result |
+|---|---|
+| unit suite | direct-exe runtest **543 ok, 0 FAIL** (470 baseline + 73 wing; direct-exe counts are the honest measure — dune's captured output truncates at ~787 lines and under-counts by 3) ✅ |
+| corpus emission | **32/32 rc=0**, err streams identical ✅ |
+| **IR byte-identity vs pre-lane control** | **IDENTICAL 32/32** at EACH of the three commits ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (all) | **30 PASS, 2 FAIL** (va_arg_vacopy + variadic, T02/T03 knowns) ✅ |
+| optimization-safety (opt) | **30 PASS, 2 FAIL** — identical class to -O0 ✅ |
+| semantics (8-bin) | **8/8 PASS** ✅ |
+| probes | precision_probe factorial/alloca_vla + corpus_watch array_local — **PASS, 0 crashes** ✅ |
+| unmapped FP intrinsics in corpus | **0** (the wing's unit-level twin also pins it) ✅ |
+
+CONTEXT.md gains the **Emission Entry (`emit_program`)** term under the new
+"Emitter" section (the avoid-list names the pre-seam shapes: `create_prog`,
+caller-side `init_subs`, reaching the emitter's KB vars). AGENTS.md's pass
+pipeline + "Running the test probes" sections updated by this lane; the
+dce-test gotchas entry about `Tid.for_name` (mapped-intrinsic call targets)
+is new test vocabulary. Control + emissions: `/tmp/opencode/emit-lane/`.
 
 **Last verified: 2026-09-07 EEST — THE WORD SUBSTRATE (branch `word-substrate`, tickets 01-05) — BATTERY GREEN, unit suite 315 ok / 0 FAIL, clpequiv 2,861,148 checks / 0 mismatches, corpus IR BYTE-IDENTICAL 32/32, check_allocas 160/0, full semantic suite 32/32 PASS**
 
@@ -455,6 +676,7 @@ the int63 word substrate (`cbat_word.ml`, referee green 2.86M/0 mismatch)
 is parallel-session in-flight work, untouched. Dead-by-measurement on this
 lane: KB transport (0.001ms), stl model recompute (2ms), ABI-as-speed
 (~1ms), `Sub.to_graph`×3 (0.3%, skipped by decision).
+
 
 **Last verified: 2026-09-05 EEST — C8 WORKLIST DRIVER (branch `c8-worklist`,
 tickets 01+02 = commits `9784985`+`c99777c`) — BATTERY GREEN, corpus IR
@@ -1490,6 +1712,19 @@ runs lifted vs native, and byte-diffs stdout.  Needs `llc` + `gcc`.
 
 ## Gotchas
 
+- **Emitter fixture grammar (test_bil2llvm.ml, 2026-09-07):** hand-built BIR
+  that the EMITTER consumes must be CFG-honest, unlike dce/vsa fixtures:
+  (1) every `Goto`/`Call ~return` target must be a REAL block of the sub —
+  `Blk.Builder.create` mints its own tid, so build the target block FIRST and
+  use `Term.tid blk_result` (a fresh `Tid.create ()` dangles and dies in
+  `bb_find_exn`/`blk_llvals`); (2) a conditional is cond-`Goto` +
+  fallthrough-`Goto` (a `Ret` carrying `~cond` is not a branch —
+  `create_branches` calls `goto_label_exn` on the second jmp); (3) the
+  terminal `Ret (Direct tid)` never resolves its label (safe to mint fresh);
+  (4) mapped-intrinsic call targets are `Tid.for_name "intrinsic:<name>"`
+  (round-trips as `@intrinsic:<name>`; `fp_intrinsic_name` strips the `@`);
+  (5) `capture_stderr` asserts on STDERR — hold the IR in a ref if a check
+  needs both (the helper returns the captured text, not the emission).
 - `hike_vsa_relevance.ml` is single-sourced (R8, 2026-08-19): `src/` (production,
   the restored two-pass D-2f tagger) is the ONLY copy.  `test_cbat/` and the
   `zz_scratch_probe/` debug probes link the wrapped `hike` library and reach it via
