@@ -503,6 +503,41 @@ let region_size_ok (r : Convutils.region) : bool =
   let b = region_bytes r in
   Int64.compare b 0L > 0 && Int64.compare b 67108864L <= 0
 
+(* Rounds a frame size up to 16-byte alignment. *)
+let align16_up n =
+  let r = Int64.rem n 16L in
+  if Int64.equal r 0L then n else Int64.add n (Int64.sub 16L r)
+
+(* Frame-geometry triple: deepest SP/FP decrement, deepest negative and
+   positive access extents. One fold over the sub's defs. *)
+let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
+  let is_sp_or_fp v = Abi.is_stack_reg abi (Var.base v) in
+  let update (max_dec, max_neg, max_pos) d =
+    let max_dec =
+      match Def.rhs d with
+      | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w) when is_sp_or_fp r ->
+          Int64.max max_dec (Word.to_int64_exn w)
+      | _ -> max_dec
+    in
+    match Def.rhs d with
+    | Bil.Load (_, addr, _, s) | Bil.Store (_, addr, _, _, s) -> (
+        let sz = Int64.of_int (Size.in_bytes s) in
+        match addr with
+        | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int w) when is_sp_or_fp b ->
+            let disp = Word.to_int64_exn w in
+            if Int64.compare disp 0L < 0 then
+              ( max_dec,
+                Int64.max max_neg (Int64.add (Int64.neg disp) sz),
+                max_pos )
+            else
+              (max_dec, max_neg, Int64.max max_pos (Int64.add disp sz))
+        | _ -> (max_dec, max_neg, max_pos))
+    | _ -> (max_dec, max_neg, max_pos)
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:(0L, 0L, 0L) ~f:(fun acc blk ->
+         Term.enum def_t blk |> Seq.fold ~init:acc ~f:update)
+
 (* Tests for SP/FP-derived memory accesses. *)
 
 (* Tests for SP/FP references. *)
