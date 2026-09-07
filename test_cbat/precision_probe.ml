@@ -175,7 +175,7 @@ let classify_def (ws : Ws.t) :
   else if Ws.is_bottom ws then `Bottom
   else
     let cardn = Ws.cardinality ws in
-    match W.to_int cardn with
+    match Cbat_word.to_int cardn with
     | Error _ -> `B65p
     | Ok n ->
       if n = 1 then `Exact
@@ -190,7 +190,7 @@ let classify_ld (ws : Ws.t) (input_bottom : bool) : ld_bucket =
     (if input_bottom then `Bottom_dead else `Bottom_live)
   else if Ws.is_top ws then `Top
   else
-    match W.to_int (Ws.cardinality ws) with
+    match Cbat_word.to_int (Ws.cardinality ws) with
     | Ok 1 -> `Exact
     | _ -> `Bounded
 
@@ -199,7 +199,7 @@ let classify_operand (ws : Ws.t) : string =
   if Ws.is_top ws then "top"
   else if Ws.is_bottom ws then "empty"
   else
-    match W.to_int (Ws.cardinality ws) with
+    match Cbat_word.to_int (Ws.cardinality ws) with
     | Error _ -> "big"
     | Ok 0 -> "empty"
     | Ok 1 -> "exact"
@@ -244,8 +244,8 @@ let window_metric_of (ws : Ws.t) : win_bucket * int64 option =
     match Ws.min_elem_signed ws, Ws.max_elem_signed ws with
     | Some mn, Some mx ->
       let w = Ws.bitwidth ws in
-      let win = W.add (W.sub mx mn) (W.one w) in
-      (match W.to_int64 win with
+      let win = Cbat_word.add (Cbat_word.sub mx mn) (Cbat_word.one w) in
+      (match Cbat_word.to_int64 win with
        | Ok v when v < 0L -> (`W_big, Some Int64.max_int)
        | Ok 0L -> (`W_big, Some Int64.max_int)
        | Ok v ->

@@ -67,11 +67,19 @@ val arshift : t -> t -> t
 
 val compare : t -> t -> int
 val equal : t -> t -> bool
+(* Ordered infixes; mirroring Bap.Std.Word's surface. *)
+val ( = ) : t -> t -> bool
+val ( <> ) : t -> t -> bool
+val ( < ) : t -> t -> bool
+val ( > ) : t -> t -> bool
+val ( <= ) : t -> t -> bool
+val ( >= ) : t -> t -> bool
 val hash : t -> int
 val min : t -> t -> t
 val max : t -> t -> t
 
 val extract_exn : ?hi:int -> ?lo:int -> t -> t
+val cast : Bil.cast -> int -> t -> t
 val concat : t -> t -> t
 
 val gcd_exn : t -> t -> t

@@ -4,7 +4,7 @@ open Bap_core_theory
 open Test_common
 
 (* Regression tests C1-C4. *)
-let q64 (v : int64) : word = W.of_int64 ~width:64 v
+let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
 
 (* C1: narrow-store OR-mask width — mask computed at slot width 64. *)
 type c3_fixture = {
@@ -34,18 +34,18 @@ let mk_c3 () : c3_fixture =
   Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
   let post0 = Blk.Builder.result post_b in
   let post_tid = Term.tid post0 in
-  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))) in
+  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
   let def_seed =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (w64 0xAA), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 0xAA)), LittleEndian, `r64))
   in
-  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x20))) in
-  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x30))) in
+  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
   let def_out =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 16)),
-           Bil.Int (w64 0xBB),
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 0xBB)),
            LittleEndian,
            `r64 ))
   in
@@ -86,8 +86,8 @@ let run_creg () =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)),
-           Bil.Int (q64 0x1122334455667788L),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (q64 0x1122334455667788L)),
            LittleEndian,
            `r64 ))
   in
@@ -95,8 +95,8 @@ let run_creg () =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)),
-           Bil.Int (q64 0xABCDL),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (q64 0xABCDL)),
            LittleEndian,
            `r16 ))
   in
@@ -149,7 +149,7 @@ let run_creg () =
     (List.length masks = 1);
   check "regression C1: the OR-mask constant is neg(1 << 16) = 0xFFFFFFFFFFFF0000 at width 64"
     (match masks with
-    | [ w ] -> Word.bitwidth w = 64 && Word.equal w (q64 0xFFFFFFFFFFFF0000L)
+    | [ w ] -> Word.bitwidth w = 64 && Cbat_word.equal (Cbat_word.of_word w) (q64 0xFFFFFFFFFFFF0000L)
     | _ -> false);
   ()
 
@@ -161,8 +161,8 @@ let run_creg () =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x4000)),
-           Bil.Int (w64 1),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x4000))),
+           Bil.Int (Cbat_word.to_word (w64 1)),
            LittleEndian,
            `r8 ))
   in
@@ -226,8 +226,8 @@ let run_creg () =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 lo)),
-           Bil.Int (w64 data),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 lo))),
+           Bil.Int (Cbat_word.to_word (w64 data)),
            LittleEndian,
            sz ))
   in
@@ -287,18 +287,18 @@ let run_creg () =
     Bil.BinOp
       ( Bil.PLUS,
         Bil.Var rsp,
-        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (w64 32)) )
+        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
   in
   let def_idx_store =
-    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (w64 7), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
-  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))) in
+  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
   let def_concrete =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)),
-           Bil.Int (w64 9),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
            LittleEndian,
            `r64 ))
   in
@@ -306,7 +306,7 @@ let run_creg () =
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
   Blk.Builder.add_def body_b def_idx_store;
   Blk.Builder.add_def body_b def_inc;
   Blk.Builder.add_def exit_b def_concrete;
@@ -360,18 +360,18 @@ let run_creg () =
     Bil.BinOp
       ( Bil.PLUS,
         Bil.Var rsp,
-        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (w64 32)) )
+        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
   in
   let def_idx_store =
-    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (w64 7), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
-  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))) in
+  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
   let def_singleton =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)),
-           Bil.Int (w64 9),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
            LittleEndian,
            `r64 ))
   in
@@ -379,7 +379,7 @@ let run_creg () =
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
   Blk.Builder.add_def body_b def_idx_store;
   Blk.Builder.add_def body_b def_inc;
   Blk.Builder.add_def exit_b def_singleton;
@@ -425,19 +425,19 @@ let run_creg () =
       List.iter
         (fun cname ->
           let c =
-            if cname = "hi" then W.sub (W.ones w) (W.of_int ~width:w 7) else W.of_int ~width:w 0x2A
+            if cname = "hi" then Cbat_word.sub (Cbat_word.ones w) (Cbat_word.of_int ~width:w 7) else Cbat_word.of_int ~width:w 0x2A
           in
           let lbl = Printf.sprintf "@w=%d,%s" w cname in
-          let base = W.succ c in
-          let cardn = W.pred (Wo.dom_size ~width:(w + 1) w) in
-          let arc_clp = Clp.create ~width:w ~step:(W.one w) ~cardn base in
+          let base = Cbat_word.succ c in
+          let cardn = Cbat_word.pred (Wo.dom_size ~width:(w + 1) w) in
+          let arc_clp = Clp.create ~width:w ~step:(Cbat_word.one w) ~cardn base in
           check
             ("R6 unit: the NEQ arc is finite non-top with cardn 2^w-1 " ^ lbl)
             ((not (Clp.is_infinite arc_clp))
             && (not (Clp.is_top arc_clp))
-            && W.equal (Clp.cardinality arc_clp) cardn
+            && Cbat_word.equal (Clp.cardinality arc_clp) cardn
             && Clp.elem base arc_clp
-            && Clp.elem (W.pred c) arc_clp
+            && Clp.elem (Cbat_word.pred c) arc_clp
             && not (Clp.elem c arc_clp));
           let arc_ws = Ws.of_clp arc_clp in
           check
@@ -449,9 +449,9 @@ let run_creg () =
           (* Stepped class in the arc's span: join stays bounded, never top. *)
           let stepped =
             Clp.create
-              (W.add base (W.of_int ~width:w 7))
-              ~step:(W.of_int ~width:w 10)
-              ~cardn:(W.of_int ~width:(w + 1) 5)
+              (Cbat_word.add base (Cbat_word.of_int ~width:w 7))
+              ~step:(Cbat_word.of_int ~width:w 10)
+              ~cardn:(Cbat_word.of_int ~width:(w + 1) 5)
           in
           let joined = Ws.union arc_ws (Ws.of_clp stepped) in
           check
@@ -467,22 +467,22 @@ let run_creg () =
   let t = Var.create ~is_virtual:false ~fresh:false "r6_t" (Type.Imm 1) in
   let m = memv "r6_m" in
   let iv = Bil.Var i in
-  let neq_exp = Bil.BinOp (Bil.NEQ, iv, Bil.Int (w32 9)) in
+  let neq_exp = Bil.BinOp (Bil.NEQ, iv, Bil.Int (Cbat_word.to_word (w32 9))) in
   let idx_addr =
     Bil.BinOp
       ( Bil.PLUS,
         Bil.Var rsp,
-        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (w64 32)) )
+        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
   in
   let def_idx_store =
-    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (w64 7), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
-  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))) in
+  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
   let def_flag = Def.create t neq_exp in
   let entry_b = Blk.Builder.create () in
   let loop_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
   Blk.Builder.add_def loop_b def_idx_store;
   Blk.Builder.add_def loop_b def_inc;
   (* Flag def after the increment (later def would clear the record). *)
@@ -521,7 +521,7 @@ let run_creg () =
   check
     "R6: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals \
      diff(top,{9}))"
-    (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   let exit_i = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check "R6: the NEQ guard's FALLTHROUGH view pins the counter to {9} exactly"
     (Ws.equal exit_i (Ws.singleton (w32 9)));
@@ -534,22 +534,22 @@ let run_creg () =
   let t = Var.create ~is_virtual:false ~fresh:false "g3_t" (Type.Imm 1) in
   let m = memv "g3_m" in
   let iv = Bil.Var i in
-  let neq_exp = Bil.BinOp (Bil.NEQ, iv, Bil.Int (w32 9)) in
+  let neq_exp = Bil.BinOp (Bil.NEQ, iv, Bil.Int (Cbat_word.to_word (w32 9))) in
   let idx_addr =
     Bil.BinOp
       ( Bil.PLUS,
         Bil.Var rsp,
-        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (w64 32)) )
+        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
   in
   let def_idx_store =
-    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (w64 7), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
-  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))) in
+  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
   let def_flag = Def.create t neq_exp in
   let entry_b = Blk.Builder.create () in
   let loop_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
   Blk.Builder.add_def loop_b def_idx_store;
   Blk.Builder.add_def loop_b def_inc;
   Blk.Builder.add_def loop_b def_flag;
@@ -587,7 +587,7 @@ let run_creg () =
   check
     "G3: the NEQ guard's TAKEN view constrains the counter to the arc {x <> 9} (non-top, equals \
      diff(top,{9}))"
-    (match Ws.min_elem head_i with Some lo -> W.equal lo (w32 0) | None -> false);
+    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   let exit_i = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
   check "G3: the NEQ guard's FALLTHROUGH view pins the counter to {9} exactly"
     (Ws.equal exit_i (Ws.singleton (w32 9)));
@@ -612,18 +612,18 @@ let run_remediation () =
   Blk.Builder.add_def post_b (Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)));
   let post0 = Blk.Builder.result post_b in
   let post_tid = Term.tid post0 in
-  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))) in
+  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
   let def_seed =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (w64 0xAA), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 0xAA)), LittleEndian, `r64))
   in
-  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x20))) in
-  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x30))) in
+  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
   (* Vs C3: outgoing slot stores unwritten RCX (TOP). *)
   let def_out =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 16)),
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
            Bil.Var rcx,
            LittleEndian,
            `r64 ))
@@ -683,13 +683,13 @@ let run_remediation () =
 ;
 (  let rsp = v64 "RSP" in
   let m = memv "a2_m" in
-  let dec = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x4800))) in
+  let dec = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x4800)))) in
   let deep =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x4800)),
-           Bil.Int (w64 1),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x4800))),
+           Bil.Int (Cbat_word.to_word (w64 1)),
            LittleEndian,
            `r8 ))
   in
@@ -720,8 +720,8 @@ let run_remediation () =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x20)),
-           Bil.Int (w64 1),
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20))),
+           Bil.Int (Cbat_word.to_word (w64 1)),
            LittleEndian,
            `r8 ))
   in
@@ -766,8 +766,8 @@ let run_remediation () =
       Def.create ~tid:(List.nth c1_def_tids 0) m
         (Bil.Store
            ( Bil.Var m,
-             Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (q64 (Int64.neg lo))),
-             Bil.Int (q64 0x1122334455667788L),
+             Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (q64 (Int64.neg lo)))),
+             Bil.Int (Cbat_word.to_word (q64 0x1122334455667788L)),
              LittleEndian,
              `r64 ))
     in
@@ -775,8 +775,8 @@ let run_remediation () =
       Def.create ~tid:(List.nth c1_def_tids 1) m
         (Bil.Store
            ( Bil.Var m,
-             Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (q64 (Int64.neg lo))),
-             Bil.Int (q64 data),
+             Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (q64 (Int64.neg lo)))),
+             Bil.Int (Cbat_word.to_word (q64 data)),
              LittleEndian,
              sz ))
     in
@@ -807,12 +807,12 @@ let run_remediation () =
   check
     "remediation A4a: the u8 narrow-store OR-mask is neg(1 << 8) = 0xFFFFFFFFFFFFFF00 at width 64"
     (match masks_of `r8 0xABL with
-    | [ w ] -> Word.bitwidth w = 64 && Word.equal w (q64 0xFFFFFFFFFFFFFF00L)
+    | [ w ] -> Word.bitwidth w = 64 && Cbat_word.equal (Cbat_word.of_word w) (q64 0xFFFFFFFFFFFFFF00L)
     | _ -> false);
   check
     "remediation A4b: the u32 narrow-store OR-mask is neg(1 << 32) = 0xFFFFFFFF00000000 at width 64"
     (match masks_of `r32 0xABCDL with
-    | [ w ] -> Word.bitwidth w = 64 && Word.equal w (q64 0xFFFFFFFF00000000L)
+    | [ w ] -> Word.bitwidth w = 64 && Cbat_word.equal (Cbat_word.of_word w) (q64 0xFFFFFFFF00000000L)
     | _ -> false);
   ()
 
@@ -837,18 +837,18 @@ let run_remediation () =
   let post0 = Blk.Builder.result post_b in
   let post_tid = Term.tid post0 in
   (* Neighbor at [entry RSP - 0x18]: inside kept frame, outside both slots. *)
-  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x18))) in
+  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x18)))) in
   let def_seed =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (w64 0xAA), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 0xAA)), LittleEndian, `r64))
   in
-  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x20))) in
-  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x30))) in
+  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
   let def_out1 =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 16)),
-           Bil.Int (w64 0xBB),
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 0xBB)),
            LittleEndian,
            `r64 ))
   in
@@ -856,8 +856,8 @@ let run_remediation () =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 24)),
-           Bil.Int (w64 0xDD),
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 24))),
+           Bil.Int (Cbat_word.to_word (w64 0xDD)),
            LittleEndian,
            `r64 ))
   in
@@ -999,11 +999,11 @@ let run_regions () =
   let b = Blk.Builder.create () in
   let d1 =
     Def.create t1
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))), LittleEndian, `r32))
   in
   let d2 =
     Def.create t2
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 32)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 32))), LittleEndian, `r32))
   in
   Blk.Builder.add_def b d1;
   Blk.Builder.add_def b d2;
@@ -1066,11 +1066,11 @@ let run_regions () =
   let b = Blk.Builder.create () in
   let d1 =
     Def.create t1
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))), LittleEndian, `r32))
   in
   let d2 =
     Def.create t2
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 32)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 32))), LittleEndian, `r32))
   in
   Blk.Builder.add_def b d1;
   Blk.Builder.add_def b d2;
@@ -1103,11 +1103,11 @@ let run_regions () =
   let b = Blk.Builder.create () in
   let d1 =
     Def.create t1
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))), LittleEndian, `r32))
   in
   let d2 =
     Def.create t2
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 32)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 32))), LittleEndian, `r32))
   in
   Blk.Builder.add_def b d1;
   Blk.Builder.add_def b d2;
@@ -1221,7 +1221,7 @@ let run_regions () =
   let d_copy = Def.create v (Bil.Var rsp) in
   let d_stack =
     Def.create t
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)), LittleEndian, `r32))
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))), LittleEndian, `r32))
   in
   let d_alias = Def.create t2 (Bil.Load (Bil.Var m, Bil.Var v, LittleEndian, `r32)) in
   Blk.Builder.add_def b d_copy;
@@ -1270,10 +1270,10 @@ let run_regions () =
       (Ws.of_list ~width:32 [ w32 1; w32 2 ], Ws.of_list ~width:32 [ w32 2; w32 3 ]);
       (Ws.of_list ~width:32 [ w32 1 ], Ws.of_list ~width:32 [ w32 2 ]);
       (Ws.top 32, Ws.of_list ~width:32 [ w32 5 ]);
-      ( Ws.of_list ~width:8 [ W.of_int ~width:8 1; W.of_int ~width:8 2 ],
-        Ws.of_list ~width:8 [ W.of_int ~width:8 3 ] );
-      ( Ws.of_clp (Clp.create (w32 0) ~step:(w32 2) ~cardn:(W.of_int ~width:33 5)),
-        Ws.of_clp (Clp.create (w32 1) ~step:(w32 2) ~cardn:(W.of_int ~width:33 5)) );
+      ( Ws.of_list ~width:8 [ Cbat_word.of_int ~width:8 1; Cbat_word.of_int ~width:8 2 ],
+        Ws.of_list ~width:8 [ Cbat_word.of_int ~width:8 3 ] );
+      ( Ws.of_clp (Clp.create (w32 0) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 5)),
+        Ws.of_clp (Clp.create (w32 1) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 5)) );
       (Ws.singleton (w32 10), Ws.of_list ~width:32 [ w32 10; w32 20 ]);
       (Ws.singleton (w32 10), Ws.of_list ~width:32 [ w32 20; w32 30 ]);
     ]
@@ -1306,20 +1306,20 @@ let run_regions () =
         let n = 1 + Random.int 5 in
         let rec els acc i =
           if i <= 0 then acc
-          else els (W.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) :: acc) (i - 1)
+          else els (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) :: acc) (i - 1)
         in
         (Ws.of_list ~width:w (els [] n), `fs)
     | 1 ->
         (* Random progression. *)
-        let base = W.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) in
-        let step = W.of_int ~width:w (1 + Random.int 3) in
+        let base = Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1)) in
+        let step = Cbat_word.of_int ~width:w (1 + Random.int 3) in
         let c = if Random.bool () then 1 + Random.int 6 else 11 + Random.int 30 in
-        ( Ws.of_clp (Clp.create base ~step ~cardn:(W.of_int ~width:(w + 1) c)),
+        ( Ws.of_clp (Clp.create base ~step ~cardn:(Cbat_word.of_int ~width:(w + 1) c)),
           if c <= 10 (* Utils.fin_set_size *) then `fs else `clp )
     | 2 ->
         (* Top (demotes by width). *)
         (Ws.top w, if w <= 3 then `fs else `clp)
-    | _ -> (Ws.singleton (W.of_int ~width:w (Random.bits () land ((1 lsl w) - 1))), `fs)
+    | _ -> (Ws.singleton (Cbat_word.of_int ~width:w (Random.bits () land ((1 lsl w) - 1))), `fs)
   in
   for _i = 1 to 300 do
     let w = [| 3; 5; 8 |].(Random.int 3) in
@@ -1350,8 +1350,8 @@ let run_regions () =
     [
       Fs.of_list ~width:32 [ w32 1; w32 2; w32 3 ];
       Fs.of_list ~width:32 [ w32 5 ];
-      Fs.of_list ~width:8 [ W.of_int ~width:8 1; W.of_int ~width:8 2 ];
-      Fs.of_list ~width:16 [ W.of_int ~width:16 10; W.of_int ~width:16 20 ];
+      Fs.of_list ~width:8 [ Cbat_word.of_int ~width:8 1; Cbat_word.of_int ~width:8 2 ];
+      Fs.of_list ~width:16 [ Cbat_word.of_int ~width:16 10; Cbat_word.of_int ~width:16 20 ];
       Fs.of_list ~width:32 [ w32 0; w32 2; w32 4; w32 6; w32 8 ];
     ]
   in
@@ -1361,24 +1361,24 @@ let run_regions () =
       let s2 = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
       check
         (Printf.sprintf "property FinSet->Clp->FinSet round-trip width %d cardn %d" (Fs.bitwidth s)
-           (W.to_int_exn (Fs.cardinality s)))
+           (Cbat_word.to_int_exn (Fs.cardinality s)))
         (Fs.equal s s2))
     fin_sets;
   let clps : Clp.t list =
     [
-      Clp.create (w32 10) ~step:(w32 2) ~cardn:(W.of_int ~width:33 3);
-      Clp.create (w32 0) ~step:(w32 1) ~cardn:(W.of_int ~width:33 5);
-      Clp.create (W.of_int ~width:8 1) ~step:(W.of_int ~width:8 1) ~cardn:(W.of_int ~width:9 3);
+      Clp.create (w32 10) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 3);
+      Clp.create (w32 0) ~step:(w32 1) ~cardn:(Cbat_word.of_int ~width:33 5);
+      Clp.create (Cbat_word.of_int ~width:8 1) ~step:(Cbat_word.of_int ~width:8 1) ~cardn:(Cbat_word.of_int ~width:9 3);
     ]
   in
   List.iter
     (fun p ->
       let cardn = Clp.cardinality p in
-      if (not (W.is_zero cardn)) && W.compare cardn (W.of_int ~width:(W.bitwidth cardn) 11) < 0 then
+      if (not (Cbat_word.is_zero cardn)) && Cbat_word.compare cardn (Cbat_word.of_int ~width:(Cbat_word.bitwidth cardn) 11) < 0 then
         let s = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
         let p2 = Clp.of_list ~width:(Fs.bitwidth s) (Fs.iter s) in
         check
-          (Printf.sprintf "property Clp->FinSet->Clp round-trip cardn %d" (W.to_int_exn cardn))
+          (Printf.sprintf "property Clp->FinSet->Clp round-trip cardn %d" (Cbat_word.to_int_exn cardn))
           (Clp.equal p p2))
     clps;
   (* m6: randomized round-trips — soundness always, exactness on wrap-free arcs. *)
@@ -1391,7 +1391,7 @@ let run_regions () =
     let step = 1 + Random.int 5 in
     let n = 1 + Random.int 10 in
     let rec els acc k =
-      if k = n then acc else els (W.of_int ~width:w ((base + (k * step)) mod dom) :: acc) (k + 1)
+      if k = n then acc else els (Cbat_word.of_int ~width:w ((base + (k * step)) mod dom) :: acc) (k + 1)
     in
     (* Exact-round-trip shape: no wrap AND seam gap step-multiple. *)
     let wrap_free = base + ((n - 1) * step) < dom in
@@ -1410,19 +1410,19 @@ let run_regions () =
     let s2 = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
     expect (subset (Fs.iter s) s2) "FinSet->Clp->FinSet SOUND (s ⊆ s2)";
     expect
-      (W.compare (Fs.cardinality s) (Fs.cardinality s2) <= 0)
+      (Cbat_word.compare (Fs.cardinality s) (Fs.cardinality s2) <= 0)
       "FinSet->Clp->FinSet cardn non-decreasing";
     if exact_shape then expect (Fs.equal s s2) "FinSet->Clp->FinSet EXACT (wrap-free arc)";
     (* Clp -> FinSet -> Clp *)
     let p3 =
-      Clp.create (W.of_int ~width:w base) ~step:(W.of_int ~width:w step)
-        ~cardn:(W.of_int ~width:(w + 1) n)
+      Clp.create (Cbat_word.of_int ~width:w base) ~step:(Cbat_word.of_int ~width:w step)
+        ~cardn:(Cbat_word.of_int ~width:(w + 1) n)
     in
     let s3 = Fs.of_list ~width:(Clp.bitwidth p3) (Clp.iter p3) in
     let p4 = Clp.of_list ~width:(Fs.bitwidth s3) (Fs.iter s3) in
     expect (List.for_all (fun x -> Clp.elem x p4) (Clp.iter p3)) "Clp->FinSet->Clp SOUND (p3 ⊆ p4)";
     expect
-      (W.compare (Clp.cardinality p3) (Clp.cardinality p4) <= 0)
+      (Cbat_word.compare (Clp.cardinality p3) (Clp.cardinality p4) <= 0)
       "Clp->FinSet->Clp cardn non-decreasing";
     if exact_shape then expect (Clp.equal p3 p4) "Clp->FinSet->Clp EXACT (wrap-free arc)"
   done;
@@ -1437,11 +1437,12 @@ let run_regions () =
 
 (* Copy-reloc slot computation, pinned through the production function. *)
 let run_copy_reloc () =
+  let bw64 = Word.of_int ~width:64 in
   let m = memv "cr_m" in
   let t i = v64 (Printf.sprintf "cr_t%d" i) in
-  let ld a = Bil.Load (Bil.Var m, Bil.Int (w64 a), LittleEndian, `r64) in
+  let ld a = Bil.Load (Bil.Var m, Bil.Int (bw64 a), LittleEndian, `r64) in
   let st a v =
-    Bil.Store (Bil.Var m, Bil.Int (w64 a), Bil.Int (w64 v), LittleEndian, `r64)
+    Bil.Store (Bil.Var m, Bil.Int (bw64 a), Bil.Int (bw64 v), LittleEndian, `r64)
   in
   let sub_of name defs =
     let b = Blk.Builder.create () in
@@ -1477,7 +1478,7 @@ let run_copy_reloc () =
           sub_of "nested"
             [
               Def.create (t 5)
-                (Bil.BinOp (Bil.PLUS, ld 0x1050, Bil.Int (w64 1)));
+                (Bil.BinOp (Bil.PLUS, ld 0x1050, Bil.Int (bw64 1)));
             ];
         ]
       ()

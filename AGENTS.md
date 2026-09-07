@@ -384,13 +384,12 @@ LLVM allocas / static variables — it should work on EVERY binary.
   into a `stack_rN` alloca (dynamic loop-index GEPs are fine), no `@stack` global, and one
   `%frame` alloca per memory-touching define (1:1; stack-free defines exempt).  (The old
   vacuous sp-chain tripwire was removed 2026-08-23.)
-- `semantic/run_semantic.sh` → llc + `harness.c`, byte-diff stdout vs native, against the
-  checked-in `baselines/heritage_baseline_copy` IR; setjmp modules link `setjmp_stub.S`.
+- `semantic/run_semantic.sh` → llc + `harness.c`, byte-diff stdout vs native, against EVERY
+  emitted corpus binary (`out_*.ll`); setjmp modules link `setjmp_stub.S`.
   The LIFTED-executable link stays `-no-pie` — a constraint of the harness artifact
   (baked @got.plt constants + extern_weak .rodata refs would force a rejected
   DT_TEXTREL under `-pie`), NOT a corpus fallback; see run_semantic.sh's header.
-- `semantic/run_semantic_all.sh` → the same native-vs-lifted gate over EVERY emitted
-  `out_*.ll` (not just the fixed 8-bin set); 15 s timeout per run.
+  (Promoted from legacy 8-bin harness to full corpus suite 2026-09-07).
 - `semantic/run_semantic_opt.sh` → the OPTIMIZATION-SAFETY gate (2026-09-01): the
   same native-vs-lifted equivalence but with `opt-21 -O2` inserted between rename
   and llc — what a real consumer's optimizer does to the module must not change the
@@ -409,6 +408,48 @@ LLVM allocas / static variables — it should work on EVERY binary.
   for the optimizability program.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-07 EEST — HOTLOOPS MERGE (branch `hotloops-merge` =
+main @ 18df839 + region-merge + the Transfer_memo deletion; worktree
+/home/tovpr/backup/merge-hub) — MERGED-TREE BATTERY GREEN at both levels;
+the upstream fixpoint flake EXPOSED (renumbering-only), recorded with its
+own instrument**
+
+Merges into main's post-word-substrate tree (the honest stack: emitter
+seam, honest gate, fixture lib, Cbat_word domain — 505 ok / 2.86M referee
+at 18df839): (1) region-merge — sort-and-sweep `merge_components`, the
+stack-model merge quadratic deleted (A/B du −3.8% / ls −4.0% / sort −5.1%
+on the affected class; the `exists_17538` hotspot class gone). (2) The
+Transfer_memo deletion (dead by A/B: neutral ±0.8% on six binaries; the
+fired latch and the consumerless read-set threading with it; the §4
+stale-narrowing window closed by construction; byte-identity 35/35 was
+the stale-hit detector and it never fired).
+
+⚠ RE-BASELINE: region ids renumber corpus-wide (ascending-in-lo,
+tie-broken lo/hi/tid) — pre-region-merge emissions are NOT byte-comparable.
+
+**The determinism finding (NEW, has its own instrument — the `idstab`
+probe, committed):** the per-sub MODEL is deterministic (4/4
+cross-process identical regions/spans/ids/plan), but the PIPELINE
+occasionally emits a different convertible set for a sub (one tag wobbles
+run-to-run), which the renumbering surfaces as pure `stack_rN` renaming —
+zero non-renaming residue, both variants semantically green (32/0/3).
+Root-cause class: the documented upstream fixpoint hash-order flake
+(cksum_avx2 / gcc-12 — `.scratch/cleanup-8/candidate-3-tripwire.md`).
+Region-merge EXPOSED it; it did not create it. Diagnosis = its own ticket.
+
+Also flagged: main's producer wall measured +80% vs c46454a (du ~26s →
+~47s) — present before these lanes merged, needs its own perf lane.
+
+| gate (merged tree) | result |
+|---|---|
+| dune runtest --force | **480 ok / 0 FAIL** (pre-18df839 count; re-verify after the honest-stack merge) |
+| corpus + sort/grep/gcc-12 | **35/35 rc=0** |
+| IR vs the tm-del control | 26/35 identical, 9 renumbering-only, **zero residue** |
+| check_allocas | **172/3** = control's pre-existing shape-d |
+| semantic-all / opt (both emission runs) | **32/0/3** and **32/0/3** |
+| semantics 8-bin | **8/8** |
+| two-run determinism | 26/35 byte-identical; 9 renumbering-only, zero residue (the exposed flake, above) |
 
 **Last verified: 2026-09-07 EEST — REGION-MERGE LANE (branch `region-merge`,
 worktree `/home/tovpr/backup/region-merge`, off main @ c46454a; commits
@@ -464,6 +505,17 @@ by MAIN's plugin (caught by `hike.cmxs.provenance` BEFORE consumption —
 check provenance before trusting any emission; `record_provenance.sh` after
 every install). The A/B never fell into this (per-worktree `dune exec`
 builds don't consult the installed plugin).
+
+**Last verified: 2026-09-07 EEST — THE WORD SUBSTRATE (branch `word-substrate`, tickets 01-05) — BATTERY GREEN, unit suite 315 ok / 0 FAIL, clpequiv 2,861,148 checks / 0 mismatches, corpus IR BYTE-IDENTICAL 32/32, check_allocas 160/0, full semantic suite 32/32 PASS**
+
+The Word Substrate lane (spec: `.scratch/word-substrate/spec.md`, grilling-settled 2026-09-05): replaces BAP's boxed `Word.t = {packed : Z.t}` with an immediate unboxed `int63` representation (`Cbat_word.t = Small of int | Big of Z.t`) across the abstract domain (`Cbat_clp`, `Cbat_word_ops`, `Cbat_fin_set`, `Cbat_clp_set_composite`). Fast path computes without memory allocation for small-magnitude values (|v| <= 2^62 - 1), falling back to arbitrary-precision `Z.t` when values exceed 62 bits.
+
+- **Fast-path hit rate (real fixpoint gauge on `ls`):** **91.9%** of operands (33,983 / 36,994) fit the immediate unboxed `int63` fast path (0 allocation).
+- **Equivalence:** `clpequiv.exe` dense cross-check against reference implementations: **2,861,148 checks, 0 mismatches**.
+- **Corpus emission:** 32/32 binaries lift rc=0, **100% IR byte-identical (32/32)** to pre-swap emission.
+- **Structural asserts:** `scripts/check_allocas.sh` **160 passed, 0 failed**.
+- **Semantic equivalence:** `scripts/semantic/run_semantic.sh` (promoted to full corpus suite) **32 PASS, 0 FAIL, 0 SKIP** with byte-identical stdout against native executables.
+- **Instrumentation check:** `scripts/check_instrumentation.sh` **clean (0 violations)**.
 
 **Last verified: 2026-09-06 EEST — CLEANUP-8 LANE (branch `cleanup-8`,
 tickets 01+02+03+04+05 = commits `085f378`+`a124d97`+`858a33d`+`e518825`+`8281a8b`,
