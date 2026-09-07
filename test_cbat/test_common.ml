@@ -1706,3 +1706,74 @@ let mk_store_minus m rsp lo data sz =
          Bil.Int (w64 data),
          LittleEndian,
          sz ))
+
+(* When-chain fixture (moved verbatim from test_properties.ml). *)
+let mk_when_chain () : sub term * tid * tid * tid * tid * var =
+  let m = memv "wc_m" in
+  let rbp = v64 "RBP" in
+  let x = Var.create ~is_virtual:false ~fresh:false "wc_x" (Type.Imm 32) in
+  let g1 = v1 "wc_g1" in
+  let g2 = v1 "wc_g2" in
+  let f1 = v1 "wc_f1" in
+  let f2 = v1 "wc_f2" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
+  let c1 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 10)) in
+  let c2 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (w32 20)) in
+  let mk_store_blk (k : word) : blk term =
+    let b = Blk.Builder.create () in
+    Blk.Builder.add_def b
+      (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int k, LittleEndian, `r32)));
+    Blk.Builder.result b in
+  let mk_jmp_blk () : blk term = Blk.Builder.result (Blk.Builder.create ()) in
+  let prologue0 =
+    let b = Blk.Builder.create () in
+    Blk.Builder.add_def b (Def.create rbp (Bil.Var (v64 "RSP")));
+    Blk.Builder.result b in
+  let s1_0 = mk_jmp_blk () in
+  let s2_0 = mk_jmp_blk () in
+  let e1_0 = mk_store_blk (w32 5) in
+  let e2_0 = mk_store_blk (w32 15) in
+  let e3_0 = mk_store_blk (w32 25) in
+  let chain_b = Blk.Builder.create () in
+  Blk.Builder.add_def chain_b (Def.create x load_e);
+  let chain0 = Blk.Builder.result chain_b in
+  let l1_0 = mk_jmp_blk () in
+  let l2_0 = mk_jmp_blk () in
+  let l3_0 = mk_jmp_blk () in
+  let chain_tid = Term.tid chain0 in
+  let l1_tid = Term.tid l1_0 in
+  let l2_tid = Term.tid l2_0 in
+  let l3_tid = Term.tid l3_0 in
+  let prologue_b = Blk.Builder.init ~copy_defs:true prologue0 in
+  Blk.Builder.add_jmp prologue_b (Jmp.create (Goto (Direct (Term.tid s1_0))));
+  let s1_b = Blk.Builder.init ~copy_defs:true s1_0 in
+  Blk.Builder.add_def s1_b (Def.create f1 (Bil.Var g1));
+  Blk.Builder.add_jmp s1_b (Jmp.create ~cond:(Bil.Var f1) (Goto (Direct (Term.tid e1_0))));
+  Blk.Builder.add_jmp s1_b (Jmp.create (Goto (Direct (Term.tid s2_0))));
+  let s2_b = Blk.Builder.init ~copy_defs:true s2_0 in
+  Blk.Builder.add_def s2_b (Def.create f2 (Bil.Var g2));
+  Blk.Builder.add_jmp s2_b (Jmp.create ~cond:(Bil.Var f2) (Goto (Direct (Term.tid e2_0))));
+  Blk.Builder.add_jmp s2_b (Jmp.create (Goto (Direct (Term.tid e3_0))));
+  let mk_goto (b0 : blk term) (dst : tid) : blk term =
+    let b = Blk.Builder.init ~copy_defs:true b0 in
+    Blk.Builder.add_jmp b (Jmp.create (Goto (Direct dst)));
+    Blk.Builder.result b in
+  let e1 = mk_goto e1_0 chain_tid in
+  let e2 = mk_goto e2_0 chain_tid in
+  let e3 = mk_goto e3_0 chain_tid in
+  let chain_b = Blk.Builder.init ~copy_defs:true chain0 in
+  Blk.Builder.add_jmp chain_b (Jmp.create ~cond:c1 (Goto (Direct l1_tid)));
+  Blk.Builder.add_jmp chain_b (Jmp.create ~cond:c2 (Goto (Direct l2_tid)));
+  Blk.Builder.add_jmp chain_b (Jmp.create (Goto (Direct l3_tid)));
+  let l1 = mk_goto l1_0 l1_tid in
+  let l2 = mk_goto l2_0 l2_tid in
+  let l3 = mk_goto l3_0 l3_tid in
+  let sub_b = Sub.Builder.create ~name:"wc_chain" () in
+  List.iter (Sub.Builder.add_blk sub_b)
+    [ Blk.Builder.result prologue_b; Blk.Builder.result s1_b; Blk.Builder.result s2_b;
+      e1; e2; e3; Blk.Builder.result chain_b; l1; l2; l3 ];
+  let sub = Sub.Builder.result sub_b in
+  (sub, l1_tid, l2_tid, l3_tid, chain_tid, x)
+
+(* T01-1: accumulated-cond acceptance — mid edge by c2 & ~c1, tail by ~c1 & ~c2. *)
