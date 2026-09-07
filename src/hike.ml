@@ -36,194 +36,11 @@ let get_section_data =
       (arr, Memory.min_addr mem, Memory.max_addr mem)
     end
 
-let free_vars sub =
-  Sub.free_vars sub
-  |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
-  |> Core.Set.to_list
-
-(* Tests the [Sub.intrinsic] attribute. *)
-let is_intrinsic (term : sub term) : bool =
-  Term.has_attr term Sub.intrinsic
-
-let is_emittable_intrinsic (term : sub term) : bool =
-  is_intrinsic term && not (Seq.is_empty (Term.enum blk_t term))
-
-(* Tests for bodyless LLVM intrinsics. *)
-let is_llvm_x86_intrinsic (term : sub term) : bool =
-  Term.has_attr term Sub.intrinsic && Seq.is_empty (Term.enum blk_t term)
-
-let fp_returning (sub : sub term) : bool =
-  let is_ymm n = Base.String.is_prefix n ~prefix:Abi.vector_param_prefix in
-  let is_value_reg v =
-    let n = Var.name (Var.base v) in
-    Base.List.mem Abi.value_return_names n ~equal:String.equal
-    || is_ymm n
-  in
-  let is_epilogue blk =
-    Term.enum jmp_t blk
-    |> Seq.exists ~f:(fun j ->
-        match Jmp.kind j with
-        | Call c -> (
-            match Call.target c with
-            | Indirect _ -> Option.is_none (Call.return c)
-            | _ -> false)
-        | _ -> false)
-  in
-  let value_defs blk =
-    Term.enum def_t blk
-    |> Seq.fold ~init:[] ~f:(fun acc d ->
-        if is_value_reg (Def.lhs d) then d :: acc else acc)
-  in
-  let cfg = Sub.to_graph sub in
-  let return_path_defs =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:[] ~f:(fun acc blk ->
-        if not (is_epilogue blk) then acc
-        else
-          let preds = Graphs.Tid.Node.preds (Term.tid blk) cfg in
-          let pred_defs =
-            Seq.fold preds ~init:[] ~f:(fun acc p ->
-                match Term.find blk_t sub p with
-                | Some pb -> value_defs pb @ acc
-                | None -> acc)
-          in
-          value_defs blk @ pred_defs @ acc)
-  in
-  match return_path_defs with
-  | [] -> false
-  | d :: _ -> is_ymm (Var.name (Var.base (Def.lhs d)))
-
-let compute_sub_sig (target : Theory.Target.t) (sub : sub term) :
-    Arg.t list * Arg.t list =
-  let free_vars = free_vars sub in
-  let rets =
-    (if Theory.Target.matches target "x86_64-gnu-elf" then
-       Abi.return_regs target
-     else [])
-    |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
-  in
-  let rets =
-    (* Double returns arrive via [%YMM0]. *)
-    if fp_returning sub then
-      let ymm0 = Base.List.nth_exn (Abi.vector_param_regs target) 0 in
-      rets
-      @ [ Arg.create ~intent:Out ymm0 (Var ymm0) ]
-    else rets
-  in
-  let rets, args =
-    if is_emittable_intrinsic sub then begin
-    (* Intrinsic signature is the model's own interface. *)
-    let args =
-      Base.List.map free_vars ~f:(fun reg ->
-          Arg.create ~intent:In reg (Var reg))
-    in
-    let rets =
-      Term.enum blk_t sub
-      |> Seq.fold ~init:[] ~f:(fun acc blk ->
-          Term.enum def_t blk
-          |> Seq.fold ~init:acc ~f:(fun acc d ->
-              let v = Def.lhs d in
-              let is_input =
-                Base.List.exists free_vars ~f:(fun fv -> Var.same fv v)
-              in
-              let already =
-                Base.List.exists acc ~f:(fun a -> Var.same (Arg.lhs a) v)
-              in
-              if is_input || already then acc
-              else Arg.create ~intent:Out v (Var v) :: acc))
-    in
-      (rets, args)
-    end
-  else if Term.name sub = "@main" then
-     let abi = Abi.of_target target in
-     let rdi = Base.List.nth_exn abi.int_param_regs 0 in
-     let rsi = Base.List.nth_exn abi.int_param_regs 1 in
-     let args =
-       [
-         Arg.create ~intent:In rdi (Var rdi);
-         Arg.create ~intent:In rsi (Var rsi);
-       ]
-     in
-      (rets, args)
-   else
-       (* Subs with incoming stack args take [hike_stack]. The VSA verdict
-         is the SOLE origin (review #2 grill): the hand-rolled BIL walk
-         that used to OR a second opinion here is deleted — two
-         mechanisms that can disagree are worse than one, and absent
-         info already defaults to false. *)
-      let has_positive =
-        Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
-        |> Base.Option.value_map ~default:false ~f:(fun info ->
-            Core.Map.exists info.Convutils.offsets ~f:(fun kind ->
-                Convutils.is_positive_kind kind))
-      in
-      let is_main =
-        String.equal (Sub.name sub) "@main"
-        || String.equal (Tid.name (Term.tid sub)) "@main"
-      in
-      let hike_stack_arg =
-        if has_positive && not is_main then
-          [ Arg.create ~intent:In Convutils.hike_stack_var
-              (Var Convutils.hike_stack_var) ]
-        else []
-      in
-      let args =
-        let rank_of_var (v : var) : int * string =
-          let n = Var.name (Var.base v) in
-          let int_order = Base.List.map (Abi.int_param_regs target) ~f:Var.name in
-          match Base.List.findi int_order ~f:(fun _ s -> String.equal s n) with
-          | Some (i, _) -> (i, n)
-          | None ->
-            if Base.String.is_prefix n ~prefix:Abi.vector_param_prefix then
-              (try
-                 let num = int_of_string (String.sub n 3 (String.length n - 3)) in
-                 if 0 <= num && num < 8 then (6 + num, n) else (100, n)
-               with _ -> (100, n))
-            else (100, n)
-        in
-        Base.List.filter free_vars ~f:(fun reg ->
-            let n = Var.name (Var.base reg) in
-            let is_callee_saved =
-              Abi.is_callee_saved_t target reg
-            in
-            not
-              (Var.same reg (sp target)
-              || Var.same reg (fp target)
-              || is_callee_saved
-              || Convutils.is_intrinsic_name n))
-        |> Base.List.sort ~compare:(fun a b ->
-            let ra, na = rank_of_var a in
-            let rb, nb = rank_of_var b in
-            match Int.compare ra rb with
-            | 0 -> String.compare na nb
-            | c -> c)
-        |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-        |> fun regs -> regs @ hike_stack_arg
-      in
-     (* PLT stubs take the full param list. Signature-shape rule (args = []
-        + any call): distinct from the emitter's BIL-shape rule
-        (Bil2llvm.is_plt_trampoline: no reg free-vars + call) — the two
-        run on different inputs (pre-DCE raw sub vs post-DCE sub) and must
-        not be merged blindly. *)
-     let is_plt_sig =
-       args = []
-       && Term.enum blk_t sub
-          |> Seq.exists ~f:(fun blk ->
-                 Term.enum jmp_t blk
-                 |> Seq.exists ~f:(fun j ->
-                        match Jmp.kind j with
-                        | Call _ -> true
-                        | _ -> false))
-     in
-     let args =
-       if is_plt_sig then
-         Base.List.map (Abi.param_regs target)
-           ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-       else args
-     in
-      (rets, args)
-  in
-  (rets, args)
+(* Intrinsics and free-vars are owned by the emitter; the filter shares. *)
+let free_vars = Bil2llvm.free_vars
+let is_intrinsic = Bil2llvm.is_intrinsic
+let is_emittable_intrinsic = Bil2llvm.is_emittable_intrinsic
+let is_llvm_x86_intrinsic = Bil2llvm.is_llvm_x86_intrinsic
 
 type 'a region = { addr : int64; size : int64; info : 'a }
 
@@ -434,34 +251,6 @@ let filter_subs proj =
 
 (* Setup and filter form their own pass. *)
 
-let init_subs ctx llvm_ctx llvm_module section_list proj =
-  (* Fills the signature table once. *)
-  let sigs =
-    Term.enum sub_t (Project.program proj)
-    |> Base.Sequence.to_list
-    |> Base.List.map ~f:(fun sub ->
-           (sub, compute_sub_sig ctx.Convutils.target sub))
-  in
-  let subs =
-    Base.List.fold sigs ~init:ctx.Convutils.subs
-      ~f:(fun acc (sub, (rets, args)) ->
-          add_sub_sig acc (Term.tid sub) ~rets ~args)
-  in
-  Toplevel.exec begin
-    KB.Context.with_var emit_ctx_var ctx (fun () ->
-      KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
-        KB.Context.with_var llvm_module_var llvm_module (fun () ->
-          KB.Context.with_var section_list_var section_list (fun () ->
-            KB.List.iter sigs ~f:(fun (sub, (rets, args)) ->
-                (* Mapped intrinsics store the sig but define no function. *)
-                if
-                  Base.Option.is_none
-                    (Bil2llvm.native_fp_op (Tid.name (Term.tid sub)))
-                then create_fun (Term.tid sub) ~rets ~args
-                else KB.return ())))))
-  end;
-  ({ ctx with Convutils.subs = subs }, proj)
-
 let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
@@ -575,7 +364,6 @@ let convert_binary output_program proj =
       ptrsize;
     }
   in
-  let ctx, proj' = init_subs ctx llvm_ctx llvm_module section_list proj in
   (* Pass 2: data-section initializers. *)
   Base.List.iter
     [
@@ -586,10 +374,16 @@ let convert_binary output_program proj =
       rodata_rel_section;
     ]
     ~f:(fun sec ->
-      Base.Option.iter sec ~f:(fun (arr, min_addr, _, base) ->
-          Bil2llvm.set_section_initializer ctx llvm_ctx llvm_module base arr
-            (Word.to_int64_exn min_addr)));
-  create_prog ctx llvm_ctx llvm_module section_list proj';
+        Base.Option.iter sec ~f:(fun (arr, min_addr, _, base) ->
+            Bil2llvm.set_section_initializer ctx llvm_ctx llvm_module base arr
+              (Word.to_int64_exn min_addr)));
+  Bil2llvm.emit_program llvm_ctx llvm_module
+    ~target ~ptrsize
+    ~symtab:symtab_val
+    ~text_section:text_section_val
+    ~section_remap:section_remap_val
+    ~copy_relocs:copy_reloc_addrs_val
+    section_list (Project.program proj);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx

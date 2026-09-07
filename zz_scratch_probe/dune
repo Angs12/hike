@@ -178,7 +178,7 @@
  (preprocess
   (pps ppx_bap)))
 
-(executable
+(test
  (name clpequiv)
  (modules clpequiv)
  (libraries

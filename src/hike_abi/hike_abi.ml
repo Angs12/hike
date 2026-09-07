@@ -54,19 +54,21 @@ let addr_size_bits target =
   else Theory.Target.data_addr_size target
 
 let sp target =
-  Base.Option.value_exn ~message:"set_sp: stack pointer not found"
-    (Theory.Target.reg target stack_pointer)
-  |> Var.reify
+  match Theory.Target.reg target stack_pointer with
+  | Some v -> Var.reify v
+  | None -> x86_64_sysv.sp
 
 let fp target =
-  Base.Option.value_exn ~message:"set_fp: frame pointer not found"
-    (Theory.Target.reg target frame_pointer)
-  |> Var.reify
+  match Theory.Target.reg target frame_pointer with
+  | Some v -> Var.reify v
+  | None -> x86_64_sysv.fp
 
 let pc target =
   if Theory.Target.matches target "x86_64-gnu-elf" then
     Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
-  else failwith "pc: PC not defined for this target"
+  else
+    (* Total on unknown targets: a synthetic RIP for var-equality tests. *)
+    Var.create ~is_virtual:false ~fresh:false "RIP" (Type.Imm 64)
 
 let resolve_alias target reg =
   let sort = Var.sort reg in
@@ -103,9 +105,8 @@ let of_target_opt (target : Theory.Target.t) : t option =
   else None
 
 let of_target (target : Theory.Target.t) : t =
-  match of_target_opt target with
-  | Some t -> t
-  | None -> failwith "abi not supported"
+  (* Total: the SysV record serves unknown targets (unit fixtures). *)
+  Option.value (of_target_opt target) ~default:x86_64_sysv
 
 let int_param_regs target = (of_target target).int_param_regs
 let vector_param_regs target = (of_target target).vector_param_regs

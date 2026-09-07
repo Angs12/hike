@@ -609,6 +609,61 @@ let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
   | None -> bottom width
   | Some x -> x) |> (fun p -> translate p translation)
 
+(* Circular step-1 arc (start, length) of a finite CLP; None otherwise.
+   [create] keeps step-1 shapes verbatim, so the arc is (base, cardn)
+   directly. Normalized edge shapes recover too: a singleton is a length-1
+   arc; the wrapped two-point pair is stored descending (base = the second
+   element, step = -1), which is the arc (base-1, 2). *)
+let step1_arc (p : t) : (word * word) option =
+  let width = bitwidth p in
+  if is_bottom p || is_infinite p then None
+  else if W.is_one (step_of p) then Some (base_of p, cardn_of p)
+  else if W.is_zero (step_of p) && is_one (cardn_of p) then
+    Some (base_of p, W.one (width + 1))
+  else if W.is_zero (W.succ (step_of p)) && W.(=) (cardn_of p) (W.of_int ~width:(width + 1) 2) then
+    Some (W.pred (base_of p), W.of_int ~width:(width + 1) 2)
+  else None
+
+(* Exact meet of two circular step-1 arcs; None when the true intersection
+   is two separate pieces (not representable as one CLP). All arithmetic at
+   width+1 bits so the wrap never overflows. *)
+let step1_intersection (width : int) (p1 : t) (p2 : t) : t option =
+  match step1_arc p1, step1_arc p2 with
+  | Some (s1, l1), Some (s2, l2) ->
+    let n = dom_size ~width:(width + 1) width in
+    if W.(>=) l1 n then Some p2
+    else if W.(>=) l2 n then Some p1
+    else if W.is_zero l1 || W.is_zero l2 then Some (bottom width)
+    else
+      let d = W.extract_exn ~hi:width (W.sub s2 s1) in
+      let e = W.add d l2 in
+      if W.(>=) d l1 then begin
+        (* B starts at/after A's end; only B's wrapped tail reaches into A. *)
+        if W.(<) e n then Some (bottom width)
+        else begin
+          let tail = W.sub e n in
+          let m = if W.(<=) tail l1 then tail else l1 in
+          if W.is_zero m then Some (bottom width)
+          else Some (create ~width s1 ~step:(W.one width) ~cardn:m)
+        end
+      end
+      else begin
+        (* B starts inside A. *)
+        if W.(<=) e n then begin
+          let m = if W.(<=) e l1 then e else l1 in
+          if W.(=) m d then Some (bottom width)
+          else Some (create ~width (W.add s1 d) ~step:(W.one width) ~cardn:(W.sub m d))
+        end
+        else begin
+          (* B wraps: pieces [d, l1) and [0, min(e-n, l1)). *)
+          let en = W.sub e n in
+          let piece = if W.(<=) en l1 then en else l1 in
+          if W.(>=) piece d then Some p1
+          else Some (if W.(<=) l1 l2 then p1 else p2)
+        end
+      end
+  | _ -> None
+
 (* First common point of both progressions. *)
 let rec intersection (p1 : t) (p2 : t) : t =
   (* Width mismatch returns the wider operand. *)
@@ -620,46 +675,51 @@ let rec intersection (p1 : t) (p2 : t) : t =
     else if is_top p1 then p2
     else if is_top p2 then p1
     else if equal p1 p2 then p1
-    else match p1.dir, p2.dir with
-    | Finite, Finite -> intersection_finite_or_circular p1 p2
-    | Circular, Circular -> intersection_finite_or_circular p1 p2
-    | Ascending, Finite ->
-      (match min_elem p2, max_elem p2 with
-       | Some lo2, Some hi2 ->
-         let min_bound = W.max p1.base lo2 in
-         solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:(step_of p2) ~min_bound ~max_bound:hi2
-       | _ -> bottom width)
-    | Finite, Ascending -> intersection p2 p1
-    | Descending, Finite ->
-      (match min_elem p2, max_elem p2 with
-       | Some lo2, Some hi2 ->
-         let max_bound = W.min p1.base hi2 in
-         solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:(step_of p2) ~min_bound:lo2 ~max_bound
-       | _ -> bottom width)
-    | Finite, Descending -> intersection p2 p1
-    | Ascending, Ascending ->
-      let min_bound = W.max p1.base p2.base in
-      solve_ascending_ascending ~width p1 p2 ~min_bound
-    | Descending, Descending ->
-      let max_bound = W.min p1.base p2.base in
-      solve_descending_descending ~width p1 p2 ~max_bound
-    | Ascending, Descending ->
-      if W.(>) p1.base p2.base then bottom width
-      else
-        solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound:p1.base ~max_bound:p2.base
-    | Descending, Ascending -> intersection p2 p1
-    | Ascending, Circular ->
-      solve_ascending_circular ~width p1 p2
-    | Circular, Ascending -> intersection p2 p1
-    | Descending, Circular ->
-      solve_descending_circular ~width p1 p2
-    | Circular, Descending -> intersection p2 p1
-    | Finite, Circular ->
-      (match min_elem p1, max_elem p1 with
-       | Some lo1, Some hi1 ->
-         solve_grid_interval ~width ~lo1:p1.base ~s1:(step_of p1) ~lo2:p2.base ~s2:p2.step ~min_bound:lo1 ~max_bound:hi1
-       | _ -> bottom width)
-    | Circular, Finite -> intersection p2 p1
+    else (match step1_intersection width p1 p2 with
+    | Some p -> p
+    | None ->
+          (match p1.dir, p2.dir with
+          | Finite, Finite -> intersection_finite_or_circular p1 p2
+          | Circular, Circular -> intersection_finite_or_circular p1 p2
+          | Ascending, Finite ->
+            (match min_elem p2, max_elem p2 with
+             | Some lo2, Some hi2 ->
+               let min_bound = W.max p1.base lo2 in
+               solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:(step_of p2) ~min_bound ~max_bound:hi2
+             | _ -> bottom width)
+          | Finite, Ascending -> intersection p2 p1
+          | Descending, Finite ->
+            (match min_elem p2, max_elem p2 with
+             | Some lo2, Some hi2 ->
+               let max_bound = W.min p1.base hi2 in
+               solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:(step_of p2) ~min_bound:lo2 ~max_bound
+             | _ -> bottom width)
+          | Finite, Descending -> intersection p2 p1
+          | Ascending, Ascending ->
+            let min_bound = W.max p1.base p2.base in
+            solve_ascending_ascending ~width p1 p2 ~min_bound
+          | Descending, Descending ->
+            let max_bound = W.min p1.base p2.base in
+            solve_descending_descending ~width p1 p2 ~max_bound
+          | Ascending, Descending ->
+            if W.(>) p1.base p2.base then bottom width
+            else
+              solve_grid_interval ~width ~lo1:p1.base ~s1:p1.step ~lo2:p2.base ~s2:p2.step ~min_bound:p1.base ~max_bound:p2.base
+          | Descending, Ascending -> intersection p2 p1
+          | Ascending, Circular ->
+            solve_ascending_circular ~width p1 p2
+          | Circular, Ascending -> intersection p2 p1
+          | Descending, Circular ->
+            solve_descending_circular ~width p1 p2
+          | Circular, Descending -> intersection p2 p1
+          | Finite, Circular ->
+            (match min_elem p1, max_elem p1 with
+             | Some lo1, Some hi1 ->
+               solve_grid_interval ~width ~lo1:p1.base ~s1:(step_of p1) ~lo2:p2.base ~s2:p2.step ~min_bound:lo1 ~max_bound:hi1
+             | _ -> bottom width)
+          | Circular, Finite -> intersection p2 p1
+      ))
+
 
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
@@ -831,51 +891,22 @@ let mul (p1 : t) (p2 : t) : t =
 
 
 
-let lead_1_bit_run (w : W.t) ~hi ~lo : int =
-  let rec lead_help (hi : int) (lo : int) : int =
-    if hi = lo then hi else
-    let mid = (hi + lo) / 2 in
-    let hi_part = W.extract_exn ~hi ~lo:(mid + 1) w in
-    if W.is_zero (W.lnot hi_part) then lead_help mid lo
-    else lead_help hi (mid + 1)
-  in
-  assert(lo >= 0);
-  assert(hi >= lo);
-  (lead_help hi lo)  + 1
+(* Fixed bit positions of [p]: below the step's 2-power (the residue class)
+   and above the highest bit where [min_p] and [max_p] differ. *)
+let fixed_bits (p : t) (min_p : word) (max_p : word) : word =
+  let sz = bitwidth p in
+  let low_twos = if is_one (cardn_of p) then sz
+    else snd (factor_2s (step_of p)) in
+  let low = if low_twos = 0 then W.zero sz else
+    W.extract_exn ~hi:(sz - 1) (W.ones low_twos) in
+  let msb = Option.value ~default:(-1)
+      (lead_1_bit (W.logxor min_p max_p)) in
+  let high = if msb < 0 || msb >= sz - 1 then W.zero sz else
+    let sized = W.extract_exn ~hi:(sz - 1)
+        (W.ones (sz - msb - 1)) in
+    W.lshift sized (W.of_int ~width:sz (msb + 1)) in
+  W.logor low high
 
-
-
-let compute_l_s_b lsb1 lsb2 b1 b2 : int = if lsb1 < lsb2 then
-    let interval = W.extract_exn ~hi:(lsb2 - 1) ~lo:lsb1 b2 in
-    let w, bit = factor_2s interval in
-    if W.is_zero w then lsb2 else bit + lsb1
-  else if lsb1 > lsb2 then
-    let interval =  W.extract_exn ~hi:(lsb1 - 1) ~lo:lsb2 b1 in
-    let w, bit = factor_2s interval in
-    if W.is_zero w then lsb1 else bit + lsb2
-  else lsb1  (* Equal low bits. *)
-
-
-
-let compute_m_s_b msb1 msb2 b1 b2 : int = if msb1 > msb2 then
-    let interval = W.extract_exn ~hi:msb1 ~lo:(msb2 + 1) b2 in
-    Option.value_map ~default:msb2
-      (lead_1_bit interval)
-      ~f:(fun b -> b + msb2 + 1)
-  else if msb1 < msb2 then
-    let interval =  W.extract_exn ~hi:msb2 ~lo:(msb1 + 1) b1 in
-    Option.value_map ~default:msb1
-      (lead_1_bit interval)
-      ~f:(fun b -> b + msb1 + 1)
-  else msb1  (* Equal high bits. *)
-
-
-let compute_range_sep msb msb1 msb2 b1 b2 : int = if msb1 > msb2
-  then if msb = msb1 then lead_1_bit_run b2 ~hi:msb1 ~lo:(msb2 + 1) else msb + 1
-  else if msb1 < msb2 then
-    if msb = msb2 then lead_1_bit_run b1 ~hi:msb2 ~lo:(msb1 + 1) else msb + 1
-    (* TODO: verify this branch. *)
-  else -1
 
 
 (* Bitwise op via non-wrapping superset. *)
@@ -907,62 +938,29 @@ let logand (p1 : t) (p2 : t) : t =
       max_elem p1 >>= fun max_elem_p1 ->
       min_elem p2 >>= fun min_elem_p2 ->
       max_elem p2 >>= fun max_elem_p2 ->
-      let _, twos_in_s1 = factor_2s (step_of p1) in
-      let _, twos_in_s2 = factor_2s (step_of p2) in
-      let least_significant_bit_p1 = if W.is_one (cardn_of p1) then sz
-      
-        else twos_in_s1 in
-      let least_significant_bit_p2 = if W.is_one (cardn_of p2) then sz
-      
-        else twos_in_s2 in
-      
-      let most_significant_bit_p1 = Option.value ~default:(-1)
-          (lead_1_bit (W.logxor min_elem_p1 max_elem_p1)) in
-      let most_significant_bit_p2 = Option.value ~default:(-1)
-          (lead_1_bit (W.logxor min_elem_p2 max_elem_p2)) in
-      let l_s_b = compute_l_s_b
-          least_significant_bit_p1
-          least_significant_bit_p2
-          min_elem_p1 min_elem_p2 in
-      let m_s_b = compute_m_s_b
-          most_significant_bit_p1
-          most_significant_bit_p2
-          min_elem_p1 min_elem_p2 in
-      if l_s_b > m_s_b then
-        (* Singleton result. *)
-        let base = W.logand min_elem_p1 min_elem_p2 in
-        !!(create base)
+      (* Bits fixed in both operands keep their AND value; a bit fixed to 0
+         in either operand is 0 in the result. On every such bit the result
+         agrees with [min_elem_p1 & min_elem_p2]. *)
+      let fixed1 = fixed_bits p1 min_elem_p1 max_elem_p1 in
+      let fixed2 = fixed_bits p2 min_elem_p2 max_elem_p2 in
+      let forced = W.logand fixed1 fixed2
+        |> W.logor (W.logand fixed1 (W.lnot min_elem_p1))
+        |> W.logor (W.logand fixed2 (W.lnot min_elem_p2)) in
+      let mask = W.lnot forced in
+      if W.is_zero mask then
+        (* No free bits: the result is the singleton AND of the minima. *)
+        !!(create (W.logand min_elem_p1 min_elem_p2))
       else
-        let range_sep = compute_range_sep m_s_b
-            most_significant_bit_p1
-            most_significant_bit_p2
-            min_elem_p1 min_elem_p2
-        in
-        let mask = if l_s_b >= range_sep then W.zero sz
-              else let ones = W.ones (range_sep - l_s_b) in
-                let sized_ones = W.extract_exn ~hi:(sz - 1) ones in
-                W.lshift sized_ones (W.of_int ~width:sz l_s_b) in
+
         let safe_lower_bound =
-          W.logand min_elem_p1 min_elem_p2 |> W.logand (W.lnot mask) in
+          W.logand min_elem_p1 min_elem_p2 |> W.logand forced in
         let safe_upper_bound = W.logand max_elem_p1 max_elem_p2 |>
                                W.logor mask |>
                                W.min max_elem_p1 |>
                                W.min max_elem_p2 in
-        let twos_step = W.lshift (W.of_int 1 ~width:sz)
-            (W.of_int l_s_b ~width:sz) in
-        let step = if most_significant_bit_p1 > most_significant_bit_p2 &&
-                      m_s_b = most_significant_bit_p1 &&
-                      range_sep = l_s_b then
-            W.max (step_of p1) twos_step
-          else if most_significant_bit_p2 > most_significant_bit_p1 &&
-                      m_s_b = most_significant_bit_p2 &&
-                      range_sep = l_s_b then
-            W.max (step_of p2) twos_step
-          else twos_step in
-        let b1_and_b2 = W.logand min_elem_p1 min_elem_p2 in
-        let frac = cdiv (W.sub safe_lower_bound b1_and_b2) step in
-        let base = W.add b1_and_b2 (W.mul step frac) in
-        (* TODO: use cardn_from_bounds. *)
+        let _, l_s_b = factor_2s mask in
+        let step = W.lshift (W.one sz) (W.of_int ~width:sz l_s_b) in
+        let base = safe_lower_bound in
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
   end with
