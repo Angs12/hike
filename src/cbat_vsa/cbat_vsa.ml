@@ -2226,6 +2226,7 @@ let walk_records_reset () = ()
 let walk_records_dump () : walk_record list = []
 #endif
 
+
 let refine_edge_inline
     ~(sol : (tid, AI.t) Solution.t)
     ~(defs : (def term * bool) Var.Map.t option)
@@ -2236,7 +2237,7 @@ let refine_edge_inline
     ~(jt : Tid.t)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
-    : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
+    : AI.t * Cbat_runctx.refine_ctx =
   
   (* Threaded context plus visited set. *)
   let ctx : analysis_ctx =
@@ -2247,7 +2248,7 @@ let refine_edge_inline
   let seeds =
     List.filter seeds ~f:(fun s -> match s with Infeasible -> false | _ -> true) in
   match seeds with
-  | [] -> (env, rctx, Tid.Set.empty)
+  | [] -> (env, rctx)
   | _ ->
     (* Gate-free (spec §2.1): every seed meets. *)
     let env =
@@ -2257,8 +2258,8 @@ let refine_edge_inline
     
     (* Cached walk with threaded context. *)
     (* No-defs callers keep the uncached walk. *)
-    let walk env seeds : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
-      if discarded then (env, rctx, Tid.Set.empty)
+    let walk env seeds : AI.t * Cbat_runctx.refine_ctx =
+      if discarded then (env, rctx)
       else
       match defs with
       | Some _ ->
@@ -2267,9 +2268,7 @@ let refine_edge_inline
         (* Memo handles validity. *)
         let version = Cbat_runctx.ver_of rc in
         (match Cbat_runctx.Walk_memo.find ~version rc.rc_state.fs_cache bt jt with
-         | Some refined ->
-           (* Walk reads subset the transfer reads. *)
-           (refined, rc, Tid.Set.empty)
+         | Some refined -> (refined, rc)
          | None ->
            let walk_reads = ref (Tid.Set.singleton bt) in
            (* Per-SCC budget caps the walk; the floor keeps the walk
@@ -2294,7 +2293,7 @@ let refine_edge_inline
                        Cbat_runctx.Walk_memo.add ~version st.fs_cache bt jt
                          ~reads:!walk_reads refined } }
              else rc in
-           (let res = (refined, rc, !walk_reads) in
+           (let res = (refined, rc) in
 #ifdef VSA_DEBUG
             record_walk bt jt seeds !walk_reads;
 #endif
@@ -2307,7 +2306,7 @@ let refine_edge_inline
         let refined, _live =
           refine_edge ~sol ~rctx:rctx ~defs ~steps:(Some cap)
             env b seeds in
-        (refined, rctx, Tid.Set.empty) in
+        (refined, rctx) in
     walk env seeds
 
 (* Denotation of a block's jumps. *)
@@ -2315,20 +2314,19 @@ let denote_jump ?preserved ?defs ?stores
     ?(flag_state : (var * Bil.binop * exp * word) option = None)
     ?(flag_group : Cbat_runctx.flag_group option = None)
     ?(sub : sub term option = None)
-    ?(no_walk : bool option)
     ?edge_conds ?sol
     ~(rctx : Cbat_runctx.refine_ctx)
     (b : blk term)  (env : AI.t) ~(target : tid)
-    : AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
+    : AI.t * Cbat_runctx.refine_ctx =
   (* Fold joins per-jump results. *)
   let rc0 = rctx in
-  let per_jump (acc, rctx, reads) jmp =
+  let per_jump (acc, rctx) jmp =
     (* Refine by the jump cond. *)
     let env =
       assume_jump_cond_with_group ?defs ?stores ~flag_state
         ~flag_group ~sub env jmp in
     (* Deep walk uses the accumulated cond. *)
-    let env, rctx, reads =
+    let env, rctx =
       match edge_conds, sol, sub with
       | Some tbl, Some snap, Some _ ->
         let acc_cond =
@@ -2339,7 +2337,6 @@ let denote_jump ?preserved ?defs ?stores
          | Some acc_cond ->
            (* Discard test mirrors bottom arms. *)
            let discarded =
-             Option.value ~default:false no_walk ||
              match Jmp.kind jmp with
              | Goto (Direct tid) | Ret (Direct tid) ->
                compare_tid target tid <> 0
@@ -2349,14 +2346,14 @@ let denote_jump ?preserved ?defs ?stores
                 | Some (Indirect _) | None -> false)
              | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false in
            (* Accumulator threads optional context. *)
-           let env', rctx', reads' =
+           let env', rctx' =
              refine_edge_inline ~sol:snap ~defs ~stores ~flag_state
                ~flag_group
                ~rctx:rctx ~jt:(Term.tid jmp)
                ~discarded b env acc_cond in
-           (env', rctx', Core.Set.union reads reads')
-         | None -> (env, rctx, reads))
-      | _ -> (env, rctx, reads) in
+           (env', rctx')
+         | None -> (env, rctx))
+      | _ -> (env, rctx) in
     
     let inspect_call c =
       match Call.return c with
@@ -2398,22 +2395,22 @@ let denote_jump ?preserved ?defs ?stores
             end else abs
           end in
     (* Per-jump transfer results. *)
-    let env_res, rctx, reads =
+    let env_res, rctx =
       match Jmp.kind jmp with
       | Int _ ->
         (* Traps are external callees. *)
         (AI.call_abstraction
            ~preserved:(Option.value ~default:Var.Set.empty preserved) env,
-         rctx, reads)
-      | Call c -> (inspect_call c, rctx, reads)
+         rctx)
+      | Call c -> (inspect_call c, rctx)
       | Goto (Direct tid)
       | Ret (Direct tid) ->
-        ((if compare_tid target tid = 0 then env else AI.bottom), rctx, reads)
+        ((if compare_tid target tid = 0 then env else AI.bottom), rctx)
       | Goto (Indirect _)
-      | Ret (Indirect _) -> (env, rctx, reads) in
-    (AI.join acc env_res, rctx, reads) in
+      | Ret (Indirect _) -> (env, rctx) in
+    (AI.join acc env_res, rctx) in
   Seq.fold (reachable_jumps env (Term.enum jmp_t b))
-    ~init:(AI.bottom, rctx, Tid.Set.empty)
+    ~init:(AI.bottom, rctx)
     ~f:per_jump
 
 (* Block denotation toward a target. *)
@@ -2427,10 +2424,8 @@ let denote_block_with_stores ?preserved ?defs ?stores
     ?(edge_conds : exp Tid.Map.t Tid.Map.t option = None)
     ?(sol : (tid, AI.t) Solution.t option = None)
     ~(rctx : Cbat_runctx.refine_ctx)
-    ?(no_walk : bool option)
     (ctx : program term) ~(source : tid) (env : AI.t)
-    : target:tid -> AI.t * Cbat_runctx.refine_ctx * Tid.Set.t =
- (* Threaded context plus read set. *)
+    : target:tid -> AI.t * Cbat_runctx.refine_ctx =
  match (Program.lookup blk_t ctx source) with
    | Some b ->
      let postcond = denote_defs b env in
@@ -2441,15 +2436,13 @@ let denote_block_with_stores ?preserved ?defs ?stores
        | Some fs -> fs
        | None -> Cbat_runctx.flag_state_of_block b in
      fun ~target ->
-       let (res, rctx', reads) =
-         denote_jump ?preserved ?defs ?stores ~flag_state
-           ~flag_group:(Some flag_group) ~sub ?no_walk ?edge_conds ?sol
-           ~rctx
-           b postcond ~target in
-       (res, rctx', Core.Set.add reads (Term.tid b))
+       denote_jump ?preserved ?defs ?stores ~flag_state
+         ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol
+         ~rctx
+         b postcond ~target
    | None -> fun ~target ->
        ignore (invalid_arg "source tid does not represent block");
-       (AI.bottom, rctx, Tid.Set.empty)
+       (AI.bottom, rctx)
 
 type vsa_sol = (tid, AI.t) Solution.t
 
@@ -2708,44 +2701,10 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             (* Context threads through transfers. *)
             let rc = !rc_cell in
              let res = Stages.time `Denote (fun () ->
-               (* Memo handles validity. *)
-               let version = Cbat_runctx.ver_of rc in
-               match Cbat_runctx.Transfer_memo.find ~version rc.rc_state.fs_out_cache p v with
-               | Some (hit_res, fired) ->
-                 
-                 (if Option.is_some head_opt && fired then
-                    match Program.lookup blk_t ctx p with
-                    | Some _pb ->
-                      ignore (denote_block_with_stores ~preserved
-                                ~defs ~stores ~sub:(Some s)
-                                ~rctx:rc
-                                ~no_walk:true ctx
-                                ~source:p p_entry ~target:v)
-                    | None -> ());
-
-                 hit_res
-               | None ->
-                 (* Latch reports acquisition. *)
-                 let flatch = Cbat_landmarks.start_fired_latch () in
-                 let (res, rc', reads) =
-                   denote_block_with_stores ~preserved ~defs
+               fst (denote_block_with_stores ~preserved ~defs
                      ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
                      ~sol:(Some sol_snap) ~rctx:rc
-                     ctx ~source:p p_entry ~target:v in
-                 let fired = Cbat_landmarks.end_fired_latch flatch in
-                 (* Read set covers inputs. *)
-                 let reads = Core.Set.add reads p in
-                 rc_cell := begin
-                   let st = rc'.rc_state in
-                   { rc' with
-                     rc_state =
-                       { st with
-                         fs_out_cache =
-                           Cbat_runctx.Transfer_memo.add
-                             ~version st.fs_out_cache p v
-                             ~reads (res, fired) } }
-                 end;
-                 res) in
+                     ctx ~source:p p_entry ~target:v)) in
             let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
             Cbat_landmarks.widening_at_head := None;
             res) in
