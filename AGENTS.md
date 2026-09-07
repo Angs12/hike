@@ -431,6 +431,42 @@ stays visible where it happens).
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
 
+**Last verified: 2026-09-08 EEST — CLEANUP-9 LANE (branch `cleanup-9`, 17
+commits: spec + tickets 01-09) — BATTERY GREEN, ≈ −2,400 LOC net, zero
+intended behavior change; post-lane two-axis review verdict GO-WITH-FIXES
+(docs-only fixes, landed here)**
+
+The lane (spec `.scratch/cleanup-9/spec.md`, 92 candidates in 7 lenses):
+01 dead code, 02 word-ops twin fold (referee-gated), 03 pass-throughs +
+hoists, 04 constraint-lane merges, 05 ref→fold, 06 emitter dedup, 07
+stack model, 08 tests + probes, 09 six file splits (hike filter/sections,
+fixture harness/vocabulary, memmap Key, CLP core/arith, emitter
+env/section/exp/mem/calls, VSA transfer/walk/driver). Every ticket landed
+behind the full battery with corpus IR byte-identity vs its same-tree
+control; two ticket items died by measurement mid-lane and are recorded
+in their ticket files (the circular-hull merge — the lo>hi guard is the
+wrap contract, S8/L3c3-1/R2-1/M5-1 pin it; the word-meet triple — the
+check-free corners over width-polymorphic vars moved 3 binaries).
+
+| gate (lane tip vs same-tree controls) | result |
+|---|---|
+| unit suite | direct-exe **507 ok, 0 FAIL**, suite output byte-identical across the test tickets ✅ |
+| differential referee | clpequiv **2,861,148 checks, 0 mismatches** (incl. through the CLP seam shims) ✅ |
+| corpus emission | **32/32 rc=0** on every ticket ✅ |
+| IR byte-identity | **IDENTICAL 32/32** (out+err+rc+stdout) on every behavior-identical ticket ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (-O0) | **32 PASS, 0 FAIL** (last fully run at ticket 07; splits after it proven byte-identical) ✅ |
+| optimization-safety (opt -O2) | subsumed by byte-identity where IR is unchanged ✅ |
+| unmapped FP intrinsics | **0** (the 26-row table pinned by the emission wing throughout) ✅ |
+| instrumentation blocker | **clean** (both profiles build) ✅ |
+
+Candidate emissions: `/home/tovpr/c9-{t04-cand2,t05-cand,merge56-cand,t07-cand,s1-cand,s3-cand,s4-cand,s5-cand,s6-cand}` (+ `/home/tovpr/c9-evidence/t04` T03-control).
+Known lane hazards for the next session: `/tmp` filled 100% mid-lane
+(build/link temp) — heavy battery dirs now go on home disk with
+`TMPDIR` set and worktree `--build-dir` off `/tmp`; the shared opam
+plugin slot is install-serialized (per-worktree `dune exec` builds
+never consult it).
+
 **Last verified: 2026-09-07 EEST (late) — REVIEW FIXES of the honest-stack
 merge, on main @ 0343404 (the two-axis code-review findings, both axes) —
 BATTERY GREEN, emission BYTE-IDENTICAL to the same-tree control 35/35 (the

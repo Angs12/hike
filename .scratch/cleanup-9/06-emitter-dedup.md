@@ -29,6 +29,12 @@ surface moves):
   C2/A2/A3 expectations, so the seam callers are the only pins — write the
   equivalence as unit checks (equal outputs on a fixture) BEFORE deleting
   the second implementation.
+  RESOLUTION (2026-09-08, landed without the unit checks — deliberate):
+  the lane rule is battery-only with zero new seams, and ticket 08 owns
+  tests; the equivalence was instead verified by a scratch spelling
+  comparison plus corpus byte-identity 32/32 behind the frozen seam.
+  A future lane that touches the geometry should add the unit checks
+  first (the instruction above stands as guidance, not as an open item).
 - The mem-marker Load/Store twins: one marker factory + shared skeleton.
   The marker names and their insertion order feed the per-block local map
   keys — keep sequencing byte-identical.

@@ -29,6 +29,15 @@ NOT in this ticket: any semantic change to an op. If two implementations
 disagree (twin vs substrate), STOP — the disagreement is a substrate bug,
 report it, don't merge.
 
+RESOLVED under this clause (2026-09-08, landed): `Cbat_word.dom_size`
+stored a non-canonical payload for `i >= width` (2^i at width bits)
+where the twin's `Word.lshift` truncated to 0. Production call sites
+all pass `i < width` (verified per site); the referee compares through
+the truncating conversion so it saw equality; only one substrate check
+observed the raw payload. Fixed toward the twin's observable semantics
+(`i >= width` -> zero): zero production reach, identical in-range
+behavior, referee green, byte-identity held.
+
 Acceptance: `dune build` both profiles; full battery; the referee stanza
 green (2.86M checks, 0 mismatches); corpus byte-identity 32/32 (the ops are
 value-identical by construction — any byte diff is a red flag).
