@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 module W = Cbat_word
 
 (* R10b: logand soundness over a sampled operand corpus. *)

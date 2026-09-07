@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 
 (* L3a: backward guard refinement. Walk fires on comparison guards; body input carries the cell. *)
 

@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 
 let run () =
 (* Trace-exact cell meet: the trace's address range meets every intersecting cell; outside cells survive. *)

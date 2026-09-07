@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 
 (* Local word literal (BAP words for Bil.Int); named apart from Test_common.w64. *)
 let bw64 = Word.of_int ~width:64

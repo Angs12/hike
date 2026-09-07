@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 
 (* Regression tests C1-C4. *)
 let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v

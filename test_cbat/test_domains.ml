@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 
 let clp1 =
   let c = Clp.create (w32 10) in
