@@ -384,13 +384,12 @@ LLVM allocas / static variables — it should work on EVERY binary.
   into a `stack_rN` alloca (dynamic loop-index GEPs are fine), no `@stack` global, and one
   `%frame` alloca per memory-touching define (1:1; stack-free defines exempt).  (The old
   vacuous sp-chain tripwire was removed 2026-08-23.)
-- `semantic/run_semantic.sh` → llc + `harness.c`, byte-diff stdout vs native, against the
-  checked-in `baselines/heritage_baseline_copy` IR; setjmp modules link `setjmp_stub.S`.
+- `semantic/run_semantic.sh` → llc + `harness.c`, byte-diff stdout vs native, against EVERY
+  emitted corpus binary (`out_*.ll`); setjmp modules link `setjmp_stub.S`.
   The LIFTED-executable link stays `-no-pie` — a constraint of the harness artifact
   (baked @got.plt constants + extern_weak .rodata refs would force a rejected
   DT_TEXTREL under `-pie`), NOT a corpus fallback; see run_semantic.sh's header.
-- `semantic/run_semantic_all.sh` → the same native-vs-lifted gate over EVERY emitted
-  `out_*.ll` (not just the fixed 8-bin set); 15 s timeout per run.
+  (Promoted from legacy 8-bin harness to full corpus suite 2026-09-07).
 - `semantic/run_semantic_opt.sh` → the OPTIMIZATION-SAFETY gate (2026-09-01): the
   same native-vs-lifted equivalence but with `opt-21 -O2` inserted between rename
   and llc — what a real consumer's optimizer does to the module must not change the
@@ -409,6 +408,17 @@ LLVM allocas / static variables — it should work on EVERY binary.
   for the optimizability program.
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-07 EEST — THE WORD SUBSTRATE (branch `word-substrate`, tickets 01-05) — BATTERY GREEN, unit suite 315 ok / 0 FAIL, clpequiv 2,861,148 checks / 0 mismatches, corpus IR BYTE-IDENTICAL 32/32, check_allocas 160/0, full semantic suite 32/32 PASS**
+
+The Word Substrate lane (spec: `.scratch/word-substrate/spec.md`, grilling-settled 2026-09-05): replaces BAP's boxed `Word.t = {packed : Z.t}` with an immediate unboxed `int63` representation (`Cbat_word.t = Small of int | Big of Z.t`) across the abstract domain (`Cbat_clp`, `Cbat_word_ops`, `Cbat_fin_set`, `Cbat_clp_set_composite`). Fast path computes without memory allocation for small-magnitude values (|v| <= 2^62 - 1), falling back to arbitrary-precision `Z.t` when values exceed 62 bits.
+
+- **Fast-path hit rate (real fixpoint gauge on `ls`):** **91.9%** of operands (33,983 / 36,994) fit the immediate unboxed `int63` fast path (0 allocation).
+- **Equivalence:** `clpequiv.exe` dense cross-check against reference implementations: **2,861,148 checks, 0 mismatches**.
+- **Corpus emission:** 32/32 binaries lift rc=0, **100% IR byte-identical (32/32)** to pre-swap emission.
+- **Structural asserts:** `scripts/check_allocas.sh` **160 passed, 0 failed**.
+- **Semantic equivalence:** `scripts/semantic/run_semantic.sh` (promoted to full corpus suite) **32 PASS, 0 FAIL, 0 SKIP** with byte-identical stdout against native executables.
+- **Instrumentation check:** `scripts/check_instrumentation.sh` **clean (0 violations)**.
 
 **Last verified: 2026-09-06 EEST — CLEANUP-8 LANE (branch `cleanup-8`,
 tickets 01+02+03+04+05 = commits `085f378`+`a124d97`+`858a33d`+`e518825`+`8281a8b`,

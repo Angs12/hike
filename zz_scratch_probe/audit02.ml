@@ -13,8 +13,8 @@ let ws_str (w : Ws.t) : string =
   if Ws.is_top w then "TOP"
   else if Ws.is_bottom w then "BOTTOM"
   else
-    let lo = match Ws.min_elem w with Some m -> Word.to_string m | None -> "?" in
-    let hi = match Ws.max_elem w with Some m -> Word.to_string m | None -> "?" in
+    let lo = match Ws.min_elem w with Some m -> Cbat_word.to_string m | None -> "?" in
+    let hi = match Ws.max_elem w with Some m -> Cbat_word.to_string m | None -> "?" in
     if Ws.is_infinite w then Printf.sprintf "{%s..%s}^inf" lo hi
     else Printf.sprintf "{%s..%s}" lo hi
 
@@ -83,8 +83,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                                     (Graphlib.Std.Solution.get tags (Term.tid blk)) v in
                                 let cur = AI.find_word w acc v in
                                 let mm = Ws.meet cur tag_v in
-                                if Ws.is_top cur && Word.is_one (Ws.cardinality mm)
-                                   || Word.is_zero (Ws.cardinality mm)
+                                if Ws.is_top cur && Cbat_word.is_one (Ws.cardinality mm)
+                                   || Cbat_word.is_zero (Ws.cardinality mm)
                                    || Ws.equal mm cur
                                 then acc
                                 else AI.add_word acc ~key:v ~data:mm

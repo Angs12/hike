@@ -306,6 +306,8 @@ let compare (a : t) (b : t) : int =
 
 let equal (a : t) (b : t) : bool = compare a b = 0
 
+
+
 let hash (t : t) : int =
   bitwidth t * 65599 lxor (if is_signed t then 1 else 0) lxor Z.hash (to_z t)
 
@@ -322,6 +324,14 @@ let extract_exn ?hi ?(lo = 0) (t : t) : t =
   match t with
   | Small (v, _, _) -> Small ((if lo >= 62 then 0 else v lsr lo) land mask len, len, false)
   | Big (z, _, _) -> mkz (Z.extract z lo len) len
+
+(* BIL cast to [sz] bits: HIGH reads the top bits, SIGNED sign-extends. *)
+let cast (ct : Bil.cast) (sz : int) (t : t) : t =
+  let w = bitwidth t in
+  match ct with
+  | Bil.UNSIGNED | Bil.LOW -> extract_exn ~hi:(sz - 1) t
+  | Bil.SIGNED -> signed (extract_exn ~hi:(sz - 1) t)
+  | Bil.HIGH -> extract_exn ~lo:(w - sz) t
 
 let concat (a : t) (b : t) : t =
   let w = bitwidth a + bitwidth b in
@@ -397,10 +407,10 @@ let to_int (t : t) : int Core_kernel.Or_error.t = Core_kernel.Or_error.try_with 
 
 let to_int64_exn (t : t) : int64 =
   let z = to_z t in
-  if Z.leq z (Z.shift_left Z.one 63) then Z.to_int64 z
+  if Z.leq z (Z.of_int64 Int64.max_int) then Z.to_int64 z
   else if Z.leq z (Z.sub (Z.shift_left Z.one 64) Z.one) then
     Z.to_int64 (Z.signed_extract z 0 64)
-  else failwith (Printf.sprintf "%s doesn't fit the int type" (to_string t))
+  else failwith (Printf.sprintf "%s doesn't fit the int64 type" (to_string t))
 
 let to_int64 (t : t) : int64 Core_kernel.Or_error.t = Core_kernel.Or_error.try_with (fun () -> to_int64_exn t)
 
@@ -501,3 +511,12 @@ let cap_at_width ~width (t : t) : t =
   if w = width then t
   else if w < width then extract_exn ~hi:(width - 1) t
   else extract_exn ~hi:(width - 1) (min (pred (dom_size ~width:w width)) t)
+
+(* Ordered infixes, defined last so the module's own uses of the
+   Stdlib operators stay in scope. *)
+let ( = ) (a : t) (b : t) : bool = compare a b = 0
+let ( <> ) (a : t) (b : t) : bool = compare a b <> 0
+let ( < ) (a : t) (b : t) : bool = compare a b < 0
+let ( > ) (a : t) (b : t) : bool = compare a b > 0
+let ( <= ) (a : t) (b : t) : bool = compare a b <= 0
+let ( >= ) (a : t) (b : t) : bool = compare a b >= 0

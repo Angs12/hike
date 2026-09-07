@@ -25,8 +25,8 @@ module MV = Cbat_vsa.Mem.Val
 let anchored_entry () : AI.t =
   let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
   let rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64) in
-  let e = AI.add_word AI.top ~key:rsp ~data:(Ws.singleton (W.of_int ~width:64 0)) in
-  AI.add_word e ~key:rbp ~data:(Ws.singleton (W.of_int ~width:64 0))
+  let e = AI.add_word AI.top ~key:rsp ~data:(Ws.singleton (Cbat_word.of_int ~width:64 0)) in
+  AI.add_word e ~key:rbp ~data:(Ws.singleton (Cbat_word.of_int ~width:64 0))
 
 let failures = ref 0
 
@@ -100,9 +100,9 @@ let capture_stderr (f : unit -> unit) : string =
 
 (* Did the not_implemented hit for [comp] log its stderr line while [f] ran? *)
 let fired (comp : string) (f : unit -> unit) : bool = contains_substring (capture_stderr f) comp
-let w32 = W.of_int ~width:32
-let w33 = W.of_int ~width:33
-let w64 = W.of_int ~width:64
+let w32 = Cbat_word.of_int ~width:32
+let w33 = Cbat_word.of_int ~width:33
+let w64 = Cbat_word.of_int ~width:64
 
 (* create n (defaults) = singleton {n} *)
 module IntLattice : Cbat_lattice_intf.S_val with type t = int = struct

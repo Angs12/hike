@@ -65,10 +65,10 @@ module Key = struct
               else Stdlib.Int64.logand (Stdlib.Int64.pred p.pvalue) (mask p.pwidth)}
 
   (* Point from an address word. *)
-  let of_word (w : word) : point option =
-    let bw = Word.bitwidth w in
+  let of_word (w : Cbat_word.t) : point option =
+    let bw = Cbat_word.bitwidth w in
     if bw <= 64 then
-      match Word.to_int64 w with
+      match Cbat_word.to_int64 w with
       | Ok i -> Some {pwidth = bw; pvalue = Stdlib.Int64.logand i (mask bw)}
       | Error _ -> None
     else None
@@ -395,7 +395,7 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
       create (op v1.data v2.data) e
     else
     let wordset_seq  = op_at_seq op (sz, e) v1 v2 in
-    let wordset_of_int i = WordSet.singleton (Word.of_int ~width:sz i) in
+    let wordset_of_int i = WordSet.singleton (Cbat_word.of_int ~width:sz i) in
     let place_in_result = match e with
       | LittleEndian -> fun i p ->
         let sized_p = WordSet.cast Bil.UNSIGNED sz p in
@@ -485,10 +485,10 @@ let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
   | Some it ->
     (* Unkeyable words keep the input. *)
     let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
-        match Key.of_word lo, Key.of_word hi with
+        match Key.of_word (Cbat_word.of_word lo), Key.of_word (Cbat_word.of_word hi) with
         | Some lo, Some hi -> Some (lo, hi)
         | _ -> None)) in
-    (match Key.of_word keep_lo, escape_pts with
+    (match Key.of_word (Cbat_word.of_word keep_lo), escape_pts with
      | Some keep_lo_pt, Some escape_pts ->
        let in_escape (k : Key.t) : bool =
          List.exists escape_pts ~f:(fun (lo, hi) ->
@@ -513,7 +513,7 @@ let store_merge (d : Val.t) (d' : Val.t) : Val.t =
       let mask =
         WordSet.lnot
           (WordSet.cast Bil.UNSIGNED w'
-             (WordSet.singleton (Word.ones w))) in
+             (WordSet.singleton (Cbat_word.ones w))) in
       Val.create
         (WordSet.logor
            (WordSet.logand (Val.data d') mask)
@@ -576,7 +576,7 @@ let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
               | BigEndian -> req_width - bit_offset - cell_w in
             let sized = WordSet.cast Bil.UNSIGNED req_width (Val.data cell_v) in
             WordSet.lshift sized
-              (WordSet.singleton (Word.of_int ~width:req_width shift_amt))
+              (WordSet.singleton (Cbat_word.of_int ~width:req_width shift_amt))
           in
           let pieces = List.map sorted ~f:assemble_piece in
           let assembled = List.reduce pieces ~f:WordSet.logor in

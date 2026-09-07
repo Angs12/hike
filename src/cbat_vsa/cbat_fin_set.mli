@@ -15,7 +15,7 @@
 
 type t [@@deriving bin_io, sexp]
 
-include Cbat_wordset_intf.S with type t := t
+include Cbat_wordset_intf.S with type t := t and type word = Cbat_word.t
 
 val intersect_generic : (module Cbat_wordset_intf.S with type t = 'ws) ->  t -> 'ws -> t
 
