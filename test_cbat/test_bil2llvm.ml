@@ -11,71 +11,6 @@ module B2l = Hike.Bil2llvm
 module Cu = Hike.Convutils
 
 (* Emits a program of subs and returns the textual IR. *)
-let emit_ir (subs : sub term list) : string =
-  let llvm_ctx = Llvm.create_context () in
-  let llvm_module = Llvm.create_module llvm_ctx "Test" in
-  let prog = Program.create ~subs () in
-  B2l.emit_program llvm_ctx llvm_module
-    ~target:Theory.Target.unknown ~ptrsize:64
-    ~symtab:None ~text_section:None ~section_remap:[] ~copy_relocs:[]
-    [] prog;
-  let s = Llvm.string_of_llmodule llvm_module in
-  Llvm.dispose_module llvm_module;
-  Llvm.dispose_context llvm_ctx;
-  s
-
-let check_ir (name : string) (must : string) (ir : string) : unit =
-  check name (contains_substring ir must)
-
-(* ------------------------------------------------------------------ *)
-(* Family 1: the FP-intrinsic table — every row emits its native op.  *)
-(* ------------------------------------------------------------------ *)
-
-let ivar64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64)
-
-(* A terminal block: build-first so callers can reference its tid. *)
-let mk_exit_blk () : blk term =
-  let b0 = Blk.Builder.create () in
-  let b = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b0) in
-  Blk.Builder.add_jmp b (Jmp.create (Ret (Direct (Tid.create ()))));
-  Blk.Builder.result b
-
-(* One mapped-intrinsic call site, the production shape:
-   [intrinsic:x0 := src; call @<name> with return <cont>; cont: ...]. *)
-let mk_fp_call_sub (intr : string) (arg_defs : def term list) : sub term =
-  let callee_tid = Tid.for_name intr in
-  let caller = Blk.Builder.create () in
-  let exit_blk = mk_exit_blk () in
-  (* The writeback reads the ret lane, the production shape. *)
-  let cont0 = Blk.Builder.create () in
-  let cont = Blk.Builder.init ~copy_defs:true (Blk.Builder.result cont0) in
-  Blk.Builder.add_def cont (Def.create (v64 "fp_wb") (Bil.Var (ivar64 "intrinsic:y0")));
-  Blk.Builder.add_jmp cont
-    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var (v64 "fp_wb"), Bil.Int (w64 0)))
-       (Goto (Direct (Term.tid exit_blk))));
-  Blk.Builder.add_jmp cont (Jmp.create (Goto (Direct (Term.tid exit_blk))));
-  let cont_blk = Blk.Builder.result cont in
-  let cont_tid = Term.tid cont_blk in
-  List.iter (Blk.Builder.add_def caller) arg_defs;
-  Blk.Builder.add_jmp caller
-    (Jmp.create
-       (Call
-          (Call.create ~return:(Direct cont_tid) ~target:(Direct callee_tid) ())));
-  let sb = Sub.Builder.create ~name:"fp_caller" () in
-  Sub.Builder.add_blk sb (Blk.Builder.result caller);
-  Sub.Builder.add_blk sb cont_blk;
-  Sub.Builder.add_blk sb exit_blk;
-  Sub.Builder.result sb
-
-(* The bodyless mapped-intrinsic stub (the model interface sig). *)
-let mk_fp_stub (intr : string) : sub term =
-  let sb = Sub.Builder.create ~name:intr () in
-  let sub = Sub.Builder.result sb in
-  let sub = Term.set_attr sub Sub.intrinsic () in
-  sub
-
-let mk_fp_program (intr : string) (arg_defs : def term list) : sub term list =
-  [ mk_fp_call_sub intr arg_defs; mk_fp_stub intr ]
 
 (* The native op each table row must emit. *)
 let fp_rows : (string * B2l.native_fp) list =
@@ -198,17 +133,8 @@ let run_poison () =
   let st =
     Def.create m (Bil.Store (Bil.Var m, addr, Bil.Var t, LittleEndian, `r64))
   in
-  let mk_sub nm =
-    let caller = Blk.Builder.create () in
-    Blk.Builder.add_def caller ld;
-    Blk.Builder.add_def caller st;
-    Blk.Builder.add_jmp caller (Jmp.create (Ret (Direct (Tid.create ()))));
-    let sb = Sub.Builder.create ~name:nm () in
-    Sub.Builder.add_blk sb (Blk.Builder.result caller);
-    Sub.Builder.result sb
-  in
-  let unb_sub = mk_sub "poison_unb" in
-  let dead_sub = mk_sub "poison_dead" in
+  let unb_sub = mk_lds_sub "poison_unb" [ ld; st ] in
+  let dead_sub = mk_lds_sub "poison_dead" [ ld; st ] in
   (* Unbounded on the load/store; Dead on the second pair. *)
   let unb_info : Cu.vsa_info =
     Cu.mk_vsa_info
