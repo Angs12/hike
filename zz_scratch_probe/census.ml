@@ -1,4 +1,9 @@
-(* Real-operand census for candidate B.
+(* Real-operand census for candidate B (the Cbat_word substrate).
+   Baseline gauge (ls, 2026-09-07, word-substrate verification):
+     operands sampled: 36,994
+     small (fits int63): 33,983 (91.9%)
+     wide: 3,011 (8.1%)
+     tags produced: 18,668
 
    clpequiv sweeps synthetic small values, so it cannot answer "what
    magnitude are the values a REAL fixpoint feeds the domain?" This
@@ -16,8 +21,8 @@ let small_bound = 0x3FFF_FFFF_FFFF_FFFFL  (* 2^62 - 1 *)
 
 (* Classify by magnitude, ignoring declared width (a 64-bit word holding
    3 is small; the fast path is chosen on value, not on type). *)
-let classify (w : Word.t) : [ `Small | `Wide ] =
-  match Word.to_int64 w with
+let classify (w : Cbat_word.t) : [ `Small | `Wide ] =
+  match Cbat_word.to_int64 w with
   | Error _ -> `Wide              (* does not fit int64 at all *)
   | Ok v ->
     (* Unsigned magnitudes only: the domain norms to non-negative. *)
@@ -35,8 +40,8 @@ let wide_examples : string list ref = ref []
 let census_i (v : int64) : unit =
   if Int64.unsigned_compare v small_bound <= 0 then incr small else incr wide
 
-let census (w : Word.t) : unit =
-  let bw = Word.bitwidth w in
+let census (w : Cbat_word.t) : unit =
+  let bw = Cbat_word.bitwidth w in
   Hashtbl.replace widths_hit bw ((Hashtbl.find_opt widths_hit bw |> Option.value ~default:0) + 1);
   match classify w with
   | `Small -> incr small
@@ -44,7 +49,7 @@ let census (w : Word.t) : unit =
     incr wide;
     if List.length !wide_examples < 8 then
       wide_examples :=
-        Printf.sprintf "w%d=%s" bw (Word.string_of_value w) :: !wide_examples
+        Printf.sprintf "w%d=%s" bw (Cbat_word.to_string w) :: !wide_examples
 
 (* Walk a solution's abstract states and census every word we can reach. *)
 let census_state (st : Cbat_vsa.AI.t) : unit =

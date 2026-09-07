@@ -33,7 +33,7 @@ let channel2_ok (ws : Ws.t) : bool =
   else
     match Ws.min_elem ws, Ws.max_elem ws with
     | Some lo, Some hi -> (
-        match Word.to_int64 lo, Word.to_int64 hi with
+        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
         | Ok lo, Ok hi ->
             let nlo, nhi = neighborhood in
             if Ws.is_ascending ws then

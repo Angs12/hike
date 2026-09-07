@@ -137,12 +137,12 @@ let frame_precedes (f1 : frame option) (f2 : frame option) : bool =
 
 (* Entry frame: entry RSP has offset 0. *)
 let seed_frame : frame option =
-  Some [ (Var.base Abi.x86_64_sysv.sp, { fconst = WordSet.singleton (Word.zero 64); fvars = [] }) ]
+  Some [ (Var.base Abi.x86_64_sysv.sp, { fconst = WordSet.singleton (Cbat_word.of_word (Word.zero 64)); fvars = [] }) ]
 
 (* Restore RSP's offset by +8. *)
 let frame_add_rsp (f : frame option) : frame option =
   let rsp = frame_key Abi.x86_64_sysv.sp in
-  let eight = WordSet.singleton (Word.of_int ~width:64 8) in
+  let eight = WordSet.singleton (Cbat_word.of_word (Word.of_int ~width:64 8)) in
   match f with
   | None -> None
   | Some f ->
@@ -263,7 +263,7 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
               match head with
               | Some h ->
                 let entries = Cbat_landmarks.entries_for_head h key in
-                let entries = List.filter entries ~f:(fun e -> Word.bitwidth e.Cbat_landmarks.bound = WordSet.bitwidth data_old) in
+                let entries = List.filter entries ~f:(fun e -> Cbat_word.bitwidth e.Cbat_landmarks.bound = WordSet.bitwidth data_old) in
                 (match entries with
                  | [] ->
                    if steps < 0 then WordSet.widen_join data_old data_new
@@ -320,7 +320,7 @@ let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
   let words' = top_non_preserved ~preserved env in
   let rsp_lo =
     match WordSet.min_elem rsp, WordSet.max_elem rsp with
-    | Some lo, Some hi when Word.equal lo hi -> Some lo
+    | Some lo, Some hi when Cbat_word.equal lo hi -> Some lo
     | _ -> None in
   let escape_ranges =
     match rsp_lo with
@@ -329,7 +329,7 @@ let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
       let ranges = List.filter_map escape ~f:(fun ws ->
           if WordSet.is_top ws || WordSet.is_infinite ws then None
           else match WordSet.min_elem ws, WordSet.max_elem ws with
-            | Some a, Some b -> Some (a, b)
+            | Some a, Some b -> Some (Cbat_word.to_word a, Cbat_word.to_word b)
             | _ -> None) in
       if List.length ranges = List.length escape then Some ranges
       else None in
@@ -339,7 +339,7 @@ let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
       MemEnv.fold env.memories ~init:env.memories
         ~f:(fun ~key ~data acc ->
             MemEnv.add acc ~key
-              ~data:(Mem.call_keep data ~keep_lo:lo ~escape:ranges))
+              ~data:(Mem.call_keep data ~keep_lo:(Cbat_word.to_word lo) ~escape:ranges))
     | _ -> MemEnv.top in
   { memories; words = words'; frame = env.frame }
 

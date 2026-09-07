@@ -20,6 +20,7 @@ module Clp = Cbat_clp
 module FinSet = Cbat_fin_set
 
 type clp = Clp.t
+type word = Cbat_word.t
 type fset = FinSet.t
 
 (* Large sets are Clps; small ones FinSets. *)
@@ -126,20 +127,20 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
   else
     let width = Clp.bitwidth p in
     let es =
-      List.sort ~compare:Word.compare
+      List.sort ~compare:Cbat_word.compare
         (List.filter ~f:(fun w -> Clp.elem w p) (FinSet.iter s)) in
     match es with
     | [] -> p
     | _ ->
       let n = List.length es in
-      let cnt = Word.of_int ~width:(width + 1) n in
+      let cnt = Cbat_word.of_int ~width:(width + 1) n in
       let c1 = Clp.cardinality p in
-      if Word.(>=) cnt c1 then Clp.bottom width
+      if Cbat_word.(>=) cnt c1 then Clp.bottom width
       else begin
         (* Strict successor in [p]'s circular order. *)
         let strict_succ (e : word) : word option =
-          match Clp.nearest_pred (Word.pred (Word.lnot e)) (Clp.lnot p) with
-          | Some w -> Some (Word.lnot w)
+          match Clp.nearest_pred (Cbat_word.pred (Cbat_word.lnot e)) (Clp.lnot p) with
+          | Some w -> Some (Cbat_word.lnot w)
           | None -> None in
         (* Consecutive pairs including the wrap pair. *)
         let pairs =
@@ -153,40 +154,40 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
             go [] first rest in
         let adj (e1, e2) : bool =
           match strict_succ e1 with
-          | Some nxt -> Word.(=) nxt e2
+          | Some nxt -> Cbat_word.(=) nxt e2
           | None -> false in
         let non_adj, adj_pairs =
           List.partition_tf ~f:(fun pr -> not (adj pr)) pairs in
         match non_adj, adj_pairs with
         | [ (arc_end, arc_start) ], (e1', e2') :: _ ->
           (* One gap: remainder is one CLP. *)
-          let step = Word.sub e2' e1' in
-          let cardn = Word.sub c1 cnt in
+          let step = Cbat_word.sub e2' e1' in
+          let cardn = Cbat_word.sub c1 cnt in
           if Clp.is_ascending p then
             match Clp.min_elem p with
-            | Some p_min when Word.(=) arc_start p_min ->
-              let new_base = Word.add arc_end step in
-              if Word.(<) new_base arc_end then Clp.bottom width
+            | Some p_min when Cbat_word.(=) arc_start p_min ->
+              let new_base = Cbat_word.add arc_end step in
+              if Cbat_word.(<) new_base arc_end then Clp.bottom width
               else Clp.create_ascending ~width ~base:new_base ~step
             | _ -> p
           else if Clp.is_descending p then
             match Clp.max_elem p with
-            | Some p_max when Word.(=) arc_end p_max ->
-              let new_base = Word.sub arc_start step in
-              if Word.(>) new_base arc_start then Clp.bottom width
+            | Some p_max when Cbat_word.(=) arc_end p_max ->
+              let new_base = Cbat_word.sub arc_start step in
+              if Cbat_word.(>) new_base arc_start then Clp.bottom width
               else Clp.create_descending ~width ~base:new_base ~step
             | _ -> p
           else if Clp.is_circular p then
-            Clp.create (Word.add arc_end step) ~step ~cardn
-          else if Word.(>) arc_start arc_end then
+            Clp.create (Cbat_word.add arc_end step) ~step ~cardn
+          else if Cbat_word.(>) arc_start arc_end then
             (* Wrapping remainder is one interval. *)
-            Clp.create (Word.add arc_end step) ~step ~cardn
+            Clp.create (Cbat_word.add arc_end step) ~step ~cardn
           else
             (match Clp.min_elem p, Clp.max_elem p with
              | Some p_min, Some p_max ->
-               if Word.(=) arc_start p_min then
-                 Clp.create (Word.add arc_end step) ~step ~cardn
-               else if Word.(=) arc_end p_max then
+               if Cbat_word.(=) arc_start p_min then
+                 Clp.create (Cbat_word.add arc_end step) ~step ~cardn
+               else if Cbat_word.(=) arc_end p_max then
                  Clp.create p_min ~step ~cardn
                else p
              | _ -> p)
@@ -194,30 +195,30 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
           (* Singleton run. *)
           (match strict_succ arc_end with
            | Some nxt ->
-             let step = Word.sub nxt arc_end in
-             let cardn = Word.sub c1 cnt in
+             let step = Cbat_word.sub nxt arc_end in
+             let cardn = Cbat_word.sub c1 cnt in
              if Clp.is_ascending p then
                match Clp.min_elem p with
-               | Some p_min when Word.(=) arc_start p_min ->
-                 let new_base = Word.add arc_end step in
-                 if Word.(<) new_base arc_end then Clp.bottom width
+               | Some p_min when Cbat_word.(=) arc_start p_min ->
+                 let new_base = Cbat_word.add arc_end step in
+                 if Cbat_word.(<) new_base arc_end then Clp.bottom width
                  else Clp.create_ascending ~width ~base:new_base ~step
                | _ -> p
              else if Clp.is_descending p then
                match Clp.max_elem p with
-               | Some p_max when Word.(=) arc_end p_max ->
-                 let new_base = Word.sub arc_start step in
-                 if Word.(>) new_base arc_start then Clp.bottom width
+               | Some p_max when Cbat_word.(=) arc_end p_max ->
+                 let new_base = Cbat_word.sub arc_start step in
+                 if Cbat_word.(>) new_base arc_start then Clp.bottom width
                  else Clp.create_descending ~width ~base:new_base ~step
                | _ -> p
              else if Clp.is_circular p then
-               Clp.create (Word.add arc_end step) ~step ~cardn
+               Clp.create (Cbat_word.add arc_end step) ~step ~cardn
              else
                (match Clp.min_elem p, Clp.max_elem p with
                 | Some p_min, Some p_max ->
-                  if Word.(=) arc_start p_min then
-                    Clp.create (Word.add arc_end step) ~step ~cardn
-                  else if Word.(=) arc_end p_max then
+                  if Cbat_word.(=) arc_start p_min then
+                    Clp.create (Cbat_word.add arc_end step) ~step ~cardn
+                  else if Cbat_word.(=) arc_end p_max then
                     Clp.create p_min ~step ~cardn
                   else p
                 | _ -> p)
@@ -259,7 +260,7 @@ let neg = lift_unop Clp.neg FinSet.neg
 let concat = lift_binop Clp.concat FinSet.concat
 
 let is_top = lift_consume Clp.is_top (fun _ -> false)
-let is_bottom = lift_consume (fun _ -> false) (Fn.compose Word.is_zero FinSet.cardinality)
+let is_bottom = lift_consume (fun _ -> false) (Fn.compose Cbat_word.is_zero FinSet.cardinality)
 let is_infinite = lift_consume Clp.is_infinite (fun _ -> false)
 let is_ascending = lift_consume Clp.is_ascending (fun _ -> false)
 let is_descending = lift_consume Clp.is_descending (fun _ -> false)

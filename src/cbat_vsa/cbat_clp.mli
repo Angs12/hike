@@ -20,20 +20,20 @@ type direction = Finite | Ascending | Descending | Circular
 
 type t [@@deriving bin_io, sexp]
 
-include Cbat_wordset_intf.S with type t := t
+include Cbat_wordset_intf.S with type t := t and type word = Cbat_word.t
 
-val create : ?width:int -> ?step:word -> ?cardn: word -> word -> t
-val create_ascending : width:int -> base:word -> step:word -> t
-val create_descending : width:int -> base:word -> step:word -> t
+val create : ?width:int -> ?step:Cbat_word.t -> ?cardn: Cbat_word.t -> Cbat_word.t -> t
+val create_ascending : width:int -> base:Cbat_word.t -> step:Cbat_word.t -> t
+val create_descending : width:int -> base:Cbat_word.t -> step:Cbat_word.t -> t
 
 (* Step-1 CLP [lo, hi]; a wrapped pair is the circular interval. *)
-val interval : width:int -> word -> word -> t
+val interval : width:int -> Cbat_word.t -> Cbat_word.t -> t
 
-val nearest_pred : word -> t -> word option
-val nearest_succ : word -> t -> word option
+val nearest_pred : Cbat_word.t -> t -> Cbat_word.t option
+val nearest_succ : Cbat_word.t -> t -> Cbat_word.t option
 
 (* Step-1 CLP from (base, step); circular when the progression wraps. *)
-val infinite : word * word -> t
+val infinite : Cbat_word.t * Cbat_word.t -> t
 
 val is_top : t -> bool
 val is_infinite : t -> bool
@@ -43,7 +43,7 @@ val is_descending : t -> bool
 val is_circular : t -> bool
 
 val subset : t -> t -> bool
-val translate : t -> word -> t
+val translate : t -> Cbat_word.t -> t
 
 val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t

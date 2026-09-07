@@ -18,8 +18,8 @@ let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub 
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
-  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
+  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
   List.iter (Blk.Builder.add_def exit_b) (exit_defs i);
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
@@ -58,7 +58,7 @@ let mk_flag_sub ~(mixed : bool) :
   let m = memv "t3_m" in
   let defA = Def.create f (Bil.Var g) in
   let defB = Def.create f (Bil.Var h) in
-  let defU = Def.create (v64 "t3_u") (Bil.Int (w64 42)) in
+  let defU = Def.create (v64 "t3_u") (Bil.Int (Cbat_word.to_word (w64 42))) in
   let defC =
     Def.create t
       (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var g, Bil.Var (v64 "RSP")), LittleEndian, `r64))
@@ -119,16 +119,16 @@ let mk_caller_alias () : caller_alias_fixture =
   Sub.Builder.add_blk callee_b cblk;
   let callee = Sub.Builder.result callee_b in
   let callee_tid = Term.tid callee in
-  let def_rsp = Def.create rsp (Bil.Int (w64 0x2000)) in
-  let def_rbp = Def.create rbp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 0x1f00))) in
-  let def_rdi = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 0x30))) in
-  let def_rbx = Def.create rbx (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x40))) in
+  let def_rsp = Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x2000))) in
+  let def_rbp = Def.create rbp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x1f00)))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
+  let def_rbx = Def.create rbx (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x40)))) in
   (* Call PUSH model (rsp := RSP - 8); placed after defs using pre-push RSP. *)
-  let def_push = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))) in
+  let def_push = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
   let def_v =
     Def.create v
       (Bil.Load
-         (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (w64 0x10)), LittleEndian, `r64))
+         (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x10))), LittleEndian, `r64))
   in
   let def_w2 =
     Def.create w2
@@ -136,14 +136,14 @@ let mk_caller_alias () : caller_alias_fixture =
   in
   let def_w = Def.create w (Bil.Load (Bil.Var m, Bil.Var rdi, LittleEndian, `r64)) in
   let def_store =
-    Def.create m (Bil.Store (Bil.Var m, Bil.Var rdi, Bil.Int (w64 42), LittleEndian, `r64))
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var rdi, Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64))
   in
   let def_store_disjoint =
     Def.create m2
       (Bil.Store
          ( Bil.Var m2,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Int (w64 0x80)),
-           Bil.Int (w64 43),
+           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Int (Cbat_word.to_word (w64 0x80))),
+           Bil.Int (Cbat_word.to_word (w64 43)),
            LittleEndian,
            `r64 ))
   in
@@ -208,14 +208,14 @@ let mk_rsp_prologue_sub () : def term * def term * def term * sub term =
   let def_load =
     Def.create t
       (Bil.Load
-         (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 0x30)), LittleEndian, `r64))
+         (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))), LittleEndian, `r64))
   in
   let def_store =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 0x30)),
-           Bil.Int (w64 42),
+           Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))),
+           Bil.Int (Cbat_word.to_word (w64 42)),
            LittleEndian,
            `r64 ))
   in
@@ -235,13 +235,13 @@ let mk_rsp_index_sub () : def term * def term * sub term =
   let idx = v64 "t21_idx" in
   let m = memv "t21_m" in
   let t = v64 "t21_t" in
-  let def_base = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))) in
-  let def_idx = Def.create idx (Bil.Int (w64 5)) in
+  let def_base = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
+  let def_idx = Def.create idx (Bil.Int (Cbat_word.to_word (w64 5))) in
   let def_load =
     Def.create t
       (Bil.Load
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (w64 8))),
+           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (Cbat_word.to_word (w64 8)))),
            LittleEndian,
            `r64 ))
   in
@@ -263,13 +263,13 @@ let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * s
   let m2 = memv "t21_n_m2" in
   let v = v64 "t21_n_v" in
   let w = v64 "t21_n_w" in
-  let def_rbp = Def.create rbp (Bil.Int (w64 0x400000)) in
-  let def_idx = Def.create idx (Bil.Int (w64 5)) in
+  let def_rbp = Def.create rbp (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  let def_idx = Def.create idx (Bil.Int (Cbat_word.to_word (w64 5))) in
   let def_load =
     Def.create v
       (Bil.Load
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (w64 8))),
+           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (Cbat_word.to_word (w64 8)))),
            LittleEndian,
            `r64 ))
   in
@@ -277,21 +277,21 @@ let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * s
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (w64 0x100)),
-           Bil.Int (w64 9),
+           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x100))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
            LittleEndian,
            `r64 ))
   in
   let def_load_rsp =
     Def.create w
-      (Bil.Load (Bil.Var m2, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8)), LittleEndian, `r64))
+      (Bil.Load (Bil.Var m2, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r64))
   in
   let def_store_rsp =
     Def.create m2
       (Bil.Store
          ( Bil.Var m2,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8)),
-           Bil.Int (w64 7),
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))),
+           Bil.Int (Cbat_word.to_word (w64 7)),
            LittleEndian,
            `r64 ))
   in
@@ -319,15 +319,15 @@ let mk_one_path_sub () : def term * def term * def term * def term * sub term =
   let def_load =
     Def.create rdi
       (Bil.Load
-         (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 0x30)), LittleEndian, `r64))
+         (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))), LittleEndian, `r64))
   in
-  let def_other = Def.create rdi (Bil.Int (w64 7)) in
+  let def_other = Def.create rdi (Bil.Int (Cbat_word.to_word (w64 7))) in
   let def_use =
     Def.create m2
       (Bil.Store
          ( Bil.Var m2,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Int (w64 8)),
-           Bil.Int (w64 42),
+           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Int (Cbat_word.to_word (w64 8))),
+           Bil.Int (Cbat_word.to_word (w64 42)),
            LittleEndian,
            `r64 ))
   in
@@ -364,7 +364,7 @@ let mk_high0_cast_sub () : var * Program.t * sub term * tid =
   let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
   Blk.Builder.add_jmp entry_b
     (Jmp.create
-       (Call (Call.create ~return:(Direct cast_tid) ~target:(Indirect (Bil.Int (w64 0))) ())));
+       (Call (Call.create ~return:(Direct cast_tid) ~target:(Indirect (Bil.Int (Cbat_word.to_word (w64 0)))) ())));
   let cast_b = Blk.Builder.init ~copy_defs:true cast0 in
   Blk.Builder.add_def cast_b (Def.create rax (Bil.Cast (Bil.HIGH, 0, Bil.Var rax)));
   Blk.Builder.add_jmp cast_b (Jmp.create (Goto (Direct final_tid)));
@@ -387,14 +387,14 @@ let mk_e2ed_heap_sub () : def term * def term * def term * def term * sub term *
   let i = v64 "e2ed_i" in
   let v = v64 "e2ed_v" in
   let m = memv "e2ed_m" in
-  let def_base = Def.create rdi (Bil.Int (w64 0x400000)) in
-  let def_idx = Def.create i (Bil.Int (w64 5)) in
-  let def_data = Def.create v (Bil.Int (w64 99)) in
+  let def_base = Def.create rdi (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  let def_idx = Def.create i (Bil.Int (Cbat_word.to_word (w64 5))) in
+  let def_data = Def.create v (Bil.Int (Cbat_word.to_word (w64 99))) in
   let def_store =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var i, Bil.Int (w64 8))),
+           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 8)))),
            Bil.Var v,
            LittleEndian,
            `r64 ))
@@ -418,16 +418,16 @@ let mk_e2ed_rsp_store_sub () : def term * def term * def term * sub term * tid =
   let i2 = v64 "e2ed_i2" in
   let m2 = memv "e2ed_m2" in
   let def_prologue = Def.create rbp (Bil.Var rsp) in
-  let def_idx = Def.create i2 (Bil.Int (w64 3)) in
+  let def_idx = Def.create i2 (Bil.Int (Cbat_word.to_word (w64 3))) in
   let def_store =
     Def.create m2
       (Bil.Store
          ( Bil.Var m2,
            Bil.BinOp
              ( Bil.PLUS,
-               Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 0x30)),
-               Bil.BinOp (Bil.TIMES, Bil.Var i2, Bil.Int (w64 8)) ),
-           Bil.Int (w64 42),
+               Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))),
+               Bil.BinOp (Bil.TIMES, Bil.Var i2, Bil.Int (Cbat_word.to_word (w64 8))) ),
+           Bil.Int (Cbat_word.to_word (w64 42)),
            LittleEndian,
            `r64 ))
   in
@@ -450,7 +450,7 @@ let mk_e2ed_rsp_store_sub () : def term * def term * def term * sub term * tid =
 let mk_p3_anchor_sub () : sub term =
   let t = v64 "p3_t" in
   let b = Blk.Builder.create () in
-  Blk.Builder.add_def b (Def.create t (Bil.Int (w64 0)));
+  Blk.Builder.add_def b (Def.create t (Bil.Int (Cbat_word.to_word (w64 0))));
   let blk = Blk.Builder.result b in
   let sub_b = Sub.Builder.create ~name:"p3_anchor" () in
   Sub.Builder.add_blk sub_b blk;
@@ -470,7 +470,7 @@ let run () =
   let c1 =
     AI.find_word 32
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (w32 5)))))
+         (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-1: assume (x < 5) refines x to [0,4]"
@@ -479,7 +479,7 @@ let run () =
   let c2 =
     AI.find_word 32
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (w32 5)))))
+         (mk_jmp (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-2: assume (x <= 5) refines x to [0,5]"
@@ -488,22 +488,22 @@ let run () =
   let c3 =
     AI.find_word 32
       (Vsa.assume_jump_cond env
-         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (w32 5)))))
+         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-3: assume (x == 5) refines x to {5}"
     (Ws.min_elem c3 = Some (w32 5) && Ws.max_elem c3 = Some (w32 5));
-  let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp (Bil.Int (w32 1)))) ivar in
+  let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp (Bil.Int (Cbat_word.to_word (w32 1))))) ivar in
   check "D4-4: doubt — constant condition keeps the state (top)" (Ws.is_top c4);
   let c5 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (w64 5)))))
+      (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5))))))
       ivar
   in
   check "D4-5: doubt — width-mismatched guard keeps the state (top)" (Ws.is_top c5);
   let c6 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (w32 5)))))
+      (Vsa.assume_jump_cond env (mk_jmp (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-6: gate-free (spec §2.1) — the NEQ guard refines to TOP−{5} (5 ∉, 0 ∈, non-top)"
@@ -514,7 +514,7 @@ let run () =
       (Vsa.assume_jump_cond env (mk_jmp (Bil.Var fv)))
       fv
   in
-  check "D4-7: assume (flag) forces the flag to {1}" (Ws.elem Word.b1 c7 && not (Ws.elem Word.b0 c7));
+  check "D4-7: assume (flag) forces the flag to {1}" (Ws.elem Cbat_word.b1 c7 && not (Ws.elem Cbat_word.b0 c7));
   let c8 =
     AI.find_word 1
       (Vsa.assume_jump_cond env
@@ -522,7 +522,7 @@ let run () =
       fv
   in
   check "D4-8: assume (NOT flag) forces the flag to {0}"
-    (Ws.elem Word.b0 c8 && not (Ws.elem Word.b1 c8));
+    (Ws.elem Cbat_word.b0 c8 && not (Ws.elem Cbat_word.b1 c8));
   ()
 
 (* Every fixture def is denoted; there is no tag gate. *))
@@ -531,14 +531,14 @@ let run () =
 (  (* Back-edge refined by "i < 5": header converges before widening fires. *)
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let iv = Bil.Var i in
-  let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (w32 5)) in
+  let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
   let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
-  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
+  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
   let header0 = Blk.Builder.result header_b in
@@ -574,16 +574,16 @@ let run () =
     "D4-9 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ [0,4]) \
      and the exit view carries the exit-iteration values (min ≥ 5)"
     ((not (Ws.is_top c_iter))
-    && (match Ws.max_elem c_iter with Some w -> Word.( <= ) w (w32 4) | None -> false)
+    && (match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false)
     && (not (Ws.is_top c_exit))
-    && match Ws.min_elem c_exit with Some w -> Word.( >= ) w (w32 5) | None -> false);
+    && match Ws.min_elem c_exit with Some w -> Cbat_word.(>=) w (w32 5) | None -> false);
   ())
 (* Ite else-arm joins both arms. *)
 ;
 (  (* {0,1}-valued Ite cond must not kill the else value. *)
   let f32 = Var.create ~is_virtual:false ~fresh:false "flag32" (Type.Imm 32) in
   let env = AI.add_word AI.top ~key:f32 ~data:(Ws.of_list ~width:32 [ w32 0; w32 1 ]) in
-  let e = Bil.Ite (Bil.Var f32, Bil.Int (w32 10), Bil.Int (w32 20)) in
+  let e = Bil.Ite (Bil.Var f32, Bil.Int (Cbat_word.to_word (w32 10)), Bil.Int (Cbat_word.to_word (w32 20))) in
   match Vsa.denote_imm_exp e env with
   | Ok ws ->
       check "E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)"
@@ -614,7 +614,7 @@ let run () =
     (let r = Clp.rshift (Clp.create (w32 1)) (Clp.create (w32 32)) in
      Clp.min_elem r = Some (w32 0)
      && Clp.max_elem r = Some (w32 0)
-     && W.to_int_exn (Clp.cardinality r) = 1
+     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && not (Clp.is_bottom r));
   check "D5-5: rshift by an amount < the operand width still computes"
@@ -679,7 +679,7 @@ let run () =
   let j = Var.create ~is_virtual:false ~fresh:false "j" (Type.Imm 32) in
   let _, ctx, sub, exit_tid =
     mk_counter_loop ~exit_defs:(fun i ->
-        [ Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (w64 1))) ])
+        [ Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))) ])
   in
   (* Mixed-width rshift computes: no guard fire, j non-top. *)
   let comp = "rshift: mixed-width shift operands (32 and 64 bits)" in
@@ -692,7 +692,7 @@ let run () =
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let j_after =
     Vsa.denote_def
-      (Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (w64 1))))
+      (Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))))
       exit_ai
   in
   check "D6-14 (BIR loop): mixed-width rshift COMPUTES (lane A), no crash, no guard fire"
@@ -737,7 +737,7 @@ let run () =
 ;
 (* T1 deleted (spec §2.1): every def is denoted, no tag needed. *)
 (  let iv = v64 "t2_iv" in
-  let d = Def.create iv (Bil.Int (w64 7)) in
+  let d = Def.create iv (Bil.Int (Cbat_word.to_word (w64 7))) in
   let e_den = Vsa.denote_def d AI.top in
   check "T2-1: gate-free — every def is denoted, no tag needed"
     (Ws.equal (AI.find_word 64 e_den iv) (Ws.singleton (w64 7)));
@@ -751,7 +751,7 @@ let run () =
   let c_in =
     AI.find_word 64
       (Vsa.assume_jump_cond AI.top
-         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (w64 5)))))
+         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
       x
   in
   check "T3-1: gate-free — the guard refines x to {5}"
@@ -759,7 +759,7 @@ let run () =
   let c_out =
     AI.find_word 64
       (Vsa.assume_jump_cond AI.top
-         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (w64 5)))))
+         (mk_jmp (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
       x
   in
   check "T3-2: gate-free (spec §2.1) — the guard refines x to {5}"
@@ -776,7 +776,7 @@ let run () =
   (* Exit IN-state is the taken-edge refined state; the fallthrough edge has no target block. *)
   let c = AI.find_word 1 (Graphlib.Std.Solution.get sol exit_tid) f in
   check "T3-7: mixed-def — f IS refined to {1} on the taken edge"
-    (Ws.elem Word.b1 c && not (Ws.elem Word.b0 c));
+    (Ws.elem Cbat_word.b1 c && not (Ws.elem Cbat_word.b0 c));
   check "T3-7b (UNASSERTABLE in the fused world — the fixture's fallthrough edge has no target block; kept for the ignore-list bookkeeping, see the comment above)" false;
   (* Single-def control refines identically. *)
   let f2, ctx2, sub2, exit_tid2, _, _, _ = mk_flag_sub ~mixed:false in
@@ -786,7 +786,7 @@ let run () =
   in
   let c2 = AI.find_word 1 (Graphlib.Std.Solution.get sol2 exit_tid2) f2 in
   check "T3-8: single-def flag — f2 IS refined to {1} on the taken edge"
-    (Ws.elem Word.b1 c2 && not (Ws.elem Word.b0 c2));
+    (Ws.elem Cbat_word.b1 c2 && not (Ws.elem Cbat_word.b0 c2));
   ()
 
 (* Caller-alias fixture: aliased slot, tracked load, call, post reload. Returns the record. *))
@@ -970,7 +970,7 @@ let run () =
   ())
 ;
 (  (* 2-bit amount vs 64-bit operand: magnitudes compared, no spurious fire. *)
-  let w2 = W.of_int ~width:2 in
+  let w2 = Cbat_word.of_int ~width:2 in
   let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
   let lshift_comp = "During lshift, maximum element of CLP2 is >= CLP1's width" in
   let rshift_comp = "During rshift, maximum element of CLP2 is >= CLP1's width" in
@@ -984,10 +984,10 @@ let run () =
     (Clp.bitwidth r = 64 && Clp.min_elem r = Some (w64 64) && (not (Clp.is_top r)) && not fire_l);
   (* Overshift is bitvec zero ({0} exactly), no fire. *)
   check "D7-11: lshift overshift (6-bit {40} amount vs 32-bit operand) -> {0} exactly, no fire"
-    (let r = Clp.lshift (Clp.create (w32 8)) (Clp.of_list ~width:6 [ W.of_int ~width:6 40 ]) in
+    (let r = Clp.lshift (Clp.create (w32 8)) (Clp.of_list ~width:6 [ Cbat_word.of_int ~width:6 40 ]) in
      Clp.min_elem r = Some (w32 0)
      && Clp.max_elem r = Some (w32 0)
-     && W.to_int_exn (Clp.cardinality r) = 1
+     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && not fire_l);
   (* 2-bit amounts take the mixed-width path (sound top); wrapped guard stays silent. *)
@@ -1006,11 +1006,11 @@ let run () =
      let a = Clp.arshift (Clp.create (w32 8)) (Clp.of_list ~width:32 [ w32 40 ]) in
      Clp.min_elem r = Some (w32 0)
      && Clp.max_elem r = Some (w32 0)
-     && W.to_int_exn (Clp.cardinality r) = 1
+     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && Clp.min_elem a = Some (w32 0)
      && Clp.max_elem a = Some (w32 0)
-     && W.to_int_exn (Clp.cardinality a) = 1
+     && Cbat_word.to_int_exn (Clp.cardinality a) = 1
      && (not (Clp.is_top a))
      && (not fire_r) && not fire_a);
   ()
@@ -1055,7 +1055,7 @@ let run () =
   let is_zero_clp (r : Clp.t) : bool =
     Clp.min_elem r = Some (w64 0)
     && Clp.max_elem r = Some (w64 0)
-    && W.to_int_exn (Clp.cardinality r) = 1
+    && Cbat_word.to_int_exn (Clp.cardinality r) = 1
     && (not (Clp.is_top r))
     && not (Clp.is_bottom r)
   in
@@ -1063,17 +1063,17 @@ let run () =
   check "E2eC-1: lshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire"
     (is_zero_clp (Clp.lshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])) && not fire_l);
   check "E2eC-2: lshift {16} by multi-card overshift {64,68,72} stride 4 -> {0}, no fire"
-    (let amt = Clp.create ~width:64 ~step:(w64 4) ~cardn:(W.of_int ~width:65 3) (w64 64) in
+    (let amt = Clp.create ~width:64 ~step:(w64 4) ~cardn:(Cbat_word.of_int ~width:65 3) (w64 64) in
      is_zero_clp (Clp.lshift (Clp.create (w64 16)) amt) && not fire_l);
   check "E2eC-3: rshift {16} by {64} (min >= width) -> EXACTLY {0}, no fire"
     (is_zero_clp (Clp.rshift (Clp.create (w64 16)) (Clp.of_list ~width:64 [ w64 64 ])) && not fire_r);
   (* Overshift arshift: mixed-sign gives {0, all-ones}; pure signs collapse. *)
   check "E2eC-4: arshift overshift of a mixed-sign operand -> {0, all-ones}, no fire"
-    (let mixed = Clp.of_list ~width:64 [ w64 1; W.lshift (w64 1) (w64 63) ] in
+    (let mixed = Clp.of_list ~width:64 [ w64 1; Cbat_word.lshift (w64 1) (w64 63) ] in
      let r = Clp.arshift mixed (Clp.of_list ~width:64 [ w64 64 ]) in
-     W.to_int_exn (Clp.cardinality r) = 2
+     Cbat_word.to_int_exn (Clp.cardinality r) = 2
      && Clp.elem (w64 0) r
-     && Clp.elem (W.ones 64) r
+     && Clp.elem (Cbat_word.ones 64) r
      && (not (Clp.elem (w64 1) r))
      && (not (Clp.is_top r))
      && not fire_a);
@@ -1082,15 +1082,15 @@ let run () =
     && not fire_a);
   check "E2eC-6: arshift overshift of a negative operand -> {all-ones} exactly"
     (let r =
-       Clp.arshift (Clp.create (W.lshift (w64 1) (w64 63))) (Clp.of_list ~width:64 [ w64 64 ])
+       Clp.arshift (Clp.create (Cbat_word.lshift (w64 1) (w64 63))) (Clp.of_list ~width:64 [ w64 64 ])
      in
-     Clp.min_elem r = Some (W.ones 64)
-     && Clp.max_elem r = Some (W.ones 64)
-     && W.to_int_exn (Clp.cardinality r) = 1
+     Clp.min_elem r = Some (Cbat_word.ones 64)
+     && Clp.max_elem r = Some (Cbat_word.ones 64)
+     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && not fire_a);
   (* Straddling (min < width <= max): capped exact path UNION overshift class. *)
-  let straddle = Clp.create ~width:64 ~step:(w64 2) ~cardn:(W.of_int ~width:65 32) (w64 8) in
+  let straddle = Clp.create ~width:64 ~step:(w64 2) ~cardn:(Cbat_word.of_int ~width:65 32) (w64 8) in
   check "E2eC-7: lshift {16} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}"
     (let r = Clp.lshift (Clp.create (w64 16)) straddle in
      (not (Clp.is_top r))
@@ -1101,7 +1101,7 @@ let run () =
      && Clp.elem (w64 0x40000000) r (* 16<<30 *)
      && not fire_l);
   check "E2eC-8: rshift {2^40} by straddling [8,70] step 2 -> non-top, contains capped image ∪ {0}"
-    (let r = Clp.rshift (Clp.create (W.lshift (w64 1) (w64 40))) straddle in
+    (let r = Clp.rshift (Clp.create (Cbat_word.lshift (w64 1) (w64 40))) straddle in
      (not (Clp.is_top r))
      && (not (Clp.is_bottom r))
      && Clp.elem (w64 0) r (* 2^40>>a = 0 for a >= 41 *)
@@ -1112,11 +1112,11 @@ let run () =
   check
     "E2eC-9: arshift {2^63} by straddling [8,70] step 2 -> non-top, contains capped base ∪ \
      {all-ones}"
-    (let r = Clp.arshift (Clp.create (W.lshift (w64 1) (w64 63))) straddle in
+    (let r = Clp.arshift (Clp.create (Cbat_word.lshift (w64 1) (w64 63))) straddle in
      (not (Clp.is_top r))
      && (not (Clp.is_bottom r))
-     && Clp.elem (W.ones 64) r (* overshift: amount 70 *)
-     && Clp.elem (W.neg (W.lshift (w64 1) (w64 55))) r (* amount 8: sign-ext of 2^63>>8 = -2^55 *)
+     && Clp.elem (Cbat_word.ones 64) r (* overshift: amount 70 *)
+     && Clp.elem (Cbat_word.neg (Cbat_word.lshift (w64 1) (w64 55))) r (* amount 8: sign-ext of 2^63>>8 = -2^55 *)
      && not fire_a);
   (* Full capped image of straddling arshift not asserted element-wise (step collapse). *)
   (* TOP amount caps to [0, width-1] at reachable stride. *)
@@ -1130,15 +1130,15 @@ let run () =
     (let r = Clp.lshift (Clp.create (w32 1)) (Clp.of_list ~width:32 [ w32 32 ]) in
      Clp.min_elem r = Some (w32 0)
      && Clp.max_elem r = Some (w32 0)
-     && W.to_int_exn (Clp.cardinality r) = 1
+     && Cbat_word.to_int_exn (Clp.cardinality r) = 1
      && (not (Clp.is_top r))
      && not fire_l);
   check "E2eC-12: array_local pattern — 8-bit operand shifted by {8} -> {0} exactly, no fire"
     (let r =
-       Clp.lshift (Clp.create (W.of_int ~width:8 1)) (Clp.of_list ~width:8 [ W.of_int ~width:8 8 ])
+       Clp.lshift (Clp.create (Cbat_word.of_int ~width:8 1)) (Clp.of_list ~width:8 [ Cbat_word.of_int ~width:8 8 ])
      in
-     Clp.min_elem r = Some (W.of_int ~width:8 0)
-     && Clp.max_elem r = Some (W.of_int ~width:8 0)
+     Clp.min_elem r = Some (Cbat_word.of_int ~width:8 0)
+     && Clp.max_elem r = Some (Cbat_word.of_int ~width:8 0)
      && (not (Clp.is_top r))
      && not fire_l);
   ()
@@ -1150,15 +1150,15 @@ let run () =
   let y = Var.create ~is_virtual:false ~fresh:false "y" (Type.Imm 64) in
   let iv = Bil.Var i in
   let xv = Bil.Var x in
-  let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (w32 5)) in
+  let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
   let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (w32 0)));
-  Blk.Builder.add_def entry_b (Def.create x (Bil.Int (w64 16)));
-  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (w32 1))));
+  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
+  Blk.Builder.add_def entry_b (Def.create x (Bil.Int (Cbat_word.to_word (w64 16))));
+  Blk.Builder.add_def body_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
   (* Body increments first: y = x << (i+1) ∈ {32..512}, in case 1. *)
   Blk.Builder.add_def body_b (Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv)));
   let entry0 = Blk.Builder.result entry_b in
@@ -1196,16 +1196,16 @@ let run () =
     "E2eC-13 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ \
      [0,4]) and the exit view carries the exit-iteration values (min ≥ 5)"
     ((not (Ws.is_top c_iter))
-    && (match Ws.max_elem c_iter with Some w -> Word.( <= ) w (w32 4) | None -> false)
+    && (match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false)
     && (not (Ws.is_top c_exit))
-    && match Ws.min_elem c_exit with Some w -> Word.( >= ) w (w32 5) | None -> false);
+    && match Ws.min_elem c_exit with Some w -> Cbat_word.(>=) w (w32 5) | None -> false);
   (* Shifted value's window: counter ⊆ [0,4] at the guard. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   check
     "E2eC-14 (BIR loop): the counter window survives the body shift — the iterate view's counter \
      stays ⊆ [0,4] (y = x << (i+1) ∈ {32..512})"
     ((not (Ws.is_top c_iter))
-    && match Ws.max_elem c_iter with Some w -> Word.( <= ) w (w32 4) | None -> false);
+    && match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false);
   ())
 ;
 (  (* Channel-2 negative (spec §2.2): the heap-indexed store never seeds. *)
@@ -1239,15 +1239,15 @@ let run () =
   let t = v64 "e2ed_t3" in
   let d1 =
     Def.create m
-      (Bil.Store (Bil.Var m, Bil.Int (w64 0x100), Bil.Int (w64 42), LittleEndian, `r64))
+      (Bil.Store (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64))
   in
   let env1 = Vsa.denote_def d1 AI.top in
   let d2 =
     Def.create m
       (Bil.Store
-         (Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64), Bil.Int (w64 7), LittleEndian, `r64))
+         (Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64), Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
-  let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (w64 0x100), LittleEndian, `r64)) in
+  let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), LittleEndian, `r64)) in
   let env2 = Vsa.denote_def d2 env1 in
   check "E2eD-7: gate-free — a top-addr store leaves memory unchanged"
     (AI.equal env2 env1);
@@ -1275,27 +1275,27 @@ let run () =
   ())
 ;
 (  let full = Ws.top 1 in
-  let full_l = Ws.of_list ~width:1 [ W.b0; W.b1 ] in
+  let full_l = Ws.of_list ~width:1 [ Cbat_word.b0; Cbat_word.b1 ] in
   check
     "L2b-1: the full 1-bit domain {0,1} reads cardn 2 (non-bottom; the FinSet cardinality no \
      longer wraps at the set width)"
     ((not (Ws.is_bottom full))
-    && Word.( = ) (Ws.cardinality full) (W.of_int ~width:2 2)
+    && Cbat_word.(=) (Ws.cardinality full) (Cbat_word.of_int ~width:2 2)
     && (not (Ws.is_bottom full_l))
-    && Word.( = ) (Ws.cardinality full_l) (W.of_int ~width:2 2));
+    && Cbat_word.(=) (Ws.cardinality full_l) (Cbat_word.of_int ~width:2 2));
   ()
 
 (* L2b-2: EQ over {0,1} — is_zero guard sees unwrapped cardn. *))
 ;
 (  let zf = v1 "l2b_zf2" in
-  let env = AI.add_word AI.top ~key:zf ~data:(Ws.of_list ~width:1 [ W.b0; W.b1 ]) in
+  let env = AI.add_word AI.top ~key:zf ~data:(Ws.of_list ~width:1 [ Cbat_word.b0; Cbat_word.b1 ]) in
   let e = Bil.BinOp (Bil.EQ, Bil.Var zf, Bil.Int W.b0) in
   match Vsa.denote_imm_exp e env with
   | Ok ws ->
       check
         "L2b-2: EQ over a {0,1} operand is {0,1} (bool_top), not bottom — the is_zero guard sees \
          cardn 2"
-        ((not (Ws.is_bottom ws)) && Word.( = ) (Ws.cardinality ws) (W.of_int ~width:2 2))
+        ((not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2))
   | Error _ ->
       check
         "L2b-2: EQ over a {0,1} operand is {0,1} (bool_top), not bottom — the is_zero guard sees \
@@ -1309,7 +1309,7 @@ let run () =
   let env_after = Vsa.denote_def (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top in
   let ws = AI.find_word 1 env_after pf in
   check "L2b-3: a lifted 1-bit flag def (val_top (Imm 1)) is {0,1} with cardn 2, not bottom"
-    ((not (Ws.is_bottom ws)) && Word.( = ) (Ws.cardinality ws) (W.of_int ~width:2 2));
+    ((not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2));
   ()
 
 (* L2b-4: overlap comparisons return bool_top, not bottom. *))
@@ -1319,12 +1319,12 @@ let run () =
   let z = v64 "l2b_z4" in
   let ok_lt =
     match Vsa.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top with
-    | Ok ws -> (not (Ws.is_bottom ws)) && Word.( = ) (Ws.cardinality ws) (W.of_int ~width:2 2)
+    | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
     | Error _ -> false
   in
   let ok_eq =
-    match Vsa.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (w64 0), Bil.Var z)) AI.top with
-    | Ok ws -> (not (Ws.is_bottom ws)) && Word.( = ) (Ws.cardinality ws) (W.of_int ~width:2 2)
+    match Vsa.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z)) AI.top with
+    | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
     | Error _ -> false
   in
   check
@@ -1338,7 +1338,7 @@ let run () =
 (  let zf = v1 "l2b_zf5" in
   let x = v64 "l2b_x5" in
   let flag_env =
-    Vsa.denote_def (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (w64 0), Bil.Var x))) AI.top
+    Vsa.denote_def (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x))) AI.top
   in
   let flag_val = AI.find_word 1 flag_env zf in
   (* (a) direct reachable_jumps on a flag-gated jump *)
@@ -1358,8 +1358,8 @@ let run () =
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (w64 0), Bil.Var x)));
-  Blk.Builder.add_def body_b (Def.create cnt (Bil.BinOp (Bil.PLUS, Bil.Var cnt, Bil.Int (w64 1))));
+  Blk.Builder.add_def entry_b (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x)));
+  Blk.Builder.add_def body_b (Def.create cnt (Bil.BinOp (Bil.PLUS, Bil.Var cnt, Bil.Int (Cbat_word.to_word (w64 1)))));
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
   let header0 = Blk.Builder.result header_b in
@@ -1397,5 +1397,5 @@ let run () =
     && (not (AI.equal body_st AI.bottom))
     && (not (Ws.is_bottom body_flag))
     (* Taken edge narrows {0,1} to {1}; both contain b1. *)
-    && Ws.elem W.b1 body_flag);
+    && Ws.elem Cbat_word.b1 body_flag);
   ())

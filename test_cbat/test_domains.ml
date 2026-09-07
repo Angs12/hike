@@ -9,7 +9,7 @@ let clp1 =
     (Clp.bitwidth c = 32
     && Clp.min_elem c = Some (w32 10)
     && Clp.max_elem c = Some (w32 10)
-    && W.to_int_exn (Clp.cardinality c) = 1);
+    && Cbat_word.to_int_exn (Clp.cardinality c) = 1);
   check "CLP1: elem of the singleton {10}" (Clp.elem (w32 10) c && not (Clp.elem (w32 11) c));
   c
 
@@ -32,49 +32,49 @@ let run_base () =
     (Clp.bitwidth clp2 = 32
     && Clp.min_elem clp2 = Some (w32 10)
     && Clp.max_elem clp2 = Some (w32 18)
-    && W.to_int_exn (Clp.cardinality clp2) = 5);
+    && Cbat_word.to_int_exn (Clp.cardinality clp2) = 5);
   check "CLP2: interval membership (14 in, 15 not in)"
     (Clp.elem (w32 14) clp2 && not (Clp.elem (w32 15) clp2));
   check "CLP2: iter enumerates the interval (descending; sorted = the set)"
-    (List.sort compare (List.map W.to_int_exn (Clp.iter clp2)) = [ 10; 12; 14; 16; 18 ]);
+    (List.sort compare (List.map Cbat_word.to_int_exn (Clp.iter clp2)) = [ 10; 12; 14; 16; 18 ]);
   check "CLP2: cardinality equals the iter length (bounds sanity)"
-    (W.to_int_exn (Clp.cardinality clp2) = List.length (Clp.iter clp2));
+    (Cbat_word.to_int_exn (Clp.cardinality clp2) = List.length (Clp.iter clp2));
   check "CLP3: of_list ~width:16 [3;1;2] -> {1,2,3} (sorted, deduped)"
     (let c = Clp.of_list ~width:16 [ w32 3; w32 1; w32 2 ] in
      Clp.bitwidth c = 16
-     && W.to_int_exn (Clp.cardinality c) = 3
-     && Clp.min_elem c = Some (W.of_int ~width:16 1)
-     && Clp.max_elem c = Some (W.of_int ~width:16 3)
-     && Clp.elem (W.of_int ~width:16 2) c);
+     && Cbat_word.to_int_exn (Clp.cardinality c) = 3
+     && Clp.min_elem c = Some (Cbat_word.of_int ~width:16 1)
+     && Clp.max_elem c = Some (Cbat_word.of_int ~width:16 3)
+     && Clp.elem (Cbat_word.of_int ~width:16 2) c);
   check "CLP4: of_list [] is bottom" (Clp.is_bottom (Clp.of_list ~width:32 []));
   check "CLP5: bottom: cardn 0, empty iter, no min elem"
     (let b = Clp.bottom 32 in
      Clp.is_bottom b
-     && W.to_int_exn (Clp.cardinality b) = 0
+     && Cbat_word.to_int_exn (Clp.cardinality b) = 0
      && Clp.iter b = []
      && Clp.min_elem b = None);
   check "CLP6: top: is_top, not bottom, absorbs by subset"
     (let t = Clp.top 32 in
      Clp.is_top t && (not (Clp.is_bottom t)) && Clp.subset clp1 t && Clp.subset t t);
   check "CLP7a: create_ascending basic properties and bounds"
-    (let asc = Clp.create_ascending ~width:64 ~base:(W.of_int ~width:64 8) ~step:(W.of_int ~width:64 8) in
+    (let asc = Clp.create_ascending ~width:64 ~base:(Cbat_word.of_int ~width:64 8) ~step:(Cbat_word.of_int ~width:64 8) in
      Clp.is_ascending asc
      && Clp.is_infinite asc
      && not (Clp.is_descending asc)
      && not (Clp.is_circular asc)
-     && Clp.min_elem asc = Some (W.of_int ~width:64 8)
-     && Clp.min_elem_signed asc = Some (W.of_int ~width:64 8));
+     && Clp.min_elem asc = Some (Cbat_word.of_int ~width:64 8)
+     && Clp.min_elem_signed asc = Some (Cbat_word.of_int ~width:64 8));
   check "CLP7b: create_descending basic properties and bounds"
-    (let desc = Clp.create_descending ~width:64 ~base:(W.of_int ~width:64 64) ~step:(W.of_int ~width:64 8) in
+    (let desc = Clp.create_descending ~width:64 ~base:(Cbat_word.of_int ~width:64 64) ~step:(Cbat_word.of_int ~width:64 8) in
      Clp.is_descending desc
      && Clp.is_infinite desc
      && not (Clp.is_ascending desc)
      && not (Clp.is_circular desc)
-     && Clp.max_elem desc = Some (W.of_int ~width:64 64)
-     && Clp.max_elem_signed desc = Some (W.of_int ~width:64 64));
+     && Clp.max_elem desc = Some (Cbat_word.of_int ~width:64 64)
+     && Clp.max_elem_signed desc = Some (Cbat_word.of_int ~width:64 64));
   check "CLP7c: directional rays canonicalize singletons to Finite"
-    (let asc1 = Clp.create_ascending ~width:64 ~base:(W.ones 64) ~step:(W.of_int ~width:64 8) in
-     let desc1 = Clp.create_descending ~width:64 ~base:(W.of_int ~width:64 7) ~step:(W.of_int ~width:64 8) in
+    (let asc1 = Clp.create_ascending ~width:64 ~base:(Cbat_word.ones 64) ~step:(Cbat_word.of_int ~width:64 8) in
+     let desc1 = Clp.create_descending ~width:64 ~base:(Cbat_word.of_int ~width:64 7) ~step:(Cbat_word.of_int ~width:64 8) in
      not (Clp.is_ascending asc1)
      && not (Clp.is_infinite asc1)
      && not (Clp.is_descending desc1)
@@ -121,14 +121,14 @@ let run_base () =
 (  let s = Fs.of_list ~width:32 [ w32 1; w32 2; w32 3 ] in
   check "FS1: of_list basics (cardn/bitwidth/min/max/elem)"
     (Fs.bitwidth s = 32
-    && W.to_int_exn (Fs.cardinality s) = 3
+    && Cbat_word.to_int_exn (Fs.cardinality s) = 3
     && Fs.min_elem s = Some (w32 1)
     && Fs.max_elem s = Some (w32 3)
     && Fs.elem (w32 2) s
     && not (Fs.elem (w32 4) s));
   check "FS1: singleton"
     (let one = Fs.singleton (w32 7) in
-     Fs.elem (w32 7) one && W.to_int_exn (Fs.cardinality one) = 1);
+     Fs.elem (w32 7) one && Cbat_word.to_int_exn (Fs.cardinality one) = 1);
   check "FS2: lift1 unops are involutive (neg, lnot)"
     (Fs.equal (Fs.neg (Fs.neg s)) s && Fs.equal (Fs.lnot (Fs.lnot s)) s);
   check "FS3: lift2 union/intersection"
@@ -151,16 +151,16 @@ let run_base () =
      Fs.equal (Fs.join s b) s
      && Fs.equal (Fs.join b s) s
      && Fs.equal (Fs.meet s b) b
-     && W.to_int_exn (Fs.cardinality (Fs.meet s b)) = 0);
+     && Cbat_word.to_int_exn (Fs.cardinality (Fs.meet s b)) = 0);
   check "FS7: add: {1,2} + {10} = {11,12}"
     (let a = Fs.of_list ~width:32 [ w32 1; w32 2 ] in
      let r = Fs.add a (Fs.singleton (w32 10)) in
-     Fs.elem (w32 11) r && Fs.elem (w32 12) r && W.to_int_exn (Fs.cardinality r) = 2);
+     Fs.elem (w32 11) r && Fs.elem (w32 12) r && Cbat_word.to_int_exn (Fs.cardinality r) = 2);
   check "FS8: extract/cast/concat width sanity"
     (let one = Fs.singleton (w32 1) in
      Fs.bitwidth (Fs.extract ~hi:7 ~lo:0 one) = 8
      && Fs.bitwidth (Fs.cast Bil.UNSIGNED 64 one) = 64
-     && Fs.bitwidth (Fs.concat one (Fs.singleton (W.of_int ~width:16 1))) = 48);
+     && Fs.bitwidth (Fs.concat one (Fs.singleton (Cbat_word.of_int ~width:16 1))) = 48);
 
   (* Width mismatch yields false, not an assert abort. *)
   let f32 = Fs.of_list ~width:32 [ w32 1; w32 2 ] in
@@ -200,51 +200,51 @@ let run_base () =
   ())
 ;
 (  check "WO1: dom_size i ~width:w = 2^i as a w-bit word (zero if w = i)"
-    (W.to_int_exn (Wo.dom_size 3 ~width:4) = 8
-    && W.bitwidth (Wo.dom_size 3 ~width:4) = 4
-    && W.to_int_exn (Wo.dom_size 60 ~width:61) = 0x1000000000000000
-    && W.is_zero (Wo.dom_size 3 ~width:3));
+    (Cbat_word.to_int_exn (Wo.dom_size 3 ~width:4) = 8
+    && Cbat_word.bitwidth (Wo.dom_size 3 ~width:4) = 4
+    && Cbat_word.to_int_exn (Wo.dom_size 60 ~width:61) = 0x1000000000000000
+    && Cbat_word.is_zero (Wo.dom_size 3 ~width:3));
   check "WO2: cap_at_width keeps small words, saturates large ones"
-    (let c255 = Wo.cap_at_width ~width:8 (W.of_int ~width:32 255) in
-     W.to_int_exn c255 = 255
-     && W.bitwidth c255 = 8
-     && W.to_int_exn (Wo.cap_at_width ~width:2 (W.of_int ~width:8 5)) = 3);
+    (let c255 = Wo.cap_at_width ~width:8 (Cbat_word.of_int ~width:32 255) in
+     Cbat_word.to_int_exn c255 = 255
+     && Cbat_word.bitwidth c255 = 8
+     && Cbat_word.to_int_exn (Wo.cap_at_width ~width:2 (Cbat_word.of_int ~width:8 5)) = 3);
   check "WO3: add_exact/mul_exact widen to the exact result"
-    (let s = Wo.add_exact (W.of_int ~width:8 200) (W.of_int ~width:8 100) in
-     W.bitwidth s = 9
-     && W.to_int_exn s = 300
+    (let s = Wo.add_exact (Cbat_word.of_int ~width:8 200) (Cbat_word.of_int ~width:8 100) in
+     Cbat_word.bitwidth s = 9
+     && Cbat_word.to_int_exn s = 300
      &&
-     let p = Wo.mul_exact (W.of_int ~width:4 15) (W.of_int ~width:4 15) in
-     W.bitwidth p = 8 && W.to_int_exn p = 225);
+     let p = Wo.mul_exact (Cbat_word.of_int ~width:4 15) (Cbat_word.of_int ~width:4 15) in
+     Cbat_word.bitwidth p = 8 && Cbat_word.to_int_exn p = 225);
   check "WO4: factor_2s pulls out the 2-power"
-    (let odd, twos = Wo.factor_2s (W.of_int ~width:8 12) in
-     W.to_int_exn odd = 3
+    (let odd, twos = Wo.factor_2s (Cbat_word.of_int ~width:8 12) in
+     Cbat_word.to_int_exn odd = 3
      && twos = 2
      &&
-     let odd', twos' = Wo.factor_2s (W.of_int ~width:8 16) in
-     W.to_int_exn odd' = 1 && twos' = 4);
+     let odd', twos' = Wo.factor_2s (Cbat_word.of_int ~width:8 16) in
+     Cbat_word.to_int_exn odd' = 1 && twos' = 4);
   check "WO5: lead_1_bit"
-    (Wo.lead_1_bit (W.of_int ~width:8 5) = Some 2
-    && Wo.lead_1_bit (W.of_int ~width:8 128) = Some 7
-    && Wo.lead_1_bit (W.zero 8) = None);
+    (Wo.lead_1_bit (Cbat_word.of_int ~width:8 5) = Some 2
+    && Wo.lead_1_bit (Cbat_word.of_int ~width:8 128) = Some 7
+    && Wo.lead_1_bit (Cbat_word.zero 8) = None);
   check "WO6: is_one / succ_exact / lshift_exact"
-    (Wo.is_one (W.of_int ~width:8 1)
-    && (not (Wo.is_one (W.of_int ~width:8 0)))
+    (Wo.is_one (Cbat_word.of_int ~width:8 1)
+    && (not (Wo.is_one (Cbat_word.of_int ~width:8 0)))
     &&
-    let s = Wo.succ_exact (W.of_int ~width:8 255) in
-    W.bitwidth s = 9
-    && W.to_int_exn s = 256
+    let s = Wo.succ_exact (Cbat_word.of_int ~width:8 255) in
+    Cbat_word.bitwidth s = 9
+    && Cbat_word.to_int_exn s = 256
     &&
-    let l = Wo.lshift_exact (W.of_int ~width:8 1) 4 in
-    W.bitwidth l = 12 && W.to_int_exn l = 16);
-  check "WO7: gt_int" (Wo.gt_int (W.of_int ~width:8 7) 5 && not (Wo.gt_int (W.of_int ~width:8 3) 5));
+    let l = Wo.lshift_exact (Cbat_word.of_int ~width:8 1) 4 in
+    Cbat_word.bitwidth l = 12 && Cbat_word.to_int_exn l = 16);
+  check "WO7: gt_int" (Wo.gt_int (Cbat_word.of_int ~width:8 7) 5 && not (Wo.gt_int (Cbat_word.of_int ~width:8 3) 5));
   ())
 (* Set difference: exact when representable, identity otherwise — never a stop. *)
 ;
-(  let w3 = W.of_int ~width:3 in
+(  let w3 = Cbat_word.of_int ~width:3 in
   (* Interval builder: [lo, hi] step 1. *)
   let int32 ~lo ~hi =
-    Clp.create ~width:32 ~step:(w32 1) ~cardn:(W.of_int ~width:33 (hi - lo + 1)) (w32 lo)
+    Clp.create ~width:32 ~step:(w32 1) ~cardn:(Cbat_word.of_int ~width:33 (hi - lo + 1)) (w32 lo)
   in
   (* W1: interior run is two pieces — identity. *)
   let a = int32 ~lo:0 ~hi:9 in
@@ -270,7 +270,7 @@ let run_base () =
   let d2 = Clp.diff (Clp.top 64) (Clp.create c) in
   check "W2: full64 \\ {0x2a} = the wrapped complement (cardn 2^64 − 1, exact)"
     (Clp.cardinality d2
-     = W.sub (W.lshift (W.of_int ~width:65 1) (W.of_int ~width:65 64)) (W.of_int ~width:65 1)
+     = Cbat_word.sub (Cbat_word.lshift (Cbat_word.of_int ~width:65 1) (Cbat_word.of_int ~width:65 64)) (Cbat_word.of_int ~width:65 1)
     && Clp.elem (w64 0x2b) d2
     && Clp.elem (w64 0x29) d2
     && not (Clp.elem c d2));
@@ -333,7 +333,7 @@ let run_base () =
   let p8 = Ws.of_clp (int32 ~lo:0 ~hi:10) in
   let d8 = Ws.diff p8 (Ws.of_list ~width:32 [ w32 0; w32 1; w32 2 ]) in
   check "W8: the Clp\\FinSet — the boundary-touch run removed exactly: [0,10] \\ {0,1,2} = {3..10}"
-    (Ws.cardinality d8 = W.of_int ~width:33 8
+    (Ws.cardinality d8 = Cbat_word.of_int ~width:33 8
     && List.for_all
          (fun w -> Ws.elem w d8)
          [ w32 3; w32 4; w32 5; w32 6; w32 7; w32 8; w32 9; w32 10 ]
@@ -346,7 +346,7 @@ let run_base () =
   check "W8c: the Clp\\FinSet with gaps — the identity (the sound over-approximation)"
     (Ws.equal d8c p8);
   (* W9: lnot/neg exact mirror rows. *)
-  let l9 = Clp.create ~width:3 ~step:(w3 2) ~cardn:(W.of_int ~width:4 3) (w3 0) in
+  let l9 = Clp.create ~width:3 ~step:(w3 2) ~cardn:(Cbat_word.of_int ~width:4 3) (w3 0) in
   (* {0,2,4} *)
   check
     "W9: lnot/neg — the exact mirror rows: lnot {0,2,4} = {7,5,3}; neg {0,2,4} = {0,6,4}; the top \
@@ -421,8 +421,8 @@ let run_policy () =
   check "D3-1: div by a set containing 0 -> top, no raise" (Clp.is_top (Clp.div d1 d0));
   check "D3-2: sdiv by a set containing 0 -> top, no raise" (Clp.is_top (Clp.sdiv d1 d0));
   check "D3-3: div by exactly {0} -> bottom (provably dead path)"
-    (Clp.is_bottom (Clp.div d1 (Clp.create (W.zero 32))));
-  check "D3-4: sdiv by exactly {0} -> bottom" (Clp.is_bottom (Clp.sdiv d1 (Clp.create (W.zero 32))));
+    (Clp.is_bottom (Clp.div d1 (Clp.create (Cbat_word.zero 32))));
+  check "D3-4: sdiv by exactly {0} -> bottom" (Clp.is_bottom (Clp.sdiv d1 (Clp.create (Cbat_word.zero 32))));
   check "D3-5: div by a nonzero singleton still computes (no regression)"
     (let r = Clp.div (Clp.create (w32 10)) (Clp.create (w32 2)) in
      Clp.min_elem r = Some (w32 5) && Clp.max_elem r = Some (w32 5));
@@ -508,13 +508,13 @@ let run_policy () =
   check "EX1b: the extrapolation contains the join (soundness)" (Clp.subset g9 r1);
   let r2 = Clp.widen_join q9 g9 in
   check "EX2: widen_join sound" (Clp.subset g9 r2);
-  let d1 = Clp.create (W.neg (w32 16)) ~step:(w32 8) ~cardn:(w32 1) in
-  let d2 = Clp.create (W.neg (w32 24)) ~step:(w32 8) ~cardn:(w32 2) in
+  let d1 = Clp.create (Cbat_word.neg (w32 16)) ~step:(w32 8) ~cardn:(w32 1) in
+  let d2 = Clp.create (Cbat_word.neg (w32 24)) ~step:(w32 8) ~cardn:(w32 2) in
   let r3 = Clp.widen_join d1 d2 in
   check "EX3: widen_join sound" (Clp.subset d2 r3);
   check "EX4: widen_join idempotent" (Clp.equal (Clp.widen_join g9 g9) g9);
-  let big1 = Clp.interval ~width:64 (w64 0) (Word.of_int ~width:64 0x100000000) in
-  let big2 = Clp.interval ~width:64 (w64 0) (Word.of_int ~width:64 0x10000000000) in
+  let big1 = Clp.interval ~width:64 (w64 0) (Cbat_word.of_int ~width:64 0x100000000) in
+  let big2 = Clp.interval ~width:64 (w64 0) (Cbat_word.of_int ~width:64 0x10000000000) in
   let r5 = Clp.widen_join big1 big2 in
   check "EX5: widen_join sound" (Clp.subset big2 r5);
   let s1 = Clp.interval ~width:32 (w32 0) (w32 0) in
@@ -523,11 +523,11 @@ let run_policy () =
   check "EX6: widen_join sound" (Clp.subset s2 r6);
   ())
 let run_agreement () =
-(  let w3 = W.of_int ~width:3 in
-  let w4 = W.of_int ~width:4 in
-  let w63 = W.of_int ~width:63 in
-  let w64i (v : int64) = W.of_int64 ~width:64 v in
-  let w63i (v : int64) = W.of_int64 ~width:63 v in
+(  let w3 = Cbat_word.of_int ~width:3 in
+  let w4 = Cbat_word.of_int ~width:4 in
+  let w63 = Cbat_word.of_int ~width:63 in
+  let w64i (v : int64) = Cbat_word.of_int64 ~width:64 v in
+  let w63i (v : int64) = Cbat_word.of_int64 ~width:63 v in
   let ones64 = w64i (-1L) in
   let max63 = w63i Int64.max_int in
 
@@ -570,7 +570,7 @@ let run_agreement () =
     && Clp.max_elem c4 = Some max63
     && Clp.elem max63 c4
     && (not (Clp.elem (w63 0) c4))
-    && W.to_int64_exn max63 = Int64.max_int);
+    && Cbat_word.to_int64_exn max63 = Int64.max_int);
 
   (* G5: 64-bit wrap add — {0xFFFF_FFFF_FFFF_FFFF} + {1} = {0}. *)
   let a5 = Clp.add (Clp.create ones64) (Clp.create (w64 1)) in
@@ -583,8 +583,8 @@ let run_agreement () =
     (Clp.equal a6 (Clp.create max63) && Clp.elem max63 a6 && not (Clp.elem (w63 0) a6));
 
   (* G7: path-independent algebraic contract. *)
-  let p = Clp.create ~width:64 ~step:(w64 2) ~cardn:(W.of_int ~width:65 5) (w64 10) in
-  let q = Clp.create ~width:64 ~step:(w64 4) ~cardn:(W.of_int ~width:65 3) (w64 6) in
+  let p = Clp.create ~width:64 ~step:(w64 2) ~cardn:(Cbat_word.of_int ~width:65 5) (w64 10) in
+  let q = Clp.create ~width:64 ~step:(w64 4) ~cardn:(Cbat_word.of_int ~width:65 3) (w64 6) in
   clp_agree "O4c-7a: add commutative" (Clp.add p q) (Clp.add q p);
   clp_agree "O4c-7b: meet commutative" (Clp.meet p q) (Clp.meet q p);
   clp_agree "O4c-7c: join commutative" (Clp.join p q) (Clp.join q p);

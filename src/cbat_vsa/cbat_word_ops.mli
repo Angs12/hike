@@ -15,40 +15,40 @@
 
 open Bap.Std
 
-val add_exact : word -> word -> word
-val mul_exact : word -> word -> word
-val succ_exact : word -> word
-val lshift_exact : word -> int -> word
+val add_exact : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
+val mul_exact : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
+val succ_exact : Cbat_word.t -> Cbat_word.t
+val lshift_exact : Cbat_word.t -> int -> Cbat_word.t
 
 
-val cdiv : word -> word -> word
+val cdiv : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
 
-val gt_int : word -> int -> bool
-val lt_int : word -> int -> bool
+val gt_int : Cbat_word.t -> int -> bool
+val lt_int : Cbat_word.t -> int -> bool
 
-val is_one : word -> bool
+val is_one : Cbat_word.t -> bool
 
-val bounded_gcd : word -> word -> word
+val bounded_gcd : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
 
-val bounded_diophantine : word -> word -> word -> (word * word) option
+val bounded_diophantine : Cbat_word.t -> Cbat_word.t -> Cbat_word.t -> (Cbat_word.t * Cbat_word.t) option
 
-val factor_2s : word -> word * int
+val factor_2s : Cbat_word.t -> Cbat_word.t * int
 
-val count_initial_1s : word -> int
+val count_initial_1s : Cbat_word.t -> int
 
-val lead_1_bit : word -> int option
+val lead_1_bit : Cbat_word.t -> int option
 
-val min : word -> word -> word
-val max : word -> word -> word
+val min : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
+val max : Cbat_word.t -> Cbat_word.t -> Cbat_word.t
 
 (* Number of values representable at [i] bits. *)
-val dom_size : ?width : int -> int -> word
+val dom_size : ?width : int -> int -> Cbat_word.t
 
 (* 2^(width-1) at [width] bits. *)
-val half : int -> word
+val half : int -> Cbat_word.t
 
-val cap_at_width : width:int -> word -> word
+val cap_at_width : width:int -> Cbat_word.t -> Cbat_word.t
 
-val add_bit : word -> word
+val add_bit : Cbat_word.t -> Cbat_word.t
 
 val endian_string : Word.endian -> string

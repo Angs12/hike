@@ -1,76 +1,88 @@
 #!/usr/bin/env bash
-# Native-vs-lifted harness over an explicit binary list (the 8-bin oracle).
-# Usage: run_semantic.sh [corpus_dir] [ir_dir] [out_dir] [extra_bins]
+# Native-vs-lifted equivalence for EVERY emitted corpus binary.
+# Usage: run_semantic.sh [corpus_dir] [ir_dir] [out_dir]
 # Renames @main, llc -O0, links harness.c (+ setjmp_stub.S for setjmp
-# users: lifted jmp_bufs hold model addresses real glibc would deref),
-# byte-diffs stdout. Never re-emits; operates on run_corpus.sh output.
+# users), runs both with a 15 s timeout, byte-diffs stdout.
 # The lifted link stays -no-pie: a linker constraint of the harness
 # artifact (baked absolute constants + extern_weak refs reject DT_TEXTREL).
-# Exit 0 iff every binary passes.
+
 set -u
-
-# Regression baseline lives in the repo, so bare runs need no /tmp state.
-HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-
 CORPUS="${1:-/tmp/corpus}"
-IR="${2:-$REPO_ROOT/baselines/heritage_baseline_copy}"
-OUT="${3:-/tmp/sem_out}"
-# Optional 4th arg: extra ad-hoc binaries beyond the regression set.
-EXTRA_BINS="${4:-}"
+IR="${2:-/tmp/heritage_p6}"
+OUT="${3:-/tmp/sem_all}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
 
-# Explicit list: each entry pins a converted shape (arg-area GEPs, RMW
-# stores, bounded-store regression). Ad-hoc extras join the same gate.
-BINS="setjmp_loop struct_arr_dynidx out_struct deep_recursion array_local factorial many_args rmw_oob"
-
-# Empty by default, so the regression set stays exactly eight binaries.
-BINS="$BINS $EXTRA_BINS"
-
+pass=0
 fail=0
+skip=0
+declare -a FAILED=()
 
-for name in $BINS; do
-# out_struct lifts corpus binary `struct` (names differ).
-    case "$name" in
-    out_struct) src=struct ;;
-    *) src="$name" ;;
-    esac
-    ll="$IR/out_$src.ll"
-    native="$CORPUS/$src"
-    if [ ! -f "$ll" ] || [ ! -x "$native" ]; then
-        echo "MISSING $name ($ll or $native)"
-        fail=1
-        continue
-    fi
+for ll in "$IR"/out_*.ll; do
+	[ -f "$ll" ] || continue
+	base="$(basename "$ll" .ll)" # out_<name>
+	name="${base#out_}"
+	case "$name" in
+	list) native="$CORPUS/list" ;; # list.c + stub main
+	*) native="$CORPUS/$name" ;;
+	esac
+	[ -x "$native" ] || {
+		echo "SKIP $base (no native $native)"
+		skip=$((skip + 1))
+		continue
+	}
 
-    # Rename the module entry + crt1-colliding symbol, then compile.
-    sed -e 's/@main/@hike_main/g' \
-        -e 's/@_dl_relocate_static_pie/@_dl_relocate_static_pie_lifted/g' \
-        "$ll" > "$OUT/${name}_lifted.ll" || { echo "FAIL $name (rename)"; fail=1; continue; }
-    llc -O0 -filetype=obj "$OUT/${name}_lifted.ll" -o "$OUT/${name}_lifted.o" \
-        || { echo "FAIL $name (llc)"; fail=1; continue; }
+	sed -e 's/@main/@hike_main/g' \
+		-e 's/@_dl_relocate_static_pie/@_dl_relocate_static_pie_lifted/g' \
+		"$ll" >"$OUT/${base}_lifted.ll" || {
+		echo "FAIL $base (rename)"
+		fail=$((fail + 1))
+		FAILED+=("$base")
+		continue
+	}
+	llc -O0 -filetype=obj "$OUT/${base}_lifted.ll" -o "$OUT/${base}_lifted.o" 2>/dev/null ||
+		{
+			echo "FAIL $base (llc)"
+			fail=$((fail + 1))
+			FAILED+=("$base")
+			continue
+		}
+	STUB=""
+	if grep -q '@_setjmp\|@longjmp' "$ll"; then STUB="$HERE/setjmp_stub.S"; fi
+	gcc -O0 -no-pie -o "$OUT/${base}_lifted" \
+		"$OUT/${base}_lifted.o" "$HERE/harness.c" $STUB 2>/dev/null ||
+		{
+			echo "FAIL $base (link)"
+			fail=$((fail + 1))
+			FAILED+=("$base")
+			continue
+		}
 
-    # Setjmp stub only when the module uses setjmp/longjmp.
-    STUB=""
-    if grep -q '@_setjmp\|@longjmp' "$ll"; then
-        STUB="$HERE/setjmp_stub.S"
-    fi
-    gcc -O0 -no-pie -o "$OUT/${name}_lifted" \
-        "$OUT/${name}_lifted.o" "$HERE/harness.c" $STUB \
-        || { echo "FAIL $name (link)"; fail=1; continue; }
-
-    # Run both and compare stdout byte-for-byte.
-    "$OUT/${name}_lifted" > "$OUT/${name}_lifted.out" 2>&1; lrc=$?
-    "$native"            > "$OUT/${name}_native.out" 2>&1; nrc=$?
-
-    if [ "$nrc" -eq "$lrc" ] \
-       && diff -q "$OUT/${name}_native.out" "$OUT/${name}_lifted.out" >/dev/null; then
-        echo "PASS $name (stdout byte-identical)"
-    else
-        echo "FAIL $name (native rc=$nrc vs lifted rc=$lrc; stdout diff:)"
-        diff "$OUT/${name}_native.out" "$OUT/${name}_lifted.out"
-        fail=1
-    fi
+	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
+	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_lifted" >"$OUT/${base}_lifted.out" 2>&1
+	lrc=$?
+	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
+	nrc=$?
+	if [ $lrc -eq 124 ] || [ $nrc -eq 124 ]; then
+		echo "FAIL $base (timeout: lifted rc=$lrc native rc=$nrc)"
+		fail=$((fail + 1))
+		FAILED+=("$base (timeout)")
+		continue
+	fi
+	if [ "$lrc" -ne "$nrc" ] || ! cmp -s "$OUT/${base}_lifted.out" "$OUT/${base}_native.out"; then
+		echo "FAIL $base (native rc=$nrc vs lifted rc=$lrc)"
+		diff "$OUT/${base}_native.out" "$OUT/${base}_lifted.out" | head -3 | sed 's/^/    /'
+		fail=$((fail + 1))
+		FAILED+=("$base")
+		continue
+	fi
+	echo "PASS $base"
+	pass=$((pass + 1))
 done
 
-exit "$fail"
+echo "----------------------------------------"
+echo "semantic-all: $pass PASS, $fail FAIL, $skip SKIP (of $(ls "$IR"/out_*.ll | wc -l) emitted)"
+if [ "$fail" -gt 0 ]; then
+	printf 'failed: %s\n' "${FAILED[@]}"
+fi
+exit $((fail > 0))

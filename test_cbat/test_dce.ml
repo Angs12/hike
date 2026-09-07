@@ -3,6 +3,8 @@ open Bap.Std
 open Bap_core_theory
 open Test_common
 
+let w64 = Word.of_int ~width:64
+
 (* Fixtures run on [Theory.Target.unknown], pinning the total ABI lane. *)
 
 (* Swept sub's defs, one list per block flattened. *)

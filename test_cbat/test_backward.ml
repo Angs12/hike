@@ -7,14 +7,14 @@ open Test_common
 
 (* Loop fixture: comparison guard in header, defs in header (fused walk fires first visit).
    Returns (sub, body tid). *)
-let mk_l3a_loop ~(cmp : Bil.binop) ~(c : word) ~(rhs : exp) : sub term * tid =
+let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * tid =
   let m = memv "l3a_m" in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let t = Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3a_v" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
-  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int c) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
   let ncond = Bil.UnOp (Bil.NOT, cond) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
@@ -54,16 +54,16 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : word) ~(rhs : exp) : sub term * tid =
 let l3a_cell_of (st : AI.t) : Ws.t =
   let m = memv "l3a_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
 
 (* Finite non-top non-bottom set bounded above by [maxv]. *)
-let l3a_bounded (ws : Ws.t) (maxv : word) : bool =
+let l3a_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Word.( <= ) w maxv | None -> false
+  && match Ws.max_elem ws with Some w -> Cbat_word.(<=) w maxv | None -> false
 
 (* Tagged-sub fixpoint; walk's cell meet observable at BODY input. *)
 (* Iterate state of an edge is the single-predecessor target's IN-state. *)
@@ -89,7 +89,7 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) : sub term * tid * jmp ter
   let rbp = v64 "RBP" in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c1_t" (Type.Imm 32) in
   let cf = v1 "l3c1_cf" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
@@ -97,7 +97,7 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) : sub term * tid * jmp ter
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
-  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (w32 10))));
+  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 10)))));
   List.iter (Blk.Builder.add_def header_b) extra_header_defs;
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
@@ -132,30 +132,30 @@ let mk_l3c1_loop ~(extra_header_defs : def term list) : sub term * tid * jmp ter
 (* Cell at RBP-8 in [st] (mem-var parameterized). *)
 let l3c1_cell_of (m : var) (st : AI.t) : Ws.t =
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
 
 (* Finite non-top non-bottom, max <= maxv. *)
-let l3c1_bounded (ws : Ws.t) (maxv : word) : bool =
+let l3c1_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Word.( <= ) w maxv | None -> false
+  && match Ws.max_elem ws with Some w -> Cbat_word.(<=) w maxv | None -> false
 
 (* L3c-2: signed comparison rows (SLT/SLE). *)
 
 (* Seeded counter loop; [flag] selects the flag-indirected guard, [prologue] drops it. Returns (sub, body tid). *)
-let mk_l3c2_loop ~(prologue : bool) ~(seed : word option) ~(cmp : Bil.binop) ~(c : word)
-    ~(body_op : Bil.binop) ~(body_k : word) ~(flag : bool) : sub term * tid =
+let mk_l3c2_loop ~(prologue : bool) ~(seed : Cbat_word.t option) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_op : Bil.binop) ~(body_k : Cbat_word.t) ~(flag : bool) : sub term * tid =
   let m = memv "l3c2_m" in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c2_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c2_u" (Type.Imm 32) in
   let cf = v1 "l3c2_cf" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
-  let cond = Bil.BinOp (cmp, Bil.Var t, Bil.Int c) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var t, Bil.Int (Cbat_word.to_word c)) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
@@ -163,12 +163,12 @@ let mk_l3c2_loop ~(prologue : bool) ~(seed : word option) ~(cmp : Bil.binop) ~(c
   (match seed with
   | Some v ->
       Blk.Builder.add_def entry_b
-        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int v, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word v), LittleEndian, `r32)))
   | None -> ());
   if prologue then Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
-  if flag then Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (cmp, Bil.Var t, Bil.Int c)));
-  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (body_op, Bil.Var t, Bil.Int body_k)));
+  if flag then Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (cmp, Bil.Var t, Bil.Int (Cbat_word.to_word c))));
+  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (body_op, Bil.Var t, Bil.Int (Cbat_word.to_word body_k))));
   Blk.Builder.add_def body_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
@@ -203,39 +203,39 @@ let mk_l3c2_loop ~(prologue : bool) ~(seed : word option) ~(cmp : Bil.binop) ~(c
 let l3c2_cell_of (st : AI.t) : Ws.t =
   let m = memv "l3c2_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
 
 (* Finite non-top non-bottom, max <= maxv. *)
-let l3c2_bounded (ws : Ws.t) (maxv : word) : bool =
+let l3c2_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Word.( <= ) w maxv | None -> false
+  && match Ws.max_elem ws with Some w -> Cbat_word.(<=) w maxv | None -> false
 
 (* Finite non-top non-bottom, all values in [lo, hi]. *)
-let l3c2_in_high (ws : Ws.t) (lo : word) (hi : word) : bool =
+let l3c2_in_high (ws : Ws.t) (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
   &&
   match (Ws.min_elem ws, Ws.max_elem ws) with
-  | Some mn, Some mx -> Word.( >= ) mn lo && Word.( <= ) mx hi
+  | Some mn, Some mx -> Cbat_word.(>=) mn lo && Cbat_word.(<=) mx hi
   | _ -> false
 
 (* L3c-3: PLUS-hull, TIMES-const, RSHIFT/ARSHIFT-const rows. *)
 
 (* Chain loop fixture: header loads, applies chain, guards. Returns (sub, body tid). *)
-let mk_l3c3_loop ~(seed : word option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : word)
-    ~(body_k : word) : sub term * tid =
+let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_k : Cbat_word.t) : sub term * tid =
   let m = memv "l3c3_m" in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3c3_v" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c3_u" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
-  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int c) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
@@ -243,13 +243,13 @@ let mk_l3c3_loop ~(seed : word option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : w
   (match seed with
   | Some sv ->
       Blk.Builder.add_def entry_b
-        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)))
   | None -> ());
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create v chain);
-  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int body_k)));
+  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k))));
   Blk.Builder.add_def body_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
@@ -283,7 +283,7 @@ let mk_l3c3_loop ~(seed : word option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : w
 let l3c3_cell_of (st : AI.t) : Ws.t =
   let m = memv "l3c3_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -297,16 +297,16 @@ let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
 (* L3c-4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
 
 (* Chain loop with compared-var width. Returns (sub, body tid). *)
-let mk_l3c4_loop ~(seed : word option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.binop) ~(c : word)
-    ~(body_k : word) : sub term * tid =
+let mk_l3c4_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_k : Cbat_word.t) : sub term * tid =
   let m = memv "l3c4_m" in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
   let t = Var.create ~is_virtual:false ~fresh:false "l3c4_t" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3c4_v" (Type.Imm v_w) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c4_u" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
-  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int c) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
@@ -314,13 +314,13 @@ let mk_l3c4_loop ~(seed : word option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.b
   (match seed with
   | Some sv ->
       Blk.Builder.add_def entry_b
-        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)))
   | None -> ());
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create v chain);
-  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int body_k)));
+  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k))));
   Blk.Builder.add_def body_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
@@ -351,7 +351,7 @@ let mk_l3c4_loop ~(seed : word option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.b
   (sub, body_tid)
 
 (* Two-load Var-vs-Var shape. Returns (sub, body tid). *)
-let mk_l3c4_vv_loop ~(seed : word option) ~(seed2 : word option) ~(cmp : Bil.binop) ~(body_k : word)
+let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~(cmp : Bil.binop) ~(body_k : Cbat_word.t)
     : sub term * tid =
   let m = memv "l3c4_m" in
   let rsp = v64 "RSP" in
@@ -359,8 +359,8 @@ let mk_l3c4_vv_loop ~(seed : word option) ~(seed2 : word option) ~(cmp : Bil.bin
   let t = Var.create ~is_virtual:false ~fresh:false "l3c4_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c4_u" (Type.Imm 32) in
   let w = Var.create ~is_virtual:false ~fresh:false "l3c4_w" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
-  let addr2 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 16)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let addr2 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))) in
   let cond = Bil.BinOp (cmp, Bil.Var t, Bil.Var u) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
@@ -369,18 +369,18 @@ let mk_l3c4_vv_loop ~(seed : word option) ~(seed2 : word option) ~(cmp : Bil.bin
   (match seed with
   | Some sv ->
       Blk.Builder.add_def entry_b
-        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)))
   | None -> ());
   (match seed2 with
   | Some sv ->
       Blk.Builder.add_def entry_b
-        (Def.create m (Bil.Store (Bil.Var m, addr2, Bil.Int sv, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr2, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)))
   | None -> ());
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create u (Bil.Load (Bil.Var m, addr2, LittleEndian, `r32)));
-  Blk.Builder.add_def body_b (Def.create w (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int body_k)));
+  Blk.Builder.add_def body_b (Def.create w (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k))));
   Blk.Builder.add_def body_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var w, LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
@@ -414,7 +414,7 @@ let mk_l3c4_vv_loop ~(seed : word option) ~(seed2 : word option) ~(cmp : Bil.bin
 let l3c4_cell_of (st : AI.t) : Ws.t =
   let m = memv "l3c4_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -428,7 +428,7 @@ let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
 (* L3c-5: structural closure — identity rows, const-first arm, shrunk catch-all. *)
 
 (* Optional-chain loop fixture. Returns (sub, body tid). *)
-let mk_l3c5_loop ~(seed : word option) ~(chain : exp option) ~(cond : exp) ~(body_k : word) :
+let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp) ~(body_k : Cbat_word.t) :
     sub term * tid =
   let m = memv "l3c5_m" in
   let rsp = v64 "RSP" in
@@ -436,7 +436,7 @@ let mk_l3c5_loop ~(seed : word option) ~(chain : exp option) ~(cond : exp) ~(bod
   let t = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
   let v = Var.create ~is_virtual:false ~fresh:false "l3c5_v" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3c5_u" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
@@ -444,13 +444,13 @@ let mk_l3c5_loop ~(seed : word option) ~(chain : exp option) ~(cond : exp) ~(bod
   (match seed with
   | Some sv ->
       Blk.Builder.add_def entry_b
-        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int sv, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)))
   | None -> ());
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   (match chain with Some ch -> Blk.Builder.add_def header_b (Def.create v ch) | None -> ());
-  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int body_k)));
+  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k))));
   Blk.Builder.add_def body_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
@@ -484,7 +484,7 @@ let mk_l3c5_loop ~(seed : word option) ~(chain : exp option) ~(cond : exp) ~(bod
 let l3c5_cell_of (st : AI.t) : Ws.t =
   let m = memv "l3c5_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -504,16 +504,16 @@ let mk_l3b1_loop () : sub term * tid * tid =
   let rsp = v64 "RSP" in
   let t = Var.create ~is_virtual:false ~fresh:false "l3b1_t" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l3b1_u" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8)) in
-  let cond = Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (w32 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (w32 0), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32)));
   Blk.Builder.add_def header_b (Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
-  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (w32 1))));
+  Blk.Builder.add_def body_b (Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 1)))));
   Blk.Builder.add_def body_b
     (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
@@ -548,21 +548,21 @@ let mk_l3b4_diamond () : sub term * tid =
   let m = memv "l3b4_m" in
   let rsp = v64 "RSP" in
   let i = Var.create ~is_virtual:false ~fresh:false "l3b4_i" (Type.Imm 32) in
-  let addr8 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8)) in
-  let addr7 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 7)) in
-  let cond = Bil.BinOp (Bil.LT, Bil.Var i, Bil.Int (w32 1)) in
+  let addr8 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let addr7 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 7))) in
+  let cond = Bil.BinOp (Bil.LT, Bil.Var i, Bil.Int (Cbat_word.to_word (w32 1))) in
   let entry_b = Blk.Builder.create () in
   let a_b = Blk.Builder.create () in
   let b_b = Blk.Builder.create () in
   let merge_b = Blk.Builder.create () in
   Blk.Builder.add_def a_b
-    (Def.create m (Bil.Store (Bil.Var m, addr8, Bil.Int (w32 7), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr8, Bil.Int (Cbat_word.to_word (w32 7)), LittleEndian, `r32)));
   Blk.Builder.add_def a_b
-    (Def.create m (Bil.Store (Bil.Var m, addr7, Bil.Int (w32 7), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr7, Bil.Int (Cbat_word.to_word (w32 7)), LittleEndian, `r32)));
   Blk.Builder.add_def b_b
-    (Def.create m (Bil.Store (Bil.Var m, addr8, Bil.Int (w32 7), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr8, Bil.Int (Cbat_word.to_word (w32 7)), LittleEndian, `r32)));
   Blk.Builder.add_def b_b
-    (Def.create m (Bil.Store (Bil.Var m, addr7, Bil.Int (w32 7), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr7, Bil.Int (Cbat_word.to_word (w32 7)), LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
   let a0 = Blk.Builder.result a_b in
   let b0 = Blk.Builder.result b_b in
@@ -605,7 +605,7 @@ let l3b_cells_of (mv : var) (st : AI.t) : int =
 let l3b1_cell_of (st : AI.t) : Ws.t =
   let m = memv "l3b1_m" in
   let rsp = v64 "RSP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -632,7 +632,7 @@ let l39_ja (cf : var) (zf : var) : exp =
   Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.OR, Bil.Var cf, Bil.Var zf))
 
 (* Exact corpus block fixture: seeded store, canonical cmp emission, compound guard. Returns (sub, body tid). *)
-let mk_l39_loop ~(seed : word) ~(c : word) ~(body_op : Bil.binop) ~(body_k : word)
+let mk_l39_loop ~(seed : Cbat_word.t) ~(c : Cbat_word.t) ~(body_op : Bil.binop) ~(body_k : Cbat_word.t)
     ~(mk_cond : cf:var -> ofv:var -> sf:var -> zf:var -> exp)
     ~(extra_header_defs : var -> def term list) : sub term * tid =
   let m = memv "l39_m" in
@@ -644,7 +644,7 @@ let mk_l39_loop ~(seed : word) ~(c : word) ~(body_op : Bil.binop) ~(body_k : wor
   let ofv = v1 "OF" in
   let sf = v1 "SF" in
   let zf = v1 "ZF" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
   let cond = mk_cond ~cf ~ofv ~sf ~zf in
   let entry_b = Blk.Builder.create () in
@@ -652,12 +652,12 @@ let mk_l39_loop ~(seed : word) ~(c : word) ~(body_op : Bil.binop) ~(body_k : wor
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int seed, LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word seed), LittleEndian, `r32)));
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   (* Canonical -O0 cmp emission, fixed order: temp, CF, OF, SF, ZF. *)
-  Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int c)));
-  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, load_e, Bil.Int c)));
+  Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int (Cbat_word.to_word c))));
+  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, load_e, Bil.Int (Cbat_word.to_word c))));
   Blk.Builder.add_def header_b
     (Def.create ofv
        (Bil.Cast
@@ -665,17 +665,17 @@ let mk_l39_loop ~(seed : word) ~(c : word) ~(body_op : Bil.binop) ~(body_k : wor
             1,
             Bil.BinOp
               ( Bil.AND,
-                Bil.BinOp (Bil.XOR, load_e, Bil.Int c),
+                Bil.BinOp (Bil.XOR, load_e, Bil.Int (Cbat_word.to_word c)),
                 Bil.BinOp (Bil.XOR, load_e, Bil.Var t) ) )));
   Blk.Builder.add_def header_b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
   Blk.Builder.add_def header_b
-    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Word.bitwidth c)), Bil.Var t)));
+    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Cbat_word.bitwidth c)), Bil.Var t)));
   List.iter (Blk.Builder.add_def header_b) (extra_header_defs m);
   Blk.Builder.add_def body_b (Def.create u (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def body_b
     (Def.create m
        (Bil.Store
-          (Bil.Var m, addr_e, Bil.BinOp (body_op, Bil.Var u, Bil.Int body_k), LittleEndian, `r32)));
+          (Bil.Var m, addr_e, Bil.BinOp (body_op, Bil.Var u, Bil.Int (Cbat_word.to_word body_k)), LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
   let header0 = Blk.Builder.result header_b in
@@ -711,22 +711,22 @@ let mk_l39b5_loop () : sub term * tid =
   let v = Var.create ~is_virtual:false ~fresh:false "l39b5_v" (Type.Imm 32) in
   let u = Var.create ~is_virtual:false ~fresh:false "l39b5_u" (Type.Imm 32) in
   let cf = v1 "CF" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let entry_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let header_b = Blk.Builder.create () in
   let exit_b = Blk.Builder.create () in
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (w32 0), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32)));
   (* Prologue def: RBP copies RSP. *)
   Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def header_b (Def.create v (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
-  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, Bil.Var v, Bil.Int (w32 3))));
+  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 3)))));
   Blk.Builder.add_def body_b (Def.create u (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def body_b
     (Def.create m
        (Bil.Store
-          (Bil.Var m, addr_e, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (w32 1)), LittleEndian, `r32)));
+          (Bil.Var m, addr_e, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (Cbat_word.to_word (w32 1))), LittleEndian, `r32)));
   let entry0 = Blk.Builder.result entry_b in
   let body0 = Blk.Builder.result body_b in
   let header0 = Blk.Builder.result header_b in
@@ -758,7 +758,7 @@ let mk_l39b5_loop () : sub term * tid =
 let l39_cell_of (st : AI.t) : Ws.t =
   let m = memv "l39_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -770,10 +770,10 @@ let l39_run (sub : sub term) (body_tid : tid) : Ws.t =
   iter_cell_of sub sol body_tid l39_cell_of
 
 (* Finite non-top non-bottom, max <= maxv. *)
-let l39_bounded (ws : Ws.t) (maxv : word) : bool =
+let l39_bounded (ws : Ws.t) (maxv : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Word.( <= ) w maxv | None -> false
+  && match Ws.max_elem ws with Some w -> Cbat_word.(<=) w maxv | None -> false
 
 (* L-E1: ON-path matched-pair RSP restoration (RSP := RSP + 8 on return). *)
 
@@ -785,10 +785,10 @@ let mk_e1_loop_sub () : sub term * tid * var =
   let header_b = Blk.Builder.create () in
   let body_b = Blk.Builder.create () in
   let cont_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create rsp (Bil.Int (w64 0x1000)));
-  Blk.Builder.add_def body_b (Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))));
+  Blk.Builder.add_def entry_b (Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x1000))));
+  Blk.Builder.add_def body_b (Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))));
   Blk.Builder.add_def body_b
-    (Def.create m (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Int (w64 0xdead), LittleEndian, `r64)));
+    (Def.create m (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0xdead)), LittleEndian, `r64)));
   let entry0 = Blk.Builder.result entry_b in
   let header0 = Blk.Builder.result header_b in
   let body0 = Blk.Builder.result body_b in
@@ -803,7 +803,7 @@ let mk_e1_loop_sub () : sub term * tid * var =
   let body_b = Blk.Builder.init ~copy_defs:true body0 in
   Blk.Builder.add_jmp body_b
     (Jmp.create
-       (Call (Call.create ~return:(Label.direct cont_tid) ~target:(Indirect (Bil.Int (w64 0))) ())));
+       (Call (Call.create ~return:(Label.direct cont_tid) ~target:(Indirect (Bil.Int (Cbat_word.to_word (w64 0)))) ())));
   let cont_b = Blk.Builder.init ~copy_defs:true cont0 in
   Blk.Builder.add_jmp cont_b (Jmp.create (Goto (Direct header_tid)));
   let entry = Blk.Builder.result entry_b in
@@ -824,17 +824,17 @@ let mk_e1_flat_sub () : sub term * tid * var =
   let m = memv "e1_m" in
   let entry_b = Blk.Builder.create () in
   let post_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create rsp (Bil.Int (w64 0x2000)));
-  Blk.Builder.add_def entry_b (Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (w64 8))));
+  Blk.Builder.add_def entry_b (Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x2000))));
+  Blk.Builder.add_def entry_b (Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))));
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Int (w64 0xcafe), LittleEndian, `r64)));
+    (Def.create m (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0xcafe)), LittleEndian, `r64)));
   let entry0 = Blk.Builder.result entry_b in
   let post0 = Blk.Builder.result post_b in
   let post_tid = Term.tid post0 in
   let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
   Blk.Builder.add_jmp entry_b
     (Jmp.create
-       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Indirect (Bil.Int (w64 0))) ())));
+       (Call (Call.create ~return:(Label.direct post_tid) ~target:(Indirect (Bil.Int (Cbat_word.to_word (w64 0)))) ())));
   let post_b = Blk.Builder.init ~copy_defs:true post0 in
   let entry = Blk.Builder.result entry_b in
   let post = Blk.Builder.result post_b in
@@ -863,7 +863,7 @@ let mk_l6_rbp_loop () : sub term * tid =
   let ofv = v1 "OF" in
   let sf = v1 "SF" in
   let zf = v1 "ZF" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
   let c = w32 63 in
   let cond = l39_jle zf sf ofv in
@@ -875,10 +875,10 @@ let mk_l6_rbp_loop () : sub term * tid =
   let epilogue_b = Blk.Builder.create () in
   Blk.Builder.add_def prologue_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (w32 0), LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32)));
   (* Canonical -O0 cmp emission, RBP-based. *)
-  Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int c)));
-  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, load_e, Bil.Int c)));
+  Blk.Builder.add_def header_b (Def.create t (Bil.BinOp (Bil.MINUS, load_e, Bil.Int (Cbat_word.to_word c))));
+  Blk.Builder.add_def header_b (Def.create cf (Bil.BinOp (Bil.LT, load_e, Bil.Int (Cbat_word.to_word c))));
   Blk.Builder.add_def header_b
     (Def.create ofv
        (Bil.Cast
@@ -886,16 +886,16 @@ let mk_l6_rbp_loop () : sub term * tid =
             1,
             Bil.BinOp
               ( Bil.AND,
-                Bil.BinOp (Bil.XOR, load_e, Bil.Int c),
+                Bil.BinOp (Bil.XOR, load_e, Bil.Int (Cbat_word.to_word c)),
                 Bil.BinOp (Bil.XOR, load_e, Bil.Var t) ) )));
   Blk.Builder.add_def header_b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
   Blk.Builder.add_def header_b
-    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Word.bitwidth c)), Bil.Var t)));
+    (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Cbat_word.bitwidth c)), Bil.Var t)));
   Blk.Builder.add_def body_b (Def.create u (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)));
   Blk.Builder.add_def body_b
     (Def.create m
        (Bil.Store
-          (Bil.Var m, addr_e, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (w32 1)), LittleEndian, `r32)));
+          (Bil.Var m, addr_e, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (Cbat_word.to_word (w32 1))), LittleEndian, `r32)));
   (* Dead epilogue def: RBP := mem[RSP]. *)
   Blk.Builder.add_def epilogue_b
     (Def.create rbp (Bil.Load (Bil.Var m, Bil.Var rsp, LittleEndian, `r64)));
@@ -942,7 +942,7 @@ let mk_l6_rbp_loop () : sub term * tid =
 let l6_cell_of (st : AI.t) : Ws.t =
   let m = memv "l6_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -956,7 +956,7 @@ let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
 (* Refactor-2 new-shape pins: inline-arithmetic, NOT-edge, const-first flip, nested BinOp. *)
 
 (* RBP-anchored ON-path fixture with optional two-path seed. Returns (sub, body tid). *)
-let mk_r2_loop ~(seed : word) ~(seed2 : word option) ~(body_op : Bil.binop) ~(body_k : word)
+let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : Bil.binop) ~(body_k : Cbat_word.t)
     ~(mk_cond : t:var -> exp) : sub term * tid =
   let m = memv "r2_m" in
   let rsp = v64 "RSP" in
@@ -965,7 +965,7 @@ let mk_r2_loop ~(seed : word) ~(seed2 : word option) ~(body_op : Bil.binop) ~(bo
   let u = Var.create ~is_virtual:false ~fresh:false "r2_u" (Type.Imm 32) in
   let f = v1 "r2_f" in
   let g = v1 "r2_g" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
   let prologue_b = Blk.Builder.create () in
   let split_b = Blk.Builder.create () in
@@ -977,18 +977,18 @@ let mk_r2_loop ~(seed : word) ~(seed2 : word option) ~(body_op : Bil.binop) ~(bo
   Blk.Builder.add_def prologue_b (Def.create rbp (Bil.Var rsp));
   Blk.Builder.add_def split_b (Def.create f (Bil.Var g));
   Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int seed, LittleEndian, `r32)));
+    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word seed), LittleEndian, `r32)));
   (match seed2 with
   | Some s2 ->
       Blk.Builder.add_def entry2_b
-        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int s2, LittleEndian, `r32)))
+        (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word s2), LittleEndian, `r32)))
   | None -> ());
   Blk.Builder.add_def header_b (Def.create t load_e);
   Blk.Builder.add_def body_b (Def.create u load_e);
   Blk.Builder.add_def body_b
     (Def.create m
        (Bil.Store
-          (Bil.Var m, addr_e, Bil.BinOp (body_op, Bil.Var u, Bil.Int body_k), LittleEndian, `r32)));
+          (Bil.Var m, addr_e, Bil.BinOp (body_op, Bil.Var u, Bil.Int (Cbat_word.to_word body_k)), LittleEndian, `r32)));
   let prologue0 = Blk.Builder.result prologue_b in
   let split0 = Blk.Builder.result split_b in
   let entry0 = Blk.Builder.result entry_b in
@@ -1050,7 +1050,7 @@ let mk_r2_loop ~(seed : word) ~(seed2 : word option) ~(body_op : Bil.binop) ~(bo
 let r2_cell_of (st : AI.t) : Ws.t =
   let m = memv "r2_m" in
   let rbp = v64 "RBP" in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (w64 8)) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
   match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
@@ -1069,7 +1069,7 @@ let run () =
         (Bil.BinOp
            ( Bil.PLUS,
              Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
-             Bil.Int (w32 1) ))
+             Bil.Int (Cbat_word.to_word (w32 1)) ))
   in
   check
     "L3a-1: backward guard refinement through PLUS — the cell at RBP-8 is bounded (⊆ [0,9]; the \
@@ -1082,7 +1082,7 @@ let run () =
         (Bil.BinOp
            ( Bil.MINUS,
              Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
-             Bil.Int (w32 1) ))
+             Bil.Int (Cbat_word.to_word (w32 1)) ))
   in
   check
     "L3a-2: backward guard refinement through MINUS — the cell at RBP-8 is bounded (⊆ [1,10]; the \
@@ -1095,7 +1095,7 @@ let run () =
         (Bil.BinOp
            ( Bil.LSHIFT,
              Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
-             Bil.Int (w32 2) ))
+             Bil.Int (Cbat_word.to_word (w32 2)) ))
   in
   check
     "L3a-3: backward guard refinement through LSHIFT-const — the cell at RBP-8 is bounded (⊆ \
@@ -1108,7 +1108,7 @@ let run () =
         (Bil.BinOp
            ( Bil.TIMES,
              Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
-             Bil.Int (w32 2) ))
+             Bil.Int (Cbat_word.to_word (w32 2)) ))
   in
   check
     "L3a-4: the TIMES rule over an unbounded operand is the identity (sound — the wrapped classes \
@@ -1121,7 +1121,7 @@ let run () =
         (Bil.BinOp
            ( Bil.PLUS,
              Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
-             Bil.Int (w32 1) ))
+             Bil.Int (Cbat_word.to_word (w32 1)) ))
   in
   check
     "L3a-5: a NEQ guard is doubt (constraint_of_compare None) — no walk, the cell at RBP-8 stays \
@@ -1141,7 +1141,7 @@ let run () =
     (l3c1_bounded cell1 (w32 9));
   (* L3c1-2: later def of the operand clears the record. *)
   let t = Var.create ~is_virtual:false ~fresh:false "l3c1_t" (Type.Imm 32) in
-  let sub2, body2, _ = mk_l3c1_loop ~extra_header_defs:[ Def.create t (Bil.Int (w32 42)) ] in
+  let sub2, body2, _ = mk_l3c1_loop ~extra_header_defs:[ Def.create t (Bil.Int (Cbat_word.to_word (w32 42))) ] in
   let ctx2 = Program.create ~subs:[ sub2 ] () in
   let sol2 = Vsa.static_graph_vsa [] ctx2 sub2 (Vsa.init_sol ~entry:(anchored_entry ()) sub2) in
   let cell2 = l3c1_cell_of m (iter_state_of sub2 sol2 body2) in
@@ -1166,15 +1166,15 @@ let run () =
   let rsp4 = v64 "RSP" in
   let t4 = Var.create ~is_virtual:false ~fresh:false "l3c1_t4" (Type.Imm 32) in
   let v4 = Var.create ~is_virtual:false ~fresh:false "l3c1_v4" (Type.Imm 32) in
-  let addr4 = Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (w64 8)) in
-  let cond4 = Bil.BinOp (Bil.LT, Bil.Var v4, Bil.Int (w32 10)) in
+  let addr4 = Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond4 = Bil.BinOp (Bil.LT, Bil.Var v4, Bil.Int (Cbat_word.to_word (w32 10))) in
   let e4 = Blk.Builder.create () in
   let b4 = Blk.Builder.create () in
   let h4 = Blk.Builder.create () in
   let x4 = Blk.Builder.create () in
   Blk.Builder.add_def h4 (Def.create t4 (Bil.Load (Bil.Var m4, addr4, LittleEndian, `r32)));
-  Blk.Builder.add_def h4 (Def.create v4 (Bil.BinOp (Bil.MINUS, Bil.Var t4, Bil.Int (w32 1))));
-  Blk.Builder.add_def b4 (Def.create v4 (Bil.BinOp (Bil.PLUS, Bil.Var t4, Bil.Int (w32 1))));
+  Blk.Builder.add_def h4 (Def.create v4 (Bil.BinOp (Bil.MINUS, Bil.Var t4, Bil.Int (Cbat_word.to_word (w32 1)))));
+  Blk.Builder.add_def b4 (Def.create v4 (Bil.BinOp (Bil.PLUS, Bil.Var t4, Bil.Int (Cbat_word.to_word (w32 1)))));
   let e0 = Blk.Builder.result e4 in
   let b0 = Blk.Builder.result b4 in
   let h0 = Blk.Builder.result h4 in
@@ -1257,7 +1257,7 @@ let run () =
      (top) still refines the cell to the two-piece [0, c−1] ∪ [2^31, max] (the gate is removed; no \
      None stop)"
     ((not (Ws.is_top cell2))
-    && match Ws.min_elem cell2 with Some w -> Word.( >= ) w (w32 0) | None -> false);
+    && match Ws.min_elem cell2 with Some w -> Cbat_word.(>=) w (w32 0) | None -> false);
   (* L3c2-3: c < 0 is one interval, no gate. *)
   let sub3, body3 =
     mk_l3c2_loop ~prologue:true ~seed:(Some half) ~cmp:Bil.SLT ~c:m_one ~body_op:Bil.MINUS
@@ -1304,7 +1304,7 @@ let run () =
   let sub1, body1 =
     mk_l3c3_loop
       ~seed:(Some (w32 0))
-      ~chain:(Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (w32 1)))
+      ~chain:(Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 1))))
       ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
   in
   check
@@ -1315,7 +1315,7 @@ let run () =
   let sub2, body2 =
     mk_l3c3_loop
       ~seed:(Some (w32 0))
-      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (w32 8)))
+      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
       ~cmp:Bil.SLT ~c:(w32 80) ~body_k:(w32 4)
   in
   check
@@ -1326,7 +1326,7 @@ let run () =
   let sub3, body3 =
     mk_l3c3_loop
       ~seed:(Some (w32 0))
-      ~chain:(Bil.BinOp (Bil.RSHIFT, Bil.Var t, Bil.Int (w32 2)))
+      ~chain:(Bil.BinOp (Bil.RSHIFT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 2))))
       ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 8)
   in
   check
@@ -1337,7 +1337,7 @@ let run () =
   let sub4a, body4a =
     mk_l3c3_loop
       ~seed:(Some (w32 0))
-      ~chain:(Bil.BinOp (Bil.ARSHIFT, Bil.Var t, Bil.Int (w32 2)))
+      ~chain:(Bil.BinOp (Bil.ARSHIFT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 2))))
       ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 8)
   in
   check
@@ -1347,7 +1347,7 @@ let run () =
   (* L3c3-4b: ARSHIFT on top operand is a sound stop. *)
   let sub4b, body4b =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.ARSHIFT, Bil.Var t, Bil.Int (w32 2)))
+      ~chain:(Bil.BinOp (Bil.ARSHIFT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 2))))
       ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
   in
   check
@@ -1357,7 +1357,7 @@ let run () =
   (* L3c3-5: TIMES k = 0 is a sound stop. *)
   let sub5, body5 =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (w32 0)))
+      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0))))
       ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
   in
   check "L3c3-5: TIMES with k = 0 is a sound stop — the cell at RBP-8 stays top"
@@ -1365,7 +1365,7 @@ let run () =
   (* L3c3-6: TIMES non-divisible EQ singleton is empty — no refinement. *)
   let sub6, body6 =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (w32 8)))
+      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
       ~cmp:Bil.EQ ~c:(w32 5) ~body_k:(w32 4)
   in
   check
@@ -1394,7 +1394,7 @@ let run () =
   let sub3, body3 =
     mk_l3c4_loop
       ~seed:(Some (w32 0))
-      ~chain:(Bil.BinOp (Bil.DIVIDE, Bil.Var t, Bil.Int (w32 2)))
+      ~chain:(Bil.BinOp (Bil.DIVIDE, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 2))))
       ~v_w:32 ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
   in
   check
@@ -1406,7 +1406,7 @@ let run () =
     mk_l3c4_loop
       ~seed:(Some (w32 0))
       ~chain:(Bil.Cast (Bil.HIGH, 8, Bil.Var t))
-      ~v_w:8 ~cmp:Bil.SLT ~c:(Word.of_int ~width:8 10) ~body_k:(w32 0x10000000)
+      ~v_w:8 ~cmp:Bil.SLT ~c:(Cbat_word.of_int ~width:8 10) ~body_k:(w32 0x10000000)
   in
   check
     "L3c4-4: the HIGH-extract producer row — `v := cast HIGH 8 t; if SLT(v, 10)` — the cell at \
@@ -1415,7 +1415,7 @@ let run () =
   (* L3c4-5: DIVIDE k = 0 is a sound stop. *)
   let sub5, body5 =
     mk_l3c4_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.DIVIDE, Bil.Var t, Bil.Int (w32 0)))
+      ~chain:(Bil.BinOp (Bil.DIVIDE, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0))))
       ~v_w:32 ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
   in
   check "L3c4-5: DIVIDE with k = 0 is a sound stop — no refinement (the cell is not a bounded set)"
@@ -1427,7 +1427,7 @@ let run () =
   (* L3c5-1: const-first guard arm normalizes to const-second. *)
   let sub1, body1 =
     mk_l3c5_loop ~seed:None ~chain:None
-      ~cond:(Bil.BinOp (Bil.EQ, Bil.Int (w32 10), Bil.Var t))
+      ~cond:(Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w32 10)), Bil.Var t))
       ~body_k:(w32 4)
   in
   check
@@ -1437,8 +1437,8 @@ let run () =
   (* L3c5-2: MOD has no closed form — sound stop. *)
   let sub2, body2 =
     mk_l3c5_loop ~seed:None
-      ~chain:(Some (Bil.BinOp (Bil.MOD, Bil.Var t, Bil.Int (w32 8))))
-      ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (w32 10)))
+      ~chain:(Some (Bil.BinOp (Bil.MOD, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8)))))
+      ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 10))))
       ~body_k:(w32 4)
   in
   check
@@ -1449,8 +1449,8 @@ let run () =
   let sub3a, body3a =
     mk_l3c5_loop
       ~seed:(Some (w32 0))
-      ~chain:(Some (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int (w32 0xFFFFFFFF))))
-      ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (w32 10)))
+      ~chain:(Some (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0xFFFFFFFF)))))
+      ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 10))))
       ~body_k:(w32 4)
   in
   check
@@ -1460,8 +1460,8 @@ let run () =
   let sub3b, body3b =
     mk_l3c5_loop
       ~seed:(Some (w32 0))
-      ~chain:(Some (Bil.BinOp (Bil.OR, Bil.Var t, Bil.Int (w32 0))))
-      ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (w32 10)))
+      ~chain:(Some (Bil.BinOp (Bil.OR, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0)))))
+      ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 10))))
       ~body_k:(w32 4)
   in
   check
@@ -1471,7 +1471,7 @@ let run () =
   let m4 = memv "l3c5_m" in
   let rsp4 = v64 "RSP" in
   let t4 = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
-  let addr4 = Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (w64 8)) in
+  let addr4 = Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (Cbat_word.to_word (w64 8))) in
   let e4 = Blk.Builder.create () in
   let h4 = Blk.Builder.create () in
   let x4 = Blk.Builder.create () in
@@ -1517,7 +1517,7 @@ let run () =
      fire)"
     (Clp.equal r1 (Clp.create (w32 0x3F)));
   (* A-2: straddling amount gives non-top non-bottom. *)
-  let amt40 = Clp.create ~width:64 ~step:(w64 1) ~cardn:(W.of_int ~width:65 40) (w64 0) in
+  let amt40 = Clp.create ~width:64 ~step:(w64 1) ~cardn:(Cbat_word.of_int ~width:65 40) (w64 0) in
   let r2 = Clp.rshift (Clp.create (w32 1)) amt40 in
   check
     "A-2: the 252-hit shape (32-bit >> 64-bit [0,40)) — the coerced three-way split yields a \
@@ -1534,14 +1534,14 @@ let run () =
      {all-ones} at 32 bits (the SIGN-extension)"
     (Clp.equal r4 (Clp.create (w32 0xFFFFFFFF)));
   (* A-5: antipodal equal-width overshift image. *)
-  let antipodal = Clp.of_list ~width:64 [ w64 1; W.lshift (w64 1) (w64 63) ] in
+  let antipodal = Clp.of_list ~width:64 [ w64 1; Cbat_word.lshift (w64 1) (w64 63) ] in
   let r5 = Clp.arshift antipodal (Clp.create (w64 70)) in
   check
     "A-5: the antipodal overshift image (64-bit {1, 2^63} arshift {70}) is {0, all-ones} \
      (equal-width path, no coercion)"
-    (W.to_int_exn (Clp.cardinality r5) = 2
+    (Cbat_word.to_int_exn (Clp.cardinality r5) = 2
     && Clp.elem (w64 0) r5
-    && Clp.elem (W.ones 64) r5
+    && Clp.elem (Cbat_word.ones 64) r5
     && (not (Clp.elem (w64 1) r5))
     && not (Clp.is_top r5));
   ())
@@ -1571,7 +1571,7 @@ let run () =
      the exit view's cell carries the exit-iteration value (8 survives)"
     ((not (Ws.is_top icell))
     && (not (Ws.is_bottom icell))
-    && (match Ws.max_elem icell with Some w -> Word.( <= ) w (w32 7) | None -> false)
+    && (match Ws.max_elem icell with Some w -> Cbat_word.(<=) w (w32 7) | None -> false)
     && (not (Ws.is_top ecell))
     && Ws.elem (w32 8) ecell);
   (* S-4: +1-adjacent equal-value cells merge to one hull. *)
@@ -1599,7 +1599,7 @@ let run () =
   let entry_b = Blk.Builder.create () in
   let blk_b = Blk.Builder.create () in
   let cont_b = Blk.Builder.create () in
-  Blk.Builder.add_def blk_b (Def.create rdi (Bil.Int (w64 42)));
+  Blk.Builder.add_def blk_b (Def.create rdi (Bil.Int (Cbat_word.to_word (w64 42))));
   let entry0 = Blk.Builder.result entry_b in
   let blk0 = Blk.Builder.result blk_b in
   let cont0 = Blk.Builder.result cont_b in
@@ -1663,7 +1663,7 @@ let run () =
      min_elem >= 4 and is not top"
     ((not (Ws.is_top cell3))
     && (not (Ws.is_bottom cell3))
-    && match Ws.min_elem cell3 with Some w -> Word.( >= ) w (w32 4) | None -> false);
+    && match Ws.min_elem cell3 with Some w -> Cbat_word.(>=) w (w32 4) | None -> false);
   (* L-B4: second cmp makes the gate reject the mixed group. *)
   let sub4, body4 =
     let f = Var.create ~is_virtual:false ~fresh:false "l39_f" (Type.Imm 32) in
@@ -1675,21 +1675,21 @@ let run () =
       ~mk_cond:(fun ~cf:_ ~ofv:_ ~sf:_ ~zf:_ -> l39_jle zf2 sf2 of2)
       ~extra_header_defs:(fun m ->
         let rsp2 = v64 "RSP" in
-        let addr2 = Bil.BinOp (Bil.MINUS, Bil.Var rsp2, Bil.Int (w64 16)) in
+        let addr2 = Bil.BinOp (Bil.MINUS, Bil.Var rsp2, Bil.Int (Cbat_word.to_word (w64 16))) in
         let f_load = Bil.Load (Bil.Var m, addr2, LittleEndian, `r32) in
         [
           Def.create f f_load;
-          Def.create t2 (Bil.BinOp (Bil.MINUS, f_load, Bil.Int (w32 5)));
+          Def.create t2 (Bil.BinOp (Bil.MINUS, f_load, Bil.Int (Cbat_word.to_word (w32 5))));
           Def.create of2
             (Bil.Cast
                ( Bil.HIGH,
                  1,
                  Bil.BinOp
                    ( Bil.AND,
-                     Bil.BinOp (Bil.XOR, Bil.Var f, Bil.Int (w32 5)),
+                     Bil.BinOp (Bil.XOR, Bil.Var f, Bil.Int (Cbat_word.to_word (w32 5))),
                      Bil.BinOp (Bil.XOR, Bil.Var f, Bil.Var t2) ) ));
           Def.create sf2 (Bil.Cast (Bil.HIGH, 1, Bil.Var t2));
-          Def.create zf2 (Bil.BinOp (Bil.EQ, Bil.Int (w32 0), Bil.Var t2));
+          Def.create zf2 (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w32 0)), Bil.Var t2));
         ])
   in
   check
@@ -1749,7 +1749,7 @@ let run () =
 (  (* R2-1: inline-arithmetic chain refines to the 64-element hull. *)
   let sub1, body1 =
     mk_r2_loop ~seed:(w32 0) ~seed2:None ~body_op:Bil.PLUS ~body_k:(w32 1) ~mk_cond:(fun ~t ->
-        Bil.BinOp (Bil.LT, Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (w32 1)), Bil.Int (w32 64)))
+        Bil.BinOp (Bil.LT, Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 1))), Bil.Int (Cbat_word.to_word (w32 64))))
   in
   let cell1 = r2_run sub1 body1 in
   check
@@ -1760,14 +1760,14 @@ let run () =
      middle value — FAILS pre-refactor: the chain unrefined, the cell stays the full domain/top)"
     ((not (Ws.is_top cell1))
     && (not (Ws.is_bottom cell1))
-    && Word.( <= ) (Ws.cardinality cell1) (Word.of_int ~width:33 64)
+    && Cbat_word.(<=) (Ws.cardinality cell1) (Cbat_word.of_int ~width:33 64)
     && not (Ws.elem (w32 100) cell1));
   (* R2-2: NOT-edge keeps env — cell not narrowed to TRUE-edge window. *)
   let sub2, body2 =
     mk_r2_loop ~seed:(w32 3)
       ~seed2:(Some (w32 8))
       ~body_op:Bil.PLUS ~body_k:(w32 1)
-      ~mk_cond:(fun ~t -> Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (w32 5))))
+      ~mk_cond:(fun ~t -> Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 5)))))
   in
   let cell2 = r2_run sub2 body2 in
   check
@@ -1779,7 +1779,7 @@ let run () =
   (* R2-3: const-first LT flip — decrementing counter converges in [11, 2^w). *)
   let sub3, body3 =
     mk_r2_loop ~seed:(w32 20) ~seed2:None ~body_op:Bil.MINUS ~body_k:(w32 1) ~mk_cond:(fun ~t ->
-        Bil.BinOp (Bil.LT, Bil.Int (w32 10), Bil.Var t))
+        Bil.BinOp (Bil.LT, Bil.Int (Cbat_word.to_word (w32 10)), Bil.Var t))
   in
   let cell3 = r2_run sub3 body3 in
   check
@@ -1790,11 +1790,11 @@ let run () =
      a sound stop), so the cell goes top"
     ((not (Ws.is_top cell3))
     && (not (Ws.is_bottom cell3))
-    && match Ws.min_elem cell3 with Some w -> Word.( >= ) w (w32 11) | None -> false);
+    && match Ws.min_elem cell3 with Some w -> Cbat_word.(>=) w (w32 11) | None -> false);
   (* R2-4: nested TIMES chain — inline walk bounds the operand, exact slice fires. *)
   let sub4, body4 =
     mk_r2_loop ~seed:(w32 63) ~seed2:None ~body_op:Bil.PLUS ~body_k:(w32 1) ~mk_cond:(fun ~t ->
-        Bil.BinOp (Bil.LT, Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (w32 8)), Bil.Int (w32 512)))
+        Bil.BinOp (Bil.LT, Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))), Bil.Int (Cbat_word.to_word (w32 512))))
   in
   check
     "R2-4 (migrated, single-pass §2): the NESTED-BinOp chain `(t * 8) < 512` — the inline walk \
@@ -1812,7 +1812,7 @@ let run () =
   (* M5-1: MINUS wrap hull. *)
   let sub1, body1 =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.MINUS, Bil.Var t, Bil.Int (w32 0xFFFFFFFF)))
+      ~chain:(Bil.BinOp (Bil.MINUS, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0xFFFFFFFF))))
       ~cmp:Bil.LT ~c:(w32 5) ~body_k:(w32 4)
   in
   let cell1 = l3c3_run sub1 body1 in
@@ -1821,14 +1821,14 @@ let run () =
      {0xFFFFFFFF, 0..3} (cardn 5; 0xFFFFFFFF ∈; 0 ∈; the wrap was handled, not emptied)"
     ((not (Ws.is_top cell1))
     && (not (Ws.is_bottom cell1))
-    && Word.( = ) (Ws.cardinality cell1) (Word.of_int ~width:33 5)
+    && Cbat_word.(=) (Ws.cardinality cell1) (Cbat_word.of_int ~width:33 5)
     && Ws.elem (w32 0xFFFFFFFF) cell1
     && Ws.elem (w32 0) cell1
     && not (Ws.elem (w32 4) cell1));
   (* M5-2: TIMES k = 0 is the identity. *)
   let sub2, body2 =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (w32 0)))
+      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0))))
       ~cmp:Bil.EQ ~c:(w32 0) ~body_k:(w32 4)
   in
   let cell2 = l3c3_run sub2 body2 in
@@ -1839,7 +1839,7 @@ let run () =
   (* M5-3: XOR-~0 bijection. *)
   let sub3, body3 =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.XOR, Bil.Var t, Bil.Int (w32 0xFFFFFFFF)))
+      ~chain:(Bil.BinOp (Bil.XOR, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0xFFFFFFFF))))
       ~cmp:Bil.EQ ~c:(w32 5) ~body_k:(w32 4)
   in
   let cell3 = l3c3_run sub3 body3 in
@@ -1852,7 +1852,7 @@ let run () =
   let sub4, body4 =
     mk_l3c4_loop ~seed:None
       ~chain:(Bil.Cast (Bil.LOW, 8, Bil.Var t4))
-      ~v_w:8 ~cmp:Bil.EQ ~c:(Word.of_int ~width:8 5) ~body_k:(w32 4)
+      ~v_w:8 ~cmp:Bil.EQ ~c:(Cbat_word.of_int ~width:8 5) ~body_k:(w32 4)
   in
   let cell4 = l3c4_run sub4 body4 in
   check
@@ -1863,11 +1863,11 @@ let run () =
     && Ws.elem (w32 5) cell4
     && Ws.elem (w32 0x105) cell4
     && (not (Ws.elem (w32 4) cell4))
-    && match Ws.max_elem cell4 with Some w -> Word.( <= ) w (w32 0xFFFFFF05) | None -> false);
+    && match Ws.max_elem cell4 with Some w -> Cbat_word.(<=) w (w32 0xFFFFFF05) | None -> false);
   (* M5-5: signed-division rule. *)
   let sub5, body5 =
     mk_l3c3_loop ~seed:None
-      ~chain:(Bil.BinOp (Bil.SDIVIDE, Bil.Var t, Bil.Int (w32 2)))
+      ~chain:(Bil.BinOp (Bil.SDIVIDE, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 2))))
       ~cmp:Bil.EQ ~c:(w32 0xFFFFFFFD) ~body_k:(w32 4)
   in
   let cell5 = l3c3_run sub5 body5 in

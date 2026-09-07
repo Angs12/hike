@@ -15,7 +15,7 @@ open Bap.Std
 open Bin_prot.Std
 include Cbat_vsa_utils
 
-module W = Word
+module W = Cbat_word
 module Option = Core_kernel.Option
 module Sexp = Core_kernel.Sexp
 module List = Core_kernel.List
@@ -39,19 +39,21 @@ type direction =
   | Circular
 [@@deriving bin_io, sexp, compare]
 
+type word = W.t
+
 (* {base + n*step | 0 <= n < cardn}. *)
 type t = {
-  base : word;
-  step : word;
-  cardn : word;
+  base : W.t;
+  step : W.t;
+  cardn : W.t;
   dir : direction;
 }
 [@@deriving bin_io, sexp, compare]
 
 
-let base_of (p : t) : word = p.base
-let step_of (p : t) : word = p.step
-let cardn_of (p : t) : word = p.cardn
+let base_of (p : t) : W.t = p.base
+let step_of (p : t) : W.t = p.step
+let cardn_of (p : t) : W.t = p.cardn
 let dir_of (p : t) : direction = p.dir
 
 let is_ascending (p : t) : bool =
@@ -68,7 +70,7 @@ let is_infinite (p : t) : bool =
 
 (* CLP from base stepping by step. *)
 
-let fit_to (width : int) (w : word) : word =
+let fit_to (width : int) (w : W.t) : W.t =
   if W.bitwidth w = width then w else W.extract_exn ~hi:(width - 1) w
 
 let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
@@ -160,7 +162,7 @@ let create_descending ~width ~base ~step : t =
     else if W.equal cardn (dom_size ~width:(width + 1) width) then top width
     else { base = base'; step = step'; cardn; dir = Descending }
 
-let cardn_from_bounds base step e : word =
+let cardn_from_bounds base step e : W.t =
   let width = W.bitwidth base in
   assert(W.bitwidth step = width);
   
@@ -170,18 +172,18 @@ let cardn_from_bounds base step e : word =
     W.succ (W.extract_exn ~hi:width div_by_step)
 
 (* Step-1 CLP [lo, hi]; wrapped pair is circular. *)
-let interval ~(width : int) (lo : word) (hi : word) : t =
+let interval ~(width : int) (lo : W.t) (hi : W.t) : t =
   create ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
 
 
 
 
-(* Cardinality as a (width+1)-bit word. *)
-let cardinality (p : t) : word = cardn_of p
+(* Cardinality as a (width+1)-bit W.t. *)
+let cardinality (p : t) : W.t = cardn_of p
 
 (* Last point; meaningless for infinite CLPs. *)
-let finite_end (p : t) : word option =
+let finite_end (p : t) : W.t option =
   let width = bitwidth p in
   let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
   if W.is_zero (cardn_of p) then None
@@ -195,7 +197,7 @@ let lnot (p : t) : t =
   | Some e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p)
 
 
-let iter (p : t) : word list =
+let iter (p : t) : W.t list =
   let rec iter_acc b s n acc =
     if W.is_zero n then acc
     else let n' = W.pred n in
@@ -203,7 +205,7 @@ let iter (p : t) : word list =
   iter_acc (base_of p) (step_of p) (cardn_of p) []
 
 (* Closest element at or below i. *)
-let nearest_pred (i : word) (p : t) : word option =
+let nearest_pred (i : W.t) (p : t) : W.t option =
   assert(bitwidth p = W.bitwidth i);
   let open Monads.Std.Monad.Option.Syntax in
   finite_end p >>= fun e ->
@@ -217,20 +219,20 @@ let nearest_pred (i : word) (p : t) : word option =
       !!(W.sub i rm)
 
 
-let nearest_inf_pred (w : word) (base : word) (step : word) : word =
+let nearest_inf_pred (w : W.t) (base : W.t) (step : W.t) : W.t =
   if W.is_zero step then base else
     let diff = W.sub w base in
     let rm = W.modulo diff step in
     W.sub w rm
 
-let nearest_succ (i : word) (p : t) : word option =
+let nearest_succ (i : W.t) (p : t) : W.t option =
   Option.map ~f:W.lnot (nearest_pred (W.lnot i) (lnot p))
 
 
-let nearest_inf_succ (w : word) (base : word) (step : word) : word =
+let nearest_inf_succ (w : W.t) (base : W.t) (step : W.t) : W.t =
   W.lnot (nearest_inf_pred (W.lnot w) (W.lnot base) step)
 
-let max_elem (p : t) : word option =
+let max_elem (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Finite ->
@@ -246,7 +248,7 @@ let max_elem (p : t) : word option =
     let max_wd = W.ones (bitwidth p) in
     nearest_pred max_wd p
 
-let min_elem (p : t) : word option =
+let min_elem (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Finite ->
@@ -260,20 +262,20 @@ let min_elem (p : t) : word option =
     nearest_succ min_wd p
 
 (* Max signed element. *)
-let max_elem_signed (p : t) : word option =
+let max_elem_signed (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Descending -> Some p.base
   | _ -> nearest_pred (W.pred (half (bitwidth p))) p
 
 (* Min signed element. *)
-let min_elem_signed (p : t) : word option =
+let min_elem_signed (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Ascending -> Some p.base
   | _ -> nearest_succ (half (bitwidth p)) p
 
-let splits_by (p : t) (w : word) : bool =
+let splits_by (p : t) (w : W.t) : bool =
   let divides a b = W.is_zero (W.modulo b a) in
   let open Monads.Std.Monad.Option.Syntax in
   Option.value ~default:true begin
@@ -288,7 +290,7 @@ let splits_by (p : t) (w : word) : bool =
   end
 
 (* Membership. *)
-let elem (i : word) (p : t) : bool =
+let elem (i : W.t) (p : t) : bool =
   assert (W.bitwidth i = bitwidth p);
   match nearest_pred i p with
   | None -> false
@@ -305,8 +307,8 @@ let equal (p1 : t) (p2 : t) : bool =
   else p1 = p2
 
 (* Rebase onto extrema interval. *)
-let unwrap_with ~(default : unit -> t) ~(min : t -> word option)
-    ~(max : t -> word option) (p : t) : t =
+let unwrap_with ~(default : unit -> t) ~(min : t -> W.t option)
+    ~(max : t -> W.t option) (p : t) : t =
   let open Monads.Std.Monad.Option.Syntax in
   match begin
     min p >>= fun base ->
@@ -326,7 +328,7 @@ let unwrap_signed (p : t) : t =
     ~min:min_elem_signed ~max:max_elem_signed p
 
 (* Smallest circular hull of two intervals. *)
-let interval_union (a1,b1) (a2,b2) : (word * word) =
+let interval_union (a1,b1) (a2,b2) : (W.t * W.t) =
   let szInt = W.bitwidth a1 in
   
   let b1' = W.sub b1 a1 in
@@ -371,7 +373,7 @@ let translate (p : t) i : t =
       infinite (new_base, step_of p)
 
 (* Largest step covering both progressions. *)
-let common_step (b1,s1) (b2,s2) : word =
+let common_step (b1,s1) (b2,s2) : W.t =
   let bDiff = if W.(>) b1 b2 then W.sub b1 b2 else W.sub b2 b1 in
   if W.is_zero s1 then bounded_gcd s2 bDiff
   else if W.is_zero s2 then bounded_gcd s1 bDiff
@@ -684,14 +686,14 @@ let diff (p1 : t) (p2 : t) : t =
             match min_elem i with
             | Some i_lo when W.(=) i_lo p1.base ->
               let new_base = W.add i_end (step_of p1) in
-              if Word.(<) new_base i_end then bottom (bitwidth p1)
+              if W.(<) new_base i_end then bottom (bitwidth p1)
               else create_ascending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
             | _ -> p1
           else if is_descending p1 then
             match min_elem i with
             | Some i_lo when W.(=) i_end p1.base ->
               let new_base = W.sub i_lo (step_of p1) in
-              if Word.(>) new_base i_lo then bottom (bitwidth p1)
+              if W.(>) new_base i_lo then bottom (bitwidth p1)
               else create_descending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
             | _ -> p1
           else if is_circular p1 then
@@ -829,7 +831,7 @@ let mul (p1 : t) (p2 : t) : t =
 
 
 
-let lead_1_bit_run (w : word) ~hi ~lo : int =
+let lead_1_bit_run (w : W.t) ~hi ~lo : int =
   let rec lead_help (hi : int) (lo : int) : int =
     if hi = lo then hi else
     let mid = (hi + lo) / 2 in
@@ -939,7 +941,7 @@ let logand (p1 : t) (p2 : t) : t =
         let mask = if l_s_b >= range_sep then W.zero sz
               else let ones = W.ones (range_sep - l_s_b) in
                 let sized_ones = W.extract_exn ~hi:(sz - 1) ones in
-                Word.lshift sized_ones (W.of_int ~width:sz l_s_b) in
+                W.lshift sized_ones (W.of_int ~width:sz l_s_b) in
         let safe_lower_bound =
           W.logand min_elem_p1 min_elem_p2 |> W.logand (W.lnot mask) in
         let safe_upper_bound = W.logand max_elem_p1 max_elem_p2 |>
@@ -1000,7 +1002,7 @@ let overshift_value (p : t) : t =
   | _ -> overshift_sign_extend sz
 
 (* Straddling amounts cap below the width. *)
-let cap_amount (p2 : t) (cap : word) (min_p2 : word) (e2 : word) : t list =
+let cap_amount (p2 : t) (cap : W.t) (min_p2 : W.t) (e2 : W.t) : t list =
   let sz2 = bitwidth p2 in
   let part ~step lo hi =
     if W.(>) lo hi then []
@@ -1021,7 +1023,7 @@ let cap_amount (p2 : t) (cap : word) (min_p2 : word) (e2 : word) : t list =
 
 (* Overshift: exact, overshifted, straddling. *)
 let split_shift ~(sz1 : int) ~(overshift : t)
-    ~(exact : t -> word -> word -> t) (p2 : t) : t option =
+    ~(exact : t -> W.t -> W.t -> t) (p2 : t) : t option =
   let open Monads.Std.Monad.Option.Syntax in
   min_elem p2 >>= fun min_p2 ->
   max_elem p2 >>= fun max_p2 ->
@@ -1050,7 +1052,7 @@ let lshift (p1 : t) (p2 : t) : t =
   (match begin
     finite_end p1 >>= fun e1 ->
     (* Exact path per amount part. *)
-    let exact_path (p2 : t) (min_p2 : word) (max_p2 : word) : t =
+    let exact_path (p2 : t) (min_p2 : W.t) (max_p2 : W.t) : t =
       let max_p2_int = W.to_int_exn max_p2 in
       let base = W.lshift (base_of p1) min_p2 in
       let step = if is_one (cardn_of p2)
@@ -1104,7 +1106,7 @@ let rec rshift (p1 : t) (p2 : t) : t =
   (match begin
     finite_end p1 >>= fun e1 ->
     (* Exact path per capped part. *)
-    let exact_path (p2 : t) (e2 : word) : t =
+    let exact_path (p2 : t) (e2 : W.t) : t =
       let base = W.rshift (base_of p1) e2 in
       if W.is_one (cardn_of p1) && W.is_one (cardn_of p2)
       then create base
@@ -1158,7 +1160,7 @@ let rec arshift (p1 : t) (p2 : t) : t =
   (match begin
     finite_end p1 >>= fun e1 ->
     (* Exact path per capped part. *)
-    let exact_path (p2 : t) (e2 : word) : t =
+    let exact_path (p2 : t) (e2 : W.t) : t =
       if W.is_one (cardn_of p1) && W.is_one (cardn_of p2)
       then
         let base = W.arshift (W.signed (base_of p1)) (base_of p2) in
@@ -1461,7 +1463,7 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
           let extrap_lo = match lo_growth with
             | None -> lo2
             | Some g ->
-              let steps_w = Word.of_int ~width steps in
+              let steps_w = W.of_int ~width steps in
               let delta = W.mul g steps_w in
               let v = W.sub lo2 delta in
               let c = nearest_inf_succ v (base_of p2) step in
@@ -1470,12 +1472,12 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
           let extrap_hi = match hi_growth with
             | None -> hi2
             | Some g ->
-              let steps_w = Word.of_int ~width steps in
+              let steps_w = W.of_int ~width steps in
               let delta = W.mul g steps_w in
               let v = W.add hi2 delta in
               if W.compare v hi2 < 0 then (* Overflow wraps. *)
                 (* Escaping translation goes infinite. *)
-                Word.ones width
+                W.ones width
               else
                 let f = nearest_inf_pred v (base_of p2) step in
                 if W.compare f hi2 < 0 then hi2 else f
@@ -1529,14 +1531,14 @@ let t_of_sexp : Sexp.t -> t = function
     let width = int_of_string s in
     bottom width
   | Sexp.List [be] ->
-    let base = Word.t_of_sexp be in
+    let base = W.of_word (Word.t_of_sexp be) in
     create base
   | Sexp.List [be; ne as ee]
   | Sexp.List [be; ne; Sexp.Atom "..."; ee] ->
-    let base = Word.t_of_sexp be in
-    let next = Word.t_of_sexp ne in
-    let e = Word.t_of_sexp ee in
-    let step = Word.sub next base in
+    let base = W.of_word (Word.t_of_sexp be) in
+    let next = W.of_word (Word.t_of_sexp ne) in
+    let e = W.of_word (Word.t_of_sexp ee) in
+    let step = W.sub next base in
     let cardn = cardn_from_bounds base step e in
     create base ~step ~cardn
   | Sexp.List _
