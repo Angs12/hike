@@ -2708,44 +2708,12 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             (* Context threads through transfers. *)
             let rc = !rc_cell in
              let res = Stages.time `Denote (fun () ->
-               (* Memo handles validity. *)
-               let version = Cbat_runctx.ver_of rc in
-               match Cbat_runctx.Transfer_memo.find ~version rc.rc_state.fs_out_cache p v with
-               | Some (hit_res, fired) ->
-                 
-                 (if Option.is_some head_opt && fired then
-                    match Program.lookup blk_t ctx p with
-                    | Some _pb ->
-                      ignore (denote_block_with_stores ~preserved
-                                ~defs ~stores ~sub:(Some s)
-                                ~rctx:rc
-                                ~no_walk:true ctx
-                                ~source:p p_entry ~target:v)
-                    | None -> ());
-
-                 hit_res
-               | None ->
-                 (* Latch reports acquisition. *)
-                 let flatch = Cbat_landmarks.start_fired_latch () in
-                 let (res, rc', reads) =
-                   denote_block_with_stores ~preserved ~defs
-                     ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
-                     ~sol:(Some sol_snap) ~rctx:rc
-                     ctx ~source:p p_entry ~target:v in
-                 let fired = Cbat_landmarks.end_fired_latch flatch in
-                 (* Read set covers inputs. *)
-                 let reads = Core.Set.add reads p in
-                 rc_cell := begin
-                   let st = rc'.rc_state in
-                   { rc' with
-                     rc_state =
-                       { st with
-                         fs_out_cache =
-                           Cbat_runctx.Transfer_memo.add
-                             ~version st.fs_out_cache p v
-                             ~reads (res, fired) } }
-                 end;
-                 res) in
+               let res, _, _ =
+                 denote_block_with_stores ~preserved ~defs
+                   ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
+                   ~sol:(Some sol_snap) ~rctx:rc
+                   ctx ~source:p p_entry ~target:v in
+               res) in
             let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
             Cbat_landmarks.widening_at_head := None;
             res) in

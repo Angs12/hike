@@ -52,17 +52,7 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
         && Bool.equal e.is_upper entry.is_upper))
     else entries
 
-(* Counts acquisitions since the last reset. *)
-let fired_count : int ref = ref 0
-let start_fired_latch () : int = !fired_count
-let end_fired_latch (base : int) : bool =
-  let fired = !fired_count > base in
-  fired_count := base;
-  fired
-
 let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Word.t) ~(is_upper : bool) ~(dist : int) : unit =
-  (* Bumped on every acquisition. *)
-  fired_count := !fired_count + 1;
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
   let cur = Hashtbl.find lm_env head |> Option.value ~default:[] in
   let next = add_smaller_dist cur entry in
