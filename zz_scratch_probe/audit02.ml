@@ -3,11 +3,11 @@
 
 open Bap.Std
 open Bap_core_theory
-module AI = Cbat_vsa.AI
-module Vsa = Cbat_vsa
-module Ws = Cbat_clp_set_composite
+open Probe_common
 
-let sp_of (proj : project) : var = Hike.Abi.sp (Project.target proj)
+(* Replica rule (pinned — owner decision keeps this probe): the walk below
+   replicates production's offsets_of_sub per-def logic; a PROD-vs-replica
+   divergence is investigated in production, never papered over in the replica. *)
 
 let ws_str (w : Ws.t) : string =
   if Ws.is_top w then "TOP"
@@ -145,17 +145,15 @@ let () =
   match paths with
   | [] -> Printf.printf "usage: %s <binary> [subname]\n" Sys.argv.(0); exit 0
   | binary :: rest ->
-    (match Bap_main.init ~argv:[|Sys.executable_name|] () with
-     | Ok () -> () | Error e ->
-       Format.eprintf "BAP init failed: %a@\n%!" Bap_main.Extension.Error.pp e; exit 1);
+    init ();
     let subname = match rest with hd :: _ -> hd | [] -> "main" in
     (match Project.create (Project.Input.file ~loader:"llvm" ~filename:binary) with
      | Error e ->
        Printf.printf "LOAD-FAIL %s: %s\n" binary (Core_kernel.Error.to_string_hum e); exit 1
      | Ok proj ->
        let sp = sp_of proj in
+       (* One set: Hike.Vsa.set_addr_bits is the same cell (Hike_vsa pass-through). *)
        Vsa.set_addr_bits 64;
-       Hike.Vsa.set_addr_bits 64;
        let prog = Project.program proj in
        (if String.equal subname "ALL" then
           Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub sp sub)

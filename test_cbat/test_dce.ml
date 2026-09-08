@@ -2,8 +2,10 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 
-let w64 = Word.of_int ~width:64
+(* Local word literal (BAP words for Bil.Int); named apart from Test_common.w64. *)
+let bw64 = Word.of_int ~width:64
 
 (* Fixtures run on [Theory.Target.unknown], pinning the total ABI lane. *)
 
@@ -25,11 +27,11 @@ let run () =
   let b = v64 "d0_b" in
   let dead = v64 "d0_dead" in
   let bb = Blk.Builder.create () in
-  Blk.Builder.add_def bb (Def.create a (Bil.Int (w64 1)));
-  Blk.Builder.add_def bb (Def.create b (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Int (w64 1))));
-  Blk.Builder.add_def bb (Def.create dead (Bil.Int (w64 5)));
+  Blk.Builder.add_def bb (Def.create a (Bil.Int (bw64 1)));
+  Blk.Builder.add_def bb (Def.create b (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Int (bw64 1))));
+  Blk.Builder.add_def bb (Def.create dead (Bil.Int (bw64 5)));
   Blk.Builder.add_jmp bb
-    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var b, Bil.Int (w64 0)))
+    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var b, Bil.Int (bw64 0)))
        (Goto (Direct (Tid.create ()))));
   let sb = Sub.Builder.create ~name:"d0_sweep" () in
   Sub.Builder.add_blk sb (Blk.Builder.result bb);
@@ -56,7 +58,7 @@ let run () =
   Blk.Builder.add_jmp bb
     (Jmp.create (Call (Call.create ~target:(Indirect (Bil.Var t)) ())));
   Blk.Builder.add_def bb
-    (Def.create t2 (Bil.Int (w64 7)));
+    (Def.create t2 (Bil.Int (bw64 7)));
   Blk.Builder.add_jmp bb
     (Jmp.create
        (Call (Call.create ~return:(Direct exit_tid) ~target:(Indirect (Bil.Var t2)) ())));
@@ -103,11 +105,11 @@ let run () =
   let m = memv "d2_m" in
   let x0 = v64 "intrinsic:x0" in
   let bb = Blk.Builder.create () in
-  Blk.Builder.add_def bb (Def.create rax (Bil.Int (w64 1)));
-  Blk.Builder.add_def bb (Def.create rdi (Bil.Int (w64 2)));
+  Blk.Builder.add_def bb (Def.create rax (Bil.Int (bw64 1)));
+  Blk.Builder.add_def bb (Def.create rdi (Bil.Int (bw64 2)));
   Blk.Builder.add_def bb
-    (Def.create m (Bil.Store (Bil.Var m, Bil.Int (w64 0x1000), Bil.Int (w64 3), LittleEndian, `r64)));
-  Blk.Builder.add_def bb (Def.create x0 (Bil.Int (w64 4)));
+    (Def.create m (Bil.Store (Bil.Var m, Bil.Int (bw64 0x1000), Bil.Int (bw64 3), LittleEndian, `r64)));
+  Blk.Builder.add_def bb (Def.create x0 (Bil.Int (bw64 4)));
   let sb = Sub.Builder.create ~name:"d2_keeps" () in
   Sub.Builder.add_blk sb (Blk.Builder.result bb);
   let sub = Sub.Builder.result sb in
@@ -144,11 +146,11 @@ let run () =
     (Def.create t
        (Bil.Load
           ( Bil.Var sm,
-            Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (w64 8)),
+            Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (bw64 8)),
             LittleEndian,
             `r64 )));
   Blk.Builder.add_jmp bb_b
-    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (w64 0)))
+    (Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (bw64 0)))
        (Goto (Direct (Tid.create ()))));
   let sb_b = Sub.Builder.create ~name:"d3_fission_live" () in
   Sub.Builder.add_blk sb_b (Blk.Builder.result bb_b);
@@ -165,16 +167,16 @@ let run () =
   let tmp = v64 "d4_tmp" in
   let arg_read = v64 "d4_arg_read" in
   let m = memv "d4_m" in
-  let rsp_def = Def.create sp_ (Bil.BinOp (Bil.MINUS, Bil.Var sp_, Bil.Int (w64 16))) in
+  let rsp_def = Def.create sp_ (Bil.BinOp (Bil.MINUS, Bil.Var sp_, Bil.Int (bw64 16))) in
   let hstk_def = Def.create hstk (Bil.Var sp_) in
   (* Sp-value def: erased on the precise path. *)
-  let tmp_def = Def.create tmp (Bil.BinOp (Bil.PLUS, Bil.Var sp_, Bil.Int (w64 8))) in
+  let tmp_def = Def.create tmp (Bil.BinOp (Bil.PLUS, Bil.Var sp_, Bil.Int (bw64 8))) in
   (* Incoming-arg read at [hike_stack + 16]: the production shape. *)
   let arg_def =
     Def.create arg_read
       (Bil.Load
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var hstk, Bil.Int (w64 16)),
+           Bil.BinOp (Bil.PLUS, Bil.Var hstk, Bil.Int (bw64 16)),
            LittleEndian,
            `r64 ))
   in
@@ -211,7 +213,7 @@ let run () =
 (  (* D5: intrinsic passthrough — [Sub.intrinsic] subs pass through untouched. *)
   let x = v64 "d5_dead" in
   let bb = Blk.Builder.create () in
-  Blk.Builder.add_def bb (Def.create x (Bil.Int (w64 9)));
+  Blk.Builder.add_def bb (Def.create x (Bil.Int (bw64 9)));
   Blk.Builder.add_jmp bb (Jmp.create (Goto (Direct (Tid.create ()))));
   let sb = Sub.Builder.create ~name:"intrinsic:d5_stub" () in
   Sub.Builder.add_blk sb (Blk.Builder.result bb);

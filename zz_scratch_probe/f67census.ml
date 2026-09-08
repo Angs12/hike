@@ -10,11 +10,6 @@
 open Bap.Std
 open Probe_common
 
-let time f =
-  let t0 = Unix.gettimeofday () in
-  let r = f () in
-  r, Unix.gettimeofday () -. t0
-
 (* --- article 7: Ogre queries replicated from hike.ml --- *)
 
 type region = { addr : int64; size : int64; info : string }

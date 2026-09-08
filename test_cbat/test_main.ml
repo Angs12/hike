@@ -6,12 +6,14 @@ let () =
   Test_seed.run ();
   Test_domains.run_policy ();
   Test_vsa.run ();
+  Test_domains.run_shifts ();
   Test_backward.run ();
   Test_domains.run_agreement ();
   Test_regression.run_creg ();
   Test_regression.run_remediation ();
   Test_properties.run_soundness ();
   Test_regression.run_regions ();
+  Test_domains.run_overlap ();
   Test_regression.run_copy_reloc ();
   Test_properties.run_roundtrip ();
   Test_properties.run_landmarks ();

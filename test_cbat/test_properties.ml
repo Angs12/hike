@@ -2,6 +2,7 @@
 open Bap.Std
 open Bap_core_theory
 open Test_common
+open Test_fixtures
 module W = Cbat_word
 
 (* R10b: logand soundness over a sampled operand corpus. *)
@@ -294,23 +295,12 @@ let lm_jle_loop ~(k1 : W.t) ?(k2 : W.t option) () : sub term * tid * tid * tid o
   let iv = Bil.Var i in
   (* Canonical -O0 cmp emission; returns the jle cond. *)
   let cmp_defs b (c : W.t) =
-    let cw = Cbat_word.to_word c in
     let t = Var.create ~is_virtual:false ~fresh:false "lm_t" (Type.Imm 32) in
     let cf = v1 "CF" in
     let ofv = v1 "OF" in
     let sf = v1 "SF" in
     let zf = v1 "ZF" in
-    Blk.Builder.add_def b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int cw)));
-    Blk.Builder.add_def b (Def.create cf (Bil.BinOp (Bil.LT, iv, Bil.Int cw)));
-    Blk.Builder.add_def b
-      (Def.create ofv
-         (Bil.Cast
-            ( Bil.HIGH,
-              1,
-              Bil.BinOp
-                (Bil.AND, Bil.BinOp (Bil.XOR, iv, Bil.Int cw), Bil.BinOp (Bil.XOR, iv, Bil.Var t)) )));
-    Blk.Builder.add_def b (Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t)));
-    Blk.Builder.add_def b (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero 32), Bil.Var t)));
+    mk_cmp_emission b ~e:iv ~c ~t ~cf ~ofv ~sf ~zf;
     l39_jle zf sf ofv
   in
   let entry_b = Blk.Builder.create () in
@@ -411,6 +401,13 @@ let lm_jne_loop ~(k : W.t) () : sub term * tid * tid =
   List.iter (Sub.Builder.add_blk sub_b) [ Blk.Builder.result entry_b; Blk.Builder.result l1_b; Blk.Builder.result b1_b; exit0 ];
   let sub = Sub.Builder.result sub_b in
   (sub, l1_tid, b1_tid)
+
+(* Shared F1-FT/B1/B3 build: the same jne-counter loop + anchored run.
+   Returns (k, sub, sol, head tid, body tid); the distinct pins stay in the tests. *)
+let lm_jne_run () : Cbat_word.t * sub term * Vsa.vsa_sol * tid * tid =
+  let k = w32 100 in
+  let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
+  (k, sub, run_anchored sub, l1_tid, b1_tid)
 
 (* VSK-02: acyclic diamond over a ranged counter; the entry state carries the
    range, so the guard edges refine to absolute halves. Returns
@@ -748,10 +745,7 @@ let run_roundtrip () =
   ())
 let run_landmarks () =
 (  let sub, l1_tid, b1_tid, _ = lm_jle_loop ~k1:(w32 100) () in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
+  let sol = run_anchored sub in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
   check
@@ -768,10 +762,7 @@ let run_landmarks () =
 ;
 (  let k = w32 100 in
   let sub, l1_tid, _ = lm_jne_loop ~k () in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-  in
+  let sol = run_anchored sub in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
   check
@@ -788,12 +779,7 @@ let run_landmarks () =
    values, the taken body pins its refined view, and the fallthrough exit pins the
    walk-observed refined pre-state. A memo keying bug moves one side, not both. *))
 ;
-(  let k = w32 100 in
-   let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
-   let prog' = Program.create ~subs:[ sub ] () in
-   let sol =
-     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-   in
+(  let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
    let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
    let st tid = Graphlib.Std.Solution.get sol tid in
    let head_i = AI.find_word 32 (st l1_tid) i in
@@ -810,9 +796,7 @@ let run_landmarks () =
    check
      "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the landmark)"
      (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
-   let exits =
-     Term.enum blk_t sub |> Seq.to_list |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
-   in
+   let exits = exit_blocks_of sub in
    let exit_i =
      match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
    in
@@ -863,12 +847,7 @@ let run_landmarks () =
    NARROWED a state (the unsound direction) or manufactured bottom on a live
    block, these exact-value pins move. *))
 ;
-(  let k = w32 100 in
-   let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
-   let prog' = Program.create ~subs:[ sub ] () in
-   let sol =
-     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-   in
+(  let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
    let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
    let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
    let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
@@ -891,8 +870,7 @@ let run_landmarks () =
    refine independently - loop 1's walk spend cannot starve loop 2. *))
 ;
 (  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
-   let prog' = Program.create ~subs:[ sub ] () in
-   let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+   let sol = run_anchored sub in
    let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
    let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
    let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
@@ -912,18 +890,10 @@ let run_landmarks () =
    starve the late walks and the exit would coarsen. Re-runs the F1-FT shape
    and pins the walk-delivered value. *))
 ;
-(  let k = w32 100 in
-   let sub, _l1_tid, b1_tid = lm_jne_loop ~k () in
-   let prog' = Program.create ~subs:[ sub ] () in
-   let sol =
-     Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
-   in
+(  let k, sub, sol, _, b1_tid = lm_jne_run () in
    let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
    let st tid = Graphlib.Std.Solution.get sol tid in
-   let exits =
-     Term.enum blk_t sub |> Seq.to_list
-     |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
-   in
+   let exits = exit_blocks_of sub in
    let exit_i =
      match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
    in
@@ -1031,8 +1001,7 @@ let run_landmarks () =
 (* F2c: acquisition + per-cycle scoping — landmarks scoped to their own WTO cycle. *))
 ;
 (  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let l2_tid = match l2_tid with Some t -> t | None -> failwith "F2c: missing L2" in
   let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
@@ -1050,8 +1019,7 @@ let run_landmarks () =
 (* When-chain fixture: split ladder seeds {5,15,25}; chain edges partition exactly. *))
 let run_chains () =
 (  let sub, l1_tid, l2_tid, l3_tid, _chain_tid, x = mk_when_chain () in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
+  let sol = run_anchored sub in
   let in_x (t : tid) : Ws.t = AI.find_word 32 (Graphlib.Std.Solution.get sol t) x in
   check
     "T01-1a (when-chain): the FIRST edge's IN-state is refined by its own cond \
@@ -1074,37 +1042,27 @@ let run_chains () =
 (  let m = memv "t01_m" in
   let rbp = v64 "RBP" in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  let entry_b = Blk.Builder.create () in
-  let mid_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var (v64 "RSP")));
-  Blk.Builder.add_def entry_b
-    (Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 3)), LittleEndian, `r32)));
-  let mid0 = Blk.Builder.result mid_b in
-  let exit0 = Blk.Builder.result exit_b in
+  let entry0 =
+    blk_of_defs
+      [
+        Def.create rbp (Bil.Var (v64 "RSP"));
+        Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 3)), LittleEndian, `r32));
+      ]
+  in
+  let mid0 = blk_of_defs [] in
+  let exit0 = blk_of_defs [] in
   let mid_tid = Term.tid mid0 in
   let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true (Blk.Builder.result entry_b) in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct mid_tid)));
-  let mid_b = Blk.Builder.init ~copy_defs:true mid0 in
-  Blk.Builder.add_jmp mid_b (Jmp.create (Goto (Direct exit_tid)));
   let sub_b = Sub.Builder.create ~name:"t01_straight" () in
   List.iter (Sub.Builder.add_blk sub_b)
-    [ Blk.Builder.result entry_b; Blk.Builder.result mid_b; exit0 ];
+    [ with_jmps entry0 [ mk_goto mid_tid ]; with_jmps mid0 [ mk_goto exit_tid ]; exit0 ];
   let sub = Sub.Builder.result sub_b in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry:(anchored_entry ()) sub) in
-  let cell_at (t : tid) : Ws.t =
-    match
-      Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32))
-        (Graphlib.Std.Solution.get sol t)
-    with
-    | Ok ws -> ws
-    | Error _ -> Ws.top 32 in
+  let sol = run_anchored sub in
+  let cell t = cell_at m rbp (Graphlib.Std.Solution.get sol t) in
   check
     "T01-2 (uniform rule): a lone unconditional goto's accumulated cond is the \
      literal TRUE — the identity transfer: EXIT's IN-state equals MID's \
      (both read the stored {3} exactly; no spurious refinement, no bottom)"
-    (Ws.equal (cell_at mid_tid) (Ws.singleton (w32 3))
-     && Ws.equal (cell_at exit_tid) (Ws.singleton (w32 3)));
+    (Ws.equal (cell mid_tid) (Ws.singleton (w32 3))
+     && Ws.equal (cell exit_tid) (Ws.singleton (w32 3)));
   ())

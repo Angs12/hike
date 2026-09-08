@@ -1,4 +1,6 @@
-(* edgemulti_probe.ml — WHY does the %0006ef1c-class phi get ONE entry for a
+(* edgemulti_probe.ml — owner-decision keep (closed duplicate-pred-phi question,
+   answered and recorded; do not delete unilaterally).
+   WHY does the %0006ef1c-class phi get ONE entry for a
    pred that LLVM lists twice? Reproduce the emitter's own pred accounting on
    subs holding [when c goto L; goto L] pairs, printing the jmp-term shape the
    emission actually sees (the RAW program; filter_subs' simplify_jmps splits

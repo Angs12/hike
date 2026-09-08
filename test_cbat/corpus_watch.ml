@@ -2,6 +2,7 @@
    Usage: dune exec test_cbat/corpus_watch.exe -- <binary> [<binary> ...] *)
 
 open Bap.Std
+open Probe_common
 
 module AI = Cbat_vsa.AI
 module Mem = Cbat_vsa.Mem
@@ -15,14 +16,6 @@ let slow_threshold = 10.0
 type outcome =
   | Ok of float              (* fixpoint wall time, seconds *)
   | Crash of string * string (* exception description * backtrace *)
-
-let describe_exn (e : exn) : string =
-  match e with
-  | Assert_failure (file, line, col) ->
-    Printf.sprintf "Assert_failure (%s:%d:%d)" file line col
-  | Failure msg -> Printf.sprintf "Failure(%s)" msg
-  | Invalid_argument msg -> Printf.sprintf "Invalid_argument(%s)" msg
-  | _ -> Printexc.to_string e
 
 (* One sub, one full fixpoint on the raw sub (spec §2.1). *)
 let run_sub (_sp : var) (_prog : program term) (sub : sub term) : outcome =
@@ -52,8 +45,7 @@ let run_binary (path : string) : bin_report =
     match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
     | Error e ->
       r.nloadfail <- 1;
-      Printf.printf "LOAD-FAIL\t%s\t%s\n" path (Core_kernel.Error.to_string_hum e);
-      flush stdout;
+      ws_load_fail path e;
       r
     | Ok proj ->
       let prog = Project.program proj in
@@ -80,25 +72,16 @@ let run_binary (path : string) : bin_report =
   with e ->
     (* Project.create / enumeration blew up. *)
     r.nloadfail <- 1;
-    Printf.printf "LOAD-FAIL\t%s\texception: %s\n" path (describe_exn e);
-    flush stdout;
+    ws_load_exn path e;
     r
 
 let () =
   let paths = List.tl (Array.to_list Sys.argv) in
   match paths with
-  | [] ->
-    Printf.printf "usage: %s <binary> [<binary> ...]\n" Sys.argv.(0);
-    flush stdout;
-    exit 0
+  | [] -> ws_usage Sys.argv.(0)
   | _ ->
     (* Init the BAP environment (loads plugins, incl. the x86 backend). *)
-     (match Bap_main.init ~argv:[|Sys.executable_name|] () with
-      | Ok () -> ()
-      | Error failed ->
-        Format.eprintf "corpus_watch: BAP initialization failed: %a@\n%!"
-          Bap_main.Extension.Error.pp failed;
-        exit 1);
+    ws_init "corpus_watch";
     Printf.printf "=== corpus watch (gate-free) ===\n";
     flush stdout;
     let reports = List.map run_binary paths in
@@ -117,10 +100,5 @@ let () =
       reports;
     let crashes = List.fold_left (fun acc r -> acc + r.ncrashes) 0 reports in
     let loadfails = List.fold_left (fun acc r -> acc + r.nloadfail) 0 reports in
-    Printf.printf "TOTAL: %d crashes, %d load failures\n" crashes loadfails;
-    Printf.printf "%s\n"
-      (if crashes = 0 && loadfails = 0 then
-         "CORPUS WATCH: PASS (no crashes)"
-       else "CORPUS WATCH: FAIL (crashes present)");
-    flush stdout;
-    exit (if crashes = 0 && loadfails = 0 then 0 else 1)
+    ws_finish ~pass:"CORPUS WATCH: PASS (no crashes)"
+      ~fail:"CORPUS WATCH: FAIL (crashes present)" crashes loadfails
