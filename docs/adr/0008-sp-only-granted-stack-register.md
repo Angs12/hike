@@ -43,9 +43,27 @@ callee-saved GPR whose stack-ness — like any register's — is PROVEN, never a
   `R12`-as-frame-pointer).
 
 **Stack-ness of an ACCESS = the `vsa_info` tag alone** — under the 100% invariant the
-tag is the only carrier, so BOTH syntactic disjuncts of `has_unbounded_access`'s
-untagged arm drop (sp and fp). Untagged accesses emit through the generic real-address
-lane against their true runtime values (sound). **Accepted risk, recorded:** an
+tag is the only carrier, and every rule that re-asks the question BY SHAPE is
+therefore redundant and deleted: the directness test, the untagged syntactic arm of
+`has_unbounded_access`, the name-based degraded extents, `is_stack_mem`, and the
+RBP-name spill detection all become tag lookups. Untagged accesses emit through the
+generic real-address lane against their true runtime values (sound).
+
+**The one rule the tag cannot express — and therefore the only survivor:** *can this
+cell be reached by an access we did not convert?* It is invisible to the tag by
+construction, because "we did not convert it" means exactly "it has no tag". Two
+shapes, one fact (unified under one name, commented as the sole non-tag-derived
+rule): a frame-derived value escaping to a call's argument registers or to memory
+(`sp_escaped` — cross-sub aliasing), and the caller-written incoming-argument area
+(`saves_incoming_reg` / ABI visibility). Its mechanism is FORCED, not chosen: it must
+be the syntactic {SP}-seeded closure, because "has a frame term" UNDER-approximates
+(`RAX := RSP − mem[x]` carries no term yet is sp-derived at runtime) — and for escape,
+missing an alias is the unsound direction, so over-approximating is mandatory.
+
+**Reduction test (the lane's falsifiable prediction):** with escape held constant,
+deleting the shape gates must be IR-NEUTRAL on the -O0 corpus, since at -O0 the tag
+and the shape tests agree. A delta the reduction does not predict falsifies it and is
+reported rather than landed. **Accepted risk, recorded:** an
 unproven sp-mentioning access (the rsp-term-lost edge — a weird `RSP := RAX` rebind
 that drops RSP's frame term) could at runtime address a cell a converted region member
 also addresses; the untagged access then writes real stack while the member writes the
