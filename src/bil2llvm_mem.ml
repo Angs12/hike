@@ -36,10 +36,9 @@ let is_plt_trampoline ctx (sub : sub term) : bool =
     |> Core.Set.to_list
   in
   let reg_vars =
+    (* SP-only: a stub genuinely using RBP is not a pure trampoline. *)
     Base.List.filter free_vars ~f:(fun reg ->
-        not
-          (Var.same reg ctx.Convutils.sp
-          || Var.same reg ctx.Convutils.fp))
+        not (Var.same reg ctx.Convutils.sp))
   in
   reg_vars = []
   && Term.enum blk_t sub

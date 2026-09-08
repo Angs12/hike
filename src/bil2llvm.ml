@@ -180,19 +180,14 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
     let fr = { fr with stack = get_local ctx tid Convutils.hike_stack_var } in
     exit_entry llvm_builder sub () >>= fun _ -> return fr
   ) else (
-  (* SP/FP are not args. *)
+  (* SP is not an arg. *)
   insert_local ctx tid ctx.Convutils.sp fr.anchor_i64;
   (* [hike_stack] is the caller entry RSP. *)
   let fr =
     { fr with stack = get_local ctx tid Convutils.hike_stack_var }
   in
-  let* fp_anchor =
-    let* llvm_ctx = Context.get llvm_ctx_var in
-    return
-    @@ Llvm.build_sub fr.anchor_i64 (Llvm.const_int (Llvm.i64_type llvm_ctx) 8)
-         "" llvm_builder
-  in
-  insert_local ctx tid ctx.Convutils.fp fp_anchor;
+  (* No fp entry binding: a never-defined RBP read takes the undef + warn
+     lane (the RBX treatment) instead of a fabricated frame address. *)
   exit_entry llvm_builder sub ()
   >>= fun _ -> return fr
   )
@@ -256,16 +251,16 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.union arg_set
   |> Core.Set.filter ~f:(fun var ->
       ((not @@ is_mem var) || Var.same var (Abi.pc ctx.Convutils.target))
-      (* Keeps SP/FP lanes. *)
+      (* Keeps SP and every callee-saved lane (fp is an ordinary one). *)
       || Var.same var ctx.Convutils.sp
-      || Var.same var ctx.Convutils.fp)
+      || Abi.is_callee_saved ctx.Convutils.abi var)
   |> Core.Set.filter ~f:(fun var ->
       (* Drops never-defined vars from transfer. *)
       Core.Set.mem def_set var
       || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
       || Var.same var ctx.Convutils.sp
-      || Var.same var ctx.Convutils.fp)
+      || Abi.is_callee_saved ctx.Convutils.abi var)
   |> Core.Set.to_list
 
 
@@ -587,6 +582,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              let is_callee_saved =
                Abi.is_callee_saved abi reg
              in
+             (* Explicit fp test: RBP joins [callee_saved] only at T6. *)
              not
                (Var.same reg (Abi.sp target)
                || Var.same reg (Abi.fp target)
