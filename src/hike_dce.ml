@@ -10,9 +10,6 @@ let abi_of (target : Theory.Target.t) : Abi.t =
   Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
 
 (* Registers read implicitly by calls. *)
-let is_ret_reg ~(abi : Abi.t) (v : var) : bool =
-  Abi.is_return_reg abi (Var.base v)
-
 let is_call_reg ~(abi : Abi.t) (v : var) : bool =
   let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
@@ -31,10 +28,6 @@ let ret_replacement (j : jmp term) : jmp term =
                   ()))
       | _ -> j)
   | _ -> j
-
-(* Tests for region mem vars. *)
-let is_region_mem (v : var) : bool =
-  Hike_stack_model.is_region_mem v
 
 (* One-pass sweep census: the def index, the lhs reader map, and the
    contributor counts behind [used]/[roots]. Jmp/phi mentions are
@@ -57,16 +50,14 @@ type sweep_census = {
 
 (* Free vars of every Load mem in one rhs. *)
 let load_mem_vars (rhs : exp) : Var.Set.t =
-  let acc = ref Var.Set.empty in
   let v =
     object
-      inherit [unit] Exp.visitor
-      method! visit_load ~mem ~addr:_ _ _ () =
-        acc := Core.Set.union !acc (Exp.free_vars mem)
+      inherit [Var.Set.t] Exp.visitor
+      method! visit_load ~mem ~addr:_ _ _ acc =
+        Core.Set.union acc (Exp.free_vars mem)
     end
   in
-  v#visit_exp rhs ();
-  !acc
+  v#visit_exp rhs Var.Set.empty
 
 let sweep_census_of (sub : sub term) : sweep_census =
   let bump m v =
@@ -162,11 +153,12 @@ let keep ?(precise=false) ?(load_roots=Var.Set.empty)
   if precise && (is_sp_for_erasure ~abi d || is_hike_stack (Def.lhs d) || is_sp_value_def ~abi d) then false
   else
     let lhs = Def.lhs d in
-    if is_region_mem lhs then
+    if Hike_stack_model.is_region_mem lhs then
       Core.Set.mem load_roots lhs
       
     else
-      Core.Set.mem used lhs || is_ret_reg ~abi lhs || Convutils.is_mem lhs
+      Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
+      || Convutils.is_mem lhs
       || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
 (* Incremental sweep: one census walk, then a removal cascade. [used] and

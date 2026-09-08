@@ -14,7 +14,7 @@ let () =
     | Vsa_info_conflict (tid, i1, i2) ->
         Some
           (Printf.sprintf
-             "hike: vsa-info conflict on sub %s: two different VSA results               were provided for the same sub (offsets %d vs %d) — the               analyses disagree, refusing to drop either"
+             "hike: vsa-info conflict on sub %s: two different VSA results were provided for the same sub (offsets %d vs %d) — the analyses disagree, refusing to drop either"
              (Tid.name tid)
              (Core.Map.length i1.Convutils.offsets)
              (Core.Map.length i2.Convutils.offsets))
@@ -54,18 +54,22 @@ let map_join (m1 : Convutils.vsa_info Tid.Map.t)
   | LT -> Ok m2
   | GT -> Ok m1
   | NC -> (
-      let base = ref m1 in
-      let conflict = ref None in
-      Core.Map.iteri m2 ~f:(fun ~key:tid ~data:i2 ->
-          match Core.Map.find !base tid with
-          | None -> base := Core.Map.set !base ~key:tid ~data:i2
-          | Some i1 -> (
-              match info_join tid i1 i2 with
-              | Ok _ -> () (* Keeps [m1]'s entry. *)
-              | Error c -> if !conflict = None then conflict := Some c));
-      match !conflict with
+      (* First conflict wins; the base extends. *)
+      let base, conflict =
+        Core.Map.fold m2 ~init:(m1, None)
+          ~f:(fun ~key:tid ~data:i2 (base, conflict) ->
+            match Core.Map.find base tid with
+            | None -> (Core.Map.set base ~key:tid ~data:i2, conflict)
+            | Some i1 -> (
+                match info_join tid i1 i2 with
+                | Ok _ -> (base, conflict) (* Keeps [m1]'s entry. *)
+                | Error c -> (
+                  match conflict with
+                  | None -> (base, Some c)
+                  | Some _ -> (base, conflict)))) in
+      match conflict with
       | Some c -> Error c
-      | None -> Ok !base)
+      | None -> Ok base)
 
 let vsa_info_slot =
   KB.Class.property ~package:"hike" run_cls "vsa-info"
@@ -76,7 +80,8 @@ let vsa_info_slot =
        ~order:map_order
        "hike:vsa-info")
 
-(* Reads the current VSA map. *)
+(* Reads the current VSA map. The cell is the monad-escape idiom: the KB
+   callback cannot return a value, so it parks the map in a local ref. *)
 let vsa_info () : Convutils.vsa_info Tid.Map.t =
   let r = ref Tid.Map.empty in
   Toplevel.exec

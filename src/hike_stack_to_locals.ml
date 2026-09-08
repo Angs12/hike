@@ -25,6 +25,9 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
         Core.Map.mem tag_of (Term.tid d))
   in
   let is_abi_visible = Model.is_abi_visible sp ~tag_of ~k_of ~last_push_tids in
+  (* ABI record, resolved once: the per-node check below runs on every
+     address expression of every converted def. *)
+  let abi = Abi.of_target target in
   (* Regions come from the VSA result. *)
   let regions =
     if info.Convutils.regions <> [] then info.Convutils.regions
@@ -50,9 +53,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* Conversion table: address -> slot or region shape. *)
   (* Returns the address base the region base replaces. *)
   let base_exp_of (addr : exp) : exp =
-    (* ABI record, resolved once: the per-node check below runs on
-       every address expression of every converted def. *)
-    let abi = Abi.of_target target in
     let is_stack_reg v = Abi.is_stack_reg abi (Var.base v) in
     let is_sf (e : exp) : bool =
       match e with
@@ -81,15 +81,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 ( Core.Map.find tag_of (Term.tid d),
                   Model.addr_of_rhs (Def.rhs d) )
               with
-              | Some (Convutils.Range (lo, hi)), Some (addr, s)
-                when Int64.equal lo hi && region_convertible (Term.tid d) -> (
-                  match Core.Map.find region_by_tid (Term.tid d) with
-                  | Some r when Int64.equal (fst r.Convutils.span) (snd r.Convutils.span) ->
-                      (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc
-                  | Some r ->
-                      (addr, `Region (r.Convutils.id, base_exp_of addr)) :: acc
-                  | None -> (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc)
-              | Some (Convutils.Range _), Some (addr, _)
+              | Some (Convutils.Range (lo, hi)), Some (addr, _)
                 when region_convertible (Term.tid d) -> (
                   match Core.Map.find region_by_tid (Term.tid d) with
                   | Some r ->
@@ -97,7 +89,11 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                       if Int64.equal rlo rhi then
                         (addr, `Slot (Model.slot_of rlo (region_max_width (Term.tid d)))) :: acc
                       else (addr, `Region (r.Convutils.id, base_exp_of addr)) :: acc
-                  | None -> acc)
+                  | None ->
+                      (* Region-less singleton tag: the slot. *)
+                      if Int64.equal lo hi then
+                        (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc
+                      else acc)
               | _ -> acc))
   in
 

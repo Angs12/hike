@@ -53,6 +53,9 @@ module Stack_model : sig
   (** Tests for the split model. *)
   val is_precise : Convutils.vsa_info -> bool
 
+  (** Returns the region alloca's emitted name. *)
+  val region_name : int -> string
+
   (** Mints and recognizes fission vars. *)
   val region_mem : int -> var
   val region_base : int -> var
