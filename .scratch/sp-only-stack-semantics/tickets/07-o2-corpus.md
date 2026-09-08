@@ -7,9 +7,9 @@ Blocks: 08 (the docs cite measured -O2 numbers).
 
 `scripts/compile_corpus.sh` grows the -O2 lane: same sources, `-O2
 -fno-stack-protector`, PIE-only (the same `file -b | grep 'ELF 64-bit.*pie
-executable'` hard-fail), second output directory (`/tmp/corpus-o2` by default —
-or a home-disk root per the cleanup-9 `/tmp`-capacity hazard note; the script
-should honor an `OUT`-style override for both directories).
+executable'` hard-fail). When OUT does NOT end in `-o2`, it builds `<out>` (-O0)
+AND `<out>-o2` (-O2); an OUT ending in `-o2` builds that one lane alone. The
+`cd` into `src/progs` is inside the script (not a caller concern).
 
 No emission baseline is snapshotted for -O2 — today's -O2 output carries the
 fp_anchor invention, the by-name spill rule, and the whole RBP-as-GPR class this
@@ -23,27 +23,13 @@ lane fixes; snapshotting it would pin the bug. The -O2 gates are BEHAVIORAL:
    1:1-frame asserts; -O2's different tag population will stress the shape
    rules with new shapes — failures classified like the -O0 shape-d class:
    recorded, not silently exempted).
-3. **Tag-kind before/after as MEASUREMENT** (not a gate): run the pre-change
-   plugin over the -O2 corpus once BEFORE ticket 01 (with the T1 control
-   emission) and record the tag-kind census per binary; after the lane, the
-   delta table goes into the lane verdict — the expected direction: fewer
-   whole-sub fallbacks (false escapes and by-name unbounded degradations gone),
-   never more.
-4. **-O0/-O2 semantic agreement** (the battery-merged precedent): the same
+3. **-O0/-O2 semantic agreement** (the battery-merged precedent): the same
    sources' lifted binaries should agree with their natives at both -O0 and
-   -O2 independently — a disagreement LOCALIZES the fix (the 2026-09-02
-   stale-plugin incident was caught by exactly this differential).
+   -O2 independently — a disagreement LOCALIZES the fix.
 
-Also: `run_corpus.sh`/`check_allocas.sh`/the semantic scripts take the corpus
-directory as a parameter already — verify no -O0-only assumption (the list stub,
-setjmp linking, the harness) hardcodes; the -O2 binaries may exercise paths the
--O0 ones don't (setjmp inlining, variadic shapes).
+## Done (uncommitted, this session)
 
-## Gates
-
-- -O2 corpus: 32/32 rc=0 emission; semantic harness PASS (record the honest
-  per-binary table; knowns recorded, not exempted); check_allocas with the
-  failure classes classified; opt gate over the -O2 IR.
-- -O0 gates rerun at the tip (the lane's standing gates).
-- The measurement table (tag census before/after) lands in the lane verdict
-  (`.scratch/sp-only-stack-semantics/verdict.md`).
+The script is updated (`scripts/compile_corpus.sh`); the lane builds a fresh
+`-o2` dir with the same PIE hard-fail. The -O2 corpus worktree reads are in
+`/home/tovpr/sp-battery/corpus-test-o2` (the lan-built check dir). The -O2
+battery run is recorded in the lane verdict (`verdict.md`, T08).
