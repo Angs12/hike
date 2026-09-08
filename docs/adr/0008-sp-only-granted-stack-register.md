@@ -52,9 +52,35 @@ generic real-address lane against their true runtime values (sound).
 **No aliasing gate survives — the invariant makes one impossible.** "Can this cell be
 reached by an access we did not convert?" is incoherent: the 100% tagging invariant is
 a REQUIREMENT, so a stack access without a tag is a BUG, not a case to defend against.
-Therefore `sp_escaped` (the {SP}-seeded syntactic closure), `frame_addr_alias` and
-`frame_value_def` are DELETED — cross-sub aliasing was never theirs to guard.
 
+**FALSIFIED BY MEASUREMENT (2026-09-08, recorded so it is not re-argued):** the full
+deletion lost 5 binaries (alloca_vla, byte_copy, rec_struct, sret_big, va_arg_mixed —
+semantic 27/5). The invariant's blind spot: **an access through an escaped frame
+pointer is untaggable in principle** — the pointer is TOP in the callee's sub, so the
+callee's VSA can never tag it, and the tag's "every stack access is tagged" holds
+only per-provable-access within one sub. The caller is the only sub holding the
+information. Escape therefore SURVIVES, in its value-true form:
+
+- `sp_escaped` — the {SP}-seeded syntactic closure (fp NOT seeded: a heap-valued RBP
+  escapes nothing; RBP joins only via its own defs). Terms under-approximate
+  (`RAX := RSP − mem[x]` carries no term), and for escape missing an alias is the
+  unsound direction, so the closure's over-approximation is mandatory.
+- `frame_addr_alias` — **tag-gated**: a read through a materialized frame address
+  vetoes conversion only when that access is UNTAGGED. A tagged access through a
+  derived base (the -O0 prologue's own `[RBP−k]` stores) is proven frame-resident and
+  needs no protection — this replaces the old rule's exclusion of RBP BY NAME (the
+  fp grant), which had silently made every -O0 prologue "not an alias".
+- `has_unbounded_access`'s **SP arm**, untagged-only: an untagged sp-mentioning
+  access writes through the model sp lane at an unproven extent and must not share a
+  frame with split regions (the VLA class — alloca_vla — needs exactly this). The
+  fp disjunct is dead: an untagged fp-based access emits through the real-address
+  lane and degrades nothing.
+
+What replaces the *name-based* handling is a tag-class fact: an access at a POSITIVE
+offset (k ≥ 0) denotes the CALLER's frame, which this sub does not own — it stays in
+the model frame. Each sub converts only cells it owns (negative offsets). Already
+computed (`Convutils.is_positive_kind`; `regions_of_sub` requires `lo < 0`;
+`is_abi_visible` keys on `lo ≥ 0`; `is_outgoing_store` uses the lo<0 / klo≥0 pair).
 **What replaces them is a tag-class fact, not a gate:** not every TAGGED access is
 CONVERTIBLE IN THIS SUB. An access at a POSITIVE offset (k ≥ 0) denotes the CALLER's
 frame, which this sub does not own — so it stays in the model frame. Each sub converts
