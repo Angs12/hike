@@ -582,7 +582,8 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              let is_callee_saved =
                Abi.is_callee_saved abi reg
              in
-             (* Explicit fp test: RBP joins [callee_saved] only at T6. *)
+             (* RBP parses via [callee_saved] (the deleted explicit fp
+                 test's same filter result); SP-only by construction. *)
              not
                (Var.same reg (Abi.sp target)
                || is_callee_saved
