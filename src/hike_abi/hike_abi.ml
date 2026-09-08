@@ -39,8 +39,6 @@ let is_fp (t : t) (v : var) : bool = Var.same v t.fp
 let is_stack_reg (t : t) (v : var) : bool = is_sp t v || is_fp t v
 let is_callee_saved (t : t) (v : var) : bool =
   Base.List.exists t.callee_saved ~f:(Var.same v)
-let is_preserved (t : t) (v : var) : bool =
-  is_stack_reg t v || is_callee_saved t v
 (* Structural model-ABI lanes; never-defined reads here aggregate per-sub. *)
 let is_vector_param_reg (t : t) (v : var) : bool =
   Base.List.exists t.vector_param_regs ~f:(Var.same v)
@@ -70,20 +68,6 @@ let pc target =
     (* Total on unknown targets: a synthetic RIP for var-equality tests. *)
     Var.create ~is_virtual:false ~fresh:false "RIP" (Type.Imm 64)
 
-let resolve_alias target reg =
-  let sort = Var.sort reg in
-  let name = Var.name reg in
-  let theory_var = Theory.Var.define sort name in
-  Option.bind (Theory.Target.unalias target theory_var) Theory.Origin.cast_sub
-
-let theory_regs target = Theory.Target.regs target |> Base.Set.to_list
-
-let base_regs target =
-  theory_regs target
-  |> Base.List.filter ~f:(fun reg ->
-      Option.is_none (Theory.Target.unalias target reg))
-  |> Base.List.map ~f:Var.reify
-
 (* Only consumers reach register lists or predicates through here. *)
 
 let imm width = Imm width
@@ -112,11 +96,7 @@ let int_param_regs target = (of_target target).int_param_regs
 let vector_param_regs target = (of_target target).vector_param_regs
 let param_regs target = param_regs (of_target target)
 let return_regs target = (of_target target).return_regs
-let callee_saved target = (of_target target).callee_saved
 
-let is_sp_t target v = is_sp (of_target target) v
-let is_fp_t target v = is_fp (of_target target) v
-let is_sp_or_fp_t target v = is_stack_reg (of_target target) v
 let is_callee_saved_t target v = is_callee_saved (of_target target) v
 
 (* Value-register names for the FP-return detector. *)

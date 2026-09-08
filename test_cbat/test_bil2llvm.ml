@@ -4,6 +4,7 @@
    (Llvm.print_module) — the same idiom check_allocas.sh uses. *)
 
 open Test_common
+open Test_fixtures
 open Bap.Std
 open Bap_core_theory
 

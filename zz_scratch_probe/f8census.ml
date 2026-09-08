@@ -3,12 +3,6 @@
 open Bap.Std
 open Probe_common
 
-let time f =
-  let t0 = Unix.gettimeofday () in
-  let r = f () in
-  let t1 = Unix.gettimeofday () in
-  r, t1 -. t0
-
 let () =
   let args = Array.to_list Sys.argv |> List.tl in
   init ();

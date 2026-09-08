@@ -27,8 +27,9 @@
   (:standard -O3))
  (modules
   cbat_clp
+  cbat_clp_core
+  cbat_clp_arith
   cbat_word
-  cbat_word_ops
   cbat_fin_set
   cbat_lattice_intf
   cbat_map_lattice
@@ -49,10 +50,13 @@
   (:standard -O3))
  (modules
   cbat_vsa
+  cbat_transfer
+  cbat_walk
   cbat_memo
   cbat_runctx
   cbat_wto
   cbat_interval_tree
+  cbat_mem_key
   cbat_ai_memmap
   cbat_ai_representation
   cbat_contextual_fixpoint

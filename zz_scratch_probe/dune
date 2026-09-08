@@ -11,7 +11,8 @@
   cbat_vsa_domain
   core_kernel
   graphlib
-  threads)
+  threads
+  unix)
  (flags
   (:standard -g -alert -deprecated))
  (preprocess
@@ -21,6 +22,7 @@
  (name audit02)
  (modules audit02)
  (libraries
+  probe_common
   hike
   bap
   bap-core-theory
@@ -201,6 +203,7 @@
 (executable
  (name stageprof)
  (modules stageprof)
+ (enabled_if (= %{profile} vsa-debug))
  (libraries
   probe_common
   hike

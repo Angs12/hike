@@ -3,12 +3,7 @@
 
 open Bap.Std
 open Bap_core_theory
-module KB = Bap_knowledge.Knowledge
-
-module AI = Cbat_vsa.AI
-module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
-module Ws = Cbat_clp_set_composite
 
 (* Forwards the address width into the VSA. *)
 let set_addr_bits (n : int) : unit = Vsa.set_addr_bits n

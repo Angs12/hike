@@ -72,7 +72,6 @@ let of_int ~width (v : int) : t =
   else if v >= 0 then Small (v, width, false)
   else mkz (Z.add (Z.shift_left Z.one width) (Z.of_int v)) width
 
-let of_int32 ?(width = 32) (v : int32) : t = of_int ~width (Int32.to_int v)
 let of_int64 ?(width = 64) (v : int64) : t = of_z (Z.of_int64 v) width
 
 let[@inline] is_zero (t : t) : bool =
@@ -435,7 +434,7 @@ end
 
 include Core_kernel.Binable.Of_stringable_without_uuid (Stringable) [@@warning "-D"]
 
-(* The [Cbat_word_ops] set, in terms of the ops above. *)
+(* The word-op set, in terms of the ops above. *)
 
 let mul_exact (a : t) (b : t) : t =
   let w = bitwidth a + bitwidth b in
@@ -493,13 +492,15 @@ let factor_2s (t : t) : t * int =
   let lo = help (w - 1) 0 in
   (extract_exn ~hi:(w - 1 + lo) ~lo t, lo)
 
-(* 2^i at [width] bits; shift amounts wrap mod 2^width like Word.lshift. *)
+(* 2^i at [width] bits; i >= width truncates to 0 (Word.lshift semantics).
+   Production call sites always pass i < width. *)
 let dom_size ?width (i : int) : t =
   let wd = match width with Some x -> x | None -> i + 1 in
   if i < 0 then zero wd
   else
     let i' = i land ((1 lsl (Stdlib.min wd 62)) - 1) in
-    if i' = 0 then one wd
+    if i' >= wd then zero wd
+    else if i' = 0 then one wd
     else if i' <= 61 then Small (1 lsl i', wd, false)
     else mkz (Z.shift_left Z.one i') wd
 
@@ -511,6 +512,32 @@ let cap_at_width ~width (t : t) : t =
   if w = width then t
   else if w < width then extract_exn ~hi:(width - 1) t
   else extract_exn ~hi:(width - 1) (min (pred (dom_size ~width:w width)) t)
+
+(* Extend by one high bit. *)
+let add_bit (w : t) : t =
+  extract_exn ~hi:(bitwidth w) w
+
+(* Position of the leading 1-bit. *)
+let lead_1_bit (w : t) : int option =
+  let rec lead_help (hi : int) (lo : int) : int option =
+    let open Monads.Std.Monad.Option.Syntax in
+    Core_kernel.Option.some_if (hi >= lo) () >>= fun _ ->
+    if hi = lo then !!hi else
+    let mid = (hi + lo) / 2 in
+    let hi_part = extract_exn ~hi ~lo:(mid + 1) w in
+    if is_zero hi_part then lead_help mid lo
+    else lead_help hi (mid + 1)
+  in
+  if is_zero w then None else lead_help ((bitwidth w) - 1) 0
+
+let count_initial_1s (w : t) : int = snd @@ factor_2s @@ lnot w
+
+let endian_string : Word.endian -> string = function
+  | BigEndian -> "BE"
+  | LittleEndian -> "le"
+
+let gt_int (w : t) (i : int) : bool =
+  compare w (of_int ~width:(bitwidth w) i) > 0
 
 (* Ordered infixes, defined last so the module's own uses of the
    Stdlib operators stay in scope. *)
