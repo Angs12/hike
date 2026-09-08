@@ -248,7 +248,15 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
       (* HIGH of non-negative is non-negative. *)
       walk cells vars a
     | Bil.Load (_, addr, _, _) ->
-      let anchored = Exp.free_vars addr |> Core.Set.for_all ~f:stack_anchor in
+      (* Anchored = every address var has a CONSTANT frame term, AND there
+         is at least one (a constant address is a global — NOT private to
+         this sub; the old [for_all] over empty free-vars passed those
+         vacuously, proving non-negativity for cells other subs write).
+         The frame term IS the privacy proof: it places the cell in this
+         sub's own frame. *)
+      let anchored =
+        not (Core.Set.is_empty (Exp.free_vars addr))
+        && Core.Set.for_all (Exp.free_vars addr) ~f:stack_anchor in
       let reentry = Core.Set.mem cells addr in
       if not anchored then false
       else if reentry then true
