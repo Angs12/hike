@@ -33,7 +33,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     if info.Convutils.regions <> [] then info.Convutils.regions
     else
       Model.regions_of_sub sp target sub info
-        ~frame_escaped:(Model.frame_escapes sp target sub)
+        ~frame_escaped:(Model.frame_escapes sp target sub info)
   in
   let region_by_tid : Convutils.region Tid.Map.t =
     Base.List.fold_left regions ~init:Tid.Map.empty ~f:(fun m r ->

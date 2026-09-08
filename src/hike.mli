@@ -33,16 +33,14 @@ module Stack_model : sig
   (** Returns split regions, or [[]] for the single-frame fallback. *)
   val split_plan :
     var -> Theory.Target.t -> sub term -> Convutils.vsa_info ->
-    Convutils.split_plan
+    frame_escaped:bool -> Convutils.split_plan
 
-  (** Tests whether a derived value escapes. *)
-  val sp_escaped : var -> Theory.Target.t -> sub term -> bool
-
-  (** Tests for reads through a materialized frame pointer. *)
-  val frame_addr_alias : var -> Theory.Target.t -> sub term -> bool
-
-  (** Tests whether the frame is reachable from outside. *)
-  val frame_escapes : var -> Theory.Target.t -> sub term -> bool
+  (** Tests whether a derived frame value escapes to a call or memory.
+       Load-bearing (2026-09-08): the callee's access through an escaped
+       frame pointer is untaggable in principle, so the caller is the only
+       sub that can keep that cell unconverted. *)
+  val frame_escapes : var -> Theory.Target.t -> sub term ->
+    Convutils.vsa_info -> bool
 
   (** Returns the region alloca size. *)
   val region_bytes : Convutils.region -> int64

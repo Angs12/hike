@@ -316,59 +316,6 @@
  (flags
   (:standard -g -alert -deprecated)))
 (executable
- (name f67census)
- (modules f67census)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated)))
-(executable
- (name nc_autopsy)
- (modules nc_autopsy)
- (enabled_if (= %{profile} vsa-debug))
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated)))
-(executable
- (name wshare)
- (modules wshare)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated)))
-
-(executable
  (name census)
  (modules census)
  (libraries

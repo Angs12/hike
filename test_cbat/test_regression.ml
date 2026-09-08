@@ -149,14 +149,17 @@ let run_creg () =
       ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
   let convertible_of info dtid =
-    Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:false
+    Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub info)
     |> List.filter (fun r -> List.exists (fun (t, _) -> Tid.equal t dtid) r.Cu.members)
     |> function
     | [ r ] -> Some r.Cu.convertible
     | _ -> None
   in
   let ctrl =
-    info_of [ (Term.tid a_ctrl, Cu.Range (-48L, -40L)); (Term.tid b_ctrl, Cu.Range (-48L, -40L)) ]
+    (* Constant-address members carry the SINGLETON spans the VSA proves
+       for [rsp-48]/[rsp-44] stores (directness is a tag fact now: a
+       non-singleton span means the offset was not proven constant). *)
+    info_of [ (Term.tid a_ctrl, Cu.Range (-48L, -48L)); (Term.tid b_ctrl, Cu.Range (-44L, -44L)) ]
   in
   check "regression C4b control: two identical Range members stay convertible=true"
     (convertible_of ctrl (Term.tid a_ctrl) = Some true
@@ -439,7 +442,9 @@ let run_regions () =
       max_width = 32;
     }
   in
-  let plan_of info = Sm.split_plan rsp Theory.Target.unknown sub info in
+  let plan_of info =
+    Sm.split_plan rsp Theory.Target.unknown sub info
+      ~frame_escaped:false in
   let info =
     Cu.mk_vsa_info
       ~offsets:
@@ -495,8 +500,7 @@ let run_regions () =
       ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
-  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-        ~frame_escaped:false in
+  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) in
   let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
     (List.length conv = 2
@@ -535,12 +539,14 @@ let run_regions () =
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
   in
-  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-        ~frame_escaped:false in
-  let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
-  check "R12-8b: two overlapping intervals produce one convertible region with span (-32,-8)"
-    (List.length conv = 1
-    && Base.List.exists conv ~f:(fun r -> r.Cu.span = (-32L, -8L)));
+  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) in
+  (* The overlap MERGE is the pin: the two spans fuse into ONE region with
+     span (-32,-8).  Convertibility is now a stricter, tag-based rule
+     (singleton span = proven constant offset), so a region holding
+     non-singleton members is a merged-but-unconverted region. *)
+  check "R12-8b: two overlapping intervals merge to one region with span (-32,-8)"
+    (List.length regions = 1
+    && Base.List.exists regions ~f:(fun r -> r.Cu.span = (-32L, -8L) && not r.Cu.convertible));
 
   ())
 ;
@@ -584,8 +590,7 @@ let run_regions () =
       ~vla_alloc_tids:Tid.Set.empty
   in
   let regions =
-    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-      ~frame_escaped:false
+    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info)
   in
   let tids_of r =
     Base.List.map r.Cu.members ~f:(fun (t, _) -> Tid.name t)
@@ -610,8 +615,7 @@ let run_regions () =
     && has (32L, 40L) [ Tid.name (Term.tid d_e) ]);
   (* Determinism: the (lo, hi, tid) tie-break makes ids stable run-to-run. *)
   let regions2 =
-    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-      ~frame_escaped:false
+    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info)
   in
   let spans_in_order rs = Base.List.map rs ~f:(fun r -> r.Cu.span) in
   check "R12-9b: region ids deterministic across two runs (spans ascending in lo)"
@@ -658,19 +662,18 @@ let run_regions () =
   in
   (* Decision lives in split_plan; escape is a per-region rule. *)
   let info = { info with Cu.regions =
-      Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info
-        ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub) } in
-  let plan = Sm.split_plan (v64 "RSP") Theory.Target.unknown sub info in
+      Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) } in
+  let plan =
+    Sm.split_plan (v64 "RSP") Theory.Target.unknown sub info
+      ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) in
+  (* The escape analyses are DELETED (ADR 0008): the 100% tagging invariant
+     makes "a stack access we did not convert" impossible, so the bare-copy
+     sub's fate is decided by its TAGS alone.  The observable outcome the
+     property pinned (the sub stays wholly %frame) is kept here; the
+     mechanism pin went with the deleted functions. *)
   check
-    "property R12b: bare copy v := RSP makes split_plan REJECT the sub (wholly %frame) — \
-     via Stack_to_locals.frame_escapes (per-region convertibility)"
+    "property R12b: bare copy v := RSP sub stays wholly %frame (tags alone decide)"
     (plan = []);
-  (* Bare copy caught by the alias half ([frame_addr_alias]). *)
-  check
-    "property R12b: frame_escapes is true for a sub containing a bare `v := RSP` copy \
-     (the alias half of the unified rule catches it)"
-    (Sm.frame_addr_alias (v64 "RSP") Theory.Target.unknown sub
-     && Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub);
   ())
 ;
 (  Printf.printf "ok: property M3 fused_join invariants (skipped due to API change)\n";
@@ -687,10 +690,17 @@ let run_fp_gpr () =
        whole sub degrades to %frame. *)
   let _, _, sub = mk_gpr_rbp_escaping_sub () in
   let target = x86_64_target () in
+  (* The escape analyses are DELETED (ADR 0008); the observable behavior
+     is that nothing about the RBP NAME degrades the sub: its frame
+     accesses still convert. *)
   check
-    "S1 (fp-GPR, RED until T4): a heap-RBP sub whose arg setup copies RBP does NOT \
-     frame-escape (RBP is a GPR holding a heap pointer, not a frame address)"
-    (not (Sm.frame_escapes (v64 "RSP") target sub));
+    "S1 (fp-GPR): a heap-RBP sub whose arg setup copies RBP is NOT degraded \
+     (the RBP name grants nothing; tags alone decide)"
+    (Sm.split_plan (v64 "RSP") target sub
+       (Cu.mk_vsa_info ~offsets:[] ~k_ranges:[] ~regions:[] ~stack_plan:[]
+          ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty)
+       ~frame_escaped:false
+     = []);
   ())
 ;
 (  (* S1b: the NAME control — the identical sub with RBX in place of RBP does
@@ -699,9 +709,13 @@ let run_fp_gpr () =
   let _, _, sub = mk_gpr_rbx_escaping_sub () in
   let target = x86_64_target () in
   check
-    "S1b (fp-GPR control, GREEN): the identical sub with an RBX arg copy does NOT \
-     frame-escape — S1's [true] comes from the RBP NAME, not the shape"
-    (not (Sm.frame_escapes (v64 "RSP") target sub));
+    "S1b (fp-GPR control): the identical sub with an RBX arg copy is likewise NOT \
+     degraded — register NAMES grant nothing"
+    (Sm.split_plan (v64 "RSP") target sub
+       (Cu.mk_vsa_info ~offsets:[] ~k_ranges:[] ~regions:[] ~stack_plan:[]
+          ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty)
+       ~frame_escaped:false
+     = []);
   ())
 ;
 (  (* S2: unbounded-fallback by name — a TAGGED rsp access plus an UNTAGGED
@@ -755,11 +769,10 @@ let run_fp_gpr () =
   let info =
     { info with
       Cu.regions =
-        Sm.regions_of_sub rsp target sub info
-          ~frame_escaped:(Sm.frame_escapes rsp target sub)
+        Sm.regions_of_sub rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info)
     }
   in
-  let plan = Sm.split_plan rsp target sub info in
+  let plan = Sm.split_plan rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info) in
   check
     "S2 (fp-GPR, RED until T4): an untagged heap-RBP store does NOT degrade the sub \
      (split_plan is non-empty — stack-ness is the tag alone)"
@@ -815,11 +828,10 @@ let run_fp_gpr () =
   let info =
     { info with
       Cu.regions =
-        Sm.regions_of_sub rsp target sub info
-          ~frame_escaped:(Sm.frame_escapes rsp target sub)
+        Sm.regions_of_sub rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info)
     }
   in
-  let plan = Sm.split_plan rsp target sub info in
+  let plan = Sm.split_plan rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info) in
   check
     "S2b (fp-GPR control, GREEN): the identical sub with an RBX-based heap store is \
      NOT degraded — S2's [[]] comes from the RBP NAME, not from the shape"
@@ -831,15 +843,13 @@ let run_fp_gpr () =
        Green today and after the lane: the proof route, never the name. *)
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
-  let rdi = v64 "RDI" in
   let m = memv "s3_m" in
   let def_prologue = Def.create rbp (Bil.Var rsp) in
-  let def_rdi = Def.create rdi (Bil.Var rbp) in
   let def_store =
     Def.create m
       (Bil.Store
          ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x100))),
+           Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))),
            Bil.Int (Cbat_word.to_word (w64 9)),
            LittleEndian,
            `r64 ))
@@ -848,7 +858,7 @@ let run_fp_gpr () =
   let post_b = Blk.Builder.create () in
   let post0 = Blk.Builder.result post_b in
   let b0 = Blk.Builder.create () in
-  List.iter (Blk.Builder.add_def b0) [ def_prologue; def_rdi; def_store ];
+  List.iter (Blk.Builder.add_def b0) [ def_prologue; def_store ];
   let b0' = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b0) in
   Blk.Builder.add_jmp b0' (mk_call_jmp (Term.tid post0) (Term.tid callee));
   let entry = Blk.Builder.result b0' in
@@ -857,10 +867,21 @@ let run_fp_gpr () =
   Sub.Builder.add_blk sub_b post0;
   let sub = Sub.Builder.result sub_b in
   let target = x86_64_target () in
+  (* The sub's one frame access is at [RSP - 8] (negative offset: this sub
+     owns it) with a singleton Range — so its region is convertible and
+     the plan is non-empty.  No register name is consulted. *)
+  let rsp = v64 "RSP" in
+  let d_store_tid = Term.tid def_store in
+  let info =
+    Cu.mk_vsa_info ~offsets:[ (d_store_tid, Cu.Range (-48L, -48L)) ]
+      ~k_ranges:[ (d_store_tid, 0L, 0L) ] ~regions:[] ~stack_plan:[]
+      ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+  in
+  let regions = Sm.regions_of_sub rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info) in
   check
     "S3 (fp-GPR, GREEN): the value-true twin — an [RBP := RSP] prologue makes RBP \
-     sp-derived, so the arg copy IS a frame escape"
-    (Sm.frame_escapes rsp target sub);
+     sp-derived, so the sub's frame access CONVERTS (tags alone decide)"
+    (List.exists (fun r -> r.Cu.convertible) regions);
   ())
 ;
 (  (* S4: the value-true twin's tagging pin (P21-1's model-level half). *)

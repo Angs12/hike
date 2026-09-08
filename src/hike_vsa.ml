@@ -55,14 +55,15 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
           ~vla_alloc_tids:alloc_tids
       in
       let base_info = mk ~regions:[] ~vla_bounds ~stack_plan:[] in
-      (* Escape verdict shared by regions and plan. *)
-      let frame_escaped = Hike_stack_model.frame_escapes sp target sub in
+      let frame_escaped = Hike_stack_model.frame_escapes sp target sub base_info in
       let regions =
         Hike_stack_model.regions_of_sub sp target sub base_info ~frame_escaped
       in
       let base = mk ~regions ~vla_bounds ~stack_plan:[] in
       (* Computes the stack plan on the pre-rewrite sub. *)
-      { base with Convutils.stack_plan = Hike_stack_model.split_plan sp target sub base }
+      { base with
+    Convutils.stack_plan =
+      Hike_stack_model.split_plan sp target sub base ~frame_escaped }
     in
     let probe_res =
       (* Runs the fixpoint; non-convergence degrades to no tags. *)
