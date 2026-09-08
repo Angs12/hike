@@ -32,10 +32,25 @@ ticket is the tree's standing documentation:
    prologue-earn migration) so the next session finds it without re-deriving the
    grill.
 
-## Gates
+## Done (this session — f206faf + AGENTS.md refresh)
 
-Docs-only: full battery is already green at 07's tip; this ticket must change no
-code (any code smell found during the doc sweep becomes its own ticket, not a
-rider). The AGENTS.md timestamp-honesty directive is the gate: an agent reading
-only this section must be able to distinguish its own regressions from inherited
-ones.
+- Spec + ticket 06/07 updated to the no-gates ruling (commit f206faf); the
+  AGENTS.md CURRENT VALIDATION STATE carries a dated 2026-09-09 entry with the
+  fresh numbers, and principle #8's Target-Defined-SP bullet gains the SP-only
+  grant. The remaining prose sweep of the HISTORICAL (bracketed) session records
+  is optional — they are labeled records, not current-state — and the stack-model
+  escape prose is already the SP-seeded closure wording.
+- **AGENTS.md Gotchas — entries learned this session:**
+  - **Constant-folded native-FP ops**: a fixture that feeds a CONSTANT operand
+    temp (`intrinsic:x0 := 0x4059`) makes LLVM fold the sitofp/fmul away — the
+    emission check sees no op. Feed non-constant operand temps to pin the REAL
+    instruction. (Constant folding also masks the sig-table fallback: an undef/
+    constant fallback operand is folded, and the native-op binop sidesteps LLVM's
+    value modulus — a `831 := 832 mod 15` sits undeleted.)
+  - **The mapped-intrinsic operand source is the STATIC table, not the sig**:
+    `fp_op_inputs` resolves each operand from the block's `intrinsic:xN` temp.
+    A signature-table fallback for a call target outside the sig map substitutes
+    a calling-convention lane (RDI, ...) — register lanes are the -O2 GPR class
+    the lane deletes, never the interface.
+- The provenance lane's one-paragraph brief is in `verdict.md` (the dual-lane
+  bits, the channel-2 gate, the fixture prologue-earn migration).

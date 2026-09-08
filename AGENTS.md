@@ -162,7 +162,7 @@ coreutils differential gate in `.scratch/restriction-removal/spec.md` §5.
    the stack to LLVM allocas / static variables — it should work on EVERY
 8. **STRICT CONTEXT.md ADHERENCE & NO AD-HOC BIL PATTERN MATCHING.**
    - **No AST Pattern Matching for Memory or Registers**: Never write structural `match` patterns over BIL constructors (`Bil.Load`, `Bil.Store`, `Bil.Cast`, etc.) or inspect memory operands directly. Use `Exp.visitor` or `Term.visitor` exclusively.
-   - **Target-Defined Stack Pointer (`Abi.sp`)**: Never hardcode register strings like `"RSP"` or `"RBP"` or check for frame pointers. `Abi.sp` is the sole origin for stack derivation. (2026-08-31: `Targetutils` and `Calling_conventions` are DELETED — the standalone `Hike_abi` library (unwrapped, module `Abi` inside each consumer via a one-line alias; exported as `Hike.Abi`) is the ONLY home of register lists, register predicates, and convention facts, shared by the vendored VSA libraries and production. NOTE: the module must never be named `Abi` at the LIBRARY level — BAP ships its own core `abi` plugin (module `Abi`, dynlinked into every bap process), and a bundle-internal `Abi` fails at load with "interface mismatch on Abi"; hence the library/module `hike_abi`/`Hike_abi`.)
+   - **Target-Defined Stack Pointer (`Abi.sp`)**: Never hardcode register strings like `"RSP"` or `"RBP"` or check for frame pointers. `Abi.sp` is the sole origin for stack derivation. **SP-only (ADR 0008): RBP/fp is an ordinary callee-saved GPR — the `Abi.fp` field, `is_fp`, `is_stack_reg` are DELETED; a register's stack-ness is PROVEN by the value-based VSA tag, never assumed by name.** (2026-08-31: `Targetutils` and `Calling_conventions` are DELETED — the standalone `Hike_abi` library (unwrapped, module `Abi` inside each consumer via a one-line alias; exported as `Hike.Abi`) is the ONLY home of register lists, register predicates, and convention facts, shared by the vendored VSA libraries and production. NOTE: the module must never be named `Abi` at the LIBRARY level — BAP ships its own core `abi` plugin (module `Abi`, dynlinked into every bap process), and a bundle-internal `Abi` fails at load with "interface mismatch on Abi"; hence the library/module `hike_abi`/`Hike_abi`.)
    - **100% VSA Tagging Invariant**: Every definition with a `stack_access` tag MUST receive a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). Untagged stack accesses are strictly prohibited.
    - **Lattice and Abstract Domain Values**: Dataflow propagation must operate over abstract sets and lattice values, distinguishing pointer arithmetic from memory values without AST inspecting hacks.
 
@@ -430,6 +430,44 @@ call `Kb.provide` explicitly at their own sites (the global KB write
 stays visible where it happens).
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-09 EEST — SP-ONLY STACK SEMANTICS lane (branch
+`sp-only-stack-semantics`, ADR 0008; code tickets 01-07 + doc ticket 08) —
+BATTERY GREEN at `f206faf`, the fp-as-ordinary-GPR conversion complete**
+
+The lane (ADR 0008, spec `.scratch/sp-only-stack-semantics/spec.md`):
+**SP is the only register granted stack semantics by fiat.** RBP/fp is an ordinary
+callee-saved GPR; its stack-ness is PROVEN (the value-based VSA tag), never assumed
+by name. GATES: none — the emission inspects nothing (no shape checks, no
+base-name tests, no spill rule). The key deletions: the `Abi.fp` field + `is_fp`/
+`is_stack_reg` (RBP joins `callee_saved`), `fp_anchor`'s invented entry binding,
+and the whole 32-bit spill apparatus (`u32_slots_of_sub`, `cast_source_width`,
+`has_32bit_extract`) — SFLOAT now emits `sitofp` at the operand's own LLVM type.
+NEW: the static model-interface table `fp_op_inputs` — the mapped intrinsic name
+IS the interface fact; `create_native_fp_call` resolves operands from the block's
+`intrinsic:xN` temps, never a sig-table fallback. Escape survived as a measured
+necessity (`frame_escapes` SP-seeded closure + tag-gated `frame_addr_alias`); the
+`-O2` corpus lane (`compile_corpus.sh <out>-o2`) is the class the lane serves.
+
+| gate (at `cedbb62`, the code tip) | result |
+|---|---|
+| unit suite | **516 ok / 0 FAIL** (the 4 fp-gpr pins are genuine by-construction: `:u64`→`sitofp i64`, `31:0`→`sitofp i32`) ✅ |
+| `dune runtest` (incl. referee) | **ALL PASSED**, clpequiv **2,861,148 / 0 mismatches** ✅ |
+| both profiles build | default + vsa-debug **rc=0** ✅ |
+| corpus emission (-O0) | **32/32 rc=0** (guarded = the 2 Unbounded knowns, identical to red3) ✅ |
+| IR vs red3-o0 | **29/32 byte-identical**; the 3 deltas are the single SFLOAT lane (trunc+sitofp-i32 → sitofp at the operand's own type, mixed_fp_int/union_overlap/va_arg_mixed) — semantically proven ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (-O0) | **32 PASS / 0 FAIL** ✅ |
+| optimization-safety (-O0 IR, opt -O2) | **32 PASS / 0 FAIL** ✅ |
+| -O2 corpus (T07, `<out>-o2`) | PIE-clean 32 bins; emission 32/32 rc=0; allocas 159/1 (out_struct, shape-d); semantics 24/8 — the -O2 class, same eight vs the pre-lane plugin, NOT a lane regression (see verdict.md) ✅ |
+| instrumentation blocker | clean (only `#ifdef VSA_DEBUG` diagnostics) ✅ |
+
+Artifacts: `/home/tovpr/sp-battery/{t06-o0,t06-o2,sem-t06-o0,sem-t06-o2}`,
+corpus `/home/tovpr/sp-corpus-o0` + the freshly built `/home/tovpr/sp-battery/corpus-test{-o2}`.
+TO-DO on the branch: the AGENTS.md prose sweep of the historical entries (1328-1502
+describe pre-lane `%frame` machinery as if current — they are bracketed session
+records, not current-state; the current-state principles and stack-model prose are
+correct), and the -O2 semantic numbers finalization (recorded in the lane verdict).
 
 **Last verified: 2026-09-08 EEST — CLEANUP-9 LANE (branch `cleanup-9`, 17
 commits: spec + tickets 01-09) — BATTERY GREEN, ≈ −2,400 LOC net, zero
