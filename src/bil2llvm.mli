@@ -59,7 +59,7 @@ val is_plt_trampoline : Convutils.emit_ctx -> sub term -> bool
 (** Degraded-path frame geometry: (bytes, anchor index, max width, anchor
     byte index). *)
 val degraded_dims :
-  ?abi:Hike_abi.t -> sub term -> int64 * int64 * int64 * int64
+  ?info:Convutils.vsa_info -> sub term -> int64 * int64 * int64 * int64
 
 (** Intrinsic facts shared with the filter pass. *)
 val is_intrinsic : sub term -> bool

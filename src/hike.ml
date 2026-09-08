@@ -136,7 +136,6 @@ let convert_binary output_program proj =
       target;
       abi = Abi.of_target target;
       sp = Abi.sp target;
-      fp = Abi.fp target;
       ptrsize;
     }
   in

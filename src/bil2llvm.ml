@@ -92,7 +92,7 @@ let update_phis transfer_vars blks sub () =
       update_phi transfer_vars blk_incoming blk_tid)
 
 (* Int edges trap. *)
-let create_control_flow llvm_builder blk sub fr ~u32_slots () =
+let create_control_flow llvm_builder blk sub fr () =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
@@ -108,7 +108,7 @@ let create_control_flow llvm_builder blk sub fr ~u32_slots () =
       create_indirect_call llvm_builder (Term.tid blk) call fr
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
-      create_call llvm_builder (Term.tid blk) blk sub call fr ~u32_slots
+      create_call llvm_builder (Term.tid blk) blk sub call fr
 
 let transfer_with_phis transfer_vars llvm_builder blk_tid () =
   let open KB in
@@ -141,14 +141,13 @@ let populate_blks transfer_vars blks sub sub_info fr () =
       ~f:(fun info -> info.Convutils.vla_alloc_tids)
   in
   (* 32-bit FP spill slots, computed once per sub. *)
-  let u32_slots = u32_slots_of_sub ~abi:ctx.Convutils.abi sub in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
       in
       transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
       >>= create_elts llvm_builder blk sub_tid sub_info fr alloc_tids
-      >>= create_control_flow llvm_builder blk sub fr ~u32_slots)
+      >>= create_control_flow llvm_builder blk sub fr)
 
 
 let exit_entry llvm_builder sub () =
@@ -259,8 +258,7 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
       Core.Set.mem def_set var
       || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
-      || Var.same var ctx.Convutils.sp
-      || Abi.is_callee_saved ctx.Convutils.abi var)
+      || Var.same var ctx.Convutils.sp)
   |> Core.Set.to_list
 
 
@@ -283,9 +281,12 @@ let build_frame_anchor llvm_ctx llvm_builder n anchor_idx =
   in
   (Some frame, anchor_idx, anchor_i64)
 
-let degraded_dims ?(abi : Abi.t = Abi.x86_64_sysv)
+let degraded_dims ?(info : Convutils.vsa_info = Convutils.empty_vsa_info)
     (sub : sub term) : int64 * int64 * int64 * int64 =
-  let max_dec, max_neg, max_pos = Hike_stack_model.degraded_geometry ~abi sub in
+  let max_dec, max_neg, max_pos, unbounded =
+    Hike_stack_model.degraded_geometry sub info
+  in
+  let max_neg = if unbounded then Int64.max max_neg 65536L else max_neg in
   let deepest = Int64.max max_dec max_neg in
   let deepest = Int64.max deepest 8L in
   let need = Int64.add deepest 8L in
@@ -327,7 +328,6 @@ let create_sub sub =
     
     clear_bbs ctx;
     clear_blk_llvals ctx;
-    let abi = ctx.Convutils.abi in
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
     (* Frame spans all tagged accesses. *)
     let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
@@ -349,7 +349,7 @@ let create_sub sub =
       if is_precise then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else if Core.Map.is_empty tags then begin
           if Base.Option.value_map sub_info ~default:false ~f:(fun info ->
-                info.Convutils.degraded) then begin            let n, _, _, anchor_idx = degraded_dims ~abi sub in
+                info.Convutils.degraded) then begin            let n, _, _, anchor_idx = degraded_dims ~info:(Option.value sub_info ~default:Convutils.empty_vsa_info) sub in
             let frame, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx in
             (frame, anchor_idx, anchor_i64)
           end
@@ -585,7 +585,6 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              (* Explicit fp test: RBP joins [callee_saved] only at T6. *)
              not
                (Var.same reg (Abi.sp target)
-               || Var.same reg (Abi.fp target)
                || is_callee_saved
                || Convutils.is_intrinsic_name n))
          |> Base.List.sort ~compare:(fun a b ->

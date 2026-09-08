@@ -27,7 +27,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let is_abi_visible = Model.is_abi_visible sp ~tag_of ~k_of ~last_push_tids in
   (* ABI record, resolved once: the per-node check below runs on every
      address expression of every converted def. *)
-  let abi = Abi.of_target target in
   (* Regions come from the VSA result. *)
   let regions =
     if info.Convutils.regions <> [] then info.Convutils.regions
@@ -51,21 +50,19 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     | None -> 64
   in
   (* Conversion table: address -> slot or region shape. *)
-  (* Returns the address base the region base replaces. *)
+  (* Returns the address base the region base replaces.  Callers reach it
+     only for TAGGED, convertible region members (the tag IS the
+     frame-residency proof, and any provable base counts — the -O0
+     [RBP - k] shape, a hand-asm R12 frame pointer, anything the VSA
+     proved); the old sp/fp-by-name test was dead conservatism. *)
   let base_exp_of (addr : exp) : exp =
-    let is_stack_reg v = Abi.is_stack_reg abi (Var.base v) in
-    let is_sf (e : exp) : bool =
-      match e with
-      | Bil.Var v -> is_stack_reg v
-      | Bil.Cast (_, _, Bil.Var v) -> is_stack_reg v
-      | _ -> false
-    in
     let rec go (e : exp) : exp option =
       match e with
       | Bil.BinOp (_, a, b) ->
           (match go a with Some x -> Some x | None -> go b)
       | Bil.Cast (_, _, a) -> go a
-      | _ -> if is_sf e then Some e else None
+      | Bil.Var _ -> Some e
+      | _ -> None
     in
     match go addr with Some b -> b | None -> addr
   in

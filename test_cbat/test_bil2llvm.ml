@@ -81,8 +81,10 @@ let run_fp_table () =
      not sampled. Unary rows take one x-def, binary rows two. *)
   let d0 = ivar64 "intrinsic:x0" in
   let d1 = ivar64 "intrinsic:x1" in
-  let x0_def = Def.create d0 (Bil.Int (Cbat_word.to_word (w64 0x4059))) in
-  let x1_def = Def.create d1 (Bil.Int (Cbat_word.to_word (w64 0x4008))) in
+  (* Non-constant operand temps: a constant folds away in LLVM, and the
+     emission check must see the REAL instruction. *)
+  let x0_def = Def.create d0 (Bil.Var (v64 "fp_arg0")) in
+  let x1_def = Def.create d1 (Bil.Var (v64 "fp_arg1")) in
   let unary (op : B2l.native_fp) : bool =
     match op with
     | B2l.SFLOAT | B2l.SINT | B2l.ISNAN | B2l.FHLT -> true
@@ -429,15 +431,31 @@ let run_fp_gpr_cast () =
   in
   let ir_rbp = cast_ir "RBP" in
   let ir_rbx = cast_ir "RBX" in
+  (* Spill-slot detection is DELETED (ADR 0008, no gates): the cast's
+     source width is the operand value's own LLVM type — the lifter's
+     extract chain builds i32, a plain [:u64] load builds i64.  No
+     register name, no tag test: every base behaves identically. *)
   check
-    "FP-GPR (RED until T5): a 32-bit store at [RBP + w] with RBP holding a NON-STACK \
-     value does NOT pick the i32 sitofp source width (spill detection is tag-gated, \
-     not name-gated)"
-    (not (contains_substring ir_rbp "sitofp i32"));
-  (* The name control: the identical sub on a non-fp GPR already behaves. *)
+    "FP-GPR: a [:u64] load feeds sitofp i64 regardless of the address base \
+     (no spill-slot rule, no name test)"
+    (contains_substring ir_rbp "sitofp i64"
+    && contains_substring ir_rbx "sitofp i64"
+    && not (contains_substring ir_rbp "sitofp i32")
+    && not (contains_substring ir_rbx "sitofp i32"));
+  (* The by-construction i32 case: the lifter's own extract chain. *)
+  let ir_ext =
+    let base = v64 "RAX" in
+    let d_x0 =
+      Def.create (ivar64 "intrinsic:x0")
+        (Bil.Extract (31, 0, Bil.Var base))
+    in
+    let intr = "intrinsic:cast_sfloat_rne_ieee754_binary_64" in
+    emit_ir (mk_fp_program intr [ d_x0 ])
+  in
   check
-    "FP-GPR (GREEN control): the identical RBX-based store does not pick the i32 width"
-    (not (contains_substring ir_rbx "sitofp i32"));
+    "FP-GPR: the lifter's own [31:0] extract feeds sitofp i32 (the width \
+     is the value's type, by construction)"
+    (contains_substring ir_ext "sitofp i32");
   ()
 
 (* ------------------------------------------------------------------ *)

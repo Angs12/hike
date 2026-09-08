@@ -11,23 +11,6 @@ open Bil2llvm_env
 open Bil2llvm_exp
 
 
-(* 32-bit FP spill slots of a sub, computed once per sub. *)
-let u32_slots_of_sub ~(abi : Abi.t) (sub : sub term) : int64 list =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:[] ~f:(fun acc b ->
-         Term.enum def_t b
-         |> Seq.fold ~init:acc ~f:(fun acc d ->
-                match Def.rhs d with
-                | Bil.Store (_, addr, _, _, s) when Size.in_bits s = 32 -> (
-                    match addr with
-                    | Bil.BinOp (Bil.PLUS, Bil.Var bv, Bil.Int w)
-                      when Abi.is_fp abi (Var.base bv) ->
-                        Word.to_int64_exn w :: acc
-                    | Bil.Var bv when Abi.is_fp abi (Var.base bv) ->
-                        0L :: acc
-                    | _ -> acc)
-                | _ -> acc))
-
 (* Restores SP after calls. *)
 let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
   let open KB in
@@ -460,40 +443,17 @@ let native_fp_op (name : string) : native_fp option =
   | "intrinsic:hlt" -> Some FHLT
   | _ -> None
 
+(* The STATIC model interface of each mapped op: the input temps the call
+   block must define, in order.  The name IS the interface fact — operand
+   resolution reads these temps directly, never a signature-table fallback
+   and never a register lane. *)
+let fp_op_inputs = function
+  | FMUL | FADD | FSUB | FDIV | FREM | FORDER ->
+      [ "intrinsic:x0"; "intrinsic:x1" ]
+  | SFLOAT | SINT | ISNAN -> [ "intrinsic:x0" ]
+  | FHLT -> []
+
 (* Tests for 32-bit sources. *)
-let rec has_32bit_extract (e : exp) : bool =
-  match e with
-  | Bil.Extract (31, _, _) -> true
-  | Bil.Extract (_, _, e') -> has_32bit_extract e'
-  | Bil.BinOp (_, a, b) -> has_32bit_extract a || has_32bit_extract b
-  | Bil.Cast (_, _, e') -> has_32bit_extract e'
-  | _ -> false
-
-(* Returns a cast source width. *)
-(* The x0 interface temp the width derivation reads. *)
-let x0_temp_name = "intrinsic:x0"
-
-(* Returns a cast source width from precomputed per-sub slots. *)
-let cast_source_width ~(abi : Abi.t) ~u32_slots (blk : blk term) : int =
-  match
-    Term.enum def_t blk
-    |> Seq.find ~f:(fun d ->
-           String.equal (Var.name (Var.base (Def.lhs d))) x0_temp_name)
-  with
-  | None -> 64
-  | Some d -> (
-      match Def.rhs d with
-      | e when has_32bit_extract e -> 32
-      | Bil.Load (_, addr, _, _) -> (
-          match addr with
-          | Bil.BinOp (Bil.PLUS, Bil.Var bv, Bil.Int w)
-            when Abi.is_fp abi (Var.base bv) ->
-              if Base.List.mem ~equal:Int64.equal u32_slots (Word.to_int64_exn w)
-              then 32
-              else 64
-          | _ -> 64)
-      | _ -> 64)
-
 (* Builds a width-aware FP binop. *)
 (* Returns width-derived FP/int types. *)
 let fp_ty_of (llvm_ctx : Llvm.llcontext) (w : int) :
@@ -563,7 +523,7 @@ let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
   (arg_w 0, res_w)
 
 (* Emits native FP ops inline. *)
-let create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots =
+let create_native_fp_call llvm_builder blk_tid blk call op =
   let open KB in
   match op with
   | FHLT ->
@@ -572,7 +532,6 @@ let create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots =
   | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | ISNAN ->
       let* llvm_ctx = Context.get llvm_ctx_var in
       let* ctx = Context.get emit_ctx_var in
-      let abi = ctx.Convutils.abi in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -582,12 +541,15 @@ let create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots =
   (* Operand temps indexed once per call. *)
   let temp_rhss = temp_rhss_of_blk blk in
   let arg_value (i : int) : Llvm.llvalue KB.t =
-    (* Resolves operands from declared arg vars. *)
-    let arg = Base.List.nth_exn args i in
-    let av = Var.base (Arg.lhs arg) in
+    (* Resolves operands from the op's STATIC input temps: the mapped name
+       is the interface, so the [intrinsic:xN] temp the block defined IS
+       the operand — a signature-table miss can never substitute a
+       register lane for it. *)
+    let name = Base.List.nth_exn (fp_op_inputs op) i in
+    let av = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 64) in
     match Core.Map.find temp_rhss av with
     | Some rhs -> create_exp llvm_builder blk_tid rhs
-    | None -> create_exp llvm_builder blk_tid (Arg.rhs arg)
+    | None -> create_exp llvm_builder blk_tid (Bil.Var av)
   in
   (* Integer width of a value, defaulting to the declared input width. *)
   let w_of = int_width_or in_w in
@@ -600,20 +562,12 @@ let create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots =
         let w = min (w_of a) (w_of b) in
         build_fp_binop llvm_builder op a b ~w
     | SFLOAT ->
-        (* Int-to-FP casts use source width. *)
+        (* Int-to-FP casts: the source width IS the operand value's own
+           LLVM type — the lifter's extract/cast chain built it (an
+           [x0 := 31:0[RAX]] read is i32; a [:u64] load is i64).  No BIL
+           inspection, no slot lists, no width tests: [sitofp] converts at
+           the operand's own width. *)
         let* x = arg_value 0 in
-        let src_w = cast_source_width ~abi ~u32_slots blk in
-        let int_src_ty =
-          if src_w = 32 then Llvm.i32_type llvm_ctx
-          else Llvm.i64_type llvm_ctx
-        in
-        let x =
-          if src_w = 32
-             && Llvm.classify_type (Llvm.type_of x) = Llvm.TypeKind.Integer
-             && Llvm.integer_bitwidth (Llvm.type_of x) > 32
-          then Llvm.build_trunc x int_src_ty "" llvm_builder
-          else x
-        in
         (* Converts use result width. *)
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
         let* d =
@@ -718,7 +672,7 @@ let create_external_intrinsic_call llvm_builder blk_tid call name =
    | _ -> ());
   finish_call llvm_builder ctx (Option.map label_tid (Call.return call))
 
-let create_call llvm_builder blk_tid blk sub call fr ~u32_slots =
+let create_call llvm_builder blk_tid blk sub call fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let target = Call.target call |> label_tid in
@@ -728,7 +682,7 @@ let create_call llvm_builder blk_tid blk sub call fr ~u32_slots =
     create_interrupt llvm_builder
   else
     match native_fp_op (Tid.name target) with
-    | Some op -> create_native_fp_call llvm_builder blk_tid blk call op ~u32_slots
+    | Some op -> create_native_fp_call llvm_builder blk_tid blk call op
     | None ->
         (* Unmapped intrinsics warn and degrade. *)
         if Convutils.is_intrinsic_name name then begin

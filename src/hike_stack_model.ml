@@ -612,35 +612,46 @@ let align16_up n =
   let r = Int64.rem n 16L in
   if Int64.equal r 0L then n else Int64.add n (Int64.sub 16L r)
 
-(* Frame-geometry triple: deepest SP/FP decrement, deepest negative and
-   positive access extents. One fold over the sub's defs. *)
-let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
-  let is_sp_or_fp v = Abi.is_stack_reg abi (Var.base v) in
-  let update (max_dec, max_neg, max_pos) d =
-    let max_dec =
-      match Def.rhs d with
-      | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w) when is_sp_or_fp r ->
-          Int64.max max_dec (Word.to_int64_exn w)
-      | _ -> max_dec
-    in
-    match Def.rhs d with
-    | Bil.Load (_, addr, _, s) | Bil.Store (_, addr, _, _, s) -> (
-        let sz = Int64.of_int (Size.in_bytes s) in
-        match addr with
-        | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int w) when is_sp_or_fp b ->
-            let disp = Word.to_int64_exn w in
-            if Int64.compare disp 0L < 0 then
-              ( max_dec,
-                Int64.max max_neg (Int64.add (Int64.neg disp) sz),
-                max_pos )
-            else
-              (max_dec, max_neg, Int64.max max_pos (Int64.add disp sz))
-        | _ -> (max_dec, max_neg, max_pos))
-    | _ -> (max_dec, max_neg, max_pos)
+(* Frame-geometry triple: deepest SP decrement (the granted fact: catches
+   rsp-sub prologues and VLAs), and the deepest negative and positive
+   access extents.  Extents come from the TAGS (ADR 0008): a tagged
+   access's proven offset span IS its extent; an untagged access never
+   touches the fallback frame (it emits through the real-address lane). *)
+let degraded_geometry (sub : sub term)
+    (info : Convutils.vsa_info) : int64 * int64 * int64 * bool =
+  let is_sp v = Abi.is_sp Abi.x86_64_sysv (Var.base v) in
+  let max_dec =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:0L ~f:(fun acc blk ->
+           Term.enum def_t blk
+           |> Seq.fold ~init:acc ~f:(fun acc d ->
+                 match Def.rhs d with
+                 | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w)
+                   when is_sp r ->
+                     Int64.max acc (Word.to_int64_exn w)
+                 | _ -> acc))
   in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:(0L, 0L, 0L) ~f:(fun acc blk ->
-         Term.enum def_t blk |> Seq.fold ~init:acc ~f:update)
+  (* Tagged extents: Range/Infinite spans, Unbounded = the whole frame. *)
+  let max_neg, max_pos, has_unbounded =
+    Core.Map.fold info.Convutils.offsets
+      ~init:(0L, 0L, false)
+      ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (neg, pos, unb) ->
+        match kind with
+        | Convutils.Range (lo, hi) | Convutils.Infinite (lo, hi) ->
+            let neg =
+              if Int64.compare lo 0L < 0 then
+                Int64.max neg (Int64.neg (Int64.min lo 0L))
+              else neg
+            in
+            let pos =
+              if Int64.compare hi 0L > 0 then Int64.max pos hi else pos
+            in
+            (neg, pos, unb)
+        | Convutils.Unbounded -> (neg, pos, true)
+        | Convutils.Dead -> (neg, pos, unb)
+        | Convutils.VLA _ -> (neg, pos, true))
+  in
+  (max_dec, max_neg, max_pos, has_unbounded)
 
 (* Tests whether a VLA overlaps a convertible region. *)
 let vla_overlaps_convertible (info : Convutils.vsa_info)

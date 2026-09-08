@@ -85,7 +85,7 @@ let stores_of_sub (s : sub term) : def term list =
 (* Preserved registers. *)
 let preserved_of_sub (s : sub term) : Var.Set.t =
   let regs =
-    Abi.x86_64_sysv.sp :: Abi.x86_64_sysv.fp :: Abi.x86_64_sysv.callee_saved
+    Abi.x86_64_sysv.sp :: Abi.x86_64_sysv.callee_saved
     |> Var.Set.of_list in
   let virt =
     Term.enum blk_t s

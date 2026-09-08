@@ -5,14 +5,15 @@ open Bap_core_theory
 open Theory.Role.Register
 open Bap.Std.Bil.Types
 
-(* Convention record. *)
+(* Convention record.  There is NO frame-pointer fact: RBP is an ordinary
+   callee-saved GPR (ADR 0008 — SP is the only register granted stack
+   semantics by fiat). *)
 type t = {
   sp : var;                      (* stack pointer *)
-  fp : var;                      (* frame pointer *)
   int_param_regs : var list;     (* SysV integer/pointer arg registers *)
   vector_param_regs : var list;  (* FP/vector arg registers (YMM0-7) *)
   return_regs : var list;        (* integer return registers *)
-  callee_saved : var list;       (* callee-saved GPRs; RBP carried as [fp] *)
+  callee_saved : var list;       (* callee-saved GPRs (incl. RBP) *)
 }
 
 let param_regs t = t.int_param_regs @ t.vector_param_regs
@@ -22,7 +23,6 @@ let x86_64_sysv : t =
   let r256 name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 256) in
   {
     sp = r64 "RSP";
-    fp = r64 "RBP";
     int_param_regs =
       Base.List.map ~f:r64 [ "RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9" ];
     vector_param_regs =
@@ -30,13 +30,11 @@ let x86_64_sysv : t =
         (Base.List.map ~f:(fun i -> "YMM" ^ Base.Int.to_string i)
            (Base.List.range 0 8));
     return_regs = [ r64 "RAX"; r64 "RDX" ];
-    callee_saved = Base.List.map ~f:r64 [ "RBX"; "R12"; "R13"; "R14"; "R15" ];
+    callee_saved = Base.List.map ~f:r64 [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ];
   }
 
 (* Var-based predicates; Var.same compares names. *)
 let is_sp (t : t) (v : var) : bool = Var.same v t.sp
-let is_fp (t : t) (v : var) : bool = Var.same v t.fp
-let is_stack_reg (t : t) (v : var) : bool = is_sp t v || is_fp t v
 let is_callee_saved (t : t) (v : var) : bool =
   Base.List.exists t.callee_saved ~f:(Var.same v)
 (* Structural model-ABI lanes; never-defined reads here aggregate per-sub. *)
@@ -55,11 +53,6 @@ let sp target =
   match Theory.Target.reg target stack_pointer with
   | Some v -> Var.reify v
   | None -> x86_64_sysv.sp
-
-let fp target =
-  match Theory.Target.reg target frame_pointer with
-  | Some v -> Var.reify v
-  | None -> x86_64_sysv.fp
 
 let pc target =
   if Theory.Target.matches target "x86_64-gnu-elf" then
@@ -80,7 +73,6 @@ let of_target_opt (target : Theory.Target.t) : t option =
     Some
       {
         sp = sp target;
-        fp = fp target;
         int_param_regs = x86_64_sysv.int_param_regs;
         vector_param_regs = x86_64_sysv.vector_param_regs;
         return_regs = x86_64_sysv.return_regs;
