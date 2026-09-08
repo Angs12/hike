@@ -34,9 +34,13 @@ callee-saved GPR whose stack-ness — like any register's — is PROVEN, never a
   syntactically derived, value-unproven, a real frame address at runtime). RBP joins
   via its prologue def at -O0 (byte-identical closure), never at -O2 (the false-escape
   precision win).
-- **Per-def `base_const` fact** (directness/fission-binding/spill-gating): one new
-  per-def field in `vsa_info` — the address's base var and its constant frame offset
-  (its frame term when fconst-only); None when no Var base or the term carries fvars.
+- **The tag's own offset span** (directness/fission-binding/spill-gating): the tag
+  IS the proof. `vsa_kind = Range (lo,hi)` — a SINGLETON span is a proven constant
+  frame offset; `Infinite` varies; no tag means unproven. No new per-def fact is
+  added: a `base_const` (base var × constant) field was considered and REJECTED as
+  an ad-hoc re-derivation of what the tag already carries, and as LESS general (it
+  needs a base-var NAME, whereas the tag admits any provable base — including an
+  `R12`-as-frame-pointer).
 
 **Stack-ness of an ACCESS = the `vsa_info` tag alone** — under the 100% invariant the
 tag is the only carrier, so BOTH syntactic disjuncts of `has_unbounded_access`'s

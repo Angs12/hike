@@ -39,7 +39,17 @@ The three proof routes:
 |---|---|---|
 | Frame term (VSA tagging, channel 1) | `apply_frame_def_list` + `is_seed` — UNCHANGED (already value-based) | the tag itself |
 | SP-seeded syntactic closure (escape ONLY) | `sp_escaped`'s derived closure, re-seeded `{SP}` | escape analysis |
-| Per-def `base_const` fact (NEW) | the extraction walk (it holds the per-def state) | directness, fission binding, spill gating |
+| The tag's own offset span | `vsa_kind` = `Range (lo,hi)` — a SINGLETON span is a proven constant offset | directness, fission binding, spill gating |
+
+**No new per-def fact is added.** An earlier draft of this spec proposed a `base_const`
+(base var × constant offset) field; it is REJECTED by the generality argument: the VSA
+already proves the offset, and the proof travels in the tag. A per-def
+`base_const` would be an ad-hoc re-derivation of what `vsa_kind` already says —
+and less general (it would need a base var NAME, while the tag works for any
+provable base, including `R12`-as-frame-pointer). The three consumers reduce to
+the tag: directness = "the proven offset is constant" (singleton `Range`);
+fission binding = the base is the frame/region, no register name needed;
+spill gating = the tag's presence already means frame-resident.
 
 **Stack-ness of an ACCESS = the tag alone.** Both syntactic disjuncts of
 `has_unbounded_access`'s untagged arm drop (sp and fp). Untagged accesses emit through

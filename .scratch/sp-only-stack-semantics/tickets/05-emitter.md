@@ -1,5 +1,33 @@
 # Ticket 05 — Emitter: fp_anchor deletion, lane absorption, tag-gated spills
 
+Status: **LANDED (commit f96dbfb, merged to the PR branch as b9b4f50)** — items 1–4
+done, item 5 (u32 tag-gate) deferred to T03's tags.
+
+## Measured outcome (corrects two of this ticket's predictions)
+
+- `dune runtest` **507 ok / 0 FAIL** — count-identical to baseline.
+- -O0 corpus 32/32 rc=0; **semantic-all 32 PASS / 0 FAIL**; **semantic-opt 32 PASS /
+  0 FAIL**; **check_allocas 160/0**; err streams identical 32/32; 0 unmapped
+  intrinsics; zero new RBP undef-read warnings (231 both sides).
+- **IR byte-identity 31/32 — item 1 is -O0-VISIBLE, not invisible as predicted.**
+  Mechanism (verified in the emitted IR and the -O0 disassembly): the gcc -O0
+  prologue is `push %rbp; mov %rsp,%rbp`, and BAP lifts the push as
+  `mem[RSP−8] := RBP` — a READ of RBP that PRECEDES the prologue's
+  `RBP := RSP` def in the same entry block. The entry binding was supplying the
+  caller's RBP there; deleting it changes the stored value from a fabricated
+  `anchor−8` to undef, and a global SSA renumbering follows.
+  **Benign, proven by the semantic gates** (the stored slot is never read in the
+  corpus) — but the ADR/AGENTS note must say item 1 is -O0-visible, and any
+  future emission diff for this lane will carry that renumbering.
+- **Item 2 correction: `Abi.is_callee_saved` is NOT a superset of the old
+  `sp ∪ fp` test on this branch** — `callee_saved = [RBX;R12..R15]` and RBP lives
+  only in the `fp` field (verified `hike_abi.ml:35`). The fp disjunct therefore
+  STAYS until T06 folds RBP into the list; dropping it early would remove the
+  never-defined-RBP lane that item 1 deliberately introduces.
+- Callee-saved lanes (RBX/R12) **are** already threaded by `def_set` membership +
+  `transfer_with_phis`; RBP threads the same way at -O0. The sp/fp disjuncts only
+  govern the never-defined case.
+
 Blocking: 04. Blocks: 06. T1 fixtures 3, 4 flip GREEN here.
 
 ## Change
