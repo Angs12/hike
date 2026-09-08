@@ -26,6 +26,15 @@ val flatten_comps : comp list -> Tid.t list
 (* Heads of every nested SCC. *)
 val heads_of_comps : comp list -> Tid.Set.t
 
+(* Kosaraju SCC over any ordered key. *)
+module Scc (K : sig
+    type t
+    val compare : t -> t -> int
+  end) : sig
+  val partition :
+    K.t list -> (K.t -> K.t list) -> (K.t -> K.t list) -> K.t list list
+end
+
 (* Recursive SCC partition. *)
 val scc_partition :
   Tid.t list -> (Tid.t -> Tid.t list) -> (Tid.t -> Tid.t list) ->

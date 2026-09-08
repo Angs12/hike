@@ -160,10 +160,6 @@ module Make_indexed_from_map
   let filter_keys (t : t) ~(f : Key.t -> bool) : t =
     Option.map t ~f:(fun m -> Map.filter_keys m ~f)
 
-  (* No stored tops. *)
-  let canonize' (m : map) : map = m
-  let canonize : t -> t = Fn.id
-
   (* Shared fold for [precedes'] and [equal']. *)
   let fold2_both
       (branch : [ `Left of L.t | `Right of L.t | `Both of L.t * L.t ] -> bool)

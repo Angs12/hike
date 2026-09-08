@@ -83,6 +83,20 @@ type refine_ctx = {
   rc_blocks : blk term Tid.Map.t;
 }
 
+(* Record-update helpers: the triple-nested ctx/state updates in one
+   place, used by every memo/transfer update site. *)
+let with_cache (rc : refine_ctx) (cache : Walk_memo.t) : refine_ctx =
+  { rc with rc_state = { rc.rc_state with fs_cache = cache } }
+
+let with_sol ?(versions : int Tid.Map.t option = None) (rc : refine_ctx)
+    (sol : AI.t Tid.Map.t) : refine_ctx =
+  { rc with
+    rc_state =
+      { rc.rc_state with
+        fs_sol = sol;
+        fs_versions =
+          Option.value ~default:rc.rc_state.fs_versions versions } }
+
 (* Last understood flag-setting comparison. *)
 
 
