@@ -6,21 +6,24 @@ Hike lifts x86-64 ELF binaries to LLVM IR, splitting the flat stack into LLVM al
 
 ### Stack model
 
-**Stack Access**: A Load/Store def whose address the VSA proves frame-resident: either directly (an affine address over frame-derived registers — a widened frame-affine address still counts) or through a reloaded address (a bounded value set contained in the frame neighborhood — subset, never intersect; a top or heap-valued address is not frame-resident).
+**Stack Access**: A Load/Store def whose address the VSA proves frame-resident: either directly (an affine address over sp-derived registers — a widened sp-derived address still counts) or through a reloaded address (a bounded value set contained in the frame neighborhood — subset, never intersect; a top or heap-valued address is not frame-resident).
 _Avoid_: direct_sp, stack reference, SP-relative def, relevance tag, syntactic SP-derivation
 
-**Frame-Residency Proof**: The VSA's own evidence that a Load/Store address lives in the stack frame — the two channels (direct affine-over-frame-derived, or a reloaded bounded subset of the frame neighborhood). The sole origin of the Stack Access classification.
+**Frame-Residency Proof**: The VSA's own evidence that a Load/Store address lives in the stack frame — the two channels (direct affine over sp-derived registers, or a reloaded bounded subset of the frame neighborhood). The sole origin of the Stack Access classification.
 _Avoid_: relevance, taint, seeding pass, syntactic SP-derivation
 
 **Dynamic Allocation**: A definition that decrements the Stack Pointer by a non-literal size (VLA / alloca).
 _Avoid_: VLA size def, runtime alloc, variable stack growth
 
-**Stack Pointer (SP)**: The target-defined stack-pointer register (`Targetutils.sp`), the sole origin for stack-derivation.
+**Stack Pointer (SP)**: The target-defined stack-pointer register (`Abi.sp`), the sole origin for stack-derivation and the only register granted stack semantics by fiat.
 _Avoid_: "RSP" string, RBP, frame pointer
+
+**Frame Pointer (FP)**: The target's frame-pointer register — an ordinary callee-saved GPR carrying no stack semantics by name. Its stack-ness, like any register's, is proven: by a frame term (an sp-derived value) or by the SP-seeded derived closure. Never assumed.
+_Avoid_: fp-as-stack-register, is_stack_reg, RBP-by-name, frame-pointer grant
 
 ### Analysis passes
 
-**Library Seam** (`Hike.*`): The `hike` library's one public interface (`src/hike.mli`): `Hike.Target`, `Hike.Relevance`, `Hike.Vsa`, `Hike.Stack_to_locals`, `Hike.Kb`, `Hike.Convutils`, `Hike.Bil2llvm`. Consumers name these modules and nothing else — the entry point `Hike` is the plugin's pass pipeline, not a namespace.
+**Library Seam** (`Hike.*`): The `hike` library's one public interface (`src/hike.mli`): `Hike.Abi`, `Hike.Vsa`, `Hike.Dce`, `Hike.Stack_model`, `Hike.Stack_to_locals`, `Hike.Kb`, `Hike.Convutils`, `Hike.Bil2llvm`. Consumers name these modules and nothing else — the entry point `Hike` is the plugin's pass pipeline, not a namespace.
 _Avoid_: `Hike__X` (the dune-internal name), `Hike__.X` (the generated wrapper alias, whose resolution is unreliable)
 
 **Stack-Access Seeding**: The VSA's classification of each Load/Store def as a Stack Access via the Frame-Residency Proof, emitted as `vsa_info` — the only carrier of stack-access-ness. No separate pass computes it.
@@ -41,6 +44,35 @@ _Avoid_: inverse_denote_exp (the shallow production no-op), guard-meet-only
 _Avoid_: partitioned state, per-edge view
 
 **100% VSA Tagging Invariant (structural)**: A Load/Store def is a Stack Access iff it carries a `vsa_info` tag (`Range`, `Infinite`, `Unbounded`, `Dead`, or `VLA`). The classification is one mechanism — there is no second tag to diverge from it.
+
+### Autonomy
+
+**Autonomous Pass**: A pass that consumes its predecessor's output as authoritative and performs only its own algorithm — it may find nodes, dispatch on node kind, apply record-driven rules, and compute facts about its own output; it may not re-derive any producer fact (stack-ness, address shape, escape, region membership).
+_Avoid_: defensive pass, re-validation, belt-and-braces, distrust guard
+
+**Guard**: A conditional refusal that distrusts a computed fact — a check whose premise is that a producer's output may be wrong. Banned: the construction is made correct instead.
+_Avoid_: gate, sanity check, refusal-to-refine, conservative refusal
+
+**Rule**: An unconditional mapping from a fact to an action — the sound fallback for a domain value (Unbounded → dynamic emission, Dead → poison) is a rule, not a guard.
+_Avoid_: fallback check, safe path
+
+**Stack Member**: The per-def entry in `vsa_info` that carries the analysis facts (kind, span, address, base, storage requirement, sp-mention) — the unit the partition joins.
+_Avoid_: tagged def, region candidate, conversion candidate
+
+**Overlap Partition**: The stack model's sole soundness mechanism: members join into connected components of the interval-overlap graph; each component's storage class is the join of its members'; the join decides Static (region alloca), Frame (the model frame — the sound fallback storage), Dynamic (runtime alloca), or Dead.
+_Avoid_: gate battery, split-plan checks, convertibility gate
+
+**Storage Class**: The lattice a partition component joins to — Static, Frame, Dynamic, or Dead (identity). `Static ⊔ Frame = Frame`, `Frame ⊔ anything = Frame`, `Static ⊔ Dynamic = Dynamic` (one merged runtime alloca).
+
+**Frame Dims**: The frame geometry facts (deepest extent, span) as record payload — consumers read them instead of re-folding tags.
+
+### Traversal
+
+**Visitor-Only Traversal**: Walking or mapping defs/terms/exps uses the BAP visitor/mapper combinators, never hand-rolled structural recursion. Single-node kind tests (a value's kind) are sanctioned; the emitter's total exp dispatch is exempt.
+_Avoid_: AST pattern matching (for traversal), hand-rolled recursion
+
+**Kind Test**: A single-node dispatch on a term or exp's constructor (Jmp.kind, Call.target, Blk.elts) used to decide its kind — sanctioned; not traversal.
+_Avoid_: structural match (ambiguous with banned traversal)
 
 ### Emitter
 
