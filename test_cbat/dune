@@ -6,6 +6,7 @@
  (libraries
   hike
   bap
+  bap-main
   cbat_vsa
   cbat_vsa_domain
   graphlib

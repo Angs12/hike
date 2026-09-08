@@ -2,6 +2,10 @@
 open Test_common
 
 let () =
+  (* Targets are registered only by Bap_main: without it Theory.Target has
+     no declarations and every target-derived ABI fact is the unknown
+     fallback (fixtures needing a real x86_64 target depend on this). *)
+  ignore (Bap_main.init ~argv:[| Sys.executable_name |] () : (unit, _) result);
   Test_domains.run_base ();
   Test_seed.run ();
   Test_domains.run_policy ();
@@ -15,6 +19,7 @@ let () =
   Test_regression.run_regions ();
   Test_domains.run_overlap ();
   Test_regression.run_copy_reloc ();
+  Test_regression.run_fp_gpr ();
   Test_properties.run_roundtrip ();
   Test_properties.run_landmarks ();
   Test_properties.run_chains ();
