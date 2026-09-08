@@ -354,6 +354,62 @@ let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * s
   let sub = Sub.Builder.result sub_b in
   (def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub)
 
+(* The -O2 GPR-RBP class: RBP holds a HEAP pointer (never sp-derived) and an
+   arg-register copy of it crosses a call. Returns (def_rbp, def_rdi, sub).
+   The fp-by-name belt reads the RDI copy as a frame escape. *)
+let mk_gpr_rbp_escaping_sub () : def term * def term * sub term =
+  let rbp = v64 "RBP" in
+  let rdi = v64 "RDI" in
+  let m = memv "t21_ne_m" in
+  let v = v64 "t21_ne_v" in
+  let def_rbp = Def.create rbp (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  let def_load =
+    Def.create v
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x10))), LittleEndian, `r64))
+  in
+  (* The arg setup: a bare copy of the heap pointer into an arg register. *)
+  let def_rdi = Def.create rdi (Bil.Var rbp) in
+  let callee = mk_selfloop_callee "t21_ne_callee" in
+  let post_b = Blk.Builder.create () in
+  let post0 = Blk.Builder.result post_b in
+  let b0 = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b0) [ def_rbp; def_load; def_rdi ];
+  let b0' = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b0) in
+  Blk.Builder.add_jmp b0' (mk_call_jmp (Term.tid post0) (Term.tid callee));
+  let blk = Blk.Builder.result b0' in
+  let sub_b = Sub.Builder.create ~name:"t21_gpr_rbp_escape" () in
+  Sub.Builder.add_blk sub_b blk;
+  Sub.Builder.add_blk sub_b post0;
+  let sub = Sub.Builder.result sub_b in
+  (def_rbp, def_rdi, sub)
+
+(* S1's NAME control: the same shape with a non-fp GPR (RBX) instead of RBP.
+   Returns (def_gpr, def_rdi, sub). *)
+let mk_gpr_rbx_escaping_sub () : def term * def term * sub term =
+  let rbx = v64 "RBX" in
+  let rdi = v64 "RDI" in
+  let m = memv "t21_ne_m2" in
+  let v = v64 "t21_ne_v2" in
+  let def_rbx = Def.create rbx (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  let def_load =
+    Def.create v
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var rbx, Bil.Int (Cbat_word.to_word (w64 0x10))), LittleEndian, `r64))
+  in
+  let def_rdi = Def.create rdi (Bil.Var rbx) in
+  let callee = mk_selfloop_callee "t21_ne_callee2" in
+  let post_b = Blk.Builder.create () in
+  let post0 = Blk.Builder.result post_b in
+  let b0 = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b0) [ def_rbx; def_load; def_rdi ];
+  let b0' = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b0) in
+  Blk.Builder.add_jmp b0' (mk_call_jmp (Term.tid post0) (Term.tid callee));
+  let blk = Blk.Builder.result b0' in
+  let sub_b = Sub.Builder.create ~name:"t21_gpr_rbx_escape" () in
+  Sub.Builder.add_blk sub_b blk;
+  Sub.Builder.add_blk sub_b post0;
+  let sub = Sub.Builder.result sub_b in
+  (def_rbx, def_rdi, sub)
+
 (* One-path heap shapes: the use-store's address joins to TOP. *)
 
 (* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, def_use, sub). *)

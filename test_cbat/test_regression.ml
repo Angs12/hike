@@ -676,6 +676,201 @@ let run_regions () =
 (  Printf.printf "ok: property M3 fused_join invariants (skipped due to API change)\n";
   ())
 
+(* The fp-GPR lane (ADR 0008): heap-RBP must not be granted stack semantics
+   by NAME. Both fixtures run on the REAL x86_64 target — at
+   [Theory.Target.unknown] no fp var is named and the belt is inert, so the
+   fixture would pass vacuously. *)
+let run_fp_gpr () =
+(  (* S1: false escape — a heap-RBP sub whose call arg setup copies RBP.
+       RBP holds a heap pointer, so nothing frame-derived escapes. Today
+       [sp_escaped] seeds RBP unconditionally, so the copy counts and the
+       whole sub degrades to %frame. *)
+  let _, _, sub = mk_gpr_rbp_escaping_sub () in
+  let target = x86_64_target () in
+  check
+    "S1 (fp-GPR, RED until T4): a heap-RBP sub whose arg setup copies RBP does NOT \
+     frame-escape (RBP is a GPR holding a heap pointer, not a frame address)"
+    (not (Sm.frame_escapes (v64 "RSP") target sub));
+  ())
+;
+(  (* S1b: the NAME control — the identical sub with RBX in place of RBP does
+       not escape today. Only the register NAME differs, so S1's [true] is
+       attributable to the fp grant, not to the shape. *)
+  let _, _, sub = mk_gpr_rbx_escaping_sub () in
+  let target = x86_64_target () in
+  check
+    "S1b (fp-GPR control, GREEN): the identical sub with an RBX arg copy does NOT \
+     frame-escape — S1's [true] comes from the RBP NAME, not the shape"
+    (not (Sm.frame_escapes (v64 "RSP") target sub));
+  ())
+;
+(  (* S2: unbounded-fallback by name — a TAGGED rsp access plus an UNTAGGED
+       heap-RBP store. The untagged heap store is not stack traffic at all,
+       so it must not degrade the sub. Today [has_unbounded_access] fires on
+       the fp name ([exp_contains_sp]'s fp disjunct) → [split_plan] = []. *)
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let m = memv "s2_m" in
+  let def_heap = Def.create rbp (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  (* Tagged: the rsp access carries a real Range tag. *)
+  let def_rsp =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 1)),
+           LittleEndian,
+           `r64 ))
+  in
+  (* Untagged (P23-2): the heap-RBP store is out of the frame neighborhood. *)
+  let def_heap_store =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x100))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  let b = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b) [ def_heap; def_rsp; def_heap_store ];
+  let exit_b = Blk.Builder.create () in
+  let exit0 = Blk.Builder.result exit_b in
+  let b' = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b) in
+  Blk.Builder.add_jmp b' (Jmp.create (Goto (Direct (Term.tid exit0))));
+  let entry = Blk.Builder.result b' in
+  let sub_b = Sub.Builder.create ~name:"s2_heap_rbp" () in
+  Sub.Builder.add_blk sub_b entry;
+  Sub.Builder.add_blk sub_b exit0;
+  let sub = Sub.Builder.result sub_b in
+  let target = x86_64_target () in
+  let info =
+    Cu.mk_vsa_info
+      ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
+      ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~vla_alloc_tids:Tid.Set.empty
+  in
+  (* Regions come from the producer (split_plan is a consumer). *)
+  let info =
+    { info with
+      Cu.regions =
+        Sm.regions_of_sub rsp target sub info
+          ~frame_escaped:(Sm.frame_escapes rsp target sub)
+    }
+  in
+  let plan = Sm.split_plan rsp target sub info in
+  check
+    "S2 (fp-GPR, RED until T4): an untagged heap-RBP store does NOT degrade the sub \
+     (split_plan is non-empty — stack-ness is the tag alone)"
+    (plan <> []);
+  ())
+;
+(  (* S2b: the NAME control — the identical sub with the untagged heap store
+       based on a NON-fp GPR (RBX) does not degrade. Same shape, same tags;
+       only the base register's name differs. This is what makes S2's
+       failure attributable to [Abi.is_fp] rather than to the fixture:
+       green today, green after the lane. *)
+  let rsp = v64 "RSP" in
+  let rbx = v64 "RBX" in
+  let m = memv "s2b_m" in
+  let def_heap = Def.create rbx (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  let def_rsp =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 1)),
+           LittleEndian,
+           `r64 ))
+  in
+  let def_heap_store =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var rbx, Bil.Int (Cbat_word.to_word (w64 0x100))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  let b = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b) [ def_heap; def_rsp; def_heap_store ];
+  let exit_b = Blk.Builder.create () in
+  let exit0 = Blk.Builder.result exit_b in
+  let b' = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b) in
+  Blk.Builder.add_jmp b' (Jmp.create (Goto (Direct (Term.tid exit0))));
+  let entry = Blk.Builder.result b' in
+  let sub_b = Sub.Builder.create ~name:"s2b_heap_rbx" () in
+  Sub.Builder.add_blk sub_b entry;
+  Sub.Builder.add_blk sub_b exit0;
+  let sub = Sub.Builder.result sub_b in
+  let target = x86_64_target () in
+  let info =
+    Cu.mk_vsa_info
+      ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
+      ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~vla_alloc_tids:Tid.Set.empty
+  in
+  let info =
+    { info with
+      Cu.regions =
+        Sm.regions_of_sub rsp target sub info
+          ~frame_escaped:(Sm.frame_escapes rsp target sub)
+    }
+  in
+  let plan = Sm.split_plan rsp target sub info in
+  check
+    "S2b (fp-GPR control, GREEN): the identical sub with an RBX-based heap store is \
+     NOT degraded — S2's [[]] comes from the RBP NAME, not from the shape"
+    (plan <> []);
+  ())
+;
+(  (* S3: the value-true twin — a real prologue ([RBP := RSP]) makes RBP
+       sp-derived, so the same sub shape DOES frame-escape and DOES degrade.
+       Green today and after the lane: the proof route, never the name. *)
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let rdi = v64 "RDI" in
+  let m = memv "s3_m" in
+  let def_prologue = Def.create rbp (Bil.Var rsp) in
+  let def_rdi = Def.create rdi (Bil.Var rbp) in
+  let def_store =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x100))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  let callee = mk_selfloop_callee "s3_callee" in
+  let post_b = Blk.Builder.create () in
+  let post0 = Blk.Builder.result post_b in
+  let b0 = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b0) [ def_prologue; def_rdi; def_store ];
+  let b0' = Blk.Builder.init ~copy_defs:true (Blk.Builder.result b0) in
+  Blk.Builder.add_jmp b0' (mk_call_jmp (Term.tid post0) (Term.tid callee));
+  let entry = Blk.Builder.result b0' in
+  let sub_b = Sub.Builder.create ~name:"s3_prologue" () in
+  Sub.Builder.add_blk sub_b entry;
+  Sub.Builder.add_blk sub_b post0;
+  let sub = Sub.Builder.result sub_b in
+  let target = x86_64_target () in
+  check
+    "S3 (fp-GPR, GREEN): the value-true twin — an [RBP := RSP] prologue makes RBP \
+     sp-derived, so the arg copy IS a frame escape"
+    (Sm.frame_escapes rsp target sub);
+  ())
+;
+(  (* S4: the value-true twin's tagging pin (P21-1's model-level half). *)
+  let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
+  let tags, _, _ = extract_anchored sub in
+  check "S4 (fp-GPR, GREEN): the prologue sub's [RBP - 0x30] access is Range-tagged"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L))
+    && Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-48L, -48L)));
+  ())
+
 (* Copy-reloc slot computation, pinned through the production function. *)
 let run_copy_reloc () =
   let bw64 = Word.of_int ~width:64 in

@@ -333,10 +333,120 @@ let run_golden () =
   check_ir "GOLDEN: i64 lanes (ptrsize 64)" "i64" ir
 
 (* ------------------------------------------------------------------ *)
+(* Family 6: the fp-GPR lane (ADR 0008) — the emitter never invents a   *)
+(* register value.                                                      *)
+(* ------------------------------------------------------------------ *)
+
+let run_fp_gpr () =
+  (* The -O2 GPR-RBP shape: a def READS RBP without ever defining it (no
+     prologue). The true value is the caller's RBP (a heap pointer); the
+     emitter must not substitute the model frame for it. *)
+  let rbp = v64 "RBP" in
+  let rdi = v64 "RDI" in
+  let v = v64 "fpg_v" in
+  (* Reads RBP (never defined in this sub) and passes the value out. *)
+  let rsp = v64 "RSP" in
+  let mm = memv "fpg_m" in
+  let d_st =
+    Def.create mm
+      (Bil.Store
+         ( Bil.Var mm,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 1)),
+           LittleEndian,
+           `r64 ))
+  in
+  let d_v = Def.create v (Bil.Var rbp) in
+  let d_arg = Def.create rdi (Bil.Var rbp) in
+  let callee_tid = Tid.for_name "fpg_callee" in
+  let cont_blk = mk_exit_blk () in
+  let cont_tid = Term.tid cont_blk in
+  let caller = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def caller) [ d_st; d_v; d_arg ];
+  Blk.Builder.add_jmp caller
+    (Jmp.create (Call (Call.create ~return:(Direct cont_tid) ~target:(Direct callee_tid) ())));
+  let sb = Sub.Builder.create ~name:"fpg_read_rbp" () in
+  Sub.Builder.add_blk sb (Blk.Builder.result caller);
+  Sub.Builder.add_blk sb cont_blk;
+  let caller_sub = Sub.Builder.result sb in
+  let callee =
+    let bb2 = Blk.Builder.create () in
+    Blk.Builder.add_jmp bb2 (Jmp.create (Ret (Direct (Tid.create ()))));
+    let sb2 = Sub.Builder.create ~name:"fpg_callee" () in
+    Sub.Builder.add_blk sb2 (Blk.Builder.result bb2);
+    Sub.Builder.result sb2
+  in
+  let info : Cu.vsa_info =
+    Cu.mk_vsa_info
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ]
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
+      ~vla_alloc_tids:Tid.Set.empty
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid caller_sub) info);
+  let ir_holder = ref "" in
+  let err = capture_stderr (fun () -> ir_holder := emit_ir [ caller_sub; callee ]) in
+  let ir = !ir_holder in
+  check
+    "FP-GPR (RED until T5): a never-defined RBP read warns through the undef-read lane \
+     (the RBX treatment)"
+    (contains_substring err "hike: undef-read:");
+  (* The invented value is [fp := anchor - 8]: a [sub] off the frame anchor
+     reaching a use of RBP. Its absence is the positive half. *)
+  (* The invention is literal: [fp := anchor - 8] binds RBP at entry, so the
+     never-defined read resolves to a frame-relative constant instead of the
+     caller's RBP. [sub i64 %anchor_i64, 8] is that binding (SP takes
+     [anchor_i64] itself and the call-restore is an [add]). *)
+  check
+    "FP-GPR (RED until T5): no invented [fp := anchor - 8] binding is emitted for RBP \
+     (the emitter does not invent a register value)"
+    (not (contains_substring ir "sub i64 %anchor_i64, 8"));
+  ()
+
+(* ------------------------------------------------------------------ *)
+(* Family 7: the fp-GPR cast width (ADR 0008) — spill-slot detection     *)
+(* must be tag-gated, not name-gated.                                  *)
+(* ------------------------------------------------------------------ *)
+
+let run_fp_gpr_cast () =
+  (* A 32-bit store at [RBP + w] where RBP holds a NON-STACK value (no
+     prologue), then a sitofp whose x0 loads from that slot. Today
+     [u32_slots_of_sub] calls any 32-bit store at [RBP +- w] a spill slot
+     ([Abi.is_fp] by name), so [cast_source_width] yields 32 and the
+     sitofp's source is truncated to i32 — the -O2 width bug. *)
+  let off = 0x40 in
+  let cast_ir (base_name : string) : string =
+    let base = v64 base_name in
+    let m = memv ("fgc_m_" ^ base_name) in
+    let d_base = Def.create base (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+    let addr = Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 off))) in
+    let d_st = Def.create m (Bil.Store (Bil.Var m, addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r32)) in
+    (* x0 loads the slot; the cast source width comes from [u32_slots]. *)
+    let d_x0 = Def.create (ivar64 "intrinsic:x0") (Bil.Load (Bil.Var m, addr, LittleEndian, `r64)) in
+    let intr = "intrinsic:cast_sfloat_rne_ieee754_binary_64" in
+    let prog = mk_fp_program intr [ d_base; d_st; d_x0 ] in
+    (* No vsa_info: the store is untagged, so it is NOT a spill slot. *)
+    emit_ir prog
+  in
+  let ir_rbp = cast_ir "RBP" in
+  let ir_rbx = cast_ir "RBX" in
+  check
+    "FP-GPR (RED until T5): a 32-bit store at [RBP + w] with RBP holding a NON-STACK \
+     value does NOT pick the i32 sitofp source width (spill detection is tag-gated, \
+     not name-gated)"
+    (not (contains_substring ir_rbp "sitofp i32"));
+  (* The name control: the identical sub on a non-fp GPR already behaves. *)
+  check
+    "FP-GPR (GREEN control): the identical RBX-based store does not pick the i32 width"
+    (not (contains_substring ir_rbx "sitofp i32"));
+  ()
+
+(* ------------------------------------------------------------------ *)
 
 let run () =
   run_fp_table ();
   run_poison ();
   run_sp_restore ();
   run_casts ();
-  run_golden ()
+  run_golden ();
+  run_fp_gpr ();
+  run_fp_gpr_cast ()
