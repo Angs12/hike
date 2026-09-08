@@ -49,21 +49,33 @@ therefore redundant and deleted: the directness test, the untagged syntactic arm
 RBP-name spill detection all become tag lookups. Untagged accesses emit through the
 generic real-address lane against their true runtime values (sound).
 
-**The one rule the tag cannot express — and therefore the only survivor:** *can this
-cell be reached by an access we did not convert?* It is invisible to the tag by
-construction, because "we did not convert it" means exactly "it has no tag". Two
-shapes, one fact (unified under one name, commented as the sole non-tag-derived
-rule): a frame-derived value escaping to a call's argument registers or to memory
-(`sp_escaped` — cross-sub aliasing), and the caller-written incoming-argument area
-(`saves_incoming_reg` / ABI visibility). Its mechanism is FORCED, not chosen: it must
-be the syntactic {SP}-seeded closure, because "has a frame term" UNDER-approximates
-(`RAX := RSP − mem[x]` carries no term yet is sp-derived at runtime) — and for escape,
-missing an alias is the unsound direction, so over-approximating is mandatory.
+**No aliasing gate survives — the invariant makes one impossible.** "Can this cell be
+reached by an access we did not convert?" is incoherent: the 100% tagging invariant is
+a REQUIREMENT, so a stack access without a tag is a BUG, not a case to defend against.
+Therefore `sp_escaped` (the {SP}-seeded syntactic closure), `frame_addr_alias` and
+`frame_value_def` are DELETED — cross-sub aliasing was never theirs to guard.
 
-**Reduction test (the lane's falsifiable prediction):** with escape held constant,
-deleting the shape gates must be IR-NEUTRAL on the -O0 corpus, since at -O0 the tag
-and the shape tests agree. A delta the reduction does not predict falsifies it and is
-reported rather than landed. **Accepted risk, recorded:** an
+**What replaces them is a tag-class fact, not a gate:** not every TAGGED access is
+CONVERTIBLE IN THIS SUB. An access at a POSITIVE offset (k ≥ 0) denotes the CALLER's
+frame, which this sub does not own — so it stays in the model frame. Each sub converts
+only cells it owns (negative offsets). This is a property of the tag, already computed
+(`Convutils.is_positive_kind`; `regions_of_sub` already requires `lo < 0`;
+`is_abi_visible` already keys on `lo ≥ 0`; `is_outgoing_store` already uses the
+lo<0 / klo≥0 pair) — one fact, stated once, replacing the def-shape test in
+`saves_incoming_reg`.
+
+**Measured, and it falsified an earlier claim (recorded so it is not re-derived):**
+"cross-sub aliasing is subsumed by the region merge" is FALSE — ranges and regions are
+PER-SUB, so the merge never sees both sides of a caller/callee pair. Proof: with 8
+arguments, the callee converts its incoming-arg cells at `[RSP+k]`, k ≥ 0, into its own
+`stack_r0..r6` allocas, while the caller addresses those same physical cells through
+the model frame. The per-sub merge cannot catch that; the positive-offset tag class
+can.
+
+**Reduction test (the lane's falsifiable prediction):** deleting the shape gates must
+be IR-NEUTRAL on the -O0 corpus, since at -O0 the tag and the shape tests agree. A
+delta the reduction does not predict falsifies it and is reported rather than landed;
+the semantic harness is the oracle for split storage. **Accepted risk, recorded:** an
 unproven sp-mentioning access (the rsp-term-lost edge — a weird `RSP := RAX` rebind
 that drops RSP's frame term) could at runtime address a cell a converted region member
 also addresses; the untagged access then writes real stack while the member writes the
