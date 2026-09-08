@@ -162,13 +162,24 @@ let decoder_constraint ?(cur : wordset option = None)
 
 (* Provenance-based non-negativity proof. *)
 let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
-    ~(stores : def term list) (e : exp) : bool =
+    ~(stores : def term list)
+    ~(env : AI.t) (e : exp) : bool =
   (* MSB-clear literals. *)
   let nonneg_word (n : Cbat_word.t) : bool =
     let w = Cbat_word.bitwidth n in
     w > 0
     && Cbat_word.(<) n (Word_ops.half w) in
-  let stack_anchor (v : var) : bool = Abi.is_stack_reg Abi.x86_64_sysv v in
+  let frame = AI.frame_of env in
+  (* Anchored = the var's offset from the entry frame is a PROVEN CONSTANT:
+     a term carrying fvars varies with the index and proves no constant
+     bound (ADR 0008 — stack-ness is proven, never granted by name). *)
+  let stack_anchor (v : var) : bool =
+    match frame with
+    | None -> false
+    | Some f ->
+      (match AI.frame_lookup f (AI.frame_key v) with
+       | Some t -> List.is_empty t.fvars
+       | None -> false) in
   (* Threaded cycle guards. *)
   let rec walk (cells : Exp.Set.t) (vars : Exp.Set.t) (e : exp) : bool =
     match e with
@@ -266,9 +277,9 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
 
 (* Non-negativity gate. *)
 let known_nonneg_of ~(defs : (def term * bool) Var.Map.t option)
-    ~(stores : def term list option) (e : exp) : bool =
+    ~(stores : def term list option) ~(env : AI.t) (e : exp) : bool =
   match defs, stores with
-  | Some dm, Some ss -> prove_nonneg ~defs:dm ~stores:ss e
+  | Some dm, Some ss -> prove_nonneg ~defs:dm ~stores:ss ~env e
   | _ -> false
 
 (* Wrapping CLP interval or None on doubt: the twin of the constructor
@@ -1248,7 +1259,7 @@ let row_for ~(env : AI.t) ?(ctx : analysis_ctx option)
   match ctx with
   | None -> guard_constraint (Cbat_word.bitwidth c) op c
   | Some { defs; stores; _ } ->
-    let known_nonneg = known_nonneg_of ~defs ~stores e in
+    let known_nonneg = known_nonneg_of ~defs ~stores ~env e in
     (match decoder_constraint ~cur ~known_nonneg op c with
      | Some cstr -> Some cstr
      | None -> guard_constraint (Cbat_word.bitwidth c) op c)
@@ -1561,7 +1572,7 @@ let assume_jump_cond_with_group
         | Ok ws -> Some ws
         | Error _ -> None in
       (* Non-negativity proof for signed gates. *)
-      let known_nonneg = known_nonneg_of ~defs ~stores e in
+      let known_nonneg = known_nonneg_of ~defs ~stores ~env e in
       (match decoder_constraint ~cur:cur_e ~known_nonneg op (Cbat_word.of_word c) with
        | Some cstr ->
          apply_operand_constraint ~defs env e cstr
