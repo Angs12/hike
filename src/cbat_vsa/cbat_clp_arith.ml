@@ -544,9 +544,11 @@ let div (p1 : t) (p2 : t) : t =
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
     max_elem p2 >>= fun max_e2 ->
-    (* Zero divisor gives top. *)
+    (* A zero divisor: non-singleton stays top; exactly {0} is the word
+       semantics (x/0 = ones), never bottom. *)
     if elem (W.zero width) p2
-    then !!(if W.is_one (cardinality p2) then bottom width else top width)
+    then !!(if W.is_one (cardinality p2) then singleton (W.ones width)
+            else top width)
     else
       let base = W.div min_e1 max_e2 in
       let e = W.div max_e1 min_e2 in
@@ -575,9 +577,11 @@ let sdiv (p1 : t) (p2 : t) : t =
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
     max_elem p2 >>= fun max_e2 ->
-    (* Zero divisor gives top; exact {0} is bottom. *)
+    (* A zero divisor: non-singleton stays top; exactly {0} is the word
+       semantics (x/0 = ones), never bottom. *)
     if elem (W.zero width) p2
-    then !!(if W.is_one (cardinality p2) then bottom width else top width)
+    then !!(if W.is_one (cardinality p2) then singleton (W.ones width)
+            else top width)
     else if W.is_one (cardinality p1) &&
             W.is_one (cardinality p2)
     then !!(singleton (wsdiv (base_of p1) (base_of p2)))

@@ -458,9 +458,7 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
             (Solution.get tags (Term.tid blk)) v in
         let cur = AI.find_word w acc v in
         let mm = WordSet.meet cur tag_v in
-        if WordSet.is_top cur
-           && Cbat_word.is_one (WordSet.cardinality mm)
-           || Cbat_word.is_zero (WordSet.cardinality mm)
+        if Cbat_word.is_zero (WordSet.cardinality mm)
            || WordSet.equal mm cur
         then acc
         else AI.add_word acc ~key:v ~data:mm

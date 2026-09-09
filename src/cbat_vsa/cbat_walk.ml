@@ -535,24 +535,16 @@ let rec constrain_cell
     (env : AI.t)
     ~(mem : exp) ~(addr : exp) ~(size : Size.t) ~(endian : endian)
     (cstr : wordset) : AI.t =
-  (* Cell keys use rewritten addresses. *)
-  let addr_opt =
-    if
-      Exp.free_vars addr
-      |> Core.Set.exists ~f:(Abi.is_sp Abi.x86_64_sysv)
-    then None
-    else
-      let a' = rewrite_addr (AI.frame_of env) addr in
-      if Exp.free_vars a' |> Core.Set.is_empty then Some a' else None in
-  match addr_opt with
-  | None -> env
-  | Some addr ->
+  (* Cell keys use rewritten addresses DENOTED in the current state (the
+     trace lane's construction): sp-derived and reloaded addresses key by
+     their denoted value set; identity (no key) is the sound fallback. *)
+  let addr' = rewrite_addr (AI.frame_of env) addr in
   match mem with
   | Bil.Var m ->
     (match Var.typ m with
      | Type.Mem (addr_i, addressable_size) ->
        let k = mem_idx addr_i addressable_size in
-       (match denote_imm_exp addr env with
+       (match denote_imm_exp addr' env with
         | Error _ -> env
         | Ok addr_ws ->
           (match Mem.Key.of_wordset addr_ws with
@@ -639,6 +631,11 @@ and constrain_def_chain ~(defs : (def term * bool) Var.Map.t)
       (match Core.Map.find defs b with
        | None -> env
        | Some (d, unique) ->
+         (* A var with several defs is position-ambiguous in the whole-sub
+            map: refining through a guessed def would narrow values the
+            constraint never excluded (unsound). The single-def scope is
+            the shallow pre-step's soundness boundary; the POSITIONAL
+            mechanism is the deep walk's reverse_def_walk. *)
          if not unique then env
          else
            match Def.rhs d with
@@ -1037,7 +1034,8 @@ let refine_edge ~(sol : (tid, AI.t) Solution.t)
           | Cell (mem, addr, size, endian, cstr) ->
             m, constrain_cell_on_trace ~st:env ~live:m e
               ~mem:mem ~addr:addr ~size:size ~endian:endian cstr
-          | Infeasible -> m, AI.bottom) in
+          (* The constraint may merely have widened; identity, never bottom. *)
+          | Infeasible -> m, e) in
     let env = ref env0 in
     (* Closure counts pops. *)
     let pops = ref 0 in
@@ -1126,7 +1124,7 @@ let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
 let complement_guard_op (op : guard_op) : guard_op = match op with
   | ULT -> UGE | ULE -> UGT
   | UGT -> ULT | UGE -> ULE
-  | EQ -> EQ | NEQ -> EQ
+  | EQ -> NEQ | NEQ -> EQ
   | SLT -> SGE | SLE -> SGT
   | SGT -> SLT | SGE -> SLE
 

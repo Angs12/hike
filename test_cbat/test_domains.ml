@@ -415,15 +415,21 @@ let run_policy () =
   check "A3: bottom is still the meet zero; top the meet identity"
     (Clp.is_bottom (Clp.meet clp2 (Clp.bottom 32)) && Clp.equal (Clp.meet clp2 (Clp.top 32)) clp2);
   ())
-(* div/sdiv by a set containing 0 returns top. *)
+(* div/sdiv: a zero-containing non-singleton divisor returns top; exactly
+   {0} is the word semantics (x/0 = ones), never bottom. *)
 ;
 (  let d1 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
   let d0 = Clp.of_list ~width:32 [ w32 0; w32 1 ] in
   check "D3-1: div by a set containing 0 -> top, no raise" (Clp.is_top (Clp.div d1 d0));
   check "D3-2: sdiv by a set containing 0 -> top, no raise" (Clp.is_top (Clp.sdiv d1 d0));
-  check "D3-3: div by exactly {0} -> bottom (provably dead path)"
-    (Clp.is_bottom (Clp.div d1 (Clp.create (Cbat_word.zero 32))));
-  check "D3-4: sdiv by exactly {0} -> bottom" (Clp.is_bottom (Clp.sdiv d1 (Clp.create (Cbat_word.zero 32))));
+  check "D3-3: div by exactly {0} -> the word semantics (x/0 = ones)"
+    (let r = Clp.div d1 (Clp.create (Cbat_word.zero 32)) in
+     Clp.min_elem r = Some (Cbat_word.ones 32)
+     && Clp.max_elem r = Some (Cbat_word.ones 32));
+  check "D3-4: sdiv by exactly {0} -> the word semantics (x/0 = ones)"
+    (let r = Clp.sdiv d1 (Clp.create (Cbat_word.zero 32)) in
+     Clp.min_elem r = Some (Cbat_word.ones 32)
+     && Clp.max_elem r = Some (Cbat_word.ones 32));
   check "D3-5: div by a nonzero singleton still computes (no regression)"
     (let r = Clp.div (Clp.create (w32 10)) (Clp.create (w32 2)) in
      Clp.min_elem r = Some (w32 5) && Clp.max_elem r = Some (w32 5));

@@ -294,7 +294,8 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp u env >>= val_as_imm >>= fun v ->
     
     if WordSet.is_top addr
-    then return_mem mv
+    (* The store may write any cell: whole-memory top. *)
+    then return_mem @@ Mem.top (Mem.get_idx mv)
     else
     
     let v' = if WordSet.splits_by addr (Cbat_word.of_int ~width:sz (Size.in_bytes s))

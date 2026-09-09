@@ -151,8 +151,9 @@ end = struct
       let hi = lo + (w - 1) in
       if lo >= p_sz then None
       else if hi >= p_sz then
-        (* Unreachable: sizes divide evenly. *)
-        Utils.not_implemented ~top:None
+        (* Sizes divide evenly; a non-factor size degrades to top. *)
+        Utils.not_implemented
+          ~top:(Some (WordSet.top ((hi + 1) - lo), hi + 1))
           "Wordset segmented by non-factor size"
       else Option.return (WordSet.extract ~hi ~lo p, hi + 1)
     end

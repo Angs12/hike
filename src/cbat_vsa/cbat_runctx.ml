@@ -104,7 +104,7 @@ let flag_state_of_block (b : blk term) :
   let ds = Term.enum def_t b |> Seq.to_list in
   let understood (op : Bil.binop) : bool =
     match op with
-    | Bil.LT | Bil.LE | Bil.EQ | Bil.SLT | Bil.SLE -> true
+    | Bil.LT | Bil.LE | Bil.EQ | Bil.NEQ | Bil.SLT | Bil.SLE -> true
     | _ -> false in
   let rec go (st : (var * Bil.binop * exp * word) option)
       (ds : def term list) : (var * Bil.binop * exp * word) option =

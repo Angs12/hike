@@ -59,6 +59,9 @@ end
 type t
 type idx = {addr_width:int; addressable_width:int}
 
+(* The index of [t]'s width facts. *)
+val get_idx : t -> idx
+
 include Value.S with type t := t
 
 include Cbat_map_lattice.S_indexed with module Val := Val and module Key := Key and
