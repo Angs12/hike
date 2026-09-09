@@ -17,9 +17,9 @@ let () =
   let info = Hike.Vsa.offsets_of_sub target sp sub in
   let regions =
     if info.Hike.Convutils.regions <> [] then info.Hike.Convutils.regions
-    else Hike.Stack_model.regions_of_sub sp target sub info ~frame_escaped:(Hike.Stack_model.frame_escapes sp target sub info)
+    else Hike.Stack_model.regions_of_sub sub info
   in
-  let plan = Hike.Stack_model.split_plan sp target sub info ~frame_escaped:(Hike.Stack_model.frame_escapes sp target sub info) in
+  let plan = Hike.Stack_model.split_plan sub info in
   Printf.printf "regions: %d\n" (List.length regions);
   Base.List.iter regions ~f:(fun r ->
       Printf.printf "  r%d span=(%Ld,%Ld) conv=%b members=%d\n"

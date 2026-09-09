@@ -43,7 +43,7 @@ let () =
               (if Core_kernel.Map.mem info.Hike.Convutils.offsets (Term.tid d)
                then "stack"
                else "")
-              ^ (if Core_kernel.Map.mem info.Hike.Convutils.vla_bounds (Term.tid d)
+              ^ (if Core_kernel.Set.mem info.Hike.Convutils.vla_alloc_tids (Term.tid d)
                  then ",dynamic_alloc"
                  else "")
             in

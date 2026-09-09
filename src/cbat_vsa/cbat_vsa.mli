@@ -59,7 +59,6 @@ module Cbat_extraction : sig
     sol:(tid, AI.t) Solution.t ->
     sub term ->
     kind Tid.Map.t * (int64 * int64) Tid.Map.t
-    * (int64 * int64) Tid.Map.t
 
   (* True for a non-literal [RSP := RSP - size]. *)
   val vla_decrement_p : var -> Bil.exp -> bool

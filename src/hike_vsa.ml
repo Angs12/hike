@@ -44,26 +44,20 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
       in
       let degraded = has_indirect_jumps in
       (* Extracts tags via [Cbat_extraction]. *)
-      let offsets, k_ranges, vla_bounds =
+      let offsets, k_ranges =
         Vsa.Cbat_extraction.extract
           ~sp ~sol ~alloc_tids
           ~dynamic_alloc:(fun d -> Core.Set.mem alloc_tids (Term.tid d))
           sub
       in
-      let mk =
-        Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded
-          ~vla_alloc_tids:alloc_tids
-      in
-      let base_info = mk ~regions:[] ~vla_bounds ~stack_plan:[] in
-      let frame_escaped = Hike_stack_model.frame_escapes sp target sub base_info in
-      let regions =
-        Hike_stack_model.regions_of_sub sp target sub base_info ~frame_escaped
-      in
-      let base = mk ~regions ~vla_bounds ~stack_plan:[] in
-      (* Computes the stack plan on the pre-rewrite sub. *)
+      let mk = Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded
+          ~vla_alloc_tids:alloc_tids in
+      let base_info = mk ~regions:[] ~stack_plan:[] in
+      let regions = Hike_stack_model.regions_of_sub sub base_info in
+      let base = mk ~regions ~stack_plan:[] in
+      (* The plan IS the convertible regions — no refusals, no recomputation. *)
       { base with
-    Convutils.stack_plan =
-      Hike_stack_model.split_plan sp target sub base ~frame_escaped }
+    Convutils.stack_plan = Hike_stack_model.split_plan sub base }
     in
     let probe_res =
       (* Runs the fixpoint; non-convergence degrades to no tags. *)

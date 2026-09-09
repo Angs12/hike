@@ -66,7 +66,7 @@ let run_creg () =
             Cu.max_width = 64;
           };
         ]
-      ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
@@ -146,10 +146,10 @@ let run_creg () =
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
     Cu.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   let convertible_of info dtid =
-    Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub info)
+    Sm.regions_of_sub sub info
     |> List.filter (fun r -> List.exists (fun (t, _) -> Tid.equal t dtid) r.Cu.members)
     |> function
     | [ r ] -> Some r.Cu.convertible
@@ -342,15 +342,6 @@ let run_regions () =
   let r_interval =
     { Cu.id = 1; span = (-32L, -1L); members = []; convertible = true; max_width = 64 }
   in
-  let r_huge =
-    {
-      Cu.id = 2;
-      span = (0L, 0x2000000L);
-      members = [];
-      convertible = true;
-      max_width = 64;
-    }
-  in
   (* Payload bytes at widest member width, unrounded — the alloca must dominate it. *)
   let raw_bytes (r : Cu.region) : int64 =
     let lo, hi = r.Cu.span in
@@ -397,10 +388,9 @@ let run_regions () =
          let b2 = Hike.Stack_model.region_bytes (with_width r (16 * r.Cu.max_width)) in
          Int64.compare b1 b0 >= 0 && Int64.compare b2 b0 > 0)
        [ r_sing; r_interval ]);
-  (* R12-5: cap guard admits small fixtures, rejects huge span. *)
-  check "R12-5: region_size_ok true for small fixtures, false for huge span"
-    (Sm.region_size_ok r_sing && Sm.region_size_ok r_interval
-     && not (Sm.region_size_ok r_huge));
+  (* R12-5's region_size_ok pin is deleted with the function (the no-gates
+     ruling): an oversized region now joins to Frame storage with a
+     diagnostic — the cap is a storage-class fact, not a refusal. *)
   ())
 ;
 (  (* Full-coverage gate asserted through split_plan (the real producer). *)
@@ -442,34 +432,23 @@ let run_regions () =
       max_width = 32;
     }
   in
-  let plan_of info =
-    Sm.split_plan rsp Theory.Target.unknown sub info
-      ~frame_escaped:false in
+  let plan_of info = Sm.split_plan sub info in
   let info =
     Cu.mk_vsa_info
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
       ~regions:[ r1; r2 ]
-      ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
-  check "R12-5: gate qualifies when every tagged offset is covered by a convertible region"
+  (* The plan IS the convertible regions. *)
+  check "R12-5: the plan is the convertible region set (tags alone)"
     (Cu.equal_split_plan (plan_of info) [ r1; r2 ]);
-  (* R12-6: Infinite offset rejected. *)
-  let info_inf =
-    {
-      info with
-      Cu.offsets =
-        Tid.Map.of_alist_exn
-          [ (tid1, Cu.Infinite (-16L, -16L));
-            (tid2, Cu.Range (-32L, -32L)) ];
-    }
-  in
-  check "R12-6: gate rejects Infinite tag (unbounded -> not covered)"
-    (plan_of info_inf = []);
-  (* R12-7: degraded sub never qualifies. *)
-  let info_deg = { info with Cu.degraded = true; vla_bounds = Tid.Map.empty } in
-  check "R12-7: degraded sub never qualifies" (plan_of info_deg = []);
+  (* R12-6/R12-7 are deleted with the refusals (the no-gates ruling): an
+     Infinite tag makes the member non-Range so it never enters a region
+     (the partition drops it by construction); a REAL degraded sub carries
+     all-Unbounded tags so its plan is [] by construction — the corpus
+     battery covers both emissions. *)
   ())
 ;
 (  (* R12-8: disjoint singletons become two regions. *)
@@ -498,9 +477,9 @@ let run_regions () =
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
-  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) in
+  let regions = Hike.Stack_model.regions_of_sub sub info in
   let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
     (List.length conv = 2
@@ -537,9 +516,9 @@ let run_regions () =
           (tid2, Cu.Range (-24L, -8L));
         ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
-  let regions = Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) in
+  let regions = Hike.Stack_model.regions_of_sub sub info in
   (* The overlap MERGE is the pin: the two spans fuse into ONE region with
      span (-32,-8).  Convertibility is now a stricter, tag-based rule
      (singleton span = proven constant offset), so a region holding
@@ -586,11 +565,10 @@ let run_regions () =
           (Term.tid d_c, Cu.Range (-40L, -24L));
           (Term.tid d_d, Cu.Range (-16L, -16L));
           (Term.tid d_e, Cu.Range (32L, 40L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-      ~vla_alloc_tids:Tid.Set.empty
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
   in
   let regions =
-    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info)
+    Hike.Stack_model.regions_of_sub sub info
   in
   let tids_of r =
     Base.List.map r.Cu.members ~f:(fun (t, _) -> Tid.name t)
@@ -615,7 +593,7 @@ let run_regions () =
     && has (32L, 40L) [ Tid.name (Term.tid d_e) ]);
   (* Determinism: the (lo, hi, tid) tie-break makes ids stable run-to-run. *)
   let regions2 =
-    Hike.Stack_model.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Hike.Stack_model.frame_escapes (v64 "RSP") Theory.Target.unknown sub info)
+    Hike.Stack_model.regions_of_sub sub info
   in
   let spans_in_order rs = Base.List.map rs ~f:(fun r -> r.Cu.span) in
   check "R12-9b: region ids deterministic across two runs (spans ascending in lo)"
@@ -624,58 +602,11 @@ let run_regions () =
        = [ (-64L, -48L); (-40L, -24L); (-16L, -16L); (32L, 40L) ]);
   ())
 ;
-(  (* R12b: bare v := RSP copy rejects the sub wholly to %frame. *)
-  let rsp = v64 "RSP" in
-  let m = memv "r12b_m" in
-  let v = v64 "r12b_v" in
-  let t = v64 "r12b_t" in
-  let t2 = v64 "r12b_t2" in
-  let b = Blk.Builder.create () in
-  let d_copy = Def.create v (Bil.Var rsp) in
-  let d_stack =
-    Def.create t
-      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))), LittleEndian, `r32))
-  in
-  let d_alias = Def.create t2 (Bil.Load (Bil.Var m, Bil.Var v, LittleEndian, `r32)) in
-  Blk.Builder.add_def b d_copy;
-  Blk.Builder.add_def b d_stack;
-  Blk.Builder.add_def b d_alias;
-  let blk = Blk.Builder.result b in
-  let sub_b = Sub.Builder.create ~name:"r12b_bare_copy" () in
-  Sub.Builder.add_blk sub_b blk;
-  let sub = Sub.Builder.result sub_b in
-  let tid_stack = Term.tid d_stack in
-  let region =
-    {
-      Cu.id = 0;
-      span = (-16L, -16L);
-      members = [ (tid_stack, (-16L, -16L)) ];
-      convertible = true;
-      max_width = 32;
-    }
-  in
-  let info =
-    Cu.mk_vsa_info
-      ~offsets:[ (tid_stack, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[ (tid_stack, -20L, -10L) ]
-      ~regions:[ region ] ~stack_plan:[] ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
-  in
-  (* Decision lives in split_plan; escape is a per-region rule. *)
-  let info = { info with Cu.regions =
-      Sm.regions_of_sub (v64 "RSP") Theory.Target.unknown sub info ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) } in
-  let plan =
-    Sm.split_plan (v64 "RSP") Theory.Target.unknown sub info
-      ~frame_escaped:(Sm.frame_escapes (v64 "RSP") Theory.Target.unknown sub info) in
-  (* The escape analyses are DELETED (ADR 0008): the 100% tagging invariant
-     makes "a stack access we did not convert" impossible, so the bare-copy
-     sub's fate is decided by its TAGS alone.  The observable outcome the
-     property pinned (the sub stays wholly %frame) is kept here; the
-     mechanism pin went with the deleted functions. *)
-  check
-    "property R12b: bare copy v := RSP sub stays wholly %frame (tags alone decide)"
-    (plan = []);
-  ())
-;
+(* R12b is deleted with the escape analyses (the no-gates ruling): the
+   bare-copy sub's fate is its TAGS — the tagged singleton region converts;
+   the untagged aliased read emits through the real-address lane.  Its
+   emission-level guarantee is the corpus battery's oracle. *)
+
 (  Printf.printf "ok: property M3 fused_join invariants (skipped due to API change)\n";
   ())
 
@@ -683,41 +614,11 @@ let run_regions () =
    by NAME. Both fixtures run on the REAL x86_64 target — at
    [Theory.Target.unknown] no fp var is named and the belt is inert, so the
    fixture would pass vacuously. *)
+(* S1/S1b are deleted (the no-gates ruling): with no escape analysis and
+   empty tags their plan is [] BY CONSTRUCTION — they pinned the deleted
+   mechanism.  The name-grants-nothing claim is pinned by S2/S2b, whose
+   fixtures carry REAL tags. *)
 let run_fp_gpr () =
-(  (* S1: false escape — a heap-RBP sub whose call arg setup copies RBP.
-       RBP holds a heap pointer, so nothing frame-derived escapes. Today
-       [sp_escaped] seeds RBP unconditionally, so the copy counts and the
-       whole sub degrades to %frame. *)
-  let _, _, sub = mk_gpr_rbp_escaping_sub () in
-  let target = x86_64_target () in
-  (* The escape analyses are DELETED (ADR 0008); the observable behavior
-     is that nothing about the RBP NAME degrades the sub: its frame
-     accesses still convert. *)
-  check
-    "S1 (fp-GPR): a heap-RBP sub whose arg setup copies RBP is NOT degraded \
-     (the RBP name grants nothing; tags alone decide)"
-    (Sm.split_plan (v64 "RSP") target sub
-       (Cu.mk_vsa_info ~offsets:[] ~k_ranges:[] ~regions:[] ~stack_plan:[]
-          ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty)
-       ~frame_escaped:false
-     = []);
-  ())
-;
-(  (* S1b: the NAME control — the identical sub with RBX in place of RBP does
-       not escape today. Only the register NAME differs, so S1's [true] is
-       attributable to the fp grant, not to the shape. *)
-  let _, _, sub = mk_gpr_rbx_escaping_sub () in
-  let target = x86_64_target () in
-  check
-    "S1b (fp-GPR control): the identical sub with an RBX arg copy is likewise NOT \
-     degraded — register NAMES grant nothing"
-    (Sm.split_plan (v64 "RSP") target sub
-       (Cu.mk_vsa_info ~offsets:[] ~k_ranges:[] ~regions:[] ~stack_plan:[]
-          ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty)
-       ~frame_escaped:false
-     = []);
-  ())
-;
 (  (* S2: unbounded-fallback by name — a TAGGED rsp access plus an UNTAGGED
        heap-RBP store. The untagged heap store is not stack traffic at all,
        so it must not degrade the sub. Today [has_unbounded_access] fires on
@@ -757,22 +658,20 @@ let run_fp_gpr () =
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b exit0;
   let sub = Sub.Builder.result sub_b in
-  let target = x86_64_target () in
   let info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
       ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-      ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
   in
   (* Regions come from the producer (split_plan is a consumer). *)
   let info =
     { info with
       Cu.regions =
-        Sm.regions_of_sub rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info)
+        Sm.regions_of_sub sub info
     }
   in
-  let plan = Sm.split_plan rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info) in
+  let plan = Sm.split_plan sub info in
   check
     "S2 (fp-GPR, RED until T4): an untagged heap-RBP store does NOT degrade the sub \
      (split_plan is non-empty — stack-ness is the tag alone)"
@@ -817,21 +716,19 @@ let run_fp_gpr () =
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b exit0;
   let sub = Sub.Builder.result sub_b in
-  let target = x86_64_target () in
   let info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
       ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_bounds:[]
-      ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
   in
   let info =
     { info with
       Cu.regions =
-        Sm.regions_of_sub rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info)
+        Sm.regions_of_sub sub info
     }
   in
-  let plan = Sm.split_plan rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info) in
+  let plan = Sm.split_plan sub info in
   check
     "S2b (fp-GPR control, GREEN): the identical sub with an RBX-based heap store is \
      NOT degraded — S2's [[]] comes from the RBP NAME, not from the shape"
@@ -866,18 +763,16 @@ let run_fp_gpr () =
   Sub.Builder.add_blk sub_b entry;
   Sub.Builder.add_blk sub_b post0;
   let sub = Sub.Builder.result sub_b in
-  let target = x86_64_target () in
-  (* The sub's one frame access is at [RSP - 8] (negative offset: this sub
-     owns it) with a singleton Range — so its region is convertible and
-     the plan is non-empty.  No register name is consulted. *)
-  let rsp = v64 "RSP" in
+  (* The sub's one frame access is at [RBP - 0x30] (negative offset: this
+     sub owns it) with a singleton Range — so its region converts.  No
+     register name is consulted. *)
   let d_store_tid = Term.tid def_store in
   let info =
     Cu.mk_vsa_info ~offsets:[ (d_store_tid, Cu.Range (-48L, -48L)) ]
       ~k_ranges:[ (d_store_tid, 0L, 0L) ] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_bounds:[] ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
-  let regions = Sm.regions_of_sub rsp target sub info ~frame_escaped:(Sm.frame_escapes rsp target sub info) in
+  let regions = Sm.regions_of_sub sub info in
   check
     "S3 (fp-GPR, GREEN): the value-true twin — an [RBP := RSP] prologue makes RBP \
      sp-derived, so the sub's frame access CONVERTS (tags alone decide)"
@@ -886,7 +781,7 @@ let run_fp_gpr () =
 ;
 (  (* S4: the value-true twin's tagging pin (P21-1's model-level half). *)
   let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
-  let tags, _, _ = extract_anchored sub in
+  let tags, _ = extract_anchored sub in
   check "S4 (fp-GPR, GREEN): the prologue sub's [RBP - 0x30] access is Range-tagged"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L))
     && Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-48L, -48L)));

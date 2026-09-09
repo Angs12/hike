@@ -515,8 +515,7 @@ let rec extract ~(sp : var)
     ~(alloc_tids : Tid.Set.t)
     ~(sol : (tid, AI.t) Solution.t)
     (sub : sub term) :
-    kind Tid.Map.t * (int64 * int64) Tid.Map.t
-    * (int64 * int64) Tid.Map.t =
+    kind Tid.Map.t * (int64 * int64) Tid.Map.t =
   let tags = sol in
   let raw, kraw =
     Term.enum blk_t sub
@@ -626,40 +625,10 @@ let rec extract ~(sp : var)
   let k_ranges =
     Base.List.fold kraw ~init:Tid.Map.empty
       ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) in
-  (* No dynamic allocations means no bounds to compute: the whole-sub
-     walk below would discard everything. *)
-  let vla_bounds =
-    if Core.Set.is_empty alloc_tids then Tid.Map.empty
-    else
-      let def_of_lhs =
-        Term.enum blk_t sub
-        |> Seq.concat_map ~f:(Term.enum def_t)
-        |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-            Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
-      in
-      Term.enum blk_t sub
-      |> Seq.concat_map ~f:(fun blk ->
-          let blk_tid = Term.tid blk in
-          Term.enum def_t blk
-          |> Seq.filter ~f:dynamic_alloc
-          |> Seq.filter_map ~f:(fun d ->
-              match vla_size_of_rhs sp def_of_lhs (Def.rhs d) with
-              | None -> None
-              | Some size ->
-                  let st = Solution.get tags blk_tid in
-                  match Cbat_transfer.denote_imm_exp size st with
-                  | Ok ws -> (
-                      match WordSet.min_elem ws, WordSet.max_elem ws with
-                      | Some lo, Some hi -> (
-                          match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-                          | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
-                          | _ -> None)
-                      | _ -> None)
-                  | Error _ -> None))
-      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (dtid, b) ->
-             Core.Map.set m ~key:dtid ~data:b)
-  in
-  (offsets, k_ranges, vla_bounds)
+  (* vla_bounds is DELETED (the no-gates ruling): its only production
+     readers were the VLA-overlap gates.  Dynamic allocation itself travels
+     in [vla_alloc_tids] (the runtime-alloca rule's input). *)
+  (offsets, k_ranges)
 
 (* Dynamic-allocation size expression. *)
 (* True for [RSP := RSP - size]. *)

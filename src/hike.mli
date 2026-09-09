@@ -25,28 +25,18 @@ end
 
 (** Stack split decision and helpers. *)
 module Stack_model : sig
-  (** Merges overlapping ranges into regions. *)
+  (** Merges overlapping ranges into regions; a region's facts (span,
+      membership, storage class) derive from the tags alone. *)
   val regions_of_sub :
-    var -> Theory.Target.t -> sub term -> Convutils.vsa_info ->
-    frame_escaped:bool -> Convutils.region list
+    sub term -> Convutils.vsa_info -> Convutils.region list
 
-  (** Returns split regions, or [[]] for the single-frame fallback. *)
+  (** The plan IS the convertible regions — no refusals.  An oversized
+      region joins to Frame storage with a diagnostic naming it. *)
   val split_plan :
-    var -> Theory.Target.t -> sub term -> Convutils.vsa_info ->
-    frame_escaped:bool -> Convutils.split_plan
-
-  (** Tests whether a derived frame value escapes to a call or memory.
-       Load-bearing (2026-09-08): the callee's access through an escaped
-       frame pointer is untaggable in principle, so the caller is the only
-       sub that can keep that cell unconverted. *)
-  val frame_escapes : var -> Theory.Target.t -> sub term ->
-    Convutils.vsa_info -> bool
+    sub term -> Convutils.vsa_info -> Convutils.split_plan
 
   (** Returns the region alloca size. *)
   val region_bytes : Convutils.region -> int64
-
-  (** Tests the region size guard. *)
-  val region_size_ok : Convutils.region -> bool
 
   (** Tests for the split model. *)
   val is_precise : Convutils.vsa_info -> bool

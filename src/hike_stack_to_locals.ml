@@ -16,24 +16,13 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   in
   
   let tag_of = info.Convutils.offsets in
-  (* Incoming and outgoing arg accesses stay in memory. *)
+  (* Incoming and outgoing arg accesses stay in memory: the cross-sub
+     consistency rule, read from the two record facts. *)
   let k_of = info.Convutils.k_ranges in
-  (* The retaddr push stays convertible. Stack-ness is [vsa_info]
-     membership (spec §2.2). *)
-  let last_push_tids =
-    Model.last_push_tids_of sub ~is_stack:(fun d ->
-        Core.Map.mem tag_of (Term.tid d))
-  in
-  let is_abi_visible = Model.is_abi_visible sp ~tag_of ~k_of ~last_push_tids in
-  (* ABI record, resolved once: the per-node check below runs on every
-     address expression of every converted def. *)
-  (* Regions come from the VSA result. *)
-  let regions =
-    if info.Convutils.regions <> [] then info.Convutils.regions
-    else
-      Model.regions_of_sub sp target sub info
-        ~frame_escaped:(Model.frame_escapes sp target sub info)
-  in
+  let is_abi_visible = Model.is_abi_visible ~tag_of ~k_of in
+  (* The record IS the regions (autonomy: consume the producer's output,
+     never recompute). *)
+  let regions = info.Convutils.regions in
   let region_by_tid : Convutils.region Tid.Map.t =
     Base.List.fold_left regions ~init:Tid.Map.empty ~f:(fun m r ->
         Base.List.fold_left r.Convutils.members ~init:m ~f:(fun m (dtid, _) ->

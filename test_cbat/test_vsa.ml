@@ -373,7 +373,7 @@ let run () =
 ;
 (  (* Channel-1 pin (spec §2.2): the prologue + frame-affine accesses seed. *)
   let extract_of (sub : sub term) : Cu.vsa_kind Tid.Map.t =
-    let offsets, _, _ = extract_anchored sub in
+    let offsets, _ = extract_anchored sub in
     offsets
   in
   let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
@@ -387,7 +387,7 @@ let run () =
 (* RSP-derived base with index; the indexed load seeds. *))
 ;
 (  let _, def_load, sub = mk_rsp_index_sub () in
-  let tags, _, _ = extract_anchored sub in
+  let tags, _ = extract_anchored sub in
   check "P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (32L, 32L)));
   ()
@@ -395,7 +395,7 @@ let run () =
 (* Heap-shaped addresses do not seed; the RSP-direct access does. *))
 ;
 (  let _, _, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
-  let tags, _, _ = extract_anchored sub in
+  let tags, _ = extract_anchored sub in
   check "P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded"
     (Core.Map.find tags (Term.tid def_load) = None);
   check "P23-2: channel 2 — the disjoint store at [rbp + 0x100] is NOT seeded"
@@ -405,7 +405,7 @@ let run () =
   ())
 ;
 (  let _, def_load, _, def_use, sub = mk_one_path_sub () in
-  let tags, _, _ = extract_anchored sub in
+  let tags, _ = extract_anchored sub in
   check "F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
   check "F1-2: channel 2 — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
@@ -525,7 +525,7 @@ let run () =
 (* Channel-1 indexed-store pin: same shape seeds without any tagger. *))
 ;
 (  let _, _, def_store, sub, _ = mk_e2ed_rsp_store_sub () in
-  let tags, _, _ = extract_anchored sub in
+  let tags, _ = extract_anchored sub in
   check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(-24,-24)"
     (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-24L, -24L)));
   ()
