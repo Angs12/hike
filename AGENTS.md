@@ -458,6 +458,22 @@ sret_big (pre-opt they pass) — same instrument, -O2 side.
 | strict opt-safety on the typed -O0 emission | **31 PASS / 2 FAIL** (nested_struct, struct_by_value) ⚠️ |
 | convergence baseline | committed: `scripts/semantic/convergence_report.sh`; table in `/tmp/convergence_baseline.txt` ✅ |
 
+**Triage status (2026-09-10, late):** the align-1 hypothesis (frame-routed
+accesses claiming natural alignment) was TESTED and REJECTED — the
+violations persist with byte alignment. The failing set is stable across
+runs (not garbage-dependent). The single-pass auto-bisect exonerates
+every pass; the miscompile needs a pass COMBINATION. Next diagnostic:
+per-pair bisection (e.g. -O2 minus sroa/mem2reg/early-cse pairwise) and
+the IR delta vs the offset-model emission (emit_l1_o0, which was
+opt-green for both). The segment-seed WIP was REVERTED (commit series
+9f52c93..c10f699): the seed alone broke the corpus 22/33 — the tags
+became segment-absolute without the coordinated keying/tag
+relativization; stage 1 of the symbolic-base program is the FULL
+coordinated flip (seed + relativized tags + keys + the 7 pin
+modernizations), not the seed alone. THE REFERENCE EMISSION REMAINS
+`/tmp/emit_typed_o0` (pre-seed, re-emitted 2026-09-10 late, 33/33
+semantics; provenance src=a1253ff6826d632e bundle=96dd7386358c5dbd).
+
 **Last verified: 2026-09-10 EEST — THE SP-RELOAD CORPUSTEST (channel-2 pin):
 the corpus is 33 binaries**
 
