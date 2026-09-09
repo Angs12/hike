@@ -23,7 +23,6 @@ module CFG = Graphs.Tid
 
 module AI = Cbat_ai_representation
 module WordSet = Cbat_clp_set_composite
-module Clp = Cbat_clp
 module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word
 module Utils = Cbat_vsa_utils
@@ -47,34 +46,13 @@ type vsa_sol = (tid, AI.t) Solution.t
 (* Entry state is top. *)
 let default_entry () : AI.t = AI.top
 
-(* The model stack segment: entry RSP is seeded as a bounded range inside
-   it, and every access tag is the segment-relative offset. *)
-let stack_base = Int64.shift_left 1L 62
-let stack_limit = Int64.shift_left 1L 23
-
 (* Initial solution of a sub. *)
 let init_sol ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = Term.first blk_t sub in
-  (* The default entry seeds RSP's word with the bounded model stack
-     segment: guard expressions evaluate on sound ranges and the L1
-     guard-pruning class is structurally dead.  Explicit (fixture)
-     entries keep their own words. *)
   let entry_state = Option.value ~default:(default_entry ()) entry in
+  (* Entry RSP has offset 0. *)
   let entry_state = AI.set_frame entry_state AI.seed_frame in
-  let entry_state =
-    match entry with
-    | None ->
-      AI.add_word entry_state
-        ~key:(Var.base Abi.x86_64_sysv.sp)
-        ~data:
-          (WordSet.of_clp
-             (Clp.create
-                (Cbat_word.of_int64 stack_base)
-                ~step:(Cbat_word.one 64)
-                ~cardn:(Cbat_word.of_int64 (Stdlib.Int64.add stack_limit 1L))))
-    | Some e -> e
-  in
   let set_init sb = Map.set empty_map ~key:(Term.tid sb) ~data:entry_state in
   let base_map = Option.value_map ~default:empty_map ~f:set_init msb in
   (* Partial CFGs give unsound results. *)
