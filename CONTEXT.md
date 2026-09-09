@@ -97,6 +97,8 @@ _Avoid_: sp-lane arithmetic for fissioned members
 **Typed Frame**: The emitted form where frame-proven accesses are typed GEPs into real storage — never address integers. It is THE stack model; there is no alternative path.
 
 **Exception Lane**: The documented residual use of address integers (`inttoptr`) for accesses with no frame provenance — section and global constants. Everything frame-proven is typed.
+
+**Convergence**: The requirement that the same C source lifted from its -O0 build and from its -O2 build, then optimized by the consumer, yields equivalent results of similar complexity. Sources whose -O2 build constant-folded the computation away are measured separately — that divergence belongs to the compiler, not the lifter.
 **Infinite**: A widened stack offset interval `[lo, hi]` where one or both bounds represent unbounded growth.
 **Unbounded**: A stack access whose address value set is completely unconstrained (`TOP`), spanning the whole stack frame.
 **Dead**: A stack access on an unreachable execution path (`BOTTOM`), eliminated by DCE.
