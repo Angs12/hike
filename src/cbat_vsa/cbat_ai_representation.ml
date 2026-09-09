@@ -18,6 +18,7 @@ include Cbat_vsa_utils
 module MapLattice = Cbat_map_lattice
 module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
+module Clp = Cbat_clp
 module Utils = Cbat_vsa_utils
 
 (* Abstract state: words, memories, frame. *)
@@ -135,9 +136,16 @@ let frame_precedes (f1 : frame option) (f2 : frame option) : bool =
   | Some _, None -> false
   | Some a, Some b -> frame_equal (join_frames a b) b
 
-(* Entry frame: entry RSP has offset 0. *)
+(* Entry frame: entry RSP is a bounded range inside the model stack
+   segment — guard expressions evaluate on sound ranges, never on a
+   single fake offset (the L1 class is structurally impossible). *)
 let seed_frame : frame option =
-  Some [ (Var.base Abi.x86_64_sysv.sp, { fconst = WordSet.singleton (Cbat_word.of_word (Word.zero 64)); fvars = [] }) ]
+  let base = Cbat_word.of_int64 (Int64.shift_left 1L 62) in
+  let cardn = Cbat_word.of_int64 (Stdlib.Int64.add (Int64.shift_left 1L 23) 1L) in
+  Some
+    [ (Var.base Abi.x86_64_sysv.sp,
+       { fconst = WordSet.of_clp (Clp.create base ~step:(Cbat_word.one 64) ~cardn);
+         fvars = [] }) ]
 
 (* Restore RSP's offset by +8. *)
 let frame_add_rsp (f : frame option) : frame option =
