@@ -1,71 +1,70 @@
-# Verdict — SP-only stack semantics lane (ADR 0008)
+# SP-only stack semantics — lane verdict
 
-Branch `sp-only-stack-semantics`, tip `f206faf` (doc ticket 08 partial) / the
-AGENTS.md refresh and verdict rounded this session. Code tickets 01-07 done;
-doc ticket 08 done.
+Branch: `sp-only-stack-semantics`. This verdict covers the lane through
+`28e05c3` (the no-gates deletion) and supersedes the interim numbers in
+AGENTS.md's 2026-09-09 entry.
 
-## End state
+## The lane's arc
 
-**SP is the only register granted stack semantics by fiat.** The `Abi.fp` field +
-`is_fp` + `is_stack_reg` are DELETED; RBP joined `callee_saved`. `fp_anchor`'s
-invented entry binding is gone (never-defined RBP reads take the undef-read lane).
-The 32-bit spill apparatus (`u32_slots_of_sub`, `cast_source_width`,
-`has_32bit_extract`, `x0_temp_name`) is DELETED — SFLOAT emits `sitofp` at the
-operand's own LLVM type. NEW: the static model-interface table `fp_op_inputs` (the
-mapped intrinsic name IS the interface; operands resolve from the block's
-`intrinsic:xN` temps).
+1. **ADR 0008** — SP is the only register granted stack semantics by fiat;
+   RBP/fp is an ordinary callee-saved GPR (Abi.fp/is_fp/is_stack_reg deleted,
+   RBP in callee_saved; fp_anchor invented entry value deleted; the spill
+   apparatus deleted — SFLOAT emits sitofp at the operand's own type).
+2. **The no-gates ruling (2026-09-09)** — the VSA correctly tags every stack
+   access; STL converts without recomputing anything and without gates. The
+   whole refusal chain and every per-member recomputation deleted in one cut
+   (see commit 28e05c3's message for the full inventory).
 
-### Measured at the code tip (cedbb62 → f206faf)
+## Battery at `28e05c3` (the no-gates deletion)
 
-- **Unit suite 516 ok / 0 FAIL**; `dune runtest` ALL PASSED (clpequiv 2,861,148 / 0).
-- Both profiles build.
-- **-O0**: corpus 32/32 rc=0; check_allocas 160/0; semantic **32/0** at -O0 and
-  opt -O2. IR 29/32 byte-identical vs red3-o0 — the 3 deltas (mixed_fp_int,
-  union_overlap, va_arg_mixed) are the single SFLOAT lane (deleted trunc +
-  sitofp-i32 → sitofp at the operand's own type), semantically proven.
-- **-O2** (T07, the new lane): `compile_corpus.sh` builds `<out>-o2` PIE-clean
-  32 bins. Emission 32/32 rc=0; check_allocas **159/1** (out_struct, the shape-d
-  class at -O2); semantics **24 PASS / 8 FAIL** (the pre-lane -O2 baseline was
-  25/7 — see the -O2 note below).
+| gate | result |
+|---|---|
+| unit suite | **510 ok / 0 FAIL** (was 516: the 6 gate-pinning checks deleted — honest) |
+| `dune runtest` (incl. referee) | ALL PASSED; clpequiv **2,861,148 / 0 mismatches** ✅ |
+| both profiles build | default + vsa-debug rc=0 ✅ |
+| corpus emission -O0 / -O2 | **32/32 rc=0** both ✅ |
+| check_allocas (-O0) | **160 passed, 0 failed** ✅ |
+| IR identity vs t06-o0 | **0/32** — the deletion legitimately re-codes the corpus |
+| semantics -O0 | **10 PASS / 22 FAIL** (was 32/0) ⚠️ |
+| semantics -O2 | **18 PASS / 14 FAIL** (was 24/8) ⚠️ |
+| optimization-safety (opt-21 -O2 over -O0 IR) | **10 PASS / 22 FAIL** (follows the -O0 cost) ⚠️ |
+| instrumentation blocker | clean ✅ |
 
-### The -O2 note (honest — do not over-read)
+## The cost, attributed (the owner's decision)
 
-- -O2 semantic **24/8** vs the handwritten 25/7 baseline. The change is the
-  **the -O2 corpus exercises the lane's target class harder**: at -O2 RBP is a
-  plain GPR (omit-frame-pointer is on), so the lifted -O2 binaries stress the
-  value-based tags, the undef lane, and the by-construction SFLOAT path that -O0
-  never hits (every -O0 prologue makes RBP sp-derived). The 8 -O2 failures
-  (deep_recursion, fizzbuzz_safe, fptr_table, union_overlap, va_arg_mixed,
-  va_arg_vacopy, array_local, byte_copy — plus out_struct allocas) are the **-O2
-  lifting corpus's known hard classes** (indirect calls, setjmp, va_arg), NOT a
-  regression introduced by this lane: the SAME eight fail against the pre-lane
-  -O2 plugin (the 25/7 baseline is the same -O2 class). This lane's -O0 gates are
-  its correctness oracle; the -O2 semantic fidelity is a standing -O2-corpus
-  program (post-lane), separate from this lane's fp-GPR conversion.
-- net-net: the lane **enabled the -O2 corpus** (it was unbuilt before); measuring
-  it at 24/8 and recording the class is the ticket's deliverable, and the -O2
-  semantic fidelity improvements are a follow-on program, not this lane.
+**The 22 -O0 failures are ONE class, not 22 bugs: the measured escape cost,
+arrived en masse.** At -O0 nearly every `main` passes a frame-derived pointer
+to a callee (`&x` to factorial, bufs to printf-class callees). With the escape
+veto deleted, `main`'s cells convert to `stack_r` allocas while the callee
+reads the same physical cell at `[RSP + k ≥ 0]` through its own real-stack
+lane — split storage, the write-closed violation class. Machine-proven on
+factorial: `main`'s `%hike_stack` sp becomes `undef` (the sp-lane def was
+deemed erasable by the precise sweep), the pushed-arg cell lands in an alloca
+the callee never reads → SIGSEGV (rc=139). This is NOT a tag bug; it is the
+falsification recorded in ADR 0008 arriving at full breadth: **the callee's
+access through an escaped frame pointer is untaggable in principle** (the
+pointer is TOP in the callee's sub), so the tag cannot carry the fact — only
+the caller can, and the caller's only channel is refusing to convert those
+cells.
 
-## What survived by measurement (recorded, never re-litigate)
+The 14 -O2 failures carry the same class plus the pre-existing 8-binary
+-O2 known set; 18 PASS (up from 24/8's PASS count only because the failing
+set shifted).
 
-- **Escape survived** in value-true form: `frame_escapes` (SP-seeded closure, fp
-  NOT seeded) + the tag-gated `frame_addr_alias` + `has_unbounded_access`'s
-  SP-only untagged arm. Deleting escape lost 5 binaries (the access through an
-  escaped frame pointer is UNTAGGABLE IN PRINCIPLE — TOP in the callee's sub; the
-  caller alone holds the fact).
-- **`base_const` CANCELLED** — the tag IS the proof; the spill-gating and
-  directness consumers read the tag's span.
-- **Ownership is a tag class**: positive offset = caller's frame = never
-  convertible here; each sub converts only `lo < 0` cells.
+## The owner's options (recorded, not decided)
 
-## Provenance-lane brief (deferred — the next lane's opening handoff)
+1. **Accept the cost** — the deletion stands; the corpus documents the
+   escape class as known-unconverted (precision loss on the caller side,
+   never unsound emission of the callee side).
+2. **Producer-side repair (the sanctioned fix)** — the escape fact becomes a
+   VSA-produced record field (hike_vsa computes it once; STL reads it and
+   never recomputes): the invariant holds (one producer, tags are complete,
+   the record carries the aliasing fact), and the 22 binaries recover. This
+   is the ADR-0008 "producer-fix later" path the owner chose provisionally
+   in Round 1 (Q3: "Delete now, producer-fix later").
+3. Restore any STL gate — **not on the table**; it contradicts the ruling.
 
-The `anchored_entry` RBP={0} word seed is a PLACEHOLDER for a real two-channel
-provenance proof. Deferred work: (1) per-cell content-provenance bit in `Mem` +
-per-var provenance set in `AI` (channel 2); (2) channel-2 seeding iff
-provenance-clean AND bounded in the window (the environment-conditional soundness
-argument); (3) the seed's DELETION; (4) fixtures earn prologues via the
-`mk_rsp_prologue_sub` pattern instead of the seed. The ADR 0008 test-side gotchas
-already cover the real-target recipe (`Bap_main.init` then
-`Theory.Target.get "bap:x86_64"` — package-qualified; `Bil.Extract` takes `nat1`
-ints; `Core.List`/`Core.String` because `Bap.Std` shadows them).
+## Artifacts
+
+`/home/tovpr/sp-battery/{nogates-o0,nogates-o2,sem-ng-o0,sem-ng-o2,semopt-ng-o0}`;
+controls `t06-o0` (pre-deletion green), `red3-o0` (T04 reference).
