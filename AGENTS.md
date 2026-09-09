@@ -430,6 +430,21 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-10 EEST — THE SP-RELOAD CORPUSTEST (channel-2 pin):
+the corpus is 33 binaries**
+
+New `src/progs/synth/sp_reload.c`: a stack pointer is SAVED TO STACK
+(volatile cell, the round-trip is real), reloaded, and dereferenced for
+writes and reads at two frame depths — the VSA's channel-2 seeding (the
+reloaded value is frame-resident and bounded) must tag the
+reloaded-pointer derefs with concrete ranges. MEASURED: -O0 tags all
+such derefs Range(...) and they convert to regions (zero inttoptr);
+-O0 semantics **33 PASS / 0 FAIL**; allocas **165/0**; -O2 pinned green
+at **27 PASS / 6 FAIL of 33** (sp_reload PASSES at -O2 too — the failing
+set is unchanged). Both corpus lanes rebuilt (`/tmp/corpus`,
+`/tmp/corpus_o2`, plus `/tmp/corpus-o2` from the same run); the typed
+reference emissions gained `out_sp_reload.ll`.
+
 **Last verified: 2026-09-10 EEST — THE TYPED FRAME GENERALIZED (ticket 04):
 the offset access path is DELETED — the typed frame is THE model**
 
