@@ -423,6 +423,68 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-09 EEST — THE SIMPLIFICATION PROGRAM (branch
+`sp-only-stack-semantics`, 4 commits `65b879c`..`3268217`): records purge +
+trust-the-producer + the vendored VSA's no-gates conversions + the
+architecture deepening — FULL BATTERY GREEN, repo 62.8k → ~40k lines**
+
+The four lanes (from the 2026-09-09 architecture review, all four candidates
+executed): (1) records purge — 34 archived `.scratch/` lanes, the AGENTS.md
+history sweep (19 superseded entries), the duplicate paper text; the
+surviving record is this section + the two live lane dirs + 3 perf reports.
+(2) trust-the-producer — ONE KB accessor (`Hike_kb.info_of_sub`) replaces
+seven private defaults; `split_plan` trusts the record; `frame_escapes`
+narrows to the tag maps it reads (the producer's dummy record dies); the
+model owns `frame_dims` (the emitter's duplicated tag folds and
+`degraded_dims`' dead tuple halves die); `emit_program` populates its ctx's
+abi/sp; STL carries the slot width in the cell shape. Dead code: interval
+tree to its 8-function surface, map-lattice `Make`/`Make_indexed`/
+`Free_index`, `vla_size_of_rhs`, `Clp.dir_of`, `Word.lsb`, `cbat_memo`
+de-functorized, mli over-exposures unexported, 9 closed-lane probes + 7
+stanzas + `profile_lift.sh` + 2 orphaned fixtures. (3) the vendored VSA's
+no-gates conversions: div-by-{0} → the word semantics `{ones}` (D3-3/4 pins
+rewritten), TOP-addressed stores → whole-memory top,
+`constrain_cell` keys by the DENOTED rewritten address (the SP pre-check
+and constant-only requirement gone), `segment_wordset` degrades to top,
+`st_tag_of` adopts the exact tag value on top locals,
+`complement_guard_op` EQ↔NEQ, NEQ joins the understood flag ops,
+Infeasible seeds stay identity; the chain lane's single-def scope is
+DOCUMENTED as the whole-sub map's soundness boundary (the deep walk is the
+positional mechanism) — not a refusal to re-litigate: the audit's proposed
+"meet into every producer" conversion is UNSOUND for the sequential-defs
+class. (4) architecture — `Cbat_vsa.Test_seam` quarantines the fixtures'
+surface out of the production interface (CONTEXT.md's Test Seam term); the
+rewrite registrations merge (`hike-stack-to-locals` runs stl + dce — the
+load-roots rule is defined over the rewrite's own vars); the orphaned
+walk-record census deleted. NOT done, recorded: `create_branches`' >2-branch
+failwith is an internal shape assert on a filter-guaranteed invariant (a
+total cascade adds new-basic-block machinery to an unreachable lane — do
+not re-propose); `Clp.compare` is interface-forced (it shadows the derived
+one for Value.S); the wordset_intf shrink yields nothing (every member is
+test-used through FinSet/Clp); the convutils split (review candidate 8) and
+the `simplify_jmps` removal are future lanes (the latter renumbers TIDs
+corpus-wide — a deliberate re-baseline, never a rider).
+
+| gate | result |
+|---|---|
+| unit suite | `dune runtest` ALL PASSED, clpequiv **2,861,148 / 0 mismatches** ✅ |
+| both profiles build | default + vsa-debug **rc=0** ✅ |
+| corpus emission (-O0) | **32/32 rc=0**, diagnostics identical to control ✅ |
+| IR vs same-tree control | lane 2: **byte-identical 32/32**; lane 4: byte-identical 32/32; lane 3: **1/32 delta** — alloca_vla's fallback frame 96→80 bytes (the div-fix/tag-adoption precision gain) ✅ |
+| structural asserts (-O0) | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (-O0) | **32 PASS / 0 FAIL** ✅ |
+| optimization-safety (opt -O2) | **32 PASS / 0 FAIL** ✅ |
+| -O2 corpus | emission **32/32 rc=0**; allocas **159/1** (out_struct, the recorded shape-d class); semantics **25/7** — the recorded class is 24/8 (deep_recursion, fizzbuzz_safe, fptr_table, union_overlap, va_arg_mixed, va_arg_vacopy, array_local, byte_copy); **deep_recursion flipped GREEN** (lane 3's NEQ/cell-meet conversions) — strictly no-worse ✅ |
+| unmapped FP intrinsics | **0** (both corpora) ✅ |
+| probes | precision_probe + corpus_watch (alloca_vla) — **PASS, 0 crashes** ✅ |
+| instrumentation blocker | clean (exercised by both builds) ✅ |
+| plugin provenance | bundle sha16 `d018a1ee694ed6de` (final), recorded after every lane install ✅ |
+
+Artifacts: `/home/tovpr/simplify-battery/{ctrl,cand,cand2,cand3,cand-o2,sem*,semopt*}`
+(ctrl = pre-program control; cand2 = post-lane-3; cand3 = final).
+The reference emission for future byte-identity checks is `cand3` (-O0) —
+pre-lane-3 controls are stale for IR comparison only in alloca_vla.
+
 **Last verified: 2026-09-09 EEST — NO-GATES LANE (branch
 `sp-only-stack-semantics`, committed as `65b879c`) — the pipeline's last
 guard-shaped conditionals DELETED — BATTERY GREEN, IR BYTE-IDENTICAL 32/32
