@@ -307,10 +307,79 @@ let frame_addr_alias (sp : var) (_target : Theory.Target.t) (sub : sub term)
                  Core.Set.mem frame_vars (Var.base v))
          | None -> false))
 
+(* Tests whether a call-tail stack store passes an outgoing stack arg.
+   The caller writes pushed arg cells below entry RSP (lo < 0, klo >= 0);
+   these denote callee-visible ABI traffic. *)
+let has_outgoing_stack_args (sp : var) (target : Theory.Target.t)
+    (sub : sub term) (info : Convutils.vsa_info) : bool =
+  let abi = Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv in
+  let facts = def_facts_of_sub sub in
+  let is_stack (d : def term) : bool =
+    Core.Map.mem info.Convutils.offsets (Term.tid d)
+  in
+  let call_tails =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:[] ~f:(fun acc blk ->
+           if Term.enum jmp_t blk |> Seq.exists ~f:is_real_call then
+             let defs = Term.enum def_t blk |> Seq.to_list in
+             let last =
+               Base.List.foldi defs ~init:None ~f:(fun i acc d ->
+                   if is_stack d then Some i else acc)
+             in
+             (defs, last) :: acc
+           else acc)
+  in
+  let outgoing_tail_tids : Tid.Set.t =
+    Base.List.fold_left call_tails ~init:Tid.Set.empty
+      ~f:(fun acc (defs, last) ->
+        match last with
+        | Some i ->
+            Base.List.take defs i
+            |> Base.List.fold_left ~init:acc ~f:(fun acc d ->
+                    Core.Set.add acc (Term.tid d))
+        | None -> acc)
+  in
+  let is_outgoing_store (d : def term) : bool =
+    match Core.Map.find facts (Term.tid d) with
+    | None -> false
+    | Some f -> (
+      match f.store_data with
+      | Some _ -> (
+        match f.addr with
+        | Some (addr, _) ->
+            let rsp_rel =
+              Exp.free_vars addr
+              |> Core.Set.exists ~f:(Abi.is_sp abi)
+            in
+            let lo_neg =
+              match Core.Map.find info.Convutils.offsets (Term.tid d) with
+              | Some (Convutils.Range (lo, _)) -> Int64.compare lo 0L < 0
+              | _ -> false
+            in
+            let k_pos =
+              match Core.Map.find info.Convutils.k_ranges (Term.tid d) with
+              | Some (klo, _) -> Int64.compare klo 0L >= 0
+              | None -> false
+            in
+            rsp_rel && lo_neg && k_pos
+        | None -> false)
+      | None -> false)
+  in
+  Term.enum blk_t sub
+  |> Seq.exists ~f:(fun blk ->
+         if Term.enum jmp_t blk |> Seq.exists ~f:is_real_call then
+           Term.enum def_t blk
+           |> Seq.exists ~f:(fun d ->
+                  Core.Set.mem outgoing_tail_tids (Term.tid d)
+                  && is_outgoing_store d)
+         else false)
+
 (* Tests whether the frame is reachable from outside. *)
 let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
-  sp_escaped sp target sub || frame_addr_alias sp target sub info
+  sp_escaped sp target sub
+  || frame_addr_alias sp target sub info
+  || has_outgoing_stack_args sp target sub info
 
 (* Merges overlapping ranges into regions. *)
 let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
