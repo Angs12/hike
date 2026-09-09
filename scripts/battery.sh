@@ -23,7 +23,10 @@ C0=/tmp/corpus; C2=/tmp/corpus_o2
 [ -d "$C0" ] && [ -d "$C2" ] || { echo "FATAL: corpus dirs missing ($C0, $C2)" >&2; exit 2; }
 
 # Provenance: the installed plugin must be THIS tree's build (by content).
-SRC_HASH=$(find "$HERE/../src" -name '*.ml' -o -name '*.mli' -o -name 'dune' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)
+# The src hash must re-derive EXACTLY as record_provenance.sh does — sha256sum
+# output embeds the path strings, so find the CANONICAL src path.
+SRC_DIR="$(cd "$HERE/../src" && pwd)"
+SRC_HASH=$(find "$SRC_DIR" -name '*.ml' -o -name '*.mli' -o -name 'dune' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)
 PROV="$(find "$(opam var prefix 2>/dev/null)/lib/hike" -maxdepth 1 -name 'hike.cmxs.provenance' 2>/dev/null | head -1)"
 PROV_TREE=$(grep '^tree:' "$PROV" 2>/dev/null | awk '{print $2}')
 PROV_SRC=$(grep '^src_sha16:' "$PROV" 2>/dev/null | awk '{print $2}')
