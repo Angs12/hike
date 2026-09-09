@@ -137,7 +137,23 @@ let convert_binary output_program proj =
       copy_relocs = copy_reloc_addrs_val;
     }
   in
-  (* Pass 2: data-section initializers. *)
+  Bil2llvm.emit_program llvm_ctx llvm_module
+    ~target ~ptrsize
+    ~symtab:symtab_val
+    ~text_section:text_section_val
+    ~section_remap:section_remap_val
+    ~copy_relocs:copy_reloc_addrs_val
+    section_list (Project.program proj);
+  (* Pass 2: data-section initializers — AFTER [emit_program]. Every
+     8-byte word renders through [remap_native_addr]: the symtab arm
+     (a word that names a lifted sub renders as [ptrtoint @sub]) needs
+     the sub's LLVM function to EXIST in the module, so populating the
+     initializers before the emission left that arm structurally dead
+     and rendered every function-valued relocated addend as the raw
+     input-world vaddr (the fptr_table class: an indirect call through
+     a data table landed on an address meaningless in the lifted
+     executable). One rule for every section, no per-word special
+     cases; words that name no lifted world keep the identity (raw). *)
   Base.List.iter
     [
       data_section;
@@ -150,13 +166,6 @@ let convert_binary output_program proj =
         Base.Option.iter sec ~f:(fun (arr, min_addr, _, base) ->
             Bil2llvm.set_section_initializer ctx llvm_ctx llvm_module base arr
               (Word.to_int64_exn min_addr)));
-  Bil2llvm.emit_program llvm_ctx llvm_module
-    ~target ~ptrsize
-    ~symtab:symtab_val
-    ~text_section:text_section_val
-    ~section_remap:section_remap_val
-    ~copy_relocs:copy_reloc_addrs_val
-    section_list (Project.program proj);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
