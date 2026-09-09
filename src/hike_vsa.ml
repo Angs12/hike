@@ -50,8 +50,19 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
           ~dynamic_alloc:(fun d -> Core.Set.mem alloc_tids (Term.tid d))
           sub
       in
+      (* Escape analysis: one computation per sub (ADR 0008, producer-fix).
+         The result flows as [vsa_info.frame_escaped]; [regions_of_sub]
+         reads it to veto conversion on escaped frames. *)
+      let pre_escape_info =
+        Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded
+          ~vla_alloc_tids:alloc_tids ~regions:[] ~stack_plan:[]
+          ~frame_escaped:false
+      in
+      let frame_escaped =
+        Hike_stack_model.frame_escapes sp target sub pre_escape_info
+      in
       let mk = Convutils.mk_vsa_info_maps ~offsets ~k_ranges ~degraded
-          ~vla_alloc_tids:alloc_tids in
+          ~vla_alloc_tids:alloc_tids ~frame_escaped in
       let base_info = mk ~regions:[] ~stack_plan:[] in
       let regions = Hike_stack_model.regions_of_sub sub base_info in
       let base = mk ~regions ~stack_plan:[] in

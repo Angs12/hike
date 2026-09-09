@@ -2,14 +2,19 @@
 
    THE MODEL IS THE TAG (ADR 0008): the VSA tags every frame-resident access
    with its proven offset span.  This module merges overlapping spans into
-   regions and derives each region's facts from those tags alone.  There is
-   NO refusal here — no whole-sub veto, no shape re-derivation, no escape
-   walk.  A region's storage class is the join of its members' tag facts
-   (Static/Frame/Dynamic/Dead); an oversized region joins to Frame (the
-   sound fallback storage) with a diagnostic naming it — never a gate. *)
+   regions and derives each region's facts from those tags + the producer-side
+   escape fact ([vsa_info.frame_escaped]).  The escape analysis (sp_escaped,
+   frame_addr_alias, frame_escapes) is restored as private helpers for the
+   producer-fix repair: [hike_vsa] computes the field ONCE per sub; downstream
+   consumers read it, never recompute.  A region's storage class is the join
+   of its members' tag facts (Static/Frame/Dynamic/Dead) AND the escape veto
+   (if the frame escapes, ALL regions stay Frame — the callee's access through
+   an escaped frame pointer is untaggable in principle).  An oversized region
+   joins to Frame with a diagnostic naming it — never a gate. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
+open Bap_core_theory
 module Abi = Hike_abi
 
 (* Stack pointer only: the one register granted stack semantics by fiat
@@ -91,18 +96,221 @@ let is_region_base (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_base"
 
-(* DELETED (the 2026-09-09 no-gates ruling, ADR 0008): the escape analyses
-   (sp_escaped, frame_addr_alias, frame_escapes), the call-tail outgoing-arg
-   walk (call_block_stack_tails, last_push_tids_of, is_outgoing_store,
-   has_outgoing_stack_args, saves_incoming_reg), the whole-sub refusal chain
-   (has_unbounded_access, tags_inside_or_disjoint, vla_overlaps_convertible,
-   region_size_ok, the degraded/VLA refusals), and the SP-mention family
-   (is_sp_var, exp_contains_sp).  The 100% tagging invariant is a
-   REQUIREMENT: an access's stack-ness is its tag, and a tagged access's
-   storage class is the tag's own value.  The one measured escape cost
-   (rec_struct/sret_big-class, 5 binaries — the callee's access through an
-   escaped frame pointer is untaggable in principle) is recorded in the lane
-   verdict; the sanctioned repair, if wanted, is producer-side. *)
+(* ---------- Escape analysis (producer-side, ADR 0008) ----------
+   Restored for the producer-fix repair: the escape fact is computed ONCE in
+   hike_vsa and travels as [vsa_info.frame_escaped].  No STL gate reads it;
+   [regions_of_sub] reads the field to veto conversion on escaped frames.
+
+   The callee's access through an escaped frame pointer is untaggable in
+   principle (the pointer is TOP in the callee's sub); the caller is the
+   only sub holding the information. *)
+
+(* Tests for a memory node in rhs. *)
+let is_memory_shape (e : exp) : bool =
+  let vis =
+    object
+      inherit [ bool ] Exp.visitor
+      method! visit_load ~mem:_ ~addr:_ _ _ _ = true
+      method! visit_store ~mem:_ ~addr:_ ~exp:_ _ _ _ = true
+    end
+  in
+  vis#visit_exp e false
+
+(* Per-def facts, extracted once: escape and alias walkers query these. *)
+type def_facts = {
+  def : def term;
+  addr : (exp * Size.t) option;
+  store_data : exp option;
+  mem_shape : bool;
+  free_vars : Var.Set.t;
+}
+
+let def_facts_of_sub (sub : sub term) : def_facts Tid.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+         Term.enum def_t blk
+         |> Seq.fold ~init:m ~f:(fun m d ->
+                let rhs = Def.rhs d in
+                Core.Map.set m ~key:(Term.tid d)
+                  ~data:
+                    {
+                      def = d;
+                      addr = addr_of_rhs rhs;
+                      store_data = store_data_exp_of_rhs rhs;
+                      mem_shape = is_memory_shape rhs;
+                      free_vars = Exp.free_vars rhs;
+                    }))
+
+let is_real_call (j : jmp term) : bool =
+  match Jmp.kind j with
+  | Call c -> (
+      match Call.target c with
+      | Direct _ -> true
+      | Indirect _ -> Option.is_some (Call.return c))
+  | _ -> false
+
+(* {SP}-seeded syntactic closure: any non-memory def whose rhs mentions a
+   derived var adds its lhs to the closure.  Then test whether a
+   frame-derived value escapes through call-arg registers or store data.
+   fp is NOT seeded (ADR 0008): RBP joins only via its own defs. *)
+let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
+    bool =
+  let base_var v = Var.base v in
+  let sp_base = base_var sp in
+  let derived : Var.Set.t ref = ref (Var.Set.of_list [ sp_base ]) in
+  let facts = def_facts_of_sub sub in
+  let rec grow () =
+    let changed = ref false in
+    Core.Map.iter facts ~f:(fun f ->
+        let d = f.def in
+        if not f.mem_shape then begin
+          let uses = f.free_vars in
+          if
+            Core.Set.exists uses ~f:(fun v ->
+                Core.Set.mem !derived (base_var v))
+          then begin
+            let lhs = base_var (Def.lhs d) in
+            if not (Core.Set.mem !derived lhs) then (
+              derived := Core.Set.add !derived lhs;
+              changed := true)
+          end
+        end);
+    if !changed then grow () else ()
+  in
+  grow ();
+  let arg_regs = lazy (Abi.param_regs target) in
+  let rec value_free_vars (e : exp) : Var.Set.t =
+    let vis =
+      object
+        inherit [ Var.Set.t ] Exp.visitor
+        method! visit_var v acc = Core.Set.add acc (base_var v)
+        method! visit_load ~mem:_ ~addr:_ _ _ acc = acc
+        method! visit_store ~mem:_ ~addr:_ ~exp:data _ _ acc =
+          Core.Set.union acc (value_free_vars data)
+      end
+    in
+    vis#visit_exp e Var.Set.empty
+  in
+  let exp_escapes (e : exp) : bool =
+    Core.Set.exists (value_free_vars e) ~f:(fun v ->
+        Core.Set.mem !derived (base_var v))
+  in
+  let call_arg_escapes =
+    let is_arg_reg (v : var) : bool =
+      Base.List.exists (Lazy.force arg_regs)
+        ~f:(fun r -> Var.same r (base_var v))
+    in
+    Term.enum blk_t sub
+    |> Seq.exists ~f:(fun blk ->
+        let has_call =
+          Term.enum jmp_t blk |> Seq.exists ~f:is_real_call
+        in
+        if not has_call then false
+        else
+          Term.enum def_t blk
+          |> Seq.exists ~f:(fun d ->
+              match Core.Map.find facts (Term.tid d) with
+              | None -> false
+              | Some f ->
+                is_arg_reg (Def.lhs d)
+                && not f.mem_shape
+                && exp_escapes (Def.rhs d))
+          || (Term.enum jmp_t blk
+              |> Seq.exists ~f:(fun j ->
+                  match Jmp.kind j with
+                  | Call c -> (
+                      match Call.target c with
+                      | Indirect e -> exp_escapes e
+                      | _ -> false)
+                  | _ -> false)))
+  in
+  let store_data_escapes =
+    Term.enum blk_t sub
+    |> Seq.exists ~f:(fun blk ->
+        Term.enum def_t blk
+        |> Seq.exists ~f:(fun d ->
+            match Core.Map.find facts (Term.tid d) with
+            | None -> false
+            | Some f -> (
+                match f.store_data with
+                | Some data ->
+                    if exp_escapes data then
+                      match f.addr with
+                      | Some (addr, _) ->
+                          let bare_sp =
+                            match addr with
+                            | Bil.Var v -> Var.same (base_var v) sp_base
+                            | _ -> false
+                          in
+                          not bare_sp
+                      | None -> false
+                    else false
+                | None -> false)))
+  in
+  call_arg_escapes || store_data_escapes
+
+(* Tag-gated read-through-derived-var test: an UNTAGGED memory access whose
+   address mentions a frame-var vetoes conversion; a TAGGED one (the -O0
+   prologue's own [RBP - k] stores) is proven frame-resident and needs no
+   protection. *)
+let frame_addr_alias (sp : var) (_target : Theory.Target.t) (sub : sub term)
+    (info : Convutils.vsa_info) : bool =
+  let facts = def_facts_of_sub sub in
+  let derived : Var.Set.t ref =
+    ref (Var.Set.of_list [ Var.base sp ])
+  in
+  let rec grow () =
+    let changed = ref false in
+    Core.Map.iter facts ~f:(fun f ->
+        let d = f.def in
+        if not f.mem_shape then begin
+          let uses = f.free_vars in
+          if
+            Core.Set.exists uses ~f:(fun v ->
+                Core.Set.mem !derived (Var.base v))
+          then begin
+            let lhs = Var.base (Def.lhs d) in
+            if not (Core.Set.mem !derived lhs) then (
+              derived := Core.Set.add !derived lhs;
+              changed := true)
+          end
+        end);
+    if !changed then grow () else ()
+  in
+  grow ();
+  let frame_vars =
+    Core.Map.filter facts ~f:(fun f ->
+        let lhs = Var.base (Def.lhs f.def) in
+        (not (Convutils.is_mem (Def.lhs f.def)))
+        && not (Var.same lhs (Var.base sp))
+        && Core.Set.exists f.free_vars ~f:(fun v ->
+              Core.Set.mem !derived (Var.base v)))
+    |> Core.Map.fold ~init:Var.Set.empty
+         ~f:(fun ~key:_ ~data:f acc ->
+           Core.Set.add acc (Var.base (Def.lhs f.def)))
+  in
+  if Core.Set.is_empty frame_vars then false
+  else
+    Core.Map.exists facts ~f:(fun f ->
+        let untagged =
+          match Core.Map.find info.Convutils.offsets (Term.tid f.def) with
+          | None -> true
+          | Some (Convutils.Range _ | Convutils.Dead) -> false
+          | Some (Convutils.Infinite _ | Convutils.Unbounded
+                  | Convutils.VLA _) -> true
+        in
+        untagged
+        &&
+        (match f.addr with
+         | Some (addr, _) ->
+             Core.Set.exists (Exp.free_vars addr) ~f:(fun v ->
+                 Core.Set.mem frame_vars (Var.base v))
+         | None -> false))
+
+(* Tests whether the frame is reachable from outside. *)
+let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
+    (info : Convutils.vsa_info) : bool =
+  sp_escaped sp target sub || frame_addr_alias sp target sub info
 
 (* Merges overlapping ranges into regions. *)
 let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
@@ -174,17 +382,22 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
               ~f:(fun (l, h) (_, (lo, hi)) ->
                 (Int64.min l lo, Int64.max h hi))
       in
-      (* Storage class, from the tags alone (a rule, never a gate):
+      (* Storage class, from the tags + the producer-side escape fact:
          - every member at a NEGATIVE offset (this sub owns the cell) and a
            SINGLETON span (the proven offset is constant) → Static;
-         - anything else (mixed ownership, a widened span) → Frame. *)
+         - anything else (mixed ownership, a widened span) → Frame.
+         The escape veto: if the frame is reachable from outside (a
+         frame-derived value passed to a callee), ALL regions stay Frame —
+         the callee reads the same physical cell through its own real-stack
+         lane, untaggable in principle (ADR 0008, producer-fix repair). *)
       let convertible =
         match members with
         | [] -> false
         | _ ->
-            Base.List.for_all members ~f:(fun (mtid, (lo, hi)) ->
+            Base.List.for_all members ~f:(fun (_mtid, (lo, hi)) ->
                 Int64.compare lo 0L < 0
                 && Int64.equal lo hi)
+            && not info.Convutils.frame_escaped
       in
       let max_width =
         Base.List.fold_left members ~init:0 ~f:(fun m (mtid, _) ->

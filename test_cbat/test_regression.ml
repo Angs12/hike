@@ -66,7 +66,7 @@ let run_creg () =
             Cu.max_width = 64;
           };
         ]
-      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
@@ -146,7 +146,7 @@ let run_creg () =
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
     Cu.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let convertible_of info dtid =
     Sm.regions_of_sub sub info
@@ -439,7 +439,7 @@ let run_regions () =
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
       ~regions:[ r1; r2 ]
-      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   (* The plan IS the convertible regions. *)
   check "R12-5: the plan is the convertible region set (tags alone)"
@@ -477,7 +477,7 @@ let run_regions () =
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions = Hike.Stack_model.regions_of_sub sub info in
   let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
@@ -516,7 +516,7 @@ let run_regions () =
           (tid2, Cu.Range (-24L, -8L));
         ]
       ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions = Hike.Stack_model.regions_of_sub sub info in
   (* The overlap MERGE is the pin: the two spans fuse into ONE region with
@@ -565,7 +565,7 @@ let run_regions () =
           (Term.tid d_c, Cu.Range (-40L, -24L));
           (Term.tid d_d, Cu.Range (-16L, -16L));
           (Term.tid d_e, Cu.Range (32L, 40L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions =
     Hike.Stack_model.regions_of_sub sub info
@@ -662,7 +662,7 @@ let run_fp_gpr () =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
       ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   (* Regions come from the producer (split_plan is a consumer). *)
   let info =
@@ -720,7 +720,7 @@ let run_fp_gpr () =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
       ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let info =
     { info with
@@ -770,7 +770,7 @@ let run_fp_gpr () =
   let info =
     Cu.mk_vsa_info ~offsets:[ (d_store_tid, Cu.Range (-48L, -48L)) ]
       ~k_ranges:[ (d_store_tid, 0L, 0L) ] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions = Sm.regions_of_sub sub info in
   check

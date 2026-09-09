@@ -141,12 +141,12 @@ let run_poison () =
     Cu.mk_vsa_info
       ~offsets:
         [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let dead_info : Cu.vsa_info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid ld, Cu.Dead) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide
     (Tid.Map.singleton (Term.tid unb_sub) unb_info);
@@ -261,7 +261,7 @@ let run_casts () =
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -320,7 +320,7 @@ let run_golden () =
     in
     Cu.mk_vsa_info ~offsets ~k_ranges:[]
       ~regions:[ region ] ~stack_plan:[ region ]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -381,7 +381,7 @@ let run_fp_gpr () =
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide (Tid.Map.singleton (Term.tid caller_sub) info);
   let ir_holder = ref "" in
