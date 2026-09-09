@@ -263,13 +263,26 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
   | None -> create_exp llvm_builder blk_tid exp
 
 let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
-  
+
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
   let v = Def.value def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag sub_info def in
+  (* The address-materialization license (ticket T1): the def's tag is
+     the producer's frame-residency proof.  A Range/Infinite with a
+     negative lower bound proves the rhs's accesses live in THIS sub's
+     frame — create_addr_ptr may route their addresses through the frame
+     base as GEPs.  Unbounded, VLA and untagged (none) prove nothing:
+     their addresses may be foreign pointers (the sret pointer, a
+     reloaded pointer), so the typed wrap is not licensed and the
+     identity materialization (inttoptr) applies. *)
+  ctx.Convutils.frame_wrap_license :=
+    (match def_tag with
+     | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _)) ->
+         Int64.compare lo 0L < 0
+     | _ -> false);
   let* res =
     (* Runtime-sized SP decrements become real allocas (spec §2.3). *)
     if Core.Set.mem alloc_tids (Term.tid def) then
@@ -316,5 +329,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
               (Llvm.integer_type llvm_ctx lw) "" llvm_builder
     | _ -> return res
   in
+  (* The license scopes to this def's rhs emission only. *)
+  ctx.Convutils.frame_wrap_license := false;
   insert_local ctx blk_tid var res;
   return ()

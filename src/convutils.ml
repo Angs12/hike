@@ -45,10 +45,20 @@ type emit_ctx = {
   dead_warned : Tid.Set.t ref;
   (* The typed frame: the frame facts (frame llval, anchor address
      integer, anchor byte index) are set per sub and create_addr_ptr
-     routes address integers through the frame base as GEPs — inttoptr
-     survives only for real (non-frame) addresses: section/global
-     constants and foreign pointers. *)
+     routes LICENSED address integers through the frame base as GEPs —
+     inttoptr for everything else. *)
   typed_frame : (Llvm.llvalue * Llvm.llvalue * int64) option ref;
+  (* The address-materialization license (ticket T1): set per def from
+     the def's VSA tag — a Range/Infinite whose lower bound is negative
+     proves the access lives in THIS sub's frame, licensing the typed
+     frame GEP in create_addr_ptr.  Every other tag (Unbounded, VLA,
+     none — foreign pointers: the sret pointer, reloaded pointers,
+     dynamic-alloca addresses) leaves the license false and the address
+     integer materializes via inttoptr (the exception lane): wrapping an
+     unproven address claims the frame as its LLVM underlying object,
+     and the consumer's optimizer then reasons such accesses die with
+     this frame — the typed-model opt-safety regression. *)
+  frame_wrap_license : bool ref;
   (* Dedups [hike: undef-read:] warnings per (sub, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* Edge-keyed SP restores: (pred, fallthrough) -> post-push+8 value. *)
@@ -72,6 +82,7 @@ let empty_emit_ctx () : emit_ctx =
     guarded_warned = ref Tid.Set.empty;
     dead_warned = ref Tid.Set.empty;
     typed_frame = ref None;
+    frame_wrap_license = ref false;
     undef_warned = ref Tid.Map.empty;
     edge_sp_restores = ref (EHashtbl.create (module Tid));
   }
