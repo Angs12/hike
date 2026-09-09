@@ -102,14 +102,4 @@ module Cu = Hike.Convutils
 module B2l = Hike.Bil2llvm
 module Hv = Hike.Vsa
 
-(* The real x86_64 target: fixtures that test NAME-GRANTED stack semantics
-   need it. At [Theory.Target.unknown] every target-derived register is
-   unnamed and the fp-by-name belt is inert, so such a fixture would pass
-   vacuously. Requires Bap_main.init (test_main.ml); the name is
-   package-qualified. *)
-let x86_64_target () : Theory.Target.t =
-  match Theory.Target.lookup ~package:"bap" "x86_64" with
-  | Some t -> t
-  | None -> failwith "fixture: the bap x86_64 target is not registered"
-
 (* Full-range 64-bit word; [w64] takes a native int. *)

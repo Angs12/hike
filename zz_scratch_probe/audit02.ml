@@ -20,20 +20,6 @@ let ws_str (w : Ws.t) : string =
 
 let exp_str (e : exp) : string = Format.asprintf "%a" Exp.pp e
 
-let dump_frame (label : string) (st : AI.t) : unit =
-  match AI.frame_of st with
-  | None -> Printf.printf "      %s: frame=BOTTOM\n" label
-  | Some f ->
-    if List.is_empty f then Printf.printf "      %s: frame=[]\n" label
-    else
-      List.iter (fun (v, (t : AI.frame_term)) ->
-          let open AI in
-          let fvstr =
-            String.concat ","
-              (List.map (fun (fv, k) -> Printf.sprintf "%s*%d" (Var.name fv) k) t.fvars) in
-          Printf.printf "      %s: %s -> %s fvars=[%s]\n"
-            label (Var.name v) (ws_str t.fconst) fvstr) f
-
 (* Walks the sub like offsets_of_sub; `on_unbounded` compares replica vs production. *)
 let audit_sub (sp : var) (sub : sub term) : unit =
   Printf.printf "  raw defs: %d\n"

@@ -302,11 +302,6 @@ let compare (a : t) (b : t) : int =
 
 let equal (a : t) (b : t) : bool = compare a b = 0
 
-
-
-let hash (t : t) : int =
-  bitwidth t * 65599 lxor (if is_signed t then 1 else 0) lxor Z.hash (to_z t)
-
 let min (a : t) (b : t) : t = if compare a b < 0 then a else b
 let max (a : t) (b : t) : t = if compare a b > 0 then a else b
 
