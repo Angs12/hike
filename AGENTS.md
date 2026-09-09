@@ -430,6 +430,34 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-10 EEST — THE CONVERGENCE INSTRUMENT (ticket 05)
++ THE TYPED MODEL'S OPT-SAFETY REGRESSION (2 binaries, triage next)**
+
+`scripts/semantic/convergence_report.sh` runs the consumer's optimizer
+(opt-21 -O2) on BOTH lifts (-O0 input and -O2 input) and classifies each
+semantically (rc + stdout vs native), with instruction counts as the
+quality dimension and the native -O2 text size as the
+input-complexity reference. First baseline: for runtime-dependent
+sources the two lifts already converge (sp_reload 82/82 insns,
+bitfield_struct 5/5, setjmp_longjmp 45/45); the huge raw ratios
+(deep_chain 323/4, ptr_chain 218/4) are the COMPILER's constant-folding
+of the -O2 input — the -O2 lift post-opt is genuinely correct (SAME).
+
+**REGRESSION FLAGGED BY THE INSTRUMENT, confirmed by the strict gate:**
+the typed model breaks opt-safety for **nested_struct and
+struct_by_value** (-O0: `run_semantic_opt.sh` = 31 PASS / 2 FAIL on
+`/tmp/emit_typed_o0`; the recorded 32/32 was the offset model). The
+built-in auto-bisect exonerates every SINGLE pass — the miscompile needs
+a pass combination (ordering interaction), so the dig is non-trivial.
+Until triaged, the typed flip is NOT shippable as green. Also
+first-time-measured: the -O2 lifts post-opt diverge for rec_struct and
+sret_big (pre-opt they pass) — same instrument, -O2 side.
+
+| gate | result |
+|---|---|
+| strict opt-safety on the typed -O0 emission | **31 PASS / 2 FAIL** (nested_struct, struct_by_value) ⚠️ |
+| convergence baseline | committed: `scripts/semantic/convergence_report.sh`; table in `/tmp/convergence_baseline.txt` ✅ |
+
 **Last verified: 2026-09-10 EEST — THE SP-RELOAD CORPUSTEST (channel-2 pin):
 the corpus is 33 binaries**
 
