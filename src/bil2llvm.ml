@@ -312,6 +312,7 @@ let create_sub sub =
     (* Consumes the stack plan. *)
     let plan = sub_info.Convutils.stack_plan in
     let is_precise = Hike_stack_model.is_precise sub_info in
+    ctx.Convutils.typed_frame := None;
     let frame, anchor_idx, anchor_i64 =
       if is_precise || (Core.Map.is_empty tags && not sub_info.Convutils.degraded)
       then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
@@ -322,6 +323,9 @@ let create_sub sub =
         let frame, _, anchor_i64 =
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx
         in
+        if ctx.Convutils.typed_stack then
+          ctx.Convutils.typed_frame :=
+            Some (Base.Option.value_exn frame, anchor_i64, anchor_idx);
         (frame, anchor_idx, anchor_i64)
     in
     let regions =
@@ -567,7 +571,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(symtab : Symtab.t option)
     ~(text_section : (int array * int64 * int64) option)
     ~(section_remap : (int64 * int64 * Llvm.llvalue) list)
-    ~(copy_relocs : int64 list) (sections : Convutils.section list)
+    ~(copy_relocs : int64 list) ~(typed_stack : bool)
+    (sections : Convutils.section list)
     (prog : program term) : unit =
   let abi = Abi.of_target target in
   let ctx =
@@ -578,6 +583,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       section_remap;
       copy_relocs;
       target;
+      typed_stack;
       Convutils.abi = abi;
       Convutils.sp = Abi.sp target;
       ptrsize;

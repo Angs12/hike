@@ -430,6 +430,21 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-09 EEST — THE TYPED FRAME PROTOTYPE (ticket 03,
+ADR 0009, `--hike-stack-model=typed`): the endgame's typed form lands
+behind a pass parameter**
+
+`create_inttoptr` routes address integers through the frame base as GEPs
+when the typed model is selected (inttoptr survives only for
+section/global constants — the exception lane); the default model is
+byte-identical to the L1 reference (verified on byte_copy). Acceptance on
+factorial/byte_copy/fizzbuzz_safe: **3/3 semantics PASS** and the opt
+report (`scripts/semantic/opt_report.sh`): byte_copy post-opt **196→170
+insns, 21→6 inttoptr/ptrtoint** (the escape-class binary — the thesis
+proven); factorial/fizzbuzz_safe are precise (regions) and identical
+under both models. The pin holds 26/6. ADR 0009 records the contract;
+generalization is the next deliberate re-baseline lane.
+
 **Last verified: 2026-09-09 EEST — THE L1 LANE (branch
 `sp-only-stack-semantics`, uncommitted): the Dead misclassification
 repaired at the producer + k_ranges removed + the -O2 pin moves 25/7 →

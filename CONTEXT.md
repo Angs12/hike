@@ -93,6 +93,10 @@ _Avoid_: sp-lane arithmetic for fissioned members
 ### VSA Classifications
 
 **Range**: A bounded stack offset interval `[lo, hi]` where `lo` and `hi` are known integers.
+
+**Typed Frame**: The emitted form where frame-proven accesses are typed GEPs into real storage — never address integers. The primary stack model (`--hike-stack-model=typed`).
+
+**Exception Lane**: The documented residual use of address integers (`inttoptr`) for accesses with no frame provenance — section and global constants. Everything frame-proven is typed.
 **Infinite**: A widened stack offset interval `[lo, hi]` where one or both bounds represent unbounded growth.
 **Unbounded**: A stack access whose address value set is completely unconstrained (`TOP`), spanning the whole stack frame.
 **Dead**: A stack access on an unreachable execution path (`BOTTOM`), eliminated by DCE.

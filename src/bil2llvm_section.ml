@@ -127,8 +127,26 @@ let resolve_addr llvm_builder addr =
 let create_inttoptr llvm_builder llvm_val =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
-  return
-  @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) "" llvm_builder
+  let* ctx = Context.get emit_ctx_var in
+  match !(ctx.Convutils.typed_frame) with
+  | Some (frame, anchor_i64, anchor_idx) ->
+      (* The typed frame: the address integer is an offset from the anchor
+         — route it through the frame base as a GEP.  inttoptr survives
+         only for section/global constants (the exception lane), which
+         arrive via the constant paths and never reach this arm. *)
+      let delta = Llvm.build_sub llvm_val anchor_i64 "" llvm_builder in
+      let idx =
+        Llvm.build_add delta
+          (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) anchor_idx false)
+          "" llvm_builder
+      in
+      return
+      @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) frame [| idx |] ""
+           llvm_builder
+  | None ->
+      return
+      @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) ""
+           llvm_builder
 
 (* Section load with copy-reloc through-load. *)
 let section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size =

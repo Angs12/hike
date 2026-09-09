@@ -22,6 +22,7 @@ val emit_program :
   text_section:(int array * int64 * int64) option ->
   section_remap:(int64 * int64 * Llvm.llvalue) list ->
   copy_relocs:int64 list ->
+  typed_stack:bool ->
   Convutils.section list ->
   program term ->
   unit

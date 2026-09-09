@@ -1665,6 +1665,7 @@ let emit_ir (subs : sub term list) : string =
   B2l.emit_program llvm_ctx llvm_module
     ~target:Theory.Target.unknown ~ptrsize:64
     ~symtab:None ~text_section:None ~section_remap:[] ~copy_relocs:[]
+    ~typed_stack:false
     [] prog;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;

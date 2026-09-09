@@ -43,6 +43,13 @@ type emit_ctx = {
   guarded_warned : Tid.Set.t ref;
   (* One Dead-classification warn per sub. *)
   dead_warned : Tid.Set.t ref;
+  (* The typed-frame lane (--hike-stack-model=typed): when on, the frame
+     facts (frame llval, anchor address integer, anchor byte index) are
+     set per sub and create_inttoptr routes address integers through the
+     frame base as GEPs — inttoptr survives only for section/global
+     constants (the exception lane). *)
+  typed_stack : bool;
+  typed_frame : (Llvm.llvalue * Llvm.llvalue * int64) option ref;
   (* Dedups [hike: undef-read:] warnings per (sub, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* Edge-keyed SP restores: (pred, fallthrough) -> post-push+8 value. *)
@@ -65,6 +72,8 @@ let empty_emit_ctx () : emit_ctx =
     ll_bbs = ref Tid.Map.empty;
     guarded_warned = ref Tid.Set.empty;
     dead_warned = ref Tid.Set.empty;
+    typed_stack = false;
+    typed_frame = ref None;
     undef_warned = ref Tid.Map.empty;
     edge_sp_restores = ref (EHashtbl.create (module Tid));
   }
