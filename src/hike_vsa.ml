@@ -8,16 +8,6 @@ module Vsa = Cbat_vsa
 (* Forwards the address width into the VSA. *)
 let set_addr_bits (n : int) : unit = Vsa.set_addr_bits n
 
-(* Cheap sound prefilter: no memory op anywhere implies no stack access
-   anywhere (spec §2.2); the common no-op sub stays free. *)
-let has_mem_ops (sub : sub term) : bool =
-  Term.enum blk_t sub
-  |> Seq.exists ~f:(fun b ->
-      Term.enum def_t b
-      |> Seq.exists ~f:(fun d ->
-          Option.is_some
-            (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))))
-
 (* Computes [sub]'s offset tags and stack plan. *)
 let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
     Convutils.vsa_info =
@@ -26,11 +16,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
      even a memory-free sub can carry a dynamic SP decrement the emitter
      must see, and the set travels in [vsa_info.vla_alloc_tids]. *)
   let alloc_tids = Vsa.Cbat_extraction.detect_dynamic_alloc sp sub in
-  (* Subs without memory ops yield no tags. *)
-  if not (has_mem_ops sub) then
-    Convutils.{ empty_vsa_info with vla_alloc_tids = alloc_tids }
-  else
-    (* Runs the fixpoint, then extracts tags def by def. *)
+  (* Runs the fixpoint, then extracts tags def by def. *)
     let finish (sol : Vsa.vsa_sol) : Convutils.vsa_info =
       (* Indirect jumps leave the CFG incomplete. *)
       let has_indirect_jumps =

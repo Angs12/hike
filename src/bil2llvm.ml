@@ -366,13 +366,11 @@ let create_sub sub =
                 | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (lo, hi))
           in
           let max_hi =
-            let clamp_hi h =
-              if Int64.compare h 0x40000000L > 0 then min_lo else h
-            in
             Core.Map.fold tags ~init:0L
-              ~f:(fun ~key:_ ~data:kind acc ->                match kind with
+              ~f:(fun ~key:_ ~data:kind acc ->
+                match kind with
                 | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
-                    if Int64.compare l 0L <= 0 then Int64.max acc (clamp_hi h)
+                    if Int64.compare l 0L <= 0 then Int64.max acc h
                     else acc
                 | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> acc)
           in

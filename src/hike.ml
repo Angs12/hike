@@ -179,33 +179,25 @@ let () =
       (* VSA tag pass; depends on the filter only (spec §2.1). *)
       Project.register_pass ~name:"vsa" ~deps:[ "hike-filter" ] ~runonce:true
         (fun proj ->
-           (* Skips a second run; the slot already holds results. *)
-           let cur = Hike_kb.vsa_info () in
-           if not (Core.Map.is_empty cur) then (
+           (* Per-sub computation is pure; the map folds before the one
+              KB write (no monad-iter-plus-ref shape). *)
+           let acc =
+             Term.enum sub_t (Project.program proj)
+             |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
+                 (* Computes tags and plan on the pre-rewrite sub. *)
+                 let info =
+                   Hike_vsa.offsets_of_sub (Project.target proj)
+                     (sp (Project.target proj)) sub
+                 in
 #ifdef VSA_DEBUG
-             Printf.eprintf "hike: vsa guard: skip second run (cur %d)\n" (Core.Map.length cur);
+                 Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
+                   (Sub.name sub) (Core.Map.length info.Convutils.offsets);
 #endif
-             proj)
-           else
-             (* Per-sub computation is pure; the map folds before the one
-                KB write (no monad-iter-plus-ref shape). *)
-             let acc =
-               Term.enum sub_t (Project.program proj)
-               |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-                   (* Computes tags and plan on the pre-rewrite sub. *)
-                   let info =
-                     Hike_vsa.offsets_of_sub (Project.target proj)
-                       (sp (Project.target proj)) sub
-                   in
-#ifdef VSA_DEBUG
-                   Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
-                     (Sub.name sub) (Core.Map.length info.Convutils.offsets);
-#endif
-                   Core.Map.set acc ~key:(Term.tid sub) ~data:info)
-             in
-             (* Provides all tags in one write. *)
-             Hike_kb.provide acc;
-             proj);
+                 Core.Map.set acc ~key:(Term.tid sub) ~data:info)
+           in
+           (* Provides all tags in one write. *)
+           Hike_kb.provide acc;
+           proj);
       (* Stack-to-locals pass. *)
        Project.register_pass ~name:"stack-to-locals" ~runonce:true
         ~deps:[ "hike-vsa" ]

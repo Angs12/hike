@@ -199,21 +199,18 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
 1. `hike-filter` — filters subs (named exclusions, stub/extern/intrinsic,
    intrinsic callers, symbol-table check) — its own pass, FIRST in the chain
    (no pass calls another pass's logic; the chain is deps-only)
-2. `hike-relevance` — tags defs (`relevant`, `stack_access`, `dynamic_alloc`).
-   **REMOVAL SPEC'D (2026-08-31, not yet implemented):** per
-   `docs/adr/0003-remove-restriction-vsa-seeding.md` +
-   `.scratch/restriction-removal/spec.md`, this pass is DELETED — every def
-   denoted; `vsa_info` (the VSA's two-channel frame-residency proof) becomes
-   the only carrier of stack-access-ness; VLA detection moves into
-   `cbat_vsa`; `hike-vsa`'s dep becomes `hike-filter`
-3. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
-   plus k-ranges) by COMPOSING the ONE producer chain (arch review #1, ADR 0005):
+2. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
+   plus k-ranges) by COMPOSING the ONE producer chain (arch review #1, ADR 0005;
+   ADR 0003 LANDED — the `hike-relevance` pass, the `relevant` tag, and the
+   backward-lane refineable gates are DELETED, every def is denoted, and
+   `vsa_info` is the only carrier of stack-access-ness):
    `fixpoint → Cbat_vsa.Cbat_extraction.extract` (the M6 classification walk, the kind
    enum — `Convutils.vsa_kind`'s physical home — the k-range arithmetic, the
    set-overlap merge, the VLA matcher) `→ Hike_stack_model.{frame_escapes, regions_of_sub,
    split_plan}` (the pure stack model, split from the rewrite pass).  The record is built
-   complete at one site; `hike_vsa` keeps only the pass policy (Relevance tagging, the
-   degraded/non-converged arms, the 100%-invariant gap WARN)
+   complete at one site; `hike_vsa` keeps only the pass policy (the
+   degraded/non-converged arms).  No prefilters, no re-entrancy skip — every
+   sub runs the full chain unconditionally (the no-gates lane, 2026-09-09)
 4. `hike-stack-to-locals` — VSA CALCULATES, stack-to-locals only MERGES: collects the
    VSA's per-access stack ranges (the `vsa_info.offsets` tags — the value-based (lo, hi)
    the addresses fall into; `Infinite (lo, hi)` becomes its span), MERGES the
@@ -282,7 +279,14 @@ LLVM allocas / static variables — it should work on EVERY binary.
 - Two dune libs: `hike.cbat_vsa_domain` (unwrapped `Cbat_*` modules) and `hike.cbat_vsa`
   (wrapped; re-exports `AI`/`Mem`/`WordSet`). Only `ppx_bap` works under dune 3.23 —
   the upstream 5-ppx set fails to link.
-- The restriction is **tag-only** — **REMOVAL SPEC'D (2026-08-31, not yet implemented)**: `docs/adr/0003-remove-restriction-vsa-seeding.md` + `.scratch/restriction-removal/spec.md` delete the `relevant` tag, the `hike-relevance` pass, and the backward-lane refineable gates entirely; `vsa_info` (the VSA's two-channel frame-residency proof) becomes the only carrier of stack-access-ness. Until it lands, the tag-only restriction stands: `denote_def` skips untagged defs unconditionally — the per-def `relevant` tag presence IS the restriction. Production arms it by running `Hike_vsa_relevance.analyze` in `hike-relevance` (every production sub is tagged before the fixpoint). A raw untagged `static_graph_vsa` tracks nothing — synthetic unit fixtures must `tag_all` their subs or run them through `Relevance.analyze`.
+- The restriction is **GONE** (ADR 0003 landed; the no-gates lane finished it
+  2026-09-09): `docs/adr/0003-remove-restriction-vsa-seeding.md` +
+  `.scratch/restriction-removal/spec.md` deleted the `relevant` tag, the
+  `hike-relevance` pass, and the backward-lane refineable gates; `vsa_info`
+  (the VSA's two-channel frame-residency proof) is the only carrier of
+  stack-access-ness, `denote_def` denotes EVERY def unconditionally, and VLA
+  detection (`detect_dynamic_alloc`) lives in `cbat_vsa`, called once per sub
+  from `hike_vsa`.
 - Backward refinement (the L3a/L3c/L-B/M5 lanes, the trace-partitioning design —
   `docs/trace-partitioning-plan.md`): GATE-FREE.  The refinement runs in the Phase B
   post-pass (`edge_views_of` over the converged solution) — the taken/fallthrough
@@ -430,6 +434,50 @@ call `Kb.provide` explicitly at their own sites (the global KB write
 stays visible where it happens).
 
 ## CURRENT VALIDATION STATE — refresh after EVERY change
+
+**Last verified: 2026-09-09 EEST — NO-GATES LANE (branch
+`sp-only-stack-semantics`, uncommitted on 86fed9f) — the pipeline's last
+guard-shaped conditionals DELETED — BATTERY GREEN, IR BYTE-IDENTICAL 32/32
+to a same-tree control**
+
+The lane (grilling-settled): a full-file:line audit of every conditional in
+`src/` against the re-derived 4-test classification (provenance — domain
+value vs distrust; re-derivation; soundness; fallback-to-identity) found 24
+RULEs, 1 GUARD, 2 UNCLEAR. Deleted all three (the audit's full inventory is
+in the session record; the audit also confirmed the absences: no
+`hike-relevance` pass, no escape re-derivation in STL, no `addr_is_stack`
+consult, no 100%-invariant WARN):
+1. the vsa pass re-entrancy skip (`hike.ml` — `Map.is_empty` belt-and-
+   suspenders, redundant with `~runonce:true` + the KB join domain),
+2. `has_mem_ops` prefilter (`hike_vsa.ml` — mem-free subs now run the FULL
+   chain unconditionally, so `degraded`/`frame_escaped` are the faithful
+   values, never hardcoded false),
+3. `clamp_hi` (`bil2llvm.ml` — the silent 0x40000000 cap that rewrote a
+   producer tag's `hi` extent with no diagnostic; the tag is trusted).
+STL confirmed compliant with the autonomy contract: the merge lives in the
+producer; STL only maps tags to locals over the record's regions.
+
+| gate (candidate vs SAME-TREE control on the current `/tmp/corpus`) | result |
+|---|---|
+| unit suite | `dune runtest` ALL PASSED, clpequiv **2,861,148 / 0 mismatches** ✅ |
+| both profiles build | default + vsa-debug **rc=0** ✅ |
+| corpus emission | **32/32 rc=0** (surviving diagnostics = the known guarded/undef classes) ✅ |
+| **IR byte-identity vs same-tree control** | **IDENTICAL 32/32** (the earlier red3-o0/t06-o0 controls are stale — different corpus build, block TIDs differ; NOT a plugin delta) ✅ |
+| structural asserts | check_allocas **160 passed, 0 failed** ✅ |
+| semantics (-O0) | **32 PASS / 0 FAIL** ✅ |
+| optimization-safety (opt -O2) | **32 PASS / 0 FAIL** ✅ |
+| instrumentation blocker | clean (exercised by both builds) ✅ |
+| plugin provenance | bundle sha16 `a99b6da6539dfa01`, provenance rewritten after the control/candidate installs ✅ |
+
+GOTCHA re-hit this session: `dune install` FAILS on the bare switch
+(mandir/docdir unknown) and silently leaves the OLD plugin installed —
+always `eval $(opam env)` first, then verify the installed `.cmxs` hash
+against `_build/install`'s (the provenance record carries it).
+
+Artifacts: `/home/tovpr/nogates-battery/{emit,ctrl,sem,semopt}`.
+TO-DO on the branch: the AGENTS.md historical prose sweep (the bracketed
+session records 1328-1502 describe pre-lane machinery) and the -O2 semantic
+numbers finalization (recorded in the SP-lane verdict).
 
 **Last verified: 2026-09-09 EEST — SP-ONLY STACK SEMANTICS lane (branch
 `sp-only-stack-semantics`, ADR 0008; code tickets 01-07 + doc ticket 08) —
