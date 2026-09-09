@@ -161,5 +161,4 @@ module Test_seam : sig
 
   (* Per-sub def-chain map. *)
   val defs_of_sub : sub term -> (def term * bool) Var.Map.t
-  val stores_of_sub : sub term -> def term list
 end

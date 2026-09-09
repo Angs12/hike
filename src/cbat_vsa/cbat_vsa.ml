@@ -773,5 +773,4 @@ module Test_seam = struct
   let walk_budget = walk_budget
   let refine_edge = refine_edge
   let defs_of_sub = defs_of_sub
-  let stores_of_sub = stores_of_sub
 end
