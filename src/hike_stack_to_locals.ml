@@ -102,13 +102,12 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* Maps only matching memory nodes, preserving enclosing structure. *)
   let map_exp_cells (e : exp) : exp =
     let v =
-      object
+      object (self)
         inherit Exp.mapper
         method! map_load ~mem ~addr e s =
           (* Fissions both load operands for regions. *)
           match shape_of_addr addr with
           | Some (`Slot local) -> (
-              
               match Var.typ local with
               | Type.Imm w ->
                   let bits = Size.in_bits s in
@@ -120,8 +119,9 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 ( Bil.Var (Model.region_mem id),
                   fission_addr id base addr,
                   e, s )
-          | None -> Bil.Load (mem, addr, e, s)
+          | None -> Bil.Load (self#map_exp mem, self#map_exp addr, e, s)
         method! map_store ~mem ~addr ~exp:data e s =
+          let data = self#map_exp data in
           (* Fissions both store operands for regions. *)
           match shape_of_addr addr with
           | Some (`Slot local) -> (
@@ -149,7 +149,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 ( Bil.Var (Model.region_mem id),
                   fission_addr id base addr,
                   data, e, s )
-          | None -> Bil.Store (mem, addr, data, e, s)
+          | None -> Bil.Store (self#map_exp mem, self#map_exp addr, data, e, s)
       end
     in
     v#map_exp e

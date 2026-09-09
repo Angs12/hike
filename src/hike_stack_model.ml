@@ -491,12 +491,9 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
    is not this sub's to convert. *)
 let is_abi_visible ~(tag_of : Convutils.vsa_kind Tid.Map.t)
     ~(k_of : (int64 * int64) Tid.Map.t) (d : def term) : bool =
+  ignore k_of;
   match Core.Map.find tag_of (Term.tid d) with
   | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
-  | Some (Convutils.Range (lo, _)) -> (
-      match Core.Map.find k_of (Term.tid d) with
-      | Some (klo, _) when Int64.compare klo 0L >= 0 -> true
-      | _ -> false)
   | _ -> false
 
 (* [is_abi_visible] over one sub. *)
@@ -587,16 +584,24 @@ let split_plan (sub : sub term) (info : Convutils.vsa_info) :
     if info.Convutils.regions <> [] then info.Convutils.regions
     else regions_of_sub sub info
   in
-  Base.List.filter regions ~f:(fun r ->
-      r.Convutils.convertible
-      &&
-      let b = region_bytes r in
-      if Int64.compare b region_max_bytes > 0 then begin
-        Hike_diag.warn
-          "region: sub %s: region %d span=(%Ld,%Ld) implies %Ld-byte alloca (cap %Ld) — storage Frame"
-          (Sub.name sub) r.Convutils.id
-          (fst r.Convutils.span) (snd r.Convutils.span)
-          b region_max_bytes;
-        false
-      end
-      else true)
+  let all_negative_convertible =
+    Base.List.for_all regions ~f:(fun r ->
+      let lo, _ = r.Convutils.span in
+      if Int64.compare lo 0L >= 0 then true
+      else r.Convutils.convertible)
+  in
+  if not all_negative_convertible then []
+  else
+    Base.List.filter regions ~f:(fun r ->
+        r.Convutils.convertible
+        &&
+        let b = region_bytes r in
+        if Int64.compare b region_max_bytes > 0 then begin
+          Hike_diag.warn
+            "region: sub %s: region %d span=(%Ld,%Ld) implies %Ld-byte alloca (cap %Ld) — storage Frame"
+            (Sub.name sub) r.Convutils.id
+            (fst r.Convutils.span) (snd r.Convutils.span)
+            b region_max_bytes;
+          false
+        end
+        else true)
