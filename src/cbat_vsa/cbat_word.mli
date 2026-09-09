@@ -30,8 +30,6 @@ val bitwidth : t -> int
 val is_signed : t -> bool
 val signed : t -> t
 val unsigned : t -> t
-val to_z : t -> Z.t
-val of_z : Z.t -> int -> t
 
 val zero : int -> t
 val one : int -> t
@@ -72,7 +70,6 @@ val ( < ) : t -> t -> bool
 val ( > ) : t -> t -> bool
 val ( <= ) : t -> t -> bool
 val ( >= ) : t -> t -> bool
-val hash : t -> int
 val min : t -> t -> t
 val max : t -> t -> t
 

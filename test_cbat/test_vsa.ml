@@ -435,7 +435,8 @@ let run () =
   ())
 ;
 (* Crash shape: RAX := high:0[RAX] in the call's return target. Returns (rax, ctx, sub, final tid). *)
-(  (* Restriction stays OFF: ON would skip the untagged cast, making the test vacuous. *)
+(  (* The restriction is deleted (ADR 0003): every def is denoted, so the
+     untagged cast IS denoted and the test is non-vacuous. *)
   let rax, _, sub, final_tid = mk_high0_cast_sub () in
   let sol = run_anchored sub in
   let final_ai = Graphlib.Std.Solution.get sol final_tid in

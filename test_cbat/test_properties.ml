@@ -149,10 +149,6 @@ let r5_sound_pairs = ref 0 (* soundness probes *)
 let r5_bad = ref [] (* violations *)
 let r5_violation w cls detail = r5_bad := (w, cls, detail) :: !r5_bad
 
-(* Cardinality word > cap without the width trap. *)
-let r5_cardn_gt (cap : int) (c : W.t) : bool =
-  if Cbat_word.bitwidth c >= 11 then Wo.gt_int c cap else Cbat_word.to_int_exn c > cap
-
 (* Reference circular-interval meet. *)
 let r5_ref_meet (w : int) (s1 : W.t) (l1 : W.t) (s2 : W.t) (l2 : W.t) :
     [ `Empty | `Arc of W.t * W.t | `TwoPiece ] =

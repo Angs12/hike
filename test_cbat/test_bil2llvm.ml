@@ -402,16 +402,16 @@ let run_fp_gpr () =
   ()
 
 (* ------------------------------------------------------------------ *)
-(* Family 7: the fp-GPR cast width (ADR 0008) — spill-slot detection     *)
-(* must be tag-gated, not name-gated.                                  *)
+(* Family 7: the fp-GPR cast width (ADR 0008) — the sitofp's source      *)
+(* width is the operand value's own type, never a register-name fact.    *)
 (* ------------------------------------------------------------------ *)
 
 let run_fp_gpr_cast () =
   (* A 32-bit store at [RBP + w] where RBP holds a NON-STACK value (no
-     prologue), then a sitofp whose x0 loads from that slot. Today
-     [u32_slots_of_sub] calls any 32-bit store at [RBP +- w] a spill slot
-     ([Abi.is_fp] by name), so [cast_source_width] yields 32 and the
-     sitofp's source is truncated to i32 — the -O2 width bug. *)
+     prologue), then a sitofp whose x0 loads from that slot. The spill-slot
+     apparatus that once truncated such casts to i32 is DELETED (ADR 0008);
+     the cast width now comes from the operand value's own LLVM type, so
+     every base behaves identically. *)
   let off = 0x40 in
   let cast_ir (base_name : string) : string =
     let base = v64 base_name in
@@ -419,11 +419,11 @@ let run_fp_gpr_cast () =
     let d_base = Def.create base (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
     let addr = Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 off))) in
     let d_st = Def.create m (Bil.Store (Bil.Var m, addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r32)) in
-    (* x0 loads the slot; the cast source width comes from [u32_slots]. *)
+    (* x0 loads the slot; the cast source width is the load's own type. *)
     let d_x0 = Def.create (ivar64 "intrinsic:x0") (Bil.Load (Bil.Var m, addr, LittleEndian, `r64)) in
     let intr = "intrinsic:cast_sfloat_rne_ieee754_binary_64" in
     let prog = mk_fp_program intr [ d_base; d_st; d_x0 ] in
-    (* No vsa_info: the store is untagged, so it is NOT a spill slot. *)
+    (* No vsa_info: the store is untagged, and no tag is consulted anyway. *)
     emit_ir prog
   in
   let ir_rbp = cast_ir "RBP" in

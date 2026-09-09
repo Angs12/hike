@@ -133,7 +133,6 @@ let populate_blks transfer_vars blks sub sub_info fr () =
   (* VLA tids travel in vsa_info (spec §2.3): the producer detected them
      once on the pre-rewrite sub. *)
   let alloc_tids = sub_info.Convutils.vla_alloc_tids in
-  (* 32-bit FP spill slots, computed once per sub. *)
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
