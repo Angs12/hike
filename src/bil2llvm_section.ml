@@ -124,20 +124,24 @@ let resolve_addr llvm_builder addr =
   | None -> failwith "load: addr not found"
   | Some section -> resolve_addr_in llvm_builder section addr
 
-(* Materializes the pointer for an address integer: a frame-relative
-   integer is an offset from the anchor and becomes a GEP into the frame;
-   a real (non-frame) address — section/global constants, foreign
-   pointers — becomes inttoptr. *)
+(* Materializes the pointer for an address integer.  The typed form — a
+   GEP into the frame — requires the producer's frame-residency license
+   (the def's tag proves the access lives in this sub's frame; see
+   [frame_wrap_license]).  Unlicensed integers are real (foreign)
+   addresses — the sret pointer, reloaded pointers, VLA addresses,
+   section/global constants — and become inttoptr (the exception lane):
+   wrapping an unproven address computes the right runtime value only by
+   alloca-distance cancellation, while presenting the WRONG underlying
+   object to the consumer's optimizer, which then reasons such accesses
+   die with this frame and deletes them (the typed-model opt-safety
+   regression, ticket T1). *)
 let create_addr_ptr llvm_builder llvm_val =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  match !(ctx.Convutils.typed_frame) with
-  | Some (frame, anchor_i64, anchor_idx) ->
-      (* The typed frame: the address integer is an offset from the anchor
-         — route it through the frame base as a GEP.  inttoptr survives
-         only for section/global constants (the exception lane), which
-         arrive via the constant paths and never reach this arm. *)
+  match (!(ctx.Convutils.typed_frame), !(ctx.Convutils.frame_wrap_license))
+  with
+  | Some (frame, anchor_i64, anchor_idx), true ->
       let delta = Llvm.build_sub llvm_val anchor_i64 "" llvm_builder in
       let idx =
         Llvm.build_add delta
@@ -147,7 +151,7 @@ let create_addr_ptr llvm_builder llvm_val =
       return
       @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) frame [| idx |] ""
            llvm_builder
-  | None ->
+  | _ ->
       return
       @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) ""
            llvm_builder
