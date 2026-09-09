@@ -22,11 +22,11 @@ let find_def_tag sub_info def =
 
 
 (* Tests for visible storage via the stack model. *)
-let is_abi_visible ctx sub_info def =
+let is_abi_visible sub_info def =
   match sub_info with
   | None -> false
   | Some info ->
-      Hike_stack_model.abi_visibility_of ctx.Convutils.sp info def
+      Hike_stack_model.abi_visibility_of info def
 
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
@@ -227,7 +227,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
         (match fr.stack with
         | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
         | None -> create_exp llvm_builder blk_tid exp)
-      else if is_abi_visible ctx sub_info def then
+      else if is_abi_visible sub_info def then
         (* Outgoing cells use their own address. *)
         (match find_mem_node (Def.rhs def) with
         | Some node ->

@@ -45,6 +45,9 @@ module Cbat_extraction : sig
   (* Address of a stack-access rhs, if any. *)
   val stack_address_of_rhs : Bil.exp -> Bil.exp option
 
+  (* Value-based stack address predicate (frame term in state). *)
+  val is_seed : AI.t -> exp -> bool
+
   (* Tag-state meet for one address. *)
   val st_tag_of :
     tags:(tid, AI.t) Solution.t ->

@@ -287,12 +287,6 @@ let collect_stats (bname : string) (sub' : sub term)
   (* L2a counters: bottom defs, live vs dead. *)
   let bottom_live = ref 0 in
   let bottom_dead = ref 0 in
-  (* Stack iff the name is RSP/RBP (spec §2.1: every def is denoted). *)
-  let is_stack_addr (a : exp) : bool =
-    Exp.free_vars a
-    |> Core.Set.exists ~f:(fun v ->
-        let n = Var.name v in
-        String.equal n "RSP" || String.equal n "RBP") in
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->
       (* Per-block entry state from the fixpoint solution. *)
@@ -341,7 +335,7 @@ let collect_stats (bname : string) (sub' : sub term)
           (* Address metric in the PRE-def state. *)
           (match addr_exp_of_rhs (Def.rhs d) with
            | Some a ->
-             let stack = is_stack_addr a in
+             let stack = Vsa.Cbat_extraction.is_seed st_before a in
              let a' =
                Vsa.rewrite_addr (Vsa.frame_of_state st_before) a in
              (* Addresses denoted with block IN-state, not re-denoted values. *)

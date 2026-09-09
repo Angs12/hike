@@ -18,8 +18,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   let tag_of = info.Convutils.offsets in
   (* Incoming and outgoing arg accesses stay in memory: the cross-sub
      consistency rule, read from the two record facts. *)
-  let k_of = info.Convutils.k_ranges in
-  let is_abi_visible = Model.is_abi_visible ~tag_of ~k_of in
+  let is_abi_visible = Model.is_abi_visible ~tag_of in
   (* The record IS the regions (autonomy: consume the producer's output,
      never recompute). *)
   let regions = info.Convutils.regions in
@@ -45,15 +44,14 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
      [RBP - k] shape, a hand-asm R12 frame pointer, anything the VSA
      proved); the old sp/fp-by-name test was dead conservatism. *)
   let base_exp_of (addr : exp) : exp =
-    let rec go (e : exp) : exp option =
-      match e with
-      | Bil.BinOp (_, a, b) ->
-          (match go a with Some x -> Some x | None -> go b)
-      | Bil.Cast (_, _, a) -> go a
-      | Bil.Var _ -> Some e
-      | _ -> None
+    let vis =
+      object
+        inherit [ exp option ] Exp.visitor
+        method! visit_var v acc =
+          Base.Option.first_some acc (Some (Bil.Var v))
+      end
     in
-    match go addr with Some b -> b | None -> addr
+    Base.Option.value (vis#visit_exp addr None) ~default:addr
   in
   let cells =
     Term.enum blk_t sub

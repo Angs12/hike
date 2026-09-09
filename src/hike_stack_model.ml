@@ -150,15 +150,10 @@ let is_real_call (j : jmp term) : bool =
   | _ -> false
 
 (* {SP}-seeded syntactic closure: any non-memory def whose rhs mentions a
-   derived var adds its lhs to the closure.  Then test whether a
-   frame-derived value escapes through call-arg registers or store data.
-   fp is NOT seeded (ADR 0008): RBP joins only via its own defs. *)
-let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
-    bool =
-  let base_var v = Var.base v in
-  let sp_base = base_var sp in
+   derived var adds its lhs to the closure.  fp is NOT seeded (ADR 0008):
+   RBP joins only via its own defs. *)
+let sp_derived_closure (facts : def_facts Tid.Map.t) (sp_base : var) : Var.Set.t =
   let derived : Var.Set.t ref = ref (Var.Set.of_list [ sp_base ]) in
-  let facts = def_facts_of_sub sub in
   let rec grow () =
     let changed = ref false in
     Core.Map.iter facts ~f:(fun f ->
@@ -167,9 +162,9 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
           let uses = f.free_vars in
           if
             Core.Set.exists uses ~f:(fun v ->
-                Core.Set.mem !derived (base_var v))
+                Core.Set.mem !derived (Var.base v))
           then begin
-            let lhs = base_var (Def.lhs d) in
+            let lhs = Var.base (Def.lhs d) in
             if not (Core.Set.mem !derived lhs) then (
               derived := Core.Set.add !derived lhs;
               changed := true)
@@ -178,6 +173,14 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
     if !changed then grow () else ()
   in
   grow ();
+  !derived
+
+let sp_escaped ?facts (sp : var) (target : Theory.Target.t) (sub : sub term) :
+    bool =
+  let facts = match facts with Some f -> f | None -> def_facts_of_sub sub in
+  let base_var v = Var.base v in
+  let sp_base = base_var sp in
+  let derived = sp_derived_closure facts sp_base in
   let arg_regs = lazy (Abi.param_regs target) in
   let rec value_free_vars (e : exp) : Var.Set.t =
     let vis =
@@ -193,7 +196,7 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
   in
   let exp_escapes (e : exp) : bool =
     Core.Set.exists (value_free_vars e) ~f:(fun v ->
-        Core.Set.mem !derived (base_var v))
+        Core.Set.mem derived (base_var v))
   in
   let call_arg_escapes =
     let is_arg_reg (v : var) : bool =
@@ -253,38 +256,17 @@ let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
    address mentions a frame-var vetoes conversion; a TAGGED one (the -O0
    prologue's own [RBP - k] stores) is proven frame-resident and needs no
    protection. *)
-let frame_addr_alias (sp : var) (_target : Theory.Target.t) (sub : sub term)
+let frame_addr_alias ?facts (sp : var) (_target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
-  let facts = def_facts_of_sub sub in
-  let derived : Var.Set.t ref =
-    ref (Var.Set.of_list [ Var.base sp ])
-  in
-  let rec grow () =
-    let changed = ref false in
-    Core.Map.iter facts ~f:(fun f ->
-        let d = f.def in
-        if not f.mem_shape then begin
-          let uses = f.free_vars in
-          if
-            Core.Set.exists uses ~f:(fun v ->
-                Core.Set.mem !derived (Var.base v))
-          then begin
-            let lhs = Var.base (Def.lhs d) in
-            if not (Core.Set.mem !derived lhs) then (
-              derived := Core.Set.add !derived lhs;
-              changed := true)
-          end
-        end);
-    if !changed then grow () else ()
-  in
-  grow ();
+  let facts = match facts with Some f -> f | None -> def_facts_of_sub sub in
+  let derived = sp_derived_closure facts (Var.base sp) in
   let frame_vars =
     Core.Map.filter facts ~f:(fun f ->
         let lhs = Var.base (Def.lhs f.def) in
         (not (Convutils.is_mem (Def.lhs f.def)))
         && not (Var.same lhs (Var.base sp))
         && Core.Set.exists f.free_vars ~f:(fun v ->
-              Core.Set.mem !derived (Var.base v)))
+              Core.Set.mem derived (Var.base v)))
     |> Core.Map.fold ~init:Var.Set.empty
          ~f:(fun ~key:_ ~data:f acc ->
            Core.Set.add acc (Var.base (Def.lhs f.def)))
@@ -310,10 +292,10 @@ let frame_addr_alias (sp : var) (_target : Theory.Target.t) (sub : sub term)
 (* Tests whether a call-tail stack store passes an outgoing stack arg.
    The caller writes pushed arg cells below entry RSP (lo < 0, klo >= 0);
    these denote callee-visible ABI traffic. *)
-let has_outgoing_stack_args (sp : var) (target : Theory.Target.t)
+let has_outgoing_stack_args ?facts (sp : var) (target : Theory.Target.t)
     (sub : sub term) (info : Convutils.vsa_info) : bool =
   let abi = Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv in
-  let facts = def_facts_of_sub sub in
+  let facts = match facts with Some f -> f | None -> def_facts_of_sub sub in
   let is_stack (d : def term) : bool =
     Core.Map.mem info.Convutils.offsets (Term.tid d)
   in
@@ -377,9 +359,10 @@ let has_outgoing_stack_args (sp : var) (target : Theory.Target.t)
 (* Tests whether the frame is reachable from outside. *)
 let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
     (info : Convutils.vsa_info) : bool =
-  sp_escaped sp target sub
-  || frame_addr_alias sp target sub info
-  || has_outgoing_stack_args sp target sub info
+  let facts = def_facts_of_sub sub in
+  sp_escaped ~facts sp target sub
+  || frame_addr_alias ~facts sp target sub info
+  || has_outgoing_stack_args ~facts sp target sub info
 
 (* Merges overlapping ranges into regions. *)
 let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
@@ -482,26 +465,15 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
       :: acc)
   |> Base.List.rev
 
-(* Tests for caller/callee-visible storage: the cross-sub consistency rule.
-   [klo >= 0] marks the CALLEE's incoming-arg area — the mirror of the
-   [lo >= 0] caller-frame rule — read from the two record facts (offsets +
-   k_ranges), per def, never a whole-sub refusal.  The caller writes pushed
-   arg cells below its entry RSP (lo < 0, klo >= 0); the callee reads them
-   at [RSP + k >= 0] through its own lane: both sides must agree the cell
-   is not this sub's to convert. *)
-let is_abi_visible ~(tag_of : Convutils.vsa_kind Tid.Map.t)
-    ~(k_of : (int64 * int64) Tid.Map.t) (d : def term) : bool =
-  ignore k_of;
+(* Tests for caller-visible storage: incoming args denotation (lo >= 0). *)
+let is_abi_visible ~(tag_of : Convutils.vsa_kind Tid.Map.t) (d : def term) : bool =
   match Core.Map.find tag_of (Term.tid d) with
   | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
   | _ -> false
 
-(* [is_abi_visible] over one sub. *)
-let abi_visibility_of (sp : var) (info : Convutils.vsa_info) :
-    def term -> bool =
-  ignore sp;
+(* [abi_visibility_of] over one sub. *)
+let abi_visibility_of (info : Convutils.vsa_info) : def term -> bool =
   is_abi_visible ~tag_of:info.Convutils.offsets
-    ~k_of:info.Convutils.k_ranges
 
 
 (* Stack model decision. *)
@@ -569,9 +541,17 @@ let degraded_geometry (sub : sub term)
 
 (* The emission-shape switch: does this sub split into region allocas
    (plan non-empty) or emit one %frame?  A derived view of the record —
-   plan <> [] — consumed by the emitter (region-allocas vs %frame, SP
-   erase/keep, call-restore suppression) and DCE's precise sweep. *)
-let is_precise (info : Convutils.vsa_info) : bool = info.Convutils.stack_plan <> []
+   consumed by the emitter (region-allocas vs %frame, SP erase/keep,
+   call-restore suppression) and DCE's precise sweep.  Write-closed:
+   for the sub to omit the frame and erase SP, every negative-offset
+   region must be convertible. *)
+let is_precise (info : Convutils.vsa_info) : bool =
+  info.Convutils.stack_plan <> []
+  &&
+  Base.List.for_all info.Convutils.regions ~f:(fun r ->
+      let lo, _ = r.Convutils.span in
+      if Int64.compare lo 0L >= 0 then true
+      else r.Convutils.convertible)
 
 (* The stack plan IS the convertible regions.  No refusals: the plan is the
    partition's Static-class components; a sub with no convertible regions
@@ -584,24 +564,16 @@ let split_plan (sub : sub term) (info : Convutils.vsa_info) :
     if info.Convutils.regions <> [] then info.Convutils.regions
     else regions_of_sub sub info
   in
-  let all_negative_convertible =
-    Base.List.for_all regions ~f:(fun r ->
-      let lo, _ = r.Convutils.span in
-      if Int64.compare lo 0L >= 0 then true
-      else r.Convutils.convertible)
-  in
-  if not all_negative_convertible then []
-  else
-    Base.List.filter regions ~f:(fun r ->
-        r.Convutils.convertible
-        &&
-        let b = region_bytes r in
-        if Int64.compare b region_max_bytes > 0 then begin
-          Hike_diag.warn
-            "region: sub %s: region %d span=(%Ld,%Ld) implies %Ld-byte alloca (cap %Ld) — storage Frame"
-            (Sub.name sub) r.Convutils.id
-            (fst r.Convutils.span) (snd r.Convutils.span)
-            b region_max_bytes;
-          false
-        end
-        else true)
+  Base.List.filter regions ~f:(fun r ->
+      r.Convutils.convertible
+      &&
+      let b = region_bytes r in
+      if Int64.compare b region_max_bytes > 0 then begin
+        Hike_diag.warn
+          "region: sub %s: region %d span=(%Ld,%Ld) implies %Ld-byte alloca (cap %Ld) — storage Frame"
+          (Sub.name sub) r.Convutils.id
+          (fst r.Convutils.span) (snd r.Convutils.span)
+          b region_max_bytes;
+        false
+      end
+      else true)
