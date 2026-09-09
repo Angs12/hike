@@ -137,7 +137,8 @@ let create_load llvm_builder (addr, size) =
           @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) ptr ""
                llvm_builder)
   | _ ->
-      (* Non-constant addresses use inttoptr. *)
+      (* Non-constant addresses materialize through [create_addr_ptr]
+         (frame GEP for frame addresses, inttoptr for foreign ones). *)
       let* addr = create_addr_ptr llvm_builder addr in
       let* llvm_ctx = Context.get llvm_ctx_var in
       return
