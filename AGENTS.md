@@ -206,7 +206,10 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
    complete at one site; `hike_vsa` keeps only the pass policy (the
    degraded/non-converged arms).  No prefilters, no re-entrancy skip — every
    sub runs the full chain unconditionally (the no-gates lane, 2026-09-09)
-3. `hike-stack-to-locals` — VSA CALCULATES, stack-to-locals only MERGES: collects the
+3. `hike-stack-to-locals` — ONE registration, two rewrites (mem-fission's two
+   halves: the DCE load-roots rule is defined over the vars the rewrite
+   creates; neither runs without the other):
+   (a) VSA CALCULATES, stack-to-locals only MERGES: collects the
    VSA's per-access stack ranges (the `vsa_info.offsets` tags — the value-based (lo, hi)
    the addresses fall into; `Infinite (lo, hi)` becomes its span), MERGES the
    overlapping ranges into STACK REGIONS (the connected components of the overlap graph
@@ -220,11 +223,11 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
    stays memory.  Over-skip costs precision, never correctness.  No tag
    pruning: the emitter only consults tags whose def's rhs is still a memory access
    (`addr_is_stack`)
-4. `hike-dce` — the aggressive DCE lane: replaces the lifted RETURN epilogue
-   (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn`) with the var-free target so the
-   popped-address def dies, then sweeps never-used defs to a fixpoint (the emitter emits a
-   real LLVM `ret` regardless)
-5. `hike-convlir` — emits LLVM via `bil2llvm.ml` through the ONE seam
+   (b) `hike-dce` (the module; `Hike.Dce`) — the aggressive DCE lane: replaces the
+   lifted RETURN epilogue (`#t := mem[RSP]; RSP := RSP + 8; call #t with noreturn`)
+   with the var-free target so the popped-address def dies, then sweeps never-used
+   defs to a fixpoint (the emitter emits a real LLVM `ret` regardless)
+4. `hike-convlir` — emits LLVM via `bil2llvm.ml` through the ONE seam
    `Bil2llvm.emit_program` (sig-collection + declarations + bodies all
    inside; the KB context vars are internal — see `src/bil2llvm.mli` and
    CONTEXT.md's Emission Entry)

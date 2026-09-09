@@ -97,9 +97,9 @@ let run_creg () =
   let sub' = fx.es_sub in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
-    Vsa.denote_defs
+    Vsa.Test_seam.denote_defs
       (blk_of (Term.tid fx.es_blk1))
-      (Vsa.denote_defs
+      (Vsa.Test_seam.denote_defs
          (blk_of (Term.tid fx.es_blk0))
          (AI.set_frame (anchored_entry ()) AI.seed_frame))
   in
@@ -199,9 +199,9 @@ let run_remediation () =
   let m = fx.es_m in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
-    Vsa.denote_defs
+    Vsa.Test_seam.denote_defs
       (blk_of (Term.tid blk1))
-      (Vsa.denote_defs (blk_of (Term.tid blk0)) (AI.set_frame (anchored_entry ()) AI.seed_frame))
+      (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (AI.set_frame (anchored_entry ()) AI.seed_frame))
   in
   let read64 ai addr =
     match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with
@@ -303,9 +303,9 @@ let run_remediation () =
   let m = fx.es_m in
   let blk_of tid = match Term.find blk_t sub' tid with Some b -> b | None -> assert false in
   let st_pre =
-    Vsa.denote_defs
+    Vsa.Test_seam.denote_defs
       (blk_of (Term.tid blk1))
-      (Vsa.denote_defs (blk_of (Term.tid blk0)) (AI.set_frame (anchored_entry ()) AI.seed_frame))
+      (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (AI.set_frame (anchored_entry ()) AI.seed_frame))
   in
   let read64 ai addr =
     match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with

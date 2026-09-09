@@ -64,7 +64,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
             ~init:(Graphlib.Std.Solution.get tags (Term.tid blk))
             ~f:(fun st d ->
                  let st_before = st in
-                 let st_after = Vsa.denote_def d st in
+                 let st_after = Vsa.Test_seam.denote_def d st in
                  (match Def.rhs d with
                   | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
                   | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
@@ -72,8 +72,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                     when Core.Map.mem info.Hike.Convutils.offsets (Term.tid d) ->
                       let is_prod_ub = Hashtbl.mem prod_unbounded (Term.tid d) in
                       if is_prod_ub then begin
-                        let frame = Vsa.frame_of_state st_before in
-                        let addr' = Vsa.rewrite_addr frame addr in
+                        let frame = Vsa.Test_seam.frame_of_state st_before in
+                        let addr' = Vsa.Test_seam.rewrite_addr frame addr in
                         let st_tag =
                           Exp.free_vars addr'
                           |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
@@ -89,8 +89,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                                 then acc
                                 else AI.add_word acc ~key:v ~data:mm
                               | Type.Mem _ | Type.Unk -> acc) in
-                        let ws_before = Vsa.denote_imm_exp addr' st_before in
-                        let ws_tag = Vsa.denote_imm_exp addr' st_tag in
+                        let ws_before = Vsa.Test_seam.denote_imm_exp addr' st_before in
+                        let ws_tag = Vsa.Test_seam.denote_imm_exp addr' st_tag in
                         Printf.printf "  DEF %s (blk %s): %s\n"
                           (Tid.to_string (Term.tid d))
                           (Tid.to_string (Term.tid blk))

@@ -196,15 +196,22 @@ let () =
            (* Provides all tags in one write. *)
            Hike_kb.provide acc;
            proj);
-      (* Stack-to-locals pass. *)
+      (* Rewrite pass: the fission rewrite and its DCE — one registration
+         (the DCE's load-roots rule is defined over the vars the rewrite
+         creates; neither runs without the other). *)
        Project.register_pass ~name:"stack-to-locals" ~runonce:true
         ~deps:[ "hike-vsa" ]
         (fun proj ->
+           let target = Project.target proj in
            let proj =
              Project.map_program proj ~f:(fun prog ->
                  Term.map sub_t prog
                    ~f:(Hike_stack_to_locals.stack_to_locals
-                         (Project.target proj) (sp (Project.target proj))))
+                         target (sp target)))
+           in
+           let proj =
+             Project.map_program proj ~f:(fun prog ->
+                 Term.map sub_t prog ~f:(Hike_dce.dce ~target))
            in
 #ifdef VSA_DEBUG
            Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->
@@ -212,18 +219,7 @@ let () =
                  (Core.Map.length info.Convutils.offsets));
 #endif
            proj);
-      (* Emission pass; runs last. *)
-      (* DCE pass. *)
-      Project.register_pass ~name:"dce" ~runonce:true
-        ~deps:[ "hike-stack-to-locals" ]
-        (fun proj ->
-           let target = Project.target proj in
-           let proj =
-             Project.map_program proj ~f:(fun prog ->
-                 Term.map sub_t prog ~f:(Hike_dce.dce ~target))
-           in
-           proj);
       Project.register_pass' ~name:"convlir" ~runonce:true
-        ~deps:[ "hike-dce" ]
+        ~deps:[ "hike-stack-to-locals" ]
         (convert_binary output_file);
       Ok ())

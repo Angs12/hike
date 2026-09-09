@@ -553,7 +553,7 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * 
 (* Cell at [base-8] in [st], read back as the load denotation reads it. *)
 let cell_at (m : var) (base : var) (st : AI.t) : Ws.t =
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
+  match Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
   | Ok ws -> ws
   | Error _ -> Ws.top 32
 

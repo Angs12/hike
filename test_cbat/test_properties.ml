@@ -815,16 +815,16 @@ let run_landmarks () =
    let range lo hi = Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi)) in
    let entry = AI.add_word (anchored_entry ()) ~key:x ~data:(range 0 20) in
    check "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit shape)"
-     (match Vsa.edge_constraints ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1) with
+     (match Vsa.Test_seam.edge_constraints ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1) with
       | [] -> true
       | _ -> false);
    check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
      (match
-        Vsa.edge_constraints ~env:entry
+        Vsa.Test_seam.edge_constraints ~env:entry
           (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
           (Ws.singleton W.b1)
       with
-      | [ Vsa.Var (v, c) ] -> Var.name v = "vsk_x" && Ws.equal c (range 0 9)
+      | [ Vsa.Test_seam.Var (v, c) ] -> Var.name v = "vsk_x" && Ws.equal c (range 0 9)
       | _ -> false);
    let prog' = Program.create ~subs:[ sub ] () in
    let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry sub) in
@@ -957,15 +957,15 @@ let run_landmarks () =
    let sol =
      Vsa.static_graph_vsa [] (Program.create ~subs:[ sub ] ())
        sub (Vsa.init_sol ~entry sub) in
-   let rctx = Vsa.mk_rctx ~cfg sub in
-   let seeds = [ Vsa.Var (i, Ws.singleton k) ] in
+   let rctx = Vsa.Test_seam.mk_rctx ~cfg sub in
+   let seeds = [ Vsa.Test_seam.Var (i, Ws.singleton k) ] in
    let walk ~cell =
-     Vsa.walk_budget rctx := cell;
-     fst (Vsa.refine_edge ~sol ~rctx ~defs:(Some (Vsa.defs_of_sub sub))
+     Vsa.Test_seam.walk_budget rctx := cell;
+     fst (Vsa.Test_seam.refine_edge ~sol ~rctx ~defs:(Some (Vsa.Test_seam.defs_of_sub sub))
             entry
             (Blk.Builder.result gb) seeds) in
    let cell_of env =
-     match Vsa.denote_imm_exp
+     match Vsa.Test_seam.denote_imm_exp
              (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
                                                 Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r32))
              env with
@@ -985,7 +985,7 @@ let run_landmarks () =
      (not (Ws.is_bottom limited_cell));
    check
      "property LM F1-B4: the binding budget actually spent the cell (the shared budget hit 0)"
-     (0 = !(Vsa.walk_budget rctx));
+     (0 = !(Vsa.Test_seam.walk_budget rctx));
    ()(* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
 (  (* Widening soundness pins. *)

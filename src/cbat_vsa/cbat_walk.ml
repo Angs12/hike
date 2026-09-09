@@ -1596,49 +1596,6 @@ let assume_jump_cond
     (env : AI.t) (jmp : jmp term) : AI.t =
   assume_jump_cond_with_group ?defs ~flag_state
     env jmp
-type walk_record = {
-  wr_guard : Tid.t;
-  wr_jmp : Tid.t;
-  wr_seq : int;
-  wr_nvar : int;
-  wr_ncell : int;
-  wr_reads : Tid.Set.t;
-}
-
-#ifdef VSA_DEBUG
-let walk_records : walk_record list ref = ref []
-let walk_seq : int ref = ref 0
-
-let record_walk (bt : Tid.t) (jt : Tid.t)
-    (seeds : edge_constraint list) (reads : Tid.Set.t) : unit =
-  incr walk_seq;
-  let nvar = ref 0 and ncell = ref 0 in
-  List.iter seeds ~f:(function
-    | Var _ -> incr nvar
-    | Cell _ -> incr ncell
-    | Infeasible -> ());
-  walk_records :=
-    {
-      wr_guard = bt;
-      wr_jmp = jt;
-      wr_seq = !walk_seq;
-      wr_nvar = !nvar;
-      wr_ncell = !ncell;
-      wr_reads = reads;
-    }
-    :: !walk_records
-
-let walk_records_reset () =
-  walk_records := [];
-  walk_seq := 0
-
-let walk_records_dump () = List.rev !walk_records
-#else
-let walk_records_reset () = ()
-let walk_records_dump () : walk_record list = []
-#endif
-
-
 let refine_edge_inline
     ~(sol : (tid, AI.t) Solution.t)
     ~(defs : (def term * bool) Var.Map.t option)
@@ -1701,11 +1658,7 @@ let refine_edge_inline
                  (Cbat_runctx.Walk_memo.add ~version rc.rc_state.fs_cache
                     bt jt ~reads:!walk_reads refined)
              else rc in
-           (let res = (refined, rc) in
-#ifdef VSA_DEBUG
-            record_walk bt jt seeds !walk_reads;
-#endif
-            res))
+           (refined, rc))
       | None ->
         (* Uncached no-defs walk: spends from the same shared cell, so it is
            bounded by it too (symmetric with the cached arm). *)

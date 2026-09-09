@@ -159,7 +159,7 @@ let run () =
     match Term.enum blk_t sub5 |> Seq.to_list with [ _; _; h; _ ] -> h | _ -> assert false
   in
   let hdr_st = Graphlib.Std.Solution.get sol5 (Term.tid hdr5) in
-  let res5 = Vsa.assume_jump_cond hdr_st jmp5 in
+  let res5 = Vsa.Test_seam.assume_jump_cond hdr_st jmp5 in
   let cell5 = cell_at m (v64 "RBP") res5 in
   check
     "L3c1-5: direct assume_jump_cond without ?defs — the flag-state refinement is gated off (no \
@@ -432,7 +432,7 @@ let run () =
   check
     "L3c5-4: an Unknown condition — the fixpoint completes and assume_jump_cond keeps the env \
      unchanged (the shrunk catch-all, never asserts)"
-    (AI.equal (Vsa.assume_jump_cond h_st4 jmp4) h_st4);
+    (AI.equal (Vsa.Test_seam.assume_jump_cond h_st4 jmp4) h_st4);
   ())
 ;
 (  (* S-1: traverse shape collapses to ≤ 3 cells. *)

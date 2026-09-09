@@ -712,15 +712,35 @@ let assume_jump_cond = Cbat_walk.assume_jump_cond
 let constrain_cell_on_trace = Cbat_walk.constrain_cell_on_trace
 let edge_constraints = Cbat_walk.edge_constraints
 
-type walk_record = Cbat_walk.walk_record = {
-  wr_guard : tid;
-  wr_jmp : tid;
-  wr_seq : int;
-  wr_nvar : int;
-  wr_ncell : int;
-  wr_reads : Tid.Set.t;
-}
-
-let walk_records_reset = Cbat_walk.walk_records_reset
-let walk_records_dump = Cbat_walk.walk_records_dump
 let refine_edge = Cbat_walk.refine_edge
+
+(* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
+module Test_seam = struct
+  type frame = Cbat_transfer.frame
+  type refine_ctx = Cbat_runctx.refine_ctx
+  type analysis_ctx = Cbat_walk.analysis_ctx = {
+    defs : (def term * bool) Var.Map.t option;
+    stores : def term list option;
+    flag_state : (var * Bil.binop * exp * word) option;
+    has_sub : bool;
+  }
+  type edge_constraint = Cbat_walk.edge_constraint =
+    | Var of var * WordSet.t
+    | Cell of exp * exp * Size.t * endian * WordSet.t
+    | Infeasible
+  module Live = Live
+  let frame_of_state = frame_of_state
+  let rewrite_addr = rewrite_addr
+  let denote_def = denote_def
+  let denote_defs = denote_defs
+  let denote_imm_exp = denote_imm_exp
+  let reachable_jumps = reachable_jumps
+  let assume_jump_cond = assume_jump_cond
+  let constrain_cell_on_trace = constrain_cell_on_trace
+  let edge_constraints = edge_constraints
+  let mk_rctx = mk_rctx
+  let walk_budget = walk_budget
+  let refine_edge = refine_edge
+  let defs_of_sub = defs_of_sub
+  let stores_of_sub = stores_of_sub
+end

@@ -63,7 +63,7 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
       Term.enum def_t b
       |> Seq.iter ~f:(fun d ->
           let pre = !st1 in
-          let post = Vsa.denote_def d pre in
+          let post = Vsa.Test_seam.denote_def d pre in
           Printf.printf "    %s\n      pre : %s\n      post: %s\n"
             (def_to_string d)
             (state_summary [ sp; i_of sub ] pre)

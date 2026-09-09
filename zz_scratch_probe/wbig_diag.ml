@@ -35,7 +35,7 @@ let () =
               |> Seq.iter ~f:(fun d ->
                   (match Def.rhs d with
                    | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-                     (match Vsa.denote_imm_exp addr !st with
+                     (match Vsa.Test_seam.denote_imm_exp addr !st with
                       | Ok ws when ws_window_big ws ->
                         incr n;
                         Printf.printf "w_big\t%s\t%s\t%s\t%s\tcall=%b\tkind=%s\n"
@@ -46,7 +46,7 @@ let () =
                            | None -> "-")
                       | _ -> ())
                    | _ -> ());
-                  st := Vsa.denote_def d !st));
+                  st := Vsa.Test_seam.denote_def d !st));
           Printf.printf "=== %s: %d w_big access(es)\n" (Sub.name sub') !n;
           total := !total + !n
         with e ->

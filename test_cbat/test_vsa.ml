@@ -22,7 +22,7 @@ let run () =
   (* x < 5 taken -> x in [0,4] *)
   let c1 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env
+      (Vsa.Test_seam.assume_jump_cond env
          (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
@@ -31,7 +31,7 @@ let run () =
   (* x <= 5 -> [0,5] *)
   let c2 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env
+      (Vsa.Test_seam.assume_jump_cond env
          (mk_jmp_to tgt (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
@@ -40,23 +40,23 @@ let run () =
   (* x == 5 -> {5} *)
   let c3 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env
+      (Vsa.Test_seam.assume_jump_cond env
          (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-3: assume (x == 5) refines x to {5}"
     (Ws.min_elem c3 = Some (w32 5) && Ws.max_elem c3 = Some (w32 5));
-  let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.Int (Cbat_word.to_word (w32 1))))) ivar in
+  let c4 = AI.find_word 32 (Vsa.Test_seam.assume_jump_cond env (mk_jmp_to tgt (Bil.Int (Cbat_word.to_word (w32 1))))) ivar in
   check "D4-4: doubt — constant condition keeps the state (top)" (Ws.is_top c4);
   let c5 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5))))))
+      (Vsa.Test_seam.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5))))))
       ivar
   in
   check "D4-5: doubt — width-mismatched guard keeps the state (top)" (Ws.is_top c5);
   let c6 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+      (Vsa.Test_seam.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
       ivar
   in
   check "D4-6: gate-free (spec §2.1) — the NEQ guard refines to TOP−{5} (5 ∉, 0 ∈, non-top)"
@@ -64,13 +64,13 @@ let run () =
   let fv = Var.create ~is_virtual:false ~fresh:false "zf" (Type.Imm 1) in
   let c7 =
     AI.find_word 1
-      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.Var fv)))
+      (Vsa.Test_seam.assume_jump_cond env (mk_jmp_to tgt (Bil.Var fv)))
       fv
   in
   check "D4-7: assume (flag) forces the flag to {1}" (Ws.elem Cbat_word.b1 c7 && not (Ws.elem Cbat_word.b0 c7));
   let c8 =
     AI.find_word 1
-      (Vsa.assume_jump_cond env
+      (Vsa.Test_seam.assume_jump_cond env
          (mk_jmp_to tgt (Bil.UnOp (Bil.NOT, Bil.Var fv))))
       fv
   in
@@ -123,7 +123,7 @@ let run () =
   let f32 = Var.create ~is_virtual:false ~fresh:false "flag32" (Type.Imm 32) in
   let env = AI.add_word AI.top ~key:f32 ~data:(Ws.of_list ~width:32 [ w32 0; w32 1 ]) in
   let e = Bil.Ite (Bil.Var f32, Bil.Int (Cbat_word.to_word (w32 10)), Bil.Int (Cbat_word.to_word (w32 20))) in
-  match Vsa.denote_imm_exp e env with
+  match Vsa.Test_seam.denote_imm_exp e env with
   | Ok ws ->
       check "E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)"
         (Ws.elem (w32 10) ws && Ws.elem (w32 20) ws && not (Ws.is_bottom ws))
@@ -189,7 +189,7 @@ let run () =
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let j_after =
-    Vsa.denote_def
+    Vsa.Test_seam.denote_def
       (Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))))
       exit_ai
   in
@@ -236,7 +236,7 @@ let run () =
 (* T1 deleted (spec §2.1): every def is denoted, no tag needed. *)
 (  let iv = v64 "t2_iv" in
   let d = Def.create iv (Bil.Int (Cbat_word.to_word (w64 7))) in
-  let e_den = Vsa.denote_def d AI.top in
+  let e_den = Vsa.Test_seam.denote_def d AI.top in
   check "T2-1: gate-free — every def is denoted, no tag needed"
     (Ws.equal (AI.find_word 64 e_den iv) (Ws.singleton (w64 7)));
   ()
@@ -247,7 +247,7 @@ let run () =
   let tgt = Tid.create () in
   let c_in =
     AI.find_word 64
-      (Vsa.assume_jump_cond AI.top
+      (Vsa.Test_seam.assume_jump_cond AI.top
          (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
       x
   in
@@ -255,7 +255,7 @@ let run () =
     (Ws.min_elem c_in = Some (w64 5) && Ws.max_elem c_in = Some (w64 5));
   let c_out =
     AI.find_word 64
-      (Vsa.assume_jump_cond AI.top
+      (Vsa.Test_seam.assume_jump_cond AI.top
          (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
       x
   in
@@ -287,7 +287,7 @@ let run () =
   let entry_blk' =
     match Term.find blk_t sub (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
   in
-  let pre = Vsa.denote_defs entry_blk' AI.top in
+  let pre = Vsa.Test_seam.denote_defs entry_blk' AI.top in
   let mkey =
     match Mem.Key.of_wordset (Ws.singleton (w64 0xd0)) with Some k -> k | None -> assert false
   in
@@ -538,17 +538,17 @@ let run () =
     Def.create m
       (Bil.Store (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64))
   in
-  let env1 = Vsa.denote_def d1 AI.top in
+  let env1 = Vsa.Test_seam.denote_def d1 AI.top in
   let d2 =
     Def.create m
       (Bil.Store
          (Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64), Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
   let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), LittleEndian, `r64)) in
-  let env2 = Vsa.denote_def d2 env1 in
+  let env2 = Vsa.Test_seam.denote_def d2 env1 in
   check "E2eD-7: gate-free — a top-addr store leaves memory unchanged"
     (AI.equal env2 env1);
-  let env3 = Vsa.denote_def dload env2 in
+  let env3 = Vsa.Test_seam.denote_def dload env2 in
   let tv = AI.find_word 64 env3 t in
   check
     "E2eD-8: gate-free — the load at the slot reads exactly the pre-store value {42} (no \
@@ -586,7 +586,7 @@ let run () =
 (  let zf = v1 "l2b_zf2" in
   let env = AI.add_word AI.top ~key:zf ~data:(Ws.of_list ~width:1 [ Cbat_word.b0; Cbat_word.b1 ]) in
   let e = Bil.BinOp (Bil.EQ, Bil.Var zf, Bil.Int W.b0) in
-  match Vsa.denote_imm_exp e env with
+  match Vsa.Test_seam.denote_imm_exp e env with
   | Ok ws ->
       check
         "L2b-2: EQ over a {0,1} operand is {0,1} (bool_top), not bottom — the is_zero guard sees \
@@ -602,7 +602,7 @@ let run () =
 (* L2b-3: lifted 1-bit flag value via unknown[bits]:u1 def. *))
 ;
 (  let pf = v1 "l2b_pf3" in
-  let env_after = Vsa.denote_def (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top in
+  let env_after = Vsa.Test_seam.denote_def (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top in
   let ws = AI.find_word 1 env_after pf in
   check "L2b-3: a lifted 1-bit flag def (val_top (Imm 1)) is {0,1} with cardn 2, not bottom"
     ((not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2));
@@ -614,12 +614,12 @@ let run () =
   let y = v64 "l2b_y4" in
   let z = v64 "l2b_z4" in
   let ok_lt =
-    match Vsa.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top with
+    match Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top with
     | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
     | Error _ -> false
   in
   let ok_eq =
-    match Vsa.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z)) AI.top with
+    match Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z)) AI.top with
     | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
     | Error _ -> false
   in
@@ -634,7 +634,7 @@ let run () =
 (  let zf = v1 "l2b_zf5" in
   let x = v64 "l2b_x5" in
   let flag_env =
-    Vsa.denote_def (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x))) AI.top
+    Vsa.Test_seam.denote_def (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x))) AI.top
   in
   let flag_val = AI.find_word 1 flag_env zf in
   (* (a) direct reachable_jumps on a flag-gated jump *)
@@ -647,7 +647,7 @@ let run () =
   Blk.Builder.add_jmp b1' (Jmp.create ~cond:(Bil.Var zf) (Goto (Direct t2)));
   let blk1' = Blk.Builder.result b1' in
   let jmp = match Term.enum jmp_t blk1' |> Seq.to_list with [ j ] -> j | _ -> assert false in
-  let kept = Vsa.reachable_jumps flag_env (Seq.of_list [ jmp ]) |> Seq.to_list in
+  let kept = Vsa.Test_seam.reachable_jumps flag_env (Seq.of_list [ jmp ]) |> Seq.to_list in
   (* (b) loop with flag-gated back-edge. *)
   let cnt = v64 "l2b_cnt5" in
   let entry0 =
