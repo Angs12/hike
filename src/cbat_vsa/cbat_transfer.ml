@@ -369,9 +369,22 @@ let denote_defs (b : blk term) : AI.t -> AI.t =
 
 (* Jumps reachable in the env. *)
 
+(* Guards are VALUE context: a frame-tracked var's word lane holds the
+   frame OFFSET (an addressing fiction the memory lane keys cells by); as
+   a value, the var is a stack address whose base is unknown.  Evaluating
+   a guard on the fake offset decides real branches from made-up bits —
+   the -O2 stack-realignment idiom (`test (RSP & 0xF)`) pruned live loops,
+   leaving the pruned blocks bottom and their accesses tagged Dead. *)
+let value_env (env : AI.t) : AI.t =
+  match AI.frame_of env with
+  | None -> env
+  | Some frame ->
+    Base.List.fold frame ~init:env ~f:(fun env (v, _) ->
+        AI.add_word env ~key:v ~data:(WordSet.top 64))
+
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
-    let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in
+    let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) (value_env env) in
     let can_fall_through = WordSet.elem Cbat_word.b0 cond in
     if not reachable then Seq.Step.Done
     else if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}

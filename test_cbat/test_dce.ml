@@ -193,7 +193,7 @@ let run () =
     }
   in
   let info =
-    Hike.Convutils.mk_vsa_info ~offsets:[] ~k_ranges:[]
+    Hike.Convutils.mk_vsa_info ~offsets:[]
       ~regions:[ region ] ~stack_plan:[ region ]
       ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in

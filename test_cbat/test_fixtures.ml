@@ -571,9 +571,9 @@ let run_anchored (sub : sub term) : Vsa.vsa_sol =
   Vsa.static_graph_vsa [] prog sub (Vsa.init_sol ~entry:(anchored_entry ()) sub)
 
 (* Anchored fixpoint + extraction (defaults: anchored entry, empty alloc tids). *)
-let extract_anchored (sub : sub term) : Cu.vsa_kind Tid.Map.t * (int64 * int64) Tid.Map.t =
+let extract_anchored (sub : sub term) : Cu.vsa_kind Tid.Map.t =
   let sol = run_anchored sub in
-  Vsa.Cbat_extraction.extract ~sp ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
+  Vsa.Cbat_extraction.extract ~dynamic_alloc:(fun _ -> false) ~alloc_tids:Tid.Set.empty ~sol sub
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
 

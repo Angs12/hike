@@ -55,7 +55,6 @@ let run_creg () =
     Cu.mk_vsa_info
       ~offsets:
         [ (Term.tid def_wide, Cu.Range (-16L, -16L)); (Term.tid def_narrow, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[]
       ~regions:
         [
           {
@@ -145,7 +144,7 @@ let run_creg () =
   Sub.Builder.add_blk sub_b exit0;
   let sub = Sub.Builder.result sub_b in
   let info_of offsets : Cu.vsa_info =
-    Cu.mk_vsa_info ~offsets ~k_ranges:[] ~regions:[] ~stack_plan:[]
+    Cu.mk_vsa_info ~offsets ~regions:[] ~stack_plan:[]
       ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let convertible_of info dtid =
@@ -437,7 +436,6 @@ let run_regions () =
     Cu.mk_vsa_info
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
-      ~k_ranges:[ (tid1, -40L, -10L); (tid2, -50L, -20L) ]
       ~regions:[ r1; r2 ]
       ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
@@ -476,7 +474,6 @@ let run_regions () =
     Cu.mk_vsa_info
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
-      ~k_ranges:[ (tid1, -20L, -10L); (tid2, -40L, -20L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions = Hike.Stack_model.regions_of_sub sub info in
@@ -515,7 +512,6 @@ let run_regions () =
           (tid1, Cu.Range (-32L, -16L));
           (tid2, Cu.Range (-24L, -8L));
         ]
-      ~k_ranges:[ (tid1, -40L, -10L); (tid2, -30L, -5L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions = Hike.Stack_model.regions_of_sub sub info in
@@ -564,8 +560,7 @@ let run_regions () =
           (Term.tid d_b, Cu.Range (-32L, -32L));
           (Term.tid d_c, Cu.Range (-40L, -24L));
           (Term.tid d_d, Cu.Range (-16L, -16L));
-          (Term.tid d_e, Cu.Range (32L, 40L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+          (Term.tid d_e, Cu.Range (32L, 40L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions =
     Hike.Stack_model.regions_of_sub sub info
@@ -661,7 +656,6 @@ let run_fp_gpr () =
   let info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   (* Regions come from the producer (split_plan is a consumer). *)
@@ -719,7 +713,6 @@ let run_fp_gpr () =
   let info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[ (Term.tid def_rsp, -20L, -10L) ]
       ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let info =
@@ -768,8 +761,7 @@ let run_fp_gpr () =
      register name is consulted. *)
   let d_store_tid = Term.tid def_store in
   let info =
-    Cu.mk_vsa_info ~offsets:[ (d_store_tid, Cu.Range (-48L, -48L)) ]
-      ~k_ranges:[ (d_store_tid, 0L, 0L) ] ~regions:[] ~stack_plan:[]
+    Cu.mk_vsa_info ~offsets:[ (d_store_tid, Cu.Range (-48L, -48L)) ] ~regions:[] ~stack_plan:[]
       ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let regions = Sm.regions_of_sub sub info in
@@ -781,7 +773,7 @@ let run_fp_gpr () =
 ;
 (  (* S4: the value-true twin's tagging pin (P21-1's model-level half). *)
   let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
-  let tags, _ = extract_anchored sub in
+  let tags = extract_anchored sub in
   check "S4 (fp-GPR, GREEN): the prologue sub's [RBP - 0x30] access is Range-tagged"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L))
     && Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-48L, -48L)));

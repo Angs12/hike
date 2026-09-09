@@ -29,7 +29,7 @@ _Avoid_: `Hike__X` (the dune-internal name), `Hike__.X` (the generated wrapper a
 **Test Seam** (`Cbat_vsa.Test_seam`): The quarantined module carrying every vendored-VSA name consumed only by test_cbat and the probes (the walk internals, assume/refine/denote, the fixtures' constraint grammar, `mk_rctx`/`walk_budget`). Production `src/` consumes the interface above it and nothing in the seam; a name in the seam must never leak into a production signature.
 _Avoid_: test-only exports in the production interface, the pass-through re-export block (deleted)
 
-**Stack-Access Seeding**: The VSA's classification of each Load/Store def as a Stack Access via the Frame-Residency Proof, emitted as `vsa_info` — the only carrier of stack-access-ness. No separate pass computes it.
+**Stack-Access Seeding**: The VSA's classification of each Load/Store def as a Stack Access via the Frame-Residency Proof, emitted as `vsa_info` — the only carrier of stack-access-ness. No separate pass computes it. `vsa_info` carries per-def offset ranges — the possible range of each access — and nothing else; every other producer question (does the frame escape?) is a fact, not a tag.
 
 **Trace-Partitioning (single-pass)**: Making a block's entry abstract state aware of the branch condition on its incoming edge, so the analysis is branch-sensitive rather than branch-blind; realized as one coupled pass where the deep backward walk runs inline at every conditional GOTO.
 _Avoid_: Phase B, post-pass, `edge_views_of` (deleted), `partitioned_states` (deleted), `edge_view` (deleted)

@@ -1,0 +1,20 @@
+# The -O2 corpus semantic gate's pinned known failures (the golden list).
+# Consumed as run_semantic.sh's 4th argument (pinned-knowns mode): green
+# iff the failing set equals this list EXACTLY. Any difference is red —
+# newly failing = REGRESSION, golden-listed now passing = IMPROVEMENT —
+# and forces a deliberate update of this file + AGENTS.md (the
+# re-baseline rule). State: 25/7 at 7e7bd26 (deep_recursion flipped green
+# in the simplification program's lane 3, byte-identical otherwise).
+#
+# Attributions are NO LONGER provisional: see
+# .scratch/o2-attribution/verdict.md — the seven are four mechanisms:
+# L1 emitter poison arms (fizzbuzz_safe, va_arg_mixed, array_local p.),
+# L2 missing hike_stack rebase (va_arg_vacopy), L3 SSE lane-promotion
+# def-use (union_overlap, byte_copy, array_local p.), L4 data-section
+# relocation rendering (fptr_table).
+byte_copy       # L3 (escape-class prior killed)
+fizzbuzz_safe   # L1 FIXED (poison gone); residual = L3 store-side (lifted-ud2 reachable)
+fptr_table      # L4 (raw un-relocated data addends; indirect-call prior killed)
+union_overlap   # L3 (stale lane-phi state; Unbounded store is a red herring)
+va_arg_mixed    # L1 (alignment-guard trap live; secondary stall re-check due)
+va_arg_vacopy   # L2 (lo<0 dynamic-load arm misses rebase_addr)

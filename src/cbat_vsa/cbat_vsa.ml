@@ -426,8 +426,9 @@ let bounds_of (ws : WordSet.t) : (int64 * int64) option =
         | _ -> None)
     | _ -> None
 
-(* ABI-visible k-range. *)
-let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
+(* Displacement from the current RSP at the def; None when either side is
+   unbounded.  Internal to the escape analysis — never a tag. *)
+let sp_displacement (ws : WordSet.t) (rsp_ws : WordSet.t) :
     (int64 * int64) option =
   match bounds_of ws, bounds_of rsp_ws with
   | Some (alo, ahi), Some (rlo, rhi) ->
@@ -508,22 +509,64 @@ let is_seed (st_before : AI.t) (addr : exp) : bool =
         | _ -> false
 
 
-let rec extract ~(sp : var)
-    ~(dynamic_alloc : def term -> bool)
+(* Outgoing-arg stores: stack writes at or above the current RSP but below
+   entry RSP — the pushed-arg signature.  Escape-analysis input computed
+   where the per-def state lives; NOT part of the tag product. *)
+let outgoing_arg_stores ~(sp : var) ~(sol : (tid, AI.t) Solution.t)
+    (sub : sub term) : Tid.Set.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
+      let st0 = Solution.get sol (Term.tid blk) in
+      let _, acc =
+        Base.List.fold_left (Term.enum def_t blk |> Seq.to_list)
+          ~init:(st0, acc)
+          ~f:(fun (st, acc) d ->
+              let st_before = st in
+              let st = Cbat_transfer.denote_def d st in
+              match stack_address_of_rhs (Def.rhs d) with
+              | Some addr when is_seed st_before addr ->
+                  let addr' =
+                    Cbat_transfer.rewrite_addr
+                      (Cbat_transfer.frame_of_state st_before) addr in
+                  let st_tag = st_tag_of ~tags:sol blk addr' st_before in
+                  let acc =
+                    match Cbat_transfer.denote_imm_exp addr' st_tag with
+                    | Ok ws -> (
+                        match classify ws, bounds_of ws with
+                        | Some (Range (lo, _)), Some (alo, _) ->
+                          let below_entry = Int64.compare lo 0L < 0 in
+                          let above_cur =
+                            match sp_displacement ws
+                                      (AI.find_word 64 st_before sp) with
+                            | Some (klo, _) -> Int64.compare klo 0L >= 0
+                            | None -> false
+                          in
+                          if below_entry && above_cur
+                          then Core.Set.add acc (Term.tid d) else acc
+                        | _ -> acc)
+                    | Error _ -> acc
+                  in
+                  (st, acc)
+              | _ -> (st, acc))
+      in
+      acc)
+
+
+let rec extract ~(dynamic_alloc : def term -> bool)
     ~(alloc_tids : Tid.Set.t)
     ~(sol : (tid, AI.t) Solution.t)
     (sub : sub term) :
-    kind Tid.Map.t * (int64 * int64) Tid.Map.t =
+    kind Tid.Map.t =
   let tags = sol in
-  let raw, kraw =
+  let raw =
     Term.enum blk_t sub
-    |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
+    |> Seq.fold ~init:[] ~f:(fun acc blk ->
         (* Every def is denoted; seeding replaces the tag match. *)
         let defs = Term.enum def_t blk |> Seq.to_list in
-        let _, acc, kacc =
+        let _, acc =
           Base.List.fold_left defs
-            ~init:(Solution.get tags (Term.tid blk), acc, kacc)
-            ~f:(fun (st, acc, kacc) d ->
+            ~init:(Solution.get tags (Term.tid blk), acc)
+            ~f:(fun (st, acc) d ->
                  let st_before = st in
                  let st = Cbat_transfer.denote_def d st in
                  match stack_address_of_rhs (Def.rhs d) with
@@ -541,27 +584,18 @@ let rec extract ~(sp : var)
                           match classify ws with
                           | Some kind ->
                               let acc = (Term.tid d, kind, ws) :: acc in
-                              let kacc =
-                                match
-                                  k_range_of ws
-                                    (AI.find_word 64 st_before sp)
-                                with
-                                | Some (klo, khi) ->
-                                    (Term.tid d, klo, khi) :: kacc
-                                | None -> kacc
-                              in
-                              (st, acc, kacc)
+                              (st, acc)
                           | None ->
                               let ws = WordSet.top 64 in
                               let acc = (Term.tid d, Unbounded, ws) :: acc in
-                              (st, acc, kacc))
+                              (st, acc))
                       | Error _ ->
                           let ws = WordSet.top 64 in
                           let acc = (Term.tid d, Unbounded, ws) :: acc in
-                          (st, acc, kacc))
-                 | _ -> (st, acc, kacc))
+                          (st, acc))
+                 | _ -> (st, acc))
         in
-        (acc, kacc))
+        acc)
   in
   let raw = List.rev raw in
   (* Overlapping addresses merge. *)
@@ -620,13 +654,10 @@ let rec extract ~(sp : var)
             | Some k -> k
             | None -> kind in
           Core.Map.set m ~key:dtid ~data:k) in
-  let k_ranges =
-    Base.List.fold kraw ~init:Tid.Map.empty
-      ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) in
   (* vla_bounds is DELETED (the no-gates ruling): its only production
      readers were the VLA-overlap gates.  Dynamic allocation itself travels
      in [vla_alloc_tids] (the runtime-alloca rule's input). *)
-  (offsets, k_ranges)
+  offsets
 
 (* True for [RSP := RSP - size]. *)
 and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =

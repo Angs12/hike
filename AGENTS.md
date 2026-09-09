@@ -195,7 +195,8 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
    intrinsic callers, symbol-table check) — its own pass, FIRST in the chain
    (no pass calls another pass's logic; the chain is deps-only)
 2. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
-   plus k-ranges) by COMPOSING the ONE producer chain (arch review #1, ADR 0005;
+   per-def offset ranges — the possible range of each access, nothing
+   else) by COMPOSING the ONE producer chain (arch review #1, ADR 0005;
    ADR 0003 LANDED — the `hike-relevance` pass, the `relevant` tag, and the
    backward-lane refineable gates are DELETED, every def is denoted, and
    `vsa_info` is the only carrier of stack-access-ness):
@@ -386,6 +387,12 @@ LLVM allocas / static variables — it should work on EVERY binary.
   (baked @got.plt constants + extern_weak .rodata refs would force a rejected
   DT_TEXTREL under `-pie`), NOT a corpus fallback; see run_semantic.sh's header.
   (Promoted from legacy 8-bin harness to full corpus suite 2026-09-07).
+  PINNED-KNOWNS MODE (2026-09-09): a 4th argument (a golden-list file —
+  `semantic/o2_known_failures.txt` is the -O2 corpus's) flips the gate green
+  rc=0 iff the failing set equals the golden list EXACTLY; any difference is
+  red rc=1 — newly failing = REGRESSION, golden-listed now passing =
+  IMPROVEMENT — so a red-list change is a deliberate golden-list + record
+  update, never a rider. Without the 4th arg: strict mode, rc=1 on ANY failure.
 - `semantic/run_semantic_opt.sh` → the OPTIMIZATION-SAFETY gate (2026-09-01): the
   same native-vs-lifted equivalence but with `opt-21 -O2` inserted between rename
   and llc — what a real consumer's optimizer does to the module must not change the
@@ -422,6 +429,93 @@ it happens).
 Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
+
+**Last verified: 2026-09-09 EEST — THE L1 LANE (branch
+`sp-only-stack-semantics`, uncommitted): the Dead misclassification
+repaired at the producer + k_ranges removed + the -O2 pin moves 25/7 →
+26/6**
+
+Root causes and fixes live in `.scratch/o2-attribution/tickets/02-l1-dead-classification.md`.
+In brief: (1) `reachable_jumps` now evaluates guards in `value_env`
+(frame-tracked vars read as the unknown stack addresses they are, never
+as the fake offset words) — the -O2 stack-realignment guard stopped
+pruning a live loop; (2) `Clp.logand`'s `None -> bottom` (unrepresentable
+image) is `None -> top` — principle 3; (3) `create_def` enforces the
+lhs var's declared width at birth (the lifter's `-O2` lane defs emitted
+i128 values under 64-bit vars; the loop phi then failed llc) — no phi
+coercion; (4) **k_ranges are GONE from `vsa_info`** (the owner's
+ranges-only doctrine): the pushed-arg discriminator is computed once in
+the extraction (`outgoing_arg_stores`) and consumed by the escape
+analysis internally — dropping it outright broke va_arg_vacopy/variadic
+at -O0 (the oracle fired; measured, then restored as an internal fact).
+The Dead arm now WARNS (`hike: guarded: ... classified Dead`) — one new
+-O0 diagnostic line (va_arg_mixed's genuinely-dead misaligned arm).
+
+**The 8 pre-existing unit-suite failures (E2eD-7/8, LM F1-*) fail on the
+PRISTINE tip too (measured via `git stash`) — they pre-date this lane and
+are the owner's triage item; the referee and both semantic oracles are
+green.**
+
+| gate (this lane's final tree) | result |
+|---|---|
+| unit suite | failure set == the pristine-tip baseline (8, pre-existing); POISON pin flipped to expect the warn ✅ |
+| referee | **2,861,148 / 0 mismatches** ✅ |
+| both profiles build | default + vsa-debug **rc=0** ✅ |
+| corpus emission (-O0) | **32/32 rc=0** ✅ |
+| -O0 semantics | **32 PASS / 0 FAIL** ✅ |
+| -O0 structural asserts | **160 passed, 0 failed** ✅ |
+| -O0 byte-identity vs cand3 | **29/32** — 3 itemized deltas (va_arg_mixed, va_arg_vacopy, variadic; the value_env refinement change), each oracle-proven; **the new -O0 reference is `/tmp/emit_l1_o0`** ✅ |
+| -O2 corpus emission | **32/32 rc=0**; allocas **159/1** (out_struct, the recorded shape-d) ✅ |
+| -O2 semantics, pinned | **26 PASS / 6 FAIL (pinned green)** — **array_local flipped**; fizzbuzz_safe residual = L3 (lifted-ud2 reached via L3-wrong lane values) ✅ |
+| unmapped FP intrinsics | **0** ✅ |
+| plugin provenance | bundle sha16 `3263becd53827d07` ✅ |
+
+Artifacts: `/tmp/emit_l1_{o0,o2}`, `/tmp/sem_l1_{o0,o2,o2c}`,
+`/tmp/dead_diag_fixed2.txt`; probes `dead_diag.exe` / `width_diag.exe`
+added (the Dead-chain and width-mismatch diagnostics).
+
+**Last verified: 2026-09-09 EEST — THE -O2 GATE PIN lane (branch
+`sp-only-stack-semantics`, uncommitted): the -O2-corpus semantic gate's
+failing set mechanically pinned**
+
+No src change: a scripts/docs lane. The -O2 semantic red list was
+re-verified end-to-end fresh (not from battery artifacts): a fresh
+`run_corpus.sh` emission of `/tmp/corpus_o2` is **byte-identical 32/32**
+to the battery's `cand-o2` reference (installed bundle sha16
+`d018a1ee694ed6de` = the recorded final), and the gate fails the exact
+recorded seven — no regression, no drift (the 19:46 run the same evening
+failed the identical set). NEW: `run_semantic.sh`'s 4th argument
+(pinned-knowns mode) + `scripts/semantic/o2_known_failures.txt` (the
+seven + provisional per-binary class priors — NO per-binary -O2
+root-cause analysis exists in the record; the dig of git history found
+only the pre-purge verdict's loose class label, and the archive contains
+zero -O2-level per-binary text). All four pin paths exercised: green
+(7 knowns, rc=0), REGRESSION, IMPROVEMENT (rc=1, labeled + named), strict
+mode unchanged. Class attributions in the golden file are PRIORS from
+-O0-era/escape-falsification/precision-lane records, pending a real -O2
+per-binary attribution pass.
+
+| gate (this lane's actual runs) | result |
+|---|---|
+| fresh -O2 emission vs `cand-o2` | **byte-identical 32/32** (rc=0) ✅ |
+| -O2 semantics, pinned | **25/7 (pinned)** — set == golden, rc=0 ✅ |
+| pin red paths | REGRESSION + IMPROVEMENT both rc=1, correctly labeled ✅ |
+| -O0 semantics, strict | **32 PASS / 0 FAIL**, rc=0 ✅ |
+
+Ticket 01 (the attribution pass) then landed: the seven failures are FOUR
+mechanisms, each runtime-proven — L1 emitter poison arms live
+(fizzbuzz_safe patch-proven end-to-end, va_arg_mixed, array_local
+partial), L2 missing hike_stack rebase in `bil2llvm_mem.ml`'s `lo<0`
+dynamic-load arm (va_arg_vacopy), L3 SSE lane-promotion def-use
+(union_overlap, byte_copy, array_local), L4 raw un-relocated data-section
+addends (fptr_table). Several recorded priors KILLED (escape-class for
+byte_copy, indirect-call for fptr_table, -O0-loop-bound for
+fizzbuzz_safe, value-side-TOP for union_overlap). Ranked fix lanes L2 →
+L1 → L3 → L4 with sizes in `.scratch/o2-attribution/verdict.md`; golden
+comments corrected to the verdict (set untouched, pin re-verified green).
+
+Artifacts: `/tmp/emit_fresh_o2`, `/tmp/sem_pin_{a,b,c,d}`,
+`/tmp/sem_strict_o0`, `/tmp/sem_diag_o2` (the fresh-evidence run).
 
 **Last verified: 2026-09-09 EEST — THE SIMPLIFICATION PROGRAM (branch
 `sp-only-stack-semantics`, 4 commits `65b879c`..`3268217`): records purge +

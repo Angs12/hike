@@ -288,13 +288,17 @@ let frame_addr_alias ~(facts : def_facts Tid.Map.t) (sp : var)
                  Core.Set.mem frame_vars (Var.base v))
          | None -> false))
 
+(* Tests whether the frame is reachable from outside.  The tag maps are
+   the only record facts the escape rules read; [facts] is computed once
+   here and shared by all three. *)
 (* Tests whether a call-tail stack store passes an outgoing stack arg.
-   The caller writes pushed arg cells below entry RSP (lo < 0, klo >= 0);
-   these denote callee-visible ABI traffic. *)
+   The caller writes pushed arg cells below entry RSP (lo < 0) at or above
+   the current RSP ([arg_stores], computed once in the extraction); these
+   denote callee-visible ABI traffic. *)
 let has_outgoing_stack_args ~(facts : def_facts Tid.Map.t) (sp : var)
     (target : Theory.Target.t) (sub : sub term)
     ~(offsets : Convutils.vsa_kind Tid.Map.t)
-    ~(k_ranges : (int64 * int64) Tid.Map.t) : bool =
+    ~(arg_stores : Tid.Set.t) : bool =
   let abi = Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv in
   let is_stack (d : def term) : bool =
     Core.Map.mem offsets (Term.tid d)
@@ -338,11 +342,7 @@ let has_outgoing_stack_args ~(facts : def_facts Tid.Map.t) (sp : var)
               | Some (Convutils.Range (lo, _)) -> Int64.compare lo 0L < 0
               | _ -> false
             in
-            let k_pos =
-              match Core.Map.find k_ranges (Term.tid d) with
-              | Some (klo, _) -> Int64.compare klo 0L >= 0
-              | None -> false
-            in
+            let k_pos = Core.Set.mem arg_stores (Term.tid d) in
             rsp_rel && lo_neg && k_pos
         | None -> false)
       | None -> false)
@@ -356,16 +356,13 @@ let has_outgoing_stack_args ~(facts : def_facts Tid.Map.t) (sp : var)
                   && is_outgoing_store d)
          else false)
 
-(* Tests whether the frame is reachable from outside.  The tag maps are
-   the only record facts the escape rules read; [facts] is computed once
-   here and shared by all three. *)
 let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
     ~(offsets : Convutils.vsa_kind Tid.Map.t)
-    ~(k_ranges : (int64 * int64) Tid.Map.t) : bool =
+    ~(arg_stores : Tid.Set.t) : bool =
   let facts = def_facts_of_sub sub in
   sp_escaped ~facts sp target sub
   || frame_addr_alias ~facts sp target sub ~offsets
-  || has_outgoing_stack_args ~facts sp target sub ~offsets ~k_ranges
+  || has_outgoing_stack_args ~facts sp target sub ~offsets ~arg_stores
 
 (* Merges overlapping ranges into regions. *)
 let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :

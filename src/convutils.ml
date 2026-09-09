@@ -41,6 +41,8 @@ type emit_ctx = {
   blk_llvals : blk_llvals Tid.Map.t ref;
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
   guarded_warned : Tid.Set.t ref;
+  (* One Dead-classification warn per sub. *)
+  dead_warned : Tid.Set.t ref;
   (* Dedups [hike: undef-read:] warnings per (sub, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* Edge-keyed SP restores: (pred, fallthrough) -> post-push+8 value. *)
@@ -62,6 +64,7 @@ let empty_emit_ctx () : emit_ctx =
     blk_llvals = ref Tid.Map.empty;
     ll_bbs = ref Tid.Map.empty;
     guarded_warned = ref Tid.Set.empty;
+    dead_warned = ref Tid.Set.empty;
     undef_warned = ref Tid.Map.empty;
     edge_sp_restores = ref (EHashtbl.create (module Tid));
   }
@@ -91,10 +94,10 @@ module Vsa = struct
   (* [plan <> []] splits into [stack_rN] allocas; [[]] uses one [%frame]. *)
   type split_plan = region list [@@deriving equal]
 
-  (* Per-def index maps: [offsets] and [k_ranges]. *)
+  (* Per-def index map: [offsets] — the possible range of each access.
+     This is the VSA's entire tag product. *)
   type vsa_info = {
     offsets : vsa_kind Tid.Map.t;
-    k_ranges : (int64 * int64) Tid.Map.t;
     regions : region list;
     stack_plan : split_plan;
     degraded : bool;
@@ -114,10 +117,8 @@ module Vsa = struct
   let equal_int64_pair ((a1, b1) : int64 * int64) ((a2, b2) : int64 * int64) : bool =
     Int64.equal a1 a2 && Int64.equal b1 b2
 
-  let equal_krange = equal_int64_pair
   let equal_vsa_info (i1 : vsa_info) (i2 : vsa_info) : bool =
     Core.Map.equal equal_vsa_kind i1.offsets i2.offsets
-    && Core.Map.equal equal_krange i1.k_ranges i2.k_ranges
     && Base.List.equal equal_region i1.regions i2.regions
     && Base.List.equal equal_region i1.stack_plan i2.stack_plan
     && Bool.equal i1.degraded i2.degraded
@@ -125,26 +126,23 @@ module Vsa = struct
     && Bool.equal i1.frame_escaped i2.frame_escaped
 
   (* Builds info from maps. *)
-  let mk_vsa_info_maps ~offsets ~k_ranges ~regions ~stack_plan ~degraded
+  let mk_vsa_info_maps ~offsets ~regions ~stack_plan ~degraded
       ~vla_alloc_tids ~frame_escaped : vsa_info =
-    { offsets; k_ranges; regions; stack_plan; degraded; vla_alloc_tids;
+    { offsets; regions; stack_plan; degraded; vla_alloc_tids;
       frame_escaped }
 
   (* Builds info from lists. *)
-  let mk_vsa_info ~offsets ~k_ranges ~regions ~stack_plan ~degraded
+  let mk_vsa_info ~offsets ~regions ~stack_plan ~degraded
       ~vla_alloc_tids ~frame_escaped : vsa_info =
     mk_vsa_info_maps
       ~offsets:
         (Base.List.fold_left offsets ~init:Tid.Map.empty
            ~f:(fun m (tid, kind) -> Core.Map.set m ~key:tid ~data:kind))
-      ~k_ranges:
-        (Base.List.fold_left k_ranges ~init:Tid.Map.empty
-           ~f:(fun m (tid, klo, khi) -> Core.Map.set m ~key:tid ~data:(klo, khi)))
       ~regions ~stack_plan ~degraded ~vla_alloc_tids ~frame_escaped
 
   (* Info with no tags. *)
   let empty_vsa_info : vsa_info =
-    mk_vsa_info_maps ~offsets:Tid.Map.empty ~k_ranges:Tid.Map.empty
+    mk_vsa_info_maps ~offsets:Tid.Map.empty
       ~regions:[] ~stack_plan:[] ~degraded:false
       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
 end

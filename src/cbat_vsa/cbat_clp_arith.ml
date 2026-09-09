@@ -165,7 +165,11 @@ let logand (p1 : t) (p2 : t) : t =
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
   end with
-  | None -> bottom sz
+  (* None = the image is unrepresentable here (circular operands have no
+     min/max); it does NOT mean the result is empty.  BOTTOM would claim a
+     live path dead — it prunes edges and turns reachable stores into Dead
+     tags (the -O2 stack-realignment class).  TOP is the sound fallback. *)
+  | None -> top sz
   | Some x -> x)
 
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))

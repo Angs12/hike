@@ -36,12 +36,6 @@ module Cbat_extraction : sig
   (* Kind of a word set. *)
   val classify : ?vla_tid:tid -> WordSet.t -> kind option
 
-  (* Signed bounds; None when top/bottom. *)
-  val bounds_of : WordSet.t -> (int64 * int64) option
-
-  (* ABI-visible k-range. *)
-  val k_range_of : WordSet.t -> WordSet.t -> (int64 * int64) option
-
   (* Address of a stack-access rhs, if any. *)
   val stack_address_of_rhs : Bil.exp -> Bil.exp option
 
@@ -54,14 +48,19 @@ module Cbat_extraction : sig
     blk term -> exp -> AI.t -> AI.t
 
   (* Per-def classification over [sol]; the two-channel frame-residency
-     proof (spec §2.2) seeds accesses, replacing the deleted tag match. *)
+     proof (spec §2.2) seeds accesses, replacing the deleted tag match.
+     The product is the per-def offset range — nothing else. *)
   val extract :
-    sp:var ->
     dynamic_alloc:(def term -> bool) ->
     alloc_tids:Tid.Set.t ->
     sol:(tid, AI.t) Solution.t ->
     sub term ->
-    kind Tid.Map.t * (int64 * int64) Tid.Map.t
+    kind Tid.Map.t
+
+  (* Outgoing-arg stores (the pushed-arg signature); escape-analysis
+     input, never a tag. *)
+  val outgoing_arg_stores :
+    sp:var -> sol:(tid, AI.t) Solution.t -> sub term -> Tid.Set.t
 
   (* True for a non-literal [RSP := RSP - size]. *)
   val vla_decrement_p : var -> Bil.exp -> bool

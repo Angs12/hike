@@ -140,13 +140,11 @@ let run_poison () =
   let unb_info : Cu.vsa_info =
     Cu.mk_vsa_info
       ~offsets:
-        [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+        [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   let dead_info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid ld, Cu.Dead) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~offsets:[ (Term.tid ld, Cu.Dead) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide
     (Tid.Map.singleton (Term.tid unb_sub) unb_info);
@@ -165,8 +163,10 @@ let run_poison () =
   in
   check "POISON: the Dead-tagged access emits a poison value"
     (contains_substring !ir_holder2 "poison");
-  check "POISON: the Dead-tagged access does NOT warn"
-    (not (contains_substring err_dead "hike: guarded:"));
+  (* The Dead arm warns through the Hike_diag channel (the L1 lane, 2026-09-09):
+     a Dead tag is a provably-empty range — it must be loud, never silent. *)
+  check "POISON: the Dead-tagged access warns through the Hike_diag channel"
+    (contains_substring err_dead "hike: guarded: sub");
   (* The undef-read lane: reading a never-defined register warns and the
      value becomes undef. *)
   let rax = v64 "RAX" in
@@ -260,8 +260,7 @@ let run_casts () =
   (* Singleton Range tag on the store: the converted-cell shape. *)
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -318,7 +317,7 @@ let run_golden () =
           max_width = 64;
         }
     in
-    Cu.mk_vsa_info ~offsets ~k_ranges:[]
+    Cu.mk_vsa_info ~offsets
       ~regions:[ region ] ~stack_plan:[ region ]
       ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
@@ -380,8 +379,7 @@ let run_fp_gpr () =
   in
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ]
-      ~k_ranges:[] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
   in
   Kb.provide (Tid.Map.singleton (Term.tid caller_sub) info);
   let ir_holder = ref "" in

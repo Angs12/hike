@@ -250,6 +250,14 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
   | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
       create_exp llvm_builder blk_tid exp
   | Some Convutils.Dead ->
+      if not (Core.Set.mem !(ctx.Convutils.dead_warned) sub_tid) then begin
+        ctx.Convutils.dead_warned :=
+          Core.Set.add !(ctx.Convutils.dead_warned) sub_tid;
+        (* Warning text is a grepped contract. *)
+        Hike_diag.warn
+          "guarded: sub %s: stack access classified Dead (empty range): def %s rhs=%s"
+          (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
+      end;
       let* typ = typ_lltype_m (Var.typ var) in
       return @@ Llvm.poison typ
   | None -> create_exp llvm_builder blk_tid exp
@@ -285,6 +293,28 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
             | None -> mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp)
        | _ -> mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp)
     else mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp
+  in
+  (* The def's value is the variable's declared width: an over-wide rhs
+     (the -O2 lane extracts, e.g. [low:128] feeding a 64-bit var)
+     contributes the variable's low bits; a narrow one zero-fills.  The
+     contract is enforced where the value is BORN, so every phi joining
+     the variable receives the declared type by construction. *)
+  let* res =
+    let lw = match Var.typ var with Type.Imm n -> n | _ -> 0 in
+    let rt = Llvm.type_of res in
+    match Llvm.classify_type rt with
+    | Llvm.TypeKind.Integer when lw > 0 ->
+        let rw = Llvm.integer_bitwidth rt in
+        if rw = lw then return res
+        else if rw > lw then
+          let* llvm_ctx = Context.get llvm_ctx_var in
+          return @@ Llvm.build_trunc res
+              (Llvm.integer_type llvm_ctx lw) "" llvm_builder
+        else
+          let* llvm_ctx = Context.get llvm_ctx_var in
+          return @@ Llvm.build_zext res
+              (Llvm.integer_type llvm_ctx lw) "" llvm_builder
+    | _ -> return res
   in
   insert_local ctx blk_tid var res;
   return ()
