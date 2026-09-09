@@ -175,9 +175,8 @@ let sp_derived_closure (facts : def_facts Tid.Map.t) (sp_base : var) : Var.Set.t
   grow ();
   !derived
 
-let sp_escaped ?facts (sp : var) (target : Theory.Target.t) (sub : sub term) :
-    bool =
-  let facts = match facts with Some f -> f | None -> def_facts_of_sub sub in
+let sp_escaped ~(facts : def_facts Tid.Map.t) (sp : var)
+    (target : Theory.Target.t) (sub : sub term) : bool =
   let base_var v = Var.base v in
   let sp_base = base_var sp in
   let derived = sp_derived_closure facts sp_base in
@@ -256,9 +255,9 @@ let sp_escaped ?facts (sp : var) (target : Theory.Target.t) (sub : sub term) :
    address mentions a frame-var vetoes conversion; a TAGGED one (the -O0
    prologue's own [RBP - k] stores) is proven frame-resident and needs no
    protection. *)
-let frame_addr_alias ?facts (sp : var) (_target : Theory.Target.t) (sub : sub term)
-    (info : Convutils.vsa_info) : bool =
-  let facts = match facts with Some f -> f | None -> def_facts_of_sub sub in
+let frame_addr_alias ~(facts : def_facts Tid.Map.t) (sp : var)
+    (_target : Theory.Target.t) (sub : sub term)
+    ~(offsets : Convutils.vsa_kind Tid.Map.t) : bool =
   let derived = sp_derived_closure facts (Var.base sp) in
   let frame_vars =
     Core.Map.filter facts ~f:(fun f ->
@@ -275,7 +274,7 @@ let frame_addr_alias ?facts (sp : var) (_target : Theory.Target.t) (sub : sub te
   else
     Core.Map.exists facts ~f:(fun f ->
         let untagged =
-          match Core.Map.find info.Convutils.offsets (Term.tid f.def) with
+          match Core.Map.find offsets (Term.tid f.def) with
           | None -> true
           | Some (Convutils.Range _ | Convutils.Dead) -> false
           | Some (Convutils.Infinite _ | Convutils.Unbounded
@@ -292,12 +291,13 @@ let frame_addr_alias ?facts (sp : var) (_target : Theory.Target.t) (sub : sub te
 (* Tests whether a call-tail stack store passes an outgoing stack arg.
    The caller writes pushed arg cells below entry RSP (lo < 0, klo >= 0);
    these denote callee-visible ABI traffic. *)
-let has_outgoing_stack_args ?facts (sp : var) (target : Theory.Target.t)
-    (sub : sub term) (info : Convutils.vsa_info) : bool =
+let has_outgoing_stack_args ~(facts : def_facts Tid.Map.t) (sp : var)
+    (target : Theory.Target.t) (sub : sub term)
+    ~(offsets : Convutils.vsa_kind Tid.Map.t)
+    ~(k_ranges : (int64 * int64) Tid.Map.t) : bool =
   let abi = Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv in
-  let facts = match facts with Some f -> f | None -> def_facts_of_sub sub in
   let is_stack (d : def term) : bool =
-    Core.Map.mem info.Convutils.offsets (Term.tid d)
+    Core.Map.mem offsets (Term.tid d)
   in
   let call_tails =
     Term.enum blk_t sub
@@ -334,12 +334,12 @@ let has_outgoing_stack_args ?facts (sp : var) (target : Theory.Target.t)
               |> Core.Set.exists ~f:(Abi.is_sp abi)
             in
             let lo_neg =
-              match Core.Map.find info.Convutils.offsets (Term.tid d) with
+              match Core.Map.find offsets (Term.tid d) with
               | Some (Convutils.Range (lo, _)) -> Int64.compare lo 0L < 0
               | _ -> false
             in
             let k_pos =
-              match Core.Map.find info.Convutils.k_ranges (Term.tid d) with
+              match Core.Map.find k_ranges (Term.tid d) with
               | Some (klo, _) -> Int64.compare klo 0L >= 0
               | None -> false
             in
@@ -356,13 +356,16 @@ let has_outgoing_stack_args ?facts (sp : var) (target : Theory.Target.t)
                   && is_outgoing_store d)
          else false)
 
-(* Tests whether the frame is reachable from outside. *)
+(* Tests whether the frame is reachable from outside.  The tag maps are
+   the only record facts the escape rules read; [facts] is computed once
+   here and shared by all three. *)
 let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
-    (info : Convutils.vsa_info) : bool =
+    ~(offsets : Convutils.vsa_kind Tid.Map.t)
+    ~(k_ranges : (int64 * int64) Tid.Map.t) : bool =
   let facts = def_facts_of_sub sub in
   sp_escaped ~facts sp target sub
-  || frame_addr_alias ~facts sp target sub info
-  || has_outgoing_stack_args ~facts sp target sub info
+  || frame_addr_alias ~facts sp target sub ~offsets
+  || has_outgoing_stack_args ~facts sp target sub ~offsets ~k_ranges
 
 (* Merges overlapping ranges into regions. *)
 let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
@@ -498,14 +501,15 @@ let align16_up n =
   let r = Int64.rem n 16L in
   if Int64.equal r 0L then n else Int64.add n (Int64.sub 16L r)
 
-(* Frame-geometry triple: deepest SP decrement (the granted fact: catches
-   rsp-sub prologues and VLAs), and the deepest negative and positive
-   access extents.  Extents come from the TAGS (ADR 0008): a tagged
-   access's proven offset span IS its extent; an untagged access never
-   touches the fallback frame (it emits through the real-address lane). *)
-let degraded_geometry (sub : sub term)
-    (info : Convutils.vsa_info) : int64 * int64 * int64 * bool =
-  let is_sp v = Abi.is_sp Abi.x86_64_sysv (Var.base v) in
+(* Frame-geometry facts for the degraded lane: deepest SP decrement (the
+   granted fact: catches rsp-sub prologues and VLAs) and the deepest
+   negative access extent.  Extents come from the TAGS (ADR 0008): a
+   tagged access's proven offset span IS its extent; an untagged access
+   never touches the fallback frame (it emits through the real-address
+   lane). *)
+let degraded_geometry (sub : sub term) ~(abi : Abi.t)
+    (info : Convutils.vsa_info) : int64 * int64 * bool =
+  let is_sp v = Abi.is_sp abi (Var.base v) in
   let max_dec =
     Term.enum blk_t sub
     |> Seq.fold ~init:0L ~f:(fun acc blk ->
@@ -518,26 +522,55 @@ let degraded_geometry (sub : sub term)
                  | _ -> acc))
   in
   (* Tagged extents: Range/Infinite spans, Unbounded = the whole frame. *)
-  let max_neg, max_pos, has_unbounded =
+  let max_neg, has_unbounded =
     Core.Map.fold info.Convutils.offsets
-      ~init:(0L, 0L, false)
-      ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (neg, pos, unb) ->
+      ~init:(0L, false)
+      ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (neg, unb) ->
         match kind with
-        | Convutils.Range (lo, hi) | Convutils.Infinite (lo, hi) ->
+        | Convutils.Range (lo, _) | Convutils.Infinite (lo, _) ->
             let neg =
               if Int64.compare lo 0L < 0 then
                 Int64.max neg (Int64.neg (Int64.min lo 0L))
               else neg
             in
-            let pos =
-              if Int64.compare hi 0L > 0 then Int64.max pos hi else pos
-            in
-            (neg, pos, unb)
-        | Convutils.Unbounded -> (neg, pos, true)
-        | Convutils.Dead -> (neg, pos, unb)
-        | Convutils.VLA _ -> (neg, pos, true))
+            (neg, unb)
+        | Convutils.Unbounded -> (neg, true)
+        | Convutils.Dead -> (neg, unb)
+        | Convutils.VLA _ -> (neg, true))
   in
-  (max_dec, max_neg, max_pos, has_unbounded)
+  (max_dec, max_neg, has_unbounded)
+
+(* The fallback frame's geometry: (alloca bytes, anchor byte index) for
+   every non-precise lane.  With tags, the tagged extents ARE the frame
+   extents; with no tags (the degraded arm) the extents come from the
+   SP-decrement walk, widened to the 64K caller-arg window on unbounded
+   and floored at the 8192-byte degraded minimum. *)
+let frame_dims (sub : sub term) ~(abi : Abi.t)
+    (info : Convutils.vsa_info) : int64 * int64 =
+  let tags = info.Convutils.offsets in
+  if Core.Map.is_empty tags then begin
+    let max_dec, max_neg, unbounded = degraded_geometry sub ~abi info in
+    let max_neg = if unbounded then Int64.max max_neg 65536L else max_neg in
+    let deepest = Int64.max (Int64.max max_dec max_neg) 8L in
+    let n = Int64.max (align16_up (Int64.add deepest 8L)) 8192L in
+    (n, Int64.sub n 8L)
+  end
+  else begin
+    let min_lo, max_hi =
+      Core.Map.fold tags ~init:(0L, 0L)
+        ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (lo, hi) ->
+          match kind with
+          | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
+              if Int64.compare l 0L <= 0 then
+                (Int64.min lo l, Int64.max hi h)
+              else (lo, hi)
+          | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (lo, hi))
+    in
+    let span = Int64.sub max_hi min_lo in
+    let need = Int64.max (Int64.sub 8L min_lo) (Int64.add span 1L) in
+    let n = align16_up need in
+    (n, Int64.sub n 8L)
+  end
 
 (* The emission-shape switch: does this sub split into region allocas
    (plan non-empty) or emit one %frame?  A derived view of the record —
@@ -553,18 +586,15 @@ let is_precise (info : Convutils.vsa_info) : bool =
       if Int64.compare lo 0L >= 0 then true
       else r.Convutils.convertible)
 
-(* The stack plan IS the convertible regions.  No refusals: the plan is the
-   partition's Static-class components; a sub with no convertible regions
-   has an empty plan and emits one %frame.  An oversized region joins to
-   Frame storage with a diagnostic naming it (the sanctioned channel; the
-   corpus table greps these). *)
+(* The stack plan IS the convertible regions.  No refusals, no
+   recomputation: the record's regions are authoritative (the producer
+   built them).  A sub with no convertible regions has an empty plan and
+   emits one %frame.  An oversized region joins to Frame storage with a
+   diagnostic naming it (the sanctioned channel; the corpus table greps
+   these). *)
 let split_plan (sub : sub term) (info : Convutils.vsa_info) :
     Convutils.split_plan =
-  let regions =
-    if info.Convutils.regions <> [] then info.Convutils.regions
-    else regions_of_sub sub info
-  in
-  Base.List.filter regions ~f:(fun r ->
+  Base.List.filter info.Convutils.regions ~f:(fun r ->
       r.Convutils.convertible
       &&
       let b = region_bytes r in

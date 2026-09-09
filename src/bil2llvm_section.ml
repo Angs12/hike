@@ -4,7 +4,6 @@ open Bap.Std
 open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
-module Ws = Cbat_clp_set_composite
 open Bil2llvm_env
 
 

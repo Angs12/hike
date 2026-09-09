@@ -85,12 +85,13 @@ let bitwidth = lift_consume Clp.bitwidth FinSet.bitwidth
 
 let cardinality = lift_consume Clp.cardinality FinSet.cardinality
 
+let nearest_pred w = lift_consume (Clp.nearest_pred w) (FinSet.nearest_pred w)
+let nearest_succ w = lift_consume (Clp.nearest_succ w) (FinSet.nearest_succ w)
+
 let min_elem = lift_consume Clp.min_elem FinSet.min_elem
 let max_elem = lift_consume Clp.max_elem FinSet.max_elem
 let min_elem_signed = lift_consume Clp.min_elem_signed FinSet.min_elem_signed
 let max_elem_signed = lift_consume Clp.max_elem_signed FinSet.max_elem_signed
-let nearest_pred w = lift_consume (Clp.nearest_pred w) (FinSet.nearest_pred w)
-let nearest_succ w = lift_consume (Clp.nearest_succ w) (FinSet.nearest_succ w)
 let splits_by = lift_consume Clp.splits_by FinSet.splits_by
 
 let elem w = lift_consume (Clp.elem w) (FinSet.elem w)

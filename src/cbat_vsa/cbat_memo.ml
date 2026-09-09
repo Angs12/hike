@@ -11,10 +11,11 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* Version-keyed memo. Entries stamp the read-set with block versions; a stored entry is reusable while every stamped version still matches. Stale entries are overwritten, never invalidated. *)
+(* Version-keyed walk memo. Entries stamp the read-set with block versions; a stored entry is reusable while every stamped version still matches. Stale entries are overwritten, never invalidated. *)
 
 open Core_kernel
 open Bap.Std
+module AI = Cbat_ai_representation
 
 #ifdef VSA_DEBUG
 (* Hit accounting, compiled out of production. *)
@@ -27,14 +28,7 @@ let reset_stats () =
   lookups := 0; hits := 0; stores := 0; stale := 0; empty_lookups := 0
 #endif
 
-(* Memoized value type. *)
-module type Value = sig
-  type t
-end
-
-(* The version oracle is threaded per call. *)
-module Make (V : Value) = struct
-  type value = V.t
+type value = AI.t
 
   (* Stamped read-set plus value. *)
   type entry = {
@@ -90,4 +84,4 @@ module Make (V : Value) = struct
       ~data:(match Core.Map.find t outer with
           | None -> Tid.Map.singleton inner e
           | Some by_inner -> Core.Map.set by_inner ~key:inner ~data:e)
-end
+

@@ -5,8 +5,6 @@ open Bap.Std.Bil.Types
 open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
-module Ws = Cbat_clp_set_composite
-module Vsa = Cbat_vsa
 open Bil2llvm_env
 open Bil2llvm_exp
 

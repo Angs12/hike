@@ -190,8 +190,6 @@ module Make_indexed_from_map
 
 end
 
-module Make_indexed(K : Map.Key) = Make_indexed_from_map(K)(Map.Make(K))
-
 module type Key_val = sig
   include Map.Key
   include Value.S with type t := t
@@ -227,11 +225,6 @@ module Make_indexed_val(K : Key_val)(L : Lattice.S_indexed_val) = struct
 
 end
 
-
-module Make (K : Map.Key)(L : Lattice.S) = struct
-  module IL = Lattice.Free_index(L)
-  include Make_indexed(K)(IL)
-end
 
 module Make_val (K : Key_val)(L : Lattice.S_val) = struct
   module IL = Lattice.Free_index_val(L)

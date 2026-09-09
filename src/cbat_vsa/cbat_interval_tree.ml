@@ -16,30 +16,14 @@ module type S = sig
   type point
 
   val empty : 'a t
-  val singleton : key -> 'a -> 'a t
-  val least : 'a t -> point option
-  val greatest : 'a t -> point option
-  val min_binding : 'a t -> (key * 'a) option
-  val max_binding : 'a t -> (key * 'a) option
   val add : 'a t -> key -> 'a -> 'a t
   val dominators : 'a t -> key -> (key * 'a) Sequence.t
   val intersections : 'a t -> key -> (key * 'a) Sequence.t
   val collect_remove_intersections
     :  'a t -> key -> (key * 'a) Sequence.t * 'a t
-  val intersects : 'a t -> key -> bool
   val dominates : 'a t -> key -> bool
-  val contains : 'a t -> point -> bool
-  val lookup : 'a t -> point -> (key * 'a) Sequence.t
-  val map : 'a t -> f:('a -> 'b) -> 'b t
-  val mapi : 'a t -> f:(key -> 'a -> 'b) -> 'b t
   val filter : 'a t -> f:('a -> bool) -> 'a t
-  val filter_map : 'a t -> f:('a -> 'b option) -> 'b t
-  val filter_mapi : 'a t -> f:(key -> 'a -> 'b option) -> 'b t
-  val remove : 'a t -> key -> 'a t
-  val remove_intersections : 'a t -> key -> 'a t
-  val remove_dominators : 'a t -> key -> 'a t
   val to_sequence : 'a t -> (key * 'a) Sequence.t
-  include Container.S1 with type 'a t := 'a t
 end
 
 module Make(Interval : Interval) = struct
@@ -95,11 +79,6 @@ module Make(Interval : Interval) = struct
     | Some {lhs=None; key; data} -> Some (key,data)
     | Some {lhs} -> min_binding lhs
 
-  let rec max_binding = function
-    | None -> None
-    | Some {rhs=None; key; data} -> Some (key,data)
-    | Some {rhs} -> max_binding rhs
-
   let bal l x d r =
     let hl,hr = height l, height r in
     if hl > hr + 2 then
@@ -131,23 +110,6 @@ module Make(Interval : Interval) = struct
       else if c < 0
       then bal (add t.lhs key data) t.key t.data t.rhs
       else bal t.lhs t.key t.data (add t.rhs key data)
-
-  let is_inside key p =
-    let low = Interval.lower key and high = Interval.upper key in
-    Point.between ~low ~high p
-
-  let lookup start a =
-    let open Sequence.Generator in
-    let rec go = function
-      | None -> return ()
-      | Some t when Point.(a < t.least || a > t.greatest) -> return ()
-      | Some t ->
-        if is_inside t.key a
-        then
-          go t.lhs >>= fun () -> yield (t.key, t.data) >>= fun () ->
-          go t.rhs
-        else go t.lhs >>= fun () -> go t.rhs in
-    start |> go |> run
 
   let is_dominated t r =
     let open Interval in
@@ -189,23 +151,6 @@ module Make(Interval : Interval) = struct
       ~take_if:has_intersections
 
   let dominates m r = not (Seq.is_empty (dominators m r))
-  let intersects m r = not (Seq.is_empty (intersections m r))
-  let contains m a = not (Seq.is_empty (lookup m a))
-
-  let rec map m ~f = Option.map m ~f:(fun m -> {
-        m with
-        lhs = map m.lhs ~f;
-        data = f m.data;
-        rhs = map m.rhs ~f;
-      })
-
-  let rec mapi m ~f = Option.map m ~f:(fun m -> {
-        m with
-        lhs = mapi m.lhs ~f;
-        data = f m.key m.data;
-        rhs = mapi m.rhs ~f;
-      })
-
 
   let rec remove_min_binding = function
     | None -> assert false
@@ -218,34 +163,6 @@ module Make(Interval : Interval) = struct
     | _ -> match min_binding t2 with
       | None -> assert false
       | Some (key,data) -> bal t1 key data (remove_min_binding t2)
-
-  let mem_equal x y =
-    Interval.(Point.(lower x = lower y) && Point.(upper x = upper y))
-
-
-  (* Removes exact matches. *)
-
-  let rec remove map mem = match map with
-    | None -> None
-    | Some t when mem_equal t.key mem ->
-      splice (remove t.lhs mem) (remove t.rhs mem)
-    | Some t -> match Interval.compare mem t.key with
-      | 1 -> bal t.lhs t.key t.data (remove t.rhs mem)
-      | _ -> bal (remove t.lhs mem) t.key t.data t.rhs
-
-  let remove_if ~leave_if ~remove_if map mem =
-    let rec remove = function
-      | None -> None
-      | Some t when leave_if t mem -> Some t
-      | Some t when remove_if t mem ->
-        splice (remove t.lhs) (remove t.rhs)
-      | Some t ->
-        bal (remove t.lhs) t.key t.data (remove t.rhs) in
-    remove map
-
-  let remove_intersections map mem = remove_if map mem
-      ~leave_if:can't_be_in_tree
-      ~remove_if:has_intersections
 
   (* Collect and remove intersections in one descent. *)
   let collect_remove_intersections map mem =
@@ -264,10 +181,6 @@ module Make(Interval : Interval) = struct
     in
     go map
 
-  let remove_dominators map mem = remove_if map mem
-      ~leave_if:can't_be_dominated
-      ~remove_if:is_dominated
-
   let filter_mapi map ~f =
     let rec fmap = function
       | None -> None
@@ -277,11 +190,8 @@ module Make(Interval : Interval) = struct
           bal (fmap t.lhs) t.key data (fmap t.rhs) in
     fmap map
 
-  let filter_map map ~f =
-    filter_mapi map ~f:(fun _ x -> f x)
-
   let filter map ~f : _ t =
-    filter_map map ~f:(fun x -> Option.some_if (f x) x)
+    filter_mapi map ~f:(fun _ x -> Option.some_if (f x) x)
 
   let to_sequence start =
     let open Seq.Generator in
@@ -291,43 +201,6 @@ module Make(Interval : Interval) = struct
         go t.lhs >>= fun () -> yield (t.key, t.data) >>= fun () -> go t.rhs
     in
     start |> go |> run
-
-  (* Custom container wrapper. *)
-
-  module C = Container.Make(
-    struct
-      type 'a t = 'a node option
-      let rec fold m ~init ~f = Option.fold m ~init:init ~f:(fun acc m ->
-          fold m.rhs ~init:(f (fold m.lhs ~init:acc ~f) m.data) ~f)
-
-      let rec iter m ~f = Option.iter m ~f:(fun m ->
-          iter m.lhs ~f;
-          f m.data;
-          iter m.rhs ~f)
-
-      let iter  = `Custom iter
-
-      let length = `Define_using_fold
-
-    end)
-
-  let fold = C.fold
-  let count = C.count
-  let sum = C.sum
-  let iter = C.iter
-  let length = C.length
-  let is_empty = C.is_empty
-  let exists = C.exists
-  let mem = C.mem
-  let for_all = C.for_all
-  let find_map = C.find_map
-  let find = C.find
-  let to_list = C.to_list
-  let to_array = C.to_array
-  let min_elt = C.min_elt
-  let max_elt = C.max_elt
-  let fold_until = C.fold_until
-  let fold_result = C.fold_result
 end
 
 module type Interval_binable = sig

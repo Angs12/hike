@@ -87,9 +87,6 @@ let msb (t : t) : bool =
   | Small (v, w, _) -> w >= 1 && w <= 62 && v >= 1 lsl (w - 1)
   | Big (z, w, _) -> w >= 1 && Z.testbit z (w - 1)
 
-let[@inline] lsb (t : t) : bool =
-  match t with Small (v, _, _) -> v land 1 = 1 | Big (z, _, _) -> Z.is_odd z
-
 let succ (t : t) : t =
   match t with
   | Small (v, w, _) ->

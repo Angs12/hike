@@ -8,13 +8,8 @@ module Model = Hike_stack_model
 
 let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     sub term =
-  let info =
-    Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
-    |> Base.Option.value
-         ~default:
-           Convutils.empty_vsa_info
-  in
-  
+  let info = Hike_kb.info_of_sub (Term.tid sub) in
+
   let tag_of = info.Convutils.offsets in
   (* Incoming and outgoing arg accesses stay in memory: the cross-sub
      consistency rule, read from the two record facts. *)
@@ -26,11 +21,6 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     Base.List.fold_left regions ~init:Tid.Map.empty ~f:(fun m r ->
         Base.List.fold_left r.Convutils.members ~init:m ~f:(fun m (dtid, _) ->
             Core.Map.set m ~key:dtid ~data:r))
-  in
-  let region_convertible (dtid : tid) : bool =
-    match Core.Map.find region_by_tid dtid with
-    | Some r -> r.Convutils.convertible
-    | None -> false
   in
   let region_max_width (dtid : tid) : int =
     match Core.Map.find region_by_tid dtid with
@@ -65,25 +55,23 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 ( Core.Map.find tag_of (Term.tid d),
                   Model.addr_of_rhs (Def.rhs d) )
               with
-              | Some (Convutils.Range (lo, hi)), Some (addr, _)
-                when region_convertible (Term.tid d) -> (
+              | Some (Convutils.Range _), Some (addr, _) -> (
                   match Core.Map.find region_by_tid (Term.tid d) with
-                  | Some r ->
+                  | Some r when r.Convutils.convertible ->
                       let rlo, rhi = r.Convutils.span in
-                      if Int64.equal rlo rhi then
-                        (addr, `Slot (Model.slot_of rlo (region_max_width (Term.tid d)))) :: acc
+                      if Int64.equal rlo rhi then begin
+                          let w = region_max_width (Term.tid d) in
+                          (addr, `Slot (Model.slot_of rlo w, w)) :: acc
+                        end
                       else (addr, `Region (r.Convutils.id, base_exp_of addr)) :: acc
-                  | None ->
-                      (* Region-less singleton tag: the slot. *)
-                      if Int64.equal lo hi then
-                        (addr, `Slot (Model.slot_of lo (region_max_width (Term.tid d)))) :: acc
-                      else acc)
+                  | _ -> acc)
               | _ -> acc))
   in
 
-  (* Looks up a cell's conversion shape. *)
+  (* Looks up a cell's conversion shape (the slot's width travels with it —
+     [slot_of] mints [Imm] by construction). *)
   let shape_of_addr (addr : exp) :
-      [> `Slot of var | `Region of int * exp ] option =
+      [> `Slot of var * int | `Region of int * exp ] option =
     Base.List.find_map cells ~f:(fun (a, shape) ->
         if Exp.equal a addr then Some shape else None)
   in
@@ -105,13 +93,10 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
         method! map_load ~mem ~addr e s =
           (* Fissions both load operands for regions. *)
           match shape_of_addr addr with
-          | Some (`Slot local) -> (
-              match Var.typ local with
-              | Type.Imm w ->
-                  let bits = Size.in_bits s in
-                  if bits < w then Bil.Cast (Bil.LOW, bits, Bil.Var local)
-                  else Bil.Var local
-              | Type.Unk | Type.Mem _ -> Bil.Var local)
+          | Some (`Slot (local, w)) ->
+              let bits = Size.in_bits s in
+              if bits < w then Bil.Cast (Bil.LOW, bits, Bil.Var local)
+              else Bil.Var local
           | Some (`Region (id, base)) ->
               Bil.Load
                 ( Bil.Var (Model.region_mem id),
@@ -122,26 +107,23 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
           let data = self#map_exp data in
           (* Fissions both store operands for regions. *)
           match shape_of_addr addr with
-          | Some (`Slot local) -> (
-              match Var.typ local with
-              | Type.Imm w ->
-                  let bits = Size.in_bits s in
-                  if bits < w then
-                    (* Splices the stored width into the slot. *)
-                    let mask =
-                      let low =
-                        Word.sub
-                          (Word.lshift (Word.one w) (Word.of_int ~width:w bits))
-                          (Word.one w)
-                      in
-                      Word.lnot low
-                    in
-                    Bil.Store (mem, addr,
-                      Bil.BinOp (Bil.OR,
-                        Bil.BinOp (Bil.AND, Bil.Var local, Bil.Int mask),
-                        Bil.Cast (Bil.UNSIGNED, w, data)), e, s)
-                  else Bil.Store (mem, addr, data, e, s)
-              | Type.Unk | Type.Mem _ -> Bil.Store (mem, addr, data, e, s))
+          | Some (`Slot (local, w)) ->
+              let bits = Size.in_bits s in
+              if bits < w then
+                (* Splices the stored width into the slot. *)
+                let mask =
+                  let low =
+                    Word.sub
+                      (Word.lshift (Word.one w) (Word.of_int ~width:w bits))
+                      (Word.one w)
+                  in
+                  Word.lnot low
+                in
+                Bil.Store (mem, addr,
+                  Bil.BinOp (Bil.OR,
+                    Bil.BinOp (Bil.AND, Bil.Var local, Bil.Int mask),
+                    Bil.Cast (Bil.UNSIGNED, w, data)), e, s)
+              else Bil.Store (mem, addr, data, e, s)
           | Some (`Region (id, base)) ->
               Bil.Store
                 ( Bil.Var (Model.region_mem id),
@@ -169,59 +151,50 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     | Some (s, `Region id) ->
         (* Rebinds ranged stores to their region mem. *)
         Def.with_rhs (Def.with_lhs d (Model.region_mem id)) (map_rhs d)
-    | Some (s, `Slot local) -> (
-        match Var.typ local with
-        | Type.Imm w -> (
-            match Model.store_data_of_rhs (Def.rhs d) with
-            | Some (data, wrap) ->
-                let bits = Size.in_bits s in
-                (* Stored data reads converted cells too. *)
-                let data = map_exp_cells data in
-                let value =
-                  if bits >= w then data
-                  else
-                    (* Splices the stored width into the slot. *)
-                    let mask =
-                      let low =
-                        Word.sub
-                          (Word.lshift (Word.one w) (Word.of_int ~width:w bits))
-                          (Word.one w)
-                      in
-                      Word.lnot low
-                    in
-                    Bil.BinOp
-                      (Bil.OR,
-                       Bil.BinOp (Bil.AND, Bil.Var local, Bil.Int mask),
-                       Bil.Cast (Bil.UNSIGNED, w, data))
+    | Some (s, `Slot (local, w)) -> (
+        match Model.store_data_of_rhs (Def.rhs d) with
+        | Some (data, wrap) ->
+            let bits = Size.in_bits s in
+            (* Stored data reads converted cells too. *)
+            let data = map_exp_cells data in
+            let value =
+              if bits >= w then data
+              else
+                (* Splices the stored width into the slot. *)
+                let mask =
+                  let low =
+                    Word.sub
+                      (Word.lshift (Word.one w) (Word.of_int ~width:w bits))
+                      (Word.one w)
+                  in
+                  Word.lnot low
                 in
-                Def.with_rhs (Def.with_lhs d local) (wrap value)
-            | None ->
-                
-                Def.with_rhs d (map_rhs d))
-        | Type.Unk | Type.Mem _ -> Def.with_rhs d (map_rhs d))
+                Bil.BinOp
+                  (Bil.OR,
+                   Bil.BinOp (Bil.AND, Bil.Var local, Bil.Int mask),
+                   Bil.Cast (Bil.UNSIGNED, w, data))
+            in
+            Def.with_rhs (Def.with_lhs d local) (wrap value)
+        | None -> Def.with_rhs d (map_rhs d))
     | None -> Def.with_rhs d (map_rhs d)
   in
   let sub' = Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:rewrite_def) in
-  (* Zero-initializes converted slots at entry. *)
-  let slots : var list =
+  (* Zero-initializes converted slots at entry (the width travels with the
+     cell). *)
+  let slots : (var * int) list =
     Base.List.fold_left cells ~init:[] ~f:(fun acc (_, shape) ->
         match shape with
-        | `Slot local when not (Base.List.exists acc ~f:(Var.equal local)) ->
-            local :: acc
+        | `Slot (local, w) when not (Base.List.exists acc ~f:(fun (l, _) -> Var.equal l local)) ->
+            (local, w) :: acc
         | _ -> acc)
   in
   match Term.first blk_t sub' with
   | None -> sub'
   | Some blk ->
-    let w_of (slot : var) : int =
-      match Var.typ slot with
-      | Type.Imm w -> w
-      | _ -> 64
-    in
     let blk' =
-      Base.List.fold_left slots ~init:blk ~f:(fun blk slot ->
+      Base.List.fold_left slots ~init:blk ~f:(fun blk (slot, w) ->
           Term.prepend def_t blk
-            (Def.create slot (Bil.Int (Word.zero (w_of slot)))))
+            (Def.create slot (Bil.Int (Word.zero w))))
     in
     Term.update blk_t sub' blk'

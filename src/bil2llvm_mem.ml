@@ -5,10 +5,6 @@ open Bap.Std.Bil.Types
 open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
-module Ws = Cbat_clp_set_composite
-module Vsa = Cbat_vsa
-module AI = Cbat_vsa.AI
-module Mem = Cbat_vsa.Mem
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_section
@@ -16,17 +12,11 @@ open Bil2llvm_section
 
 (* Looks up a def VSA tag. *)
 let find_def_tag sub_info def =
-  Base.Option.bind sub_info ~f:(fun info ->
-      Core.Map.find info.Convutils.offsets (Term.tid def))
-
-
+  Core.Map.find sub_info.Convutils.offsets (Term.tid def)
 
 (* Tests for visible storage via the stack model. *)
 let is_abi_visible sub_info def =
-  match sub_info with
-  | None -> false
-  | Some info ->
-      Hike_stack_model.abi_visibility_of info def
+  Hike_stack_model.abi_visibility_of sub_info def
 
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =

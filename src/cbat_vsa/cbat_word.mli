@@ -44,7 +44,6 @@ val of_int64 : ?width:int -> int64 -> t
 val is_zero : t -> bool
 val is_one : t -> bool
 val msb : t -> bool
-val lsb : t -> bool
 
 val succ : t -> t
 val pred : t -> t

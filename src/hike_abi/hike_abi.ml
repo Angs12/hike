@@ -63,10 +63,6 @@ let pc target =
 
 (* Only consumers reach register lists or predicates through here. *)
 
-let imm width = Imm width
-let r64 name = Var.create name (imm 64)
-let r256 name = Var.create name (imm 256)
-
 (* x86_64-gnu-elf only. of_target_opt is total (None on unknown targets). *)
 let of_target_opt (target : Theory.Target.t) : t option =
   if Theory.Target.matches target "x86_64-gnu-elf" then
@@ -84,12 +80,7 @@ let of_target (target : Theory.Target.t) : t =
   (* Total: the SysV record serves unknown targets (unit fixtures). *)
   Option.value (of_target_opt target) ~default:x86_64_sysv
 
-let int_param_regs target = (of_target target).int_param_regs
-let vector_param_regs target = (of_target target).vector_param_regs
 let param_regs target = param_regs (of_target target)
-let return_regs target = (of_target target).return_regs
-
-let is_callee_saved_t target v = is_callee_saved (of_target target) v
 
 (* Value-register names for the FP-return detector. *)
 let value_return_names = [ "RAX"; "EAX"; "RDX"; "EDX" ]

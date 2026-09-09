@@ -5,7 +5,6 @@ open Bap.Std.Bil.Types
 open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
-module Ws = Cbat_clp_set_composite
 
 
 (* Per-sub frame state. *)

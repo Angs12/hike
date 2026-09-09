@@ -71,26 +71,6 @@ module type S_indexed_val = sig
   include Value.S with type t := t
 end
 
-module Free_index (L : S) : S_indexed
-  with type idx = unit and type t = L.t
-= struct
-  type t = L.t
-  type idx = unit
-
-  let get_idx _ = ()
-  let top _ = L.top
-  let bottom _ = L.bottom
-
-  let meet = L.meet
-  let join = L.join
-
-  let widen_join = L.widen_join
-
-  let precedes = L.precedes
-  let equal = L.equal
-
-end
-
 module Free_index_val (L : S_val) : S_indexed_val
   with type idx = unit and type t = L.t
 = struct

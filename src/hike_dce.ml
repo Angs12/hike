@@ -2,12 +2,7 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Bap_core_theory
 module Abi = Hike_abi
-
-(* ABI record, defaulting to x86_64 SysV. *)
-let abi_of (target : Theory.Target.t) : Abi.t =
-  Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
 
 (* Registers read implicitly by calls. *)
 let is_call_reg ~(abi : Abi.t) (v : var) : bool =
@@ -143,9 +138,7 @@ let is_sp_for_erasure ~(abi : Abi.t) (d : def term) : bool =
 (* True when the sub uses the split model. Hoisted out of the sweep by
    [dce]: the KB entry cannot change while defs are only removed. *)
 let is_precise_sub (sub : sub term) : bool =
-  match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
-  | None -> false
-  | Some info -> Hike_stack_model.is_precise info
+  Hike_stack_model.is_precise (Hike_kb.info_of_sub (Term.tid sub))
 
 (* Region mems survive iff loaded; [mem] always survives. *)
 let keep ?(precise=false) ?(load_roots=Var.Set.empty)
@@ -252,5 +245,5 @@ let dce ~target (sub : sub term) : sub term =
       end
     in
     let precise = is_precise_sub sub in
-    let abi = abi_of target in
+    let abi = Abi.of_target target in
     mapper#map_sub sub |> sweep_worklist ~abi ~precise

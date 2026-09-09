@@ -1,3 +1,6 @@
+(* Interval tree over [Interval] keys: the surface [cbat_ai_memmap]'s Mem
+   uses (add / query / filter). *)
+
 open Core_kernel[@@warning "-D"]
 
 module type Interval = sig
@@ -14,30 +17,14 @@ module type S = sig
   type point
 
   val empty : 'a t
-  val singleton : key -> 'a -> 'a t
-  val least : 'a t -> point option
-  val greatest : 'a t -> point option
-  val min_binding : 'a t -> (key * 'a) option
-  val max_binding : 'a t -> (key * 'a) option
   val add : 'a t -> key -> 'a -> 'a t
   val dominators : 'a t -> key -> (key * 'a) Sequence.t
   val intersections : 'a t -> key -> (key * 'a) Sequence.t
   val collect_remove_intersections
     :  'a t -> key -> (key * 'a) Sequence.t * 'a t
-  val intersects : 'a t -> key -> bool
   val dominates : 'a t -> key -> bool
-  val contains : 'a t -> point -> bool
-  val lookup : 'a t -> point -> (key * 'a) Sequence.t
-  val map : 'a t -> f:('a -> 'b) -> 'b t
-  val mapi : 'a t -> f:(key -> 'a -> 'b) -> 'b t
   val filter : 'a t -> f:('a -> bool) -> 'a t
-  val filter_map : 'a t -> f:('a -> 'b option) -> 'b t
-  val filter_mapi : 'a t -> f:(key -> 'a -> 'b option) -> 'b t
-  val remove : 'a t -> key -> 'a t
-  val remove_intersections : 'a t -> key -> 'a t
-  val remove_dominators : 'a t -> key -> 'a t
   val to_sequence : 'a t -> (key * 'a) Sequence.t
-  include Container.S1 with type 'a t := 'a t
 end
 
 module Make(Interval : Interval) : S

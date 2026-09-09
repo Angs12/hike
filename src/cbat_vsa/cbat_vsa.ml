@@ -630,7 +630,6 @@ let rec extract ~(sp : var)
      in [vla_alloc_tids] (the runtime-alloca rule's input). *)
   (offsets, k_ranges)
 
-(* Dynamic-allocation size expression. *)
 (* True for [RSP := RSP - size]. *)
 and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
   match rhs with
@@ -638,22 +637,6 @@ and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
       Var.same (Var.base a) sp_base
       && (match size with Bil.Int _ -> false | _ -> true)
   | _ -> false
-
-and vla_size_of_rhs (sp : var) (def_of_lhs : def term Var.Map.t)
-    (rhs : Bil.exp) : Bil.exp option =
-  match rhs with
-  | Bil.BinOp (Bil.MINUS, Bil.Var _, size) when vla_decrement_p (Var.base sp) rhs ->
-      Some size
-  | Bil.Var tmp -> (
-      match Core.Map.find def_of_lhs (Var.base tmp) with
-      | Some d' -> (
-          match Def.rhs d' with
-          | Bil.BinOp (Bil.MINUS, Bil.Var _, size)
-            when vla_decrement_p (Var.base sp) (Def.rhs d') ->
-              Some size
-          | _ -> None)
-      | None -> None)
-  | _ -> None
 
 (* Runtime-sized SP decrements — relocated unchanged from the deleted
    relevance pass (spec §2.3); the hike-vsa pass calls it once per sub. *)

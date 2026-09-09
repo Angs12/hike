@@ -93,6 +93,8 @@ differential gate in `.scratch/restriction-removal/spec.md` §5.
    The debug executables (build in every profile; `enabled_if` vsa-debug for
    vsa_debug/wbig_diag; NEVER installed, NEVER on a production path):
    - `zz_scratch_probe/audit02.exe` (legacy harness entry, default profile),
+   - `zz_scratch_probe/clpequiv.exe` (the differential referee: 2.86M-check
+     sweep, wired into `dune runtest` as a `(test)` stanza),
    - `zz_scratch_probe/vsa_debug.exe` (fixture traces, views, live maps),
    - `zz_scratch_probe/wbig_diag.exe` (w_big address inspection),
    - `zz_scratch_probe/stage_timer.exe` (per-stage pipeline wall-time
@@ -100,7 +102,12 @@ differential gate in `.scratch/restriction-removal/spec.md` §5.
    - `zz_scratch_probe/conv_diag.exe` (fixpoint NON-CONVERGENCE diagnosis:
      prints the first still-growing (block, successor), the widening-point
      set, the failing blocks' BIR, and the gap successor's words/memory),
-   - `zz_scratch_probe/dump_tags.exe` (vsa_info tag + split_plan dump).
+   - `zz_scratch_probe/dump_tags.exe` (vsa_info tag + split_plan dump),
+   - `zz_scratch_probe/subtimes.exe` (per-sub producer cost distribution —
+     the A/B workhorse), `passcost.exe` (per-sub pass + DCE-round times),
+     `idstab.exe` / `sweepcheck.exe` (cross-process / in-process
+     region-id determinism), `edgemulti_probe` (owner-pinned
+     duplicate-pred-phi repro).
    NEVER add temporary debug prints / env-gated
    `Sys.getenv` instrumentation to production `src/` or `src/cbat_vsa/` code —
    keep the production sources clean; use or extend the debug harness instead.

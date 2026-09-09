@@ -30,9 +30,8 @@ let budget_per_edge = 1024
 
 
 
-module Walk_memo = Cbat_memo.Make (struct
-  type t = AI.t
-end)
+(* The walk's memo; value is the abstract state. *)
+module Walk_memo = Cbat_memo
 
 
 (* Per-block flag group. *)

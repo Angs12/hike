@@ -45,7 +45,6 @@ type t = {
 let base_of (p : t) : W.t = p.base
 let step_of (p : t) : W.t = p.step
 let cardn_of (p : t) : W.t = p.cardn
-let dir_of (p : t) : direction = p.dir
 
 let is_ascending (p : t) : bool =
   match p.dir with Ascending -> true | _ -> false

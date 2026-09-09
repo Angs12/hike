@@ -53,18 +53,7 @@ val create_copy_reloc_bss :
   (int * string) list ->
   Llvm.llvalue
 
-(** PLT trampoline test: no reg free-vars + a call. *)
-val is_plt_trampoline : Convutils.emit_ctx -> sub term -> bool
-
-(** Degraded-path frame geometry: (bytes, anchor index, max width, anchor
-    byte index). *)
-val degraded_dims :
-  ?info:Convutils.vsa_info -> sub term -> int64 * int64 * int64 * int64
-
 (** Intrinsic facts shared with the filter pass. *)
 val is_intrinsic : sub term -> bool
 val is_emittable_intrinsic : sub term -> bool
 val is_llvm_x86_intrinsic : sub term -> bool
-
-(** Memory-excluded free vars of a sub. *)
-val free_vars : sub term -> var list

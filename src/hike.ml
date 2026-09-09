@@ -127,16 +127,14 @@ let convert_binary output_program proj =
       ]
   in
   let ctx =
+    (* Only the section facts are read here; emit_program builds its own
+       full context from the seam arguments. *)
     {
       (Convutils.empty_emit_ctx ()) with
       Convutils.symtab = symtab_val;
       text_section = text_section_val;
       section_remap = section_remap_val;
       copy_relocs = copy_reloc_addrs_val;
-      target;
-      abi = Abi.of_target target;
-      sp = Abi.sp target;
-      ptrsize;
     }
   in
   (* Pass 2: data-section initializers. *)

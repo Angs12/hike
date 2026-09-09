@@ -7,10 +7,6 @@ open Bap.Std.Bil.Types
 open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
-module Ws = Cbat_clp_set_composite
-module Vsa = Cbat_vsa
-module AI = Cbat_vsa.AI
-module Mem = Cbat_vsa.Mem
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_mem
@@ -135,11 +131,8 @@ let populate_blks transfer_vars blks sub sub_info fr () =
   let* ctx, llvm_ctx = emit_env () in
   let sub_tid = Term.tid sub in
   (* VLA tids travel in vsa_info (spec §2.3): the producer detected them
-     once on the pre-rewrite sub. Missing info degrades to none. *)
-  let alloc_tids =
-    Base.Option.value_map sub_info ~default:Tid.Set.empty
-      ~f:(fun info -> info.Convutils.vla_alloc_tids)
-  in
+     once on the pre-rewrite sub. *)
+  let alloc_tids = sub_info.Convutils.vla_alloc_tids in
   (* 32-bit FP spill slots, computed once per sub. *)
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
@@ -281,22 +274,6 @@ let build_frame_anchor llvm_ctx llvm_builder n anchor_idx =
   in
   (Some frame, anchor_idx, anchor_i64)
 
-let degraded_dims ?(info : Convutils.vsa_info = Convutils.empty_vsa_info)
-    (sub : sub term) : int64 * int64 * int64 * int64 =
-  let max_dec, max_neg, max_pos, unbounded =
-    Hike_stack_model.degraded_geometry sub info
-  in
-  let max_neg = if unbounded then Int64.max max_neg 65536L else max_neg in
-  let deepest = Int64.max max_dec max_neg in
-  let deepest = Int64.max deepest 8L in
-  let need = Int64.add deepest 8L in
-  let n = Hike_stack_model.align16_up need in
-  let n = Int64.max n 8192L in
-  let grown = Hike_stack_model.align16_up (Int64.add n max_pos) in
-  let anchor_idx = Int64.sub n 8L in
-  (n, grown, max_pos, anchor_idx)
-
-
 (* Stack model decision is consumed here. *)
 
 
@@ -329,57 +306,23 @@ let create_sub sub =
     clear_bbs ctx;
     clear_blk_llvals ctx;
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
-    (* Frame spans all tagged accesses. *)
-    let sub_info = Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) in
-    
-    let tags = match sub_info with
-      | Some info -> info.Convutils.offsets
-      | None -> Tid.Map.empty
-    in    (* Consumes the stack plan. *)
-    let plan =
-      match sub_info with
-      | None -> []
-      | Some info -> info.Convutils.stack_plan
-    in
-    let is_precise =
-      Base.Option.value_map sub_info ~default:false
-        ~f:Hike_stack_model.is_precise
-    in
+    (* The record IS the producer's verdict (one accessor, one default). *)
+    let sub_info = Hike_kb.info_of_sub (Term.tid sub) in
+    let tags = sub_info.Convutils.offsets in
+    (* Consumes the stack plan. *)
+    let plan = sub_info.Convutils.stack_plan in
+    let is_precise = Hike_stack_model.is_precise sub_info in
     let frame, anchor_idx, anchor_i64 =
-      if is_precise then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-      else if Core.Map.is_empty tags then begin
-          if Base.Option.value_map sub_info ~default:false ~f:(fun info ->
-                info.Convutils.degraded) then begin            let n, _, _, anchor_idx = degraded_dims ~info:(Option.value sub_info ~default:Convutils.empty_vsa_info) sub in
-            let frame, _, anchor_i64 = build_frame_anchor llvm_ctx llvm_builder n anchor_idx in
-            (frame, anchor_idx, anchor_i64)
-          end
-          else (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-        end
-        else begin          let min_lo, max_hi =
-            Core.Map.fold tags ~init:(0L, 0L)
-              ~f:(fun ~key:_ ~data:kind (lo, hi) ->
-                match kind with
-                | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
-                    if Int64.compare l 0L <= 0 then
-                      (Int64.min lo l, Int64.max hi h)
-                    else (lo, hi)
-                | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (lo, hi))
-          in
-          let max_hi =
-            Core.Map.fold tags ~init:0L
-              ~f:(fun ~key:_ ~data:kind acc ->
-                match kind with
-                | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
-                    if Int64.compare l 0L <= 0 then Int64.max acc h
-                    else acc
-                | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> acc)
-          in
-          let span = Int64.sub max_hi min_lo in
-          let need = Int64.max (Int64.sub 8L min_lo) (Int64.add span 1L) in
-          let n = Hike_stack_model.align16_up need in
-          let anchor_idx = Int64.sub n 8L in
+      if is_precise || (Core.Map.is_empty tags && not sub_info.Convutils.degraded)
+      then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
+      else
+        let n, anchor_idx =
+          Hike_stack_model.frame_dims sub ~abi:ctx.Convutils.abi sub_info
+        in
+        let frame, _, anchor_i64 =
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx
-        end
+        in
+        (frame, anchor_idx, anchor_i64)
     in
     let regions =
       if is_precise then
@@ -550,10 +493,8 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
          mechanisms that can disagree are worse than one, and absent
          info already defaults to false. *)
        let has_positive =
-         Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub)
-         |> Base.Option.value_map ~default:false ~f:(fun info ->
-             Core.Map.exists info.Convutils.offsets ~f:(fun kind ->
-                 Convutils.is_positive_kind kind))
+         Core.Map.exists (Hike_kb.info_of_sub (Term.tid sub)).Convutils.offsets
+           ~f:(fun kind -> Convutils.is_positive_kind kind)
        in
        let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
        let hike_stack_arg =
@@ -628,6 +569,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(section_remap : (int64 * int64 * Llvm.llvalue) list)
     ~(copy_relocs : int64 list) (sections : Convutils.section list)
     (prog : program term) : unit =
+  let abi = Abi.of_target target in
   let ctx =
     {
       (Convutils.empty_emit_ctx ()) with
@@ -636,11 +578,12 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       section_remap;
       copy_relocs;
       target;
+      Convutils.abi = abi;
+      Convutils.sp = Abi.sp target;
       ptrsize;
     }
   in
   (* Signature collection fills the table once. *)
-  let abi = Abi.of_target target in
   let sigs =
     Term.enum sub_t prog
     |> Base.Sequence.to_list
@@ -684,4 +627,3 @@ let create_section_global = Bil2llvm_section.create_section_global
 let set_section_initializer = Bil2llvm_section.set_section_initializer
 let create_uninitialized_global = Bil2llvm_section.create_uninitialized_global
 let create_copy_reloc_bss = Bil2llvm_section.create_copy_reloc_bss
-let is_plt_trampoline = Bil2llvm_mem.is_plt_trampoline

@@ -8,9 +8,6 @@ module Abi = Hike_abi
 
 (** Per-sub stack offset ranges. *)
 module Vsa : sig
-  (** Forwards the address width into the VSA. *)
-  val set_addr_bits : int -> unit
-
   (** Computes [sub]'s offset tags and stack plan. *)
   val offsets_of_sub :
     Theory.Target.t -> var -> sub term -> Convutils.vsa_info
@@ -35,26 +32,12 @@ module Stack_model : sig
   val split_plan :
     sub term -> Convutils.vsa_info -> Convutils.split_plan
 
-  (** Tests whether a frame-derived value is reachable from outside this
-      sub (call arg, indirect call target, or store data).  Computed once
-      in [hike_vsa]; the result travels as [vsa_info.frame_escaped]. *)
-  val frame_escapes :
-    var -> Theory.Target.t -> sub term -> Convutils.vsa_info -> bool
-
   (** Returns the region alloca size. *)
   val region_bytes : Convutils.region -> int64
-
-  (** Tests for the split model. *)
-  val is_precise : Convutils.vsa_info -> bool
-
-  (** Returns the region alloca's emitted name. *)
-  val region_name : int -> string
 
   (** Mints and recognizes fission vars. *)
   val region_mem : int -> var
   val region_base : int -> var
-  val is_region_mem : var -> bool
-  val is_region_base : var -> bool
 end
 
 (** Stack-to-locals rewrite. *)

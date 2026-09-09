@@ -35,11 +35,6 @@ module Scc (K : sig
     K.t list -> (K.t -> K.t list) -> (K.t -> K.t list) -> K.t list list
 end
 
-(* Recursive SCC partition. *)
-val scc_partition :
-  Tid.t list -> (Tid.t -> Tid.t list) -> (Tid.t -> Tid.t list) ->
-  Tid.t list list
-
 (* WTO; swapped accessors build the reversed ordering. *)
 val wto :
   nodes:Tid.t list ->

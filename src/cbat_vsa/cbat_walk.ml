@@ -1778,10 +1778,11 @@ let denote_jump ?preserved ?defs ?stores
             (* Written registers are static. *)
             let escape =
               
+              (* [mk_rctx] builds the facts for every block of the sub. *)
               let written =
                 match Core.Map.find rc0.rc_call_facts (Term.tid b) with
                 | Some (w, _) -> w
-                | None -> fst (Cbat_runctx.call_facts_of_block b) in
+                | None -> failwith "hike: no call facts for block (rctx)" in
               List.map written ~f:(fun v -> AI.find_word 64 env v) in
             let abs =
               AI.call_abstraction_frame
@@ -1794,7 +1795,7 @@ let denote_jump ?preserved ?defs ?stores
             let pushed =
               match Core.Map.find rc0.rc_call_facts (Term.tid b) with
               | Some (_, p) -> p
-              | None -> snd (Cbat_runctx.call_facts_of_block b) in
+              | None -> failwith "hike: no call facts for block (rctx)" in
             if pushed then begin
               let abs =
                 AI.add_word abs ~key:rsp
@@ -1844,7 +1845,7 @@ let denote_block_with_stores ?preserved ?defs ?stores
      let flag_state, flag_group =
        match Core.Map.find rctx.rc_flag_states (Term.tid b) with
        | Some fs -> fs
-       | None -> Cbat_runctx.flag_state_of_block b in
+       | None -> failwith "hike: no flag state for block (rctx)" in
      fun ~target ->
        denote_jump ?preserved ?defs ?stores ~flag_state
          ~flag_group:(Some flag_group) ~sub ?edge_conds ?sol

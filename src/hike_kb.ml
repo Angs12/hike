@@ -91,6 +91,15 @@ let vsa_info () : Convutils.vsa_info Tid.Map.t =
              KB.return ())));
   !r
 
+(* The ONE vsa_info lookup. Absence means "no tags" (the empty info): the
+   identity rule every consumer used to restate with its own default. The
+   pipeline's vsa pass provides every sub; fixtures state untagged subs
+   simply by not providing. *)
+let info_of_sub (tid : Tid.t) : Convutils.vsa_info =
+  match Core.Map.find (vsa_info ()) tid with
+  | Some info -> info
+  | None -> Convutils.empty_vsa_info
+
 (* Stores [vmap] in the slot. *)
 let provide (vmap : Convutils.vsa_info Tid.Map.t) : unit =
   Toplevel.exec

@@ -15,10 +15,8 @@ let () =
   let sp = sp_of proj in
   let sub = match find_sub prog name with Some s -> s | None -> failwith ("no " ^ name) in
   let info = Hike.Vsa.offsets_of_sub target sp sub in
-  let regions =
-    if info.Hike.Convutils.regions <> [] then info.Hike.Convutils.regions
-    else Hike.Stack_model.regions_of_sub sub info
-  in
+  (* The record IS the regions (the producer built them). *)
+  let regions = info.Hike.Convutils.regions in
   let plan = Hike.Stack_model.split_plan sub info in
   Printf.printf "regions: %d\n" (List.length regions);
   Base.List.iter regions ~f:(fun r ->
