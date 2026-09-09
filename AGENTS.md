@@ -430,6 +430,27 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-10 EEST — THE TYPED FRAME GENERALIZED (ticket 04):
+the offset access path is DELETED — the typed frame is THE model**
+
+The `--hike-stack-model` parameter is gone (it existed for one session);
+`create_inttoptr` was renamed **`create_addr_ptr`** — it materializes the
+pointer for an address integer: frame-relative integers become GEPs into
+the frame; real (non-frame) addresses — section/global constants,
+foreign pointers — become inttoptr (the documented exception lane, ADR
+0009). The VSA's residency tags license the conversion (the 100% Tagging
+Invariant); untagged addresses are foreign pointers.
+
+| gate (the final tree) | result |
+|---|---|
+| -O0: emission / semantics / allocas | **32/32 rc=0 / 32 PASS 0 FAIL / 160-0** ✅ |
+| -O2: emission / semantics pinned / allocas | **32/32 rc=0 / 26-6 pinned green / 159-1 (recorded shape-d)** ✅ |
+| referee | **2,861,148 / 0** ✅ |
+| suite | failure set == the pre-existing baseline (8; owner triage) ✅ |
+| **Re-baseline** | **20/32 binaries changed** vs the L1 reference (itemized in ticket 04) — **the new -O0 reference emission is `/tmp/emit_typed_o0`** ✅ |
+| inttoptr/ptrtoint corpus-wide | **447 → 259** (exception lane + regions plumbing remain) ✅ |
+| plugin provenance | bundle sha16 `818458b8d83db655` ✅ |
+
 **Last verified: 2026-09-09 EEST — THE TYPED FRAME PROTOTYPE (ticket 03,
 ADR 0009, `--hike-stack-model=typed`): the endgame's typed form lands
 behind a pass parameter**

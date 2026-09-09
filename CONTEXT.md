@@ -94,7 +94,7 @@ _Avoid_: sp-lane arithmetic for fissioned members
 
 **Range**: A bounded stack offset interval `[lo, hi]` where `lo` and `hi` are known integers.
 
-**Typed Frame**: The emitted form where frame-proven accesses are typed GEPs into real storage — never address integers. The primary stack model (`--hike-stack-model=typed`).
+**Typed Frame**: The emitted form where frame-proven accesses are typed GEPs into real storage — never address integers. It is THE stack model; there is no alternative path.
 
 **Exception Lane**: The documented residual use of address integers (`inttoptr`) for accesses with no frame provenance — section and global constants. Everything frame-proven is typed.
 **Infinite**: A widened stack offset interval `[lo, hi]` where one or both bounds represent unbounded growth.

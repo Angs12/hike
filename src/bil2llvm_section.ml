@@ -124,7 +124,11 @@ let resolve_addr llvm_builder addr =
   | None -> failwith "load: addr not found"
   | Some section -> resolve_addr_in llvm_builder section addr
 
-let create_inttoptr llvm_builder llvm_val =
+(* Materializes the pointer for an address integer: a frame-relative
+   integer is an offset from the anchor and becomes a GEP into the frame;
+   a real (non-frame) address — section/global constants, foreign
+   pointers — becomes inttoptr. *)
+let create_addr_ptr llvm_builder llvm_val =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in

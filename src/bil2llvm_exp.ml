@@ -132,13 +132,13 @@ let create_load llvm_builder (addr, size) =
       const_addr_load llvm_builder (Word.of_int64 ~width:64 v) size
         ~fallback:(fun () ->
           let* llvm_ctx = Context.get llvm_ctx_var in
-          let* ptr = create_inttoptr llvm_builder addr in
+          let* ptr = create_addr_ptr llvm_builder addr in
           return
           @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) ptr ""
                llvm_builder)
   | _ ->
       (* Non-constant addresses use inttoptr. *)
-      let* addr = create_inttoptr llvm_builder addr in
+      let* addr = create_addr_ptr llvm_builder addr in
       let* llvm_ctx = Context.get llvm_ctx_var in
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr ""
@@ -151,10 +151,10 @@ let create_store llvm_builder (llvm_var, addr) =
       const_addr_store llvm_builder (Word.of_int64 ~width:64 v)
         ~data:(fun () -> KB.return llvm_var)
         ~fallback:(fun () ->
-          let* addr = create_inttoptr llvm_builder addr in
+          let* addr = create_addr_ptr llvm_builder addr in
           return @@ Llvm.build_store llvm_var addr llvm_builder)
   | _ ->
-      let* addr = create_inttoptr llvm_builder addr in
+      let* addr = create_addr_ptr llvm_builder addr in
       return @@ Llvm.build_store llvm_var addr llvm_builder
 
 let create_cast llvm_builder (cast, i, llvm_val) =

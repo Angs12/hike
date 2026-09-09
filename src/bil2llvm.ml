@@ -323,9 +323,10 @@ let create_sub sub =
         let frame, _, anchor_i64 =
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx
         in
-        if ctx.Convutils.typed_stack then
-          ctx.Convutils.typed_frame :=
-            Some (Base.Option.value_exn frame, anchor_i64, anchor_idx);
+        (* The typed frame is THE model: the anchor address integer is
+           consumed only by create_addr_ptr's frame-relative GEP. *)
+        ctx.Convutils.typed_frame :=
+          Some (Base.Option.value_exn frame, anchor_i64, anchor_idx);
         (frame, anchor_idx, anchor_i64)
     in
     let regions =
@@ -571,7 +572,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(symtab : Symtab.t option)
     ~(text_section : (int array * int64 * int64) option)
     ~(section_remap : (int64 * int64 * Llvm.llvalue) list)
-    ~(copy_relocs : int64 list) ~(typed_stack : bool)
+    ~(copy_relocs : int64 list)
     (sections : Convutils.section list)
     (prog : program term) : unit =
   let abi = Abi.of_target target in
@@ -583,7 +584,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       section_remap;
       copy_relocs;
       target;
-      typed_stack;
       Convutils.abi = abi;
       Convutils.sp = Abi.sp target;
       ptrsize;

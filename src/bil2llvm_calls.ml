@@ -283,7 +283,7 @@ let create_indirect_call llvm_builder blk_tid call fr =
     |> label_tid
   in
   let* target_exp = create_exp llvm_builder blk_tid target in
-  let* func_ptr = Bil2llvm_section.create_inttoptr llvm_builder target_exp in
+  let* func_ptr = Bil2llvm_section.create_addr_ptr llvm_builder target_exp in
   let* fn, fn_typ = get_func icall_tid in
   let rets = get_rets ctx icall_tid in
   let* args =

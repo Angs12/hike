@@ -27,7 +27,7 @@ let setup proj =
   (* Forwards the address width. *)
   Hike_vsa.set_addr_bits (addr_size_bits target)
 
-let convert_binary output_program typed_stack proj =
+let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   setup proj;
@@ -156,7 +156,6 @@ let convert_binary output_program typed_stack proj =
     ~text_section:text_section_val
     ~section_remap:section_remap_val
     ~copy_relocs:copy_reloc_addrs_val
-    ~typed_stack
     section_list (Project.program proj);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
@@ -166,14 +165,6 @@ let output =
   Extension.Configuration.parameter ~aliases:[ "o"; "output" ]
     Extension.Type.("output file" %: string)
     "output-file" ~doc:"File to output LLVM IR"
-
-(* The stack emission model: "offset" (the anchor + inttoptr fiction) or
-   "typed" (address integers route through the frame base as GEPs;
-   inttoptr survives only for section/global constants). *)
-let stack_model =
-  Extension.Configuration.parameter
-    Extension.Type.("stack model" %: string)
-    "stack-model" ~doc:"Stack emission model: offset (default) | typed"
 
 let () =
   Extension.declare (fun ctx ->
@@ -230,6 +221,5 @@ let () =
            proj);
       Project.register_pass' ~name:"convlir" ~runonce:true
         ~deps:[ "hike-stack-to-locals" ]
-        (convert_binary output_file
-           (Extension.Configuration.get ctx stack_model = "typed"));
+        (convert_binary output_file);
       Ok ())

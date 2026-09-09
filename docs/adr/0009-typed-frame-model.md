@@ -1,7 +1,8 @@
 # ADR 0009 — the typed frame model (offset fiction → typed GEP)
 
-Date: 2026-09-09. Status: accepted (prototype landed; generalization is a
-deliberate re-baseline lane).
+Date: 2026-09-09 (prototype); 2026-09-10 (generalized — the offset
+access path is deleted; the selection parameter is gone). Status:
+accepted, THE model.
 
 ## Context
 
