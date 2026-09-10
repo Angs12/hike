@@ -13,16 +13,24 @@ EVERYTHING. And everything the removals orphaned is cleaned NOW.
   is the second channel the symbolic base was supposed to kill.
   Consumer: `hike_vsa.ml:46` (`frame_escapes sp target sub ~offsets
   ~arg_stores`) — the only one.
-- Audit targets (verify conformance, change only if violated): the
-  predicate uses `denote_imm_exp` (the owner phrased it as
-  `denote_exp` — align the naming/structure to the denotation family
-  without a functional change if the imm variant is the correct
-  address denotation); `st_tag_of`'s tag-state (must be derived FROM
-  the solution's denotations, not an independent channel); the
-  `in_stack_segment` degraded arm (plain hulls in the non-canonical
-  band — a denotational property of the value set, expected fine);
-  any seed-flag-shaped machinery anywhere in the word domain or the
-  transfer functions.
+- STRENGTHENED DIRECTIVE (owner, same session): "We should only use
+  the symbolic stack base to find stack accesses and use a predicate
+  for that. Remove every other mechanisms!" — the mandate is REMOVE,
+  not audit-if-violated:
+  - `st_tag_of`'s tag-state survives ONLY if it is a pure derived view
+    of the solution's denotations (the tag = the denotation minus the
+    base); otherwise its uses read the denotation directly and the
+    mechanism is deleted.
+  - `outgoing_arg_stores` must be pure predicate output (verify).
+  - Any written-in-block / syntactic heuristic feeding escape or
+    frame-keeping (the call-abstraction lane's arg-register rule)
+    yields to the denotational rule where a denotation suffices.
+  - Any seed-flag-shaped machinery anywhere: deleted.
+  - KEEP (not stack-access mechanisms): the VLA matcher (finds
+    dynamic ALLOCATIONS, a different question), the structural
+    address extraction (`stack_address_of_rhs` — a sanctioned kind
+    test for WHERE the address exp lives), the predicate's own
+    arithmetic (relativize, `in_stack_segment`'s degraded arm).
 
 ## The rule that replaces the closure
 
