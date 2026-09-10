@@ -16,23 +16,29 @@ model first) and va_arg_vacopy (the va_list state round-trip: the
 second va_copy'd pass reads a stale 6th element). The T4 bridge gives
 variadic subs a caller_window parameter; this lane removes the need.
 
-## The design space (implementer measures both, lands one)
+Design pre-digest: `.scratch/typed-model/t9-design-notes.md` (the
+idiom map, the lift paths, the va_list storage facts, the two options'
+transformation surfaces with soundness corners). READ IT FIRST. Its
+asymmetry evidence DECIDES the design space:
 
-1. **The alloca'd overflow array**: the callee's promoted overflow
-   parameters are stored at entry into a private alloca'd array; the
-   va_list's overflow pointer targets that array; the walk is
-   model-local memory. The va_start/va_arg idioms materialize from the
-   promoted parameters (the callee knows the SysV layout: reg-save
-   area from the named-register parameters, overflow from the array).
-2. **The LLVM-variadic tail**: declare the lifted variadic sub
-   LLVM-variadic; the promoted overflow args pass as varargs; the
-   va_arg idiom rewrites to LLVM `va_arg`. Deeper emitter
-   transformation of the va_arg idiom; only sound where the lifted
-   va_arg walk maps 1:1 onto LLVM's lowering.
+**LAND option (a) — the alloca'd overflow array.** It is sound for the
+DYNAMIC walk by LAYOUT (a dynamic GEP into the SysV-ordered array needs
+no per-slot proof), serves the -O2 straight-line Caller reads and the
+INLINED class (the -O2 vacopy walk lives inside `main`, which cannot be
+declared LLVM-variadic — option (b) has NO rule for the exact residual
+T9 targets, and its 1:1 walk-recognition is gate-shaped). Under (a) the
+window parameter dies for the WHOLE variadic class. Respect the noted
+soundness corners: the array-completeness size rule, the va_list
+ESCAPE class (vprintf forwarding — absent from the corpus; flag, never
+hack), and the check_allocas storage-shape assert.
 
-Whichever lands: NO second mechanism, no window parameter for the
-variadic class, complete rules per idiom shape; anything the
-denotations/promotions cannot serve is flagged, never hacked.
+**DE-SCOPED from this ticket:** va_arg_mixed — its failing -O2 lift
+carries ZERO window traffic (no Caller/Mixed sites, no hike_stack
+param); it is the L1 poison/alignment-guard class. If it flips during
+T9's battery, attribute it to the L1 lane, not the re-model. The
+va_arg_vacopy residual routes through the Caller lane + an untagged
+raw-inttoptr over a reloaded-pointer phi (the state round-trip) —
+re-attribute under T4's model FIRST, exactly as the doctrine says.
 
 ## Battery protocol (you hold the shared plugin slot in your wave)
 
