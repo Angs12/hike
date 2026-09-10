@@ -43,15 +43,21 @@ type emit_ctx = {
   guarded_warned : Tid.Set.t ref;
   (* One Dead-classification warn per sub. *)
   dead_warned : Tid.Set.t ref;
-  (* The typed frame: the frame facts (frame llval, anchor address
-     integer, anchor byte index) are set per sub and create_addr_ptr
-     routes LICENSED address integers through the frame base as GEPs —
-     inttoptr for everything else. *)
-  typed_frame : (Llvm.llvalue * Llvm.llvalue * int64) option ref;
+  (* The sub's stack anchor: (storage llval, anchor address integer,
+     anchor byte index) — ONE fact computed once per sub (create_sub)
+     and consumed twice: create_addr_ptr routes LICENSED address
+     integers through it as GEPs, and the SP Slot binds the anchor
+     integer as stack_0.  A frame sub anchors to its %frame alloca; a
+     precise (region-split) sub anchors to its first region alloca
+     (index 0).  [None] = the sub owns no stack storage (tag-free,
+     non-degraded); the absent anchor is then NEVER queried — a
+     licensed address requires a Range/Infinite tag on some def, and a
+     tagged sub always owns stack storage (frame or region split). *)
+  stack_anchor : (Llvm.llvalue * Llvm.llvalue * int64) option ref;
   (* The address-materialization license (ticket T1): set per def from
      the def's VSA tag — a Range/Infinite whose lower bound is negative
-     proves the access lives in THIS sub's frame, licensing the typed
-     frame GEP in create_addr_ptr.  Every other tag (Unbounded, VLA,
+     proves the access lives in THIS sub's frame, licensing the anchor
+     GEP in create_addr_ptr.  Every other tag (Unbounded, VLA,
      none — foreign pointers: the sret pointer, reloaded pointers,
      dynamic-alloca addresses) leaves the license false and the address
      integer materializes via inttoptr (the exception lane): wrapping an
@@ -85,7 +91,9 @@ let empty_emit_ctx () : emit_ctx =
     ll_bbs = ref Tid.Map.empty;
     guarded_warned = ref Tid.Set.empty;
     dead_warned = ref Tid.Set.empty;
-    typed_frame = ref None;
+    (* The empty record before the first sub — not a mode: create_sub
+       assigns every sub's computed anchor before any def emits. *)
+    stack_anchor = ref None;
     frame_wrap_license = ref false;
     undef_warned = ref Tid.Map.empty;
     edge_sp_restores = ref (EHashtbl.create (module Tid));
