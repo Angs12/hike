@@ -59,15 +59,18 @@ last consumer), plus the usual sweep (dead values, stale comments
 naming the closure, mli over-exposures) — each deletion with a
 no-caller proof.
 
-## OWNER DIRECTIVE (2026-09-10): removals land; failures become tickets
+## OWNER DIRECTIVE (2026-09-10, final): removals land; failures are
+## INVENTORY, not tickets
 
-"Do the removals; any failures will be fixed in new tickets — trying
-to solve them now will just make things more complicated!" If a gate
-goes red BECAUSE of a removal, do NOT patch, compensate, or roll the
-removal back: record the failure in the verdict's FAILURES→TICKETS
-section (the gate, the binary/pin, the failing mechanism's hypothesis
-if cheap, the exact reproduction command) and land. The orchestrator
-tickets them; the follow-up lanes fix them against the clean tree.
+"No — we should not try to fix anything! The model will change
+significantly anyways! Converting to the new model correctly is more
+important! The breaks might fix themselves!" If a gate goes red
+BECAUSE of a removal: do NOT patch, compensate, roll back — and do
+NOT commit to fix-lanes either. Record it in the verdict's FAILURES
+INVENTORY section (the gate, the binary/pin, the reproduction
+command) and land. T4's model change may dissolve these failures;
+only what SURVIVES the new model gets ticketed (by the orchestrator,
+after T4's battery).
 
 ## Binding constraints
 
