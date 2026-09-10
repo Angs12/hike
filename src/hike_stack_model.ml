@@ -2,18 +2,14 @@
 
    THE MODEL IS THE TAG (ADR 0008): the VSA tags every frame-resident access
    with its proven offset span.  This module merges overlapping spans into
-   regions and derives each region's facts from those tags + the producer-side
-   escape fact ([vsa_info.frame_escaped]).  [hike_vsa] computes the field ONCE
-   per sub; downstream consumers read it, never recompute.  A region's storage
-   class is the join of its members' tag facts (Static/Frame/Dynamic/Dead) AND
-   the escape veto (if the frame escapes, ALL regions stay Frame — the
-   callee's access through an escaped frame pointer is untaggable in
-   principle).  An oversized region joins to Frame with a diagnostic naming it
-   — never a gate. *)
+   regions and derives each region's facts from those tags and the solution's
+   denotations alone (T3c: the escape fact is deleted — the segment universe
+   answers the storage question; see the region partition's servability
+   rule).  An oversized region joins to Frame with a diagnostic naming it —
+   never a gate. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Bap_core_theory
 module Abi = Hike_abi
 module Vsa = Cbat_vsa
 
@@ -96,139 +92,18 @@ let is_region_base (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_base"
 
-(* ---------- Escape analysis (producer-side, ADR 0008) ----------
-   The escape fact is computed ONCE in hike_vsa and travels as
-   [vsa_info.frame_escaped].  No STL gate reads it; [regions_of_sub] reads
-   the field to veto conversion on escaped frames.
-
-   The callee's access through an escaped frame pointer is untaggable in
-   principle (the pointer is TOP in the callee's sub); the caller is the
-   only sub holding the information.
-
-   T3c — the escape question is DENOTATIONAL (the owner's single-predicate
-   directive): the ONE predicate family ([is_stack_access]) applied to
-   values answers every arm —
-   - a call's pointer-argument register (or an indirect call's target)
-     whose denotation is stack-symbolic escapes;
-   - a stack access whose address OPERAND denotes stack-symbolic while
-     the region lanes cannot serve it (any tag but a convertible
-     singleton) keeps the frame model — the sub's SP-relative
-     neighborhood must stay private (the SP-anchoring convention is
-     T4's; see the T3c verdict's BLOCKED-BY-T4 section);
-   - callee-visible stack traffic is [has_outgoing_stack_args]'s
-     denotational signature (the producer's pushed-arg tags).
-   There is NO var closure and no syntactic derivation. *)
-
-(* Tests for a real call: direct, or indirect with a return (the
-   noreturn lifted-return epilogue is not a call site). *)
-let is_real_call (j : jmp term) : bool =
-  match Jmp.kind j with
-  | Call c -> (
-      match Call.target c with
-      | Direct _ -> true
-      | Indirect _ -> Option.is_some (Call.return c))
-  | _ -> false
-
-(* The denotational call-argument escape (T3c): in every block that ends
-   in a real call, the callee-visible registers (and an indirect call's
-   target) are read in the block's abstract state AT the call — the
-   block's solution state threaded through its own defs.  A register
-   escapes iff its DENOTATION is a stack-symbolic set — the ONE
-   predicate family, applied to values. *)
-let call_args_escape ~(sol : Vsa.vsa_sol) (target : Theory.Target.t)
-    (sub : sub term) : bool =
-  let arg_regs = lazy (Abi.param_regs target) in
-  Term.enum blk_t sub
-  |> Seq.exists ~f:(fun blk ->
-      if
-        not (Term.enum jmp_t blk |> Seq.exists ~f:is_real_call)
-      then false
-      else
-        let st =
-          Vsa.denote_defs blk
-            (Graphlib.Std.Solution.get sol (Term.tid blk))
-        in
-        let escapes_value (e : exp) : bool =
-          Vsa.Cbat_extraction.is_stack_access st e
-        in
-        Lazy.force arg_regs
-        |> Base.List.exists ~f:(fun r -> escapes_value (Bil.Var r))
-        || (Term.enum jmp_t blk
-            |> Seq.exists ~f:(fun j ->
-                match Jmp.kind j with
-                | Call c -> (
-                    match Call.target c with
-                    | Indirect e -> escapes_value e
-                    | _ -> false)
-                | _ -> false)))
-
-(* Tests whether a call-tail stack store passes an outgoing stack arg.
-   The caller writes pushed arg cells below entry RSP (lo < 0) at or above
-   the current RSP ([arg_stores], computed once in the extraction); these
-   denote callee-visible ABI traffic. *)
-let has_outgoing_stack_args (sp : var) (target : Theory.Target.t)
-    (sub : sub term) ~(offsets : Convutils.vsa_kind Tid.Map.t)
-    ~(arg_stores : Tid.Set.t) : bool =
-  let abi = Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv in
-  let is_stack (d : def term) : bool =
-    Core.Map.mem offsets (Term.tid d)
-  in
-  let call_tails =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:[] ~f:(fun acc blk ->
-           if Term.enum jmp_t blk |> Seq.exists ~f:is_real_call then
-             let defs = Term.enum def_t blk |> Seq.to_list in
-             let last =
-               Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-                   if is_stack d then Some i else acc)
-             in
-             (defs, last) :: acc
-           else acc)
-  in
-  let outgoing_tail_tids : Tid.Set.t =
-    Base.List.fold_left call_tails ~init:Tid.Set.empty
-      ~f:(fun acc (defs, last) ->
-        match last with
-        | Some i ->
-            Base.List.take defs i
-            |> Base.List.fold_left ~init:acc ~f:(fun acc d ->
-                    Core.Set.add acc (Term.tid d))
-        | None -> acc)
-  in
-  let is_outgoing_store (d : def term) : bool =
-    match addr_of_rhs (Def.rhs d), store_data_exp_of_rhs (Def.rhs d) with
-    | Some (addr, _), Some _ ->
-        let rsp_rel =
-          Exp.free_vars addr
-          |> Core.Set.exists ~f:(Abi.is_sp abi)
-        in
-        let lo_neg =
-          match Core.Map.find offsets (Term.tid d) with
-          | Some (Convutils.Range (lo, _)) -> Int64.compare lo 0L < 0
-          | _ -> false
-        in
-        let k_pos = Core.Set.mem arg_stores (Term.tid d) in
-        rsp_rel && lo_neg && k_pos
-    | _ -> false
-  in
-  Term.enum blk_t sub
-  |> Seq.exists ~f:(fun blk ->
-         if Term.enum jmp_t blk |> Seq.exists ~f:is_real_call then
-           Term.enum def_t blk
-           |> Seq.exists ~f:(fun d ->
-                  Core.Set.mem outgoing_tail_tids (Term.tid d)
-                  && is_outgoing_store d)
-         else false)
-
-(* The SP-lane veto (T3c): the frame model is the only storage whose
-   SP-relative neighborhood is PRIVATE to the sub (the anchor value is
-   the sub's own frame cell), so a sub with a stack access the region
-   lanes cannot serve keeps the frame.  Stack-reachability is
-   DENOTATIONAL — an address operand's DENOTATION is a stack-symbolic
-   set ([is_stack_access] applied to the operand's value), never a
-   syntactic derivation.  Servable = a convertible singleton [Range]
-   (the region GEP lane). *)
-let unservable_stack_access ~(sol : Vsa.vsa_sol)
+(* The region partition's storage-servability rule (T3c): a region
+   converts only when the sub's stack traffic is entirely region-
+   servable — every stack access a convertible singleton serves.  The
+   segment universe makes all stack memory one address space, but the
+   SP-relative lane's neighborhood is private only under the sub's own
+   anchor; an access the region lanes cannot serve (any tag but a
+   convertible singleton) with a stack-symbolic address operand keeps
+   the frame model.  Stack-reachability is DENOTATIONAL:
+   [is_stack_access] applied to the operand's value at the def — the
+   ONE predicate family, reading the solution's denotations directly.
+   There is NO escape fact and no var closure. *)
+let unservable_stack_traffic ~(sol : Vsa.vsa_sol)
     ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) : bool =
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
@@ -259,21 +134,10 @@ let unservable_stack_access ~(sol : Vsa.vsa_sol)
       in
       found)
 
-(* Tests whether the frame is reachable from outside.  The inputs are the
-   producer's facts: the solution's denotations ([sol]) and the tag maps.
-   No var closure, no syntactic derivation — the denotation is the only
-   mechanism. *)
-let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
-    ~(sol : Vsa.vsa_sol)
-    ~(offsets : Convutils.vsa_kind Tid.Map.t)
-    ~(arg_stores : Tid.Set.t) : bool =
-  call_args_escape ~sol target sub
-  || unservable_stack_access ~sol ~offsets sub
-  || has_outgoing_stack_args sp target sub ~offsets ~arg_stores
-
-(* Merges overlapping ranges into regions. *)
-let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
-    Convutils.region list =
+(* Merges overlapping ranges into regions; the partition decides from
+   the tags and the solution's denotations alone. *)
+let regions_of_sub ~(sol : Vsa.vsa_sol) (sub : sub term)
+    (info : Convutils.vsa_info) : Convutils.region list =
   (* The ranges ARE the tags: singleton-span Range members at negative
      offsets are this sub's own proven-constant cells. *)
   let ranges : (int64 * int64) Tid.Map.t =
@@ -341,22 +205,24 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
               ~f:(fun (l, h) (_, (lo, hi)) ->
                 (Int64.min l lo, Int64.max h hi))
       in
-      (* Storage class, from the tags + the producer-side escape fact:
+      (* Storage class, from the tags + the denotations alone:
          - every member at a NEGATIVE offset (this sub owns the cell) and a
            SINGLETON span (the proven offset is constant) → Static;
          - anything else (mixed ownership, a widened span) → Frame.
-         The escape veto: if the frame is reachable from outside (a
-         frame-derived value passed to a callee), ALL regions stay Frame —
-         the callee reads the same physical cell through its own real-stack
-         lane, untaggable in principle (ADR 0008, producer-fix repair). *)
+         The servability rule: if ANY stack access of the sub is not
+         region-servable, no region converts — the SP-relative lane's
+         neighborhood must stay private (see the T3c verdict,
+         BLOCKED-BY-T4: the entry-block alloca anchor removes this). *)
       let convertible =
-        match members with
-        | [] -> false
-        | _ ->
-            Base.List.for_all members ~f:(fun (_mtid, (lo, hi)) ->
-                Int64.compare lo 0L < 0
-                && Int64.equal lo hi)
-            && not info.Convutils.frame_escaped
+        if unservable_stack_traffic ~sol ~offsets:info.Convutils.offsets sub
+        then false
+        else
+          match members with
+          | [] -> false
+          | _ ->
+              Base.List.for_all members ~f:(fun (_mtid, (lo, hi)) ->
+                  Int64.compare lo 0L < 0
+                  && Int64.equal lo hi)
       in
       let max_width =
         Base.List.fold_left members ~init:0 ~f:(fun m (mtid, _) ->

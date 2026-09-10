@@ -124,12 +124,6 @@ module Vsa = struct
     (* Dynamic-allocation defs (spec §2.3); the producer's one detection,
        read by the emitter instead of re-detecting. *)
     vla_alloc_tids : Tid.Set.t;
-    (* Producer-side escape fact (ADR 0008, the producer-fix repair):
-       true iff a frame-derived value is reachable from outside this sub
-       (call arg, indirect call target, or store data at a non-bare-SP
-       address).  Computed once in [hike_vsa]; consumed by
-       [regions_of_sub] to veto conversion on escaped frames. *)
-    frame_escaped : bool;
   }
 
   (* Hand-written equality over maps. *)
@@ -139,28 +133,26 @@ module Vsa = struct
     && Base.List.equal equal_region i1.stack_plan i2.stack_plan
     && Bool.equal i1.degraded i2.degraded
     && Core.Set.equal i1.vla_alloc_tids i2.vla_alloc_tids
-    && Bool.equal i1.frame_escaped i2.frame_escaped
 
   (* Builds info from maps. *)
   let mk_vsa_info_maps ~offsets ~regions ~stack_plan ~degraded
-      ~vla_alloc_tids ~frame_escaped : vsa_info =
-    { offsets; regions; stack_plan; degraded; vla_alloc_tids;
-      frame_escaped }
+      ~vla_alloc_tids : vsa_info =
+    { offsets; regions; stack_plan; degraded; vla_alloc_tids }
 
   (* Builds info from lists. *)
   let mk_vsa_info ~offsets ~regions ~stack_plan ~degraded
-      ~vla_alloc_tids ~frame_escaped : vsa_info =
+      ~vla_alloc_tids : vsa_info =
     mk_vsa_info_maps
       ~offsets:
         (Base.List.fold_left offsets ~init:Tid.Map.empty
            ~f:(fun m (tid, kind) -> Core.Map.set m ~key:tid ~data:kind))
-      ~regions ~stack_plan ~degraded ~vla_alloc_tids ~frame_escaped
+      ~regions ~stack_plan ~degraded ~vla_alloc_tids
 
   (* Info with no tags. *)
   let empty_vsa_info : vsa_info =
     mk_vsa_info_maps ~offsets:Tid.Map.empty
       ~regions:[] ~stack_plan:[] ~degraded:false
-      ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~vla_alloc_tids:Tid.Set.empty
 end
 include Vsa
 

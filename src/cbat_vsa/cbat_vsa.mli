@@ -65,11 +65,6 @@ module Cbat_extraction : sig
     sub term ->
     kind Tid.Map.t
 
-  (* Outgoing-arg stores (the pushed-arg signature); escape-analysis
-     input, never a tag. *)
-  val outgoing_arg_stores :
-    sp:var -> sol:(tid, AI.t) Solution.t -> sub term -> Tid.Set.t
-
   (* True for a non-literal [RSP := RSP - size]. *)
   val vla_decrement_p : var -> Bil.exp -> bool
 
