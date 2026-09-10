@@ -29,10 +29,10 @@ let audit_sub (sp : var) (sub : sub term) : unit =
   let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
   Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
       match k with
-      | Hike.Convutils.Unbounded -> Hashtbl.add prod_unbounded tid ()
+      | Hike.Stack_model.Unbounded -> Hashtbl.add prod_unbounded tid ()
       | _ -> ());
   let prod_unbounded_count = Hashtbl.length prod_unbounded in
-  let stack_count = Core.Map.length info.Hike.Convutils.offsets in
+  let stack_count = Core.Map.length info.Hike.Stack_model.offsets in
   Printf.printf "=== sub %s (%s) — stack=%d offsets=%d Unbounded(PROD)=%d ===\n"
     (Sub.name sub) (Tid.to_string (Term.tid sub))
     stack_count (Core.Map.length info.offsets) prod_unbounded_count;
@@ -55,7 +55,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                   | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _)
                   | Bil.Cast (_, _, Bil.Load (_, addr, _, _))
                   | Bil.Cast (_, _, Bil.Store (_, addr, _, _, _))
-                    when Core.Map.mem info.Hike.Convutils.offsets (Term.tid d) ->
+                    when Core.Map.mem info.Hike.Stack_model.offsets (Term.tid d) ->
                       let is_prod_ub = Hashtbl.mem prod_unbounded (Term.tid d) in
                       if is_prod_ub then begin
                         let addr' = addr in

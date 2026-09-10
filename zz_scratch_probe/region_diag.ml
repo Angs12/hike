@@ -90,7 +90,7 @@ let () =
           end);
       (* The region plan the model builds from the extraction's tags. *)
       let info0 =
-        Hike.Convutils.mk_vsa_info_maps
+        Hike.Stack_model.mk_vsa_info_maps
           ~offsets:(Vsa.Cbat_extraction.extract
                       ~dynamic_alloc:(fun _ -> false)
                       ~alloc_tids:(Vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
@@ -103,8 +103,8 @@ let () =
       |> Seq.iter ~f:(fun blk ->
           Term.enum def_t blk
           |> Seq.iter ~f:(fun d ->
-              match Core.Map.find info0.Hike.Convutils.offsets (Term.tid d) with
-              | Some (Hike.Convutils.Range (lo, hi)) when Int64.equal lo hi ->
+              match Core.Map.find info0.Hike.Stack_model.offsets (Term.tid d) with
+              | Some (Hike.Stack_model.Range (lo, hi)) when Int64.equal lo hi ->
                 Printf.printf "SINGLETON %s: %s = %s\n" (Tid.name (Term.tid d))
                   (Var.name (Def.lhs d))
                   (Format.asprintf "%a" Exp.pp (Def.rhs d))
@@ -118,11 +118,11 @@ let () =
       let rs = Hike.Stack_model.regions_of_sub sub info0 in
       Base.List.iter rs ~f:(fun r ->
           Printf.printf "region r%d span=(%Ld,%Ld) convertible=%b members=%d\n"
-            r.Hike.Convutils.id (fst r.Hike.Convutils.span) (snd r.Hike.Convutils.span)
-            r.Hike.Convutils.convertible (Base.List.length r.Hike.Convutils.members);
-          Base.List.iter r.Hike.Convutils.members ~f:(fun (tid, (lo, hi)) ->
+            r.Hike.Stack_model.id (fst r.Hike.Stack_model.span) (snd r.Hike.Stack_model.span)
+            r.Hike.Stack_model.convertible (Base.List.length r.Hike.Stack_model.members);
+          Base.List.iter r.Hike.Stack_model.members ~f:(fun (tid, (lo, hi)) ->
               Printf.printf "  member %s (%Ld,%Ld): %s = %s\n" (Tid.name tid) lo hi
-                (match Core.Map.find info0.Hike.Convutils.offsets tid with
+                (match Core.Map.find info0.Hike.Stack_model.offsets tid with
                  | Some k -> vsa_kind_to_string k
                  | None -> "-")
                 (match Core.Map.find defs tid with

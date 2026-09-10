@@ -10,21 +10,21 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
     sub term =
   let info = Hike_kb.info_of_sub (Term.tid sub) in
 
-  let tag_of = info.Convutils.offsets in
+  let tag_of = info.Model.offsets in
   (* Incoming and outgoing arg accesses stay in memory: the cross-sub
      consistency rule, read from the two record facts. *)
   let is_abi_visible = Model.is_abi_visible ~tag_of in
   (* The record IS the regions (autonomy: consume the producer's output,
      never recompute). *)
-  let regions = info.Convutils.regions in
-  let region_by_tid : Convutils.region Tid.Map.t =
+  let regions = info.Model.regions in
+  let region_by_tid : Model.region Tid.Map.t =
     Base.List.fold_left regions ~init:Tid.Map.empty ~f:(fun m r ->
-        Base.List.fold_left r.Convutils.members ~init:m ~f:(fun m (dtid, _) ->
+        Base.List.fold_left r.Model.members ~init:m ~f:(fun m (dtid, _) ->
             Core.Map.set m ~key:dtid ~data:r))
   in
   let region_max_width (dtid : tid) : int =
     match Core.Map.find region_by_tid dtid with
-    | Some r -> r.Convutils.max_width
+    | Some r -> r.Model.max_width
     | None -> 64
   in
   (* Conversion table: address -> slot or region shape. *)
@@ -55,15 +55,15 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
                 ( Core.Map.find tag_of (Term.tid d),
                   Model.addr_of_rhs (Def.rhs d) )
               with
-              | Some (Convutils.Range _), Some (addr, _) -> (
+              | Some (Model.Range _), Some (addr, _) -> (
                   match Core.Map.find region_by_tid (Term.tid d) with
-                  | Some r when r.Convutils.convertible ->
-                      let rlo, rhi = r.Convutils.span in
+                  | Some r when r.Model.convertible ->
+                      let rlo, rhi = r.Model.span in
                       if Int64.equal rlo rhi then begin
                           let w = region_max_width (Term.tid d) in
                           (addr, `Slot (Model.slot_of rlo w, w)) :: acc
                         end
-                      else (addr, `Region (r.Convutils.id, base_exp_of addr)) :: acc
+                      else (addr, `Region (r.Model.id, base_exp_of addr)) :: acc
                   | _ -> acc)
               | _ -> acc))
   in

@@ -66,7 +66,7 @@ let create_call_args blk_tid llvm_builder call_tid fr =
         let stored =
           match Core.Map.find fr.outgoing blk_tid with
           | Some site ->
-              Base.List.Assoc.find ~equal:Int.equal site.Convutils.site_slots i
+              Base.List.Assoc.find ~equal:Int.equal site.Hike_stack_model.site_slots i
           | None -> None
         in
         (match Base.Option.bind stored ~f:(fun dtid ->
@@ -437,7 +437,7 @@ let create_thunk (sub_tid : tid) =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let info = Hike_kb.info_of_sub sub_tid in
-  let arity = info.Convutils.prom_arity in
+  let arity = info.Hike_stack_model.prom_arity in
   if arity = 0 || String.equal (Tid.name sub_tid) "@main" then
     KB.return ()
   else

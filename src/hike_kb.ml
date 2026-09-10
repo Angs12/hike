@@ -3,11 +3,13 @@
 open Bap.Std
 
 module KB = Bap_knowledge.Knowledge
+(* The record home (S10b). *)
+module Model = Hike_stack_model
 
 let run_cls = KB.Class.declare ~package:"hike" "run" ()
 
 (* Conflicting infos for one sub. *)
-type KB.conflict += Vsa_info_conflict of Tid.t * Convutils.vsa_info * Convutils.vsa_info
+type KB.conflict += Vsa_info_conflict of Tid.t * Model.vsa_info * Model.vsa_info
 
 let () =
   KB.Conflict.register_printer (function
@@ -16,21 +18,21 @@ let () =
           (Printf.sprintf
              "hike: vsa-info conflict on sub %s: two different VSA results were provided for the same sub (offsets %d vs %d) — the analyses disagree, refusing to drop either"
              (Tid.name tid)
-             (Core.Map.length i1.Convutils.offsets)
-             (Core.Map.length i2.Convutils.offsets))
+             (Core.Map.length i1.Model.offsets)
+             (Core.Map.length i2.Model.offsets))
     | _ -> None)
 
 (* Joins two infos; differing infos conflict. *)
-let info_join (tid : Tid.t) (i1 : Convutils.vsa_info) (i2 : Convutils.vsa_info) :
-    (Convutils.vsa_info, KB.conflict) result =
+let info_join (tid : Tid.t) (i1 : Model.vsa_info) (i2 : Model.vsa_info) :
+    (Model.vsa_info, KB.conflict) result =
   (* Equality is the only order infos have; anything else conflicts. *)
-  if Convutils.equal_vsa_info i1 i2 then Ok i1
+  if Model.equal_vsa_info i1 i2 then Ok i1
   else Error (Vsa_info_conflict (tid, i1, i2))
 
 (* Orders maps by extension. *)
-let map_order (m1 : Convutils.vsa_info Tid.Map.t)
-    (m2 : Convutils.vsa_info Tid.Map.t) : KB.Order.partial =
-  if Base.phys_equal m1 m2 || Core.Map.equal Convutils.equal_vsa_info m1 m2
+let map_order (m1 : Model.vsa_info Tid.Map.t)
+    (m2 : Model.vsa_info Tid.Map.t) : KB.Order.partial =
+  if Base.phys_equal m1 m2 || Core.Map.equal Model.equal_vsa_info m1 m2
   then KB.Order.EQ
   else
     let included_in a b =
@@ -38,7 +40,7 @@ let map_order (m1 : Convutils.vsa_info Tid.Map.t)
           acc
           &&
           match Core.Map.find b tid with
-          | Some i2 -> Convutils.equal_vsa_info i1 i2
+          | Some i2 -> Model.equal_vsa_info i1 i2
           | None -> false)
     in
     if included_in m1 m2 then KB.Order.LT
@@ -46,9 +48,9 @@ let map_order (m1 : Convutils.vsa_info Tid.Map.t)
     else KB.Order.NC
 
 (* Unions maps; shared subs join per [info_join]. *)
-let map_join (m1 : Convutils.vsa_info Tid.Map.t)
-    (m2 : Convutils.vsa_info Tid.Map.t) :
-    (Convutils.vsa_info Tid.Map.t, KB.conflict) result =
+let map_join (m1 : Model.vsa_info Tid.Map.t)
+    (m2 : Model.vsa_info Tid.Map.t) :
+    (Model.vsa_info Tid.Map.t, KB.conflict) result =
   match map_order m1 m2 with
   | EQ -> Ok m1
   | LT -> Ok m2
@@ -82,7 +84,7 @@ let vsa_info_slot =
 
 (* Reads the current VSA map. The cell is the monad-escape idiom: the KB
    callback cannot return a value, so it parks the map in a local ref. *)
-let vsa_info () : Convutils.vsa_info Tid.Map.t =
+let vsa_info () : Model.vsa_info Tid.Map.t =
   let r = ref Tid.Map.empty in
   Toplevel.exec
     (KB.bind (KB.Object.read run_cls "hike-run") ~f:(fun obj ->
@@ -95,13 +97,13 @@ let vsa_info () : Convutils.vsa_info Tid.Map.t =
    identity rule every consumer used to restate with its own default. The
    pipeline's vsa pass provides every sub; fixtures state untagged subs
    simply by not providing. *)
-let info_of_sub (tid : Tid.t) : Convutils.vsa_info =
+let info_of_sub (tid : Tid.t) : Model.vsa_info =
   match Core.Map.find (vsa_info ()) tid with
   | Some info -> info
-  | None -> Convutils.empty_vsa_info
+  | None -> Model.empty_vsa_info
 
 (* Stores [vmap] in the slot. *)
-let provide (vmap : Convutils.vsa_info Tid.Map.t) : unit =
+let provide (vmap : Model.vsa_info Tid.Map.t) : unit =
   Toplevel.exec
     (KB.bind (KB.Object.read run_cls "hike-run") ~f:(fun obj ->
          KB.provide vsa_info_slot obj vmap))

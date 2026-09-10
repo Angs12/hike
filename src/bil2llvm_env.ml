@@ -20,11 +20,11 @@ type sub_frame = {
      Slot (T4).  None = the sub owns no SP storage (SP binds to the
      anchor constant, 0 for storage-free subs). *)
   stack0 : Llvm.llvalue option;
-  regions : (Convutils.region * Llvm.llvalue) list;
+  regions : (Hike_stack_model.region * Llvm.llvalue) list;
   is_precise : bool;
   (* T4: per call block, the outgoing slot site (the slot index ->
      storing-def map from the producer's record). *)
-  outgoing : Convutils.call_site Tid.Map.t;
+  outgoing : Hike_stack_model.call_site Tid.Map.t;
   (* T4b: the outgoing slot stores' values, recorded by the STORE's own
      emission (def tid -> the LLVM value written).  The call passes the
      value the store wrote — never a re-evaluation of the stored exp at

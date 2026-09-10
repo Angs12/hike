@@ -133,7 +133,7 @@ let populate_blks transfer_vars blks sub sub_info fr () =
   let sub_tid = Term.tid sub in
   (* VLA tids travel in vsa_info (spec §2.3): the producer detected them
      once on the pre-rewrite sub. *)
-  let alloc_tids = sub_info.Convutils.vla_alloc_tids in
+  let alloc_tids = sub_info.Hike_stack_model.vla_alloc_tids in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
@@ -307,12 +307,12 @@ let create_sub sub =
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
     (* The record IS the producer's verdict (one accessor, one default). *)
     let sub_info = Hike_kb.info_of_sub (Term.tid sub) in
-    let tags = sub_info.Convutils.offsets in
+    let tags = sub_info.Hike_stack_model.offsets in
     (* Consumes the stack plan. *)
-    let plan = sub_info.Convutils.stack_plan in
+    let plan = sub_info.Hike_stack_model.stack_plan in
     let is_precise = Hike_stack_model.is_precise sub_info in
     let frame, anchor_idx, anchor_i64 =
-      if is_precise || (Core.Map.is_empty tags && not sub_info.Convutils.degraded)
+      if is_precise || (Core.Map.is_empty tags && not sub_info.Hike_stack_model.degraded)
       then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else
         let n, anchor_idx =
@@ -330,7 +330,7 @@ let create_sub sub =
             let base =
               Llvm.build_alloca
                 (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int n))
-                (Hike_stack_model.region_name r.Convutils.id)
+                (Hike_stack_model.region_name r.Hike_stack_model.id)
                 llvm_builder
             in
             Llvm.set_alignment 16 base;
@@ -342,7 +342,7 @@ let create_sub sub =
       let rec bind_regions = function
         | [] -> return ()
         | (r, base) :: rest ->
-            let base_var = Hike_stack_model.region_base r.Convutils.id in
+            let base_var = Hike_stack_model.region_base r.Hike_stack_model.id in
             insert_local ctx Graphs.Tid.start base_var base;
             bind_regions rest
       in
@@ -390,10 +390,10 @@ let create_sub sub =
        def — the store's own emission records its value in
        [store_vals] (create_def), and [create_call_args] passes it. *)
     let store_vals = EHashtbl.create (module Tid) in
-    let outgoing = sub_info.Convutils.prom_sites in
+    let outgoing = sub_info.Hike_stack_model.prom_sites in
     let fr : sub_frame =
       { anchor_i64; stack = None; stack0; regions;
-        is_precise; outgoing; store_vals; resolved = sub_info.Convutils.prom_resolved }
+        is_precise; outgoing; store_vals; resolved = sub_info.Hike_stack_model.prom_resolved }
     in
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= build_entry_block llvm_builder transfer_vars fr sub fn
@@ -539,13 +539,13 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
        let info = Hike_kb.info_of_sub (Term.tid sub) in
        let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
        let window_arg =
-         if info.Convutils.prom_window && not is_main then
+         if info.Hike_stack_model.prom_window && not is_main then
            [ Arg.create ~intent:In Hike_stack_model.hike_window_var
                (Var Hike_stack_model.hike_window_var) ]
          else []
        in
        let slot_args =
-         Base.List.init info.Convutils.prom_arity ~f:(fun i ->
+         Base.List.init info.Hike_stack_model.prom_arity ~f:(fun i ->
              let v = Hike_stack_model.arg_slot i in
              Arg.create ~intent:In v (Var v))
        in
@@ -662,7 +662,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let twin_sig_of (sub, (rets, _)) =
     let sub_tid = Term.tid sub in
     let info = Hike_kb.info_of_sub sub_tid in
-    if info.Convutils.prom_arity > 0
+    if info.Hike_stack_model.prom_arity > 0
        && not (String.equal (Tid.name sub_tid) "@main")
     then
       (* The twin's signature = the synthetic indirect convention (the

@@ -171,15 +171,15 @@ let blk_bil_to_string (b : blk term) : string =
   in
   Printf.sprintf "-- blk %s\n%s\n%s" (Tid.name (Term.tid b)) defs jmps
 
-let vsa_kind_to_string (k : Hike.Convutils.vsa_kind) : string =
+let vsa_kind_to_string (k : Hike.Stack_model.vsa_kind) : string =
   match k with
-  | Hike.Convutils.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
-  | Hike.Convutils.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
-  | Hike.Convutils.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
-  | Hike.Convutils.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
-  | Hike.Convutils.Unbounded -> "Unbounded"
-  | Hike.Convutils.Dead -> "Dead"
-  | Hike.Convutils.VLA tid -> Printf.sprintf "VLA(%s)" (Tid.name tid)
+  | Hike.Stack_model.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Unbounded -> "Unbounded"
+  | Hike.Stack_model.Dead -> "Dead"
+  | Hike.Stack_model.VLA tid -> Printf.sprintf "VLA(%s)" (Tid.name tid)
 
 (* Value-set of each named var in the state. *)
 let state_summary (vars : var list) (st : AI.t) : string =

@@ -18,17 +18,17 @@ let () =
   for _i = 1 to 5 do
     let info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
     let regions =
-      if info.Hike.Convutils.regions <> [] then info.Hike.Convutils.regions
+      if info.Hike.Stack_model.regions <> [] then info.Hike.Stack_model.regions
       else Hike.Stack_model.regions_of_sub sub info
     in
     let sig_ =
       String.concat ","
         (Base.List.map regions ~f:(fun r ->
              Printf.sprintf "(%Ld,%Ld,%d,%s)"
-               (fst r.Hike.Convutils.span) (snd r.Hike.Convutils.span)
-               r.Hike.Convutils.id
+               (fst r.Hike.Stack_model.span) (snd r.Hike.Stack_model.span)
+               r.Hike.Stack_model.id
                (String.concat "|"
-                  (Base.List.map r.Hike.Convutils.members ~f:(fun (t,_) -> Tid.name t)))))
+                  (Base.List.map r.Hike.Stack_model.members ~f:(fun (t,_) -> Tid.name t)))))
     in
     sigs := sig_ :: !sigs
   done;

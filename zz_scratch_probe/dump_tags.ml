@@ -21,29 +21,29 @@ let () =
       | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] — %s not found" name)
     in
     let info = Hike.Vsa.offsets_of_sub target sp ~symtab:(Some (Project.symbols proj)) ~prog:(Program.create ~subs:[ sub ] ()) sub in
-    let kind_of = info.Hike.Convutils.offsets in
+    let kind_of = info.Hike.Stack_model.offsets in
     (* Region id whose span holds the def's tag; "-" when in no region. *)
     let region_of =
-      Base.List.fold info.Hike.Convutils.regions ~init:Tid.Map.empty
+      Base.List.fold info.Hike.Stack_model.regions ~init:Tid.Map.empty
         ~f:(fun m r ->
-          Base.List.fold r.Hike.Convutils.members ~init:m
+          Base.List.fold r.Hike.Stack_model.members ~init:m
             ~f:(fun m (tid, _) ->
               Core_kernel.Map.set m ~key:tid
                 ~data:
-                  (if r.Hike.Convutils.convertible then
-                     Printf.sprintf "r%d" r.Hike.Convutils.id
+                  (if r.Hike.Stack_model.convertible then
+                     Printf.sprintf "r%d" r.Hike.Stack_model.id
                    else
-                     Printf.sprintf "-r%d" r.Hike.Convutils.id)))
+                     Printf.sprintf "-r%d" r.Hike.Stack_model.id)))
     in    Term.enum blk_t sub
     |> Seq.iter ~f:(fun b ->
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->
             (* Stack-ness is [vsa_info] membership (spec §2.2). *)
             let tags =
-              (if Core_kernel.Map.mem info.Hike.Convutils.offsets (Term.tid d)
+              (if Core_kernel.Map.mem info.Hike.Stack_model.offsets (Term.tid d)
                then "stack"
                else "")
-              ^ (if Core_kernel.Set.mem info.Hike.Convutils.vla_alloc_tids (Term.tid d)
+              ^ (if Core_kernel.Set.mem info.Hike.Stack_model.vla_alloc_tids (Term.tid d)
                  then ",dynamic_alloc"
                  else "")
             in
@@ -75,23 +75,23 @@ let () =
       ~prog:(Program.create ~subs:[ sub ] ())
       sub
   in
-  Core.List.iter info.Hike.Convutils.sp_extents
+  Core.List.iter info.Hike.Stack_model.sp_extents
     ~f:(fun (lo, hi) -> Printf.printf "EXTENT\t%Ld..%Ld\n" lo hi);
   Printf.printf "PROM\tarity=%d\twindow=%b\tretaddr=%d\n"
-    info.Hike.Convutils.prom_arity info.Hike.Convutils.prom_window
-    (List.length (Core_kernel.Set.to_list info.Hike.Convutils.prom_retaddr));
+    info.Hike.Stack_model.prom_arity info.Hike.Stack_model.prom_window
+    (List.length (Core_kernel.Set.to_list info.Hike.Stack_model.prom_retaddr));
   Core_kernel.List.iter
-    (Core_kernel.Map.to_alist info.Hike.Convutils.prom_sites)
+    (Core_kernel.Map.to_alist info.Hike.Stack_model.prom_sites)
     ~f:(fun (key, data) ->
       Printf.printf "SITE\t%s\tslots=[%s]\n"
         (Tid.name key)
         (String.concat ","
            (Core_kernel.List.map
-              data.Hike.Convutils.site_slots
+              data.Hike.Stack_model.site_slots
               ~f:(fun (i, dtid) ->
                 Printf.sprintf "%d->%s" i (Tid.name dtid)))));
   Core_kernel.List.iter
-    (Core_kernel.Map.to_alist info.Hike.Convutils.prom_resolved)
+    (Core_kernel.Map.to_alist info.Hike.Stack_model.prom_resolved)
     ~f:(fun (key, data) ->
       Printf.printf "RESOLVED\t%s\t%s\n" (Tid.name key)
         (match data with

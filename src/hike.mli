@@ -17,7 +17,7 @@ module Vsa : sig
     symtab:Symtab.t option ->
     prog:program term ->
     sub term ->
-    Convutils.vsa_info
+    Hike_stack_model.vsa_info
 
   (** The target-resolution predicate (T4): a singleton whose word
       names a lifted sub resolves ([Some tid] — the Resolved Call
@@ -34,22 +34,105 @@ module Dce : sig
     target:Theory.Target.t -> sub term -> sub term
 end
 
-(** Stack split decision and helpers. *)
+(** Stack split decision and helpers.  Also the home of the Vsa record
+    (S10b): the producer/emitter contract point — the producer builds
+    it, the KB stores it, the model and the emitter consume it. *)
 module Stack_model : sig
+  (** Alias of the kind enum in [Cbat_extraction]. *)
+  type vsa_kind = Hike_stack_model.vsa_kind =
+    | Range of int64 * int64
+    | Infinite of int64 * int64
+    | Caller of int64 * int64
+    | Mixed of int64 * int64
+    | Unbounded
+    | Dead
+    | VLA of Tid.t
+
+  type region = Hike_stack_model.region = {
+    id : int;
+    span : int64 * int64;
+    members : (Tid.t * (int64 * int64)) list;
+    convertible : bool;
+    max_width : int;
+  }
+
+  (** [plan <> []] splits into [stack_rN] allocas; [[]] uses one [%frame]. *)
+  type split_plan = Hike_stack_model.split_plan
+
+  type call_site = Hike_stack_model.call_site = {
+    site_slots : (int * Tid.t) list;
+  }
+
+  (** Per-def index map: [offsets] — the possible range of each access;
+      plus the T4 promotion facts. *)
+  type vsa_info = Hike_stack_model.vsa_info = {
+    offsets : vsa_kind Tid.Map.t;
+    regions : region list;
+    stack_plan : split_plan;
+    degraded : bool;
+    vla_alloc_tids : Tid.Set.t;
+    prom_slots : int Tid.Map.t;
+    prom_arity : int;
+    prom_window : bool;
+    prom_retaddr : Tid.Set.t;
+    prom_sites : call_site Tid.Map.t;
+    prom_resolved : Tid.t option Tid.Map.t;
+    sp_extents : (int64 * int64) list;
+  }
+
+  (** Builds info from maps. *)
+  val mk_vsa_info_maps :
+    ?prom_slots:int Tid.Map.t ->
+    ?prom_arity:int ->
+    ?prom_window:bool ->
+    ?prom_retaddr:Tid.Set.t ->
+    ?prom_sites:call_site Tid.Map.t ->
+    ?prom_resolved:Tid.t option Tid.Map.t ->
+    ?sp_extents:(int64 * int64) list ->
+    offsets:vsa_kind Tid.Map.t ->
+    regions:region list ->
+    stack_plan:split_plan ->
+    degraded:bool ->
+    vla_alloc_tids:Tid.Set.t ->
+    unit ->
+    vsa_info
+
+  (** Builds info from lists. *)
+  val mk_vsa_info :
+    ?prom_slots:int Tid.Map.t ->
+    ?prom_arity:int ->
+    ?prom_window:bool ->
+    ?prom_retaddr:Tid.Set.t ->
+    ?prom_sites:call_site Tid.Map.t ->
+    ?prom_resolved:Tid.t option Tid.Map.t ->
+    ?sp_extents:(int64 * int64) list ->
+    offsets:(Tid.t * vsa_kind) list ->
+    regions:region list ->
+    stack_plan:split_plan ->
+    degraded:bool ->
+    vla_alloc_tids:Tid.Set.t ->
+    unit ->
+    vsa_info
+
+  (** Structural equalities (fixture/diagnostic use). *)
+  val equal_vsa_kind : vsa_kind -> vsa_kind -> bool
+  val equal_region : region -> region -> bool
+  val equal_split_plan : split_plan -> split_plan -> bool
+  val equal_call_site : call_site -> call_site -> bool
+  val equal_vsa_info : vsa_info -> vsa_info -> bool
+
   (** Merges overlapping ranges into regions; a region's facts (span,
       membership, storage class) derive from the tags alone (T4: the
       servability clause is deleted — the SP Slot anchor makes every
       sub's SP neighborhood private, so the partition is geometric). *)
-  val regions_of_sub :
-    sub term -> Convutils.vsa_info -> Convutils.region list
+  val regions_of_sub : sub term -> vsa_info -> region list
 
   (** The plan IS the convertible regions — no refusals.  An oversized
       region joins to Frame storage with a diagnostic naming it. *)
-  val split_plan :
-    sub term -> Convutils.vsa_info -> Convutils.split_plan
+  val split_plan : sub term -> vsa_info -> split_plan
 
   (** Returns the region alloca size. *)
-  val region_bytes : Convutils.region -> int64
+  val region_bytes : region -> int64
 
   (** Mints and recognizes fission vars. *)
   val region_mem : int -> var

@@ -67,7 +67,7 @@ let slot_index_of (k : int64) : int option =
      the window;
    - everything else (a spanned or mixed set, a wider read, a storing
      def — writes land in real caller memory) keeps the window. *)
-let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
+let callee_side ~(offsets : Model.vsa_kind Tid.Map.t) (sub : sub term) :
     int Tid.Map.t * int * bool * Tid.Set.t =
   let window = ref false in
   let retaddr = ref Tid.Set.empty in
@@ -80,7 +80,7 @@ let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
       |> Seq.iter ~f:(fun d ->
           let dtid = Term.tid d in
           match Core.Map.find offsets dtid with
-          | Some (Convutils.Caller (lo, hi)) ->
+          | Some (Model.Caller (lo, hi)) ->
               if not (Int64.equal lo hi) then window := true
               else
                 let k = lo in
@@ -117,7 +117,7 @@ let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
                         in
                         mark first
                     | _ -> ()))
-          | Some (Convutils.Mixed _) -> window := true
+          | Some (Model.Mixed _) -> window := true
           | _ -> ()));
   (* The written slots leave the promoted map: their reads take the
      window, where the write landed. *)
@@ -148,7 +148,7 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
     ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
     ~(abi : Hike_abi.t)
     (sub : sub term) :
-    Convutils.call_site Tid.Map.t * Tid.t option Tid.Map.t
+    Model.call_site Tid.Map.t * Tid.t option Tid.Map.t
     * (int64 * int64) list =
   let sites = ref Tid.Map.empty in
   let resolved = ref Tid.Map.empty in
@@ -241,7 +241,7 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
               in
               slots
         in
-        sites := Core.Map.set !sites ~key:btid ~data:{ Convutils.site_slots }
+        sites := Core.Map.set !sites ~key:btid ~data:{ Model.site_slots }
       end;
       (* Resolution of every indirect call at this block's end state,
          and the escaped values (the convention lanes at the call). *)
@@ -264,7 +264,7 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
 (* Computes [sub]'s offset tags, stack plan, and promotion facts. *)
 let offsets_of_sub (target : Theory.Target.t) (sp : var)
     ~(symtab : Symtab.t option) ~(prog : program term)
-    (sub : sub term) : Convutils.vsa_info =
+    (sub : sub term) : Model.vsa_info =
   let prog' = Program.create ~subs:[ sub ] () in
   (* VLA detection runs once per sub (spec §2.3), ahead of every arm below:
      even a memory-free sub can carry a dynamic SP decrement the emitter
@@ -278,7 +278,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
         (Convutils.sanitize_name (Tid.name (Term.tid s)), Term.tid s) :: acc)
   in
   (* Runs the fixpoint, then extracts tags def by def. *)
-  let finish (sol : Vsa.vsa_sol) : Convutils.vsa_info =
+  let finish (sol : Vsa.vsa_sol) : Model.vsa_info =
     (* Indirect jumps leave the CFG incomplete. *)
     let has_indirect_jumps =
       Term.enum blk_t sub
@@ -299,7 +299,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
     in
     (* The region partition is geometric (T4): the SP Slot anchor makes
        every sub's SP neighborhood private. *)
-    let mk = Convutils.mk_vsa_info_maps ~offsets ~degraded
+    let mk = Model.mk_vsa_info_maps ~offsets ~degraded
         ~vla_alloc_tids:alloc_tids in
     (* The storage-class lattice (Frame ⊔ anything = Frame): stack
        traffic the regions do not serve keeps the SP-relative lane,
@@ -326,8 +326,8 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
     let regions = Hike_stack_model.regions_of_sub sub (base_info ()) in
     let region_of_def =
       Base.List.fold regions ~init:Tid.Map.empty ~f:(fun m r ->
-          if r.Convutils.convertible then
-            Base.List.fold r.Convutils.members ~init:m
+          if r.Model.convertible then
+            Base.List.fold r.Model.members ~init:m
               ~f:(fun m (dtid, _) -> Core.Map.set m ~key:dtid ~data:r)
           else m)
     in
@@ -357,7 +357,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
     in
     (* The plan IS the convertible regions — no refusals, no recomputation. *)
     { base with
-    Convutils.stack_plan = Hike_stack_model.split_plan sub base }
+    Model.stack_plan = Hike_stack_model.split_plan sub base }
   in
   let probe_res =
     (* Runs the fixpoint; non-convergence degrades to no tags. *)
@@ -380,9 +380,9 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
             Option.is_some
               (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d)))
         |> Seq.fold ~init:Tid.Map.empty ~f:(fun m d ->
-            Core.Map.set m ~key:(Term.tid d) ~data:Convutils.Unbounded)
+            Core.Map.set m ~key:(Term.tid d) ~data:Model.Unbounded)
       in
-      Convutils.{ empty_vsa_info with offsets; degraded = true;
+      Model.{ empty_vsa_info with offsets; degraded = true;
                   vla_alloc_tids = alloc_tids }
     | Some sol -> finish sol
   in

@@ -175,7 +175,7 @@ let () =
                  in
 #ifdef VSA_DEBUG
                  Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
-                   (Sub.name sub) (Core.Map.length info.Convutils.offsets);
+                   (Sub.name sub) (Core.Map.length info.Hike_stack_model.offsets);
 #endif
                  Core.Map.set acc ~key:(Term.tid sub) ~data:info)
            in
@@ -202,7 +202,7 @@ let () =
 #ifdef VSA_DEBUG
            Core.Map.iter (Hike_kb.vsa_info ()) ~f:(fun info ->
                Printf.eprintf "hike: stl: %d tag(s)\n"
-                 (Core.Map.length info.Convutils.offsets));
+                 (Core.Map.length info.Hike_stack_model.offsets));
 #endif
            proj);
       Project.register_pass' ~name:"convlir" ~runonce:true
