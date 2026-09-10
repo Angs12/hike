@@ -6,11 +6,11 @@ Hike lifts x86-64 ELF binaries to LLVM IR, splitting the flat stack into LLVM al
 
 ### Stack model
 
-**Stack Access**: A Load/Store def whose address the VSA proves frame-resident: either directly (an affine address over sp-derived registers — a widened sp-derived address still counts) or through a reloaded address (a bounded value set contained in the frame neighborhood — subset, never intersect; a top or heap-valued address is not frame-resident).
-_Avoid_: direct_sp, stack reference, SP-relative def, relevance tag, syntactic SP-derivation
+**Stack Access**: A Load/Store def whose address's DENOTATION is a stack-symbolic set inside the segment — the one predicate (`is_stack_access` over the denotation). No second channel, no seed flags, no syntactic derivation.
+_Avoid_: direct_sp, stack reference, SP-relative def, relevance tag, SP-derived closure, is_seed, two channels
 
-**Frame-Residency Proof**: The VSA's own evidence that a Load/Store address lives in the stack frame — the two channels (direct affine over sp-derived registers, or a reloaded bounded subset of the frame neighborhood). The sole origin of the Stack Access classification.
-_Avoid_: relevance, taint, seeding pass, syntactic SP-derivation
+**Symbolic Stack Base** (`stack_0`): The entry SP's word, seeded with the bounded segment; arithmetic propagates the symbol, bitwise/compares go TOP-unknown. The ONE mechanism: it finds stack accesses, resolves call targets, and answers every producer question the escape analysis used to approximate — the escape fact is deleted, its consumers read the denotations directly.
+_Avoid_: escape analysis, frame escape fact, seeded flag, frame relation
 
 **Dynamic Allocation**: A definition that decrements the Stack Pointer by a non-literal size (VLA / alloca).
 _Avoid_: VLA size def, runtime alloc, variable stack growth
