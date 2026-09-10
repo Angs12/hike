@@ -115,10 +115,37 @@ let resolve_target ~(lookup : int64 -> Tid.t option) (ws : Vsa.WordSet.t) :
    (the window base the site passes = the callee's entry RSP). *)
 let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
     ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
+    ~(abi : Hike_abi.t)
     (sub : sub term) :
-    Convutils.call_site Tid.Map.t * Tid.t option Tid.Map.t =
+    Convutils.call_site Tid.Map.t * Tid.t option Tid.Map.t
+    * (int64 * int64) list =
   let sites = ref Tid.Map.empty in
   let resolved = ref Tid.Map.empty in
+  (* A stack-symbolic value that escapes the sub (a call argument) is
+     recorded for the precision decision and the frame sizing: the sub's
+     own storage must back every cell another sub reaches through the
+     escaped pointer. *)
+  let exts = ref [] in
+  let note_escape (e : exp) (st : Vsa.AI.t) =
+    match Vsa.denote_imm_exp e st with
+    | Error _ -> ()
+    | Ok ws -> (
+        match Vsa.Cbat_extraction.relativize_opt ws with
+        | None -> ()
+        | Some rel ->
+            let ext =
+              match singleton_i64 rel with
+              | Some v -> (v, v)
+              | None -> (
+                  match Vsa.WordSet.min_elem rel, Vsa.WordSet.max_elem rel with
+                  | Some mn, Some mx -> (
+                      match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
+                      | Ok lo, Ok hi -> (lo, hi)
+                      | _ -> (Int64.min_int, Int64.max_int))
+                  | _ -> (Int64.min_int, Int64.max_int))
+            in
+            exts := ext :: !exts)
+  in
   let lookup (v : int64) : Tid.t option =
     match symtab with
     | Some symtab -> (
@@ -149,9 +176,12 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
       in
       if has_call then begin
         (* The SP offset at the call = the window base the site passes. *)
-        let site =
+        let site_slots =
           match singleton_stack_offset (Bil.Var sp) st_end with
-          | None -> { Convutils.site_slots = []; site_provable = false }
+          (* the SP offset at the call is not a single known word: the
+             site's outgoing stores stay on the window path (the
+             identity) — none of them feeds a promoted slot *)
+          | None -> []
           | Some d_sp ->
               let _, slots =
                 Base.List.fold_left defs ~init:(st0, [])
@@ -178,11 +208,12 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
                         | None -> (st, acc))
                     | _ -> (st, acc))
               in
-              { Convutils.site_slots = slots; site_provable = true }
+              slots
         in
-        sites := Core.Map.set !sites ~key:btid ~data:site
+        sites := Core.Map.set !sites ~key:btid ~data:{ Convutils.site_slots }
       end;
-      (* Resolution of every indirect call at this block's end state. *)
+      (* Resolution of every indirect call at this block's end state,
+         and the escaped values (the convention lanes at the call). *)
       Term.enum jmp_t blk
       |> Seq.iter ~f:(fun j ->
           match Jmp.kind j with
@@ -193,8 +224,11 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
                   resolved :=
                     Core.Map.set !resolved ~key:(Term.tid j) ~data:cls
               | Direct _ -> ())
-          | _ -> ()));
-  (!sites, !resolved)
+          | _ -> ());
+      Core.List.iter
+        (abi.Hike_abi.int_param_regs @ abi.Hike_abi.vector_param_regs)
+        ~f:(fun v -> note_escape (Bil.Var v) st_end));
+  (!sites, !resolved, !exts)
 
 (* Computes [sub]'s offset tags, stack plan, and promotion facts. *)
 let offsets_of_sub (target : Theory.Target.t) (sp : var)
@@ -232,21 +266,63 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
         ~dynamic_alloc:(fun d -> Core.Set.mem alloc_tids (Term.tid d))
         sub
     in
-    (* The region partition is purely geometric (T4): the SP Slot anchor
-       makes every sub's SP neighborhood private. *)
+    (* The region partition is geometric (T4): the SP Slot anchor makes
+       every sub's SP neighborhood private. *)
     let mk = Convutils.mk_vsa_info_maps ~offsets ~degraded
         ~vla_alloc_tids:alloc_tids in
-    let base_info = mk ~regions:[] ~stack_plan:[] () in
-    let regions = Hike_stack_model.regions_of_sub sub base_info in
+    (* The storage-class lattice (Frame ⊔ anything = Frame): stack
+       traffic the regions do not serve keeps the SP-relative lane,
+       whose anchor must be the sub's own frame — an unserved sub joins
+       to Frame (its regions withdraw, the fallback frame backs every
+       access).  Served = the tag is a Range inside a convertible
+       region (singleton cells and fissioned ranged regions alike —
+       this is what recovers T3c's 21 re-framed subs, whose ranged
+       regions now convert); VLA and Dead carry their own lanes; window
+       traffic (Caller / the retaddr cell) is served by the promoted
+       parameters, the window parameter, or the ret lane without
+       touching this sub's storage. *)
     let prom_slots, prom_arity, prom_window, prom_retaddr =
       callee_side ~offsets sub
     in
-    let prom_sites, prom_resolved =
-      caller_side ~sol ~sp ~symtab ~name_tid sub
+    let prom_sites, prom_resolved, sp_extents =
+      caller_side ~sol ~sp ~symtab ~name_tid
+        ~abi:(Hike_abi.of_target target) sub
     in
+    let base_info () =
+      mk ~prom_sites ~prom_slots ~prom_arity ~prom_window ~prom_retaddr
+        ~regions:[] ~stack_plan:[] ()
+    in
+    let regions = Hike_stack_model.regions_of_sub sub (base_info ()) in
+    let region_of_def =
+      Base.List.fold regions ~init:Tid.Map.empty ~f:(fun m r ->
+          if r.Convutils.convertible then
+            Base.List.fold r.Convutils.members ~init:m
+              ~f:(fun m (dtid, _) -> Core.Map.set m ~key:dtid ~data:r)
+          else m)
+    in
+    let accesses_served =
+      Core.List.for_all
+        (Core.Map.to_alist offsets)
+        ~f:(fun (dtid, kind) ->
+          match kind with
+          | Range _ -> Core.Map.mem region_of_def dtid
+          | VLA _ | Dead | Caller _ -> true
+          | Mixed _ | Infinite _ | Unbounded -> false)
+    in
+    (* The storage-class closure over escapes: a stack-symbolic value
+       that leaves the sub (a call argument — an sret pointer, a cell
+       address handed to memcpy, a window base) travels as an
+       SP-arithmetic address, and the regions are separate allocas that
+       no SP-arithmetic address can name.  The Frame model's anchor is
+       the one storage SP-arithmetic addresses stay inside, so any
+       escape joins the sub to Frame; a sub with no escaping stack
+       values keeps its regions. *)
+    let values_served = Base.List.is_empty sp_extents in
+    let served = accesses_served && values_served in
+    let regions = if served then regions else [] in
     let base =
       mk ~regions ~stack_plan:[] ~prom_slots ~prom_arity ~prom_window
-        ~prom_retaddr ~prom_sites ~prom_resolved ()
+        ~prom_retaddr ~prom_sites ~prom_resolved ~sp_extents ()
     in
     (* The plan IS the convertible regions — no refusals, no recomputation. *)
     { base with

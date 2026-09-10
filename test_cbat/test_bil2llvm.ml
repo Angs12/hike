@@ -558,8 +558,11 @@ let run_promotion () =
     (sprintf "define internal void @\"%s_hike_thunk\""
        (Cu.sanitize_name (Tid.name (Term.tid callee))))
     ir;
-  check_ir "T4-THUNK: the twin carries the caller-window base, not SP"
-    "_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %hike_window)" ir;
+  check_ir "T4-THUNK: the twin carries the synthetic indirect convention (the window base, never SP)"
+    ("_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, "
+    ^ "i64 %R9, i256 %YMM0, i256 %YMM1, i256 %YMM2, i256 %YMM3, "
+    ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, i64 %hike_window)")
+    ir;
   check_ir "T4-THUNK: the twin unpacks the window slots into the promoted body"
     (sprintf "call void @\"%s\"(i64 %%RDI, i64 %%RSI, i64 %%"
        (Cu.sanitize_name (Tid.name (Term.tid callee))))

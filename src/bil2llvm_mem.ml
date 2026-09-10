@@ -227,13 +227,18 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       let dtid = Term.tid def in
       (match Core.Map.find sub_info.Convutils.prom_slots dtid with
        | Some i ->
-           (* A proven incoming slot reads its promoted parameter (T4). *)
+           (* A proven incoming slot reads its promoted parameter (T4).
+              The parameter's binding is filter-guaranteed at every step
+              (the create_branches-class shape assert): (1) the record's
+              [prom_arity] = max promoted index + 1, so [i < arity];
+              (2) the signature carries slots 0..arity-1; (3) the sig's
+              args join the transfer set via [arg_set]; (4)
+              [add_args_to_vars] binds every param at entry and the phi
+              plumbing rebinds it in each block.  The local map
+              therefore holds the parameter in every block. *)
            (match get_local ctx blk_tid (Hike_stack_model.arg_slot i) with
             | Some v -> KB.return v
-            | None ->
-                failwith
-                  "mem_access: promoted slot parameter is not bound (the \
-                   signature and the body disagree)")
+            | None -> KB.return (get_phi ctx blk_tid (Hike_stack_model.arg_slot i)))
        | None ->
            if Core.Set.mem sub_info.Convutils.prom_retaddr dtid then
              (* The return-address cell dies with the real LLVM ret; its

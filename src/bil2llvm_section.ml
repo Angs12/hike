@@ -90,7 +90,8 @@ let text_load_constant ctx llvm_ctx llvm_module addr w =
   | _ -> None
 
 (* Builds a remapped section initializer. *)
-let set_section_initializer ctx llvm_ctx llvm_module g arr min_addr =
+let set_section_initializer ctx llvm_ctx llvm_module g (arr : int array)
+    min_addr =
   let n64 = (Array.length arr + 7) / 8 in
   let slot_at i =
     let v =

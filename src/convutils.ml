@@ -120,11 +120,12 @@ module Vsa = struct
   type split_plan = region list [@@deriving equal]
 
   (* One call site's outgoing slot facts (T4): which slot index each of
-     the block's outgoing stores feeds, and whether the site's store-slot
-     correspondence is provable (the SP offset at the call a singleton). *)
+     the block's outgoing stores feeds.  The structured fact IS the
+     provability — presence of slot i in the map = the site's store
+     feeds promoted slot i; absence = the store stays on the window
+     path (the identity). *)
   type call_site = {
     site_slots : (int * Tid.t) list; (* slot index -> storing def *)
-    site_provable : bool;
   } [@@deriving equal]
 
   (* Per-def index map: [offsets] — the possible range of each access.
@@ -152,6 +153,13 @@ module Vsa = struct
     prom_retaddr : Tid.Set.t;
     prom_sites : call_site Tid.Map.t;
     prom_resolved : Tid.t option Tid.Map.t;
+    (* T4: the extents of every stack-symbolic VALUE the sub forms
+       (SP-derived addresses computed into non-memory defs — sret
+       pointers, escaped cell addresses).  Two consumers: the precise
+       decision (a value outside the convertible regions joins the sub
+       to Frame — the storage lattice) and the frame sizing (the frame
+       covers the formed extents). *)
+    sp_extents : (int64 * int64) list;
   }
 
   (* Hand-written equality over maps. *)
@@ -168,6 +176,9 @@ module Vsa = struct
     && Core.Map.equal equal_call_site i1.prom_sites i2.prom_sites
     && Core.Map.equal (Base.Option.equal Tid.equal) i1.prom_resolved
          i2.prom_resolved
+    && Base.List.equal
+         (fun (a,b) (c,d) -> Int64.equal a c && Int64.equal b d)
+         i1.sp_extents i2.sp_extents
 
   (* Builds info from maps. The promotion fields are optional (empty =
      no promotion) so the fixture grammar stays stable; the trailing
@@ -179,20 +190,22 @@ module Vsa = struct
       ?(prom_retaddr = Tid.Set.empty)
       ?(prom_sites = Tid.Map.empty)
       ?(prom_resolved = Tid.Map.empty)
+      ?(sp_extents = [])
       ~offsets ~regions ~stack_plan ~degraded
       ~vla_alloc_tids () : vsa_info =
     { offsets; regions; stack_plan; degraded; vla_alloc_tids; prom_slots;
-      prom_arity; prom_window; prom_retaddr; prom_sites; prom_resolved }
+      prom_arity; prom_window; prom_retaddr; prom_sites; prom_resolved;
+      sp_extents }
 
   (* Builds info from lists. *)
   let mk_vsa_info
       ?prom_slots ?prom_arity ?prom_window ?prom_retaddr ?prom_sites
-      ?prom_resolved
+      ?prom_resolved ?sp_extents
       ~offsets ~regions ~stack_plan ~degraded
       ~vla_alloc_tids () : vsa_info =
     mk_vsa_info_maps
       ?prom_slots ?prom_arity ?prom_window ?prom_retaddr ?prom_sites
-      ?prom_resolved
+      ?prom_resolved ?sp_extents
       ~offsets:
         (Base.List.fold_left offsets ~init:Tid.Map.empty
            ~f:(fun m (tid, kind) -> Core.Map.set m ~key:tid ~data:kind))
@@ -218,7 +231,15 @@ let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 let is_intrinsic_name (s : string) : bool =
   Base.String.is_prefix s ~prefix:"intrinsic:"
 
-type section = { base : Llvm.llvalue; min_addr : word; max_addr : word }
+type section = {
+  base : Llvm.llvalue;
+  min_addr : word;
+  max_addr : word;
+  (* The section's byte image (T4: the initializers render inside
+     [emit_program], where the one address map — thunks included —
+     lives). *)
+  bytes : int array option;
+}
 type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL | TEXT
 
 let section_type_to_string = function

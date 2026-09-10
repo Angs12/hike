@@ -11,6 +11,7 @@ open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_mem
 open Bil2llvm_calls
+open Bil2llvm_section
 
 let update_phi transfer_vars blk_incoming blk_tid =
   let open KB in
@@ -400,7 +401,7 @@ let create_sub sub =
                 | Some d -> (
                     match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
                     | Some (data, _) -> Some (i, data)
-                    | None -> None)
+                    | None -> Some (i, Def.rhs d))
                 | None -> None)
           in
           Core.Map.set acc ~key:btid ~data:slots)
@@ -674,32 +675,28 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   (* The Thunks' signatures: the legacy memory-path convention (the
      register lanes plus the window base) — registered so the
      unprovable-direct-site path can call the twin wholesale. *)
-  let twin_sig_of (sub, (rets, args)) =
+  let twin_sig_of (sub, (rets, _)) =
     let sub_tid = Term.tid sub in
     let info = Hike_kb.info_of_sub sub_tid in
     if info.Convutils.prom_arity > 0
        && not (String.equal (Tid.name sub_tid) "@main")
-    then Some (Bil2llvm_calls.thunk_tid_of sub_tid, (rets, args))
+    then
+      (* The twin's signature = the synthetic indirect convention (the
+         register lanes plus the window base), exactly what a pointer
+         call passes. *)
+      Some
+        ( Bil2llvm_calls.thunk_tid_of sub_tid,
+          ( rets,
+            Base.List.map
+              (conv.Abi.int_param_regs @ conv.Abi.vector_param_regs)
+              ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+            @ [
+                Arg.create ~intent:In Convutils.hike_window_var
+                  (Var Convutils.hike_window_var);
+              ] ) )
     else None
   in
   let twin_sigs = Base.List.filter_map sigs ~f:twin_sig_of in
-  let window_args_of (rets, args) =
-    let reg_args =
-      Base.List.filter args ~f:(fun a ->
-          let n = Var.name (Arg.lhs a) in
-          (not (Base.String.is_prefix n ~prefix:"hike_slot"))
-          && not (Var.same (Arg.lhs a) Convutils.hike_window_var))
-    in
-    ( rets,
-      reg_args
-      @ [
-          Arg.create ~intent:In Convutils.hike_window_var
-            (Var Convutils.hike_window_var);
-        ] )
-  in
-  let twin_sigs =
-    Base.List.map twin_sigs ~f:(fun (tid, s) -> (tid, window_args_of s))
-  in
   let subs =
     Base.List.fold twin_sigs
       ~init:
@@ -741,6 +738,24 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
             KB.Seq.iter
               (Term.enum sub_t prog)
               ~f:(fun s -> create_sub s)))))
+  end;
+  (* The data-section initializers render INSIDE the one emission
+     context (T4): every 8-byte word goes through [remap_native_addr],
+     whose symtab arm now resolves to the Thunk of a promoted sub —
+     function-pointer data must land on the memory-convention twin so
+     unresolvable pointer sites stay sound. *)
+  Toplevel.exec begin
+    KB.Context.with_var emit_ctx_var ctx (fun () ->
+      KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
+        KB.Context.with_var llvm_module_var llvm_module (fun () ->
+          KB.List.iter sections ~f:(fun section ->
+              match section.Convutils.bytes with
+              | Some arr ->
+                  KB.return
+                  @@ Bil2llvm_section.set_section_initializer ctx llvm_ctx
+                       llvm_module section.Convutils.base arr
+                       (Word.to_int64_exn section.Convutils.min_addr)
+              | None -> KB.return ()))))
   end
 
 (* The frozen seam (bil2llvm.mli): re-exports from the lane modules. *)

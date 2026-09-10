@@ -447,19 +447,29 @@ let create_thunk (sub_tid : tid) =
     else begin
       let args = get_args ctx sub_tid in
       let rets = get_rets ctx sub_tid in
-        (* The legacy memory-path signature: the register lanes plus
-           the caller-window base. *)
+        (* The twin carries the SYNTHETIC INDIRECT convention, exactly
+           the signature the pointer call passes: every convention
+           register lane (integer and vector) plus the caller-window
+           base — so the twin's window param sits at the same position
+           the icall type puts it. *)
+        let conv = Abi.of_target ctx.Convutils.target in
+        let twin_args =
+          Base.List.map
+            (conv.Abi.int_param_regs @ conv.Abi.vector_param_regs)
+            ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+          @ [
+              Arg.create ~intent:In Convutils.hike_window_var
+                (Var Convutils.hike_window_var);
+            ]
+        in
+        (* The lanes of [sub]'s own signature the twin forwards (by
+           name, from the twin's params). *)
         let reg_args =
           Base.List.filter args ~f:(fun a ->
               let n = Var.name (Arg.lhs a) in
               (not (Base.String.is_prefix n ~prefix:"hike_slot"))
               && not (Var.same (Arg.lhs a) Convutils.hike_window_var))
         in
-        let window_arg =
-          Arg.create ~intent:In Convutils.hike_window_var
-            (Var Convutils.hike_window_var)
-        in
-        let twin_args = reg_args @ [ window_arg ] in
         let* ret_typ = ret_type_of_rets rets in
         let* arg_typs =
           KB.List.map twin_args ~f:(fun a ->
@@ -479,7 +489,7 @@ let create_thunk (sub_tid : tid) =
         register_fn ctx (thunk_tid_of sub_tid) fn fn_typ;
         (* The twin's body: unpack the window, forward, return. *)
         let builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-        let window = Llvm.param fn (Base.List.length reg_args) in
+        let window = Llvm.param fn (Base.List.length twin_args - 1) in
         let slot_vals =
           Base.List.init arity ~f:(fun i ->
               let addr =
@@ -494,8 +504,21 @@ let create_thunk (sub_tid : tid) =
               in
               Llvm.build_load (Llvm.i64_type llvm_ctx) ptr "" builder)
         in
+        (* Forward [sub]'s own register lanes by name from the twin's
+           params, then the unpacked slots.  A lane outside the
+           convention the twin carries is never passed by any caller —
+           it reads undef, the model-ABI never-defined treatment. *)
+        let param_named (v : var) : Llvm.llvalue =
+          let n = Var.name v in
+          match
+            Base.List.findi twin_args ~f:(fun i a -> Var.name (Arg.lhs a) = n)
+            |> Base.Option.map ~f:(fun (i, _) -> Llvm.param fn i)
+          with
+          | Some p -> p
+          | None -> Llvm.undef (Llvm.i64_type llvm_ctx)
+        in
         let call_args =
-          Base.List.init (Base.List.length reg_args) ~f:(Llvm.param fn)
+          Base.List.map reg_args ~f:(fun a -> param_named (Arg.lhs a))
           |> fun regs -> regs @ slot_vals
         in
         let* callee_fn, callee_typ = get_func sub_tid in
