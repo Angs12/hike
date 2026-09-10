@@ -1536,7 +1536,20 @@ let acquire_unsat_fallthrough ?(ctx : analysis_ctx option)
       if gate_ok then begin
       let bop = bop and e = e and c = Cbat_word.of_word c in
       let gop = guard_op_of_binop bop in
-      let op = complement_guard_op gop in
+      (* The probe is the FALLTHROUGH edge's OWN excluded-boundary row,
+         polarity-aware in the jump's NOT (the paper's observe_unsat
+         fires on the guard the cycle keeps missing — the exit edge). A
+         jcc whose condition negates the flag (the [NOT zf] idiom — the
+         decoder's NEQ row) loops on the complemented flag, so its
+         fallthrough SATISFIES the flag def's comparison: the probe is
+         [gop] itself. A bare-flag jcc falls through on the complemented
+         comparison. The complement table keeps serving false-edge STATE
+         refinement; acquisition is a different consumer of the same
+         flag record and reads the polarity off the jump condition. *)
+      let op =
+        match decoded_condition cond with
+        | Some NEQ -> gop
+        | _ -> complement_guard_op gop in
       (match row_for ~env ?ctx:(Some ctx) e op c with
        | Some cstr_e ->
          (match e with
