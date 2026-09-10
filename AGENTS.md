@@ -545,6 +545,59 @@ Merge `7a41070` + spec records `92ac41c`; ticket
 | unit suite | failure set == the pre-existing 8 (E2eD-7/8, LM F1-*; owner triage) ✅ |
 | plugin provenance | bundle sha16 `54e284d5d3441228` ✅ |
 
+**Last verified: 2026-09-11 EEST — T4 + T4b LANDED (the promotion +
+SP Slot + resolved indirect calls + internal thunks; strict -O0
+restored to 37/37; the pin at 7)**
+
+Branch `typed-model-program`, merges `9b06689` (T4) + `04b84c2` (T4b);
+battery `/home/tovpr/tm-battery/merge-t4b` (plugin bundle
+`06b009e387d37dc3`):
+
+- **T4 (the grilled conversion)**: stack args promoted to real call
+  parameters (per-slot, widest+trunc, written slots demote); the SP
+  Slot (entry-block alloca, per-invocation anchor; `hike_stack` is
+  zero in src/ and emissions); VSA-resolved indirect calls
+  (singleton → direct promoted call; multi/foreign/TOP → pointer call
+  through INTERNAL thunks whose signature matches the pointer-call
+  layout; fn-pointer data renders to twins); the `hike_window`
+  parameter (the variadic/mixed residual only); retaddr reads bind
+  undef. All 21 T3c re-framed subs recovered their exact region
+  counts. Convergence prize: many_args 58/4, mixed_fp_int 68/4,
+  variadic 185/27.
+- **T4b (conversion correctness)**: T4's guard diagnosis was
+  superseded — the copy's values were lost to SPLIT STORAGE (an
+  untagged TOP-addressed store made the partition zero-init the
+  copy-out's reads) and STALE-SLOT READS (call sites re-evaluated
+  stored exps). Four constructed rules, zero gates: Unknown seeding
+  (TOP-addressed defs tag Unbounded), the Caller lane serves the node
+  via value substitution, slot args consume the STORED value, written
+  slots demote from promotion. Two unsound implicit case-fusions
+  deleted (TOP⇒foreign; written-slot reads⇒parameter); net diff
+  +176/−94. strict -O0 32/5 → **37/37**; fn_escape/fn_table_disp
+  proven flips; six more sources converged SAME/SAME.
+- **The -O2 pin holds at 7** (byte_copy, union_overlap — L3/T5;
+  va_arg_mixed, fizzbuzz_safe — L1; va_arg_vacopy — T9; spill_many —
+  the one undug T4-merge SIGSEGV, next lane's first dig;
+  jump_table_sw — the -O2 indirect-jump dispatch).
+- NOTE: the corpora are 37 bins (T4 rebuilt `/tmp/corpus*` in place,
+  against its isolation instruction — the canaries verify the lanes;
+  the state is recorded). The Unbounded diagnostic now fires once per
+  Frame-joined sub's pointer-arg derefs (27 -O0 lines — the sanctioned
+  channel).
+
+| gate (the merged battery) | result |
+|---|---|
+| strict opt-safety (-O0) | **37 PASS / 0 FAIL** ✅ |
+| -O0 emission / semantics / allocas | **37/37 rc=0 / 37 PASS 0 FAIL / 185-0** ✅ |
+| -O2 emission / semantics pinned / allocas | **37/37 rc=0 / 30-7 set == golden / 185-0** ✅ |
+| referee | **2,861,148 / 0 mismatches** ✅ |
+| unit suite | failure set == the pre-existing 8; all T4 pins pass ✅ |
+| plugin provenance | bundle sha16 `06b009e387d37dc3` ✅ |
+
+Reference emissions: `/home/tovpr/tm-battery/merge-t4b/emit-{o0,o2}`.
+Next: S10a (the dead-weight wave), S10b (the convutils split), T5,
+T9, then the final code review.
+
 **Last verified: 2026-09-10 EEST — T3c LANDED (the escape deleted
 entirely; the partition reads the denotations; the -O2 pin moves 6→4)**
 
