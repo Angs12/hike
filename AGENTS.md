@@ -430,6 +430,56 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-10 EEST — T3 LANDED (the symbolic stack base +
+single-channel tagging; the offset fiction and `value_env` are GONE)**
+
+Branch `typed-model-program`, merge `d2b66d7` + records `52b47c1`;
+battery `/home/tovpr/tm-battery/merge-t3` (the same tree the finisher
+verified as `7a60794`; plugin bundle `0311e8475e2aaf1e`):
+
+- The word domain carries the bounded stack segment
+  (`[2^62, 2^62+8MiB]`, `StackOff`): arithmetic propagates the symbol,
+  bitwise/compares go TOP-unknown (the L1 class is structurally
+  impossible; `value_env` deleted). `is_stack_access addr st` = the
+  denotation is a stack-symbolic set; the tag = the denotation minus
+  the base — ONE channel; the frame relation (`seed_frame`,
+  `apply_frame_def`, `frame_add_fvar`, `mentions_frame_var`,
+  `rewrite_addr`) is deleted grep-clean. The emitter materializes
+  addresses through the ONE uniform rule (`ptr = frame +
+  (word − stack_0)`); the Mixed class (two-sided spans — the va_list
+  reg-save-or-overflow pointer) uses the argued two-base
+  `select(word ≥ stack_0, hike_stack + (word − stack_0), raw word)` —
+  a complete rule per span shape, never a refusal (spec §T3's landed
+  note). Design notes: `.scratch/typed-model/t3-design-notes.md`;
+  verdict: `tickets/T3-symbolic-stack-base-verdict.md`.
+- The 7 old-universe pins re-derived and green (VSK-EMPTY, L-D6, L-D2,
+  L3c5-3a/b, L3c4-4, L3c3-1). Deliberate full -O0 emission
+  re-baseline (all 33 binaries: folded constant frame GEPs → runtime
+  `word − %anchor_i64` arithmetic; 3 selects corpus-wide; inttoptr
+  counts ~unchanged).
+- **va_arg_vacopy re-attributed**: the recorded L2 mechanism (missing
+  `rebase_addr` in the `lo<0` arm) is structurally deleted and the
+  -O2 failure persists → the residual is the va_list state round-trip
+  in the -O2 lift (golden comment corrected, commit `52b47c1`).
+  va_arg_mixed stays L1 (the ud2 poison arm, rc=132). Convergence
+  rows unchanged in classification (27 SAME/SAME + the six DIFF);
+  quality-only movement: va_arg_vacopy's -O0 lift post-opt 212→396
+  (T4's lever).
+
+| gate (the merged battery) | result |
+|---|---|
+| strict opt-safety (-O0) | **33 PASS / 0 FAIL** ✅ |
+| -O0 emission / semantics / allocas | **33/33 rc=0 / 33 PASS 0 FAIL / 165-0** ✅ |
+| -O2 emission / semantics pinned / allocas | **33/33 rc=0 / 27-6 set == golden / 165-0 (modernized check (d))** ✅ |
+| convergence | **27 SAME/SAME + the six DIFF = the knowns** ✅ |
+| referee | **2,861,148 / 0 mismatches** ✅ |
+| unit suite | failure set == the pre-existing 8; the 7 modernized pins PASS ✅ |
+| plugin provenance | bundle sha16 `0311e8475e2aaf1e` ✅ |
+
+Reference emissions: -O0 `/home/tovpr/tm-battery/merge-t3/emit-o0`
+(T3 re-baselined all 33), -O2 `.../emit-o2`. Next: T4 (stack-arg
+promotion), T5 (the SSE lane def-use).
+
 **Last verified: 2026-09-10 EEST — THE TYPED-MODEL PROGRAM, WAVE 1
 LANDED (T1 + T2 + T6 merged on `typed-model-program`) + THE -O2 CORPUS
 INCIDENT FOUND AND REPAIRED (the pin holds at 27/6, set == the golden
