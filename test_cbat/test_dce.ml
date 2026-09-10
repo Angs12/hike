@@ -185,7 +185,7 @@ let run () =
   (* Split-model plan for the precise sub only; the control stays absent. *)
   let region =
     {
-      Hike.Convutils.id = 0;
+      Hike.Stack_model.id = 0;
       span = (-16L, -16L);
       members = [];
       convertible = true;
@@ -193,7 +193,7 @@ let run () =
     }
   in
   let info =
-    Hike.Convutils.mk_vsa_info ~offsets:[]
+    Hike.Stack_model.mk_vsa_info ~offsets:[]
       ~regions:[ region ] ~stack_plan:[ region ]
       ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in

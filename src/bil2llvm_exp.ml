@@ -2,7 +2,6 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
@@ -213,16 +212,16 @@ let create_immidiate word =
 (* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
   let v = Var.base var in
-  let abi = ctx.Convutils.abi in
+  let abi = ctx.abi in
   let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
   let sub_key = blk_tid in
   let warned_vars =
-    match Core.Map.find !(ctx.Convutils.undef_warned) sub_key with
+    match Core.Map.find !(ctx.undef_warned) sub_key with
     | Some r -> r
     | None ->
         let r = ref Var.Set.empty in
-        ctx.Convutils.undef_warned :=
-          Core.Map.set !(ctx.Convutils.undef_warned) ~key:sub_key ~data:r;
+        ctx.undef_warned :=
+          Core.Map.set !(ctx.undef_warned) ~key:sub_key ~data:r;
         r
   in
   if not (Core.Set.mem !warned_vars v) then begin
@@ -252,7 +251,7 @@ let rec create_exp llvm_builder blk_tid exp =
           let want_w =
             match Var.typ v with Type.Imm w -> w | _ -> 64
           in
-          match Convutils.probe_local_family ctx blk_tid v ~want_w with
+          match probe_local_family ctx blk_tid v ~want_w with
           | Some (val_at_w, bound_w) ->
               let want_ty = Llvm.integer_type llvm_ctx' want_w in
               if bound_w = want_w then return val_at_w

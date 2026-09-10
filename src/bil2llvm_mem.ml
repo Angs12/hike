@@ -2,7 +2,6 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
@@ -12,19 +11,19 @@ open Bil2llvm_section
 
 (* Looks up a def VSA tag. *)
 let find_def_tag sub_info def =
-  Core.Map.find sub_info.Convutils.offsets (Term.tid def)
+  Core.Map.find sub_info.Hike_stack_model.offsets (Term.tid def)
 
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =
     Sub.free_vars sub
-    |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
+    |> Core.Set.filter ~f:(fun var -> not @@ Hike_stack_model.is_mem var)
     |> Core.Set.to_list
   in
   let reg_vars =
     (* SP-only: a stub genuinely using RBP is not a pure trampoline. *)
     Base.List.filter free_vars ~f:(fun reg ->
-        not (Var.same reg ctx.Convutils.sp))
+        not (Var.same reg ctx.sp))
   in
   reg_vars = []
   && Term.enum blk_t sub
@@ -185,10 +184,10 @@ let create_dynamic_alloc llvm_builder blk_tid exp =
   | _ -> create_exp llvm_builder blk_tid exp
 
 (* Finds the region containing an offset. *)
-let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
-    (lo : int64) : (Convutils.region * Llvm.llvalue) option =
+let region_of_offset (regions : (Hike_stack_model.region * Llvm.llvalue) list)
+    (lo : int64) : (Hike_stack_model.region * Llvm.llvalue) option =
   Base.List.find regions ~f:(fun (r, _) ->
-      let rlo, rhi = r.Convutils.span in
+      let rlo, rhi = r.Hike_stack_model.span in
       Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
 
 (* Dispatches tagged accesses to storage.  The producer's tag IS the
@@ -213,10 +212,10 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
   match def_tag with
-  | Some (Convutils.Range _ | Convutils.Infinite _) ->
+  | Some (Hike_stack_model.Range _ | Hike_stack_model.Infinite _) ->
       (* The uniform materialization rule. *)
       create_exp llvm_builder blk_tid exp
-  | Some (Convutils.Caller _) ->
+  | Some (Hike_stack_model.Caller _) ->
       (* ONE rule over the def's mem node and its fact (T4b): the node's
          value is substituted into the rhs, so the def's surrounding
          computation is carried BY CONSTRUCTION — a wide access is
@@ -230,7 +229,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       (match find_mem_node (Def.rhs def) with
        | None -> create_exp llvm_builder blk_tid exp
        | Some (`Load (addr, size)) | Some (`Store (addr, _, size)) ->
-           if Core.Set.mem sub_info.Convutils.prom_retaddr dtid then
+           if Core.Set.mem sub_info.Hike_stack_model.prom_retaddr dtid then
              let marker = marker_of_size size in
              let emit () =
                let* llvm_ctx = Context.get llvm_ctx_var in
@@ -240,7 +239,7 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
              let rewrite marker = rewrite_mem_node exp addr size marker in
              emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
            else
-             (match Core.Map.find sub_info.Convutils.prom_slots dtid with
+             (match Core.Map.find sub_info.Hike_stack_model.prom_slots dtid with
              | Some i ->
                  (* The parameter's binding is filter-guaranteed at every
                     step (the create_branches-class shape assert): (1) the
@@ -274,26 +273,26 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
                  emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
              | None ->
                  caller_mem_access llvm_builder blk_tid fr addr exp))
-  | Some (Convutils.Mixed _) ->
+  | Some (Hike_stack_model.Mixed _) ->
       (match find_mem_node (Def.rhs def) with
       | Some node ->
           mixed_mem_access llvm_builder blk_tid fr (mem_node_addr node) exp
       | None -> create_exp llvm_builder blk_tid exp)
-  | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
-  | Some Convutils.Unbounded ->
-      if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
-        ctx.Convutils.guarded_warned :=
-          Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
+  | Some (Hike_stack_model.VLA _) -> create_exp llvm_builder blk_tid exp
+  | Some Hike_stack_model.Unbounded ->
+      if not (Core.Set.mem !(ctx.guarded_warned) sub_tid) then begin
+        ctx.guarded_warned :=
+          Core.Set.add !(ctx.guarded_warned) sub_tid;
         (* Warning text is a grepped contract. *)
         Hike_diag.warn
           "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
           (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
       end;
       create_exp llvm_builder blk_tid exp
-  | Some Convutils.Dead ->
-      if not (Core.Set.mem !(ctx.Convutils.dead_warned) sub_tid) then begin
-        ctx.Convutils.dead_warned :=
-          Core.Set.add !(ctx.Convutils.dead_warned) sub_tid;
+  | Some Hike_stack_model.Dead ->
+      if not (Core.Set.mem !(ctx.dead_warned) sub_tid) then begin
+        ctx.dead_warned :=
+          Core.Set.add !(ctx.dead_warned) sub_tid;
         (* Warning text is a grepped contract. *)
         Hike_diag.warn
           "guarded: sub %s: stack access classified Dead (empty range): def %s rhs=%s"
@@ -318,9 +317,9 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
      and untagged do not (their addresses may be caller-window or
      foreign pointers — the sret pointer, a reloaded pointer), so the
      identity materialization (inttoptr) applies. *)
-  ctx.Convutils.frame_wrap_license :=
+  ctx.frame_wrap_license :=
     (match def_tag with
-     | Some (Convutils.Range _ | Convutils.Infinite _) -> true
+     | Some (Hike_stack_model.Range _ | Hike_stack_model.Infinite _) -> true
      | _ -> false);
   let* res =
     (* Runtime-sized SP decrements become real allocas (spec §2.3). *)
@@ -331,10 +330,10 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
     else if fr.is_precise then
       (* Split-model accesses use region GEPs. *)
       (match def_tag with
-       | Some (Convutils.Range (lo, hi)) when Int64.equal lo hi ->
+       | Some (Hike_stack_model.Range (lo, hi)) when Int64.equal lo hi ->
            (match region_of_offset fr.regions lo with
             | Some (r, base) ->
-                let offset = Int64.sub lo (fst r.Convutils.span) in
+                let offset = Int64.sub lo (fst r.Hike_stack_model.span) in
                 let* llvm_ctx = Context.get llvm_ctx_var in
                 let gep =
                   Llvm.build_gep (Llvm.i8_type llvm_ctx) base
@@ -369,16 +368,16 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
     | _ -> return res
   in
   (* The license scopes to this def's rhs emission only. *)
-  ctx.Convutils.frame_wrap_license := false;
+  ctx.frame_wrap_license := false;
   (* The outgoing slot store's value is recorded where it is PRODUCED
      (T4b): the site's call passes the value this store wrote (looked
      up by the def tid), never a re-evaluation of the stored exp at the
      call — a var the block redefines between the store and the call
      would pass the wrong value. *)
   let is_site_store =
-    match Core.Map.find sub_info.Convutils.prom_sites blk_tid with
+    match Core.Map.find sub_info.Hike_stack_model.prom_sites blk_tid with
     | Some site ->
-        Base.List.exists site.Convutils.site_slots
+        Base.List.exists site.Hike_stack_model.site_slots
           ~f:(fun (_, dtid) -> Tid.equal dtid (Term.tid def))
     | None -> false
   in

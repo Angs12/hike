@@ -109,7 +109,7 @@ let sweep_census_of (sub : sub term) : sweep_census =
 
 (* Tests for intrinsic interface vars. *)
 let is_intrinsic_var (v : var) : bool =
-  Convutils.is_intrinsic_name (Var.name (Var.base v))
+  Bil2llvm_env.is_intrinsic_name (Var.name (Var.base v))
 
 (* Region mems survive iff loaded; [mem] always survives.  (T3 deleted
    the precise-lane SP erasure: the uniform materialization READS the
@@ -123,7 +123,7 @@ let keep ?(load_roots=Var.Set.empty)
     Core.Set.mem load_roots lhs
   else
     Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
-    || Convutils.is_mem lhs
+    || Hike_stack_model.is_mem lhs
     || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
 (* Incremental sweep: one census walk, then a removal cascade. [used] and

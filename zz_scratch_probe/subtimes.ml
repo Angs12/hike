@@ -36,7 +36,7 @@ let () =
           let info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
           let dt = Unix.gettimeofday () -. t0 in
           let ntags =
-            Core.Map.length info.Hike.Convutils.offsets
+            Core.Map.length info.Hike.Stack_model.offsets
           in
           (dt, name, nblk, ndefs, ntags))
         subs

@@ -2,7 +2,6 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
@@ -14,7 +13,7 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
   let open KB in
   if fr.is_precise then return ()
   else
-    let sp_key = ctx.Convutils.sp in
+    let sp_key = ctx.sp in
     match get_local ctx sub_tid sp_key with
     | None -> return ()
     | Some post_push ->
@@ -47,7 +46,7 @@ let create_call_args blk_tid llvm_builder call_tid fr =
         (* The caller-window base is the caller's SP at the call: the
            outgoing stores land at SP-relative addresses, so the
            callee's slot k sits at window + k (T4). *)
-        (match get_local ctx blk_tid ctx.Convutils.sp with
+        (match get_local ctx blk_tid ctx.sp with
          | Some v -> return v
          | None ->
              let* llvm_ctx = Context.get llvm_ctx_var in
@@ -66,7 +65,7 @@ let create_call_args blk_tid llvm_builder call_tid fr =
         let stored =
           match Core.Map.find fr.outgoing blk_tid with
           | Some site ->
-              Base.List.Assoc.find ~equal:Int.equal site.Convutils.site_slots i
+              Base.List.Assoc.find ~equal:Int.equal site.Hike_stack_model.site_slots i
           | None -> None
         in
         (match Base.Option.bind stored ~f:(fun dtid ->
@@ -173,8 +172,8 @@ let ret_type_of_rets rets =
 
 (* Registers a declared/defined function in the emit context. *)
 let register_fn ctx sub_tid fn fn_typ =
-  ctx.Convutils.ll_funcs :=
-    Core.Map.add_exn !(ctx.Convutils.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ)
+  ctx.ll_funcs :=
+    Core.Map.add_exn !(ctx.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ)
 
 let create_ret_type sub_tid =
   let open KB in
@@ -225,7 +224,7 @@ let add_args_to_vars llvm_builder blk_tid sub_tid fn () =
            match Llvm.classify_type (Llvm.type_of param) with
            | Llvm.TypeKind.Pointer ->
                Llvm.build_ptrtoint param
-                 (Llvm.integer_type llvm_ctx ctx.Convutils.ptrsize)
+                 (Llvm.integer_type llvm_ctx ctx.ptrsize)
                  "" llvm_builder
            | _ -> param
          in
@@ -275,11 +274,11 @@ let create_fun sub_tid ~rets ~args =
 let get_func tid =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  match Core.Map.find !(ctx.Convutils.ll_funcs) tid with
+  match Core.Map.find !(ctx.ll_funcs) tid with
   | Some v -> return v
   | None ->
       let* _ = create_fun_declaration tid in
-      return @@ Core.Map.find_exn !(ctx.Convutils.ll_funcs) tid
+      return @@ Core.Map.find_exn !(ctx.ll_funcs) tid
 
 (* Binds a call's aggregate return into its ret lanes. *)
 let bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct =
@@ -437,11 +436,11 @@ let create_thunk (sub_tid : tid) =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let info = Hike_kb.info_of_sub sub_tid in
-  let arity = info.Convutils.prom_arity in
+  let arity = info.Hike_stack_model.prom_arity in
   if arity = 0 || String.equal (Tid.name sub_tid) "@main" then
     KB.return ()
   else
-    if Core.Map.mem !(ctx.Convutils.ll_funcs) (thunk_tid_of sub_tid) then
+    if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then
       KB.return ()
     else begin
       let args = get_args ctx sub_tid in
@@ -451,7 +450,7 @@ let create_thunk (sub_tid : tid) =
            register lane (integer and vector) plus the caller-window
            base — so the twin's window param sits at the same position
            the icall type puts it. *)
-        let conv = Abi.of_target ctx.Convutils.target in
+        let conv = Abi.of_target ctx.target in
         let twin_args =
           Base.List.map
             (conv.Abi.int_param_regs @ conv.Abi.vector_param_regs)
@@ -530,8 +529,8 @@ let create_thunk (sub_tid : tid) =
          | _ -> ignore (Llvm.build_ret r builder));
         (* Function-address rendering produces the twin (keyed by the
            sub's LLVM name). *)
-        ctx.Convutils.thunks :=
-          (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.Convutils.thunks);
+        ctx.thunks :=
+          (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks);
         KB.return ()
     end
 
@@ -851,7 +850,7 @@ let create_call llvm_builder blk_tid blk sub call fr =
     | Some op -> create_native_fp_call llvm_builder blk_tid blk call op
     | None ->
         (* Unmapped intrinsics warn and degrade. *)
-        if Convutils.is_intrinsic_name name then begin
+        if is_intrinsic_name name then begin
           Hike_diag.warn
             "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
             name (Tid.name (Term.tid sub));

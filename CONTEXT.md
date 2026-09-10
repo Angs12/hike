@@ -23,7 +23,9 @@ _Avoid_: fp-as-stack-register, is_stack_reg, RBP-by-name, frame-pointer grant
 
 ### Analysis passes
 
-**Library Seam** (`Hike.*`): The `hike` library's one public interface (`src/hike.mli`): `Hike.Abi`, `Hike.Vsa`, `Hike.Dce`, `Hike.Stack_model`, `Hike.Stack_to_locals`, `Hike.Kb`, `Hike.Convutils`, `Hike.Bil2llvm`. Consumers name these modules and nothing else — the entry point `Hike` is the plugin's pass pipeline, not a namespace.
+**Library Seam** (`Hike.*`): The `hike` library's one public interface (`src/hike.mli`): `Hike.Abi`, `Hike.Vsa`, `Hike.Dce`, `Hike.Stack_model`, `Hike.Stack_to_locals`, `Hike.Kb`, `Hike.Bil2llvm` (S10b dissolved the
+`Convutils` drawer: the Vsa record lives in `Stack_model`, the emitter
+state in `Bil2llvm_env`). Consumers name these modules and nothing else — the entry point `Hike` is the plugin's pass pipeline, not a namespace.
 _Avoid_: `Hike__X` (the dune-internal name), `Hike__.X` (the generated wrapper alias, whose resolution is unreliable)
 
 **Test Seam** (`Cbat_vsa.Test_seam`): The quarantined module carrying every vendored-VSA name consumed only by test_cbat and the probes (the walk internals, assume/refine/denote, the fixtures' constraint grammar, `mk_rctx`/`walk_budget`). Production `src/` consumes the interface above it and nothing in the seam; a name in the seam must never leak into a production signature.

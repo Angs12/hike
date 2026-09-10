@@ -2,9 +2,11 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
+
 
 module StrSet = Set.Make (String)
+
+let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
 (* Intrinsics are owned by the emitter; the filter shares the facts. *)
 let is_intrinsic = Bil2llvm.is_intrinsic

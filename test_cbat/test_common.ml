@@ -100,8 +100,10 @@ let sp = v64 "RSP"
 
 module Kb = Hike.Kb
 module Sm = Hike.Stack_model
+(* The record vocabulary (S10b: the Vsa record moved into Stack_model;
+   test_fixtures resolves [Cu] through this open). *)
+module Cu = Hike.Stack_model
 module Stl = Hike.Stack_to_locals
-module Cu = Hike.Convutils
 module B2l = Hike.Bil2llvm
 module Hv = Hike.Vsa
 

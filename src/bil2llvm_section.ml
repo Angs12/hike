@@ -1,7 +1,6 @@
 (* Emitter section lane: symtab remap, section globals, const-address loads. *)
 
 open Bap.Std
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
@@ -13,7 +12,7 @@ open Bil2llvm_env
    so unresolvable sites stay sound; resolved sites call the promoted
    body directly and never consult this rendering. *)
 let lookup_native_fn ctx llvm_module v =
-  match ctx.Convutils.symtab with
+  match ctx.symtab with
   | Some symtab -> (
       match Symtab.find_by_start symtab (Word.of_int64 ~width:64 v) with
       | Some (name, _, _) ->
@@ -21,7 +20,7 @@ let lookup_native_fn ctx llvm_module v =
           (match fn with
            | Some f ->
                (match Base.List.Assoc.find ~equal:String.equal
-                        !(ctx.Convutils.thunks) name with
+                        !(ctx.thunks) name with
                 | Some twin -> Some twin
                 | None -> Some f)
            | None -> None)
@@ -34,7 +33,7 @@ let remap_native_addr ctx llvm_ctx llvm_module v =
   | Some f -> Some (Llvm.const_ptrtoint f (Llvm.i64_type llvm_ctx))
   | None -> (
       match
-        Base.List.find ctx.Convutils.section_remap ~f:(fun (lo, hi, _) ->
+        Base.List.find ctx.section_remap ~f:(fun (lo, hi, _) ->
             Int64.compare lo v <= 0 && Int64.compare v hi <= 0)
       with
       | Some (lo, _, g) ->
@@ -63,7 +62,7 @@ let create_section_global llvm_ctx llvm_module size name ~is_const =
 (* Reads a stashed .text constant. *)
 let text_load_constant ctx llvm_ctx llvm_module addr w =
   let v = Word.to_int64_exn addr in
-  match ctx.Convutils.text_section with
+  match ctx.text_section with
   | Some (arr, tmin, tmax)
     when Int64.compare v tmin >= 0 && Int64.compare v tmax <= 0 ->
       let off = Int64.to_int (Int64.sub v tmin) in
@@ -154,14 +153,14 @@ let create_addr_ptr llvm_builder llvm_val =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  match !(ctx.Convutils.frame_wrap_license) with
+  match !(ctx.frame_wrap_license) with
   | true ->
       (* The license proves the storage: a licensed address requires a
          Range/Infinite tag on some def, and a tagged sub always owns
          stack storage (a frame or a region split) — the anchor is
          present. *)
       let frame, anchor_i64, anchor_idx =
-        match !(ctx.Convutils.stack_anchor) with
+        match !(ctx.stack_anchor) with
         | Some anchor -> anchor
         | None ->
             failwith "licensed address in a storage-free sub (no anchor)"
@@ -185,7 +184,7 @@ let section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size =
   let open KB in
   let* base = resolve_addr_in llvm_builder section addr in
   if
-    Base.List.exists ctx.Convutils.copy_relocs ~f:(fun a ->
+    Base.List.exists ctx.copy_relocs ~f:(fun a ->
         Int64.equal a addr_i64)
   then
     (* Loads through copy-relocated pointers. *)
