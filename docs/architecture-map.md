@@ -58,6 +58,9 @@ flowchart TB
         PRED --> DEEP
     end
 
+    JUMPC["THE JUMP COMPILER (the guard-decoding layer,<br/>inside the walk): decoded_condition decodes the<br/>jcc idioms (the cond decoder); decoder_constraint's<br/>rows compile flag idioms to value-comparison<br/>constraints; the complement rows serve false-edge<br/>state refinement; the acquisition probe (polarity-aware,<br/>T8-repaired) feeds landmark acquisition"]
+    JUMPC --> DEEP
+
     PRED2["is_stack_access addr st =<br/>the ONE predicate:<br/>the address's DENOTATION is a<br/>stack-symbolic set inside the segment<br/>(T3c: the escape and every second<br/>channel are DELETED)"]
 
     subgraph TAGS["the tag product (vsa_info — facts, not flags)"]
@@ -74,6 +77,7 @@ flowchart TB
 
     SPLIT["regions_of_sub + split_plan:<br/>connected components of the<br/>interval-overlap graph; storage class<br/>Static / Frame / Dynamic / Dead<br/>(purely geometric post-T3c)"]
 
+    SEED --> FIXP --> JUMPC
     SEED --> FIXP --> PRED2 --> TAGS
     PRED2 --> CS --> PROM
     TAGS --> SPLIT
@@ -124,6 +128,7 @@ flowchart LR
     T3cr["T3c: the escape DELETED entirely<br/>(the partition reads the denotations;<br/>the -O2 pin moved 6 -> 4:<br/>fizzbuzz_safe + fptr_table flipped green)"]
     T4r["T4: the grilled convention<br/>(promotion, the SP Slot, resolved<br/>indirect calls, internal thunks,<br/>hike_window) — ahead of all four<br/>prior lifters; no precedent to lean on"]
     T4br["T4b: conversion correctness<br/>(four constructed rules, zero gates:<br/>Unknown seeding, node-served Caller lane,<br/>stored-value slot args, written-slot<br/>demotion — strict -O0 32/5 -> 37/37)"]
+    T13["T13 (queued): THE JUMP-COMPILER PASS —<br/>a new BAP pass compiles every jcc flag idiom<br/>to an actual value comparison ONCE, before the VSA:<br/>the VSA consumes plain comparisons (the decoder<br/>rows and complement table shrink to the comparison<br/>core), the emitter emits icmp directly —<br/>decoupled, more optimizable LLVM, no jcc"]
     DOCT["THE DOCTRINE (binding):<br/>NO GATES — no conditional refusals<br/>NO FALLBACKS — identity is the only fallback<br/>ONE MECHANISM — the denotation answers everything<br/>FIX THE ARCHITECTURE, NOT THE IMPLEMENTATION —<br/>the fix's diff DELETES cases<br/>CONVERSION FIRST — failures are inventoried"]
 
     ADR3 --> T3r
