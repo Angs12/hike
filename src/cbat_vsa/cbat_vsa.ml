@@ -401,27 +401,40 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   Stages.report (Sub.name s);
   Solution.create (!rc_cell).rc_state.fs_sol sol_default
 module Cbat_extraction = struct
-(* Classification vocabulary.  [Caller] is the producer's lane split
-   (D1): a bounded span entirely at/above the entry RSP is ABI-visible
-   caller-window traffic (incoming stack args, the return-address
-   slot) — the emitter routes it through the hike_stack lane; Range/
-   Infinite (spans reaching below the entry RSP, including mixed) are
-   this sub's frame lane. *)
+(* Classification vocabulary — the producer's lane split (D1 + the
+   mixed-class finding):
+   - [Range]/[Infinite]: the span lies ENTIRELY below the entry RSP —
+     this sub's own frame (the uniform frame rule).
+   - [Caller]: the span lies entirely at/above the entry RSP —
+     ABI-visible caller-window traffic (incoming stack args, the
+     return-address slot) — the hike_stack lane.
+   - [Mixed]: the span is two-sided or wrapped (a va_list pointer that
+     is the reg-save area OR the overflow area, an ITE'd address, a
+     widened hull crossing the entry RSP): the runtime address is
+     GENUINELY either-based, and the emitter's complete rule for the
+     class is the two-base select (no single-base rule is sound —
+     measured on variadic/factorial/va_arg_vacopy). *)
 type kind =
   | Range of int64 * int64
   | Infinite of int64 * int64
   | Caller of int64 * int64
+  | Mixed of int64 * int64
   | Unbounded
   | Dead
   | VLA of Tid.t
 [@@deriving equal]
 
-(* The own/caller split: positives become Caller. *)
+(* The lane split: entirely-above -> Caller; entirely-below -> Range;
+   everything else (two-sided, wrapped) -> Mixed. *)
 let caller_split (k : kind) : kind =
+  let cmp = Stdlib.Int64.compare in
+  let ordered lo hi = cmp lo hi <= 0 in
   match k with
-  | Range (lo, hi) when Stdlib.Int64.compare lo 0L >= 0 -> Caller (lo, hi)
-  | Infinite (lo, hi) when Stdlib.Int64.compare lo 0L >= 0 -> Caller (lo, hi)
-  | Range _ | Infinite _ | Caller _ | Unbounded | Dead | VLA _ -> k
+  | Range (lo, hi) | Infinite (lo, hi) ->
+    if ordered lo hi && cmp lo 0L >= 0 then Caller (lo, hi)
+    else if ordered lo hi && cmp hi 0L <= 0 then k
+    else Mixed (lo, hi)
+  | Caller _ | Mixed _ | Unbounded | Dead | VLA _ -> k
 
 (* The offset-space twin of a stack denotation (the tag universe);
    identity for non-stack values is NOT sound (a foreign address would
@@ -609,7 +622,8 @@ let rec extract ~(dynamic_alloc : def term -> bool)
   let span_of = function
     | Range (lo, hi) -> (lo, hi)
     | Infinite (lo, hi) -> (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
-    | Caller (lo, hi) -> (lo, hi)
+    | Caller (lo, hi) | Mixed (lo, hi) ->
+      (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
     | Unbounded | Dead | VLA _ -> (0L, 0L)
   in
   let merged_tags : kind Tid.Map.t =
@@ -617,7 +631,7 @@ let rec extract ~(dynamic_alloc : def term -> bool)
       Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
           match kind with
           | Range _ -> true
-          | Infinite _ | Caller _ | Unbounded | Dead | VLA _ -> false)
+          | Infinite _ | Caller _ | Mixed _ | Unbounded | Dead | VLA _ -> false)
     in
     let items = bounded in
     (* Transitive overlap components. *)

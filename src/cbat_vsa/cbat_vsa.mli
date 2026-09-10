@@ -31,6 +31,7 @@ module Cbat_extraction : sig
     | Range of int64 * int64
     | Infinite of int64 * int64
     | Caller of int64 * int64
+    | Mixed of int64 * int64
     | Unbounded
     | Dead
     | VLA of Tid.t

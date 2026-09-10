@@ -276,7 +276,7 @@ let frame_addr_alias ~(facts : def_facts Tid.Map.t) (sp : var)
         let untagged =
           match Core.Map.find offsets (Term.tid f.def) with
           | None -> true
-          | Some (Convutils.Range _ | Convutils.Caller _
+          | Some (Convutils.Range _ | Convutils.Caller _ | Convutils.Mixed _
                   | Convutils.Dead) -> false
           | Some (Convutils.Infinite _ | Convutils.Unbounded
                   | Convutils.VLA _) -> true
@@ -375,8 +375,8 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
       ~f:(fun (kind : Convutils.vsa_kind) ->
         match kind with
         | Convutils.Range (lo, hi) -> Some (lo, hi)
-        | Convutils.Infinite _ | Convutils.Caller _ | Convutils.Unbounded
-        | Convutils.Dead | Convutils.VLA _ -> None)
+        | Convutils.Infinite _ | Convutils.Caller _ | Convutils.Mixed _
+        | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> None)
   in
   let facts =
     (* One walk for the widths (the only per-def BIL fact still needed). *)
@@ -533,6 +533,15 @@ let degraded_geometry (sub : sub term) ~(abi : Abi.t)
               else neg
             in
             (neg, unb)
+        | Convutils.Mixed (lo, _) ->
+            (* The mixed class's frame arm indexes the frame for the
+               below-entry truths: the negative extent sizes it. *)
+            let neg =
+              if Int64.compare lo 0L < 0 then
+                Int64.max neg (Int64.neg (Int64.min lo 0L))
+              else neg
+            in
+            (neg, unb)
         | Convutils.Caller _ -> (neg, unb)
         | Convutils.Unbounded -> (neg, true)
         | Convutils.Dead -> (neg, unb)
@@ -564,6 +573,11 @@ let frame_dims (sub : sub term) ~(abi : Abi.t)
               (* Post-split Range/Infinite always reach below the entry
                  RSP; the caller window ([Caller]) never sizes the frame. *)
               (Int64.min lo l, Int64.max hi h)
+          | Convutils.Mixed (l, h) ->
+              (* Two-sided: the below-entry side sizes the frame (the
+                 select routes above-entry words to hike_stack); the
+                 span may be wrapped, so fold both extrema. *)
+              (Int64.min lo (Int64.min l h), Int64.max hi (Int64.max l h))
           | Convutils.Caller _ | Convutils.Unbounded | Convutils.Dead
           | Convutils.VLA _ -> (lo, hi))
     in
