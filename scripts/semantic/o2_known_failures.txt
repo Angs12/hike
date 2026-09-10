@@ -3,32 +3,18 @@
 # iff the failing set equals this list EXACTLY. Any difference is red —
 # newly failing = REGRESSION, golden-listed now passing = IMPROVEMENT —
 # and forces a deliberate update of this file + AGENTS.md (the
-# re-baseline rule). State: 25/7 at 7e7bd26 (deep_recursion flipped green
-# in the simplification program's lane 3, byte-identical otherwise).
+# re-baseline rule).
 #
-# Attributions are NO LONGER provisional: see
-# .scratch/o2-attribution/verdict.md — the seven are four mechanisms:
-# L1 emitter poison arms (fizzbuzz_safe, va_arg_mixed, array_local p.),
-# L2 missing hike_stack rebase (va_arg_vacopy), L3 SSE lane-promotion
-# def-use (union_overlap, byte_copy, array_local p.), L4 data-section
-# relocation rendering (fptr_table).
-byte_copy       # L3 (escape-class prior killed)
-union_overlap   # L3 (stale lane-phi state; Unbounded store is a red herring)
-va_arg_mixed    # L1 (alignment-guard trap live; secondary stall re-check due)
-va_arg_vacopy   # the va_list state round-trip in the -O2 lift (re-attributed 2026-09-10: T3 deleted the L2 lo<0 arm structurally and the failure persists)
-#
-# 2026-09-10 T3c IMPROVEMENT (the re-baseline rule, deliberate): the
-# denotational escape rule changed two subs' storage decisions and the
-# -O2 lifts of fizzbuzz_safe (L1 lifted-ud2 no longer reached) and
-# fptr_table (L4) PASS the harness. Golden list moves 6 -> 4; measured
-# 29 PASS / 4 FAIL, failing set == this list (see the T3c verdict).
-#
-# 2026-09-10 corpus incident (recorded so it is never repeated): a rebuild
-# invoked `compile_corpus.sh /tmp/corpus_o2` (underscore) which the script's
-# -o2-suffix rule treated as an -O0 out dir — /tmp/corpus_o2 became a
-# byte-identical -O0 COPY and every -O2 gate silently re-tested -O0 binaries
-# (one battery "passed 33/33 strict" on it; the golden list was briefly and
-# wrongly emptied). Repaired from /tmp/corpus-o2; scripts/battery.sh now
-# canary-guards the lanes (byte_copy / fizzbuzz_safe must differ from -O0).
-# VERIFIED on the repaired corpus with the typed-model wave-1 plugin
-# (bundle 29c2bb3d9e2e05a2): 27 PASS / 6 FAIL, failing set == this list.
+# State: 28/9 at the T4 merge (9b06689, bundle 76cb1c1b0ce17d16) — the
+# conversion's inventoried reds. The corpora are 37 bins (T4 added the
+# four indirect-call sources; NOTE the agent rebuilt /tmp/corpus* in
+# place — against its isolation instruction; canaries verify the lanes).
+byte_copy       # L3 SSE lane def-use (T5)
+fizzbuzz_safe   # regressed at the T4 merge — re-attribute under the promoted model (T4b/inventory)
+fn_escape       # NEW T4 source: the thunk path — conversion-correctness class (T4b)
+fn_table_disp   # NEW T4 source: multi-target dispatch — conversion-correctness class (T4b)
+jump_table_sw   # NEW T4 source: fails at -O2 only (T4b/inventory)
+spill_many      # regressed at the T4 merge — re-attribute (T4b/inventory)
+union_overlap   # L3 SSE lane def-use (T5)
+va_arg_mixed    # L1 poison/alignment-guard class (unchanged by T4)
+va_arg_vacopy   # the va_list state round-trip — T4's claimed improvement did NOT reproduce on the merged tree (T4b re-attributes)
