@@ -93,11 +93,22 @@ legacy memory convention).
 ## The retirement inventory (from T3c's blocked-by-T4 section)
 
 Everything T3c records as blocked by the parameter convention lands
-here: the caller-window materialization lane, the Mixed two-base
-select (dies except where the va_arg bridge genuinely needs it —
-re-attributed in the verdict), the precise SP-binds-to-param arm, the
-constant-anchor arm, the `sp_restores` edge-keyed mechanism as it
-intersects the SP Slot.
+here (its verdict's BLOCKED-BY-T4 section is the list):
+- the caller-window materialization lane and the Mixed two-base select
+  (die except where the va_arg bridge genuinely needs them — each
+  survivor re-attributed in T4's verdict);
+- the `llvm.stacksave` SP bridge T3c installed for the entry sub
+  (replaced by the SP Slot's private anchor);
+- the `sp_restores` edge-keyed post-call SP mechanism (intersects the
+  SP Slot; dies if the slot subsumes it);
+- the 21 subs T3c honestly returned to the Frame model — their region
+  precision RECOVERS under the SP Slot anchor (T4's acceptance
+  measures the recovery per sub);
+- the `prove_nonneg` seed-flag whose denotational replacement measured
+  red (T3c inventory): re-attempt ONLY if T4's model change dissolves
+  the old failure — measured, never forced;
+- the servability clause in `regions_of_sub` and the region-GEP lane
+  T3c flagged as decorative under the private anchor.
 
 ## Battery protocol (you hold the shared plugin slot in your wave)
 

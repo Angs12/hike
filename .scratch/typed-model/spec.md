@@ -1,9 +1,11 @@
 # The typed-model program — convergence, soundness, simplicity
 
 Label: ready-for-agent
-Settled: 2026-09-10 (grilling sessions; decisions are the owner's)
-Supersedes: the open items of `.scratch/o2-attribution/` (tickets 01–04
-landed; their remaining findings are absorbed here).
+Settled: 2026-09-10 (grilling sessions; decisions are the owner's);
+UPDATED 2026-09-10 late: T1/T2/T6/T3/T3c landed, the -O2 corpus
+incident corrected, T4's design grilled and settled, the doctrine in
+its final form.
+Supersedes: the open items of `.scratch/o2-attribution/`.
 
 ## Binding constraints (every ticket, no exceptions)
 
@@ -13,185 +15,223 @@ landed; their remaining findings are absorbed here).
 - **NO FALLBACKS.** Every form has a complete emission rule. The only
   sound fallback is the identity (TOP / the plain access) — never
   BOTTOM, never a stop, never a silent trap.
+- **THE ONE MECHANISM (owner doctrine, final form).** The symbolic
+  stack base finds stack accesses (`is_stack_access` over the
+  denotation), resolves call targets, and answers every producer
+  question. No `is_seed` flags, no SP-derived closures, no escape
+  fact, no second channel — removed, not reformed. Consumers read the
+  denotations directly.
+- **CONVERSION FIRST (owner directive).** Removals land as removals.
+  Failures caused by a removal are INVENTORIED (gate, binary,
+  reproduction command), never patched, compensated, rolled back, or
+  ticketed for fixing. The model changes significantly in T4; only
+  failures SURVIVING the new model get ticketed afterward. Hard bars
+  that survive this doctrine: both profiles build, the instrumentation
+  blocker clean, the differential referee at 0 mismatches (a soundness
+  red is flagged loudly, never landed silently).
 - **Soundness over precision, always.** The semantic harness is the
   oracle; the pin (`o2_known_failures.txt`) moves only in the commit
   that deliberately changes it.
 
 ## Problem Statement
 
-The typed frame model is now the only stack model, and it delivered
-(array_local flipped, factorial split, byte_copy's conversions halved).
-But the program that makes both the -O0 and the -O2 lifts converge to
-the same optimized result is unfinished: two sources miscompile after
-the consumer's optimizer (a typed-model regression), six -O2 sources
-still diverge (the known classes), the provenance machinery still
-carries a fiction the typed model no longer needs, and the changes and
-removals left cruft behind.
+The typed frame is the only stack model, and the symbolic stack base
+is its provenance (T3 landed; the -O2 pin moved 6→4 when the escape
+died — the owner's "more precise and correct" prediction held). What
+remains: stack-passed values still flow through memory and hide from
+the consumer's interprocedural optimizer (the convergence class); the
+SP is still threaded as a function argument instead of living in an
+entry-block alloca; indirect calls still funnel through one synthetic
+signature; the va_list still walks caller-window memory. The program
+converts the model to its endgame form: values in registers, SP in a
+slot, targets resolved by denotation — correctly first, fixes only for
+what survives the conversion.
 
 ## Solution
 
-One ordered program: fix the regression, simplify what the removals
-orphaned, replace the provenance fiction with a symbolic stack base and
-a single denotation predicate, promote stack args to registers, fix the
-SSE lane def-use and the data relocations — each ticket behind the full
-battery, each verdict reporting convergence movement.
+One ordered program: T4 converts the emission convention (promotion +
+the SP Slot + VSA-resolved indirect calls + internal thunks + the
+renamed caller-window residual); T5 fixes the SSE lane def-use; T9
+re-models va_list and retires even the window bridge; surviving
+failures become tickets after T4's battery re-measures them.
 
 ## User Stories
 
 1. As a binary-analysis consumer, I want the -O0 lift and the -O2 lift
    of the same source to optimize to equivalent results, so that my
    analysis pipeline does not depend on how the binary was built.
-2. As a binary-analysis consumer, I want the optimized -O0 lift to keep
+2. As a binary-analysis consumer, I want the optimized lift to keep
    every observable behavior of the input binary, so that lifted tools
    are trustworthy under aggressive optimization.
-3. As a binary-analysis consumer, I want struct-copy-heavy programs
-   (nested_struct, struct_by_value) to survive opt-21 -O2 unchanged in
-   behavior, so that the typed model is safe for memory-dense code.
-4. As a binary-analysis consumer, I want the SSE-vectorized -O2 code
-   (lane webs) to lift to correct, folded results, so that optimized
-   inputs are first-class.
-5. As a binary-analysis consumer, I want data-section pointers
-   (relocated constants) to resolve to real lifted addresses, so that
-   indirect calls through tables work.
-6. As the pipeline maintainer, I want the VSA's provenance to be one
-   denotation predicate over a sound word domain, so that there is no
-   second mechanism to keep consistent.
-7. As the pipeline maintainer, I want the offset fiction gone from the
-   word lane, so that guard expressions evaluate on sound values by
-   construction and value_env stays deleted.
-8. As the pipeline maintainer, I want every emission rule to be complete
-   per tag kind, so that no arm depends on "this cannot happen".
-9. As the pipeline maintainer, I want the Dead classification loud
-   (warned) and rare, so that silent misclassifications surface.
-10. As the pipeline maintainer, I want post-removal dead code deleted in
-    the same program that removed the feature, so that the tree stays
-    honest about what exists.
-11. As the pipeline maintainer, I want stack-arg traffic promoted to
-    call arguments, so that the consumer's interprocedural optimizer can
-    see values that the model currently hides in memory.
+3. As a binary-analysis consumer, I want stack-passed values to reach
+   the optimizer as call arguments, so that interprocedural constant
+   propagation folds across calls (the convergence class collapses).
+4. As a binary-analysis consumer, I want each sub's stack to be its
+   own frame, so that recursion is reentrancy-safe and LLVM's SROA
+   sees private, scalarizable storage.
+5. As a binary-analysis consumer, I want indirect calls resolved by
+   the VSA's denotation of the target, so that table dispatch lifts to
+   direct, optimizable calls.
+6. As a binary-analysis consumer, I want unresolvable indirect sites
+   to stay sound through internal thunks, so that resolution failure
+   costs convergence, never correctness.
+7. As a binary-analysis consumer, I want SSE-vectorized code to lift
+   to correct, folded results, so that optimized inputs are
+   first-class.
+8. As a binary-analysis consumer, I want variadic code to lift
+   correctly without a stack parameter, so that the no-SP-parameter
+   convention is total (the va_list re-model).
+9. As the pipeline maintainer, I want the denotation to be the only
+   provenance mechanism, so that there is no second channel to keep
+   consistent.
+10. As the pipeline maintainer, I want every emission rule complete
+    per tag kind, so that no arm depends on "this cannot happen".
+11. As the pipeline maintainer, I want removals to land as removals,
+    so that the tree honestly reflects the model and conversion
+    failures are never papered over with machinery.
 12. As the pipeline maintainer, I want the convergence report to stay
     the single instrument, so that each lane's verdict states its
     movement in one place.
 13. As a corpus consumer, I want the pin to fail on any unexplained
-    change to the -O2 red list, so that regressions and improvements are
+    -O2 red-list change, so that regressions and improvements are
     equally deliberate.
-14. As a corpus consumer, I want the -O0 gate to stay 33/33, so that the
-    primary oracle never regresses while -O2 work proceeds.
-15. As the pipeline maintainer, I want the 8 pre-existing unit failures
-    triaged, so that the suite's silence means green.
+14. As a corpus consumer, I want indirect-call behavior covered by
+    dedicated corpus sources and unit pins, so that the resolution
+    classes are tested, not assumed.
+15. As the pipeline maintainer, I want the surviving-failure tickets
+    created only after the new model's battery, so that no lane chases
+    breaks the conversion dissolves.
 
 ## Tickets
 
-### T1 (P0) — the typed-model opt-safety regression
+### LANDED (2026-09-10) — T1, T2, T6, T3, T3c
 
-nested_struct and struct_by_value: unoptimized correct, post-opt-21
-DIFF (strict gate 31 PASS / 2 FAIL on `/tmp/emit_typed_o0`). Align-1
-hypothesis tested and rejected; the failing set is stable; the
-single-pass auto-bisect exonerates every pass → a pass-combination
-interaction. The fix must be the GENERAL address-materialization rule
-(the one rule every access goes through), never a per-shape patch.
-Diagnose via per-pair bisection and the IR delta against the
-offset-model emission (`/tmp/emit_l1_o0`, opt-green for both).
-Owner: emitter/typed-model. Size M.
+- **T1**: the frame-wrap license (the typed GEP requires the
+  producer's frame-residency license); opt-safety 31/2 → 33/33.
+- **T2**: the simplification pass (−41 LOC, structural identity).
+- **T6**: section initializers render after `emit_program` through the
+  code-reference map.
+- **T3**: the symbolic stack base — the segment universe, the one
+  denotation predicate, relativized tags, `value_env` and the frame
+  relation deleted, the uniform materialization rule.
+- **T3c**: the escape deleted ENTIRELY; the partition reads the
+  solution's denotations; every second mechanism removed; the -O2 pin
+  moved 6→4 (fizzbuzz_safe, fptr_table flip green). Inventory: the
+  seed-flag denotational replacement measured red and was reverted
+  (reproduction in the verdict); 21 subs honestly returned to the
+  Frame model pending T4's anchor; the entry sub's SP binds via
+  `llvm.stacksave` as the bridge.
+- **The -O2 corpus incident**: `/tmp/corpus_o2` was a mislabeled -O0
+  copy (the sp_reload-era rebuild missed the `-o2` suffix rule);
+  repaired from `/tmp/corpus-o2`; `scripts/battery.sh` canary-guards
+  the lanes (byte_copy/fizzbuzz_safe must differ from -O0).
 
-### T2 (P1) — the simplification pass
+### T4 (P1, NEXT) — stack-arg promotion + the SP convention
 
-Sweep everything the removals orphaned: dead values (e.g.
-`equal_int64_pair`), stale comments mentioning deleted machinery, mli
-over-exposures, unused fixture builders. The tree carries no dangling
-references after this pass. Size S.
+The authority is the ticket:
+`.scratch/typed-model/tickets/T4-stack-arg-promotion.md` (the grilled
+design, commit 5bcb538). In brief:
 
-### T3 (P1) — the symbolic stack base + single-channel tagging
+1. **Promotion** — per-slot, total over resolved sites: proven
+   incoming slots become parameters; callers' outgoing stores become
+   call arguments. Widths: promote at the stored width, narrower reads
+   truncate, a wider read demotes the slot. Unprovable slots stay on
+   the window (mixed per-slot).
+2. **The SP Slot** — every memory-touching sub gets an entry-block
+   alloca holding its per-invocation anchor (ptrtoint of its own
+   frame / region base). NO sub takes an SP parameter; `hike_stack`
+   and both T3 binding arms retire (plus the `llvm.stacksave` bridge
+   and the `sp_restores` mechanism per the T3c handoff).
+3. **Indirect calls resolve through the VSA** — the target's
+   denotation classifies the site: singleton lifted sub → direct call
+   through its promoted signature (a Resolved Call Site);
+   multi-target/foreign/unresolvable → the pointer call through the
+   Thunk. Target-authoritative signatures; sites storing fewer slots
+   pass undef (reading an unpassed arg is UB in the binary too).
+4. **Thunks** — internal-linkage memory-convention twins of
+   address-taken promoted subs; fn-pointer data renders to the twin;
+   no target ever demotes.
+5. **Caller-Window Parameter** — the residual (variadic bridge +
+   mixed unproven remainder), RENAMED from `hike_stack`;
+   `check_allocas`' sp-roots modernize in the same commit.
+6. **Tests** — four new corpus sources (`fn_table_disp`,
+   `jump_table_sw`, `fn_single`, `fn_escape`; corpus 33 → 37,
+   deliberate) + unit pins for the four resolution classes and the
+   thunk shape (the existing Test_seam/corpus seams, no new seams).
+7. **Retirement inventory** — everything in T3c's verdict BLOCKED-BY-T4
+   section lands here, each item's disposition (died/bridged/
+   re-attributed) in T4's verdict.
 
-Seed entry RSP's word with the bounded model stack segment
-(`[2^62, 2^62 + 8MiB]`); one predicate `is_stack_access addr st` = the
-denotation is a bounded set inside the segment; the tag = the denotation
-minus the base. Delete the frame relation and `value_env` — the L1 class
-is structurally impossible (bitwise/compares on segment words go
-TOP-unknown). Includes the 7-pin modernization (the cell-key universe
-shift) and the segment-word consistency of the memory lane. The failed
-WIP's lesson is recorded: the seed without relativized tags broke 22/33
-— the flip is one coordinated change, validated end-to-end. Size M.
-
-**The general rule this ticket installs (and which subsumes the old
-per-tag address dispatch): every address word materializes as ONE
-uniform step — `ptr = frame + (word − stack_0)` — total over all words,
-all signs, all widths. No positive/negative arms, no rebase selects, no
-span cases. The old per-tag dispatch (singleton-positive rebase,
-negative GEP, dynamic inttoptr) is deleted by this rule, and with it the
-L2 mixed-span special case.
-[LANDED 2026-09-10: the Mixed class (two-sided/wrapped spans — the
-va_list reg-save-or-overflow pointer) materializes via the two-base
-rule `select(word >= stack_0, hike_stack + (word - stack_0), raw word)`
-— argued a complete rule, not a gate: the condition is exact (the sign
-of the anchor-relative offset IS the boundary), both arms materialize
-soundly, the rule never refuses; no single base is sound (measured).
-See the T3 verdict; the "no selects" letter above is amended to "no
-tag-shape dispatch arms".]
-
-### T4 (P1) — stack-arg promotion
-
-ALL stack args pass as call arguments — uniformly. The SysV convention
-fixes the correspondence (the callee's incoming slots at
-[entry_rsp + 8 + 8·i]; each caller stores the same slot relative to the
-call's rsp), so the promotion is total: the callee's incoming stack
-reads become parameters, the caller's outgoing stores become call
-arguments — no provenness condition, no per-slot cases. Convergence
-prize: the memory-passed class (deep_chain 323/4, many_args 133/4,
-spill_many 134/4, nested_calls 75/4, alloca_vla 95/4, mixed_fp_int
-68/4, union_overlap 166/4). Size M.
+Convergence prize (measure vs the pre-T4 reference): deep_chain,
+spill_many, many_args, alloca_vla, nested_calls, mixed_fp_int,
+union_overlap collapse toward their o2+opt counts.
 
 ### T5 (P2) — L3: the SSE lane def-use fidelity
 
-byte_copy, union_overlap, fizzbuzz_safe's residual, array_local's 0.18
-convergence gap: lane-consuming ops must meet the lane defs written
-earlier in the same iteration (the producer-subtraction discipline), and
-vector store loops must advance. The biggest convergence lever after
-T4.
+Re-scoped to the 4-knowns world: byte_copy and union_overlap (the L3
+class), array_local's convergence gap, and whatever -O2 shapes the
+four new indirect-call sources add. Lane-consuming ops must meet the
+lane defs written earlier in the same iteration (the
+producer-subtraction discipline); vector store loops must advance.
+Blocked-by: T4 (its promotions change the measured class; the
+accounting order holds).
 
-### T6 (P3) — L4: data-section relocation rendering
+### T9 (P2, NEW) — the va_list re-model
 
-fptr_table: relocated data words (`R_X86_64_RELATIVE` addends) must
-render as lifted-world addresses, not raw original vaddrs. Size M.
+Retire the caller-window parameter for variadic subs: the va_list
+overflow becomes model-local storage (an alloca'd overflow array the
+va_list walks, populated from the promoted parameters), or the
+LLVM-variadic tail — the implementer measures both against the
+no-second-mechanism doctrine and lands one. va_arg_mixed and
+va_arg_vacopy (the va_list state round-trip) are the measured class.
+Blocked-by: T4. After T9, NO sub takes a window parameter unless a
+mixed unproven remainder demonstrably survives.
 
-### T7 — DISSOLVED into T3
+### T7 — DISSOLVED (re-attributed)
 
-The mixed-sign span GEP-select was a special case by construction. Under
-T3's uniform materialization (`frame + (word − stack_0)`, total over all
-words), there are no sign cases and no selects. Any va_arg overflow
-residual is re-attributed after T3 lands.
+The L2 mechanism is structurally deleted (T3) and the failure
+persisted → the va_arg_vacopy residual is the va_list state
+round-trip; T9 owns it. va_arg_mixed stays L1 (the ud2 poison arm) —
+re-attributed in T4/T9's verdicts if the class moves.
 
 ### T8 — the 8 pre-existing unit failures (owner triage)
 
-E2eD-7/8 and the LM F1 pins fail on the pristine tip (measured via
-`git stash`); ready-for-human.
+E2eD-7/8 and the LM F1 pins fail on the pristine tip; ready-for-human.
+T3c's seed-flag replacement attempt (reverted) is inventoried in its
+verdict as T8-adjacent evidence.
 
 ## Testing Decisions
 
 - The seams are the existing ones — no new seams: the corpus battery
-  (`run_corpus` → `run_semantic` → `check_allocas` →
-  `run_semantic_opt`), the unit suite + the differential referee, the
-  convergence report, the pin, and the probes (`dead_diag`,
-  `width_diag`, `dump_tags`).
+  (`battery.sh`: provenance canaries → runtest+referee → emission →
+  check_allocas → strict semantics → strict opt-safety → the pinned
+  gate → the convergence report), the unit suite via the
+  `Cbat_vsa.Test_seam` quarantine, and the probes.
+- T4's indirect-call tests ride the corpus seam (new synth sources,
+  both -O0 and -O2 lanes) and the Test_seam (the resolution-class
+  pins) — the highest existing seams.
 - A good test asserts external behavior (stdout/rc vs native) or a
   recorded metric movement — never internal representation details.
-- Per-lane accounting: every ticket's verdict reports its red-list
-  movement; the pin moves only deliberately.
+- Conversion-first accounting: a removal lane's verdict carries the
+  FAILURES INVENTORY; fix tickets exist only for failures that survive
+  the next model change's battery.
 
 ## Out of Scope
 
-- Fold-recovery (re-materializing computations the -O2 compiler folded
-  into constants) — the owner chose the quality-envelope bar.
-- Struct-typed frames (field-GEP per cell) — deferred; per-access
-  splitting is LLVM SROA's job under the typed model.
+- Fold-recovery — the owner chose the quality-envelope bar.
+- Struct-typed frames (field-GEP per cell) — LLVM SROA's job.
+- Fixing inventoried failures before T4 lands — conversion first.
+- Foreign-signature modeling (PLT stubs as lifted-shaped subs) — the
+  pointer call with the memory convention covers them.
 - Calendar scheduling — per-lane accounting only.
 
 ## Further Notes
 
-- The new reference emission is `/tmp/emit_typed_o0` (33/33 semantics;
-  provenance src=a1253ff6826d632e bundle=96dd7386358c5dbd).
-- The segment-seed WIP was reverted (broke the corpus 22/33): the seed
-  without relativized tags and keys is unsound-by-incompleteness — T3 is
-  the full coordinated flip, not a seed.
+- The -O0/-O2 reference emissions are `/home/tovpr/tm-battery/
+  merge-t3c/emit-o0` and `.../emit-o2` (the T3c-merged tree;
+  provenance bundle `54e284d5d3441228`).
+- The pin is at 4 (byte_copy, union_overlap, va_arg_mixed,
+  va_arg_vacopy); the incident and its guard are recorded in the
+  golden file's header.
 - The 8 pre-existing unit failures and their triage are recorded in
   AGENTS.md's validation blocks.
