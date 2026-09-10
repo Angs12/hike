@@ -471,6 +471,44 @@ Merge `7a41070` + spec records `92ac41c`; ticket
 | unit suite | failure set == the pre-existing 8 (E2eD-7/8, LM F1-*; owner triage) ✅ |
 | plugin provenance | bundle sha16 `54e284d5d3441228` ✅ |
 
+**Last verified: 2026-09-10 EEST — T3c LANDED (the escape deleted
+entirely; the partition reads the denotations; the -O2 pin moves 6→4)**
+
+Branch `typed-model-program`, merge `7a41070` + specs `92ac41c`;
+battery `/home/tovpr/tm-battery/merge-t3c` (plugin bundle
+`54e284d5d3441228`):
+
+- The escape QUESTION died (owner doctrine: the symbolic stack base
+  answers everything): `frame_escapes`, `frame_escaped`,
+  `sp_derived_closure`, `outgoing_arg_stores`, `def_facts` and their
+  helper machinery are DELETED with no-caller proofs; `regions_of_sub`
+  takes the solution and reads the denotations directly (one predicate
+  family). The -O2 pin moved 6→4 (fizzbuzz_safe, fptr_table flip
+  green; 12 convergence quality-rows improved) — the owner's
+  "more precise and correct" prediction held. The golden list is at 4
+  (byte_copy, union_overlap, va_arg_mixed, va_arg_vacopy).
+- INVENTORY (conversion-first; NOT fixed): the `prove_nonneg`
+  seed-flag's denotational replacement measured red (L-D2/L-D6) and
+  was reverted — reproduction in the T3c verdict; 21 subs honestly
+  returned to the Frame model (precise only via the closure's
+  accident) pending T4's SP-Slot anchor; the entry sub's SP binds via
+  `llvm.stacksave` as the bridge.
+- The program spec was rewritten to the landed state: T4's grilled
+  design (VSA-resolved indirect calls, internal thunks, the SP Slot,
+  caller_window), T5 re-scoped, T9 (the va_list re-model) ticketed.
+
+| gate (the merged battery) | result |
+|---|---|
+| strict opt-safety (-O0) | **33 PASS / 0 FAIL** ✅ |
+| -O0 emission / semantics / allocas | **33/33 rc=0 / 33 PASS 0 FAIL / 165-0** ✅ |
+| -O2 emission / semantics pinned / allocas | **33/33 rc=0 / 29-4 set == golden / 165-0** ✅ |
+| referee | **2,861,148 / 0 mismatches** ✅ |
+| unit suite | failure set == the pre-existing 8 (T8, owner triage) ✅ |
+| plugin provenance | bundle sha16 `54e284d5d3441228` ✅ |
+
+Reference emissions: `/home/tovpr/tm-battery/merge-t3c/emit-{o0,o2}`.
+Next: T4 (the grilled promotion + SP convention), then T5, T9.
+
 **Last verified: 2026-09-10 EEST — T3 LANDED (the symbolic stack base +
 single-channel tagging; the offset fiction and `value_env` are GONE)**
 
