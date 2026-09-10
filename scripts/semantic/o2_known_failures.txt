@@ -3,16 +3,28 @@
 # iff the failing set equals this list EXACTLY. Any difference is red —
 # newly failing = REGRESSION, golden-listed now passing = IMPROVEMENT —
 # and forces a deliberate update of this file + AGENTS.md (the
-# re-baseline rule).
+# re-baseline rule). State: 25/7 at 7e7bd26 (deep_recursion flipped green
+# in the simplification program's lane 3, byte-identical otherwise).
 #
-# 2026-09-10, the typed-model program's merged battery (T1+T2+T6,
-# plugin bundle 29c2bb3d9e2e05a2): the list is EMPTY — the strict -O2
-# semantic gate passes 33/33 on a fresh emission. The recorded six
-# (byte_copy, fizzbuzz_safe, fptr_table, union_overlap, va_arg_mixed,
-# va_arg_vacopy) do not reproduce even from the PRE-T1 tree (T1's
-# verdict re-emitted from 775d616 unfixed: 33/33) — the -O2 corpus was
-# rebuilt for the sp_reload lane after the 26/6 record, and the
-# L1–L4 mechanisms are unobservable on the current binaries. The
-# mechanism records survive in .scratch/o2-attribution/verdict.md and
-# the typed-model tickets. The pin now guards an empty set: any new
-# -O2 semantic failure is a REGRESSION by definition.
+# Attributions are NO LONGER provisional: see
+# .scratch/o2-attribution/verdict.md — the seven are four mechanisms:
+# L1 emitter poison arms (fizzbuzz_safe, va_arg_mixed, array_local p.),
+# L2 missing hike_stack rebase (va_arg_vacopy), L3 SSE lane-promotion
+# def-use (union_overlap, byte_copy, array_local p.), L4 data-section
+# relocation rendering (fptr_table).
+byte_copy       # L3 (escape-class prior killed)
+fizzbuzz_safe   # L1 FIXED (poison gone); residual = L3 store-side (lifted-ud2 reachable)
+fptr_table      # L4 (raw un-relocated data addends; indirect-call prior killed)
+union_overlap   # L3 (stale lane-phi state; Unbounded store is a red herring)
+va_arg_mixed    # L1 (alignment-guard trap live; secondary stall re-check due)
+va_arg_vacopy   # L2 (lo<0 dynamic-load arm misses rebase_addr)
+#
+# 2026-09-10 corpus incident (recorded so it is never repeated): a rebuild
+# invoked `compile_corpus.sh /tmp/corpus_o2` (underscore) which the script's
+# -o2-suffix rule treated as an -O0 out dir — /tmp/corpus_o2 became a
+# byte-identical -O0 COPY and every -O2 gate silently re-tested -O0 binaries
+# (one battery "passed 33/33 strict" on it; the golden list was briefly and
+# wrongly emptied). Repaired from /tmp/corpus-o2; scripts/battery.sh now
+# canary-guards the lanes (byte_copy / fizzbuzz_safe must differ from -O0).
+# VERIFIED on the repaired corpus with the typed-model wave-1 plugin
+# (bundle 29c2bb3d9e2e05a2): 27 PASS / 6 FAIL, failing set == this list.

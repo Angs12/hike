@@ -431,12 +431,30 @@ Historical lane records and specs cited below live in git history (the
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
 **Last verified: 2026-09-10 EEST — THE TYPED-MODEL PROGRAM, WAVE 1
-LANDED (T1 + T2 + T6 merged on `typed-model-program`; the -O2 golden
-list is EMPTY; every source converges SAME/SAME)**
+LANDED (T1 + T2 + T6 merged on `typed-model-program`) + THE -O2 CORPUS
+INCIDENT FOUND AND REPAIRED (the pin holds at 27/6, set == the golden
+six)**
 
 The implement-spec PR branch `typed-model-program` (tickets + verdicts
 in `.scratch/typed-model/`), battery `/home/tovpr/tm-battery/merge-t1`:
 
+- **THE -O2 CORPUS INCIDENT (found by the owner challenging a
+  too-good result)**: a sp_reload-era rebuild invoked
+  `compile_corpus.sh /tmp/corpus_o2` — the underscore misses the
+  script's `-o2`-suffix test, so the script built -O0 BINARIES into
+  `/tmp/corpus_o2` (byte-identical 33/33 to `/tmp/corpus`) while the
+  real -O2 lane went to `/tmp/corpus-o2`. Every -O2 measurement
+  consuming the underscore dir silently re-tested -O0 binaries: one
+  battery "passed -O2 strict 33/33" on them, the convergence table
+  read SAME/SAME with i0=i2, and the golden list was briefly and
+  WRONGLY emptied (commit 7cfa53a — superseded by the correction
+  commit). The tell: deep_chain's -O2 lift is compiler-folded to ~4
+  insns (a genuine -O2 build cannot un-fold); i0/i2=323/323 exposed the
+  fake corpus. REPAIRED: `/tmp/corpus_o2` restored from
+  `/tmp/corpus-o2`; the mislabeled copy kept at
+  `/tmp/corpus_o2.MISLABELED-o0copy`; `scripts/battery.sh` now
+  canary-guards the lanes (byte_copy/fizzbuzz_safe must DIFFER from
+  -O0 or the battery hard-fails).
 - **T1 (the opt-safety regression, P0)**: the typed frame GEP now
   REQUIRES the producer's frame-residency license (`frame_wrap_license`
   in `src/convutils.ml`; `create_def` derives it from the def's tag —
@@ -445,10 +463,12 @@ in `.scratch/typed-model/`), battery `/home/tovpr/tm-battery/merge-t1`:
   EVERY runtime address integer was based on this sub's frame alloca,
   so opt-21 deleted the sret copy stores after inlining
   (struct_by_value, nested_struct). Mechanism + evidence:
-  `.scratch/typed-model/tickets/T1-opt-safety-regression-verdict.md`.
-  Emission re-baseline: 14/33 -O0 binaries changed (runtime-index
-  frame wraps 201→72, inttoptr 42→171); the two failing binaries
-  became byte-identical to the opt-green offset-model reference.
+  `.scratch/typed-model/tickets/T1-opt-safety-regression-verdict.md`
+  (its -O2 rows are void — measured on the mislabeled corpus; the
+  verdict carries a correction note). Emission re-baseline: 14/33 -O0
+  binaries changed (runtime-index frame wraps 201→72, inttoptr
+  42→171); the two failing binaries became byte-identical to the
+  opt-green offset-model reference.
 - **T2 (the simplification pass)**: −41 LOC — proven-orphaned values
   (`equal_int64_pair`, `Cbat_word.hash`, …), mli over-exposures,
   stale comments; behavior-identity structural. Verdict:
@@ -457,37 +477,39 @@ in `.scratch/typed-model/`), battery `/home/tovpr/tm-battery/merge-t1`:
   `emit_program`, through the same address map code references use
   (the function-start remap arm was structurally dead at initializer
   time — relocated fn-pointer addends rendered as raw input vaddrs).
-  The current -O2 fptr_table builds its table with `lea`s, so no pin
-  movement came from it; the rule fires for any binary relocating fn
-  pointers into emitted data. Verdict:
+  The rule fires for any binary relocating fn pointers into emitted
+  data (the current -O2 fptr_table builds its table with `lea`s, so
+  the real-corpus pin shows no movement from it). Verdict:
   `.scratch/typed-model/tickets/T6-data-relocation-rendering-verdict.md`.
-- **THE -O2 GOLDEN LIST IS EMPTY (deliberate IMPROVEMENT, this
-  commit)**: the strict -O2 semantic gate passes 33/33 fresh; the
-  recorded six do not reproduce even from the PRE-T1 tree (T1's
-  verdict re-emitted from 775d616 unfixed: 33/33 — the -O2 corpus was
-  rebuilt for the sp_reload lane after the 26/6 record). The pin now
-  guards an empty set: any new -O2 semantic failure is a REGRESSION.
-- **CONVERGENCE**: the report is uniform — every source SAME/SAME with
-  identical post-opt instruction counts on both lifts (the former
-  convergence class — deep_chain 323/4 etc. — is gone with the rebuilt
-  corpus; the quality-envelope bar holds). Table:
-  `/home/tovpr/tm-battery/merge-t1/conv.log`.
+- **THE PIN HOLDS AT 27/6 (verified on the REPAIRED corpus with the
+  merged plugin)**: failing set == the golden six (byte_copy,
+  fizzbuzz_safe, fptr_table, union_overlap, va_arg_mixed,
+  va_arg_vacopy). No -O2 movement from wave 1 — as expected: T1's fix
+  is the -O0 lane, T6's rule needs a fn-pointer-data binary the
+  current corpus lacks. -O2 allocas 164/1 (out_struct, the recorded
+  shape-d).
+- **CONVERGENCE (real corpus)**: back to the recorded shape —
+  deep_chain 323/4 etc. are the compiler's constant-folding of the -O2
+  input (SAME, correct); the six DIFF rows are exactly the golden six
+  (the L1–L4 classes T4/T5/T6 target). Table:
+  `/home/tovpr/tm-battery/merge-t1/conv-real.log`.
 
-| gate (the merged battery, `scripts/battery.sh`) | result |
+| gate | result |
 |---|---|
 | strict opt-safety (-O0) | **33 PASS / 0 FAIL** (was 31/2) ✅ |
 | -O0 emission / semantics / allocas | **33/33 rc=0 / 33 PASS 0 FAIL / 165-0** ✅ |
-| -O2 emission / semantics | **33/33 rc=0 / 33 PASS 0 FAIL strict; golden emptied** ✅ |
-| -O2 lifts post-opt (the convergence report's o2 column) | **33/33 SAME** ✅ |
-| convergence report | **33/33 SAME/SAME, i0/i2 uniform** ✅ |
+| -O2 emission / semantics pinned | **33/33 rc=0 / 27 PASS 6 FAIL, set == golden** ✅ |
+| -O2 structural asserts | **164 passed / 1 failed (out_struct shape-d, the recorded class)** ✅ |
+| convergence report (real corpus) | **27 SAME/SAME + the six DIFF = the knowns; deep_chain 323/4** ✅ |
 | referee | **2,861,148 / 0 mismatches** ✅ |
 | unit suite | failure set == the pre-existing 8 (E2eD-7/8, LM F1-*; T8, owner triage) ✅ |
 | plugin provenance | bundle sha16 `29c2bb3d9e2e05a2` ✅ |
 
-The -O0 reference emission for byte-identity checks is now
-`/home/tovpr/tm-battery/merge-t1/emit-o0` (T1 re-baselined 14/33).
-Next: T3 (the symbolic stack base — the coordinated flip), then T4
-(stack-arg promotion), T5 (the SSE lane def-use).
+The -O0 reference emission for byte-identity checks is
+`/home/tovpr/tm-battery/merge-t1/emit-o0` (T1 re-baselined 14/33);
+the true -O2 emission is `.../emit-o2-real`. Next: T3 (the symbolic
+stack base — the coordinated flip), then T4 (stack-arg promotion),
+T5 (the SSE lane def-use).
 
 **Last verified: 2026-09-10 EEST — THE CONVERGENCE INSTRUMENT (ticket 05)
 + THE TYPED MODEL'S OPT-SAFETY REGRESSION (2 binaries, triage next)**

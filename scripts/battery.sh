@@ -21,6 +21,17 @@ command -v bap >/dev/null 2>&1 || { echo "FATAL: bap not found (eval \$(opam env
 command -v opt-21 >/dev/null 2>&1 || { echo "FATAL: opt-21 not found (the gate pins the optimizer)" >&2; exit 2; }
 C0=/tmp/corpus; C2=/tmp/corpus_o2
 [ -d "$C0" ] && [ -d "$C2" ] || { echo "FATAL: corpus dirs missing ($C0, $C2)" >&2; exit 2; }
+# Corpus identity: the -O2 lane must be genuinely -O2. The sp_reload-era
+# rebuild once left an -O0 COPY in $C2 (compile_corpus.sh <dir> builds -O0
+# unless <dir> ends in -o2), and every -O2 gate silently tested -O0
+# binaries. These two vectorization canaries must DIFFER from the -O0 lane.
+for canary in byte_copy fizzbuzz_safe; do
+  if cmp -s "$C0/$canary" "$C2/$canary" 2>/dev/null; then
+    echo "FATAL: $C2 is an -O0 copy (canary $canary identical to $C0)." >&2
+    echo "       Rebuild the lanes: compile_corpus.sh /tmp/corpus-o2; cp -a /tmp/corpus-o2 /tmp/corpus_o2" >&2
+    exit 2
+  fi
+done
 
 # Provenance: the installed plugin must be THIS tree's build (by content).
 # The src hash must re-derive EXACTLY as record_provenance.sh does — sha256sum

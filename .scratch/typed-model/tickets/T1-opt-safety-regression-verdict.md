@@ -149,3 +149,21 @@ evidence).
 - The -O2 33/33 without opt is luck-dependent for the base tree (stale
   reads that happen to hit fresh values); the fixed tree removes the
   producer of those stale reads for the 14 changed binaries.
+
+## CORRECTION (2026-09-10, post-merge): the -O2 rows above are VOID
+
+The "-O2 pin is stale / the six do not reproduce" finding — and every
+-O2 row in the tables above — was measured against a MISLABELED corpus:
+`/tmp/corpus_o2` had been overwritten with a byte-identical copy of the
+-O0 corpus (a sp_reload-era rebuild invoked `compile_corpus.sh
+/tmp/corpus_o2`; the underscore misses the script's `-o2`-suffix rule,
+so it built -O0 into it). The re-emit from 775d616 that showed "33/33
+at -O2" was the -O0 lift passing twice, not drift. The real -O2 corpus
+was restored from `/tmp/corpus-o2`; on it the merged wave-1 tree
+measures **27 PASS / 6 FAIL, failing set == the golden six** — the
+recorded state, no movement in either direction from this lane. The
+-O0 findings of this verdict (the mechanism, the license rule, the
+31/2 → 33/33 opt-safety flip, the 14/33 emission re-baseline) stand
+unaffected: `/tmp/corpus` was never corrupted. Guard added:
+`scripts/battery.sh` canary-checks byte_copy/fizzbuzz_safe differ
+between the lanes and hard-fails otherwise.
