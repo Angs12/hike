@@ -59,6 +59,16 @@ last consumer), plus the usual sweep (dead values, stale comments
 naming the closure, mli over-exposures) — each deletion with a
 no-caller proof.
 
+## OWNER DIRECTIVE (2026-09-10): removals land; failures become tickets
+
+"Do the removals; any failures will be fixed in new tickets — trying
+to solve them now will just make things more complicated!" If a gate
+goes red BECAUSE of a removal, do NOT patch, compensate, or roll the
+removal back: record the failure in the verdict's FAILURES→TICKETS
+section (the gate, the binary/pin, the failing mechanism's hypothesis
+if cheap, the exact reproduction command) and land. The orchestrator
+tickets them; the follow-up lanes fix them against the clean tree.
+
 ## Binding constraints
 
 Spec: `.scratch/typed-model/spec.md` (NO GATES, NO FALLBACKS,
