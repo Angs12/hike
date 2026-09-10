@@ -106,16 +106,18 @@ let is_region_base (v : var) : bool =
    only sub holding the information.
 
    T3c — the escape question is DENOTATIONAL (the owner's single-predicate
-   directive): the frame escapes iff a value that denotes a
-   stack-symbolic set leaves the sub — a call's pointer-argument register
-   whose denotation is stack-symbolic ([is_stack_access] applied to the
-   value), or an indirect call whose target is.  There is NO var closure
-   and no syntactic derivation: the symbolic stack base propagates
-   structurally (arithmetic + memory round-trips), so the denotation is
-   the complete answer.  Storing a stack-symbolic value INSIDE the frame
-   is not an escape — the round-trip is tracked, the callee never sees
-   it; callee-visible stack traffic is [has_outgoing_stack_args]'s
-   denotational signature (the producer's pushed-arg tags). *)
+   directive): the ONE predicate family ([is_stack_access]) applied to
+   values answers every arm —
+   - a call's pointer-argument register (or an indirect call's target)
+     whose denotation is stack-symbolic escapes;
+   - a stack access whose address OPERAND denotes stack-symbolic while
+     the region lanes cannot serve it (any tag but a convertible
+     singleton) keeps the frame model — the sub's SP-relative
+     neighborhood must stay private (the SP-anchoring convention is
+     T4's; see the T3c verdict's BLOCKED-BY-T4 section);
+   - callee-visible stack traffic is [has_outgoing_stack_args]'s
+     denotational signature (the producer's pushed-arg tags).
+   There is NO var closure and no syntactic derivation. *)
 
 (* Tests for a real call: direct, or indirect with a return (the
    noreturn lifted-return epilogue is not a call site). *)
@@ -218,6 +220,45 @@ let has_outgoing_stack_args (sp : var) (target : Theory.Target.t)
                   && is_outgoing_store d)
          else false)
 
+(* The SP-lane veto (T3c): the frame model is the only storage whose
+   SP-relative neighborhood is PRIVATE to the sub (the anchor value is
+   the sub's own frame cell), so a sub with a stack access the region
+   lanes cannot serve keeps the frame.  Stack-reachability is
+   DENOTATIONAL — an address operand's DENOTATION is a stack-symbolic
+   set ([is_stack_access] applied to the operand's value), never a
+   syntactic derivation.  Servable = a convertible singleton [Range]
+   (the region GEP lane). *)
+let unservable_stack_access ~(sol : Vsa.vsa_sol)
+    ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) : bool =
+  Term.enum blk_t sub
+  |> Seq.exists ~f:(fun blk ->
+      let st0 = Graphlib.Std.Solution.get sol (Term.tid blk) in
+      let _, found =
+        Base.List.fold_left (Term.enum def_t blk |> Seq.to_list)
+          ~init:(st0, false)
+          ~f:(fun (st, found) d ->
+            let st_before = st in
+            let st = Vsa.denote_def d st in
+            if found then (st, true)
+            else
+              match Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d) with
+              | Some addr ->
+                let reachable =
+                  Exp.free_vars addr
+                  |> Core.Set.exists ~f:(fun v ->
+                      Vsa.Cbat_extraction.is_stack_access st_before
+                        (Bil.Var v))
+                in
+                let servable =
+                  match Core.Map.find offsets (Term.tid d) with
+                  | Some (Convutils.Range (lo, hi)) -> Int64.equal lo hi
+                  | _ -> false
+                in
+                (st, reachable && not servable)
+              | None -> (st, found))
+      in
+      found)
+
 (* Tests whether the frame is reachable from outside.  The inputs are the
    producer's facts: the solution's denotations ([sol]) and the tag maps.
    No var closure, no syntactic derivation — the denotation is the only
@@ -227,6 +268,7 @@ let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term)
     ~(offsets : Convutils.vsa_kind Tid.Map.t)
     ~(arg_stores : Tid.Set.t) : bool =
   call_args_escape ~sol target sub
+  || unservable_stack_access ~sol ~offsets sub
   || has_outgoing_stack_args sp target sub ~offsets ~arg_stores
 
 (* Merges overlapping ranges into regions. *)

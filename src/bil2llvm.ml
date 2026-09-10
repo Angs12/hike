@@ -151,6 +151,8 @@ let exit_entry llvm_builder sub () =
 let build_entry_block llvm_builder transfer_vars fr sub fn () =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* llvm_module = Context.get llvm_module_var in
   let tid = Graphs.Tid.start in
   KB.List.iter transfer_vars ~f:(fun var ->
       let arg =
@@ -175,7 +177,21 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
     let fr = { fr with stack = get_local ctx tid Convutils.hike_stack_var } in
     (match fr.stack with
      | Some hs -> insert_local ctx tid ctx.Convutils.sp hs
-     | None -> ());
+     | None ->
+         (* No hike_stack lane (the module's entry sub): the entry RSP
+            is the REAL machine stack pointer, captured at entry.  The
+            sub's SP-relative neighborhood — untagged accesses, SP
+            values — is the real stack below this point; the region
+            allocas never consult it (their accesses' addresses are
+            rewritten to region GEPs).  SP stays DEFINED in every sub. *)
+         let fnty = Llvm.function_type (Llvm.pointer_type llvm_ctx) [||] in
+         let ss = Llvm.declare_function "llvm.stacksave" fnty llvm_module in
+         let p = Llvm.build_call fnty ss [||] "entry_sp" llvm_builder in
+         let v =
+           Llvm.build_ptrtoint p (Llvm.i64_type llvm_ctx) "entry_sp_i64"
+             llvm_builder
+         in
+         insert_local ctx tid ctx.Convutils.sp v);
     exit_entry llvm_builder sub () >>= fun _ -> return fr
   ) else (
   (* SP is not an arg. *)

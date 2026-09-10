@@ -13,11 +13,15 @@
 # def-use (union_overlap, byte_copy, array_local p.), L4 data-section
 # relocation rendering (fptr_table).
 byte_copy       # L3 (escape-class prior killed)
-fizzbuzz_safe   # L1 FIXED (poison gone); residual = L3 store-side (lifted-ud2 reachable)
-fptr_table      # L4 (raw un-relocated data addends; indirect-call prior killed)
 union_overlap   # L3 (stale lane-phi state; Unbounded store is a red herring)
 va_arg_mixed    # L1 (alignment-guard trap live; secondary stall re-check due)
 va_arg_vacopy   # the va_list state round-trip in the -O2 lift (re-attributed 2026-09-10: T3 deleted the L2 lo<0 arm structurally and the failure persists)
+#
+# 2026-09-10 T3c IMPROVEMENT (the re-baseline rule, deliberate): the
+# denotational escape rule changed two subs' storage decisions and the
+# -O2 lifts of fizzbuzz_safe (L1 lifted-ud2 no longer reached) and
+# fptr_table (L4) PASS the harness. Golden list moves 6 -> 4; measured
+# 29 PASS / 4 FAIL, failing set == this list (see the T3c verdict).
 #
 # 2026-09-10 corpus incident (recorded so it is never repeated): a rebuild
 # invoked `compile_corpus.sh /tmp/corpus_o2` (underscore) which the script's
