@@ -172,8 +172,6 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
      frame (or of its first region alloca for precise subs).  The SP
      local binds to the slot's value: stack_0 is PRIVATE to this
      invocation, reentrancy-safe, and NO sub takes an SP parameter.
-     The hike_stack parameter and both T3 binding arms (precise
-     SP-binds-to-param, the entry sub's llvm.stacksave) are retired.
      SROA erases the constant cases. *)
   let sp0 =
     match fr.stack0 with
@@ -182,7 +180,7 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
   in
   insert_local ctx tid ctx.Convutils.sp sp0;
   (* The Caller-Window Parameter local (variadic/mixed subs only). *)
-  let fr = { fr with stack = get_local ctx tid Convutils.hike_window_var } in
+  let fr = { fr with stack = get_local ctx tid Hike_stack_model.hike_window_var } in
   exit_entry llvm_builder sub () >>= fun _ -> return fr
 
 (* Builds blocks and transfer set in one walk. *)
@@ -303,7 +301,7 @@ let create_sub sub =
       |> Base.Option.value_exn ~message:"create sub : function not found"
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-    
+
     clear_bbs ctx;
     clear_blk_llvals ctx;
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
@@ -529,14 +527,13 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
          become positional parameters ([hike_slotN], width 64 — the
          SysV slot width; narrower reads truncate); the Caller-Window
          Parameter survives only for variadic/mixed subs (the unproven
-         remainder, renamed from hike_stack — it is the caller-window
-         base, not SP). *)
+         remainder — the caller-window base, not SP). *)
        let info = Hike_kb.info_of_sub (Term.tid sub) in
        let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
        let window_arg =
          if info.Convutils.prom_window && not is_main then
-           [ Arg.create ~intent:In Convutils.hike_window_var
-               (Var Convutils.hike_window_var) ]
+           [ Arg.create ~intent:In Hike_stack_model.hike_window_var
+               (Var Hike_stack_model.hike_window_var) ]
          else []
        in
        let slot_args =
@@ -572,7 +569,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
                || is_callee_saved
                || Convutils.is_intrinsic_name n
                || Base.String.is_prefix n ~prefix:"hike_slot"
-               || Var.same reg Convutils.hike_window_var))
+               || Var.same reg Hike_stack_model.hike_window_var))
          |> Base.List.sort ~compare:(fun a b ->
              let ra, na = rank_of_var a in
              let rb, nb = rank_of_var b in
@@ -647,8 +644,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       Base.List.map (conv.int_param_regs @ conv.vector_param_regs)
         ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
       @ [
-          Arg.create ~intent:In Convutils.hike_window_var
-            (Var Convutils.hike_window_var);
+          Arg.create ~intent:In Hike_stack_model.hike_window_var
+            (Var Hike_stack_model.hike_window_var);
         ] )
   in
   (* The Thunks' signatures: the legacy memory-path convention (the
@@ -670,8 +667,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
               (conv.Abi.int_param_regs @ conv.Abi.vector_param_regs)
               ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
             @ [
-                Arg.create ~intent:In Convutils.hike_window_var
-                  (Var Convutils.hike_window_var);
+                Arg.create ~intent:In Hike_stack_model.hike_window_var
+                  (Var Hike_stack_model.hike_window_var);
               ] ) )
     else None
   in

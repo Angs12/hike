@@ -103,6 +103,12 @@ differential gate in `.scratch/restriction-removal/spec.md` §5.
      prints the first still-growing (block, successor), the widening-point
      set, the failing blocks' BIR, and the gap successor's words/memory),
    - `zz_scratch_probe/dump_tags.exe` (vsa_info tag + split_plan dump),
+   - `zz_scratch_probe/region_diag.exe` (per-sub pointer-arg denotations +
+     the region plan — the region/materialization diagnostic; the former
+     escape_diag, renamed when the escape died),
+   - `zz_scratch_probe/dead_diag.exe` (the Dead-classification chain:
+     which def classified Dead and why — the `hike: guarded: ... classified
+     Dead` diagnostic's instrument),
    - `zz_scratch_probe/subtimes.exe` (per-sub producer cost distribution —
      the A/B workhorse), `passcost.exe` (per-sub pass + DCE-round times),
      `idstab.exe` / `sweepcheck.exe` (cross-process / in-process

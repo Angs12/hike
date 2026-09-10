@@ -407,8 +407,7 @@ module Cbat_extraction = struct
      this sub's own frame (the uniform frame rule).
    - [Caller]: the span lies entirely at/above the entry RSP —
      ABI-visible caller-window traffic (incoming stack args, the
-     return-address slot) — the caller-window lane (T4: renamed from
-     hike_stack).
+     return-address slot) — the caller-window lane.
    - [Mixed]: the span is two-sided or wrapped (a va_list pointer that
      is the reg-save area OR the overflow area, an ITE'd address, a
      widened hull crossing the entry RSP): the runtime address is
@@ -645,8 +644,8 @@ and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
       && (match size with Bil.Int _ -> false | _ -> true)
   | _ -> false
 
-(* Runtime-sized SP decrements — relocated unchanged from the deleted
-   relevance pass (spec §2.3); the hike-vsa pass calls it once per sub. *)
+(* Runtime-sized SP decrements (the VLA matcher); the hike-vsa pass
+   calls it once per sub. *)
 and detect_dynamic_alloc (sp : var) (sub : sub term) : Tid.Set.t =
   let sp_base = Var.base sp in
   let def_of_lhs =

@@ -14,10 +14,6 @@ open Bil2llvm_section
 let find_def_tag sub_info def =
   Core.Map.find sub_info.Convutils.offsets (Term.tid def)
 
-(* Tests for visible storage via the stack model. *)
-let is_abi_visible sub_info def =
-  Hike_stack_model.abi_visibility_of sub_info def
-
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =

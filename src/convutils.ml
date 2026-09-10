@@ -219,12 +219,6 @@ module Vsa = struct
 end
 include Vsa
 
-(* The Caller-Window Parameter (T4: renamed from hike_stack — it is the
-   caller-window base, not SP): the residual window-base argument of
-   variadic/mixed subs (the bridge) and of the memory-convention thunks. *)
-let hike_window_var : var =
-  Var.create ~is_virtual:false ~fresh:false "hike_window" (Type.Imm 64)
-
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 (* Tests for [intrinsic:*] names. *)

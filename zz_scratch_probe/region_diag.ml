@@ -1,7 +1,7 @@
 (* Prints one sub's stack-access denotations and its region plan: per call
    block, each pointer-arg register's denotation (stack-symbolic or not);
    the region partition with every member's tag and rhs.
-   Usage: escape_diag.exe <binary> [subname] (default "main"). *)
+   Usage: region_diag.exe <binary> [subname] (default "main"). *)
 
 open Bap.Std
 open Probe_common
@@ -50,14 +50,14 @@ let () =
             let btid = Term.tid blk in
             Printf.printf "block %s:\n" (Tid.name btid);
             let st =
-              Vsa.denote_defs blk (Graphlib.Std.Solution.get sol btid)
+              Vsa.Test_seam.denote_defs blk (Graphlib.Std.Solution.get sol btid)
             in
             Base.List.iter arg_regs ~f:(fun r ->
                 let d = Vsa.Test_seam.denote_imm_exp (Bil.Var r) st in
                 let sa = Vsa.Cbat_extraction.is_stack_access st (Bil.Var r) in
                 (match d with
                  | Error e ->
-                  Printf.printf "  %s: ERROR escape=%b\n"
+                  Printf.printf "  %s: ERROR stack=%b\n"
                     (Var.name r) sa
                 | Ok ws ->
                   let kind =
@@ -72,7 +72,7 @@ let () =
                             Printf.sprintf "plain[%Ld..%Ld]" lo hi
                           | _ -> "plain?"))
                   in
-                  Printf.printf "  %s: %s escape=%b\n"
+                  Printf.printf "  %s: %s stack=%b\n"
                     (Var.name r) kind sa));
             Base.List.iter calls ~f:(fun j ->
                 match Jmp.kind j with
@@ -88,7 +88,7 @@ let () =
                     (Option.is_some (Call.return c))
                 | _ -> ())
           end);
-      (* Regions the model would build with the escape veto OFF. *)
+      (* The region plan the model builds from the extraction's tags. *)
       let info0 =
         Hike.Convutils.mk_vsa_info_maps
           ~offsets:(Vsa.Cbat_extraction.extract
