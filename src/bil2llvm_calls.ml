@@ -43,7 +43,7 @@ let create_call_args blk_tid llvm_builder call_tid fr =
   let extern = is_extern ctx call_tid in
   KB.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
-      if Var.same (Arg.lhs arg) Convutils.hike_window_var then
+      if Var.same (Arg.lhs arg) Hike_stack_model.hike_window_var then
         (* The caller-window base is the caller's SP at the call: the
            outgoing stores land at SP-relative addresses, so the
            callee's slot k sits at window + k (T4). *)
@@ -105,9 +105,6 @@ let create_call_args blk_tid llvm_builder call_tid fr =
       else
         let* arg = create_exp llvm_builder blk_tid exp in
         return arg)
-(* Sub declarations (shared by the definition and call lanes). *)
-
-
 
 (* FP return width. *)
 type fp_ret_kind = FpFloat | FpDouble | FpLongDouble
@@ -460,8 +457,8 @@ let create_thunk (sub_tid : tid) =
             (conv.Abi.int_param_regs @ conv.Abi.vector_param_regs)
             ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
           @ [
-              Arg.create ~intent:In Convutils.hike_window_var
-                (Var Convutils.hike_window_var);
+              Arg.create ~intent:In Hike_stack_model.hike_window_var
+                (Var Hike_stack_model.hike_window_var);
             ]
         in
         (* The lanes of [sub]'s own signature the twin forwards (by
@@ -470,12 +467,12 @@ let create_thunk (sub_tid : tid) =
           Base.List.filter args ~f:(fun a ->
               let n = Var.name (Arg.lhs a) in
               (not (Base.String.is_prefix n ~prefix:"hike_slot"))
-              && not (Var.same (Arg.lhs a) Convutils.hike_window_var))
+              && not (Var.same (Arg.lhs a) Hike_stack_model.hike_window_var))
         in
         let* ret_typ = ret_type_of_rets rets in
         let* arg_typs =
           KB.List.map twin_args ~f:(fun a ->
-              if Var.same (Arg.lhs a) Convutils.hike_window_var then
+              if Var.same (Arg.lhs a) Hike_stack_model.hike_window_var then
                 KB.return @@ Llvm.i64_type llvm_ctx
               else var_lltype (Arg.lhs a))
         in

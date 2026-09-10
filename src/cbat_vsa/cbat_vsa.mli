@@ -95,13 +95,10 @@ val init_sol : ?entry:AI.t ->  sub term -> vsa_sol
 
 val static_graph_vsa : tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
 
-(* Denotes one def / a block's defs in order (the transfer function; phis
-   are the identity).  Production surface since T3c: the model's
-   denotational escape rule reads a call block's abstract state AT the
-   call, and each access's operand denotations at the def. *)
+(* Denotes one def in order (the transfer function; phis are the
+   identity).  Production surface: hike_vsa's outgoing-slot map denotes
+   the defs around a call to read the SP offset at the call. *)
 val denote_def : def term -> AI.t -> AI.t
-
-val denote_defs : blk term -> AI.t -> AI.t
 
 (* Denotes one expression in a state (the immediate-value denotation).
    Production surface since T4: the call-site resolution and the
