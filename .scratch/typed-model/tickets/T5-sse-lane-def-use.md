@@ -7,6 +7,10 @@ Blocked-by: **T4** (its promotions change the measured class; the
 convergence accounting order holds).
 Blocks: nothing.
 
+Design pre-digest: `.scratch/typed-model/t5-design-notes.md` (the
+words-lane def-use map, the iteration-boundary verdict, the minimal
+three-point mechanism, the T4/T3c interactions — read it FIRST).
+
 ## The measured class (post-T3c)
 
 The -O2 pin holds at 4: byte_copy, union_overlap (the L3 class),
