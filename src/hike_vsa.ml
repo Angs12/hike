@@ -96,6 +96,18 @@ let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
           | _ -> ()));
   (!slots, !arity, !window, !retaddr)
 
+(* The target-resolution predicate (T4): the site's class over the
+   target's denotation.  A singleton whose word names a lifted sub
+   resolves ([Some tid] — the Resolved Call Site); a bounded
+   multi-target set, a foreign singleton, and an unresolvable set all
+   take the pointer call ([None]).  [lookup] answers "is this address
+   a lifted sub?" (the symtab + the program's name map in
+   production). *)
+let resolve_target ~(lookup : int64 -> Tid.t option) (ws : Vsa.WordSet.t) :
+    Tid.t option = match singleton_i64 ws with
+  | None -> None
+  | Some v -> lookup v
+
 (* The CALLER side: per-call-block outgoing slot stores, and the
    singleton resolution of each indirect call.  The slot correspondence
    is the SysV-fixed one: a store at relative offset [a] feeds the
@@ -107,21 +119,20 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
     Convutils.call_site Tid.Map.t * Tid.t option Tid.Map.t =
   let sites = ref Tid.Map.empty in
   let resolved = ref Tid.Map.empty in
-  let resolve_target (texp : exp) (st : Vsa.AI.t) : Tid.t option =
+  let lookup (v : int64) : Tid.t option =
+    match symtab with
+    | Some symtab -> (
+        match Symtab.find_by_start symtab (Word.of_int64 ~width:64 v) with
+        | Some (name, _, _) ->
+            (* a singleton FOREIGN address resolves to no sub *)
+            Base.List.Assoc.find ~equal:String.equal name_tid name
+        | None -> None)
+    | None -> None
+  in
+  let resolve_exp (texp : exp) (st : Vsa.AI.t) : Tid.t option =
     match Vsa.denote_imm_exp texp st with
     | Error _ -> None
-    | Ok ws -> (
-        match singleton_i64 ws with
-        | None -> None (* a bounded multi-target set, or unresolvable *)
-        | Some v -> (
-            match symtab with
-            | Some symtab -> (
-                match Symtab.find_by_start symtab (Word.of_int64 ~width:64 v) with
-                | Some (name, _, _) ->
-                    (* a singleton FOREIGN address resolves to no sub *)
-                    Base.List.Assoc.find ~equal:String.equal name_tid name
-                | None -> None)
-            | None -> None))
+    | Ok ws -> resolve_target ~lookup ws
   in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
@@ -178,7 +189,7 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
           | Call c -> (
               match Call.target c with
               | Indirect texp ->
-                  let cls = resolve_target texp st_end in
+                  let cls = resolve_exp texp st_end in
                   resolved :=
                     Core.Map.set !resolved ~key:(Term.tid j) ~data:cls
               | Direct _ -> ())

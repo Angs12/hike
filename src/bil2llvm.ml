@@ -583,11 +583,16 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
                Abi.is_callee_saved abi reg
              in
              (* RBP parses via [callee_saved] (the deleted explicit fp
-                 test's same filter result); SP-only by construction. *)
+                 test's same filter result); SP-only by construction.
+                 The promoted interface names (hike_slotN / the window
+                 base) are the emitter's own vocabulary — never
+                 register lanes. *)
              not
                (Var.same reg (Abi.sp target)
                || is_callee_saved
-               || Convutils.is_intrinsic_name n))
+               || Convutils.is_intrinsic_name n
+               || Base.String.is_prefix n ~prefix:"hike_slot"
+               || Var.same reg Convutils.hike_window_var))
          |> Base.List.sort ~compare:(fun a b ->
              let ra, na = rank_of_var a in
              let rb, nb = rank_of_var b in

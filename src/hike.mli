@@ -18,6 +18,13 @@ module Vsa : sig
     prog:program term ->
     sub term ->
     Convutils.vsa_info
+
+  (** The target-resolution predicate (T4): a singleton whose word
+      names a lifted sub resolves ([Some tid] — the Resolved Call
+      Site); a bounded multi-target set, a foreign singleton, and TOP
+      take the pointer call ([None]). *)
+  val resolve_target :
+    lookup:(int64 -> Tid.t option) -> Cbat_vsa.WordSet.t -> Tid.t option
 end
 
 (** Dead-code elimination. *)
