@@ -153,10 +153,12 @@ let create_store llvm_builder (llvm_var, addr) =
         ~data:(fun () -> KB.return llvm_var)
         ~fallback:(fun () ->
           let* addr = create_addr_ptr llvm_builder addr in
-          return @@ Llvm.build_store llvm_var addr llvm_builder)
+          let _ : Llvm.llvalue = Llvm.build_store llvm_var addr llvm_builder in
+          KB.return llvm_var)
   | _ ->
       let* addr = create_addr_ptr llvm_builder addr in
-      return @@ Llvm.build_store llvm_var addr llvm_builder
+      let _ : Llvm.llvalue = Llvm.build_store llvm_var addr llvm_builder in
+      KB.return llvm_var
 
 let create_cast llvm_builder (cast, i, llvm_val) =
   let open KB in
@@ -331,7 +333,9 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
              ~fallback:(fun () ->
                let* base = resolve_addr llvm_builder addr_w in
                let* data = create_exp llvm_builder blk_tid data in
-               return @@ Llvm.build_store data base llvm_builder)
+               let _ : Llvm.llvalue =
+                 Llvm.build_store data base llvm_builder in
+               KB.return data)
        | None ->
            (* Stores through remapped constants. *)
            let* data = create_exp llvm_builder blk_tid data in

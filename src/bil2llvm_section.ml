@@ -220,7 +220,9 @@ let const_addr_load llvm_builder addr_w size ~fallback =
 
 (* Const-address stores into the found section, else the fallback. The
    stored value arrives as a thunk so the section GEP keeps its emission
-   order ahead of value-lane instructions. *)
+   order ahead of value-lane instructions.  The form's VALUE is the
+   stored data (Bil.Store's type is the data's), never the void store
+   instruction. *)
 let const_addr_store llvm_builder addr_w ~data ~fallback =
   let open KB in
   let* sections = Context.get section_list_var in
@@ -228,7 +230,8 @@ let const_addr_store llvm_builder addr_w ~data ~fallback =
   | Some section ->
       let* base = resolve_addr_in llvm_builder section addr_w in
       let* llvm_var = data () in
-      return @@ Llvm.build_store llvm_var base llvm_builder
+      let _ : Llvm.llvalue = Llvm.build_store llvm_var base llvm_builder in
+      return llvm_var
   | None -> fallback ()
 
 let create_empty_llvm_i8array llvm_ctx size =

@@ -430,6 +430,80 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-10 EEST — T4b LANDED (branch
+`tm/t4b-conversion-correctness`): the conversion-correctness classes are
+constructed away — THE -O0 PRIMARY ORACLE IS GREEN AT 37/37, strict
+opt-safety 37/37, the -O2 pin SHRANK 9 -> 7 (fn_escape, fn_table_disp
+flipped green)**
+
+T4's merge battery (32/5 -O0, inventoried reds) is superseded by this
+lane. Ticket `.scratch/typed-model/tickets/T4b-conversion-correctness.md`
++ verdict `T4b-conversion-correctness-verdict.md`; battery
+`/home/tovpr/tm-battery/t4b/` (emissions `emit-o0`/`emit-o2` are the NEW
+reference emissions; reference for -O0 byte-identity was merge-t4's).
+
+The FOUR constructed rules (one mechanism each, at the point the wrong
+value was produced; the evidence and case-count delta are in the
+verdict):
+1. **extraction (cbat_vsa.ml)**: a memory def whose address denotation
+   is TOP is tagged `Unbounded` — the classification is total over the
+   denotation trichotomy (stack-symbolic / provably-foreign / unknown).
+   The unknown class previously fell silently into the foreign lane, so
+   the partition could not see it; tagged, `accesses_served` reads it
+   and the storage lattice joins the sub to Frame — ONE storage for
+   every cell the raw lane and the converted cells touch (the
+   struct-copy class: build's ranged array store was TOP-addressed and
+   untagged while the copy-out's singleton reads converted to slot
+   locals — split storage, the checksum read zeros).
+2. **emitter, Caller lane (bil2llvm_mem.ml)**: the def's mem node is
+   served by its FACT — promoted slot param (width-coerced), retaddr
+   undef, or the window materialization — by VALUE SUBSTITUTION into
+   the rhs (`rewrite_mem_node`, shared with the pointer lane). The
+   whole-def replacement arms are DELETED (they dropped the def's
+   surrounding rhs: e_two's `eax ^ [rbp+0x10]` lost the xor and b).
+3. **emitter, outgoing slots (bil2llvm.ml/bil2llvm_mem.ml/
+   bil2llvm_calls.ml)**: the site's slot value is recorded by the
+   STORE's own emission (`fr.store_vals`, keyed by the storing def);
+   the call passes the value the store WROTE — the late evaluation of
+   the stored exp at the call is DELETED (a var the block redefines
+   between the store and the call passed the wrong value: transform's
+   slot0 got cell2's value because RAX was redefined). The Store lanes
+   now return the stored data — Bil.Store's exp VALUE is the data, not
+   the void store instruction.
+4. **producer, callee_side (hike_vsa.ml)**: a store into the caller
+   window demotes every slot cell its bytes intersect — SUB-SLOT writes
+   too (a write at entry_rsp+68 is inside slot 7's cell) — and the
+   written slots leave the promoted map: their reads take the window,
+   where the write landed, never the stale parameter (modify_copy's
+   `s.a0 += 100` store-back was read back as the original param).
+
+| gate | result |
+|---|---|
+| build, default + vsa-debug profiles | rc=0 ✅ |
+| instrumentation blocker | clean (rc=0) ✅ |
+| referee (`clpequiv`) | **2,861,148 checks / 0 mismatches** ✅ |
+| `dune runtest` | 516 ok; failure set == EXACTLY the 8 pre-existing (E2eD-7/8, LM F1-*); the F1-2 pin re-derived (it froze the old unsound not-seeded behavior of the TOP class) ✅ |
+| -O0 emission / structural asserts | 37/37 rc=0 / 185 passed 0 failed ✅ |
+| **-O0 strict semantics** | **37 PASS / 0 FAIL — the primary oracle green** ✅ |
+| -O0 strict opt-safety | **37 PASS / 0 FAIL** (array_local's opt failure resolved) ✅ |
+| -O2 emission / structural asserts | 37/37 rc=0 / 185 passed 0 failed ✅ |
+| -O2 pinned semantics | **30 PASS / 7 FAIL — PIN SHRANK 9 -> 7**: fn_escape, fn_table_disp flip GREEN (proven); the golden list + comments updated in this lane's commit ✅ |
+| convergence vs merge-t4/conv.log | array_local, fn_escape, fn_table_disp, nested_struct, sret_big, struct_by_value moved to SAME/SAME; no regressions; the seven DIFF rows == the pin's seven ✅ |
+| provenance | bundle `06b009e387d37dc3` (final tree) ✅ |
+
+The pin's remaining seven, re-attributed with current symptoms:
+byte_copy/union_overlap (L3 SSE, value divergence), va_arg_mixed (L1
+poison arm, SIGILL), fizzbuzz_safe (L1 poison arm, SIGILL), va_arg_vacopy
+(the va_list round-trip, T9), spill_many (SIGSEGV at the -O2 frame
+layout under the promoted model — T4's regression persists, needs its
+own dig), jump_table_sw (the -O2 indirect-jump dispatch, rc=192).
+Re-baseline: -O0 emissions 20/37 byte-identical to merge-t4's (17
+changed: the Frame-joined subs + the promotion lanes); -O2 28/37. The
+new Unbounded warnings (once per sub: pointer-arg derefs now WARN) are
+the sanctioned diagnostic reaching the TOP class — the corpus rc gates
+are unaffected.
+
+**Last verified: 2026-09-10 EEST — T3c LANDED (the escape dies entirely; the
 **Last verified: 2026-09-10 EEST — T3c LANDED (the escape dies entirely; the
 denotation is the ONE mechanism; the -O2 pin 6 → 4) — the typed-model
 program's waves 1–2 are complete, T4 is the frontier**

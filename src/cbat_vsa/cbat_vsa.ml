@@ -499,8 +499,9 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
    are [StackOff] cells), or a bounded plain hull inside the
    non-canonical band (the degraded arm: a bitwise-mangled SP lane).
    A bottom denotation is a dead path — seeding records the Dead kind.
-   Non-seeding is sound (the access stays untagged, the real-address
-   lane). *)
+   An UNKNOWN (TOP) denotation records Unbounded (it may name this
+   frame); only an address PROVEN outside the segment stays untagged
+   (the real-address lane — it cannot alias the frame's cells). *)
 let is_stack_access (st_before : AI.t) (addr : exp) : bool =
   match Cbat_transfer.denote_imm_exp addr st_before with
   | Error _ -> false
@@ -550,7 +551,22 @@ let rec extract ~(dynamic_alloc : def term -> bool)
                           let ws = WordSet.top 64 in
                           let acc = (Term.tid d, Unbounded, ws) :: acc in
                           (st, acc))
-                 | _ -> (st, acc))
+                 | Some addr -> (
+                     (* Not provably stack.  The sound classification of
+                        an UNKNOWN (TOP) address is the Unbounded kind —
+                        it may name this frame, so the storage lattice
+                        sees the access and joins the sub to Frame (one
+                        storage for every cell the raw lane and the
+                        converted cells both touch).  An address proven
+                        OUTSIDE the segment (a section/global constant)
+                        takes the real-address lane untagged. *)
+                     match Cbat_transfer.denote_imm_exp addr st_before with
+                     | Ok ws when WordSet.is_top ws ->
+                         let ws = WordSet.top 64 in
+                         let acc = (Term.tid d, Unbounded, ws) :: acc in
+                         (st, acc)
+                     | _ -> (st, acc))
+                 | None -> (st, acc))
         in
         acc)
   in

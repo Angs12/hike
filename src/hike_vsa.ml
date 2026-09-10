@@ -60,6 +60,11 @@ let slot_index_of (k : int64) : int option =
      dies with the real LLVM ret and never forces a window parameter;
    - a LOAD at a singleton SysV slot offset, width within the cell,
      promotes to slot [(k-8)/8];
+   - a STORE at a singleton slot offset writes the caller's window
+     cell: the slot it touches DEMOTES — the parameter is only the
+     initialization of a read-only slot, and a read after the write
+     must observe the write (T4b) — so every access to that slot takes
+     the window;
    - everything else (a spanned or mixed set, a wider read, a storing
      def — writes land in real caller memory) keeps the window. *)
 let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
@@ -68,6 +73,7 @@ let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
   let retaddr = ref Tid.Set.empty in
   let slots = ref Tid.Map.empty in
   let arity = ref 0 in
+  let written = ref [] in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
       Term.enum def_t blk
@@ -90,11 +96,36 @@ let callee_side ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) :
                         arity := Int.max !arity (i + 1)
                     | _ -> (* a wider read demotes the slot to memory *)
                         window := true)
-                | None -> (* a store writes real window memory *)
-                    window := true)
+                | None ->
+                    (* a store writes real window memory; every slot
+                       cell the store's bytes intersect demotes — a
+                       write at a sub-slot offset (the high half of a
+                       cell) must be observable by that slot's reads
+                       too (T4b) *)
+                    window := true;
+                    (match Model.addr_of_rhs (Def.rhs d) with
+                    | Some (_, size) when Int64.compare k 8L >= 0 ->
+                        let bytes = Size.in_bits size / 8 in
+                        let first =
+                          Int64.to_int Int64.(div (sub k 8L) 8L) in
+                        let last =
+                          Int64.to_int
+                            Int64.(div (add k (of_int (bytes - 1))) 8L) in
+                        let rec mark i =
+                          if i <= last then
+                            (written := i :: !written; mark (i + 1))
+                        in
+                        mark first
+                    | _ -> ()))
           | Some (Convutils.Mixed _) -> window := true
           | _ -> ()));
-  (!slots, !arity, !window, !retaddr)
+  (* The written slots leave the promoted map: their reads take the
+     window, where the write landed. *)
+  let slots =
+    Core.Map.filter_map !slots ~f:(fun i ->
+        if Base.List.mem !written i ~equal:Int.equal then None else Some i)
+  in
+  (slots, !arity, !window, !retaddr)
 
 (* The target-resolution predicate (T4): the site's class over the
    target's denotation.  A singleton whose word names a lifted sub

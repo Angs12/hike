@@ -56,20 +56,22 @@ let create_call_args blk_tid llvm_builder call_tid fr =
         Base.String.is_prefix (Var.name (Arg.lhs arg)) ~prefix:"hike_slot"
       then
         (* A promoted slot argument: the site's proven outgoing store,
-           else undef — a site storing fewer slots leaves the rest
-           unpassed (reading an unpassed arg is UB in the binary too). *)
+           whose value the store's own emission recorded (T4b) — a site
+           storing fewer slots leaves the rest unpassed (reading an
+           unpassed arg is UB in the binary too). *)
         let name = Var.name (Arg.lhs arg) in
         let i =
           int_of_string @@ String.sub name 9 (String.length name - 9)
         in
         let stored =
           match Core.Map.find fr.outgoing blk_tid with
-          | Some slots -> Base.List.Assoc.find ~equal:Int.equal slots i
+          | Some site ->
+              Base.List.Assoc.find ~equal:Int.equal site.Convutils.site_slots i
           | None -> None
         in
-        (match stored with
-         | Some data_exp ->
-             let* v = create_exp llvm_builder blk_tid data_exp in
+        (match Base.Option.bind stored ~f:(fun dtid ->
+                     EHashtbl.find fr.store_vals dtid) with
+         | Some v ->
              let ty = Llvm.type_of v in
              let v =
                match Llvm.classify_type ty with
