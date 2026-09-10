@@ -491,8 +491,8 @@ let run () =
   let cont_st = Graphlib.Std.Solution.get sol cont_tid in
   check
     "B-1: an interrupt edge is an unknown external callee — the continuation keeps the RSP anchor \
-     ({0}) and the caller-saved rdi is topped (no AI.top degradation)"
-    (Ws.equal (AI.find_word 64 cont_st rsp) (Ws.singleton (w64 0))
+     (the symbolic segment base at offset 0) and the caller-saved rdi is topped (no AI.top degradation)"
+    (Ws.equal (AI.find_word 64 cont_st rsp) (Ws.stack_word_i64 0L)
     && Ws.is_top (AI.find_word 64 cont_st rdi));
   ())
 ;

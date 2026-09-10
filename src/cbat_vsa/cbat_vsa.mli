@@ -24,10 +24,13 @@ module Mem = Cbat_ai_memmap
 
 (* Per-def classification over the converged solution. *)
 module Cbat_extraction : sig
-  (* Classification vocabulary. *)
+  (* Classification vocabulary.  [Caller] = the producer's lane split:
+     a bounded span entirely at/above the entry RSP (the ABI-visible
+     caller window — incoming stack args, the return-address slot). *)
   type kind =
     | Range of int64 * int64
     | Infinite of int64 * int64
+    | Caller of int64 * int64
     | Unbounded
     | Dead
     | VLA of Tid.t
@@ -36,20 +39,24 @@ module Cbat_extraction : sig
   (* Kind of a word set. *)
   val classify : ?vla_tid:tid -> WordSet.t -> kind option
 
+  (* The own/caller lane split over a classified kind. *)
+  val caller_split : kind -> kind
+
   (* Address of a stack-access rhs, if any. *)
   val stack_address_of_rhs : Bil.exp -> Bil.exp option
 
-  (* Value-based stack address predicate (frame term in state). *)
-  val is_seed : AI.t -> exp -> bool
+  (* The ONE stack-access predicate (T3): the address's denotation is
+     stack-symbolic (or the plain in-band degraded arm). *)
+  val is_stack_access : AI.t -> exp -> bool
 
   (* Tag-state meet for one address. *)
   val st_tag_of :
     tags:(tid, AI.t) Solution.t ->
     blk term -> exp -> AI.t -> AI.t
 
-  (* Per-def classification over [sol]; the two-channel frame-residency
-     proof (spec §2.2) seeds accesses, replacing the deleted tag match.
-     The product is the per-def offset range — nothing else. *)
+  (* Per-def classification over [sol]; the single denotation predicate
+     seeds accesses.  The product is the per-def SEGMENT-RELATIVE offset
+     range (the lane split included) — nothing else. *)
   val extract :
     dynamic_alloc:(def term -> bool) ->
     alloc_tids:Tid.Set.t ->
@@ -90,15 +97,6 @@ val static_graph_vsa : tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
    test_cbat and the probes, never by production src/.  Quarantined so
    the interface above stays the pipeline's real surface. *)
 module Test_seam : sig
-  (* Opaque frame relation; None is bottom. *)
-  type frame
-
-  (* Frame relation of a state. *)
-  val frame_of_state : AI.t -> frame option
-
-  (* Rewrite an address to its offset expression. *)
-  val rewrite_addr : frame option -> exp -> exp
-
   val denote_def : def term -> AI.t -> AI.t
 
   val denote_defs : blk term -> AI.t -> AI.t

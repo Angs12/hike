@@ -108,6 +108,13 @@ let rec to_plain (t : t) : t =
      | _ -> Clp (Clp.top 64))
   | Clp _ | FinSet _ -> t
 
+(* Plain-operand top test (the composite [is_top] is defined later). *)
+let plain_is_top (t : t) : bool =
+  match t with
+  | Clp p -> Clp.is_top p
+  | FinSet _ -> false
+  | StackOff offs -> Clp.is_top offs
+
 let of_list ~width l : t =
   if List.length l > Utils.fin_set_size
   then Clp (Clp.of_list ~width l)
@@ -194,11 +201,14 @@ let top i = bound_set_size @@ Clp (Clp.top i)
    re-tagging it stack is sound. *)
 let stack_band_lo = Stdlib.Int64.shift_left 1L 61
 
-(* Band test on concrete extrema. *)
+(* Band test on concrete extrema: every extremum signed-positive and at
+   least [stack_band_lo] (int64 has no [2^63), so the signed reading of
+   the band's upper end is simply "not negative"). *)
 let in_band_words (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
   match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
   | Ok loi, Ok hii ->
-    Stdlib.Int64.compare loi stack_band_lo >= 0 && Stdlib.Int64.compare hii 0L < 0
+    Stdlib.Int64.compare loi stack_band_lo >= 0
+    && Stdlib.Int64.compare hii stack_band_lo >= 0
   | _ -> false
 
 (* Tests stack residency: the symbolic arm, or the plain degraded arm. *)
@@ -355,6 +365,8 @@ let rec intersection (t1 : t) (t2 : t) : t =
   if bitwidth t1 <> bitwidth t2 then
     (if bitwidth t1 > bitwidth t2 then t1 else t2)
   else match t1, t2 with
+  | StackOff _, _ when plain_is_top t2 -> t1
+  | _, StackOff _ when plain_is_top t1 -> t2
   | StackOff o1, StackOff o2 -> StackOff (Clp.intersection o1 o2)
   | StackOff _, _ | _, StackOff _ ->
     intersection (to_plain t1) (to_plain t2)

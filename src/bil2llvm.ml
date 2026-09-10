@@ -496,9 +496,11 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
          that used to OR a second opinion here is deleted — two
          mechanisms that can disagree are worse than one, and absent
          info already defaults to false. *)
+       (* The producer's [Caller] tags ARE the verdict (T3's lane split —
+         the emitter never tests tag signs). *)
        let has_positive =
          Core.Map.exists (Hike_kb.info_of_sub (Term.tid sub)).Convutils.offsets
-           ~f:(fun kind -> Convutils.is_positive_kind kind)
+           ~f:(fun kind -> match kind with Convutils.Caller _ -> true | _ -> false)
        in
        let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
        let hike_stack_arg =

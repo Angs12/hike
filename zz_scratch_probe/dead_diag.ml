@@ -87,7 +87,6 @@ let () =
     (* Per stack-addressed def: the full Dead chain. *)
     Base.List.iter blocks ~f:(fun blk ->
         let st_blk = Graphlib.Std.Solution.get sol (Term.tid blk) in
-        let frame = Vsa.Test_seam.frame_of_state st_blk in
         let sp_ws = Vsa.AI.find_word 64 st_blk sp in
         (* RSP defs: state before/after, and the after-kind. *)
         let _, rsp_trace =
@@ -118,30 +117,30 @@ let () =
             match Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d) with
             | None -> ()
             | Some addr ->
-              let seeded = Vsa.Cbat_extraction.is_seed st_blk addr in
-              let addr' = Vsa.Test_seam.rewrite_addr frame addr in
-              let changed = not (Exp.equal addr' addr) in
+              let seeded = Vsa.Cbat_extraction.is_stack_access st_blk addr in
               let st_tag =
-                Vsa.Cbat_extraction.st_tag_of ~tags:sol blk addr' st_blk in
-              let ws_tag = Vsa.Test_seam.denote_imm_exp addr' st_tag in
+                Vsa.Cbat_extraction.st_tag_of ~tags:sol blk addr st_blk in
+              let ws_tag = Vsa.Test_seam.denote_imm_exp addr st_tag in
               let ws_plain = Vsa.Test_seam.denote_imm_exp addr st_blk in
+              (* The tag universe is the denotation's offset-space twin. *)
               let kind =
                 match ws_tag with
                 | Ok ws ->
-                  (match Vsa.Cbat_extraction.classify ws with
+                  (match Vsa.Cbat_extraction.classify
+                           (Option.value ~default:ws (Ws.relativize ws)) with
                    | Some k -> vsa_kind_to_string k
                    | None -> "none")
                 | Error _ -> "denote-error"
               in
               Printf.printf
-                "DEF blk=%s %s  lhs=%s\n  rhs   = %s\n  addr' = %s\n  \
-                 seeded=%b rw=%b frame=%b sp_ws=%s\n  plain=%s; tag=%s; kind=%s\n"
+                "DEF blk=%s %s  lhs=%s\n  rhs   = %s\n  addr = %s\n  \
+                 seeded=%b sp_ws=%s\n  plain=%s; tag=%s; kind=%s\n"
                 (Tid.to_string (Term.tid blk))
                 (Tid.to_string (Term.tid d))
                 (Var.name (Def.lhs d))
                 (pp_exp (Def.rhs d))
-                (pp_exp addr')
-                seeded changed (Option.is_some frame) (ws_summary sp_ws)
+                (pp_exp addr)
+                seeded (ws_summary sp_ws)
                 (match ws_plain with Ok w -> ws_summary w | Error _ -> "error")
                 (match ws_tag with Ok w -> ws_summary w | Error _ -> "error")
                 kind))

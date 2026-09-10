@@ -1,5 +1,9 @@
-(* Forward transfer: frame facts, value denotation over BIL. Pure;
-   the walk and driver consume it (one-directional dep). *)
+(* Forward transfer: value denotation over BIL. Pure; the walk and
+   driver consume it (one-directional dep).  The frame relation is
+   DELETED (T3): the entry RSP's word carries the symbolic segment
+   base, SP-derived addresses denote [StackOff] directly, and memory
+   cells key by their segment offsets — no address rewriting, no
+   offset fiction. *)
 
 include Core_kernel
 open Bap.Std
@@ -114,148 +118,6 @@ let val_top : typ -> val_t = function
     `Mem (Mem.top k)
   | Type.Unk -> failwith "Error in val_top: typ is not representable by Type.t"
 
-(* Effect of one def on facts; every def is denoted (spec §2.1). *)
-let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
-  let v = AI.frame_key (Def.lhs d) in
-  let remove = AI.frame_remove f v in
-  (* Copy rule with shift. *)
-  let transfer ~(shift : AI.frame_term -> AI.frame_term) (y : var)
-      : AI.frame =
-    if Var.equal y v then
-      match AI.frame_lookup f v with
-      | Some t -> AI.frame_set f v (shift t)
-      | None -> remove
-    else
-      match AI.frame_lookup f y with
-      | Some t -> AI.frame_set f v (shift t)
-      | None -> remove in
-  (* A derived [z] drops the fact. *)
-  let if_not_derived (z : var)
-      ~(shift : AI.frame_term -> AI.frame_term) (y : var) : AI.frame =
-    if Option.is_some (AI.frame_lookup f z) then remove
-    else transfer ~shift y in
-  match Def.rhs d with
-  | Bil.Var y ->
-    let y = AI.frame_key y in
-    if Var.equal y v then f
-    else (match AI.frame_lookup f y with
-        | Some t -> AI.frame_set f v t
-        | None -> remove)
-  | Bil.Int _ -> remove
-  | Bil.BinOp (op, e1, e2) ->
-    (match op, e1, e2 with
-     | Bil.PLUS, Bil.Var y, Bil.Int k
-     | Bil.PLUS, Bil.Int k, Bil.Var y
-     | Bil.MINUS, Bil.Var y, Bil.Int k ->
-       (* Derived iff y derived. *)
-       let y = AI.frame_key y in
-       let c = WordSet.singleton (Cbat_word.of_word k) in
-       let shift =
-         match op with
-         | Bil.PLUS -> fun t -> AI.frame_add_const t c
-         | Bil.MINUS -> fun t -> AI.frame_sub_const t c
-         | _ -> Fun.id in
-       transfer ~shift y
-     | Bil.PLUS, Bil.Var y, Bil.Var z ->
-       (* Derived iff y derived. *)
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z 1) y
-     | Bil.MINUS, Bil.Var y, Bil.Var z ->
-       (* Derived iff y derived. *)
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-1)) y
-     | Bil.PLUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k)
-     | Bil.PLUS, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k), Bil.Var y ->
-       (* Derived iff y derived. *)
-       let k = match Cbat_word.to_int (Cbat_word.of_word k) with Ok n -> n | Error _ -> 0 in
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z k) y
-     | Bil.MINUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k) ->
-       (* Derived iff y derived. *)
-       let k = match Cbat_word.to_int (Cbat_word.of_word k) with Ok n -> n | Error _ -> 0 in
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-k)) y
-     | _ -> remove)
-  | Bil.Load _ | Bil.Store _ | Bil.Cast _ | Bil.Extract _
-  | Bil.Concat _ | Bil.Ite _ | Bil.UnOp _ | Bil.Let _ | Bil.Unknown _ ->
-    remove
-
-(* None stays bottom. *)
-let apply_frame_def (f : AI.frame option) (d : def term) : AI.frame option =
-  match f with
-  | None -> None
-  | Some f -> Some (apply_frame_def_list f d)
-
-
-
-(* Offset expression plus literal. *)
-let expr_of_term (t : AI.frame_term) (k : Cbat_word.t) : exp option =
-  match WordSet.min_elem t.fconst, WordSet.max_elem t.fconst with
-  | Some lo, Some hi when Cbat_word.equal lo hi ->
-    let base = Cbat_word.add lo k in
-    Some (List.fold t.fvars ~init:(Bil.Int (Cbat_word.to_word base)) ~f:(fun acc (v, k') ->
-        let scaled = Bil.BinOp (Bil.TIMES, Bil.Var v, Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:64 k'))) in
-        if k' >= 0 then Bil.BinOp (Bil.PLUS, acc, scaled)
-        else Bil.BinOp (Bil.MINUS, acc, scaled)))
-  | _ -> None
-
-(* Rewrite an address to its offset expression. *)
-let rewrite_addr (frame : AI.frame option) (a : exp) : exp =
-  let find (v : var) : AI.frame_term option =
-    match frame with
-    | None -> None
-    | Some f -> AI.frame_lookup f v in
-  let derived_free (e : exp) : bool =
-    Exp.free_vars e
-    |> Core.Set.for_all ~f:(fun v -> Option.is_none (find v)) in
-  let rec go (e : exp) : exp option =
-    match e with
-    | Bil.Var x ->
-      (match find x with
-       | Some t -> expr_of_term t (Cbat_word.zero 64)
-       | None -> None)
-    | Bil.Int _ -> Some e
-    | Bil.BinOp (Bil.PLUS, e1, e2) ->
-      (match go e1, go e2 with
-       | Some r1, Some r2 -> Some (Bil.BinOp (Bil.PLUS, r1, r2))
-       | Some r1, None ->
-         if derived_free e2 then Some (Bil.BinOp (Bil.PLUS, r1, e2)) else None
-       | None, Some r2 ->
-         if derived_free e1 then Some (Bil.BinOp (Bil.PLUS, e1, r2)) else None
-       | None, None -> None)
-    | Bil.BinOp (Bil.MINUS, e1, e2) ->
-      (match go e1, go e2 with
-       | Some r1, Some r2 -> Some (Bil.BinOp (Bil.MINUS, r1, r2))
-       | Some r1, None ->
-         if derived_free e2 then Some (Bil.BinOp (Bil.MINUS, r1, e2)) else None
-       | None, Some _ -> None  
-       | None, None -> None)
-    | _ -> None in
-  match go a with
-  | Some r -> r
-  | None -> a
-
-(* Rewrite an rhs address. *)
-let frame_rewrite_rhs (frame : AI.frame option) (e : exp) : exp =
-  match e with
-  | Bil.Load (m, a, en, s) ->
-    Bil.Load (m, rewrite_addr frame a, en, s)
-  | Bil.Store (m, a, u, en, s) ->
-    Bil.Store (m, rewrite_addr frame a, u, en, s)
-  | _ -> e
-
-
-
-(* Frame relation of a state. *)
-type frame = AI.frame
-
-(* Frame relation of a state. *)
-let frame_of_state (env : AI.t) : frame option = AI.frame_of env
-
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in
   let monadic_assert (b : bool) (err : Type.error) =
@@ -338,53 +200,37 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
+(* Every def is denoted (spec §2.1); the restriction gate is deleted.
+   The denotation IS the transfer: SP-derived addresses arrive as
+   [StackOff] words and memory ops key cells by their segment offsets. *)
 let denote_def (df : def term) (env : AI.t) : AI.t =
-  (* Every def is denoted (spec §2.1); the restriction gate is deleted. *)
   let v = Def.lhs df in
   let e = Def.rhs df in
-  (* Addresses rewrite to offsets. *)
-  let frame = AI.frame_of env in
-  let e = frame_rewrite_rhs frame e in
-  (* Frame-derived values denote offsets. *)
-  let e = rewrite_addr frame e in
   exn_on_err @@
   let open Monad_type_error in
-  
   denote_exp e env >>| fun ev ->
   (match ev with
    | `Word p -> AI.add_word env ~key:v ~data:p
    | `Mem m -> AI.add_memory env ~key:v ~data:m)
-  |> fun env' ->
-  AI.set_frame env' (apply_frame_def (AI.frame_of env) df)
 
 (* Denotation of a block's defs. *)
 let denote_defs (b : blk term) : AI.t -> AI.t =
   (* Phis are the identity. *)
-  (* Frame advances through each def. *)
   fun env0 ->
     Term.enum def_t b
     |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def df env)
 
 
 
-(* Jumps reachable in the env. *)
-
-(* Guards are VALUE context: a frame-tracked var's word lane holds the
-   frame OFFSET (an addressing fiction the memory lane keys cells by); as
-   a value, the var is a stack address whose base is unknown.  Evaluating
-   a guard on the fake offset decides real branches from made-up bits —
-   the -O2 stack-realignment idiom (`test (RSP & 0xF)`) pruned live loops,
-   leaving the pruned blocks bottom and their accesses tagged Dead. *)
-let value_env (env : AI.t) : AI.t =
-  match AI.frame_of env with
-  | None -> env
-  | Some frame ->
-    Base.List.fold frame ~init:env ~f:(fun env (v, _) ->
-        AI.add_word env ~key:v ~data:(WordSet.top 64))
-
+(* Jumps reachable in the env.  Guards evaluate on the words lane
+   directly (T3): an SP-derived var's word is the segment-smeared
+   stack base, so bit tests on it stay undecided ([seg & 0xF] = [0,15])
+   and comparisons against concrete addresses decide consistently with
+   real pointer behavior — the L1 guard-pruning class is structurally
+   dead, by construction, with no [value_env] patch. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
-    let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) (value_env env) in
+    let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in
     let can_fall_through = WordSet.elem Cbat_word.b0 cond in
     if not reachable then Seq.Step.Done
     else if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}

@@ -37,14 +37,13 @@ let mk_mem ~key ~data =
   let v = Mem.Val.create data LittleEndian in
   Mem.add (Mem.top { Mem.addr_width = 32; Mem.addressable_width = 8 }) ~key:k ~data:v
 
-(* Seed fixture: entry state with RSP/RBP at {0} plus an explicit frame. *)
-let mk_seed_state rsp rbp frame () =
-  AI.set_frame
-    (AI.add_word
-       (AI.add_word AI.top ~key:rsp ~data:(Ws.singleton (w64 0)))
-       ~key:rbp
-       ~data:(Ws.singleton (w64 0)))
-    frame
+(* Seed fixture: entry state with RSP/RBP at the symbolic segment base
+   (offset 0 — the production universe, T3). *)
+let mk_seed_state rsp rbp () =
+  AI.add_word
+    (AI.add_word AI.top ~key:rsp ~data:(Ws.stack_word_i64 0L))
+    ~key:rbp
+    ~data:(Ws.stack_word_i64 0L)
 
 (* VSA fixture builders (moved verbatim from test_vsa.ml). *)
 let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub term * tid =

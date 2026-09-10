@@ -261,7 +261,7 @@ let addr_exp_of_rhs (e : exp) : exp option =
 (* One L2a DIAG line for a bottom word def. *)
 let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
     (d : def term) (input_bottom : bool) (tagged : bool)
-    (frame : Vsa.Test_seam.frame option) (st_before : AI.t) : unit =
+    (st_before : AI.t) : unit =
   let class_of (e : exp) : string =
     match Vsa.Test_seam.denote_imm_exp e st_before with
     | Error _ -> "err"
@@ -269,8 +269,7 @@ let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
   let kind, op1, op2 =
     match Def.rhs d with
     | Bil.BinOp (op, x, y) -> binop_name op, class_of x, class_of y
-    | Bil.Load (_, a, _, _) ->
-      "load", class_of (Vsa.Test_seam.rewrite_addr frame a), "n/a"
+    | Bil.Load (_, a, _, _) -> "load", class_of a, "n/a"
     | Bil.Cast (ct, _, _) -> "cast:" ^ cast_name ct, "n/a", "n/a"
     | _ -> "other", "n/a", "n/a" in
   Printf.printf "DIAG\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n"
@@ -315,12 +314,12 @@ let collect_stats (bname : string) (sub' : sub term)
                    incr bottom_dead;
                    if diag_on () then
                      diag_bottom bname sub' b d input_bottom tagged
-                       (Vsa.Test_seam.frame_of_state st_before) st_before
+                       st_before
                  end else begin
                    incr bottom_live;
                    if diag_on () then
                      diag_bottom bname sub' b d input_bottom tagged
-                       (Vsa.Test_seam.frame_of_state st_before) st_before
+                       st_before
                  end;
                  if input_bottom then `Bottom_dead else `Bottom_live
                | `Exact -> `Exact
@@ -335,14 +334,12 @@ let collect_stats (bname : string) (sub' : sub term)
           (* Address metric in the PRE-def state. *)
           (match addr_exp_of_rhs (Def.rhs d) with
            | Some a ->
-             let stack = Vsa.Cbat_extraction.is_seed st_before a in
-             let a' =
-               Vsa.Test_seam.rewrite_addr (Vsa.Test_seam.frame_of_state st_before) a in
+             let stack = Vsa.Cbat_extraction.is_stack_access st_before a in
              (* Addresses denoted with block IN-state, not re-denoted values. *)
              (* M6 meet is [st_tag_of] (genuine-subset gate). *)
              let st_tag =
-               Vsa.Cbat_extraction.st_tag_of ~tags b a' st_before in
-             (match Vsa.Test_seam.denote_imm_exp a' st_tag with
+               Vsa.Cbat_extraction.st_tag_of ~tags b a st_before in
+             (match Vsa.Test_seam.denote_imm_exp a st_tag with
               | Error _ ->
                 s.Sub_stats.ld_denote_err <- s.Sub_stats.ld_denote_err + 1
               | Ok ws ->
