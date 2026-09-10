@@ -32,6 +32,14 @@ Supersedes: the open items of `.scratch/o2-attribution/`.
 - **Soundness over precision, always.** The semantic harness is the
   oracle; the pin (`o2_known_failures.txt`) moves only in the commit
   that deliberately changes it.
+- **FIX THE ARCHITECTURE, NOT THE IMPLEMENTATION (owner doctrine,
+  2026-09-10 — very important).** Every failure's fix lands on the
+  architecture side: construct the general rule that makes the failure
+  class impossible, so the code becomes robust, general, and reachable.
+  NEVER respond to a failure by adding gates, checks, or per-case
+  branches at the failure site — a fix with many cases is the failure
+  moving into the code. The measure of a fix: the diff deletes cases,
+  it does not add them.
 
 ## Problem Statement
 
