@@ -137,10 +137,12 @@ let resolve_addr llvm_builder addr =
   | None -> failwith "load: addr not found"
   | Some section -> resolve_addr_in llvm_builder section addr
 
-(* Materializes the pointer for an address integer.  The typed form — a
-   GEP into the frame — requires the producer's frame-residency license
-   (the def's tag proves the access lives in this sub's frame; see
-   [frame_wrap_license]).  Unlicensed integers are real (foreign)
+(* Materializes the pointer for an address integer.  A LICENSED integer
+   (the def's VSA tag proves the access lives in this sub's stack
+   storage; see [frame_wrap_license]) becomes a GEP into the sub's
+   anchor storage: anchor + (word − anchor_i64) + anchor_idx — the SP
+   Slot value IS anchor_i64, so the runtime index is exact however
+   imprecise the tag.  Unlicensed integers are real (foreign)
    addresses — the sret pointer, reloaded pointers, VLA addresses,
    section/global constants — and become inttoptr (the exception lane):
    wrapping an unproven address computes the right runtime value only by
@@ -152,9 +154,18 @@ let create_addr_ptr llvm_builder llvm_val =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  match (!(ctx.Convutils.typed_frame), !(ctx.Convutils.frame_wrap_license))
-  with
-  | Some (frame, anchor_i64, anchor_idx), true ->
+  match !(ctx.Convutils.frame_wrap_license) with
+  | true ->
+      (* The license proves the storage: a licensed address requires a
+         Range/Infinite tag on some def, and a tagged sub always owns
+         stack storage (a frame or a region split) — the anchor is
+         present. *)
+      let frame, anchor_i64, anchor_idx =
+        match !(ctx.Convutils.stack_anchor) with
+        | Some anchor -> anchor
+        | None ->
+            failwith "licensed address in a storage-free sub (no anchor)"
+      in
       let delta = Llvm.build_sub llvm_val anchor_i64 "" llvm_builder in
       let idx =
         Llvm.build_add delta
@@ -164,7 +175,7 @@ let create_addr_ptr llvm_builder llvm_val =
       return
       @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) frame [| idx |] ""
            llvm_builder
-  | _ ->
+  | false ->
       return
       @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) ""
            llvm_builder

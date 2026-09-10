@@ -196,7 +196,7 @@ let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
    - Range/Infinite (spans entirely below the entry RSP — this sub's
      own frame): the ONE uniform rule — the address integer flows
      through create_exp into create_addr_ptr's licensed arm,
-     ptr = frame + (word − stack_0) + anchor_idx, total over all signs
+     ptr = anchor + (word − stack_0) + anchor_idx, total over all signs
      and widths (the SP Slot value IS stack_0, so the runtime index is
      exact however imprecise the tag).
    - Caller: a proven slot read becomes its promoted parameter; the

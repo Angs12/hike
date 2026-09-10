@@ -9,9 +9,9 @@ module KB = Bap_knowledge.Knowledge
 
 (* Per-sub frame state. *)
 type sub_frame = {
-  frame : Llvm.llvalue option;
-  (* Anchor byte index. *)
-  anchor_idx : int64;
+  (* The sub's anchor address integer: the SP Slot's stored value for
+     storage-carrying subs; the constant 0 anchor for storage-free
+     subs (the [stack0 = None] fallback readers). *)
   anchor_i64 : Llvm.llvalue;
   (* The caller-window base local (the Caller-Window Parameter), when
      the sub carries one (variadic/mixed — the T4 residual). *)

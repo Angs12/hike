@@ -271,7 +271,7 @@ let build_frame_anchor llvm_ctx llvm_builder n anchor_idx =
     Llvm.build_ptrtoint anchor (Llvm.i64_type llvm_ctx) "anchor_i64"
       llvm_builder
   in
-  (Some frame, anchor_idx, anchor_i64)
+  (frame, anchor_idx, anchor_i64)
 
 (* Stack model decision is consumed here. *)
 
@@ -311,7 +311,6 @@ let create_sub sub =
     (* Consumes the stack plan. *)
     let plan = sub_info.Convutils.stack_plan in
     let is_precise = Hike_stack_model.is_precise sub_info in
-    ctx.Convutils.typed_frame := None;
     let frame, anchor_idx, anchor_i64 =
       if is_precise || (Core.Map.is_empty tags && not sub_info.Convutils.degraded)
       then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
@@ -319,14 +318,10 @@ let create_sub sub =
         let n, anchor_idx =
           Hike_stack_model.frame_dims sub ~abi:ctx.Convutils.abi sub_info
         in
-        let frame, _, anchor_i64 =
+        let frame, anchor_idx, anchor_i64 =
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx
         in
-        (* The typed frame is THE model: the anchor address integer is
-           consumed only by create_addr_ptr's frame-relative GEP. *)
-        ctx.Convutils.typed_frame :=
-          Some (Base.Option.value_exn frame, anchor_i64, anchor_idx);
-        (frame, anchor_idx, anchor_i64)
+        (Some frame, anchor_idx, anchor_i64)
     in
     let regions =
       if is_precise then
@@ -353,19 +348,32 @@ let create_sub sub =
       in
       bind_regions regions
     in
-    (* The SP Slot (T4): the entry-block alloca holding this
-       invocation's anchor — the ptrtoint of the sub's own frame, or of
-       its first region alloca for precise subs. *)
-    let anchor_val, sp_slot =
+    (* THE stack anchor — one fact, two consumers: create_addr_ptr's
+       licensed GEP and the SP Slot's stack_0 below.  Frame storage
+       anchors to the sub's %frame alloca; the region split anchors to
+       its first region alloca (index 0 — the exact value the SP Slot
+       binds for precise subs).  [None] = the sub owns no stack storage
+       (tag-free, non-degraded): no def can then carry a Range/Infinite
+       tag, no address is ever licensed, and the absent anchor is never
+       queried. *)
+    let anchor =
       match frame, regions with
-      | Some _, _ -> (anchor_i64, true)
+      | Some frame, _ -> Some (frame, anchor_i64, anchor_idx)
       | None, (_, base) :: _ ->
           let v =
             Llvm.build_ptrtoint base (Llvm.i64_type llvm_ctx) "anchor_i64"
               llvm_builder
           in
-          (v, true)
-      | None, [] -> (anchor_i64, false)
+          Some (base, v, 0L)
+      | None, [] -> None
+    in
+    ctx.Convutils.stack_anchor := anchor;
+    (* The SP Slot (T4): the entry-block alloca holding this
+       invocation's anchor — the sub's own anchor integer. *)
+    let anchor_val, sp_slot =
+      match anchor with
+      | Some (_, v, _) -> (v, true)
+      | None -> (anchor_i64, false)
     in
     let stack0 =
       if sp_slot then begin
@@ -384,7 +392,7 @@ let create_sub sub =
     let store_vals = EHashtbl.create (module Tid) in
     let outgoing = sub_info.Convutils.prom_sites in
     let fr : sub_frame =
-      { frame; anchor_idx; anchor_i64; stack = None; stack0; regions;
+      { anchor_i64; stack = None; stack0; regions;
         is_precise; outgoing; store_vals; resolved = sub_info.Convutils.prom_resolved }
     in
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
