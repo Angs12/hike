@@ -30,18 +30,6 @@ let addr_of_rhs (e : exp) : (exp * Size.t) option =
   in
   vis#visit_exp e None
 
-(* Stored data of a store rhs (no wrapper closure; the model never
-   rewrites, only tests). *)
-let store_data_exp_of_rhs (e : exp) : exp option =
-  let vis =
-    object
-      inherit [ exp option ] Exp.visitor
-      method! visit_store ~mem:_ ~addr:_ ~exp:data _ _ acc =
-        Base.Option.first_some acc (Some data)
-    end
-  in
-  vis#visit_exp e None
-
 (* Splits a store rhs into data and cast wrapper using visitor/mapper. *)
 let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
   let vis =
@@ -77,6 +65,13 @@ let arg_slot (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "hike_slot%d" i)
     (Type.Imm 64)
+
+(* The Caller-Window Parameter: the caller-window base, not SP — the
+   residual window-base argument of variadic/mixed subs (the bridge) and
+   of the memory-convention thunks.  The model owns the var grammar:
+   window, slots, and regions all mint here. *)
+let hike_window_var : var =
+  Var.create ~is_virtual:false ~fresh:false "hike_window" (Type.Imm 64)
 
 (* Region memory and base vars; the alloca's emitted name. *)
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
@@ -223,11 +218,6 @@ let is_abi_visible ~(tag_of : Convutils.vsa_kind Tid.Map.t) (d : def term) : boo
   | Some (Convutils.Caller _) -> true
   | _ -> false
 
-(* [abi_visibility_of] over one sub. *)
-let abi_visibility_of (info : Convutils.vsa_info) : def term -> bool =
-  is_abi_visible ~tag_of:info.Convutils.offsets
-
-
 (* Stack model decision. *)
 
 (* Returns the region alloca size. *)
@@ -299,11 +289,6 @@ let degraded_geometry (sub : sub term) ~(abi : Abi.t)
   in
   (max_dec, max_neg, has_unbounded)
 
-(* The fallback frame's geometry: (alloca bytes, anchor byte index) for
-   every non-precise lane.  With tags, the tagged extents ARE the frame
-   extents; with no tags (the degraded arm) the extents come from the
-   SP-decrement walk, widened to the 64K caller-arg window on unbounded
-   and floored at the 8192-byte degraded minimum. *)
 (* The fallback frame's geometry: (alloca bytes, anchor byte index).
    The frame covers every owned-storage fact the record carries — the
    tagged access extents AND the formed stack-value extents (T4: the
