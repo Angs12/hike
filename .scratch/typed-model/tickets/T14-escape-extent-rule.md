@@ -53,6 +53,19 @@ probe of param registers.
   (`stack_offsets : t -> Clp.t option` — answers only for `StackOff`)
   used by `note_escape` instead of `relativize_opt` (which
   deliberately serves the tag universe's smear arms).
+- **THE OWNER'S INVARIANT, explicit**: only values from the StackOff
+  symbol size the frame and decide escape — regular integers
+  contribute NOTHING. (StackOff IS tracked and disjoint from plain
+  integers by the symbolic base's construction; the bug was the
+  probe's accessor — `relativize_opt`'s smear arm — not the
+  tracking.)
+- **The band arm's own census** (the question this forensics raises):
+  post-symbolic-base, when does an ADDRESS-position denotation
+  legitimately reach the plain-band degraded arm (bitwise-mangled SP
+  lanes?)? Measure on the corpus: if zero ADDRESS classifications
+  reach the band arm, its classification role is measured dead and
+  its disposition (delete now / keep for corpus growth) is recorded
+  in the verdict — inventory-first, never a silent keep.
 - **Two hardenings as rules, not gates**: (i) `build_frame_anchor`
   never loses bits — the 64-bit array-type path, or a loud
   `Hike_diag` refusal of an absurd `n` (never a silent truncation);
