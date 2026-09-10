@@ -460,26 +460,6 @@ let classify ?vla_tid (ws : WordSet.t) : kind option =
        | _ -> Some Unbounded)
     | _ -> Some Unbounded
 
-(* Signed bounds or None. *)
-let bounds_of (ws : WordSet.t) : (int64 * int64) option =
-  if WordSet.is_top ws || WordSet.is_bottom ws then None
-  else
-    match WordSet.min_elem ws, WordSet.max_elem ws with
-    | Some lo, Some hi -> (
-        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok lo, Ok hi -> Some (lo, hi)
-        | _ -> None)
-    | _ -> None
-
-(* Displacement from the current RSP at the def; None when either side is
-   unbounded.  Internal to the escape analysis — never a tag. *)
-let sp_displacement (ws : WordSet.t) (rsp_ws : WordSet.t) :
-    (int64 * int64) option =
-  match bounds_of ws, bounds_of rsp_ws with
-  | Some (alo, ahi), Some (rlo, rhi) ->
-      Some (Stdlib.Int64.sub alo rhi, Stdlib.Int64.sub ahi rlo)
-  | _ -> None
-
 (* Address of a stack-access rhs using Exp.visitor. *)
 let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
   let vis =
@@ -526,50 +506,6 @@ let is_stack_access (st_before : AI.t) (addr : exp) : bool =
   | Ok ws ->
     if WordSet.is_bottom ws then true
     else WordSet.in_stack_segment ws
-
-
-(* Outgoing-arg stores: stack writes at or above the current RSP but below
-   entry RSP — the pushed-arg signature.  Escape-analysis input computed
-   where the per-def state lives; NOT part of the tag product. *)
-let outgoing_arg_stores ~(sp : var) ~(sol : (tid, AI.t) Solution.t)
-    (sub : sub term) : Tid.Set.t =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
-      let st0 = Solution.get sol (Term.tid blk) in
-      let _, acc =
-        Base.List.fold_left (Term.enum def_t blk |> Seq.to_list)
-          ~init:(st0, acc)
-          ~f:(fun (st, acc) d ->
-              let st_before = st in
-              let st = Cbat_transfer.denote_def d st in
-              match stack_address_of_rhs (Def.rhs d) with
-              | Some addr when is_stack_access st_before addr ->
-                  let st_tag = st_tag_of ~tags:sol blk addr st_before in
-                  let acc =
-                    match Cbat_transfer.denote_imm_exp addr st_tag with
-                    | Ok ws -> (
-                        match relativize_opt ws with
-                        | Some rel ->
-                          (match classify rel, bounds_of rel with
-                           | Some (Range (lo, _)), Some _ ->
-                             let below_entry = Int64.compare lo 0L < 0 in
-                             let above_cur =
-                               match sp_displacement rel
-                                         (Option.value ~default:ws
-                                            (relativize_opt (AI.find_word 64 st_before sp))) with
-                               | Some (klo, _) -> Int64.compare klo 0L >= 0
-                               | None -> false
-                             in
-                             if below_entry && above_cur
-                             then Core.Set.add acc (Term.tid d) else acc
-                           | _ -> acc)
-                        | None -> acc)
-                    | Error _ -> acc
-                  in
-                  (st, acc)
-              | _ -> (st, acc))
-      in
-      acc)
 
 
 let rec extract ~(dynamic_alloc : def term -> bool)

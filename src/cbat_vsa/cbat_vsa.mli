@@ -65,11 +65,6 @@ module Cbat_extraction : sig
     sub term ->
     kind Tid.Map.t
 
-  (* Outgoing-arg stores (the pushed-arg signature); escape-analysis
-     input, never a tag. *)
-  val outgoing_arg_stores :
-    sp:var -> sol:(tid, AI.t) Solution.t -> sub term -> Tid.Set.t
-
   (* True for a non-literal [RSP := RSP - size]. *)
   val vla_decrement_p : var -> Bil.exp -> bool
 
@@ -93,6 +88,14 @@ val set_addr_bits : int -> unit
 val init_sol : ?entry:AI.t ->  sub term -> vsa_sol
 
 val static_graph_vsa : tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
+
+(* Denotes one def / a block's defs in order (the transfer function; phis
+   are the identity).  Production surface since T3c: the model's
+   denotational escape rule reads a call block's abstract state AT the
+   call, and each access's operand denotations at the def. *)
+val denote_def : def term -> AI.t -> AI.t
+
+val denote_defs : blk term -> AI.t -> AI.t
 
 (* The fixtures' construction seam: every name here is consumed by
    test_cbat and the probes, never by production src/.  Quarantined so

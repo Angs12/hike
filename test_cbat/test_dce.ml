@@ -195,7 +195,7 @@ let run () =
   let info =
     Hike.Convutils.mk_vsa_info ~offsets:[]
       ~regions:[ region ] ~stack_plan:[ region ]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   Kb.provide (Tid.Map.singleton (Term.tid precise_sub) info);
   let precise' = Hike.Dce.dce ~target:Theory.Target.unknown precise_sub in

@@ -36,19 +36,13 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
           ~dynamic_alloc:(fun d -> Core.Set.mem alloc_tids (Term.tid d))
           sub
       in
-      (* Escape analysis: one computation per sub (ADR 0008, producer-fix).
-         The result flows as [vsa_info.frame_escaped]; [regions_of_sub]
-         reads it to veto conversion on escaped frames. *)
-      let arg_stores =
-        Vsa.Cbat_extraction.outgoing_arg_stores ~sp ~sol sub
-      in
-      let frame_escaped =
-        Hike_stack_model.frame_escapes sp target sub ~offsets ~arg_stores
-      in
+      (* The region partition reads the solution's denotations directly
+         (T3c): no escape fact, no frame_escaped — the servability rule
+         lives in the partition. *)
       let mk = Convutils.mk_vsa_info_maps ~offsets ~degraded
-          ~vla_alloc_tids:alloc_tids ~frame_escaped in
+          ~vla_alloc_tids:alloc_tids in
       let base_info = mk ~regions:[] ~stack_plan:[] in
-      let regions = Hike_stack_model.regions_of_sub sub base_info in
+      let regions = Hike_stack_model.regions_of_sub ~sol sub base_info in
       let base = mk ~regions ~stack_plan:[] in
       (* The plan IS the convertible regions — no refusals, no recomputation. *)
       { base with

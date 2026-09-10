@@ -23,8 +23,11 @@ end
 (** Stack split decision and helpers. *)
 module Stack_model : sig
   (** Merges overlapping ranges into regions; a region's facts (span,
-      membership, storage class) derive from the tags alone. *)
+      membership, storage class) derive from the tags and the solution's
+      denotations alone (T3c: the servability rule reads [is_stack_access]
+      on address operands at each def). *)
   val regions_of_sub :
+    sol:Cbat_vsa.vsa_sol ->
     sub term -> Convutils.vsa_info -> Convutils.region list
 
   (** The plan IS the convertible regions — no refusals.  An oversized

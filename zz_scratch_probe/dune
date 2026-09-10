@@ -137,6 +137,24 @@
  (preprocess
   (pps ppx_bap)))
 
+ (executable
+ (name escape_diag)
+ (modules escape_diag)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  cbat_vsa
+  cbat_vsa_domain
+  core_kernel
+  graphlib
+  threads)
+ (flags
+  (:standard -alert -deprecated -w
+   +a-4-9-27-29-32-39-40-41-42-44-45-48-58-59-60-70)))
 (executable
  (name vsa_debug)
  (modules vsa_debug)

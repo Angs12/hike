@@ -140,11 +140,11 @@ let run_poison () =
   let unb_info : Cu.vsa_info =
     Cu.mk_vsa_info
       ~offsets:
-        [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+        [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   let dead_info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid ld, Cu.Dead) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~offsets:[ (Term.tid ld, Cu.Dead) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   Kb.provide
     (Tid.Map.singleton (Term.tid unb_sub) unb_info);
@@ -260,7 +260,7 @@ let run_casts () =
   (* Singleton Range tag on the store: the converted-cell shape. *)
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -319,7 +319,7 @@ let run_golden () =
     in
     Cu.mk_vsa_info ~offsets
       ~regions:[ region ] ~stack_plan:[ region ]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -379,7 +379,7 @@ let run_fp_gpr () =
   in
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ~frame_escaped:false
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
   in
   Kb.provide (Tid.Map.singleton (Term.tid caller_sub) info);
   let ir_holder = ref "" in
