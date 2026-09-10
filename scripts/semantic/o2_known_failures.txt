@@ -17,7 +17,7 @@ fizzbuzz_safe   # L1 FIXED (poison gone); residual = L3 store-side (lifted-ud2 r
 fptr_table      # L4 (raw un-relocated data addends; indirect-call prior killed)
 union_overlap   # L3 (stale lane-phi state; Unbounded store is a red herring)
 va_arg_mixed    # L1 (alignment-guard trap live; secondary stall re-check due)
-va_arg_vacopy   # L2 (lo<0 dynamic-load arm misses rebase_addr)
+va_arg_vacopy   # the va_list state round-trip in the -O2 lift (re-attributed 2026-09-10: T3 deleted the L2 lo<0 arm structurally and the failure persists)
 #
 # 2026-09-10 corpus incident (recorded so it is never repeated): a rebuild
 # invoked `compile_corpus.sh /tmp/corpus_o2` (underscore) which the script's

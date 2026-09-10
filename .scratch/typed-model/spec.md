@@ -120,6 +120,14 @@ all signs, all widths. No positive/negative arms, no rebase selects, no
 span cases. The old per-tag dispatch (singleton-positive rebase,
 negative GEP, dynamic inttoptr) is deleted by this rule, and with it the
 L2 mixed-span special case.
+[LANDED 2026-09-10: the Mixed class (two-sided/wrapped spans — the
+va_list reg-save-or-overflow pointer) materializes via the two-base
+rule `select(word >= stack_0, hike_stack + (word - stack_0), raw word)`
+— argued a complete rule, not a gate: the condition is exact (the sign
+of the anchor-relative offset IS the boundary), both arms materialize
+soundly, the rule never refuses; no single base is sound (measured).
+See the T3 verdict; the "no selects" letter above is amended to "no
+tag-shape dispatch arms".]
 
 ### T4 (P1) — stack-arg promotion
 
