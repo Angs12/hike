@@ -531,7 +531,10 @@ let run () =
     (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-24L, -24L)));
   ()
 
-(* E3: top-address stores leave memory unchanged; the slot load reads through. *))
+(* E3 (the SOUND contract): a store through a TOP address may write any
+   cell — the whole memory invalidates (whole-memory top; the dropped-store
+   narrowing the old pins froze was unsound), and the pre-store slot value
+   is no longer provable: the 0x100 load reads top. *))
 ;
 (  let m = memv "e2ed_m3" in
   let t = v64 "e2ed_t3" in
@@ -546,15 +549,19 @@ let run () =
          (Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64), Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
   in
   let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), LittleEndian, `r64)) in
+  let mem1 = AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } env1 m in
   let env2 = Vsa.Test_seam.denote_def d2 env1 in
-  check "E2eD-7: gate-free — a top-addr store leaves memory unchanged"
-    (AI.equal env2 env1);
+  let mem2 = AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } env2 m in
+  check "E2eD-7: gate-free — a top-addr store invalidates the memory (the store may hit any \
+         cell: whole-memory top, never the preserved pre-store state)"
+    (not (Mem.equal mem1 (Mem.top (Mem.get_idx mem1)))
+    && Mem.equal mem2 (Mem.top (Mem.get_idx mem2)));
   let env3 = Vsa.Test_seam.denote_def dload env2 in
   let tv = AI.find_word 64 env3 t in
   check
-    "E2eD-8: gate-free — the load at the slot reads exactly the pre-store value {42} (no \
-     full-range-cell pollution)"
-    (Ws.equal tv (Ws.singleton (w64 42)));
+    "E2eD-8: gate-free — the load at the slot reads top (the top store may hit 0x100, so the \
+     pre-store {42} is no longer provable — invalidated, not preserved)"
+    (Ws.is_top tv);
   ())
 ;
 (  let rsp_var = v64 "RSP" in
