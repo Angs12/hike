@@ -34,6 +34,23 @@ vocabulary, post-T10).
    the storage lattice's Unbounded row dies — `Infinite[-∞,+∞]` joins
    to Frame exactly as Unbounded did, by the same lattice arithmetic);
    fixtures and pins updated with verification (the T8 precedent).
+3. **THE VLA KIND (owner question, measured):** the enum conflates
+   ADDRESS shape (Range/Infinite/Dead) with STORAGE class (who serves
+   the access). `VLA of Tid.t` is the partition's Dynamic storage
+   class leaking into the address enum: its four consumption sites are
+   all storage decisions (region-split exclusion, geometry extent,
+   the plain-materialization lane — the SP Slot already binds
+   `ptrtoint %vla`, the promotion exclusion). The construction: the
+   address enum reduces to Range/Infinite/Dead; the storage decision
+   moves to the partition's storage lattice fed by
+   `detect_dynamic_alloc` (which runs first by design); the
+   allocation-site fact stays per-def (`vla_alloc_tids` — the
+   emitter's dynamic-alloca rule consumes it). ACCEPTANCE: alloca_vla
+   keeps its dynamic alloca IR and its semantics (the recorded
+   segfault is the reason this construction exists); the enum shrinks;
+   the case-count delta reported. If the measurement shows the
+   storage-lattice route CANNOT reproduce the region-exclusion
+   behavior, record why and keep the kind — inventory-first.
 3. The diagnostic survives, re-keyed to the FACT: "unbounded span"
    fires when a Frame-joined access's bounds are the full domain (the
    T4b 27-line class keeps its warning — loud, as the doctrine wants).
