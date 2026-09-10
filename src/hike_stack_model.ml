@@ -2,16 +2,15 @@
 
    THE MODEL IS THE TAG (ADR 0008): the VSA tags every frame-resident access
    with its proven offset span.  This module merges overlapping spans into
-   regions and derives each region's facts from those tags and the solution's
-   denotations alone (T3c: the escape fact is deleted — the segment universe
-   answers the storage question; see the region partition's servability
-   rule).  An oversized region joins to Frame with a diagnostic naming it —
+   regions and derives each region's facts from those tags alone (T4: the
+   denotations left with the T3c servability clause — the SP Slot anchor
+   is the privacy mechanism, so the partition is purely geometric).
+   An oversized region joins to Frame with a diagnostic naming it —
    never a gate. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
-module Vsa = Cbat_vsa
 
 (* Stack pointer only: the one register granted stack semantics by fiat
    (ADR 0008).  There is no frame-pointer fact here — fp is an ordinary
@@ -71,6 +70,14 @@ let slot_of (lo : int64) (bits : int) : var =
     (Printf.sprintf "slot_%Ld" (Int64.abs lo))
     (Type.Imm bits)
 
+(* The promoted incoming stack-slot parameter of index [i] (T4): the
+   callee's own signature fact, minted deterministically so the
+   signature and the body agree on the same var. *)
+let arg_slot (i : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (Printf.sprintf "hike_slot%d" i)
+    (Type.Imm 64)
+
 (* Region memory and base vars; the alloca's emitted name. *)
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 
@@ -92,52 +99,18 @@ let is_region_base (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_base"
 
-(* The region partition's storage-servability rule (T3c): a region
-   converts only when the sub's stack traffic is entirely region-
-   servable — every stack access a convertible singleton serves.  The
-   segment universe makes all stack memory one address space, but the
-   SP-relative lane's neighborhood is private only under the sub's own
-   anchor; an access the region lanes cannot serve (any tag but a
-   convertible singleton) with a stack-symbolic address operand keeps
-   the frame model.  Stack-reachability is DENOTATIONAL:
-   [is_stack_access] applied to the operand's value at the def — the
-   ONE predicate family, reading the solution's denotations directly.
-   There is NO escape fact and no var closure. *)
-let unservable_stack_traffic ~(sol : Vsa.vsa_sol)
-    ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) : bool =
-  Term.enum blk_t sub
-  |> Seq.exists ~f:(fun blk ->
-      let st0 = Graphlib.Std.Solution.get sol (Term.tid blk) in
-      let _, found =
-        Base.List.fold_left (Term.enum def_t blk |> Seq.to_list)
-          ~init:(st0, false)
-          ~f:(fun (st, found) d ->
-            let st_before = st in
-            let st = Vsa.denote_def d st in
-            if found then (st, true)
-            else
-              match Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d) with
-              | Some addr ->
-                let reachable =
-                  Exp.free_vars addr
-                  |> Core.Set.exists ~f:(fun v ->
-                      Vsa.Cbat_extraction.is_stack_access st_before
-                        (Bil.Var v))
-                in
-                let servable =
-                  match Core.Map.find offsets (Term.tid d) with
-                  | Some (Convutils.Range (lo, hi)) -> Int64.equal lo hi
-                  | _ -> false
-                in
-                (st, reachable && not servable)
-              | None -> (st, found))
-      in
-      found)
+(* The region partition's storage rule (T4): a region converts when
+   every member is a NEGATIVE singleton `Range` tag — the sub's own
+   proven-constant cells.  T3c's servability clause (the whole-sub
+   traffic test) is DELETED here: the SP Slot anchor (T4) makes every
+   sub's SP neighborhood private, so traffic outside the regions flows
+   through the SP-relative lane over the sub's own storage and no
+   longer forces the frame model. *)
 
 (* Merges overlapping ranges into regions; the partition decides from
-   the tags and the solution's denotations alone. *)
-let regions_of_sub ~(sol : Vsa.vsa_sol) (sub : sub term)
-    (info : Convutils.vsa_info) : Convutils.region list =
+   the tags and the promotion record (T4). *)
+let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
+    Convutils.region list =
   (* The ranges ARE the tags: singleton-span Range members at negative
      offsets are this sub's own proven-constant cells. *)
   let ranges : (int64 * int64) Tid.Map.t =
@@ -196,6 +169,17 @@ let regions_of_sub ~(sol : Vsa.vsa_sol) (sub : sub term)
   let components : (tid * (int64 * int64)) list list =
     merge_components (Core.Map.to_alist ranges)
   in
+  (* T4: a cell some call site stores into as its outgoing window slot
+     must remain a REAL memory store — the callee's Thunk and the
+     Caller-Window Parameter lane read the window memory.  The
+     write-closed join: a region holding such a member keeps Frame
+     storage (a member that stays memory blocks the region). *)
+  let site_stores =
+    Core.Map.fold info.Convutils.prom_sites ~init:Tid.Set.empty
+      ~f:(fun ~key:_ ~data:site acc ->
+        Base.List.fold site.Convutils.site_slots ~init:acc
+          ~f:(fun acc (_, dtid) -> Core.Set.add acc dtid))
+  in
   Base.List.foldi components ~init:[] ~f:(fun i acc members ->
       let span =
         match members with
@@ -205,24 +189,18 @@ let regions_of_sub ~(sol : Vsa.vsa_sol) (sub : sub term)
               ~f:(fun (l, h) (_, (lo, hi)) ->
                 (Int64.min l lo, Int64.max h hi))
       in
-      (* Storage class, from the tags + the denotations alone:
-         - every member at a NEGATIVE offset (this sub owns the cell) and a
-           SINGLETON span (the proven offset is constant) → Static;
-         - anything else (mixed ownership, a widened span) → Frame.
-         The servability rule: if ANY stack access of the sub is not
-         region-servable, no region converts — the SP-relative lane's
-         neighborhood must stay private (see the T3c verdict,
-         BLOCKED-BY-T4: the entry-block alloca anchor removes this). *)
+      (* Storage class, from the tags + the promotion record: every
+         member at a NEGATIVE offset (this sub owns the cell) and a
+         SINGLETON span (the proven offset is constant) -> Static;
+         anything else (mixed ownership, a widened span) -> Frame. *)
       let convertible =
-        if unservable_stack_traffic ~sol ~offsets:info.Convutils.offsets sub
-        then false
-        else
-          match members with
-          | [] -> false
-          | _ ->
-              Base.List.for_all members ~f:(fun (_mtid, (lo, hi)) ->
-                  Int64.compare lo 0L < 0
-                  && Int64.equal lo hi)
+        match members with
+        | [] -> false
+        | _ ->
+            Base.List.for_all members ~f:(fun (mtid, (lo, hi)) ->
+                (not (Core.Set.mem site_stores mtid))
+                && Int64.compare lo 0L < 0
+                && Int64.equal lo hi)
       in
       let max_width =
         Base.List.fold_left members ~init:0 ~f:(fun m (mtid, _) ->
@@ -326,10 +304,39 @@ let degraded_geometry (sub : sub term) ~(abi : Abi.t)
    extents; with no tags (the degraded arm) the extents come from the
    SP-decrement walk, widened to the 64K caller-arg window on unbounded
    and floored at the 8192-byte degraded minimum. *)
+(* The fallback frame's geometry: (alloca bytes, anchor byte index).
+   The frame covers every owned-storage fact the record carries — the
+   tagged access extents AND the formed stack-value extents (T4: the
+   SP-derived addresses the sub computes, e.g. an sret pointer) — the
+   SP-decrement walk sizes the no-facts degraded arm, widened to the
+   64K caller-arg window on unbounded and floored at the 8192-byte
+   degraded minimum. *)
 let frame_dims (sub : sub term) ~(abi : Abi.t)
     (info : Convutils.vsa_info) : int64 * int64 =
   let tags = info.Convutils.offsets in
-  if Core.Map.is_empty tags then begin
+  let min_lo, max_hi, unbounded =
+    Core.Map.fold tags ~init:(0L, 0L, false)
+      ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (lo, hi, unb) ->
+        match kind with
+        | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
+            (* Post-split Range/Infinite always reach below the entry
+               RSP; the caller window never sizes the frame. *)
+            (Int64.min lo l, Int64.max hi h, unb)
+        | Convutils.Mixed (l, h) ->
+            (* Two-sided: the below-entry side sizes the frame; the
+               span may be wrapped, so fold both extrema. *)
+            (Int64.min lo (Int64.min l h), Int64.max hi (Int64.max l h), unb)
+        | Convutils.Unbounded | Convutils.VLA _ -> (lo, hi, true)
+        | Convutils.Caller _ | Convutils.Dead -> (lo, hi, unb))
+  in
+  (* The formed stack-value extents (T4). *)
+  let min_lo, max_hi =
+    Base.List.fold_left info.Convutils.sp_extents
+      ~init:(min_lo, max_hi)
+      ~f:(fun (lo, hi) (l, h) -> (Int64.min lo l, Int64.max hi h))
+  in
+  if Core.Map.is_empty tags && Base.List.is_empty info.Convutils.sp_extents
+  then begin
     let max_dec, max_neg, unbounded = degraded_geometry sub ~abi info in
     let max_neg = if unbounded then Int64.max max_neg 65536L else max_neg in
     let deepest = Int64.max (Int64.max max_dec max_neg) 8L in
@@ -337,34 +344,12 @@ let frame_dims (sub : sub term) ~(abi : Abi.t)
     (n, Int64.sub n 8L)
   end
   else begin
-    let min_lo, max_hi =
-      Core.Map.fold tags ~init:(0L, 0L)
-        ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (lo, hi) ->
-          match kind with
-          | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
-              (* Post-split Range/Infinite always reach below the entry
-                 RSP; the caller window ([Caller]) never sizes the frame. *)
-              (Int64.min lo l, Int64.max hi h)
-          | Convutils.Mixed (l, h) ->
-              (* Two-sided: the below-entry side sizes the frame (the
-                 select routes above-entry words to hike_stack); the
-                 span may be wrapped, so fold both extrema. *)
-              (Int64.min lo (Int64.min l h), Int64.max hi (Int64.max l h))
-          | Convutils.Caller _ | Convutils.Unbounded | Convutils.Dead
-          | Convutils.VLA _ -> (lo, hi))
-    in
+    let max_hi = if unbounded then Int64.max max_hi 65536L else max_hi in
     let span = Int64.sub max_hi min_lo in
     let need = Int64.max (Int64.sub 8L min_lo) (Int64.add span 1L) in
-    let n = align16_up need in
+    let n = Int64.max (align16_up need) 8L in
     (n, Int64.sub n 8L)
   end
-
-(* The emission-shape switch: does this sub split into region allocas
-   (plan non-empty) or emit one %frame?  A derived view of the record —
-   consumed by the emitter (region-allocas vs %frame, SP erase/keep,
-   call-restore suppression) and DCE's precise sweep.  Write-closed:
-   for the sub to omit the frame and erase SP, every negative-offset
-   region must be convertible. *)
 let is_precise (info : Convutils.vsa_info) : bool =
   info.Convutils.stack_plan <> []
   &&

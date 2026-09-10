@@ -407,7 +407,8 @@ module Cbat_extraction = struct
      this sub's own frame (the uniform frame rule).
    - [Caller]: the span lies entirely at/above the entry RSP —
      ABI-visible caller-window traffic (incoming stack args, the
-     return-address slot) — the hike_stack lane.
+     return-address slot) — the caller-window lane (T4: renamed from
+     hike_stack).
    - [Mixed]: the span is two-sided or wrapped (a va_list pointer that
      is the reg-save area OR the overflow area, an ITE'd address, a
      widened hull crossing the entry RSP): the runtime address is
@@ -607,7 +608,7 @@ let rec extract ~(dynamic_alloc : def term -> bool)
                   Core.Map.set acc ~key:dtid ~data:(Range (lo, hi))))
   in
   (* The producer's lane split: positives are the ABI-visible caller
-     window (the hike_stack lane); negatives and mixed spans are this
+     window (the caller-window lane); negatives and mixed spans are this
      sub's frame (the uniform frame rule). *)
   let offsets =
       Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->

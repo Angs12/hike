@@ -16,10 +16,10 @@ let () =
   let sub = match find_sub prog name with Some s -> s | None -> failwith ("no " ^ name) in
   let sigs = ref [] in
   for _i = 1 to 5 do
-    let info = Hike.Vsa.offsets_of_sub target sp sub in
+    let info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
     let regions =
       if info.Hike.Convutils.regions <> [] then info.Hike.Convutils.regions
-      else Hike.Stack_model.regions_of_sub sub ~sol:(Vsa.init_sol sub) info
+      else Hike.Stack_model.regions_of_sub sub info
     in
     let sig_ =
       String.concat ","

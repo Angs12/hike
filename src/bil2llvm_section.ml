@@ -7,12 +7,24 @@ module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
 
 
-(* Finds the LLVM function at a native address. *)
+(* Finds the LLVM function at a native address.  A promoted sub's
+   address renders to its Thunk (the memory-convention twin, T4): the
+   twin is what a pointer call can enter with no provable arguments,
+   so unresolvable sites stay sound; resolved sites call the promoted
+   body directly and never consult this rendering. *)
 let lookup_native_fn ctx llvm_module v =
   match ctx.Convutils.symtab with
   | Some symtab -> (
       match Symtab.find_by_start symtab (Word.of_int64 ~width:64 v) with
-      | Some (name, _, _) -> Llvm.lookup_function name llvm_module
+      | Some (name, _, _) ->
+          let fn = Llvm.lookup_function name llvm_module in
+          (match fn with
+           | Some f ->
+               (match Base.List.Assoc.find ~equal:String.equal
+                        !(ctx.Convutils.thunks) name with
+                | Some twin -> Some twin
+                | None -> Some f)
+           | None -> None)
       | None -> None)
   | None -> None
 
@@ -78,7 +90,8 @@ let text_load_constant ctx llvm_ctx llvm_module addr w =
   | _ -> None
 
 (* Builds a remapped section initializer. *)
-let set_section_initializer ctx llvm_ctx llvm_module g arr min_addr =
+let set_section_initializer ctx llvm_ctx llvm_module g (arr : int array)
+    min_addr =
   let n64 = (Array.length arr + 7) / 8 in
   let slot_at i =
     let v =

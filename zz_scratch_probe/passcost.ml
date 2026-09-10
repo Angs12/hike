@@ -47,7 +47,7 @@ let () =
             time (fun () -> Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
           in
           let _info, t_vsa =
-            time (fun () -> Hike.Vsa.offsets_of_sub target sp sub)
+            time (fun () -> Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub)
           in
           (* stl and dce read the KB that offsets_of_sub populates. *)
           let stl_sub, t_stl =

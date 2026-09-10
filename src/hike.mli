@@ -8,9 +8,23 @@ module Abi = Hike_abi
 
 (** Per-sub stack offset ranges. *)
 module Vsa : sig
-  (** Computes [sub]'s offset tags and stack plan. *)
+  (** Computes [sub]'s offset tags, stack plan, and promotion facts
+      (T4).  The name map of [prog] and [symtab] resolve indirect-call
+      targets to lifted subs. *)
   val offsets_of_sub :
-    Theory.Target.t -> var -> sub term -> Convutils.vsa_info
+    Theory.Target.t ->
+    var ->
+    symtab:Symtab.t option ->
+    prog:program term ->
+    sub term ->
+    Convutils.vsa_info
+
+  (** The target-resolution predicate (T4): a singleton whose word
+      names a lifted sub resolves ([Some tid] — the Resolved Call
+      Site); a bounded multi-target set, a foreign singleton, and TOP
+      take the pointer call ([None]). *)
+  val resolve_target :
+    lookup:(int64 -> Tid.t option) -> Cbat_vsa.WordSet.t -> Tid.t option
 end
 
 (** Dead-code elimination. *)
@@ -23,11 +37,10 @@ end
 (** Stack split decision and helpers. *)
 module Stack_model : sig
   (** Merges overlapping ranges into regions; a region's facts (span,
-      membership, storage class) derive from the tags and the solution's
-      denotations alone (T3c: the servability rule reads [is_stack_access]
-      on address operands at each def). *)
+      membership, storage class) derive from the tags alone (T4: the
+      servability clause is deleted — the SP Slot anchor makes every
+      sub's SP neighborhood private, so the partition is geometric). *)
   val regions_of_sub :
-    sol:Cbat_vsa.vsa_sol ->
     sub term -> Convutils.vsa_info -> Convutils.region list
 
   (** The plan IS the convertible regions — no refusals.  An oversized
@@ -41,6 +54,9 @@ module Stack_model : sig
   (** Mints and recognizes fission vars. *)
   val region_mem : int -> var
   val region_base : int -> var
+
+  (** The promoted incoming stack-slot parameter of index [i] (T4). *)
+  val arg_slot : int -> var
 end
 
 (** Stack-to-locals rewrite. *)

@@ -63,6 +63,10 @@ type emit_ctx = {
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* Edge-keyed SP restores: (pred, fallthrough) -> post-push+8 value. *)
   edge_sp_restores : (Tid.t, (Tid.t, Llvm.llvalue) EHashtbl.t) EHashtbl.t ref;
+  (* T4: the emitted Thunks (memory-convention twins), keyed by the
+     sub's LLVM name — function-address rendering produces the twin so
+     unresolvable pointer sites stay sound. *)
+  thunks : (string * Llvm.llvalue) list ref;
 }
 
 let empty_emit_ctx () : emit_ctx =
@@ -85,6 +89,7 @@ let empty_emit_ctx () : emit_ctx =
     frame_wrap_license = ref false;
     undef_warned = ref Tid.Map.empty;
     edge_sp_restores = ref (EHashtbl.create (module Tid));
+    thunks = ref [];
   }
 
 module Vsa = struct
@@ -114,6 +119,15 @@ module Vsa = struct
   (* [plan <> []] splits into [stack_rN] allocas; [[]] uses one [%frame]. *)
   type split_plan = region list [@@deriving equal]
 
+  (* One call site's outgoing slot facts (T4): which slot index each of
+     the block's outgoing stores feeds.  The structured fact IS the
+     provability — presence of slot i in the map = the site's store
+     feeds promoted slot i; absence = the store stays on the window
+     path (the identity). *)
+  type call_site = {
+    site_slots : (int * Tid.t) list; (* slot index -> storing def *)
+  } [@@deriving equal]
+
   (* Per-def index map: [offsets] — the possible range of each access.
      This is the VSA's entire tag product. *)
   type vsa_info = {
@@ -124,6 +138,28 @@ module Vsa = struct
     (* Dynamic-allocation defs (spec §2.3); the producer's one detection,
        read by the emitter instead of re-detecting. *)
     vla_alloc_tids : Tid.Set.t;
+    (* T4 stack-arg promotion. [prom_slots]: def tid -> promoted incoming
+       slot index (the callee's proven singleton slot reads).
+       [prom_arity]: the positional slot count (max index + 1).
+       [prom_window]: the sub needs the Caller-Window Parameter (mixed /
+       spanned / storing / wide window traffic — the unproven remainder).
+       [prom_retaddr]: return-address slot reads (they die with the real
+       LLVM ret and must not force a window parameter).
+       [prom_sites]: per call block, the outgoing slot stores.
+       [prom_resolved]: per indirect call, the singleton lifted target. *)
+    prom_slots : int Tid.Map.t;
+    prom_arity : int;
+    prom_window : bool;
+    prom_retaddr : Tid.Set.t;
+    prom_sites : call_site Tid.Map.t;
+    prom_resolved : Tid.t option Tid.Map.t;
+    (* T4: the extents of every stack-symbolic VALUE the sub forms
+       (SP-derived addresses computed into non-memory defs — sret
+       pointers, escaped cell addresses).  Two consumers: the precise
+       decision (a value outside the convertible regions joins the sub
+       to Frame — the storage lattice) and the frame sizing (the frame
+       covers the formed extents). *)
+    sp_extents : (int64 * int64) list;
   }
 
   (* Hand-written equality over maps. *)
@@ -133,32 +169,61 @@ module Vsa = struct
     && Base.List.equal equal_region i1.stack_plan i2.stack_plan
     && Bool.equal i1.degraded i2.degraded
     && Core.Set.equal i1.vla_alloc_tids i2.vla_alloc_tids
+    && Core.Map.equal Int.equal i1.prom_slots i2.prom_slots
+    && Int.equal i1.prom_arity i2.prom_arity
+    && Bool.equal i1.prom_window i2.prom_window
+    && Core.Set.equal i1.prom_retaddr i2.prom_retaddr
+    && Core.Map.equal equal_call_site i1.prom_sites i2.prom_sites
+    && Core.Map.equal (Base.Option.equal Tid.equal) i1.prom_resolved
+         i2.prom_resolved
+    && Base.List.equal
+         (fun (a,b) (c,d) -> Int64.equal a c && Int64.equal b d)
+         i1.sp_extents i2.sp_extents
 
-  (* Builds info from maps. *)
-  let mk_vsa_info_maps ~offsets ~regions ~stack_plan ~degraded
-      ~vla_alloc_tids : vsa_info =
-    { offsets; regions; stack_plan; degraded; vla_alloc_tids }
+  (* Builds info from maps. The promotion fields are optional (empty =
+     no promotion) so the fixture grammar stays stable; the trailing
+     unit closes the application. *)
+  let mk_vsa_info_maps
+      ?(prom_slots = Tid.Map.empty)
+      ?(prom_arity = 0)
+      ?(prom_window = false)
+      ?(prom_retaddr = Tid.Set.empty)
+      ?(prom_sites = Tid.Map.empty)
+      ?(prom_resolved = Tid.Map.empty)
+      ?(sp_extents = [])
+      ~offsets ~regions ~stack_plan ~degraded
+      ~vla_alloc_tids () : vsa_info =
+    { offsets; regions; stack_plan; degraded; vla_alloc_tids; prom_slots;
+      prom_arity; prom_window; prom_retaddr; prom_sites; prom_resolved;
+      sp_extents }
 
   (* Builds info from lists. *)
-  let mk_vsa_info ~offsets ~regions ~stack_plan ~degraded
-      ~vla_alloc_tids : vsa_info =
+  let mk_vsa_info
+      ?prom_slots ?prom_arity ?prom_window ?prom_retaddr ?prom_sites
+      ?prom_resolved ?sp_extents
+      ~offsets ~regions ~stack_plan ~degraded
+      ~vla_alloc_tids () : vsa_info =
     mk_vsa_info_maps
+      ?prom_slots ?prom_arity ?prom_window ?prom_retaddr ?prom_sites
+      ?prom_resolved ?sp_extents
       ~offsets:
         (Base.List.fold_left offsets ~init:Tid.Map.empty
            ~f:(fun m (tid, kind) -> Core.Map.set m ~key:tid ~data:kind))
-      ~regions ~stack_plan ~degraded ~vla_alloc_tids
+      ~regions ~stack_plan ~degraded ~vla_alloc_tids ()
 
   (* Info with no tags. *)
   let empty_vsa_info : vsa_info =
     mk_vsa_info_maps ~offsets:Tid.Map.empty
       ~regions:[] ~stack_plan:[] ~degraded:false
-      ~vla_alloc_tids:Tid.Set.empty
+      ~vla_alloc_tids:Tid.Set.empty ()
 end
 include Vsa
 
-(* Callee entry RSP passed by caller. *)
-let hike_stack_var : var =
-  Var.create ~is_virtual:false ~fresh:false "hike_stack" (Type.Imm 64)
+(* The Caller-Window Parameter (T4: renamed from hike_stack — it is the
+   caller-window base, not SP): the residual window-base argument of
+   variadic/mixed subs (the bridge) and of the memory-convention thunks. *)
+let hike_window_var : var =
+  Var.create ~is_virtual:false ~fresh:false "hike_window" (Type.Imm 64)
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
@@ -166,7 +231,15 @@ let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 let is_intrinsic_name (s : string) : bool =
   Base.String.is_prefix s ~prefix:"intrinsic:"
 
-type section = { base : Llvm.llvalue; min_addr : word; max_addr : word }
+type section = {
+  base : Llvm.llvalue;
+  min_addr : word;
+  max_addr : word;
+  (* The section's byte image (T4: the initializers render inside
+     [emit_program], where the one address map — thunks included —
+     lives). *)
+  bytes : int array option;
+}
 type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL | TEXT
 
 let section_type_to_string = function

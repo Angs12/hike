@@ -31,21 +31,26 @@ for ll in "$OUT_DIR"/out_*.ll; do
   fi
 
   # (b) no stack_rN GEP takes an sp-derived index.
-  #     Dynamic loop-counter indexes pass; sp roots are the entry
-  #     anchor and the hike_stack param.
+  #     Dynamic loop-counter indexes pass; sp roots are the SP Slot
+  #     (entry anchor store/load, T4), the anchor ptrtoint, and the
+  #     Caller-Window Parameter (%hike_window — the window base, not SP).
   #     Blind spot: CHAIN skips non-anchor sub shapes, so other
   #     sub-routed sp values evade this tripwire.
   bad="$(awk '
     function chain(v) { return index(" " CHAIN " ", " " v " ") > 0 }
     function add(v)  { if (v != "" && !chain(v)) CHAIN = CHAIN " " v }
-    # sp roots: entry anchor (ptrtoint of %frame) and hike_stack param.
+    # sp roots (T4 grammar): the SP Slot alloca load, the entry anchor
+    # ptrtoint, and the Caller-Window Parameter. %hike_stack is GONE.
     /ptrtoint.*to i64/ {
       if (match($0, /%[A-Za-z0-9_.]+ = ptrtoint/)) {
         if (match($0, /^  %[^ ]+ = ptrtoint/)) { v = substr($0, 3, index(substr($0,3), " ")-1); add(v) }
       }
     }
-    /%hike_stack/ {
-      if (match($0, /%hike_stack/)) add("%hike_stack")
+    /load i64, ptr %sp_slot/ {
+      if (match($0, /^  %[^ ]+ = load/)) { v = substr($0, 3, index(substr($0,3), " ")-1); add(v) }
+    }
+    /%hike_window/ {
+      if (match($0, /%hike_window/)) add("%hike_window")
     }
     /%anchor_i64/ {
       if (match($0, /%anchor_i64/)) add("%anchor_i64")

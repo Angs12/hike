@@ -70,6 +70,12 @@ module Cbat_extraction : sig
 
   (* Runtime-sized SP decrements (spec §2.3). *)
   val detect_dynamic_alloc : var -> sub term -> Tid.Set.t
+
+  (* The offset-space twin of a stack denotation (identity for
+     non-stack values — None stays None).  Production surface since
+     T4: the call-site resolution reads the offset sets of the SP and
+     of the outgoing store addresses. *)
+  val relativize_opt : WordSet.t -> WordSet.t option
 end
 
 (* Re-exported profiling interface. *)
@@ -96,6 +102,11 @@ val static_graph_vsa : tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
 val denote_def : def term -> AI.t -> AI.t
 
 val denote_defs : blk term -> AI.t -> AI.t
+
+(* Denotes one expression in a state (the immediate-value denotation).
+   Production surface since T4: the call-site resolution and the
+   outgoing-slot map read the target's and the SP's word sets. *)
+val denote_imm_exp : exp -> AI.t -> (WordSet.t, Type.error) Result.t
 
 (* The fixtures' construction seam: every name here is consumed by
    test_cbat and the probes, never by production src/.  Quarantined so

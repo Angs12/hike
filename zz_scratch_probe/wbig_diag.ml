@@ -21,7 +21,7 @@ let () =
         try
           let n = ref 0 in
           let sub', sol = analyze_and_fixpoint sp prog sub in
-          let info = Hike.Vsa.offsets_of_sub target sp sub' in
+          let info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub' ] ()) sub' in
           let kind_of = info.Hike.Convutils.offsets in
           Term.enum blk_t sub'
           |> Seq.iter ~f:(fun b ->

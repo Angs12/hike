@@ -46,6 +46,16 @@ let convert_binary output_program proj =
         in
         (arr, min_addr, max_addr, base))
   in
+  let section_of_arr section_type ~is_const =
+    match mk_section section_type ~is_const with
+    | None -> None
+    | Some (arr, min_addr, max_addr, base) ->
+        Some
+          { Convutils.base;
+            Convutils.min_addr = min_addr;
+            Convutils.max_addr = max_addr;
+            Convutils.bytes = Some arr }
+  in
   let data_section = mk_section DATA ~is_const:false in
   let rodata_section = mk_section RODATA ~is_const:true in
   let bss_region =
@@ -105,10 +115,6 @@ let convert_binary output_program proj =
       ]
       ~f:(fun x -> x)
   in
-  let section_of_sec sec =
-    Base.Option.map sec ~f:(fun (_, min_addr, max_addr, base) ->
-        { base; min_addr; max_addr })
-  in
   let section_list =
     Base.List.filter_mapi
       ~f:(fun i section ->
@@ -118,24 +124,13 @@ let convert_binary output_program proj =
             None
         | Some s -> Some s)
       [
-        section_of_sec data_section;
-        section_of_sec rodata_section;
+        section_of_arr DATA ~is_const:false;
+        section_of_arr RODATA ~is_const:true;
         bss_section;
-        section_of_sec got_section;
-        section_of_sec gotplt_section;
-        section_of_sec rodata_rel_section;
+        section_of_arr GOT ~is_const:true;
+        section_of_arr GOTPLT ~is_const:true;
+        section_of_arr RODATA_REL ~is_const:true;
       ]
-  in
-  let ctx =
-    (* Only the section facts are read here; emit_program builds its own
-       full context from the seam arguments. *)
-    {
-      (Convutils.empty_emit_ctx ()) with
-      Convutils.symtab = symtab_val;
-      text_section = text_section_val;
-      section_remap = section_remap_val;
-      copy_relocs = copy_reloc_addrs_val;
-    }
   in
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~ptrsize
@@ -144,28 +139,6 @@ let convert_binary output_program proj =
     ~section_remap:section_remap_val
     ~copy_relocs:copy_reloc_addrs_val
     section_list (Project.program proj);
-  (* Pass 2: data-section initializers — AFTER [emit_program]. Every
-     8-byte word renders through [remap_native_addr]: the symtab arm
-     (a word that names a lifted sub renders as [ptrtoint @sub]) needs
-     the sub's LLVM function to EXIST in the module, so populating the
-     initializers before the emission left that arm structurally dead
-     and rendered every function-valued relocated addend as the raw
-     input-world vaddr (the fptr_table class: an indirect call through
-     a data table landed on an address meaningless in the lifted
-     executable). One rule for every section, no per-word special
-     cases; words that name no lifted world keep the identity (raw). *)
-  Base.List.iter
-    [
-      data_section;
-      rodata_section;
-      got_section;
-      gotplt_section;
-      rodata_rel_section;
-    ]
-    ~f:(fun sec ->
-        Base.Option.iter sec ~f:(fun (arr, min_addr, _, base) ->
-            Bil2llvm.set_section_initializer ctx llvm_ctx llvm_module base arr
-              (Word.to_int64_exn min_addr)));
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
@@ -191,10 +164,14 @@ let () =
            let acc =
              Term.enum sub_t (Project.program proj)
              |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-                 (* Computes tags and plan on the pre-rewrite sub. *)
+                 (* Computes tags, plan, and promotion facts on the
+                    pre-rewrite sub. *)
                  let info =
                    Hike_vsa.offsets_of_sub (Project.target proj)
-                     (sp (Project.target proj)) sub
+                     (sp (Project.target proj))
+                     ~symtab:(Some (Project.symbols proj))
+                     ~prog:(Project.program proj)
+                     sub
                  in
 #ifdef VSA_DEBUG
                  Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"

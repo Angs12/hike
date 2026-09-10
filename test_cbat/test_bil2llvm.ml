@@ -3,6 +3,7 @@
    Theory.Target.unknown + ptrsize:64, and asserts on the textual IR
    (Llvm.print_module) — the same idiom check_allocas.sh uses. *)
 
+open Printf
 open Test_common
 open Test_fixtures
 open Bap.Std
@@ -140,11 +141,11 @@ let run_poison () =
   let unb_info : Cu.vsa_info =
     Cu.mk_vsa_info
       ~offsets:
-        [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+        [ (Term.tid ld, Cu.Unbounded); (Term.tid st, Cu.Unbounded) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   let dead_info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid ld, Cu.Dead) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~offsets:[ (Term.tid ld, Cu.Dead) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   Kb.provide
     (Tid.Map.singleton (Term.tid unb_sub) unb_info);
@@ -260,7 +261,7 @@ let run_casts () =
   (* Singleton Range tag on the store: the converted-cell shape. *)
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -319,7 +320,7 @@ let run_golden () =
     in
     Cu.mk_vsa_info ~offsets
       ~regions:[ region ] ~stack_plan:[ region ]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   Kb.provide (Tid.Map.singleton (Term.tid sub) info);
   let ir = emit_ir [ sub ] in
@@ -379,7 +380,7 @@ let run_fp_gpr () =
   in
   let info : Cu.vsa_info =
     Cu.mk_vsa_info
-      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ()
   in
   Kb.provide (Tid.Map.singleton (Term.tid caller_sub) info);
   let ir_holder = ref "" in
@@ -457,6 +458,151 @@ let run_fp_gpr_cast () =
 
 (* ------------------------------------------------------------------ *)
 
+
+(* ------------------------------------------------------------------ *)
+(* Family 8: stack-arg promotion emission (T4).                        *)
+(* ------------------------------------------------------------------ *)
+
+(* A promoted callee (two proven slots) and a caller with one resolved
+   indirect site and the outgoing stores the slots feed. *)
+let run_promotion () =
+  let m = memv "prom_m" in
+  let rsp = v64 "RSP" in
+  let slot0 = ivar64 "hike_slot0" in
+  let slot1 = ivar64 "hike_slot1" in
+  (* The callee: reads its two promoted slots (the production Caller
+     reads) and returns through the model ret lane. *)
+  let callee_bb = Blk.Builder.create () in
+  let exit_blk = mk_exit_blk () in
+  let acc = v64 "prom_acc" in
+  (* The callee also reads RDI/RSI (never defines them): the register
+     lanes of the signature, the realistic promoted shape. *)
+  let rdi = v64 "RDI" in
+  let rsi = v64 "RSI" in
+  let ld0 =
+    Def.create (v64 "prom_ld0")
+      (Bil.Load (Bil.Var m, Bil.Var slot0, LittleEndian, `r64))
+  in
+  Blk.Builder.add_def callee_bb ld0;
+  Blk.Builder.add_def callee_bb
+    (Def.create acc
+       (Bil.BinOp (Bil.PLUS, Bil.Var rdi,
+                   Bil.BinOp (Bil.PLUS, Bil.Var rsi,
+                              Bil.BinOp (Bil.PLUS, Bil.Var slot0, Bil.Var slot1)))));
+  Blk.Builder.add_jmp callee_bb (Goto (Direct (Term.tid exit_blk)) |> Jmp.create);
+  let callee_b = Sub.Builder.create ~name:"prom_callee" () in
+  Sub.Builder.add_blk callee_b (Blk.Builder.result callee_bb);
+  Sub.Builder.add_blk callee_b exit_blk;
+  let callee = Sub.Builder.result callee_b in
+  (* The caller: pushes two outgoing stores, then an indirect call the
+     VSA resolves (the volatile-singleton class). *)
+  let caller_bb = Blk.Builder.create () in
+  let cont_blk = mk_exit_blk () in
+  let cont_tid = Term.tid cont_blk in
+  let store1 =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 24))),
+           Bil.Int (Cbat_word.to_word (w64 7)),
+           LittleEndian,
+           `r64 ))
+  in
+  let store2 =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 32))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  let j =
+    Jmp.create
+      (Call
+         (Call.create ~return:(Direct cont_tid)
+            ~target:(Indirect (Bil.Var (v64 "prom_tptr"))) ()))
+  in
+  Blk.Builder.add_def caller_bb store1;
+  Blk.Builder.add_def caller_bb store2;
+  Blk.Builder.add_jmp caller_bb j;
+  let caller_b = Sub.Builder.create ~name:"prom_caller" () in
+  Sub.Builder.add_blk caller_b (Blk.Builder.result caller_bb);
+  Sub.Builder.add_blk caller_b cont_blk;
+  let caller = Sub.Builder.result caller_b in
+  let callee_info : Cu.vsa_info =
+    Cu.mk_vsa_info
+      ~prom_slots:Tid.Map.empty ~prom_arity:2 ~prom_window:false
+      ~offsets:[] ~regions:[] ~stack_plan:[] ~degraded:false
+      ~vla_alloc_tids:Tid.Set.empty ()
+  in
+  let caller_info : Cu.vsa_info =
+    Cu.mk_vsa_info
+      ~prom_resolved:(Tid.Map.singleton (Term.tid j) (Some (Term.tid callee)))
+      ~offsets:[] ~regions:[] ~stack_plan:[] ~degraded:false
+      ~vla_alloc_tids:Tid.Set.empty ()
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid callee) callee_info);
+  Kb.provide (Tid.Map.singleton (Term.tid caller) caller_info);
+  let ir = emit_ir [ caller; callee ] in
+  (* The callee's promoted signature carries the register lanes then
+     the positional slots. *)
+  check_ir "T4-PROM: the promoted signature carries the positional slots"
+    "(i64 %RDI, i64 %RSI, i64 %hike_slot0, i64 %hike_slot1)" ir;
+  check_ir "T4-PROM: the resolved site calls the promoted body directly"
+    (sprintf "call void @\"%s\"(i64 undef, i64 undef, i64 undef, i64 undef)"
+       (Cu.sanitize_name (Tid.name (Term.tid callee))))
+    ir;
+  (* The Thunk: internal linkage, the legacy memory-path signature. *)
+  check_ir "T4-THUNK: the memory-convention twin is emitted with internal linkage"
+    (sprintf "define internal void @\"%s_hike_thunk\""
+       (Cu.sanitize_name (Tid.name (Term.tid callee))))
+    ir;
+  check_ir "T4-THUNK: the twin carries the synthetic indirect convention (the window base, never SP)"
+    ("_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, "
+    ^ "i64 %R9, i256 %YMM0, i256 %YMM1, i256 %YMM2, i256 %YMM3, "
+    ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, i64 %hike_window)")
+    ir;
+  check_ir "T4-THUNK: the twin unpacks the window slots into the promoted body"
+    (sprintf "call void @\"%s\"(i64 %%RDI, i64 %%RSI, i64 %%"
+       (Cu.sanitize_name (Tid.name (Term.tid callee))))
+    ir;
+  check_ir "T4-THUNK: the twin loads the slots from the window memory"
+    "load i64, ptr %1" ir;
+  (* The unresolved site: the pointer call through the synthetic
+     signature (which carries the window base). *)
+  let j2 =
+    Jmp.create
+      (Call
+         (Call.create ~return:(Direct cont_tid)
+            ~target:(Indirect (Bil.Var (v64 "prom_tptr2"))) ()))
+  in
+  let caller2_bb = Blk.Builder.create () in
+  Blk.Builder.add_jmp caller2_bb j2;
+  let caller2_b = Sub.Builder.create ~name:"prom_caller2" () in
+  Sub.Builder.add_blk caller2_b (Blk.Builder.result caller2_bb);
+  Sub.Builder.add_blk caller2_b cont_blk;
+  let caller2 = Sub.Builder.result caller2_b in
+  let caller2_info : Cu.vsa_info =
+    Cu.mk_vsa_info
+      ~prom_resolved:(Tid.Map.singleton (Term.tid j2) None)
+      ~offsets:[] ~regions:[] ~stack_plan:[] ~degraded:false
+      ~vla_alloc_tids:Tid.Set.empty ()
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid caller2) caller2_info);
+  let ir2 = emit_ir [ caller2; callee ] in
+  check_ir
+    "T4-PTR: the unresolvable site takes the pointer call (never the promoted body)"
+    "call { i64, i64 } %" ir2;
+  check
+    "T4-PTR: the pointer call never lands on the promoted body directly"
+    (not (contains_substring ir2 "call { i64, i64 } @prom_callee("));
+  check_ir "T4-PTR: the synthetic indirect signature carries the window base"
+    "@indirect_call(i64, i64, i64, i64, i64, i64, i256, i256, i256, i256, \
+                    i256, i256, i256, i256, i64)"
+    ir2;
+  ()
+
 let run () =
   run_fp_table ();
   run_poison ();
@@ -464,4 +610,5 @@ let run () =
   run_casts ();
   run_golden ();
   run_fp_gpr ();
-  run_fp_gpr_cast ()
+  run_fp_gpr_cast ();
+  run_promotion ()

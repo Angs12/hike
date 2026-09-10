@@ -18,6 +18,7 @@ let () =
   Test_properties.run_soundness ();
   Test_regression.run_regions ();
   Test_domains.run_overlap ();
+  Test_regression.run_t4_resolution ();
   Test_regression.run_copy_reloc ();
   Test_regression.run_fp_gpr ();
   Test_properties.run_roundtrip ();

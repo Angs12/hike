@@ -13,9 +13,20 @@ type sub_frame = {
   (* Anchor byte index. *)
   anchor_idx : int64;
   anchor_i64 : Llvm.llvalue;
+  (* The caller-window base local (the Caller-Window Parameter), when
+     the sub carries one (variadic/mixed — the T4 residual). *)
   stack : Llvm.llvalue option;
+  (* The per-invocation anchor: the SP entry value bound from the SP
+     Slot (T4).  None = the sub owns no SP storage (SP binds to the
+     anchor constant, 0 for storage-free subs). *)
+  stack0 : Llvm.llvalue option;
   regions : (Convutils.region * Llvm.llvalue) list;
   is_precise : bool;
+  (* T4: per call block, the outgoing slot stores' data exps
+     (slot index -> stored value). *)
+  outgoing : (int * exp) list Tid.Map.t;
+  (* T4: per indirect call jmp, the VSA's singleton resolution. *)
+  resolved : Tid.t option Tid.Map.t;
 }
 (* Emission context threaded as a KB var. *)
 let llvm_ctx_var : Llvm.llcontext KB.Context.var =
