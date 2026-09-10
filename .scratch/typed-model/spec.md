@@ -236,6 +236,11 @@ after T4; the diagnosis is ready whenever).
 
 ## Further Notes
 
+- **S10 — the post-T4 simplification wave** is drafted:
+  `tickets/S10-post-t4-simplification.md` (dead weight, the convutils
+  split, the guard-decoder store-chain deletion measured post-T5, the
+  post-T9 residue sweep — with the lane order and conflict classes).
+  It gates at T4's merge.
 - The -O0/-O2 reference emissions are `/home/tovpr/tm-battery/
   merge-t3c/emit-o0` and `.../emit-o2` (the T3c-merged tree;
   provenance bundle `54e284d5d3441228`).
