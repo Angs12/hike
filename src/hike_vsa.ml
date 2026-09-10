@@ -36,14 +36,18 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var) (sub : sub term) :
           ~dynamic_alloc:(fun d -> Core.Set.mem alloc_tids (Term.tid d))
           sub
       in
-      (* Escape analysis: one computation per sub (ADR 0008, producer-fix).
-         The result flows as [vsa_info.frame_escaped]; [regions_of_sub]
-         reads it to veto conversion on escaped frames. *)
+      (* Escape analysis: one computation per sub (ADR 0008, producer-fix);
+         T3c made it denotational — the frame escapes iff a value whose
+         DENOTATION is stack-symbolic leaves the sub (a call's
+         pointer-argument register, or an indirect call's target), or the
+         sub passes outgoing stack args.  No var closure.  The result
+         flows as [vsa_info.frame_escaped]; [regions_of_sub] reads it to
+         veto conversion on escaped frames. *)
       let arg_stores =
         Vsa.Cbat_extraction.outgoing_arg_stores ~sp ~sol sub
       in
       let frame_escaped =
-        Hike_stack_model.frame_escapes sp target sub ~offsets ~arg_stores
+        Hike_stack_model.frame_escapes sp target sub ~sol ~offsets ~arg_stores
       in
       let mk = Convutils.mk_vsa_info_maps ~offsets ~degraded
           ~vla_alloc_tids:alloc_tids ~frame_escaped in

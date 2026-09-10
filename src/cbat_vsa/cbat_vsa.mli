@@ -94,6 +94,11 @@ val init_sol : ?entry:AI.t ->  sub term -> vsa_sol
 
 val static_graph_vsa : tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
 
+(* Denotes a block's defs in order (the transfer function; phis are the
+   identity).  Production surface since T3c: the model's denotational
+   escape rule reads a call block's abstract state AT the call. *)
+val denote_defs : blk term -> AI.t -> AI.t
+
 (* The fixtures' construction seam: every name here is consumed by
    test_cbat and the probes, never by production src/.  Quarantined so
    the interface above stays the pipeline's real surface. *)
