@@ -22,9 +22,15 @@ type sub_frame = {
   stack0 : Llvm.llvalue option;
   regions : (Convutils.region * Llvm.llvalue) list;
   is_precise : bool;
-  (* T4: per call block, the outgoing slot stores' data exps
-     (slot index -> stored value). *)
-  outgoing : (int * exp) list Tid.Map.t;
+  (* T4: per call block, the outgoing slot site (the slot index ->
+     storing-def map from the producer's record). *)
+  outgoing : Convutils.call_site Tid.Map.t;
+  (* T4b: the outgoing slot stores' values, recorded by the STORE's own
+     emission (def tid -> the LLVM value written).  The call passes the
+     value the store wrote — never a re-evaluation of the stored exp at
+     the call, which would read a var the block redefined after the
+     store. *)
+  store_vals : (Tid.t, Llvm.llvalue) EHashtbl.t;
   (* T4: per indirect call jmp, the VSA's singleton resolution. *)
   resolved : Tid.t option Tid.Map.t;
 }

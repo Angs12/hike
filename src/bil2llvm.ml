@@ -379,36 +379,15 @@ let create_sub sub =
       end
       else None
     in
-    (* The outgoing slot stores' data exps, per call block (T4): the
-       site's proven outgoing stores become the promoted call's slot
-       arguments; the stores themselves remain in the caller's frame
-       memory. *)
-    let def_term_of =
-      Term.enum blk_t sub
-      |> Base.Sequence.to_list
-      |> Base.List.concat_map ~f:(fun blk ->
-          Term.enum def_t blk |> Base.Sequence.to_list)
-      |> Base.List.fold ~init:Tid.Map.empty ~f:(fun m d ->
-          Core.Map.set m ~key:(Term.tid d) ~data:d)
-    in
-    let outgoing =
-      Core.Map.fold sub_info.Convutils.prom_sites ~init:Tid.Map.empty
-        ~f:(fun ~key:btid ~data:site acc ->
-          let slots =
-            Base.List.filter_map site.Convutils.site_slots
-              ~f:(fun (i, dtid) ->
-                match Core.Map.find def_term_of dtid with
-                | Some d -> (
-                    match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
-                    | Some (data, _) -> Some (i, data)
-                    | None -> Some (i, Def.rhs d))
-                | None -> None)
-          in
-          Core.Map.set acc ~key:btid ~data:slots)
-    in
+    (* The outgoing slot sites (T4): the site's proven outgoing stores
+       become the promoted call's slot arguments, keyed by the storing
+       def — the store's own emission records its value in
+       [store_vals] (create_def), and [create_call_args] passes it. *)
+    let store_vals = EHashtbl.create (module Tid) in
+    let outgoing = sub_info.Convutils.prom_sites in
     let fr : sub_frame =
       { frame; anchor_idx; anchor_i64; stack = None; stack0; regions;
-        is_precise; outgoing; resolved = sub_info.Convutils.prom_resolved }
+        is_precise; outgoing; store_vals; resolved = sub_info.Convutils.prom_resolved }
     in
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= build_entry_block llvm_builder transfer_vars fr sub fn

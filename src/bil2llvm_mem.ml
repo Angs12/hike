@@ -73,6 +73,23 @@ let emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite =
   insert_local ctx blk_tid marker v;
   create_exp llvm_builder blk_tid (rewrite marker)
 
+(* Maps only the mem node matching (addr, size) to a var, preserving the
+   enclosing structure — the one rewrite every access-serving lane uses
+   (the pointer lane, the promoted-slot lane, the retaddr lane). *)
+let rewrite_mem_node exp addr size marker =
+  let v =
+    object
+      inherit Exp.mapper
+      method! map_load ~mem ~addr:a e s =
+        if Exp.equal a addr && Size.equal s size then Bil.Var marker
+        else Bil.Load (mem, a, e, s)
+      method! map_store ~mem ~addr:a ~exp:x e s =
+        if Exp.equal a addr && Size.equal s size then Bil.Var marker
+        else Bil.Store (mem, a, x, e, s)
+    end
+  in
+  v#map_exp exp
+
 (* Dispatches memory load/store through a pointer using Exp.mapper. *)
 let mem_access_at_ptr llvm_builder blk_tid ptr exp =
   let open KB in
@@ -86,17 +103,7 @@ let mem_access_at_ptr llvm_builder blk_tid ptr exp =
              (Llvm.integer_type llvm_ctx (Size.in_bits size))
              ptr "" llvm_builder
       in
-      let rewrite marker =
-        let v =
-          object
-            inherit Exp.mapper
-            method! map_load ~mem ~addr:a e s =
-              if Exp.equal a addr && Size.equal s size then Bil.Var marker
-              else Bil.Load (mem, a, e, s)
-          end
-        in
-        v#map_exp exp
-      in
+      let rewrite marker = rewrite_mem_node exp addr size marker in
       emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
   | Some (`Store (addr, data, size)) ->
       let marker = marker_of_size size in
@@ -107,17 +114,7 @@ let mem_access_at_ptr llvm_builder blk_tid ptr exp =
         (* Store nodes bind data, not void stores. *)
         return d
       in
-      let rewrite marker =
-        let v =
-          object
-            inherit Exp.mapper
-            method! map_store ~mem ~addr:a ~exp:x e s =
-              if Exp.equal a addr && Size.equal s size then Bil.Var marker
-              else Bil.Store (mem, a, x, e, s)
-          end
-        in
-        v#map_exp exp
-      in
+      let rewrite marker = rewrite_mem_node exp addr size marker in
       emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
   | None -> create_exp llvm_builder blk_tid exp
 
@@ -224,33 +221,63 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       (* The uniform materialization rule. *)
       create_exp llvm_builder blk_tid exp
   | Some (Convutils.Caller _) ->
+      (* ONE rule over the def's mem node and its fact (T4b): the node's
+         value is substituted into the rhs, so the def's surrounding
+         computation is carried BY CONSTRUCTION — a wide access is
+         never "either the copy or the guard".  The node's fact: a
+         proven slot read is its promoted parameter (at the node's own
+         width — the narrower-read rule); the retaddr cell reads undef
+         (it dies with the real ret); every other node takes the
+         caller-window materialization over the Caller-Window
+         Parameter. *)
       let dtid = Term.tid def in
-      (match Core.Map.find sub_info.Convutils.prom_slots dtid with
-       | Some i ->
-           (* A proven incoming slot reads its promoted parameter (T4).
-              The parameter's binding is filter-guaranteed at every step
-              (the create_branches-class shape assert): (1) the record's
-              [prom_arity] = max promoted index + 1, so [i < arity];
-              (2) the signature carries slots 0..arity-1; (3) the sig's
-              args join the transfer set via [arg_set]; (4)
-              [add_args_to_vars] binds every param at entry and the phi
-              plumbing rebinds it in each block.  The local map
-              therefore holds the parameter in every block. *)
-           (match get_local ctx blk_tid (Hike_stack_model.arg_slot i) with
-            | Some v -> KB.return v
-            | None -> KB.return (get_phi ctx blk_tid (Hike_stack_model.arg_slot i)))
-       | None ->
+      (match find_mem_node (Def.rhs def) with
+       | None -> create_exp llvm_builder blk_tid exp
+       | Some (`Load (addr, size)) | Some (`Store (addr, _, size)) ->
            if Core.Set.mem sub_info.Convutils.prom_retaddr dtid then
-             (* The return-address cell dies with the real LLVM ret; its
-                read never forces a window parameter (T4 point 8). *)
-             let* llvm_ctx = Context.get llvm_ctx_var in
-             KB.return @@ Llvm.undef (Llvm.i64_type llvm_ctx)
+             let marker = marker_of_size size in
+             let emit () =
+               let* llvm_ctx = Context.get llvm_ctx_var in
+               KB.return
+               @@ Llvm.undef (Llvm.integer_type llvm_ctx (Size.in_bits size))
+             in
+             let rewrite marker = rewrite_mem_node exp addr size marker in
+             emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
            else
-             (match find_mem_node (Def.rhs def) with
-              | Some node ->
-                  caller_mem_access llvm_builder blk_tid fr (mem_node_addr node)
-                    exp
-              | None -> create_exp llvm_builder blk_tid exp))
+             (match Core.Map.find sub_info.Convutils.prom_slots dtid with
+             | Some i ->
+                 (* The parameter's binding is filter-guaranteed at every
+                    step (the create_branches-class shape assert): (1) the
+                    record's [prom_arity] = max promoted index + 1, so
+                    [i < arity]; (2) the signature carries slots
+                    0..arity-1; (3) the sig's args join the transfer set
+                    via [arg_set]; (4) [add_args_to_vars] binds every
+                    param at entry and the phi plumbing rebinds it in
+                    each block. *)
+                 let marker = marker_of_size size in
+                 let emit () =
+                   let v =
+                     match get_local ctx blk_tid (Hike_stack_model.arg_slot i) with
+                     | Some v -> v
+                     | None -> get_phi ctx blk_tid (Hike_stack_model.arg_slot i)
+                   in
+                   let* llvm_ctx = Context.get llvm_ctx_var in
+                   let bits = Size.in_bits size in
+                   let ty = Llvm.type_of v in
+                   KB.return
+                   @@ (match Llvm.classify_type ty with
+                       | Llvm.TypeKind.Integer when Llvm.integer_bitwidth ty > bits ->
+                           Llvm.build_trunc v (Llvm.integer_type llvm_ctx bits)
+                             "" llvm_builder
+                       | Llvm.TypeKind.Integer when Llvm.integer_bitwidth ty < bits ->
+                           Llvm.build_zext v (Llvm.integer_type llvm_ctx bits)
+                             "" llvm_builder
+                       | _ -> v)
+                 in
+                 let rewrite marker = rewrite_mem_node exp addr size marker in
+                 emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
+             | None ->
+                 caller_mem_access llvm_builder blk_tid fr addr exp))
   | Some (Convutils.Mixed _) ->
       (match find_mem_node (Def.rhs def) with
       | Some node ->
@@ -347,5 +374,19 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
   in
   (* The license scopes to this def's rhs emission only. *)
   ctx.Convutils.frame_wrap_license := false;
+  (* The outgoing slot store's value is recorded where it is PRODUCED
+     (T4b): the site's call passes the value this store wrote (looked
+     up by the def tid), never a re-evaluation of the stored exp at the
+     call — a var the block redefines between the store and the call
+     would pass the wrong value. *)
+  let is_site_store =
+    match Core.Map.find sub_info.Convutils.prom_sites blk_tid with
+    | Some site ->
+        Base.List.exists site.Convutils.site_slots
+          ~f:(fun (_, dtid) -> Tid.equal dtid (Term.tid def))
+    | None -> false
+  in
+  if is_site_store then
+    EHashtbl.set fr.store_vals ~key:(Term.tid def) ~data:res;
   insert_local ctx blk_tid var res;
   return ()
