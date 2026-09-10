@@ -169,17 +169,15 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
     let w = Cbat_word.bitwidth n in
     w > 0
     && Cbat_word.(<) n (Word_ops.half w) in
-  let frame = AI.frame_of env in
-  (* Anchored = the var's offset from the entry frame is a PROVEN CONSTANT:
-     a term carrying fvars varies with the index and proves no constant
-     bound (ADR 0008 — stack-ness is proven, never granted by name). *)
+  (* Anchored (T3) = the var's word IS a stack-symbolic value: the
+     symbolic segment base is derived from THIS sub's entry RSP by
+     construction, so the cell it addresses is private to this frame
+     (ADR 0008 — stack-ness is proven by the value, never by name). *)
   let stack_anchor (v : var) : bool =
-    match frame with
-    | None -> false
-    | Some f ->
-      (match AI.frame_lookup f (AI.frame_key v) with
-       | Some t -> List.is_empty t.fvars
-       | None -> false) in
+    match Var.typ v with
+    | Type.Imm w ->
+      Option.is_some (WordSet.as_stack (AI.find_word w env v))
+    | Type.Mem _ | Type.Unk -> false in
   (* Threaded cycle guards. *)
   let rec walk (cells : Exp.Set.t) (vars : Exp.Set.t) (e : exp) : bool =
     match e with
@@ -248,12 +246,12 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
       (* HIGH of non-negative is non-negative. *)
       walk cells vars a
     | Bil.Load (_, addr, _, _) ->
-      (* Anchored = every address var has a CONSTANT frame term, AND there
+      (* Anchored = every address var is a stack-symbolic value, AND there
          is at least one (a constant address is a global — NOT private to
-         this sub; the old [for_all] over empty free-vars passed those
-         vacuously, proving non-negativity for cells other subs write).
-         The frame term IS the privacy proof: it places the cell in this
-         sub's own frame. *)
+         this sub; a vacuous [for_all] over empty free-vars would prove
+         non-negativity for cells other subs write).  The symbolic base
+         IS the privacy proof: it places the cell in this sub's own
+         frame. *)
       let anchored =
         not (Core.Set.is_empty (Exp.free_vars addr))
         && Core.Set.for_all (Exp.free_vars addr) ~f:stack_anchor in
@@ -535,16 +533,16 @@ let rec constrain_cell
     (env : AI.t)
     ~(mem : exp) ~(addr : exp) ~(size : Size.t) ~(endian : endian)
     (cstr : wordset) : AI.t =
-  (* Cell keys use rewritten addresses DENOTED in the current state (the
-     trace lane's construction): sp-derived and reloaded addresses key by
-     their denoted value set; identity (no key) is the sound fallback. *)
-  let addr' = rewrite_addr (AI.frame_of env) addr in
+  (* Cell keys use the address's denotation in the current state (the
+     trace lane's construction): stack-symbolic addresses key by their
+     segment offsets, foreign ones by their concrete hulls; identity
+     (no key) is the sound fallback. *)
   match mem with
   | Bil.Var m ->
     (match Var.typ m with
      | Type.Mem (addr_i, addressable_size) ->
        let k = mem_idx addr_i addressable_size in
-       (match denote_imm_exp addr' env with
+       (match denote_imm_exp addr env with
         | Error _ -> env
         | Ok addr_ws ->
           (match Mem.Key.of_wordset addr_ws with
@@ -686,11 +684,9 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
        let resSize = Size.in_bits size in
        if WordSet.bitwidth cstr <> resSize then env
        else
-         (* Offset via the load block state. *)
-         let addr' = rewrite_addr (AI.frame_of st) addr in
          (* Trace values meet live constraints. *)
          let st' =
-           Exp.free_vars addr'
+           Exp.free_vars addr
            |> Core.Set.fold ~init:st ~f:(fun acc v ->
                match Core.Map.find live (Var.base v) with
                | None -> acc
@@ -704,7 +700,7 @@ let constrain_cell_on_trace ~(st : AI.t) ~(live : wordset Var.Map.t)
                      then acc
                      else AI.add_word acc ~key:v ~data:m
                   | Type.Mem _ | Type.Unk -> acc)) in
-         (match denote_imm_exp addr' st' with
+         (match denote_imm_exp addr st' with
           | Error _ -> env
           | Ok addr_ws ->
             (match Mem.Key.of_wordset addr_ws with
@@ -1748,12 +1744,12 @@ let denote_jump ?preserved ?defs ?stores
               | Some (_, p) -> p
               | None -> failwith "hike: no call facts for block (rctx)" in
             if pushed then begin
-              let abs =
-                AI.add_word abs ~key:rsp
-                  ~data:(WordSet.add (AI.find_word 64 abs rsp)
-                           (WordSet.singleton (Cbat_word.of_int ~width:64 8))) in
-              (* Relation restores RSP by +8. *)
-              AI.set_frame abs (AI.frame_add_rsp (AI.frame_of abs))
+              (* The matched-pair restore: the callee's ret pops exactly
+                 the retaddr the caller pushed (L-E1).  On a stack word
+                 the +8 lands in the offsets exactly (StackOff + const). *)
+              AI.add_word abs ~key:rsp
+                ~data:(WordSet.add (AI.find_word 64 abs rsp)
+                         (WordSet.singleton (Cbat_word.of_int ~width:64 8)))
             end else abs
           end in
     (* Per-jump transfer results. *)

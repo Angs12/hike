@@ -378,9 +378,9 @@ let run () =
   in
   let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
   let tags = extract_of sub in
-  check "P21-1: channel 1 — the load at [RBP - 0x30] seeds Range(-48,-48)"
+  check "P21-1: the symbolic arm — the load at [RBP - 0x30] (RBP := RSP: StackOff offs -48) seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
-  check "P21-2: channel 1 — the store at [RBP - 0x30] seeds Range(-48,-48)"
+  check "P21-2: the symbolic arm — the store at [RBP - 0x30] seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-48L, -48L)));
   ()
 
@@ -388,27 +388,27 @@ let run () =
 ;
 (  let _, def_load, sub = mk_rsp_index_sub () in
   let tags = extract_anchored sub in
-  check "P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (32L, 32L)));
+  check "P22-1: the symbolic arm — the indexed load at [rdi + idx*8] (rdi := RSP-8, idx := 5: offs -8 + 40 = 32, entirely above the entry RSP) seeds the CALLER lane Caller(32,32)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Caller (32L, 32L)));
   ()
 
 (* Heap-shaped addresses do not seed; the RSP-direct access does. *))
 ;
 (  let _, _, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
   let tags = extract_anchored sub in
-  check "P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded"
+  check "P23-1: the plain arm — the load at [rbp + idx*8] (rbp := 0x400000: a plain foreign constant, outside the stack band) is NOT seeded"
     (Core.Map.find tags (Term.tid def_load) = None);
-  check "P23-2: channel 2 — the disjoint store at [rbp + 0x100] is NOT seeded"
+  check "P23-2: the plain arm — the disjoint store at [rbp + 0x100] is NOT seeded"
     (Core.Map.find tags (Term.tid def_store_disjoint) = None);
-  check "P23-3: channel 1 — the RSP-direct store at [RSP - 8] seeds Range(-8,-8)"
+  check "P23-3: the symbolic arm — the RSP-direct store at [RSP - 8] seeds Range(-8,-8)"
     (Core.Map.find tags (Term.tid def_store_rsp) = Some (Cu.Range (-8L, -8L)));
   ())
 ;
 (  let _, def_load, _, def_use, sub = mk_one_path_sub () in
   let tags = extract_anchored sub in
-  check "F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
+  check "F1-1: the symbolic arm — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
-  check "F1-2: channel 2 — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
+  check "F1-2: the plain arm — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
     (Core.Map.find tags (Term.tid def_use) = None);
   ())
 (* Degenerate cast/extract sizes degrade to top; shift guards compare magnitudes. *)
@@ -566,9 +566,9 @@ let run () =
   let sol = run_anchored sub in
   let st = Graphlib.Std.Solution.get sol (entry_tid_of sub) in
   check
-    "P3-1: gate-free — the RSP := 0 anchor is denoted (entry input state \
-     carries RSP = {0})"
-    (Ws.equal (AI.find_word 64 st rsp_var) (Ws.singleton (w64 0)));
+    "P3-1: gate-free — the entry RSP anchor is denoted (entry input state \
+     carries RSP = the symbolic segment base at offset 0 — StackOff{0})"
+    (Ws.equal (AI.find_word 64 st rsp_var) (Ws.stack_word_i64 0L));
   ())
 ;
 (  let full = Ws.top 1 in

@@ -51,8 +51,20 @@ let init_sol ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = Term.first blk_t sub in
   let entry_state = Option.value ~default:(default_entry ()) entry in
-  (* Entry RSP has offset 0. *)
-  let entry_state = AI.set_frame entry_state AI.seed_frame in
+  (* The default entry seeds RSP's word with the SYMBOLIC SEGMENT BASE
+     (T3): every SP-derived address denotes [StackOff] — exact offsets
+     for tagging and cell keying, a segment-smeared hull for guards (the
+     L1 fake-bits pruning class is structurally dead; [value_env] is
+     deleted).  Explicit (fixture) entries keep their own words — a
+     fixture may choose a concrete RSP universe; the frame relation the
+     old rebind clobbered is gone, so nothing else is lost. *)
+  let entry_state =
+    match entry with
+    | None ->
+      AI.add_word entry_state
+        ~key:(Var.base Abi.x86_64_sysv.sp)
+        ~data:(WordSet.stack_word_i64 0L)
+    | Some e -> e in
   let set_init sb = Map.set empty_map ~key:(Term.tid sb) ~data:entry_state in
   let base_map = Option.value_map ~default:empty_map ~f:set_init msb in
   (* Partial CFGs give unsound results. *)
@@ -389,14 +401,47 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   Stages.report (Sub.name s);
   Solution.create (!rc_cell).rc_state.fs_sol sol_default
 module Cbat_extraction = struct
-(* Classification vocabulary. *)
+(* Classification vocabulary — the producer's lane split (D1 + the
+   mixed-class finding):
+   - [Range]/[Infinite]: the span lies ENTIRELY below the entry RSP —
+     this sub's own frame (the uniform frame rule).
+   - [Caller]: the span lies entirely at/above the entry RSP —
+     ABI-visible caller-window traffic (incoming stack args, the
+     return-address slot) — the hike_stack lane.
+   - [Mixed]: the span is two-sided or wrapped (a va_list pointer that
+     is the reg-save area OR the overflow area, an ITE'd address, a
+     widened hull crossing the entry RSP): the runtime address is
+     GENUINELY either-based, and the emitter's complete rule for the
+     class is the two-base select (no single-base rule is sound —
+     measured on variadic/factorial/va_arg_vacopy). *)
 type kind =
   | Range of int64 * int64
   | Infinite of int64 * int64
+  | Caller of int64 * int64
+  | Mixed of int64 * int64
   | Unbounded
   | Dead
   | VLA of Tid.t
 [@@deriving equal]
+
+(* The lane split: entirely-above -> Caller; entirely-below -> Range;
+   everything else (two-sided, wrapped) -> Mixed. *)
+let caller_split (k : kind) : kind =
+  let cmp = Stdlib.Int64.compare in
+  let ordered lo hi = cmp lo hi <= 0 in
+  match k with
+  | Range (lo, hi) | Infinite (lo, hi) ->
+    if ordered lo hi && cmp lo 0L >= 0 then Caller (lo, hi)
+    else if ordered lo hi && cmp hi 0L <= 0 then k
+    else Mixed (lo, hi)
+  | Caller _ | Mixed _ | Unbounded | Dead | VLA _ -> k
+
+(* The offset-space twin of a stack denotation (the tag universe);
+   identity for non-stack values is NOT sound (a foreign address would
+   masquerade as an offset), so None stays None and callers take their
+   sound arm. *)
+let relativize_opt (ws : WordSet.t) : WordSet.t option =
+  WordSet.relativize ws
 
 (* Kind of a word set. *)
 let classify ?vla_tid (ws : WordSet.t) : kind option =
@@ -466,47 +511,21 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
       | Type.Mem _ | Type.Unk -> acc)
 
 
-(* Frame neighborhood for channel 2: generous constants (spec §2.2). *)
-let frame_neighborhood : int64 * int64 = (-65536L, 65536L)
-
-(* Tests whether an address mentions a frame-tracked var. *)
-let mentions_frame_var (frame : Cbat_transfer.frame option) (addr : exp) : bool =
-  match frame with
-  | None -> false
-  | Some f ->
-    Exp.free_vars addr
-    |> Core.Set.exists ~f:(fun v ->
-        Option.is_some (AI.frame_lookup f (AI.frame_key v)))
-
-(* Tests the two-channel frame-residency proof (spec §2.2). *)
-let is_seed (st_before : AI.t) (addr : exp) : bool =
-  let frame = Cbat_transfer.frame_of_state st_before in
-  (* Channel 1 (direct): the address is affine over frame-derived registers,
-     widened or not; [Infinite] stays live. *)
-  if mentions_frame_var frame addr then true
-  else
-    (* Channel 2 (reloaded): the denoted address is bounded and a SUBSET of
-       the frame neighborhood — never intersection; non-seeding is sound. *)
-    match Cbat_transfer.denote_imm_exp addr st_before with
-    | Error _ -> false
-    | Ok ws ->
-      if WordSet.is_top ws || WordSet.is_circular ws then false
-      else if WordSet.is_bottom ws then true
-      else
-        match WordSet.min_elem ws, WordSet.max_elem ws with
-        | Some lo, Some hi -> (
-            match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-            | Ok lo_i64, Ok hi_i64 ->
-              let nlo, nhi = frame_neighborhood in
-              if WordSet.is_ascending ws then
-                (* Non-negative ascending ray pointing into caller stack frame *)
-                Stdlib.Int64.compare lo_i64 0L >= 0
-                && Stdlib.Int64.compare lo_i64 nhi <= 0
-              else
-                Stdlib.Int64.compare lo_i64 nlo >= 0
-                && Stdlib.Int64.compare hi_i64 nhi <= 0
-            | _ -> false)
-        | _ -> false
+(* The ONE stack-access predicate (T3): the address's denotation is a
+   stack-symbolic set — the symbolic segment base propagates from the
+   seeded entry RSP through arithmetic and memory round-trips (the
+   reloaded-pointer channel is structural: spilled RSP-derived values
+   are [StackOff] cells), or a bounded plain hull inside the
+   non-canonical band (the degraded arm: a bitwise-mangled SP lane).
+   A bottom denotation is a dead path — seeding records the Dead kind.
+   Non-seeding is sound (the access stays untagged, the real-address
+   lane). *)
+let is_stack_access (st_before : AI.t) (addr : exp) : bool =
+  match Cbat_transfer.denote_imm_exp addr st_before with
+  | Error _ -> false
+  | Ok ws ->
+    if WordSet.is_bottom ws then true
+    else WordSet.in_stack_segment ws
 
 
 (* Outgoing-arg stores: stack writes at or above the current RSP but below
@@ -524,26 +543,27 @@ let outgoing_arg_stores ~(sp : var) ~(sol : (tid, AI.t) Solution.t)
               let st_before = st in
               let st = Cbat_transfer.denote_def d st in
               match stack_address_of_rhs (Def.rhs d) with
-              | Some addr when is_seed st_before addr ->
-                  let addr' =
-                    Cbat_transfer.rewrite_addr
-                      (Cbat_transfer.frame_of_state st_before) addr in
-                  let st_tag = st_tag_of ~tags:sol blk addr' st_before in
+              | Some addr when is_stack_access st_before addr ->
+                  let st_tag = st_tag_of ~tags:sol blk addr st_before in
                   let acc =
-                    match Cbat_transfer.denote_imm_exp addr' st_tag with
+                    match Cbat_transfer.denote_imm_exp addr st_tag with
                     | Ok ws -> (
-                        match classify ws, bounds_of ws with
-                        | Some (Range (lo, _)), Some (alo, _) ->
-                          let below_entry = Int64.compare lo 0L < 0 in
-                          let above_cur =
-                            match sp_displacement ws
-                                      (AI.find_word 64 st_before sp) with
-                            | Some (klo, _) -> Int64.compare klo 0L >= 0
-                            | None -> false
-                          in
-                          if below_entry && above_cur
-                          then Core.Set.add acc (Term.tid d) else acc
-                        | _ -> acc)
+                        match relativize_opt ws with
+                        | Some rel ->
+                          (match classify rel, bounds_of rel with
+                           | Some (Range (lo, _)), Some _ ->
+                             let below_entry = Int64.compare lo 0L < 0 in
+                             let above_cur =
+                               match sp_displacement rel
+                                         (Option.value ~default:ws
+                                            (relativize_opt (AI.find_word 64 st_before sp))) with
+                               | Some (klo, _) -> Int64.compare klo 0L >= 0
+                               | None -> false
+                             in
+                             if below_entry && above_cur
+                             then Core.Set.add acc (Term.tid d) else acc
+                           | _ -> acc)
+                        | None -> acc)
                     | Error _ -> acc
                   in
                   (st, acc)
@@ -570,25 +590,25 @@ let rec extract ~(dynamic_alloc : def term -> bool)
                  let st_before = st in
                  let st = Cbat_transfer.denote_def d st in
                  match stack_address_of_rhs (Def.rhs d) with
-                 | Some addr when is_seed st_before addr ->
-                     let addr' =
-                       Cbat_transfer.rewrite_addr (Cbat_transfer.frame_of_state st_before) addr in
-                     (* Addresses use tag-state values. *)
-                     let st_tag = st_tag_of ~tags blk addr' st_before in
-                     (match
-                        Cbat_transfer.denote_imm_exp
-                          (* Addresses rewrite to offsets. *)
-                          addr' st_tag
-                      with
-                      | Ok ws -> (
-                          match classify ws with
-                          | Some kind ->
-                              let acc = (Term.tid d, kind, ws) :: acc in
-                              (st, acc)
-                          | None ->
-                              let ws = WordSet.top 64 in
-                              let acc = (Term.tid d, Unbounded, ws) :: acc in
-                              (st, acc))
+                 | Some addr when is_stack_access st_before addr ->
+                     (* Addresses use tag-state values; the tag is the
+                        SEGMENT-RELATIVE offset set (the denotation's
+                        offset-space twin). *)
+                     let st_tag = st_tag_of ~tags blk addr st_before in
+                     (match Cbat_transfer.denote_imm_exp addr st_tag with
+                      | Ok ws ->
+                          let ws =
+                            match relativize_opt ws with
+                            | Some rel -> rel
+                            | None -> ws in
+                          (match classify ws with
+                           | Some kind ->
+                               let acc = (Term.tid d, kind, ws) :: acc in
+                               (st, acc)
+                           | None ->
+                               let ws = WordSet.top 64 in
+                               let acc = (Term.tid d, Unbounded, ws) :: acc in
+                               (st, acc))
                       | Error _ ->
                           let ws = WordSet.top 64 in
                           let acc = (Term.tid d, Unbounded, ws) :: acc in
@@ -602,6 +622,8 @@ let rec extract ~(dynamic_alloc : def term -> bool)
   let span_of = function
     | Range (lo, hi) -> (lo, hi)
     | Infinite (lo, hi) -> (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
+    | Caller (lo, hi) | Mixed (lo, hi) ->
+      (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
     | Unbounded | Dead | VLA _ -> (0L, 0L)
   in
   let merged_tags : kind Tid.Map.t =
@@ -609,7 +631,7 @@ let rec extract ~(dynamic_alloc : def term -> bool)
       Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
           match kind with
           | Range _ -> true
-          | Infinite _ | Unbounded | Dead | VLA _ -> false)
+          | Infinite _ | Caller _ | Mixed _ | Unbounded | Dead | VLA _ -> false)
     in
     let items = bounded in
     (* Transitive overlap components. *)
@@ -648,12 +670,15 @@ let rec extract ~(dynamic_alloc : def term -> bool)
               ~f:(fun acc (dtid, _, _) ->
                   Core.Map.set acc ~key:dtid ~data:(Range (lo, hi))))
   in
+  (* The producer's lane split: positives are the ABI-visible caller
+     window (the hike_stack lane); negatives and mixed spans are this
+     sub's frame (the uniform frame rule). *)
   let offsets =
       Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->
           let k = match Core.Map.find merged_tags dtid with
             | Some k -> k
             | None -> kind in
-          Core.Map.set m ~key:dtid ~data:k) in
+          Core.Map.set m ~key:dtid ~data:(caller_split k)) in
   (* vla_bounds is DELETED (the no-gates ruling): its only production
      readers were the VLA-overlap gates.  Dynamic allocation itself travels
      in [vla_alloc_tids] (the runtime-alloca rule's input). *)
@@ -715,11 +740,7 @@ let walk_budget (rc : refine_ctx) : int ref = rc.Cbat_runctx.rc_walk_budget
    modules; this interface re-exports them. The driver below consumes
    both; neither consumes this module (no cycle by construction). *)
 
-type frame = Cbat_transfer.frame
-
 let set_addr_bits = Cbat_transfer.set_addr_bits
-let frame_of_state = Cbat_transfer.frame_of_state
-let rewrite_addr = Cbat_transfer.rewrite_addr
 let denote_def = Cbat_transfer.denote_def
 let denote_defs = Cbat_transfer.denote_defs
 let denote_imm_exp = Cbat_transfer.denote_imm_exp
@@ -747,7 +768,6 @@ let refine_edge = Cbat_walk.refine_edge
 
 (* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
 module Test_seam = struct
-  type frame = Cbat_transfer.frame
   type refine_ctx = Cbat_runctx.refine_ctx
   type analysis_ctx = Cbat_walk.analysis_ctx = {
     defs : (def term * bool) Var.Map.t option;
@@ -760,8 +780,6 @@ module Test_seam = struct
     | Cell of exp * exp * Size.t * endian * WordSet.t
     | Infeasible
   module Live = Live
-  let frame_of_state = frame_of_state
-  let rewrite_addr = rewrite_addr
   let denote_def = denote_def
   let denote_defs = denote_defs
   let denote_imm_exp = denote_imm_exp

@@ -17,12 +17,15 @@ module Vsa = Cbat_vsa
 module MK = Cbat_vsa.Mem.Key
 module MV = Cbat_vsa.Mem.Val
 
-(* Explicit anchored entry state (RSP = {0}); fixtures pass it to the fixpoint. *)
+(* Explicit anchored entry state (RSP = the symbolic segment base,
+   offset 0 — the production universe, T3); fixtures pass it to the
+   fixpoint so unit pins exercise the same representation the default
+   entry seeds. *)
 let anchored_entry () : AI.t =
   let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
   let rbp = Var.create ~is_virtual:false ~fresh:false "RBP" (Type.Imm 64) in
-  let e = AI.add_word AI.top ~key:rsp ~data:(Ws.singleton (Cbat_word.of_int ~width:64 0)) in
-  AI.add_word e ~key:rbp ~data:(Ws.singleton (Cbat_word.of_int ~width:64 0))
+  let e = AI.add_word AI.top ~key:rsp ~data:(Ws.stack_word_i64 0L) in
+  AI.add_word e ~key:rbp ~data:(Ws.stack_word_i64 0L)
 
 (* AI word environment from (var, word-set) binds over top. *)
 let failures = ref 0

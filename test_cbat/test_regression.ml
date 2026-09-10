@@ -100,7 +100,7 @@ let run_creg () =
       (blk_of (Term.tid fx.es_blk1))
       (Vsa.Test_seam.denote_defs
          (blk_of (Term.tid fx.es_blk0))
-         (AI.set_frame (anchored_entry ()) AI.seed_frame))
+         (anchored_entry ()))
   in
   let read64 ai addr =
     match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with
@@ -200,7 +200,7 @@ let run_remediation () =
   let st_pre =
     Vsa.Test_seam.denote_defs
       (blk_of (Term.tid blk1))
-      (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (AI.set_frame (anchored_entry ()) AI.seed_frame))
+      (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (anchored_entry ()))
   in
   let read64 ai addr =
     match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with
@@ -304,7 +304,7 @@ let run_remediation () =
   let st_pre =
     Vsa.Test_seam.denote_defs
       (blk_of (Term.tid blk1))
-      (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (AI.set_frame (anchored_entry ()) AI.seed_frame))
+      (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (anchored_entry ()))
   in
   let read64 ai addr =
     match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with

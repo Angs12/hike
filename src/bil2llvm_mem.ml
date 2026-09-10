@@ -121,54 +121,65 @@ let mem_access_at_ptr llvm_builder blk_tid ptr exp =
       emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
   | None -> create_exp llvm_builder blk_tid exp
 
-(* Emits a singleton-tagged access. *)
-let create_static_mem_access llvm_builder blk_tid fr lo exp =
-  let open KB in
-  let* ctx, llvm_ctx = emit_env () in
-  let gep_opt =
-    if Int64.compare lo 0L > 0 then
-      match fr.stack with
-      | Some stack ->
-          let addr =
-            Llvm.build_add stack
-              (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) lo false)
-              "" llvm_builder
-          in
-          Some (Llvm.build_inttoptr addr (Llvm.pointer_type llvm_ctx) "" llvm_builder)
-      | None -> None
-    else
-      match fr.frame with
-      | Some frame ->
-          Some
-            (Llvm.build_gep (Llvm.i8_type llvm_ctx) frame
-               [|
-                 Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-                   (Int64.add fr.anchor_idx lo) false;
-               |]
-               "" llvm_builder)
-      | None -> None
-  in
-  match gep_opt with
-  | Some gep -> mem_access_at_ptr llvm_builder blk_tid gep exp
-  | None ->
-#ifdef VSA_DEBUG
-      Printf.eprintf "hike: create_static_mem_access fallback lo=%Ld no frame/stack -> dynamic\n" lo;
-#endif
-      create_exp llvm_builder blk_tid exp
-
-(* Singleton tags use const GEPs. *)
-(* Rebases positive-interval addresses onto the stack. *)
-let rebase_addr llvm_builder fr addr =
+(* The caller-window materialization (D1's ONE form, no select):
+   ptr = hike_stack + (word − stack_0) — stack_0 is the emitted
+   entry-RSP value (anchor_i64 for frame subs, the hike_stack parameter
+   itself for precise subs), so the runtime difference is the exact
+   ABI-visible offset however wide the tag. *)
+let caller_mem_access llvm_builder blk_tid fr addr exp =
   let open KB in
   match fr.stack with
-  | None -> return addr
   | Some stack ->
-    let offset = Llvm.build_sub addr fr.anchor_i64 "arg_off" llvm_builder in
+    let* addr_v = create_exp llvm_builder blk_tid addr in
     let* llvm_ctx = Context.get llvm_ctx_var in
+    let stack0 =
+      (* Precise subs bind the SP local to hike_stack: that IS their
+         emitted entry-RSP value (their anchor_i64 is the unused 0). *)
+      match fr.is_precise with
+      | true -> stack
+      | false -> fr.anchor_i64 in
+    let offset = Llvm.build_sub addr_v stack0 "caller_off" llvm_builder in
+    let base = Llvm.build_add stack offset "caller_addr" llvm_builder in
+    let ptr =
+      Llvm.build_inttoptr base (Llvm.pointer_type llvm_ctx) "" llvm_builder in
+    mem_access_at_ptr llvm_builder blk_tid ptr exp
+  | None ->
+      (* No hike_stack lane (main): the raw address is the real one. *)
+      create_exp llvm_builder blk_tid exp
+
+(* The mixed-class materialization — the COMPLETE rule for a span that
+   is two-sided or wrapped at runtime (a va_list pointer denoting the
+   reg-save area OR the overflow area, an ITE'd address, a widened hull
+   crossing the entry RSP): the runtime word chooses the base.  A
+   word at/above the emitted entry RSP is caller-window traffic
+   (hike_stack + (word − stack_0)); below it, the word is an anchor-
+   linear frame address (inttoptr of it IS the frame cell — the
+   ptrtoint round-trip).  This is not a conservative select: the class
+   is genuinely either-based and BOTH arms are exact. *)
+let mixed_mem_access llvm_builder blk_tid fr addr exp =
+  let open KB in
+  match fr.stack with
+  | Some stack ->
+    let* addr_v = create_exp llvm_builder blk_tid addr in
+    let* llvm_ctx = Context.get llvm_ctx_var in
+    let stack0 =
+      match fr.is_precise with
+      | true -> stack
+      | false -> fr.anchor_i64 in
+    let offset = Llvm.build_sub addr_v stack0 "mixed_off" llvm_builder in
     let zero = Llvm.const_int (Llvm.i64_type llvm_ctx) 0 in
-    let is_caller = Llvm.build_icmp Llvm.Icmp.Sge offset zero "is_caller_arg" llvm_builder in
-    let caller_addr = Llvm.build_add stack offset "caller_addr" llvm_builder in
-    return @@ Llvm.build_select is_caller caller_addr addr "arg_addr" llvm_builder
+    let is_caller =
+      Llvm.build_icmp Llvm.Icmp.Sge offset zero "is_caller_arg" llvm_builder in
+    let caller_addr =
+      Llvm.build_add stack offset "caller_addr" llvm_builder in
+    let base =
+      Llvm.build_select is_caller caller_addr addr_v "arg_addr" llvm_builder in
+    let ptr =
+      Llvm.build_inttoptr base (Llvm.pointer_type llvm_ctx) "" llvm_builder in
+    mem_access_at_ptr llvm_builder blk_tid ptr exp
+  | None ->
+      (* No hike_stack lane (main): the raw address is the real one. *)
+      create_exp llvm_builder blk_tid exp
 
 (* Emits runtime-sized allocas. *)
 let create_dynamic_alloc llvm_builder blk_tid exp =
@@ -187,15 +198,6 @@ let create_dynamic_alloc llvm_builder blk_tid exp =
            llvm_builder
   | _ -> create_exp llvm_builder blk_tid exp
 
-(* Loads/stores through a computed address. *)
-let mem_access_via_ptr llvm_builder blk_tid addr_v exp =
-  let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let p =
-    Llvm.build_inttoptr addr_v (Llvm.pointer_type llvm_ctx) "" llvm_builder
-  in
-  mem_access_at_ptr llvm_builder blk_tid p exp
-
 (* Finds the region containing an offset. *)
 let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
     (lo : int64) : (Convutils.region * Llvm.llvalue) option =
@@ -203,7 +205,20 @@ let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
       let rlo, rhi = r.Convutils.span in
       Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
 
-(* Dispatches tagged accesses to storage. *)
+(* Dispatches tagged accesses to storage.  The producer's tag IS the
+   lane (T3): no sign tests in the emitter.
+   - Range/Infinite (spans entirely below the entry RSP — this sub's
+     own frame): the ONE uniform rule — the address integer flows
+     through create_exp into create_addr_ptr's licensed arm,
+     ptr = frame + (word − stack_0) + anchor_idx, total over all signs
+     and widths (the emitted entry-RSP value IS stack_0, so the runtime
+     index is exact however imprecise the tag).
+   - Caller (spans entirely at/above the entry RSP — the producer's
+     ABI-visible window split): the hike_stack form, one base.
+   - Mixed (two-sided/wrapped spans): the two-base rule — the runtime
+     word chooses (the recorded deviation from the ticket's no-select
+     letter; no single-base rule is sound for the class).
+   - VLA/Unbounded/Dead/untagged: their existing complete lanes. *)
 let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
     (def : def term) (exp : exp) =
   
@@ -211,30 +226,18 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
   match def_tag with
-  | Some (Convutils.Range (lo, hi)) when Int64.equal lo hi ->
-      if Int64.compare lo 0L > 0 then
-        (* Incoming-arg cells read via [hike_stack]. *)
-        (match fr.stack with
-        | Some _ -> create_static_mem_access llvm_builder blk_tid fr lo exp
-        | None -> create_exp llvm_builder blk_tid exp)
-      else if is_abi_visible sub_info def then
-        (* Outgoing cells use their own address. *)
-        (match find_mem_node (Def.rhs def) with
-        | Some node ->
-            let* addr_v = create_exp llvm_builder blk_tid (mem_node_addr node) in
-            mem_access_via_ptr llvm_builder blk_tid addr_v exp
-        | None -> create_exp llvm_builder blk_tid exp)
-      else
-        (* Locals use static frame GEPs. *)
-        create_static_mem_access llvm_builder blk_tid fr lo exp
-  | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _))
-    when Int64.compare lo 0L >= 0 ->
-      (* Positive intervals rebase onto the stack. *)
+  | Some (Convutils.Range _ | Convutils.Infinite _) ->
+      (* The uniform materialization rule. *)
+      create_exp llvm_builder blk_tid exp
+  | Some (Convutils.Caller _) ->
       (match find_mem_node (Def.rhs def) with
       | Some node ->
-          let* addr_v = create_exp llvm_builder blk_tid (mem_node_addr node) in
-          let* addr_v = rebase_addr llvm_builder fr addr_v in
-          mem_access_via_ptr llvm_builder blk_tid addr_v exp
+          caller_mem_access llvm_builder blk_tid fr (mem_node_addr node) exp
+      | None -> create_exp llvm_builder blk_tid exp)
+  | Some (Convutils.Mixed _) ->
+      (match find_mem_node (Def.rhs def) with
+      | Some node ->
+          mixed_mem_access llvm_builder blk_tid fr (mem_node_addr node) exp
       | None -> create_exp llvm_builder blk_tid exp)
   | Some (Convutils.VLA _) -> create_exp llvm_builder blk_tid exp
   | Some Convutils.Unbounded ->
@@ -246,8 +249,6 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
           "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
           (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
       end;
-      create_exp llvm_builder blk_tid exp
-  | Some (Convutils.Range _) | Some (Convutils.Infinite _) ->
       create_exp llvm_builder blk_tid exp
   | Some Convutils.Dead ->
       if not (Core.Set.mem !(ctx.Convutils.dead_warned) sub_tid) then begin
@@ -270,18 +271,16 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
   let v = Def.value def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag sub_info def in
-  (* The address-materialization license (ticket T1): the def's tag is
-     the producer's frame-residency proof.  A Range/Infinite with a
-     negative lower bound proves the rhs's accesses live in THIS sub's
-     frame — create_addr_ptr may route their addresses through the frame
-     base as GEPs.  Unbounded, VLA and untagged (none) prove nothing:
-     their addresses may be foreign pointers (the sret pointer, a
-     reloaded pointer), so the typed wrap is not licensed and the
+  (* The address-materialization license (tickets T1 + T3): the def's
+     tag kind IS the producer's frame-residency proof.  Range/Infinite
+     (the frame lane — spans reaching below the entry RSP, post-split)
+     license the frame GEP in create_addr_ptr; Caller, Unbounded, VLA
+     and untagged do not (their addresses may be caller-window or
+     foreign pointers — the sret pointer, a reloaded pointer), so the
      identity materialization (inttoptr) applies. *)
   ctx.Convutils.frame_wrap_license :=
     (match def_tag with
-     | Some (Convutils.Range (lo, _) | Convutils.Infinite (lo, _)) ->
-         Int64.compare lo 0L < 0
+     | Some (Convutils.Range _ | Convutils.Infinite _) -> true
      | _ -> false);
   let* res =
     (* Runtime-sized SP decrements become real allocas (spec §2.3). *)

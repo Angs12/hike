@@ -88,7 +88,12 @@ module WordSet = Cbat_clp_set_composite
   let overlap (k1 : t) (k2 : t) : bool =
     contains k1 (lower k2) || contains k2 (lower k1)
 
+  (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations (T3):
+     the shared base makes the offset the per-sub cell identity; plain
+     denotations (foreign addresses, and the degraded in-band arm via
+     its relativized hull) key by their own extrema. *)
   let of_wordset (p : WordSet.t) : t option =
+    let p = match WordSet.relativize p with Some rel -> rel | None -> p in
     let open Monads.Std.Monad.Option.Syntax in
     WordSet.min_elem p >>= fun lo_w ->
     WordSet.max_elem p >>= fun hi_w ->

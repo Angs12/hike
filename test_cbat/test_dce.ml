@@ -205,9 +205,14 @@ let run () =
   in
   let pn = names precise' in
   let cn = names ctl' in
-  (* Precise: SP/hike_stack/sp-value erased; control: the whole lane stays. *)
-  check "D4: on the precise path (split stack_plan) SP/hike_stack/sp-value defs are erased; the control keeps them"
-    (pn = [ "d4_arg_read" ] && cn = [ "RSP"; "hike_stack"; "d4_arg_read" ]);
+  (* T3 deleted the precise-lane SP erasure (the uniform materialization
+     READS the SP-derived address arithmetic — in precise subs the SP
+     local binds to hike_stack, so those defs are defined): the USED sp
+     lane survives on both paths, and the unused sp-value def dies by
+     the plain liveness rule. *)
+  check "D4 (T3): the precise-lane SP erasure is DELETED — the sp/hike_stack lane survives iff used (the arg read roots it), the unused sp-value def dies on both paths"
+    (pn = [ "RSP"; "hike_stack"; "d4_arg_read" ]
+    && cn = [ "RSP"; "hike_stack"; "d4_arg_read" ]);
   ())
 ;
 (  (* D5: intrinsic passthrough — [Sub.intrinsic] subs pass through untouched. *)

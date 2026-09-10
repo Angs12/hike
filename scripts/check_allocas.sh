@@ -112,44 +112,38 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (d) per-function frame shape: stack_r-only when precise,
-  #     frame-only when degraded; stack-free defines exempt.
+  # (d) per-function model-storage shape (T3 vocabulary): a define may
+  #     carry ONE model storage — the fallback %frame (degraded), the
+  #     stack_rN allocas (precise) — or none at all: the caller lane
+  #     (hike_stack-parameterized) and the foreign/untagged exception
+  #     lane (inttoptr real addresses) legitimately own no model
+  #     storage.  Violations: MIXING frame+stack_r, or referencing
+  #     model storage the define does not own.
   n_bad="$(awk '
-    BEGIN { in_define=0; has_stack_r=0; has_frame=0; has_mem=0; bad=0 }
+    BEGIN { in_define=0; bad=0 }
+    function check() {
+      if (n_frame_a > 0 && n_stackr_a > 0) { bad++; return }
+      if (n_frame_a == 0 && n_stackr_a == 0 && (n_frame_ref > 0 || n_stackr_ref > 0)) { bad++ }
+    }
     /^define / {
-      if (in_define) {
-        if (!has_mem) { /* exempt stack-free */ }
-        else if (has_stack_r) {
-          if (has_frame) { bad++ }
-        } else {
-          if (!has_frame) { bad++ }
-        }
-      }
-      in_define=1; has_stack_r=0; has_frame=0; has_mem=0; next
+      if (in_define) { check() }
+      in_define=1; n_frame_a=0; n_stackr_a=0; n_frame_ref=0; n_stackr_ref=0
+      next
     }
     /^declare / { next }
     in_define {
-      if ($0 ~ /%stack_r[0-9]+ = alloca/) has_stack_r=1
-      if ($0 ~ /%frame = alloca/) has_frame=1
-      if ($0 ~ /alloca/ || $0 ~ /[[:space:]]load[[:space:]]/ || $0 ~ /[[:space:]]store[[:space:]]/) has_mem=1
+      if ($0 ~ /%frame = alloca/) n_frame_a++
+      if ($0 ~ /%stack_r[0-9]+ = alloca/) n_stackr_a++
+      if ($0 ~ /%frame/) n_frame_ref++
+      if ($0 ~ /%stack_r[0-9]+/) n_stackr_ref++
     }
-    END {
-      if (in_define) {
-        if (!has_mem) { /* exempt */ }
-        else if (has_stack_r) {
-          if (has_frame) { bad++ }
-        } else {
-          if (!has_frame) { bad++ }
-        }
-      }
-      print bad
-    }
+    END { if (in_define) { check() } ; print bad }
   ' "$ll")"
   if [ "$n_bad" -ne 0 ]; then
-    echo "FAIL $name: (d) $n_bad define(s) violate frame/stack_r shape (precise must have stack_r and no frame, degraded must have frame and no stack_r)"
+    echo "FAIL $name: (d) $n_bad define(s) violate model-storage shape (mixing frame+stack_r, or phantom model-storage references)"
     FAIL=$((FAIL + 1))
   else
-    echo "PASS $name: (d) frame/stack_r shape ok (precise=stack_r-only, degraded=frame-only)"
+    echo "PASS $name: (d) model-storage shape ok (frame, stack_r, caller-lane, or foreign-only)"
     PASS=$((PASS + 1))
   fi
 

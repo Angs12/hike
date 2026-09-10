@@ -111,48 +111,20 @@ let sweep_census_of (sub : sub term) : sweep_census =
 let is_intrinsic_var (v : var) : bool =
   Convutils.is_intrinsic_name (Var.name (Var.base v))
 
-let is_hike_stack (v : var) : bool = Var.same v Convutils.hike_stack_var
-
-let is_sp ~(abi : Abi.t) (v : var) : bool = Abi.is_sp abi v
-
-let rec sp_value_exp ~(abi : Abi.t) (e : exp) : bool =
-  match e with
-  | Bil.Var v -> is_sp ~abi v
-  | Bil.BinOp (_, a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
-  | Bil.UnOp (_, a) -> sp_value_exp ~abi a
-  | Bil.Cast (_, _, a) -> sp_value_exp ~abi a
-  | Bil.Extract (_, _, a) -> sp_value_exp ~abi a
-  | Bil.Concat (a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
-  | Bil.Let (_, a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
-  | Bil.Ite (c, a, b) -> sp_value_exp ~abi c || sp_value_exp ~abi a || sp_value_exp ~abi b
-  | _ -> false
-
-let is_sp_value_def ~(abi : Abi.t) (d : def term) : bool =
-  not (Convutils.is_mem (Def.lhs d))
-  && not (is_sp ~abi (Var.base (Def.lhs d)))
-  && sp_value_exp ~abi (Def.rhs d)
-
-let is_sp_for_erasure ~(abi : Abi.t) (d : def term) : bool =
-  is_sp ~abi (Def.lhs d)
-
-(* True when the sub uses the split model. Hoisted out of the sweep by
-   [dce]: the KB entry cannot change while defs are only removed. *)
-let is_precise_sub (sub : sub term) : bool =
-  Hike_stack_model.is_precise (Hike_kb.info_of_sub (Term.tid sub))
-
-(* Region mems survive iff loaded; [mem] always survives. *)
-let keep ?(precise=false) ?(load_roots=Var.Set.empty)
+(* Region mems survive iff loaded; [mem] always survives.  (T3 deleted
+   the precise-lane SP erasure: the uniform materialization READS the
+   SP-derived address arithmetic — in precise subs the SP local binds
+   to [hike_stack], so those defs are defined and their liveness is the
+   plain used-based rule.) *)
+let keep ?(load_roots=Var.Set.empty)
     ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
-  if precise && (is_sp_for_erasure ~abi d || is_hike_stack (Def.lhs d) || is_sp_value_def ~abi d) then false
+  let lhs = Def.lhs d in
+  if Hike_stack_model.is_region_mem lhs then
+    Core.Set.mem load_roots lhs
   else
-    let lhs = Def.lhs d in
-    if Hike_stack_model.is_region_mem lhs then
-      Core.Set.mem load_roots lhs
-      
-    else
-      Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
-      || Convutils.is_mem lhs
-      || is_call_reg ~abi lhs || is_intrinsic_var lhs
+    Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
+    || Convutils.is_mem lhs
+    || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
 (* Incremental sweep: one census walk, then a removal cascade. [used] and
    [load_roots] start exact (permanent mentions plus every counted var)
@@ -161,7 +133,7 @@ let keep ?(precise=false) ?(load_roots=Var.Set.empty)
    convergence — and each def is decided at most a handful of times
    instead of once per round. Blocks that lose nothing keep their
    physical block (no rebuild). *)
-let sweep_worklist ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
+let sweep_worklist ~(abi : Abi.t) (sub : sub term) : sub term =
   let census = sweep_census_of sub in
   let dom m =
     Core.Map.fold m ~init:Var.Set.empty ~f:(fun ~key:v ~data:_ acc ->
@@ -193,7 +165,7 @@ let sweep_worklist ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
         | Some d ->
             if
               Core.Set.mem !removed tid
-              || keep ~precise ~load_roots:!load_roots ~abi d !used
+              || keep ~load_roots:!load_roots ~abi d !used
             then drain rest
             else begin
               removed := Core.Set.add !removed tid;
@@ -244,6 +216,5 @@ let dce ~target (sub : sub term) : sub term =
         method! map_jmp j = ret_replacement j
       end
     in
-    let precise = is_precise_sub sub in
     let abi = Abi.of_target target in
-    mapper#map_sub sub |> sweep_worklist ~abi ~precise
+    mapper#map_sub sub |> sweep_worklist ~abi

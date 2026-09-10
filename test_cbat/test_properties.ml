@@ -826,8 +826,8 @@ let run_landmarks () =
    let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry sub) in
    let st tid = Graphlib.Std.Solution.get sol tid in
    check
-     "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state)"
-     (AI.equal (st guard_tid) (AI.set_frame entry AI.seed_frame));
+     "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state; the frame relation is gone — the identity is over words and memories)"
+     (AI.equal (st guard_tid) entry);
    check "property LM VSK-MIXED-TAKEN: the taken edge refines x to [0,9] exactly"
      (Ws.equal (AI.find_word 32 (st then_tid) x) (range 0 9));
    check "property LM VSK-MIXED-FALL: the fallthrough edge refines x to [10,20] exactly"

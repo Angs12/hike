@@ -94,6 +94,8 @@ module Vsa = struct
   type vsa_kind = Cbat_vsa.Cbat_extraction.kind =
     | Range of int64 * int64
     | Infinite of int64 * int64
+    | Caller of int64 * int64
+    | Mixed of int64 * int64
     | Unbounded
     | Dead
     | VLA of Tid.t
@@ -165,10 +167,6 @@ include Vsa
 (* Callee entry RSP passed by caller. *)
 let hike_stack_var : var =
   Var.create ~is_virtual:false ~fresh:false "hike_stack" (Type.Imm 64)
-
-let is_positive_kind = function
-  | Range (lo, _) | Infinite (lo, _) -> Int64.compare lo 0L >= 0
-  | Unbounded | Dead | VLA _ -> false
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 

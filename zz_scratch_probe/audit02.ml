@@ -58,8 +58,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                     when Core.Map.mem info.Hike.Convutils.offsets (Term.tid d) ->
                       let is_prod_ub = Hashtbl.mem prod_unbounded (Term.tid d) in
                       if is_prod_ub then begin
-                        let frame = Vsa.Test_seam.frame_of_state st_before in
-                        let addr' = Vsa.Test_seam.rewrite_addr frame addr in
+                        let addr' = addr in
                         let st_tag =
                           Exp.free_vars addr'
                           |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
@@ -82,7 +81,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                           (Tid.to_string (Term.tid blk))
                           (exp_str (Def.rhs d));
                         Printf.printf "    raw addr     : %s\n" (exp_str addr);
-                        Printf.printf "    rewrite_addr : %s\n" (exp_str addr');
+                        Printf.printf "    addr (used)  : %s\n" (exp_str addr');
                         (match ws_before with
                          | Ok ws -> Printf.printf "    denote(before): %s\n" (ws_str ws)
                          | Error _ -> Printf.printf "    denote(before): ERROR\n");
@@ -103,9 +102,9 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                           let addr_unchanged = Exp.equal addr addr' in
                           match ws_before, ws_tag with
                           | Ok ws, _ when Ws.is_top ws && addr_unchanged ->
-                            "candidate 1: rewrite_addr returned addr unchanged AND value is TOP"
+                            "candidate 1: the address denotes TOP (no stack word in scope)"
                           | Ok ws, _ when Ws.is_top ws ->
-                            Printf.sprintf "candidate 2: denote_imm_exp returned TOP (rewrite DID change addr to %s)"
+                            Printf.sprintf "candidate 2: denote_imm_exp returned TOP (addr transformed to %s)"
                               (exp_str addr')
                           | Error _, _ -> "candidate 3: denote_imm_exp returned Error (val_as_imm failure)"
                           | Ok _, Ok _ ->

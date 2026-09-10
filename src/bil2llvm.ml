@@ -167,8 +167,15 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
       !$(insert_local ctx tid var) llval)
   >>= fun () ->
   if fr.is_precise then (
-    (* Precise subs keep [hike_stack], erase SP. *)
+    (* Precise subs keep [hike_stack]; the SP local binds to it — the
+       emitted entry-RSP value IS the caller-passed [hike_stack] (T3:
+       RSP-relative address arithmetic must stay defined; the BIL still
+       reads RSP for ABI-window accesses even when every local
+       converted). *)
     let fr = { fr with stack = get_local ctx tid Convutils.hike_stack_var } in
+    (match fr.stack with
+     | Some hs -> insert_local ctx tid ctx.Convutils.sp hs
+     | None -> ());
     exit_entry llvm_builder sub () >>= fun _ -> return fr
   ) else (
   (* SP is not an arg. *)
@@ -496,9 +503,14 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
          that used to OR a second opinion here is deleted — two
          mechanisms that can disagree are worse than one, and absent
          info already defaults to false. *)
+       (* The producer's [Caller] tags ARE the verdict (T3's lane split —
+         the emitter never tests tag signs). *)
        let has_positive =
          Core.Map.exists (Hike_kb.info_of_sub (Term.tid sub)).Convutils.offsets
-           ~f:(fun kind -> Convutils.is_positive_kind kind)
+           ~f:(fun kind ->
+             match kind with
+             | Convutils.Caller _ | Convutils.Mixed _ -> true
+             | _ -> false)
        in
        let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
        let hike_stack_arg =

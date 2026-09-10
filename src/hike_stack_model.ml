@@ -276,7 +276,8 @@ let frame_addr_alias ~(facts : def_facts Tid.Map.t) (sp : var)
         let untagged =
           match Core.Map.find offsets (Term.tid f.def) with
           | None -> true
-          | Some (Convutils.Range _ | Convutils.Dead) -> false
+          | Some (Convutils.Range _ | Convutils.Caller _ | Convutils.Mixed _
+                  | Convutils.Dead) -> false
           | Some (Convutils.Infinite _ | Convutils.Unbounded
                   | Convutils.VLA _) -> true
         in
@@ -374,8 +375,8 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
       ~f:(fun (kind : Convutils.vsa_kind) ->
         match kind with
         | Convutils.Range (lo, hi) -> Some (lo, hi)
-        | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead
-        | Convutils.VLA _ -> None)
+        | Convutils.Infinite _ | Convutils.Caller _ | Convutils.Mixed _
+        | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> None)
   in
   let facts =
     (* One walk for the widths (the only per-def BIL fact still needed). *)
@@ -465,10 +466,11 @@ let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
       :: acc)
   |> Base.List.rev
 
-(* Tests for caller-visible storage: incoming args denotation (lo >= 0). *)
+(* Tests for caller-visible storage: the producer's [Caller] lane
+  split (incoming-arg / return-slot denotations at/above entry RSP). *)
 let is_abi_visible ~(tag_of : Convutils.vsa_kind Tid.Map.t) (d : def term) : bool =
   match Core.Map.find tag_of (Term.tid d) with
-  | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
+  | Some (Convutils.Caller _) -> true
   | _ -> false
 
 (* [abi_visibility_of] over one sub. *)
@@ -531,6 +533,16 @@ let degraded_geometry (sub : sub term) ~(abi : Abi.t)
               else neg
             in
             (neg, unb)
+        | Convutils.Mixed (lo, _) ->
+            (* The mixed class's frame arm indexes the frame for the
+               below-entry truths: the negative extent sizes it. *)
+            let neg =
+              if Int64.compare lo 0L < 0 then
+                Int64.max neg (Int64.neg (Int64.min lo 0L))
+              else neg
+            in
+            (neg, unb)
+        | Convutils.Caller _ -> (neg, unb)
         | Convutils.Unbounded -> (neg, true)
         | Convutils.Dead -> (neg, unb)
         | Convutils.VLA _ -> (neg, true))
@@ -558,10 +570,16 @@ let frame_dims (sub : sub term) ~(abi : Abi.t)
         ~f:(fun ~key:_ ~data:(kind : Convutils.vsa_kind) (lo, hi) ->
           match kind with
           | Convutils.Range (l, h) | Convutils.Infinite (l, h) ->
-              if Int64.compare l 0L <= 0 then
-                (Int64.min lo l, Int64.max hi h)
-              else (lo, hi)
-          | Convutils.Unbounded | Convutils.Dead | Convutils.VLA _ -> (lo, hi))
+              (* Post-split Range/Infinite always reach below the entry
+                 RSP; the caller window ([Caller]) never sizes the frame. *)
+              (Int64.min lo l, Int64.max hi h)
+          | Convutils.Mixed (l, h) ->
+              (* Two-sided: the below-entry side sizes the frame (the
+                 select routes above-entry words to hike_stack); the
+                 span may be wrapped, so fold both extrema. *)
+              (Int64.min lo (Int64.min l h), Int64.max hi (Int64.max l h))
+          | Convutils.Caller _ | Convutils.Unbounded | Convutils.Dead
+          | Convutils.VLA _ -> (lo, hi))
     in
     let span = Int64.sub max_hi min_lo in
     let need = Int64.max (Int64.sub 8L min_lo) (Int64.add span 1L) in

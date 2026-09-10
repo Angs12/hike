@@ -175,6 +175,8 @@ let vsa_kind_to_string (k : Hike.Convutils.vsa_kind) : string =
   match k with
   | Hike.Convutils.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
   | Hike.Convutils.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
+  | Hike.Convutils.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
+  | Hike.Convutils.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
   | Hike.Convutils.Unbounded -> "Unbounded"
   | Hike.Convutils.Dead -> "Dead"
   | Hike.Convutils.VLA tid -> Printf.sprintf "VLA(%s)" (Tid.name tid)

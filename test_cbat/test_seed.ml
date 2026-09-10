@@ -15,13 +15,6 @@ let run () =
     Ws.of_clp
       (Clp.create ~width:64 ~step:(w64 1) ~cardn:(Cbat_word.of_int ~width:65 (hi - lo + 1)) (w64 lo))
   in
-  let frame_rsp_rbp =
-    Some
-      [
-        (Var.base rsp, { AI.fconst = Ws.singleton (w64 0); AI.fvars = [] });
-        (Var.base rbp, { AI.fconst = Ws.singleton (w64 0); AI.fvars = [] });
-      ]
-  in
   let key_of ws = match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of" in
   let add_cell st addr_ws data =
     let mv = AI.find_memory k st m in
@@ -33,7 +26,7 @@ let run () =
     Mem.Val.data (Mem.find (64, LittleEndian) mv (key_of addr_ws))
   in
   (* T1: RSP-based meet — [RSP - 8] meets the cell at offset key {-8}. *)
-  let st1 = add_cell (mk_seed_state rsp rbp frame_rsp_rbp ()) (Ws.singleton (w64 (-8))) (iv ~lo:0 ~hi:20) in
+  let st1 = add_cell (mk_seed_state rsp rbp ()) (Ws.singleton (w64 (-8))) (iv ~lo:0 ~hi:20) in
   let env1 =
     Vsa.Test_seam.constrain_cell_on_trace ~st:st1 ~live:Var.Map.empty st1 ~mem:(Bil.Var m)
       ~addr:(Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))))
@@ -46,7 +39,7 @@ let run () =
      Ws.elem (w64 9) v && not (Ws.elem (w64 15) v));
   (* T2: dynamic-index meet — iterate constraint [0,4] confines the meet; cell 40 survives. *)
   let st2 =
-    let s = add_cell (mk_seed_state rsp rbp frame_rsp_rbp ()) (Ws.singleton (w64 0)) (iv ~lo:0 ~hi:20) in
+    let s = add_cell (mk_seed_state rsp rbp ()) (Ws.singleton (w64 0)) (iv ~lo:0 ~hi:20) in
     add_cell s (Ws.singleton (w64 40)) (iv ~lo:0 ~hi:20)
   in
   let st2 = AI.add_word st2 ~key:idx ~data:(iv ~lo:0 ~hi:10) in
@@ -63,7 +56,7 @@ let run () =
      let v40 = cell_at env2 (Ws.singleton (w64 40)) in
      Ws.elem (w64 9) v0 && (not (Ws.elem (w64 15) v0)) && Ws.elem (w64 15) v40);
   (* T3: ranged meet — stored [0,64] splits; overlap [8,24] meets, rest keeps original. *)
-  let st3 = add_cell (mk_seed_state rsp rbp frame_rsp_rbp ()) (iv ~lo:0 ~hi:64) (iv ~lo:0 ~hi:20) in
+  let st3 = add_cell (mk_seed_state rsp rbp ()) (iv ~lo:0 ~hi:64) (iv ~lo:0 ~hi:20) in
   let st3 = AI.add_word st3 ~key:idx ~data:(iv ~lo:8 ~hi:24) in
   let live3 = Var.Map.singleton (Var.base idx) (iv ~lo:8 ~hi:24) in
   let env3 =
@@ -84,7 +77,7 @@ let run () =
      && Ws.elem (w64 15) v24);
   (* T4: exit-side cells survive — offsets 40 and 80 untouched. *)
   let st4 =
-    let s = add_cell (mk_seed_state rsp rbp frame_rsp_rbp ()) (Ws.singleton (w64 0)) (iv ~lo:0 ~hi:20) in
+    let s = add_cell (mk_seed_state rsp rbp ()) (Ws.singleton (w64 0)) (iv ~lo:0 ~hi:20) in
     let s = add_cell s (Ws.singleton (w64 40)) (iv ~lo:0 ~hi:20) in
     add_cell s (Ws.singleton (w64 80)) (iv ~lo:0 ~hi:20)
   in
