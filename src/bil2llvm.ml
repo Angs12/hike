@@ -4,7 +4,6 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
@@ -18,7 +17,7 @@ let update_phi transfer_vars blk_incoming blk_tid =
   let* ctx = Context.get emit_ctx_var in
   (* Consults edge-keyed restores first. *)
   let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
-    if Var.same var ctx.Convutils.sp then
+    if Var.same var ctx.sp then
       match EHashtbl.find !(ctx.edge_sp_restores) pred_tid with
       | Some inner -> EHashtbl.find inner blk_tid
       | None -> None
@@ -178,7 +177,7 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
     | Some v -> v
     | None -> fr.anchor_i64 (* storage-free subs: the constant anchor *)
   in
-  insert_local ctx tid ctx.Convutils.sp sp0;
+  insert_local ctx tid ctx.sp sp0;
   (* The Caller-Window Parameter local (variadic/mixed subs only). *)
   let fr = { fr with stack = get_local ctx tid Hike_stack_model.hike_window_var } in
   exit_entry llvm_builder sub () >>= fun _ -> return fr
@@ -241,16 +240,16 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.union (ret_set ctx)
   |> Core.Set.union arg_set
   |> Core.Set.filter ~f:(fun var ->
-      ((not @@ is_mem var) || Var.same var (Abi.pc ctx.Convutils.target))
+      ((not @@ Hike_stack_model.is_mem var) || Var.same var (Abi.pc ctx.target))
       (* Keeps SP and every callee-saved lane (fp is an ordinary one). *)
-      || Var.same var ctx.Convutils.sp
-      || Abi.is_callee_saved ctx.Convutils.abi var)
+      || Var.same var ctx.sp
+      || Abi.is_callee_saved ctx.abi var)
   |> Core.Set.filter ~f:(fun var ->
       (* Drops never-defined vars from transfer. *)
       Core.Set.mem def_set var
       || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
-      || Var.same var ctx.Convutils.sp)
+      || Var.same var ctx.sp)
   |> Core.Set.to_list
 
 
@@ -297,7 +296,7 @@ let create_sub sub =
     let* ctx = Context.get emit_ctx_var in
     let blks = Term.enum blk_t sub in
     let fn, _ =
-      Core.Map.find !(ctx.Convutils.ll_funcs) (Term.tid sub)
+      Core.Map.find !(ctx.ll_funcs) (Term.tid sub)
       |> Base.Option.value_exn ~message:"create sub : function not found"
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
@@ -316,7 +315,7 @@ let create_sub sub =
       then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
       else
         let n, anchor_idx =
-          Hike_stack_model.frame_dims sub ~abi:ctx.Convutils.abi sub_info
+          Hike_stack_model.frame_dims sub ~abi:ctx.abi sub_info
         in
         let frame, anchor_idx, anchor_i64 =
           build_frame_anchor llvm_ctx llvm_builder n anchor_idx
@@ -367,7 +366,7 @@ let create_sub sub =
           Some (base, v, 0L)
       | None, [] -> None
     in
-    ctx.Convutils.stack_anchor := anchor;
+    ctx.stack_anchor := anchor;
     (* The SP Slot (T4): the entry-block alloca holding this
        invocation's anchor — the sub's own anchor integer. *)
     let anchor_val, sp_slot =
@@ -403,11 +402,11 @@ let create_sub sub =
     (* Summarizes model-ABI undef reads. *)
     let sub_tid = Term.tid sub in
     let lane_reads =
-      Core.Map.fold !(ctx.Convutils.undef_warned) ~init:Var.Set.empty
+      Core.Map.fold !(ctx.undef_warned) ~init:Var.Set.empty
         ~f:(fun ~key:_ ~data:warned_vars acc ->
           Core.Set.union acc !warned_vars)
       |> Core.Set.filter ~f:(fun v ->
-             let abi = ctx.Convutils.abi in
+             let abi = ctx.abi in
              Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v)
     in
     if not (Core.Set.is_empty lane_reads) then
@@ -420,7 +419,7 @@ let create_sub sub =
 
 let free_vars sub =
   Sub.free_vars sub
-  |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
+  |> Core.Set.filter ~f:(fun var -> not @@ Hike_stack_model.is_mem var)
   |> Core.Set.to_list
 
 (* Tests the [Sub.intrinsic] attribute. *)
@@ -575,7 +574,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              not
                (Var.same reg (Abi.sp target)
                || is_callee_saved
-               || Convutils.is_intrinsic_name n
+               || is_intrinsic_name n
                || Base.String.is_prefix n ~prefix:"hike_slot"
                || Var.same reg Hike_stack_model.hike_window_var))
          |> Base.List.sort ~compare:(fun a b ->
@@ -619,19 +618,19 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(text_section : (int array * int64 * int64) option)
     ~(section_remap : (int64 * int64 * Llvm.llvalue) list)
     ~(copy_relocs : int64 list)
-    (sections : Convutils.section list)
+    (sections : section list)
     (prog : program term) : unit =
   let abi = Abi.of_target target in
   let ctx =
     {
-      (Convutils.empty_emit_ctx ()) with
-      Convutils.symtab = symtab;
+      (empty_emit_ctx ()) with
+      symtab = symtab;
       text_section;
       section_remap;
       copy_relocs;
       target;
-      Convutils.abi = abi;
-      Convutils.sp = Abi.sp target;
+      abi = abi;
+      sp = Abi.sp target;
       ptrsize;
     }
   in
@@ -684,7 +683,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let subs =
     Base.List.fold twin_sigs
       ~init:
-        (Core.Map.add_exn ctx.Convutils.subs ~key:icall_tid ~data:icall_sig)
+        (Core.Map.add_exn ctx.subs ~key:icall_tid ~data:icall_sig)
       ~f:(fun acc (tid, (rets, args)) -> add_sub_sig acc tid ~rets ~args)
   in
   let subs =
@@ -692,7 +691,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       ~f:(fun acc (sub, (rets, args)) ->
           add_sub_sig acc (Term.tid sub) ~rets ~args)
   in
-  let ctx = { ctx with Convutils.subs = subs } in
+  let ctx = { ctx with subs = subs } in
   Toplevel.exec begin
     KB.Context.with_var emit_ctx_var ctx (fun () ->
       KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
@@ -733,12 +732,12 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
         KB.Context.with_var llvm_module_var llvm_module (fun () ->
           KB.List.iter sections ~f:(fun section ->
-              match section.Convutils.bytes with
+              match section.bytes with
               | Some arr ->
                   KB.return
                   @@ Bil2llvm_section.set_section_initializer ctx llvm_ctx
-                       llvm_module section.Convutils.base arr
-                       (Word.to_int64_exn section.Convutils.min_addr)
+                       llvm_module section.base arr
+                       (Word.to_int64_exn section.min_addr)
               | None -> KB.return ()))))
   end
 
@@ -747,6 +746,9 @@ type native_fp = Bil2llvm_calls.native_fp =
   | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | FHLT | ISNAN
 
 let native_fp_op = Bil2llvm_calls.native_fp_op
+
+(* The name-minting fact, shared (see the mli). *)
+let sanitize_name = Bil2llvm_env.sanitize_name
 let create_section_global = Bil2llvm_section.create_section_global
 let set_section_initializer = Bil2llvm_section.set_section_initializer
 let create_uninitialized_global = Bil2llvm_section.create_uninitialized_global

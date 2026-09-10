@@ -2,7 +2,6 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
@@ -18,13 +17,13 @@ let find_def_tag sub_info def =
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =
     Sub.free_vars sub
-    |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
+    |> Core.Set.filter ~f:(fun var -> not @@ Hike_stack_model.is_mem var)
     |> Core.Set.to_list
   in
   let reg_vars =
     (* SP-only: a stub genuinely using RBP is not a pure trampoline. *)
     Base.List.filter free_vars ~f:(fun reg ->
-        not (Var.same reg ctx.Convutils.sp))
+        not (Var.same reg ctx.sp))
   in
   reg_vars = []
   && Term.enum blk_t sub
@@ -281,9 +280,9 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       | None -> create_exp llvm_builder blk_tid exp)
   | Some (Hike_stack_model.VLA _) -> create_exp llvm_builder blk_tid exp
   | Some Hike_stack_model.Unbounded ->
-      if not (Core.Set.mem !(ctx.Convutils.guarded_warned) sub_tid) then begin
-        ctx.Convutils.guarded_warned :=
-          Core.Set.add !(ctx.Convutils.guarded_warned) sub_tid;
+      if not (Core.Set.mem !(ctx.guarded_warned) sub_tid) then begin
+        ctx.guarded_warned :=
+          Core.Set.add !(ctx.guarded_warned) sub_tid;
         (* Warning text is a grepped contract. *)
         Hike_diag.warn
           "guarded: sub %s: stack access is Unbounded (unconstrained / TOP): def %s rhs=%s"
@@ -291,9 +290,9 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       end;
       create_exp llvm_builder blk_tid exp
   | Some Hike_stack_model.Dead ->
-      if not (Core.Set.mem !(ctx.Convutils.dead_warned) sub_tid) then begin
-        ctx.Convutils.dead_warned :=
-          Core.Set.add !(ctx.Convutils.dead_warned) sub_tid;
+      if not (Core.Set.mem !(ctx.dead_warned) sub_tid) then begin
+        ctx.dead_warned :=
+          Core.Set.add !(ctx.dead_warned) sub_tid;
         (* Warning text is a grepped contract. *)
         Hike_diag.warn
           "guarded: sub %s: stack access classified Dead (empty range): def %s rhs=%s"
@@ -318,7 +317,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
      and untagged do not (their addresses may be caller-window or
      foreign pointers — the sret pointer, a reloaded pointer), so the
      identity materialization (inttoptr) applies. *)
-  ctx.Convutils.frame_wrap_license :=
+  ctx.frame_wrap_license :=
     (match def_tag with
      | Some (Hike_stack_model.Range _ | Hike_stack_model.Infinite _) -> true
      | _ -> false);
@@ -369,7 +368,7 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
     | _ -> return res
   in
   (* The license scopes to this def's rhs emission only. *)
-  ctx.Convutils.frame_wrap_license := false;
+  ctx.frame_wrap_license := false;
   (* The outgoing slot store's value is recorded where it is PRODUCED
      (T4b): the site's call passes the value this store wrote (looked
      up by the def tid), never a re-evaluation of the stored exp at the

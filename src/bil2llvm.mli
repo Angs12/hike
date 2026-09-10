@@ -10,6 +10,10 @@ type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FORDER | FHL
 (** Intrinsic classification: does [name] map to a native FP op? *)
 val native_fp_op : string -> native_fp option
 
+(** The sub's LLVM name (tid-name sanitization) — the emitter owns the
+    minting; the VSA's target-name map and the fixtures share the fact. *)
+val sanitize_name : string -> string
+
 (** The emission entry: populates the emitter state, then runs signature
     collection (sub declarations) and body emission over [prog].
     Output is the side effect on [llvm_module]. *)
@@ -22,7 +26,7 @@ val emit_program :
   text_section:(int array * int64 * int64) option ->
   section_remap:(int64 * int64 * Llvm.llvalue) list ->
   copy_relocs:int64 list ->
-  Convutils.section list ->
+  Bil2llvm_env.section list ->
   program term ->
   unit
 
@@ -32,7 +36,7 @@ val create_section_global :
 
 (** Fills a section global's initializer from raw bytes. *)
 val set_section_initializer :
-  Convutils.emit_ctx ->
+  Bil2llvm_env.emit_ctx ->
   Llvm.llcontext ->
   Llvm.llmodule ->
   Llvm.llvalue ->

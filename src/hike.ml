@@ -1,7 +1,7 @@
 open Bap.Std
 open Bap_main
 open Bap_core_theory
-open Convutils
+open Bil2llvm_env
 open Hike_abi
 module Abi = Hike_abi
 open Hike_filter
@@ -14,7 +14,6 @@ module Dce = Hike_dce
 module Stack_model = Hike_stack_model
 module Stack_to_locals = Hike_stack_to_locals
 module Kb = Hike_kb
-module Convutils = Convutils
 module Bil2llvm = Bil2llvm
 
 (* Setup and filter form their own pass. *)
@@ -51,10 +50,10 @@ let convert_binary output_program proj =
     | None -> None
     | Some (arr, min_addr, max_addr, base) ->
         Some
-          { Convutils.base;
-            Convutils.min_addr = min_addr;
-            Convutils.max_addr = max_addr;
-            Convutils.bytes = Some arr }
+          { base;
+            min_addr;
+            max_addr;
+            bytes = Some arr }
   in
   let data_section = mk_section DATA ~is_const:false in
   let rodata_section = mk_section RODATA ~is_const:true in

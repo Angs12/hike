@@ -216,6 +216,10 @@ let region_base (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (region_name id ^ "_base") (Type.Imm 64)
 
+(* Memory-var test (the BAP var-kind predicate; the var grammar lives
+   here with the fission-var tests). *)
+let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
+
 (* Tests for fission var names. *)
 let is_region_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"

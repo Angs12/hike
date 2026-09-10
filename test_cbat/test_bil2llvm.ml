@@ -551,12 +551,12 @@ let run_promotion () =
     "(i64 %RDI, i64 %RSI, i64 %hike_slot0, i64 %hike_slot1)" ir;
   check_ir "T4-PROM: the resolved site calls the promoted body directly"
     (sprintf "call void @\"%s\"(i64 undef, i64 undef, i64 undef, i64 undef)"
-       (Hike.Convutils.sanitize_name (Tid.name (Term.tid callee))))
+       (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
     ir;
   (* The Thunk: internal linkage, the legacy memory-path signature. *)
   check_ir "T4-THUNK: the memory-convention twin is emitted with internal linkage"
     (sprintf "define internal void @\"%s_hike_thunk\""
-       (Hike.Convutils.sanitize_name (Tid.name (Term.tid callee))))
+       (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
     ir;
   check_ir "T4-THUNK: the twin carries the synthetic indirect convention (the window base, never SP)"
     ("_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, "
@@ -565,7 +565,7 @@ let run_promotion () =
     ir;
   check_ir "T4-THUNK: the twin unpacks the window slots into the promoted body"
     (sprintf "call void @\"%s\"(i64 %%RDI, i64 %%RSI, i64 %%"
-       (Hike.Convutils.sanitize_name (Tid.name (Term.tid callee))))
+       (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
     ir;
   check_ir "T4-THUNK: the twin loads the slots from the window memory"
     "load i64, ptr %1" ir;

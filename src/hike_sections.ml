@@ -2,7 +2,7 @@
 
 open Bap.Std
 open Bil2llvm
-open Convutils
+open Bil2llvm_env
 
 type 'a region = { addr : int64; size : int64; info : 'a }
 
@@ -41,7 +41,7 @@ let create_uninitialized_section llvm_ctx llvm_module proj section_type
       let size = Int64.to_int size in
       let min_addr = Word.of_int ~width:64 addr in
       let max_addr = Word.of_int ~width:64 (addr + size - 1) in
-      { Convutils.base; min_addr; max_addr; Convutils.bytes = None })
+      { base; min_addr; max_addr; bytes = None })
 
 (* Collects copy-relocated bss slots. *)
 let get_copy_relocations proj ~bss_addr ~bss_size =

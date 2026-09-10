@@ -151,9 +151,6 @@ end
 (** Per-sub VSA result store. *)
 module Kb = Hike_kb
 
-(** Shared pass/emitter vocabulary. *)
-module Convutils = Convutils
-
 (** LLVM emitter. *)
 module Bil2llvm = Bil2llvm
 

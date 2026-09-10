@@ -275,7 +275,7 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
   let name_tid =
     Term.enum sub_t prog
     |> Seq.fold ~init:[] ~f:(fun acc s ->
-        (Convutils.sanitize_name (Tid.name (Term.tid s)), Term.tid s) :: acc)
+        (Bil2llvm.sanitize_name (Tid.name (Term.tid s)), Term.tid s) :: acc)
   in
   (* Runs the fixpoint, then extracts tags def by def. *)
   let finish (sol : Vsa.vsa_sol) : Model.vsa_info =

@@ -139,7 +139,7 @@ let stack_to_locals (target : Theory.Target.t) (sp : var) (sub : sub term) :
   (* Rebinds whole-access defs to their cell; maps nested loads elsewhere. *)
   let rewrite_def (d : def term) : def term =
     let whole_access =
-      match (Model.addr_of_rhs (Def.rhs d), Convutils.is_mem (Def.lhs d)) with
+      match (Model.addr_of_rhs (Def.rhs d), Model.is_mem (Def.lhs d)) with
       | Some (addr, s), true -> (
           match shape_of_addr addr with
           | Some (`Slot local) -> Some (s, `Slot local)
