@@ -430,6 +430,47 @@ Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
 
+**Last verified: 2026-09-10 EEST — T3c LANDED (the escape dies entirely; the
+denotation is the ONE mechanism; the -O2 pin 6 → 4) — the typed-model
+program's waves 1–2 are complete, T4 is the frontier**
+
+Merge `7a41070` + spec records `92ac41c`; ticket
+`.scratch/typed-model/tickets/T3c-single-predicate-verdict.md`; battery
+`/home/tovpr/tm-battery/t3c/` (pre-T3c baseline verified byte-identical
+33/33 to merge-t3 before any change); plugin bundle `54e284d5d3441228`
+(src `e7b3c1c9db41c52b`):
+
+- The escape is DELETED ENTIRELY (`frame_escapes`/`frame_escaped`, the
+  SP-derived closure `sp_derived_closure`, `sp_escaped`,
+  `frame_addr_alias`, `def_facts`, `outgoing_arg_stores`,
+  `sp_displacement`, `bounds_of` — grep-clean per the verdict's
+  no-caller proofs). The region partition (`regions_of_sub ~sol`)
+  decides from the tags + the denotations alone (stack-reachable =
+  an address operand's denotation is a stack-symbolic set); ONE
+  predicate family, no second channel.
+- The pin moved 6 → 4 (fizzbuzz_safe, fptr_table flipped green — the
+  L1-residual/L4 classes); golden list `o2_known_failures.txt` = the
+  four (byte_copy, union_overlap, va_arg_mixed, va_arg_vacopy).
+- Honest emission cost recorded: 19/33 -O0 binaries differ — 21 subs
+  returned to the Frame model (unservable traffic under the
+  caller-shared/`llvm.stacksave` SP anchor); the servability clause is
+  written to be DELETED by T4's SP Slot. The entry sub's SP binds via
+  `llvm.stacksave` as the T4 bridge.
+- The program's remaining tickets: **T4** (stack-arg promotion + the SP
+  convention + VSA-resolved indirect calls + thunks; worktree
+  `/home/tovpr/hike-t4`, branch `tm/t4-stack-args`), then T5 (SSE
+  lane) and T9 (va_list re-model), each blocked-by the previous wave.
+  T4's retirement inventory (T3c's BLOCKED-BY-T4 section) lands in T4.
+
+| gate (the merged battery) | result |
+|---|---|
+| -O0 emission / semantics / opt-safety | **33/33 rc=0 / 33 PASS 0 FAIL / 33 PASS 0 FAIL** ✅ |
+| -O2 emission / semantics pinned | **33/33 rc=0 / 29 PASS 4 FAIL, set == golden (4)** ✅ |
+| structural asserts (both lanes) | **165 / 0 each** ✅ |
+| referee | **2,861,148 / 0 mismatches** ✅ |
+| unit suite | failure set == the pre-existing 8 (E2eD-7/8, LM F1-*; owner triage) ✅ |
+| plugin provenance | bundle sha16 `54e284d5d3441228` ✅ |
+
 **Last verified: 2026-09-10 EEST — T3 LANDED (the symbolic stack base +
 single-channel tagging; the offset fiction and `value_env` are GONE)**
 
