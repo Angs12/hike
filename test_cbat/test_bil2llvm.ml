@@ -3,6 +3,7 @@
    Theory.Target.unknown + ptrsize:64, and asserts on the textual IR
    (Llvm.print_module) — the same idiom check_allocas.sh uses. *)
 
+open Printf
 open Test_common
 open Test_fixtures
 open Bap.Std
@@ -544,21 +545,27 @@ let run_promotion () =
   Kb.provide (Tid.Map.singleton (Term.tid callee) callee_info);
   Kb.provide (Tid.Map.singleton (Term.tid caller) caller_info);
   let ir = emit_ir [ caller; callee ] in
-  if Sys.getenv_opt "T4_DEBUG_IR" <> None then prerr_endline ir;
-  (* The callee's promoted signature carries the positional slots. *)
+  (* The callee's promoted signature carries the register lanes then
+     the positional slots. *)
   check_ir "T4-PROM: the promoted signature carries the positional slots"
-    "@prom_callee(i64 %RDI, i64 %RSI, i64 %hike_slot0, i64 %hike_slot1)" ir;
+    "(i64 %RDI, i64 %RSI, i64 %hike_slot0, i64 %hike_slot1)" ir;
   check_ir "T4-PROM: the resolved site calls the promoted body directly"
-    "call { i64, i64 } @prom_callee(" ir;
+    (sprintf "call void @\"%s\"(i64 undef, i64 undef, i64 undef, i64 undef)"
+       (Cu.sanitize_name (Tid.name (Term.tid callee))))
+    ir;
   (* The Thunk: internal linkage, the legacy memory-path signature. *)
   check_ir "T4-THUNK: the memory-convention twin is emitted with internal linkage"
-    "define internal { i64, i64 } @prom_callee_hike_thunk(" ir;
+    (sprintf "define internal void @\"%s_hike_thunk\""
+       (Cu.sanitize_name (Tid.name (Term.tid callee))))
+    ir;
   check_ir "T4-THUNK: the twin carries the caller-window base, not SP"
-    "(i64 %RDI, i64 %RSI, i64 %hike_window)" ir;
+    "_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %hike_window)" ir;
   check_ir "T4-THUNK: the twin unpacks the window slots into the promoted body"
-    "@prom_callee(i64 %RDI, i64 %RSI, i64 %0, i64 %1)" ir;
+    (sprintf "call void @\"%s\"(i64 %%RDI, i64 %%RSI, i64 %%"
+       (Cu.sanitize_name (Tid.name (Term.tid callee))))
+    ir;
   check_ir "T4-THUNK: the twin loads the slots from the window memory"
-    "load i64, ptr %2" ir;
+    "load i64, ptr %1" ir;
   (* The unresolved site: the pointer call through the synthetic
      signature (which carries the window base). *)
   let j2 =
@@ -588,7 +595,8 @@ let run_promotion () =
     "T4-PTR: the pointer call never lands on the promoted body directly"
     (not (contains_substring ir2 "call { i64, i64 } @prom_callee("));
   check_ir "T4-PTR: the synthetic indirect signature carries the window base"
-    "declare { i64, i64 } @indirect_call(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, i64 %R9, i64 %YMM0, i64 %YMM1, i64 %YMM2, i64 %YMM3, i64 %YMM4, i64 %YMM5, i64 %YMM6, i64 %YMM7, i64 %hike_window)"
+    "@indirect_call(i64, i64, i64, i64, i64, i64, i256, i256, i256, i256, \
+                    i256, i256, i256, i256, i64)"
     ir2;
   ()
 

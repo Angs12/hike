@@ -804,6 +804,35 @@ let run_fp_gpr () =
   ())
 
 (* Copy-reloc slot computation, pinned through the production function. *)
+
+(* ------------------------------------------------------------------ *)
+(* T4-RES: the target-resolution predicate's four classes.             *)
+(* ------------------------------------------------------------------ *)
+
+let run_t4_resolution () =
+  let callee_tid = Tid.for_name "res_callee" in
+  let lifted v = if Int64.equal v 0x1000L then Some callee_tid else None in
+  let ws_singleton (v : int64) : Cbat_vsa.WordSet.t =
+    Cbat_vsa.WordSet.singleton (w64 (Int64.to_int v))
+  in
+  (* 1. singleton lifted sub: the Resolved Call Site (direct). *)
+  check "T4-RES singleton: a singleton naming a lifted sub resolves direct"
+    (Hike.Vsa.resolve_target ~lookup:lifted (ws_singleton 0x1000L)
+     = Some callee_tid);
+  (* 2. bounded multi-target set: the pointer call. *)
+  check "T4-RES multi: a bounded two-target set takes the pointer call"
+    (Hike.Vsa.resolve_target ~lookup:lifted
+       (Cbat_vsa.WordSet.union (ws_singleton 0x1000L)
+          (ws_singleton 0x1008L))
+     = None);
+  (* 3. foreign singleton (no lifted sub at the address): pointer call. *)
+  check "T4-RES foreign: a foreign singleton takes the pointer call"
+    (Hike.Vsa.resolve_target ~lookup:lifted (ws_singleton 0x9999L) = None);
+  (* 4. unresolvable (TOP): pointer call. *)
+  check "T4-RES top: an unresolvable target set takes the pointer call"
+    (Hike.Vsa.resolve_target ~lookup:lifted (Cbat_vsa.WordSet.top 64) = None);
+  ()
+
 let run_copy_reloc () =
   let bw64 = Word.of_int ~width:64 in
   let m = memv "cr_m" in
