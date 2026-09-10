@@ -24,6 +24,28 @@ each caller stores the same slot relative to the call's rsp):
 The `hike_stack`/rebase path is untouched for non-slot accesses.
 Signature churn re-baselines the affected IR (deliberate).
 
+## OWNER DIRECTIVE (2026-09-10, binds this ticket's end-state)
+
+"SP should not be a stack argument! It should just be an alloca in the
+entry block!" — the promotion's purpose is exactly this: once stack
+args pass as REAL call parameters, the sub needs no stack parameter.
+The end-state convention:
+- NO sub takes a stack/SP parameter (the T3-era `hike_stack`
+  parameter is retired; the "precise subs' SP local binds to the
+  hike_stack parameter" arm dies with it).
+- The SP local binds to an ENTRY-BLOCK ALLOCA: the sub's own frame is
+  the alloca; the SP value is its ptrtoint, bound at entry (stored
+  into an entry-block slot where the model mutates it — pushes, dynamic
+  allocas).
+- The residual unpromotable window (indirect-call callees, unproven
+  slots) needs a complete-rule answer under the no-parameter
+  convention. If — and only if — no sound complete rule exists
+  (the callee cannot name the caller's frame without a channel), that
+  class is FLAGGED in the verdict for the owner with the measured
+  evidence — never hacked with a hidden second mechanism.
+Sequence note: this convention is what makes the promotion TOTAL
+rather than partial — the two halves land as one ticket.
+
 ## Battery protocol (you hold the shared plugin slot in your wave)
 
 Same as T1's (see `T1-opt-safety-regression.md` §Battery protocol):
