@@ -20,7 +20,7 @@ let () =
       | Some s -> s
       | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] — %s not found" name)
     in
-    let info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
+    let info = Hike.Vsa.offsets_of_sub target sp ~symtab:(Some (Project.symbols proj)) ~prog:(Program.create ~subs:[ sub ] ()) sub in
     let kind_of = info.Hike.Convutils.offsets in
     (* Region id whose span holds the def's tag; "-" when in no region. *)
     let region_of =
@@ -71,7 +71,7 @@ let () =
   let name = match List.tl args with n :: _ -> n | [] -> "main" in
   let sub = Base.Option.value_exn (find_sub prog name) in
   let info =
-    Hike.Vsa.offsets_of_sub target sp ~symtab:None
+    Hike.Vsa.offsets_of_sub target sp ~symtab:(Some (Project.symbols proj))
       ~prog:(Program.create ~subs:[ sub ] ())
       sub
   in
@@ -97,3 +97,45 @@ let () =
         (match data with
          | Some t -> "some " ^ Tid.name t
          | None -> "none"))
+
+(* T4 debug: the indirect-call target denotations of the sub. *)
+let () =
+  let args = List.tl (Array.to_list Sys.argv) in
+  let proj = load_project (List.hd args) in
+  let prog = Project.program proj in
+  let name = match List.tl args with n :: _ -> n | [] -> "main" in
+  let sub = Base.Option.value_exn (find_sub prog name) in
+  let sol =
+    Vsa.static_graph_vsa [] (Program.create ~subs:[ sub ] ()) sub
+      (Vsa.init_sol sub)
+  in
+  let dump lbl st_end (j : jmp term) =
+    match Jmp.kind j with
+    | Call c -> (
+        let lbl = lbl ^ " jmp=" ^ Tid.name (Term.tid j) in
+        match Call.target c with
+        | Indirect texp -> (
+            match Vsa.denote_imm_exp texp st_end with
+            | Error _ -> Printf.printf "TGT %s error\n" lbl
+            | Ok ws ->
+                Printf.printf "TGT %s top=%b min=%s max=%s\n" lbl
+                  (Vsa.WordSet.is_top ws)
+                  (match Vsa.WordSet.min_elem ws with
+                  | Some w -> Cbat_word.to_string w
+                  | None -> "-")
+                  (match Vsa.WordSet.max_elem ws with
+                  | Some w -> Cbat_word.to_string w
+                  | None -> "-"))
+        | Direct _ -> Printf.printf "TGT %s direct\n" lbl)
+    | _ -> ()
+  in
+  Term.enum blk_t sub
+  |> Seq.iter ~f:(fun blk ->
+      let st0 = Graphlib.Std.Solution.get sol (Term.tid blk) in
+      let st_end =
+        Base.List.fold_left (Term.enum def_t blk |> Seq.to_list)
+          ~init:st0
+          ~f:(fun st d -> Vsa.denote_def d st)
+      in
+      let lbl = Tid.name (Term.tid blk) in
+      Term.enum jmp_t blk |> Seq.iter ~f:(dump lbl st_end))
