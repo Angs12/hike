@@ -194,11 +194,20 @@ persisted → the va_arg_vacopy residual is the va_list state
 round-trip; T9 owns it. va_arg_mixed stays L1 (the ud2 poison arm) —
 re-attributed in T4/T9's verdicts if the class moves.
 
-### T8 — the 8 pre-existing unit failures (owner triage)
+### T8 — the 8 pre-existing unit failures (ROOT-CAUSED, ready to fix)
 
-E2eD-7/8 and the LM F1 pins fail on the pristine tip; ready-for-human.
-T3c's seed-flag replacement attempt (reverted) is inventoried in its
-verdict as T8-adjacent evidence.
+Full triage: `.scratch/typed-model/t8-triage.md`. Both groups broke at
+ONE commit (`5218757`, the no-gates conversions lane — its
+"runtest ALL PASSED" record was a stale run). E2eD-7/8: the pins froze
+the OLD unsound dropped-store behavior; the sound conversion is
+correct — RE-DERIVE the pins. LM F1 (6): the `complement_guard_op` fix
+killed the landmark ACQUISITION probe's polarity (it must probe the
+jump's `NOT`-aware excluded-boundary row, not the complemented flag
+row) — REPAIR the probe; it is the landmark feature's only end-to-end
+acceptance test. Both groups survive the T4 model unchanged (no
+segment-universe involvement). The F1 repair is small and
+T4-independent — sequencing is the owner's call (conversion-first says
+after T4; the diagnosis is ready whenever).
 
 ## Testing Decisions
 
