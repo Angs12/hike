@@ -65,7 +65,7 @@ let run_creg () =
             Cu.max_width = 64;
           };
         ]
-      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   let stl_info = Tid.Map.singleton (Term.tid tagged) info in
   Kb.provide stl_info;
@@ -153,10 +153,10 @@ let run_creg () =
   let sub_mixed = mk_sub ~name:"c4b_regions_mixed" [ a_mixed; b_mixed; a_ctrl; b_ctrl ] in
   let info_of offsets : Cu.vsa_info =
     Cu.mk_vsa_info ~offsets ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   let convertible_of sub info dtid =
-    Sm.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info
+    Sm.regions_of_sub sub info
     |> List.filter (fun r -> List.exists (fun (t, _) -> Tid.equal t dtid) r.Cu.members)
     |> function
     | [ r ] -> Some r.Cu.convertible
@@ -178,16 +178,22 @@ let run_creg () =
               (Term.tid a_ctrl, Cu.Range (-48L, -48L));
               (Term.tid b_ctrl, Cu.Range (-44L, -44L)) ]
   in
-  check "regression C4b: a non-servable (non-singleton) member blocks every region's conversion"
-    (convertible_of sub_mixed mixed (Term.tid a_ctrl) = Some false
-    && convertible_of sub_mixed mixed (Term.tid b_ctrl) = Some false);
+  (* T4 rewrote this pin: the T3c servability rule (a non-singleton
+     member blocks every region) is DELETED — the SP Slot anchor makes
+     every sub's SP neighborhood private, so the partition is purely
+     geometric.  The Infinite-span members join NO region (they are not
+     Range tags), and the singleton members' region converts regardless. *)
+  check "regression C4b (T4): Infinite members join no region and never block the singleton members' conversion"
+    (convertible_of sub_mixed mixed (Term.tid a_ctrl) = Some true
+    && convertible_of sub_mixed mixed (Term.tid b_ctrl) = Some true
+    && convertible_of sub_mixed mixed (Term.tid a_mixed) = None);
   ()
 
 (* C4a: Infinite tag survives the overlap merge. *))
 ;
 (  let sub, def_idx_store = mk_indexed_loop ~pfx:"c4a" in
   let tagged = sub in
-  let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
+  let info = Hv.offsets_of_sub Theory.Target.unknown sp ~symtab:None ~prog:(Program.create ~subs:[ tagged ] ()) tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   check
     "regression C4a: the indexed loop-body store carries an offset tag (fixture locates the \
@@ -199,7 +205,7 @@ let run_creg () =
 ;
 (  let sub, def_idx_store = mk_indexed_loop ~pfx:"r11" in
   let tagged = sub in
-  let info = Hv.offsets_of_sub Theory.Target.unknown sp tagged in
+  let info = Hv.offsets_of_sub Theory.Target.unknown sp ~symtab:None ~prog:(Program.create ~subs:[ tagged ] ()) tagged in
   let kind_of dtid = Core.Map.find info.Cu.offsets dtid in
   (* Control: indexed member keeps its kind. *)
   check "property R11 control: the indexed member keeps its own kind through the merge"
@@ -455,7 +461,7 @@ let run_regions () =
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
       ~regions:[ r1; r2 ]
-      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
   (* The plan IS the convertible regions. *)
   check "R12-5: the plan is the convertible region set (tags alone)"
@@ -492,9 +498,9 @@ let run_regions () =
     Cu.mk_vsa_info
       ~offsets:
         [ (tid1, Cu.Range (-16L, -16L)); (tid2, Cu.Range (-32L, -32L)) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
-  let regions = Hike.Stack_model.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info in
+  let regions = Hike.Stack_model.regions_of_sub sub info in
   let conv = Base.List.filter regions ~f:(fun r -> r.Cu.convertible) in
   check "R12-8: two disjoint singleton offsets produce two convertible regions"
     (List.length conv = 2
@@ -530,9 +536,9 @@ let run_regions () =
           (tid1, Cu.Range (-32L, -16L));
           (tid2, Cu.Range (-24L, -8L));
         ]
-      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
-  let regions = Hike.Stack_model.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info in
+  let regions = Hike.Stack_model.regions_of_sub sub info in
   (* The overlap MERGE is the pin: the two spans fuse into ONE region with
      span (-32,-8).  Convertibility is now a stricter, tag-based rule
      (singleton span = proven constant offset), so a region holding
@@ -578,10 +584,10 @@ let run_regions () =
           (Term.tid d_b, Cu.Range (-32L, -32L));
           (Term.tid d_c, Cu.Range (-40L, -24L));
           (Term.tid d_d, Cu.Range (-16L, -16L));
-          (Term.tid d_e, Cu.Range (32L, 40L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+          (Term.tid d_e, Cu.Range (32L, 40L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ()
   in
   let regions =
-    Hike.Stack_model.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info
+    Hike.Stack_model.regions_of_sub sub info
   in
   let tids_of r =
     Base.List.map r.Cu.members ~f:(fun (t, _) -> Tid.name t)
@@ -606,7 +612,7 @@ let run_regions () =
     && has (32L, 40L) [ Tid.name (Term.tid d_e) ]);
   (* Determinism: the (lo, hi, tid) tie-break makes ids stable run-to-run. *)
   let regions2 =
-    Hike.Stack_model.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info
+    Hike.Stack_model.regions_of_sub sub info
   in
   let spans_in_order rs = Base.List.map rs ~f:(fun r -> r.Cu.span) in
   check "R12-9b: region ids deterministic across two runs (spans ascending in lo)"
@@ -674,13 +680,13 @@ let run_fp_gpr () =
   let info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ()
   in
   (* Regions come from the producer (split_plan is a consumer). *)
   let info =
     { info with
       Cu.regions =
-        Sm.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info
+        Sm.regions_of_sub sub info
     }
   in
   let plan = Sm.split_plan sub info in
@@ -731,12 +737,12 @@ let run_fp_gpr () =
   let info =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid def_rsp, Cu.Range (-16L, -16L)) ]
-      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty
+      ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ()
   in
   let info =
     { info with
       Cu.regions =
-        Sm.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info
+        Sm.regions_of_sub sub info
     }
   in
   let plan = Sm.split_plan sub info in
@@ -780,9 +786,9 @@ let run_fp_gpr () =
   let d_store_tid = Term.tid def_store in
   let info =
     Cu.mk_vsa_info ~offsets:[ (d_store_tid, Cu.Range (-48L, -48L)) ] ~regions:[] ~stack_plan:[]
-      ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
-  let regions = Sm.regions_of_sub sub ~sol:(Cbat_vsa.init_sol sub) info in
+  let regions = Sm.regions_of_sub sub info in
   check
     "S3 (fp-GPR, GREEN): the value-true twin — an [RBP := RSP] prologue makes RBP \
      sp-derived, so the sub's frame access CONVERTS (tags alone decide)"

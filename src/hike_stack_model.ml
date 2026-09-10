@@ -2,16 +2,15 @@
 
    THE MODEL IS THE TAG (ADR 0008): the VSA tags every frame-resident access
    with its proven offset span.  This module merges overlapping spans into
-   regions and derives each region's facts from those tags and the solution's
-   denotations alone (T3c: the escape fact is deleted — the segment universe
-   answers the storage question; see the region partition's servability
-   rule).  An oversized region joins to Frame with a diagnostic naming it —
+   regions and derives each region's facts from those tags alone (T4: the
+   denotations left with the T3c servability clause — the SP Slot anchor
+   is the privacy mechanism, so the partition is purely geometric).
+   An oversized region joins to Frame with a diagnostic naming it —
    never a gate. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
-module Vsa = Cbat_vsa
 
 (* Stack pointer only: the one register granted stack semantics by fiat
    (ADR 0008).  There is no frame-pointer fact here — fp is an ordinary
@@ -71,6 +70,14 @@ let slot_of (lo : int64) (bits : int) : var =
     (Printf.sprintf "slot_%Ld" (Int64.abs lo))
     (Type.Imm bits)
 
+(* The promoted incoming stack-slot parameter of index [i] (T4): the
+   callee's own signature fact, minted deterministically so the
+   signature and the body agree on the same var. *)
+let arg_slot (i : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (Printf.sprintf "hike_slot%d" i)
+    (Type.Imm 64)
+
 (* Region memory and base vars; the alloca's emitted name. *)
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 
@@ -92,52 +99,19 @@ let is_region_base (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_base"
 
-(* The region partition's storage-servability rule (T3c): a region
-   converts only when the sub's stack traffic is entirely region-
-   servable — every stack access a convertible singleton serves.  The
-   segment universe makes all stack memory one address space, but the
-   SP-relative lane's neighborhood is private only under the sub's own
-   anchor; an access the region lanes cannot serve (any tag but a
-   convertible singleton) with a stack-symbolic address operand keeps
-   the frame model.  Stack-reachability is DENOTATIONAL:
-   [is_stack_access] applied to the operand's value at the def — the
-   ONE predicate family, reading the solution's denotations directly.
-   There is NO escape fact and no var closure. *)
-let unservable_stack_traffic ~(sol : Vsa.vsa_sol)
-    ~(offsets : Convutils.vsa_kind Tid.Map.t) (sub : sub term) : bool =
-  Term.enum blk_t sub
-  |> Seq.exists ~f:(fun blk ->
-      let st0 = Graphlib.Std.Solution.get sol (Term.tid blk) in
-      let _, found =
-        Base.List.fold_left (Term.enum def_t blk |> Seq.to_list)
-          ~init:(st0, false)
-          ~f:(fun (st, found) d ->
-            let st_before = st in
-            let st = Vsa.denote_def d st in
-            if found then (st, true)
-            else
-              match Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d) with
-              | Some addr ->
-                let reachable =
-                  Exp.free_vars addr
-                  |> Core.Set.exists ~f:(fun v ->
-                      Vsa.Cbat_extraction.is_stack_access st_before
-                        (Bil.Var v))
-                in
-                let servable =
-                  match Core.Map.find offsets (Term.tid d) with
-                  | Some (Convutils.Range (lo, hi)) -> Int64.equal lo hi
-                  | _ -> false
-                in
-                (st, reachable && not servable)
-              | None -> (st, found))
-      in
-      found)
+(* The region partition's storage rule (T4): a region converts when
+   every member is a NEGATIVE singleton `Range` tag — the sub's own
+   proven-constant cells.  T3c's servability clause (the whole-sub
+   traffic test) is DELETED here: the SP Slot anchor (T4) makes every
+   sub's SP neighborhood private, so traffic outside the regions flows
+   through the SP-relative lane over the sub's own storage and no
+   longer forces the frame model. *)
 
 (* Merges overlapping ranges into regions; the partition decides from
-   the tags and the solution's denotations alone. *)
-let regions_of_sub ~(sol : Vsa.vsa_sol) (sub : sub term)
-    (info : Convutils.vsa_info) : Convutils.region list =
+   the tags alone (T4: the denotations left with the servability
+   clause — the SP Slot anchor is the privacy mechanism). *)
+let regions_of_sub (sub : sub term) (info : Convutils.vsa_info) :
+    Convutils.region list =
   (* The ranges ARE the tags: singleton-span Range members at negative
      offsets are this sub's own proven-constant cells. *)
   let ranges : (int64 * int64) Tid.Map.t =
@@ -205,24 +179,17 @@ let regions_of_sub ~(sol : Vsa.vsa_sol) (sub : sub term)
               ~f:(fun (l, h) (_, (lo, hi)) ->
                 (Int64.min l lo, Int64.max h hi))
       in
-      (* Storage class, from the tags + the denotations alone:
-         - every member at a NEGATIVE offset (this sub owns the cell) and a
-           SINGLETON span (the proven offset is constant) → Static;
-         - anything else (mixed ownership, a widened span) → Frame.
-         The servability rule: if ANY stack access of the sub is not
-         region-servable, no region converts — the SP-relative lane's
-         neighborhood must stay private (see the T3c verdict,
-         BLOCKED-BY-T4: the entry-block alloca anchor removes this). *)
+      (* Storage class, from the tags alone: every member at a NEGATIVE
+         offset (this sub owns the cell) and a SINGLETON span (the
+         proven offset is constant) -> Static; anything else (mixed
+         ownership, a widened span) -> Frame. *)
       let convertible =
-        if unservable_stack_traffic ~sol ~offsets:info.Convutils.offsets sub
-        then false
-        else
-          match members with
-          | [] -> false
-          | _ ->
-              Base.List.for_all members ~f:(fun (_mtid, (lo, hi)) ->
-                  Int64.compare lo 0L < 0
-                  && Int64.equal lo hi)
+        match members with
+        | [] -> false
+        | _ ->
+            Base.List.for_all members ~f:(fun (_mtid, (lo, hi)) ->
+                Int64.compare lo 0L < 0
+                && Int64.equal lo hi)
       in
       let max_width =
         Base.List.fold_left members ~init:0 ~f:(fun m (mtid, _) ->

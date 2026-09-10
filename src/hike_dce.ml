@@ -113,9 +113,9 @@ let is_intrinsic_var (v : var) : bool =
 
 (* Region mems survive iff loaded; [mem] always survives.  (T3 deleted
    the precise-lane SP erasure: the uniform materialization READS the
-   SP-derived address arithmetic — in precise subs the SP local binds
-   to [hike_stack], so those defs are defined and their liveness is the
-   plain used-based rule.) *)
+   SP-derived address arithmetic — since T4 the SP local binds to the
+   sub's own SP Slot at entry, so those defs are defined and their
+   liveness is the plain used-based rule.) *)
 let keep ?(load_roots=Var.Set.empty)
     ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
   let lhs = Def.lhs d in

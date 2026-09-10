@@ -100,8 +100,8 @@ let create_control_flow llvm_builder blk sub fr () =
   | Int -> create_interrupt llvm_builder
   | Ret -> create_return tid llvm_builder sub
   | CallIndirect ->
-      let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
-      create_indirect_call llvm_builder (Term.tid blk) call fr
+      let j = Bap.Std.Seq.hd_exn control_flow in
+      create_indirect_call llvm_builder (Term.tid blk) sub j fr
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call llvm_builder (Term.tid blk) blk sub call fr
@@ -151,8 +151,6 @@ let exit_entry llvm_builder sub () =
 let build_entry_block llvm_builder transfer_vars fr sub fn () =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
   let tid = Graphs.Tid.start in
   KB.List.iter transfer_vars ~f:(fun var ->
       let arg =
@@ -168,43 +166,23 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
       in
       !$(insert_local ctx tid var) llval)
   >>= fun () ->
-  if fr.is_precise then (
-    (* Precise subs keep [hike_stack]; the SP local binds to it — the
-       emitted entry-RSP value IS the caller-passed [hike_stack] (T3:
-       RSP-relative address arithmetic must stay defined; the BIL still
-       reads RSP for ABI-window accesses even when every local
-       converted). *)
-    let fr = { fr with stack = get_local ctx tid Convutils.hike_stack_var } in
-    (match fr.stack with
-     | Some hs -> insert_local ctx tid ctx.Convutils.sp hs
-     | None ->
-         (* No hike_stack lane (the module's entry sub): the entry RSP
-            is the REAL machine stack pointer, captured at entry.  The
-            sub's SP-relative neighborhood — untagged accesses, SP
-            values — is the real stack below this point; the region
-            allocas never consult it (their accesses' addresses are
-            rewritten to region GEPs).  SP stays DEFINED in every sub. *)
-         let fnty = Llvm.function_type (Llvm.pointer_type llvm_ctx) [||] in
-         let ss = Llvm.declare_function "llvm.stacksave" fnty llvm_module in
-         let p = Llvm.build_call fnty ss [||] "entry_sp" llvm_builder in
-         let v =
-           Llvm.build_ptrtoint p (Llvm.i64_type llvm_ctx) "entry_sp_i64"
-             llvm_builder
-         in
-         insert_local ctx tid ctx.Convutils.sp v);
-    exit_entry llvm_builder sub () >>= fun _ -> return fr
-  ) else (
-  (* SP is not an arg. *)
-  insert_local ctx tid ctx.Convutils.sp fr.anchor_i64;
-  (* [hike_stack] is the caller entry RSP. *)
-  let fr =
-    { fr with stack = get_local ctx tid Convutils.hike_stack_var }
+  (* The SP Slot (T4): every storage-carrying sub owns an entry-block
+     alloca holding its per-invocation anchor — the ptrtoint of its own
+     frame (or of its first region alloca for precise subs).  The SP
+     local binds to the slot's value: stack_0 is PRIVATE to this
+     invocation, reentrancy-safe, and NO sub takes an SP parameter.
+     The hike_stack parameter and both T3 binding arms (precise
+     SP-binds-to-param, the entry sub's llvm.stacksave) are retired.
+     SROA erases the constant cases. *)
+  let sp0 =
+    match fr.stack0 with
+    | Some v -> v
+    | None -> fr.anchor_i64 (* storage-free subs: the constant anchor *)
   in
-  (* No fp entry binding: a never-defined RBP read takes the undef + warn
-     lane (the RBX treatment) instead of a fabricated frame address. *)
-  exit_entry llvm_builder sub ()
-  >>= fun _ -> return fr
-  )
+  insert_local ctx tid ctx.Convutils.sp sp0;
+  (* The Caller-Window Parameter local (variadic/mixed subs only). *)
+  let fr = { fr with stack = get_local ctx tid Convutils.hike_window_var } in
+  exit_entry llvm_builder sub () >>= fun _ -> return fr
 
 (* Builds blocks and transfer set in one walk. *)
 let collect_sub_data ctx llvm_ctx blks fn sub =
@@ -376,8 +354,60 @@ let create_sub sub =
       in
       bind_regions regions
     in
+    (* The SP Slot (T4): the entry-block alloca holding this
+       invocation's anchor — the ptrtoint of the sub's own frame, or of
+       its first region alloca for precise subs. *)
+    let anchor_val, sp_slot =
+      match frame, regions with
+      | Some _, _ -> (anchor_i64, true)
+      | None, (_, base) :: _ ->
+          let v =
+            Llvm.build_ptrtoint base (Llvm.i64_type llvm_ctx) "anchor_i64"
+              llvm_builder
+          in
+          (v, true)
+      | None, [] -> (anchor_i64, false)
+    in
+    let stack0 =
+      if sp_slot then begin
+        let slot =
+          Llvm.build_alloca (Llvm.i64_type llvm_ctx) "sp_slot" llvm_builder
+        in
+        ignore (Llvm.build_store anchor_val slot llvm_builder);
+        Some (Llvm.build_load (Llvm.i64_type llvm_ctx) slot "stack_0" llvm_builder)
+      end
+      else None
+    in
+    (* The outgoing slot stores' data exps, per call block (T4): the
+       site's proven outgoing stores become the promoted call's slot
+       arguments; the stores themselves remain in the caller's frame
+       memory. *)
+    let def_term_of =
+      Term.enum blk_t sub
+      |> Base.Sequence.to_list
+      |> Base.List.concat_map ~f:(fun blk ->
+          Term.enum def_t blk |> Base.Sequence.to_list)
+      |> Base.List.fold ~init:Tid.Map.empty ~f:(fun m d ->
+          Core.Map.set m ~key:(Term.tid d) ~data:d)
+    in
+    let outgoing =
+      Core.Map.fold sub_info.Convutils.prom_sites ~init:Tid.Map.empty
+        ~f:(fun ~key:btid ~data:site acc ->
+          let slots =
+            Base.List.filter_map site.Convutils.site_slots
+              ~f:(fun (i, dtid) ->
+                match Core.Map.find def_term_of dtid with
+                | Some d -> (
+                    match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
+                    | Some (data, _) -> Some (i, data)
+                    | None -> None)
+                | None -> None)
+          in
+          Core.Map.set acc ~key:btid ~data:slots)
+    in
     let fr : sub_frame =
-      { frame; anchor_idx; anchor_i64; stack = None; regions; is_precise }
+      { frame; anchor_idx; anchor_i64; stack = None; stack0; regions;
+        is_precise; outgoing; resolved = sub_info.Convutils.prom_resolved }
     in
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= build_entry_block llvm_builder transfer_vars fr sub fn
@@ -514,26 +544,25 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
      in
       (rets, args)
    else
-       (* Subs with incoming stack args take [hike_stack]. The VSA verdict
-         is the SOLE origin (review #2 grill): the hand-rolled BIL walk
-         that used to OR a second opinion here is deleted — two
-         mechanisms that can disagree are worse than one, and absent
-         info already defaults to false. *)
-       (* The producer's [Caller] tags ARE the verdict (T3's lane split —
-         the emitter never tests tag signs). *)
-       let has_positive =
-         Core.Map.exists (Hike_kb.info_of_sub (Term.tid sub)).Convutils.offsets
-           ~f:(fun kind ->
-             match kind with
-             | Convutils.Caller _ | Convutils.Mixed _ -> true
-             | _ -> false)
-       in
+       (* T4: the signature is the callee's own promoted interface. The
+         producer's record is the SOLE origin: proven incoming slots
+         become positional parameters ([hike_slotN], width 64 — the
+         SysV slot width; narrower reads truncate); the Caller-Window
+         Parameter survives only for variadic/mixed subs (the unproven
+         remainder, renamed from hike_stack — it is the caller-window
+         base, not SP). *)
+       let info = Hike_kb.info_of_sub (Term.tid sub) in
        let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
-       let hike_stack_arg =
-         if has_positive && not is_main then
-           [ Arg.create ~intent:In Convutils.hike_stack_var
-               (Var Convutils.hike_stack_var) ]
+       let window_arg =
+         if info.Convutils.prom_window && not is_main then
+           [ Arg.create ~intent:In Convutils.hike_window_var
+               (Var Convutils.hike_window_var) ]
          else []
+       in
+       let slot_args =
+         Base.List.init info.Convutils.prom_arity ~f:(fun i ->
+             let v = Hike_stack_model.arg_slot i in
+             Arg.create ~intent:In v (Var v))
        in
        let args =
          let rank_of_var (v : var) : int * string =
@@ -566,7 +595,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              | 0 -> String.compare na nb
              | c -> c)
          |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-         |> fun regs -> regs @ hike_stack_arg
+         |> fun regs -> regs @ slot_args @ window_arg
        in
       (* PLT stubs take the full param list. Signature-shape rule (args = []
          + any call): distinct from the emitter's BIL-shape rule
@@ -622,8 +651,58 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     |> Base.Sequence.to_list
     |> Base.List.map ~f:(fun sub -> (sub, compute_sub_sig target ~abi sub))
   in
+  (* The synthetic indirect-call signature gains the Caller-Window
+     Parameter (T4): every pointer call passes the caller's SP at the
+     call, so the Thunk of a promoted target can unpack the window. *)
+  let icall_tid = Tid.for_name "indirect_call" in
+  let conv = Abi.of_target target in
+  let icall_sig =
+    ( Base.List.map conv.return_regs ~f:(fun reg ->
+          Arg.create ~intent:Out reg (Var reg)),
+      Base.List.map (conv.int_param_regs @ conv.vector_param_regs)
+        ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+      @ [
+          Arg.create ~intent:In Convutils.hike_window_var
+            (Var Convutils.hike_window_var);
+        ] )
+  in
+  (* The Thunks' signatures: the legacy memory-path convention (the
+     register lanes plus the window base) — registered so the
+     unprovable-direct-site path can call the twin wholesale. *)
+  let twin_sig_of (sub, (rets, args)) =
+    let sub_tid = Term.tid sub in
+    let info = Hike_kb.info_of_sub sub_tid in
+    if info.Convutils.prom_arity > 0
+       && not (String.equal (Tid.name sub_tid) "@main")
+    then Some (Bil2llvm_calls.thunk_tid_of sub_tid, (rets, args))
+    else None
+  in
+  let twin_sigs = Base.List.filter_map sigs ~f:twin_sig_of in
+  let window_args_of (rets, args) =
+    let reg_args =
+      Base.List.filter args ~f:(fun a ->
+          let n = Var.name (Arg.lhs a) in
+          (not (Base.String.is_prefix n ~prefix:"hike_slot"))
+          && not (Var.same (Arg.lhs a) Convutils.hike_window_var))
+    in
+    ( rets,
+      reg_args
+      @ [
+          Arg.create ~intent:In Convutils.hike_window_var
+            (Var Convutils.hike_window_var);
+        ] )
+  in
+  let twin_sigs =
+    Base.List.map twin_sigs ~f:(fun (tid, s) -> (tid, window_args_of s))
+  in
   let subs =
-    Base.List.fold sigs ~init:ctx.Convutils.subs
+    Base.List.fold twin_sigs
+      ~init:
+        (Core.Map.add_exn ctx.Convutils.subs ~key:icall_tid ~data:icall_sig)
+      ~f:(fun acc (tid, (rets, args)) -> add_sub_sig acc tid ~rets ~args)
+  in
+  let subs =
+    Base.List.fold sigs ~init:subs
       ~f:(fun acc (sub, (rets, args)) ->
           add_sub_sig acc (Term.tid sub) ~rets ~args)
   in
@@ -640,6 +719,14 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                     (native_fp_op (Tid.name (Term.tid sub)))
                 then create_fun (Term.tid sub) ~rets ~args
                 else KB.return ())))))
+  end;
+  Toplevel.exec begin
+    KB.Context.with_var emit_ctx_var ctx (fun () ->
+      KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
+        KB.Context.with_var llvm_module_var llvm_module (fun () ->
+          KB.Context.with_var section_list_var sections (fun () ->
+            KB.List.iter sigs ~f:(fun (sub, _) ->
+                Bil2llvm_calls.create_thunk (Term.tid sub))))))
   end;
   Toplevel.exec begin
     KB.Context.with_var emit_ctx_var ctx (fun () ->

@@ -121,11 +121,10 @@ let mem_access_at_ptr llvm_builder blk_tid ptr exp =
       emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
   | None -> create_exp llvm_builder blk_tid exp
 
-(* The caller-window materialization (D1's ONE form, no select):
-   ptr = hike_stack + (word − stack_0) — stack_0 is the emitted
-   entry-RSP value (anchor_i64 for frame subs, the hike_stack parameter
-   itself for precise subs), so the runtime difference is the exact
-   ABI-visible offset however wide the tag. *)
+(* The caller-window materialization (the Caller-Window Parameter lane,
+   T4's residual): ptr = window + (word − stack_0) — stack_0 is the
+   sub's own per-invocation anchor (the SP Slot value), so the runtime
+   difference is the exact ABI-visible offset however wide the tag. *)
 let caller_mem_access llvm_builder blk_tid fr addr exp =
   let open KB in
   match fr.stack with
@@ -133,18 +132,14 @@ let caller_mem_access llvm_builder blk_tid fr addr exp =
     let* addr_v = create_exp llvm_builder blk_tid addr in
     let* llvm_ctx = Context.get llvm_ctx_var in
     let stack0 =
-      (* Precise subs bind the SP local to hike_stack: that IS their
-         emitted entry-RSP value (their anchor_i64 is the unused 0). *)
-      match fr.is_precise with
-      | true -> stack
-      | false -> fr.anchor_i64 in
+      match fr.stack0 with Some v -> v | None -> fr.anchor_i64 in
     let offset = Llvm.build_sub addr_v stack0 "caller_off" llvm_builder in
     let base = Llvm.build_add stack offset "caller_addr" llvm_builder in
     let ptr =
       Llvm.build_inttoptr base (Llvm.pointer_type llvm_ctx) "" llvm_builder in
     mem_access_at_ptr llvm_builder blk_tid ptr exp
   | None ->
-      (* No hike_stack lane (main): the raw address is the real one. *)
+      (* No window lane (@main): the raw address is the real one. *)
       create_exp llvm_builder blk_tid exp
 
 (* The mixed-class materialization — the COMPLETE rule for a span that
@@ -152,7 +147,7 @@ let caller_mem_access llvm_builder blk_tid fr addr exp =
    reg-save area OR the overflow area, an ITE'd address, a widened hull
    crossing the entry RSP): the runtime word chooses the base.  A
    word at/above the emitted entry RSP is caller-window traffic
-   (hike_stack + (word − stack_0)); below it, the word is an anchor-
+   (window + (word − stack_0)); below it, the word is an anchor-
    linear frame address (inttoptr of it IS the frame cell — the
    ptrtoint round-trip).  This is not a conservative select: the class
    is genuinely either-based and BOTH arms are exact. *)
@@ -163,9 +158,7 @@ let mixed_mem_access llvm_builder blk_tid fr addr exp =
     let* addr_v = create_exp llvm_builder blk_tid addr in
     let* llvm_ctx = Context.get llvm_ctx_var in
     let stack0 =
-      match fr.is_precise with
-      | true -> stack
-      | false -> fr.anchor_i64 in
+      match fr.stack0 with Some v -> v | None -> fr.anchor_i64 in
     let offset = Llvm.build_sub addr_v stack0 "mixed_off" llvm_builder in
     let zero = Llvm.const_int (Llvm.i64_type llvm_ctx) 0 in
     let is_caller =
@@ -178,7 +171,7 @@ let mixed_mem_access llvm_builder blk_tid fr addr exp =
       Llvm.build_inttoptr base (Llvm.pointer_type llvm_ctx) "" llvm_builder in
     mem_access_at_ptr llvm_builder blk_tid ptr exp
   | None ->
-      (* No hike_stack lane (main): the raw address is the real one. *)
+      (* No window lane (@main): the raw address is the real one. *)
       create_exp llvm_builder blk_tid exp
 
 (* Emits runtime-sized allocas. *)
@@ -211,10 +204,11 @@ let region_of_offset (regions : (Convutils.region * Llvm.llvalue) list)
      own frame): the ONE uniform rule — the address integer flows
      through create_exp into create_addr_ptr's licensed arm,
      ptr = frame + (word − stack_0) + anchor_idx, total over all signs
-     and widths (the emitted entry-RSP value IS stack_0, so the runtime
-     index is exact however imprecise the tag).
-   - Caller (spans entirely at/above the entry RSP — the producer's
-     ABI-visible window split): the hike_stack form, one base.
+     and widths (the SP Slot value IS stack_0, so the runtime index is
+     exact however imprecise the tag).
+   - Caller: a proven slot read becomes its promoted parameter; the
+     retaddr cell reads undef (it dies with the real ret); the rest is
+     the window form over the Caller-Window Parameter (T4).
    - Mixed (two-sided/wrapped spans): the two-base rule — the runtime
      word chooses (the recorded deviation from the ticket's no-select
      letter; no single-base rule is sound for the class).
@@ -230,10 +224,28 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       (* The uniform materialization rule. *)
       create_exp llvm_builder blk_tid exp
   | Some (Convutils.Caller _) ->
-      (match find_mem_node (Def.rhs def) with
-      | Some node ->
-          caller_mem_access llvm_builder blk_tid fr (mem_node_addr node) exp
-      | None -> create_exp llvm_builder blk_tid exp)
+      let dtid = Term.tid def in
+      (match Core.Map.find sub_info.Convutils.prom_slots dtid with
+       | Some i ->
+           (* A proven incoming slot reads its promoted parameter (T4). *)
+           (match get_local ctx blk_tid (Hike_stack_model.arg_slot i) with
+            | Some v -> KB.return v
+            | None ->
+                failwith
+                  "mem_access: promoted slot parameter is not bound (the \
+                   signature and the body disagree)")
+       | None ->
+           if Core.Set.mem sub_info.Convutils.prom_retaddr dtid then
+             (* The return-address cell dies with the real LLVM ret; its
+                read never forces a window parameter (T4 point 8). *)
+             let* llvm_ctx = Context.get llvm_ctx_var in
+             KB.return @@ Llvm.undef (Llvm.i64_type llvm_ctx)
+           else
+             (match find_mem_node (Def.rhs def) with
+              | Some node ->
+                  caller_mem_access llvm_builder blk_tid fr (mem_node_addr node)
+                    exp
+              | None -> create_exp llvm_builder blk_tid exp))
   | Some (Convutils.Mixed _) ->
       (match find_mem_node (Def.rhs def) with
       | Some node ->

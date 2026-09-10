@@ -26,7 +26,7 @@ let () =
 
     (* Production single call: the total the pass pays per sub. *)
     let t0 = Unix.gettimeofday () in
-    let _info = Hike.Vsa.offsets_of_sub target sp sub in
+    let _info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
     let t_total = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE producer(offsets_of_sub)  %8.3fs   (whole producer: fixpoint+walk+merge+regions+split_plan — what the pass pays)\n"
       t_total;

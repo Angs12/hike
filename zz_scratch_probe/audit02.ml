@@ -25,7 +25,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
   (* PROD verdict for cross-checking the replica. *)
-  let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp sub in
+  let info = Hike.Vsa.offsets_of_sub Theory.Target.unknown sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
   let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
   Core.Map.iteri info.offsets ~f:(fun ~key:tid ~data:k ->
       match k with

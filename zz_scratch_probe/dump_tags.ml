@@ -20,7 +20,7 @@ let () =
       | Some s -> s
       | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] — %s not found" name)
     in
-    let info = Hike.Vsa.offsets_of_sub target sp sub in
+    let info = Hike.Vsa.offsets_of_sub target sp ~symtab:None ~prog:(Program.create ~subs:[ sub ] ()) sub in
     let kind_of = info.Hike.Convutils.offsets in
     (* Region id whose span holds the def's tag; "-" when in no region. *)
     let region_of =

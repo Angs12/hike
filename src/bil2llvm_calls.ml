@@ -43,23 +43,51 @@ let create_call_args blk_tid llvm_builder call_tid fr =
   let extern = is_extern ctx call_tid in
   KB.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
-      if Var.same (Arg.lhs arg) Convutils.hike_stack_var then
-        (* Threads [hike_stack] to callees. *)
-        let first, second =
-          if fr.is_precise then Convutils.hike_stack_var, ctx.Convutils.sp
-          else ctx.Convutils.sp, Convutils.hike_stack_var
+      if Var.same (Arg.lhs arg) Convutils.hike_window_var then
+        (* The caller-window base is the caller's SP at the call: the
+           outgoing stores land at SP-relative addresses, so the
+           callee's slot k sits at window + k (T4). *)
+        (match get_local ctx blk_tid ctx.Convutils.sp with
+         | Some v -> return v
+         | None ->
+             let* llvm_ctx = Context.get llvm_ctx_var in
+             return @@ Llvm.undef (Llvm.i64_type llvm_ctx))
+      else if
+        Base.String.is_prefix (Var.name (Arg.lhs arg)) ~prefix:"hike_slot"
+      then
+        (* A promoted slot argument: the site's proven outgoing store,
+           else undef — a site storing fewer slots leaves the rest
+           unpassed (reading an unpassed arg is UB in the binary too). *)
+        let name = Var.name (Arg.lhs arg) in
+        let i =
+          int_of_string @@ String.sub name 9 (String.length name - 9)
         in
-        let v_opt =
-          match get_local ctx blk_tid first with
-          | Some _ as v -> v
-          | None -> get_local ctx blk_tid second
+        let stored =
+          match Core.Map.find fr.outgoing blk_tid with
+          | Some slots -> Base.List.Assoc.find ~equal:Int.equal slots i
+          | None -> None
         in
-        match v_opt with
-        | Some v -> return v
-        | None ->
-            let* llvm_ctx = Context.get llvm_ctx_var in
-            (* Missing [hike_stack] lanes yield undef. *)
-            return @@ Llvm.undef (Llvm.i64_type llvm_ctx)
+        (match stored with
+         | Some data_exp ->
+             let* v = create_exp llvm_builder blk_tid data_exp in
+             let ty = Llvm.type_of v in
+             let v =
+               match Llvm.classify_type ty with
+               | Llvm.TypeKind.Integer ->
+                   let bits = Llvm.integer_bitwidth ty in
+                   if bits = 64 then v
+                   else if bits > 64 then
+                     Llvm.build_trunc v (Llvm.i64_type llvm_ctx) ""
+                       llvm_builder
+                   else
+                     Llvm.build_zext v (Llvm.i64_type llvm_ctx) ""
+                       llvm_builder
+               | _ -> v
+             in
+             return v
+         | None ->
+             let* llvm_ctx = Context.get llvm_ctx_var in
+             return @@ Llvm.undef (Llvm.i64_type llvm_ctx))
       else if extern && is_fp_param (Arg.lhs arg) then
         (* Lowers YMM args to doubles for externs. *)
         let* v = create_exp llvm_builder blk_tid exp in
@@ -272,30 +300,6 @@ let finish_call llvm_builder ctx fallthrough =
       ignore (Llvm.build_unreachable llvm_builder);
       return ()
 
-let create_indirect_call llvm_builder blk_tid call fr =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  let icall_tid = Tid.for_name "indirect_call" in
-  let target = Call.target call |> label_exp in
-  let fallthrough =
-    Call.return call
-    |> Base.Option.value_exn ~message:"Create call: expected call got return"
-    |> label_tid
-  in
-  let* target_exp = create_exp llvm_builder blk_tid target in
-  let* func_ptr = Bil2llvm_section.create_addr_ptr llvm_builder target_exp in
-  let* fn, fn_typ = get_func icall_tid in
-  let rets = get_rets ctx icall_tid in
-  let* args =
-    create_call_args blk_tid llvm_builder icall_tid fr
-  in
-  let ret_struct =
-    Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
-  in
-  bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct;
-  let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
-  finish_call llvm_builder ctx (Some fallthrough)
-
 let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
     fallthrough target fr =
   let open KB in
@@ -366,6 +370,148 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
   | None ->
       if emit_unreachable then finish_call llvm_builder ctx None
       else return ())
+
+(* The Resolved Call Site class and the pointer-call class (T4): the
+   VSA's singleton resolution calls the promoted body directly; every
+   other site takes the pointer call through the synthetic indirect
+   signature (which carries the caller-window base). *)
+let create_indirect_call llvm_builder blk_tid sub (j : jmp term) fr =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  let icall_tid = Tid.for_name "indirect_call" in
+  let call = call_exn j in
+  let target = Call.target call |> label_exp in
+  let fallthrough =
+    Call.return call
+    |> Base.Option.value_exn ~message:"Create call: expected call got return"
+    |> label_tid
+  in
+  match Core.Map.find fr.resolved (Term.tid j) with
+  | Some (Some target_tid) ->
+      (* A Resolved Call Site (T4): the target is provably a singleton
+         lifted sub — the direct call goes through its promoted
+         signature. *)
+      create_func_call llvm_builder blk_tid sub (Some fallthrough) target_tid fr
+  | _ ->
+      (* The pointer call: bounded multi-target sets, foreign
+         addresses, and unresolvable targets.  The pointer lands in
+         the Thunk of a promoted target (address rendering), or in the
+         target's existing memory convention. *)
+      let* target_exp = create_exp llvm_builder blk_tid target in
+      let* func_ptr = Bil2llvm_section.create_addr_ptr llvm_builder target_exp in
+      let* fn, fn_typ = get_func icall_tid in
+      let rets = get_rets ctx icall_tid in
+      let* args =
+        create_call_args blk_tid llvm_builder icall_tid fr
+      in
+      let ret_struct =
+        Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
+      in
+      bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct;
+      let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
+      finish_call llvm_builder ctx (Some fallthrough)
+
+(* ------------------------------------------------------------------ *)
+(* T4: the Thunk — the memory-convention twin of a promoted sub.       *)
+(* ------------------------------------------------------------------ *)
+
+(* The twin's LLVM name and its synthetic tid. *)
+let thunk_name_of (sub_tid : tid) : string =
+  sanitize_name (Tid.name sub_tid) ^ "_hike_thunk"
+
+let thunk_tid_of (sub_tid : tid) : tid =
+  Tid.for_name (Tid.name sub_tid ^ ":thunk")
+
+(* A slot's offset in the caller window (SysV: [entry_rsp + 8 + 8*i]). *)
+let slot_offset (i : int) : Int64.t = Int64.of_int (8 + (8 * i))
+
+(* Emits the memory-convention twin of one promoted sub: it unpacks
+   the window memory into the promoted body's slot parameters and
+   forwards the register lanes.  INTERNAL linkage — the consumer's
+   optimizer sees through it (inlines it into callers, devirtualizes
+   provable pointers), so the twin costs nothing where the site
+   resolves anyway.  Function-pointer data renders to the twin, so
+   unresolvable sites stay sound.  No target ever demotes. *)
+let create_thunk (sub_tid : tid) =
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* llvm_module = Context.get llvm_module_var in
+  let info = Hike_kb.info_of_sub sub_tid in
+  let arity = info.Convutils.prom_arity in
+  if arity = 0 || String.equal (Tid.name sub_tid) "@main" then
+    KB.return ()
+  else
+    if Core.Map.mem !(ctx.Convutils.ll_funcs) (thunk_tid_of sub_tid) then
+      KB.return ()
+    else begin
+      let args = get_args ctx sub_tid in
+      let rets = get_rets ctx sub_tid in
+        (* The legacy memory-path signature: the register lanes plus
+           the caller-window base. *)
+        let reg_args =
+          Base.List.filter args ~f:(fun a ->
+              let n = Var.name (Arg.lhs a) in
+              (not (Base.String.is_prefix n ~prefix:"hike_slot"))
+              && not (Var.same (Arg.lhs a) Convutils.hike_window_var))
+        in
+        let window_arg =
+          Arg.create ~intent:In Convutils.hike_window_var
+            (Var Convutils.hike_window_var)
+        in
+        let twin_args = reg_args @ [ window_arg ] in
+        let* ret_typ = ret_type_of_rets rets in
+        let* arg_typs =
+          KB.List.map twin_args ~f:(fun a ->
+              if Var.same (Arg.lhs a) Convutils.hike_window_var then
+                KB.return @@ Llvm.i64_type llvm_ctx
+              else var_lltype (Arg.lhs a))
+        in
+        let fn_typ =
+          Llvm.function_type ret_typ (Array.of_list arg_typs)
+        in
+        let fn =
+          Llvm.define_function (thunk_name_of sub_tid) fn_typ llvm_module
+        in
+        Llvm.set_linkage Llvm.Linkage.Internal fn;
+        Base.List.iteri twin_args ~f:(fun i a ->
+            Llvm.set_value_name (Var.name (Arg.lhs a)) (Llvm.param fn i));
+        register_fn ctx (thunk_tid_of sub_tid) fn fn_typ;
+        (* The twin's body: unpack the window, forward, return. *)
+        let builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
+        let window = Llvm.param fn (Base.List.length reg_args) in
+        let slot_vals =
+          Base.List.init arity ~f:(fun i ->
+              let addr =
+                Llvm.build_add window
+                  (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+                     (slot_offset i) false)
+                  "" builder
+              in
+              let ptr =
+                Llvm.build_inttoptr addr (Llvm.pointer_type llvm_ctx) ""
+                  builder
+              in
+              Llvm.build_load (Llvm.i64_type llvm_ctx) ptr "" builder)
+        in
+        let call_args =
+          Base.List.init (Base.List.length reg_args) ~f:(Llvm.param fn)
+          |> fun regs -> regs @ slot_vals
+        in
+        let* callee_fn, callee_typ = get_func sub_tid in
+        let r =
+          Llvm.build_call callee_typ callee_fn
+            (Array.of_list call_args) "" builder
+        in
+        (match rets with
+         | [] -> ignore (Llvm.build_ret_void builder)
+         | _ -> ignore (Llvm.build_ret r builder));
+        (* Function-address rendering produces the twin (keyed by the
+           sub's LLVM name). *)
+        ctx.Convutils.thunks :=
+          (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.Convutils.thunks);
+        KB.return ()
+    end
 
 let create_return blk_tid llvm_builder cur_sub =
   let open KB in

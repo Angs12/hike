@@ -95,7 +95,7 @@ let () =
                       ~dynamic_alloc:(fun _ -> false)
                       ~alloc_tids:(Vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
                       ~sol sub)
-          ~degraded:false ~vla_alloc_tids:Tid.Set.empty
+          ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
           ~regions:[] ~stack_plan:[]
       in
       (* Tagged defs whose tag is a suspicious singleton. *)
@@ -115,7 +115,7 @@ let () =
         |> Seq.fold ~init:(Core.Map.empty (module Tid)) ~f:(fun m d ->
             Core.Map.set m ~key:(Term.tid d) ~data:(Def.rhs d))
       in
-      let rs = Hike.Stack_model.regions_of_sub sub ~sol info0 in
+      let rs = Hike.Stack_model.regions_of_sub sub info0 in
       Base.List.iter rs ~f:(fun r ->
           Printf.printf "region r%d span=(%Ld,%Ld) convertible=%b members=%d\n"
             r.Hike.Convutils.id (fst r.Hike.Convutils.span) (snd r.Hike.Convutils.span)

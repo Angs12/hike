@@ -191,10 +191,14 @@ let () =
            let acc =
              Term.enum sub_t (Project.program proj)
              |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-                 (* Computes tags and plan on the pre-rewrite sub. *)
+                 (* Computes tags, plan, and promotion facts on the
+                    pre-rewrite sub. *)
                  let info =
                    Hike_vsa.offsets_of_sub (Project.target proj)
-                     (sp (Project.target proj)) sub
+                     (sp (Project.target proj))
+                     ~symtab:(Some (Project.symbols proj))
+                     ~prog:(Project.program proj)
+                     sub
                  in
 #ifdef VSA_DEBUG
                  Printf.eprintf "hike: vsa: %s -> %d tag(s)\n"
