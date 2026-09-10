@@ -408,8 +408,8 @@ let run () =
   let tags = extract_anchored sub in
   check "F1-1: the symbolic arm — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
     (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
-  check "F1-2: the plain arm — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
-    (Core.Map.find tags (Term.tid def_use) = None);
+  check "F1-2: the plain arm — the use store at [rdi + 8] (rdi joins the TOP cell value) seeds Unbounded (a TOP address may name this frame; T4b)"
+    (Core.Map.find tags (Term.tid def_use) = Some Cu.Unbounded);
   ())
 (* Degenerate cast/extract sizes degrade to top; shift guards compare magnitudes. *)
 ;
