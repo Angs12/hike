@@ -32,17 +32,22 @@ EVERYTHING. And everything the removals orphaned is cleaned NOW.
     test for WHERE the address exp lives), the predicate's own
     arithmetic (relativize, `in_stack_segment`'s degraded arm).
 
-## The rule that replaces the closure
+## The rule that replaces the closure — STRENGTHENED (owner, 2026-09-10)
 
-The escape question goes denotational: a call's pointer-argument
-register ESCAPES iff, in the call block's abstract state, the
-register's DENOTATION is a stack-symbolic set (`is_stack_access`'s
-`in_stack_segment` on the denoted value — the same predicate family,
-applied to values). No var-closure, no syntactic derivation, no
-written-in-block heuristics where a denotation suffices. Whatever
-`frame_escapes` feeds (the record's escape fact → split_plan/the
-model's frame decisions) consumes the new fact with the same shape —
-the model stays a consumer of producer facts.
+The escape QUESTION dies entirely (owner: "using the stack_base means
+we can move completely away from escape — the denotation transfers
+everything to the actual stack accesses"). `frame_escapes`,
+`frame_escaped`, and the escape FACT are deleted, not rebuilt
+denotationally:
+- `regions_of_sub`'s escape veto → the region partition decides from
+  the tags/denotations alone (the unified segment universe makes all
+  stack memory one address space — the veto approximated a question
+  the address space answers exactly; the precision movement is
+  measured and itemized in the verdict).
+- the call-abstraction frame-keeping → consumes the address-range
+  answer from the denotations at the call site.
+- a consumer the denotations genuinely cannot serve = a flagged
+  blocked-by item, never a rebuilt fact.
 
 ## Cleanup (the second directive)
 
