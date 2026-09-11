@@ -38,6 +38,19 @@ module Dce : sig
     target:Theory.Target.t -> sub term -> sub term
 end
 
+(** The jump compiler (T13, construction): jcc flag idioms become value
+    comparisons. *)
+module Jump : sig
+  (** Rewrites jcc flag idioms into the simplest equivalent value
+      comparisons; identity on the residual. *)
+  val compile_sub : sub term -> sub term
+  val compile_program : program term -> program term
+
+  (** The jcc family of a cond ("je", ..., "jbe"), or [None] for a
+      non-idiom cond (the census probe's label). *)
+  val family_of_cond : exp -> string option
+end
+
 (** Stack split decision and helpers.  Also the home of the Vsa record
     (S10b): the producer/emitter contract point — the producer builds
     it, the KB stores it, the model and the emitter consume it. *)
