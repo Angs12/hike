@@ -54,15 +54,19 @@ just move code!") The rewrite rules, in priority order:
   partial-flag effects) keeps the current path — the identity, not a
   refusal. The pass DELETES the idioms it compiles; the case-count
   delta is the acceptance's first row.
-- The VSA's guard layer SHRINKS to the comparison core: the decoder's
-  flag-idiom rows, the complement table's flag arms, and the
-  acquisition probe's flag-idiom handling are deleted (the T8-repaired
-  polarity rule simplifies to the comparison-level truth it always
-  pointed at). What remains: comparison constraints + the landmark
-  machinery (unchanged semantics, cleaner input).
-- The emitter: branches emit `icmp` + `br` on the comparison directly —
-  the consumer's optimizer sees native comparisons (the
-  optimizability prize); the flag defs no longer exist to translate.
+- **THE VSA'S JCC MECHANISM STAYS (owner correction, 2026-09-11):**
+  it is the identity path for the RESIDUAL — the non-compiled idioms
+  (the 1/363 memory-operand class), cross-block flags, and corpus
+  growth. No decoder rows are deleted at wire-up; whether any row
+  becomes measured-dead later is a separate inventory question.
+- **PRECISION-NEUTRAL WIRE-UP (the acceptance):** the F1 landmark
+  pins stay green, the convergence table line-identical (any moved
+  row is inventoried), the pin unchanged, strict gates green — the
+  compiled comparisons must give the VSA exactly the constraint power
+  the decoded idioms did.
+- The emitter: compiled branches flow the EXISTING comparison path —
+  no flag defs to translate (the optimizability prize: measure the
+  post-opt instruction counts on branch-heavy sources).
 
 ## The measured class
 
