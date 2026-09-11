@@ -254,6 +254,15 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
 
 Tags are Tid-keyed and computed before emission; pass deps must stay prefixed (`hike-...`).
 
+9. **COMMENT STYLE (owner directive, 2026-09-11 — important).** Write
+   small and concise comments that explain the code — what it does and
+   the invariant it maintains — NOT the previous bug the code had.
+   Comments must be readable: no bug-history narratives, no
+   ticket-forensics retellings, no "this used to be wrong before"
+   stories. The history lives in the lane records and verdicts; the
+   comment states the invariant and moves on. A comment longer than a
+   few lines is a design doc — move it there.
+
 ## The stack model (the endgame — user directive, 2026-08-16)
 
 The EMISSION target for every stack access is a REAL LLVM alloca (or a static
