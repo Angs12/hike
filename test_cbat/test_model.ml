@@ -228,4 +228,107 @@ let run_producer_record () =
      = Some (Sm.Range (-16L, -16L)));
   ()
 
-let run () = run_producer_record ()
+(* ------------------------------------------------------------------ *)
+(* Lane B: the frame geometry ([layout_of_sub] -> [frame_dims]) and    *)
+(* the split-plan cap.  T14's contract: only a StackOff proof sizes    *)
+(* the frame; absurd spans degrade to the bounded 64K arm with a       *)
+(* named diagnostic; the no-tags walk sizes from the SP decrement.     *)
+(* ------------------------------------------------------------------ *)
+
+let info_of ~(offsets : (tid * Sm.vsa_kind) list)
+    ?(sp_extents : (int64 * int64) list = [])
+    ?(regions : Sm.region list = []) ?(plan : Sm.split_plan = [])
+    ?(degraded = false) () : Sm.vsa_info =
+  Sm.mk_vsa_info ~offsets ~sp_extents ~regions ~stack_plan:plan
+    ~degraded ~vla_alloc_tids:Tid.Set.empty ()
+
+let run_layout () =
+  let abi = Hike.Abi.x86_64_sysv in
+  let layout_of info =
+    let sub = straight_sub "pr_layout" [] in
+    Sm.layout_of_sub sub ~abi info
+  in
+  (* B1: the precise arm — the plan's regions are the layout, no frame. *)
+  let region : Sm.region =
+    { id = 0; span = (-24L, -16L); members = []; convertible = true; max_width = 64 }
+  in
+  let b1 = layout_of (info_of ~offsets:[] ~regions:[ region ] ~plan:[ region ] ()) in
+  check "PR-B1: the precise sub carries its region geometry and no fallback frame"
+    (b1.frame_bytes = None
+    && b1.regions = [ (0, (-24L, -16L), Sm.region_bytes region) ]);
+  (* B2: the storage-free arm — no tags, not degraded: no stack storage. *)
+  let b2 = layout_of (info_of ~offsets:[] ()) in
+  check "PR-B2: a tag-free non-degraded sub owns no stack storage"
+    (b2.frame_bytes = None && b2.regions = []);
+  (* B3: the tags arm — extents size the frame: Range(-32,-8) ->
+     need = max(8-(-32), 25) = 40 -> align16 = 48. *)
+  let d_b3 = Tid.create () in
+  let b3 =
+    layout_of (info_of ~offsets:[ (d_b3, Sm.Range (-32L, -8L)) ] ())
+  in
+  check "PR-B3: the tagged frame sizes to the extent span (Range(-32,-8) -> 48 bytes)"
+    (b3.frame_bytes = Some 48L && b3.regions = []);
+  (* B4: the unbounded arm — Unbounded widens to the 64K window:
+     max_hi -> 65536, need = 65537 -> align16 = 65552. *)
+  let d_b4 = Tid.create () in
+  let b4 = layout_of (info_of ~offsets:[ (d_b4, Sm.Unbounded) ] ()) in
+  check "PR-B4: an Unbounded tag takes the bounded 64K arm (65552 bytes)"
+    (b4.frame_bytes = Some 65552L);
+  (* B5: the absurd-extent rule (T14, the spill_many class): a span
+     >= 2^31 (here the [2^61, 2^62) band hull) never sizes the frame —
+     it degrades to the bounded arm and names itself on the channel. *)
+  let d_b5 = Tid.create () in
+  let absurd_span = (0x2000000000000000L, 0x4000000000000000L) in
+  let b5_err =
+    capture_stderr (fun () ->
+        ignore (layout_of (info_of ~offsets:[ (d_b5, Sm.Range (fst absurd_span, snd absurd_span)) ] ())))
+  in
+  let b5 = layout_of (info_of ~offsets:[ (d_b5, Sm.Range (fst absurd_span, snd absurd_span)) ] ()) in
+  check "PR-B5: the absurd extent warns through the Hike_diag channel"
+    (contains_substring b5_err "hike: frame:"
+    && contains_substring b5_err "absurd");
+  check "PR-B5: the absurd span takes the bounded arm, never a multi-exabyte frame"
+    (b5.frame_bytes = Some 65552L);
+  (* B5b: the wrapped pair reads absurd too (overflow-safe). *)
+  let b5b_err =
+    capture_stderr (fun () ->
+        ignore (layout_of
+                  (info_of ~offsets:[] ~sp_extents:[ (Int64.max_int, Int64.min_int) ] ())))
+  in
+  check "PR-B5b: a wrapped extent span is absurd (the sound unbounded reading)"
+    (contains_substring b5b_err "absurd");
+  (* B6: the degraded walk — no tags: the deepest SP decrement sizes
+     the frame, floored at 8192. *)
+  let rsp_dec n = Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 n)))) in
+  let small = straight_sub "pr_b6_small" [ rsp_dec 0x80 ] in
+  let big = straight_sub "pr_b6_big" [ rsp_dec 0x4000 ] in
+  let b6_small = Sm.layout_of_sub small ~abi (info_of ~offsets:[] ~degraded:true ()) in
+  let b6_big = Sm.layout_of_sub big ~abi (info_of ~offsets:[] ~degraded:true ()) in
+  check "PR-B6: the no-tags walk floors at the 8192-byte degraded minimum"
+    (b6_small.frame_bytes = Some 8192L);
+  check "PR-B6: a deep SP decrement sizes the degraded frame above the floor (0x4000 -> 16400)"
+    (b6_big.frame_bytes = Some 16400L);
+  (* B7: the split-plan cap — a region whose alloca exceeds 64 MiB
+     joins to Frame storage (excluded from the plan) with a named
+     diagnostic; the control region stays. *)
+  let big_region : Sm.region =
+    { id = 0; span = (0L, 0x1000000L); members = []; convertible = true; max_width = 64 }
+  in
+  let ok_region : Sm.region =
+    { id = 1; span = (-16L, -16L); members = []; convertible = true; max_width = 64 }
+  in
+  let sub_b7 = straight_sub "pr_b7_cap" [] in
+  let info_b7 = info_of ~offsets:[] ~regions:[ big_region; ok_region ] () in
+  let b7_err =
+    capture_stderr (fun () -> ignore (Sm.split_plan sub_b7 info_b7))
+  in
+  let plan = Sm.split_plan sub_b7 info_b7 in
+  check "PR-B7: the oversized region names itself and leaves the plan (storage Frame)"
+    (contains_substring b7_err "hike: region:"
+    && contains_substring b7_err "storage Frame"
+    && plan = [ ok_region ]);
+  ()
+
+let run () =
+  run_producer_record ();
+  run_layout ()
