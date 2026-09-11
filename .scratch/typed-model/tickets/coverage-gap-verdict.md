@@ -41,6 +41,10 @@ off-by-one is exactly one slot for EVERY demoting write.
   lands now or is inventoried (conversion-first). Re-attribution
   note: T4b's verdict measured demotion working for the
   modify_copy class (the touched slot), which is why this survived.
+  **UPDATE (same day, micro-fix lane): FIXED** — commit `d6fce42`
+  corrected the rule, landed the exactness pin this lane refused to
+  write, and the full battery is green with the pin held at the golden
+  six; see `demotion-offby-one-verdict.md` (sibling).
 
 ## The coverage map (module x status)
 
