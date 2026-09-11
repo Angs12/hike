@@ -62,7 +62,11 @@ just move code!") The rewrite rules, in priority order:
   shrinking the residual to ~zero; the guard on a non-compiled cond
   falls to the sound identity (top). KEPT: `comparison_constraint`
   (the comparison-level rows) + the landmark machinery — the
-  mechanism's core. The precision proof is the acceptance: F1 green,
+  mechanism's core. THE REMOVAL IS TOTAL (owner, final): the decoder
+  rows AND every mention — src comments, CONTEXT.md, current-facing
+  docs — cleaned to the post-T13 reality; the verdict's grep section
+  proves zero references to the removed machinery (dated historical
+  records stay historical). The precision proof is the acceptance: F1 green,
   convergence line-identical or the movements inventoried as the
   MEASURED residual cost, the pin at 6, referee 0, the suite ALL
   GREEN.
