@@ -1,8 +1,8 @@
 (* T13 jump-compiler pins: each idiom family compiles to the exact
    simplified comparison (pinned by structural equality), consumed flag
    defs die, reused value vars survive, the CFG is unchanged, and the
-   residual cases (cross-block flags, unknown opcode, ambiguous defs,
-   inconsistent facts) pass through untouched. *)
+   residual cases (cross-block flags, unknown opcode, CF-preserved
+   inc/dec, inconsistent facts) pass through untouched. *)
 
 open Bap.Std
 open Test_common
@@ -260,18 +260,6 @@ let run () : unit =
   let s' = J.compile_sub s in
   check "t13: unknown opcode stays residual" (Exp.equal (jmp_cond_of s') (Bil.Var pf));
 
-  (* RESIDUAL: two ZF defs (ambiguous multi-reaching) — the identity,
-     no drop. *)
-  let amb_defs =
-    [
-      Def.create zf (Bil.BinOp (Bil.EQ, w0_32, xv));
-      Def.create zf (Bil.BinOp (Bil.EQ, w0_32, yv));
-    ] in
-  let s, _ = sub_of_defs_and_jmp "t13_amb" amb_defs (Bil.Var zf) in
-  let s' = J.compile_sub s in
-  check "t13: ambiguous ZF stays residual" (Exp.equal (jmp_cond_of s') (Bil.Var zf));
-  check "t13: ambiguous defs untouched" (Int.equal (Base.List.length (defs_of s')) 2);
-
   (* RESIDUAL: inconsistent facts — jbe whose ZF is not the same
      subtraction as CF's borrow. *)
   let inc_defs =
@@ -284,6 +272,36 @@ let run () : unit =
   let s, _ = sub_of_defs_and_jmp "t13_inc" inc_defs cf_or_zf in
   let s' = J.compile_sub s in
   check "t13: inconsistent jbe stays residual" (Exp.equal (jmp_cond_of s') cf_or_zf);
+
+  (* RESIDUAL: the inc/dec class — CF PRESERVED (no CF def in the
+     block's flag group).  A CF-consuming family (jbe) stays the
+     identity: a stale CF from a predecessor is invisible to the
+     per-block facts. *)
+  let incdec_defs =
+    [
+      Def.create t (Bil.BinOp (Bil.PLUS, xv, Bil.Int (Word.one 64)));
+      Def.create zf (Bil.BinOp (Bil.EQ, w0_32, tv));
+    ] in
+  let s, _ = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
+  let s' = J.compile_sub s in
+  check "t13: inc/dec (CF preserved) jbe stays residual"
+    (Exp.equal (jmp_cond_of s') cf_or_zf);
+  check "t13: inc/dec defs untouched (no drop)" (Int.equal (Base.List.length (defs_of s')) 2);
+
+  (* the single REACHING def: two ZF defs in one block — every cond
+     reads the LAST (all defs precede all jmps; the first is a dead
+     write).  The cond compiles from the second def; BOTH defs die
+     (the var is unused sub-wide after the rewrite). *)
+  let amb_defs =
+    [
+      Def.create zf (Bil.BinOp (Bil.EQ, w0_32, xv));
+      Def.create zf (Bil.BinOp (Bil.EQ, w0_32, yv));
+    ] in
+  let s, _ = sub_of_defs_and_jmp "t13_reaching" amb_defs (Bil.Var zf) in
+  let s' = J.compile_sub s in
+  check "t13: two ZF defs → the reaching (last) def's comparison"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, yv, w0_64)));
+  check "t13: both ZF defs die (var unused)" (not (has_def_for s' zf));
 
   (* unconditional jumps untouched. *)
   let s, _ = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in

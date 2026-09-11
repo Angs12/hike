@@ -117,9 +117,10 @@ let is_zero_int = function Bil.Int w -> Word.is_zero w | _ -> false
 
 let is_one_int = function Bil.Int w -> Word.equal w (Word.one (Word.bitwidth w)) | _ -> false
 
-(* Fact extraction from one flag def rhs (the table above).  [None]
-   when the flag already has a fact (a second def — ambiguous) or the
-   shape is unknown. *)
+(* Fact extraction from one flag def rhs (the table above).  Called
+   once per flag — on its single reaching def (the block's last def of
+   the flag var); [None] when the shape is unknown (the flag gets no
+   fact and conds over it stay residual). *)
 let extract_facts (name : string) (rhs : exp) (f : facts) : facts option =
   match (name, rhs) with
   | "ZF", Bil.BinOp (Bil.EQ, a, b) when is_zero_int a -> (
@@ -225,6 +226,19 @@ let family_cond (facts : facts) (j : jcc) : exp option =
   | JG, Some _, _, Some _, Some (x, y, _) -> Some (cmp Bil.SLT y x)
   | _ -> None
 
+let family_name (j : jcc) : string =
+  match j with
+  | JE -> "je" | JNE -> "jne" | JLE -> "jle" | JL -> "jl" | JG -> "jg"
+  | JGE -> "jge" | JA -> "ja" | JAE -> "jae" | JB -> "jb" | JBE -> "jbe"
+
+let family_of_cond (e : exp) : string option =
+  match parse_bexp e with
+  | Some b -> (
+      match classify b with
+      | Some j -> Some (family_name j)
+      | None -> None)
+  | None -> None
+
 (* The flag vars a family consumes. *)
 let family_flags (j : jcc) : string list =
   match j with
@@ -287,9 +301,8 @@ let flag_names = [ "ZF"; "CF"; "SF"; "OF" ]
 
 type block_plan = {
   changed : bool;
-  (* consumed flag var -> the tid of its defining def (dropped iff no
-     remaining use sub-wide). *)
-  consumed_defs : (var * tid) list;
+  (* consumed flag vars (their facts served the rewritten cond). *)
+  consumed_vars : Var.Set.t;
 }
 
 (* One block: analyze the defs, compile every jmp whose cond
@@ -298,16 +311,16 @@ type block_plan = {
 let plan_block (blk : blk term) : block_plan * (jmp term * exp option) list =
   let defs = Term.enum def_t blk |> Seq.to_list in
   let indexed = List.mapi defs ~f:(fun i d -> (i, d)) in
-  (* Single-def flag map: two defs of one flag var remove it entirely —
-     its facts go absent and conds over it stay residual. *)
+  (* The single REACHING def of each flag var: all defs precede all
+     jmps of a block, so every cond reads the LAST def — earlier flag
+     defs are dead writes.  Facts come only from that def; a flag with
+     no def in the block has no fact (its conds stay residual). *)
   let flag_map =
     List.fold_left indexed ~init:Var.Map.empty
       ~f:(fun acc (i, d) ->
         let lhs = Def.lhs d in
         if List.exists flag_names ~f:(fun n -> is_flag n lhs) then
-          match Core.Map.find acc lhs with
-          | None -> Core.Map.set acc ~key:lhs ~data:(i, Def.rhs d)
-          | Some _ -> Core.Map.remove acc lhs
+          Core.Map.set acc ~key:lhs ~data:(i, Def.rhs d)
         else acc) in
   (* Block ctx: single-def value rhs + last def position per var. *)
   let ctx =
@@ -363,11 +376,10 @@ let plan_block (blk : blk term) : block_plan * (jmp term * exp option) list =
         in
         (j, new_cond)) in
   let changed = List.exists compiled ~f:(fun (_, c) -> Option.is_some c) in
-  let consumed_defs =
-    if not changed then []
+  let consumed_vars =
+    if not changed then Var.Set.empty
     else
-      (* for each rewritten jmp, the flags its family consumes, each
-         bound to the tid of its defining def. *)
+      (* for each rewritten jmp, the flag vars its family consumes. *)
       List.concat_map compiled ~f:(fun (j, c) ->
           match c with
           | None -> []
@@ -378,15 +390,13 @@ let plan_block (blk : blk term) : block_plan * (jmp term * exp option) list =
                   | Some jcc ->
                       List.filter_map (family_flags jcc) ~f:(fun n ->
                           match flag_def n with
-                          | Some (v, i) -> (
-                              match List.nth defs i with
-                              | Some d -> Some (v, Term.tid d)
-                              | None -> None)
+                          | Some (v, _) -> Some v
                           | None -> None)
                   | None -> [])
               | None -> []))
+      |> Var.Set.of_list
   in
-  ({ changed; consumed_defs }, compiled)
+  ({ changed; consumed_vars }, compiled)
 
 (* Sub-wide free-var uses (defs' rhs + jmps + phis). *)
 let uses_of (s : sub term) : Var.Set.t =
@@ -405,16 +415,17 @@ let uses_of (s : sub term) : Var.Set.t =
       |> Seq.fold ~init:acc ~f:(fun acc p -> Core.Set.union acc (Phi.free_vars p)))
 
 (* The jump compiler over one sub: compiles every eligible cond, then
-   drops the consumed flag defs whose only use was the rewritten jump
-   (rule 5).  Everything else is the identity. *)
+   drops every def of a consumed flag var whose only use was the
+   rewritten jump (rule 5 — the var is unused sub-wide, so all its
+   defs are dead).  Everything else is the identity. *)
 let compile_sub (sub : sub term) : sub term =
-  let consumed = ref [] in
+  let consumed = ref Var.Set.empty in
   let sub1 =
     Term.map blk_t sub ~f:(fun blk ->
         let plan, compiled = plan_block blk in
         if not plan.changed then blk
         else begin
-          List.iter plan.consumed_defs ~f:(fun cv -> consumed := cv :: !consumed);
+          consumed := Core.Set.union !consumed plan.consumed_vars;
           Term.map jmp_t blk ~f:(fun j ->
               match
                 List.find compiled ~f:(fun (j', _) ->
@@ -424,24 +435,20 @@ let compile_sub (sub : sub term) : sub term =
               | _ -> j)
         end)
   in
-  match !consumed with
-  | [] -> sub1
-  | pairs -> (
-      let used = uses_of sub1 in
-      let dead =
-        List.filter_map pairs ~f:(fun (v, dtid) ->
-            if Core.Set.mem used v then None else Some dtid)
-        |> Tid.Set.of_list in
-      if Core.Set.is_empty dead then sub1
-      else
-        Term.map blk_t sub1 ~f:(fun blk ->
-            if
-              Term.enum def_t blk
-              |> Seq.exists ~f:(fun d -> Core.Set.mem dead (Term.tid d))
-            then
-              Term.filter def_t blk ~f:(fun d ->
-                  not (Core.Set.mem dead (Term.tid d)))
-            else blk))
+  if Core.Set.is_empty !consumed then sub1
+  else
+    let used = uses_of sub1 in
+    let dead = Core.Set.diff !consumed used in
+    if Core.Set.is_empty dead then sub1
+    else
+      Term.map blk_t sub1 ~f:(fun blk ->
+          if
+            Term.enum def_t blk
+            |> Seq.exists ~f:(fun d -> Core.Set.mem dead (Def.lhs d))
+          then
+            Term.filter def_t blk ~f:(fun d ->
+                not (Core.Set.mem dead (Def.lhs d)))
+          else blk)
 
 let compile_program (prog : program term) : program term =
   Term.map sub_t prog ~f:compile_sub
