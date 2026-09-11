@@ -250,8 +250,26 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.to_list
 
 
-(* Allocates the per-sub frame. *)
+(* Allocates the per-sub frame.  The array count crosses the LLVM
+   binding as a 32-BIT UNSIGNED (the stub's Int_val -> unsigned param):
+   a count at/above 2^31 truncates SILENTLY there, while the anchor
+   keeps the 64-bit index — the exact loss that rendered spill_many's
+   4-EB frame request as a 4.1-GB alloca.  The rule: the request is
+   loud (Hike_diag) and bounded to the machinery's representable
+   maximum, never silently truncated; [frame_dims]' bounded arm keeps
+   every sound producer below the boundary, so the diagnostic names a
+   wrong producer, not a normal lane. *)
 let build_frame_anchor llvm_ctx llvm_builder n anchor_idx =
+  let n =
+    if Int64.compare n 0x7fff_ffffL >= 0 then begin
+      Hike_diag.warn
+        "frame: frame request %Ld bytes is absurd (array-count bound 2^31) — clamped; the producer's extents are wrong"
+        n;
+      0x7fff_ffffL
+    end
+    else n
+  in
+  let anchor_idx = Int64.min anchor_idx (Int64.sub n 8L) in
   let frame =
     Llvm.build_alloca
       (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int n))

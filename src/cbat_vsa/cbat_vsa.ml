@@ -491,6 +491,18 @@ let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
       | Type.Mem _ | Type.Unk -> acc)
 
 
+(* THE T14 BAND-ARM CENSUS (debug builds only): how many ADDRESS
+   classifications resolve through the StackOff proof vs the plain-band
+   degraded arm.  The T14 verdict's disposition for the band arm reads
+   this count; the blocks vanish from every non-vsa-debug build. *)
+#ifdef VSA_DEBUG
+let t14_stack_hits = ref 0
+let t14_band_hits = ref 0
+let () = at_exit (fun () ->
+    Printf.printf "t14-census: address classifications stackoff=%d band=%d\n"
+      !t14_stack_hits !t14_band_hits)
+#endif
+
 (* The ONE stack-access predicate (T3): the address's denotation is a
    stack-symbolic set — the symbolic segment base propagates from the
    seeded entry RSP through arithmetic and memory round-trips (the
@@ -506,7 +518,16 @@ let is_stack_access (st_before : AI.t) (addr : exp) : bool =
   | Error _ -> false
   | Ok ws ->
     if WordSet.is_bottom ws then true
-    else WordSet.in_stack_segment ws
+    else begin
+      let res = WordSet.in_stack_segment ws in
+#ifdef VSA_DEBUG
+      (match res, WordSet.stack_offsets ws with
+       | true, Some _ -> incr t14_stack_hits
+       | true, None -> incr t14_band_hits
+       | _ -> ());
+#endif
+      res
+    end
 
 
 let rec extract ~(dynamic_alloc : def term -> bool)

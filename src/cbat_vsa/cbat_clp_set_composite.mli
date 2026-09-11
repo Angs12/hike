@@ -47,8 +47,13 @@ val stack_word : Cbat_clp.t -> t
 (* The singleton-offset stack word. *)
 val stack_word_i64 : int64 -> t
 
-(* The offset set of a stack-symbolic value. *)
-val as_stack : t -> Cbat_clp.t option
+(* The offset set of a stack-symbolic value — the StackOff PROOF
+   (T14): [Some offs] ONLY for the symbolic arm; a plain in-band set
+   (the degraded band arm) is None.  This is the accessor for every
+   "is this value FROM this sub's SP" question (frame extents, the
+   escape decision); the band re-tag stays for ADDRESS
+   classification via [in_stack_segment]. *)
+val stack_offsets : t -> Cbat_clp.t option
 
 (* Stack residency: the symbolic arm, or the plain degraded arm (a
    bounded plain hull inside the signed-positive band [2^61, 2^63) —

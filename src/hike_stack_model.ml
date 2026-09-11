@@ -439,6 +439,18 @@ let degraded_geometry (sub : sub term) ~(abi : Abi.t)
   in
   (max_dec, max_neg, has_unbounded)
 
+(* An extent the frame cannot bound: an unordered (wrapped) pair, or a
+   span at/above the alloca machinery's 32-bit element boundary (2^31 —
+   beyond it the array-type count loses bits, and no real frame lives
+   there).  The sound reading of an unboundable extent is UNBOUNDED —
+   the extent joins the unbounded classification and the frame takes
+   the bounded arm (the 64K window), never a multi-exabyte request
+   (T14: spill_many's fake extents folded into a 4-EB span here). *)
+let extent_absurd (l : int64) (h : int64) : bool =
+  let lo = Int64.min l h and hi = Int64.max l h in
+  (* hi - lo >= 2^31 - 1, overflow-safe (a wrapped add reads absurd). *)
+  Int64.compare hi (Int64.add lo 0x7fff_ffffL) >= 0
+
 (* The fallback frame's geometry: (alloca bytes, anchor byte index).
    The frame covers every owned-storage fact the record carries — the
    tagged access extents AND the formed stack-value extents (T4: the
@@ -449,27 +461,37 @@ let degraded_geometry (sub : sub term) ~(abi : Abi.t)
 let frame_dims (sub : sub term) ~(abi : Abi.t)
     (info : vsa_info) : int64 * int64 =
   let tags = info.offsets in
-  let min_lo, max_hi, unbounded =
-    Core.Map.fold tags ~init:(0L, 0L, false)
-      ~f:(fun ~key:_ ~data:(kind : vsa_kind) (lo, hi, unb) ->
+  let absurd, min_lo, max_hi, unbounded =
+    Core.Map.fold tags ~init:([], 0L, 0L, false)
+      ~f:(fun ~key:_ ~data:(kind : vsa_kind) (abs, lo, hi, unb) ->
         match kind with
         | Range (l, h) | Infinite (l, h) ->
             (* Post-split Range/Infinite always reach below the entry
                RSP; the caller window never sizes the frame. *)
-            (Int64.min lo l, Int64.max hi h, unb)
+            if extent_absurd l h then ((l, h) :: abs, lo, hi, true)
+            else (abs, Int64.min lo l, Int64.max hi h, unb)
         | Mixed (l, h) ->
             (* Two-sided: the below-entry side sizes the frame; the
                span may be wrapped, so fold both extrema. *)
-            (Int64.min lo (Int64.min l h), Int64.max hi (Int64.max l h), unb)
-        | Unbounded | VLA _ -> (lo, hi, true)
-        | Caller _ | Dead -> (lo, hi, unb))
+            if extent_absurd l h then ((l, h) :: abs, lo, hi, true)
+            else
+              (abs, Int64.min lo (Int64.min l h), Int64.max hi (Int64.max l h),
+               unb)
+        | Unbounded | VLA _ -> (abs, lo, hi, true)
+        | Caller _ | Dead -> (abs, lo, hi, unb))
   in
-  (* The formed stack-value extents (T4). *)
-  let min_lo, max_hi =
+  (* The formed stack-value extents (T4), under the same absurd rule. *)
+  let absurd, min_lo, max_hi, unbounded =
     Base.List.fold_left info.sp_extents
-      ~init:(min_lo, max_hi)
-      ~f:(fun (lo, hi) (l, h) -> (Int64.min lo l, Int64.max hi h))
+      ~init:(absurd, min_lo, max_hi, unbounded)
+      ~f:(fun (abs, lo, hi, unb) (l, h) ->
+        if extent_absurd l h then ((l, h) :: abs, lo, hi, true)
+        else (abs, Int64.min lo l, Int64.max hi h, unb))
   in
+  Base.List.iter absurd ~f:(fun (l, h) ->
+      Hike_diag.warn
+        "frame: sub %s: extent span (%Ld,%Ld) is absurd — the frame degrades to the bounded arm"
+        (Sub.name sub) l h);
   if Core.Map.is_empty tags && Base.List.is_empty info.sp_extents
   then begin
     let max_dec, max_neg, unbounded = degraded_geometry sub ~abi info in
