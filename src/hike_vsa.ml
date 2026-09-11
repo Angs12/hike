@@ -387,3 +387,153 @@ let offsets_of_sub (target : Theory.Target.t) (sp : var)
     | Some sol -> finish sol
   in
   probe_res
+
+(* ------------------------------------------------------------------ *)
+(* T10 part 2: the promotion becomes a BIR REWRITE (the mem-fission    *)
+(* /DCE precedent — a pipeline-level term transformation, not emitter  *)
+(* record reading).  The record's promotion facts are consumed HERE,   *)
+(* at rewrite time, and become STRUCTURE:                              *)
+(* - the sub gains its promoted parameters as real BIR args (slots     *)
+(*   0..arity-1, then the Caller-Window Parameter);                    *)
+(* - each proven incoming-slot load reads its parameter (a plain var   *)
+(*   read, truncated to the node's own width for narrower reads — the  *)
+(*   narrower-read rule);                                              *)
+(* - each site's outgoing store gains a call-arg def binding the store *)
+(*   def's own value ([hike_argN := lhs]) — the value the store        *)
+(*   wrote, by construction (the T4b stored-value semantics);          *)
+(* - singleton-resolved indirect targets become DIRECT call targets.   *)
+(* The emitter then transcribes what the term already carries — params *)
+(* are params, args are args, targets are targets — and needs no       *)
+(* record.  The written-slot demotion already lives in [callee_side]   *)
+(* (the demoted slots never enter [prom_slots], so their loads are     *)
+(* never rewritten and take the window).                               *)
+(*                                                                     *)
+(* Exact-carry exemptions (CALLEE side only): the emittable intrinsics *)
+(* (the soft-float bodies — their signature branch is the free-var     *)
+(* projection) and @main (its signature branch is fixed rdi/rsi) gain  *)
+(* no BIR args and no parameter reads — their Caller traffic keeps the *)
+(* window/raw lanes, exactly what their signature branches served.     *)
+(* The CALLER side (arg defs + direct targets) runs for every sub.     *)
+(* ------------------------------------------------------------------ *)
+
+(* Replaces the Load node matching (addr,size) with [x] (the BIR twin
+   of the emitter's former node rewrite). *)
+let rewrite_load_to (e : exp) (addr : exp) (size : Size.t) (x : exp) : exp =
+  let v =
+    object
+      inherit Exp.mapper
+      method! map_load ~mem ~addr:a rest s =
+        if Exp.equal a addr && Size.equal s size then x
+        else Bil.Load (mem, a, rest, s)
+    end
+  in
+  v#map_exp e
+
+let promote_sub (info : Model.vsa_info) (sub : sub term) : sub term =
+  (* The callee-side rewrite is skipped for the emittable intrinsics
+     (the soft-float bodies — their signature branch is the free-var
+     projection) and @main (its signature branch is fixed rdi/rsi): no
+     BIR args, no parameter reads — exactly what their signature
+     branches served before.  The CALLER side (the call-arg defs and
+     the direct targets) applies to EVERY sub: any sub's call sites
+     pass promoted arguments and resolve through the denotations. *)
+  let callee_exempt =
+    Bil2llvm.is_emittable_intrinsic sub
+    || String.equal (Tid.name (Term.tid sub)) "@main"
+  in
+  let sub =
+    if callee_exempt then sub
+    else
+      (* 1. The sub gains its promoted parameters as real BIR args, in
+         signature order: slots 0..arity-1, then the window. *)
+      let b = Sub.Builder.create ~tid:(Term.tid sub) ~name:(Sub.name sub) () in
+      Base.List.init info.Model.prom_arity ~f:(fun i ->
+          Arg.create ~intent:In (Model.arg_slot i)
+            (Bil.Var (Model.arg_slot i)))
+      @ (if info.Model.prom_window then
+         [ Arg.create ~intent:In Model.hike_window_var
+             (Bil.Var Model.hike_window_var) ]
+         else [])
+      |> Base.List.iter ~f:(fun a -> Sub.Builder.add_arg b a);
+      Term.enum blk_t sub |> Seq.iter ~f:(fun blk -> Sub.Builder.add_blk b blk);
+      Term.with_attrs (Sub.Builder.result b) (Term.attrs sub)
+  in
+    (* 2 + 3. Per block: rewrite the proven slot loads to parameter
+       reads; insert the call-arg defs; resolve the indirect targets.
+       (The slot-load rewrite is callee-side — a non-exempt sub's own
+       proven reads.) *)
+    Term.map blk_t sub ~f:(fun blk ->
+        let btid = Term.tid blk in
+        (* 3a. A resolved singleton target becomes a direct one — the
+           jmp keeps its tid (the record keys on it) and its guard. *)
+        let blk =
+          Term.map jmp_t blk ~f:(fun j ->
+              match Core.Map.find info.Model.prom_resolved (Term.tid j) with
+              | Some (Some t) -> (
+                  match Jmp.kind j with
+                  | Call c ->
+                      Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j)
+                        (Call (Call.with_target c (Direct t)))
+                  | _ -> j)
+              | _ -> j)
+        in
+        (* 2. The proven slot loads read their parameters (callee-side
+           only: the exempt subs carry no promoted parameters). *)
+        let blk =
+          if callee_exempt then blk
+          else
+          Term.map def_t blk ~f:(fun d ->
+              match Core.Map.find info.Model.prom_slots (Term.tid d) with
+              | None -> d
+              | Some i -> (
+                  (* [prom_slots] holds only LOAD defs at a singleton
+                     proven offset (the [load_of_rhs] class): the first
+                     mem node IS the proven load. *)
+                  match Model.addr_of_rhs (Def.rhs d) with
+                  | Some (addr, size) ->
+                      let bits = Size.in_bits size in
+                      let slot_exp =
+                        if Int.equal bits 64 then Bil.Var (Model.arg_slot i)
+                        else
+                          Bil.Cast (Bil.LOW, bits, Bil.Var (Model.arg_slot i))
+                      in
+                      Def.with_rhs d
+                        (rewrite_load_to (Def.rhs d) addr size slot_exp)
+                  | None -> d))
+        in
+        (* 3b. The site's outgoing stores gain their call-arg defs: each
+           binds the slot's temp to the STORING DEF's own value (the
+           lhs var's binding), placed immediately after that def — the
+           store's emission binds the lhs, so the arg reads the value
+           the store wrote, never a later state. *)
+        match Core.Map.find info.Model.prom_sites btid with
+        | Some site when not (Base.List.is_empty site.Model.site_slots) ->
+            let defs =
+              Term.enum def_t blk |> Seq.to_list
+            in
+            let next_tid dtid =
+              let rec after = function
+                | [] -> None
+                | d :: tl ->
+                    if Tid.equal (Term.tid d) dtid then
+                      Base.List.hd tl |> Base.Option.map ~f:Term.tid
+                    else after tl
+              in
+              after defs
+            in
+            Base.List.fold_left site.Model.site_slots ~init:blk
+              ~f:(fun blk (i, dtid) ->
+                match Base.List.find defs ~f:(fun d -> Tid.equal (Term.tid d) dtid) with
+                | None -> blk
+                | Some store_def ->
+                    let arg_def =
+                      Def.create (Model.call_arg i)
+                        (Bil.Var (Def.lhs store_def))
+                    in
+                    match next_tid dtid with
+                    | Some next ->
+                        Term.prepend def_t blk ~before:next arg_def
+                    | None ->
+                        (* last def of the block: append *)
+                        Term.append def_t blk arg_def)
+        | _ -> blk)

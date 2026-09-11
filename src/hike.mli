@@ -25,6 +25,10 @@ module Vsa : sig
       take the pointer call ([None]). *)
   val resolve_target :
     lookup:(int64 -> Tid.t option) -> Cbat_vsa.WordSet.t -> Tid.t option
+
+  (** The promotion becomes a BIR rewrite (T10): real BIR args on the
+      sub, call-arg defs at the sites, direct resolved targets. *)
+  val promote_sub : Hike_stack_model.vsa_info -> sub term -> sub term
 end
 
 (** Dead-code elimination. *)
@@ -140,6 +144,29 @@ module Stack_model : sig
 
   (** The promoted incoming stack-slot parameter of index [i] (T4). *)
   val arg_slot : int -> var
+
+  (** Info with no tags (the identity record). *)
+  val empty_vsa_info : vsa_info
+
+  (** The emitter's narrow LAYOUT fact (T10): the alloca-construction
+      inputs — frame bytes and region geometry.  Rides the sub term. *)
+  type sub_layout = Hike_stack_model.sub_layout = {
+    frame_bytes : int64 option;
+    regions : (int * (int64 * int64) * int64) list;
+  }
+
+  val empty_layout : sub_layout
+  val layout_of_sub : sub term -> abi:Abi.t -> vsa_info -> sub_layout
+  val set_layout : sub_layout -> sub term -> sub term
+
+  (** Per-def tags (T10): the kind rides the def's value. *)
+  val stamp_def_kinds : vsa_info -> sub term -> sub term
+  val def_kind : def term -> vsa_kind option
+
+  (** The call-argument temps the promotion rewrite creates at the
+      call sites. *)
+  val call_arg : int -> var
+  val is_call_arg : var -> bool
 end
 
 (** Stack-to-locals rewrite. *)

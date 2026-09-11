@@ -200,19 +200,28 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
 1. `hike-filter` — filters subs (named exclusions, stub/extern/intrinsic,
    intrinsic callers, symbol-table check) — its own pass, FIRST in the chain
    (no pass calls another pass's logic; the chain is deps-only)
-2. `hike-vsa` — fills `Convutils.vsa_info` (sub tid → per-def SP-relative offset ranges
-   per-def offset ranges — the possible range of each access, nothing
-   else) by COMPOSING the ONE producer chain (arch review #1, ADR 0005;
+2. `hike-vsa` — fills the Vsa record (sub tid → per-def offset ranges
+   — the possible range of each access, nothing else) by COMPOSING the
+   ONE producer chain (arch review #1, ADR 0005;
    ADR 0003 LANDED — the `hike-relevance` pass, the `relevant` tag, and the
    backward-lane refineable gates are DELETED, every def is denoted, and
    `vsa_info` is the only carrier of stack-access-ness):
    `fixpoint → Cbat_vsa.Cbat_extraction.extract` (the M6 classification walk, the kind
    enum — `Convutils.vsa_kind`'s physical home — the k-range arithmetic, the
-   set-overlap merge, the VLA matcher) `→ Hike_stack_model.{frame_escapes, regions_of_sub,
+   set-overlap merge, the VLA matcher) `→ Hike_stack_model.{regions_of_sub,
    split_plan}` (the pure stack model, split from the rewrite pass).  The record is built
    complete at one site; `hike_vsa` keeps only the pass policy (the
    degraded/non-converged arms).  No prefilters, no re-entrancy skip — every
-   sub runs the full chain unconditionally (the no-gates lane, 2026-09-09)
+   sub runs the full chain unconditionally (the no-gates lane, 2026-09-09).
+   T10: the pass then STAMPS the per-def kinds onto the defs (KB value
+   slots, the `rip_relative_addr` precedent), the LAYOUT tag onto the
+   sub term, and runs the PROMOTION REWRITE (`Hike_vsa.promote_sub`):
+   the sub gains its promoted parameters as real BIR args, proven slot
+   loads read them, each call site binds the stored value to a
+   `hike_argN` def, and resolved indirect targets become DIRECT — the
+   emitter transcribes structure and reads NO record (the intrinsic-
+   callers filter is deleted too; the intrinsic placeholder SUBS stay
+   excluded)
 3. `hike-stack-to-locals` — ONE registration, two rewrites (mem-fission's two
    halves: the DCE load-roots rule is defined over the vars the rewrite
    creates; neither runs without the other):
@@ -237,7 +246,11 @@ Single chain, order enforced by pass deps; only `hike-convlir` is user-facing:
 4. `hike-convlir` — emits LLVM via `bil2llvm.ml` through the ONE seam
    `Bil2llvm.emit_program` (sig-collection + declarations + bodies all
    inside; the KB context vars are internal — see `src/bil2llvm.mli` and
-   CONTEXT.md's Emission Entry)
+   CONTEXT.md's Emission Entry).  T10: the emitter consumes NO analysis
+   record — its per-sub inputs are the LAYOUT tag (frame/region
+   geometry) and per-def tags (kind/VLA/license on the def's value);
+   `Hike_kb` is pipeline-only (grep + module-direction proof in the T10
+   verdict)
 
 Tags are Tid-keyed and computed before emission; pass deps must stay prefixed (`hike-...`).
 
@@ -435,6 +448,68 @@ it happens).
 Historical lane records and specs cited below live in git history (the
 2026-09-09 records purge archived merged lanes' `.scratch/` dirs);
 `git log --diff-filter=D --name-only -- .scratch/` finds them.
+
+**Last verified: 2026-09-11 EEST — T10 LANDED (branch
+`tm/t10-pipeline`): the intrinsic-callers filter dies (part 1, measured
+structurally dead) + THE EMITTER CONSUMES NO RECORD (part 2, the
+promotion is a BIR rewrite) — the full battery green, -O0 37/37 strict
+semantics AND strict opt-safety, the -O2 pin holds at the golden seven,
+convergence delta ZERO**
+
+Two owner directives composed (ticket
+`.scratch/typed-model/tickets/T10-pipeline-simplification.md`; verdict
+`T10-pipeline-simplification-verdict.md`; battery
+`/home/tovpr/tm-battery/t10/`):
+
+- **Part 1**: `calls_intrinsic`'s predicate (`intrinsic && not
+  emittable && not llvm_x86`) was a CONTRADICTION (emittable and
+  llvm_x86 partition the intrinsics by body-ness) — the set was always
+  empty. Deleted; intrinsic placeholder SUBS stay excluded. Part 1 was
+  byte-identical 37/37 BOTH lanes vs the same-tree control (commit
+  `58b63e5`); the `unmapped intrinsic` grep is an explicit gate and is
+  CLEAN.
+- **Part 2 — the divorce**: the emitter (`bil2llvm*`) reads ZERO
+  record: no `Hike_kb`/`info_of_sub` reference (grep-proof), no
+  `vsa_info`/prom_*/offsets. The promotion is a BIR rewrite
+  (`Hike_vsa.promote_sub`, run in the vsa pass): subs gain their
+  promoted parameters as REAL BIR ARGS; proven slot loads read them
+  (`Cast (LOW, w, Var hike_slotN)` for narrow reads); each site binds
+  the storing def's own value to a `hike_argN` def right after the
+  store (the T4b stored-value semantics, by construction); resolved
+  indirect targets become DIRECT call targets. Per-def facts (kind,
+  VLA) ride the DEF'S VALUE as KB value slots (`Model.def_kind_slot`,
+  the `rip_relative_addr` precedent); geometry rides the SUB TERM as
+  the LAYOUT tag (`Model.layout_tag`: frame bytes + region (id, span,
+  bytes)). `hike_kb` survives as a PIPELINE-ONLY carrier (hike-vsa →
+  the model → STL + the fixtures); the emitter path cannot reach it
+  (module dependency direction). The DCE's keep rule gained the
+  call-arg root (the load-roots precedent — the rule is defined over
+  the rewrite's own vars). Retaddr reads stay an emission-time rule
+  over the per-def tag (Caller(0,0) + load + ≤64 + no store in rhs —
+  the producer's exact class, no set needed).
+- Deliberate re-baseline: -O0 29/37 byte-identical to the pre-T10
+  control (8 changed: deep_recursion, fizzbuzz_safe, fn_escape,
+  fn_single, fn_table_disp, jump_table_sw, nested_calls,
+  nested_struct — the promotion/resolution surface); -O2 34/37
+  (fn_escape, fn_table_disp, va_arg_vacopy). Diagnostics identical
+  (268 lines, same families). The census REPRODUCES delta-zero
+  (thunks 26=26, slot-param defines 26=26, window-param defines
+  29=29, pointer-call sites 6=6, fn_single's resolved direct
+  promoted calls 2=2).
+
+| gate | result |
+|---|---|
+| build, default + vsa-debug profiles | rc=0 ✅ |
+| instrumentation blocker | clean ✅ |
+| referee (`clpequiv`) | **2,861,148 checks / 0 mismatches** ✅ |
+| `dune runtest` | 523 ok; failure set == EXACTLY the 8 pre-existing (E2eD-7/8, LM F1-*); +7 new T10 pins PASS ✅ |
+| -O0 emission / structural asserts / `unmapped intrinsic` | 37/37 rc=0 / 185-0 / CLEAN ✅ |
+| -O2 emission / structural asserts | 37/37 rc=0 / 185-0 ✅ |
+| -O0 strict semantics | **37 PASS / 0 FAIL** ✅ |
+| -O0 strict opt-safety | **37 PASS / 0 FAIL** ✅ |
+| -O2 pinned semantics | **set == the golden seven** (rc=0) ✅ |
+| convergence vs merge-t4b/conv.log | **line-for-line identical — zero moved rows** ✅ |
+| emitter record divorce | grep-proof: zero `Hike_kb`/`vsa_info`/`prom_*` in `bil2llvm*` ✅ |
 
 **Last verified: 2026-09-10 EEST — T4b LANDED (branch
 `tm/t4b-conversion-correctness`): the conversion-correctness classes are

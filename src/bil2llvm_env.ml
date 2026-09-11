@@ -8,7 +8,6 @@
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
-open Hike_stack_model
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
 
@@ -131,7 +130,9 @@ let empty_emit_ctx () : emit_ctx =
     thunks = ref [];
   }
 
-(* Per-sub frame state. *)
+(* Per-sub frame state.  T10: no analysis-record inputs — everything
+   here is either LLVM emission state or structure transcribed from the
+   sub term (the region geometry from the sub's LAYOUT tag). *)
 type sub_frame = {
   (* The sub's anchor address integer: the SP Slot's stored value for
      storage-carrying subs; the constant 0 anchor for storage-free
@@ -144,19 +145,11 @@ type sub_frame = {
      Slot (T4).  None = the sub owns no SP storage (SP binds to the
      anchor constant, 0 for storage-free subs). *)
   stack0 : Llvm.llvalue option;
-  regions : (region * Llvm.llvalue) list;
+  (* The split regions: ((id, span), base alloca) — geometry from the
+     sub's LAYOUT tag. *)
+  regions : ((int * (int64 * int64)) * Llvm.llvalue) list;
+  (* The sub split into regions (the layout's regions are non-empty). *)
   is_precise : bool;
-  (* T4: per call block, the outgoing slot site (the slot index ->
-     storing-def map from the producer's record). *)
-  outgoing : call_site Tid.Map.t;
-  (* T4b: the outgoing slot stores' values, recorded by the STORE's own
-     emission (def tid -> the LLVM value written).  The call passes the
-     value the store wrote — never a re-evaluation of the stored exp at
-     the call, which would read a var the block redefined after the
-     store. *)
-  store_vals : (Tid.t, Llvm.llvalue) EHashtbl.t;
-  (* T4: per indirect call jmp, the VSA's singleton resolution. *)
-  resolved : Tid.t option Tid.Map.t;
 }
 (* Emission context threaded as a KB var. *)
 let llvm_ctx_var : Llvm.llcontext KB.Context.var =

@@ -116,29 +116,26 @@ let transfer_with_phis transfer_vars llvm_builder blk_tid () =
       insert_local ctx blk_tid var res;
       return ())
 
-let create_elts llvm_builder blk sub_tid sub_info fr alloc_tids () =
+let create_elts llvm_builder blk sub_tid fr () =
   let open KB in
   let tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
-      | `Def def -> create_def tid llvm_builder sub_tid sub_info fr alloc_tids def
+      | `Def def -> create_def tid llvm_builder sub_tid fr def
       | `Phi _ -> return ()
       | `Jmp _ -> return ())
 
-let populate_blks transfer_vars blks sub sub_info fr () =
+let populate_blks transfer_vars blks sub fr () =
   let open KB in
   let* ctx, llvm_ctx = emit_env () in
   let sub_tid = Term.tid sub in
-  (* VLA tids travel in vsa_info (spec §2.3): the producer detected them
-     once on the pre-rewrite sub. *)
-  let alloc_tids = sub_info.Hike_stack_model.vla_alloc_tids in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
       in
       transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
-      >>= create_elts llvm_builder blk sub_tid sub_info fr alloc_tids
+      >>= create_elts llvm_builder blk sub_tid fr
       >>= create_control_flow llvm_builder blk sub fr)
 
 
@@ -304,44 +301,41 @@ let create_sub sub =
     clear_bbs ctx;
     clear_blk_llvals ctx;
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
-    (* The record IS the producer's verdict (one accessor, one default). *)
-    let sub_info = Hike_kb.info_of_sub (Term.tid sub) in
-    let tags = sub_info.Hike_stack_model.offsets in
-    (* Consumes the stack plan. *)
-    let plan = sub_info.Hike_stack_model.stack_plan in
-    let is_precise = Hike_stack_model.is_precise sub_info in
+    (* The LAYOUT fact (T10): the alloca-construction inputs ride the
+       sub term — no analysis record reaches the emitter. *)
+    let frame_bytes, layout_regions =
+      match Term.get_attr sub Hike_stack_model.layout_tag with
+      | Some { frame_bytes; regions } -> (frame_bytes, regions)
+      | None -> (None, [])
+    in
     let frame, anchor_idx, anchor_i64 =
-      if is_precise || (Core.Map.is_empty tags && not sub_info.Hike_stack_model.degraded)
-      then (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-      else
-        let n, anchor_idx =
-          Hike_stack_model.frame_dims sub ~abi:ctx.abi sub_info
-        in
-        let frame, anchor_idx, anchor_i64 =
-          build_frame_anchor llvm_ctx llvm_builder n anchor_idx
-        in
-        (Some frame, anchor_idx, anchor_i64)
+      match frame_bytes with
+      | Some n ->
+          let frame, anchor_idx, anchor_i64 =
+            build_frame_anchor llvm_ctx llvm_builder n
+              (Int64.sub n 8L)
+          in
+          (Some frame, anchor_idx, anchor_i64)
+      | None -> (None, 0L, Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
     in
     let regions =
-      if is_precise then
-        Base.List.mapi plan ~f:(fun _ r ->
-            let n = Hike_stack_model.region_bytes r in
-            let base =
-              Llvm.build_alloca
-                (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int n))
-                (Hike_stack_model.region_name r.Hike_stack_model.id)
-                llvm_builder
-            in
-            Llvm.set_alignment 16 base;
-            (r, base))
-      else []
+      Base.List.map layout_regions
+        ~f:(fun (id, span, bytes) ->
+          let base =
+            Llvm.build_alloca
+              (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int bytes))
+              (Hike_stack_model.region_name id)
+              llvm_builder
+          in
+          Llvm.set_alignment 16 base;
+          ((id, span), base))
     in
     (* Binds region bases to alloca cell-0. *)
     let* () =
       let rec bind_regions = function
         | [] -> return ()
-        | (r, base) :: rest ->
-            let base_var = Hike_stack_model.region_base r.Hike_stack_model.id in
+        | ((id, _), base) :: rest ->
+            let base_var = Hike_stack_model.region_base id in
             insert_local ctx Graphs.Tid.start base_var base;
             bind_regions rest
       in
@@ -352,8 +346,8 @@ let create_sub sub =
        anchors to the sub's %frame alloca; the region split anchors to
        its first region alloca (index 0 — the exact value the SP Slot
        binds for precise subs).  [None] = the sub owns no stack storage
-       (tag-free, non-degraded): no def can then carry a Range/Infinite
-       tag, no address is ever licensed, and the absent anchor is never
+       (no frame, no regions): no def can then carry a licensed tag, no
+       address is ever licensed, and the absent anchor is never
        queried. *)
     let anchor =
       match frame, regions with
@@ -384,19 +378,13 @@ let create_sub sub =
       end
       else None
     in
-    (* The outgoing slot sites (T4): the site's proven outgoing stores
-       become the promoted call's slot arguments, keyed by the storing
-       def — the store's own emission records its value in
-       [store_vals] (create_def), and [create_call_args] passes it. *)
-    let store_vals = EHashtbl.create (module Tid) in
-    let outgoing = sub_info.Hike_stack_model.prom_sites in
     let fr : sub_frame =
       { anchor_i64; stack = None; stack0; regions;
-        is_precise; outgoing; store_vals; resolved = sub_info.Hike_stack_model.prom_resolved }
+        is_precise = not (Base.List.is_empty regions) }
     in
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= build_entry_block llvm_builder transfer_vars fr sub fn
-    >>= fun fr -> populate_blks transfer_vars blks sub sub_info fr ()
+    >>= fun fr -> populate_blks transfer_vars blks sub fr ()
     >>= update_phis transfer_vars blks sub
     >>= fun () ->
     (* Summarizes model-ABI undef reads. *)
@@ -529,25 +517,13 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
      in
       (rets, args)
    else
-       (* T4: the signature is the callee's own promoted interface. The
-         producer's record is the SOLE origin: proven incoming slots
-         become positional parameters ([hike_slotN], width 64 — the
-         SysV slot width; narrower reads truncate); the Caller-Window
-         Parameter survives only for variadic/mixed subs (the unproven
-         remainder — the caller-window base, not SP). *)
-       let info = Hike_kb.info_of_sub (Term.tid sub) in
-       let is_main = String.equal (Tid.name (Term.tid sub)) "@main" in
-       let window_arg =
-         if info.Hike_stack_model.prom_window && not is_main then
-           [ Arg.create ~intent:In Hike_stack_model.hike_window_var
-               (Var Hike_stack_model.hike_window_var) ]
-         else []
-       in
-       let slot_args =
-         Base.List.init info.Hike_stack_model.prom_arity ~f:(fun i ->
-             let v = Hike_stack_model.arg_slot i in
-             Arg.create ~intent:In v (Var v))
-       in
+       (* T4 + T10: the signature is the callee's own promoted interface,
+         transcribed from the SUB TERM'S OWN BIR ARGS (the promotion
+         rewrite added them: the proven slots 0..arity-1, then the
+         Caller-Window Parameter for the variadic/mixed residual — the
+         caller-window base, not SP).  No record read: the args ARE the
+         structure. *)
+       let arg_terms = Term.enum arg_t sub |> Base.Sequence.to_list in
        let args =
          let rank_of_var (v : var) : int * string =
            let n = Var.name (Var.base v) in
@@ -569,13 +545,14 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              (* RBP parses via [callee_saved] (the deleted explicit fp
                  test's same filter result); SP-only by construction.
                  The promoted interface names (hike_slotN / the window
-                 base) are the emitter's own vocabulary — never
-                 register lanes. *)
+                 base / the call-arg temps) are the emitter's own
+                 vocabulary — never register lanes. *)
              not
                (Var.same reg (Abi.sp target)
                || is_callee_saved
                || is_intrinsic_name n
                || Base.String.is_prefix n ~prefix:"hike_slot"
+               || Base.String.is_prefix n ~prefix:"hike_arg"
                || Var.same reg Hike_stack_model.hike_window_var))
          |> Base.List.sort ~compare:(fun a b ->
              let ra, na = rank_of_var a in
@@ -584,7 +561,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              | 0 -> String.compare na nb
              | c -> c)
          |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-         |> fun regs -> regs @ slot_args @ window_arg
+         |> fun regs -> regs @ arg_terms
        in
       (* PLT stubs take the full param list. Signature-shape rule (args = []
          + any call): distinct from the emitter's BIL-shape rule
@@ -657,11 +634,16 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   (* The Thunks' signatures: the legacy memory-path convention (the
      register lanes plus the window base) — registered so the
-     unprovable-direct-site path can call the twin wholesale. *)
-  let twin_sig_of (sub, (rets, _)) =
+     unprovable-direct-site path can call the twin wholesale.  A sub
+     earns a twin iff its own signature carries promoted slots (T10:
+     read from the signature, not the record). *)
+  let has_slot_args args =
+    Base.List.exists args ~f:(fun a ->
+        Base.String.is_prefix (Var.name (Arg.lhs a)) ~prefix:"hike_slot")
+  in
+  let twin_sig_of (sub, (rets, args)) =
     let sub_tid = Term.tid sub in
-    let info = Hike_kb.info_of_sub sub_tid in
-    if info.Hike_stack_model.prom_arity > 0
+    if has_slot_args args
        && not (String.equal (Tid.name sub_tid) "@main")
     then
       (* The twin's signature = the synthetic indirect convention (the
