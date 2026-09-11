@@ -72,7 +72,10 @@ just move code!") The rewrite rules, in priority order:
   to the pass-compiled comparison conds (the post-T13 reality), their
   semantics exact (head = K, body = K-1) — the unit-level precision
   proof; `test_jump.ml` is the jcc coverage, extended to cover every
-  removed test's concern (the verdict carries the coverage map). The precision proof is the acceptance: F1 green,
+  removed test's concern (the verdict carries the coverage map). THE PIN PRINCIPLE (owner):
+test the PROJECT, not BAP — a check that would pass on any correct
+use of BAP is a framework test and is deleted; every pin asserts
+hike's logic (the table, the rules, the dominance, the residual). The precision proof is the acceptance: F1 green,
   convergence line-identical or the movements inventoried as the
   MEASURED residual cost, the pin at 6, referee 0, the suite ALL
   GREEN.

@@ -216,6 +216,12 @@ deliberately.
   recorded metric movement — never internal representation. A pin
   that freezes unsound behavior is re-derived with verification (the
   T8/E2eD precedent), never muted.
+- **TEST THE PROJECT, NOT BAP (owner directive, 2026-09-11).** BAP is
+  not the project: a check that would pass on any correct use of BAP
+  (mappers visit, tags exist, CFG primitives behave) tests the
+  framework and is deleted. Every pin asserts HIKE's logic — the
+  flag-effects table, the rewrite rules, the promotion's
+  correspondence, the storage decisions, the diagnostics contracts.
 - The corpus: 37 PIE binaries, both lanes, canary-guarded; the four
   indirect-call sources are permanent members.
 - Conversion-first accounting: a removal lane's verdict carries the
