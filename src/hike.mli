@@ -45,6 +45,10 @@ module Jump : sig
       comparisons; identity on the residual. *)
   val compile_sub : sub term -> sub term
   val compile_program : program term -> program term
+
+  (** The jcc family of a cond ("je", ..., "jbe"), or [None] for a
+      non-idiom cond (the census probe's label). *)
+  val family_of_cond : exp -> string option
 end
 
 (** Stack split decision and helpers.  Also the home of the Vsa record
