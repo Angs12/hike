@@ -28,7 +28,20 @@ two places, and the consumer's optimizer never sees a plain `icmp`.
 ## What lands
 
 A NEW BAP pass (first in the analysis chain, after hike-filter):
-compile every jump condition to an ACTUAL VALUE COMPARISON.
+REDESIGN every jump condition into the SIMPLEST equivalent value
+comparison — not a relocation of the flag decoding. (Owner directive:
+"the pass should redesign the jcc to make it simpler if possible, not
+just move code!") The rewrite rules, in priority order:
+
+1. REUSE over re-substitute: a cond over a flag def that computed a
+   value var reuses the var (`tmp := i-k; jne` -> `cond = tmp != 0`,
+   never `(i-k) != 0` re-emitted).
+2. FOLD the degenerate forms (cmp x 0, a-a, and x 0; constant conds
+   resolve).
+3. WIDTH-MINIMAL: the comparison at the flag def's own operand width.
+4. CANONICALIZE: constant-right, one operand order — identical conds
+   for jumps over the same def (CSE-friendly).
+5. DROP the consumed defs (no other uses).
 
 - The pass holds the flag-semantics knowledge ONCE (per
   flag-setting-opcode effects; the same facts the VSA's decoder rows
