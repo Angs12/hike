@@ -1,13 +1,17 @@
 # The typed-model program — convergence, soundness, simplicity
 
-Implements the spec at `.scratch/typed-model/spec.md` (settled
-2026-09-10, updated through the 2026-09-11 grilling sessions). One
-ordered program on one branch (`typed-model-program`). **Doctrine
-(binding, final form):** no gates, no fallbacks, one mechanism (the
-symbolic stack base + the denotation predicate answers everything),
-fix the architecture — the fix's diff deletes cases — and conversion
-first (failures are inventoried; only what survives the next model
-change gets fixed).
+Implements the spec at `.scratch/typed-model/spec-v2.md` (the
+comprehensive consolidation, 2026-09-11; supersedes `spec.md`, kept as
+the v1 record). One ordered program on one branch
+(`typed-model-program`). **Doctrine (binding, final form):** no gates,
+no fallbacks, one mechanism (the symbolic stack base + the denotation
+predicate answers everything), fix the architecture — the fix's diff
+deletes cases — and conversion first (failures are inventoried; only
+what survives the next model change gets fixed).
+
+Status of this record: it IS the PR. The branch is pushed to
+`origin/typed-model-program` (no GitHub PR — `gh`'s token is invalid in
+this environment; the branch + this file are the review surface).
 
 | ticket | what | state |
 |---|---|---|
@@ -22,10 +26,10 @@ change gets fixed).
 | [S10a](tickets/S10a-verdict.md) | the dead-weight wave + the region-GEP measurement | **landed** (byte-identical 37/37 both lanes) |
 | [S10b](tickets/S10b-verdict.md) | `convutils` deleted — the record in `Hike_stack_model`, the emitter state in `Bil2llvm_env` | **landed** (byte-identical 37/37 both lanes) |
 | typed-flag | `typed_frame`'s option died — ONE `stack_anchor` fact, two consumers | **landed** (byte-identical 37/37 both lanes) |
-| [T10](tickets/T10-pipeline-simplification.md) | the intrinsic-callers filter dies + THE EMITTER CONSUMES NO RECORD (the promotion becomes a BIR rewrite) | **in flight** |
-| [T13](tickets/T13-jump-compiler-pass.md) | the jump-compiler pass — jcc flag idioms become value comparisons ONCE (construction in flight; registration + deletions + battery at the next slot window) | queued |
-| [T14](tickets/T14-escape-extent-rule.md) | the escape-extent rule — only a `StackOff` proof sizes the frame (the spill_many SIGSEGV forensics); the pin 7 → 6 | queued |
-| [T15](tickets/T15-single-representation.md) | the single representation — tags carry the denotation; `relativize_opt` and its smear arm die | queued |
+| [T10](tickets/T10-pipeline-simplification.md) | the intrinsic-callers filter dies + THE EMITTER CONSUMES NO RECORD (the promotion becomes a BIR rewrite) | **landed** (census delta zero, convergence zero-moved-rows) |
+| [T14](tickets/T14-escape-extent-rule.md) | the escape-extent rule — only a `StackOff` proof sizes the frame (the spill_many SIGSEGV forensics); the pin 7 → 6 | **landed** (spill_many flips; golden list moved in `a24c8d2`) |
+| [T13](tickets/T13-jump-compiler-pass.md) | the jump-compiler pass — jcc flag idioms become value comparisons ONCE (redesign, not relocation) | **in flight** (worktree `/home/tovpr/hike-t13`, branch `tm/t13-jump-compiler`) |
+| [T15](tickets/T15-single-representation.md) | the single representation — tags carry the denotation; `relativize_opt` and its smear arm die | **in flight** (worktree `/home/tovpr/hike-t15`, branch `tm/t15-single-representation`) |
 | [T12](tickets/T12-kind-collapse.md) | the kind collapse — `Unbounded` into `Infinite`; the `VLA` kind's storage role to the partition lattice (the enum: Range / Infinite / Dead) | queued |
 | [T5](tickets/T5-sse-lane-def-use.md) | the SSE lane def-use fidelity (design pre-digested: `t5-design-notes.md`) | queued |
 | [T9](tickets/T9-va-list-remodel.md) | the va_list re-model — the alloca'd overflow array (decided by evidence: `t9-design-notes.md`) | queued |
@@ -36,13 +40,28 @@ change gets fixed).
 - **Strict -O0 semantics: 37 PASS / 0 FAIL**; **strict opt-safety:
   37/37**; the referee: **2,861,148 / 0**; the unit suite: **ALL
   PASSED** (T8).
-- **The -O2 pin holds at 7**, each member owned: byte_copy +
+- **The -O2 pin holds at 6**, each member owned: byte_copy +
   union_overlap (L3 → T5), va_arg_mixed + fizzbuzz_safe (L1),
-  va_arg_vacopy (the va_list round-trip → T9), spill_many (the
-  escape-extent misfire → T14), jump_table_sw (the -O2 dispatch →
-  T13's territory). Convergence: the memory-passed class collapsed
-  (many_args 121→58/4, mixed_fp_int 136→68/4, variadic 185/27); six
-  more sources reached SAME/SAME at T4b.
+  va_arg_vacopy (the va_list round-trip → T9), jump_table_sw (the -O2
+  dispatch). spill_many left the list at T14 (`a24c8d2` — proven
+  flip). Convergence: the memory-passed class collapsed (many_args
+  121→58/4, mixed_fp_int 136→68/4, variadic 185/27); six more sources
+  reached SAME/SAME at T4b.
+
+## The reference battery for this program's next lanes
+
+Measured 2026-09-11 on a freshly compiled corpus pair (the previous
+`/tmp/corpus*` was lost with tmpfs; `scripts/compile_corpus.sh
+/tmp/corpus` + `cp -a /tmp/corpus-o2 /tmp/corpus_o2`, canaries
+verified):
+
+`/home/tovpr/tm-battery/base` — provenance bundle `7ba492c8bf4bfbde`,
+**0 hard reds**: `dune runtest` PASS, -O0 emission 37/37 rc=0,
+allocas green, -O0 semantics **37 PASS / 0 FAIL**, -O0 opt-safety
+**37 PASS / 0 FAIL**, -O2 emission 37/37, -O2 allocas green, the pin
+green at 6, plus `conv/`. Both emission dirs are the byte-identity
+reference for this corpus pair (a removal lane's acceptance is
+byte-identical 37/37 both lanes).
 
 ## The corpus incident (recorded so it never repeats)
 
