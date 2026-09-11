@@ -35,7 +35,7 @@ let restore_sp_after_call llvm_builder ctx sub_tid fr fallthrough_tid =
          | Some _ -> ());
         return ()
 
-let create_call_args blk_tid llvm_builder call_tid fr =
+let create_call_args blk_tid llvm_builder call_tid =
   let open KB in
   let* ctx, llvm_ctx = emit_env () in
   let args = get_args ctx call_tid in
@@ -54,41 +54,35 @@ let create_call_args blk_tid llvm_builder call_tid fr =
       else if
         Base.String.is_prefix (Var.name (Arg.lhs arg)) ~prefix:"hike_slot"
       then
-        (* A promoted slot argument: the site's proven outgoing store,
-           whose value the store's own emission recorded (T4b) — a site
-           storing fewer slots leaves the rest unpassed (reading an
-           unpassed arg is UB in the binary too). *)
+        (* A promoted slot argument: the call-arg def the promotion
+           rewrite created in this block (bound to the storing def's
+           own value — the value the store wrote).  A site storing
+           fewer slots leaves the rest unpassed (reading an unpassed
+           arg is UB in the binary too). *)
         let name = Var.name (Arg.lhs arg) in
         let i =
           int_of_string @@ String.sub name 9 (String.length name - 9)
         in
-        let stored =
-          match Core.Map.find fr.outgoing blk_tid with
-          | Some site ->
-              Base.List.Assoc.find ~equal:Int.equal site.Hike_stack_model.site_slots i
-          | None -> None
-        in
-        (match Base.Option.bind stored ~f:(fun dtid ->
-                     EHashtbl.find fr.store_vals dtid) with
-         | Some v ->
-             let ty = Llvm.type_of v in
-             let v =
-               match Llvm.classify_type ty with
-               | Llvm.TypeKind.Integer ->
-                   let bits = Llvm.integer_bitwidth ty in
-                   if bits = 64 then v
-                   else if bits > 64 then
-                     Llvm.build_trunc v (Llvm.i64_type llvm_ctx) ""
-                       llvm_builder
-                   else
-                     Llvm.build_zext v (Llvm.i64_type llvm_ctx) ""
-                       llvm_builder
-               | _ -> v
-             in
-             return v
-         | None ->
-             let* llvm_ctx = Context.get llvm_ctx_var in
-             return @@ Llvm.undef (Llvm.i64_type llvm_ctx))
+        match get_local ctx blk_tid (Hike_stack_model.call_arg i) with
+        | Some v ->
+            let ty = Llvm.type_of v in
+            let v =
+              match Llvm.classify_type ty with
+              | Llvm.TypeKind.Integer ->
+                  let bits = Llvm.integer_bitwidth ty in
+                  if bits = 64 then v
+                  else if bits > 64 then
+                    Llvm.build_trunc v (Llvm.i64_type llvm_ctx) ""
+                      llvm_builder
+                  else
+                    Llvm.build_zext v (Llvm.i64_type llvm_ctx) ""
+                      llvm_builder
+              | _ -> v
+            in
+            return v
+        | None ->
+            let* llvm_ctx = Context.get llvm_ctx_var in
+            return @@ Llvm.undef (Llvm.i64_type llvm_ctx)
       else if extern && is_fp_param (Arg.lhs arg) then
         (* Lowers YMM args to doubles for externs. *)
         let* v = create_exp llvm_builder blk_tid exp in
@@ -302,7 +296,7 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
     fallthrough target fr =
   let open KB in
   let* ctx, llvm_ctx = emit_env () in
-  let* args = create_call_args blk_tid llvm_builder target fr in
+  let* args = create_call_args blk_tid llvm_builder target in
   let rets = get_rets ctx target in
   let* fn, fn_typ = get_func target in
   (match (fp_ret_kind_of_extern ctx target, rets) with
@@ -369,10 +363,14 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid sub
       if emit_unreachable then finish_call llvm_builder ctx None
       else return ())
 
-(* The Resolved Call Site class and the pointer-call class (T4): the
-   VSA's singleton resolution calls the promoted body directly; every
-   other site takes the pointer call through the synthetic indirect
-   signature (which carries the caller-window base). *)
+(* The pointer-call class (T4/T10): every call jmp that still reaches
+   this arm is an indirect site whose target the VSA did NOT resolve to
+   a singleton lifted sub — a bounded multi-target set, a foreign
+   address, or an unresolvable target.  (The resolved singletons became
+   DIRECT call targets in the producer's promotion rewrite; they route
+   through create_call as direct calls.)  The pointer lands in the
+   Thunk of a promoted target (address rendering), or in the target's
+   existing memory convention. *)
 let create_indirect_call llvm_builder blk_tid sub (j : jmp term) fr =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -384,30 +382,19 @@ let create_indirect_call llvm_builder blk_tid sub (j : jmp term) fr =
     |> Base.Option.value_exn ~message:"Create call: expected call got return"
     |> label_tid
   in
-  match Core.Map.find fr.resolved (Term.tid j) with
-  | Some (Some target_tid) ->
-      (* A Resolved Call Site (T4): the target is provably a singleton
-         lifted sub — the direct call goes through its promoted
-         signature. *)
-      create_func_call llvm_builder blk_tid sub (Some fallthrough) target_tid fr
-  | _ ->
-      (* The pointer call: bounded multi-target sets, foreign
-         addresses, and unresolvable targets.  The pointer lands in
-         the Thunk of a promoted target (address rendering), or in the
-         target's existing memory convention. *)
-      let* target_exp = create_exp llvm_builder blk_tid target in
-      let* func_ptr = Bil2llvm_section.create_addr_ptr llvm_builder target_exp in
-      let* fn, fn_typ = get_func icall_tid in
-      let rets = get_rets ctx icall_tid in
-      let* args =
-        create_call_args blk_tid llvm_builder icall_tid fr
-      in
-      let ret_struct =
-        Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
-      in
-      bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct;
-      let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
-      finish_call llvm_builder ctx (Some fallthrough)
+  let* target_exp = create_exp llvm_builder blk_tid target in
+  let* func_ptr = Bil2llvm_section.create_addr_ptr llvm_builder target_exp in
+  let* fn, fn_typ = get_func icall_tid in
+  let rets = get_rets ctx icall_tid in
+  let* args =
+    create_call_args blk_tid llvm_builder icall_tid
+  in
+  let ret_struct =
+    Llvm.build_call fn_typ func_ptr (Array.of_list args) "" llvm_builder
+  in
+  bind_extracted_rets ctx blk_tid llvm_builder rets ret_struct;
+  let* () = restore_sp_after_call llvm_builder ctx blk_tid fr fallthrough in
+  finish_call llvm_builder ctx (Some fallthrough)
 
 (* ------------------------------------------------------------------ *)
 (* T4: the Thunk — the memory-convention twin of a promoted sub.       *)
@@ -435,9 +422,15 @@ let create_thunk (sub_tid : tid) =
   let* ctx = Context.get emit_ctx_var in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
-  let info = Hike_kb.info_of_sub sub_tid in
-  let arity = info.Hike_stack_model.prom_arity in
-  if arity = 0 || String.equal (Tid.name sub_tid) "@main" then
+  (* The twin exists for every sub whose own signature carries promoted
+     slots (T10: read from the signature, not the record).  @main's
+     signature branch is fixed, so it never carries slots and never
+     earns a twin. *)
+  let arity =
+    Base.List.count (get_args ctx sub_tid) ~f:(fun a ->
+        Base.String.is_prefix (Var.name (Arg.lhs a)) ~prefix:"hike_slot")
+  in
+  if arity = 0 then
     KB.return ()
   else
     if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then

@@ -158,6 +158,8 @@ let () =
       (* VSA tag pass; depends on the filter only (spec §2.1). *)
       Project.register_pass ~name:"vsa" ~deps:[ "hike-filter" ] ~runonce:true
         (fun proj ->
+           let target = Project.target proj in
+           let abi = Hike_abi.of_target target in
            (* Per-sub computation is pure; the map folds before the one
               KB write (no monad-iter-plus-ref shape). *)
            let acc =
@@ -166,8 +168,8 @@ let () =
                  (* Computes tags, plan, and promotion facts on the
                     pre-rewrite sub. *)
                  let info =
-                   Hike_vsa.offsets_of_sub (Project.target proj)
-                     (sp (Project.target proj))
+                   Hike_vsa.offsets_of_sub target
+                     (sp target)
                      ~symtab:(Some (Project.symbols proj))
                      ~prog:(Project.program proj)
                      sub
@@ -180,7 +182,25 @@ let () =
            in
            (* Provides all tags in one write. *)
            Hike_kb.provide acc;
-           proj);
+           (* The promotion becomes BIR structure (T10): the per-def
+              kinds stamp onto the defs, the layout onto the sub term,
+              and the promotion facts rewrite into real BIR args, arg
+              defs, and direct call targets — the emitter consumes no
+              record. *)
+           Project.map_program proj ~f:(fun prog ->
+               Term.map sub_t prog ~f:(fun sub ->
+                   let info =
+                     match Core.Map.find acc (Term.tid sub) with
+                     | Some info -> info
+                     | None -> Hike_stack_model.empty_vsa_info
+                   in
+                   let sub = Hike_stack_model.stamp_def_kinds info sub in
+                   let sub =
+                     Hike_stack_model.set_layout
+                       (Hike_stack_model.layout_of_sub sub ~abi info)
+                       sub
+                   in
+                   Hike_vsa.promote_sub info sub)));
       (* Rewrite pass: the fission rewrite and its DCE — one registration
          (the DCE's load-roots rule is defined over the vars the rewrite
          creates; neither runs without the other). *)

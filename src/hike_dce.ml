@@ -111,11 +111,13 @@ let sweep_census_of (sub : sub term) : sweep_census =
 let is_intrinsic_var (v : var) : bool =
   Bil2llvm_env.is_intrinsic_name (Var.name (Var.base v))
 
-(* Region mems survive iff loaded; [mem] always survives.  (T3 deleted
-   the precise-lane SP erasure: the uniform materialization READS the
-   SP-derived address arithmetic — since T4 the SP local binds to the
-   sub's own SP Slot at entry, so those defs are defined and their
-   liveness is the plain used-based rule.) *)
+(* Region mems survive iff loaded; the promotion's call-arg defs survive
+   (they ARE the call's arguments — the emission consumes them at the
+   call); [mem] always survives.  (T3 deleted the precise-lane SP
+   erasure: the uniform materialization READS the SP-derived address
+   arithmetic — since T4 the SP local binds to the sub's own SP Slot at
+   entry, so those defs are defined and their liveness is the plain
+   used-based rule.) *)
 let keep ?(load_roots=Var.Set.empty)
     ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
   let lhs = Def.lhs d in
@@ -124,6 +126,7 @@ let keep ?(load_roots=Var.Set.empty)
   else
     Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
     || Hike_stack_model.is_mem lhs
+    || Hike_stack_model.is_call_arg lhs
     || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
 (* Incremental sweep: one census walk, then a removal cascade. [used] and

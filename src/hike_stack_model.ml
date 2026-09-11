@@ -10,6 +10,7 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
+open Bap_core_theory
 module Abi = Hike_abi
 
 (* Stack pointer only: the one register granted stack semantics by fiat
@@ -196,6 +197,20 @@ let arg_slot (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "hike_slot%d" i)
     (Type.Imm 64)
+
+(* The call-argument temp of slot [i] (T10): the BIR def a call site
+   binds the promoted argument to (the promotion rewrite creates it
+   right after the site's outgoing store; the call's emission passes its
+   bound value).  Deterministically minted like the slots. *)
+let call_arg (i : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (Printf.sprintf "hike_arg%d" i)
+    (Type.Imm 64)
+
+(* Tests for the call-argument temps (the DCE rule: they survive — they
+   are the call's arguments, consumed by the emission). *)
+let is_call_arg (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"hike_arg"
 
 (* The Caller-Window Parameter: the caller-window base, not SP — the
    residual window-base argument of variadic/mixed subs (the bridge) and
@@ -499,3 +514,212 @@ let split_plan (sub : sub term) (info : vsa_info) :
         false
       end
       else true)
+
+(* ------------------------------------------------------------------ *)
+(* T10: the emitter's per-sub inputs.  The emitter consumes NO analysis *)
+(* record — everything it needs is either STRUCTURE (the promotion's    *)
+(* BIR args / arg defs / direct targets, the def-kind slots below) or   *)
+(* this narrow LAYOUT fact: the alloca-construction inputs alone (the   *)
+(* fallback frame's bytes and the split regions' geometry).  No         *)
+(* offsets, no promotion facts, no kinds in it.                         *)
+(* ------------------------------------------------------------------ *)
+
+module Sub_layout = struct
+  open Core_kernel[@@warning "-D"]
+
+  type t = {
+    (* Some n = one %frame alloca of n bytes, anchor at byte n-8 (the
+       fallback storage).  None = no fallback frame. *)
+    frame_bytes : int64 option;
+    (* The split regions: (id, span, alloca bytes) — one [stack_rN]
+       alloca each, the GEP offsets relative to [span]. *)
+    regions : (int * (int64 * int64) * int64) list;
+  }
+
+  (* (id, span, bytes) structural equality/order. *)
+  let equal_region (i1, (l1, h1), b1) (i2, (l2, h2), b2) =
+    Int.equal i1 i2 && Int64.equal l1 l2 && Int64.equal h1 h2
+    && Int64.equal b1 b2
+
+  let compare_region (i1, (l1, h1), b1) (i2, (l2, h2), b2) =
+    match Int.compare i1 i2 with
+    | 0 -> (
+        match Int64.compare l1 l2 with
+        | 0 -> (
+            match Int64.compare h1 h2 with
+            | 0 -> Int64.compare b1 b2
+            | c -> c)
+        | c -> c)
+    | c -> c
+
+  let equal (a : t) (b : t) =
+    Base.Option.equal Int64.equal a.frame_bytes b.frame_bytes
+    && Base.List.equal equal_region a.regions b.regions
+
+  let compare (a : t) (b : t) : int =
+    let frame =
+      match (a.frame_bytes, b.frame_bytes) with
+      | None, None -> 0
+      | None, Some _ -> -1
+      | Some _, None -> 1
+      | Some x, Some y -> Int64.compare x y
+    in
+    if frame <> 0 then frame
+    else Base.List.compare compare_region a.regions b.regions
+
+  let pp fmt { frame_bytes; regions } =
+    Format.fprintf fmt "frame=%s;regions=%d"
+      (match frame_bytes with Some n -> Int64.to_string n | None -> "none")
+      (Base.List.length regions)
+
+  let empty = { frame_bytes = None; regions = [] }
+
+  let sexp_of_t (t : t) : Sexp.t =
+    Sexp.List
+      (Sexp.Atom
+         (match t.frame_bytes with
+          | Some n -> Int64.to_string n
+          | None -> "none")
+       ::
+       Base.List.map t.regions ~f:(fun (id, (lo, hi), b) ->
+           Sexp.Atom (Printf.sprintf "%d:%Ld:%Ld:%Ld" id lo hi b)))
+
+  let t_of_sexp (s : Sexp.t) : t =
+    let atom_or_fail ~what = function
+      | Sexp.Atom a -> a
+      | _ -> failwith ("hike-layout: bad " ^ what ^ " sexp")
+    in
+    match s with
+    | Sexp.List (frame :: rs) ->
+        let frame_bytes =
+          match atom_or_fail ~what:"frame" frame with
+          | "none" -> None
+          | n -> Some (Int64.of_string n)
+        in
+        let region_atom a =
+          match
+            Stdlib.String.split_on_char ':' (atom_or_fail ~what:"region" a)
+          with
+          | [ id; lo; hi; b ] ->
+              (int_of_string id,
+               (Int64.of_string lo, Int64.of_string hi),
+               Int64.of_string b)
+          | _ -> failwith "hike-layout: bad region sexp"
+        in
+        { frame_bytes; regions = Base.List.map rs ~f:region_atom }
+    | _ -> failwith "hike-layout: bad sexp"
+
+  module Stringable = struct
+    type nonrec t = t
+    let to_string t = Sexp.to_string (sexp_of_t t)
+    let of_string s = t_of_sexp (Sexp.of_string s)
+  end
+
+  include Core_kernel.Binable.Of_stringable_without_uuid (Stringable)
+      [@@warning "-D"]
+end
+
+(* Top-level aliases (the mli's re-export shape). *)
+type sub_layout = Sub_layout.t = {
+  frame_bytes : int64 option;
+  regions : (int * (int64 * int64) * int64) list;
+}
+
+let empty_layout = Sub_layout.empty
+
+(* The layout rides the SUB TERM (the one tag): the producer computes it
+   once; the emitter reads it off the term. *)
+let layout_tag : Sub_layout.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-layout"
+    ~uuid:"3f5e1c2a-9b47-4d60-8a15-c4d9e07b2f11"
+    (module Sub_layout)
+
+(* Computes the alloca-construction inputs from the record (the exact
+   replication of the emitter's former frame decision): precise subs
+   carry their split regions; a non-degraded sub with no tags owns no
+   stack storage; everything else falls back to one frame sized by
+   [frame_dims]. *)
+let layout_of_sub (sub : sub term) ~(abi : Abi.t) (info : vsa_info) :
+    Sub_layout.t =
+  if is_precise info then
+    { frame_bytes = None;
+      regions =
+        Base.List.map info.stack_plan ~f:(fun r ->
+            (r.id, r.span, region_bytes r)) }
+  else if Core.Map.is_empty info.offsets && not info.degraded then
+    Sub_layout.empty
+  else
+    let n, _ = frame_dims sub ~abi info in
+    { frame_bytes = Some n; regions = [] }
+
+let set_layout (l : Sub_layout.t) (sub : sub term) : sub term =
+  Term.set_attr sub layout_tag l
+
+(* ------------------------------------------------------------------ *)
+(* T10: the per-def tags ride the DEF'S VALUE (the rip_relative_addr   *)
+(* precedent): the producer stamps the kind (the 100% Tagging          *)
+(* Invariant's tag, plus the VLA marker for the dynamic-allocation      *)
+(* defs) onto each def; the emitter reads them off the term — never    *)
+(* via a per-sub record.                                                *)
+(* ------------------------------------------------------------------ *)
+
+module KB = Bap_knowledge.Knowledge
+
+(* Conflicting kinds for one def (two different classifications were
+   stamped — the analyses disagree). *)
+type KB.conflict += Def_kind_conflict
+
+let () =
+  KB.Conflict.register_printer (function
+    | Def_kind_conflict ->
+        Some
+          "hike: def-kind conflict: two different VSA classifications were stamped for one def (the analyses disagree)"
+    | _ -> None)
+
+let kind_domain : vsa_kind option KB.Domain.t =
+  KB.Domain.define
+    ~inspect:(fun _ -> Base.Sexp.Atom "hike:def-kind")
+    ~join:(fun a b ->
+      match (a, b) with
+      | None, x | x, None -> Ok (if Base.Option.is_none a then b else a)
+      | Some a, Some b ->
+          if equal_vsa_kind a b then Ok (Some a)
+          else Error Def_kind_conflict)
+    ~order:(fun a b ->
+      match (a, b) with
+      | None, None -> KB.Order.EQ
+      | None, Some _ -> KB.Order.LT
+      | Some _, None -> KB.Order.GT
+      | Some a, Some b ->
+          if Base.phys_equal a b || equal_vsa_kind a b then KB.Order.EQ
+          else KB.Order.NC)
+    ~empty:None "hike:def-kind"
+
+(* The def's VSA kind: the producer's classification, read by the
+   emitter's tag dispatch and the frame-wrap license. *)
+let def_kind_slot : (Theory.Value.cls, vsa_kind option) KB.slot =
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-vsa-kind"
+    kind_domain
+
+let def_kind (d : def term) : vsa_kind option =
+  KB.Value.get def_kind_slot (Def.value d)
+
+(* Stamps the record's per-def facts onto the sub's defs: the kind tag
+   for every tagged def, and the VLA kind for the dynamic-allocation
+   defs (whose rhs is a SP decrement — no memory node, hence no tag —
+   so the marker travels in the same slot). *)
+let stamp_def_kinds (info : vsa_info) (sub : sub term) : sub term =
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.map def_t blk ~f:(fun d ->
+          match
+            match Core.Map.find info.offsets (Term.tid d) with
+            | Some k -> Some k
+            | None ->
+                if Core.Set.mem info.vla_alloc_tids (Term.tid d) then
+                  Some (VLA (Term.tid d))
+                else None
+          with
+          | None -> d
+          | Some k ->
+              Def.with_value d
+                (KB.Value.put def_kind_slot (Def.value d) (Some k))))

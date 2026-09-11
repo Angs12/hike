@@ -9,9 +9,10 @@ open Bil2llvm_exp
 open Bil2llvm_section
 
 
-(* Looks up a def VSA tag. *)
-let find_def_tag sub_info def =
-  Core.Map.find sub_info.Hike_stack_model.offsets (Term.tid def)
+(* The def's VSA kind (T10): the tag rides the DEF'S VALUE — the
+   producer stamped it; no per-sub record reaches the emitter. *)
+let find_def_tag (def : def term) : Hike_stack_model.vsa_kind option =
+  Hike_stack_model.def_kind def
 
 (* Tests for PLT stubs. *)
 let is_plt_trampoline ctx (sub : sub term) : bool =
@@ -184,28 +185,31 @@ let create_dynamic_alloc llvm_builder blk_tid exp =
   | _ -> create_exp llvm_builder blk_tid exp
 
 (* Finds the region containing an offset. *)
-let region_of_offset (regions : (Hike_stack_model.region * Llvm.llvalue) list)
-    (lo : int64) : (Hike_stack_model.region * Llvm.llvalue) option =
-  Base.List.find regions ~f:(fun (r, _) ->
-      let rlo, rhi = r.Hike_stack_model.span in
+let region_of_offset
+    (regions : ((int * (int64 * int64)) * Llvm.llvalue) list)
+    (lo : int64) : ((int * (int64 * int64)) * Llvm.llvalue) option =
+  Base.List.find regions ~f:(fun ((_, (rlo, rhi)), _) ->
       Int64.compare lo rlo >= 0 && Int64.compare lo rhi <= 0)
 
 (* Dispatches tagged accesses to storage.  The producer's tag IS the
-   lane (T3): no sign tests in the emitter.
+   lane (T3) — it rides the DEF'S VALUE (T10): no sign tests, no record.
    - Range/Infinite (spans entirely below the entry RSP — this sub's
      own frame): the ONE uniform rule — the address integer flows
      through create_exp into create_addr_ptr's licensed arm,
      ptr = anchor + (word − stack_0) + anchor_idx, total over all signs
      and widths (the SP Slot value IS stack_0, so the runtime index is
      exact however imprecise the tag).
-   - Caller: a proven slot read becomes its promoted parameter; the
-     retaddr cell reads undef (it dies with the real ret); the rest is
-     the window form over the Caller-Window Parameter (T4).
+   - Caller: the proven slot reads were REWRITTEN to parameter reads by
+     the promotion (a plain var read — never reaches this dispatch);
+     the retaddr cell (a Caller(0,0) load within the cell width, no
+     store in the rhs — the producer's exact retaddr class) reads undef
+     (it dies with the real ret); everything else is the window form
+     over the Caller-Window Parameter (T4).
    - Mixed (two-sided/wrapped spans): the two-base rule — the runtime
      word chooses (the recorded deviation from the ticket's no-select
      letter; no single-base rule is sound for the class).
    - VLA/Unbounded/Dead/untagged: their existing complete lanes. *)
-let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
+let mem_access llvm_builder blk_tid sub_tid fr def_tag
     (def : def term) (exp : exp) =
   
   let open KB in
@@ -215,64 +219,30 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
   | Some (Hike_stack_model.Range _ | Hike_stack_model.Infinite _) ->
       (* The uniform materialization rule. *)
       create_exp llvm_builder blk_tid exp
-  | Some (Hike_stack_model.Caller _) ->
-      (* ONE rule over the def's mem node and its fact (T4b): the node's
-         value is substituted into the rhs, so the def's surrounding
-         computation is carried BY CONSTRUCTION — a wide access is
-         never "either the copy or the guard".  The node's fact: a
-         proven slot read is its promoted parameter (at the node's own
-         width — the narrower-read rule); the retaddr cell reads undef
-         (it dies with the real ret); every other node takes the
-         caller-window materialization over the Caller-Window
-         Parameter. *)
-      let dtid = Term.tid def in
+  | Some (Hike_stack_model.Caller (lo, hi)) ->
+      let retaddr_cell =
+        Int64.equal lo 0L && Int64.equal hi 0L
+      in
       (match find_mem_node (Def.rhs def) with
        | None -> create_exp llvm_builder blk_tid exp
+       | Some (`Load (addr, size))
+         when retaddr_cell && Size.in_bits size <= 64
+              && Base.Option.is_none
+                   (Hike_stack_model.store_data_of_rhs (Def.rhs def)) ->
+           (* The return-address cell: dies with the real ret. *)
+           let marker = marker_of_size size in
+           let emit () =
+             let* llvm_ctx = Context.get llvm_ctx_var in
+             KB.return
+             @@ Llvm.undef (Llvm.integer_type llvm_ctx (Size.in_bits size))
+           in
+           let rewrite marker = rewrite_mem_node exp addr size marker in
+           emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
        | Some (`Load (addr, size)) | Some (`Store (addr, _, size)) ->
-           if Core.Set.mem sub_info.Hike_stack_model.prom_retaddr dtid then
-             let marker = marker_of_size size in
-             let emit () =
-               let* llvm_ctx = Context.get llvm_ctx_var in
-               KB.return
-               @@ Llvm.undef (Llvm.integer_type llvm_ctx (Size.in_bits size))
-             in
-             let rewrite marker = rewrite_mem_node exp addr size marker in
-             emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
-           else
-             (match Core.Map.find sub_info.Hike_stack_model.prom_slots dtid with
-             | Some i ->
-                 (* The parameter's binding is filter-guaranteed at every
-                    step (the create_branches-class shape assert): (1) the
-                    record's [prom_arity] = max promoted index + 1, so
-                    [i < arity]; (2) the signature carries slots
-                    0..arity-1; (3) the sig's args join the transfer set
-                    via [arg_set]; (4) [add_args_to_vars] binds every
-                    param at entry and the phi plumbing rebinds it in
-                    each block. *)
-                 let marker = marker_of_size size in
-                 let emit () =
-                   let v =
-                     match get_local ctx blk_tid (Hike_stack_model.arg_slot i) with
-                     | Some v -> v
-                     | None -> get_phi ctx blk_tid (Hike_stack_model.arg_slot i)
-                   in
-                   let* llvm_ctx = Context.get llvm_ctx_var in
-                   let bits = Size.in_bits size in
-                   let ty = Llvm.type_of v in
-                   KB.return
-                   @@ (match Llvm.classify_type ty with
-                       | Llvm.TypeKind.Integer when Llvm.integer_bitwidth ty > bits ->
-                           Llvm.build_trunc v (Llvm.integer_type llvm_ctx bits)
-                             "" llvm_builder
-                       | Llvm.TypeKind.Integer when Llvm.integer_bitwidth ty < bits ->
-                           Llvm.build_zext v (Llvm.integer_type llvm_ctx bits)
-                             "" llvm_builder
-                       | _ -> v)
-                 in
-                 let rewrite marker = rewrite_mem_node exp addr size marker in
-                 emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
-             | None ->
-                 caller_mem_access llvm_builder blk_tid fr addr exp))
+           (* The window materialization: the written slots (demoted by
+              the producer) and the wide reads — the traffic the
+              promotion left on the window, where the writes landed. *)
+           caller_mem_access llvm_builder blk_tid fr addr exp)
   | Some (Hike_stack_model.Mixed _) ->
       (match find_mem_node (Def.rhs def) with
       | Some node ->
@@ -302,14 +272,14 @@ let mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag
       return @@ Llvm.poison typ
   | None -> create_exp llvm_builder blk_tid exp
 
-let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
+let create_def blk_tid llvm_builder sub_tid fr def =
 
   let open KB in
   let* ctx = Context.get emit_ctx_var in
   let var = Def.lhs def in
   let v = Def.value def in
   let exp = Def.rhs def in
-  let def_tag = find_def_tag sub_info def in
+  let def_tag = find_def_tag def in
   (* The address-materialization license (tickets T1 + T3): the def's
      tag kind IS the producer's frame-residency proof.  Range/Infinite
      (the frame lane — spans reaching below the entry RSP, post-split)
@@ -322,28 +292,31 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
      | Some (Hike_stack_model.Range _ | Hike_stack_model.Infinite _) -> true
      | _ -> false);
   let* res =
-    (* Runtime-sized SP decrements become real allocas (spec §2.3). *)
-    if Core.Set.mem alloc_tids (Term.tid def) then
-      create_dynamic_alloc llvm_builder blk_tid exp
-    else if KB.Value.get rip_relative_addr v then
-      create_rip_relative_addr llvm_builder blk_tid exp
-    else if fr.is_precise then
-      (* Split-model accesses use region GEPs. *)
-      (match def_tag with
-       | Some (Hike_stack_model.Range (lo, hi)) when Int64.equal lo hi ->
-           (match region_of_offset fr.regions lo with
-            | Some (r, base) ->
-                let offset = Int64.sub lo (fst r.Hike_stack_model.span) in
-                let* llvm_ctx = Context.get llvm_ctx_var in
-                let gep =
-                  Llvm.build_gep (Llvm.i8_type llvm_ctx) base
-                    [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]
-                    "" llvm_builder
-                in
-                 mem_access_at_ptr llvm_builder blk_tid gep exp
-            | None -> mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp)
-       | _ -> mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp)
-    else mem_access llvm_builder blk_tid sub_tid sub_info fr def_tag def exp
+    (* Runtime-sized SP decrements become real allocas (spec §2.3) —
+       the VLA marker rides the def's kind (T10). *)
+    match def_tag with
+    | Some (Hike_stack_model.VLA _) ->
+        create_dynamic_alloc llvm_builder blk_tid exp
+    | _ ->
+        if KB.Value.get rip_relative_addr v then
+          create_rip_relative_addr llvm_builder blk_tid exp
+        else if fr.is_precise then
+          (* Split-model accesses use region GEPs. *)
+          (match def_tag with
+           | Some (Hike_stack_model.Range (lo, hi)) when Int64.equal lo hi ->
+               (match region_of_offset fr.regions lo with
+                | Some ((_, (rlo, _)), base) ->
+                    let offset = Int64.sub lo rlo in
+                    let* llvm_ctx = Context.get llvm_ctx_var in
+                    let gep =
+                      Llvm.build_gep (Llvm.i8_type llvm_ctx) base
+                        [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]
+                        "" llvm_builder
+                    in
+                     mem_access_at_ptr llvm_builder blk_tid gep exp
+                | None -> mem_access llvm_builder blk_tid sub_tid fr def_tag def exp)
+           | _ -> mem_access llvm_builder blk_tid sub_tid fr def_tag def exp)
+        else mem_access llvm_builder blk_tid sub_tid fr def_tag def exp
   in
   (* The def's value is the variable's declared width: an over-wide rhs
      (the -O2 lane extracts, e.g. [low:128] feeding a 64-bit var)
@@ -369,19 +342,5 @@ let create_def blk_tid llvm_builder sub_tid sub_info fr alloc_tids def =
   in
   (* The license scopes to this def's rhs emission only. *)
   ctx.frame_wrap_license := false;
-  (* The outgoing slot store's value is recorded where it is PRODUCED
-     (T4b): the site's call passes the value this store wrote (looked
-     up by the def tid), never a re-evaluation of the stored exp at the
-     call — a var the block redefines between the store and the call
-     would pass the wrong value. *)
-  let is_site_store =
-    match Core.Map.find sub_info.Hike_stack_model.prom_sites blk_tid with
-    | Some site ->
-        Base.List.exists site.Hike_stack_model.site_slots
-          ~f:(fun (_, dtid) -> Tid.equal dtid (Term.tid def))
-    | None -> false
-  in
-  if is_site_store then
-    EHashtbl.set fr.store_vals ~key:(Term.tid def) ~data:res;
   insert_local ctx blk_tid var res;
   return ()

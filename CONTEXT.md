@@ -92,8 +92,14 @@ _Avoid_: arr_of (the deleted pre-fission name), tag-consultation at emission
 **Region Base** (`stack_rN_base`): the region's cell-0 address var, entry-bound to the alloca; the fissioned address `[base + index]` keeps the original index arithmetic with the base naming the region. Both operands of a fissioned access name the region — a split storage (one path's alloca GEP vs another's raw lane for the same cell) is unrepresentable.
 _Avoid_: sp-lane arithmetic for fissioned members
 
-**Stack-Arg Promotion**: The total conversion of stack-passed call arguments to real call parameters — the callee's proven incoming stack slots become parameters; callers' outgoing stores become call arguments at every resolved site. Per-slot mixing (unprovable slots stay on the window); per-slot width rule (promoted at the stored width, narrower reads truncate, a wider read demotes the slot).
-_Avoid_: outgoing-area threading, memory-passed args, provenness gate
+**Stack-Arg Promotion**: The total conversion of stack-passed call arguments to real call parameters — the callee's proven incoming stack slots become parameters; callers' outgoing stores become call arguments at every resolved site. Per-slot mixing (unprovable slots stay on the window); per-slot width rule (promoted at the stored width, narrower reads truncate, a wider read demotes the slot). T10: the promotion is a BIR REWRITE in the producer's pass (the mem-fission precedent) — the sub term gains real BIR args (`hike_slotN`, plus `hike_window` when the residual survives), proven slot loads are rewritten to read them, each site binds the stored value to a `hike_argN` def right after its store, and the emitter transcribes the structure — it reads no record.
+_Avoid_: outgoing-area threading, memory-passed args, provenness gate, emitter record reads
+
+**Layout Tag** (`Sub_layout`): The narrow per-sub fact that rides the SUB TERM: the alloca-construction inputs alone (the fallback frame's bytes, the split regions' (id, span, bytes)). No offsets, no promotion facts, no kinds in it — the analysis record never reaches the emitter.
+_Avoid_: vsa_info in the emitter, per-sub record query, emitter KB read
+
+**Def-Kind Tag**: The per-def VSA kind (`Range`/`Infinite`/`Caller`/`Mixed`/`Unbounded`/`Dead`/`VLA`) riding the DEF'S VALUE as a KB slot (the `rip_relative_addr` precedent) — the producer stamps it, the emitter's tag dispatch and frame-wrap license read it off the term.
+_Avoid_: per-def record lookup, tid-keyed side table
 
 **SP Slot**: The entry-block alloca every memory-touching sub owns, holding the sub's per-invocation stack anchor (the ptrtoint of its own frame or region storage). SP is never a function parameter; model SP mutations are stores to the slot.
 _Avoid_: hike_stack parameter, threaded SP, SP argument
@@ -101,8 +107,8 @@ _Avoid_: hike_stack parameter, threaded SP, SP argument
 **Per-Invocation Anchor** (`stack_0`): The model's stack origin, bound at entry to the sub's own storage base — reentrant-safe; SP-relative offsets are frame-relative. No constant anchor, no shared region.
 _Avoid_: constant anchor, global stack base
 
-**Resolved Call Site**: A call site whose target the VSA proves a singleton lifted sub — it emits a direct call through the target's promoted signature. A bounded multi-target set or any foreign address emits the pointer call (memory convention).
-_Avoid_: synthetic indirect signature, indirect-call heuristic
+**Resolved Call Site**: A call site whose target the VSA proves a singleton lifted sub — the promotion rewrite (T10) rewrites its target to a DIRECT BIR call target, so the emitter emits a plain direct call through the target's promoted signature. A bounded multi-target set or any foreign address keeps the indirect jmp and emits the pointer call (memory convention).
+_Avoid_: synthetic indirect signature, indirect-call heuristic, resolution record at emission
 
 **Thunk** (memory-convention twin): The twin of an address-taken promoted sub, carrying the legacy memory-path signature; function-pointer data renders to the thunk, so unresolvable call sites stay sound through the pointer.
 _Avoid_: trampoline, target demotion

@@ -56,27 +56,19 @@ let excluded_subs =
     "frame_dummy";
   ]
 
-(* FP instructions modeled as soft-float calls. *)
-let calls_intrinsic prog =
-  let callgraph = Program.to_graph prog in
-  let visit_edge _ edge filter_set =
-    let caller = Graphs.Callgraph.Edge.src edge in
-    let callee = Graphs.Callgraph.Edge.dst edge in
-    let term = Term.find sub_t prog callee in
-    if
-      Base.Option.value_map term ~default:false ~f:(fun term ->
-          is_intrinsic term
-          && not (is_emittable_intrinsic term)
-          && not (is_llvm_x86_intrinsic term))
-    then Core.Set.add filter_set caller
-    else filter_set
-  in
-  Graphlib.Std.Graphlib.depth_first_search
-    (module Graphs.Callgraph)
-    callgraph ~init:Tid.Set.empty ~enter_edge:visit_edge
-
-let should_filter filter_set syms sub =
-  (* Emittable intrinsics stay; their calls inline. *)
+(* The intrinsic-callers exclusion is DELETED (T10 part 1): it was a
+   relic of the incomplete-FP-table era, and already structurally dead —
+   [is_emittable_intrinsic] and [is_llvm_x86_intrinsic] partition the
+   intrinsics by body-ness, so the exclusion's predicate was a
+   contradiction and the set it built was always empty.  Callers of
+   intrinsics lift; the promotion, thunks, and window lanes are
+   callee-agnostic.  What stays filtered: the intrinsic SUBS themselves
+   (BAP's bodyless @intrinsic:* placeholders are not code — call TARGETS
+   map through the emitter's table; the placeholder subs are never
+   lifted). *)
+let should_filter syms sub =
+  (* Emittable intrinsics (the soft-float bodies) stay; their calls
+     inline. *)
   if is_emittable_intrinsic sub then false
   else
     Base.List.mem ~equal:String.equal excluded_subs (Sub.name sub)
@@ -84,7 +76,6 @@ let should_filter filter_set syms sub =
     || Term.has_attr sub Sub.extern
     || Term.has_attr sub Sub.entry_point
     || is_intrinsic sub
-    || Core.Set.mem filter_set (Term.tid sub)
     || (not @@ StrSet.mem (Sub.name sub) syms)
 
 let filter_subs proj =
@@ -94,9 +85,8 @@ let filter_subs proj =
         StrSet.add name set)
   in
   Project.map_program proj ~f:(fun prog ->
-      let filter_set = calls_intrinsic prog in
       Term.filter_map sub_t prog ~f:(fun sub ->
-          if should_filter filter_set syms sub then
+          if should_filter syms sub then
             None
           else
             Some (sub |> simplify_jmps)))

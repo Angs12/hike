@@ -12,6 +12,19 @@ open Bap_core_theory
 module B2l = Hike.Bil2llvm
 module Cu = Hike.Stack_model
 
+(* T10: the emitter consumes NO record — the fixture stamps the
+   producer's facts onto the terms (what the pipeline's vsa pass does:
+   per-def kinds, the layout tag, and the promotion's BIR structure).
+   [Kb.provide] stays a pipeline-pass concern and is not used here. *)
+let stamp (info : Cu.vsa_info) (sub : sub term) : sub term =
+  let sub = Cu.stamp_def_kinds info sub in
+  let sub =
+    Cu.set_layout
+      (Cu.layout_of_sub sub ~abi:Hike.Abi.x86_64_sysv info)
+      sub
+  in
+  Hike.Vsa.promote_sub info sub
+
 (* The native op each table row must emit. *)
 let fp_rows : (string * B2l.native_fp) list =
   [
@@ -135,8 +148,6 @@ let run_poison () =
   let st =
     Def.create m (Bil.Store (Bil.Var m, addr, Bil.Var t, LittleEndian, `r64))
   in
-  let unb_sub = mk_lds_sub "poison_unb" [ ld; st ] in
-  let dead_sub = mk_lds_sub "poison_dead" [ ld; st ] in
   (* Unbounded on the load/store; Dead on the second pair. *)
   let unb_info : Cu.vsa_info =
     Cu.mk_vsa_info
@@ -147,9 +158,10 @@ let run_poison () =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid ld, Cu.Dead) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
-  Kb.provide
-    (Tid.Map.singleton (Term.tid unb_sub) unb_info);
-  Kb.provide (Tid.Map.singleton (Term.tid dead_sub) dead_info);
+  let unb_sub = mk_lds_sub "poison_unb" [ ld; st ] in
+  let dead_sub = mk_lds_sub "poison_dead" [ ld; st ] in
+  let unb_sub = stamp unb_info unb_sub in
+  let dead_sub = stamp dead_info dead_sub in
   let ir_holder = ref "" in
   let err_unb =
     capture_stderr (fun () -> ir_holder := emit_ir [ unb_sub ])
@@ -263,7 +275,7 @@ let run_casts () =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
-  Kb.provide (Tid.Map.singleton (Term.tid sub) info);
+  let sub = stamp info sub in
   let ir = emit_ir [ sub ] in
   check "CAST: the tagged store reaches memory with its narrowing cast intact"
     (contains_substring ir "store" && contains_substring ir "trunc")
@@ -322,7 +334,7 @@ let run_golden () =
       ~regions:[ region ] ~stack_plan:[ region ]
       ~degraded:false ~vla_alloc_tids:Tid.Set.empty ()
   in
-  Kb.provide (Tid.Map.singleton (Term.tid sub) info);
+  let sub = stamp info sub in
   let ir = emit_ir [ sub ] in
   check_ir "GOLDEN: the golden sub emits a function define" "define" ir;
   check_ir "GOLDEN: the fission region alloca is built by name" "stack_r0" ir;
@@ -382,7 +394,7 @@ let run_fp_gpr () =
     Cu.mk_vsa_info
       ~offsets:[ (Term.tid d_st, Cu.Range (-16L, -16L)) ] ~regions:[] ~stack_plan:[] ~degraded:false       ~vla_alloc_tids:Tid.Set.empty ()
   in
-  Kb.provide (Tid.Map.singleton (Term.tid caller_sub) info);
+  let caller_sub = stamp info caller_sub in
   let ir_holder = ref "" in
   let err = capture_stderr (fun () -> ir_holder := emit_ir [ caller_sub; callee ]) in
   let ir = !ir_holder in
@@ -542,17 +554,29 @@ let run_promotion () =
       ~offsets:[] ~regions:[] ~stack_plan:[] ~degraded:false
       ~vla_alloc_tids:Tid.Set.empty ()
   in
-  Kb.provide (Tid.Map.singleton (Term.tid callee) callee_info);
-  Kb.provide (Tid.Map.singleton (Term.tid caller) caller_info);
+  let callee = stamp callee_info callee in
+  let caller = stamp caller_info caller in
   let ir = emit_ir [ caller; callee ] in
+  (try
+     let oc = open_out "/tmp/t10_prom_ir.txt" in
+     output_string oc ir; close_out oc
+   with _ -> ());
   (* The callee's promoted signature carries the register lanes then
      the positional slots. *)
   check_ir "T4-PROM: the promoted signature carries the positional slots"
     "(i64 %RDI, i64 %RSI, i64 %hike_slot0, i64 %hike_slot1)" ir;
-  check_ir "T4-PROM: the resolved site calls the promoted body directly"
-    (sprintf "call void @\"%s\"(i64 undef, i64 undef, i64 undef, i64 undef)"
-       (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
-    ir;
+  (* T10: the resolved site is a DIRECT call through the promoted
+     signature (the producer rewrote the target); the unpassed slots
+     stay undef.  The register lanes carry the caller's own signature
+     values (the direct call freed the caller of its indirect-target
+     var, so the PLT shape rule no longer fires - the lanes are real
+     parameters, not undefs). *)
+  check
+    "T4-PROM: the resolved site calls the promoted body directly"
+    (contains_substring ir
+       (sprintf "call void @\"%s\"("
+          (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
+     && contains_substring ir ", i64 undef, i64 undef)");
   (* The Thunk: internal linkage, the legacy memory-path signature. *)
   check_ir "T4-THUNK: the memory-convention twin is emitted with internal linkage"
     (sprintf "define internal void @\"%s_hike_thunk\""
@@ -589,7 +613,7 @@ let run_promotion () =
       ~offsets:[] ~regions:[] ~stack_plan:[] ~degraded:false
       ~vla_alloc_tids:Tid.Set.empty ()
   in
-  Kb.provide (Tid.Map.singleton (Term.tid caller2) caller2_info);
+  let caller2 = stamp caller2_info caller2 in
   let ir2 = emit_ir [ caller2; callee ] in
   check_ir
     "T4-PTR: the unresolvable site takes the pointer call (never the promoted body)"
@@ -603,6 +627,133 @@ let run_promotion () =
     ir2;
   ()
 
+(* ------------------------------------------------------------------ *)
+(* Family 9: the promotion as a BIR rewrite (T10) — the sub's structure *)
+(* carries what the record used to.                                     *)
+(* ------------------------------------------------------------------ *)
+
+let run_t10_rewrite () =
+  (* A Caller(8,8) load def: the proven incoming slot read. *)
+  let m = memv "t10_m" in
+  let addr =
+    Bil.BinOp (Bil.PLUS, Bil.Var (v64 "RSP"), Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w)
+  in
+  let d_ld =
+    Def.create (ivar64 "t10_t")
+      (Bil.Load (Bil.Var m, addr, LittleEndian, `r64))
+  in
+  let exit_blk = mk_exit_blk () in
+  let bb = Blk.Builder.create () in
+  Blk.Builder.add_def bb d_ld;
+  Blk.Builder.add_jmp bb (Jmp.create (Goto (Direct (Term.tid exit_blk))));
+  let sb = Sub.Builder.create ~name:"t10_callee" () in
+  Sub.Builder.add_blk sb (Blk.Builder.result bb);
+  Sub.Builder.add_blk sb exit_blk;
+  let sub = Sub.Builder.result sb in
+  let info =
+    Cu.mk_vsa_info
+      ~prom_slots:(Tid.Map.singleton (Term.tid d_ld) 0)
+      ~prom_arity:1
+      ~offsets:[ (Term.tid d_ld, Cu.Caller (8L, 8L)) ]
+      ~regions:[] ~stack_plan:[] ~degraded:false
+      ~vla_alloc_tids:Tid.Set.empty ()
+  in
+  let sub' = Hike.Vsa.promote_sub info sub in
+  check "T10-PROMOTE: the sub gains its promoted parameter as a real BIR arg"
+    (Base.List.exists
+       (Term.enum arg_t sub' |> Seq.to_list)
+       ~f:(fun a -> Var.equal (Arg.lhs a) (Cu.arg_slot 0)));
+  check "T10-PROMOTE: the sub keeps its tid through the arg-term rewrite"
+    (Tid.equal (Term.tid sub') (Term.tid sub));
+  let find_def sub' dtid =
+    Term.enum blk_t sub'
+    |> Seq.find_map ~f:(fun b ->
+           Base.List.find_map
+             (Term.enum def_t b |> Seq.to_list)
+             ~f:(fun d ->
+                 if Tid.equal (Term.tid d) dtid then Some d else None))
+  in
+  let d_ld' = Base.Option.value_exn (find_def sub' (Term.tid d_ld)) in
+  check "T10-PROMOTE: the proven slot load reads its parameter"
+    (match Def.rhs d_ld' with
+     | Bil.Var v -> Var.equal v (Cu.arg_slot 0)
+     | _ -> false);
+  (* The stamped kind survives the rhs rewrite (the load-bearing stamp
+     fact: Def.with_rhs keeps the def's value). *)
+  let sub'' = Cu.stamp_def_kinds info sub' in
+  let d_stamped = Base.Option.value_exn (find_def sub'' (Term.tid d_ld)) in
+  check "T10-PROMOTE: the stamped kind survives the rhs rewrite"
+    (match Cu.def_kind d_stamped with
+     | Some (Cu.Caller (8L, 8L)) -> true
+     | _ -> false);
+  (* The caller side: the site's store gains its call-arg def, and the
+     resolved indirect target becomes a direct call. *)
+  let m2 = memv "t10_m2" in
+  let store =
+    Def.create m2
+      (Bil.Store
+         ( Bil.Var m2,
+           Bil.BinOp (Bil.PLUS, Bil.Var (v64 "RSP"), Cbat_word.to_word (w64 16) |> fun w -> Bil.Int w),
+           Bil.Int (Cbat_word.to_word (w64 7)),
+           LittleEndian,
+           `r64 ))
+  in
+  let cont_blk = mk_exit_blk () in
+  let j =
+    Jmp.create
+      (Call
+         (Call.create ~return:(Direct (Term.tid cont_blk))
+            ~target:(Indirect (Bil.Var (ivar64 "t10_tptr")))
+            ()))
+  in
+  let cbb = Blk.Builder.create () in
+  Blk.Builder.add_def cbb store;
+  Blk.Builder.add_jmp cbb j;
+  let csb = Sub.Builder.create ~name:"t10_caller" () in
+  Sub.Builder.add_blk csb (Blk.Builder.result cbb);
+  Sub.Builder.add_blk csb cont_blk;
+  let caller = Sub.Builder.result csb in
+  let call_blk_tid = Term.tid (Base.List.hd_exn (Term.enum blk_t caller |> Seq.to_list)) in
+  let caller_info =
+    Cu.mk_vsa_info
+      ~prom_sites:
+        (Tid.Map.singleton call_blk_tid
+           { Cu.site_slots = [ (0, Term.tid store) ] })
+      ~prom_resolved:(Tid.Map.singleton (Term.tid j) (Some (Term.tid sub')))
+      ~offsets:[] ~regions:[] ~stack_plan:[] ~degraded:false
+      ~vla_alloc_tids:Tid.Set.empty ()
+  in
+  let caller' = Hike.Vsa.promote_sub caller_info caller in
+  let cblk = Base.List.hd_exn (Term.enum blk_t caller' |> Seq.to_list) in
+  let cdefs = Term.enum def_t cblk |> Seq.to_list in
+  let pos dtid =
+    Base.List.findi cdefs ~f:(fun _ d -> Tid.equal (Term.tid d) dtid)
+  in
+  (match (pos (Term.tid store), Base.List.findi cdefs ~f:(fun _ d -> Var.equal (Def.lhs d) (Cu.call_arg 0))) with
+   | Some (i_store, _), Some (i_arg, arg_def) ->
+       check "T10-SITE: the call-arg def is bound right after the storing def"
+         (Int.equal i_arg (i_store + 1));
+       check "T10-SITE: the call-arg def reads the storing def's own value"
+         (match Def.rhs arg_def with
+          | Bil.Var v -> Var.equal v (Def.lhs store)
+          | _ -> false)
+   | _ ->
+       check "T10-SITE: the call-arg def is bound right after the storing def" false);
+  (match Term.enum jmp_t cblk |> Seq.to_list with
+   | [ j' ] -> (
+       match Jmp.kind j' with
+       | Call c -> (
+           match Call.target c with
+           | Direct t ->
+               check "T10-SITE: the resolved indirect target became a direct call"
+                 (Tid.equal t (Term.tid sub'))
+           | Indirect _ ->
+               check "T10-SITE: the resolved indirect target became a direct call" false)
+       | _ ->
+           check "T10-SITE: the resolved indirect target became a direct call" false)
+   | _ ->
+       check "T10-SITE: the resolved indirect target became a direct call" false)
+
 let run () =
   run_fp_table ();
   run_poison ();
@@ -611,4 +762,5 @@ let run () =
   run_golden ();
   run_fp_gpr ();
   run_fp_gpr_cast ();
-  run_promotion ()
+  run_promotion ();
+  run_t10_rewrite ()
