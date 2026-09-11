@@ -178,6 +178,71 @@ let run () : unit =
        (jmp_cond_of s')
        (Bil.BinOp (Bil.EQ, Bil.BinOp (Bil.AND, xv, yv), Bil.Int (Word.zero 64))));
 
+  (* THE TEST/AND GROUP (the lifter's memory-operand test shape): the
+     flag defs — ZF := (x&y) = 0, SF := high:1[x&y], CF := 0, OF := 0.
+     With OF ≡ 0 the signed families run on SF alone. *)
+  let test_group_defs ?(with_of = true) () : def term list =
+    let a = Bil.BinOp (Bil.AND, xv, yv) in
+    let base =
+      [
+        Def.create zf (Bil.BinOp (Bil.EQ, w0_32, a));
+        Def.create sf (Bil.Cast (Bil.HIGH, 1, a));
+        Def.create cf (Bil.Int (Word.zero 1));
+      ] in
+    if with_of then Def.create ovf (Bil.Int (Word.zero 1)) :: base else base in
+  let test_core =
+    Bil.BinOp
+      ( Bil.AND
+      , Bil.BinOp (Bil.OR, Bil.Var sf, Bil.Var ovf)
+      , Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.AND, Bil.Var sf, Bil.Var ovf)) ) in
+  let test_jl_cond = test_core in
+  let test_jle_cond = Bil.BinOp (Bil.OR, Bil.Var zf, test_core) in
+  let zero64 = Bil.Int (Word.zero 64) in
+  let and_e = Bil.BinOp (Bil.AND, xv, yv) in
+  let s, _ = sub_of_defs_and_jmp "t13_test_jl" (test_group_defs ()) test_jl_cond in
+  let s' = J.compile_sub s in
+  check "t13: test jl → (x&y) <s 0 (OF ≡ 0)"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLT, and_e, zero64)));
+  check "t13: test jl consumed SF and OF defs"
+    (not (has_def_for s' sf) && not (has_def_for s' ovf));
+
+  let s, _ = sub_of_defs_and_jmp "t13_test_jle" (test_group_defs ()) test_jle_cond in
+  let s' = J.compile_sub s in
+  check "t13: test jle → (x&y) <=s 0"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, and_e, zero64)));
+
+  let s, _ = sub_of_defs_and_jmp "t13_test_jg"
+      (test_group_defs ())
+      (Bil.UnOp (Bil.NOT, test_jle_cond)) in
+  let s' = J.compile_sub s in
+  check "t13: test jg → 0 <s (x&y)"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLT, zero64, and_e)));
+
+  let s, _ = sub_of_defs_and_jmp "t13_test_jge"
+      (test_group_defs ())
+      (Bil.UnOp (Bil.NOT, test_jl_cond)) in
+  let s' = J.compile_sub s in
+  check "t13: test jge → 0 <=s (x&y)"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, zero64, and_e)));
+
+  let s, _ = sub_of_defs_and_jmp "t13_test_je" (test_group_defs ()) (Bil.Var zf) in
+  let s' = J.compile_sub s in
+  check "t13: test je → (x&y) = 0 (full group)"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, and_e, zero64)));
+
+  let s, _ = sub_of_defs_and_jmp "t13_test_jne" (test_group_defs ()) v_not in
+  let s' = J.compile_sub s in
+  check "t13: test jne → (x&y) != 0 (full group)"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.NEQ, and_e, zero64)));
+
+  (* RESIDUAL: the signed family over a test group whose OF def is
+     MISSING (cross-block OF): no OF fact, no OF ≡ 0 fact → the
+     identity. *)
+  let s, _ =
+    sub_of_defs_and_jmp "t13_test_noof" (test_group_defs ~with_of:false ()) test_jl_cond in
+  let s' = J.compile_sub s in
+  check "t13: test jl without OF stays residual" (Exp.equal (jmp_cond_of s') test_jl_cond);
+
   (* FOLD: cmp x,0 — (x−0)=0 folds; jnz → x != 0. *)
   let zero = Bil.Int (Word.zero 64) in
   let fold_defs =
