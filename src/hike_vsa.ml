@@ -122,11 +122,18 @@ let callee_side ~(offsets : Model.vsa_kind Tid.Map.t) (sub : sub term) :
                     (match Model.addr_of_rhs (Def.rhs d) with
                     | Some (_, size) when Int64.compare k 8L >= 0 ->
                         let bytes = Size.in_bits size / 8 in
-                        let first =
-                          Int64.to_int Int64.(div (sub k 8L) 8L) in
+                        (* slot i spans [entry_rsp + 8 + 8i, +8): BOTH
+                           bounds are relative to the window base — the
+                           bytes [k, k+bytes) intersect exactly the
+                           slots [(k-8)/8, (k-8+bytes-1)/8].  The guard
+                           keeps k-8 >= 0, so both divisions are on
+                           non-negative words (no negative-rounding
+                           corner). *)
+                        let rel = Int64.(sub k 8L) in
+                        let first = Int64.to_int Int64.(div rel 8L) in
                         let last =
                           Int64.to_int
-                            Int64.(div (add k (of_int (bytes - 1))) 8L) in
+                            Int64.(div (add rel (of_int (bytes - 1))) 8L) in
                         let rec mark i =
                           if i <= last then
                             (written := i :: !written; mark (i + 1))
