@@ -1,5 +1,9 @@
 # The typed-model program — convergence, soundness, simplicity
 
+> SUPERSEDED as the live spec by `.scratch/typed-model/spec-v2.md`
+> (the comprehensive consolidation, 2026-09-11). This document
+> remains the v1 record of the program's first half.
+
 Label: ready-for-agent
 Settled: 2026-09-10 (grilling sessions; decisions are the owner's);
 UPDATED 2026-09-10 late: T1/T2/T6/T3/T3c landed, the -O2 corpus
