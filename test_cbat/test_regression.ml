@@ -620,14 +620,15 @@ let run_regions () =
     && spans_in_order regions
        = [ (-64L, -48L); (-40L, -24L); (-16L, -16L); (32L, 40L) ]);
   ())
-;
+
 (* R12b is deleted with the escape analyses (the no-gates ruling): the
    bare-copy sub's fate is its TAGS — the tagged singleton region converts;
    the untagged aliased read emits through the real-address lane.  Its
    emission-level guarantee is the corpus battery's oracle. *)
-
-(  Printf.printf "ok: property M3 fused_join invariants (skipped due to API change)\n";
-  ())
+(* The M3 printf-stub is deleted with it (the test-audit lane, 2026-09-11):
+   a `Printf.printf "ok: ..."` that asserts nothing is a fake pass — the
+   fused_join invariants it "skipped" are pinned by the ML1-ML7 checks in
+   test_domains.ml. *)
 
 (* The fp-GPR lane (ADR 0008): heap-RBP must not be granted stack semantics
    by NAME. Both fixtures run on the REAL x86_64 target — at
