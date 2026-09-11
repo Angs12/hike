@@ -60,8 +60,13 @@ let stack_word (offs : Clp.t) : t = StackOff offs
 let stack_word_i64 (k : int64) : t =
   StackOff (Clp.singleton (Cbat_word.of_word (Word.of_int64 ~width:64 k)))
 
-(* The offset set when the value is stack-symbolic. *)
-let as_stack (t : t) : Clp.t option = match t with
+(* The offset set of a stack-symbolic value — the StackOff PROOF
+   (T14): answers ONLY for the symbolic arm.  A plain in-band set (the
+   degraded band arm) is None: the band re-tag serves ADDRESS
+   classification, where the argument is about addresses — never a
+   frame-extent question, where regular integers contribute
+   NOTHING. *)
+let stack_offsets (t : t) : Clp.t option = match t with
   | StackOff offs -> Some offs
   | Clp _ | FinSet _ -> None
 

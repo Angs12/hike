@@ -28,6 +28,14 @@ let singleton_i64 (ws : Vsa.WordSet.t) : int64 option =
         | _ -> None)
     | _ -> None
 
+(* The T14 census counter (debug builds only; vanishes elsewhere). *)
+#ifdef VSA_DEBUG
+let t14_slot_band_hits = ref 0
+let () = at_exit (fun () ->
+    Printf.printf "t14-census: slot-offset plain-band consults=%d\n"
+      !t14_slot_band_hits)
+#endif
+
 (* The segment-relative offset of [e] in [st], when it is a single
    known stack word (the offset-space twin of the denotation). *)
 let singleton_stack_offset (e : exp) (st : Vsa.AI.t) : int64 option =
@@ -35,7 +43,15 @@ let singleton_stack_offset (e : exp) (st : Vsa.AI.t) : int64 option =
   | Error _ -> None
   | Ok ws -> (
       match Vsa.Cbat_extraction.relativize_opt ws with
-      | Some rel -> singleton_i64 rel
+      | Some rel ->
+#ifdef VSA_DEBUG
+        (* THE T14 BAND-ARM CENSUS: the plain-band smear arm consulted
+           for a slot-correspondence offset (the value is NOT a StackOff
+           proof).  The verdict's disposition reads this count. *)
+        if Option.is_none (Vsa.WordSet.stack_offsets ws) then
+          incr t14_slot_band_hits;
+#endif
+        singleton_i64 rel
       | None -> None)
 
 (* The def's memory node is a LOAD of (addr, size); stores are not. *)
@@ -152,28 +168,37 @@ let caller_side ~(sol : Vsa.vsa_sol) ~(sp : var)
     * (int64 * int64) list =
   let sites = ref Tid.Map.empty in
   let resolved = ref Tid.Map.empty in
-  (* A stack-symbolic value that escapes the sub (a call argument) is
-     recorded for the precision decision and the frame sizing: the sub's
-     own storage must back every cell another sub reaches through the
-     escaped pointer. *)
+  (* An escaping stack value (a call argument) is recorded for the
+     precision decision and the frame sizing — by the escape-extent
+     rule (T14), a StackOff PROOF only: the sub's own storage must back
+     every cell another sub reaches through an SP-formed pointer, and
+     no plain integer is ever such a value. *)
   let exts = ref [] in
   let note_escape (e : exp) (st : Vsa.AI.t) =
     match Vsa.denote_imm_exp e st with
     | Error _ -> ()
     | Ok ws -> (
-        match Vsa.Cbat_extraction.relativize_opt ws with
+        (* THE ESCAPE-EXTENT RULE (T14): only a StackOff denotation — a
+           value formed from THIS sub's SP — sizes the frame and
+           decides the escape; a plain in-band integer contributes
+           NOTHING.  The accessor is the StackOff-proof one
+           ([Vsa.WordSet.stack_offsets]); the tag universe's
+           [relativize_opt] deliberately includes the plain-band smear
+           arm, and folding scratch integer arithmetic through it built
+           spill_many's 4-exabyte frame request (gcc -O2's checksum
+           values sit in [2^61, 2^63) — in-band, not stack). *)
+        match Vsa.WordSet.stack_offsets ws with
         | None -> ()
-        | Some rel ->
+        | Some offs ->
             let ext =
-              match singleton_i64 rel with
-              | Some v -> (v, v)
-              | None -> (
-                  match Vsa.WordSet.min_elem rel, Vsa.WordSet.max_elem rel with
-                  | Some mn, Some mx -> (
-                      match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
-                      | Ok lo, Ok hi -> (lo, hi)
-                      | _ -> (Int64.min_int, Int64.max_int))
+              match
+                Vsa.WordSet.Clp.min_elem offs, Vsa.WordSet.Clp.max_elem offs
+              with
+              | Some mn, Some mx -> (
+                  match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
+                  | Ok lo, Ok hi -> (lo, hi)
                   | _ -> (Int64.min_int, Int64.max_int))
+              | _ -> (Int64.min_int, Int64.max_int)
             in
             exts := ext :: !exts)
   in

@@ -176,7 +176,7 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
   let stack_anchor (v : var) : bool =
     match Var.typ v with
     | Type.Imm w ->
-      Option.is_some (WordSet.as_stack (AI.find_word w env v))
+      Option.is_some (WordSet.stack_offsets (AI.find_word w env v))
     | Type.Mem _ | Type.Unk -> false in
   (* Threaded cycle guards. *)
   let rec walk (cells : Exp.Set.t) (vars : Exp.Set.t) (e : exp) : bool =

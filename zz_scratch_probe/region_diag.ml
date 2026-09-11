@@ -64,7 +64,7 @@ let () =
                     if Ws.is_top ws then "TOP"
                     else if Ws.is_bottom ws then "BOTTOM"
                     else
-                      (match Ws.as_stack ws with
+                      (match Ws.stack_offsets ws with
                        | Some _ -> "StackOff"
                        | None ->
                          (match Ws.stack_bounds ws with
