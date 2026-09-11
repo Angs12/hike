@@ -21,6 +21,7 @@ let () =
   Test_regression.run_t4_resolution ();
   Test_regression.run_copy_reloc ();
   Test_regression.run_fp_gpr ();
+  Test_model.run ();
   Test_properties.run_roundtrip ();
   Test_properties.run_landmarks ();
   Test_properties.run_chains ();

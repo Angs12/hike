@@ -1,6 +1,6 @@
 (test
  (name test_main)
- (modules test_main test_common test_fixtures test_domains test_seed test_vsa test_backward test_regression test_properties test_dce test_bil2llvm test_jump)
+ (modules test_main test_common test_fixtures test_domains test_seed test_vsa test_backward test_regression test_properties test_dce test_bil2llvm test_jump test_model)
  (flags
   (:standard -alert -deprecated))
  (libraries
