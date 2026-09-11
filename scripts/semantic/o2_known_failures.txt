@@ -5,15 +5,17 @@
 # and forces a deliberate update of this file + AGENTS.md (the
 # re-baseline rule).
 #
-# State: 30/7 at the T4b merge (bundle 06b009e387d37dc3) — the pin
-# SHRANK 9 -> 7: fn_escape and fn_table_disp flipped GREEN (proven
-# flips: the T4b conversion rules — the T4-merge reds 32/5 -O0 resolved
-# to 37/37 and the -O2 members followed). Per-member attribution below.
-# The corpora are 37 bins (T4 added the four indirect-call sources).
+# State: 31/6 at the T14 merge (bundle 7ba492c8bf4bfbde) — the pin
+# SHRANK 7 -> 6: spill_many flipped GREEN (proven flip: T14's
+# escape-extent rule — only a StackOff proof sizes the frame; the
+# band re-tag misfire had built a 4-EB frame). Earlier: 9 -> 7 at the
+# T4b merge (bundle 06b009e387d37dc3; fn_escape and fn_table_disp
+# flipped GREEN — the T4b conversion rules). Per-member attribution
+# below. The corpora are 37 bins (T4 added the four indirect-call
+# sources); re-measured 2026-09-11 on a freshly compiled corpus pair.
 byte_copy       # L3 SSE lane def-use (T5) — value divergence (ck1/ck2 wrong), rc=0
 fizzbuzz_safe   # L1 poison arm — lifted SIGILL (rc=132): the lifted-ud2 lane reached at -O2 (same class as pre-T4)
-jump_table_sw   # the -O2 indirect-jump dispatch — lifted rc=192 (crash): the jump-table goto lane, its own dig
-spill_many      # lifted SIGSEGV (rc=139) at the -O2 frame layout under the promoted model — the T4-merge regression persists (T5/inventory dig)
+jump_table_sw   # the -O2 indirect-jump dispatch — lifted rc=224 (crash): the jump-table goto lane, its own dig
 union_overlap   # L3 SSE lane def-use (T5) — value divergence (total wrong), rc=0
 va_arg_mixed    # L1 poison arm — lifted SIGILL (rc=132): the va_arg alignment-split dead branch reached at -O2
 va_arg_vacopy   # the va_list state round-trip (T9) — second pass's last value 0 vs 6, rc=0
