@@ -68,17 +68,17 @@ gate "dune runtest (units + clpequiv referee)" "$OUT/runtest.log" $?
 
 # 1. -O0 corpus: emission, structural asserts, strict semantics, strict opt-safety.
 bash "$HERE/run_corpus.sh" "$C0" "$OUT/emit-o0" >"$OUT/emit-o0.log" 2>&1
-gate "-O0 emission (run_corpus, 33/33 rc=0)" "$OUT/emit-o0.log" $?
+gate "-O0 emission (run_corpus, rc=0)" "$OUT/emit-o0.log" $?
 bash "$HERE/check_allocas.sh" "$OUT/emit-o0" >"$OUT/allocas-o0.log" 2>&1
 gate "-O0 structural asserts (check_allocas)" "$OUT/allocas-o0.log" $?
 bash "$HERE/semantic/run_semantic.sh" "$C0" "$OUT/emit-o0" "$OUT/sem-o0" >"$OUT/sem-o0.log" 2>&1
-gate "-O0 semantics strict (33 PASS / 0 FAIL)" "$OUT/sem-o0.log" $?
+gate "-O0 semantics strict (all PASS)" "$OUT/sem-o0.log" $?
 bash "$HERE/semantic/run_semantic_opt.sh" "$C0" "$OUT/emit-o0" "$OUT/semopt-o0" >"$OUT/semopt-o0.log" 2>&1
-gate "-O0 opt-safety strict (33 PASS / 0 FAIL)" "$OUT/semopt-o0.log" $?
+gate "-O0 opt-safety strict (all PASS)" "$OUT/semopt-o0.log" $?
 
 # 2. -O2 corpus: emission, structural asserts, PINNED semantics.
 bash "$HERE/run_corpus.sh" "$C2" "$OUT/emit-o2" >"$OUT/emit-o2.log" 2>&1
-gate "-O2 emission (run_corpus, 33/33 rc=0)" "$OUT/emit-o2.log" $?
+gate "-O2 emission (run_corpus, rc=0)" "$OUT/emit-o2.log" $?
 bash "$HERE/check_allocas.sh" "$OUT/emit-o2" >"$OUT/allocas-o2.log" 2>&1
 gate "-O2 structural asserts (check_allocas)" "$OUT/allocas-o2.log" $?
 PIN="$HERE/semantic/o2_known_failures.txt"
