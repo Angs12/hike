@@ -518,7 +518,39 @@ let run_stl_rewrite () =
         (match Def.rhs d with
          | Bil.Cast (Bil.LOW, 32, Bil.Var v) -> is_slot_var v
          | _ -> false)
-     | None -> false)
+     | None -> false);
+
+  (* C3: the ABI-visible exception - a Caller-tagged access stays
+     memory even inside a convertible region (the cross-sub
+     consistency rule outranks the region). *)
+  let c3_st = mk_store 8L 9 `r64 in
+  let c3 = straight_sub "pr_c3_abi" [ c3_st ] in
+  let c3_region : Sm.region =
+    { id = 0; span = (-8L, -8L); members = [ (Term.tid c3_st, (-8L, -8L)) ];
+      convertible = true; max_width = 64 }
+  in
+  let c3_info = info_of ~offsets:[] ~regions:[ c3_region ] () in
+  let c3_info =
+    { c3_info with
+      Sm.offsets =
+        Core.Map.set Tid.Map.empty
+          ~key:(Term.tid c3_st) ~data:(Sm.Caller (8L, 8L)) }
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid c3) c3_info);
+  let c3' = Stl.stack_to_locals Theory.Target.unknown sp c3 in
+  let c3_st' =
+    Term.enum blk_t c3'
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.find ~f:(fun d -> Tid.equal (Term.tid d) (Term.tid c3_st))
+  in
+  check "PR-C3: the Caller-tagged access keeps its memory store (ABI-visible)"
+    (match c3_st' with
+     | Some d ->
+        (match Def.rhs d with
+         | Bil.Store (Bil.Var mem, _, _, _, _) -> Var.same mem m
+         | _ -> false)
+     | None -> false);
+  ()
 
 (* ------------------------------------------------------------------ *)
 (* Lane D: the emitter's alloca shapes — the VLA lane (the dynamic     *)
@@ -692,6 +724,7 @@ let run_abi_and_kb () =
   (* The ONE lookup: absence is the empty info (the identity record). *)
   check "PR-E2: info_of_sub on a never-provided sub is the empty record"
     (Sm.equal_vsa_info (Kb.info_of_sub (Tid.create ())) Sm.empty_vsa_info)
+
 
 let run () =
   run_producer_record ();
