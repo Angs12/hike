@@ -17,6 +17,12 @@ open Bap_core_theory
 
 module Sm = Hike.Stack_model
 module Hv = Hike.Vsa
+(* The consumer-side one-line alias (the src convention). *)
+module Abi = Hike.Abi
+
+(* A register list names exactly [names]. *)
+let names_are (vs : var list) (names : string list) : bool =
+  Base.List.map vs ~f:(fun v -> Var.name v) = names
 
 (* 64-bit literal word (native-int [w64] covers 63 bits only). *)
 let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
@@ -606,8 +612,90 @@ let run_emitter_shapes () =
     && contains_substring ir3 "alloca [2147483647 x i8]");
   ()
 
+(* ------------------------------------------------------------------ *)
+(* Lane E: the register/convention facts (Hike_abi, ADR 0008: SP is    *)
+(* the only stack-semantics register, fp an ordinary callee-saved GPR) *)
+(* and the KB domain's join/order semantics (the pipeline-only store). *)
+(* ------------------------------------------------------------------ *)
+
+let run_abi_and_kb () =
+  let abi = Hike.Abi.x86_64_sysv in
+  let named n = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64) in
+  (* The SysV record. *)
+  check "PR-E1: the stack pointer is RSP, and only RSP (SP-only, ADR 0008)"
+    (Var.equal (Var.base abi.Abi.sp) (Var.base (named "RSP"))
+    && Abi.is_sp abi (named "RSP")
+    && not (Abi.is_sp abi (named "RBP")));
+  check "PR-E1: RBP is an ordinary callee-saved GPR — no frame-pointer fact exists"
+    (Abi.is_callee_saved abi (named "RBP")
+    && names_are abi.Abi.callee_saved [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ]);
+  check "PR-E1: the SysV lanes — 6 integer args, 8 vector args, RAX/RDX returns"
+    (names_are abi.Abi.int_param_regs
+       [ "RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9" ]
+    && Base.List.length abi.Abi.vector_param_regs = 8
+    && String.equal (Var.name (Base.List.nth_exn abi.Abi.vector_param_regs 0)) "YMM0"
+    && names_are abi.Abi.return_regs [ "RAX"; "RDX" ]
+    && Base.List.length (Abi.param_regs Theory.Target.unknown) = 14);
+  check "PR-E1: the structural predicates partition the lanes"
+    (Abi.is_return_reg abi (named "RAX")
+    && not (Abi.is_return_reg abi (named "RCX"))
+    && Abi.is_vector_param_reg abi (named "YMM3")
+    && not (Abi.is_vector_param_reg abi (named "RDI")));
+  (* The unknown-target totality: the SysV record serves unit fixtures. *)
+  check "PR-E1: an unknown target falls back to the SysV record (total)"
+    (Hike.Abi.of_target_opt Theory.Target.unknown = None
+    && Abi.is_sp (Hike.Abi.of_target Theory.Target.unknown) (named "RSP")
+    && Hike.Abi.addr_size_bits Theory.Target.unknown = 0);
+  (* The real target: the reified SP register. *)
+  let x86 = Theory.Target.of_string "x86_64-gnu-elf" in
+  check "PR-E1: the x86_64-gnu-elf target reifies RSP as the SP"
+    (Theory.Target.matches x86 "x86_64-gnu-elf"
+    && (match Hike.Abi.of_target_opt x86 with
+        | Some a -> Abi.is_sp a (Hike.Abi.sp x86)
+        | None -> false));
+
+  (* The KB domain: extension order, union join, conflicts refuse. *)
+  let t1 = Tid.create () in
+  let t2 = Tid.create () in
+  let mk_info ks = Sm.mk_vsa_info ~offsets:ks ~regions:[] ~stack_plan:[]
+      ~degraded:false ~vla_alloc_tids:Tid.Set.empty () in
+  let i_a = mk_info [ (t1, Sm.Range (-8L, -8L)) ] in
+  let i_a' = mk_info [ (t1, Sm.Range (-8L, -8L)) ] in
+  let i_ab = mk_info [ (t1, Sm.Range (-8L, -8L)); (t2, Sm.Unbounded) ] in
+  let i_b = mk_info [ (t2, Sm.Range (-16L, -16L)) ] in
+  let i_c = mk_info [ (t1, Sm.Range (-24L, -24L)) ] in
+  let m1 = Tid.Map.singleton t1 i_a in
+  let m2 = Tid.Map.singleton t1 i_a' in
+  let big = Core.Map.set (Tid.Map.singleton t1 i_a) ~key:t2 ~data:i_ab in
+  let other = Tid.Map.singleton (Tid.create ()) i_b in
+  let open Kb in
+  check "PR-E2: the info order is extension (EQ / LT / GT / NC over the maps)"
+    (map_order m1 m2 = KB.Order.EQ
+    && map_order m1 big = KB.Order.LT
+    && map_order big m1 = KB.Order.GT
+    && map_order m1 other = KB.Order.NC);
+  check "PR-E2: joining a subset takes the bigger"
+    (match map_join m1 big with
+     | Ok j -> Core.Map.equal Sm.equal_vsa_info j big
+     | Error _ -> false);
+  check "PR-E2: joining disjoint maps unions (both entries survive)"
+    (match map_join m1 other with
+     | Ok j -> Core.Map.mem j t1 && Core.Map.mem j (fst (Base.Option.value_exn (Core.Map.nth other 0)))
+     | Error _ -> false);
+  check "PR-E2: two different infos for one sub CONFLICT (never silently dropped)"
+    (match map_join m1 (Tid.Map.singleton t1 i_c) with
+     | Error (Vsa_info_conflict _) -> true
+     | _ -> false);
+  check "PR-E2: info_join accepts equal infos and refuses differing ones"
+    ((match info_join t1 i_a i_a' with Ok _ -> true | Error _ -> false)
+    && (match info_join t1 i_a i_c with Error _ -> true | Ok _ -> false));
+  (* The ONE lookup: absence is the empty info (the identity record). *)
+  check "PR-E2: info_of_sub on a never-provided sub is the empty record"
+    (Sm.equal_vsa_info (Kb.info_of_sub (Tid.create ())) Sm.empty_vsa_info)
+
 let run () =
   run_producer_record ();
   run_layout ();
   run_stl_rewrite ();
-  run_emitter_shapes ()
+  run_emitter_shapes ();
+  run_abi_and_kb ()
