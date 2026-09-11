@@ -54,11 +54,18 @@ just move code!") The rewrite rules, in priority order:
   partial-flag effects) keeps the current path — the identity, not a
   refusal. The pass DELETES the idioms it compiles; the case-count
   delta is the acceptance's first row.
-- **THE VSA'S JCC MECHANISM STAYS (owner correction, 2026-09-11):**
-  it is the identity path for the RESIDUAL — the non-compiled idioms
-  (the 1/363 memory-operand class), cross-block flags, and corpus
-  growth. No decoder rows are deleted at wire-up; whether any row
-  becomes measured-dead later is a separate inventory question.
+- **CORRECTION #2 (owner, superseding the keep): the cond rewriter
+  does the exact same job the VSA did, on the BIR level — the VSA's
+  flag-idiom decoding is REDUNDANT and is REMOVED at wire-up.** The
+  pass first consumes the last family (memory-operand test/and: the
+  and-shape OF is identically 0 — jle compiles to `result <=s 0`),
+  shrinking the residual to ~zero; the guard on a non-compiled cond
+  falls to the sound identity (top). KEPT: `comparison_constraint`
+  (the comparison-level rows) + the landmark machinery — the
+  mechanism's core. The precision proof is the acceptance: F1 green,
+  convergence line-identical or the movements inventoried as the
+  MEASURED residual cost, the pin at 6, referee 0, the suite ALL
+  GREEN.
 - **PRECISION-NEUTRAL WIRE-UP (the acceptance):** the F1 landmark
   pins stay green, the convergence table line-identical (any moved
   row is inventoried), the pin unchanged, strict gates green — the
