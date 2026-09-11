@@ -90,7 +90,11 @@ let run_producer_record () =
 
   (* A4: the written-slot demotion (T4b): a store into the caller
      window writes REAL memory — the slot it touches leaves the
-     promoted map, so the read after the write observes the store. *)
+     promoted map, so the read after the write observes the store.
+     The demotion is EXACT: slot i spans [entry_rsp+8+8i, +8), so an
+     8-byte store at [RSP+8] touches slot 0's cell ONLY — the next
+     slot's read stays promoted (the off-by-one pin: the old
+     [(k+bytes-1)/8] upper bound demoted slot 1 too). *)
   let a4_t = v64 "pr_a4_t" in
   let a4_st =
     Def.create m
@@ -98,7 +102,11 @@ let run_producer_record () =
                   LittleEndian, `r64))
   in
   let a4_ld = Def.create a4_t (Bil.Load (Bil.Var m, plus_addr sp 8L, LittleEndian, `r64)) in
-  let a4 = straight_sub "pr_a4_storing" [ a4_st; a4_ld ] in
+  let a4_ld1 =
+    Def.create (v64 "pr_a4_t1")
+      (Bil.Load (Bil.Var m, plus_addr sp 16L, LittleEndian, `r64))
+  in
+  let a4 = straight_sub "pr_a4_storing" [ a4_st; a4_ld; a4_ld1 ] in
   let a4_info =
     Hv.offsets_of_sub Theory.Target.unknown sp ~symtab:None
       ~prog:(Program.create ~subs:[ a4 ] ()) a4
@@ -107,6 +115,8 @@ let run_producer_record () =
     a4_info.Sm.prom_window;
   check "PR-A4: the slot the store touches demotes (its read takes the window)"
     (not (Core.Map.mem a4_info.Sm.prom_slots (Term.tid a4_ld)));
+  check "PR-A4: the demotion is EXACT — an 8-byte store at [RSP+8] leaves slot 1 promoted"
+    (Core.Map.find a4_info.Sm.prom_slots (Term.tid a4_ld1) = Some 1);
 
 
 (* A5: the VLA detection (the non-literal SP decrement) and the
