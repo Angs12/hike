@@ -121,6 +121,22 @@ let run () : unit =
   check "t13: jb → x <u y" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LT, xv, yv)));
   check "t13: jb consumed CF def" (not (has_def_for s' cf));
 
+  (* the ADD-carry CF shape: the lifter emits the carry as the
+     LT-shaped fact (d <u a) — the comparison IS the carry's
+     definition, so jb consumes it shape-honestly (the fact is
+     verbatim-faithful for both the sub borrow and the add carry). *)
+  let add_defs =
+    [
+      Def.create t (Bil.BinOp (Bil.PLUS, xv, yv));
+      Def.create cf (Bil.BinOp (Bil.LT, tv, xv));
+    ] in
+  let s, _ = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
+  let s' = J.compile_sub s in
+  check "t13: jb over add-carry → t <u x (the carry, verbatim)"
+    (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LT, tv, xv)));
+  check "t13: jb over add consumed CF def" (not (has_def_for s' cf));
+  check "t13: add's sum def survives (the cond reuses it)" (has_def_for s' t);
+
   let s, _ = sub_of_defs_and_jmp "t13_jae" (cmp_defs ~with_all:false ()) (Bil.UnOp (Bil.NOT, Bil.Var cf)) in
   let s' = J.compile_sub s in
   check "t13: jae → y <=u x (complement flips operands, no NOT)"
