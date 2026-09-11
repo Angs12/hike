@@ -66,7 +66,13 @@ just move code!") The rewrite rules, in priority order:
   rows AND every mention — src comments, CONTEXT.md, current-facing
   docs — cleaned to the post-T13 reality; the verdict's grep section
   proves zero references to the removed machinery (dated historical
-  records stay historical). The precision proof is the acceptance: F1 green,
+  records stay historical). THE TEST POLICY (owner): obsolete tests
+  are REMOVED — VSA-side tests exercising the deleted decoder die
+  (compile-clean forces it); the F1 landmark pins' fixtures re-derive
+  to the pass-compiled comparison conds (the post-T13 reality), their
+  semantics exact (head = K, body = K-1) — the unit-level precision
+  proof; `test_jump.ml` is the jcc coverage, extended to cover every
+  removed test's concern (the verdict carries the coverage map). The precision proof is the acceptance: F1 green,
   convergence line-identical or the movements inventoried as the
   MEASURED residual cost, the pin at 6, referee 0, the suite ALL
   GREEN.
