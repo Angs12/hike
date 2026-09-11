@@ -514,7 +514,100 @@ let run_stl_rewrite () =
          | _ -> false)
      | None -> false)
 
+(* ------------------------------------------------------------------ *)
+(* Lane D: the emitter's alloca shapes — the VLA lane (the dynamic     *)
+(* allocation, stack-model hierarchy rule 1), the SP Slot / stack_0   *)
+(* anchoring per storage class, and the frame-request clamp (the       *)
+(* silent-truncation lesson, loud now).                                *)
+(* ------------------------------------------------------------------ *)
+
+(* The T10 fixture stamp: per-def kinds + the layout tag onto the terms
+   (the emitter consumes no record). *)
+let stamp_shape (info : Sm.vsa_info) (sub : sub term) : sub term =
+  let sub = Sm.stamp_def_kinds info sub in
+  Sm.set_layout (Sm.layout_of_sub sub ~abi:Hike.Abi.x86_64_sysv info) sub
+
+let run_emitter_shapes () =
+  let m = memv "pr_d_m" in
+
+  (* D1: the VLA lane — a non-literal SP decrement becomes a REAL
+     runtime-sized alloca; the model RSP binds to its integer. *)
+  let d_rbx = Def.create (v64 "pr_d_rbx") (Bil.Int (Cbat_word.to_word (w64 0x80))) in
+  let d_vla =
+    Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var (Def.lhs d_rbx)))
+  in
+  let d_st =
+    Def.create m
+      (Bil.Store (Bil.Var m, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 7)),
+                  LittleEndian, `r64))
+  in
+  let d1 = straight_sub "pr_d1_vla" [ d_rbx; d_vla; d_st ] in
+  let d1_info =
+    info_of ~offsets:[] ~degraded:false ()
+    |> fun i ->
+    { i with Sm.vla_alloc_tids = tid_set [ Term.tid d_vla ] }
+  in
+  let ir1 = emit_ir [ stamp_shape d1_info d1 ] in
+  check "PR-D1: the VLA def emits a real runtime-sized i8 alloca"
+    (contains_substring ir1 "%vla = alloca i8, i64");
+  check "PR-D1: the model SP binds to the alloca's integer (vla_i64)"
+    (contains_substring ir1 "%vla_i64 = ptrtoint");
+
+  (* D2: the SP Slot per storage class. *)
+  (* Frame storage: %frame + the anchor GEP + the entry sp_slot. *)
+  let d_ld =
+    Def.create (v64 "pr_d2_t")
+      (Bil.Load (Bil.Var m, minus_addr sp 16L, LittleEndian, `r64))
+  in
+  let d2 = straight_sub "pr_d2_frame" [ d_ld ] in
+  let d2_info =
+    info_of ~offsets:[ (Term.tid d_ld, Sm.Range (-16L, -16L)) ] ()
+  in
+  let ir2 = emit_ir [ stamp_shape d2_info d2 ] in
+  check "PR-D2: frame storage emits the %frame alloca"
+    (contains_substring ir2 "%frame = alloca [");
+  check "PR-D2: frame storage anchors through the entry SP Slot (per-invocation stack_0)"
+    (contains_substring ir2 "%sp_slot = alloca i64"
+    && contains_substring ir2 "%stack_0 = load i64, ptr %sp_slot");
+  (* Region storage: the anchor is region-0 (the precise sub's base). *)
+  let region : Sm.region =
+    { id = 0; span = (-16L, -16L); members = []; convertible = true; max_width = 64 }
+  in
+  let d2b = straight_sub "pr_d2b_region" [ d_ld ] in
+  let d2b_info =
+    info_of ~offsets:[ (Term.tid d_ld, Sm.Range (-16L, -16L)) ]
+      ~regions:[ region ] ~plan:[ region ] ()
+  in
+  let ir2b = emit_ir [ stamp_shape d2b_info d2b ] in
+  check "PR-D2b: region storage anchors the SP Slot at region-0 (the ptrtoint base)"
+    (contains_substring ir2b "%anchor_i64 = ptrtoint ptr %stack_r0"
+    && contains_substring ir2b "%sp_slot = alloca i64");
+  (* Storage-free: no anchor, no SP Slot. *)
+  let d2c = straight_sub "pr_d2c_free" [] in
+  let ir2c = emit_ir [ stamp_shape (info_of ~offsets:[] ()) d2c ] in
+  check "PR-D2c: a storage-free sub emits no SP Slot and no frame"
+    (not (contains_substring ir2c "%sp_slot")
+    && not (contains_substring ir2c "%frame"));
+
+  (* D3: the frame-request clamp — a layout over the array-count bound
+     (2^31) clamps LOUDLY (the silent-truncation lesson). *)
+  let d3 = straight_sub "pr_d3_huge" [ d_ld ] in
+  let d3_info =
+    info_of ~offsets:[ (Tid.create (), Sm.Range (-0x80000000L, -0x80000000L)) ] ()
+  in
+  let d3_sub = stamp_shape d3_info d3 in
+  let d3_err, ir3 =
+    capture_stderr (fun () -> ignore (emit_ir [ d3_sub ]))
+    |> fun err -> (err, emit_ir [ stamp_shape d3_info d3 ])
+  in
+  check "PR-D3: an over-bound frame request names itself on the channel and clamps"
+    (contains_substring d3_err "hike: frame:"
+    && contains_substring d3_err "clamped"
+    && contains_substring ir3 "alloca [2147483647 x i8]");
+  ()
+
 let run () =
   run_producer_record ();
   run_layout ();
-  run_stl_rewrite ()
+  run_stl_rewrite ();
+  run_emitter_shapes ()
