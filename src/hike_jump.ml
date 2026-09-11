@@ -1,12 +1,13 @@
 (* T13 — the jump compiler (construction): a BIR→BIR term transformation
    that REDESIGNS jcc flag idioms into the SIMPLEST equivalent value
    comparisons (never a relocation of the flag decoding).  The flag
-   semantics lives HERE ONCE — the flag-effects table below, the def-
-   side twin of cbat_walk's decoder rows.  Identity on the residual: a
-   cond with no dominating single flag def, an unknown shape, or an
-   inconsistent fact set keeps the current path unchanged (no gates, no
-   fallbacks, no partial rewrites).  Pipeline registration and the VSA
-   decoder shrink are the slot-window phase. *)
+   semantics lives HERE ONCE — the flag-effects table below.  Identity
+   on the residual: a cond with no dominating single flag def, an
+   unknown shape, or an inconsistent fact set keeps the current path
+   unchanged (no gates, no fallbacks, no partial rewrites).  The pass
+   runs FIRST in the analysis chain (after hike-filter, before
+   hike-vsa), so every downstream consumer reads value comparisons
+   where the rewrite fired. *)
 
 open Bap.Std
 open Core
@@ -18,6 +19,8 @@ open Core
 (*   CF := a < b               CF ⇔ a <u b     (sub/cmp borrow)        *)
 (*   SF := high:1[e]           SF ⇔ sign bit of e                      *)
 (*   OF := high:1[(x^y)&(x^d)] OF ⇔ signed overflow of x−y, d = x−y    *)
+(*   OF := 0                  the test/and group: OF ≡ 0, so the       *)
+(*                            signed families run on SF alone          *)
 (*                                                                     *)
 (* Anything else (add/imul/shift carries, PF/AF forms, unknown[bits])  *)
 (* is NOT consumed — conds over those shapes stay residual.            *)
@@ -94,9 +97,10 @@ type facts = {
   cf : cf_fact option; (* CF ⇔ (a <u b) / constant *)
   sf : exp option; (* SF ⇔ sign bit of e *)
   ovf : (exp * exp * exp) option; (* OF ⇔ signed overflow of x−y, d = x−y *)
+  and_form : bool; (* OF := 0 — the test/and group (OF identically 0) *)
 }
 
-let empty_facts = { zf = None; cf = None; sf = None; ovf = None }
+let empty_facts = { zf = None; cf = None; sf = None; ovf = None; and_form = false }
 
 (* Width of an exp: the width of its free vars (operands are
    width-uniform in BIR); a bare immediate is its own width. *)
@@ -144,6 +148,10 @@ let extract_facts (name : string) (rhs : exp) (f : facts) : facts option =
         , Bil.BinOp (Bil.AND, Bil.BinOp (Bil.XOR, x, y), Bil.BinOp (Bil.XOR, x2, d)) ) )
     when Exp.equal x x2 -> (
       match f.ovf with None -> Some { f with ovf = Some (x, y, d) } | _ -> None)
+  (* test/and: OF is identically 0 — the group's signed identity is SF
+     alone. *)
+  | "OF", e when is_zero_int e ->
+    if f.and_form then None else Some { f with and_form = true }
   | _ -> None
 
 (* ------------------------------------------------------------------ *)
@@ -210,7 +218,13 @@ let zero_family ~neg (d : exp) : exp option =
    The comparison runs at the def's operand width — the widths ride
    the inlined exps themselves. *)
 let family_cond (facts : facts) (j : jcc) : exp option =
-  let { zf; cf; sf; ovf } = facts in
+  let { zf; cf; sf; ovf; and_form } = facts in
+  (* The and-group's signed rows: OF ≡ 0, so the sign of e IS the
+     signed relation to 0 (e <s 0, e <=s 0, and their flips). *)
+  let slt0 e = Option.map ~f:(fun z -> cmp Bil.SLT e z) (zero_exp e) in
+  let sle0 e = Option.map ~f:(fun z -> cmp Bil.SLE e z) (zero_exp e) in
+  let gts0 e = Option.map ~f:(fun z -> cmp Bil.SLT z e) (zero_exp e) in
+  let ges0 e = Option.map ~f:(fun z -> cmp Bil.SLE z e) (zero_exp e) in
   match (j, zf, cf, sf, ovf) with
   | JE, Some (Zero d), _, _, _ -> zero_family ~neg:false d
   | JNE, Some (Zero d), _, _, _ -> zero_family ~neg:true d
@@ -220,10 +234,14 @@ let family_cond (facts : facts) (j : jcc) : exp option =
   | JAE, _, Some (Ult (a, b)), _, _ -> Some (cmp Bil.LE b a)
   | JBE, Some (Zero _), Some (Ult (a, b)), _, _ -> Some (cmp Bil.LE a b)
   | JA, Some (Zero _), Some (Ult (a, b)), _, _ -> Some (cmp Bil.LT b a)
-  | JL, _, _, Some _, Some (x, y, _) -> Some (cmp Bil.SLT x y)
-  | JGE, _, _, Some _, Some (x, y, _) -> Some (cmp Bil.SLE y x)
+  | JL, _, _, Some e, Some (x, y, _) -> Some (cmp Bil.SLT x y)
+  | JGE, _, _, Some e, Some (x, y, _) -> Some (cmp Bil.SLE y x)
   | JLE, Some _, _, Some _, Some (x, y, _) -> Some (cmp Bil.SLE x y)
   | JG, Some _, _, Some _, Some (x, y, _) -> Some (cmp Bil.SLT y x)
+  | JL, _, _, Some e, None when and_form -> slt0 e
+  | JGE, _, _, Some e, None when and_form -> ges0 e
+  | JLE, Some _, _, Some e, None when and_form -> sle0 e
+  | JG, Some _, _, Some e, None when and_form -> gts0 e
   | _ -> None
 
 let family_name (j : jcc) : string =
@@ -270,11 +288,15 @@ let compile_jcc (c : ctx) (facts : facts) (flag_def : string -> (var * int) opti
     | JL | JGE -> (
         match (facts.sf, facts.ovf) with
         | Some e, Some (x, y, d) -> is_minus_xy c d x y && same_exp c e d
+        (* the and-group: OF ≡ 0, SF alone is the relation — no check
+           beyond the fact's presence. *)
+        | Some _, None when facts.and_form -> true
         | _ -> false)
     | JLE | JG -> (
         match (zf_zero, facts.sf, facts.ovf) with
         | Some d0, Some e, Some (x, y, d) ->
             is_minus_xy c d x y && same_exp c e d && same_exp c d0 d
+        | Some d0, Some e, None when facts.and_form -> same_exp c d0 e
         | _ -> false)
   in
   if not consistent then None

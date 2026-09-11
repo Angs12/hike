@@ -81,9 +81,11 @@ states; it is now invoked at the jump instead of in a post-pass.
 `edge_constraints` decomposes a guard into `Var` / `Cell` / `Infeasible` seeds
 for **both** the True and False sides:
 
-- **True side** — `c`, decoded by `decoded_condition` (recognises the `jle`→
-  `SLE`, `jl`→`SLT`, `ja`→`UGT` compound -O0 flag idioms) and realised by
-  `decoder_constraint` (all nine rows: `ULT/ULE/EQ/SLT/SLE/UGT/UGE/SGT/SGE`).
+- **True side** — `c`: since T13 the jump-compiler pass rewrites compilable
+  conditional jumps to value comparisons BEFORE the analysis, so most guards
+  arrive as plain `x op c`; the flag-idiom decoder remains for the residual
+  (cross-block/partial-flag conds). `decoder_constraint` realises both
+  (all nine rows: `ULT/ULE/EQ/SLT/SLE/UGT/UGE/SGT/SGE`).
 - **False side** — `complement_guard_op(c)` (e.g. `NEQ` → `EQ`).
 
 Transfer (the edge-split):
@@ -94,8 +96,8 @@ f.in ⊔= refine_edge(edge P→f, False-cstr)   # fallthrough, refined by ¬c
 # raw P.out is NOT separately joined — joining both would collapse to raw
 ```
 
-**NEQ guards (re-verified 2026-08-30):** a *decoded* `jne` guard (`~ZF` →
-NEQ) refines the **taken** edge exactly — `decoder_constraint`'s NEQ row is
+**NEQ guards (re-verified 2026-08-30):** a `jne` guard (the pass compiles
+`~ZF` to `x != c`) refines the **taken** edge exactly — `decoder_constraint`'s NEQ row is
 the two-piece `TOP − {c}` with the exclusion of `c` at the meet — and `jz`
 (`ZF` → EQ) pins the taken edge to `{c}`; the fallthrough gets the complement
 via `complement_guard_op`. The `None` sound-stop survives only for
@@ -253,8 +255,7 @@ public API and test fixtures, not just dead production code —
 | `refine_edge` | the complete backward dataflow for one edge (reverse-CFG fixpoint) |
 | `reverse_def_walk` | producer subtraction `cstr' = cstr ∩ post(v)` |
 | `constrain_cell_on_trace` | trace-exact cell meet (`Mem.meet_range`), cell-gate replacement |
-| `decoded_condition` | decodes compound -O0 jcc idioms to guard ops |
-| `decoder_constraint` | the nine-row guard→constraint map |
+| `decoder_constraint` | the nine-row guard→constraint map (over the pass-compiled comparisons) |
 | `complement_guard_op` | complement of a guard op (the NOT-unwrap rows for `Edge.cond`'s syntactic `~(x op c)`) |
 | `Graphs.Ir.Edge.cond` | **BAP-native accumulated path condition** per edge (`Sub.to_cfg`) — includes the preceding when-chain negatives; the fused transfer's input |
 | ~~`edge_views_of`~~ | **DELETED** |
@@ -265,10 +266,10 @@ public API and test fixtures, not just dead production code —
 
 ## 10. Known limitations (recorded, not regressions)
 
-1. **NEQ, non-decoded** — for guards the jcc decoder does not recognize,
-   `comparison_constraint`'s `Bil.NEQ` row returns `None`; taken edge
-   identity, fallthrough gets `EQ`. (Decoded `jne`/`jz` guards refine exactly
-   — see §4.) The -O2 `w_big` residual class. Inherited.
+1. **NEQ, two-sided** — `comparison_constraint`'s `Bil.NEQ` row returns
+   `None`; taken-edge identity via the two-piece complement at the meet.
+   (`jne`/`jz` guards compile to comparisons and refine exactly — see §4.)
+   The -O2 `w_big` residual class. Inherited.
 2. **Per-edge views collapse at joins** — the fused design refines the JOINED
    destination IN-state; a multi-predecessor block loses the per-edge
    partition (a loop head is the join of the entry-refined and

@@ -156,8 +156,16 @@ let () =
            setup proj;
            (* Setup and filter run first. *)
            filter_subs proj);
-      (* VSA tag pass; depends on the filter only (spec §2.1). *)
-      Project.register_pass ~name:"vsa" ~deps:[ "hike-filter" ] ~runonce:true
+      (* The jump compiler (T13): jcc flag idioms become the simplest
+         equivalent value comparisons, ONCE, in the BIR — before any
+         analysis reads the conds.  Identity on the residual (flags
+         across blocks, partial-flag effects). *)
+      Project.register_pass ~name:"jump" ~deps:[ "hike-filter" ]
+        ~runonce:true (fun proj ->
+          Project.map_program proj ~f:Hike_jump.compile_program);
+      (* VSA tag pass; depends on the jump compiler (the conds it reads
+         are already value comparisons where compilable). *)
+      Project.register_pass ~name:"vsa" ~deps:[ "hike-jump" ] ~runonce:true
         (fun proj ->
            let target = Project.target proj in
            let abi = Hike_abi.of_target target in
