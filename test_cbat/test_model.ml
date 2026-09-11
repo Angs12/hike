@@ -329,6 +329,192 @@ let run_layout () =
     && plan = [ ok_region ]);
   ()
 
+(* ------------------------------------------------------------------ *)
+(* Lane C: the stack-to-locals rewrite's deep arms — the multi-cell    *)
+(* region fission (region mem + base), the entry zero-init, the        *)
+(* narrow-read splice, the ABI-visible exception, and the write-closed *)
+(* rule at the rewrite level.  (Only the slot OR-mask form was pinned
+   before: C1/A4 in test_regression.) *)
+(* ------------------------------------------------------------------ *)
+
+let run_stl_rewrite () =
+  let m = memv "pr_c_m" in
+  let mk_store off data (sz : size) : def term =
+    Def.create m
+      (Bil.Store (Bil.Var m, minus_addr sp off, Bil.Int (Cbat_word.to_word (w64 data)),
+                  LittleEndian, sz))
+  in
+  (* C1: the fission arm — two singleton cells (-24, -16) in one
+     convertible region whose span is NOT singleton: both accesses take
+     the Region shape (region mem + base), including the NESTED load
+     (the -O0 cmp pattern) inside a BinOp def. *)
+  let c1_st0 = mk_store 24L 1 `r64 in
+  let c1_st1 = mk_store 16L 2 `r64 in
+  let c1_t = v64 "pr_c1_t" in
+  let c1_ld_nested =
+    Def.create c1_t
+      (Bil.BinOp (Bil.PLUS,
+                  Bil.Load (Bil.Var m, minus_addr sp 16L, LittleEndian, `r64),
+                  Bil.Int (Cbat_word.to_word (w64 1))))
+  in
+  (* The write-closed control: a member of a NON-convertible region
+     stays memory (together or not at all). *)
+  let c1_ctl = mk_store 8L 3 `r64 in
+  let c1 = straight_sub "pr_c1_fission"
+      [ c1_st0; c1_st1; c1_ld_nested; c1_ctl ] in
+  let region0 : Sm.region =
+    { id = 0;
+      span = (-24L, -16L);
+      members =
+        [ (Term.tid c1_st0, (-24L, -24L)); (Term.tid c1_st1, (-16L, -16L));
+          (Term.tid c1_ld_nested, (-16L, -16L)) ];
+      convertible = true;
+      max_width = 64 }
+  in
+  let region1 : Sm.region =
+    { id = 1; span = (-8L, -8L); members = [ (Term.tid c1_ctl, (-8L, -8L)) ];
+      convertible = false; max_width = 64 }
+  in
+  let c1_info =
+    info_of ~offsets:[]
+      ~regions:[ region0; region1 ] ()
+  in
+  let c1_info =
+    { c1_info with
+      Sm.offsets =
+        Core.Map.set
+          (Core.Map.set
+             (Core.Map.set
+                (Core.Map.set Tid.Map.empty
+                   ~key:(Term.tid c1_st0) ~data:(Sm.Range (-24L, -24L)))
+                ~key:(Term.tid c1_st1) ~data:(Sm.Range (-16L, -16L)))
+             ~key:(Term.tid c1_ld_nested) ~data:(Sm.Range (-16L, -16L)))
+          ~key:(Term.tid c1_ctl) ~data:(Sm.Caller (8L, 8L)) }
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid c1) c1_info);
+  let c1' = Stl.stack_to_locals Theory.Target.unknown sp c1 in
+  let def_of_lhs sub (n : string) : def term option =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.find ~f:(fun d -> String.equal (Var.name (Def.lhs d)) n)
+  in
+  (* The COMPOUND-address shape (the lifted -O0 [mem[RSP - k]]): the mem
+     operand names the region and the SP index arithmetic is KEPT — it
+     materializes at emission through the anchor (= region-0 for
+     precise subs). *)
+  let st0' = def_of_lhs c1' (Var.name (Sm.region_mem 0)) in
+  check "PR-C1: the whole-access store rebinds to the region mem, keeping the SP index arithmetic"
+    (match st0' with
+     | Some d ->
+        (match Def.rhs d with
+         | Bil.Store (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var b, Bil.Int _), _, _, _) ->
+            Var.same mem (Sm.region_mem 0) && Var.same b sp
+         | _ -> false)
+     | None -> false);
+  let c1_t' =
+    Term.enum blk_t c1'
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) c1_t)
+  in
+  check "PR-C1: the nested load inside a BinOp def reads the region mem too (the -O0 cmp pattern)"
+    (match c1_t' with
+     | Some d ->
+        (match Def.rhs d with
+         | Bil.BinOp (Bil.PLUS, Bil.Load (Bil.Var mem, _, _, _), Bil.Int _) ->
+            Var.same mem (Sm.region_mem 0)
+         | _ -> false)
+     | None -> false);
+
+  (* C1b: the BARE-VAR-address shape (the lifted indirect/[t] form):
+     the address temp names the region base — [stack_rN_base] replaces
+     it, both operands name the region (the split-storage rule). *)
+  let c1b_t = v64 "pr_c1b_t" in
+  let c1b_addr = Def.create c1b_t (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 16)))) in
+  let c1b_st =
+    Def.create m
+      (Bil.Store (Bil.Var m, Bil.Var c1b_t, Bil.Int (Cbat_word.to_word (w64 5)),
+                  LittleEndian, `r64))
+  in
+  let c1b = straight_sub "pr_c1b_barevar" [ c1b_addr; c1b_st ] in
+  let c1b_info =
+    info_of ~offsets:[] ~regions:[ { region0 with members = [ (Term.tid c1b_st, (-16L, -16L)) ] } ] ()
+  in
+  let c1b_info =
+    { c1b_info with
+      Sm.offsets =
+        Core.Map.set Tid.Map.empty
+          ~key:(Term.tid c1b_st) ~data:(Sm.Range (-16L, -16L)) }
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid c1b) c1b_info);
+  let c1b' = Stl.stack_to_locals Theory.Target.unknown sp c1b in
+  let st0b' = def_of_lhs c1b' (Var.name (Sm.region_mem 0)) in
+  check "PR-C1b: the bare-var address store rebinds to the region mem and names the region base"
+    (match st0b' with
+     | Some d ->
+        (match Def.rhs d with
+         | Bil.Store (Bil.Var mem, Bil.Var b, _, _, _) ->
+            Var.same mem (Sm.region_mem 0) && Var.same b (Sm.region_base 0)
+         | _ -> false)
+     | None -> false);
+  let ctl' = def_of_lhs c1' (Var.name m) in
+  check "PR-C1: the non-convertible region's member keeps its memory store (write-closed)"
+    (match ctl' with
+     | Some d ->
+        (match Def.rhs d with
+         | Bil.Store (Bil.Var mem, _, _, _, _) -> Var.same mem m
+         | _ -> false)
+     | None -> false);
+
+  (* C2: the slot arms — a singleton region converts to a named local:
+     the entry zero-init, and the narrow read splices a LOW cast. *)
+  let c2_st = mk_store 16L 7 `r64 in
+  let c2_t = v64 "pr_c2_t" in
+  let c2_ld =
+    Def.create c2_t (Bil.Load (Bil.Var m, minus_addr sp 16L, LittleEndian, `r32))
+  in
+  let c2 = straight_sub "pr_c2_slot" [ c2_st; c2_ld ] in
+  let c2_region : Sm.region =
+    { id = 0; span = (-16L, -16L);
+      members = [ (Term.tid c2_st, (-16L, -16L)); (Term.tid c2_ld, (-16L, -16L)) ];
+      convertible = true; max_width = 64 }
+  in
+  let c2_info =
+    info_of ~offsets:[] ~regions:[ c2_region ] ()
+  in
+  let c2_info =
+    { c2_info with
+      Sm.offsets =
+        Core.Map.set
+          (Core.Map.set Tid.Map.empty
+             ~key:(Term.tid c2_st) ~data:(Sm.Range (-16L, -16L)))
+          ~key:(Term.tid c2_ld) ~data:(Sm.Range (-16L, -16L)) }
+  in
+  Kb.provide (Tid.Map.singleton (Term.tid c2) c2_info);
+  let c2' = Stl.stack_to_locals Theory.Target.unknown sp c2 in
+  let entry = Base.Option.value_exn (Term.first blk_t c2') in
+  let defs = Term.enum def_t entry |> Seq.to_list in
+  (* The slot var is minted by the model's deterministic grammar
+     ("slot_<abs-lo>", the cell width); [slot_of] itself is not on the
+     mli surface, so the pin reads the grammar off the rewrite. *)
+  let is_slot_var v = String.equal (Var.name v) "slot_16" in
+  check "PR-C2: the converted slot zero-initializes at entry (the width travels with the cell)"
+    (match defs with
+     | d :: _ ->
+        is_slot_var (Def.lhs d)
+        && (match Def.rhs d with Bil.Int w -> Word.equal w (Word.zero 64) | _ -> false)
+     | [] -> false);
+  let c2_ld' =
+    List.find_opt (fun d -> Var.equal (Def.lhs d) c2_t) defs
+  in
+  check "PR-C2: the narrow (r32) read of a 64-bit slot splices the LOW cast"
+    (match c2_ld' with
+     | Some d ->
+        (match Def.rhs d with
+         | Bil.Cast (Bil.LOW, 32, Bil.Var v) -> is_slot_var v
+         | _ -> false)
+     | None -> false)
+
 let run () =
   run_producer_record ();
-  run_layout ()
+  run_layout ();
+  run_stl_rewrite ()
