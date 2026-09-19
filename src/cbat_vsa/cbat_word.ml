@@ -87,9 +87,6 @@ let msb (t : t) : bool =
   | Small (v, w, _) -> w >= 1 && w <= 62 && v >= 1 lsl (w - 1)
   | Big (z, w, _) -> w >= 1 && Z.testbit z (w - 1)
 
-let[@inline] lsb (t : t) : bool =
-  match t with Small (v, _, _) -> v land 1 = 1 | Big (z, _, _) -> Z.is_odd z
-
 let succ (t : t) : t =
   match t with
   | Small (v, w, _) ->
@@ -305,11 +302,6 @@ let compare (a : t) (b : t) : int =
 
 let equal (a : t) (b : t) : bool = compare a b = 0
 
-
-
-let hash (t : t) : int =
-  bitwidth t * 65599 lxor (if is_signed t then 1 else 0) lxor Z.hash (to_z t)
-
 let min (a : t) (b : t) : t = if compare a b < 0 then a else b
 let max (a : t) (b : t) : t = if compare a b > 0 then a else b
 
@@ -402,7 +394,7 @@ let to_int_exn (t : t) : int =
     Z.to_int (Z.signed_extract z 0 Sys.int_size)
   else failwith (Printf.sprintf "%s doesn't fit the int type" (to_string t))
 
-let to_int (t : t) : int Core_kernel.Or_error.t = Core_kernel.Or_error.try_with (fun () -> to_int_exn t)
+let to_int (t : t) : int Core.Or_error.t = Core.Or_error.try_with (fun () -> to_int_exn t)
 
 let to_int64_exn (t : t) : int64 =
   let z = to_z t in
@@ -411,18 +403,18 @@ let to_int64_exn (t : t) : int64 =
     Z.to_int64 (Z.signed_extract z 0 64)
   else failwith (Printf.sprintf "%s doesn't fit the int64 type" (to_string t))
 
-let to_int64 (t : t) : int64 Core_kernel.Or_error.t = Core_kernel.Or_error.try_with (fun () -> to_int64_exn t)
+let to_int64 (t : t) : int64 Core.Or_error.t = Core.Or_error.try_with (fun () -> to_int64_exn t)
 
 let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_string t)
 
 let of_word (w : word) : t = of_string (Word.to_string w)
 let to_word (t : t) : word = Word.of_string (to_string t)
 
-let sexp_of_t (t : t) : Core_kernel.Sexp.t = Core_kernel.Sexp.Atom (to_string t)
+let sexp_of_t (t : t) : Core.Sexp.t = Core.Sexp.Atom (to_string t)
 
-let t_of_sexp (s : Core_kernel.Sexp.t) : t =
+let t_of_sexp (s : Core.Sexp.t) : t =
   match s with
-  | Core_kernel.Sexp.Atom a -> of_string a
+  | Core.Sexp.Atom a -> of_string a
   | _ -> failwith "Cbat_word.t_of_sexp: expects an atom"
 
 module Stringable = struct
@@ -432,7 +424,11 @@ module Stringable = struct
   let of_string = of_string
 end
 
-include Core_kernel.Binable.Of_stringable_without_uuid (Stringable) [@@warning "-D"]
+include Core.Binable.Of_stringable_with_uuid (struct
+  include Stringable
+
+  let caller_identity = Bin_prot.Shape.Uuid.of_string "hike:cbat_word.t/1"
+end)
 
 (* The word-op set, in terms of the ops above. *)
 
@@ -521,7 +517,7 @@ let add_bit (w : t) : t =
 let lead_1_bit (w : t) : int option =
   let rec lead_help (hi : int) (lo : int) : int option =
     let open Monads.Std.Monad.Option.Syntax in
-    Core_kernel.Option.some_if (hi >= lo) () >>= fun _ ->
+    Core.Option.some_if (hi >= lo) () >>= fun _ ->
     if hi = lo then !!hi else
     let mid = (hi + lo) / 2 in
     let hi_part = extract_exn ~hi ~lo:(mid + 1) w in

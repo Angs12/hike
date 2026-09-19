@@ -11,7 +11,7 @@
 (*  *)
 (* ************************************************************************* *)
 
-open Core_kernel
+open Core
 open Bap.Std
 
 (* Memory as an interval tree from address ranges to CLPs with endianness. *)
@@ -26,6 +26,9 @@ module Key : sig
   val sexp_of_t : t -> Sexp.t
 
   val of_wordset : WordSet.t -> t option
+
+  (* Key ranges share at least one address. *)
+  val overlap : t -> t -> bool
 end
 
 
@@ -45,10 +48,6 @@ module Val : sig
   val is_top : t -> bool
   val is_bottom : t -> bool
 
-  val join_at : idx -> t -> t -> t
-  val meet_at : idx -> t -> t -> t
-
-
   val join_poly : t -> t -> t
   val meet_poly : t -> t -> t
 
@@ -59,6 +58,9 @@ end
 type t
 type idx = {addr_width:int; addressable_width:int}
 
+(* The index of [t]'s width facts. *)
+val get_idx : t -> idx
+
 include Value.S with type t := t
 
 include Cbat_map_lattice.S_indexed with module Val := Val and module Key := Key and
@@ -67,6 +69,18 @@ type t := t and type idx := idx
 (* Meet [data] into every cell whose key intersects [key]. *)
 val meet_range : t -> key:Key.t -> data:Val.t -> t
 
+(* [widen_join] with the caller's per-key combiner: where the trees
+   are comparable, each cell of the new tree combines with the old
+   tree's value at the same key; join otherwise. *)
+val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
+
 (* Keep cells at key >= [keep_lo] outside [escape]. *)
 val call_keep : t -> keep_lo:Bap.Std.word -> escape:(Bap.Std.word * Bap.Std.word) list -> t
+
+(* Whether the map is the bottom map (no tree, no reads). *)
+val is_bottom : t -> bool
+
+(* Whether a stored cell's key intersects the byte range [lo, hi]
+   (inclusive addresses); unkeyable bounds answer true. *)
+val has_cell_in : t -> lo:Cbat_word.t -> hi:Cbat_word.t -> bool
 

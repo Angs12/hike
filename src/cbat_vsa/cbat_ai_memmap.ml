@@ -11,15 +11,15 @@
 (*  *)
 (* ************************************************************************* *)
 
-open !Core_kernel
+open !Core
 include Bap.Std
 
-module Fn = Core_kernel.Fn
-module Sexp = Core_kernel.Sexp
-module Option = Core_kernel.Option
-module Or_error = Core_kernel.Or_error
-module Result = Core_kernel.Result
-module Binable = Core_kernel.Binable
+module Fn = Core.Fn
+module Sexp = Core.Sexp
+module Option = Core.Option
+module Or_error = Core.Or_error
+module Result = Core.Result
+module Binable = Core.Binable
 
 module Lattice = Cbat_lattice_intf
 module WordSet = Cbat_clp_set_composite
@@ -116,24 +116,23 @@ end = struct
     then WordSet.precedes v1.data v2.data
     else false
 
-  (* Mismatched indices meet/join to top/bottom of the max width. *)
-  let join (v1 : t) (v2 : t) : t =
+  (* One lift at equal indices; mismatched indices meet/join to
+     bottom/top at the max width. *)
+  let lift_idx ~(mismatch : int -> WordSet.t)
+      (op : WordSet.t -> WordSet.t -> WordSet.t) (v1 : t) (v2 : t) : t =
     if idx_equal (get_idx v1) (get_idx v2)
-    then {data = WordSet.join v1.data v2.data; endian = v1.endian}
-    else {data = WordSet.top (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
+    then {data = op v1.data v2.data; endian = v1.endian}
+    else {data = mismatch (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
           endian = v1.endian}
+
+  let join (v1 : t) (v2 : t) : t =
+    lift_idx ~mismatch:WordSet.top WordSet.join v1 v2
 
   let meet (v1 : t) (v2 : t) : t =
-    if idx_equal (get_idx v1) (get_idx v2)
-    then {data = WordSet.meet v1.data v2.data; endian = v1.endian}
-    else {data = WordSet.bottom (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
-          endian = v1.endian}
+    lift_idx ~mismatch:WordSet.bottom WordSet.meet v1 v2
 
   let widen_join (v1 : t) (v2 : t) : t =
-    if idx_equal (get_idx v1) (get_idx v2)
-    then {data = WordSet.widen_join v1.data v2.data; endian = v1.endian}
-    else {data = WordSet.top (max (WordSet.bitwidth v1.data) (WordSet.bitwidth v2.data));
-          endian = v1.endian}
+    lift_idx ~mismatch:WordSet.top WordSet.widen_join v1 v2
 
 
   let is_top = lift_in WordSet.is_top
@@ -151,8 +150,9 @@ end = struct
       let hi = lo + (w - 1) in
       if lo >= p_sz then None
       else if hi >= p_sz then
-        (* Unreachable: sizes divide evenly. *)
-        Utils.not_implemented ~top:None
+        (* Sizes divide evenly; a non-factor size degrades to top. *)
+        Utils.not_implemented
+          ~top:(Some (WordSet.top ((hi + 1) - lo), hi + 1))
           "Wordset segmented by non-factor size"
       else Option.return (WordSet.extract ~hi ~lo p, hi + 1)
     end
@@ -241,7 +241,7 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
 
 end
 
-module IT = Cbat_interval_tree.Make_binable(Key)
+module IT = Interval_tree.Make_binable(Key)
 
 type idx = {addr_width:int; addressable_width:int} [@@deriving bin_io, sexp, compare]
 
@@ -265,8 +265,8 @@ let bottom (i : idx) : t =
 
 
 let op_add' op (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
-  (* Collect and remove intersections in one descent. *)
-  let ints, rest = IT.collect_remove_intersections m k in
+  let ints = IT.intersections m k in
+  let rest = IT.remove_intersections m k in
   let gaps = Key.gaps (Val.top (Val.get_idx d)) k ints in
   let overlaps = Seq.append gaps ints in
   let itree =
@@ -318,6 +318,24 @@ let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
              else IT.add acc k v) in
        {itree = Some kept; width = m.width}
      | _ -> m)
+
+(* Whether the map is the bottom map: no tree, no reads (the
+   unreached state's memory). *)
+let is_bottom (m : t) : bool =
+  match m.itree with None -> true | Some _ -> false
+
+(* Whether a stored cell's key intersects the byte range [lo, hi]
+   (inclusive addresses).  Unkeyable bounds answer "yes" — the caller
+   keeps its abstract read. *)
+let has_cell_in (m : t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool =
+  match m.itree with
+  | None -> false
+  | Some it -> (
+      match Key.of_word lo, Key.of_word hi with
+      | Some plo, Some phi when Key.le plo phi ->
+        let k = { Key.lo = plo; hi = phi } in
+        Seq.exists (IT.to_sequence it) ~f:(fun (k', _) -> Key.overlap k' k)
+      | _ -> true)
 
 (* Width-aware point-store merge. *)
 let store_merge (d : Val.t) (d' : Val.t) : Val.t =

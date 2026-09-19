@@ -7,12 +7,12 @@ open Bin_prot.Std
 include Cbat_vsa_utils
 
 module W = Cbat_word
-module Option = Core_kernel.Option
-module Sexp = Core_kernel.Sexp
-module List = Core_kernel.List
+module Option = Core.Option
+module Sexp = Core.Sexp
+module List = Core.List
 
 open !Cbat_word
-open Core_kernel
+open Core
 module Hashtbl = Stdlib.Hashtbl
 let min = Stdlib.min
 let max = Stdlib.max
@@ -45,7 +45,6 @@ type t = {
 let base_of (p : t) : W.t = p.base
 let step_of (p : t) : W.t = p.step
 let cardn_of (p : t) : W.t = p.cardn
-let dir_of (p : t) : direction = p.dir
 
 let is_ascending (p : t) : bool =
   match p.dir with Ascending -> true | _ -> false
@@ -293,7 +292,7 @@ let is_top (p : t) : bool = p = top (bitwidth p)
 
 (* Equivalence; faster than subset. *)
 let equal (p1 : t) (p2 : t) : bool =
-  if p1 == p2 then true
+  if phys_equal p1 p2 then true
   else if bitwidth p1 <> bitwidth p2 then false
   else p1 = p2
 
@@ -392,7 +391,7 @@ let subset (p1 : t) (p2 : t) : bool =
   if bitwidth p1 <> bitwidth p2 then false
   else if is_bottom p1 then true
   else if is_bottom p2 then false
-  else if p1 == p2 || equal p1 p2 then true
+  else if phys_equal p1 p2 || equal p1 p2 then true
   else
     let divides a b =
       if W.is_zero a then W.is_zero b

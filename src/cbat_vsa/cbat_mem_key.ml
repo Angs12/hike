@@ -14,7 +14,7 @@
 (* Memory-cell keys: address-range intervals with hull/overlap algebra.
    Split from the memmap (pure interval facts; zero memory-domain deps). *)
 
-open !Core_kernel
+open !Core
 include Bap.Std
 
 module WordSet = Cbat_clp_set_composite
@@ -88,10 +88,26 @@ module WordSet = Cbat_clp_set_composite
   let overlap (k1 : t) (k2 : t) : bool =
     contains k1 (lower k2) || contains k2 (lower k1)
 
+  (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
+     the shared base makes the offset the per-sub cell identity.  The
+     offset interval is read from the denotation's own structure (a
+     [StackOff]'s offsets ARE the offset set); a plain denotation keys
+     by the degraded in-band arm's segment-relative hull (via
+     [stack_bounds]) or by its own extrema (a foreign address). *)
   let of_wordset (p : WordSet.t) : t option =
+    let lo_w, hi_w =
+      match WordSet.stack_offsets p with
+      | Some offs -> (WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs)
+      | None ->
+        (match WordSet.stack_bounds p with
+         | Some (lo, hi) ->
+           let w i = Cbat_word.of_word (Word.of_int64 ~width:64 i) in
+           (Some (w lo), Some (w hi))
+         | None -> (WordSet.min_elem p, WordSet.max_elem p))
+    in
     let open Monads.Std.Monad.Option.Syntax in
-    WordSet.min_elem p >>= fun lo_w ->
-    WordSet.max_elem p >>= fun hi_w ->
+    lo_w >>= fun lo_w ->
+    hi_w >>= fun hi_w ->
     (match of_word lo_w, of_word hi_w with
      | Some lo, Some hi when le lo hi -> Some {lo; hi}
      | Some lo, Some hi -> Some {lo = hi; hi = lo} (* order-independent hull *)

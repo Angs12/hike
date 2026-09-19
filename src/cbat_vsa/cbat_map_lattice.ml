@@ -11,11 +11,11 @@
 (*  *)
 (* ************************************************************************* *)
 
-module Map = Core_kernel.Map
-module Option = Core_kernel.Option
-module Sexp = Core_kernel.Sexp
-module Sexpable = Core_kernel.Sexpable
-module Fn = Core_kernel.Fn
+module Map = Core.Map
+module Option = Core.Option
+module Sexp = Core.Sexp
+module Sexpable = Core.Sexpable
+module Fn = Core.Fn
 module Value = Bap.Std.Value
 module Lattice = Cbat_lattice_intf
 
@@ -129,7 +129,6 @@ module Make_indexed_from_map
 
   let join : t -> t -> t = lift_join (join' L.join)
   let widen_join = lift_join (join' L.widen_join)
-  (* Widening with a caller-supplied per-key operator. *)
 
   let op_add op (m : map) ~key:key ~data:data : t =
     let idx = L.get_idx data in
@@ -190,8 +189,6 @@ module Make_indexed_from_map
 
 end
 
-module Make_indexed(K : Map.Key) = Make_indexed_from_map(K)(Map.Make(K))
-
 module type Key_val = sig
   include Map.Key
   include Value.S with type t := t
@@ -227,11 +224,6 @@ module Make_indexed_val(K : Key_val)(L : Lattice.S_indexed_val) = struct
 
 end
 
-
-module Make (K : Map.Key)(L : Lattice.S) = struct
-  module IL = Lattice.Free_index(L)
-  include Make_indexed(K)(IL)
-end
 
 module Make_val (K : Key_val)(L : Lattice.S_val) = struct
   module IL = Lattice.Free_index_val(L)

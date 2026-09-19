@@ -11,15 +11,13 @@
 (*  *)
 (* ************************************************************************* *)
 
-include Core_kernel
+include Core
 open Bap.Std
 open Graphlib.Std
-module Abi = Hike_abi
 
 module Stages = Cbat_vsa_stages
 
 module CG = Graphs.Callgraph
-module CFG = Graphs.Tid
 
 module AI = Cbat_ai_representation
 module WordSet = Cbat_clp_set_composite
@@ -27,12 +25,14 @@ module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word
 module Utils = Cbat_vsa_utils
 
-(* WTO over the engine cfg; swapped accessors reverse it. *)
-
-let wto_of_cfg (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
+(* WTO over the engine cfg; swapped accessors reverse it.  [succ]
+   supplies the engine's successor function (the resolved dispatch's
+   extra edges ride it). *)
+let wto_of_cfg ~(succ : tid -> tid list) (cfg : Graphs.Tid.t) :
+    Cbat_wto.comp list =
   Cbat_wto.wto
     ~nodes:(Graphs.Tid.nodes cfg |> Seq.to_list)
-    ~succ:(fun n -> Graphs.Tid.Node.succs n cfg |> Seq.to_list)
+    ~succ
     ~pred:(fun n -> Graphs.Tid.Node.preds n cfg |> Seq.to_list)
 
 
@@ -47,12 +47,22 @@ type vsa_sol = (tid, AI.t) Solution.t
 let default_entry () : AI.t = AI.top
 
 (* Initial solution of a sub. *)
-let init_sol ?entry (sub : sub term) =
+let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = Term.first blk_t sub in
   let entry_state = Option.value ~default:(default_entry ()) entry in
-  (* Entry RSP has offset 0. *)
-  let entry_state = AI.set_frame entry_state AI.seed_frame in
+  (* The default entry seeds the SP's word with the SYMBOLIC SEGMENT
+     BASE: every SP-derived address denotes [StackOff] — exact offsets
+     for tagging and cell keying, a segment-smeared hull for guards.
+     Explicit (fixture) entries keep their own words — a fixture may
+     choose a concrete RSP universe. *)
+  let entry_state =
+    match entry with
+    | None ->
+      AI.add_word entry_state
+        ~key:(Var.base abi.Hike_abi.sp)
+        ~data:(WordSet.stack_word_i64 0L)
+    | Some e -> e in
   let set_init sb = Map.set empty_map ~key:(Term.tid sb) ~data:entry_state in
   let base_map = Option.value_map ~default:empty_map ~f:set_init msb in
   (* Partial CFGs give unsound results. *)
@@ -75,17 +85,16 @@ let defs_of_sub (s : sub term) : (def term * bool) Var.Map.t =
 let stores_of_sub (s : sub term) : def term list =
   Term.enum blk_t s
   |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.filter ~f:begin fun d ->
-    match Def.rhs d with
-    | Bil.Store _ -> true
-    | _ -> false
-  end
+  |> Seq.filter ~f:(fun d ->
+      match Def.rhs d with
+      | Bil.Store _ -> true
+      | _ -> false)
   |> Seq.to_list
 
-(* Preserved registers. *)
-let preserved_of_sub (s : sub term) : Var.Set.t =
+(* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
+let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
   let regs =
-    Abi.x86_64_sysv.sp :: Abi.x86_64_sysv.fp :: Abi.x86_64_sysv.callee_saved
+    abi.Hike_abi.sp :: abi.Hike_abi.callee_saved
     |> Var.Set.of_list in
   let virt =
     Term.enum blk_t s
@@ -102,7 +111,9 @@ let preserved_of_sub (s : sub term) : Var.Set.t =
   Core.Set.union regs virt
 
 
-(* Per-sub static edge table: per (block, jmp) accumulated cond. *)
+(* Per-sub static edge table: per (block, jmp) accumulated cond, in the
+   completed (negation-free) form — the fallthrough edge's NOT sits in
+   its negated comparison, so the walk constrains every edge cond TRUE. *)
 let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
   let ircfg = Sub.to_cfg sub in
   let tbl : (Tid.t, exp Tid.Map.t) Hashtbl.t =
@@ -118,65 +129,71 @@ let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
         | Some m -> m in
       let by_jmp =
         Core.Map.set by_jmp ~key:jt
-          ~data:(Graphs.Ir.Edge.cond e ircfg) in
+          ~data:(Cbat_vsa_utils.complete_cond (Graphs.Ir.Edge.cond e ircfg)) in
       Hashtbl.set tbl ~key:(Term.tid src) ~data:by_jmp);
   Hashtbl.fold tbl ~init:Tid.Map.empty ~f:(fun ~key ~data acc ->
       Core.Map.set acc ~key ~data)
+
+(* Per-sub disabled-continuation table: each jmp observes the NEXT
+   jmp's cond in its block (the excluded edge whose value-set exclusion
+   becomes a widening landmark).  A pure function of the blocks' jmp
+   order and the edge table; keyed by jmp tid. *)
+let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
+    (sub : sub term) : exp Tid.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc b ->
+      let js = Term.enum jmp_t b |> Seq.to_list in
+      let cond j =
+        match Core.Map.find edge_conds (Term.tid b) with
+        | None -> None
+        | Some by_jmp -> Core.Map.find by_jmp (Term.tid j) in
+      let rec pair js dcs acc =
+        match js, dcs with
+        | [], _ | _, [] -> acc
+        | j :: js, Some e :: dcs ->
+          pair js dcs (Core.Map.set acc ~key:(Term.tid j) ~data:e)
+        | _ :: js, None :: dcs -> pair js dcs acc in
+      match List.map js ~f:cond with
+      | [] -> acc
+      | _ :: tl -> pair js tl acc)
 
 (* Candidate-1 overlap census: per-walk records (guard block, jmp, seed
    mix, visited-block set). Production builds see only the type and
    no-op stubs below — nothing is compiled in (principle #6). *)
 
-let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
+let rec static_graph_vsa
+    ~(abi : Hike_abi.t)
+    ?(written : Var.Set.t option Tid.Map.t = Tid.Map.empty)
+    ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
+    (stack : tid list) (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
   (* Per-sub sets computed once; the walks are un-gated (spec §2.1). *)
-  let preserved = preserved_of_sub s in
-  (* Per-sub def-chain map. *)
-  let defs = defs_of_sub s in
-  (* Store list computed once. *)
-  let stores = stores_of_sub s in
+  let preserved = preserved_of_sub ~abi s in
   (* Frame facts computed once. *)
   (* Per-sub static edge table. *)
   let edge_conds = edge_conds_of s in
+  let disabled_conds = disabled_conds_of ~edge_conds s in
   let cfg = Sub.to_graph s in
   (* Pseudo-nodes never reach denotation. *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
   (* Run context built once per run. *)
-  let rctx = Cbat_runctx.mk_rctx ~cfg:cfg_tmp s in
-  (* WTO fixpoint; inner SCCs stabilize first. *)
-  let wto = wto_of_cfg cfg_tmp in
-  let heads = Cbat_wto.heads_of_comps wto in
+  let rctx = Cbat_runctx.mk_rctx ~cfg:cfg_tmp ~abi s in
   let cfg = cfg_tmp in
-  (* Static predecessor lists; process_vertex reads these instead of
-     re-deriving them on every visit. *)
-  let preds_of =
-    Graphs.Tid.nodes cfg
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m v ->
-        Core.Map.set m ~key:v
-          ~data:(CFG.Node.preds v cfg |> Seq.to_list))
+  (* The dispatch graph: the CFG plus the Resolved dispatches' extra
+     edges — one succs/preds pair serves the WTO, the worklist, and
+     process_vertex's predecessor lists. *)
+  let { Cbat_dispatch_graph.succs; Cbat_dispatch_graph.preds } =
+    Cbat_dispatch_graph.make ~cfg
+      ~blocks:(Tid.Set.of_list (Core.Map.keys rctx.Cbat_runctx.rc_blocks))
+      resolved s
   in
+  (* WTO fixpoint; inner SCCs stabilize first. *)
+  let wto = wto_of_cfg ~succ:succs cfg_tmp in
+  let smry = Cbat_wto.summary wto in
+  let heads = smry.Cbat_wto.heads in
+  let head_to_blocks = smry.Cbat_wto.head_to_blocks in
+  let block_to_head = smry.Cbat_wto.block_to_head in
   Cbat_landmarks.clear ();
-  let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
-  let rec collect_heads comps =
-    List.iter comps ~f:(function
-      | Cbat_wto.Vertex _ -> ()
-      | Cbat_wto.SCC (h, inner) ->
-        let blocks = Tid.Set.of_list (h :: Cbat_wto.flatten_comps inner) in
-        Hashtbl.set head_to_blocks ~key:h ~data:blocks;
-        collect_heads inner)
-  in
-  collect_heads wto;
-  let block_to_head : (Tid.t, Tid.t) Hashtbl.t = Hashtbl.create (module Tid) in
-  Hashtbl.iteri head_to_blocks ~f:(fun ~key:h ~data:blocks ->
-    Core.Set.iter blocks ~f:(fun btid ->
-      match Hashtbl.find block_to_head btid with
-      | None -> Hashtbl.set block_to_head ~key:btid ~data:h
-      | Some existing ->
-        (* Innermost wins. *)
-        let existing_set = Hashtbl.find_exn head_to_blocks existing in
-        if Core.Set.length blocks < Core.Set.length existing_set then
-          Hashtbl.set block_to_head ~key:btid ~data:h));
-
   (* Widen cycle vars per head; folds the single walk above, no second table. *)
   let need_map : Var.Set.t Tid.Map.t =
     let compute_need (blocks : Tid.Set.t) : Var.Set.t =
@@ -185,7 +202,7 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
         Core.Set.to_list blocks
         |> List.concat_map ~f:(fun tid ->
             match Core.Map.find rctx.rc_blocks tid with
-            | Some blk -> Term.enum def_t blk |> Seq.to_list
+            | Some bf -> Term.enum def_t bf.bf_term |> Seq.to_list
             | None -> [])
       in
       let def_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
@@ -227,6 +244,16 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   in
   
   let sol_default = Solution.default init in
+  (* The walk's signed-row witness: producer-proven non-negativity,
+     computed once from the sub's defs and stores; the env argument is
+     the row-time state (the address anchor check). *)
+  let defs_tbl = defs_of_sub s in
+  let stores_tbl = stores_of_sub s in
+  let rctx =
+    { rctx with
+      Cbat_runctx.rc_nonneg =
+        (fun ~env e ->
+          Cbat_backward.prove_nonneg ~defs:defs_tbl ~stores:stores_tbl ~env e) } in
   (* The initial solution seeds the store; from here the store is the only
      home for per-block values, versions, and the caches they key. *)
   let rc_cell =
@@ -234,22 +261,27 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       (Cbat_runctx.with_sol rctx
          (Solution.enum init
           |> Seq.fold ~init:Tid.Map.empty
-               ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v))) in
+               ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:(v, 0)))) in
   let get n =
     match Core.Map.find (!rc_cell).rc_state.fs_sol n with
-    | Some v -> v
+    | Some (v, _) -> v
     | None -> sol_default in
   (* Store plus version bump; the stability check below compares first. *)
   let set n v =
     let rc = !rc_cell in
     let st = rc.rc_state in
-    let versions =
-      match Core.Map.find st.fs_versions n with
-      | None -> Core.Map.set st.fs_versions ~key:n ~data:1
-      | Some k -> Core.Map.set st.fs_versions ~key:n ~data:(k + 1) in
+    let ver =
+      match Core.Map.find st.fs_sol n with
+      | None -> 1
+      | Some (_, k) -> k + 1 in
     rc_cell :=
-      Cbat_runctx.with_sol ~versions:(Some versions) rc
-        (Core.Map.set st.fs_sol ~key:n ~data:v) in
+      Cbat_runctx.with_sol rc
+        (Core.Map.set st.fs_sol ~key:n ~data:(v, ver)) in
+  (* The plain solution view of the versioned store. *)
+  let mk_sol () =
+    Solution.create
+      (Core.Map.map (!rc_cell).rc_state.fs_sol ~f:fst)
+      sol_default in
   Stages.reset ();
   let total_processed = ref 0 in
   let max_steps = 6000 in
@@ -267,21 +299,20 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
       Hashtbl.set head_visits ~key:v ~data:(n + 1)
     end;
     if !total_processed > max_steps then begin
-      let sol = Solution.create (!rc_cell).rc_state.fs_sol sol_default in
+      let sol = mk_sol () in
       raise (Fixpoint_not_converged (max_steps, sol, None))
     end;
     let old = get v in
-    let preds =
-      Core.Map.find preds_of v |> Option.value ~default:[]
-    in
+    let preds = preds v in
     (* Dead bindings never reach the join; the keep-set depends only on
        the visited block, not on the predecessor. *)
     let keep =
-      Option.value ~default:Var.Set.empty
-        (Core.Map.find (!rc_cell).rc_live_in v)
+      match Core.Map.find (!rc_cell).rc_blocks v with
+      | Some bf -> bf.bf_live_in
+      | None -> Var.Set.empty
     in
     (* Snapshot for the deep walk. *)
-    let sol_snap = Solution.create (!rc_cell).rc_state.fs_sol sol_default in
+    let sol_snap = mk_sol () in
     let incoming =
       if List.is_empty preds then old
       else
@@ -297,8 +328,9 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
             (* Context threads through transfers. *)
             let rc = !rc_cell in
              let res = Stages.time `Denote (fun () ->
-               fst (Cbat_walk.denote_block_with_stores ~preserved ~defs
-                     ~stores ~sub:(Some s) ~edge_conds:(Some edge_conds)
+               fst (Cbat_forward.denote_block ~preserved ~written ~resolved
+                     ~sub:(Some s) ~edge_conds:(Some edge_conds)
+                     ~disabled:(Some disabled_conds)
                      ~sol:(Some sol_snap) ~rctx:rc
                      ctx ~source:p p_entry ~target:v)) in
             let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
@@ -345,18 +377,10 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     then false
     else (Stages.time `Glue (fun () -> set v new_val); true))
   in
-  (* WTO position index built once; the queue pops the lowest. *)
-  let pos_of =
-    List.mapi (Cbat_wto.flatten_comps wto) ~f:(fun i t -> (t, i))
-    |> List.fold ~init:Tid.Map.empty ~f:(fun m (t, i) ->
-        Core.Map.set m ~key:t ~data:i) in
+  (* The queue pops the lowest WTO position. *)
   let pos (v : Tid.t) : int =
-    Option.value ~default:Int.max_value (Core.Map.find pos_of v) in
-  (* One walk-pop allowance for the whole run. *)
-  let allowance =
-    Core.Map.fold rctx.rc_out_edges ~init:0
-      ~f:(fun ~key:_ ~data:n acc -> acc + n) in
-  rctx.rc_walk_budget := Cbat_runctx.budget_per_edge * allowance;
+    Option.value ~default:Int.max_value
+      (Core.Map.find smry.Cbat_wto.pos_of v) in
   (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
      completely, and changes enqueue Tid-CFG successors. *)
   let pending = ref Tid.Set.empty in
@@ -364,8 +388,8 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
   (match Term.first blk_t s with
   | None -> ()
   | Some entry ->
-    Graphs.Tid.Node.succs (Term.tid entry) cfg
-    |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t));
+    succs (Term.tid entry)
+    |> List.iter ~f:(fun t -> pending := Core.Set.add !pending t));
   let pop_min () =
     let best =
       Core.Set.fold !pending ~init:None ~f:(fun best t ->
@@ -382,57 +406,105 @@ let rec static_graph_vsa (stack : tid list) (ctx : Program.t) (s : Sub.t) (init 
     | None -> ()
     | Some v ->
       if process_vertex v then
-        Graphs.Tid.Node.succs v cfg
-        |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t);
+        succs v
+        |> List.iter ~f:(fun t -> pending := Core.Set.add !pending t);
       stabilize_worklist () in
   stabilize_worklist ();
   Stages.report (Sub.name s);
-  Solution.create (!rc_cell).rc_state.fs_sol sol_default
+  mk_sol ()
 module Cbat_extraction = struct
-(* Classification vocabulary. *)
+(* Classification vocabulary — the producer's lane split (D1 + the
+   mixed-class finding).  The (lo,hi) pair is the denotation's position
+   interval on the model's ABSOLUTE segment line (see [classify]);
+   "below/above the entry RSP" below reads as below/above the segment
+   base:
+   - [Range]/[Infinite]: the span lies ENTIRELY below the entry RSP —
+     this sub's own frame (the uniform frame rule).
+   - [Caller]: the span lies entirely at/above the entry RSP —
+     ABI-visible caller-window traffic (incoming stack args, the
+     return-address slot) — the caller-window lane.
+   - [Mixed]: the span is two-sided or wrapped (a va_list pointer that
+     is the reg-save area OR the overflow area, an ITE'd address, a
+     widened hull crossing the entry RSP): the runtime address is
+     GENUINELY either-based, and the emitter's complete rule for the
+     class is the two-base select (no single-base rule is sound —
+     measured on variadic/factorial/va_arg_vacopy). *)
 type kind =
   | Range of int64 * int64
   | Infinite of int64 * int64
-  | Unbounded
+  | Caller of int64 * int64
+  | Mixed of int64 * int64
   | Dead
-  | VLA of Tid.t
 [@@deriving equal]
 
-(* Kind of a word set. *)
-let classify ?vla_tid (ws : WordSet.t) : kind option =
-  if WordSet.is_top ws then Some Unbounded
-  else if WordSet.is_bottom ws then Some Dead
-  else
-    match WordSet.min_elem ws, WordSet.max_elem ws with
-    | Some lo, Some hi ->
-      (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-       | Ok lo, Ok hi ->
-         let is_inf = WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 in
-         if is_inf && Option.is_some vla_tid then
-           Some (VLA (Option.value_exn vla_tid))
-         else if is_inf then Some (Infinite (lo, hi))
-         else Some (Range (lo, hi))
-       | _ -> Some Unbounded)
-    | _ -> Some Unbounded
+(* The fully-infinite span: the whole position line.  A TOP denotation
+   IS this span — the degenerate [Infinite], carrying no bound. *)
+let unbounded_span : kind = Infinite (Stdlib.Int64.min_int, Stdlib.Int64.max_int)
 
-(* Signed bounds or None. *)
-let bounds_of (ws : WordSet.t) : (int64 * int64) option =
-  if WordSet.is_top ws || WordSet.is_bottom ws then None
-  else
-    match WordSet.min_elem ws, WordSet.max_elem ws with
-    | Some lo, Some hi -> (
-        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok lo, Ok hi -> Some (lo, hi)
-        | _ -> None)
-    | _ -> None
+(* The unbounded-span fact: the bounds cover the whole line. *)
+let is_unbounded_span (lo : int64) (hi : int64) : bool =
+  Int64.equal lo Stdlib.Int64.min_int && Int64.equal hi Stdlib.Int64.max_int
 
-(* ABI-visible k-range. *)
-let k_range_of (ws : WordSet.t) (rsp_ws : WordSet.t) :
-    (int64 * int64) option =
-  match bounds_of ws, bounds_of rsp_ws with
-  | Some (alo, ahi), Some (rlo, rhi) ->
-      Some (Stdlib.Int64.sub alo rhi, Stdlib.Int64.sub ahi rlo)
+(* The lane split over ABSOLUTE positions: entirely at/above the entry
+   RSP (the segment base — the seeded SP is base + offset 0) -> Caller;
+   entirely below -> Range (kept); everything else (two-sided, wrapped)
+   -> Mixed.  The unbounded span is no lane — it names no side of the
+   entry line — so it keeps itself. *)
+let caller_split (k : kind) : kind =
+  let cmp = Stdlib.Int64.compare in
+  let ordered lo hi = cmp lo hi <= 0 in
+  let entry = WordSet.stack_base in
+  match k with
+  | Range (lo, hi) | Infinite (lo, hi) when not (is_unbounded_span lo hi) ->
+    if ordered lo hi && cmp lo entry >= 0 then Caller (lo, hi)
+    else if ordered lo hi && cmp hi entry <= 0 then k
+    else Mixed (lo, hi)
+  | k -> k
+
+(* Kind of a word set.  The kind's (lo,hi) pair is the denotation's
+   position interval on the model's ABSOLUTE segment line: the entry
+   RSP is the segment base (the seeded SP is base + offset 0), so a
+   frame offset o has absolute position [stack_base + o], and a plain
+   in-band word (the degraded arm) is its own address.  The single
+   representation: the interval is read from the denotation's own
+   structure — [stack_offsets] (the StackOff proof) carries the offset
+   set, whose extrema lift by the base; a plain set's own extrema are
+   already absolute — never a rebuilt offset-space twin. *)
+let position_of_offset (o : int64) : int64 option =
+  let r = Stdlib.Int64.add WordSet.stack_base o in
+  (* Overflow-checked: the base is positive, so only a huge positive
+     offset can wrap the sum. *)
+  if Stdlib.Int64.compare o 0L > 0 && Stdlib.Int64.compare r o < 0 then None
+  else Some r
+
+(* The kind's int64 bound pair: both extrema words to int64; [None] on
+   any doubt. *)
+let int64_pair_of (lo : Cbat_word.t) (hi : Cbat_word.t)
+    : (int64 * int64) option =
+  match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+  | Ok lo, Ok hi -> Some (lo, hi)
   | _ -> None
+
+let classify (ws : WordSet.t) : kind =
+  if WordSet.is_top ws then unbounded_span
+  else if WordSet.is_bottom ws then Dead
+  else
+    let bounds =
+      match WordSet.offset_extrema ws with
+      | Some (lo, hi) ->
+        Option.bind (int64_pair_of lo hi) ~f:(fun (lo, hi) ->
+            Option.bind (position_of_offset lo) ~f:(fun lo ->
+                Option.map (position_of_offset hi) ~f:(fun hi -> (lo, hi))))
+      | None ->
+        (match WordSet.min_elem ws, WordSet.max_elem ws with
+         | Some lo, Some hi -> int64_pair_of lo hi
+         | _ -> None)
+    in
+    match bounds with
+    | Some (lo, hi) ->
+      let is_inf = WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 in
+      if is_inf then Infinite (lo, hi) else Range (lo, hi)
+    | None -> unbounded_span
 
 (* Address of a stack-access rhs using Exp.visitor. *)
 let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
@@ -446,331 +518,87 @@ let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
     end
   in
   vis#visit_exp rhs None
-
-
-let st_tag_of ~(tags : (tid, AI.t) Solution.t) (blk : blk term)
-    (addr' : exp) (st_before : AI.t) : AI.t =
-  Exp.free_vars addr'
-  |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
-      match Var.typ v with
-      | Type.Imm w ->
-        let tag_v = AI.find_word w
-            (Solution.get tags (Term.tid blk)) v in
-        let cur = AI.find_word w acc v in
-        let mm = WordSet.meet cur tag_v in
-        if WordSet.is_top cur
-           && Cbat_word.is_one (WordSet.cardinality mm)
-           || Cbat_word.is_zero (WordSet.cardinality mm)
-           || WordSet.equal mm cur
-        then acc
-        else AI.add_word acc ~key:v ~data:mm
-      | Type.Mem _ | Type.Unk -> acc)
-
-
-(* Frame neighborhood for channel 2: generous constants (spec §2.2). *)
-let frame_neighborhood : int64 * int64 = (-65536L, 65536L)
-
-(* Tests whether an address mentions a frame-tracked var. *)
-let mentions_frame_var (frame : Cbat_transfer.frame option) (addr : exp) : bool =
-  match frame with
-  | None -> false
-  | Some f ->
-    Exp.free_vars addr
-    |> Core.Set.exists ~f:(fun v ->
-        Option.is_some (AI.frame_lookup f (AI.frame_key v)))
-
-(* Tests the two-channel frame-residency proof (spec §2.2). *)
-let is_seed (st_before : AI.t) (addr : exp) : bool =
-  let frame = Cbat_transfer.frame_of_state st_before in
-  (* Channel 1 (direct): the address is affine over frame-derived registers,
-     widened or not; [Infinite] stays live. *)
-  if mentions_frame_var frame addr then true
-  else
-    (* Channel 2 (reloaded): the denoted address is bounded and a SUBSET of
-       the frame neighborhood — never intersection; non-seeding is sound. *)
-    match Cbat_transfer.denote_imm_exp addr st_before with
-    | Error _ -> false
-    | Ok ws ->
-      if WordSet.is_top ws || WordSet.is_circular ws then false
-      else if WordSet.is_bottom ws then true
-      else
-        match WordSet.min_elem ws, WordSet.max_elem ws with
-        | Some lo, Some hi -> (
-            match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-            | Ok lo_i64, Ok hi_i64 ->
-              let nlo, nhi = frame_neighborhood in
-              if WordSet.is_ascending ws then
-                (* Non-negative ascending ray pointing into caller stack frame *)
-                Stdlib.Int64.compare lo_i64 0L >= 0
-                && Stdlib.Int64.compare lo_i64 nhi <= 0
-              else
-                Stdlib.Int64.compare lo_i64 nlo >= 0
-                && Stdlib.Int64.compare hi_i64 nhi <= 0
-            | _ -> false)
-        | _ -> false
-
-
-let rec extract ~(sp : var)
-    ~(dynamic_alloc : def term -> bool)
-    ~(alloc_tids : Tid.Set.t)
-    ~(sol : (tid, AI.t) Solution.t)
-    (sub : sub term) :
-    kind Tid.Map.t * (int64 * int64) Tid.Map.t
-    * (int64 * int64) Tid.Map.t =
-  let tags = sol in
-  let raw, kraw =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:([], []) ~f:(fun (acc, kacc) blk ->
-        (* Every def is denoted; seeding replaces the tag match. *)
-        let defs = Term.enum def_t blk |> Seq.to_list in
-        let _, acc, kacc =
-          Base.List.fold_left defs
-            ~init:(Solution.get tags (Term.tid blk), acc, kacc)
-            ~f:(fun (st, acc, kacc) d ->
-                 let st_before = st in
-                 let st = Cbat_transfer.denote_def d st in
-                 match stack_address_of_rhs (Def.rhs d) with
-                 | Some addr when is_seed st_before addr ->
-                     let addr' =
-                       Cbat_transfer.rewrite_addr (Cbat_transfer.frame_of_state st_before) addr in
-                     (* Addresses use tag-state values. *)
-                     let st_tag = st_tag_of ~tags blk addr' st_before in
-                     (match
-                        Cbat_transfer.denote_imm_exp
-                          (* Addresses rewrite to offsets. *)
-                          addr' st_tag
-                      with
-                      | Ok ws -> (
-                          match classify ws with
-                          | Some kind ->
-                              let acc = (Term.tid d, kind, ws) :: acc in
-                              let kacc =
-                                match
-                                  k_range_of ws
-                                    (AI.find_word 64 st_before sp)
-                                with
-                                | Some (klo, khi) ->
-                                    (Term.tid d, klo, khi) :: kacc
-                                | None -> kacc
-                              in
-                              (st, acc, kacc)
-                          | None ->
-                              let ws = WordSet.top 64 in
-                              let acc = (Term.tid d, Unbounded, ws) :: acc in
-                              (st, acc, kacc))
-                      | Error _ ->
-                          let ws = WordSet.top 64 in
-                          let acc = (Term.tid d, Unbounded, ws) :: acc in
-                          (st, acc, kacc))
-                 | _ -> (st, acc, kacc))
-        in
-        (acc, kacc))
-  in
-  let raw = List.rev raw in
-  (* Overlapping addresses merge. *)
-  let span_of = function
-    | Range (lo, hi) -> (lo, hi)
-    | Infinite (lo, hi) -> (Stdlib.Int64.min lo hi, Stdlib.Int64.max lo hi)
-    | Unbounded | Dead | VLA _ -> (0L, 0L)
-  in
-  let merged_tags : kind Tid.Map.t =
-    let bounded, unbounded_or_dead =
-      Base.List.partition_tf raw ~f:(fun (_, kind, _) ->
-          match kind with
-          | Range _ -> true
-          | Infinite _ | Unbounded | Dead | VLA _ -> false)
-    in
-    let items = bounded in
-    (* Transitive overlap components. *)
-    let rec components acc = function
-      | [] -> acc
-      | (dtid, kind, ws) :: rest ->
-          let overlapping, non_overlapping =
-            Base.List.partition_tf acc ~f:(fun comp ->
-                Base.List.exists comp ~f:(fun (_, _, ws') -> WordSet.overlap ws ws'))
-          in
-          let new_comp =
-            (dtid, kind, ws) :: Base.List.concat overlapping
-          in
-          components (new_comp :: non_overlapping) rest
-    in
-    let init_map =
-      Base.List.fold unbounded_or_dead ~init:Tid.Map.empty ~f:(fun acc (dtid, kind, _) ->
-          Core.Map.set acc ~key:dtid ~data:kind)
-    in
-    Base.List.fold_left (components [] items) ~init:init_map
-      ~f:(fun acc comp ->
-        match comp with
-        | [ (dtid, kind, _) ] -> Core.Map.set acc ~key:dtid ~data:kind
-        | _ ->
-            let lo, hi =
-              match comp with
-              | (_, k0, _) :: rest ->
-                let slo0, shi0 = span_of k0 in
-                Base.List.fold_left rest ~init:(slo0, shi0)
-                  ~f:(fun (l, h) (_, k, _) ->
-                    let slo, shi = span_of k in
-                    (Stdlib.Int64.min l slo, Stdlib.Int64.max h shi))
-              | [] -> (0L, 0L) (* Non-empty components. *)
-            in
-            Base.List.fold_left comp ~init:acc
-              ~f:(fun acc (dtid, _, _) ->
-                  Core.Map.set acc ~key:dtid ~data:(Range (lo, hi))))
-  in
-  let offsets =
-      Base.List.fold raw ~init:Tid.Map.empty ~f:(fun m (dtid, kind, _) ->
-          let k = match Core.Map.find merged_tags dtid with
-            | Some k -> k
-            | None -> kind in
-          Core.Map.set m ~key:dtid ~data:k) in
-  let k_ranges =
-    Base.List.fold kraw ~init:Tid.Map.empty
-      ~f:(fun m (dtid, lo, hi) -> Core.Map.set m ~key:dtid ~data:(lo, hi)) in
-  (* No dynamic allocations means no bounds to compute: the whole-sub
-     walk below would discard everything. *)
-  let vla_bounds =
-    if Core.Set.is_empty alloc_tids then Tid.Map.empty
-    else
-      let def_of_lhs =
-        Term.enum blk_t sub
-        |> Seq.concat_map ~f:(Term.enum def_t)
-        |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-            Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
-      in
-      Term.enum blk_t sub
-      |> Seq.concat_map ~f:(fun blk ->
-          let blk_tid = Term.tid blk in
-          Term.enum def_t blk
-          |> Seq.filter ~f:dynamic_alloc
-          |> Seq.filter_map ~f:(fun d ->
-              match vla_size_of_rhs sp def_of_lhs (Def.rhs d) with
-              | None -> None
-              | Some size ->
-                  let st = Solution.get tags blk_tid in
-                  match Cbat_transfer.denote_imm_exp size st with
-                  | Ok ws -> (
-                      match WordSet.min_elem ws, WordSet.max_elem ws with
-                      | Some lo, Some hi -> (
-                          match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-                          | Ok lo, Ok hi -> Some (Term.tid d, (lo, hi))
-                          | _ -> None)
-                      | _ -> None)
-                  | Error _ -> None))
-      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m (dtid, b) ->
-             Core.Map.set m ~key:dtid ~data:b)
-  in
-  (offsets, k_ranges, vla_bounds)
-
-(* Dynamic-allocation size expression. *)
-(* True for [RSP := RSP - size]. *)
-and vla_decrement_p (sp_base : var) (rhs : Bil.exp) : bool =
-  match rhs with
-  | Bil.BinOp (Bil.MINUS, Bil.Var a, size) ->
-      Var.same (Var.base a) sp_base
-      && (match size with Bil.Int _ -> false | _ -> true)
-  | _ -> false
-
-and vla_size_of_rhs (sp : var) (def_of_lhs : def term Var.Map.t)
-    (rhs : Bil.exp) : Bil.exp option =
-  match rhs with
-  | Bil.BinOp (Bil.MINUS, Bil.Var _, size) when vla_decrement_p (Var.base sp) rhs ->
-      Some size
-  | Bil.Var tmp -> (
-      match Core.Map.find def_of_lhs (Var.base tmp) with
-      | Some d' -> (
-          match Def.rhs d' with
-          | Bil.BinOp (Bil.MINUS, Bil.Var _, size)
-            when vla_decrement_p (Var.base sp) (Def.rhs d') ->
-              Some size
-          | _ -> None)
-      | None -> None)
-  | _ -> None
-
-(* Runtime-sized SP decrements — relocated unchanged from the deleted
-   relevance pass (spec §2.3); the hike-vsa pass calls it once per sub. *)
-and detect_dynamic_alloc (sp : var) (sub : sub term) : Tid.Set.t =
-  let sp_base = Var.base sp in
-  let def_of_lhs =
-    Term.enum blk_t sub
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
-        Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
-  in
-  let is_sp_var (v : var) : bool = Var.same (Var.base v) sp_base in
-  let find_def (v : var) : def term option = Core.Map.find def_of_lhs (Var.base v) in
-  let is_dynamic_sp_decrement (e : exp) : bool =
-    vla_decrement_p sp_base e
-  in
-  let v =
-    object
-      inherit [Tid.Set.t] Term.visitor
-      method! visit_def d acc =
-        let lhs = Def.lhs d in
-        if is_sp_var lhs then
-          let rhs = Def.rhs d in
-          if is_dynamic_sp_decrement rhs then
-            Core.Set.add acc (Term.tid d)
-          else
-            match rhs with
-            | Bil.Var tmp ->
-                (match find_def tmp with
-                 | Some d' when is_dynamic_sp_decrement (Def.rhs d') ->
-                     Core.Set.add (Core.Set.add acc (Term.tid d)) (Term.tid d')
-                 | _ -> acc)
-            | _ -> acc
-        else acc
-    end
-  in
-  v#visit_sub sub Tid.Set.empty
-
 end
 
 (* Re-exports for the mli's fixture seam (the F1 family constructs these). *)
 type refine_ctx = Cbat_runctx.refine_ctx
-let mk_rctx = Cbat_runctx.mk_rctx
-let walk_budget (rc : refine_ctx) : int ref = rc.Cbat_runctx.rc_walk_budget
+let mk_rctx ~cfg ~abi = Cbat_runctx.mk_rctx ~cfg ~abi
 
-(* The frozen seam (cbat_vsa.mli): transfer and walk live in sibling
-   modules; this interface re-exports them. The driver below consumes
-   both; neither consumes this module (no cycle by construction). *)
-
-type frame = Cbat_transfer.frame
+(* The frozen seam (cbat_vsa.mli): transfer, forward, and backward live
+   in sibling modules; this interface re-exports them. The driver below
+   consumes them; none consumes this module (no cycle by construction). *)
 
 let set_addr_bits = Cbat_transfer.set_addr_bits
-let frame_of_state = Cbat_transfer.frame_of_state
-let rewrite_addr = Cbat_transfer.rewrite_addr
+
+type section_image = Cbat_transfer.section_image = {
+  img_lo : int64;
+  img_hi : int64;
+  img_bytes : int array;
+}
+
+let set_section_images = Cbat_transfer.set_section_images
 let denote_def = Cbat_transfer.denote_def
 let denote_defs = Cbat_transfer.denote_defs
 let denote_imm_exp = Cbat_transfer.denote_imm_exp
 let reachable_jumps = Cbat_transfer.reachable_jumps
+let fold_block_states = Cbat_transfer.fold_block_states
+let last_defs = Cbat_transfer.last_defs
 
-type analysis_ctx = Cbat_walk.analysis_ctx = {
-  defs : (def term * bool) Var.Map.t option;
-  stores : def term list option;
-  flag_state : (var * Bil.binop * exp * word) option;
-  has_sub : bool;
-}
+(* The one denotation access: [e] denotes in the before-env of [def] —
+   the block's defs replay from [pre] up to [def], the target def's own
+   transfer not run — or, with no [def], in the block's postcondition
+   (the full replay through every def; a def-less block denotes in
+   [pre]).  A [def] outside [blk] denotates in [AI.top]. *)
+let denote_exp_at :
+    pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
+    (WordSet.t, Type.error) Result.t =
+  fun ~pre ~blk ?def e ->
+    match def with
+    | None -> denote_imm_exp e (denote_defs blk pre)
+    | Some d ->
+        let hit = ref false in
+        let env =
+          Term.enum def_t blk
+          |> Seq.fold ~init:pre ~f:(fun env x ->
+              if !hit then env
+              else if Tid.equal (Term.tid x) (Term.tid d) then (
+                hit := true;
+                env)
+              else denote_def x env)
+        in
+        if !hit then denote_imm_exp e env else denote_imm_exp e AI.top
 
-type edge_constraint = Cbat_walk.edge_constraint =
-  | Var of var * WordSet.t
-  | Cell of exp * exp * Size.t * endian * WordSet.t
-  | Infeasible
+(* The per-block boundary envs of a solution: pre is the solution's
+   entry state, post the block's def replay from it (the state the
+   block's jmps read). *)
+let block_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
+    (AI.t * AI.t) Tid.Map.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+      let pre = Solution.get sol (Term.tid blk) in
+      Core.Map.set m ~key:(Term.tid blk) ~data:(pre, denote_defs blk pre))
 
-module Live = Cbat_walk.Live
+let constrain_edge = Cbat_backward.constrain_edge
+let inverse_denote = Cbat_backward.inverse_denote
 
-let assume_jump_cond = Cbat_walk.assume_jump_cond
-let constrain_cell_on_trace = Cbat_walk.constrain_cell_on_trace
-let edge_constraints = Cbat_walk.edge_constraints
+(* The seam's seed shape: the cond's leaf constraints as (var, row)
+   pairs; the walk keys them by the base var. *)
+let refine_edge ~sol ~rctx ?reads ~seeds env blk =
+  Cbat_backward.refine_edge ~sol ~rctx ?reads
+    ~seeds:(List.fold seeds ~init:Var.Map.empty
+              ~f:(fun m (v, c) -> Core.Map.set m ~key:(Var.base v) ~data:c))
+    env blk
 
-type walk_record = Cbat_walk.walk_record = {
-  wr_guard : tid;
-  wr_jmp : tid;
-  wr_seq : int;
-  wr_nvar : int;
-  wr_ncell : int;
-  wr_reads : Tid.Set.t;
-}
-
-let walk_records_reset = Cbat_walk.walk_records_reset
-let walk_records_dump = Cbat_walk.walk_records_dump
-let refine_edge = Cbat_walk.refine_edge
+(* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
+module Test_seam = struct
+  type refine_ctx = Cbat_runctx.refine_ctx
+  let denote_def = denote_def
+  let denote_defs = denote_defs
+  let denote_imm_exp = denote_imm_exp
+  let fold_block_states = fold_block_states
+  let reachable_jumps = reachable_jumps
+  let constrain_edge = constrain_edge
+  let inverse_denote = inverse_denote
+  let mk_rctx = mk_rctx
+  let refine_edge = refine_edge
+end

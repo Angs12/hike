@@ -7,12 +7,12 @@ open Bin_prot.Std
 include Cbat_vsa_utils
 
 module W = Cbat_word
-module Option = Core_kernel.Option
-module Sexp = Core_kernel.Sexp
-module List = Core_kernel.List
+module Option = Core.Option
+module Sexp = Core.Sexp
+module List = Core.List
 
 open !Cbat_word
-open Core_kernel
+open Core
 module Hashtbl = Stdlib.Hashtbl
 let min = Stdlib.min
 let max = Stdlib.max
@@ -165,7 +165,11 @@ let logand (p1 : t) (p2 : t) : t =
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
   end with
-  | None -> bottom sz
+  (* None = the image is unrepresentable here (circular operands have no
+     min/max); it does NOT mean the result is empty.  BOTTOM would claim a
+     live path dead — it prunes edges and turns reachable stores into Dead
+     tags (the -O2 stack-realignment class).  TOP is the sound fallback. *)
+  | None -> top sz
   | Some x -> x)
 
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
@@ -544,9 +548,11 @@ let div (p1 : t) (p2 : t) : t =
     min_elem p2 >>= fun min_e2 ->
     max_elem p1 >>= fun max_e1 ->
     max_elem p2 >>= fun max_e2 ->
-    (* Zero divisor gives top. *)
+    (* A zero divisor: non-singleton stays top; exactly {0} is the word
+       semantics (x/0 = ones), never bottom. *)
     if elem (W.zero width) p2
-    then !!(if W.is_one (cardinality p2) then bottom width else top width)
+    then !!(if W.is_one (cardinality p2) then singleton (W.ones width)
+            else top width)
     else
       let base = W.div min_e1 max_e2 in
       let e = W.div max_e1 min_e2 in
@@ -562,8 +568,10 @@ let div (p1 : t) (p2 : t) : t =
   | None -> bottom width
   | Some x -> x)
 
+let wsdiv (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
+let wsmod (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
+
 let sdiv (p1 : t) (p2 : t) : t =
-  let wsdiv a b = W.div (W.signed a) (W.signed b) in
   (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
   (* Infinite operand gives unbounded quotient. *)
@@ -571,41 +579,101 @@ let sdiv (p1 : t) (p2 : t) : t =
   else
   let open Monads.Std.Monad.Option.Syntax in
   (match begin
-    min_elem p1 >>= fun min_e1 ->
-    min_elem p2 >>= fun min_e2 ->
-    max_elem p1 >>= fun max_e1 ->
-    max_elem p2 >>= fun max_e2 ->
-    (* Zero divisor gives top; exact {0} is bottom. *)
+    (* Truncated division's extrema sit at the SIGNED extrema: a
+       sign-spanning set's unsigned endpoints are not its signed
+       corners. *)
+    min_elem_signed p1 >>= fun min_e1 ->
+    min_elem_signed p2 >>= fun min_e2 ->
+    max_elem_signed p1 >>= fun max_e1 ->
+    max_elem_signed p2 >>= fun max_e2 ->
+    (* A zero divisor: non-singleton stays top; exactly {0} is the word
+       semantics (x/0 = ones), never bottom. *)
     if elem (W.zero width) p2
-    then !!(if W.is_one (cardinality p2) then bottom width else top width)
+    then !!(if W.is_one (cardinality p2) then singleton (W.ones width)
+            else top width)
     else if W.is_one (cardinality p1) &&
             W.is_one (cardinality p2)
     then !!(singleton (wsdiv (base_of p1) (base_of p2)))
-    else
+    else if W.(<) max_e2 (half width) || W.(>=) min_e2 (half width) then begin
+      (* One-signed divisor: the truncated quotient's extrema sit at the
+         corner pairs of the signed extrema. *)
       let minmax = wsdiv min_e1 max_e2 in
       let minmin = wsdiv min_e1 min_e2 in
       let maxmax = wsdiv max_e1 max_e2 in
       let maxmin = wsdiv max_e1 min_e2 in
-      let base =
-        min minmax @@
-        min minmin @@
-        min maxmax maxmin in
-      let e =
-        max minmax @@
-        max minmin @@
-        max maxmax maxmin in
-      (* TODO: improve step accuracy. *)
+      (* The hull is the signed-order interval (it may wrap). *)
+      let h = half width in
+      let scmp a b =
+        match W.(>=) a h, W.(>=) b h with
+        | true, false -> -1
+        | false, true -> 1
+        | _ -> W.compare a b
+      in
+      let lo =
+        List.reduce_exn [ minmax; minmin; maxmax; maxmin ]
+          ~f:(fun a b -> if scmp a b <= 0 then a else b) in
+      let hi =
+        List.reduce_exn [ minmax; minmin; maxmax; maxmin ]
+          ~f:(fun a b -> if scmp a b >= 0 then a else b) in
       let step = W.one width in
-      let cardn = cardn_from_bounds base step e in
-      !!(create base ~step ~cardn)
+      let cardn = cardn_from_bounds lo step hi in
+      !!(create lo ~step ~cardn)
+    end
+    else !!(top width)
   end with
   | None -> bottom width
   | Some x -> x)
 
 
+(* The unsigned residue bound: x mod k lands in [0, k-1] for every k >
+   0, exactly [lo mod k, hi mod k] when lo and hi share their quotient,
+   and x itself when every divisor exceeds x or the divisor is {0}
+   (the word identity).  Divisor shapes outside these arms keep the
+   subtraction composite. *)
 let modulo (p1 : t) (p2 : t) : t =
-  sub p1 (mul (div p1 p2) p2)
+  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
+  else if is_bottom p1 || is_bottom p2 then sub p1 (mul (div p1 p2) p2)
+  else
+    let width = bitwidth p1 in
+    match min_elem p2, max_elem p2 with
+    | Some kmin, Some kmax when W.is_zero kmin && W.equal kmin kmax -> p1
+    | Some kmin, Some kmax when not (W.is_zero kmin) ->
+      (match min_elem p1, max_elem p1 with
+       | Some lo, Some hi when W.equal kmin kmax ->
+         let k = kmin in
+         if W.equal (W.div lo k) (W.div hi k)
+         then interval ~width (W.modulo lo k) (W.modulo hi k)
+         else interval ~width (W.zero width) (W.pred k)
+       | _ ->
+         (match max_elem p1 with
+          | Some hi when W.(<) hi kmin -> p1
+          | _ -> interval ~width (W.zero width) (W.pred kmax)))
+    | _ -> sub p1 (mul (div p1 p2) p2)
 
-
+(* The signed residue bound for a positive constant divisor: |r| <=
+   k-1, refined to the exact sub-interval inside one truncated
+   quotient block; a mixed-sign dividend takes the wrapping band
+   [-(k-1), k-1].  Other divisor shapes keep the subtraction
+   composite. *)
 let smodulo (p1 : t) (p2 : t) : t =
-  sub p1 (mul (sdiv p1 p2) p2)
+  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
+  else if is_bottom p1 || is_bottom p2 then sub p1 (mul (sdiv p1 p2) p2)
+  else
+    let width = bitwidth p1 in
+    match min_elem p2, max_elem p2 with
+    | Some k, Some k' when
+        W.equal k k' && not (W.is_zero k) && W.(<) k (half width) ->
+      let neg_band = W.succ (W.neg k) in
+      (match min_elem_signed p1, max_elem_signed p1 with
+       | Some slo, Some shi ->
+         if W.(<) slo (half width) then
+           if W.equal (wsdiv slo k) (wsdiv shi k)
+           then interval ~width (wsmod slo k) (wsmod shi k)
+           else interval ~width (W.zero width) (W.pred k)
+         else if W.(>=) shi (half width) then
+           if W.equal (wsdiv slo k) (wsdiv shi k)
+           then interval ~width (wsmod slo k) (wsmod shi k)
+           else interval ~width neg_band (W.zero width)
+         else interval ~width neg_band (W.pred k)
+       | _ -> sub p1 (mul (sdiv p1 p2) p2))
+    | _ -> sub p1 (mul (sdiv p1 p2) p2)

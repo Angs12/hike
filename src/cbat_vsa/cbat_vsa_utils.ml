@@ -33,7 +33,7 @@ let fin_set_size : int = 10
 (* Integer division rounding up. *)
 let cdiv (x : int) (y : int) : int = (x - 1)/y + 1
 
-open !Core_kernel
+open !Core
 open Bap.Std
 
 let exn_on_err : ('a, Type.error) Result.t -> 'a = function
@@ -45,3 +45,40 @@ let rotate_list (l : 'a list) : 'a list =
   match l_r with
   | [] -> []
   | hd::tl -> hd::(List.rev tl)
+
+(* Negation of a comparison op: symmetric ops complement in place;
+   ordering ops complement AND swap ([!(a < b)] = [b <= a]).  Total —
+   the result is always one of the understood comparisons. *)
+let negate_comparison (op : Bil.binop) : Bil.binop * bool =
+  match op with
+  | Bil.LT -> (Bil.LE, true)
+  | Bil.LE -> (Bil.LT, true)
+  | Bil.SLT -> (Bil.SLE, true)
+  | Bil.SLE -> (Bil.SLT, true)
+  | Bil.EQ -> (Bil.NEQ, false)
+  | _ -> (Bil.EQ, false)
+
+let is_comparison_op (op : Bil.binop) : bool =
+  match op with
+  | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE -> true
+  | _ -> false
+
+(* The complete form of a cond: every negation sits in a comparison, so
+   the evaluator constrains the cond TRUE and needs no polarity rule.
+   NOT over a comparison is the negated comparison; NOT over a NOT
+   folds; AND sides complete; NOT over any other shape stays (the
+   walk's NOT row is the bijection). *)
+let rec complete_cond (e : exp) : exp =
+  match e with
+  | Bil.BinOp (Bil.AND, a, b) ->
+    Bil.BinOp (Bil.AND, complete_cond a, complete_cond b)
+  | Bil.UnOp (Bil.NOT, u) -> negated_cond u
+  | _ -> e
+
+and negated_cond (e : exp) : exp =
+  match e with
+  | Bil.BinOp (op, a, b) when is_comparison_op op ->
+    let op', swap = negate_comparison op in
+    if swap then Bil.BinOp (op', b, a) else Bil.BinOp (op', a, b)
+  | Bil.UnOp (Bil.NOT, u) -> complete_cond u
+  | _ -> Bil.UnOp (Bil.NOT, e)

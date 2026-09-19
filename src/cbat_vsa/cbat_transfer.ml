@@ -1,7 +1,9 @@
-(* Forward transfer: frame facts, value denotation over BIL. Pure;
-   the walk and driver consume it (one-directional dep). *)
-
-include Core_kernel
+(* Forward transfer: value denotation over BIL. Pure; the walk and
+   driver consume it (one-directional dep).  The entry RSP's word
+   carries the symbolic segment base, SP-derived addresses denote
+   [StackOff] directly, and memory cells key by their segment
+   offsets. *)
+include Core
 open Bap.Std
 open Graphlib.Std
 open Cbat_vsa_utils
@@ -114,147 +116,130 @@ let val_top : typ -> val_t = function
     `Mem (Mem.top k)
   | Type.Unk -> failwith "Error in val_top: typ is not representable by Type.t"
 
-(* Effect of one def on facts; every def is denoted (spec §2.1). *)
-let apply_frame_def_list (f : AI.frame) (d : def term) : AI.frame =
-  let v = AI.frame_key (Def.lhs d) in
-  let remove = AI.frame_remove f v in
-  (* Copy rule with shift. *)
-  let transfer ~(shift : AI.frame_term -> AI.frame_term) (y : var)
-      : AI.frame =
-    if Var.equal y v then
-      match AI.frame_lookup f v with
-      | Some t -> AI.frame_set f v (shift t)
-      | None -> remove
+(* An image-backed section: [img_lo..img_hi] are the span's inclusive
+   address bounds, [img_bytes] the section's static content.  The
+   pass entry threads only sections whose runtime content IS the
+   image. *)
+type section_image =
+  { img_lo : int64;
+    img_hi : int64;
+    img_bytes : int array }
+
+let section_images_ref : section_image list ref = ref []
+
+(* Threads the image-backed sections in. *)
+let set_section_images (imgs : section_image list) : unit =
+  section_images_ref := imgs
+
+(* The image's [bits]-bit word at byte offset [off], assembled in the
+   load's endianness; [None] when the bytes leave the array. *)
+let image_word (bytes : int array) (off : int) ~(endian : endian)
+    ~(bits : int) : Cbat_word.t option =
+  let nb = bits / 8 in
+  if
+    bits <= 0 || bits > 64 || bits mod 8 <> 0 || off < 0
+    || off + nb > Array.length bytes
+  then None
+  else
+    let v =
+      let rec go i acc =
+        if i >= nb then acc
+        else
+          let b = Stdlib.Int64.of_int bytes.(off + i) in
+          let acc' =
+            match endian with
+            | LittleEndian ->
+              Stdlib.Int64.logor acc (Stdlib.Int64.shift_left b (8 * i))
+            | BigEndian ->
+              Stdlib.Int64.logor acc
+                (Stdlib.Int64.shift_left b (8 * (nb - 1 - i)))
+          in
+          go (i + 1) acc'
+      in
+      go 0 0L
+    in
+    Some (Cbat_word.of_word (Word.of_int64 ~width:bits v))
+
+(* An address set the image rule can enumerate exactly. *)
+let image_load_card_cap = 64
+
+(* The image-backed load: an address set fully bounded inside ONE
+   threaded image reads the image's bytes — the exact value set, the
+   image being the section's static content.  The premise is the whole
+   rule: a plain (non-stack) bounded address whose entire access
+   extent lies inside one image, no stored cell intersecting the
+   extent (a store wins), and an enumerable address set.  Anything
+   else keeps the abstract read — the sound identity. *)
+let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
+    (mv : Mem.t) : wordset option =
+  (* A live (non-bottom) memory reads top where no cell covers the
+     bytes; a bottom memory — the unreached state's default — keeps
+     the load's own abstract value. *)
+  if not (Mem.is_bottom mv) then
+    match !section_images_ref with
+    | [] -> None
+    | images ->
+    if
+      bits <= 0 || bits > 64
+      || WordSet.is_top addr || WordSet.is_bottom addr
+      || WordSet.is_infinite addr
+      || Option.is_some (WordSet.stack_offsets addr)
+      || WordSet.in_stack_segment addr
+    then None
     else
-      match AI.frame_lookup f y with
-      | Some t -> AI.frame_set f v (shift t)
-      | None -> remove in
-  (* A derived [z] drops the fact. *)
-  let if_not_derived (z : var)
-      ~(shift : AI.frame_term -> AI.frame_term) (y : var) : AI.frame =
-    if Option.is_some (AI.frame_lookup f z) then remove
-    else transfer ~shift y in
-  match Def.rhs d with
-  | Bil.Var y ->
-    let y = AI.frame_key y in
-    if Var.equal y v then f
-    else (match AI.frame_lookup f y with
-        | Some t -> AI.frame_set f v t
-        | None -> remove)
-  | Bil.Int _ -> remove
-  | Bil.BinOp (op, e1, e2) ->
-    (match op, e1, e2 with
-     | Bil.PLUS, Bil.Var y, Bil.Int k
-     | Bil.PLUS, Bil.Int k, Bil.Var y
-     | Bil.MINUS, Bil.Var y, Bil.Int k ->
-       (* Derived iff y derived. *)
-       let y = AI.frame_key y in
-       let c = WordSet.singleton (Cbat_word.of_word k) in
-       let shift =
-         match op with
-         | Bil.PLUS -> fun t -> AI.frame_add_const t c
-         | Bil.MINUS -> fun t -> AI.frame_sub_const t c
-         | _ -> Fun.id in
-       transfer ~shift y
-     | Bil.PLUS, Bil.Var y, Bil.Var z ->
-       (* Derived iff y derived. *)
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z 1) y
-     | Bil.MINUS, Bil.Var y, Bil.Var z ->
-       (* Derived iff y derived. *)
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-1)) y
-     | Bil.PLUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k)
-     | Bil.PLUS, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k), Bil.Var y ->
-       (* Derived iff y derived. *)
-       let k = match Cbat_word.to_int (Cbat_word.of_word k) with Ok n -> n | Error _ -> 0 in
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z k) y
-     | Bil.MINUS, Bil.Var y, BinOp (Bil.TIMES, Bil.Var z, Bil.Int k) ->
-       (* Derived iff y derived. *)
-       let k = match Cbat_word.to_int (Cbat_word.of_word k) with Ok n -> n | Error _ -> 0 in
-       let y = AI.frame_key y in
-       let z = AI.frame_key z in
-       if_not_derived z ~shift:(fun t -> AI.frame_add_fvar t z (-k)) y
-     | _ -> remove)
-  | Bil.Load _ | Bil.Store _ | Bil.Cast _ | Bil.Extract _
-  | Bil.Concat _ | Bil.Ite _ | Bil.UnOp _ | Bil.Let _ | Bil.Unknown _ ->
-    remove
-
-(* None stays bottom. *)
-let apply_frame_def (f : AI.frame option) (d : def term) : AI.frame option =
-  match f with
-  | None -> None
-  | Some f -> Some (apply_frame_def_list f d)
-
-
-
-(* Offset expression plus literal. *)
-let expr_of_term (t : AI.frame_term) (k : Cbat_word.t) : exp option =
-  match WordSet.min_elem t.fconst, WordSet.max_elem t.fconst with
-  | Some lo, Some hi when Cbat_word.equal lo hi ->
-    let base = Cbat_word.add lo k in
-    Some (List.fold t.fvars ~init:(Bil.Int (Cbat_word.to_word base)) ~f:(fun acc (v, k') ->
-        let scaled = Bil.BinOp (Bil.TIMES, Bil.Var v, Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:64 k'))) in
-        if k' >= 0 then Bil.BinOp (Bil.PLUS, acc, scaled)
-        else Bil.BinOp (Bil.MINUS, acc, scaled)))
-  | _ -> None
-
-(* Rewrite an address to its offset expression. *)
-let rewrite_addr (frame : AI.frame option) (a : exp) : exp =
-  let find (v : var) : AI.frame_term option =
-    match frame with
-    | None -> None
-    | Some f -> AI.frame_lookup f v in
-  let derived_free (e : exp) : bool =
-    Exp.free_vars e
-    |> Core.Set.for_all ~f:(fun v -> Option.is_none (find v)) in
-  let rec go (e : exp) : exp option =
-    match e with
-    | Bil.Var x ->
-      (match find x with
-       | Some t -> expr_of_term t (Cbat_word.zero 64)
-       | None -> None)
-    | Bil.Int _ -> Some e
-    | Bil.BinOp (Bil.PLUS, e1, e2) ->
-      (match go e1, go e2 with
-       | Some r1, Some r2 -> Some (Bil.BinOp (Bil.PLUS, r1, r2))
-       | Some r1, None ->
-         if derived_free e2 then Some (Bil.BinOp (Bil.PLUS, r1, e2)) else None
-       | None, Some r2 ->
-         if derived_free e1 then Some (Bil.BinOp (Bil.PLUS, e1, r2)) else None
-       | None, None -> None)
-    | Bil.BinOp (Bil.MINUS, e1, e2) ->
-      (match go e1, go e2 with
-       | Some r1, Some r2 -> Some (Bil.BinOp (Bil.MINUS, r1, r2))
-       | Some r1, None ->
-         if derived_free e2 then Some (Bil.BinOp (Bil.MINUS, r1, e2)) else None
-       | None, Some _ -> None  
-       | None, None -> None)
-    | _ -> None in
-  match go a with
-  | Some r -> r
-  | None -> a
-
-(* Rewrite an rhs address. *)
-let frame_rewrite_rhs (frame : AI.frame option) (e : exp) : exp =
-  match e with
-  | Bil.Load (m, a, en, s) ->
-    Bil.Load (m, rewrite_addr frame a, en, s)
-  | Bil.Store (m, a, u, en, s) ->
-    Bil.Store (m, rewrite_addr frame a, u, en, s)
-  | _ -> e
-
-
-
-(* Frame relation of a state. *)
-type frame = AI.frame
-
-(* Frame relation of a state. *)
-let frame_of_state (env : AI.t) : frame option = AI.frame_of env
+      let i64 w =
+        match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
+      in
+      let mn_w = WordSet.min_elem addr and mx_w = WordSet.max_elem addr in
+      match
+        Base.Option.bind mn_w ~f:i64, Base.Option.bind mx_w ~f:i64
+      with
+      | Some lo_a, Some hi_a -> (
+          let nb = bits / 8 in
+          let last = Stdlib.Int64.add hi_a (Stdlib.Int64.of_int (nb - 1)) in
+          if Stdlib.Int64.unsigned_compare last hi_a < 0 then None
+          else
+            match
+              Base.List.find images
+                ~f:(fun { img_lo; img_hi; _ } ->
+                  Stdlib.Int64.unsigned_compare lo_a img_lo >= 0
+                  && Stdlib.Int64.unsigned_compare last img_hi <= 0)
+            with
+            | None -> None
+            | Some { img_lo; img_bytes; _ } ->
+              let last_w =
+                Cbat_word.of_word (Word.of_int64 ~width:64 last)
+              in
+              if Mem.has_cell_in mv ~lo:(Option.value_exn mn_w) ~hi:last_w
+              then None
+              else if
+                Cbat_word.gt_int (WordSet.cardinality addr) image_load_card_cap
+              then None
+              else
+                (* Every enumerated address lies inside the hull, whose
+                   whole extent the span check covered — the reads stay
+                   in bounds; one unreadable word refuses the arm for
+                   the whole set. *)
+                Base.List.fold (WordSet.iter addr) ~init:(Some [])
+                  ~f:(fun acc a ->
+                      match acc with
+                      | None -> None
+                      | Some ws -> (
+                          match i64 a with
+                          | None -> None
+                          | Some ai -> (
+                              match
+                                image_word img_bytes
+                                  (Stdlib.Int64.to_int
+                                     (Stdlib.Int64.sub ai img_lo))
+                                  ~endian ~bits
+                              with
+                              | Some w -> Some (w :: ws)
+                              | None -> None)))
+                |> Option.map ~f:(fun words ->
+                        WordSet.of_list ~width:bits words))
+      | _ -> None
+  else None
 
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in
@@ -279,10 +264,13 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
     let resSize = Size.in_bits s in
-    if WordSet.splits_by addr (Cbat_word.of_int ~width:resSize (Size.in_bytes s))
-    then Option.value_map ~default:(return_imm @@ WordSet.bottom resSize) (Mem.Key.of_wordset addr)
-        ~f:(fun k -> Mem.find (resSize, e) mv k |> Mem.Val.data |> return_imm)
-    else return_imm @@ WordSet.top resSize
+    (match section_image_load ~addr ~endian:e ~bits:resSize mv with
+    | Some ws -> return_imm ws
+    | None ->
+      if WordSet.splits_by addr (Cbat_word.of_int ~width:resSize (Size.in_bytes s))
+      then Option.value_map ~default:(return_imm @@ WordSet.bottom resSize) (Mem.Key.of_wordset addr)
+          ~f:(fun k -> Mem.find (resSize, e) mv k |> Mem.Val.data |> return_imm)
+      else return_imm @@ WordSet.top resSize)
   | Bil.Store (m, a, u, e, s) ->
     Type.infer u >>= fun u_typ ->
     let sz = Size.in_bits s in
@@ -294,7 +282,8 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp u env >>= val_as_imm >>= fun v ->
     
     if WordSet.is_top addr
-    then return_mem mv
+    (* The store may write any cell: whole-memory top. *)
+    then return_mem @@ Mem.top (Mem.get_idx mv)
     else
     
     let v' = if WordSet.splits_by addr (Cbat_word.of_int ~width:sz (Size.in_bytes s))
@@ -337,37 +326,56 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
+(* Every def is denoted (spec §2.1): the denotation IS the transfer —
+   SP-derived addresses arrive as [StackOff] words and memory ops key
+   cells by their segment offsets. *)
 let denote_def (df : def term) (env : AI.t) : AI.t =
-  (* Every def is denoted (spec §2.1); the restriction gate is deleted. *)
   let v = Def.lhs df in
   let e = Def.rhs df in
-  (* Addresses rewrite to offsets. *)
-  let frame = AI.frame_of env in
-  let e = frame_rewrite_rhs frame e in
-  (* Frame-derived values denote offsets. *)
-  let e = rewrite_addr frame e in
   exn_on_err @@
   let open Monad_type_error in
-  
   denote_exp e env >>| fun ev ->
   (match ev with
    | `Word p -> AI.add_word env ~key:v ~data:p
    | `Mem m -> AI.add_memory env ~key:v ~data:m)
-  |> fun env' ->
-  AI.set_frame env' (apply_frame_def (AI.frame_of env) df)
 
 (* Denotation of a block's defs. *)
 let denote_defs (b : blk term) : AI.t -> AI.t =
   (* Phis are the identity. *)
-  (* Frame advances through each def. *)
   fun env0 ->
     Term.enum def_t b
     |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def df env)
 
+(* One per-block state replay: the block's defs fold [denote_def] from
+   its solution entry state; [f] folds the accumulator over each def's
+   (before, after) states.  A def-less block runs [f] zero times and
+   the end state is the entry state. *)
+let fold_block_states ~(sol : (tid, AI.t) Solution.t) (blk : blk term)
+    ~(init : 'acc) ~(f : AI.t -> AI.t -> def term -> 'acc -> 'acc) :
+    'acc * AI.t =
+  let st_end, acc =
+    Term.enum def_t blk
+    |> Seq.fold ~init:(Solution.get sol (Term.tid blk), init)
+         ~f:(fun (st_before, acc) d ->
+             let st_after = denote_def d st_before in
+             (st_after, f st_before st_after d acc))
+  in
+  (acc, st_end)
+
+(* The block's last def per lhs var: the reaching def at the block's
+   end (the defs run in order before the block's jmps). *)
+let last_defs (blk : blk term) : def term Var.Map.t =
+  Term.enum def_t blk
+  |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+      Core.Map.set m ~key:(Def.lhs d) ~data:d)
 
 
-(* Jumps reachable in the env. *)
 
+(* Jumps reachable in the env.  Guards evaluate on the words lane
+   directly: an SP-derived var's word is the segment-smeared
+   stack base, so bit tests on it stay undecided ([seg & 0xF] = [0,15])
+   and comparisons against concrete addresses decide consistently with
+   real pointer behavior. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
     let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in

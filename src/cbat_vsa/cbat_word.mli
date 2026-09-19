@@ -30,8 +30,6 @@ val bitwidth : t -> int
 val is_signed : t -> bool
 val signed : t -> t
 val unsigned : t -> t
-val to_z : t -> Z.t
-val of_z : Z.t -> int -> t
 
 val zero : int -> t
 val one : int -> t
@@ -44,7 +42,6 @@ val of_int64 : ?width:int -> int64 -> t
 val is_zero : t -> bool
 val is_one : t -> bool
 val msb : t -> bool
-val lsb : t -> bool
 
 val succ : t -> t
 val pred : t -> t
@@ -73,7 +70,6 @@ val ( < ) : t -> t -> bool
 val ( > ) : t -> t -> bool
 val ( <= ) : t -> t -> bool
 val ( >= ) : t -> t -> bool
-val hash : t -> int
 val min : t -> t -> t
 val max : t -> t -> t
 
@@ -81,14 +77,12 @@ val extract_exn : ?hi:int -> ?lo:int -> t -> t
 val cast : Bil.cast -> int -> t -> t
 val concat : t -> t -> t
 
-val gcd_exn : t -> t -> t
 val lcm_exn : t -> t -> t
-val gcdext_exn : t -> t -> t * t * t
 
 val to_int_exn : t -> int
-val to_int : t -> int Core_kernel.Or_error.t
+val to_int : t -> int Core.Or_error.t
 val to_int64_exn : t -> int64
-val to_int64 : t -> int64 Core_kernel.Or_error.t
+val to_int64 : t -> int64 Core.Or_error.t
 
 val to_string : t -> string
 val of_string : string -> t
@@ -98,9 +92,9 @@ val pp : Format.formatter -> t -> unit
 val of_word : word -> t
 val to_word : t -> word
 
-val sexp_of_t : t -> Core_kernel.Sexp.t
-val t_of_sexp : Core_kernel.Sexp.t -> t
-include Core_kernel.Binable.S with type t := t
+val sexp_of_t : t -> Core.Sexp.t
+val t_of_sexp : Core.Sexp.t -> t
+include Core.Binable.S with type t := t
 
 (* The word-op set. *)
 

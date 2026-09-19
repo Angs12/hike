@@ -21,8 +21,6 @@
  (name cbat_vsa_domain)
  (public_name hike.cbat_vsa_domain)
  (wrapped false)
- (flags
-  (:standard -alert -deprecated))
  (ocamlopt_flags
   (:standard -O3))
  (modules
@@ -36,32 +34,32 @@
   cbat_clp_set_composite
   cbat_wordset_intf
   cbat_vsa_utils
+  cbat_interval
+  cbat_range_partition
   cbat_landmarks)
- (libraries hike_abi bap bitvec bitvec-order core core_kernel monads hashcons)
+ (libraries hike_abi bap bitvec bitvec-order bin_prot core monads hashcons)
  (preprocess
   (pps ppx_bap)))
 
 (library
  (name cbat_vsa)
  (public_name hike.cbat_vsa)
- (flags
-  (:standard -alert -deprecated))
  (ocamlopt_flags
   (:standard -O3))
  (modules
   cbat_vsa
   cbat_transfer
-  cbat_walk
+  cbat_forward
+  cbat_backward
   cbat_memo
   cbat_runctx
   cbat_wto
-  cbat_interval_tree
+  cbat_dispatch_graph
   cbat_mem_key
   cbat_ai_memmap
   cbat_ai_representation
-  cbat_contextual_fixpoint
   cbat_vsa_stages)
- (libraries bap hike_abi cbat_vsa_domain bitvec core core_kernel monads hashcons)
+ (libraries bap hike_abi cbat_vsa_domain bitvec core monads hashcons)
  ; The cppo chain (mirrors src/dune's hike library): the stages debug
  ; adapter carries #ifdef VSA_DEBUG, and without this stanza the raw
  ; directive reaches the parser — the trailing #ifdef then parses as a

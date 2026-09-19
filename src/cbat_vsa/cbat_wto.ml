@@ -13,7 +13,7 @@
 
 (* Bourdoncle weak topological ordering over plain accessors. Heads are the minimal widening-point set; swapped accessors build the reversed ordering. *)
 
-open Core_kernel
+open Core
 open Bap.Std
 
 type comp =
@@ -31,6 +31,44 @@ let rec heads_of_comps (cs : comp list) : Tid.Set.t =
       | SCC (h, inner) ->
         let acc = Core.Set.add acc h in
         Core.Set.union acc (heads_of_comps inner))
+
+(* The driver's views of one ordering, built in a single pass: the head
+   set, each head's member blocks, each block's innermost head, and the
+   WTO position index. *)
+type summary = {
+  heads : Tid.Set.t;
+  head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t;
+  block_to_head : (Tid.t, Tid.t) Hashtbl.t;
+  pos_of : int Tid.Map.t;
+}
+
+let summary (cs : comp list) : summary =
+  let heads = heads_of_comps cs in
+  let head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t = Hashtbl.create (module Tid) in
+  let rec collect comps =
+    List.iter comps ~f:(function
+        | Vertex _ -> ()
+        | SCC (h, inner) ->
+          let blocks = Tid.Set.of_list (h :: flatten_comps inner) in
+          Hashtbl.set head_to_blocks ~key:h ~data:blocks;
+          collect inner)
+  in
+  collect cs;
+  let block_to_head : (Tid.t, Tid.t) Hashtbl.t = Hashtbl.create (module Tid) in
+  Hashtbl.iteri head_to_blocks ~f:(fun ~key:h ~data:blocks ->
+      Core.Set.iter blocks ~f:(fun btid ->
+          match Hashtbl.find block_to_head btid with
+          | None -> Hashtbl.set block_to_head ~key:btid ~data:h
+          | Some existing ->
+            (* Innermost wins. *)
+            let existing_set = Hashtbl.find_exn head_to_blocks existing in
+            if Core.Set.length blocks < Core.Set.length existing_set then
+              Hashtbl.set block_to_head ~key:btid ~data:h));
+  let pos_of =
+    List.mapi (flatten_comps cs) ~f:(fun i t -> (t, i))
+    |> List.fold ~init:Tid.Map.empty ~f:(fun m (t, i) ->
+        Core.Map.set m ~key:t ~data:i) in
+  { heads; head_to_blocks; block_to_head; pos_of }
 
 (* Kosaraju SCC over any ordered key: the block-graph partition and the
    widening-need var graph both call it (one interface, two adapters). *)

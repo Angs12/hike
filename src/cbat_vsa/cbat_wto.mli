@@ -13,7 +13,7 @@
 
 (* Bourdoncle weak topological ordering over plain accessors. *)
 
-open Core_kernel
+open Core
 open Bap.Std
 
 type comp =
@@ -26,6 +26,18 @@ val flatten_comps : comp list -> Tid.t list
 (* Heads of every nested SCC. *)
 val heads_of_comps : comp list -> Tid.Set.t
 
+(* The driver's views of one ordering: the head set, each head's member
+   blocks, each block's innermost head, and the WTO position index. *)
+type summary = {
+  heads : Tid.Set.t;
+  head_to_blocks : (Tid.t, Tid.Set.t) Hashtbl.t;
+  block_to_head : (Tid.t, Tid.t) Hashtbl.t;
+  pos_of : int Tid.Map.t;
+}
+
+(* All views in one pass over the components. *)
+val summary : comp list -> summary
+
 (* Kosaraju SCC over any ordered key. *)
 module Scc (K : sig
     type t
@@ -34,11 +46,6 @@ module Scc (K : sig
   val partition :
     K.t list -> (K.t -> K.t list) -> (K.t -> K.t list) -> K.t list list
 end
-
-(* Recursive SCC partition. *)
-val scc_partition :
-  Tid.t list -> (Tid.t -> Tid.t list) -> (Tid.t -> Tid.t list) ->
-  Tid.t list list
 
 (* WTO; swapped accessors build the reversed ordering. *)
 val wto :

@@ -1,7 +1,7 @@
 (* Simon & King landmark widening. Empty meets acquire landmarks; heads extrapolate toward them. *)
 
 open Bap.Std
-open Core_kernel
+open Core
 
 (* Per-(var, bound, is_upper) entry; smaller distance wins. *)
 type lm_entry = {
