@@ -99,7 +99,7 @@ let () =
   let sub = Hike.Jump.compile_sub target sub in
   Printf.printf "===== AFTER JUMP =====\n";
   dump_sub sub;
-  ignore (Vsa.fixpoint target sp ~prog:(Project.program proj) ~images:[] ~block_addrs:[] sub);
+  ignore (Vsa.fixpoint target sp ~prog:(Project.program proj) ~images:[] sub);
   let sol =
     Cbat_vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv ~resolved:Tid.Map.empty []
       (Program.create ~subs:[ sub ] ()) sub

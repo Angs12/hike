@@ -188,7 +188,7 @@ let install_envs (subs : sub term list) : bool =
         match
           Hv.fixpoint Theory.Target.unknown sp
             ~prog:(Program.create ~subs:[ sub ] ())
-            ~images:[] ~block_addrs:[] sub
+            ~images:[] sub
         with
         | None -> (m, false)
         | Some (envs, _) ->

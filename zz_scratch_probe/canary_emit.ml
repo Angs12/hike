@@ -43,7 +43,7 @@ let run ~strip (path : string) (out : string) : unit =
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
         let envs, sub' =
           Hike.Vsa.fixpoint target (Abi.sp target) ~prog
-            ~images ~block_addrs:[] sub
+            ~images sub
           |> Base.Option.value ~default:(Tid.Map.empty, sub)
         in
         Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'))

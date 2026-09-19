@@ -60,12 +60,13 @@ let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
              note acc blk d))
 
 (* The dispatch's case pairs off the target's denotation: a bounded
-   set no larger than the block count, every word naming an in-sub
-   block, all words resolved. *)
-let resolved_pairs_of ~(denote : denote)
-    ~(blocks : (int64 * tid) list) ~(blk : blk term) (texp : exp) :
+   set no larger than the run's block count, every word naming a block
+   on the run's map.  A resolvable word the map cannot name is a loud
+   failure — an analysis loss, never a silent foreign transfer. *)
+let resolved_pairs_of ~(denote : denote) ~(blk : blk term) (texp : exp) :
     (Cbat_word.t * tid) list option =
-  if Base.List.is_empty blocks then None
+  let blocks = Hike_kb.block_addrs () in
+  if Core.Map.is_empty blocks then None
   else
     Base.Option.bind (Result.to_option (denote ~blk texp)) ~f:(fun ws ->
         if Vsa.WordSet.is_top ws || Vsa.WordSet.is_infinite ws
@@ -77,24 +78,24 @@ let resolved_pairs_of ~(denote : denote)
             | Ok c -> c
             | Error _ -> Int64.max_int in
           if
-            Int64.compare card (Int64.of_int (Base.List.length blocks)) > 0
+            Int64.compare card (Int64.of_int (Core.Map.length blocks)) > 0
           then None
           else
-            let pairs =
-              Vsa.WordSet.iter ws
-              |> Base.List.filter_map ~f:(fun w ->
-                  match Cbat_word.to_int64 w with
-                  | Ok a ->
-                      Base.Option.map
-                        ~f:(fun t -> (w, t))
-                        (Base.List.Assoc.find blocks a ~equal:Int64.equal)
-                  | Error _ -> None)
+            let word_pair (w : Cbat_word.t) : Cbat_word.t * tid =
+              match Cbat_word.to_int64 w with
+              | Ok a -> (
+                  match Hike_kb.block_addr a with
+                  | Some t -> (w, t)
+                  | None ->
+                      failwith
+                        (Printf.sprintf
+                           "hike-cfg-complete: dispatch word 0x%Lx names no block in the run's block-address map"
+                           a))
+              | Error _ ->
+                  failwith
+                    "hike-cfg-complete: a dispatch word exceeds the address width"
             in
-            if
-              not (Base.List.is_empty pairs)
-              && Base.List.length pairs = Int64.to_int card
-            then Some pairs
-            else None)
+            Some (Vsa.WordSet.iter ws |> Base.List.map ~f:word_pair))
 
 
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
@@ -178,7 +179,7 @@ let ret_jmp ~(word_bits : int) : jmp term =
    becomes the guarded-goto series (a call dispatch's continuation is
    the default); everything else stays. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(blocks : (int64 * tid) list) ~(word_bits : int)
+    ~(word_bits : int)
     ~(reaching : tid Var.Map.t) ~(blk : blk term) (j : jmp term) :
     jmp term list option =
   let retaddr_read v =
@@ -197,11 +198,11 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
             | Some (Direct t) -> Some t
             | Some (Indirect _) | None -> None
           in
-          Base.Option.bind (resolved_pairs_of ~denote ~blocks ~blk texp)
+          Base.Option.bind (resolved_pairs_of ~denote ~blk texp)
             ~f:(fun pairs -> Some (dispatch_jmps j texp pairs cont))
       | _ -> None)
   | Goto (Indirect texp) ->
-      Base.Option.bind (resolved_pairs_of ~denote ~blocks ~blk texp)
+      Base.Option.bind (resolved_pairs_of ~denote ~blk texp)
         ~f:(fun pairs -> Some (dispatch_jmps j texp pairs None))
   | _ -> None
 
@@ -215,7 +216,7 @@ let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
 (* The completion round: every block's jmps pass through the rewrite
    decision; a sub with no decision comes back unchanged. *)
 let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(blocks : (int64 * tid) list) ~(word_bits : int)
+    ~(word_bits : int)
     (sub : sub term) : sub term * bool =
   let changed = ref false in
   let reblock (blk : blk term) : blk term =
@@ -223,7 +224,7 @@ let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~blocks ~word_bits ~reaching ~blk j
+          rewritten_jmps ~denote ~retaddr ~word_bits ~reaching ~blk j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
     in
     match decided with
@@ -250,13 +251,12 @@ let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
 let complete ~(denote : denote)
     ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
-    ~(blocks : (int64 * tid) list)
     (sub : sub term) : sub term * bool =
   let retaddr = retaddr_defs ~abi ~sol sub in
   Vsa.set_section_images images;
   let word_bits = 8 * abi.Hike_abi.word in
   let result =
-    (try rewrite_sub ~denote ~retaddr ~blocks ~word_bits sub
+    (try rewrite_sub ~denote ~retaddr ~word_bits sub
      with exn -> Vsa.set_section_images []; raise exn)
   in
   Vsa.set_section_images [];

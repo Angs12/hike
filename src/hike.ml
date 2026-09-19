@@ -220,6 +220,10 @@ let pass_vsa proj =
                img_bytes = arr } ])
     |> Base.Option.value ~default:[]
   in
+  (* The run's block-address map: the dispatch resolution's word home,
+     installed from the producer's facts at this boundary.  Un-built
+     (the empty map), so every dispatch stays foreign. *)
+  Hike_kb.install_block_addrs Core.Int64.Map.empty;
   (* The producer, composed per sub: the fixpoint's products are the
      block environments (the one cross-pass fact) and the REWRITTEN
      SUB (the CFG completion's terms). *)
@@ -228,7 +232,7 @@ let pass_vsa proj =
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
         match
           Hike_vsa.fixpoint target (sp target)
-            ~prog:(Project.program proj) ~images ~block_addrs:[] sub
+            ~prog:(Project.program proj) ~images sub
         with
         | None -> acc
         | Some (envs, sub') ->

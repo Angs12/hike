@@ -237,7 +237,7 @@ let () =
       try
         let envs, _sub' =
           Hike.Vsa.fixpoint target sp ~prog
-            ~images:[] ~block_addrs:[] sub
+            ~images:[] sub
           |> Base.Option.value ~default:(Tid.Map.empty, sub)
         in
         let wc, arity = tree_verdict abi envs sub in
@@ -260,7 +260,7 @@ let () =
           | Some sub ->
             let envs, _sub' =
               Hike.Vsa.fixpoint target sp ~prog:(Project.program proj)
-                ~images:[] ~block_addrs:[] sub
+                ~images:[] sub
               |> Base.Option.value ~default:(Tid.Map.empty, sub)
             in
             let sol =

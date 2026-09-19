@@ -104,7 +104,7 @@ let () =
                Some
                  (let fixed =
                     Hike.Vsa.fixpoint target sp ~prog:(Project.program proj)
-                      ~images:[] ~block_addrs:[] sub
+                      ~images:[] sub
                   in
                   match fixed with
                   | None -> (Tid.Map.empty, Tid.Map.empty)

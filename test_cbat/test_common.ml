@@ -124,7 +124,8 @@ module Hv = Hike.Vsa
 let produce ?(block_addrs = []) ?(images = [])
     target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term =
-  Hv.fixpoint target sp ~prog ~images ~block_addrs sub
+  Hike.Kb.install_block_addrs (Core.Int64.Map.of_alist_exn block_addrs);
+  Hv.fixpoint target sp ~prog ~images sub
   |> Base.Option.value ~default:(Tid.Map.empty, sub)
 
 (* The T2 chain replica over fixtures: the composed production entries
@@ -170,7 +171,7 @@ let install_fixture_envs (subs : sub term list) : bool =
         match
           Hv.fixpoint Theory.Target.unknown sp
             ~prog:(Program.create ~subs:[ sub ] ())
-            ~images:[] ~block_addrs:[] sub
+            ~images:[] sub
         with
         | None -> (m, false)
         | Some (envs, _) ->
@@ -202,7 +203,8 @@ let pos (o : int64) : int64 = Int64.add Hike.Stack_model.segment_base o
 let produce ?(block_addrs = []) ?(images = [])
     target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term =
-  Hv.fixpoint target sp ~prog ~images ~block_addrs sub
+  Hike.Kb.install_block_addrs (Core.Int64.Map.of_alist_exn block_addrs);
+  Hv.fixpoint target sp ~prog ~images sub
   |> Base.Option.value ~default:(Tid.Map.empty, sub)
 
 (* The T2 chain replica over fixtures: the composed production entries
@@ -248,7 +250,7 @@ let install_fixture_envs (subs : sub term list) : bool =
         match
           Hv.fixpoint Theory.Target.unknown sp
             ~prog:(Program.create ~subs:[ sub ] ())
-            ~images:[] ~block_addrs:[] sub
+            ~images:[] sub
         with
         | None -> (m, false)
         | Some (envs, _) ->

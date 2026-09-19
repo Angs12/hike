@@ -298,7 +298,7 @@ let emit_digest ?(dump : string option) (path : string) : string =
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
         let envs, sub' =
           Hike.Vsa.fixpoint target sp ~prog
-            ~images:[] ~block_addrs:[] sub
+            ~images:[] sub
           |> Base.Option.value ~default:(Tid.Map.empty, sub)
         in
         Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'))

@@ -158,7 +158,6 @@ let summaries_of ~(abi : Hike_abi.t) (prog : program term) :
 let fixpoint (target : Theory.Target.t) (sp : var)
     ~(prog : program term)
     ~(images : Vsa.section_image list)
-    ~(block_addrs : (int64 * tid) list)
     (sub : sub term) :
     ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term) option =
   self_arm target;
@@ -189,8 +188,7 @@ let fixpoint (target : Theory.Target.t) (sp : var)
 #endif
     let denote = Hike_cfg_complete.denote_of_sol sol in
     let sub', changed =
-      Hike_cfg_complete.complete ~denote ~abi ~sol ~images
-        ~blocks:block_addrs sub
+      Hike_cfg_complete.complete ~denote ~abi ~sol ~images sub
     in
     if changed then rounds sub' else (sol, sub')
   in

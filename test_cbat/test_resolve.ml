@@ -153,6 +153,34 @@ let run_jmp_kinds () =
               | _ -> false)
         | _ -> false)
      | _ -> false);
+  (* J4: a word the run's map cannot name is a loud failure — a
+     resolvable dispatch (the set's size within the block count) whose
+     table word names no block is an analysis loss, never a silent
+     foreign transfer.  The map here carries an unrelated second block
+     so the shape test passes and the lookup itself is what misses. *)
+  let j4_sel = v64 "t22_j4_sel" in
+  let j4_t1 = Def.create j4_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
+  let j4_t2 = Def.create j4_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
+  let j4_flag = v1 "t22_j4_flag" in
+  let j4, j4_tids =
+    sub_of "t22_map_miss"
+      [ [], [ (1, fun t -> mk_jmp_to t (Bil.Var j4_flag)); (2, mk_goto) ];
+        [ j4_t1 ], [ (3, mk_goto) ];
+        [ j4_t2 ], [ (3, mk_goto) ];
+        [], [ (4, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j4_sel)))) ];
+        [], [ (6, mk_goto) ];
+        [], [ (6, mk_goto) ];
+        [], [ (0, mk_ret) ] ]
+  in
+  check "T22-J4: a dispatch word the map cannot name fails loudly"
+    (try
+       ignore
+         (produce Theory.Target.unknown
+            ~block_addrs:
+              [ (0x1008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
+            (Program.create ~subs:[ j4 ] ()) j4);
+       false
+     with Failure _ -> true);
   (* J3: a foreign pointer target (a constant naming no block) — the
      indirect transfer stays. *)
   let j3_t = v64 "t22_j3_t" in

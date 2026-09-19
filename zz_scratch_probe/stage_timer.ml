@@ -28,7 +28,7 @@ let () =
     let t0 = Unix.gettimeofday () in
     let _envs, _sub' =
       Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
-        ~images:[] ~block_addrs:[] sub
+        ~images:[] sub
       |> Base.Option.value ~default:(Tid.Map.empty, sub)
     in
     let t_total = Unix.gettimeofday () -. t0 in

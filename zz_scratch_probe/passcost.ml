@@ -50,7 +50,7 @@ let () =
           let _envs, t_vsa =
             time (fun () ->
                 Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
-                  ~images:[] ~block_addrs:[] sub)
+                  ~images:[] sub)
           in
           let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in
           let rounds, _ = dce_rounds target sub in

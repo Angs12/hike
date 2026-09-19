@@ -42,7 +42,7 @@ let () =
     Term.enum sub_t prog
     |> Seq.find_exn ~f:(fun s -> String.equal (Sub.name s) want)
   in
-  let envs, _sub' = Hv.fixpoint target sp ~prog ~images:[] ~block_addrs:[] sub
+  let envs, _sub' = Hv.fixpoint target sp ~prog ~images:[] sub
     |> Base.Option.value ~default:(Tid.Map.empty, sub) in
   let all_envs =
     Core.Map.fold envs ~init:Tid.Map.empty

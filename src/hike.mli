@@ -36,7 +36,6 @@ module Vsa : sig
     var ->
     prog:program term ->
     images:section_image list ->
-    block_addrs:(int64 * tid) list ->
     sub term ->
     ((Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term) option
 
@@ -82,7 +81,6 @@ module Cfg_complete : sig
     abi:Abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     images:Cbat_vsa.section_image list ->
-    blocks:(int64 * tid) list ->
     sub term -> sub term * bool
 end
 

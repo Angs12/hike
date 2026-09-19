@@ -124,7 +124,7 @@ let report_sub ~(images : Vsa.section_image list) ~(sol : Vsa.vsa_sol)
         |> ignore);
   (* The indirect transfers: the target denotation at the block's end. *)
   ignore
-    (Hike.Vsa.fixpoint target sp ~prog ~images ~block_addrs:[] sub);
+    (Hike.Vsa.fixpoint target sp ~prog ~images sub);
   Term.enum blk_t sub |> Seq.to_list
   |> Base.List.iter ~f:(fun b ->
       let (), st_end =
@@ -185,7 +185,7 @@ let tagdiff_binary ~(use_images : bool) (path : string) : unit =
         let sol =
           let fixed =
             Hike.Vsa.fixpoint target sp ~prog ~images
-              ~block_addrs:[] sub
+              sub
           in
           ignore fixed;
           Cbat_vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
@@ -235,7 +235,7 @@ let emit_digest ?(dump : string option = None) ~(use_images : bool) (path : stri
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
         let envs, sub' =
           Hike.Vsa.fixpoint target sp ~prog ~images
-            ~block_addrs:[] sub
+            sub
           |> Base.Option.value ~default:(Tid.Map.empty, sub)
         in
         Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'))
