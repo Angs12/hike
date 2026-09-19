@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
-# Structural asserts over emitted .ll modules.
+# Structural asserts over emitted .ll modules — derived from the
+# section-range architecture's invariants (ADR 0010 / the v6 delta),
+# not from any rendering.
 # Usage: check_allocas.sh <out_dir> (holds out_<name>.ll; exit 0 iff all pass).
-#   (a) any %stack_rN reference implies >= 1 stack_rN alloca.
-#   (b) no GEP into a stack_rN alloca takes an sp-derived index
-#       (dynamic loop-counter indexes are fine).
+#   (a) every region/window reference implies its storage exists
+#       (a stack_rN alloca; the window parameter for window mems).
+#   (b) one materialize shape: every GEP into a stack_rN alloca takes
+#       an index in the anchor-normalized world (a chain through the
+#       SP Slot's stack_0) or a pure constant (a fully static access).
 #   (c) no @stack global reference.
-#   (d) each memory-touching define has exactly one frame alloca shape
-#       (precise = stack_r-only, degraded = frame-only; stack-free exempt).
+#   (d) residue discipline: no legacy %frame alloca (the residue is
+#       stack_r0); at most one residue alloca per define; references
+#       imply their alloca.
 #   (e) no entry-edge poison phis.
-# INFO: per-module inttoptr-derived load count (visibility only).
+#   (f) every section component/residue global is internal.
+#   (g) the integer world escapes (D4b): no ptrtoint of a GEP into a
+#       stack_rN alloca — GEP-derived pointers never become integers.
+#   (h) window mems imply the window parameter: a define referencing
+#       %hike_window_mem carries %hike_window.
 
 set -u
 
@@ -19,86 +28,63 @@ PASS=0
 for ll in "$OUT_DIR"/out_*.ll; do
   name="$(basename "$ll" .ll)"
 
-  # (a) any %stack_rN reference implies >= 1 `alloca [`.
-  n_refs="$(grep -c '%stack_r[0-9]' "$ll")"
-  n_allocas="$(grep -c 'alloca \[' "$ll")"
-  if [ "$n_refs" -gt 0 ] && [ "$n_allocas" -lt 1 ]; then
-    echo "FAIL $name: (a) $n_refs stack_rN reference(s) but no stack_rN alloca"
+  # (a) references imply storage: a stack_rN reference requires the
+  #     alloca; a hike_window_mem reference requires the parameter.
+  n_sr_ref="$(grep -c '%stack_r[0-9]' "$ll")"
+  n_sr_alloca="$(grep -c '%stack_r[0-9]\+ = alloca' "$ll")"
+  if [ "$n_sr_ref" -gt 0 ] && [ "$n_sr_alloca" -lt 1 ]; then
+    echo "FAIL $name: (a) $n_sr_ref stack_rN reference(s) but no region alloca"
     FAIL=$((FAIL + 1))
   else
-    echo "PASS $name: (a) $n_allocas stack_rN alloca(s) for $n_refs stack_rN ref(s)"
+    echo "PASS $name: (a) $n_sr_alloca region alloca(s) for $n_sr_ref ref(s)"
+    PASS=$((PASS + 1))
+  fi
+  n_wm_ref="$(grep -c '%hike_window_mem' "$ll")"
+  n_wp="$(grep -c '%hike_window)' "$ll")"
+  if [ "$n_wm_ref" -gt 0 ] && [ "$n_wp" -lt 1 ]; then
+    echo "FAIL $name: (a) window mem reference(s) but no %hike_window parameter"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS $name: (a) window mems ($n_wm_ref) vs the window parameter ($n_wp)"
     PASS=$((PASS + 1))
   fi
 
-  # (b) no stack_rN GEP takes an sp-derived index.
-  #     Dynamic loop-counter indexes pass; sp roots are the entry
-  #     anchor and the hike_stack param.
-  #     Blind spot: CHAIN skips non-anchor sub shapes, so other
-  #     sub-routed sp values evade this tripwire.
+  # (b) one materialize: every stack_rN GEP index is anchor-normalized
+  #     (its chain passes through a `sub ..., %stack_0`) or a literal.
   bad="$(awk '
     function chain(v) { return index(" " CHAIN " ", " " v " ") > 0 }
     function add(v)  { if (v != "" && !chain(v)) CHAIN = CHAIN " " v }
-    # sp roots: entry anchor (ptrtoint of %frame) and hike_stack param.
-    /ptrtoint.*to i64/ {
-      if (match($0, /%[A-Za-z0-9_.]+ = ptrtoint/)) {
-        if (match($0, /^  %[^ ]+ = ptrtoint/)) { v = substr($0, 3, index(substr($0,3), " ")-1); add(v) }
-      }
+    /%stack_0 = load/ {
+      if (match($0, /^  %[^ ]+ = load/)) { v = substr($0, 3, index(substr($0,3), " ")-1); add(v) }
     }
-    /%hike_stack/ {
-      if (match($0, /%hike_stack/)) add("%hike_stack")
-    }
-    /%anchor_i64/ {
-      if (match($0, /%anchor_i64/)) add("%anchor_i64")
-      if (match($0, /%[0-9]+ = phi i64.*%anchor_i64/)) {
-        if (match($0, /^  %[0-9]+ = phi/)) { lhs = substr($0, 3, index(substr($0,3), " ")-1); add(lhs) }
-      }
-    }
-    # Arithmetic propagation, except the anchor-sub offset pattern
-    # (`sub %addr, %anchor_i64` yields a clean index, not sp-derived).
-    /^  %[^ ]+ = (sub|add|mul|and|or|xor|shl|lshr|ashr) i64 %/ {
+    # the normalization: any sub whose RHS is a stack_0-chain value
+    # produces an anchor-relative value (the one-materialize core).
+    /^  %[^ ]+ = sub i64 / {
       if (match($0, /^  %[^ ]+/)) { lhs = substr($0, 3, index(substr($0,3), " ")-1) }
-      # anchor-sub cancellation: the result is the offset, not sp-derived
-      if (match($0, /sub i64/) && index($0, "%anchor_i64") > 0) { next }
-      # find any %var after i64
-      n = split($0, parts, "i64 ")
-      for (i=2; i<=n; i++) {
-        if (match(parts[i], /%[A-Za-z0-9_.]+/)) {
-          rhs = substr(parts[i], RSTART, RLENGTH)
-          if (chain(rhs)) { add(lhs); break }
-        }
-      }
-    }
-    # phi merges mentioning a chain value propagate too
-    /phi i64/ {
-      if (match($0, /^  %[^ ]+ = phi/)) {
-        lhs = substr($0, 3, index(substr($0,3), " ")-1)
-        # mark lhs when the line holds a chain token
-        tmp = $0
-        while (match(tmp, /%[A-Za-z0-9_.]+/)) {
-          tok = substr(tmp, RSTART, RLENGTH)
-          if (chain(tok)) { add(lhs); break }
-          tmp = substr(tmp, RSTART+RLENGTH)
-        }
-      }
-    }
-    # violation: GEP into stack_r with a chain index
-    /getelementptr.*%stack_r[0-9]+/ {
-      # index operand follows "i64": const or %var
       line = $0
-      # strip through the stack_r base (sub takes regex first)
+      # operands after "sub i64"
+      while (match(line, /%[A-Za-z0-9_.]+/)) {
+        tok = substr(line, RSTART, RLENGTH)
+        if (chain(tok)) { add(lhs); break }
+        line = substr(line, RSTART+RLENGTH)
+      }
+    }
+    /getelementptr.*%stack_r[0-9]+/ {
+      line = $0
       sub(/.*%stack_r[0-9]+, /, "", line)
       if (match(line, /i64 %[A-Za-z0-9_.]+/)) {
         idx = substr(line, RSTART+4, RLENGTH-4)
-        if (chain(idx)) print "sp-derived GEP index into stack_r: " idx " in: " $0
+        if (idx !~ /^-?[0-9]+$/ && !chain(idx))
+          print "non-normalized GEP index into stack_r: " idx " in: " $0
       }
     }
   ' "$ll" | head -5)"
   if [ -n "$bad" ]; then
-    echo "FAIL $name: (b) sp-derived GEP index into stack_r alloca:"
+    echo "FAIL $name: (b) GEP index not in the anchor-normalized world:"
     echo "$bad" | sed 's/^/    /'
     FAIL=$((FAIL + 1))
   else
-    echo "PASS $name: (b) no sp-derived GEP index into stack_r"
+    echo "PASS $name: (b) every region GEP is anchor-normalized or static"
     PASS=$((PASS + 1))
   fi
 
@@ -112,44 +98,24 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (d) per-function frame shape: stack_r-only when precise,
-  #     frame-only when degraded; stack-free defines exempt.
-  n_bad="$(awk '
-    BEGIN { in_define=0; has_stack_r=0; has_frame=0; has_mem=0; bad=0 }
-    /^define / {
-      if (in_define) {
-        if (!has_mem) { /* exempt stack-free */ }
-        else if (has_stack_r) {
-          if (has_frame) { bad++ }
-        } else {
-          if (!has_frame) { bad++ }
-        }
-      }
-      in_define=1; has_stack_r=0; has_frame=0; has_mem=0; next
+  # (d) residue discipline: the legacy %frame is gone; the residue is
+  #     stack_r0 and a define carries at most one.
+  n_frame="$(grep -c '%frame = alloca' "$ll")"
+  n_multi="$(awk '
+    /^define / { n_r0 = 0 }
+    /%stack_r0 = alloca/ { n_r0++ }
+    /^define / { if (NR > 1 && seen) { } }
+    { if (/^define /) { if (in_d && n_r0 > 1) bad++; in_d = 1; n_r0 = 0 }
+      else if (/^declare/) { }
     }
-    /^declare / { next }
-    in_define {
-      if ($0 ~ /%stack_r[0-9]+ = alloca/) has_stack_r=1
-      if ($0 ~ /%frame = alloca/) has_frame=1
-      if ($0 ~ /alloca/ || $0 ~ /[[:space:]]load[[:space:]]/ || $0 ~ /[[:space:]]store[[:space:]]/) has_mem=1
-    }
-    END {
-      if (in_define) {
-        if (!has_mem) { /* exempt */ }
-        else if (has_stack_r) {
-          if (has_frame) { bad++ }
-        } else {
-          if (!has_frame) { bad++ }
-        }
-      }
-      print bad
-    }
+    /%stack_r0 = alloca/ { if (in_d && n_r0 > 1) bad++ }
+    END { if (in_d && n_r0 > 1) bad++; print bad + 0 }
   ' "$ll")"
-  if [ "$n_bad" -ne 0 ]; then
-    echo "FAIL $name: (d) $n_bad define(s) violate frame/stack_r shape (precise must have stack_r and no frame, degraded must have frame and no stack_r)"
+  if [ "$n_frame" -ne 0 ] || [ "$n_multi" -ne 0 ]; then
+    echo "FAIL $name: (d) legacy %frame alloca(s)=$n_frame, multi-residue define(s)=$n_multi"
     FAIL=$((FAIL + 1))
   else
-    echo "PASS $name: (d) frame/stack_r shape ok (precise=stack_r-only, degraded=frame-only)"
+    echo "PASS $name: (d) residue discipline ok (no %frame; at most one stack_r0 per define)"
     PASS=$((PASS + 1))
   fi
 
@@ -160,6 +126,37 @@ for ll in "$OUT_DIR"/out_*.ll; do
     FAIL=$((FAIL + 1))
   else
     echo "PASS $name: (e) 0 entry-edge poison phis"
+    PASS=$((PASS + 1))
+  fi
+
+  # (f) every section component/residue global is internal — external
+  # linkage would fork the address world and block the consumer's
+  # constant propagation.
+  n_comp="$(grep -c '^@sec_comp_[0-9]\+ =' "$ll")"
+  n_res="$(grep -c '^@sec_res_[0-9]\+ =' "$ll")"
+  if [ "$n_comp" -gt 0 ] || [ "$n_res" -gt 0 ]; then
+    bad_ext="$(grep -E '^@sec_(comp|res)_[0-9]+ =' "$ll" | grep -vc 'internal' || true)"
+    if [ "$bad_ext" -gt 0 ]; then
+      echo "FAIL $name: (f) $bad_ext non-internal sec_comp/sec_res global(s)"
+      FAIL=$((FAIL + 1))
+    else
+      echo "PASS $name: (f) sec globals internal ($n_comp comp(s), $n_res run(s))"
+      PASS=$((PASS + 1))
+    fi
+  else
+    echo "PASS $name: (f) unsplit (no section components)"
+    PASS=$((PASS + 1))
+  fi
+
+  # (g) the integer world escapes (D4b): no ptrtoint of a GEP into a
+  #     stack_rN alloca — GEP-derived pointers never become integers
+  #     (their integer is the alloca's base, a different world).
+  n_esc="$(grep -c 'ptrtoint ptr getelementptr i8, ptr %stack_r[0-9]' "$ll")"
+  if [ "$n_esc" -ne 0 ]; then
+    echo "FAIL $name: (g) $n_esc GEP-derived stack pointer(s) escape as integers"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS $name: (g) no GEP-derived stack pointer escapes as an integer"
     PASS=$((PASS + 1))
   fi
 

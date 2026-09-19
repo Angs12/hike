@@ -5,6 +5,9 @@
 # users), runs both with a 15 s timeout, byte-diffs stdout.
 # The lifted link stays -no-pie: a linker constraint of the harness
 # artifact (baked absolute constants + extern_weak refs reject DT_TEXTREL).
+#
+# STRICT: rc=1 on ANY failure — a failing binary is a loud red, never an
+# allowlisted known.
 
 set -u
 CORPUS="${1:-/tmp/corpus}"

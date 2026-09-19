@@ -3,7 +3,7 @@
 # recompile -> native-vs-lifted success-rate table.
 # Resumable: each stage skips existing work (delete $WORK/ir to re-emit).
 # Usage: coreutils_pipeline.sh [workdir] [stage]
-#   stage: all|clone|build|collect|lift|test|summary (default all)
+#   stage: all|clone|build|collect|lift|link|suite|summary (default all)
 #   workdir default /tmp/opencode/coreutils-test
 # Needs a fresh plugin, plus git, autoconf/automake, make, bap, llc, gcc.
 set -u
@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
 WORK="${1:-/tmp/opencode/coreutils-test}"
 STAGE="${2:-all}"
-JOBS="$(nproc 2>/dev/null || echo 4)"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 URL="https://github.com/coreutils/coreutils"
 CORE="$WORK/coreutils"
 BINS="$WORK/binaries"
@@ -40,7 +40,7 @@ do_clone() {
 TARBALL_URL="https://ftp.gnu.org/gnu/coreutils/coreutils-9.5.tar.xz"
 
 # Plain gcc defaults = PIE executables.
-CFLAGS_BUILD="-O0 -fno-stack-protector"
+CFLAGS_BUILD="${CFLAGS_BUILD:--O0 -fno-stack-protector}"
 
 build_configure_make() {   # $1 = source dir
     local src="$1"
@@ -134,9 +134,30 @@ do_lift() {
     note "lift: $ok/$total already emitted; lifting ${#pending[@]} remaining SERIALLY (one at a time — parallel lifts OOM)"
     if [ "${#pending[@]}" -gt 0 ]; then
         local name
-        for name in "${pending[@]}"; do
-            "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
-        done
+        if [ "${HIKE_BATCH:-0}" = "1" ]; then
+            # One process for the whole pending list: the once-per-process
+            # plugin/startup floor amortizes. The driver deletes a binary's
+            # partial .ll on failure, so the file's existence is the verdict;
+            # its begin/end lines (with per-binary ms) land in LIFT_LOG.
+            local args=()
+            for name in "${pending[@]}"; do
+                args+=("$BINS/$name")
+            done
+            (cd "$REPO_ROOT" && dune exec bin/hike_batch.exe -- \
+                --output-dir="$IR" --prefix=out_ --timeout=600 \
+                "${args[@]}") >> "$LIFT_LOG" 2>&1
+            for name in "${pending[@]}"; do
+                if [ -s "$IR/out_$name.ll" ]; then
+                    echo "OK   $name" >> "$LIFT_LOG"
+                else
+                    echo "FAIL $name" >> "$LIFT_LOG"
+                fi
+            done
+        else
+            for name in "${pending[@]}"; do
+                "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
+            done
+        fi
         ok=$(( $(grep -c '^OK' "$LIFT_LOG") ))
     fi
     note "lift: $ok/$total emitted OK (details: $LIFT_LOG; timings: $TIMES)"
@@ -161,14 +182,12 @@ do_lift_report() {
 }
 
 # ----------------------------------------------------------------- test ----
-do_test() {
+do_link() {
     : > "$TEST_LOG"
-    local pass=0 fail=0 skip=0
+    local ok=0 fail=0
     for ll in "$IR"/out_*.ll; do
-        [ -e "$ll" ] || { note "test: no IR found under $IR"; return 1; }
+        [ -e "$ll" ] || { note "link: no IR found under $IR"; return 1; }
         local name; name="$(basename "$ll")"; name="${name#out_}"; name="${name%.ll}"
-        local native="$BINS/$name"
-        [ -x "$native" ] || { echo "SKIP $name (no native)" >> "$TEST_LOG"; skip=$((skip+1)); continue; }
 
         sed -e 's/@main/@hike_main/g' \
             -e 's/@_dl_relocate_static_pie/@_dl_relocate_static_pie_lifted/g' \
@@ -193,41 +212,11 @@ do_test() {
         fi
         rm -f "$OUT/${name}_lifted.o"
         command -v strip >/dev/null && strip "$OUT/${name}_lifted" 2>/dev/null
-
-        # Cap captures: yes-class utilities write forever.
-        # Truncate only shrinks: -s 1M on a smaller file would NUL-pad it.
-        caprun() { local o="$1" d="$2" n="$3"; local r=0
-                   (cd "$d" && timeout 20 "./$n" > "$o.tmp" 2>&1); r=$?
-                   local sz; sz=$(stat -c%s "$o.tmp" 2>/dev/null || echo 0)
-                   [ "$sz" -gt 1048576 ] && truncate -s 1M "$o.tmp" 2>/dev/null
-                   mv "$o.tmp" "$o"; return $r; }
-
-        # Normalize nondeterministic tokens before diffing (raw captures stay).
-        # mktemp suffixes are per-run random; dd elapsed/rate legitimately
-        # differ per run (the rate UNIT stays visible, so a real unit bug
-        # still fails).
-        norm() { sed -E \
-                   -e 's/tmp\.[A-Za-z0-9]{6,}/tmp.RANDOM/g' \
-                   -e 's/(, )[0-9][0-9.eE+-]*( s, )[0-9][0-9.]*( [A-Za-z]*B\/s)$/\1ELAPSED\2RATE\3/' \
-                   "$1" 2>/dev/null; }
-
         mkdir -p "$OUT/run/both"
-        # One shared dir keeps argv[0] and PWD identical on both sides.
-
-        cp -f "$native" "$OUT/run/both/$name"
-        caprun "$OUT/${name}_native.stdout" "$OUT/run/both" "$name"; local nrc=$?
         cp -f "$OUT/${name}_lifted" "$OUT/run/both/$name"
-        caprun "$OUT/${name}_lifted.stdout" "$OUT/run/both" "$name"; local lrc=$?
-
-        if [ "$nrc" -eq "$lrc" ] \
-           && diff -q <(norm "$OUT/${name}_native.stdout") \
-                      <(norm "$OUT/${name}_lifted.stdout") >/dev/null 2>&1; then
-            echo "PASS $name" >> "$TEST_LOG"; pass=$((pass+1))
-        else
-            echo "FAIL $name (rc $nrc vs $lrc)" >> "$TEST_LOG"; fail=$((fail+1))
-        fi
+        echo "OK $name" >> "$TEST_LOG"; ok=$((ok+1))
     done
-    note "test: PASS=$pass FAIL=$fail SKIP=$skip (details: $TEST_LOG)"
+    note "link: OK=$ok FAIL=$fail (details: $TEST_LOG)"
 }
 
 # Coreutils' own suite (make check), three-way: native baseline, lifted,
@@ -308,24 +297,27 @@ do_suite() {
 
 # -------------------------------------------------------------- summary ----
 do_summary() {
-    local lifts tests p f s
+    local lifts
     lifts=$(grep -c '^OK' "$LIFT_LOG" 2>/dev/null || echo 0)
     local total; total=$(ls "$BINS" 2>/dev/null | wc -l)
-    p=$(grep -c '^PASS' "$TEST_LOG" 2>/dev/null || echo 0)
-    f=$(grep -c '^FAIL' "$TEST_LOG" 2>/dev/null || echo 0)
-    s=$(grep -c '^SKIP' "$TEST_LOG" 2>/dev/null || echo 0)
-    tests=$((p+f))
     echo "==================== COREUTILS SUCCESS RATE ===================="
     echo "binaries collected : $total"
     echo "hike-lifted OK     : $lifts / $total"
-    echo "recompiled+tested  : $tests (skipped $s)"
-    echo "semantic PASS      : $p"
-    echo "semantic FAIL      : $f"
-    if [ "$total" -gt 0 ]; then
-        awk -v p="$p" -v t="$total" 'BEGIN { printf "SUCCESS RATE       : %d/%d = %.1f%%\n", p, t, 100*p/t }'
+    echo "recompiled (link)  : $(grep -c '^OK' "$TEST_LOG" 2>/dev/null || echo 0)"
+    local slog="$WORK/suite"
+    if [ -s "$slog/native.test-suite.log" ] && [ -s "$slog/lifted.test-suite.log" ]; then
+        echo "--- the upstream suite (make check): native vs lifted ---"
+        grep -E '^# (TOTAL|PASS|FAIL|SKIP|ERROR|XFAIL|XPASS):' \
+            "$slog/native.test-suite.log" | tr -s ' ' | sed 's/^/native /'
+        grep -E '^# (TOTAL|PASS|FAIL|SKIP|ERROR|XFAIL|XPASS):' \
+            "$slog/lifted.test-suite.log" | tr -s ' ' | sed 's/^/lifted /'
+        echo "--- new lifted failures (in lifted, not in native) ---"
+        comm -13 <(grep '^FAIL: ' "$slog/native.test-suite.log" | sort -u) \
+                 <(grep '^FAIL: ' "$slog/lifted.test-suite.log" | sort -u) | head -40
+    else
+        echo "suite: not run yet (stage: suite)"
     fi
     echo "================================================================"
-    echo "failures:"; grep '^FAIL' "$TEST_LOG" 2>/dev/null | head -40
 }
 
 case "$STAGE" in
@@ -334,13 +326,14 @@ case "$STAGE" in
     collect) do_collect ;;
     lift)    do_lift ;;
     lift-report) do_lift_report ;;
-    test)    do_test ;;
+    link)    do_link ;;
     suite)   do_suite ;;
     summary) do_summary ;;
     all)
         do_collect || exit 1
         do_lift     # failures recorded, not fatal - the report shows them
-        do_test
+        do_link
+        do_suite    # the upstream suite IS the semantic oracle
         do_summary
         do_lift_report
         ;;
