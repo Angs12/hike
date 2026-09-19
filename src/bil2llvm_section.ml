@@ -477,9 +477,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
                     own_lo = si_lo;
                     own_hi = si_hi;
                     base;
-                    typed_w = word;
-                    is_const = false;
-                    bss = true } ]
+                    typed_w = word } ]
             | None -> []
           in
           let addr = Int64.to_int si_lo in
@@ -508,9 +506,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
                     own_lo = si_lo;
                     own_hi = si_hi;
                     base;
-                    typed_w = word;
-                    is_const = si_const;
-                    bss = false } ]
+                    typed_w = word } ]
             | None -> []
           in
           { base;
