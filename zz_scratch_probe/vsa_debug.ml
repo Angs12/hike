@@ -53,7 +53,7 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
   let sp = Hike.Abi.x86_64_sysv.sp in
   let prog' = Program.create ~subs:[ sub ] () in
   let sol =
-    Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub)
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub)
   in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun b ->
@@ -63,7 +63,7 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
       Term.enum def_t b
       |> Seq.iter ~f:(fun d ->
           let pre = !st1 in
-          let post = Vsa.denote_def d pre in
+          let post = Vsa.Test_seam.denote_def d pre in
           Printf.printf "    %s\n      pre : %s\n      post: %s\n"
             (def_to_string d)
             (state_summary [ sp; i_of sub ] pre)

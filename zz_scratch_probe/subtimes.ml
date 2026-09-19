@@ -33,11 +33,13 @@ let () =
                    acc + n)
           in
           let t0 = Unix.gettimeofday () in
-          let info = Hike.Vsa.offsets_of_sub target sp sub in
-          let dt = Unix.gettimeofday () -. t0 in
-          let ntags =
-            Core.Map.length info.Hike.Convutils.offsets
+          let _envs, _sub' =
+            Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
+              ~images:[] ~block_addrs:[] sub
+            |> Base.Option.value ~default:(Tid.Map.empty, sub)
           in
+          let dt = Unix.gettimeofday () -. t0 in
+          let ntags = Core.Set.length (Hike.Sections.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) in
           (dt, name, nblk, ndefs, ntags))
         subs
     in
@@ -45,7 +47,7 @@ let () =
     let total =
       List.fold_left (fun acc (t, _, _, _, _) -> acc +. t) 0.0 rows
     in
-    Printf.printf "total offsets_of_sub time: %.3fs over %d subs\n\n" total
+    Printf.printf "total producer time: %.3fs over %d subs\n\n" total
       (List.length rows);
     Printf.printf "%10.3fs  %5.1f%%  %6d blk %7d defs %5d tags  %s\n" total 100.0
       0 0 0 "(ALL)";

@@ -21,8 +21,15 @@ let () =
         try
           let n = ref 0 in
           let sub', sol = analyze_and_fixpoint sp prog sub in
-          let info = Hike.Vsa.offsets_of_sub target sp sub' in
-          let kind_of = info.Hike.Convutils.offsets in
+          let kind_of =
+            let sol =
+              Cbat_vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+                ~resolved:Tid.Map.empty []
+                (Program.create ~subs:[ sub' ] ()) sub'
+                (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub')
+            in
+            Probe_common.seam_kinds_of sol sub'
+          in
           Term.enum blk_t sub'
           |> Seq.iter ~f:(fun b ->
               let has_call =
@@ -35,18 +42,18 @@ let () =
               |> Seq.iter ~f:(fun d ->
                   (match Def.rhs d with
                    | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
-                     (match Vsa.denote_imm_exp addr !st with
+                     (match Vsa.Test_seam.denote_imm_exp addr !st with
                       | Ok ws when ws_window_big ws ->
                         incr n;
                         Printf.printf "w_big\t%s\t%s\t%s\t%s\tcall=%b\tkind=%s\n"
                           (Sub.name sub') (Tid.name (Term.tid b))
                           (def_to_string d) (ws_to_string ws) has_call
-                          (match Core_kernel.Map.find kind_of (Term.tid d) with
+                          (match Core.Map.find kind_of (Term.tid d) with
                            | Some k -> vsa_kind_to_string k
                            | None -> "-")
                       | _ -> ())
                    | _ -> ());
-                  st := Vsa.denote_def d !st));
+                  st := Vsa.Test_seam.denote_def d !st));
           Printf.printf "=== %s: %d w_big access(es)\n" (Sub.name sub') !n;
           total := !total + !n
         with e ->

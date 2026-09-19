@@ -86,7 +86,7 @@ let () =
     let sub' = sub in
     let prog' = Program.create ~subs:[ sub' ] () in
     let sol =
-      try Vsa.static_graph_vsa [] prog' sub' (Vsa.init_sol sub')
+      try Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub' (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub')
       with
       | Vsa.Fixpoint_not_converged (n, _sol, gap) ->
         Printf.printf "FIXPOINT NOT CONVERGED after %d rounds\n" n;

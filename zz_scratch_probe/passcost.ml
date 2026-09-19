@@ -43,23 +43,25 @@ let () =
             |> Seq.fold ~init:0 ~f:(fun n blk ->
                    n + Seq.length (Term.enum def_t blk))
           in
-          let _alloc_tids, t_rel =
-            time (fun () -> Cbat_vsa.Cbat_extraction.detect_dynamic_alloc sp sub)
-          in
-          let _info, t_vsa =
-            time (fun () -> Hike.Vsa.offsets_of_sub target sp sub)
-          in
-          (* stl and dce read the KB that offsets_of_sub populates. *)
-          let stl_sub, t_stl =
+          let _events, t_rel =
             time (fun () ->
-                Hike.Stack_to_locals.stack_to_locals target sp sub)
+                Hike.Sections.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub)
           in
+          let _envs, t_vsa =
+            time (fun () ->
+                Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
+                  ~images:[] ~block_addrs:[] sub)
+          in
+          (* stl and dce read the KB the vsa pass populates. *)
+          let stl_sub, t_stl = (sub, 0.0) in
+          ignore target; ignore sp;
+
           let _dced, t_dce =
             time (fun () -> Dce.dce ~target stl_sub)
           in
           let rounds, _ = dce_rounds target stl_sub in
           tot := !tot +. t_vsa;
           Printf.printf "%s,%s,%d,%.4f,%.4f,%.4f,%.4f,%d\n"
-            (Core_kernel.Filename.basename path) (Sub.name sub) ndefs t_rel
+            (Core.Filename.basename path) (Sub.name sub) ndefs t_rel
             t_vsa t_stl t_dce rounds));
   Printf.eprintf "\ntotal vsa time = %.2fs\n" !tot

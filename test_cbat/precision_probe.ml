@@ -23,7 +23,7 @@ let diag_on () : bool =
 
 (* Fixpoint entry solution: production default. *)
 let init_sol_of (sub' : sub term) : Vsa.vsa_sol =
-  Vsa.init_sol sub'
+  Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub'
 
 let () = Printexc.record_backtrace true
 
@@ -261,16 +261,15 @@ let addr_exp_of_rhs (e : exp) : exp option =
 (* One L2a DIAG line for a bottom word def. *)
 let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
     (d : def term) (input_bottom : bool) (tagged : bool)
-    (frame : Vsa.frame option) (st_before : AI.t) : unit =
+    (st_before : AI.t) : unit =
   let class_of (e : exp) : string =
-    match Vsa.denote_imm_exp e st_before with
+    match Vsa.Test_seam.denote_imm_exp e st_before with
     | Error _ -> "err"
     | Ok ws -> classify_operand ws in
   let kind, op1, op2 =
     match Def.rhs d with
     | Bil.BinOp (op, x, y) -> binop_name op, class_of x, class_of y
-    | Bil.Load (_, a, _, _) ->
-      "load", class_of (Vsa.rewrite_addr frame a), "n/a"
+    | Bil.Load (_, a, _, _) -> "load", class_of a, "n/a"
     | Bil.Cast (ct, _, _) -> "cast:" ^ cast_name ct, "n/a", "n/a"
     | _ -> "other", "n/a", "n/a" in
   Printf.printf "DIAG\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n"
@@ -281,18 +280,33 @@ let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
   flush stdout
 
 (* Walk blocks in def order, re-denote, classify. *)
+(* The seeding predicate and the tag-state meet for one address — the
+   probes' copies of the extraction's arms. *)
+let is_stack_access st addr =
+  match Vsa.Test_seam.denote_imm_exp addr st with
+  | Error _ -> false
+  | Ok ws -> Ws.is_bottom ws || Ws.in_stack_segment ws
+
+let st_tag_of ~(tags : Vsa.vsa_sol) (blk : blk term) (addr : exp)
+    (st_before : AI.t) : AI.t =
+  Exp.free_vars addr |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
+      match Var.typ v with
+      | Type.Imm w ->
+        let tag_v = AI.find_word w
+            (Graphlib.Std.Solution.get tags (Term.tid blk)) v in
+        let cur = AI.find_word w acc v in
+        let mm = Ws.meet cur tag_v in
+        if Cbat_word.is_zero (Ws.cardinality mm) || Ws.equal mm cur
+        then acc
+        else AI.add_word acc ~key:v ~data:mm
+      | Type.Mem _ | Type.Unk -> acc)
+
 let collect_stats (bname : string) (sub' : sub term)
     (sol : Vsa.vsa_sol) (tags : Vsa.vsa_sol) : Sub_stats.t =
   let s = Sub_stats.create (Sub.name sub') in
   (* L2a counters: bottom defs, live vs dead. *)
   let bottom_live = ref 0 in
   let bottom_dead = ref 0 in
-  (* Stack iff the name is RSP/RBP (spec §2.1: every def is denoted). *)
-  let is_stack_addr (a : exp) : bool =
-    Exp.free_vars a
-    |> Core.Set.exists ~f:(fun v ->
-        let n = Var.name v in
-        String.equal n "RSP" || String.equal n "RBP") in
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->
       (* Per-block entry state from the fixpoint solution. *)
@@ -306,7 +320,7 @@ let collect_stats (bname : string) (sub' : sub term)
       |> Seq.iter ~f:(fun d ->
           let st_before = !st in
           (* Sequential denotation, like the fixpoint. *)
-          st := Vsa.denote_def d !st;
+          st := Vsa.Test_seam.denote_def d !st;
           (* Word-lhs defs only; bottom split by entry state. *)
           (match Var.typ (Def.lhs d) with
            | Type.Imm w ->
@@ -321,12 +335,12 @@ let collect_stats (bname : string) (sub' : sub term)
                    incr bottom_dead;
                    if diag_on () then
                      diag_bottom bname sub' b d input_bottom tagged
-                       (Vsa.frame_of_state st_before) st_before
+                       st_before
                  end else begin
                    incr bottom_live;
                    if diag_on () then
                      diag_bottom bname sub' b d input_bottom tagged
-                       (Vsa.frame_of_state st_before) st_before
+                       st_before
                  end;
                  if input_bottom then `Bottom_dead else `Bottom_live
                | `Exact -> `Exact
@@ -341,14 +355,11 @@ let collect_stats (bname : string) (sub' : sub term)
           (* Address metric in the PRE-def state. *)
           (match addr_exp_of_rhs (Def.rhs d) with
            | Some a ->
-             let stack = is_stack_addr a in
-             let a' =
-               Vsa.rewrite_addr (Vsa.frame_of_state st_before) a in
+             let stack = is_stack_access st_before a in
              (* Addresses denoted with block IN-state, not re-denoted values. *)
-             (* M6 meet is [st_tag_of] (genuine-subset gate). *)
-             let st_tag =
-               Vsa.Cbat_extraction.st_tag_of ~tags b a' st_before in
-             (match Vsa.denote_imm_exp a' st_tag with
+             (* M6 meet is the st_tag meet (genuine-subset gate). *)
+             let st_tag = st_tag_of ~tags b a st_before in
+             (match Vsa.Test_seam.denote_imm_exp a st_tag with
               | Error _ ->
                 s.Sub_stats.ld_denote_err <- s.Sub_stats.ld_denote_err + 1
               | Ok ws ->
@@ -551,7 +562,7 @@ and run_sub (_sp : var) (_prog : program term) (bname : string)
     let prog' = Program.create ~subs:[ sub ] () in
     let t0 = Unix.gettimeofday () in
     let sol =
-      Vsa.static_graph_vsa [] prog' sub (init_sol_of sub) in
+      Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (init_sol_of sub) in
     let t1 = Unix.gettimeofday () in
     (* Per-block TAG state is the IN-state ([tags = sol]). *)
     let st = collect_stats bname sub sol sol in

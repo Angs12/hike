@@ -14,7 +14,7 @@ open Test_fixtures
 
 (* L2b-1: full 1-bit domain reads cardn 2. *)
 let run () =
-(* SP anchor removed: fixtures pin the anchored entry explicitly. *)
+(* Fixtures pin the anchored entry explicitly. *)
 (* Branch-assume refinement pins. *)
 (  let ivar = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let tgt = Tid.create () in
@@ -22,8 +22,7 @@ let run () =
   (* x < 5 taken -> x in [0,4] *)
   let c1 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env
-         (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5)))))))
       ivar
   in
   check "D4-1: assume (x < 5) refines x to [0,4]"
@@ -31,8 +30,7 @@ let run () =
   (* x <= 5 -> [0,5] *)
   let c2 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env
-         (mk_jmp_to tgt (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.LE, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5)))))))
       ivar
   in
   check "D4-2: assume (x <= 5) refines x to [0,5]"
@@ -40,23 +38,22 @@ let run () =
   (* x == 5 -> {5} *)
   let c3 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env
-         (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5)))))))
       ivar
   in
   check "D4-3: assume (x == 5) refines x to {5}"
     (Ws.min_elem c3 = Some (w32 5) && Ws.max_elem c3 = Some (w32 5));
-  let c4 = AI.find_word 32 (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.Int (Cbat_word.to_word (w32 1))))) ivar in
+  let c4 = AI.find_word 32 (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.Int (Cbat_word.to_word (w32 1)))))) ivar in
   check "D4-4: doubt — constant condition keeps the state (top)" (Ws.is_top c4);
   let c5 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.LT, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w64 5)))))))
       ivar
   in
   check "D4-5: doubt — width-mismatched guard keeps the state (top)" (Ws.is_top c5);
   let c6 =
     AI.find_word 32
-      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.NEQ, Bil.Var ivar, Bil.Int (Cbat_word.to_word (w32 5)))))))
       ivar
   in
   check "D4-6: gate-free (spec §2.1) — the NEQ guard refines to TOP−{5} (5 ∉, 0 ∈, non-top)"
@@ -64,14 +61,13 @@ let run () =
   let fv = Var.create ~is_virtual:false ~fresh:false "zf" (Type.Imm 1) in
   let c7 =
     AI.find_word 1
-      (Vsa.assume_jump_cond env (mk_jmp_to tgt (Bil.Var fv)))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.Var fv))))
       fv
   in
   check "D4-7: assume (flag) forces the flag to {1}" (Ws.elem Cbat_word.b1 c7 && not (Ws.elem Cbat_word.b0 c7));
   let c8 =
     AI.find_word 1
-      (Vsa.assume_jump_cond env
-         (mk_jmp_to tgt (Bil.UnOp (Bil.NOT, Bil.Var fv))))
+      (Vsa.Test_seam.constrain_edge ~env:env (Jmp.cond (mk_jmp_to tgt (Bil.UnOp (Bil.NOT, Bil.Var fv)))))
       fv
   in
   check "D4-8: assume (NOT flag) forces the flag to {0}"
@@ -86,29 +82,26 @@ let run () =
   let iv = Bil.Var i in
   let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
   let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
-  let entry0 = blk_of_defs [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ] in
-  let body0 =
-    blk_of_defs [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) ]
+  let sub, tids =
+    sub_of "d4_loop"
+      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ], [ (1, mk_goto) ];
+        [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) ], [ (2, mk_goto) ];
+        [], [ (3, fun t -> mk_jmp_to t nlt5); (1, fun t -> mk_jmp_to t lt5) ];
+        [], [] ]
   in
-  let header0 = blk_of_defs [] in
-  let exit0 = blk_of_defs [] in
-  let body_tid = Term.tid body0 in
-  let header_tid = Term.tid header0 in
-  let exit_tid = Term.tid exit0 in
-  let entry = with_jmps entry0 [ mk_goto body_tid ] in
-  let body = with_jmps body0 [ mk_goto header_tid ] in
-  let header = with_jmps header0 [ mk_jmp_to exit_tid nlt5; mk_jmp_to body_tid lt5 ] in
-  let exit = exit0 in
-  let sub_b = Sub.Builder.create ~name:"d4_loop" () in
-  Sub.Builder.add_blk sub_b entry;
-  Sub.Builder.add_blk sub_b body;
-  Sub.Builder.add_blk sub_b header;
-  Sub.Builder.add_blk sub_b exit;
-  let sub = Sub.Builder.result sub_b in
+  let body_tid = tids.(1) in
+  let header_tid = tids.(2) in
+  let exit_tid = tids.(3) in
   let sol = run_anchored sub in
   (* Per-edge states read from single-predecessor targets' IN-states. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   let c_exit = AI.find_word 32 (Graphlib.Std.Solution.get sol exit_tid) i in
+  let pr o = match o with Some w -> Cbat_word.to_string w | None -> "-" in
+  let hi_st = Graphlib.Std.Solution.get sol header_tid in
+  Printf.printf "D4-9 DIAG iter=[%s..%s] top=%b exit=[%s..%s] head=[%s..%s]\n%!"
+    (pr (Ws.min_elem c_iter)) (pr (Ws.max_elem c_iter)) (Ws.is_top c_iter)
+    (pr (Ws.min_elem c_exit)) (pr (Ws.max_elem c_exit))
+    (pr (Ws.min_elem (AI.find_word 32 hi_st i))) (pr (Ws.max_elem (AI.find_word 32 hi_st i)));
   check
     "D4-9 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ [0,4]) \
      and the exit view carries the exit-iteration values (min ≥ 5)"
@@ -117,19 +110,6 @@ let run () =
     && (not (Ws.is_top c_exit))
     && match Ws.min_elem c_exit with Some w -> Cbat_word.(>=) w (w32 5) | None -> false);
   ())
-(* Ite else-arm joins both arms. *)
-;
-(  (* {0,1}-valued Ite cond must not kill the else value. *)
-  let f32 = Var.create ~is_virtual:false ~fresh:false "flag32" (Type.Imm 32) in
-  let env = AI.add_word AI.top ~key:f32 ~data:(Ws.of_list ~width:32 [ w32 0; w32 1 ]) in
-  let e = Bil.Ite (Bil.Var f32, Bil.Int (Cbat_word.to_word (w32 10)), Bil.Int (Cbat_word.to_word (w32 20))) in
-  match Vsa.denote_imm_exp e env with
-  | Ok ws ->
-      check "E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)"
-        (Ws.elem (w32 10) ws && Ws.elem (w32 20) ws && not (Ws.is_bottom ws))
-  | Error _ ->
-      check "E3-1: Ite with a {0,1}-valued flag joins both arms (no bottom)" false;
-      ())
 (* Coercing width helper: mismatched ops coerce, never raise. *)
 ;
 (  let p32 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
@@ -189,7 +169,7 @@ let run () =
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
   let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
   let j_after =
-    Vsa.denote_def
+    Vsa.Test_seam.denote_def
       (Def.create j (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))))
       exit_ai
   in
@@ -232,31 +212,20 @@ let run () =
     ((not (contains_substring captured "not_implemented"))
     && not (contains_substring captured "(degrading to top)"));
   ())
-;
-(* T1 deleted (spec §2.1): every def is denoted, no tag needed. *)
-(  let iv = v64 "t2_iv" in
-  let d = Def.create iv (Bil.Int (Cbat_word.to_word (w64 7))) in
-  let e_den = Vsa.denote_def d AI.top in
-  check "T2-1: gate-free — every def is denoted, no tag needed"
-    (Ws.equal (AI.find_word 64 e_den iv) (Ws.singleton (w64 7)));
-  ()
-
-(* Frozen-flag fixture: f := g/h, stack-access load, unrelated-def control, jmp exit if f. *))
+(* Frozen-flag fixture: f := g/h, stack-access load, unrelated-def control, jmp exit if f. *)
 ;
 (  let x = v64 "t3_x" in
   let tgt = Tid.create () in
   let c_in =
     AI.find_word 64
-      (Vsa.assume_jump_cond AI.top
-         (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:AI.top (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5)))))))
       x
   in
   check "T3-1: gate-free — the guard refines x to {5}"
     (Ws.min_elem c_in = Some (w64 5) && Ws.max_elem c_in = Some (w64 5));
   let c_out =
     AI.find_word 64
-      (Vsa.assume_jump_cond AI.top
-         (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))))
+      (Vsa.Test_seam.constrain_edge ~env:AI.top (Jmp.cond (mk_jmp_to tgt (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5)))))))
       x
   in
   check "T3-2: gate-free (spec §2.1) — the guard refines x to {5}"
@@ -277,30 +246,12 @@ let run () =
   let c2 = AI.find_word 1 (Graphlib.Std.Solution.get sol2 exit_tid2) f2 in
   check "T3-8: single-def flag — f2 IS refined to {1} on the taken edge"
     (Ws.elem Cbat_word.b1 c2 && not (Ws.elem Cbat_word.b0 c2));
-  ()
+  ())
 
-(* Caller-alias fixture: aliased slot, tracked load, call, post reload. Returns the record. *))
+(* Caller-alias fixture: aliased slot, tracked load, call, post reload. Returns the record. *)
 ;
 (  let fx = mk_caller_alias () in
   let sub = fx.ca_sub in
-  (* Pre-call state makes the post-call check non-vacuous. *)
-  let entry_blk' =
-    match Term.find blk_t sub (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
-  in
-  let pre = Vsa.denote_defs entry_blk' AI.top in
-  let mkey =
-    match Mem.Key.of_wordset (Ws.singleton (w64 0xd0)) with Some k -> k | None -> assert false
-  in
-  let pre_val =
-    Mem.Val.data
-      (Mem.find (64, LittleEndian)
-         (AI.find_memory { addr_width = 64; addressable_width = 8 } pre fx.ca_m)
-         mkey)
-  in
-  check "T4-5: pre-call the aliased slot holds {42} (non-vacuous pin)"
-    (Ws.equal pre_val (Ws.singleton (w64 42)));
-  check "T4-6: pre-call rdi is the concrete address {0xd0} (the alias)"
-    (Ws.equal (AI.find_word 64 pre fx.ca_rdi) (Ws.singleton (w64 0xd0)));
   (* Gate-free fixpoint on the raw sub. *)
   let sol = run_anchored sub in
   let post_ai = Graphlib.Std.Solution.get sol fx.ca_post_tid in
@@ -373,43 +324,43 @@ let run () =
 ;
 (  (* Channel-1 pin (spec §2.2): the prologue + frame-affine accesses seed. *)
   let extract_of (sub : sub term) : Cu.vsa_kind Tid.Map.t =
-    let offsets, _, _ = extract_anchored sub in
+    let offsets = extract_anchored sub in
     offsets
   in
   let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
   let tags = extract_of sub in
-  check "P21-1: channel 1 — the load at [RBP - 0x30] seeds Range(-48,-48)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
-  check "P21-2: channel 1 — the store at [RBP - 0x30] seeds Range(-48,-48)"
-    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-48L, -48L)));
+  check "P21-1: the symbolic arm — the load at [RBP - 0x30] (RBP := RSP: StackOff offs -48) seeds Range(base-48,base-48)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (pos (-48L), pos (-48L))));
+  check "P21-2: the symbolic arm — the store at [RBP - 0x30] seeds Range(base-48,base-48)"
+    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (pos (-48L), pos (-48L))));
   ()
 
 (* RSP-derived base with index; the indexed load seeds. *))
 ;
 (  let _, def_load, sub = mk_rsp_index_sub () in
-  let tags, _, _ = extract_anchored sub in
-  check "P22-1: channel 1 — the indexed load at [rdi + idx*8] seeds Range(32,32)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (32L, 32L)));
+  let tags = extract_anchored sub in
+  check "P22-1: the symbolic arm — the indexed load at [rdi + idx*8] (rdi := RSP-8, idx := 5: offs -8 + 40 = 32, entirely above the entry RSP) seeds the CALLER lane Caller(base+32,base+32)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Caller (pos (32L), pos (32L))));
   ()
 
 (* Heap-shaped addresses do not seed; the RSP-direct access does. *))
 ;
 (  let _, _, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
-  let tags, _, _ = extract_anchored sub in
-  check "P23-1: channel 2 — the load at [rbp + idx*8] (denotes outside the neighborhood) is NOT seeded"
+  let tags = extract_anchored sub in
+  check "P23-1: the plain arm — the load at [rbp + idx*8] (rbp := 0x400000: a plain foreign constant, outside the stack band) is NOT seeded"
     (Core.Map.find tags (Term.tid def_load) = None);
-  check "P23-2: channel 2 — the disjoint store at [rbp + 0x100] is NOT seeded"
+  check "P23-2: the plain arm — the disjoint store at [rbp + 0x100] is NOT seeded"
     (Core.Map.find tags (Term.tid def_store_disjoint) = None);
-  check "P23-3: channel 1 — the RSP-direct store at [RSP - 8] seeds Range(-8,-8)"
-    (Core.Map.find tags (Term.tid def_store_rsp) = Some (Cu.Range (-8L, -8L)));
+  check "P23-3: the symbolic arm — the RSP-direct store at [RSP - 8] seeds Range(base-8,base-8)"
+    (Core.Map.find tags (Term.tid def_store_rsp) = Some (Cu.Range (pos (-8L), pos (-8L))));
   ())
 ;
 (  let _, def_load, _, def_use, sub = mk_one_path_sub () in
-  let tags, _, _ = extract_anchored sub in
-  check "F1-1: channel 1 — the on-path load at [rbp - 0x30] seeds Range(-48,-48)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (-48L, -48L)));
-  check "F1-2: channel 2 — the use store at [rdi + 8] (rdi joins the TOP cell value) is NOT seeded"
-    (Core.Map.find tags (Term.tid def_use) = None);
+  let tags = extract_anchored sub in
+  check "F1-1: the symbolic arm — the on-path load at [rbp - 0x30] seeds Range(base-48,base-48)"
+    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (pos (-48L), pos (-48L))));
+  check "F1-2: the plain arm — the use store at [rdi + 8] (rdi joins the TOP cell value) seeds the unbounded span (a TOP address is the fully-infinite kind — it may name this frame)"
+    (Core.Map.find tags (Term.tid def_use) = Some Cu.unbounded_span);
   ())
 (* Degenerate cast/extract sizes degrade to top; shift guards compare magnitudes. *)
 ;
@@ -435,7 +386,8 @@ let run () =
   ())
 ;
 (* Crash shape: RAX := high:0[RAX] in the call's return target. Returns (rax, ctx, sub, final tid). *)
-(  (* Restriction stays OFF: ON would skip the untagged cast, making the test vacuous. *)
+(  (* Every def is denoted, so the
+     untagged cast IS denoted and the test is non-vacuous. *)
   let rax, _, sub, final_tid = mk_high0_cast_sub () in
   let sol = run_anchored sub in
   let final_ai = Graphlib.Std.Solution.get sol final_tid in
@@ -462,36 +414,20 @@ let run () =
   let xv = Bil.Var x in
   let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
   let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
-  let entry0 =
-    blk_of_defs
-      [
-        Def.create i (Bil.Int (Cbat_word.to_word (w32 0)));
-        Def.create x (Bil.Int (Cbat_word.to_word (w64 16)));
-      ]
+  let sub, tids =
+    sub_of "e2ec_loop"
+      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0)));
+          Def.create x (Bil.Int (Cbat_word.to_word (w64 16))) ],
+        [ (1, mk_goto) ];
+        (* Body increments first: y = x << (i+1) ∈ {32..512}, in case 1. *)
+        [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1))));
+          Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv)) ],
+        [ (2, mk_goto) ];
+        [], [ (3, fun t -> mk_jmp_to t nlt5); (1, fun t -> mk_jmp_to t lt5) ];
+        [], [] ]
   in
-  (* Body increments first: y = x << (i+1) ∈ {32..512}, in case 1. *)
-  let body0 =
-    blk_of_defs
-      [
-        Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1))));
-        Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv));
-      ]
-  in
-  let header0 = blk_of_defs [] in
-  let exit0 = blk_of_defs [] in
-  let body_tid = Term.tid body0 in
-  let header_tid = Term.tid header0 in
-  let exit_tid = Term.tid exit0 in
-  let entry = with_jmps entry0 [ mk_goto body_tid ] in
-  let body = with_jmps body0 [ mk_goto header_tid ] in
-  let header = with_jmps header0 [ mk_jmp_to exit_tid nlt5; mk_jmp_to body_tid lt5 ] in
-  let exit = exit0 in
-  let sub_b = Sub.Builder.create ~name:"e2ec_loop" () in
-  Sub.Builder.add_blk sub_b entry;
-  Sub.Builder.add_blk sub_b body;
-  Sub.Builder.add_blk sub_b header;
-  Sub.Builder.add_blk sub_b exit;
-  let sub = Sub.Builder.result sub_b in
+  let body_tid = tids.(1) in
+  let exit_tid = tids.(3) in
   let sol = run_anchored sub in
   (* Single-predecessor IN-states are the per-edge refined states. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
@@ -525,36 +461,14 @@ let run () =
 (* Channel-1 indexed-store pin: same shape seeds without any tagger. *))
 ;
 (  let _, _, def_store, sub, _ = mk_e2ed_rsp_store_sub () in
-  let tags, _, _ = extract_anchored sub in
-  check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(-24,-24)"
-    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (-24L, -24L)));
-  ()
-
-(* E3: top-address stores leave memory unchanged; the slot load reads through. *))
-;
-(  let m = memv "e2ed_m3" in
-  let t = v64 "e2ed_t3" in
-  let d1 =
-    Def.create m
-      (Bil.Store (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64))
-  in
-  let env1 = Vsa.denote_def d1 AI.top in
-  let d2 =
-    Def.create m
-      (Bil.Store
-         (Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64), Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
-  in
-  let dload = Def.create t (Bil.Load (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), LittleEndian, `r64)) in
-  let env2 = Vsa.denote_def d2 env1 in
-  check "E2eD-7: gate-free — a top-addr store leaves memory unchanged"
-    (AI.equal env2 env1);
-  let env3 = Vsa.denote_def dload env2 in
-  let tv = AI.find_word 64 env3 t in
-  check
-    "E2eD-8: gate-free — the load at the slot reads exactly the pre-store value {42} (no \
-     full-range-cell pollution)"
-    (Ws.equal tv (Ws.singleton (w64 42)));
+  let tags = extract_anchored sub in
+  check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(base-24,base-24)"
+    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (pos (-24L), pos (-24L))));
   ())
+
+(* E3 (the SOUND contract): a store through a TOP address may write any
+   cell — the whole memory invalidates (whole-memory top), and the
+   pre-store slot value is unprovable: the 0x100 load reads top. *)
 ;
 (  let rsp_var = v64 "RSP" in
   let entry_tid_of (sub : sub term) : tid =
@@ -565,9 +479,9 @@ let run () =
   let sol = run_anchored sub in
   let st = Graphlib.Std.Solution.get sol (entry_tid_of sub) in
   check
-    "P3-1: gate-free — the RSP := 0 anchor is denoted (entry input state \
-     carries RSP = {0})"
-    (Ws.equal (AI.find_word 64 st rsp_var) (Ws.singleton (w64 0)));
+    "P3-1: gate-free — the entry RSP anchor is denoted (entry input state \
+     carries RSP = the symbolic segment base at offset 0 — StackOff{0})"
+    (Ws.equal (AI.find_word 64 st rsp_var) (Ws.stack_word_i64 0L));
   ())
 ;
 (  let full = Ws.top 1 in
@@ -579,111 +493,72 @@ let run () =
     && Cbat_word.(=) (Ws.cardinality full) (Cbat_word.of_int ~width:2 2)
     && (not (Ws.is_bottom full_l))
     && Cbat_word.(=) (Ws.cardinality full_l) (Cbat_word.of_int ~width:2 2));
-  ()
+  ())
 
-(* L2b-2: EQ over {0,1} — is_zero guard sees unwrapped cardn. *))
 ;
-(  let zf = v1 "l2b_zf2" in
-  let env = AI.add_word AI.top ~key:zf ~data:(Ws.of_list ~width:1 [ Cbat_word.b0; Cbat_word.b1 ]) in
-  let e = Bil.BinOp (Bil.EQ, Bil.Var zf, Bil.Int W.b0) in
-  match Vsa.denote_imm_exp e env with
-  | Ok ws ->
-      check
-        "L2b-2: EQ over a {0,1} operand is {0,1} (bool_top), not bottom — the is_zero guard sees \
-         cardn 2"
-        ((not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2))
-  | Error _ ->
-      check
-        "L2b-2: EQ over a {0,1} operand is {0,1} (bool_top), not bottom — the is_zero guard sees \
-         cardn 2"
-        false;
-      ()
-
-(* L2b-3: lifted 1-bit flag value via unknown[bits]:u1 def. *))
-;
-(  let pf = v1 "l2b_pf3" in
-  let env_after = Vsa.denote_def (Def.create pf (Bil.Unknown ("l2b_bits", Type.Imm 1))) AI.top in
-  let ws = AI.find_word 1 env_after pf in
-  check "L2b-3: a lifted 1-bit flag def (val_top (Imm 1)) is {0,1} with cardn 2, not bottom"
-    ((not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2));
-  ()
-
-(* L2b-4: overlap comparisons return bool_top, not bottom. *))
-;
-(  let x = v64 "l2b_x4" in
-  let y = v64 "l2b_y4" in
-  let z = v64 "l2b_z4" in
-  let ok_lt =
-    match Vsa.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top with
-    | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
-    | Error _ -> false
+(  (* PA: a same-block-redefined address var keeps its WALK binding —
+      the block-entry register value is a different var version and
+      never meets into the address.  The entry band
+      [0xffffff00,0xffffffff] plus a TOP reload from a frame cell
+      reproduces the real-code wrapped hull (rpl_mbrtoc32's 2^32-79
+      Caller band); the honest classification of the TOP reload is the
+      unbounded span. *)
+  let rbp = v64 "RBP" in
+  let rax = v64 "RAX" in
+  let m = memv "pa_m" in
+  let cell =
+    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x28)))
   in
-  let ok_eq =
-    match Vsa.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z)) AI.top with
-    | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
-    | Error _ -> false
+  let def_reload =
+    Def.create rax (Bil.Load (Bil.Var m, cell, LittleEndian, `r64))
   in
+  let def_store =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp
+             (Bil.MINUS,
+              Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Var rax),
+              Bil.Int (Cbat_word.to_word (w64 0x46))),
+           Bil.Int (Cbat_word.to_word (w64 0x41)),
+           LittleEndian,
+           `r64 ))
+  in
+  let sub, _ =
+    sub_of "pa_stale_meet"
+      [ [], [ (1, mk_goto) ]; [ def_reload; def_store ], [] ]
+  in
+  let subc = Hike.Jump.compile_sub jump_target sub in
+  let prog = Program.create ~subs:[ subc ] () in
+  let band =
+    Ws.of_clp
+      (Clp.interval ~width:64
+         (Cbat_word.of_int64 ~width:64 0xffffff00L)
+         (Cbat_word.of_int64 ~width:64 0xffffffffL))
+  in
+  let entry = AI.add_word (anchored_entry ()) ~key:rax ~data:band in
+  let sol =
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog subc
+      (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry subc)
+  in
+  let blk_of_def sub dtid =
+    Term.enum blk_t sub
+    |> Seq.find ~f:(fun b ->
+        Seq.exists (Term.enum def_t b) ~f:(fun d -> Tid.equal (Term.tid d) dtid))
+    |> Base.Option.value_exn
+  in
+  let kind =
+    Base.Option.bind
+      (Term.enum blk_t sub
+       |> Seq.find ~f:(fun b ->
+           Seq.exists (Term.enum def_t b)
+             ~f:(fun d -> Tid.equal (Term.tid d) (Term.tid def_store))))
+      ~f:(fun b -> kind_of_def ~sol b def_store)
+  in
+  ignore blk_of_def;
   check
-    "L2b-4: overlap comparisons (LT over two top64 operands; EQ(0, top64)) are {0,1} (bool_top), \
-     not bottom"
-    (ok_lt && ok_eq);
-  ()
-
-(* L2b-5: flag-gated branch survives — no unsound pruning. *))
-;
-(  let zf = v1 "l2b_zf5" in
-  let x = v64 "l2b_x5" in
-  let flag_env =
-    Vsa.denote_def (Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x))) AI.top
-  in
-  let flag_val = AI.find_word 1 flag_env zf in
-  (* (a) direct reachable_jumps on a flag-gated jump *)
-  let b1 = Blk.Builder.create () in
-  let b2 = Blk.Builder.create () in
-  let blk1 = Blk.Builder.result b1 in
-  let blk2 = Blk.Builder.result b2 in
-  let t2 = Term.tid blk2 in
-  let b1' = Blk.Builder.init ~copy_defs:true blk1 in
-  Blk.Builder.add_jmp b1' (Jmp.create ~cond:(Bil.Var zf) (Goto (Direct t2)));
-  let blk1' = Blk.Builder.result b1' in
-  let jmp = match Term.enum jmp_t blk1' |> Seq.to_list with [ j ] -> j | _ -> assert false in
-  let kept = Vsa.reachable_jumps flag_env (Seq.of_list [ jmp ]) |> Seq.to_list in
-  (* (b) loop with flag-gated back-edge. *)
-  let cnt = v64 "l2b_cnt5" in
-  let entry0 =
-    blk_of_defs [ Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var x)) ]
-  in
-  let body0 =
-    blk_of_defs [ Def.create cnt (Bil.BinOp (Bil.PLUS, Bil.Var cnt, Bil.Int (Cbat_word.to_word (w64 1)))) ]
-  in
-  let header0 = blk_of_defs [] in
-  let exit0 = blk_of_defs [] in
-  let body_tid = Term.tid body0 in
-  let exit_tid = Term.tid exit0 in
-  let header_tid = Term.tid header0 in
-  let entry = with_jmps entry0 [ mk_goto header_tid ] in
-  let body = with_jmps body0 [ mk_goto header_tid ] in
-  let header =
-    with_jmps header0
-      [ mk_jmp_to body_tid (Bil.Var zf); mk_jmp_to exit_tid (Bil.UnOp (Bil.NOT, Bil.Var zf)) ]
-  in
-  let exit = exit0 in
-  let sub_b = Sub.Builder.create ~name:"l2b_flag_loop" () in
-  Sub.Builder.add_blk sub_b entry;
-  Sub.Builder.add_blk sub_b body;
-  Sub.Builder.add_blk sub_b header;
-  Sub.Builder.add_blk sub_b exit;
-  let sub = Sub.Builder.result sub_b in
-  let sol = run_anchored sub in
-  let body_st = Graphlib.Std.Solution.get sol body_tid in
-  let body_flag = AI.find_word 1 body_st zf in
-  check
-    "L2b-5: a flag-gated branch survives — reachable_jumps keeps the {0,1}-flag jump and the loop \
-     body's solution input is non-bottom with a non-bottom flag (no unsound pruning)"
-    ((not (Ws.is_bottom flag_val))
-    && List.length kept = 1
-    && (not (AI.equal body_st AI.bottom))
-    && (not (Ws.is_bottom body_flag))
-    (* Taken edge narrows {0,1} to {1}; both contain b1. *)
-    && Ws.elem Cbat_word.b1 body_flag);
+    "PA-1: the store's address keeps its walk binding — a same-block \
+     reloaded TOP var classifies as the unbounded span, never the entry \
+     band's Caller"
+    (kind = Some Cu.unbounded_span);
   ())

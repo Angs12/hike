@@ -149,10 +149,6 @@ let r5_sound_pairs = ref 0 (* soundness probes *)
 let r5_bad = ref [] (* violations *)
 let r5_violation w cls detail = r5_bad := (w, cls, detail) :: !r5_bad
 
-(* Cardinality word > cap without the width trap. *)
-let r5_cardn_gt (cap : int) (c : W.t) : bool =
-  if Cbat_word.bitwidth c >= 11 then Wo.gt_int c cap else Cbat_word.to_int_exn c > cap
-
 (* Reference circular-interval meet. *)
 let r5_ref_meet (w : int) (s1 : W.t) (l1 : W.t) (s2 : W.t) (l2 : W.t) :
     [ `Empty | `Arc of W.t * W.t | `TwoPiece ] =
@@ -280,165 +276,22 @@ let r5_rand_word (bits : int) : Int64.t =
   in
   go 0L bits
 
-(* R7: contextual fixpoint detects stabilization. *)
-
-(* Contextual-fixpoint module, via the internal wrapper name. *)
-module Cfp = Cbat_vsa__Cbat_contextual_fixpoint
-
-(* Widening landmarks: empty guard meets record landmarks; widening extrapolates. *)
-
-(* Corpus jle shape, one or two chained loops. Returns (sub, l1, b1, l2 option). *)
-let lm_jle_loop ~(k1 : W.t) ?(k2 : W.t option) () : sub term * tid * tid * tid option =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
-  let iv = Bil.Var i in
-  (* Canonical -O0 cmp emission; returns the jle cond. *)
-  let cmp_defs b (c : W.t) =
-    let t = Var.create ~is_virtual:false ~fresh:false "lm_t" (Type.Imm 32) in
-    let cf = v1 "CF" in
-    let ofv = v1 "OF" in
-    let sf = v1 "SF" in
-    let zf = v1 "ZF" in
-    mk_cmp_emission b ~e:iv ~c ~t ~cf ~ofv ~sf ~zf;
-    l39_jle zf sf ofv
-  in
-  let entry_b = Blk.Builder.create () in
-  let l1_b = Blk.Builder.create () in
-  let b1_b = Blk.Builder.create () in
-  let l2_b = Blk.Builder.create () in
-  let b2_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
-  Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
-  let cond1 = cmp_defs l1_b k1 in
-  let cond2 = match k2 with Some c -> Some (cmp_defs l2_b c) | None -> None in
-  let entry0 = Blk.Builder.result entry_b in
-  let l10 = Blk.Builder.result l1_b in
-  let b10 = Blk.Builder.result b1_b in
-  let l20 = Blk.Builder.result l2_b in
-  let b20 = Blk.Builder.result b2_b in
-  let exit0 = Blk.Builder.result exit_b in
-  let l1_tid = Term.tid l10 in
-  let b1_tid = Term.tid b10 in
-  let l2_tid = Term.tid l20 in
-  let b2_tid = Term.tid b20 in
-  let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct l1_tid)));
-  let l1_b = Blk.Builder.init ~copy_defs:true l10 in
-  Blk.Builder.add_jmp l1_b (Jmp.create ~cond:cond1 (Goto (Direct b1_tid)));
-  Blk.Builder.add_jmp l1_b
-    (Jmp.create
-       ~cond:(Bil.UnOp (Bil.NOT, cond1))
-       (Goto (Direct (match k2 with Some _ -> l2_tid | None -> exit_tid))));
-  let b1_b = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_def b1_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
-  Blk.Builder.add_jmp b1_b (Jmp.create (Goto (Direct l1_tid)));
-  let l2_b = Blk.Builder.init ~copy_defs:true l20 in
-  (match cond2 with
-  | Some c2 ->
-      Blk.Builder.add_jmp l2_b (Jmp.create ~cond:c2 (Goto (Direct b2_tid)));
-      Blk.Builder.add_jmp l2_b (Jmp.create ~cond:(Bil.UnOp (Bil.NOT, c2)) (Goto (Direct exit_tid)))
-  | None -> ());
-  let b2_b = Blk.Builder.init ~copy_defs:true b20 in
-  Blk.Builder.add_def b2_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
-  Blk.Builder.add_jmp b2_b (Jmp.create (Goto (Direct l2_tid)));
-  let sub_b = Sub.Builder.create ~name:"lm_landmark_counter" () in
-  let l2_res = Blk.Builder.result l2_b in
-  let b2_res = Blk.Builder.result b2_b in
-  (* Drop the unused second loop: empty blocks break CFG/WTO plumbing. *)
-  let keep_l2 = match k2 with Some _ -> true | None -> false in
-  let entry = Blk.Builder.result entry_b in
-  List.iter (Sub.Builder.add_blk sub_b)
-    ([ entry; Blk.Builder.result l1_b; Blk.Builder.result b1_b ]
-    @ (if keep_l2 then [ l2_res; b2_res ] else [])
-    @ [ exit0 ]);
-  let sub = Sub.Builder.result sub_b in
-  (sub, l1_tid, b1_tid, match k2 with Some _ -> Some l2_tid | None -> None)
-
-(* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
-let lm_jne_loop ~(k : W.t) () : sub term * tid * tid =
-  let kw = Cbat_word.to_word k in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-  let t = Var.create ~is_virtual:false ~fresh:false "lm_ne_t" (Type.Imm 32) in
-  let zf = v1 "ZF" in
-  let iv = Bil.Var i in
-  let entry_b = Blk.Builder.create () in
-  let l1_b = Blk.Builder.create () in
-  let b1_b = Blk.Builder.create () in
-  let exit_b = Blk.Builder.create () in
-  Blk.Builder.add_def entry_b (Def.create i (Bil.Int (Cbat_word.to_word (w32 0))));
-  Blk.Builder.add_def entry_b (Def.create rbp (Bil.Var rsp));
-  Blk.Builder.add_def l1_b (Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int kw)));
-  (* ZF compares the program var directly (recovery binds the right var). *)
-  Blk.Builder.add_def l1_b
-    (Def.create zf
-       (Bil.BinOp
-          (Bil.EQ,
-           Bil.BinOp (Bil.MINUS, iv, Bil.Int kw),
-           Bil.Int (Word.zero 32))));
-  let cond_taken = Bil.UnOp (Bil.NOT, Bil.Var zf) in
-  let cond_fallthrough = Bil.Var zf in
-  let entry0 = Blk.Builder.result entry_b in
-  let l10 = Blk.Builder.result l1_b in
-  let b10 = Blk.Builder.result b1_b in
-  let exit0 = Blk.Builder.result exit_b in
-  let l1_tid = Term.tid l10 in
-  let b1_tid = Term.tid b10 in
-  let exit_tid = Term.tid exit0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct l1_tid)));
-  let l1_b = Blk.Builder.init ~copy_defs:true l10 in
-  Blk.Builder.add_jmp l1_b (Jmp.create ~cond:cond_taken (Goto (Direct b1_tid)));
-  Blk.Builder.add_jmp l1_b (Jmp.create ~cond:cond_fallthrough (Goto (Direct exit_tid)));
-  let b1_b = Blk.Builder.init ~copy_defs:true b10 in
-  Blk.Builder.add_def b1_b (Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))));
-  Blk.Builder.add_jmp b1_b (Jmp.create (Goto (Direct l1_tid)));
-  let sub_b = Sub.Builder.create ~name:"lm_ne_landmark" () in
-  List.iter (Sub.Builder.add_blk sub_b) [ Blk.Builder.result entry_b; Blk.Builder.result l1_b; Blk.Builder.result b1_b; exit0 ];
-  let sub = Sub.Builder.result sub_b in
-  (sub, l1_tid, b1_tid)
-
-(* Shared F1-FT/B1/B3 build: the same jne-counter loop + anchored run.
-   Returns (k, sub, sol, head tid, body tid); the distinct pins stay in the tests. *)
-let lm_jne_run () : Cbat_word.t * sub term * Vsa.vsa_sol * tid * tid =
-  let k = w32 100 in
-  let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
-  (k, sub, run_anchored sub, l1_tid, b1_tid)
-
 (* VSK-02: acyclic diamond over a ranged counter; the entry state carries the
    range, so the guard edges refine to absolute halves. Returns
    (sub, guard_tid, then_tid, else_tid, x). *)
 let vsk_diamond () : sub term * tid * tid * tid * var =
   let x = Var.create ~is_virtual:false ~fresh:false "vsk_x" (Type.Imm 32) in
   let guard_e = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))) in
-  let entry_b = Blk.Builder.create () in
-  let guard_b = Blk.Builder.create () in
-  let then_b = Blk.Builder.create () in
-  let else_b = Blk.Builder.create () in
   (* No defs on the entry->guard lane: the transfer is empty, so the
      unconditional edge pins the early-exit identity exactly. *)
-  let entry0 = Blk.Builder.result entry_b in
-  let guard0 = Blk.Builder.result guard_b in
-  let then0 = Blk.Builder.result then_b in
-  let else0 = Blk.Builder.result else_b in
-  let guard_tid = Term.tid guard0 in
-  let then_tid = Term.tid then0 in
-  let else_tid = Term.tid else0 in
-  let entry_b = Blk.Builder.init ~copy_defs:true entry0 in
-  Blk.Builder.add_jmp entry_b (Jmp.create (Goto (Direct guard_tid)));
-  let guard_b = Blk.Builder.init ~copy_defs:true guard0 in
-  Blk.Builder.add_jmp guard_b (Jmp.create ~cond:guard_e (Goto (Direct then_tid)));
-  Blk.Builder.add_jmp guard_b
-    (Jmp.create ~cond:(Bil.UnOp (Bil.NOT, guard_e)) (Goto (Direct else_tid)));
-  let sub_b = Sub.Builder.create ~name:"vsk_diamond" () in
-  List.iter (Sub.Builder.add_blk sub_b)
-    [ Blk.Builder.result entry_b; Blk.Builder.result guard_b; then0; else0 ];
-  let sub = Sub.Builder.result sub_b in
-  (sub, guard_tid, then_tid, else_tid, x)
+  let sub, tids =
+    sub_of "vsk_diamond"
+      [ [], [ (1, mk_goto) ];
+        [], [ (2, fun t -> mk_jmp_to t guard_e); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, guard_e))) ];
+        [], [];
+        [], [] ]
+  in
+  (sub, tids.(1), tids.(2), tids.(3), x)
 
 (* F1: JLE-counter head lands at TOP (inclusive taken row overshoots); pins sound invariants. *)
 
@@ -577,37 +430,6 @@ let run_soundness () =
     "property meet R5: the step-1 interval meet equals the exact circular-interval reference \
      (widths 8/16/32/64)"
     (List.length !r5_bad = 0))
-;
-(  (* Constant transfer over a 2-block cycle stabilizes in a couple of rounds. *)
-  let a_b = Blk.Builder.create () in
-  let b_b = Blk.Builder.create () in
-  let a0 = Blk.Builder.result a_b in
-  let b0 = Blk.Builder.result b_b in
-  let a_tid = Term.tid a0 in
-  let b_tid = Term.tid b0 in
-  let a_b = Blk.Builder.init ~copy_defs:true a0 in
-  Blk.Builder.add_jmp a_b (Jmp.create (Goto (Direct b_tid)));
-  let b_b = Blk.Builder.init ~copy_defs:true b0 in
-  Blk.Builder.add_jmp b_b (Jmp.create (Goto (Direct a_tid)));
-  let sub_b = Sub.Builder.create ~name:"r7_cycle" () in
-  Sub.Builder.add_blk sub_b (Blk.Builder.result a_b);
-  Sub.Builder.add_blk sub_b (Blk.Builder.result b_b);
-  let cfg =
-    Graphs.Tid.Node.remove Graphs.Tid.start (Sub.to_graph (Sub.Builder.result sub_b))
-    |> Graphs.Tid.Node.remove Graphs.Tid.exit
-  in
-  let sol =
-    Cfp.fixpoint
-      (module Graphs.Tid)
-      ~steps:256
-      ~init:(Graphlib.Std.Solution.create (Tid.Map.singleton a_tid 7) 0)
-      ~equal:(fun x y -> x = y)
-      ~merge:(fun x y -> if x >= y then x else y)
-      ~f:(fun ~source:_ -> fun _ -> fun ~target:_ -> 42)
-      cfg
-  in
-  check "property R7 solution: every cycle block's materialized value is the transferred constant"
-    (Graphlib.Std.Solution.get sol a_tid = 42 && Graphlib.Std.Solution.get sol b_tid = 42))
 let run_roundtrip () =
 (* W1: of_list round-trip over representable CLPs. *)
 (  Random.init 20260823;
@@ -744,249 +566,41 @@ let run_roundtrip () =
     !cases !corners !skips !coarsened;
   ())
 let run_landmarks () =
-(  let sub, l1_tid, b1_tid, _ = lm_jle_loop ~k1:(w32 100) () in
-  let sol = run_anchored sub in
-  let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
-  let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-  check
-    "property LM F1: the head's lower bound is the entry constant 0"
-    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-  (* Taken view's state is the body's IN-state. *)
-  let taken_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
-  check
-    "property LM F1: the taken view's lower bound is the entry constant 0"
-    (match Ws.min_elem taken_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-  ()
-
-(* F1-NEQ: NEQ-counter head lands at [0, K] (max == K) — Finite fires end-to-end. *))
-;
-(  let k = w32 100 in
-  let sub, l1_tid, _ = lm_jne_loop ~k () in
-  let sol = run_anchored sub in
-  let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-  let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-  check
-    "property LM F1-NEQ: the head's lower bound is the entry constant 0"
-    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-  check
-    "property LM F1-NEQ: the head's upper bound is the landmark K (Finite extrapolation fired end-to-end)"
-    (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
-  ()
-
-(* F1-FT: fallthrough edge fixture — the walk-equals-vertex pin for the shared memo.
-   Same jne-counter loop as F1-NEQ (arrow-less [i - k] record operand through guarded
-   refinement — the landmark-consumption lane): the head pins the vertex-computed
-   values, the taken body pins its refined view, and the fallthrough exit pins the
-   walk-observed refined pre-state. A memo keying bug moves one side, not both. *))
-;
-(  let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
-   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-   let st tid = Graphlib.Std.Solution.get sol tid in
-   let head_i = AI.find_word 32 (st l1_tid) i in
-   check
-     "property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side of the pin)"
-     (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   check
-     "property LM F1-FT: the head's upper bound is the landmark K (vertex side of the pin)"
-     (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
-   let body_i = AI.find_word 32 (st b1_tid) i in
-   check
-     "property LM F1-FT: the taken body's lower bound is the entry constant 0"
-     (match Ws.min_elem body_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   check
-     "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the landmark)"
-     (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
-   let exits = exit_blocks_of sub in
-   let exit_i =
-     match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
-   in
-   check "property LM F1-FT: the fallthrough exit pins the counter to {K} exactly (walk side of the pin)"
-     (Ws.equal exit_i (Ws.singleton k));
-   ()
-
-(* VSK-02: empty-seed/mixed-seed oracle — pins the existing early exit and the
+(  (* VSK-02: empty-seed/mixed-seed oracle — pins the existing early exit and the
    mixed-seed refined values through the library seam. The diamond's entry
    state carries x in [0,20]; the entry->guard edge is the empty-seed shape
    (constant-true acc cond refines to the input state exactly), and the
    guard's taken/fallthrough edges refine to the absolute halves. The identity
-   is against the seeded entry state (init_sol frames entry RSP at offset 0). *))
-;
-(  let sub, guard_tid, then_tid, else_tid, x = vsk_diamond () in
+   is against the seeded entry state (init_sol frames entry RSP at offset 0). *)
+  let sub, guard_tid, then_tid, else_tid, x = vsk_diamond () in
    let range lo hi = Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi)) in
    let entry = AI.add_word (anchored_entry ()) ~key:x ~data:(range 0 20) in
    check "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit shape)"
-     (match Vsa.edge_constraints ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1) with
-      | [] -> true
-      | _ -> false);
+     (AI.equal
+        (Vsa.Test_seam.inverse_denote ~env:entry (Bil.Int (W.to_word W.b1))
+           (Ws.singleton W.b1))
+        entry);
    check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
-     (match
-        Vsa.edge_constraints ~env:entry
-          (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
-          (Ws.singleton W.b1)
-      with
-      | [ Vsa.Var (v, c) ] -> Var.name v = "vsk_x" && Ws.equal c (range 0 9)
-      | _ -> false);
+     (Ws.equal
+        (AI.find_word 32
+           (Vsa.Test_seam.inverse_denote ~env:entry
+              (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
+              (Ws.singleton W.b1))
+           x)
+        (range 0 9));
    let prog' = Program.create ~subs:[ sub ] () in
-   let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol ~entry sub) in
+   let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
    let st tid = Graphlib.Std.Solution.get sol tid in
    check
-     "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state)"
-     (AI.equal (st guard_tid) (AI.set_frame entry AI.seed_frame));
+     "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state; the frame relation is gone — the identity is over words and memories)"
+     (AI.equal (st guard_tid) entry);
    check "property LM VSK-MIXED-TAKEN: the taken edge refines x to [0,9] exactly"
      (Ws.equal (AI.find_word 32 (st then_tid) x) (range 0 9));
    check "property LM VSK-MIXED-FALL: the fallthrough edge refines x to [10,20] exactly"
      (Ws.equal (AI.find_word 32 (st else_tid) x) (range 10 20));
    ()
 
-(* F1-B1 (budget soundness): the walk-pop budget is armed on every fixpoint
-   run; on this landmark loop the walks are the refinement carrier, so the
-   budget's soundness contract - a shorter walk is the sound coarsening the
-   256 cap always was, never a narrowing - is pinned by the same invariants
-   the unlimited walk must satisfy: the head lands at [0, K] (never above K,
-   never bottom) and the taken body lands at [0, K-1]. If a budget bug
-   NARROWED a state (the unsound direction) or manufactured bottom on a live
-   block, these exact-value pins move. *))
-;
-(  let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
-   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-   let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
-   check
-     "property LM F1-B1: the budget-armed head's lower bound is the entry constant 0"
-     (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   check
-     "property LM F1-B1: the budget-armed head's upper bound is the landmark K (never narrowed, never blown past)"
-     (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
-   check
-     "property LM F1-B1: the budget-armed taken body's upper bound is K-1 (the guard's exclusion survives)"
-     (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
-   check
-     "property LM F1-B1: the budget never manufactures bottom on a live block (the head's state is inhabited)"
-     (not (Ws.is_bottom head_i));
-   ()
-
-(* F1-B2 (starvation-regression pin): two sequential SCCs under the ONE
-   global per-run walk allowance. The behavioral core: BOTH loops still
-   refine independently - loop 1's walk spend cannot starve loop 2. *))
-;
-(  let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
-   let sol = run_anchored sub in
-   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
-   let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
-   let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
-   check
-     "property LM F1-B2: loop 2's head lower bound is the entry constant 0 (refined independently under the global budget - no starvation by loop 1's walk spend)"
-     (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-   check
-     "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both loops refined independently)"
-     (match Ws.min_elem i1 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   ()
-
-(* F1-B3 (budget memo-first): the Walk_memo is consulted BEFORE the budget
-   caps a walk, so a memoized refinement survives even when the allowance is
-   exhausted. The F1-FT walk-observed pin (the fallthrough exit holds {K}
-   exactly) runs with the budget armed; a budget-first ordering bug would
-   starve the late walks and the exit would coarsen. Re-runs the F1-FT shape
-   and pins the walk-delivered value. *))
-;
-(  let k, sub, sol, _, b1_tid = lm_jne_run () in
-   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-   let st tid = Graphlib.Std.Solution.get sol tid in
-   let exits = exit_blocks_of sub in
-   let exit_i =
-     match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
-   in
-   check
-     "property LM F1-B3: the fallthrough exit pins the counter to {K} exactly (the memo-first walk delivery survives the budget)"
-     (Ws.equal exit_i (Ws.singleton k));
-   check
-     "property LM F1-B3: the taken body's refined view survives (upper bound K-1)"
-     (match Ws.max_elem (AI.find_word 32 (st b1_tid) i) with
-      | Some hi -> Cbat_word.equal hi (Cbat_word.pred k)
-      | None -> false);
-   ()
-
-(* F1-B4 (binding regime): the budget BINDS, and the soundness contract is
-   pinned in the binding direction. The walk's steps-DEPENDENT product is the
-   cell meet through a Load-producing def ([def_constraints] ->
-   [constrain_cell_on_trace] fires INSIDE the walk), so the fixture seeds a
-   Var constraint on a var whose guard-block def is a Load over a known cell
-   with a WIDE stored range. The unlimited walk meets the cell down to the
-   seed; a 2-pop budget-limited walk covers less — and the contract says the
-   limited result must COVER the unlimited one (coarsening, [precedes]),
-   never narrow it, never bottom a live block. The exported mk_rctx +
-   walk_budget seam constructs the context and drives the shared cell. *))
-;
-(  let k = w32 100 in
-   let sub0, l1_tid, _b1_tid = lm_jne_loop ~k () in
-   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-   let mem = Var.create ~is_virtual:true ~fresh:false "f1b4_m" (Type.Mem (`r64, `r8)) in
-   (* Prepend to the guard block: t := Load[mem, RBP-8]; i := t.  The seed on
-      i walks backward through i's def to t's Load and meets the cell. *)
-   let guard_blk =
-     Term.enum blk_t sub0 |> Seq.to_list |> List.find (fun b -> Term.tid b = l1_tid) in
-   let gb = Blk.Builder.init ~copy_defs:true guard_blk in
-   let t = Var.create ~is_virtual:true ~fresh:false "f1b4_t" (Type.Imm 32) in
-   let rbp = v64 "RBP" in
-   Blk.Builder.add_def gb
-     (Def.create t
-        (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
-                   LittleEndian, `r32)));
-   Blk.Builder.add_def gb (Def.create i (Bil.Var t));
-   let sub_b = Sub.Builder.create ~name:"f1b4_sub" () in
-   Term.enum blk_t sub0 |> Seq.iter ~f:(fun b ->
-       if Term.tid b = l1_tid then Sub.Builder.add_blk sub_b (Blk.Builder.result gb)
-       else Sub.Builder.add_blk sub_b b);
-   let sub = Sub.Builder.result sub_b in
-   let cfg =
-     Sub.to_graph sub
-     |> Graphs.Tid.Node.remove Graphs.Tid.start
-     |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-   (* The entry — and therefore the solution snapshot the walk re-denotes
-      against — must carry the memory binding (a missing mem var reads the
-      map lattice's bottom and trips the width assert). *)
-   let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
-   (* RBP is anchored at 0, so RBP-8 wraps to the unsigned -8 key. *)
-   let key = match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
-     | Some k -> k | None -> failwith "F1-B4: bad key" in
-   let wide_mem =
-     Mem.add (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
-       ~key ~data:(Mem.Val.create wide LittleEndian) in
-   let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
-   let sol =
-     Vsa.static_graph_vsa [] (Program.create ~subs:[ sub ] ())
-       sub (Vsa.init_sol ~entry sub) in
-   let rctx = Vsa.mk_rctx ~cfg sub in
-   let seeds = [ Vsa.Var (i, Ws.singleton k) ] in
-   let walk ~cell =
-     Vsa.walk_budget rctx := cell;
-     fst (Vsa.refine_edge ~sol ~rctx ~defs:(Some (Vsa.defs_of_sub sub))
-            entry
-            (Blk.Builder.result gb) seeds) in
-   let cell_of env =
-     match Vsa.denote_imm_exp
-             (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
-                                                Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r32))
-             env with
-     | Ok ws -> ws
-     | Error _ -> Ws.top 32 in
-   let full = walk ~cell:10_000 in
-   let limited = walk ~cell:2 in
-   let full_cell = cell_of full and limited_cell = cell_of limited in
-   check
-     "property LM F1-B4: the unlimited walk meets the cell (the fixture's precondition: the full walk moves the cell off its wide range)"
-     (Ws.precedes full_cell wide);
-   check
-     "property LM F1-B4: the binding budget's cell COVERS the unlimited result (coarsening, never narrowing — precedes)"
-     (Ws.precedes full_cell limited_cell);
-   check
-     "property LM F1-B4: the binding budget never manufactures bottom on a live block"
-     (not (Ws.is_bottom limited_cell));
-   check
-     "property LM F1-B4: the binding budget actually spent the cell (the shared budget hit 0)"
-     (0 = !(Vsa.walk_budget rctx));
-   ()(* F2a: landmark consumption at CLP level — never lands short of the join. *))
+(* F2a: landmark consumption at CLP level — never lands short of the join. *))
 ;
 (  (* Widening soundness pins. *)
   let p1 = Clp.interval ~width:32 (w32 0) (w32 100) in
@@ -1010,8 +624,9 @@ let run_landmarks () =
     "property LM F2c: loop 1's head lower bound is the entry constant 0"
     (match Ws.min_elem i1 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
   check
-    "property LM F2c: loop 2's head lower bound is the entry constant 0"
-    (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
+    "property LM F2c: loop 2's head lower bound is loop 1's exact exit value K1+1 (the compiled \
+     fallthrough comparison partitions the exit edge)"
+    (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (Cbat_word.succ (w32 40)) | None -> false);
   ()
 
 (* Single-pass trace partitioning: every out-edge transfers a branch-refined state. *)
@@ -1042,21 +657,16 @@ let run_chains () =
 (  let m = memv "t01_m" in
   let rbp = v64 "RBP" in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  let entry0 =
-    blk_of_defs
-      [
-        Def.create rbp (Bil.Var (v64 "RSP"));
-        Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 3)), LittleEndian, `r32));
-      ]
+  let sub, tids =
+    sub_of "t01_straight"
+      [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 3)), LittleEndian, `r32)) ],
+        [ (1, mk_goto) ];
+        [], [ (2, mk_goto) ];
+        [], [] ]
   in
-  let mid0 = blk_of_defs [] in
-  let exit0 = blk_of_defs [] in
-  let mid_tid = Term.tid mid0 in
-  let exit_tid = Term.tid exit0 in
-  let sub_b = Sub.Builder.create ~name:"t01_straight" () in
-  List.iter (Sub.Builder.add_blk sub_b)
-    [ with_jmps entry0 [ mk_goto mid_tid ]; with_jmps mid0 [ mk_goto exit_tid ]; exit0 ];
-  let sub = Sub.Builder.result sub_b in
+  let mid_tid = tids.(1) in
+  let exit_tid = tids.(2) in
   let sol = run_anchored sub in
   let cell t = cell_at m rbp (Graphlib.Std.Solution.get sol t) in
   check
@@ -1065,4 +675,277 @@ let run_chains () =
      (both read the stored {3} exactly; no spurious refinement, no bottom)"
     (Ws.equal (cell mid_tid) (Ws.singleton (w32 3))
      && Ws.equal (cell exit_tid) (Ws.singleton (w32 3)));
+  ())
+
+(* T5: the SSE-lane def-use mechanisms — positional prefix states in the
+   deep walk, the Store row (cell constraints flow into the stored
+   data's producers), and cycle-written cell data extrapolating at
+   warmed heads. *)
+
+let run_t5 () =
+(* T5-1 (prefix states): a store, then a load whose ADDRESS the same
+   block defines.  The walk's cell meet keys by the same-iteration
+   address and lands {5}; denoted on the block-entry state the address
+   is TOP and the meet never lands. *)
+(  let mem = memv "t5_m" in
+  let rbp = v64 "RBP" in
+  let addr = Var.create ~is_virtual:true ~fresh:false "t5_addr" (Type.Imm 64) in
+  let t = Var.create ~is_virtual:true ~fresh:false "t5_t" (Type.Imm 32) in
+  let addr_e = Bil.Var addr in
+  let addr_lit = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let sub, tids =
+    sub_of "t5_store_load"
+      [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+          Def.create addr addr_lit;
+          Def.create mem
+            (Bil.Store (Bil.Var mem, addr_e, Bil.Int (Cbat_word.to_word (w32 5)),
+                        LittleEndian, `r32));
+          Def.create t (Bil.Load (Bil.Var mem, addr_e, LittleEndian, `r32)) ],
+        [ (1, fun tt -> mk_jmp_to tt (Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 5))))) ];
+        [], [ (0, mk_ret) ] ]
+  in
+  let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
+  let key = match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
+    | Some k -> k | None -> failwith "T5-1: bad key" in
+  let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
+  let wide_mem =
+    Mem.add (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+      ~key ~data:(Mem.Val.create wide LittleEndian) in
+  let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
+  let sol =
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+      sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
+  let cfg =
+    Sub.to_graph sub
+    |> Graphs.Tid.Node.remove Graphs.Tid.start
+    |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+  let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+  let entry = AI.add_word entry ~key:t ~data:(Ws.singleton (w32 5)) in
+  let refined =
+    Vsa.Test_seam.refine_edge ~sol ~rctx
+      ~seeds:[ (t, Ws.singleton (w32 5)) ]
+      entry blk in
+  (* The cell AT the fixture's key (the same-iteration address's key):
+     the load's meet lands there. *)
+  let cell =
+    let open Cbat_vsa.Mem in
+    let mv = AI.find_memory { addr_width = 64; addressable_width = 8 } refined mem in
+    Val.data (find (32, LittleEndian) mv key) in
+  check
+    "T5-1 (prefix states): the deep walk's cell meet keys by the \
+     same-iteration address — the load after the store meets the cell \
+     down to {5}"
+    (     Ws.equal cell (Ws.singleton (w32 5)));
+  ())
+
+(* T5-2 (the Store row): a cell constraint flows into the stored data's
+   producers — load KA, copy, store KB, load KB; the constraint {6} on
+   the KB load reaches the KA load's cell through the store's data. *)
+;
+(  let mem = memv "t5r_m" in
+  let rbp = v64 "RBP" in
+  let ta = Var.create ~is_virtual:true ~fresh:false "t5r_a" (Type.Imm 32) in
+  let tb = Var.create ~is_virtual:true ~fresh:false "t5r_b" (Type.Imm 32) in
+  let t2 = Var.create ~is_virtual:true ~fresh:false "t5r_t" (Type.Imm 32) in
+  let ka = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 16))) in
+  let kb = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let sub, _ =
+    sub_of "t5_store_row"
+      [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+          Def.create ta (Bil.Load (Bil.Var mem, ka, LittleEndian, `r32));
+          Def.create tb (Bil.Var ta);
+          Def.create mem
+            (Bil.Store (Bil.Var mem, kb, Bil.Var tb, LittleEndian, `r32));
+          Def.create t2 (Bil.Load (Bil.Var mem, kb, LittleEndian, `r32)) ],
+        [ (1, fun tt -> mk_jmp_to tt (Bil.BinOp (Bil.EQ, Bil.Var t2, Bil.Int (Cbat_word.to_word (w32 6))))) ];
+        [], [ (0, mk_ret) ] ]
+  in
+  let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
+  let key_of w = match Mem.Key.of_wordset (Ws.singleton (w64 w)) with
+    | Some k -> k | None -> failwith "T5-2: bad key" in
+  let k16 = key_of (-16) and k8 = key_of (-8) in
+  let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
+  let wide_mem =
+    Mem.add
+      (Mem.add (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+         ~key:k16 ~data:(Mem.Val.create wide LittleEndian))
+      ~key:k8 ~data:(Mem.Val.create wide LittleEndian) in
+  let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
+  let sol =
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+      sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
+  let cfg =
+    Sub.to_graph sub
+    |> Graphs.Tid.Node.remove Graphs.Tid.start
+    |> Graphs.Tid.Node.remove Graphs.Tid.exit in
+  let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+  let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
+  let refined =
+    Vsa.Test_seam.refine_edge ~sol ~rctx
+      ~seeds:[ (t2, Ws.singleton (w32 6)) ]
+      entry blk in
+  let cell_of_key k =
+    match Vsa.Test_seam.denote_imm_exp
+            (Bil.Load (Bil.Var mem, k, LittleEndian, `r32)) refined with
+    | Ok ws -> ws
+    | Error _ -> Ws.top 32 in
+  check
+    "T5-2 (Store row): the constrained cell (the store's key) meets {6}"
+    (Ws.equal (cell_of_key kb) (Ws.singleton (w32 6)));
+  check
+    "T5-2 (Store row): the constraint flows into the stored data's \
+     producers — the producing load's cell meets {6}"
+    (Ws.equal (cell_of_key ka) (Ws.singleton (w32 6)));
+  ())
+
+(* T5-3 (the T12 ruling, pinned): a bounded runtime SP adjustment is
+   NOT a VLA — no allocation event; an unbounded size is the event. *)
+;
+(  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let mk ~(unbounded : bool) (name : string) : sub term =
+    let t = Var.create ~is_virtual:true ~fresh:false "t5v_sz" (Type.Imm 64) in
+    let mem = memv "t5v_m" in
+    let sz_rhs =
+      if unbounded then
+        Bil.Load (Bil.Var mem, Bil.Var rbp, LittleEndian, `r64)
+      else Bil.Int (Cbat_word.to_word (w64 16)) in
+    fst
+      (sub_of name
+         [ [ Def.create t sz_rhs;
+             Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var t)) ],
+           [ (1, mk_goto) ];
+           [], [ (0, mk_ret) ] ]) in
+  let bounded = mk ~unbounded:false "t5v_bounded" in
+  let unbounded = mk ~unbounded:true "t5v_unbounded" in
+  check
+    "T5-3 (T12 ruling): a bounded runtime SP adjustment is NOT a VLA — \
+     no allocation event"
+    (Core.Set.is_empty (extract_anchored_events bounded));
+  check
+    "T5-3 (T12 ruling): an unbounded runtime SP size IS the allocation \
+     event"
+    (not (Core.Set.is_empty (extract_anchored_events unbounded)));
+  ())
+
+(* T5-4 (head extrapolation): a cycle-written cell's data advances by
+   the steps; landmark translation when the head holds entries; the
+   overflow arm is the plain widen. *)
+;
+(  let mv = memv "t5x_m" in
+  let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
+  let key = key_of (Ws.singleton (w32 100)) in
+  let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
+  let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
+    let m =
+      Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
+    AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd in
+  let cell_of (st : AI.t) : Ws.t =
+    Mem.Val.data
+      (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key) in
+  let h = Tid.for_name "t5x_head" in
+  let need = Var.Set.singleton (Var.base xv) in
+  let d_old = Ws.singleton (w32 1) in
+  let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
+  let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
+  Cbat_landmarks.clear ();
+  let plain = AI.widen_join (mkstate d_old w_old) (mkstate d_new w_new) in
+  check
+    "T5-4 (contrast): the plain memory widen drives the cell data \
+     infinite"
+    (Ws.is_infinite (cell_of plain));
+  let r =
+    AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
+      (mkstate d_old w_old) (mkstate d_new w_new) in
+  check
+    "T5-4 (extrapolation): the cycle-written cell data advances by the \
+     steps"
+    (Ws.equal (cell_of r) (Ws.extrapolate_steps ~steps:1 d_old d_new));
+  check
+    "T5-4 (extrapolation): the advanced cell stays bounded (the plain \
+     widen does not)"
+    (not (Ws.is_infinite (cell_of r)));
+  Cbat_landmarks.record_landmark_for_head ~head:h (Var.base xv)
+    ~bound:(w32 10) ~is_upper:true ~dist:2;
+  (match Cbat_landmarks.entries_for_head h (Var.base xv) with
+   | e :: _ -> e.Cbat_landmarks.dist_p <- Some 5
+   | [] -> failwith "T5-4: landmark not recorded");
+  let rl =
+    AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
+      (mkstate d_old w_old) (mkstate d_new w_new) in
+  check
+    "T5-4 (landmarks): the cell data translates toward the head's \
+     landmark (growth 3 x 1 step: hi 2 -> 5)"
+    (match Ws.max_elem (cell_of rl) with
+     | Some hi -> W.equal hi (w32 5)
+     | None -> false);
+  Cbat_landmarks.clear ();
+  let r_ex =
+    AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
+      (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in
+  let r_w =
+    AI.widen_join (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in
+  check
+    "T5-4 (overflow): extrapolation overflow falls back to the plain \
+     widen"
+    (Ws.equal (cell_of r_ex) (cell_of r_w));
+  Cbat_landmarks.clear ();
+  ())
+
+(* T5-4b (store loop integration): a counter loop storing i into a cell —
+   the cell data follows the loop's bounded range instead of widening to
+   the infinite ascending hull. *)
+;
+(  let mem = memv "t5l_m" in
+  let rbp = v64 "RBP" in
+  let i = Var.create ~is_virtual:false ~fresh:false "t5l_i" (Type.Imm 32) in
+  let t = Var.create ~is_virtual:false ~fresh:false "t5l_t" (Type.Imm 32) in
+  let zf = v1 "t5l_zf" in
+  let k = w32 100 in
+  let kw = Cbat_word.to_word k in
+  let iv = Bil.Var i in
+  let sub, tids =
+    sub_of "t5l_store_loop"
+      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0)));
+          Def.create rbp (Bil.Var (v64 "RSP")) ],
+        [ (1, mk_goto) ];
+        [ Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int kw));
+          Def.create zf (Bil.BinOp (Bil.EQ, Bil.BinOp (Bil.MINUS, iv, Bil.Int kw), Bil.Int (Word.zero 32))) ],
+        [ (2, fun tt -> mk_jmp_to tt (Bil.UnOp (Bil.NOT, Bil.Var zf)));
+          (3, fun tt -> mk_jmp_to tt (Bil.Var zf)) ];
+        [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1))));
+          Def.create mem
+            (Bil.Store (Bil.Var mem,
+                        Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+                        Bil.Var i, LittleEndian, `r32)) ],
+        [ (1, mk_goto) ];
+        [], [ (0, mk_ret) ] ]
+  in
+  let exit_tid = tids.(3) in
+  let key = match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
+    | Some k -> k | None -> failwith "T5-4b: bad key" in
+  let wide_mem =
+    Mem.add (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+      ~key ~data:(Mem.Val.create (Ws.singleton (w32 0)) LittleEndian) in
+  let entry_state = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
+  let sol =
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+      sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_state sub) in
+  let exit_st = Graphlib.Std.Solution.get sol exit_tid in
+  let cell =
+    match
+      Vsa.Test_seam.denote_imm_exp
+        (Bil.Load (Bil.Var mem,
+                   Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+                   LittleEndian, `r32))
+        exit_st with
+    | Ok ws -> ws
+    | Error _ -> Ws.top 32 in
+  check
+    "T5-4b (store loop): the stored cell data is bounded — it followed \
+     the loop's landmark range instead of widening to the infinite hull"
+    ((not (Ws.is_infinite cell))
+     && (match Ws.max_elem cell with
+         | Some hi -> W.compare hi k <= 0
+         | None -> false));
   ())

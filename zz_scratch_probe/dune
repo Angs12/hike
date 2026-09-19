@@ -9,12 +9,12 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads
   unix)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -29,11 +29,11 @@
   bap-main
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   bap-future
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -49,11 +49,11 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -69,11 +69,71 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+(executable
+ (name bir_cfg)
+ (modules bir_cfg)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+(executable
+ (name bir_dump)
+ (modules bir_dump)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+(executable
+ (name dead_diag)
+ (modules dead_diag)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads)
+ (flags
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -89,11 +149,11 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -110,11 +170,11 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -131,11 +191,11 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -152,72 +212,11 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
- (preprocess
-  (pps ppx_bap)))
-
-(executable
- (name sweepcheck)
- (modules sweepcheck)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated))
- (preprocess
-  (pps ppx_bap)))
-
-(executable
- (name idstab)
- (modules idstab)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated))
- (preprocess
-  (pps ppx_bap)))
-
-(executable
- (name stageprof)
- (modules stageprof)
- (enabled_if (= %{profile} vsa-debug))
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
@@ -233,54 +232,14 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
-(executable
- (name graphstats)
- (modules graphstats)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated))
- (preprocess
-  (pps ppx_bap)))
-
-(executable
- (name memostats)
- (modules memostats)
- (enabled_if (= %{profile} vsa-debug))
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated))
- (preprocess
-  (pps ppx_bap)))
 (executable
  (name passcost)
  (modules passcost)
@@ -290,51 +249,36 @@
   bap
   bap-core-theory
   bap-main
-  bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated)))
+  :standard -g))
+
 (executable
- (name f8census)
- (modules f8census)
+ (name t16_bir)
+ (modules t16_bir)
  (libraries
   probe_common
   hike
   bap
   bap-core-theory
   bap-main
-  bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated)))
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
 (executable
- (name f67census)
- (modules f67census)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core_kernel
-  graphlib
-  threads)
- (flags
-  (:standard -g -alert -deprecated)))
-(executable
- (name nc_autopsy)
- (modules nc_autopsy)
+ (name ta3c_diag)
+ (modules ta3c_diag)
  (enabled_if (= %{profile} vsa-debug))
  (libraries
   probe_common
@@ -345,14 +289,18 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated)))
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
 (executable
- (name wshare)
- (modules wshare)
+ (name pa_census)
+ (modules pa_census)
+ (enabled_if (= %{profile} vsa-debug))
  (libraries
   probe_common
   hike
@@ -362,15 +310,19 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
-  threads)
+  threads
+  unix)
  (flags
-  (:standard -g -alert -deprecated)))
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
 
 (executable
- (name census)
- (modules census)
+ (name wc_diag)
+ (modules wc_diag)
+ (enabled_if (= %{profile} vsa-debug))
  (libraries
   probe_common
   hike
@@ -380,35 +332,38 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
-(executable
- (name wordbench)
- (modules wordbench)
- (libraries
+(test
+ (name crash_pins)
+ (modules crash_pins)
+(libraries
+  probe_common
   hike
   bap
   bap-core-theory
   bap-main
+  bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
 (executable
- (name vsa_ptr_diag)
- (modules vsa_ptr_diag)
+ (name canary_emit)
+ (modules canary_emit)
+ (enabled_if (= %{profile} vsa-debug))
  (libraries
   probe_common
   hike
@@ -418,11 +373,42 @@
   bap-future
   cbat_vsa
   cbat_vsa_domain
-  core_kernel
+  core
   graphlib
+  llvm
   threads)
  (flags
-  (:standard -g -alert -deprecated))
+  :standard -g)
  (preprocess
   (pps ppx_bap)))
 
+
+
+(executable
+ (name digA_window_thunk)
+ (modules digA_window_thunk)
+ (enabled_if (= %{profile} vsa-debug))
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+
+
+(executable
+ (name zz_ret_test)
+ (modules zz_ret_test)
+ (libraries bap bap-main bap-core-theory)
+ (preprocess
+  (pps ppx_bap)))

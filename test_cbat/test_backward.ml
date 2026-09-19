@@ -11,6 +11,7 @@ open Test_fixtures
 
 
 let run () =
+
 (  (* L3a-1: PLUS row — EQ(v,5) gives t' = {4}. *)
   let sub1, body1 =
     mk_l3a_loop ~cmp:Bil.EQ ~c:(w32 5)
@@ -36,7 +37,8 @@ let run () =
   check
     "L3a-2: backward guard refinement through MINUS — the cell at RBP-8 is bounded (⊆ [1,10]; the \
      walk met [1,10] into the load cell)"
-    (bounded_above (l3a_run_analyzed sub2 body2) (w32 10));
+    (let v = l3a_run_analyzed sub2 body2 in
+     bounded_above v (w32 10));
   (* L3a-3: LSHIFT-const row — t' = [0,9]. *)
   let sub3, body3 =
     mk_l3a_loop ~cmp:Bil.LT ~c:(w32 40)
@@ -80,33 +82,39 @@ let run () =
 ;
 (  let m = memv "l3c1_m" in
   (* L3c1-1: flag-indirected guard recovers the constraint. *)
-  let sub1, body1, _ = mk_l3c1_loop ~extra_header_defs:[] in
+  let sub1, body1, _ = mk_l3c1_loop ~extra_header_defs:[] ~pre_cf_defs:[] in
   let sol1 = run_anchored sub1 in
   let cell1 = cell_at m (v64 "RBP") (iter_state_of sub1 sol1 body1) in
   check
     "L3c1-1: a flag-indirected guard (CF := LT(t, 10); if CF goto …) — the flag-state record \
      recovers the constraint on t and the cell at RBP-8 is bounded (⊆ [0,9])"
     (bounded_above cell1 (w32 9));
-  (* L3c1-2: later def of the operand clears the record. *)
+  (* L3c1-2: a redefinition of the operand between the load and the
+     comparison invalidates the record — the compared value is the
+     constant, whose constraint is empty. *)
   let t = Var.create ~is_virtual:false ~fresh:false "l3c1_t" (Type.Imm 32) in
-  let sub2, body2, _ = mk_l3c1_loop ~extra_header_defs:[ Def.create t (Bil.Int (Cbat_word.to_word (w32 42))) ] in
+  let sub2, body2, _ =
+    mk_l3c1_loop ~extra_header_defs:[]
+      ~pre_cf_defs:[ Def.create t (Bil.Int (Cbat_word.to_word (w32 42))) ] in
   let sol2 = run_anchored sub2 in
   let cell2 = cell_at m (v64 "RBP") (iter_state_of sub2 sol2 body2) in
   check
-    "L3c1-2: a later def of the compared operand (t := 42) between the comparison and the jump \
-     invalidates the flag record — no cell refinement"
-    (Ws.is_top cell2);
+    "L3c1-2: a redefinition of the compared operand (t := 42) between the load and the \
+     comparison makes the guard constant-false — the taken edge is dead and the body's \
+     state is empty (the cell reads bottom; no refinement of a dead path)"
+    (     Ws.is_bottom cell2);
   (* L3c1-3: non-comparison flag redefinition clears the record. *)
   let cf = v1 "l3c1_cf" in
   let sub3, body3, _ =
     mk_l3c1_loop ~extra_header_defs:[ Def.create cf (Bil.Unknown ("l3c1_bits", Type.Imm 1)) ]
+      ~pre_cf_defs:[]
   in
   let sol3 = run_anchored sub3 in
   let cell3 = cell_at m (v64 "RBP") (iter_state_of sub3 sol3 body3) in
   check
     "L3c1-3: a non-comparison redefinition of the flag (CF := unknown) invalidates the flag record \
      — no cell refinement"
-    (Ws.is_top cell3);
+    (     Ws.is_top cell3);
   (* L3c1-4: multi-def base refines through the producer subtraction. *)
   let m4 = memv "l3c1_m4" in
   let rsp4 = v64 "RSP" in
@@ -114,56 +122,42 @@ let run () =
   let v4 = Var.create ~is_virtual:false ~fresh:false "l3c1_v4" (Type.Imm 32) in
   let addr4 = Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (Cbat_word.to_word (w64 8))) in
   let cond4 = Bil.BinOp (Bil.LT, Bil.Var v4, Bil.Int (Cbat_word.to_word (w32 10))) in
-  let e0 = blk_of_defs [] in
-  let b0 =
-    blk_of_defs
-      [ Def.create v4 (Bil.BinOp (Bil.PLUS, Bil.Var t4, Bil.Int (Cbat_word.to_word (w32 1)))) ]
+  let sub4, tids4 =
+    sub_of "l3c1_multidef"
+      [ [], [ (2, mk_goto) ];
+        [ Def.create v4 (Bil.BinOp (Bil.PLUS, Bil.Var t4, Bil.Int (Cbat_word.to_word (w32 1)))) ],
+        [ (2, mk_goto) ];
+        [ Def.create t4 (Bil.Load (Bil.Var m4, addr4, LittleEndian, `r32));
+          Def.create v4 (Bil.BinOp (Bil.MINUS, Bil.Var t4, Bil.Int (Cbat_word.to_word (w32 1)))) ],
+        [ (1, fun t -> mk_jmp_to t cond4); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond4))) ];
+        [], [] ]
   in
-  let h0 =
-    blk_of_defs
-      [
-        Def.create t4 (Bil.Load (Bil.Var m4, addr4, LittleEndian, `r32));
-        Def.create v4 (Bil.BinOp (Bil.MINUS, Bil.Var t4, Bil.Int (Cbat_word.to_word (w32 1))));
-      ]
-  in
-  let x0 = blk_of_defs [] in
-  let b_tid = Term.tid b0 in
-  let h_tid = Term.tid h0 in
-  let x_tid = Term.tid x0 in
-  let e = with_jmps e0 [ mk_goto h_tid ] in
-  let b = with_jmps b0 [ mk_goto h_tid ] in
-  let h = with_jmps h0 [ mk_jmp_to b_tid cond4; mk_jmp_to x_tid (Bil.UnOp (Bil.NOT, cond4)) ] in
-  let sub_b = Sub.Builder.create ~name:"l3c1_multidef" () in
-  Sub.Builder.add_blk sub_b e;
-  Sub.Builder.add_blk sub_b b;
-  Sub.Builder.add_blk sub_b h;
-  Sub.Builder.add_blk sub_b x0;
-  let sub4 = Sub.Builder.result sub_b in
+  let b_tid = tids4.(1) in
   let sol4 = run_anchored sub4 in
   let cell4 = cell_at m4 (v64 "RBP") (Graphlib.Std.Solution.get sol4 b_tid) in
   (* Body-IN cell is the exact taken-edge window [1,10]. *)
   check
-    "L3c1-4 (migrated, single-pass §2): the multi-def base refines through the \
+    "L3c1-4: the multi-def base refines through the \
      per-block producer subtraction — the body-IN cell is the EXACT taken-edge \
      window [1,10] (1 ∈, 10 ∈, 0 ∉, 11 ∉; non-top)"
-    ((not (Ws.is_top cell4))
+    (     (not (Ws.is_top cell4))
     && (not (Ws.is_bottom cell4))
     && Ws.elem (w32 1) cell4
     && Ws.elem (w32 10) cell4
     && not (Ws.elem (w32 0) cell4)
     && not (Ws.elem (w32 11) cell4));
   (* L3c1-5: without ?defs the flag-state step is gated off. *)
-  let sub5, _, jmp5 = mk_l3c1_loop ~extra_header_defs:[] in
+  let sub5, _, jmp5 = mk_l3c1_loop ~extra_header_defs:[] ~pre_cf_defs:[] in
   let sol5 = run_anchored sub5 in
   let hdr5 =
     match Term.enum blk_t sub5 |> Seq.to_list with [ _; _; h; _ ] -> h | _ -> assert false
   in
   let hdr_st = Graphlib.Std.Solution.get sol5 (Term.tid hdr5) in
-  let res5 = Vsa.assume_jump_cond hdr_st jmp5 in
+  let res5 = Vsa.Test_seam.constrain_edge ~env:hdr_st (Jmp.cond jmp5) in
   let cell5 = cell_at m (v64 "RBP") res5 in
   check
-    "L3c1-5: direct assume_jump_cond without ?defs — the flag-state refinement is gated off (no \
-     cell refinement; the pre-L3c behavior)"
+    "L3c1-5: direct constrain_edge — the flag-state refinement is gated off (no \
+     cell refinement)"
     (Ws.is_top cell5);
   ())
 ;
@@ -190,8 +184,7 @@ let run () =
   let cell2 = cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub2 sol2 body2) in
   check
     "L3c2-2: the two-piece SLT rule — a signed guard whose operand is not provably non-negative \
-     (top) still refines the cell to the two-piece [0, c−1] ∪ [2^31, max] (the gate is removed; no \
-     None stop)"
+     (top) still refines the cell to the two-piece [0, c−1] ∪ [2^31, max]"
     ((not (Ws.is_top cell2))
     && match Ws.min_elem cell2 with Some w -> Cbat_word.(>=) w (w32 0) | None -> false);
   (* L3c2-3: c < 0 is one interval, no gate. *)
@@ -216,7 +209,7 @@ let run () =
   check
     "L3c2-4: the -O0 flag-indirected pattern (CF := SLT(t, 4); if CF goto …) — the flag-state \
      record + the signed row bound the cell at RBP-8 (⊆ [0,3])"
-    (bounded_above cell4 (w32 3));
+    (     bounded_above cell4 (w32 3));
   (* L3c2-5: no prologue def needed; trace/frame derives the range. *)
   let sub5, body5 =
     mk_l3c2_loop ~prologue:false
@@ -243,11 +236,15 @@ let run () =
   check
     "L3c3-1: the PLUS-HULL row — `v := t + 1; if SLT(v, 10)` — the wrapped hull {−1} ∪ [0,8] caps \
      the cell at RBP-8 (bounded ⊆ [0,9])"
-    (bounded_above (l3c3_run sub1 body1) (w32 9));
-  (* L3c3-2: TIMES over unbounded operand is the identity. *)
+    (let v = l3c3_run sub1 body1 in
+     bounded_above v (w32 9));
+  (* L3c3-2: TIMES over an unbounded operand is the identity (sound —
+     the cell is not bounded by the multiplier); with a seeded operand
+     the guard's signed row bounds it and the TIMES pre-image applies
+     exactly (t ∈ [0..9] under v = 8t <s 80). *)
   let sub2, body2 =
     mk_l3c3_loop
-      ~seed:(Some (w32 0))
+      ~seed:None
       ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
       ~cmp:Bil.SLT ~c:(w32 80) ~body_k:(w32 4)
   in
@@ -255,6 +252,20 @@ let run () =
     "L3c3-2: the TIMES rule over an unbounded operand is the identity (sound — the cell is not \
      bounded by the multiplier)"
     (not (bounded_above (l3c3_run sub2 body2) (w32 9)));
+  let sub2b, body2b =
+    mk_l3c3_loop
+      ~seed:(Some (w32 0))
+      ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
+      ~cmp:Bil.SLT ~c:(w32 80) ~body_k:(w32 4)
+  in
+  check
+    "L3c3-2b: the seeded operand is bounded by the guard's signed row, so the TIMES pre-image \
+     applies: the cell at RBP-8 is [0..9] (8t <s 80 over t ∈ [0..9])"
+    (let ws = l3c3_run sub2b body2b in
+     bounded_above ws (w32 9)
+     && (match Ws.min_elem ws with
+         | Some lo -> Cbat_word.equal lo (w32 0)
+         | None -> false));
   (* L3c3-3: RSHIFT-const row. *)
   let sub3, body3 =
     mk_l3c3_loop
@@ -388,7 +399,8 @@ let run () =
   in
   check
     "L3c5-3a: the AND-identity row — `v := t AND ~0` (≡ t) — the cell at RBP-8 is bounded (⊆ [0,9])"
-    (bounded_above (l3c5_run sub3a body3a) (w32 9));
+    (let v = l3c5_run sub3a body3a in
+     bounded_above v (w32 9));
   (* L3c5-3b: OR-identity row. *)
   let sub3b, body3b =
     mk_l3c5_loop
@@ -405,19 +417,14 @@ let run () =
   let rsp4 = v64 "RSP" in
   let t4 = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
   let addr4 = Bil.BinOp (Bil.MINUS, Bil.Var rsp4, Bil.Int (Cbat_word.to_word (w64 8))) in
-  let e0 = blk_of_defs [] in
-  let h0 =
-    blk_of_defs [ Def.create t4 (Bil.Load (Bil.Var m4, addr4, LittleEndian, `r32)) ]
+  let sub4, tids4 =
+    sub_of "l3c5_unknown"
+      [ [], [ (1, mk_goto) ];
+        [ Def.create t4 (Bil.Load (Bil.Var m4, addr4, LittleEndian, `r32)) ],
+        [ (2, fun t -> mk_jmp_to t (Bil.Unknown ("l3c5_unknown", Type.Imm 1))) ];
+        [], [] ]
   in
-  let x0 = blk_of_defs [] in
-  let h_tid = Term.tid h0 in
-  let x_tid = Term.tid x0 in
-  let sub_b = Sub.Builder.create ~name:"l3c5_unknown" () in
-  Sub.Builder.add_blk sub_b (with_jmps e0 [ mk_goto h_tid ]);
-  Sub.Builder.add_blk sub_b
-    (with_jmps h0 [ mk_jmp_to x_tid (Bil.Unknown ("l3c5_unknown", Type.Imm 1)) ]);
-  Sub.Builder.add_blk sub_b x0;
-  let sub4 = Sub.Builder.result sub_b in
+  let h_tid = tids4.(1) in
   let sol4 = run_anchored sub4 in
   let h_st4 = Graphlib.Std.Solution.get sol4 h_tid in
   let jmp4 =
@@ -430,9 +437,9 @@ let run () =
     | _ -> assert false
   in
   check
-    "L3c5-4: an Unknown condition — the fixpoint completes and assume_jump_cond keeps the env \
+    "L3c5-4: an Unknown condition — the fixpoint completes and constrain_edge keeps the env \
      unchanged (the shrunk catch-all, never asserts)"
-    (AI.equal (Vsa.assume_jump_cond h_st4 jmp4) h_st4);
+    (AI.equal (Vsa.Test_seam.constrain_edge ~env:h_st4 (Jmp.cond jmp4)) h_st4);
   ())
 ;
 (  (* S-1: traverse shape collapses to ≤ 3 cells. *)
@@ -472,27 +479,20 @@ let run () =
 ;
 (  let rsp = v64 "RSP" in
   let rdi = v64 "RDI" in
-  let entry0 = blk_of_defs [] in
-  let blk0 = blk_of_defs [ Def.create rdi (Bil.Int (Cbat_word.to_word (w64 42))) ] in
-  let cont0 = blk_of_defs [] in
-  let blk_tid = Term.tid blk0 in
-  let cont_tid = Term.tid cont0 in
-  (* Interrupt edge: return tid ignored by the arm. *)
-  let entry = with_jmps entry0 [ mk_goto blk_tid ] in
-  let blk =
-    with_jmps blk0 [ Jmp.create (Int (0x80, cont_tid)); mk_goto cont_tid ]
+  let sub, tids =
+    sub_of "l37_intr"
+      [ [], [ (1, mk_goto) ];
+        [ Def.create rdi (Bil.Int (Cbat_word.to_word (w64 42))) ],
+        [ (2, fun t -> Jmp.create (Int (0x80, t))); (2, mk_goto) ];
+        [], [] ]
   in
-  let sub_b = Sub.Builder.create ~name:"l37_intr" () in
-  Sub.Builder.add_blk sub_b entry;
-  Sub.Builder.add_blk sub_b blk;
-  Sub.Builder.add_blk sub_b cont0;
-  let sub = Sub.Builder.result sub_b in
+  let cont_tid = tids.(2) in
   let sol = run_anchored sub in
   let cont_st = Graphlib.Std.Solution.get sol cont_tid in
   check
     "B-1: an interrupt edge is an unknown external callee — the continuation keeps the RSP anchor \
-     ({0}) and the caller-saved rdi is topped (no AI.top degradation)"
-    (Ws.equal (AI.find_word 64 cont_st rsp) (Ws.singleton (w64 0))
+     (the symbolic segment base at offset 0) and the caller-saved rdi is topped (no AI.top degradation)"
+    (Ws.equal (AI.find_word 64 cont_st rsp) (Ws.stack_word_i64 0L)
     && Ws.is_top (AI.find_word 64 cont_st rdi));
   ())
 ;
@@ -528,7 +528,7 @@ let run () =
     "L-B3: the ja compound guard `~(CF | ZF)` (unsigned e > c) — the decoder emits UGT (c=3 -> [4, \
      2^w)) and the decrementing counter converges inside the constraint: the cell at RBP-8 has \
      min_elem >= 4 and is not top"
-    ((not (Ws.is_top cell3))
+    (     (not (Ws.is_top cell3))
     && (not (Ws.is_bottom cell3))
     && match Ws.min_elem cell3 with Some w -> Cbat_word.(>=) w (w32 4) | None -> false);
   (* L-B4: second cmp makes the gate reject the mixed group. *)
@@ -573,18 +573,17 @@ let run () =
   ())
 (* L-D2: wide-bound pin — counter crosses widening before converging. *)
 ;
-(  (* L-D2: c=63 ascending counter needs the relaxed gate. *)
-  let sub, body =
+(  let sub, body =
     mk_l39_loop ~seed:(w32 0) ~c:(w32 63) ~body_op:Bil.PLUS ~body_k:(w32 1)
       ~mk_cond:(fun ~cf:_ ~ofv ~sf ~zf -> l39_jle zf sf ofv)
       ~extra_header_defs:(fun _ -> [])
   in
   check
     "L-D2: the WIDE-BOUND corpus shape (c=63, ascending counter seeded 0, crossing the i>10 \
-     widening threshold) — the L-D1 gate-relaxed refinement (provably_nonneg_operand proving the \
-     cell non-negative via the seed store) bounds the cell at RBP-8 (⊆ [0, 64), max ≤ 63) — FAILS \
-     pre-L-D1 (the SLE gate rejects the widened infinite CLP, the cell stays top)"
-    (bounded_above (l39_run sub body) (w32 63));
+     widening threshold) — the cell's proven non-negativity (via the seed store) survives the \
+     widened state and bounds the cell at RBP-8 (⊆ [0, 64), max ≤ 63)"
+    (let v = l39_run sub body in
+     bounded_above v (w32 63));
   ())
 ;
 (  (* E1-1: call-in-loop header RSP stays exactly {0x1000}. *)
@@ -593,15 +592,14 @@ let run () =
   check
     "E1-1: call-in-loop RSP stability — the ON-path matched-pair +8 (the callee's ret pops exactly \
      the retaddr the caller pushed) keeps the header RSP at EXACTLY the pre-push {0x1000} \
-     (bounded, no drift — FAILS pre-L-E1: the header joins {−8k}/iteration and the i>10 widening \
-     makes the infinite descending CLP)"
+     (bounded, no drift)"
     (Ws.equal rsp_hdr (Ws.singleton (w64 0x1000)));
   (* E1-2: straight-line continuation RSP is exactly {0x2000}. *)
   let sub, post_tid, rsp = mk_e1_flat_sub () in
   let rsp_post = e1_rsp_at sub post_tid rsp in
   check
     "E1-2: straight-line call RSP exactness — the continuation RSP is EXACTLY the pre-call \
-     singleton {0x2000} (truth, not truth−8 = {0x1ff8} — FAILS pre-L-E1)"
+     singleton {0x2000} (the exact truth, not truth−8 = {0x1ff8})"
     (Ws.equal rsp_post (Ws.singleton (w64 0x2000)));
   ())
 ;
@@ -610,7 +608,8 @@ let run () =
     "L-D6 (gate-free, spec §2.1): the RBP-anchored loop (prologue RBP := RSP + the c=63 jle \
      loop at RBP−8 + the dead epilogue RBP := mem[RSP]) — every def is denoted, so the jcc \
      decoder's cell meet binds the cell at RBP−8 to ⊆ [0, 64) at the BODY input"
-    (bounded_above (l6_run sub body) (w32 63));
+    (let v = l6_run sub body in
+     bounded_above v (w32 63));
   ())
 ;
 (  (* R2-1: inline-arithmetic chain refines to the 64-element hull. *)
@@ -624,7 +623,7 @@ let run () =
      Load[RBP-8]) — the producer-op recursion refines the (t+1) chain (guard row -> [0,64) on \
      (t+1) -> the PLUS row's circular hull {−1} ∪ [0, 62] on t -> the Var -> refine_backward -> \
      refine_cell) and the cell at RBP−8 is the 64-element hull (⊆ {−1} ∪ [0, 64); cardn 64; no \
-     middle value — FAILS pre-refactor: the chain unrefined, the cell stays the full domain/top)"
+     middle value)"
     ((not (Ws.is_top cell1))
     && (not (Ws.is_bottom cell1))
     && Cbat_word.(<=) (Ws.cardinality cell1) (Cbat_word.of_int ~width:33 64)
@@ -639,9 +638,8 @@ let run () =
   let cell2 = r2_run sub2 body2 in
   check
     "R2-2: NOT-of-comparison `~(t < 5)` (the taken edge = t ≥ 5, the two-path seed cell {3, 8}) — \
-     the comparison-operand keep-env gate (the FALSE-edge guard) leaves the cell UNSHARPENED by \
-     the TRUE-edge row [0, 5): NOT bounded ⊆ [0, 4] (it is top/unbounded) — with the gate removed \
-     the wrong window drops the live values (the cell wrongly ⊆ [0, 4])"
+     the NOT-edge keeps its env: the false-edge row [0, 5) never confines the taken edge, so the \
+     cell keeps its live values (not bounded ⊆ [0, 4])"
     (not (bounded_above cell2 (w32 4)));
   (* R2-3: const-first LT flip — decrementing counter converges in [11, 2^w). *)
   let sub3, body3 =
@@ -652,9 +650,7 @@ let run () =
   check
     "R2-3: the CONST-FIRST LT flip `10 < t` (Bil.BinOp (Bil.LT, Bil.Int 10, t)) — the flip (ora-9 \
      Item 1(d)) dispatches on the guard_op enum (UGT): t > 10 unsigned -> [11, 2^w) and the \
-     DECREMENTING counter converges inside the constraint (non-top, min_elem ≥ 11) — FAILS on the \
-     current tree: the landed const-first arm is the EQ-only equivalence (LT const-first is still \
-     a sound stop), so the cell goes top"
+     DECREMENTING counter converges inside the constraint (non-top, min_elem ≥ 11)"
     ((not (Ws.is_top cell3))
     && (not (Ws.is_bottom cell3))
     && match Ws.min_elem cell3 with Some w -> Cbat_word.(>=) w (w32 11) | None -> false);
@@ -664,7 +660,7 @@ let run () =
         Bil.BinOp (Bil.LT, Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))), Bil.Int (Cbat_word.to_word (w32 512))))
   in
   check
-    "R2-4 (migrated, single-pass §2): the NESTED-BinOp chain `(t * 8) < 512` — the inline walk \
+    "R2-4: the NESTED-BinOp chain `(t * 8) < 512` — the inline walk \
      bounds the operand, the exact TIMES no-wrap slice fires, and the body-IN cell is the EXACT \
      singleton {63} (the loop exits at t = 64; 63 ∈, 62 ∉, 64 ∉; non-top)"
     (let cell = r2_run sub4 body4 in

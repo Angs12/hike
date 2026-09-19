@@ -1,35 +1,59 @@
 (* Exhaustive equivalence check for the CLP lattice core.
 
    Compares every binary operation and the identity elements across a dense
-   sweep of (width, base, step, cardn), asserting that:
-     - is_top is unchanged,
-     - top w and bottom w are unchanged as *values*,
-     - every op result is structurally unchanged.
-   The reference ("old") implementations are inlined below so this harness
-   stays valid after the production ones are rewritten.
+   sweep of (width, base, step, cardn), asserting against the inlined
+   reference implementations that:
+     - is_top agrees,
+     - top w and bottom w agree as *values*,
+     - every op result is structurally identical.
+   The reference implementations are inlined below, independent of the
+   production code.
 
-   [Ref_word] holds the pre-substrate word implementations (frozen)
-   verbatim; the sweep cross-checks them against the unmodified production
-   ops (word-substrate T1: the referee must be green while both sides are
-   still identical).
+   [Ref_word] holds the frozen reference word implementations verbatim;
+   the sweep cross-checks the production word ops against them.
 
    The word-op sweep runs at the widths the domain actually uses: the swept
    widths (1..64) plus a direct 64/65/129-bit sweep (129 = [dom_size
    ~width:(2*width+1)] and [mul_exact]'s summed width at width 64).
 
    The same sweep cross-checks [Cbat_word] (the int63 substrate) against the
-   reference, over every op it exports (word-substrate T2).
+   reference, over every op it exports.
 
    Usage: clpequiv.exe *)
 
 open Bap.Std
 open Probe_common
-module CKL = Core_kernel.List
+module CKL = Core.List
 module Wo = Cbat_word
 module CW = Cbat_word
 
+(* The word-gcd oracle, inlined for the sweep (the referee's own copy
+   of the op it cross-checks). *)
+let cw_mask (w : int) : int =
+  if w >= 62 then max_int else if w <= 0 then 0 else (1 lsl w) - 1
+
+let rec cw_gcd_int (a : int) (b : int) : int =
+  if b = 0 then a else cw_gcd_int b (a mod b)
+
+let cw_gcd_exn (a : CW.t) (b : CW.t) : CW.t =
+  let w = CW.bitwidth a in
+  match a, b with
+  | CW.Small (x, _, _), CW.Small (y, _, _) ->
+    if x = 0 then CW.Small (y, w, false)
+    else if y = 0 then CW.Small (x, w, false)
+    else CW.Small (cw_gcd_int x y land cw_mask w, w, false)
+  | _ ->
+    let to_z (t : CW.t) : Z.t =
+      match t with
+      | CW.Small (v, _, _) -> Z.of_int v
+      | CW.Big (z, _, _) -> z in
+    let zmax = Z.sub (Z.shift_left Z.one w) Z.one in
+    let z = Z.gcd (to_z a) (to_z b) in
+    let z = if Z.sign z >= 0 && Z.numbits z <= w then z else Z.logand z zmax in
+    if Z.fits_int z then CW.Small (Z.to_int z, w, false) else CW.Big (z, w, false)
+
 (* ========================================================================= *)
-(* CLP reference implementations, as they were before the change. *)
+(* CLP reference implementations. *)
 (* ========================================================================= *)
 
 let ref_bottom (width : int) : Ws.Clp.t =
@@ -48,12 +72,12 @@ let ops : (string * (Ws.Clp.t -> Ws.Clp.t -> Ws.Clp.t)) list =
   ; ("join", Ws.Clp.join); ("meet", Ws.Clp.meet) ]
 
 (* ========================================================================= *)
-(* Ref_word: the pre-substrate word implementations, verbatim. *)
+(* Ref_word: the frozen reference word implementations, verbatim. *)
 (* ========================================================================= *)
 
 module Ref_word = struct
   module W = Word
-  module Option = Core_kernel.Option
+  module Option = Core.Option
 
   (* Multiply at the summed width; cannot overflow. *)
   let mul_exact (w1 : word) (w2 : word) : word =
@@ -188,8 +212,7 @@ let () =
   let show (w : word) : string = Word.to_string w in
   (* The unsigned payload. *)
   let z_of (w : word) : Z.t = Bitvec.to_bigint (Word.to_bitvec w) in
-  (* int63 discriminates |v| <= 2^62-1, matching the planned Small/Big
-     split. *)
+  (* int63 discriminates |v| <= 2^62-1. *)
   let max_small : Z.t = Z.of_int 4611686018427387903 in
   let i63 (w : word) : int option =
     let i = z_of w in
@@ -292,7 +315,7 @@ let () =
     cw2 "lshift" Word.lshift CW.lshift w1 w2;
     cw2 "rshift" Word.rshift CW.rshift w1 w2;
     cw2 "arshift" Word.arshift CW.arshift w1 w2;
-    cw2 "gcd_exn" Word.gcd_exn CW.gcd_exn w1 w2;
+    cw2 "gcd_exn" Word.gcd_exn cw_gcd_exn w1 w2;
     cw2 "lcm_exn" Word.lcm_exn CW.lcm_exn w1 w2;
     cw2 "min" Word.min CW.min w1 w2;
     cw2 "max" Word.max CW.max w1 w2;
@@ -469,7 +492,7 @@ let () =
               check_word_ops width v1 v2;
               check_cbat_word width v1 v2)));
 
-  (* ---- CLP sweep (the pre-existing harness) --------------------------- *)
+  (* ---- CLP sweep --------------------------- *)
 
   let widths = [ 1; 2; 3; 4; 8; 16; 32; 64 ] in
   CKL.iter widths ~f:(fun w ->
@@ -520,7 +543,7 @@ let () =
         done
       done);
 
-  (* ---- Directional CLP checks (Tickets 01 & 02) ----------------------- *)
+  (* Directional CLP checks. *)
   let check_directional () =
     let w64 = 64 in
     let w_8 = CW.of_int ~width:w64 8 in
@@ -592,7 +615,7 @@ let () =
     if Ws.Clp.is_infinite desc_single then
       bad "DIRECTIONAL: desc_single should canonicalize to Finite (not infinite)";
 
-    (* ---- Ticket 03 Operations: widen_join, subset, intersection, translate ---- *)
+    (* Operations: widen_join, subset, intersection, translate. *)
     (* widen_join: stable lo -> Ascending *)
     let p_8 = Ws.Clp.create ~width:w64 w_8 in
     let p_8_16 = Ws.Clp.interval ~width:w64 w_8 (CW.of_int ~width:w64 16) in

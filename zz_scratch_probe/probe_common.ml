@@ -1,11 +1,24 @@
 (* Shared shell for the zz_scratch_probe drivers: init, loading, printing. *)
 
 open Bap.Std
+open Bap_core_theory
 
 module AI = Cbat_vsa.AI
 module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
+
+(* The fixture drivers' target: the flag roles name the flag vars the
+   synthetic subs define (Theory.Var.define is pure in (sort, name),
+   so Var.same matches them). *)
+let jump_target =
+  let flag name = Theory.Var.forget (Theory.Var.define Theory.Bool.t name) in
+  Theory.Target.declare ~package:"probe" "jump-flags" ~bits:64 ~byte:8
+    ~regs:Theory.Role.Register.[
+        [zero_flag], [flag "ZF"];
+        [carry_flag], [flag "CF"];
+        [sign_flag], [flag "SF"];
+        [overflow_flag], [flag "OF"]]
 
 (* BAP init; call before opening a project. *)
 let init () =
@@ -17,10 +30,10 @@ let init () =
     exit 1
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
-   Output contracts (the PASS lines, exit codes) are byte-compatible with the
-   pre-factoring drivers: scripts grep them. *)
+   Output contracts (the PASS lines, exit codes) are byte-stable: scripts
+   grep them. *)
 
-(* Exception description (byte-identical to the watchers' former local copy). *)
+(* Exception description. *)
 let describe_exn (e : exn) : string =
   match e with
   | Assert_failure (file, line, col) ->
@@ -45,8 +58,8 @@ let ws_init (tool : string) : unit =
     exit 1
 
 (* Load-failure lines (the LOAD-FAIL contract). *)
-let ws_load_fail (path : string) (e : Core_kernel.Error.t) : unit =
-  Printf.printf "LOAD-FAIL\t%s\t%s\n" path (Core_kernel.Error.to_string_hum e);
+let ws_load_fail (path : string) (e : Core.Error.t) : unit =
+  Printf.printf "LOAD-FAIL\t%s\t%s\n" path (Core.Error.to_string_hum e);
   flush stdout
 
 let ws_load_exn (path : string) (e : exn) : unit =
@@ -74,7 +87,7 @@ let load_project (path : string) : Project.t =
   | Ok proj -> proj
   | Error e ->
     Format.eprintf "probe: load failed: %s: %s\n%!" path
-      (Core_kernel.Error.to_string_hum e);
+      (Core.Error.to_string_hum e);
     exit 1
 
 let sp_of (proj : Project.t) : var = Hike.Abi.sp (Project.target proj)
@@ -105,7 +118,7 @@ let all_subs (prog : program term) : sub term list =
 let analyze_and_fixpoint (_sp : var) (_prog : program term) (sub : sub term)
     : sub term * Vsa.vsa_sol =
   let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa [] prog' sub (Vsa.init_sol sub) in
+  let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
   (sub, sol)
 
 (* Word-set printers. *)
@@ -139,7 +152,8 @@ let ws_window_big (ws : Ws.t) : bool =
 
 let target_to_string (l : label) : string =
   match l with
-  | Direct tid -> Tid.name tid
+  | Direct tid ->
+    (try Tid.name tid with _ -> "%" ^ Tid.to_string tid)
   | Indirect e -> "[" ^ Format.asprintf "%a" Exp.pp e ^ "]"
 
 let jmp_to_string (j : jmp term) : string =
@@ -171,13 +185,42 @@ let blk_bil_to_string (b : blk term) : string =
   in
   Printf.sprintf "-- blk %s\n%s\n%s" (Tid.name (Term.tid b)) defs jmps
 
-let vsa_kind_to_string (k : Hike.Convutils.vsa_kind) : string =
+(* The per-def stack kinds through the seam: the address's denotation
+   at the def's own before-env, classified in place (the extraction's
+   per-def rule; no merge). *)
+let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
+    Hike.Stack_model.vsa_kind Tid.Map.t =
+  let opt (r : ('a, 'b) Result.t) : 'a option =
+    match r with Ok w -> Some w | Error _ -> None in
+  let kind_of blk d =
+    let open Base.Option in
+    Base.Option.bind
+      (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
+      ~f:(fun addr ->
+        opt
+          (Vsa.denote_exp_at
+             ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
+             ~blk ~def:d addr))
+    >>= fun ws ->
+    if Ws.is_bottom ws || Ws.in_stack_segment ws then
+      Some (Vsa.Cbat_extraction.caller_split (Vsa.Cbat_extraction.classify ws))
+    else if Ws.is_top ws then Some Hike.Stack_model.unbounded_span
+    else None
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+      Seq.fold (Term.enum def_t blk) ~init:m ~f:(fun m d ->
+          match kind_of blk d with
+          | Some k -> Core.Map.set m ~key:(Term.tid d) ~data:k
+          | None -> m))
+
+let vsa_kind_to_string (k : Hike.Stack_model.vsa_kind) : string =
   match k with
-  | Hike.Convutils.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
-  | Hike.Convutils.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
-  | Hike.Convutils.Unbounded -> "Unbounded"
-  | Hike.Convutils.Dead -> "Dead"
-  | Hike.Convutils.VLA tid -> Printf.sprintf "VLA(%s)" (Tid.name tid)
+  | Hike.Stack_model.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
+  | Hike.Stack_model.Dead -> "Dead"
 
 (* Value-set of each named var in the state. *)
 let state_summary (vars : var list) (st : AI.t) : string =

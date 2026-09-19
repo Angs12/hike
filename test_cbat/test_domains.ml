@@ -415,15 +415,21 @@ let run_policy () =
   check "A3: bottom is still the meet zero; top the meet identity"
     (Clp.is_bottom (Clp.meet clp2 (Clp.bottom 32)) && Clp.equal (Clp.meet clp2 (Clp.top 32)) clp2);
   ())
-(* div/sdiv by a set containing 0 returns top. *)
+(* div/sdiv: a zero-containing non-singleton divisor returns top; exactly
+   {0} is the word semantics (x/0 = ones), never bottom. *)
 ;
 (  let d1 = Clp.of_list ~width:32 [ w32 1; w32 2 ] in
   let d0 = Clp.of_list ~width:32 [ w32 0; w32 1 ] in
   check "D3-1: div by a set containing 0 -> top, no raise" (Clp.is_top (Clp.div d1 d0));
   check "D3-2: sdiv by a set containing 0 -> top, no raise" (Clp.is_top (Clp.sdiv d1 d0));
-  check "D3-3: div by exactly {0} -> bottom (provably dead path)"
-    (Clp.is_bottom (Clp.div d1 (Clp.create (Cbat_word.zero 32))));
-  check "D3-4: sdiv by exactly {0} -> bottom" (Clp.is_bottom (Clp.sdiv d1 (Clp.create (Cbat_word.zero 32))));
+  check "D3-3: div by exactly {0} -> the word semantics (x/0 = ones)"
+    (let r = Clp.div d1 (Clp.create (Cbat_word.zero 32)) in
+     Clp.min_elem r = Some (Cbat_word.ones 32)
+     && Clp.max_elem r = Some (Cbat_word.ones 32));
+  check "D3-4: sdiv by exactly {0} -> the word semantics (x/0 = ones)"
+    (let r = Clp.sdiv d1 (Clp.create (Cbat_word.zero 32)) in
+     Clp.min_elem r = Some (Cbat_word.ones 32)
+     && Clp.max_elem r = Some (Cbat_word.ones 32));
   check "D3-5: div by a nonzero singleton still computes (no regression)"
     (let r = Clp.div (Clp.create (w32 10)) (Clp.create (w32 2)) in
      Clp.min_elem r = Some (w32 5) && Clp.max_elem r = Some (w32 5));
@@ -499,10 +505,7 @@ let run_policy () =
   let q9 = Clp.interval ~width:32 (w32 0) (w32 1) in
   let g9 = Clp.interval ~width:32 (w32 0) (w32 2) in
   let r1 = Clp.widen_join q9 g9 in
-  check "EX1: widen_join contains join (extrapolate stub)" (Clp.subset g9 r1);
   check "EX1b: the extrapolation contains the join (soundness)" (Clp.subset g9 r1);
-  let r2 = Clp.widen_join q9 g9 in
-  check "EX2: widen_join sound" (Clp.subset g9 r2);
   let d1 = Clp.create (Cbat_word.neg (w32 16)) ~step:(w32 8) ~cardn:(w32 1) in
   let d2 = Clp.create (Cbat_word.neg (w32 24)) ~step:(w32 8) ~cardn:(w32 2) in
   let r3 = Clp.widen_join d1 d2 in
@@ -1132,3 +1135,111 @@ let run_overlap () =
        always, exactness on wrap-free arcs)\n";
   ())
 
+
+(* PBH: the DIV/MOD rows carry the residue bound.  The classic idiom
+   x % K (x bounded, K a constant) must produce the residue interval,
+   never the whole word. *)
+let run_divmod () =
+  let iv (w : int) (lo : int) (hi : int) =
+    Clp.interval ~width:w (Wo.of_int ~width:w lo) (Wo.of_int ~width:w hi)
+  in
+  let one (w : int) (v : int) = Clp.singleton (Wo.of_int ~width:w v) in
+  check "PBH-M1: mod of a wide interval by a constant is the residue hull"
+    (let r = Clp.modulo (iv 64 0x17 0xfb6) (one 64 16) in
+     Clp.min_elem r = Some (Wo.of_int ~width:64 0)
+     && Clp.max_elem r = Some (Wo.of_int ~width:64 15));
+  check "PBH-M2: mod inside one quotient block is the exact sub-interval"
+    (let r = Clp.modulo (iv 64 0x23 0x29) (one 64 16) in
+     Clp.min_elem r = Some (Wo.of_int ~width:64 3)
+     && Clp.max_elem r = Some (Wo.of_int ~width:64 9));
+  check "PBH-M3: mod at width 128 (the idiv concat) keeps the residue bound"
+    (let r = Clp.modulo (iv 128 0x17 0xfb6) (one 128 16) in
+     Clp.min_elem r = Some (Wo.of_int ~width:128 0)
+     && Clp.max_elem r = Some (Wo.of_int ~width:128 15));
+  check "PBH-M4: mod by exactly {0} is the identity (word semantics)"
+    (Clp.equal (Clp.modulo (iv 64 5 9) (one 64 0)) (iv 64 5 9));
+  check "PBH-M5: mod by a bounded divisor range caps at its max"
+    (let kmax = Wo.of_int64 ~width:128 0xffffffffffffffffL in
+     let r =
+       Clp.modulo (one 128 0x80) (Clp.interval ~width:128 (Wo.of_int ~width:128 1) kmax)
+     in
+     Clp.min_elem r = Some (Wo.of_int ~width:128 0)
+     && Clp.max_elem r = Some (Wo.pred kmax));
+  check "PBH-M6: mod by strictly larger divisors keeps the dividend"
+    (Clp.equal (Clp.modulo (iv 64 3 7) (iv 64 9 20)) (iv 64 3 7));
+  check "PBH-M7: smod of a nonnegative interval is the residue hull"
+    (let r = Clp.smodulo (iv 64 3 0x33) (one 64 16) in
+     Clp.min_elem r = Some (Wo.of_int ~width:64 0)
+     && Clp.max_elem r = Some (Wo.of_int ~width:64 15));
+  check "PBH-M8: smod of a mixed-sign interval stays within +-(k-1)"
+    (let p1 = iv 64 (-4) 7 in
+     let r = Clp.smodulo p1 (one 64 16) in
+     let gt =
+       List.map
+         (fun x -> Cbat_word.modulo (Cbat_word.signed x) (Cbat_word.signed (Wo.of_int ~width:64 16)))
+         (Clp.iter p1)
+     in
+     gt <> [] && List.for_all (fun x -> Clp.elem x r) gt);
+  (* Soundness sweep: every pointwise residue lands in the row's result. *)
+  let unsound = ref 0 in
+  let inexact = ref 0 in
+  for w = 4 to 8 do
+    for lo = -12 to 12 do
+      for hi = lo to 12 do
+        for k = 1 to 5 do
+          let p1 = iv w lo hi in
+          let p2 = one w k in
+          let r = Clp.modulo p1 p2 in
+          let gt =
+            List.map (fun x -> Cbat_word.modulo x (Wo.of_int ~width:w k))
+              (Clp.iter p1)
+          in
+          if not (List.for_all (fun x -> Clp.elem x r) gt) then incr unsound;
+          let r' = Clp.smodulo p1 p2 in
+          let gt' =
+            List.map
+              (fun x ->
+                 Cbat_word.modulo (Cbat_word.signed x)
+                   (Cbat_word.signed (Wo.of_int ~width:w k)))
+              (Clp.iter p1)
+          in
+          if not (List.for_all (fun x -> Clp.elem x r') gt') then incr unsound;
+          (* Same-quotient unsigned cases are exact hulls. *)
+          let slo = if lo < 0 then 0 else lo in
+          let shi = max hi slo in
+          if slo / k = shi / k && hi >= 0 && lo >= 0 then
+            let want = Clp.of_list ~width:w gt in
+            if not (Clp.equal r want) then incr inexact
+        done
+      done
+    done
+  done;
+  (* sdiv corners read the SIGNED extrema: every pointwise truncated
+     quotient lands in the row's result. *)
+  let qunsound = ref 0 in
+  for w = 4 to 8 do
+    for lo = -12 to 12 do
+      for hi = lo to 12 do
+        for k = 1 to 5 do
+          let p1 = iv w lo hi in
+          let p2 = one w k in
+          let q = Clp.sdiv p1 p2 in
+          let gt =
+            List.map
+              (fun x ->
+                 Cbat_word.div (Cbat_word.signed x)
+                   (Cbat_word.signed (Wo.of_int ~width:w k)))
+              (Clp.iter p1)
+          in
+          if not (List.for_all (fun x -> Clp.elem x q) gt) then incr qunsound
+        done
+      done
+    done
+  done;
+  check "PBH-M11: sdiv corner hull soundness sweep (signed dividends, k<=5)"
+    (!qunsound = 0);
+  check "PBH-M9: mod/smod row soundness sweep (widths 4..8, all intervals, k<=5)"
+    (!unsound = 0);
+  check "PBH-M10: same-quotient mod results are the exact residue hull" (
+    !inexact = 0);
+  ()
