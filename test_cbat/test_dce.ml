@@ -130,7 +130,7 @@ let run () =
 ;
 (  (* D3: two-tier region-mem rule — a fissioned store chain dies iff no Load roots it. *)
   let sm = Hike.Stack_model.region_mem 0 in
-  let base = Hike.Stack_model.region_base ~word:8 0 in
+  let base = v64 "d_base" in
   (* (a) never loaded: both store-chain members die *)
   let sub_a, _ = sub_of "d3_fission_dead" [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ] in
   let sub_a' = Hike.Dce.dce ~target:Theory.Target.unknown sub_a in
@@ -217,7 +217,7 @@ let run () =
        storage carries escaped bytes survives the sweep; its reader is
        never a def of this sub (another world reads the raw pointer). *)
   let sm = Hike.Stack_model.region_mem 0 in
-  let base = Hike.Stack_model.region_base ~word:8 0 in
+  let base = v64 "d_base" in
   let sub, _ =
     sub_of "d6_escape_root"
       [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]

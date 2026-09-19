@@ -821,11 +821,11 @@ let run_t5 () =
   check
     "T5-3 (T12 ruling): a bounded runtime SP adjustment is NOT a VLA — \
      no allocation event"
-    (Core.Set.is_empty (extract_anchored_events bounded));
+    (Core.Set.is_empty (dyn_alloc_events bounded));
   check
     "T5-3 (T12 ruling): an unbounded runtime SP size IS the allocation \
      event"
-    (not (Core.Set.is_empty (extract_anchored_events unbounded)));
+    (not (Core.Set.is_empty (dyn_alloc_events unbounded)));
   ())
 
 (* T5-4 (head extrapolation): a cycle-written cell's data advances by

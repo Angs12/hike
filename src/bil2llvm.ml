@@ -258,7 +258,6 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.filter ~f:(fun var ->
       (* Drops never-defined vars from transfer. *)
       Core.Set.mem def_set var
-      || Hike_stack_model.is_region_base var
       || Core.Set.mem arg_set var
       || Var.same var ctx.sp)
   |> Core.Set.to_list
@@ -382,10 +381,7 @@ let create_sub sub =
       | Some v -> v
       | None -> Llvm.const_int (Llvm.i64_type llvm_ctx) 0
     in
-    let fr : sub_frame =
-      { anchor_i64; stack0; regions;
-        is_precise = not (Base.List.is_empty regions) }
-    in
+    let fr : sub_frame = { anchor_i64; stack0; regions } in
     cur_frame := Some fr;
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= fun () ->
@@ -788,9 +784,8 @@ type sec_owner = Bil2llvm_env.sec_owner = {
   own_hi : int64;
   base : Llvm.llvalue;
   typed_w : int;
-  is_const : bool;
-  bss : bool;
 }
+
 
 type section = Bil2llvm_env.section = {
   base : Llvm.llvalue;

@@ -7,17 +7,7 @@
 
 open Bap.Std
 module Vsa = Cbat_vsa
-
-(* [ws] is a single known word. *)
-let singleton_i64 (ws : Vsa.WordSet.t) : int64 option =
-  if Vsa.WordSet.is_top ws then None
-  else
-    match Vsa.WordSet.min_elem ws, Vsa.WordSet.max_elem ws with
-    | Some lo, Some hi -> (
-        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok a, Ok b when Int64.equal a b -> Some a
-        | _ -> None)
-    | _ -> None
+module Model = Hike_stack_model
 
 (* The target-resolution predicate: the site's class over the
    target's denotation.  A singleton whose word names a lifted sub
@@ -27,7 +17,7 @@ let singleton_i64 (ws : Vsa.WordSet.t) : int64 option =
    a lifted sub?" (the symtab + the program's name map in
    production). *)
 let resolve_target ~(lookup : int64 -> Tid.t option) (ws : Vsa.WordSet.t) :
-    Tid.t option = match singleton_i64 ws with
+    Tid.t option = match Model.singleton_i64 ws with
   | None -> None
   | Some v -> lookup v
 

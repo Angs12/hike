@@ -491,41 +491,8 @@ let run_anchored (sub : sub term) : Vsa.vsa_sol =
 let anchored_sp () : var =
   Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64)
 
-(* One-line contract: the def's kind through the seam — the address's
-   denotation at the def's own before-env, classified in place; a TOP
-   address is the unbounded span, a plain foreign address seeds
-   nothing. *)
-let kind_of_def ~(sol : Vsa.vsa_sol) (blk : blk term) (d : def term) :
-    Cu.vsa_kind option =
-  let opt (r : ('a, 'b) Result.t) : 'a option =
-    match r with Ok w -> Some w | Error _ -> None in
-  let open Base.Option in
-  Base.Option.bind
-    (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
-    ~f:(fun addr ->
-      opt
-        (Vsa.denote_exp_at
-           ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
-           ~blk ~def:d addr))
-  >>= fun ws ->
-  if Ws.is_bottom ws || Ws.in_stack_segment ws then
-    Some (Vsa.Cbat_extraction.caller_split (Vsa.Cbat_extraction.classify ws))
-  else if Ws.is_top ws then Some Cu.unbounded_span
-  else None
-
-(* The sub's kind map through the seam: the per-def classification the
-   extraction produced, recomputed from the denotations. *)
-let extract_anchored (sub : sub term) : Cu.vsa_kind Tid.Map.t =
-  let sol = run_anchored sub in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-      Seq.fold (Term.enum def_t blk) ~init:m ~f:(fun m d ->
-          match kind_of_def ~sol blk d with
-          | Some k -> Core.Map.set m ~key:(Term.tid d) ~data:k
-          | None -> m))
-
 (* The VLA events through the shape test. *)
-let extract_anchored_events (sub : sub term) : Tid.Set.t =
+let dyn_alloc_events (sub : sub term) : Tid.Set.t =
   Hike.Sections.dynamic_alloc_tids_of ~sp:(anchored_sp ())
     ~denote:Hike.Vsa.denote_exp_at sub
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =

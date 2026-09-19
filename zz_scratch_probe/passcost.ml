@@ -30,7 +30,7 @@ let () =
   init ();
   let args = List.tl (Array.to_list Sys.argv) in
   if Base.List.is_empty args then usage Sys.argv.(0) "<binary>...";
-  Printf.printf "binary,sub,ndefs,seed_s,vsa_s,stl_s,dce_s,dce_rounds\n";
+  Printf.printf "binary,sub,ndefs,vla_s,vsa_s,dce_s,dce_rounds\n";
   let tot = ref 0.0 in
   Base.List.iter args ~f:(fun path ->
       let proj = load_project path in
@@ -52,16 +52,10 @@ let () =
                 Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
                   ~images:[] ~block_addrs:[] sub)
           in
-          (* stl and dce read the KB the vsa pass populates. *)
-          let stl_sub, t_stl = (sub, 0.0) in
-          ignore target; ignore sp;
-
-          let _dced, t_dce =
-            time (fun () -> Dce.dce ~target stl_sub)
-          in
-          let rounds, _ = dce_rounds target stl_sub in
+          let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in
+          let rounds, _ = dce_rounds target sub in
           tot := !tot +. t_vsa;
-          Printf.printf "%s,%s,%d,%.4f,%.4f,%.4f,%.4f,%d\n"
+          Printf.printf "%s,%s,%d,%.4f,%.4f,%.4f,%d\n"
             (Core.Filename.basename path) (Sub.name sub) ndefs t_rel
-            t_vsa t_stl t_dce rounds));
+            t_vsa t_dce rounds));
   Printf.eprintf "\ntotal vsa time = %.2fs\n" !tot

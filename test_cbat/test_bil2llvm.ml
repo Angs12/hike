@@ -19,18 +19,18 @@ module Sm = Hike.Stack_model
 let stamp_tag (d : def term) (t : Sm.sec_tag option) : def term =
   match t with Some t -> Sm.set_sec_tag t d | None -> d
 
-(* The fixture stamp: the kinds the producer stamps onto the defs,
-   hand-stated per fixture; then the promotion. *)
-let stamp (tags : (Tid.t * Cu.vsa_kind) list) (sub : sub term) : sub term =
+(* The fixture stamp: the PRODUCTION tags, hand-stated per fixture
+   (the same sec_tag the attribution stamps); then the promotion. *)
+let stamp (tags : (Tid.t * Sm.sec_tag) list) (sub : sub term) : sub term =
   let tags =
     Base.List.fold tags ~init:Tid.Map.empty
-      ~f:(fun m (tid, k) -> Core.Map.set m ~key:tid ~data:k)
+      ~f:(fun m (tid, t) -> Core.Map.set m ~key:tid ~data:t)
   in
   let sub =
     Term.map blk_t sub ~f:(fun blk ->
         Term.map def_t blk ~f:(fun d ->
             match Core.Map.find tags (Term.tid d) with
-            | Some k -> stamp_tag d (tag_of_kind k)
+            | Some t -> stamp_tag d (Some t)
             | None -> d))
   in
   Hike.Sections.promote_sub ~abi:Hike.Abi.x86_64_sysv (mk_facts ()) sub
@@ -50,7 +50,9 @@ let run_poison () =
   in
   (* The unbounded span on the load/store; Dead on the second pair. *)
   let dead_sub = mk_lds_sub "poison_dead" [ ld; st ] in
-  let dead_sub = stamp [ (Term.tid ld, Cu.Dead) ] dead_sub in
+  let dead_sub =
+    stamp [ (Term.tid ld, Sm.Tag.Dead) ] dead_sub
+  in
 
   let ir_holder2 = ref "" in
   let err_dead =
@@ -203,7 +205,7 @@ let run_casts () =
         [], [ (0, mk_ret) ] ]
   in
   (* Singleton Range tag on the store: the converted-cell shape. *)
-  let sub = stamp [ (Term.tid d_st, Cu.Range (pos (-16L), pos (-16L))) ] sub in
+  let sub = stamp [ (Term.tid d_st, Sm.Tag.Stack (pos (-16L), pos (-16L))) ] sub in
   let ir = emit_ir [ sub ] in
   check "CAST: the tagged store reaches memory with its narrowing cast intact"
     (contains_substring ir "store" && contains_substring ir "trunc")
@@ -234,8 +236,8 @@ let run_golden () =
      layout, the write-closed fission shape. *)
   let sub =
     stamp
-      [ (Term.tid d_ld, Cu.Range (pos (-16L), pos (-16L)));
-        (Term.tid d_st, Cu.Range (pos (-24L), pos (-24L))) ]
+      [ (Term.tid d_ld, Sm.Tag.Stack (pos (-16L), pos (-16L)));
+        (Term.tid d_st, Sm.Tag.Stack (pos (-24L), pos (-24L))) ]
       sub
   in
   let sub =
@@ -294,7 +296,7 @@ let run_fp_gpr () =
   in
   let callee = fst (sub_of "fpg_callee" [ [], [ (0, mk_ret) ] ]) in
   let caller_sub =
-    stamp [ (Term.tid d_st, Cu.Range (pos (-16L), pos (-16L))) ] caller_sub in
+    stamp [ (Term.tid d_st, Sm.Tag.Stack (pos (-16L), pos (-16L))) ] caller_sub in
   let ir_holder = ref "" in
   let err = capture_stderr (fun () -> ir_holder := emit_ir [ caller_sub; callee ]) in
   let ir = !ir_holder in
@@ -426,7 +428,7 @@ let run_anchor_residue () =
       [ [ d_st ], [ (1, mk_goto) ];
         [], [ (0, mk_ret) ] ]
   in
-  let sub = stamp [ (Term.tid d_st, Cu.Range (pos (-16L), pos (-16L))) ] sub0 in
+  let sub = stamp [ (Term.tid d_st, Sm.Tag.Stack (pos (-16L), pos (-16L))) ] sub0 in
   (* The anchor is the fold's (region id, index): the residue alloca
      is 33 bytes (the array count is exact, no pad) and the anchor GEP
      sits at the SysV residue — 33 rounded to the entry-SP residue

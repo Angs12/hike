@@ -105,11 +105,9 @@ module Cu = Hike.Stack_model
 
 (* The list-form facts builder (the producer-internal promotion
    product the rewrite pins stamp). *)
-let mk_facts
-    ?(prom_arity = 0) ?(prom_sites = Tid.Map.empty)
-    ?(prom_resolved = Tid.Map.empty) () :
+let mk_facts ?(prom_arity = 0) ?(prom_resolved = Tid.Map.empty) () :
     Hike.Sections.facts =
-  { Hike.Sections.prom_arity; prom_sites; prom_resolved }
+  { Hike.Sections.prom_arity; prom_resolved }
 
 (* The absolute segment-line position of a frame offset (T15): the
    entry RSP is the segment base, so a frame offset o sits at
@@ -197,22 +195,84 @@ let rewrite_one (sub : sub term) : sub term =
   let prog = run_chain_attrib [ sub ] in
   Term.first sub_t prog |> Base.Option.value_exn
 
-(* The slim tag of an old-model kind: the emitter-lane mapping the
-   fixtures' hand-made infos imply (the attribution's own derivation
-   runs in [run_chain_attrib]). *)
-let tag_of_kind (k : Cu.vsa_kind) : Sm.sec_tag option =
-  let open Hike.Stack_model in
-  let open Tag in
-  Some
-    (match k with
-    | Range (l, h) -> Stack (l, h)
-    | Infinite (l, h) when Cu.is_unbounded_span l h -> Stack_unbounded
-    | Infinite (l, h) -> Stack (l, h)
-    | Caller (l, h) ->
-        if Int64.equal l Sm.segment_base && Int64.equal h Sm.segment_base then
-          Stack (l, h)
-        else Args (l, h)
-    | Mixed (l, h) -> Stack (l, h)
-    | Dead -> Dead)
+let pos (o : int64) : int64 = Int64.add Hike.Stack_model.segment_base o
+(* The producer, composed: the fixpoint's two products (the block
+   environments and the REWRITTEN SUB) — the tests' one-line driver.
+   [install_run] happens at the caller, exactly like the pass. *)
+let produce ?(block_addrs = []) ?(images = [])
+    target (prog : program term) (sub : sub term) :
+    (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term =
+  Hv.fixpoint target sp ~prog ~images ~block_addrs sub
+  |> Base.Option.value ~default:(Tid.Map.empty, sub)
+
+(* The T2 chain replica over fixtures: the composed production entries
+   (fixpoint, facts, the one install, the jmp/dyn stamps, the
+   attribution, and the rewrite) — the tests' one-line driver.
+   Returns the rewritten program. *)
+let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
+  let target = Theory.Target.unknown in
+  let prog = Program.create ~subs () in
+  let abi = Hike.Abi.x86_64_sysv in
+  let acc =
+    Seq.fold (Term.enum sub_t prog) ~init:Tid.Map.empty ~f:(fun acc sub ->
+        let envs, sub' = produce target prog sub in
+        Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'))
+  in
+  let all_envs =
+    Core.Map.fold acc ~init:Tid.Map.empty ~f:(fun ~key:_ ~data:(e, _) m ->
+        Core.Map.fold e ~init:m ~f:(fun ~key ~data m' -> Core.Map.set m' ~key ~data))
+  in
+  Kb.install_run ~block_envs:all_envs;
+  let prog =
+    Term.map sub_t prog ~f:(fun sub ->
+        let _, sub' =
+          Core.Map.find acc (Term.tid sub)
+          |> Option.value ~default:(Tid.Map.empty, sub)
+        in
+        Sm.stamp_dyn_allocs
+          ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub') sub')
+  in
+  let ctx =
+    Hike.Sections.attribute ~word:8 ~entry:Hike.Stack_model.segment_base ~abi ~spans
+      ~denote:Hv.denote_exp_at prog
+  in
+  let prog = Term.map sub_t prog ~f:(Hike.Sections.stamp_tags ctx) in
+  Hike.Sections.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base ~abi ~sp
+    ~symtab:None ~spans ~denote:Hv.denote_exp_at ~ctx prog
+
+(* Installs the fixtures' block environments through the sanctioned KB
+   lifecycle (the attribution's seam reads them). *)
+let install_fixture_envs (subs : sub term list) : bool =
+  let all_envs, ok =
+    Base.List.fold subs ~init:(Tid.Map.empty, true) ~f:(fun (m, ok) sub ->
+        match
+          Hv.fixpoint Theory.Target.unknown sp
+            ~prog:(Program.create ~subs:[ sub ] ())
+            ~images:[] ~block_addrs:[] sub
+        with
+        | None -> (m, false)
+        | Some (envs, _) ->
+            (Core.Map.merge m envs
+               ~f:(fun ~key:_ el ->
+                 match el with
+                   | `Left v | `Right v | `Both (_, v) -> Some v),
+             ok))
+  in
+  Kb.install_run ~block_envs:all_envs;
+  ok && not (Core.Map.is_empty all_envs)
+
+(* The attribution ctx over fixtures with freshly installed envs. *)
+let fixture_ctx ?(spans = []) (subs : sub term list) : Hike.Sections.ctx =
+  ignore (install_fixture_envs subs);
+  Hike.Sections.attribute ~word:8 ~entry:Hike.Stack_model.segment_base
+    ~abi:Hike.Abi.x86_64_sysv ~spans ~denote:Hv.denote_exp_at
+    (Program.create ~subs ())
+
+(* The single-sub rewrite: the chain replica's rewritten sub. *)
+let rewrite_one (sub : sub term) : sub term =
+  let prog = run_chain_attrib [ sub ] in
+  Term.first sub_t prog |> Base.Option.value_exn
+
+
 
 (* Full-range 64-bit word; [w64] takes a native int. *)

@@ -1,5 +1,5 @@
 (* Prints one line per def whose address window is >= 2^63, plus per-sub counts.
-   Usage: wbig_diag.exe <binary>; unfiltered subs that fail tagging report and skip. *)
+   Usage: wbig_diag.exe <binary>; subs that fail the fixpoint report and skip. *)
 
 open Bap.Std
 open Probe_common

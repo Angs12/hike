@@ -185,7 +185,6 @@ val stamp_tags : ctx -> sub term -> sub term
     resolution over the seam, and the BIR rewrite. *)
 type facts = {
   prom_arity : int;
-  prom_sites : Hike_stack_model.call_site Tid.Map.t;
   prom_resolved : Tid.t option Tid.Map.t;
 }
 
@@ -198,15 +197,14 @@ val dynamic_alloc_tids_of :
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   sub term -> Tid.Set.t
 
-(** The caller side: the resolved indirect calls and the escaping
-    SP-formed extents. *)
+(** The caller side: the resolved indirect calls (the target's
+    denotation class at each site). *)
 val caller_side :
   denote:(blk:blk term -> ?def:def term -> exp ->
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   symtab:Symtab.t option ->
   name_tid:(string * Tid.t) list ->
-  abi:Hike_abi.t ->
-  sub term -> Tid.t option Tid.Map.t * (int64 * int64) list
+  sub term -> Tid.t option Tid.Map.t
 
 (** The resolution product alone. *)
 val call_resolution :
@@ -214,7 +212,6 @@ val call_resolution :
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   symtab:Symtab.t option ->
   name_tid:(string * Tid.t) list ->
-  abi:Hike_abi.t ->
   sub term -> Tid.t option Tid.Map.t
 
 (** The promotion rewrite: the sub gains its promoted parameters as

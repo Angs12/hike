@@ -30,7 +30,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
   let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
   let opt (r : ('a, 'b) Result.t) : 'a option =
     match r with Ok w -> Some w | Error _ -> None in
-  let kind_of (blk : blk term) (d : def term) : Hike.Stack_model.vsa_kind option =
+  let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Cbat_extraction.kind option =
     let open Base.Option in
     Base.Option.bind
       (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
@@ -42,7 +42,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
     >>= fun ws ->
     if Ws.is_bottom ws || Ws.in_stack_segment ws then
       Some (Vsa.Cbat_extraction.caller_split (Vsa.Cbat_extraction.classify ws))
-    else if Ws.is_top ws then Some Hike.Stack_model.unbounded_span
+    else if Ws.is_top ws then Some Cbat_vsa.Cbat_extraction.unbounded_span
     else None
   in
   let prod_map =
@@ -56,7 +56,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
   let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
   Core.Map.iteri prod_map ~f:(fun ~key:tid ~data:k ->
       match k with
-      | Hike.Stack_model.Infinite (lo, hi) when Hike.Stack_model.is_unbounded_span lo hi ->
+      | Cbat_vsa.Cbat_extraction.Infinite (lo, hi)
+        when Cbat_vsa.Cbat_extraction.is_unbounded_span lo hi ->
           Hashtbl.add prod_unbounded tid ()
       | _ -> ());
   let prod_unbounded_count = Hashtbl.length prod_unbounded in

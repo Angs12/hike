@@ -34,14 +34,12 @@ let load_addr_of (word_bits : int) (d : def term) : exp option =
   | _ -> None
 
 (* One-line contract: the address denotates, in the def's own
-   before-env, to the entry-RSP cell — the return-address read. *)
+   before-env, to the entry-RSP cell — THE return-address fact. *)
 let reads_retaddr_cell ~(denote : denote) (blk : blk term) (d : def term)
     (addr : exp) : bool =
-  let open Base.Option in
-  (denote ~blk ~def:d addr |> Result.to_option
-   >>= Model.singleton_stack_position
-   >>= fun pos -> Some (Int64.equal pos Model.segment_base))
-  |> Option.value ~default:false
+  match denote ~blk ~def:d addr with
+  | Ok ws -> Model.is_return_address ws
+  | Error _ -> false
 
 (* The retaddr proof, re-derived through the denotation: the defs
    whose load address denotates — at the def's own before-env — to
@@ -167,11 +165,11 @@ let dispatch_jmps (j : jmp term) (sel : exp)
    as that call), and the emitter's shape dispatch renders exactly
    this class through the return lane.  The var-free target leaves no
    reader for the retaddr load, so the sweep kills it. *)
-let ret_jmp () : jmp term =
+let ret_jmp ~(word_bits : int) : jmp term =
   Jmp.create
     (Call
        (Call.create
-          ~target:(Indirect (Bil.Unknown ("hike-cfg-ret", Type.Imm 64)))
+          ~target:(Indirect (Bil.Unknown ("hike-cfg-ret", Type.Imm word_bits)))
           ()))
 
 (* One jmp's rewrite decision: the return epilogue (a noreturn call
@@ -180,7 +178,7 @@ let ret_jmp () : jmp term =
    becomes the guarded-goto series (a call dispatch's continuation is
    the default); everything else stays. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(blocks : (int64 * tid) list)
+    ~(blocks : (int64 * tid) list) ~(word_bits : int)
     ~(reaching : tid Var.Map.t) ~(blk : blk term) (j : jmp term) :
     jmp term list option =
   let retaddr_read v =
@@ -191,7 +189,8 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
   match Jmp.kind j with
   | Call c -> (
       match (Call.return c, Call.target c) with
-      | None, Indirect (Bil.Var v) when retaddr_read v -> Some [ ret_jmp () ]
+      | None, Indirect (Bil.Var v) when retaddr_read v ->
+          Some [ ret_jmp ~word_bits ]
       | _, Indirect texp ->
           let cont =
             match Call.return c with
@@ -216,14 +215,15 @@ let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
 (* The completion round: every block's jmps pass through the rewrite
    decision; a sub with no decision comes back unchanged. *)
 let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(blocks : (int64 * tid) list) (sub : sub term) : sub term * bool =
+    ~(blocks : (int64 * tid) list) ~(word_bits : int)
+    (sub : sub term) : sub term * bool =
   let changed = ref false in
   let reblock (blk : blk term) : blk term =
     let js = Seq.to_list (Term.enum jmp_t blk) in
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~blocks ~reaching ~blk j
+          rewritten_jmps ~denote ~retaddr ~blocks ~word_bits ~reaching ~blk j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
     in
     match decided with
@@ -254,6 +254,10 @@ let complete ~(denote : denote)
     (sub : sub term) : sub term * bool =
   let retaddr = retaddr_defs ~abi ~sol sub in
   Vsa.set_section_images images;
-  let sub', changed = rewrite_sub ~denote ~retaddr ~blocks sub in
+  let word_bits = 8 * abi.Hike_abi.word in
+  let result =
+    (try rewrite_sub ~denote ~retaddr ~blocks ~word_bits sub
+     with exn -> Vsa.set_section_images []; raise exn)
+  in
   Vsa.set_section_images [];
-  (sub', changed)
+  result

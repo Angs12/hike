@@ -24,7 +24,7 @@ let classify_hull (w : int64) : string =
 
 (* The window hull from the Caller tags (the promoted slots excluded).
    A wrapped pair (lo > hi) floors the hull at one word. *)
-let window_hull (offsets : Model.vsa_kind Tid.Map.t)
+let window_hull (offsets : Vsa.Cbat_extraction.kind Tid.Map.t)
     (slots : int Tid.Map.t) : int64 option =
   let word = 8L in
   let acc = ref None in
@@ -40,7 +40,7 @@ let window_hull (offsets : Model.vsa_kind Tid.Map.t)
       if Core.Map.mem slots dtid then ()
       else
         match k with
-        | Model.Caller (lo, hi) -> see lo hi
+        | Vsa.Cbat_extraction.Caller (lo, hi) -> see lo hi
         | _ -> ());
   !acc
 
@@ -126,8 +126,8 @@ let () =
               Core.Map.to_alist offsets
               |> Base.List.exists ~f:(fun (_dtid, k) ->
                   match k with
-                  | Model.Mixed _ -> true
-                  | Model.Caller (lo, hi) -> Int64.compare lo hi > 0
+                  | Vsa.Cbat_extraction.Mixed _ -> true
+                  | Vsa.Cbat_extraction.Caller (lo, hi) -> Int64.compare lo hi > 0
                   | _ -> false)
             in
             (match hull with
@@ -145,17 +145,17 @@ let () =
                  Core.Map.iteri offsets
                    ~f:(fun ~key:dtid ~data:k ->
                      match k with
-                       | Model.Caller (lo, hi) when Int64.compare lo hi <= 0 ->
+                       | Vsa.Cbat_extraction.Caller (lo, hi) when Int64.compare lo hi <= 0 ->
                            let ext = Int64.sub hi Model.segment_base in
                            if Int64.compare ext window_bytes > 0 then
                              Printf.printf
                                "CULPRIT\t%s\t%s\tCaller\t%s\t%.16Lx\t%.16Lx\t%Ld\n"
                                bin name (name_of dtid) lo hi ext
-                       | Model.Caller (lo, hi) ->
+                       | Vsa.Cbat_extraction.Caller (lo, hi) ->
                            Printf.printf
                              "CULPRIT\t%s\t%s\tCallerWrapped\t%s\t%.16Lx\t%.16Lx\n"
                              bin name (name_of dtid) lo hi
-                       | Model.Mixed (lo, hi) ->
+                       | Vsa.Cbat_extraction.Mixed (lo, hi) ->
                            Printf.printf
                              "CULPRIT\t%s\t%s\tMixed\t%s\t%.16Lx\t%.16Lx\n"
                              bin name (name_of dtid) lo hi

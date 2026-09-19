@@ -31,9 +31,8 @@ type sec_owner = Bil2llvm_env.sec_owner = {
   base : Llvm.llvalue;
   (* The component's emission decision (components only). *)
   typed_w : int;                (* bytes per element: 8/4/2/1 *)
-  is_const : bool;
-  bss : bool;
 }
+
 
 (** One section of the emitted module: the base global, the native
     span, the byte image, and the byte-exact owner tiling.  Empty

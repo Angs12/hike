@@ -206,7 +206,7 @@ let sweep_worklist ~(abi : Abi.t) ~(roots : Var.Set.t) (sub : sub term) :
    degraded run's epilogue, a cast target): the completion's rewrite
    owns the proven epilogues, and this shape test catches the residual
    — the return lane renders every return-less call anyway. *)
-let ret_replacement (j : jmp term) : jmp term =
+let ret_replacement ~(word_bits : int) (j : jmp term) : jmp term =
   match Jmp.kind j with
   | Call c -> (
       match (Call.target c, Call.return c) with
@@ -214,7 +214,7 @@ let ret_replacement (j : jmp term) : jmp term =
         Jmp.with_kind j
           (Call
              (Call.with_target c
-                (Indirect (Bil.Unknown ("hike-dce-ret", Type.Imm 64)))))
+                (Indirect (Bil.Unknown ("hike-dce-ret", Type.Imm word_bits)))))
       | _ -> j)
   | _ -> j
 
@@ -225,7 +225,9 @@ let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else
     let abi = Abi.of_target target in
+    let word_bits = 8 * abi.Abi.word in
     let sub =
-      Term.map blk_t sub ~f:(Blk.map_elts ~jmp:ret_replacement)
+      Term.map blk_t sub
+        ~f:(Blk.map_elts ~jmp:(ret_replacement ~word_bits))
     in
     sweep_worklist ~abi ~roots sub

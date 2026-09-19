@@ -152,27 +152,18 @@ module Stack_model : sig
       absolute, so a frame offset o sits at [segment_base + o]). *)
   val segment_base : int64
 
-  (** Alias of the kind enum in [Cbat_extraction]. *)
-  type vsa_kind = Hike_stack_model.vsa_kind =
-    | Range of int64 * int64
-    | Infinite of int64 * int64
-    | Caller of int64 * int64
-    | Mixed of int64 * int64
-    | Dead
-
-  (** The fully-infinite span — the kind of a TOP denotation — and the
-      fact its consumers key on. *)
-  val unbounded_span : vsa_kind
-  val is_unbounded_span : int64 -> int64 -> bool
-
   (** The denotation's single stack position (absolute, on the
       segment line), when it denotates to exactly one — the
       cell-identity predicate. *)
   val singleton_stack_position : Cbat_vsa.WordSet.t -> int64 option
 
-  type call_site = Hike_stack_model.call_site = {
-    site_slots : (int * Tid.t) list;
-  }
+  (** THE return-address fact: an address that denotes to the
+      stack-symbolic singleton at the entry-RSP cell, and its two
+      projections — the stamped Section Tag form and the pre-solve
+      exact-pop shape form. *)
+  val is_return_address : Cbat_vsa.WordSet.t -> bool
+  val is_return_address_tag : sec_tag -> bool
+  val is_return_address_shape : abi:Abi.t -> exp -> bool
 
   (** One emitted section component: the word range of the span
       it covers plus the typed-emission decision. *)
@@ -185,9 +176,6 @@ module Stack_model : sig
     typed_w : int;
   }
 
-  (** Structural equalities (fixture/diagnostic use). *)
-  val equal_vsa_kind : vsa_kind -> vsa_kind -> bool
-
   (** A word of a section image is string text iff a printable run
       crosses its start boundary (see [Hike_stack_model] for the
       rule); the one home of the string-text predicate. *)
@@ -195,7 +183,6 @@ module Stack_model : sig
 
   (** Mints and recognizes fission vars. *)
   val region_mem : int -> var
-  val region_base : word:int -> int -> var
   val is_region_mem : var -> bool
 
   (** The incoming-window memory var (the caller's world) and its test. *)
@@ -278,8 +265,3 @@ val section_spec_of :
   comps:Hike_stack_model.sec_comp list ->
   whole:(int * int64 * int64) list ->
   Project.t -> Bil2llvm.section_spec
-
-(** The whole pass chain in dependency order, applied without the pass
-    registry — the batch driver's entry. [output] is the LLVM IR file
-    the convlir stage prints. *)
-val run_chain : output:string -> Project.t -> unit

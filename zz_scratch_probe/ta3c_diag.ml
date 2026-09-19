@@ -208,7 +208,7 @@ let tagdiff_binary ~(use_images : bool) (path : string) : unit =
         seam_kinds_of sol sub
       in
       incr n;
-      if not (Core.Map.equal Model.equal_vsa_kind with_img without_img) then (
+      if not (Core.Map.equal Cbat_vsa.Cbat_extraction.equal_kind with_img without_img) then (
         incr diff;
         Printf.printf "tagdiff DIFF sub %s in %s\n" (Sub.name sub) path));
   Printf.printf "tagdiff %s: %d subs, %d diff\n%!" (Filename.basename path) !n !diff

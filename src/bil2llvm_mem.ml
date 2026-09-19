@@ -123,9 +123,7 @@ let mem_access llvm_builder blk_tid sub_tid fr def_tag
           end;
           let* typ = typ_lltype_m (Var.typ var) in
           return @@ Llvm.poison typ
-      | Some (Hike_stack_model.Tag.Stack (lo, hi))
-        when Stdlib.Int64.equal lo Hike_stack_model.segment_base
-             && Stdlib.Int64.equal hi Hike_stack_model.segment_base -> (
+      | Some def_tag when Hike_stack_model.is_return_address_tag def_tag -> (
           (* The return-address cell: dies with the real ret. *)
           match find_mem_node (Def.rhs def) with
           | Some (`Load (addr, size))

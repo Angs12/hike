@@ -125,19 +125,19 @@ let temp_defs_of_blk (blk : blk term) : def term Var.Map.t =
          Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
 
 (* Derives intrinsic widths from types. *)
-let fp_intrinsic_sizes (args : Arg.t list) (rets : Arg.t list) :
-    int * int =
+let fp_intrinsic_sizes ~(word_bits : int) (args : Arg.t list)
+    (rets : Arg.t list) : int * int =
   let arg_w (i : int) : int =
     match Base.List.nth args i with
     | Some a -> (
-        match Var.typ (Arg.lhs a) with Type.Imm w -> w | _ -> 64)
-    | None -> 64
+        match Var.typ (Arg.lhs a) with Type.Imm w -> w | _ -> word_bits)
+    | None -> word_bits
   in
   let res_w =
     match rets with
     | r :: _ -> (
-        match Var.typ (Arg.lhs r) with Type.Imm w -> w | _ -> 64)
-    | [] -> 64
+        match Var.typ (Arg.lhs r) with Type.Imm w -> w | _ -> word_bits)
+    | [] -> word_bits
   in
   (arg_w 0, res_w)
 
@@ -157,7 +157,8 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
   let args = get_args ctx target in
   (* Widths come from declared types. *)
   let rets = get_rets ctx target in
-  let in_w, res_w = fp_intrinsic_sizes args rets in
+  let word_bits = 8 * ctx.abi.Abi.word in
+  let in_w, res_w = fp_intrinsic_sizes ~word_bits args rets in
   (* Operand defs indexed once per call. *)
   let temp_defs = temp_defs_of_blk blk in
   let sig_ = fp_sig_of op in
@@ -269,10 +270,10 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
      return block).  Each ret takes the result at its own declared
      width. *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
-      let rw = match Var.typ ret with Type.Imm w -> w | _ -> 64 in
+      let rw = match Var.typ ret with Type.Imm w -> w | _ -> word_bits in
       let r_lane =
         coerce_int_width llvm_ctx llvm_builder
-          ~bits:(int_width_or 64 r) r rw in
+          ~bits:(int_width_or word_bits r) r rw in
       insert_local ctx blk_tid ret r_lane;
       Option.iter (fun t -> insert_local ctx t ret r_lane) fallthrough);
   finish_call llvm_builder ctx fallthrough

@@ -451,11 +451,8 @@ let stamp_shape
 let empty_layout : Sm.sub_layout =
   { regions = []; anchor = None; window_param = false }
 
-(* Stamps the old-model kind's slim tag onto a fixture def. *)
-let tag_def (k : Sm.vsa_kind) (d : def term) : def term =
-  match tag_of_kind k with
-  | Some t -> Sm.set_sec_tag t d
-  | None -> d
+(* Stamps the production tag onto a fixture def. *)
+let tag_def (t : Sm.sec_tag) (d : def term) : def term = Sm.set_sec_tag t d
 
 let run_emitter_shapes () =
   let m = memv "pr_d_m" in
@@ -491,7 +488,7 @@ let run_emitter_shapes () =
   let d_ld =
     Def.create (v64 "pr_d2_t")
       (Bil.Load (Bil.Var (Sm.region_mem 0), minus_addr sp 16L, LittleEndian, `r64))
-    |> tag_def (Sm.Range (pos (-16L), pos (-16L)))
+    |> tag_def (Sm.Tag.Stack (pos (-16L), pos (-16L)))
   in
   let d2 = straight_sub "pr_d2_residue" [ d_ld ] in
   let ir2 = emit_ir [ stamp_shape ~layout:(residue_layout 32L 8192L) d2 ] in
@@ -526,7 +523,7 @@ let run_emitter_shapes () =
   let d3_ld =
     Def.create (v64 "pr_d3_t")
       (Bil.Load (Bil.Var m, minus_addr sp 0x80000000L, LittleEndian, `r64))
-    |> tag_def (Sm.Range (pos (-0x80000000L), pos (-0x80000000L)))
+    |> tag_def (Sm.Tag.Stack (pos (-0x80000000L), pos (-0x80000000L)))
   in
   let d3 = straight_sub "pr_d3_huge" [ d3_ld ] in
   let clamp_layout : Sm.sub_layout =

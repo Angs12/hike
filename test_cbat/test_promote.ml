@@ -1,8 +1,8 @@
 (* The stack-arg promotion's pins: the promotion-fact derivation through
    the REAL fixpoint ([Hike.Vsa.fixpoint]) and the tree's promotion facts
-   / [prom_retaddr] / [prom_sites] / [prom_resolved] — the producer's
-   promotion product), the promotion as a BIR rewrite
-   ([Hike.Sections.promote_sub] — real args, parameter reads, call-arg
+   ([prom_arity] / [prom_resolved] — the producer's promotion product),
+   the promotion as a BIR rewrite ([Hike.Sections.promote_sub] — real
+   args, parameter reads, call-arg
    defs, direct resolved targets), and the promotion's emitted shape
    (the promoted signature, the memory-convention twin, the pointer
    call).  Fixtures stamp the producer's facts onto BIR terms; the
@@ -399,7 +399,7 @@ let run_producer_promotion () =
     (ignore (install_fixture_envs [ a6 ]);
      let resolved =
        Hike.Sections.call_resolution ~denote:Hv.denote_exp_at ~symtab:None
-         ~name_tid:[] ~abi:Hike.Abi.x86_64_sysv a6
+         ~name_tid:[] a6
      in
      Core.Map.find resolved (Term.tid j) = Some None);
   ()

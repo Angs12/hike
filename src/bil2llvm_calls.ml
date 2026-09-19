@@ -9,24 +9,18 @@ open Bil2llvm_exp
 open Bil2llvm_fp
 
 
-(* The call-push marker: a call in a block that writes SP pushed its
-   return address (the lifter materializes the push in the caller); a
-   block that writes no SP pushed nothing (the intrinsic twins). *)
-let pushes_sp ctx (blk : blk term) : bool =
-  Term.enum def_t blk |> Seq.exists ~f:(fun d -> Var.same (Def.lhs d) ctx.sp)
-
-(* The matched-pair SP restore: the callee's ret pops the retaddr the
-   call pushed, so the return edge rebinds the caller's SP to its
-   pre-call value.  The binding is edge-keyed — only the call's own
-   edge into the continuation restores. *)
-let restore_sp_after_call llvm_builder ctx blk_tid ~pushed fallthrough_tid =
+(* The matched-pair SP restore: every call reaching this lane is a
+   MACHINE call — its retaddr push is materialized in the caller's BIR
+   and the callee's ret pops it, so the return edge rebinds the
+   caller's SP to its pre-call value (modeled ops — intrinsics —
+   render inline and never arrive here).  The binding is edge-keyed —
+   only the call's own edge into the continuation restores. *)
+let restore_sp_after_call llvm_builder ctx blk_tid fallthrough_tid =
   let open KB in
-  if not pushed then return ()
-  else
-    let sp_key = ctx.sp in
-    match get_local ctx blk_tid sp_key with
-    | None -> return ()
-    | Some post_push ->
+  let sp_key = ctx.sp in
+  match get_local ctx blk_tid sp_key with
+  | None -> return ()
+  | Some post_push ->
         let* llvm_ctx = Context.get llvm_ctx_var in
         let restored =
           Llvm.build_add post_push
@@ -401,10 +395,7 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid blk sub
   in
   (match fallthrough with
   | Some fallthrough ->
-      let* () =
-        restore_sp_after_call llvm_builder ctx blk_tid
-          ~pushed:(pushes_sp ctx blk) fallthrough
-      in
+      let* () = restore_sp_after_call llvm_builder ctx blk_tid fallthrough in
       finish_call llvm_builder ctx (Some fallthrough)
   | None ->
       if emit_unreachable then finish_call llvm_builder ctx None
@@ -444,10 +435,7 @@ let create_indirect_call llvm_builder blk_tid blk sub (j : jmp term) =
     create_call_args blk_tid llvm_builder icall_tid
   in
   let* () = bind_call_rets ctx blk_tid llvm_builder fn_typ func_ptr args rets in
-  let* () =
-    restore_sp_after_call llvm_builder ctx blk_tid
-      ~pushed:(pushes_sp ctx blk) fallthrough
-  in
+  let* () = restore_sp_after_call llvm_builder ctx blk_tid fallthrough in
   finish_call llvm_builder ctx (Some fallthrough)
 
 (* The Thunk — the memory-convention twin of a promoted sub. *)

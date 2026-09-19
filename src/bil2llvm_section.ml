@@ -405,8 +405,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
                 Int64.add lo (Int64.of_int (c.Model.lo_w * word - 1));
               base = g;
               typed_w = word;
-              is_const;
-              bss }
+            }
             :: !owners;
           counter := !counter + 1
         end;
@@ -422,8 +421,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
                 (Int64.of_int (c.Model.hi_w * word + (word - 1)));
             base = g;
             typed_w = c.Model.typed_w;
-            is_const;
-            bss }
+          }
           :: !owners;
         cursor := c.Model.hi_w + 1);
     if !cursor < words then begin
@@ -437,8 +435,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
           own_hi = hi;
           base = g;
           typed_w = word;
-          is_const;
-          bss }
+        }
         :: !owners;
       counter := !counter + 1
     end;

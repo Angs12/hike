@@ -218,27 +218,19 @@ let create_cast llvm_builder (cast, i, llvm_val) =
       in
       return @@ coerce UNSIGNED shifted
 
+(* The immediate constant: the NATIVE bits, always — the data/access
+   domain's one world.  A data word that names code renders the lifted
+   address only in the section initializers (the function domain's
+   thunk boundary); an immediate in address arithmetic must stay in
+   the native world the section map resolves in. *)
 let create_immidiate word =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
-  let* ctx = Context.get emit_ctx_var in
-  (* Remaps native function constants (<=64-bit words only). *)
-  let remapped =
-    if Word.bitwidth word <= 64 then
-      let v = Word.to_int64_exn word in
-      Base.Option.map (lookup_native_fn ctx llvm_module v) ~f:(fun fn ->
-          Llvm.const_ptrtoint fn (Llvm.i64_type llvm_ctx))
-    else None
-  in
-  match remapped with
-  | Some c -> return c
-  | None ->
-      return
-      @@ Llvm.const_int_of_string
-           (Llvm.integer_type llvm_ctx (Word.bitwidth word))
-           (Word.string_of_value word)
-           16
+  return
+  @@ Llvm.const_int_of_string
+       (Llvm.integer_type llvm_ctx (Word.bitwidth word))
+       (Word.string_of_value word)
+       16
 
 (* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
@@ -320,7 +312,7 @@ let rec create_exp llvm_builder blk_tid exp =
       | None ->
           let* llvm_ctx' = Context.get llvm_ctx_var in
           let want_w =
-            match Var.typ v with Type.Imm w -> w | _ -> 64
+            match Var.typ v with Type.Imm w -> w | _ -> 8 * ctx.abi.Abi.word
           in
           match probe_local_family ctx blk_tid v ~want_w with
           | Some (val_at_w, bound_w) ->

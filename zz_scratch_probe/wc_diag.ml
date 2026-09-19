@@ -1,8 +1,9 @@
-(* Window-class probe: the producer's window-class inputs per sub, at
-   the production chain (the composed producer) and at a replica of the
+(* Window probe: per sub it prints the finalized tree's residue/Args
+   verdict (the window geometry the layout consumes) and the promoted
+   slots/arity, at the production chain and at a replica of the
    production fixpoint.  Per sub it prints:
-   - the verdict: Model.window_class, the promoted slots/arity,
-   - the Caller/Mixed tags in [offsets] (the tag channel),
+   - the verdict: the tree's window extent, the promoted slots/arity,
+   - the seam-kind tags (the test-seam channel),
    - [sp_extents] (the stored-value channel),
    - the escape channels replicated on the same solution: each store's
      data denotation at the BLOCK-ENTRY state (where caller_side reads
@@ -97,11 +98,11 @@ let stack_hull (e : exp) (st : AI.t) : (int64 * int64) option =
       | Some offs -> hull offs)
 
 let print_info (abi : Hike_abi.t) (sub : sub term)
-    (offsets : Model.vsa_kind Tid.Map.t)
+    (offsets : Vsa.Cbat_extraction.kind Tid.Map.t)
     (envs : (Vsa.AI.t * Vsa.AI.t) Tid.Map.t) : unit =
   let name = Sub.name sub in
   let tree_wc, tree_arity = tree_verdict abi envs sub in
-  Printf.printf "VERDICT %s: window_class=%s\n%!" name
+  Printf.printf "VERDICT %s: window_extent=%s\n%!" name
     (match tree_wc with
      | None -> "None"
      | Some w -> Printf.sprintf "Some(%Ld)" w);
@@ -114,7 +115,7 @@ let print_info (abi : Hike_abi.t) (sub : sub term)
       |> Seq.iteri ~f:(fun i d -> Base.Hashtbl.set names ~key:(Term.tid d)
                                       ~data:(Printf.sprintf "%s#%d" bn i)));
   Core.Map.iteri offsets
-    ~f:(fun ~key:dtid ~data:(kind : Model.vsa_kind) ->
+    ~f:(fun ~key:dtid ~data:(kind : Vsa.Cbat_extraction.kind) ->
         match kind with
         | Caller (lo, hi) ->
           Printf.printf "  TAG %s Caller(abs %Ld..%Ld rel %Ld..%Ld)\n%!"
@@ -215,13 +216,7 @@ let dig_stores (abi : Hike_abi.t)
           ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
           ~blk e
     in
-    let _sites, exts =
-      Promote.caller_side ~denote ~symtab:None ~name_tid:[] ~abi sub
-    in
-    Base.List.iter exts ~f:(fun (l, h) ->
-        Printf.printf "  CALLER_SIDE-EXT rel(%Ld..%Ld)\n%!" (rel l) (rel h));
-    Printf.printf "  WOULD-BE-AT-DEF window_class=%s (production caller_side: %s)\n%!"
-      (would_be !pre_exts) (would_be exts)
+    Printf.printf "  WOULD-BE-AT-DEF window_extent=%s\n%!" (would_be !pre_exts)
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in

@@ -67,12 +67,9 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
         Core.Map.set m ~key:(Term.tid s) ~data:s)
   in
-  let sp = abi.Hike_abi.sp in
   let reads_retaddr (rhs : exp) : bool =
     match Model.addr_of_rhs rhs with
-    | Some (addr, _) ->
-      Core.Set.equal (Exp.free_vars addr)
-        (Var.Set.singleton sp)
+    | Some (addr, _) -> Model.is_return_address_shape ~abi addr
     | None -> false
   in
   let memo = ref Tid.Map.empty in

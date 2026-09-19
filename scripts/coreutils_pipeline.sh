@@ -134,30 +134,9 @@ do_lift() {
     note "lift: $ok/$total already emitted; lifting ${#pending[@]} remaining SERIALLY (one at a time — parallel lifts OOM)"
     if [ "${#pending[@]}" -gt 0 ]; then
         local name
-        if [ "${HIKE_BATCH:-0}" = "1" ]; then
-            # One process for the whole pending list: the once-per-process
-            # plugin/startup floor amortizes. The driver deletes a binary's
-            # partial .ll on failure, so the file's existence is the verdict;
-            # its begin/end lines (with per-binary ms) land in LIFT_LOG.
-            local args=()
-            for name in "${pending[@]}"; do
-                args+=("$BINS/$name")
-            done
-            (cd "$REPO_ROOT" && dune exec bin/hike_batch.exe -- \
-                --output-dir="$IR" --prefix=out_ --timeout=600 \
-                "${args[@]}") >> "$LIFT_LOG" 2>&1
-            for name in "${pending[@]}"; do
-                if [ -s "$IR/out_$name.ll" ]; then
-                    echo "OK   $name" >> "$LIFT_LOG"
-                else
-                    echo "FAIL $name" >> "$LIFT_LOG"
-                fi
-            done
-        else
-            for name in "${pending[@]}"; do
-                "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
-            done
-        fi
+        for name in "${pending[@]}"; do
+            "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
+        done
         ok=$(( $(grep -c '^OK' "$LIFT_LOG") ))
     fi
     note "lift: $ok/$total emitted OK (details: $LIFT_LOG; timings: $TIMES)"

@@ -117,45 +117,7 @@
  (preprocess
   (pps ppx_bap)))
 
-(executable
- (name dead_diag)
- (modules dead_diag)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core
-  graphlib
-  threads)
- (flags
-  :standard -g)
- (preprocess
-  (pps ppx_bap)))
 
-(executable
- (name dump_tags)
- (modules dump_tags)
- (libraries
-  probe_common
-  hike
-  bap
-  bap-core-theory
-  bap-main
-  bap-future
-  cbat_vsa
-  cbat_vsa_domain
-  core
-  graphlib
-  threads)
- (flags
-  :standard -g)
- (preprocess
-  (pps ppx_bap)))
 
 (executable
  (name vsa_debug)
@@ -406,9 +368,3 @@
 
 
 
-(executable
- (name zz_ret_test)
- (modules zz_ret_test)
- (libraries bap bap-main bap-core-theory)
- (preprocess
-  (pps ppx_bap)))

@@ -179,71 +179,6 @@ type portion = {
 (* [entry, entry+word-1]; Args begins at entry+word.                   *)
 (* ------------------------------------------------------------------ *)
 
-let stack_floor ~(entry : int64) : int64 = Stdlib.Int64.add entry Stdlib.Int64.min_int
-let args_ceiling : int64 = Stdlib.Int64.max_int
-
-let args_base ~(entry : int64) ~(word : int) : int64 =
-  Stdlib.Int64.add entry (Stdlib.Int64.of_int word)
-
-let stack_top ~(entry : int64) ~(word : int) : int64 =
-  Stdlib.Int64.pred (args_base ~entry ~word)
-
-(* [hi + n - 1] in signed position arithmetic, saturating at the
-   ceiling — the sound full interval, never a wrapped short one. *)
-let expand_hi ~(cap : int64) (hi : int64) (n : int) : int64 =
-  let w = Stdlib.Int64.of_int (n - 1) in
-  let r = Stdlib.Int64.add hi w in
-  if Stdlib.Int64.compare r hi < 0 || Stdlib.Int64.compare r cap > 0 then cap else r
-
-(* [hi + n - 1] in unsigned address arithmetic; wrapping past the
-   domain's top saturates at the top (2^64-1). *)
-let expand_hi_unsigned (hi : int64) (n : int) : int64 =
-  let w = Stdlib.Int64.of_int (n - 1) in
-  let r = Stdlib.Int64.add hi w in
-  if Stdlib.Int64.unsigned_compare r hi < 0 then -1L else r
-
-(* The intersection of [lo, hi] (ordered by [cmp]) with [slo, shi]. *)
-let clip ~(cmp : int64 -> int64 -> int) (lo : int64) (hi : int64)
-    (slo : int64) (shi : int64) : (int64 * int64) option =
-  let lo = if cmp lo slo >= 0 then lo else slo in
-  let hi = if cmp hi shi <= 0 then hi else shi in
-  if cmp lo hi <= 0 then Some (lo, hi) else None
-
-(* A stack-symbolic set's offset extrema lifted onto the position
-   line; None when not representable. *)
-let positions_of_offsets (ws : Vsa.WordSet.t) : (int64 * int64) option =
-  match Vsa.WordSet.offset_extrema ws with
-  | None -> None
-  | Some (lo, hi) -> (
-      match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-      | Ok lo, Ok hi -> (
-          match
-            ( Vsa.Cbat_extraction.position_of_offset lo,
-              Vsa.Cbat_extraction.position_of_offset hi )
-          with
-          | Some lo, Some hi -> Some (lo, hi)
-          | _ -> None)
-      | _ -> None)
-
-(* A plain set's unsigned extrema; None when not representable. *)
-let unsigned_bounds (ws : Vsa.WordSet.t) : (int64 * int64) option =
-  match Vsa.WordSet.min_elem ws, Vsa.WordSet.max_elem ws with
-  | Some lo, Some hi -> (
-      match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-      | Ok lo, Ok hi -> Some (lo, hi)
-      | _ -> None)
-  | _ -> None
-
-(* The domain bounds of a possibly-infinite set over [flo, cei]: an
-   unbounded direction extends to the scope bound; a wrapped or
-   circular hull covers the whole scope. *)
-let full_bounds (ws : Vsa.WordSet.t) ~(flo : int64) ~(cei : int64)
-    (lo : int64) (hi : int64) : int64 * int64 =
-  if Stdlib.Int64.compare lo hi > 0 then (flo, cei)
-  else if Vsa.WordSet.is_ascending ws then (lo, cei)
-  else if Vsa.WordSet.is_descending ws then (flo, hi)
-  else (flo, cei)
-
 (* ------------------------------------------------------------------ *)
 (* range_of_denotation: the ONE mechanism (S09).  Bottom yields no     *)
 (* portion; every reachable unknown address contributes its full       *)
@@ -253,10 +188,10 @@ let full_bounds (ws : Vsa.WordSet.t) ~(flo : int64) ~(cei : int64)
 let range_of_denotation ~(word : int) ~(entry : int64)
     ~(spans : data_span list) ~(rip : bool) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
-  let floor = stack_floor ~entry in
-  let cei = args_ceiling in
-  let a_base = args_base ~entry ~word in
-  let s_top = stack_top ~entry ~word in
+  let floor = Model.stack_floor ~entry in
+  let cei = Model.args_ceiling in
+  let a_base = Model.args_base ~entry ~word in
+  let s_top = Model.stack_top ~entry ~word in
   (* The Stack/Args portions of an OCCUPIED position interval
      [lo,hi]; the tag carries the ADDRESS bounds [alo,ahi]. *)
   let sub_portions ~(elig : bool) ~(alo : int64) ~(ahi : int64)
@@ -271,12 +206,12 @@ let range_of_denotation ~(word : int) ~(entry : int64)
     in
     let parts =
       Base.List.filter_map
-        [ portion Stack (clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
-          portion Args (clip ~cmp:Stdlib.Int64.compare lo hi a_base cei) ]
+        [ portion Stack (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
+          portion Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base cei) ]
         ~f:(fun x -> x)
     in
     ( Option.map
-        (clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
+        (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
         ~f:(fun _ -> tag alo ahi),
       parts )
   in
@@ -313,14 +248,14 @@ let range_of_denotation ~(word : int) ~(entry : int64)
     match Vsa.WordSet.stack_offsets ws with
     | Some _ -> (
         (* Stack-symbolic: the offset proof lifts onto the line. *)
-        match positions_of_offsets ws with
+        match Model.positions_of_offsets ws with
         | None -> clamped_top_sub
         | Some (lo, hi) ->
-            let occ_hi = expand_hi ~cap:cei hi width in
+            let occ_hi = Model.expand_hi ~cap:cei hi width in
             if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
               (* An unbounded direction: the full supported bounds of the
                  side the interval reaches, identity. *)
-              let nlo, nhi = full_bounds ws ~flo:floor ~cei:cei lo hi in
+              let nlo, nhi = Model.full_bounds ws ~flo:floor ~cei:cei lo hi in
               let t =
                 if Stdlib.Int64.compare nlo a_base >= 0 then Tag.Args_unbounded
                 else Tag.Stack (nlo, nhi)
@@ -336,16 +271,16 @@ let range_of_denotation ~(word : int) ~(entry : int64)
               sub_portions ~elig:single ~alo:lo ~ahi:hi lo occ_hi)
     | None -> (
         let in_band = Vsa.WordSet.in_stack_segment ws in
-        match (if in_band then unsigned_bounds ws else None) with
+        match (if in_band then Model.unsigned_bounds ws else None) with
         | Some (lo, hi) ->
             (* A plain band hull: its own positions on the line; no
                conversion proof (identity). *)
             sub_portions ~elig:false ~alo:lo ~ahi:hi lo
-              (expand_hi ~cap:cei hi width)
+              (Model.expand_hi ~cap:cei hi width)
         | None -> (
             (* A plain data/foreign address: project into every span by
                intersection. *)
-            match unsigned_bounds ws with
+            match Model.unsigned_bounds ws with
             | None ->
                 (* The values are provably stack (in the band) but no
                    bound survives: Args vs Locals is lost — a loud
@@ -378,11 +313,11 @@ let range_of_denotation ~(word : int) ~(entry : int64)
                   | None -> plain_top
                 else plain_top
               else
-                let occ_hi = expand_hi_unsigned hi width in
+                let occ_hi = Model.expand_hi_unsigned hi width in
                 let parts =
                   Base.List.filter_map spans ~f:(fun d ->
                       Base.Option.map
-                        (clip ~cmp:Stdlib.Int64.unsigned_compare lo occ_hi d.ds_lo d.ds_hi)
+                        (Model.clip ~cmp:Stdlib.Int64.unsigned_compare lo occ_hi d.ds_lo d.ds_hi)
                         ~f:(fun (plo, phi) -> (d, plo, phi)))
                 in
                 let whole_in_one =
@@ -427,20 +362,6 @@ type env = {
   denote : blk:blk term -> ?def:def term -> exp ->
            (Vsa.WordSet.t, Type.error) Result.t;
 }
-
-(* The escape extent of a denotation: a StackOff proof's positions
-   (the full supported bounds when unbounded); None otherwise. *)
-let escape_extent ~(entry : int64) (ws : Vsa.WordSet.t) : (int64 * int64) option =
-  match Vsa.WordSet.stack_offsets ws with
-  | None -> None
-  | Some _ -> (
-      let floor = stack_floor ~entry in
-      match positions_of_offsets ws with
-      | None -> Some (floor, args_ceiling)
-      | Some (lo, hi) ->
-          if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
-            Some (full_bounds ws ~flo:floor ~cei:args_ceiling lo hi)
-          else Some (lo, hi))
 
 type collecting = {
   sub : Tid.t;                        (* the current sub *)
@@ -503,17 +424,17 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
 let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
     member list =
   let lo, hi = ext in
-  let floor = stack_floor ~entry:env.entry in
-  let s_top = stack_top ~entry:env.entry ~word:env.word in
-  let a_base = args_base ~entry:env.entry ~word:env.word in
+  let floor = Model.stack_floor ~entry:env.entry in
+  let s_top = Model.stack_top ~entry:env.entry ~word:env.word in
+  let a_base = Model.args_base ~entry:env.entry ~word:env.word in
   let member_of_sec s part =
     Base.Option.map part ~f:(fun (plo, phi) ->
         { m_sec = s; m_lo = plo; m_hi = phi; m_sub = sub; m_def = None;
           m_width = 0; m_store = false; m_identity = true })
   in
   Base.List.filter_map
-    [ member_of_sec Stack (clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
-      member_of_sec Args (clip ~cmp:Stdlib.Int64.compare lo hi a_base args_ceiling) ]
+    [ member_of_sec Stack (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
+      member_of_sec Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base Model.args_ceiling) ]
     ~f:(fun x -> x)
 
 let is_rip_relative (d : def term) : bool =
@@ -560,7 +481,7 @@ let collect (env : env) (prog : program term) : collecting =
               match env.denote ~blk:acc.blk (Bil.Var v) with
               | Error _ -> acc
               | Ok ws -> (
-                  match escape_extent ~entry:env.entry ws with
+                  match Model.escape_extent ~entry:env.entry ws with
                   | None -> acc
                   | Some ext ->
                       Base.List.fold (escape_members ~sub:acc.sub ~env ext)
@@ -582,7 +503,7 @@ let collect (env : env) (prog : program term) : collecting =
           match env.denote ~blk:acc.blk (Bil.Var env.sp) with
           | Error _ -> acc
           | Ok ws -> (
-              match positions_of_offsets ws with
+              match Model.positions_of_offsets ws with
               | Some (lo, hi) when Stdlib.Int64.equal lo hi ->
                 let sp_abs = lo in
                 let win_lo =
@@ -609,7 +530,7 @@ let collect (env : env) (prog : program term) : collecting =
                   (* A failed query keeps the access: the unknown
                      identity contributes full members. *)
                   range_of_denotation ~word:env.word ~entry:env.entry
-                    ~spans:env.spans ~rip:false ~width (Vsa.WordSet.top 64)
+                    ~spans:env.spans ~rip:false ~width (Vsa.WordSet.top (8 * env.word))
               | Ok ws ->
                   range_of_denotation ~word:env.word ~entry:env.entry
                     ~spans:env.spans ~rip:(is_rip_relative d) ~width ws
@@ -638,7 +559,7 @@ let collect (env : env) (prog : program term) : collecting =
                 match env.denote ~blk:acc.blk ~def:d data with
                 | Error _ -> acc
                 | Ok ws -> (
-                    match escape_extent ~entry:env.entry ws with
+                    match Model.escape_extent ~entry:env.entry ws with
                     | None -> acc
                     | Some ext ->
                         Base.List.fold (escape_members ~sub:acc.sub ~env ext)
@@ -722,7 +643,7 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
           incr regions;
           { storage = Stack_region !regions; members = ms })
     | Args -> (
-        let base = args_base ~entry ~word in
+        let base = Model.args_base ~entry ~word in
         let w64 = Stdlib.Int64.of_int word in
         let same_cell lo hi =
           Stdlib.Int64.compare lo base >= 0
@@ -956,9 +877,10 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         | Stack_residue ->
             let below =
               if
-                Stdlib.Int64.equal k.lo.p_pos (stack_floor ~entry)
-                || Stdlib.Int64.compare (Stdlib.Int64.sub entry k.lo.p_pos) 65536L > 0
-              then Stdlib.Int64.max below 65536L
+                Stdlib.Int64.equal k.lo.p_pos (Model.stack_floor ~entry)
+                || Stdlib.Int64.compare (Stdlib.Int64.sub entry k.lo.p_pos)
+                     Hike_stack_model.stack_max > 0
+              then Stdlib.Int64.max below Hike_stack_model.stack_max
               else Stdlib.Int64.max below (Stdlib.Int64.sub entry k.lo.p_pos)
             in
             ((below, window, carved), true)
@@ -1053,11 +975,11 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
     | Ok ws -> (
         match Vsa.WordSet.stack_offsets ws with
         | Some _ -> (
-            match positions_of_offsets ws with
+            match Model.positions_of_offsets ws with
             | Some (lo, hi) when Stdlib.Int64.equal lo hi -> Some lo
             | _ -> None)
         | None ->
-            if Vsa.WordSet.in_stack_segment ws then Hike_resolve.singleton_i64 ws
+            if Vsa.WordSet.in_stack_segment ws then Model.singleton_i64 ws
             else None)
   in
   let slot_of_start (a : int64) (d_sp : int64) : int option =
@@ -1166,9 +1088,8 @@ let conversion_of ~(word : int) ~(entry : int64) ~(spans : data_span list)
              (the tag drives the emitter's arm). *)
           let retaddr_cell =
             match tag with
-            | Some Tag.Stack (lo, hi) ->
-              Stdlib.Int64.equal lo entry && Stdlib.Int64.equal hi entry
-            | _ -> false
+            | Some t -> Model.is_return_address_tag t
+            | None -> false
           in
           let owned =
             Base.List.filter portions ~f:(fun p ->
@@ -1193,7 +1114,7 @@ let conversion_of ~(word : int) ~(entry : int64) ~(spans : data_span list)
                       let d_in =
                         Stdlib.Int64.to_int
                           (Stdlib.Int64.rem
-                             (Stdlib.Int64.sub p.pt_lo (args_base ~entry ~word))
+                             (Stdlib.Int64.sub p.pt_lo (Model.args_base ~entry ~word))
                              (Stdlib.Int64.of_int word))
                       in
                       if Base.List.mem demoted i ~equal:Int.equal then
@@ -1420,26 +1341,8 @@ let dynamic_alloc_tids_of ~(sp : var)
    consumes them in scope — never KB-stored. *)
 type facts = {
   prom_arity : int;
-  prom_sites : Model.call_site Tid.Map.t;
   prom_resolved : Tid.t option Tid.Map.t;
 }
-
-(* The offset set's hull lifted onto the segment line: the extrema
-   through to_int64 and position_of_offset; [None] when any step
-   fails (an extremum outside the word or past the base sum). *)
-let hull_positions (offs : Vsa.WordSet.Clp.t) : (int64 * int64) option =
-  match Vsa.WordSet.Clp.min_elem offs, Vsa.WordSet.Clp.max_elem offs with
-  | Some mn, Some mx -> (
-      match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
-      | Ok lo, Ok hi -> (
-          match
-            Vsa.Cbat_extraction.position_of_offset lo,
-            Vsa.Cbat_extraction.position_of_offset hi
-          with
-          | Some lo, Some hi -> Some (lo, hi)
-          | _ -> None)
-      | _ -> None)
-  | _ -> None
 
 (* The def's memory node is a LOAD of (addr, size); stores are not. *)
 let load_of_rhs (e : exp) : (exp * Size.t) option =
@@ -1477,36 +1380,11 @@ let slot_index_of ~(word : int) (k : int64) : int option =
 let caller_side ~(denote : blk:blk term -> ?def:def term -> exp ->
                   (Vsa.WordSet.t, Type.error) Result.t)
     ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
-    ~(abi : Hike_abi.t)
-    (sub : sub term) :
-    Tid.t option Tid.Map.t * (int64 * int64) list =
+    (sub : sub term) : Tid.t option Tid.Map.t =
   let resolved = ref Tid.Map.empty in
-  let exts = ref [] in
-  let note_escape ~(blk : blk term) ?def (e : exp) =
-    match denote ~blk ?def e with
-    | Error _ -> ()
-    | Ok ws -> (
-        match Vsa.WordSet.stack_offsets ws with
-        | None -> ()
-        | Some offs ->
-            let ext =
-              Base.Option.value (hull_positions offs)
-                ~default:(Stdlib.Int64.min_int, Stdlib.Int64.max_int)
-            in
-            exts := ext :: !exts)
-  in
   let lookup = Hike_resolve.symtab_lookup ~symtab ~name_tid in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
-      (* An SP-derived value the sub STORES escapes into memory: its
-         reloaded copies deref through the raw-address lane.  Each
-         store's data denotes at the def's own before-env; the
-         parameter registers at the block's end state. *)
-      Term.enum def_t blk
-      |> Seq.iter ~f:(fun d ->
-          match Model.store_data_of_rhs (Def.rhs d) with
-          | None -> ()
-          | Some (data, _) -> note_escape ~blk ~def:d data);
       Term.enum jmp_t blk
       |> Seq.iter ~f:(fun j ->
           match Jmp.kind j with
@@ -1522,18 +1400,15 @@ let caller_side ~(denote : blk:blk term -> ?def:def term -> exp ->
                         Core.Map.set !resolved ~key:(Term.tid j)
                           ~data:(Hike_resolve.resolve_target ~lookup ws))
               | Direct _ -> ())
-          | _ -> ());
-      Core.List.iter (Hike_abi.param_regs abi)
-        ~f:(fun v -> note_escape ~blk (Bil.Var v)));
-  (!resolved, !exts)
+          | _ -> ()));
+  !resolved
 
 (* The resolution product alone (the driver's call_resolution). *)
 let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
                       (Vsa.WordSet.t, Type.error) Result.t)
     ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
-    ~(abi : Hike_abi.t)
     (sub : sub term) : Tid.t option Tid.Map.t =
-  fst (caller_side ~denote ~symtab ~name_tid ~abi sub)
+  caller_side ~denote ~symtab ~name_tid sub
 
 (* Replaces the Load node matching (addr,size) with [x] (the BIR twin
    of the emitter's node rewrite). *)
@@ -1650,34 +1525,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   in
   let slots, arity = slot_defs_of ~demoted tree in
   let arity = if callee_exempt then 0 else arity in
-  (* The site bindings: full-cell stores only, filtered to the callee's
-     promoted arity. *)
-  let site_slots btid callee =
-    let arity = arity_of callee in
-    match Core.Map.find sites btid with
-    | None -> []
-    | Some bs ->
-        Base.List.filter_map bs ~f:(fun b ->
-            if b.sb_full && b.sb_slot < arity then
-              Some (b.sb_slot, Term.tid b.sb_def)
-            else None)
-  in
-  let prom_sites =
-    Core.Map.mapi sites ~f:(fun ~key:btid ~data:_ ->
-        match Term.find blk_t sub btid with
-        | None -> { Model.site_slots = [] }
-        | Some blk -> (
-            match
-              Term.enum jmp_t blk
-              |> Seq.fold ~init:None ~f:(fun acc j ->
-                     match Core.Map.find resolved (Term.tid j) with
-                     | Some (Some t) -> Some t
-                     | _ -> acc)
-            with
-            | Some callee -> { Model.site_slots = site_slots btid callee }
-            | None -> { Model.site_slots = [] }))
-  in
-  let facts = { prom_arity = arity; prom_sites; prom_resolved = resolved } in
+  let facts = { prom_arity = arity; prom_resolved = resolved } in
   let sub = promote_sub ~abi facts sub in
   (* The window-value facts (D4b): a def with no memory node whose
      value denotes bounded-stack-symbolic wholly at/above the entry
@@ -1697,8 +1545,8 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                   match Vsa.WordSet.stack_offsets ws with
                   | None -> acc
                   | Some _ -> (
-                      let a_base = args_base ~entry ~word in
-                      match positions_of_offsets ws with
+                      let a_base = Model.args_base ~entry ~word in
+                      match Model.positions_of_offsets ws with
                       | Some (lo, hi)
                         when Stdlib.Int64.compare lo a_base >= 0
                              && Stdlib.Int64.compare hi a_base >= 0
@@ -1778,9 +1626,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
            let sites = stage_a ~word ~abi ~sp ~denote sub in
-           let resolved =
-             call_resolution ~denote ~symtab ~name_tid ~abi sub
-           in
+           let resolved = call_resolution ~denote ~symtab ~name_tid sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in
   (* The callee arity map (pre-demotion slots; the demotion only

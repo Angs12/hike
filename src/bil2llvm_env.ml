@@ -40,8 +40,6 @@ type sec_owner = {
   base : Llvm.llvalue;
   (* The component's emission decision (components only). *)
   typed_w : int;                (* bytes per element: 8/4/2/1 *)
-  is_const : bool;
-  bss : bool;
 }
 
 type section = {
@@ -116,7 +114,6 @@ type emit_ctx = {
   subs : (Arg.t list * Arg.t list) Tid.Map.t;
   blk_llvals : blk_llvals Tid.Map.t ref;
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
-  guarded_warned : Tid.Set.t ref;
   (* One Dead-classification warn per sub. *)
   dead_warned : Tid.Set.t ref;
   (* Dedups [hike: undef-read:] warnings per (sub, var). *)
@@ -151,7 +148,6 @@ let empty_emit_ctx () : emit_ctx =
     subs = Tid.Map.empty;
     blk_llvals = ref Tid.Map.empty;
     ll_bbs = ref Tid.Map.empty;
-    guarded_warned = ref Tid.Set.empty;
     dead_warned = ref Tid.Set.empty;
     undef_warned = ref Tid.Map.empty;
     edge_sp_restores = ref (EHashtbl.create (module Tid));
@@ -176,8 +172,6 @@ type sub_frame = {
      and the region's entry-relative base — the typed channel (the var
      is the identity; nothing parses names). *)
   regions : (Var.t * (Llvm.llvalue * int64)) list;
-  (* The sub split into regions (the layout's regions are non-empty). *)
-  is_precise : bool;
 }
 
 (* The sub whose body is being emitted: routes the region/window mem

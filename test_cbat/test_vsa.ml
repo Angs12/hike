@@ -321,47 +321,8 @@ let run () =
   check "C1-5: a virtual var is preserved when it is in the preserved set"
     (Ws.equal (AI.find_word 64 e_v vv) (Ws.singleton (w64 3)));
   ())
-;
-(  (* Channel-1 pin (spec §2.2): the prologue + frame-affine accesses seed. *)
-  let extract_of (sub : sub term) : Cu.vsa_kind Tid.Map.t =
-    let offsets = extract_anchored sub in
-    offsets
-  in
-  let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
-  let tags = extract_of sub in
-  check "P21-1: the symbolic arm — the load at [RBP - 0x30] (RBP := RSP: StackOff offs -48) seeds Range(base-48,base-48)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (pos (-48L), pos (-48L))));
-  check "P21-2: the symbolic arm — the store at [RBP - 0x30] seeds Range(base-48,base-48)"
-    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (pos (-48L), pos (-48L))));
-  ()
 
-(* RSP-derived base with index; the indexed load seeds. *))
-;
-(  let _, def_load, sub = mk_rsp_index_sub () in
-  let tags = extract_anchored sub in
-  check "P22-1: the symbolic arm — the indexed load at [rdi + idx*8] (rdi := RSP-8, idx := 5: offs -8 + 40 = 32, entirely above the entry RSP) seeds the CALLER lane Caller(base+32,base+32)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Caller (pos (32L), pos (32L))));
-  ()
 
-(* Heap-shaped addresses do not seed; the RSP-direct access does. *))
-;
-(  let _, _, def_load, def_store_disjoint, def_store_rsp, sub = mk_gpr_rbp_sub () in
-  let tags = extract_anchored sub in
-  check "P23-1: the plain arm — the load at [rbp + idx*8] (rbp := 0x400000: a plain foreign constant, outside the stack band) is NOT seeded"
-    (Core.Map.find tags (Term.tid def_load) = None);
-  check "P23-2: the plain arm — the disjoint store at [rbp + 0x100] is NOT seeded"
-    (Core.Map.find tags (Term.tid def_store_disjoint) = None);
-  check "P23-3: the symbolic arm — the RSP-direct store at [RSP - 8] seeds Range(base-8,base-8)"
-    (Core.Map.find tags (Term.tid def_store_rsp) = Some (Cu.Range (pos (-8L), pos (-8L))));
-  ())
-;
-(  let _, def_load, _, def_use, sub = mk_one_path_sub () in
-  let tags = extract_anchored sub in
-  check "F1-1: the symbolic arm — the on-path load at [rbp - 0x30] seeds Range(base-48,base-48)"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (pos (-48L), pos (-48L))));
-  check "F1-2: the plain arm — the use store at [rdi + 8] (rdi joins the TOP cell value) seeds the unbounded span (a TOP address is the fully-infinite kind — it may name this frame)"
-    (Core.Map.find tags (Term.tid def_use) = Some Cu.unbounded_span);
-  ())
 (* Degenerate cast/extract sizes degrade to top; shift guards compare magnitudes. *)
 ;
 (  let c64 = Clp.create (w64 16) in
@@ -448,22 +409,13 @@ let run () =
     && match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false);
   ())
 ;
-(  (* Channel-2 negative (spec §2.2): the heap-indexed store never seeds. *)
+(  (* Channel-2 negative: the heap-indexed store never seeds. *)
   let _, _, _, _, sub, exit_tid = mk_e2ed_heap_sub () in
-  (* Gate-free: every def is denoted, so the store's data var reads {99}. *)
   let sol = run_anchored sub in
   let exit_ai = Graphlib.Std.Solution.get sol exit_tid in
   let vv = AI.find_word 64 exit_ai (v64 "e2ed_v") in
   check "E2eD-4: gate-free — the heap store's data var is denoted ({99})"
     (Ws.equal vv (Ws.singleton (w64 99)));
-  ()
-
-(* Channel-1 indexed-store pin: same shape seeds without any tagger. *))
-;
-(  let _, _, def_store, sub, _ = mk_e2ed_rsp_store_sub () in
-  let tags = extract_anchored sub in
-  check "E2eD-5: channel 1 — the indexed store at [(rbp - 0x30) + i*8] seeds Range(base-24,base-24)"
-    (Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (pos (-24L), pos (-24L))));
   ())
 
 (* E3 (the SOUND contract): a store through a TOP address may write any
@@ -496,69 +448,4 @@ let run () =
   ())
 
 ;
-(  (* PA: a same-block-redefined address var keeps its WALK binding —
-      the block-entry register value is a different var version and
-      never meets into the address.  The entry band
-      [0xffffff00,0xffffffff] plus a TOP reload from a frame cell
-      reproduces the real-code wrapped hull (rpl_mbrtoc32's 2^32-79
-      Caller band); the honest classification of the TOP reload is the
-      unbounded span. *)
-  let rbp = v64 "RBP" in
-  let rax = v64 "RAX" in
-  let m = memv "pa_m" in
-  let cell =
-    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x28)))
-  in
-  let def_reload =
-    Def.create rax (Bil.Load (Bil.Var m, cell, LittleEndian, `r64))
-  in
-  let def_store =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp
-             (Bil.MINUS,
-              Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Var rax),
-              Bil.Int (Cbat_word.to_word (w64 0x46))),
-           Bil.Int (Cbat_word.to_word (w64 0x41)),
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, _ =
-    sub_of "pa_stale_meet"
-      [ [], [ (1, mk_goto) ]; [ def_reload; def_store ], [] ]
-  in
-  let subc = Hike.Jump.compile_sub jump_target sub in
-  let prog = Program.create ~subs:[ subc ] () in
-  let band =
-    Ws.of_clp
-      (Clp.interval ~width:64
-         (Cbat_word.of_int64 ~width:64 0xffffff00L)
-         (Cbat_word.of_int64 ~width:64 0xffffffffL))
-  in
-  let entry = AI.add_word (anchored_entry ()) ~key:rax ~data:band in
-  let sol =
-    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog subc
-      (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry subc)
-  in
-  let blk_of_def sub dtid =
-    Term.enum blk_t sub
-    |> Seq.find ~f:(fun b ->
-        Seq.exists (Term.enum def_t b) ~f:(fun d -> Tid.equal (Term.tid d) dtid))
-    |> Base.Option.value_exn
-  in
-  let kind =
-    Base.Option.bind
-      (Term.enum blk_t sub
-       |> Seq.find ~f:(fun b ->
-           Seq.exists (Term.enum def_t b)
-             ~f:(fun d -> Tid.equal (Term.tid d) (Term.tid def_store))))
-      ~f:(fun b -> kind_of_def ~sol b def_store)
-  in
-  ignore blk_of_def;
-  check
-    "PA-1: the store's address keeps its walk binding — a same-block \
-     reloaded TOP var classifies as the unbounded span, never the entry \
-     band's Caller"
-    (kind = Some Cu.unbounded_span);
-  ())
+

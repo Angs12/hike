@@ -140,29 +140,8 @@ let run_creg () =
           | Some rs -> rs.A.storage = A.Stack_residue
           | None -> false)
      | None -> false);
-  ()
-
-(* C4a: Infinite tag survives the overlap merge. *))
-;
-(  let sub, def_idx_store = mk_indexed_loop ~pfx:"c4a" in
-  let tagged = sub in
-  let tags = extract_anchored tagged in
-  check
-    "C4a: the indexed loop-body store carries an offset tag (fixture locates the \
-     Infinite class)"
-    (Core.Map.find tags (Term.tid def_idx_store) <> None);
-  ()
-
-(* R11: overlap merge preserves every member's kind/span verbatim. *))
-;
-(  let sub, def_idx_store = mk_indexed_loop ~pfx:"r11" in
-  let tagged = sub in
-  let tags = extract_anchored tagged in
-  (* Control: indexed member keeps its kind. *)
-  check "property R11 control: the indexed member keeps its own kind through the merge"
-    (Core.Map.find tags (Term.tid def_idx_store) <> None);
-
   ())
+
 let run_remediation () =
 (  (* Vs C3: outgoing slot stores unwritten RCX (TOP). *)
   let rcx = v64 "RCX" in
@@ -382,10 +361,4 @@ let run_fp_gpr () =
     (storage_at ctx sub Sm.Stack (pos (-48L)) (pos (-41L)) = Some (A.Stack_region 1));
   ())
 ;
-(  (* S4: the value-true twin's tagging pin. *)
-  let _, def_load, def_store, sub = mk_rsp_prologue_sub () in
-  let tags = extract_anchored sub in
-  check "S4 (fp-GPR): the prologue sub's [RBP - 0x30] access is Range-tagged"
-    (Core.Map.find tags (Term.tid def_load) = Some (Cu.Range (pos (-48L), pos (-48L)))
-    && Core.Map.find tags (Term.tid def_store) = Some (Cu.Range (pos (-48L), pos (-48L))));
-  ())
+

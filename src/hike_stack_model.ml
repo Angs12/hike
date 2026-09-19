@@ -63,28 +63,122 @@ module Vsa = struct
      constant, and a frame-relative depth is [base − position]. *)
   let segment_base = Cbat_vsa.WordSet.stack_base
 
-  (* Alias of the kind enum in [Cbat_extraction]. *)
-  type vsa_kind = Cbat_vsa.Cbat_extraction.kind =
-    | Range of int64 * int64
-    | Infinite of int64 * int64
-    | Caller of int64 * int64
-    | Mixed of int64 * int64
-    | Dead
-  (* Aliases [equal_kind] for [@@deriving equal]. *)
-  let equal_vsa_kind = Cbat_vsa.Cbat_extraction.equal_kind
+  (* ---- The position line (the scope geometry) ---- *)
 
-  (* The fully-infinite span — the kind of a TOP denotation — and the
-     fact its consumers key on. *)
-  let unbounded_span = Cbat_vsa.Cbat_extraction.unbounded_span
-  let is_unbounded_span = Cbat_vsa.Cbat_extraction.is_unbounded_span
+
+  (* ---- The word-pair seams ---- *)
+
+  (* The word-pair seams — the one lifting every hull/singleton
+     consumer shares, so the arithmetic lives in exactly one place. *)
+  let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
+      : (int64 * int64) option =
+    let i64 w = match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None in
+    let open Base.Option in
+    i64 lo >>= fun lo ->
+    i64 hi >>= fun hi ->
+    Cbat_vsa.Cbat_extraction.position_of_offset lo >>= fun lo ->
+    Cbat_vsa.Cbat_extraction.position_of_offset hi >>= fun hi ->
+    Some (lo, hi)
+
+  let singleton_pair (lo : Cbat_word.t option) (hi : Cbat_word.t option)
+      : int64 option =
+    match lo, hi with
+    | Some lo, Some hi when Cbat_word.equal lo hi -> (
+        match Cbat_word.to_int64 lo with
+        | Ok v -> Some v
+        | Error _ -> None)
+    | _ -> None
+
+  let stack_floor ~(entry : int64) : int64 = Stdlib.Int64.add entry Stdlib.Int64.min_int
+  let args_ceiling : int64 = Stdlib.Int64.max_int
+
+  let args_base ~(entry : int64) ~(word : int) : int64 =
+    Stdlib.Int64.add entry (Stdlib.Int64.of_int word)
+
+  let stack_top ~(entry : int64) ~(word : int) : int64 =
+    Stdlib.Int64.pred (args_base ~entry ~word)
+
+  (* [hi + n - 1] in signed position arithmetic, saturating at the
+     ceiling — the sound full interval, never a wrapped short one. *)
+  let expand_hi ~(cap : int64) (hi : int64) (n : int) : int64 =
+    let w = Stdlib.Int64.of_int (n - 1) in
+    let r = Stdlib.Int64.add hi w in
+    if Stdlib.Int64.compare r hi < 0 || Stdlib.Int64.compare r cap > 0 then cap else r
+
+  (* [hi + n - 1] in unsigned address arithmetic; wrapping past the
+     domain's top saturates at the top (2^64-1). *)
+  let expand_hi_unsigned (hi : int64) (n : int) : int64 =
+    let w = Stdlib.Int64.of_int (n - 1) in
+    let r = Stdlib.Int64.add hi w in
+    if Stdlib.Int64.unsigned_compare r hi < 0 then -1L else r
+
+  (* The intersection of [lo, hi] (ordered by [cmp]) with [slo, shi]. *)
+  let clip ~(cmp : int64 -> int64 -> int) (lo : int64) (hi : int64)
+      (slo : int64) (shi : int64) : (int64 * int64) option =
+    let lo = if cmp lo slo >= 0 then lo else slo in
+    let hi = if cmp hi shi <= 0 then hi else shi in
+    if cmp lo hi <= 0 then Some (lo, hi) else None
+
+  (* A stack-symbolic set's offset extrema lifted onto the position
+     line; None when not representable. *)
+  let positions_of_offsets (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
+    match Cbat_vsa.WordSet.offset_extrema ws with
+    | Some (lo, hi) -> position_pair lo hi
+    | None -> None
+
+  (* A plain set's unsigned extrema; None when not representable. *)
+  let unsigned_bounds (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
+    match Cbat_vsa.WordSet.min_elem ws, Cbat_vsa.WordSet.max_elem ws with
+    | Some lo, Some hi -> (
+        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+        | Ok lo, Ok hi -> Some (lo, hi)
+        | _ -> None)
+    | _ -> None
+
+  (* The domain bounds of a possibly-infinite set over [flo, cei]: an
+     unbounded direction extends to the scope bound; a wrapped or
+     circular hull covers the whole scope. *)
+  let full_bounds (ws : Cbat_vsa.WordSet.t) ~(flo : int64) ~(cei : int64)
+      (lo : int64) (hi : int64) : int64 * int64 =
+    if Stdlib.Int64.compare lo hi > 0 then (flo, cei)
+    else if Cbat_vsa.WordSet.is_ascending ws then (lo, cei)
+    else if Cbat_vsa.WordSet.is_descending ws then (flo, hi)
+    else (flo, cei)
+
+  (* The Clp offset hull lifted onto the segment line: the extrema
+     through to_int64 and position_of_offset; [None] when any step
+     fails (an extremum outside the word or past the base sum). *)
+  let hull_positions (offs : Cbat_vsa.WordSet.Clp.t) : (int64 * int64) option =
+    match Cbat_vsa.WordSet.Clp.min_elem offs, Cbat_vsa.WordSet.Clp.max_elem offs with
+    | Some lo, Some hi -> position_pair lo hi
+    | _ -> None
+
+  (* A stack-symbolic value's escape extent: its positions, with the
+     unbounded directions reaching the scope bound. *)
+  let escape_extent ~(entry : int64) (ws : Cbat_vsa.WordSet.t)
+      : (int64 * int64) option =
+    match Cbat_vsa.WordSet.stack_offsets ws with
+    | None -> None
+    | Some _ -> (
+        let floor = stack_floor ~entry in
+        match positions_of_offsets ws with
+        | None -> Some (floor, args_ceiling)
+        | Some (lo, hi) ->
+            if Cbat_vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
+              Some (full_bounds ws ~flo:floor ~cei:args_ceiling lo hi)
+            else Some (lo, hi))
+
+  (* [ws] is a single known word (the plain-set singleton; a TOP set is
+     deliberately NOT one). *)
+  let singleton_i64 (ws : Cbat_vsa.WordSet.t) : int64 option =
+    if Cbat_vsa.WordSet.is_top ws then None
+    else singleton_pair (Cbat_vsa.WordSet.min_elem ws) (Cbat_vsa.WordSet.max_elem ws)
 
   (* One-line contract: the offset set with exactly one element. *)
   let singleton_offset (offs : Cbat_vsa.WordSet.Clp.t) : int64 option =
-    let i64 w = match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None in
-    let open Base.Option in
-    Cbat_vsa.WordSet.Clp.min_elem offs >>= i64
-    >>= fun lo -> Cbat_vsa.WordSet.Clp.max_elem offs >>= i64
-    >>= fun hi -> if Int64.equal lo hi then Some lo else None
+    singleton_pair
+      (Cbat_vsa.WordSet.Clp.min_elem offs)
+      (Cbat_vsa.WordSet.Clp.max_elem offs)
 
   (* One-line contract: the denotation's single stack position
      (absolute, on the segment line), when it denotates to exactly
@@ -94,15 +188,37 @@ module Vsa = struct
     Cbat_vsa.WordSet.stack_offsets ws >>= singleton_offset
     >>= Cbat_vsa.Cbat_extraction.position_of_offset
 
+  (* THE return-address fact and its phase-appropriate projections —
+     every consumer calls one of these and nothing else.  The one
+     definition: an address that denotes to the stack-symbolic
+     singleton at the entry-RSP cell. *)
+  let is_return_address (ws : Cbat_vsa.WordSet.t) : bool =
+    match singleton_stack_position ws with
+    | Some p -> Int64.equal p segment_base
+    | None -> false
+
+  (* The stamped projection: the same denotation, computed once by the
+     attribution and carried on the def's Section Tag. *)
+  let is_return_address_tag (t : sec_tag) : bool =
+    match t with
+    | Tag.Stack (lo, hi) ->
+        Int64.equal lo segment_base && Int64.equal hi segment_base
+    | _ -> false
+
+  (* The pre-solve projection: the exact-pop shape [mem[SP]] — the one
+     spelling the return epilogue produces — for the one consumer that
+     runs before any solution exists (the call abstraction's kill
+     summaries). *)
+  let is_return_address_shape ~(abi : Abi.t) (addr : exp) : bool =
+    match addr with
+    | Bil.Var v -> Var.same (Var.base v) abi.Hike_abi.sp
+    | _ -> false
+
   (* One call site's outgoing slot facts: which slot index each of
      the block's outgoing stores feeds.  The structured fact IS the
      provability — presence of slot i in the map = the site's store
      feeds promoted slot i; absence = the store stays on the window
      path (the identity). *)
-  type call_site = {
-    site_slots : (int * Tid.t) list; (* slot index -> storing def *)
-  } [@@deriving equal]
-
 end
 include Vsa
 
@@ -199,9 +315,6 @@ let region_mem (id : int) : var =
     (region_name id ^ "_mem")
     (mem64_t (Size.of_int_exn 8))
 
-let region_base ~(word : int) (id : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (region_name id ^ "_base") (Type.Imm (word_bits word))
 
 (* Memory-var test (the BAP var-kind predicate; the var grammar lives
    here with the fission-var tests). *)
@@ -213,10 +326,6 @@ let is_region_mem (v : var) : bool =
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
 (* The region id of a fission var ([stack_rN_mem]). *)
-let is_region_base (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
-  && Base.String.is_suffix (Var.name v) ~suffix:"_base"
-
 (* ------------------------------------------------------------------ *)
 (* The section partition.  Sections mirror the stack regions:   *)
 (* the attribution pass carves each reserved span into per-object     *)
@@ -294,13 +403,25 @@ let caller_window_bytes : int64 = 65536L
    residue's own extent clamps at. *)
 let stack_max : int64 = 65536L
 
-(* A call pushes its return address one word below the caller's SP at
-   the call — a cell below the lowest SP value the sub reaches, which
-   the extent folds never record.  A call with no return continuation
-   is the lifted return's epilogue: it pops instead of pushing. *)
+(* THE call-push fact: a MACHINE call pushes its return address (one
+   word below the caller's SP at the call); a modeled op — an
+   intrinsic, rendered inline — pushes nothing.  One predicate, three
+   consumers: the frame's push-word reserve, the call-window member,
+   and the return-edge SP restore. *)
+let is_intrinsic_target (t : tid) : bool =
+  Base.String.is_prefix (Tid.name t) ~prefix:"intrinsic:"
+
+let machine_call (j : jmp term) : bool =
+  match Jmp.kind j with
+  | Call c -> (
+      match Call.target c with
+      | Direct t -> not (is_intrinsic_target t)
+      | Indirect _ -> true)
+  | _ -> false
+
 let call_pushes (j : jmp term) : bool =
   match Jmp.kind j with
-  | Call c -> Option.is_some (Call.return c)
+  | Call c -> machine_call j && Option.is_some (Call.return c)
   | _ -> false
 
 let has_call_push (sub : sub term) : bool =
@@ -359,6 +480,7 @@ module Sub_layout = struct
     | 0 -> Bool.compare a.window_param b.window_param
     | c -> c
 
+  (* Required by [Value.Tag.register] — the layout tag's printer. *)
   let pp fmt { regions; anchor; window_param } =
     Format.fprintf fmt "regions=%d;anchor=%s;window=%b"
       (Base.List.length regions)
@@ -367,16 +489,14 @@ module Sub_layout = struct
        | None -> "none")
       window_param
 
-  let empty = { regions = []; anchor = None; window_param = false }
-
   let sexp_of_t (t : t) : Sexp.t =
     Sexp.List
       (Base.List.map t.regions ~f:(fun (id, (lo, hi), b) ->
            Sexp.Atom (Printf.sprintf "%d:%Ld:%Ld:%Ld" id lo hi b))
        @ (match t.anchor with
           | Some (i, idx) -> [ Sexp.Atom (Printf.sprintf "anchor=%d:%Ld" i idx) ]
-          | None -> []
-          @ if t.window_param then [ Sexp.Atom "window" ] else []))
+          | None -> [])
+       @ if t.window_param then [ Sexp.Atom "window" ] else [])
 
   let t_of_sexp (s : Sexp.t) : t =
     match s with

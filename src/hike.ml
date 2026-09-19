@@ -194,9 +194,8 @@ let chain ~name ~prev run =
 let map_subs f proj =
   Project.map_program proj ~f:(fun prog -> Term.map sub_t prog ~f)
 
-(* The pass bodies in chain order. The plugin registers them as
-   passes; [run_chain] applies them directly — one chain, two
-   drivers. *)
+(* The pass bodies in chain order; the plugin registers each as a
+   pass with its predecessor as dependency. *)
 let pass_filter proj =
   (* The filter runs first; the analysis entries self-arm their address
      width from the targets they carry. *)
@@ -323,11 +322,6 @@ let pass_attrib proj =
             Hike_dce.dce ~roots ~target sub))
 
 let pass_convlir ~output proj = convert_binary output proj
-
-(* The whole chain in dependency order — the same functions the
-   plugin registers, applied without the pass registry. *)
-let run_chain ~output proj =
-  pass_convlir ~output (pass_attrib (pass_vsa (pass_split_mem (pass_jump (pass_filter proj)))))
 
 (* The registrations mirror the chain order: each pass's deps are its
    predecessor. The DCE and the emitter spec belong to attrib (the DCE's

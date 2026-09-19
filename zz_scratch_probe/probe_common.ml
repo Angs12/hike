@@ -189,7 +189,7 @@ let blk_bil_to_string (b : blk term) : string =
    at the def's own before-env, classified in place (the extraction's
    per-def rule; no merge). *)
 let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
-    Hike.Stack_model.vsa_kind Tid.Map.t =
+    Vsa.Cbat_extraction.kind Tid.Map.t =
   let opt (r : ('a, 'b) Result.t) : 'a option =
     match r with Ok w -> Some w | Error _ -> None in
   let kind_of blk d =
@@ -204,7 +204,7 @@ let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
     >>= fun ws ->
     if Ws.is_bottom ws || Ws.in_stack_segment ws then
       Some (Vsa.Cbat_extraction.caller_split (Vsa.Cbat_extraction.classify ws))
-    else if Ws.is_top ws then Some Hike.Stack_model.unbounded_span
+    else if Ws.is_top ws then Some Vsa.Cbat_extraction.unbounded_span
     else None
   in
   Term.enum blk_t sub
@@ -214,13 +214,13 @@ let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
           | Some k -> Core.Map.set m ~key:(Term.tid d) ~data:k
           | None -> m))
 
-let vsa_kind_to_string (k : Hike.Stack_model.vsa_kind) : string =
+let vsa_kind_to_string (k : Vsa.Cbat_extraction.kind) : string =
   match k with
-  | Hike.Stack_model.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
-  | Hike.Stack_model.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
-  | Hike.Stack_model.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
-  | Hike.Stack_model.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
-  | Hike.Stack_model.Dead -> "Dead"
+  | Vsa.Cbat_extraction.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
+  | Vsa.Cbat_extraction.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
+  | Vsa.Cbat_extraction.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
+  | Vsa.Cbat_extraction.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
+  | Vsa.Cbat_extraction.Dead -> "Dead"
 
 (* Value-set of each named var in the state. *)
 let state_summary (vars : var list) (st : AI.t) : string =

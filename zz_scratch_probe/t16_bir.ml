@@ -1,5 +1,5 @@
-(* Replicates the pass chain (filter -> jump -> vsa ->
-   stack-to-locals -> dce) on one sub and dumps the post-pipeline BIR.
+(* Replicates the pass chain (filter -> jump -> vsa -> sections -> dce)
+   on one sub and dumps the post-pipeline BIR.
    Usage: t16_bir.exe <binary> [subname] *)
 
 open Bap.Std
@@ -105,12 +105,12 @@ let () =
       (Program.create ~subs:[ sub ] ()) sub
       (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub)
   in
-  let kind_str (kind : Model.vsa_kind) = match kind with
-    | Model.Range (a,b) -> Printf.sprintf "Range(%Ld,%Ld)" a b
-    | Model.Infinite (a,b) -> Printf.sprintf "Infinite(%Ld,%Ld)" a b
-    | Model.Caller (a,b) -> Printf.sprintf "Caller(%Ld,%Ld)" a b
-    | Model.Mixed (a,b) -> Printf.sprintf "Mixed(%Ld,%Ld)" a b
-    | Model.Dead -> "Dead" in
+  let kind_str (kind : Cvsa.Cbat_extraction.kind) = match kind with
+    | Cvsa.Cbat_extraction.Range (a,b) -> Printf.sprintf "Range(%Ld,%Ld)" a b
+    | Cvsa.Cbat_extraction.Infinite (a,b) -> Printf.sprintf "Infinite(%Ld,%Ld)" a b
+    | Cvsa.Cbat_extraction.Caller (a,b) -> Printf.sprintf "Caller(%Ld,%Ld)" a b
+    | Cvsa.Cbat_extraction.Mixed (a,b) -> Printf.sprintf "Mixed(%Ld,%Ld)" a b
+    | Cvsa.Cbat_extraction.Dead -> "Dead" in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
       Seq.iter (Term.enum def_t blk) ~f:(fun d ->
@@ -130,7 +130,7 @@ let () =
               Some
                 (Cbat_vsa.Cbat_extraction.caller_split
                    (Cbat_vsa.Cbat_extraction.classify ws))
-            else if Ws.is_top ws then Some Model.unbounded_span
+            else if Ws.is_top ws then Some Cvsa.Cbat_extraction.unbounded_span
             else None
           in
           match kind with
