@@ -220,10 +220,20 @@ let pass_vsa proj =
                img_bytes = arr } ])
     |> Base.Option.value ~default:[]
   in
-  (* The run's block-address map: the dispatch resolution's word home,
-     installed from the producer's facts at this boundary.  Un-built
-     (the empty map), so every dispatch stays foreign. *)
-  Hike_kb.install_block_addrs Core.Int64.Map.empty;
+  (* The run's block-address map: every lifted block's own address
+     stamp — the tid<->address bijection the lift establishes — read
+     off the terms at this boundary.  Blocks the lift created unnamed
+     carry no stamp and name no case entry. *)
+  let block_addrs =
+    Term.enum sub_t (Project.program proj)
+    |> Seq.concat_map ~f:(Term.enum blk_t)
+    |> Seq.filter_map ~f:(fun b ->
+           Base.Option.map (Term.get_attr b address)
+             ~f:(fun a -> (a, Term.tid b)))
+    |> Seq.to_list
+    |> Core.Map.of_alist_exn (module Addr)
+  in
+  Hike_kb.install_block_addrs block_addrs;
   (* The producer, composed per sub: the fixpoint's products are the
      block environments (the one cross-pass fact) and the REWRITTEN
      SUB (the CFG completion's terms). *)

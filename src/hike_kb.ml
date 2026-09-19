@@ -18,22 +18,24 @@ let env_stamps : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t ref =
 let block_env (btid : Tid.t) : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) option =
   Core.Map.find !env_stamps btid
 
-(* The run's block-address map: a native address to the tid of the
-   block whose extent contains it — the dispatch resolution's word
-   home.  An un-built map (empty) keeps every dispatch foreign. *)
-let block_addrs_table : tid Core.Int64.Map.t ref =
-  ref Core.Int64.Map.empty
+(* The run's block-address map: an address to the tid of the block
+   whose extent contains it — the dispatch resolution's word home.  An
+   un-built map (empty) keeps every dispatch foreign. *)
+let block_addrs_table = ref (Core.Map.empty (module Addr))
 
 (* The map's run-boundary install, where the producer's facts live. *)
-let install_block_addrs (m : tid Core.Int64.Map.t) : unit =
-  block_addrs_table := m
+let install_block_addrs m = block_addrs_table := m
+
+(* A case entry carved out of a block's middle becomes a block of its
+   own, on the map. *)
+let add_block_addr ~addr ~(tid : Tid.t) =
+  block_addrs_table := Core.Map.set !block_addrs_table ~key:addr ~data:tid
 
 (* The run's map, read-only. *)
-let block_addrs () : tid Core.Int64.Map.t = !block_addrs_table
+let block_addrs () = !block_addrs_table
 
-(* The block a native address names on the run's map. *)
-let block_addr (a : int64) : tid option =
-  Core.Map.find !block_addrs_table a
+(* The block an address names on the run's map. *)
+let block_addr (a : Addr.t) : Tid.t option = Core.Map.find !block_addrs_table a
 
 (* The run's install: the block-env stamps of ONE analysis run replace
    the table in one write, after the producer's fold completes. *)

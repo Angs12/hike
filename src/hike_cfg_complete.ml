@@ -59,12 +59,146 @@ let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
          Seq.fold (Term.enum def_t blk) ~init:acc ~f:(fun acc d ->
              note acc blk d))
 
+(* The sub's addressed starts: every block's own address stamp,
+   ascending — the block extents' bounds. *)
+let addressed_starts (sub : sub term) : (Addr.t * tid) list =
+  Term.enum blk_t sub
+  |> Seq.filter_map ~f:(fun b ->
+         Base.Option.map (Term.get_attr b address)
+           ~f:(fun a -> (a, Term.tid b)))
+  |> Seq.to_list
+  |> Base.List.sort ~compare:(fun (a, _) (b, _) -> Word.compare a b)
+
+(* The dispatch's case words: a bounded plain set no larger than the
+   run's block count — the words a resolution may target or split at. *)
+let bounded_words ~(denote : denote) ~(blk : blk term) (texp : exp) :
+    Cbat_word.t list option =
+  let blocks = Hike_kb.block_addrs () in
+  if Core.Map.is_empty blocks then None
+  else
+    Base.Option.bind (Result.to_option (denote ~blk texp)) ~f:(fun ws ->
+        if Vsa.WordSet.is_top ws || Vsa.WordSet.is_infinite ws
+           || Vsa.WordSet.is_bottom ws
+        then None
+        else
+          let card =
+            match Cbat_word.to_int64 (Vsa.WordSet.cardinality ws) with
+            | Ok c -> c
+            | Error _ -> Int64.max_int in
+          if
+            Int64.compare card (Int64.of_int (Core.Map.length blocks)) > 0
+          then None
+          else Some (Vsa.WordSet.iter ws))
+
+(* One mid-block case entry: the containing block splits at the entry
+   instruction — the prefix keeps the block's tid (its incoming edges)
+   and falls through to the fresh entry block, which takes the
+   address.  Sound only when the prefix is transparent: nothing it
+   defines is read past it — else the split needs phi repair (loud). *)
+let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
+    (sub : sub term) : sub term * tid =
+  let container =
+    Base.List.fold starts ~init:None ~f:(fun best (sa, t) ->
+        if Word.compare sa a < 0 then
+          match best with
+          | Some (sa', _) when Word.compare sa' sa >= 0 -> best
+          | _ -> Some (sa, t)
+        else best)
+  in
+  match container with
+  | None ->
+      failwith
+        (Printf.sprintf
+           "hike-cfg-complete: dispatch word %s names no block in the run's block-address map"
+           (Word.to_string a))
+  | Some (sa, ctid) ->
+    let c =
+      Term.enum blk_t sub
+      |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) ctid)
+    in
+    let defs = Seq.to_list (Term.enum def_t c) in
+    let pivot =
+      Base.List.find defs ~f:(fun d ->
+          match Term.get_attr d address with
+          | Some da -> Word.equal da a
+          | None -> false)
+    in
+    match pivot with
+    | None ->
+        failwith
+          (Printf.sprintf
+             "hike-cfg-complete: dispatch word %s falls inside the block at %s (%s) with no entry instruction to split at"
+             (Word.to_string a) (Word.to_string sa) (Tid.name ctid))
+    | Some pivot ->
+        let b1, b2 = Blk.split_before c pivot in
+        let b2 = Term.set_attr b2 address a in
+        let b2_free = Blk.free_vars b2 in
+        let repair_needed =
+          Term.enum def_t b1 |> Seq.exists ~f:(fun d ->
+              Core.Set.mem b2_free (Def.lhs d))
+          || (Term.enum phi_t b1 |> Seq.exists ~f:(fun p ->
+                 Core.Set.mem b2_free (Phi.lhs p)))
+        in
+        if repair_needed then
+          failwith
+            (Printf.sprintf
+               "hike-cfg-complete: the split of the block at %s at %s needs phi repair"
+               (Word.to_string sa) (Word.to_string a));
+        let sub' =
+          Term.concat_map blk_t sub ~f:(fun b ->
+              if Tid.equal (Term.tid b) ctid then [ b1; b2 ] else [ b ])
+        in
+        (sub', Term.tid b2)
+
+(* The round's dispatch preparation: every resolvable dispatch's case
+   words land on the run's map — exact starts are already there,
+   mid-block entries through the block split.  A cross-sub word stays
+   foreign (the extern machinery's class); a word in no block is a
+   loud analysis loss.  One split per pass; each split adds a block,
+   so the passes terminate. *)
+let rec prepare_dispatches ~(denote : denote) ~(changed : bool ref)
+    (sub : sub term) : sub term =
+  let starts = addressed_starts sub in
+  let dispatch_word blk =
+    Base.List.find_map (Term.enum jmp_t blk |> Seq.to_list) ~f:(fun j ->
+        let target =
+          match Jmp.kind j with
+          | Call c -> (match Call.target c with Indirect e -> Some e | _ -> None)
+          | Goto (Indirect e) -> Some e
+          | _ -> None
+        in
+        Base.Option.bind ~f:(bounded_words ~denote ~blk) target
+        |> Base.Option.bind ~f:(fun words ->
+               Base.List.find_map words ~f:(fun w ->
+                   match Hike_kb.block_addr (Cbat_word.to_word w) with
+                   | Some _ -> None
+                   | None -> Some (Cbat_word.to_word w))))
+  in
+  match
+    Term.enum blk_t sub
+    |> Seq.filter_map ~f:(fun blk ->
+           match dispatch_word blk with
+           | None -> None
+           | Some a ->
+               let sub', t = split_entry ~starts a sub in
+               Some (a, sub', t))
+    |> Seq.to_list
+    |> Base.List.hd
+  with
+  | None -> sub
+  | Some (a, sub', t) ->
+      Hike_kb.add_block_addr ~addr:a ~tid:t;
+      changed := true;
+      prepare_dispatches ~denote ~changed sub'
+
 (* The dispatch's case pairs off the target's denotation: a bounded
-   set no larger than the run's block count, every word naming a block
-   on the run's map.  A resolvable word the map cannot name is a loud
-   failure — an analysis loss, never a silent foreign transfer. *)
-let resolved_pairs_of ~(denote : denote) ~(blk : blk term) (texp : exp) :
-    (Cbat_word.t * tid) list option =
+   set no larger than the run's block count, every word naming an
+   in-sub block on the run's map.  A cross-sub word leaves the whole
+   dispatch foreign (the extern machinery's class); a resolvable word
+   the map cannot name is a loud failure — an analysis loss, never a
+   silent foreign transfer. *)
+let resolved_pairs_of ~(denote : denote) ~(sub_tids : Tid.Set.t)
+    ~(blk : blk term) (texp : exp) : (Cbat_word.t * tid) list option =
   let blocks = Hike_kb.block_addrs () in
   if Core.Map.is_empty blocks then None
   else
@@ -81,21 +215,19 @@ let resolved_pairs_of ~(denote : denote) ~(blk : blk term) (texp : exp) :
             Int64.compare card (Int64.of_int (Core.Map.length blocks)) > 0
           then None
           else
-            let word_pair (w : Cbat_word.t) : Cbat_word.t * tid =
-              match Cbat_word.to_int64 w with
-              | Ok a -> (
-                  match Hike_kb.block_addr a with
-                  | Some t -> (w, t)
-                  | None ->
-                      failwith
-                        (Printf.sprintf
-                           "hike-cfg-complete: dispatch word 0x%Lx names no block in the run's block-address map"
-                           a))
-              | Error _ ->
+            let pair (w : Cbat_word.t) : (Cbat_word.t * tid) option =
+              match Hike_kb.block_addr (Cbat_word.to_word w) with
+              | Some t when Core.Set.mem sub_tids t -> Some (w, t)
+              | Some _ -> None
+              | None ->
                   failwith
-                    "hike-cfg-complete: a dispatch word exceeds the address width"
+                    (Printf.sprintf
+                       "hike-cfg-complete: dispatch word %s names no block in the run's block-address map"
+                       (Word.to_string (Cbat_word.to_word w)))
             in
-            Some (Vsa.WordSet.iter ws |> Base.List.map ~f:word_pair))
+            let pairs = Vsa.WordSet.iter ws |> Base.List.map ~f:pair in
+            if Base.List.exists pairs ~f:Option.is_none then None
+            else Some (Base.List.filter_map pairs ~f:(fun p -> p)))
 
 
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
@@ -179,7 +311,7 @@ let ret_jmp ~(word_bits : int) : jmp term =
    becomes the guarded-goto series (a call dispatch's continuation is
    the default); everything else stays. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(word_bits : int)
+    ~(word_bits : int) ~(sub_tids : Tid.Set.t)
     ~(reaching : tid Var.Map.t) ~(blk : blk term) (j : jmp term) :
     jmp term list option =
   let retaddr_read v =
@@ -198,11 +330,12 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
             | Some (Direct t) -> Some t
             | Some (Indirect _) | None -> None
           in
-          Base.Option.bind (resolved_pairs_of ~denote ~blk texp)
+          Base.Option.bind
+            (resolved_pairs_of ~denote ~sub_tids ~blk texp)
             ~f:(fun pairs -> Some (dispatch_jmps j texp pairs cont))
       | _ -> None)
   | Goto (Indirect texp) ->
-      Base.Option.bind (resolved_pairs_of ~denote ~blk texp)
+      Base.Option.bind (resolved_pairs_of ~denote ~sub_tids ~blk texp)
         ~f:(fun pairs -> Some (dispatch_jmps j texp pairs None))
   | _ -> None
 
@@ -219,12 +352,18 @@ let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(word_bits : int)
     (sub : sub term) : sub term * bool =
   let changed = ref false in
+  let sub = prepare_dispatches ~denote ~changed sub in
+  let sub_tids =
+    Core.Set.of_list (module Tid)
+      (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
+  in
   let reblock (blk : blk term) : blk term =
     let js = Seq.to_list (Term.enum jmp_t blk) in
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~word_bits ~reaching ~blk j
+          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids ~reaching ~blk
+            j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
     in
     match decided with

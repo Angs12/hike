@@ -124,7 +124,9 @@ module Hv = Hike.Vsa
 let produce ?(block_addrs = []) ?(images = [])
     target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term =
-  Hike.Kb.install_block_addrs (Core.Int64.Map.of_alist_exn block_addrs);
+  Hike.Kb.install_block_addrs
+    (Core.Map.of_alist_exn (module Addr)
+       (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))));
   Hv.fixpoint target sp ~prog ~images sub
   |> Base.Option.value ~default:(Tid.Map.empty, sub)
 
@@ -203,7 +205,9 @@ let pos (o : int64) : int64 = Int64.add Hike.Stack_model.segment_base o
 let produce ?(block_addrs = []) ?(images = [])
     target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term =
-  Hike.Kb.install_block_addrs (Core.Int64.Map.of_alist_exn block_addrs);
+  Hike.Kb.install_block_addrs
+    (Core.Map.of_alist_exn (module Addr)
+       (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))));
   Hv.fixpoint target sp ~prog ~images sub
   |> Base.Option.value ~default:(Tid.Map.empty, sub)
 
