@@ -2,32 +2,12 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Bap_core_theory
 module Abi = Hike_abi
-
-(* ABI record, defaulting to x86_64 SysV. *)
-let abi_of (target : Theory.Target.t) : Abi.t =
-  Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
 
 (* Registers read implicitly by calls. *)
 let is_call_reg ~(abi : Abi.t) (v : var) : bool =
-  let regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs @ abi.Abi.return_regs in
+  let regs = Abi.param_regs abi @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
-
-(* Rewrites the return epilogue to a var-free target. *)
-let ret_replacement (j : jmp term) : jmp term =
-  match Jmp.kind j with
-  | Call c -> (
-      match (Call.target c, Call.return c) with
-      | Indirect (Bil.Var _), None ->
-          Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j)
-            (Call
-               (Call.create
-                  ~target:
-                    (Indirect (Bil.Unknown ("hike-dce-ret", Type.Imm 64)))
-                  ()))
-      | _ -> j)
-  | _ -> j
 
 (* One-pass sweep census: the def index, the lhs reader map, and the
    contributor counts behind [used]/[roots]. Jmp/phi mentions are
@@ -114,68 +94,49 @@ let sweep_census_of (sub : sub term) : sweep_census =
 
 (* Tests for intrinsic interface vars. *)
 let is_intrinsic_var (v : var) : bool =
-  Convutils.is_intrinsic_name (Var.name (Var.base v))
+  Bil2llvm_env.is_intrinsic_name (Var.name (Var.base v))
 
-let is_hike_stack (v : var) : bool = Var.same v Convutils.hike_stack_var
-
-let is_sp ~(abi : Abi.t) (v : var) : bool = Abi.is_sp abi v
-
-let rec sp_value_exp ~(abi : Abi.t) (e : exp) : bool =
-  match e with
-  | Bil.Var v -> is_sp ~abi v
-  | Bil.BinOp (_, a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
-  | Bil.UnOp (_, a) -> sp_value_exp ~abi a
-  | Bil.Cast (_, _, a) -> sp_value_exp ~abi a
-  | Bil.Extract (_, _, a) -> sp_value_exp ~abi a
-  | Bil.Concat (a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
-  | Bil.Let (_, a, b) -> sp_value_exp ~abi a || sp_value_exp ~abi b
-  | Bil.Ite (c, a, b) -> sp_value_exp ~abi c || sp_value_exp ~abi a || sp_value_exp ~abi b
-  | _ -> false
-
-let is_sp_value_def ~(abi : Abi.t) (d : def term) : bool =
-  not (Convutils.is_mem (Def.lhs d))
-  && not (is_sp ~abi (Var.base (Def.lhs d)))
-  && sp_value_exp ~abi (Def.rhs d)
-
-let is_sp_for_erasure ~(abi : Abi.t) (d : def term) : bool =
-  is_sp ~abi (Def.lhs d)
-
-(* True when the sub uses the split model. Hoisted out of the sweep by
-   [dce]: the KB entry cannot change while defs are only removed. *)
-let is_precise_sub (sub : sub term) : bool =
-  match Core.Map.find (Hike_kb.vsa_info ()) (Term.tid sub) with
-  | None -> false
-  | Some info -> Hike_stack_model.is_precise info
-
-(* Region mems survive iff loaded; [mem] always survives. *)
-let keep ?(precise=false) ?(load_roots=Var.Set.empty)
+(* Region and section-component mems survive iff loaded; the promotion's
+   call-arg defs survive (they ARE the call's arguments — the emission
+   consumes them at the call); [mem] always survives. SP needs no
+   special case: the SP local binds to the sub's SP Slot, so SP-derived
+   address defs stay live by the plain used rule. *)
+let keep ?(load_roots=Var.Set.empty)
     ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
-  if precise && (is_sp_for_erasure ~abi d || is_hike_stack (Def.lhs d) || is_sp_value_def ~abi d) then false
+  let lhs = Def.lhs d in
+  if Hike_stack_model.is_window_mem lhs then
+    (* The incoming window's stores are the call's outgoing arguments —
+       their reader is the callee (through the window parameter), never
+       a def of this sub. *)
+    true
+  else if Hike_stack_model.is_region_mem lhs
+  || Hike_stack_model.is_sec_comp_mem lhs then
+    Core.Set.mem load_roots lhs
   else
-    let lhs = Def.lhs d in
-    if Hike_stack_model.is_region_mem lhs then
-      Core.Set.mem load_roots lhs
-      
-    else
-      Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
-      || Convutils.is_mem lhs
-      || is_call_reg ~abi lhs || is_intrinsic_var lhs
+    Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
+    || Hike_stack_model.is_mem lhs
+    || Hike_stack_model.is_call_arg lhs
+    || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
 (* Incremental sweep: one census walk, then a removal cascade. [used] and
-   [load_roots] start exact (permanent mentions plus every counted var)
-   and stay exact (a var leaves only when its last contributor is
-   removed), so each [keep] verdict equals the round version's verdict at
-   convergence — and each def is decided at most a handful of times
-   instead of once per round. Blocks that lose nothing keep their
-   physical block (no rebuild). *)
-let sweep_worklist ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
+   [load_roots] start exact (permanent mentions, every counted var, and
+   the escape roots) and stay exact (a var leaves only when its last
+   contributor is removed), so each [keep] verdict equals the round
+   version's verdict at convergence — and each def is decided at most a
+   handful of times instead of once per round. Blocks that lose nothing
+   keep their physical block (no rebuild). *)
+let sweep_worklist ~(abi : Abi.t) ~(roots : Var.Set.t) (sub : sub term) :
+    sub term =
   let census = sweep_census_of sub in
   let dom m =
     Core.Map.fold m ~init:Var.Set.empty ~f:(fun ~key:v ~data:_ acc ->
         Core.Set.add acc v)
   in
   let used = ref (Core.Set.union census.perm (dom census.cnt)) in
-  let load_roots = ref (Core.Set.union census.perm (dom census.rcnt)) in
+  let load_roots =
+    ref
+      (Core.Set.union roots (Core.Set.union census.perm (dom census.rcnt)))
+  in
   let cnt = ref census.cnt in
   let rcnt = ref census.rcnt in
   let removed = ref Tid.Set.empty in
@@ -200,7 +161,7 @@ let sweep_worklist ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
         | Some d ->
             if
               Core.Set.mem !removed tid
-              || keep ~precise ~load_roots:!load_roots ~abi d !used
+              || keep ~load_roots:!load_roots ~abi d !used
             then drain rest
             else begin
               removed := Core.Set.add !removed tid;
@@ -241,16 +202,30 @@ let sweep_worklist ~(abi : Abi.t) ~precise (sub : sub term) : sub term =
               not (Core.Set.mem !removed (Term.tid d)))
         else blk)
 
-(* Rewrites returns, then sweeps. Intrinsics pass through. *)
-let dce ~target (sub : sub term) : sub term =
+(* Frees the target-producing def of an unproven noreturn call (a
+   degraded run's epilogue, a cast target): the completion's rewrite
+   owns the proven epilogues, and this shape test catches the residual
+   — the return lane renders every return-less call anyway. *)
+let ret_replacement (j : jmp term) : jmp term =
+  match Jmp.kind j with
+  | Call c -> (
+      match (Call.target c, Call.return c) with
+      | Indirect (Bil.Var _), None ->
+        Jmp.with_kind j
+          (Call
+             (Call.with_target c
+                (Indirect (Bil.Unknown ("hike-dce-ret", Type.Imm 64)))))
+      | _ -> j)
+  | _ -> j
+
+(* Rewrites the residual returns, then sweeps. [roots] names the
+   storage mem vars whose bytes escape this sub (their stores' reader
+   lives in another world). Intrinsics pass through. *)
+let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else
-    let mapper =
-      object
-        inherit Term.mapper
-        method! map_jmp j = ret_replacement j
-      end
+    let abi = Abi.of_target target in
+    let sub =
+      Term.map blk_t sub ~f:(Blk.map_elts ~jmp:ret_replacement)
     in
-    let precise = is_precise_sub sub in
-    let abi = abi_of target in
-    mapper#map_sub sub |> sweep_worklist ~abi ~precise
+    sweep_worklist ~abi ~roots sub

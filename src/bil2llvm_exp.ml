@@ -2,10 +2,8 @@
 
 open Bap.Std
 open Bap.Std.Bil.Types
-open Convutils
 module Abi = Hike_abi
 module KB = Bap_knowledge.Knowledge
-module Ws = Cbat_clp_set_composite
 open Bil2llvm_env
 open Bil2llvm_section
 
@@ -126,6 +124,38 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
       @@ Llvm.build_trunc temp_var
            (Llvm.integer_type llvm_ctx result_size) "" llvm_builder
 
+(* True when the address expression bases on the target's TLS
+   register: the access renders as the thread-local anchor read. *)
+let rec is_tls_addr ctx (e : exp) : bool =
+  match e with
+  | Var v -> Var.same v ctx.abi.Abi.thread_pointer
+  | BinOp (_, e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
+  | UnOp (_, e) -> is_tls_addr ctx e
+  | Cast (_, _, e) -> is_tls_addr ctx e
+  | Extract (_, _, e) -> is_tls_addr ctx e
+  | Concat (e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
+  | Let (_, e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
+  | _ -> false
+
+(* The TLS anchor: a thread_local global's address is not a constant —
+   it depends on the calling thread — and llvm.threadlocal.address is
+   its accessor.  A TLS-register-relative access reads the anchor's
+   per-thread cell; the binary's offset drops with the base. *)
+let tls_anchor_addr llvm_builder =
+  let open KB in
+  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* llvm_module = Context.get llvm_module_var in
+  let g =
+    Llvm.declare_global (Llvm.i64_type llvm_ctx) "hike_tls_anchor" llvm_module
+  in
+  Llvm.set_thread_local_mode Llvm.ThreadLocalMode.GeneralDynamic g;
+  Llvm.set_initializer (Llvm.const_int (Llvm.i64_type llvm_ctx) 0) g;
+  let tp = Llvm.pointer_type llvm_ctx in
+  let fty = Llvm.function_type tp [| tp |] in
+  let f = Llvm.declare_function "llvm.threadlocal.address" fty llvm_module in
+  KB.return
+  @@ Llvm.build_call fty f [| g |] "tls_anchor" llvm_builder
+
 let create_load llvm_builder (addr, size) =
   let open KB in
   match Llvm.int64_of_const addr with
@@ -133,13 +163,14 @@ let create_load llvm_builder (addr, size) =
       const_addr_load llvm_builder (Word.of_int64 ~width:64 v) size
         ~fallback:(fun () ->
           let* llvm_ctx = Context.get llvm_ctx_var in
-          let* ptr = create_inttoptr llvm_builder addr in
+          let* ptr = create_addr_ptr llvm_builder addr in
           return
           @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) ptr ""
                llvm_builder)
   | _ ->
-      (* Non-constant addresses use inttoptr. *)
-      let* addr = create_inttoptr llvm_builder addr in
+      (* Non-constant addresses materialize through [create_addr_ptr]
+         (frame GEP for frame addresses, inttoptr for foreign ones). *)
+      let* addr = create_addr_ptr llvm_builder addr in
       let* llvm_ctx = Context.get llvm_ctx_var in
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr ""
@@ -152,11 +183,13 @@ let create_store llvm_builder (llvm_var, addr) =
       const_addr_store llvm_builder (Word.of_int64 ~width:64 v)
         ~data:(fun () -> KB.return llvm_var)
         ~fallback:(fun () ->
-          let* addr = create_inttoptr llvm_builder addr in
-          return @@ Llvm.build_store llvm_var addr llvm_builder)
+          let* addr = create_addr_ptr llvm_builder addr in
+          let _ : Llvm.llvalue = Llvm.build_store llvm_var addr llvm_builder in
+          KB.return llvm_var)
   | _ ->
-      let* addr = create_inttoptr llvm_builder addr in
-      return @@ Llvm.build_store llvm_var addr llvm_builder
+      let* addr = create_addr_ptr llvm_builder addr in
+      let _ : Llvm.llvalue = Llvm.build_store llvm_var addr llvm_builder in
+      KB.return llvm_var
 
 let create_cast llvm_builder (cast, i, llvm_val) =
   let open KB in
@@ -190,8 +223,7 @@ let create_immidiate word =
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
   let* ctx = Context.get emit_ctx_var in
-  (* Remaps native function constants. *)
-  (* Remap applies to <=64-bit words. *)
+  (* Remaps native function constants (<=64-bit words only). *)
   let remapped =
     if Word.bitwidth word <= 64 then
       let v = Word.to_int64_exn word in
@@ -211,16 +243,16 @@ let create_immidiate word =
 (* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
   let v = Var.base var in
-  let abi = ctx.Convutils.abi in
+  let abi = ctx.abi in
   let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
   let sub_key = blk_tid in
   let warned_vars =
-    match Core.Map.find !(ctx.Convutils.undef_warned) sub_key with
+    match Core.Map.find !(ctx.undef_warned) sub_key with
     | Some r -> r
     | None ->
         let r = ref Var.Set.empty in
-        ctx.Convutils.undef_warned :=
-          Core.Map.set !(ctx.Convutils.undef_warned) ~key:sub_key ~data:r;
+        ctx.undef_warned :=
+          Core.Map.set !(ctx.undef_warned) ~key:sub_key ~data:r;
         r
   in
   if not (Core.Set.mem !warned_vars v) then begin
@@ -229,6 +261,46 @@ let warn_undef_read ctx var blk_tid =
       Hike_diag.warn "undef-read: blk %s: var %s never defined"
         (Tid.name blk_tid) (Var.name v)
   end
+
+(* The first memory node of an exp (the access lanes' one node — the
+   fission invariant keeps a def's rhs single-node). *)
+type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
+
+let find_mem_node (exp : exp) : mem_node option =
+  let vis =
+    object
+      inherit [ mem_node option ] Exp.visitor
+      method! visit_load ~mem:_ ~addr _ size acc =
+        Base.Option.first_some acc (Some (`Load (addr, size)))
+      method! visit_store ~mem:_ ~addr ~exp:x _ size acc =
+        Base.Option.first_some acc (Some (`Store (addr, x, size)))
+    end
+  in
+  vis#visit_exp exp None
+
+(* Name of the accumulator marker var an access lane binds. *)
+let marker_name = "hike_acc"
+
+let marker_of_size size =
+  Var.create ~is_virtual:true ~fresh:false marker_name
+    (Type.Imm (Size.in_bits size))
+
+(* Maps only the mem node matching (addr, size) to a var, preserving
+   the enclosing structure — the one rewrite every access-serving lane
+   uses. *)
+let rewrite_mem_node exp addr size marker =
+  let v =
+    object
+      inherit Exp.mapper
+      method! map_load ~mem ~addr:a e s =
+        if Exp.equal a addr && Size.equal s size then Bil.Var marker
+        else Bil.Load (mem, a, e, s)
+      method! map_store ~mem ~addr:a ~exp:x e s =
+        if Exp.equal a addr && Size.equal s size then Bil.Var marker
+        else Bil.Store (mem, a, x, e, s)
+    end
+  in
+  v#map_exp exp
 
 let rec create_exp llvm_builder blk_tid exp =
   let open KB in
@@ -250,7 +322,7 @@ let rec create_exp llvm_builder blk_tid exp =
           let want_w =
             match Var.typ v with Type.Imm w -> w | _ -> 64
           in
-          match Convutils.probe_local_family ctx blk_tid v ~want_w with
+          match probe_local_family ctx blk_tid v ~want_w with
           | Some (val_at_w, bound_w) ->
               let want_ty = Llvm.integer_type llvm_ctx' want_w in
               if bound_w = want_w then return val_at_w
@@ -260,7 +332,7 @@ let rec create_exp llvm_builder blk_tid exp =
                 return @@ Llvm.build_zext val_at_w want_ty "" llvm_builder
           | None ->
               warn_undef_read ctx v blk_tid;
-              !$Llvm.undef (typ_lltype_m (Var.typ v)))
+              frozen_undef ctx v)
   | Int i -> create_immidiate i
   | Cast (cast, i, exp) ->
       let* var = create_exp llvm_builder blk_tid exp in
@@ -277,14 +349,48 @@ let rec create_exp llvm_builder blk_tid exp =
   | Extract (hi, lo, exp) ->
       let* llvm_var = create_exp llvm_builder blk_tid exp in
       create_extract llvm_builder (hi, lo, llvm_var)
-  (* Fissioned AND ordinary memory ops emit identically: the rewrite
-     already materialized region storage into the address, so by emission
-     there is nothing left to dispatch on (the former mem-operand guard
-     arms were byte-identical to these fallthroughs and are deleted). *)
+  (* Fissioned AND ordinary memory ops: a named section component
+     routes by name through its own global; everything else
+     emits identically — the rewrite already materialized region
+     storage into the address. *)
+  | Store (Bil.Var mv, addr, data, _, _)
+    when Hike_stack_model.is_region_mem mv
+         || Hike_stack_model.is_window_mem mv ->
+      region_window_access llvm_builder blk_tid mv exp
+        ~raw:(fun () ->
+          let* addr = create_exp llvm_builder blk_tid addr in
+          let* data = create_exp llvm_builder blk_tid data in
+          create_store llvm_builder (data, addr))
+  | Store (Bil.Var mv, addr, data, _, s)
+    when Hike_stack_model.is_sec_comp_mem mv ->
+      sec_comp_access llvm_builder blk_tid ~store:true mv addr
+        ~data:(Some data) (Size.in_bits s)
+  | Store (_, addr, data, _, _) when is_tls_addr ctx addr ->
+      let* ptr = tls_anchor_addr llvm_builder in
+      let* data = create_exp llvm_builder blk_tid data in
+      KB.return
+      @@ Llvm.build_store data ptr llvm_builder
   | Store (_, addr, data, _, _) ->
       let* addr = create_exp llvm_builder blk_tid addr in
       let* data = create_exp llvm_builder blk_tid data in
       create_store llvm_builder (data, addr)
+  | Load (Bil.Var mv, addr, _, size)
+    when Hike_stack_model.is_region_mem mv
+         || Hike_stack_model.is_window_mem mv ->
+      region_window_access llvm_builder blk_tid mv exp
+        ~raw:(fun () ->
+          let* addr = create_exp llvm_builder blk_tid addr in
+          create_load llvm_builder (addr, Size.in_bits size))
+  | Load ((Bil.Var mv), addr, _, size)
+    when Hike_stack_model.is_sec_comp_mem mv ->
+      sec_comp_access llvm_builder blk_tid ~store:false mv addr
+        ~data:None (Size.in_bits size)
+  | Load (_, addr, _, size) when is_tls_addr ctx addr ->
+      let* ptr = tls_anchor_addr llvm_builder in
+      let* llvm_ctx = Context.get llvm_ctx_var in
+      KB.return
+      @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) ptr
+           "" llvm_builder
   | Load (_, addr, _, size) ->
       let* addr = create_exp llvm_builder blk_tid addr in
       create_load llvm_builder (addr, Size.in_bits size)
@@ -305,7 +411,54 @@ let rec create_exp llvm_builder blk_tid exp =
       return @@ Llvm.poison typ
 
 
-let rec create_rip_relative_addr llvm_builder blk_tid exp =
+(* The NAMED-COMPONENT lane (the section routing): the BIL memory var
+   IS the component's identity — the spec setup binds each component
+   mem var to its global and native base; the address expr evaluates
+   to NATIVE bits (the rewrite kept the constant-chain arithmetic), so
+   the GEP index is the exact native delta. *)
+and sec_comp_access llvm_builder blk_tid ~(store : bool)
+    (mv : var) (addr : exp) ~(data : exp option) (size : int) :
+    Llvm.llvalue KB.t =
+  let open KB in
+  let* ctx, llvm_ctx = emit_env () in
+  match Base.List.Assoc.find ~equal:Var.equal !(ctx.sec_comps) mv with
+  | Some (base, own_lo) ->
+    let* a = create_exp llvm_builder blk_tid addr in
+    let idx =
+      Llvm.build_sub a
+        (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) own_lo false)
+        "" llvm_builder
+    in
+    let p =
+      Llvm.build_gep (Llvm.i8_type llvm_ctx) base [| idx |] ""
+        llvm_builder
+    in
+    if store then
+      (match data with
+       | Some d ->
+         let* v = create_exp llvm_builder blk_tid d in
+         let _ : Llvm.llvalue = Llvm.build_store v p llvm_builder in
+         KB.return v
+       | None -> assert false)
+    else
+      KB.return
+      @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) p ""
+           llvm_builder
+  | None ->
+    (* Unknown component: the generic memory lane — the address
+       stays native bits and materializes unremapped. *)
+    if store then
+      (match data with
+       | Some d ->
+         let* a = create_exp llvm_builder blk_tid addr in
+         let* v = create_exp llvm_builder blk_tid d in
+         create_store llvm_builder (v, a)
+       | None -> assert false)
+    else
+      let* a = create_exp llvm_builder blk_tid addr in
+      create_load llvm_builder (a, size)
+
+and create_rip_relative_addr llvm_builder blk_tid exp =
   let open KB in
   let* llvm_ctx = Context.get llvm_ctx_var in
   let* llvm_module = Context.get llvm_module_var in
@@ -321,6 +474,14 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
             return @@ Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) v false
       in
       return addr
+  | Store (Bil.Var mv, addr, data, _, s)
+    when Hike_stack_model.is_sec_comp_mem mv ->
+      sec_comp_access llvm_builder blk_tid ~store:true mv addr
+        ~data:(Some data) (Size.in_bits s)
+  | Load (Bil.Var mv, addr, _, s)
+    when Hike_stack_model.is_sec_comp_mem mv ->
+      sec_comp_access llvm_builder blk_tid ~store:false mv addr
+        ~data:None (Size.in_bits s)
   | Store (_, addr, data, _, _) ->
       let* addr = create_exp llvm_builder blk_tid addr in
       (match Llvm.int64_of_const addr with
@@ -331,7 +492,9 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
              ~fallback:(fun () ->
                let* base = resolve_addr llvm_builder addr_w in
                let* data = create_exp llvm_builder blk_tid data in
-               return @@ Llvm.build_store data base llvm_builder)
+               let _ : Llvm.llvalue =
+                 Llvm.build_store data base llvm_builder in
+               KB.return data)
        | None ->
            (* Stores through remapped constants. *)
            let* data = create_exp llvm_builder blk_tid data in
@@ -348,13 +511,152 @@ let rec create_rip_relative_addr llvm_builder blk_tid exp =
                section_load llvm_builder llvm_ctx addr_w i64
                  (Size.in_bits size))
        | None ->
-           (* Loads via inttoptr on remapped constants. *)
+           (* Non-constant addresses: the ordinary [create_load] path. *)
            create_load llvm_builder (addr, Size.in_bits size))
   | Cast (cast, i, (Load _ as load)) ->
       (* RIP-relative widening loads. *)
       let* v = create_rip_relative_addr llvm_builder blk_tid load in
       create_cast llvm_builder (cast, i, v)
   | _ -> create_exp llvm_builder blk_tid exp
+
+(* Shared skeleton: bind the arm's value to the marker, then re-emit
+   with the arm's rewrite. Insertion order is the arm's order. *)
+and emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite =
+  let open KB in
+  let* v = emit () in
+  insert_local ctx blk_tid marker v;
+  create_exp llvm_builder blk_tid (rewrite marker)
+
+(* The region lane: the BIL's [stack_rN_mem] routes to the region's
+   own alloca.  The address expression evaluates to the anchor-based
+   runtime integer (the model arithmetic resolves against the SP
+   Slot's anchor), so the GEP index is the entry-relative offset of
+   the access minus the region's entry-relative base — the same
+   relative byte, exact for dynamic indices and displacement. *)
+(* The incoming-window lane: the callee's above-entry accesses read the
+   CALLER's window through the hike_window parameter — the same
+   normalization (the access's anchor-relative offset), one base
+   different: the parameter integer, not an alloca. *)
+and window_mem_access llvm_builder blk_tid fr mv exp =
+  let open KB in
+  match Hike_stack_model.is_window_mem mv with
+  | false -> create_exp llvm_builder blk_tid exp
+  | true -> (
+      let* ctx, llvm_ctx = emit_env () in
+      let* w_int =
+        let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
+        match get_local ctx blk_tid w with
+        | Some v -> KB.return v
+        | None -> KB.return @@ Llvm.const_int (Llvm.i64_type llvm_ctx) 0
+      in
+      let off a =
+        let stack0 =
+          match fr.stack0 with
+          | Some v -> v
+          | None -> fr.anchor_i64
+        in
+        Llvm.build_sub a stack0 "" llvm_builder
+      in
+      match find_mem_node exp with
+      | Some (`Load (addr, size)) ->
+          let marker = marker_of_size size in
+          let* a = create_exp llvm_builder blk_tid addr in
+          let p =
+            Llvm.build_inttoptr
+              (Llvm.build_add w_int (off a) "" llvm_builder)
+              (Llvm.pointer_type llvm_ctx) "" llvm_builder
+          in
+          let emit () =
+            KB.return
+            @@ Llvm.build_load
+                 (Llvm.integer_type llvm_ctx (Size.in_bits size))
+                 p "" llvm_builder
+          in
+          let rewrite marker = rewrite_mem_node exp addr size marker in
+          emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
+      | Some (`Store (addr, data, size)) ->
+          let marker = marker_of_size size in
+          let* a = create_exp llvm_builder blk_tid addr in
+          let p =
+            Llvm.build_inttoptr
+              (Llvm.build_add w_int (off a) "" llvm_builder)
+              (Llvm.pointer_type llvm_ctx) "" llvm_builder
+          in
+          let emit () =
+            let* d = create_exp llvm_builder blk_tid data in
+            let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
+            KB.return d
+          in
+          let rewrite marker = rewrite_mem_node exp addr size marker in
+          emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
+      | None -> create_exp llvm_builder blk_tid exp)
+
+and region_mem_access llvm_builder blk_tid fr mv exp =
+  let open KB in
+  let stack0 =
+    match fr.stack0 with Some v -> v | None -> fr.anchor_i64
+  in
+  let region_index llvm_builder rel_rlo a =
+    let* llvm_ctx = Context.get llvm_ctx_var in
+    let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
+    KB.return
+    @@ Llvm.build_sub rel
+         (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) rel_rlo false)
+         "" llvm_builder
+  in
+  match Base.List.Assoc.find ~equal:Var.equal fr.regions mv with
+  | None -> create_exp llvm_builder blk_tid exp
+  | Some (base, rel_rlo) -> (
+      match find_mem_node exp with
+      | Some (`Load (addr, size)) ->
+          let marker = marker_of_size size in
+          let* ctx = Context.get emit_ctx_var in
+          let* llvm_ctx = Context.get llvm_ctx_var in
+          let* a = create_exp llvm_builder blk_tid addr in
+          let* idx = region_index llvm_builder rel_rlo a in
+          let p =
+            Llvm.build_gep (Llvm.i8_type llvm_ctx) base [| idx |] ""
+              llvm_builder
+          in
+          let emit () =
+            KB.return
+            @@ Llvm.build_load
+                 (Llvm.integer_type llvm_ctx (Size.in_bits size))
+                 p "" llvm_builder
+          in
+          let rewrite marker = rewrite_mem_node exp addr size marker in
+          emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
+      | Some (`Store (addr, data, size)) ->
+          let marker = marker_of_size size in
+          let* ctx = Context.get emit_ctx_var in
+          let* llvm_ctx = Context.get llvm_ctx_var in
+          let* a = create_exp llvm_builder blk_tid addr in
+          let* idx = region_index llvm_builder rel_rlo a in
+          let p =
+            Llvm.build_gep (Llvm.i8_type llvm_ctx) base [| idx |] ""
+              llvm_builder
+          in
+          let emit () =
+            let open KB in
+            let* d = create_exp llvm_builder blk_tid data in
+            let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
+            return d
+          in
+          let rewrite marker = rewrite_mem_node exp addr size marker in
+          emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
+      | None -> create_exp llvm_builder blk_tid exp)
+
+(* The region/window twin of the generic exp lane (defense in depth):
+   a fissioned mem var reaching this lane still routes to its storage;
+   with no frame bound (outside a body) or no such region, the raw
+   lane serves the access. *)
+and region_window_access llvm_builder blk_tid mv exp ~raw =
+  match !Bil2llvm_env.cur_frame with
+  | Some fr when Hike_stack_model.is_region_mem mv ->
+      region_mem_access llvm_builder blk_tid fr mv exp
+  | Some fr when Hike_stack_model.is_window_mem mv ->
+      window_mem_access llvm_builder blk_tid fr mv exp
+  | _ -> raw ()
 
 let create_branches blk_tid llvm_builder branches =
   let open KB in

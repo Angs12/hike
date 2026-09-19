@@ -13,8 +13,14 @@
 ; nothing there, and cbat_vsa's per-stage profiling counters link the
 ; no-op adapter instead.
 (env
+ (dev
+  (ocamlopt_flags
+   (:standard -O3)))
+ (fast
+  (ocamlopt_flags
+   (:standard -inline 0 -rounds 1)))
  (vsa-debug
   (flags
-   (:standard -g -alert -deprecated))
+   :standard -g)
   (ocamlopt_flags
    (:standard -O3))))

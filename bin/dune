@@ -1,0 +1,22 @@
+; The batch lift driver: same chain as the plugin, one process for N
+; binaries. Built in every profile, never installed. Library set and
+; init pattern mirror zz_scratch_probe/probe_common.ml — Bap_main.init
+; dynlinks the plugin world the lift needs (llvm loader, x86 targets).
+(executable
+ (name hike_batch)
+ (libraries
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  core
+  threads
+  unix
+  str))
+
+(rule
+ (alias all)
+ (deps (source_tree .))
+ (action
+  (run %{workspace_root}/src/check_instrumentation.sh .)))

@@ -11,3 +11,6 @@ lm_test.ml
 # Only its dune _build is ignored.
 zz_scratch_probe/_build/
 _build-debug/
+_build-dbg2/
+_build-default-check/
+_build-fast/

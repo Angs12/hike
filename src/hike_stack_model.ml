@@ -1,46 +1,111 @@
-(* Pure stack model: regions, split plan, and escape rules. *)
+
+(* The sections in declaration order (the attribution's vocabulary,
+   hosted here — the model is the shared home every lane reads).  A
+   range carries its section, so merging across sections is
+   impossible. *)
+module Vocab = struct
+  open! Core
+
+  type sec = Stack | Args | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
+  [@@deriving equal, compare, sexp]
+
+  (* The slim def-carried classification: the def's section with its
+     ADDRESS bounds (not the tree's occupied-byte bounds), the
+     justified unbounded form, the data-section anchoring, or Dead.
+     Absence is the identity.  The constructors live in [Tag] so the
+     section constructors stay unshadowed. *)
+  module Tag = struct
+    type t =
+      | Stack of int64 * int64
+      | Stack_unbounded
+      | Args of int64 * int64
+      | Args_unbounded
+      | Sec of sec * int64 * int64
+      | Dead
+    [@@deriving equal, compare, sexp]
+  end
+
+  type sec_tag = Tag.t
+end
+
+include Vocab
+
+(* Pure stack model: the geometry facts and the shared vocabulary.
+
+
+   THE MODEL IS THE TAG (ADR 0008): the VSA tags every frame-resident access
+   with its proven offset span.  This module merges overlapping spans into
+   regions and derives each region's facts from those tags alone — the SP
+   Slot anchor makes the partition purely geometric.
+   An oversized region joins to Frame with a diagnostic naming it —
+   never a gate. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
 
-(* Derives SP/FP from the target. *)
-let fp_of (target : Theory.Target.t) : var option =
-  if Theory.Target.is_unknown target then None
-  else
-    match Abi.fp target with
-    | v -> Some v
-    | exception _ -> None
+(* Stack pointer only: the one register granted stack semantics by fiat
+   (ADR 0008).  There is no frame-pointer fact here — fp is an ordinary
+   callee-saved GPR whose stack-ness, like any register's, is proven by
+   the VSA (its frame term), never by name. *)
 
-let is_sp_or_fp (sp : var) (fp : var option) (v : var) : bool =
-  Var.same (Var.base v) (Var.base sp)
-  ||
-  match fp with
-  | Some fp -> Var.same (Var.base v) (Var.base fp)
-  | None -> false
+(* The Vsa record: the producer/emitter contract point.  The
+   producer (hike_vsa) builds it, the KB (hike_kb) stores it, the model
+   and the emitter consume it — one home at the contract point. *)
+module Vsa = struct
+  open Core
 
-(* Tests for SP/FP references. *)
-let rec exp_contains_sp (sp : var) (fp : var option) (e : exp) :
-    bool =
-  match e with
-  | Bil.Var v -> is_sp_or_fp sp fp v
-  | Bil.BinOp (_, a, b) ->
-      exp_contains_sp sp fp a || exp_contains_sp sp fp b
-  | Bil.UnOp (_, a) -> exp_contains_sp sp fp a
-  | Bil.Cast (_, _, a) -> exp_contains_sp sp fp a
-  | Bil.Extract (_, _, a) -> exp_contains_sp sp fp a
-  | Bil.Concat (a, b) ->
-      exp_contains_sp sp fp a || exp_contains_sp sp fp b
-  | Bil.Let (_, a, b) ->
-      exp_contains_sp sp fp a || exp_contains_sp sp fp b
-  | Bil.Ite (c, a, b) ->
-      exp_contains_sp sp fp c
-      || exp_contains_sp sp fp a
-      || exp_contains_sp sp fp b
-  | Bil.Load (_, a, _, _) | Bil.Store (_, a, _, _, _) ->
-      exp_contains_sp sp fp a
-  | _ -> false
+  (* The model segment's base (2^62): the ABSOLUTE position of the
+     entry RSP on the segment line (the seeded SP is base + offset 0).
+     The single representation: tag positions are absolute, so
+     every "below/above the entry RSP" question compares against this
+     constant, and a frame-relative depth is [base − position]. *)
+  let segment_base = Cbat_vsa.WordSet.stack_base
+
+  (* Alias of the kind enum in [Cbat_extraction]. *)
+  type vsa_kind = Cbat_vsa.Cbat_extraction.kind =
+    | Range of int64 * int64
+    | Infinite of int64 * int64
+    | Caller of int64 * int64
+    | Mixed of int64 * int64
+    | Dead
+  (* Aliases [equal_kind] for [@@deriving equal]. *)
+  let equal_vsa_kind = Cbat_vsa.Cbat_extraction.equal_kind
+
+  (* The fully-infinite span — the kind of a TOP denotation — and the
+     fact its consumers key on. *)
+  let unbounded_span = Cbat_vsa.Cbat_extraction.unbounded_span
+  let is_unbounded_span = Cbat_vsa.Cbat_extraction.is_unbounded_span
+
+  (* One-line contract: the offset set with exactly one element. *)
+  let singleton_offset (offs : Cbat_vsa.WordSet.Clp.t) : int64 option =
+    let i64 w = match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None in
+    let open Base.Option in
+    Cbat_vsa.WordSet.Clp.min_elem offs >>= i64
+    >>= fun lo -> Cbat_vsa.WordSet.Clp.max_elem offs >>= i64
+    >>= fun hi -> if Int64.equal lo hi then Some lo else None
+
+  (* One-line contract: the denotation's single stack position
+     (absolute, on the segment line), when it denotates to exactly
+     one. *)
+  let singleton_stack_position (ws : Cbat_vsa.WordSet.t) : int64 option =
+    let open Base.Option in
+    Cbat_vsa.WordSet.stack_offsets ws >>= singleton_offset
+    >>= Cbat_vsa.Cbat_extraction.position_of_offset
+
+  (* One call site's outgoing slot facts: which slot index each of
+     the block's outgoing stores feeds.  The structured fact IS the
+     provability — presence of slot i in the map = the site's store
+     feeds promoted slot i; absence = the store stays on the window
+     path (the identity). *)
+  type call_site = {
+    site_slots : (int * Tid.t) list; (* slot index -> storing def *)
+  } [@@deriving equal]
+
+end
+include Vsa
+
 
 
 let addr_of_rhs (e : exp) : (exp * Size.t) option =
@@ -51,18 +116,6 @@ let addr_of_rhs (e : exp) : (exp * Size.t) option =
         Base.Option.first_some acc (Some (addr, s))
       method! visit_store ~mem:_ ~addr ~exp:_ _ s acc =
         Base.Option.first_some acc (Some (addr, s))
-    end
-  in
-  vis#visit_exp e None
-
-(* Stored data of a store rhs (no wrapper closure; the model never
-   rewrites, only tests). *)
-let store_data_exp_of_rhs (e : exp) : exp option =
-  let vis =
-    object
-      inherit [ exp option ] Exp.visitor
-      method! visit_store ~mem:_ ~addr:_ ~exp:data _ _ acc =
-        Base.Option.first_some acc (Some data)
     end
   in
   vis#visit_exp e None
@@ -90,10 +143,53 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
       in
       Some (data, wrap)
 
-let slot_of (lo : int64) (bits : int) : var =
+(* One word, in bits: the width of every model-var minter below. *)
+let word_bits (word : int) : int = 8 * word
+
+(* The promoted incoming stack-slot parameter of index [i]: the
+   callee's own signature fact, minted deterministically so the
+   signature and the body agree on the same var. *)
+let arg_slot ~(word : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (Printf.sprintf "slot_%Ld" (Int64.abs lo))
-    (Type.Imm bits)
+    (Printf.sprintf "hike_slot%d" i)
+    (Type.Imm (word_bits word))
+
+(* The call-argument temp of slot [i]: the BIR def a call site
+   binds the promoted argument to (the promotion rewrite creates it
+   right after the site's outgoing store; the call's emission passes its
+   bound value).  Deterministically minted like the slots. *)
+let call_arg ~(word : int) (i : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (Printf.sprintf "hike_arg%d" i)
+    (Type.Imm (word_bits word))
+
+(* Tests for the call-argument temps (the DCE rule: they survive — they
+   are the call's arguments, consumed by the emission). *)
+let is_call_arg (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"hike_arg"
+
+(* Tests for the promoted slot parameters. *)
+let is_arg_slot (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"hike_slot"
+
+(* The incoming-window memory var: the rewrite re-points a callee's
+   above-entry accesses at it; the emitter materializes them against
+   the hike_window parameter (the caller's world), never the callee's
+   own residue alloca. *)
+let window_mem : var =
+  Var.create ~is_virtual:false ~fresh:false "hike_window_mem"
+    (mem64_t (Size.of_int_exn 8))
+
+let is_window_mem (v : var) : bool =
+  String.equal (Var.name v) "hike_window_mem"
+
+(* The Caller-Window Parameter: the caller-window base, not SP — the
+   residual window-base argument of variadic/mixed subs (the bridge) and
+   of the memory-convention thunks.  The model owns the var grammar:
+   window, slots, and regions all mint here. *)
+let hike_window_var ~(word : int) : var =
+  Var.create ~is_virtual:false ~fresh:false "hike_window"
+    (Type.Imm (word_bits word))
 
 (* Region memory and base vars; the alloca's emitted name. *)
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
@@ -101,655 +197,340 @@ let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 let region_mem (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (region_name id ^ "_mem")
-    (Type.Mem (Size.addr_of_int_exn 64, Size.of_int_exn 8))
+    (mem64_t (Size.of_int_exn 8))
 
-let region_base (id : int) : var =
+let region_base ~(word : int) (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (region_name id ^ "_base") (Type.Imm 64)
+    (region_name id ^ "_base") (Type.Imm (word_bits word))
+
+(* Memory-var test (the BAP var-kind predicate; the var grammar lives
+   here with the fission-var tests). *)
+let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 (* Tests for fission var names. *)
 let is_region_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
+(* The region id of a fission var ([stack_rN_mem]). *)
 let is_region_base (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_base"
 
-(* Tests for incoming-arg saves. *)
-let saves_incoming_reg (abi : Abi.t) (d : def term) : bool =
-  let param_regs = abi.Abi.int_param_regs @ abi.Abi.vector_param_regs in
-  match Def.rhs d with
-  | Bil.Store (_, _, data, _, _) -> (
-      match data with
-      | Bil.Var v ->
-          Base.List.exists param_regs
-            ~f:(fun r -> Var.same r (Var.base v))
-      | _ -> false)
-  | _ -> false
+(* ------------------------------------------------------------------ *)
+(* The section partition.  Sections mirror the stack regions:   *)
+(* the attribution pass carves each reserved span into per-object     *)
+(* components; the BIL carries the component in the mem var           *)
+(* ([sec_comp_N_mem], the fission convention); the emitter routes by  *)
+(* name.  A section's native base is a compile-time constant (unlike  *)
+(* the stack's runtime anchor), so there is no base var to bind —     *)
+(* the address delta is inline arithmetic.                            *)
+(* ------------------------------------------------------------------ *)
 
-
-let is_real_call (j : jmp term) : bool =
-  match Jmp.kind j with
-  | Call c -> (
-      match Call.target c with
-      | Direct _ -> true
-      | Indirect _ -> Option.is_some (Call.return c))
-  | _ -> false
-
-(* Tests whether a frame address escapes. *)
-
-(* Shared walk: per call block, the def list with the last stack def's
-   index. Both positional rules below are complements of it. Stack-ness is
-   [vsa_info] membership (spec §2.2); callers pass the predicate. *)
-let call_block_stack_tails ~(is_stack : def term -> bool) (sub : sub term) :
-    (def term list * int option) list =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:[] ~f:(fun acc blk ->
-         if
-           Term.enum jmp_t blk
-           |> Seq.exists ~f:is_real_call
-         then
-           let defs = Term.enum def_t blk |> Seq.to_list in
-           let last =
-             Base.List.foldi defs ~init:None ~f:(fun i acc d ->
-                 if is_stack d then Some i else acc)
-           in
-           (defs, last) :: acc
-         else acc)
-
-(* Last stack def per call block. *)
-let last_push_tids_of ~(is_stack : def term -> bool) (sub : sub term) :
-    Tid.Set.t =
-  Base.List.fold_left (call_block_stack_tails ~is_stack sub) ~init:Tid.Set.empty
-    ~f:(fun acc (defs, last) ->
-      match last with
-      | Some i -> Core.Set.add acc (Term.tid (Base.List.nth_exn defs i))
-      | None -> acc)
-
-(* Tests for a memory node in rhs (no accumulator games). *)
-let is_memory_shape (e : exp) : bool =
-  let vis =
-    object
-      inherit [ bool ] Exp.visitor
-      method! visit_load ~mem:_ ~addr:_ _ _ _ = true
-      method! visit_store ~mem:_ ~addr:_ ~exp:_ _ _ _ = true
-    end
-  in
-  vis#visit_exp e false
-
-(* Per-def facts, extracted once per pass entry: every consumer below used
-   to re-walk the same defs with addr_of_rhs / store_data_of_rhs /
-   is_memory_shape / Exp.free_vars (six consumers on one sub). *)
-type def_facts = {
-  def : def term;
-  addr : (exp * Size.t) option;
-  store_data : exp option;
-  mem_shape : bool;
-  free_vars : Var.Set.t;
+(* One emitted component: the word range [lo_w, hi_w] of the section
+   keyed by its native span, plus the typed-emission decision. *)
+type sec_comp = {
+  comp_id : int;              (* the N in sec_comp_N (module-wide) *)
+  sec_lo : int64;             (* the owning section's native span *)
+  sec_hi : int64;
+  lo_w : int;                 (* word range within the section *)
+  hi_w : int;
+  typed_w : int;              (* bytes per element: 8/4/2/1 *)
 }
 
-let def_facts_of_sub (sub : sub term) : def_facts Tid.Map.t =
+let sec_comp_name (n : int) : string = Printf.sprintf "sec_comp_%d" n
+
+let sec_comp_mem (n : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (sec_comp_name n ^ "_mem")
+    (mem64_t (Size.of_int_exn 8))
+
+(* The gap runs (the residue's byte-exact remainder) continue the same
+   numbering; they emit globals but carry no BIL var. *)
+let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
+
+let is_sec_comp_mem (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix:"sec_comp_"
+  && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+
+(* The component id of a fission var ([sec_comp_N_mem]); a var the test
+   above rejects parses to no id. *)
+(* A word of a section image is string text iff a printable run crosses
+   its start boundary: the start byte is printable and every byte back
+   to the last NUL (or to the array's start, when none precedes) is
+   printable too.  A NUL directly before the word means the run starts
+   at the word — no crossing, the word renders as a value. *)
+let string_text_word ~(arr : int array) ~(off : int) : bool =
+  let printable b = b >= 0x20 && b <= 0x7e in
+  let rec crosses i =
+    if i < 0 then true
+    else if arr.(i) = 0 then i < off - 1
+    else if printable arr.(i) then crosses (i - 1)
+    else false
+  in
+  off > 0 && off < Array.length arr && printable arr.(off) && crosses (off - 1)
+
+(* The degraded frame's below-entry depth fact: the deepest literal SP
+   decrement in the sub (rsp-sub prologues and VLAs). *)
+let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
+  let is_sp v = Abi.is_sp abi (Var.base v) in
   Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+  |> Seq.fold ~init:0L ~f:(fun acc blk ->
          Term.enum def_t blk
-         |> Seq.fold ~init:m ~f:(fun m d ->
-                let rhs = Def.rhs d in
-                Core.Map.set m ~key:(Term.tid d)
-                  ~data:
-                    {
-                      def = d;
-                      addr = addr_of_rhs rhs;
-                      store_data = store_data_exp_of_rhs rhs;
-                      mem_shape = is_memory_shape rhs;
-                      free_vars = Exp.free_vars rhs;
-                    }))
+         |> Seq.fold ~init:acc ~f:(fun acc d ->
+               match Def.rhs d with
+               | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w)
+                 when is_sp r ->
+                   Int64.max acc (Word.to_int64_exn w)
+               | _ -> acc))
 
-let sp_escaped (sp : var) (target : Theory.Target.t) (sub : sub term) :
-    bool =
-  let base_var v = Var.base v in
-  let sp_base = base_var sp in
-  let fp = fp_of target in
-  let fp_bases =
-    match fp with Some fp -> [ base_var fp ] | None -> []
-  in
-  (* Vars derived via arithmetic, excluding loads. *)
-  let derived : Var.Set.t ref =
-    ref (Var.Set.of_list (sp_base :: fp_bases))
-  in
-  (* Per-def facts, extracted once: the grow loop below used to re-walk
-     every def per round. *)
-  let facts = def_facts_of_sub sub in
-  let rec grow () =
-    let changed = ref false in
-    Core.Map.iter facts ~f:(fun f ->
-        let d = f.def in
-        if not f.mem_shape then begin
-          let uses = f.free_vars in
-          if
-            Core.Set.exists uses ~f:(fun v ->
-                Core.Set.mem !derived (base_var v))
-          then begin
-            let lhs = base_var (Def.lhs d) in
-            if not (Core.Set.mem !derived lhs) then (
-              derived := Core.Set.add !derived lhs;
-              changed := true)
-          end
-        end);
-    if !changed then grow () else ()
-  in
-  grow ();
-  (* Argument registers, resolved once: Abi.param_regs raises on unknown
-     targets, and laziness preserves the old raise-on-first-use timing. *)
-  let arg_regs = lazy (Abi.param_regs target) in
-  (* Derived values escape via call args, stored data, or indirect targets. *)
-  (* Free vars of the computed value. *)
-  let rec value_free_vars (e : exp) : Var.Set.t =
-    let vis =
-      object
-        inherit [ Var.Set.t ] Exp.visitor
-        method! visit_var v acc = Core.Set.add acc (base_var v)
-        method! visit_load ~mem:_ ~addr:_ _ _ acc = acc
-        method! visit_store ~mem:_ ~addr:_ ~exp:data _ _ acc =
-          Core.Set.union acc (value_free_vars data)
-      end
-    in
-    vis#visit_exp e Var.Set.empty
-  in
-  let exp_escapes (e : exp) : bool =
-    Core.Set.exists (value_free_vars e) ~f:(fun v ->
-        Core.Set.mem !derived (base_var v))
-  in
-  let call_arg_escapes =
-    (* Only argument-register defs count. *)
-    let is_arg_reg (v : var) : bool =
-      Base.List.exists (Lazy.force arg_regs)
-        ~f:(fun r -> Var.same r (base_var v))
-    in
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        let has_call =
-          Term.enum jmp_t blk
-          |> Seq.exists ~f:is_real_call
-        in
-        if not has_call then false
-        else
-          Term.enum def_t blk
-          |> Seq.exists ~f:(fun d ->
-              match Core.Map.find facts (Term.tid d) with
-              | None -> false
-              | Some f ->
-                is_arg_reg (Def.lhs d)
-                && not f.mem_shape
-                && exp_escapes (Def.rhs d))
-          || (Term.enum jmp_t blk
-              |> Seq.exists ~f:(fun j ->
-                  match Jmp.kind j with
-                  | Call c -> (
-                      match Call.target c with
-                      | Indirect e -> exp_escapes e
-                      | _ -> false)
-                  | _ -> false)))
-  in
-  let store_data_escapes =
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        Term.enum def_t blk
-        |> Seq.exists ~f:(fun d ->
-            match Core.Map.find facts (Term.tid d) with
-            | None -> false
-            | Some f -> (
-              match f.store_data with
-              | Some data ->
-                if exp_escapes data then
-                  match f.addr with
-                  | Some (addr, _) ->
-                    let bare_sp =
-                      match addr with
-                      | Bil.Var v -> Var.same (base_var v) sp_base
-                      | _ -> false
-                    in
-                    not bare_sp
-                  | None -> false
-                else false
-              | None -> false)))
-  in
-  call_arg_escapes || store_data_escapes
+(* The capacity of the frame's window extension (the bounded arm: a
+   real SysV window never needs more; a wider extent reads past it the
+   way an unproven address always has). *)
+let caller_window_bytes : int64 = 65536L
 
-(* Merges overlapping ranges into regions. *)
-let regions_of_sub (sp : var) (target : Theory.Target.t) (sub : sub term)
-    (info : Convutils.vsa_info) ~(frame_escaped : bool) :
-    Convutils.region list =
-  let k_of = info.Convutils.k_ranges in
-  let ranges : (int64 * int64) Tid.Map.t =
-    Core.Map.filter_map info.Convutils.offsets
-      ~f:(fun (kind : Convutils.vsa_kind) ->
-        match kind with
-        | Convutils.Range (lo, hi) -> Some (lo, hi)
-        | Convutils.Infinite _ | Convutils.Unbounded | Convutils.Dead
-        | Convutils.VLA _ -> None)
-  in
-  let abi =
-    (* Falls back to x86_64 SysV on unknown targets. *)
-    Option.value (Abi.of_target_opt target) ~default:Abi.x86_64_sysv
-  in
-  (* Frame pointer, resolved once for the per-def/per-node family below. *)
-  let fp = fp_of target in
-  (* One walk builds every per-def fact below (the def map, the widths,
-     and the member/outgoing re-walks all read it). *)
-  let facts = def_facts_of_sub sub in
-  let def_of_tid : def term Tid.Map.t =
-    Core.Map.map facts ~f:(fun f -> f.def)
-  in
-  let def_width_of (mtid : tid) : int =
-    match Core.Map.find facts mtid with
-    | Some { addr = Some (_, s); _ } -> Size.in_bits s
-    | _ -> 64
-  in
-  (* Call-tail defs are the outgoing-arg area. *)
-  (* Tests for calls passing stack args. *)
-  let outgoing_tail_tids : Tid.Set.t =
-    let is_stack (d : def term) : bool =
-      Core.Map.mem info.Convutils.offsets (Term.tid d)
-    in
-    Base.List.fold_left
-      (call_block_stack_tails ~is_stack sub)
-      ~init:Tid.Set.empty
-      ~f:(fun acc (defs, last) ->
-        match last with
-        | Some i ->
-            Base.List.take defs i
-            |> Base.List.fold_left ~init:acc ~f:(fun acc d ->
-                    Core.Set.add acc (Term.tid d))
-        | None -> acc)
-  in
-   (* Tests for call-tail stack stores. *)
-  (* Tests for RSP-relative stores below entry RSP. *)
-  let is_outgoing_store (d : def term) : bool =
-    match Core.Map.find facts (Term.tid d) with
-    | None -> false
-    | Some f -> (
-      match f.store_data with
-      | Some _ -> (
-        match f.addr with
-        | Some (addr, _) ->
-            let rsp_rel =
-              Exp.free_vars addr
-              |> Core.Set.exists ~f:(Abi.is_sp abi)
-            in
-            (* lo<0 and k>=0 marks pushed arg cells. *)
-            let lo_neg =
-              match Core.Map.find ranges (Term.tid d) with
-              | Some (lo, _) -> Int64.compare lo 0L < 0
-              | None -> false
-            in
-            let k_pos =
-              match Core.Map.find k_of (Term.tid d) with
-              | Some (klo, _) -> Int64.compare klo 0L >= 0
-              | None -> false
-            in
-            rsp_rel && lo_neg && k_pos
-        | None -> false)
-    | None -> false)
-  in
-  
-  (* Exemption applies at conversion time. *)
-  let has_outgoing_stack_args : bool lazy_t =
-    lazy
-      (Term.enum blk_t sub
-      |> Seq.exists ~f:(fun blk ->
-             if
-               Term.enum jmp_t blk
-               |> Seq.exists ~f:is_real_call
-             then
-               Term.enum def_t blk
-               |> Seq.exists ~f:(fun d ->
-                      Core.Set.mem outgoing_tail_tids (Term.tid d)
-                      && is_outgoing_store d)
-             else false))
-  in
-  (* Escaped frame addresses stay in the model frame. *)
-  (* Tests for [sp/fp +- const] addresses. *)
-  let rec is_direct_const_addr ~(sp : var) ~(fp : var option) (addr : exp) : bool =
-    let base_var v = Var.base v in
-    let is_base v = is_sp_or_fp sp fp (base_var v) in
-    match addr with
-    | Bil.Int _ -> true
-    | Bil.Var v -> is_base v
-    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Var v, Bil.Int _)
-    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Int _, Bil.Var v) ->
-        is_base v
-    | Bil.Cast (_, _, e) -> is_direct_const_addr ~sp ~fp e
-    | _ -> false
-  in
-  (* Connected components of the interval-overlap graph, by sort-and-sweep:
-     sort ascending on (lo, hi, tid); a range joins the current component
-     when its lo <= the component's max hi — it then overlaps the member
-     holding that max (lo_m <= lo_j holds for all earlier members by the
-     sort). The (lo, hi, tid) order fixes member and component order. *)
-  let merge_components
-      (items : (tid * (int64 * int64)) list)
-      : (tid * (int64 * int64)) list list =
-    let sorted =
-      Base.List.sort items
-        ~compare:(fun (t1, (lo1, hi1)) (t2, (lo2, hi2)) ->
-          let c = Int64.compare lo1 lo2 in
-          if c <> 0 then c
-          else
-            let c = Int64.compare hi1 hi2 in
-            if c <> 0 then c else Tid.compare t1 t2)
-    in
-    let rec sweep cur max_hi rest =
-      match rest with
-      | [] -> [ Base.List.rev cur ]
-      | ((_, (lo, hi)) as x) :: tl ->
-          if Int64.compare lo max_hi <= 0 then
-            sweep (x :: cur) (if Int64.compare hi max_hi > 0 then hi else max_hi) tl
-          else
-            Base.List.rev cur :: sweep [ x ] hi tl
-    in
-    match sorted with
-    | [] -> []
-    | ((_, (_, hi0)) as x0) :: tl -> sweep [ x0 ] hi0 tl
-  in
-  let components : (tid * (int64 * int64)) list list =
-    merge_components (Core.Map.to_alist ranges)
-  in
-  Base.List.foldi components ~init:[] ~f:(fun i acc members ->
-      let span =
-        match members with
-        | [] -> (0L, 0L)
-        | (_, (lo0, hi0)) :: rest ->
-            Base.List.fold_left rest ~init:(lo0, hi0)
-              ~f:(fun (l, h) (_, (lo, hi)) ->
-                (Int64.min l lo, Int64.max h hi))
-      in
-      let convertible =
-        match members with
-        | [] -> false
-        | _ ->
-            let res = Base.List.for_all members ~f:(fun (mtid, (lo, _)) ->
-                Int64.compare lo 0L < 0
-                && (match Core.Map.find def_of_tid mtid with
-                    | Some md -> not (saves_incoming_reg abi md)
-                    | None -> true)
-                (* Members use direct-constant addresses. *)
-                && (match Core.Map.find facts mtid with
-                    | Some f ->
-                        (match f.addr with
-                         | Some (addr, _) ->
-                             let ok = is_direct_const_addr ~sp ~fp addr in
-#ifdef VSA_DEBUG
-                             if not ok then
-                               Printf.eprintf "hike:   member %s NOT direct: addr=%s\n"
-                                 (Tid.name mtid)
-                                 (Format.asprintf "%a" Exp.pp addr);
-#endif
-                             ok
-                         | None -> true)
-                    | None -> true)) in
-#ifdef VSA_DEBUG
-            if not res then (
-              let lo0, hi0 = span in
-              Printf.eprintf "hike: region %d span=(%Ld,%Ld) NOT convertible: members=%d\n" i lo0 hi0 (List.length members);
-              Printf.eprintf "hike:   (sub %s)\n" (Sub.name sub);
-              Base.List.iter members ~f:(fun (mtid, (lo, hi)) ->
-                  let k_str = match Core.Map.find k_of mtid with Some (klo, khi) -> Printf.sprintf "(%Ld,%Ld)" klo khi | None -> "None" in
-                  let saves = match Core.Map.find def_of_tid mtid with Some md -> saves_incoming_reg abi md | None -> false in
-                  Printf.eprintf "hike:   member %s (%Ld,%Ld) k=%s saves=%b\n" (Tid.name mtid) lo hi k_str saves);
-            );
-#endif
-            res
-            && not (Lazy.force has_outgoing_stack_args)
-            (* Escape is a per-region rule. *)
-            && not frame_escaped
-      in
-      let max_width =
-        Base.List.fold_left members ~init:0 ~f:(fun m (mtid, _) ->
-            Int.max m (def_width_of mtid))
-      in
-      {
-        Convutils.id = i;
-        Convutils.span = span;
-        Convutils.members = members;
-        Convutils.convertible = convertible;
-        Convutils.max_width = max_width;
-      }
-      :: acc)
-  |> Base.List.rev
+(* The directionless stack top's below-entry clamp: a TOP StackOff
+   claims [entry − stack_max, entry) — the same practical constant the
+   residue's own extent clamps at. *)
+let stack_max : int64 = 65536L
 
-(* Tests for caller/callee-visible storage. *)
-let is_abi_visible ?(last_push_tids = Tid.Set.empty) (sp : var)
-    ~(tag_of : Convutils.vsa_kind Tid.Map.t)
-    ~(k_of : (int64 * int64) Tid.Map.t) (d : def term) : bool =
-  if Core.Set.mem last_push_tids (Term.tid d) then false
-  else
-  match Core.Map.find tag_of (Term.tid d) with
-  | Some (Convutils.Range (lo, _)) when Int64.compare lo 0L >= 0 -> true
-  | Some (Convutils.Range (lo, _)) -> (
-      match Core.Map.find k_of (Term.tid d) with
-      | Some (klo, _) when Int64.compare klo 0L >= 0 -> (
-          match addr_of_rhs (Def.rhs d) with
-          | Some (addr, _) ->
-              Exp.free_vars addr
-              |> Core.Set.exists ~f:(fun v ->
-                     Var.same (Var.base v) (Var.base sp))
-          | None -> false)
-      | _ -> false)
+(* A call pushes its return address one word below the caller's SP at
+   the call — a cell below the lowest SP value the sub reaches, which
+   the extent folds never record.  A call with no return continuation
+   is the lifted return's epilogue: it pops instead of pushing. *)
+let call_pushes (j : jmp term) : bool =
+  match Jmp.kind j with
+  | Call c -> Option.is_some (Call.return c)
   | _ -> false
 
-(* [is_abi_visible] over one sub. *)
-let abi_visibility_of (sp : var) (info : Convutils.vsa_info) :
-    def term -> bool =
-  is_abi_visible sp ~tag_of:info.Convutils.offsets ~k_of:info.Convutils.k_ranges
-
-
-(* Stack model decision. *)
-
-
-
-
-
-
-
-
-(* Returns the region alloca size. *)
-let region_bytes (r : Convutils.region) : int64 =
-  let lo, hi = r.Convutils.span in
-  let span_len = Int64.add (Int64.sub hi lo) 1L in
-  let raw = Int64.div (Int64.mul span_len (Int64.of_int r.Convutils.max_width)) 8L in
-  let raw = if Int64.compare raw 0L <= 0 then 1L else raw in
-  let r = Int64.rem raw 16L in
-  if Int64.equal r 0L then raw else Int64.add raw (Int64.sub 16L r)
-
-(* Tests the region size guard. *)
-let region_size_ok (r : Convutils.region) : bool =
-  let b = region_bytes r in
-  Int64.compare b 0L > 0 && Int64.compare b 67108864L <= 0
-
-(* Rounds a frame size up to 16-byte alignment. *)
-let align16_up n =
-  let r = Int64.rem n 16L in
-  if Int64.equal r 0L then n else Int64.add n (Int64.sub 16L r)
-
-(* Frame-geometry triple: deepest SP/FP decrement, deepest negative and
-   positive access extents. One fold over the sub's defs. *)
-let degraded_geometry ~(abi : Abi.t) (sub : sub term) : int64 * int64 * int64 =
-  let is_sp_or_fp v = Abi.is_stack_reg abi (Var.base v) in
-  let update (max_dec, max_neg, max_pos) d =
-    let max_dec =
-      match Def.rhs d with
-      | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w) when is_sp_or_fp r ->
-          Int64.max max_dec (Word.to_int64_exn w)
-      | _ -> max_dec
-    in
-    match Def.rhs d with
-    | Bil.Load (_, addr, _, s) | Bil.Store (_, addr, _, _, s) -> (
-        let sz = Int64.of_int (Size.in_bytes s) in
-        match addr with
-        | Bil.BinOp (Bil.PLUS, Bil.Var b, Bil.Int w) when is_sp_or_fp b ->
-            let disp = Word.to_int64_exn w in
-            if Int64.compare disp 0L < 0 then
-              ( max_dec,
-                Int64.max max_neg (Int64.add (Int64.neg disp) sz),
-                max_pos )
-            else
-              (max_dec, max_neg, Int64.max max_pos (Int64.add disp sz))
-        | _ -> (max_dec, max_neg, max_pos))
-    | _ -> (max_dec, max_neg, max_pos)
-  in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:(0L, 0L, 0L) ~f:(fun acc blk ->
-         Term.enum def_t blk |> Seq.fold ~init:acc ~f:update)
-
-(* Tests for SP/FP-derived memory accesses. *)
-
-let is_stack_mem (sp : var) (fp : var option) (e : exp) : bool =
-  match addr_of_rhs e with
-  | Some (a, _) -> exp_contains_sp sp fp a
-  | None -> false
-
-let frame_value_def (sp : var) (fp : var option) (d : def term) :
-    bool =
-  let lhs = Def.lhs d in
-  (not (Convutils.is_mem lhs))
-  && (not (is_sp_or_fp sp fp lhs))
-  && exp_contains_sp sp fp (Def.rhs d)
-
-(* Address mentions any frame-derived var: [var_maybe_addr]'s per-pair
-   test lifted to a target set, so one address walk serves all targets
-   with early exit. Exactly equivalent at our call site: every target
-   comes from [frame_value_def], which excludes sp/fp lhs, so the old
-   sp/fp cross-match arm is dead; what remains is base-name equality,
-   and [Var.same x y = equal (base x) (base y)] makes set membership on
-   base vars exact. *)
-let rec addr_mentions_any (env : exp Var.Map.t) (targets : Var.Set.t)
-    (e : exp) : bool =
-  match e with
-  | Bil.Var w ->
-      Core.Set.mem targets (Var.base w)
-      ||
-      (match Core.Map.find env (Var.base w) with
-      | Some e' -> addr_mentions_any env targets e'
-      | None -> false)
-  | Bil.Ite (_, t, f) ->
-      addr_mentions_any env targets t
-      || addr_mentions_any env targets f
-  | Bil.Let (x, e1, e2) ->
-      let env' = Core.Map.set env ~key:x ~data:e1 in
-      addr_mentions_any env' targets e2
-  | Bil.Cast (_, _, e') | Bil.Extract (_, _, e') ->
-      addr_mentions_any env targets e'
-  | _ -> false
-
-(* Tests for reads through a materialized frame pointer. *)
-let frame_addr_alias (sp : var) (target : Theory.Target.t) (sub : sub term) :
-    bool =
-  (* Frame pointer, resolved once for the scan below. *)
-  let fp = fp_of target in
-  let defs =
-    Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list
-  in
-  (* Frame-derived lhs vars (base), collected once. The old shape nested
-     the per-pair predicate inside the per-match scan (quadratic in the
-     number of matches times mem-address defs). *)
-  let frame_vars =
-    Base.List.fold_left defs ~init:Var.Set.empty ~f:(fun s d ->
-        if frame_value_def sp fp d then Core.Set.add s (Var.base (Def.lhs d))
-        else s)
-  in
-  if Core.Set.is_empty frame_vars then false
-  else
-    Base.List.exists defs ~f:(fun d ->
-        match addr_of_rhs (Def.rhs d) with
-        | Some (addr, _) -> addr_mentions_any Var.Map.empty frame_vars addr
-        | None -> false)
-
-(* Tests whether a VLA overlaps a convertible region. *)
-let vla_overlaps_convertible (info : Convutils.vsa_info)
-    (convertible : Convutils.region list) : bool =
-  
-  Core.Map.fold info.Convutils.vla_bounds ~init:false
-    ~f:(fun ~key:_ ~data:(_lo, hi) acc ->
-      acc
-      ||
-      let max_size = hi in
-      if Int64.compare max_size 0L <= 0 then false
-      else
-        let vla_lo = Int64.neg max_size in
-        let vla_hi = -1L in
-        Base.List.exists convertible ~f:(fun r ->
-            let rlo, rhi = r.Convutils.span in
-            not (Int64.compare vla_hi rlo < 0 || Int64.compare vla_lo rhi > 0)))
-
-(* Tests for unboundable stack accesses. *)
-let has_unbounded_access (sp : var) (fp : var option) (sub : sub term)
-    (info : Convutils.vsa_info) : bool =
-  (* Direct walk with early exit (no index: the single consumer stops at
-     the first unbounded def, which a prebuilt index would forfeit). *)
+let has_call_push (sub : sub term) : bool =
   Term.enum blk_t sub
   |> Seq.exists ~f:(fun blk ->
-         Term.enum def_t blk
-         |> Seq.exists ~f:(fun d ->
-                is_stack_mem sp fp (Def.rhs d)
-                &&
-                match Core.Map.find info.Convutils.offsets (Term.tid d) with
-                | None -> true
-                | Some (Convutils.Infinite _) -> true
-                | Some Convutils.Unbounded -> true
-                | Some (Convutils.VLA _) -> true
-                | Some Convutils.Dead -> false
-                | Some (Convutils.Range _) -> false))
+         Term.enum jmp_t blk |> Seq.exists ~f:call_pushes)
 
-(* Tests that tags resolve inside convertible regions. *)
-let tags_inside_or_disjoint (info : Convutils.vsa_info)
-    (convertible : Convutils.region list) : bool =
-  Core.Map.for_all info.Convutils.offsets ~f:(fun (kind : Convutils.vsa_kind) ->
-      match kind with
-      | Convutils.Infinite _ | Convutils.Unbounded -> false
-      | Convutils.Dead -> true
-      | Convutils.VLA _ -> false
-      | Convutils.Range (lo, hi) ->
-          let inside =
-            Base.List.exists convertible ~f:(fun r ->
-                let rlo, rhi = r.Convutils.span in
-                Int64.compare lo rlo >= 0 && Int64.compare hi rhi <= 0)
-          in
-          let disjoint =
-            Base.List.for_all convertible ~f:(fun r ->
-                let rlo, rhi = r.Convutils.span in
-                Int64.compare hi rlo < 0 || Int64.compare lo rhi > 0)
-          in
-          if Int64.compare lo 0L < 0 then inside else inside || disjoint)
+(* The emitter's per-sub inputs are STRUCTURE (the promotion's BIR args /
+   arg defs / direct targets, the def-kind slots below) plus this narrow
+   LAYOUT fact: the alloca-construction inputs alone (the fallback
+   frame's bytes and the split regions' geometry) — no offsets, no
+   promotion facts, no kinds. *)
 
-(* Tests whether the frame is reachable from outside. *)
-let frame_escapes (sp : var) (target : Theory.Target.t) (sub : sub term) :
-    bool =
-  sp_escaped sp target sub || frame_addr_alias sp target sub
+module Sub_layout = struct
+  open Core
 
-(* Returns split regions, or [[]] for fallback. *)
-let split_plan (sp : var) (target : Theory.Target.t) (sub : sub term)
-    (info : Convutils.vsa_info) : Convutils.split_plan =
-  if info.Convutils.degraded then []
-  else if has_unbounded_access sp (fp_of target) sub info then []
-  else
-    let regions = info.Convutils.regions in
-    let convertible =
-      Base.List.filter regions ~f:(fun r -> r.Convutils.convertible)
-    in
-    if convertible = [] then []
-    else
-      let should_degrade_vla =
-        vla_overlaps_convertible info convertible
-        || (not (Core.Set.is_empty info.Convutils.vla_alloc_tids)
-           && Core.Map.is_empty info.Convutils.vla_bounds)
-      in
-      if should_degrade_vla then []
-      else if not (tags_inside_or_disjoint info convertible) then []
-      else if not (Base.List.for_all convertible ~f:region_size_ok) then []
-      else convertible
+  (* D3: the fold's product.  [regions] is EVERY alloca of the sub —
+     the carved regions and the stack residue (id 0, whose extent
+     contains the anchor and the caller window).  [anchor] is the
+     entry RSP's runtime position: (region id, byte index inside that
+     alloca) — the SP Slot stores ptrtoint of it, so every model
+     address integer resolves against one base. *)
+  type t = {
+    regions : (int * (int64 * int64) * int64) list;
+    anchor : (int * int64) option;
+    (* The sub reads its incoming window (above-entry positions): its
+       direct-call signature carries the hike_window parameter and its
+       window accesses materialize against it. *)
+    window_param : bool;
+  }
 
-(* Tests for the split model. *)
-let is_precise (info : Convutils.vsa_info) : bool = info.Convutils.stack_plan <> []
+  let equal_region (i1, (l1, h1), b1) (i2, (l2, h2), b2) =
+    Int.equal i1 i2 && Int64.equal l1 l2 && Int64.equal h1 h2
+    && Int64.equal b1 b2
+
+  let compare_region (i1, (l1, h1), b1) (i2, (l2, h2), b2) =
+    match Int.compare i1 i2 with
+    | 0 -> (
+        match Int64.compare l1 l2 with
+        | 0 -> (
+            match Int64.compare h1 h2 with
+            | 0 -> Int64.compare b1 b2
+            | c -> c)
+        | c -> c)
+    | c -> c
+
+  let equal (a : t) (b : t) =
+    Base.List.equal equal_region a.regions b.regions
+    && Base.Option.equal
+         (fun (i1, x1) (i2, x2) -> Int.equal i1 i2 && Int64.equal x1 x2)
+         a.anchor b.anchor
+    && Bool.equal a.window_param b.window_param
+
+  let compare (a : t) (b : t) : int =
+    match Base.List.compare compare_region a.regions b.regions with
+    | 0 -> Bool.compare a.window_param b.window_param
+    | c -> c
+
+  let pp fmt { regions; anchor; window_param } =
+    Format.fprintf fmt "regions=%d;anchor=%s;window=%b"
+      (Base.List.length regions)
+      (match anchor with
+       | Some (i, idx) -> Printf.sprintf "r%d@%Ld" i idx
+       | None -> "none")
+      window_param
+
+  let empty = { regions = []; anchor = None; window_param = false }
+
+  let sexp_of_t (t : t) : Sexp.t =
+    Sexp.List
+      (Base.List.map t.regions ~f:(fun (id, (lo, hi), b) ->
+           Sexp.Atom (Printf.sprintf "%d:%Ld:%Ld:%Ld" id lo hi b))
+       @ (match t.anchor with
+          | Some (i, idx) -> [ Sexp.Atom (Printf.sprintf "anchor=%d:%Ld" i idx) ]
+          | None -> []
+          @ if t.window_param then [ Sexp.Atom "window" ] else []))
+
+  let t_of_sexp (s : Sexp.t) : t =
+    match s with
+    | Sexp.List items ->
+        let regions =
+          Base.List.filter_map items ~f:(fun item ->
+              match item with
+              | Sexp.Atom a when not (Base.String.is_prefix a ~prefix:"anchor=") ->
+                  (match Stdlib.String.split_on_char ':' a with
+                   | [ id; lo; hi; b ] ->
+                       Some
+                         ( int_of_string id,
+                           (Int64.of_string lo, Int64.of_string hi),
+                           Int64.of_string b )
+                   | _ -> failwith "hike-layout: bad region sexp")
+              | _ -> None)
+        in
+        let anchor =
+          Base.List.find_map items ~f:(fun item ->
+              match item with
+              | Sexp.Atom a when Base.String.is_prefix a ~prefix:"anchor=" ->
+                  (match
+                     Stdlib.String.split_on_char ':'
+                       (Base.String.drop_prefix a 7)
+                   with
+                   | [ i; idx ] -> Some (int_of_string i, Int64.of_string idx)
+                   | _ -> failwith "hike-layout: bad anchor sexp")
+              | _ -> None)
+        in
+        let window_param =
+          Base.List.exists items ~f:(fun item ->
+              match item with
+              | Sexp.Atom a -> String.equal a "window"
+              | _ -> false)
+        in
+        { regions; anchor; window_param }
+    | _ -> failwith "hike-layout: bad sexp"
+
+  module Stringable = struct
+    type nonrec t = t
+    let to_string t = Base.Sexp.to_string (sexp_of_t t)
+    let of_string s = t_of_sexp (Parsexp.Single.parse_string_exn s)
+  end
+
+  include Core.Binable.Of_stringable_with_uuid (struct
+    include Stringable
+
+    let caller_identity =
+      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/2"
+  end)
+end
+
+(* Top-level aliases (the mli's re-export shape). *)
+type sub_layout = Sub_layout.t = {
+  regions : (int * (int64 * int64) * int64) list;
+  anchor : (int * int64) option;
+  window_param : bool;
+}
 
 
+
+(* The layout rides the SUB TERM (the one tag): the producer computes it
+   once; the emitter reads it off the term. *)
+let layout_tag : Sub_layout.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-layout"
+    ~uuid:"3f5e1c2a-9b47-4d60-8a15-c4d9e07b2f11"
+    (module Sub_layout)
+
+let set_layout (l : Sub_layout.t) (sub : sub term) : sub term =
+  Term.set_attr sub layout_tag l
+
+
+(* Per-def tags ride the DEF'S VALUE: the producer stamps each def with
+   its kind (the 100% Tagging Invariant's tag) and the dynamic-allocation
+   defs with the dyn-alloc fact; the emitter reads the tags off the
+   term — never a per-sub record. *)
+
+module KB = Bap_knowledge.Knowledge
+
+(* The dynamic-allocation fact: the def is a runtime-sized SP
+   decrement (the producer's denotation event) and emits a REAL
+   runtime-sized alloca.  The storage decision rides the def's value
+   beside the kind — the address enum says nothing about storage. *)
+let def_dyn_alloc_slot : (Theory.Value.cls, bool) KB.slot =
+  let bool_domain =
+    KB.Domain.flat
+      ~inspect:(fun b -> Base.Sexp.Atom (string_of_bool b))
+      ~equal:Bool.equal ~empty:false "hike:dyn-alloc"
+  in
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-dyn-alloc"
+    bool_domain
+
+let def_is_dyn_alloc (d : def term) : bool =
+  KB.Value.get def_dyn_alloc_slot (Def.value d)
+
+(* The window-value fact: the def computes an ADDRESS VALUE that lives
+   at/above the entry line — its emitted integer re-bases to the
+   hike_window parameter (the caller's world), so derefs of the stored
+   pointer stay additive-safe.  The address-expression world rule
+   (D4b): values escape in the world their position names. *)
+let def_window_value_slot : (Theory.Value.cls, bool) KB.slot =
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-window-value"
+    (KB.Domain.flat
+       ~inspect:(fun b -> Base.Sexp.Atom (string_of_bool b))
+       ~equal:Bool.equal ~empty:false "hike:window-value")
+
+let def_is_window_value (d : def term) : bool =
+  KB.Value.get def_window_value_slot (Def.value d)
+
+let stamp_window_values ~(window_values : Tid.Set.t)
+    (sub : sub term) : sub term =
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.map def_t blk ~f:(fun d ->
+          if Core.Set.mem window_values (Term.tid d) then
+            Def.with_value d
+              (KB.Value.put def_window_value_slot (Def.value d) true)
+          else d))
+
+(* Stamps the dynamic-allocation fact onto the event defs (the def's
+   own slot — it is not a range classification). *)
+let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
+    (sub : sub term) : sub term =
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.map def_t blk ~f:(fun d ->
+          if Core.Set.mem dynamic_alloc_tids (Term.tid d) then
+            Def.with_value d
+              (KB.Value.put def_dyn_alloc_slot (Def.value d) true)
+          else d))
+
+(* The slim section tag rides the def's VALUE (the def_kind_slot
+   pattern): the producer stamps it; the emitter's dispatch reads it
+   off the term. *)
+
+type KB.conflict += Sec_tag_conflict
+
+let () =
+  KB.Conflict.register_printer (function
+    | Sec_tag_conflict ->
+        Some
+          "hike: section-tag conflict: two different attributions were stamped for one def"
+    | _ -> None)
+
+let sec_tag_domain : sec_tag option KB.Domain.t =
+  KB.Domain.optional
+    ~inspect:(fun _ -> Base.Sexp.Atom "hike:section-tag")
+    ~join:(fun a b -> if Tag.equal a b then Ok a else Error Sec_tag_conflict)
+    ~equal:Tag.equal "hike:section-tag"
+
+let sec_tag_slot : (Theory.Value.cls, sec_tag option) KB.slot =
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-section-tag"
+    sec_tag_domain
+
+let sec_tag (d : def term) : sec_tag option =
+  KB.Value.get sec_tag_slot (Def.value d)
+
+let set_sec_tag (t : sec_tag) (d : def term) : def term =
+  Def.with_value d (KB.Value.put sec_tag_slot (Def.value d) (Some t))

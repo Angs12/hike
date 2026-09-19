@@ -1,98 +1,25 @@
-(* Per-sub VSA results in the KB. Order is map extension, join is map union. *)
+(* The pipeline's analysis crossing: the run's block-boundary
+   environments, installed atomically once per analysis run — a reader
+   never sees one table from this run and the other from the previous
+   one.  The environments are the analysis's ONLY cross-pass product;
+   every other fact re-derives through the seam. *)
 
 open Bap.Std
 
-module KB = Bap_knowledge.Knowledge
+(* The block-boundary environments: one (pre, post) pair per block tid.
+   The producer stamps them at the sticky loop's stabilization from the
+   final converged solution; a phi reads [pre], a jmp reads [post]. *)
+let env_stamps : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t ref =
+  ref Tid.Map.empty
 
-let run_cls = KB.Class.declare ~package:"hike" "run" ()
+(* The block's stamped pair; absence means the sub's analysis did not
+   converge, so every reader takes [Cbat_vsa.AI.top] — the
+   no-constraint identity. *)
+let block_env (btid : Tid.t) : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) option =
+  Core.Map.find !env_stamps btid
 
-(* Conflicting infos for one sub. *)
-type KB.conflict += Vsa_info_conflict of Tid.t * Convutils.vsa_info * Convutils.vsa_info
-
-let () =
-  KB.Conflict.register_printer (function
-    | Vsa_info_conflict (tid, i1, i2) ->
-        Some
-          (Printf.sprintf
-             "hike: vsa-info conflict on sub %s: two different VSA results were provided for the same sub (offsets %d vs %d) — the analyses disagree, refusing to drop either"
-             (Tid.name tid)
-             (Core.Map.length i1.Convutils.offsets)
-             (Core.Map.length i2.Convutils.offsets))
-    | _ -> None)
-
-(* Joins two infos; differing infos conflict. *)
-let info_join (tid : Tid.t) (i1 : Convutils.vsa_info) (i2 : Convutils.vsa_info) :
-    (Convutils.vsa_info, KB.conflict) result =
-  (* Equality is the only order infos have; anything else conflicts. *)
-  if Convutils.equal_vsa_info i1 i2 then Ok i1
-  else Error (Vsa_info_conflict (tid, i1, i2))
-
-(* Orders maps by extension. *)
-let map_order (m1 : Convutils.vsa_info Tid.Map.t)
-    (m2 : Convutils.vsa_info Tid.Map.t) : KB.Order.partial =
-  if Base.phys_equal m1 m2 || Core.Map.equal Convutils.equal_vsa_info m1 m2
-  then KB.Order.EQ
-  else
-    let included_in a b =
-      Core.Map.fold a ~init:true ~f:(fun ~key:tid ~data:i1 acc ->
-          acc
-          &&
-          match Core.Map.find b tid with
-          | Some i2 -> Convutils.equal_vsa_info i1 i2
-          | None -> false)
-    in
-    if included_in m1 m2 then KB.Order.LT
-    else if included_in m2 m1 then KB.Order.GT
-    else KB.Order.NC
-
-(* Unions maps; shared subs join per [info_join]. *)
-let map_join (m1 : Convutils.vsa_info Tid.Map.t)
-    (m2 : Convutils.vsa_info Tid.Map.t) :
-    (Convutils.vsa_info Tid.Map.t, KB.conflict) result =
-  match map_order m1 m2 with
-  | EQ -> Ok m1
-  | LT -> Ok m2
-  | GT -> Ok m1
-  | NC -> (
-      (* First conflict wins; the base extends. *)
-      let base, conflict =
-        Core.Map.fold m2 ~init:(m1, None)
-          ~f:(fun ~key:tid ~data:i2 (base, conflict) ->
-            match Core.Map.find base tid with
-            | None -> (Core.Map.set base ~key:tid ~data:i2, conflict)
-            | Some i1 -> (
-                match info_join tid i1 i2 with
-                | Ok _ -> (base, conflict) (* Keeps [m1]'s entry. *)
-                | Error c -> (
-                  match conflict with
-                  | None -> (base, Some c)
-                  | Some _ -> (base, conflict)))) in
-      match conflict with
-      | Some c -> Error c
-      | None -> Ok base)
-
-let vsa_info_slot =
-  KB.Class.property ~package:"hike" run_cls "vsa-info"
-    (KB.Domain.define
-       ~inspect:(fun _ -> Base.Sexp.Atom "hike:vsa-info")
-       ~join:map_join
-       ~empty:Tid.Map.empty
-       ~order:map_order
-       "hike:vsa-info")
-
-(* Reads the current VSA map. The cell is the monad-escape idiom: the KB
-   callback cannot return a value, so it parks the map in a local ref. *)
-let vsa_info () : Convutils.vsa_info Tid.Map.t =
-  let r = ref Tid.Map.empty in
-  Toplevel.exec
-    (KB.bind (KB.Object.read run_cls "hike-run") ~f:(fun obj ->
-         KB.bind (KB.collect vsa_info_slot obj) ~f:(fun m ->
-             r := m;
-             KB.return ())));
-  !r
-
-(* Stores [vmap] in the slot. *)
-let provide (vmap : Convutils.vsa_info Tid.Map.t) : unit =
-  Toplevel.exec
-    (KB.bind (KB.Object.read run_cls "hike-run") ~f:(fun obj ->
-         KB.provide vsa_info_slot obj vmap))
+(* The run's install: the block-env stamps of ONE analysis run replace
+   the table in one write, after the producer's fold completes. *)
+let install_run ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t) :
+    unit =
+  env_stamps := block_envs
