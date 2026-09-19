@@ -1,3 +1,8 @@
+; bap.dev/ is the owner's local fork checkout: its rules are its own; the
+; multi-project scan would build its unbootstrapped rules.  This project
+; never descends into it.
+(dirs :standard \ bap.dev)
+
 ; The workspace-wide env stanzas live here (NOT in dune-project: profiles
 ; are not dune-project fields — see commit e9c8d95 and d4d31a5).
 ;
