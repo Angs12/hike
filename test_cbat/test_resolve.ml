@@ -115,15 +115,17 @@ let run_jmp_kinds () =
      guarded-goto series: [sel=0x1010 ? b2; goto b1] — the lowest
      word's target is the default, so its own guard is redundant. *)
   let j2_sel = v64 "t22_j2_sel" in
+  let j2_base = v64 "t22_j2_base" in
+  let j2_bdef = Def.create j2_base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
   let j2_t1 = Def.create j2_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
   let j2_t2 = Def.create j2_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
   let head_flag = v1 "t22_flag" in
   let j2, tids =
     sub_of "t22_dispatch"
-      [ [], [ (1, fun t -> mk_jmp_to t (Bil.Var head_flag)); (2, mk_goto) ];
+      [ [ j2_bdef ], [ (1, fun t -> mk_jmp_to t (Bil.Var head_flag)); (2, mk_goto) ];
         [ j2_t1 ], [ (3, mk_goto) ];
         [ j2_t2 ], [ (3, mk_goto) ];
-        [], [ (4, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j2_sel)))) ];
+        [], [ (4, fun _ -> Jmp.create (Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var j2_sel, Bil.Var j2_base))))) ];
         [], [ (6, mk_goto) ];
         [], [ (6, mk_goto) ];
         [], [ (0, mk_ret) ] ]
@@ -131,23 +133,26 @@ let run_jmp_kinds () =
   let b1_tid = tids.(4) in
   let b2_tid = tids.(5) in
   let _, j2' =
-    produce Theory.Target.unknown ~block_addrs:[ (0x1008L, b1_tid); (0x1010L, b2_tid) ]
+    produce Theory.Target.unknown
+      ~block_addrs:[ (0x3008L, b1_tid); (0x3010L, b2_tid) ]
       (Program.create ~subs:[ j2 ] ()) j2
   in
-  let eq_word w j =
+  (* the guards live in the DELTA domain: the target's delta summand
+     equals the table's own entry *)
+  let eq_delta w j =
     match Jmp.cond j with
     | Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int w') ->
       Var.equal v j2_sel
       && Int64.equal (Word.to_int64_exn w') w
     | _ -> false
   in
-  check "N8-DISP: the dispatch becomes a guarded-goto series in the existing block"
+  check "N8-DISP: the dispatch becomes a delta-guarded series in the existing block"
     (match jmps_of_blk j2' 3 with
      | [ g2; dflt ] ->
        (match Jmp.kind g2, Jmp.kind dflt with
         | Goto (Direct t2), Goto (Direct td) ->
           Tid.equal t2 b2_tid && Tid.equal td b1_tid
-          && eq_word 0x1010L g2
+          && eq_delta 0x1010L g2
           && (match Jmp.cond dflt with
               | Bil.Int w -> Word.equal w (Word.one 1)
               | _ -> false)
@@ -159,15 +164,17 @@ let run_jmp_kinds () =
      foreign transfer.  The map here carries an unrelated second block
      so the shape test passes and the lookup itself is what misses. *)
   let j4_sel = v64 "t22_j4_sel" in
+  let j4_base = v64 "t22_j4_base" in
+  let j4_bdef = Def.create j4_base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
   let j4_t1 = Def.create j4_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
   let j4_t2 = Def.create j4_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
   let j4_flag = v1 "t22_j4_flag" in
   let j4, j4_tids =
     sub_of "t22_map_miss"
-      [ [], [ (1, fun t -> mk_jmp_to t (Bil.Var j4_flag)); (2, mk_goto) ];
+      [ [ j4_bdef ], [ (1, fun t -> mk_jmp_to t (Bil.Var j4_flag)); (2, mk_goto) ];
         [ j4_t1 ], [ (3, mk_goto) ];
         [ j4_t2 ], [ (3, mk_goto) ];
-        [], [ (4, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j4_sel)))) ];
+        [], [ (4, fun _ -> Jmp.create (Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var j4_sel, Bil.Var j4_base))))) ];
         [], [ (6, mk_goto) ];
         [], [ (6, mk_goto) ];
         [], [ (0, mk_ret) ] ]
@@ -177,7 +184,7 @@ let run_jmp_kinds () =
        ignore
          (produce Theory.Target.unknown
             ~block_addrs:
-              [ (0x1008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
+              [ (0x3008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
             (Program.create ~subs:[ j4 ] ()) j4);
        false
      with Failure _ -> true);

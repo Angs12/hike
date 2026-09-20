@@ -307,7 +307,7 @@ let max (a : t) (b : t) : t = if compare a b > 0 then a else b
 
 let extract_exn ?hi ?(lo = 0) (t : t) : t =
   let w = bitwidth t in
-  let hi = match hi with Some h -> h | None -> w - 1 in
+  let hi = Option.value hi ~default:(w - 1) in
   let len = hi - lo + 1 in
   if len <= 0 then failwith "Cbat_word.extract: negative length";
   (* BAP sign-extends a signed source, and the extension vanishes when the
@@ -321,7 +321,16 @@ let cast (ct : Bil.cast) (sz : int) (t : t) : t =
   let w = bitwidth t in
   match ct with
   | Bil.UNSIGNED | Bil.LOW -> extract_exn ~hi:(sz - 1) t
-  | Bil.SIGNED -> signed (extract_exn ~hi:(sz - 1) t)
+  | Bil.SIGNED when sz <= w -> signed (extract_exn ~hi:(sz - 1) t)
+  | Bil.SIGNED ->
+    (* Sign-extend from the operand's own width: extracting at [sz]
+       zero-fills the high bits and the sign re-read lands on bit
+       [sz-1] instead of bit [w-1]. *)
+    let bits = to_z t in
+    let bits = if Z.testbit bits (w - 1)
+      then Z.logor bits (Z.shift_left Z.minus_one (w - 1))
+      else bits in
+    signed (mkz bits sz)
   | Bil.HIGH -> extract_exn ~lo:(w - sz) t
 
 let concat (a : t) (b : t) : t =
@@ -491,7 +500,7 @@ let factor_2s (t : t) : t * int =
 (* 2^i at [width] bits; i >= width truncates to 0 (Word.lshift semantics).
    Production call sites always pass i < width. *)
 let dom_size ?width (i : int) : t =
-  let wd = match width with Some x -> x | None -> i + 1 in
+  let wd = Option.value width ~default:(i + 1) in
   if i < 0 then zero wd
   else
     let i' = i land ((1 lsl (Stdlib.min wd 62)) - 1) in

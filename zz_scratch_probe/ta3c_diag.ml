@@ -122,9 +122,121 @@ let report_sub ~(images : Vsa.section_image list) ~(sol : Vsa.vsa_sol)
                  | Error _ -> "type-error")
                 (Exp.to_string rhs))
         |> ignore);
+  (* The dispatch defs' armed denotations on the RAW sub: what the
+     classifier's reaching-def path consumes in round 1. *)
+  Term.enum blk_t sub |> Seq.to_list
+  |> Base.List.iter ~f:(fun b ->
+      Vsa.Test_seam.fold_block_states ~sol b ~init:()
+        ~f:(fun st_before _st d () ->
+            let rhs = Def.rhs d in
+            let is_rax_def =
+              String.equal (Var.name (Def.lhs d)) "RAX"
+              && Base.String.is_substring (Exp.to_string rhs) ~substring:"mem[" in
+            let is_add_def =
+              String.equal (Var.name (Def.lhs d)) "RAX"
+              && Base.String.is_substring (Exp.to_string rhs) ~substring:"+ #" in
+            if is_rax_def || is_add_def then
+              match Vsa.Test_seam.denote_imm_exp rhs st_before with
+              | Error _ ->
+                Printf.printf "  rawdef %s (def %s) type-error rhs=%s\n"
+                  (Tid.name (Term.tid b)) (Tid.name (Term.tid d))
+                  (Exp.to_string rhs)
+              | Ok ws ->
+                let c = match Cbat_word.to_int64 (Ws.cardinality ws) with
+                  | Ok v -> Int64.to_int v | Error _ -> -1 in
+                Printf.printf "  rawdef %s (def %s) -> [%s] card=%d inf=%b rhs=%s\n"
+                  (Tid.name (Term.tid b)) (Tid.name (Term.tid d))
+                  (ws_words ws) c (Ws.is_infinite ws) (Exp.to_string rhs))
+        |> ignore);
+  Vsa.set_section_images [];
   (* The indirect transfers: the target denotation at the block's end. *)
-  ignore
-    (Hike.Vsa.fixpoint target sp ~prog ~images sub);
+  (* The run's block-address map, exactly what pass_vsa installs: the
+     resolution's word home, so this probe traces the real path. *)
+  let blk_addr_pairs =
+    Term.enum blk_t sub
+    |> Seq.filter_map ~f:(fun b ->
+        Base.Option.map (Term.get_attr b address)
+          ~f:(fun a -> (a, Term.tid b)))
+    |> Seq.to_list
+  in
+  Hike.Kb.install_block_addrs (Core.Map.of_alist_exn (module Addr) blk_addr_pairs);
+  let envs, sub_final =
+    match Hike.Vsa.fixpoint target sp ~prog ~images sub with
+    | Some (envs, sub') -> (envs, sub')
+    | None -> (Core.Map.empty (module Tid), sub)
+  in
+  Printf.printf "  -- completion states (the final re-solve, per block) --\n";
+  Term.enum blk_t sub_final |> Seq.to_list
+  |> Base.List.iter ~f:(fun b ->
+      let w st v = ws_words (AI.find_word 64 st v) in
+      match Core.Map.find envs (Term.tid b) with
+      | None ->
+        Printf.printf "  cstate %s (no env)\n" (Tid.name (Term.tid b))
+      | Some (pre, post) ->
+        Printf.printf "  cstate %s in-R8=%s out-R8=%s in-RAX=%s out-RAX=%s\n"
+          (Tid.name (Term.tid b)) (w pre r8) (w post r8) (w pre rax)
+          (w post rax));
+  (* The resolution's Var-arm premise check: the armed re-denotation of
+     each indirect target var's reaching def, at its before-env. *)
+  let cards ws =
+    let c = match Cbat_word.to_int64 (Ws.cardinality ws) with
+      | Ok v -> Int64.to_int v | Error _ -> -1 in
+    Printf.sprintf "card=%d inf=%b top=%b bot=%b" c
+      (Ws.is_infinite ws) (Ws.is_top ws) (Ws.is_bottom ws)
+  in
+  Printf.printf "  map blocks = %d\n"
+    (Core.Map.length (Hike.Kb.block_addrs ()));
+  Hike.Kb.install_run ~block_envs:envs;
+  Vsa.set_section_images images;
+  Term.enum blk_t sub_final |> Seq.to_list
+  |> Base.List.iter ~f:(fun b ->
+      let ind = Base.List.filter_map (Term.enum jmp_t b |> Seq.to_list)
+          ~f:(fun j ->
+            match Jmp.kind j with
+            | Goto (Indirect e) -> Some e
+            | Call c -> (match Call.target c with
+                | Indirect e -> Some e | _ -> None)
+            | _ -> None)
+      in
+      match ind with
+      | [] -> ()
+      | tgts ->
+        (* the last def per target var, in term order *)
+        let last_def v =
+          Term.enum def_t b |> Seq.to_list
+          |> Base.List.fold ~init:None ~f:(fun acc d ->
+              if Var.equal (Def.lhs d) v then Some d else acc)
+        in
+        Base.List.iter tgts ~f:(fun e ->
+            match e with
+            | Bil.Var v ->
+              (match last_def v with
+               | None -> Printf.printf "  varm %s: tgt %s has no def in blk\n"
+                           (Tid.name (Term.tid b)) (Var.name v)
+               | Some d ->
+                 match
+                   Hike.Vsa.denote_exp_at ~blk:b ~def:d (Def.rhs d)
+                 with
+                 | Error ty ->
+                   Printf.printf "  varm %s: type-error %s\n"
+                     (Tid.name (Term.tid b)) (Type.Error.to_string ty)
+                 | Ok ws ->
+                   Printf.printf "  varm %s: tgt %s rhs=%s -> [%s] %s\n"
+                     (Tid.name (Term.tid b)) (Var.name v)
+                     (Exp.to_string (Def.rhs d)) (ws_words ws) (cards ws))
+            | _ ->
+              match Hike.Vsa.denote_exp_at ~blk:b e with
+              | Ok ws ->
+                Printf.printf "  varm %s: exp tgt -> [%s] %s\n"
+                  (Tid.name (Term.tid b)) (ws_words ws) (cards ws)
+              | Error _ ->
+                Printf.printf "  varm %s: exp tgt type-error\n"
+                  (Tid.name (Term.tid b))));
+  Vsa.set_section_images [];
+  Printf.printf "  -- final sub --\n%s\n"
+    (Term.enum blk_t sub_final |> Seq.to_list
+     |> Base.List.map ~f:(fun b -> blk_bil_to_string b)
+     |> String.concat "\n");
   Term.enum blk_t sub |> Seq.to_list
   |> Base.List.iter ~f:(fun b ->
       let (), st_end =
