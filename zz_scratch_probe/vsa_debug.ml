@@ -51,10 +51,7 @@ let i_of (sub : sub term) : var =
 let run_one_fixture (name : string) (sub : sub term) : unit =
   Printf.printf "=== fixture %s ===\n" name;
   let sp = Hike.Abi.x86_64_sysv.sp in
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol =
-    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub)
-  in
+  let sol = run_sub_fixpoint sub in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun b ->
       let st0 = Graphlib.Std.Solution.get sol (Term.tid b) in

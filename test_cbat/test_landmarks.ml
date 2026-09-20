@@ -113,10 +113,8 @@ let run () =
      (Ws.min_elem i1) (fun lo -> Cbat_word.equal lo (w32 0));
    ()
 
-(* F1-B3 (memo-first): the Walk_memo serves a repeated edge's refinement,
-   so the F1-FT walk-observed pin (the fallthrough exit holds {K}
-   exactly) runs through the memoized walk; a memo bug would coarsen the
-   exit. Re-runs the F1-FT shape and pins the walk-delivered value. *))
+(* F1-B3: re-runs the F1-FT shape and pins the walk-delivered value
+   (the fallthrough exit holds {K} exactly). *))
 ;
 (  let k, sub, sol, _, b1_tid = lm_jne_run () in
    let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
@@ -184,7 +182,7 @@ let run () =
        ~key ~data:(Mem.Val.create wide LittleEndian) in
    let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
    let sol =
-     Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+     Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv (Program.create ~subs:[ sub ] ())
        sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
    let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
    let walk () =

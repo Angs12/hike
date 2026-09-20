@@ -112,12 +112,16 @@ let find_sub (prog : program term) (name : string) : sub term option =
 let all_subs (prog : program term) : sub term list =
   Term.enum sub_t prog |> Seq.to_list
 
-(* Run the solution-only fixpoint on the raw sub (spec §2.1). *)
+(* The ONE per-sub solve (spec §2.1): the sub over its own program,
+   seeded from init_sol.  Every probe's fixpoint flow is this. *)
+let run_sub_fixpoint (sub : sub term) : Vsa.vsa_sol =
+  let prog' = Program.create ~subs:[ sub ] () in
+  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub
+    (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub)
+
 let analyze_and_fixpoint (_sp : var) (_prog : program term) (sub : sub term)
     : sub term * Vsa.vsa_sol =
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
-  (sub, sol)
+  (sub, run_sub_fixpoint sub)
 
 (* Word-set printers. *)
 

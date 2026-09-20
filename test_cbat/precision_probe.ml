@@ -559,10 +559,9 @@ let rec run_binary (path : string) : bin_report =
 and run_sub (_sp : var) (_prog : program term) (bname : string)
     (sub : sub term) : outcome =
   try
-    let prog' = Program.create ~subs:[ sub ] () in
     let t0 = Unix.gettimeofday () in
     let sol =
-      Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (init_sol_of sub) in
+      Probe_common.run_sub_fixpoint sub in
     let t1 = Unix.gettimeofday () in
     (* Per-block TAG state is the IN-state ([tags = sol]). *)
     let st = collect_stats bname sub sol sol in

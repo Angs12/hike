@@ -232,130 +232,16 @@ let mk_caller_alias () : caller_alias_fixture =
 (* RSP-anchored seeds: RBP enters only via RSP-derivation. *)
 
 (* -O0 prologue (rbp := RSP) + load + overlapping store. Returns (def_rbp, def_store, sub). *)
-let mk_rsp_prologue_sub () : def term * def term * def term * sub term =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let m = memv "t21_m" in
-  let t = v64 "t21_t" in
-  let def_rbp = Def.create rbp (Bil.Var rsp) in
-  let def_load =
-    Def.create t
-      (Bil.Load
-         (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))), LittleEndian, `r64))
-  in
-  let def_store =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))),
-           Bil.Int (Cbat_word.to_word (w64 42)),
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, _ = sub_of "t21_prologue" [ [ def_rbp; def_load; def_store ], [] ] in
-  (def_rbp, def_load, def_store, sub)
 
-let mk_rsp_index_sub () : def term * def term * sub term =
-  let rsp = v64 "RSP" in
-  let rdi = v64 "t21_rdi" in
-  let idx = v64 "t21_idx" in
-  let m = memv "t21_m" in
-  let t = v64 "t21_t" in
-  let def_base = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
-  let def_idx = Def.create idx (Bil.Int (Cbat_word.to_word (w64 5))) in
-  let def_load =
-    Def.create t
-      (Bil.Load
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (Cbat_word.to_word (w64 8)))),
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, _ = sub_of "t21_idx" [ [ def_base; def_idx; def_load ], [] ] in
-  (def_idx, def_load, sub)
 
-let mk_gpr_rbp_sub () : def term * def term * def term * def term * def term * sub term =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let idx = v64 "t21_n_idx" in
-  let m = memv "t21_n_m" in
-  let m2 = memv "t21_n_m2" in
-  let v = v64 "t21_n_v" in
-  let w = v64 "t21_n_w" in
-  let def_rbp = Def.create rbp (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
-  let def_idx = Def.create idx (Bil.Int (Cbat_word.to_word (w64 5))) in
-  let def_load =
-    Def.create v
-      (Bil.Load
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.BinOp (Bil.TIMES, Bil.Var idx, Bil.Int (Cbat_word.to_word (w64 8)))),
-           LittleEndian,
-           `r64 ))
-  in
-  let def_store_disjoint =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x100))),
-           Bil.Int (Cbat_word.to_word (w64 9)),
-           LittleEndian,
-           `r64 ))
-  in
-  let def_load_rsp =
-    Def.create w
-      (Bil.Load (Bil.Var m2, Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r64))
-  in
-  let def_store_rsp =
-    Def.create m2
-      (Bil.Store
-         ( Bil.Var m2,
-           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))),
-           Bil.Int (Cbat_word.to_word (w64 7)),
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, _ =
-    sub_of "t21_gpr_rbp"
-      [ [ def_rbp; def_idx; def_load; def_store_disjoint; def_load_rsp; def_store_rsp ], [] ]
-  in
-  (def_rbp, def_idx, def_load, def_store_disjoint, def_store_rsp, sub)
+
+
+
 
 (* One-path heap shapes: the use-store's address joins to TOP. *)
 
 (* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, def_use, sub). *)
-let mk_one_path_sub () : def term * def term * def term * def term * sub term =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "t22_rbp" in
-  let rdi = v64 "t22_rdi" in
-  let m = memv "t22_m" in
-  let m2 = memv "t22_m2" in
-  let f1 = v1 "t22_f1" in
-  let f2 = v1 "t22_f2" in
-  let def_prologue = Def.create rbp (Bil.Var rsp) in
-  let def_load =
-    Def.create rdi
-      (Bil.Load
-         (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))), LittleEndian, `r64))
-  in
-  let def_other = Def.create rdi (Bil.Int (Cbat_word.to_word (w64 7))) in
-  let def_use =
-    Def.create m2
-      (Bil.Store
-         ( Bil.Var m2,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Int (Cbat_word.to_word (w64 8))),
-           Bil.Int (Cbat_word.to_word (w64 42)),
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, _ =
-    sub_of "t22_onepath"
-      [ [ def_prologue ],
-        [ (1, fun t -> mk_jmp_to t (Bil.Var f1)); (2, fun t -> mk_jmp_to t (Bil.Var f2)) ];
-        [ def_load ], [ (3, mk_goto) ];
-        [ def_other ], [];
-        [ def_use ], [] ]
-  in
-  (def_prologue, def_load, def_other, def_use, sub)
+
 
 let mk_high0_cast_sub () : var * Program.t * sub term * tid =
   let rax = Var.create ~is_virtual:false ~fresh:false "rax" (Type.Imm 64) in
@@ -397,31 +283,7 @@ let mk_e2ed_heap_sub () : def term * def term * def term * def term * sub term *
   in
   (def_base, def_idx, def_data, def_store, sub, tids.(1))
 
-let mk_e2ed_rsp_store_sub () : def term * def term * def term * sub term * tid =
-  let rsp = v64 "RSP" in
-  let rbp = v64 "e2ed_rbp" in
-  let i2 = v64 "e2ed_i2" in
-  let m2 = memv "e2ed_m2" in
-  let def_prologue = Def.create rbp (Bil.Var rsp) in
-  let def_idx = Def.create i2 (Bil.Int (Cbat_word.to_word (w64 3))) in
-  let def_store =
-    Def.create m2
-      (Bil.Store
-         ( Bil.Var m2,
-           Bil.BinOp
-             ( Bil.PLUS,
-               Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30))),
-               Bil.BinOp (Bil.TIMES, Bil.Var i2, Bil.Int (Cbat_word.to_word (w64 8))) ),
-           Bil.Int (Cbat_word.to_word (w64 42)),
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, tids =
-    sub_of "e2ed_rsp_store"
-      [ [ def_prologue; def_idx; def_store ], [ (1, mk_goto) ];
-        [], [] ]
-  in
-  (def_prologue, def_idx, def_store, sub, tids.(1))
+
 
 (* RSP := 0 anchor def is tagged, so the entry state carries RSP = {0}. *)
 
@@ -484,7 +346,7 @@ let jump_target =
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let sub = Hike.Jump.compile_sub jump_target sub in
   let prog = Program.create ~subs:[ sub ] () in
-  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
 (* Anchored fixpoint + extraction; the SP is the anchored universe's
    RSP (the var the anchored entry seeds). *)
@@ -493,7 +355,7 @@ let anchored_sp () : var =
 
 (* The VLA events through the shape test. *)
 let dyn_alloc_events (sub : sub term) : Tid.Set.t =
-  Hike.Sections.dynamic_alloc_tids_of ~sp:(anchored_sp ())
+  Hike.Promote.dynamic_alloc_tids_of ~sp:(anchored_sp ())
     ~denote:Hike.Vsa.denote_exp_at sub
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
@@ -750,7 +612,9 @@ let mk_l3b4_diamond () : sub term * tid =
   in
   (sub, tids.(3))
 
-(* Cell count in [st]'s memory: counts "(height " sexp markers. *)
+(* Cell count in [st]'s memory: the mem map's tree nodes — one
+   "(height" per map node in the sexp (the fork's Mem exposes no
+   enumeration; the count is the printer's node marker). *)
 let l3b_cells_of (mv : var) (st : AI.t) : int =
   let mem = AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } st mv in
   let s = Core.Sexp.to_string (Mem.sexp_of_t mem) in

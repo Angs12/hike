@@ -21,8 +21,7 @@ type outcome =
 let run_sub (_sp : var) (_prog : program term) (sub : sub term) : outcome =
   let t0 = Unix.gettimeofday () in
   try
-    let prog' = Program.create ~subs:[ sub ] () in
-    let _sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
+    let _sol = Probe_common.run_sub_fixpoint sub in
     let t1 = Unix.gettimeofday () in
     Ok (t1 -. t0)
   with e ->

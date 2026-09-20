@@ -186,7 +186,7 @@ let install_envs (subs : sub term list) : bool =
   let all_envs, ok =
     Base.List.fold subs ~init:(Tid.Map.empty, true) ~f:(fun (m, ok) sub ->
         match
-          Hv.fixpoint Theory.Target.unknown sp
+          Hv.fixpoint Theory.Target.unknown
             ~prog:(Program.create ~subs:[ sub ] ())
             ~images:[] sub
         with

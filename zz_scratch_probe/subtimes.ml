@@ -34,12 +34,12 @@ let () =
           in
           let t0 = Unix.gettimeofday () in
           let _envs, _sub' =
-            Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
+            Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
               ~images:[] sub
             |> Base.Option.value ~default:(Tid.Map.empty, sub)
           in
           let dt = Unix.gettimeofday () -. t0 in
-          let ntags = Core.Set.length (Hike.Sections.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) in
+          let ntags = Core.Set.length (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) in
           (dt, name, nblk, ndefs, ntags))
         subs
     in

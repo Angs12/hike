@@ -20,6 +20,7 @@ let () =
   Test_regression.run_regions ();
   Test_domains.run_overlap ();
   Test_domains.run_divmod ();
+  Test_domains.run_word_casts ();
   Test_resolve.run ();
   Test_regression.run_fp_gpr ();
   Test_sections.run ();

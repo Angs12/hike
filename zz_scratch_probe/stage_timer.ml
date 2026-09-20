@@ -27,7 +27,7 @@ let () =
     (* Production single call: the total the pass pays per sub. *)
     let t0 = Unix.gettimeofday () in
     let _envs, _sub' =
-      Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
+      Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
         ~images:[] sub
       |> Base.Option.value ~default:(Tid.Map.empty, sub)
     in
@@ -38,13 +38,12 @@ let () =
     (* Decomposition: the VLA events are the shape test. *)
     let t0 = Unix.gettimeofday () in
     let _events =
-      Hike.Sections.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub in
+      Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub in
     let t_analyze = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE event-detect             %8.3fs\n" t_analyze;
 
-    let prog' = Program.create ~subs:[ sub ] () in
     let t0 = Unix.gettimeofday () in
-    let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
+    let sol = Probe_common.run_sub_fixpoint sub in
     let t_fix = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE fixpoint (inline refines) %8.3fs\n" t_fix;
 

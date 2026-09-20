@@ -45,11 +45,11 @@ let () =
           in
           let _events, t_rel =
             time (fun () ->
-                Hike.Sections.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub)
+                Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub)
           in
           let _envs, t_vsa =
             time (fun () ->
-                Hike.Vsa.fixpoint target sp ~prog:(Program.create ~subs:[ sub ] ())
+                Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
                   ~images:[] sub)
           in
           let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in

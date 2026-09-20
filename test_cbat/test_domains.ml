@@ -1243,3 +1243,28 @@ let run_divmod () =
   check "PBH-M10: same-quotient mod results are the exact residue hull" (
     !inexact = 0);
   ()
+
+let run_word_casts () =
+  (* A narrow word set's SIGNED cast to a wider width sign-extends
+     from the operand's own width: the sign bit is bit [w-1] of the
+     operand, never bit [sz-1] of the result. *)
+  let w32m1 = Cbat_word.of_int64 ~width:32 (-1L) in
+  let widened = Cbat_word.cast Bil.SIGNED 64 w32m1 in
+  check "CAST-W1: a negative 32-bit word's SIGNED cast to 64 sign-extends"
+    (match Cbat_word.to_int64 widened with
+     | Ok v -> Int64.equal v (-1L)
+     | Error _ -> false);
+  let w32pos = Cbat_word.of_int64 ~width:32 0x7fffffffL in
+  let widened_pos = Cbat_word.cast Bil.SIGNED 64 w32pos in
+  check "CAST-W2: a positive narrow word's SIGNED cast is the identity"
+    (match Cbat_word.to_int64 widened_pos with
+     | Ok v -> Int64.equal v 0x7fffffffL
+     | Error _ -> false);
+  let narrowed = Cbat_word.cast Bil.SIGNED 32 (Cbat_word.of_int64 ~width:64 (-1L)) in
+  (* [to_int64] reads the narrow word's bit pattern unsigned, so the
+     truncated pattern shows up as 0xFFFFFFFF, not -1. *)
+  check "CAST-W3: a SIGNED cast to a narrower width keeps the truncated bit pattern"
+    (match Cbat_word.to_int64 narrowed with
+     | Ok v -> Int64.equal v 0xFFFFFFFFL
+     | Error _ -> false);
+  ()

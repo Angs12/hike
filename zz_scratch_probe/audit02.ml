@@ -26,8 +26,7 @@ let audit_sub (sp : var) (sub : sub term) : unit =
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
   (* The PROD verdict through the seam: the per-def classification the
      extraction produced, recomputed from the denotations. *)
-  let prog' = Program.create ~subs:[ sub ] () in
-  let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
+  let sol = run_sub_fixpoint sub in
   let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Cbat_extraction.kind option =
     let open Base.Option in
     Base.Option.bind

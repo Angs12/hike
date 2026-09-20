@@ -24,8 +24,7 @@ let () =
           let kind_of =
             let sol =
               Cbat_vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-                ~resolved:Tid.Map.empty []
-                (Program.create ~subs:[ sub' ] ()) sub'
+                ~resolved:Tid.Map.empty (Program.create ~subs:[ sub' ] ()) sub'
                 (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub')
             in
             Probe_common.seam_kinds_of sol sub'

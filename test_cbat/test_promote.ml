@@ -1,7 +1,7 @@
 (* The stack-arg promotion's pins: the promotion-fact derivation through
    the REAL fixpoint ([Hike.Vsa.fixpoint]) and the tree's promotion facts
    ([prom_arity] / [prom_resolved] — the producer's promotion product),
-   the promotion as a BIR rewrite ([Hike.Sections.promote_sub] — real
+   the promotion as a BIR rewrite ([Hike.Promote.promote_sub] — real
    args, parameter reads, call-arg
    defs, direct resolved targets), and the promotion's emitted shape
    (the promoted signature, the memory-convention twin, the pointer
@@ -39,12 +39,12 @@ let stamp_tag
  (d : def term) (t : Sm.sec_tag option) : def term =
   match t with Some t -> Sm.set_sec_tag t d | None -> d
 
-let stamp (facts : Pr.facts) (sub : sub term) : sub term =
+let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
   let sub =
     Cu.stamp_dyn_allocs
-      ~dynamic_alloc_tids:(Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) sub
+      ~dynamic_alloc_tids:(Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) sub
   in
-  Hike.Sections.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub
+  Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub
 
 (* Family 8: stack-arg promotion emission.                             *)
 
@@ -103,8 +103,8 @@ let run_promotion () =
         [], [ (0, mk_ret) ] ]
   in
   let j = sub_jmp caller 0 0 in
-  let callee_facts : Pr.facts = mk_facts ~prom_arity:2 () in
-  let caller_facts : Pr.facts =
+  let callee_facts : Hike.Promote.facts = mk_facts ~prom_arity:2 () in
+  let caller_facts : Hike.Promote.facts =
     mk_facts
       ~prom_resolved:(Tid.Map.singleton (Term.tid j) (Some (Term.tid callee)))
       ()
@@ -159,7 +159,7 @@ let run_promotion () =
         [], [ (0, mk_ret) ] ]
   in
   let j2 = sub_jmp caller2 0 0 in
-  let caller2_facts : Pr.facts =
+  let caller2_facts : Hike.Promote.facts =
     mk_facts ~prom_resolved:(Tid.Map.singleton (Term.tid j2) None) ()
   in
   let caller2 = stamp caller2_facts caller2 in
@@ -195,7 +195,7 @@ let run_t10_rewrite () =
         [], [ (0, mk_ret) ] ]
   in
   let facts = mk_facts ~prom_arity:1 () in
-  let sub' = Hike.Sections.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub in
+  let sub' = Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub in
   check "T10-PROMOTE: the sub gains its promoted parameter as a real BIR arg"
     (Base.List.exists
        (Term.enum arg_t sub' |> Seq.to_list)
@@ -318,8 +318,7 @@ let run_producer_promotion () =
     let sol =
       Cbat_vsa.static_graph_vsa
         ~abi:Hike_abi.x86_64_sysv
-        ~resolved:Tid.Map.empty []
-        (Program.create ~subs:[ a2 ] ()) a2
+        ~resolved:Tid.Map.empty (Program.create ~subs:[ a2 ] ()) a2
         (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv a2)
     in
     Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol a2
@@ -386,17 +385,17 @@ let run_producer_promotion () =
   let j = sub_jmp a6 0 0 in
   check "PR-A6: the site's outgoing stores map to SysV slots, last store wins"
     (ignore (install_fixture_envs [ a6 ]);
-     let bindings = Hike.Sections.stage_a ~word:8 ~abi:Hike.Abi.x86_64_sysv ~sp
+     let bindings = Hike.Promote.stage_a ~word:8 ~abi:Hike.Abi.x86_64_sysv ~sp
         ~denote:Hv.denote_exp_at a6 in
      match Core.Map.find bindings (Term.tid body) with
      | Some [ b ] ->
-         Int.equal b.Hike.Sections.sb_slot 1
-         && Tid.equal (Term.tid b.Hike.Sections.sb_def) (Term.tid a6_st2)
+         Int.equal b.Hike.Promote.sb_slot 1
+         && Tid.equal (Term.tid b.Hike.Promote.sb_def) (Term.tid a6_st2)
      | _ -> false);
   check "PR-A6: the unresolvable indirect target records no resolution (symtab-free)"
     (ignore (install_fixture_envs [ a6 ]);
      let resolved =
-       Hike.Sections.call_resolution ~denote:Hv.denote_exp_at ~symtab:None
+       Hike.Promote.call_resolution ~denote:Hv.denote_exp_at ~symtab:None
          ~name_tid:[] a6
      in
      Core.Map.find resolved (Term.tid j) = Some None);

@@ -177,7 +177,8 @@ let run () =
   let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
   (* Three little-endian 4-byte entries at 0x4000: 0x2d, 0, 0x5a1e. *)
   let img_bytes =
-    [| 0x2d; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00; 0x00; 0x1e; 0x5a; 0x00; 0x00 |]
+    Bytes.of_string
+      "\x2d\x00\x00\x00\x00\x00\x00\x00\x1e\x5a\x00\x00"
   in
   let images =
     [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes } ]

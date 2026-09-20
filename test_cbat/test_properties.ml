@@ -589,7 +589,7 @@ let run_landmarks () =
            x)
         (range 0 9));
    let prog' = Program.create ~subs:[ sub ] () in
-   let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
+   let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
    let st tid = Graphlib.Std.Solution.get sol tid in
    check
      "property LM VSK-EMPTY: the unconditional edge is the identity transfer (guard IN equals the seeded entry state; the frame relation is gone — the identity is over words and memories)"
@@ -713,7 +713,7 @@ let run_t5 () =
       ~key ~data:(Mem.Val.create wide LittleEndian) in
   let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
   let sol =
-    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv (Program.create ~subs:[ sub ] ())
       sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
   let cfg =
     Sub.to_graph sub
@@ -772,7 +772,7 @@ let run_t5 () =
       ~key:k8 ~data:(Mem.Val.create wide LittleEndian) in
   let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
   let sol =
-    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv (Program.create ~subs:[ sub ] ())
       sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub) in
   let cfg =
     Sub.to_graph sub
@@ -843,18 +843,18 @@ let run_t5 () =
     Mem.Val.data
       (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key) in
   let h = Tid.for_name "t5x_head" in
+  let lm = Cbat_landmarks.create () in
   let need = Var.Set.singleton (Var.base xv) in
   let d_old = Ws.singleton (w32 1) in
   let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
   let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
-  Cbat_landmarks.clear ();
   let plain = AI.widen_join (mkstate d_old w_old) (mkstate d_new w_new) in
   check
     "T5-4 (contrast): the plain memory widen drives the cell data \
      infinite"
     (Ws.is_infinite (cell_of plain));
   let r =
-    AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
+    AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
       (mkstate d_old w_old) (mkstate d_new w_new) in
   check
     "T5-4 (extrapolation): the cycle-written cell data advances by the \
@@ -864,21 +864,21 @@ let run_t5 () =
     "T5-4 (extrapolation): the advanced cell stays bounded (the plain \
      widen does not)"
     (not (Ws.is_infinite (cell_of r)));
-  Cbat_landmarks.record_landmark_for_head ~head:h (Var.base xv)
+  Cbat_landmarks.record_landmark_for_head lm ~head:h (Var.base xv)
     ~bound:(w32 10) ~is_upper:true ~dist:2;
-  (match Cbat_landmarks.entries_for_head h (Var.base xv) with
+  (match Cbat_landmarks.entries_for_head lm h (Var.base xv) with
    | e :: _ -> e.Cbat_landmarks.dist_p <- Some 5
    | [] -> failwith "T5-4: landmark not recorded");
   let rl =
-    AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
+    AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
       (mkstate d_old w_old) (mkstate d_new w_new) in
   check_bound
     "T5-4 (landmarks): the cell data translates toward the head's \
      landmark (growth 3 x 1 step: hi 2 -> 5)"
     (Ws.max_elem (cell_of rl)) (fun hi -> W.equal hi (w32 5));
-  Cbat_landmarks.clear ();
+  let lm = Cbat_landmarks.create () in
   let r_ex =
-    AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
+    AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
       (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in
   let r_w =
     AI.widen_join (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in
@@ -886,7 +886,6 @@ let run_t5 () =
     "T5-4 (overflow): extrapolation overflow falls back to the plain \
      widen"
     (Ws.equal (cell_of r_ex) (cell_of r_w));
-  Cbat_landmarks.clear ();
   ())
 
 (* T5-4b (store loop integration): a counter loop storing i into a cell —
@@ -926,7 +925,7 @@ let run_t5 () =
       ~key ~data:(Mem.Val.create (Ws.singleton (w32 0)) LittleEndian) in
   let entry_state = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
   let sol =
-    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] (Program.create ~subs:[ sub ] ())
+    Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv (Program.create ~subs:[ sub ] ())
       sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_state sub) in
   let exit_st = Graphlib.Std.Solution.get sol exit_tid in
   let cell =

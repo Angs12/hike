@@ -45,7 +45,7 @@ let run_producer_record () =
   let a5 = straight_sub "pr_a5_vla" [ a5_lit; a5_rbx_def; a5_bnd ] in
   check "PR-A5: neither the literal decrement nor the chain-resolved constant is the event — a size the code fixes keeps the SP at a bounded interval"
     (Core.Set.is_empty
-       (Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5));
+       (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5));
   (* [a5_rcx] is never defined: its denotation is TOP — the
      runtime-unbounded size. *)
   let a5_vla =
@@ -53,7 +53,7 @@ let run_producer_record () =
   in
   let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
   let a5u_events =
-    Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5u in
+    Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5u in
   check "PR-A5: the runtime-unbounded decrement is the event; the literal decrement is not"
     (Core.Set.equal a5u_events (tid_set [ Term.tid a5_vla ]));
   let a5_stamped = Sm.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u in
@@ -77,7 +77,7 @@ let run_producer_record () =
   let a5c_sp = Def.create sp (Bil.Var a5c_t2) in
   let a5c = straight_sub "pr_a5c_chain" [ a5c_d1; a5c_d2; a5c_sp ] in
   check "PR-A5c: a VLA spelled through TWO temps is still the event (the chain resolves through the sequential state)"
-    (Core.Set.equal (Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5c)
+    (Core.Set.equal (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5c)
        (tid_set [ Term.tid a5c_sp ]));
 
   (* A5d: the plus-form (the lea-computed adjustment: a negative size
@@ -92,7 +92,7 @@ let run_producer_record () =
   in
   let a5d = straight_sub "pr_a5d_plus" [ a5d_d1; a5d_sp ] in
   check "PR-A5d: the lea-computed adjustment (a negative size ADDED) is the event"
-    (Core.Set.equal (Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5d)
+    (Core.Set.equal (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5d)
        (tid_set [ Term.tid a5d_sp ]));
 
   (* A5e: N6's direction — the def's VALUE decides.  With real
@@ -109,7 +109,7 @@ let run_producer_record () =
   ignore (install_fixture_envs [ a5e ]);
   check "PR-A5e: a provably-above PLUS adjustment is not the VLA event (the value's direction)"
     (Core.Set.is_empty
-       (Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5e));
+       (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5e));
 
   (* A5b: the LOOP-CARRIED VLA — the decrement sits inside a runtime
      loop; the shape test is local to the def, so the loop changes
@@ -122,7 +122,7 @@ let run_producer_record () =
         [], [ (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, a5b_loop))); (1, fun t -> mk_jmp_to t a5b_loop) ];
         [], [] ]
   in
-  let a5b_events = Pr.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5b in
+  let a5b_events = Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5b in
   let a5b_body_sp =
     Term.enum blk_t a5b
     |> Seq.find_map ~f:(fun blk ->
@@ -597,7 +597,7 @@ let run_abi_and_kb () =
 (* The printable-run rule (the model's one home): a word is string
    text iff a printable run crosses its start boundary. *)
 let run_text () =
-  let txt = Array.of_list [ 0x63; 0x61; 0x74; 0; 0x61; 0xff; 0x74; 0 ] in
+  let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
   check "STRING-TEXT: a printable run crossing the start covers the word"
     (Sm.string_text_word ~arr:txt ~off:1);
   check "STRING-TEXT: a NUL directly before the word means no crossing"
@@ -608,7 +608,7 @@ let run_text () =
     (not (Sm.string_text_word ~arr:txt ~off:5));
   check "STRING-TEXT: the first word of the image never crosses"
     (not (Sm.string_text_word ~arr:txt ~off:0));
-  let all_txt = Array.of_list [ 0x63; 0x61; 0x74; 0x20; 0x7e ] in
+  let all_txt = Bytes.of_string "\x63\x61\x74\x20\x7e" in
   check "STRING-TEXT: running off the front crosses iff the prefix is all printable"
     (Sm.string_text_word ~arr:all_txt ~off:4)
 

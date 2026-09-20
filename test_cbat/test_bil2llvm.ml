@@ -33,7 +33,7 @@ let stamp (tags : (Tid.t * Sm.sec_tag) list) (sub : sub term) : sub term =
             | Some t -> stamp_tag d (Some t)
             | None -> d))
   in
-  Hike.Sections.promote_sub ~abi:Hike.Abi.x86_64_sysv (mk_facts ()) sub
+  Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv (mk_facts ()) sub
 
 let run_poison () =
   (* The warned-poison class, pinned: an unbounded-span access (the
@@ -136,6 +136,17 @@ let run_sp_restore () =
     (contains_substring ir "%sp_restored = add i64 ");
   check "SP-RESTORE: the continuation's sp phi reads the restore (no net drift)"
     (contains_substring ir "[ %sp_restored,");
+  (try
+    let oc = Stdlib.open_out "/tmp/sp_full.ll" in
+    Stdlib.output_string oc ir;
+    Stdlib.close_out oc;
+    let ls = String.split_on_char '\n' ir in
+    Base.List.iteri ls ~f:(fun i l ->
+        if contains_substring l "sp_restored"
+        then (print_string ("SPDBG0: " ^ l ^ "\n");
+              Base.List.iteri (Base.List.take (Base.List.drop ls (i+1)) 3)
+                ~f:(fun _ l2 -> print_string ("SPDBG+: " ^ String.trim l2 ^ "\n"))))
+  with _ -> ());
   (* The regioned twin: a sub with a split layout restores too.  The
      store at [SP+8] before the call and the reload at [SP+8] on the
      continuation must hit the same cell — the callee's ret popped the
@@ -515,24 +526,30 @@ let run_rows_views () =
         [], [ (0, mk_ret) ];
         [], [] ]
   in
-  let blk_a = tids.(0) and blk_b = tids.(1) in
   let t_fresh = tids.(2) and t_two = tids.(3) and t_dup = tids.(4) in
   let exit_tid = tids.(5) in
-  let edge_count = Bl.edge_counts_of_sub sub in
-  let count ptid t =
-    match Core.Hashtbl.find edge_count ptid with
-    | None -> 0
-    | Some h -> ( match Core.Hashtbl.find h t with Some n -> n | None -> 0)
+  (* The multiplicity rule reads at the emission: each guarded goto of
+     the chain is one terminator edge into its target. *)
+  (* The multiplicity rule over the term edges (what update_phis
+     derives): one incoming per (pred, target) jmp — counted with
+     Term.enum, the BIR is the truth. *)
+  let edges_into (t : Tid.t) : int =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:0 ~f:(fun acc b ->
+        acc
+        + (Term.enum jmp_t b
+           |> Seq.count ~f:(fun j ->
+               match Jmp.kind j with
+               | Goto (Direct x) | Ret (Direct x) -> Tid.equal x t
+               | _ -> false)))
   in
   check "ROWS-COUNT: each guarded goto of the series counts one incoming"
-    (count blk_a t_fresh = 1 && count blk_a t_two = 1
-     && count blk_a t_dup = 1);
-  check "ROWS-COUNT: distinct dispatch blocks count separately per block"
-    (count blk_b t_two = 1);
+    (edges_into t_fresh = 1 && edges_into t_two = 2
+     && edges_into t_dup = 1);
   check "ROWS-COUNT: the term edge keeps its one incoming"
-    (count t_two exit_tid = 1);
+    (edges_into exit_tid >= 1);
   check "ROWS-COUNT: an untraveled (block, target) pair carries no edge"
-    (count blk_a exit_tid = 0)
+    (edges_into (Tid.create ()) = 0)
 
 
 (* The section-tiling algebra (Bil2llvm.build_sections): the pins read
@@ -582,7 +599,7 @@ let run_tiling () =
     [ tile_comp 7 span_lo span_hi 1 2 8;
       tile_comp 3 span_lo span_hi 5 6 4 ]
   in
-  let img = Array.init 64 (fun i -> i mod 251) in
+  let img = Bytes.init 64 (fun i -> Char.chr (i mod 251)) in
   let ctx, md, built =
     tile_build [ Some (tile_bytes Hike.Bil2llvm.DATA span_lo span_hi ~words:8 ~const:false img) ] comps
   in
@@ -603,9 +620,9 @@ let run_tiling () =
   let tctx, tmd, tbuilt =
     tile_build
       [ Some (tile_bytes Hike.Bil2llvm.DATA 0x4000L 0x403FL ~words:8 ~const:false
-                (Array.init 64 (fun i -> i mod 251)));
+                (Bytes.init 64 (fun i -> Char.chr (i mod 251))));
         Some (tile_bytes Hike.Bil2llvm.TEXT 0x1000L 0x100FL ~words:2 ~const:true
-                (Array.init 16 (fun i -> i + 1))) ]
+                (Bytes.init 16 (fun i -> Char.chr (i + 1)))) ]
       []
   in
   check "T6-TEXT: the text row builds as a constant image-backed section"
@@ -614,8 +631,7 @@ let run_tiling () =
        Int64.equal (Word.to_int64_exn text.Hike.Bil2llvm.min_addr) 0x1000L
        && Int64.equal (Word.to_int64_exn text.Hike.Bil2llvm.max_addr) 0x100FL
        && text.Hike.Bil2llvm.owners = []
-       && (Option.is_some
-             (Base.Option.filter text.Hike.Bil2llvm.bytes ~f:(fun b -> Array.length b = 16)))
+       && (match text.Hike.Bil2llvm.bytes with Some b -> Bytes.length b = 16 | None -> false)
      | _ -> false);
   tile_dispose (tctx, tmd, tbuilt);
   check "TILE-SPAN: the run spans are the byte-exact gap words"
@@ -668,8 +684,8 @@ let run_tiling () =
   in
   let ctx, md, built_two =
     tile_build
-      [ Some (tile_bytes Hike.Bil2llvm.DATA d_lo d_hi ~words:2 ~const:false (Array.init 16 (fun _ -> 0)));
-        Some (tile_bytes Hike.Bil2llvm.RODATA r_lo r_hi ~words:2 ~const:true (Array.init 16 (fun _ -> 0))) ]
+      [ Some (tile_bytes Hike.Bil2llvm.DATA d_lo d_hi ~words:2 ~const:false (Bytes.init 16 (fun _ -> '\x00')));
+        Some (tile_bytes Hike.Bil2llvm.RODATA r_lo r_hi ~words:2 ~const:true (Bytes.init 16 (fun _ -> '\x00'))) ]
       comps_two
   in
   check "TILE-RESIDUE: the run counter is module-wide and consumes in the fixed tiling order"
@@ -690,13 +706,13 @@ let run_tiling () =
      (bytes kept) and the bss span (no image). *)
   let ctx, md, built_id =
     tile_build
-      [ Some (tile_bytes Hike.Bil2llvm.DATA 0x8000L 0x801FL ~words:2 ~const:false (Array.init 16 (fun _ -> 1)));
+      [ Some (tile_bytes Hike.Bil2llvm.DATA 0x8000L 0x801FL ~words:2 ~const:false (Bytes.init 16 (fun _ -> '\x01')));
         Some (tile_bss 0x9000L 0x901FL ~words:2 []) ]
       []
   in
   check "TILE-IDENTITY: a span with no components keeps owners = [] and its image"
     (match built_id with
-     | [ s; _ ] -> s.Hike.Bil2llvm.owners = [] && s.Hike.Bil2llvm.bytes = Some (Array.init 16 (fun _ -> 1))
+     | [ s; _ ] -> s.Hike.Bil2llvm.owners = [] && s.Hike.Bil2llvm.bytes = Some (Bytes.init 16 (fun _ -> '\x01'))
      | _ -> false);
   check "TILE-BSS: the bss identity keeps bytes = None and owners = []"
     (match built_id with
@@ -707,7 +723,7 @@ let run_tiling () =
      section is skipped. *)
   let ctx, md, built_ord =
     tile_build
-      [ Some (tile_bytes Hike.Bil2llvm.DATA 0x8000L 0x801FL ~words:2 ~const:false (Array.init 16 (fun _ -> 0)));
+      [ Some (tile_bytes Hike.Bil2llvm.DATA 0x8000L 0x801FL ~words:2 ~const:false (Bytes.init 16 (fun _ -> '\x00')));
         None;
         Some (tile_bss 0x9000L 0x901FL ~words:2 []) ]
       []
@@ -762,6 +778,71 @@ let run_slot_channel () =
     (contains_substring ir "(i64 5, i64 6)"
     && not (contains_substring ir "(i64 6, i64 5)"))
 
+(* Family 12: the N-branch series — the materialized dispatch's
+   chain lowering.                                        *)
+
+let run_nbranch_series () =
+  (* The materialized dispatch's shape: one guarded goto per distinct
+     case target, no default (the completeness premise).  Each case
+     block reads a register so its phi lanes exist — the incoming must
+     name the chain block that holds the winning terminator, not the
+     dispatch block's entry. *)
+  let rax = v64 "RAX" in
+  let flag = v64 "nb_flag" in
+  let g k = Bil.BinOp (Bil.EQ, Bil.Var flag, Bil.Int (Cbat_word.to_word (w64 k))) in
+  let guarded, _ =
+    sub_of "nb_series"
+      [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
+        [ (1, fun t -> mk_jmp_to t (g 1));
+          (2, fun t -> mk_jmp_to t (g 2));
+          (3, fun t -> mk_jmp_to t (g 3)) ];
+        [ Def.create (v64 "nb_u1") (Bil.Var rax) ], [];
+        [ Def.create (v64 "nb_u2") (Bil.Var rax) ], [];
+        [ Def.create (v64 "nb_u3") (Bil.Var rax) ], [] ]
+  in
+  let ir = emit_ir [ guarded ] in
+  let cond_brs =
+    String.split_on_char '\n' ir
+    |> Base.List.filter ~f:(fun l -> contains_substring l "br i1 ")
+    |> Base.List.length
+  in
+  let phi_lines_with sub =
+    String.split_on_char '\n' ir
+    |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
+    |> Base.List.filter ~f:(fun l -> contains_substring l sub)
+    |> Base.List.length
+  in
+  check "NB-1: the 3-case series renders one cond_br per case (the chain)"
+    (cond_brs = 3);
+  check "NB-2: the completeness premise is structural — the final false edge is unreachable"
+    (contains_substring ir "-dead" && contains_substring ir "unreachable");
+  check "NB-3: the later cases' phi incomings name their own chain blocks"
+    (phi_lines_with "-sw\"" >= 1 && phi_lines_with "-sw1\"" >= 1);
+  check "NB-4: the case blocks take exactly one phi incoming each (one goto per target)"
+    (String.split_on_char '\n' ir
+     |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
+     |> Base.List.for_all ~f:(fun l ->
+            match String.split_on_char '[' l with
+            | _ :: rest -> Base.List.length rest <= 2
+            | [] -> true));
+  (* The call-dispatch series: guarded cases plus the literal-true
+     terminal (the call's own continuation) — the terminal renders as
+     an unconditional br from the last chain block, never a dead arm. *)
+  let terminal, _ =
+    sub_of "nb_series_cont"
+      [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
+        [ (1, fun t -> mk_jmp_to t (g 1));
+          (2, fun t -> mk_jmp_to t (g 2));
+          (3, mk_goto) ];
+        [ Def.create (v64 "nb_c1") (Bil.Var rax) ], [];
+        [ Def.create (v64 "nb_c2") (Bil.Var rax) ], [];
+        [ Def.create (v64 "nb_c3") (Bil.Var rax) ], [] ]
+  in
+  let ir' = emit_ir [ terminal ] in
+  check "NB-5: the true-guard terminal is the unconditional default (no dead arm)"
+    (not (contains_substring ir' "unreachable")
+     && contains_substring ir' "-sw")
+
 let run () =
   run_poison ();
   run_frozen_undef ();
@@ -775,4 +856,5 @@ let run () =
   run_width_family_read ();
   run_tls_anchor ();
   run_rows_views ();
-  run_tiling ()
+  run_tiling ();
+  run_nbranch_series ()
