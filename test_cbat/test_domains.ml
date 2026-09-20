@@ -1280,3 +1280,23 @@ let run_stackoff_cardn () =
   check "CARDN-W1: the |segment|*|offs| product saturates past the exact threshold"
     (Cbat_word.equal (Ws.cardinality (Ws.stack_word offs)) (Cbat_word.ones 65));
   ()
+
+let run_stackoff_bounds () =
+  (* A StackOff's extrema answer from its offset set — the exact
+     projection [base + o_lo, base + o_hi], no span slack. *)
+  let addr o = Cbat_word.of_int64 ~width:64 (Int64.add Ws.stack_base o) in
+  let p1 = Ws.stack_word_i64 (-8L) in
+  check "PW-S1: a singleton stack address's extrema are the exact address"
+    (match Ws.min_elem p1, Ws.max_elem p1 with
+     | Some lo, Some hi ->
+         Cbat_word.equal lo (addr (-8L)) && Cbat_word.equal hi (addr (-8L))
+     | _ -> false);
+  let p2 = Ws.stack_word (Clp.interval ~width:64
+                            (Cbat_word.of_int64 ~width:64 (-16L))
+                            (Cbat_word.of_int64 ~width:64 (-8L))) in
+  check "PW-S2: an offset interval projects to its exact address hull"
+    (match Ws.min_elem p2, Ws.max_elem p2 with
+     | Some lo, Some hi ->
+         Cbat_word.equal lo (addr (-16L)) && Cbat_word.equal hi (addr (-8L))
+     | _ -> false);
+  ()

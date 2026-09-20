@@ -26,10 +26,10 @@ type fset = FinSet.t
 (* Large sets are Clps; small ones FinSets; stack addresses carry the
    symbolic segment base.  [StackOff offs] denotes the model stack
    segment base plus the exact offset set [offs]; the base is a MODEL
-   constant, never widened.  Operations that lose the shape degrade to
-   the plain concrete smear [stack_base + offs_lo, stack_base +
-   stack_span + offs_hi] — sound because [2^62, 2^63) is disjoint from
-   every real address. *)
+   constant, never widened.  Its extrema answer from the offset set —
+   the exact hull [stack_base + offs_lo, stack_base + offs_hi];
+   operations that lose the shape degrade through the segment-span
+   bounds, which the ownership carve and the raw lane require. *)
 type t =
   | Clp of Clp.t
   | FinSet of FinSet.t
@@ -66,8 +66,27 @@ let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
     then None
     else Some abc
 
-(* The concrete smear bounds [base + offs_lo, base + span + offs_hi]. *)
-let smear_bounds (offs : Clp.t) : (int64 * int64) option =
+(* The plain-line extrema [base + offs_lo, base + offs_hi]: the exact
+   hull of the denotation, for the value queries. *)
+let plain_bounds (offs : Clp.t) : (int64 * int64) option =
+  match Clp.min_elem offs, Clp.max_elem offs with
+  | Some lo, Some hi ->
+    (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+     | Ok loi, Ok hii ->
+       (match checked_add3 stack_base 0L loi with
+        | None -> None
+        | Some cmin ->
+          match checked_add3 stack_base 0L hii with
+          | None -> None
+          | Some cmax -> Some (cmin, cmax))
+     | _ -> None)
+  | _ -> None
+
+(* The degraded bounds [base + offs_lo, base + span + offs_hi]: the
+   span is load-bearing — a shape-lost address feeds the ownership
+   carve and the raw-lane eligibility, which must not trust a tight
+   range the lost shape cannot back. *)
+let degrade_bounds (offs : Clp.t) : (int64 * int64) option =
   match Clp.min_elem offs, Clp.max_elem offs with
   | Some lo, Some hi ->
     (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
@@ -81,12 +100,13 @@ let smear_bounds (offs : Clp.t) : (int64 * int64) option =
      | _ -> None)
   | _ -> None
 
-(* The plain concrete twin: the smear as a step-1 hull; the lifts
-   route every StackOff they cannot handle precisely through it. *)
+(* The plain concrete twin: the degraded bounds as a step-1 hull; the
+   lifts route every StackOff they cannot handle precisely through
+   it. *)
 let rec to_plain (t : t) : t =
   match t with
   | StackOff offs ->
-    (match smear_bounds offs with
+    (match degrade_bounds offs with
      | Some (cmin, cmax)
        when Stdlib.Int64.compare cmin 0L >= 0 && Stdlib.Int64.compare cmax cmin >= 0 ->
        Clp (Clp.interval ~width:64 (w64_of_i64 cmin) (w64_of_i64 cmax))
@@ -208,7 +228,7 @@ let in_stack_segment (t : t) : bool =
      | _ -> false)
 
 (* Segment-relative bounds: StackOff keeps its exact offsets; a plain
-   in-band set maps to its smear-relative hull. *)
+   in-band set maps to its own hull. *)
 let stack_bounds (t : t) : (int64 * int64) option =
   let of_words (lo : Cbat_word.t) (hi : Cbat_word.t) =
     match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
@@ -271,13 +291,13 @@ let nearest_succ w (t : t) =
 
 let min_elem (t : t) = match t with
   | StackOff offs ->
-    Option.map (smear_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
+    Option.map (plain_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
   | Clp p -> Clp.min_elem p
   | FinSet s -> FinSet.min_elem s
 
 let max_elem (t : t) = match t with
   | StackOff offs ->
-    Option.map (smear_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
+    Option.map (plain_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
   | Clp p -> Clp.max_elem p
   | FinSet s -> FinSet.max_elem s
 
@@ -293,9 +313,9 @@ let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   Option.bind twin ~f:(fun t' ->
     Option.map2 (min_elem t') (max_elem t') ~f:(fun lo hi -> (lo, hi)))
 
-(* Signed extrema: the smear is signed-positive, so its signed and
-   unsigned extrema agree; a set spanning the sign boundary has no
-   signed extremum. *)
+(* Signed extrema: the projection is signed-positive, so its signed
+   and unsigned extrema agree; a set spanning the sign boundary has
+   no signed extremum. *)
 let min_elem_signed (t : t) = match t with
   | StackOff _ -> min_elem t
   | Clp p -> (
@@ -328,10 +348,10 @@ let splits_by (t : t) (w : Cbat_word.t) = match t with
   | Clp p -> Clp.splits_by p w
   | FinSet s -> FinSet.splits_by s w
 
-(* Hull test: an over-approximation of membership in the smear. *)
+(* Hull test: an over-approximation of membership in the projection. *)
 let elem w (t : t) = match t with
   | StackOff offs ->
-    (match smear_bounds offs with
+    (match plain_bounds offs with
      | Some (cmin, cmax) ->
        (match Cbat_word.to_int64 w with
         | Ok wi ->
@@ -341,8 +361,8 @@ let elem w (t : t) = match t with
   | Clp p -> Clp.elem w p
   | FinSet s -> FinSet.elem w s
 
-(* Materializes the base-0 slice only; a full smear is 8 MiB of
-   elements. *)
+(* Materializes the base-0 slice only; the full projection is
+   8 MiB of elements. *)
 let iter (t : t) = match t with
   | StackOff offs ->
     List.map ~f:(fun w -> Cbat_word.add (w64_of_i64 stack_base) w)

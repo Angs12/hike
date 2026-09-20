@@ -363,9 +363,9 @@ let last_defs (blk : blk term) : def term Var.Map.t =
 
 
 (* Jumps reachable in the env.  An SP-derived var's word is the
-   segment-smeared stack base: bit tests on it stay undecided, and
-   comparisons against concrete addresses decide consistently with
-   real pointer behavior. *)
+   segment base plus its exact offsets: bit tests and comparisons
+   against concrete addresses decide consistently with real pointer
+   behavior. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
     let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in
