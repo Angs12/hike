@@ -54,6 +54,10 @@ type refine_ctx = {
   (* The solve's own widening-landmark state (Simon & King): fresh per
      [mk_rctx], never the process's. *)
   rc_landmarks : Cbat_landmarks.t;
+  (* The run's sub-address lookup: a call-target word names a lifted
+     sub of this program, or none — every address foreign.  The
+     indirect call site's summary derivation reads it. *)
+  rc_sub_lookup : int64 -> Tid.t option;
 }
 
 let with_sol (rc : refine_ctx) (sol : (AI.t * int) Tid.Map.t) : refine_ctx =
@@ -122,14 +126,16 @@ let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
 
 (* The per-run analysis context: one fold over the sub's blocks builds
    the per-block fact records; the live-in fixpoint feeds them. *)
-let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t) (s : sub term) :
-    refine_ctx = {
+let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
+    ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
+    (s : sub term) : refine_ctx = {
   rc_nonneg = (fun ~env:_ _ -> false);
   rc_landmarks = Cbat_landmarks.create ();
   rc_state = {
     fs_sol = Tid.Map.empty;
   };
   rc_abi = abi;
+  rc_sub_lookup = sub_lookup;
   rc_blocks =
     let live = live_in_of_sub s cfg in
     Term.enum blk_t s

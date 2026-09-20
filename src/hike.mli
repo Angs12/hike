@@ -28,6 +28,7 @@ module Vsa : sig
   val fixpoint :
     Theory.Target.t ->
     prog:program term ->
+    symtab:Symtab.t option ->
     images:section_image list ->
     sub term ->
     ((Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term) option

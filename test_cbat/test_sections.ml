@@ -188,7 +188,7 @@ let install_envs (subs : sub term list) : bool =
         match
           Hv.fixpoint Theory.Target.unknown
             ~prog:(Program.create ~subs:[ sub ] ())
-            ~images:[] sub
+            ~symtab:None ~images:[] sub
         with
         | None -> (m, false)
         | Some (envs, _) ->
@@ -474,7 +474,32 @@ let run_data () =
          | Some { A.storage = A.Data_region _; _ } -> true
          | _ -> false))
 
+(* The full-span claim: every TOP entrance names its cause, and each
+   claim is the shape its denotation path serves. *)
+let run_top_claim () =
+  let plain (t, ps) =
+    match t, ps with
+    | None, [ p1; p2 ] ->
+        portion_eq p1 S.Stack (Int64.add entry Stdlib.Int64.min_int) (pos 7L)
+        && portion_eq p2 S.Args (pos 8L) Stdlib.Int64.max_int
+    | _ -> false in
+  let clamped (t, ps) =
+    match t, ps with
+    | Some Tag.Stack_unbounded, [ p ] ->
+        portion_eq p S.Stack (pos (-65536L)) (pos (-1L))
+    | _ -> false in
+  check "AT1-TC1: the query-failed claim is the plain full-line claim"
+    (plain (A.top_claim ~cause:A.Query_failed ~entry ~word:8));
+  check "AT1-TC2: the foreign claim is the plain full-line claim"
+    (plain (A.top_claim ~cause:A.Foreign ~entry ~word:8));
+  check "AT1-TC3: the unbounded-stack claim clamps below the entry"
+    (clamped (A.top_claim ~cause:A.Unbounded_stack ~entry ~word:8));
+  check "AT1-TC4: the denotation paths land on their claims"
+    (plain (rd (Ws.top 64)) && clamped (rd (Ws.stack_word (Clp.top 64))));
+  ()
+
 let run () =
   run_ranges ();
   run_trees ();
-  run_data ()
+  run_data ();
+  run_top_claim ()

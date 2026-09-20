@@ -105,7 +105,11 @@ let denote_jump
                 (match Core.Map.find written ct with
                  | Some (Some ws) -> Some ws
                  | _ -> None)
-              | Indirect _ -> None
+              | Indirect texp ->
+                Cbat_call_effects.indirect_summary
+                  ~lookup:(rc0.Cbat_runctx.rc_sub_lookup)
+                  ~summary_of:(fun tid -> Option.join (Core.Map.find written tid))
+                  ~env texp
             in
             Cbat_call_effects.transfer ~abi ~preserved
               ~site:{ Cbat_call_effects.summary; written_lanes; pushed }

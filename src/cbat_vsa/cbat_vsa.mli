@@ -94,6 +94,7 @@ val static_graph_vsa :
   abi:Hike_abi.t ->
   ?written:Var.Set.t option Tid.Map.t ->
   ?resolved:Tid.Set.t Tid.Map.t ->
+  ?sub_lookup:(int64 -> Tid.t option) ->
   Program.t -> Sub.t -> vsa_sol -> vsa_sol
 
 (* [e] denotes in the before-env of [def] — the block's defs replay

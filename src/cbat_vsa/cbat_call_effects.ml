@@ -13,6 +13,21 @@ type site = {
   pushed : bool;
 }
 
+let indirect_summary ~(lookup : int64 -> Tid.t option)
+    ~(summary_of : Tid.t -> Var.Set.t option) ~(env : AI.t)
+    (texp : exp) : Var.Set.t option =
+  match Cbat_transfer.denote_imm_exp texp env with
+  | Error _ -> None
+  | Ok ws ->
+    if WordSet.is_top ws then None
+    else
+      match WordSet.min_elem ws, WordSet.max_elem ws with
+      | Some lo, Some hi when Cbat_word.equal lo hi ->
+        (match Cbat_word.to_int64 lo with
+         | Ok v -> Option.bind (lookup v) ~f:summary_of
+         | Error _ -> None)
+      | _ -> None
+
 let transfer ~(abi : Hike_abi.t) ~(preserved : Var.Set.t) ~(site : site)
     (env : AI.t) : AI.t =
   let word_bits = 8 * abi.Hike_abi.word in

@@ -151,6 +151,7 @@ let rec static_graph_vsa
     ~(abi : Hike_abi.t)
     ?(written : Var.Set.t option Tid.Map.t = Tid.Map.empty)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
+    ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
   let preserved = preserved_of_sub ~abi s in
   let edge_conds = edge_conds_of s in
@@ -159,7 +160,7 @@ let rec static_graph_vsa
   (* Pseudo-nodes never reach denotation. *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  let rctx = Cbat_runctx.mk_rctx ~cfg:cfg_tmp ~abi s in
+  let rctx = Cbat_runctx.mk_rctx ~cfg:cfg_tmp ~abi ~sub_lookup s in
   let cfg = cfg_tmp in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
      edges, serving the WTO, the worklist, and the predecessor lists. *)
@@ -422,7 +423,7 @@ end
 
 (* Re-exports for the mli's fixture seam. *)
 type refine_ctx = Cbat_runctx.refine_ctx
-let mk_rctx ~cfg ~abi = Cbat_runctx.mk_rctx ~cfg ~abi
+let mk_rctx ~cfg ~abi s = Cbat_runctx.mk_rctx ~cfg ~abi s
 
 (* Re-exports of the sibling transfer/forward/backward modules. *)
 let set_addr_bits = Cbat_transfer.set_addr_bits

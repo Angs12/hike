@@ -139,12 +139,17 @@ let summaries_of ~(abi : Hike_abi.t) (prog : program term) :
    no environments, no rewrite — readers take the top identity. *)
 let fixpoint (target : Theory.Target.t)
     ~(prog : program term)
+    ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
     (sub : sub term) :
     ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term) option =
   self_arm target;
   let abi = Hike_abi.of_target target in
   let written = summaries_of ~abi prog in
+  let sub_lookup =
+    Hike_resolve.symtab_lookup ~symtab
+      ~name_tid:(Hike_resolve.name_tid_of prog)
+  in
 #ifdef VSA_DEBUG
   let dump_r8 (sol : Vsa.vsa_sol) (sub : sub term) =
     let rep = Base.List.nth_exn abi.Hike_abi.int_param_regs 4 in
@@ -164,7 +169,7 @@ let fixpoint (target : Theory.Target.t)
     let prog' = Program.create ~subs:[ sub ] () in
     let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
     let sol =
-      Vsa.static_graph_vsa ~abi ~written ~resolved prog' sub seed
+      Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup prog' sub seed
     in
 #ifdef VSA_DEBUG
     dump_r8 sol sub;

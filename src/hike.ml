@@ -214,7 +214,8 @@ let pass_vsa proj =
         Option.value
           (Base.Option.map
              (Hike_vsa.fixpoint target
-                ~prog:(Project.program proj) ~images sub)
+                ~prog:(Project.program proj)
+                ~symtab:(Some (Project.symbols proj)) ~images sub)
              ~f:(fun (envs, sub') ->
                Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub')))
           ~default:acc)

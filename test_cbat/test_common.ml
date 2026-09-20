@@ -130,7 +130,7 @@ let produce ?(block_addrs = []) ?(images = [])
   Hike.Kb.install_block_addrs
     (Core.Map.of_alist_exn (module Addr)
        (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))));
-  Hv.fixpoint target ~prog ~images sub
+  Hv.fixpoint target ~prog ~symtab:None ~images sub
   |> Base.Option.value ~default:(Tid.Map.empty, sub)
 
 (* The T2 chain replica over fixtures: the composed production entries
@@ -176,7 +176,7 @@ let install_fixture_envs (subs : sub term list) : bool =
         match
           Hv.fixpoint Theory.Target.unknown
             ~prog:(Program.create ~subs:[ sub ] ())
-            ~images:[] sub
+            ~symtab:None ~images:[] sub
         with
         | None -> (m, false)
         | Some (envs, _) ->

@@ -362,4 +362,28 @@ let run () =
     (Ws.equal (reads m_trap 0x2000 trap_frame) (Ws.singleton (w64 42))
     && Ws.equal (reads m_trap 0x3000 trap_frame) (Ws.singleton (w64 7))
     && Ws.is_top (reads m_trap 0x500 trap_frame));
+  (* CE8-CE10: an indirect site's summary derivation — the target exp's
+     denotation resolves through the run's sub lookup. *)
+  let tgt = v64 "ce_tgt" in
+  let sub_tid = Tid.create () in
+  let g = Base.List.nth_exn abi.Hike_abi.caller_saved_gprs 0 in
+  let gs = Core.Set.singleton (module Var) g in
+  let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
+  let summary_of t =
+    if Tid.equal t sub_tid then Some gs else None in
+  let bounded = AI.add_word AI.top ~key:tgt ~data:(Ws.singleton (w64 0x5000)) in
+  check "CE8: a singleton target naming a lifted sub reads its summary"
+    (match Ce.indirect_summary ~lookup ~summary_of ~env:bounded (Bil.Var tgt) with
+     | Some ws -> Var.Set.equal ws gs
+     | None -> false);
+  let spread = AI.add_word AI.top ~key:tgt
+      ~data:(Ws.of_list ~width:64 [ w64 1; w64 2 ]) in
+  check "CE9: an unbounded target resolves to nothing"
+    (match Ce.indirect_summary ~lookup ~summary_of ~env:spread (Bil.Var tgt) with
+     | None -> true | Some _ -> false);
+  let foreign = AI.add_word AI.top ~key:tgt
+      ~data:(Ws.singleton (w64 0x9000)) in
+  check "CE10: a foreign singleton resolves to nothing"
+    (match Ce.indirect_summary ~lookup ~summary_of ~env:foreign (Bil.Var tgt) with
+     | None -> true | Some _ -> false);
   ())

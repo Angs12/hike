@@ -20,6 +20,15 @@ type site = {
   pushed : bool;
 }
 
+(* An indirect target's summary: the target exp's denotation in the
+   pre-call env — a singleton word naming a lifted sub through [lookup]
+   reads that sub's own kill summary through [summary_of]; anything
+   unresolved reads [None]. *)
+val indirect_summary :
+  lookup:(int64 -> Tid.t option) ->
+  summary_of:(Tid.t -> Var.Set.t option) ->
+  env:AI.t -> exp -> Var.Set.t option
+
 (* The caller's post-call state: the preserved caller-saved GPRs kept,
    the rest topped; the frame kept at/above the highest possible
    call-time RSP outside the escapes — every call alike, trap or ABI —

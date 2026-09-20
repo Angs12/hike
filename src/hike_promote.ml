@@ -575,15 +575,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                 (Vsa.WordSet.t, Type.error) Result.t)
     ~(ctx : Sections.ctx)
     (prog : program term) : program term =
-  let sanitize (name : string) =
-    Base.String.filter name ~f:(fun c ->
-        match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)
-  in
-  let name_tid =
-    Term.enum sub_t prog
-    |> Seq.fold ~init:[] ~f:(fun acc s ->
-           (sanitize (Tid.name (Term.tid s)), Term.tid s) :: acc)
-  in
+  let name_tid = Hike_resolve.name_tid_of prog in
   let callee_exempt = Hike_stack_model.fixed_signature in
   let exempt =
     Term.enum sub_t prog
