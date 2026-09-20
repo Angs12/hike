@@ -1,35 +1,25 @@
-(* The jump compiler (construction): a BIR→BIR term transformation
-   that REDESIGNS jcc flag idioms into the SIMPLEST equivalent value
-   comparisons (never a relocation of the flag decoding).  The flag
-   semantics lives HERE ONCE — the flag-effects table below.  Identity
-   on the residual: a cond with no single reaching flag def, an
-   unknown shape, or an inconsistent fact set keeps the current path
-   unchanged (no gates, no fallbacks, no partial rewrites).  The pass
-   runs FIRST in the analysis chain (after hike-filter, before
-   hike-vsa), so every downstream consumer reads value comparisons
-   where the rewrite fired. *)
+(* The jump compiler: rewrites jcc flag idioms into the simplest equivalent
+   value comparisons.  Identity on the residual — a cond with no single
+   reaching flag def, an unknown shape, or an inconsistent fact set keeps
+   the current path unchanged. *)
 
 open Bap.Std
 open Bap_core_theory
 open Core
 
-(* The flag-effects table: the flag defs as the lifter emits them.
+(* The flag defs as the lifter emits them, and the facts they yield:
    ZF := 0 = d               ZF ⇔ d = 0      (also ZF := 1 / := 0)
    CF := a < b               CF ⇔ a <u b     (sub/cmp borrow)
    SF := high:1[e]           SF ⇔ sign bit of e
    OF := high:1[(x^y)&(x^d)] OF ⇔ signed overflow of x−y, d = x−y
-   OF := 0                  the test/and group: OF ≡ 0, so the
-                            signed families run on SF alone
-   Anything else (add/imul/shift carries, PF/AF forms, unknown[bits])
-   is NOT consumed — conds over those shapes stay residual. *)
+   OF := 0                   the test/and group: OF ≡ 0, so the
+                             signed families run on SF alone
+   Anything else (add/imul/shift carries, PF/AF forms) is NOT consumed. *)
 
-(* Cond boolean structure over flag vars (BIR conds are pure AND/OR/NOT
-   over 1-bit vars; anything else fails to parse and stays residual). *)
+(* BIR conds are pure AND/OR/NOT over 1-bit vars. *)
 type bexp = V of var | N of bexp | A of bexp * bexp | O of bexp * bexp
 
-(* The flags the compiler consumes, identified by the target's register
-   roles (never a register name).  A flag the target does not register
-   has no var — conds over it stay residual. *)
+(* Flags identified by the target's register roles, never a name. *)
 type flag = ZF | CF | SF | OF
 
 type flag_vars = {
@@ -77,8 +67,6 @@ let is_xor_core (fv : flag_vars) (b : bexp) : bool =
       && is_flag fv SF sf2 && is_flag fv OF of2
   | _ -> false
 
-(* Per-block flag facts. *)
-
 type zf_fact = Zero of exp | Zconst of bool
 
 type cf_fact = Ult of exp * exp | Cconst of bool
@@ -93,8 +81,8 @@ type facts = {
 
 let empty_facts = { zf = None; cf = None; sf = None; ovf = None; and_form = false }
 
-(* Width of an exp: the width of its free vars (operands are
-   width-uniform in BIR); a bare immediate is its own width. *)
+(* Width of an exp: the width of its free vars (BIR is width-uniform); a
+   bare immediate is its own width. *)
 let width_of_exp (e : exp) : int option =
   match e with
   | Bil.Int w -> Some (Word.bitwidth w)
@@ -112,10 +100,8 @@ let is_zero_int = function Bil.Int w -> Word.is_zero w | _ -> false
 
 let is_one_int = function Bil.Int w -> Word.is_one w | _ -> false
 
-(* Fact extraction from one flag def rhs (the table above).  Called
-   once per flag — on its single reaching def (the block's last def of
-   the flag var); [None] when the shape is unknown (the flag gets no
-   fact and conds over it stay residual). *)
+(* Fact extraction from one flag def rhs (the table above); [None] when the
+   shape is unknown. *)
 let extract_facts (fl : flag) (rhs : exp) (f : facts) : facts option =
   match (fl, rhs) with
   | ZF, Bil.BinOp (Bil.EQ, a, b) when is_zero_int a -> (
@@ -139,19 +125,18 @@ let extract_facts (fl : flag) (rhs : exp) (f : facts) : facts option =
         , Bil.BinOp (Bil.AND, Bil.BinOp (Bil.XOR, x, y), Bil.BinOp (Bil.XOR, x2, d)) ) )
     when Exp.equal x x2 -> (
       match f.ovf with None -> Some { f with ovf = Some (x, y, d) } | _ -> None)
-  (* test/and: OF is identically 0 — the group's signed identity is SF
-     alone. *)
+  (* test/and: OF is identically 0 — the group's signed identity is SF alone. *)
   | OF, e when is_zero_int e ->
     if f.and_form then None else Some { f with and_form = true }
   | _ -> None
 
-(* Block context: single-def value rhs (for CONSISTENCY CHECKS only —
-   the emitted comparison REUSES the var, never re-substitutes). *)
+(* Block context: single-def value rhs, for CONSISTENCY CHECKS only — the
+   emitted comparison reuses the var, never re-substitutes. *)
 
 type ctx = { rhs : exp Var.Map.t; xrhs : exp Var.Map.t }
 
-(* [rhs] keys the block's own single defs; [xrhs] keys (by base var)
-   the unique reaching defs from predecessor blocks. *)
+(* [rhs] keys the block's own single defs; [xrhs] keys (by base var) the
+   unique reaching defs from predecessor blocks. *)
 let resolve_exp (c : ctx) (e : exp) : exp =
   match e with
   | Bil.Var v -> (
@@ -163,25 +148,21 @@ let resolve_exp (c : ctx) (e : exp) : exp =
 let same_exp (c : ctx) (a : exp) (b : exp) : bool =
   Exp.equal (resolve_exp c a) (resolve_exp c b)
 
-(* The overflow pattern is only the sub-overflow predicate when its
-   diff exp IS (x − y) — resolved. *)
+(* The overflow pattern is only the sub-overflow predicate when its diff exp
+   IS (x − y), resolved. *)
 let is_minus_xy (c : ctx) (e : exp) (x : exp) (y : exp) : bool =
   match resolve_exp c e with
   | Bil.BinOp (Bil.MINUS, a, b) -> Exp.equal a x && Exp.equal b y
   | _ -> false
 
-(* The rewrite. *)
-
 let const_cond (b : bool) : exp = Bil.Int (if b then Word.one 1 else Word.zero 1)
 
-(* The cond algebra: the parsed bexp compiles by SUBSTITUTION over the
-   flag facts — each leaf becomes an atom, NOT is the complement, and
-   AND/OR combine two relations when both range over the same two
-   values.  Everything else stays residual (the identity). *)
+(* The cond algebra: each parsed leaf becomes an atom over the flag facts,
+   NOT is the complement, and AND/OR combine two relations when both range
+   over the same two values. *)
 
-(* The relation lattice: a relation admits a subset of the orderings
-   less/equal/greater over its operand pair; the complement and the
-   connectives are componentwise. *)
+(* The relation lattice: a relation admits a subset of the orderings over its
+   operand pair; the complement and the connectives are componentwise. *)
 type rel = LT | LE | EQ | NEQ | GT | GE
 
 let rel_bits = function
@@ -198,11 +179,10 @@ let rel_of_bits = function
   | false, false, true -> Some GT | false, true, true -> Some GE
   | true, true, true | false, false, false -> None
 
-(* An atom: a constant truth, or one relation over two values (the
-   flag picks signed vs unsigned).  The pair is the two values the
-   relation ranges over — the connectives' agreement key.  An emitted
-   equality keeps the ZF var form (d = 0); its pair looks through the
-   resolved subtraction (d = x − y makes the pair (x, y)). *)
+(* An atom: a constant truth, or one relation over two values (the bool picks
+   signed vs unsigned).  The pair is the two values the relation ranges over —
+   the connectives' agreement key; an emitted equality's pair looks through
+   the resolved subtraction (d = x − y makes the pair (x, y)). *)
 type atom = Const of bool | Rel of rel * bool * exp * exp
 
 type item = { atom : atom; pair : (exp * exp) option; flags : flag list }
@@ -214,8 +194,8 @@ let complement_item (i : item) : item =
        | Const b -> Const (not b)
        | Rel (r, s, a, b) -> Rel (rel_complement r, s, a, b)) }
 
-(* The emitted comparison: GT/GE render operand-swapped (never a
-   NOT); signedness picks the operator. *)
+(* GT/GE render operand-swapped (never a NOT); signedness picks the
+   operator. *)
 let render_atom = function
   | Const b -> const_cond b
   | Rel (r, s, a, b) ->
@@ -228,11 +208,9 @@ let render_atom = function
       let x, y = match r with GT | GE -> (b, a) | _ -> (a, b) in
       Bil.BinOp (op, x, y)
 
-(* The atoms over the facts.  ZF ⇔ (d = 0): a subtraction compares its
-   operands (a−a is constant, the constant stays right), any other d
-   is compared to zero at d's own width — d is reused, never
-   re-substituted.  CF ⇔ (a <u b) / constant.  SF under OF ≡ 0 is the
-   sign alone, e <s 0. *)
+(* The atoms over the facts: a ZF subtraction compares its operands (d is
+   reused, never re-substituted), any other d is compared to zero at d's own
+   width; SF under OF ≡ 0 is the sign alone, e <s 0. *)
 let zf_item (c : ctx) (d : exp) : item option =
   let pair =
     match resolve_exp c d with
@@ -252,7 +230,6 @@ let sign_item (e : exp) (flags : flag list) : item option =
   Option.map (zero_exp e) ~f:(fun z ->
       { atom = Rel (LT, true, e, z); pair = Some (e, z); flags })
 
-(* The atom a cond leaf reads over the facts. *)
 let flag_item (fv : flag_vars) (c : ctx) (facts : facts) (v : var) : item option =
   if is_flag fv ZF v then
     match facts.zf with
@@ -269,9 +246,8 @@ let flag_item (fv : flag_vars) (c : ctx) (facts : facts) (v : var) : item option
     Option.bind facts.sf ~f:(fun e -> sign_item e [ SF ])
   else None
 
-(* The xor-core atom: x <s y when the overflow's diff resolves to
-   (x − y) and the sign exp to the same diff; with OF ≡ 0 (the
-   test/and group) the core is the sign alone. *)
+(* The xor-core atom: x <s y when the overflow's diff resolves to (x − y) and
+   the sign exp to the same diff; with OF ≡ 0 the core is the sign alone. *)
 let signed_item (c : ctx) (facts : facts) : item option =
   match (facts.sf, facts.ovf) with
   | Some e, Some (x, y, d) when is_minus_xy c d x y && same_exp c e d ->
@@ -279,11 +255,9 @@ let signed_item (c : ctx) (facts : facts) : item option =
   | Some e, None when facts.and_form -> sign_item e [ SF; OF ]
   | _ -> None
 
-(* AND/OR over two compiled atoms: constants fold; relations combine
-   on the lattice iff both range over the same two values (the pairs
-   agree under the block's single-def resolution); an equality side
-   carries no signed flavor — the ordering side's operands and
-   signedness emit. *)
+(* AND/OR over two compiled atoms: constants fold; relations combine on the
+   lattice iff both range over the same two values; an equality side carries
+   no signed flavor — the ordering side's operands and signedness emit. *)
 let combine (c : ctx) ~or_ (u : item) (v : item) : item option =
   let flags = List.append u.flags v.flags in
   let eq r = match r with EQ | NEQ -> true | _ -> false in
@@ -314,7 +288,6 @@ let combine (c : ctx) ~or_ (u : item) (v : item) : item option =
     | _ -> None in
   Option.map ~f:(fun (atom, pair) -> { atom; pair; flags }) joined
 
-(* The cond's value: the bexp evaluated over the atoms. *)
 let rec eval_bexp (fv : flag_vars) (c : ctx) (facts : facts) (b : bexp) :
     item option =
   match b with
@@ -329,20 +302,15 @@ and join (fv : flag_vars) (c : ctx) (facts : facts) ~or_ (x : bexp) (y : bexp) :
   Option.bind (eval_bexp fv c facts x) ~f:(fun x' ->
       Option.bind (eval_bexp fv c facts y) ~f:(combine c ~or_ x'))
 
-(* ------------------------------------------------------------------ *)
-(* Cross-block reaching definitions                                    *)
-(* ------------------------------------------------------------------ *)
-
 type binfo = {
   idefs : (int * def term) list; (* defs in block order *)
   last_pos : int Var.Map.t; (* last def position per var *)
   defined : Var.Set.t; (* vars with a def or phi site here (entry kills) *)
 }
 
-(* Reaching state: the unique def site per BASE var, plus the vars
-   whose entry value has no unique site (several reaching defs, or a
-   phi).  A var absent from both reaches from no site — a live-in
-   parameter, whose value is stable. *)
+(* Reaching state: the unique def site per BASE var, plus the vars whose
+   entry value has no unique site (several reaching defs, or a phi).  A var
+   absent from both is a live-in parameter, whose value is stable. *)
 type rstate = { ru : def term Var.Map.t; rm : Var.Set.t }
 
 let rstate_equal (a : rstate) (b : rstate) : bool =
@@ -385,8 +353,8 @@ let rtrans (bin : rstate) (bi : binfo) : rstate =
          ~f:(fun acc (k, d) -> Core.Map.set acc ~key:k ~data:d) in
   let rm =
     Core.Set.filter bin.rm ~f:(fun v -> not (Core.Set.mem bi.defined v)) in
-  (* A phi defines its lhs at the entry with no def site — the var's
-     entry value stays site-less (multi). *)
+  (* A phi defines its lhs at the entry with no def site — the var's entry
+     value stays site-less (multi). *)
   let rm =
     Core.Set.fold bi.defined ~init:rm ~f:(fun s v ->
         if List.exists (Core.Map.to_alist gen) ~f:(fun (v', _) -> Var.equal v' v)
@@ -410,8 +378,8 @@ type xenv = {
   site : (Tid.t * int) Tid.Map.t; (* def tid -> (block tid, position) *)
 }
 
-(* The reaching-defs fixpoint over the CFG (union dataflow; the unique
-   site per var when every path agrees, ambiguity otherwise). *)
+(* The reaching-defs fixpoint: the unique site per var when every path
+   agrees, ambiguity otherwise. *)
 let reaching_defs (blocks : blk term list) : xenv =
   let all_tids = List.map blocks ~f:(fun b -> Term.tid b) in
   let bins =
@@ -483,9 +451,9 @@ let reaching_defs (blocks : blk term list) : xenv =
     bins;
     site }
 
-(* The def of [v] the flag producer at [pos] in block [p] read: the
-   last def of [v] in [p] before [pos], else [v]'s unique reaching
-   def at [p]'s entry. *)
+(* The def of [v] the flag producer at [pos] in block [p] read: the last def
+   of [v] in [p] before [pos], else [v]'s unique reaching def at [p]'s
+   entry. *)
 let read_def (xenv : xenv) (p : Tid.t) (pos : int) (v : var) : def term option =
   Option.bind (Core.Map.find xenv.bins p) ~f:(fun bi ->
       let vb = Var.base v in
@@ -499,11 +467,10 @@ let read_def (xenv : xenv) (p : Tid.t) (pos : int) (v : var) : def term option =
           Option.bind (Core.Map.find xenv.in_state p) ~f:(fun st ->
               Core.Map.find st.ru vb))
 
-(* The inline guard: every var the emitted comparison reads must hold,
-   at the jump, the value its flag producer read.  A var with a site in
-   the branching block is readable only when every producer is local
-   (the position guard); a var reaching from elsewhere is readable only
-   when each cross-block producer read the same unique reaching def. *)
+(* The inline guard: every var the emitted comparison reads must hold, at the
+   jump, the value its flag producer read — a var defined in the branching
+   block only when every producer is local, a cross-block var only through
+   one unique reaching def. *)
 let cross_guard (xenv : xenv) (b : blk term) (bi : binfo) (in_st : rstate)
     (producers : (Tid.t * int) list) (e : exp) : bool =
   let b_tid = Term.tid b in
@@ -532,24 +499,9 @@ let cross_guard (xenv : xenv) (b : blk term) (bi : binfo) (in_st : rstate)
                 | None -> false)
         | None -> not (Core.Set.mem in_st.rm vb))
 
-(* Block analysis and the sub driver. *)
-
 let all_flags = [ ZF; CF; SF; OF ]
 
-(* True when the exp reads memory.  A comparison over a mem operand
-   must live in a DEF, never inline in a jmp cond: the def is what the
-   VSA tags (the access's frame-residency proof rides the def, exactly
-   as it rode the flag defs), and the tag is what licenses the
-   emitter's frame addressing. *)
-let reads_mem (e : exp) : bool =
-  let vis =
-    object
-      inherit [ bool ] Exp.visitor
-      method! visit_load ~mem:_ ~addr _ _ acc = acc || true
-      method! visit_store ~mem:_ ~addr ~exp:_ _ _ acc = acc || true
-    end
-  in
-  vis#visit_exp e false
+let reads_mem (e : exp) : bool = Hike_stack_model.reads_mem e
 
 type block_plan = {
   changed : bool;
@@ -557,13 +509,9 @@ type block_plan = {
   consumed_vars : Var.Set.t;
 }
 
-(* One block: compile every jmp whose cond evaluates over the atoms.
-   Each flag resolves to its single reaching def — the block's last
-   def, or the unique reaching def at the block entry (the cross-block
-   case).  A flag with no def in the block and no unique reaching def,
-   or an ambiguous candidate, has no fact (conds over it stay
-   residual).  Unchanged jmps (and whole unchanged blocks) keep the
-   current path — the identity, never a partial rewrite. *)
+(* One block: each flag resolves to its single reaching def — the block's
+   last def or the unique reaching def at the block entry; an ambiguous
+   candidate has no fact.  Unchanged jmps keep the current path. *)
 let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
     block_plan * (jmp term * exp option * item option) list =
   let bt = Term.tid blk in
@@ -581,10 +529,8 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
         if List.exists all_flags ~f:(fun fl -> is_flag fv fl lhs) then
           Core.Map.set acc ~key:lhs ~data:(i, Def.rhs d)
         else acc) in
-  (* Block ctx: single-def value rhs (own defs, plus the unique
-     reaching defs of vars with no site here — the cross-block temp
-     chains the consistency checks resolve) + last def position per
-     var. *)
+  (* Block ctx: single-def value rhs — own defs, plus the unique reaching
+     defs of vars with no site here — + last def position per var. *)
   let ctx =
     let counts =
       List.fold_left bi.idefs ~init:Var.Map.empty
@@ -607,9 +553,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
              if Core.Set.mem bi.defined key then acc
              else Core.Map.set acc ~key ~data:(Def.rhs data)) in
     { rhs; xrhs } in
-  (* One candidate per flag: the within-block def when the block has
-     one, else the unique reaching def.  Two distinct candidates are
-     ambiguous — the flag gets no fact. *)
+  (* Two distinct candidates for one flag are ambiguous — no fact. *)
   let flag_def (fl : flag) : (var * (Tid.t * int) * exp) option =
     let within =
       Core.Map.to_alist flag_map
@@ -664,7 +608,6 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
   in
   ({ changed; consumed_vars }, compiled)
 
-(* Sub-wide free-var uses (defs' rhs + jmps + phis). *)
 let uses_of (s : sub term) : Var.Set.t =
   Term.enum blk_t s
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
@@ -680,14 +623,10 @@ let uses_of (s : sub term) : Var.Set.t =
       Term.enum phi_t blk
       |> Seq.fold ~init:acc ~f:(fun acc p -> Core.Set.union acc (Phi.free_vars p)))
 
-(* The jump compiler over one sub: compiles every eligible cond (flag
-   defs resolve through cross-block reaching definitions), then drops
-   every def of a consumed flag var whose only use was the rewritten
-   jump (the var is unused sub-wide, so all its defs are dead).  A
-   compiled cond reading memory binds the comparison to a fresh 1-bit
-   def (the VSA tags the def — the access proof the emitter's frame
-   addressing consumes) and the cond reads the def.  Everything else is
-   the identity. *)
+(* Compiles every eligible cond, then drops every def of a consumed flag var
+   whose only use was the rewritten jump.  A compiled cond reading memory
+   binds the comparison to a fresh 1-bit def — the VSA tags the def, and the
+   tag is what licenses the emitter's frame addressing. *)
 let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
   let fv = flag_vars target in
   let xenv = reaching_defs (Term.enum blk_t sub |> Seq.to_list) in

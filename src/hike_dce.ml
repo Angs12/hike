@@ -1,5 +1,4 @@
 (* Sweeps dead defs; region mems survive iff loaded. *)
-
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
@@ -9,12 +8,11 @@ let is_call_reg ~(abi : Abi.t) (v : var) : bool =
   let regs = Abi.param_regs abi @ abi.Abi.return_regs in
   Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
 
-(* One-pass sweep census: the def index, the lhs reader map, and the
-   contributor counts behind [used]/[roots]. Jmp/phi mentions are
-   permanent (only defs are ever removed). [cnt]/[rcnt] count SURVIVING
-   defs mentioning each var, so a var leaves its set exactly when its
-   count hits zero outside [perm] — the cascade below then re-checks
-   precisely the defs whose [keep] verdict could have flipped. *)
+(* The sweep census: contributor counts behind [used]/[roots].  Jmp/phi
+   mentions are permanent (only defs are ever removed); [cnt]/[rcnt] count
+   SURVIVING defs mentioning each var, so a var leaves its set exactly when
+   its count hits zero outside [perm] and the cascade re-checks precisely the
+   defs whose [keep] verdict could have flipped. *)
 type sweep_census = {
   defs : def term Tid.Map.t;
   (* Defs whose lhs is the key var (re-check set when the var leaves). *)
@@ -28,16 +26,8 @@ type sweep_census = {
   perm : Var.Set.t;
 }
 
-(* Free vars of every Load mem in one rhs. *)
 let load_mem_vars (rhs : exp) : Var.Set.t =
-  let v =
-    object
-      inherit [Var.Set.t] Exp.visitor
-      method! visit_load ~mem ~addr:_ _ _ acc =
-        Core.Set.union acc (Exp.free_vars mem)
-    end
-  in
-  v#visit_exp rhs Var.Set.empty
+  Hike_stack_model.load_mem_vars rhs
 
 let sweep_census_of (sub : sub term) : sweep_census =
   let bump m v =
@@ -92,22 +82,20 @@ let sweep_census_of (sub : sub term) : sweep_census =
   in
   Term.enum blk_t sub |> Seq.fold ~init ~f:census_blk
 
-(* Tests for intrinsic interface vars. *)
 let is_intrinsic_var (v : var) : bool =
-  Bil2llvm_env.is_intrinsic_name (Var.name (Var.base v))
+  Hike_stack_model.is_intrinsic_name (Var.name (Var.base v))
 
-(* Region and section-component mems survive iff loaded; the promotion's
-   call-arg defs survive (they ARE the call's arguments — the emission
-   consumes them at the call); [mem] always survives. SP needs no
-   special case: the SP local binds to the sub's SP Slot, so SP-derived
-   address defs stay live by the plain used rule. *)
+(* Region and section-component mems survive iff loaded; call-arg defs
+   survive (they ARE the call's arguments — the emission consumes them at
+   the call); [mem] always survives.  SP needs no special case: the SP local
+   binds to the sub's SP Slot, so SP-derived address defs stay live by the
+   plain used rule. *)
 let keep ?(load_roots=Var.Set.empty)
     ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
   let lhs = Def.lhs d in
   if Hike_stack_model.is_window_mem lhs then
     (* The incoming window's stores are the call's outgoing arguments —
-       their reader is the callee (through the window parameter), never
-       a def of this sub. *)
+       their reader is the callee, never a def of this sub. *)
     true
   else if Hike_stack_model.is_region_mem lhs
   || Hike_stack_model.is_sec_comp_mem lhs then
@@ -118,13 +106,9 @@ let keep ?(load_roots=Var.Set.empty)
     || Hike_stack_model.is_call_arg lhs
     || is_call_reg ~abi lhs || is_intrinsic_var lhs
 
-(* Incremental sweep: one census walk, then a removal cascade. [used] and
-   [load_roots] start exact (permanent mentions, every counted var, and
-   the escape roots) and stay exact (a var leaves only when its last
-   contributor is removed), so each [keep] verdict equals the round
-   version's verdict at convergence — and each def is decided at most a
-   handful of times instead of once per round. Blocks that lose nothing
-   keep their physical block (no rebuild). *)
+(* Incremental sweep: [used] and [load_roots] start exact and stay exact (a
+   var leaves only when its last contributor is removed), so each [keep]
+   verdict is final. *)
 let sweep_worklist ~(abi : Abi.t) ~(roots : Var.Set.t) (sub : sub term) :
     sub term =
   let census = sweep_census_of sub in
@@ -202,10 +186,8 @@ let sweep_worklist ~(abi : Abi.t) ~(roots : Var.Set.t) (sub : sub term) :
               not (Core.Set.mem !removed (Term.tid d)))
         else blk)
 
-(* Frees the target-producing def of an unproven noreturn call (a
-   degraded run's epilogue, a cast target): the completion's rewrite
-   owns the proven epilogues, and this shape test catches the residual
-   — the return lane renders every return-less call anyway. *)
+(* A return-less call never consumes its target; rendering it Unknown frees
+   the def that produced it. *)
 let ret_replacement ~(word_bits : int) (j : jmp term) : jmp term =
   match Jmp.kind j with
   | Call c -> (
@@ -218,9 +200,8 @@ let ret_replacement ~(word_bits : int) (j : jmp term) : jmp term =
       | _ -> j)
   | _ -> j
 
-(* Rewrites the residual returns, then sweeps. [roots] names the
-   storage mem vars whose bytes escape this sub (their stores' reader
-   lives in another world). Intrinsics pass through. *)
+(* [roots] names the storage mem vars whose bytes escape this sub — their
+   stores' reader lives outside it.  Intrinsics pass through. *)
 let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else

@@ -8,14 +8,12 @@ open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_mem
 
-(* Maps soft-float calls to native FP ops. *)
 type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
                | FCONVERT of int | FORDER | FHLT | ISNAN
 
 let fp_intrinsic_name = strip_at
 
-(* The mapped intrinsic names and their ops, one row per name (the
-   width-suffixed forms, then the unsuffixed ones). *)
+(* One row per mapped intrinsic name. *)
 let native_fp_table : (string * native_fp) list =
   [ ("intrinsic:fmul_rne_ieee754_binary_64", FMUL);
     ("intrinsic:fmul_rne_ieee754_binary_32", FMUL);
@@ -29,12 +27,10 @@ let native_fp_table : (string * native_fp) list =
     ("intrinsic:frem_rne_ieee754_binary_32", FREM);
     ("intrinsic:forder_rne_ieee754_binary_64", FORDER);
     ("intrinsic:forder_rne_ieee754_binary_32", FORDER);
-    (* NaN predicate via fcmp uno. *)
     ("intrinsic:is_nan_rne_ieee754_binary_64", ISNAN);
     ("intrinsic:is_nan_rne_ieee754_binary_32", ISNAN);
     ("intrinsic:is_nan_ieee754_binary", ISNAN);
     ("intrinsic:is_nan_rne_ieee754_binary", ISNAN);
-    (* Unsuffixed compare names. *)
     ("intrinsic:forder_ieee754_binary", FORDER);
     ("intrinsic:forder_rne_ieee754_binary", FORDER);
     ("intrinsic:cast_sfloat_rne_ieee754_binary_64", SFLOAT);
@@ -43,27 +39,20 @@ let native_fp_table : (string * native_fp) list =
     (* Exact width conversions: the suffix is the result width. *)
     ("intrinsic:fconvert_rne_ieee754_binary_64", FCONVERT 64);
     ("intrinsic:fconvert_rne_ieee754_binary_32", FCONVERT 32);
-    (* Unsuffixed arithmetic names. *)
     ("intrinsic:fmul_rne_ieee754_binary", FMUL);
     ("intrinsic:fadd_rne_ieee754_binary", FADD);
     ("intrinsic:fsub_rne_ieee754_binary", FSUB);
     ("intrinsic:fdiv_rne_ieee754_binary", FDIV);
     ("intrinsic:frem_rne_ieee754_binary", FREM);
-    (* Halt uses the trap model. *)
     ("intrinsic:hlt", FHLT) ]
 
 let native_fp_op (name : string) : native_fp option =
   Base.List.Assoc.find native_fp_table (fp_intrinsic_name name)
     ~equal:String.equal
 
-(* The STATIC model interface of each mapped op: the input temps the call
-   block must define, in order.  The name IS the interface fact — operand
-   resolution reads these temps directly, never a signature-table fallback
-   and never a register lane. *)
-(* The mapped intrinsic's interface, declared: the convention temps
-   the block defines (args) and the result temps the consumer reads
-   (rets).  Widths derive from the op — FCONVERT w reads x0 at the
-   complementary width and yields y0 at w. *)
+(* The static model interface of each mapped op: the input temps the
+   call block defines (fp_args) and the result temps consumers read
+   (fp_rets); FCONVERT w reads x0 at the complementary width. *)
 type fp_sig = { fp_args : Var.t list; fp_rets : Var.t list }
 
 let fp_sig_of (op : native_fp) : fp_sig =
@@ -80,7 +69,6 @@ let fp_sig_of (op : native_fp) : fp_sig =
       fp_rets = [ y0 res_w ] }
   | FHLT -> { fp_args = []; fp_rets = [] }
 
-(* Returns width-derived FP/int types. *)
 let fp_ty_of (llvm_ctx : Llvm.llcontext) (w : int) :
     Llvm.lltype * Llvm.lltype =
   ( (if w <= 32 then Llvm.float_type llvm_ctx
@@ -99,10 +87,9 @@ let bitcast_to_fp llvm_builder v fp_ty =
     Llvm.build_bitcast v fp_ty "" llvm_builder
   else v
 
-(* Builds a width-aware FP binop. *)
 let build_fp_binop llvm_builder op a b ~(w : int) =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   let fp_ty, ret_ty = fp_ty_of llvm_ctx w in
   let da = bitcast_to_fp llvm_builder a fp_ty in
   let db = bitcast_to_fp llvm_builder b fp_ty in
@@ -124,7 +111,6 @@ let temp_defs_of_blk (blk : blk term) : def term Var.Map.t =
   |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
          Core.Map.set m ~key:(Var.base (Def.lhs d)) ~data:d)
 
-(* Derives intrinsic widths from types. *)
 let fp_intrinsic_sizes ~(word_bits : int) (args : Arg.t list)
     (rets : Arg.t list) : int * int =
   let arg_w (i : int) : int =
@@ -140,7 +126,6 @@ let fp_intrinsic_sizes ~(word_bits : int) (args : Arg.t list)
   in
   (arg_w 0, res_w)
 
-(* Emits native FP ops inline. *)
 let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
   let open KB in
   match op with
@@ -149,25 +134,20 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
       create_interrupt llvm_builder
   | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FCONVERT _ | FORDER
    | ISNAN ->
-      let* llvm_ctx = Context.get llvm_ctx_var in
+      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       let* ctx = Context.get emit_ctx_var in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
-  (* Widths come from declared types. *)
   let rets = get_rets ctx target in
   let word_bits = 8 * ctx.abi.Abi.word in
   let in_w, res_w = fp_intrinsic_sizes ~word_bits args rets in
-  (* Operand defs indexed once per call. *)
   let temp_defs = temp_defs_of_blk blk in
   let sig_ = fp_sig_of op in
   let arg_value (i : int) : Llvm.llvalue KB.t =
-    (* Resolves operands from the declared input temps: the [intrinsic:xN]
-       temp the block defined IS the operand — a signature-table miss can
-       never substitute a register lane for it.  The temp routes through
-       the ONE memory dispatch, so a converted operand (its def's load
-       re-pointed at a region/window mem var) materializes in its own
-       world, never the raw model lane. *)
+    (* The [intrinsic:xN] temp the block defined IS the operand; it
+       routes through the memory dispatch, so a converted operand
+       materializes in its own world. *)
     let av = Base.List.nth_exn sig_.fp_args i in
     match Core.Map.find temp_defs av with
     | Some d ->
@@ -175,22 +155,18 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
           (Def.rhs d)
     | None -> create_exp llvm_builder blk_tid (Bil.Var av)
   in
-  (* Integer width of a value, defaulting to the declared input width. *)
   let w_of = int_width_or in_w in
   let result =
     match op with
     | FMUL | FADD | FSUB | FDIV | FREM ->
-        (* Operand width comes from values. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
         build_fp_binop llvm_builder op a b ~w
     | SFLOAT ->
-        (* Int-to-FP casts: [sitofp] converts at the operand's own LLVM
-           type — the lifter's extract/cast chain built it (an
-           [x0 := 31:0[RAX]] read is i32; a [:u64] load is i64). *)
+        (* [sitofp] converts at the operand's own LLVM type (the
+           lifter's extract/cast chain built it). *)
         let* x = arg_value 0 in
-        (* Converts use result width. *)
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
         let* d =
           KB.return
@@ -199,7 +175,6 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
         return
         @@ Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
     | SINT ->
-        (* FP-to-int casts use operand width. *)
         let* x = arg_value 0 in
         let src_w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx src_w in
@@ -214,9 +189,8 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
         in
         return r
     | FCONVERT res_w ->
-        (* Exact width conversions: the name's suffix is the result
-           width and the input is the complementary FP width — fpext
-           widens, fptrunc narrows with round-to-nearest. *)
+        (* The name's suffix is the result width; the input is the
+           complementary FP width (fpext widens, fptrunc narrows). *)
         let* x = arg_value 0 in
         let in_w = if res_w = 64 then 32 else 64 in
         let x =
@@ -236,7 +210,6 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
         return
         @@ Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
     | FORDER ->
-        (* Ordered less-than via fcmp olt. *)
         let* a = arg_value 0 in
         let* b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
@@ -250,7 +223,6 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
         in
         return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | ISNAN ->
-        (* NaN test via fcmp uno. *)
         let* x = arg_value 0 in
         let w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
@@ -263,11 +235,8 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
     | FHLT -> assert false
   in
   let* r = result in
-  (* The declared ret temps bind in BOTH scopes: the call block's exit
-     (the phi-threaded consumers) and the fallthrough block's entry
-     (the direct reads — the YMM assembly defs the BIR places in the
-     return block).  Each ret takes the result at its own declared
-     width. *)
+  (* Ret temps bind in both scopes: the call block (phi consumers)
+     and the fallthrough block (direct reads). *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
       let rw = match Var.typ ret with Type.Imm w -> w | _ -> word_bits in
       let r_lane =

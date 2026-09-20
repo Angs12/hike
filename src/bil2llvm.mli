@@ -11,16 +11,8 @@ type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
 (** Intrinsic classification: does [name] map to a native FP op? *)
 val native_fp_op : string -> native_fp option
 
-(** The sub's LLVM name (tid-name sanitization) — the emitter owns the
-    minting; the VSA's target-name map and the fixtures share the fact. *)
+(** The sub's LLVM name (tid-name sanitization). *)
 val sanitize_name : string -> string
-
-(** The phi-arity view: one count per (predecessor, target) term edge —
-    the completed dispatch's conditional gotos are real BIR edges, and
-    the rewrite's one-goto-per-target rule keeps a multi-word case at
-    one incoming. *)
-val edge_counts_of_sub :
-  sub term -> (Tid.t, (Tid.t, int) Core.Hashtbl.t) Core.Hashtbl.t
 
 (** One owner of a byte range of a section: a component or a gap run.
     [own_id] is the component id ([None] for a gap run). *)
@@ -41,7 +33,7 @@ type section = Bil2llvm_env.section = {
   base : Llvm.llvalue;
   min_addr : word;
   max_addr : word;
-  bytes : int array option;
+  bytes : Bytes.t option;
   owners : sec_owner list;
 }
 
@@ -55,9 +47,9 @@ type section_type = Bil2llvm_env.section_type =
   | RODATA_REL
   | TEXT
 
-(** One input section of the spec: a byte-image section (its span, word
-    count on the word grid, const-ness, image) or the bss span (zeroed
-    storage with its copy-relocated slots). *)
+val section_type_to_string : section_type -> string
+
+(** One input section of the spec: a byte-image section or the bss span. *)
 type sec_input = Bil2llvm_env.sec_input =
   | Sec_bytes of {
       si_type : section_type;
@@ -65,7 +57,7 @@ type sec_input = Bil2llvm_env.sec_input =
       si_hi : int64;
       si_words : int;
       si_const : bool;
-      si_image : int array;
+      si_image : Bytes.t;
     }
   | Sec_bss of {
       si_lo : int64;
@@ -74,11 +66,9 @@ type sec_input = Bil2llvm_env.sec_input =
       si_copy_relocs : (int * string) list;
     }
 
-(** The section spec: the finalized data tree's Global components, the
-    spans served whole (each (id, lo, hi) — the section's own image
-    global is the id's storage), the section word grid, and the input
-    sections in the fixed section-list order ([None] = absent from the
-    binary) — the emitter constructs the sections from it. *)
+(** The section spec: the components, the spans served whole
+    (each (id, lo, hi)), the word grid, and the input sections in the
+    fixed section-list order ([None] = absent from the binary). *)
 type section_spec = Bil2llvm_env.section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
@@ -86,16 +76,14 @@ type section_spec = Bil2llvm_env.section_spec = {
   spec_sections : sec_input option list;
 }
 
-(** Constructs the sections from the spec: the component/gap-run
-    globals, the byte-exact owner tiles, and the residue names — one
-    counter across sections, consumed in the fixed tiling order. *)
+(** Constructs the sections from the spec.  Gap-run names draw from
+    one counter across sections, consumed in the fixed tiling order. *)
 val build_sections :
   Llvm.llcontext -> Llvm.llmodule -> section_spec -> Bil2llvm_env.section list
 
-(** The emission entry: builds the sections from [spec], populates the
-    emitter state, then runs signature collection (sub declarations)
-    and body emission over [prog].  Output is the side effect on
-    [llvm_module]. *)
+(** The emission entry: builds the sections from [spec], then runs
+    signature collection and body emission over [prog].  Output is
+    the side effect on [llvm_module]. *)
 val emit_program :
   Llvm.llcontext ->
   Llvm.llmodule ->
@@ -125,12 +113,3 @@ val create_copy_reloc_bss :
   (int * string) list ->
   word:int ->
   Llvm.llvalue
-
-(** Intrinsic facts shared with the filter pass. *)
-val is_intrinsic : sub term -> bool
-val is_emittable_intrinsic : sub term -> bool
-
-(** The sub's signature is fixed — the promotion does not define it
-    (the emittable intrinsics and @main); the promote rewrite, the
-    signature collection, and the twin rule read this one fact. *)
-val fixed_signature : sub term -> bool

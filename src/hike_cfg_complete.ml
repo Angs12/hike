@@ -1,12 +1,6 @@
-(* The CFG completion: a BIR-to-BIR rewrite driven by the VSA's own
-   denotations.  A CONSUMER of the VSA — the solver passes the seam and
-   the round's solution in, and its loop (Hike_vsa.fixpoint) drives the
-   rounds: solve -> complete -> if the sub changed -> re-solve the NEW
-   sub.  The rewritten BIR is the only product: return epilogues become
-   real [Ret] jmps and resolvable dispatches become guarded-goto series
-   in the existing blocks — no kinds map, no tags; later passes and the
-   emitter read plain BAP shape.  Each rewrite converts an indirect
-   transfer to direct structure, so the rounds terminate. *)
+(* The CFG completion, fused into the solver's own loop: per phase,
+   bounding dispatches grow the extra edges and split their mid-block
+   case entries; at drain the materialization lands once. *)
 
 open Bap.Std
 module Vsa = Cbat_vsa
@@ -17,15 +11,12 @@ module Model = Hike_stack_model
 type denote =
   blk:blk term -> ?def:def term -> exp -> (Vsa.WordSet.t, Type.error) Result.t
 
-(* The round-solution seam: every block's precondition is the
-   solution's own entry state for the block. *)
 let denote_of_sol (sol : Vsa.vsa_sol) : denote =
   fun ~blk ?def e ->
     Vsa.denote_exp_at
       ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk)) ~blk ?def e
 
-(* One-line contract: the def's memory node is a load of at most one
-   word; its address, if so. *)
+(* A load of at most one word; its address, if so. *)
 let load_addr_of (word_bits : int) (d : def term) : exp option =
   match Model.addr_of_rhs (Def.rhs d) with
   | Some (addr, size) when Size.in_bits size <= word_bits ->
@@ -33,18 +24,16 @@ let load_addr_of (word_bits : int) (d : def term) : exp option =
       else None
   | _ -> None
 
-(* One-line contract: the address denotates, in the def's own
-   before-env, to the entry-RSP cell — THE return-address fact. *)
+(* The address denotates, in the def's own before-env, to the
+   entry-RSP cell — the return-address fact. *)
 let reads_retaddr_cell ~(denote : denote) (blk : blk term) (d : def term)
     (addr : exp) : bool =
   match denote ~blk ~def:d addr with
   | Ok ws -> Model.is_return_address ws
   | Error _ -> false
 
-(* The retaddr proof, re-derived through the denotation: the defs
-   whose load address denotates — at the def's own before-env — to
-   the stack-symbolic singleton at the entry-RSP cell (offset 0 on
-   the segment line) read the return address. *)
+(* The defs whose load address denotates, in the def's own before-env,
+   to the stack-symbolic entry-RSP cell. *)
 let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : Tid.Set.t =
   let denote = denote_of_sol sol in
@@ -67,15 +56,16 @@ let option_if_debug msg =
   ignore msg
 #endif
 
-(* The sub's addressed starts: every block's own address stamp,
-   ascending — the block extents' bounds. *)
+(* The run's block-address entries restricted to this sub — the block
+   extents' bounds; cross-sub entries never contain a split. *)
 let addressed_starts (sub : sub term) : (Addr.t * tid) list =
-  Term.enum blk_t sub
-  |> Seq.filter_map ~f:(fun b ->
-         Base.Option.map (Term.get_attr b address)
-           ~f:(fun a -> (a, Term.tid b)))
-  |> Seq.to_list
-  |> Base.List.sort ~compare:(fun (a, _) (b, _) -> Word.compare a b)
+  let sub_tids =
+    Core.Set.of_list (module Tid)
+      (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
+  in
+  Hike_kb.block_addrs ()
+  |> Core.Map.to_alist
+  |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem sub_tids t)
 
 (* The dispatch's case words: a bounded plain set no larger than the
    run's block count — the words a resolution may target or split at. *)
@@ -84,7 +74,7 @@ let bounded_words ~(denote : denote) ~(blk : blk term) ?def
   let blocks = Hike_kb.block_addrs () in
   if Core.Map.is_empty blocks then None
   else
-    Base.Option.bind (Result.to_option (denote ~blk ?def texp)) ~f:(fun ws ->
+    Base.Option.bind (Base.Result.ok (denote ~blk ?def texp)) ~f:(fun ws ->
         if Vsa.WordSet.is_top ws || Vsa.WordSet.is_infinite ws
            || Vsa.WordSet.is_bottom ws
         then (
@@ -95,24 +85,18 @@ let bounded_words ~(denote : denote) ~(blk : blk term) ?def
                 else "BOTTOM"));
           None)
         else
-          let card =
-            match Cbat_word.to_int64 (Vsa.WordSet.cardinality ws) with
-            | Ok c -> c
-            | Error _ -> Int64.max_int in
-          let over =
-            Int64.compare card (Int64.of_int (Core.Map.length blocks)) > 0 in
-          if over then
-            option_if_debug
-              (Printf.sprintf
-                 "bounded_words: card %Ld exceeds the map's %d blocks"
-                 card (Core.Map.length blocks));
-          if over then None else Some (Vsa.WordSet.iter ws))
+          (match Vsa.WordSet.enumerate ~cap:(Core.Map.length blocks) ws with
+           | Some ws -> Some ws
+           | None ->
+             option_if_debug
+               (Printf.sprintf
+                  "bounded_words: card exceeds the map's %d blocks"
+                  (Core.Map.length blocks));
+             None))
 
-(* One mid-block case entry: the containing block splits at the entry
-   instruction — the prefix keeps the block's tid (its incoming edges)
-   and falls through to the fresh entry block, which takes the
-   address.  Sound only when the prefix is transparent: nothing it
-   defines is read past it — else the split needs phi repair (loud). *)
+(* One mid-block case entry: the prefix keeps the block's tid (its
+   incoming edges) and falls through to the fresh entry block, which
+   takes the address; sound only when the prefix is transparent. *)
 let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
     (sub : sub term) : sub term * tid =
   let container =
@@ -157,11 +141,9 @@ let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
           || (Term.enum phi_t b1 |> Seq.exists ~f:(fun p ->
                  Core.Set.mem b2_free (Phi.lhs p)))
         in
-        (* The prefix's reachability decides its fate.  A prefix block
-           nothing targets is dead code and drops (the case entry skips
-           it natively); a prefix something jumps into stays a real
-           block feeding the entry -- and then a prefix-defined value
-           read past the split needs phi repair (loud). *)
+        (* A prefix nothing targets is dead code and drops; a prefix
+           something jumps into stays, and needs phi repair if a
+           prefix-defined value is read past the split (loud). *)
         let entry = Term.first blk_t sub |> Base.Option.value_exn in
         let targets tid blk =
           Term.enum jmp_t blk
@@ -201,39 +183,32 @@ let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
           in
           (sub', Term.tid b2)
 
-(* The round's dispatch preparation: every resolvable dispatch's case
-   words land on the run's map — exact starts are already there,
-   mid-block entries through the block split.  A cross-sub word stays
-   foreign (the extern machinery's class); a word in no block is a
-   loud analysis loss.  One split per pass; each split adds a block,
-   so the passes terminate. *)
-(* The dispatch's case words, denotated at the state the jump reads.
-   A bare-variable target is the sum its reaching definition computes,
-   so the words are that sum's addends denotated at the definition's
-   before-env -- the delta plus the base -- never the post-transfer
-   state, which a noreturn call poisons. *)
+(* The dispatch's case words, denotated at the state the jump reads;
+   a bare-variable target's words come from its reaching definition's
+   before-env, never the noreturn-poisoned post-transfer state. *)
 let dispatch_words ~(denote : denote) ~(reaching : tid Var.Map.t)
     ~(blk : blk term) (texp : exp) : Cbat_word.t list option =
   match texp with
   | Bil.BinOp (Bil.PLUS, _, _) -> bounded_words ~denote ~blk texp
   | Bil.Var v ->
-      Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
-          Base.Option.bind
-            (Seq.find (Term.enum def_t blk) ~f:(fun d ->
-                 Tid.equal (Term.tid d) dtid))
-            ~f:(fun add_def ->
-              bounded_words ~denote ~blk ~def:add_def (Def.rhs add_def)))
+    let reaching_def dtid =
+      Seq.find (Term.enum def_t blk) ~f:(fun d ->
+          Tid.equal (Term.tid d) dtid)
+    in
+    Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
+        Base.Option.bind (reaching_def dtid) ~f:(fun add_def ->
+            bounded_words ~denote ~blk ~def:add_def (Def.rhs add_def)))
   | _ -> None
 
-(* The dispatch's guard subject and base: the target's top-level
-   summands -- one denotates to a singleton (the base the deltas
-   telescope through), the other carries the table's delta and is the
-   guard's subject.  A bare-variable target looks through its reaching
-   definition (the sum's own addends, denotated at that def's
-   before-env); the subject is then the sum minus the base, whose
-   value is the delta in every address space. *)
+(* The dispatch's guard subject and base: of the target's top-level
+   summands, one denotates to a singleton (the base) and the other
+   carries the table's delta and is the guard's subject. *)
 
-let rec prepare_dispatches ~(denote : denote) ~(changed : bool ref)
+(* The resolution's preparation walk: every resolvable dispatch's case
+   words land on the run's map (mid-block entries through the block
+   split).  A cross-sub word stays foreign; a word in no block is a
+   loud analysis loss.  One split per walk, so the walks terminate. *)
+let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
     (sub : sub term) : sub term =
   let starts = addressed_starts sub in
   let dispatch_word blk =
@@ -273,8 +248,50 @@ let rec prepare_dispatches ~(denote : denote) ~(changed : bool ref)
         (Printf.sprintf "prepare: split at %s -> tid %s"
            (Word.to_string a) (Tid.name t));
       Hike_kb.add_block_addr ~addr:a ~tid:t;
-      changed := true;
-      prepare_dispatches ~denote ~changed sub'
+      fresh := Core.Set.add !fresh t;
+      prepare_dispatches ~denote ~fresh sub'
+
+let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
+    ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
+  let singleton_value ?def e =
+    Base.Option.bind (Base.Result.ok (denote ~blk ?def e)) ~f:(fun ws ->
+        if Cbat_word.is_one (Vsa.WordSet.cardinality ws) then
+          Base.Option.bind (Vsa.WordSet.min_elem ws)
+            ~f:(fun w -> Base.Result.ok (Cbat_word.to_int64 w))
+        else None)
+  in
+  let pick x y =
+    match singleton_value x with
+    | Some bval -> Some (y, x, bval)
+    | None -> (
+        match singleton_value y with
+        | Some bval -> Some (x, y, bval)
+        | None -> None)
+  in
+  let reaching_sum v =
+    match Core.Map.find reaching v with
+    | None -> None
+    | Some dtid -> (
+        match
+          Seq.find (Term.enum def_t blk) ~f:(fun d ->
+              Tid.equal (Term.tid d) dtid)
+        with
+        | Some add_def -> (
+            match Def.rhs add_def with
+            | Bil.BinOp (Bil.PLUS, x, y) -> (
+                match singleton_value ~def:add_def x with
+                | Some bval -> Some (y, x, bval)
+                | None -> (
+                    match singleton_value ~def:add_def y with
+                    | Some bval -> Some (x, y, bval)
+                    | None -> None))
+            | _ -> None)
+        | None -> None)
+  in
+  match texp with
+  | Bil.BinOp (Bil.PLUS, x, y) -> pick x y
+  | Bil.Var v -> reaching_sum v
+  | _ -> None
 
 let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
@@ -309,25 +326,21 @@ let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
   | _ -> None
 
 (* The dispatch's case pairs off the target's denotation: a bounded
-   set no larger than the run's block count, every word naming an
-   in-sub block on the run's map.  The pairs are BASE-RELATIVE -- the
-   guard word is the case's delta [w - base], so the runtime
-   comparison lives in the delta domain and never depends on where the
-   module linked the table.  A cross-sub word leaves the whole
-   dispatch foreign (the extern machinery's class); a resolvable word
-   the map cannot name is a loud failure -- an analysis loss, never a
-   silent foreign transfer. *)
+   set, every word naming an in-sub block.  The pairs are
+   BASE-RELATIVE — the guard word is the delta [w - base] — so the
+   runtime comparison never depends on where the table was linked. *)
 let resolved_pairs_of ~(denote : denote) ~(reaching : tid Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(blk : blk term) (texp : exp) :
-    (exp * (word * tid) list) option =
+    (exp * (word * tid) list * Int64.t) option =
   let blocks = Hike_kb.block_addrs () in
   match dispatch_words ~denote ~reaching ~blk texp with
   | None -> None
   | Some ws ->
     if Base.List.length ws > Core.Map.length blocks then None
     else
-        Base.Option.bind (delta_subject ~denote ~reaching ~blk texp)
-          ~f:(fun (delta_exp, base_exp, bval) ->
+        match delta_subject ~denote ~reaching ~blk texp with
+        | None -> None
+        | Some (delta_exp, base_exp, bval) ->
           let subject =
             match texp with
             | Bil.BinOp (Bil.PLUS, _, _) -> delta_exp
@@ -347,7 +360,7 @@ let resolved_pairs_of ~(denote : denote) ~(reaching : tid Var.Map.t)
           in
           let pairs = Base.List.map ws ~f:case in
           if Base.List.exists pairs ~f:Option.is_none then None
-          else Some (subject, Base.List.filter_map pairs ~f:(fun p -> p)))
+          else Some (subject, Base.List.filter_map pairs ~f:(fun p -> p), bval)
 
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
    The words share the selector's width, so the comparisons typecheck. *)
@@ -359,64 +372,54 @@ let guarded_cond (sel : exp) (ws : word list) : exp =
       Base.List.fold rest ~init:(eq w)
         ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
 
-(* The literal-true condition ([Jmp.create]'s default guard) and the
-   guard composition: the dispatch jmp's own guard narrows every case
-   and the default alike. *)
+(* The dispatch jmp's own guard narrows every case and the default
+   alike. *)
 let true_cond : exp = Bil.Int (Word.one 1)
 
-let is_true_cond (e : exp) : bool =
-  match e with Bil.Int w -> Word.equal w (Word.one 1) | _ -> false
-
 let guard_of (j : jmp term) : exp option =
-  match Jmp.cond j with c when is_true_cond c -> None | c -> Some c
+  match Jmp.cond j with c when Model.is_true_cond c -> None | c -> Some c
 
 let and_guard (guard : exp option) (cond : exp) : exp =
   Base.Option.fold guard ~init:cond ~f:(fun cond g -> Bil.BinOp (Bil.AND, g, cond))
 
 (* The dispatch's successor series: one conditional goto per distinct
-   case target (its words OR-merge into one guard), then the
-   unconditional default.  The default target's own words need no
-   guard — every other guard failing falls through to it — so its
-   group is dropped and one edge per target survives for the phis.
-   [pairs] is non-empty by [resolved_pairs_of]'s contract, so with no
-   continuation the lowest case word's group is the default. *)
+   case target (its words OR-merge into one guard).  A call dispatch's
+   continuation is the series' terminal; a goto dispatch has none —
+   under the completeness premise its guards are exhaustive. *)
 let dispatch_jmps (j : jmp term) (sel : exp)
     (pairs : (word * tid) list) (cont : tid option) :
-    jmp term list =
+    jmp term list option =
   let by_target =
     Base.List.fold pairs ~init:[] ~f:(fun acc (w, t) ->
         match Base.List.Assoc.find acc t ~equal:Tid.equal with
         | Some ws -> Base.List.Assoc.add acc t (w :: ws) ~equal:Tid.equal
         | None -> (t, [ w ]) :: acc)
   in
-  (* Groups in ascending first-word order; the head names the lowest
-     case word (the no-continuation default, as the switch chose). *)
+  (* Groups in ascending first-word order. *)
   let ascending = List.rev by_target in
-  let groups, default_tid =
-    match cont with
-    | Some t ->
-        (Base.List.filter ascending ~f:(fun (g, _) -> not (Tid.equal g t)),
-         t)
-    | None ->
-        (Base.List.tl_exn ascending, fst (Base.List.hd_exn ascending))
-  in
   let guard = guard_of j in
-  let cases =
-    Base.List.map groups ~f:(fun (t, ws) ->
-        Jmp.create ~cond:(and_guard guard (guarded_cond sel ws))
-          (Goto (Direct t)))
+  let guarded (t, ws) =
+    Jmp.create ~cond:(and_guard guard (guarded_cond sel ws))
+      (Goto (Direct t))
   in
-  cases
-  @ [ Jmp.create
-        ~cond:(Base.Option.value guard ~default:true_cond)
-        (Goto (Direct default_tid)) ]
+  match cont with
+  | Some t ->
+    let groups =
+      Base.List.filter ascending ~f:(fun (g, _) -> not (Tid.equal g t)) in
+    if Base.List.is_empty groups then None
+    else
+      Some
+        (Base.List.map groups ~f:guarded
+         @ [ Jmp.create
+               ~cond:(Base.Option.value guard ~default:true_cond)
+               (Goto (Direct t)) ])
+  | None ->
+    if Base.List.length ascending < 2 then None
+    else Some (Base.List.map ascending ~f:guarded)
 
-(* The return epilogue's replacement: the BIR's canonical return
-   shape.  This fork stores a [Ret] as a return-less call with the
-   return-address label as its target ([Jmp.create (Ret _)] reads back
-   as that call), and the emitter's shape dispatch renders exactly
-   this class through the return lane.  The var-free target leaves no
-   reader for the retaddr load, so the sweep kills it. *)
+(* The return epilogue's replacement: the canonical [Ret] shape — a
+   return-less call the emitter renders as a return; the var-free
+   target leaves the retaddr load unread, so the sweep kills it. *)
 let ret_jmp ~(word_bits : int) : jmp term =
   Jmp.create
     (Call
@@ -424,18 +427,120 @@ let ret_jmp ~(word_bits : int) : jmp term =
           ~target:(Indirect (Bil.Unknown ("hike-cfg-ret", Type.Imm word_bits)))
           ()))
 
+(* The [bits]-bit word of an image's byte array at [off], in [endian]. *)
+let image_word_at (bytes : Bytes.t) (off : int) ~(endian : endian)
+    ~(bits : int) : int64 option =
+  let n = bits / 8 in
+  if off < 0 || off + n > Bytes.length bytes then None
+  else
+    let byte i = Int64.of_int (Char.code (Bytes.get bytes (off + i))) in
+    let w =
+      match endian with
+      | LittleEndian ->
+        Base.List.fold (Base.List.init n ~f:(fun i -> i)) ~init:0L
+          ~f:(fun acc i -> Int64.logor acc (Int64.shift_left (byte i) (8 * i)))
+      | BigEndian ->
+        Base.List.fold (Base.List.init n ~f:(fun i -> i)) ~init:0L
+          ~f:(fun acc i -> Int64.logor (Int64.shift_left acc 8) (byte i))
+    in
+    Some w
+
+(* The completeness premise: the enumerated words cover every value
+   the dispatch's source may produce; a memory-read value only when
+   every address the table load may read is bounded and each slot's
+   image word is one of the case addresses.  Any doubt is incomplete. *)
+let table_covered ~(denote : denote) ~(reaching : tid Var.Map.t)
+    ~(blk : blk term) ~(base : Int64.t) ~(pairs : (word * tid) list)
+    ~(images : Vsa.section_image list)
+    (texp : exp) : bool =
+  let enumerated =
+    Core.Set.of_list (module Core.Int64)
+      (Base.List.map pairs ~f:(fun (w, _) ->
+           Int64.add (Word.to_int64_exn w) base))
+  in
+  let value_var =
+    let singleton e =
+      Base.Option.value_map (Base.Result.ok (denote ~blk e))
+        ~default:false ~f:(fun ws ->
+          Cbat_word.is_one (Vsa.WordSet.cardinality ws))
+    in
+    match texp with
+    | Bil.Var _ -> Some texp
+    | Bil.BinOp (Bil.PLUS, x, y) ->
+      if singleton x then Some y
+      else if singleton y then Some x
+      else None
+    | _ -> None
+  in
+  let load =
+    Base.Option.bind value_var ~f:(fun e ->
+        match e with
+        | Bil.Var v ->
+          Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
+              Seq.find (Term.enum def_t blk) ~f:(fun d ->
+                  Tid.equal (Term.tid d) dtid))
+        | _ -> None)
+  in
+  (* One enumerated address: inside some image, and its slot's image
+     word is one of the enumerated case addresses. *)
+  let slot_covered ~(endian : endian) ~(bits : int) (a : Cbat_word.t) : bool
+      =
+    match Cbat_word.to_int64 a with
+    | Error _ -> false
+    | Ok a ->
+      Base.List.find_map images ~f:(fun img ->
+          if Stdlib.Int64.unsigned_compare a img.img_lo >= 0
+             && Stdlib.Int64.unsigned_compare
+                  (Int64.add a (Int64.of_int (bits / 8 - 1)))
+                  img.img_hi <= 0
+          then Some img
+          else None)
+      |> Base.Option.bind ~f:(fun img ->
+          let off =
+            Stdlib.Int64.to_int (Stdlib.Int64.sub a img.img_lo) in
+          Base.Option.map
+            (image_word_at img.img_bytes off ~endian ~bits)
+            ~f:(Core.Set.mem enumerated))
+      |> Base.Option.value ~default:false
+  in
+  Base.Option.bind load ~f:(fun d ->
+      match Def.rhs d with
+      | Bil.Load (_, addr_exp, endian, size) ->
+        Some (d, addr_exp, endian, Size.in_bits size)
+      | _ -> None)
+  |> Base.Option.map ~f:(fun (d, addr_exp, endian, bits) ->
+      match Base.Result.ok (denote ~blk ~def:d addr_exp) with
+      | Some addrs
+        when (not (Vsa.WordSet.is_top addrs))
+             && (not (Vsa.WordSet.is_infinite addrs))
+             && (not (Vsa.WordSet.is_bottom addrs))
+             && not (Cbat_word.gt_int (Vsa.WordSet.cardinality addrs) 64)
+        -> Base.List.for_all (Vsa.WordSet.iter addrs)
+             ~f:(slot_covered ~endian ~bits)
+      | _ -> false)
+  |> Base.Option.value ~default:true
+
 (* One jmp's rewrite decision: the return epilogue (a noreturn call
-   whose target var's reaching def is the retaddr read) lands in the
-   canonical return shape; a dispatch whose case words all resolve
-   becomes the guarded-goto series (a call dispatch's continuation is
-   the default); everything else stays. *)
+   whose target var's reaching def is the retaddr read) becomes the
+   canonical return; a fully-resolving, completely-enumerating
+   dispatch becomes the guarded-goto series; else it stays. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(word_bits : int) ~(sub_tids : Tid.Set.t)
-    ~(reaching : tid Var.Map.t) ~(blk : blk term) (j : jmp term) :
+    ~(reaching : tid Var.Map.t) ~(images : Vsa.section_image list)
+    ~(blk : blk term) (j : jmp term) :
     jmp term list option =
   let retaddr_read v =
     Base.Option.value_map (Core.Map.find reaching v) ~default:false
       ~f:(fun dtid -> Core.Set.mem retaddr dtid)
+  in
+  let series texp cont =
+    Base.Option.bind
+      (resolved_pairs_of ~denote ~reaching ~sub_tids ~blk texp)
+      ~f:(fun (subject, pairs, base) ->
+          if
+            table_covered ~denote ~reaching ~blk ~base ~pairs ~images texp
+          then dispatch_jmps j subject pairs cont
+          else None)
   in
   match Jmp.kind j with
   | Call c -> (
@@ -448,68 +553,81 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
             | Some (Direct t) -> Some t
             | Some (Indirect _) | None -> None
           in
-          Base.Option.bind
-            (resolved_pairs_of ~denote ~reaching ~sub_tids ~blk texp)
-            ~f:(fun (delta_exp, pairs) ->
-                Some (dispatch_jmps j delta_exp pairs cont))
+          series texp cont
       | _ -> None)
-  | Goto (Indirect texp) ->
-      Base.Option.bind (resolved_pairs_of ~denote ~reaching ~sub_tids ~blk texp)
-        ~f:(fun (delta_exp, pairs) ->
-            Some (dispatch_jmps j delta_exp pairs None))
+  | Goto (Indirect texp) -> series texp None
   | _ -> None
 
-(* Rebuilds [blk] with exactly [js'] as its jmps (the builder copies
-   the defs and phis; the attrs follow). *)
+(* Rebuilds [blk] with exactly [js'] as its jmps. *)
 let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
   let b = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
   Base.List.iter js' ~f:(Blk.Builder.add_jmp b);
   Term.with_attrs (Blk.Builder.result b) (Term.attrs blk)
 
-(* The completion round: every block's jmps pass through the rewrite
-   decision; a sub with no decision comes back unchanged. *)
-(* Unreachable-block elimination: a block no reachable transfer names
-   is dead (a resolved dispatch's replaced container).  Skipped while a
-   foreign indirect transfer survives -- its targets cannot be counted,
-   so a pred-less block might still be entered. *)
-let prune_unreachable (sub : sub term) : sub term * bool =
-  let entry = Base.Option.value_exn (Term.first blk_t sub) in
-  let blocks = Seq.to_list (Term.enum blk_t sub) in
-  let rec go seen blk =
-    if Core.Set.mem seen (Term.tid blk) then seen
-    else
-      let seen = Core.Set.add seen (Term.tid blk) in
-      Term.enum jmp_t blk
-      |> Seq.fold ~init:seen ~f:(fun seen j ->
-             let targets =
-               match Jmp.kind j with
-               | Goto (Direct t) -> [ t ]
-               | Call c -> (
-                   match Call.return c with
-                   | Some (Direct t) -> [ t ]
-                   | _ -> [])
-               | _ -> []
-             in
-             Base.List.fold targets ~init:seen ~f:(fun seen t ->
-                 match
-                   Base.List.find blocks ~f:(fun b ->
-                       Tid.equal (Term.tid b) t)
-                 with
-                 | Some b -> go seen b
-                 | None -> seen))
-  in
-  let reachable = go Tid.Set.empty entry in
-  let pruned = Core.Set.length reachable < List.length blocks in
-  let sub' = Term.filter_map blk_t sub ~f:(fun b ->
-      if Core.Set.mem reachable (Term.tid b) then Some b else None)
-  in
-  (sub', pruned)
+(* The split retraction: a fresh entry block nothing reaches — no
+   transfer names it, no jmp-less block's fallthrough (the next block
+   in term order) reaches it — drops.  Only fresh blocks are prunable:
+   a block behind an unresolved indirect transfer is live. *)
+let prune_unreachable ~(fresh : Tid.Set.t) (sub : sub term) : sub term =
+  if Core.Set.is_empty fresh then sub
+  else
+    let entry = Base.Option.value_exn (Term.first blk_t sub) in
+    let blocks = Seq.to_list (Term.enum blk_t sub) in
+    let rec nexts = function
+      | [] -> []
+      | b :: tl -> (
+          let nx = match tl with b2 :: _ -> Some (Term.tid b2) | [] -> None in
+          (Term.tid b, nx) :: nexts tl)
+    in
+    let fall_tbl = Core.Map.of_alist_exn (module Tid) (nexts blocks) in
+    let rec go seen blk =
+      if Core.Set.mem seen (Term.tid blk) then seen
+      else
+        let seen = Core.Set.add seen (Term.tid blk) in
+        let js = Seq.to_list (Term.enum jmp_t blk) in
+        let seen =
+          Base.List.fold js ~init:seen ~f:(fun seen j ->
+              let targets =
+                match Jmp.kind j with
+                | Goto (Direct t) -> [ t ]
+                | Call c -> (
+                    match Call.return c with
+                    | Some (Direct t) -> [ t ]
+                    | _ -> [])
+                | _ -> []
+              in
+              Base.List.fold targets ~init:seen ~f:(fun seen t ->
+                  match
+                    Base.List.find blocks ~f:(fun b ->
+                        Tid.equal (Term.tid b) t)
+                  with
+                  | Some b -> go seen b
+                  | None -> seen))
+        in
+        if Base.List.is_empty js then
+          match Core.Map.find fall_tbl (Term.tid blk) with
+          | Some (Some t) -> (
+              match
+                Base.List.find blocks ~f:(fun b ->
+                    Tid.equal (Term.tid b) t)
+              with
+              | Some b -> go seen b
+              | None -> seen)
+          | _ -> seen
+        else seen
+    in
+    let reachable = go Tid.Set.empty entry in
+    Term.filter_map blk_t sub ~f:(fun b ->
+        if (not (Core.Set.mem fresh (Term.tid b)))
+           || Core.Set.mem reachable (Term.tid b)
+        then Some b
+        else None)
 
-let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(word_bits : int)
-    (sub : sub term) : sub term * bool =
-  let changed = ref false in
-  let sub = prepare_dispatches ~denote ~changed sub in
+(* The exit rewrite, once at drain; a sub with no decision comes back
+   unchanged. *)
+let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
+    ~(word_bits : int) ~(images : Vsa.section_image list)
+    (sub : sub term) : sub term =
   let sub_tids =
     Core.Set.of_list (module Tid)
       (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
@@ -519,14 +637,13 @@ let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids ~reaching ~blk
-            j
+          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids ~reaching
+            ~images ~blk j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
     in
     match decided with
     | [] -> blk
     | _ ->
-        changed := true;
         let rewr = Core.Map.of_alist_exn (module Tid) decided in
         let spliced =
           Base.List.concat_map js ~f:(fun j ->
@@ -536,36 +653,70 @@ let rewrite_sub ~(denote : denote) ~(retaddr : Tid.Set.t)
         in
         with_jmps blk spliced
   in
-  let sub' = Term.map blk_t sub ~f:reblock in
-  let has_foreign =
-    Term.enum blk_t sub' |> Seq.exists ~f:(fun b ->
-        Term.enum jmp_t b |> Seq.exists ~f:(fun j ->
-            match Jmp.kind j with
-            | Goto (Indirect _) -> true
-            | Call c -> (
-                match Call.target c with Indirect _ -> true | _ -> false)
-            | _ -> false))
-  in
-  if has_foreign then (sub', !changed)
-  else
-    let sub'', pruned = prune_unreachable sub' in
-    (sub'', !changed || pruned)
+  Term.map blk_t sub ~f:reblock
 
-(* One completion round on the round's own solution: the retaddr proof
-   re-derives through the solution, the dispatch classification
-   denotates through the seam with the images armed (the jump-table
-   case words live in .rodata), and the rewrites land in the terms.
-   The product is the REWRITTEN SUB and whether anything changed. *)
-let complete ~(denote : denote)
-    ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+(* One resolution event pass on the phase's own solution: the case
+   words land on the run's map and resolved dispatches contribute
+   their target sets to the extra edges.  The split is the only BIR
+   change and it is additive. *)
+let resolve_phase ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
-    (sub : sub term) : sub term * bool =
+    (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
+    sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * bool =
+  let denote = denote_of_sol sol in
+  let fresh = ref Tid.Set.empty in
+  Vsa.with_images images (fun () ->
+      let sub = prepare_dispatches ~denote ~fresh sub in
+      let sub_tids =
+        Core.Set.of_list (module Tid)
+          (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
+      in
+      let grew = ref false in
+      let resolved' =
+        Term.enum blk_t sub
+        |> Seq.fold ~init:resolved ~f:(fun acc blk ->
+            let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
+            Term.enum jmp_t blk
+            |> Seq.fold ~init:acc ~f:(fun acc j ->
+                let target =
+                  match Jmp.kind j with
+                  | Call c -> (
+                      match Call.target c with Indirect e -> Some e | _ -> None)
+                  | Goto (Indirect e) -> Some e
+                  | _ -> None
+                in
+                match target with
+                | None -> acc
+                | Some texp -> (
+                    match resolved_pairs_of ~denote ~reaching ~sub_tids ~blk texp with
+                    | None -> acc
+                    | Some (_, pairs, _) ->
+                      let ts =
+                        Core.Set.of_list (module Tid)
+                          (Base.List.map pairs ~f:snd) in
+                      match Core.Map.find acc (Term.tid j) with
+                      | Some old when Core.Set.equal old ts -> acc
+                      | Some old ->
+                        grew := true;
+                        Core.Map.set acc ~key:(Term.tid j)
+                          ~data:(Core.Set.union old ts)
+                      | None ->
+                        grew := true;
+                        Core.Map.set acc ~key:(Term.tid j) ~data:ts)))
+      in
+      (sub, resolved', !fresh, not (Core.Set.is_empty !fresh) || !grew))
+
+(* The exit materialization at drain: the rewrites land once and the
+   prune retracts the split structure the materialization didn't
+   claim; the denotations run with the section images armed. *)
+let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
+    ~(images : Vsa.section_image list) ~(fresh : Tid.Set.t)
+    (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
-  Vsa.set_section_images images;
   let word_bits = 8 * abi.Hike_abi.word in
-  let result =
-    (try rewrite_sub ~denote ~retaddr ~word_bits sub
-     with exn -> Vsa.set_section_images []; raise exn)
+  let sub =
+    Vsa.with_images images (fun () ->
+        rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~word_bits
+          ~images sub)
   in
-  Vsa.set_section_images [];
-  result
+  prune_unreachable ~fresh sub

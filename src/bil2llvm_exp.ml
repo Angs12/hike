@@ -76,7 +76,6 @@ let create_unop llvm_builder (op, llvm_val) =
   | NEG -> Llvm.build_neg llvm_val "" llvm_builder
   | NOT -> Llvm.build_not llvm_val "" llvm_builder
 
-(* Returns an expression bitwidth. *)
 let rec exp_size (e : exp) : int =
   match e with
   | Bil.Extract (hi, lo, _) -> max 0 (hi - lo + 1)
@@ -88,7 +87,7 @@ let rec exp_size (e : exp) : int =
 
 let create_concat llvm_builder (llvm_var1, llvm_var2) =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
   let llvm_var2_size = Llvm.type_of llvm_var2 |> Llvm.integer_bitwidth in
   let result_typ =
@@ -102,7 +101,7 @@ let create_concat llvm_builder (llvm_var1, llvm_var2) =
 
 let create_extract llvm_builder (hi, lo, llvm_var) =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   let width = Llvm.integer_bitwidth (Llvm.type_of llvm_var) in
   let result_size = hi - lo + 1 in
   if lo >= width then
@@ -124,8 +123,7 @@ let create_extract llvm_builder (hi, lo, llvm_var) =
       @@ Llvm.build_trunc temp_var
            (Llvm.integer_type llvm_ctx result_size) "" llvm_builder
 
-(* True when the address expression bases on the target's TLS
-   register: the access renders as the thread-local anchor read. *)
+(* True when the address bases on the target's TLS register. *)
 let rec is_tls_addr ctx (e : exp) : bool =
   match e with
   | Var v -> Var.same v ctx.abi.Abi.thread_pointer
@@ -137,14 +135,12 @@ let rec is_tls_addr ctx (e : exp) : bool =
   | Let (_, e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
   | _ -> false
 
-(* The TLS anchor: a thread_local global's address is not a constant —
-   it depends on the calling thread — and llvm.threadlocal.address is
-   its accessor.  A TLS-register-relative access reads the anchor's
-   per-thread cell; the binary's offset drops with the base. *)
+(* A thread_local global's address is not a constant;
+   llvm.threadlocal.address is its accessor. *)
 let tls_anchor_addr llvm_builder =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
   let g =
     Llvm.declare_global (Llvm.i64_type llvm_ctx) "hike_tls_anchor" llvm_module
   in
@@ -162,16 +158,15 @@ let create_load llvm_builder (addr, size) =
   | Some v ->
       const_addr_load llvm_builder (Word.of_int64 ~width:64 v) size
         ~fallback:(fun () ->
-          let* llvm_ctx = Context.get llvm_ctx_var in
+          let* { llvm_ctx; _ } = Context.get emit_ctx_var in
           let* ptr = create_addr_ptr llvm_builder addr in
           return
           @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) ptr ""
                llvm_builder)
   | _ ->
-      (* Non-constant addresses materialize through [create_addr_ptr]
-         (frame GEP for frame addresses, inttoptr for foreign ones). *)
+      (* Non-constant addresses materialize through [create_addr_ptr]. *)
       let* addr = create_addr_ptr llvm_builder addr in
-      let* llvm_ctx = Context.get llvm_ctx_var in
+      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) addr ""
            llvm_builder
@@ -193,7 +188,7 @@ let create_store llvm_builder (llvm_var, addr) =
 
 let create_cast llvm_builder (cast, i, llvm_val) =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   let width = Llvm.integer_bitwidth (Llvm.type_of llvm_val) in
   let target = Llvm.integer_type llvm_ctx i in
   let extend cast =
@@ -218,21 +213,17 @@ let create_cast llvm_builder (cast, i, llvm_val) =
       in
       return @@ coerce UNSIGNED shifted
 
-(* The immediate constant: the NATIVE bits, always — the data/access
-   domain's one world.  A data word that names code renders the lifted
-   address only in the section initializers (the function domain's
-   thunk boundary); an immediate in address arithmetic must stay in
-   the native world the section map resolves in. *)
+(* Immediates keep their native bits; only the section initializers
+   remap words that name lifted addresses. *)
 let create_immidiate word =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   return
   @@ Llvm.const_int_of_string
        (Llvm.integer_type llvm_ctx (Word.bitwidth word))
        (Word.string_of_value word)
        16
 
-(* Warns on reads of never-defined vars. *)
 let warn_undef_read ctx var blk_tid =
   let v = Var.base var in
   let abi = ctx.abi in
@@ -254,23 +245,15 @@ let warn_undef_read ctx var blk_tid =
         (Tid.name blk_tid) (Var.name v)
   end
 
-(* The first memory node of an exp (the access lanes' one node — the
-   fission invariant keeps a def's rhs single-node). *)
+(* The one memory node of an exp (a def's rhs holds at most one). *)
 type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
 
 let find_mem_node (exp : exp) : mem_node option =
-  let vis =
-    object
-      inherit [ mem_node option ] Exp.visitor
-      method! visit_load ~mem:_ ~addr _ size acc =
-        Base.Option.first_some acc (Some (`Load (addr, size)))
-      method! visit_store ~mem:_ ~addr ~exp:x _ size acc =
-        Base.Option.first_some acc (Some (`Store (addr, x, size)))
-    end
-  in
-  vis#visit_exp exp None
+  match Hike_stack_model.mem_node_of exp with
+  | Some (`Load (_, addr, size)) -> Some (`Load (addr, size))
+  | Some (`Store (_, addr, data, size)) -> Some (`Store (addr, data, size))
+  | None -> None
 
-(* Name of the accumulator marker var an access lane binds. *)
 let marker_name = "hike_acc"
 
 let marker_of_size size =
@@ -278,8 +261,7 @@ let marker_of_size size =
     (Type.Imm (Size.in_bits size))
 
 (* Maps only the mem node matching (addr, size) to a var, preserving
-   the enclosing structure — the one rewrite every access-serving lane
-   uses. *)
+   the enclosing structure. *)
 let rewrite_mem_node exp addr size marker =
   let v =
     object
@@ -310,7 +292,7 @@ let rec create_exp llvm_builder blk_tid exp =
       match get_local ctx blk_tid v with
       | Some x -> return x
       | None ->
-          let* llvm_ctx' = Context.get llvm_ctx_var in
+          let* { llvm_ctx = llvm_ctx'; _ } = Context.get emit_ctx_var in
           let want_w =
             match Var.typ v with Type.Imm w -> w | _ -> 8 * ctx.abi.Abi.word
           in
@@ -341,10 +323,8 @@ let rec create_exp llvm_builder blk_tid exp =
   | Extract (hi, lo, exp) ->
       let* llvm_var = create_exp llvm_builder blk_tid exp in
       create_extract llvm_builder (hi, lo, llvm_var)
-  (* Fissioned AND ordinary memory ops: a named section component
-     routes by name through its own global; everything else
-     emits identically — the rewrite already materialized region
-     storage into the address. *)
+  (* Region/window and section-component mem vars route to their
+     storage; everything else emits through the generic memory path. *)
   | Store (Bil.Var mv, addr, data, _, _)
     when Hike_stack_model.is_region_mem mv
          || Hike_stack_model.is_window_mem mv ->
@@ -379,7 +359,7 @@ let rec create_exp llvm_builder blk_tid exp =
         ~data:None (Size.in_bits size)
   | Load (_, addr, _, size) when is_tls_addr ctx addr ->
       let* ptr = tls_anchor_addr llvm_builder in
-      let* llvm_ctx = Context.get llvm_ctx_var in
+      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       KB.return
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx (Size.in_bits size)) ptr
            "" llvm_builder
@@ -403,11 +383,9 @@ let rec create_exp llvm_builder blk_tid exp =
       return @@ Llvm.poison typ
 
 
-(* The NAMED-COMPONENT lane (the section routing): the BIL memory var
-   IS the component's identity — the spec setup binds each component
-   mem var to its global and native base; the address expr evaluates
-   to NATIVE bits (the rewrite kept the constant-chain arithmetic), so
-   the GEP index is the exact native delta. *)
+(* Named-component routing: the mem var is the component's identity,
+   bound to its global and native base; the address evaluates to
+   native bits, so the GEP index is the exact native delta. *)
 and sec_comp_access llvm_builder blk_tid ~(store : bool)
     (mv : var) (addr : exp) ~(data : exp option) (size : int) :
     Llvm.llvalue KB.t =
@@ -437,8 +415,7 @@ and sec_comp_access llvm_builder blk_tid ~(store : bool)
       @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) p ""
            llvm_builder
   | None ->
-    (* Unknown component: the generic memory lane — the address
-       stays native bits and materializes unremapped. *)
+    (* Unknown component: the generic memory path, unremapped. *)
     if store then
       (match data with
        | Some d ->
@@ -452,12 +429,11 @@ and sec_comp_access llvm_builder blk_tid ~(store : bool)
 
 and create_rip_relative_addr llvm_builder blk_tid exp =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
   let* ctx = Context.get emit_ctx_var in
   match exp with
   | Bil.Int w ->
-      (* Remaps function and section addresses. *)
       let v = Word.to_int64_exn w in
       let* addr =
         return @@
@@ -487,7 +463,6 @@ and create_rip_relative_addr llvm_builder blk_tid exp =
                  Llvm.build_store data base llvm_builder in
                KB.return data)
        | None ->
-           (* Stores through remapped constants. *)
            let* data = create_exp llvm_builder blk_tid data in
            create_store llvm_builder (data, addr))
   | Load (_, addr, _, size) ->
@@ -495,14 +470,12 @@ and create_rip_relative_addr llvm_builder blk_tid exp =
       (match Llvm.int64_of_const addr with
        | Some i64 ->
            let addr_w = Word.of_int64 ~width:64 i64 in
-           (* Reads .text loads at compile time. *)
            const_addr_load llvm_builder addr_w (Size.in_bits size)
              ~fallback:(fun () ->
-               let* llvm_ctx = Context.get llvm_ctx_var in
+               let* { llvm_ctx; _ } = Context.get emit_ctx_var in
                section_load llvm_builder llvm_ctx addr_w i64
                  (Size.in_bits size))
        | None ->
-           (* Non-constant addresses: the ordinary [create_load] path. *)
            create_load llvm_builder (addr, Size.in_bits size))
   | Cast (cast, i, (Load _ as load)) ->
       (* RIP-relative widening loads. *)
@@ -510,24 +483,17 @@ and create_rip_relative_addr llvm_builder blk_tid exp =
       create_cast llvm_builder (cast, i, v)
   | _ -> create_exp llvm_builder blk_tid exp
 
-(* Shared skeleton: bind the arm's value to the marker, then re-emit
-   with the arm's rewrite. Insertion order is the arm's order. *)
 and emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite =
   let open KB in
   let* v = emit () in
   insert_local ctx blk_tid marker v;
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   create_exp llvm_builder blk_tid (rewrite marker)
 
-(* The region lane: the BIL's [stack_rN_mem] routes to the region's
-   own alloca.  The address expression evaluates to the anchor-based
-   runtime integer (the model arithmetic resolves against the SP
-   Slot's anchor), so the GEP index is the entry-relative offset of
-   the access minus the region's entry-relative base — the same
-   relative byte, exact for dynamic indices and displacement. *)
-(* The incoming-window lane: the callee's above-entry accesses read the
-   CALLER's window through the hike_window parameter — the same
-   normalization (the access's anchor-relative offset), one base
-   different: the parameter integer, not an alloca. *)
+(* Region accesses GEP the region alloca at (access offset − region
+   base), both relative to the SP anchor.  Window accesses normalize
+   the same way against the hike_window parameter — the caller's
+   window base. *)
 and window_mem_access llvm_builder blk_tid fr mv exp =
   let open KB in
   match Hike_stack_model.is_window_mem mv with
@@ -582,7 +548,7 @@ and region_mem_access llvm_builder blk_tid fr mv exp =
   let open KB in
   let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
   let region_index llvm_builder rel_rlo a =
-    let* llvm_ctx = Context.get llvm_ctx_var in
+    let* { llvm_ctx; _ } = Context.get emit_ctx_var in
     let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
     KB.return
     @@ Llvm.build_sub rel
@@ -596,7 +562,7 @@ and region_mem_access llvm_builder blk_tid fr mv exp =
       | Some (`Load (addr, size)) ->
           let marker = marker_of_size size in
           let* ctx = Context.get emit_ctx_var in
-          let* llvm_ctx = Context.get llvm_ctx_var in
+          let* { llvm_ctx; _ } = Context.get emit_ctx_var in
           let* a = create_exp llvm_builder blk_tid addr in
           let* idx = region_index llvm_builder rel_rlo a in
           let p =
@@ -614,7 +580,7 @@ and region_mem_access llvm_builder blk_tid fr mv exp =
       | Some (`Store (addr, data, size)) ->
           let marker = marker_of_size size in
           let* ctx = Context.get emit_ctx_var in
-          let* llvm_ctx = Context.get llvm_ctx_var in
+          let* { llvm_ctx; _ } = Context.get emit_ctx_var in
           let* a = create_exp llvm_builder blk_tid addr in
           let* idx = region_index llvm_builder rel_rlo a in
           let p =
@@ -631,45 +597,75 @@ and region_mem_access llvm_builder blk_tid fr mv exp =
           emit_with_marker llvm_builder blk_tid ctx marker ~emit ~rewrite
       | None -> create_exp llvm_builder blk_tid exp)
 
-(* The region/window twin of the generic exp lane (defense in depth):
-   a fissioned mem var reaching this lane still routes to its storage;
-   with no frame bound (outside a body) or no such region, the raw
-   lane serves the access. *)
+(* Routes a region/window mem var to its storage; with no frame
+   bound, the raw arm serves the access. *)
 and region_window_access llvm_builder blk_tid mv exp ~raw =
-  match !Bil2llvm_env.cur_frame with
+  let open KB in
+  let* ctx = Context.get emit_ctx_var in
+  match !(ctx.cur_frame) with
   | Some fr when Hike_stack_model.is_region_mem mv ->
       region_mem_access llvm_builder blk_tid fr mv exp
   | Some fr when Hike_stack_model.is_window_mem mv ->
       window_mem_access llvm_builder blk_tid fr mv exp
   | _ -> raw ()
 
+(* Each jmp of a series renders in its own basic block; every direct
+   edge lands in the edge table so target phis name the terminator's
+   block.  The terminal guard is complete: literal-true branches
+   unconditionally, else the false edge is [unreachable]. *)
 let create_branches blk_tid llvm_builder branches =
   let open KB in
   let open Bap.Std in
   let* ctx = KB.Context.get emit_ctx_var in
-  if Seq.length branches = 1 then 
-    (
-    let br = Seq.hd_exn branches in
-    let jmp_target = Jmp.kind br |> goto_label_exn in
-    match jmp_target with
-    | Direct tid ->
-        let bb = get_bb ctx tid in
-        Llvm.build_br bb llvm_builder |> ignore;
-        KB.return ()
-    | Indirect exp ->
-        let* target_val = create_exp llvm_builder blk_tid exp in
-        Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
-        KB.return ())
-  else if Seq.length branches = 2 then (
-    
-    let br1 = Seq.hd_exn branches in
-    let else_jmp = Seq.to_list branches |> Base.List.last_exn in
-    let true_target = Jmp.kind br1 |> goto_label_exn |> label_tid in
-    let false_target = Jmp.kind else_jmp |> goto_label_exn |> label_tid in
-    let true_bb = get_bb ctx true_target in
-    let false_bb = get_bb ctx false_target in
-    let cond = Jmp.cond br1 in
-    let* cond_res = create_exp llvm_builder blk_tid cond in
-    Llvm.build_cond_br cond_res true_bb false_bb llvm_builder |> ignore;
-    KB.return ())
-  else failwith "pp_branches: more than 2 branches"
+  let llvm_ctx = ctx.llvm_ctx in
+  let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
+  let jmps = Seq.to_list branches in
+  let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
+    Edge_tbl.set !(ctx.edge_tbl) ~pred:blk_tid ~target:tid ~term_bb:cur ()
+  in
+  let rec step ~(first : bool) cur = function
+    | [] -> return ()
+    | j :: rest -> (
+        let cont_bb =
+          match rest with
+          | [] -> None
+          | _ -> Some (Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-sw") fn)
+        in
+        match Jmp.kind j |> goto_label_exn with
+        | Direct tid -> (
+            let bb = get_bb ctx tid in
+            note_edge ~cur tid;
+            match cont_bb with
+            | Some next ->
+                let* cond = create_exp llvm_builder blk_tid (Jmp.cond j) in
+                Llvm.build_cond_br cond bb next llvm_builder |> ignore;
+                Llvm.position_at_end next llvm_builder;
+                step ~first:false next rest
+            | None ->
+                if Hike_stack_model.is_true_cond (Jmp.cond j) || first
+                then (
+                  Llvm.build_br bb llvm_builder |> ignore;
+                  return ())
+                else
+                  let dead =
+                    Llvm.append_block llvm_ctx
+                      (Tid.name blk_tid ^ "-dead")
+                      fn
+                  in
+                  let* cond = create_exp llvm_builder blk_tid (Jmp.cond j) in
+                  Llvm.build_cond_br cond bb dead llvm_builder |> ignore;
+                  Llvm.position_at_end dead llvm_builder;
+                  Llvm.build_unreachable llvm_builder |> ignore;
+                  return ())
+        | Indirect exp -> (
+            (* An indirect jmp ends its own path; later jmps still
+               render. *)
+            let* target_val = create_exp llvm_builder blk_tid exp in
+            Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
+            (match cont_bb with
+             | Some next ->
+                 Llvm.position_at_end next llvm_builder;
+                 step ~first:false next rest
+             | None -> return ())))
+  in
+  step ~first:true (Llvm.insertion_block llvm_builder) jmps

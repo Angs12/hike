@@ -1,34 +1,16 @@
-(* The node-fission pass (hike-split-mem): every def keeps exactly one
-   memory node inline.  The later nodes of a multi-node rhs become
-   fresh virtual load defs immediately before it — they read the same
-   mem-var state the inline nodes read (nested loads see pre-store
-   memory either way), and the original def keeps its tid.
-
-   The per-def tag is then the complete proof of the def's only memory
-   node: the KB record, the region membership, and every consumer key
-   the def — never the expression.  Stores never hoist: a def binds
-   the mem var once, so the (single) store is the rhs root and stays. *)
+(* The node-fission pass: every def keeps exactly one memory node
+   inline; the later nodes of a multi-node rhs become fresh virtual
+   load defs before it, reading the same mem-var state (nested loads
+   see pre-store memory either way).  The per-def tag is then the
+   complete proof of the def's only memory node. *)
 
 open Bap.Std
 
-(* The number of memory nodes of an exp — every Load/Store node,
-   including the ones nested in a store's data or a load's address. *)
-let mem_count (e : exp) : int =
-  let vis =
-    object
-      inherit [ int ] Exp.visitor as super
-      method! visit_load ~mem ~addr rest s acc =
-        super#visit_load ~mem ~addr rest s (acc + 1)
-      method! visit_store ~mem ~addr ~exp rest s acc =
-        super#visit_store ~mem ~addr ~exp rest s (acc + 1)
-    end
-  in
-  vis#visit_exp e 0
+let mem_count (e : exp) : int = Hike_stack_model.mem_node_count e
 
-(* Splits one def: the hoisted load defs, then the rewritten def.  The
-   first memory node stays inline (the one the VSA's classification
-   describes); every distinct later load becomes a fresh virtual def;
-   equal later nodes share one def (pure reads of one state). *)
+(* The first memory node stays inline (the one the VSA's
+   classification describes); every distinct later load becomes a
+   fresh virtual def; equal later nodes share one def. *)
 let split_def (d : def term) : def term list =
   let rhs = Def.rhs d in
   if mem_count rhs <= 1 then [ d ]
@@ -54,10 +36,9 @@ let split_def (d : def term) : def term list =
           if !seen = 1 then super#map_load ~mem ~addr e s
           else Bil.Var (fresh_node ~bits:s (Bil.Load (mem, addr, e, s)))
         method! map_store ~mem ~addr ~exp:e rest s =
-          (* The store node itself is the def's OWN write when it is the
-             first (pre-order) node: keep it inline — the def defines the
-             mem var.  A store encountered LATER (a nested or second
-             store) hoists like a load: one node per def, always. *)
+          (* The first (pre-order) store node is the def's own write —
+             the def defines the mem var; a later (nested or second)
+             store hoists like a load: one node per def, always. *)
           incr seen;
           if !seen = 1 then super#map_store ~mem ~addr ~exp:e rest s
           else Bil.Var (fresh_node ~bits:s (Bil.Store (mem, addr, e, rest, s)))
@@ -70,8 +51,7 @@ let split_def (d : def term) : def term list =
     in
     hoists @ [ Def.with_rhs d rhs' ]
 
-(* The sub, with every def single-node.  Identity unless a def needs
-   splitting (the corpus's single-node subs keep their exact terms). *)
+(* Identity unless a def needs splitting. *)
 let split_sub (sub : sub term) : sub term =
   let needs =
     Term.enum blk_t sub

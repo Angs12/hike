@@ -6,11 +6,8 @@ module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
 
 
-(* Finds the LLVM function at a native address.  A promoted sub's
-   address renders to its Thunk (the memory-convention twin): the
-   twin is what a pointer call can enter with no provable arguments,
-   so unresolvable sites stay sound; resolved sites call the promoted
-   body directly and never consult this rendering. *)
+(* Finds the LLVM function at a native address; a promoted sub
+   renders to its thunk so unresolvable pointer sites stay sound. *)
 let lookup_native_fn ctx llvm_module v =
   Base.Option.bind ctx.symtab ~f:(fun symtab ->
       Base.Option.bind
@@ -22,9 +19,8 @@ let lookup_native_fn ctx llvm_module v =
                 (Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) name)
                 ~default:f)))
 
-(* The owning global and byte offset of [v]: the base map picks the
-   owner covering [v]; the identity (the section base at [lo]) covers
-   the unsplit shape. *)
+(* The owning global and byte offset of [v]; the unsplit shape
+   resolves to the section base. *)
 let section_target ~sec_base lo owners v =
   Base.Option.value
     (Base.Option.map
@@ -33,12 +29,9 @@ let section_target ~sec_base lo owners v =
        ~f:(fun o -> (o.base, Int64.sub v o.own_lo)))
     ~default:(sec_base, Int64.sub v lo)
 
-(* The one address map: a function start renders to its function, a
-   section byte to its OWNING global (the section base map — components
-   and gap runs tile the section byte-exactly, so the base map is total
-   and every rendered pointer is self-valid).  [finish] picks the form:
-   the found value itself (the pointer form), or its ptrtoint (the
-   integer form the address arithmetic consumes). *)
+(* The one address map: a function start to its function, a section
+   byte to its owning global (owners tile byte-exactly, so every
+   rendered pointer is valid).  [finish] picks pointer vs ptrtoint. *)
 let remap_native ctx llvm_ctx llvm_module v ~finish =
   Base.Option.first_some
     (Base.Option.map (lookup_native_fn ctx llvm_module v) ~f:finish)
@@ -52,8 +45,6 @@ let remap_native ctx llvm_ctx llvm_module v ~finish =
               (Llvm.const_in_bounds_gep (Llvm.i8_type llvm_ctx) base
                  [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]))))
 
-(* Remaps a native address to its lifted value: a function start to its
-   Thunk/function, a section byte to its owning global. *)
 let remap_native_addr ctx llvm_ctx llvm_module v =
   remap_native ctx llvm_ctx llvm_module v
     ~finish:(fun f -> Llvm.const_ptrtoint f (Llvm.i64_type llvm_ctx))
@@ -71,25 +62,24 @@ let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
 
 (* The little-endian word assembler: the [len] bytes at [off] (bytes
    past the image read 0). *)
-let word_of_bytes ~(arr : int array) ~(off : int) ~(len : int) : int64 =
+let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
   Base.List.fold
     (Base.List.init len ~f:(fun k -> len - 1 - k))
     ~init:0L
     ~f:(fun acc k ->
       let b =
-        if off + k < Array.length arr then Int64.of_int arr.(off + k)
+        if off + k < Bytes.length arr
+        then Int64.of_int (Char.code (Bytes.get arr (off + k)))
         else 0L
       in
       Int64.logor (Int64.shift_left acc 8) b)
 
-(* A section initializer over the byte image — components, gap runs,
-   and unsplit sections: the element width is [typed_w]; word-sized
-   elements render through the one address map (remapped targets),
-   ptr-typed elements render the target ADDRESS itself (the
-   devirtualization prize), narrower elements chunk the raw bytes.
-   BSS components are zero. *)
+(* A section initializer over the byte image: word-sized elements
+   render through the address map (pointer-valued words render the
+   target address itself), narrower elements chunk the raw bytes;
+   BSS is zero. *)
 let set_owner_initializer ctx llvm_ctx llvm_module g
-    (arr : int array) ~(word_lo : int) ~(word_hi : int)
+    (arr : Bytes.t) ~(word_lo : int) ~(word_hi : int)
     ~(typed_w : int) ~(bss : bool) ~word =
   let words = word_hi - word_lo + 1 in
   let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
@@ -97,10 +87,8 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     if typed_w >= word then word_ty
     else Llvm.integer_type llvm_ctx (typed_w * 8)
   in
-  (* A word whose start boundary a printable string run crosses yields
-     its raw bits: the value is text — remapping it would relocate the
-     string's own bytes and corrupt the data (the model's
-     [string_text_word] is the one home of the rule). *)
+  (* A word inside a printable string run keeps its raw bits:
+     remapping it would relocate the string's own bytes. *)
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
@@ -115,8 +103,6 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     let slots = Base.Array.init words ~f:(fun i -> word64 (word_lo + i)) in
     Llvm.set_initializer (Llvm.const_array elem_ty slots) g
   else
-    (* Narrow elements chunk the raw bytes (sub-word reads of
-       relocated words keep the native bits). *)
     let chunks = words * (word / typed_w) in
     let elems =
       Base.Array.init chunks ~f:(fun i ->
@@ -126,13 +112,12 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     in
     Llvm.set_initializer (Llvm.const_array elem_ty elems) g
 
-(* Finds the section containing a word address. *)
 let section_of_addr sections (addr : word) =
   Base.List.find sections ~f:(fun section ->
       Word.between ~low:section.min_addr addr ~high:section.max_addr)
 
-(* The owner of [addr_i64] in [section]: (global, native base of the
-   owner).  The identity arm is the whole-section array. *)
+(* (global, owner base) for the address; no owners = the
+   whole-section array. *)
 let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
   let identity = (section.base, Word.to_int64_exn section.min_addr) in
   match section.owners with
@@ -146,10 +131,9 @@ let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
            ~f:(fun o -> (o.base, o.own_lo)))
         ~default:identity
 
-(* GEPs into the owner of the address (no scan). *)
 let resolve_addr_in llvm_builder section addr =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   let base, own_lo =
     owner_of section (Word.to_int64_exn addr)
   in
@@ -164,13 +148,12 @@ let resolve_addr_in llvm_builder section addr =
 
 let resolve_addr llvm_builder addr =
   let open KB in
-  let* sections = Context.get section_list_var in
+  let* { sections; _ } = Context.get emit_ctx_var in
   let section = section_of_addr sections addr in
   match section with
   | None ->
-      (* Out-of-section address: the identity — the raw native
-         constant inttoptr'd. *)
-      let* llvm_ctx = Context.get llvm_ctx_var in
+      (* Out-of-section address: inttoptr of the raw constant. *)
+      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       let v =
         Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
           (Word.to_int64_exn addr) false
@@ -179,18 +162,14 @@ let resolve_addr llvm_builder addr =
       @@ Llvm.build_inttoptr v (Llvm.pointer_type llvm_ctx) "" llvm_builder
   | Some section -> resolve_addr_in llvm_builder section addr
 
-(* Materializes the pointer for an address integer: a real (foreign)
-   address — the sret pointer, a reloaded pointer, a VLA address, a
-   section/global constant — inttoptrs to itself; an already-pointer
-   value is the identity. *)
+(* Materializes the pointer for an address integer; an
+   already-pointer value passes through. *)
 let create_addr_ptr llvm_builder llvm_val =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   if
     Llvm.classify_type (Llvm.type_of llvm_val) = Llvm.TypeKind.Pointer
   then
-    (* Already a pointer (a component's loaded value): the identity —
-       the pointer IS the address. *)
     return llvm_val
   else
       return
@@ -205,7 +184,6 @@ let section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size =
     Base.List.exists ctx.copy_relocs ~f:(fun a ->
         Int64.equal a addr_i64)
   then
-    (* Loads through copy-relocated pointers. *)
     let p =
       Llvm.build_load (Llvm.i64_type llvm_ctx) base "" llvm_builder
     in
@@ -223,11 +201,10 @@ let section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size =
 let section_load llvm_builder llvm_ctx addr addr_i64 size =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  let* sections = Context.get section_list_var in
+  let* { sections; _ } = Context.get emit_ctx_var in
   match section_of_addr sections addr with
   | None ->
-      (* Out-of-section address: the identity — load through the raw
-         native pointer. *)
+      (* Out-of-section address: load through the raw native pointer. *)
       let v =
         Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) addr_i64 false
       in
@@ -239,32 +216,28 @@ let section_load llvm_builder llvm_ctx addr addr_i64 size =
            llvm_builder
   | Some section -> section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size
 
-(* Const-address loads: the found section, else the fallback. The
-   found section passes through (one scan). *)
+(* Const-address loads through the found section, else the fallback. *)
 let const_addr_load llvm_builder addr_w size ~fallback =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  let* sections = Context.get section_list_var in
+  let* { sections; _ } = Context.get emit_ctx_var in
   let v = Word.to_int64_exn addr_w in
   match section_of_addr sections addr_w with
   | Some section ->
       section_load_in llvm_builder llvm_ctx ctx section addr_w v size
   | None -> fallback ()
 
-(* Const-address stores into the found section, else the fallback. The
-   stored value arrives as a thunk so the section GEP keeps its emission
-   order ahead of value-lane instructions.  The form's VALUE is the
-   stored data (Bil.Store's type is the data's), never the void store
-   instruction.  A store at a copy-relocated slot address goes THROUGH
-   the slot's relocated pointer (the through-load's matching arm). *)
+(* Const-address stores: the stored value arrives as a thunk so the
+   section GEP precedes it and the form's value is the stored data.
+   A copy-relocated slot address stores through the slot's pointer. *)
 let const_addr_store llvm_builder addr_w ~data ~fallback =
   let open KB in
-  let* sections = Context.get section_list_var in
+  let* { sections; _ } = Context.get emit_ctx_var in
   match section_of_addr sections addr_w with
   | Some section ->
       let* base = resolve_addr_in llvm_builder section addr_w in
-      let* llvm_ctx = Context.get llvm_ctx_var in
+      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       let* ctx = Context.get emit_ctx_var in
       let* llvm_var = data () in
       if
@@ -282,40 +255,38 @@ let const_addr_store llvm_builder addr_w ~data ~fallback =
         return llvm_var
   | None -> fallback ()
 
-let create_empty_llvm_i8array llvm_ctx size =
-  Array.init size (fun _ -> Llvm.const_int (Llvm.i8_type llvm_ctx) 0)
-  |> Llvm.const_array (Llvm.i8_type llvm_ctx)
+(* A global [n x elem_ty] array; [None] zero-initializes. *)
+let create_array_global llvm_ctx llvm_module name elem_ty n slots =
+  let g = Llvm.declare_global (Llvm.array_type elem_ty n) name llvm_module in
+  let init =
+    Base.Option.value_map slots
+      ~default:(Llvm.const_null (Llvm.array_type elem_ty n))
+      ~f:(Llvm.const_array elem_ty)
+  in
+  Llvm.set_initializer init g;
+  Llvm.set_global_constant false g;
+  g
 
 let create_uninitialized_global llvm_ctx llvm_module size name =
-  let size = Int64.to_int size in
-  let ret =
-    Llvm.declare_global
-      (Llvm.array_type (Llvm.i8_type llvm_ctx) size)
-      name llvm_module
-  in
-  Llvm.set_initializer (create_empty_llvm_i8array llvm_ctx size) ret;
-  Llvm.set_global_constant false ret;
-  ret
+  create_array_global llvm_ctx llvm_module name (Llvm.i8_type llvm_ctx)
+    (Int64.to_int size) None
 
-(* Builds bss with copy-relocated slots. *)
 let create_copy_reloc_bss llvm_ctx llvm_module size name copy_relocs ~word
     =
   let size = Int64.to_int size in
   let n64 = (size + word - 1) / word in
   let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
-  let ret =
-    Llvm.declare_global (Llvm.array_type word_ty n64) name llvm_module
-  in
-  let arr = Array.init n64 (fun _ -> Llvm.const_int word_ty 0) in
-  Base.List.iter copy_relocs ~f:(fun (off, sym_name) ->
-      let extern =
-        Llvm.declare_global (Llvm.i8_type llvm_ctx) sym_name llvm_module
-      in
-      arr.(off / word)
-      <- Llvm.const_ptrtoint extern word_ty);
-  Llvm.set_initializer (Llvm.const_array word_ty arr) ret;
-  Llvm.set_global_constant false ret;
-  ret
+  match copy_relocs with
+  | [] -> create_array_global llvm_ctx llvm_module name word_ty n64 None
+  | _ ->
+      let arr = Array.init n64 (fun _ -> Llvm.const_int word_ty 0) in
+      Base.List.iter copy_relocs ~f:(fun (off, sym_name) ->
+          let extern =
+            Llvm.declare_global (Llvm.i8_type llvm_ctx) sym_name llvm_module
+          in
+          arr.(off / word)
+          <- Llvm.const_ptrtoint extern word_ty);
+      create_array_global llvm_ctx llvm_module name word_ty n64 (Some arr)
 
 (* Per-object alignment from the native address (ctz, capped at 16). *)
 let align_of native_lo =
@@ -326,14 +297,11 @@ let align_of native_lo =
   in
   1 lsl ctz native_lo 0
 
-(* The section construction, from the spec: per section, the plan's
-   components tile the span byte-exactly into component globals and
-   gap runs; a span with no components stays the identity (one
-   whole-section array).  The gap runs draw their names from ONE
-   counter across sections — per-section numbering would name two
-   sections' runs alike, and the linker would fuse them into one
-   global — and the counter consumes in the fixed tiling order, which
-   is also the globals' declaration order. *)
+(* Builds the sections from the spec: components tile each span
+   byte-exactly into component globals and gap runs; a span with no
+   components stays one whole-section array.  Gap runs draw names
+   from ONE counter across sections — colliding names would let the
+   linker fuse two runs into one global. *)
 let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   let module Model = Hike_stack_model in
   let word = spec.spec_word in
@@ -341,9 +309,8 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     Base.List.filter spec.spec_comps ~f:(fun c ->
         Int64.equal c.Model.sec_lo lo && Int64.equal c.Model.sec_hi hi)
   in
-  (* A span served whole: its own image global is the shared region
-     id's storage, and one owner row wires the id to it (the converted
-     lane GEPs the same global the raw lane resolves). *)
+  (* A span served whole: its image global is the region id's
+     storage, wired by one owner row. *)
   let whole_id lo hi =
     Base.List.find_map spec.spec_whole ~f:(fun (i, l, h) ->
         if Int64.equal l lo && Int64.equal h hi then Some i else None)
@@ -487,7 +454,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
         else
           let base =
             create_section_global llvm_ctx llvm_module
-              (Array.length si_image) llvm_name ~is_const:si_const ~word
+              (Bytes.length si_image) llvm_name ~is_const:si_const ~word
           in
           let owners =
             Base.Option.value_map whole ~default:[] ~f:(fun id ->
@@ -516,8 +483,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
             | Some si when key_of si = t -> Some (t, build_entry si)
             | _ -> None))
   in
-  (* The output order is the fixed section-list order; an absent
-     section warns with its index. *)
+  (* Output order is the fixed section-list order. *)
   Base.List.filter_mapi spec.spec_sections ~f:(fun i e ->
       match e with
       | None ->

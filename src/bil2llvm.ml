@@ -1,6 +1,5 @@
 (* LLVM emitter core: declarations, blocks, subs, sigs, entry.
-   Lanes live in bil2llvm_{env,section,exp,mem,fp,calls}; this module
-   orchestrates and carries the frozen seam (bil2llvm.mli). *)
+   The lanes live in bil2llvm_{env,section,exp,mem,fp,calls}. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
@@ -13,19 +12,22 @@ open Bil2llvm_calls
 open Bil2llvm_fp
 open Bil2llvm_section
 
+let section_type_to_string = Bil2llvm_env.section_type_to_string
+
 let update_phi transfer_vars blk_incoming blk_tid =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  (* Consults edge-keyed restores first. *)
+  (* The edge bridge's SP restore wins over the pred's local binding. *)
   let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
     if Var.same var ctx.sp then
-      Base.Option.bind (EHashtbl.find !(ctx.edge_sp_restores) pred_tid)
-        ~f:(fun inner -> EHashtbl.find inner blk_tid)
+      match Edge_tbl.find !(ctx.edge_tbl) ~pred:pred_tid ~target:blk_tid with
+      | Some r -> r.sp_restore
+      | None -> None
     else None
   in
   KB.List.iter transfer_vars ~f:(fun var ->
       let phi_llvar = get_phi ctx blk_tid var in
-      Seq.iter blk_incoming ~f:(fun tid ->
+      List.iter blk_incoming ~f:(fun (tid, pred_bb) ->
           let phi_reg =
             match edge_val tid var with
             | Some v -> Some v
@@ -33,53 +35,38 @@ let update_phi transfer_vars blk_incoming blk_tid =
           in
           match phi_reg with
           | Some phi_reg ->
-              Llvm.add_incoming (phi_reg, get_bb ctx tid) phi_llvar;
+              Llvm.add_incoming (phi_reg, pred_bb) phi_llvar;
               return ()
           | None ->
               (* An incoming with no value on its edge reads the
-                 register's fixed garbage — the never-defined-var
-                 rule, with the sanctioned diagnostic. *)
+                 register's frozen undef. *)
               warn_undef_read ctx var blk_tid;
               let* v = frozen_undef ctx var in
-              Llvm.add_incoming (v, get_bb ctx tid) phi_llvar;
+              Llvm.add_incoming (v, pred_bb) phi_llvar;
               return ()))
 
-(* Counts edge multiplicities over the term edges: every conditional
-   goto of a completed dispatch is a real BIR edge, so one bump per
-   (predecessor, target) jmp — the rewrite's one-goto-per-target rule
-   keeps a multi-word case at one incoming. *)
-let edge_counts_of_sub (sub : sub term) :
-    (Tid.t, (Tid.t, int) EHashtbl.t) EHashtbl.t =
-  let edge_count = EHashtbl.create (module Tid) in
-  let bump (ptid : Tid.t) (t : Tid.t) : unit =
-    let inner =
-      match EHashtbl.find edge_count ptid with
-      | Some h -> h
-      | None ->
-        let h = EHashtbl.create (module Tid) in
-        EHashtbl.set edge_count ~key:ptid ~data:h;
-        h
-    in
-    let cur = match EHashtbl.find inner t with Some n -> n | None -> 0 in
-    EHashtbl.set inner ~key:t ~data:(cur + 1)
+(* LLVM phis take one incoming per terminator edge; two conditional
+   gotos to the same target are two edges where the graph shows one. *)
+let multiplicity (pred_blk : blk term) (target : Tid.t) : int =
+  let n =
+    Term.enum jmp_t pred_blk
+    |> Seq.count ~f:(fun j ->
+        match Jmp.kind j with
+        | Goto (Direct t) | Ret (Direct t) -> Tid.equal t target
+        | _ -> false)
   in
-  Term.enum blk_t sub
-  |> Seq.iter ~f:(fun pb ->
-      let ptid = Term.tid pb in
-      Term.enum jmp_t pb
-      |> Seq.iter ~f:(fun j ->
-          match Jmp.kind j with
-          | Goto (Direct t) | Ret (Direct t) -> bump ptid t
-          | _ -> ()));
-  edge_count
+  if n = 0 then 1 else n
 
 let update_phis transfer_vars blks sub () =
+  let blk_of =
+    Core.Map.of_alist_exn (module Tid)
+      (Base.List.map (Seq.to_list blks) ~f:(fun b -> (Term.tid b, b)))
+  in
   let open KB in
-  let edge_count = edge_counts_of_sub sub in
+  let* ctx = Context.get emit_ctx_var in
   let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
-      (* Phis need one entry per edge. *)
       let term_preds =
         Graphs.Tid.Node.preds blk_tid cfg
         |> Base.Sequence.to_list
@@ -87,22 +74,27 @@ let update_phis transfer_vars blks sub () =
       let blk_incoming =
         Base.List.concat_map term_preds ~f:(fun ptid ->
             let n =
-              Base.Option.value
-                (EHashtbl.find edge_count ptid
-                 |> Base.Option.bind ~f:(fun h -> EHashtbl.find h blk_tid))
-                ~default:1
+              match Core.Map.find blk_of ptid with
+              | Some pb -> multiplicity pb blk_tid
+              | None -> 1
             in
-            Base.List.init n ~f:(fun _ -> ptid))
-        |> Base.Sequence.of_list
+            Base.List.init n ~f:(fun _ ->
+                (* Phi incomings name the pred's terminator block, not
+                   its entry. *)
+                let edge_bb =
+                  match Edge_tbl.find !(ctx.edge_tbl) ~pred:ptid ~target:blk_tid with
+                  | Some r -> r.term_bb
+                  | None -> get_bb ctx ptid
+                in
+                (ptid, edge_bb)))
       in
       update_phi transfer_vars blk_incoming blk_tid)
 
-(* Int edges trap. *)
 let create_control_flow llvm_builder blk sub fr () =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
-    (* Def-only blocks return implicitly. *)
+    (* Def-only blocks still need a terminator. *)
     create_return tid llvm_builder sub
   else
   match cf_type control_flow with
@@ -168,19 +160,15 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
         match arg with
         | Some arg -> create_exp llvm_builder tid (Arg.rhs arg)
         | None ->
-            (* Unbound transfer vars read the register's fixed garbage:
-               a freeze, so every later read of the same undefined
-               register observes identical bits. *)
+            (* Unbound transfer vars freeze to one fixed value:
+               repeated reads of an undefined register observe
+               identical bits. *)
             frozen_undef ~builder:llvm_builder ctx var
       in
       !$(insert_local ctx tid var) llval)
   >>= fun () ->
-  (* The SP Slot: every storage-carrying sub owns an entry-block
-     alloca holding its per-invocation anchor — the ptrtoint of its own
-     frame (or of its first region alloca for precise subs).  The SP
-     local binds to the slot's value: stack_0 is PRIVATE to this
-     invocation, reentrancy-safe, and NO sub takes an SP parameter.
-     SROA erases the constant cases. *)
+  (* The SP local binds to a per-invocation entry-block alloca: the
+     anchor is invocation-private — reentrancy-safe, no SP parameter. *)
   let sp0 =
     (* storage-free subs: the constant anchor *)
     Base.Option.value fr.stack0 ~default:fr.anchor_i64
@@ -192,9 +180,8 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
 let collect_sub_data ctx llvm_ctx blks fn sub =
   insert_bb ctx Graphs.Tid.start (Llvm.entry_block fn);
   init_blk_llvals ctx Graphs.Tid.start;
-  (* The transfer set (live across blocks: call-arg regs, callee rets,
-     free vars) and the defined set (defs plus phi lhs — phi lanes need
-     definedness). *)
+  (* (transfer set, defined set); the defined set includes phi lhs —
+     phi lanes need definedness. *)
   let defined_and_transfered =
     Seq.fold blks
       ~f:(fun (reg_set, def_set) blk ->
@@ -214,7 +201,6 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
                             ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg))),
                           get_args ctx ctid )
                     | Indirect _ ->
-                        (* Indirect callees bind all ret regs. *)
                         ( Core.Set.union rets (ret_set ctx),
                           [] )
                   in
@@ -228,7 +214,6 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
           |> Seq.fold ~init:Var.Set.empty ~f:(fun acc elt ->
                  match elt with
                  | `Def def -> Core.Set.add acc (Var.base (Def.lhs def))
-                 (* Phi lhs counts as defined. *)
                  | `Phi phi -> Core.Set.add acc (Var.base (Phi.lhs phi))
                  | _ -> acc)
         in
@@ -248,22 +233,19 @@ let collect_sub_data ctx llvm_ctx blks fn sub =
   |> Core.Set.union arg_set
   |> Core.Set.filter ~f:(fun var ->
       ((not @@ Hike_stack_model.is_mem var) || Var.same var (Abi.pc ctx.target))
-      (* Keeps SP and every callee-saved lane (fp is an ordinary one). *)
+      (* SP and callee-saved lanes stay live. *)
       || Var.same var ctx.sp
       || Abi.is_callee_saved ctx.abi var)
   |> Core.Set.filter ~f:(fun var ->
-      (* Drops never-defined vars from transfer. *)
       Core.Set.mem def_set var
       || Core.Set.mem arg_set var
       || Var.same var ctx.sp)
   |> Core.Set.to_list
 
 
-(* The anchor word: ptrtoint of the base GEP at [idx] — the integer the
-   SP Slot stores and every materialization relativizes against.  [idx]
-   is ≡ 16 − word (mod 16): the SysV entry SP carries that residue, and
-   the lifted word arithmetic (an SSE #GP fault guard tests
-   (stack_0 + k) & 15) must evaluate the residue the native does. *)
+(* The anchor word: the integer the SP Slot stores and every
+   materialization relativizes against.  [idx] keeps the SysV entry-SP
+   residue mod 16, so lifted alignment tests evaluate as the native. *)
 let anchor_word llvm_ctx llvm_builder base idx =
   let anchor =
     Llvm.build_gep (Llvm.i8_type llvm_ctx) base
@@ -273,8 +255,7 @@ let anchor_word llvm_ctx llvm_builder base idx =
   Llvm.build_ptrtoint anchor (Llvm.i64_type llvm_ctx) "anchor_i64"
     llvm_builder
 
-(* The sub body: the stack model's LAYOUT decision is consumed here
-   (the layout tag read below). *)
+(* Consumes the sub's LAYOUT tag (region geometry). *)
 let create_sub sub =
   let open KB in
   if is_empty sub then return ()
@@ -283,7 +264,7 @@ let create_sub sub =
     Base.Option.is_some (native_fp_op (Tid.name (Term.tid sub)))
   then return ()
   else
-    let* llvm_ctx = Context.get llvm_ctx_var in
+    let* { llvm_ctx; _ } = Context.get emit_ctx_var in
     let* ctx = Context.get emit_ctx_var in
     let blks = Term.enum blk_t sub in
     let fn, _ =
@@ -295,9 +276,8 @@ let create_sub sub =
     clear_bbs ctx;
     clear_blk_llvals ctx;
     clear_undef_vals ctx;
+    ctx.undef_warned := Tid.Map.empty;
     let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
-    (* The LAYOUT fact: the alloca-construction inputs ride the
-       sub term — no analysis record reaches the emitter. *)
     let layout_regions, layout_anchor =
       Base.Option.value_map (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:([], None)
@@ -306,11 +286,8 @@ let create_sub sub =
     let regions =
       Base.List.map layout_regions
         ~f:(fun (id, (lo, _), bytes) ->
-          (* The array count crosses the LLVM binding as a 32-BIT
-             UNSIGNED (the stub's Int_val -> unsigned param), so a
-             count at/above 2^31 would truncate silently there.  The
-             request is loud and bounded, never silently truncated;
-             the fold keeps every sound producer below the boundary. *)
+          (* LLVM array counts cross the binding as 32-bit unsigned:
+             clamp loudly rather than truncate silently. *)
           let bytes =
             if Int64.compare bytes 0x7fff_fff0L >= 0 then begin
               Hike_diag.warn
@@ -330,9 +307,7 @@ let create_sub sub =
           ( Hike_stack_model.region_mem id,
             (base, Stdlib.Int64.sub lo Hike_stack_model.segment_base) ))
     in
-    (* THE stack anchor — the entry RSP's runtime position, from the
-       fold: (region id, byte index).  The SP Slot stores its
-       ptrtoint; every materialization relativizes against it. *)
+    (* The anchor: (region id, byte index) into the regions above. *)
     let anchor =
       Base.Option.bind layout_anchor ~f:(fun (rid, idx) ->
           Base.Option.bind
@@ -341,7 +316,6 @@ let create_sub sub =
             ~f:(fun (_, (base, _)) ->
               Some (anchor_word llvm_ctx llvm_builder base idx)))
     in
-    (* Binds region bases to alloca cell-0. *)
     let* () =
       let rec bind_regions = function
         | [] -> return ()
@@ -351,8 +325,6 @@ let create_sub sub =
       in
       bind_regions regions
     in
-    (* The SP Slot: the entry-block alloca holding this
-       invocation's anchor — the sub's own anchor integer. *)
     let anchor_val, sp_slot =
       Base.Option.value_map anchor
         ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0, false)
@@ -372,17 +344,16 @@ let create_sub sub =
       Base.Option.value anchor ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
     in
     let fr : sub_frame = { anchor_i64; stack0; regions } in
-    cur_frame := Some fr;
+    ctx.cur_frame := Some fr;
     add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
     >>= fun () ->
     build_entry_block llvm_builder transfer_vars fr sub fn ()
     >>= fun fr ->
-    cur_frame := Some fr;
+    ctx.cur_frame := Some fr;
     populate_blks transfer_vars blks sub fr ()
     >>= update_phis transfer_vars blks sub
     >>= fun () ->
-    cur_frame := None;
-    (* Summarizes model-ABI undef reads. *)
+    ctx.cur_frame := None;
     let sub_tid = Term.tid sub in
     let lane_reads =
       Core.Map.fold !(ctx.undef_warned) ~init:Var.Set.empty
@@ -398,26 +369,10 @@ let create_sub sub =
         (Tid.name sub_tid) (Core.Set.length lane_reads);
     return ()
 
-(* Sub-signature facts shared with the filter pass. *)
-
 let free_vars sub =
   Sub.free_vars sub
   |> Core.Set.filter ~f:(fun var -> not @@ Hike_stack_model.is_mem var)
   |> Core.Set.to_list
-
-(* Tests the [Sub.intrinsic] attribute. *)
-let is_intrinsic (term : sub term) : bool =
-  Term.has_attr term Sub.intrinsic
-
-(* Intrinsics with bodies we can emit. *)
-let is_emittable_intrinsic (term : sub term) : bool =
-  is_intrinsic term && not (Seq.is_empty (Term.enum blk_t term))
-
-(* The signature is FIXED — the promotion does not define it: the
-   emittable intrinsics (free-var projection) and @main (rdi/rsi). *)
-let fixed_signature (term : sub term) : bool =
-  is_emittable_intrinsic term
-  || String.equal (Tid.name (Term.tid term)) "@main"
 
 let fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
   let is_value_reg v =
@@ -477,9 +432,9 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
     else rets
   in
   let rets, args =
-    (* A sub whose incoming window it reads (the layout's window_param)
-       carries the caller-window base: its above-entry accesses
-       materialize against the CALLER's world. *)
+    (* A sub reading its incoming window carries the caller-window
+       base: its above-entry accesses materialize against the
+       caller's frame. *)
     let window_arg =
       match Term.get_attr sub Hike_stack_model.layout_tag with
       | Some { Hike_stack_model.window_param = true; _ } ->
@@ -488,8 +443,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
             (Bil.Var (Hike_stack_model.hike_window_var ~word:w)) ]
       | _ -> []
     in
-    if is_emittable_intrinsic sub then begin
-    (* Intrinsic signature is the model's own interface. *)
+    if Hike_stack_model.is_emittable_intrinsic sub then begin
     let args =
       Base.List.map free_vars ~f:(fun reg ->
           Arg.create ~intent:In reg (Var reg))
@@ -511,7 +465,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
     in
       (rets, args)
     end
-  else if fixed_signature sub then
+  else if Hike_stack_model.fixed_signature sub then
      let rdi = Base.List.nth_exn abi.int_param_regs 0 in
      let rsi = Base.List.nth_exn abi.int_param_regs 1 in
      let args =
@@ -522,15 +476,10 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
      in
       (rets, args)
    else
-       (* The signature is the callee's own promoted interface,
-         transcribed from the SUB TERM'S OWN BIR ARGS (the promotion
-         rewrite added them: the proven slots and the window class's
-         hull slots 0..arity-1).  No record read: the args ARE the
-         structure. *)
+       (* The signature transcribes the sub term's own BIR args
+         (promoted slots included). *)
        let arg_terms = Term.enum arg_t sub |> Base.Sequence.to_list in
        let args =
-         (* The convention's parameter order: the integer lanes, then
-            the vector lanes. *)
          let rank_of_var (v : var) : int * string =
            let n = Var.name (Var.base v) in
            match Base.List.findi (Abi.param_regs abi) ~f:(fun _ r -> Var.same r v) with
@@ -542,17 +491,14 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
              let is_callee_saved =
                Abi.is_callee_saved abi reg
              in
-             (* RBP filters out via [callee_saved] (an ordinary
-                 callee-saved GPR — SP-only); the TLS base filters out
-                 via [thread_pointer] (reads are self-basing — the
-                 read site renders the target's own base); the promoted
-                 interface names (hike_slotN / the call-arg temps) are
-                 the emitter's own vocabulary — never register lanes. *)
+             (* Filters non-parameter lanes: callee-saved regs, the
+                 self-basing TLS base, the emitter's own promoted
+                 names. *)
              not
                (Var.same reg (Abi.sp target)
                || Var.same reg abi.thread_pointer
                || is_callee_saved
-               || is_intrinsic_name n
+               || Hike_stack_model.is_intrinsic_name n
                || Base.String.is_prefix n ~prefix:"hike_slot"
                || Base.String.is_prefix n ~prefix:"hike_arg"))
          |> Base.List.sort ~compare:(fun a b ->
@@ -564,11 +510,9 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
          |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
          |> fun regs -> regs @ arg_terms
        in
-      (* PLT stubs take the full param list. Signature-shape rule (args = []
-         + any call): distinct from the emitter's BIL-shape rule
-         [is_plt_trampoline] (no reg free-vars + call) — the two run on
-         different inputs (pre-DCE raw sub vs post-DCE sub) and must not
-         be merged blindly. *)
+      (* Signature-shape PLT rule (args = [] + any call); distinct
+         from [is_plt_trampoline]'s BIL-shape rule — different
+         inputs, do not merge. *)
       let is_plt_sig =
         args = []
         && Term.enum blk_t sub
@@ -589,17 +533,13 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
    in
    (rets, args)
 
-(* One emission phase: the four KB context vars every lane reads,
-   bound around [body].  The phases and their order — signatures,
-   thunks, bodies, initializers — are the emission's load-bearing
-   structure. *)
+(* One emission phase: the KB context var with the LLVM handles and
+   sections bound.  Phase order — sigs, thunks, bodies, initializers —
+   is load-bearing. *)
 let run_emission ctx llvm_ctx llvm_module sections body =
+  let ctx = { ctx with llvm_ctx; llvm_module; sections } in
   Toplevel.exec begin
-    KB.Context.with_var emit_ctx_var ctx (fun () ->
-      KB.Context.with_var llvm_ctx_var llvm_ctx (fun () ->
-        KB.Context.with_var llvm_module_var llvm_module (fun () ->
-          KB.Context.with_var section_list_var sections (fun () ->
-            body ()))))
+    KB.Context.with_var emit_ctx_var ctx (fun () -> body ())
   end
 
 (* The emission entry: signature collection, declarations, bodies. *)
@@ -609,11 +549,10 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(copy_relocs : int64 list)
     (spec : section_spec)
     (prog : program term) : unit =
-  (* The sections construct from the spec — the globals, the tiles, and
-     the owner lists — before any function declares. *)
+  (* The sections construct from the spec before any function declares. *)
   let sections = Bil2llvm_section.build_sections llvm_ctx llvm_module spec in
-  (* The section base map: every native address in a section renders
-     through its owning global. *)
+  (* The section base map: every native address renders through its
+     owning global. *)
   let section_remap =
     Base.List.map sections ~f:(fun s ->
         ( Word.to_int64_exn s.min_addr,
@@ -634,9 +573,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       ptrsize;
     }
   in
-  (* The named-component map: the BIL's sec_comp_N_mem routes
-     through it; filled before any body emits (the rip-relative lane
-     renders through the same owners). *)
+  (* The named-component map: filled before any body emits; the
+     rip-relative path renders through the same owners. *)
   Base.List.iter sections ~f:(fun section ->
       Base.List.iter section.owners ~f:(fun o ->
           match o.own_id with
@@ -653,9 +591,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     |> Base.Sequence.to_list
     |> Base.List.map ~f:(fun sub -> (sub, compute_sub_sig target ~abi sub))
   in
-  (* The synthetic indirect-call signature gains the Caller-Window
-     Parameter: every pointer call passes the caller's SP at the
-     call, so the Thunk of a promoted target can unpack the window. *)
+  (* Every pointer call passes the caller's SP, so a promoted
+     target's thunk can unpack the caller window. *)
   let icall_tid = Tid.for_name "indirect_call" in
   let conv = Abi.of_target target in
   let icall_sig =
@@ -663,21 +600,16 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
           Arg.create ~intent:Out reg (Var reg)),
       window_conv_args ~word:conv.Abi.word conv )
   in
-  (* The Thunks' signatures: the memory-path convention (the
-     register lanes plus the window base) — registered so the
-     unprovable-direct-site path can call the twin wholesale.  A sub
-     earns a twin iff its own signature carries promoted slots (read
-     from the signature, not a record). *)
+  (* A sub earns a thunk twin iff its own signature carries promoted
+     slots; the twin's signature is the synthetic indirect
+     convention. *)
   let has_slot_args args =
     Base.List.exists args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
   in
   let twin_sig_of (sub, (rets, args)) =
     let sub_tid = Term.tid sub in
-    if has_slot_args args && not (fixed_signature sub)
+    if has_slot_args args && not (Hike_stack_model.fixed_signature sub)
     then
-      (* The twin's signature = the synthetic indirect convention (the
-         register lanes plus the window base), exactly what a pointer
-         call passes. *)
       Some
         ( Bil2llvm_calls.thunk_tid_of sub_tid,
           (rets, window_conv_args ~word:conv.Abi.word conv) )
@@ -709,8 +641,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   run_emission ctx llvm_ctx llvm_module sections (fun () ->
       KB.List.iter sigs ~f:(fun (sub, (rets, args)) ->
-          (* Mapped intrinsics store the sig but define no function; a
-             self-call stub declares instead of defining. *)
           let tid = Term.tid sub in
           if Base.Option.is_some (native_fp_op (Tid.name tid)) then
             KB.return ()
@@ -724,25 +654,19 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       KB.Seq.iter (Term.enum sub_t prog) ~f:(fun s ->
           if is_self_call_stub_tid (Term.tid s) then KB.return ()
           else create_sub s));
-  (* The data-section initializers render INSIDE the one emission
-     context: every 8-byte word goes through [remap_native_addr],
-     whose symtab arm resolves to the Thunk of a promoted sub —
-     function-pointer data must land on the memory-convention twin so
-     unresolvable pointer sites stay sound.  Split sections
-     render per owner: components with their typed/ptr decisions, gap
-     runs as word slices. *)
+  (* Initializers render inside the emission context: word data goes
+     through [remap_native_addr], so function-pointer data lands on a
+     promoted sub's thunk. *)
   run_emission ctx llvm_ctx llvm_module sections (fun () ->
       KB.List.iter sections ~f:(fun section ->
           match section.bytes with
           | Some arr when Base.List.is_empty section.owners ->
-              (* The unsplit section is one owner: the whole image,
-                 word cells 0 through the last. *)
               let word = ctx.abi.Abi.word in
               KB.return
               @@ Bil2llvm_section.set_owner_initializer ctx llvm_ctx
                    llvm_module section.base arr
                    ~word_lo:0
-                   ~word_hi:((Array.length arr + word - 1) / word - 1)
+                   ~word_hi:((Bytes.length arr + word - 1) / word - 1)
                    ~typed_w:word ~bss:false ~word
           | Some arr ->
               let lo = Word.to_int64_exn section.min_addr in
@@ -762,12 +686,11 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                        ~bss:false ~word)
           | None -> KB.return ()))
 
-(* The frozen seam (bil2llvm.mli): re-exports from the lane modules. *)
+(* Re-exports from the lane modules (the mli surface). *)
 type native_fp = Bil2llvm_fp.native_fp =
   | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
   | FCONVERT of int | FORDER | FHLT | ISNAN
 
-(* The section construction's surface, from the env lane. *)
 type sec_owner = Bil2llvm_env.sec_owner = {
   own_id : int option;
   own_lo : int64;
@@ -781,7 +704,7 @@ type section = Bil2llvm_env.section = {
   base : Llvm.llvalue;
   min_addr : word;
   max_addr : word;
-  bytes : int array option;
+  bytes : Bytes.t option;
   owners : sec_owner list;
 }
 
@@ -801,7 +724,7 @@ type sec_input = Bil2llvm_env.sec_input =
       si_hi : int64;
       si_words : int;
       si_const : bool;
-      si_image : int array;
+      si_image : Bytes.t;
     }
   | Sec_bss of {
       si_lo : int64;
@@ -819,10 +742,8 @@ type section_spec = Bil2llvm_env.section_spec = {
 
 let native_fp_op = Bil2llvm_fp.native_fp_op
 
-(* The name-minting fact, shared (see the mli). *)
 let sanitize_name = Bil2llvm_env.sanitize_name
 
-(* The section construction, from the section lane. *)
 let build_sections = Bil2llvm_section.build_sections
 let create_section_global = Bil2llvm_section.create_section_global
 let create_uninitialized_global = Bil2llvm_section.create_uninitialized_global

@@ -5,9 +5,8 @@ open Bap_core_theory
 open Theory.Role.Register
 open Bap.Std.Bil.Types
 
-(* Convention record.  There is NO frame-pointer fact: RBP is an ordinary
-   callee-saved GPR (ADR 0008 — SP is the only register granted stack
-   semantics by fiat). *)
+(* No frame-pointer fact: SP is the only register granted stack semantics;
+   RBP is an ordinary callee-saved GPR. *)
 type t = {
   sp : var;                      (* stack pointer *)
   thread_pointer : var;          (* the TLS base register *)
@@ -43,16 +42,13 @@ let x86_64_sysv : t =
 let is_sp (t : t) (v : var) : bool = Var.same v t.sp
 let is_callee_saved (t : t) (v : var) : bool =
   Base.List.exists t.callee_saved ~f:(Var.same v)
-(* Structural model-ABI lanes; never-defined reads here aggregate per-sub. *)
 let is_vector_param_reg (t : t) (v : var) : bool =
   Base.List.exists t.vector_param_regs ~f:(Var.same v)
 let is_return_reg (t : t) (v : var) : bool =
   Base.List.exists t.return_regs ~f:(Var.same v)
 
-(* The argument lanes in convention order: integer, then vector. *)
+(* Argument registers in convention order: integer, then vector. *)
 let param_regs (t : t) : var list = t.int_param_regs @ t.vector_param_regs
-
-(* Target-derived registers and sizes. *)
 
 let addr_size_bits target =
   if Theory.Target.is_unknown target then 0
@@ -72,13 +68,13 @@ let pc target =
   if Theory.Target.matches target "x86_64-gnu-elf" then
     Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
   else
-    (* Total on unknown targets: a synthetic RIP for var-equality tests. *)
+    (* A synthetic RIP for var-equality tests on unknown targets. *)
     Var.create ~is_virtual:false ~fresh:false "RIP" (Type.Imm 64)
 
-(* Only consumers reach register lists or predicates through here. *)
+(* Consumers reach register lists and predicates only through here. *)
 
 let of_target (target : Theory.Target.t) : t =
-  (* Total: the SysV record serves unknown targets (unit fixtures). *)
+  (* The SysV record serves unknown targets. *)
   if Theory.Target.matches target "x86_64-gnu-elf" then
     {
       sp = sp target;
@@ -95,5 +91,4 @@ let of_target (target : Theory.Target.t) : t =
 (* Value-register names for the FP-return detector. *)
 let value_return_names = [ "RAX"; "EAX"; "RDX"; "EDX" ]
 
-(* Vector-register name prefix. *)
 let vector_param_prefix = "YMM"

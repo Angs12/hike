@@ -9,8 +9,8 @@ module StrSet = Set.Make (String)
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
 (* Intrinsics are owned by the emitter; the filter shares the facts. *)
-let is_intrinsic = Bil2llvm.is_intrinsic
-let is_emittable_intrinsic = Bil2llvm.is_emittable_intrinsic
+let is_intrinsic = Hike_stack_model.is_intrinsic
+let is_emittable_intrinsic = Hike_stack_model.is_emittable_intrinsic
 
 let simplify_jmps sub =
   Term.concat_map blk_t sub ~f:(fun blk ->
@@ -35,7 +35,6 @@ let simplify_jmps sub =
                 Some new_blk)
         in
         let new_blk = Blk.Builder.result blk_builder in
-        (* Copies block attrs. *)
         let new_blk = Term.with_attrs new_blk (Term.attrs blk) in
         children @ [ new_blk ])
 
@@ -53,14 +52,11 @@ let excluded_subs =
     "frame_dummy";
   ]
 
-(* Callers of intrinsics lift; the promotion, thunks, and window lanes
-   are callee-agnostic.  What stays filtered: the intrinsic SUBS
-   themselves (BAP's bodyless @intrinsic:* placeholders are not code —
-   call TARGETS map through the emitter's table; the placeholder subs
-   are never lifted). *)
+(* What stays filtered: the intrinsic subs themselves — BAP's bodyless
+   @intrinsic:* placeholders are not code; call targets map through
+   the emitter's table. *)
 let should_filter syms sub =
-  (* Emittable intrinsics (the soft-float bodies) stay; their calls
-     inline. *)
+  (* Emittable intrinsics (the soft-float bodies) stay. *)
   if is_emittable_intrinsic sub then false
   else
     Base.List.mem ~equal:String.equal excluded_subs (Sub.name sub)

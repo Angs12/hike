@@ -1,6 +1,5 @@
-(* Emitter environment: KB context vars, the env reader, LLtype helpers,
-   the WVar/blk-llvals machinery, the signature/label helpers, and the
-   LLVM-name minting.  The module every emitter lane opens. *)
+(* Emitter environment: KB context vars, LLtype helpers, the
+   WVar/blk-llvals machinery, signature/label helpers, name minting. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
@@ -10,6 +9,46 @@ module KB = Bap_knowledge.Knowledge
 
 
 module EHashtbl = Core.Hashtbl
+
+(* The edge bridge: per BIR edge (pred -> target), the basic block
+   holding the edge's terminator and the edge's SP-restore value.
+   Reset per sub; phis read it after rendering completes. *)
+module Edge_tbl = struct
+  type row = { term_bb : Llvm.llbasicblock; sp_restore : Llvm.llvalue option }
+
+  type t = (Tid.t, (Tid.t, row) EHashtbl.t) EHashtbl.t
+
+  let empty () : t = EHashtbl.create (module Tid)
+
+  (* Merges into any existing row: the render paths write different
+     fields of one row. *)
+  let set (t : t) ~(pred : Tid.t) ~(target : Tid.t)
+      ?term_bb ?sp_restore () : unit =
+    let inner =
+      match EHashtbl.find t pred with
+      | Some h -> h
+      | None ->
+        let h = EHashtbl.create (module Tid) in
+        EHashtbl.set t ~key:pred ~data:h;
+        h
+    in
+    let existing = EHashtbl.find inner target in
+    let row =
+      match existing with
+      | Some r ->
+        { term_bb = Option.value term_bb ~default:r.term_bb;
+          sp_restore = Base.Option.first_some sp_restore r.sp_restore }
+      | None ->
+        { term_bb = (match term_bb with Some bb -> bb | None -> failwith "Edge_tbl.set: a new row needs a term_bb");
+          sp_restore = sp_restore }
+    in
+    EHashtbl.set inner ~key:target ~data:row
+
+  let find (t : t) ~(pred : Tid.t) ~(target : Tid.t) : row option =
+    match EHashtbl.find t pred with
+    | Some h -> EHashtbl.find h target
+    | None -> None
+end
 
 (* Vars keyed by (name, width). *)
 type wvar = WVar of Var.t * int
@@ -30,7 +69,6 @@ module WVarMap = Map.Make (WVar)
 type llvalue_map = Llvm.llvalue WVarMap.t
 type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
 
-(* Section types. *)
 (* One owner of a byte range of a section: a component or a gap
    run.  [own_id] is the component id ([None] for a gap run). *)
 type sec_owner = {
@@ -46,13 +84,11 @@ type section = {
   base : Llvm.llvalue;
   min_addr : word;
   max_addr : word;
-  (* The section's byte image (the initializers render inside
-     [emit_program], where the one address map — thunks included —
-     lives). *)
-  bytes : int array option;
-  (* The byte-exact tiling: every address in the section resolves
-     through exactly one owner.  Empty = the identity (the one big
-     array in [base]). *)
+  (* The byte image; initializers render inside [emit_program],
+     where the address map lives. *)
+  bytes : Bytes.t option;
+  (* The byte-exact tiling: every address resolves through exactly
+     one owner.  Empty = the identity (the one array in [base]). *)
   owners : sec_owner list;
 }
 type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL | TEXT
@@ -66,9 +102,7 @@ let section_type_to_string = function
   | RODATA_REL -> "data.rel.ro"
   | TEXT -> "text"
 
-(* One input section of the spec: a byte-image section (its span, word
-   count on the word grid, const-ness, image) or the bss span (zeroed
-   storage with its copy-relocated slots). *)
+(* One input section of the spec. *)
 type sec_input =
   | Sec_bytes of {
       si_type : section_type;
@@ -76,7 +110,7 @@ type sec_input =
       si_hi : int64;
       si_words : int;             (* the word count on the word grid *)
       si_const : bool;
-      si_image : int array;       (* the section's byte image *)
+      si_image : Bytes.t;       (* the section's byte image *)
     }
   | Sec_bss of {
       si_lo : int64;
@@ -85,11 +119,9 @@ type sec_input =
       si_copy_relocs : (int * string) list;
     }
 
-(* The section spec: everything the section construction consumes —
-   the finalized data tree's Global components, the spans served whole
-   (each (id, lo, hi): the section's own image global is the id's
-   storage), the word grid, and the input sections in the fixed
-   section-list order ([None] = absent from the binary). *)
+(* The section spec: the components, the spans served whole
+   (each (id, lo, hi)), the word grid, and the input sections in the
+   fixed section-list order ([None] = absent from the binary). *)
 type section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
@@ -97,16 +129,25 @@ type section_spec = {
   spec_sections : sec_input option list;
 }
 
+type sub_frame = {
+  (* The anchor integer: the SP slot's stored value, or the constant
+     0 for storage-free subs. *)
+  anchor_i64 : Llvm.llvalue;
+  (* The SP entry value; None = SP binds to [anchor_i64]. *)
+  stack0 : Llvm.llvalue option;
+  (* Region mem var -> (alloca, entry-relative base). *)
+  regions : (Var.t * (Llvm.llvalue * int64)) list;
+}
+
+
 type emit_ctx = {
   symtab : Symtab.t option;
-  (* (lo, hi, base, owners) per reserved section: the section base map —
-     every native address in a section renders through its owning
-     global. *)
+  (* The section base map: every native address renders through its
+     owning global. *)
   section_remap : (int64 * int64 * Llvm.llvalue * sec_owner list) list;
   copy_relocs : int64 list;
   target : Theory.Target.t;
-  (* ABI projection of [target] — static per binary. Leaf code reads these
-     instead of reaching back into the target per def/exp. *)
+  (* ABI projection of [target], static per binary. *)
   abi : Abi.t;
   sp : var;
   ptrsize : int;
@@ -114,24 +155,28 @@ type emit_ctx = {
   subs : (Arg.t list * Arg.t list) Tid.Map.t;
   blk_llvals : blk_llvals Tid.Map.t ref;
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
+  (* Bound once per emission, read as plain ctx fields. *)
+  llvm_ctx : Llvm.llcontext;
+  llvm_module : Llvm.llmodule;
+  sections : section list;
   (* One Dead-classification warn per sub. *)
   dead_warned : Tid.Set.t ref;
   (* Dedups [hike: undef-read:] warnings per (sub, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
-  (* Edge-keyed SP restores: (pred, fallthrough) -> post-push+8 value. *)
-  edge_sp_restores : (Tid.t, (Tid.t, Llvm.llvalue) EHashtbl.t) EHashtbl.t ref;
-  (* The emitted Thunks (memory-convention twins), keyed by the
-     sub's LLVM name — function-address rendering produces the twin so
-     unresolvable pointer sites stay sound. *)
+  (* The body's frame: routes region/window mem vars; bound around
+     body emission. *)
+  cur_frame : sub_frame option ref;
+  (* The edge bridge, reset per sub. *)
+  edge_tbl : Edge_tbl.t ref;
+  (* The emitted thunks (memory-convention twins), keyed by the
+     sub's LLVM name — function-address rendering produces the twin
+     so unresolvable pointer sites stay sound. *)
   thunks : (string * Llvm.llvalue) list ref;
-  (* The named-component map: the BIL's [sec_comp_N_mem] var bound to
-     its global and the component's native base — the typed channel. *)
+  (* [sec_comp_N_mem] var -> (global, native base). *)
   sec_comps : (Var.t * (Llvm.llvalue * int64)) list ref;
-  (* Per-sub entry-block freeze of every never-defined var: one
-     arbitrary-but-fixed value per register per invocation, so two
-     reads of the same undefined register observe the SAME bits (a
-     machine self-comparison of an undefined register stays
-     deterministic instead of folding to LLVM's per-use undef). *)
+  (* One frozen value per never-defined var, so two reads of the same
+     undefined register observe identical bits (LLVM's per-use undef
+     would fold a self-comparison). *)
   undef_vals : llvalue_map ref;
 }
 
@@ -148,63 +193,31 @@ let empty_emit_ctx () : emit_ctx =
     subs = Tid.Map.empty;
     blk_llvals = ref Tid.Map.empty;
     ll_bbs = ref Tid.Map.empty;
+    llvm_ctx = Obj.magic 0;
+    llvm_module = Obj.magic 0;
+    sections = [];
     dead_warned = ref Tid.Set.empty;
     undef_warned = ref Tid.Map.empty;
-    edge_sp_restores = ref (EHashtbl.create (module Tid));
+    cur_frame = ref None;
+    edge_tbl = ref (Edge_tbl.empty ());
     thunks = ref [];
     sec_comps = ref [];
     undef_vals = ref WVarMap.empty;
   }
 
-(* Per-sub frame state.  No analysis-record inputs — everything
-   here is either LLVM emission state or structure transcribed from the
-   sub term (the region geometry from the sub's LAYOUT tag). *)
-type sub_frame = {
-  (* The sub's anchor address integer: the SP Slot's stored value for
-     storage-carrying subs; the constant 0 anchor for storage-free
-     subs (the [stack0 = None] fallback readers). *)
-  anchor_i64 : Llvm.llvalue;
-  (* The per-invocation anchor: the SP entry value bound from the SP
-     Slot.  None = the sub owns no SP storage (SP binds to the
-     anchor constant, 0 for storage-free subs). *)
-  stack0 : Llvm.llvalue option;
-  (* The split regions: the BIL's region mem var bound to its alloca
-     and the region's entry-relative base — the typed channel (the var
-     is the identity; nothing parses names). *)
-  regions : (Var.t * (Llvm.llvalue * int64)) list;
-}
-
-(* The sub whose body is being emitted: routes the region/window mem
-   vars the generic exp lane's twin arms consult (defense in depth —
-   the def-level dispatch owns the primary route).  Bound by the body
-   emitter around its blocks. *)
-let cur_frame : sub_frame option ref = ref None
-
 (* Emission context threaded as a KB var. *)
-let llvm_ctx_var : Llvm.llcontext KB.Context.var =
-  KB.Context.declare ~package:"hike" "llvm-ctx" (KB.return (Obj.magic 0))
-
-let llvm_module_var : Llvm.llmodule KB.Context.var =
-  KB.Context.declare ~package:"hike" "llvm-module" (KB.return (Obj.magic 0))
-
-let section_list_var : section list KB.Context.var =
-  KB.Context.declare ~package:"hike" "section-list" (KB.return [])
-
-(* Default emission context. *)
 let emit_ctx_var : emit_ctx KB.Context.var =
   KB.Context.declare ~package:"hike" "emit-ctx"
     (KB.return (empty_emit_ctx ()))
 
-(* One reader for the context-get pairs opening most emitters. *)
 let emit_env () =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  return (ctx, llvm_ctx)
+  return (ctx, ctx.llvm_ctx)
 
 let typ_lltype_m typ =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   match typ with
   | Imm n -> return @@ Llvm.integer_type llvm_ctx n
   | _ -> return @@ Llvm.pointer_type llvm_ctx
@@ -218,7 +231,6 @@ let coerce_int_width llvm_ctx llvm_builder ~bits v w =
     Llvm.build_trunc v (Llvm.integer_type llvm_ctx w) "" llvm_builder
   else Llvm.build_zext v (Llvm.integer_type llvm_ctx w) "" llvm_builder
 
-(* Tests for FP arg registers (the convention's vector param lanes). *)
 let is_fp_param (ctx : emit_ctx) (v : var) : bool =
   Abi.is_vector_param_reg ctx.abi v
 
@@ -234,10 +246,6 @@ let sanitize_name =
       else if c = '\\' then false
       else if c = '@' then false
       else true)
-
-(* Tests for [intrinsic:*] names. *)
-let is_intrinsic_name (s : string) : bool =
-  Base.String.is_prefix s ~prefix:"intrinsic:"
 
 let strip_at (name : string) : string =
   if String.length name > 0 && name.[0] = '@' then
@@ -260,9 +268,9 @@ let add_sub_sig subs tid ~rets ~args =
 let get_calling_convention ctx =
   Abi.of_target ctx.target
 
-(* The synthetic indirect-call convention: every register lane plus the
-   caller-window base as In args — the exact argument list a pointer
-   call passes and a thunk accepts. *)
+(* The synthetic indirect-call convention: every register lane plus
+   the caller-window base — exactly what a pointer call passes and a
+   thunk accepts. *)
 let window_conv_args ~(word : int) (conv : Abi.t) : Arg.t list =
   let window = Hike_stack_model.hike_window_var ~word in
   Base.List.map
@@ -308,9 +316,6 @@ type cf_type =
   | Int
   | CallIndirect
 
-(* The BIR's shape decides the transfer's class: the completion's
-   rewritten forms (real Ret jmps, guarded-goto series) read as the
-   plain shapes they are. *)
 let cf_type control_flow =
   let br = Seq.hd_exn control_flow in
   match Jmp.kind br with
@@ -382,17 +387,15 @@ let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
           | Some _ -> want_w
           | None -> w )
 
-(* One arbitrary-but-fixed value for a never-defined var: memoized per
-   sub, placed in the entry block so it dominates every reader.  While
-   the entry block is being built the caller's builder inserts it in
-   order; afterwards it inserts before the entry terminator. *)
+(* One frozen value per never-defined var, memoized per sub and
+   placed in the entry block so it dominates every reader. *)
 let frozen_undef ctx ?(builder : Llvm.llbuilder option) (var : var) :
     Llvm.llvalue KB.t =
   let open KB in
   match WVarMap.find_opt (wvar_of var) !(ctx.undef_vals) with
   | Some v -> return v
   | None ->
-      let* llvm_ctx = Context.get llvm_ctx_var in
+      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       let* typ = var_lltype var in
       let b =
         match builder with
@@ -410,7 +413,6 @@ let frozen_undef ctx ?(builder : Llvm.llbuilder option) (var : var) :
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
 
-(* Finishes a call with its fallthrough edge. *)
 let finish_call llvm_builder ctx fallthrough =
   let open KB in
   match fallthrough with
@@ -422,14 +424,12 @@ let finish_call llvm_builder ctx fallthrough =
       ignore (Llvm.build_unreachable llvm_builder);
       return ()
 
-(* Name of the trap function trap edges declare. *)
 let trap_name = "llvm.trap"
 
-(* Emits trap edges. *)
 let create_interrupt llvm_builder =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
   let trap_ty = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
   let trap = Llvm.declare_function trap_name trap_ty llvm_module in
   ignore

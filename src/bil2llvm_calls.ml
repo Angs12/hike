@@ -9,31 +9,24 @@ open Bil2llvm_exp
 open Bil2llvm_fp
 
 
-(* The matched-pair SP restore: every call reaching this lane is a
-   MACHINE call — its retaddr push is materialized in the caller's BIR
-   and the callee's ret pops it, so the return edge rebinds the
-   caller's SP to its pre-call value (modeled ops — intrinsics —
-   render inline and never arrive here).  The binding is edge-keyed —
-   only the call's own edge into the continuation restores. *)
+(* Machine calls push a return address the callee's ret pops, so the
+   call's fallthrough edge rebinds SP to its pre-call value.  The
+   binding is edge-keyed. *)
 let restore_sp_after_call llvm_builder ctx blk_tid fallthrough_tid =
   let open KB in
   let sp_key = ctx.sp in
   match get_local ctx blk_tid sp_key with
   | None -> return ()
   | Some post_push ->
-        let* llvm_ctx = Context.get llvm_ctx_var in
+        let* { llvm_ctx; _ } = Context.get emit_ctx_var in
         let restored =
           Llvm.build_add post_push
             (Llvm.const_int (Llvm.i64_type llvm_ctx) ctx.abi.Abi.word)
             "sp_restored" llvm_builder
         in
-        (* Binds restores edge-keyed. *)
-        (match EHashtbl.find !(ctx.edge_sp_restores) blk_tid with
-         | Some inner -> EHashtbl.set inner ~key:fallthrough_tid ~data:restored
-         | None ->
-             let inner = EHashtbl.create (module Tid) in
-             EHashtbl.set inner ~key:fallthrough_tid ~data:restored;
-             EHashtbl.set !(ctx.edge_sp_restores) ~key:blk_tid ~data:inner);
+        Edge_tbl.set !(ctx.edge_tbl) ~pred:blk_tid ~target:fallthrough_tid
+          ~term_bb:(get_bb ctx blk_tid)
+          ~sp_restore:restored ();
         (match get_local ctx fallthrough_tid sp_key with
          | None -> insert_local ctx fallthrough_tid sp_key restored
          | Some _ -> ());
@@ -48,11 +41,8 @@ let create_call_args blk_tid llvm_builder
   let slot_args =
     Base.List.filter args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
   in
-  (* The slot args' values: the caller's binding of the SAME slot — the
-     k-th slot parameter binds the block's [call_arg k] def, the minted
-     var of index k.  Both mints derive from the index, so the binding
-     is order-independent: the site's defs land in whatever order the
-     stores execute. *)
+  (* Slot parameter k binds the block's [call_arg (k-1)] def; both
+     names derive from the index, so the binding is order-independent. *)
   let arg_value_of_slot k =
     if k < 1 then None
     else
@@ -64,9 +54,7 @@ let create_call_args blk_tid llvm_builder
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
       then
-        (* The caller-window base is the caller's SP at the call: the
-           outgoing stores land at SP-relative addresses, so the
-           callee's slot k sits at window + k. *)
+        (* The caller-window base is the caller's SP at the call. *)
         (match get_local ctx blk_tid ctx.sp with
          | Some v -> return v
          | None ->
@@ -97,7 +85,7 @@ let create_call_args blk_tid llvm_builder
       else if extern && is_fp_param ctx (Arg.lhs arg) then
         (* Lowers YMM args to doubles for externs. *)
         let* v = create_exp llvm_builder blk_tid exp in
-        let* llvm_ctx = Context.get llvm_ctx_var in
+        let* { llvm_ctx; _ } = Context.get emit_ctx_var in
         let* v =
           if Llvm.integer_bitwidth (Llvm.type_of v) = 256 then
             KB.return
@@ -110,10 +98,8 @@ let create_call_args blk_tid llvm_builder
         let* arg = create_exp llvm_builder blk_tid exp in
         KB.return arg)
 
-(* FP return width. *)
 type fp_ret_kind = FpFloat | FpDouble | FpLongDouble
 
-(* Double-returning libm names. *)
 let fp_double_libm : string list =
   [ "acos"; "acosh"; "asin"; "asinh"; "atan"; "atan2"; "atanh"; "cbrt";
     "ceil"; "copysign"; "cos"; "cosh"; "drem"; "erf"; "erfc"; "exp";
@@ -129,7 +115,6 @@ let fp_double_parsing : string list = [ "atof"; "strtod"; "strtod_l" ]
 let fp_float_parsing : string list = [ "strtof"; "strtof_l" ]
 let fp_longdouble_parsing : string list = [ "strtold"; "strtold_l" ]
 
-(* Module-init membership sets for the extern-float classifier. *)
 let fp_double_libm_set = Base.Set.of_list (module Base.String) fp_double_libm
 let fp_double_parsing_set = Base.Set.of_list (module Base.String) fp_double_parsing
 let fp_float_parsing_set = Base.Set.of_list (module Base.String) fp_float_parsing
@@ -157,10 +142,9 @@ let fp_lltype llvm_ctx = function
   | FpDouble -> Llvm.double_type llvm_ctx
   | FpLongDouble -> Llvm.x86fp80_type llvm_ctx
 
-(* Ret-type constructor shared by declarations and definitions. *)
 let ret_type_of_rets rets =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   match rets with
   | [] -> return @@ Llvm.void_type llvm_ctx
   | [ ret ] -> var_lltype (Arg.lhs ret)
@@ -170,7 +154,6 @@ let ret_type_of_rets rets =
       in
       return @@ Llvm.struct_type llvm_ctx (Array.of_list rets_typs)
 
-(* Registers a declared/defined function in the emit context. *)
 let register_fn ctx sub_tid fn fn_typ =
   ctx.ll_funcs :=
     Core.Map.add_exn !(ctx.ll_funcs) ~key:sub_tid ~data:(fn, fn_typ)
@@ -205,7 +188,7 @@ let set_arg_names_of args fn =
 
 let set_arg_attrs_of fn args =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   Base.List.iteri args ~f:(fun i arg ->
       if Arg.intent arg = Some Both then
         let attr = Llvm.create_enum_attr llvm_ctx "noalias" 0L in
@@ -238,7 +221,7 @@ let add_args_to_vars llvm_builder blk_tid sub_tid fn () =
 
 let create_fun_declaration sub_tid =
   let open KB in
-  let* llvm_module = Context.get llvm_module_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
   let* ctx = Context.get emit_ctx_var in
   let* ret_typ = create_ret_type sub_tid in
   let* args_typ = create_arg_types sub_tid in
@@ -256,10 +239,9 @@ let create_fun_declaration sub_tid =
 
 let create_fun sub_tid ~rets ~args =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
   let* ctx = Context.get emit_ctx_var in
-  (* Uses explicit rets/args. *)
   let* ret_typ = ret_type_of_rets rets in
   let* args_typ = arg_types_of ctx sub_tid llvm_ctx args in
   let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
@@ -280,12 +262,11 @@ let get_func tid =
       let* _ = create_fun_declaration tid in
       return @@ Core.Map.find_exn !(ctx.ll_funcs) tid
 
-(* Performs a call and binds its result into the ret lanes: no rets
-   drops the result, a single ret binds it zeroext, multiple rets
-   extract from the aggregate. *)
+(* Binds the call result into the ret lanes: a single ret zeroext,
+   multiple rets extract from the aggregate. *)
 let bind_call_rets ctx blk_tid llvm_builder fn_typ fn args rets =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
   match rets with
   | [] ->
       Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
@@ -309,13 +290,10 @@ let bind_call_rets ctx blk_tid llvm_builder fn_typ fn args rets =
           insert_local ctx blk_tid (Arg.lhs ret) ret_val);
       return ()
 
-(* The outgoing stack args of a call site: the slot stores' promotion
-  bindings in SysV slot order — the k-th trailing argument is the
-  block's [call_arg k] def (the minted var of index k), enumerated by
-  index and stopping at the first absent slot.  An extern consumes the
-  stack slots after the register args, so the site's window stores ARE
-  its trailing arguments — the 7th vararg of a printf-class call rides
-  them. *)
+(* The outgoing stack args in slot order: [call_arg k] defs
+  enumerated by index, stopping at the first absent slot.  An extern
+  consumes stack slots after the register args, so the window stores
+  are its trailing varargs. *)
 let extern_stack_args ctx blk_tid (blk : blk term) =
   let word = ctx.abi.Abi.word in
   let defined v =
@@ -399,14 +377,9 @@ let create_func_call ?(emit_unreachable = true) llvm_builder blk_tid blk sub
       if emit_unreachable then finish_call llvm_builder ctx None
       else return ())
 
-(* The pointer-call class: every call jmp that still reaches
-   this arm is an indirect site whose target the VSA did NOT resolve to
-   a singleton lifted sub — a bounded multi-target set, a foreign
-   address, or an unresolvable target.  (The resolved singletons became
-   DIRECT call targets in the producer's promotion rewrite; they route
-   through create_call as direct calls.)  The pointer lands in the
-   Thunk of a promoted target (address rendering), or in the target's
-   existing memory convention. *)
+(* An indirect site with an unresolved target: the pointer lands in
+   a promoted target's thunk (via address rendering), else the
+   target's existing convention. *)
 let create_indirect_call llvm_builder blk_tid blk sub (j : jmp term) =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
@@ -420,9 +393,6 @@ let create_indirect_call llvm_builder blk_tid blk sub (j : jmp term) =
   in
   let* target_exp = create_exp llvm_builder blk_tid target in
   let* func_ptr =
-    (* A ptr-typed component's loaded value IS the pointer (the
-       devirtualization lane); address integers materialize through
-       the address map. *)
     if Llvm.classify_type (Llvm.type_of target_exp) = Llvm.TypeKind.Pointer
     then KB.return target_exp
     else Bil2llvm_section.create_addr_ptr llvm_builder target_exp
@@ -438,7 +408,6 @@ let create_indirect_call llvm_builder blk_tid blk sub (j : jmp term) =
 
 (* The Thunk — the memory-convention twin of a promoted sub. *)
 
-(* The twin's LLVM name and its synthetic tid. *)
 let thunk_name_of (sub_tid : tid) : string =
   sanitize_name (Tid.name sub_tid) ^ "_hike_thunk"
 
@@ -450,22 +419,16 @@ let thunk_tid_of (sub_tid : tid) : tid =
 let slot_offset ~(word : int) (i : int) : Int64.t =
   Int64.of_int (word + (word * i))
 
-(* Emits the memory-convention twin of one promoted sub: it unpacks
-   the window memory into the promoted body's slot parameters and
-   forwards the register lanes.  INTERNAL linkage — the consumer's
-   optimizer sees through it (inlines it into callers, devirtualizes
-   provable pointers), so the twin costs nothing where the site
-   resolves anyway.  Function-pointer data renders to the twin, so
-   unresolvable sites stay sound.  No target ever demotes. *)
+(* The twin unpacks the window into the promoted body's slot
+   parameters and forwards the register lanes.  Internal linkage: the
+   consumer's optimizer inlines it where the call site resolves. *)
 let create_thunk (sub_tid : tid) =
   let open KB in
   let* ctx = Context.get emit_ctx_var in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
-  (* The twin exists for every sub whose own signature carries promoted
-     slots (read from the signature, not a record).  @main's
-     signature branch is fixed, so it never carries slots and never
-     earns a twin. *)
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
+      (* A twin exists iff the sub's own signature carries promoted
+         slots. *)
   let arity =
     Base.List.count (get_args ctx sub_tid) ~f:(fun a ->
         Hike_stack_model.is_arg_slot (Arg.lhs a))
@@ -480,15 +443,10 @@ let create_thunk (sub_tid : tid) =
       let rets = get_rets ctx sub_tid in
       let word = ctx.abi.Abi.word in
       let window_var = Hike_stack_model.hike_window_var ~word in
-        (* The twin carries the SYNTHETIC INDIRECT convention, exactly
-           the signature the pointer call passes: every convention
-           register lane (integer and vector) plus the caller-window
-           base — so the twin's window param sits at the same position
-           the icall type puts it. *)
+        (* The twin carries the synthetic indirect convention — exactly
+           what a pointer call passes. *)
         let conv = Abi.of_target ctx.target in
         let twin_args = window_conv_args ~word conv in
-        (* The lanes of [sub]'s own signature the twin forwards (by
-           name, from the twin's params). *)
         let reg_args =
           Base.List.filter args ~f:(fun a ->
               let n = Var.name (Arg.lhs a) in
@@ -530,10 +488,9 @@ let create_thunk (sub_tid : tid) =
               Llvm.build_load
                 (Llvm.integer_type llvm_ctx (8 * word)) ptr "" builder)
         in
-        (* Forward [sub]'s own register lanes by name from the twin's
-           params, then the unpacked slots.  A lane outside the
-           convention the twin carries is never passed by any caller —
-           it reads undef, the model-ABI never-defined treatment. *)
+        (* Forwards [sub]'s register lanes by name from the twin's
+           params, then the unpacked slots; a lane the twin's
+           convention lacks reads undef. *)
         let param_named (v : var) : Llvm.llvalue =
           let n = Var.name v in
           Base.Option.value
@@ -553,8 +510,6 @@ let create_thunk (sub_tid : tid) =
         (match rets with
          | [] -> ignore (Llvm.build_ret_void builder)
          | _ -> ignore (Llvm.build_ret r builder));
-        (* Function-address rendering produces the twin (keyed by the
-           sub's LLVM name). *)
         ctx.thunks :=
           (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks);
         KB.return ()
@@ -565,7 +520,6 @@ let create_return blk_tid llvm_builder cur_sub =
   let* ctx = Context.get emit_ctx_var in
   let* rets =
     KB.List.map (get_rets ctx (Term.tid cur_sub)) ~f:(fun ret ->
-        (* Missing YMM0 reads yield undef. *)
         match get_local ctx blk_tid (Arg.lhs ret) with
         | Some v -> return v
         | None ->
@@ -579,11 +533,10 @@ let create_return blk_tid llvm_builder cur_sub =
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore);
   return ()
 
-(* Emits unmapped intrinsics as extern calls. *)
 let create_external_intrinsic_call llvm_builder blk_tid call name =
   let open KB in
-  let* llvm_ctx = Context.get llvm_ctx_var in
-  let* llvm_module = Context.get llvm_module_var in
+  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+  let* { llvm_module; _ } = Context.get emit_ctx_var in
   let* ctx = Context.get emit_ctx_var in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -608,12 +561,9 @@ let create_external_intrinsic_call llvm_builder blk_tid call name =
    | _ -> ());
   finish_call llvm_builder ctx (Option.map label_tid (Call.return call))
 
-(* The self-call stub: a register-free trampoline whose resolved call
-   target is the stub itself — the symtab names an external function at
-   the stub's own address, so its definition would be a same-named
-   self-call.  It renders no definition and no body: the declaration
-   carries the name and every call site binds it, so the external
-   resolves at link time. *)
+(* A self-call stub targets its own address (the symtab names an
+   external there); it declares but never defines, so call sites
+   resolve to the external at link time. *)
 let is_self_call_stub (ctx : emit_ctx) (sub : sub term) : bool =
   let self_targeted =
     Term.enum blk_t sub
@@ -635,7 +585,6 @@ let create_call llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in
   let name = Tid.name target |> fp_intrinsic_name in
   if Base.String.is_prefix (Tid.name target) ~prefix:"@interrupt:" then
-    (* Interrupt calls trap. *)
     create_interrupt llvm_builder
   else
     match native_fp_op (Tid.name target) with
@@ -643,15 +592,13 @@ let create_call llvm_builder blk_tid blk sub call fr =
         create_native_fp_call llvm_builder blk_tid (Term.tid sub) fr blk call
           op
     | None ->
-        (* Unmapped intrinsics warn and degrade. *)
-        if is_intrinsic_name name then begin
+        if Hike_stack_model.is_intrinsic_name name then begin
           Hike_diag.warn
             "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
             name (Tid.name (Term.tid sub));
           create_external_intrinsic_call llvm_builder blk_tid call name
         end
         else (
-        (* PLT callers pass through returns. *)
         match Call.return call with
         | Some l ->
             let fallthrough = Some (label_tid l) in

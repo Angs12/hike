@@ -1,20 +1,9 @@
-(* The canary-strip pass (hike-strip-canaries), after hike-vsa: the
-   detector composes the four sure facts — the TLS canary read (the
-   address's base var is [Abi.thread_pointer], the offset is data), the
-   store of the read value into one VSA-proven stack cell, the reload
-   of that cell feeding a comparison, and the not-equal edge reaching a
-   symtab-resolved [__stack_chk_fail] — and the rewrite deletes the
-   read, the store, the reload, the compare's def family, and the
-   not-equal edge; the equality edge continues unconditionally (the
-   canary compares equal on every defined trace), and blocks the
-   rewrite leaves unreachable are removed.  Placement: after the VSA,
-   before the fission — the reads still reach the VSA (their analysis
-   mass is paid), but the EMISSION loses them: the TLS reads, the
-   store, the second exit edge, and the foreign fail-call shape vanish
-   before the emitter.  The FS/anchor render stays in the emitter: this
-   pass restructures, the emitter renders, and post-pass the render
-   fires only for the residual reads.  An unrecognized composition
-   stays exactly as it is — the identity, never a gate. *)
+(* The canary-strip pass, before the fission: the detector composes
+   the TLS canary read (the address's base var is
+   [Abi.thread_pointer]), its store into one VSA-proven stack cell,
+   the reload feeding the comparison, and the not-equal edge to a
+   symtab-resolved [__stack_chk_fail]; the equality edge continues
+   unconditionally, and an unrecognized composition is the identity. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
@@ -23,12 +12,7 @@ module Abi = Hike_abi
 module Model = Hike_stack_model
 module Vsa = Cbat_vsa
 
-(* ------------------------------------------------------------------ *)
-(* The facts                                                           *)
-(* ------------------------------------------------------------------ *)
-
-(* The TLS-shape address: the base var is the thread pointer; the
-   offset is data, never matched. *)
+(* The base var is the thread pointer; the offset is data. *)
 let tls_addr (tp : var) (addr : exp) : bool =
   match addr with
   | Bil.Var v -> Var.same v tp
@@ -40,23 +24,20 @@ let is_load_rhs (e : exp) : bool = match e with Bil.Load _ -> true | _ -> false
 let is_store_rhs (e : exp) : bool =
   match e with Bil.Store _ -> true | _ -> false
 
-(* The TLS canary read def: the rhs is exactly the TLS load. *)
 let is_tls_read (tp : var) (d : def term) : bool =
   match Def.rhs d with
   | Bil.Load (_, addr, _, _) -> tls_addr tp addr
   | _ -> false
 
-(* One-line contract: the def's cell — the single stack position its
-   address denotates to at the def's own before-env (the seam's
-   cell identity). *)
+(* The def's cell: the single stack position its address denotates to
+   at the def's own before-env. *)
 let cell_of (blk : blk term) (d : def term) : int64 option =
   let open Base.Option in
   (Base.Option.map (Model.addr_of_rhs (Def.rhs d)) ~f:fst
-   >>= fun addr -> Result.to_option (Hike_vsa.denote_exp_at ~blk ~def:d addr)
+   >>= fun addr -> Base.Result.ok (Hike_vsa.denote_exp_at ~blk ~def:d addr)
    >>= Model.singleton_stack_position)
 
-(* One-line contract: every memory def's cell, keyed by def tid (the
-   pass's cell identities, computed once on the input sub). *)
+(* Every memory def's cell, keyed by def tid. *)
 let cells_of_sub (sub : sub term) : int64 Tid.Map.t =
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
@@ -65,7 +46,6 @@ let cells_of_sub (sub : sub term) : int64 Tid.Map.t =
              | Some cell -> Core.Map.set m ~key:(Term.tid d) ~data:cell
              | None -> m))
 
-(* The value the store stores. *)
 let store_data (d : def term) : exp option =
   match Def.rhs d with
   | Bil.Store (_, _, data, _, _) -> Some data
@@ -77,10 +57,6 @@ let is_mem_var (v : var) : bool =
 (* The value operands of an exp: the free vars, memory excluded. *)
 let value_vars (e : exp) : Var.Set.t =
   Core.Set.filter (Exp.free_vars e) ~f:(fun v -> not (is_mem_var v))
-
-(* ------------------------------------------------------------------ *)
-(* Per-sub context: blocks, reaching definitions, CFG                  *)
-(* ------------------------------------------------------------------ *)
 
 type block_data = {
   b_blk : blk term;
@@ -156,8 +132,7 @@ let build_ctx (sub : sub term) : ctx =
         in
         go 0 m (Array.to_list b.b_defs))
   in
-  (* The may-reaching def sets at each block entry (union over the
-     predecessors; a block's own defs kill then gen in order). *)
+  (* Union over predecessors; a block's own defs kill then gen. *)
   let transfer (entry : Tid.Set.t Var.Map.t) (b : block_data) :
       Tid.Set.t Var.Map.t =
     Base.List.fold (Array.to_list b.b_defs) ~init:entry ~f:(fun st d ->
@@ -210,14 +185,8 @@ let reaching_at (ctx : ctx) (b : block_data) (i : int) (v : var) : Tid.Set.t =
   in
   go (i - 1)
 
-(* ------------------------------------------------------------------ *)
-(* The value checks                                                    *)
-(* ------------------------------------------------------------------ *)
-
-(* The stored value at the store def is the value the TLS read
-   produced: the data exp is the read def's lhs var, the read is that
-   var's unique reaching def at the store, and the store's before-env
-   denotes the data to the read's own denoted value. *)
+(* The stored value is the TLS read's value: the data exp is the read
+   def's lhs, the read is its unique reaching def, both denote equal. *)
 let stored_value_is_read_value ~(store_blk : blk term) ~(read_blk : blk term)
     ~(reaching : var -> Tid.Set.t) ~(tp : var) ~(read : def term)
     (store : def term) : bool =
@@ -233,10 +202,8 @@ let stored_value_is_read_value ~(store_blk : blk term) ~(read_blk : blk term)
         | _ -> false)
   | _ -> false
 
-(* The compared operand at the compare carries the reloaded value: the
-   first def after the reload that reads its lhs denotes that var — in
-   the VSA's before-env — to the reload's own denoted value, so the
-   reloaded value reaches the comparison unmodified. *)
+(* The first def after the reload that reads its lhs denotes it to the
+   reload's value — the reload reaches the comparison unmodified. *)
 let compare_operand_is_reload_value (b : block_data) (reload : def term) :
     bool =
   let v = Def.lhs reload in
@@ -258,14 +225,8 @@ let compare_operand_is_reload_value (b : block_data) (reload : def term) :
       | Ok a, Ok w -> Vsa.WordSet.equal a w
       | _ -> false)
 
-(* ------------------------------------------------------------------ *)
-(* The in-block def chain and the compare family                       *)
-(* ------------------------------------------------------------------ *)
-
 (* The in-block def chain behind the compare's operands: each var
-   resolves to its block-local last def (memory excluded),
-   transitively.  Cross-block producers stop the chain — such shapes
-   stay the identity. *)
+   resolves to its block-local last def; cross-block producers stop. *)
 let in_block_chain (b : block_data) (from_vars : Var.Set.t) : Tid.Set.t =
   let rec go (visited : Tid.Set.t) (work : (var * int) list) : Tid.Set.t =
     match work with
@@ -294,8 +255,7 @@ let in_block_chain (b : block_data) (from_vars : Var.Set.t) : Tid.Set.t =
          (v, Array.length b.b_defs) :: acc))
 
 (* The compare family: the chain plus every block def whose value
-   operands mention a family lhs (the subtract's flag defs and operand
-   temps) — memory-typed lhs never propagates. *)
+   operands mention a family lhs; memory-typed lhs never propagates. *)
 let compare_family (b : block_data) (chain : Tid.Set.t) : Tid.Set.t =
   let fam = ref chain in
   let changed = ref true in
@@ -319,16 +279,10 @@ let compare_family (b : block_data) (chain : Tid.Set.t) : Tid.Set.t =
   done;
   !fam
 
-(* ------------------------------------------------------------------ *)
-(* The fail call and the fail-reach set                                *)
-(* ------------------------------------------------------------------ *)
-
 let is_fail_name (n : string) : bool =
   Base.String.is_substring n ~substring:"stack_chk_fail"
 
-(* A fail block: a direct call whose target resolves to
-   [__stack_chk_fail] in the symtab (a program sub's name when the tid
-   names one, else the tid's own label). *)
+(* A direct call whose target resolves to [__stack_chk_fail]. *)
 let is_fail_block ~(names : Tid.t -> string) (b : block_data) : bool =
   Base.List.exists (Array.to_list b.b_jmps) ~f:(fun j ->
       match Jmp.kind j with
@@ -358,10 +312,6 @@ let reach_fail ~(ctx : ctx) ~(names : Tid.t -> string) : Tid.t -> bool =
         v
   in
   go Tid.Set.empty
-
-(* ------------------------------------------------------------------ *)
-(* The detector                                                        *)
-(* ------------------------------------------------------------------ *)
 
 (* One proven composition: the deleted defs and the deleted edge. *)
 type comp = {
@@ -407,15 +357,13 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
           let fail_t = if f1 then t1 else t2 in
           let fail_i = if f1 then 0 else 1 in
           let eq_i = 1 - fail_i in
-          (* The compare's def chain: both conds' operands. *)
           let from_vars =
             Base.List.fold (Array.to_list b.b_jmps) ~init:Var.Set.empty ~f:(fun acc j ->
                 Core.Set.union acc (value_vars (Jmp.cond j)))
           in
           let chain = in_block_chain b from_vars in
-          (* The tied reloads: chain members whose rhs is exactly a
-             load the VSA proves lands in one singleton cell; every
-             loading chain member carries this block's one cell. *)
+          (* The tied reloads: chain members whose rhs is a
+             singleton-cell load. *)
           let cell_of_load tid =
             match find_def b tid with
             | Some d when is_load_rhs (Def.rhs d) -> cell_of tid
@@ -432,7 +380,6 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
                   Base.Option.value_map (cell_of_load tid) ~default:true
                     ~f:(fun c -> Int64.equal c cell))
             in
-            (* The compare operand's tie: a reload on the chain. *)
             let reloads =
               Core.Set.filter chain ~f:(fun tid ->
                   Base.Option.value_map (cell_of_load tid) ~default:false
@@ -444,8 +391,6 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
                     ~f:(compare_operand_is_reload_value b))
             in
             if one_cell && reload_tied then
-              (* The store: the one def on this cell whose rhs is a
-                 store of a TLS read's value. *)
               let tagged =
                 Base.List.filter_map ctx.blocks ~f:(fun b' ->
                     Base.List.find_map (Array.to_list b'.b_defs) ~f:(fun d ->
@@ -497,10 +442,8 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
       else ());
   !comps
 
-(* One-line contract: the composition list whose cells every proven
-   access accounts for — a cell converts together: every access the
-   VSA proves lands on it is the one store or a reload some
-   composition of this round ties. *)
+(* A cell converts together: every access the VSA proves lands on it
+   must be the composition's store or a tied reload of this round. *)
 let cells_accounted ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx)
     (comps : comp list) : comp list =
   Base.List.filter comps ~f:(fun c ->
@@ -524,9 +467,8 @@ let cells_accounted ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx)
                   && is_load_rhs (Def.rhs d)
               | _ -> true)))
 
-(* The rewrite's validity: every surviving use reads no deleted def —
-   the exact reaching analysis (a body block's use of the same register
-   reaches its own defs, never the deleted epilogue's). *)
+(* The rewrite is valid only when every surviving use reads no deleted
+   def (exact reaching analysis). *)
 let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t)
     ~(edge_srcs : Tid.Set.t) : bool =
   let check_use b i e =
@@ -547,14 +489,9 @@ let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t)
                   ~f:(fun (pred, e) ->
                     Core.Set.mem edge_srcs pred || check_use b 0 e)))
 
-(* ------------------------------------------------------------------ *)
-(* The rewrite                                                         *)
-(* ------------------------------------------------------------------ *)
-
-(* Removes the blocks this rewrite left with zero predecessors (a
-   seed's only edge died; the cascade follows the pruned blocks' own
-   edges).  [pre_preds_count] is the pre-rewrite predecessor count: a
-   block that was already unreachable stays as it is. *)
+(* Removes the blocks the rewrite left with zero predecessors,
+   cascading.  [pre_preds_count] is the pre-rewrite count: a block
+   that was already unreachable stays. *)
 let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
     ~(seeds : Tid.Set.t) : sub term =
   let succs_of s =
@@ -590,8 +527,7 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
   in
   go sub seeds
 
-(* The pass over one sub: detect, check, rewrite, repeat until the
-   identity. *)
+(* Detect, check, rewrite, repeat until the identity. *)
 let strip_sub ~(abi : Abi.t) ~(names : string Tid.Map.t) (sub : sub term) :
     sub term =
   let name_of t =

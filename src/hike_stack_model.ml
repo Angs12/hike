@@ -1,19 +1,14 @@
 
-(* The sections in declaration order (the attribution's vocabulary,
-   hosted here — the model is the shared home every lane reads).  A
-   range carries its section, so merging across sections is
-   impossible. *)
+(* A range carries its section, so merging across sections is impossible. *)
 module Vocab = struct
   open! Core
 
   type sec = Stack | Args | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
   [@@deriving equal, compare, sexp]
 
-  (* The slim def-carried classification: the def's section with its
-     ADDRESS bounds (not the tree's occupied-byte bounds), the
-     justified unbounded form, the data-section anchoring, or Dead.
-     Absence is the identity.  The constructors live in [Tag] so the
-     section constructors stay unshadowed. *)
+  (* The def-carried classification: a section with its ADDRESS bounds, the
+     justified unbounded form, or Dead.  Absence is the identity.  In [Tag]
+     so the [sec] constructors stay unshadowed. *)
   module Tag = struct
     type t =
       | Stack of int64 * int64
@@ -30,47 +25,29 @@ end
 
 include Vocab
 
-(* Pure stack model: the geometry facts and the shared vocabulary.
-
-
-   THE MODEL IS THE TAG (ADR 0008): the VSA tags every frame-resident access
-   with its proven offset span.  This module merges overlapping spans into
-   regions and derives each region's facts from those tags alone — the SP
-   Slot anchor makes the partition purely geometric.
-   An oversized region joins to Frame with a diagnostic naming it —
-   never a gate. *)
+(* The pure stack model: the VSA tags every frame-resident access with its
+   proven offset span; this module merges overlapping spans into regions
+   from those tags alone.  An oversized region joins to Frame with a
+   diagnostic naming it. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
 
-(* Stack pointer only: the one register granted stack semantics by fiat
-   (ADR 0008).  There is no frame-pointer fact here — fp is an ordinary
-   callee-saved GPR whose stack-ness, like any register's, is proven by
-   the VSA (its frame term), never by name. *)
+(* Only [Abi.sp] carries stack semantics; any other register's stack-ness is
+   proven by the VSA, never by name. *)
 
-(* The Vsa record: the producer/emitter contract point.  The
-   producer (hike_vsa) builds it, the KB (hike_kb) stores it, the model
-   and the emitter consume it — one home at the contract point. *)
+(* The producer builds this record; the model and the emitter consume it. *)
 module Vsa = struct
   open Core
 
-  (* The model segment's base (2^62): the ABSOLUTE position of the
-     entry RSP on the segment line (the seeded SP is base + offset 0).
-     The single representation: tag positions are absolute, so
-     every "below/above the entry RSP" question compares against this
-     constant, and a frame-relative depth is [base − position]. *)
+  (* The ABSOLUTE position of the entry RSP on the segment line (the seeded
+     SP is base + offset 0); a frame-relative depth is [base − position]. *)
   let segment_base = Cbat_vsa.WordSet.stack_base
 
-  (* ---- The position line (the scope geometry) ---- *)
 
-
-  (* ---- The word-pair seams ---- *)
-
-  (* The word-pair seams — the one lifting every hull/singleton
-     consumer shares, so the arithmetic lives in exactly one place. *)
-  let i64_opt (w : Cbat_word.t) : int64 option =
+let i64_opt (w : Cbat_word.t) : int64 option =
     match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
 
   let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
@@ -97,15 +74,14 @@ module Vsa = struct
   let stack_top ~(entry : int64) ~(word : int) : int64 =
     Stdlib.Int64.pred (args_base ~entry ~word)
 
-  (* [hi + n - 1] in signed position arithmetic, saturating at the
-     ceiling — the sound full interval, never a wrapped short one. *)
+  (* [hi + n - 1] in signed arithmetic, saturating at the ceiling — a
+     wrapped short interval would be unsound. *)
   let expand_hi ~(cap : int64) (hi : int64) (n : int) : int64 =
     let w = Stdlib.Int64.of_int (n - 1) in
     let r = Stdlib.Int64.add hi w in
     if Stdlib.Int64.compare r hi < 0 || Stdlib.Int64.compare r cap > 0 then cap else r
 
-  (* [hi + n - 1] in unsigned address arithmetic; wrapping past the
-     domain's top saturates at the top (2^64-1). *)
+  (* [hi + n - 1] in unsigned arithmetic; wrapping saturates at the top. *)
   let expand_hi_unsigned (hi : int64) (n : int) : int64 =
     let w = Stdlib.Int64.of_int (n - 1) in
     let r = Stdlib.Int64.add hi w in
@@ -118,8 +94,7 @@ module Vsa = struct
     let hi = if cmp hi shi <= 0 then hi else shi in
     if cmp lo hi <= 0 then Some (lo, hi) else None
 
-  (* A stack-symbolic set's offset extrema lifted onto the position
-     line; None when not representable. *)
+  (* A stack-symbolic set's offset extrema on the position line. *)
   let positions_of_offsets (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
     Option.bind (Cbat_vsa.WordSet.offset_extrema ws) ~f:(fun (lo, hi) ->
         position_pair lo hi)
@@ -133,9 +108,8 @@ module Vsa = struct
     i64_opt hi >>= fun hi ->
     Some (lo, hi)
 
-  (* The domain bounds of a possibly-infinite set over [flo, cei]: an
-     unbounded direction extends to the scope bound; a wrapped or
-     circular hull covers the whole scope. *)
+  (* An unbounded direction extends to the scope bound; a wrapped or circular
+     hull covers the whole scope. *)
   let full_bounds (ws : Cbat_vsa.WordSet.t) ~(flo : int64) ~(cei : int64)
       (lo : int64) (hi : int64) : int64 * int64 =
     if Stdlib.Int64.compare lo hi > 0 then (flo, cei)
@@ -143,9 +117,7 @@ module Vsa = struct
     else if Cbat_vsa.WordSet.is_descending ws then (flo, hi)
     else (flo, cei)
 
-  (* The Clp offset hull lifted onto the segment line: the extrema
-     through to_int64 and position_of_offset; [None] when any step
-     fails (an extremum outside the word or past the base sum). *)
+  (* The Clp offset hull on the segment line; [None] when not representable. *)
   let hull_positions (offs : Cbat_vsa.WordSet.Clp.t) : (int64 * int64) option =
     let open Base.Option in
     Cbat_vsa.WordSet.Clp.min_elem offs >>= fun lo ->
@@ -166,73 +138,95 @@ module Vsa = struct
               Some (full_bounds ws ~flo:floor ~cei:args_ceiling lo hi)
             else Some (lo, hi))
 
-  (* [ws] is a single known word (the plain-set singleton; a TOP set is
-     deliberately NOT one). *)
+  (* A single known word; a TOP set is deliberately not one. *)
   let singleton_i64 (ws : Cbat_vsa.WordSet.t) : int64 option =
     if Cbat_vsa.WordSet.is_top ws then None
     else singleton_pair (Cbat_vsa.WordSet.min_elem ws) (Cbat_vsa.WordSet.max_elem ws)
 
-  (* One-line contract: the offset set with exactly one element. *)
   let singleton_offset (offs : Cbat_vsa.WordSet.Clp.t) : int64 option =
     singleton_pair
       (Cbat_vsa.WordSet.Clp.min_elem offs)
       (Cbat_vsa.WordSet.Clp.max_elem offs)
 
-  (* One-line contract: the denotation's single stack position
-     (absolute, on the segment line), when it denotates to exactly
-     one. *)
+  (* The denotation's single stack position (absolute), when it has
+     exactly one. *)
   let singleton_stack_position (ws : Cbat_vsa.WordSet.t) : int64 option =
     let open Base.Option in
     Cbat_vsa.WordSet.stack_offsets ws >>= singleton_offset
     >>= Cbat_vsa.Cbat_extraction.position_of_offset
 
-  (* THE return-address fact and its phase-appropriate projections —
-     every consumer calls one of these and nothing else.  The one
-     definition: an address that denotes to the stack-symbolic
-     singleton at the entry-RSP cell. *)
+  (* The return-address fact and its projections: an address that denotes to
+     the stack-symbolic singleton at the entry-RSP cell. *)
   let is_return_address (ws : Cbat_vsa.WordSet.t) : bool =
     match singleton_stack_position ws with
     | Some p -> Int64.equal p segment_base
     | None -> false
 
-  (* The stamped projection: the same denotation, computed once by the
-     attribution and carried on the def's Section Tag. *)
+  (* The same denotation, read off the def's section tag. *)
   let is_return_address_tag (t : sec_tag) : bool =
     match t with
     | Tag.Stack (lo, hi) ->
         Int64.equal lo segment_base && Int64.equal hi segment_base
     | _ -> false
 
-  (* The pre-solve projection: the exact-pop shape [mem[SP]] — the one
-     spelling the return epilogue produces — for the one consumer that
-     runs before any solution exists (the call abstraction's kill
-     summaries). *)
+  (* The shape-only projection [mem[SP]], for the consumer that runs before
+     any solution exists. *)
   let is_return_address_shape ~(abi : Abi.t) (addr : exp) : bool =
     match addr with
     | Bil.Var v -> Var.same (Var.base v) abi.Hike_abi.sp
     | _ -> false
 
-  (* One call site's outgoing slot facts: which slot index each of
-     the block's outgoing stores feeds.  The structured fact IS the
-     provability — presence of slot i in the map = the site's store
-     feeds promoted slot i; absence = the store stays on the window
-     path (the identity). *)
 end
 include Vsa
 
 
 
-let addr_of_rhs (e : exp) : (exp * Size.t) option =
+(* A def keeps exactly one inline mem node, so one scan serves every
+   consumer. *)
+type mem_node =
+  [ `Load of exp * exp * Size.t      (* mem, address, width *)
+  | `Store of exp * exp * exp * Size.t ]  (* mem, address, data, width *)
+
+let mem_nodes (e : exp) : mem_node list =
   let vis =
     object
-      inherit [ (exp * Size.t) option ] Exp.visitor
-      method! visit_load ~mem:_ ~addr _ s acc =
-        Base.Option.first_some acc (Some (addr, s))
-      method! visit_store ~mem:_ ~addr ~exp:_ _ s acc =
-        Base.Option.first_some acc (Some (addr, s))
+      inherit [ mem_node list ] Exp.visitor as super
+      method! visit_load ~mem ~addr rest s acc =
+        super#visit_load ~mem ~addr rest s (`Load (mem, addr, s) :: acc)
+      method! visit_store ~mem ~addr ~exp rest s acc =
+        super#visit_store ~mem ~addr ~exp rest s (`Store (mem, addr, exp, s) :: acc)
     end
   in
-  vis#visit_exp e None
+  List.rev (vis#visit_exp e [])
+
+let mem_node_of (e : exp) : mem_node option =
+  match mem_nodes e with n :: _ -> Some n | [] -> None
+
+(* The first node whose mem var satisfies [pred]. *)
+let mem_node_where (pred : var -> bool) (e : exp) : mem_node option =
+  Base.List.find_map (mem_nodes e) ~f:(fun n ->
+      match n with
+      | `Load (Bil.Var v, _, _) when pred v -> Some n
+      | `Store (Bil.Var v, _, _, _) when pred v -> Some n
+      | _ -> None)
+
+let mem_node_count (e : exp) : int = List.length (mem_nodes e)
+
+let reads_mem (e : exp) : bool =
+  match mem_node_of e with Some _ -> true | None -> false
+
+(* Free vars of every Load mem in one rhs. *)
+let load_mem_vars (rhs : exp) : Var.Set.t =
+  Base.List.fold (mem_nodes rhs) ~init:Var.Set.empty
+    ~f:(fun (acc : Var.Set.t) n ->
+      match n with
+      | `Load (mem, _, _) -> Core.Set.union acc (Exp.free_vars mem)
+      | _ -> acc)
+
+let addr_of_rhs (e : exp) : (exp * Size.t) option =
+  match mem_node_of e with
+  | Some (`Load (_, a, s)) | Some (`Store (_, a, _, s)) -> Some (a, s)
+  | _ -> None
 
 (* Splits a store rhs into data and cast wrapper using visitor/mapper. *)
 let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
@@ -255,39 +249,49 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
       in
       (data, wrap))
 
-(* One word, in bits: the width of every model-var minter below. *)
 let word_bits (word : int) : int = 8 * word
 
-(* The promoted incoming stack-slot parameter of index [i]: the
-   callee's own signature fact, minted deterministically so the
-   signature and the body agree on the same var. *)
+let is_true_cond (e : exp) : bool =
+  match e with Bil.Int w -> Word.equal w (Word.one 1) | _ -> false
+
+(* The producer/emitter signature contract: which subs keep their
+   pre-promotion signature — emittable intrinsics and @main. *)
+let is_intrinsic (term : sub term) : bool =
+  Term.has_attr term Sub.intrinsic
+
+let is_emittable_intrinsic (term : sub term) : bool =
+  is_intrinsic term && not (Seq.is_empty (Term.enum blk_t term))
+
+let is_intrinsic_name (s : string) : bool =
+  Base.String.is_prefix s ~prefix:"intrinsic:"
+
+let fixed_signature (term : sub term) : bool =
+  is_emittable_intrinsic term
+  || String.equal (Tid.name (Term.tid term)) "@main"
+
+(* The promoted stack-slot parameter of index [i]; minted deterministically
+   so the signature and the body agree on the same var. *)
 let arg_slot ~(word : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "hike_slot%d" i)
     (Type.Imm (word_bits word))
 
-(* The call-argument temp of slot [i]: the BIR def a call site
-   binds the promoted argument to (the promotion rewrite creates it
-   right after the site's outgoing store; the call's emission passes its
-   bound value).  Deterministically minted like the slots. *)
+(* The call-argument temp of slot [i]; deterministically minted like the
+   slots. *)
 let call_arg ~(word : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (Printf.sprintf "hike_arg%d" i)
     (Type.Imm (word_bits word))
 
-(* Tests for the call-argument temps (the DCE rule: they survive — they
-   are the call's arguments, consumed by the emission). *)
+(* The call-argument temps survive DCE: they are the call's arguments. *)
 let is_call_arg (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"hike_arg"
 
-(* Tests for the promoted slot parameters. *)
 let is_arg_slot (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"hike_slot"
 
-(* The incoming-window memory var: the rewrite re-points a callee's
-   above-entry accesses at it; the emitter materializes them against
-   the hike_window parameter (the caller's world), never the callee's
-   own residue alloca. *)
+(* The incoming-window memory var: a callee's above-entry accesses are
+   materialized against the caller's window through it. *)
 let window_mem : var =
   Var.create ~is_virtual:false ~fresh:false "hike_window_mem"
     (mem64_t (Size.of_int_exn 8))
@@ -295,15 +299,12 @@ let window_mem : var =
 let is_window_mem (v : var) : bool =
   String.equal (Var.name v) "hike_window_mem"
 
-(* The Caller-Window Parameter: the caller-window base, not SP — the
-   residual window-base argument of variadic/mixed subs (the bridge) and
-   of the memory-convention thunks.  The model owns the var grammar:
-   window, slots, and regions all mint here. *)
+(* The caller-window base parameter (not SP); the model mints the whole var
+   grammar — window, slots, regions — here. *)
 let hike_window_var ~(word : int) : var =
   Var.create ~is_virtual:false ~fresh:false "hike_window"
     (Type.Imm (word_bits word))
 
-(* Region memory and base vars; the alloca's emitted name. *)
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 
 let region_mem (id : int) : var =
@@ -312,28 +313,19 @@ let region_mem (id : int) : var =
     (mem64_t (Size.of_int_exn 8))
 
 
-(* Memory-var test (the BAP var-kind predicate; the var grammar lives
-   here with the fission-var tests). *)
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
-(* Tests for fission var names. *)
 let is_region_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
-(* The region id of a fission var ([stack_rN_mem]). *)
-(* ------------------------------------------------------------------ *)
-(* The section partition.  Sections mirror the stack regions:   *)
-(* the attribution pass carves each reserved span into per-object     *)
-(* components; the BIL carries the component in the mem var           *)
-(* ([sec_comp_N_mem], the fission convention); the emitter routes by  *)
-(* name.  A section's native base is a compile-time constant (unlike  *)
-(* the stack's runtime anchor), so there is no base var to bind —     *)
-(* the address delta is inline arithmetic.                            *)
-(* ------------------------------------------------------------------ *)
+(* The section partition: each reserved span's components are carried in the
+   mem var [sec_comp_N_mem] and the emitter routes by name.  A section's
+   native base is a compile-time constant, so the address delta is inline
+   arithmetic. *)
 
-(* One emitted component: the word range [lo_w, hi_w] of the section
-   keyed by its native span, plus the typed-emission decision. *)
+(* One emitted component: a word range of the section keyed by its native
+   span, plus the typed-emission decision. *)
 type sec_comp = {
   comp_id : int;              (* the N in sec_comp_N (module-wide) *)
   sec_lo : int64;             (* the owning section's native span *)
@@ -350,33 +342,29 @@ let sec_comp_mem (n : int) : var =
     (sec_comp_name n ^ "_mem")
     (mem64_t (Size.of_int_exn 8))
 
-(* The gap runs (the residue's byte-exact remainder) continue the same
-   numbering; they emit globals but carry no BIL var. *)
+(* The gap runs continue the same numbering; they emit globals but carry no
+   BIL var. *)
 let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
 
 let is_sec_comp_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"sec_comp_"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
-(* The component id of a fission var ([sec_comp_N_mem]); a var the test
-   above rejects parses to no id. *)
-(* A word of a section image is string text iff a printable run crosses
-   its start boundary: the start byte is printable and every byte back
-   to the last NUL (or to the array's start, when none precedes) is
-   printable too.  A NUL directly before the word means the run starts
-   at the word — no crossing, the word renders as a value. *)
-let string_text_word ~(arr : int array) ~(off : int) : bool =
+(* A word is string text iff a printable run crosses its start boundary —
+   printable back to the last NUL (or the array start); a NUL directly
+   before it means the run starts at the word and it renders as a value. *)
+let string_text_word ~(arr : Bytes.t) ~(off : int) : bool =
+  let byte i = Char.code (Bytes.get arr i) in
   let printable b = b >= 0x20 && b <= 0x7e in
   let rec crosses i =
     if i < 0 then true
-    else if arr.(i) = 0 then i < off - 1
-    else if printable arr.(i) then crosses (i - 1)
+    else if byte i = 0 then i < off - 1
+    else if printable (byte i) then crosses (i - 1)
     else false
   in
-  off > 0 && off < Array.length arr && printable arr.(off) && crosses (off - 1)
+  off > 0 && off < Bytes.length arr && printable (byte off) && crosses (off - 1)
 
-(* The degraded frame's below-entry depth fact: the deepest literal SP
-   decrement in the sub (rsp-sub prologues and VLAs). *)
+(* The deepest literal SP decrement in the sub (prologues and VLAs). *)
 let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
   let is_sp v = Abi.is_sp abi (Var.base v) in
   Term.enum blk_t sub
@@ -389,21 +377,15 @@ let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
                    Int64.max acc (Word.to_int64_exn w)
                | _ -> acc))
 
-(* The capacity of the frame's window extension (the bounded arm: a
-   real SysV window never needs more; a wider extent reads past it the
-   way an unproven address always has). *)
+(* The window extension's capacity; a real SysV window never needs more. *)
 let caller_window_bytes : int64 = 65536L
 
-(* The directionless stack top's below-entry clamp: a TOP StackOff
-   claims [entry − stack_max, entry) — the same practical constant the
-   residue's own extent clamps at. *)
+(* The directionless stack top's below-entry clamp: a TOP stack offset
+   claims [entry − stack_max, entry). *)
 let stack_max : int64 = 65536L
 
-(* THE call-push fact: a MACHINE call pushes its return address (one
-   word below the caller's SP at the call); a modeled op — an
-   intrinsic, rendered inline — pushes nothing.  One predicate, three
-   consumers: the frame's push-word reserve, the call-window member,
-   and the return-edge SP restore. *)
+(* A machine call pushes its return address one word below the caller's SP;
+   a modeled op (an intrinsic rendered inline) pushes nothing. *)
 let is_intrinsic_target (t : tid) : bool =
   Base.String.is_prefix (Tid.name t) ~prefix:"intrinsic:"
 
@@ -425,27 +407,22 @@ let has_call_push (sub : sub term) : bool =
   |> Seq.exists ~f:(fun blk ->
          Term.enum jmp_t blk |> Seq.exists ~f:call_pushes)
 
-(* The emitter's per-sub inputs are STRUCTURE (the promotion's BIR args /
-   arg defs / direct targets, the def-kind slots below) plus this narrow
-   LAYOUT fact: the alloca-construction inputs alone (the fallback
-   frame's bytes and the split regions' geometry) — no offsets, no
-   promotion facts, no kinds. *)
+(* The emitter's per-sub inputs are structure (BIR args, direct targets,
+   def tags) plus this layout fact: the alloca-construction inputs alone. *)
 
 module Sub_layout = struct
   open Core
 
-  (* D3: the fold's product.  [regions] is EVERY alloca of the sub —
-     the carved regions and the stack residue (id 0, whose extent
-     contains the anchor and the caller window).  [anchor] is the
-     entry RSP's runtime position: (region id, byte index inside that
-     alloca) — the SP Slot stores ptrtoint of it, so every model
-     address integer resolves against one base. *)
+  (* [regions] is every alloca of the sub — the carved regions plus the
+     stack residue (id 0, whose extent contains the anchor and the caller
+     window).  [anchor] is the entry RSP's runtime position (region id, byte
+     index inside that alloca), so every model address resolves against one
+     base. *)
   type t = {
     regions : (int * (int64 * int64) * int64) list;
     anchor : (int * int64) option;
-    (* The sub reads its incoming window (above-entry positions): its
-       direct-call signature carries the hike_window parameter and its
-       window accesses materialize against it. *)
+    (* The sub reads its incoming window: its direct-call signature carries
+       the hike_window parameter. *)
     window_param : bool;
   }
 
@@ -476,7 +453,7 @@ module Sub_layout = struct
     | 0 -> Bool.compare a.window_param b.window_param
     | c -> c
 
-  (* Required by [Value.Tag.register] — the layout tag's printer. *)
+  (* Required by [Value.Tag.register]. *)
   let pp fmt { regions; anchor; window_param } =
     Format.fprintf fmt "regions=%d;anchor=%s;window=%b"
       (Base.List.length regions)
@@ -544,7 +521,6 @@ module Sub_layout = struct
   end)
 end
 
-(* Top-level aliases (the mli's re-export shape). *)
 type sub_layout = Sub_layout.t = {
   regions : (int * (int64 * int64) * int64) list;
   anchor : (int * int64) option;
@@ -553,8 +529,8 @@ type sub_layout = Sub_layout.t = {
 
 
 
-(* The layout rides the SUB TERM (the one tag): the producer computes it
-   once; the emitter reads it off the term. *)
+(* The layout rides the sub term: the producer computes it once, the emitter
+   reads it off the term. *)
 let layout_tag : Sub_layout.t Value.Tag.t =
   Value.Tag.register ~package:"hike" ~name:"hike-layout"
     ~uuid:"3f5e1c2a-9b47-4d60-8a15-c4d9e07b2f11"
@@ -564,17 +540,13 @@ let set_layout (l : Sub_layout.t) (sub : sub term) : sub term =
   Term.set_attr sub layout_tag l
 
 
-(* Per-def tags ride the DEF'S VALUE: the producer stamps each def with
-   its kind (the 100% Tagging Invariant's tag) and the dynamic-allocation
-   defs with the dyn-alloc fact; the emitter reads the tags off the
-   term — never a per-sub record. *)
+(* Per-def tags ride the def's value: the producer stamps each def, the
+   emitter reads the tags off the term. *)
 
 module KB = Bap_knowledge.Knowledge
 
-(* The dynamic-allocation fact: the def is a runtime-sized SP
-   decrement (the producer's denotation event) and emits a REAL
-   runtime-sized alloca.  The storage decision rides the def's value
-   beside the kind — the address enum says nothing about storage. *)
+(* The def is a runtime-sized SP decrement and emits a real runtime-sized
+   alloca; the storage fact rides the def's value beside the kind. *)
 let def_dyn_alloc_slot : (Theory.Value.cls, bool) KB.slot =
   let bool_domain =
     KB.Domain.flat
@@ -587,11 +559,8 @@ let def_dyn_alloc_slot : (Theory.Value.cls, bool) KB.slot =
 let def_is_dyn_alloc (d : def term) : bool =
   KB.Value.get def_dyn_alloc_slot (Def.value d)
 
-(* The window-value fact: the def computes an ADDRESS VALUE that lives
-   at/above the entry line — its emitted integer re-bases to the
-   hike_window parameter (the caller's world), so derefs of the stored
-   pointer stay additive-safe.  The address-expression world rule
-   (D4b): values escape in the world their position names. *)
+(* The def computes an address value at/above the entry line; its emitted
+   integer re-bases to the hike_window parameter. *)
 let def_window_value_slot : (Theory.Value.cls, bool) KB.slot =
   KB.Class.property ~package:"hike" Theory.Value.cls "hike-window-value"
     (KB.Domain.flat
@@ -610,8 +579,7 @@ let stamp_window_values ~(window_values : Tid.Set.t)
               (KB.Value.put def_window_value_slot (Def.value d) true)
           else d))
 
-(* Stamps the dynamic-allocation fact onto the event defs (the def's
-   own slot — it is not a range classification). *)
+(* Stamps the dynamic-allocation fact onto the event defs. *)
 let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
     (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
@@ -621,9 +589,8 @@ let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
               (KB.Value.put def_dyn_alloc_slot (Def.value d) true)
           else d))
 
-(* The slim section tag rides the def's VALUE (the def_kind_slot
-   pattern): the producer stamps it; the emitter's dispatch reads it
-   off the term. *)
+(* The section tag rides the def's value: the producer stamps it, the
+   emitter's dispatch reads it off the term. *)
 
 type KB.conflict += Sec_tag_conflict
 
