@@ -20,6 +20,7 @@ module Stages = Cbat_vsa_stages
 module CG = Graphs.Callgraph
 
 module AI = Cbat_ai_representation
+module Call_effects = Cbat_call_effects
 module WordSet = Cbat_clp_set_composite
 module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word

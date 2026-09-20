@@ -95,58 +95,32 @@ let denote_jump
           (* Calls abstract; every caller's def is denoted. *)
           begin
             let abi = rc0.Cbat_runctx.rc_abi in
-            let word_bits = 8 * abi.Hike_abi.word in
-            let rsp = abi.Hike_abi.sp in
-            (* A direct callee's kill summary keeps the caller-saved GPRs
-               it provably never writes; the return regs are the call's
-               own lanes.  No summary (missing or kill-all) keeps only
-               the base preserved set. *)
-            let preserved_site =
-              let base = preserved in
-              match Call.target c with
-              | Direct ct -> (
-                  match Core.Map.find written ct with
-                  | Some (Some ws) ->
-                    Base.List.fold abi.Hike_abi.caller_saved_gprs
-                      ~init:base ~f:(fun acc v ->
-                          if Core.Set.mem ws v then acc
-                          else if
-                            Base.List.exists
-                              abi.Hike_abi.return_regs ~f:(Var.same v)
-                          then acc
-                          else Core.Set.add acc v)
-                  | _ -> base)
-              | Indirect _ -> base
-            in
             let written_lanes, pushed =
               match Core.Map.find rc0.rc_blocks (Term.tid b) with
               | Some bf -> bf.bf_call_facts
               | None -> failwith "hike: no call facts for block (rctx)" in
-            (* The escape: the registers the call block wrote. *)
-            let escape =
-              List.map written_lanes ~f:(fun v -> AI.find_word word_bits env v) in
-            let abs =
-              AI.call_abstraction_frame
-                ~preserved:preserved_site
-                ~rsp:(AI.find_word word_bits env rsp)
-                ~escape env in
-            (* The SP restores by one word on returns: the callee's ret
-               pops exactly the retaddr the caller pushed.  On a stack
-               word the +word lands in the offsets exactly. *)
-            if pushed then begin
-              AI.add_word abs ~key:rsp
-                ~data:(WordSet.add (AI.find_word word_bits abs rsp)
-                         (WordSet.singleton
-                            (Cbat_word.of_int ~width:word_bits
-                               abi.Hike_abi.word)))
-            end else abs
+            let target =
+              match Call.target c with
+              | Direct ct ->
+                Cbat_call_effects.Callee
+                  (match Core.Map.find written ct with
+                   | Some (Some ws) -> Some ws
+                   | _ -> None)
+              | Indirect _ -> Cbat_call_effects.Callee None
+            in
+            Cbat_call_effects.transfer ~abi ~preserved
+              ~site:{ Cbat_call_effects.target; written_lanes; pushed }
+              env
           end in
     let env_res, rctx =
       match Jmp.kind jmp with
       | Int _ ->
         (* Traps are external callees. *)
-        (AI.call_abstraction
-           ~preserved:preserved env,
+        (Cbat_call_effects.transfer
+           ~abi:(rc0.Cbat_runctx.rc_abi) ~preserved
+           ~site:{ Cbat_call_effects.target = Trap;
+                   written_lanes = []; pushed = false }
+           env,
          rctx)
       | Call c -> (
         match Core.Map.find resolved (Term.tid jmp) with

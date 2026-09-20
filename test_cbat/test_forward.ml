@@ -242,4 +242,115 @@ let run () =
   in
   Vsa.set_section_images [];
   check "IMG-4: a stored cell in range wins over the image bytes" img4;
+  ());
+(* The call-effects transfer: the survive-a-call policy — the preserved
+   derivation from the callee's kill summary, the frame-keep decision,
+   and the SP restore, each behind the one interface. *)
+(  let abi = Hike_abi.x86_64_sysv in
+  let module Ce = Vsa.Call_effects in
+  let not_return v =
+    not (Base.List.exists abi.Hike_abi.return_regs ~f:(Var.same v)) in
+  let g1, g2 =
+    match Base.List.filter abi.Hike_abi.caller_saved_gprs ~f:not_return with
+    | g1 :: g2 :: _ -> (g1, g2)
+    | _ -> assert false
+  in
+  let rdi = Base.List.nth_exn abi.Hike_abi.int_param_regs 0 in
+  let x = v64 "ce_x" in
+  let mkey lo =
+    match Mem.Key.of_wordset (Ws.singleton (w64 lo)) with
+    | Some k -> k | None -> assert false
+  in
+  let idx = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+  (* The pre-call env: a frame with cells at [0x2000; 0x3000] above the
+     call-time RSP {0x1000}, one below it at [0x500], and a memory var. *)
+  let raw_env ~lanes =
+    let mem =
+      Mem.add
+        (Mem.add
+           (Mem.add
+              (Mem.top idx)
+              ~key:(mkey 0x2000)
+              ~data:(Mem.Val.create (Ws.singleton (w64 42)) LittleEndian))
+           ~key:(mkey 0x3000)
+           ~data:(Mem.Val.create (Ws.singleton (w64 7)) LittleEndian))
+        ~key:(mkey 0x500)
+        ~data:(Mem.Val.create (Ws.singleton (w64 1)) LittleEndian)
+    in
+    let m = memv "ce_m" in
+    let env =
+      AI.add_memory AI.top ~key:m ~data:mem
+      |> AI.add_word ~key:abi.Hike_abi.sp
+           ~data:(Ws.singleton (w64 0x1000))
+    in
+    let env =
+      Base.List.fold lanes ~init:env ~f:(fun acc v ->
+          AI.add_word acc ~key:v ~data:(Ws.singleton (w64 0x2000)))
+    in
+    (env, m)
+  in
+  let reads m lo post =
+    Mem.Val.data (Mem.find (64, LittleEndian)
+                    (AI.find_memory idx post m) (mkey lo))
+  in
+  (* CE1/CE2: the preserved derivation from the callee's kill summary. *)
+  let summary = Core.Set.singleton (module Var) g1 in
+  let words_env =
+    AI.add_word
+      (AI.add_word AI.top ~key:g1 ~data:(Ws.singleton (w64 1)))
+      ~key:g2
+      ~data:(Ws.singleton (w64 2))
+  in
+  let kept = Ce.transfer ~abi ~preserved:(Var.Set.singleton x)
+      ~site:{ Ce.target = Ce.Callee (Some summary); written_lanes = [];
+              pushed = false }
+      (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5))) in
+  check "CE1: the kill summary keeps non-written caller-saved GPRs and the base"
+    (Ws.equal (AI.find_word 64 kept x) (Ws.singleton (w64 5))
+    && Ws.equal (AI.find_word 64 kept g2) (Ws.singleton (w64 2))
+    && Ws.is_top (AI.find_word 64 kept g1));
+  let killed = Ce.transfer ~abi ~preserved:(Var.Set.singleton x)
+      ~site:{ Ce.target = Ce.Callee None; written_lanes = []; pushed = false }
+      (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5))) in
+  check "CE2: no summary (unknown or kill-all) keeps only the base set"
+    (Ws.equal (AI.find_word 64 killed x) (Ws.singleton (w64 5))
+    && Ws.is_top (AI.find_word 64 killed g1)
+    && Ws.is_top (AI.find_word 64 killed g2));
+  (* CE3/CE4: the frame-keep decision on the frame cells. *)
+  let frame_call ~lanes =
+    let e, m = raw_env ~lanes in
+    (Ce.transfer ~abi ~preserved:Var.Set.empty
+       ~site:{ Ce.target = Ce.Callee None; written_lanes = lanes;
+               pushed = false }
+       e,
+     m)
+  in
+  let kept_frame, m_kept = frame_call ~lanes:[] in
+  check "CE3: frame-keep — cells at/above the call-time RSP survive, below die"
+    (Ws.equal (reads m_kept 0x2000 kept_frame) (Ws.singleton (w64 42))
+    && Ws.equal (reads m_kept 0x3000 kept_frame) (Ws.singleton (w64 7))
+    && Ws.is_top (reads m_kept 0x500 kept_frame));
+  let escaped, m_esc = frame_call ~lanes:[ rdi ] in
+  check "CE4: an escape lane's range dies with the call, the rest of the frame survives"
+    (Ws.is_top (reads m_esc 0x2000 escaped)
+    && Ws.equal (reads m_esc 0x3000 escaped) (Ws.singleton (w64 7)));
+  (* CE5: the pushed site's SP restore. *)
+  let restored = Ce.transfer ~abi ~preserved:Var.Set.empty
+      ~site:{ Ce.target = Ce.Callee None; written_lanes = []; pushed = true }
+      (AI.add_word AI.top ~key:abi.Hike_abi.sp
+         ~data:(Ws.singleton (w64 0x1000))) in
+  let rsp' = AI.find_word 64 restored abi.Hike_abi.sp in
+  check "CE5: a pushed site's SP gains one word — the popped retaddr"
+    (Ws.elem (w64 0x1000) rsp' && Ws.elem (w64 0x1008) rsp');
+  (* CE6: a trap keeps no frame and restores no SP (the landing-1
+     contract; landing 2 tightens the memory half). *)
+  let trap_env, m_trap = raw_env ~lanes:[] in
+  let trap = Ce.transfer ~abi
+      ~preserved:(Var.Set.singleton abi.Hike_abi.sp)
+      ~site:{ Ce.target = Ce.Trap; written_lanes = []; pushed = false }
+      trap_env in
+  check "CE6: a trap keeps no frame (whole-memory top) and restores no SP"
+    (Mem.equal (AI.find_memory idx trap m_trap) (Mem.top idx)
+    && Ws.equal (AI.find_word 64 trap abi.Hike_abi.sp)
+         (Ws.singleton (w64 0x1000)));
   ())

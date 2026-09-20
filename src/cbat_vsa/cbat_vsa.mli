@@ -19,6 +19,9 @@ module WordSet = Cbat_clp_set_composite
 
 module AI = Cbat_ai_representation
 
+(* The one policy for what survives a call. *)
+module Call_effects = Cbat_call_effects
+
 (* Re-exported memory abstraction. *)
 module Mem = Cbat_ai_memmap
 
