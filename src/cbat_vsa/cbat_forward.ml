@@ -1,8 +1,7 @@
 (* Forward jump/block denotation: the per-jmp transfer toward a target
    (the direct/resolved identity, the call abstraction), joined over the
    reachable jumps; each conditional edge drives the backward
-   refinement inline (cbat_backward, one-directional).  Consumes the
-   transfer (open). *)
+   refinement inline. *)
 
 include Core
 open Bap.Std
@@ -11,10 +10,9 @@ module AI = Cbat_ai_representation
 module WordSet = Cbat_clp_set_composite
 open Cbat_transfer
 
-(* The ONE edge classification: whether a jump's transfer reaches the
+(* The edge classification: whether a jump's transfer reaches the
    denotation target.  [Exact ts] — iff the transfer's target is in
-   [ts]; [Any] — may continue anywhere (the target among them);
-   [Never] — never reaches it. *)
+   [ts]; [Any] — may continue anywhere; [Never] — never reaches it. *)
 type edge_rel = Exact of Tid.Set.t | Any | Never
 
 let edge_rel_of ~(resolved : Tid.Set.t Tid.Map.t) (jmp : jmp term) : edge_rel =
@@ -51,53 +49,42 @@ let walk_discards ~(target : tid) (rel : edge_rel) : bool =
   | Never -> true
 
 (* Denotation of a block's jumps. *)
-let denote_jump ?preserved
-    ?(written : Var.Set.t option Tid.Map.t = Tid.Map.empty)
-    ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
-    ?(sub : sub term option = None)
-    ?edge_conds ?disabled ?sol
+let denote_jump
+    ~(preserved : Var.Set.t)
+    ~(written : Var.Set.t option Tid.Map.t)
+    ~(resolved : Tid.Set.t Tid.Map.t)
+    ~(sub : sub term)
+    ~(edge_conds : exp Tid.Map.t Tid.Map.t)
+    ~(disabled : exp Tid.Map.t)
+    ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     (b : blk term)  (env : AI.t) ~(target : tid)
     : AI.t * Cbat_runctx.refine_ctx =
-  (* Fold joins per-jump results. *)
   let rc0 = rctx in
   (* Per jmp: the edge's own cond and the disabled continuation (the
-     next edge's cond — the fallthrough's completed form), both from
-     the run's tables.  Without them there is no cond to constrain and
-     no continuation to observe. *)
+     next edge's cond), both from the run's tables. *)
   let lookup_cond jmp =
-    match edge_conds with
-    | Some tbl ->
-      Core.Map.find tbl (Term.tid b)
-      |> Option.bind ~f:(fun by_jmp ->
-          Core.Map.find by_jmp (Term.tid jmp))
-    | None -> None in
+    Core.Map.find edge_conds (Term.tid b)
+    |> Option.bind ~f:(fun by_jmp ->
+        Core.Map.find by_jmp (Term.tid jmp)) in
   let per_jump (acc, rctx) jmp =
     let edge_cond = lookup_cond jmp in
     let rel = edge_rel_of ~resolved jmp in
-    (* Observe the disabled continuation (the widening landmarks); the
-       edge's cond constrains the state inside refine_edge_inline.
-       The observation needs the walk (the producer push), so it rides
-       the same sol-carrying arm. *)
-    (match sol, disabled with
-     | Some snap, Some tbl ->
-       Option.iter (Core.Map.find tbl (Term.tid jmp))
-         ~f:(fun dc ->
-           Cbat_backward.acquire_unsat ~sol:snap
-             ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
-             env b dc)
-     | _ -> ());
-    (* Deep walk uses the same edge cond. *)
+    (* Observes the disabled continuation (the widening landmarks); the
+       observation needs the walk, so it rides the same sol-carrying
+       arm. *)
+    Option.iter (Core.Map.find disabled (Term.tid jmp))
+      ~f:(fun dc ->
+        Cbat_backward.acquire_unsat ~sol
+          ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
+          ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
+          env b dc);
     let env, rctx =
-      match edge_conds, sol, sub with
-      | Some _, Some snap, Some _ ->
-        (match edge_cond with
-         | Some acc_cond ->
-           Cbat_backward.refine_edge_inline ~sol:snap
-             ~rctx:rctx ~jt:(Term.tid jmp)
-             ~discarded:(walk_discards ~target rel) b env acc_cond
-         | None -> (env, rctx))
-      | _ -> (env, rctx) in
+      match edge_cond with
+      | Some acc_cond ->
+        Cbat_backward.refine_edge_inline ~sol
+          ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
+      | None -> (env, rctx) in
 
     let inspect_call c =
       match Call.return c with
@@ -107,7 +94,6 @@ let denote_jump ?preserved
         | Some (Direct _) ->
           (* Calls abstract; every caller's def is denoted. *)
           begin
-            (* The run's convention facts (the rctx carries them). *)
             let abi = rc0.Cbat_runctx.rc_abi in
             let word_bits = 8 * abi.Hike_abi.word in
             let rsp = abi.Hike_abi.sp in
@@ -116,7 +102,7 @@ let denote_jump ?preserved
                own lanes.  No summary (missing or kill-all) keeps only
                the base preserved set. *)
             let preserved_site =
-              let base = Option.value ~default:Var.Set.empty preserved in
+              let base = preserved in
               match Call.target c with
               | Direct ct -> (
                   match Core.Map.find written ct with
@@ -132,13 +118,11 @@ let denote_jump ?preserved
                   | _ -> base)
               | Indirect _ -> base
             in
-            (* The run's convention facts (the rctx carries them);
-               [mk_rctx] builds the facts for every block of the sub. *)
             let written_lanes, pushed =
               match Core.Map.find rc0.rc_blocks (Term.tid b) with
               | Some bf -> bf.bf_call_facts
               | None -> failwith "hike: no call facts for block (rctx)" in
-            (* Written registers are static. *)
+            (* The escape: the registers the call block wrote. *)
             let escape =
               List.map written_lanes ~f:(fun v -> AI.find_word word_bits env v) in
             let abs =
@@ -146,10 +130,9 @@ let denote_jump ?preserved
                 ~preserved:preserved_site
                 ~rsp:(AI.find_word word_bits env rsp)
                 ~escape env in
-            (* The SP restores by one word on returns: the matched-pair
-               restore — the callee's ret pops exactly the retaddr the
-               caller pushed.  On a stack word the +word lands in the
-               offsets exactly (StackOff + const). *)
+            (* The SP restores by one word on returns: the callee's ret
+               pops exactly the retaddr the caller pushed.  On a stack
+               word the +word lands in the offsets exactly. *)
             if pushed then begin
               AI.add_word abs ~key:rsp
                 ~data:(WordSet.add (AI.find_word word_bits abs rsp)
@@ -158,21 +141,19 @@ let denote_jump ?preserved
                                abi.Hike_abi.word)))
             end else abs
           end in
-    (* Per-jump transfer results. *)
     let env_res, rctx =
       match Jmp.kind jmp with
       | Int _ ->
         (* Traps are external callees. *)
         (AI.call_abstraction
-           ~preserved:(Option.value ~default:Var.Set.empty preserved) env,
+           ~preserved:preserved env,
          rctx)
       | Call c -> (
         match Core.Map.find resolved (Term.tid jmp) with
         | Some _ ->
           (* A resolved transfer is the intra-sub jump the concrete
-             machine performs: FULL IDENTITY — no callee effects on
-             registers, memory, or frame; control continues at cont.
-             Any other target is unreachable. *)
+             machine performs: FULL IDENTITY — no callee effects; any
+             other target is unreachable. *)
           ((if env_leads ~target rel then env else AI.bottom), rctx)
         | None -> (inspect_call c, rctx))
       | Goto (Direct _) | Ret (Direct _) ->
@@ -185,13 +166,14 @@ let denote_jump ?preserved
     ~f:per_jump
 
 (* Block denotation toward a target. *)
-let denote_block ?preserved
-    ?(written : Var.Set.t option Tid.Map.t = Tid.Map.empty)
-    ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
-    ?(sub : sub term option = None)
-    ?(edge_conds : exp Tid.Map.t Tid.Map.t option = None)
-    ?(disabled : exp Tid.Map.t option = None)
-    ?(sol : (tid, AI.t) Solution.t option = None)
+let denote_block
+    ~(preserved : Var.Set.t)
+    ~(written : Var.Set.t option Tid.Map.t)
+    ~(resolved : Tid.Set.t Tid.Map.t)
+    ~(sub : sub term)
+    ~(edge_conds : exp Tid.Map.t Tid.Map.t)
+    ~(disabled : exp Tid.Map.t)
+    ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     (ctx : program term) ~(source : tid) (env : AI.t)
     : target:tid -> AI.t * Cbat_runctx.refine_ctx =
@@ -199,8 +181,8 @@ let denote_block ?preserved
    | Some b ->
      let postcond = denote_defs b env in
      fun ~target ->
-       denote_jump ?preserved ~written ~resolved ~sub ?edge_conds ?disabled
-         ?sol
+       denote_jump ~preserved ~written ~resolved ~sub ~edge_conds ~disabled
+         ~sol
          ~rctx
          b postcond ~target
    | None -> fun ~target ->

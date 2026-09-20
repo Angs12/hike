@@ -1,8 +1,6 @@
-(* Forward transfer: value denotation over BIL. Pure; the walk and
-   driver consume it (one-directional dep).  The entry RSP's word
+(* Forward transfer: value denotation over BIL.  The entry RSP's word
    carries the symbolic segment base, SP-derived addresses denote
-   [StackOff] directly, and memory cells key by their segment
-   offsets. *)
+   [StackOff], and memory cells key by their segment offsets. *)
 include Core
 open Bap.Std
 open Graphlib.Std
@@ -17,7 +15,6 @@ module Word_ops = Cbat_word
 let addr_bits_ref = ref 0
 let set_addr_bits (n : int) : unit = addr_bits_ref := n
 
-(* Memory index of a memory type. *)
 let mem_idx addr_sz addressable_sz : Mem.idx =
   { Mem.addr_width =
       (if !addr_bits_ref > 0 then !addr_bits_ref else Size.in_bits addr_sz);
@@ -29,7 +26,6 @@ type wordset = WordSet.t
 
 
 
-(* Widths of both inputs. *)
 let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   let btrue = WordSet.singleton (Cbat_word.b1) in
   let bfalse = WordSet.singleton (Cbat_word.b0) in
@@ -123,7 +119,7 @@ let val_top : typ -> val_t = function
 type section_image =
   { img_lo : int64;
     img_hi : int64;
-    img_bytes : int array }
+    img_bytes : Bytes.t }
 
 let section_images_ref : section_image list ref = ref []
 
@@ -131,21 +127,28 @@ let section_images_ref : section_image list ref = ref []
 let set_section_images (imgs : section_image list) : unit =
   section_images_ref := imgs
 
+(* Runs [f] with [imgs] armed, disarmed on every exit. *)
+let with_images (imgs : section_image list) (f : unit -> 'a) : 'a =
+  section_images_ref := imgs;
+  match f () with
+  | v -> section_images_ref := []; v
+  | exception e -> section_images_ref := []; raise e
+
 (* The image's [bits]-bit word at byte offset [off], assembled in the
    load's endianness; [None] when the bytes leave the array. *)
-let image_word (bytes : int array) (off : int) ~(endian : endian)
+let image_word (bytes : Bytes.t) (off : int) ~(endian : endian)
     ~(bits : int) : Cbat_word.t option =
   let nb = bits / 8 in
   if
     bits <= 0 || bits > 64 || bits mod 8 <> 0 || off < 0
-    || off + nb > Array.length bytes
+    || off + nb > Bytes.length bytes
   then None
   else
     let v =
       let rec go i acc =
         if i >= nb then acc
         else
-          let b = Stdlib.Int64.of_int bytes.(off + i) in
+          let b = Stdlib.Int64.of_int (Char.to_int (Bytes.get bytes (off + i))) in
           let acc' =
             match endian with
             | LittleEndian ->
@@ -164,12 +167,9 @@ let image_word (bytes : int array) (off : int) ~(endian : endian)
 let image_load_card_cap = 64
 
 (* The image-backed load: an address set fully bounded inside ONE
-   threaded image reads the image's bytes — the exact value set, the
-   image being the section's static content.  The premise is the whole
-   rule: a plain (non-stack) bounded address whose entire access
-   extent lies inside one image, no stored cell intersecting the
-   extent (a store wins), and an enumerable address set.  Anything
-   else keeps the abstract read — the sound identity. *)
+   threaded image, with no stored cell intersecting the access extent
+   and an enumerable address set, reads the image's bytes — the exact
+   value set.  Anything else keeps the abstract read. *)
 let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
     (mv : Mem.t) : wordset option =
   (* A live (non-bottom) memory reads top where no cell covers the
@@ -320,9 +320,8 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
-(* Every def is denoted (spec §2.1): the denotation IS the transfer —
-   SP-derived addresses arrive as [StackOff] words and memory ops key
-   cells by their segment offsets. *)
+(* Every def is denoted: SP-derived addresses arrive as [StackOff]
+   words and memory ops key cells by their segment offsets. *)
 let denote_def (df : def term) (env : AI.t) : AI.t =
   let v = Def.lhs df in
   let e = Def.rhs df in
@@ -333,17 +332,15 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
    | `Word p -> AI.add_word env ~key:v ~data:p
    | `Mem m -> AI.add_memory env ~key:v ~data:m)
 
-(* Denotation of a block's defs. *)
 let denote_defs (b : blk term) : AI.t -> AI.t =
   (* Phis are the identity. *)
   fun env0 ->
     Term.enum def_t b
     |> Seq.fold ~init:env0 ~f:(fun env df -> denote_def df env)
 
-(* One per-block state replay: the block's defs fold [denote_def] from
-   its solution entry state; [f] folds the accumulator over each def's
-   (before, after) states.  A def-less block runs [f] zero times and
-   the end state is the entry state. *)
+(* One per-block state replay: the block's defs fold [denote_def]
+   from its entry state; [f] folds over each def's (before, after)
+   states. *)
 let fold_block_states ~(sol : (tid, AI.t) Solution.t) (blk : blk term)
     ~(init : 'acc) ~(f : AI.t -> AI.t -> def term -> 'acc -> 'acc) :
     'acc * AI.t =
@@ -357,7 +354,7 @@ let fold_block_states ~(sol : (tid, AI.t) Solution.t) (blk : blk term)
   (acc, st_end)
 
 (* The block's last def per lhs var: the reaching def at the block's
-   end (the defs run in order before the block's jmps). *)
+   end. *)
 let last_defs (blk : blk term) : def term Var.Map.t =
   Term.enum def_t blk
   |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
@@ -365,10 +362,9 @@ let last_defs (blk : blk term) : def term Var.Map.t =
 
 
 
-(* Jumps reachable in the env.  Guards evaluate on the words lane
-   directly: an SP-derived var's word is the segment-smeared
-   stack base, so bit tests on it stay undecided ([seg & 0xF] = [0,15])
-   and comparisons against concrete addresses decide consistently with
+(* Jumps reachable in the env.  An SP-derived var's word is the
+   segment-smeared stack base: bit tests on it stay undecided, and
+   comparisons against concrete addresses decide consistently with
    real pointer behavior. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->

@@ -11,7 +11,7 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* Cbat_vsa_utils: small shared utilities. Every def is denoted (spec §2.1). *)
+(* Cbat_vsa_utils: small shared utilities. Every def is denoted. *)
 
 exception NotImplemented of string
 

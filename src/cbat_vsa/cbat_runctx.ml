@@ -12,8 +12,8 @@
 (* ************************************************************************* *)
 
 
-(* Per-run analysis context: static per-block facts, version stamps and
-   walk/transfer memos threaded through the engine. *)
+(* Per-run analysis context: static per-block facts and the versioned
+   solution threaded through the engine. *)
 
 open Core
 open Bap.Std
@@ -21,21 +21,13 @@ open Graphlib.Std
 module Utils = Cbat_vsa_utils
 module AI = Cbat_ai_representation
 
-(* The walk's memo; value is the abstract state. *)
-module Walk_memo = Cbat_memo
-
-
-(* Per-run analysis context. *)
-(* Mutable per-analysis state: the versioned solution values that key
-   the memos, and the memos. The fixpoint builds one per sub and
-   the call abstraction one per callee — sharing memo entries would be
-   unsound (Tids are only unique per sub), so each context owns its own. *)
+(* Mutable per-analysis state: the versioned solution values.  The
+   fixpoint builds one per sub and the call abstraction one per callee
+   — Tids are only unique per sub, so each context owns its own. *)
 type fix_state = {
   (* Per-block solution values with their version stamps; a bump means
      the value changed. *)
   fs_sol : (AI.t * int) Tid.Map.t;
-  (* Cached walks. *)
-  fs_cache : Walk_memo.t;
 }
 
 (* Static per-block facts, one per sub block: the block's term, the
@@ -54,21 +46,18 @@ type refine_ctx = {
      the walk anchors on, the call-written register lanes, and the
      word size behind every word lookup. *)
   rc_abi : Hike_abi.t;
-  (* Per-block facts. *)
   rc_blocks : block_facts Tid.Map.t;
   (* The producer non-negativity oracle (the walk's signed rows): an
      expression whose every possible value has its sign bit clear.  The
      default proves nothing. *)
   rc_nonneg : env:AI.t -> exp -> bool;
+  (* The solve's own widening-landmark state (Simon & King): fresh per
+     [mk_rctx], never the process's. *)
+  rc_landmarks : Cbat_landmarks.t;
 }
 
-(* Record-update helpers: the triple-nested ctx/state updates in one
-   place, used by every memo/transfer update site. *)
-let with_cache (rc : refine_ctx) (cache : Walk_memo.t) : refine_ctx =
-  { rc with rc_state = { rc.rc_state with fs_cache = cache } }
-
 let with_sol (rc : refine_ctx) (sol : (AI.t * int) Tid.Map.t) : refine_ctx =
-  { rc with rc_state = { rc.rc_state with fs_sol = sol } }
+  { rc with rc_state = { fs_sol = sol } }
 
 (* Static per-block call facts: the convention's integer-arg lanes the
    block writes, and whether the block writes SP (the call-push marker). *)
@@ -136,9 +125,9 @@ let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
 let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t) (s : sub term) :
     refine_ctx = {
   rc_nonneg = (fun ~env:_ _ -> false);
+  rc_landmarks = Cbat_landmarks.create ();
   rc_state = {
     fs_sol = Tid.Map.empty;
-    fs_cache = Walk_memo.empty;
   };
   rc_abi = abi;
   rc_blocks =

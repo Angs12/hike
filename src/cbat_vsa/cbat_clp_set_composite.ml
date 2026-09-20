@@ -24,21 +24,12 @@ type word = Cbat_word.t
 type fset = FinSet.t
 
 (* Large sets are Clps; small ones FinSets; stack addresses carry the
-   symbolic segment base.
-
-   [StackOff offs] denotes the model stack segment base — an unknown
-   value inside [stack_base, stack_base + stack_span] — plus the exact
-   offset set [offs].  The base is a MODEL constant, never widened: it
-   keeps the correlation between the entry RSP and every SP-derived
-   address.  Arithmetic with base-free operands propagates the offsets
-   exactly; every operation that loses the shape (bitwise, multiplies,
-   mixed meets) degrades to the plain concrete hull — the SMEAR
-   [stack_base + offs_lo, stack_base + stack_span + offs_hi] — which is
-   sound: [2^62, 2^63) is non-canonical on x86-64, disjoint from every
-   real user (below 2^56) and kernel (signed-negative) address, so
-   guard masks on the smear stay undecided ([2^62, 2^62+8MiB] & 0xF =
-   [0,15]) while comparisons against concrete addresses decide
-   consistently with real pointer behavior. *)
+   symbolic segment base.  [StackOff offs] denotes the model stack
+   segment base plus the exact offset set [offs]; the base is a MODEL
+   constant, never widened.  Operations that lose the shape degrade to
+   the plain concrete smear [stack_base + offs_lo, stack_base +
+   stack_span + offs_hi] — sound because [2^62, 2^63) is disjoint from
+   every real address. *)
 type t =
   | Clp of Clp.t
   | FinSet of FinSet.t
@@ -50,19 +41,13 @@ type idx = int
 let stack_base = Stdlib.Int64.shift_left 1L 62
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
-(* The stack word over an offset set. *)
 let stack_word (offs : Clp.t) : t = StackOff offs
 
-(* Singleton-offset stack word. *)
 let stack_word_i64 (k : int64) : t =
   StackOff (Clp.singleton (Cbat_word.of_word (Word.of_int64 ~width:64 k)))
 
-(* The offset set of a stack-symbolic value — the StackOff PROOF
-   (T14): answers ONLY for the symbolic arm.  A plain in-band set (the
-   degraded band arm) is None: the band re-tag serves ADDRESS
-   classification, where the argument is about addresses — never a
-   frame-extent question, where regular integers contribute
-   NOTHING. *)
+(* The offset set of a stack-symbolic value — answers ONLY for the
+   symbolic arm; a plain in-band set is None. *)
 let stack_offsets (t : t) : Clp.t option = match t with
   | StackOff offs -> Some offs
   | Clp _ | FinSet _ -> None
@@ -96,10 +81,8 @@ let smear_bounds (offs : Clp.t) : (int64 * int64) option =
      | _ -> None)
   | _ -> None
 
-(* The plain concrete twin: the smear as a step-1 hull (always a large
-   Clp, so the raw constructor is exactly what [bound_set_size] keeps).
-   The generic lifts below route every StackOff they cannot handle
-   precisely through this twin — the degradation contract. *)
+(* The plain concrete twin: the smear as a step-1 hull; the lifts
+   route every StackOff they cannot handle precisely through it. *)
 let rec to_plain (t : t) : t =
   match t with
   | StackOff offs ->
@@ -130,9 +113,7 @@ let rec lift_consume (f_clp : clp -> 'a) (f_fs : fset -> 'a) : t -> 'a = fun t -
   | FinSet s -> f_fs s
   | StackOff _ -> lift_consume f_clp f_fs (to_plain t)
 
-(* Small sets skip the sorted-list round trip: the element list is already
-   materialized, so empty and singleton convert directly. Singletons are the
-   common case (immediates and single-point guards). *)
+(* Small sets convert directly from the materialized element list. *)
 let clp_of_finset fs : clp =
   let width = FinSet.bitwidth fs in
   match FinSet.iter fs with
@@ -197,15 +178,14 @@ let of_clp (p : clp) : t = bound_set_size (Clp p)
 let bottom i = FinSet (FinSet.bottom i)
 let top i = bound_set_size @@ Clp (Clp.top i)
 
-(* The plain-arm band: signed-positive [2^61, 2^63).  A bounded plain
-   set inside it is a DEGRADED stack address (a bitwise-mangled SP
-   lane, a reloaded smear) — no real x86-64 address can be there, so
-   re-tagging it stack is sound. *)
+(* The plain-arm band: signed-positive [2^61, 2^63); no real x86-64
+   address can be there, so re-tagging a bounded set inside it stack is
+   sound. *)
 let stack_band_lo = Stdlib.Int64.shift_left 1L 61
 
-(* Band test on concrete extrema: every extremum signed-positive and at
-   least [stack_band_lo] (int64 has no [2^63), so the signed reading of
-   the band's upper end is simply "not negative"). *)
+(* Band test on concrete extrema: every extremum at least
+   [stack_band_lo]; int64 has no [2^63), so the upper end reads as
+   "not negative". *)
 let in_band_words (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
   match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
   | Ok loi, Ok hii ->
@@ -264,12 +244,24 @@ let bitwidth (t : t) : int = match t with
   | Clp p -> Clp.bitwidth p
   | FinSet s -> FinSet.bitwidth s
 
-(* |segment| * |offs| at width 65 (only zero/one tests read it). *)
+(* |segment| * |offs| at width 65.  The product SATURATES: a wrapped
+   product would under-report. *)
 let cardinality (t : t) = match t with
   | StackOff offs ->
-    Cbat_word.mul
-      (Cbat_word.of_int ~width:65 (Stdlib.Int64.to_int stack_span + 1))
-      (Cbat_word.cap_at_width ~width:65 (Clp.cardinality offs))
+    let width = 65 in
+    let a = Cbat_word.of_int ~width (Stdlib.Int64.to_int stack_span + 1) in
+    let b = Cbat_word.cap_at_width ~width (Clp.cardinality offs) in
+    if Cbat_word.is_zero a || Cbat_word.is_zero b then
+      Cbat_word.zero width
+    else if Cbat_word.is_one a then b
+    else if Cbat_word.is_one b then a
+    else
+      (* a = 2^23 + 1, so [b <= 2^39] keeps the exact product below
+         2^63; anything larger saturates. *)
+      (match Cbat_word.to_int64 b with
+       | Ok v when Stdlib.Int64.compare v 0x8000000000L <= 0 ->
+         Cbat_word.mul a b
+       | _ -> Cbat_word.ones width)
   | Clp p -> Clp.cardinality p
   | FinSet s -> FinSet.cardinality s
 
@@ -291,13 +283,8 @@ let max_elem (t : t) = match t with
   | Clp p -> Clp.max_elem p
   | FinSet s -> FinSet.max_elem s
 
-(* The SEGMENT-RELATIVE extrema of a stack value's offsets: a
-   [StackOff]'s offset set as a set (element-faithful for small
-   cardinalities, arc extrema otherwise), a plain in-band set as its
-   segment-relative hull rendered back to words — a negative relative
-   bound wraps, and the wrap IS the landed degradation (the wrapped
-   tag degrades the frame, never sizes it).  Callers lift the result
-   onto the absolute line. *)
+(* The SEGMENT-RELATIVE extrema of a stack value: a [StackOff]'s offset
+   set, or a plain in-band set's segment-relative hull. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   let twin = match t with
     | StackOff offs -> Some (of_clp offs)
@@ -308,12 +295,9 @@ let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   Option.bind twin ~f:(fun t' ->
     Option.map2 (min_elem t') (max_elem t') ~f:(fun lo hi -> (lo, hi)))
 
-(* Signed extrema.  The StackOff smear is signed-positive, so its
-   signed and unsigned extrema agree; the Clp and FinSet arms carry
-   their own signed queries — a set spanning the sign boundary reads a
-   small signed value off its unsigned max (the full set's
-   [0xFFFFFFFF] is [-1] signed), which mis-decides every signed
-   comparison to "certainly true". *)
+(* Signed extrema: the smear is signed-positive, so its signed and
+   unsigned extrema agree; a set spanning the sign boundary has no
+   signed extremum. *)
 let min_elem_signed (t : t) = match t with
   | StackOff _ -> min_elem t
   | Clp p -> (
@@ -346,8 +330,7 @@ let splits_by (t : t) (w : Cbat_word.t) = match t with
   | Clp p -> Clp.splits_by p w
   | FinSet s -> FinSet.splits_by s w
 
-(* Hull test (an over-approximation of membership in the smear; every
-   in-repo consumer tests 1-bit guard values, never stack words). *)
+(* Hull test: an over-approximation of membership in the smear. *)
 let elem w (t : t) = match t with
   | StackOff offs ->
     (match smear_bounds offs with
@@ -360,8 +343,8 @@ let elem w (t : t) = match t with
   | Clp p -> Clp.elem w p
   | FinSet s -> FinSet.elem w s
 
-(* Materializes the base-0 slice only (no in-repo consumer; a full
-   smear materialization is 8 MiB of elements by construction). *)
+(* Materializes the base-0 slice only; a full smear is 8 MiB of
+   elements. *)
 let iter (t : t) = match t with
   | StackOff offs ->
     List.map ~f:(fun w -> Cbat_word.add (w64_of_i64 stack_base) w)
@@ -395,10 +378,7 @@ let union t1 t2 : t = match t1, t2 with
     lift_binop Clp.union FinSet.union t1 t2
 
 (* The plain side of a mixed meet, translated into the offset space
-   (positions minus the segment base — the inverse of [to_plain]'s
-   lifting): a stack-symbolic value equals a plain value only at
-   base + off, so the meet stays stack-symbolic and guard constraints
-   on stored pointers keep the symbol the frame facts ride on. *)
+   (positions minus the base): the meet stays stack-symbolic. *)
 let plain_offsets (p : t) : Clp.t option =
   let base = Cbat_word.of_int64 ~width:64 stack_base in
   match p with
@@ -470,10 +450,10 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
             ~f:(fun nxt -> Cbat_word.( = ) nxt e2) in
         let non_adj, adj_pairs =
           List.partition_tf ~f:(fun pr -> not (adj pr)) pairs in
-        match non_adj, adj_pairs with
-        | [ (arc_end, arc_start) ], (e1', e2') :: _ ->
-          (* One gap: remainder is one CLP. *)
-          let step = Cbat_word.sub e2' e1' in
+        (* The remainder of [p] after one removed arc [arc_start..arc_end]
+           (stepping by [step]): its direction decides the constructor
+           family. *)
+        let remainder ~(arc_end : word) ~(arc_start : word) ~(step : word) : clp =
           let cardn = Cbat_word.sub c1 cnt in
           if Clp.is_ascending p then
             match Clp.min_elem p with
@@ -491,9 +471,6 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
             | _ -> p
           else if Clp.is_circular p then
             Clp.create (Cbat_word.add arc_end step) ~step ~cardn
-          else if Cbat_word.(>) arc_start arc_end then
-            (* Wrapping remainder is one interval. *)
-            Clp.create (Cbat_word.add arc_end step) ~step ~cardn
           else
             (match Clp.min_elem p, Clp.max_elem p with
              | Some p_min, Some p_max ->
@@ -503,40 +480,20 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
                  Clp.create p_min ~step ~cardn
                else p
              | _ -> p)
+        in
+        match non_adj, adj_pairs with
+        | [ (arc_end, arc_start) ], (e1', e2') :: _ ->
+          (* One gap: remainder is one CLP stepping by the surviving
+             arc's stride. *)
+          remainder ~arc_end ~arc_start ~step:(Cbat_word.sub e2' e1')
         | [ (arc_end, arc_start) ], [] ->
-          (* Singleton run. *)
+          (* Singleton run: the remainder starts at the strict
+             successor of the run's end. *)
           (match strict_succ arc_end with
            | Some nxt ->
-             let step = Cbat_word.sub nxt arc_end in
-             let cardn = Cbat_word.sub c1 cnt in
-             if Clp.is_ascending p then
-               match Clp.min_elem p with
-               | Some p_min when Cbat_word.(=) arc_start p_min ->
-                 let new_base = Cbat_word.add arc_end step in
-                 if Cbat_word.(<) new_base arc_end then Clp.bottom width
-                 else Clp.create_ascending ~width ~base:new_base ~step
-               | _ -> p
-             else if Clp.is_descending p then
-               match Clp.max_elem p with
-               | Some p_max when Cbat_word.(=) arc_end p_max ->
-                 let new_base = Cbat_word.sub arc_start step in
-                 if Cbat_word.(>) new_base arc_start then Clp.bottom width
-                 else Clp.create_descending ~width ~base:new_base ~step
-               | _ -> p
-             else if Clp.is_circular p then
-               Clp.create (Cbat_word.add arc_end step) ~step ~cardn
-             else
-               (match Clp.min_elem p, Clp.max_elem p with
-                | Some p_min, Some p_max ->
-                  if Cbat_word.(=) arc_start p_min then
-                    Clp.create (Cbat_word.add arc_end step) ~step ~cardn
-                  else if Cbat_word.(=) arc_end p_max then
-                    Clp.create p_min ~step ~cardn
-                  else p
-                | _ -> p)
+             remainder ~arc_end ~arc_start ~step:(Cbat_word.sub nxt arc_end)
            | None -> p)
         | _ ->
-          (* Otherwise the identity. *)
           p
       end
 
@@ -580,8 +537,7 @@ let sub t1 t2 : t = match t1, t2 with
      | Some t -> t
      | None -> lift_binop Clp.sub FinSet.sub t1 t2)
 
-(* Shape-losing binops degrade to the plain concrete twins — the
-   generic lift's [StackOff] arm runs [to_plain] itself. *)
+(* Shape-losing binops degrade to the plain concrete twins. *)
 let mul t1 t2 = lift_binop Clp.mul FinSet.mul t1 t2
 let div t1 t2 = lift_binop Clp.div FinSet.div t1 t2
 let sdiv t1 t2 = lift_binop Clp.sdiv FinSet.sdiv t1 t2
@@ -599,9 +555,7 @@ let neg t = lift_unop Clp.neg FinSet.neg t
 
 let concat t1 t2 = lift_binop Clp.concat FinSet.concat t1 t2
 
-(* The Clp-carrying arms share one representation: the offsets arm and
-   the plain arm answer the same Clp query; a FinSet has none of these
-   shapes. *)
+(* The offsets arm and the plain arm answer the same Clp query. *)
 let on_offs (f : clp -> bool) (t : t) : bool =
   match t with
   | StackOff offs | Clp offs -> f offs
@@ -619,7 +573,6 @@ let is_ascending t = on_offs Clp.is_ascending t
 let is_descending t = on_offs Clp.is_descending t
 let is_circular t = on_offs Clp.is_circular t
 
-(* Lattice. *)
 let rec precedes t1 t2 : bool = match t1, t2 with
   | StackOff o1, StackOff o2 -> Clp.precedes o1 o2
   | StackOff _, _ | _, StackOff _ ->
@@ -629,8 +582,7 @@ let rec precedes t1 t2 : bool = match t1, t2 with
   | Clp _, FinSet _ -> false
   | FinSet s, Clp p -> Clp.precedes (clp_of_finset s) p
 
-(* Widening lives in the offsets; mixed pairs lose the shape —
-   [as_clp] degrades a StackOff to its plain twin. *)
+(* Widening lives in the offsets; mixed pairs degrade via [as_clp]. *)
 let widen_join t1 t2 : t = match t1, t2 with
   | StackOff o1, StackOff o2 -> StackOff (Clp.widen_join o1 o2)
   | _ -> bound_set_size @@ Clp (Clp.widen_join (as_clp t1) (as_clp t2))
@@ -659,10 +611,8 @@ let extract ?hi ?lo t =
 let cast c sz t =
   if sz <= 0 then top (bitwidth t)
   else
-    (* Every BIL cast at the operand's own width (UNSIGNED/LOW extract
-       the full width, SIGNED re-reads the same bits, HIGH extracts from
-       lo:0) is the identity on the value set; width changes degrade to
-       the plain concrete twin. *)
+    (* Any cast at the operand's own width is the identity on the
+       value set; width changes degrade to the plain concrete twin. *)
     match t with
     | StackOff _ when sz = 64 -> t
     | StackOff _ -> lift_unop (Clp.cast c sz) (FinSet.cast c sz) (to_plain t)
@@ -678,3 +628,74 @@ let pp ppf (t : t) = match t with
   | Clp p -> Clp.pp ppf p
   | FinSet s -> FinSet.pp ppf s
 
+
+(* The def-carried classification of a set on the model's ABSOLUTE
+   segment line — the entry RSP is the segment base, so a frame offset
+   o has absolute position [stack_base + o]. *)
+
+type kind =
+  | Range of int64 * int64
+  | Infinite of int64 * int64
+  | Caller of int64 * int64
+  | Mixed of int64 * int64
+  | Dead
+[@@deriving equal]
+
+(* The fully-infinite span: the whole position line.  A TOP denotation
+   IS this span — the degenerate [Infinite], carrying no bound. *)
+let unbounded_span : kind = Infinite (Stdlib.Int64.min_int, Stdlib.Int64.max_int)
+
+let is_unbounded_span (lo : int64) (hi : int64) : bool =
+  Int64.equal lo Stdlib.Int64.min_int && Int64.equal hi Stdlib.Int64.max_int
+
+(* Overflow-checked absolute position of one frame offset. *)
+let position_of_offset (o : int64) : int64 option =
+  let r = Stdlib.Int64.add stack_base o in
+  if Stdlib.Int64.compare o 0L > 0 && Stdlib.Int64.compare r o < 0 then None
+  else Some r
+
+let int64_pair_of (lo : Cbat_word.t) (hi : Cbat_word.t)
+  : (int64 * int64) option =
+  match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+  | Ok lo, Ok hi -> Some (lo, hi)
+  | _ -> None
+
+(* Split over ABSOLUTE positions: entirely at/above the entry RSP ->
+   Caller; entirely below -> Range; otherwise Mixed.  The unbounded
+   span names no side of the entry line, so it keeps itself. *)
+let caller_split (k : kind) : kind =
+  let cmp = Stdlib.Int64.compare in
+  let ordered lo hi = cmp lo hi <= 0 in
+  let entry = stack_base in
+  match k with
+  | Range (lo, hi) | Infinite (lo, hi) when not (is_unbounded_span lo hi) ->
+    if ordered lo hi && cmp lo entry >= 0 then Caller (lo, hi)
+    else if ordered lo hi && cmp hi entry <= 0 then k
+    else Mixed (lo, hi)
+  | k -> k
+
+let classify (t : t) : kind =
+  if is_top t then unbounded_span
+  else if is_bottom t then Dead
+  else
+    let bounds =
+      match offset_extrema t with
+      | Some (lo, hi) ->
+        Base.Option.bind (int64_pair_of lo hi) ~f:(fun (lo, hi) ->
+            Base.Option.bind (position_of_offset lo) ~f:(fun lo ->
+                Base.Option.map (position_of_offset hi) ~f:(fun hi -> (lo, hi))))
+      | None ->
+        (match min_elem t, max_elem t with
+         | Some lo, Some hi -> int64_pair_of lo hi
+         | _ -> None)
+    in
+    match bounds with
+    | Some (lo, hi) ->
+      let is_inf = is_infinite t || Stdlib.Int64.compare lo hi > 0 in
+      if is_inf then Infinite (lo, hi) else Range (lo, hi)
+    | None -> unbounded_span
+
+(* The elements, when the set is enumerable within [cap]; [None] = the
+   count exceeds the budget, the caller takes its sound identity. *)
+let enumerate ~(cap : int) (t : t) : word list option =
+  if Cbat_word.gt_int (cardinality t) cap then None else Some (iter t)

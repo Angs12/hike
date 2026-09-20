@@ -23,8 +23,8 @@ module Utils = Cbat_vsa_utils
 
 (* Abstract state: words, memories.  Stack provenance is the WORD value
    itself — the entry RSP's word is seeded with the symbolic segment
-   base ([WordSet.stack_word]) and SP-derived addresses stay [StackOff]
-   through arithmetic, memory round-trips, and refinement. *)
+   base and SP-derived addresses stay [StackOff] through arithmetic,
+   memory round-trips, and refinement. *)
 
 type wordset = WordSet.t
 
@@ -52,19 +52,14 @@ let bottom : t =
     words = WordEnv.bottom;
   }
 
-(* Empty word or memory env is bottom. *)
-
-
 let equal (e1 : t) e2 : bool =
   MemEnv.equal e1.memories e2.memories &&
   WordEnv.equal e1.words e2.words
 
-(* Add a memory binding. *)
 let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
   {memories = MemEnv.add e.memories ~key ~data;
    words = e.words}
 
-(* Add a word binding. *)
 let add_word (e : t) ~(key : var) ~(data : wordset) : t =
   {memories = e.memories;
    words = WordEnv.add e.words ~key ~data}
@@ -124,7 +119,9 @@ let extrapolate_data ~(entries : Cbat_landmarks.lm_entry list) ~(steps : int)
   | _ -> Cbat_landmarks.translate_to ~steps old new_ entries
 
 (* Extrapolate [need] vars by [steps]; negative steps widen. *)
-let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
+let selective_widen_extrapolate ?(head:Tid.t option=None)
+    ~(landmarks : Cbat_landmarks.t)
+    ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
   if Core.Set.is_empty need then join e1 e2
   else if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
@@ -140,7 +137,7 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
             if Core.Set.mem need (Var.base key) then
               match head with
               | Some h ->
-                extrapolate_data ~entries:(Cbat_landmarks.entries_for_head h key)
+                extrapolate_data ~entries:(Cbat_landmarks.entries_for_head landmarks h key)
                   ~steps data_old data_new
               | None -> extrapolate_data ~entries:[] ~steps data_old data_new
             else
@@ -153,22 +150,17 @@ let selective_widen_extrapolate ?(head:Tid.t option=None) ~(need : Var.Set.t) ~(
     let memories =
       match head with
       | Some h when steps > 0 ->
-        (* CYCLE-WRITTEN CELLS EXTRAPOLATE: at a warmed head, every
-           cell the incoming state differs on was written by the
-           cycle's own stores (pre-loop writes are stable by warmup;
-           call-mediated writes abstract to whole-memory top, where
-           extrapolation is a no-op).  Its data advances by [steps]
-           traversals — landmark translation when the head holds
-           entries at the cell's width, the plain-widen arm on
-           overflow.  Keys never change; bounds only move outward; no
-           residency claim. *)
+        (* CYCLE-WRITTEN CELLS EXTRAPOLATE: at a warmed head every cell
+           the incoming state differs on was written by the cycle's own
+           stores.  Data advances by [steps] traversals; keys never
+           change, bounds only move outward. *)
         MemEnv.fold e1.memories ~init:MemEnv.top
           ~f:(fun ~key:mv ~data:old acc ->
               let idx = Mem.get_idx old in
               let nw = MemEnv.find idx e2.memories mv in
               if Mem.equal nw (Mem.top idx) then acc
               else begin
-                let entries = Cbat_landmarks.entries_for_head h mv in
+                let entries = Cbat_landmarks.entries_for_head landmarks h mv in
                 let extr (v1 : Mem.Val.t) (v2 : Mem.Val.t) : Mem.Val.t =
                   if Mem.Val.equal v1 v2 then Mem.Val.widen_join v1 v2
                   else
@@ -198,7 +190,6 @@ let precedes (e1 : t) (e2 : t) : bool =
   MemEnv.precedes e1.memories e2.memories &&
   WordEnv.precedes e1.words e2.words
 
-(* Post-call abstraction. *)
 (* Top caller-saved words. *)
 let top_non_preserved ~(preserved : Var.Set.t) (env : t) : WordEnv.t =
   WordEnv.fold env.words ~init:env.words
@@ -210,13 +201,11 @@ let top_non_preserved ~(preserved : Var.Set.t) (env : t) : WordEnv.t =
 let call_abstraction ~(preserved : Var.Set.t) (env : t) : t =
   { memories = MemEnv.top; words = top_non_preserved ~preserved env }
 
-(* Like [call_abstraction]; caller frame survives.  The frame-keep
-   boundary and the escape ranges are KEY-space: stack-derived
-   cells key by segment offsets, foreign cells by their concrete
-   addresses, so the call-time RSP contributes its bounds (offset hull
-   for a stack word, concrete extrema otherwise) and pointer-arg
-   escapes exclude their own key ranges.  An unbounded RSP or any
-   foreign escape keeps the sound whole-memory-top fallback. *)
+(* Like [call_abstraction]; the caller frame survives.  The frame-keep
+   boundary and the escape ranges are KEY-space: stack-derived cells
+   key by segment offsets, foreign cells by their concrete addresses.
+   An unbounded RSP or any foreign escape keeps the sound
+   whole-memory-top fallback. *)
 let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : t) : t =
   let words' = top_non_preserved ~preserved env in

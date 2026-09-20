@@ -27,7 +27,6 @@ let glue_calls = ref 0
 let gc0 = ref (Gc.quick_stat ())
 
 let reset () =
-  Cbat_memo.reset_stats ();
   denote_calls := 0; join_calls := 0; equal_calls := 0; widen_calls := 0;
   walk_calls := 0;
   t_denote := 0.; t_join := 0.; t_equal := 0.; t_widen := 0.;

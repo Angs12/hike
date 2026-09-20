@@ -24,13 +24,10 @@ module Mem = Cbat_ai_memmap
 
 (* Per-def classification over the converged solution. *)
 module Cbat_extraction : sig
-  (* Classification vocabulary — the (lo,hi) pair of the carrying
+  (* Classification vocabulary: the (lo,hi) pair of the carrying
      constructors is the denotation's position interval on the model's
      ABSOLUTE segment line (the entry RSP = the segment base; a frame
-     offset o sits at [stack_base + o]).  [Caller] = the producer's
-     lane split: a bounded span entirely at/above the entry RSP (the
-     ABI-visible caller window — incoming stack args, the
-     return-address slot). *)
+     offset o sits at [stack_base + o]). *)
   type kind =
     | Range of int64 * int64
     | Infinite of int64 * int64
@@ -40,22 +37,21 @@ module Cbat_extraction : sig
   [@@deriving equal]
 
   (* The fully-infinite span (the whole position line) — the kind of a
-     TOP denotation, and the fact every unbounded-span consumer keys on. *)
+     TOP denotation. *)
   val unbounded_span : kind
 
-  (* The unbounded-span fact: the bounds cover the whole line. *)
   val is_unbounded_span : int64 -> int64 -> bool
 
   (* Kind of a word set (the denotation, read in place). *)
   val classify : WordSet.t -> kind
 
-  (* The lane split over ABSOLUTE positions: entirely at/above the
+  (* The split over ABSOLUTE positions: entirely at/above the
      entry RSP -> [Caller]; entirely below -> [Range]; two-sided or
-     wrapped -> [Mixed]; the unbounded span keeps itself. *)
+     wrapped -> [Mixed]. *)
   val caller_split : kind -> kind
 
   (* The absolute position of a frame offset (the segment base + the
-     offset, overflow-checked) — the ONE offset-to-position lifting. *)
+     offset, overflow-checked). *)
   val position_of_offset : int64 -> int64 option
 
   (* Address of a stack-access rhs, if any. *)
@@ -81,13 +77,13 @@ val set_addr_bits : int -> unit
 type section_image = Cbat_transfer.section_image = {
   img_lo : int64;
   img_hi : int64;
-  img_bytes : int array;
+  img_bytes : Bytes.t;
 }
 
 (* Threads the image-backed sections in: only sections whose runtime
-   content IS the static image (never relocated, never written —
-   relocated data lands in .data.rel.ro, not here). *)
+   content IS the static image — never relocated, never written. *)
 val set_section_images : section_image list -> unit
+val with_images : section_image list -> (unit -> 'a) -> 'a
 
 val init_sol : abi:Hike_abi.t -> ?entry:AI.t ->  sub term -> vsa_sol
 
@@ -95,20 +91,18 @@ val static_graph_vsa :
   abi:Hike_abi.t ->
   ?written:Var.Set.t option Tid.Map.t ->
   ?resolved:Tid.Set.t Tid.Map.t ->
-  tid list -> Program.t -> Sub.t -> vsa_sol -> vsa_sol
+  Program.t -> Sub.t -> vsa_sol -> vsa_sol
 
-(* The one denotation access: [e] denotes in the before-env of [def] —
-   the block's defs replay from [pre] up to [def], the target def's own
-   transfer not run — or, with no [def], in the block's postcondition
-   (the full replay through every def; a def-less block denotes in
-   [pre]).  A [def] outside [blk] denotates in [AI.top]. *)
+(* [e] denotes in the before-env of [def] — the block's defs replay
+   from [pre] up to [def], the target def's own transfer not run — or,
+   with no [def], in the block's postcondition.  A [def] outside [blk]
+   denotes in [AI.top]. *)
 val denote_exp_at :
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
 
 (* The per-block boundary envs of a solution: pre is the solution's
-   entry state, post the block's def replay from it (the state the
-   block's jmps read). *)
+   entry state, post the block's def replay from it. *)
 val block_envs_of_sol :
   sol:vsa_sol -> sub term -> (AI.t * AI.t) Tid.Map.t
 
@@ -116,9 +110,8 @@ val block_envs_of_sol :
    end). *)
 val last_defs : blk term -> def term Var.Map.t
 
-(* The fixtures' construction seam: every name here is consumed by
-   test_cbat and the probes, never by production src/.  Quarantined so
-   the interface above stays the pipeline's real surface. *)
+(* The fixtures' construction seam: consumed by test_cbat and the
+   probes, never by production src/. *)
 module Test_seam : sig
   val denote_def : def term -> AI.t -> AI.t
 
@@ -126,9 +119,9 @@ module Test_seam : sig
 
   val denote_imm_exp : exp -> AI.t -> (WordSet.t, Type.error) Result.t
 
-  (* One per-block state replay: the block's defs fold [denote_def] from
-     its solution entry state; [f] folds the accumulator over each def's
-     (before, after) states; the end state is the replay's final state. *)
+  (* One per-block state replay: the block's defs fold [denote_def]
+     from its solution entry state; [f] folds over each def's (before,
+     after) states. *)
   val fold_block_states :
     sol:(tid, AI.t) Solution.t ->
     blk term ->
@@ -138,14 +131,14 @@ module Test_seam : sig
 
   val reachable_jumps : AI.t -> jmp term seq -> jmp term seq
 
-  (* Constrain a state by an edge's cond (env -> cond -> env). *)
-  val constrain_edge : env:AI.t -> exp -> AI.t
+  (* Constrain a state by an edge's cond. *)
+  val constrain_edge :
+    env:AI.t -> ?landmarks:Cbat_landmarks.t -> exp -> AI.t
 
-  (* Meet a cell with a trace-exact constraint. *)
   (* The inverse denote: one backward rule per node kind, the mirror of
-     the forward transfer.  Env + expression + the constraint the value
+     the forward transfer — env + expression + the constraint the value
      must satisfy -> the refined env. *)
-  val inverse_denote : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> exp -> WordSet.t -> AI.t
+  val inverse_denote : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> ?landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
   (* Run context of one fixpoint run: per-block facts and the memos. *)
   type refine_ctx
@@ -154,13 +147,11 @@ module Test_seam : sig
   val mk_rctx : cfg:Graphs.Tid.t -> abi:Hike_abi.t -> sub term -> refine_ctx
 
   (* The deep backward walk: the env threads through every visited
-     block's defs, running to its fixpoint over the block.  [seeds]
-     are the cond's leaf constraints — the (var, row) pairs the edge's
-     own constraint narrowed. *)
+     block's defs, running to its fixpoint over the block; [seeds] are
+     the cond's leaf constraints. *)
   val refine_edge :
     sol:(tid, AI.t) Solution.t ->
     rctx:refine_ctx ->
-    ?reads:Tid.Set.t ref option ->
     seeds:(var * WordSet.t) list ->
     AI.t -> blk term -> AI.t
 end

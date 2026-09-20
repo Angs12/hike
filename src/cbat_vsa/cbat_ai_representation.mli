@@ -19,8 +19,8 @@ type t
 
 include Cbat_lattice_intf.S_val with type t := t
 
-(* Stack provenance is the WORD value itself (the symbolic segment
-   base, [WordSet.stack_word]). *)
+(* Stack provenance is the WORD value itself: the entry RSP's word
+   carries the symbolic segment base. *)
 
 val add_word : t -> key:var -> data:WordSet.t -> t
 val add_memory : t -> key:var -> data:Cbat_ai_memmap.t -> t
@@ -31,7 +31,7 @@ val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 (* Drop dead virtual temps; machine regs are the ABI surface and stay. *)
 val gc : t -> keep:Var.Set.t -> t
 
-val selective_widen_extrapolate : ?head:Tid.t option -> need:Var.Set.t -> steps:int -> t -> t -> t
+val selective_widen_extrapolate : ?head:Tid.t option -> landmarks:Cbat_landmarks.t -> need:Var.Set.t -> steps:int -> t -> t -> t
 
 (* Keep [preserved] words, top the rest and all memory. *)
 val call_abstraction : preserved:Var.Set.t -> t -> t

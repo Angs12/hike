@@ -22,6 +22,10 @@ open Graphlib.Std
 type t = {
   succs : tid -> tid list;
   preds : tid -> tid list;
+  (* The extra edges' targets: the blocks that GAINED a predecessor.
+     The worklist seeds them directly — a warm seed's stable prefix
+     never enqueues them (propagation is change-driven). *)
+  gained_preds : Tid.Set.t;
 }
 
 (* The graph over [cfg] for [sub]: each jmp's [resolved] target set

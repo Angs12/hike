@@ -12,16 +12,11 @@
 (* ************************************************************************* *)
 
 (* The domain's numeric substrate, a drop-in for [Bap.Std.Word].
-
-   [Small] carries an int63 immediate, [Big] a [Z.t]; the split is by VALUE
-   MAGNITUDE, never by declared width, so a 129-bit word holding 3 is
-   [Small].  Each op computes in machine ints when both operands are
-   [Small] and the result stays in the int63 range, and in [Z.t] otherwise.
-   The [Z.t] arm is the same operation at arbitrary precision, so falling
-   back is exact, never an approximation.
-
-   A value is the canonical payload of BAP's representation: [0 <= v <
-   2^width], with the signed flag carried beside it.  Arithmetic results are
+   [Small] carries an int63 immediate, [Big] a [Z.t]; the split is by
+   VALUE MAGNITUDE, never by declared width.  The [Z.t] arm is the same
+   operation at arbitrary precision, so falling back is exact.  A value
+   is the canonical payload of BAP's representation: [0 <= v < 2^width],
+   with the signed flag carried beside it; arithmetic results are
    unsigned, because BAP packs them unsigned. *)
 
 open Bap.Std
@@ -543,6 +538,9 @@ let endian_string : Word.endian -> string = function
 
 let gt_int (w : t) (i : int) : bool =
   compare w (of_int ~width:(bitwidth w) i) > 0
+
+let leq_int (w : t) (i : int) : bool =
+  compare w (of_int ~width:(bitwidth w) i) <= 0
 
 (* Ordered infixes, defined last so the module's own uses of the
    Stdlib operators stay in scope. *)

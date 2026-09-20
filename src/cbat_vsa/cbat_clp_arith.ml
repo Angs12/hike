@@ -1,6 +1,4 @@
-(* CLP arithmetic: binops, shifts, casts, division. Pure over the core
-   (one-directional dep: arith -> core; the seam shims live in
-   cbat_clp.ml). *)
+(* CLP arithmetic: binops, shifts, casts, division. *)
 
 open Bap.Std
 open Bin_prot.Std
@@ -164,10 +162,9 @@ let logand (p1 : t) (p2 : t) : t =
         let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
         !!(create base ~step ~cardn)
   end with
-  (* None = the image is unrepresentable here (circular operands have no
-     min/max); it does NOT mean the result is empty.  BOTTOM would claim a
-     live path dead — it prunes edges and turns reachable stores into Dead
-     tags (the -O2 stack-realignment class).  TOP is the sound fallback. *)
+  (* None = the image is unrepresentable here; it does NOT mean the
+     result is empty.  BOTTOM would claim a live path dead — TOP is the
+     sound fallback. *)
   | None -> top sz
   | Some x -> x)
 
@@ -182,8 +179,6 @@ let logxor (p1 : t) (p2 : t) : t =
   let approx2 = sub (add p1 p2) (mul (logand p1 p2) two) in
   (* Meet of two sound approximations. *)
   intersection approx1 approx2
-
-(* Overshift: exact, overshifted, straddling. *)
 
 (* Overshift image is sign extension. *)
 let overshift_sign_extend (sz : int) : t =
@@ -290,7 +285,6 @@ let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
       (rshift (base_of p1) @@ e2)
   else W.one sz1
 
-(* Equal widths required. *)
 let rec rshift (p1 : t) (p2 : t) : t =
   let sz1 = bitwidth p1 in
   let sz2 = bitwidth p2 in
@@ -389,7 +383,6 @@ let rec arshift (p1 : t) (p2 : t) : t =
   | None -> bottom sz1
   | Some x -> x)
 
-(* Split at n. *)
 let split_at_n (p : t) n : t * t =
   
   
@@ -400,7 +393,7 @@ let split_at_n (p : t) n : t * t =
   create (base_of p) ~step:(step_of p) ~cardn:cardn1,
   create p2_base ~step:(step_of p) ~cardn:cardn2
 
-(* Widen to the given width. *)
+(* Exact split: the part that fits [width] and the wrapped remainder. *)
 let extract_exact ~width:(width : int) (p : t) : t * t =
   let p_width = bitwidth p in
   assert (width >= p_width);
@@ -449,13 +442,11 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
     create ~width:(hiv+1) (base_of p) ~step:(step_of p) ~cardn:(cardn_of p)
   else if hiv >= sz then top sz
   else
-    (* TODO: check the signed case. *)
     let ext =  W.extract_exn ~hi:hiv in
     let ext_signed w = W.extract_exn ~hi:hiv (W.signed w) in
     match finite_end p with
     | None -> bottom (hiv + 1)
     | Some e ->
-        (* TODO: check the infinite case. *)
         if is_infinite p then infinite (ext (base_of p), ext (step_of p))
         else
           (* negmin precedes maxint. *)
@@ -559,7 +550,6 @@ let div (p1 : t) (p2 : t) : t =
                     W.is_zero (W.modulo (step_of p1) (base_of p2))
           then bounded_gcd (W.div (step_of p1) (base_of p2))
               (W.sub (W.div (base_of p1) (base_of p2)) base)
-              (* TODO: improve step precision. *)
           else W.one width in
       let cardn = cardn_from_bounds base step e in
       !!(create base ~step ~cardn)
@@ -627,8 +617,7 @@ let sdiv (p1 : t) (p2 : t) : t =
 (* The unsigned residue bound: x mod k lands in [0, k-1] for every k >
    0, exactly [lo mod k, hi mod k] when lo and hi share their quotient,
    and x itself when every divisor exceeds x or the divisor is {0}
-   (the word identity).  Divisor shapes outside these arms keep the
-   subtraction composite. *)
+   (the word identity). *)
 let modulo (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
   else if is_bottom p1 || is_bottom p2 then sub p1 (mul (div p1 p2) p2)
@@ -652,8 +641,7 @@ let modulo (p1 : t) (p2 : t) : t =
 (* The signed residue bound for a positive constant divisor: |r| <=
    k-1, refined to the exact sub-interval inside one truncated
    quotient block; a mixed-sign dividend takes the wrapping band
-   [-(k-1), k-1].  Other divisor shapes keep the subtraction
-   composite. *)
+   [-(k-1), k-1]. *)
 let smodulo (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
   else if is_bottom p1 || is_bottom p2 then sub p1 (mul (sdiv p1 p2) p2)

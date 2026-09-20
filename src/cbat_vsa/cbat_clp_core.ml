@@ -1,6 +1,4 @@
-(* CLP core: types, creation, order, meet/join, widening, printing.
-   Arithmetic lives in cbat_clp_arith.ml; this interface plus one-line
-   shims in cbat_clp.ml is the frozen seam (cbat_clp.mli). *)
+(* CLP core: types, creation, order, meet/join, widening, printing. *)
 
 open Bap.Std
 open Bin_prot.Std
@@ -804,7 +802,6 @@ let union (p1 : t) (p2 : t) : t =
       infinite (base_of p1, step)
 
 
-(* Lattice. *)
 type idx = int
 let get_idx = bitwidth
 let precedes = subset
@@ -813,8 +810,8 @@ let meet = intersection
 
 
 let widen_join (p1 : t) (p2 : t) : t =
-  (* Widening needs an ascending chain. *)
-  (* Bottom-to-singleton widens to top. *)
+  (* Widening needs an ascending chain; bottom-to-singleton widens to
+     top. *)
   if is_bottom p1 then top (bitwidth p2)
   else if subset p1 p2 then
     if equal p1 p2 then p1 else

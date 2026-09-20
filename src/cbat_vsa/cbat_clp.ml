@@ -11,8 +11,8 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* The frozen seam (cbat_clp.mli): core comes from the include
-   below; arithmetic is one line per op behind it. *)
+(* The frozen seam: core from the include below, arithmetic one line
+   per op. *)
 
 include Cbat_clp_core
 

@@ -20,18 +20,20 @@ let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
 
 (* Per-head landmark table. *)
 
-(* Head currently widened; None outside a cycle. *)
-let widening_at_head : Tid.t option ref = ref None
+type t = {
+  lm_env : (Tid.t, lm_entry list) Hashtbl.t;
+  mutable widening_at_head : Tid.t option;  (* head currently widened; None outside a cycle *)
+}
 
-(* Head to landmark list. *)
-let lm_env : (Tid.t, lm_entry list) Hashtbl.t = Hashtbl.create (module Tid)
-
-let clear () = Hashtbl.clear lm_env
+(* One fresh table per solve — the widening state is the run's, never
+   the process's. *)
+let create () : t =
+  { lm_env = Hashtbl.create (module Tid); widening_at_head = None }
 
 (* Drop entries of [h] and its SCC. *)
-let clear_head (h : Tid.t) (blocks : Tid.Set.t) : unit =
-  Hashtbl.remove lm_env h;
-  Core.Set.iter blocks ~f:(fun btid -> Hashtbl.remove lm_env btid)
+let clear_head (t : t) (h : Tid.t) (blocks : Tid.Set.t) : unit =
+  Hashtbl.remove t.lm_env h;
+  Core.Set.iter blocks ~f:(fun btid -> Hashtbl.remove t.lm_env btid)
 
 let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   match List.find entries ~f:(fun e ->
@@ -52,23 +54,23 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
         && Bool.equal e.is_upper entry.is_upper))
     else entries
 
-let record_landmark_for_head ~(head:Tid.t) (v : var) ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
+let record_landmark_for_head (t : t) ~(head:Tid.t) (v : var) ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
-  let cur = Hashtbl.find lm_env head |> Option.value ~default:[] in
+  let cur = Hashtbl.find t.lm_env head |> Option.value ~default:[] in
   let next = add_smaller_dist cur entry in
-  Hashtbl.set lm_env ~key:head ~data:next
+  Hashtbl.set t.lm_env ~key:head ~data:next
 
 (* Entries recorded for [head]. *)
-let entries_for_head (head : Tid.t) (_v : var) : lm_entry list =
-  Hashtbl.find lm_env head |> Option.value ~default:[]
+let entries_for_head (t : t) (head : Tid.t) (_v : var) : lm_entry list =
+  Hashtbl.find t.lm_env head |> Option.value ~default:[]
 
 (* Record an empty meet's disabled boundary at the enclosing head. The
    head check comes first: outside a cycle the meet below is pure
    computation whose result is discarded. *)
-let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : unit =
+let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : unit =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then ()
   else
-    match !widening_at_head with
+    match t.widening_at_head with
     | None ->
       (* Outside a cycle: no-op. *)
       ()
@@ -82,17 +84,17 @@ let observe_unsat_var (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_cl
           if Cbat_word.(<) p_max c_min then begin
             (* Set below the boundary: upper landmark. *)
             let d = distance_words p_max c_min in
-            record_landmark_for_head ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
+            record_landmark_for_head t ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
           end else if Cbat_word.(>) p_min c_max then begin
             (* Set above the boundary: lower landmark. *)
             let d = distance_words c_max p_min in
-            record_landmark_for_head ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
+            record_landmark_for_head t ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
           end else ()
         | _ -> ()
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf widens. *)
-let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
-  match Hashtbl.find lm_env h with
+let lm_calc_steps (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
+  match Hashtbl.find t.lm_env h with
   | None -> `Inf
   | Some lst ->
     let has_zero = List.exists lst ~f:(fun e -> Option.is_none e.dist_p) in
@@ -108,8 +110,8 @@ let lm_calc_steps (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
       else `Finite (List.min_elt finite ~compare:Int.compare |> Option.value_exn)
 
 (* Commit current distances as previous. *)
-let lm_advance (h : Tid.t) : unit =
-  match Hashtbl.find lm_env h with
+let lm_advance (t : t) (h : Tid.t) : unit =
+  match Hashtbl.find t.lm_env h with
   | None -> ()
   | Some lst ->
     List.iter lst ~f:(fun entry ->

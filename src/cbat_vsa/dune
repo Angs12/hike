@@ -34,8 +34,6 @@
   cbat_clp_set_composite
   cbat_wordset_intf
   cbat_vsa_utils
-  cbat_interval
-  cbat_range_partition
   cbat_landmarks)
  (libraries hike_abi bap bitvec bitvec-order bin_prot core monads hashcons)
  (preprocess
@@ -51,7 +49,6 @@
   cbat_transfer
   cbat_forward
   cbat_backward
-  cbat_memo
   cbat_runctx
   cbat_wto
   cbat_dispatch_graph

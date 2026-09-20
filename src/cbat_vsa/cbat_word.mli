@@ -11,16 +11,12 @@
 (*  *)
 (* ************************************************************************* *)
 
-(* The domain's numeric substrate.
-
-   [Small] holds an int63 immediate, [Big] a [Z.t]; the split is by VALUE
-   MAGNITUDE, never by declared width.  Each op works in machine ints when
-   both operands are [Small] and the result stays in the int63 range, and in
-   [Z.t] otherwise; the [Z.t] arm is the same op at arbitrary precision, so
-   a fall back is exact.
-
-   A value is the canonical payload [0 <= v < 2^width], with the signed flag
-   carried beside it.  Arithmetic results are unsigned. *)
+(* The domain's numeric substrate.  [Small] holds an int63 immediate,
+   [Big] a [Z.t]; the split is by VALUE MAGNITUDE, never by declared
+   width, and the [Z.t] arm is the same op at arbitrary precision, so a
+   fall back is exact.  A value is the canonical payload
+   [0 <= v < 2^width], with the signed flag carried beside it;
+   arithmetic results are unsigned. *)
 
 open Bap.Std
 
@@ -121,4 +117,5 @@ val add_bit : t -> t
 val count_initial_1s : t -> int
 val lead_1_bit : t -> int option
 val gt_int : t -> int -> bool
+val leq_int : t -> int -> bool
 val endian_string : Word.endian -> string

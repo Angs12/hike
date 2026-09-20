@@ -89,11 +89,9 @@ module WordSet = Cbat_clp_set_composite
     contains k1 (lower k2) || contains k2 (lower k1)
 
   (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
-     the shared base makes the offset the per-sub cell identity.  The
-     offset interval is read from the denotation's own structure (a
-     [StackOff]'s offsets ARE the offset set); a plain denotation keys
-     by the degraded in-band arm's segment-relative hull (via
-     [stack_bounds]) or by its own extrema (a foreign address). *)
+     the shared base makes the offset the per-sub cell identity.  A
+     plain denotation keys by its segment-relative hull or its own
+     extrema. *)
   let of_wordset (p : WordSet.t) : t option =
     let lo_w, hi_w =
       match WordSet.stack_offsets p with

@@ -22,6 +22,10 @@ open Graphlib.Std
 type t = {
   succs : tid -> tid list;
   preds : tid -> tid list;
+  (* The extra edges' targets: the blocks that GAINED a predecessor.
+     The worklist seeds them directly — a warm seed's stable prefix
+     never enqueues them (propagation is change-driven). *)
+  gained_preds : Tid.Set.t;
 }
 
 (* The resolved dispatches' extra successor edges, keyed by BLOCK: the
@@ -67,5 +71,10 @@ let make ~(cfg : Graphs.Tid.t) ~(blocks : Tid.Set.t)
             if Base.List.mem ps v ~equal:Tid.equal then acc
             else Core.Map.set acc ~key:w ~data:(v :: ps)))
   in
+  let gained_preds =
+    Core.Map.fold extras ~init:Tid.Set.empty
+      ~f:(fun ~key:_ ~data:es acc -> Core.Set.union acc es)
+  in
   { succs;
-    preds = fun v -> Option.value ~default:[] (Core.Map.find preds v) }
+    preds = (fun v -> Option.value ~default:[] (Core.Map.find preds v));
+    gained_preds }
