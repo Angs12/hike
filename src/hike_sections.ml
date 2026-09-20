@@ -105,64 +105,79 @@ type portion = {
 (* Bottom yields no portion; every reachable unknown address
    contributes its full possible range to each space it may touch. *)
 
+(* Why an address denotated TOP: the denotation query itself failed, a
+   stack-symbolic set with no surviving bounds, or a plain top — no
+   stack basis and no rip proof (the heap). *)
+type top_cause = Query_failed | Unbounded_stack | Foreign
+
+(* Portions of the occupied interval [lo,hi]; the tag carries the
+   ADDRESS bounds [alo,ahi]. *)
+let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
+    ~(alo : int64) ~(ahi : int64) (lo : int64) (hi : int64)
+    : sec_tag option * portion list =
+  let floor = Model.stack_floor ~entry in
+  let cei = Model.args_ceiling in
+  let a_base = Model.args_base ~entry ~word in
+  let s_top = Model.stack_top ~entry ~word in
+  let tag l h =
+    if Stdlib.Int64.compare l a_base >= 0 then Tag.Args (l, h)
+    else Tag.Stack (l, h)
+  in
+  let portion s part =
+    Base.Option.map part ~f:(fun (plo, phi) ->
+        { pt_sec = s; pt_lo = plo; pt_hi = phi; pt_elig = elig })
+  in
+  let parts =
+    Base.List.filter_map
+      [ portion Stack (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
+        portion Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base cei) ]
+      ~f:(fun x -> x)
+  in
+  ( Option.map
+      (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
+      ~f:(fun _ -> tag alo ahi),
+    parts )
+
+(* The full-span claim for a TOP address: a stack-symbolic top claims
+   below-entry only, clamped by [stack_max] — imprecision never
+   reaches the Args slots; any other top claims the sub-local spaces'
+   full range — the identity member forcing write closure with the
+   carved cells. *)
+let top_claim ~(cause : top_cause) ~(entry : int64) ~(word : int)
+    : sec_tag option * portion list =
+  match cause with
+  | Unbounded_stack ->
+    let lo = Stdlib.Int64.sub entry Hike_stack_model.stack_max in
+    ( Some Tag.Stack_unbounded,
+      snd (sub_portions ~entry ~word ~elig:false ~alo:lo
+             ~ahi:(Stdlib.Int64.pred entry) lo (Stdlib.Int64.pred entry)) )
+  | Query_failed | Foreign ->
+    (None,
+     snd (sub_portions ~entry ~word ~elig:false
+            ~alo:(Model.stack_floor ~entry) ~ahi:Model.args_ceiling
+            (Model.stack_floor ~entry) Model.args_ceiling))
+
 let range_of_denotation ~(word : int) ~(entry : int64)
     ~(spans : data_span list) ~(rip : bool) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   let floor = Model.stack_floor ~entry in
   let cei = Model.args_ceiling in
   let a_base = Model.args_base ~entry ~word in
-  let s_top = Model.stack_top ~entry ~word in
-  (* Portions of the occupied interval [lo,hi]; the tag carries the
-     ADDRESS bounds [alo,ahi]. *)
-  let sub_portions ~(elig : bool) ~(alo : int64) ~(ahi : int64)
-      (lo : int64) (hi : int64) : sec_tag option * portion list =
-    let tag l h =
-      if Stdlib.Int64.compare l a_base >= 0 then Tag.Args (l, h)
-      else Tag.Stack (l, h)
-    in
-    let portion s part =
-      Base.Option.map part ~f:(fun (plo, phi) ->
-          { pt_sec = s; pt_lo = plo; pt_hi = phi; pt_elig = elig })
-    in
-    let parts =
-      Base.List.filter_map
-        [ portion Stack (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
-          portion Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base cei) ]
-        ~f:(fun x -> x)
-    in
-    ( Option.map
-        (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
-        ~f:(fun _ -> tag alo ahi),
-      parts )
-  in
-  (* A directionless stack top claims below-entry only, clamped by
-     [stack_max] — imprecision never reaches the Args slots. *)
-  let clamped_top_sub : sec_tag option * portion list =
-    let lo = Stdlib.Int64.sub entry Hike_stack_model.stack_max in
-    ( Some Tag.Stack_unbounded,
-      snd (sub_portions ~elig:false ~alo:lo
-             ~ahi:(Stdlib.Int64.pred entry) lo (Stdlib.Int64.pred entry)) )
-  in
-  (* A plain top claims no data span, but claims the sub-local spaces'
-     full range — the identity member forcing write closure with the
-     carved cells. *)
-  let plain_top : sec_tag option * portion list =
-    (None, snd (sub_portions ~elig:false ~alo:floor ~ahi:cei floor cei))
-  in
+  let sub_portions = sub_portions ~entry ~word in
   if Vsa.WordSet.is_bottom ws then (Some Tag.Dead, [])
   else if Vsa.WordSet.is_top ws then (
-    (* A stack-symbolic top is the clamped below-entry claim; a plain
-       top is the heap.  A rip-relative address is a link-time constant
-       in the encoding — top there is an analysis loss. *)
-    if Option.is_some (Vsa.WordSet.stack_offsets ws) then clamped_top_sub
+    (* A rip-relative address is a link-time constant in the encoding —
+       top there is an analysis loss. *)
+    if Option.is_some (Vsa.WordSet.stack_offsets ws) then
+      top_claim ~cause:Unbounded_stack ~entry ~word
     else if rip then
       failwith "hike-sections: a rip-relative access denotated plain top"
-    else plain_top)
+    else top_claim ~cause:Foreign ~entry ~word)
   else
     match Vsa.WordSet.stack_offsets ws with
     | Some _ -> (
         match Model.positions_of_offsets ws with
-        | None -> clamped_top_sub
+        | None -> top_claim ~cause:Unbounded_stack ~entry ~word
         | Some (lo, hi) ->
             let occ_hi = Model.expand_hi ~cap:cei hi width in
             if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
@@ -197,7 +212,7 @@ let range_of_denotation ~(word : int) ~(entry : int64)
                    the heap claim. *)
                 if in_band then
                   failwith "hike-sections: a stack-band access lost all bounds"
-                else plain_top
+                else top_claim ~cause:Foreign ~entry ~word
             | Some (lo, hi) ->
               if
                 Vsa.WordSet.is_infinite ws
@@ -219,8 +234,8 @@ let range_of_denotation ~(word : int) ~(entry : int64)
                             pt_lo = Stdlib.Int64.max lo d.ds_lo;
                             pt_hi = d.ds_hi;
                             pt_elig = false } ] )
-                  | None -> plain_top
-                else plain_top
+                  | None -> top_claim ~cause:Foreign ~entry ~word
+                else top_claim ~cause:Foreign ~entry ~word
               else
                 let occ_hi = Model.expand_hi_unsigned hi width in
                 let parts =
@@ -426,8 +441,7 @@ let collect (env : env) (prog : program term) : collecting =
               | Error _ ->
                   (* A failed query keeps the access: the unknown
                      identity contributes full members. *)
-                  range_of_denotation ~word:env.word ~entry:env.entry
-                    ~spans:env.spans ~rip:false ~width (Vsa.WordSet.top (8 * env.word))
+                  top_claim ~cause:Query_failed ~entry:env.entry ~word:env.word
               | Ok ws ->
                   range_of_denotation ~word:env.word ~entry:env.entry
                     ~spans:env.spans ~rip:(is_rip_relative d) ~width ws
