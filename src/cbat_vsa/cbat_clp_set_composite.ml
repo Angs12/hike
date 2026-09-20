@@ -258,10 +258,8 @@ let cardinality (t : t) = match t with
     else
       (* a = 2^23 + 1, so [b <= 2^39] keeps the exact product below
          2^63; anything larger saturates. *)
-      (match Cbat_word.to_int64 b with
-       | Ok v when Stdlib.Int64.compare v 0x8000000000L <= 0 ->
-         Cbat_word.mul a b
-       | _ -> Cbat_word.ones width)
+      if Cbat_word.leq_int b 0x8000000000 then Cbat_word.mul a b
+      else Cbat_word.ones width
   | Clp p -> Clp.cardinality p
   | FinSet s -> FinSet.cardinality s
 

@@ -1268,3 +1268,15 @@ let run_word_casts () =
      | Ok v -> Int64.equal v 0xFFFFFFFFL
      | Error _ -> false);
   ()
+
+let run_stackoff_cardn () =
+  (* The composite |segment|·|offs| product saturates: an offs
+     cardinality of 2^63 (width 65) exceeds the 2^39 exact-product
+     threshold, so the product reads ones — never a wrapped value. *)
+  let b =
+    Cbat_word.mul (Cbat_word.of_int ~width:65 8)
+      (Cbat_word.of_int ~width:65 0x1000000000000000) in
+  let offs = Clp.create ~width:64 ~step:(Cbat_word.one 64) ~cardn:b (Cbat_word.zero 64) in
+  check "CARDN-W1: the |segment|*|offs| product saturates past the exact threshold"
+    (Cbat_word.equal (Ws.cardinality (Ws.stack_word offs)) (Cbat_word.ones 65));
+  ()

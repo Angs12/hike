@@ -21,6 +21,7 @@ let () =
   Test_domains.run_overlap ();
   Test_domains.run_divmod ();
   Test_domains.run_word_casts ();
+  Test_domains.run_stackoff_cardn ();
   Test_resolve.run ();
   Test_regression.run_fp_gpr ();
   Test_sections.run ();
