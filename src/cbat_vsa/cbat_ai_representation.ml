@@ -198,10 +198,7 @@ let top_non_preserved ~(preserved : Var.Set.t) (env : t) : WordEnv.t =
       then acc
       else WordEnv.add acc ~key ~data:(WordSet.top (WordSet.bitwidth data)))
 
-let call_abstraction ~(preserved : Var.Set.t) (env : t) : t =
-  { memories = MemEnv.top; words = top_non_preserved ~preserved env }
-
-(* Like [call_abstraction]; the caller frame survives.  The frame-keep
+(* The caller frame survives.  The frame-keep
    boundary and the escape ranges are KEY-space: stack-derived cells
    key by segment offsets, foreign cells by their concrete addresses.
    An unbounded RSP or any foreign escape keeps the sound

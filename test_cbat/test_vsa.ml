@@ -279,9 +279,15 @@ let run () =
     (Map.fold Map.top ~init:[] ~f:(fun ~key ~data acc -> (key, data) :: acc) = []);
   ()
 
-(* C1: call_abstraction — preserved words kept, rest TOPed, memory TOPed. *))
+(* C1: the call-effects transfer — preserved words kept, rest TOPed;
+   memory TOPed while the RSP is unbounded, no frame proof. *))
 ;
-(  let x = v64 "c1_x" in
+(  let abi = Hike_abi.x86_64_sysv in
+  let module Ce = Vsa.Call_effects in
+  let call env preserved =
+    Ce.transfer ~abi ~preserved
+      ~site:{ Ce.summary = None; written_lanes = []; pushed = false } env in
+  let x = v64 "c1_x" in
   let y = v64 "c1_y" in
   let rsp = v64 "RSP" in
   let env =
@@ -290,12 +296,12 @@ let run () =
       ~key:y
       ~data:(Ws.singleton (w64 7))
   in
-  let env' = AI.call_abstraction ~preserved:(Var.Set.singleton x) env in
+  let env' = call env (Var.Set.singleton x) in
   check "C1-1: a preserved word keeps its value-set"
     (Ws.equal (AI.find_word 64 env' x) (Ws.singleton (w64 5)));
   check "C1-2: a non-preserved word is TOPed" (Ws.is_top (AI.find_word 64 env' y));
   let env'' = AI.add_word env ~key:rsp ~data:(Ws.singleton (w64 0x10)) in
-  let e' = AI.call_abstraction ~preserved:(Var.Set.of_list [ x; rsp ]) env'' in
+  let e' = call env'' (Var.Set.of_list [ x; rsp ]) in
   check "C1-3: RSP is preserved when it is in the preserved set"
     (Ws.equal (AI.find_word 64 e' rsp) (Ws.singleton (w64 0x10))
     && Ws.equal (AI.find_word 64 e' x) (Ws.singleton (w64 5)));
@@ -310,14 +316,14 @@ let run () =
       ~data:(Mem.Val.create (Ws.singleton (w64 0x11)) LittleEndian)
   in
   let env_m = AI.add_memory AI.top ~key:m0 ~data:mem in
-  let e_m = AI.call_abstraction ~preserved:Var.Set.empty env_m in
-  check "C1-4: memory is TOPed entirely (a stored value reads as top)"
+  let e_m = call env_m Var.Set.empty in
+  check "C1-4: a call with an unbounded RSP keeps no frame (a stored value reads as top)"
     (Mem.equal
        (AI.find_memory { addr_width = 64; addressable_width = 8 } e_m m0)
        (Mem.top { addr_width = 64; addressable_width = 8 }));
   let vv = Var.create ~is_virtual:true ~fresh:false "c1_vv" (Type.Imm 64) in
   let env_v = AI.add_word AI.top ~key:vv ~data:(Ws.singleton (w64 3)) in
-  let e_v = AI.call_abstraction ~preserved:(Var.Set.singleton vv) env_v in
+  let e_v = call env_v (Var.Set.singleton vv) in
   check "C1-5: a virtual var is preserved when it is in the preserved set"
     (Ws.equal (AI.find_word 64 e_v vv) (Ws.singleton (w64 3)));
   ())

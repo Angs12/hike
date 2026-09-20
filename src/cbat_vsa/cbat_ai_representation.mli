@@ -33,11 +33,9 @@ val gc : t -> keep:Var.Set.t -> t
 
 val selective_widen_extrapolate : ?head:Tid.t option -> landmarks:Cbat_landmarks.t -> need:Var.Set.t -> steps:int -> t -> t -> t
 
-(* Keep [preserved] words, top the rest and all memory. *)
-val call_abstraction : preserved:Var.Set.t -> t -> t
-
-(* Like [call_abstraction]; keeps cells outside the callee's write
+(* Every call keeps the caller frame: cells outside the callee's write
    range (at/above the call-time RSP's key bounds, minus the escape
-   key ranges of pointer arguments). *)
+   key ranges of pointer arguments) survive; the whole-memory top on
+   any doubt. *)
 val call_abstraction_frame : preserved:Var.Set.t -> rsp:WordSet.t
   -> escape:WordSet.t list -> t -> t

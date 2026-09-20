@@ -302,7 +302,7 @@ let run () =
       ~data:(Ws.singleton (w64 2))
   in
   let kept = Ce.transfer ~abi ~preserved:(Var.Set.singleton x)
-      ~site:{ Ce.target = Ce.Callee (Some summary); written_lanes = [];
+      ~site:{ Ce.summary = Some summary; written_lanes = [];
               pushed = false }
       (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5))) in
   check "CE1: the kill summary keeps non-written caller-saved GPRs and the base"
@@ -310,7 +310,7 @@ let run () =
     && Ws.equal (AI.find_word 64 kept g2) (Ws.singleton (w64 2))
     && Ws.is_top (AI.find_word 64 kept g1));
   let killed = Ce.transfer ~abi ~preserved:(Var.Set.singleton x)
-      ~site:{ Ce.target = Ce.Callee None; written_lanes = []; pushed = false }
+      ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
       (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5))) in
   check "CE2: no summary (unknown or kill-all) keeps only the base set"
     (Ws.equal (AI.find_word 64 killed x) (Ws.singleton (w64 5))
@@ -320,7 +320,7 @@ let run () =
   let frame_call ~lanes =
     let e, m = raw_env ~lanes in
     (Ce.transfer ~abi ~preserved:Var.Set.empty
-       ~site:{ Ce.target = Ce.Callee None; written_lanes = lanes;
+       ~site:{ Ce.summary = None; written_lanes = lanes;
                pushed = false }
        e,
      m)
@@ -336,7 +336,7 @@ let run () =
     && Ws.equal (reads m_esc 0x3000 escaped) (Ws.singleton (w64 7)));
   (* CE5: the pushed site's SP restore. *)
   let restored = Ce.transfer ~abi ~preserved:Var.Set.empty
-      ~site:{ Ce.target = Ce.Callee None; written_lanes = []; pushed = true }
+      ~site:{ Ce.summary = None; written_lanes = []; pushed = true }
       (AI.add_word AI.top ~key:abi.Hike_abi.sp
          ~data:(Ws.singleton (w64 0x1000))) in
   let rsp' = AI.find_word 64 restored abi.Hike_abi.sp in
@@ -347,10 +347,19 @@ let run () =
   let trap_env, m_trap = raw_env ~lanes:[] in
   let trap = Ce.transfer ~abi
       ~preserved:(Var.Set.singleton abi.Hike_abi.sp)
-      ~site:{ Ce.target = Ce.Trap; written_lanes = []; pushed = false }
+      ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
       trap_env in
-  check "CE6: a trap keeps no frame (whole-memory top) and restores no SP"
-    (Mem.equal (AI.find_memory idx trap m_trap) (Mem.top idx)
-    && Ws.equal (AI.find_word 64 trap abi.Hike_abi.sp)
+  check "CE6: a trap restores no SP (it pops no retaddr)"
+    (Ws.equal (AI.find_word 64 trap abi.Hike_abi.sp)
          (Ws.singleton (w64 0x1000)));
+  (* CE7: a trap with a bounded RSP and bounded escapes keeps the frame
+     like any call — the escape bounds what the trap may clobber. *)
+  let trap_frame = Ce.transfer ~abi
+      ~preserved:(Var.Set.singleton abi.Hike_abi.sp)
+      ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
+      trap_env in
+  check "CE7: a trap with a bounded RSP keeps the frame like any call"
+    (Ws.equal (reads m_trap 0x2000 trap_frame) (Ws.singleton (w64 42))
+    && Ws.equal (reads m_trap 0x3000 trap_frame) (Ws.singleton (w64 7))
+    && Ws.is_top (reads m_trap 0x500 trap_frame));
   ())

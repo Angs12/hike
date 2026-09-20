@@ -99,27 +99,31 @@ let denote_jump
               match Core.Map.find rc0.rc_blocks (Term.tid b) with
               | Some bf -> bf.bf_call_facts
               | None -> failwith "hike: no call facts for block (rctx)" in
-            let target =
+            let summary =
               match Call.target c with
               | Direct ct ->
-                Cbat_call_effects.Callee
-                  (match Core.Map.find written ct with
-                   | Some (Some ws) -> Some ws
-                   | _ -> None)
-              | Indirect _ -> Cbat_call_effects.Callee None
+                (match Core.Map.find written ct with
+                 | Some (Some ws) -> Some ws
+                 | _ -> None)
+              | Indirect _ -> None
             in
             Cbat_call_effects.transfer ~abi ~preserved
-              ~site:{ Cbat_call_effects.target; written_lanes; pushed }
+              ~site:{ Cbat_call_effects.summary; written_lanes; pushed }
               env
           end in
     let env_res, rctx =
       match Jmp.kind jmp with
       | Int _ ->
-        (* Traps are external callees. *)
+        (* Traps ride the same frame-keep rule as ABI calls; a trap
+           pushes no retaddr. *)
+        let written_lanes, _pushed =
+          match Core.Map.find rc0.rc_blocks (Term.tid b) with
+          | Some bf -> bf.bf_call_facts
+          | None -> failwith "hike: no call facts for block (rctx)" in
         (Cbat_call_effects.transfer
            ~abi:(rc0.Cbat_runctx.rc_abi) ~preserved
-           ~site:{ Cbat_call_effects.target = Trap;
-                   written_lanes = []; pushed = false }
+           ~site:{ Cbat_call_effects.summary = None; written_lanes;
+                   pushed = false }
            env,
          rctx)
       | Call c -> (
