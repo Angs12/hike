@@ -232,22 +232,20 @@ let run_stl_rewrite () =
   in
   let c1 = straight_sub "pr_c1_fission" [ c1_st0; c1_st1; c1_ld_nested ] in
   let c1' = rewrite_one c1 in
-  check "PR-C1: the whole-access store rebinds lhs and mem node to the region mem, keeping the SP address arithmetic"
-    (match def_of_lhs c1' (Sm.region_mem 1) with
-     | Some d ->
-        (match Def.rhs d with
-         | Bil.Store (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var b, Bil.Int _), _, _, _) ->
-            Var.same mem (Sm.region_mem 1) && Var.same b sp
-         | _ -> false)
-     | None -> false);
-  check "PR-C1: the nested load inside a BinOp def reads the region mem too (the -O0 cmp pattern)"
-    (match def_of_lhs c1' c1_t with
-     | Some d ->
-        (match Def.rhs d with
-         | Bil.BinOp (Bil.PLUS, Bil.Load (Bil.Var mem, _, _, _), Bil.Int _) ->
-            Var.same mem (Sm.region_mem 2)
-         | _ -> false)
-     | None -> false);
+  check_bound "PR-C1: the whole-access store rebinds lhs and mem node to the region mem, keeping the SP address arithmetic"
+    (def_of_lhs c1' (Sm.region_mem 1))
+    (fun d ->
+       match Def.rhs d with
+       | Bil.Store (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var b, Bil.Int _), _, _, _) ->
+          Var.same mem (Sm.region_mem 1) && Var.same b sp
+       | _ -> false);
+  check_bound "PR-C1: the nested load inside a BinOp def reads the region mem too (the -O0 cmp pattern)"
+    (def_of_lhs c1' c1_t)
+    (fun d ->
+       match Def.rhs d with
+       | Bil.BinOp (Bil.PLUS, Bil.Load (Bil.Var mem, _, _, _), Bil.Int _) ->
+          Var.same mem (Sm.region_mem 2)
+       | _ -> false);
 
   (* C2: the Arg_slot byte selection (S20) — args reads wholly inside
      one word cell become [hike_slotN] parameter reads: the full-cell
@@ -269,25 +267,21 @@ let run_stl_rewrite () =
   let c2_intra = args_ld "pr_c2_intra" 12 `r32 in
   let c2 = straight_sub "pr_c2_slot" [ d_rbp; c2_full; c2_narrow; c2_intra ] in
   let c2' = rewrite_one c2 in
-  check "PR-C2: the full-cell args read (width 64) becomes the bare hike_slot0 var"
-    (match def_of_tid c2' (Term.tid c2_full) with
-     | Some d ->
-        (match Def.rhs d with Bil.Var v -> Var.equal v slot0 | _ -> false)
-     | None -> false);
-  check "PR-C2: the aligned narrow args read (width 32 at cell start) splices the LOW cast"
-    (match def_of_tid c2' (Term.tid c2_narrow) with
-     | Some d ->
-        (match Def.rhs d with
-         | Bil.Cast (Bil.LOW, 32, Bil.Var v) -> Var.equal v slot0
-         | _ -> false)
-     | None -> false);
-  check "PR-C2: the intra-cell args read (width 32 at byte 4) selects bits [32,63]"
-    (match def_of_tid c2' (Term.tid c2_intra) with
-     | Some d ->
-        (match Def.rhs d with
-         | Bil.Extract (63, 32, Bil.Var v) -> Var.equal v slot0
-         | _ -> false)
-     | None -> false);
+  check_bound "PR-C2: the full-cell args read (width 64) becomes the bare hike_slot0 var"
+    (def_of_tid c2' (Term.tid c2_full))
+    (fun d -> match Def.rhs d with Bil.Var v -> Var.equal v slot0 | _ -> false);
+  check_bound "PR-C2: the aligned narrow args read (width 32 at cell start) splices the LOW cast"
+    (def_of_tid c2' (Term.tid c2_narrow))
+    (fun d ->
+       match Def.rhs d with
+       | Bil.Cast (Bil.LOW, 32, Bil.Var v) -> Var.equal v slot0
+       | _ -> false);
+  check_bound "PR-C2: the intra-cell args read (width 32 at byte 4) selects bits [32,63]"
+    (def_of_tid c2' (Term.tid c2_intra))
+    (fun d ->
+       match Def.rhs d with
+       | Bil.Extract (63, 32, Bil.Var v) -> Var.equal v slot0
+       | _ -> false);
 
   (* C3: write-closed Window — an Args cell that also contains a STORE
      takes Window storage on both sides: the read keeps its memory node
@@ -303,13 +297,12 @@ let run_stl_rewrite () =
   in
   let c3 = straight_sub "pr_c3_abi" [ d_rbp; c3_rd; c3_st ] in
   let c3' = rewrite_one c3 in
-  check "PR-C3: an Args read in a stored cell converts with the store to the incoming-window memory (write-closed)"
-    (match def_of_tid c3' (Term.tid c3_rd) with
-     | Some d ->
-        (match Def.rhs d with
-         | Bil.Load (Bil.Var mem, _, _, _) -> Var.same mem (Sm.window_mem)
-         | _ -> false)
-     | None -> false);
+  check_bound "PR-C3: an Args read in a stored cell converts with the store to the incoming-window memory (write-closed)"
+    (def_of_tid c3' (Term.tid c3_rd))
+    (fun d ->
+       match Def.rhs d with
+       | Bil.Load (Bil.Var mem, _, _, _) -> Var.same mem (Sm.window_mem)
+       | _ -> false);
 
   (* N3 (V-F): the split RMW — one read-modify-write def on an Args
      cell fissions into the hoisted read def + the store def;
@@ -410,21 +403,20 @@ let run_stl_rewrite () =
      |> Seq.concat_map ~f:(Term.enum jmp_t)
      |> Seq.for_all ~f:(fun j -> not (has_load (Jmp.cond j))));
   let c4' = rewrite_one c4 in
-  check "PR-C4: the load def converts to the region mem and the guard reads its temp"
-    (match def_of_tid c4' (Term.tid c4_ld) with
-     | Some d ->
-        (match Def.rhs d with
-         | Bil.Load (Bil.Var mem, _, _, _) ->
-             Var.same mem (Sm.region_mem 1)
-             && (Term.enum blk_t c4'
-                 |> Seq.concat_map ~f:(Term.enum jmp_t)
-                 |> Seq.exists ~f:(fun j ->
-                        match Jmp.cond j with
-                        | Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int _) ->
-                            Var.equal v c4_t
-                        | _ -> false))
-         | _ -> false)
-     | None -> false);
+  check_bound "PR-C4: the load def converts to the region mem and the guard reads its temp"
+    (def_of_tid c4' (Term.tid c4_ld))
+    (fun d ->
+       match Def.rhs d with
+       | Bil.Load (Bil.Var mem, _, _, _) ->
+           Var.same mem (Sm.region_mem 1)
+           && (Term.enum blk_t c4'
+               |> Seq.concat_map ~f:(Term.enum jmp_t)
+               |> Seq.exists ~f:(fun j ->
+                      match Jmp.cond j with
+                      | Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int _) ->
+                          Var.equal v c4_t
+                      | _ -> false))
+       | _ -> false);
   ()
 
 (* Lane D: the emitter's alloca shapes — the VLA lane (the dynamic     *)
@@ -588,15 +580,14 @@ let run_abi_and_kb () =
      [install_run] is the whole state, absence is the top identity. *)
   let t1 = Tid.create () in
   let t2 = Tid.create () in
-  let present = function Some _ -> true | None -> false in
   Kb.install_run ~block_envs:(Tid.Map.singleton t1 (AI.top, AI.top));
   check "PR-E2: block_env reads back the provided pair; another block reads none"
-    (present (Kb.block_env t1) && Kb.block_env t2 = None);
+    (Option.is_some (Kb.block_env t1) && Kb.block_env t2 = None);
   check "PR-E2: the envs install is the whole state — the run's table replaces, never merges"
-    (Kb.block_env t2 = None && present (Kb.block_env t1));
+    (Kb.block_env t2 = None && Option.is_some (Kb.block_env t1));
   Kb.install_run ~block_envs:(Tid.Map.singleton t2 (AI.top, AI.top));
   check "PR-E2: the replacement leaves no earlier run's entries"
-    (present (Kb.block_env t2) && Kb.block_env t1 = None);
+    (Option.is_some (Kb.block_env t2) && Kb.block_env t1 = None);
   (* The ONE lookup: absence is the no-constraint identity (the reader
      denotates in [AI.top]). *)
   check "PR-E2: block_env on a never-provided block is none"

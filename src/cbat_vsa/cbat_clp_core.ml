@@ -182,9 +182,8 @@ let finite_end (p : t) : W.t option =
 
 let lnot (p : t) : t =
   (* Any point works as the infinite base. *)
-  match finite_end p with
-  | None -> bottom (bitwidth p)
-  | Some e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p)
+  Option.value_map (finite_end p) ~default:(bottom (bitwidth p))
+    ~f:(fun e -> create (W.lnot e) ~step:(step_of p) ~cardn:(cardn_of p))
 
 
 let iter (p : t) : W.t list =
@@ -282,9 +281,7 @@ let splits_by (p : t) (w : W.t) : bool =
 (* Membership. *)
 let elem (i : W.t) (p : t) : bool =
   assert (W.bitwidth i = bitwidth p);
-  match nearest_pred i p with
-  | None -> false
-  | Some j -> W.(=) i j
+  Option.value_map (nearest_pred i p) ~default:false ~f:(W.( = ) i)
 
 (* Top test via coprime step. *)
 let is_top (p : t) : bool = p = top (bitwidth p)
@@ -436,12 +433,8 @@ let safe_lcm s1 s2 =
   with _ -> None
 
 let solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound =
-  match safe_lcm s1 s2 with
-  | None -> None
-  | Some step ->
-    match bounded_diophantine s1 s2 (W.sub lo2 lo1) with
-    | None -> None
-    | Some (u, _) ->
+  Option.bind (safe_lcm s1 s2) ~f:(fun step ->
+    Option.bind (bounded_diophantine s1 s2 (W.sub lo2 lo1)) ~f:(fun (u, _) ->
       let x0 = W.add lo1 (W.mul u s1) in
       let x =
         if W.(<) x0 min_bound then
@@ -456,15 +449,11 @@ let solve_first_point_ge ~lo1 ~s1 ~lo2 ~s2 ~min_bound =
           W.sub x0 (W.mul q step)
       in
       if W.(<) x min_bound then None
-      else Some (x, step)
+      else Some (x, step)))
 
 let solve_last_point_le ~lo1 ~s1 ~lo2 ~s2 ~max_bound =
-  match safe_lcm s1 s2 with
-  | None -> None
-  | Some step ->
-    match bounded_diophantine s1 s2 (W.sub lo2 lo1) with
-    | None -> None
-    | Some (u, _) ->
+  Option.bind (safe_lcm s1 s2) ~f:(fun step ->
+    Option.bind (bounded_diophantine s1 s2 (W.sub lo2 lo1)) ~f:(fun (u, _) ->
       let x0 = W.add lo1 (W.mul u s1) in
       let x =
         if W.(>) x0 max_bound then
@@ -479,7 +468,7 @@ let solve_last_point_le ~lo1 ~s1 ~lo2 ~s2 ~max_bound =
           W.add x0 (W.mul q step)
       in
       if W.(>) x max_bound then None
-      else Some (x, step)
+      else Some (x, step)))
 
 let solve_grid_interval ~width ~lo1 ~s1 ~lo2 ~s2 ~min_bound ~max_bound : t =
   if W.(>) min_bound max_bound then bottom width

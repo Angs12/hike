@@ -114,14 +114,12 @@ let () =
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
       Seq.iter (Term.enum def_t blk) ~f:(fun d ->
-          let opt (r : ('a, 'b) Result.t) : 'a option =
-            match r with Ok w -> Some w | Error _ -> None in
           let kind =
             let open Base.Option in
             Base.Option.bind
               (Cbat_vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
               ~f:(fun addr ->
-                opt
+                Result.to_option
                   (Cbat_vsa.denote_exp_at
                      ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
                      ~blk ~def:d addr))

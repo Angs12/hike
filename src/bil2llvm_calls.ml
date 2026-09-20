@@ -74,12 +74,10 @@ let create_call_args blk_tid llvm_builder
              return @@ Llvm.undef ty)
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let k =
-          match
-            Base.List.findi slot_args
-              ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg))
-          with
-          | Some (i, _) -> i + 1
-          | None -> 0
+          Base.Option.value_map
+            (Base.List.findi slot_args
+               ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg)))
+            ~default:0 ~f:(fun (i, _) -> i + 1)
         in
         (match arg_value_of_slot k with
          | Some v ->
@@ -538,12 +536,10 @@ let create_thunk (sub_tid : tid) =
            it reads undef, the model-ABI never-defined treatment. *)
         let param_named (v : var) : Llvm.llvalue =
           let n = Var.name v in
-          match
-            Base.List.findi twin_args ~f:(fun i a -> Var.name (Arg.lhs a) = n)
-            |> Base.Option.map ~f:(fun (i, _) -> Llvm.param fn i)
-          with
-          | Some p -> p
-          | None -> Llvm.undef (Llvm.i64_type llvm_ctx)
+          Base.Option.value
+            (Base.List.findi twin_args ~f:(fun i a -> Var.name (Arg.lhs a) = n)
+             |> Base.Option.map ~f:(fun (i, _) -> Llvm.param fn i))
+            ~default:(Llvm.undef (Llvm.i64_type llvm_ctx))
         in
         let call_args =
           Base.List.map reg_args ~f:(fun a -> param_named (Arg.lhs a))

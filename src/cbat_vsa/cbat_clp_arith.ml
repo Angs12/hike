@@ -51,9 +51,8 @@ let add (p1 : t) (p2 : t) : t =
 
 let neg (p : t) : t =
   (* Any point works as the infinite base. *)
-  match finite_end p with
-  | None -> bottom (bitwidth p)
-  | Some e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p)
+  Option.value_map (finite_end p) ~default:(bottom (bitwidth p))
+    ~f:(fun e -> create (W.neg e) ~step:(step_of p) ~cardn:(cardn_of p))
 
 let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 

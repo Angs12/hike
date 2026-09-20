@@ -39,7 +39,7 @@ let r10b_enum (p : Clp.t) : W.t list * bool =
                 if
                   Cbat_word.equal nxt cur
                   || W.compare nxt cur <= 0
-                  || match mx with Some mx -> W.compare nxt mx > 0 | None -> false
+                  || Option.is_some (Base.Option.filter mx ~f:(fun mx -> W.compare nxt mx > 0))
                 then (List.rev (cur :: acc), true)
                 else go (n + 1) nxt (cur :: acc)
         in
@@ -620,13 +620,13 @@ let run_landmarks () =
   let l2_tid = match l2_tid with Some t -> t | None -> failwith "F2c: missing L2" in
   let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
   let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
-  check
+  check_bound
     "property LM F2c: loop 1's head lower bound is the entry constant 0"
-    (match Ws.min_elem i1 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-  check
+    (Ws.min_elem i1) (fun lo -> Cbat_word.equal lo (w32 0));
+  check_bound
     "property LM F2c: loop 2's head lower bound is loop 1's exact exit value K1+1 (the compiled \
      fallthrough comparison partitions the exit edge)"
-    (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (Cbat_word.succ (w32 40)) | None -> false);
+    (Ws.min_elem i2) (fun lo -> Cbat_word.equal lo (Cbat_word.succ (w32 40)));
   ()
 
 (* Single-pass trace partitioning: every out-edge transfers a branch-refined state. *)
@@ -785,10 +785,9 @@ let run_t5 () =
       ~seeds:[ (t2, Ws.singleton (w32 6)) ]
       entry blk in
   let cell_of_key k =
-    match Vsa.Test_seam.denote_imm_exp
-            (Bil.Load (Bil.Var mem, k, LittleEndian, `r32)) refined with
-    | Ok ws -> ws
-    | Error _ -> Ws.top 32 in
+    Result.fold
+      (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var mem, k, LittleEndian, `r32)) refined)
+      ~ok:Fun.id ~error:(fun _ -> Ws.top 32) in
   check
     "T5-2 (Store row): the constrained cell (the store's key) meets {6}"
     (Ws.equal (cell_of_key kb) (Ws.singleton (w32 6)));
@@ -873,12 +872,10 @@ let run_t5 () =
   let rl =
     AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
       (mkstate d_old w_old) (mkstate d_new w_new) in
-  check
+  check_bound
     "T5-4 (landmarks): the cell data translates toward the head's \
      landmark (growth 3 x 1 step: hi 2 -> 5)"
-    (match Ws.max_elem (cell_of rl) with
-     | Some hi -> W.equal hi (w32 5)
-     | None -> false);
+    (Ws.max_elem (cell_of rl)) (fun hi -> W.equal hi (w32 5));
   Cbat_landmarks.clear ();
   let r_ex =
     AI.selective_widen_extrapolate ~head:(Some h) ~need ~steps:1
@@ -933,19 +930,16 @@ let run_t5 () =
       sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_state sub) in
   let exit_st = Graphlib.Std.Solution.get sol exit_tid in
   let cell =
-    match
-      Vsa.Test_seam.denote_imm_exp
-        (Bil.Load (Bil.Var mem,
-                   Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
-                   LittleEndian, `r32))
-        exit_st with
-    | Ok ws -> ws
-    | Error _ -> Ws.top 32 in
+    Result.fold
+      (Vsa.Test_seam.denote_imm_exp
+         (Bil.Load (Bil.Var mem,
+                    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+                    LittleEndian, `r32))
+         exit_st)
+      ~ok:Fun.id ~error:(fun _ -> Ws.top 32) in
   check
     "T5-4b (store loop): the stored cell data is bounded — it followed \
      the loop's landmark range instead of widening to the infinite hull"
     ((not (Ws.is_infinite cell))
-     && (match Ws.max_elem cell with
-         | Some hi -> W.compare hi k <= 0
-         | None -> false));
+     && Option.is_some (Base.Option.filter (Ws.max_elem cell) ~f:(fun hi -> W.compare hi k <= 0)));
   ())

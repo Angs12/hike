@@ -407,13 +407,14 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
   let lo, hi =
     match p.pt_sec with
     | Stack | Args -> (p.pt_lo, p.pt_hi)
-    | _ -> (
+    | _ ->
         (* The data side owns the emitter's word grid: a member's
            extent is its occupied bytes snapped OUT to the owning
            span's word hull. *)
-        match Base.List.find spans ~f:(fun d -> equal_sec d.ds_sec p.pt_sec) with
-        | Some d -> word_hull ~word d p.pt_lo p.pt_hi
-        | None -> (p.pt_lo, p.pt_hi))
+        Option.value_map
+          (Base.List.find spans ~f:(fun d -> equal_sec d.ds_sec p.pt_sec))
+          ~default:(p.pt_lo, p.pt_hi)
+          ~f:(fun d -> word_hull ~word d p.pt_lo p.pt_hi)
   in
   { m_sec = p.pt_sec; m_lo = lo; m_hi = hi; m_sub = sub;
     m_def = def; m_width = width; m_store = store;
@@ -452,13 +453,8 @@ let rec is_const_chain (e : exp) : bool =
 
 (* The def's memory access: (address, width in bytes, stores). *)
 let access_of (d : def term) : (exp * int * bool) option =
-  match Model.addr_of_rhs (Def.rhs d) with
-  | None -> None
-  | Some (addr, size) ->
-      Some
-        ( addr,
-          Size.in_bytes size,
-          Option.is_some (Model.store_data_of_rhs (Def.rhs d)) )
+  Option.map (Model.addr_of_rhs (Def.rhs d)) ~f:(fun (addr, size) ->
+      (addr, Size.in_bytes size, Option.is_some (Model.store_data_of_rhs (Def.rhs d))))
 
 let collect (env : env) (prog : program term) : collecting =
   let v =
@@ -478,15 +474,15 @@ let collect (env : env) (prog : program term) : collecting =
            members). *)
         let acc =
           Base.List.fold env.params ~init:acc ~f:(fun acc v ->
-              match env.denote ~blk:acc.blk (Bil.Var v) with
-              | Error _ -> acc
-              | Ok ws -> (
-                  match Model.escape_extent ~entry:env.entry ws with
-                  | None -> acc
-                  | Some ext ->
-                      Base.List.fold (escape_members ~sub:acc.sub ~env ext)
-                        ~init:acc
-                        ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
+              Option.fold
+                (Option.bind
+                   (Result.ok (env.denote ~blk:acc.blk (Bil.Var v)))
+                   ~f:(Model.escape_extent ~entry:env.entry))
+                ~init:acc
+                ~f:(fun acc ext ->
+                  Base.List.fold (escape_members ~sub:acc.sub ~env ext)
+                    ~init:acc
+                    ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
         in
         (* The call window: a block that calls has an outgoing-window
            extent the callee (the memory-convention thunk) reads
@@ -500,11 +496,14 @@ let collect (env : env) (prog : program term) : collecting =
         in
         if not has_call then acc
         else
-          match env.denote ~blk:acc.blk (Bil.Var env.sp) with
-          | Error _ -> acc
-          | Ok ws -> (
-              match Model.positions_of_offsets ws with
-              | Some (lo, hi) when Stdlib.Int64.equal lo hi ->
+          Option.fold
+            (Option.bind
+               (Result.ok (env.denote ~blk:acc.blk (Bil.Var env.sp)))
+               ~f:Model.positions_of_offsets)
+            ~init:acc
+            ~f:(fun acc (lo, hi) ->
+              if not (Stdlib.Int64.equal lo hi) then acc
+              else
                 let sp_abs = lo in
                 let win_lo =
                   Stdlib.Int64.sub sp_abs (Stdlib.Int64.of_int env.word) in
@@ -516,8 +515,7 @@ let collect (env : env) (prog : program term) : collecting =
                 in
                 Base.List.fold (escape_members ~sub:acc.sub ~env (win_lo, win_hi))
                   ~init:acc
-                  ~f:(fun acc m -> { acc with tree = insert acc.tree m })
-              | _ -> acc)
+                  ~f:(fun acc m -> { acc with tree = insert acc.tree m }))
 
       method! enter_def d acc =
         let dtid = Term.tid d in
@@ -553,18 +551,17 @@ let collect (env : env) (prog : program term) : collecting =
             |> fun acc ->
             (* A stored stack-symbolic value escapes into memory: its
                reloaded copies deref through the raw lane. *)
-            match Model.store_data_of_rhs (Def.rhs d) with
-            | None -> acc
-            | Some (data, _) -> (
-                match env.denote ~blk:acc.blk ~def:d data with
-                | Error _ -> acc
-                | Ok ws -> (
-                    match Model.escape_extent ~entry:env.entry ws with
-                    | None -> acc
-                    | Some ext ->
-                        Base.List.fold (escape_members ~sub:acc.sub ~env ext)
-                          ~init:acc
-                          ~f:(fun acc m -> { acc with tree = insert acc.tree m }))))
+            Option.fold
+              (Option.bind (Model.store_data_of_rhs (Def.rhs d))
+                 ~f:(fun (data, _) ->
+                   Option.bind
+                     (Result.ok (env.denote ~blk:acc.blk ~def:d data))
+                     ~f:(Model.escape_extent ~entry:env.entry)))
+              ~init:acc
+              ~f:(fun acc ext ->
+                Base.List.fold (escape_members ~sub:acc.sub ~env ext)
+                  ~init:acc
+                  ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
     end
   in
   v#run prog
@@ -744,16 +741,14 @@ let whole_comps_of ~(word : int) ~(spans : data_span list)
       (Base.List.map bindings ~f:(fun (k, rs) -> (k, rs.members)))
   in
   Base.List.filter_map whole ~f:(fun d ->
-      match
-        Base.List.find bindings ~f:(fun (k, rs) ->
-            equal_sec k.lo.p_sec d.ds_sec
-            && (match rs.storage with Data_region _ -> true | _ -> false))
-      with
-      | Some (_, rs) -> (
+      Option.bind
+        (Base.List.find bindings ~f:(fun (k, rs) ->
+             equal_sec k.lo.p_sec d.ds_sec
+             && (match rs.storage with Data_region _ -> true | _ -> false)))
+        ~f:(fun (_, rs) ->
           match rs.storage with
           | Data_region id -> Some (id, d.ds_lo, d.ds_hi)
-          | _ -> None)
-      | None -> None)
+          | _ -> None))
 
 (* The emitter spec's Global components from the finalized data tree
    (S24): each CARVED range's word-grid tile and typed-width decision.
@@ -779,13 +774,11 @@ let global_comps_of ~(word : int) ~(spans : data_span list)
         if in_whole k.lo.p_sec k.lo.p_pos then None
         else
           match rs.storage with
-          | Data_region id -> (
-              match
-                Base.List.find spans ~f:(fun d ->
-                    equal_sec d.ds_sec k.lo.p_sec)
-              with
-              | None -> None
-              | Some d ->
+          | Data_region id ->
+              Option.bind
+                (Base.List.find spans ~f:(fun d ->
+                     equal_sec d.ds_sec k.lo.p_sec))
+                ~f:(fun d ->
                   let lo_w =
                     Int64.to_int_exn
                       (Stdlib.Int64.div (Stdlib.Int64.sub k.lo.p_pos d.ds_lo) w)
@@ -835,9 +828,8 @@ let set_sec_tag (t : sec_tag) (d : def term) : def term =
 let stamp_tags (c : ctx) (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
-          match Core.Map.find c.tags (Term.tid d) with
-          | Some t -> set_sec_tag t d
-          | None -> d))
+          Option.value_map (Core.Map.find c.tags (Term.tid d)) ~default:d
+            ~f:(fun t -> set_sec_tag t d)))
 
 (* ------------------------------------------------------------------ *)
 (* The Stack/Args rewrite surface (D1-D4: the range architecture).     *)
@@ -972,15 +964,13 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
       int64 option =
     match denote ~blk ?def e with
     | Error _ -> None
-    | Ok ws -> (
-        match Vsa.WordSet.stack_offsets ws with
-        | Some _ -> (
-            match Model.positions_of_offsets ws with
-            | Some (lo, hi) when Stdlib.Int64.equal lo hi -> Some lo
-            | _ -> None)
-        | None ->
-            if Vsa.WordSet.in_stack_segment ws then Model.singleton_i64 ws
-            else None)
+    | Ok ws ->
+        if Option.is_some (Vsa.WordSet.stack_offsets ws) then
+          Option.filter (Model.positions_of_offsets ws)
+            ~f:(fun (lo, hi) -> Stdlib.Int64.equal lo hi)
+          |> Option.map ~f:fst
+        else if Vsa.WordSet.in_stack_segment ws then Model.singleton_i64 ws
+        else None
   in
   let slot_of_start (a : int64) (d_sp : int64) : int option =
     let rel = Stdlib.Int64.sub a d_sp in
@@ -1009,38 +999,36 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
                let bindings =
                  Term.enum def_t blk
                  |> Seq.fold ~init:[] ~f:(fun acc d ->
-                        match
-                          ( Model.addr_of_rhs (Def.rhs d),
-                            Model.store_data_of_rhs (Def.rhs d) )
-                        with
-                        | Some (addr, size), Some _ -> (
-                            match singleton_at ~def:d ~blk addr with
-                            | Some a -> (
-                                match slot_of_start a d_sp with
-                                | Some i ->
-                                    let cell_lo =
-                                      Stdlib.Int64.add
-                                        (Stdlib.Int64.add d_sp w64)
-                                        (Stdlib.Int64.mul w64
-                                           (Stdlib.Int64.of_int i))
-                                    in
-                                    let occ_hi =
-                                      Stdlib.Int64.add a
-                                        (Stdlib.Int64.of_int
-                                           (Size.in_bytes size - 1))
-                                    in
-                                    let full =
-                                      Stdlib.Int64.equal a cell_lo
-                                      && Stdlib.Int64.equal occ_hi
-                                           (Stdlib.Int64.add cell_lo
-                                              (Stdlib.Int64.pred w64))
-                                    in
-                                    { sb_slot = i; sb_def = d; sb_full = full }
-                                    :: Base.List.filter acc ~f:(fun b ->
-                                           not (Int.equal b.sb_slot i))
-                                | None -> acc)
-                            | None -> acc)
-                        | _ -> acc)
+                        Option.value ~default:acc
+                          (Option.bind
+                             (Option.filter (Model.addr_of_rhs (Def.rhs d))
+                                ~f:(fun _ ->
+                                  Option.is_some
+                                    (Model.store_data_of_rhs (Def.rhs d))))
+                             ~f:(fun (addr, size) ->
+                               Option.bind (singleton_at ~def:d ~blk addr)
+                                 ~f:(fun a ->
+                                   Option.map (slot_of_start a d_sp) ~f:(fun i ->
+                                       let cell_lo =
+                                         Stdlib.Int64.add
+                                           (Stdlib.Int64.add d_sp w64)
+                                           (Stdlib.Int64.mul w64
+                                              (Stdlib.Int64.of_int i))
+                                       in
+                                       let occ_hi =
+                                         Stdlib.Int64.add a
+                                           (Stdlib.Int64.of_int
+                                              (Size.in_bytes size - 1))
+                                       in
+                                       let full =
+                                         Stdlib.Int64.equal a cell_lo
+                                         && Stdlib.Int64.equal occ_hi
+                                              (Stdlib.Int64.add cell_lo
+                                                 (Stdlib.Int64.pred w64))
+                                       in
+                                       { sb_slot = i; sb_def = d; sb_full = full }
+                                       :: Base.List.filter acc ~f:(fun b ->
+                                              not (Int.equal b.sb_slot i)))))))
                in
                Core.Map.set sites ~key:btid
                  ~data:(Base.List.sort bindings ~compare:(fun a b ->
@@ -1087,9 +1075,7 @@ let conversion_of ~(word : int) ~(entry : int64) ~(spans : data_span list)
           (* D1: the retaddr contract keeps its die-with-ret rendering
              (the tag drives the emitter's arm). *)
           let retaddr_cell =
-            match tag with
-            | Some t -> Model.is_return_address_tag t
-            | None -> false
+            Option.value_map tag ~default:false ~f:Model.is_return_address_tag
           in
           let owned =
             Base.List.filter portions ~f:(fun p ->
@@ -1218,9 +1204,9 @@ let bind_site_args ~(word : int) (bindings : site_binding list)
            typed model var when the store went through the model's
            memory). *)
         let data =
-          match Model.store_data_of_rhs (Def.rhs b.sb_def) with
-          | Some (data, _) -> data
-          | None -> Bil.Var (Def.lhs b.sb_def)
+          Option.value_map (Model.store_data_of_rhs (Def.rhs b.sb_def))
+            ~default:(Bil.Var (Def.lhs b.sb_def))
+            ~f:fst
         in
         let arg = Def.create (Model.call_arg ~word b.sb_slot) data in
         match Term.next def_t blk (Term.tid b.sb_def) with
@@ -1277,23 +1263,19 @@ let dynamic_alloc_tids_of ~(sp : var)
      unrepresentable value or an unknown old SP keeps the seed's
      verdict (unknown = the runtime move). *)
   let descends ~blk ~def d =
-    match
-      (denote ~blk ~def:d (Bil.Var sp_base), denote ~blk ~def:d (Def.rhs d))
-    with
-    | Ok old, Ok neu when not (Vsa.WordSet.is_top neu) -> (
-      match (Vsa.WordSet.stack_offsets old, Vsa.WordSet.stack_offsets neu) with
-      | Some old_offs, Some neu_offs -> (
-        match Model.singleton_offset old_offs with
-        | Some old_off -> (
-          match Vsa.WordSet.Clp.max_elem neu_offs with
-          | Some nhi -> (
-            match Cbat_word.to_int64 nhi with
-            | Ok hi -> Stdlib.Int64.compare hi old_off < 0
-            | Error _ -> true)
-          | None -> true)
-        | None -> true)
-      | _ -> true)
-    | _ -> true
+    let open Base.Option in
+    let verdict =
+      Result.ok (denote ~blk ~def:d (Bil.Var sp_base)) >>= fun old ->
+      Result.ok (denote ~blk ~def:d (Def.rhs d)) >>= fun neu ->
+      if Vsa.WordSet.is_top neu then None else
+      Vsa.WordSet.stack_offsets old >>= fun old_offs ->
+      Vsa.WordSet.stack_offsets neu >>= fun neu_offs ->
+      Model.singleton_offset old_offs >>= fun old_off ->
+      Vsa.WordSet.Clp.max_elem neu_offs >>= fun nhi ->
+      Result.ok (Cbat_word.to_int64 nhi) >>= fun hi ->
+      Some (Stdlib.Int64.compare hi old_off < 0)
+    in
+    Option.value verdict ~default:true
   in
   (* One-line contract: the rhs that moves SP by a runtime size - the
      direct [SP +/- X] form or the copy chain reaching it. *)
@@ -1346,11 +1328,8 @@ type facts = {
 
 (* The def's memory node is a LOAD of (addr, size); stores are not. *)
 let load_of_rhs (e : exp) : (exp * Size.t) option =
-  match Model.addr_of_rhs e with
-  | Some (addr, size) ->
-      if Option.is_some (Model.store_data_of_rhs e) then None
-      else Some (addr, size)
-  | None -> None
+  Option.filter (Model.addr_of_rhs e) ~f:(fun _ ->
+      Option.is_none (Model.store_data_of_rhs e))
 
 (* The SysV slot index of a callee-side incoming offset (the callee's
    slots sit at [entry_rsp + word + word*i]; entry_rsp is the window
@@ -1496,9 +1475,8 @@ let slot_defs_of ~(demoted : int list) (tree : sub_tree) :
         match rs.storage with
         | Arg_slot i when not (Base.List.mem demoted i ~equal:Int.equal) ->
             Base.List.fold rs.members ~init:(m, mx) ~f:(fun (m, mx) mm ->
-                match mm.m_def with
-                | Some dtid -> (Core.Map.set m ~key:dtid ~data:i, Int.max mx i)
-                | None -> (m, mx))
+                Option.fold mm.m_def ~init:(m, mx) ~f:(fun (m, mx) dtid ->
+                    (Core.Map.set m ~key:dtid ~data:i, Int.max mx i)))
         | _ -> (m, mx))
   in
   (slots, if arity < 0 then 0 else arity + 1)
@@ -1561,9 +1539,8 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         let blk =
           Term.map def_t blk ~f:(fun d ->
               let bits =
-                match access_of d with
-                | Some (_, w, _) -> 8 * w
-                | None -> 0
+                Option.value_map (access_of d) ~default:0
+                  ~f:(fun (_, w, _) -> 8 * w)
               in
               let conv, _tag =
                 conversion_of ~word ~entry ~spans ~denote ~tree
@@ -1580,9 +1557,8 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                   d')
         in
         (* Stage C: the argument bindings at the storing defs. *)
-        match Core.Map.find sites (Term.tid blk) with
-        | Some bs -> bind_site_args ~word bs blk
-        | None -> blk)
+        Option.fold (Core.Map.find sites (Term.tid blk)) ~init:blk
+          ~f:(fun _ bs -> bind_site_args ~word bs blk))
   in
   (* A window-VALUE def reads the hike_window parameter (D4b): the
      signature carries it whenever such a def exists, tree or no tree
@@ -1643,10 +1619,10 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let arity_of (t : Tid.t) : int =
     if Core.Set.mem exempt t then 0
     else
-      match Term.find sub_t prog t with
-      | Some sub -> (
-          match slots_of sub with [] -> 0 | is -> 1 + Base.List.fold is ~init:0 ~f:Int.max)
-      | None -> 0
+      Option.fold (Term.find sub_t prog t) ~init:0 ~f:(fun _ sub ->
+          match slots_of sub with
+          | [] -> 0
+          | is -> 1 + Base.List.fold is ~init:0 ~f:Int.max)
   in
   (* The cross-sub demotion (S21): an Arg_slot slot a resolved site
      cannot bind with its full final bytes takes the Window rule on
@@ -1660,15 +1636,11 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         in
         Core.Map.fold sites ~init:acc ~f:(fun ~key:btid ~data:bs acc ->
             let callees =
-              match Term.find blk_t caller btid with
-              | Some blk ->
+              Option.fold (Term.find blk_t caller btid) ~init:[] ~f:(fun _ blk ->
                   Term.enum jmp_t blk
                   |> Seq.filter_map ~f:(fun j ->
-                         match Core.Map.find resolved (Term.tid j) with
-                         | Some (Some t) -> Some t
-                         | _ -> None)
-                  |> Seq.to_list
-              | None -> []
+                         Option.join (Core.Map.find resolved (Term.tid j)))
+                  |> Seq.to_list)
             in
             Base.List.fold callees ~init:acc ~f:(fun acc callee ->
                 Base.List.fold bs ~init:acc ~f:(fun acc b ->

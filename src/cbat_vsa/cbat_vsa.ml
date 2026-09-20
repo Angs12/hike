@@ -124,9 +124,7 @@ let edge_conds_of (sub : sub term) : exp Tid.Map.t Tid.Map.t =
       let jmp = Graphs.Ir.Edge.jmp e in
       let jt = Term.tid jmp in
       let by_jmp =
-        match Hashtbl.find tbl (Term.tid src) with
-        | None -> Tid.Map.empty
-        | Some m -> m in
+        Option.value (Hashtbl.find tbl (Term.tid src)) ~default:Tid.Map.empty in
       let by_jmp =
         Core.Map.set by_jmp ~key:jt
           ~data:(Cbat_vsa_utils.complete_cond (Graphs.Ir.Edge.cond e ircfg)) in
@@ -144,9 +142,8 @@ let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc b ->
       let js = Term.enum jmp_t b |> Seq.to_list in
       let cond j =
-        match Core.Map.find edge_conds (Term.tid b) with
-        | None -> None
-        | Some by_jmp -> Core.Map.find by_jmp (Term.tid j) in
+        Option.bind (Core.Map.find edge_conds (Term.tid b)) ~f:(fun by_jmp ->
+            Core.Map.find by_jmp (Term.tid j)) in
       let rec pair js dcs acc =
         match js, dcs with
         | [], _ | _, [] -> acc
@@ -263,17 +260,15 @@ let rec static_graph_vsa
           |> Seq.fold ~init:Tid.Map.empty
                ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:(v, 0)))) in
   let get n =
-    match Core.Map.find (!rc_cell).rc_state.fs_sol n with
-    | Some (v, _) -> v
-    | None -> sol_default in
+    Option.value_map (Core.Map.find (!rc_cell).rc_state.fs_sol n)
+      ~default:sol_default ~f:fst in
   (* Store plus version bump; the stability check below compares first. *)
   let set n v =
     let rc = !rc_cell in
     let st = rc.rc_state in
     let ver =
-      match Core.Map.find st.fs_sol n with
-      | None -> 1
-      | Some (_, k) -> k + 1 in
+      Option.value_map (Core.Map.find st.fs_sol n) ~default:1
+        ~f:(fun (_, k) -> k + 1) in
     rc_cell :=
       Cbat_runctx.with_sol rc
         (Core.Map.set st.fs_sol ~key:n ~data:(v, ver)) in
@@ -307,9 +302,8 @@ let rec static_graph_vsa
     (* Dead bindings never reach the join; the keep-set depends only on
        the visited block, not on the predecessor. *)
     let keep =
-      match Core.Map.find (!rc_cell).rc_blocks v with
-      | Some bf -> bf.bf_live_in
-      | None -> Var.Set.empty
+      Option.value_map (Core.Map.find (!rc_cell).rc_blocks v)
+        ~default:Var.Set.empty ~f:(fun bf -> bf.bf_live_in)
     in
     (* Snapshot for the deep walk. *)
     let sol_snap = mk_sol () in
@@ -337,9 +331,7 @@ let rec static_graph_vsa
             Cbat_landmarks.widening_at_head := None;
             res) in
         (Stages.time `Join (fun () ->
-           match List.reduce outs ~f:AI.join with
-           | Some j -> j
-           | None -> old))
+           Option.value ~default:old (List.reduce outs ~f:AI.join)))
     in
     let new_val =
       if List.is_empty preds then old
@@ -385,9 +377,7 @@ let rec static_graph_vsa
      completely, and changes enqueue Tid-CFG successors. *)
   let pending = ref Tid.Set.empty in
   (* Entry itself is never seeded: init_sol pre-seeds its state. *)
-  (match Term.first blk_t s with
-  | None -> ()
-  | Some entry ->
+  Option.iter (Term.first blk_t s) ~f:(fun entry ->
     succs (Term.tid entry)
     |> List.iter ~f:(fun t -> pending := Core.Set.add !pending t));
   let pop_min () =

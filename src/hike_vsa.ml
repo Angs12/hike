@@ -28,14 +28,12 @@ type section_image = Vsa.section_image = {
    in [denote_exp_at].  Absence (no converged solution) is [AI.top],
    the no-constraint identity. *)
 let block_pre (blk : blk term) : Vsa.AI.t =
-  match Hike_kb.block_env (Term.tid blk) with
-  | Some (pre, _) -> pre
-  | None -> Vsa.AI.top
+  Base.Option.value (Base.Option.map (Hike_kb.block_env (Term.tid blk)) ~f:fst)
+    ~default:(Vsa.AI.top)
 
 let block_post (blk : blk term) : Vsa.AI.t =
-  match Hike_kb.block_env (Term.tid blk) with
-  | Some (_, post) -> post
-  | None -> Vsa.AI.top
+  Base.Option.value (Base.Option.map (Hike_kb.block_env (Term.tid blk)) ~f:snd)
+    ~default:(Vsa.AI.top)
 
 (* [e] denotes in the before-env of [def] — the block's defs replay
    from its precondition tag up to [def], the target def's own transfer
@@ -68,9 +66,8 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
         Core.Map.set m ~key:(Term.tid s) ~data:s)
   in
   let reads_retaddr (rhs : exp) : bool =
-    match Model.addr_of_rhs rhs with
-    | Some (addr, _) -> Model.is_return_address_shape ~abi addr
-    | None -> false
+    Base.Option.value_map (Model.addr_of_rhs rhs) ~default:false
+      ~f:(fun (addr, _) -> Model.is_return_address_shape ~abi addr)
   in
   let memo = ref Tid.Map.empty in
   let rec summary ~(visited : Tid.Set.t) (s : sub term) : Var.Set.t option =
@@ -101,7 +98,7 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
                       match Call.target c with
                       | Indirect (Bil.Var v)
                       | Indirect (Bil.Cast (_, _, Bil.Var v))
-                        when Option.is_none (Call.return c) -> (
+                        when Base.Option.is_none (Call.return c) -> (
                           match Core.Map.find last (Var.base v) with
                           | Some rhs when reads_retaddr rhs -> None
                           | _ -> Some None)
@@ -111,7 +108,7 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
           |> Seq.to_list
         in
         let v =
-          if Base.List.exists callees ~f:(fun c -> Option.is_none c) then None
+          if Base.List.exists callees ~f:(fun c -> Base.Option.is_none c) then None
           else
             let kill = ref false in
             let ws =

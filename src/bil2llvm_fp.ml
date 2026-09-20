@@ -128,10 +128,9 @@ let temp_defs_of_blk (blk : blk term) : def term Var.Map.t =
 let fp_intrinsic_sizes ~(word_bits : int) (args : Arg.t list)
     (rets : Arg.t list) : int * int =
   let arg_w (i : int) : int =
-    match Base.List.nth args i with
-    | Some a -> (
-        match Var.typ (Arg.lhs a) with Type.Imm w -> w | _ -> word_bits)
-    | None -> word_bits
+    Base.Option.value_map (Base.List.nth args i) ~default:word_bits
+      ~f:(fun a ->
+          match Var.typ (Arg.lhs a) with Type.Imm w -> w | _ -> word_bits)
   in
   let res_w =
     match rets with

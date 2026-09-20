@@ -118,10 +118,9 @@ let run_creg () =
   let b_ctrl = mk_store_minus m rsp 44 4 `r64 in
   let sub_ctrl = fst (sub_of "c4b_ctrl" [ [ a_ctrl; b_ctrl ], [] ]) in
   let ctx_ctrl = fixture_ctx [ sub_ctrl ] in
-  check "C4b control: the constant stores' merged component takes Region storage"
-    (match storage_of_def ctx_ctrl sub_ctrl (Term.tid a_ctrl) with
-     | Some rs -> rs.A.storage = A.Stack_region 1
-     | None -> false);
+  check_bound "C4b control: the constant stores' merged component takes Region storage"
+    (storage_of_def ctx_ctrl sub_ctrl (Term.tid a_ctrl))
+    (fun rs -> rs.A.storage = A.Stack_region 1);
   (* The mixed variant: the indexed loop's widened store (the
      Infinite class — C4a pins its tag) contributes a full-scope
      identity member.  Its component takes Frame storage, never
@@ -129,10 +128,9 @@ let run_creg () =
      together-or-not-at-all rule). *)
   let sub_mixed, def_idx_store = mk_indexed_loop ~pfx:"c4b" in
   let ctx_mixed = fixture_ctx [ sub_mixed ] in
-  check "C4b: the widened member's component takes Frame storage, never Region"
-    (match storage_of_def ctx_mixed sub_mixed (Term.tid def_idx_store) with
-     | Some rs -> rs.A.storage = A.Stack_residue
-     | None -> false);
+  check_bound "C4b: the widened member's component takes Frame storage, never Region"
+    (storage_of_def ctx_mixed sub_mixed (Term.tid def_idx_store))
+    (fun rs -> rs.A.storage = A.Stack_residue);
   check "C4b: the constant cell joins the widened member's Frame component (together, not Region)"
     (match Core.Map.find ctx_mixed.A.sub_trees (Term.tid sub_mixed) with
      | Some tree ->
@@ -248,11 +246,10 @@ let run_regions () =
    collector denotes addresses — names are never consulted); the
    name-grants-nothing claim is pinned by the S2/S2b twin. *)
 let storage_at ctx sub sec lo hi : A.storage option =
-  match Core.Map.find ctx.A.sub_trees (Term.tid sub) with
-  | Some tree ->
+  Base.Option.bind (Core.Map.find ctx.A.sub_trees (Term.tid sub))
+    ~f:(fun tree ->
       Base.Option.map (A.storage_of_range tree (A.range sec lo hi))
-        ~f:(fun rs -> rs.A.storage)
-  | None -> None
+        ~f:(fun rs -> rs.A.storage))
 
 let run_fp_gpr () =
 (  (* S2: a proven rsp access plus an UNTAGGED heap-RBP store. The heap

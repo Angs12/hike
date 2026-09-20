@@ -176,8 +176,7 @@ let create_def blk_tid llvm_builder sub_tid fr def =
           let* ty = typ_lltype_m (Var.typ wv) in
           KB.return (Llvm.undef ty)
       in
-      let stack0 =
-        match fr.stack0 with Some v -> v | None -> fr.anchor_i64 in
+      let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
       let* llvm_ctx = Context.get llvm_ctx_var in
       let rel = Llvm.build_sub res stack0 "" llvm_builder in
       KB.return (Llvm.build_add w rel "" llvm_builder)

@@ -155,9 +155,7 @@ let run () =
       && not (has_block stripped tids.(3))
       && has_block stripped tids.(2)
       && has_def stripped (Term.tid rbp_def)
-      && (match jmp_of stripped (Term.tid eq_j) with
-          | Some j -> cond_is_true j
-          | None -> false));
+      && (Option.is_some (Base.Option.filter (jmp_of stripped (Term.tid eq_j)) ~f:cond_is_true)));
     ())
   ;
   (  (* SC2 (census: no-RELOAD, 120 corpus-wide): the compare reads the
@@ -322,12 +320,8 @@ let run () =
        block and its phi die; both equality edges continue \
        unconditionally"
       ((not (has_block stripped tids.(5)))
-      && (match jmp_of stripped (Term.tid eq1) with
-          | Some j -> cond_is_true j
-          | None -> false)
-      && (match jmp_of stripped (Term.tid eq2) with
-          | Some j -> cond_is_true j
-          | None -> false)
+      && (Option.is_some (Base.Option.filter (jmp_of stripped (Term.tid eq1)) ~f:cond_is_true))
+      && (Option.is_some (Base.Option.filter (jmp_of stripped (Term.tid eq2)) ~f:cond_is_true))
       && has_block stripped tids.(4)
       && not (has_def stripped (Term.tid (nth_def fixture tids.(2) 0)))
       && not (has_def stripped (Term.tid (nth_def fixture tids.(3) 0))));

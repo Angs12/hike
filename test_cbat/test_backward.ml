@@ -186,7 +186,7 @@ let run () =
     "L3c2-2: the two-piece SLT rule — a signed guard whose operand is not provably non-negative \
      (top) still refines the cell to the two-piece [0, c−1] ∪ [2^31, max]"
     ((not (Ws.is_top cell2))
-    && match Ws.min_elem cell2 with Some w -> Cbat_word.(>=) w (w32 0) | None -> false);
+    && Base.Option.filter (Ws.min_elem cell2) ~f:(fun w -> Cbat_word.(>=) w (w32 0)) |> Option.is_some);
   (* L3c2-3: c < 0 is one interval, no gate. *)
   let sub3, body3 =
     mk_l3c2_loop ~prologue:true ~seed:(Some half) ~cmp:Bil.SLT ~c:m_one ~body_op:Bil.MINUS
@@ -263,9 +263,8 @@ let run () =
      applies: the cell at RBP-8 is [0..9] (8t <s 80 over t ∈ [0..9])"
     (let ws = l3c3_run sub2b body2b in
      bounded_above ws (w32 9)
-     && (match Ws.min_elem ws with
-         | Some lo -> Cbat_word.equal lo (w32 0)
-         | None -> false));
+     && Option.is_some
+          (Base.Option.filter (Ws.min_elem ws) ~f:(fun lo -> Cbat_word.equal lo (w32 0))));
   (* L3c3-3: RSHIFT-const row. *)
   let sub3, body3 =
     mk_l3c3_loop
@@ -464,7 +463,7 @@ let run () =
      the exit view's cell carries the exit-iteration value (8 survives)"
     ((not (Ws.is_top icell))
     && (not (Ws.is_bottom icell))
-    && (match Ws.max_elem icell with Some w -> Cbat_word.(<=) w (w32 7) | None -> false)
+    && (Base.Option.filter (Ws.max_elem icell) ~f:(fun w -> Cbat_word.(<=) w (w32 7)) |> Option.is_some)
     && (not (Ws.is_top ecell))
     && Ws.elem (w32 8) ecell);
   (* S-4: +1-adjacent equal-value cells merge to one hull. *)
@@ -530,7 +529,7 @@ let run () =
      min_elem >= 4 and is not top"
     (     (not (Ws.is_top cell3))
     && (not (Ws.is_bottom cell3))
-    && match Ws.min_elem cell3 with Some w -> Cbat_word.(>=) w (w32 4) | None -> false);
+    && Base.Option.filter (Ws.min_elem cell3) ~f:(fun w -> Cbat_word.(>=) w (w32 4)) |> Option.is_some);
   (* L-B4: second cmp makes the gate reject the mixed group. *)
   let sub4, body4 =
     let f = Var.create ~is_virtual:false ~fresh:false "l39_f" (Type.Imm 32) in
@@ -653,7 +652,7 @@ let run () =
      DECREMENTING counter converges inside the constraint (non-top, min_elem ≥ 11)"
     ((not (Ws.is_top cell3))
     && (not (Ws.is_bottom cell3))
-    && match Ws.min_elem cell3 with Some w -> Cbat_word.(>=) w (w32 11) | None -> false);
+    && Base.Option.filter (Ws.min_elem cell3) ~f:(fun w -> Cbat_word.(>=) w (w32 11)) |> Option.is_some);
   (* R2-4: nested TIMES chain — inline walk bounds the operand, exact slice fires. *)
   let sub4, body4 =
     mk_r2_loop ~seed:(w32 63) ~seed2:None ~body_op:Bil.PLUS ~body_k:(w32 1) ~mk_cond:(fun ~t ->
@@ -726,7 +725,8 @@ let run () =
     && Ws.elem (w32 5) cell4
     && Ws.elem (w32 0x105) cell4
     && (not (Ws.elem (w32 4) cell4))
-    && match Ws.max_elem cell4 with Some w -> Cbat_word.(<=) w (w32 0xFFFFFF05) | None -> false);
+    && Base.Option.filter (Ws.max_elem cell4) ~f:(fun w -> Cbat_word.(<=) w (w32 0xFFFFFF05))
+       |> Option.is_some);
   (* M5-5: signed-division rule. *)
   let sub5, body5 =
     mk_l3c3_loop ~seed:None

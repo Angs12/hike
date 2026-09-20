@@ -42,10 +42,9 @@ type sec_meta = {
 
 let bss_region proj =
   let regions = get_named_region_info proj in
-  match Seq.find regions ~f:(fun { info; _ } -> String.equal info ".bss") with
-  | None -> None
-  | Some { addr; size; _ } ->
-    Some (addr, size, get_copy_relocations proj ~bss_addr:addr ~bss_size:size)
+  Base.Option.map (Seq.find regions ~f:(fun { info; _ } -> String.equal info ".bss"))
+    ~f:(fun { addr; size; _ } ->
+      (addr, size, get_copy_relocations proj ~bss_addr:addr ~bss_size:size))
 
 let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
   let byte_row section_type ~is_const =
@@ -61,11 +60,8 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
           sm_copy_relocs = [] })
   in
   let bss_row =
-    match bss_region proj with
-    | None -> None
-    | Some (addr, size, copy_relocs) ->
-        Some
-          { sm_type = BSS;
+    Base.Option.map (bss_region proj) ~f:(fun (addr, size, copy_relocs) ->
+        { sm_type = BSS;
             sm_const = false;
             sm_lo = addr;
             sm_hi = Int64.sub (Int64.add addr size) 1L;
@@ -74,7 +70,7 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
                 (Int64.div (Int64.add size (Int64.of_int (word - 1)))
                    (Int64.of_int word));
             sm_image = None;
-            sm_copy_relocs = copy_relocs }
+            sm_copy_relocs = copy_relocs })
   in
   [ byte_row DATA ~is_const:false;
     byte_row RODATA ~is_const:true;
@@ -88,11 +84,11 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
    slot set, unfiltered: loads AND stores at a slot go through the
    slot's relocated pointer. *)
 let copy_reloc_slot_addrs proj =
-  match bss_region proj with
-  | Some (addr, _, copy_relocs) ->
-      Base.List.map copy_relocs
-        ~f:(fun (off, _) -> Int64.add addr (Int64.of_int off))
-  | None -> []
+  Base.Option.value
+    (Base.Option.map (bss_region proj) ~f:(fun (addr, _, copy_relocs) ->
+         Base.List.map copy_relocs
+           ~f:(fun (off, _) -> Int64.add addr (Int64.of_int off))))
+    ~default:[]
 
 (* The attribution's data spans, from the section metadata: each
    reserved span's section, native bounds, and copy-relocated slot
@@ -240,13 +236,13 @@ let pass_vsa proj =
   let acc =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-        match
-          Hike_vsa.fixpoint target (sp target)
-            ~prog:(Project.program proj) ~images sub
-        with
-        | None -> acc
-        | Some (envs, sub') ->
-          Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'))
+        Option.value
+          (Base.Option.map
+             (Hike_vsa.fixpoint target (sp target)
+                ~prog:(Project.program proj) ~images sub)
+             ~f:(fun (envs, sub') ->
+               Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub')))
+          ~default:acc)
   in
   let all_envs =
     Core.Map.fold acc ~init:Tid.Map.empty
@@ -262,9 +258,8 @@ let pass_vsa proj =
      trees). *)
   Project.map_program proj ~f:(fun prog ->
       Term.map sub_t prog ~f:(fun sub ->
-          match Core.Map.find acc (Term.tid sub) with
-          | Some (_, sub') -> sub'
-          | None -> sub))
+          Option.value (Base.Option.map (Core.Map.find acc (Term.tid sub)) ~f:snd)
+            ~default:sub))
 
 (* The canary strip: the proven canary composition (the TLS read, the
    same-cell store/reload, the not-equal edge to __stack_chk_fail)

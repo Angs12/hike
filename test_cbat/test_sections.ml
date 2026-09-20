@@ -323,14 +323,13 @@ let run_trees () =
     (match storage_at ctx3 sub3 S.Stack (pos (-0x30L)) (pos (-0x29L)) with
      | Some A.Stack_residue -> true
      | _ -> false);
-  check "AT1-ESC: the escape member survives finalization with no def"
-    (match Core.Map.find ctx3.A.sub_trees (Term.tid sub3) with
-     | Some tree ->
-         A.Tree.to_sequence tree |> Seq.to_list
-         |> Base.List.exists ~f:(fun (_, rs) ->
-                Base.List.exists rs.A.members ~f:(fun mm ->
-                    Option.is_none mm.A.m_def && mm.A.m_identity))
-     | None -> false);
+  check_bound "AT1-ESC: the escape member survives finalization with no def"
+    (Core.Map.find ctx3.A.sub_trees (Term.tid sub3))
+    (fun tree ->
+       A.Tree.to_sequence tree |> Seq.to_list
+       |> Base.List.exists ~f:(fun (_, rs) ->
+              Base.List.exists rs.A.members ~f:(fun mm ->
+                  Option.is_none mm.A.m_def && mm.A.m_identity)));
   (* The retaddr row. *)
   let ret_read =
     Def.create (v64 "at_ret") (Bil.Load (Bil.Var m, Bil.Var rsp, LittleEndian, `r64))

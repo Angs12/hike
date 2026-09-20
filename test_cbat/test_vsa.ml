@@ -106,9 +106,9 @@ let run () =
     "D4-9 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ [0,4]) \
      and the exit view carries the exit-iteration values (min ≥ 5)"
     ((not (Ws.is_top c_iter))
-    && (match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false)
+    && (Base.Option.filter (Ws.max_elem c_iter) ~f:(fun w -> Cbat_word.(<=) w (w32 4)) |> Option.is_some)
     && (not (Ws.is_top c_exit))
-    && match Ws.min_elem c_exit with Some w -> Cbat_word.(>=) w (w32 5) | None -> false);
+    && Base.Option.filter (Ws.min_elem c_exit) ~f:(fun w -> Cbat_word.(>=) w (w32 5)) |> Option.is_some);
   ())
 (* Coercing width helper: mismatched ops coerce, never raise. *)
 ;
@@ -397,16 +397,16 @@ let run () =
     "E2eC-13 (BIR loop): the partition — the iterate view's counter is bounded by the guard (⊆ \
      [0,4]) and the exit view carries the exit-iteration values (min ≥ 5)"
     ((not (Ws.is_top c_iter))
-    && (match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false)
+    && (Base.Option.filter (Ws.max_elem c_iter) ~f:(fun w -> Cbat_word.(<=) w (w32 4)) |> Option.is_some)
     && (not (Ws.is_top c_exit))
-    && match Ws.min_elem c_exit with Some w -> Cbat_word.(>=) w (w32 5) | None -> false);
+    && Base.Option.filter (Ws.min_elem c_exit) ~f:(fun w -> Cbat_word.(>=) w (w32 5)) |> Option.is_some);
   (* Shifted value's window: counter ⊆ [0,4] at the guard. *)
   let c_iter = AI.find_word 32 (Graphlib.Std.Solution.get sol body_tid) i in
   check
     "E2eC-14 (BIR loop): the counter window survives the body shift — the iterate view's counter \
      stays ⊆ [0,4] (y = x << (i+1) ∈ {32..512})"
     ((not (Ws.is_top c_iter))
-    && match Ws.max_elem c_iter with Some w -> Cbat_word.(<=) w (w32 4) | None -> false);
+    && Base.Option.filter (Ws.max_elem c_iter) ~f:(fun w -> Cbat_word.(<=) w (w32 4)) |> Option.is_some);
   ())
 ;
 (  (* Channel-2 negative: the heap-indexed store never seeds. *)

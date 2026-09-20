@@ -155,6 +155,4 @@ let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t) (s : sub term) :
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =
-  match Core.Map.find rc.rc_state.fs_sol t with
-  | Some (_, v) -> v
-  | None -> 0
+  Option.value_map (Core.Map.find rc.rc_state.fs_sol t) ~default:0 ~f:snd

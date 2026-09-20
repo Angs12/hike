@@ -169,28 +169,24 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       (* Plus: shift intervals by the other operand. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
-         let a' = match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-           | Some bmin, Some bmax ->
-             hull ~wrapping:true width (Cbat_word.sub vlo bmax) (Cbat_word.sub vhi bmin)
-           | _ -> None in
-         let b' = match WordSet.min_elem a_ws, WordSet.max_elem a_ws with
-           | Some amin, Some amax ->
-             hull ~wrapping:true width (Cbat_word.sub vlo amax) (Cbat_word.sub vhi amin)
-           | _ -> None in
+         let a' = Option.map2 (WordSet.min_elem b_ws) (WordSet.max_elem b_ws)
+             ~f:(fun bmin bmax ->
+               hull ~wrapping:true width (Cbat_word.sub vlo bmax) (Cbat_word.sub vhi bmin)) |> Option.join in
+         let b' = Option.map2 (WordSet.min_elem a_ws) (WordSet.max_elem a_ws)
+             ~f:(fun amin amax ->
+               hull ~wrapping:true width (Cbat_word.sub vlo amax) (Cbat_word.sub vhi amin)) |> Option.join in
          a', b'
        | _ -> None, None)
     | Bil.MINUS ->
       (* Minus: shift intervals by the other operand. *)
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
-         let a' = match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-           | Some bmin, Some bmax ->
-             hull ~wrapping:true width (Cbat_word.add vlo bmin) (Cbat_word.add vhi bmax)
-           | _ -> None in
-         let b' = match WordSet.min_elem a_ws, WordSet.max_elem a_ws with
-           | Some amin, Some amax ->
-             hull ~wrapping:true width (Cbat_word.sub amin vhi) (Cbat_word.sub amax vlo)
-           | _ -> None in
+         let a' = Option.map2 (WordSet.min_elem b_ws) (WordSet.max_elem b_ws)
+             ~f:(fun bmin bmax ->
+               hull ~wrapping:true width (Cbat_word.add vlo bmin) (Cbat_word.add vhi bmax)) |> Option.join in
+         let b' = Option.map2 (WordSet.min_elem a_ws) (WordSet.max_elem a_ws)
+             ~f:(fun amin amax ->
+               hull ~wrapping:true width (Cbat_word.sub amin vhi) (Cbat_word.sub amax vlo)) |> Option.join in
          a', b'
        | _ -> None, None)
     | Bil.TIMES ->
@@ -502,15 +498,18 @@ let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
        | _ -> None, None)
     | _ -> None, None
 
+(* The [Ok] payload, or [None]. *)
+let or_opt : ('a, _) result -> 'a option = function
+  | Ok v -> Some v
+  | Error _ -> None
+
 (* Constraint row on an operand.  The signed rows read the producer
    non-negativity proof; the family falls from the evidence tier to the
    total tier on its own. *)
 let row_for ~(env : AI.t) ?(nonneg : exp -> bool = fun _ -> false)
     (e : exp) (op : guard_op) (c : Cbat_word.t)
     : wordset option =
-  let cur = match denote_imm_exp e env with
-    | Ok ws -> Some ws
-    | Error _ -> None in
+  let cur = or_opt (denote_imm_exp e env) in
   match op with
   | SLT | SLE -> guard_row ~cur ~known_nonneg:(nonneg e) op c
   | ULT | ULE | EQ -> guard_row ~cur op c
@@ -690,25 +689,22 @@ let rec inverse_denote ~(env : AI.t)
     inverse_denote ~env ~cells ~nonneg a (WordSet.neg produced)
   | Bil.Cast (Bil.HIGH, sz, a) ->
     (* The extent widening. *)
-    (match high_cast_constraint env a sz produced with
-     | Some a' -> inverse_denote ~env ~cells ~nonneg a a'
-     | None -> env)
+    Option.value_map (high_cast_constraint env a sz produced) ~default:env
+      ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg a a')
   | Bil.Cast (ct, _, a) ->
     (match ct with
      | Bil.SIGNED | Bil.UNSIGNED ->
-       (match ext_cast_constraint
-                 ~is_signed:(match ct with Bil.SIGNED -> true | _ -> false)
-                 env a produced with
-        | Some a' -> inverse_denote ~env ~cells ~nonneg a a'
-        | None -> env)
+       Option.value_map
+         (ext_cast_constraint
+            ~is_signed:(match ct with Bil.SIGNED -> true | _ -> false)
+            env a produced) ~default:env
+         ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg a a')
      | _ ->
-       (match low_cast_constraint env a produced with
-        | Some a' -> inverse_denote ~env ~cells ~nonneg a a'
-        | None -> env))
+       Option.value_map (low_cast_constraint env a produced) ~default:env
+         ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg a a'))
   | Bil.Extract (hi, lo, a) ->
-    (match extract_constraint env a hi lo produced with
-     | Some a' -> inverse_denote ~env ~cells ~nonneg a a'
-     | None -> env)
+    Option.value_map (extract_constraint env a hi lo produced) ~default:env
+      ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg a a')
   | Bil.Concat (a, b) ->
     (* The forward concatenates; the inverse splits the window on the
        width boundary. *)
@@ -734,12 +730,9 @@ let rec inverse_denote ~(env : AI.t)
     let env = meet_cell ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
     (match m with
      | Bil.Var mv ->
-       (match denote_imm_exp a env with
-        | Ok addr_ws ->
-          (match Mem.Key.of_wordset addr_ws with
-           | Some k -> cells := (mv, k, produced, en) :: !cells
-           | None -> ())
-        | Error _ -> ())
+       Option.iter
+         (Option.bind (or_opt (denote_imm_exp a env)) ~f:Mem.Key.of_wordset)
+         ~f:(fun k -> cells := (mv, k, produced, en) :: !cells)
      | _ -> ());
     env
   | Bil.Store (m, a, u, _en, s) ->
@@ -753,9 +746,7 @@ let rec inverse_denote ~(env : AI.t)
         | [] -> env
         | pending ->
           let resSize = Size.in_bits s in
-          let ks = match denote_imm_exp a env with
-            | Ok addr_ws -> Mem.Key.of_wordset addr_ws
-            | Error _ -> None in
+          let ks = Option.bind (or_opt (denote_imm_exp a env)) ~f:Mem.Key.of_wordset in
           (match ks with
            | None -> env
            | Some ks ->
@@ -774,9 +765,9 @@ let rec inverse_denote ~(env : AI.t)
               | None -> env
               | Some ((_, _, cstr_cell, _), rest) ->
                 cells := rest;
-                let data_cstr = match denote_imm_exp u env with
-                  | Ok written -> WordSet.meet cstr_cell written
-                  | Error _ -> cstr_cell in
+                let data_cstr =
+                  Option.value_map (or_opt (denote_imm_exp u env))
+                    ~default:cstr_cell ~f:(WordSet.meet cstr_cell) in
                 if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
                 else inverse_denote ~env ~cells ~nonneg u data_cstr)))
      | _ -> env)
@@ -976,10 +967,8 @@ let walk_block ?(raw : bool = false)
      constraints met in, and the accumulating edge memory. *)
   let call_env (pre : AI.t) : AI.t =
     let e = List.fold mem_vars ~init:pre ~f:(fun e m ->
-        match mem_idx_of m with
-        | Some (k, m) ->
-          AI.add_memory e ~key:m ~data:(AI.find_memory k !env_out m)
-        | None -> e) in
+        Option.value_map (mem_idx_of m) ~default:e ~f:(fun (k, m) ->
+            AI.add_memory e ~key:m ~data:(AI.find_memory k !env_out m))) in
     Core.Map.fold !live ~init:e ~f:(fun ~key:v ~data:c acc ->
         match Var.typ v with
         | Type.Imm w when WordSet.bitwidth c = w ->
@@ -1000,11 +989,9 @@ let walk_block ?(raw : bool = false)
         | _ -> ()) in
   let commit_memory (env' : AI.t) =
     List.iter mem_vars ~f:(fun m ->
-        match mem_idx_of m with
-        | Some (k, m) ->
-          env_out := AI.add_memory !env_out ~key:m
-              ~data:(AI.find_memory k env' m)
-        | None -> ()) in
+        Option.iter (mem_idx_of m) ~f:(fun (k, m) ->
+            env_out := AI.add_memory !env_out ~key:m
+                ~data:(AI.find_memory k env' m))) in
   List.iter prefixed ~f:(fun (d, pre, post) ->
       let v = Def.lhs d in
       match Var.typ v with

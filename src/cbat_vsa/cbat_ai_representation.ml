@@ -226,9 +226,8 @@ let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
       match WordSet.stack_bounds ws with
       | Some (a, b) -> Some (Word.of_int64 ~width:64 a, Word.of_int64 ~width:64 b)
       | None ->
-        (match WordSet.min_elem ws, WordSet.max_elem ws with
-         | Some a, Some b -> Some (Cbat_word.to_word a, Cbat_word.to_word b)
-         | _ -> None) in
+        Option.map2 (WordSet.min_elem ws) (WordSet.max_elem ws)
+          ~f:(fun a b -> (Cbat_word.to_word a, Cbat_word.to_word b)) in
   (* The callee writes below its own RSP; cells at keys at/above the
      HIGHEST possible call-time RSP survive every call site. *)
   let keep_lo = Option.map ~f:snd (range_of rsp) in

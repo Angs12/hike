@@ -129,15 +129,13 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     (* Growth per traversal times steps, clamped at landmark and bound. *)
     let cap = 1 lsl 40 in
     let delta_of (e : lm_entry) : int =
-      match e.dist with
-      | Some dc ->
-        let g = match e.dist_p with Some dp when dp > dc -> dp - dc | _ -> 0 in
-        let d = g * steps in
-        if d > cap then cap else d
-      | None -> 0
+      Option.value ~default:0 (Option.map e.dist ~f:(fun dc ->
+          let g = match e.dist_p with Some dp when dp > dc -> dp - dc | _ -> 0 in
+          let d = g * steps in
+          if d > cap then cap else d))
     in
-    let lo_base = match Cbat_clp_set_composite.min_elem data_new with Some w -> w | None -> Cbat_word.zero width in
-    let hi_base = match Cbat_clp_set_composite.max_elem data_new with Some w -> w | None -> Cbat_word.zero width in
+    let lo_base = Option.value (Cbat_clp_set_composite.min_elem data_new) ~default:(Cbat_word.zero width) in
+    let hi_base = Option.value (Cbat_clp_set_composite.max_elem data_new) ~default:(Cbat_word.zero width) in
     let extrap_lo =
       let lo' = List.filter entries ~f:(fun e -> not e.is_upper) in
       match lo' with

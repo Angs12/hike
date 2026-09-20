@@ -104,12 +104,10 @@ let find_sub (prog : program term) (name : string) : sub term option =
     Term.enum sub_t prog
     |> Seq.find ~f:(fun s -> String.equal (Sub.name s) name)
   in
-  match exact with
-  | Some _ as x -> x
-  | None ->
-    Term.enum sub_t prog
-    |> Seq.find ~f:(fun s ->
-        Base.String.is_substring (Sub.name s) ~substring:name)
+  Base.Option.first_some exact
+    (Term.enum sub_t prog
+     |> Seq.find ~f:(fun s ->
+         Base.String.is_substring (Sub.name s) ~substring:name))
 
 let all_subs (prog : program term) : sub term list =
   Term.enum sub_t prog |> Seq.to_list
@@ -190,14 +188,12 @@ let blk_bil_to_string (b : blk term) : string =
    per-def rule; no merge). *)
 let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
     Vsa.Cbat_extraction.kind Tid.Map.t =
-  let opt (r : ('a, 'b) Result.t) : 'a option =
-    match r with Ok w -> Some w | Error _ -> None in
   let kind_of blk d =
     let open Base.Option in
     Base.Option.bind
       (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
       ~f:(fun addr ->
-        opt
+        Result.to_option
           (Vsa.denote_exp_at
              ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
              ~blk ~def:d addr))

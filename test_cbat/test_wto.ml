@@ -240,7 +240,7 @@ let run () =
              | _ -> None) with
      | Some inner ->
        List.exists inner ~f:(fun ic ->
-           match comp_head ic with Some h2 -> Tid.equal h2 iv | None -> false)
+           Option.is_some (Base.Option.filter (comp_head ic) ~f:(fun h2 -> Tid.equal h2 iv)))
      | None -> false);
   check "WTO-GRAPH: heads first, then the inner body, then the outer tail, then the next loop"
     (List.equal Tid.equal (Cw.flatten_comps comps) [ e; h1; iv; j; k; l2; b2; x ]);
@@ -249,9 +249,12 @@ let run () =
      pos_of flat iv < pos_of flat k && pos_of flat j < pos_of flat k);
   check "WTO-GRAPH: sequential loops are sibling components in traversal order"
     (let flat = Cw.flatten_comps comps in
-     match List.find_map (scc_comps comps) ~f:(fun (hd, ms) -> if Tid.equal hd h1 then Some ms else None) with
-     | Some ms -> not (List.exists ms ~f:(Tid.equal l2)) && pos_of flat h1 < pos_of flat l2
-     | None -> false);
+     Option.is_some
+       (Base.Option.filter
+          (List.find_map (scc_comps comps) ~f:(fun (hd, ms) ->
+               if Tid.equal hd h1 then Some ms else None))
+          ~f:(fun ms -> not (List.exists ms ~f:(Tid.equal l2))
+                        && pos_of flat h1 < pos_of flat l2)));
 
   (* Swapped accessors build the reversed ordering: the same battery
      over the reversed edge list. *)

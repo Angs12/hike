@@ -275,14 +275,13 @@ let run_t10_rewrite () =
     | None -> None
   in
   check "T10-SITE: the call-arg def is bound right after the storing def"
-    (match arg_at with Some _ -> true | None -> false);
-  check "T10-SITE: the call-arg def reads the storing def's written bytes"
-    (match arg_at with
-     | Some arg_def ->
-       (match Def.rhs arg_def with
-        | Bil.Int w -> Word.to_int64_exn w = 7L
-        | _ -> false)
-     | None -> false)
+    (Option.is_some arg_at);
+  check_bound "T10-SITE: the call-arg def reads the storing def's written bytes"
+    arg_at
+    (fun arg_def ->
+       match Def.rhs arg_def with
+       | Bil.Int w -> Word.to_int64_exn w = 7L
+       | _ -> false)
 
 (* The producer record's promotion lanes, through the REAL fixpoint
    (the entry seeds RSP at the symbolic segment base, the production
@@ -350,12 +349,11 @@ let run_producer_promotion () =
   let a4_storage (sec : Hike.Stack_model.sec) (lo : int64) (hi : int64) :
       Hike.Sections.storage option =
     let ctx = fixture_ctx [ a4 ] in
-    match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid a4) with
-    | None -> None
-    | Some tree ->
+    Base.Option.bind (Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid a4))
+      ~f:(fun tree ->
         Base.Option.map
           (Hike.Sections.storage_of_range tree (Hike.Sections.range sec lo hi))
-          ~f:(fun rs -> rs.Hike.Sections.storage)
+          ~f:(fun rs -> rs.Hike.Sections.storage))
   in
   check "PR-A4: the written cell is Window (write-closed; its reads take the window)"
     (a4_storage Sm.Args (pos 8L) (pos 15L) = Some Hike.Sections.Stack_residue);

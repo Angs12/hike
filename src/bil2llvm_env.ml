@@ -271,22 +271,18 @@ let window_conv_args ~(word : int) (conv : Abi.t) : Arg.t list =
   @ [ Arg.create ~intent:In window (Var window) ]
 
 let get_args ctx sub_tid =
-  match Core.Map.find ctx.subs sub_tid with
-  | Some (_, args) -> args
-  | None ->
-      let callconv = get_calling_convention ctx in
-      Base.List.map
-        ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-        (Abi.param_regs callconv)
+  Base.Option.value_map (Core.Map.find ctx.subs sub_tid) ~f:snd
+    ~default:(let callconv = get_calling_convention ctx in
+              Base.List.map
+                ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+                (Abi.param_regs callconv))
 
 let get_rets ctx sub_tid =
-  match Core.Map.find ctx.subs sub_tid with
-  | Some (rets, _) -> rets
-  | None ->
-      let callconv = get_calling_convention ctx in
-      Base.List.map
-        ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
-        callconv.return_regs
+  Base.Option.value_map (Core.Map.find ctx.subs sub_tid) ~f:fst
+    ~default:(let callconv = get_calling_convention ctx in
+              Base.List.map
+                ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
+                callconv.return_regs)
 
 let ret_set ctx =
   let callconv = get_calling_convention ctx in

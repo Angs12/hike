@@ -453,15 +453,15 @@ let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * 
 (* Cell at [base-8] in [st], read back as the load denotation reads it. *)
 let cell_at (m : var) (base : var) (st : AI.t) : Ws.t =
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 8))) in
-  match Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st with
-  | Ok ws -> ws
-  | Error _ -> Ws.top 32
+  Result.fold
+    (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st)
+    ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
 
 (* Finite non-top non-bottom set bounded above by [maxv]. *)
 let bounded_above (ws : Ws.t) (maxv : Cbat_word.t) : bool =
   (not (Ws.is_top ws))
   && (not (Ws.is_bottom ws))
-  && match Ws.max_elem ws with Some w -> Cbat_word.( <= ) w maxv | None -> false
+  && Option.is_some (Base.Option.filter (Ws.max_elem ws) ~f:(fun w -> Cbat_word.( <= ) w maxv))
 
 (* Tagged-sub fixpoint; walk's cell meet observable at BODY input. *)
 (* Iterate state of an edge is the single-predecessor target's IN-state. *)
@@ -819,7 +819,7 @@ let lm_jle_loop ~(k1 : Cbat_word.t) ?(k2 : Cbat_word.t option) () : sub term * t
   let defs1, cond1 = cmp_defs k1 in
   let inc () = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
   (* Drop the unused second loop: empty blocks break CFG/WTO plumbing. *)
-  let keep_l2 = match k2 with Some _ -> true | None -> false in
+  let keep_l2 = Option.is_some k2 in
   let exit_i = if keep_l2 then 5 else 3 in
   let l2_nodes =
     match k2 with
@@ -841,7 +841,7 @@ let lm_jle_loop ~(k1 : Cbat_word.t) ?(k2 : Cbat_word.t option) () : sub term * t
        @ l2_nodes
        @ [ [], [] ])
   in
-  (sub, tids.(1), tids.(2), match k2 with Some _ -> Some tids.(3) | None -> None)
+  (sub, tids.(1), tids.(2), if Option.is_some k2 then Some tids.(3) else None)
 
 (* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
 let lm_jne_loop ~(k : Cbat_word.t) () : sub term * tid * tid =

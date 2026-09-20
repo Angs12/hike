@@ -36,6 +36,9 @@ let check (name : string) (b : bool) : unit =
     Printf.printf "FAIL: %s\n" name;
     incr failures)
 
+(* A check over an optional bound: a missing lookup fails the check. *)
+let check_bound name o f = check name (match o with Some v -> f v | None -> false)
+
 let contains_substring (hay : string) (needle : string) : bool =
   let n = String.length hay and m = String.length needle in
   let rec go i = i + m <= n && (String.sub hay i m = needle || go (i + 1)) in

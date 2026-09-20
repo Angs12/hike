@@ -66,9 +66,7 @@ let parse_bexp (e : exp) : bexp option =
     | Bil.BinOp (Bil.OR, a, b) -> pair (fun x y -> O (x, y)) a b
     | _ -> None
   and pair c a b =
-    match (go a, go b) with
-    | Some a, Some b -> Some (c a b)
-    | _ -> None in
+    Option.bind (go a) ~f:(fun a -> Option.map (go b) ~f:(c a)) in
   go e
 
 (* The signed xor core: (SF|OF) & ~(SF&OF) — OF xor SF. *)
@@ -108,7 +106,7 @@ let width_of_exp (e : exp) : int option =
         match Var.typ v with Type.Imm n -> Some n | _ -> None)
 
 let zero_exp (e : exp) : exp option =
-  match width_of_exp e with Some n -> Some (Bil.Int (Word.zero n)) | None -> None
+  Option.map ~f:(fun n -> Bil.Int (Word.zero n)) (width_of_exp e)
 
 let is_zero_int = function Bil.Int w -> Word.is_zero w | _ -> false
 
@@ -247,14 +245,12 @@ let zf_item (c : ctx) (d : exp) : item option =
         else if is_zero_int x then Some (Rel (EQ, false, y, x))
         else Some (Rel (EQ, false, x, y))
     | _ -> Option.map ~f:(fun z -> Rel (EQ, false, d, z)) (zero_exp d) in
-  match (atom, pair) with
-  | Some atom, Some pair -> Some { atom; pair = Some pair; flags = [ ZF ] }
-  | _ -> None
+  Option.bind atom ~f:(fun atom ->
+      Option.map pair ~f:(fun pair -> { atom; pair = Some pair; flags = [ ZF ] }))
 
 let sign_item (e : exp) (flags : flag list) : item option =
-  match zero_exp e with
-  | Some z -> Some { atom = Rel (LT, true, e, z); pair = Some (e, z); flags }
-  | None -> None
+  Option.map (zero_exp e) ~f:(fun z ->
+      { atom = Rel (LT, true, e, z); pair = Some (e, z); flags })
 
 (* The atom a cond leaf reads over the facts. *)
 let flag_item (fv : flag_vars) (c : ctx) (facts : facts) (v : var) : item option =
@@ -270,7 +266,7 @@ let flag_item (fv : flag_vars) (c : ctx) (facts : facts) (v : var) : item option
     | Some (Cconst b) -> Some { atom = Const b; pair = None; flags = [ CF ] }
     | None -> None
   else if is_flag fv SF v && facts.and_form then
-    match facts.sf with Some e -> sign_item e [ SF ] | None -> None
+    Option.bind facts.sf ~f:(fun e -> sign_item e [ SF ])
   else None
 
 (* The xor-core atom: x <s y when the overflow's diff resolves to
@@ -330,9 +326,8 @@ let rec eval_bexp (fv : flag_vars) (c : ctx) (facts : facts) (b : bexp) :
 
 and join (fv : flag_vars) (c : ctx) (facts : facts) ~or_ (x : bexp) (y : bexp) :
     item option =
-  match (eval_bexp fv c facts x, eval_bexp fv c facts y) with
-  | Some x', Some y' -> combine c ~or_ x' y'
-  | _ -> None
+  Option.bind (eval_bexp fv c facts x) ~f:(fun x' ->
+      Option.bind (eval_bexp fv c facts y) ~f:(combine c ~or_ x'))
 
 (* ------------------------------------------------------------------ *)
 (* Cross-block reaching definitions                                    *)
@@ -456,17 +451,17 @@ let reaching_defs (blocks : blk term list) : xenv =
     List.iter blocks ~f:(fun b ->
         let bt = Term.tid b in
         let inn =
-          match Core.Map.find preds bt with
-          | None -> empty
-          | Some ps ->
-              Core.Set.fold ps ~init:empty ~f:(fun acc p ->
-                  match Core.Map.find !states p with
-                  | Some (_, out) -> rjoin acc out
-                  | None -> acc) in
+          Option.value
+            (Option.map (Core.Map.find preds bt) ~f:(fun ps ->
+                 Core.Set.fold ps ~init:empty ~f:(fun acc p ->
+                     Option.value
+                       (Option.map (Core.Map.find !states p)
+                          ~f:(fun (_, out) -> rjoin acc out))
+                       ~default:acc)))
+            ~default:empty in
         let out =
-          match Core.Map.find bins bt with
-          | Some bi -> rtrans inn bi
-          | None -> inn in
+          Option.value (Option.map (Core.Map.find bins bt) ~f:(rtrans inn))
+            ~default:inn in
         let (_, prev_out) = Option.value_exn (Core.Map.find !states bt) in
         if not (rstate_equal prev_out out) then begin
           states := Core.Map.set !states ~key:bt ~data:(inn, out);
@@ -492,9 +487,7 @@ let reaching_defs (blocks : blk term list) : xenv =
    last def of [v] in [p] before [pos], else [v]'s unique reaching
    def at [p]'s entry. *)
 let read_def (xenv : xenv) (p : Tid.t) (pos : int) (v : var) : def term option =
-  match Core.Map.find xenv.bins p with
-  | None -> None
-  | Some bi -> (
+  Option.bind (Core.Map.find xenv.bins p) ~f:(fun bi ->
       let vb = Var.base v in
       let within =
         List.fold_left bi.idefs ~init:None ~f:(fun acc (i, d) ->
@@ -502,10 +495,9 @@ let read_def (xenv : xenv) (p : Tid.t) (pos : int) (v : var) : def term option =
       in
       match within with
       | Some d -> Some d
-      | None -> (
-          match Core.Map.find xenv.in_state p with
-          | Some st -> Core.Map.find st.ru vb
-          | None -> None))
+      | None ->
+          Option.bind (Core.Map.find xenv.in_state p) ~f:(fun st ->
+              Core.Map.find st.ru vb))
 
 (* The inline guard: every var the emitted comparison reads must hold,
    at the jump, the value its flag producer read.  A var with a site in
@@ -648,17 +640,13 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
         let result =
           Option.bind (parse_bexp (Jmp.cond j)) ~f:(eval_bexp fv ctx facts) in
         let new_cond =
-          match result with
-          | Some i ->
+          Option.bind result ~f:(fun i ->
               let producers =
                 List.filter_map i.flags ~f:(fun fl ->
-                    match flag_def fl with
-                    | Some (_, site, _) -> Some site
-                    | None -> None) in
+                    Option.map (flag_def fl) ~f:(fun (_, site, _) -> site)) in
               let guard = cross_guard xenv blk bi in_st producers in
               let cond = render_atom i.atom in
-              if guard cond then Some cond else None
-          | None -> None in
+              if guard cond then Some cond else None) in
         (j, new_cond, result)) in
   let changed = List.exists compiled ~f:(fun (_, c, _) -> Option.is_some c) in
   let consumed_vars =
@@ -670,9 +658,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
           | Some _, Some i ->
               Some
                 (List.filter_map i.flags ~f:(fun fl ->
-                     match flag_def fl with
-                     | Some (v, _, _) -> Some v
-                     | None -> None))
+                     Option.map (flag_def fl) ~f:(fun (v, _, _) -> v)))
           | _ -> None)
       |> List.concat |> Var.Set.of_list
   in
@@ -731,12 +717,12 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
                 Term.append def_t blk d) in
           Term.map jmp_t blk ~f:(fun j ->
               let cond =
-                match
-                  List.find cmp_by_jmp ~f:(fun (jt, _) ->
-                      Tid.equal (Term.tid j) jt)
-                with
-                | Some (_, d) -> Bil.Var (Def.lhs d)
-                | None -> Jmp.cond j in
+                Option.value
+                  (Option.map
+                     (List.find cmp_by_jmp ~f:(fun (jt, _) ->
+                          Tid.equal (Term.tid j) jt))
+                     ~f:(fun (_, d) -> Bil.Var (Def.lhs d)))
+                  ~default:(Jmp.cond j) in
               match
                 List.find compiled ~f:(fun (j', _, _) ->
                     Tid.equal (Term.tid j) (Term.tid j'))

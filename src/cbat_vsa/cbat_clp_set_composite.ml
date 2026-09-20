@@ -281,17 +281,13 @@ let nearest_succ w (t : t) =
 
 let min_elem (t : t) = match t with
   | StackOff offs ->
-    (match smear_bounds offs with
-     | Some (cmin, _) -> Some (w64_of_i64 cmin)
-     | None -> None)
+    Option.map (smear_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
   | Clp p -> Clp.min_elem p
   | FinSet s -> FinSet.min_elem s
 
 let max_elem (t : t) = match t with
   | StackOff offs ->
-    (match smear_bounds offs with
-     | Some (_, cmax) -> Some (w64_of_i64 cmax)
-     | None -> None)
+    Option.map (smear_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
   | Clp p -> Clp.max_elem p
   | FinSet s -> FinSet.max_elem s
 
@@ -309,12 +305,8 @@ let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
       Option.map (stack_bounds t) ~f:(fun (lo, hi) ->
           of_clp (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi)))
   in
-  match twin with
-  | Some t' ->
-    (match min_elem t', max_elem t' with
-     | Some lo, Some hi -> Some (lo, hi)
-     | _ -> None)
-  | None -> None
+  Option.bind twin ~f:(fun t' ->
+    Option.map2 (min_elem t') (max_elem t') ~f:(fun lo hi -> (lo, hi)))
 
 (* Signed extrema.  The StackOff smear is signed-positive, so its
    signed and unsigned extrema agree; the Clp and FinSet arms carry
@@ -459,11 +451,10 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
       let c1 = Clp.cardinality p in
       if Cbat_word.(>=) cnt c1 then Clp.bottom width
       else begin
-        (* Strict successor in [p]'s circular order. *)
+        (* Strict successor in [p]'s circular order: [nearest_succ]
+           off by one succ (its inverse runs through [lnot]). *)
         let strict_succ (e : word) : word option =
-          match Clp.nearest_pred (Cbat_word.pred (Cbat_word.lnot e)) (Clp.lnot p) with
-          | Some w -> Some (Cbat_word.lnot w)
-          | None -> None in
+          Clp.nearest_succ (Cbat_word.succ e) p in
         (* Consecutive pairs including the wrap pair. *)
         let pairs =
           match es with
@@ -475,9 +466,8 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
               | e :: tl -> go ((prev, e) :: acc) e tl in
             go [] first rest in
         let adj (e1, e2) : bool =
-          match strict_succ e1 with
-          | Some nxt -> Cbat_word.(=) nxt e2
-          | None -> false in
+          Option.value_map (strict_succ e1) ~default:false
+            ~f:(fun nxt -> Cbat_word.( = ) nxt e2) in
         let non_adj, adj_pairs =
           List.partition_tf ~f:(fun pr -> not (adj pr)) pairs in
         match non_adj, adj_pairs with

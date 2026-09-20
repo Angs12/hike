@@ -21,23 +21,16 @@ module Model = Hike__Hike_stack_model
 module Promote = Hike__Hike_sections
 module Vsa = Cbat_vsa
 
-let i64_of_word w =
-  match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
+let i64_of_word w = Result.to_option (Cbat_word.to_int64 w)
 
 (* The absolute segment positions of a stack-offset set's hull. *)
 let hull (offs : Vsa.WordSet.Clp.t) : (int64 * int64) option =
-  match Vsa.WordSet.Clp.min_elem offs, Vsa.WordSet.Clp.max_elem offs with
-  | Some mn, Some mx -> (
-      match i64_of_word mn, i64_of_word mx with
-      | Some lo, Some hi -> (
-          match
-            ( Vsa.Cbat_extraction.position_of_offset lo,
-              Vsa.Cbat_extraction.position_of_offset hi )
-          with
-          | Some lo, Some hi -> Some (lo, hi)
-          | _ -> None)
-      | _ -> None)
-  | _ -> None
+  Base.Option.both (Vsa.WordSet.Clp.min_elem offs) (Vsa.WordSet.Clp.max_elem offs)
+  |> Option.bind ~f:(fun (mn, mx) -> Base.Option.both (i64_of_word mn) (i64_of_word mx))
+  |> Option.bind ~f:(fun (lo, hi) ->
+         Base.Option.both
+           (Vsa.Cbat_extraction.position_of_offset lo)
+           (Vsa.Cbat_extraction.position_of_offset hi))
 
 let rel (pos : int64) : int64 = Int64.sub pos Model.segment_base
 
@@ -90,12 +83,9 @@ let eval_data (e : exp) (st : AI.t) : string =
           | None -> "STACK(no-hull)"))
 
 let stack_hull (e : exp) (st : AI.t) : (int64 * int64) option =
-  match Vsa.Test_seam.denote_imm_exp e st with
-  | Error _ -> None
-  | Ok ws -> (
-      match Vsa.WordSet.stack_offsets ws with
-      | None -> None
-      | Some offs -> hull offs)
+  Result.to_option (Vsa.Test_seam.denote_imm_exp e st)
+  |> Option.bind ~f:Vsa.WordSet.stack_offsets
+  |> Option.bind ~f:hull
 
 let print_info (abi : Hike_abi.t) (sub : sub term)
     (offsets : Vsa.Cbat_extraction.kind Tid.Map.t)

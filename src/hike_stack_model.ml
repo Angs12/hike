@@ -70,12 +70,14 @@ module Vsa = struct
 
   (* The word-pair seams — the one lifting every hull/singleton
      consumer shares, so the arithmetic lives in exactly one place. *)
+  let i64_opt (w : Cbat_word.t) : int64 option =
+    match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
+
   let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
       : (int64 * int64) option =
-    let i64 w = match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None in
     let open Base.Option in
-    i64 lo >>= fun lo ->
-    i64 hi >>= fun hi ->
+    i64_opt lo >>= fun lo ->
+    i64_opt hi >>= fun hi ->
     Cbat_vsa.Cbat_extraction.position_of_offset lo >>= fun lo ->
     Cbat_vsa.Cbat_extraction.position_of_offset hi >>= fun hi ->
     Some (lo, hi)
@@ -83,10 +85,7 @@ module Vsa = struct
   let singleton_pair (lo : Cbat_word.t option) (hi : Cbat_word.t option)
       : int64 option =
     match lo, hi with
-    | Some lo, Some hi when Cbat_word.equal lo hi -> (
-        match Cbat_word.to_int64 lo with
-        | Ok v -> Some v
-        | Error _ -> None)
+    | Some lo, Some hi when Cbat_word.equal lo hi -> i64_opt lo
     | _ -> None
 
   let stack_floor ~(entry : int64) : int64 = Stdlib.Int64.add entry Stdlib.Int64.min_int
@@ -122,18 +121,17 @@ module Vsa = struct
   (* A stack-symbolic set's offset extrema lifted onto the position
      line; None when not representable. *)
   let positions_of_offsets (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
-    match Cbat_vsa.WordSet.offset_extrema ws with
-    | Some (lo, hi) -> position_pair lo hi
-    | None -> None
+    Option.bind (Cbat_vsa.WordSet.offset_extrema ws) ~f:(fun (lo, hi) ->
+        position_pair lo hi)
 
   (* A plain set's unsigned extrema; None when not representable. *)
   let unsigned_bounds (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
-    match Cbat_vsa.WordSet.min_elem ws, Cbat_vsa.WordSet.max_elem ws with
-    | Some lo, Some hi -> (
-        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok lo, Ok hi -> Some (lo, hi)
-        | _ -> None)
-    | _ -> None
+    let open Base.Option in
+    Cbat_vsa.WordSet.min_elem ws >>= fun lo ->
+    Cbat_vsa.WordSet.max_elem ws >>= fun hi ->
+    i64_opt lo >>= fun lo ->
+    i64_opt hi >>= fun hi ->
+    Some (lo, hi)
 
   (* The domain bounds of a possibly-infinite set over [flo, cei]: an
      unbounded direction extends to the scope bound; a wrapped or
@@ -149,9 +147,9 @@ module Vsa = struct
      through to_int64 and position_of_offset; [None] when any step
      fails (an extremum outside the word or past the base sum). *)
   let hull_positions (offs : Cbat_vsa.WordSet.Clp.t) : (int64 * int64) option =
-    match Cbat_vsa.WordSet.Clp.min_elem offs, Cbat_vsa.WordSet.Clp.max_elem offs with
-    | Some lo, Some hi -> position_pair lo hi
-    | _ -> None
+    let open Base.Option in
+    Cbat_vsa.WordSet.Clp.min_elem offs >>= fun lo ->
+    Cbat_vsa.WordSet.Clp.max_elem offs >>= position_pair lo
 
   (* A stack-symbolic value's escape extent: its positions, with the
      unbounded directions reaching the scope bound. *)
@@ -245,9 +243,7 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
         Base.Option.first_some acc (Some data)
     end
   in
-  match vis#visit_exp e None with
-  | None -> None
-  | Some data ->
+  Base.Option.map (vis#visit_exp e None) ~f:(fun data ->
       let wrap x =
         let mapper =
           object
@@ -257,7 +253,7 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
         in
         mapper#map_exp e
       in
-      Some (data, wrap)
+      (data, wrap))
 
 (* One word, in bits: the width of every model-var minter below. *)
 let word_bits (word : int) : int = 8 * word
@@ -484,18 +480,17 @@ module Sub_layout = struct
   let pp fmt { regions; anchor; window_param } =
     Format.fprintf fmt "regions=%d;anchor=%s;window=%b"
       (Base.List.length regions)
-      (match anchor with
-       | Some (i, idx) -> Printf.sprintf "r%d@%Ld" i idx
-       | None -> "none")
+      (Base.Option.value_map anchor ~default:"none"
+         ~f:(fun (i, idx) -> Printf.sprintf "r%d@%Ld" i idx))
       window_param
 
   let sexp_of_t (t : t) : Sexp.t =
     Sexp.List
       (Base.List.map t.regions ~f:(fun (id, (lo, hi), b) ->
            Sexp.Atom (Printf.sprintf "%d:%Ld:%Ld:%Ld" id lo hi b))
-       @ (match t.anchor with
-          | Some (i, idx) -> [ Sexp.Atom (Printf.sprintf "anchor=%d:%Ld" i idx) ]
-          | None -> [])
+       @ (Base.Option.value_map t.anchor ~default:[]
+            ~f:(fun (i, idx) ->
+              [ Sexp.Atom (Printf.sprintf "anchor=%d:%Ld" i idx) ]))
        @ if t.window_param then [ Sexp.Atom "window" ] else [])
 
   let t_of_sexp (s : Sexp.t) : t =

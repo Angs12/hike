@@ -614,7 +614,8 @@ let run_tiling () =
        Int64.equal (Word.to_int64_exn text.Hike.Bil2llvm.min_addr) 0x1000L
        && Int64.equal (Word.to_int64_exn text.Hike.Bil2llvm.max_addr) 0x100FL
        && text.Hike.Bil2llvm.owners = []
-       && (match text.Hike.Bil2llvm.bytes with Some b -> Array.length b = 16 | None -> false)
+       && (Option.is_some
+             (Base.Option.filter text.Hike.Bil2llvm.bytes ~f:(fun b -> Array.length b = 16)))
      | _ -> false);
   tile_dispose (tctx, tmd, tbuilt);
   check "TILE-SPAN: the run spans are the byte-exact gap words"

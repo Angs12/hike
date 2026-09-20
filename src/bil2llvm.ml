@@ -19,9 +19,8 @@ let update_phi transfer_vars blk_incoming blk_tid =
   (* Consults edge-keyed restores first. *)
   let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
     if Var.same var ctx.sp then
-      match EHashtbl.find !(ctx.edge_sp_restores) pred_tid with
-      | Some inner -> EHashtbl.find inner blk_tid
-      | None -> None
+      Base.Option.bind (EHashtbl.find !(ctx.edge_sp_restores) pred_tid)
+        ~f:(fun inner -> EHashtbl.find inner blk_tid)
     else None
   in
   KB.List.iter transfer_vars ~f:(fun var ->
@@ -88,12 +87,10 @@ let update_phis transfer_vars blks sub () =
       let blk_incoming =
         Base.List.concat_map term_preds ~f:(fun ptid ->
             let n =
-              match
-                EHashtbl.find edge_count ptid
-                |> Base.Option.bind ~f:(fun h -> EHashtbl.find h blk_tid)
-              with
-              | Some n -> n
-              | None -> 1
+              Base.Option.value
+                (EHashtbl.find edge_count ptid
+                 |> Base.Option.bind ~f:(fun h -> EHashtbl.find h blk_tid))
+                ~default:1
             in
             Base.List.init n ~f:(fun _ -> ptid))
         |> Base.Sequence.of_list
@@ -185,9 +182,8 @@ let build_entry_block llvm_builder transfer_vars fr sub fn () =
      invocation, reentrancy-safe, and NO sub takes an SP parameter.
      SROA erases the constant cases. *)
   let sp0 =
-    match fr.stack0 with
-    | Some v -> v
-    | None -> fr.anchor_i64 (* storage-free subs: the constant anchor *)
+    (* storage-free subs: the constant anchor *)
+    Base.Option.value fr.stack0 ~default:fr.anchor_i64
   in
   insert_local ctx tid ctx.sp sp0;
   exit_entry llvm_builder sub () >>= fun _ -> return fr
@@ -303,9 +299,9 @@ let create_sub sub =
     (* The LAYOUT fact: the alloca-construction inputs ride the
        sub term — no analysis record reaches the emitter. *)
     let layout_regions, layout_anchor =
-      match Term.get_attr sub Hike_stack_model.layout_tag with
-      | Some { regions; anchor } -> (regions, anchor)
-      | None -> ([], None)
+      Base.Option.value_map (Term.get_attr sub Hike_stack_model.layout_tag)
+        ~default:([], None)
+        ~f:(fun { regions; anchor } -> (regions, anchor))
     in
     let regions =
       Base.List.map layout_regions
@@ -338,15 +334,12 @@ let create_sub sub =
        fold: (region id, byte index).  The SP Slot stores its
        ptrtoint; every materialization relativizes against it. *)
     let anchor =
-      match layout_anchor with
-      | Some (rid, idx) -> (
-          match
-            Base.List.find regions
-              ~f:(fun (v, _) -> Var.equal v (Hike_stack_model.region_mem rid))
-          with
-          | Some (_, (base, _)) -> Some (anchor_word llvm_ctx llvm_builder base idx)
-          | None -> None)
-      | None -> None
+      Base.Option.bind layout_anchor ~f:(fun (rid, idx) ->
+          Base.Option.bind
+            (Base.List.find regions
+               ~f:(fun (v, _) -> Var.equal v (Hike_stack_model.region_mem rid)))
+            ~f:(fun (_, (base, _)) ->
+              Some (anchor_word llvm_ctx llvm_builder base idx)))
     in
     (* Binds region bases to alloca cell-0. *)
     let* () =
@@ -361,10 +354,9 @@ let create_sub sub =
     (* The SP Slot: the entry-block alloca holding this
        invocation's anchor — the sub's own anchor integer. *)
     let anchor_val, sp_slot =
-      match anchor with
-      | Some v -> (v, true)
-      | None ->
-        (Llvm.const_int (Llvm.i64_type llvm_ctx) 0, false)
+      Base.Option.value_map anchor
+        ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0, false)
+        ~f:(fun v -> (v, true))
     in
     let stack0 =
       if sp_slot then begin
@@ -377,9 +369,7 @@ let create_sub sub =
       else None
     in
     let anchor_i64 =
-      match anchor with
-      | Some v -> v
-      | None -> Llvm.const_int (Llvm.i64_type llvm_ctx) 0
+      Base.Option.value anchor ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
     in
     let fr : sub_frame = { anchor_i64; stack0; regions } in
     cur_frame := Some fr;

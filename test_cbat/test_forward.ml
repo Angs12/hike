@@ -112,14 +112,18 @@ let run () =
   let y = v64 "l2b_y4" in
   let z = v64 "l2b_z4" in
   let ok_lt =
-    match Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top with
-    | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
-    | Error _ -> false
+    Result.fold
+      (Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Var y)) AI.top)
+      ~ok:(fun ws ->
+        (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2))
+      ~error:(fun _ -> false)
   in
   let ok_eq =
-    match Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z)) AI.top with
-    | Ok ws -> (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2)
-    | Error _ -> false
+    Result.fold
+      (Vsa.Test_seam.denote_imm_exp (Bil.BinOp (Bil.EQ, Bil.Int (Cbat_word.to_word (w64 0)), Bil.Var z)) AI.top)
+      ~ok:(fun ws ->
+        (not (Ws.is_bottom ws)) && Cbat_word.(=) (Ws.cardinality ws) (Cbat_word.of_int ~width:2 2))
+      ~error:(fun _ -> false)
   in
   check
     "L2b-4: overlap comparisons (LT over two top64 operands; EQ(0, top64)) are {0,1} (bool_top), \
@@ -193,9 +197,7 @@ let run () =
     match Vsa.Test_seam.denote_imm_exp (load32 var_exp) env3 with
     | Ok ws ->
       let card =
-        match Cbat_word.to_int64 (Ws.cardinality ws) with
-        | Ok c -> c
-        | Error _ -> -1L
+        Result.fold (Cbat_word.to_int64 (Ws.cardinality ws)) ~ok:Fun.id ~error:(fun _ -> -1L)
       in
       Ws.elem (word32 0x2dL) ws && Ws.elem (word32 0L) ws
       && Ws.elem (word32 0x5a1eL) ws

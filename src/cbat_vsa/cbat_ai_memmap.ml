@@ -303,21 +303,20 @@ let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
   | Some it ->
     (* Unkeyable words keep the input. *)
     let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
-        match Key.of_word (Cbat_word.of_word lo), Key.of_word (Cbat_word.of_word hi) with
-        | Some lo, Some hi -> Some (lo, hi)
-        | _ -> None)) in
-    (match Key.of_word (Cbat_word.of_word keep_lo), escape_pts with
-     | Some keep_lo_pt, Some escape_pts ->
-       let in_escape (k : Key.t) : bool =
-         List.exists escape_pts ~f:(fun (lo, hi) ->
-             Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
-       let kept =
-         IT.to_sequence it
-         |> Seq.fold ~init:IT.empty ~f:(fun acc (k, v) ->
-             if Key.lt (Key.lower k) keep_lo_pt || in_escape k then acc
-             else IT.add acc k v) in
-       {itree = Some kept; width = m.width}
-     | _ -> m)
+        Option.map2 (Key.of_word (Cbat_word.of_word lo))
+          (Key.of_word (Cbat_word.of_word hi)) ~f:(fun lo hi -> (lo, hi)))) in
+    Option.value ~default:m
+      (Option.map2 (Key.of_word (Cbat_word.of_word keep_lo)) escape_pts
+         ~f:(fun keep_lo_pt escape_pts ->
+           let in_escape (k : Key.t) : bool =
+             List.exists escape_pts ~f:(fun (lo, hi) ->
+                 Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
+           let kept =
+             IT.to_sequence it
+             |> Seq.fold ~init:IT.empty ~f:(fun acc (k, v) ->
+                 if Key.lt (Key.lower k) keep_lo_pt || in_escape k then acc
+                 else IT.add acc k v) in
+           {itree = Some kept; width = m.width}))
 
 (* Whether the map is the bottom map: no tree, no reads (the
    unreached state's memory). *)
@@ -444,9 +443,8 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
           let keys_aligned = Key.aligned_mod lo_key_start hi_key_start (fst i) in
           if keys_aligned then Val.join_at i v v' else Val.top i))
 
-let find (i : Val.idx) (m : t) (k : Key.t) = match m.itree with
-  | None -> Val.bottom i
-  | Some t -> find' i t k
+let find (i : Val.idx) (m : t) (k : Key.t) =
+  Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)
 
 (* Index of values at a key. *)
 let find_idx' (m : itree) (k : Key.t) : Val.idx =
@@ -454,9 +452,8 @@ let find_idx' (m : itree) (k : Key.t) : Val.idx =
     Seq.map ~f:(Fn.compose Val.get_idx snd) tl
     |> Seq.fold ~init:(Val.get_idx hd) ~f:Val.Idx.join)
 
-let find_idx (m : t) (k : Key.t) : Val.idx = match m.itree with
-  | None -> Val.Idx.top
-  | Some t -> find_idx' t k
+let find_idx (m : t) (k : Key.t) : Val.idx =
+  Option.value_map m.itree ~default:Val.Idx.top ~f:(fun t -> find_idx' t k)
 
 (* Order via cellwise precedes. *)
 let precedes' (m1 : itree) (m2 : itree) : bool =

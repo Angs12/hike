@@ -76,10 +76,8 @@ let run_fp_table () =
   (* Every row maps to its constructor. *)
   List.iter
     (fun (name, op) ->
-      check ("FP-TABLE " ^ name ^ ": native_fp_op gives " ^ string_of_natfp op)
-        (match B2l.native_fp_op ("@" ^ name) with
-         | Some op' -> op' = op
-         | None -> false))
+      check_bound ("FP-TABLE " ^ name ^ ": native_fp_op gives " ^ string_of_natfp op)
+        (B2l.native_fp_op ("@" ^ name)) (fun op' -> op' = op))
     fp_rows;
   (* Every row EMITS its native op — a dropped row degrades to a soft-float
      call without any warning difference, so emission is checked per row,

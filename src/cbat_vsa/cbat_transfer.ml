@@ -222,20 +222,14 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
                    the whole set. *)
                 Base.List.fold (WordSet.iter addr) ~init:(Some [])
                   ~f:(fun acc a ->
-                      match acc with
-                      | None -> None
-                      | Some ws -> (
-                          match i64 a with
-                          | None -> None
-                          | Some ai -> (
-                              match
-                                image_word img_bytes
-                                  (Stdlib.Int64.to_int
-                                     (Stdlib.Int64.sub ai img_lo))
-                                  ~endian ~bits
-                              with
-                              | Some w -> Some (w :: ws)
-                              | None -> None)))
+                      Base.Option.bind acc ~f:(fun ws ->
+                          Base.Option.bind (i64 a) ~f:(fun ai ->
+                              Base.Option.map
+                                (image_word img_bytes
+                                   (Stdlib.Int64.to_int
+                                      (Stdlib.Int64.sub ai img_lo))
+                                   ~endian ~bits)
+                                ~f:(fun w -> w :: ws))))
                 |> Option.map ~f:(fun words ->
                         WordSet.of_list ~width:bits words))
       | _ -> None

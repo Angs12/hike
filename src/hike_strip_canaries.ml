@@ -250,15 +250,13 @@ let compare_operand_is_reload_value (b : block_data) (reload : def term) :
       Some b.b_defs.(i)
     else after (i + 1)
   in
-  match consumer 0 with
-  | None -> false
-  | Some c -> (
-    match
-      Hike_vsa.denote_exp_at ~blk:b.b_blk ~def:c (Bil.Var v),
-      Hike_vsa.denote_exp_at ~blk:b.b_blk ~def:reload (Def.rhs reload)
-    with
-    | Ok a, Ok w -> Vsa.WordSet.equal a w
-    | _ -> false)
+  Base.Option.value_map (consumer 0) ~default:false ~f:(fun c ->
+      match
+        Hike_vsa.denote_exp_at ~blk:b.b_blk ~def:c (Bil.Var v),
+        Hike_vsa.denote_exp_at ~blk:b.b_blk ~def:reload (Def.rhs reload)
+      with
+      | Ok a, Ok w -> Vsa.WordSet.equal a w
+      | _ -> false)
 
 (* ------------------------------------------------------------------ *)
 (* The in-block def chain and the compare family                       *)
@@ -349,13 +347,12 @@ let reach_fail ~(ctx : ctx) ~(names : Tid.t -> string) : Tid.t -> bool =
       if Core.Set.mem path t then false
       else
         let v =
-          match Core.Map.find ctx.by_tid t with
-          | None -> false
-          | Some b ->
-            is_fail_block ~names b
-            || Core.Set.exists
-                 (Option.value (Core.Map.find ctx.succs t) ~default:Tid.Set.empty)
-                 ~f:(go (Core.Set.add path t))
+          Base.Option.value_map (Core.Map.find ctx.by_tid t) ~default:false
+            ~f:(fun b ->
+              is_fail_block ~names b
+              || Core.Set.exists
+                   (Base.Option.value (Core.Map.find ctx.succs t) ~default:Tid.Set.empty)
+                   ~f:(go (Core.Set.add path t)))
         in
         memo := Core.Map.set !memo ~key:t ~data:v;
         v
@@ -399,7 +396,7 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
       in
       let both_direct =
         Array.length b.b_jmps = 2
-        && Base.List.for_all targets ~f:(function Some _ -> true | None -> false)
+        && Base.List.for_all targets ~f:Base.Option.is_some
       in
       if both_direct then
         let t1 = Base.Option.value_exn (Base.List.nth_exn targets 0) in
@@ -425,32 +422,26 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
             | _ -> None
           in
           let cells =
-            Core.Set.fold chain ~init:[] ~f:(fun acc tid ->
-                match cell_of_load tid with
-                | Some c -> c :: acc
-                | None -> acc)
+            Base.List.filter_map (Core.Set.to_list chain) ~f:cell_of_load
             |> Base.List.dedup_and_sort ~compare:Int64.compare
           in
           match cells with
           | [ cell ] ->
             let one_cell =
               Core.Set.for_all chain ~f:(fun tid ->
-                  match cell_of_load tid with
-                  | None -> true
-                  | Some c -> Int64.equal c cell)
+                  Base.Option.value_map (cell_of_load tid) ~default:true
+                    ~f:(fun c -> Int64.equal c cell))
             in
             (* The compare operand's tie: a reload on the chain. *)
             let reloads =
               Core.Set.filter chain ~f:(fun tid ->
-                  match cell_of_load tid with
-                  | Some c -> Int64.equal c cell
-                  | None -> false)
+                  Base.Option.value_map (cell_of_load tid) ~default:false
+                    ~f:(fun c -> Int64.equal c cell))
             in
             let reload_tied =
               Core.Set.exists reloads ~f:(fun tid ->
-                  match find_def b tid with
-                  | Some d -> compare_operand_is_reload_value b d
-                  | None -> false)
+                  Base.Option.value_map (find_def b tid) ~default:false
+                    ~f:(compare_operand_is_reload_value b))
             in
             if one_cell && reload_tied then
               (* The store: the one def on this cell whose rhs is a
@@ -468,9 +459,10 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
               match stores with
               | [ (sb, sd) ] ->
                 let reaching v =
-                  match Core.Map.find ctx.def_site (Term.tid sd) with
-                  | Some (_, i) -> reaching_at ctx sb i v
-                  | None -> Tid.Set.empty
+                  Base.Option.value
+                    (Base.Option.map (Core.Map.find ctx.def_site (Term.tid sd))
+                       ~f:(fun (_, i) -> reaching_at ctx sb i v))
+                    ~default:Tid.Set.empty
                 in
                 let read =
                   Base.List.find tls_reads ~f:(fun (rb, rd) ->
@@ -603,7 +595,7 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
 let strip_sub ~(abi : Abi.t) ~(names : string Tid.Map.t) (sub : sub term) :
     sub term =
   let name_of t =
-    match Core.Map.find names t with Some n -> n | None -> Tid.name t
+    Base.Option.value (Core.Map.find names t) ~default:(Tid.name t)
   in
   let cells = cells_of_sub sub in
   let cell_of tid = Core.Map.find cells tid in
@@ -643,9 +635,9 @@ let strip_sub ~(abi : Abi.t) ~(names : string Tid.Map.t) (sub : sub term) :
           in
           let touched =
             Core.Set.fold deleted ~init:Tid.Set.empty ~f:(fun acc t ->
-                match Core.Map.find ctx.def_site t with
-                | Some (btid, _) -> Core.Set.add acc btid
-                | None -> acc)
+                Base.Option.value_map (Core.Map.find ctx.def_site t)
+                  ~default:acc
+                  ~f:(fun (btid, _) -> Core.Set.add acc btid))
           in
           let sub =
             Term.map blk_t sub ~f:(fun blk ->
@@ -656,17 +648,16 @@ let strip_sub ~(abi : Abi.t) ~(names : string Tid.Map.t) (sub : sub term) :
                         not (Core.Set.mem deleted (Term.tid d)))
                   else blk
                 in
-                match Core.Map.find edge_edits t with
-                | Some (fail_j, eq_j) ->
-                  let blk =
-                    Term.filter jmp_t blk ~f:(fun j ->
-                        not (Tid.equal (Term.tid j) fail_j))
-                  in
-                  Term.map jmp_t blk ~f:(fun j ->
-                      if Tid.equal (Term.tid j) eq_j then
-                        Jmp.with_cond j true_word
-                      else j)
-                | None -> blk)
+                Base.Option.value_map (Core.Map.find edge_edits t) ~default:blk
+                  ~f:(fun (fail_j, eq_j) ->
+                    let blk =
+                      Term.filter jmp_t blk ~f:(fun j ->
+                          not (Tid.equal (Term.tid j) fail_j))
+                    in
+                    Term.map jmp_t blk ~f:(fun j ->
+                        if Tid.equal (Term.tid j) eq_j then
+                          Jmp.with_cond j true_word
+                        else j)))
           in
           (* The deleted edges' phi entries die with them. *)
           let sub =

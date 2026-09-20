@@ -12,31 +12,26 @@ open Bil2llvm_env
    so unresolvable sites stay sound; resolved sites call the promoted
    body directly and never consult this rendering. *)
 let lookup_native_fn ctx llvm_module v =
-  match ctx.symtab with
-  | Some symtab -> (
-      match Symtab.find_by_start symtab (Word.of_int64 ~width:64 v) with
-      | Some (name, _, _) ->
+  Base.Option.bind ctx.symtab ~f:(fun symtab ->
+      Base.Option.bind
+        (Symtab.find_by_start symtab (Word.of_int64 ~width:64 v))
+        ~f:(fun (name, _, _) ->
           let fn = Llvm.lookup_function name llvm_module in
-          (match fn with
-           | Some f ->
-               (match Base.List.Assoc.find ~equal:String.equal
-                        !(ctx.thunks) name with
-                | Some twin -> Some twin
-                | None -> Some f)
-           | None -> None)
-      | None -> None)
-  | None -> None
+          Base.Option.map fn ~f:(fun f ->
+              Base.Option.value
+                (Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) name)
+                ~default:f)))
 
 (* The owning global and byte offset of [v]: the base map picks the
    owner covering [v]; the identity (the section base at [lo]) covers
    the unsplit shape. *)
 let section_target ~sec_base lo owners v =
-  match
-    Base.List.find owners ~f:(fun o ->
-        Int64.compare o.own_lo v <= 0 && Int64.compare v o.own_hi <= 0)
-  with
-  | Some o -> (o.base, Int64.sub v o.own_lo)
-  | None -> (sec_base, Int64.sub v lo)
+  Base.Option.value
+    (Base.Option.map
+       (Base.List.find owners ~f:(fun o ->
+            Int64.compare o.own_lo v <= 0 && Int64.compare v o.own_hi <= 0))
+       ~f:(fun o -> (o.base, Int64.sub v o.own_lo)))
+    ~default:(sec_base, Int64.sub v lo)
 
 (* The one address map: a function start renders to its function, a
    section byte to its OWNING global (the section base map — components
@@ -45,20 +40,17 @@ let section_target ~sec_base lo owners v =
    the found value itself (the pointer form), or its ptrtoint (the
    integer form the address arithmetic consumes). *)
 let remap_native ctx llvm_ctx llvm_module v ~finish =
-  match lookup_native_fn ctx llvm_module v with
-  | Some f -> Some (finish f)
-  | None -> (
-      match
-        Base.List.find ctx.section_remap ~f:(fun (lo, hi, _, _) ->
-            Int64.compare lo v <= 0 && Int64.compare v hi <= 0)
-      with
-      | Some (lo, _, g, owners) ->
-        let base, offset = section_target ~sec_base:g lo owners v in
-        Some
-          (finish
-             (Llvm.const_in_bounds_gep (Llvm.i8_type llvm_ctx) base
-                [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]))
-      | None -> None)
+  Base.Option.first_some
+    (Base.Option.map (lookup_native_fn ctx llvm_module v) ~f:finish)
+    (Base.Option.bind
+       (Base.List.find ctx.section_remap ~f:(fun (lo, hi, _, _) ->
+            Int64.compare lo v <= 0 && Int64.compare v hi <= 0))
+       ~f:(fun (lo, _, g, owners) ->
+         let base, offset = section_target ~sec_base:g lo owners v in
+         Some
+           (finish
+              (Llvm.const_in_bounds_gep (Llvm.i8_type llvm_ctx) base
+                 [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]))))
 
 (* Remaps a native address to its lifted value: a function start to its
    Thunk/function, a section byte to its owning global. *)
@@ -115,9 +107,8 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     if Hike_stack_model.string_text_word ~arr ~off then
       Llvm.const_of_int64 word_ty v false
     else
-      match remap_native_addr ctx llvm_ctx llvm_module v with
-      | Some c -> c
-      | None -> Llvm.const_of_int64 word_ty v false
+      Base.Option.value (remap_native_addr ctx llvm_ctx llvm_module v)
+        ~default:(Llvm.const_of_int64 word_ty v false)
   in
   if bss then Llvm.set_initializer (Llvm.const_null elem_ty) g
   else if typed_w >= word then
@@ -143,16 +134,17 @@ let section_of_addr sections (addr : word) =
 (* The owner of [addr_i64] in [section]: (global, native base of the
    owner).  The identity arm is the whole-section array. *)
 let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
+  let identity = (section.base, Word.to_int64_exn section.min_addr) in
   match section.owners with
-  | [] -> (section.base, Word.to_int64_exn section.min_addr)
-  | owners -> (
-      match
-        Base.List.find owners ~f:(fun o ->
-            Int64.compare o.own_lo addr_i64 <= 0
-            && Int64.compare addr_i64 o.own_hi <= 0)
-      with
-      | Some o -> (o.base, o.own_lo)
-      | None -> (section.base, Word.to_int64_exn section.min_addr))
+  | [] -> identity
+  | owners ->
+      Base.Option.value
+        (Base.Option.map
+           (Base.List.find owners ~f:(fun o ->
+                Int64.compare o.own_lo addr_i64 <= 0
+                && Int64.compare addr_i64 o.own_hi <= 0))
+           ~f:(fun o -> (o.base, o.own_lo)))
+        ~default:identity
 
 (* GEPs into the owner of the address (no scan). *)
 let resolve_addr_in llvm_builder section addr =
@@ -445,7 +437,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
       (Base.List.length owners);
     Base.List.iter owners ~f:(fun o ->
         Printf.eprintf "  owner id=%s lo=%Lx hi=%Lx base=%s\n"
-          (match o.own_id with Some i -> Int.to_string i | None -> "gap")
+          (Base.Option.value_map o.own_id ~default:"gap" ~f:Int.to_string)
           o.own_lo o.own_hi (Llvm.value_name o.base));
 #endif
     let base = match owners with o :: _ -> o.base | [] -> assert false in
@@ -471,14 +463,12 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
                 si_copy_relocs ~word
           in
           let owners =
-            match whole with
-            | Some id ->
+            Base.Option.value_map whole ~default:[] ~f:(fun id ->
                 [ { own_id = Some id;
                     own_lo = si_lo;
                     own_hi = si_hi;
                     base;
-                    typed_w = word } ]
-            | None -> []
+                    typed_w = word } ])
           in
           let addr = Int64.to_int si_lo in
           let size = Int64.to_int size in
@@ -500,14 +490,12 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
               (Array.length si_image) llvm_name ~is_const:si_const ~word
           in
           let owners =
-            match whole with
-            | Some id ->
+            Base.Option.value_map whole ~default:[] ~f:(fun id ->
                 [ { own_id = Some id;
                     own_lo = si_lo;
                     own_hi = si_hi;
                     base;
-                    typed_w = word } ]
-            | None -> []
+                    typed_w = word } ])
           in
           { base;
             min_addr = Word.of_int64 ~width:64 si_lo;

@@ -460,10 +460,9 @@ and create_rip_relative_addr llvm_builder blk_tid exp =
       (* Remaps function and section addresses. *)
       let v = Word.to_int64_exn w in
       let* addr =
-        match remap_native_addr ctx llvm_ctx llvm_module v with
-        | Some c -> return c
-        | None ->
-            return @@ Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) v false
+        return @@
+        Base.Option.value (remap_native_addr ctx llvm_ctx llvm_module v)
+          ~default:(Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) v false)
       in
       return addr
   | Store (Bil.Var mv, addr, data, _, s)
@@ -542,11 +541,7 @@ and window_mem_access llvm_builder blk_tid fr mv exp =
         | None -> KB.return @@ Llvm.const_int (Llvm.i64_type llvm_ctx) 0
       in
       let off a =
-        let stack0 =
-          match fr.stack0 with
-          | Some v -> v
-          | None -> fr.anchor_i64
-        in
+        let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
         Llvm.build_sub a stack0 "" llvm_builder
       in
       match find_mem_node exp with
@@ -585,9 +580,7 @@ and window_mem_access llvm_builder blk_tid fr mv exp =
 
 and region_mem_access llvm_builder blk_tid fr mv exp =
   let open KB in
-  let stack0 =
-    match fr.stack0 with Some v -> v | None -> fr.anchor_i64
-  in
+  let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
   let region_index llvm_builder rel_rlo a =
     let* llvm_ctx = Context.get llvm_ctx_var in
     let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in

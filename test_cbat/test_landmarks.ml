@@ -13,14 +13,14 @@ let run () =
   let sol = run_anchored sub in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-  check
+  check_bound
     "property LM F1: the head's lower bound is the entry constant 0"
-    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
+    (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
   (* Taken view's state is the body's IN-state. *)
   let taken_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
-  check
+  check_bound
     "property LM F1: the taken view's lower bound is the entry constant 0"
-    (match Ws.min_elem taken_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
+    (Ws.min_elem taken_i) (fun lo -> Cbat_word.equal lo (w32 0));
   ()
 
 (* F1-NEQ: NEQ-counter head lands at [0, K] (max == K) — Finite fires end-to-end. *))
@@ -30,12 +30,12 @@ let run () =
   let sol = run_anchored sub in
   let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
   let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-  check
+  check_bound
     "property LM F1-NEQ: the head's lower bound is the entry constant 0"
-    (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-  check
+    (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
+  check_bound
     "property LM F1-NEQ: the head's upper bound is the landmark K (Finite extrapolation fired end-to-end)"
-    (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
+    (Ws.max_elem head_i) (fun hi -> Cbat_word.equal hi k);
   ()
 
 (* F1-FT: fallthrough edge fixture — the walk-equals-vertex pin for the shared memo.
@@ -48,19 +48,19 @@ let run () =
    let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
    let st tid = Graphlib.Std.Solution.get sol tid in
    let head_i = AI.find_word 32 (st l1_tid) i in
-   check
+   check_bound
      "property LM F1-FT: the head's lower bound is the entry constant 0 (vertex side of the pin)"
-     (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   check
+     (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
+   check_bound
      "property LM F1-FT: the head's upper bound is the landmark K (vertex side of the pin)"
-     (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
+     (Ws.max_elem head_i) (fun hi -> Cbat_word.equal hi k);
   let body_i = AI.find_word 32 (st b1_tid) i in
-  check
+  check_bound
     "property LM F1-FT: the taken body's lower bound is the entry constant 0"
-    (match Ws.min_elem body_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   check
+    (Ws.min_elem body_i) (fun lo -> Cbat_word.equal lo (w32 0));
+   check_bound
      "property LM F1-FT: the taken body's upper bound is K-1 (the guard excluded the landmark)"
-     (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
+     (Ws.max_elem body_i) (fun hi -> Cbat_word.equal hi (Cbat_word.pred k));
    let exits = exit_blocks_of sub in
    let exit_i =
      match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
@@ -80,15 +80,15 @@ let run () =
    let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
    let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
    let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
-   check
+   check_bound
      "property LM F1-B1: the head's lower bound is the entry constant 0"
-     (match Ws.min_elem head_i with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
-   check
+     (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
+   check_bound
      "property LM F1-B1: the head's upper bound is the landmark K (never narrowed, never blown past)"
-     (match Ws.max_elem head_i with Some hi -> Cbat_word.equal hi k | None -> false);
-   check
+     (Ws.max_elem head_i) (fun hi -> Cbat_word.equal hi k);
+   check_bound
      "property LM F1-B1: the taken body's upper bound is K-1 (the guard's exclusion survives)"
-     (match Ws.max_elem body_i with Some hi -> Cbat_word.equal hi (Cbat_word.pred k) | None -> false);
+     (Ws.max_elem body_i) (fun hi -> Cbat_word.equal hi (Cbat_word.pred k));
    check
      "property LM F1-B1: the walk never manufactures bottom on a live block (the head's state is inhabited)"
      (not (Ws.is_bottom head_i));
@@ -103,14 +103,14 @@ let run () =
    let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
    let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
   let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
-   check
+   check_bound
      "property LM F1-B2: loop 2's head lower bound is loop 1's exact exit value K1+1 (the compiled \
      fallthrough comparison refines the exit edge; both loops refine independently)"
-     (match Ws.min_elem i2 with Some lo -> Cbat_word.equal lo (Cbat_word.succ (w32 40)) | None -> false);
+     (Ws.min_elem i2) (fun lo -> Cbat_word.equal lo (Cbat_word.succ (w32 40)));
    let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-   check
+   check_bound
      "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both loops refined independently)"
-     (match Ws.min_elem i1 with Some lo -> Cbat_word.equal lo (w32 0) | None -> false);
+     (Ws.min_elem i1) (fun lo -> Cbat_word.equal lo (w32 0));
    ()
 
 (* F1-B3 (memo-first): the Walk_memo serves a repeated edge's refinement,
@@ -128,12 +128,10 @@ let run () =
    check
      "property LM F1-B3: the fallthrough exit pins the counter to {K} exactly (the memoized walk delivery)"
      (Ws.equal exit_i (Ws.singleton k));
-  check
+  check_bound
     "property LM F1-B3: the taken body's refined view survives (upper bound K-1)"
-    (let v = AI.find_word 32 (st b1_tid) i in
-     match Ws.max_elem v with
-      | Some hi -> Cbat_word.equal hi (Cbat_word.pred k)
-      | None -> false);
+    (Ws.max_elem (AI.find_word 32 (st b1_tid) i))
+    (fun hi -> Cbat_word.equal hi (Cbat_word.pred k));
    ()
 
 (* F1-B4 (the walk's cell meet): the walk's product is the cell meet
@@ -195,12 +193,12 @@ let run () =
        ~seeds:[ (i, Ws.singleton k) ]
        entry gb in
    let cell_of env =
-     match Vsa.Test_seam.denote_imm_exp
-             (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
-                                                Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r32))
-             env with
-     | Ok ws -> ws
-     | Error _ -> Ws.top 32 in
+     Result.fold
+       (Vsa.Test_seam.denote_imm_exp
+          (Bil.Load (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var (v64 "RBP"),
+                                             Bil.Int (Cbat_word.to_word (w64 8))), LittleEndian, `r32))
+          env)
+       ~ok:Fun.id ~error:(fun _ -> Ws.top 32) in
    let full_cell = cell_of (walk ()) in
    check
      "property LM F1-B4: the walk meets the cell (the fixture's precondition: the walk moves the cell off its wide range)"

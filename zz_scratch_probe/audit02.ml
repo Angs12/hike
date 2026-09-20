@@ -28,14 +28,12 @@ let audit_sub (sp : var) (sub : sub term) : unit =
      extraction produced, recomputed from the denotations. *)
   let prog' = Program.create ~subs:[ sub ] () in
   let sol = Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv [] prog' sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub) in
-  let opt (r : ('a, 'b) Result.t) : 'a option =
-    match r with Ok w -> Some w | Error _ -> None in
   let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Cbat_extraction.kind option =
     let open Base.Option in
     Base.Option.bind
       (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
       ~f:(fun addr ->
-        opt
+        Result.to_option
           (Vsa.denote_exp_at
              ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
              ~blk ~def:d addr))
