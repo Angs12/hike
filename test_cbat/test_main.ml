@@ -23,6 +23,7 @@ let () =
   Test_domains.run_word_casts ();
   Test_domains.run_stackoff_cardn ();
   Test_domains.run_stackoff_bounds ();
+  Test_domains.run_stackoff_blind ();
   Test_resolve.run ();
   Test_regression.run_fp_gpr ();
   Test_sections.run ();

@@ -27,9 +27,10 @@ type fset = FinSet.t
    symbolic segment base.  [StackOff offs] denotes the model stack
    segment base plus the exact offset set [offs]; the base is a MODEL
    constant, never widened.  Its extrema answer from the offset set —
-   the exact hull [stack_base + offs_lo, stack_base + offs_hi];
-   operations that lose the shape degrade through the segment-span
-   bounds, which the ownership carve and the raw lane require. *)
+   the exact hull [stack_base + offs_lo, stack_base + offs_hi]; ops
+   that lose the shape degrade to that plain hull, and ops that read
+   the base's bit pattern answer top — the base is a tag, not a
+   fact. *)
 type t =
   | Clp of Clp.t
   | FinSet of FinSet.t
@@ -67,46 +68,36 @@ let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
     else Some abc
 
 (* The plain-line extrema [base + offs_lo, base + offs_hi]: the exact
-   hull of the denotation, for the value queries. *)
+   hull of the denotation, for the value queries.  A missing direction
+   clamps to the segment extent — a stack address is in the segment by
+   definition, never on the whole 64-bit line. *)
 let plain_bounds (offs : Clp.t) : (int64 * int64) option =
-  match Clp.min_elem offs, Clp.max_elem offs with
-  | Some lo, Some hi ->
-    (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-     | Ok loi, Ok hii ->
-       (match checked_add3 stack_base 0L loi with
-        | None -> None
-        | Some cmin ->
-          match checked_add3 stack_base 0L hii with
-          | None -> None
-          | Some cmax -> Some (cmin, cmax))
-     | _ -> None)
+  let floor = Stdlib.Int64.sub stack_base stack_span in
+  let ceil = Stdlib.Int64.add stack_base stack_span in
+  let side = function
+    | Some w ->
+      (match Cbat_word.to_int64 w with
+       | Ok v -> checked_add3 stack_base 0L v
+       | Error _ -> None)
+    | None -> None
+  in
+  let lo = match Clp.min_elem offs with
+    | Some w -> side (Some w)
+    | None -> Some floor in
+  let hi = match Clp.max_elem offs with
+    | Some w -> side (Some w)
+    | None -> Some ceil in
+  match lo, hi with
+  | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
   | _ -> None
 
-(* The degraded bounds [base + offs_lo, base + span + offs_hi]: the
-   span is load-bearing — a shape-lost address feeds the ownership
-   carve and the raw-lane eligibility, which must not trust a tight
-   range the lost shape cannot back. *)
-let degrade_bounds (offs : Clp.t) : (int64 * int64) option =
-  match Clp.min_elem offs, Clp.max_elem offs with
-  | Some lo, Some hi ->
-    (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-     | Ok loi, Ok hii ->
-       (match checked_add3 stack_base 0L loi with
-        | None -> None
-        | Some cmin ->
-          match checked_add3 stack_base stack_span hii with
-          | None -> None
-          | Some cmax -> Some (cmin, cmax))
-     | _ -> None)
-  | _ -> None
-
-(* The plain concrete twin: the degraded bounds as a step-1 hull; the
+(* The plain concrete twin: the exact hull as a step-1 interval; the
    lifts route every StackOff they cannot handle precisely through
    it. *)
 let rec to_plain (t : t) : t =
   match t with
   | StackOff offs ->
-    (match degrade_bounds offs with
+    (match plain_bounds offs with
      | Some (cmin, cmax)
        when Stdlib.Int64.compare cmin 0L >= 0 && Stdlib.Int64.compare cmax cmin >= 0 ->
        Clp (Clp.interval ~width:64 (w64_of_i64 cmin) (w64_of_i64 cmax))
@@ -555,23 +546,40 @@ let sub t1 t2 : t = match t1, t2 with
      | Some t -> t
      | None -> lift_binop Clp.sub FinSet.sub t1 t2)
 
-(* Shape-losing binops degrade to the plain concrete twins. *)
-let mul t1 t2 = lift_binop Clp.mul FinSet.mul t1 t2
-let div t1 t2 = lift_binop Clp.div FinSet.div t1 t2
-let sdiv t1 t2 = lift_binop Clp.sdiv FinSet.sdiv t1 t2
-let modulo t1 t2 = lift_binop Clp.modulo FinSet.modulo t1 t2
-let smodulo t1 t2 = lift_binop Clp.smodulo FinSet.smodulo t1 t2
-let arshift t1 t2 = lift_binop Clp.arshift FinSet.arshift t1 t2
-let rshift t1 t2 = lift_binop Clp.rshift FinSet.rshift t1 t2
-let lshift t1 t2 = lift_binop Clp.lshift FinSet.lshift t1 t2
-let logand t1 t2 = lift_binop Clp.logand FinSet.logand t1 t2
-let logor t1 t2 = lift_binop Clp.logor FinSet.logor t1 t2
-let logxor t1 t2 = lift_binop Clp.logxor FinSet.logxor t1 t2
+(* The symbolic base is a tag, not a fact: ops whose result reads its
+   bit pattern (bitwise, shifts, mul/div) answer top on a
+   stack-symbolic operand — never the plain twin's fabricated bits;
+   the relative ops (add, sub, comparisons) keep the exact offsets. *)
+let blind_binop (f_clp : clp -> clp -> clp) (f_fs : fset -> fset -> fset)
+    (t1 : t) (t2 : t) : t =
+  match t1, t2 with
+  | StackOff _, _ | _, StackOff _ -> top (bitwidth t1)
+  | _ -> lift_binop f_clp f_fs t1 t2
 
-let lnot t = lift_unop Clp.lnot FinSet.lnot t
-let neg t = lift_unop Clp.neg FinSet.neg t
+let blind_unop (f_clp : clp -> clp) (f_fs : fset -> fset) (t : t) : t =
+  match t with
+  | StackOff _ -> top (bitwidth t)
+  | _ -> lift_unop f_clp f_fs t
 
-let concat t1 t2 = lift_binop Clp.concat FinSet.concat t1 t2
+let mul t1 t2 = blind_binop Clp.mul FinSet.mul t1 t2
+let div t1 t2 = blind_binop Clp.div FinSet.div t1 t2
+let sdiv t1 t2 = blind_binop Clp.sdiv FinSet.sdiv t1 t2
+let modulo t1 t2 = blind_binop Clp.modulo FinSet.modulo t1 t2
+let smodulo t1 t2 = blind_binop Clp.smodulo FinSet.smodulo t1 t2
+let arshift t1 t2 = blind_binop Clp.arshift FinSet.arshift t1 t2
+let rshift t1 t2 = blind_binop Clp.rshift FinSet.rshift t1 t2
+let lshift t1 t2 = blind_binop Clp.lshift FinSet.lshift t1 t2
+let logand t1 t2 = blind_binop Clp.logand FinSet.logand t1 t2
+let logor t1 t2 = blind_binop Clp.logor FinSet.logor t1 t2
+let logxor t1 t2 = blind_binop Clp.logxor FinSet.logxor t1 t2
+
+let lnot t = blind_unop Clp.lnot FinSet.lnot t
+let neg t = blind_unop Clp.neg FinSet.neg t
+
+let concat t1 t2 =
+  match t1, t2 with
+  | StackOff _, _ | _, StackOff _ -> top (bitwidth t1 + bitwidth t2)
+  | _ -> lift_binop Clp.concat FinSet.concat t1 t2
 
 (* The offsets arm and the plain arm answer the same Clp query. *)
 let on_offs (f : clp -> bool) (t : t) : bool =
@@ -622,7 +630,8 @@ let extract ?hi ?lo t =
       (* The full-width extract is the identity. *)
       t
     | StackOff _ ->
-      lift_unop (Clp.extract ?hi ?lo) (FinSet.extract ?hi ?lo) (to_plain t)
+      let hi_v = Option.value ~default:(bitwidth t - 1) hi in
+      top (hi_v - lo_v + 1)
     | Clp _ | FinSet _ ->
       lift_unop (Clp.extract ?hi ?lo) (FinSet.extract ?hi ?lo) t
 
@@ -633,7 +642,7 @@ let cast c sz t =
        value set; width changes degrade to the plain concrete twin. *)
     match t with
     | StackOff _ when sz = 64 -> t
-    | StackOff _ -> lift_unop (Clp.cast c sz) (FinSet.cast c sz) (to_plain t)
+    | StackOff _ -> top sz
     | Clp _ | FinSet _ -> lift_unop (Clp.cast c sz) (FinSet.cast c sz) t
 
 let get_idx (t : t) : idx = match t with

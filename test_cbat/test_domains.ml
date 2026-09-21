@@ -1300,3 +1300,36 @@ let run_stackoff_bounds () =
          Cbat_word.equal lo (addr (-16L)) && Cbat_word.equal hi (addr (-8L))
      | _ -> false);
   ()
+
+let run_stackoff_blind () =
+  (* The symbolic base's bit pattern is a tag, not a fact: bit-reading
+     ops answer top on a stack-symbolic operand, so an alignment guard
+     can neither confirm nor refute from fabricated bits. *)
+  let w x = Ws.singleton (Cbat_word.of_int ~width:64 x) in
+  let p = Ws.stack_word_i64 (-72L) in
+  check "PW-B1: a stack address's bitwise AND answers top, not the base's bits"
+    (Ws.is_top (Ws.logand p (w 15)));
+  check "PW-B2: a stack address's shift answers top"
+    (Ws.is_top (Ws.rshift p (w 4)));
+  check "PW-B3: a stack address's narrow extract answers top"
+    (Ws.is_top (Ws.extract ~hi:3 ~lo:0 p));
+  check "PW-B4: a stack address's narrow cast answers top"
+    (Ws.is_top (Ws.cast Bil.LOW 32 p));
+  (match Ws.stack_offsets (Ws.add p (w 0x38)) with
+   | Some offs -> (
+       match Clp.min_elem offs, Clp.max_elem offs with
+       | Some lo, Some hi ->
+           check "PW-B5: add keeps the stack shape with exact offsets"
+             (Cbat_word.to_int64 lo = Ok (-16L)
+              && Cbat_word.to_int64 hi = Ok (-16L))
+       | _ -> check "PW-B5: add keeps the stack shape with exact offsets" false)
+   | None -> check "PW-B5: add keeps the stack shape with exact offsets" false);
+  check "PW-B6: plain singletons keep the exact bitwise AND"
+    (match Ws.logand (w 15) (w 8) with
+     | t ->
+         (match Ws.min_elem t, Ws.max_elem t with
+          | Some lo, Some hi ->
+              Cbat_word.equal lo (Cbat_word.of_int ~width:64 8)
+              && Cbat_word.equal hi (Cbat_word.of_int ~width:64 8)
+          | _ -> false));
+  ()

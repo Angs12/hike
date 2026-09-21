@@ -33,7 +33,8 @@ val extrapolate_steps : steps:int -> t -> t -> t
 (* The symbolic stack base.  [StackOff offs] = the model stack
    segment base (non-canonical, disjoint from every real x86-64
    address) plus the exact offset set; shape-losing ops degrade to the
-   plain concrete hull. *)
+   plain exact hull, and ops that read the base's bit pattern answer
+   top — the base is a tag, not a fact. *)
 
 (* The segment base (2^62), as int64. *)
 val stack_base : int64
