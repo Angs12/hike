@@ -2,7 +2,6 @@
 
 open Bap.Std
 module Abi = Hike_abi
-module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
 
 
@@ -131,78 +130,60 @@ let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
            ~f:(fun o -> (o.base, o.own_lo)))
         ~default:identity
 
-let resolve_addr_in llvm_builder section addr =
-  let open KB in
-  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+let resolve_addr_in ctx llvm_builder section addr =
   let base, own_lo =
     owner_of section (Word.to_int64_exn addr)
   in
   let offset =
-    Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+    Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
       (Int64.sub (Word.to_int64_exn addr) own_lo)
       false
   in
-  return
-  @@ Llvm.build_gep (Llvm.i8_type llvm_ctx) base [| offset |] ""
-       llvm_builder
+  Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| offset |] ""
+    llvm_builder
 
-let resolve_addr llvm_builder addr =
-  let open KB in
-  let* { sections; _ } = Context.get emit_ctx_var in
-  let section = section_of_addr sections addr in
-  match section with
+let resolve_addr ctx llvm_builder addr =
+  match section_of_addr ctx.sections addr with
   | None ->
       (* Out-of-section address: inttoptr of the raw constant. *)
-      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
       let v =
-        Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+        Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
           (Word.to_int64_exn addr) false
       in
-      return
-      @@ Llvm.build_inttoptr v (Llvm.pointer_type llvm_ctx) "" llvm_builder
-  | Some section -> resolve_addr_in llvm_builder section addr
+      Llvm.build_inttoptr v (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder
+  | Some section -> resolve_addr_in ctx llvm_builder section addr
 
 (* Materializes the pointer for an address integer; an
    already-pointer value passes through. *)
-let create_addr_ptr llvm_builder llvm_val =
-  let open KB in
-  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-  if
-    Llvm.classify_type (Llvm.type_of llvm_val) = Llvm.TypeKind.Pointer
-  then
-    return llvm_val
+let create_addr_ptr ctx llvm_builder llvm_val =
+  if Llvm.classify_type (Llvm.type_of llvm_val) = Llvm.TypeKind.Pointer
+  then llvm_val
   else
-      return
-      @@ Llvm.build_inttoptr llvm_val (Llvm.pointer_type llvm_ctx) ""
-           llvm_builder
+    Llvm.build_inttoptr llvm_val (Llvm.pointer_type ctx.llvm_ctx) ""
+      llvm_builder
 
 (* Section load with copy-reloc through-load. *)
 let section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size =
-  let open KB in
-  let* base = resolve_addr_in llvm_builder section addr in
+  let base = resolve_addr_in ctx llvm_builder section addr in
   if
     Base.List.exists ctx.copy_relocs ~f:(fun a ->
         Int64.equal a addr_i64)
-  then
+  then begin
     let p =
       Llvm.build_load (Llvm.i64_type llvm_ctx) base "" llvm_builder
     in
     let pp =
       Llvm.build_inttoptr p (Llvm.pointer_type llvm_ctx) "" llvm_builder
     in
-    return
-    @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) pp ""
-         llvm_builder
+    Llvm.build_load (Llvm.integer_type llvm_ctx size) pp ""
+      llvm_builder
+  end
   else
-    return
-    @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) base ""
-         llvm_builder
+    Llvm.build_load (Llvm.integer_type llvm_ctx size) base ""
+      llvm_builder
 
-let section_load llvm_builder llvm_ctx addr addr_i64 size =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  let* { sections; _ } = Context.get emit_ctx_var in
-  match section_of_addr sections addr with
+let section_load ctx llvm_builder llvm_ctx addr addr_i64 size =
+  match section_of_addr ctx.sections addr with
   | None ->
       (* Out-of-section address: load through the raw native pointer. *)
       let v =
@@ -211,48 +192,40 @@ let section_load llvm_builder llvm_ctx addr addr_i64 size =
       let p =
         Llvm.build_inttoptr v (Llvm.pointer_type llvm_ctx) "" llvm_builder
       in
-      return
-      @@ Llvm.build_load (Llvm.integer_type llvm_ctx size) p ""
-           llvm_builder
+      Llvm.build_load (Llvm.integer_type llvm_ctx size) p ""
+        llvm_builder
   | Some section -> section_load_in llvm_builder llvm_ctx ctx section addr addr_i64 size
 
 (* Const-address loads through the found section, else the fallback. *)
-let const_addr_load llvm_builder addr_w size ~fallback =
-  let open KB in
-  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-  let* ctx = Context.get emit_ctx_var in
-  let* { sections; _ } = Context.get emit_ctx_var in
+let const_addr_load ctx llvm_builder addr_w size ~fallback =
   let v = Word.to_int64_exn addr_w in
-  match section_of_addr sections addr_w with
+  match section_of_addr ctx.sections addr_w with
   | Some section ->
-      section_load_in llvm_builder llvm_ctx ctx section addr_w v size
+      section_load_in llvm_builder ctx.llvm_ctx ctx section addr_w v size
   | None -> fallback ()
 
 (* Const-address stores: the stored value arrives as a thunk so the
    section GEP precedes it and the form's value is the stored data.
    A copy-relocated slot address stores through the slot's pointer. *)
-let const_addr_store llvm_builder addr_w ~data ~fallback =
-  let open KB in
-  let* { sections; _ } = Context.get emit_ctx_var in
-  match section_of_addr sections addr_w with
+let const_addr_store ctx llvm_builder addr_w ~data ~fallback =
+  match section_of_addr ctx.sections addr_w with
   | Some section ->
-      let* base = resolve_addr_in llvm_builder section addr_w in
-      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-      let* ctx = Context.get emit_ctx_var in
-      let* llvm_var = data () in
+      let base = resolve_addr_in ctx llvm_builder section addr_w in
+      let llvm_var = data () in
       if
         Base.List.exists ctx.copy_relocs ~f:(fun a ->
             Int64.equal a (Word.to_int64_exn addr_w))
-      then
+      then begin
         let p =
-          Llvm.build_load (Llvm.i64_type llvm_ctx) base "" llvm_builder in
+          Llvm.build_load (Llvm.i64_type ctx.llvm_ctx) base "" llvm_builder in
         let pp =
-          Llvm.build_inttoptr p (Llvm.pointer_type llvm_ctx) "" llvm_builder in
+          Llvm.build_inttoptr p (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder in
         let _ : Llvm.llvalue = Llvm.build_store llvm_var pp llvm_builder in
-        return llvm_var
+        llvm_var
+      end
       else
         let _ : Llvm.llvalue = Llvm.build_store llvm_var base llvm_builder in
-        return llvm_var
+        llvm_var
   | None -> fallback ()
 
 (* A global [n x elem_ty] array; [None] zero-initializes. *)

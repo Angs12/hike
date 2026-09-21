@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Writes the build identity next to the installed dune plugin, so battery.sh
-# verifies the tested plugin was built from this tree (by content, not
-# mtime). Records the plugin object hash, git identity, and tree path;
-# battery.sh fails on mismatch.
+# Writes the build identity next to the installed dune plugin, so the
+# gates verify the tested plugin was built from this tree (by content,
+# not mtime). Records the plugin object hash, git identity, and tree
+# path; a mismatch means rebuild and reinstall.
 
 set -euo pipefail
 
@@ -26,8 +26,8 @@ BUNDLE_HASH=$(sha256sum "$PLUGIN_DST" | cut -c1-16)
 
 cat > "${PLUGIN_DST}.provenance" <<EOF
 # hike plugin provenance — written by src/record_provenance.sh at install time.
-# battery.sh verifies these fields BEFORE running the gates; a mismatch
-# means the installed plugin is NOT this tree's build — rebuild and reinstall.
+# The gates verify these fields BEFORE running; a mismatch means the
+# installed plugin is NOT this tree's build — rebuild and reinstall.
 tree: $TREE
 git: $GIT_DESC
 src_sha16: $SRC_HASH

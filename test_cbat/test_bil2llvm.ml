@@ -843,7 +843,39 @@ let run_nbranch_series () =
     (not (contains_substring ir' "unreachable")
      && contains_substring ir' "-sw")
 
+let run_scope_freshness () =
+  (* The lifetime law, pinned: one sub_scope per sub.  The sub-end
+     undef-read summary folds THIS sub's warned reads only — a warn
+     set leaked across the sub boundary would make the clean second
+     sub repeat the first sub's report. *)
+  let rax = v64 "RAX" in
+  let undef_sub, _ =
+    sub_of "scope_leak_a"
+      [ [],
+        [ (1, fun t -> mk_jmp_to t (Bil.BinOp (Bil.EQ, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 0)))));
+          (1, mk_goto) ];
+        [], [ (0, mk_ret) ] ]
+  in
+  let clean_sub, _ =
+    sub_of "scope_leak_b"
+      [ [ Def.create (v64 "scope_b_t") (Bil.Int (Cbat_word.to_word (w64 1))) ],
+        [ (1, mk_goto) ];
+        [], [ (0, mk_ret) ] ]
+  in
+  let err = capture_stderr (fun () -> ignore (emit_ir [ undef_sub; clean_sub ])) in
+  (* The summaries are matched per tid: the capture may also hold
+     earlier tests' buffered stderr, but tids are unique per process. *)
+  let reports tid =
+    String.split_on_char '\n' err
+    |> List.filter (fun l -> contains_substring l ("undef-read: sub " ^ Tid.name tid))
+  in
+  check "SCOPE: the sub with never-defined lane reads reports them"
+    (List.length (reports (Term.tid undef_sub)) >= 1);
+  check "SCOPE: the clean sub's scope is fresh — no summary leaks across the boundary"
+    (List.length (reports (Term.tid clean_sub)) = 0)
+
 let run () =
+  run_scope_freshness ();
   run_poison ();
   run_frozen_undef ();
   run_slot_channel ();

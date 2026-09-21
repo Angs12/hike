@@ -3,7 +3,6 @@
 
 open Bap.Std
 module Abi = Hike_abi
-module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_mem
@@ -87,10 +86,8 @@ let bitcast_to_fp llvm_builder v fp_ty =
     Llvm.build_bitcast v fp_ty "" llvm_builder
   else v
 
-let build_fp_binop llvm_builder op a b ~(w : int) =
-  let open KB in
-  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-  let fp_ty, ret_ty = fp_ty_of llvm_ctx w in
+let build_fp_binop ctx llvm_builder op a b ~(w : int) =
+  let fp_ty, ret_ty = fp_ty_of ctx.llvm_ctx w in
   let da = bitcast_to_fp llvm_builder a fp_ty in
   let db = bitcast_to_fp llvm_builder b fp_ty in
   let d =
@@ -102,8 +99,7 @@ let build_fp_binop llvm_builder op a b ~(w : int) =
     | FREM -> Llvm.build_frem da db "" llvm_builder
     | SFLOAT | SINT | FCONVERT _ | FORDER | FHLT | ISNAN -> assert false
   in
-  return
-  @@ Llvm.build_bitcast d ret_ty "" llvm_builder
+  Llvm.build_bitcast d ret_ty "" llvm_builder
 
 (* Operand defs of a block indexed by base var, last def wins. *)
 let temp_defs_of_blk (blk : blk term) : def term Var.Map.t =
@@ -126,16 +122,14 @@ let fp_intrinsic_sizes ~(word_bits : int) (args : Arg.t list)
   in
   (arg_w 0, res_w)
 
-let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
-  let open KB in
+let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op =
   match op with
   | FHLT ->
       (* Halt traps without binding results or emitting fallthrough. *)
-      create_interrupt llvm_builder
+      create_interrupt ctx llvm_builder
   | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT | FCONVERT _ | FORDER
    | ISNAN ->
-      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-      let* ctx = Context.get emit_ctx_var in
+  let llvm_ctx = ctx.llvm_ctx in
   let fallthrough = Option.map label_tid (Call.return call) in
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -144,54 +138,43 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
   let in_w, res_w = fp_intrinsic_sizes ~word_bits args rets in
   let temp_defs = temp_defs_of_blk blk in
   let sig_ = fp_sig_of op in
-  let arg_value (i : int) : Llvm.llvalue KB.t =
+  let arg_value (i : int) : Llvm.llvalue =
     (* The [intrinsic:xN] temp the block defined IS the operand; it
        routes through the memory dispatch, so a converted operand
        materializes in its own world. *)
     let av = Base.List.nth_exn sig_.fp_args i in
     match Core.Map.find temp_defs av with
     | Some d ->
-        mem_access llvm_builder blk_tid sub_tid fr (find_def_tag d) d
+        mem_access ctx scope llvm_builder blk_tid sub_tid fr (find_def_tag d) d
           (Def.rhs d)
-    | None -> create_exp llvm_builder blk_tid (Bil.Var av)
+    | None -> create_exp ctx scope llvm_builder blk_tid (Bil.Var av)
   in
   let w_of = int_width_or in_w in
   let result =
     match op with
     | FMUL | FADD | FSUB | FDIV | FREM ->
-        let* a = arg_value 0 in
-        let* b = arg_value 1 in
+        let a = arg_value 0 in
+        let b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
-        build_fp_binop llvm_builder op a b ~w
+        build_fp_binop ctx llvm_builder op a b ~w
     | SFLOAT ->
         (* [sitofp] converts at the operand's own LLVM type (the
            lifter's extract/cast chain built it). *)
-        let* x = arg_value 0 in
+        let x = arg_value 0 in
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
-        let* d =
-          KB.return
-          @@ Llvm.build_sitofp x tgt_fp_ty "" llvm_builder
-        in
-        return
-        @@ Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
+        let d = Llvm.build_sitofp x tgt_fp_ty "" llvm_builder in
+        Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
     | SINT ->
-        let* x = arg_value 0 in
+        let x = arg_value 0 in
         let src_w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx src_w in
         let _, res_lane_ty = fp_ty_of llvm_ctx res_w in
-        let* d =
-          KB.return
-          @@ Llvm.build_bitcast x src_fp_ty "" llvm_builder
-        in
-        let* r =
-          KB.return
-          @@ Llvm.build_fptosi d res_lane_ty "" llvm_builder
-        in
-        return r
+        let d = Llvm.build_bitcast x src_fp_ty "" llvm_builder in
+        Llvm.build_fptosi d res_lane_ty "" llvm_builder
     | FCONVERT res_w ->
         (* The name's suffix is the result width; the input is the
            complementary FP width (fpext widens, fptrunc narrows). *)
-        let* x = arg_value 0 in
+        let x = arg_value 0 in
         let in_w = if res_w = 64 then 32 else 64 in
         let x =
           coerce_int_width llvm_ctx llvm_builder
@@ -199,42 +182,37 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
         in
         let src_fp_ty, _ = fp_ty_of llvm_ctx in_w in
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
-        let* xf =
-          KB.return @@ bitcast_to_fp llvm_builder x src_fp_ty
-        in
-        let* d =
+        let xf = bitcast_to_fp llvm_builder x src_fp_ty in
+        let d =
           if res_w > in_w
-          then KB.return @@ Llvm.build_fpext xf tgt_fp_ty "" llvm_builder
-          else KB.return @@ Llvm.build_fptrunc xf tgt_fp_ty "" llvm_builder
+          then Llvm.build_fpext xf tgt_fp_ty "" llvm_builder
+          else Llvm.build_fptrunc xf tgt_fp_ty "" llvm_builder
         in
-        return
-        @@ Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
+        Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
     | FORDER ->
-        let* a = arg_value 0 in
-        let* b = arg_value 1 in
+        let a = arg_value 0 in
+        let b = arg_value 1 in
         let w = min (w_of a) (w_of b) in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
-        let* p =
-          KB.return
-          @@ Llvm.build_fcmp Llvm.Fcmp.Olt
-               (bitcast_to_fp llvm_builder a src_fp_ty)
-               (bitcast_to_fp llvm_builder b src_fp_ty)
-               "" llvm_builder
+        let p =
+          Llvm.build_fcmp Llvm.Fcmp.Olt
+            (bitcast_to_fp llvm_builder a src_fp_ty)
+            (bitcast_to_fp llvm_builder b src_fp_ty)
+            "" llvm_builder
         in
-        return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
+        Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | ISNAN ->
-        let* x = arg_value 0 in
+        let x = arg_value 0 in
         let w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx w in
         let xf = bitcast_to_fp llvm_builder x src_fp_ty in
-        let* p =
-          KB.return
-          @@ Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
+        let p =
+          Llvm.build_fcmp Llvm.Fcmp.Uno xf xf "" llvm_builder
         in
-        return @@ Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
+        Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | FHLT -> assert false
   in
-  let* r = result in
+  let r = result in
   (* Ret temps bind in both scopes: the call block (phi consumers)
      and the fallthrough block (direct reads). *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
@@ -242,6 +220,6 @@ let create_native_fp_call llvm_builder blk_tid sub_tid fr blk call op =
       let r_lane =
         coerce_int_width llvm_ctx llvm_builder
           ~bits:(int_width_or word_bits r) r rw in
-      insert_local ctx blk_tid ret r_lane;
-      Option.iter (fun t -> insert_local ctx t ret r_lane) fallthrough);
-  finish_call llvm_builder ctx fallthrough
+      insert_local scope blk_tid ret r_lane;
+      Option.iter (fun t -> insert_local scope t ret r_lane) fallthrough);
+  finish_call scope llvm_builder fallthrough

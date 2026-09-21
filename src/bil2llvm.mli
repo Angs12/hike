@@ -1,5 +1,6 @@
 (* LLVM emitter. Signature collection and body emission both run inside
-   [emit_program]; the KB context vars are internal. *)
+   [emit_program]; the emission state — one run ctx and a per-sub
+   scope — is internal values, never global. *)
 
 open Bap.Std
 open Bap_core_theory

@@ -1,10 +1,11 @@
 (* LLVM emitter core: declarations, blocks, subs, sigs, entry.
-   The lanes live in bil2llvm_{env,section,exp,mem,fp,calls}. *)
+   The lanes live in bil2llvm_{env,section,exp,mem,fp,calls}.
+   The emission state is two values: the run ctx and one sub_scope
+   per sub, opened and dropped by [emit_program]'s body loop. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
-module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_mem
@@ -14,36 +15,32 @@ open Bil2llvm_section
 
 let section_type_to_string = Bil2llvm_env.section_type_to_string
 
-let update_phi transfer_vars blk_incoming blk_tid =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
+let update_phi ctx scope transfer_vars blk_incoming blk_tid =
   (* The edge bridge's SP restore wins over the pred's local binding. *)
   let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
     if Var.same var ctx.sp then
-      match Edge_tbl.find !(ctx.edge_tbl) ~pred:pred_tid ~target:blk_tid with
+      match Edge_tbl.find !(scope.edge_tbl) ~pred:pred_tid ~target:blk_tid with
       | Some r -> r.sp_restore
       | None -> None
     else None
   in
-  KB.List.iter transfer_vars ~f:(fun var ->
-      let phi_llvar = get_phi ctx blk_tid var in
-      List.iter blk_incoming ~f:(fun (tid, pred_bb) ->
+  Base.List.iter transfer_vars ~f:(fun var ->
+      let phi_llvar = get_phi scope blk_tid var in
+      Base.List.iter blk_incoming ~f:(fun (tid, pred_bb) ->
           let phi_reg =
             match edge_val tid var with
             | Some v -> Some v
-            | None -> get_local ctx tid var
+            | None -> get_local scope tid var
           in
           match phi_reg with
           | Some phi_reg ->
-              Llvm.add_incoming (phi_reg, pred_bb) phi_llvar;
-              return ()
+              Llvm.add_incoming (phi_reg, pred_bb) phi_llvar
           | None ->
               (* An incoming with no value on its edge reads the
                  register's frozen undef. *)
-              warn_undef_read ctx var blk_tid;
-              let* v = frozen_undef ctx var in
-              Llvm.add_incoming (v, pred_bb) phi_llvar;
-              return ()))
+              warn_undef_read ctx scope var blk_tid;
+              let v = frozen_undef ctx scope var in
+              Llvm.add_incoming (v, pred_bb) phi_llvar))
 
 (* LLVM phis take one incoming per terminator edge; two conditional
    gotos to the same target are two edges where the graph shows one. *)
@@ -57,13 +54,11 @@ let multiplicity (pred_blk : blk term) (target : Tid.t) : int =
   in
   if n = 0 then 1 else n
 
-let update_phis transfer_vars blks sub () =
+let update_phis ctx scope transfer_vars blks sub =
   let blk_of =
     Core.Map.of_alist_exn (module Tid)
       (Base.List.map (Seq.to_list blks) ~f:(fun b -> (Term.tid b, b)))
   in
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
   let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
@@ -82,112 +77,101 @@ let update_phis transfer_vars blks sub () =
                 (* Phi incomings name the pred's terminator block, not
                    its entry. *)
                 let edge_bb =
-                  match Edge_tbl.find !(ctx.edge_tbl) ~pred:ptid ~target:blk_tid with
+                  match Edge_tbl.find !(scope.edge_tbl) ~pred:ptid ~target:blk_tid with
                   | Some r -> r.term_bb
-                  | None -> get_bb ctx ptid
+                  | None -> get_bb scope ptid
                 in
                 (ptid, edge_bb)))
       in
-      update_phi transfer_vars blk_incoming blk_tid)
+      update_phi ctx scope transfer_vars blk_incoming blk_tid)
 
-let create_control_flow llvm_builder blk sub fr () =
+let create_control_flow ctx scope llvm_builder blk sub fr =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
   if Seq.is_empty control_flow then
     (* Def-only blocks still need a terminator. *)
-    create_return tid llvm_builder sub
+    create_return ctx scope tid llvm_builder sub
   else
   match cf_type control_flow with
-  | Br -> create_branches tid llvm_builder control_flow
-  | Int -> create_interrupt llvm_builder
-  | Ret -> create_return tid llvm_builder sub
+  | Br -> create_branches ctx scope tid llvm_builder control_flow
+  | Int -> create_interrupt ctx llvm_builder
+  | Ret -> create_return ctx scope tid llvm_builder sub
   | CallIndirect ->
       let j = Bap.Std.Seq.hd_exn control_flow in
-      create_indirect_call llvm_builder (Term.tid blk) blk sub j
+      create_indirect_call ctx scope llvm_builder tid blk sub j
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
-      create_call llvm_builder (Term.tid blk) blk sub call fr
+      create_call ctx scope llvm_builder tid blk sub call fr
 
-let transfer_with_phis transfer_vars llvm_builder blk_tid () =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  KB.List.iter transfer_vars ~f:(fun var ->
-      let* typ = var_lltype var in
+let transfer_with_phis ctx scope transfer_vars llvm_builder blk_tid =
+  Base.List.iter transfer_vars ~f:(fun var ->
+      let typ = var_lltype ctx var in
       let res = Llvm.build_empty_phi typ "" llvm_builder in
-      insert_phi ctx blk_tid var res;
-      insert_local ctx blk_tid var res;
-      return ())
+      insert_phi scope blk_tid var res;
+      insert_local scope blk_tid var res)
 
-let create_elts llvm_builder blk sub_tid fr () =
-  let open KB in
+let create_elts ctx scope llvm_builder blk sub_tid fr =
   let tid = Term.tid blk in
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
-      | `Def def -> create_def tid llvm_builder sub_tid fr def
-      | `Phi _ -> return ()
-      | `Jmp _ -> return ())
+      | `Def def -> create_def ctx scope tid llvm_builder sub_tid fr def
+      | `Phi _ -> ()
+      | `Jmp _ -> ())
 
-let populate_blks transfer_vars blks sub fr () =
-  let open KB in
-  let* ctx, llvm_ctx = emit_env () in
+let populate_blks ctx scope transfer_vars blks sub fr =
   let sub_tid = Term.tid sub in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
-        Llvm.builder_at_end llvm_ctx (get_bb ctx (Term.tid blk))
+        Llvm.builder_at_end ctx.llvm_ctx (get_bb scope (Term.tid blk))
       in
-      transfer_with_phis transfer_vars llvm_builder (Term.tid blk) ()
-      >>= create_elts llvm_builder blk sub_tid fr
-      >>= create_control_flow llvm_builder blk sub fr)
+      transfer_with_phis ctx scope transfer_vars llvm_builder (Term.tid blk);
+      create_elts ctx scope llvm_builder blk sub_tid fr;
+      create_control_flow ctx scope llvm_builder blk sub fr)
 
 
-let exit_entry llvm_builder sub () =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  KB.return
-  @@ Llvm.build_br (get_bb ctx (entry_blk_tid sub)) llvm_builder
+let exit_entry scope llvm_builder sub =
+  ignore (Llvm.build_br (get_bb scope (entry_blk_tid sub)) llvm_builder)
 
-let build_entry_block llvm_builder transfer_vars fr sub fn () =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
+let build_entry_block ctx scope llvm_builder transfer_vars fr sub fn =
   let tid = Graphs.Tid.start in
-  KB.List.iter transfer_vars ~f:(fun var ->
+  Base.List.iter transfer_vars ~f:(fun var ->
       let arg =
         Base.List.find (get_args ctx (Term.tid sub)) ~f:(fun arg ->
             Var.same (Arg.lhs arg) var)
       in
       let llval =
         match arg with
-        | Some arg -> create_exp llvm_builder tid (Arg.rhs arg)
+        | Some arg -> create_exp ctx scope llvm_builder tid (Arg.rhs arg)
         | None ->
             (* Unbound transfer vars freeze to one fixed value:
                repeated reads of an undefined register observe
                identical bits. *)
-            frozen_undef ~builder:llvm_builder ctx var
+            frozen_undef ctx scope ~builder:llvm_builder var
       in
-      !$(insert_local ctx tid var) llval)
-  >>= fun () ->
+      insert_local scope tid var llval);
   (* The SP local binds to a per-invocation entry-block alloca: the
      anchor is invocation-private — reentrancy-safe, no SP parameter. *)
   let sp0 =
     (* storage-free subs: the constant anchor *)
     Base.Option.value fr.stack0 ~default:fr.anchor_i64
   in
-  insert_local ctx tid ctx.sp sp0;
-  exit_entry llvm_builder sub () >>= fun _ -> return fr
+  insert_local scope tid ctx.sp sp0;
+  exit_entry scope llvm_builder sub;
+  fr
 
 (* Builds blocks and transfer set in one walk. *)
-let collect_sub_data ctx llvm_ctx blks fn sub =
-  insert_bb ctx Graphs.Tid.start (Llvm.entry_block fn);
-  init_blk_llvals ctx Graphs.Tid.start;
+let collect_sub_data ctx scope llvm_ctx blks fn sub =
+  insert_bb scope Graphs.Tid.start (Llvm.entry_block fn);
+  init_blk_llvals scope Graphs.Tid.start;
   (* (transfer set, defined set); the defined set includes phi lhs —
      phi lanes need definedness. *)
   let defined_and_transfered =
     Seq.fold blks
       ~f:(fun (reg_set, def_set) blk ->
         let tid = Term.tid blk in
-        init_blk_llvals ctx tid;
-        insert_bb ctx tid (Llvm.append_block llvm_ctx (Term.name blk) fn);
+        init_blk_llvals scope tid;
+        insert_bb scope tid (Llvm.append_block llvm_ctx (Term.name blk) fn);
         let blk_free = Blk.free_vars blk in
         let call_args, call_rets =
           Term.enum jmp_t blk
@@ -256,16 +240,14 @@ let anchor_word llvm_ctx llvm_builder base idx =
     llvm_builder
 
 (* Consumes the sub's LAYOUT tag (region geometry). *)
-let create_sub sub =
-  let open KB in
-  if is_empty sub then return ()
+let create_sub ctx scope sub =
+  if is_empty sub then ()
   else if
     (* Skips soft-float bodies for mapped intrinsics. *)
     Base.Option.is_some (native_fp_op (Tid.name (Term.tid sub)))
-  then return ()
+  then ()
   else
-    let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-    let* ctx = Context.get emit_ctx_var in
+    let llvm_ctx = ctx.llvm_ctx in
     let blks = Term.enum blk_t sub in
     let fn, _ =
       Core.Map.find !(ctx.ll_funcs) (Term.tid sub)
@@ -273,11 +255,7 @@ let create_sub sub =
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
 
-    clear_bbs ctx;
-    clear_blk_llvals ctx;
-    clear_undef_vals ctx;
-    ctx.undef_warned := Tid.Map.empty;
-    let transfer_vars = collect_sub_data ctx llvm_ctx blks fn sub in
+    let transfer_vars = collect_sub_data ctx scope llvm_ctx blks fn sub in
     let layout_regions, layout_anchor =
       Base.Option.value_map (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:([], None)
@@ -316,15 +294,8 @@ let create_sub sub =
             ~f:(fun (_, (base, _)) ->
               Some (anchor_word llvm_ctx llvm_builder base idx)))
     in
-    let* () =
-      let rec bind_regions = function
-        | [] -> return ()
-        | (v, (base, _)) :: rest ->
-            insert_local ctx Graphs.Tid.start v base;
-            bind_regions rest
-      in
-      bind_regions regions
-    in
+    Base.List.iter regions ~f:(fun (v, (base, _)) ->
+        insert_local scope Graphs.Tid.start v base);
     let anchor_val, sp_slot =
       Base.Option.value_map anchor
         ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0, false)
@@ -344,19 +315,16 @@ let create_sub sub =
       Base.Option.value anchor ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
     in
     let fr : sub_frame = { anchor_i64; stack0; regions } in
-    ctx.cur_frame := Some fr;
-    add_args_to_vars llvm_builder Graphs.Tid.start (Term.tid sub) fn ()
-    >>= fun () ->
-    build_entry_block llvm_builder transfer_vars fr sub fn ()
-    >>= fun fr ->
-    ctx.cur_frame := Some fr;
-    populate_blks transfer_vars blks sub fr ()
-    >>= update_phis transfer_vars blks sub
-    >>= fun () ->
-    ctx.cur_frame := None;
+    scope.cur_frame := Some fr;
+    add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
+    let fr = build_entry_block ctx scope llvm_builder transfer_vars fr sub fn in
+    scope.cur_frame := Some fr;
+    populate_blks ctx scope transfer_vars blks sub fr;
+    update_phis ctx scope transfer_vars blks sub;
+    scope.cur_frame := None;
     let sub_tid = Term.tid sub in
     let lane_reads =
-      Core.Map.fold !(ctx.undef_warned) ~init:Var.Set.empty
+      Core.Map.fold !(scope.undef_warned) ~init:Var.Set.empty
         ~f:(fun ~key:_ ~data:warned_vars acc ->
           Core.Set.union acc !warned_vars)
       |> Core.Set.filter ~f:(fun v ->
@@ -366,8 +334,7 @@ let create_sub sub =
     if not (Core.Set.is_empty lane_reads) then
       Hike_diag.warn
         "undef-read: sub %s: %d never-defined model-ABI lane read(s) [undef]"
-        (Tid.name sub_tid) (Core.Set.length lane_reads);
-    return ()
+        (Tid.name sub_tid) (Core.Set.length lane_reads)
 
 let free_vars sub =
   Sub.free_vars sub
@@ -533,16 +500,10 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
    in
    (rets, args)
 
-(* One emission phase: the KB context var with the LLVM handles and
-   sections bound.  Phase order — sigs, thunks, bodies, initializers —
-   is load-bearing. *)
-let run_emission ctx llvm_ctx llvm_module sections body =
-  let ctx = { ctx with llvm_ctx; llvm_module; sections } in
-  Toplevel.exec begin
-    KB.Context.with_var emit_ctx_var ctx (fun () -> body ())
-  end
-
-(* The emission entry: signature collection, declarations, bodies. *)
+(* The emission entry: signature collection, declarations, bodies.
+   Phase order — sigs, thunks, bodies, initializers — is load-bearing;
+   the body loop opens one [sub_scope] per sub and drops it at the
+   boundary. *)
 let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(target : Bap_core_theory.Theory.Target.t) ~(ptrsize : int)
     ~(symtab : Symtab.t option)
@@ -561,30 +522,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
           s.owners ))
   in
   let abi = Abi.of_target target in
-  let ctx =
-    {
-      (empty_emit_ctx ()) with
-      symtab = symtab;
-      section_remap;
-      copy_relocs;
-      target;
-      abi = abi;
-      sp = Abi.sp target;
-      ptrsize;
-    }
-  in
-  (* The named-component map: filled before any body emits; the
-     rip-relative path renders through the same owners. *)
-  Base.List.iter sections ~f:(fun section ->
-      Base.List.iter section.owners ~f:(fun o ->
-          match o.own_id with
-          | Some id ->
-            let v = Hike_stack_model.sec_comp_mem id in
-            ctx.sec_comps :=
-              (v, (o.base, o.own_lo))
-              :: Base.List.filter !(ctx.sec_comps)
-                   ~f:(fun (k, _) -> not (Var.equal k v))
-          | None -> ()));
   (* Signature collection fills the table once. *)
   let sigs =
     Term.enum sub_t prog
@@ -619,7 +556,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let subs =
     Base.List.fold twin_sigs
       ~init:
-        (Core.Map.add_exn ctx.subs ~key:icall_tid ~data:icall_sig)
+        (Core.Map.add_exn Tid.Map.empty ~key:icall_tid ~data:icall_sig)
       ~f:(fun acc (tid, (rets, args)) -> add_sub_sig acc tid ~rets ~args)
   in
   let subs =
@@ -627,7 +564,34 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       ~f:(fun acc (sub, (rets, args)) ->
           add_sub_sig acc (Term.tid sub) ~rets ~args)
   in
-  let ctx = { ctx with subs = subs } in
+  let ctx =
+    { symtab;
+      section_remap;
+      copy_relocs;
+      target;
+      abi;
+      sp = Abi.sp target;
+      ptrsize;
+      subs;
+      llvm_ctx;
+      llvm_module;
+      sections;
+      ll_funcs = ref Tid.Map.empty;
+      thunks = ref [];
+      sec_comps = ref [] }
+  in
+  (* The named-component map: filled before any body emits; the
+     rip-relative path renders through the same owners. *)
+  Base.List.iter sections ~f:(fun section ->
+      Base.List.iter section.owners ~f:(fun o ->
+          match o.own_id with
+          | Some id ->
+            let v = Hike_stack_model.sec_comp_mem id in
+            ctx.sec_comps :=
+              (v, (o.base, o.own_lo))
+              :: Base.List.filter !(ctx.sec_comps)
+                   ~f:(fun (k, _) -> not (Var.equal k v))
+          | None -> ()));
   (* An external function's PLT stub defines no function and emits no
      body — its declaration carries the name for every call site. *)
   let self_call_stubs =
@@ -639,52 +603,51 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let is_self_call_stub_tid t =
     Base.List.mem self_call_stubs t ~equal:Tid.equal
   in
-  run_emission ctx llvm_ctx llvm_module sections (fun () ->
-      KB.List.iter sigs ~f:(fun (sub, (rets, args)) ->
-          let tid = Term.tid sub in
-          if Base.Option.is_some (native_fp_op (Tid.name tid)) then
-            KB.return ()
-          else if is_self_call_stub_tid tid then
-            Bil2llvm_calls.create_fun_declaration tid
-          else create_fun tid ~rets ~args));
-  run_emission ctx llvm_ctx llvm_module sections (fun () ->
-      KB.List.iter sigs ~f:(fun (sub, _) ->
-          Bil2llvm_calls.create_thunk (Term.tid sub)));
-  run_emission ctx llvm_ctx llvm_module sections (fun () ->
-      KB.Seq.iter (Term.enum sub_t prog) ~f:(fun s ->
-          if is_self_call_stub_tid (Term.tid s) then KB.return ()
-          else create_sub s));
-  (* Initializers render inside the emission context: word data goes
-     through [remap_native_addr], so function-pointer data lands on a
-     promoted sub's thunk. *)
-  run_emission ctx llvm_ctx llvm_module sections (fun () ->
-      KB.List.iter sections ~f:(fun section ->
-          match section.bytes with
-          | Some arr when Base.List.is_empty section.owners ->
-              let word = ctx.abi.Abi.word in
-              KB.return
-              @@ Bil2llvm_section.set_owner_initializer ctx llvm_ctx
-                   llvm_module section.base arr
-                   ~word_lo:0
-                   ~word_hi:((Bytes.length arr + word - 1) / word - 1)
-                   ~typed_w:word ~bss:false ~word
-          | Some arr ->
-              let lo = Word.to_int64_exn section.min_addr in
-              let word = ctx.abi.Abi.word in
-              KB.List.iter section.owners ~f:(fun o ->
-                  let w (a : int64) =
-                    Int64.to_int (Int64.sub a lo) / word
-                  in
-                  KB.return
-                  @@ Bil2llvm_section.set_owner_initializer ctx llvm_ctx
-                       llvm_module o.base arr
-                       ~word_lo:(w o.own_lo)
-                       ~word_hi:(w o.own_hi)
-                       ~typed_w:
-                         (if Option.is_none o.own_id then word
-                          else o.typed_w)
-                       ~bss:false ~word)
-          | None -> KB.return ()))
+  (* Phase 1: declarations. *)
+  Base.List.iter sigs ~f:(fun (sub, (rets, args)) ->
+      let tid = Term.tid sub in
+      if Base.Option.is_some (native_fp_op (Tid.name tid)) then ()
+      else if is_self_call_stub_tid tid then
+        create_fun_declaration ctx tid
+      else create_fun ctx tid ~rets ~args);
+  (* Phase 2: thunks. *)
+  Base.List.iter sigs ~f:(fun (sub, _) -> create_thunk ctx (Term.tid sub));
+  (* Phase 3: bodies — one sub_scope per sub, opened here, dead at
+     the boundary. *)
+  Term.enum sub_t prog
+  |> Seq.iter ~f:(fun s ->
+      if is_self_call_stub_tid (Term.tid s) then ()
+      else
+        let scope = fresh_scope () in
+        create_sub ctx scope s);
+  (* Phase 4: initializers render inside the emission value: word data
+     goes through [remap_native_addr], so function-pointer data lands
+     on a promoted sub's thunk. *)
+  Base.List.iter sections ~f:(fun section ->
+      match section.bytes with
+      | Some arr when Base.List.is_empty section.owners ->
+          let word = ctx.abi.Abi.word in
+          Bil2llvm_section.set_owner_initializer ctx llvm_ctx
+            llvm_module section.base arr
+            ~word_lo:0
+            ~word_hi:((Bytes.length arr + word - 1) / word - 1)
+            ~typed_w:word ~bss:false ~word
+      | Some arr ->
+          let lo = Word.to_int64_exn section.min_addr in
+          let word = ctx.abi.Abi.word in
+          Base.List.iter section.owners ~f:(fun o ->
+              let w (a : int64) =
+                Int64.to_int (Int64.sub a lo) / word
+              in
+              Bil2llvm_section.set_owner_initializer ctx llvm_ctx
+                llvm_module o.base arr
+                ~word_lo:(w o.own_lo)
+                ~word_hi:(w o.own_hi)
+                ~typed_w:
+                  (if Option.is_none o.own_id then word
+                   else o.typed_w)
+                ~bss:false ~word)
+      | None -> ())
 
 (* Re-exports from the lane modules (the mli surface). *)
 type native_fp = Bil2llvm_fp.native_fp =

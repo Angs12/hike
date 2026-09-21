@@ -1,4 +1,4 @@
-(* Test entry point: theme modules in file order, then the battery oracle line. *)
+(* Test entry point: theme modules in file order, then the oracle line. *)
 open Test_common
 
 let () =

@@ -1,18 +1,17 @@
-(* Emitter environment: KB context vars, LLtype helpers, the
-   WVar/blk-llvals machinery, signature/label helpers, name minting. *)
+(* Emitter environment: the emission run's value ctx, the per-sub
+   scope, LLtype helpers, the WVar/blk-llvals machinery, signature and
+   label helpers, name minting. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
 open Bap_core_theory
 module Abi = Hike_abi
-module KB = Bap_knowledge.Knowledge
-
 
 module EHashtbl = Core.Hashtbl
 
 (* The edge bridge: per BIR edge (pred -> target), the basic block
    holding the edge's terminator and the edge's SP-restore value.
-   Reset per sub; phis read it after rendering completes. *)
+   One table per sub scope; phis read it after rendering completes. *)
 module Edge_tbl = struct
   type row = { term_bb : Llvm.llbasicblock; sp_restore : Llvm.llvalue option }
 
@@ -139,7 +138,9 @@ type sub_frame = {
   regions : (Var.t * (Llvm.llvalue * int64)) list;
 }
 
-
+(* The emission run: static per-binary facts and the cross-phase
+   state.  One value, created by [emit_program], threaded through the
+   lanes; the caller owns the LLVM context and module. *)
 type emit_ctx = {
   symtab : Symtab.t option;
   (* The section base map: every native address renders through its
@@ -151,14 +152,26 @@ type emit_ctx = {
   abi : Abi.t;
   sp : var;
   ptrsize : int;
-  ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
   subs : (Arg.t list * Arg.t list) Tid.Map.t;
-  blk_llvals : blk_llvals Tid.Map.t ref;
-  ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
-  (* Bound once per emission, read as plain ctx fields. *)
+  (* Bound once per emission. *)
   llvm_ctx : Llvm.llcontext;
   llvm_module : Llvm.llmodule;
   sections : section list;
+  (* Cross-phase state: declarations fill [ll_funcs], the thunk phase
+     fills [thunks], the preamble fills [sec_comps]; later phases
+     read them. *)
+  ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
+  thunks : (string * Llvm.llvalue) list ref;
+  (* [sec_comp_N_mem] var -> (global, native base). *)
+  sec_comps : (Var.t * (Llvm.llvalue * int64)) list ref;
+}
+
+(* The sub-emission scope: every per-sub emission state.  [emit_program]'s
+   body loop opens one per sub and drops it at the boundary — nothing
+   here survives the sub that created it, so no field needs a clear. *)
+type sub_scope = {
+  ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
+  blk_llvals : blk_llvals Tid.Map.t ref;
   (* One Dead-classification warn per sub. *)
   dead_warned : Tid.Set.t ref;
   (* Dedups [hike: undef-read:] warnings per (sub, var). *)
@@ -166,63 +179,29 @@ type emit_ctx = {
   (* The body's frame: routes region/window mem vars; bound around
      body emission. *)
   cur_frame : sub_frame option ref;
-  (* The edge bridge, reset per sub. *)
+  (* The edge bridge: fresh per scope. *)
   edge_tbl : Edge_tbl.t ref;
-  (* The emitted thunks (memory-convention twins), keyed by the
-     sub's LLVM name — function-address rendering produces the twin
-     so unresolvable pointer sites stay sound. *)
-  thunks : (string * Llvm.llvalue) list ref;
-  (* [sec_comp_N_mem] var -> (global, native base). *)
-  sec_comps : (Var.t * (Llvm.llvalue * int64)) list ref;
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
   undef_vals : llvalue_map ref;
 }
 
-let empty_emit_ctx () : emit_ctx =
-  {
-    symtab = None;
-    section_remap = [];
-    copy_relocs = [];
-    target = Theory.Target.unknown;
-    abi = Abi.x86_64_sysv;
-    sp = Abi.x86_64_sysv.sp;
-    ptrsize = 0;
-    ll_funcs = ref Tid.Map.empty;
-    subs = Tid.Map.empty;
+let fresh_scope () : sub_scope =
+  { ll_bbs = ref Tid.Map.empty;
     blk_llvals = ref Tid.Map.empty;
-    ll_bbs = ref Tid.Map.empty;
-    llvm_ctx = Obj.magic 0;
-    llvm_module = Obj.magic 0;
-    sections = [];
     dead_warned = ref Tid.Set.empty;
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
     edge_tbl = ref (Edge_tbl.empty ());
-    thunks = ref [];
-    sec_comps = ref [];
-    undef_vals = ref WVarMap.empty;
-  }
+    undef_vals = ref WVarMap.empty }
 
-(* Emission context threaded as a KB var. *)
-let emit_ctx_var : emit_ctx KB.Context.var =
-  KB.Context.declare ~package:"hike" "emit-ctx"
-    (KB.return (empty_emit_ctx ()))
-
-let emit_env () =
-  let open KB in
-  let* ctx = Context.get emit_ctx_var in
-  return (ctx, ctx.llvm_ctx)
-
-let typ_lltype_m typ =
-  let open KB in
-  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
+let typ_lltype ctx typ =
   match typ with
-  | Imm n -> return @@ Llvm.integer_type llvm_ctx n
-  | _ -> return @@ Llvm.pointer_type llvm_ctx
+  | Imm n -> Llvm.integer_type ctx.llvm_ctx n
+  | _ -> Llvm.pointer_type ctx.llvm_ctx
 
-let var_lltype var = typ_lltype_m (Var.typ var)
+let var_lltype ctx var = typ_lltype ctx (Var.typ var)
 
 (* Coerces an integer value of known width to a lane width. *)
 let coerce_int_width llvm_ctx llvm_builder ~bits v w =
@@ -331,45 +310,41 @@ let cf_type control_flow =
           match Call.target c with Indirect _ -> Ret | Direct _ -> CallFun))
   | Int _ -> Int
 
-let clear_blk_llvals ctx = ctx.blk_llvals := Tid.Map.empty
-let clear_bbs ctx = ctx.ll_bbs := Tid.Map.empty
-let clear_undef_vals ctx = ctx.undef_vals := WVarMap.empty
+let insert_bb scope tid llvm_bb =
+  scope.ll_bbs := Core.Map.add_exn !(scope.ll_bbs) ~key:tid ~data:llvm_bb
 
-let insert_bb ctx tid llvm_bb =
-  ctx.ll_bbs := Core.Map.add_exn !(ctx.ll_bbs) ~key:tid ~data:llvm_bb
+let get_bb scope tid = bb_find !(scope.ll_bbs) tid
 
-let get_bb ctx tid = bb_find !(ctx.ll_bbs) tid
-
-let init_blk_llvals ctx blk_tid =
+let init_blk_llvals scope blk_tid =
   let phis = ref WVarMap.empty in
   let locals = ref WVarMap.empty in
-  ctx.blk_llvals :=
-    Core.Map.add_exn !(ctx.blk_llvals) ~key:blk_tid ~data:{ phis; locals }
+  scope.blk_llvals :=
+    Core.Map.add_exn !(scope.blk_llvals) ~key:blk_tid ~data:{ phis; locals }
 
-let insert_phi ctx blk_tid var value =
-  let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+let insert_phi scope blk_tid var value =
+  let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
   blk_llvals.phis := WVarMap.add (wvar_of var) value !(blk_llvals.phis)
 
-let get_phi ctx blk_tid var =
-  let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+let get_phi scope blk_tid var =
+  let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
   match WVarMap.find_opt (wvar_of var) !(blk_llvals.phis) with
   | Some v -> v
   | None ->
       failwith @@ "Phi " ^ Var.name var ^ " not found at blk "
       ^ Tid.name blk_tid
 
-let insert_local ctx blk_tid var value =
-  let blk_llvals = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+let insert_local scope blk_tid var value =
+  let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
   blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals)
 
-let get_local ctx blk_tid var =
-  let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+let get_local scope blk_tid var =
+  let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
   WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
 
 (* Finds [v]'s binding at another width. *)
-let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
+let probe_local_family scope blk_tid (v : Var.t) ~(want_w : int) :
     (Llvm.llvalue * int) option =
-  let blk_vars = blk_llvals_find !(ctx.blk_llvals) blk_tid in
+  let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
   let base = Var.base v in
   let bindings =
     WVarMap.bindings !(blk_vars.locals)
@@ -389,53 +364,43 @@ let probe_local_family ctx blk_tid (v : Var.t) ~(want_w : int) :
 
 (* One frozen value per never-defined var, memoized per sub and
    placed in the entry block so it dominates every reader. *)
-let frozen_undef ctx ?(builder : Llvm.llbuilder option) (var : var) :
-    Llvm.llvalue KB.t =
-  let open KB in
-  match WVarMap.find_opt (wvar_of var) !(ctx.undef_vals) with
-  | Some v -> return v
+let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
+    Llvm.llvalue =
+  match WVarMap.find_opt (wvar_of var) !(scope.undef_vals) with
+  | Some v -> v
   | None ->
-      let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-      let* typ = var_lltype var in
+      let typ = var_lltype ctx var in
       let b =
         match builder with
         | Some b -> b
         | None ->
-            let entry = get_bb ctx Graphs.Tid.start in
+            let entry = get_bb scope Graphs.Tid.start in
             (match Llvm.block_terminator entry with
-             | Some t -> Llvm.builder_before llvm_ctx t
-             | None -> Llvm.builder_at_end llvm_ctx entry)
+             | Some t -> Llvm.builder_before ctx.llvm_ctx t
+             | None -> Llvm.builder_at_end ctx.llvm_ctx entry)
       in
       let v = Llvm.build_freeze (Llvm.undef typ) "hike_undef" b in
-      ctx.undef_vals := WVarMap.add (wvar_of var) v !(ctx.undef_vals);
-      return v
+      scope.undef_vals := WVarMap.add (wvar_of var) v !(scope.undef_vals);
+      v
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"
 
-let finish_call llvm_builder ctx fallthrough =
-  let open KB in
+let finish_call scope llvm_builder fallthrough =
   match fallthrough with
   | Some ft ->
-      let bb = get_bb ctx ft in
-      ignore (Llvm.build_br bb llvm_builder);
-      return ()
-  | None ->
-      ignore (Llvm.build_unreachable llvm_builder);
-      return ()
+      let bb = get_bb scope ft in
+      ignore (Llvm.build_br bb llvm_builder)
+  | None -> ignore (Llvm.build_unreachable llvm_builder)
 
 let trap_name = "llvm.trap"
 
-let create_interrupt llvm_builder =
-  let open KB in
-  let* { llvm_ctx; _ } = Context.get emit_ctx_var in
-  let* { llvm_module; _ } = Context.get emit_ctx_var in
-  let trap_ty = Llvm.function_type (Llvm.void_type llvm_ctx) [||] in
-  let trap = Llvm.declare_function trap_name trap_ty llvm_module in
+let create_interrupt ctx llvm_builder =
+  let trap_ty = Llvm.function_type (Llvm.void_type ctx.llvm_ctx) [||] in
+  let trap = Llvm.declare_function trap_name trap_ty ctx.llvm_module in
   ignore
     (Llvm.build_call trap_ty trap [||] "" llvm_builder);
-  ignore (Llvm.build_unreachable llvm_builder);
-  KB.return ()
+  ignore (Llvm.build_unreachable llvm_builder)
 
 let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in
