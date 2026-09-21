@@ -195,3 +195,23 @@
   threads)
  (flags
   :standard -g))
+
+(executable
+ (name retaddr_diag)
+ (modules retaddr_diag)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))

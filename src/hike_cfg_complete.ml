@@ -45,6 +45,13 @@ let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
                       | _ -> acc)
                   | None -> acc)))
 
+(* A target variable whose reaching def reads the return-address cell:
+   a return, never a dispatch candidate. *)
+let retaddr_read ~(reaching : tid Var.Map.t) ~(retaddr : Tid.Set.t)
+    (v : var) : bool =
+  Base.Option.value_map (Core.Map.find reaching v) ~default:false
+    ~f:(fun dtid -> Core.Set.mem retaddr dtid)
+
 (* The dispatch resolution's debug trace; compiled out of production. *)
 let option_if_debug msg =
 #ifdef VSA_DEBUG
@@ -208,7 +215,8 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
    words land on the run's map (mid-block entries through the block
    split).  A cross-sub word stays foreign; a word in no block is a
    loud analysis loss.  One split per walk, so the walks terminate. *)
-let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
+let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
+    ~(fresh : Tid.Set.t ref)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
   let starts = addressed_starts ~block_addrs sub in
@@ -221,14 +229,17 @@ let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
           | Goto (Indirect e) -> Some e
           | _ -> None
         in
-        Base.Option.bind
-          ~f:(dispatch_words ~denote ~block_addrs ~reaching ~blk) target
-        |> Base.Option.bind ~f:(fun words ->
-               Base.List.find_map words ~f:(fun w ->
-                   let a = Cbat_word.to_word w in
-                   match Core.Map.find block_addrs a with
-                   | Some _ -> None
-                   | None -> Some a)))
+        match target with
+        | Some (Bil.Var v) when retaddr_read ~reaching ~retaddr v -> None
+        | _ ->
+          Base.Option.bind
+            ~f:(dispatch_words ~denote ~block_addrs ~reaching ~blk) target
+          |> Base.Option.bind ~f:(fun words ->
+                 Base.List.find_map words ~f:(fun w ->
+                     let a = Cbat_word.to_word w in
+                     match Core.Map.find block_addrs a with
+                     | Some _ -> None
+                     | None -> Some a)))
   in
   match
     Term.enum blk_t sub
@@ -250,7 +261,7 @@ let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
            (Word.to_string a) (Tid.name t));
       let block_addrs' = Core.Map.set block_addrs ~key:a ~data:t in
       fresh := Core.Set.add !fresh t;
-      prepare_dispatches ~denote ~fresh ~block_addrs:block_addrs' sub'
+      prepare_dispatches ~denote ~retaddr ~fresh ~block_addrs:block_addrs' sub'
 
 let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
@@ -532,10 +543,6 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(reaching : tid Var.Map.t) ~(images : Vsa.section_image list)
     ~(blk : blk term) (j : jmp term) :
     jmp term list option =
-  let retaddr_read v =
-    Base.Option.value_map (Core.Map.find reaching v) ~default:false
-      ~f:(fun dtid -> Core.Set.mem retaddr dtid)
-  in
   let series texp cont =
     Base.Option.bind
       (resolved_pairs_of ~denote ~reaching ~sub_tids ~block_addrs ~blk texp)
@@ -548,7 +555,7 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
   match Jmp.kind j with
   | Call c -> (
       match (Call.return c, Call.target c) with
-      | None, Indirect (Bil.Var v) when retaddr_read v ->
+      | None, Indirect (Bil.Var v) when retaddr_read ~reaching ~retaddr v ->
           Some [ ret_jmp ~word_bits ]
       | _, Indirect texp ->
           let cont =
@@ -664,15 +671,18 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
    words land on the run's map and resolved dispatches contribute
    their target sets to the extra edges.  The split is the only BIR
    change and it is additive. *)
-let resolve_phase ~(sol : Vsa.vsa_sol)
+let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool =
   let denote = denote_of_sol sol in
+  let retaddr = retaddr_defs ~abi ~sol sub in
   let fresh = ref Tid.Set.empty in
   Vsa.with_images images (fun () ->
-      let sub, block_addrs' = prepare_dispatches ~denote ~fresh ~block_addrs sub in
+      let sub, block_addrs' =
+        prepare_dispatches ~denote ~retaddr ~fresh ~block_addrs sub
+      in
       let sub_tids =
         Core.Set.of_list (module Tid)
           (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
@@ -693,6 +703,7 @@ let resolve_phase ~(sol : Vsa.vsa_sol)
                 in
                 match target with
                 | None -> acc
+                | Some (Bil.Var v) when retaddr_read ~reaching ~retaddr v -> acc
                 | Some texp -> (
                     match resolved_pairs_of ~denote ~reaching ~sub_tids
                             ~block_addrs:block_addrs' ~blk texp with

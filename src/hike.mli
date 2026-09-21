@@ -65,6 +65,7 @@ module Cfg_complete : sig
       edges.  Returns the sub, the edge set, the fresh entry blocks,
       the grown block-address map, and whether anything grew. *)
   val resolve_phase :
+    abi:Abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     images:Cbat_vsa.section_image list ->
     block_addrs:Tid.t Addr.Map.t ->
