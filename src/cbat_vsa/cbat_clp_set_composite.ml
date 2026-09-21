@@ -28,9 +28,9 @@ type fset = FinSet.t
    segment base plus the exact offset set [offs]; the base is a MODEL
    constant, never widened.  Its extrema answer from the offset set —
    the exact hull [stack_base + offs_lo, stack_base + offs_hi]; ops
-   that lose the shape degrade to that plain hull, and ops that read
-   the base's bit pattern answer top — the base is a tag, not a
-   fact. *)
+   that lose the shape degrade to that plain hull, and ops that keep
+   unknown bits of the base answer top — the base is a tag except for
+   its ABI-certified low nibble. *)
 type t =
   | Clp of Clp.t
   | FinSet of FinSet.t
@@ -38,8 +38,11 @@ type t =
 [@@deriving bin_io, sexp, compare]
 type idx = int
 
-(* The model stack segment: base 2^62, span 8 MiB. *)
-let stack_base = Stdlib.Int64.shift_left 1L 62
+(* The model stack segment: base 2^62 + 8, span 8 MiB.  The +8 is the
+   ABI's entry residue — a call-entered function's RSP is 8 (mod 16) —
+   the one part of the base that is a fact rather than a tag. *)
+let stack_base =
+  Stdlib.Int64.add (Stdlib.Int64.shift_left 1L 62) 8L
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
 let stack_word (offs : Clp.t) : t = StackOff offs
@@ -546,10 +549,15 @@ let sub t1 t2 : t = match t1, t2 with
      | Some t -> t
      | None -> lift_binop Clp.sub FinSet.sub t1 t2)
 
-(* The symbolic base is a tag, not a fact: ops whose result reads its
-   bit pattern (bitwise, shifts, mul/div) answer top on a
-   stack-symbolic operand — never the plain twin's fabricated bits;
-   the relative ops (add, sub, comparisons) keep the exact offsets. *)
+(* The symbolic base is a tag: only its low nibble is a fact — the
+   ABI's entry residue carried in [stack_base].  An op whose result
+   keeps none of the unknown bits (a mask, extract, or low cast
+   confined to the certified nibble) computes on it; every op that
+   keeps unknown bits answers top — never the plain twin's fabricated
+   bits.  The relative ops (add, sub, comparisons) keep the exact
+   offsets. *)
+let certified_bits = 4
+
 let blind_binop (f_clp : clp -> clp -> clp) (f_fs : fset -> fset -> fset)
     (t1 : t) (t2 : t) : t =
   match t1, t2 with
@@ -561,6 +569,37 @@ let blind_unop (f_clp : clp -> clp) (f_fs : fset -> fset) (t : t) : t =
   | StackOff _ -> top (bitwidth t)
   | _ -> lift_unop f_clp f_fs t
 
+(* The stack-symbolic side of a mixed pair, with its plain other. *)
+let mixed (t1 : t) (t2 : t) : (t * t) option =
+  match t1, t2 with
+  | StackOff _, (Clp _ | FinSet _) -> Some (t1, t2)
+  | (Clp _ | FinSet _), StackOff _ -> Some (t2, t1)
+  | _ -> None
+
+(* The singleton word of a plain operand, if it is one. *)
+let singleton_of (t : t) : word option =
+  let pair a b = if Cbat_word.equal a b then Some a else None in
+  match t with
+  | Clp p -> (match Clp.min_elem p, Clp.max_elem p with
+      | Some a, Some b -> pair a b
+      | _ -> None)
+  | FinSet s -> (match FinSet.min_elem s, FinSet.max_elem s with
+      | Some a, Some b -> pair a b
+      | _ -> None)
+  | StackOff _ -> None
+
+(* The exact image of [f] over the offsets while the set stays
+   enumerable; top past the budget.  [f] answers at [width] bits. *)
+let certified_image ~(width : int) (f : word -> word) (offs : clp) : t =
+  let base = w64_of_i64 stack_base in
+  match Cbat_word.to_int (Clp.cardinality offs) with
+  | Ok n when n > 0 && n <= Utils.fin_set_size ->
+    of_list ~width
+      (List.map (Clp.iter offs)
+         ~f:(fun o ->
+             Cbat_word.cast Bil.UNSIGNED width (f (Cbat_word.add base o))))
+  | _ -> top width
+
 let mul t1 t2 = blind_binop Clp.mul FinSet.mul t1 t2
 let div t1 t2 = blind_binop Clp.div FinSet.div t1 t2
 let sdiv t1 t2 = blind_binop Clp.sdiv FinSet.sdiv t1 t2
@@ -569,7 +608,22 @@ let smodulo t1 t2 = blind_binop Clp.smodulo FinSet.smodulo t1 t2
 let arshift t1 t2 = blind_binop Clp.arshift FinSet.arshift t1 t2
 let rshift t1 t2 = blind_binop Clp.rshift FinSet.rshift t1 t2
 let lshift t1 t2 = blind_binop Clp.lshift FinSet.lshift t1 t2
-let logand t1 t2 = blind_binop Clp.logand FinSet.logand t1 t2
+(* The mask annihilates every unknown bit, so a mask confined to the
+   certified nibble has an exact plain answer; a wider mask keeps
+   fabricated bits and answers top. *)
+let logand t1 t2 : t =
+  match mixed t1 t2 with
+  | Some (t, m) ->
+    (match t, singleton_of m with
+     | StackOff offs, Some k when Cbat_word.leq_int k ((1 lsl certified_bits) - 1) ->
+       let k64 = Cbat_word.cast Bil.UNSIGNED (bitwidth t) k in
+       certified_image ~width:(bitwidth t)
+         (fun v -> Cbat_word.logand v k64) offs
+     | _ -> top (bitwidth t))
+  | None ->
+    (match t1, t2 with
+     | StackOff _, StackOff _ -> top (bitwidth t1)
+     | _ -> lift_binop Clp.logand FinSet.logand t1 t2)
 let logor t1 t2 = blind_binop Clp.logor FinSet.logor t1 t2
 let logxor t1 t2 = blind_binop Clp.logxor FinSet.logxor t1 t2
 
@@ -629,6 +683,10 @@ let extract ?hi ?lo t =
     | StackOff _ when lo_v = 0 && (match hi with Some 63 -> true | _ -> false) ->
       (* The full-width extract is the identity. *)
       t
+    | StackOff offs when Option.value ~default:63 hi < certified_bits ->
+      let hi_v = Option.value ~default:63 hi in
+      certified_image ~width:(hi_v - lo_v + 1)
+        (Cbat_word.extract_exn ~hi:hi_v ~lo:lo_v) offs
     | StackOff _ ->
       let hi_v = Option.value ~default:(bitwidth t - 1) hi in
       top (hi_v - lo_v + 1)
@@ -639,9 +697,12 @@ let cast c sz t =
   if sz <= 0 then top (bitwidth t)
   else
     (* Any cast at the operand's own width is the identity on the
-       value set; width changes degrade to the plain concrete twin. *)
+       value set; a width change confined to the certified nibble
+       computes, keeping unknown bits answers top. *)
     match t with
     | StackOff _ when sz = 64 -> t
+    | StackOff offs when sz <= certified_bits && not (match c with Bil.HIGH -> true | _ -> false) ->
+      certified_image ~width:sz (Cbat_word.cast c sz) offs
     | StackOff _ -> top sz
     | Clp _ | FinSet _ -> lift_unop (Clp.cast c sz) (FinSet.cast c sz) t
 

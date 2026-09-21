@@ -1302,18 +1302,27 @@ let run_stackoff_bounds () =
   ()
 
 let run_stackoff_blind () =
-  (* The symbolic base's bit pattern is a tag, not a fact: bit-reading
-     ops answer top on a stack-symbolic operand, so an alignment guard
-     can neither confirm nor refute from fabricated bits. *)
+  (* The base is a tag except for its ABI-certified low nibble (the
+     entry residue 8 (mod 16), carried in the base constant): bit-ops
+     confined to the nibble compute the exact answer, ops that keep
+     unknown bits answer top. *)
   let w x = Ws.singleton (Cbat_word.of_int ~width:64 x) in
+  let word ?(width = 64) x = Cbat_word.of_int ~width x in
   let p = Ws.stack_word_i64 (-72L) in
-  check "PW-B1: a stack address's bitwise AND answers top, not the base's bits"
-    (Ws.is_top (Ws.logand p (w 15)));
-  check "PW-B2: a stack address's shift answers top"
+  let q = Ws.stack_word_i64 (-66L) in
+  let exact ?(width = 64) v r =
+    let v = Cbat_word.of_int ~width v in
+    match Ws.min_elem r, Ws.max_elem r, Ws.stack_offsets r with
+    | Some lo, Some hi, None -> Cbat_word.equal lo v && Cbat_word.equal hi v
+    | _ -> false
+  in
+  check "PW-B1: an AND confined to the certified nibble computes the ABI truth"
+    (exact 0 (Ws.logand p (w 15)));
+  check "PW-B2: a shift keeps unknown bits and answers top"
     (Ws.is_top (Ws.rshift p (w 4)));
-  check "PW-B3: a stack address's narrow extract answers top"
-    (Ws.is_top (Ws.extract ~hi:3 ~lo:0 p));
-  check "PW-B4: a stack address's narrow cast answers top"
+  check "PW-B3: an extract confined to the certified nibble computes"
+    (exact ~width:4 0 (Ws.extract ~hi:3 ~lo:0 p));
+  check "PW-B4: a wide low cast keeps unknown bits and answers top"
     (Ws.is_top (Ws.cast Bil.LOW 32 p));
   (match Ws.stack_offsets (Ws.add p (w 0x38)) with
    | Some offs -> (
@@ -1332,4 +1341,45 @@ let run_stackoff_blind () =
               Cbat_word.equal lo (Cbat_word.of_int ~width:64 8)
               && Cbat_word.equal hi (Cbat_word.of_int ~width:64 8)
           | _ -> false));
+  check "PW-R1: the certified AND answers the true residue"
+    (exact 6 (Ws.logand q (w 15)));
+  check "PW-R2: a sub-nibble mask keeps its bits"
+    (exact 2 (Ws.logand q (w 2)));
+  check "PW-R3: a certified extract answers the masked bits"
+    (exact ~width:2 1 (Ws.extract ~hi:3 ~lo:2 q));
+  check "PW-R4: a certified narrow cast answers the low bits"
+    (exact ~width:4 6 (Ws.cast Bil.SIGNED 4 q));
+  check "PW-R5: a certified AND over an offset interval answers the residue hull"
+    (match
+       Ws.min_elem
+         (Ws.logand
+            (Ws.stack_word
+               (Clp.interval ~width:64
+                  (Cbat_word.of_int64 ~width:64 (-72L))
+                  (Cbat_word.of_int64 ~width:64 (-64L))))
+            (w 15)),
+       Ws.max_elem
+         (Ws.logand
+            (Ws.stack_word
+               (Clp.interval ~width:64
+                  (Cbat_word.of_int64 ~width:64 (-72L))
+                  (Cbat_word.of_int64 ~width:64 (-64L))))
+            (w 15))
+     with
+     | Some lo, Some hi ->
+         Cbat_word.equal lo (word 0) && Cbat_word.equal hi (word 8)
+     | _ -> false);
+  let big =
+    Ws.stack_word
+      (Clp.interval ~width:64
+         (Cbat_word.of_int64 ~width:64 (-1073741824L))
+         (Cbat_word.of_int64 ~width:64 1073741824L)) in
+  check "PW-R6: a bit-op past the enumeration budget answers top"
+    (Ws.is_top (Ws.logand big (w 15)));
+  check "PW-R7: an unconfined mask keeps fabricated bits and answers top"
+    (Ws.is_top (Ws.logand p (w 0xFF0)));
+  check "PW-R8: two stack addresses' AND answers top"
+    (Ws.is_top (Ws.logand p q));
+  check "PW-R9: a HIGH cast keeps the unknown bits and answers top"
+    (Ws.is_top (Ws.cast Bil.HIGH 4 p));
   ()

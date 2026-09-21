@@ -386,4 +386,27 @@ let run () =
   check "CE10: a foreign singleton resolves to nothing"
     (match Ce.indirect_summary ~lookup ~summary_of ~env:foreign (Bil.Var tgt) with
      | None -> true | Some _ -> false);
+  (* R-G1: the movaps alignment guard the lifter materializes — the
+     SP-derived value's certified nibble AND 0xF equals zero exactly,
+     so the guard's EQ denotates {1} and the #GP path is provably
+     dead instead of unknown. *)
+  let sp = v64 "rg1_rsp" in
+  let tmp = v64 "rg1_tmp" in
+  let env0 = AI.add_word AI.top ~key:sp ~data:(Ws.stack_word_i64 0L) in
+  let env1 =
+    Vsa.Test_seam.denote_def
+      (Def.create tmp
+         (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Int (Cbat_word.to_word (w64 0x48)))))
+      env0 in
+  let guard =
+    Bil.BinOp (Bil.EQ,
+               Bil.BinOp (Bil.AND, Bil.Var tmp, Bil.Int (Cbat_word.to_word (w64 0xF))),
+               Bil.Int (Cbat_word.to_word (w64 0))) in
+  match Vsa.Test_seam.denote_imm_exp guard env1 with
+  | Ok ws ->
+      check "R-G1: the movaps alignment guard denotates the singleton {1}"
+        (Ws.elem (Cbat_word.of_int ~width:1 1) ws
+         && not (Ws.elem (Cbat_word.of_int ~width:1 0) ws))
+  | Error _ ->
+      check "R-G1: the movaps alignment guard denotates the singleton {1}" false;
   ())
