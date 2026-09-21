@@ -57,7 +57,7 @@
   cbat_ai_representation
   cbat_call_effects
   cbat_vsa_stages)
- (libraries bap hike_abi cbat_vsa_domain bitvec core monads hashcons)
+ (libraries bap bap-knowledge hike_abi cbat_vsa_domain bitvec core monads hashcons)
  ; The cppo chain (mirrors src/dune's hike library): the stages debug
  ; adapter carries #ifdef VSA_DEBUG, and without this stanza the raw
  ; directive reaches the parser — the trailing #ifdef then parses as a

@@ -9,9 +9,10 @@ open Bap.Std
 module Hike_abi = Hike_abi
 
 type facts = {
-  (* One (pre, post) pair per block tid; a phi reads [pre], a jmp
-     reads [post].  Absence means the sub's analysis did not converge;
-     [denote] answers [AI.top]. *)
+  (* One (pre, post) pair per block tid; [post] answers no-def queries
+     and [pre] feeds the VSA_DEBUG differential's replay.  Absence
+     means the sub's analysis did not converge; [denote] answers
+     [AI.top]. *)
   envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t;
   (* An address to the tid of the block whose extent contains it.
      An empty map keeps every dispatch foreign. *)
@@ -19,12 +20,10 @@ type facts = {
   addr_bits : int;
   target : Bap_core_theory.Theory.Target.t;
   abi : Hike_abi.t;
-  (* The denotation memo's handle: one per record, valid because the
-     record's envs are immutable after the boundary. *)
-  cache : Cbat_vsa.denote_cache;
-  (* [e] denotes in the before-env of [def] — the block's defs replay
-     up to [def], the target def's own transfer not run — or, with no
-     [def], in the block's postcondition (the state a jmp reads). *)
+  (* [e] denotes in the before-env of [def] — the def's Env Tag — or,
+     with no [def], in the block's postcondition (the state a jmp
+     reads).  A def with no tag (minted after the boundary) answers
+     [AI.top]. *)
   denote :
     blk:blk term -> ?def:def term -> exp ->
     (Cbat_vsa.WordSet.t, Type.error) Result.t;
@@ -33,21 +32,20 @@ type facts = {
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(target : Bap_core_theory.Theory.Target.t) : facts =
-  let blk_env blk =
+  let blk_envs blk =
     match Core.Map.find block_envs (Term.tid blk) with
-    | Some (pre, _) -> pre
-    | None -> Cbat_vsa.AI.top
+    | Some pair -> pair
+    | None -> (Cbat_vsa.AI.top, Cbat_vsa.AI.top)
   in
-  let cache = Cbat_vsa.new_denote_cache () in
   { envs = block_envs;
     block_addrs;
     addr_bits = Hike_abi.addr_size_bits target;
     target;
     abi = Hike_abi.of_target target;
-    cache;
     denote =
       fun ~blk ?def e ->
-        Cbat_vsa.denote_exp_at ~cache ~pre:(blk_env blk) ~blk ?def e }
+        let pre, post = blk_envs blk in
+        Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e }
 
 (* The run's record, installed once at the pass_vsa boundary. *)
 let run : facts option ref = ref None

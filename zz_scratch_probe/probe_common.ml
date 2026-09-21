@@ -192,6 +192,8 @@ let blk_bil_to_string (b : blk term) : string =
    per-def rule; no merge). *)
 let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
     Vsa.Cbat_extraction.kind Tid.Map.t =
+  (* The seam reads the defs' Env Tags: walk the sweep's stamped sub. *)
+  let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
   let kind_of blk d =
     let open Base.Option in
     Base.Option.bind

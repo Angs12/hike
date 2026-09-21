@@ -97,39 +97,38 @@ val static_graph_vsa :
   ?sub_lookup:(int64 -> Tid.t option) ->
   Program.t -> Sub.t -> vsa_sol -> vsa_sol
 
-(* The denotation memo's handle: caller-owned state (the analysis
-   record's field).  Entries never invalidate while the caller's envs
-   are immutable; captures self-invalidate on a physically different
-   [pre]. *)
-type denote_cache
-
-val new_denote_cache : unit -> denote_cache
-
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
-   completion loop, ONLY.  Consumers use the memoized seam
-   [denote_exp_at].  No memo, no cache: raw replay from the given
-   state. *)
+   completion loop, ONLY.  Consumers use the seam [denote_exp_at];
+   this is a raw replay from the given state. *)
 val solve_denote :
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
 
-(* [e] denotes in the before-env of [def] — the block's defs replay
-   from [pre] up to [def], the target def's own transfer not run — or,
-   with no [def], in the block's postcondition.  A [def] outside [blk]
-   denotes in [AI.top].  With a memo cache, gate-passing queries are
-   served from the captured restricted envs; everything else replays
-   exactly as without the cache. *)
+(* [e] denotes in the before-env of [def] — the Env Tag the solve
+   stamped on the def, or [AI.top] when the def carries no tag (minted
+   after the analysis boundary) — or, with no [def], in the block's
+   postcondition.  [pre] feeds the VSA_DEBUG differential's replay
+   only. *)
 val denote_exp_at :
-  ?cache:denote_cache ->
+  ?post:AI.t ->
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
 
 
 
-(* The per-block boundary envs of a solution: pre is the solution's
-   entry state, post the block's def replay from it. *)
-val block_envs_of_sol :
-  sol:vsa_sol -> sub term -> (AI.t * AI.t) Tid.Map.t
+(* The Env Tag: the before-state environment the solve held at a def,
+   riding the def's value.  Absence means the def is outside the
+   analysis boundary — minted after it, or its sub did not converge —
+   and denotes TOP. *)
+val env_tag : def term -> AI.t option
+
+val set_env_tag : AI.t -> def term -> def term
+
+(* The solve's boundary sweep: one (pre, post) env pair per block (pre
+   the solution's entry state, post the block's def replay from it) and
+   the sub with every def stamped with its before-state. *)
+val stamp_envs_of_sol :
+  sol:vsa_sol -> sub term -> (AI.t * AI.t) Tid.Map.t * sub term
 
 (* The block's last def per lhs var (the reaching def at the block's
    end). *)
@@ -165,7 +164,8 @@ module Test_seam : sig
      must satisfy -> the refined env. *)
   val inverse_denote : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> ?landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
-  (* Run context of one fixpoint run: per-block facts and the memos. *)
+  (* One fixpoint run's context: the static per-block facts, the
+     convention facts, and the run's mutable state. *)
   type refine_ctx
 
   (* The per-run context (the walk fixtures' construction seam). *)

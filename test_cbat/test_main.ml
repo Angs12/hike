@@ -39,6 +39,9 @@ let () =
   Test_dce.run ();
   Test_jump.run ();
   Test_strip_canaries.run ();
+  Test_env_tag.run ();
+  Test_env_tag.run_seam ();
+  Test_env_tag.run_promote ();
   Test_bil2llvm.run ();
   Test_fp.run ();
   print_endline

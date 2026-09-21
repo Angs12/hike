@@ -180,35 +180,19 @@ let run_ranges () =
      | None, [] -> true
      | _ -> false)
 
-(* The end-to-end collector: freshly installed fixture environments
-   through the sanctioned KB lifecycle, then one attrib pass. *)
-let install_envs (subs : sub term list) : Hike.Kb.facts * bool =
-  let all_envs, ok =
-    Base.List.fold subs ~init:(Tid.Map.empty, true) ~f:(fun (m, ok) sub ->
-        match
-          Hv.fixpoint Theory.Target.unknown
-            ~prog:(Program.create ~subs:[ sub ] ())
-            ~symtab:None ~images:[]
-            ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
-                        (Program.create ~subs:[ sub ] ()))
-            ~block_addrs:(Core.Map.empty (module Addr)) sub
-        with
-        | None -> (m, false)
-        | Some (envs, _, _) ->
-            Core.Map.merge m envs
-              ~f:(fun ~key:_ el ->
-                match el with
-                | `Left v | `Right v | `Both (_, v) -> Some v),
-            ok)
-  in
-  (Kb.build ~block_envs:all_envs ~block_addrs:(Core.Map.empty (module Addr))
-     ~target:Theory.Target.unknown,
-   ok && not (Core.Map.is_empty all_envs))
+(* The shared fixture fold: the solve, the one install, and the stamped
+   subs the seam reads. *)
+let install_envs = fixture_facts
 
 let attribute_of (subs : sub term list) : A.ctx =
-  let facts, _ = install_envs subs in
+  let facts, subs, _ = install_envs subs in
   A.attribute ~facts ~word:8 ~entry ~spans:(spans_of ())
     (Program.create ~subs ())
+
+(* The fixture's solve converged and left environments. *)
+let solved (subs : sub term list) : bool =
+  let _, _, ok = install_envs subs in
+  ok
 
 let storage_at (ctx : A.ctx) (sub : sub term) (sec : A.sec) (lo : int64)
     (hi : int64) : A.storage option =
@@ -259,7 +243,7 @@ let run_trees () =
   let l8 = load_at m rbp 8L 64 in
   let sub1 = straight_sub "at_reads" [ def_rbp; l16; l12; l8 ] in
   check "AT1-ENV: the fixture's environments install (the lifecycle)"
-    (snd (install_envs [ sub1 ]));
+    (solved [ sub1 ]);
   let ctx1 = attribute_of [ sub1 ] in
   check "AT1-TREE: the bridged reads merge into one Region over [entry-16,entry-1]"
     (match storage_at ctx1 sub1 S.Stack (pos (-16L)) (pos (-1L)) with
@@ -269,7 +253,7 @@ let run_trees () =
     (let sub2 =
        straight_sub "at_adj" [ def_rbp; load_at m rbp 32L 64; load_at m rbp 16L 64 ]
      in
-     ignore (snd (install_envs [ sub2 ]));
+     ignore (solved [ sub2 ]);
      let ctx = attribute_of [ sub2 ] in
      match
        ( storage_at ctx sub2 S.Stack (pos (-32L)) (pos (-25L)),
@@ -288,7 +272,7 @@ let run_trees () =
   let subw = straight_sub "at_topwrite" [ def_rbp; known; top_store ] in
   let other = straight_sub "at_other" [ def_rbp; load_at m rbp 8L 64 ] in
   check "AT1-ENV: the top-write fixtures' environments install"
-    (snd (install_envs [ subw; other ]));
+    (solved [ subw; other ]);
   let ctx = attribute_of [ subw; other ] in
   check "AT1-TOPW: the TOP write and the known read share Frame storage"
     (match storage_at ctx subw S.Stack (pos (-8L)) (pos (-1L)) with
@@ -321,7 +305,7 @@ let run_trees () =
   let clean = load_at m rbp 0x20L 64 in
   let sub3 = straight_sub "at_escape" [ def_rbp; def_esc; clean; esc_store ] in
   check "AT1-ENV: the escape fixture's environments install"
-    (snd (install_envs [ sub3 ]));
+    (solved [ sub3 ]);
   let ctx3 = attribute_of [ sub3 ] in
   check "AT1-ESC: the escaped extent's component takes Frame storage"
     (match storage_at ctx3 sub3 S.Stack (pos (-0x30L)) (pos (-0x29L)) with
@@ -340,7 +324,7 @@ let run_trees () =
   in
   let sub4 = straight_sub "at_retaddr" [ ret_read ] in
   check "AT1-ENV: the retaddr fixture's environments install"
-    (snd (install_envs [ sub4 ]));
+    (solved [ sub4 ]);
   let ctx4 = attribute_of [ sub4 ] in
   check "AT1-RET: the retaddr bytes' component takes Frame storage"
     (match storage_at ctx4 sub4 S.Stack entry (pos 7L) with
@@ -352,7 +336,7 @@ let run_trees () =
   let a_intra = ld_plus m rbp 12L 32 in
   let sub5 = straight_sub "at_args" [ def_rbp; a_full; a_intra ] in
   check "AT1-ENV: the args fixture's environments install"
-    (snd (install_envs [ sub5 ]));
+    (solved [ sub5 ]);
   let ctx5 = attribute_of [ sub5 ] in
   check "AT1-ARGS: the full-cell and intra-cell reads share Arg_slot 0"
     (match storage_at ctx5 sub5 S.Args (pos 8L) (pos 15L) with
@@ -364,7 +348,7 @@ let run_trees () =
       [ def_rbp; a_full; st_plus m rbp 8L 64; a_cell1 ]
   in
   check "AT1-ENV: the args-store fixture's environments install"
-    (snd (install_envs [ sub6 ]));
+    (solved [ sub6 ]);
   let ctx6 = attribute_of [ sub6 ] in
   check "AT1-ARGS: a store demotes its cell to Window"
     (match storage_at ctx6 sub6 S.Args (pos 8L) (pos 15L) with
@@ -408,11 +392,9 @@ let sec_load ?(rip = true) ?(width = 8) (addr : int64) : def term =
   else d
 
 let data_ctx (defs : def term list) : A.ctx =
-  let sub = straight_sub "at_global" defs in
-  (* The seam's replay reads the stamped environments: install the
-     fixture's block envs through the sanctioned lifecycle. *)
-  ignore (install_fixture_envs [ sub ]);
-  attribute_of [ sub ]
+  (* The seam reads the stamped environments: [attribute_of] installs
+     them over its own fixpoint. *)
+  attribute_of [ straight_sub "at_global" defs ]
 
 let data_comps (ctx : A.ctx) : Hike.Stack_model.sec_comp list =
   A.global_comps_of ~word:8 ~spans:(spans_of ()) ctx

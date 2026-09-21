@@ -168,5 +168,6 @@ let fixpoint (target : Theory.Target.t)
       Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
         ~fresh sub'
     in
-    Some (Vsa.block_envs_of_sol ~sol sub'', sub'', block_addrs')
+    let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
+    Some (envs, stamped, block_addrs')
   | None -> None

@@ -418,12 +418,11 @@ let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_str
 let of_word (w : word) : t =
   mkzw (Bitvec.to_bigint (Word.to_bitvec w)) (Word.bitwidth w) false
 
+(* The payload is already the two's-complement bit pattern; the sign
+   flag rides on the BAP word so a signed value keeps its reading. *)
 let to_word (t : t) : word =
-  let w = bitwidth t and s = is_signed t in
-  let z = to_z t in
-  let neg = s && msb t in
-  let v = if neg then Z.sub (Z.shift_left Z.one w) z else z in
-  Word.create (Bitvec.bigint_unsafe v) w
+  let word = Word.create (Bitvec.bigint_unsafe (to_z t)) (bitwidth t) in
+  if is_signed t then Word.signed word else word
 
 let sexp_of_t (t : t) : Core.Sexp.t = Core.Sexp.Atom (to_string t)
 

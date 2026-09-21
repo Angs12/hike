@@ -13,6 +13,7 @@
 
 include Core
 open Bap.Std
+open Bap_core_theory
 open Graphlib.Std
 
 module Stages = Cbat_vsa_stages
@@ -185,8 +186,8 @@ let rec static_graph_vsa
             | Some bf -> Term.enum def_t bf.bf_term |> Seq.to_list
             | None -> [])
       in
-      let def_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
-      if Core.Set.is_empty def_vars then Var.Set.empty
+      let cycle_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
+      if Core.Set.is_empty cycle_vars then Var.Set.empty
       else begin
         let succ_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
         let pred_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
@@ -194,7 +195,7 @@ let rec static_graph_vsa
           let lhs = Var.base (Def.lhs d) in
           let uses = Exp.free_vars (Def.rhs d) |> Core.Set.to_list |> List.map ~f:Var.base in
           List.iter uses ~f:(fun u ->
-            if Core.Set.mem def_vars u then begin
+            if Core.Set.mem cycle_vars u then begin
               Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
               Hashtbl.add_multi pred_tbl ~key:u ~data:lhs
             end));
@@ -203,7 +204,7 @@ let rec static_graph_vsa
             let compare = Var.compare
           end) in
         let comps =
-          Var_scc.partition (Core.Set.to_list def_vars)
+          Var_scc.partition (Core.Set.to_list cycle_vars)
             (Hashtbl.find_multi succ_tbl) (Hashtbl.find_multi pred_tbl) in
         List.fold comps ~init:Var.Set.empty ~f:(fun need comp ->
             match comp with
@@ -443,82 +444,41 @@ let reachable_jumps = Cbat_transfer.reachable_jumps
 let fold_block_states = Cbat_transfer.fold_block_states
 let last_defs = Cbat_transfer.last_defs
 
-(* The exp's var leaves and whether it reads a memory node — the
-   denotation memo's gate (via the visitor, never a shape match). *)
-let exp_gate_info (e : exp) : (Var.Set.t * bool) option =
-  let vars = ref Var.Set.empty in
-  let mem = ref false in
-  let v =
-    object
-      inherit [ unit ] Exp.visitor
-      method! visit_var x () = vars := Core.Set.add !vars (Var.base x)
-      method! visit_load ~mem:_ ~addr:_ _ _ () = mem := true
-    end
-  in
-  v#visit_exp e ();
-  Some (!vars, !mem)
+(* The Env Tag: the before-state environment the solve held at a def,
+   riding the def's value.  Absence means the def is outside the
+   analysis boundary — minted after it, or its sub did not converge —
+   and denotes TOP. *)
 
-(* The vars a def itself carries: its rhs's vars plus its (integer)
-   lhs.  A restricted env covers exactly these. *)
-let def_vars (d : def term) : Var.Set.t =
-  let vs =
-    match exp_gate_info (Def.rhs d) with
-    | Some (vars, _) -> vars
-    | None -> Var.Set.empty
-  in
-  let lhs = Var.base (Def.lhs d) in
-  match Var.typ lhs with
-  | Type.Imm _ -> Core.Set.add vs lhs
-  | _ -> vs
+module KB = Bap_knowledge.Knowledge
 
-(* The denotation memo.  The cache is caller-owned state (the analysis
-   record's field) whose envs are immutable, so entries never
-   invalidate; a capture is keyed on the physical identity of the
-   [pre] it replayed from, so a caller handing a different env
-   self-invalidates the block.  Per def: a RESTRICTED env — top plus
-   the exact word bindings of the def's own rhs/lhs vars.  Per block:
-   the single-var postcondition bindings (the block-level consumers
-   query the param regs and SP).  The gate serves ONLY word-only exps
-   whose vars the key covers; a served query reading an uncovered var
-   is a LOUD analysis bug, never a silent TOP. *)
-type denote_cache = {
-  def_envs : (Tid.t, AI.t * Var.Set.t) Hashtbl.t;
-  post_words : (Tid.t, (string * WordSet.t) list) Hashtbl.t;
-  captured : (Tid.t, AI.t) Hashtbl.t;
-}
+type KB.conflict += Env_tag_conflict
 
-let new_denote_cache () : denote_cache = {
-  def_envs = Hashtbl.create (module Tid);
-  post_words = Hashtbl.create (module Tid);
-  captured = Hashtbl.create (module Tid);
-}
+let () =
+  KB.Conflict.register_printer (function
+    | Env_tag_conflict ->
+        Some
+          "hike: env-tag conflict: two different before-state environments were stamped for one def"
+    | _ -> None)
 
-let restrict env vars =
-  Core.Set.fold vars ~init:AI.top
-    ~f:(fun acc v ->
-      match Var.typ v with
-      | Type.Imm bits -> AI.add_word acc ~key:v ~data:(AI.find_word bits env v)
-      | _ -> acc)
+let env_tag_domain : AI.t option KB.Domain.t =
+  KB.Domain.optional
+    ~inspect:(fun _ -> Sexp.Atom "hike:env-tag")
+    ~join:(fun a b -> if AI.equal a b then Ok a else Error Env_tag_conflict)
+    ~equal:AI.equal "hike:env-tag"
 
-let capture c ~pre ~blk =
-  let btid = Term.tid blk in
-  match Hashtbl.find c.captured btid with
-  | Some p when phys_equal p pre -> ()
-  | _ ->
-    Hashtbl.set c.captured ~key:btid ~data:pre;
-    Hashtbl.set c.post_words ~key:btid ~data:[];
-    let env = ref pre in
-    Term.enum def_t blk
-    |> Seq.iter ~f:(fun d ->
-        let covered = def_vars d in
-        Hashtbl.set c.def_envs ~key:(Term.tid d)
-          ~data:(restrict !env covered, covered);
-        env := denote_def d !env)
+let env_tag_slot : (Theory.Value.cls, AI.t option) KB.slot =
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-env-tag"
+    env_tag_domain
+
+let env_tag (d : def term) : AI.t option =
+  KB.Value.get env_tag_slot (Def.value d)
+
+let set_env_tag (env : AI.t) (d : def term) : def term =
+  Def.with_value d (KB.Value.put env_tag_slot (Def.value d) (Some env))
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
-   completion loop, ONLY.  Consumers use the memoized seam
-   [denote_exp_at].  No memo, no cache: raw replay from the given
-   state. *)
+   completion loop, ONLY.  Consumers use the seam [denote_exp_at];
+   this is a raw replay from the given state. *)
 let solve_denote :
     pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
     (WordSet.t, Type.error) Result.t =
@@ -541,104 +501,129 @@ let solve_denote :
     in
     denote_imm_exp e env
 
-(* [e] denotes in the before-env of [def] — the block's defs replay
-   from [pre] up to [def], the target def's own transfer not run — or,
-   with no [def], in the block's postcondition.  A [def] outside [blk]
-   denotes in [AI.top].  With a memo cache, gate-passing queries are
-   served from the captured restricted envs; everything else replays
-   exactly as without the cache. *)
-let denote_exp_at :
-    ?cache:denote_cache ->
-    pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
-    (WordSet.t, Type.error) Result.t =
-  fun ?cache ~pre ~blk ?def e ->
-    let raw ?env e =
-      denote_imm_exp e (match env with Some env -> env | None -> AI.top)
-    in
-    match (cache, def) with
-    | Some c, Some d -> (
-        match exp_gate_info e with
-        | Some (vars, false) when Core.Set.is_subset vars ~of_:(def_vars d) ->
-          capture c ~pre ~blk;
-          (match Hashtbl.find c.def_envs (Term.tid d) with
-           | None -> raw e (* the def is outside [blk]: AI.top *)
-           | Some (restricted, covered) ->
-             Core.Set.iter vars ~f:(fun v ->
-                 if not (Core.Set.mem covered v) then
-                   failwith
-                     (Printf.sprintf
-                        "hike: denotation memo served an uncovered var %s"
-                        (Var.name v)));
-             denote_imm_exp e restricted)
-        | _ ->
-          let hit = ref false in
-          let env =
-            Term.enum def_t blk
-            |> Seq.fold ~init:pre ~f:(fun env x ->
-                if !hit then env
-                else if Tid.equal (Term.tid x) (Term.tid d) then (
-                  hit := true;
-                  env)
-                else denote_def x env)
-          in
-          if !hit then denote_imm_exp e env else denote_imm_exp e AI.top)
-    | Some c, None -> (
-        match exp_gate_info e with
-        | Some (vars, false) when Core.Set.length vars = 1 ->
-          capture c ~pre ~blk;
-          let v = Core.Set.to_list vars |> Base.List.hd_exn in
-          let btid = Term.tid blk in
-          let name = Var.name v in
-          let rec find = function
-            | (n, ws) :: rest when String.equal n name -> Some ws
-            | _ :: rest -> find rest
-            | [] -> None
-          in
-          let binding =
-            match Hashtbl.find c.post_words btid with
-            | Some ws -> find ws
-            | None -> None
-          in
-          (match binding with
-           | Some ws -> Ok ws
-           | None ->
-             let r = denote_imm_exp e (denote_defs blk pre) in
-             (match r with
-              | Ok ws ->
-                let prev =
-                  match Hashtbl.find c.post_words btid with
-                  | Some ws -> ws
-                  | None -> []
-                in
-                Hashtbl.set c.post_words ~key:btid ~data:((name, ws) :: prev)
-              | Error _ -> ());
-             r)
-        | _ -> denote_imm_exp e (denote_defs blk pre))
-    | None, _ ->
-      (match def with
-       | None -> denote_imm_exp e (denote_defs blk pre)
-       | Some d ->
-         let hit = ref false in
-         let env =
-           Term.enum def_t blk
-           |> Seq.fold ~init:pre ~f:(fun env x ->
-               if !hit then env
-               else if Tid.equal (Term.tid x) (Term.tid d) then (
-                 hit := true;
-                 env)
-               else denote_def x env)
-         in
-         if !hit then denote_imm_exp e env else denote_imm_exp e AI.top)
+#ifdef VSA_DEBUG
+(* The Env Tag differential: every def-level query replays from [pre]
+   through the raw path and compares the tag's answer; a def whose tid
+   was stamped and now carries no tag is a LOST tag, counted as a
+   mismatch like a value divergence.  Mismatches print as they happen;
+   the per-sub census (stamped / queried / mismatch) prints at exit. *)
+let env_tag_sub_of_blk : (Tid.t, string) Hashtbl.t = Hashtbl.create (module Tid)
+let env_tag_stamped : (Tid.t, unit) Hashtbl.t = Hashtbl.create (module Tid)
+let env_tag_census : (string, int * int * int) Hashtbl.t =
+  Hashtbl.create (module String)
 
-(* The per-block boundary envs of a solution: pre is the solution's
-   entry state, post the block's def replay from it (the state the
-   block's jmps read). *)
-let block_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
-    (AI.t * AI.t) Tid.Map.t =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-      let pre = Solution.get sol (Term.tid blk) in
-      Core.Map.set m ~key:(Term.tid blk) ~data:(pre, denote_defs blk pre))
+let env_tag_bump ~(sub : string) ~(stamped : int) ~(queried : int)
+    ~(mismatch : int) : unit =
+  let s, q, m =
+    Hashtbl.find env_tag_census sub |> Base.Option.value ~default:(0, 0, 0)
+  in
+  Hashtbl.set env_tag_census ~key:sub
+    ~data:(s + stamped, q + queried, m + mismatch)
+
+let env_tag_dump () =
+  Hashtbl.iteri env_tag_census
+    ~f:(fun ~key:sub ~data:(stamped, queried, mismatch) ->
+      Printf.eprintf
+        "hike-env-tag: sub %s: stamped=%d queried=%d mismatch=%d\n%!" sub
+        stamped queried mismatch)
+
+let () = at_exit env_tag_dump
+
+let env_tag_result_str (r : (WordSet.t, Type.error) Result.t) : string =
+  match r with
+  | Ok ws ->
+    if WordSet.is_top ws then "TOP"
+    else if WordSet.is_bottom ws then "BOTTOM"
+    else (
+      match WordSet.min_elem ws, WordSet.max_elem ws with
+      | Some lo, Some hi ->
+        Printf.sprintf "[%s..%s]" (Cbat_word.to_string lo)
+          (Cbat_word.to_string hi)
+      | _ -> "?")
+  | Error e -> "error: " ^ Type.Error.to_string e
+
+let env_tag_check ~pre ~blk (d : def term) (e : exp)
+    (answer : (WordSet.t, Type.error) Result.t) : unit =
+  let sub =
+    Hashtbl.find env_tag_sub_of_blk (Term.tid blk)
+    |> Base.Option.value ~default:"?"
+  in
+  let tagged = Base.Option.is_some (env_tag d) in
+  let lost = (not tagged) && Hashtbl.mem env_tag_stamped (Term.tid d) in
+  let replay = solve_denote ~pre ~blk ~def:d e in
+  let mismatch =
+    lost
+    || (tagged
+        && (match answer, replay with
+            | Ok a, Ok r -> not (WordSet.equal a r)
+            | Error a, Error r -> not (Type.Error.equal a r)
+            | _ -> true))
+  in
+  env_tag_bump ~sub ~stamped:0 ~queried:1
+    ~mismatch:(if mismatch then 1 else 0);
+  if lost then
+    Printf.eprintf
+      "hike-env-tag: LOST sub %s blk %s def %s: tag=absent (stamped before) replay=%s\n%!"
+      sub (Tid.to_string (Term.tid blk)) (Tid.to_string (Term.tid d))
+      (env_tag_result_str replay)
+  else if mismatch then
+    Printf.eprintf
+      "hike-env-tag: MISMATCH sub %s blk %s def %s: tag=%s replay=%s\n%!" sub
+      (Tid.to_string (Term.tid blk)) (Tid.to_string (Term.tid d))
+      (env_tag_result_str answer) (env_tag_result_str replay)
+#endif
+
+(* [e] denotes in the before-env of [def] — the Env Tag the solve
+   stamped on the def, or [AI.top] when the def carries no tag (minted
+   after the analysis boundary) — or, with no [def], in the block's
+   postcondition.  [pre] feeds the VSA_DEBUG differential's replay
+   only. *)
+let denote_exp_at :
+    ?post:AI.t -> pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
+    (WordSet.t, Type.error) Result.t =
+  fun ?(post = AI.top) ~pre ~blk ?def e ->
+    match def with
+    | None -> denote_imm_exp e post
+    | Some d ->
+      let env =
+        match env_tag d with Some env -> env | None -> AI.top
+      in
+      let answer = denote_imm_exp e env in
+#ifdef VSA_DEBUG
+      env_tag_check ~pre ~blk d e answer;
+#endif
+      answer
+
+(* The solve's boundary sweep: one (pre, post) env pair per block (pre
+   the solution's entry state, post the block's def replay from it) and
+   the sub with every def stamped with the env its own transfer reads. *)
+let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
+    (AI.t * AI.t) Tid.Map.t * sub term =
+  let envs = ref Tid.Map.empty in
+  let sub' =
+    Term.map blk_t sub ~f:(fun blk ->
+        let pre = Solution.get sol (Term.tid blk) in
+        let env = ref pre in
+        let blk' =
+          Term.map def_t blk ~f:(fun d ->
+              let before = !env in
+              env := denote_def d before;
+#ifdef VSA_DEBUG
+              Hashtbl.set env_tag_stamped ~key:(Term.tid d) ~data:();
+              env_tag_bump ~sub:(Sub.name sub) ~stamped:1 ~queried:0
+                ~mismatch:0;
+#endif
+              set_env_tag before d)
+        in
+        envs := Core.Map.set !envs ~key:(Term.tid blk) ~data:(pre, !env);
+        blk')
+  in
+#ifdef VSA_DEBUG
+  Term.enum blk_t sub'
+  |> Seq.iter ~f:(fun b ->
+      Hashtbl.set env_tag_sub_of_blk ~key:(Term.tid b) ~data:(Sub.name sub));
+#endif
+  (!envs, sub')
 
 let constrain_edge = Cbat_backward.constrain_edge
 let inverse_denote = Cbat_backward.inverse_denote

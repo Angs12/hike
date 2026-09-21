@@ -182,11 +182,14 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
   Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base ~facts
     ~symtab:None ~spans ~ctx prog
 
-(* The fixtures' analysis facts: the subs' converged environments, no
-   addresses.  The bool reports a nonempty env set. *)
-let fixture_facts (subs : sub term list) : Hike.Kb.facts * bool =
-  let all_envs, ok =
-    Base.List.fold subs ~init:(Tid.Map.empty, true) ~f:(fun (m, ok) sub ->
+(* The fixtures' analysis facts: the subs' converged environments, plus
+   the stamped subs the seam reads (the fixpoint's sweep tags every def
+   with its before-env).  The bool reports a nonempty env set. *)
+let fixture_facts (subs : sub term list) :
+    Hike.Kb.facts * sub term list * bool =
+  let all_envs, stamped, ok =
+    Base.List.fold subs ~init:(Tid.Map.empty, [], true)
+      ~f:(fun (m, stamped, ok) sub ->
         match
           Hv.fixpoint Theory.Target.unknown
             ~prog:(Program.create ~subs:[ sub ] ())
@@ -195,24 +198,34 @@ let fixture_facts (subs : sub term list) : Hike.Kb.facts * bool =
                         (Program.create ~subs:[ sub ] ()))
             ~block_addrs:(Core.Map.empty (module Addr)) sub
         with
-        | None -> (m, false)
-        | Some (envs, _, _) ->
+        | None -> (m, stamped, false)
+        | Some (envs, sub', _) ->
             (Core.Map.merge m envs
                ~f:(fun ~key:_ el ->
                  match el with
                    | `Left v | `Right v | `Both (_, v) -> Some v),
+             sub' :: stamped,
              ok))
   in
   (Hike.Kb.build ~block_envs:all_envs
      ~block_addrs:(Core.Map.empty (module Addr)) ~target:Theory.Target.unknown,
+   Base.List.rev stamped,
    ok && not (Core.Map.is_empty all_envs))
 
 let install_fixture_envs (subs : sub term list) : Hike.Kb.facts =
-  fst (fixture_facts subs)
+  let facts, _, _ = fixture_facts subs in
+  facts
 
-(* The attribution ctx over fixtures with freshly solved envs. *)
+(* The facts plus the one stamped sub (the unstamped term when the
+   solve did not converge). *)
+let fixture_facts_sub (sub : sub term) : Hike.Kb.facts * sub term =
+  let facts, stamped, _ = fixture_facts [ sub ] in
+  (facts, match stamped with [ s ] -> s | _ -> sub)
+
+(* The attribution ctx over fixtures with freshly solved, stamped
+   envs. *)
 let fixture_ctx ?(spans = []) (subs : sub term list) : Hike.Sections.ctx =
-  let facts, _ = fixture_facts subs in
+  let facts, subs, _ = fixture_facts subs in
   Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
     ~spans (Program.create ~subs ())
 

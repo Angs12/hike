@@ -1292,9 +1292,12 @@ let run_word_boundary () =
   check "WORD-BC: of_word of a small word is the Small immediate"
     (Cbat_word.of_word (Word.one 64)
      = Cbat_word.Small (1, 64, false));
-  check "WORD-BC: to_word of the signed high-bit word takes the two's complement (the string path's quirk)"
+  check "WORD-BC: to_word of a signed negative keeps the two's-complement payload and the sign flag"
     (let t = Cbat_word.of_string "-1:64s" in
-     Word.equal (Cbat_word.to_word t) (Word.one 64));
+     String.equal (Word.to_string (Cbat_word.to_word t)) "-1:64s");
+  check "WORD-BC: to_word of a signed zero keeps the sign flag"
+    (let t = Cbat_word.signed (Cbat_word.of_string "0:64u") in
+     String.equal (Word.to_string (Cbat_word.to_word t)) "0:64s");
   check "WORD-BC: to_word of an unsigned small value is the same bits at the same width"
     (Word.equal (Cbat_word.to_word (Cbat_word.Small (42, 16, false)))
                 (Word.of_int ~width:16 42));

@@ -384,7 +384,7 @@ let run_producer_promotion () =
   let body = List.nth (Term.enum blk_t a6 |> Seq.to_list) 0 in
   let j = sub_jmp a6 0 0 in
   check "PR-A6: the site's outgoing stores map to SysV slots, last store wins"
-    (let fa6 = install_fixture_envs [ a6 ] in
+    (let fa6, a6 = fixture_facts_sub a6 in
      let bindings = Hike.Promote.stage_a ~word:8 ~abi:Hike.Abi.x86_64_sysv ~sp
         ~denote:fa6.denote a6 in
      match Core.Map.find bindings (Term.tid body) with
@@ -393,7 +393,7 @@ let run_producer_promotion () =
          && Tid.equal (Term.tid b.Hike.Promote.sb_def) (Term.tid a6_st2)
      | _ -> false);
   check "PR-A6: the unresolvable indirect target records no resolution (symtab-free)"
-    (let fa6 = install_fixture_envs [ a6 ] in
+    (let fa6, a6 = fixture_facts_sub a6 in
      let resolved =
        Hike.Promote.call_resolution ~denote:fa6.denote ~symtab:None
          ~name_tid:[] a6

@@ -46,12 +46,13 @@ let strip ?(facts : Hike.Kb.facts option) prog fixture =
 
 (* The production chain up to the strip: the jump compiler, then the
    VSA run whose stamped block environments the seam's cell identities
-   read (the pass's only VSA input). *)
+   read (the pass's only VSA input).  The stamped fixture comes back
+   for the strip to read its defs' Env Tags. *)
 let run_to_strip (fixture : sub term) (stub : sub term) :
     sub term * program term * Hike.Kb.facts =
   let fixture = Hike.Jump.compile_sub jump_target fixture in
   let prog = Program.create ~subs:[ fixture; stub ] () in
-  let facts = install_fixture_envs [ fixture ] in
+  let facts, fixture = fixture_facts_sub fixture in
   (fixture, prog, facts)
 
 (* Term lookups on a sub. *)
@@ -303,7 +304,7 @@ let run () =
       Term.map blk_t fixture ~f:(fun b ->
           if Tid.equal (Term.tid b) tids.(5) then fail_b else b)
     in
-    let facts = install_fixture_envs [ fixture ] in
+    let facts, fixture = fixture_facts_sub fixture in
     let prog = Program.create ~subs:[ fixture; stub ] () in
     let eq1 = Base.List.find_exn (jmps_of fixture tids.(2)) ~f:(fun j ->
         match Jmp.kind j with

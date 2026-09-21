@@ -106,7 +106,7 @@ let run_producer_record () =
   in
   let a5e_sp = Def.create sp (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Var a5e_y)) in
   let a5e = straight_sub "pr_a5e_plus_above" [ a5e_y_def; a5e_sp ] in
-  let fa5e = install_fixture_envs [ a5e ] in
+  let fa5e, a5e = fixture_facts_sub a5e in
   check "PR-A5e: a provably-above PLUS adjustment is not the VLA event (the value's direction)"
     (Core.Set.is_empty
        (Hike.Promote.dynamic_alloc_tids_of ~facts:fa5e a5e));

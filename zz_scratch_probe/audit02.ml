@@ -27,6 +27,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
   (* The PROD verdict through the seam: the per-def classification the
      extraction produced, recomputed from the denotations. *)
   let sol = run_sub_fixpoint sub in
+  (* The seam reads the defs' Env Tags: audit the sweep's stamped sub. *)
+  let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
   let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Cbat_extraction.kind option =
     let open Base.Option in
     Base.Option.bind
