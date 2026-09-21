@@ -269,12 +269,11 @@ let bind_site_args ~(word : int) (bindings : site_binding list)
 (* The dynamic-allocation event: a def that moves SP by a runtime
    size — the direct [SP +/- X] form or a copy chain reaching it,
    with a non-fixed size and a strictly-below-SP value. *)
-let dynamic_alloc_tids_of ~(sp : var)
-    ~(denote : blk:blk term -> ?def:def term -> exp ->
-                (Vsa.WordSet.t, Type.error) Result.t)
+let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
     (sub : sub term) : Tid.Set.t =
-  let sp_base = Var.base sp in
+  let sp_base = Var.base facts.abi.Hike_abi.sp in
   let is_sp v = Var.equal (Var.base v) sp_base in
+  let denote = facts.denote in
   (* The size's own denotation confirms the event: a singleton
      displacement is a proven-constant frame adjust (no alloca), a
      non-singleton or unknown one is the runtime move. *)
@@ -568,13 +567,14 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
 
 (* The program driver: per-sub sites and resolution, the cross-sub
    demotion, the rewrite. *)
-let rewrite_program ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
-    ~(sp : var) ~(symtab : Symtab.t option)
+let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
+    ~(symtab : Symtab.t option)
     ~(spans : Sections.data_span list)
-    ~(denote : blk:blk term -> ?def:def term -> exp ->
-                (Vsa.WordSet.t, Type.error) Result.t)
     ~(ctx : Sections.ctx)
     (prog : program term) : program term =
+  let abi = facts.abi in
+  let denote = facts.denote in
+  let sp = abi.Hike_abi.sp in
   let name_tid = Hike_resolve.name_tid_of prog in
   let callee_exempt = Hike_stack_model.fixed_signature in
   let exempt =

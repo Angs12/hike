@@ -12,6 +12,12 @@ module Abi = Hike_abi
 module Model = Hike_stack_model
 module Vsa = Cbat_vsa
 
+(* [e] denotes in the before-env of [def] — the analysis facts'
+   denotation, threaded from the pass entry. *)
+type denote =
+  blk:blk term -> ?def:def term -> exp ->
+  (Vsa.WordSet.t, Type.error) Result.t
+
 (* The base var is the thread pointer; the offset is data. *)
 let tls_addr (tp : var) (addr : exp) : bool =
   match addr with
@@ -31,18 +37,18 @@ let is_tls_read (tp : var) (d : def term) : bool =
 
 (* The def's cell: the single stack position its address denotates to
    at the def's own before-env. *)
-let cell_of (blk : blk term) (d : def term) : int64 option =
+let cell_of ~(denote : denote) (blk : blk term) (d : def term) : int64 option =
   let open Base.Option in
   (Base.Option.map (Model.addr_of_rhs (Def.rhs d)) ~f:fst
-   >>= fun addr -> Base.Result.ok (Hike_vsa.denote_exp_at ~blk ~def:d addr)
+   >>= fun addr -> Base.Result.ok (denote ~blk ~def:d addr)
    >>= Model.singleton_stack_position)
 
 (* Every memory def's cell, keyed by def tid. *)
-let cells_of_sub (sub : sub term) : int64 Tid.Map.t =
+let cells_of_sub ~(denote : denote) (sub : sub term) : int64 Tid.Map.t =
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
          Seq.fold (Term.enum def_t blk) ~init:m ~f:(fun m d ->
-             match cell_of blk d with
+             match cell_of ~denote blk d with
              | Some cell -> Core.Map.set m ~key:(Term.tid d) ~data:cell
              | None -> m))
 
@@ -187,7 +193,8 @@ let reaching_at (ctx : ctx) (b : block_data) (i : int) (v : var) : Tid.Set.t =
 
 (* The stored value is the TLS read's value: the data exp is the read
    def's lhs, the read is its unique reaching def, both denote equal. *)
-let stored_value_is_read_value ~(store_blk : blk term) ~(read_blk : blk term)
+let stored_value_is_read_value ~(denote : denote)
+    ~(store_blk : blk term) ~(read_blk : blk term)
     ~(reaching : var -> Tid.Set.t) ~(tp : var) ~(read : def term)
     (store : def term) : bool =
   match store_data store with
@@ -195,8 +202,8 @@ let stored_value_is_read_value ~(store_blk : blk term) ~(read_blk : blk term)
     Core.Set.equal (reaching v) (Tid.Set.singleton (Term.tid read))
     && is_tls_read tp read
     && (match
-          Hike_vsa.denote_exp_at ~blk:store_blk ~def:store (Bil.Var v),
-          Hike_vsa.denote_exp_at ~blk:read_blk ~def:read (Def.rhs read)
+          denote ~blk:store_blk ~def:store (Bil.Var v),
+          denote ~blk:read_blk ~def:read (Def.rhs read)
         with
         | Ok a, Ok b -> Vsa.WordSet.equal a b
         | _ -> false)
@@ -204,7 +211,7 @@ let stored_value_is_read_value ~(store_blk : blk term) ~(read_blk : blk term)
 
 (* The first def after the reload that reads its lhs denotes it to the
    reload's value — the reload reaches the comparison unmodified. *)
-let compare_operand_is_reload_value (b : block_data) (reload : def term) :
+let compare_operand_is_reload_value ~(denote : denote) (b : block_data) (reload : def term) :
     bool =
   let v = Def.lhs reload in
   let rec consumer i =
@@ -219,8 +226,8 @@ let compare_operand_is_reload_value (b : block_data) (reload : def term) :
   in
   Base.Option.value_map (consumer 0) ~default:false ~f:(fun c ->
       match
-        Hike_vsa.denote_exp_at ~blk:b.b_blk ~def:c (Bil.Var v),
-        Hike_vsa.denote_exp_at ~blk:b.b_blk ~def:reload (Def.rhs reload)
+        denote ~blk:b.b_blk ~def:c (Bil.Var v),
+        denote ~blk:b.b_blk ~def:reload (Def.rhs reload)
       with
       | Ok a, Ok w -> Vsa.WordSet.equal a w
       | _ -> false)
@@ -325,7 +332,7 @@ type comp = {
   c_fail_blk : Tid.t;
 }
 
-let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
+let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
     ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx) : comp list =
   let reach = reach_fail ~ctx ~names in
   let tp = abi.Abi.thread_pointer in
@@ -388,7 +395,7 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
             let reload_tied =
               Core.Set.exists reloads ~f:(fun tid ->
                   Base.Option.value_map (find_def b tid) ~default:false
-                    ~f:(compare_operand_is_reload_value b))
+                    ~f:(compare_operand_is_reload_value ~denote b))
             in
             if one_cell && reload_tied then
               let tagged =
@@ -411,7 +418,7 @@ let find_comps ~(abi : Abi.t) ~(names : Tid.t -> string)
                 in
                 let read =
                   Base.List.find tls_reads ~f:(fun (rb, rd) ->
-                      stored_value_is_read_value ~store_blk:sb.b_blk
+                      stored_value_is_read_value ~denote ~store_blk:sb.b_blk
                         ~read_blk:rb.b_blk ~reaching ~tp ~read:rd sd)
                 in
                 (match read with
@@ -528,12 +535,14 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
   go sub seeds
 
 (* Detect, check, rewrite, repeat until the identity. *)
-let strip_sub ~(abi : Abi.t) ~(names : string Tid.Map.t) (sub : sub term) :
-    sub term =
+let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
+    (sub : sub term) : sub term =
+  let abi = facts.abi in
+  let denote = facts.denote in
   let name_of t =
     Base.Option.value (Core.Map.find names t) ~default:(Tid.name t)
   in
-  let cells = cells_of_sub sub in
+  let cells = cells_of_sub ~denote sub in
   let cell_of tid = Core.Map.find cells tid in
   let true_word = Bil.Int (Word.one 1) in
   let rec loop sub depth =
@@ -545,7 +554,7 @@ let strip_sub ~(abi : Abi.t) ~(names : string Tid.Map.t) (sub : sub term) :
             if Core.Set.mem ts t then acc + 1 else acc)
       in
       match
-        find_comps ~abi ~names:name_of ~cell_of ~ctx
+        find_comps ~denote ~abi ~names:name_of ~cell_of ~ctx
         |> cells_accounted ~cell_of ~ctx
       with
       | [] -> sub

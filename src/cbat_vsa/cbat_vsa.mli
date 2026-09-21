@@ -97,13 +97,34 @@ val static_graph_vsa :
   ?sub_lookup:(int64 -> Tid.t option) ->
   Program.t -> Sub.t -> vsa_sol -> vsa_sol
 
+(* The denotation memo's handle: caller-owned state (the analysis
+   record's field).  Entries never invalidate while the caller's envs
+   are immutable; captures self-invalidate on a physically different
+   [pre]. *)
+type denote_cache
+
+val new_denote_cache : unit -> denote_cache
+
+(* The SOLVE's own replay — for Hike_cfg_complete, the producer's
+   completion loop, ONLY.  Consumers use the memoized seam
+   [denote_exp_at].  No memo, no cache: raw replay from the given
+   state. *)
+val solve_denote :
+  pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
+  (WordSet.t, Type.error) Result.t
+
 (* [e] denotes in the before-env of [def] — the block's defs replay
    from [pre] up to [def], the target def's own transfer not run — or,
    with no [def], in the block's postcondition.  A [def] outside [blk]
-   denotes in [AI.top]. *)
+   denotes in [AI.top].  With a memo cache, gate-passing queries are
+   served from the captured restricted envs; everything else replays
+   exactly as without the cache. *)
 val denote_exp_at :
+  ?cache:denote_cache ->
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
+
+
 
 (* The per-block boundary envs of a solution: pre is the solution's
    entry state, post the block's def replay from it. *)

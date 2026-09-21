@@ -66,7 +66,7 @@ let run_jmp_kinds () =
         [ (1, fun t -> Jmp.create (Call (Call.create ~target:(Indirect (Bil.Var j1_ra)) ()))) ];
         [], [ (0, mk_ret) ] ]
   in
-  let _, j1' =
+  let _, j1', _ =
     produce Theory.Target.unknown (Program.create ~subs:[ j1 ] ()) j1
   in
   let j1_retaddr =
@@ -100,7 +100,7 @@ let run_jmp_kinds () =
              Jmp.create (Call (Call.create ~return:(Direct t) ~target:(Indirect (Bil.Var j1_ra)) ()))) ];
         [], [ (0, mk_ret) ] ]
   in
-  let _, j1b' =
+  let _, j1b', _ =
     produce Theory.Target.unknown (Program.create ~subs:[ j1b ] ()) j1b
   in
   check "T22-J1b: a return=Some call with the same target stays a call (no rewrite)"
@@ -131,7 +131,7 @@ let run_jmp_kinds () =
   in
   let b1_tid = tids.(4) in
   let b2_tid = tids.(5) in
-  let _, j2' =
+  let _, j2', _ =
     produce Theory.Target.unknown
       ~block_addrs:[ (0x3008L, b1_tid); (0x3010L, b2_tid) ]
       (Program.create ~subs:[ j2 ] ()) j2
@@ -169,7 +169,7 @@ let run_jmp_kinds () =
         [], [ (2, mk_goto) ];
         [], [ (0, mk_ret) ] ]
   in
-  let _, j5' =
+  let _, j5', _ =
     produce Theory.Target.unknown
       ~block_addrs:[ (0x3008L, j5_tids.(1)) ]
       (Program.create ~subs:[ j5 ] ()) j5
@@ -204,7 +204,7 @@ let run_jmp_kinds () =
         [ j6_pivot ], [ (4, mk_goto) ];
         [], [ (0, mk_ret) ] ]
   in
-  let envs6, j6' =
+  let envs6, j6', block_addrs6 =
     produce Theory.Target.unknown
       ~block_addrs:[ (0x3008L, j6_tids.(2)); (0x300cL, j6_tids.(3)) ]
       (Program.create ~subs:[ j6 ] ()) j6
@@ -219,7 +219,7 @@ let run_jmp_kinds () =
     match Cbat_word.to_int64 (Cbat_vsa.WordSet.cardinality head_sel) with
     | Ok c -> c
     | Error _ -> 0L in
-  let j6_fresh = Hike.Kb.block_addr (Addr.of_int64 0x3010L) in
+  let j6_fresh = Core.Map.find block_addrs6 (Addr.of_int64 0x3010L) in
   check "FUSED-GROWTH: the selector widens in the same run (the loop closed through analysis edges)"
     (Int64.equal sel_card 2L);
   check "FUSED-GROWTH: the mid-block case entry split, the fresh entry block took the address"
@@ -266,7 +266,7 @@ let run_jmp_kinds () =
         [ j7_pivot ], [ (5, mk_goto) ];
         [], [ (0, mk_ret) ] ]
   in
-  let _, j7' =
+  let _, j7', _ =
     produce Theory.Target.unknown
       ~block_addrs:[ (0x2000L, j7_tids.(4)); (0x9000L, Tid.create ()) ]
       (Program.create ~subs:[ j7 ] ()) j7
@@ -317,7 +317,7 @@ let run_jmp_kinds () =
       [ [ j3_ld ], [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j3_t)))) ];
         [], [ (0, mk_ret) ] ]
   in
-  let _, j3' =
+  let _, j3', _ =
     produce Theory.Target.unknown (Program.create ~subs:[ j3 ] ()) j3
   in
   check "T22-J3: a foreign pointer target is untouched by the rewrite"
@@ -332,7 +332,7 @@ let run_jmp_kinds () =
       [ [], [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j3b_top)))) ];
         [], [ (0, mk_ret) ] ]
   in
-  let _, j3b' =
+  let _, j3b', _ =
     produce Theory.Target.unknown (Program.create ~subs:[ j3b ] ()) j3b
   in
   check "T22-J3b: a TOP target is untouched by the rewrite"

@@ -13,7 +13,6 @@ let () =
     let proj = load_project path in
     let prog = Project.program proj in
     let target = Project.target proj in
-    let sp = sp_of proj in
     let subs = all_subs prog in
     Printf.printf "# subs: %d\n" (List.length subs);
     let rows =
@@ -33,13 +32,21 @@ let () =
                    acc + n)
           in
           let t0 = Unix.gettimeofday () in
-          let _envs, _sub' =
+          let facts =
+            Hike.Kb.build ~block_envs:Tid.Map.empty
+              ~block_addrs:(Core.Map.empty (module Addr)) ~target
+          in
+          let _envs, _sub', _ =
             Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
-              ~symtab:None ~images:[] sub
-            |> Base.Option.value ~default:(Tid.Map.empty, sub)
+              ~symtab:None ~images:[]
+              ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi
+                          (Program.create ~subs:[ sub ] ()))
+              ~block_addrs:(Core.Map.empty (module Addr)) sub
+            |> Base.Option.value
+                 ~default:(Tid.Map.empty, sub, Core.Map.empty (module Addr))
           in
           let dt = Unix.gettimeofday () -. t0 in
-          let ntags = Core.Set.length (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) in
+          let ntags = Core.Set.length (Hike.Promote.dynamic_alloc_tids_of ~facts sub) in
           (dt, name, nblk, ndefs, ntags))
         subs
     in

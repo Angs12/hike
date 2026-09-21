@@ -38,20 +38,21 @@ let names_of prog =
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun mm s ->
       Core.Map.set mm ~key:(Term.tid s) ~data:(Sub.name s))
 
-let strip prog fixture =
+let strip ?(facts : Hike.Kb.facts option) prog fixture =
   Hike.Strip_canaries.strip_sub
-    ~abi:Hike_abi.x86_64_sysv
+    ~facts:(match facts with Some f -> f | None -> top_facts)
     ~names:(names_of prog)
     fixture
 
 (* The production chain up to the strip: the jump compiler, then the
    VSA run whose stamped block environments the seam's cell identities
    read (the pass's only VSA input). *)
-let run_to_strip (fixture : sub term) (stub : sub term) : sub term * program term =
+let run_to_strip (fixture : sub term) (stub : sub term) :
+    sub term * program term * Hike.Kb.facts =
   let fixture = Hike.Jump.compile_sub jump_target fixture in
   let prog = Program.create ~subs:[ fixture; stub ] () in
-  ignore (install_fixture_envs [ fixture ]);
-  (fixture, prog)
+  let facts = install_fixture_envs [ fixture ] in
+  (fixture, prog, facts)
 
 (* Term lookups on a sub. *)
 let blk_of sub btid =
@@ -131,7 +132,7 @@ let run () =
         edge continues unconditionally; the fail block is gone; the
         entry's other defs survive. *)
     let fixture, tids = build_idiom ~off:8 ~store_data:(Bil.Var rax) ~extra_entry:[] ~fail_jmp:(fail_jmp ()) in
-    let fixture, prog = run_to_strip fixture stub in
+    let fixture, prog, facts = run_to_strip fixture stub in
     let eq_j = eq_jmp_of fixture tids in
     let fail_j =
       Base.List.find_exn (jmps_of fixture tids.(1)) ~f:(fun j ->
@@ -142,7 +143,7 @@ let run () =
     let reload = nth_def fixture tids.(1) 0 in
     let subtract = nth_def fixture tids.(1) 1 in
     let rbp_def = nth_def fixture tids.(0) 0 in
-    let stripped = strip prog fixture in
+    let stripped = strip ~facts prog fixture in
     check
       "SC1: the proven canary composition deletes (read, store, reload, \
        compare family, not-equal edge); the fail block dies; the equality \
@@ -171,9 +172,9 @@ let run () =
       Term.map blk_t fixture ~f:(fun b ->
           if Tid.equal (Term.tid b) tids.(1) then cmp else b)
     in
-    let fixture, prog = run_to_strip fixture stub in
+    let fixture, prog, facts = run_to_strip fixture stub in
     let subtract = Base.List.nth_exn (Term.enum def_t (blk_of fixture tids.(1)) |> Seq.to_list) 0 in
-    let stripped = strip prog fixture in
+    let stripped = strip ~facts prog fixture in
     check
       "SC2: no same-cell reload — the identity (the canary stays, the \
        fail edge stays)"
@@ -188,11 +189,11 @@ let run () =
       build_idiom ~off:8 ~store_data:(Bil.Var rax)
         ~extra_entry:[] ~fail_jmp:(mk_ret (Tid.create ()))
     in
-    let fixture, prog = run_to_strip fixture stub in
+    let fixture, prog, facts = run_to_strip fixture stub in
     let read = nth_def fixture tids.(0) 1 in
     let store = nth_def fixture tids.(0) 2 in
     let reload = nth_def fixture tids.(1) 0 in
-    let stripped = strip prog fixture in
+    let stripped = strip ~facts prog fixture in
     check
       "SC3: the not-equal edge reaches no fail call — the identity"
       (has_def stripped (Term.tid read)
@@ -219,13 +220,13 @@ let run () =
         ~extra_entry:[ def rdx tls_load; def m alias_store ]
         ~fail_jmp:(fail_jmp ())
     in
-    let fixture, prog = run_to_strip fixture stub in
+    let fixture, prog, facts = run_to_strip fixture stub in
     let read = nth_def fixture tids.(0) 1 in
     let store = nth_def fixture tids.(0) 2 in
     let alias_read = nth_def fixture tids.(0) 3 in
     let alias_st = nth_def fixture tids.(0) 4 in
     let reload = nth_def fixture tids.(1) 0 in
-    let stripped = strip prog fixture in
+    let stripped = strip ~facts prog fixture in
     check
       "SC4: the alias byte-store through the read register does not \
        become the canary store — the true composition removes, the \
@@ -246,11 +247,11 @@ let run () =
         ~extra_entry:[ def rbx zero64 ]
         ~fail_jmp:(fail_jmp ())
     in
-    let fixture, prog = run_to_strip fixture stub in
+    let fixture, prog, facts = run_to_strip fixture stub in
     let read = nth_def fixture tids.(0) 1 in
     let store = nth_def fixture tids.(0) 2 in
     let reload = nth_def fixture tids.(1) 0 in
-    let stripped = strip prog fixture in
+    let stripped = strip ~facts prog fixture in
     check
       "SC5: a local stored to the cell is not the canary — the identity, \
        decoy TLS read notwithstanding"
@@ -302,7 +303,7 @@ let run () =
       Term.map blk_t fixture ~f:(fun b ->
           if Tid.equal (Term.tid b) tids.(5) then fail_b else b)
     in
-    ignore (install_fixture_envs [ fixture ]);
+    let facts = install_fixture_envs [ fixture ] in
     let prog = Program.create ~subs:[ fixture; stub ] () in
     let eq1 = Base.List.find_exn (jmps_of fixture tids.(2)) ~f:(fun j ->
         match Jmp.kind j with
@@ -314,7 +315,7 @@ let run () =
         | Goto (Direct t) -> Tid.equal t tids.(4)
         | _ -> false)
     in
-    let stripped = strip prog fixture in
+    let stripped = strip ~facts prog fixture in
     check
       "SC6: two checks on one cell remove together; the shared fail \
        block and its phi die; both equality edges continue \

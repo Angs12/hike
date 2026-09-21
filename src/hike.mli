@@ -22,25 +22,27 @@ module Vsa : sig
 
   (** The fused solve: phases of solve + resolution growth until
       stable, materialization once at drain.  Returns the per-block
-      (pre, post) environments and the rewritten sub; [None] =
-      non-convergence (readers take the top identity).  [prog] is the
-      whole program; [images] arm the resolver's denotations only. *)
+      (pre, post) environments, the rewritten sub, and the grown
+      block-address map; [None] = non-convergence (readers take the
+      top identity).  [prog] is the whole program; [images] arm the
+      resolver's denotations only; [written] is the program's
+      kill-summary pass, computed once at the boundary. *)
   val fixpoint :
     Theory.Target.t ->
     prog:program term ->
     symtab:Symtab.t option ->
     images:section_image list ->
+    written:Var.Set.t option Tid.Map.t ->
+    block_addrs:Tid.t Addr.Map.t ->
     sub term ->
-    ((Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term) option
+    ((Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term *
+     Tid.t Addr.Map.t) option
 
-  (** [exp] denotes in the before-env of [def], or with no [def] in
-      the block's postcondition — the state a jmp reads.  A [def]
-      outside its block denotes in [Cbat_vsa.AI.top]. *)
-  val denote_exp_at :
-    blk:blk term ->
-    ?def:def term ->
-    exp ->
-    (Cbat_vsa.WordSet.t, Type.error) Result.t
+  (** The program's kill summaries (every subs' transitive written
+      register set); computed once per program at the boundary and
+      consumed by the fixpoint. *)
+  val kill_summaries :
+    abi:Abi.t -> program term -> Var.Set.t option Tid.Map.t
 end
 
 (** The CFG completion, fused into the solver's loop: resolution is an
@@ -61,13 +63,14 @@ module Cfg_complete : sig
       words land on the run's map (mid-block entries split their
       block, additively) and resolved dispatches grow the extra
       edges.  Returns the sub, the edge set, the fresh entry blocks,
-      and whether anything grew. *)
+      the grown block-address map, and whether anything grew. *)
   val resolve_phase :
     sol:Cbat_vsa.vsa_sol ->
     images:Cbat_vsa.section_image list ->
+    block_addrs:Tid.t Addr.Map.t ->
     sub term ->
     Tid.Set.t Tid.Map.t ->
-    sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * bool
+    sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool
 
   (** The exit materialization at drain: canonical returns,
       complete-only guarded-goto series, and the prune retracts split
@@ -76,6 +79,7 @@ module Cfg_complete : sig
     abi:Abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     images:Cbat_vsa.section_image list ->
+    block_addrs:Tid.t Addr.Map.t ->
     fresh:Tid.Set.t ->
     sub term -> sub term
 end
@@ -234,16 +238,19 @@ module Sections = Hike_sections
     promoted parameters and call sites bind the stored values. *)
 module Promote = Hike_promote
 
-(** The analysis run's store: block environments and block addresses. *)
+(** The analysis closure: the run's facts as ONE value, built by
+    [Kb.build] at the pass_vsa boundary, installed once, and threaded
+    through every consumer as a parameter.  Also the term-carried KB
+    value slots' home. *)
 module Kb = Hike_kb
 
 (** The canary-strip pass: proven canary compositions delete before
     the fission. *)
 module Strip_canaries : sig
-  (** [strip_sub ~abi ~names sub] removes every proven canary
+  (** [strip_sub ~facts ~names sub] removes every proven canary
       composition; an unrecognized composition is the identity. *)
   val strip_sub :
-    abi:Abi.t -> names:string Tid.Map.t -> sub term -> sub term
+    facts:Hike_kb.facts -> names:string Tid.Map.t -> sub term -> sub term
 end
 
 (** LLVM emitter. *)

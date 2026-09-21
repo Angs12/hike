@@ -1,6 +1,6 @@
 (* The VSA: the solver and its CFG-completion loop.  The products are
-   the block-boundary environments and the rewritten sub; every other
-   fact re-derives through [denote_exp_at]. *)
+   the block-boundary environments and the rewritten sub; consumers
+   read them through the Hike_kb facts record. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -19,25 +19,6 @@ type section_image = Vsa.section_image = {
   img_hi : int64;
   img_bytes : Bytes.t;
 }
-
-(* A phi reads its block's precondition, a jmp its postcondition;
-   absence (no converged solution) is [AI.top]. *)
-let block_pre (blk : blk term) : Vsa.AI.t =
-  Base.Option.value (Base.Option.map (Hike_kb.block_env (Term.tid blk)) ~f:fst)
-    ~default:(Vsa.AI.top)
-
-let block_post (blk : blk term) : Vsa.AI.t =
-  Base.Option.value (Base.Option.map (Hike_kb.block_env (Term.tid blk)) ~f:snd)
-    ~default:(Vsa.AI.top)
-
-(* [e] denotes in the before-env of [def] — the block's defs replay
-   up to [def], the target def's own transfer not run — or, with no
-   [def], in the block's postcondition (the state a jmp reads).  A
-   [def] outside [blk] denotes in [AI.top]. *)
-let denote_exp_at :
-    blk:blk term -> ?def:def term -> exp ->
-    (Vsa.WordSet.t, Type.error) Result.t =
-  fun ~blk ?def e -> Vsa.denote_exp_at ~pre:(block_pre blk) ~blk ?def e
 
 (* The per-sub written-register summary: every def whose lhs base is a
    non-virtual register; [Var.base] normalizes partial defs. *)
@@ -120,16 +101,8 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
       Core.Map.set m ~key:(Term.tid s) ~data:(summary ~visited:(Tid.Set.empty : Tid.Set.t) s))
 
-(* One computation per program: the per-sub fold passes the same
-   program; the memo keys on its physical identity. *)
-let summaries_of ~(abi : Hike_abi.t) (prog : program term) :
-    Var.Set.t option Tid.Map.t =
-  match !(Hike_kb.summaries_memo) with
-  | Some ((p, a), s) when p == prog && a == abi -> s
-  | _ ->
-    let s = kill_summaries ~abi prog in
-    Hike_kb.summaries_memo := Some ((prog, abi), s);
-    s
+(* One computation per program, at the pass_vsa boundary; the fixpoint
+   consumes the summaries per phase. *)
 
 (* The fused solve: each phase runs the engine over the resolved
    extra-edge set, then the resolver grows the edges and splits
@@ -141,11 +114,12 @@ let fixpoint (target : Theory.Target.t)
     ~(prog : program term)
     ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
+    ~(written : Var.Set.t option Tid.Map.t)
+    ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) :
-    ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term) option =
+    ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t) option =
   self_arm target;
   let abi = Hike_abi.of_target target in
-  let written = summaries_of ~abi prog in
   let sub_lookup =
     Hike_resolve.symtab_lookup ~symtab
       ~name_tid:(Hike_resolve.name_tid_of prog)
@@ -165,7 +139,8 @@ let fixpoint (target : Theory.Target.t)
   in
 #endif
   let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
-      (fresh : Tid.Set.t) (init : Vsa.vsa_sol option) =
+      (fresh : Tid.Set.t) (block_addrs : Tid.t Addr.Map.t)
+      (init : Vsa.vsa_sol option) =
     let prog' = Program.create ~subs:[ sub ] () in
     let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
     let sol =
@@ -174,23 +149,24 @@ let fixpoint (target : Theory.Target.t)
 #ifdef VSA_DEBUG
     dump_r8 sol sub;
 #endif
-    let sub', resolved', fresh', events =
-      Hike_cfg_complete.resolve_phase ~sol ~images sub resolved
+    let sub', resolved', fresh', block_addrs', events =
+      Hike_cfg_complete.resolve_phase ~sol ~images ~block_addrs sub resolved
     in
-    if events then phases sub' resolved' (Core.Set.union fresh fresh') (Some sol)
-    else (sol, sub', Core.Set.union fresh fresh')
+    if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)
+    else (sol, sub', Core.Set.union fresh fresh', block_addrs')
   in
   match
-    try Some (phases sub Tid.Map.empty Tid.Set.empty None)
+    try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
     with Vsa.Fixpoint_not_converged (n, _, _) ->
       Hike_diag.warn
         "vsa: sub %s: fixpoint not converged in %d iterations — no environments, no rewrite (every reader takes the top identity)"
         (Sub.name sub) n;
       None
   with
-  | Some (sol, sub', fresh) ->
+  | Some (sol, sub', fresh, block_addrs') ->
     let sub'' =
-      Hike_cfg_complete.materialize ~abi ~sol ~images ~fresh sub'
+      Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
+        ~fresh sub'
     in
-    Some (Vsa.block_envs_of_sol ~sol sub'', sub'')
+    Some (Vsa.block_envs_of_sol ~sol sub'', sub'', block_addrs')
   | None -> None

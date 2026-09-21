@@ -1,39 +1,64 @@
-(* The analysis run's tables: block environments and the block-address
-   map, each installed atomically once per run. *)
+(* The analysis closure: the run's facts as ONE value, built by
+   [build] at the pass_vsa boundary and threaded through every
+   consumer as a parameter.  The KB value slots (sec-tag, dyn-alloc,
+   window) stay the term-carried half; the module has no read API for
+   the closure — [install]/[facts] move the record across the pass
+   boundary, one fetch per pass entry. *)
 
 open Bap.Std
 module Hike_abi = Hike_abi
 
-(* One (pre, post) pair per block tid; a phi reads [pre], a jmp reads
-   [post]. *)
-let env_stamps : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t ref =
-  ref Tid.Map.empty
+type facts = {
+  (* One (pre, post) pair per block tid; a phi reads [pre], a jmp
+     reads [post].  Absence means the sub's analysis did not converge;
+     [denote] answers [AI.top]. *)
+  envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t;
+  (* An address to the tid of the block whose extent contains it.
+     An empty map keeps every dispatch foreign. *)
+  block_addrs : Tid.t Addr.Map.t;
+  addr_bits : int;
+  target : Bap_core_theory.Theory.Target.t;
+  abi : Hike_abi.t;
+  (* The denotation memo's handle: one per record, valid because the
+     record's envs are immutable after the boundary. *)
+  cache : Cbat_vsa.denote_cache;
+  (* [e] denotes in the before-env of [def] — the block's defs replay
+     up to [def], the target def's own transfer not run — or, with no
+     [def], in the block's postcondition (the state a jmp reads). *)
+  denote :
+    blk:blk term -> ?def:def term -> exp ->
+    (Cbat_vsa.WordSet.t, Type.error) Result.t;
+}
 
-(* Absence means the sub's analysis did not converge; every reader
-   takes [Cbat_vsa.AI.top]. *)
-let block_env (btid : Tid.t) : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) option =
-  Core.Map.find !env_stamps btid
+let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(target : Bap_core_theory.Theory.Target.t) : facts =
+  let blk_env blk =
+    match Core.Map.find block_envs (Term.tid blk) with
+    | Some (pre, _) -> pre
+    | None -> Cbat_vsa.AI.top
+  in
+  let cache = Cbat_vsa.new_denote_cache () in
+  { envs = block_envs;
+    block_addrs;
+    addr_bits = Hike_abi.addr_size_bits target;
+    target;
+    abi = Hike_abi.of_target target;
+    cache;
+    denote =
+      fun ~blk ?def e ->
+        Cbat_vsa.denote_exp_at ~cache ~pre:(blk_env blk) ~blk ?def e }
 
-(* An address to the tid of the block whose extent contains it.  An
-   empty map keeps every dispatch foreign. *)
-let block_addrs_table = ref (Core.Map.empty (module Addr))
+(* The run's record, installed once at the pass_vsa boundary. *)
+let run : facts option ref = ref None
 
-let install_block_addrs m = block_addrs_table := m
+let install (f : facts) = run := Some f
+
+let facts () =
+  match !run with
+  | Some f -> f
+  | None -> failwith "hike: no analysis facts installed (pass_vsa did not run)"
 
 (* A mid-block case entry becomes its own block, on the map. *)
-let add_block_addr ~addr ~(tid : Tid.t) =
-  block_addrs_table := Core.Map.set !block_addrs_table ~key:addr ~data:tid
-
-let block_addrs () = !block_addrs_table
-
-let block_addr (a : Addr.t) : Tid.t option = Core.Map.find !block_addrs_table a
-
-let install_run ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t) :
-    unit =
-  env_stamps := block_envs
-
-(* One computation per program, keyed on the program's physical
-   identity. *)
-let summaries_memo :
-    ((Bap.Std.program term * Hike_abi.t) * Var.Set.t option Tid.Map.t) option ref
-  = ref None
+let add_block_addr (f : facts) ~addr ~(tid : Tid.t) : facts =
+  { f with block_addrs = Core.Map.set f.block_addrs ~key:addr ~data:tid }

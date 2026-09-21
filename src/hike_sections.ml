@@ -585,14 +585,13 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
   Base.List.fold sorted ~init:Tree.empty ~f:(fun t (k, ms) ->
       Tree.add t k (decide k ms))
 
-let attribute ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
+let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     ~(spans : data_span list)
-    ~(denote : blk:blk term -> ?def:def term -> exp ->
-                (Vsa.WordSet.t, Type.error) Result.t)
     (prog : program term) : ctx =
+  let abi = facts.abi in
   let env =
     { word; entry; spans; params = Hike_abi.param_regs abi;
-      sp = abi.Hike_abi.sp; denote }
+      sp = abi.Hike_abi.sp; denote = facts.denote }
   in
   let collected = collect env prog in
   let sub_trees =

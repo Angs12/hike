@@ -411,8 +411,19 @@ let to_int64 (t : t) : int64 Core.Or_error.t = Core.Or_error.try_with (fun () ->
 
 let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_string t)
 
-let of_word (w : word) : t = of_string (Word.to_string w)
-let to_word (t : t) : word = Word.of_string (to_string t)
+(* The BAP<->VSA boundary moves BITS through [Bitvec]'s bignum
+   conversions — no strings, at every width.  [mkzw] re-normalizes the
+   word's value into the canonical [0,2^w); [bigint_unsafe] requires a
+   value already in that range, which [v] is by construction. *)
+let of_word (w : word) : t =
+  mkzw (Bitvec.to_bigint (Word.to_bitvec w)) (Word.bitwidth w) false
+
+let to_word (t : t) : word =
+  let w = bitwidth t and s = is_signed t in
+  let z = to_z t in
+  let neg = s && msb t in
+  let v = if neg then Z.sub (Z.shift_left Z.one w) z else z in
+  Word.create (Bitvec.bigint_unsafe v) w
 
 let sexp_of_t (t : t) : Core.Sexp.t = Core.Sexp.Atom (to_string t)
 

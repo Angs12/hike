@@ -2,7 +2,6 @@ open Bap.Std
 open Bap_main
 open Bap_core_theory
 open Bil2llvm_env
-open Hike_abi
 module Abi = Hike_abi
 open Hike_filter
 
@@ -207,60 +206,61 @@ let pass_vsa proj =
     |> Seq.to_list
     |> Core.Map.of_alist_exn (module Addr)
   in
-  Hike_kb.install_block_addrs block_addrs;
-  let acc =
+  let written =
+    Hike_vsa.kill_summaries ~abi:(Hike_abi.of_target target)
+      (Project.program proj)
+  in
+  let subs_acc, block_addrs =
     Term.enum sub_t (Project.program proj)
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
+    |> Seq.fold ~init:(Tid.Map.empty, block_addrs)
+         ~f:(fun (acc, block_addrs) sub ->
         Option.value
           (Base.Option.map
              (Hike_vsa.fixpoint target
                 ~prog:(Project.program proj)
-                ~symtab:(Some (Project.symbols proj)) ~images sub)
-             ~f:(fun (envs, sub') ->
-               Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub')))
-          ~default:acc)
+                ~symtab:(Some (Project.symbols proj)) ~images ~written
+                ~block_addrs sub)
+             ~f:(fun (envs, sub', block_addrs') ->
+               (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'),
+                block_addrs')))
+          ~default:(acc, block_addrs))
   in
   let all_envs =
-    Core.Map.fold acc ~init:Tid.Map.empty
+    Core.Map.fold subs_acc ~init:Tid.Map.empty
       ~f:(fun ~key:_ ~data:(envs, _) m ->
         Core.Map.fold envs ~init:m
           ~f:(fun ~key ~data m' -> Core.Map.set m' ~key ~data))
   in
-  Hike_kb.install_run ~block_envs:all_envs;
+  Hike_kb.install
+    (Hike_kb.build ~block_envs:all_envs ~block_addrs ~target);
   (* The rewritten subs are the program from here on. *)
   Project.map_program proj ~f:(fun prog ->
       Term.map sub_t prog ~f:(fun sub ->
-          Option.value (Base.Option.map (Core.Map.find acc (Term.tid sub)) ~f:snd)
+          Option.value (Base.Option.map (Core.Map.find subs_acc (Term.tid sub)) ~f:snd)
             ~default:sub))
 
 (* The canary strip runs before the fission: a proven canary
    composition is deleted before emission. *)
 let pass_strip_canaries proj =
+  let facts = Hike_kb.facts () in
   let names =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
         Core.Map.set m ~key:(Term.tid s) ~data:(Sub.name s))
   in
-  map_subs
-    (Hike_strip_canaries.strip_sub
-       ~abi:(Hike_abi.of_target (Project.target proj))
-       ~names)
-    proj
+  map_subs (Hike_strip_canaries.strip_sub ~facts ~names) proj
 (* The sections pass; the emitter spec reaches the emitter through the
    run-scoped stash (the pass registry has no return channel). *)
 let pass_attrib proj =
-  let target = Project.target proj in
-  let abi = Hike_abi.of_target target in
+  let facts = Hike_kb.facts () in
+  let target = facts.target in
   let word = Theory.Target.bits target / 8 in
-  let sp = sp target in
   let spans = attrib_spans ~word proj in
   let dyn_allocs =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
            Core.Map.set m ~key:(Term.tid sub)
-             ~data:
-              (Hike_promote.dynamic_alloc_tids_of ~sp
-                 ~denote:Hike_vsa.denote_exp_at sub))
+             ~data:(Hike_promote.dynamic_alloc_tids_of ~facts sub))
   in
   Project.map_program proj ~f:(fun prog ->
       let prog =
@@ -271,13 +271,13 @@ let pass_attrib proj =
               sub)
       in
       let ctx =
-        Hike_sections.attribute ~word ~entry:Hike_stack_model.segment_base ~abi
-          ~spans ~denote:Hike_vsa.denote_exp_at prog
+        Hike_sections.attribute ~facts ~word ~entry:Hike_stack_model.segment_base
+          ~spans prog
       in
       Term.map sub_t prog ~f:(Hike_sections.stamp_tags ctx)
       |> Hike_promote.rewrite_program ~word ~entry:Hike_stack_model.segment_base
-            ~abi ~sp ~symtab:(Some (Project.symbols proj)) ~spans
-            ~denote:Hike_vsa.denote_exp_at ~ctx
+            ~facts ~symtab:(Some (Project.symbols proj)) ~spans
+            ~ctx
       |> fun prog ->
         (* The DCE's load roots are the vars the rewrite created; its
            escape roots are the storages carrying identity members. *)

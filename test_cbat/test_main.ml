@@ -21,6 +21,7 @@ let () =
   Test_domains.run_overlap ();
   Test_domains.run_divmod ();
   Test_domains.run_word_casts ();
+  Test_domains.run_word_boundary ();
   Test_domains.run_stackoff_cardn ();
   Test_domains.run_stackoff_bounds ();
   Test_domains.run_stackoff_blind ();

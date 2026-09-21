@@ -14,11 +14,7 @@ type facts = {
 
 (** The dynamic-allocation events: the defs that move SP by a runtime
     size — a non-fixed size and a strictly-below-SP value. *)
-val dynamic_alloc_tids_of :
-  sp:var ->
-  denote:(blk:blk term -> ?def:def term -> exp ->
-          (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
-  sub term -> Tid.Set.t
+val dynamic_alloc_tids_of : facts:Hike_kb.facts -> sub term -> Tid.Set.t
 
 (** The resolved target (if any) of each indirect call site. *)
 val caller_side :
@@ -66,12 +62,9 @@ val stage_a :
 val rewrite_program :
   word:int ->
   entry:int64 ->
-  abi:Hike_abi.t ->
-  sp:var ->
+  facts:Hike_kb.facts ->
   symtab:Symtab.t option ->
   spans:Hike_sections.data_span list ->
-  denote:(blk:blk term -> ?def:def term -> exp ->
-          (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   ctx:Hike_sections.ctx ->
   program term ->
   program term

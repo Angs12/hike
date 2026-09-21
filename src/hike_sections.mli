@@ -130,12 +130,10 @@ val top_claim :
     escapes through the [denote] seam) and finalizes the ownership
     trees. *)
 val attribute :
+  facts:Hike_kb.facts ->
   word:int ->
   entry:int64 ->
-  abi:Hike_abi.t ->
   spans:data_span list ->
-  denote:(blk:blk term -> ?def:def term -> exp ->
-          (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   program term ->
   ctx
 

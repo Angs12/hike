@@ -34,9 +34,12 @@ let () =
   let tot = ref 0.0 in
   Base.List.iter args ~f:(fun path ->
       let proj = load_project path in
-      let sp = sp_of proj in
       let target = Project.target proj in
       let prog = Project.program proj in
+      let facts =
+        Hike.Kb.build ~block_envs:Tid.Map.empty
+          ~block_addrs:(Core.Map.empty (module Addr)) ~target
+      in
       Base.List.iter (all_subs prog) ~f:(fun sub ->
           let ndefs =
             Term.enum blk_t sub
@@ -44,13 +47,14 @@ let () =
                    n + Seq.length (Term.enum def_t blk))
           in
           let _events, t_rel =
-            time (fun () ->
-                Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub)
+            time (fun () -> Hike.Promote.dynamic_alloc_tids_of ~facts sub)
           in
           let _envs, t_vsa =
             time (fun () ->
                 Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
-                  ~images:[] sub)
+                  ~symtab:None ~images:[]
+                  ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi prog)
+                  ~block_addrs:(Core.Map.empty (module Addr)) sub)
           in
           let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in
           let rounds, _ = dce_rounds target sub in

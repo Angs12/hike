@@ -179,9 +179,7 @@ let run () =
   in
   let precise_sub = mk_cond_sub "d4_precise" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
   let ctl_sub = mk_cond_sub "d4_ctl" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
-  (* The DCE keys on the BIL's own vars (region mems, call args); the
-     installed table is the empty identity. *)
-  Kb.install_run ~block_envs:Tid.Map.empty;
+  (* The DCE keys on the BIL's own vars (region mems, call args). *)
   let precise' = Hike.Dce.dce ~target:Theory.Target.unknown precise_sub in
   let ctl' = Hike.Dce.dce ~target:Theory.Target.unknown ctl_sub in
   let names sub' =

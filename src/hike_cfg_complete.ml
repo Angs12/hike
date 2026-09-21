@@ -6,14 +6,15 @@ open Bap.Std
 module Vsa = Cbat_vsa
 module Model = Hike_stack_model
 
-(* The seam the solver passes in: [e] denotes in [blk] (in the target
-   def's before-env when [~def] is given). *)
+(* The solve's own denotation: [e] denotes in [blk] (in the target
+   def's before-env when [~def] is given), replayed from the phase's
+   solution state by the solve's own replay. *)
 type denote =
   blk:blk term -> ?def:def term -> exp -> (Vsa.WordSet.t, Type.error) Result.t
 
 let denote_of_sol (sol : Vsa.vsa_sol) : denote =
   fun ~blk ?def e ->
-    Vsa.denote_exp_at
+    Vsa.solve_denote
       ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk)) ~blk ?def e
 
 (* A load of at most one word; its address, if so. *)
@@ -58,20 +59,22 @@ let option_if_debug msg =
 
 (* The run's block-address entries restricted to this sub — the block
    extents' bounds; cross-sub entries never contain a split. *)
-let addressed_starts (sub : sub term) : (Addr.t * tid) list =
+let addressed_starts ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) :
+    (Addr.t * tid) list =
   let sub_tids =
     Core.Set.of_list (module Tid)
       (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
   in
-  Hike_kb.block_addrs ()
+  block_addrs
   |> Core.Map.to_alist
   |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem sub_tids t)
 
 (* The dispatch's case words: a bounded plain set no larger than the
    run's block count — the words a resolution may target or split at. *)
-let bounded_words ~(denote : denote) ~(blk : blk term) ?def
+let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(blk : blk term) ?def
     (texp : exp) : Cbat_word.t list option =
-  let blocks = Hike_kb.block_addrs () in
+  let blocks = block_addrs in
   if Core.Map.is_empty blocks then None
   else
     Base.Option.bind (Base.Result.ok (denote ~blk ?def texp)) ~f:(fun ws ->
@@ -186,10 +189,11 @@ let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
 (* The dispatch's case words, denotated at the state the jump reads;
    a bare-variable target's words come from its reaching definition's
    before-env, never the noreturn-poisoned post-transfer state. *)
-let dispatch_words ~(denote : denote) ~(reaching : tid Var.Map.t)
+let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(reaching : tid Var.Map.t)
     ~(blk : blk term) (texp : exp) : Cbat_word.t list option =
   match texp with
-  | Bil.BinOp (Bil.PLUS, _, _) -> bounded_words ~denote ~blk texp
+  | Bil.BinOp (Bil.PLUS, _, _) -> bounded_words ~denote ~block_addrs ~blk texp
   | Bil.Var v ->
     let reaching_def dtid =
       Seq.find (Term.enum def_t blk) ~f:(fun d ->
@@ -197,7 +201,7 @@ let dispatch_words ~(denote : denote) ~(reaching : tid Var.Map.t)
     in
     Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
         Base.Option.bind (reaching_def dtid) ~f:(fun add_def ->
-            bounded_words ~denote ~blk ~def:add_def (Def.rhs add_def)))
+            bounded_words ~denote ~block_addrs ~blk ~def:add_def (Def.rhs add_def)))
   | _ -> None
 
 (* The dispatch's guard subject and base: of the target's top-level
@@ -209,8 +213,9 @@ let dispatch_words ~(denote : denote) ~(reaching : tid Var.Map.t)
    split).  A cross-sub word stays foreign; a word in no block is a
    loud analysis loss.  One split per walk, so the walks terminate. *)
 let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
-    (sub : sub term) : sub term =
-  let starts = addressed_starts sub in
+    ~(block_addrs : Tid.t Addr.Map.t)
+    (sub : sub term) : sub term * Tid.t Addr.Map.t =
+  let starts = addressed_starts ~block_addrs sub in
   let dispatch_word blk =
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     Base.List.find_map (Term.enum jmp_t blk |> Seq.to_list) ~f:(fun j ->
@@ -221,11 +226,11 @@ let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
           | _ -> None
         in
         Base.Option.bind
-          ~f:(dispatch_words ~denote ~reaching ~blk) target
+          ~f:(dispatch_words ~denote ~block_addrs ~reaching ~blk) target
         |> Base.Option.bind ~f:(fun words ->
                Base.List.find_map words ~f:(fun w ->
                    let a = Cbat_word.to_word w in
-                   match Hike_kb.block_addr a with
+                   match Core.Map.find block_addrs a with
                    | Some _ -> None
                    | None -> Some a)))
   in
@@ -242,14 +247,14 @@ let rec prepare_dispatches ~(denote : denote) ~(fresh : Tid.Set.t ref)
   with
   | None ->
       option_if_debug "prepare: no missing word, done";
-      sub
+      (sub, block_addrs)
   | Some (a, sub', t) ->
       option_if_debug
         (Printf.sprintf "prepare: split at %s -> tid %s"
            (Word.to_string a) (Tid.name t));
-      Hike_kb.add_block_addr ~addr:a ~tid:t;
+      let block_addrs' = Core.Map.set block_addrs ~key:a ~data:t in
       fresh := Core.Set.add !fresh t;
-      prepare_dispatches ~denote ~fresh sub'
+      prepare_dispatches ~denote ~fresh ~block_addrs:block_addrs' sub'
 
 let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
@@ -330,10 +335,11 @@ let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
    BASE-RELATIVE — the guard word is the delta [w - base] — so the
    runtime comparison never depends on where the table was linked. *)
 let resolved_pairs_of ~(denote : denote) ~(reaching : tid Var.Map.t)
-    ~(sub_tids : Tid.Set.t) ~(blk : blk term) (texp : exp) :
+    ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(blk : blk term) (texp : exp) :
     (exp * (word * tid) list * Int64.t) option =
-  let blocks = Hike_kb.block_addrs () in
-  match dispatch_words ~denote ~reaching ~blk texp with
+  let blocks = block_addrs in
+  match dispatch_words ~denote ~block_addrs ~reaching ~blk texp with
   | None -> None
   | Some ws ->
     if Base.List.length ws > Core.Map.length blocks then None
@@ -348,7 +354,7 @@ let resolved_pairs_of ~(denote : denote) ~(reaching : tid Var.Map.t)
           in
           let case (w : Cbat_word.t) : (word * tid) option =
             let a = Cbat_word.to_word w in
-            match Hike_kb.block_addr a with
+            match Core.Map.find block_addrs a with
             | Some t when Core.Set.mem sub_tids t ->
               Some (Addr.of_int64 (Int64.sub (Word.to_int64_exn a) bval), t)
             | Some _ -> None
@@ -526,6 +532,7 @@ let table_covered ~(denote : denote) ~(reaching : tid Var.Map.t)
    dispatch becomes the guarded-goto series; else it stays. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(word_bits : int) ~(sub_tids : Tid.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t)
     ~(reaching : tid Var.Map.t) ~(images : Vsa.section_image list)
     ~(blk : blk term) (j : jmp term) :
     jmp term list option =
@@ -535,7 +542,7 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
   in
   let series texp cont =
     Base.Option.bind
-      (resolved_pairs_of ~denote ~reaching ~sub_tids ~blk texp)
+      (resolved_pairs_of ~denote ~reaching ~sub_tids ~block_addrs ~blk texp)
       ~f:(fun (subject, pairs, base) ->
           if
             table_covered ~denote ~reaching ~blk ~base ~pairs ~images texp
@@ -626,7 +633,8 @@ let prune_unreachable ~(fresh : Tid.Set.t) (sub : sub term) : sub term =
 (* The exit rewrite, once at drain; a sub with no decision comes back
    unchanged. *)
 let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(word_bits : int) ~(images : Vsa.section_image list)
+    ~(word_bits : int) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(images : Vsa.section_image list)
     (sub : sub term) : sub term =
   let sub_tids =
     Core.Set.of_list (module Tid)
@@ -637,7 +645,8 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids ~reaching
+          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids ~block_addrs
+            ~reaching
             ~images ~blk j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
     in
@@ -661,12 +670,13 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
    change and it is additive. *)
 let resolve_phase ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
+    ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
-    sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * bool =
+    sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool =
   let denote = denote_of_sol sol in
   let fresh = ref Tid.Set.empty in
   Vsa.with_images images (fun () ->
-      let sub = prepare_dispatches ~denote ~fresh sub in
+      let sub, block_addrs' = prepare_dispatches ~denote ~fresh ~block_addrs sub in
       let sub_tids =
         Core.Set.of_list (module Tid)
           (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
@@ -688,7 +698,8 @@ let resolve_phase ~(sol : Vsa.vsa_sol)
                 match target with
                 | None -> acc
                 | Some texp -> (
-                    match resolved_pairs_of ~denote ~reaching ~sub_tids ~blk texp with
+                    match resolved_pairs_of ~denote ~reaching ~sub_tids
+                            ~block_addrs:block_addrs' ~blk texp with
                     | None -> acc
                     | Some (_, pairs, _) ->
                       let ts =
@@ -704,19 +715,21 @@ let resolve_phase ~(sol : Vsa.vsa_sol)
                         grew := true;
                         Core.Map.set acc ~key:(Term.tid j) ~data:ts)))
       in
-      (sub, resolved', !fresh, not (Core.Set.is_empty !fresh) || !grew))
+      (sub, resolved', !fresh, block_addrs',
+       not (Core.Set.is_empty !fresh) || !grew))
 
 (* The exit materialization at drain: the rewrites land once and the
    prune retracts the split structure the materialization didn't
    claim; the denotations run with the section images armed. *)
 let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
-    ~(images : Vsa.section_image list) ~(fresh : Tid.Set.t)
+    ~(images : Vsa.section_image list) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(fresh : Tid.Set.t)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
   let word_bits = 8 * abi.Hike_abi.word in
   let sub =
     Vsa.with_images images (fun () ->
         rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~word_bits
-          ~images sub)
+          ~block_addrs ~images sub)
   in
   prune_unreachable ~fresh sub

@@ -1281,6 +1281,38 @@ let run_stackoff_cardn () =
     (Cbat_word.equal (Ws.cardinality (Ws.stack_word offs)) (Cbat_word.ones 65));
   ()
 
+let run_word_boundary () =
+  (* The BAP<->VSA word boundary moves BITS directly now; these pins
+     lock the values the old string round-trip produced. *)
+  let w64 v = Word.of_int64 ~width:64 v in
+  check "WORD-BC: of_word keeps the unsigned value (all-ones stays 2^64-1)"
+    (match Cbat_word.of_word (w64 (-1L)) with
+     | Cbat_word.Big (z, 64, false) -> Z.equal z (Z.of_string "18446744073709551615")
+     | _ -> false);
+  check "WORD-BC: of_word of a small word is the Small immediate"
+    (Cbat_word.of_word (Word.one 64)
+     = Cbat_word.Small (1, 64, false));
+  check "WORD-BC: to_word of the signed high-bit word takes the two's complement (the string path's quirk)"
+    (let t = Cbat_word.of_string "-1:64s" in
+     Word.equal (Cbat_word.to_word t) (Word.one 64));
+  check "WORD-BC: to_word of an unsigned small value is the same bits at the same width"
+    (Word.equal (Cbat_word.to_word (Cbat_word.Small (42, 16, false)))
+                (Word.of_int ~width:16 42));
+  check "WORD-BC: of_word (to_word t) is value-identity for unsigned words"
+    (let t = Cbat_word.of_string "0x8000000000000000:64u" in
+     Cbat_word.equal (Cbat_word.of_word (Cbat_word.to_word t)) t);
+  check "WORD-BC: the high-bit unsigned word's int64 bit pattern survives"
+    (Word.equal
+       (Cbat_word.to_word (Cbat_word.of_string "0x8000000000000000:64u"))
+       (w64 Int64.min_int));
+  check "WORD-BC: a 80-bit word round-trips with no string path"
+    (let wide = Word.ones 80 in
+     Cbat_word.equal
+       (Cbat_word.of_word (Cbat_word.to_word (Cbat_word.of_word wide)))
+       (Cbat_word.of_word wide)
+     && Word.equal (Cbat_word.to_word (Cbat_word.of_word wide)) wide);
+  ()
+
 let run_stackoff_bounds () =
   (* A StackOff's extrema answer from its offset set — the exact
      projection [base + o_lo, base + o_hi], no span slack. *)

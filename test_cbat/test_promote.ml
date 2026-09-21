@@ -42,7 +42,7 @@ let stamp_tag
 let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
   let sub =
     Cu.stamp_dyn_allocs
-      ~dynamic_alloc_tids:(Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at sub) sub
+      ~dynamic_alloc_tids:(Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts sub) sub
   in
   Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub
 
@@ -384,18 +384,18 @@ let run_producer_promotion () =
   let body = List.nth (Term.enum blk_t a6 |> Seq.to_list) 0 in
   let j = sub_jmp a6 0 0 in
   check "PR-A6: the site's outgoing stores map to SysV slots, last store wins"
-    (ignore (install_fixture_envs [ a6 ]);
+    (let fa6 = install_fixture_envs [ a6 ] in
      let bindings = Hike.Promote.stage_a ~word:8 ~abi:Hike.Abi.x86_64_sysv ~sp
-        ~denote:Hv.denote_exp_at a6 in
+        ~denote:fa6.denote a6 in
      match Core.Map.find bindings (Term.tid body) with
      | Some [ b ] ->
          Int.equal b.Hike.Promote.sb_slot 1
          && Tid.equal (Term.tid b.Hike.Promote.sb_def) (Term.tid a6_st2)
      | _ -> false);
   check "PR-A6: the unresolvable indirect target records no resolution (symtab-free)"
-    (ignore (install_fixture_envs [ a6 ]);
+    (let fa6 = install_fixture_envs [ a6 ] in
      let resolved =
-       Hike.Promote.call_resolution ~denote:Hv.denote_exp_at ~symtab:None
+       Hike.Promote.call_resolution ~denote:fa6.denote ~symtab:None
          ~name_tid:[] a6
      in
      Core.Map.find resolved (Term.tid j) = Some None);

@@ -45,7 +45,7 @@ let run_producer_record () =
   let a5 = straight_sub "pr_a5_vla" [ a5_lit; a5_rbx_def; a5_bnd ] in
   check "PR-A5: neither the literal decrement nor the chain-resolved constant is the event — a size the code fixes keeps the SP at a bounded interval"
     (Core.Set.is_empty
-       (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5));
+       (Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5));
   (* [a5_rcx] is never defined: its denotation is TOP — the
      runtime-unbounded size. *)
   let a5_vla =
@@ -53,7 +53,7 @@ let run_producer_record () =
   in
   let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
   let a5u_events =
-    Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5u in
+    Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5u in
   check "PR-A5: the runtime-unbounded decrement is the event; the literal decrement is not"
     (Core.Set.equal a5u_events (tid_set [ Term.tid a5_vla ]));
   let a5_stamped = Sm.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u in
@@ -77,7 +77,7 @@ let run_producer_record () =
   let a5c_sp = Def.create sp (Bil.Var a5c_t2) in
   let a5c = straight_sub "pr_a5c_chain" [ a5c_d1; a5c_d2; a5c_sp ] in
   check "PR-A5c: a VLA spelled through TWO temps is still the event (the chain resolves through the sequential state)"
-    (Core.Set.equal (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5c)
+    (Core.Set.equal (Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5c)
        (tid_set [ Term.tid a5c_sp ]));
 
   (* A5d: the plus-form (the lea-computed adjustment: a negative size
@@ -92,7 +92,7 @@ let run_producer_record () =
   in
   let a5d = straight_sub "pr_a5d_plus" [ a5d_d1; a5d_sp ] in
   check "PR-A5d: the lea-computed adjustment (a negative size ADDED) is the event"
-    (Core.Set.equal (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5d)
+    (Core.Set.equal (Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5d)
        (tid_set [ Term.tid a5d_sp ]));
 
   (* A5e: N6's direction — the def's VALUE decides.  With real
@@ -106,10 +106,10 @@ let run_producer_record () =
   in
   let a5e_sp = Def.create sp (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Var a5e_y)) in
   let a5e = straight_sub "pr_a5e_plus_above" [ a5e_y_def; a5e_sp ] in
-  ignore (install_fixture_envs [ a5e ]);
+  let fa5e = install_fixture_envs [ a5e ] in
   check "PR-A5e: a provably-above PLUS adjustment is not the VLA event (the value's direction)"
     (Core.Set.is_empty
-       (Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5e));
+       (Hike.Promote.dynamic_alloc_tids_of ~facts:fa5e a5e));
 
   (* A5b: the LOOP-CARRIED VLA — the decrement sits inside a runtime
      loop; the shape test is local to the def, so the loop changes
@@ -122,7 +122,7 @@ let run_producer_record () =
         [], [ (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, a5b_loop))); (1, fun t -> mk_jmp_to t a5b_loop) ];
         [], [] ]
   in
-  let a5b_events = Hike.Promote.dynamic_alloc_tids_of ~sp ~denote:Hike.Vsa.denote_exp_at a5b in
+  let a5b_events = Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5b in
   let a5b_body_sp =
     Term.enum blk_t a5b
     |> Seq.find_map ~f:(fun blk ->
@@ -576,22 +576,6 @@ let run_abi_and_kb () =
     (abi.Abi.word = 8
     && Hike.Abi.((of_target x86).Abi.word) = Theory.Target.bits x86 / 8);
 
-  (* The KB carrier: one table (the block environments), one producer —
-     [install_run] is the whole state, absence is the top identity. *)
-  let t1 = Tid.create () in
-  let t2 = Tid.create () in
-  Kb.install_run ~block_envs:(Tid.Map.singleton t1 (AI.top, AI.top));
-  check "PR-E2: block_env reads back the provided pair; another block reads none"
-    (Option.is_some (Kb.block_env t1) && Kb.block_env t2 = None);
-  check "PR-E2: the envs install is the whole state — the run's table replaces, never merges"
-    (Kb.block_env t2 = None && Option.is_some (Kb.block_env t1));
-  Kb.install_run ~block_envs:(Tid.Map.singleton t2 (AI.top, AI.top));
-  check "PR-E2: the replacement leaves no earlier run's entries"
-    (Option.is_some (Kb.block_env t2) && Kb.block_env t1 = None);
-  (* The ONE lookup: absence is the no-constraint identity (the reader
-     denotates in [AI.top]). *)
-  check "PR-E2: block_env on a never-provided block is none"
-    (Kb.block_env (Tid.create ()) = None);
   ()
 
 (* The printable-run rule (the model's one home): a word is string

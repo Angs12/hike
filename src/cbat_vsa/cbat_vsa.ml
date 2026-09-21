@@ -443,17 +443,90 @@ let reachable_jumps = Cbat_transfer.reachable_jumps
 let fold_block_states = Cbat_transfer.fold_block_states
 let last_defs = Cbat_transfer.last_defs
 
-(* [e] denotes in the before-env of [def] — the block's defs replay
-   from [pre] up to [def], the target def's own transfer not run — or,
-   with no [def], in the block's postcondition.  A [def] outside [blk]
-   denotes in [AI.top]. *)
-let denote_exp_at :
+(* The exp's var leaves and whether it reads a memory node — the
+   denotation memo's gate (via the visitor, never a shape match). *)
+let exp_gate_info (e : exp) : (Var.Set.t * bool) option =
+  let vars = ref Var.Set.empty in
+  let mem = ref false in
+  let v =
+    object
+      inherit [ unit ] Exp.visitor
+      method! visit_var x () = vars := Core.Set.add !vars (Var.base x)
+      method! visit_load ~mem:_ ~addr:_ _ _ () = mem := true
+    end
+  in
+  v#visit_exp e ();
+  Some (!vars, !mem)
+
+(* The vars a def itself carries: its rhs's vars plus its (integer)
+   lhs.  A restricted env covers exactly these. *)
+let def_vars (d : def term) : Var.Set.t =
+  let vs =
+    match exp_gate_info (Def.rhs d) with
+    | Some (vars, _) -> vars
+    | None -> Var.Set.empty
+  in
+  let lhs = Var.base (Def.lhs d) in
+  match Var.typ lhs with
+  | Type.Imm _ -> Core.Set.add vs lhs
+  | _ -> vs
+
+(* The denotation memo.  The cache is caller-owned state (the analysis
+   record's field) whose envs are immutable, so entries never
+   invalidate; a capture is keyed on the physical identity of the
+   [pre] it replayed from, so a caller handing a different env
+   self-invalidates the block.  Per def: a RESTRICTED env — top plus
+   the exact word bindings of the def's own rhs/lhs vars.  Per block:
+   the single-var postcondition bindings (the block-level consumers
+   query the param regs and SP).  The gate serves ONLY word-only exps
+   whose vars the key covers; a served query reading an uncovered var
+   is a LOUD analysis bug, never a silent TOP. *)
+type denote_cache = {
+  def_envs : (Tid.t, AI.t * Var.Set.t) Hashtbl.t;
+  post_words : (Tid.t, (string * WordSet.t) list) Hashtbl.t;
+  captured : (Tid.t, AI.t) Hashtbl.t;
+}
+
+let new_denote_cache () : denote_cache = {
+  def_envs = Hashtbl.create (module Tid);
+  post_words = Hashtbl.create (module Tid);
+  captured = Hashtbl.create (module Tid);
+}
+
+let restrict env vars =
+  Core.Set.fold vars ~init:AI.top
+    ~f:(fun acc v ->
+      match Var.typ v with
+      | Type.Imm bits -> AI.add_word acc ~key:v ~data:(AI.find_word bits env v)
+      | _ -> acc)
+
+let capture c ~pre ~blk =
+  let btid = Term.tid blk in
+  match Hashtbl.find c.captured btid with
+  | Some p when phys_equal p pre -> ()
+  | _ ->
+    Hashtbl.set c.captured ~key:btid ~data:pre;
+    Hashtbl.set c.post_words ~key:btid ~data:[];
+    let env = ref pre in
+    Term.enum def_t blk
+    |> Seq.iter ~f:(fun d ->
+        let covered = def_vars d in
+        Hashtbl.set c.def_envs ~key:(Term.tid d)
+          ~data:(restrict !env covered, covered);
+        env := denote_def d !env)
+
+(* The SOLVE's own replay — for Hike_cfg_complete, the producer's
+   completion loop, ONLY.  Consumers use the memoized seam
+   [denote_exp_at].  No memo, no cache: raw replay from the given
+   state. *)
+let solve_denote :
     pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
     (WordSet.t, Type.error) Result.t =
   fun ~pre ~blk ?def e ->
-    match def with
-    | None -> denote_imm_exp e (denote_defs blk pre)
-    | Some d ->
+    let env =
+      match def with
+      | None -> denote_defs blk pre
+      | Some d ->
         let hit = ref false in
         let env =
           Term.enum def_t blk
@@ -464,7 +537,98 @@ let denote_exp_at :
                 env)
               else denote_def x env)
         in
-        if !hit then denote_imm_exp e env else denote_imm_exp e AI.top
+        if !hit then env else AI.top
+    in
+    denote_imm_exp e env
+
+(* [e] denotes in the before-env of [def] — the block's defs replay
+   from [pre] up to [def], the target def's own transfer not run — or,
+   with no [def], in the block's postcondition.  A [def] outside [blk]
+   denotes in [AI.top].  With a memo cache, gate-passing queries are
+   served from the captured restricted envs; everything else replays
+   exactly as without the cache. *)
+let denote_exp_at :
+    ?cache:denote_cache ->
+    pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
+    (WordSet.t, Type.error) Result.t =
+  fun ?cache ~pre ~blk ?def e ->
+    let raw ?env e =
+      denote_imm_exp e (match env with Some env -> env | None -> AI.top)
+    in
+    match (cache, def) with
+    | Some c, Some d -> (
+        match exp_gate_info e with
+        | Some (vars, false) when Core.Set.is_subset vars ~of_:(def_vars d) ->
+          capture c ~pre ~blk;
+          (match Hashtbl.find c.def_envs (Term.tid d) with
+           | None -> raw e (* the def is outside [blk]: AI.top *)
+           | Some (restricted, covered) ->
+             Core.Set.iter vars ~f:(fun v ->
+                 if not (Core.Set.mem covered v) then
+                   failwith
+                     (Printf.sprintf
+                        "hike: denotation memo served an uncovered var %s"
+                        (Var.name v)));
+             denote_imm_exp e restricted)
+        | _ ->
+          let hit = ref false in
+          let env =
+            Term.enum def_t blk
+            |> Seq.fold ~init:pre ~f:(fun env x ->
+                if !hit then env
+                else if Tid.equal (Term.tid x) (Term.tid d) then (
+                  hit := true;
+                  env)
+                else denote_def x env)
+          in
+          if !hit then denote_imm_exp e env else denote_imm_exp e AI.top)
+    | Some c, None -> (
+        match exp_gate_info e with
+        | Some (vars, false) when Core.Set.length vars = 1 ->
+          capture c ~pre ~blk;
+          let v = Core.Set.to_list vars |> Base.List.hd_exn in
+          let btid = Term.tid blk in
+          let name = Var.name v in
+          let rec find = function
+            | (n, ws) :: rest when String.equal n name -> Some ws
+            | _ :: rest -> find rest
+            | [] -> None
+          in
+          let binding =
+            match Hashtbl.find c.post_words btid with
+            | Some ws -> find ws
+            | None -> None
+          in
+          (match binding with
+           | Some ws -> Ok ws
+           | None ->
+             let r = denote_imm_exp e (denote_defs blk pre) in
+             (match r with
+              | Ok ws ->
+                let prev =
+                  match Hashtbl.find c.post_words btid with
+                  | Some ws -> ws
+                  | None -> []
+                in
+                Hashtbl.set c.post_words ~key:btid ~data:((name, ws) :: prev)
+              | Error _ -> ());
+             r)
+        | _ -> denote_imm_exp e (denote_defs blk pre))
+    | None, _ ->
+      (match def with
+       | None -> denote_imm_exp e (denote_defs blk pre)
+       | Some d ->
+         let hit = ref false in
+         let env =
+           Term.enum def_t blk
+           |> Seq.fold ~init:pre ~f:(fun env x ->
+               if !hit then env
+               else if Tid.equal (Term.tid x) (Term.tid d) then (
+                 hit := true;
+                 env)
+               else denote_def x env)
+         in
+         if !hit then denote_imm_exp e env else denote_imm_exp e AI.top)
 
 (* The per-block boundary envs of a solution: pre is the solution's
    entry state, post the block's def replay from it (the state the
