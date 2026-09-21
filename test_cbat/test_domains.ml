@@ -1302,9 +1302,7 @@ let run_stackoff_bounds () =
   ()
 
 let run_stackoff_blind () =
-  (* The base is a tag except for its ABI-certified low nibble (the
-     entry residue 8 (mod 16), carried in the base constant): bit-ops
-     confined to the nibble compute the exact answer, ops that keep
+  (* Bit-ops confined to the certified nibble compute; ops keeping
      unknown bits answer top. *)
   let w x = Ws.singleton (Cbat_word.of_int ~width:64 x) in
   let word ?(width = 64) x = Cbat_word.of_int ~width x in

@@ -386,10 +386,8 @@ let run () =
   check "CE10: a foreign singleton resolves to nothing"
     (match Ce.indirect_summary ~lookup ~summary_of ~env:foreign (Bil.Var tgt) with
      | None -> true | Some _ -> false);
-  (* R-G1: the movaps alignment guard the lifter materializes — the
-     SP-derived value's certified nibble AND 0xF equals zero exactly,
-     so the guard's EQ denotates {1} and the #GP path is provably
-     dead instead of unknown. *)
+  (* R-G1: the movaps alignment guard denotates {1} exactly — the
+     #GP path is provably dead. *)
   let sp = v64 "rg1_rsp" in
   let tmp = v64 "rg1_tmp" in
   let env0 = AI.add_word AI.top ~key:sp ~data:(Ws.stack_word_i64 0L) in
