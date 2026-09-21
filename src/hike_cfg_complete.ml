@@ -25,29 +25,25 @@ let load_addr_of (word_bits : int) (d : def term) : exp option =
       else None
   | _ -> None
 
-(* The address denotates, in the def's own before-env, to the
-   entry-RSP cell — the return-address fact. *)
-let reads_retaddr_cell ~(denote : denote) (blk : blk term) (d : def term)
-    (addr : exp) : bool =
-  match denote ~blk ~def:d addr with
-  | Ok ws -> Model.is_return_address ws
-  | Error _ -> false
-
 (* The defs whose load address denotates, in the def's own before-env,
-   to the stack-symbolic entry-RSP cell. *)
+   to the stack-symbolic entry-RSP cell.  One replay per block: the
+   fold carries each def's before-env, so the per-def address
+   denotations ride the block's single pass. *)
 let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : Tid.Set.t =
-  let denote = denote_of_sol sol in
-  let note (acc : Tid.Set.t) blk d =
-    match load_addr_of (8 * abi.Hike_abi.word) d with
-    | Some addr when reads_retaddr_cell ~denote blk d addr ->
-        Core.Set.add acc (Term.tid d)
-    | _ -> acc
-  in
+  let word_bits = 8 * abi.Hike_abi.word in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
-         Seq.fold (Term.enum def_t blk) ~init:acc ~f:(fun acc d ->
-             note acc blk d))
+         fst
+           (Vsa.fold_block_states ~sol blk ~init:acc
+              ~f:(fun before _after d acc ->
+                  match load_addr_of word_bits d with
+                  | Some addr -> (
+                      match Vsa.denote_imm_exp addr before with
+                      | Ok ws when Model.is_return_address ws ->
+                        Core.Set.add acc (Term.tid d)
+                      | _ -> acc)
+                  | None -> acc)))
 
 (* The dispatch resolution's debug trace; compiled out of production. *)
 let option_if_debug msg =

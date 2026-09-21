@@ -139,6 +139,26 @@
  (preprocess
   (pps ppx_bap)))
 
+ (executable
+ (name sm3_ab)
+ (modules sm3_ab)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  bap-future
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
 (test
  (name clpequiv)
  (modules clpequiv)

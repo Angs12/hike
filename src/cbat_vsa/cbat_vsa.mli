@@ -104,6 +104,21 @@ val solve_denote :
   pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
   (WordSet.t, Type.error) Result.t
 
+(* The word-set denotation of an exp in a given env — the vocabulary
+   of the completion loop's own folds. *)
+val denote_imm_exp : exp -> AI.t -> (WordSet.t, Type.error) Result.t
+
+(* One replay per block: the block's defs fold [denote_def] from the
+   solution's entry state and [f] folds over each def's (before, after)
+   states.  The completion's per-def queries ride this fold — one
+   replay per block, never one per def. *)
+val fold_block_states :
+  sol:(tid, AI.t) Solution.t ->
+  blk term ->
+  init:'acc ->
+  f:(AI.t -> AI.t -> def term -> 'acc -> 'acc) ->
+  'acc * AI.t
+
 (* [e] denotes in the before-env of [def] — the Env Tag the solve
    stamped on the def, or [AI.top] when the def carries no tag (minted
    after the analysis boundary) — or, with no [def], in the block's
