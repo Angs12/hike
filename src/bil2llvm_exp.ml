@@ -196,27 +196,6 @@ let create_immidiate ctx word =
     (Word.string_of_value word)
     16
 
-let warn_undef_read ctx scope var blk_tid =
-  let v = Var.base var in
-  let abi = ctx.abi in
-  let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
-  let sub_key = blk_tid in
-  let warned_vars =
-    match Core.Map.find !(scope.undef_warned) sub_key with
-    | Some r -> r
-    | None ->
-        let r = ref Var.Set.empty in
-        scope.undef_warned :=
-          Core.Map.set !(scope.undef_warned) ~key:sub_key ~data:r;
-        r
-  in
-  if not (Core.Set.mem !warned_vars v) then begin
-    warned_vars := Core.Set.add !warned_vars v;
-    if not is_lane then
-      Hike_diag.warn "undef-read: blk %s: var %s never defined"
-        (Tid.name blk_tid) (Var.name v)
-  end
-
 (* The one memory node of an exp (a def's rhs holds at most one). *)
 type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
 
@@ -567,7 +546,7 @@ let create_branches ctx scope blk_tid llvm_builder branches =
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
   let jmps = Seq.to_list branches in
   let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
-    Edge_tbl.set !(scope.edge_tbl) ~pred:blk_tid ~target:tid ~term_bb:cur ()
+    Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:tid ~term_bb:cur ()
   in
   let rec step ~(first : bool) cur = function
     | [] -> ()

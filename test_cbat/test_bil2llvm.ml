@@ -333,12 +333,12 @@ let run_fp_gpr () =
 (* Family 9: the promotion as a BIR rewrite — the sub's structure *)
 (* is the emitter's only input.                                         *)
 
-(* Family 10: the phi edge multiplicity — one incoming per EDGE.       *)
+(* Family 10: the phi edges — one incoming per RENDERED edge.       *)
 
 (* Phi lines with exactly two incomings. A block whose cond and
-   fallthrough gotos target the SAME successor contributes TWO edges;
-   the target's phis take one incoming per edge (2), where a
-   node-keyed predecessor list would render one. *)
+   fallthrough gotos target the SAME successor renders two edges from
+   two blocks; the target's phis take one incoming per rendered
+   edge (2). *)
 let count_two_incoming_phis (ir : string) : int =
   String.split_on_char '\n' ir
   |> List.filter (fun l -> contains_substring l " = phi i64 ")
@@ -348,7 +348,7 @@ let count_two_incoming_phis (ir : string) : int =
       | [] -> false)
   |> List.length
 
-let run_phi_edge_multiplicity () =
+let run_phi_edges () =
   (* Shared shape: A defines x := RSP + 1 and branches on a flag; T
      reads x. E is the alternate fallthrough. *)
   let build ~(both_to_t : bool) () : string =
@@ -469,9 +469,9 @@ let run_anchor_residue () =
     "getelementptr i8, ptr %stack_r0, i64 8192" ir
 
 (* Family 12: the resolved-dispatch rows' emitter views — the phi
-   incomings (per-target grouping) and the phi arity (per-edge
-   multiplicity), folded from the producer's rows (the J2 shape: a
-   stamped dispatch over real BIR). *)
+   incomings (per-target grouping, one per rendered edge), folded
+   from the producer's rows (the J2 shape: a stamped dispatch over
+   real BIR). *)
 let run_tls_anchor () =
   (* The TLS-relative access (the stack-protector canary shape): the
      address bases on the ABI's thread-pointer register and renders as
@@ -528,11 +528,8 @@ let run_rows_views () =
   in
   let t_fresh = tids.(2) and t_two = tids.(3) and t_dup = tids.(4) in
   let exit_tid = tids.(5) in
-  (* The multiplicity rule reads at the emission: each guarded goto of
-     the chain is one terminator edge into its target. *)
-  (* The multiplicity rule over the term edges (what update_phis
-     derives): one incoming per (pred, target) jmp — counted with
-     Term.enum, the BIR is the truth. *)
+  (* Each guarded goto of the chain is one terminator edge into its
+     target, and each rendered edge contributes one incoming. *)
   let edges_into (t : Tid.t) : int =
     Term.enum blk_t sub
     |> Seq.fold ~init:0 ~f:(fun acc b ->
@@ -874,6 +871,77 @@ let run_scope_freshness () =
   check "SCOPE: the clean sub's scope is fresh — no summary leaks across the boundary"
     (List.length (reports (Term.tid clean_sub)) = 0)
 
+(* The rendered-edge law, pinned: two conditional gotos to one target
+   render two EDGES from two blocks; the target's phi takes one
+   incoming per rendered predecessor — never the merged-and-counted
+   shape that names one block twice. *)
+let phi_preds (line : string) : string list =
+  (* One label per incoming: the token between ', %"' and the next '"'. *)
+  let n = String.length line in
+  let rec go i acc =
+    if i + 4 > n then List.rev acc
+    else if String.sub line i 4 = ", %\"" then begin
+      let b = i + 4 in
+      let e = String.index_from line b '"' in
+      go (e + 1) (String.sub line b (e - b) :: acc)
+    end
+    else go (i + 1) acc
+  in
+  go 0 []
+
+let run_phi_rendered_edges () =
+  let rax = v64 "RAX" in
+  let flag = v64 "dup_flag" in
+  let g k = Bil.BinOp (Bil.EQ, Bil.Var flag, Bil.Int (Cbat_word.to_word (w64 k))) in
+  let dup_sub, _ =
+    sub_of "phi_dup"
+      [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
+        [ (1, fun t -> mk_jmp_to t (g 1));
+          (1, fun t -> mk_jmp_to t (g 2)) ];
+        [ Def.create (v64 "dup_u") (Bil.Var rax) ], [] ]
+  in
+  let ir = emit_ir [ dup_sub ] in
+  let phi_lines =
+    String.split_on_char '\n' ir
+    |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
+  in
+  check "PHI-EDGE: the target block carries phis (the fixture exercises them)"
+    (List.length phi_lines >= 1);
+  let dup_preds =
+    List.concat_map (fun l ->
+        let ps = phi_preds l in
+        let uniq = List.sort_uniq compare ps in
+        if List.length uniq < List.length ps then [ l ] else [])
+      phi_lines
+  in
+  check "PHI-EDGE: no phi names the same predecessor block twice"
+    (dup_preds = []);
+  (* The strong form: the module is valid LLVM — the optimizer's
+     frontend accepts it. *)
+  let ll = Filename.temp_file "phi_dup" ".ll" in
+  let oc = open_out ll in
+  output_string oc ir;
+  close_out oc;
+  let o = Filename.temp_file "phi_dup" ".o" in
+  let ic = Unix.open_process_in
+      (Printf.sprintf "llc -O0 -filetype=obj %s -o %s 2>&1" ll o) in
+  let llc_out =
+    let buf = Buffer.create 256 in
+    (try
+       while true do
+         Buffer.add_char buf (input_char ic)
+       done
+     with End_of_file -> ());
+    Buffer.contents buf
+  in
+  let status = Unix.close_process_in ic in
+  Sys.remove ll;
+  Sys.remove o;
+  check "PHI-EDGE: llc accepts the module (one incoming per rendered predecessor)"
+    (match status with Unix.WEXITED 0 -> true | _ ->
+       Printf.printf "llc: %s\n" llc_out;
+       false)
+
 let run () =
   run_scope_freshness ();
   run_poison ();
@@ -884,9 +952,10 @@ let run () =
   run_golden ();
   run_anchor_residue ();
   run_fp_gpr ();
-  run_phi_edge_multiplicity ();
+  run_phi_edges ();
   run_width_family_read ();
   run_tls_anchor ();
   run_rows_views ();
   run_tiling ();
-  run_nbranch_series ()
+  run_nbranch_series ();
+  run_phi_rendered_edges ()

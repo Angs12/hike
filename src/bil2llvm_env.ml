@@ -9,45 +9,17 @@ module Abi = Hike_abi
 
 module EHashtbl = Core.Hashtbl
 
-(* The edge bridge: per BIR edge (pred -> target), the basic block
-   holding the edge's terminator and the edge's SP-restore value.
-   One table per sub scope; phis read it after rendering completes. *)
-module Edge_tbl = struct
-  type row = { term_bb : Llvm.llbasicblock; sp_restore : Llvm.llvalue option }
-
-  type t = (Tid.t, (Tid.t, row) EHashtbl.t) EHashtbl.t
-
-  let empty () : t = EHashtbl.create (module Tid)
-
-  (* Merges into any existing row: the render paths write different
-     fields of one row. *)
-  let set (t : t) ~(pred : Tid.t) ~(target : Tid.t)
-      ?term_bb ?sp_restore () : unit =
-    let inner =
-      match EHashtbl.find t pred with
-      | Some h -> h
-      | None ->
-        let h = EHashtbl.create (module Tid) in
-        EHashtbl.set t ~key:pred ~data:h;
-        h
-    in
-    let existing = EHashtbl.find inner target in
-    let row =
-      match existing with
-      | Some r ->
-        { term_bb = Option.value term_bb ~default:r.term_bb;
-          sp_restore = Base.Option.first_some sp_restore r.sp_restore }
-      | None ->
-        { term_bb = (match term_bb with Some bb -> bb | None -> failwith "Edge_tbl.set: a new row needs a term_bb");
-          sp_restore = sp_restore }
-    in
-    EHashtbl.set inner ~key:target ~data:row
-
-  let find (t : t) ~(pred : Tid.t) ~(target : Tid.t) : row option =
-    match EHashtbl.find t pred with
-    | Some h -> EHashtbl.find h target
-    | None -> None
-end
+(* One RENDERED edge: the block holding the winning terminator, the
+   BIR block it belongs to, the edge's SP restore, the jump target.
+   Rows are appended per rendered jmp — never merged, so two
+   conditional gotos to one target are two rows with two distinct
+   terminator blocks. *)
+type phi_edge = {
+  e_pred : Tid.t;                    (* the edge's BIR block *)
+  e_term_bb : Llvm.llbasicblock;     (* the block holding the terminator *)
+  e_sp_restore : Llvm.llvalue option;
+  e_target : Tid.t;
+}
 
 (* Vars keyed by (name, width). *)
 type wvar = WVar of Var.t * int
@@ -179,8 +151,8 @@ type sub_scope = {
   (* The body's frame: routes region/window mem vars; bound around
      body emission. *)
   cur_frame : sub_frame option ref;
-  (* The edge bridge: fresh per scope. *)
-  edge_tbl : Edge_tbl.t ref;
+  (* The rendered edges: fresh per scope, owned by Bil2llvm_phi. *)
+  edges : phi_edge list ref;
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
@@ -193,7 +165,7 @@ let fresh_scope () : sub_scope =
     dead_warned = ref Tid.Set.empty;
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
-    edge_tbl = ref (Edge_tbl.empty ());
+    edges = ref [];
     undef_vals = ref WVarMap.empty }
 
 let typ_lltype ctx typ =
@@ -382,6 +354,27 @@ let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
       let v = Llvm.build_freeze (Llvm.undef typ) "hike_undef" b in
       scope.undef_vals := WVarMap.add (wvar_of var) v !(scope.undef_vals);
       v
+
+let warn_undef_read ctx scope var blk_tid =
+  let v = Var.base var in
+  let abi = ctx.abi in
+  let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
+  let sub_key = blk_tid in
+  let warned_vars =
+    match Core.Map.find !(scope.undef_warned) sub_key with
+    | Some r -> r
+    | None ->
+        let r = ref Var.Set.empty in
+        scope.undef_warned :=
+          Core.Map.set !(scope.undef_warned) ~key:sub_key ~data:r;
+        r
+  in
+  if not (Core.Set.mem !warned_vars v) then begin
+    warned_vars := Core.Set.add !warned_vars v;
+    if not is_lane then
+      Hike_diag.warn "undef-read: blk %s: var %s never defined"
+        (Tid.name blk_tid) (Var.name v)
+  end
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"

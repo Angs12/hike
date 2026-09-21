@@ -21,7 +21,7 @@ let restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough_tid =
             (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) ctx.abi.Abi.word)
             "sp_restored" llvm_builder
         in
-        Edge_tbl.set !(scope.edge_tbl) ~pred:blk_tid ~target:fallthrough_tid
+        Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:fallthrough_tid
           ~term_bb:(get_bb scope blk_tid)
           ~sp_restore:restored ();
         (match get_local scope fallthrough_tid sp_key with

@@ -15,75 +15,17 @@ open Bil2llvm_section
 
 let section_type_to_string = Bil2llvm_env.section_type_to_string
 
-let update_phi ctx scope transfer_vars blk_incoming blk_tid =
-  (* The edge bridge's SP restore wins over the pred's local binding. *)
-  let edge_val (pred_tid : tid) (var : var) : Llvm.llvalue option =
-    if Var.same var ctx.sp then
-      match Edge_tbl.find !(scope.edge_tbl) ~pred:pred_tid ~target:blk_tid with
-      | Some r -> r.sp_restore
-      | None -> None
-    else None
-  in
-  Base.List.iter transfer_vars ~f:(fun var ->
-      let phi_llvar = get_phi scope blk_tid var in
-      Base.List.iter blk_incoming ~f:(fun (tid, pred_bb) ->
-          let phi_reg =
-            match edge_val tid var with
-            | Some v -> Some v
-            | None -> get_local scope tid var
-          in
-          match phi_reg with
-          | Some phi_reg ->
-              Llvm.add_incoming (phi_reg, pred_bb) phi_llvar
-          | None ->
-              (* An incoming with no value on its edge reads the
-                 register's frozen undef. *)
-              warn_undef_read ctx scope var blk_tid;
-              let v = frozen_undef ctx scope var in
-              Llvm.add_incoming (v, pred_bb) phi_llvar))
-
-(* LLVM phis take one incoming per terminator edge; two conditional
-   gotos to the same target are two edges where the graph shows one. *)
-let multiplicity (pred_blk : blk term) (target : Tid.t) : int =
-  let n =
-    Term.enum jmp_t pred_blk
-    |> Seq.count ~f:(fun j ->
-        match Jmp.kind j with
-        | Goto (Direct t) | Ret (Direct t) -> Tid.equal t target
-        | _ -> false)
-  in
-  if n = 0 then 1 else n
-
 let update_phis ctx scope transfer_vars blks sub =
-  let blk_of =
-    Core.Map.of_alist_exn (module Tid)
-      (Base.List.map (Seq.to_list blks) ~f:(fun b -> (Term.tid b, b)))
-  in
   let cfg = Sub.to_graph sub in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
-      let term_preds =
+      let preds =
         Graphs.Tid.Node.preds blk_tid cfg
         |> Base.Sequence.to_list
       in
-      let blk_incoming =
-        Base.List.concat_map term_preds ~f:(fun ptid ->
-            let n =
-              match Core.Map.find blk_of ptid with
-              | Some pb -> multiplicity pb blk_tid
-              | None -> 1
-            in
-            Base.List.init n ~f:(fun _ ->
-                (* Phi incomings name the pred's terminator block, not
-                   its entry. *)
-                let edge_bb =
-                  match Edge_tbl.find !(scope.edge_tbl) ~pred:ptid ~target:blk_tid with
-                  | Some r -> r.term_bb
-                  | None -> get_bb scope ptid
-                in
-                (ptid, edge_bb)))
-      in
-      update_phi ctx scope transfer_vars blk_incoming blk_tid)
+      Base.List.iter transfer_vars ~f:(fun var ->
+          let phi = get_phi scope blk_tid var in
+          Bil2llvm_phi.add_incomings ctx scope ~phi ~preds ~target:blk_tid var))
 
 let create_control_flow ctx scope llvm_builder blk sub fr =
   let control_flow = Term.enum jmp_t blk in
