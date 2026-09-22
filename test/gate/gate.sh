@@ -21,7 +21,7 @@ SEMOUT="${HIKE_SEMOUT:-/tmp/hike-sem}"
 SEMOPT="${HIKE_SEMOPT:-/tmp/hike-semopt}"
 
 usage() {
-  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|opt-safety|unit|all>" >&2
+  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|opt-safety|unit|fail-before|all>" >&2
   exit 2
 }
 
@@ -36,6 +36,7 @@ stage() {
     semantics)  need_provenance; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
     opt-safety) need_provenance; "$HERE/semantic/run_semantic_opt.sh" "$CORPUS" "$EMIT" "$SEMOPT" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
+    fail-before) "$HERE/fail_before.sh" ;;
     *)          usage ;;
   esac
 }
@@ -44,7 +45,7 @@ STAGE="${1:-}"
 [ -n "$STAGE" ] || usage
 
 if [ "$STAGE" = all ]; then
-  for s in provenance corpus lift allocas semantics opt-safety unit; do
+  for s in provenance corpus lift allocas semantics opt-safety unit fail-before; do
     echo "=== gate: $s"
     stage "$s" || {
       echo "gate FAILED at stage: $s" >&2
