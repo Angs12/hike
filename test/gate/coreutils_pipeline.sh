@@ -10,7 +10,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SEM="$HERE/semantic"
-REPO_ROOT="$(cd "$HERE/.." && pwd)"
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 WORK="${1:-/tmp/opencode/coreutils-test}"
 STAGE="${2:-all}"

@@ -9,7 +9,8 @@
 set -u
 C0="$1"; C2="$2"; L0="$3"; L2="$4"
 W="${5:-/tmp/conv_work}"; mkdir -p "$W"
-HARNESS="$HOME/Documents/hike/scripts/semantic/harness.c"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+HARNESS="$HERE/harness.c"
 
 insns() { grep -cE '^[ ]*%[a-z0-9]+ = |^[ ]+(ret|br|store|call|load) ' "$1" 2>/dev/null; }
 textsz() { size "$1" 2>/dev/null | awk 'NR==2 {print $1}'; }

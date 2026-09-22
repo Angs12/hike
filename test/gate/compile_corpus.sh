@@ -13,7 +13,7 @@
 set -u
 
 OUT="${1:-/tmp/corpus}"
-cd "$(dirname "$0")/../src/progs" || exit 1
+cd "$(dirname "$0")/../../src/progs" || exit 1
 
 build_lane () {
   local flags="$1" dest="$2"
