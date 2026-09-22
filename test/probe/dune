@@ -1,0 +1,16 @@
+(executables
+ (names corpus_watch precision_probe)
+ (modules corpus_watch precision_probe)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  bap-future
+  threads)
+ (flags
+  :standard -g))
