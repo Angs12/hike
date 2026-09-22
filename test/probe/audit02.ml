@@ -150,10 +150,65 @@ let audit_sub (sp : var) (sub : sub term) : unit =
           ())
   end
 
+(* wbig mode: one line per def whose address window is >= 2^63, plus per-sub
+   counts.  Initially its own probe; folded in here.  Subs that fail the
+   fixpoint report and skip. *)
+let wbig_main (path : string) : unit =
+  let proj = load_project path in
+  let prog = Project.program proj in
+  let sp = sp_of proj in
+  let total = ref 0 in
+  let skipped = ref 0 in
+  all_subs prog
+  |> List.iter (fun sub ->
+      try
+        let n = ref 0 in
+        let sub', sol = analyze_and_fixpoint sp prog sub in
+        let kind_of =
+          let sol =
+            Cbat_vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+              ~resolved:Tid.Map.empty (Program.create ~subs:[ sub' ] ()) sub'
+              (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub')
+          in
+          Probe_common.seam_kinds_of sol sub'
+        in
+        Term.enum blk_t sub'
+        |> Seq.iter ~f:(fun b ->
+            let has_call =
+              Term.enum jmp_t b
+              |> Seq.exists ~f:(fun j ->
+                  match Jmp.kind j with Call _ -> true | _ -> false)
+            in
+            let st = ref (Graphlib.Std.Solution.get sol (Term.tid b)) in
+            Term.enum def_t b
+            |> Seq.iter ~f:(fun d ->
+                (match Def.rhs d with
+                 | Bil.Load (_, addr, _, _) | Bil.Store (_, addr, _, _, _) ->
+                   (match Vsa.Test_seam.denote_imm_exp addr !st with
+                    | Ok ws when ws_window_big ws ->
+                      incr n;
+                      Printf.printf "w_big\t%s\t%s\t%s\t%s\tcall=%b\tkind=%s\n"
+                        (Sub.name sub') (Tid.name (Term.tid b))
+                        (def_to_string d) (ws_to_string ws) has_call
+                        (match Core.Map.find kind_of (Term.tid d) with
+                         | Some k -> vsa_kind_to_string k
+                         | None -> "-")
+                    | _ -> ())
+                 | _ -> ());
+                st := Vsa.Test_seam.denote_def d !st));
+        Printf.printf "=== %s: %d w_big access(es)\n" (Sub.name sub') !n;
+        total := !total + !n
+      with e ->
+        incr skipped;
+        Printf.printf "=== %s: SKIPPED (%s)\n" (Sub.name sub)
+          (Printexc.to_string e));
+  Printf.printf "TOTAL w_big accesses: %d (%d sub(s) skipped)\n" !total !skipped
+
 let () =
   let paths = Array.to_list Sys.argv |> List.tl in
   match paths with
-  | [] -> Printf.printf "usage: %s <binary> [subname]\n" Sys.argv.(0); exit 0
+  | "--wbig" :: binary :: _ -> init (); wbig_main binary
+  | [] -> Printf.printf "usage: %s <binary> [subname] | --wbig <binary>\n" Sys.argv.(0); exit 0
   | binary :: rest ->
     init ();
     let subname = match rest with hd :: _ -> hd | [] -> "main" in

@@ -19,8 +19,8 @@
   (pps ppx_bap)))
 
 (executables
- (names audit02 conv_diag passcost stage_timer subtimes corpus_watch precision_probe)
- (modules audit02 conv_diag passcost stage_timer subtimes corpus_watch precision_probe)
+ (names audit02 conv_diag stage_timer subtimes corpus_watch precision_probe)
+ (modules audit02 conv_diag stage_timer subtimes corpus_watch precision_probe)
  (libraries
   probe_common
   hike
@@ -40,8 +40,8 @@
   (pps ppx_bap)))
 
 (executables
- (names vsa_debug wbig_diag)
- (modules vsa_debug wbig_diag)
+ (names vsa_debug)
+ (modules vsa_debug)
  (enabled_if
   (= %{profile} vsa-debug))
  (libraries

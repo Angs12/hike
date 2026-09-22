@@ -45,15 +45,21 @@ site→pin list.
 
 ## Reconciliation status
 
-The migration ran per module with a clean `dune runtest` (22 modules,
-0 failures). Two rows show a count divergence that a label-based counter
-cannot settle — `test_forward` (25 pins vs 28 label occurrences) and
-`test_promote` (22 pins vs 13) — because the counter over- and
-under-counts multi-line and multi-label sites. These are recorded as a
-follow-up ticket: a pin-by-pin audit against the git-history sources
-verifying that no assertion in those two modules was dropped or
-duplicated. The other fifteen rows reconcile exactly or have a
-documented fold/expansion.
+Resolved (T1). The divergences were artifacts of a label-based counter:
+`check` calls are multi-line, `check_ir` helper calls were excluded by a
+word-boundary count, and a `match Ok/Error` repeats one label across two
+arms.
+
+- `test_forward`: 26 counter hits → 25 logical assertions (the `Ok/Error`
+  pair for E3-1 and for R-G1 each counts once) → 15 `FWD-*` + 10 `CE-*` =
+  25 pins. Exact.
+- `test_promote`: 15 `check`/`check_bound` + 7 `check_ir` = 22 logical
+  assertions → 22 `PR-*` pins (T4-* 9, T10-* 5, PR-A* 6, PR-WC* 2). Exact.
+
+`test_bil2llvm` is the one intended fold: 53 assertions (39 `check` + 14
+`check_ir`) are carried as 41 assertion sites inside 22 `EMIT-*` pins,
+with co-located `check_ir` calls conjoined — the module's own report lists
+the fold. The other fourteen rows reconcile exactly.
 
 Detail per pin: `test/pins/<module>.md` (concatenated into
 `test/pins.md`).
