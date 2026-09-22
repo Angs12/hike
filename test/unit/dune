@@ -1,0 +1,41 @@
+(library
+ (name hike_test)
+ (modules harness common fixtures)
+ (libraries
+  hike
+  bap
+  bap-main
+  bap-core-theory
+  cbat_vsa
+  cbat_vsa_domain
+  graphlib
+  core
+  bap-future
+  threads
+  unix
+  alcotest)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+(test
+ (name test_dce)
+ (modules test_dce)
+ (libraries
+  hike_test
+  alcotest
+  hike
+  bap
+  bap-main
+  bap-core-theory
+  cbat_vsa
+  cbat_vsa_domain
+  graphlib
+  core
+  bap-future
+  unix)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))

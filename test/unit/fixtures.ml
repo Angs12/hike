@@ -1,0 +1,1136 @@
+(* Shared fixture vocabulary: BIR builders, loop families, run helpers.
+   Split from test_common.ml (harness stays there). *)
+
+open Bap.Std
+open Bap_core_theory
+open Common
+open Harness
+
+let mk_env binds = List.fold_left (fun e (v, ws) -> AI.add_word e ~key:v ~data:ws) AI.top binds
+
+(* A conditional/terminal jump to an explicit target tid. *)
+let mk_jmp_to tgt cond = Jmp.create ~cond (Goto (Direct tgt))
+
+(* An unconditional jump to an explicit target tid. *)
+let mk_goto (tgt : tid) : jmp term = Jmp.create (Goto (Direct tgt))
+
+(* A terminal Ret to a fresh tid (the exit-block idiom); the edge maker
+   ignores the node index. *)
+let mk_ret : tid -> jmp term = fun _ -> Jmp.create (Ret (Direct (Tid.create ())))
+
+(* One block from a def list (phase 1 of the two-phase builder dance:
+   tids are captured from the result before jumps are wired). *)
+let blk_of_defs (defs : def term list) : blk term =
+  let b = Blk.Builder.create () in
+  List.iter (Blk.Builder.add_def b) defs;
+  Blk.Builder.result b
+
+(* Wire jumps onto a phase-1 block (phase 2: re-init, add jumps). *)
+let with_jmps (b0 : blk term) (jmps : jmp term list) : blk term =
+  let b = Blk.Builder.init ~copy_defs:true b0 in
+  List.iter (Blk.Builder.add_jmp b) jmps;
+  Blk.Builder.result b
+
+(* The j-th jmp of the i-th block (the DSL's read-back for jmp tids). *)
+let sub_jmp (sub : sub term) (i : int) (j : int) : jmp term =
+  let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) i in
+  List.nth (Term.enum jmp_t blk |> Seq.to_list) j
+
+(* One sub from nodes: a node is its defs plus out-edges, each edge a
+   (target index, jump maker) pair — the maker receives the target's
+   tid. Node order is the sub's block order (the VSA reads its
+   taken/fallthrough edge order from it); the tids come back in that
+   order. *)
+let sub_of ?(tid = Tid.create ()) ?(args = []) (name : string)
+    (nodes : (def term list * (int * (tid -> jmp term)) list) list) :
+    sub term * tid array =
+  let b0s = List.map (fun (defs, _) -> blk_of_defs defs) nodes in
+  let tids = Array.of_list (List.map Term.tid b0s) in
+  let blks =
+    List.map2
+      (fun b0 (_, edges) -> with_jmps b0 (List.map (fun (i, mk) -> mk tids.(i)) edges))
+      b0s nodes
+  in
+  let sb = Sub.Builder.create ~tid ~name () in
+  List.iter (Sub.Builder.add_arg sb) args;
+  List.iter (Sub.Builder.add_blk sb) blks;
+  (Sub.Builder.result sb, tids)
+
+(* A one-entry sub over the defs, exiting through a real terminal
+   block (CFG-honest: the Goto target is built first). *)
+let straight_sub (name : string) (defs : def term list) : sub term =
+  fst (sub_of name [ defs, [ (1, mk_goto) ]; [], [ (0, mk_ret) ] ])
+
+(* Mem fixture: a singleton map holding one key/data cell. *)
+let key_of ws =
+  match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of"
+
+let mk_mem ~key ~data =
+  let k = key_of key in
+  let v = Mem.Val.create data LittleEndian in
+  Mem.add (Mem.top { Mem.addr_width = 32; Mem.addressable_width = 8 }) ~key:k ~data:v
+
+(* Seed fixture: entry state with RSP/RBP at the symbolic segment base
+   (offset 0 — the production universe). *)
+let mk_seed_state rsp rbp () =
+  AI.add_word
+    (AI.add_word AI.top ~key:rsp ~data:(Ws.stack_word_i64 0L))
+    ~key:rbp
+    ~data:(Ws.stack_word_i64 0L)
+
+(* VSA fixture builders (moved verbatim from test_vsa.ml). *)
+let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub term * tid =
+  let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
+  let t = Var.create ~is_virtual:false ~fresh:false "t" (Type.Imm 32) in
+  let iv = Bil.Var i in
+  let tv = Bil.Var t in
+  let lt = Bil.BinOp (Bil.LT, iv, tv) in
+  let nlt = Bil.UnOp (Bil.NOT, lt) in
+  let sub, tids =
+    sub_of "counter_loop"
+      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ], [ (1, mk_goto) ];
+        [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) ], [ (2, mk_goto) ];
+        [], [ (3, fun t -> mk_jmp_to t lt); (2, fun t -> mk_jmp_to t nlt) ];
+        exit_defs i, [] ]
+  in
+  let ctx = Program.create ~subs:[ sub ] () in
+  (i, ctx, sub, tids.(3))
+
+(* Flag-guard fixture: mixed vs single def shapes. *)
+let mk_flag_sub ~(mixed : bool) :
+    var * Program.t * sub term * tid * def term * def term option * def term =
+  let f = v1 "t3_f" in
+  let g = v1 "t3_g" in
+  let h = v1 "t3_h" in
+  let t = v64 "t3_t" in
+  let m = memv "t3_m" in
+  let defA = Def.create f (Bil.Var g) in
+  let defB = Def.create f (Bil.Var h) in
+  let defU = Def.create (v64 "t3_u") (Bil.Int (Cbat_word.to_word (w64 42))) in
+  let defC =
+    Def.create t
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var g, Bil.Var (v64 "RSP")), LittleEndian, `r64))
+  in
+  let sub, tids =
+    sub_of "t3_flag"
+      [ [ defA ] @ (if mixed then [ defB ] else []) @ [ defC; defU ],
+        [ (1, fun t -> mk_jmp_to t (Bil.Var f)) ];
+        [], [] ]
+  in
+  let ctx = Program.create ~subs:[ sub ] () in
+  (f, ctx, sub, tids.(1), defA, (if mixed then Some defB else None), defU)
+
+(* Single self-looping block sub (a never-analyzed callee; calls abstract it).
+   Shared by the alias-shape fixture below and the prologue/outgoing escape family. *)
+let mk_selfloop_callee (name : string) : sub term =
+  fst (sub_of name [ ([], [ (0, mk_goto) ]) ])
+
+(* Call jump with a return continuation. *)
+let mk_call_jmp (post_tid : tid) (callee_tid : tid) : jmp term =
+  Jmp.create (Call (Call.create ~return:(Label.direct post_tid) ~target:(Label.direct callee_tid) ()))
+
+(* Frozen-flag guard — constrain_edge refines every var, gate-free. *)
+type caller_alias_fixture = {
+  ca_ctx : Program.t;
+  ca_sub : sub term;
+  ca_entry_blk : blk term;
+  ca_post_tid : tid;
+  ca_m : var;
+  ca_r2 : var;
+  ca_rsp : var;
+  ca_rbp : var;
+  ca_rbx : var;
+  ca_rdi : var;
+  ca_def_rbp : def term;
+  ca_def_rdi : def term;
+  ca_def_store : def term;
+  ca_def_store_disjoint : def term;
+}
+
+let mk_caller_alias () : caller_alias_fixture =
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let rbx = v64 "RBX" in
+  let rdi = v64 "rdi" in
+  let r2 = v64 "t4_r2" in
+  let m = memv "t4_m" in
+  let m2 = memv "t4_m2" in
+  let v = v64 "t4_v" in
+  let w = v64 "t4_w" in
+  let w2 = v64 "t4_w2" in
+  (* Callee: single self-looping block; never analyzed (call abstracted). *)
+  let callee = mk_selfloop_callee "t4_callee" in
+  let callee_tid = Term.tid callee in
+  let def_rsp = Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x2000))) in
+  let def_rbp = Def.create rbp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x1f00)))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
+  let def_rbx = Def.create rbx (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x40)))) in
+  (* Call PUSH model (rsp := RSP - 8); placed after defs using pre-push RSP. *)
+  let def_push = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8)))) in
+  let def_v =
+    Def.create v
+      (Bil.Load
+         (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x10))), LittleEndian, `r64))
+  in
+  let def_w2 =
+    Def.create w2
+      (Bil.Load (Bil.Var m, Bil.BinOp (Bil.PLUS, Bil.Var rbx, Bil.Var rsp), LittleEndian, `r64))
+  in
+  let def_w = Def.create w (Bil.Load (Bil.Var m, Bil.Var rdi, LittleEndian, `r64)) in
+  let def_store =
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var rdi, Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64))
+  in
+  let def_store_disjoint =
+    Def.create m2
+      (Bil.Store
+         ( Bil.Var m2,
+           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.Int (Cbat_word.to_word (w64 0x80))),
+           Bil.Int (Cbat_word.to_word (w64 43)),
+           LittleEndian,
+           `r64 ))
+  in
+  let def_reload = Def.create r2 (Bil.Load (Bil.Var m, Bil.Var rdi, LittleEndian, `r64)) in
+  let caller, tids =
+    sub_of ~args:[ Arg.create rdi (Bil.Var rdi); Arg.create r2 (Bil.Var r2) ]
+      "t4_caller"
+      [ [ def_rsp;
+          def_rbp;
+          def_rdi;
+          def_rbx;
+          def_push;
+          def_v;
+          def_w2;
+          def_w;
+          def_store;
+          def_store_disjoint ],
+        [ (1, fun t -> mk_call_jmp t callee_tid) ];
+        [ def_reload ], [] ]
+  in
+  let entry = List.hd (Term.enum blk_t caller |> Seq.to_list) in
+  let ctx = Program.create ~subs:[ caller; callee ] () in
+  {
+    ca_ctx = ctx;
+    ca_sub = caller;
+    ca_entry_blk = entry;
+    ca_post_tid = tids.(1);
+    ca_m = m;
+    ca_r2 = r2;
+    ca_rsp = rsp;
+    ca_rbp = rbp;
+    ca_rbx = rbx;
+    ca_rdi = rdi;
+    ca_def_rbp = def_rbp;
+    ca_def_rdi = def_rdi;
+    ca_def_store = def_store;
+    ca_def_store_disjoint = def_store_disjoint;
+  }
+
+(* Caller-alias soundness — post-call reload reads TOP; RSP/RBP/RBX kept, rdi TOPed.
+   The alias prologue (rdi through rbp, push def, dual mems) is a different
+   shape from the fp/outgoing escape family (mk_escape_caller); it shares only
+   the callee/call wiring above. *)
+(* F1: map-lattice fold visits explicitly-stored bindings only; absent = top. *)
+(* RSP-anchored seeds: RBP enters only via RSP-derivation. *)
+
+(* -O0 prologue (rbp := RSP) + load + overlapping store. Returns (def_rbp, def_store, sub). *)
+
+
+
+
+
+
+(* One-path heap shapes: the use-store's address joins to TOP. *)
+
+(* One-path fixture: the rdi use is reachable only via B1. Returns (def_prologue, def_load, def_other, def_use, sub). *)
+
+
+let mk_high0_cast_sub () : var * Program.t * sub term * tid =
+  let rax = Var.create ~is_virtual:false ~fresh:false "rax" (Type.Imm 64) in
+  let sub, tids =
+    sub_of "d7_high0_cast"
+      [ [],
+        [ (1, fun t ->
+              Jmp.create (Call (Call.create ~return:(Direct t) ~target:(Indirect (Bil.Int (Cbat_word.to_word (w64 0)))) ()))) ];
+        [ Def.create rax (Bil.Cast (Bil.HIGH, 0, Bil.Var rax)) ], [ (2, mk_goto) ];
+        [], [] ]
+  in
+  let ctx = Program.create ~subs:[ sub ] () in
+  (rax, ctx, sub, tids.(2))
+
+(* Stack-only residue closure: heap-indexed stores fall out; top-addr stores skipped. *)
+
+(* Heap-indexed store negative. Returns (def_base, def_idx, def_data, def_store, sub, exit tid). *)
+let mk_e2ed_heap_sub () : def term * def term * def term * def term * sub term * tid =
+  let rdi = v64 "e2ed_rdi" in
+  let i = v64 "e2ed_i" in
+  let v = v64 "e2ed_v" in
+  let m = memv "e2ed_m" in
+  let def_base = Def.create rdi (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
+  let def_idx = Def.create i (Bil.Int (Cbat_word.to_word (w64 5))) in
+  let def_data = Def.create v (Bil.Int (Cbat_word.to_word (w64 99))) in
+  let def_store =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 8)))),
+           Bil.Var v,
+           LittleEndian,
+           `r64 ))
+  in
+  let sub, tids =
+    sub_of "e2ed_heap"
+      [ [ def_base; def_idx; def_data; def_store ], [ (1, mk_goto) ];
+        [], [] ]
+  in
+  (def_base, def_idx, def_data, def_store, sub, tids.(1))
+
+
+
+(* RSP := 0 anchor def is tagged, so the entry state carries RSP = {0}. *)
+
+(* Smallest sub running the fixpoint: one block, one trivial def. *)
+let mk_p3_anchor_sub () : sub term =
+  let t = v64 "p3_t" in
+  fst (sub_of "p3_anchor" [ [ Def.create t (Bil.Int (Cbat_word.to_word (w64 0))) ], [] ])
+
+(* Backward-refinement loop fixtures (moved verbatim from test_backward.ml). *)
+let mk_l3a_loop ~(cmp : Bil.binop) ~(c : Cbat_word.t) ~(rhs : exp) : sub term * tid =
+  let m = memv "l3a_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32) in
+  let v = Var.create ~is_virtual:false ~fresh:false "l3a_v" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
+  let ncond = Bil.UnOp (Bil.NOT, cond) in
+  let sub, tids =
+    sub_of "l3a_loop"
+      [ [ Def.create rbp (Bil.Var rsp) ], [ (2, mk_goto) ];
+        [], [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)); Def.create v rhs ],
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t ncond) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Cell at [base-8] in [st], read back as the load denotation reads it. *)
+let cell_at (m : var) (base : var) (st : AI.t) : Ws.t =
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 8))) in
+  Result.fold
+    (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) st)
+    ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
+
+(* Finite non-top non-bottom set bounded above by [maxv]. *)
+let bounded_above (ws : Ws.t) (maxv : Cbat_word.t) : bool =
+  (not (Ws.is_top ws))
+  && (not (Ws.is_bottom ws))
+  && Option.is_some (Base.Option.filter (Ws.max_elem ws) ~f:(fun w -> Cbat_word.( <= ) w maxv))
+
+(* Tagged-sub fixpoint; walk's cell meet observable at BODY input. *)
+(* Iterate state of an edge is the single-predecessor target's IN-state. *)
+(* Anchored fixpoint run (defaults: the anchored entry; fixtures rely on
+   it).  The sub runs through the jump compiler first — the pipeline's
+   reality: the analysis reads value comparisons, never flag idioms. *)
+
+(* The fixtures' target: the flag roles name the fixture flag vars
+   (Theory.Var.define is pure in (sort, name), so Var.same matches
+   them). *)
+let jump_target =
+  let flag name = Theory.Var.forget (Theory.Var.define Theory.Bool.t name) in
+  Theory.Target.declare ~package:"test" "jump-flags" ~bits:64 ~byte:8
+    ~regs:Theory.Role.Register.[
+        [zero_flag], [flag "ZF"];
+        [carry_flag], [flag "CF"];
+        [sign_flag], [flag "SF"];
+        [overflow_flag], [flag "OF"]]
+
+let run_anchored (sub : sub term) : Vsa.vsa_sol =
+  let sub = Hike.Jump.compile_sub jump_target sub in
+  let prog = Program.create ~subs:[ sub ] () in
+  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+
+(* The VLA events through the shape test. *)
+let dyn_alloc_events (sub : sub term) : Tid.Set.t =
+  Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts sub
+let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
+  Graphlib.Std.Solution.get sol target_tid
+
+let iter_cell_of (sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) (cell_of : AI.t -> Ws.t) :
+    Ws.t =
+  cell_of (iter_state_of sub sol target_tid)
+
+let l3a_run_analyzed (sub : sub term) (body_tid : tid) : Ws.t =
+  (* Gate-free (spec §2.1): the raw sub runs; every def is denoted. *)
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3a_m") (v64 "RBP"))
+
+(* L3c-1: flag-state mechanism — bare-flag guards recover the comparison constraint. *)
+
+(* Flag-indirected loop fixture. Returns (sub, body tid, back-edge jump). *)
+let mk_l3c1_loop ~(extra_header_defs : def term list) ~(pre_cf_defs : def term list)
+    : sub term * tid * jmp term =
+  let m = memv "l3c1_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c1_t" (Type.Imm 32) in
+  let cf = v1 "l3c1_cf" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let sub, tids =
+    sub_of "l3c1_loop"
+      [ [ Def.create rbp (Bil.Var rsp) ], [ (2, mk_goto) ];
+        [], [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ] @ pre_cf_defs
+        @ [ Def.create cf (Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 10)))) ]
+        @ extra_header_defs,
+        [ (1, fun t -> mk_jmp_to t (Bil.Var cf)); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, Bil.Var cf))) ];
+        [], [] ]
+  in
+  let header = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
+  let jmp = match Term.enum jmp_t header |> Seq.to_list with [ j1; _ ] -> j1 | _ -> assert false in
+  (sub, tids.(1), jmp)
+
+(* L3c-2: signed comparison rows (SLT/SLE). *)
+
+(* Seeded counter loop; [flag] selects the flag-indirected guard, [prologue] drops it. Returns (sub, body tid). *)
+let mk_l3c2_loop ~(prologue : bool) ~(seed : Cbat_word.t option) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_op : Bil.binop) ~(body_k : Cbat_word.t) ~(flag : bool) : sub term * tid =
+  let m = memv "l3c2_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c2_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3c2_u" (Type.Imm 32) in
+  let cf = v1 "l3c2_cf" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var t, Bil.Int (Cbat_word.to_word c)) in
+  let jcond = if flag then Bil.Var cf else cond in
+  let sub, tids =
+    sub_of "l3c2_loop"
+      [ (match seed with
+         | Some v ->
+             [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word v), LittleEndian, `r32)) ]
+         | None -> [])
+        @ (if prologue then [ Def.create rbp (Bil.Var rsp) ] else []),
+        [ (2, mk_goto) ];
+        [ Def.create u (Bil.BinOp (body_op, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ]
+        @ (if flag then [ Def.create cf cond ] else []),
+        [ (1, fun t -> mk_jmp_to t jcond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, jcond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Finite non-top non-bottom, all values in [lo, hi]. *)
+let l3c2_in_high (ws : Ws.t) (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
+  (not (Ws.is_top ws))
+  && (not (Ws.is_bottom ws))
+  &&
+  match (Ws.min_elem ws, Ws.max_elem ws) with
+  | Some mn, Some mx -> Cbat_word.( >= ) mn lo && Cbat_word.( <= ) mx hi
+  | _ -> false
+
+(* L3c-3: PLUS-hull, TIMES-const, RSHIFT/ARSHIFT-const rows. *)
+
+(* Chain loop fixture: header loads, applies chain, guards. Returns (sub, body tid). *)
+let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_k : Cbat_word.t) : sub term * tid =
+  let m = memv "l3c3_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
+  let v = Var.create ~is_virtual:false ~fresh:false "l3c3_v" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3c3_u" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
+  let sub, tids =
+    sub_of "l3c3_loop"
+      [ (match seed with
+         | Some sv ->
+             [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
+         | None -> [])
+        @ [ Def.create rbp (Bil.Var rsp) ],
+        [ (2, mk_goto) ];
+        [ Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)); Def.create v chain ],
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Plain fixpoint; BODY input cell at RBP-8. *)
+let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (v64 "RBP"))
+
+(* L3c-4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
+
+(* Chain loop with compared-var width. Returns (sub, body tid). *)
+let mk_l3c4_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_k : Cbat_word.t) : sub term * tid =
+  let m = memv "l3c4_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c4_t" (Type.Imm 32) in
+  let v = Var.create ~is_virtual:false ~fresh:false "l3c4_v" (Type.Imm v_w) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3c4_u" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
+  let sub, tids =
+    sub_of "l3c4_loop"
+      [ (match seed with
+         | Some sv ->
+             [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
+         | None -> [])
+        @ [ Def.create rbp (Bil.Var rsp) ],
+        [ (2, mk_goto) ];
+        [ Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)); Def.create v chain ],
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Two-load Var-vs-Var shape. Returns (sub, body tid). *)
+let mk_l3c4_vv_loop ~(seed : Cbat_word.t option) ~(seed2 : Cbat_word.t option) ~(cmp : Bil.binop) ~(body_k : Cbat_word.t)
+    : sub term * tid =
+  let m = memv "l3c4_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c4_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3c4_u" (Type.Imm 32) in
+  let w = Var.create ~is_virtual:false ~fresh:false "l3c4_w" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let addr2 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))) in
+  let cond = Bil.BinOp (cmp, Bil.Var t, Bil.Var u) in
+  let sub, tids =
+    sub_of "l3c4_vv"
+      [ (match seed with
+         | Some sv ->
+             [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
+         | None -> [])
+        @ (match seed2 with
+           | Some sv ->
+               [ Def.create m (Bil.Store (Bil.Var m, addr2, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
+           | None -> [])
+        @ [ Def.create rbp (Bil.Var rsp) ],
+        [ (2, mk_goto) ];
+        [ Def.create w (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var w, LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32));
+          Def.create u (Bil.Load (Bil.Var m, addr2, LittleEndian, `r32)) ],
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Plain fixpoint; BODY input cell at RBP-8. *)
+let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c4_m") (v64 "RBP"))
+
+(* L3c-5: structural closure — identity rows, const-first arm, shrunk catch-all. *)
+
+(* Optional-chain loop fixture. Returns (sub, body tid). *)
+let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp) ~(body_k : Cbat_word.t) :
+    sub term * tid =
+  let m = memv "l3c5_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
+  let v = Var.create ~is_virtual:false ~fresh:false "l3c5_v" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3c5_u" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let sub, tids =
+    sub_of "l3c5_loop"
+      [ (match seed with
+         | Some sv ->
+             [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
+         | None -> [])
+        @ [ Def.create rbp (Bil.Var rsp) ],
+        [ (2, mk_goto) ];
+        [ Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ]
+        @ (match chain with Some ch -> [ Def.create v ch ] | None -> []),
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Plain fixpoint; BODY input cell at RBP-8. *)
+let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (v64 "RBP"))
+
+(* Interrupt denotation: unknown external callee via call_abstraction. *)
+(* L-3b: coalesce equal-lower merge arm — piles collapse, reads preserved. *)
+
+(* Seeded RMW counter (traverse shape). Returns (sub, body tid, header tid). *)
+let mk_l3b1_loop () : sub term * tid * tid =
+  let m = memv "l3b1_m" in
+  let rsp = v64 "RSP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3b1_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3b1_u" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let cond = Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))) in
+  let sub, tids =
+    sub_of "l3b1_loop"
+      [ [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 1))));
+          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ],
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1), tids.(2))
+
+(* Diamond: both branches store {7} at [RSP-8]/[RSP-7]; merge unions them. Returns (sub, merge tid). *)
+let mk_l3b4_diamond () : sub term * tid =
+  let m = memv "l3b4_m" in
+  let rsp = v64 "RSP" in
+  let i = Var.create ~is_virtual:false ~fresh:false "l3b4_i" (Type.Imm 32) in
+  let addr8 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let addr7 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 7))) in
+  let cond = Bil.BinOp (Bil.LT, Bil.Var i, Bil.Int (Cbat_word.to_word (w32 1))) in
+  let store7 addr = Def.create m (Bil.Store (Bil.Var m, addr, Bil.Int (Cbat_word.to_word (w32 7)), LittleEndian, `r32)) in
+  let sub, tids =
+    sub_of "l3b4_diamond"
+      [ [], [ (1, fun t -> mk_jmp_to t cond); (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [ store7 addr8; store7 addr7 ], [ (3, mk_goto) ];
+        [ store7 addr8; store7 addr7 ], [ (3, mk_goto) ];
+        [], [] ]
+  in
+  (sub, tids.(3))
+
+(* Cell count in [st]'s memory: the mem map's tree nodes — one
+   "(height" per map node in the sexp (the fork's Mem exposes no
+   enumeration; the count is the printer's node marker). *)
+let l3b_cells_of (mv : var) (st : AI.t) : int =
+  let mem = AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } st mv in
+  let s = Core.Sexp.to_string (Mem.sexp_of_t mem) in
+  let marker = "(height " in
+  let mlen = String.length marker in
+  let n = ref 0 in
+  for i = 0 to String.length s - mlen do
+    if String.sub s i mlen = marker then incr n
+  done;
+  !n
+
+(* L-B: jcc-decoder pins — exact -O0 corpus block fixture. *)
+
+(* jle/jl/ja guard nestings the decoder matcher accepts. *)
+let l39_jle (zf : var) (sf : var) (ofv : var) : exp =
+  Bil.BinOp
+    ( Bil.OR,
+      Bil.Var zf,
+      Bil.BinOp
+        ( Bil.AND,
+          Bil.BinOp (Bil.OR, Bil.Var sf, Bil.Var ofv),
+          Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.AND, Bil.Var sf, Bil.Var ofv)) ) )
+
+let l39_jl (sf : var) (ofv : var) : exp =
+  Bil.BinOp
+    ( Bil.AND,
+      Bil.BinOp (Bil.OR, Bil.Var sf, Bil.Var ofv),
+      Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.AND, Bil.Var sf, Bil.Var ofv)) )
+
+let l39_ja (cf : var) (zf : var) : exp =
+  Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.OR, Bil.Var cf, Bil.Var zf))
+
+(* Canonical -O0 cmp emission, fixed order: temp, CF, OF, SF, ZF (the decoder is order-sensitive). *)
+let mk_cmp_defs ~(e : exp) ~(c : Cbat_word.t) ~(t : var) ~(cf : var) ~(ofv : var) ~(sf : var)
+    ~(zf : var) : def term list =
+  [ Def.create t (Bil.BinOp (Bil.MINUS, e, Bil.Int (Cbat_word.to_word c)));
+    Def.create cf (Bil.BinOp (Bil.LT, e, Bil.Int (Cbat_word.to_word c)));
+    Def.create ofv
+      (Bil.Cast
+         ( Bil.HIGH,
+           1,
+           Bil.BinOp
+             ( Bil.AND,
+               Bil.BinOp (Bil.XOR, e, Bil.Int (Cbat_word.to_word c)),
+               Bil.BinOp (Bil.XOR, e, Bil.Var t) ) ));
+    Def.create sf (Bil.Cast (Bil.HIGH, 1, Bil.Var t));
+    Def.create zf (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero (Cbat_word.bitwidth c)), Bil.Var t)) ]
+
+(* Widening landmarks: empty guard meets record landmarks; widening extrapolates. *)
+
+(* Corpus jle shape, one or two chained loops. Returns (sub, l1, b1, l2 option). *)
+let lm_jle_loop ~(k1 : Cbat_word.t) ?(k2 : Cbat_word.t option) () : sub term * tid * tid * tid option =
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
+  let iv = Bil.Var i in
+  (* Canonical -O0 cmp emission; returns the defs and the jle cond. *)
+  let cmp_defs (c : Cbat_word.t) : def term list * exp =
+    let t = Var.create ~is_virtual:false ~fresh:false "lm_t" (Type.Imm 32) in
+    let cf = v1 "CF" in
+    let ofv = v1 "OF" in
+    let sf = v1 "SF" in
+    let zf = v1 "ZF" in
+    (mk_cmp_defs ~e:iv ~c ~t ~cf ~ofv ~sf ~zf, l39_jle zf sf ofv)
+  in
+  let defs1, cond1 = cmp_defs k1 in
+  let inc () = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
+  (* Drop the unused second loop: empty blocks break CFG/WTO plumbing. *)
+  let keep_l2 = Option.is_some k2 in
+  let exit_i = if keep_l2 then 5 else 3 in
+  let l2_nodes =
+    match k2 with
+    | Some c ->
+      let defs2, cond2 = cmp_defs c in
+      [ defs2, [ (4, fun t -> mk_jmp_to t cond2); (exit_i, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond2))) ];
+        [ inc () ], [ (3, mk_goto) ] ]
+    | None -> []
+  in
+  let sub, tids =
+    sub_of "lm_landmark_counter"
+      ([ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))); Def.create rbp (Bil.Var rsp) ],
+         [ (1, mk_goto) ];
+         defs1,
+         [ (2, fun t -> mk_jmp_to t cond1);
+           (* l1's fallthrough: l2 when kept, exit otherwise — both node 3. *)
+           (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond1))) ];
+         [ inc () ], [ (1, mk_goto) ] ]
+       @ l2_nodes
+       @ [ [], [] ])
+  in
+  (sub, tids.(1), tids.(2), if Option.is_some k2 then Some tids.(3) else None)
+
+(* NEQ-counter loop; landmarks are the only precision mechanism. Returns (sub, l1, b1). *)
+let lm_jne_loop ~(k : Cbat_word.t) () : sub term * tid * tid =
+  let kw = Cbat_word.to_word k in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
+  let t = Var.create ~is_virtual:false ~fresh:false "lm_ne_t" (Type.Imm 32) in
+  let zf = v1 "ZF" in
+  let iv = Bil.Var i in
+  let cond_taken = Bil.UnOp (Bil.NOT, Bil.Var zf) in
+  let cond_fallthrough = Bil.Var zf in
+  let sub, tids =
+    sub_of "lm_ne_landmark"
+      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))); Def.create rbp (Bil.Var rsp) ],
+        [ (1, mk_goto) ];
+        (* ZF compares the program var directly (recovery binds the right var). *)
+        [ Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int kw));
+          Def.create zf
+            (Bil.BinOp
+               (Bil.EQ,
+                Bil.BinOp (Bil.MINUS, iv, Bil.Int kw),
+                Bil.Int (Word.zero 32))) ],
+        [ (2, fun t -> mk_jmp_to t cond_taken); (3, fun t -> mk_jmp_to t cond_fallthrough) ];
+        [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) ],
+        [ (1, mk_goto) ];
+        [], [] ]
+  in
+  (sub, tids.(1), tids.(2))
+
+(* Shared F1-FT/B1/B3 build: the same jne-counter loop + anchored run.
+   Returns (k, sub, sol, head tid, body tid); the distinct pins stay in the tests. *)
+let lm_jne_run () : Cbat_word.t * sub term * Vsa.vsa_sol * tid * tid =
+  let k = w32 100 in
+  let sub, l1_tid, b1_tid = lm_jne_loop ~k () in
+  (k, sub, run_anchored sub, l1_tid, b1_tid)
+
+(* Exact corpus block fixture: seeded store, canonical cmp emission, compound guard. Returns (sub, body tid). *)
+let mk_l39_loop ~(seed : Cbat_word.t) ~(c : Cbat_word.t) ~(body_op : Bil.binop) ~(body_k : Cbat_word.t)
+    ~(mk_cond : cf:var -> ofv:var -> sf:var -> zf:var -> exp)
+    ~(extra_header_defs : var -> def term list) : sub term * tid =
+  let m = memv "l39_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l39_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l39_u" (Type.Imm 32) in
+  let cf = v1 "CF" in
+  let ofv = v1 "OF" in
+  let sf = v1 "SF" in
+  let zf = v1 "ZF" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
+  let cond = mk_cond ~cf ~ofv ~sf ~zf in
+  let sub, tids =
+    sub_of "l39_loop"
+      [ [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word seed), LittleEndian, `r32));
+          Def.create rbp (Bil.Var rsp) ],
+        [ (2, mk_goto) ];
+        [ Def.create u load_e;
+          Def.create m
+            (Bil.Store
+               (Bil.Var m, addr_e, Bil.BinOp (body_op, Bil.Var u, Bil.Int (Cbat_word.to_word body_k)), LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        mk_cmp_defs ~e:load_e ~c ~t ~cf ~ofv ~sf ~zf @ extra_header_defs m,
+        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Record-path fixture: bare-flag guard with unique def. Returns (sub, body tid). *)
+let mk_l39b5_loop () : sub term * tid =
+  let m = memv "l39_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let v = Var.create ~is_virtual:false ~fresh:false "l39b5_v" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l39b5_u" (Type.Imm 32) in
+  let cf = v1 "CF" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let sub, tids =
+    sub_of "l39b5_loop"
+      [ [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32));
+          Def.create rbp (Bil.Var rsp) ],
+        [ (2, mk_goto) ];
+        [ Def.create u (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32));
+          Def.create m
+            (Bil.Store
+               (Bil.Var m, addr_e, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (Cbat_word.to_word (w32 1))), LittleEndian, `r32)) ],
+        [ (2, mk_goto) ];
+        [ Def.create v (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32));
+          Def.create cf (Bil.BinOp (Bil.LT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 3)))) ],
+        [ (1, fun t -> mk_jmp_to t (Bil.Var cf)); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, Bil.Var cf))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
+
+(* Plain fixpoint; BODY input cell at RBP-8. *)
+let l39_run (sub : sub term) (body_tid : tid) : Ws.t =
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l39_m") (v64 "RBP"))
+
+(* L-E1: ON-path matched-pair RSP restoration (RSP := RSP + 8 on return). *)
+
+(* Call-in-loop fixture. Returns (sub, header tid, rsp). *)
+let mk_e1_loop_sub () : sub term * tid * var =
+  let rsp = v64 "RSP" in
+  let m = memv "e1_m" in
+  let sub, tids =
+    sub_of "e1_loop"
+      [ [ Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x1000))) ], [ (1, mk_goto) ];
+        [], [ (2, mk_goto) ];
+        [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))));
+          Def.create m (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0xdead)), LittleEndian, `r64)) ],
+        [ (3, fun t ->
+              Jmp.create (Call (Call.create ~return:(Label.direct t) ~target:(Indirect (Bil.Int (Cbat_word.to_word (w64 0)))) ()))) ];
+        [], [ (1, mk_goto) ] ]
+  in
+  (sub, tids.(1), rsp)
+
+(* Straight-line call fixture. Returns (sub, post tid, rsp). *)
+let mk_e1_flat_sub () : sub term * tid * var =
+  let rsp = v64 "RSP" in
+  let m = memv "e1_m" in
+  let sub, tids =
+    sub_of "e1_flat"
+      [ [ Def.create rsp (Bil.Int (Cbat_word.to_word (w64 0x2000)));
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))));
+          Def.create m (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0xcafe)), LittleEndian, `r64)) ],
+        [ (1, fun t ->
+              Jmp.create (Call (Call.create ~return:(Label.direct t) ~target:(Indirect (Bil.Int (Cbat_word.to_word (w64 0)))) ()))) ];
+        [], [] ]
+  in
+  (sub, tids.(1), rsp)
+
+(* ON-path fixpoint; RSP value-set at [tid]. *)
+let e1_rsp_at (sub : sub term) (tid : tid) (rsp : var) : Ws.t =
+  AI.find_word 64 (Graphlib.Std.Solution.get (run_anchored sub) tid) rsp
+
+(* L-D6: RBP-anchored gate-free fixture — the dead epilogue def is denoted too. *)
+
+(* RBP loop with dead epilogue def. Returns (sub, body tid). *)
+let mk_l6_rbp_loop () : sub term * tid =
+  let m = memv "l6_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l6_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l6_u" (Type.Imm 32) in
+  let cf = v1 "CF" in
+  let ofv = v1 "OF" in
+  let sf = v1 "SF" in
+  let zf = v1 "ZF" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
+  let c = w32 63 in
+  let cond = l39_jle zf sf ofv in
+  let sub, tids =
+    sub_of "l6_rbp_loop"
+      [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
+        [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word (w32 0)), LittleEndian, `r32)) ],
+        [ (3, mk_goto) ];
+        [ Def.create u load_e;
+          Def.create m
+            (Bil.Store
+               (Bil.Var m, addr_e, Bil.BinOp (Bil.PLUS, Bil.Var u, Bil.Int (Cbat_word.to_word (w32 1))), LittleEndian, `r32)) ],
+        [ (3, mk_goto) ];
+        mk_cmp_defs ~e:load_e ~c ~t ~cf ~ofv ~sf ~zf,
+        [ (2, fun t -> mk_jmp_to t cond); (4, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [ (5, mk_goto) ];
+        (* Dead epilogue def: RBP := mem[RSP]. *)
+        [ Def.create rbp (Bil.Load (Bil.Var m, Bil.Var rsp, LittleEndian, `r64)) ],
+        [] ]
+  in
+  (sub, tids.(2))
+
+(* ON-path fixpoint; BODY input cell at RBP-8. *)
+let l6_run (sub : sub term) (body_tid : tid) : Ws.t =
+  cell_at (memv "l6_m") (v64 "RBP") (Graphlib.Std.Solution.get (run_anchored sub) body_tid)
+
+(* The secondary guarded-refinement shapes: inline-arithmetic record
+   operand, NOT-edge, const-first flip, nested BinOp. *)
+
+(* RBP-anchored ON-path fixture with optional two-path seed. Returns (sub, body tid). *)
+let mk_r2_loop ~(seed : Cbat_word.t) ~(seed2 : Cbat_word.t option) ~(body_op : Bil.binop) ~(body_k : Cbat_word.t)
+    ~(mk_cond : t:var -> exp) : sub term * tid =
+  let m = memv "r2_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "r2_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "r2_u" (Type.Imm 32) in
+  let f = v1 "r2_f" in
+  let g = v1 "r2_g" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
+  let cond = mk_cond ~t in
+  let seed_store s = Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word s), LittleEndian, `r32)) in
+  let body_defs =
+    [ Def.create u load_e;
+      Def.create m
+        (Bil.Store
+           (Bil.Var m, addr_e, Bil.BinOp (body_op, Bil.Var u, Bil.Int (Cbat_word.to_word body_k)), LittleEndian, `r32)) ]
+  in
+  let not_cond = Bil.UnOp (Bil.NOT, cond) in
+  match seed2 with
+  | Some s2 ->
+      let sub, tids =
+        sub_of "r2_loop"
+          [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
+            [ Def.create f (Bil.Var g) ],
+            [ (2, fun t -> mk_jmp_to t (Bil.Var f)); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, Bil.Var f))) ];
+            [ seed_store seed ], [ (5, mk_goto) ];
+            [ seed_store s2 ], [ (5, mk_goto) ];
+            body_defs, [ (5, mk_goto) ];
+            [ Def.create t load_e ], [ (4, fun t -> mk_jmp_to t cond); (6, fun t -> mk_jmp_to t not_cond) ];
+            [], [] ]
+      in
+      (sub, tids.(4))
+  | None ->
+      let sub, tids =
+        sub_of "r2_loop"
+          [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
+            [ seed_store seed ], [ (3, mk_goto) ];
+            body_defs, [ (3, mk_goto) ];
+            [ Def.create t load_e ], [ (2, fun t -> mk_jmp_to t cond); (4, fun t -> mk_jmp_to t not_cond) ];
+            [], [] ]
+      in
+      (sub, tids.(2))
+
+(* ON-path fixpoint; BODY input cell at RBP-8. *)
+let r2_run (sub : sub term) (body_tid : tid) : Ws.t =
+  iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "r2_m") (v64 "RBP"))
+
+(* Indexed-loop twin (C4a/R11): i := 0; body indexed store + inc; exit singleton store.
+   The two tests differ only in the var-name prefix; the divergent pins stay in the tests. *)
+let mk_indexed_loop ~pfx : sub term * def term =
+  let rsp = v64 "RSP" in
+  let i = Var.create ~is_virtual:false ~fresh:false (pfx ^ "_i") (Type.Imm 32) in
+  let t = Var.create ~is_virtual:false ~fresh:false (pfx ^ "_t") (Type.Imm 32) in
+  let m = memv (pfx ^ "_m") in
+  let iv = Bil.Var i in
+  let lt = Bil.BinOp (Bil.LT, iv, Bil.Var t) in
+  let nlt = Bil.UnOp (Bil.NOT, lt) in
+  let idx_addr =
+    Bil.BinOp
+      ( Bil.PLUS,
+        Bil.Var rsp,
+        Bil.BinOp (Bil.MINUS, Bil.Cast (Bil.UNSIGNED, 64, iv), Bil.Int (Cbat_word.to_word (w64 32))) )
+  in
+  let def_idx_store =
+    Def.create m (Bil.Store (Bil.Var m, idx_addr, Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64))
+  in
+  let def_inc = Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) in
+  let def_exit =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  let sub, _ =
+    sub_of (pfx ^ "_merge")
+      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ], [ (1, mk_goto) ];
+        [ def_idx_store; def_inc ], [ (2, mk_goto) ];
+        [], [ (3, fun t -> mk_jmp_to t nlt); (1, fun t -> mk_jmp_to t lt) ];
+        [ def_exit ], [] ]
+  in
+  (sub, def_idx_store)
+
+(* Escape fixtures (the caller/callee family): prologue + outgoing-slot shape. *)
+
+(* Outgoing-slot payload: a constant or a register's (possibly TOP) value. *)
+type escape_payload = C of int | R of var
+
+type escape_fixture = {
+  es_sub : sub term;
+  es_blk0 : blk term;
+  es_blk1 : blk term;
+  es_post_tid : tid;
+  es_m : var;
+}
+
+(* Caller/callee escape fixture: fp-seeded frame + prologue + outgoing slots
+   + call + post reload. The C3/A1/A4c near-copies differ only in the prefix,
+   the fp offset, and the outgoing payloads; the divergent pins stay in the tests. *)
+let mk_escape_caller ~pfx ~fp_off ~seed ~(outs : (int * escape_payload) list) () : escape_fixture =
+  let rsp = v64 "RSP" in
+  let fp = v64 (pfx ^ "_fp") in
+  let rdi = v64 "RDI" in
+  let r2 = v64 (pfx ^ "_r2") in
+  let m = memv (pfx ^ "_m") in
+  let callee = mk_selfloop_callee (pfx ^ "_callee") in
+  let callee_tid = Term.tid callee in
+  let def_fp = Def.create fp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 fp_off)))) in
+  let def_seed =
+    Def.create m (Bil.Store (Bil.Var m, Bil.Var fp, Bil.Int (Cbat_word.to_word (w64 seed)), LittleEndian, `r64))
+  in
+  let def_prologue = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x20)))) in
+  let def_rdi = Def.create rdi (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 0x30)))) in
+  let def_out (off, p) =
+    let data = match p with C v -> Bil.Int (Cbat_word.to_word (w64 v)) | R v -> Bil.Var v in
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 off))),
+           data,
+           LittleEndian,
+           `r64 ))
+  in
+  let caller, tids =
+    sub_of ~args:[ Arg.create rdi (Bil.Var rdi); Arg.create r2 (Bil.Var r2) ]
+      (pfx ^ "_caller")
+      [ [ def_fp; def_seed; def_prologue ], [ (1, mk_goto) ];
+        def_rdi :: List.map def_out outs, [ (2, fun t -> mk_call_jmp t callee_tid) ];
+        [ Def.create r2 (Bil.Load (Bil.Var m, Bil.Var fp, LittleEndian, `r64)) ], [] ]
+  in
+  let blks = Term.enum blk_t caller |> Seq.to_list in
+  { es_sub = caller; es_blk0 = List.nth blks 0; es_blk1 = List.nth blks 1; es_post_tid = tids.(2); es_m = m }
+
+(* Store builder, MINUS/rsp-rooted with explicit size. *)
+let mk_store_minus m rsp lo data sz =
+  Def.create m
+    (Bil.Store
+       ( Bil.Var m,
+         Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 lo))),
+         Bil.Int (Cbat_word.to_word (w64 data)),
+         LittleEndian,
+         sz ))
+
+(* When-chain fixture (moved verbatim from test_properties.ml). *)
+let mk_when_chain () : sub term * tid * tid * tid * tid * var =
+  let m = memv "wc_m" in
+  let rbp = v64 "RBP" in
+  let x = Var.create ~is_virtual:false ~fresh:false "wc_x" (Type.Imm 32) in
+  let g1 = v1 "wc_g1" in
+  let g2 = v1 "wc_g2" in
+  let f1 = v1 "wc_f1" in
+  let f2 = v1 "wc_f2" in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let load_e = Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32) in
+  let c1 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))) in
+  let c2 = Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 20))) in
+  let store_k k = Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word k), LittleEndian, `r32)) in
+  let sub, tids =
+    sub_of "wc_chain"
+      [ [ Def.create rbp (Bil.Var (v64 "RSP")) ], [ (1, mk_goto) ];
+        [ Def.create f1 (Bil.Var g1) ], [ (3, fun t -> mk_jmp_to t (Bil.Var f1)); (2, mk_goto) ];
+        [ Def.create f2 (Bil.Var g2) ], [ (4, fun t -> mk_jmp_to t (Bil.Var f2)); (5, mk_goto) ];
+        [ store_k (w32 5) ], [ (6, mk_goto) ];
+        [ store_k (w32 15) ], [ (6, mk_goto) ];
+        [ store_k (w32 25) ], [ (6, mk_goto) ];
+        [ Def.create x load_e ], [ (7, fun t -> mk_jmp_to t c1); (8, fun t -> mk_jmp_to t c2); (9, mk_goto) ];
+        [], [ (7, mk_goto) ];
+        [], [ (8, mk_goto) ];
+        [], [ (9, mk_goto) ] ]
+  in
+  (sub, tids.(7), tids.(8), tids.(9), tids.(6), x)
+
+(* T01-1: accumulated-cond acceptance — mid edge by c2 & ~c1, tail by ~c1 & ~c2. *)
+
+(* Store builder, PLUS/base-rooted at fixed `r64 (the fission shape). *)
+let mk_store_plus sm base off dat =
+  Def.create sm
+    (Bil.Store
+       ( Bil.Var sm,
+         Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 off))),
+         Bil.Int (Cbat_word.to_word (w64 dat)),
+         LittleEndian,
+         `r64 ))
+
+(* Single-block sub with a cond read (the D4 production shape). *)
+let mk_cond_sub nm defs cond_var =
+  fst
+    (sub_of nm
+       [ defs,
+         [ (0,
+            fun _ ->
+              Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var cond_var, Bil.Int (Cbat_word.to_word (w64 0))))
+                (Goto (Direct (Tid.create ())))) ] ])
+
+(* Emitter fixtures (moved verbatim from test_bil2llvm.ml). *)
+let emit_ir (subs : sub term list) : string =
+  let llvm_ctx = Llvm.create_context () in
+  let llvm_module = Llvm.create_module llvm_ctx "Test" in
+  let prog = Program.create ~subs () in
+  B2l.emit_program llvm_ctx llvm_module
+    ~target:Theory.Target.unknown ~ptrsize:64
+    ~symtab:None ~copy_relocs:[]
+    { B2l.spec_comps = []; B2l.spec_whole = []; B2l.spec_word = 8;
+      B2l.spec_sections = [] }
+    prog;
+  let s = Llvm.string_of_llmodule llvm_module in
+  Llvm.dispose_module llvm_module;
+  Llvm.dispose_context llvm_ctx;
+  s
+
+let check_ir (name : string) (must : string) (ir : string) : unit =
+  check name (contains_substring ir must)
+
+(* Blocks of a sub holding no jumps (the exit-block idiom). *)
+let exit_blocks_of (sub : sub term) : blk term list =
+  Term.enum blk_t sub |> Seq.to_list |> List.filter (fun b -> Term.enum jmp_t b |> Seq.to_list = [])
+
+(* Family 1: the FP-intrinsic table — every row emits its native op.  *)
+
+let ivar64 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.Imm 64)
+
+(* One mapped-intrinsic call site, the production shape:
+   [intrinsic:x0 := src; call @<name> with return <cont>; cont: ...]. *)
+let mk_fp_call_sub (intr : string) (arg_defs : def term list) : sub term =
+  let callee_tid = Tid.for_name intr in
+  fst
+    (sub_of "fp_caller"
+       [ arg_defs,
+         [ (1, fun t -> Jmp.create (Call (Call.create ~return:(Direct t) ~target:(Direct callee_tid) ()))) ];
+         (* The writeback reads the ret lane, the production shape. *)
+         [ Def.create (v64 "fp_wb") (Bil.Var (ivar64 "intrinsic:y0")) ],
+         [ (2,
+            fun t ->
+              Jmp.create ~cond:(Bil.BinOp (Bil.EQ, Bil.Var (v64 "fp_wb"), Bil.Int (Cbat_word.to_word (w64 0))))
+                (Goto (Direct t)));
+           (2, mk_goto) ];
+         [], [ (0, fun _ -> Jmp.create (Ret (Direct (Tid.create ())))) ] ])
+
+(* The bodyless mapped-intrinsic stub (the model interface sig). *)
+let mk_fp_stub (intr : string) : sub term =
+  let sub, _ = sub_of intr [] in
+  Term.set_attr sub Sub.intrinsic ()
+
+let mk_fp_program (intr : string) (arg_defs : def term list) : sub term list =
+  [ mk_fp_call_sub intr arg_defs; mk_fp_stub intr ]
+
+(* Single-block sub over caller-supplied defs with a terminal Ret. *)
+let mk_lds_sub nm defs =
+  fst (sub_of nm [ defs, [ (0, fun _ -> Jmp.create (Ret (Direct (Tid.create ())))) ] ])
