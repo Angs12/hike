@@ -30,11 +30,12 @@ hike_link() {
 }
 
 # Run lifted vs native with identical argv[0] (glibc prints it in usage
-# messages) and a 15 s timeout; compare both rc and stdout bytes.  Prints
-# the verdict; returns non-zero on any failure, timeout included.
+# messages) and a 15 s timeout; compare both rc and stdout bytes.  The
+# fifth argument names the lifted output stem (default <base>_lifted).
+# Prints the verdict; returns non-zero on any failure, timeout included.
 hike_run_cmp() {
-  local lifted="$1" native="$2" out="$3" base="$4"
-  timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$lifted" >"$out/${base}_lifted.out" 2>&1
+  local lifted="$1" native="$2" out="$3" base="$4" lbase="${5:-${base}_lifted}"
+  timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$lifted" >"$out/${lbase}.out" 2>&1
   local lrc=$?
   timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$out/${base}_native.out" 2>&1
   local nrc=$?
@@ -42,9 +43,9 @@ hike_run_cmp() {
     echo "FAIL $base (timeout: lifted rc=$lrc native rc=$nrc)"
     return 1
   fi
-  if [ "$lrc" -ne "$nrc" ] || ! cmp -s "$out/${base}_lifted.out" "$out/${base}_native.out"; then
+  if [ "$lrc" -ne "$nrc" ] || ! cmp -s "$out/${lbase}.out" "$out/${base}_native.out"; then
     echo "FAIL $base (native rc=$nrc vs lifted rc=$lrc)"
-    diff "$out/${base}_native.out" "$out/${base}_lifted.out" | head -3 | sed 's/^/    /'
+    diff "$out/${base}_native.out" "$out/${lbase}.out" | head -3 | sed 's/^/    /'
     return 1
   fi
   return 0

@@ -9,6 +9,7 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
 SEM="$HERE/semantic"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
@@ -168,25 +169,20 @@ do_link() {
         [ -e "$ll" ] || { note "link: no IR found under $IR"; return 1; }
         local name; name="$(basename "$ll")"; name="${name#out_}"; name="${name%.ll}"
 
-        sed -e 's/@main/@hike_main/g' \
-            -e 's/@_dl_relocate_static_pie/@_dl_relocate_static_pie_lifted/g' \
-            "$ll" > "$OUT/${name}_lifted.ll" 2>/dev/null \
-          || { echo "FAIL $name (rename)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
-        llc -O0 -filetype=obj "$OUT/${name}_lifted.ll" -o "$OUT/${name}_lifted.o" 2>>"$OUT/$name.llc.log" \
-          || { echo "FAIL $name (llc)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
-
-        local STUB="" GMP="" CRYPTO=""
-        grep -q '@_setjmp\|@longjmp' "$ll" && STUB="$SEM/setjmp_stub.S"
+        local GMP="" CRYPTO=""
         # gnulib/GMP users need -lgmp, like the native link
         grep -q '@__gmp' "$ll" && GMP="-lgmp"
         # gnulib hashing can route through libcrypto
         grep -qE '@(MD5_|SHA1_|SHA224_|SHA256_|SHA384_|SHA512_|EVP_)' "$ll" \
           && CRYPTO="-lcrypto"
+        hike_rename "$ll" "$OUT/${name}_lifted.ll" 2>/dev/null \
+          || { echo "FAIL $name (rename)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
+        hike_llc "$OUT/${name}_lifted.ll" "$OUT/${name}_lifted.o" 2>>"$OUT/$name.llc.log" \
+          || { echo "FAIL $name (llc)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
         # --allow-multiple-definition: gnulib modules defining their own
         # malloc/free must not collide with the harness wrappers
-        if ! gcc -O0 -no-pie -o "$OUT/${name}_lifted" \
-                 -Wl,--allow-multiple-definition \
-                 "$OUT/${name}_lifted.o" "$SEM/harness.c" $STUB $GMP $CRYPTO 2>>"$OUT/$name.gcc.log"; then
+        if ! hike_link "$OUT/${name}_lifted.o" "$ll" "$OUT/${name}_lifted" "$SEM" \
+                 -Wl,--allow-multiple-definition $GMP $CRYPTO 2>>"$OUT/$name.gcc.log"; then
             echo "FAIL $name (link)" >> "$TEST_LOG"; fail=$((fail+1)); continue
         fi
         rm -f "$OUT/${name}_lifted.o"

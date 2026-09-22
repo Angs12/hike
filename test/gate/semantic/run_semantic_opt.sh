@@ -11,6 +11,7 @@ CORPUS="${1:-/tmp/corpus}"
 IR="${2:-/tmp/heritage_p6}"
 OUT="${3:-/tmp/sem_opt}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/../lib.sh"
 mkdir -p "$OUT"
 
 # Pinned optimizer; a default switch must not silently change the gate.
@@ -42,9 +43,7 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
-	sed -e 's/@main/@hike_main/g' \
-		-e 's/@_dl_relocate_static_pie/@_dl_relocate_static_pie_lifted/g' \
-		"$ll" >"$OUT/${base}_renamed.ll" || {
+	hike_rename "$ll" "$OUT/${base}_renamed.ll" || {
 		echo "FAIL $base (rename)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
@@ -59,23 +58,22 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
-	llc -O0 -filetype=obj "$OUT/${base}_opt.ll" -o "$OUT/${base}_opt.o" 2>/dev/null ||
+	hike_llc "$OUT/${base}_opt.ll" "$OUT/${base}_opt.o" 2>/dev/null ||
 		{
 			echo "FAIL $base (llc after opt)"
 			fail=$((fail + 1))
 			FAILED+=("$base")
 			continue
 		}
+	if ! hike_link "$OUT/${base}_opt.o" "$ll" "$OUT/${base}_opt.bin" "$HERE" 2>/dev/null; then
+		echo "FAIL $base (link after opt)"
+		fail=$((fail + 1))
+		FAILED+=("$base")
+		continue
+	fi
+	# The bisect below re-links by hand; keep the stub selection handy.
 	STUB=""
 	if grep -q '@_setjmp\|@longjmp' "$ll"; then STUB="$HERE/setjmp_stub.S"; fi
-	gcc -O0 -no-pie -o "$OUT/${base}_opt.bin" \
-		"$OUT/${base}_opt.o" "$HERE/harness.c" $STUB 2>/dev/null ||
-		{
-			echo "FAIL $base (link after opt)"
-			fail=$((fail + 1))
-			FAILED+=("$base")
-			continue
-		}
 
 	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
 	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1
