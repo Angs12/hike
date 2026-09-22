@@ -1,0 +1,19 @@
+# Pins — test_strip_canaries
+
+Module: `test/unit/test_strip_canaries.ml` (group `strip_canaries`, ids `SC-01`…`SC-06`).
+Production mechanism: `src/hike_strip_canaries.ml` (`Hike.Strip_canaries.strip_sub`).
+
+There is **no `Test_seam`** for this pass, so no fail-before switch can be
+flipped from the test tier. Production `src/` is never modified. The disable
+recipes below are textual; the recorded red is the state each recipe produces
+(by review, re-demonstrated whenever the cited mechanism changes). Every pin
+builds its own fixture inside its closure — no cross-pin state.
+
+| id | mechanism | disable recipe | red evidence |
+| --- | --- | --- | --- |
+| SC-01 | Full four-fact composition: TLS read (`Abi.thread_pointer`) → same-cell store → tied reload reaching the compare → not-equal edge reaching a symtab-resolved `__stack_chk_fail`; the deleted defs are the read, store, compare family and reload, the not-equal edge is removed, the equality edge is forced true (`Jmp.with_cond … true_word`), and the fail block is pruned. | In `find_comps`, force the identity: `let find_comps ~denote ~abi ~names ~cell_of ~ctx = []` (equivalently, skip the `loop` rewrite body in `strip_sub`). | `check "SC-01"` fails: the read/store/reload/subtract defs and the fail block survive and the equality edge stays conditional. |
+| SC-02 | No-RELOAD identity: the composition needs a chain member whose rhs is a singleton-cell load and whose value reaches the compare (`compare_operand_is_reload_value`, the `reload_tied`/`one_cell` gate). A compare reading the read value directly has no reload, so the pass is the identity. | Relax `reload_tied` to `true` (drop the `if one_cell && reload_tied` conjunction to `if one_cell`), so a compare on the direct read fires. | `check "SC-02"` fails: `has_def stripped subtract` is false (the compare def is deleted). |
+| SC-03 | No-fail-edge identity: `reach_fail`/`is_fail_block` require the not-equal successor path to reach a direct call whose name contains `stack_chk_fail`. | `let reach_fail ~ctx ~names = fun _ -> true` so every not-equal edge counts as a fail edge. | `check "SC-03"` fails: `has_block stripped tids.(3)` is false (the ret-targeted fail block is removed). |
+| SC-04 | Value tie, not name match: `stored_value_is_read_value` requires the store data to be the read def's lhs, that read to be the unique reaching def, and the two denotations to be equal. An alias byte-store whose address mentions the read register is not the canary store. | Replace the tie with a name match (drop `Core.Set.equal (reaching v) (Tid.Set.singleton (Term.tid read))` and the denotation equality), accepting any store whose data mentions the read lhs. | `check "SC-04"` fails: `has_def stripped alias_read`/`alias_st` is false (the alias store/read are eaten). |
+| SC-05 | Stored value is the TLS read: a local stored to the same cell is refused even with a decoy TLS read present (the `Bil.Var` + denotation test in `stored_value_is_read_value`). | Drop the `stored_value_is_read_value` filter over `tls_reads` (accept any store on the cell). | `check "SC-05"` fails: `has_def stripped read` is false. |
+| SC-06 | Multi-check shared cell/fail block: `cells_accounted` plus the per-`comp` rewrite remove both compositions together, `Phi.remove` drops the deleted edges' entries, and `prune` removes the now-unreachable shared fail block; both equality edges go unconditional. | Force the identity (`find_comps = []`), or remove only one of the two compositions (rewrite the first `comp` only). | `check "SC-06"` fails: `has_block stripped tids.(5)` is true (the shared fail block survives). |
