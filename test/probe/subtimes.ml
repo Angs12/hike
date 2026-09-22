@@ -78,7 +78,7 @@ let () =
           (dt, name, nblk, ndefs, ntags))
         subs
     in
-    let rows = List.sort (fun (a, _, _, _, _) (b, _, _, _, _) -> compare a b) rows in
+    let rows = List.sort (fun (a, _, _, _, _) (b, _, _, _, _) -> compare b a) rows in
     let total =
       List.fold_left (fun acc (t, _, _, _, _) -> acc +. t) 0.0 rows
     in

@@ -4,21 +4,8 @@ open Bap.Std
 open Bap_core_theory
 
 module AI = Cbat_vsa.AI
-module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
-
-(* The fixture drivers' target: the flag roles name the flag vars the
-   synthetic subs define (Theory.Var.define is pure in (sort, name),
-   so Var.same matches them). *)
-let jump_target =
-  let flag name = Theory.Var.forget (Theory.Var.define Theory.Bool.t name) in
-  Theory.Target.declare ~package:"probe" "jump-flags" ~bits:64 ~byte:8
-    ~regs:Theory.Role.Register.[
-        [zero_flag], [flag "ZF"];
-        [carry_flag], [flag "CF"];
-        [sign_flag], [flag "SF"];
-        [overflow_flag], [flag "OF"]]
 
 (* BAP init; call before opening a project. *)
 let init () =
