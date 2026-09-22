@@ -19,9 +19,53 @@
  (preprocess
   (pps ppx_bap)))
 
-(test
- (name test_dce)
- (modules test_dce)
+(tests
+ (names
+  test_dce
+  test_clp
+  test_fin_set
+  test_map_lattice
+  test_word
+  test_ws
+  test_call_effects
+  test_backward
+  test_wto
+  test_forward
+  test_vsa
+  test_env_tag
+  test_model
+  test_sections
+  test_promote
+  test_bil2llvm
+  test_emit_fp
+  test_jump
+  test_resolve
+  test_strip_canaries
+  test_clp_equiv
+  test_integration)
+ (modules
+  test_dce
+  test_clp
+  test_fin_set
+  test_map_lattice
+  test_word
+  test_ws
+  test_call_effects
+  test_backward
+  test_wto
+  test_forward
+  test_vsa
+  test_env_tag
+  test_model
+  test_sections
+  test_promote
+  test_bil2llvm
+  test_emit_fp
+  test_jump
+  test_resolve
+  test_strip_canaries
+  test_clp_equiv
+  test_integration)
  (libraries
   hike_test
   alcotest
