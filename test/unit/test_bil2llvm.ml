@@ -967,6 +967,56 @@ let tests : unit Alcotest.test list =
           | _ ->
               Printf.printf "llc: %s\n" llc_out;
               false));
+
+    (* PHI-EDGE / call fallthrough: a call whose block does not track SP
+       still records its fallthrough edge.  The return block's phi must
+       not be empty (llc rejects a phi with predecessors but no
+       incomings); this is the coreutils `wc`-class shape. *)
+    pin "EMIT-24"
+      "a call in a block with no SP def still records its fallthrough edge (the module is llc-valid)"
+      (fun () ->
+        let rax = v64 "RAX" in
+        let callee = straight_sub "callee_nosp" [] in
+        let callee_tid = Term.tid callee in
+        let caller, _ =
+          sub_of "caller_nosp"
+            [ [ Def.create rax (Bil.Int (Cbat_word.to_word (w64 1))) ],
+              [ (1, fun t -> mk_call_jmp t callee_tid) ];
+              [ Def.create (v64 "ret_v") (Bil.Var rax) ], [] ]
+        in
+        let ir = emit_ir [ caller; callee ] in
+        let phi_lines =
+          String.split_on_char '\n' ir
+          |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
+        in
+        check "EMIT-24" (List.length phi_lines >= 1);
+        let ll = Filename.temp_file "call_nosp" ".ll" in
+        let oc = Stdlib.open_out ll in
+        output_string oc ir;
+        close_out oc;
+        let o = Filename.temp_file "call_nosp" ".o" in
+        let ic =
+          Unix.open_process_in
+            (Printf.sprintf "llc -O0 -filetype=obj %s -o %s 2>&1" ll o)
+        in
+        let llc_out =
+          let buf = Buffer.create 256 in
+          (try
+             while true do
+               Buffer.add_char buf (input_char ic)
+             done
+           with End_of_file -> ());
+          Buffer.contents buf
+        in
+        let status = Unix.close_process_in ic in
+        Sys.remove ll;
+        Sys.remove o;
+        check "EMIT-24"
+          (match status with
+          | Unix.WEXITED 0 -> true
+          | _ ->
+              Printf.printf "llc: %s\n" llc_out;
+              false));
   ]
 
 let () = run "bil2llvm" tests
