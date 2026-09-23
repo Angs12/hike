@@ -56,6 +56,11 @@ let remap_native_addr ctx llvm_ctx llvm_module v =
   remap_native ctx llvm_ctx llvm_module v
     ~finish:(fun f -> Llvm.const_ptrtoint f (Llvm.i64_type llvm_ctx))
 
+(* The remapped address integer, else the raw constant. *)
+let remapped_const ctx llvm_ctx llvm_module v ty =
+  Base.Option.value (remap_native_addr ctx llvm_ctx llvm_module v)
+    ~default:(Llvm.const_of_int64 ty v false)
+
 (* Declares a section global as [n x iN], [word] bytes per cell. *)
 let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
   let n64 = (size + word - 1) / word in
@@ -102,8 +107,7 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     if Hike_stack_model.string_text_word ~arr ~off then
       Llvm.const_of_int64 word_ty v false
     else
-      Base.Option.value (remap_native_addr ctx llvm_ctx llvm_module v)
-        ~default:(Llvm.const_of_int64 word_ty v false)
+      remapped_const ctx llvm_ctx llvm_module v word_ty
   in
   if bss then Llvm.set_initializer (Llvm.const_null elem_ty) g
   else if typed_w >= word then

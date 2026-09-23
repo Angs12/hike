@@ -187,7 +187,7 @@ let ret_replacement ~(word_bits : int) (j : jmp term) : jmp term =
         Jmp.with_kind j
           (Call
              (Call.with_target c
-                (Indirect (Bil.Unknown ("hike-dce-ret", Type.Imm word_bits)))))
+                (Indirect (Hike_stack_model.canonical_ret_target ~word_bits))))
       | _ -> j)
   | _ -> j
 

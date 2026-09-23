@@ -8,8 +8,9 @@ module AI = Cbat_ai_representation
 
 (* The call-site facts the transfer consumes. *)
 type site = {
-  (* The callee's never-written caller-saved set; [None] = an unknown
-     or kill-all callee, or a non-ABI trap. *)
+  (* The callee's written-register (kill) summary over caller-saved
+     GPRs; preserved = not in it and not a return lane.  [None] = an
+     unknown or kill-all callee, or a non-ABI trap. *)
   summary : Var.Set.t option;
   (* The convention's integer/pointer arg lanes the call block writes —
      the escape bounding which caller-frame cells the callee may

@@ -31,7 +31,7 @@ let not_implemented ?(top : 'a option) component : 'a = match top with
 let fin_set_size : int = 10
 
 (* Integer division rounding up. *)
-let cdiv (x : int) (y : int) : int = (x - 1)/y + 1
+let cdiv_int (x : int) (y : int) : int = (x - 1)/y + 1
 
 open !Core
 open Bap.Std

@@ -213,7 +213,7 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
     then None
     else
       let i64 w =
-        match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
+        Cbat_word.to_int64_opt w
       in
       let mn_w = WordSet.min_elem addr and mx_w = WordSet.max_elem addr in
       match

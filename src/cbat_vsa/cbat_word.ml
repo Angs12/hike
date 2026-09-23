@@ -409,6 +409,9 @@ let to_int64_exn (t : t) : int64 =
 
 let to_int64 (t : t) : int64 Core.Or_error.t = Core.Or_error.try_with (fun () -> to_int64_exn t)
 
+let to_int64_opt (t : t) : int64 option =
+  match to_int64 t with Ok v -> Some v | Error _ -> None
+
 let pp (ppf : Format.formatter) (t : t) : unit = Format.fprintf ppf "%s" (to_string t)
 
 (* The BAP<->VSA boundary moves BITS through [Bitvec]'s bignum

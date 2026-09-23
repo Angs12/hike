@@ -12,6 +12,7 @@ module List = Core.List
 open !Cbat_word
 open Core
 module Hashtbl = Stdlib.Hashtbl
+
 let min = Stdlib.min
 let max = Stdlib.max
 let ( = ) = Stdlib.( = )
@@ -23,9 +24,17 @@ let ( >= ) = Stdlib.( >= )
 
 open Cbat_clp_core
 
+(* The binop width policy: [None] = equal widths, compute; [Some w] =
+   the mismatch's over-approximation width. *)
+let width_mismatch (p1 : t) (p2 : t) : int option =
+  if bitwidth p1 = bitwidth p2 then None
+  else Some (Stdlib.max (bitwidth p1) (bitwidth p2))
+
 let add (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
+  match width_mismatch p1 p2 with
+    | Some w -> top w
+    | None -> let sz = bitwidth p1 in
   match finite_end p1 with
   | None -> bottom sz
   | Some e1 ->
@@ -56,7 +65,9 @@ let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 
 let mul (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
+  match width_mismatch p1 p2 with
+    | Some w -> top w
+    | None -> let sz = bitwidth p1 in
   (* Empty operand gives bottom. *)
   match finite_end p1 with
   | None -> bottom sz
@@ -205,7 +216,9 @@ let lnot_facts (p : t) (q : t) (f : and_facts option) : and_facts option =
 
 let logxor (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
+  match width_mismatch p1 p2 with
+    | Some w -> top w
+    | None -> let width = bitwidth p1 in
   let two = create (W.of_int 2 ~width) in
   let np1 = lnot p1 and np2 = lnot p2 in
   (* The four ANDs share their operands: [p1] feeds the first and fourth,
@@ -549,7 +562,9 @@ let concat (p1 : t) (p2 : t) : t =
 (* BAP div truncates; ediv is Euclidean. *)
 let div (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
+  match width_mismatch p1 p2 with
+    | Some w -> top w
+    | None -> let width = bitwidth p1 in
   let open Monads.Std.Monad.Option.Syntax in
   (match begin
     min_elem p1 >>= fun min_e1 ->
@@ -580,7 +595,9 @@ let wsmod (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
 
 let sdiv (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
+  match width_mismatch p1 p2 with
+    | Some w -> top w
+    | None -> let width = bitwidth p1 in
   (* Infinite operand gives unbounded quotient. *)
   if is_infinite p1 || is_infinite p2 then top width
   else
@@ -637,8 +654,10 @@ let sdiv (p1 : t) (p2 : t) : t =
    and x itself when every divisor exceeds x or the divisor is {0}
    (the word identity). *)
 let modulo (p1 : t) (p2 : t) : t =
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
-  else if is_bottom p1 || is_bottom p2 then sub p1 (mul (div p1 p2) p2)
+  match width_mismatch p1 p2 with
+  | Some w -> top w
+  | None ->
+    if is_bottom p1 || is_bottom p2 then sub p1 (mul (div p1 p2) p2)
   else
     let width = bitwidth p1 in
     match min_elem p2, max_elem p2 with
@@ -661,8 +680,10 @@ let modulo (p1 : t) (p2 : t) : t =
    quotient block; a mixed-sign dividend takes the wrapping band
    [-(k-1), k-1]. *)
 let smodulo (p1 : t) (p2 : t) : t =
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
-  else if is_bottom p1 || is_bottom p2 then sub p1 (mul (sdiv p1 p2) p2)
+  match width_mismatch p1 p2 with
+  | Some w -> top w
+  | None ->
+    if is_bottom p1 || is_bottom p2 then sub p1 (mul (sdiv p1 p2) p2)
   else
     let width = bitwidth p1 in
     match min_elem p2, max_elem p2 with

@@ -252,19 +252,13 @@ let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
   | Logxor -> FinSet.logxor s1 s2
   | Concat -> FinSet.concat s1 s2
 
-let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
+let rec lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   bound_set_size @@ match t1, t2 with
   | Clp p1, Clp p2 -> Clp (binop_clp op p1 p2)
   | FinSet s1, FinSet s2 -> FinSet (binop_fs op s1 s2)
   | Clp p, FinSet s -> Clp (binop_clp op p (clp_of_finset s))
   | FinSet s, Clp p -> Clp (binop_clp op (clp_of_finset s) p)
-  | StackOff _, _ | _, StackOff _ ->
-    (match to_plain t1, to_plain t2 with
-     | Clp p1, Clp p2 -> Clp (binop_clp op p1 p2)
-     | FinSet s1, FinSet s2 -> FinSet (binop_fs op s1 s2)
-     | Clp p, FinSet s -> Clp (binop_clp op p (clp_of_finset s))
-     | FinSet s, Clp p -> Clp (binop_clp op (clp_of_finset s) p)
-     | StackOff _, _ | _, StackOff _ -> Clp (Clp.top 64))
+  | StackOff _, _ | _, StackOff _ -> lift_binop op (to_plain t1) (to_plain t2)
 
 let lift_unop (f_clp : clp -> clp) (f_fs : fset -> fset) : t -> t = fun t ->
   let rec go t =

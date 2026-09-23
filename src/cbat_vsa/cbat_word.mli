@@ -79,6 +79,7 @@ val to_int_exn : t -> int
 val to_int : t -> int Core.Or_error.t
 val to_int64_exn : t -> int64
 val to_int64 : t -> int64 Core.Or_error.t
+val to_int64_opt : t -> int64 option
 
 val to_string : t -> string
 val of_string : string -> t

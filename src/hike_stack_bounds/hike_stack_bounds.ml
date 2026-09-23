@@ -10,7 +10,7 @@ module Ws = Cbat_clp_set_composite
 module Clp = Cbat_clp
 
 let i64_opt (w : Cbat_word.t) : int64 option =
-  match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
+  Cbat_word.to_int64_opt w
 
 let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
     : (int64 * int64) option =

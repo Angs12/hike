@@ -149,7 +149,8 @@ module WordSet = Cbat_clp_set_composite
     hi_w >>= fun hi_w ->
     (match of_word lo_w, of_word hi_w with
      | Some lo, Some hi when le lo hi -> Some {lo; hi; step = stride}
-     | Some lo, Some hi -> Some {lo = hi; hi = lo; step = stride}
+     | Some _lo, Some _hi ->
+       failwith "hike-mem-key: unordered extrema reached of_wordset"
      | _ -> None)
 
   (* Hull of both inputs. *)

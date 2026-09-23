@@ -38,7 +38,8 @@ let x86_64_sysv : t =
     word = 8;
   }
 
-(* Var-based predicates; Var.same compares names. *)
+(* Var-based predicates; [Var.same] compares base vars (EAX ~ RAX),
+   [Var.equal] the full variable. *)
 let is_sp (t : t) (v : var) : bool = Var.same v t.sp
 let is_callee_saved (t : t) (v : var) : bool =
   Base.List.exists t.callee_saved ~f:(Var.same v)

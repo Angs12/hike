@@ -321,6 +321,12 @@ let is_sec_comp_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"sec_comp_"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
+(* The canonical return shape both passes materialize: a return-less
+   call whose target is this unknown — the emitter classifies it as
+   Ret by shape; nothing reads the label. *)
+let canonical_ret_target ~(word_bits : int) : exp =
+  Bil.Unknown ("hike-ret", Type.Imm word_bits)
+
 (* The tid-name sanitization the symbol-table lookups and the emitted
    names share: a sub's symtab name and its LLVM name stay comparable. *)
 let sanitize_tid_name (n : string) : string =

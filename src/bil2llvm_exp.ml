@@ -383,8 +383,8 @@ and create_rip_relative_addr ctx scope llvm_builder blk_tid exp =
   match exp with
   | Bil.Int w ->
       let v = Word.to_int64_exn w in
-      Base.Option.value (remap_native_addr ctx ctx.llvm_ctx ctx.llvm_module v)
-        ~default:(Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) v false)
+      remapped_const ctx ctx.llvm_ctx ctx.llvm_module v
+        (Llvm.i64_type ctx.llvm_ctx)
   | Store (Bil.Var mv, addr, data, _, s)
     when Hike_stack_model.is_sec_comp_mem mv ->
       sec_comp_access ctx scope llvm_builder blk_tid ~store:true mv addr

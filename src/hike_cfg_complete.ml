@@ -520,7 +520,7 @@ let ret_jmp ~(word_bits : int) : jmp term =
   Jmp.create
     (Call
        (Call.create
-          ~target:(Indirect (Bil.Unknown ("hike-cfg-ret", Type.Imm word_bits)))
+          ~target:(Indirect (Hike_stack_model.canonical_ret_target ~word_bits))
           ()))
 
 (* The [bits]-bit word of an image's byte array at [off], in [endian]. *)

@@ -67,7 +67,7 @@ end = struct
 
     type t = idx
 
-    let top = 1, BigEndian
+    let top = 64, BigEndian
 
     let join (w1, e1 : t) (w2, e2 : t) : t =
       if Bitvector.compare_endian e1 e2 = 0
@@ -193,7 +193,7 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
     else
     let seq1 = cast_seq (sz, e) v1 in
     let seq2 = cast_seq (sz, e) v2 in
-    let seq_len = Utils.cdiv (max sz1 sz2) sz in
+    let seq_len = Utils.cdiv_int (max sz1 sz2) sz in
     let seq1 = Seq.concat @@ Seq.repeat seq1 in
     let seq2 = Seq.concat @@ Seq.repeat seq2 in
     let res_inf_seq = Seq.zip seq1 seq2 |>
