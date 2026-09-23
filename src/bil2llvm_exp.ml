@@ -555,7 +555,12 @@ let create_branches ctx scope blk_tid llvm_builder branches =
           | _ -> Some (Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-sw") fn)
         in
         match Jmp.kind j |> goto_label_exn with
-        | Direct tid -> (
+        | Direct tid ->
+            if Base.String.is_prefix (Tid.name tid) ~prefix:"@interrupt:" then
+              (* A divide-by-zero trap lifts as a direct goto to the
+                 interrupt sub; it is terminal. *)
+              create_interrupt ctx llvm_builder
+            else (
             let bb = get_bb scope tid in
             note_edge ~cur tid;
             match cont_bb with

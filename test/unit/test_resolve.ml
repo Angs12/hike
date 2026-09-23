@@ -395,6 +395,72 @@ let tests : unit Alcotest.test list =
 
     (* J3: a foreign pointer target (a constant naming no block) — the
        indirect transfer stays. *)
+    pin "RES-21"
+      "the materializer: a gap word re-lifts its case body and retargets existing blocks"
+      (fun () ->
+        let j8_sel = v64 "t22_j8_sel" in
+        let j8_base = v64 "t22_j8_base" in
+        let j8_bdef =
+          Def.create j8_base (Bil.Int (Cbat_word.to_word (q64 0x2000L)))
+        in
+        let j8_t1 =
+          Def.create j8_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L)))
+        in
+        let j8_t2 =
+          Def.create j8_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L)))
+        in
+        let j8_flag = v1 "t22_j8_flag" in
+        let j8, j8_tids =
+          sub_of "t22_materialize"
+            [ [ j8_bdef ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var j8_flag)); (2, mk_goto) ];
+              [ j8_t1 ], [ (3, mk_goto) ];
+              [ j8_t2 ], [ (3, mk_goto) ];
+              [],
+              [ (4,
+                 fun _ ->
+                   Jmp.create
+                     (Goto
+                        (Indirect
+                           (Bil.BinOp (Bil.PLUS, Bil.Var j8_sel, Bil.Var j8_base))))) ];
+              [], [ (6, mk_goto) ];
+              [], [ (6, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let a = Addr.of_int64 0x3010L in
+        let materialized =
+          let b = Blk.Builder.create ~tid:(Tid.for_addr a) () in
+          Blk.Builder.add_jmp b
+            (Jmp.create
+               (Goto (Direct (Tid.for_addr (Addr.of_int64 0x3008L)))));
+          Blk.Builder.result b
+        in
+        let _, sub8', block_addrs8 =
+          produce Theory.Target.unknown
+            ~block_addrs:
+              [ (0x3008L, j8_tids.(4)); (0x400000L, j8_tids.(5)) ]
+            ~lift_at:(fun a' ->
+              if Addr.equal a' a then Some [ materialized ] else None)
+            (Program.create ~subs:[ j8 ] ()) j8
+        in
+        let named =
+          match Core.Map.find block_addrs8 a with
+          | Some t -> Tid.equal t (Tid.for_addr a)
+          | None -> false
+        in
+        let retargeted =
+          Term.enum blk_t sub8'
+          |> Seq.find ~f:(fun b -> Tid.equal (Term.tid b) (Tid.for_addr a))
+          |> Base.Option.value_map ~default:false ~f:(fun b ->
+                 match Term.enum jmp_t b |> Seq.to_list with
+                 | [ j ] -> (
+                     match Jmp.kind j with
+                     | Goto (Direct t) -> Tid.equal t j8_tids.(4)
+                     | _ -> false)
+                 | _ -> false)
+        in
+        check "RES-21" (named && retargeted));
+
     pin "RES-15" "T22-J3: a foreign pointer target is untouched by the rewrite"
       (fun () ->
         let j3_t = v64 "t22_j3_t" in
@@ -514,6 +580,7 @@ let tests : unit Alcotest.test list =
             let sub5', resolved5', fresh5', _, events5 =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                 ~images:[]
+                ~lift_at:(fun _ -> None)
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
@@ -558,6 +625,7 @@ let tests : unit Alcotest.test list =
             let sub5', _, _, _, _ =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                 ~images:[]
+                ~lift_at:(fun _ -> None)
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])

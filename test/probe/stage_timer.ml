@@ -34,6 +34,7 @@ let () =
         ~symtab:None ~images:[]
         ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi
                     (Program.create ~subs:[ sub ] ()))
+        ~lift_at:(fun _ -> None)
         ~block_addrs:(Core.Map.empty (module Addr)) sub
       |> Base.Option.value ~default:(Tid.Map.empty, sub, Core.Map.empty (module Addr))
     in

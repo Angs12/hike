@@ -115,6 +115,7 @@ let fixpoint (target : Theory.Target.t)
     ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
     ~(written : Var.Set.t option Tid.Map.t)
+    ~(lift_at : Addr.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) :
     ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t) option =
@@ -150,7 +151,8 @@ let fixpoint (target : Theory.Target.t)
     dump_r8 sol sub;
 #endif
     let sub', resolved', fresh', block_addrs', events =
-      Hike_cfg_complete.resolve_phase ~abi ~sol ~images ~block_addrs sub resolved
+      Hike_cfg_complete.resolve_phase ~abi ~sol ~images ~lift_at ~block_addrs
+        sub resolved
     in
     if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)
     else (sol, sub', Core.Set.union fresh fresh', block_addrs')

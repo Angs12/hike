@@ -195,6 +195,34 @@ let pass_vsa proj =
                img_bytes = arr } ])
     |> Base.Option.value ~default:[]
   in
+  (* The re-lift seam: decode and lift the case body at a dispatch word
+     the lift never made a block.  The view starts at the word so the
+     body's first block is aligned there; only the blocks reachable from
+     it are kept (the sweep's tail past the terminator is dropped). *)
+  let lift_at (a : Addr.t) : blk term list option =
+    match Seq.to_list (Memmap.lookup (Project.memory proj) a) with
+    | [] -> None
+    | (seg, _) :: _ -> (
+        let view = Memory.view_exn ~from:a seg in
+        match Disasm_expert.Recursive.run (Project.arch proj) view with
+        | Error _ -> None
+        | Ok rec_t ->
+          let cfg = Disasm_expert.Recursive.cfg rec_t in
+          let root =
+            Graphs.Cfg.nodes cfg
+            |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) a)
+          in
+          Base.Option.map root ~f:(fun root ->
+              let nodes =
+                Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) cfg
+                  ~init:[] ~f:(fun acc n -> n :: acc) root
+              in
+              let others =
+                Base.List.filter nodes ~f:(fun n ->
+                    not (Addr.equal (Block.addr n) a))
+              in
+              Base.List.concat_map (root :: others) ~f:(Blk.lift cfg)))
+  in
   (* The run's block-address map, read off the terms at this boundary:
      each block's own address stamp.  A block the lift created unnamed
      carries no stamp and names no case entry. *)
@@ -220,7 +248,7 @@ let pass_vsa proj =
              (Hike_vsa.fixpoint target
                 ~prog:(Project.program proj)
                 ~symtab:(Some (Project.symbols proj)) ~images ~written
-                ~block_addrs sub)
+                ~lift_at ~block_addrs sub)
              ~f:(fun (envs, sub', block_addrs') ->
                (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'),
                 block_addrs')))

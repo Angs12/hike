@@ -1017,6 +1017,23 @@ let tests : unit Alcotest.test list =
           | _ ->
               Printf.printf "llc: %s\n" llc_out;
               false));
+
+    (* A divide-by-zero trap lifts as a direct goto to the interrupt
+       sub, not a call.  The goto must render as the interrupt handler,
+       never a block lookup (there is no such block). *)
+    pin "EMIT-25"
+      "a goto to an interrupt sub emits the interrupt handler"
+      (fun () ->
+        let interrupt = Tid.for_name "interrupt:#0" in
+        let sub, _ =
+          sub_of "div_trap"
+            [ [ Def.create (v64 "div_trap_t")
+                  (Bil.Int (Cbat_word.to_word (w64 1))) ],
+              [ (1, mk_goto) ];
+              [], [ (0, fun _ -> mk_goto interrupt) ] ]
+        in
+        let ir = emit_ir [ sub ] in
+        check "EMIT-25" (contains_substring ir "llvm.trap"));
   ]
 
 let () = run "bil2llvm" tests

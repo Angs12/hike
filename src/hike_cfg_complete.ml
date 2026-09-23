@@ -100,11 +100,71 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
                   (Core.Map.length blocks));
              None))
 
+(* Rewrite a lifted term's direct targets through [f]; indirect targets
+   stay the resolution's own. *)
+let remap_label f = function
+  | Direct t -> Direct (f t)
+  | Indirect e -> Indirect e
+
+let remap_jmp f (j : jmp term) : jmp term =
+  let kind =
+    match Jmp.kind j with
+    | Goto l -> Goto (remap_label f l)
+    | Ret l -> Ret (remap_label f l)
+    | Int (n, t) -> Int (n, f t)
+    | Call c ->
+      Call
+        (Call.create ~target:(remap_label f (Call.target c))
+           ?return:(Base.Option.map (Call.return c) ~f:(remap_label f))
+           ())
+  in
+  Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j) kind
+
+(* A dispatch word can name an address the lift never made a block: a
+   jump-table case body BAP never disassembled.  [lift_at] re-decodes
+   and lifts it; the lifted blocks keep their address-derived tids and a
+   direct target that names an existing block is retargeted to that
+   block's tid.  [None] when the word is genuinely undecodable. *)
+let materialize_block ~(lift_at : Addr.t -> blk term list option)
+    ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) (a : Addr.t) :
+    (sub term * tid) option =
+  match lift_at a with
+  | None | Some [] -> None
+  | Some blks ->
+    let existing =
+      Core.Map.fold block_addrs ~init:Tid.Map.empty
+        ~f:(fun ~key:addr ~data:t m ->
+          Core.Map.set m ~key:(Tid.for_addr addr) ~data:t)
+    in
+    let retarget t =
+      Base.Option.value (Core.Map.find existing t) ~default:t
+    in
+    let blks =
+      Base.List.map blks ~f:(fun b ->
+          Term.map jmp_t b ~f:(remap_jmp retarget))
+    in
+    let present =
+      Term.enum blk_t sub
+      |> Seq.fold ~init:Tid.Set.empty ~f:(fun s b ->
+             Core.Set.add s (Term.tid b))
+    in
+    let fresh =
+      Base.List.filter blks ~f:(fun b ->
+          not (Core.Set.mem present (Term.tid b)))
+    in
+    let sub' =
+      Base.List.fold fresh ~init:sub ~f:(fun s b -> Term.append blk_t s b)
+    in
+    Some (sub', Term.tid (Base.List.hd_exn blks))
+
 (* One mid-block case entry: the prefix keeps the block's tid (its
    incoming edges) and falls through to the fresh entry block, which
-   takes the address; sound only when the prefix is transparent. *)
-let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
-    (sub : sub term) : sub term * tid =
+   takes the address; sound only when the prefix is transparent.  A word
+   in no block at all materializes its case body instead. *)
+let split_entry ~(starts : (Addr.t * tid) list)
+    ~(lift_at : Addr.t -> blk term list option)
+    ~(block_addrs : Tid.t Addr.Map.t) (a : Addr.t) (sub : sub term) :
+    sub term * tid =
   let container =
     Base.List.fold starts ~init:None ~f:(fun best (sa, t) ->
         if Word.compare sa a < 0 then
@@ -132,11 +192,14 @@ let split_entry ~(starts : (Addr.t * tid) list) (a : Addr.t)
           | None -> false)
     in
     match pivot with
-    | None ->
-        failwith
-          (Printf.sprintf
-             "hike-cfg-complete: dispatch word %s falls inside the block at %s (%s) with no entry instruction to split at"
-             (Word.to_string a) (Word.to_string sa) (Tid.name ctid))
+    | None -> (
+        match materialize_block ~lift_at ~block_addrs sub a with
+        | Some (sub', t) -> (sub', t)
+        | None ->
+          failwith
+            (Printf.sprintf
+               "hike-cfg-complete: dispatch word %s falls inside the block at %s (%s) with no entry instruction to split at"
+               (Word.to_string a) (Word.to_string sa) (Tid.name ctid)))
     | Some pivot ->
         let b1, b2 = Blk.split_before c pivot in
         let b2 = Term.set_attr b2 address a in
@@ -217,6 +280,7 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
    loud analysis loss.  One split per walk, so the walks terminate. *)
 let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(fresh : Tid.Set.t ref)
+    ~(lift_at : Addr.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
   let starts = addressed_starts ~block_addrs sub in
@@ -247,7 +311,7 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
            match dispatch_word blk with
            | None -> None
            | Some a ->
-               let sub', t = split_entry ~starts a sub in
+               let sub', t = split_entry ~starts ~lift_at ~block_addrs a sub in
                Some (a, sub', t))
     |> Seq.to_list
     |> Base.List.hd
@@ -261,7 +325,8 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
            (Word.to_string a) (Tid.name t));
       let block_addrs' = Core.Map.set block_addrs ~key:a ~data:t in
       fresh := Core.Set.add !fresh t;
-      prepare_dispatches ~denote ~retaddr ~fresh ~block_addrs:block_addrs' sub'
+      prepare_dispatches ~denote ~retaddr ~fresh ~lift_at
+        ~block_addrs:block_addrs' sub'
 
 let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
@@ -718,6 +783,7 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
    change and it is additive. *)
 let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
+    ~(lift_at : Addr.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool =
@@ -726,7 +792,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   let fresh = ref Tid.Set.empty in
   Vsa.with_images images (fun () ->
       let sub, block_addrs' =
-        prepare_dispatches ~denote ~retaddr ~fresh ~block_addrs sub
+        prepare_dispatches ~denote ~retaddr ~fresh ~lift_at ~block_addrs sub
       in
       let sub_tids =
         Core.Set.of_list (module Tid)
