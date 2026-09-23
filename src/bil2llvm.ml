@@ -328,7 +328,7 @@ let create_sub ctx scope sub =
    the body loop opens one [sub_scope] per sub and drops it at the
    boundary. *)
 let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
-    ~(target : Bap_core_theory.Theory.Target.t) ~(ptrsize : int)
+    ~(target : Bap_core_theory.Theory.Target.t) ~(addr_bits : int)
     ~(symtab : Symtab.t option)
     ~(copy_relocs : int64 list)
     (spec : section_spec)
@@ -367,7 +367,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       target;
       abi;
       sp = Abi.sp target;
-      ptrsize;
+      addr_bits;
       sub_of;
       synthetic;
       llvm_ctx;

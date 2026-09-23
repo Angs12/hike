@@ -17,7 +17,6 @@ let names_are (vs : var list) (names : string list) : bool =
   Base.List.map vs ~f:(fun v -> Var.name v) = names
 
 (* 64-bit literal word (native-int [w64] covers 63 bits only). *)
-let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
 
 let minus_addr sp (off : int64) : exp =
   Bil.BinOp

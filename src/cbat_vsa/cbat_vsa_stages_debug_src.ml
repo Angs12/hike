@@ -70,7 +70,10 @@ let report (label : string) : unit =
   Printf.printf
     "STAGES %s: denote %7.3fs/%d  join %7.3fs/%d  equal %7.3fs/%d  \
      widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d  glue %7.3fs/%d  \
-     cell_lm rec=%d con=%d\n\
+     cell_lm rec=%d con=%d  GC %s: minor %.0f  major %.0f  promoted %.0f\n%!"
+    label !t_denote !denote_calls !t_join !join_calls !t_equal !equal_calls
+    !t_widen !widen_calls !t_walk !walk_calls !t_scaffold !scaffold_calls
+    !t_glue !glue_calls
+    !cell_lm_recorded !cell_lm_consumed
     label (gc_minor_words ()) (gc_major_words ()) (gc_promoted_words ())
-
 #endif

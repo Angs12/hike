@@ -9,8 +9,7 @@ module Model = Hike_stack_model
 (* The solve's own denotation: [e] denotes in [blk] (in the target
    def's before-env when [~def] is given), replayed from the phase's
    solution state by the solve's own replay. *)
-type denote =
-  blk:blk term -> ?def:def term -> exp -> (Vsa.WordSet.t, Type.error) Result.t
+type denote = Hike_kb.denote
 
 let denote_of_sol (sol : Vsa.vsa_sol) : denote =
   fun ~blk ?def e ->

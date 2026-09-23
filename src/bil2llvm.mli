@@ -91,7 +91,7 @@ val emit_program :
   Llvm.llcontext ->
   Llvm.llmodule ->
   target:Theory.Target.t ->
-  ptrsize:int ->
+  addr_bits:int ->
   symtab:Symtab.t option ->
   copy_relocs:int64 list ->
   section_spec ->

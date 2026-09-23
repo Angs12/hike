@@ -14,9 +14,7 @@ module Vsa = Cbat_vsa
 
 (* [e] denotes in the before-env of [def] — the analysis facts'
    denotation, threaded from the pass entry. *)
-type denote =
-  blk:blk term -> ?def:def term -> exp ->
-  (Vsa.WordSet.t, Type.error) Result.t
+type denote = Hike_kb.denote
 
 (* The base var is the thread pointer; the offset is data. *)
 let tls_addr (tp : var) (addr : exp) : bool =

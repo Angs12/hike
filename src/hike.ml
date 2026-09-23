@@ -31,7 +31,7 @@ let convert_binary output_program proj =
   let target = Project.target proj in
   let abi = Abi.of_target target in
   let word = abi.Hike_abi.word in
-  let ptrsize = Theory.Target.bits target in
+  let addr_bits = Theory.Target.bits target in
   let spec =
     match (Hike_kb.facts ()).Hike_kb.spec with
     | Some spec -> spec
@@ -42,7 +42,7 @@ let convert_binary output_program proj =
   let copy_reloc_addrs_val = Hike_sections.copy_reloc_slot_addrs proj in
   let symtab_val = Some (Project.symbols proj) in
   Bil2llvm.emit_program llvm_ctx llvm_module
-    ~target ~ptrsize
+    ~target ~addr_bits
     ~symtab:symtab_val
     ~copy_relocs:copy_reloc_addrs_val
     spec (Project.program proj);

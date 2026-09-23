@@ -1088,7 +1088,7 @@ let emit_ir (subs : sub term list) : string =
      the pipeline does; the emitter reads them there. *)
   let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
   B2l.emit_program llvm_ctx llvm_module
-    ~target:Theory.Target.unknown ~ptrsize:64
+    ~target:Theory.Target.unknown ~addr_bits:64
     ~symtab:None ~copy_relocs:[]
     { B2l.spec_comps = []; B2l.spec_whole = []; B2l.spec_word = 8;
       B2l.spec_sections = [] }

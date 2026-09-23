@@ -19,10 +19,7 @@ module Tag = Hike.Sections.Tag
 let entry = Hike.Stack_model.segment_base
 
 (* An int64 word (the plain denotation literal). *)
-let i2w (x : int64) : Cbat_word.t =
-  Cbat_word.of_word (Word.of_int64 ~width:64 x)
 
-let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
 
 let portion_eq (p : A.portion) (sec : A.sec) (lo : int64) (hi : int64) =
   A.equal_sec p.A.pt_sec sec && Int64.equal p.A.pt_lo lo

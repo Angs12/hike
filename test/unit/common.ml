@@ -65,6 +65,11 @@ module Ds = Hike.Def_slots
 (* The record vocabulary: test_fixtures resolves [Cu] through this open. *)
 module Cu = Hike.Stack_model
 
+let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
+
+let i2w (x : int64) : Cbat_word.t =
+  Cbat_word.of_word (Word.of_int64 ~width:64 x)
+
 (* The list-form facts builder (the producer-internal promotion
    product the rewrite pins stamp). *)
 let mk_facts ?(prom_arity = 0) ?(prom_resolved = Tid.Map.empty) () :

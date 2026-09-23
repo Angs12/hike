@@ -128,7 +128,7 @@ type emit_ctx = {
   (* ABI projection of [target], static per binary. *)
   abi : Abi.t;
   sp : var;
-  ptrsize : int;
+  addr_bits : int;
   (* A lifted sub's own term, so its signature is read off its [arg]
      terms; the synthetic conventions (the indirect call and the twins)
      are DERIVED — [synthetic] names them, nothing is stored. *)

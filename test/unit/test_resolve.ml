@@ -8,7 +8,6 @@ open Hike_test.Common
 open Hike_test.Fixtures
 
 (* 64-bit literal word (native-int [w64] covers 63 bits only). *)
-let q64 (v : int64) : Cbat_word.t = Cbat_word.of_int64 ~width:64 v
 
 (* A singleton word-set from an int64 address. *)
 let ws_singleton (v : int64) : Cbat_vsa.WordSet.t =

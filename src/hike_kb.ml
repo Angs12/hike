@@ -8,6 +8,12 @@
 open Bap.Std
 module Hike_abi = Hike_abi
 
+(* The denotation seam: [exp] in the before-env of [def], or the
+   block's postcondition with no [def]. *)
+type denote =
+  blk:blk term -> ?def:def term -> exp ->
+  (Cbat_vsa.WordSet.t, Type.error) Result.t
+
 type facts = {
   (* One (pre, post) pair per block tid; [post] answers no-def queries
      and [pre] feeds the VSA_DEBUG differential's replay.  Absence
@@ -24,9 +30,7 @@ type facts = {
      with no [def], in the block's postcondition (the state a jmp
      reads).  A def with no tag (minted after the boundary) answers
      [AI.top]. *)
-  denote :
-    blk:blk term -> ?def:def term -> exp ->
-    (Cbat_vsa.WordSet.t, Type.error) Result.t;
+  denote : denote;
   (* The emitter's section spec, installed by the attribution pass in
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)

@@ -195,7 +195,7 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
         | Llvm.TypeKind.Pointer
           when not (Hike_stack_model.is_ptr_arg arg) ->
             Llvm.build_ptrtoint param
-              (Llvm.integer_type ctx.llvm_ctx ctx.ptrsize)
+              (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
               "" llvm_builder
         | _ -> param
       in
