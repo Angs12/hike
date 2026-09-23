@@ -326,10 +326,13 @@ let tests : unit Alcotest.test list =
                  | _ -> false)
               | _ -> false)));
 
-    (* The retraction pin: a resolution whose materialization declines
+    (* The liveness pin: a resolution whose materialization declines
        (a cross-sub word keeps the pairs list empty) leaves its eager
-       split unclaimed — the exit prune retracts it. *)
-    pin "RES-13" "FUSED-RETRACT: the unclaimed eager split is retracted at exit"
+       split unclaimed — but the surviving indirect transfer still
+       denotes the split's address, so the address-bearing fresh block
+       stays (the runtime transfer may land on it). *)
+    pin "RES-13"
+      "FUSED-LIVE: an unresolved indirect transfer's denotation keeps its split fresh block"
       (fun () ->
         let j7_sel = v64 "t22_j7_sel" in
         let j7_base = v64 "t22_j7_base" in
@@ -341,7 +344,7 @@ let tests : unit Alcotest.test list =
         let j7_pivot = Def.create j7_pad (Bil.Int (Cbat_word.to_word (q64 0L))) in
         let j7_pivot = Term.set_attr j7_pivot address (Cbat_word.to_word (q64 0x3008L)) in
         let j7, j7_tids =
-          sub_of "t22_retract"
+          sub_of "t22_live"
             [ [ j7_bdef ], [ (1, fun t -> mk_jmp_to t (Bil.Var j7_flag)); (2, mk_goto) ];
               [ j7_s1 ], [ (3, mk_goto) ];
               [ j7_s2 ], [ (3, mk_goto) ];
@@ -355,12 +358,11 @@ let tests : unit Alcotest.test list =
             (Program.create ~subs:[ j7 ] ()) j7
         in
         check "RES-13"
-          (Base.List.find_map (Term.enum blk_t j7' |> Seq.to_list)
+          (Base.List.exists (Term.enum blk_t j7' |> Seq.to_list)
              ~f:(fun b ->
                match Term.get_attr b address with
-               | Some a when Word.equal a (Cbat_word.to_word (q64 0x3008L)) -> Some true
-               | _ -> None)
-           = None));
+               | Some a -> Word.equal a (Cbat_word.to_word (q64 0x3008L))
+               | None -> false)));
 
     (* J4: a word the run's map cannot name is a loud failure. *)
     pin "RES-14" "T22-J4: a dispatch word the map cannot name fails loudly"

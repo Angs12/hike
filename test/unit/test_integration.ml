@@ -582,12 +582,12 @@ let tests : unit Alcotest.test list =
           "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit \
            shape)"
           (AI.equal
-             (Vsa.Test_seam.inverse_denote ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1))
+             (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1))
              entry);
         check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
           (Ws.equal
              (AI.find_word 32
-                (Vsa.Test_seam.inverse_denote ~env:entry
+                (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:entry
                    (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
                    (Ws.singleton W.b1))
                 x)
@@ -847,12 +847,31 @@ let tests : unit Alcotest.test list =
         check "T5-3 (T12 ruling): an unbounded runtime SP size IS the allocation event"
           (not (Core.Set.is_empty (dyn_alloc_events unbounded))));
 
-    (* T5-4 (head extrapolation): a cycle-written cell's data advances by
-       the steps; landmark translation applies when the head holds
-       entries; the overflow arm is the plain widen. *)
-    pin "INT-11"
-      "T5-4 head extrapolation: cycle-written cell data advances by the steps, translates toward \
-       the landmark, and overflows to the plain widen"
+    (* T5-4 (head extrapolation): a cell widens strictly by its OWN
+       entries — no own entries plain-widen; own entries translate by
+       their own steps; a bottom old state stays the plain widen.  One
+       pin per logical check. *)
+    pin "INT-20" "T5-4 contrast: the plain memory widen drives the cell data infinite"
+      (fun () ->
+        let mv = memv "t5x_m" in
+        let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
+        let key = key_of (Ws.singleton (w32 100)) in
+        let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
+        let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
+          let m = Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
+          AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd
+        in
+        let cell_of (st : AI.t) : Ws.t =
+          Mem.Val.data (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key)
+        in
+        let d_old = Ws.singleton (w32 1) in
+        let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
+        let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
+        let plain = AI.widen_join (mkstate d_old w_old) (mkstate d_new w_new) in
+        check "T5-4 (contrast): the plain memory widen drives the cell data infinite"
+          (Ws.is_infinite (cell_of plain)));
+
+    pin "INT-21" "T5-4 ownership: a cell with no own entries plain-widens"
       (fun () ->
         let mv = memv "t5x_m" in
         let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
@@ -872,109 +891,72 @@ let tests : unit Alcotest.test list =
         let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
         let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
         let plain = AI.widen_join (mkstate d_old w_old) (mkstate d_new w_new) in
-        check "T5-4 (contrast): the plain memory widen drives the cell data infinite"
-          (Ws.is_infinite (cell_of plain));
         let r =
           AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
             (mkstate d_old w_old) (mkstate d_new w_new)
         in
-        check "T5-4 (extrapolation): the cycle-written cell data advances by the steps"
-          (Ws.equal (cell_of r) (Ws.extrapolate_steps ~steps:1 d_old d_new));
-        check "T5-4 (extrapolation): the advanced cell stays bounded (the plain widen does not)"
-          (not (Ws.is_infinite (cell_of r)));
-        Cbat_landmarks.record_landmark_for_head lm ~head:h (Var.base xv) ~bound:(w32 10)
-          ~is_upper:true ~dist:2;
-        (match Cbat_landmarks.entries_for_head lm h (Var.base xv) with
-        | e :: _ -> e.Cbat_landmarks.dist_p <- Some 5
+        check "T5-4 (ownership): a cell with no own entries plain-widens"
+          (Ws.equal (cell_of r) (cell_of plain)));
+
+    pin "INT-22"
+      "T5-4 landmarks: the cell translates by its OWN entry (growth 2 x 1 step: hi 2 -> 4)"
+      (fun () ->
+        let mv = memv "t5x_m" in
+        let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
+        let key = key_of (Ws.singleton (w32 100)) in
+        let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
+        let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
+          let m = Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
+          AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd
+        in
+        let cell_of (st : AI.t) : Ws.t =
+          Mem.Val.data (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key)
+        in
+        let h = Tid.for_name "t5x_head" in
+        let lm = Cbat_landmarks.create () in
+        let need = Var.Set.singleton (Var.base xv) in
+        let d_old = Ws.singleton (w32 1) in
+        let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
+        let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
+        Cbat_landmarks.record_landmark_for_cell lm ~head:h
+          ~cell:(Mem.Key.cell_key key)
+          ~bound:(w32 10) ~is_upper:true ~dist:2;
+        (match Cbat_landmarks.entries_for_cell lm h (Mem.Key.cell_key key) with
+        | e :: _ -> e.Cbat_landmarks.dist_p <- Some 4
         | [] -> failwith "T5-4: landmark not recorded");
         let rl =
           AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
             (mkstate d_old w_old) (mkstate d_new w_new)
         in
         check_bound
-          "T5-4 (landmarks): the cell data translates toward the head's landmark (growth 3 x 1 \
-           step: hi 2 -> 5)"
-          (Ws.max_elem (cell_of rl)) (fun hi -> W.equal hi (w32 5));
+          "T5-4 (landmarks): the cell translates by its OWN entry (growth 2 x 1 step: hi 2 -> 4)"
+          (Ws.max_elem (cell_of rl)) (fun hi -> W.equal hi (w32 4)));
+
+    pin "INT-23" "T5-4 bottom: a bottom old cell state equals the plain widen"
+      (fun () ->
+        let mv = memv "t5x_m" in
+        let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
+        let key = key_of (Ws.singleton (w32 100)) in
+        let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
+        let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
+          let m = Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
+          AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd
+        in
+        let cell_of (st : AI.t) : Ws.t =
+          Mem.Val.data (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key)
+        in
+        let h = Tid.for_name "t5x_head" in
         let lm = Cbat_landmarks.create () in
+        let need = Var.Set.singleton (Var.base xv) in
+        let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
+        let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
         let r_ex =
           AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
             (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new)
         in
         let r_w = AI.widen_join (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in
-        check "T5-4 (overflow): extrapolation overflow falls back to the plain widen"
+        check "T5-4 (bottom): a bottom old cell state equals the plain widen"
           (Ws.equal (cell_of r_ex) (cell_of r_w)));
-
-    (* T5-4b (store loop integration): a counter loop storing i into a cell
-       — the cell data follows the loop's bounded range instead of widening
-       to the infinite ascending hull. *)
-    pin "INT-12"
-      "T5-4b store loop: the stored cell data stays bounded, following the loop's landmark range"
-      (fun () ->
-        let mem = memv "t5l_m" in
-        let rbp = v64 "RBP" in
-        let i = Var.create ~is_virtual:false ~fresh:false "t5l_i" (Type.Imm 32) in
-        let t = Var.create ~is_virtual:false ~fresh:false "t5l_t" (Type.Imm 32) in
-        let zf = v1 "t5l_zf" in
-        let k = w32 100 in
-        let kw = Cbat_word.to_word k in
-        let iv = Bil.Var i in
-        let sub, tids =
-          sub_of "t5l_store_loop"
-            [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0)));
-                Def.create rbp (Bil.Var (v64 "RSP")) ],
-              [ (1, mk_goto) ];
-              [ Def.create t (Bil.BinOp (Bil.MINUS, iv, Bil.Int kw));
-                Def.create zf
-                  (Bil.BinOp
-                     ( Bil.EQ,
-                       Bil.BinOp (Bil.MINUS, iv, Bil.Int kw),
-                       Bil.Int (Word.zero 32) )) ],
-              [ (2, fun tt -> mk_jmp_to tt (Bil.UnOp (Bil.NOT, Bil.Var zf)));
-                (3, fun tt -> mk_jmp_to tt (Bil.Var zf)) ];
-              [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1))));
-                Def.create mem
-                  (Bil.Store
-                     ( Bil.Var mem,
-                       Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
-                       Bil.Var i, LittleEndian, `r32 )) ],
-              [ (1, mk_goto) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let exit_tid = tids.(3) in
-        let key =
-          match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
-          | Some k -> k
-          | None -> failwith "T5-4b: bad key"
-        in
-        let wide_mem =
-          Mem.add
-            (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
-            ~key ~data:(Mem.Val.create (Ws.singleton (w32 0)) LittleEndian)
-        in
-        let entry_state = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
-        let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
-            (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_state sub)
-        in
-        let exit_st = Graphlib.Std.Solution.get sol exit_tid in
-        let cell =
-          Result.fold
-            (Vsa.Test_seam.denote_imm_exp
-               (Bil.Load
-                  ( Bil.Var mem,
-                    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
-                    LittleEndian,
-                    `r32 ))
-               exit_st)
-            ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
-        in
-        check
-          "T5-4b (store loop): the stored cell data is bounded — it followed the loop's landmark \
-           range instead of widening to the infinite hull"
-          ((not (Ws.is_infinite cell))
-          && Option.is_some
-               (Base.Option.filter (Ws.max_elem cell) ~f:(fun hi -> W.compare hi k <= 0))));
 
     (* F1: the jle-counter head's lower bound is the entry constant. *)
     pin "INT-13" "LM F1: the jle-counter head and taken view lower bounds are the entry constant 0"

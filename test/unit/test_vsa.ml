@@ -14,7 +14,7 @@ let i32 (n : string) : var = Var.create ~is_virtual:false ~fresh:false n (Type.I
 (* constrain_edge over the anchored top env, reading [v] at [width]. *)
 let assume (width : int) (v : var) (cond : exp) : Ws.t =
   AI.find_word width
-    (Vsa.Test_seam.constrain_edge ~env:AI.top
+    (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:AI.top
        (Jmp.cond (mk_jmp_to (Tid.create ()) cond)))
     v
 

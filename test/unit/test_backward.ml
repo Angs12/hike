@@ -56,7 +56,7 @@ let s_w32_of_env env v = AI.find_word 32 env (Var.base v)
 
 let s_window_of env cond v =
   AI.find_word 32
-    (Vsa.Test_seam.inverse_denote ~env cond
+    (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env cond
        (Ws.singleton (Cbat_word.of_word Word.b1)))
     (Var.base v)
 
@@ -230,7 +230,7 @@ let tests : unit Alcotest.test list =
           | _ -> assert false
         in
         let hdr_st = Graphlib.Std.Solution.get sol5 (Term.tid hdr5) in
-        let res5 = Vsa.Test_seam.constrain_edge ~env:hdr_st (Jmp.cond jmp5) in
+        let res5 = Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:hdr_st (Jmp.cond jmp5) in
         let cell5 = cell_at m (v64 "RBP") res5 in
         check "BK-10" (Ws.is_top cell5));
 
@@ -566,7 +566,7 @@ let tests : unit Alcotest.test list =
           | _ -> assert false
         in
         check "BK-33"
-          (AI.equal (Vsa.Test_seam.constrain_edge ~env:h_st4 (Jmp.cond jmp4)) h_st4));
+          (AI.equal (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:h_st4 (Jmp.cond jmp4)) h_st4));
 
     (* L-3b: the equal-lower merge arm and the partition views. *)
     pin "BK-34"
@@ -968,7 +968,7 @@ let tests : unit Alcotest.test list =
             (bk_iv64 ~lo:0 ~hi:20)
         in
         let env1 =
-          Vsa.Test_seam.inverse_denote ~env:st1
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:st1
             (t_load_exp
                (Bil.BinOp (Bil.MINUS, Bil.Var t_rsp, Bil.Int (Cbat_word.to_word (w64 8)))))
             (bk_iv64 ~lo:0 ~hi:9)
@@ -990,7 +990,7 @@ let tests : unit Alcotest.test list =
         in
         let st2 = AI.add_word st2 ~key:t_idx ~data:(bk_iv64 ~lo:0 ~hi:4) in
         let env2 =
-          Vsa.Test_seam.inverse_denote ~env:st2
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:st2
             (t_load_exp
                (Bil.BinOp
                   ( Bil.PLUS,
@@ -1015,7 +1015,7 @@ let tests : unit Alcotest.test list =
         in
         let st3 = AI.add_word st3 ~key:t_idx ~data:(bk_iv64 ~lo:8 ~hi:24) in
         let env3 =
-          Vsa.Test_seam.inverse_denote ~env:st3
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:st3
             (t_load_exp (Bil.BinOp (Bil.PLUS, Bil.Var t_rbp, Bil.Var t_idx)))
             (bk_iv64 ~lo:0 ~hi:9)
         in
@@ -1042,7 +1042,7 @@ let tests : unit Alcotest.test list =
         in
         let st4 = AI.add_word st4 ~key:t_idx ~data:(bk_iv64 ~lo:0 ~hi:4) in
         let env4 =
-          Vsa.Test_seam.inverse_denote ~env:st4
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:st4
             (t_load_exp
                (Bil.BinOp
                   ( Bil.PLUS,
@@ -1125,7 +1125,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let env7 = mk_env [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:3) ] in
         let env7' =
-          Vsa.Test_seam.inverse_denote ~env:env7
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:env7
             (Bil.BinOp
                ( Bil.LT,
                  Bil.Var s_t,
@@ -1168,7 +1168,7 @@ let tests : unit Alcotest.test list =
                  ~data:(Mem.Val.create (bk_iv32 ~lo:0 ~hi:40) LittleEndian))
         in
         let env9 =
-          Vsa.Test_seam.inverse_denote ~env:mem9
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:mem9
             (Bil.BinOp
                ( Bil.LT,
                  Bil.Load
@@ -1191,7 +1191,7 @@ let tests : unit Alcotest.test list =
        (10 ∈; 9 ∉)"
       (fun () ->
         let s10 =
-          Vsa.Test_seam.inverse_denote ~env:(mk_env [])
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
             (Cbat_vsa_utils.complete_cond
                (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 10))))))
             (Ws.singleton (Cbat_word.of_word Word.b1))
@@ -1202,7 +1202,7 @@ let tests : unit Alcotest.test list =
     pin "BK-71" "the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈"
       (fun () ->
         let s11 =
-          Vsa.Test_seam.inverse_denote ~env:(mk_env [])
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
             (Bil.BinOp (Bil.LT, Bil.UnOp (Bil.NEG, Bil.Var s_t), Bil.Int (Cbat_word.to_word (s_r32 10))))
             (Ws.singleton (Cbat_word.of_word Word.b1))
         in
@@ -1212,7 +1212,7 @@ let tests : unit Alcotest.test list =
     pin "BK-72" "the completed dual — NOT (t EQ 10) -> the NEQ complement (10 ∉; 11 ∈)"
       (fun () ->
         let s13 =
-          Vsa.Test_seam.inverse_denote ~env:(mk_env [])
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
             (Cbat_vsa_utils.complete_cond
                (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.EQ, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 10))))))
             (Ws.singleton (Cbat_word.of_word Word.b1))
@@ -1232,7 +1232,7 @@ let tests : unit Alcotest.test list =
                      ~cardn:(Cbat_word.of_int ~width:33 0x10000) (s_r32 0)) ) ]
         in
         let env15' =
-          Vsa.Test_seam.inverse_denote ~env:env15
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:env15
             (Bil.BinOp
                ( Bil.EQ,
                  Bil.Cast (Bil.LOW, 8, Bil.Var s_t),
@@ -1251,7 +1251,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let env15b = mk_env [ (s_t, Ws.singleton (s_r32 0x100)) ] in
         let env15b' =
-          Vsa.Test_seam.inverse_denote ~env:env15b
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:env15b
             (Bil.BinOp
                ( Bil.LT,
                  Bil.Cast (Bil.SIGNED, 64, Bil.Var s_t),
@@ -1261,7 +1261,7 @@ let tests : unit Alcotest.test list =
         let c15b = s_w32_of_env env15b' s_t in
         let row15b =
           s_w32_of_env
-            (Vsa.Test_seam.inverse_denote ~env:(mk_env [])
+            (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
                (Bil.BinOp
                   ( Bil.LT,
                     Bil.Cast (Bil.SIGNED, 64, Bil.Var s_t),
@@ -1308,7 +1308,7 @@ let tests : unit Alcotest.test list =
         let b1 = Ws.singleton (Cbat_word.of_word Word.b1) in
         let y16_read =
           s_w32_of_env
-            (Vsa.Test_seam.inverse_denote ~env:env16
+            (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:env16
                (Cbat_vsa_utils.complete_cond
                   (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var x16, Bil.Var y16))))
                b1)
@@ -1334,7 +1334,7 @@ let tests : unit Alcotest.test list =
         in
         let b1 = Ws.singleton (Cbat_word.of_word Word.b1) in
         let env16c' =
-          Vsa.Test_seam.inverse_denote ~env:env16c
+          Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:env16c
             (Bil.BinOp
                ( Bil.AND,
                  Bil.BinOp (Bil.LT, Bil.Var a16, Bil.Var y16),
@@ -1354,12 +1354,12 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "BK-78"
           (AI.equal
-             (Vsa.Test_seam.inverse_denote ~env:(mk_env [])
+             (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
                 (Bil.Int (Cbat_word.to_word (s_r32 5)))
                 (Ws.singleton (s_r32 7)))
              AI.bottom
           && AI.equal
-               (Vsa.Test_seam.inverse_denote ~env:(mk_env [])
+               (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
                   (Bil.Int (Cbat_word.to_word (s_r32 5)))
                   (Ws.singleton (s_r32 5)))
                (mk_env [])));

@@ -1,6 +1,6 @@
 # Pins — test_integration
 
-Module: `test/unit/test_integration.ml` (group `integration`, ids `INT-01`…`INT-19`),
+Module: `test/unit/test_integration.ml` (group `integration`, ids `INT-01`…`INT-10`, `INT-13`…`INT-23`),
 merging the word-domain / backward-walk soundness properties and the
 landmark / T5 pins from `test_cbat/test_properties.ml` and
 `test_cbat/test_landmarks.ml`. Every source `check` site is carried as one
@@ -26,8 +26,10 @@ produces, re-demonstrated whenever the cited mechanism changes. Production
 | INT-08 | The deep walk's cell meet keys by the same-iteration address denotation (T5-1: the load after the store meets `{5}`). | In `cbat_backward.ml`, denotate the load's address on the block-entry state instead of the same-iteration address. | The cell stays on the wide `[0,200]` range (or top), not `{5}`. |
 | INT-09 | The Store row flows a cell constraint into the stored data's producers (T5-2: load KA → copy → store KB → load KB). | In `cbat_backward.ml`, drop the Store row from the def-constraint walk. | The producing load's cell (KA) stays wide, not `{6}`. |
 | INT-10 | `Hike.Promote.dynamic_alloc_tids_of` classifies by value: a bounded literal SP decrement is not a VLA event, an unbounded runtime size is. | Classify by shape (any `RSP` decrement) or require a literal size. | The bounded fixture gains an event, or the unbounded fixture loses one. |
-| INT-11 | `AI.selective_widen_extrapolate` (`cbat_ai_representation.ml`) advances cycle-written cell data by the steps, clamps at the head's landmark, and falls back to the plain widen on overflow. | Route `selective_widen_extrapolate` to plain `AI.widen_join`. | The cell goes infinite (contrast/advance checks fail) or the landmark translation overshoots. |
-| INT-12 | Same landmark extrapolation end-to-end over a store loop (T5-4b): the stored cell data follows the loop's bounded range. | As INT-11: plain widen at the head. | The cell data is infinite or `max_elem > K`. |
+| INT-20 | The contrast baseline: a plain `AI.widen_join` drives a cycle-written cell's data infinite (`cbat_ai_representation.ml`). | Make the plain memory widen stop widening (return an operand). | `Ws.is_infinite (cell_of plain)` is false; the contrast collapses. |
+| INT-21 | `AI.selective_widen_extrapolate` self-gates each cell on its OWN landmark entries: no own entries ⇒ plain widen (no borrowing of the word lane's entries). | Have the memory arm translate a cell that has no own entries. | `cell_of r <> cell_of plain`. |
+| INT-22 | A cell with its own entry translates by that entry's steps (`record_landmark_for_cell` / `entries_for_cell`; `dist_p` growth 2 × 1 step: hi 2 → 4). | Drop the cell arm's Finite translate (or the per-cell row lookup). | `Ws.max_elem (cell_of rl) <> 4`. |
+| INT-23 | A bottom old cell state stays the plain widen (the bottom guard in the cell arm). | Let the bottom old state extrapolate instead of widening. | `cell_of r_ex <> cell_of r_w`. |
 | INT-13 | Landmark-directed widening over the jle counter (F1): the head and taken view keep the entry constant 0 as their lower bound. | In `Vsa.init_sol` / the entry transfer, seed the counter from top instead of the entry constant. | `Ws.min_elem` is no longer `0` (or is absent). |
 | INT-14 | The jne counter's Finite landmark firing end-to-end (F1-NEQ): the head lands at `[0,K]`, `max == K`. | In `cbat_landmarks.ml`, make `lm_calc_steps` always return `Inf`. | The head widens past K: the upper-bound check fails. |
 | INT-15 | The fallthrough-edge fixture (F1-FT): head `[0,K]`, taken body `[0,K-1]`, fallthrough exit `{K}`. | Make `lm_calc_steps` always `Inf` (plain widen at the head). | Head max ≠ K and the exit is not the singleton `{K}`. |

@@ -289,7 +289,7 @@ let tests : unit Alcotest.test list =
         check_ir "PR-04"
           ("_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, "
           ^ "i64 %R9, i256 %YMM0, i256 %YMM1, i256 %YMM2, i256 %YMM3, "
-          ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, i64 %hike_window)")
+          ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, ptr %hike_window)")
           ir);
 
     (* PR-05: the twin unpacks the window slots into the promoted body. *)
@@ -300,10 +300,10 @@ let tests : unit Alcotest.test list =
              (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
           ir);
 
-    (* PR-06: the twin loads the slots from the window memory. *)
-    pin "PR-06" "the twin loads the slots from the window memory" (fun () ->
+    (* PR-06: the twin reads the slots through the window pointer. *)
+    pin "PR-06" "the twin reads the slots through the window pointer" (fun () ->
         let _, ir, _ = t4_fixture () in
-        check_ir "PR-06" "load i64, ptr %1" ir);
+        check_ir "PR-06" "getelementptr i8, ptr %hike_window" ir);
 
     (* PR-07: the unresolved site takes the pointer call through the
        synthetic signature. *)
@@ -322,7 +322,7 @@ let tests : unit Alcotest.test list =
         let _, _, ir2 = t4_fixture () in
         check_ir "PR-09"
           "@indirect_call(i64, i64, i64, i64, i64, i64, i256, i256, i256, i256, \
-           i256, i256, i256, i256, i64)"
+           i256, i256, i256, i256, ptr)"
           ir2);
 
     (* PR-10: the sub gains its promoted parameter as a real BIR arg. *)

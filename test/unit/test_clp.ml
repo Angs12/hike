@@ -340,11 +340,13 @@ let tests : unit Alcotest.test list =
           && not (Clp.elem c (Clp.diff (Clp.top 64) (Clp.create c)))));
 
     pin "CLP-32"
-      "W5: the gapped subtraction is the identity — {0,2,4,6,8} \\ {0,4,8} = {0,2,4,6,8} (not a run)"
+      "W5: the small-card gapped subtraction is exact — {0,2,4,6,8} \\ {0,4,8} = {2,6}"
       (fun () ->
         let a5 = Clp.create ~width:32 ~step:(w32 2) ~cardn:(w33 5) (w32 0) in
         let b5 = Clp.create ~width:32 ~step:(w32 4) ~cardn:(w33 3) (w32 0) in
-        check "CLP-32" (Clp.equal (Clp.diff a5 b5) a5));
+        check "CLP-32"
+          (Clp.equal (Clp.diff a5 b5)
+             (Clp.create ~width:32 ~step:(w32 4) ~cardn:(w33 2) (w32 2))));
 
     pin "CLP-33"
       "W6: the singleton removal — the boundary singletons exact ([0,10] \\ {0} = {1..10}; \\ {10} = \

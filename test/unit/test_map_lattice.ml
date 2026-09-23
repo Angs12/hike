@@ -144,12 +144,15 @@ let tests : unit Alcotest.test list =
           && Ws.is_top (read32 m 21)));
 
     pin "MAP-16"
-      "opadd-b: join a key spanning several nodes — the [gaps] cells duplicate the node lo addresses, \
-       so the node lo reads are top (structural-only observation)"
+      "opadd-b: join a key spanning several nodes — node lo 10 reads {1,3}, node lo 14 reads {2,3}, the \
+       uncovered byte 13 is top"
       (fun () ->
         let m = Mem.meet_add (range_cell 10 12 1) ~key:(range 14 16) ~data:(cell 2) in
         let m = Mem.join_add m ~key:(range 10 16) ~data:(cell 3) in
-        check "MAP-16" (Ws.is_top (read32 m 10) && Ws.is_top (read32 m 14) && Ws.is_top (read32 m 13)));
+        check "MAP-16"
+          (Ws.equal (read32 m 10) (Ws.of_list ~width:32 [ w32 1; w32 3 ])
+          && Ws.equal (read32 m 14) (Ws.of_list ~width:32 [ w32 2; w32 3 ])
+          && Ws.is_top (read32 m 13)));
 
     pin "MAP-17"
       "opadd-c1: meet a key covering the node (interval_diff `none) — the fresh gap becomes {1,2} (meet \
@@ -165,13 +168,13 @@ let tests : unit Alcotest.test list =
 
     pin "MAP-18"
       "opadd-c2: join a key overlapping the node's low half (interval_diff `one) — the high flank lo 16 \
-       keeps {1}; the joined cell's lo 10 is top (gap pollution)"
+       keeps {1}; the joined cell's lo 10 = {1,2}; the fresh gap lo 7 is top"
       (fun () ->
         let m = range_cell 10 20 1 in
         let m = Mem.join_add m ~key:(range 5 15) ~data:(cell 2) in
         check "MAP-18"
           (Ws.equal (read32 m 16) (Ws.singleton (w32 1))
-          && Ws.is_top (read32 m 10)
+          && Ws.equal (read32 m 10) (Ws.of_list ~width:32 [ w32 1; w32 2 ])
           && Ws.is_top (read32 m 7)));
 
     pin "MAP-19"
