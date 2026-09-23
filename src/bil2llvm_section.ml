@@ -18,15 +18,20 @@ let lookup_native_fn ctx llvm_module v =
                 (Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) name)
                 ~default:f)))
 
-(* The owning global and byte offset of [v]; the unsplit shape
-   resolves to the section base. *)
-let section_target ~sec_base lo owners v =
-  Base.Option.value
-    (Base.Option.map
-       (Base.List.find owners ~f:(fun o ->
-            Int64.compare o.own_lo v <= 0 && Int64.compare v o.own_hi <= 0))
-       ~f:(fun o -> (o.base, Int64.sub v o.own_lo)))
-    ~default:(sec_base, Int64.sub v lo)
+(* (global, owner base) for the address; no owners = the
+   whole-section array. *)
+let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
+  let identity = (section.base, Word.to_int64_exn section.min_addr) in
+  match section.owners with
+  | [] -> identity
+  | owners ->
+      Base.Option.value
+        (Base.Option.map
+           (Base.List.find owners ~f:(fun o ->
+                Int64.compare o.own_lo addr_i64 <= 0
+                && Int64.compare addr_i64 o.own_hi <= 0))
+           ~f:(fun o -> (o.base, o.own_lo)))
+        ~default:identity
 
 (* The one address map: a function start to its function, a section
    byte to its owning global (owners tile byte-exactly, so every
@@ -35,14 +40,17 @@ let remap_native ctx llvm_ctx llvm_module v ~finish =
   Base.Option.first_some
     (Base.Option.map (lookup_native_fn ctx llvm_module v) ~f:finish)
     (Base.Option.bind
-       (Base.List.find ctx.section_remap ~f:(fun (lo, hi, _, _) ->
+       (Base.List.find ctx.sections ~f:(fun s ->
+            let lo = Word.to_int64_exn s.min_addr in
+            let hi = Word.to_int64_exn s.max_addr in
             Int64.compare lo v <= 0 && Int64.compare v hi <= 0))
-       ~f:(fun (lo, _, g, owners) ->
-         let base, offset = section_target ~sec_base:g lo owners v in
+       ~f:(fun section ->
+         let base, own_lo = owner_of section v in
          Some
            (finish
               (Llvm.const_in_bounds_gep (Llvm.i8_type llvm_ctx) base
-                 [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) offset false |]))))
+                 [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+                      (Int64.sub v own_lo) false |]))))
 
 let remap_native_addr ctx llvm_ctx llvm_module v =
   remap_native ctx llvm_ctx llvm_module v
@@ -114,21 +122,6 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
 let section_of_addr sections (addr : word) =
   Base.List.find sections ~f:(fun section ->
       Word.between ~low:section.min_addr addr ~high:section.max_addr)
-
-(* (global, owner base) for the address; no owners = the
-   whole-section array. *)
-let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
-  let identity = (section.base, Word.to_int64_exn section.min_addr) in
-  match section.owners with
-  | [] -> identity
-  | owners ->
-      Base.Option.value
-        (Base.Option.map
-           (Base.List.find owners ~f:(fun o ->
-                Int64.compare o.own_lo addr_i64 <= 0
-                && Int64.compare addr_i64 o.own_hi <= 0))
-           ~f:(fun o -> (o.base, o.own_lo)))
-        ~default:identity
 
 let resolve_addr_in ctx llvm_builder section addr =
   let base, own_lo =

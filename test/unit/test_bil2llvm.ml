@@ -11,10 +11,10 @@ open Hike_test.Fixtures
 
 (* The producer's per-def tag stamp + the promotion rewrite: the fixture
    hand-states the tags the attribution would stamp, then promotes. *)
-let stamp_tag (d : def term) (t : Sm.sec_tag option) : def term =
-  match t with Some t -> Sm.set_sec_tag t d | None -> d
+let stamp_tag (d : def term) (t : Ds.sec_tag option) : def term =
+  match t with Some t -> Ds.set_sec_tag t d | None -> d
 
-let stamp (tags : (Tid.t * Sm.sec_tag) list) (sub : sub term) : sub term =
+let stamp (tags : (Tid.t * Ds.sec_tag) list) (sub : sub term) : sub term =
   let tags =
     Base.List.fold tags ~init:Tid.Map.empty
       ~f:(fun m (tid, t) -> Core.Map.set m ~key:tid ~data:t)

@@ -61,6 +61,7 @@ let sp = v64 "RSP"
 
 module Kb = Hike.Kb
 module Sm = Hike.Stack_model
+module Ds = Hike.Def_slots
 (* The record vocabulary: test_fixtures resolves [Cu] through this open. *)
 module Cu = Hike.Stack_model
 
@@ -130,7 +131,7 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
           Core.Map.find acc (Term.tid sub)
           |> Option.value ~default:(Tid.Map.empty, sub)
         in
-        Sm.stamp_dyn_allocs
+        Ds.stamp_dyn_allocs
           ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts sub') sub')
   in
   let ctx =

@@ -28,6 +28,69 @@ let update_phis ctx scope transfer_vars blks =
           let phi = get_phi scope blk_tid var in
           Bil2llvm_phi.add_incomings ctx scope ~phi ~rows ~target:blk_tid var))
 
+
+(* Each jmp of a series renders in its own basic block; every direct
+   edge lands in the edge table so target phis name the terminator's
+   block.  The terminal guard is complete: literal-true branches
+   unconditionally, else the false edge is [unreachable]. *)
+let create_branches ctx scope blk_tid llvm_builder branches =
+  let open Bap.Std in
+  let llvm_ctx = ctx.llvm_ctx in
+  let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
+  let jmps = Seq.to_list branches in
+  let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
+    Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:tid ~term_bb:cur ()
+  in
+  let rec step ~(first : bool) cur = function
+    | [] -> ()
+    | j :: rest -> (
+        let cont_bb =
+          match rest with
+          | [] -> None
+          | _ -> Some (Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-sw") fn)
+        in
+        match Jmp.kind j |> goto_label_exn with
+        | Direct tid ->
+            if Base.String.is_prefix (Tid.name tid) ~prefix:"@interrupt:" then
+              (* A divide-by-zero trap lifts as a direct goto to the
+                 interrupt sub; it is terminal. *)
+              create_interrupt ctx llvm_builder
+            else (
+            let bb = get_bb scope tid in
+            note_edge ~cur tid;
+            match cont_bb with
+            | Some next ->
+                let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
+                Llvm.build_cond_br cond bb next llvm_builder |> ignore;
+                Llvm.position_at_end next llvm_builder;
+                step ~first:false next rest
+            | None ->
+                if Hike_stack_model.is_true_cond (Jmp.cond j) || first
+                then (
+                  Llvm.build_br bb llvm_builder |> ignore)
+                else
+                  let dead =
+                    Llvm.append_block llvm_ctx
+                      (Tid.name blk_tid ^ "-dead")
+                      fn
+                  in
+                  let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
+                  Llvm.build_cond_br cond bb dead llvm_builder |> ignore;
+                  Llvm.position_at_end dead llvm_builder;
+                  Llvm.build_unreachable llvm_builder |> ignore)
+        | Indirect exp -> (
+            (* An indirect jmp ends its own path; later jmps still
+               render. *)
+            let target_val = create_exp ctx scope llvm_builder blk_tid exp in
+            Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
+            (match cont_bb with
+             | Some next ->
+                 Llvm.position_at_end next llvm_builder;
+                 step ~first:false next rest
+             | None -> ())))
+  in
+  step ~first:true (Llvm.insertion_block llvm_builder) jmps
+
 let create_control_flow ctx scope llvm_builder blk sub fr =
   let control_flow = Term.enum jmp_t blk in
   let tid = Term.tid blk in
@@ -272,15 +335,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     (prog : program term) : unit =
   (* The sections construct from the spec before any function declares. *)
   let sections = Bil2llvm_section.build_sections llvm_ctx llvm_module spec in
-  (* The section base map: every native address renders through its
-     owning global. *)
-  let section_remap =
-    Base.List.map sections ~f:(fun s ->
-        ( Word.to_int64_exn s.min_addr,
-          Word.to_int64_exn s.max_addr,
-          s.base,
-          s.owners ))
-  in
   let abi = Abi.of_target target in
   (* The signature rides each sub's own [arg] terms (written by the types
      pass); the emitter reads it off the sub. *)
@@ -291,19 +345,16 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   (* Every pointer call passes the caller's SP, so a promoted
      target's thunk can unpack the caller window. *)
-  let icall_tid = Tid.for_name "indirect_call" in
   (* A sub earns a thunk twin iff its own signature carries promoted
      slots; the twin's signature is the synthetic indirect
      convention. *)
-  let has_slot_args args =
-    Base.List.exists args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
-  in
+  let has_slot_args args = count_slot_args args > 0 in
   (* The synthetic conventions: the indirect call and every sub that
      earned a twin.  Their signatures are DERIVED from the ABI — only
      their names are held. *)
   let synthetic =
     Base.List.fold subs_list
-      ~init:(Core.Set.of_list (module Tid) [ icall_tid ])
+      ~init:(Core.Set.of_list (module Tid) [ indirect_call_tid ])
       ~f:(fun acc sub ->
         let args = Hike_stack_model.sig_args sub in
         if has_slot_args args && not (Hike_stack_model.fixed_signature sub)
@@ -312,7 +363,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   let ctx =
     { symtab;
-      section_remap;
       copy_relocs;
       target;
       abi;

@@ -470,7 +470,7 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
         m_def = None; m_width = 0; m_store = false; m_identity = true })
 
 let is_rip_relative (d : def term) : bool =
-  Hike_stack_model.def_is_rip_relative d
+  Hike_def_slots.def_is_rip_relative d
 
 (* Pure constant arithmetic — the address shape whose emission
    evaluates to the exact native bits. *)
@@ -851,8 +851,9 @@ let escape_roots_of_tree (tree : sub_tree) : Var.Set.t =
            let mem_var = function
              | Stack_region id -> Some (Model.region_mem id)
              | Stack_residue -> Some (Model.region_mem Model.residue_id)
-             | Data_region id -> Some (Model.sec_comp_mem id)
              | Arg_slot _ -> None
+             | Data_region _ ->
+               failwith "hike-sections: a data binding in a sub tree"
            in
            match mem_var rs.storage with
            | Some v -> Core.Set.add acc v
@@ -928,10 +929,10 @@ let global_comps_of ~(word : int) ~(spans : data_span list)
         Hike_diag.warn "sec: span %.8Lx..%.8Lx: %d component(s)" d.ds_lo d.ds_hi n);
   comps
 
-let sec_tag (d : def term) : sec_tag option = Hike_stack_model.sec_tag d
+let sec_tag (d : def term) : sec_tag option = Hike_def_slots.sec_tag d
 
 let set_sec_tag (t : sec_tag) (d : def term) : def term =
-  Hike_stack_model.set_sec_tag t d
+  Hike_def_slots.set_sec_tag t d
 
 let stamp_tags (c : ctx) (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->

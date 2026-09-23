@@ -431,6 +431,45 @@ and emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite =
   insert_local scope blk_tid marker v;
   create_exp ctx scope llvm_builder blk_tid (rewrite marker)
 
+(* The fission access: GEP the storage at the access's index, emit
+   the load or store, and bind the marker the mem node carries
+   forward.  The index arithmetic is the caller's — the window's
+   (a − stack0) and the region's (a − stack0 − rel_rlo) are the two
+   spellings of "access offset relative to the storage base". *)
+and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
+    ~(index_of : Llvm.llvalue -> Llvm.llvalue) node (exp : exp) :
+    Llvm.llvalue =
+  let rewrite addr size marker = rewrite_mem_node exp addr size marker in
+  match node with
+  | `Load (addr, size) ->
+      let marker = marker_of_size size in
+      let p =
+        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base
+          [| index_of (create_exp ctx scope llvm_builder blk_tid addr) |]
+          "" llvm_builder
+      in
+      let emit () =
+        Llvm.build_load
+          (Llvm.integer_type ctx.llvm_ctx (Size.in_bits size))
+          p "" llvm_builder
+      in
+      emit_with_marker ctx scope llvm_builder blk_tid marker ~emit
+        ~rewrite:(rewrite addr size)
+  | `Store (addr, data, size) ->
+      let marker = marker_of_size size in
+      let p =
+        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base
+          [| index_of (create_exp ctx scope llvm_builder blk_tid addr) |]
+          "" llvm_builder
+      in
+      let emit () =
+        let d = create_exp ctx scope llvm_builder blk_tid data in
+        let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
+        d
+      in
+      emit_with_marker ctx scope llvm_builder blk_tid marker ~emit
+        ~rewrite:(rewrite addr size)
+
 (* Region accesses GEP the region alloca at (access offset − region
    base), both relative to the SP anchor.  Window accesses normalize
    the same way against the hike_window parameter — a pointer into the
@@ -445,39 +484,13 @@ and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
         | Some v -> v
         | None -> Llvm.undef (var_lltype ctx w)
       in
-      let off a =
-        let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
-        Llvm.build_sub a stack0 "" llvm_builder
-      in
       match find_mem_node exp with
-      | Some (`Load (addr, size)) ->
-          let marker = marker_of_size size in
-          let a = create_exp ctx scope llvm_builder blk_tid addr in
-          let p =
-            Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w_ptr [| off a |] ""
-              llvm_builder
-          in
-          let emit () =
-            Llvm.build_load
-              (Llvm.integer_type ctx.llvm_ctx (Size.in_bits size))
-              p "" llvm_builder
-          in
-          let rewrite marker = rewrite_mem_node exp addr size marker in
-          emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite
-      | Some (`Store (addr, data, size)) ->
-          let marker = marker_of_size size in
-          let a = create_exp ctx scope llvm_builder blk_tid addr in
-          let p =
-            Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w_ptr [| off a |] ""
-              llvm_builder
-          in
-          let emit () =
-            let d = create_exp ctx scope llvm_builder blk_tid data in
-            let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
-            d
-          in
-          let rewrite marker = rewrite_mem_node exp addr size marker in
-          emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite
+      | Some node ->
+          storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
+            ~index_of:(fun a ->
+                let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
+                Llvm.build_sub a stack0 "" llvm_builder)
+            node exp
       | None -> create_exp ctx scope llvm_builder blk_tid exp)
 
 and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
@@ -492,36 +505,9 @@ and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
   | None -> create_exp ctx scope llvm_builder blk_tid exp
   | Some (base, rel_rlo) -> (
       match find_mem_node exp with
-      | Some (`Load (addr, size)) ->
-          let marker = marker_of_size size in
-          let a = create_exp ctx scope llvm_builder blk_tid addr in
-          let idx = region_index llvm_builder rel_rlo a in
-          let p =
-            Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| idx |] ""
-              llvm_builder
-          in
-          let emit () =
-            Llvm.build_load
-              (Llvm.integer_type ctx.llvm_ctx (Size.in_bits size))
-              p "" llvm_builder
-          in
-          let rewrite marker = rewrite_mem_node exp addr size marker in
-          emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite
-      | Some (`Store (addr, data, size)) ->
-          let marker = marker_of_size size in
-          let a = create_exp ctx scope llvm_builder blk_tid addr in
-          let idx = region_index llvm_builder rel_rlo a in
-          let p =
-            Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| idx |] ""
-              llvm_builder
-          in
-          let emit () =
-            let d = create_exp ctx scope llvm_builder blk_tid data in
-            let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
-            d
-          in
-          let rewrite marker = rewrite_mem_node exp addr size marker in
-          emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite
+      | Some node ->
+          storage_access ctx scope llvm_builder blk_tid ~base
+            ~index_of:(fun a -> region_index llvm_builder rel_rlo a) node exp
       | None -> create_exp ctx scope llvm_builder blk_tid exp)
 
 (* Routes a region/window mem var to its storage; with no frame
@@ -533,65 +519,3 @@ and region_window_access ctx scope llvm_builder blk_tid mv exp ~raw =
   | Some fr when Hike_stack_model.is_window_mem mv ->
       window_mem_access ctx scope llvm_builder blk_tid fr mv exp
   | _ -> raw ()
-
-(* Each jmp of a series renders in its own basic block; every direct
-   edge lands in the edge table so target phis name the terminator's
-   block.  The terminal guard is complete: literal-true branches
-   unconditionally, else the false edge is [unreachable]. *)
-let create_branches ctx scope blk_tid llvm_builder branches =
-  let open Bap.Std in
-  let llvm_ctx = ctx.llvm_ctx in
-  let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
-  let jmps = Seq.to_list branches in
-  let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
-    Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:tid ~term_bb:cur ()
-  in
-  let rec step ~(first : bool) cur = function
-    | [] -> ()
-    | j :: rest -> (
-        let cont_bb =
-          match rest with
-          | [] -> None
-          | _ -> Some (Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-sw") fn)
-        in
-        match Jmp.kind j |> goto_label_exn with
-        | Direct tid ->
-            if Base.String.is_prefix (Tid.name tid) ~prefix:"@interrupt:" then
-              (* A divide-by-zero trap lifts as a direct goto to the
-                 interrupt sub; it is terminal. *)
-              create_interrupt ctx llvm_builder
-            else (
-            let bb = get_bb scope tid in
-            note_edge ~cur tid;
-            match cont_bb with
-            | Some next ->
-                let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
-                Llvm.build_cond_br cond bb next llvm_builder |> ignore;
-                Llvm.position_at_end next llvm_builder;
-                step ~first:false next rest
-            | None ->
-                if Hike_stack_model.is_true_cond (Jmp.cond j) || first
-                then (
-                  Llvm.build_br bb llvm_builder |> ignore)
-                else
-                  let dead =
-                    Llvm.append_block llvm_ctx
-                      (Tid.name blk_tid ^ "-dead")
-                      fn
-                  in
-                  let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
-                  Llvm.build_cond_br cond bb dead llvm_builder |> ignore;
-                  Llvm.position_at_end dead llvm_builder;
-                  Llvm.build_unreachable llvm_builder |> ignore)
-        | Indirect exp -> (
-            (* An indirect jmp ends its own path; later jmps still
-               render. *)
-            let target_val = create_exp ctx scope llvm_builder blk_tid exp in
-            Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
-            (match cont_bb with
-             | Some next ->
-                 Llvm.position_at_end next llvm_builder;
-                 step ~first:false next rest
-             | None -> ())))
-  in
-  step ~first:true (Llvm.insertion_block llvm_builder) jmps

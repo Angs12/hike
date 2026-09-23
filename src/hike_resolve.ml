@@ -17,13 +17,9 @@ let resolve_target ~(lookup : int64 -> Tid.t option) (ws : Vsa.WordSet.t) :
 (* The program's sub-name -> tid pairs, the lookup's name side; tid
    labels carry separators the symbol table spells without. *)
 let name_tid_of (prog : program term) : (string * Tid.t) list =
-  let sanitize (name : string) =
-    Base.String.filter name ~f:(fun c ->
-        match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)
-  in
   Term.enum sub_t prog
   |> Seq.fold ~init:[] ~f:(fun acc s ->
-         (sanitize (Tid.name (Term.tid s)), Term.tid s) :: acc)
+         (Model.sanitize_tid_name (Tid.name (Term.tid s)), Term.tid s) :: acc)
 
 (* A singleton address names a sub of this program through the symtab
    and the name map; a foreign address resolves to no sub. *)

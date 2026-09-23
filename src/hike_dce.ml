@@ -68,16 +68,7 @@ let sweep_census_of (sub : sub term) : sweep_census =
             rcnt = bump_all acc.rcnt lms;
           })
     in
-    let perm =
-      Term.enum jmp_t blk
-      |> Seq.fold ~init:acc.perm ~f:(fun s j ->
-          Core.Set.union s (Jmp.free_vars j))
-    in
-    let perm =
-      Term.enum phi_t blk
-      |> Seq.fold ~init:perm ~f:(fun s p ->
-          Core.Set.union s (Phi.free_vars p))
-    in
+    let perm = Core.Set.union acc.perm (Hike_stack_model.blk_reads blk) in
     { acc with perm }
   in
   Term.enum blk_t sub |> Seq.fold ~init ~f:census_blk

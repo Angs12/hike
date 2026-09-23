@@ -609,19 +609,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
   ({ changed; consumed_vars }, compiled)
 
 let uses_of (s : sub term) : Var.Set.t =
-  Term.enum blk_t s
-  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
-      let acc =
-        Term.enum def_t blk
-        |> Seq.fold ~init:acc ~f:(fun acc d ->
-            Core.Set.union acc (Exp.free_vars (Def.rhs d)))
-      in
-      let acc =
-        Term.enum jmp_t blk
-        |> Seq.fold ~init:acc ~f:(fun acc j -> Core.Set.union acc (Jmp.free_vars j))
-      in
-      Term.enum phi_t blk
-      |> Seq.fold ~init:acc ~f:(fun acc p -> Core.Set.union acc (Phi.free_vars p)))
+  Hike_stack_model.sub_reads s
 
 (* Compiles every eligible cond, then drops every def of a consumed flag var
    whose only use was the rewritten jump.  A compiled cond reading memory

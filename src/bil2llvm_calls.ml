@@ -351,7 +351,7 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
    a promoted target's thunk (via address rendering), else the
    target's existing convention. *)
 let create_indirect_call ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
-  let icall_tid = Tid.for_name "indirect_call" in
+  let icall_tid = indirect_call_tid in
   let call = call_exn j in
   let target = Call.target call |> label_exp in
   let fallthrough =
@@ -393,10 +393,7 @@ let create_thunk ctx (sub_tid : tid) =
   let llvm_module = ctx.llvm_module in
       (* A twin exists iff the sub's own signature carries promoted
          slots. *)
-  let arity =
-    Base.List.count (get_args ctx sub_tid) ~f:(fun a ->
-        Hike_stack_model.is_arg_slot (Arg.lhs a))
-  in
+  let arity = count_slot_args (get_args ctx sub_tid) in
   if arity = 0 then ()
   else if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then ()
   else begin

@@ -235,7 +235,7 @@ let tests : unit Alcotest.test list =
           }
         in
         let stamp sub =
-          Sm.stamp_dyn_allocs ~dynamic_alloc_tids:Tid.Set.empty sub
+          Ds.stamp_dyn_allocs ~dynamic_alloc_tids:Tid.Set.empty sub
           |> Sm.set_layout layout
         in
         let ir =

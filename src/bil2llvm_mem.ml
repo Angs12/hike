@@ -8,7 +8,7 @@ open Bil2llvm_exp
 open Bil2llvm_section
 
 let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
-  Hike_stack_model.sec_tag def
+  Hike_def_slots.sec_tag def
 
 let is_plt_trampoline ctx (sub : sub term) : bool =
   let free_vars =
@@ -104,9 +104,9 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
   let res =
-    if Hike_stack_model.def_is_dyn_alloc def then
+    if Hike_def_slots.def_is_dyn_alloc def then
       create_dynamic_alloc ctx scope llvm_builder blk_tid def exp
-    else if Hike_stack_model.def_is_rip_relative def then
+    else if Hike_def_slots.def_is_rip_relative def then
       create_rip_relative_addr ctx scope llvm_builder blk_tid exp
     else mem_access ctx scope llvm_builder blk_tid sub_tid fr def_tag def exp
   in
@@ -115,7 +115,7 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
      hike_window parameter.  Memory-node defs are skipped — their
      value is loaded data, not an address. *)
   let res =
-    if Hike_stack_model.def_is_window_value def then
+    if Hike_def_slots.def_is_window_value def then
       let w_i64 =
         let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
         match get_local scope blk_tid wv with

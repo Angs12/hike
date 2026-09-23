@@ -123,7 +123,6 @@ type emit_ctx = {
   symtab : Symtab.t option;
   (* The section base map: every native address renders through its
      owning global. *)
-  section_remap : (int64 * int64 * Llvm.llvalue * sec_owner list) list;
   copy_relocs : int64 list;
   target : Theory.Target.t;
   (* ABI projection of [target], static per binary. *)
@@ -203,15 +202,18 @@ let is_extern ctx (sub_tid : tid) : bool =
   (not (Core.Map.mem ctx.sub_of sub_tid))
   && not (Core.Set.mem ctx.synthetic sub_tid)
 
-(* Strips tid prefixes for LLVM names. *)
-let sanitize_name =
-  Base.String.filter ~f:(fun c ->
-      if c = '#' then false
-      else if c = '.' then false
-      else if c = '%' then false
-      else if c = '\\' then false
-      else if c = '@' then false
-      else true)
+(* Strips tid prefixes for LLVM names; the model owns the character set,
+   so the emitter's names and the resolver's name map agree. *)
+let sanitize_name = Hike_stack_model.sanitize_tid_name
+
+(* The synthetic indirect-call sub: every pointer call targets it, and
+   its convention is [window_conv_args]. *)
+let indirect_call_tid : tid = Tid.for_name "indirect_call"
+
+(* The promoted slots in a signature: the thunk twin's arity, and the
+   has-slots test's count. *)
+let count_slot_args (args : Arg.t list) : int =
+  Base.List.count args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
 
 let strip_at (name : string) : string =
   if String.length name > 0 && name.[0] = '@' then

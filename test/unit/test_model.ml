@@ -54,7 +54,7 @@ let stamp_shape
     ~(layout : Sm.sub_layout)
     (sub : sub term) : sub term =
   let sub =
-    Sm.stamp_dyn_allocs
+    Ds.stamp_dyn_allocs
       ~dynamic_alloc_tids:
         (Base.Option.value dynamic_alloc_tids ~default:Tid.Set.empty)
       sub
@@ -66,7 +66,7 @@ let empty_layout : Sm.sub_layout =
   { regions = []; anchor = None; window_param = false }
 
 (* Stamps the production tag onto a fixture def. *)
-let tag_def (t : Sm.sec_tag) (d : def term) : def term = Sm.set_sec_tag t d
+let tag_def (t : Ds.sec_tag) (d : def term) : def term = Ds.set_sec_tag t d
 
 (* The stack-to-locals fixture mem var and its MINUS/rsp-rooted store. *)
 let pr_c_m = memv "pr_c_m"
@@ -163,10 +163,10 @@ let tests : unit Alcotest.test list =
           Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5u
         in
         let a5_stamped =
-          Sm.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u
+          Ds.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u
         in
         check "MOD-03"
-          (Sm.def_is_dyn_alloc
+          (Ds.def_is_dyn_alloc
              (Base.Option.value_exn
                 (def_of_tid a5_stamped (Term.tid a5_vla)))));
 

@@ -50,8 +50,7 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
          let btid = Term.tid blk in
          let has_call =
            Term.enum jmp_t blk
-           |> Seq.exists ~f:(fun j ->
-                  match Jmp.kind j with Call _ -> true | _ -> false)
+           |> Seq.exists ~f:Hike_stack_model.machine_call
          in
          if not has_call then sites
          else
@@ -233,7 +232,10 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int) (d : def term) :
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_global id ->
       let mem_var = Model.sec_comp_mem id in
-      Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
+      let d =
+        Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
+      in
+      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_slot (i, din) ->
       let read = slot_read ~word i din bits in
       Def.map_exp d ~f:(fun e -> rewrite_load_node ~dst:read e)
@@ -410,7 +412,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                         Core.Set.add acc (Term.tid d)
                       | _ -> acc))))
   in
-  let sub = Hike_stack_model.stamp_window_values ~window_values sub in
+  let sub = Hike_def_slots.stamp_window_values ~window_values sub in
   let sub =
     Term.map blk_t sub ~f:(fun blk ->
         let blk =

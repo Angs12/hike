@@ -145,8 +145,6 @@ module Stack_model : sig
 
   type sec_tag = Hike_stack_model.sec_tag
 
-  val sec_tag : def term -> sec_tag option
-  val set_sec_tag : sec_tag -> def term -> def term
   (** The model segment's base (2^62 + 8: the ABI entry residue): the
       ABSOLUTE position of the entry RSP on the segment line; tag
       positions are absolute, so a frame offset [o] sits at
@@ -229,16 +227,14 @@ module Stack_model : sig
   val set_layout : sub_layout -> sub term -> sub term
 
 
-  (** Per-def tags: the dynamic-allocation fact rides the def's value. *)
-  val stamp_dyn_allocs : dynamic_alloc_tids:Tid.Set.t -> sub term -> sub term
-  val stamp_window_values : window_values:Tid.Set.t -> sub term -> sub term
-  val def_is_window_value : def term -> bool
-  val def_is_dyn_alloc : def term -> bool
-
   (** The call-argument temps the promotion creates at call sites. *)
   val call_arg : word:int -> int -> var
   val is_call_arg : var -> bool
 end
+
+(** The def-carried KB value slots: the producer stamps each def's
+    value, the emitter reads the tags off the term. *)
+module Def_slots = Hike_def_slots
 
 (** The project's data-section facts and the slim def-carried section
     tag. *)

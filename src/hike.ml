@@ -15,6 +15,7 @@ module Dce = Hike_dce
 module Jump = Hike_jump
 module Split_mem = Hike_split_mem
 module Stack_model = Hike_stack_model
+module Def_slots = Hike_def_slots
 module Sections = Hike_sections
 module Image = Hike_image
 module Promote = Hike_promote
@@ -183,7 +184,7 @@ let pass_attrib proj =
   Project.map_program proj ~f:(fun prog ->
       let prog =
         Term.map sub_t prog ~f:(fun sub ->
-            Hike_stack_model.stamp_dyn_allocs
+            Hike_def_slots.stamp_dyn_allocs
               ~dynamic_alloc_tids:(Core.Map.find dyn_allocs (Term.tid sub)
                                    |> Option.value ~default:Tid.Set.empty)
               sub)
