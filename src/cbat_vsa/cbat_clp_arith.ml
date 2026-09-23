@@ -161,11 +161,6 @@ let logand_general (f1 : and_facts) (f2 : and_facts) : t =
 let facts_of (p : t) (f : (t -> and_facts option) option) : and_facts option =
   match f with Some f -> f p | None -> and_facts_of p
 
-(* Memoize [p]'s answer in [r] (outer [None] = not yet read); the general
-   arm is the only reader. *)
-let facts_memo (r : and_facts option option ref) (p : t) : and_facts option =
-  match !r with Some f -> f | None -> let f = and_facts_of p in r := Some f; f
-
 (* Bitwise op via non-wrapping superset. *)
 let logand_rule ?f (cp1 : t) (cp2 : t) : t =
   (* Mixed widths coerce to max. *)
@@ -224,12 +219,16 @@ let logxor (p1 : t) (p2 : t) : t =
   (* The four ANDs share their operands: [p1] feeds the first and fourth,
      [p2] the second and fourth, and each lnot operand mirrors its source.
      A fast arm never reaches the resolver. *)
-  let m1 = ref None and m2 = ref None in
+  (* Each operand's facts compute at most once, lazily, however many
+     of the four ANDs reach for them. *)
+  let f1 = lazy (and_facts_of p1) and f2 = lazy (and_facts_of p2) in
+  let fn1 = lazy (lnot_facts p1 np1 (Lazy.force f1))
+  and fn2 = lazy (lnot_facts p2 np2 (Lazy.force f2)) in
   let resolve (q : t) : and_facts option =
-    if phys_equal q p1 then facts_memo m1 p1
-    else if phys_equal q p2 then facts_memo m2 p2
-    else if phys_equal q np1 then lnot_facts p1 np1 (facts_memo m1 p1)
-    else if phys_equal q np2 then lnot_facts p2 np2 (facts_memo m2 p2)
+    if phys_equal q p1 then Lazy.force f1
+    else if phys_equal q p2 then Lazy.force f2
+    else if phys_equal q np1 then Lazy.force fn1
+    else if phys_equal q np2 then Lazy.force fn2
     else and_facts_of q in
   let approx1 = logor (logand_rule ~f:resolve p1 np2)
       (logand_rule ~f:resolve np1 p2) in
