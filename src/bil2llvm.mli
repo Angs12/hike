@@ -46,15 +46,9 @@ type section = Bil2llvm_env.section = {
   owners : sec_owner list;
 }
 
-(** The reserved data-section kinds. *)
-type section_type = Bil2llvm_env.section_type =
-  | DATA
-  | RODATA
-  | BSS
-  | GOT
-  | GOTPLT
-  | RODATA_REL
-  | TEXT
+(** The section vocabulary: the model's [sec], whose data sections
+    carry the section table. *)
+type section_type = Bil2llvm_env.section_type
 
 val section_type_to_string : section_type -> string
 

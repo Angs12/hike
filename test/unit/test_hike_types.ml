@@ -131,7 +131,7 @@ let tests : unit Alcotest.test list =
       "compute_sub_sig: x86_64 returns RAX/RDX [Out]; a lane-free sub has no args"
       (fun () ->
         let sub = plain_sub "t14_ret" [] in
-        let rets, args = Types.compute_sub_sig (x86 ()) ~abi sub in
+        let rets, args = Types.compute_sub_sig (x86 ()) sub in
         check "TYPES-09"
           (arg_names rets = [ "RAX"; "RDX" ]
           && Base.List.for_all rets ~f:(fun a ->
@@ -141,7 +141,7 @@ let tests : unit Alcotest.test list =
     pin "TYPES-10" "compute_sub_sig: an unknown target answers no returns"
       (fun () ->
         let sub = plain_sub "t14_ret" [] in
-        let rets, args = Types.compute_sub_sig unknown ~abi sub in
+        let rets, args = Types.compute_sub_sig unknown sub in
         check "TYPES-10" (rets = [] && args = []));
 
     pin "TYPES-11"
@@ -154,7 +154,7 @@ let tests : unit Alcotest.test list =
             [ Def.create (v64 "t14_a") (Bil.Var rsi);
               Def.create (v64 "t14_b") (Bil.Var rdi) ]
         in
-        let _, args = Types.compute_sub_sig unknown ~abi sub in
+        let _, args = Types.compute_sub_sig unknown sub in
         check "TYPES-11" (arg_names args = [ "RDI"; "RSI" ] && for_all_in args));
 
     pin "TYPES-12"
@@ -167,7 +167,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_f2") (Bil.Var (v64 "RBX"));
               Def.create (v64 "t14_f3") (Bil.Var (v64 "FS_BASE")) ]
         in
-        let _, args = Types.compute_sub_sig unknown ~abi sub in
+        let _, args = Types.compute_sub_sig unknown sub in
         check "TYPES-12" (args = []));
 
     pin "TYPES-13"
@@ -180,7 +180,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_p2") (Bil.Var (v64 "hike_arg2"));
               Def.create (v64 "t14_p3") (Bil.Var (v64 "intrinsic:foo")) ]
         in
-        let _, args = Types.compute_sub_sig unknown ~abi sub in
+        let _, args = Types.compute_sub_sig unknown sub in
         check "TYPES-13" (args = []));
 
     pin "TYPES-14"
@@ -200,7 +200,7 @@ let tests : unit Alcotest.test list =
                            ()))) ];
               [], [] ]
         in
-        let _, args = Types.compute_sub_sig unknown ~abi sub in
+        let _, args = Types.compute_sub_sig unknown sub in
         check "TYPES-14"
           (arg_names args = Base.List.map (Abi.param_regs abi) ~f:Var.name
           && for_all_in args));
@@ -208,7 +208,7 @@ let tests : unit Alcotest.test list =
     pin "TYPES-15"
       "compute_sub_sig: [@main] keeps the fixed RDI/RSI signature"
       (fun () ->
-        let rets, args = Types.compute_sub_sig unknown ~abi (main_sub ()) in
+        let rets, args = Types.compute_sub_sig unknown (main_sub ()) in
         check "TYPES-15"
           (rets = [] && arg_names args = [ "RDI"; "RSI" ] && for_all_in args));
 
@@ -220,7 +220,7 @@ let tests : unit Alcotest.test list =
           { regions = []; anchor = None; window_param = true }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
-        let rets, args = Types.compute_sub_sig unknown ~abi sub in
+        let rets, args = Types.compute_sub_sig unknown sub in
         check "TYPES-16"
           (rets = []
           && match args with
@@ -241,7 +241,7 @@ let tests : unit Alcotest.test list =
             (straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
             Sub.intrinsic ()
         in
-        let rets, args = Types.compute_sub_sig unknown ~abi sub in
+        let rets, args = Types.compute_sub_sig unknown sub in
         check "TYPES-17"
           (arg_names args = [ "RDI" ]
           && for_all_in args
@@ -253,7 +253,7 @@ let tests : unit Alcotest.test list =
       "compute_sub_sig: an FP-returning sub appends the YMM0 [Out] lane"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
-        let rets, _ = Types.compute_sub_sig (x86 ()) ~abi (epilogue_sub ymm0) in
+        let rets, _ = Types.compute_sub_sig (x86 ()) (epilogue_sub ymm0) in
         check "TYPES-18" (arg_names rets = [ "RAX"; "RDX"; "YMM0" ]));
 
     pin "TYPES-19"
@@ -264,7 +264,7 @@ let tests : unit Alcotest.test list =
         let sub =
           straight_sub "t14_sign" [ Def.create (v64 "t14_su") (Bil.Var rdi) ]
         in
-        let rets, args = Types.compute_sub_sig (x86 ()) ~abi sub in
+        let rets, args = Types.compute_sub_sig (x86 ()) sub in
         let prog = Program.create ~subs:[ sub ] () in
         let prog' = Types.sign_program ~target:(x86 ()) prog in
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
@@ -283,7 +283,7 @@ let tests : unit Alcotest.test list =
         let sub' =
           Term.first sub_t (Project.program proj') |> Base.Option.value_exn
         in
-        let rets, args = Types.compute_sub_sig target ~abi sub in
+        let rets, args = Types.compute_sub_sig target sub in
         check "TYPES-20"
           (Theory.Target.matches (Project.target proj') "x86_64-gnu-elf"
           && lanes_of_sub sub' = lanes (rets @ args)));

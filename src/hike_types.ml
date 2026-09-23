@@ -15,9 +15,7 @@ let free_vars sub =
 
 let fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
   let is_value_reg v =
-    Base.List.mem Abi.value_return_names (Var.name (Var.base v))
-      ~equal:String.equal
-    || Abi.is_vector_param_reg abi v
+    Abi.is_value_return_reg abi v || Abi.is_vector_param_reg abi v
   in
   let is_epilogue blk =
     Term.enum jmp_t blk
@@ -64,13 +62,12 @@ let tag_lane (a : Arg.t) : Arg.t =
   then Model.set_ptr_arg a
   else a
 
-let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
+let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : Arg.t list * Arg.t list =
+  let abi = Abi.of_target target in
   let free_vars = free_vars sub in
   let rets =
-    (if Bap_core_theory.Theory.Target.matches target "x86_64-gnu-elf" then
-       abi.return_regs
-     else [])
+    (if Abi.is_primary_target target then abi.return_regs else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in
   let rets =
@@ -147,8 +144,8 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
               || Var.same reg abi.thread_pointer
               || is_callee_saved
               || Model.is_intrinsic_name n
-              || Base.String.is_prefix n ~prefix:"hike_slot"
-              || Base.String.is_prefix n ~prefix:"hike_arg"))
+              || Model.is_arg_slot (Var.base reg)
+              || Model.is_call_arg (Var.base reg)))
         |> Base.List.sort ~compare:(fun a b ->
             let ra, na = rank_of_var a in
             let rb, nb = rank_of_var b in
@@ -186,9 +183,8 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t) ~(abi : Abi.t)
    caller (the fixtures), run exactly this. *)
 let sign_program ~(target : Bap_core_theory.Theory.Target.t)
     (prog : program term) : program term =
-  let abi = Abi.of_target target in
   Term.map sub_t prog ~f:(fun sub ->
-      let rets, args = compute_sub_sig target ~abi sub in
+      let rets, args = compute_sub_sig target sub in
       Model.set_sig sub (rets @ args))
 
 (* The pass: write every sub's signature, with its lane types, onto the

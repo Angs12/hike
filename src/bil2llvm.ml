@@ -418,14 +418,7 @@ type section = Bil2llvm_env.section = {
   owners : sec_owner list;
 }
 
-type section_type = Bil2llvm_env.section_type =
-  | DATA
-  | RODATA
-  | BSS
-  | GOT
-  | GOTPLT
-  | RODATA_REL
-  | TEXT
+type section_type = Bil2llvm_env.section_type
 
 type sec_input = Bil2llvm_env.sec_input =
   | Sec_bytes of {

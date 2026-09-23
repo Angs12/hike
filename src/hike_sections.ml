@@ -18,6 +18,108 @@ type data_span = {
 }
 [@@deriving equal, compare, sexp]
 
+(* The section metadata rows, in the fixed table order; the spans,
+   emitter spec, and copy-reloc slots all project from this builder. *)
+type sec_meta = {
+  sm_type : sec;
+  sm_const : bool;
+  sm_lo : int64;
+  sm_hi : int64;
+  sm_words : int;
+  sm_image : Bytes.t option;  (* None = the bss region *)
+  sm_copy_relocs : (int * string) list;  (* bss: (byte offset, symbol) *)
+}
+
+let bss_region proj =
+  let regions = Hike_image.get_named_region_info proj in
+  Base.Option.map (Seq.find regions ~f:(fun { info; _ } -> String.equal info ".bss"))
+    ~f:(fun { addr; size; _ } ->
+      (addr, size, Hike_image.get_copy_relocations proj ~bss_addr:addr ~bss_size:size))
+
+let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
+  let byte_row (sm_type : sec) ~is_const =
+    let llvm_name = Bil2llvm_env.section_type_to_string sm_type in
+    Hike_image.get_section_mem ("." ^ llvm_name) proj |> Hike_image.get_section_data
+    |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
+        { sm_type;
+          sm_const = is_const;
+          sm_lo = Word.to_int64_exn min_addr;
+          sm_hi = Word.to_int64_exn max_addr;
+          sm_words = (Bytes.length arr + word - 1) / word;
+          sm_image = Some arr;
+          sm_copy_relocs = [] })
+  in
+  let bss_row =
+    Base.Option.map (bss_region proj) ~f:(fun (addr, size, copy_relocs) ->
+        { sm_type = Bss;
+          sm_const = false;
+          sm_lo = addr;
+          sm_hi = Stdlib.Int64.sub (Stdlib.Int64.add addr size) 1L;
+          sm_words =
+            Stdlib.Int64.to_int
+              (Stdlib.Int64.div (Stdlib.Int64.add size (Stdlib.Int64.of_int (word - 1)))
+                 (Stdlib.Int64.of_int word));
+          sm_image = None;
+          sm_copy_relocs = copy_relocs })
+  in
+  [ byte_row Data ~is_const:false;
+    byte_row Rodata ~is_const:true;
+    bss_row;
+    byte_row Got ~is_const:true;
+    byte_row Gotplt ~is_const:true;
+    byte_row Datarelro ~is_const:true;
+    byte_row Text ~is_const:true ]
+
+(* Every copy-relocated slot address (absolute): loads and stores at a
+   slot go through the slot's relocated pointer. *)
+let copy_reloc_slot_addrs proj =
+  Base.Option.value
+    (Base.Option.map (bss_region proj) ~f:(fun (addr, _, copy_relocs) ->
+         Base.List.map copy_relocs
+           ~f:(fun (off, _) -> Stdlib.Int64.add addr (Stdlib.Int64.of_int off))))
+    ~default:[]
+
+let attrib_spans ~(word : int) (proj : Project.t) : data_span list =
+  Base.List.filter_map (sec_meta ~word proj)
+    ~f:(Base.Option.map ~f:(fun m ->
+            { ds_sec = m.sm_type;
+              ds_lo = m.sm_lo;
+              ds_hi = m.sm_hi;
+              ds_slots =
+                Base.List.map m.sm_copy_relocs ~f:(fun (off, _) ->
+                    Stdlib.Int64.add m.sm_lo (Stdlib.Int64.of_int off)) }))
+
+(* The emitter's section spec; a [whole] entry (id, lo, hi) is a span
+   served whole — the section's own image global is the id's storage. *)
+let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
+    ~(whole : (int * int64 * int64) list) (proj : Project.t) :
+    Bil2llvm_env.section_spec =
+  let spec_section (m : sec_meta) =
+    let open Bil2llvm_env in
+    match m.sm_image with
+    | Some arr ->
+        Sec_bytes
+          { si_type = m.sm_type;
+            si_lo = m.sm_lo;
+            si_hi = m.sm_hi;
+            si_words = m.sm_words;
+            si_const = m.sm_const;
+            si_image = arr }
+    | None ->
+        Sec_bss
+          { si_lo = m.sm_lo;
+            si_hi = m.sm_hi;
+            si_words = m.sm_words;
+            si_copy_relocs = m.sm_copy_relocs }
+  in
+  let open Bil2llvm_env in
+  { spec_comps = comps;
+    spec_whole = whole;
+    spec_word = word;
+    spec_sections =
+      Base.List.map (sec_meta ~word proj)
+        ~f:(Base.Option.map ~f:spec_section) }
+
 type point = { p_sec : sec; p_pos : int64 } [@@deriving sexp]
 type range = { lo : point; hi : point } [@@deriving sexp]
 

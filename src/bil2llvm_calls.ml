@@ -410,8 +410,7 @@ let create_thunk ctx (sub_tid : tid) =
         let twin_args = window_conv_args ~word conv in
         let reg_args =
           Base.List.filter args ~f:(fun a ->
-              let n = Var.name (Arg.lhs a) in
-              (not (Base.String.is_prefix n ~prefix:"hike_slot"))
+              (not (Hike_stack_model.is_arg_slot (Arg.lhs a)))
               && not (Var.same (Arg.lhs a) window_var))
         in
         let ret_typ = ret_type_of_rets ctx rets in

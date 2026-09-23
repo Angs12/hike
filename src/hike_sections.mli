@@ -175,3 +175,35 @@ val whole_comps_of :
     typed width); whole spans contribute nothing. *)
 val global_comps_of :
   word:int -> spans:data_span list -> ctx -> Hike_stack_model.sec_comp list
+
+(** The section metadata rows, in the fixed table order; the spans,
+    emitter spec, and copy-reloc slots all project from this builder. *)
+type sec_meta = {
+  sm_type : sec;
+  sm_const : bool;
+  sm_lo : int64;
+  sm_hi : int64;
+  sm_words : int;
+  sm_image : Bytes.t option;  (* None = the bss region *)
+  sm_copy_relocs : (int * string) list;  (* bss: (byte offset, symbol) *)
+}
+
+(** The ELF section table rows ([None] = absent from the binary). *)
+val sec_meta : word:int -> Project.t -> sec_meta option list
+
+(** Every copy-relocated slot address (absolute); every access at a
+    slot serves through the slot's relocated pointer. *)
+val copy_reloc_slot_addrs : Project.t -> int64 list
+
+(** The attribution's data spans: each reserved section's bounds and
+    copy-relocated slot addresses, in the fixed table order. *)
+val attrib_spans : word:int -> Project.t -> data_span list
+
+(** The emitter's section spec; a [whole] entry (id, lo, hi) is a span
+    served whole — the section's own image global is the id's
+    storage. *)
+val section_spec_of :
+  word:int ->
+  comps:Hike_stack_model.sec_comp list ->
+  whole:(int * int64 * int64) list ->
+  Project.t -> Bil2llvm_env.section_spec

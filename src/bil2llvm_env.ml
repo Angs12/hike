@@ -62,16 +62,20 @@ type section = {
      one owner.  Empty = the identity (the one array in [base]). *)
   owners : sec_owner list;
 }
-type section_type = DATA | RODATA | BSS | GOT | GOTPLT | RODATA_REL | TEXT
+(* The shared section vocabulary (the producer/emitter contract point);
+   the section table carries the data sections only. *)
+type section_type = Hike_stack_model.sec
 
 let section_type_to_string = function
-  | DATA -> "data"
-  | RODATA -> "rodata"
-  | BSS -> "bss"
-  | GOT -> "got"
-  | GOTPLT -> "got.plt"
-  | RODATA_REL -> "data.rel.ro"
-  | TEXT -> "text"
+  | Hike_stack_model.Stack -> "stack"
+  | Hike_stack_model.Args -> "args"
+  | Hike_stack_model.Data -> "data"
+  | Hike_stack_model.Rodata -> "rodata"
+  | Hike_stack_model.Bss -> "bss"
+  | Hike_stack_model.Got -> "got"
+  | Hike_stack_model.Gotplt -> "got.plt"
+  | Hike_stack_model.Datarelro -> "data.rel.ro"
+  | Hike_stack_model.Text -> "text"
 
 (* One input section of the spec. *)
 type sec_input =

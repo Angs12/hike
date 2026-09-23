@@ -27,6 +27,10 @@ type facts = {
   denote :
     blk:blk term -> ?def:def term -> exp ->
     (Cbat_vsa.WordSet.t, Type.error) Result.t;
+  (* The emitter's section spec, installed by the attribution pass in
+     the same run that built [envs]; [None] = no attribution ran and
+     the sections emit with no components. *)
+  spec : Bil2llvm_env.section_spec option;
 }
 
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
@@ -43,9 +47,10 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     target;
     abi = Hike_abi.of_target target;
     denote =
-      fun ~blk ?def e ->
+      (fun ~blk ?def e ->
         let pre, post = blk_envs blk in
-        Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e }
+        Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e);
+    spec = None }
 
 (* The run's record, installed once at the pass_vsa boundary. *)
 let run : facts option ref = ref None
@@ -56,6 +61,10 @@ let facts () =
   match !run with
   | Some f -> f
   | None -> failwith "hike: no analysis facts installed (pass_vsa did not run)"
+
+(* The attribution pass adds the emitter spec to the installed record. *)
+let with_spec (f : facts) (spec : Bil2llvm_env.section_spec) : facts =
+  { f with spec = Some spec }
 
 (* A mid-block case entry becomes its own block, on the map. *)
 let add_block_addr (f : facts) ~addr ~(tid : Tid.t) : facts =

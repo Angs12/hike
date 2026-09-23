@@ -4,6 +4,7 @@
 open Bap.Std
 
 module Model = Hike_stack_model
+module Abi = Hike_abi
 
 type storage = {
   mem : Var.t;
@@ -33,7 +34,7 @@ let build ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
           (Model.region_name id)
           llvm_builder
       in
-      Llvm.set_alignment 16 base;
+      Llvm.set_alignment Abi.stack_align base;
       { mem = Model.region_mem id;
         base;
         rel = Stdlib.Int64.sub lo Model.segment_base })

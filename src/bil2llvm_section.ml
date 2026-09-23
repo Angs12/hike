@@ -293,7 +293,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     let ty = Llvm.array_type (Llvm.integer_type llvm_ctx (word * 8)) words in
     let g = Llvm.declare_global ty name llvm_module in
     Llvm.set_linkage Llvm.Linkage.Internal g;
-    Llvm.set_alignment 16 g;
+    Llvm.set_alignment Abi.stack_align g;
     if bss then Llvm.set_initializer (Llvm.const_null ty) g;
     g
   in
@@ -387,7 +387,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   let build_entry (entry : sec_input) : section =
     match entry with
     | Sec_bss { si_lo; si_hi; si_words; si_copy_relocs } ->
-        let llvm_name = section_type_to_string BSS in
+        let llvm_name = section_type_to_string Model.Bss in
         let comps = comps_of si_lo si_hi in
         let whole = whole_id si_lo si_hi in
         if not (Base.List.is_empty comps) && Option.is_none whole then
@@ -444,12 +444,13 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
             owners }
   in
   let key_of = function
-    | Sec_bss _ -> BSS
+    | Sec_bss _ -> Model.Bss
     | Sec_bytes { si_type; _ } -> si_type
   in
   let built =
     Base.List.filter_map
-      [ BSS; GOT; GOTPLT; RODATA_REL; DATA; RODATA; TEXT ]
+      [ Model.Bss; Model.Got; Model.Gotplt; Model.Datarelro; Model.Data;
+        Model.Rodata; Model.Text ]
       ~f:(fun t ->
         Base.List.find_map spec.spec_sections ~f:(fun e ->
             match e with

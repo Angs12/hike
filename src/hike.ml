@@ -24,118 +24,6 @@ module Types = Hike_types
 module Strip_canaries = Hike_strip_canaries
 module Bil2llvm = Bil2llvm
 
-(* The section metadata rows, in the fixed table order; the spans,
-   emitter spec, and copy-reloc slots all project from this builder. *)
-type sec_meta = {
-  sm_type : section_type;
-  sm_const : bool;
-  sm_lo : int64;
-  sm_hi : int64;
-  sm_words : int;
-  sm_image : Bytes.t option;  (* None = the bss region *)
-  sm_copy_relocs : (int * string) list;  (* bss: (byte offset, symbol) *)
-}
-
-let bss_region proj =
-  let regions = Hike_image.get_named_region_info proj in
-  Base.Option.map (Seq.find regions ~f:(fun { info; _ } -> String.equal info ".bss"))
-    ~f:(fun { addr; size; _ } ->
-      (addr, size, Hike_image.get_copy_relocations proj ~bss_addr:addr ~bss_size:size))
-
-let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
-  let byte_row section_type ~is_const =
-    let llvm_name = section_type_to_string section_type in
-    Hike_image.get_section_mem ("." ^ llvm_name) proj |> Hike_image.get_section_data
-    |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
-        { sm_type = section_type;
-          sm_const = is_const;
-          sm_lo = Word.to_int64_exn min_addr;
-          sm_hi = Word.to_int64_exn max_addr;
-          sm_words = (Bytes.length arr + word - 1) / word;
-          sm_image = Some arr;
-          sm_copy_relocs = [] })
-  in
-  let bss_row =
-    Base.Option.map (bss_region proj) ~f:(fun (addr, size, copy_relocs) ->
-        { sm_type = BSS;
-            sm_const = false;
-            sm_lo = addr;
-            sm_hi = Int64.sub (Int64.add addr size) 1L;
-            sm_words =
-              Int64.to_int
-                (Int64.div (Int64.add size (Int64.of_int (word - 1)))
-                   (Int64.of_int word));
-            sm_image = None;
-            sm_copy_relocs = copy_relocs })
-  in
-  [ byte_row DATA ~is_const:false;
-    byte_row RODATA ~is_const:true;
-    bss_row;
-    byte_row GOT ~is_const:true;
-    byte_row GOTPLT ~is_const:true;
-    byte_row RODATA_REL ~is_const:true;
-    byte_row TEXT ~is_const:true ]
-
-(* Every copy-relocated slot address (absolute): loads and stores at a
-   slot go through the slot's relocated pointer. *)
-let copy_reloc_slot_addrs proj =
-  Base.Option.value
-    (Base.Option.map (bss_region proj) ~f:(fun (addr, _, copy_relocs) ->
-         Base.List.map copy_relocs
-           ~f:(fun (off, _) -> Int64.add addr (Int64.of_int off))))
-    ~default:[]
-
-let attrib_spans ~(word : int) (proj : Project.t) : Hike_sections.data_span list =
-  let sec_of_type = function
-    | DATA -> Hike_stack_model.Data
-    | RODATA -> Hike_stack_model.Rodata
-    | BSS -> Hike_stack_model.Bss
-    | GOT -> Hike_stack_model.Got
-    | GOTPLT -> Hike_stack_model.Gotplt
-    | RODATA_REL -> Hike_stack_model.Datarelro
-    | TEXT -> Hike_stack_model.Text
-  in
-  Base.List.filter_map (sec_meta ~word proj)
-    ~f:(Base.Option.map ~f:(fun m ->
-            { Hike_sections.ds_sec = sec_of_type m.sm_type;
-              Hike_sections.ds_lo = m.sm_lo;
-              Hike_sections.ds_hi = m.sm_hi;
-              Hike_sections.ds_slots =
-                Base.List.map m.sm_copy_relocs ~f:(fun (off, _) ->
-                    Int64.add m.sm_lo (Int64.of_int off)) }))
-
-(* The emitter's section spec; a [whole] entry (id, lo, hi) is a span
-   served whole — the section's own image global is the id's storage. *)
-let section_spec_of ~(word : int) ~(comps : Hike_stack_model.sec_comp list)
-    ~(whole : (int * int64 * int64) list) (proj : Project.t) :
-    Bil2llvm.section_spec =
-  let spec_section (m : sec_meta) =
-    match m.sm_image with
-    | Some arr ->
-        Sec_bytes
-          { si_type = m.sm_type;
-            si_lo = m.sm_lo;
-            si_hi = m.sm_hi;
-            si_words = m.sm_words;
-            si_const = m.sm_const;
-            si_image = arr }
-    | None ->
-        Sec_bss
-          { si_lo = m.sm_lo;
-            si_hi = m.sm_hi;
-            si_words = m.sm_words;
-            si_copy_relocs = m.sm_copy_relocs }
-  in
-  { spec_comps = comps;
-    spec_whole = whole;
-    spec_word = word;
-    spec_sections =
-      Base.List.map (sec_meta ~word proj)
-        ~f:(Base.Option.map ~f:spec_section) }
-
-
-let section_spec_stash : Bil2llvm.section_spec option ref = ref None
-
 let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
@@ -143,13 +31,13 @@ let convert_binary output_program proj =
   let ptrsize = Theory.Target.bits target in
   let word = ptrsize / 8 in
   let spec =
-    match !section_spec_stash with
-    | Some spec when spec.Bil2llvm.spec_word = word -> spec
-    | _ ->
+    match (Hike_kb.facts ()).Hike_kb.spec with
+    | Some spec -> spec
+    | None ->
         (* No attribution ran: the sections emit with no components. *)
-        section_spec_of ~word ~comps:[] ~whole:[] proj
+        Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] proj
   in
-  let copy_reloc_addrs_val = copy_reloc_slot_addrs proj in
+  let copy_reloc_addrs_val = Hike_sections.copy_reloc_slot_addrs proj in
   let symtab_val = Some (Project.symbols proj) in
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~ptrsize
@@ -187,7 +75,8 @@ let pass_vsa proj =
      the static image: .rodata is read-only and a valid PIE never
      relocates it (relocated data lands in .data.rel.ro). *)
   let images =
-    Hike_image.get_section_mem ("." ^ section_type_to_string RODATA) proj
+    Hike_image.get_section_mem
+      ("." ^ section_type_to_string Hike_stack_model.Rodata) proj
     |> Hike_image.get_section_data
     |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
            [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
@@ -278,13 +167,13 @@ let pass_strip_canaries proj =
         Core.Map.set m ~key:(Term.tid s) ~data:(Sub.name s))
   in
   map_subs (Hike_strip_canaries.strip_sub ~facts ~names) proj
-(* The sections pass; the emitter spec reaches the emitter through the
-   run-scoped stash (the pass registry has no return channel). *)
+(* The sections pass: attribution, promotion, DCE; the emitter spec is
+   installed into the KB facts for convert_binary. *)
 let pass_attrib proj =
   let facts = Hike_kb.facts () in
   let target = facts.target in
   let word = Theory.Target.bits target / 8 in
-  let spans = attrib_spans ~word proj in
+  let spans = Hike_sections.attrib_spans ~word proj in
   let dyn_allocs =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
@@ -308,14 +197,14 @@ let pass_attrib proj =
             ~facts ~symtab:(Some (Project.symbols proj)) ~spans
             ~ctx
       |> fun prog ->
+        Hike_kb.install
+          (Hike_kb.with_spec (Hike_kb.facts ())
+             (Hike_sections.section_spec_of ~word
+                ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
+                ~whole:(Hike_sections.whole_comps_of ~word ~spans ctx)
+                proj));
         (* The DCE's load roots are the vars the rewrite created; its
            escape roots are the storages carrying identity members. *)
-        section_spec_stash :=
-          Some
-            (section_spec_of ~word
-               ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
-               ~whole:(Hike_sections.whole_comps_of ~word ~spans ctx)
-               proj);
         Term.map sub_t prog ~f:(fun sub ->
             let roots =
               Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
@@ -331,7 +220,6 @@ let pass_types proj = Hike_types.run proj
 let () =
   Extension.declare (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
-      section_spec_stash := None;
       Project.register_pass ~name:"filter" ~runonce:true pass_filter;
       let jump = chain ~name:"jump" ~prev:"filter" pass_jump in
       let split_mem = chain ~name:"split-mem" ~prev:jump pass_split_mem in

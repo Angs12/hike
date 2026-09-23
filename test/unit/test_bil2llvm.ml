@@ -676,7 +676,7 @@ let tests : unit Alcotest.test list =
         let ctx, md, built =
           tile_build
             [ Some
-                (tile_bytes Hike.Bil2llvm.DATA span_lo span_hi ~words:8
+                (tile_bytes Hike.Stack_model.Data span_lo span_hi ~words:8
                    ~const:false img) ]
             comps
         in
@@ -741,11 +741,11 @@ let tests : unit Alcotest.test list =
         let tctx, tmd, tbuilt =
           tile_build
             [ Some
-                (tile_bytes Hike.Bil2llvm.DATA 0x4000L 0x403FL ~words:8
+                (tile_bytes Hike.Stack_model.Data 0x4000L 0x403FL ~words:8
                    ~const:false
                    (Bytes.init 64 (fun i -> Char.chr (i mod 251))));
               Some
-                (tile_bytes Hike.Bil2llvm.TEXT 0x1000L 0x100FL ~words:2
+                (tile_bytes Hike.Stack_model.Text 0x1000L 0x100FL ~words:2
                    ~const:true (Bytes.init 16 (fun i -> Char.chr (i + 1)))) ]
             []
         in
@@ -775,10 +775,10 @@ let tests : unit Alcotest.test list =
         let ctx, md, built_two =
           tile_build
             [ Some
-                (tile_bytes Hike.Bil2llvm.DATA d_lo d_hi ~words:2
+                (tile_bytes Hike.Stack_model.Data d_lo d_hi ~words:2
                    ~const:false (Bytes.init 16 (fun _ -> '\x00')));
               Some
-                (tile_bytes Hike.Bil2llvm.RODATA r_lo r_hi ~words:2
+                (tile_bytes Hike.Stack_model.Rodata r_lo r_hi ~words:2
                    ~const:true (Bytes.init 16 (fun _ -> '\x00'))) ]
             comps_two
         in
@@ -803,7 +803,7 @@ let tests : unit Alcotest.test list =
         let ctx, md, built_id =
           tile_build
             [ Some
-                (tile_bytes Hike.Bil2llvm.DATA 0x8000L 0x801FL ~words:2
+                (tile_bytes Hike.Stack_model.Data 0x8000L 0x801FL ~words:2
                    ~const:false (Bytes.init 16 (fun _ -> '\x01')));
               Some (tile_bss 0x9000L 0x901FL ~words:2 []) ]
             []
@@ -829,7 +829,7 @@ let tests : unit Alcotest.test list =
         let ctx, md, built_ord =
           tile_build
             [ Some
-                (tile_bytes Hike.Bil2llvm.DATA 0x8000L 0x801FL ~words:2
+                (tile_bytes Hike.Stack_model.Data 0x8000L 0x801FL ~words:2
                    ~const:false (Bytes.init 16 (fun _ -> '\x00')));
               None;
               Some (tile_bss 0x9000L 0x901FL ~words:2 []) ]

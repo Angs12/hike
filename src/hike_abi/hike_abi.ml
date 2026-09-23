@@ -64,8 +64,13 @@ let thread_pointer target =
   | Some v -> Var.reify v
   | None -> x86_64_sysv.thread_pointer
 
+(* The one target the pipeline's facts are written against; unknown
+   targets take the SysV fallback record. *)
+let is_primary_target (t : Theory.Target.t) : bool =
+  Theory.Target.matches t "x86_64-gnu-elf"
+
 let pc target =
-  if Theory.Target.matches target "x86_64-gnu-elf" then
+  if is_primary_target target then
     Var.create "RIP" (Imm (Theory.Target.data_addr_size target))
   else
     (* A synthetic RIP for var-equality tests on unknown targets. *)
@@ -75,7 +80,7 @@ let pc target =
 
 let of_target (target : Theory.Target.t) : t =
   (* The SysV record serves unknown targets. *)
-  if Theory.Target.matches target "x86_64-gnu-elf" then
+  if is_primary_target target then
     {
       sp = sp target;
       thread_pointer = thread_pointer target;
@@ -88,7 +93,13 @@ let of_target (target : Theory.Target.t) : t =
     }
   else x86_64_sysv
 
+(* SysV stack alignment: every stack object is 16-byte aligned. *)
+let stack_align = 16
+
 (* Value-register names for the FP-return detector. *)
 let value_return_names = [ "RAX"; "EAX"; "RDX"; "EDX" ]
+
+let is_value_return_reg (t : t) (v : var) : bool =
+  Base.List.mem value_return_names (Var.name (Var.base v)) ~equal:String.equal
 
 let vector_param_prefix = "YMM"

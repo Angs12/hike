@@ -42,7 +42,7 @@ let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
     Llvm.build_array_alloca (Llvm.i8_type ctx.llvm_ctx) size "vla"
       llvm_builder
   in
-  Llvm.set_alignment 16 vla;
+  Llvm.set_alignment Hike_abi.stack_align vla;
   Llvm.build_ptrtoint vla (Llvm.i64_type ctx.llvm_ctx) "vla_i64"
     llvm_builder
 
