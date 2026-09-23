@@ -70,7 +70,7 @@ let ref_is_top (p : Ws.Clp.t) : bool = Ws.Clp.equal p (ref_top (Ws.Clp.bitwidth 
 
 let ops : (string * (Ws.Clp.t -> Ws.Clp.t -> Ws.Clp.t)) list =
   [ ("add", Ws.Clp.add); ("sub", Ws.Clp.sub); ("mul", Ws.Clp.mul)
-  ; ("logand", Ws.Clp.logand); ("logor", Ws.Clp.logor)
+  ; ("logand", Ws.Clp.logand); ("logor", Ws.Clp.logor); ("logxor", Ws.Clp.logxor)
   ; ("intersection", Ws.Clp.intersection)
   ; ("join", Ws.Clp.join); ("meet", Ws.Clp.meet) ]
 

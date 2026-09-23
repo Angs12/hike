@@ -491,16 +491,48 @@ let bounded_diophantine (a : t) (b : t) (c : t) : (t * t) option =
     else Some (extract_exn ~hi:(size - 1) x0, extract_exn ~hi:(size - 1) y0)
   end
 
-let factor_2s (t : t) : t * int =
-  let rec help (hi : int) (lo : int) : int =
-    if hi = lo then hi
-    else
-      let mid = (hi + lo) / 2 in
-      if is_zero (extract_exn ~hi:mid ~lo t) then help hi (mid + 1) else help mid lo
+(* Trailing-zero count of a positive immediate. *)
+let trailing_zeros_int (v : int) : int =
+  let rec go (v : int) (k : int) : int =
+    if v land 0xFFFF_FFFF = 0 then go (v lsr 32) (k + 32)
+    else if v land 0xFFFF = 0 then go (v lsr 16) (k + 16)
+    else if v land 0xFF = 0 then go (v lsr 8) (k + 8)
+    else if v land 0xF = 0 then go (v lsr 4) (k + 4)
+    else if v land 0x3 = 0 then go (v lsr 2) (k + 2)
+    else if v land 0x1 = 0 then k + 1
+    else k
   in
+  go v 0
+
+(* Highest set-bit position of a positive immediate. *)
+let highest_bit_int (v : int) : int =
+  let rec go (v : int) (k : int) : int =
+    if v lsr 32 <> 0 then go (v lsr 32) (k + 32)
+    else if v lsr 16 <> 0 then go (v lsr 16) (k + 16)
+    else if v lsr 8 <> 0 then go (v lsr 8) (k + 8)
+    else if v lsr 4 <> 0 then go (v lsr 4) (k + 4)
+    else if v lsr 2 <> 0 then go (v lsr 2) (k + 2)
+    else if v lsr 1 <> 0 then k + 1
+    else k
+  in
+  go v 0
+
+(* Splits into the odd part and the power of two.  The search reads the
+   payload directly: an immediate's bits through the int helpers, a
+   bignum's through [Z.trailing_zeros]/[Z.extract]. *)
+let factor_2s (t : t) : t * int =
   let w = bitwidth t in
-  let lo = help (w - 1) 0 in
-  (extract_exn ~hi:(w - 1 + lo) ~lo t, lo)
+  match t with
+  | Small (v, _, _) ->
+    if v = 0 then (zero w, w - 1)
+    else
+      let lo = trailing_zeros_int v in
+      (Small ((v lsr lo) land mask w, w, false), lo)
+  | Big (z, _, _) ->
+    if Z.sign z = 0 then (zero w, w - 1)
+    else
+      let lo = Z.trailing_zeros z in
+      (mkz (Z.extract z lo w) w, lo)
 
 (* 2^i at [width] bits; i >= width truncates to 0 (Word.lshift semantics).
    Production call sites always pass i < width. *)
@@ -529,16 +561,11 @@ let add_bit (w : t) : t =
 
 (* Position of the leading 1-bit. *)
 let lead_1_bit (w : t) : int option =
-  let rec lead_help (hi : int) (lo : int) : int option =
-    let open Monads.Std.Monad.Option.Syntax in
-    Core.Option.some_if (hi >= lo) () >>= fun _ ->
-    if hi = lo then !!hi else
-    let mid = (hi + lo) / 2 in
-    let hi_part = extract_exn ~hi ~lo:(mid + 1) w in
-    if is_zero hi_part then lead_help mid lo
-    else lead_help hi (mid + 1)
-  in
-  if is_zero w then None else lead_help ((bitwidth w) - 1) 0
+  if is_zero w then None
+  else
+    match w with
+    | Small (v, _, _) -> Some (highest_bit_int v)
+    | Big (z, _, _) -> Some (Z.numbits z - 1)
 
 let count_initial_1s (w : t) : int = snd @@ factor_2s @@ lnot w
 

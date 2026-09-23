@@ -18,8 +18,6 @@ open Graphlib.Std
 
 module Stages = Cbat_vsa_stages
 
-module CG = Graphs.Callgraph
-
 module AI = Cbat_ai_representation
 module Call_effects = Cbat_call_effects
 module WordSet = Cbat_clp_set_composite
@@ -27,14 +25,20 @@ module Mem = Cbat_ai_memmap
 module Word_ops = Cbat_word
 module Utils = Cbat_vsa_utils
 
-(* WTO over the engine cfg; [succ] supplies the successor function
-   (the resolved dispatch's extra edges ride it). *)
-let wto_of_cfg ~(succ : tid -> tid list) (cfg : Graphs.Tid.t) :
-    Cbat_wto.comp list =
+(* Re-exported so the hike library can count KB operations too. *)
+#ifdef VSA_DEBUG
+module Cbat_kb_census = Cbat_kb_census
+module Cbat_attr_census = Cbat_attr_census
+#endif
+
+(* WTO over the engine cfg; [succ]/[pred] are the dispatch graph's
+   accessors — the resolved dispatches' extra edges ride BOTH, so the
+   ordering closes on the same graph pair it walks. *)
+let wto_of_cfg ~(succ : tid -> tid list) ~(pred : tid -> tid list)
+    (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
   Cbat_wto.wto
     ~nodes:(Graphs.Tid.nodes cfg |> Seq.to_list)
-    ~succ
-    ~pred:(fun n -> Graphs.Tid.Node.preds n cfg |> Seq.to_list)
+    ~succ ~pred
 
 
 (* Solution still changing at the step cap. *)
@@ -84,6 +88,19 @@ let stores_of_sub (s : sub term) : def term list =
       | Bil.Store _ -> true
       | _ -> false)
   |> Seq.to_list
+
+(* The run's context: the library builder plus production's own defaults —
+   the non-negativity oracle over the sub's defs and stores, and the run's
+   sub-address lookup.  The fixpoint and the fixtures' seam build the same
+   context through this one builder. *)
+let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
+    ?sub_lookup (s : sub term) : Cbat_runctx.refine_ctx =
+  let rctx = Cbat_runctx.mk_rctx ~cfg ~abi ?sub_lookup s in
+  let defs = defs_of_sub s in
+  let stores = stores_of_sub s in
+  { rctx with
+    Cbat_runctx.rc_nonneg =
+      (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~stores ~env e) }
 
 (* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
 let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
@@ -161,7 +178,7 @@ let rec static_graph_vsa
   (* Pseudo-nodes never reach denotation. *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  let rctx = Cbat_runctx.mk_rctx ~cfg:cfg_tmp ~abi ~sub_lookup s in
+  let rctx = mk_rctx ~cfg:cfg_tmp ~abi ~sub_lookup s in
   let cfg = cfg_tmp in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
      edges, serving the WTO, the worklist, and the predecessor lists. *)
@@ -171,7 +188,7 @@ let rec static_graph_vsa
   in
   let { Cbat_dispatch_graph.succs; Cbat_dispatch_graph.preds } = dg in
   (* WTO fixpoint; inner SCCs stabilize first. *)
-  let wto = wto_of_cfg ~succ:succs cfg_tmp in
+  let wto = wto_of_cfg ~succ:succs ~pred:preds cfg_tmp in
   let smry = Cbat_wto.summary wto in
   let heads = smry.Cbat_wto.heads in
   let head_to_blocks = smry.Cbat_wto.head_to_blocks in
@@ -225,15 +242,6 @@ let rec static_graph_vsa
   in
   
   let sol_default = Solution.default init in
-  (* The walk's signed-row witness: producer-proven non-negativity,
-     computed once from the sub's defs and stores. *)
-  let defs_tbl = defs_of_sub s in
-  let stores_tbl = stores_of_sub s in
-  let rctx =
-    { rctx with
-      Cbat_runctx.rc_nonneg =
-        (fun ~env e ->
-          Cbat_backward.prove_nonneg ~defs:defs_tbl ~stores:stores_tbl ~env e) } in
   (* The initial solution seeds the store; from here the store is the only
      home for per-block values, versions, and the caches they key. *)
   let rc_cell =
@@ -262,11 +270,43 @@ let rec static_graph_vsa
       sol_default in
   Stages.reset ();
   let total_processed = ref 0 in
-  let max_steps = 6000 in
+  (* The visit budget scales with the block count so a sub's sweep
+     allowance is size-independent; the floor bounds tiny subs. *)
+  let max_steps = Stdlib.max 6000 (8 * Core.Map.length rctx.rc_blocks) in
   (* Per-head visit counts; each head gets its own warmup window. *)
   let head_visits : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
   let head_warmed (v : Tid.t) : bool =
     Option.value ~default:0 (Hashtbl.find head_visits v) > 10 in
+#ifdef VSA_DEBUG
+  (* Forward witness: every guard cond from [p] to [v] denotates false on
+     the pred's entry state, so the edge is dead without the backward
+     refinement.  A dispatch extra-edge has no jmp and cannot be
+     witnessed. *)
+  let edge_forward_dead ~(p : Tid.t) ~(v : Tid.t) : bool =
+    match Core.Map.find (!rc_cell).rc_blocks p with
+    | None -> false
+    | Some bf ->
+      let conds = Core.Map.find edge_conds p in
+      Term.enum jmp_t bf.bf_term
+      |> Seq.filter ~f:(fun j ->
+          match Jmp.kind j with
+          | Goto (Direct t) | Ret (Direct t) -> Tid.equal t v
+          | Call c -> (
+              match Call.return c with
+              | Some (Direct t) -> Tid.equal t v
+              | _ -> false)
+          | Goto (Indirect _) | Ret (Indirect _) | Int _ -> false)
+      |> Seq.exists ~f:(fun j ->
+          match
+            Option.bind conds ~f:(fun m -> Core.Map.find m (Term.tid j))
+          with
+          | None -> false
+          | Some cond -> (
+              match Cbat_transfer.denote_imm_exp cond (get p) with
+              | Ok w -> not (WordSet.elem Cbat_word.b1 w)
+              | Error _ -> false))
+  in
+#endif
   let process_vertex (v : Tid.t) : bool =
     Stages.time `Scaffold (fun () ->
     incr total_processed;
@@ -293,25 +333,41 @@ let rec static_graph_vsa
       if List.is_empty preds then old
       else
         let outs = List.map preds ~f:(fun p ->
-            let head_opt, p_entry =
-              Stages.time `Glue (fun () ->
-                let head_opt = Hashtbl.find block_to_head p in
-                rctx.Cbat_runctx.rc_landmarks.Cbat_landmarks.widening_at_head <- head_opt;
-                let p_entry = get p in
-                (head_opt, p_entry)) in
-
-            let rc = !rc_cell in
-             let res = Stages.time `Denote (fun () ->
-               fst (Cbat_forward.denote_block ~preserved ~written ~resolved
-                     ~sub:s ~edge_conds ~disabled:disabled_conds
-                     ~sol:sol_snap ~rctx:rc
-                     ctx ~source:p p_entry ~target:v)) in
-            let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
-            rctx.Cbat_runctx.rc_landmarks.Cbat_landmarks.widening_at_head <- None;
-            res) in
+            Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
+              (Hashtbl.find block_to_head p) (fun () ->
+#ifdef VSA_DEBUG
+                Cbat_attr_census.bump "bottomskip.edge.total";
+#endif
+                let p_entry = Stages.time `Glue (fun () -> get p) in
+                let rc = !rc_cell in
+                let res = Stages.time `Denote (fun () ->
+                  fst (Cbat_forward.denote_block ~preserved ~written ~resolved
+                        ~sub:s ~edge_conds ~disabled:disabled_conds
+                        ~sol:sol_snap ~rctx:rc
+                        ctx ~source:p p_entry ~target:v)) in
+                let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
+#ifdef VSA_DEBUG
+                (if AI.equal res AI.bottom then begin
+                   Cbat_attr_census.bump "bottomskip.edge.bottom";
+                   if edge_forward_dead ~p ~v then
+                     Cbat_attr_census.bump "bottomskip.edge.forward_dead"
+                   else Cbat_attr_census.bump "bottomskip.edge.refine_only"
+                 end);
+#endif
+                res)) in
         (Stages.time `Join (fun () ->
            Option.value ~default:old (List.reduce outs ~f:AI.join)))
     in
+#ifdef VSA_DEBUG
+    (if not (List.is_empty preds) then
+       Cbat_attr_census.bump "bottomskip.entry.total");
+    (if AI.equal incoming AI.bottom && not (List.is_empty preds) then begin
+       Cbat_attr_census.bump "bottomskip.entry.bottom";
+       if List.for_all preds ~f:(fun p -> edge_forward_dead ~p ~v) then
+         Cbat_attr_census.bump "bottomskip.entry.forward_dead"
+       else Cbat_attr_census.bump "bottomskip.entry.refine_only"
+     end);
+#endif
     let new_val =
       if List.is_empty preds then old
       else if Core.Set.mem heads v && head_warmed v then begin
@@ -321,20 +377,26 @@ let rec static_graph_vsa
         else begin
         (* Finite extrapolates; Zero joins; Inf widens. *)
         let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
-        rctx.Cbat_runctx.rc_landmarks.Cbat_landmarks.widening_at_head <- Some v;
-        let res = match Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v with
-          | `Finite n ->
-            let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:(Some v) ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
-            Cbat_landmarks.clear_head rctx.Cbat_runctx.rc_landmarks v (Hashtbl.find_exn head_to_blocks v);
-            r
-          | `Zero ->
-            Cbat_landmarks.lm_advance rctx.Cbat_runctx.rc_landmarks v;
-            j
-          | `Inf ->
-            Stages.time `Widen (fun () -> AI.widen_join old incoming)
-        in
-        rctx.Cbat_runctx.rc_landmarks.Cbat_landmarks.widening_at_head <- None;
-        res
+        Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
+          (fun () ->
+            match Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v with
+            | `Finite n ->
+              let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:(Some v) ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
+              Cbat_landmarks.clear_head rctx.Cbat_runctx.rc_landmarks v (Hashtbl.find_exn head_to_blocks v);
+              r
+            | `Zero ->
+              Cbat_landmarks.lm_advance rctx.Cbat_runctx.rc_landmarks v;
+              j
+            | `Inf ->
+              if Cbat_landmarks.cell_driven rctx.Cbat_runctx.rc_landmarks v then
+                (* No word landmarks at the head; the memory arm runs the
+                   cells' own three-way. Negative steps widen the words. *)
+                Stages.time `Widen (fun () ->
+                    AI.selective_widen_extrapolate ~head:(Some v)
+                      ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:(-1)
+                      old incoming)
+              else
+                Stages.time `Widen (fun () -> AI.widen_join old incoming))
         end
       end else
         Stages.time `Join (fun () -> AI.join old incoming)
@@ -424,7 +486,6 @@ end
 
 (* Re-exports for the mli's fixture seam. *)
 type refine_ctx = Cbat_runctx.refine_ctx
-let mk_rctx ~cfg ~abi s = Cbat_runctx.mk_rctx ~cfg ~abi s
 
 (* Re-exports of the sibling transfer/forward/backward modules. *)
 let set_addr_bits = Cbat_transfer.set_addr_bits
@@ -463,17 +524,32 @@ let () =
 let env_tag_domain : AI.t option KB.Domain.t =
   KB.Domain.optional
     ~inspect:(fun _ -> Sexp.Atom "hike:env-tag")
-    ~join:(fun a b -> if AI.equal a b then Ok a else Error Env_tag_conflict)
-    ~equal:AI.equal "hike:env-tag"
+    ~join:(fun a b ->
+#ifdef VSA_DEBUG
+      let () = Cbat_kb_census.bump "domain.env.join" in
+#endif
+      if AI.equal a b then Ok a else Error Env_tag_conflict)
+    ~equal:(fun a b ->
+#ifdef VSA_DEBUG
+      let () = Cbat_kb_census.bump "domain.env.equal" in
+#endif
+      AI.equal a b)
+    "hike:env-tag"
 
 let env_tag_slot : (Theory.Value.cls, AI.t option) KB.slot =
   KB.Class.property ~package:"hike" Theory.Value.cls "hike-env-tag"
     env_tag_domain
 
 let env_tag (d : def term) : AI.t option =
+#ifdef VSA_DEBUG
+  let () = Cbat_kb_census.bump "env_tag.get" in
+#endif
   KB.Value.get env_tag_slot (Def.value d)
 
 let set_env_tag (env : AI.t) (d : def term) : def term =
+#ifdef VSA_DEBUG
+  let () = Cbat_kb_census.bump "env_tag.put" in
+#endif
   Def.with_value d (KB.Value.put env_tag_slot (Def.value d) (Some env))
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
@@ -542,13 +618,12 @@ let env_tag_result_str (r : (WordSet.t, Type.error) Result.t) : string =
       | _ -> "?")
   | Error e -> "error: " ^ Type.Error.to_string e
 
-let env_tag_check ~pre ~blk (d : def term) (e : exp)
+let env_tag_check ~pre ~blk ~(tagged : bool) (d : def term) (e : exp)
     (answer : (WordSet.t, Type.error) Result.t) : unit =
   let sub =
     Hashtbl.find env_tag_sub_of_blk (Term.tid blk)
     |> Base.Option.value ~default:"?"
   in
-  let tagged = Base.Option.is_some (env_tag d) in
   let lost = (not tagged) && Hashtbl.mem env_tag_stamped (Term.tid d) in
   let replay = solve_denote ~pre ~blk ~def:d e in
   let mismatch =
@@ -583,14 +658,20 @@ let denote_exp_at :
     (WordSet.t, Type.error) Result.t =
   fun ?(post = AI.top) ~pre ~blk ?def e ->
     match def with
-    | None -> denote_imm_exp e post
+    | None ->
+#ifdef VSA_DEBUG
+      let () = Cbat_kb_census.bump "seam.query.nodef" in
+#endif
+      denote_imm_exp e post
     | Some d ->
-      let env =
-        match env_tag d with Some env -> env | None -> AI.top
-      in
+#ifdef VSA_DEBUG
+      let () = Cbat_kb_census.bump "seam.query.def" in
+#endif
+      let tag = env_tag d in
+      let env = match tag with Some env -> env | None -> AI.top in
       let answer = denote_imm_exp e env in
 #ifdef VSA_DEBUG
-      env_tag_check ~pre ~blk d e answer;
+      env_tag_check ~pre ~blk ~tagged:(Base.Option.is_some tag) d e answer;
 #endif
       answer
 
@@ -607,7 +688,8 @@ let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
         let blk' =
           Term.map def_t blk ~f:(fun d ->
               let before = !env in
-              env := denote_def d before;
+              let after = denote_def d before in
+              env := after;
 #ifdef VSA_DEBUG
               Hashtbl.set env_tag_stamped ~key:(Term.tid d) ~data:();
               env_tag_bump ~sub:(Sub.name sub) ~stamped:1 ~queried:0
@@ -647,5 +729,10 @@ module Test_seam = struct
   let constrain_edge = constrain_edge
   let inverse_denote = inverse_denote
   let mk_rctx = mk_rctx
+  (* The context's landmark table and the widening-head bracket: a refine
+     run through the seam uses the context's own table. *)
+  let landmarks_of (rctx : refine_ctx) = rctx.Cbat_runctx.rc_landmarks
+  let with_widening_head (rctx : refine_ctx) head f =
+    Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks head f
   let refine_edge = refine_edge
 end

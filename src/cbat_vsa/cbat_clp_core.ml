@@ -76,10 +76,16 @@ let create ?(width : int option) ?(step = W.b1) ?(cardn = W.b1) base : t =
     if W.(>=) e base' then {base = base'; step = step'; cardn = cardn_w; dir = Finite}
     else {base = e; step = W.neg step'; cardn = cardn_w; dir = Finite}
   else
+    (* [cardn_w] has [width+1] bits, [step'] [width]; the exact product
+       reaches [2^width] exactly when the operands' bit lengths sum past
+       [width].  A sum of exactly [width+1] is the one undecided case:
+       the product's own top bit decides it. *)
+    let bits (x : W.t) = match lead_1_bit x with None -> 0 | Some k -> k + 1 in
     let is_wrap =
-      let ds = dom_size ~width:(2*width + 1) width in
-      let mul = mul_exact cardn_w step' in
-      W.(>=) mul ds
+      let sum = bits cardn_w + bits step' in
+      if sum >= width + 2 then true
+      else if sum <= width then false
+      else msb (W.mul cardn_w step')
     in
     if is_wrap then
       let div, twos = factor_2s step' in
@@ -163,6 +169,34 @@ let cardn_from_bounds base step e : W.t =
 let interval ~(width : int) (lo : W.t) (hi : W.t) : t =
   create ~width ~step:(W.one width)
     ~cardn:(cardn_from_bounds lo (W.one width) hi) lo
+
+(* Sound hull of a list. *)
+let of_list ~width l : t =
+  assert (width > 0);
+  let open Monads.Std.Monad.Option.Syntax in
+  (match begin
+    let l = List.map l ~f:(W.extract_exn ~hi:(width - 1) ~lo:0) in
+    let l = List.sort ~compare:W.compare l in
+    let diff_list = List.map2_exn l (rotate_list l) ~f:W.sub in
+    let idx, _, step = List.foldi diff_list ~init:(0, W.zero width, W.zero width)
+        ~f:(fun i (idx, diff, step) d ->
+            assert(W.bitwidth diff = W.bitwidth step);
+            assert(W.bitwidth diff = W.bitwidth d);
+            if W.(>) d diff
+             then i, d, bounded_gcd diff step
+             else idx, diff, bounded_gcd d step) in
+    let l = idx
+            (* Rotate to the first element. *)
+            |> List.split_n l
+            |> (fun (end_l, start_l) -> List.append start_l end_l) in
+    List.hd l >>= fun base ->
+    List.last l >>= fun e ->
+    let cardn = cardn_from_bounds base step e in
+    assert(W.bitwidth base = width);
+    !!(create base ~step ~cardn)
+  end with
+  | None -> bottom width
+  | Some x -> x)
 
 
 
@@ -712,7 +746,22 @@ let diff (p1 : t) (p2 : t) : t =
       let run =
         (is_one (cardn_of i) || W.(=) (step_of i) (step_of p1))
         && subset i p2 in
-      if not run then p1
+      (* Within the budget the survivors decide: an exact hull when they
+         form one, the identity otherwise; past the budget the identity
+         is the sound over-approximation. *)
+      let enumerate_or_identity () =
+        if W.gt_int (cardn_of p1) fin_set_size then p1
+        else
+          let survivors =
+            List.filter ~f:(fun x -> not (elem x p2)) (iter p1)
+          in
+          let hull = of_list ~width:(bitwidth p1) survivors in
+          if W.equal (cardn_of hull)
+             (W.of_int ~width:(bitwidth p1 + 1) (List.length survivors))
+          then hull
+          else p1
+      in
+      if not run then enumerate_or_identity ()
       else
         match finite_end i with
         | None -> p1
@@ -737,17 +786,23 @@ let diff (p1 : t) (p2 : t) : t =
             (* Wrapping remainder. *)
             create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
           else
-            (* Remainder is one interval only at the edges. *)
-            (match min_elem i, min_elem p1 with
-             | Some i_lo, Some p_lo ->
-               if W.(=) i_lo p_lo then
-                 create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
-               else
-                 (match finite_end p1 with
-                  | Some p_end when W.(=) i_end p_end ->
-                    create p_lo ~step:(step_of p1) ~cardn
-                  | _ -> p1)
-             | _ -> p1)
+            (* The edges are one interval only on a non-wrapping
+               traversal, where the unsigned minimum is the start; a
+               wrapped Finite AP decides by its survivors. *)
+            (match finite_end p1 with
+             | Some p_end when W.(<) p_end (base_of p1) ->
+               enumerate_or_identity ()
+             | _ ->
+               (match min_elem i, min_elem p1 with
+                | Some i_lo, Some p_lo ->
+                  if W.(=) i_lo p_lo then
+                    create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
+                  else
+                    (match finite_end p1 with
+                     | Some p_end when W.(=) i_end p_end ->
+                       create p_lo ~step:(step_of p1) ~cardn
+                     | _ -> p1)
+                | _ -> p1))
 
 
 (* Union; same width expected. *)

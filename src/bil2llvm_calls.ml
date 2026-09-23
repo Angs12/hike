@@ -47,10 +47,17 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
       then
-        (* The caller-window base is the caller's SP at the call. *)
-        (match get_local scope blk_tid ctx.sp with
-         | Some v -> v
-         | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+        (* The caller-window base is the caller's SP at the call, as a
+           pointer into the caller's residue. *)
+        (match (get_local scope blk_tid ctx.sp, !(scope.cur_frame)) with
+         | Some sp, Some fr -> (
+             match fr.anchor_ptr with
+             | Some aptr ->
+                 let delta = Llvm.build_sub sp fr.anchor_i64 "" llvm_builder in
+                 Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) aptr [| delta |] ""
+                   llvm_builder
+             | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+         | _ -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let k =
           Base.Option.value_map
@@ -130,9 +137,16 @@ let fp_lltype llvm_ctx = function
 let ret_type_of_rets ctx rets =
   match rets with
   | [] -> Llvm.void_type ctx.llvm_ctx
-  | [ ret ] -> var_lltype ctx (Arg.lhs ret)
+  | [ ret ] ->
+      if Hike_stack_model.is_ptr_arg ret then Llvm.pointer_type ctx.llvm_ctx
+      else var_lltype ctx (Arg.lhs ret)
   | rets ->
-      let rets_typs = Base.List.map rets ~f:(fun ret -> var_lltype ctx (Arg.lhs ret)) in
+      let rets_typs =
+        Base.List.map rets ~f:(fun ret ->
+            if Hike_stack_model.is_ptr_arg ret then
+              Llvm.pointer_type ctx.llvm_ctx
+            else var_lltype ctx (Arg.lhs ret))
+      in
       Llvm.struct_type ctx.llvm_ctx (Array.of_list rets_typs)
 
 let register_fn ctx sub_tid fn fn_typ =
@@ -149,7 +163,7 @@ let create_ret_type ctx sub_tid =
 let arg_types_of ctx sub_tid args =
   Base.List.map args ~f:(fun arg ->
       let var = Arg.lhs arg in
-      if Arg.intent arg = Some Both then Llvm.pointer_type ctx.llvm_ctx
+      if Hike_stack_model.is_ptr_arg arg then Llvm.pointer_type ctx.llvm_ctx
       else if is_extern ctx sub_tid && is_fp_param ctx var then
         Llvm.double_type ctx.llvm_ctx
       else var_lltype ctx var)
@@ -180,7 +194,8 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
       in
       let value =
         match Llvm.classify_type (Llvm.type_of param) with
-        | Llvm.TypeKind.Pointer ->
+        | Llvm.TypeKind.Pointer
+          when not (Hike_stack_model.is_ptr_arg arg) ->
             Llvm.build_ptrtoint param
               (Llvm.integer_type ctx.llvm_ctx ctx.ptrsize)
               "" llvm_builder
@@ -398,7 +413,7 @@ let create_thunk ctx (sub_tid : tid) =
         let arg_typs =
           Base.List.map twin_args ~f:(fun a ->
               if Var.same (Arg.lhs a) window_var then
-                Llvm.integer_type llvm_ctx (8 * word)
+                Llvm.pointer_type llvm_ctx
               else var_lltype ctx (Arg.lhs a))
         in
         let fn_typ =
@@ -416,14 +431,12 @@ let create_thunk ctx (sub_tid : tid) =
         let window = Llvm.param fn (Base.List.length twin_args - 1) in
         let slot_vals =
           Base.List.init arity ~f:(fun i ->
-              let addr =
-                Llvm.build_add window
-                  (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-                     (slot_offset ~word:ctx.abi.Abi.word i) false)
-                  "" builder
+              let off =
+                Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+                  (slot_offset ~word:ctx.abi.Abi.word i) false
               in
               let ptr =
-                Llvm.build_inttoptr addr (Llvm.pointer_type llvm_ctx) ""
+                Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
                   builder
               in
               Llvm.build_load
@@ -491,7 +504,13 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   (match get_rets ctx target with
    | [ ret ] -> insert_local scope blk_tid (Arg.lhs ret) r
    | _ -> ());
-  finish_call scope llvm_builder (Option.map label_tid (Call.return call))
+  let fallthrough = Option.map label_tid (Call.return call) in
+  Option.iter
+    (fun t ->
+      Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:t
+        ~term_bb:(get_bb scope blk_tid) ())
+    fallthrough;
+  finish_call scope llvm_builder fallthrough
 
 (* A self-call stub targets its own address (the symtab names an
    external there); it declares but never defines, so call sites

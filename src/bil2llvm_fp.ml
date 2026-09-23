@@ -222,4 +222,9 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op 
           ~bits:(int_width_or word_bits r) r rw in
       insert_local scope blk_tid ret r_lane;
       Option.iter (fun t -> insert_local scope t ret r_lane) fallthrough);
+  Option.iter
+    (fun t ->
+      Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:t
+        ~term_bb:(get_bb scope blk_tid) ())
+    fallthrough;
   finish_call scope llvm_builder fallthrough

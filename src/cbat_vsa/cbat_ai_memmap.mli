@@ -27,6 +27,19 @@ module Key : sig
 
   val of_wordset : WordSet.t -> t option
 
+  (* The cell's stride: > 1 for a bounded strided address progression,
+     1 for a plain hull. *)
+  val step : t -> int
+
+  (* Same-grid strides keep their step; any mix demotes to 1. *)
+  val combined_step : t -> t -> int
+
+  (* Sub-ranges of [k] covered by no cell of [s]. *)
+  val gaps : 'a -> t -> (t * 'a) seq -> (t * 'a) seq
+
+  (* The key the landmark table records this cell under. *)
+  val cell_key : t -> Cbat_landmarks.Cell_key.t
+
   (* Key ranges share at least one address. *)
   val overlap : t -> t -> bool
 end
@@ -72,7 +85,7 @@ val meet_range : t -> key:Key.t -> data:Val.t -> t
 (* [widen_join] with the caller's per-key combiner: where the trees
    are comparable, each cell of the new tree combines with the old
    tree's value at the same key; join otherwise. *)
-val widen_join_op : (Val.t -> Val.t -> Val.t) -> t -> t -> t
+val widen_join_op : (Key.t -> Val.t -> Val.t -> Val.t) -> t -> t -> t
 
 (* Keep cells at key >= [keep_lo] outside [escape]. *)
 val call_keep : t -> keep_lo:Bap.Std.word -> escape:(Bap.Std.word * Bap.Std.word) list -> t

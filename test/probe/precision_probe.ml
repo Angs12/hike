@@ -21,6 +21,14 @@ let diag_on () : bool =
   | Some "1" -> true
   | _ -> false
 
+(* Default OFF; HIKE_VSA_DIAG_ACC=1 dumps one DIAG_ACC line per memory
+   access: the address's class, its offset extrema under the tag-meet
+   and before-state views, and its absolute extrema. *)
+let acc_on () : bool =
+  match Sys.getenv_opt "HIKE_VSA_DIAG_ACC" with
+  | Some "1" -> true
+  | _ -> false
+
 (* Fixpoint entry solution: production default. *)
 let init_sol_of (sub' : sub term) : Vsa.vsa_sol =
   Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub'
@@ -279,6 +287,32 @@ let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
     (Var.name (Def.lhs d)) kind op1 op2;
   flush stdout
 
+(* One DIAG_ACC line: the access address's class, its offset extrema
+   (segment-relative) and absolute extrema under the tag-meet view, and
+   its offset extrema under the def's before-state (the production
+   denotation). *)
+let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
+    (stack : bool) (ws : Ws.t) (a : exp) (st_before : AI.t) : unit =
+  let i64_of_word (w : Cbat_word.t) : string =
+    match Cbat_word.to_int64 w with
+    | Ok v -> Printf.sprintf "%Ld" v
+    | Error _ -> "?" in
+  let offs_of ws' = match Ws.offset_extrema ws' with
+    | Some (lo, hi) -> Printf.sprintf "%s..%s" (i64_of_word lo) (i64_of_word hi)
+    | None -> "n/a" in
+  let abs = match Ws.min_elem ws, Ws.max_elem ws with
+    | Some lo, Some hi ->
+      Printf.sprintf "%s..%s" (i64_of_word lo) (i64_of_word hi)
+    | _ -> "n/a" in
+  let pre = match Vsa.Test_seam.denote_imm_exp a st_before with
+    | Ok ws' -> offs_of ws'
+    | Error _ -> "err" in
+  Printf.printf "DIAG_ACC\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n"
+    bname (Sub.name sub') (Tid.to_string (Term.tid b))
+    (Tid.to_string (Term.tid d)) (def_to_string d)
+    (classify_operand ws) (offs_of ws) pre abs (if stack then 1 else 0);
+  flush stdout
+
 (* Walk blocks in def order, re-denote, classify. *)
 (* The seeding predicate and the tag-state meet for one address — the
    probes' copies of the extraction's arms. *)
@@ -363,6 +397,7 @@ let collect_stats (bname : string) (sub' : sub term)
               | Error _ ->
                 s.Sub_stats.ld_denote_err <- s.Sub_stats.ld_denote_err + 1
               | Ok ws ->
+                if acc_on () then diag_acc bname sub' b d stack ws a st_before;
                 (* Bottom split uses [input_bottom], as the def series. *)
                 let lb = classify_ld ws input_bottom in
                 Sub_stats.add_ld s stack lb;

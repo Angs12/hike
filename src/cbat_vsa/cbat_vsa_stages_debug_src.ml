@@ -20,6 +20,11 @@ let walk_max_pops = ref 0
 let t_scaffold = ref 0.
 let scaffold_calls = ref 0
 
+(* Cell-landmark census, accumulated for the whole process; [reset]
+   (per-solve) leaves them so every STAGES line carries the total. *)
+let cell_lm_recorded = ref 0
+let cell_lm_consumed = ref 0
+
 let t_glue = ref 0.
 let glue_calls = ref 0
 
@@ -72,12 +77,14 @@ let gc_promoted_words () =
 let report (label : string) : unit =
   Printf.printf
     "STAGES %s: denote %7.3fs/%d  join %7.3fs/%d  equal %7.3fs/%d  \
-     widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d  glue %7.3fs/%d\n\
+     widen %7.3fs/%d  walk %7.3fs/%d  scaffold %7.3fs/%d  glue %7.3fs/%d  \
+     cell_lm rec=%d con=%d\n\
      WALKS %s: pops %d  blocks %d  truncs %d  max_pops %d\n\
      GC %s: minor %.0f  major %.0f  promoted %.0f\n%!"
     label !t_denote !denote_calls !t_join !join_calls !t_equal !equal_calls
     !t_widen !widen_calls !t_walk !walk_calls !t_scaffold !scaffold_calls
     !t_glue !glue_calls
+    !cell_lm_recorded !cell_lm_consumed
     label !walk_pops !walk_blocks !walk_truncs !walk_max_pops
     label (gc_minor_words ()) (gc_major_words ()) (gc_promoted_words ())
 

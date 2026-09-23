@@ -52,15 +52,40 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
         else if Cbat_word.(>=) (sgn v1_min) (sgn v2_max) then return bfalse
         else return bool_top
     end in
+#ifdef VSA_DEBUG
+  (* B16 census: both operands are stack singletons.  The cardinality
+     gate reads the saturated stack-span for a StackOff, so this shape
+     can only reach the overlap fall-through. *)
+  let stack_singleton (v : wordset) : bool =
+    match WordSet.stack_offsets v with
+    | Some o -> Word_ops.is_one (WordSet.Clp.cardinality o)
+    | None -> false
+  in
+#endif
   (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
     let v1Size = WordSet.cardinality v1 in
     let v2Size = WordSet.cardinality v2 in
     if Cbat_word.is_zero v1Size || Cbat_word.is_zero v2Size then bool_bottom
-    else if Word_ops.is_one v1Size && Word_ops.is_one v2Size then
+    else if Word_ops.is_one v1Size && Word_ops.is_one v2Size then begin
+#ifdef VSA_DEBUG
+      (if stack_singleton v1 && stack_singleton v2 && WordSet.equal v1 v2 then
+         Format.eprintf "DBG B16 stack-singleton-eq GATE-FIRED\n%!"
+       else ());
+#endif
       wordset_of_bool
         (if negate then not (WordSet.equal v1 v2) else WordSet.equal v1 v2)
-    else if WordSet.overlap v1 v2 then bool_top
+    end
+    else if WordSet.overlap v1 v2 then begin
+#ifdef VSA_DEBUG
+      (if stack_singleton v1 && stack_singleton v2 then
+         Format.eprintf "DBG B16 stack-singleton-pair %s %s\n%!"
+           (if WordSet.equal v1 v2 then "equal-2reach" else "distinct")
+           (if negate then "neq" else "eq")
+       else ());
+#endif
+      bool_top
+    end
     else if negate then btrue else bfalse
   in
   match op with

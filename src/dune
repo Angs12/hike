@@ -24,6 +24,7 @@
     monads
     ogre
     hike.hike_abi
+    hike.hike_stack_bounds
     hike.cbat_vsa
     hike.cbat_vsa_domain))
 

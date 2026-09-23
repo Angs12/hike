@@ -34,6 +34,12 @@ val time :
   [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Widen ] ->
   (unit -> 'a) -> 'a
 
+(* Cell-landmark census: acquisitions at cell meets and Finite-arm
+   consumptions at widening heads. The debug adapter accumulates for the
+   whole process (reset leaves them); the prod adapter stays 0. *)
+val cell_lm_recorded : int ref
+val cell_lm_consumed : int ref
+
 (* Commit one walk's schedule metrics. *)
 val bump_walk_pops : pops:int -> blocks:int -> truncated:bool -> unit -> unit
 

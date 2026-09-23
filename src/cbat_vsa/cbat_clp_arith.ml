@@ -107,15 +107,60 @@ let fixed_bits (p : t) (min_p : word) (max_p : word) : word =
 
 
 
+(* The general AND arm's per-operand facts: both extrema and the fixed-bit
+   mask. *)
+type and_facts = { af_min : word; af_max : word; af_fixed : word }
+
+let and_facts_of (p : t) : and_facts option =
+  let open Monads.Std.Monad.Option.Syntax in
+  min_elem p >>= fun mn ->
+  max_elem p >>= fun mx ->
+  !!( { af_min = mn; af_max = mx; af_fixed = fixed_bits p mn mx } )
+
+(* The general AND arm: a pure function of the two operands' facts. *)
+let logand_general (f1 : and_facts) (f2 : and_facts) : t =
+  let min_elem_p1 = f1.af_min and max_elem_p1 = f1.af_max in
+  let min_elem_p2 = f2.af_min and max_elem_p2 = f2.af_max in
+  let sz = W.bitwidth min_elem_p1 in
+  (* Bits fixed in both operands keep their AND value; a bit fixed to 0
+     in either operand is 0 in the result. On every such bit the result
+     agrees with [min_elem_p1 & min_elem_p2]. *)
+  let forced = W.logand f1.af_fixed f2.af_fixed
+    |> W.logor (W.logand f1.af_fixed (W.lnot min_elem_p1))
+    |> W.logor (W.logand f2.af_fixed (W.lnot min_elem_p2)) in
+  let mask = W.lnot forced in
+  if W.is_zero mask then
+    (* No free bits: the result is the singleton AND of the minima. *)
+    create (W.logand min_elem_p1 min_elem_p2)
+  else
+    let safe_lower_bound =
+      W.logand min_elem_p1 min_elem_p2 |> W.logand forced in
+    let safe_upper_bound = W.logand max_elem_p1 max_elem_p2 |>
+                           W.logor mask |>
+                           W.min max_elem_p1 |>
+                           W.min max_elem_p2 in
+    let _, l_s_b = factor_2s mask in
+    let step = W.lshift (W.one sz) (W.of_int ~width:sz l_s_b) in
+    let base = safe_lower_bound in
+    let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
+    create base ~step ~cardn
+
+(* A caller whose operand appears in several of its calls passes one
+   resolver, so the facts are computed at most once per operand. *)
+let facts_of (p : t) (f : (t -> and_facts option) option) : and_facts option =
+  match f with Some f -> f p | None -> and_facts_of p
+
+(* Memoize [p]'s answer in [r] (outer [None] = not yet read); the general
+   arm is the only reader. *)
+let facts_memo (r : and_facts option option ref) (p : t) : and_facts option =
+  match !r with Some f -> f | None -> let f = and_facts_of p in r := Some f; f
+
 (* Bitwise op via non-wrapping superset. *)
-let logand (p1 : t) (p2 : t) : t =
+let logand_rule ?f (cp1 : t) (cp2 : t) : t =
   (* Mixed widths coerce to max. *)
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let sz = bitwidth p1 in
+  if bitwidth cp1 <> bitwidth cp2 then top (Stdlib.max (bitwidth cp1) (bitwidth cp2)) else let sz = bitwidth cp1 in
   let cardn_two = W.of_int ~width:(sz + 1) 2 in
-  
-  let cp1 = p1 in
-  let cp2 = p2 in
-  
+
   let p1, p2 = if W.(<=) (cardinality cp1) (cardinality cp2)
     then (cp1, cp2) else (cp2, cp1) in
   let open Monads.Std.Monad.Option.Syntax in
@@ -132,35 +177,9 @@ let logand (p1 : t) (p2 : t) : t =
       let cardn = cardn_two in
       !!(create base ~step ~cardn)
     else
-      min_elem p1 >>= fun min_elem_p1 ->
-      max_elem p1 >>= fun max_elem_p1 ->
-      min_elem p2 >>= fun min_elem_p2 ->
-      max_elem p2 >>= fun max_elem_p2 ->
-      (* Bits fixed in both operands keep their AND value; a bit fixed to 0
-         in either operand is 0 in the result. On every such bit the result
-         agrees with [min_elem_p1 & min_elem_p2]. *)
-      let fixed1 = fixed_bits p1 min_elem_p1 max_elem_p1 in
-      let fixed2 = fixed_bits p2 min_elem_p2 max_elem_p2 in
-      let forced = W.logand fixed1 fixed2
-        |> W.logor (W.logand fixed1 (W.lnot min_elem_p1))
-        |> W.logor (W.logand fixed2 (W.lnot min_elem_p2)) in
-      let mask = W.lnot forced in
-      if W.is_zero mask then
-        (* No free bits: the result is the singleton AND of the minima. *)
-        !!(create (W.logand min_elem_p1 min_elem_p2))
-      else
-
-        let safe_lower_bound =
-          W.logand min_elem_p1 min_elem_p2 |> W.logand forced in
-        let safe_upper_bound = W.logand max_elem_p1 max_elem_p2 |>
-                               W.logor mask |>
-                               W.min max_elem_p1 |>
-                               W.min max_elem_p2 in
-        let _, l_s_b = factor_2s mask in
-        let step = W.lshift (W.one sz) (W.of_int ~width:sz l_s_b) in
-        let base = safe_lower_bound in
-        let cardn = W.div (W.sub safe_upper_bound base) step |> succ_exact in
-        !!(create base ~step ~cardn)
+      match facts_of p1 f, facts_of p2 f with
+      | Some f1, Some f2 -> Some (logand_general f1 f2)
+      | _ -> None
   end with
   (* None = the image is unrepresentable here; it does NOT mean the
      result is empty.  BOTTOM would claim a live path dead — TOP is the
@@ -168,15 +187,41 @@ let logand (p1 : t) (p2 : t) : t =
   | None -> top sz
   | Some x -> x)
 
+let logand (p1 : t) (p2 : t) : t = logand_rule p1 p2
+
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
+
+(* [q] is [lnot p].  When [p] is create-normalized (Finite or Circular)
+   [q] is its exact complement, so its facts mirror [f]: the extrema swap
+   under complement and the fixed-bit mask is unchanged.  A directional
+   ray's [lnot] may renormalize onto its subgroup — then [q] answers from
+   itself. *)
+let lnot_facts (p : t) (q : t) (f : and_facts option) : and_facts option =
+  match f with
+  | Some af when not (is_ascending p || is_descending p) ->
+    Some { af_min = W.lnot af.af_max; af_max = W.lnot af.af_min;
+           af_fixed = af.af_fixed }
+  | _ -> and_facts_of q
 
 let logxor (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2)) else let width = bitwidth p1 in
   let two = create (W.of_int 2 ~width) in
-  let approx1 = logor (logand p1 (lnot p2)) (logand (lnot p1) p2) in
+  let np1 = lnot p1 and np2 = lnot p2 in
+  (* The four ANDs share their operands: [p1] feeds the first and fourth,
+     [p2] the second and fourth, and each lnot operand mirrors its source.
+     A fast arm never reaches the resolver. *)
+  let m1 = ref None and m2 = ref None in
+  let resolve (q : t) : and_facts option =
+    if phys_equal q p1 then facts_memo m1 p1
+    else if phys_equal q p2 then facts_memo m2 p2
+    else if phys_equal q np1 then lnot_facts p1 np1 (facts_memo m1 p1)
+    else if phys_equal q np2 then lnot_facts p2 np2 (facts_memo m2 p2)
+    else and_facts_of q in
+  let approx1 = logor (logand_rule ~f:resolve p1 np2)
+      (logand_rule ~f:resolve np1 p2) in
   (* Bitwise equality. *)
-  let approx2 = sub (add p1 p2) (mul (logand p1 p2) two) in
+  let approx2 = sub (add p1 p2) (mul (logand_rule ~f:resolve p1 p2) two) in
   (* Meet of two sound approximations. *)
   intersection approx1 approx2
 
@@ -500,33 +545,6 @@ let concat (p1 : t) (p2 : t) : t =
   
   (add p1' p2')
 
-(* Sound hull of a list. *)
-let of_list ~width l : t =
-  assert (width > 0);
-  let open Monads.Std.Monad.Option.Syntax in
-  (match begin
-    let l = List.map l ~f:(W.extract_exn ~hi:(width - 1) ~lo:0) in
-    let l = List.sort ~compare:W.compare l in
-    let diff_list = List.map2_exn l (rotate_list l) ~f:W.sub in
-    let idx, _, step = List.foldi diff_list ~init:(0, W.zero width, W.zero width)
-        ~f:(fun i (idx, diff, step) d ->
-            assert(W.bitwidth diff = W.bitwidth step);
-            assert(W.bitwidth diff = W.bitwidth d);
-            if W.(>) d diff
-             then i, d, bounded_gcd diff step
-             else idx, diff, bounded_gcd d step) in
-    let l = idx
-            (* Rotate to the first element. *)
-            |> List.split_n l
-            |> (fun (end_l, start_l) -> List.append start_l end_l) in
-    List.hd l >>= fun base ->
-    List.last l >>= fun e ->
-    let cardn = cardn_from_bounds base step e in
-    assert(W.bitwidth base = width);
-    !!(create base ~step ~cardn)
-  end with
-  | None -> bottom width
-  | Some x -> x)
 
 (* BAP div truncates; ediv is Euclidean. *)
 let div (p1 : t) (p2 : t) : t =

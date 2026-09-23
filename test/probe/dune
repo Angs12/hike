@@ -18,10 +18,51 @@
  (preprocess
   (pps ppx_bap)))
 
-(executables
- (names audit02 conv_diag stage_timer subtimes corpus_watch precision_probe)
- (modules audit02 conv_diag stage_timer subtimes corpus_watch precision_probe)
+(library
+ (name clp_bench_rows)
+ (modules clp_bench_rows)
  (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads
+  unix)
+ (flags
+  :standard -g))
+
+(executables
+ (names
+  audit02
+  conv_diag
+  stage_timer
+  subtimes
+  corpus_watch
+  precision_probe
+  vsa_gap
+  var_key_bench
+  attr_census
+  memmap_bench
+  clp_bench)
+ (modules
+  audit02
+  conv_diag
+  stage_timer
+  subtimes
+  corpus_watch
+  precision_probe
+  vsa_gap
+  var_key_bench
+  attr_census
+  memmap_bench
+  clp_bench)
+ (libraries
+  clp_bench_rows
   probe_common
   hike
   bap
@@ -60,3 +101,12 @@
   :standard -g)
  (preprocess
   (pps ppx_bap)))
+
+(test
+ (name clp_tripwire)
+ (modules clp_tripwire)
+ (libraries
+  clp_bench_rows
+  probe_common)
+ (flags
+  :standard -g))

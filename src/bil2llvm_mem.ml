@@ -3,7 +3,6 @@
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
-module KB = Bap_knowledge.Knowledge
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_section
@@ -102,13 +101,12 @@ let mem_access ctx scope llvm_builder blk_tid sub_tid fr def_tag
 
 let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
   let var = Def.lhs def in
-  let v = Def.value def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
   let res =
     if Hike_stack_model.def_is_dyn_alloc def then
       create_dynamic_alloc ctx scope llvm_builder blk_tid def exp
-    else if KB.Value.get rip_relative_addr v then
+    else if Hike_stack_model.def_is_rip_relative def then
       create_rip_relative_addr ctx scope llvm_builder blk_tid exp
     else mem_access ctx scope llvm_builder blk_tid sub_tid fr def_tag def exp
   in
@@ -118,15 +116,16 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
      value is loaded data, not an address. *)
   let res =
     if Hike_stack_model.def_is_window_value def then
-      let w =
+      let w_i64 =
         let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
         match get_local scope blk_tid wv with
-        | Some v -> v
-        | None -> Llvm.undef (typ_lltype ctx (Var.typ wv))
+        | Some v ->
+            Llvm.build_ptrtoint v (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
+        | None -> Llvm.undef (Llvm.i64_type ctx.llvm_ctx)
       in
       let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
       let rel = Llvm.build_sub res stack0 "" llvm_builder in
-      Llvm.build_add w rel "" llvm_builder
+      Llvm.build_add w_i64 rel "" llvm_builder
     else res
   in
   (* The def's value is coerced to the variable's declared width

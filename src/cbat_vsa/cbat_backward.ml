@@ -131,6 +131,9 @@ let hull ~(wrapping : bool) (width : int) (lo : Cbat_word.t) (hi : Cbat_word.t)
     if WordSet.is_top ws then None else Some ws
 
 let neq_complement (c : Cbat_word.t) : wordset option =
+#ifdef VSA_DEBUG
+  Cbat_attr_census.bump "band.neq_complement";
+#endif
   let cstr =
     WordSet.diff (WordSet.top (Cbat_word.bitwidth c)) (WordSet.singleton c) in
   if Cbat_clp_set_composite.is_bottom cstr then None else Some cstr
@@ -370,6 +373,20 @@ let constraint_row ?(cur : wordset option = None)
   | NEQ | UGT | UGE | SGT | SGE -> None
 
 let total_row (op : guard_op) (c : Cbat_word.t) : wordset option =
+#ifdef VSA_DEBUG
+  Cbat_attr_census.bump
+    (match op with
+     | ULT -> "band.total.ult"
+     | ULE -> "band.total.ule"
+     | UGT -> "band.total.ugt"
+     | UGE -> "band.total.uge"
+     | EQ -> "band.total.eq"
+     | NEQ -> "band.total.neq"
+     | SLT -> "band.total.slt"
+     | SLE -> "band.total.sle"
+     | SGT -> "band.total.sgt"
+     | SGE -> "band.total.sge");
+#endif
   let width = Cbat_word.bitwidth c in
   let maxw = Cbat_word.ones width in
   let half = Word_ops.half width in
@@ -413,8 +430,16 @@ let guard_row ?(cur : wordset option = None)
   match op with
   | ULT | ULE | EQ | SLT | SLE ->
     (match constraint_row ~cur ~known_nonneg op c with
-     | Some row -> Some row
-     | None -> total_row op c)
+     | Some row ->
+#ifdef VSA_DEBUG
+       Cbat_attr_census.bump "band.constraint.ok";
+#endif
+       Some row
+     | None ->
+#ifdef VSA_DEBUG
+       Cbat_attr_census.bump "band.constraint.fallback";
+#endif
+       total_row op c)
   | NEQ | UGT | UGE | SGT | SGE -> total_row op c
 
 
@@ -429,7 +454,14 @@ let overlap_eq (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
      | _ -> None, None)
   else
     (match op with
-     | Bil.NEQ -> Some (WordSet.diff a_ws ov), Some (WordSet.diff b_ws ov)
+     | Bil.NEQ ->
+       let da = WordSet.diff a_ws ov and db = WordSet.diff b_ws ov in
+#ifdef VSA_DEBUG
+       (if WordSet.equal da a_ws then
+          Cbat_attr_census.bump "band.diff.identity"
+        else Cbat_attr_census.bump "band.diff.exact");
+#endif
+       Some da, Some db
      | _ -> Some ov, Some ov)
 
 (* [x op y]: const rows at the other operand's extrema; the signed [x]
@@ -602,10 +634,51 @@ let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
       end
   | Type.Mem _ | Type.Unk -> env
 
+#ifdef VSA_DEBUG
+(* The cell-meet soundness differential: each narrowing cell meet is
+   checked over its enumerable concrete points — every pre-meet element
+   satisfying the produced constraint must survive the meet; a lost
+   point is an unsound narrowing and fails the debug run.  Bounded:
+   pre-values beyond the enumeration cap count as skipped. *)
+let cell_meet_cap = 16
+let cell_meet_seq = ref 0
+let cell_meet_verified = ref 0
+let cell_meet_skipped = ref 0
+let cell_meet_violations = ref 0
+let cell_meet_diff_dump () =
+  Printf.printf "CELL-MEET-DIFF: verified=%d skipped=%d violations=%d\n%!"
+    !cell_meet_verified !cell_meet_skipped !cell_meet_violations
+let () = at_exit cell_meet_diff_dump
+let cell_meet_diff ~(ckey : string) ~(pre : wordset) ~(cstr : wordset)
+    ~(res : wordset) : unit =
+  incr cell_meet_seq;
+  match WordSet.enumerate ~cap:cell_meet_cap pre with
+  | None -> incr cell_meet_skipped
+  | Some elems ->
+    (match List.find elems ~f:(fun v ->
+         WordSet.elem v cstr && not (WordSet.elem v res)) with
+     | None -> incr cell_meet_verified
+     | Some v ->
+       incr cell_meet_violations;
+       failwith
+         (Format.asprintf
+            "CELL-MEET-DIFF VIOLATION cell %s: point %s satisfies the \
+             constraint %a but is outside the meet %a (pre %a)"
+            ckey (Cbat_word.to_string v) WordSet.pp cstr WordSet.pp res
+            WordSet.pp pre))
+#endif
+
+(* The cell key a backward meet may name: only a bounded address set
+   denotes the cell a trace reads.  An unbounded address names no cell,
+   so its constraint must stay identity rather than narrow every cell. *)
+let bounded_cell_key (ws : wordset) : Mem.Key.t option =
+  if WordSet.is_top ws || WordSet.is_infinite ws then None
+  else Mem.Key.of_wordset ws
+
 let rec inverse_denote ~(env : AI.t)
     ?(cells : pending_cell list ref = ref [])
     ?(nonneg : exp -> bool = fun _ -> false)
-    ?(landmarks : Cbat_landmarks.t = Cbat_landmarks.create ())
+    ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
   match e with
   | Bil.Var v ->
@@ -666,12 +739,14 @@ let rec inverse_denote ~(env : AI.t)
   | Bil.Load (m, a, en, s) ->
     (* The cell fact meets the env's memory and threads to the store
        that wrote it. *)
-    let env = meet_cell ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
+    let env = meet_cell ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
     (match m with
      | Bil.Var mv ->
-       Option.iter
-         (Option.bind (Base.Result.ok (denote_imm_exp a env)) ~f:Mem.Key.of_wordset)
-         ~f:(fun k -> cells := (mv, k, produced, en) :: !cells)
+       (match denote_imm_exp a env with
+        | Ok aws ->
+          Option.iter (bounded_cell_key aws)
+            ~f:(fun k -> cells := (mv, k, produced, en) :: !cells)
+        | Error _ -> ())
      | _ -> ());
     env
   | Bil.Store (m, a, u, _en, s) ->
@@ -683,7 +758,7 @@ let rec inverse_denote ~(env : AI.t)
         | [] -> env
         | pending ->
           let resSize = Size.in_bits s in
-          let ks = Option.bind (Base.Result.ok (denote_imm_exp a env)) ~f:Mem.Key.of_wordset in
+          let ks = Option.bind (Base.Result.ok (denote_imm_exp a env)) ~f:bounded_cell_key in
           (match ks with
            | None -> env
            | Some ks ->
@@ -759,7 +834,7 @@ let rec inverse_denote ~(env : AI.t)
 
 (* The produced {1} windows the operands by the ordering decision. *)
 and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
-    ?(landmarks : Cbat_landmarks.t = Cbat_landmarks.create ())
+    ~(landmarks : Cbat_landmarks.t)
     ~(nonneg : exp -> bool)
     (op : Bil.binop) (a : exp) (b : exp) : AI.t =
   let const_side (x : exp) (flip : bool) (op : Bil.binop) (c : word) : AI.t =
@@ -789,8 +864,8 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
 (* The load's cell fact meets the env's memory at the denoted address:
    stack-symbolic addresses key by segment offsets, foreign by their
    concrete hulls; identity on doubt. *)
-and meet_cell ~(env : AI.t) ~(mem : exp) ~(addr : exp) ~(size : Size.t)
-    ~(endian : endian) (produced : wordset) : AI.t =
+and meet_cell ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
+    ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) : AI.t =
   match mem with
   | Bil.Var m ->
     (match Var.typ m with
@@ -803,7 +878,7 @@ and meet_cell ~(env : AI.t) ~(mem : exp) ~(addr : exp) ~(size : Size.t)
 #endif
           env
         | Ok addr_ws ->
-          (match Mem.Key.of_wordset addr_ws with
+          (match bounded_cell_key addr_ws with
            | None ->
 #ifdef VSA_DEBUG
              Format.eprintf "DBG MEET-CELL: no key from %a\n%!"
@@ -817,9 +892,23 @@ and meet_cell ~(env : AI.t) ~(mem : exp) ~(addr : exp) ~(size : Size.t)
                let mv = AI.find_memory k env m in
                let data = Mem.Val.create produced endian in
 #ifdef VSA_DEBUG
+               let pre = Mem.Val.data (Mem.find (resSize, endian) mv key) in
+               if Cbat_landmarks.observe_unsat_cell landmarks
+                    ~cell:(Mem.Key.cell_key key) ~p:pre ~cstr:produced
+               then incr Stages.cell_lm_recorded;
+               let res = WordSet.meet pre produced in
+               if not (WordSet.equal res pre) then
+                 cell_meet_diff
+                   ~ckey:(Sexp.to_string (Mem.Key.sexp_of_t key))
+                   ~pre ~cstr:produced ~res;
                Format.eprintf "DBG MEET-CELL: meet %a into key %s\n%!"
                  WordSet.pp produced
                  (Sexp.to_string (Mem.Key.sexp_of_t key));
+#else
+               ignore (Cbat_landmarks.observe_unsat_cell landmarks
+                         ~cell:(Mem.Key.cell_key key)
+                         ~p:(Mem.Val.data (Mem.find (resSize, endian) mv key))
+                         ~cstr:produced);
 #endif
                AI.add_memory env ~key:m
                  ~data:(Mem.meet_range mv ~key ~data)))
@@ -828,7 +917,7 @@ and meet_cell ~(env : AI.t) ~(mem : exp) ~(addr : exp) ~(size : Size.t)
 
 (* The edge step: the graph's completed cond constrained TRUE — the {1}
    lives here only. *)
-let constrain_edge ~(env : AI.t) ?(landmarks : Cbat_landmarks.t = Cbat_landmarks.create ())
+let constrain_edge ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
     (cond : exp) : AI.t =
   inverse_denote ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
 

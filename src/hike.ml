@@ -20,6 +20,7 @@ module Image = Hike_image
 module Promote = Hike_promote
 module Filter = Hike_filter
 module Kb = Hike_kb
+module Types = Hike_types
 module Strip_canaries = Hike_strip_canaries
 module Bil2llvm = Bil2llvm
 
@@ -297,6 +298,8 @@ let pass_attrib proj =
 
 let pass_convlir ~output proj = convert_binary output proj
 
+let pass_types proj = Hike_types.run proj
+
 let () =
   Extension.declare (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
@@ -309,7 +312,8 @@ let () =
         chain ~name:"strip-canaries" ~prev:vsa pass_strip_canaries
       in
       let sections = chain ~name:"sections" ~prev:strip_canaries pass_attrib in
+      let types = chain ~name:"types" ~prev:sections pass_types in
       Project.register_pass' ~name:"convlir" ~runonce:true
-        ~deps:[ "hike-" ^ sections ]
+        ~deps:[ "hike-" ^ types ]
         (pass_convlir ~output:output_file);
       Ok ())

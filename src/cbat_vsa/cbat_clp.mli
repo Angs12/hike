@@ -29,6 +29,9 @@ val create_descending : width:int -> base:Cbat_word.t -> step:Cbat_word.t -> t
 (* Step-1 CLP [lo, hi]; a wrapped pair is the circular interval. *)
 val interval : width:int -> Cbat_word.t -> Cbat_word.t -> t
 
+(* The progression's step (0 for singletons). *)
+val step_of : t -> Cbat_word.t
+
 val nearest_pred : Cbat_word.t -> t -> Cbat_word.t option
 val nearest_succ : Cbat_word.t -> t -> Cbat_word.t option
 

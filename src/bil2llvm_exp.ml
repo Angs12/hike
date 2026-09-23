@@ -433,17 +433,17 @@ and emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite =
 
 (* Region accesses GEP the region alloca at (access offset − region
    base), both relative to the SP anchor.  Window accesses normalize
-   the same way against the hike_window parameter — the caller's
-   window base. *)
+   the same way against the hike_window parameter — a pointer into the
+   caller's residue. *)
 and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
   match Hike_stack_model.is_window_mem mv with
   | false -> create_exp ctx scope llvm_builder blk_tid exp
   | true -> (
-      let w_int =
+      let w_ptr =
         let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
         match get_local scope blk_tid w with
         | Some v -> v
-        | None -> Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) 0
+        | None -> Llvm.undef (var_lltype ctx w)
       in
       let off a =
         let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
@@ -454,9 +454,8 @@ and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
           let marker = marker_of_size size in
           let a = create_exp ctx scope llvm_builder blk_tid addr in
           let p =
-            Llvm.build_inttoptr
-              (Llvm.build_add w_int (off a) "" llvm_builder)
-              (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder
+            Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w_ptr [| off a |] ""
+              llvm_builder
           in
           let emit () =
             Llvm.build_load
@@ -469,9 +468,8 @@ and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
           let marker = marker_of_size size in
           let a = create_exp ctx scope llvm_builder blk_tid addr in
           let p =
-            Llvm.build_inttoptr
-              (Llvm.build_add w_int (off a) "" llvm_builder)
-              (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder
+            Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w_ptr [| off a |] ""
+              llvm_builder
           in
           let emit () =
             let d = create_exp ctx scope llvm_builder blk_tid data in

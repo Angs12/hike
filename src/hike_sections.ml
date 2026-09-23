@@ -357,7 +357,7 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
     ~f:(fun x -> x)
 
 let is_rip_relative (d : def term) : bool =
-  Bap_knowledge.Knowledge.Value.get Bap.Std.rip_relative_addr (Def.value d)
+  Hike_stack_model.def_is_rip_relative d
 
 (* Pure constant arithmetic — the address shape whose emission
    evaluates to the exact native bits. *)

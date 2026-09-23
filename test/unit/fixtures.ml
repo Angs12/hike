@@ -1084,6 +1084,9 @@ let emit_ir (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
   let prog = Program.create ~subs () in
+  (* The types pass writes each sub's signature onto its [arg] terms, as
+     the pipeline does; the emitter reads them there. *)
+  let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
   B2l.emit_program llvm_ctx llvm_module
     ~target:Theory.Target.unknown ~ptrsize:64
     ~symtab:None ~copy_relocs:[]

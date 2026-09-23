@@ -106,6 +106,8 @@ type sub_frame = {
   anchor_i64 : Llvm.llvalue;
   (* The SP entry value; None = SP binds to [anchor_i64]. *)
   stack0 : Llvm.llvalue option;
+  (* The anchor alloca pointer; None = storage-free. *)
+  anchor_ptr : Llvm.llvalue option;
   (* Region mem var -> (alloca, entry-relative base). *)
   regions : (Var.t * (Llvm.llvalue * int64)) list;
 }
@@ -124,7 +126,11 @@ type emit_ctx = {
   abi : Abi.t;
   sp : var;
   ptrsize : int;
-  subs : (Arg.t list * Arg.t list) Tid.Map.t;
+  (* A lifted sub's own term, so its signature is read off its [arg]
+     terms; the synthetic conventions (the indirect call and the twins)
+     are DERIVED — [synthetic] names them, nothing is stored. *)
+  sub_of : sub term Tid.Map.t;
+  synthetic : Tid.Set.t;
   (* Bound once per emission. *)
   llvm_ctx : Llvm.llcontext;
   llvm_module : Llvm.llmodule;
@@ -173,7 +179,11 @@ let typ_lltype ctx typ =
   | Imm n -> Llvm.integer_type ctx.llvm_ctx n
   | _ -> Llvm.pointer_type ctx.llvm_ctx
 
-let var_lltype ctx var = typ_lltype ctx (Var.typ var)
+(* The caller-window base is a real pointer; every other lane keeps its
+   BIR type. *)
+let var_lltype ctx var =
+  if Hike_stack_model.is_window_var var then Llvm.pointer_type ctx.llvm_ctx
+  else typ_lltype ctx (Var.typ var)
 
 (* Coerces an integer value of known width to a lane width. *)
 let coerce_int_width llvm_ctx llvm_builder ~bits v w =
@@ -186,7 +196,8 @@ let is_fp_param (ctx : emit_ctx) (v : var) : bool =
   Abi.is_vector_param_reg ctx.abi v
 
 let is_extern ctx (sub_tid : tid) : bool =
-  not (Core.Map.mem ctx.subs sub_tid)
+  (not (Core.Map.mem ctx.sub_of sub_tid))
+  && not (Core.Set.mem ctx.synthetic sub_tid)
 
 (* Strips tid prefixes for LLVM names. *)
 let sanitize_name =
@@ -213,9 +224,6 @@ let blk_llvals_find map tid =
   | Some v -> v
   | None -> failwith @@ "blk_llvals.find_exn: " ^ Tid.name tid
 
-let add_sub_sig subs tid ~rets ~args =
-  Core.Map.add_exn subs ~key:tid ~data:(rets, args)
-
 let get_calling_convention ctx =
   Abi.of_target ctx.target
 
@@ -229,19 +237,39 @@ let window_conv_args ~(word : int) (conv : Abi.t) : Arg.t list =
     (Abi.param_regs conv)
   @ [ Arg.create ~intent:In window (Var window) ]
 
+(* A lifted sub carries its own signature on its [arg] terms (the returns
+   are the [Out] intents); the synthetic conventions (the indirect call
+   and the twins) are DERIVED from the ABI — nothing is stored. *)
+let synthetic_args ctx =
+  window_conv_args ~word:ctx.abi.Hike_abi.word (get_calling_convention ctx)
+
+let synthetic_rets ctx =
+  let callconv = get_calling_convention ctx in
+  Base.List.map
+    ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
+    callconv.return_regs
+
 let get_args ctx sub_tid =
-  Base.Option.value_map (Core.Map.find ctx.subs sub_tid) ~f:snd
-    ~default:(let callconv = get_calling_convention ctx in
-              Base.List.map
-                ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-                (Abi.param_regs callconv))
+  match Core.Map.find ctx.sub_of sub_tid with
+  | Some sub -> Hike_stack_model.sig_args sub
+  | None ->
+      if Core.Set.mem ctx.synthetic sub_tid then synthetic_args ctx
+      else
+        let callconv = get_calling_convention ctx in
+        Base.List.map
+          ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+          (Abi.param_regs callconv)
 
 let get_rets ctx sub_tid =
-  Base.Option.value_map (Core.Map.find ctx.subs sub_tid) ~f:fst
-    ~default:(let callconv = get_calling_convention ctx in
-              Base.List.map
-                ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
-                callconv.return_regs)
+  match Core.Map.find ctx.sub_of sub_tid with
+  | Some sub -> Hike_stack_model.sig_rets sub
+  | None ->
+      if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
+      else
+        let callconv = get_calling_convention ctx in
+        Base.List.map
+          ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
+          callconv.return_regs
 
 let ret_set ctx =
   let callconv = get_calling_convention ctx in

@@ -574,11 +574,48 @@ let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
   Base.List.iter js' ~f:(Blk.Builder.add_jmp b);
   Term.with_attrs (Blk.Builder.result b) (Term.attrs blk)
 
+(* The fresh blocks a surviving indirect transfer may still denote:
+   [go] does not follow indirect edges, so an unresolved transfer whose
+   target denotation names a split entry keeps it live.  A transfer
+   whose denotation cannot be bounded keeps every fresh block. *)
+let indirect_live ~(denote : denote) ~(retaddr : Tid.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t) ~(fresh : Tid.Set.t)
+    (sub : sub term) : Tid.Set.t =
+  if Core.Set.is_empty fresh then Tid.Set.empty
+  else
+    let add_target acc blk texp =
+      let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
+      match texp with
+      | Bil.Var v when retaddr_read ~reaching ~retaddr v -> acc
+      | _ -> (
+          match dispatch_words ~denote ~block_addrs ~reaching ~blk texp with
+          | None -> Core.Set.union acc fresh
+          | Some ws ->
+            Base.List.fold ws ~init:acc ~f:(fun acc w ->
+                let a = Cbat_word.to_word w in
+                match Core.Map.find block_addrs a with
+                | Some t when Core.Set.mem fresh t -> Core.Set.add acc t
+                | _ -> acc))
+    in
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
+        Term.enum jmp_t blk
+        |> Seq.fold ~init:acc ~f:(fun acc j ->
+            match Jmp.kind j with
+            | Goto (Indirect texp) -> add_target acc blk texp
+            | Call c -> (
+                match Call.target c with
+                | Indirect texp -> add_target acc blk texp
+                | _ -> acc)
+            | _ -> acc))
+
 (* The split retraction: a fresh entry block nothing reaches — no
    transfer names it, no jmp-less block's fallthrough (the next block
-   in term order) reaches it — drops.  Only fresh blocks are prunable:
-   a block behind an unresolved indirect transfer is live. *)
-let prune_unreachable ~(fresh : Tid.Set.t) (sub : sub term) : sub term =
+   in term order) reaches it, no surviving indirect transfer denotes
+   it ([live]) — drops.  Only fresh blocks are prunable: a block behind
+   an unresolved indirect transfer is live. *)
+let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
+    (sub : sub term) : sub term =
   if Core.Set.is_empty fresh then sub
   else
     let entry = Base.Option.value_exn (Term.first blk_t sub) in
@@ -627,6 +664,14 @@ let prune_unreachable ~(fresh : Tid.Set.t) (sub : sub term) : sub term =
         else seen
     in
     let reachable = go Tid.Set.empty entry in
+    let reachable =
+      Core.Set.fold live ~init:reachable ~f:(fun seen t ->
+          match
+            Base.List.find blocks ~f:(fun b -> Tid.equal (Term.tid b) t)
+          with
+          | Some b -> go seen b
+          | None -> seen)
+    in
     Term.filter_map blk_t sub ~f:(fun b ->
         if (not (Core.Set.mem fresh (Term.tid b)))
            || Core.Set.mem reachable (Term.tid b)
@@ -734,9 +779,16 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
   let word_bits = 8 * abi.Hike_abi.word in
-  let sub =
+  let sub, live =
     Vsa.with_images images (fun () ->
-        rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~word_bits
-          ~block_addrs ~images sub)
+        let live =
+          indirect_live ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
+            ~fresh sub
+        in
+        let sub =
+          rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~word_bits
+            ~block_addrs ~images sub
+        in
+        (sub, live))
   in
-  prune_unreachable ~fresh sub
+  prune_unreachable ~fresh ~live sub

@@ -35,8 +35,17 @@ val extrapolate_steps : steps:int -> t -> t -> t
    nibble (the ABI entry residue 8 (mod 16)) and answer top beyond
    it. *)
 
-(* The segment base (2^62), as int64. *)
+(* The segment base (2^62 + 8: the ABI entry residue — a call-entered
+   RSP is 8 (mod 16)), as int64. *)
 val stack_base : int64
+
+(* The certified width: the low bits of the base that are a fact (the
+   entry residue's nibble). *)
+val certified_bits : int
+
+(* The plain-arm band's lower bound; the band is
+   [stack_band_lo, 2^63) — unreachable for real addresses. *)
+val stack_band_lo : int64
 
 val stack_word : Cbat_clp.t -> t
 val stack_word_i64 : int64 -> t
@@ -44,6 +53,10 @@ val stack_word_i64 : int64 -> t
 (* The offset set of a stack-symbolic value — [Some offs] ONLY for the
    symbolic arm; a plain in-band set is None. *)
 val stack_offsets : t -> Cbat_clp.t option
+
+(* The set's own address stride: > 1 only for a bounded strided Clp or
+   stack-offset progression; 1 otherwise. *)
+val stride : t -> int
 
 (* Stack residency: the symbolic arm, or a bounded plain hull inside
    the signed-positive band [2^61, 2^63) — unreachable for real

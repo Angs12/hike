@@ -84,19 +84,21 @@ let () =
     Printf.printf "=== conv_diag %s (%s) ===\n" (Filename.basename path)
       (Sub.name sub);
     let sub' = sub in
-    let sol =
-      try Probe_common.run_sub_fixpoint sub'
-      with
-      | Vsa.Fixpoint_not_converged (n, _sol, gap) ->
+    let sol, converged =
+      try (Probe_common.run_sub_fixpoint sub', true)
+      with Vsa.Fixpoint_not_converged (n, sol, gap) ->
         Printf.printf "FIXPOINT NOT CONVERGED after %d rounds\n" n;
         (match gap with
          | Some (b, s) ->
            Printf.printf "  first still-growing (block, successor): (%s -> %s)\n"
              (Tid.name b) (Tid.name s)
          | None -> Printf.printf "  (no gap pair captured)\n");
-        exit 0
+        (sol, false)
     in
-    Printf.printf "FIXPOINT CONVERGED\n";
+    Printf.printf
+      "%s\n"
+      (if converged then "FIXPOINT CONVERGED"
+       else "PARTIAL SOLUTION (widening-point SCCs follow)");
     let cfg = cfg_of sub' in
     let heads = cyclic_heads cfg in
     Printf.printf "WIDENING-POINT set (%d cyclic SCCs):\n" (List.length heads);

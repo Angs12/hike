@@ -122,11 +122,13 @@ let extrapolate_data ~(entries : Cbat_landmarks.lm_entry list) ~(steps : int)
 let selective_widen_extrapolate ?(head:Tid.t option=None)
     ~(landmarks : Cbat_landmarks.t)
     ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
-  if Core.Set.is_empty need then join e1 e2
-  else if WordEnv.equal e1.words WordEnv.bottom then e2
+  if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
+  else if Core.Set.is_empty need && Option.is_none head then join e1 e2
   else
     let words =
+      if Core.Set.is_empty need then WordEnv.join e1.words e2.words
+      else
       WordEnv.fold e1.words ~init:WordEnv.top ~f:(fun ~key ~data:data_old acc ->
         let idx = WordSet.bitwidth data_old
         in
@@ -149,35 +151,48 @@ let selective_widen_extrapolate ?(head:Tid.t option=None)
     in
     let memories =
       match head with
-      | Some h when steps > 0 ->
-        (* CYCLE-WRITTEN CELLS EXTRAPOLATE: at a warmed head every cell
-           the incoming state differs on was written by the cycle's own
-           stores.  Data advances by [steps] traversals; keys never
-           change, bounds only move outward. *)
+      | Some h ->
+        (* Each cell widens by its OWN entries' three-way — Finite
+           translates, Zero advances and joins, Inf plain-widens; a cell
+           without own entries plain-widens. *)
         MemEnv.fold e1.memories ~init:MemEnv.top
           ~f:(fun ~key:mv ~data:old acc ->
               let idx = Mem.get_idx old in
               let nw = MemEnv.find idx e2.memories mv in
               if Mem.equal nw (Mem.top idx) then acc
               else begin
-                let entries = Cbat_landmarks.entries_for_head landmarks h mv in
-                let extr (v1 : Mem.Val.t) (v2 : Mem.Val.t) : Mem.Val.t =
+                let extr ck v1 v2 =
                   if Mem.Val.equal v1 v2 then Mem.Val.widen_join v1 v2
                   else
-                    let data_old = Mem.Val.data v1 in
-                    let data_new = Mem.Val.data v2 in
-                    let data = extrapolate_data ~entries ~steps data_old data_new in
-                    (* Overflow escapes to the plain-widen arm. *)
-                    let data =
-                      if WordSet.is_top data
-                      then WordSet.widen_join data_old data_new
-                      else data in
-                    let _, e = Mem.Val.get_idx v2 in
-                    Mem.Val.create data e in
+                    let cl = Mem.Key.cell_key ck in
+                    match Cbat_landmarks.entries_for_cell landmarks h cl with
+                    | [] -> Mem.Val.widen_join v1 v2
+                    | entries ->
+                      (match Cbat_landmarks.lm_calc_steps_for_cell landmarks h cl with
+                       | `Zero ->
+                         Cbat_landmarks.advance_cell landmarks h cl;
+                         Mem.Val.widen_join v1 v2
+                       | `Inf -> Mem.Val.widen_join v1 v2
+                       | `Finite n ->
+#ifdef VSA_DEBUG
+                         incr Cbat_vsa_stages.cell_lm_consumed;
+#endif
+                         let data_old = Mem.Val.data v1 in
+                         let data_new = Mem.Val.data v2 in
+                         let data = extrapolate_data ~entries ~steps:n data_old data_new in
+                         (* Overflow escapes to the plain-widen arm. *)
+                         let data =
+                           if WordSet.is_top data
+                           then WordSet.widen_join data_old data_new
+                           else data in
+                         Cbat_landmarks.clear_cell landmarks h cl;
+                         let _, e = Mem.Val.get_idx v2 in
+                         Mem.Val.create data e)
+                in
                 MemEnv.add acc ~key:mv
                   ~data:(Mem.widen_join_op extr old nw)
               end)
-      | _ -> MemEnv.widen_join e1.memories e2.memories in
+      | None -> MemEnv.widen_join e1.memories e2.memories in
     { memories; words }
 
 let meet (e1 : t) (e2 : t) : t =
@@ -190,43 +205,20 @@ let precedes (e1 : t) (e2 : t) : bool =
   MemEnv.precedes e1.memories e2.memories &&
   WordEnv.precedes e1.words e2.words
 
-(* Top caller-saved words. *)
-let top_non_preserved ~(preserved : Var.Set.t) (env : t) : WordEnv.t =
-  WordEnv.fold env.words ~init:env.words
+(* Top every word key not in [preserved]; the memories stay. *)
+let top_words_except ~(preserved : Var.Set.t) (env : t) : t =
+  let words = WordEnv.fold env.words ~init:env.words
     ~f:(fun ~key ~data acc ->
       if Core.Set.exists preserved ~f:(fun p -> Var.same p key)
       then acc
-      else WordEnv.add acc ~key ~data:(WordSet.top (WordSet.bitwidth data)))
+      else WordEnv.add acc ~key ~data:(WordSet.top (WordSet.bitwidth data))) in
+  { env with words }
 
-(* The caller frame survives.  The frame-keep
-   boundary and the escape ranges are KEY-space: stack-derived cells
-   key by segment offsets, foreign cells by their concrete addresses.
-   An unbounded RSP or any foreign escape keeps the sound
-   whole-memory-top fallback. *)
-let call_abstraction_frame ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
-    ~(escape : WordSet.t list) (env : t) : t =
-  let words' = top_non_preserved ~preserved env in
-  let range_of (ws : WordSet.t) : (word * word) option =
-    if WordSet.is_top ws || WordSet.is_infinite ws then None
-    else
-      match WordSet.stack_bounds ws with
-      | Some (a, b) -> Some (Word.of_int64 ~width:64 a, Word.of_int64 ~width:64 b)
-      | None ->
-        Option.map2 (WordSet.min_elem ws) (WordSet.max_elem ws)
-          ~f:(fun a b -> (Cbat_word.to_word a, Cbat_word.to_word b)) in
-  (* The callee writes below its own RSP; cells at keys at/above the
-     HIGHEST possible call-time RSP survive every call site. *)
-  let keep_lo = Option.map ~f:snd (range_of rsp) in
-  let escape_ranges =
-    match List.filter_map escape ~f:range_of with
-    | ranges when List.length ranges = List.length escape -> Some ranges
-    | _ -> None in
-  let memories =
-    match keep_lo, escape_ranges with
-    | Some lo, Some ranges ->
-      MemEnv.fold env.memories ~init:env.memories
-        ~f:(fun ~key ~data acc ->
-            MemEnv.add acc ~key
-              ~data:(Mem.call_keep data ~keep_lo:lo ~escape:ranges))
-    | _ -> MemEnv.top in
-  { memories; words = words' }
+(* Apply [f] to every memory cell; the words stay. *)
+let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =
+  let memories = MemEnv.fold env.memories ~init:env.memories
+    ~f:(fun ~key ~data acc -> MemEnv.add acc ~key ~data:(f ~key ~data)) in
+  { env with memories }
+
+(* The whole-memory-top fallback; the words stay. *)
+let top_memories (env : t) : t = { env with memories = MemEnv.top }

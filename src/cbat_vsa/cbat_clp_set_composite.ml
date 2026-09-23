@@ -52,6 +52,48 @@ let stack_offsets (t : t) : Clp.t option = match t with
   | StackOff offs -> Some offs
   | Clp _ | FinSet _ -> None
 
+(* The progression's own stride: a bounded Clp/stack-offset set with
+   step > 1 carries that step; a FinSet whose elements share one
+   common difference carries it; everything else is 1. *)
+let stride (t : t) : int =
+  let of_clp c =
+    if Clp.is_infinite c || Clp.is_bottom c then 1
+    else
+      match Cbat_word.to_int64 (Clp.step_of c) with
+      | Ok s ->
+        let i = Stdlib.Int64.to_int s in
+        if i > 1 then i else 1
+      | Error _ -> 1
+  in
+  (* The one common difference of consecutive elements, if uniform. *)
+  let rec common_diff prev d (ws : Cbat_word.t list) : Cbat_word.t option =
+    match ws with
+    | [] -> d
+    | w :: rest ->
+      let d' = Cbat_word.sub w prev in
+      if Cbat_word.compare d' Cbat_word.b0 = 0 then None
+      else
+        match d with
+        | None -> common_diff w (Some d') rest
+        | Some d0 ->
+          if Cbat_word.equal d0 d' then common_diff w d rest else None
+  in
+  let of_finset s =
+    match FinSet.iter s with
+    | [] | [_] -> 1
+    | w1 :: rest ->
+      (match common_diff w1 None rest with
+       | Some d when Cbat_word.compare d Cbat_word.b1 > 0 ->
+         (match Cbat_word.to_int64 d with
+          | Ok i -> let v = Stdlib.Int64.to_int i in if v > 1 then v else 1
+          | Error _ -> 1)
+       | _ -> 1)
+  in
+  match t with
+  | Clp c -> of_clp c
+  | StackOff offs -> of_clp offs
+  | FinSet s -> of_finset s
+
 let w64_of_i64 (i : int64) : Cbat_word.t =
   Cbat_word.of_word (Word.of_int64 ~width:64 i)
 
@@ -154,23 +196,75 @@ let rec bound_set_size (t : t) : t =
     else FinSet s
   | StackOff _ -> bound_set_size (to_plain t)
 
-let lift_binop (f_clp : clp -> clp -> clp) (f_fs : fset -> fset -> fset)
-    t1 t2 : t =
-  let rec go t1 t2 =
-    match t1, t2 with
-    | Clp p1, Clp p2 -> Clp (f_clp p1 p2)
-    | FinSet s1, FinSet s2 -> FinSet (f_fs s1 s2)
-    | Clp p, FinSet s -> Clp (f_clp p (clp_of_finset s))
-    | FinSet s, Clp p -> Clp (f_clp (clp_of_finset s) p)
-    | StackOff _, _ | _, StackOff _ ->
-      (match to_plain t1, to_plain t2 with
-       | Clp p1, Clp p2 -> Clp (f_clp p1 p2)
-       | FinSet s1, FinSet s2 -> FinSet (f_fs s1 s2)
-       | Clp p, FinSet s -> Clp (f_clp p (clp_of_finset s))
-       | FinSet s, Clp p -> Clp (f_clp (clp_of_finset s) p)
-       | StackOff _, _ | _, StackOff _ -> Clp (Clp.top 64))
-  in
-  bound_set_size @@ go t1 t2
+(* The plain binops as immediate tags: the lift's one op-aware choke
+   point — every arm applies its op directly, no first-class function
+   crosses the lift. *)
+type binop =
+  | Union
+  | Add
+  | Sub
+  | Mul
+  | Div
+  | Sdiv
+  | Modulo
+  | Smodulo
+  | Lshift
+  | Rshift
+  | Arshift
+  | Logand
+  | Logor
+  | Logxor
+  | Concat
+
+let binop_clp (op : binop) (p1 : clp) (p2 : clp) : clp =
+  match op with
+  | Union -> Clp.union p1 p2
+  | Add -> Clp.add p1 p2
+  | Sub -> Clp.sub p1 p2
+  | Mul -> Clp.mul p1 p2
+  | Div -> Clp.div p1 p2
+  | Sdiv -> Clp.sdiv p1 p2
+  | Modulo -> Clp.modulo p1 p2
+  | Smodulo -> Clp.smodulo p1 p2
+  | Lshift -> Clp.lshift p1 p2
+  | Rshift -> Clp.rshift p1 p2
+  | Arshift -> Clp.arshift p1 p2
+  | Logand -> Clp.logand p1 p2
+  | Logor -> Clp.logor p1 p2
+  | Logxor -> Clp.logxor p1 p2
+  | Concat -> Clp.concat p1 p2
+
+let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
+  match op with
+  | Union -> FinSet.union s1 s2
+  | Add -> FinSet.add s1 s2
+  | Sub -> FinSet.sub s1 s2
+  | Mul -> FinSet.mul s1 s2
+  | Div -> FinSet.div s1 s2
+  | Sdiv -> FinSet.sdiv s1 s2
+  | Modulo -> FinSet.modulo s1 s2
+  | Smodulo -> FinSet.smodulo s1 s2
+  | Lshift -> FinSet.lshift s1 s2
+  | Rshift -> FinSet.rshift s1 s2
+  | Arshift -> FinSet.arshift s1 s2
+  | Logand -> FinSet.logand s1 s2
+  | Logor -> FinSet.logor s1 s2
+  | Logxor -> FinSet.logxor s1 s2
+  | Concat -> FinSet.concat s1 s2
+
+let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
+  bound_set_size @@ match t1, t2 with
+  | Clp p1, Clp p2 -> Clp (binop_clp op p1 p2)
+  | FinSet s1, FinSet s2 -> FinSet (binop_fs op s1 s2)
+  | Clp p, FinSet s -> Clp (binop_clp op p (clp_of_finset s))
+  | FinSet s, Clp p -> Clp (binop_clp op (clp_of_finset s) p)
+  | StackOff _, _ | _, StackOff _ ->
+    (match to_plain t1, to_plain t2 with
+     | Clp p1, Clp p2 -> Clp (binop_clp op p1 p2)
+     | FinSet s1, FinSet s2 -> FinSet (binop_fs op s1 s2)
+     | Clp p, FinSet s -> Clp (binop_clp op p (clp_of_finset s))
+     | FinSet s, Clp p -> Clp (binop_clp op (clp_of_finset s) p)
+     | StackOff _, _ | _, StackOff _ -> Clp (Clp.top 64))
 
 let lift_unop (f_clp : clp -> clp) (f_fs : fset -> fset) : t -> t = fun t ->
   let rec go t =
@@ -379,9 +473,9 @@ let rec overlap t1 t2 : bool = match t1, t2 with
 let union t1 t2 : t = match t1, t2 with
   | StackOff o1, StackOff o2 -> StackOff (Clp.union o1 o2)
   | StackOff _, _ | _, StackOff _ ->
-    lift_binop Clp.union FinSet.union (to_plain t1) (to_plain t2)
+    lift_binop Union (to_plain t1) (to_plain t2)
   | Clp _, Clp _ | FinSet _, FinSet _ | Clp _, FinSet _ | FinSet _, Clp _ ->
-    lift_binop Clp.union FinSet.union t1 t2
+    lift_binop Union t1 t2
 
 (* The plain side of a mixed meet, translated into the offset space
    (positions minus the base): the meet stays stack-symbolic. *)
@@ -507,9 +601,25 @@ let clp_diff_finset (p : clp) (s : fset) : clp =
 let rec diff (t1 : t) (t2 : t) : t = match t1, t2 with
   | StackOff _, _ | _, StackOff _ ->
     diff (to_plain t1) (to_plain t2)
-  | Clp p1, Clp p2 -> bound_set_size (Clp (Clp.diff p1 p2))
+  | Clp p1, Clp p2 ->
+    (* G2a: within the budget the enumerated difference is exact, two
+       runs included; past it the bound identity stands. *)
+    if Clp.bitwidth p1 <> Clp.bitwidth p2
+       || Word_ops.gt_int (Clp.cardinality p1) Utils.fin_set_size
+    then bound_set_size (Clp (Clp.diff p1 p2))
+    else
+      FinSet
+        (FinSet.of_list ~width:(Clp.bitwidth p1)
+           (List.filter ~f:(fun x -> not (Clp.elem x p2)) (Clp.iter p1)))
   | FinSet s1, FinSet s2 -> FinSet (FinSet.diff s1 s2)
-  | Clp p, FinSet s -> bound_set_size (Clp (clp_diff_finset p s))
+  | Clp p, FinSet s ->
+    if Clp.bitwidth p <> FinSet.bitwidth s
+       || Word_ops.gt_int (Clp.cardinality p) Utils.fin_set_size
+    then bound_set_size (Clp (clp_diff_finset p s))
+    else
+      FinSet
+        (FinSet.of_list ~width:(Clp.bitwidth p)
+           (List.filter ~f:(fun x -> not (FinSet.elem x s)) (Clp.iter p)))
   | FinSet s, Clp p ->
     if FinSet.bitwidth s <> Clp.bitwidth p then t1
     else
@@ -529,11 +639,11 @@ let stack_lift2 (f : clp -> clp -> clp) (t1 : t) (t2 : t) : t option =
 let add t1 t2 : t = match t1, t2 with
   (* Two stack words: the base appears twice — the plain hulls. *)
   | StackOff _, StackOff _ ->
-    lift_binop Clp.add FinSet.add (to_plain t1) (to_plain t2)
+    lift_binop Add (to_plain t1) (to_plain t2)
   | _ ->
     (match stack_lift2 Clp.add t1 t2 with
      | Some t -> t
-     | None -> lift_binop Clp.add FinSet.add t1 t2)
+     | None -> lift_binop Add t1 t2)
 
 let sub t1 t2 : t = match t1, t2 with
   (* Two stack words: the base cancels — the exact offset difference. *)
@@ -541,18 +651,17 @@ let sub t1 t2 : t = match t1, t2 with
   | _ ->
     (match stack_lift2 Clp.sub t1 t2 with
      | Some t -> t
-     | None -> lift_binop Clp.sub FinSet.sub t1 t2)
+     | None -> lift_binop Sub t1 t2)
 
 (* Only the base's low nibble is a fact (the ABI entry residue): an
    op confined to it computes; an op keeping unknown bits answers
    top.  The relative ops (add, sub, comparisons) keep exact offsets. *)
 let certified_bits = 4
 
-let blind_binop (f_clp : clp -> clp -> clp) (f_fs : fset -> fset -> fset)
-    (t1 : t) (t2 : t) : t =
+let blind_binop (op : binop) (t1 : t) (t2 : t) : t =
   match t1, t2 with
   | StackOff _, _ | _, StackOff _ -> top (bitwidth t1)
-  | _ -> lift_binop f_clp f_fs t1 t2
+  | _ -> lift_binop op t1 t2
 
 let blind_unop (f_clp : clp -> clp) (f_fs : fset -> fset) (t : t) : t =
   match t with
@@ -589,14 +698,14 @@ let certified_image ~(width : int) (f : word -> word) (offs : clp) : t =
              Cbat_word.cast Bil.UNSIGNED width (f (Cbat_word.add base o))))
   | _ -> top width
 
-let mul t1 t2 = blind_binop Clp.mul FinSet.mul t1 t2
-let div t1 t2 = blind_binop Clp.div FinSet.div t1 t2
-let sdiv t1 t2 = blind_binop Clp.sdiv FinSet.sdiv t1 t2
-let modulo t1 t2 = blind_binop Clp.modulo FinSet.modulo t1 t2
-let smodulo t1 t2 = blind_binop Clp.smodulo FinSet.smodulo t1 t2
-let arshift t1 t2 = blind_binop Clp.arshift FinSet.arshift t1 t2
-let rshift t1 t2 = blind_binop Clp.rshift FinSet.rshift t1 t2
-let lshift t1 t2 = blind_binop Clp.lshift FinSet.lshift t1 t2
+let mul t1 t2 = blind_binop Mul t1 t2
+let div t1 t2 = blind_binop Div t1 t2
+let sdiv t1 t2 = blind_binop Sdiv t1 t2
+let modulo t1 t2 = blind_binop Modulo t1 t2
+let smodulo t1 t2 = blind_binop Smodulo t1 t2
+let arshift t1 t2 = blind_binop Arshift t1 t2
+let rshift t1 t2 = blind_binop Rshift t1 t2
+let lshift t1 t2 = blind_binop Lshift t1 t2
 (* A mask confined to the certified nibble computes; a wider mask
    keeps unknown bits and answers top. *)
 let logand t1 t2 : t =
@@ -611,9 +720,9 @@ let logand t1 t2 : t =
   | None ->
     (match t1, t2 with
      | StackOff _, StackOff _ -> top (bitwidth t1)
-     | _ -> lift_binop Clp.logand FinSet.logand t1 t2)
-let logor t1 t2 = blind_binop Clp.logor FinSet.logor t1 t2
-let logxor t1 t2 = blind_binop Clp.logxor FinSet.logxor t1 t2
+     | _ -> lift_binop Logand t1 t2)
+let logor t1 t2 = blind_binop Logor t1 t2
+let logxor t1 t2 = blind_binop Logxor t1 t2
 
 let lnot t = blind_unop Clp.lnot FinSet.lnot t
 let neg t = blind_unop Clp.neg FinSet.neg t
@@ -621,7 +730,7 @@ let neg t = blind_unop Clp.neg FinSet.neg t
 let concat t1 t2 =
   match t1, t2 with
   | StackOff _, _ | _, StackOff _ -> top (bitwidth t1 + bitwidth t2)
-  | _ -> lift_binop Clp.concat FinSet.concat t1 t2
+  | _ -> lift_binop Concat t1 t2
 
 (* The offsets arm and the plain arm answer the same Clp query. *)
 let on_offs (f : clp -> bool) (t : t) : bool =

@@ -129,13 +129,12 @@ let conversion_of ~(word : int) ~(entry : int64) ~(spans : Sections.data_span li
             Sections.range_of_denotation ~word ~entry ~spans
               ~rip:(Sections.is_rip_relative d) ~width ws
           in
-          (* An unbounded address keeps its memory form: the value may
-             live in another world's arithmetic (an escaped pointer),
-             and the GEP form would re-anchor it into this sub's
-             storage. *)
+          (* An above-entry unbounded address keeps its memory form: its
+             storage is the caller's world, which the typed arguments
+             carry.  A below-entry unbounded address is a pointer into
+             the residue alloca, exactly like a bounded one. *)
           match tag with
-          | Some (Sections.Tag.Stack_unbounded | Sections.Tag.Args_unbounded) ->
-              (Keep, tag)
+          | Some Sections.Tag.Args_unbounded -> (Keep, tag)
           | _ ->
           (* A return-address cell keeps its tag — the emitter's
              return arm. *)

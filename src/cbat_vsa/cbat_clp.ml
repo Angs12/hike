@@ -33,4 +33,3 @@ let arshift = Cbat_clp_arith.arshift
 let extract = Cbat_clp_arith.extract
 let cast = Cbat_clp_arith.cast
 let concat = Cbat_clp_arith.concat
-let of_list = Cbat_clp_arith.of_list

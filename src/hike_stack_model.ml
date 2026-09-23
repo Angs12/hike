@@ -46,27 +46,20 @@ module Vsa = struct
      SP is base + offset 0); a frame-relative depth is [base − position]. *)
   let segment_base = Cbat_vsa.WordSet.stack_base
 
+  (* The base's certified width and the stack band's lower bound: the
+     base's low nibble is a fact, and a bounded plain set in
+     [stack_band_lo, 2^63) is stack. *)
+  let certified_bits = Cbat_vsa.WordSet.certified_bits
+  let stack_band_lo = Cbat_vsa.WordSet.stack_band_lo
 
-let i64_opt (w : Cbat_word.t) : int64 option =
-    match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
-
-  let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
-      : (int64 * int64) option =
-    let open Base.Option in
-    i64_opt lo >>= fun lo ->
-    i64_opt hi >>= fun hi ->
-    Cbat_vsa.Cbat_extraction.position_of_offset lo >>= fun lo ->
-    Cbat_vsa.Cbat_extraction.position_of_offset hi >>= fun hi ->
-    Some (lo, hi)
+  (* The clamp and its bounds are shared with the call abstraction. *)
+  include Hike_stack_bounds
 
   let singleton_pair (lo : Cbat_word.t option) (hi : Cbat_word.t option)
       : int64 option =
     match lo, hi with
     | Some lo, Some hi when Cbat_word.equal lo hi -> i64_opt lo
     | _ -> None
-
-  let stack_floor ~(entry : int64) : int64 = Stdlib.Int64.add entry Stdlib.Int64.min_int
-  let args_ceiling : int64 = Stdlib.Int64.max_int
 
   let args_base ~(entry : int64) ~(word : int) : int64 =
     Stdlib.Int64.add entry (Stdlib.Int64.of_int word)
@@ -94,49 +87,11 @@ let i64_opt (w : Cbat_word.t) : int64 option =
     let hi = if cmp hi shi <= 0 then hi else shi in
     if cmp lo hi <= 0 then Some (lo, hi) else None
 
-  (* A stack-symbolic set's offset extrema on the position line. *)
-  let positions_of_offsets (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
-    Option.bind (Cbat_vsa.WordSet.offset_extrema ws) ~f:(fun (lo, hi) ->
-        position_pair lo hi)
-
-  (* A plain set's unsigned extrema; None when not representable. *)
-  let unsigned_bounds (ws : Cbat_vsa.WordSet.t) : (int64 * int64) option =
-    let open Base.Option in
-    Cbat_vsa.WordSet.min_elem ws >>= fun lo ->
-    Cbat_vsa.WordSet.max_elem ws >>= fun hi ->
-    i64_opt lo >>= fun lo ->
-    i64_opt hi >>= fun hi ->
-    Some (lo, hi)
-
-  (* An unbounded direction extends to the scope bound; a wrapped or circular
-     hull covers the whole scope. *)
-  let full_bounds (ws : Cbat_vsa.WordSet.t) ~(flo : int64) ~(cei : int64)
-      (lo : int64) (hi : int64) : int64 * int64 =
-    if Stdlib.Int64.compare lo hi > 0 then (flo, cei)
-    else if Cbat_vsa.WordSet.is_ascending ws then (lo, cei)
-    else if Cbat_vsa.WordSet.is_descending ws then (flo, hi)
-    else (flo, cei)
-
   (* The Clp offset hull on the segment line; [None] when not representable. *)
   let hull_positions (offs : Cbat_vsa.WordSet.Clp.t) : (int64 * int64) option =
     let open Base.Option in
     Cbat_vsa.WordSet.Clp.min_elem offs >>= fun lo ->
     Cbat_vsa.WordSet.Clp.max_elem offs >>= position_pair lo
-
-  (* A stack-symbolic value's escape extent: its positions, with the
-     unbounded directions reaching the scope bound. *)
-  let escape_extent ~(entry : int64) (ws : Cbat_vsa.WordSet.t)
-      : (int64 * int64) option =
-    match Cbat_vsa.WordSet.stack_offsets ws with
-    | None -> None
-    | Some _ -> (
-        let floor = stack_floor ~entry in
-        match positions_of_offsets ws with
-        | None -> Some (floor, args_ceiling)
-        | Some (lo, hi) ->
-            if Cbat_vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
-              Some (full_bounds ws ~flo:floor ~cei:args_ceiling lo hi)
-            else Some (lo, hi))
 
   (* A single known word; a TOP set is deliberately not one. *)
   let singleton_i64 (ws : Cbat_vsa.WordSet.t) : int64 option =
@@ -305,6 +260,9 @@ let hike_window_var ~(word : int) : var =
   Var.create ~is_virtual:false ~fresh:false "hike_window"
     (Type.Imm (word_bits word))
 
+let is_window_var (v : var) : bool =
+  String.equal (Var.name v) "hike_window"
+
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 
 let region_mem (id : int) : var =
@@ -376,13 +334,6 @@ let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
                  when is_sp r ->
                    Int64.max acc (Word.to_int64_exn w)
                | _ -> acc))
-
-(* The window extension's capacity; a real SysV window never needs more. *)
-let caller_window_bytes : int64 = 65536L
-
-(* The directionless stack top's below-entry clamp: a TOP stack offset
-   claims [entry − stack_max, entry). *)
-let stack_max : int64 = 65536L
 
 (* A machine call pushes its return address one word below the caller's SP;
    a modeled op (an intrinsic rendered inline) pushes nothing. *)
@@ -539,6 +490,57 @@ let layout_tag : Sub_layout.t Value.Tag.t =
 let set_layout (l : Sub_layout.t) (sub : sub term) : sub term =
   Term.set_attr sub layout_tag l
 
+(* The emission signature rides the sub's own [arg] terms: the returns are
+   the [Out] intents, the arguments the rest.  One place holds it, and the
+   emitter reads it off the sub — no side table. *)
+let set_sig (s : sub term) (lanes : Arg.t list) : sub term =
+  let s = Term.filter arg_t s ~f:(Fun.const false) in
+  Base.List.fold lanes ~init:s ~f:(fun s a -> Term.append arg_t s a)
+
+let is_ret (a : Arg.t) : bool = Arg.intent a = Some Out
+
+let sig_args (s : sub term) : Arg.t list =
+  Term.enum arg_t s |> Base.Sequence.to_list
+  |> Base.List.filter ~f:(fun a -> not (is_ret a))
+
+let sig_rets (s : sub term) : Arg.t list =
+  Term.enum arg_t s |> Base.Sequence.to_list |> Base.List.filter ~f:is_ret
+
+(* The pass is the home of each lane's TYPE: a lane is a pointer (an
+   address lane, a by-reference argument, the caller window) or it keeps
+   its BIR type.  Stamped on the [arg] term. *)
+module Flag = struct
+  open Core
+
+  type t = bool [@@deriving compare, equal, sexp]
+
+  let pp fmt b = Format.pp_print_bool fmt b
+
+  module Stringable = struct
+    type nonrec t = t
+
+    let to_string = function true -> "true" | false -> "false"
+    let of_string = function "true" -> true | _ -> false
+  end
+
+  include Core.Binable.Of_stringable_with_uuid (struct
+    include Stringable
+
+    let caller_identity =
+      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Flag/1"
+  end)
+end
+
+let arg_ptr_tag : Flag.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-arg-ptr"
+    ~uuid:"7c1d2e3f-0a11-4b22-9c33-44d55e66f704"
+    (module Flag)
+
+let is_ptr_arg (a : Arg.t) : bool =
+  Base.Option.value (Term.get_attr a arg_ptr_tag) ~default:false
+
+let set_ptr_arg (a : Arg.t) : Arg.t = Term.set_attr a arg_ptr_tag true
+
 
 (* Per-def tags ride the def's value: the producer stamps each def, the
    emitter reads the tags off the term. *)
@@ -557,7 +559,18 @@ let def_dyn_alloc_slot : (Theory.Value.cls, bool) KB.slot =
     bool_domain
 
 let def_is_dyn_alloc (d : def term) : bool =
+#ifdef VSA_DEBUG
+  let () = Cbat_vsa.Cbat_kb_census.bump "dyn_alloc.get" in
+#endif
   KB.Value.get def_dyn_alloc_slot (Def.value d)
+
+(* The def's address is a rip-relative constant; the emitter re-renders it
+   through the section owner. *)
+let def_is_rip_relative (d : def term) : bool =
+#ifdef VSA_DEBUG
+  let () = Cbat_vsa.Cbat_kb_census.bump "rip_relative_addr.get" in
+#endif
+  KB.Value.get rip_relative_addr (Def.value d)
 
 (* The def computes an address value at/above the entry line; its emitted
    integer re-bases to the hike_window parameter. *)
@@ -568,15 +581,21 @@ let def_window_value_slot : (Theory.Value.cls, bool) KB.slot =
        ~equal:Bool.equal ~empty:false "hike:window-value")
 
 let def_is_window_value (d : def term) : bool =
+#ifdef VSA_DEBUG
+  let () = Cbat_vsa.Cbat_kb_census.bump "window_value.get" in
+#endif
   KB.Value.get def_window_value_slot (Def.value d)
 
 let stamp_window_values ~(window_values : Tid.Set.t)
     (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
-          if Core.Set.mem window_values (Term.tid d) then
+          if Core.Set.mem window_values (Term.tid d) then (
+#ifdef VSA_DEBUG
+            let () = Cbat_vsa.Cbat_kb_census.bump "window_value.put" in
+#endif
             Def.with_value d
-              (KB.Value.put def_window_value_slot (Def.value d) true)
+              (KB.Value.put def_window_value_slot (Def.value d) true))
           else d))
 
 (* Stamps the dynamic-allocation fact onto the event defs. *)
@@ -584,9 +603,12 @@ let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
     (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
-          if Core.Set.mem dynamic_alloc_tids (Term.tid d) then
+          if Core.Set.mem dynamic_alloc_tids (Term.tid d) then (
+#ifdef VSA_DEBUG
+            let () = Cbat_vsa.Cbat_kb_census.bump "dyn_alloc.put" in
+#endif
             Def.with_value d
-              (KB.Value.put def_dyn_alloc_slot (Def.value d) true)
+              (KB.Value.put def_dyn_alloc_slot (Def.value d) true))
           else d))
 
 (* The section tag rides the def's value: the producer stamps it, the
@@ -605,14 +627,25 @@ let sec_tag_domain : sec_tag option KB.Domain.t =
   KB.Domain.optional
     ~inspect:(fun _ -> Base.Sexp.Atom "hike:section-tag")
     ~join:(fun a b -> if Tag.equal a b then Ok a else Error Sec_tag_conflict)
-    ~equal:Tag.equal "hike:section-tag"
+    ~equal:(fun a b ->
+#ifdef VSA_DEBUG
+      let () = Cbat_vsa.Cbat_kb_census.bump "domain.sec.equal" in
+#endif
+      Tag.equal a b)
+    "hike:section-tag"
 
 let sec_tag_slot : (Theory.Value.cls, sec_tag option) KB.slot =
   KB.Class.property ~package:"hike" Theory.Value.cls "hike-section-tag"
     sec_tag_domain
 
 let sec_tag (d : def term) : sec_tag option =
+#ifdef VSA_DEBUG
+  let () = Cbat_vsa.Cbat_kb_census.bump "sec_tag.get" in
+#endif
   KB.Value.get sec_tag_slot (Def.value d)
 
 let set_sec_tag (t : sec_tag) (d : def term) : def term =
+#ifdef VSA_DEBUG
+  let () = Cbat_vsa.Cbat_kb_census.bump "sec_tag.put" in
+#endif
   Def.with_value d (KB.Value.put sec_tag_slot (Def.value d) (Some t))

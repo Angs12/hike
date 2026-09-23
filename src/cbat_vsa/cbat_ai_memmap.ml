@@ -264,15 +264,23 @@ let bottom (i : idx) : t =
 
 
 
-let op_add' op (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
+(* [op_demoted] combines data at an intersection piece not fully
+   covered by both keys' claims (mixed grids): the incoming fact
+   covers only its own stride points there. *)
+let op_add' ~(op : Val.t -> Val.t -> Val.t)
+    ~(op_demoted : Val.t -> Val.t -> Val.t)
+    (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
   let ints = IT.intersections m k in
   let rest = IT.remove_intersections m k in
   let gaps = Key.gaps (Val.top (Val.get_idx d)) k ints in
   let overlaps = Seq.append gaps ints in
   let itree =
     Seq.fold overlaps ~init:rest ~f:begin fun rest (k',d') ->
-      let newD = op d d' in
       let k_int = Key.intersection k k' in
+      let combine =
+        if Key.covers k k_int && Key.covers k' k_int
+        then op else op_demoted in
+      let newD = combine d d' in
       (* Overlapping range. *)
       let rest = IT.add rest k_int newD in
       (* Non-overlapping ranges. *)
@@ -283,15 +291,20 @@ let op_add' op (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t 
     end in
   {itree = Some itree; width}
 
-let op_add op (m : t) : key:Key.t -> data:Val.t -> t = match m.itree with
+let op_add ~(op : Val.t -> Val.t -> Val.t) ~(op_demoted : Val.t -> Val.t -> Val.t)
+    (m : t) : key:Key.t -> data:Val.t -> t = match m.itree with
   | None -> fun ~key:_ ~data:_ -> {itree=None; width=m.width}
-  | Some t -> op_add' op t m.width
+  | Some t -> op_add' ~op ~op_demoted t m.width
 
-(* Join-add. *)
-let join_add : t -> key:Key.t -> data:Val.t -> t = op_add Val.join_poly
+(* Join-add: a store's fact widens both sides everywhere. *)
+let join_add : t -> key:Key.t -> data:Val.t -> t =
+  op_add ~op:Val.join_poly ~op_demoted:Val.join_poly
 
-(* Meet-add. *)
-let meet_add : t -> key:Key.t -> data:Val.t -> t = op_add Val.meet_poly
+(* Meet-add: the constraint narrows same-grid cells; on a demoted
+   piece the cell keeps its data (the constraint does not cover the
+   interleaved bytes). *)
+let meet_add : t -> key:Key.t -> data:Val.t -> t =
+  op_add ~op:Val.meet_poly ~op_demoted:(fun _ d' -> d')
 
 (* Meet [data] into intersecting cells. *)
 let meet_range (m : t) ~key ~data : t = meet_add m ~key ~data
@@ -332,7 +345,7 @@ let has_cell_in (m : t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool =
   | Some it -> (
       match Key.of_word lo, Key.of_word hi with
       | Some plo, Some phi when Key.le plo phi ->
-        let k = { Key.lo = plo; hi = phi } in
+        let k = { Key.lo = plo; hi = phi; step = 1 } in
         Seq.exists (IT.to_sequence it) ~f:(fun (k', _) -> Key.overlap k' k)
       | _ -> true)
 
@@ -359,7 +372,8 @@ let store_merge (d : Val.t) (d' : Val.t) : Val.t =
 
 (* Point store overwrites; else joins. *)
 let add (m : t) ~key : data:Val.t -> t =
-  if Key.equal (Key.lower key) (Key.upper key) then op_add store_merge m ~key
+  if Key.equal (Key.lower key) (Key.upper key)
+  then op_add ~op:store_merge ~op_demoted:store_merge m ~key
   else join_add m ~key
 
 (* Fold intersecting cells. *)
@@ -429,19 +443,21 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
           pvalue =
             Stdlib.Int64.add (Key.lower k).pvalue
               (Stdlib.Int64.of_int (req_bytes - 1)) } in
-      { Key.lo = Key.lower k; hi }
+      { Key.lo = Key.lower k; hi; step = Key.step k }
     else k in
   let ints_list = Seq.to_list (IT.intersections m query_k) in
   match try_assemble_cells i query_k ints_list with
   | Some v -> v
   | None ->
     fold_intersections ~default:(Val.top i) m k ~f:(fun hd ints _ ->
-      (* Join each cell so the width is exact. *)
+      (* Join each cell so the width is exact; a strided cell joins
+         only on its own stride grid. *)
       Seq.fold ints ~init:hd ~f:(fun v (k',v') ->
           let lo_key_start = Key.min (Key.lower k) (Key.lower k') in
           let hi_key_start = Key.max (Key.lower k) (Key.lower k') in
-          let keys_aligned = Key.aligned_mod lo_key_start hi_key_start (fst i) in
-          if keys_aligned then Val.join_at i v v' else Val.top i))
+          if Key.read_aligned ~bits:(fst i) ~step:(Key.step k')
+                 lo_key_start hi_key_start
+          then Val.join_at i v v' else Val.top i))
 
 let find (i : Val.idx) (m : t) (k : Key.t) =
   Option.value_map m.itree ~default:(Val.bottom i) ~f:(fun t -> find' i t k)
@@ -509,13 +525,11 @@ let coalesce (it : itree) : itree =
       else match pending with
         | None -> (acc, Some (k, v))
         | Some (pk, pv) when Key.equal (Key.lower k) (Key.lower pk) ->
-            (acc, Some ({Key.lo = Key.lower pk;
-                         Key.hi = Key.max (Key.upper pk) (Key.upper k)},
-                        Val.join_poly pv v)) (* merge *)
+            (acc, Some (Key.union pk k, Val.join_poly pv v)) (* merge *)
         | Some (pk, pv) when Val.equal pv v &&
             (let nxt = Key.succ (Key.upper pk) in
              not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
-            (acc, Some ({Key.lo = Key.lower pk; Key.hi = Key.upper k}, v))
+            (acc, Some (Key.union pk k, v))
         | Some (pk, pv) -> (IT.add acc pk pv, Some (k, v)))
   |> fun (acc, pending) ->
   Option.fold ~init:acc pending ~f:(fun acc (k, v) -> IT.add acc k v)
@@ -552,7 +566,7 @@ let lift_join f (m1 : t) (m2 : t) : t =
 
 let join : t -> t -> t = lift_join join'
 
-let widen_join_op (w : Val.t -> Val.t -> Val.t) : t -> t -> t =
+let widen_join_op (w : Key.t -> Val.t -> Val.t -> Val.t) : t -> t -> t =
   lift_join (fun t1 t2 ->
     if precedes' t1 t2
     then begin
@@ -562,13 +576,13 @@ let widen_join_op (w : Val.t -> Val.t -> Val.t) : t -> t -> t =
           let idx = find_idx' t2 key in
           let d1 = find' idx t1 key in
           let d2 = find' idx t2 key in
-          IT.add it key @@ w d1 d2
+          IT.add it key @@ w key d1 d2
         end
       end
     end
     else join' t1 t2)
 
-let widen_join = widen_join_op Val.widen_join
+let widen_join = widen_join_op (fun _ d1 d2 -> Val.widen_join d1 d2)
 
 
 (* Meet may grow the tree. *)

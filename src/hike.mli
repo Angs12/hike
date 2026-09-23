@@ -145,10 +145,19 @@ module Stack_model : sig
 
   val sec_tag : def term -> sec_tag option
   val set_sec_tag : sec_tag -> def term -> def term
-  (** The model segment's base (2^62): the ABSOLUTE position of the
-      entry RSP on the segment line; tag positions are absolute, so a
-      frame offset [o] sits at [segment_base + o]. *)
+  (** The model segment's base (2^62 + 8: the ABI entry residue): the
+      ABSOLUTE position of the entry RSP on the segment line; tag
+      positions are absolute, so a frame offset [o] sits at
+      [segment_base + o]. *)
   val segment_base : int64
+
+  (** The base's certified width: the low nibble is the ABI entry
+      residue (8 (mod 16)), the only bits that are a fact. *)
+  val certified_bits : int
+
+  (** The plain-arm stack band's lower bound; the band is
+      [stack_band_lo, 2^63). *)
+  val stack_band_lo : int64
 
   (** The denotation's single absolute stack position, when it
       denotates to exactly one — the cell-identity predicate. *)

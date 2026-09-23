@@ -158,6 +158,9 @@ let fixpoint (target : Theory.Target.t)
   match
     try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
     with Vsa.Fixpoint_not_converged (n, _, _) ->
+#ifdef VSA_DEBUG
+      Vsa.Cbat_attr_census.bump "backstop.sub";
+#endif
       Hike_diag.warn
         "vsa: sub %s: fixpoint not converged in %d iterations — no environments, no rewrite (every reader takes the top identity)"
         (Sub.name sub) n;

@@ -17,12 +17,6 @@ let record_edge scope ~pred ~target ~term_bb ?sp_restore () =
       e_target = target }
     :: !(scope.edges)
 
-(* The rendered rows of one BIR edge (pred -> target): usually one,
-   one per jmp when a series targets the same block twice. *)
-let rows_for scope ~pred ~target : phi_edge list =
-  Base.List.filter !(scope.edges)
-    ~f:(fun r -> Tid.equal r.e_pred pred && Tid.equal r.e_target target)
-
 (* The incoming's value for one rendered edge: the edge's SP restore
    wins over the pred's local binding; a never-bound read warns and
    freezes. *)
@@ -36,23 +30,13 @@ let incoming_value ctx scope ~sp_restore ~pred_tid ~target var =
         warn_undef_read ctx scope var target;
         frozen_undef ctx scope var)
 
-(* One incoming per rendered predecessor of [target]: each BIR pred
-   contributes one incoming per rendered row, and a pred with no
-   recorded row — an edge the render lanes never see, such as a
-   call's fallthrough when SP needs no restore — falls back to the
-   pred's own block. *)
-let add_incomings ctx scope ~phi ~(preds : Tid.t list) ~target var =
-  Base.List.iter preds ~f:(fun ptid ->
-      match rows_for scope ~pred:ptid ~target with
-      | [] ->
-        Llvm.add_incoming
-          (incoming_value ctx scope ~sp_restore:None ~pred_tid:ptid ~target var,
-           get_bb scope ptid)
-          phi
-      | rows ->
-        Base.List.iter rows ~f:(fun r ->
-            Llvm.add_incoming
-              (incoming_value ctx scope
-                 ~sp_restore:r.e_sp_restore ~pred_tid:r.e_pred ~target var,
-               r.e_term_bb)
-              phi))
+(* One incoming per rendered edge into [target]: the recorded rows ARE
+   the emitted CFG's predecessor set, so a block the render lanes never
+   branch to takes no incoming. *)
+let add_incomings ctx scope ~phi ~(rows : phi_edge list) ~target var =
+  Base.List.iter rows ~f:(fun r ->
+      Llvm.add_incoming
+        (incoming_value ctx scope ~sp_restore:r.e_sp_restore
+           ~pred_tid:r.e_pred ~target var,
+         r.e_term_bb)
+        phi)

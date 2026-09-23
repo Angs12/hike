@@ -1,0 +1,228 @@
+(* The production-config non-convergence diagnostic: replicates the
+   pass's per-sub solve (jump -> split-mem terms, whole-program kill
+   summaries, .rodata image, symtab, block addrs) and on
+   Fixpoint_not_converged prints the gap, the widening heads, and the
+   head states.
+   Usage: vsa_gap.exe <binary> <subname> [raw|jump|split|both] *)
+
+open Bap.Std
+open Bap_core_theory
+open Probe_common
+
+module AI = Cbat_vsa.AI
+module Vsa = Cbat_vsa
+
+(* Direct-jump CFG successors of a block (conv_diag's). *)
+let succs (blk : blk term) : tid list =
+  Term.enum jmp_t blk
+  |> Seq.filter_map ~f:(fun j ->
+      match Jmp.kind j with
+      | Goto (Direct t) | Ret (Direct t) -> Some t
+      | Call c -> (
+          match Call.target c with
+          | Direct t -> Some t
+          | _ -> None)
+      | _ -> None)
+  |> Seq.to_list
+
+let cfg_of (sub : sub term) : (tid * tid list) list =
+  Term.enum blk_t sub
+  |> Seq.map ~f:(fun b -> (Term.tid b, succs b))
+  |> Seq.to_list
+
+let succs_of (cfg : (tid * tid list) list) (t : tid) : tid list =
+  match Base.List.Assoc.find cfg t ~equal:Tid.equal with
+  | Some ts -> ts
+  | None -> []
+
+let reachable (cfg : (tid * tid list) list) (start : tid) (target : tid) :
+    bool =
+  let rec go seen = function
+    | [] -> false
+    | t :: rest ->
+      if Tid.equal t target then true
+      else if Base.List.mem seen t ~equal:Tid.equal then go seen rest
+      else go (t :: seen) (succs_of cfg t @ rest)
+  in
+  go [] [ start ]
+
+let on_cycle (cfg : (tid * tid list) list) (t : tid) : bool =
+  Base.List.exists (succs_of cfg t) ~f:(fun s -> reachable cfg s t)
+
+let cyclic_heads (cfg : (tid * tid list) list) : (tid * tid list) list =
+  let cyc =
+    Base.List.filter_map cfg ~f:(fun (t, _) ->
+        if on_cycle cfg t then Some t else None)
+  in
+  let rec group = function
+    | [] -> []
+    | t :: rest ->
+      let same_cycle x y = reachable cfg x y && reachable cfg y x in
+      let comp, rest' =
+        Base.List.partition_tf rest ~f:(fun x -> same_cycle t x)
+      in
+      let members = t :: comp in
+      let head =
+        Base.List.fold_left members ~init:t ~f:(fun acc x ->
+            if String.compare (Tid.name x) (Tid.name acc) < 0 then x else acc)
+      in
+      (head, members) :: group rest'
+  in
+  group cyc
+
+(* The jump lines of a block - the guard shapes. *)
+let jmps_line (b : blk term) : string =
+  Term.enum jmp_t b
+  |> Seq.map ~f:(fun j ->
+      match Jmp.kind j with
+      | Goto (Direct t) -> "goto " ^ Tid.name t
+      | Goto (Indirect e) ->
+        "goto [" ^ Format.asprintf "%a" Exp.pp e ^ "]"
+      | Ret _ -> "ret"
+      | Int _ -> "int"
+      | Call c ->
+        "call ret="
+        ^ (match Call.return c with
+           | Some l -> target_to_string l
+           | None -> "none"))
+  |> Seq.to_list
+  |> Base.String.concat ~sep:" ; "
+
+let usage_text = "<binary> <subname> [raw|jump|split|both]"
+
+let () =
+  let args = List.tl (Array.to_list Sys.argv) in
+  init ();
+  match args with
+  | [] -> usage Sys.argv.(0) usage_text
+  | path :: subname :: rest -> (
+    let mode = match rest with m :: _ -> m | [] -> "both" in
+    let written_mode = match rest with _ :: w :: _ -> w | _ -> "whole" in
+    let proj = load_project path in
+    let prog = Project.program proj in
+    let target = Project.target proj in
+    let raw =
+      match find_sub prog subname with
+      | Some s -> s
+      | None -> usage Sys.argv.(0) usage_text
+    in
+    let images =
+      Hike.Image.get_section_mem ".rodata" proj
+      |> Hike.Image.get_section_data
+      |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
+             [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
+                 img_hi = Word.to_int64_exn max_addr;
+                 img_bytes = arr } ])
+      |> Base.Option.value ~default:[]
+    in
+    ignore images;
+    (* symtab/block_addrs ride the pass's fixpoint (resolution +
+       materialization); the raw first-phase solve here doesn't take
+       them. *)
+    ignore (Some (Project.symbols proj));
+    let block_addrs =
+      Term.enum sub_t prog
+      |> Seq.concat_map ~f:(Term.enum blk_t)
+      |> Seq.filter_map ~f:(fun b ->
+             Base.Option.map (Term.get_attr b address)
+               ~f:(fun a -> (a, Term.tid b)))
+      |> Seq.to_list
+      |> Core.Map.of_alist_exn (module Addr)
+    in
+    ignore block_addrs;
+    (* The kill-summary regime: the pass computes whole-program
+       summaries; a single-sub run degrades every callee to unknown. *)
+    let written =
+      match written_mode with
+      | "none" -> Tid.Map.empty
+      | _ -> Hike.Vsa.kill_summaries ~abi:(Hike.Abi.of_target target) prog
+    in
+    Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
+    (* The pass's transforms, in chain order. *)
+    let sub =
+      match mode with
+      | "raw" -> raw
+      | "jump" -> Hike.Jump.compile_sub target raw
+      | "split" -> Hike.Split_mem.split_sub raw
+      | "both" -> Hike.Split_mem.split_sub (Hike.Jump.compile_sub target raw)
+      | _ -> usage Sys.argv.(0) usage_text
+    in
+    let nblk = Term.enum blk_t sub |> Seq.length in
+    let ndefs =
+      Term.enum blk_t sub
+      |> Seq.fold ~init:0 ~f:(fun acc b ->
+             acc + (Term.enum def_t b |> Seq.length))
+    in
+    Printf.printf "=== vsa_gap %s (%s) mode=%s written=%s  %d blk %d defs ===\n%!"
+      (Filename.basename path) (Sub.name raw) mode written_mode nblk ndefs;
+    let abi = Hike.Abi.of_target target in
+    let prog' = Program.create ~subs:[ sub ] () in
+    let t0 = Unix.gettimeofday () in
+    match
+      Vsa.static_graph_vsa ~abi ~written ~sub_lookup:(fun _ -> None) prog' sub
+        (Vsa.init_sol ~abi sub)
+    with
+    | sol ->
+      Printf.printf "CONVERGED in %.3fs\n%!" (Unix.gettimeofday () -. t0);
+      ignore sol
+    | exception Vsa.Fixpoint_not_converged (n, sol, gap) ->
+      Printf.printf "NOT CONVERGED after %d visits (%.3fs)\n%!"
+        n (Unix.gettimeofday () -. t0);
+      (match gap with
+       | Some (b, s) ->
+         Printf.printf "first still-growing (block, successor): %s -> %s\n%!"
+           (Tid.name b) (Tid.name s)
+       | None -> Printf.printf "(no gap pair captured)\n%!");
+      let cfg = cfg_of sub in
+      let heads = cyclic_heads cfg in
+      Printf.printf "widening-point set: %d cyclic SCCs\n%!"
+        (List.length heads);
+      List.iter
+        (fun (head, members) ->
+          let blk =
+            Term.enum blk_t sub
+            |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) head)
+          in
+          Printf.printf "HEAD %s  (members: %s)\n" (Tid.name head)
+            (Base.String.concat ~sep:", "
+               (Base.List.map members ~f:Tid.name));
+          Printf.printf "  jmps: %s\n" (jmps_line blk);
+          let vars =
+            Base.List.dedup_and_sort
+              (Base.List.concat_map members
+                 ~f:(fun t ->
+                     match
+                       Term.enum blk_t sub
+                       |> Seq.find ~f:(fun b -> Tid.equal (Term.tid b) t)
+                     with
+                     | Some b ->
+                       Term.enum def_t b
+                       |> Seq.map ~f:(fun d -> Var.base (Def.lhs d))
+                       |> Seq.to_list
+                     | None -> []))
+              ~compare:(fun a b -> String.compare (Var.name a) (Var.name b))
+          in
+          let st = Graphlib.Std.Solution.get sol head in
+          Printf.printf "  head state (%d vars):\n" (List.length vars);
+          List.iter
+            (fun v ->
+              let ws = AI.find_word 64 st v in
+              let desc =
+                if Cbat_vsa.WordSet.is_top ws then "TOP"
+                else if Cbat_vsa.WordSet.is_bottom ws then "BOT"
+                else
+                  match
+                    Cbat_vsa.WordSet.min_elem ws, Cbat_vsa.WordSet.max_elem ws
+                  with
+                  | Some lo, Some hi ->
+                    Printf.sprintf "[%s .. %s]%s"
+                      (word_to_hex (Cbat_word.to_word lo))
+                      (word_to_hex (Cbat_word.to_word hi))
+                      (if Cbat_vsa.WordSet.is_infinite ws then " inf" else "")
+                  | _ -> "?"
+              in
+              if desc <> "BOT" then
+                Printf.printf "    %s = %s\n" (Var.name v) desc)
+            vars)
+        heads)
+  | _ -> usage Sys.argv.(0) usage_text

@@ -65,6 +65,18 @@ end
 (* Re-exported profiling interface. *)
 module Stages = Cbat_vsa_stages
 
+(* The KB operation census (compiled only under VSA_DEBUG). *)
+#ifdef VSA_DEBUG
+module Cbat_kb_census : sig
+  val bump : string -> unit
+end
+
+(* The attribution census (compiled only under VSA_DEBUG). *)
+module Cbat_attr_census : sig
+  val bump : string -> unit
+end
+#endif
+
 
 type vsa_sol = (tid, AI.t) Solution.t
 
@@ -170,21 +182,32 @@ module Test_seam : sig
 
   val reachable_jumps : AI.t -> jmp term seq -> jmp term seq
 
-  (* Constrain a state by an edge's cond. *)
+  (* Constrain a state by an edge's cond (the context's landmark table). *)
   val constrain_edge :
-    env:AI.t -> ?landmarks:Cbat_landmarks.t -> exp -> AI.t
+    env:AI.t -> landmarks:Cbat_landmarks.t -> exp -> AI.t
 
   (* The inverse denote: one backward rule per node kind, the mirror of
      the forward transfer — env + expression + the constraint the value
      must satisfy -> the refined env. *)
-  val inverse_denote : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> ?landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
+  val inverse_denote : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
   (* One fixpoint run's context: the static per-block facts, the
      convention facts, and the run's mutable state. *)
   type refine_ctx
 
-  (* The per-run context (the walk fixtures' construction seam). *)
-  val mk_rctx : cfg:Graphs.Tid.t -> abi:Hike_abi.t -> sub term -> refine_ctx
+  (* The per-run context: the library builder with production's own
+     defaults — the non-negativity oracle, the run's sub-address lookup,
+     and one landmark table. *)
+  val mk_rctx :
+    cfg:Graphs.Tid.t -> abi:Hike_abi.t ->
+    ?sub_lookup:(int64 -> Tid.t option) -> sub term -> refine_ctx
+
+  (* The context's landmark table (one source of truth). *)
+  val landmarks_of : refine_ctx -> Cbat_landmarks.t
+
+  (* Run [f] with the context's table widening at [head]. *)
+  val with_widening_head :
+    refine_ctx -> Tid.t option -> (unit -> 'a) -> 'a
 
   (* The deep backward walk: the env threads through every visited
      block's defs, running to its fixpoint over the block; [seeds] are

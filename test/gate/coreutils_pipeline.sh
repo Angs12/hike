@@ -177,7 +177,10 @@ do_link() {
           && CRYPTO="-lcrypto"
         hike_rename "$ll" "$OUT/${name}_lifted.ll" 2>/dev/null \
           || { echo "FAIL $name (rename)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
-        hike_llc "$OUT/${name}_lifted.ll" "$OUT/${name}_lifted.o" 2>>"$OUT/$name.llc.log" \
+        # The lifted code is memory-heavy; at -O0 it runs far slower than
+        # the native originals the suite was timed against.  LLC_OPT=-O2
+        # both lets the suite finish and exercises the optimized module.
+        hike_llc "$OUT/${name}_lifted.ll" "$OUT/${name}_lifted.o" "${LLC_OPT:--O0}" 2>>"$OUT/$name.llc.log" \
           || { echo "FAIL $name (llc)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
         # --allow-multiple-definition: gnulib modules defining their own
         # malloc/free must not collide with the harness wrappers
@@ -248,6 +251,12 @@ do_suite() {
         fi
     done
     note "suite: swapped $swapped lifted binaries into $CORE/src"
+
+    # ---- clean the test state ----
+    # A killed run leaves tests/*.log behind, and make then reuses them: the
+    # re-run "finishes" in seconds reporting FAIL 0 from stale results.
+    find "$CORE/tests" -name '*.log' -delete 2>/dev/null || true
+    find "$CORE" -name 'test-suite.log' -delete 2>/dev/null || true
 
     # ---- lifted run ----
     touch "$suite_log/.stamp.$$"
