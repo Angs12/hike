@@ -400,26 +400,28 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let is_self_call_stub_tid t =
     Base.List.mem self_call_stubs t ~equal:Tid.equal
   in
-  (* Phase 1: declarations. *)
-  Base.List.iter subs_list ~f:(fun sub ->
-      let tid = Term.tid sub in
-      if Base.Option.is_some (native_fp_op (Tid.name tid)) then ()
-      else if is_self_call_stub_tid tid then
-        create_fun_declaration ctx tid
-      else create_fun ctx tid ~rets:(get_rets ctx tid) ~args:(get_args ctx tid));
-  (* Phase 2: thunks. *)
-  Base.List.iter subs_list ~f:(fun sub -> create_thunk ctx (Term.tid sub));
-  (* Phase 3: bodies — one sub_scope per sub, opened here, dead at
-     the boundary. *)
-  Term.enum sub_t prog
-  |> Seq.iter ~f:(fun s ->
-      if is_self_call_stub_tid (Term.tid s) then ()
-      else
-        let scope = fresh_scope () in
-        create_sub ctx scope s);
-  (* Phase 4: initializers render inside the emission value: word data
-     goes through [remap_native_addr], so function-pointer data lands
-     on a promoted sub's thunk. *)
+  let declare_phase () =
+    Base.List.iter subs_list ~f:(fun sub ->
+        let tid = Term.tid sub in
+        if Base.Option.is_some (native_fp_op (Tid.name tid)) then ()
+        else if is_self_call_stub_tid tid then
+          create_fun_declaration ctx tid
+        else create_fun ctx tid ~rets:(get_rets ctx tid) ~args:(get_args ctx tid))
+  in
+  let thunk_phase () =
+    Base.List.iter subs_list ~f:(fun sub -> create_thunk ctx (Term.tid sub))
+  in
+  let bodies_phase () =
+    Term.enum sub_t prog
+    |> Seq.iter ~f:(fun s ->
+        if is_self_call_stub_tid (Term.tid s) then ()
+        else
+          let scope = fresh_scope () in
+          create_sub ctx scope s)
+  in
+  let initializer_phase () =
+    (* Word data goes through [remap_native_addr], so function-pointer
+       data lands on a promoted sub's thunk. *)
   Base.List.iter sections ~f:(fun section ->
       match section.bytes with
       | Some arr when Base.List.is_empty section.owners ->
@@ -445,6 +447,12 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                    else o.typed_w)
                 ~bss:false ~word)
       | None -> ())
+  in
+  (* Phase order — sigs, thunks, bodies, initializers — is load-bearing. *)
+  declare_phase ();
+  thunk_phase ();
+  bodies_phase ();
+  initializer_phase ()
 
 (* Re-exports from the lane modules (the mli surface). *)
 type native_fp = Bil2llvm_fp.native_fp =
