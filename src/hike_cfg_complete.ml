@@ -122,15 +122,24 @@ let remap_jmp f (j : jmp term) : jmp term =
 
 (* A dispatch word can name an address the lift never made a block: a
    jump-table case body BAP never disassembled.  [lift_at] re-decodes
-   and lifts it; the lifted blocks keep their address-derived tids and a
-   direct target that names an existing block is retargeted to that
-   block's tid.  [None] when the word is genuinely undecodable. *)
+   and lifts it; the lifted blocks are spliced in like any other block
+   and their addresses join the run's map.  A lifted block that only
+   repeats a block already present (its address or tid is known) is not
+   added twice — references to it are retargeted to that block. *)
 let materialize_block ~(lift_at : Addr.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) (a : Addr.t) :
-    (sub term * tid) option =
+    (sub term * tid * (Addr.t * tid) list) option =
   match lift_at a with
   | None | Some [] -> None
   | Some blks ->
+    let addr_of b = Term.get_attr b address in
+    let duplicate b =
+      match addr_of b with
+      | Some addr -> Core.Map.mem block_addrs addr
+      | None -> false
+    in
+    (* A lifted direct target is address-derived; an address that already
+       names a block resolves to that block's tid. *)
     let existing =
       Core.Map.fold block_addrs ~init:Tid.Map.empty
         ~f:(fun ~key:addr ~data:t m ->
@@ -139,23 +148,24 @@ let materialize_block ~(lift_at : Addr.t -> blk term list option)
     let retarget t =
       Base.Option.value (Core.Map.find existing t) ~default:t
     in
-    let blks =
-      Base.List.map blks ~f:(fun b ->
-          Term.map jmp_t b ~f:(remap_jmp retarget))
-    in
     let present =
       Term.enum blk_t sub
       |> Seq.fold ~init:Tid.Set.empty ~f:(fun s b ->
              Core.Set.add s (Term.tid b))
     in
-    let fresh =
-      Base.List.filter blks ~f:(fun b ->
-          not (Core.Set.mem present (Term.tid b)))
+    let kept =
+      Base.List.filter_map blks ~f:(fun b ->
+          if duplicate b || Core.Set.mem present (Term.tid b) then None
+          else Some (Term.map jmp_t b ~f:(remap_jmp retarget)))
+    in
+    let entries =
+      Base.List.filter_map kept ~f:(fun b ->
+          Base.Option.map (addr_of b) ~f:(fun addr -> (addr, Term.tid b)))
     in
     let sub' =
-      Base.List.fold fresh ~init:sub ~f:(fun s b -> Term.append blk_t s b)
+      Base.List.fold kept ~init:sub ~f:(fun s b -> Term.append blk_t s b)
     in
-    Some (sub', Term.tid (Base.List.hd_exn blks))
+    Some (sub', retarget (Term.tid (Base.List.hd_exn blks)), entries)
 
 (* One mid-block case entry: the prefix keeps the block's tid (its
    incoming edges) and falls through to the fresh entry block, which
@@ -164,7 +174,7 @@ let materialize_block ~(lift_at : Addr.t -> blk term list option)
 let split_entry ~(starts : (Addr.t * tid) list)
     ~(lift_at : Addr.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t) (a : Addr.t) (sub : sub term) :
-    sub term * tid =
+    sub term * tid * (Addr.t * tid) list =
   let container =
     Base.List.fold starts ~init:None ~f:(fun best (sa, t) ->
         if Word.compare sa a < 0 then
@@ -194,7 +204,7 @@ let split_entry ~(starts : (Addr.t * tid) list)
     match pivot with
     | None -> (
         match materialize_block ~lift_at ~block_addrs sub a with
-        | Some (sub', t) -> (sub', t)
+        | Some (sub', t, entries) -> (sub', t, entries)
         | None ->
           failwith
             (Printf.sprintf
@@ -244,13 +254,13 @@ let split_entry ~(starts : (Addr.t * tid) list)
             Term.concat_map blk_t sub ~f:(fun b ->
                 if Tid.equal (Term.tid b) ctid then [ b1; b2 ] else [ b ])
           in
-          (sub', Term.tid b2))
+          (sub', Term.tid b2, []))
         else
           let sub' =
             Term.concat_map blk_t sub ~f:(fun b ->
                 if Tid.equal (Term.tid b) ctid then [ b2 ] else [ b ])
           in
-          (sub', Term.tid b2)
+          (sub', Term.tid b2, [])
 
 (* The dispatch's case words, denotated at the state the jump reads;
    a bare-variable target's words come from its reaching definition's
@@ -311,19 +321,25 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
            match dispatch_word blk with
            | None -> None
            | Some a ->
-               let sub', t = split_entry ~starts ~lift_at ~block_addrs a sub in
-               Some (a, sub', t))
+               let sub', t, entries =
+                 split_entry ~starts ~lift_at ~block_addrs a sub
+               in
+               Some (a, sub', t, entries))
     |> Seq.to_list
     |> Base.List.hd
   with
   | None ->
       option_if_debug "prepare: no missing word, done";
       (sub, block_addrs)
-  | Some (a, sub', t) ->
+  | Some (a, sub', t, entries) ->
       option_if_debug
         (Printf.sprintf "prepare: split at %s -> tid %s"
            (Word.to_string a) (Tid.name t));
-      let block_addrs' = Core.Map.set block_addrs ~key:a ~data:t in
+      let block_addrs' =
+        Base.List.fold entries
+          ~init:(Core.Map.set block_addrs ~key:a ~data:t)
+          ~f:(fun m (addr, tid) -> Core.Map.set m ~key:addr ~data:tid)
+      in
       fresh := Core.Set.add !fresh t;
       prepare_dispatches ~denote ~retaddr ~fresh ~lift_at
         ~block_addrs:block_addrs' sub'

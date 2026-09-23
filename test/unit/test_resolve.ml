@@ -428,24 +428,34 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let a = Addr.of_int64 0x3010L in
+        let b = Addr.of_int64 0x3014L in
         let materialized =
-          let b = Blk.Builder.create ~tid:(Tid.for_addr a) () in
-          Blk.Builder.add_jmp b
+          let e = Blk.Builder.create ~tid:(Tid.for_addr a) () in
+          Blk.Builder.add_jmp e
             (Jmp.create
                (Goto (Direct (Tid.for_addr (Addr.of_int64 0x3008L)))));
-          Blk.Builder.result b
+          let e = Term.set_attr (Blk.Builder.result e) address a in
+          let i = Blk.Builder.create ~tid:(Tid.for_addr b) () in
+          let i = Term.set_attr (Blk.Builder.result i) address b in
+          [ e; i ]
         in
         let _, sub8', block_addrs8 =
           produce Theory.Target.unknown
             ~block_addrs:
               [ (0x3008L, j8_tids.(4)); (0x400000L, j8_tids.(5)) ]
             ~lift_at:(fun a' ->
-              if Addr.equal a' a then Some [ materialized ] else None)
+              if Addr.equal a' a then Some materialized else None)
             (Program.create ~subs:[ j8 ] ()) j8
         in
         let named =
           match Core.Map.find block_addrs8 a with
           | Some t -> Tid.equal t (Tid.for_addr a)
+          | None -> false
+        in
+        (* Every new block is registered, not just the dispatch entry. *)
+        let registered =
+          match Core.Map.find block_addrs8 b with
+          | Some t -> Tid.equal t (Tid.for_addr b)
           | None -> false
         in
         let retargeted =
@@ -459,7 +469,7 @@ let tests : unit Alcotest.test list =
                      | _ -> false)
                  | _ -> false)
         in
-        check "RES-21" (named && retargeted));
+        check "RES-21" (named && registered && retargeted));
 
     pin "RES-15" "T22-J3: a foreign pointer target is untouched by the rewrite"
       (fun () ->
