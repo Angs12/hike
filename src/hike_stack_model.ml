@@ -265,6 +265,21 @@ let is_window_var (v : var) : bool =
 
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 
+(* The residue is region id 0: the fallback alloca every un-carved
+   stack access shares. *)
+let residue_id : int = 0
+
+(* Slot geometry: with [entry] the call-time post-push SP (the callee's
+   entry line), slot [i] occupies [entry + word + word*i, +word) — the
+   return address occupies [entry, entry + word). *)
+let slot_offset ~(word : int) (i : int) : int64 =
+  Stdlib.Int64.of_int (word * (i + 1))
+
+let slot_index_of_offset ~(word : int) (rel : int64) : int =
+  Stdlib.Int64.to_int
+    (Stdlib.Int64.div (Stdlib.Int64.sub rel (Stdlib.Int64.of_int word))
+       (Stdlib.Int64.of_int word))
+
 let region_mem (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (region_name id ^ "_mem")

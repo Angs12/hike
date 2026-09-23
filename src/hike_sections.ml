@@ -191,7 +191,14 @@ module Tag = Hike_stack_model.Tag
 
 type sec_tag = Hike_stack_model.sec_tag
 
-type ctx = { sub_trees : sub_tree Tid.Map.t; data_tree : data_tree; tags : sec_tag Tid.Map.t }
+type ctx = {
+  sub_trees : sub_tree Tid.Map.t;
+  data_tree : data_tree;
+  tags : sec_tag Tid.Map.t;
+  (* The data spans served whole, computed once by [attribute] and
+     shared by the finalize and both spec projections. *)
+  whole : data_span list;
+}
 
 type portion = {
   pt_sec : sec;
@@ -441,22 +448,18 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
     m_identity = not p.pt_elig }
 
 (* The identity members of an escape extent, projected into the
-   sub-local spaces; no def. *)
+   sub-local spaces; no def.  [sub_portions]'s two clip windows ARE
+   the sub-local line's geometry. *)
 let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
     member list =
   let lo, hi = ext in
-  let floor = Model.stack_floor ~entry:env.entry in
-  let s_top = Model.stack_top ~entry:env.entry ~word:env.word in
-  let a_base = Model.args_base ~entry:env.entry ~word:env.word in
-  let member_of_sec s part =
-    Base.Option.map part ~f:(fun (plo, phi) ->
-        { m_sec = s; m_lo = plo; m_hi = phi; m_sub = sub; m_def = None;
-          m_width = 0; m_store = false; m_identity = true })
+  let _, parts =
+    sub_portions ~entry:env.entry ~word:env.word ~elig:false
+      ~alo:lo ~ahi:hi lo hi
   in
-  Base.List.filter_map
-    [ member_of_sec Stack (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
-      member_of_sec Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base Model.args_ceiling) ]
-    ~f:(fun x -> x)
+  Base.List.map parts ~f:(fun p ->
+      { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
+        m_def = None; m_width = 0; m_store = false; m_identity = true })
 
 let is_rip_relative (d : def term) : bool =
   Hike_stack_model.def_is_rip_relative d
@@ -592,6 +595,17 @@ let align16_up n =
 
 let region_max_bytes : int64 = 67108864L
 
+(* A stack region's alloca size: its byte span, 16-aligned. *)
+let region_bytes (k : range) : int64 =
+  align16_up (Stdlib.Int64.add (Stdlib.Int64.sub k.hi.p_pos k.lo.p_pos) 1L)
+
+(* Whether [pos] sits inside one of the spans served whole. *)
+let in_whole_span (whole : data_span list) (s : sec) (pos : int64) : bool =
+  Base.List.exists whole ~f:(fun d ->
+      equal_sec d.ds_sec s
+      && Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
+      && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0)
+
 let is_data_sec (s : sec) : bool =
   match s with Stack | Args -> false | _ -> true
 
@@ -613,18 +627,10 @@ let whole_spans_of (spans : data_span list) (bindings : (range * member list) li
       (not (Base.List.is_empty d.ds_slots)) || Base.List.mem tainted d ~equal:equal_data_span)
 
 let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
-    ~(kind : [ `Sub | `Data ]) (tree : member list Tree.t) : range_storage Tree.t =
+    ~(kind : [ `Sub | `Data ]) ~(whole : data_span list)
+    (tree : member list Tree.t) : range_storage Tree.t =
   let bindings = Tree.to_sequence tree |> Seq.to_list in
   let sorted = Base.List.sort bindings ~compare:(fun (k1, _) (k2, _) -> compare k1 k2) in
-  let whole =
-    match kind with `Data -> whole_spans_of spans sorted | `Sub -> []
-  in
-  let in_whole_span (s : sec) (pos : int64) : bool =
-    Base.List.exists whole ~f:(fun d ->
-        equal_sec d.ds_sec s
-        && Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
-        && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0)
-  in
   let ret_lo = entry in
   let ret_hi = Stdlib.Int64.pred (Stdlib.Int64.add entry (Stdlib.Int64.of_int word)) in
   (* The residue (id 0) is the stack's fallback region.  A whole span
@@ -642,8 +648,7 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
           Stdlib.Int64.compare k.hi.p_pos ret_lo >= 0
           && Stdlib.Int64.compare k.lo.p_pos ret_hi <= 0
         in
-        let bytes =
-          align16_up (Stdlib.Int64.add (Stdlib.Int64.sub k.hi.p_pos k.lo.p_pos) 1L) in
+        let bytes = region_bytes k in
         if overlaps_ret || any_identity || Stdlib.Int64.compare bytes region_max_bytes > 0
         then { storage = Stack_residue; members = ms }
         else (
@@ -666,11 +671,12 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
         then
           { storage =
               Arg_slot
-                (Stdlib.Int64.to_int (Stdlib.Int64.div (Stdlib.Int64.sub k.lo.p_pos base) w64));
+                (Model.slot_index_of_offset ~word
+                   (Stdlib.Int64.sub k.lo.p_pos entry));
             members = ms }
         else { storage = Stack_residue; members = ms })
     | sec ->
-        if in_whole_span sec k.lo.p_pos then
+        if in_whole_span whole sec k.lo.p_pos then
       let id =
         match Base.List.Assoc.find !span_ids sec ~equal:equal_sec with
         | Some id -> id
@@ -696,12 +702,18 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
       sp = abi.Hike_abi.sp; denote = facts.denote }
   in
   let collected = collect env prog in
+  (* The whole-served set: computed once, consumed by the data
+     finalization and both spec projections. *)
+  let whole =
+    whole_spans_of spans (Tree.to_sequence collected.data |> Seq.to_list)
+  in
   let sub_trees =
     Core.Map.map collected.subs ~f:(fun tree ->
-        finalize_tree ~word ~entry ~spans ~kind:`Sub tree)
+        finalize_tree ~word ~entry ~spans ~kind:`Sub ~whole:[] tree)
   in
-  let data_tree = finalize_tree ~word ~entry ~spans ~kind:`Data collected.data in
-  { sub_trees; data_tree; tags = collected.tags }
+  let data_tree =
+    finalize_tree ~word ~entry ~spans ~kind:`Data ~whole collected.data in
+  { sub_trees; data_tree; tags = collected.tags; whole }
 
 (* Merged bindings never overlap, so the binding containing the
    range's least point is THE owner. *)
@@ -722,7 +734,7 @@ let escape_roots_of_tree (tree : sub_tree) : Var.Set.t =
          else
            let mem_var = function
              | Stack_region id -> Some (Model.region_mem id)
-             | Stack_residue -> Some (Model.region_mem 0)
+             | Stack_residue -> Some (Model.region_mem Model.residue_id)
              | Data_region id -> Some (Model.sec_comp_mem id)
              | Arg_slot _ -> None
            in
@@ -732,14 +744,9 @@ let escape_roots_of_tree (tree : sub_tree) : Var.Set.t =
 
 (* A whole span serves as ONE component covering the span, stored in
    the section's own image global (the emitter wires the id to it). *)
-let whole_comps_of ~(word : int) ~(spans : data_span list)
-    (ctx : ctx) : (int * int64 * int64) list =
+let whole_comps_of (ctx : ctx) : (int * int64 * int64) list =
   let bindings = Tree.to_sequence ctx.data_tree |> Seq.to_list in
-  let whole =
-    whole_spans_of spans
-      (Base.List.map bindings ~f:(fun (k, rs) -> (k, rs.members)))
-  in
-  Base.List.filter_map whole ~f:(fun d ->
+  Base.List.filter_map ctx.whole ~f:(fun d ->
       Option.bind
         (Base.List.find bindings ~f:(fun (k, rs) ->
              equal_sec k.lo.p_sec d.ds_sec
@@ -755,20 +762,10 @@ let global_comps_of ~(word : int) ~(spans : data_span list)
     (ctx : ctx) : Model.sec_comp list =
   let w = Stdlib.Int64.of_int word in
   let bindings = Tree.to_sequence ctx.data_tree |> Seq.to_list in
-  let whole =
-    whole_spans_of spans
-      (Base.List.map bindings ~f:(fun (k, rs) -> (k, rs.members)))
-  in
-  let in_whole (s : sec) (pos : int64) =
-    Base.List.exists whole ~f:(fun d ->
-        equal_sec d.ds_sec s
-        && Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
-        && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0)
-  in
   let comps =
     bindings
     |> Base.List.filter_map ~f:(fun (k, rs) ->
-        if in_whole k.lo.p_sec k.lo.p_pos then None
+        if in_whole_span ctx.whole k.lo.p_sec k.lo.p_pos then None
         else
           match rs.storage with
           | Data_region id ->
@@ -839,6 +836,14 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
          (Base.Sexp.to_string (sexp_of_point k.hi)))
   in
   let bindings = Tree.to_sequence tree |> Seq.to_list in
+  (* The Args-space residue members are the caller-window's readers:
+     they force the window and the window parameter alike. *)
+  let args_residue =
+    Base.List.exists bindings ~f:(fun (k, rs) ->
+        match rs.storage with
+        | Stack_residue -> equal_sec k.lo.p_sec Args
+        | _ -> false)
+  in
   let ( below, window, carved ), residue_seen =
     Base.List.fold bindings
       ~init:
@@ -860,9 +865,7 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
             in
             ((below, window, carved), true)
         | Stack_region id ->
-            let bytes =
-              align16_up (Stdlib.Int64.add (Stdlib.Int64.sub k.hi.p_pos k.lo.p_pos) 1L)
-            in
+            let bytes = region_bytes k in
             if Stdlib.Int64.compare bytes region_max_bytes > 0 then
               fail_unserved "oversized region" k;
             (( below,
@@ -878,13 +881,7 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   (* The window is the constant SysV extent; a wider reach reads past
      it — a sound over-approximation. *)
   let window =
-    let any_args =
-      Base.List.exists bindings ~f:(fun (k, rs) ->
-          match rs.storage with
-          | Stack_residue -> equal_sec k.lo.p_sec Args
-          | _ -> false)
-    in
-    if any_args || residue_seen then Hike_stack_model.caller_window_bytes
+    if args_residue || residue_seen then Hike_stack_model.caller_window_bytes
     else 0L
   in
   (* The anchor sits at the SysV entry-SP alignment inside the
@@ -904,24 +901,17 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let rhi = Stdlib.Int64.pred (Stdlib.Int64.add entry window) in
   let regions =
     if residue_seen || Stdlib.Int64.compare window 0L > 0 then
-      (0, (rlo, rhi), residue_bytes) :: Base.List.rev carved
+      (Model.residue_id, (rlo, rhi), residue_bytes) :: Base.List.rev carved
     else Base.List.rev carved
   in
   let anchor =
-    if residue_seen || Stdlib.Int64.compare window 0L > 0 then Some (0, anchor_idx)
+    if residue_seen || Stdlib.Int64.compare window 0L > 0 then
+      Some (Model.residue_id, anchor_idx)
     else
       match regions with
       | (id, _, _) :: _ -> Some (id, residue_mod)
       | [] -> None
   in
-  (* An Args-position residue member reads the caller's window — the
-     signature carries the window parameter. *)
-  let window_param =
-    Base.List.exists bindings ~f:(fun (k, rs) ->
-        match rs.storage with
-        | Stack_residue -> equal_sec k.lo.p_sec Args
-        | Arg_slot _ -> false
-        | _ -> false)
-  in
+  let window_param = args_residue in
   { Hike_stack_model.regions; anchor; window_param }
 

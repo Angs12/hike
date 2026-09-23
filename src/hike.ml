@@ -201,7 +201,7 @@ let pass_attrib proj =
           (Hike_kb.with_spec (Hike_kb.facts ())
              (Hike_sections.section_spec_of ~word
                 ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
-                ~whole:(Hike_sections.whole_comps_of ~word ~spans ctx)
+                ~whole:(Hike_sections.whole_comps_of ctx)
                 proj));
         (* The DCE's load roots are the vars the rewrite created; its
            escape roots are the storages carrying identity members. *)

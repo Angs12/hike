@@ -863,7 +863,7 @@ let tests : unit Alcotest.test list =
                (Program.create ~subs:[ sub ] ())
            in
            Base.List.is_empty (A.global_comps_of ~word:8 ~spans:slot_spans ctx)
-           && (match A.whole_comps_of ~word:8 ~spans:slot_spans ctx with
+           && (match A.whole_comps_of ctx with
                | [ (_id, 0x4000L, 0x403FL) ] -> true
                | _ -> false)
            && (match

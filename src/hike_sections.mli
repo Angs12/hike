@@ -85,11 +85,13 @@ module Tag = Hike_stack_model.Tag
 
 type sec_tag = Hike_stack_model.sec_tag
 
-(** The completed attribution: the finalized trees and the def tags. *)
+(** The completed attribution: the finalized trees, the def tags, and
+    the data spans served whole. *)
 type ctx = {
   sub_trees : sub_tree Tid.Map.t;
   data_tree : data_tree;
   tags : sec_tag Tid.Map.t;
+  whole : data_span list;
 }
 
 (** One projected portion of an access: the occupied interval in one
@@ -168,8 +170,7 @@ val layout_of_tree :
 
 (** Each whole-served span as one row: its shared region id and
     bounds (the section's own image global is the storage). *)
-val whole_comps_of :
-  word:int -> spans:data_span list -> ctx -> (int * int64 * int64) list
+val whole_comps_of : ctx -> (int * int64 * int64) list
 
 (** The carved data ranges' global components (word-grid tile and
     typed width); whole spans contribute nothing. *)
