@@ -29,8 +29,9 @@ let convert_binary output_program proj =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   let target = Project.target proj in
+  let abi = Abi.of_target target in
+  let word = abi.Hike_abi.word in
   let ptrsize = Theory.Target.bits target in
-  let word = ptrsize / 8 in
   let spec =
     match (Hike_kb.facts ()).Hike_kb.spec with
     | Some spec -> spec
@@ -173,7 +174,7 @@ let pass_strip_canaries proj =
 let pass_attrib proj =
   let facts = Hike_kb.facts () in
   let target = facts.target in
-  let word = Theory.Target.bits target / 8 in
+  let word = facts.abi.Hike_abi.word in
   let spans = Hike_sections.attrib_spans ~word proj in
   let dyn_allocs =
     Term.enum sub_t (Project.program proj)

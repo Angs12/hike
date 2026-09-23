@@ -114,7 +114,7 @@ do_collect() {
 do_lift() {
     # 64MB minor heap: fixpoint churn otherwise spends ~11% in major GC.
     export OCAMLRUNPARAM="${OCAMLRUNPARAM:-s=8M}"
-    [ -d "$BINS" ] && [ "$(ls -A "$BINS" 2>/dev/null)" ] || { do_collect; } || return 1
+    if [ -z "$(ls -A "$BINS" 2>/dev/null)" ]; then do_collect || return 1; fi
     : > "$LIFT_LOG"
     local TIMES="$WORK/lift_times.tsv"
     [ "${RETIME:-0}" = "1" ] && : > "$TIMES"
@@ -148,6 +148,10 @@ do_lift() {
 do_lift_report() {
     local tsv="$WORK/lift_times.tsv"
     [ -s "$tsv" ] || { note "lift-report: no timings ($tsv) - run RETIME=1 ... lift"; return 0; }
+    if ! command -v gawk >/dev/null 2>&1; then
+        note "lift-report: the percentile awk needs gawk; report skipped"
+        return 0
+    fi
     awk -F'\t' '{n++; s+=$2; a[n]=$2}
         END{
           asort(a);

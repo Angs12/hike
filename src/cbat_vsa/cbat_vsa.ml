@@ -93,7 +93,7 @@ let stores_of_sub (s : sub term) : def term list =
    the non-negativity oracle over the sub's defs and stores, and the run's
    sub-address lookup.  The fixpoint and the fixtures' seam build the same
    context through this one builder. *)
-let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
+let mk_rctx_with_oracle ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
     ?sub_lookup (s : sub term) : Cbat_runctx.refine_ctx =
   let rctx = Cbat_runctx.mk_rctx ~cfg ~abi ?sub_lookup s in
   let defs = defs_of_sub s in
@@ -178,7 +178,7 @@ let rec static_graph_vsa
   (* Pseudo-nodes never reach denotation. *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  let rctx = mk_rctx ~cfg:cfg_tmp ~abi ~sub_lookup s in
+  let rctx = mk_rctx_with_oracle ~cfg:cfg_tmp ~abi ~sub_lookup s in
   let cfg = cfg_tmp in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
      edges, serving the WTO, the worklist, and the predecessor lists. *)
@@ -728,7 +728,7 @@ module Test_seam = struct
   let reachable_jumps = reachable_jumps
   let constrain_edge = constrain_edge
   let inverse_denote = inverse_denote
-  let mk_rctx = mk_rctx
+  let mk_rctx = mk_rctx_with_oracle
   (* The context's landmark table and the widening-head bracket: a refine
      run through the seam uses the context's own table. *)
   let landmarks_of (rctx : refine_ctx) = rctx.Cbat_runctx.rc_landmarks

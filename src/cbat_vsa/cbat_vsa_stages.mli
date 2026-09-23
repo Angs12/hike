@@ -6,11 +6,8 @@ val equal_calls : int ref
 val widen_calls : int ref
 val walk_calls : int ref
 
-(* Walk-schedule metrics: pops, blocks, truncs, max_pops. *)
-val walk_pops : int ref
-val walk_blocks : int ref
-val walk_truncs : int ref
-val walk_max_pops : int ref
+(* Count one walk. *)
+val incr_walk : unit -> unit
 
 (* Accumulated per-stage seconds. *)
 val t_denote : float ref
@@ -39,9 +36,6 @@ val time :
    whole process (reset leaves them); the prod adapter stays 0. *)
 val cell_lm_recorded : int ref
 val cell_lm_consumed : int ref
-
-(* Commit one walk's schedule metrics. *)
-val bump_walk_pops : pops:int -> blocks:int -> truncated:bool -> unit -> unit
 
 (* Print totals and call counts. *)
 val report : string -> unit

@@ -286,32 +286,39 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
         if Int64.equal l lo && Int64.equal h hi then Some i else None)
   in
   let counter = ref (Base.List.length spec.spec_comps) in
-  let create_run_global name ~words ~bss =
-    let ty = Llvm.array_type (Llvm.integer_type llvm_ctx (word * 8)) words in
-    let g = Llvm.declare_global ty name llvm_module in
+  (* One internal array global: the gap runs and the components share
+     the declaration; the run path pins the 16 alignment (its spans
+     are word-grid filler), the component path aligns to the native
+     base. *)
+  let declare_internal_array name ~elem_ty ~n ~align ~const ~init =
+    let g = Llvm.declare_global (Llvm.array_type elem_ty n) name llvm_module in
     Llvm.set_linkage Llvm.Linkage.Internal g;
-    Llvm.set_alignment Abi.stack_align g;
-    if bss then Llvm.set_initializer (Llvm.const_null ty) g;
+    Llvm.set_global_constant const g;
+    Llvm.set_alignment align g;
+    Option.iter (fun v -> Llvm.set_initializer v g) init;
     g
+  in
+  let create_run_global name ~words ~bss =
+    let ty = Llvm.integer_type llvm_ctx (word * 8) in
+    declare_internal_array name ~elem_ty:ty ~n:words
+      ~align:Abi.stack_align ~const:false
+      ~init:(if bss then Some (Llvm.const_null (Llvm.array_type ty words)) else None)
   in
   let create_comp_global name (c : Model.sec_comp) ~is_const ~bss =
     let words = c.Model.hi_w - c.Model.lo_w + 1 in
-    let ty =
-      if c.Model.typed_w >= word then
-        Llvm.array_type (Llvm.integer_type llvm_ctx (word * 8)) words
-      else
-        Llvm.array_type
-          (Llvm.integer_type llvm_ctx (c.Model.typed_w * 8))
-          (words * (word / c.Model.typed_w))
+    let elem_ty =
+      if c.Model.typed_w >= word then Llvm.integer_type llvm_ctx (word * 8)
+      else Llvm.integer_type llvm_ctx (c.Model.typed_w * 8)
     in
-    let g = Llvm.declare_global ty name llvm_module in
-    Llvm.set_linkage Llvm.Linkage.Internal g;
-    Llvm.set_global_constant (is_const && not bss) g;
-    Llvm.set_alignment
-      (align_of (Int64.add c.Model.sec_lo (Int64.of_int (c.Model.lo_w * word))))
-      g;
-    if bss then Llvm.set_initializer (Llvm.const_null ty) g;
-    g
+    let n =
+      if c.Model.typed_w >= word then words
+      else words * (word / c.Model.typed_w)
+    in
+    let ty = Llvm.array_type elem_ty n in
+    declare_internal_array name ~elem_ty ~n
+      ~align:(align_of (Int64.add c.Model.sec_lo (Int64.of_int (c.Model.lo_w * word))))
+      ~const:(is_const && not bss)
+      ~init:(if bss then Some (Llvm.const_null ty) else None)
   in
   let tile name ~(comps : Model.sec_comp list) ~lo ~hi ~words ~is_const ~bss
       ~arr =

@@ -930,7 +930,7 @@ type live_map = wordset Var.Map.t
    with [live].  [~raw] applies the constraint AS GIVEN, skipping the
    producer subtraction — the acquisition's hypothetical; raw walks
    write nothing, only the empty-meet observations fire. *)
-let walk_block ?(raw : bool = false)
+let walk ?(raw : bool = false)
     ~(sol : (tid, AI.t) Solution.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
@@ -1082,29 +1082,29 @@ let cond_seeds ~(base : AI.t) (env : AI.t) (cond : exp) : live_map =
         else acc
       | _ -> acc)
 
+(* The refinement walk: the constraint meets the produced values (the
+   producer subtraction). *)
+let walk_block ~sol ~landmarks ~witness ~seeds env blk =
+  walk ~raw:false ~sol ~landmarks ~witness ~seeds env blk
+
+(* The acquisition's hypothetical: the constraint applies AS GIVEN,
+   skipping the producer subtraction. *)
+let walk_block_raw ~sol ~landmarks ~witness ~seeds env blk =
+  walk ~raw:true ~sol ~landmarks ~witness ~seeds env blk
+
 (* The deep walk: the guard block's defs backwards; leftover
    constraints and cell meets flow into the returned edge env. *)
 let refine_edge ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(seeds : live_map)
     (env : AI.t) (blk : blk term) : AI.t =
-  let refined = walk_block ~sol ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg ~seeds env blk in
-  (* Commit walk metrics (debug-only; the production adapter drops them). *)
-  Stages.bump_walk_pops
-    ~pops:1
-#ifdef VSA_DEBUG
-    ~blocks:1
-#else
-    ~blocks:0
-#endif
-    ~truncated:false
-    ();
-  refined
+  Stages.incr_walk ();
+  walk_block ~sol ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg ~seeds env blk
 
 (* The disabled continuation observed through the same rules, the
    result DISCARDED: every empty meet records the excluded boundary +
-   distance as the enclosing WTO cycle's widening landmark.  Memory
-   cells carry no landmarks. *)
+   distance as the enclosing WTO cycle's widening landmark (words and
+   memory cells alike). *)
 let acquire_unsat ~(sol : (tid, AI.t) Solution.t) ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
@@ -1124,7 +1124,7 @@ let acquire_unsat ~(sol : (tid, AI.t) Solution.t) ~(landmarks : Cbat_landmarks.t
                 ~data:(WordSet.singleton Cbat_word.b1)
             | _ -> acc)
       else seeds in
-    ignore (walk_block ~raw:true ~sol ~landmarks ~witness ~seeds:raw_seeds constrained blk)
+    ignore (walk_block_raw ~sol ~landmarks ~witness ~seeds:raw_seeds constrained blk)
   end
 
 let refine_edge_inline
