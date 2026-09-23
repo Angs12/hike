@@ -134,7 +134,7 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op 
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
   let rets = get_rets ctx target in
-  let word_bits = 8 * ctx.abi.Abi.word in
+  let word_bits = Hike_abi.word_bits ctx.abi in
   let in_w, res_w = fp_intrinsic_sizes ~word_bits args rets in
   let temp_defs = temp_defs_of_blk blk in
   let sig_ = fp_sig_of op in

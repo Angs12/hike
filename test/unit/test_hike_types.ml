@@ -80,7 +80,7 @@ let tests : unit Alcotest.test list =
                      `r64 )) ]
         in
         check "TYPES-01"
-          (Base.List.map (Types.free_vars sub) ~f:Var.name = [ "RDI" ]));
+          (Base.List.map (Model.free_regs sub) ~f:Var.name = [ "RDI" ]));
 
     pin "TYPES-02" "fp_returning: a YMM def on the epilogue path is an FP return"
       (fun () ->

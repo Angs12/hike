@@ -163,7 +163,7 @@ let build_entry_block ctx scope llvm_builder transfer_vars fr sub fn =
      anchor is invocation-private — reentrancy-safe, no SP parameter. *)
   let sp0 =
     (* storage-free subs: the constant anchor *)
-    Base.Option.value fr.stack0 ~default:fr.anchor_i64
+    frame_stack0 fr
   in
   insert_local scope tid ctx.sp sp0;
   exit_entry scope llvm_builder sub;

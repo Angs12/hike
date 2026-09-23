@@ -8,11 +8,6 @@ open Bap.Std
 module Model = Hike_stack_model
 module Abi = Hike_abi
 
-let free_vars sub =
-  Sub.free_vars sub
-  |> Core.Set.filter ~f:(fun var -> not @@ Model.is_mem var)
-  |> Core.Set.to_list
-
 let fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
   let is_value_reg v =
     Abi.is_value_return_reg abi v || Abi.is_vector_param_reg abi v
@@ -65,7 +60,7 @@ let tag_lane (a : Arg.t) : Arg.t =
 let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : Arg.t list * Arg.t list =
   let abi = Abi.of_target target in
-  let free_vars = free_vars sub in
+  let free_vars = Model.free_regs sub in
   let rets =
     (if Abi.is_primary_target target then abi.return_regs else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))

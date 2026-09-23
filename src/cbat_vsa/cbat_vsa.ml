@@ -341,10 +341,10 @@ let rec static_graph_vsa
                 let p_entry = Stages.time `Glue (fun () -> get p) in
                 let rc = !rc_cell in
                 let res = Stages.time `Denote (fun () ->
-                  fst (Cbat_forward.denote_block ~preserved ~written ~resolved
-                        ~sub:s ~edge_conds ~disabled:disabled_conds
+                  Cbat_forward.denote_block ~preserved ~written ~resolved
+                        ~edge_conds ~disabled:disabled_conds
                         ~sol:sol_snap ~rctx:rc
-                        ctx ~source:p p_entry ~target:v)) in
+                        ctx ~source:p p_entry ~target:v) in
                 let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
 #ifdef VSA_DEBUG
                 (if AI.equal res AI.bottom then begin

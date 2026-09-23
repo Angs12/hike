@@ -197,7 +197,7 @@ let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else
     let abi = Abi.of_target target in
-    let word_bits = 8 * abi.Abi.word in
+    let word_bits = Hike_abi.word_bits abi in
     let sub =
       Term.map blk_t sub
         ~f:(Blk.map_elts ~jmp:(ret_replacement ~word_bits))

@@ -10,26 +10,6 @@ open Bil2llvm_section
 let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
   Hike_def_slots.sec_tag def
 
-let is_plt_trampoline ctx (sub : sub term) : bool =
-  let free_vars =
-    Sub.free_vars sub
-    |> Core.Set.filter ~f:(fun var -> not @@ Hike_stack_model.is_mem var)
-    |> Core.Set.to_list
-  in
-  let reg_vars =
-    (* A stub using the frame pointer is not a pure trampoline. *)
-    Base.List.filter free_vars ~f:(fun reg ->
-        not (Var.same reg ctx.sp))
-  in
-  reg_vars = []
-  && Term.enum blk_t sub
-     |> Seq.exists ~f:(fun blk ->
-            Term.enum jmp_t blk
-            |> Seq.exists ~f:(fun j ->
-                   match Jmp.kind j with
-                   | Call _ -> true
-                   | _ -> false))
-
 (* Runtime-sized allocas: the def's value is the post-event SP, so
    the alloca size is (old SP − new SP) however the size was spelled. *)
 let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
@@ -86,7 +66,7 @@ let mem_access ctx scope llvm_builder blk_tid sub_tid fr def_tag
       | Some def_tag when Hike_stack_model.is_return_address_tag def_tag -> (
           match find_mem_node (Def.rhs def) with
           | Some (`Load (addr, size))
-            when Size.in_bits size <= 8 * ctx.abi.Abi.word
+            when Size.in_bits size <= Hike_abi.word_bits ctx.abi
                  && Base.Option.is_none
                       (Hike_stack_model.store_data_of_rhs (Def.rhs def)) ->
               let marker = marker_of_size size in
@@ -123,7 +103,7 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
             Llvm.build_ptrtoint v (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
         | None -> Llvm.undef (Llvm.i64_type ctx.llvm_ctx)
       in
-      let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
+      let stack0 = frame_stack0 fr in
       let rel = Llvm.build_sub res stack0 "" llvm_builder in
       Llvm.build_add w_i64 rel "" llvm_builder
     else res

@@ -93,6 +93,9 @@ let of_target (target : Theory.Target.t) : t =
     }
   else x86_64_sysv
 
+(* The target's word size in bits, from the byte size the record carries. *)
+let word_bits (t : t) : int = 8 * t.word
+
 (* SysV stack alignment: every stack object is 16-byte aligned. *)
 let stack_align = 16
 

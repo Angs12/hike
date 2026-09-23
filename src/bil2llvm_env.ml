@@ -206,6 +206,11 @@ let is_extern ctx (sub_tid : tid) : bool =
    so the emitter's names and the resolver's name map agree. *)
 let sanitize_name = Hike_stack_model.sanitize_tid_name
 
+(* The frame's entry-SP value: the SP slot's load, or the constant
+   anchor for a storage-free sub. *)
+let frame_stack0 (fr : sub_frame) : Llvm.llvalue =
+  Base.Option.value fr.stack0 ~default:fr.anchor_i64
+
 (* The synthetic indirect-call sub: every pointer call targets it, and
    its convention is [window_conv_args]. *)
 let indirect_call_tid : tid = Tid.for_name "indirect_call"
@@ -230,56 +235,48 @@ let blk_llvals_find map tid =
   | Some v -> v
   | None -> failwith @@ "blk_llvals.find_exn: " ^ Tid.name tid
 
-let get_calling_convention ctx =
-  Abi.of_target ctx.target
+(* The convention's register lanes as args of one intent. *)
+let reg_args ~intent (regs : var list) : Arg.t list =
+  Base.List.map regs ~f:(fun reg -> Arg.create ~intent reg (Var reg))
 
 (* The synthetic indirect-call convention: every register lane plus
    the caller-window base — exactly what a pointer call passes and a
    thunk accepts. *)
 let window_conv_args ~(word : int) (conv : Abi.t) : Arg.t list =
   let window = Hike_stack_model.hike_window_var ~word in
-  Base.List.map
-    ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-    (Abi.param_regs conv)
+  reg_args ~intent:In (Abi.param_regs conv)
   @ [ Arg.create ~intent:In window (Var window) ]
 
 (* A lifted sub carries its own signature on its [arg] terms (the returns
    are the [Out] intents); the synthetic conventions (the indirect call
    and the twins) are DERIVED from the ABI — nothing is stored. *)
 let synthetic_args ctx =
-  window_conv_args ~word:ctx.abi.Hike_abi.word (get_calling_convention ctx)
+  window_conv_args ~word:ctx.abi.Hike_abi.word ctx.abi
 
 let synthetic_rets ctx =
-  let callconv = get_calling_convention ctx in
-  Base.List.map
-    ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
-    callconv.return_regs
+  reg_args ~intent:Out ctx.abi.Abi.return_regs
+
+(* One signature lane's LLVM type: the pointer-tagged lanes pass
+   pointers, the rest keep the BIR type. *)
+let lane_type ctx (a : Arg.t) : Llvm.lltype =
+  if Hike_stack_model.is_ptr_arg a then Llvm.pointer_type ctx.llvm_ctx
+  else var_lltype ctx (Arg.lhs a)
 
 let get_args ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
   | Some sub -> Hike_stack_model.sig_args sub
   | None ->
       if Core.Set.mem ctx.synthetic sub_tid then synthetic_args ctx
-      else
-        let callconv = get_calling_convention ctx in
-        Base.List.map
-          ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-          (Abi.param_regs callconv)
+      else reg_args ~intent:In (Abi.param_regs ctx.abi)
 
 let get_rets ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
   | Some sub -> Hike_stack_model.sig_rets sub
   | None ->
       if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
-      else
-        let callconv = get_calling_convention ctx in
-        Base.List.map
-          ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
-          callconv.return_regs
+      else reg_args ~intent:Out ctx.abi.Abi.return_regs
 
-let ret_set ctx =
-  let callconv = get_calling_convention ctx in
-  Var.Set.of_list callconv.return_regs
+let ret_set ctx = Var.Set.of_list ctx.abi.Abi.return_regs
 
 let goto_label_exn jmp =
   match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"

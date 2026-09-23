@@ -6,6 +6,7 @@ module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_fp
+open Bil2llvm_mem
 
 
 (* Machine calls push a return address the callee's ret pops, so the
@@ -142,16 +143,9 @@ let fp_lltype llvm_ctx = function
 let ret_type_of_rets ctx rets =
   match rets with
   | [] -> Llvm.void_type ctx.llvm_ctx
-  | [ ret ] ->
-      if Hike_stack_model.is_ptr_arg ret then Llvm.pointer_type ctx.llvm_ctx
-      else var_lltype ctx (Arg.lhs ret)
+  | [ ret ] -> lane_type ctx ret
   | rets ->
-      let rets_typs =
-        Base.List.map rets ~f:(fun ret ->
-            if Hike_stack_model.is_ptr_arg ret then
-              Llvm.pointer_type ctx.llvm_ctx
-            else var_lltype ctx (Arg.lhs ret))
-      in
+      let rets_typs = Base.List.map rets ~f:(lane_type ctx) in
       Llvm.struct_type ctx.llvm_ctx (Array.of_list rets_typs)
 
 let register_fn ctx sub_tid fn fn_typ =
@@ -168,10 +162,9 @@ let create_ret_type ctx sub_tid =
 let arg_types_of ctx sub_tid args =
   Base.List.map args ~f:(fun arg ->
       let var = Arg.lhs arg in
-      if Hike_stack_model.is_ptr_arg arg then Llvm.pointer_type ctx.llvm_ctx
-      else if is_extern ctx sub_tid && is_fp_param ctx var then
+      if is_extern ctx sub_tid && is_fp_param ctx var then
         Llvm.double_type ctx.llvm_ctx
-      else var_lltype ctx var)
+      else lane_type ctx arg)
 
 let create_arg_types ctx sub_tid =
   arg_types_of ctx sub_tid (get_args ctx sub_tid)
@@ -377,6 +370,22 @@ let create_indirect_call ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
 let thunk_name_of (sub_tid : tid) : string =
   sanitize_name (Tid.name sub_tid) ^ "_hike_thunk"
 
+let is_plt_trampoline ctx (sub : sub term) : bool =
+  let free_vars = Hike_stack_model.free_regs sub in
+  let reg_vars =
+    (* A stub using the frame pointer is not a pure trampoline. *)
+    Base.List.filter free_vars ~f:(fun reg ->
+        not (Var.same reg ctx.sp))
+  in
+  reg_vars = []
+  && Term.enum blk_t sub
+     |> Seq.exists ~f:(fun blk ->
+            Term.enum jmp_t blk
+            |> Seq.exists ~f:(fun j ->
+                   match Jmp.kind j with
+                   | Call _ -> true
+                   | _ -> false))
+
 let thunk_tid_of (sub_tid : tid) : tid =
   Tid.for_name (Tid.name sub_tid ^ ":thunk")
 
@@ -415,7 +424,7 @@ let create_thunk ctx (sub_tid : tid) =
           Base.List.map twin_args ~f:(fun a ->
               if Var.same (Arg.lhs a) window_var then
                 Llvm.pointer_type llvm_ctx
-              else var_lltype ctx (Arg.lhs a))
+              else lane_type ctx a)
         in
         let fn_typ =
           Llvm.function_type ret_typ (Array.of_list arg_typs)
@@ -529,7 +538,7 @@ let is_self_call_stub (ctx : emit_ctx) (sub : sub term) : bool =
                 | Indirect _ -> false)
             | _ -> false))
   in
-  self_targeted && Bil2llvm_mem.is_plt_trampoline ctx sub
+  self_targeted && is_plt_trampoline ctx sub
 
 let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in
@@ -554,7 +563,7 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
             let fallthrough = Some (label_tid l) in
             create_func_call ctx scope llvm_builder blk_tid blk sub fallthrough target
         | None ->
-            if Bil2llvm_mem.is_plt_trampoline ctx sub then begin
+            if is_plt_trampoline ctx sub then begin
               create_func_call ~emit_unreachable:false ctx scope llvm_builder blk_tid
                 blk sub None target;
               create_return ctx scope blk_tid llvm_builder sub

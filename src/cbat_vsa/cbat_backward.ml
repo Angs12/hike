@@ -1132,14 +1132,14 @@ let refine_edge_inline
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
-    : AI.t * Cbat_runctx.refine_ctx =
+    : AI.t =
   let env_in = env in
   let env = constrain_edge ~env ~landmarks:rctx.rc_landmarks acc_cond in
   (* No constraint derived: nothing to deliver. *)
-  if discarded || AI.equal env env_in || AI.equal env AI.bottom then (env, rctx)
+  if discarded || AI.equal env env_in || AI.equal env AI.bottom then env
   else
     let seeds = cond_seeds ~base:env_in env acc_cond in
     let refined =
       Stages.time `Walk (fun () ->
           refine_edge ~sol ~rctx ~seeds env b) in
-    (refined, rctx)
+    refined

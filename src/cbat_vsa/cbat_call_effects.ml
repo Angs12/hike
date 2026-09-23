@@ -72,7 +72,7 @@ let frame_keep ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
 
 let transfer ~(abi : Hike_abi.t) ~(preserved : Var.Set.t) ~(site : site)
     (env : AI.t) : AI.t =
-  let word_bits = 8 * abi.Hike_abi.word in
+  let word_bits = Hike_abi.word_bits abi in
   let rsp = abi.Hike_abi.sp in
   (* A callee's kill summary keeps the caller-saved GPRs it provably
      never writes; the return regs are the call's own lanes.  No

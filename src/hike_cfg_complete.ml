@@ -31,7 +31,7 @@ let load_addr_of (word_bits : int) (d : def term) : exp option =
    denotations ride the block's single pass. *)
 let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : Tid.Set.t =
-  let word_bits = 8 * abi.Hike_abi.word in
+  let word_bits = Hike_abi.word_bits abi in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
          fst
@@ -62,15 +62,17 @@ let option_if_debug msg =
 
 (* The run's block-address entries restricted to this sub — the block
    extents' bounds; cross-sub entries never contain a split. *)
+(* The sub's block tids. *)
+let sub_tids (sub : sub term) : Tid.Set.t =
+  Core.Set.of_list (module Tid)
+    (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
+
 let addressed_starts ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) :
     (Addr.t * tid) list =
-  let sub_tids =
-    Core.Set.of_list (module Tid)
-      (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
-  in
+
   block_addrs
   |> Core.Map.to_alist
-  |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem sub_tids t)
+  |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem (sub_tids sub) t)
 
 (* The dispatch's case words: a bounded plain set no larger than the
    run's block count — the words a resolution may target or split at. *)
@@ -767,16 +769,14 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(word_bits : int) ~(block_addrs : Tid.t Addr.Map.t)
     ~(images : Vsa.section_image list)
     (sub : sub term) : sub term =
-  let sub_tids =
-    Core.Set.of_list (module Tid)
-      (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
-  in
+
   let reblock (blk : blk term) : blk term =
     let js = Seq.to_list (Term.enum jmp_t blk) in
     let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids ~block_addrs
+          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids:(sub_tids sub)
+            ~block_addrs
             ~reaching
             ~images ~blk j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
@@ -807,15 +807,13 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool =
   let denote = denote_of_sol sol in
   let retaddr = retaddr_defs ~abi ~sol sub in
+  let sub_tids = sub_tids sub in
   let fresh = ref Tid.Set.empty in
   Vsa.with_images images (fun () ->
       let sub, block_addrs' =
         prepare_dispatches ~denote ~retaddr ~fresh ~lift_at ~block_addrs sub
       in
-      let sub_tids =
-        Core.Set.of_list (module Tid)
-          (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
-      in
+
       let grew = ref false in
       let resolved' =
         Term.enum blk_t sub
@@ -862,7 +860,7 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(fresh : Tid.Set.t)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
-  let word_bits = 8 * abi.Hike_abi.word in
+  let word_bits = Hike_abi.word_bits abi in
   let sub, live =
     Vsa.with_images images (fun () ->
         let live =

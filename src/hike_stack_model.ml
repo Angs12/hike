@@ -336,6 +336,12 @@ let blk_reads (b : blk term) : Var.Set.t =
   Term.enum phi_t b
   |> Seq.fold ~init:acc ~f:(fun acc p -> Core.Set.union acc (Phi.free_vars p))
 
+(* The sub's free register lanes: its free vars minus the memory vars. *)
+let free_regs (sub : sub term) : var list =
+  Sub.free_vars sub
+  |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
+  |> Core.Set.to_list
+
 (* The vars a sub reads: every def's rhs plus each block's reads. *)
 let sub_reads (s : sub term) : Var.Set.t =
   Term.enum blk_t s

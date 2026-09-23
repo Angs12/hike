@@ -252,7 +252,7 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
       | Some x -> x
       | None ->
           let want_w =
-            match Var.typ v with Type.Imm w -> w | _ -> 8 * ctx.abi.Abi.word
+            match Var.typ v with Type.Imm w -> w | _ -> Hike_abi.word_bits ctx.abi
           in
           match probe_local_family scope blk_tid v ~want_w with
           | Some (val_at_w, bound_w) ->
@@ -488,13 +488,12 @@ and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
       | Some node ->
           storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
             ~index_of:(fun a ->
-                let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
-                Llvm.build_sub a stack0 "" llvm_builder)
+                Llvm.build_sub a (frame_stack0 fr) "" llvm_builder)
             node exp
       | None -> create_exp ctx scope llvm_builder blk_tid exp)
 
 and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
-  let stack0 = Base.Option.value fr.stack0 ~default:fr.anchor_i64 in
+  let stack0 = frame_stack0 fr in
   let region_index llvm_builder rel_rlo a =
     let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
     Llvm.build_sub rel
