@@ -10,23 +10,28 @@ open Bil2llvm_fp
 
 (* Machine calls push a return address the callee's ret pops, so the
    call's fallthrough edge rebinds SP to its pre-call value.  The
-   binding is edge-keyed. *)
+   binding is edge-keyed.  The edge is recorded unconditionally — the
+   phi planner's predecessor set is the rendered edges, so a call whose
+   block does not track SP still needs its fallthrough recorded or the
+   target's phis come out with no incoming. *)
 let restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough_tid =
   let sp_key = ctx.sp in
-  match get_local scope blk_tid sp_key with
-  | None -> ()
-  | Some post_push ->
+  let sp_restore =
+    match get_local scope blk_tid sp_key with
+    | None -> None
+    | Some post_push ->
         let restored =
           Llvm.build_add post_push
             (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) ctx.abi.Abi.word)
             "sp_restored" llvm_builder
         in
-        Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:fallthrough_tid
-          ~term_bb:(get_bb scope blk_tid)
-          ~sp_restore:restored ();
         (match get_local scope fallthrough_tid sp_key with
          | None -> insert_local scope fallthrough_tid sp_key restored
-         | Some _ -> ())
+         | Some _ -> ());
+        Some restored
+  in
+  Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:fallthrough_tid
+    ~term_bb:(get_bb scope blk_tid) ?sp_restore ()
 
 let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let args = get_args ctx call_tid in
