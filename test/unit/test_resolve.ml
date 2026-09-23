@@ -115,6 +115,38 @@ let tests : unit Alcotest.test list =
                | _ -> false)
            | _ -> false));
 
+    (* The lifted `ret` is a plain `Goto` (BAP lifts `retq` as
+       `jmp #retaddr`), not a call; the same retaddr read behind it is
+       the epilogue and canonicalizes the same way. *)
+    pin "RES-22"
+      "the lifted `ret` Goto canonicalizes to the var-free return"
+      (fun () ->
+        let j9_ra = v64 "t22_j9_ra" in
+        let j9_ld =
+          Def.create j9_ra
+            (Bil.Load
+               (Bil.Var (memv "t22_j9_m"), Bil.Var sp, LittleEndian, `r64))
+        in
+        let j9, _ =
+          sub_of "t22_ret_goto"
+            [ [ j9_ld ],
+              [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j9_ra)))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let _, j9', _ =
+          produce Theory.Target.unknown (Program.create ~subs:[ j9 ] ()) j9
+        in
+        check "RES-22"
+          (match jmps_of_blk j9' 0 with
+           | [ j ] -> (
+               match Jmp.kind j with
+               | Call c -> (
+                   match (Call.return c, Call.target c) with
+                   | None, Indirect (Bil.Unknown _) -> true
+                   | _ -> false)
+               | _ -> false)
+           | _ -> false));
+
     (* J1b: the control — the same target read behind a return=Some call
        is a real indirect call, not the epilogue: no rewrite. *)
     pin "RES-07"

@@ -646,6 +646,8 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
           in
           series texp cont
       | _ -> None)
+  | Goto (Indirect (Bil.Var v)) when retaddr_read ~reaching ~retaddr v ->
+      Some [ ret_jmp ~word_bits ]
   | Goto (Indirect texp) -> series texp None
   | _ -> None
 
