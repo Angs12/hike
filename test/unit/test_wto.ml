@@ -384,37 +384,37 @@ let tests : unit Alcotest.test list =
     ]
   @ [
       (* The dispatch-graph adapter over the plain -O0 dispatch shape. *)
-      pin "WTO-25"
+      pin "DG-01"
         "DG-SUCC: the resolved in-sub targets ride the dispatch block's successors (filtered, deduplicated)"
         (fun () ->
           let _sub, entry, b1, b2, foreign, _blocks, succs, _preds = mk_dg_dispatch () in
-          check "WTO-25"
+          check "DG-01"
             (List.length (succs entry) = 2
              && Base.List.count (succs entry) ~f:(Tid.equal b1) = 1
              && Base.List.mem (succs entry) b2 ~equal:Tid.equal
              && not (Base.List.mem (succs entry) foreign ~equal:Tid.equal)));
-      pin "WTO-26" "DG-PRED: the extra edge mirrors into the fresh target's predecessor list"
+      pin "DG-02" "DG-PRED: the extra edge mirrors into the fresh target's predecessor list"
         (fun () ->
           let _sub, entry, _b1, b2, _foreign, _blocks, _succs, preds = mk_dg_dispatch () in
-          check "WTO-26" (Base.List.equal Tid.equal (preds b2) [ entry ]));
-      pin "WTO-27" "DG-PRED: a base successor's predecessor list keeps no duplicate mirror"
+          check "DG-02" (Base.List.equal Tid.equal (preds b2) [ entry ]));
+      pin "DG-03" "DG-PRED: a base successor's predecessor list keeps no duplicate mirror"
         (fun () ->
           let _sub, entry, b1, _b2, _foreign, _blocks, _succs, preds = mk_dg_dispatch () in
-          check "WTO-27" (Base.List.equal Tid.equal (preds b1) [ entry ]));
-      pin "WTO-28" "DG-EMPTY: an empty resolved map is the plain CFG"
+          check "DG-03" (Base.List.equal Tid.equal (preds b1) [ entry ]));
+      pin "DG-04" "DG-EMPTY: an empty resolved map is the plain CFG"
         (fun () ->
           let sub, entry, b1, b2, _foreign, blocks, _succs, _preds = mk_dg_dispatch () in
           let { Dg.succs = plain_succs; Dg.preds = plain_preds; Dg.gained_preds = _ } =
             Dg.make ~cfg:(cfg_of sub) ~blocks Tid.Map.empty sub
           in
-          check "WTO-28"
+          check "DG-04"
             (Base.List.equal Tid.equal (plain_succs entry) [ b1 ]
              && Base.List.is_empty (plain_preds b2)));
-      pin "WTO-29" "DG-WTO: the extra edge alone closes the loop's WTO component"
+      pin "DG-05" "DG-WTO: the extra edge alone closes the loop's WTO component"
         (fun () ->
           let nodes2, l0, l1, l2, loop_succs, loop_preds = mk_dg_loop () in
           let comps = Cw.wto ~nodes:nodes2 ~succ:loop_succs ~pred:loop_preds in
-          check "WTO-29"
+          check "DG-05"
             (match comps with
              | Cw.SCC (h, inner) :: _ ->
                Tid.equal h l0
@@ -422,16 +422,16 @@ let tests : unit Alcotest.test list =
                     (Core.Set.of_list (module Tid) (members (Cw.SCC (h, inner))))
                     (Core.Set.of_list (module Tid) [ l0; l1; l2 ])
              | _ -> false));
-      pin "WTO-30" "ROWS-ENGINE: the completed dispatch's case edges are term edges (one per target)"
+      pin "DG-06" "ROWS-ENGINE: the completed dispatch's case edges are term edges (one per target)"
         (fun () ->
           let entry, b1, b2, succs, _preds = mk_rows_dispatch () in
-          check "WTO-30"
+          check "DG-06"
             (Base.List.count (succs entry) ~f:(Tid.equal b1) = 1
              && Base.List.count (succs entry) ~f:(Tid.equal b2) = 1));
-      pin "WTO-31" "ROWS-ENGINE: the case target mirrors into preds"
+      pin "DG-07" "ROWS-ENGINE: the case target mirrors into preds"
         (fun () ->
           let entry, _b1, b2, _succs, preds = mk_rows_dispatch () in
-          check "WTO-31" (Base.List.equal Tid.equal (preds b2) [ entry ]));
+          check "DG-07" (Base.List.equal Tid.equal (preds b2) [ entry ]));
     ]
 
 let () = run "wto" tests

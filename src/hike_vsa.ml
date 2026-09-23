@@ -34,11 +34,7 @@ let written_regs_of_sub (sub : sub term) : Var.Set.t =
 
 let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
     Var.Set.t option Tid.Map.t =
-  let subs =
-    Term.enum sub_t prog
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
-        Core.Map.set m ~key:(Term.tid s) ~data:s)
-  in
+  let subs = Hike_stack_model.sub_map prog in
   let reads_retaddr (rhs : exp) : bool =
     Base.Option.value_map (Model.addr_of_rhs rhs) ~default:false
       ~f:(fun (addr, _) -> Model.is_return_address_shape ~abi addr)

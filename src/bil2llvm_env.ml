@@ -211,6 +211,7 @@ let sanitize_name = Hike_stack_model.sanitize_tid_name
 let frame_stack0 (fr : sub_frame) : Llvm.llvalue =
   Base.Option.value fr.stack0 ~default:fr.anchor_i64
 
+
 (* The synthetic indirect-call sub: every pointer call targets it, and
    its convention is [window_conv_args]. *)
 let indirect_call_tid : tid = Tid.for_name "indirect_call"

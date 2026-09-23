@@ -342,6 +342,12 @@ let blk_reads (b : blk term) : Var.Set.t =
   Term.enum phi_t b
   |> Seq.fold ~init:acc ~f:(fun acc p -> Core.Set.union acc (Phi.free_vars p))
 
+(* The program's subs keyed by tid. *)
+let sub_map (prog : program term) : sub term Tid.Map.t =
+  Term.enum sub_t prog
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
+      Core.Map.set m ~key:(Term.tid s) ~data:s)
+
 (* The sub's free register lanes: its free vars minus the memory vars. *)
 let free_regs (sub : sub term) : var list =
   Sub.free_vars sub

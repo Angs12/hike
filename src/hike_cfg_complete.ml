@@ -46,9 +46,10 @@ let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
 
 (* A target variable whose reaching def reads the return-address cell:
    a return, never a dispatch candidate. *)
-let retaddr_read ~(reaching : tid Var.Map.t) ~(retaddr : Tid.Set.t)
+let retaddr_read ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
     (v : var) : bool =
-  Base.Option.value_map (Core.Map.find reaching v) ~default:false
+  Base.Option.value_map (Core.Map.find last_defs v |> Option.map Term.tid)
+    ~default:false
     ~f:(fun dtid -> Core.Set.mem retaddr dtid)
 
 (* The dispatch resolution's debug trace; compiled out of production. *)
@@ -58,6 +59,20 @@ let option_if_debug msg =
 #else
   ignore msg
 #endif
+
+(* The jmp's indirect target when it is not a retaddr read: the ret
+   epilogue's target is the stack-symbolic cell, never a dispatch. *)
+let dispatch_target ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
+    (j : jmp term) : exp option =
+  let target =
+    match Jmp.kind j with
+    | Call c -> (match Call.target c with Indirect e -> Some e | _ -> None)
+    | Goto (Indirect e) -> Some e
+    | _ -> None
+  in
+  match target with
+  | Some (Bil.Var v) when retaddr_read ~last_defs ~retaddr v -> None
+  | t -> t
 
 (* The run's block-address entries restricted to this sub — the block
    extents' bounds; cross-sub entries never contain a split. *)
@@ -267,18 +282,13 @@ let split_entry ~(starts : (Addr.t * tid) list)
    a bare-variable target's words come from its reaching definition's
    before-env, never the noreturn-poisoned post-transfer state. *)
 let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(reaching : tid Var.Map.t)
+    ~(last_defs : def term Var.Map.t)
     ~(blk : blk term) (texp : exp) : Cbat_word.t list option =
   match texp with
   | Bil.BinOp (Bil.PLUS, _, _) -> bounded_words ~denote ~block_addrs ~blk texp
   | Bil.Var v ->
-    let reaching_def dtid =
-      Seq.find (Term.enum def_t blk) ~f:(fun d ->
-          Tid.equal (Term.tid d) dtid)
-    in
-    Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
-        Base.Option.bind (reaching_def dtid) ~f:(fun add_def ->
-            bounded_words ~denote ~block_addrs ~blk ~def:add_def (Def.rhs add_def)))
+    Base.Option.bind (Core.Map.find last_defs v) ~f:(fun add_def ->
+        bounded_words ~denote ~block_addrs ~blk ~def:add_def (Def.rhs add_def))
   | _ -> None
 
 (* The dispatch's guard subject and base: of the target's top-level
@@ -296,19 +306,13 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
   let starts = addressed_starts ~block_addrs sub in
   let dispatch_word blk =
-    let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
+    let last_defs = Vsa.last_defs blk in
     Base.List.find_map (Term.enum jmp_t blk |> Seq.to_list) ~f:(fun j ->
-        let target =
-          match Jmp.kind j with
-          | Call c -> (match Call.target c with Indirect e -> Some e | _ -> None)
-          | Goto (Indirect e) -> Some e
-          | _ -> None
-        in
-        match target with
-        | Some (Bil.Var v) when retaddr_read ~reaching ~retaddr v -> None
-        | _ ->
+        match dispatch_target ~last_defs ~retaddr j with
+        | None -> None
+        | Some texp ->
           Base.Option.bind
-            ~f:(dispatch_words ~denote ~block_addrs ~reaching ~blk) target
+            ~f:(dispatch_words ~denote ~block_addrs ~last_defs ~blk) (Some texp)
           |> Base.Option.bind ~f:(fun words ->
                  Base.List.find_map words ~f:(fun w ->
                      let a = Cbat_word.to_word w in
@@ -345,49 +349,7 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
       prepare_dispatches ~denote ~retaddr ~fresh ~lift_at
         ~block_addrs:block_addrs' sub'
 
-let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
-    ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
-  let singleton_value ?def e =
-    Base.Option.bind (Base.Result.ok (denote ~blk ?def e)) ~f:(fun ws ->
-        if Cbat_word.is_one (Vsa.WordSet.cardinality ws) then
-          Base.Option.bind (Vsa.WordSet.min_elem ws)
-            ~f:(fun w -> Base.Result.ok (Cbat_word.to_int64 w))
-        else None)
-  in
-  let pick x y =
-    match singleton_value x with
-    | Some bval -> Some (y, x, bval)
-    | None -> (
-        match singleton_value y with
-        | Some bval -> Some (x, y, bval)
-        | None -> None)
-  in
-  let reaching_sum v =
-    match Core.Map.find reaching v with
-    | None -> None
-    | Some dtid -> (
-        match
-          Seq.find (Term.enum def_t blk) ~f:(fun d ->
-              Tid.equal (Term.tid d) dtid)
-        with
-        | Some add_def -> (
-            match Def.rhs add_def with
-            | Bil.BinOp (Bil.PLUS, x, y) -> (
-                match singleton_value ~def:add_def x with
-                | Some bval -> Some (y, x, bval)
-                | None -> (
-                    match singleton_value ~def:add_def y with
-                    | Some bval -> Some (x, y, bval)
-                    | None -> None))
-            | _ -> None)
-        | None -> None)
-  in
-  match texp with
-  | Bil.BinOp (Bil.PLUS, x, y) -> pick x y
-  | Bil.Var v -> reaching_sum v
-  | _ -> None
-
-let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
+let delta_subject ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
   let singleton_value ?def e =
     match Result.to_option (denote ~blk ?def e) with
@@ -405,14 +367,10 @@ let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
     | None -> Base.Option.map (singleton_value ?def y) ~f:(fun bval -> (x, y, bval))
   in
   let reaching_sum v =
-    Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
-        Base.Option.bind
-          (Seq.find (Term.enum def_t blk) ~f:(fun d ->
-               Tid.equal (Term.tid d) dtid))
-          ~f:(fun add_def ->
-            match Def.rhs add_def with
-            | Bil.BinOp (Bil.PLUS, x, y) -> pick ~def:add_def x y
-            | _ -> None))
+    Base.Option.bind (Core.Map.find last_defs v) ~f:(fun add_def ->
+        match Def.rhs add_def with
+        | Bil.BinOp (Bil.PLUS, x, y) -> pick ~def:add_def x y
+        | _ -> None)
   in
   match texp with
   | Bil.BinOp (Bil.PLUS, x, y) -> pick x y
@@ -423,17 +381,17 @@ let delta_subject ~(denote : denote) ~(reaching : tid Var.Map.t)
    set, every word naming an in-sub block.  The pairs are
    BASE-RELATIVE — the guard word is the delta [w - base] — so the
    runtime comparison never depends on where the table was linked. *)
-let resolved_pairs_of ~(denote : denote) ~(reaching : tid Var.Map.t)
+let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) (texp : exp) :
     (exp * (word * tid) list * Int64.t) option =
   let blocks = block_addrs in
-  match dispatch_words ~denote ~block_addrs ~reaching ~blk texp with
+  match dispatch_words ~denote ~block_addrs ~last_defs ~blk texp with
   | None -> None
   | Some ws ->
     if Base.List.length ws > Core.Map.length blocks then None
     else
-        match delta_subject ~denote ~reaching ~blk texp with
+        match delta_subject ~denote ~last_defs ~blk texp with
         | None -> None
         | Some (delta_exp, base_exp, bval) ->
           let subject =
@@ -544,7 +502,7 @@ let image_word_at (bytes : Bytes.t) (off : int) ~(endian : endian)
    the dispatch's source may produce; a memory-read value only when
    every address the table load may read is bounded and each slot's
    image word is one of the case addresses.  Any doubt is incomplete. *)
-let table_covered ~(denote : denote) ~(reaching : tid Var.Map.t)
+let table_covered ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(blk : blk term) ~(base : Int64.t) ~(pairs : (word * tid) list)
     ~(images : Vsa.section_image list)
     (texp : exp) : bool =
@@ -570,10 +528,7 @@ let table_covered ~(denote : denote) ~(reaching : tid Var.Map.t)
   let load =
     Base.Option.bind value_var ~f:(fun e ->
         match e with
-        | Bil.Var v ->
-          Base.Option.bind (Core.Map.find reaching v) ~f:(fun dtid ->
-              Seq.find (Term.enum def_t blk) ~f:(fun d ->
-                  Tid.equal (Term.tid d) dtid))
+        | Bil.Var v -> Core.Map.find last_defs v
         | _ -> None)
   in
   (* One enumerated address: inside some image, and its slot's image
@@ -622,22 +577,22 @@ let table_covered ~(denote : denote) ~(reaching : tid Var.Map.t)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(word_bits : int) ~(sub_tids : Tid.Set.t)
     ~(block_addrs : Tid.t Addr.Map.t)
-    ~(reaching : tid Var.Map.t) ~(images : Vsa.section_image list)
+    ~(last_defs : def term Var.Map.t) ~(images : Vsa.section_image list)
     ~(blk : blk term) (j : jmp term) :
     jmp term list option =
   let series texp cont =
     Base.Option.bind
-      (resolved_pairs_of ~denote ~reaching ~sub_tids ~block_addrs ~blk texp)
+      (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs ~blk texp)
       ~f:(fun (subject, pairs, base) ->
           if
-            table_covered ~denote ~reaching ~blk ~base ~pairs ~images texp
+            table_covered ~denote ~last_defs ~blk ~base ~pairs ~images texp
           then dispatch_jmps j subject pairs cont
           else None)
   in
   match Jmp.kind j with
   | Call c -> (
       match (Call.return c, Call.target c) with
-      | None, Indirect (Bil.Var v) when retaddr_read ~reaching ~retaddr v ->
+      | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
           Some [ ret_jmp ~word_bits ]
       | _, Indirect texp ->
           let cont =
@@ -647,7 +602,7 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
           in
           series texp cont
       | _ -> None)
-  | Goto (Indirect (Bil.Var v)) when retaddr_read ~reaching ~retaddr v ->
+  | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
       Some [ ret_jmp ~word_bits ]
   | Goto (Indirect texp) -> series texp None
   | _ -> None
@@ -668,11 +623,11 @@ let indirect_live ~(denote : denote) ~(retaddr : Tid.Set.t)
   if Core.Set.is_empty fresh then Tid.Set.empty
   else
     let add_target acc blk texp =
-      let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
+      let last_defs = Vsa.last_defs blk in
       match texp with
-      | Bil.Var v when retaddr_read ~reaching ~retaddr v -> acc
+      | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> acc
       | _ -> (
-          match dispatch_words ~denote ~block_addrs ~reaching ~blk texp with
+          match dispatch_words ~denote ~block_addrs ~last_defs ~blk texp with
           | None -> Core.Set.union acc fresh
           | Some ws ->
             Base.List.fold ws ~init:acc ~f:(fun acc w ->
@@ -771,12 +726,12 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
 
   let reblock (blk : blk term) : blk term =
     let js = Seq.to_list (Term.enum jmp_t blk) in
-    let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
+    let last_defs = Vsa.last_defs blk in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
           rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids:(sub_tids sub)
             ~block_addrs
-            ~reaching
+            ~last_defs
             ~images ~blk j
           |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
     in
@@ -817,21 +772,13 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
       let resolved' =
         Term.enum blk_t sub
         |> Seq.fold ~init:resolved ~f:(fun acc blk ->
-            let reaching = Core.Map.map (Vsa.last_defs blk) ~f:Term.tid in
+            let last_defs = Vsa.last_defs blk in
             Term.enum jmp_t blk
             |> Seq.fold ~init:acc ~f:(fun acc j ->
-                let target =
-                  match Jmp.kind j with
-                  | Call c -> (
-                      match Call.target c with Indirect e -> Some e | _ -> None)
-                  | Goto (Indirect e) -> Some e
-                  | _ -> None
-                in
-                match target with
+                match dispatch_target ~last_defs ~retaddr j with
                 | None -> acc
-                | Some (Bil.Var v) when retaddr_read ~reaching ~retaddr v -> acc
                 | Some texp -> (
-                    match resolved_pairs_of ~denote ~reaching ~sub_tids
+                    match resolved_pairs_of ~denote ~last_defs ~sub_tids
                             ~block_addrs:block_addrs' ~blk texp with
                     | None -> acc
                     | Some (_, pairs, _) ->

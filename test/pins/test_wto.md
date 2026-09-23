@@ -29,10 +29,10 @@ Source: `test_cbat/test_wto.ml`. Target: `test/unit/test_wto.ml`.
 | WTO-22 | Reversed-accessor battery: `heads_of_comps` equals the head set | in `heads_of_comps`, include `Vertex` tids under the reversed ordering | to be recorded |
 | WTO-23 | `Cbat_wto.Scc.partition` isolates a 2-cycle and a singleton | in `src/cbat_vsa/cbat_wto.ml` `Scc.partition`, skip the transpose pass so components merge | to be recorded |
 | WTO-24 | `Scc.partition` keeps two cycles joined by a bridge as two disjoint components | in `Scc.partition`, union bridge-reachable components | to be recorded |
-| WTO-25 | `Cbat_dispatch_graph.make` adds resolved in-sub targets to the dispatch block's successors, filtered and deduplicated | in `src/cbat_vsa/cbat_dispatch_graph.ml` `make`, skip the `blocks` filter or drop the dedup | to be recorded |
-| WTO-26 | `make` mirrors each extra edge into the fresh target's predecessor list | in `make`, omit the predecessor mirror | to be recorded |
-| WTO-27 | `make` keeps no duplicate mirror when the target is already a base successor | in `make`, add an unguarded mirror for base successors | to be recorded |
-| WTO-28 | An empty resolved map yields the plain CFG | in `make`, add a synthetic extra edge even with an empty resolved map | to be recorded |
-| WTO-29 | The extra resolved edge alone closes the loop's WTO component | in `make`, drop the extra edge so the loop stays acyclic | to be recorded |
-| WTO-30 | A completed dispatch's case edges are term edges, one per target | in `make`, filter the rewrite's term edges out of the successor list | to be recorded |
-| WTO-31 | The completed dispatch's case target mirrors into preds | in `make`, omit the predecessor mirror for term edges | to be recorded |
+| DG-01 | `Cbat_dispatch_graph.make` adds resolved in-sub targets to the dispatch block's successors, filtered and deduplicated | in `src/cbat_vsa/cbat_dispatch_graph.ml` `make`, skip the `blocks` filter or drop the dedup | to be recorded |
+| DG-02 | `make` mirrors each extra edge into the fresh target's predecessor list | in `make`, omit the predecessor mirror | to be recorded |
+| DG-03 | `make` keeps no duplicate mirror when the target is already a base successor | in `make`, add an unguarded mirror for base successors | to be recorded |
+| DG-04 | An empty resolved map yields the plain CFG | in `make`, add a synthetic extra edge even with an empty resolved map | to be recorded |
+| DG-05 | The extra resolved edge alone closes the loop's WTO component | in `make`, drop the extra edge so the loop stays acyclic | to be recorded |
+| DG-06 | A completed dispatch's case edges are term edges, one per target | in `make`, filter the rewrite's term edges out of the successor list | to be recorded |
+| DG-07 | The completed dispatch's case target mirrors into preds | in `make`, omit the predecessor mirror for term edges | to be recorded |
