@@ -351,7 +351,7 @@ let run_anchored (sub : sub term) : Vsa.vsa_sol =
 
 (* The VLA events through the shape test. *)
 let dyn_alloc_events (sub : sub term) : Tid.Set.t =
-  Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts sub
+  Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts sub
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
 

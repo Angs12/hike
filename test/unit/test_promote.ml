@@ -20,7 +20,7 @@ let plus_addr sp (off : int64) : exp =
 let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
   let sub =
     Cu.stamp_dyn_allocs
-      ~dynamic_alloc_tids:(Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts sub) sub
+      ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts sub) sub
   in
   Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub
 

@@ -178,7 +178,7 @@ let pass_attrib proj =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
            Core.Map.set m ~key:(Term.tid sub)
-             ~data:(Hike_promote.dynamic_alloc_tids_of ~facts sub))
+             ~data:(Hike_sections.dynamic_alloc_tids_of ~facts sub))
   in
   Project.map_program proj ~f:(fun prog ->
       let prog =

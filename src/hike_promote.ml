@@ -42,10 +42,7 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
     if
       Stdlib.Int64.compare rel w64 >= 0
       && Stdlib.Int64.equal (Stdlib.Int64.rem rel w64) 0L
-    then
-      Some
-        (Stdlib.Int64.to_int
-           (Stdlib.Int64.div (Stdlib.Int64.sub rel w64) w64))
+    then Some (Model.slot_index_of_offset ~word rel)
     else None
   in
   Term.enum blk_t sub
@@ -74,10 +71,8 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
                                 match slot_of_start a d_sp with
                                 | Some i ->
                                     let cell_lo =
-                                      Stdlib.Int64.add
-                                        (Stdlib.Int64.add d_sp w64)
-                                        (Stdlib.Int64.mul w64
-                                           (Stdlib.Int64.of_int i))
+                                      Stdlib.Int64.add d_sp
+                                        (Model.slot_offset ~word i)
                                     in
                                     let occ_hi =
                                       Stdlib.Int64.add a
@@ -104,7 +99,7 @@ let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
 let region_id_of_storage (s : Sections.storage) : int =
   match s with
   | Stack_region n | Data_region n -> n
-  | Stack_residue | Arg_slot _ -> 0
+  | Stack_residue | Arg_slot _ -> Model.residue_id
 
 type conv =
   | Conv_region of int * (int64 * int64)  (* the region id and span *)
@@ -113,22 +108,21 @@ type conv =
   | Conv_global of int                    (* the component id *)
   | Keep
 
-let conversion_of ~(word : int) ~(entry : int64) ~(spans : Sections.data_span list)
-    ~(denote : blk:blk term -> ?def:def term -> exp ->
-                (Vsa.WordSet.t, Type.error) Result.t)
+(* The rewrite decision reads the attribution's own projection of the
+   def (ctx.projections) — the collect path computed it; the rewrite
+   cannot disagree with the tree. *)
+let conversion_of ~(word : int) ~(entry : int64)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
-    ~(blk : blk term) ~(d : def term)
+    ~(projected : (Sections.Tag.t option * Sections.portion list) option)
+    ~(d : def term)
     ~(demoted : int list) : conv * Sections.Tag.t option =
   match Sections.access_of d with
   | None -> (Keep, None)
-  | Some (addr, width, _) -> (
-      match denote ~blk ~def:d addr with
-      | Error _ -> (Keep, None)
-      | Ok ws -> (
-          let tag, portions =
-            Sections.range_of_denotation ~word ~entry ~spans
-              ~rip:(Sections.is_rip_relative d) ~width ws
-          in
+  | Some (addr, _, _) -> (
+      match projected with
+      (* A failed attribution query keeps the memory form. *)
+      | None -> (Keep, None)
+      | Some (tag, portions) ->
           (* An above-entry unbounded address keeps its memory form: its
              storage is the caller's world, which the typed arguments
              carry.  A below-entry unbounded address is a pointer into
@@ -175,7 +169,7 @@ let conversion_of ~(word : int) ~(entry : int64) ~(spans : Sections.data_span li
                   | _, Data_region id -> (Conv_global id, tag)
                   | _ -> (Keep, tag))
               | None -> (Keep, tag))
-          | _ -> (Keep, tag)))
+          | _ -> (Keep, tag))
 
 (* Replaces every Load/Store node of the expression with [dst]. *)
 let rewrite_load_node ~(dst : exp) (e : exp) : exp =
@@ -265,124 +259,11 @@ let bind_site_args ~(word : int) (bindings : site_binding list)
         | Some next -> Term.prepend def_t blk ~before:(Term.tid next) arg
         | None -> Term.append def_t blk arg)
 
-(* The dynamic-allocation event: a def that moves SP by a runtime
-   size — the direct [SP +/- X] form or a copy chain reaching it,
-   with a non-fixed size and a strictly-below-SP value. *)
-let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
-    (sub : sub term) : Tid.Set.t =
-  let sp_base = Var.base facts.abi.Hike_abi.sp in
-  let is_sp v = Var.equal (Var.base v) sp_base in
-  let denote = facts.denote in
-  (* The size's own denotation confirms the event: a singleton
-     displacement is a proven-constant frame adjust (no alloca), a
-     non-singleton or unknown one is the runtime move. *)
-  let runtime_at ~blk ~def d sz =
-    match denote ~blk ~def:d sz with
-    | Error _ -> true
-    | Ok ws ->
-      not (Cbat_vsa.WordSet.is_top ws)
-      && (match Cbat_vsa.WordSet.min_elem ws, Cbat_vsa.WordSet.max_elem ws with
-          | Some lo, Some hi -> not (Cbat_word.equal lo hi)
-          | _ -> true)
-  in
-  (* A literal size is fixed; a var defers to its def; a def cycle or
-     any other exp is runtime. *)
-  let rec runtime_size chain seen sz =
-    match sz with
-    | Bil.Int _ -> false
-    | Bil.Var v -> var_size chain seen v
-    | _ -> true
-  and var_size chain seen v =
-    let b = Var.base v in
-    if Core.Set.mem seen b then true
-    else
-      let next d = runtime_size chain (Core.Set.add seen b) (Def.rhs d) in
-      Core.Option.value ~default:true (Core.Option.map ~f:next (Core.Map.find chain b))
-  in
-  (* The def's value must land strictly below the old SP (a
-     decrement); an unknown keeps the runtime-move verdict. *)
-  let descends ~blk ~def d =
-    match
-      (denote ~blk ~def:d (Bil.Var sp_base), denote ~blk ~def:d (Def.rhs d))
-    with
-    | Ok old, Ok neu when not (Vsa.WordSet.is_top neu) -> (
-      match (Vsa.WordSet.stack_offsets old, Vsa.WordSet.stack_offsets neu) with
-      | Some old_offs, Some neu_offs -> (
-        match Model.singleton_offset old_offs with
-        | Some old_off -> (
-          match Vsa.WordSet.Clp.max_elem neu_offs with
-          | Some nhi -> (
-            match Cbat_word.to_int64 nhi with
-            | Ok hi -> Stdlib.Int64.compare hi old_off < 0
-            | Error _ -> true)
-          | None -> true)
-        | None -> true)
-      | _ -> true)
-    | _ -> true
-  in
-  (* The direct [SP +/- X] form, or the copy chain reaching it. *)
-  let rec event_rhs chain seen rhs =
-    match rhs with
-    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Var a, sz) when is_sp a ->
-      runtime_size chain seen sz
-    | Bil.Var v ->
-      let b = Var.base v in
-      if Core.Set.mem seen b then false
-      else
-        let next d = event_rhs chain (Core.Set.add seen b) (Def.rhs d) in
-        Core.Option.value ~default:false
-          (Core.Option.map ~f:next (Core.Map.find chain b))
-    | _ -> false
-  in
-  (* The sequential walk: the chain holds the defs seen so far, in
-     block/def order. *)
-  Term.enum blk_t sub
-  |> Seq.fold ~init:(Tid.Set.empty, Var.Map.empty)
-       ~f:(fun (events, chain) blk ->
-         Seq.fold (Term.enum def_t blk) ~init:(events, chain)
-           ~f:(fun (events, chain) d ->
-             if is_sp (Def.lhs d) then
-               (match Model.addr_of_rhs (Def.rhs d) with
-                | Some (sz, _) ->
-                  if event_rhs chain Var.Set.empty (Def.rhs d)
-                     && runtime_at ~blk ~def:d d sz
-                     && descends ~blk ~def:d d
-                  then (Core.Set.add events (Term.tid d), chain)
-                  else (events, chain)
-                | None ->
-                  if event_rhs chain Var.Set.empty (Def.rhs d)
-                     && descends ~blk ~def:d d
-                  then (Core.Set.add events (Term.tid d), chain)
-                  else (events, chain))
-             else
-               (events,
-                Core.Map.set chain ~key:(Var.base (Def.lhs d)) ~data:d)))
-       |> fst
-
 (* The promotion's per-sub input facts. *)
 type facts = {
   prom_arity : int;
   prom_resolved : Tid.t option Tid.Map.t;
 }
-
-(* The def's memory node is a LOAD of (addr, size); stores are not. *)
-let load_of_rhs (e : exp) : (exp * Size.t) option =
-  match Model.addr_of_rhs e with
-  | Some (addr, size) ->
-      if Core.Option.is_some (Model.store_data_of_rhs e) then None
-      else Some (addr, size)
-  | None -> None
-
-(* Callee slots sit at [entry_rsp + word + word*i]; [entry_rsp] is the
-   window base — the caller's SP at the call. *)
-let slot_index_of ~(word : int) (k : int64) : int option =
-  let w = Stdlib.Int64.of_int word in
-  if Stdlib.Int64.compare k w >= 0 && Stdlib.Int64.equal (Stdlib.Int64.rem k w) 0L
-  then
-    Some
-      (Stdlib.Int64.to_int
-         (Stdlib.Int64.div (Stdlib.Int64.sub k w) w))
-  else None
 
 (* Resolves each indirect call's target through its denotation. *)
 let caller_side ~(denote : blk:blk term -> ?def:def term -> exp ->
@@ -441,13 +322,14 @@ let promote_sub ~(abi : Hike_abi.t) (facts : facts)
   let sub =
     if callee_exempt then sub
     else
-      (* Promotion defines the sub's whole argument convention: strip
-         the sub's args, then append the slots in signature order. *)
-      let sub = Term.filter arg_t sub ~f:(Fun.const false) in
-      Base.List.init facts.prom_arity ~f:(fun i ->
-          Arg.create ~intent:In (Model.arg_slot ~word i)
-            (Bil.Var (Model.arg_slot ~word i)))
-      |> Base.List.fold ~init:sub ~f:(fun sub a -> Term.append arg_t sub a)
+      (* Promotion defines the sub's whole argument convention: the
+         slots in signature order replace the sub's args. *)
+      let slots =
+        Base.List.init facts.prom_arity ~f:(fun i ->
+            Arg.create ~intent:In (Model.arg_slot ~word i)
+              (Bil.Var (Model.arg_slot ~word i)))
+      in
+      Model.set_sig sub slots
   in
     Term.map blk_t sub ~f:(fun blk ->
         (* A resolved target becomes direct; the jmp keeps its tid,
@@ -539,8 +421,10 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                 | None -> 0
               in
               let conv, _tag =
-                conversion_of ~word ~entry ~spans ~denote ~tree
-                  ~data:ctx.data_tree ~blk ~d ~demoted
+                conversion_of ~word ~entry ~tree
+                  ~data:ctx.data_tree
+                  ~projected:(Base.Option.join (Core.Map.find ctx.projections (Term.tid d)))
+                  ~d ~demoted
               in
               let d' = rewrite_def ~word ~conv ~bits d in
               match conv with

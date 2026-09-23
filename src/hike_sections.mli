@@ -85,15 +85,6 @@ module Tag = Hike_stack_model.Tag
 
 type sec_tag = Hike_stack_model.sec_tag
 
-(** The completed attribution: the finalized trees, the def tags, and
-    the data spans served whole. *)
-type ctx = {
-  sub_trees : sub_tree Tid.Map.t;
-  data_tree : data_tree;
-  tags : sec_tag Tid.Map.t;
-  whole : data_span list;
-}
-
 (** One projected portion of an access: the occupied interval in one
     space and its conversion eligibility there. *)
 type portion = {
@@ -103,6 +94,16 @@ type portion = {
   pt_elig : bool;
 }
 [@@deriving equal, compare, sexp]
+
+(** The completed attribution: the finalized trees, the def tags, each
+    access def's projection, and the data spans served whole. *)
+type ctx = {
+  sub_trees : sub_tree Tid.Map.t;
+  data_tree : data_tree;
+  tags : sec_tag Tid.Map.t;
+  projections : (sec_tag option * portion list) option Tid.Map.t;
+  whole : data_span list;
+}
 
 (** Projects one address denotation of [width] bytes into its
     occupied-byte portions per represented space, plus the def's tag.
@@ -138,6 +139,10 @@ val attribute :
   spans:data_span list ->
   program term ->
   ctx
+
+(** The dynamic-allocation events: the defs that move SP by a runtime
+    size — a non-fixed size and a strictly-below-SP value. *)
+val dynamic_alloc_tids_of : facts:Hike_kb.facts -> sub term -> Tid.Set.t
 
 (** The ownership query: the finalized binding owning [r]. *)
 val storage_of_range : range_storage Tree.t -> range -> range_storage option

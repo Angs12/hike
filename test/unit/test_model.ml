@@ -135,7 +135,7 @@ let tests : unit Alcotest.test list =
         let a5 = straight_sub "pr_a5_vla" [ a5_lit; a5_rbx_def; a5_bnd ] in
         check "MOD-01"
           (Core.Set.is_empty
-             (Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5)));
+             (Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5)));
 
     pin "MOD-02"
       "PR-A5: the runtime-unbounded decrement is the event; the literal decrement is not"
@@ -146,7 +146,7 @@ let tests : unit Alcotest.test list =
         in
         let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
         let a5u_events =
-          Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5u
+          Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5u
         in
         check "MOD-02"
           (Core.Set.equal a5u_events (tid_set [ Term.tid a5_vla ])));
@@ -160,7 +160,7 @@ let tests : unit Alcotest.test list =
         in
         let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
         let a5u_events =
-          Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5u
+          Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5u
         in
         let a5_stamped =
           Sm.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u
@@ -185,7 +185,7 @@ let tests : unit Alcotest.test list =
         let a5c = straight_sub "pr_a5c_chain" [ a5c_d1; a5c_d2; a5c_sp ] in
         check "MOD-04"
           (Core.Set.equal
-             (Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5c)
+             (Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5c)
              (tid_set [ Term.tid a5c_sp ])));
 
     pin "MOD-05"
@@ -206,7 +206,7 @@ let tests : unit Alcotest.test list =
         let a5d = straight_sub "pr_a5d_plus" [ a5d_d1; a5d_sp ] in
         check "MOD-05"
           (Core.Set.equal
-             (Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5d)
+             (Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5d)
              (tid_set [ Term.tid a5d_sp ])));
 
     pin "MOD-06"
@@ -228,7 +228,7 @@ let tests : unit Alcotest.test list =
         let fa5e, a5e = fixture_facts_sub a5e in
         check "MOD-06"
           (Core.Set.is_empty
-             (Hike.Promote.dynamic_alloc_tids_of ~facts:fa5e a5e)));
+             (Hike.Sections.dynamic_alloc_tids_of ~facts:fa5e a5e)));
 
     pin "MOD-07"
       "PR-A5b: the LOOP-CARRIED VLA is the event — the widened head does not hide it"
@@ -250,7 +250,7 @@ let tests : unit Alcotest.test list =
               [], [] ]
         in
         let a5b_events =
-          Hike.Promote.dynamic_alloc_tids_of ~facts:top_facts a5b
+          Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5b
         in
         let a5b_body_sp =
           Term.enum blk_t a5b

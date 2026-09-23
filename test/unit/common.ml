@@ -131,7 +131,7 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
           |> Option.value ~default:(Tid.Map.empty, sub)
         in
         Sm.stamp_dyn_allocs
-          ~dynamic_alloc_tids:(Hike.Promote.dynamic_alloc_tids_of ~facts sub') sub')
+          ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts sub') sub')
   in
   let ctx =
     Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base

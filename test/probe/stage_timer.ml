@@ -45,7 +45,7 @@ let () =
     (* Decomposition: the VLA events are the shape test. *)
     let t0 = Unix.gettimeofday () in
     let _events =
-      Hike.Promote.dynamic_alloc_tids_of ~facts:(Hike.Kb.build ~block_envs:Tid.Map.empty ~block_addrs:(Core.Map.empty (module Addr)) ~target) sub in
+      Hike.Sections.dynamic_alloc_tids_of ~facts:(Hike.Kb.build ~block_envs:Tid.Map.empty ~block_addrs:(Core.Map.empty (module Addr)) ~target) sub in
     let t_analyze = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE event-detect             %8.3fs\n" t_analyze;
 

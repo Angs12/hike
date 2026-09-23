@@ -49,7 +49,7 @@ let passcost_main (args : string list) : unit =
                    n + Seq.length (Term.enum def_t blk))
           in
           let _events, t_rel =
-            time (fun () -> Hike.Promote.dynamic_alloc_tids_of ~facts sub)
+            time (fun () -> Hike.Sections.dynamic_alloc_tids_of ~facts sub)
           in
           let _envs, t_vsa =
             time (fun () ->
@@ -136,7 +136,7 @@ let () =
             Hike.Kb.build ~block_envs:Tid.Map.empty
               ~block_addrs:(Core.Map.empty (module Addr)) ~target
           in
-          let ntags = Core.Set.length (Hike.Promote.dynamic_alloc_tids_of ~facts sub) in
+          let ntags = Core.Set.length (Hike.Sections.dynamic_alloc_tids_of ~facts sub) in
           Printf.eprintf "probe: %s done in %.3fs\n%!" name dt;
           (dt, name, nblk, ndefs, ntags))
         subs

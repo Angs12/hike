@@ -191,15 +191,6 @@ module Tag = Hike_stack_model.Tag
 
 type sec_tag = Hike_stack_model.sec_tag
 
-type ctx = {
-  sub_trees : sub_tree Tid.Map.t;
-  data_tree : data_tree;
-  tags : sec_tag Tid.Map.t;
-  (* The data spans served whole, computed once by [attribute] and
-     shared by the finalize and both spec projections. *)
-  whole : data_span list;
-}
-
 type portion = {
   pt_sec : sec;
   pt_lo : int64;
@@ -207,6 +198,19 @@ type portion = {
   pt_elig : bool;
 }
 [@@deriving equal, compare, sexp]
+
+type ctx = {
+  sub_trees : sub_tree Tid.Map.t;
+  data_tree : data_tree;
+  tags : sec_tag Tid.Map.t;
+  (* Each access def's (tag, portions) projection; [None] = the
+     attribution's query failed and the rewrite keeps the memory form. *)
+  projections : (sec_tag option * portion list) option Tid.Map.t;
+  (* The data spans served whole, computed once by [attribute] and
+     shared by the finalize and both spec projections. *)
+  whole : data_span list;
+}
+
 
 (* The sub-local line: entry RSP at [entry], signed positions; the
    return-address bytes are [entry, entry + word - 1], then Args. *)
@@ -398,6 +402,10 @@ type collecting = {
   data : member list Tree.t;
   subs : (member list Tree.t) Tid.Map.t;
   tags : sec_tag Tid.Map.t;
+  (* The projection the rewrite consumes: [None] = the query failed
+     (the collect path claims the full span; the rewrite keeps the
+     memory form). *)
+  projections : (sec_tag option * portion list) option Tid.Map.t;
 }
 
 (* The intersecting bindings merge into one: the inclusive hull, the
@@ -541,20 +549,32 @@ let collect (env : env) (prog : program term) : collecting =
         match access_of d with
         | None -> acc
         | Some (addr, width, store) -> (
-            let tag, portions =
+            (* The def's projection, computed once: the rewrite reads
+               this record instead of re-deriving it from the seam. *)
+            let projected : (sec_tag option * portion list) option =
               match env.denote ~blk:acc.blk ~def:d addr with
-              | Error _ ->
+              | Error _ -> None
+              | Ok ws ->
+                Some
+                  (range_of_denotation ~word:env.word ~entry:env.entry
+                     ~spans:env.spans ~rip:(is_rip_relative d) ~width ws)
+            in
+            let tag, portions =
+              match projected with
+              | Some pair -> pair
+              | None ->
                   (* A failed query keeps the access: the unknown
                      identity contributes full members. *)
                   top_claim ~cause:Query_failed ~entry:env.entry ~word:env.word
-              | Ok ws ->
-                  range_of_denotation ~word:env.word ~entry:env.entry
-                    ~spans:env.spans ~rip:(is_rip_relative d) ~width ws
             in
             let acc =
               match tag with
               | Some t -> { acc with tags = Core.Map.set acc.tags ~key:dtid ~data:t }
               | None -> acc
+            in
+            let acc =
+              { acc with
+                projections = Core.Map.set acc.projections ~key:dtid ~data:projected }
             in
             Base.List.fold portions ~init:acc ~f:(fun acc p ->
                 let m =
@@ -587,7 +607,8 @@ let collect (env : env) (prog : program term) : collecting =
     { sub = Tid.create ();
       blk = Blk.Builder.result (Blk.Builder.create ());
       tree = Tree.empty;
-      data = Tree.empty; subs = Tid.Map.empty; tags = Tid.Map.empty }
+      data = Tree.empty; subs = Tid.Map.empty; tags = Tid.Map.empty;
+      projections = Tid.Map.empty }
 
 let align16_up n =
   let r = Stdlib.Int64.rem n 16L in
@@ -713,7 +734,102 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   in
   let data_tree =
     finalize_tree ~word ~entry ~spans ~kind:`Data ~whole collected.data in
-  { sub_trees; data_tree; tags = collected.tags; whole }
+  { sub_trees; data_tree; tags = collected.tags; projections = collected.projections;
+    whole }
+
+(* The dynamic-allocation event: a def that moves SP by a runtime
+   size — the direct [SP +/- X] form or a copy chain reaching it,
+   with a non-fixed size and a strictly-below-SP value. *)
+let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
+    (sub : sub term) : Tid.Set.t =
+  let sp_base = Var.base facts.abi.Hike_abi.sp in
+  let is_sp v = Var.equal (Var.base v) sp_base in
+  let denote = facts.denote in
+  (* The size's own denotation confirms the event: a singleton
+     displacement is a proven-constant frame adjust (no alloca), a
+     non-singleton or unknown one is the runtime move. *)
+  let runtime_at ~blk ~def d sz =
+    match denote ~blk ~def:d sz with
+    | Error _ -> true
+    | Ok ws ->
+      not (Vsa.WordSet.is_top ws)
+      && (match Vsa.WordSet.min_elem ws, Vsa.WordSet.max_elem ws with
+          | Some lo, Some hi -> not (Cbat_word.equal lo hi)
+          | _ -> true)
+  in
+  (* A literal size is fixed; a var defers to its def; a def cycle or
+     any other exp is runtime. *)
+  let rec runtime_size chain seen sz =
+    match sz with
+    | Bil.Int _ -> false
+    | Bil.Var v -> var_size chain seen v
+    | _ -> true
+  and var_size chain seen v =
+    let b = Var.base v in
+    if Core.Set.mem seen b then true
+    else
+      let next d = runtime_size chain (Core.Set.add seen b) (Def.rhs d) in
+      Core.Option.value ~default:true (Core.Option.map ~f:next (Core.Map.find chain b))
+  in
+  (* The def's value must land strictly below the old SP (a
+     decrement); an unknown keeps the runtime-move verdict. *)
+  let descends ~blk ~def d =
+    match
+      (denote ~blk ~def:d (Bil.Var sp_base), denote ~blk ~def:d (Def.rhs d))
+    with
+    | Ok old, Ok neu when not (Vsa.WordSet.is_top neu) -> (
+      match (Vsa.WordSet.stack_offsets old, Vsa.WordSet.stack_offsets neu) with
+      | Some old_offs, Some neu_offs -> (
+        match Model.singleton_offset old_offs with
+        | Some old_off -> (
+          match Vsa.WordSet.Clp.max_elem neu_offs with
+          | Some nhi -> (
+            match Cbat_word.to_int64 nhi with
+            | Ok hi -> Stdlib.Int64.compare hi old_off < 0
+            | Error _ -> true)
+          | None -> true)
+        | None -> true)
+      | _ -> true)
+    | _ -> true
+  in
+  (* The direct [SP +/- X] form, or the copy chain reaching it. *)
+  let rec event_rhs chain seen rhs =
+    match rhs with
+    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Var a, sz) when is_sp a ->
+      runtime_size chain seen sz
+    | Bil.Var v ->
+      let b = Var.base v in
+      if Core.Set.mem seen b then false
+      else
+        let next d = event_rhs chain (Core.Set.add seen b) (Def.rhs d) in
+        Core.Option.value ~default:false
+          (Core.Option.map ~f:next (Core.Map.find chain b))
+    | _ -> false
+  in
+  (* The sequential walk: the chain holds the defs seen so far, in
+     block/def order. *)
+  Term.enum blk_t sub
+  |> Seq.fold ~init:(Tid.Set.empty, Var.Map.empty)
+       ~f:(fun (events, chain) blk ->
+         Seq.fold (Term.enum def_t blk) ~init:(events, chain)
+           ~f:(fun (events, chain) d ->
+             if is_sp (Def.lhs d) then
+               (match Model.addr_of_rhs (Def.rhs d) with
+                | Some (sz, _) ->
+                  if event_rhs chain Var.Set.empty (Def.rhs d)
+                     && runtime_at ~blk ~def:d d sz
+                     && descends ~blk ~def:d d
+                  then (Core.Set.add events (Term.tid d), chain)
+                  else (events, chain)
+                | None ->
+                  if event_rhs chain Var.Set.empty (Def.rhs d)
+                     && descends ~blk ~def:d d
+                  then (Core.Set.add events (Term.tid d), chain)
+                  else (events, chain))
+             else
+               (events,
+                Core.Map.set chain ~key:(Var.base (Def.lhs d)) ~data:d)))
+       |> fst
 
 (* Merged bindings never overlap, so the binding containing the
    range's least point is THE owner. *)
