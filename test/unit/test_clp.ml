@@ -1076,11 +1076,12 @@ let tests : unit Alcotest.test list =
         done;
         check "CLP-109" (!qunsound = 0));
 
-    pin "CLP-110" "PBH-M9: mod/smod row soundness sweep (widths 4..8, all intervals, k<=5)"
-      (fun () -> check "CLP-110" (fst (pbh_mod_sweep ()) = 0));
-
-    pin "CLP-111" "PBH-M10: same-quotient mod results are the exact residue hull"
-      (fun () -> check "CLP-111" (snd (pbh_mod_sweep ()) = 0));
+    (* One sweep, two facts: the sound rows and the exact hull. *)
+    pin "CLP-110" "PBH-M9/M10: mod/smod sweep — row soundness and the same-quotient exact residue hull (widths 4..8, all intervals, k<=5)"
+      (fun () ->
+        let unsound, inexact = pbh_mod_sweep () in
+        check "CLP-110" (unsound = 0);
+        check "CLP-111" (inexact = 0));
   ]
 
 let () = run "clp" tests

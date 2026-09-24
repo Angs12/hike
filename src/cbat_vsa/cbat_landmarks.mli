@@ -34,10 +34,10 @@ val lm_advance : t -> Tid.t -> unit
 
 (* Record a landmark for [head]. *)
 val record_landmark_for_head :
-  t -> head:Tid.t -> var -> bound:Cbat_word.t -> is_upper:bool -> dist:int -> unit
+  t -> head:Tid.t -> bound:Cbat_word.t -> is_upper:bool -> dist:int -> unit
 
 (* Entries recorded for [head]. *)
-val entries_for_head : t -> Tid.t -> var -> lm_entry list
+val entries_for_head : t -> Tid.t -> lm_entry list
 
 (* Extrapolate bounds toward landmarks; clamp at landmark and current
    bound. *)

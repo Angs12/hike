@@ -165,6 +165,51 @@ let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
 (* Per-walk metrics: production builds see only the type and no-op
    stubs below. *)
 
+(* The widen cycle's need set: the block SCC's variable SCCs (a
+   singleton variable SCC needs itself iff self-looping; every
+   multi-vertex variable SCC needs all its members). *)
+let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
+    (blocks : Tid.Set.t) : Var.Set.t =
+  let defs =
+    Core.Set.to_list blocks
+    |> List.concat_map ~f:(fun tid ->
+        match Core.Map.find rc_blocks tid with
+        | Some bf -> Term.enum def_t bf.bf_term |> Seq.to_list
+        | None -> [])
+  in
+  let cycle_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
+  if Core.Set.is_empty cycle_vars then Var.Set.empty
+  else begin
+    let succ_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
+    let pred_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
+    List.iter defs ~f:(fun d ->
+      let lhs = Var.base (Def.lhs d) in
+      let uses = Exp.free_vars (Def.rhs d) |> Core.Set.to_list |> List.map ~f:Var.base in
+      List.iter uses ~f:(fun u ->
+        if Core.Set.mem cycle_vars u then begin
+          Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
+          Hashtbl.add_multi pred_tbl ~key:u ~data:lhs
+        end));
+    let module Var_scc = Cbat_wto.Scc (struct
+        type t = Var.t
+        let compare = Var.compare
+      end) in
+    let comps =
+      Var_scc.partition (Core.Set.to_list cycle_vars)
+        (Hashtbl.find_multi succ_tbl) (Hashtbl.find_multi pred_tbl) in
+    List.fold comps ~init:Var.Set.empty ~f:(fun need comp ->
+        match comp with
+        | [v] ->
+          let succs = Hashtbl.find_multi succ_tbl v in
+          if List.mem succs v ~equal:Var.equal then
+            Core.Set.add need v
+          else need
+        | vs when List.length vs > 1 ->
+          List.fold vs ~init:need ~f:(fun need v ->
+              Core.Set.add need v)
+        | _ -> need)
+  end
+
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)
     ?(written : Var.Set.t option Tid.Map.t = Tid.Map.empty)
@@ -193,52 +238,10 @@ let rec static_graph_vsa
   let heads = smry.Cbat_wto.heads in
   let head_to_blocks = smry.Cbat_wto.head_to_blocks in
   let block_to_head = smry.Cbat_wto.block_to_head in
-  (* Widen cycle vars per head. *)
   let need_map : Var.Set.t Tid.Map.t =
-    let compute_need (blocks : Tid.Set.t) : Var.Set.t =
-      let defs =
-        Core.Set.to_list blocks
-        |> List.concat_map ~f:(fun tid ->
-            match Core.Map.find rctx.rc_blocks tid with
-            | Some bf -> Term.enum def_t bf.bf_term |> Seq.to_list
-            | None -> [])
-      in
-      let cycle_vars = Var.Set.of_list (List.map defs ~f:(fun d -> Var.base (Def.lhs d))) in
-      if Core.Set.is_empty cycle_vars then Var.Set.empty
-      else begin
-        let succ_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
-        let pred_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
-        List.iter defs ~f:(fun d ->
-          let lhs = Var.base (Def.lhs d) in
-          let uses = Exp.free_vars (Def.rhs d) |> Core.Set.to_list |> List.map ~f:Var.base in
-          List.iter uses ~f:(fun u ->
-            if Core.Set.mem cycle_vars u then begin
-              Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
-              Hashtbl.add_multi pred_tbl ~key:u ~data:lhs
-            end));
-        let module Var_scc = Cbat_wto.Scc (struct
-            type t = Var.t
-            let compare = Var.compare
-          end) in
-        let comps =
-          Var_scc.partition (Core.Set.to_list cycle_vars)
-            (Hashtbl.find_multi succ_tbl) (Hashtbl.find_multi pred_tbl) in
-        List.fold comps ~init:Var.Set.empty ~f:(fun need comp ->
-            match comp with
-            | [v] ->
-              let succs = Hashtbl.find_multi succ_tbl v in
-              if List.mem succs v ~equal:Var.equal then
-                Core.Set.add need v
-              else need
-            | vs when List.length vs > 1 ->
-              List.fold vs ~init:need ~f:(fun need v ->
-                  Core.Set.add need v)
-            | _ -> need)
-      end
-    in
     Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
       ~f:(fun ~key:h ~data:blocks acc ->
-        Core.Map.set acc ~key:h ~data:(compute_need blocks))
+        Core.Map.set acc ~key:h ~data:(compute_need ~rc_blocks:rctx.rc_blocks blocks))
   in
   
   let sol_default = Solution.default init in

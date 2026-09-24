@@ -429,21 +429,21 @@ let l3c2_in_high (ws : Ws.t) (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
   | Some mn, Some mx -> Cbat_word.( >= ) mn lo && Cbat_word.( <= ) mx hi
   | _ -> false
 
-(* L3c-3: PLUS-hull, TIMES-const, RSHIFT/ARSHIFT-const rows. *)
-
-(* Chain loop fixture: header loads, applies chain, guards. Returns (sub, body tid). *)
-let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
-    ~(body_k : Cbat_word.t) : sub term * tid =
-  let m = memv "l3c3_m" in
+(* L3c loop fixtures: header seeds/loads, body increments and stores,
+   latch loads the cell and guards.  The vars carry the fixture's name
+   prefix, so a caller rebuilds them to spell its chain/cond. *)
+let mk_l3_chain_loop ~(name : string) ~(seed : Cbat_word.t option)
+    ~(v_w : int) ~(chain : exp option) ~(cond : exp) ~(body_k : Cbat_word.t) :
+    sub term * tid =
+  let m = memv (name ^ "_m") in
   let rsp = v64 "RSP" in
   let rbp = v64 "RBP" in
-  let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
-  let v = Var.create ~is_virtual:false ~fresh:false "l3c3_v" (Type.Imm 32) in
-  let u = Var.create ~is_virtual:false ~fresh:false "l3c3_u" (Type.Imm 32) in
+  let t = Var.create ~is_virtual:false ~fresh:false (name ^ "_t") (Type.Imm 32) in
+  let v = Var.create ~is_virtual:false ~fresh:false (name ^ "_v") (Type.Imm v_w) in
+  let u = Var.create ~is_virtual:false ~fresh:false (name ^ "_u") (Type.Imm 32) in
   let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  let cond = Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c)) in
   let sub, tids =
-    sub_of "l3c3_loop"
+    sub_of (name ^ "_loop")
       [ (match seed with
          | Some sv ->
              [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
@@ -453,11 +453,24 @@ let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) 
         [ Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
           Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
         [ (2, mk_goto) ];
-        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)); Def.create v chain ],
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ]
+        @ (match chain with Some ch -> [ Def.create v ch ] | None -> []),
         [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
         [], [] ]
   in
   (sub, tids.(1))
+
+let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_k : Cbat_word.t) : sub term * tid =
+  let v = Var.create ~is_virtual:false ~fresh:false "l3c3_v" (Type.Imm 32) in
+  mk_l3_chain_loop ~name:"l3c3" ~seed ~v_w:32 ~chain:(Some chain)
+    ~cond:(Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c))) ~body_k
+
+let mk_l3c4_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
+    ~(body_k : Cbat_word.t) : sub term * tid =
+  let v = Var.create ~is_virtual:false ~fresh:false "l3c4_v" (Type.Imm v_w) in
+  mk_l3_chain_loop ~name:"l3c4" ~seed ~v_w ~chain:(Some chain)
+    ~cond:(Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c))) ~body_k
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
@@ -536,30 +549,7 @@ let l3c4_run (sub : sub term) (body_tid : tid) : Ws.t =
 (* Optional-chain loop fixture. Returns (sub, body tid). *)
 let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp) ~(body_k : Cbat_word.t) :
     sub term * tid =
-  let m = memv "l3c5_m" in
-  let rsp = v64 "RSP" in
-  let rbp = v64 "RBP" in
-  let t = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
-  let v = Var.create ~is_virtual:false ~fresh:false "l3c5_v" (Type.Imm 32) in
-  let u = Var.create ~is_virtual:false ~fresh:false "l3c5_u" (Type.Imm 32) in
-  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  let sub, tids =
-    sub_of "l3c5_loop"
-      [ (match seed with
-         | Some sv ->
-             [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
-         | None -> [])
-        @ [ Def.create rbp (Bil.Var rsp) ],
-        [ (2, mk_goto) ];
-        [ Def.create u (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word body_k)));
-          Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var u, LittleEndian, `r32)) ],
-        [ (2, mk_goto) ];
-        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ]
-        @ (match chain with Some ch -> [ Def.create v ch ] | None -> []),
-        [ (1, fun t -> mk_jmp_to t cond); (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
-        [], [] ]
-  in
-  (sub, tids.(1))
+  mk_l3_chain_loop ~name:"l3c5" ~seed ~v_w:32 ~chain ~cond ~body_k
 
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =

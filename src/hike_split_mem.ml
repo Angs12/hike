@@ -53,18 +53,14 @@ let split_def (d : def term) : def term list =
 
 (* Identity unless a def needs splitting. *)
 let split_sub (sub : sub term) : sub term =
-  let needs =
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        Term.enum def_t blk |> Seq.exists ~f:(fun d -> mem_count (Def.rhs d) > 1))
-  in
-  if not needs then sub
+  let offending blk =
+    Term.enum def_t blk
+    |> Seq.exists ~f:(fun d -> mem_count (Def.rhs d) > 1) in
+  if not (Term.enum blk_t sub |> Seq.exists ~f:offending) then sub
   else
     Term.map blk_t sub ~f:(fun blk ->
-        let defs = Term.enum def_t blk |> Seq.to_list in
-        if Base.List.for_all defs ~f:(fun d -> mem_count (Def.rhs d) <= 1) then
-          blk
-        else Term.concat_map def_t blk ~f:split_def)
+        if offending blk then Term.concat_map def_t blk ~f:split_def
+        else blk)
 
 let normalize (prog : program term) : program term =
   Term.map sub_t prog ~f:split_sub

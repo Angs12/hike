@@ -3,6 +3,9 @@
 Source: `test_cbat/test_wto.ml`. Target: `test/unit/test_wto.ml`.
 31 pins. Every surviving assertion migrated; none retired.
 
+The red-evidence cells below state the expected failure mode; the recipes
+are textual, so no measured red is claimed here.
+
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
 | WTO-01 | `Cbat_wto.flatten_comps` emits all blocks with each head before its members | in `src/cbat_vsa/cbat_wto.ml` `flatten_comps`, emit `inner` before `h` in the `SCC` arm | to be recorded |

@@ -81,14 +81,14 @@ let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry lis
         && Bool.equal e.is_upper entry.is_upper))
     else entries
 
-let record_landmark_for_head (t : t) ~(head:Tid.t) (v : var) ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
+let record_landmark_for_head (t : t) ~(head : Tid.t) ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
   let cur = Hashtbl.find t.lm_env head |> Option.value ~default:[] in
   let next = add_smaller_dist cur entry in
   Hashtbl.set t.lm_env ~key:head ~data:next
 
 (* Entries recorded for [head]. *)
-let entries_for_head (t : t) (head : Tid.t) (_v : var) : lm_entry list =
+let entries_for_head (t : t) (head : Tid.t) : lm_entry list =
   Hashtbl.find t.lm_env head |> Option.value ~default:[]
 
 (* Record an empty meet's disabled boundary at the enclosing head. The
@@ -111,11 +111,11 @@ let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr :
           if Cbat_word.(<) p_max c_min then begin
             (* Set below the boundary: upper landmark. *)
             let d = distance_words p_max c_min in
-            record_landmark_for_head t ~head:h v ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
+            record_landmark_for_head t ~head:h ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
           end else if Cbat_word.(>) p_min c_max then begin
             (* Set above the boundary: lower landmark. *)
             let d = distance_words c_max p_min in
-            record_landmark_for_head t ~head:h v ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
+            record_landmark_for_head t ~head:h ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
           end else ()
         | _ -> ()
 

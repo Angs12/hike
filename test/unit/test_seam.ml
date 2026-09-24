@@ -83,10 +83,9 @@ let tests : unit Alcotest.test list =
         in
         let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi sub in
         let lm = Vsa.Test_seam.landmarks_of rctx in
-        let x = Var.create ~is_virtual:false ~fresh:false "sc_lm_x" (Type.Imm 32) in
         let head = Tid.for_name "sc_lm_head" in
         check "SEAM-02"
-          (match Cbat_landmarks.entries_for_head lm head x with
+          (match Cbat_landmarks.entries_for_head lm head with
           | [] -> true
           | _ -> false));
 
@@ -110,7 +109,7 @@ let tests : unit Alcotest.test list =
         Vsa.Test_seam.with_widening_head rctx (Some head) (fun () ->
             ignore (Vsa.Test_seam.constrain_edge ~landmarks:lm ~env cond));
         check "SEAM-03"
-          (match Cbat_landmarks.entries_for_head lm head x with
+          (match Cbat_landmarks.entries_for_head lm head with
           | e :: _ -> Cbat_word.equal e.Cbat_landmarks.bound (w32 20)
           | [] -> false));
   ]

@@ -13,6 +13,10 @@ recorded red is the state that recipe produces (re-demonstrated whenever
 the cited mechanism changes).  Every pin builds its own fixture inside its
 closure — no cross-pin state.
 
+The red-evidence cells below state the expected failure mode; the recipes
+are textual (the mechanism is not runtime-switchable at the pin), so no
+measured red is claimed here.
+
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
 | JMP-01 | `zf_item` resolves an inline `(x−y)` ZF and renders `EQ x y` (operand resolution, not re-substitution). | In `zf_item`, replace the `Bil.BinOp (Bil.MINUS, x, y)` arm with the non-minus `zero_exp` arm (`Bil.BinOp (Bil.EQ, xv, W0)`). | to be recorded |

@@ -71,7 +71,7 @@ let stride (t : t) : int =
     | [] -> d
     | w :: rest ->
       let d' = Cbat_word.sub w prev in
-      if Cbat_word.compare d' Cbat_word.b0 = 0 then None
+      if Cbat_word.is_zero d' then None
       else
         match d with
         | None -> common_diff w (Some d') rest
@@ -83,7 +83,7 @@ let stride (t : t) : int =
     | [] | [_] -> 1
     | w1 :: rest ->
       (match common_diff w1 None rest with
-       | Some d when Cbat_word.compare d Cbat_word.b1 > 0 ->
+       | Some d ->
          (match Cbat_word.to_int64 d with
           | Ok i -> let v = Stdlib.Int64.to_int i in if v > 1 then v else 1
           | Error _ -> 1)

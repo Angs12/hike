@@ -3,7 +3,7 @@
 
 open Bap.Std
 
-type 'a region = { addr : int64; size : int64; info : 'a }
+type region = { addr : int64; size : int64; name : string }
 
 let get_section_mem name proj =
   Project.memory proj |> Memmap.to_sequence
@@ -49,7 +49,7 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
 let get_named_region_info proj =
   let query =
     let open Ogre in
-    let region addr size info = { addr; size; info } in
+    let region addr size name = { addr; size; name } in
     let addr = Type.("addr" %: int) in
     let size = Type.("size" %: int) in
     let name = Type.("name" %: str) in

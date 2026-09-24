@@ -139,7 +139,7 @@ let selective_widen_extrapolate ?(head:Tid.t option=None)
             if Core.Set.mem need (Var.base key) then
               match head with
               | Some h ->
-                extrapolate_data ~entries:(Cbat_landmarks.entries_for_head landmarks h key)
+                extrapolate_data ~entries:(Cbat_landmarks.entries_for_head landmarks h)
                   ~steps data_old data_new
               | None -> extrapolate_data ~entries:[] ~steps data_old data_new
             else

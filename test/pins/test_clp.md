@@ -118,4 +118,4 @@ recipe is the textual inversion of the pinned contract recorded below.
 | CLP-108 | PBH-M8: smod of a mixed-sign interval stays within +-(k-1) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-109 | PBH-M11: sdiv corner hull soundness sweep (signed dividends, k<=5) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-110 | PBH-M9: mod/smod row soundness sweep (widths 4..8, all intervals, k<=5) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
-| CLP-111 | PBH-M10: same-quotient mod results are the exact residue hull | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
+| CLP-111 | PBH-M10: same-quotient mod results are the exact residue hull | share CLP-110's recipe (one sweep, two checks) | pin FAILs under that inversion (re-demonstrated by review) |

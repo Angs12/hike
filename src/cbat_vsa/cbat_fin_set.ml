@@ -70,20 +70,16 @@ let lift2_pred (f : WSet.t -> WSet.t -> bool)
 let lift_unop (op : Cbat_word.t -> Cbat_word.t) : WSet.t -> WSet.t = WSet.map ~f:op
 
 (* Cartesian fold of [elem_op]. *)
-let lift_binop' (elem_op : Cbat_word.t -> Cbat_word.t -> Cbat_word.t) s1 s2 : WSet.t =
+let lift_binop (elem_op : Cbat_word.t -> Cbat_word.t -> Cbat_word.t) s1 s2 : WSet.t =
   Core.Set.fold_right s1 ~init:WSet.empty ~f:begin fun w1 init ->
     Core.Set.fold_right s2 ~init ~f:begin fun w2 s ->
       Core.Set.add s (elem_op w1 w2)
     end
   end
 
-let lift_binop (op : Cbat_word.t -> Cbat_word.t -> Cbat_word.t)
-    s1 s2 : WSet.t =
-  lift_binop' op s1 s2
-
 let lift_binop_signed (op : Cbat_word.t -> Cbat_word.t -> Cbat_word.t)
     s1 s2 : WSet.t =
-  lift_binop' (fun w1 w2 -> op (Cbat_word.signed w1) (Cbat_word.signed w2)) s1 s2
+  lift_binop (fun w1 w2 -> op (Cbat_word.signed w1) (Cbat_word.signed w2)) s1 s2
 
 let equal = lift2_pred WSet.equal
 

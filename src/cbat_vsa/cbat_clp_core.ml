@@ -427,6 +427,8 @@ let subset (p1 : t) (p2 : t) : bool =
     in
     match p1.dir, p2.dir with
     | Finite, Finite -> subset_finite p1 p2
+    (* A non-bottom Finite set's extrema are Some; the [false] arms
+       answer the bottom contour. *)
     | Finite, Ascending ->
       (match min_elem p1, max_elem p1 with
        | Some lo1, _ ->

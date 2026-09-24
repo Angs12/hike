@@ -37,7 +37,7 @@ type sec_meta = {
 
 let bss_region proj =
   let regions = Hike_image.get_named_region_info proj in
-  Base.Option.map (Seq.find regions ~f:(fun { info; _ } -> String.equal info ".bss"))
+  Base.Option.map (Seq.find regions ~f:(fun { name; _ } -> String.equal name ".bss"))
     ~f:(fun { addr; size; _ } ->
       (addr, size, Hike_image.get_copy_relocations proj ~bss_addr:addr ~bss_size:size))
 
