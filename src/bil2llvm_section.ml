@@ -75,16 +75,21 @@ let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
 (* The little-endian word assembler: the [len] bytes at [off] (bytes
    past the image read 0). *)
 let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
-  Base.List.fold
-    (Base.List.init len ~f:(fun k -> len - 1 - k))
-    ~init:0L
-    ~f:(fun acc k ->
-      let b =
-        if off + k < Bytes.length arr
-        then Int64.of_int (Char.code (Bytes.get arr (off + k)))
-        else 0L
+  (* Shifts fold little-endian bytes; bytes past the image read zero. *)
+  let b k =
+    if off + k < Bytes.length arr
+    then Int64.of_int (Char.code (Bytes.get arr (off + k)))
+    else 0L
+  in
+  let rec go acc k =
+    if k = len then acc
+    else
+      let acc' =
+        if k = 0 then b 0 else Stdlib.Int64.logor acc (Stdlib.Int64.shift_left (b k) (8 * k))
       in
-      Int64.logor (Int64.shift_left acc 8) b)
+      go acc' (k + 1)
+  in
+  go 0L 0
 
 (* A section initializer over the byte image: word-sized elements
    render through the address map (pointer-valued words render the
@@ -100,14 +105,14 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     else Llvm.integer_type llvm_ctx (typed_w * 8)
   in
   (* A word inside a printable string run keeps its raw bits:
-     remapping it would relocate the string's own bytes. *)
+     remapping it would relocate the string's own bytes.  The text
+     table is one prepass over the image, not a rescan per word. *)
+  let text = Hike_stack_model.string_text_table arr in
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
-    if Hike_stack_model.string_text_word ~arr ~off then
-      Llvm.const_of_int64 word_ty v false
-    else
-      remapped_const ctx llvm_ctx llvm_module v word_ty
+    if text off then Llvm.const_of_int64 word_ty v false
+    else remapped_const ctx llvm_ctx llvm_module v word_ty
   in
   if bss then Llvm.set_initializer (Llvm.const_null elem_ty) g
   else if typed_w >= word then

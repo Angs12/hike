@@ -18,11 +18,17 @@ let section_type_to_string = Bil2llvm_env.section_type_to_string
    records every rendered terminator, so a block the emitter never
    branches to takes no incoming. *)
 let update_phis ctx scope transfer_vars blks =
-  let edges = !(scope.edges) in
+  (* The rendered edges group by target once; per block the join is a
+     lookup, not a filter over every edge. *)
+  let by_target =
+    Base.List.fold !(scope.edges) ~init:Tid.Map.empty
+      ~f:(fun m r ->
+        Core.Map.add_multi m ~key:r.e_target ~data:r)
+  in
   Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
       let rows =
-        Base.List.filter edges ~f:(fun r -> Tid.equal r.e_target blk_tid)
+        Core.Map.find by_target blk_tid |> Option.value ~default:[]
       in
       Base.List.iter transfer_vars ~f:(fun var ->
           let phi = get_phi scope blk_tid var in

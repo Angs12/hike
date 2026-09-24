@@ -45,9 +45,15 @@ let native_fp_table : (string * native_fp) list =
     ("intrinsic:frem_rne_ieee754_binary", FREM);
     ("intrinsic:hlt", FHLT) ]
 
+(* The table as a hash map, built once: call dispatch consults it
+   per call site per sub. *)
+let native_fp_map =
+  let t = Core.String.Table.create () in
+  Base.List.iter native_fp_table ~f:(fun (k, v) -> Core.Hashtbl.set t ~key:k ~data:v);
+  t
+
 let native_fp_op (name : string) : native_fp option =
-  Base.List.Assoc.find native_fp_table (fp_intrinsic_name name)
-    ~equal:String.equal
+  Core.Hashtbl.find native_fp_map (fp_intrinsic_name name)
 
 (* The static model interface of each mapped op: the input temps the
    call block defines (fp_args) and the result temps consumers read

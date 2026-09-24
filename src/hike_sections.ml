@@ -736,7 +736,9 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     (prog : program term) : ctx =
   let abi = facts.abi in
   let env =
-    { word; entry; spans; params = Hike_abi.param_regs abi;
+    (* Only the integer params ride the escape fold: the vector lanes
+       are FP values the model's stack offsets never serve. *)
+    { word; entry; spans; params = abi.Hike_abi.int_param_regs;
       sp = abi.Hike_abi.sp; denote = facts.denote }
   in
   let collected = collect env prog in
@@ -849,7 +851,9 @@ let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
    range's least point is THE owner. *)
 let storage_of_range (tree : range_storage Tree.t) (r : range) :
     range_storage option =
-  match Tree.lookup tree r.lo |> Seq.to_list with
+  (* The rewrite's hottest query; the tree's lookup yields the
+     containing (or nearest) entries, of which the first decides. *)
+  match Seq.to_list (Tree.lookup tree r.lo) with
   | (_, v) :: _ -> Some v
   | [] -> None
 

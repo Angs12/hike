@@ -189,12 +189,15 @@ let create_cast ctx llvm_builder (cast, i, llvm_val) =
       coerce UNSIGNED shifted
 
 (* Immediates keep their native bits; only the section initializers
-   remap words that name lifted addresses. *)
+   remap words that name lifted addresses.  Widths to 64 bits take
+   the direct integer path; wider words go through the text form. *)
 let create_immediate ctx word =
-  Llvm.const_int_of_string
-    (Llvm.integer_type ctx.llvm_ctx (Word.bitwidth word))
-    (Word.string_of_value word)
-    16
+  let w = Word.bitwidth word in
+  let ty = Llvm.integer_type ctx.llvm_ctx w in
+  if w <= 64 then
+    Llvm.const_of_int64 ty (Word.to_int64_exn word) false
+  else
+    Llvm.const_int_of_string ty (Word.string_of_value word) 16
 
 (* The one memory node of an exp (a def's rhs holds at most one). *)
 type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
