@@ -148,6 +148,11 @@ val dynamic_alloc_tids_of : facts:Hike_kb.facts -> sub term -> Tid.Set.t
 val storage_of_range : range_storage Tree.t -> range -> range_storage option
 
 (** The def's memory access: (address, width in bytes, stores?). *)
+(** The section space predicates: data sections vs the sub-local
+    stack/arg spaces. *)
+val is_data_sec : sec -> bool
+val is_sub_local : sec -> bool
+
 val access_of : def term -> (exp * int * bool) option
 val is_rip_relative : def term -> bool
 val is_const_chain : exp -> bool

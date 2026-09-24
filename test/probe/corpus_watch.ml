@@ -1,5 +1,5 @@
 (* Corpus assert-watch driver: runs the full VSA fixpoint per sub of each argv binary.
-   Usage: dune exec test_cbat/corpus_watch.exe -- <binary> [<binary> ...] *)
+   Usage: dune exec test/probe/corpus_watch.exe -- <binary> [<binary> ...] *)
 
 open Bap.Std
 open Probe_common

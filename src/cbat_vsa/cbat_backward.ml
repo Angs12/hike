@@ -750,7 +750,7 @@ let rec inverse_denote ~(env : AI.t)
   | Bil.Load (m, a, en, s) ->
     (* The cell fact meets the env's memory and threads to the store
        that wrote it. *)
-    let env = meet_cell ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
+    let env = constrain_cell_on_trace ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
     (match m with
      | Bil.Var mv ->
        (match denote_imm_exp a env with
@@ -877,7 +877,7 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
 (* The load's cell fact meets the env's memory at the denoted address:
    stack-symbolic addresses key by segment offsets, foreign by their
    concrete hulls; identity on doubt. *)
-and meet_cell ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
+and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
     ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) : AI.t =
   match mem with
   | Bil.Var m ->

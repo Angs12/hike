@@ -251,9 +251,9 @@ let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
         portion Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base cei) ]
       ~f:(fun x -> x)
   in
-  ( Option.map
-      (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
-      ~f:(fun _ -> tag alo ahi),
+  ( (if Option.is_some (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
+     then Some (tag alo ahi)
+     else None),
     parts )
 
 (* The full-span claim for a TOP address: a stack-symbolic top claims
@@ -448,12 +448,18 @@ let word_hull ~(word : int) (d : data_span) (lo : int64) (hi : int64) :
   in
   (hull_lo, Stdlib.Int64.max hull_hi hull_lo)
 
+let is_data_sec (s : sec) : bool =
+  match s with Stack | Args -> false | _ -> true
+
+(* The sub-local spaces: the stack frame and the caller window's arg
+   slots — everything a per-sub alloca serves. *)
+let is_sub_local (s : sec) : bool = not (is_data_sec s)
+
 let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool)
     ~(word : int) ~(spans : data_span list) (p : portion) : member =
   let lo, hi =
-    match p.pt_sec with
-    | Stack | Args -> (p.pt_lo, p.pt_hi)
-    | _ ->
+    if is_sub_local p.pt_sec then (p.pt_lo, p.pt_hi)
+    else
         (* The data side owns the emitter's word grid: a member's
            extent is its occupied bytes snapped OUT to the owning
            span's word hull. *)
@@ -597,10 +603,8 @@ let collect (env : env) (prog : program term) : collecting =
                   member_of ~sub:acc.sub ~def:(Some dtid) ~width ~store
                     ~word:env.word ~spans:env.spans p
                 in
-                let sub_local =
-                  match p.pt_sec with Stack | Args -> true | _ -> false
-                in
-                if sub_local then { acc with tree = insert acc.tree m }
+                if is_sub_local p.pt_sec then
+                  { acc with tree = insert acc.tree m }
                 else { acc with data = insert acc.data m })
             |> fun acc ->
             (* A stored stack-symbolic value escapes into memory: its
@@ -643,8 +647,6 @@ let in_whole_span (whole : data_span list) (s : sec) (pos : int64) : bool =
       && Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
       && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0)
 
-let is_data_sec (s : sec) : bool =
-  match s with Stack | Args -> false | _ -> true
 
 (* The data spans served whole (identity): a span with any identity
    binding, or with copy-relocated slots (externally-owned bytes). *)

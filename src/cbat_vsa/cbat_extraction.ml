@@ -6,16 +6,7 @@ open Bap.Std
 
 module WordSet = Cbat_clp_set_composite
 
-(* Classification vocabulary: the (lo,hi) pair is the denotation's
-   position interval on the model's ABSOLUTE segment line (see
-   [classify]); "below/above the entry RSP" reads as below/above the
-   segment base.
-   - [Range]/[Infinite]: entirely below the entry RSP — this sub's
-     own frame.
-   - [Caller]: entirely at/above — ABI-visible caller-window traffic.
-   - [Mixed]: two-sided or wrapped — the runtime address is GENUINELY
-     either-based; the emitter's rule is the two-base select. *)
-(* Re-exported from cbat_clp_set_composite for the seam's consumers. *)
+(* The kind gloss lives in cbat_vsa.mli (the seam's contract point). *)
 type kind = WordSet.kind =
   | Range of int64 * int64
   | Infinite of int64 * int64

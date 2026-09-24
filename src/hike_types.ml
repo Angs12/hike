@@ -8,7 +8,7 @@ open Bap.Std
 module Model = Hike_stack_model
 module Abi = Hike_abi
 
-let fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
+let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
   let is_value_reg v =
     Abi.is_value_return_reg abi v || Abi.is_vector_param_reg abi v
   in
@@ -67,7 +67,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
   in
   let rets =
     (* Double returns arrive via [%YMM0]. *)
-    if fp_returning ~abi sub then
+    if is_fp_returning ~abi sub then
       let ymm0 = Base.List.nth_exn abi.vector_param_regs 0 in
       rets @ [ Arg.create ~intent:Out ymm0 (Var ymm0) ]
     else rets
@@ -120,13 +120,13 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
          (promoted slots included). *)
       let arg_terms = Term.enum arg_t sub |> Base.Sequence.to_list in
       let args =
-        (* Non-parameters sort after every convention register. *)
+        (* Non-parameters sort after every convention register; the
+           register list is hoisted out of the sort comparator. *)
         let nonparam_rank = 100 in
+        let param_regs = Abi.param_regs abi in
         let rank_of_var (v : var) : int * string =
           let n = Var.name (Var.base v) in
-          match
-            Base.List.findi (Abi.param_regs abi) ~f:(fun _ r -> Var.same r v)
-          with
+          match Base.List.findi param_regs ~f:(fun _ r -> Var.same r v) with
           | Some (i, _) -> (i, n)
           | None -> (nonparam_rank, n)
         in

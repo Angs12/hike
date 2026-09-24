@@ -1,6 +1,7 @@
 # Pins: Cbat_word
 
-Module `Cbat_word`. One row per pin in `test/unit/test_word.ml`.
+Module `Cbat_word` (`src/cbat_vsa/cbat_word.ml`), pinned by
+`test/unit/test_word.ml` (ids `WORD-…`).
 
 Red evidence is by review: the pinned mechanisms live in the vendored
 domain library and are not reachable from a test seam, so the disable

@@ -486,6 +486,8 @@ and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
       in
       match find_mem_node exp with
       | Some node ->
+          (* The window parameter IS its own base: an access's address
+             minus the sub's stack0 is the offset into the window. *)
           storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
             ~index_of:(fun a ->
                 Llvm.build_sub a (frame_stack0 fr) "" llvm_builder)
@@ -494,6 +496,9 @@ and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
 
 and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
   let stack0 = frame_stack0 fr in
+  (* The region alloca's base sits [rel_rlo] above the sub's stack0
+     (the region's lowest byte): anchor-normalized minus that offset
+     is the byte index inside the alloca. *)
   let region_index llvm_builder rel_rlo a =
     let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
     Llvm.build_sub rel

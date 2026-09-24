@@ -30,7 +30,14 @@ module Cbat_extraction : sig
   (* Classification vocabulary: the (lo,hi) pair of the carrying
      constructors is the denotation's position interval on the model's
      ABSOLUTE segment line (the entry RSP = the segment base; a frame
-     offset o sits at [stack_base + o]). *)
+     offset o sits at [stack_base + o]).
+     - [Range]/[Infinite]: entirely below the entry RSP — this sub's
+       own frame.
+     - [Caller]: entirely at/above — ABI-visible caller-window traffic.
+     - [Mixed]: two-sided or wrapped — the runtime address is
+       GENUINELY either-based; the emitter's rule is the two-base
+       select.
+     - [Dead]: the access sits on an unreachable path. *)
   type kind =
     | Range of int64 * int64
     | Infinite of int64 * int64

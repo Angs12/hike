@@ -171,12 +171,12 @@ let build_entry_block ctx scope llvm_builder transfer_vars fr sub fn =
   fr
 
 (* Builds blocks and transfer set in one walk. *)
-let collect_sub_data ctx scope llvm_ctx blks fn sub =
+let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
   insert_bb scope Graphs.Tid.start (Llvm.entry_block fn);
   init_blk_llvals scope Graphs.Tid.start;
   (* (transfer set, defined set); the defined set includes phi lhs —
      phi lanes need definedness. *)
-  let defined_and_transfered =
+  let defined_and_transferred =
     Seq.fold blks
       ~f:(fun (reg_set, def_set) blk ->
         let tid = Term.tid blk in
@@ -216,7 +216,7 @@ let collect_sub_data ctx scope llvm_ctx blks fn sub =
           Core.Set.union (Core.Set.union def_set blk_defs) call_rets ))
       ~init:(Var.Set.empty, Var.Set.empty)
   in
-  let reg_set, def_set = defined_and_transfered in
+  let reg_set, def_set = defined_and_transferred in
   let arg_set =
     Base.List.fold (get_args ctx (Term.tid sub)) ~init:Var.Set.empty
       ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg)))
@@ -261,7 +261,7 @@ let create_sub ctx scope sub =
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
 
-    let transfer_vars = collect_sub_data ctx scope llvm_ctx blks fn sub in
+    let transfer_vars = transfer_vars_of_sub ctx scope llvm_ctx blks fn sub in
     let layout =
       Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:{ Hike_stack_model.Sub_layout.regions = [];

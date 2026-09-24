@@ -39,6 +39,8 @@ type idx = int
    RSP is 8 (mod 16). *)
 let stack_base =
   Stdlib.Int64.add (Stdlib.Int64.shift_left 1L 62) 8L
+(* The symbolic stack segment spans 8 MiB above the base — a TOP
+   stack claim covers at most [stack_span] bytes. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
 let stack_word (offs : Clp.t) : t = StackOff offs

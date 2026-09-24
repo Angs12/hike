@@ -1,7 +1,9 @@
 # test_wto pins
 
 Source: `test_cbat/test_wto.ml`. Target: `test/unit/test_wto.ml`.
-31 pins. Every surviving assertion migrated; none retired.
+The module carries two id families — `WTO-…` (the WTO/FIX pins) and
+`DG-…` (the dispatch-graph pins) — one row each below. Every surviving
+assertion migrated; none retired.
 
 The red-evidence cells below state the expected failure mode; the recipes
 are textual, so no measured red is claimed here.

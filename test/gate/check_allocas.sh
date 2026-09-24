@@ -18,6 +18,7 @@
 #       stack_rN alloca — GEP-derived pointers never become integers.
 #   (h) window mems imply the window parameter: a define referencing
 #       %hike_window_mem carries %hike_window.
+#   INFO (non-failing): per-module inttoptr-derived load count.
 
 set -u
 

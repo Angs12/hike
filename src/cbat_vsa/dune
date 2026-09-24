@@ -1,21 +1,14 @@
-; Phase 0 build skeleton for the CBAT VSA port (see README.md).
-;
 ; cbat_vsa_domain: CLP / abstract-value core. Unwrapped so that
 ; cbat_vsa (the BIR fixpoint library) can reference these modules
 ; unqualified — dune does not auto-open wrapped dependency libraries.
 ; cbat_vsa_utils lives here because cbat_clp and
 ; cbat_clp_set_composite depend on it (a cycle would result otherwise).
+; The domain library links `bap`: Bap.Std is the only provider of the
+; Word API used here.
 ;
-; Note: the domain library still links `bap` because Bap.Std is the
-; only provider of the Word API used here (Bap.Std.Word = Bap_bitvector,
-; internal to bap-std; the `bitvec` package has no Word module and a
-; monadic API). See the Phase 0 report for per-module seam decisions.
-;
-; ppx: the upstream 5-ppx set (ppx_deriving, ppx_bin_prot, ppx_sexp_conv,
-; ppx_compare, ppx_fields_conv) fails under dune 3.23 because the
-; opam-installed ppx_deriving 6.0.3 is not marked (kind ppx_rewriter) —
-; "Ppx dependency on a non-ppx library". Fallback per plan: ppx_bap,
-; which bundles ppx_bin_prot/ppx_sexp_conv/ppx_compare/ppx_fields_conv.
+; ppx is ppx_bap, which bundles the deriving set (bin_prot, sexp,
+; compare, fields_conv) — the upstream 5-ppx split does not link
+; under dune 3.23.
 
 (library
  (name cbat_vsa_domain)

@@ -422,13 +422,13 @@ let tests : unit Alcotest.test list =
                     (Core.Set.of_list (module Tid) (members (Cw.SCC (h, inner))))
                     (Core.Set.of_list (module Tid) [ l0; l1; l2 ])
              | _ -> false));
-      pin "DG-06" "ROWS-ENGINE: the completed dispatch's case edges are term edges (one per target)"
+      pin "DG-06" "DG-SERIES: the completed dispatch's case edges are term edges (one per target)"
         (fun () ->
           let entry, b1, b2, succs, _preds = mk_rows_dispatch () in
           check "DG-06"
             (Base.List.count (succs entry) ~f:(Tid.equal b1) = 1
              && Base.List.count (succs entry) ~f:(Tid.equal b2) = 1));
-      pin "DG-07" "ROWS-ENGINE: the case target mirrors into preds"
+      pin "DG-07" "DG-SERIES: the case target mirrors into preds"
         (fun () ->
           let entry, _b1, b2, _succs, preds = mk_rows_dispatch () in
           check "DG-07" (Base.List.equal Tid.equal (preds b2) [ entry ]));

@@ -1,4 +1,4 @@
-(* Shared shell for the zz_scratch_probe drivers: init, loading, printing. *)
+(* Shared shell for the test/probe drivers: init, loading, printing. *)
 
 open Bap.Std
 open Bap_core_theory

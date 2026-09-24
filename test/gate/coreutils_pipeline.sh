@@ -45,7 +45,7 @@ CFLAGS_BUILD="${CFLAGS_BUILD:--O0 -fno-stack-protector}"
 
 build_configure_make() {   # $1 = source dir
     local src="$1"
-    note "build: configure CFLAGS='-O0 $CFLAGS_BUILD' (PIE only, no fallback)"
+    note "build: configure CFLAGS='$CFLAGS_BUILD' (PIE only, no fallback)"
     (cd "$src" \
      && CFLAGS="$CFLAGS_BUILD" LDFLAGS="" \
         ./configure --disable-gcc-warnings >> "$WORK/configure.log" 2>&1) || {
@@ -115,7 +115,6 @@ do_lift() {
     # 64MB minor heap: fixpoint churn otherwise spends ~11% in major GC.
     export OCAMLRUNPARAM="${OCAMLRUNPARAM:-s=8M}"
     if [ -z "$(ls -A "$BINS" 2>/dev/null)" ]; then do_collect || return 1; fi
-    : > "$LIFT_LOG"
     local TIMES="$WORK/lift_times.tsv"
     [ "${RETIME:-0}" = "1" ] && : > "$TIMES"
     touch "$TIMES"
@@ -134,6 +133,7 @@ do_lift() {
     done
     note "lift: $ok/$total already emitted; lifting ${#pending[@]} remaining SERIALLY (one at a time — parallel lifts OOM)"
     if [ "${#pending[@]}" -gt 0 ]; then
+        : > "$LIFT_LOG"
         local name
         for name in "${pending[@]}"; do
             "$HERE/lift_one.sh" "$name" "$BINS" "$IR" "$OUT" "$TIMES" "$LIFT_LOG"
@@ -287,6 +287,11 @@ do_suite() {
 do_summary() {
     local lifts
     lifts=$(grep -c '^OK' "$LIFT_LOG" 2>/dev/null || echo 0)
+    if [ "$lifts" -eq 0 ]; then
+        # A resumed run's log may hold only the new lifts; the emitted
+        # IR is the ground truth.
+        lifts=$(ls "$IR"/out_*.ll 2>/dev/null | wc -l)
+    fi
     local total; total=$(ls "$BINS" 2>/dev/null | wc -l)
     echo "==================== COREUTILS SUCCESS RATE ===================="
     echo "binaries collected : $total"

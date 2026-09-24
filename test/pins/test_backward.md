@@ -35,7 +35,7 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-12 | L3c2-2 the two-piece SLT total row for an unproven operand. | Drop the `total_row` fallback in `guard_row` for SLT (return `None`). | BK-12 (cell top). |
 | BK-13 | L3c2-3 `c >= half` SLT/SLE single high interval. | Drop the `if c >= half` branch in `constraint_row`. | BK-13 (`l3c2_in_high` false). |
 | BK-14 | L3c2-4 flag-indirected signed guard (record + signed row). | As BK-06 (`plan_block = []`). | BK-14. |
-| BK-15 | L3c2-5 trace-exact cell refinement with no RBP prologue def (`meet_cell`). | Make `meet_cell` the identity (`fun ~env … -> env`). | BK-15. |
+| BK-15 | L3c2-5 trace-exact cell refinement with no RBP prologue def (`constrain_cell_on_trace`). | Make `constrain_cell_on_trace` the identity (`fun ~env … -> env`). | BK-15. |
 | BK-16 | L3c3-1 PLUS-HULL: the circular hull `{−1} ∪ [0,8]` on `t`. | As BK-01 (PLUS arm identity). | BK-16. |
 | BK-17 | L3c3-2 TIMES over an unbounded operand is the identity (sound stop). | As BK-04 (force a bounded TIMES answer). | BK-17. |
 | BK-18 | L3c3-2b seeded operand: the guard's signed row bounds `t`, so the exact TIMES slice applies. | Drop the TIMES slice in `operand_constraints` (return `None,None` for TIMES). | BK-18. |
@@ -77,8 +77,8 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-54 | M5-4 LOW cast in the walk: truncation hull `[5, 0xFFFFFF05]`. | Make `low_cast_constraint` return `None`. | BK-54. |
 | BK-55 | M5-5 signed-division rule `{−6,−5}`. | Drop the SDIVIDE arm. | BK-55. |
 | BK-56 | M5-6 Var-identity row propagates through the copy (`≤ [0,9]`, not `[0,10]`). | Drop the `Bil.Var` identity propagation in the walk. | BK-56 (`bounded_above … 9` false). |
-| BK-57 | T1 the RSP-based same-block cell meet (`meet_cell` meets `[RSP-8]` into the offset key). | Make `meet_cell` the identity. | BK-57 (cell unchanged; `15 ∈`). |
-| BK-58 | T2 the dynamic-index meet: the index's iterate range confines the key hull. | Skip the index constraint in `meet_cell` (meet all keys). | BK-58 (cell at 40 refined too). |
+| BK-57 | T1 the RSP-based same-block cell meet (`constrain_cell_on_trace` meets `[RSP-8]` into the offset key). | Make `constrain_cell_on_trace` the identity. | BK-57 (cell unchanged; `15 ∈`). |
+| BK-58 | T2 the dynamic-index meet: the index's iterate range confines the key hull. | Skip the index constraint in `constrain_cell_on_trace` (meet all keys). | BK-58 (cell at 40 refined too). |
 | BK-59 | T3 the ranged meet's overlap boundary (the `[0,64]` cell splits at `[8,24]`). | Make `Mem.meet_range` meet the whole cell (no split). | BK-59 (offset 0 narrowed). |
 | BK-60 | T4 the exit-side cells survive the iterate-range meet. | As BK-58 (meet everything). | BK-60 (offset 40/80 narrowed). |
 | BK-61 | S1 EQ const-second seeds the Var `{10}` (`row_for EQ`). | Make `row_for`/`constraint_row` EQ return `None`. | BK-61 (`10 ∈` false). |

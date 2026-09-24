@@ -1,6 +1,6 @@
-(* memmap_bench: per-op wall + minor-word bill for ticket 06's sites —
-   find' (the per-query Seq.to_list), op_at (the per-byte cell op on a
-   join), try_assemble_cells (the sort/map/reduce of an interior read),
+(* memmap_bench: per-op wall + minor-word bill for the memmap's hot
+   ops — find' (the per-query Seq.to_list), op_at (the per-byte cell
+   op on a join), try_assemble_cells (the sort/map/reduce of an interior read),
    and the FinSet Cartesian fold.  Same counter as clp_bench:
    [Gc.minor_words] is exact and two consecutive loops must agree.
 

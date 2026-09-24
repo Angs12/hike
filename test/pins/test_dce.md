@@ -1,5 +1,10 @@
 # DCE pins
 
+Module `Hike_dce` (`src/hike_dce.ml`), driven by
+`test/unit/test_dce.ml` (ids `DCE-01`…).  Mechanism: the never-used
+sweep to a fixpoint — its load roots are the vars the promote rewrite
+created, its escape roots the storages with identity members.
+
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
 | DCE-01 | `Hike.Dce.dce` is total on `Theory.Target.unknown`; a jmp-read def chain survives, an unused def dies | drop the jmp-read root from the liveness roots in `src/hike_dce.ml` | all but one def survives → `List.length defs = 2` fails |

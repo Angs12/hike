@@ -201,7 +201,9 @@ let of_list ~width l : t =
 
 
 
-(* Cardinality as a (width+1)-bit W.t. *)
+(* Cardinality as a (width+1)-bit W.t.  Exact for a finite Clp; a
+   StackOff's reading is the step product SATURATED at 2^width —
+   "at least this many", never an exact count. *)
 let cardinality (p : t) : W.t = cardn_of p
 
 (* Last point; meaningless for infinite CLPs. *)

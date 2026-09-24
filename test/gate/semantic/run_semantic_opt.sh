@@ -76,9 +76,9 @@ for ll in "$IR"/out_*.ll; do
 	if grep -q '@_setjmp\|@longjmp' "$ll"; then STUB="$HERE/setjmp_stub.S"; fi
 
 	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
-	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1
+	timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1
 	lrc=$?
-	timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
+	timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
 	nrc=$?
 	if [ $lrc -eq 124 ] || [ $nrc -eq 124 ]; then
 		echo "FAIL $base (timeout after opt: lifted rc=$lrc native rc=$nrc)"
@@ -112,7 +112,7 @@ for ll in "$IR"/out_*.ll; do
 					any_bisect=1
 					continue
 				}
-			timeout 15 bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_bisect_$p.bin" >"$OUT/${base}_bisect_$p.out" 2>&1
+			timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_bisect_$p.bin" >"$OUT/${base}_bisect_$p.out" 2>&1
 			prc=$?
 			if [ "$prc" -ne "$nrc" ] || ! cmp -s "$OUT/${base}_bisect_$p.out" "$OUT/${base}_native.out"; then
 				bisect_line="$bisect_line $p"

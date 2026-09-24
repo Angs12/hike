@@ -10,6 +10,22 @@ open Hike_test.Harness
 open Hike_test.Common
 open Hike_test.Fixtures
 
+(* The image-fixture vocabulary the FWD image pins share: one base
+   var, one 12-byte image at 0x4000, and an env whose memory is top
+   and whose base var holds the given address set. *)
+let img_fixture =
+  let img_var = v64 "t_img_base" in
+  let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
+  let img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00\x1e\x5a\x00\x00" in
+  let images = [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes } ] in
+  let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+  let env_with_addrs addrs =
+    let st = AI.add_memory AI.top ~key:m ~data:(Mem.top k) in
+    AI.add_word st ~key:img_var ~data:(Ws.of_list ~width:64 addrs)
+  in
+  let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
+  (img_var, images, m, k, env_with_addrs, load32)
+
 let tests : unit Alcotest.test list =
   [
     (* FWD-01: an Ite whose flag is {0,1} joins both arms. *)
@@ -227,16 +243,7 @@ let tests : unit Alcotest.test list =
     (* FWD-11: a bounded image-backed load denotes the exact image words. *)
     pin "FWD-11" "a bounded image-backed load denotes the exact image words"
       (fun () ->
-        let img_var = v64 "t_img_base" in
-        let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
-        let img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00\x1e\x5a\x00\x00" in
-        let images = [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes } ] in
-        let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
-        let env_with_addrs addrs =
-          let st = AI.add_memory AI.top ~key:m ~data:(Mem.top k) in
-          AI.add_word st ~key:img_var ~data:(Ws.of_list ~width:64 addrs)
-        in
-        let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
+        let img_var, images, _, _, env_with_addrs, load32 = img_fixture in
         let word32 v = Cbat_word.of_word (Word.of_int64 ~width:32 v) in
         let env3 = env_with_addrs [ w64 0x4000; w64 0x4004; w64 0x4008 ] in
         protect
@@ -259,14 +266,7 @@ let tests : unit Alcotest.test list =
     (* FWD-12: the same load with no threaded image keeps the abstract top. *)
     pin "FWD-12" "an image-backed load without images keeps the abstract value"
       (fun () ->
-        let img_var = v64 "t_img_base" in
-        let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
-        let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
-        let env_with_addrs addrs =
-          let st = AI.add_memory AI.top ~key:m ~data:(Mem.top k) in
-          AI.add_word st ~key:img_var ~data:(Ws.of_list ~width:64 addrs)
-        in
-        let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
+        let img_var, _images, _m, k, env_with_addrs, load32 = img_fixture in
         let env3 = env_with_addrs [ w64 0x4000; w64 0x4004; w64 0x4008 ] in
         protect
           ~set:(fun () -> Vsa.set_section_images [])
@@ -282,16 +282,7 @@ let tests : unit Alcotest.test list =
     (* FWD-13: a hull overhanging the image's end stays abstract. *)
     pin "FWD-13" "an access overhanging the image's end keeps the abstract value"
       (fun () ->
-        let img_var = v64 "t_img_base" in
-        let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
-        let img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00\x1e\x5a\x00\x00" in
-        let images = [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes } ] in
-        let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
-        let env_with_addrs addrs =
-          let st = AI.add_memory AI.top ~key:m ~data:(Mem.top k) in
-          AI.add_word st ~key:img_var ~data:(Ws.of_list ~width:64 addrs)
-        in
-        let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
+        let img_var, images, _, _, env_with_addrs, load32 = img_fixture in
         let env_over = env_with_addrs [ w64 0x400c; w64 0x4010 ] in
         protect
           ~set:(fun () -> Vsa.set_section_images images)
@@ -307,16 +298,7 @@ let tests : unit Alcotest.test list =
     (* FWD-14: a stored cell in range wins over the image bytes. *)
     pin "FWD-14" "a stored cell in range wins over the image bytes"
       (fun () ->
-        let img_var = v64 "t_img_base" in
-        let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
-        let img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00\x1e\x5a\x00\x00" in
-        let images = [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes } ] in
-        let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
-        let env_with_addrs addrs =
-          let st = AI.add_memory AI.top ~key:m ~data:(Mem.top k) in
-          AI.add_word st ~key:img_var ~data:(Ws.of_list ~width:64 addrs)
-        in
-        let load32 addr_exp = Bil.Load (Bil.Var m, addr_exp, LittleEndian, `r32) in
+        let img_var, images, m, k, env_with_addrs, load32 = img_fixture in
         let word32 v = Cbat_word.of_word (Word.of_int64 ~width:32 v) in
         let stored = Ws.singleton (word32 0x12345678L) in
         let cell_addr = Ws.singleton (w64 0x4000) in

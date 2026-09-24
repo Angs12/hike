@@ -20,9 +20,9 @@ under that inversion.
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
 | TYPES-01 | `free_vars` drops memory-typed vars from `Sub.free_vars` and keeps registers. | In `src/hike_types.ml` `free_vars`, drop the `not @@ Model.is_mem` filter. | TYPES-01 FAILs: the mem var joins the list. |
-| TYPES-02 | `fp_returning`: a YMM def on the epilogue path (an indirect call with no return) is an FP return. | In `fp_returning`, make `is_epilogue` always `false` (or drop the `Seq.exists`). | TYPES-02 FAILs: the FP sub answers `false`. |
-| TYPES-03 | `fp_returning`: an integer return register (`RAX`) on the epilogue path is not an FP return. | In `fp_returning`, drop the final `is_vector_param_reg` test (return `return_path_defs <> []`). | TYPES-03 FAILs: the integer sub answers `true`. |
-| TYPES-04 | `fp_returning`: a value def off the epilogue path is not a return at all. | In `fp_returning`, treat every value-reg def as a return path (drop the `is_epilogue` filter). | TYPES-04 FAILs: the no-epilogue sub answers `true`. |
+| TYPES-02 | `is_fp_returning`: a YMM def on the epilogue path (an indirect call with no return) is an FP return. | In `is_fp_returning`, make `is_epilogue` always `false` (or drop the `Seq.exists`). | TYPES-02 FAILs: the FP sub answers `false`. |
+| TYPES-03 | `is_fp_returning`: an integer return register (`RAX`) on the epilogue path is not an FP return. | In `is_fp_returning`, drop the final `is_vector_param_reg` test (return `return_path_defs <> []`). | TYPES-03 FAILs: the integer sub answers `true`. |
+| TYPES-04 | `is_fp_returning`: a value def off the epilogue path is not a return at all. | In `is_fp_returning`, treat every value-reg def as a return path (drop the `is_epilogue` filter). | TYPES-04 FAILs: the no-epilogue sub answers `true`. |
 | TYPES-05 | `tag_lane`: a plain `In` register lane is left untagged. | In `tag_lane`, drop the pointer guard (always `set_ptr_arg`). | TYPES-05 FAILs: the lane becomes a pointer. |
 | TYPES-06 | `tag_lane`: a `Both` intent lane is a pointer (an address lane). | In `tag_lane`, drop the `Arg.intent a = Some Both` arm. | TYPES-06 FAILs: the `Both` lane is untagged. |
 | TYPES-07 | `tag_lane`: a memory-typed lhs lane is a pointer (its storage). | In `tag_lane`, drop the `Model.is_mem v` arm. | TYPES-07 FAILs: the mem lane is untagged. |
@@ -36,6 +36,6 @@ under that inversion.
 | TYPES-15 | `compute_sub_sig`: `@main` keeps the fixed `RDI`/`RSI` signature. | In `Model.fixed_signature`, drop the `Tid.name … = "@main"` disjunct. | TYPES-15 FAILs: `@main` falls to the PLT/else shape. |
 | TYPES-16 | `compute_sub_sig`: a `window_param` layout carries the caller window as a pointer `In` lane. | In `compute_sub_sig`, drop the `window_arg` append (`args @ []`). | TYPES-16 FAILs: the window lane is absent. |
 | TYPES-17 | `compute_sub_sig`: an emittable intrinsic takes its free vars `In` and its own defs `Out`. | In the intrinsic branch, skip the def scan for returns (return the target's `rets`). | TYPES-17 FAILs: the intrinsic's `Out` lane is absent. |
-| TYPES-18 | `compute_sub_sig`: an FP-returning sub appends the `YMM0` `Out` lane to the integer returns. | In `compute_sub_sig`, drop the `if fp_returning … then rets @ [ymm0]` branch. | TYPES-18 FAILs: YMM0 is missing. |
+| TYPES-18 | `compute_sub_sig`: an FP-returning sub appends the `YMM0` `Out` lane to the integer returns. | In `compute_sub_sig`, drop the `if is_fp_returning … then rets @ [ymm0]` branch. | TYPES-18 FAILs: YMM0 is missing. |
 | TYPES-19 | `sign_program`: the computed `(rets @ args)` lanes land on the sub's own `arg` terms, intent and pointer tag included. | In `sign_program`, call `Model.set_sig sub rets` (drop the args) or `set_sig` without `compute_sub_sig`. | TYPES-19 FAILs: the arg terms no longer match `rets @ args`. |
 | TYPES-20 | `run`: the project entry signs the project's own program with the project's target. | In `run`, drop the `Project.map_program … sign_program` (return `proj` unchanged). | TYPES-20 FAILs: the sub carries no `arg` terms. |

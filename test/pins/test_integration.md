@@ -1,6 +1,8 @@
 # Pins — test_integration
 
-Module: `test/unit/test_integration.ml` (group `integration`, ids `INT-01`…`INT-10`, `INT-13`…`INT-23`),
+Module: `test/unit/test_integration.ml` (group `integration`, ids
+`INT-01`…`INT-23`; `INT-11`/`INT-12` were never minted — the source
+sweep skipped them — and the survivors' id gaps carry no meaning),
 merging the word-domain / backward-walk soundness properties and the
 landmark / T5 pins from `test_cbat/test_properties.ml` and
 `test_cbat/test_landmarks.ml`. Every source `check` site is carried as one

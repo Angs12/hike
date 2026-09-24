@@ -24,7 +24,7 @@ run_model() { # ll tag native_out
       "$ll" > "$W/$tag.renamed.ll" || return 1
   llc -O0 -filetype=obj "$W/$tag.renamed.ll" -o "$W/$tag.o" 2>/dev/null || return 1
   gcc -O0 -no-pie -o "$W/$tag" "$W/$tag.o" "$HARNESS" 2>/dev/null || return 1
-  timeout 15 "$W/$tag" > "$W/$tag.out" 2>&1
+  timeout "${HIKE_RUN_TIMEOUT:-15}" "$W/$tag" > "$W/$tag.out" 2>&1
   RUN_rc=$?
   RUN_out="$W/$tag.out"
   return 0
@@ -36,7 +36,7 @@ for b in $(ls "$C0"); do
   f0="$L0/out_$b.ll"; f2="$L2/out_$b.ll"
   [ -f "$f0" ] && [ -f "$f2" ] || continue
   native_out="$W/$b.native"
-  timeout 15 "$C0/$b" > "$native_out" 2>&1; nrc=$?
+  timeout "${HIKE_RUN_TIMEOUT:-15}" "$C0/$b" > "$native_out" 2>&1; nrc=$?
   cls0="crash"; cls2="crash"; i0="-"; i2="-"
   if [ -f "$f0" ] && opt-21 -O2 -S "$f0" -o "$W/m0.ll" 2>/dev/null \
      && run_model "$W/m0.ll" o0 "$native_out"; then

@@ -535,8 +535,9 @@ let factor_2s (t : t) : t * int =
       let lo = Z.trailing_zeros z in
       (mkz (Z.extract z lo w) w, lo)
 
-(* 2^i at [width] bits; i >= width truncates to 0 (Word.lshift semantics).
-   Production call sites always pass i < width. *)
+(* The domain size 2^i at [width] bits; i >= width truncates to 0
+   (Word.lshift semantics).  Production call sites always pass
+   i < width. *)
 let dom_size ?width (i : int) : t =
   let wd = Option.value width ~default:(i + 1) in
   if i < 0 then zero wd

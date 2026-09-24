@@ -83,6 +83,18 @@ let tag_of (sub : sub term) (d : def term) =
   |> Seq.find_map ~f:(fun dd ->
          if Tid.equal (Term.tid dd) (Term.tid d) then A.sec_tag dd else None)
 
+let storage_of_def ctx sub dtid : A.range_storage option =
+  match Core.Map.find ctx.A.sub_trees (Term.tid sub) with
+  | Some tree ->
+      A.Tree.to_sequence tree |> Seq.to_list
+      |> Base.List.find_map ~f:(fun (_, rs) ->
+             if
+               Base.List.exists rs.A.members ~f:(fun mm ->
+                   Base.Option.equal Tid.equal mm.A.m_def (Some dtid))
+             then Some rs
+             else None)
+  | None -> None
+
 let storage_at (ctx : A.ctx) (sub : sub term) (sec : A.sec) (lo : int64)
     (hi : int64) : A.storage option =
   Base.Option.bind (Core.Map.find ctx.A.sub_trees (Term.tid sub))
@@ -155,6 +167,34 @@ let clamped (t, ps) =
   | Some Tag.Stack_unbounded, [ p ] ->
       portion_eq p S.Stack (pos (-65536L)) (pos (-1L))
   | _ -> false
+
+(* S2's shape: a heap-pointing GPR store beside the [RSP-16] cell
+   write; the base register is the control (RBP vs RBX). *)
+let heap_store_sub name m_name (base : var) : sub term =
+  let rsp = v64 "RSP" in
+  let m = memv m_name in
+  let def_heap =
+    Def.create base (Bil.Int (Cbat_word.to_word (w64 0x400000)))
+  in
+  let def_rsp =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16)) ),
+           Bil.Int (Cbat_word.to_word (w64 1)),
+           LittleEndian,
+           `r64 ))
+  in
+  let def_heap_store =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.PLUS, Bil.Var base, Bil.Int (Cbat_word.to_word (w64 0x100)) ),
+           Bil.Int (Cbat_word.to_word (w64 9)),
+           LittleEndian,
+           `r64 ))
+  in
+  fst (sub_of name [ [ def_heap; def_rsp; def_heap_store ], [ (1, mk_goto) ]; [], [] ])
 
 let tests : unit Alcotest.test list =
   [
@@ -967,18 +1007,6 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let rsp = v64 "RSP" in
         let m = memv "c4b_m" in
-        let storage_of_def ctx sub dtid : A.range_storage option =
-          match Core.Map.find ctx.A.sub_trees (Term.tid sub) with
-          | Some tree ->
-              A.Tree.to_sequence tree |> Seq.to_list
-              |> Base.List.find_map ~f:(fun (_, rs) ->
-                     if
-                       Base.List.exists rs.A.members ~f:(fun mm ->
-                           Base.Option.equal Tid.equal mm.A.m_def (Some dtid))
-                     then Some rs
-                     else None)
-          | None -> None
-        in
         let a_ctrl = mk_store_minus m rsp 48 3 `r64 in
         let b_ctrl = mk_store_minus m rsp 44 4 `r64 in
         let sub_ctrl = fst (sub_of "c4b_ctrl" [ [ a_ctrl; b_ctrl ], [] ]) in
@@ -989,18 +1017,6 @@ let tests : unit Alcotest.test list =
 
     pin "SEC-60" "C4b: the widened member's component takes Frame storage, never Region"
       (fun () ->
-        let storage_of_def ctx sub dtid : A.range_storage option =
-          match Core.Map.find ctx.A.sub_trees (Term.tid sub) with
-          | Some tree ->
-              A.Tree.to_sequence tree |> Seq.to_list
-              |> Base.List.find_map ~f:(fun (_, rs) ->
-                     if
-                       Base.List.exists rs.A.members ~f:(fun mm ->
-                           Base.Option.equal Tid.equal mm.A.m_def (Some dtid))
-                     then Some rs
-                     else None)
-          | None -> None
-        in
         let sub_mixed, def_idx_store = mk_indexed_loop ~pfx:"c4b" in
         let ctx_mixed = fixture_ctx [ sub_mixed ] in
         check_bound "SEC-60"
@@ -1094,40 +1110,7 @@ let tests : unit Alcotest.test list =
     pin "SEC-66"
       "S2 (fp-GPR): an untagged heap-RBP store does NOT degrade the sub (the rsp cell keeps Region storage — stack-ness is the value proof alone)"
       (fun () ->
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
-        let m = memv "s2_m" in
-        let def_heap =
-          Def.create rbp (Bil.Int (Cbat_word.to_word (w64 0x400000)))
-        in
-        let def_rsp =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.MINUS,
-                     Bil.Var rsp,
-                     Bil.Int (Cbat_word.to_word (w64 16)) ),
-                 Bil.Int (Cbat_word.to_word (w64 1)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let def_heap_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.PLUS,
-                     Bil.Var rbp,
-                     Bil.Int (Cbat_word.to_word (w64 0x100)) ),
-                 Bil.Int (Cbat_word.to_word (w64 9)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let sub, _ =
-          sub_of "s2_heap_rbp"
-            [ [ def_heap; def_rsp; def_heap_store ], [ (1, mk_goto) ]; [], [] ]
-        in
+        let sub = heap_store_sub "s2_heap_rbp" "s2_m" (v64 "RBP") in
         let ctx = fixture_ctx [ sub ] in
         check "SEC-66"
           (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
@@ -1136,40 +1119,7 @@ let tests : unit Alcotest.test list =
     pin "SEC-67"
       "S2b (fp-GPR control): the identical sub with an RBX-based heap store is NOT degraded — storage-ness comes from the value proof, not the name"
       (fun () ->
-        let rsp = v64 "RSP" in
-        let rbx = v64 "RBX" in
-        let m = memv "s2b_m" in
-        let def_heap =
-          Def.create rbx (Bil.Int (Cbat_word.to_word (w64 0x400000)))
-        in
-        let def_rsp =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.MINUS,
-                     Bil.Var rsp,
-                     Bil.Int (Cbat_word.to_word (w64 16)) ),
-                 Bil.Int (Cbat_word.to_word (w64 1)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let def_heap_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.PLUS,
-                     Bil.Var rbx,
-                     Bil.Int (Cbat_word.to_word (w64 0x100)) ),
-                 Bil.Int (Cbat_word.to_word (w64 9)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let sub, _ =
-          sub_of "s2b_heap_rbx"
-            [ [ def_heap; def_rsp; def_heap_store ], [ (1, mk_goto) ]; [], [] ]
-        in
+        let sub = heap_store_sub "s2b_heap_rbx" "s2b_m" (v64 "RBX") in
         let ctx = fixture_ctx [ sub ] in
         check "SEC-67"
           (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))

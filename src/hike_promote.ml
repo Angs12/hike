@@ -138,16 +138,14 @@ let conversion_of ~(word : int) ~(entry : int64)
           in
           let owned =
             Base.List.filter portions ~f:(fun p ->
-                match p.pt_sec with
-                | Stack | Args -> not retaddr_cell
-                | _ -> p.pt_elig && Sections.is_const_chain addr)
+                if Sections.is_sub_local p.pt_sec then not retaddr_cell
+                else p.pt_elig && Sections.is_const_chain addr)
           in
           match owned with
           | [ p ] -> (
               let owner =
-                match p.pt_sec with
-                | Stack | Args -> Sections.storage_of_range tree (Sections.range p.pt_sec p.pt_lo p.pt_hi)
-                | _ -> Sections.storage_of_range data (Sections.range p.pt_sec p.pt_lo p.pt_hi)
+                let space = if Sections.is_sub_local p.pt_sec then tree else data in
+                Sections.storage_of_range space (Sections.range p.pt_sec p.pt_lo p.pt_hi)
               in
               match owner with
               | Some rs -> (

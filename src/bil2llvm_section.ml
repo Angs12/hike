@@ -377,7 +377,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     end;
     let owners = Base.List.rev !owners in
 #ifdef VSA_DEBUG
-    Printf.eprintf "t18tile: %s words=%d owners=%d\n" name words
+    Printf.eprintf "sections: %s words=%d owners=%d\n" name words
       (Base.List.length owners);
     Base.List.iter owners ~f:(fun o ->
         Printf.eprintf "  owner id=%s lo=%Lx hi=%Lx base=%s\n"
@@ -447,27 +447,12 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
             bytes = Some si_image;
             owners }
   in
-  let key_of = function
-    | Sec_bss _ -> Model.Bss
-    | Sec_bytes { si_type; _ } -> si_type
-  in
-  let built =
-    Base.List.filter_map
-      [ Model.Bss; Model.Got; Model.Gotplt; Model.Datarelro; Model.Data;
-        Model.Rodata; Model.Text ]
-      ~f:(fun t ->
-        Base.List.find_map spec.spec_sections ~f:(fun e ->
-            match e with
-            | Some si when key_of si = t -> Some (t, build_entry si)
-            | _ -> None))
-  in
-  (* Output order is the fixed section-list order. *)
+  (* One pass over the spec: each present section builds and lands in
+     the spec's own order; a section the binary lacks warns and emits
+     nothing. *)
   Base.List.filter_mapi spec.spec_sections ~f:(fun i e ->
       match e with
       | None ->
           Hike_diag.warn "section %d was not found in binary" i;
           None
-      | Some si ->
-          let t = key_of si in
-          Base.List.find_map built ~f:(fun (bt, s) ->
-              if bt = t then Some s else None))
+      | Some si -> Some (build_entry si))

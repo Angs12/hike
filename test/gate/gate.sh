@@ -2,7 +2,8 @@
 # The gate orchestrator: one entry point for the strict integration chain.
 #
 #   gate.sh <stage>
-#     stages: provenance corpus lift allocas semantics opt-safety unit all
+#     stages: fail-before provenance corpus lift allocas semantics opt-safety
+#             unit all
 #
 # `all` runs the documented chain in order and aborts on the first failure.
 # Every stage is strict (non-zero exit on any failure) and provenance is

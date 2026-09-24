@@ -590,6 +590,8 @@ let div (p1 : t) (p2 : t) : t =
   | None -> bottom width
   | Some x -> x)
 
+(* Word-size signed division/modulus (the ws- prefix is "signed
+   word ops", not a WebAssembly spelling). *)
 let wsdiv (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
 let wsmod (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
 
