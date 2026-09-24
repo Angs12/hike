@@ -23,7 +23,7 @@ let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
       llvm_builder
   in
   Llvm.set_alignment Hike_abi.stack_align vla;
-  Llvm.build_ptrtoint vla (Llvm.i64_type ctx.llvm_ctx) "vla_i64"
+  Llvm.build_ptrtoint vla (ctx.i64_ty) "vla_i64"
     llvm_builder
 
 (* Region/window access emission lives in [Bil2llvm_exp]. *)
@@ -100,8 +100,8 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
         let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
         match get_local scope blk_tid wv with
         | Some v ->
-            Llvm.build_ptrtoint v (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
-        | None -> Llvm.undef (Llvm.i64_type ctx.llvm_ctx)
+            Llvm.build_ptrtoint v (ctx.i64_ty) "" llvm_builder
+        | None -> Llvm.undef (ctx.i64_ty)
       in
       let stack0 = frame_stack0 fr in
       let rel = Llvm.build_sub res stack0 "" llvm_builder in

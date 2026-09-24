@@ -38,7 +38,13 @@ end
 module WVarMap = Map.Make (WVar)
 
 type llvalue_map = Llvm.llvalue WVarMap.t
-type blk_llvals = { phis : llvalue_map ref; locals : llvalue_map ref }
+type blk_llvals = {
+  phis : llvalue_map ref;
+  locals : llvalue_map ref;
+  (* The same bindings indexed by base var (width, value) lists —
+     the width-miss probe reads this, not the whole locals map. *)
+  family : (int * Llvm.llvalue) list WVarMap.t ref;
+}
 
 (* One owner of a byte range of a section: a component or a gap
    run.  [own_id] is the component id ([None] for a gap run). *)
@@ -144,7 +150,16 @@ type emit_ctx = {
   ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
   thunks : (string * Llvm.llvalue) list ref;
   (* [sec_comp_N_mem] var -> (global, native base). *)
-  sec_comps : (Var.t * (Llvm.llvalue * int64)) list ref;
+  sec_comps : (Llvm.llvalue * int64) Var.Map.t ref;
+  (* The TLS anchor global and the llvm.trap function, declared once. *)
+  tls_anchor : Llvm.llvalue option ref;
+  trap_fn : Llvm.llvalue option ref;
+  (* PLT-trampoline verdicts, per sub: the O(sub) walk runs once. *)
+  plt_trampolines : bool Tid.Map.t ref;
+  (* The hot LLVM types, bound once per emission. *)
+  i64_ty : Llvm.lltype;
+  ptr_ty : Llvm.lltype;
+  word_ty : Llvm.lltype;
 }
 
 (* The sub-emission scope: every per-sub emission state.  [emit_program]'s
@@ -180,12 +195,12 @@ let fresh_scope () : sub_scope =
 let typ_lltype ctx typ =
   match typ with
   | Imm n -> Llvm.integer_type ctx.llvm_ctx n
-  | _ -> Llvm.pointer_type ctx.llvm_ctx
+  | _ -> ctx.ptr_ty
 
 (* The caller-window base is a real pointer; every other lane keeps its
    BIR type. *)
 let var_lltype ctx var =
-  if Hike_stack_model.is_window_var var then Llvm.pointer_type ctx.llvm_ctx
+  if Hike_stack_model.is_window_var var then ctx.ptr_ty
   else typ_lltype ctx (Var.typ var)
 
 (* Coerces an integer value of known width to a lane width. *)
@@ -260,7 +275,7 @@ let synthetic_rets ctx =
 (* One signature lane's LLVM type: the pointer-tagged lanes pass
    pointers, the rest keep the BIR type. *)
 let lane_type ctx (a : Arg.t) : Llvm.lltype =
-  if Hike_stack_model.is_ptr_arg a then Llvm.pointer_type ctx.llvm_ctx
+  if Hike_stack_model.is_ptr_arg a then ctx.ptr_ty
   else var_lltype ctx (Arg.lhs a)
 
 let get_args ctx sub_tid =
@@ -322,8 +337,10 @@ let get_bb scope tid = bb_find !(scope.ll_bbs) tid
 let init_blk_llvals scope blk_tid =
   let phis = ref WVarMap.empty in
   let locals = ref WVarMap.empty in
+  let family = ref WVarMap.empty in
   scope.blk_llvals :=
-    Core.Map.add_exn !(scope.blk_llvals) ~key:blk_tid ~data:{ phis; locals }
+    Core.Map.add_exn !(scope.blk_llvals) ~key:blk_tid
+      ~data:{ phis; locals; family }
 
 let insert_phi scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
@@ -339,7 +356,17 @@ let get_phi scope blk_tid var =
 
 let insert_local scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
-  blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals)
+  blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals);
+  let wvar = wvar_of var in
+  let WVar (base, _) = wvar in
+  let prev = WVarMap.find_opt (WVar (base, -1)) !(blk_llvals.family) in
+  let width =
+    match Var.typ var with Type.Imm w -> w | _ -> 0
+  in
+  blk_llvals.family :=
+    WVarMap.add (WVar (base, -1))
+      ((width, value) :: Option.value prev ~default:[])
+      !(blk_llvals.family)
 
 let get_local scope blk_tid var =
   let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
@@ -351,9 +378,9 @@ let probe_local_family scope blk_tid (v : Var.t) ~(want_w : int) :
   let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
   let base = Var.base v in
   let bindings =
-    WVarMap.bindings !(blk_vars.locals)
-    |> List.filter (fun ((WVar (bv, _w)), _) -> Var.same bv base)
-    |> List.map (fun ((WVar (_, w)), value) -> (w, value))
+    match WVarMap.find_opt (WVar (base, -1)) !(blk_vars.family) with
+    | Some l -> l
+    | None -> []
   in
   match
     List.sort (fun (w1, _) (w2, _) -> compare w2 w1) bindings
@@ -421,7 +448,14 @@ let trap_name = "llvm.trap"
 
 let create_interrupt ctx llvm_builder =
   let trap_ty = Llvm.function_type (Llvm.void_type ctx.llvm_ctx) [||] in
-  let trap = Llvm.declare_function trap_name trap_ty ctx.llvm_module in
+  let trap =
+    match !(ctx.trap_fn) with
+    | Some f -> f
+    | None ->
+      let f = Llvm.declare_function trap_name trap_ty ctx.llvm_module in
+      ctx.trap_fn := Some f;
+      f
+  in
   ignore
     (Llvm.build_call trap_ty trap [||] "" llvm_builder);
   ignore (Llvm.build_unreachable llvm_builder)

@@ -137,7 +137,7 @@ let resolve_addr_in ctx llvm_builder section addr =
     owner_of section (Word.to_int64_exn addr)
   in
   let offset =
-    Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
+    Llvm.const_of_int64 (ctx.i64_ty)
       (Int64.sub (Word.to_int64_exn addr) own_lo)
       false
   in
@@ -149,7 +149,7 @@ let resolve_addr ctx llvm_builder addr =
   | None ->
       (* Out-of-section address: inttoptr of the raw constant. *)
       let v =
-        Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
+        Llvm.const_of_int64 (ctx.i64_ty)
           (Word.to_int64_exn addr) false
       in
       Llvm.build_inttoptr v (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder
@@ -219,7 +219,7 @@ let const_addr_store ctx llvm_builder addr_w ~data ~fallback =
             Int64.equal a (Word.to_int64_exn addr_w))
       then begin
         let p =
-          Llvm.build_load (Llvm.i64_type ctx.llvm_ctx) base "" llvm_builder in
+          Llvm.build_load (ctx.i64_ty) base "" llvm_builder in
         let pp =
           Llvm.build_inttoptr p (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder in
         let _ : Llvm.llvalue = Llvm.build_store llvm_var pp llvm_builder in

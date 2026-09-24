@@ -42,6 +42,13 @@ type block_facts = {
 type refine_ctx = {
   (* Mutable state, owned by this context. *)
   rc_state : fix_state;
+  (* The last postcondition per source block, keyed physically by the
+     entry state it was computed from: a k-successor pred denotes once
+     per visit instead of once per edge. *)
+  rc_post : (AI.t * AI.t) Tid.Map.t ref;
+  (* The walked block's def chain with its pre/post states, keyed
+     physically by the entry state the chain was denoted from. *)
+  rc_prefix : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref;
   (* The run's convention facts (Hike_abi is the one home): the sp var
      the walk anchors on, the call-written register lanes, and the
      word size behind every word lookup. *)
@@ -134,6 +141,8 @@ let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
   rc_state = {
     fs_sol = Tid.Map.empty;
   };
+  rc_post = ref Tid.Map.empty;
+  rc_prefix = ref Tid.Map.empty;
   rc_abi = abi;
   rc_sub_lookup = sub_lookup;
   rc_blocks =

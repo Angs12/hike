@@ -125,12 +125,19 @@ let rec is_tls_addr ctx (e : exp) : bool =
    llvm.threadlocal.address is its accessor. *)
 let tls_anchor_addr ctx llvm_builder =
   let g =
-    Llvm.declare_global (Llvm.i64_type ctx.llvm_ctx) "hike_tls_anchor"
-      ctx.llvm_module
+    match !(ctx.tls_anchor) with
+    | Some g -> g
+    | None ->
+      let g =
+        Llvm.declare_global (ctx.i64_ty) "hike_tls_anchor"
+          ctx.llvm_module
+      in
+      Llvm.set_thread_local_mode Llvm.ThreadLocalMode.GeneralDynamic g;
+      Llvm.set_initializer (Llvm.const_int (ctx.i64_ty) 0) g;
+      ctx.tls_anchor := Some g;
+      g
   in
-  Llvm.set_thread_local_mode Llvm.ThreadLocalMode.GeneralDynamic g;
-  Llvm.set_initializer (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) 0) g;
-  let tp = Llvm.pointer_type ctx.llvm_ctx in
+  let tp = ctx.ptr_ty in
   let fty = Llvm.function_type tp [| tp |] in
   let f = Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module in
   Llvm.build_call fty f [| g |] "tls_anchor" llvm_builder
@@ -347,12 +354,12 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
 and sec_comp_access ctx scope llvm_builder blk_tid ~(store : bool)
     (mv : var) (addr : exp) ~(data : exp option) (size : int) :
     Llvm.llvalue =
-  match Base.List.Assoc.find ~equal:Var.equal !(ctx.sec_comps) mv with
+  match Core.Map.find !(ctx.sec_comps) mv with
   | Some (base, own_lo) ->
     let a = create_exp ctx scope llvm_builder blk_tid addr in
     let idx =
       Llvm.build_sub a
-        (Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) own_lo false)
+        (Llvm.const_of_int64 (ctx.i64_ty) own_lo false)
         "" llvm_builder
     in
     let p =
@@ -387,7 +394,7 @@ and create_rip_relative_addr ctx scope llvm_builder blk_tid exp =
   | Bil.Int w ->
       let v = Word.to_int64_exn w in
       remapped_const ctx ctx.llvm_ctx ctx.llvm_module v
-        (Llvm.i64_type ctx.llvm_ctx)
+        (ctx.i64_ty)
   | Store (Bil.Var mv, addr, data, _, s)
     when Hike_stack_model.is_sec_comp_mem mv ->
       sec_comp_access ctx scope llvm_builder blk_tid ~store:true mv addr
@@ -505,7 +512,7 @@ and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
   let region_index llvm_builder rel_rlo a =
     let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
     Llvm.build_sub rel
-      (Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) rel_rlo false)
+      (Llvm.const_of_int64 (ctx.i64_ty) rel_rlo false)
       "" llvm_builder
   in
   match Base.List.Assoc.find ~equal:Var.equal fr.regions mv with

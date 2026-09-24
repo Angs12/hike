@@ -340,8 +340,6 @@ let rec static_graph_vsa
       Option.value_map (Core.Map.find (!rc_cell).rc_blocks v)
         ~default:Var.Set.empty ~f:(fun bf -> bf.bf_live_in)
     in
-    (* Snapshot for the deep walk. *)
-    let sol_snap = mk_sol () in
     let incoming =
       if List.is_empty preds then old
       else
@@ -356,7 +354,7 @@ let rec static_graph_vsa
                 let res = Stages.time `Denote (fun () ->
                   Cbat_forward.denote_block ~preserved ~written ~resolved
                         ~edge_conds ~disabled:disabled_conds
-                        ~sol:sol_snap ~rctx:rc
+                        ~rctx:rc
                         ctx ~source:p p_entry ~target:v) in
                 let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
 #ifdef VSA_DEBUG
@@ -426,34 +424,40 @@ let rec static_graph_vsa
       (Core.Map.find smry.Cbat_wto.pos_of v) in
   (* Succ-seeded WTO-priority worklist; every visit runs process_vertex
      completely, and changes enqueue Tid-CFG successors. *)
-  let pending = ref Tid.Set.empty in
+  (* WTO-priority buckets: pos -> the blocks at that position.  A
+     block's position is static, so enqueue is one bucket insert and
+     pop_min reads the least non-empty bucket. *)
+  let pending : Tid.Set.t Int.Map.t ref = ref Int.Map.empty in
+  let enqueue t =
+    pending :=
+      Core.Map.update !pending (pos t) ~f:(function
+          | None -> Core.Set.singleton (module Tid) t
+          | Some set -> Core.Set.add set t)
+  in
   (* Entry itself is never seeded: init_sol pre-seeds its state. *)
   Option.iter (Term.first blk_t s) ~f:(fun entry ->
     succs (Term.tid entry)
-    |> List.iter ~f:(fun t -> pending := Core.Set.add !pending t));
+    |> List.iter ~f:enqueue);
   (* A block that gained an extra-edge predecessor re-joins even from
      a stable warm seed — its incoming set grew without any
      predecessor's value changing. *)
-  Core.Set.iter dg.Cbat_dispatch_graph.gained_preds ~f:(fun t ->
-      pending := Core.Set.add !pending t);
+  Core.Set.iter dg.Cbat_dispatch_graph.gained_preds ~f:enqueue;
   let pop_min () =
-    let best =
-      Core.Set.fold !pending ~init:None ~f:(fun best t ->
-          match best with
-          | None -> Some t
-          | Some b -> if pos t < pos b then Some t else best) in
-    match best with
+    match Core.Map.min_elt !pending with
     | None -> None
-    | Some v ->
-      pending := Core.Set.remove !pending v;
+    | Some (p, set) ->
+      let v = Core.Set.choose_exn set in
+      let rest = Core.Set.remove set v in
+      pending :=
+        (if Core.Set.is_empty rest then Core.Map.remove !pending p
+         else Core.Map.set !pending ~key:p ~data:rest);
       Some v in
   let rec stabilize_worklist () =
     match pop_min () with
     | None -> ()
     | Some v ->
       if process_vertex v then
-        succs v
-        |> List.iter ~f:(fun t -> pending := Core.Set.add !pending t);
+        succs v |> List.iter ~f:enqueue;
       stabilize_worklist () in
   stabilize_worklist ();
   Stages.report (Sub.name s);
@@ -499,7 +503,10 @@ let inverse_denote = Cbat_backward.inverse_denote
 (* The seam's seed shape: the cond's leaf constraints as (var, row)
    pairs. *)
 let refine_edge ~sol ~rctx ~seeds env blk =
-  Cbat_backward.refine_edge ~sol ~rctx
+  (* The walked block's IN state is its entry in [sol]. *)
+  Cbat_backward.refine_edge
+    ~entry:(Solution.get sol (Term.tid blk))
+    ~rctx
     ~seeds:(List.fold seeds ~init:Var.Map.empty
               ~f:(fun m (v, c) -> Core.Map.set m ~key:(Var.base v) ~data:c))
     env blk

@@ -53,10 +53,11 @@ let denote_jump
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
-    ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     (b : blk term)  (env : AI.t) ~(target : tid)
     : AI.t =
+  (* The backward refinement's entry state IS the source block's IN
+     state — the env this jump transfers. *)
   (* Per jmp: the edge's own cond and the disabled continuation (the
      next edge's cond), both from the run's tables. *)
   let lookup_cond jmp =
@@ -71,14 +72,14 @@ let denote_jump
        arm. *)
     Option.iter (Core.Map.find disabled (Term.tid jmp))
       ~f:(fun dc ->
-        Cbat_backward.acquire_unsat ~sol
+        Cbat_backward.acquire_unsat ~entry:env
           ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
           ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
           env b dc);
     let env =
       match edge_cond with
       | Some acc_cond ->
-        Cbat_backward.refine_edge_inline ~sol
+        Cbat_backward.refine_edge_inline
           ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
       | None -> env in
 
@@ -149,16 +150,25 @@ let denote_block
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
-    ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     (ctx : program term) ~(source : tid) (env : AI.t)
     : target:tid -> AI.t =
  match (Program.lookup blk_t ctx source) with
    | Some b ->
-     let postcond = denote_defs b env in
+     (* The block's postcondition depends only on the source block's
+        IN state: one denotation per (block, state), shared by every
+        successor edge. *)
+     let postcond =
+       match Core.Map.find !(rctx.Cbat_runctx.rc_post) source with
+       | Some (e0, p0) when phys_equal e0 env -> p0
+       | _ ->
+         let p = denote_defs b env in
+         rctx.Cbat_runctx.rc_post :=
+           Core.Map.set !(rctx.Cbat_runctx.rc_post) ~key:source ~data:(env, p);
+         p
+     in
      fun ~target ->
        denote_jump ~preserved ~written ~resolved ~edge_conds ~disabled
-         ~sol
          ~rctx
          b postcond ~target
    | None -> fun ~target ->

@@ -151,10 +151,10 @@ let exit_entry scope llvm_builder sub =
 
 let build_entry_block ctx scope llvm_builder transfer_vars fr sub fn =
   let tid = Graphs.Tid.start in
+  let args = get_args ctx (Term.tid sub) in
   Base.List.iter transfer_vars ~f:(fun var ->
       let arg =
-        Base.List.find (get_args ctx (Term.tid sub)) ~f:(fun arg ->
-            Var.same (Arg.lhs arg) var)
+        Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) var)
       in
       let llval =
         match arg with
@@ -182,6 +182,7 @@ let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
   init_blk_llvals scope Graphs.Tid.start;
   (* (transfer set, defined set); the defined set includes phi lhs —
      phi lanes need definedness. *)
+  let indirect_rets = ret_set ctx in
   let defined_and_transferred =
     Seq.fold blks
       ~f:(fun (reg_set, def_set) blk ->
@@ -200,9 +201,7 @@ let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
                         ( Base.List.fold (get_rets ctx ctid) ~init:rets
                             ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg))),
                           get_args ctx ctid )
-                    | Indirect _ ->
-                        ( Core.Set.union rets (ret_set ctx),
-                          [] )
+                    | Indirect _ -> (Core.Set.union rets indirect_rets, [])
                   in
                   ( Base.List.fold args ~init:acc ~f:(fun acc arg ->
                         Core.Set.add acc (Var.base (Arg.lhs arg))),
@@ -382,7 +381,13 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       sections;
       ll_funcs = ref Tid.Map.empty;
       thunks = ref [];
-      sec_comps = ref [] }
+      sec_comps = ref Var.Map.empty;
+      tls_anchor = ref None;
+      trap_fn = ref None;
+      plt_trampolines = ref Tid.Map.empty;
+      i64_ty = Llvm.i64_type llvm_ctx;
+      ptr_ty = Llvm.pointer_type llvm_ctx;
+      word_ty = Llvm.integer_type llvm_ctx (abi.Abi.word * 8) }
   in
   (* The named-component map: filled before any body emits; the
      rip-relative path renders through the same owners. *)
@@ -391,22 +396,18 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
           match o.own_id with
           | Some id ->
             let v = Hike_stack_model.sec_comp_mem id in
-            ctx.sec_comps :=
-              (v, (o.base, o.own_lo))
-              :: Base.List.filter !(ctx.sec_comps)
-                   ~f:(fun (k, _) -> not (Var.equal k v))
+            ctx.sec_comps := Core.Map.set !(ctx.sec_comps) ~key:v ~data:(o.base, o.own_lo)
           | None -> ()));
   (* An external function's PLT stub defines no function and emits no
      body — its declaration carries the name for every call site. *)
   let self_call_stubs =
     Term.enum sub_t prog
     |> Base.Sequence.filter ~f:(Bil2llvm_calls.is_self_call_stub ctx)
-    |> Base.Sequence.map ~f:(Term.tid)
+    |> Base.Sequence.map ~f:Term.tid
     |> Base.Sequence.to_list
+    |> Core.Set.of_list (module Tid)
   in
-  let is_self_call_stub_tid t =
-    Base.List.mem self_call_stubs t ~equal:Tid.equal
-  in
+  let is_self_call_stub_tid t = Core.Set.mem self_call_stubs t in
   let declare_phase () =
     Base.List.iter subs_list ~f:(fun sub ->
         let tid = Term.tid sub in

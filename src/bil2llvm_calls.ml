@@ -23,7 +23,7 @@ let restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough_tid =
     | Some post_push ->
         let restored =
           Llvm.build_add post_push
-            (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx) ctx.abi.Abi.word)
+            (Llvm.const_int (ctx.i64_ty) ctx.abi.Abi.word)
             "sp_restored" llvm_builder
         in
         (match get_local scope fallthrough_tid sp_key with
@@ -86,7 +86,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         let v = create_exp ctx scope llvm_builder blk_tid exp in
         let v =
           if Llvm.integer_bitwidth (Llvm.type_of v) = 256 then
-            Llvm.build_trunc v (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
+            Llvm.build_trunc v (ctx.i64_ty) "" llvm_builder
           else v
         in
         Llvm.build_bitcast v (Llvm.double_type ctx.llvm_ctx) ""
@@ -270,17 +270,20 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
   are its trailing varargs. *)
 let extern_stack_args ctx scope blk_tid (blk : blk term) =
   let word = ctx.abi.Abi.word in
-  let defined v =
+  (* The block's defined lhs vars, one pass; the slot walk conses and
+     one rev restores slot order. *)
+  let defined_vars =
     Term.enum def_t blk
-    |> Seq.exists ~f:(fun d -> Var.equal (Def.lhs d) v)
+    |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+        Core.Set.add acc (Def.lhs d))
   in
   let rec slots i acc =
     let v = Hike_stack_model.call_arg ~word i in
-    if defined v then
+    if Core.Set.mem defined_vars v then
       match get_local scope blk_tid v with
-      | Some value -> slots (i + 1) (acc @ [ value ])
+      | Some value -> slots (i + 1) (value :: acc)
       | None -> acc
-    else acc
+    else List.rev acc
   in
   slots 0 []
 
@@ -301,22 +304,22 @@ let bind_extern_fp_rets ctx scope llvm_builder blk_tid fn_typ fn args rets
       Llvm.build_bitcast ret_val (Llvm.integer_type ctx.llvm_ctx 80) ""
         llvm_builder
     in
-    let rax = Llvm.build_trunc bits (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder in
+    let rax = Llvm.build_trunc bits (ctx.i64_ty) "" llvm_builder in
     let high =
       Llvm.build_lshr bits
         (Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 80) 64)
         "" llvm_builder
     in
-    let rdx = Llvm.build_trunc high (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder in
+    let rdx = Llvm.build_trunc high (ctx.i64_ty) "" llvm_builder in
     first_ret rax;
     second_ret rdx
   | FpFloat | FpDouble ->
     let d =
       Llvm.build_fpcast ret_val (Llvm.double_type ctx.llvm_ctx) "" llvm_builder
     in
-    let i = Llvm.build_bitcast d (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder in
+    let i = Llvm.build_bitcast d (ctx.i64_ty) "" llvm_builder in
     first_ret i;
-    second_ret (Llvm.undef (Llvm.i64_type ctx.llvm_ctx))
+    second_ret (Llvm.undef (ctx.i64_ty))
 
 let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
@@ -370,7 +373,16 @@ let create_indirect_call ctx scope llvm_builder blk_tid (j : jmp term) =
 let thunk_name_of (sub_tid : tid) : string =
   sanitize_name (Tid.name sub_tid) ^ "_hike_thunk"
 
-let is_plt_trampoline ctx (sub : sub term) : bool =
+let rec is_plt_trampoline ctx (sub : sub term) : bool =
+  match Core.Map.find !(ctx.plt_trampolines) (Term.tid sub) with
+  | Some v -> v
+  | None ->
+    let verdict = is_plt_trampoline_slow ctx sub in
+    ctx.plt_trampolines := Core.Map.set !(ctx.plt_trampolines)
+        ~key:(Term.tid sub) ~data:verdict;
+    verdict
+
+and is_plt_trampoline_slow ctx (sub : sub term) : bool =
   let free_vars = Hike_stack_model.free_regs sub in
   let reg_vars =
     (* A stub using the frame pointer is not a pure trampoline. *)
@@ -412,7 +424,7 @@ let create_thunk ctx (sub_tid : tid) =
     let window_var = Hike_stack_model.hike_window_var ~word in
     (* The twin carries the synthetic indirect convention — exactly
        what a pointer call passes. *)
-    let conv = Abi.of_target ctx.target in
+    let conv = ctx.abi in
     let twin_args = window_conv_args ~word conv in
         let reg_args =
           Base.List.filter args ~f:(fun a ->
@@ -496,8 +508,8 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
   let n_args = Base.List.length args in
-  let fn_ty = Llvm.function_type (Llvm.i64_type ctx.llvm_ctx)
-      (Array.init n_args (fun _ -> Llvm.i64_type ctx.llvm_ctx)) in
+  let fn_ty = Llvm.function_type (ctx.i64_ty)
+      (Array.init n_args (fun _ -> ctx.i64_ty)) in
   let callee = Llvm.declare_function name fn_ty ctx.llvm_module in
   let arg_vals =
     Base.List.map ~f:(fun a ->

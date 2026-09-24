@@ -964,22 +964,38 @@ let carry_undefined ~(raw : bool) (live : wordset Var.Map.t)
 let undefined_width = WordSet.bottom 8
 
 let walk ?(raw : bool = false)
-    ~(sol : (tid, AI.t) Solution.t)
+    ?(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
+    ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
     ~(seeds : live_map)
     (env : AI.t) (blk : blk term) : AI.t =
   let env_out = ref env in
-  let blk_state = Solution.get sol (Term.tid blk) in
+  (* The walked block's IN state, handed in by the caller — no
+     solution lookup, no snapshot copy. *)
+  let blk_state = entry in
   (* Each def paired with its pre- and post-state, positionally;
-     reverse def order. *)
+     reverse def order.  The chain depends only on (block, entry
+     state): the solve ctx caches the last denotation physically. *)
   let prefixed =
-    Term.enum def_t blk
-    |> Seq.fold ~init:(blk_state, [])
-      ~f:(fun (st, acc) d ->
-          let post = denote_def d st in
-          (post, (d, st, post) :: acc))
-    |> snd in
+    let compute () =
+      Term.enum def_t blk
+      |> Seq.fold ~init:(blk_state, [])
+        ~f:(fun (st, acc) d ->
+            let post = denote_def d st in
+            (post, (d, st, post) :: acc))
+      |> snd
+    in
+    match cache with
+    | Some c ->
+      (match Core.Map.find !c (Term.tid blk) with
+       | Some (e0, pref) when phys_equal e0 blk_state -> pref
+       | _ ->
+         let pref = compute () in
+         c := Core.Map.set !c ~key:(Term.tid blk) ~data:(blk_state, pref);
+         pref)
+    | None -> compute ()
+  in
   (* Word vars are the delivery/kill domain; mem vars the meets. *)
   let mem_vars_of (e : exp) (acc : var list) =
     Core.Set.fold (Exp.free_vars e) ~init:acc ~f:(fun acc v ->
@@ -1109,28 +1125,31 @@ let cond_seeds ~(base : AI.t) (env : AI.t) (cond : exp) : live_map =
 
 (* The refinement walk: the constraint meets the produced values (the
    producer subtraction). *)
-let walk_block ~sol ~landmarks ~witness ~seeds env blk =
-  walk ~raw:false ~sol ~landmarks ~witness ~seeds env blk
+let walk_block ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
+    ~seeds env blk =
+  walk ~raw:false ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
+    ~witness ~seeds env blk
 
 (* The acquisition's hypothetical: the constraint applies AS GIVEN,
    skipping the producer subtraction. *)
-let walk_block_raw ~sol ~landmarks ~witness ~seeds env blk =
-  walk ~raw:true ~sol ~landmarks ~witness ~seeds env blk
+let walk_block_raw ~entry ~landmarks ~witness ~seeds env blk =
+  walk ~raw:true ~entry ~landmarks ~witness ~seeds env blk
 
 (* The deep walk: the guard block's defs backwards; leftover
    constraints and cell meets flow into the returned edge env. *)
-let refine_edge ~(sol : (tid, AI.t) Solution.t)
+let refine_edge ~(entry : AI.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(seeds : live_map)
     (env : AI.t) (blk : blk term) : AI.t =
   Stages.incr_walk ();
-  walk_block ~sol ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg ~seeds env blk
+  walk_block ~rctx ~entry ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg
+    ~seeds env blk
 
 (* The disabled continuation observed through the same rules, the
    result DISCARDED: every empty meet records the excluded boundary +
    distance as the enclosing WTO cycle's widening landmark (words and
    memory cells alike). *)
-let acquire_unsat ~(sol : (tid, AI.t) Solution.t) ~(landmarks : Cbat_landmarks.t)
+let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
   (* The raw walk pushes the disabled cond's constraints through the
@@ -1149,11 +1168,10 @@ let acquire_unsat ~(sol : (tid, AI.t) Solution.t) ~(landmarks : Cbat_landmarks.t
                 ~data:(WordSet.singleton Cbat_word.b1)
             | _ -> acc)
       else seeds in
-    ignore (walk_block_raw ~sol ~landmarks ~witness ~seeds:raw_seeds constrained blk)
+    ignore (walk_block_raw ~entry ~landmarks ~witness ~seeds:raw_seeds constrained blk)
   end
 
 let refine_edge_inline
-    ~(sol : (tid, AI.t) Solution.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
@@ -1166,5 +1184,5 @@ let refine_edge_inline
     let seeds = cond_seeds ~base:env_in env acc_cond in
     let refined =
       Stages.time `Walk (fun () ->
-          refine_edge ~sol ~rctx ~seeds env b) in
+          refine_edge ~entry:env_in ~rctx ~seeds env b) in
     refined
