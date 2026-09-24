@@ -445,44 +445,9 @@ let rec static_graph_vsa
   stabilize_worklist ();
   Stages.report (Sub.name s);
   mk_sol ()
-module Cbat_extraction = struct
-(* Classification vocabulary: the (lo,hi) pair is the denotation's
-   position interval on the model's ABSOLUTE segment line (see
-   [classify]); "below/above the entry RSP" reads as below/above the
-   segment base.
-   - [Range]/[Infinite]: entirely below the entry RSP — this sub's
-     own frame.
-   - [Caller]: entirely at/above — ABI-visible caller-window traffic.
-   - [Mixed]: two-sided or wrapped — the runtime address is GENUINELY
-     either-based; the emitter's rule is the two-base select. *)
-(* Re-exported from cbat_clp_set_composite for the seam's consumers. *)
-type kind = WordSet.kind =
-  | Range of int64 * int64
-  | Infinite of int64 * int64
-  | Caller of int64 * int64
-  | Mixed of int64 * int64
-  | Dead
-
-let unbounded_span = Cbat_clp_set_composite.unbounded_span
-let is_unbounded_span = Cbat_clp_set_composite.is_unbounded_span
-let caller_split = Cbat_clp_set_composite.caller_split
-let position_of_offset = Cbat_clp_set_composite.position_of_offset
-let classify = Cbat_clp_set_composite.classify
-let equal_kind = Cbat_clp_set_composite.equal_kind
-
-(* Address of a stack-access rhs using Exp.visitor. *)
-let stack_address_of_rhs (rhs : Bil.exp) : Bil.exp option =
-  let vis =
-    object
-      inherit [ Bil.exp option ] Exp.visitor
-      method! visit_load ~mem:_ ~addr _ _ acc =
-        Base.Option.first_some acc (Some addr)
-      method! visit_store ~mem:_ ~addr ~exp:_ _ _ acc =
-        Base.Option.first_some acc (Some addr)
-    end
-  in
-  vis#visit_exp rhs None
-end
+(* The classification vocabulary lives in Cbat_extraction (re-exported
+   so the seam's consumers keep their paths). *)
+module Cbat_extraction = Cbat_extraction
 
 (* Re-exports for the mli's fixture seam. *)
 type refine_ctx = Cbat_runctx.refine_ctx
@@ -505,208 +470,16 @@ let reachable_jumps = Cbat_transfer.reachable_jumps
 let fold_block_states = Cbat_transfer.fold_block_states
 let last_defs = Cbat_transfer.last_defs
 
-(* The Env Tag: the before-state environment the solve held at a def,
-   riding the def's value.  Absence means the def is outside the
-   analysis boundary — minted after it, or its sub did not converge —
-   and denotes TOP. *)
-
-module KB = Bap_knowledge.Knowledge
-
-type KB.conflict += Env_tag_conflict
-
-let () =
-  KB.Conflict.register_printer (function
-    | Env_tag_conflict ->
-        Some
-          "hike: env-tag conflict: two different before-state environments were stamped for one def"
-    | _ -> None)
-
-let env_tag_domain : AI.t option KB.Domain.t =
-  KB.Domain.optional
-    ~inspect:(fun _ -> Sexp.Atom "hike:env-tag")
-    ~join:(fun a b ->
-#ifdef VSA_DEBUG
-      let () = Cbat_kb_census.bump "domain.env.join" in
-#endif
-      if AI.equal a b then Ok a else Error Env_tag_conflict)
-    ~equal:(fun a b ->
-#ifdef VSA_DEBUG
-      let () = Cbat_kb_census.bump "domain.env.equal" in
-#endif
-      AI.equal a b)
-    "hike:env-tag"
-
-let env_tag_slot : (Theory.Value.cls, AI.t option) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-env-tag"
-    env_tag_domain
-
-let env_tag (d : def term) : AI.t option =
-#ifdef VSA_DEBUG
-  let () = Cbat_kb_census.bump "env_tag.get" in
-#endif
-  KB.Value.get env_tag_slot (Def.value d)
-
-let set_env_tag (env : AI.t) (d : def term) : def term =
-#ifdef VSA_DEBUG
-  let () = Cbat_kb_census.bump "env_tag.put" in
-#endif
-  Def.with_value d (KB.Value.put env_tag_slot (Def.value d) (Some env))
-
-(* The SOLVE's own replay — for Hike_cfg_complete, the producer's
-   completion loop, ONLY.  Consumers use the seam [denote_exp_at];
-   this is a raw replay from the given state. *)
-let solve_denote :
-    pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
-    (WordSet.t, Type.error) Result.t =
-  fun ~pre ~blk ?def e ->
-    let env =
-      match def with
-      | None -> denote_defs blk pre
-      | Some d ->
-        let hit = ref false in
-        let env =
-          Term.enum def_t blk
-          |> Seq.fold ~init:pre ~f:(fun env x ->
-              if !hit then env
-              else if Tid.equal (Term.tid x) (Term.tid d) then (
-                hit := true;
-                env)
-              else denote_def x env)
-        in
-        if !hit then env else AI.top
-    in
-    denote_imm_exp e env
-
-#ifdef VSA_DEBUG
-(* The Env Tag differential: every def-level query replays from [pre]
-   through the raw path and compares the tag's answer; a def whose tid
-   was stamped and now carries no tag is a LOST tag, counted as a
-   mismatch like a value divergence.  Mismatches print as they happen;
-   the per-sub census (stamped / queried / mismatch) prints at exit. *)
-let env_tag_sub_of_blk : (Tid.t, string) Hashtbl.t = Hashtbl.create (module Tid)
-let env_tag_stamped : (Tid.t, unit) Hashtbl.t = Hashtbl.create (module Tid)
-let env_tag_census : (string, int * int * int) Hashtbl.t =
-  Hashtbl.create (module String)
-
-let env_tag_bump ~(sub : string) ~(stamped : int) ~(queried : int)
-    ~(mismatch : int) : unit =
-  let s, q, m =
-    Hashtbl.find env_tag_census sub |> Base.Option.value ~default:(0, 0, 0)
-  in
-  Hashtbl.set env_tag_census ~key:sub
-    ~data:(s + stamped, q + queried, m + mismatch)
-
-let env_tag_dump () =
-  Hashtbl.iteri env_tag_census
-    ~f:(fun ~key:sub ~data:(stamped, queried, mismatch) ->
-      Printf.eprintf
-        "hike-env-tag: sub %s: stamped=%d queried=%d mismatch=%d\n%!" sub
-        stamped queried mismatch)
-
-let () = at_exit env_tag_dump
-
-let env_tag_result_str (r : (WordSet.t, Type.error) Result.t) : string =
-  match r with
-  | Ok ws ->
-    if WordSet.is_top ws then "TOP"
-    else if WordSet.is_bottom ws then "BOTTOM"
-    else (
-      match WordSet.min_elem ws, WordSet.max_elem ws with
-      | Some lo, Some hi ->
-        Printf.sprintf "[%s..%s]" (Cbat_word.to_string lo)
-          (Cbat_word.to_string hi)
-      | _ -> "?")
-  | Error e -> "error: " ^ Type.Error.to_string e
-
-let env_tag_check ~pre ~blk ~(tagged : bool) (d : def term) (e : exp)
-    (answer : (WordSet.t, Type.error) Result.t) : unit =
-  let sub =
-    Hashtbl.find env_tag_sub_of_blk (Term.tid blk)
-    |> Base.Option.value ~default:"?"
-  in
-  let lost = (not tagged) && Hashtbl.mem env_tag_stamped (Term.tid d) in
-  let replay = solve_denote ~pre ~blk ~def:d e in
-  let mismatch =
-    lost
-    || (tagged
-        && (match answer, replay with
-            | Ok a, Ok r -> not (WordSet.equal a r)
-            | Error a, Error r -> not (Type.Error.equal a r)
-            | _ -> true))
-  in
-  env_tag_bump ~sub ~stamped:0 ~queried:1
-    ~mismatch:(if mismatch then 1 else 0);
-  if lost then
-    Printf.eprintf
-      "hike-env-tag: LOST sub %s blk %s def %s: tag=absent (stamped before) replay=%s\n%!"
-      sub (Tid.to_string (Term.tid blk)) (Tid.to_string (Term.tid d))
-      (env_tag_result_str replay)
-  else if mismatch then
-    Printf.eprintf
-      "hike-env-tag: MISMATCH sub %s blk %s def %s: tag=%s replay=%s\n%!" sub
-      (Tid.to_string (Term.tid blk)) (Tid.to_string (Term.tid d))
-      (env_tag_result_str answer) (env_tag_result_str replay)
-#endif
-
-(* [e] denotes in the before-env of [def] — the Env Tag the solve
-   stamped on the def, or [AI.top] when the def carries no tag (minted
-   after the analysis boundary) — or, with no [def], in the block's
-   postcondition.  [pre] feeds the VSA_DEBUG differential's replay
-   only. *)
-let denote_exp_at :
-    ?post:AI.t -> pre:AI.t -> blk:blk term -> ?def:def term -> exp ->
-    (WordSet.t, Type.error) Result.t =
-  fun ?(post = AI.top) ~pre ~blk ?def e ->
-    match def with
-    | None ->
-#ifdef VSA_DEBUG
-      let () = Cbat_kb_census.bump "seam.query.nodef" in
-#endif
-      denote_imm_exp e post
-    | Some d ->
-#ifdef VSA_DEBUG
-      let () = Cbat_kb_census.bump "seam.query.def" in
-#endif
-      let tag = env_tag d in
-      let env = match tag with Some env -> env | None -> AI.top in
-      let answer = denote_imm_exp e env in
-#ifdef VSA_DEBUG
-      env_tag_check ~pre ~blk ~tagged:(Base.Option.is_some tag) d e answer;
-#endif
-      answer
-
-(* The solve's boundary sweep: one (pre, post) env pair per block (pre
-   the solution's entry state, post the block's def replay from it) and
-   the sub with every def stamped with the env its own transfer reads. *)
-let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
-    (AI.t * AI.t) Tid.Map.t * sub term =
-  let envs = ref Tid.Map.empty in
-  let sub' =
-    Term.map blk_t sub ~f:(fun blk ->
-        let pre = Solution.get sol (Term.tid blk) in
-        let env = ref pre in
-        let blk' =
-          Term.map def_t blk ~f:(fun d ->
-              let before = !env in
-              let after = denote_def d before in
-              env := after;
-#ifdef VSA_DEBUG
-              Hashtbl.set env_tag_stamped ~key:(Term.tid d) ~data:();
-              env_tag_bump ~sub:(Sub.name sub) ~stamped:1 ~queried:0
-                ~mismatch:0;
-#endif
-              set_env_tag before d)
-        in
-        envs := Core.Map.set !envs ~key:(Term.tid blk) ~data:(pre, !env);
-        blk')
-  in
-#ifdef VSA_DEBUG
-  Term.enum blk_t sub'
-  |> Seq.iter ~f:(fun b ->
-      Hashtbl.set env_tag_sub_of_blk ~key:(Term.tid b) ~data:(Sub.name sub));
-#endif
-  (!envs, sub')
-
+(* The Env Tag seam (the KB domain/slot, the stamp, the raw replay,
+   the VSA_DEBUG differential, [denote_exp_at], and the env stamp)
+   lives in Cbat_env_tag; re-exported so the consumers keep their
+   [Vsa.*] paths. *)
+module Env_tag = Cbat_env_tag
+let denote_exp_at = Cbat_env_tag.denote_exp_at
+let stamp_envs_of_sol = Cbat_env_tag.stamp_envs_of_sol
+let env_tag = Cbat_env_tag.env_tag
+let set_env_tag = Cbat_env_tag.set_env_tag
+let solve_denote = Cbat_env_tag.solve_denote
 let constrain_edge = Cbat_backward.constrain_edge
 let inverse_denote = Cbat_backward.inverse_denote
 

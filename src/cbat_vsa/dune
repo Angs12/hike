@@ -32,6 +32,7 @@
   cbat_lattice_intf
   cbat_map_lattice
   cbat_clp_set_composite
+  cbat_extraction
   cbat_wordset_intf
   cbat_vsa_utils
   cbat_landmarks)
@@ -58,6 +59,7 @@
   cbat_call_effects
   cbat_kb_census
   cbat_attr_census
+  cbat_env_tag
   cbat_vsa_stages)
  (libraries bap bap-knowledge hike_abi hike_stack_bounds cbat_vsa_domain bitvec core monads hashcons)
  ; The cppo chain (mirrors src/dune's hike library): the stages debug

@@ -4,65 +4,13 @@
 open Bap.Std
 open Probe_common
 
-(* Direct-jump CFG successors of a block. *)
-let succs (blk : blk term) : tid list =
-  Term.enum jmp_t blk
-  |> Seq.filter_map ~f:(fun j ->
-      match Jmp.kind j with
-      | Goto (Direct t) | Ret (Direct t) -> Some t
-      | Call c -> (
-          match Call.target c with
-          | Direct t -> Some t
-          | _ -> None)
-      | _ -> None)
-  |> Seq.to_list
-
-let cfg_of (sub : sub term) : (tid * tid list) list =
-  Term.enum blk_t sub
-  |> Seq.map ~f:(fun b -> (Term.tid b, succs b))
-  |> Seq.to_list
-
-let succs_of (cfg : (tid * tid list) list) (t : tid) : tid list =
-  match Base.List.Assoc.find cfg t ~equal:Tid.equal with
-  | Some ts -> ts
-  | None -> []
-
-(* Reachability in the CFG. *)
-let reachable (cfg : (tid * tid list) list) (start : tid) (target : tid) :
-    bool =
-  let rec go seen = function
-    | [] -> false
-    | t :: rest ->
-      if Tid.equal t target then true
-      else if Base.List.mem seen t ~equal:Tid.equal then go seen rest
-      else go (t :: seen) (succs_of cfg t @ rest)
-  in
-  go [] [ start ]
-
-let on_cycle (cfg : (tid * tid list) list) (t : tid) : bool =
-  Base.List.exists (succs_of cfg t) ~f:(fun s -> reachable cfg s t)
-
-(* One (head, members) per cyclic SCC; head is the smallest Tid name. *)
-let cyclic_heads (cfg : (tid * tid list) list) : (tid * tid list) list =
-  let cyc =
-    Base.List.filter_map cfg ~f:(fun (t, _) ->
-        if on_cycle cfg t then Some t else None)
-  in
-  let rec group = function
-    | [] -> []
-    | t :: rest ->
-      let same_cycle x y = reachable cfg x y && reachable cfg y x in
-      let comp, rest' =
-        Base.List.partition_tf rest ~f:(fun x -> same_cycle t x)
-      in
-      let members = t :: comp in
-      let head =
-        Base.List.fold_left members ~init:t ~f:(fun acc x ->
-            if String.compare (Tid.name x) (Tid.name acc) < 0 then x else acc)
-      in
-      (head, members) :: group rest'
-  in
-  group cyc
+(* The CFG view lives in Probe_common (shared with vsa_gap). *)
+let succs = cfg_succs
+let cfg_of = cfg_of
+let succs_of = succs_of
+let reachable = reachable
+let on_cycle = on_cycle
+let cyclic_heads = cyclic_heads
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in

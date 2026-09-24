@@ -20,39 +20,11 @@ let now = Unix.gettimeofday
 let sink = ref 0
 let keep (i : int) : unit = sink := !sink lxor i
 
-type row = {
-  name : string;
-  n : int;
-  ns_a : float;
-  ns_b : float;
-  w_a : float;
-  w_b : float;
-}
+type row = Probe_common.bench_row
 
-let measure ~name ~n (f : unit -> unit) : row =
-  let warm = 1 + (n / 10) in
-  for _ = 1 to warm do f () done;
-  let loop () =
-    let w0 = Gc.minor_words () in
-    let t0 = now () in
-    for _ = 1 to n do f () done;
-    let t1 = now () in
-    let w1 = Gc.minor_words () in
-    ((t1 -. t0) *. 1e9 /. float_of_int n, (w1 -. w0) /. float_of_int n)
-  in
-  let ns_a, w_a = loop () in
-  let ns_b, w_b = loop () in
-  { name; n; ns_a; ns_b; w_a; w_b }
+let measure = Probe_common.bench_measure
 
-let print_table (rows : row list) : unit =
-  Printf.printf "%-46s %8s %11s %11s %12s %12s %5s\n" "op" "n" "ns/op A"
-    "ns/op B" "words/op A" "words/op B" "agree";
-  List.iter
-    (fun r ->
-      Printf.printf "%-46s %8d %11.1f %11.1f %12.1f %12.1f %5s\n" r.name
-        r.n r.ns_a r.ns_b r.w_a r.w_b
-        (if r.w_a = r.w_b then "yes" else "NO"))
-    rows
+let print_table = Probe_common.bench_print_table
 
 let w32 = CW.of_int ~width:32
 

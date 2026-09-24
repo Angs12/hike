@@ -225,3 +225,101 @@ let lhs_vars_of (sub : sub term) : var list =
   |> Seq.fold ~init:[] ~f:(fun acc d ->
       let base = Var.base (Def.lhs d) in
       if Base.List.exists acc ~f:(Var.same base) then acc else base :: acc)
+(* The probes' direct-jump CFG view: successors, reachability, and the
+   cyclic SCCs (a naive replica of Cbat_wto's SCC — the probes want the
+   plain listing, not the WTO component structure). *)
+let cfg_succs (blk : blk term) : tid list =
+  Term.enum jmp_t blk
+  |> Seq.filter_map ~f:(fun j ->
+      match Jmp.kind j with
+      | Goto (Direct t) | Ret (Direct t) -> Some t
+      | Call c -> (
+          match Call.target c with
+          | Direct t -> Some t
+          | _ -> None)
+      | _ -> None)
+  |> Seq.to_list
+
+let cfg_of (sub : sub term) : (tid * tid list) list =
+  Term.enum blk_t sub
+  |> Seq.map ~f:(fun b -> (Term.tid b, cfg_succs b))
+  |> Seq.to_list
+
+let succs_of (cfg : (tid * tid list) list) (t : tid) : tid list =
+  match Base.List.Assoc.find cfg t ~equal:Tid.equal with
+  | Some ts -> ts
+  | None -> []
+
+let reachable (cfg : (tid * tid list) list) (start : tid) (target : tid) :
+    bool =
+  let rec go seen = function
+    | [] -> false
+    | t :: rest ->
+      if Tid.equal t target then true
+      else if Base.List.mem seen t ~equal:Tid.equal then go seen rest
+      else go (t :: seen) (succs_of cfg t @ rest)
+  in
+  go [] [ start ]
+
+let on_cycle (cfg : (tid * tid list) list) (t : tid) : bool =
+  Base.List.exists (succs_of cfg t) ~f:(fun s -> reachable cfg s t)
+
+let cyclic_heads (cfg : (tid * tid list) list) : (tid * tid list) list =
+  let cyc =
+    Base.List.filter_map cfg ~f:(fun (t, _) ->
+        if on_cycle cfg t then Some t else None)
+  in
+  let rec group = function
+    | [] -> []
+    | t :: rest ->
+      let same_cycle x y = reachable cfg x y && reachable cfg y x in
+      let comp, rest' =
+        Base.List.partition_tf rest ~f:(fun x -> same_cycle t x)
+      in
+      let members = t :: comp in
+      let head =
+        Base.List.fold_left members ~init:t ~f:(fun acc x ->
+            if String.compare (Tid.name x) (Tid.name acc) < 0 then x else acc)
+      in
+      (head, members) :: group rest'
+  in
+  group cyc
+
+(* The probes' bench harness: the warmup + two-loop measure and the
+   table printer, shared by the three bench probes. *)
+let bench_now = Unix.gettimeofday
+
+type bench_row = {
+  name : string;
+  n : int;
+  ns_a : float;
+  ns_b : float;
+  w_a : float;
+  w_b : float;
+}
+
+let bench_measure ~name ~n (f : unit -> unit) : bench_row =
+  let warm = 1 + (n / 10) in
+  for _ = 1 to warm do f () done;
+  let loop () =
+    let w0 = Gc.minor_words () in
+    let t0 = bench_now () in
+    for _ = 1 to n do f () done;
+    let t1 = bench_now () in
+    let w1 = Gc.minor_words () in
+    ((t1 -. t0) *. 1e9 /. float_of_int n, (w1 -. w0) /. float_of_int n)
+  in
+  let ns_a, w_a = loop () in
+  let ns_b, w_b = loop () in
+  { name; n; ns_a; ns_b; w_a; w_b }
+
+(* The three probes standardize on one name column. *)
+let bench_print_table (rows : bench_row list) : unit =
+  Printf.printf "%-46s %8s %11s %11s %12s %12s %5s\n" "op" "n" "ns/op A"
+    "ns/op B" "words/op A" "words/op B" "agree";
+  List.iter
+    (fun r ->
+      Printf.printf "%-46s %8d %11.1f %11.1f %12.1f %12.1f %5s\n" r.name
+        r.n r.ns_a r.ns_b r.w_a r.w_b
+        (if r.w_a = r.w_b then "yes" else "NO"))
+    rows
