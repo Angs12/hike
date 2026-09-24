@@ -385,9 +385,9 @@ let rec is_plt_trampoline ctx (sub : sub term) : bool =
 and is_plt_trampoline_slow ctx (sub : sub term) : bool =
   let free_vars = Hike_stack_model.free_regs sub in
   let reg_vars =
-    (* A stub using the frame pointer is not a pure trampoline. *)
     Base.List.filter free_vars ~f:(fun reg ->
-        not (Var.same reg ctx.sp))
+        not (Var.same reg ctx.sp)
+        && not (Abi.is_return_reg ctx.abi reg))
   in
   reg_vars = []
   && Term.enum blk_t sub
@@ -395,7 +395,7 @@ and is_plt_trampoline_slow ctx (sub : sub term) : bool =
             Term.enum jmp_t blk
             |> Seq.exists ~f:(fun j ->
                    match Jmp.kind j with
-                   | Call _ -> true
+                   | Call _ when not (Hike_return.is_jmp j) -> true
                    | _ -> false))
 
 let thunk_tid_of (sub_tid : tid) : tid =
@@ -504,6 +504,21 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
   | [ ret ] -> Llvm.build_ret ret llvm_builder |> ignore
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore
 
+let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
+  let call = call_exn j in
+  match Call.target call with
+  | Indirect (Bil.Unknown _) ->
+      create_return ctx scope blk_tid llvm_builder sub
+  | Indirect target ->
+      let target_exp = create_exp ctx scope llvm_builder blk_tid target in
+      let target_ptr =
+        if Llvm.classify_type (Llvm.type_of target_exp) = Llvm.TypeKind.Pointer
+        then target_exp
+        else Bil2llvm_section.create_addr_ptr ctx llvm_builder target_exp
+      in
+      ignore (Llvm.build_indirect_br target_ptr 0 llvm_builder)
+  | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
+
 let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -538,6 +553,7 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
    external there); it declares but never defines, so call sites
    resolve to the external at link time. *)
 let is_self_call_stub (ctx : emit_ctx) (sub : sub term) : bool =
+  let sub_name = sanitize_name (Tid.name (Term.tid sub)) in
   let self_targeted =
     Term.enum blk_t sub
     |> Seq.exists ~f:(fun blk ->
@@ -546,7 +562,9 @@ let is_self_call_stub (ctx : emit_ctx) (sub : sub term) : bool =
             match Jmp.kind j with
             | Call c -> (
                 match Call.target c with
-                | Direct t -> Tid.equal t (Term.tid sub)
+                | Direct t ->
+                    Tid.equal t (Term.tid sub)
+                    || sanitize_name (Tid.name t) = sub_name
                 | Indirect _ -> false)
             | _ -> false))
   in
@@ -575,9 +593,6 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
             let fallthrough = Some (label_tid l) in
             create_func_call ctx scope llvm_builder blk_tid blk fallthrough target
         | None ->
-            if is_plt_trampoline ctx sub then begin
-              create_func_call ~emit_unreachable:false ctx scope llvm_builder
-                blk_tid blk None target;
-              create_return ctx scope blk_tid llvm_builder sub
-            end
-            else create_func_call ctx scope llvm_builder blk_tid blk None target)
+            create_func_call ~emit_unreachable:false ctx scope llvm_builder blk_tid
+              blk None target;
+            create_return ctx scope blk_tid llvm_builder sub)

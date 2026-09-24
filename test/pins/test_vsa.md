@@ -30,7 +30,7 @@ The Call_effects transfer pins (C1-1..C1-5) live in `test_call_effects`.
 | VSA-20 | `Cbat_clp.widen_join` mixed-width coercion | make `widen_join` raise on mismatch | VSA-20 red: raise / missing `{1}` |
 | VSA-21 | `Cbat_clp.meet` mixed-width alias → wider operand | make `meet` raise or return bottom on mismatch | VSA-21 red: `bitwidth ≠ 64` / not `equal r p64` |
 | VSA-22 | `Cbat_clp.add` same-width regression | make the same-width arm coerce the result width | VSA-22 red: `bitwidth ≠ 32` / missing `{11,13}` |
-| VSA-23 | `Cbat_transfer.denote_def` (`cbat_transfer.ml:325`) — the mixed-width `RSHIFT` COMPUTES (no `not_implemented` fire) | route mixed-width shifts through `not_implemented ~top` | VSA-23 red: `fired_r` true or `j_after` is top |
+| VSA-23 | `Cbat_transfer.denote_binop` — a mixed-width `RSHIFT` reaching the domain answers top at the common width (no `not_implemented` fire) | make `denote_binop` coerce the operands (cast to the common width + recurse) | VSA-23 red: `j_after` reads a computed value, not a 64-bit top |
 | VSA-24 | `Cbat_fin_set.union` lift2 default width | make `union` assert or keep the narrower width | VSA-24 red: raise / `bitwidth ≠ 64` |
 | VSA-25 | `Cbat_fin_set.intersection` lift2 default width | make `intersection` assert or keep the narrower width | VSA-25 red: raise / `bitwidth ≠ 64` |
 | VSA-26 | `Cbat_fin_set.add` lift2 default width | make `add` assert or keep the narrower width | VSA-26 red: raise / `bitwidth ≠ 64` |
@@ -67,3 +67,6 @@ The Call_effects transfer pins (C1-1..C1-5) live in `test_call_effects`.
 | VSA-59 | `Cbat_transfer.denote_def` store cell (`cbat_transfer.ml:268`) — the heap-indexed store's data var is denoted `{99}` | make the store arm leave the environment unchanged | VSA-59 red: `vv ≠ {99}` |
 | VSA-60 | `Cbat_vsa.init_sol` (`cbat_vsa.ml:49`) — the entry `RSP` anchor is the symbolic segment base at offset 0 (`StackOff{0}`) | seed the entry `RSP` with `Ws.top 64` instead of `stack_word_i64 0` | VSA-60 red: `find_word 64` ≠ `stack_word_i64 0` |
 | VSA-61 | `Cbat_clp_set_composite.cardinality` (`:257`) + `Cbat_fin_set.cardinality` (`:35`) — the full 1-bit domain reads cardn 2 (width+1 bits) | read the cardinality at the set width (1 bit) | VSA-61 red: cardn wraps to 0 / ≠ 2 |
+| VSA-62 | `Cbat_clp_arith.cast`'s `SIGNED when sz > width` arm answers top at the TARGET width (`extract_hi`'s widening arm keeps the target width too) | drop the cast arm and restore `top sz` (the operand width) in `extract_hi` | VSA-62 red: an 8-bit top, not a 64-bit one |
+| VSA-63 | `Cbat_clp_arith.cast` — a `SIGNED` widening of a bounded operand sign-extends the progression | drop the `SIGNED when sz > width` arm so `extract_internal` answers top | VSA-63 red: top at 64 bits, not `{-1}` |
+| VSA-64 | the same arm keeps a positive bounded operand (`{0x7f}:8` → `{0x7f}:64`) | as VSA-63 | VSA-64 red: top, not `{0x7f}` |

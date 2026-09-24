@@ -124,18 +124,20 @@ let remap_label f = function
   | Indirect e -> Indirect e
 
 let remap_jmp f (j : jmp term) : jmp term =
-  let kind =
-    match Jmp.kind j with
-    | Goto l -> Goto (remap_label f l)
-    | Ret l -> Ret (remap_label f l)
-    | Int (n, t) -> Int (n, f t)
-    | Call c ->
-      Call
-        (Call.create ~target:(remap_label f (Call.target c))
-           ?return:(Base.Option.map (Call.return c) ~f:(remap_label f))
-           ())
-  in
-  Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j) kind
+  if Hike_return.is_jmp j then j
+  else
+    let kind =
+      match Jmp.kind j with
+      | Goto l -> Goto (remap_label f l)
+      | Ret l -> Ret (remap_label f l)
+      | Int (n, t) -> Int (n, f t)
+      | Call c ->
+        Call
+          (Call.create ~target:(remap_label f (Call.target c))
+             ?return:(Base.Option.map (Call.return c) ~f:(remap_label f))
+             ())
+    in
+    Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j) kind
 
 (* A dispatch word can name an address the lift never made a block: a
    jump-table case body BAP never disassembled.  [lift_at] re-decodes
@@ -173,7 +175,10 @@ let materialize_block ~(lift_at : Addr.t -> blk term list option)
     let kept =
       Base.List.filter_map blks ~f:(fun b ->
           if duplicate b || Core.Set.mem present (Term.tid b) then None
-          else Some (Term.map jmp_t b ~f:(remap_jmp retarget)))
+          else
+            Some
+              (Term.map jmp_t b ~f:(remap_jmp retarget)
+              |> Hike_coerce.coerce_block))
     in
     let entries =
       Base.List.filter_map kept ~f:(fun b ->
@@ -240,7 +245,7 @@ let split_entry ~(starts : (Addr.t * tid) list)
         (* A prefix nothing targets is dead code and drops; a prefix
            something jumps into stays, and needs phi repair if a
            prefix-defined value is read past the split (loud). *)
-        let entry = Term.first blk_t sub |> Base.Option.value_exn in
+        let entry = Vsa.entry_block_of sub |> Base.Option.value_exn in
         let targets tid blk =
           Term.enum jmp_t blk
           |> Seq.exists ~f:(fun j ->
@@ -418,11 +423,12 @@ let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
 (* [ws] is non-empty — a case group is built from at least one word. *)
 let guarded_cond (sel : exp) (ws : word list) : exp =
   let eq w = Bil.BinOp (Bil.EQ, sel, Bil.Int w) in
-  match ws with
-  | w :: rest ->
-      Base.List.fold rest ~init:(eq w)
-        ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
-  | [] -> failwith "hike-cfg-complete: empty case group"
+  (match ws with
+   | w :: rest ->
+       Base.List.fold rest ~init:(eq w)
+         ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
+   | [] -> failwith "hike-cfg-complete: empty case group")
+  |> Hike_coerce.coerce_exp
 
 (* The dispatch jmp's own guard narrows every case and the default
    alike. *)
@@ -469,15 +475,8 @@ let dispatch_jmps (j : jmp term) (sel : exp)
     if Base.List.length ascending < 2 then None
     else Some (Base.List.map ascending ~f:guarded)
 
-(* The return epilogue's replacement: the canonical [Ret] shape — a
-   return-less call the emitter renders as a return; the var-free
-   target leaves the retaddr load unread, so the sweep kills it. *)
-let ret_jmp ~(word_bits : int) : jmp term =
-  Jmp.create
-    (Call
-       (Call.create
-          ~target:(Indirect (Hike_stack_model.canonical_ret_target ~word_bits))
-          ()))
+(* The return epilogue's replacement: the canonical direct return edge. *)
+let ret_jmp : jmp term = Hike_return.create ()
 
 (* The [bits]-bit word of an image's byte array at [off], in [endian]. *)
 let image_word_at (bytes : Bytes.t) (off : int) ~(endian : endian)
@@ -574,7 +573,7 @@ let table_covered ~(denote : denote) ~(last_defs : def term Var.Map.t)
    canonical return; a fully-resolving, completely-enumerating
    dispatch becomes the guarded-goto series; else it stays. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(word_bits : int) ~(sub_tids : Tid.Set.t)
+    ~(sub_tids : Tid.Set.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t) ~(images : Vsa.section_image list)
     ~(blk : blk term) (j : jmp term) :
@@ -592,7 +591,7 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
   | Call c -> (
       match (Call.return c, Call.target c) with
       | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
-          Some [ ret_jmp ~word_bits ]
+          Some [ ret_jmp ]
       | _, Indirect texp ->
           let cont =
             match Call.return c with
@@ -602,7 +601,7 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
           series texp cont
       | _ -> None)
   | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
-      Some [ ret_jmp ~word_bits ]
+      Some [ ret_jmp ]
   | Goto (Indirect texp) -> series texp None
   | _ -> None
 
@@ -656,7 +655,7 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
     (sub : sub term) : sub term =
   if Core.Set.is_empty fresh then sub
   else
-    let entry = Base.Option.value_exn (Term.first blk_t sub) in
+    let entry = Base.Option.value_exn (Vsa.entry_block_of sub) in
     let blocks = Seq.to_list (Term.enum blk_t sub) in
     (* Tid -> block, the DFS's lookup; linear finds would be O(V.E). *)
     let by_tid =
@@ -717,7 +716,7 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
 (* The exit rewrite, once at drain; a sub with no decision comes back
    unchanged. *)
 let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(word_bits : int) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(block_addrs : Tid.t Addr.Map.t)
     ~(images : Vsa.section_image list)
     (sub : sub term) : sub term =
 
@@ -726,7 +725,7 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
     let last_defs = Vsa.last_defs blk in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~word_bits ~sub_tids:(sub_tids sub)
+          rewritten_jmps ~denote ~retaddr ~sub_tids:(sub_tids sub)
             ~block_addrs
             ~last_defs
             ~images ~blk j
@@ -745,6 +744,56 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
         with_jmps blk spliced
   in
   Term.map blk_t sub ~f:reblock
+
+(* The shape-only return canonicalization, for a sub whose fixpoint did
+   not converge: a target var whose reaching def loads the entry SP
+   cell.  This is the sanctioned pre-solution projection — the
+   denotation path supersedes it wherever a solution exists. *)
+let rewritten_shape_returns ~(retaddr : Tid.Set.t)
+    ~(last_defs : def term Var.Map.t) (j : jmp term) : jmp term list option =
+  match Jmp.kind j with
+  | Call c -> (
+      match (Call.return c, Call.target c) with
+      | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
+          Some [ ret_jmp ]
+      | _ -> None)
+  | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
+      Some [ ret_jmp ]
+  | _ -> None
+
+let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
+  let word_bits = 8 * abi.Hike_abi.word in
+  let retaddr =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.filter_map ~f:(fun d ->
+           match load_addr_of word_bits d with
+           | Some addr when Model.is_return_address_shape ~abi addr ->
+               Some (Term.tid d)
+           | _ -> None)
+    |> Seq.to_list |> Tid.Set.of_list
+  in
+  if Core.Set.is_empty retaddr then sub
+  else
+    Term.map blk_t sub ~f:(fun blk ->
+        let js = Seq.to_list (Term.enum jmp_t blk) in
+        let last_defs = Vsa.last_defs blk in
+        let decided =
+          Base.List.filter_map js ~f:(fun j ->
+              rewritten_shape_returns ~retaddr ~last_defs j
+              |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
+        in
+        match decided with
+        | [] -> blk
+        | _ ->
+            let rewr = Core.Map.of_alist_exn (module Tid) decided in
+            let spliced =
+              Base.List.concat_map js ~f:(fun j ->
+                  match Core.Map.find rewr (Term.tid j) with
+                  | Some js' -> js'
+                  | None -> [ j ])
+            in
+            with_jmps blk spliced)
 
 (* One resolution event pass on the phase's own solution: the case
    words land on the run's map and resolved dispatches contribute
@@ -803,7 +852,6 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(fresh : Tid.Set.t)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
-  let word_bits = Hike_abi.word_bits abi in
   let sub, live =
     Vsa.with_images images (fun () ->
         let live =
@@ -811,7 +859,7 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
             ~fresh sub
         in
         let sub =
-          rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~word_bits
+          rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr
             ~block_addrs ~images sub
         in
         (sub, live))

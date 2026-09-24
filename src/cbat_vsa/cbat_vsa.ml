@@ -57,9 +57,19 @@ type vsa_sol = (tid, AI.t) Solution.t
 
 let default_entry () : AI.t = AI.top
 
+(* The sub's entry block: the CFG's [Start] pseudo-node points to it.
+   Term order need not put it first (a cold partition can precede it),
+   so read the graph, not [Term.first]. *)
+let entry_block_of (sub : sub term) : blk term option =
+  let cfg = Sub.to_graph sub in
+  Graphs.Tid.Node.succs Graphs.Tid.start cfg
+  |> Seq.filter ~f:(fun tid -> not (Tid.equal tid Graphs.Tid.exit))
+  |> Seq.min_elt ~compare:Tid.compare
+  |> Option.bind ~f:(fun tid -> Term.find blk_t sub tid)
+
 let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
-  let msb = Term.first blk_t sub in
+  let msb = entry_block_of sub in
   let entry_state = Option.value ~default:(default_entry ()) entry in
   (* The default entry seeds the SP with the SYMBOLIC SEGMENT BASE:
      every SP-derived address denotes [StackOff]; explicit fixture
@@ -446,7 +456,7 @@ let rec static_graph_vsa
           | Some set -> Core.Set.add set t)
   in
   (* Entry itself is never seeded: init_sol pre-seeds its state. *)
-  Option.iter (Term.first blk_t s) ~f:(fun entry ->
+  Option.iter (entry_block_of s) ~f:(fun entry ->
     succs (Term.tid entry)
     |> List.iter ~f:enqueue);
   (* A block that gained an extra-edge predecessor re-joins even from

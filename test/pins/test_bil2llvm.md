@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-22`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-29`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -21,7 +21,7 @@ one failing fixture never hides the rest of the module.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| EMIT-01 | `bil2llvm.ml` Phase 3 opens a fresh `sub_scope` per sub, so `scope.undef_warned` (folded into the sub-end `undef-read: sub …` summary in `create_sub`) holds only this sub's reads. | In `src/bil2llvm.ml` Phase 3, hoist `let scope = fresh_scope ()` above the `Term.enum sub_t prog |> Seq.iter` so one scope serves all bodies. | EMIT-01 FAILs: the clean sub inherits the first sub's warned RAX lane, so `reports (Term.tid clean_sub) <> []` (a leaked `undef-read: sub …` line). |
+| EMIT-01 | `bil2llvm.ml` Phase 3 opens a fresh `sub_scope` per sub, so `scope.undef_warned` holds only this sub's reads. | In `src/bil2llvm.ml` Phase 3, hoist `let scope = fresh_scope ()` above the `Term.enum sub_t prog |> Seq.iter` so one scope serves all bodies. | EMIT-01 FAILs: the clean sub inherits the first sub's warned lane. |
 | EMIT-02 | `bil2llvm_mem.ml` `mem_access`'s `Some Tag.Dead` arm emits `Llvm.poison` and warns once per sub (`Hike_diag.warn "guarded: …"`). | In `mem_access`, replace `Llvm.poison (typ_lltype …)` with a zero constant and drop the `Hike_diag.warn`. | EMIT-02 FAILs: no `poison` substring in the IR and no `hike: guarded: sub` in the stderr capture. |
 | EMIT-03 | `bil2llvm_env.ml` `warn_undef_read` logs `undef-read: blk …`; `frozen_undef` mints `Llvm.build_freeze (Llvm.undef typ) "hike_undef"` for a never-defined read. | In `create_exp`'s `Var` arm (or `frozen_undef`), return bare `Llvm.undef typ` and skip `warn_undef_read`. | EMIT-03 FAILs: stderr has no `hike: undef-read:` and the IR has no `freeze i64 undef`. |
 | EMIT-04 | `build_entry_block` (`bil2llvm.ml`) freezes each unbound transfer var through `frozen_undef` (cached per `wvar`), so the register-file phi's entry incoming is one `%hike_undef`, never a bare `undef`. | In `bil2llvm.ml` `build_entry_block`, insert `Llvm.undef` for an unbound transfer var instead of calling `frozen_undef`. | EMIT-04 FAILs: the entry phi incoming reads `[ undef,` and no `[ %hike_undef,` is emitted. |
@@ -45,3 +45,7 @@ one failing fixture never hides the rest of the module.
 | EMIT-22 | `bil2llvm_phi.add_incomings` labels each rendered row with its `e_term_bb` (the block holding the winning terminator), so a duplicated BIR edge renders two distinct chain blocks; llc accepts the module. | In `bil2llvm_phi.add_incomings`, label every row with `get_bb scope ptid` (the BIR pred block) instead of `r.e_term_bb`. | EMIT-22 FAILs: a phi names the same predecessor twice (`dup_preds <> []`) and llc rejects the module (duplicate phi predecessor labels). |
 | EMIT-24 | a call sentence records its fallthrough edge even when the block does not track SP; the return block phi is non-empty and the module is llc-valid | revert the unconditional record_edge in restore_sp_after_call (src/bil2llvm_calls.ml) | EMIT-24 FAILs with "PHINode should have one entry for each predecessor" (measured) |
 | EMIT-25 | `create_branches`'s `Direct` arm routes an `@interrupt:` target to `create_interrupt` (a `div`-trap `goto @interrupt:#0` has no block to look up). | Drop the `@interrupt:` prefix guard so `Direct tid` always calls `get_bb`. | EMIT-25 FAILs: `emit_ir` raises `Failure "bb_find_exn: @interrupt:#0"` (measured). |
+| EMIT-26 | A terminal direct call emits a return terminator after the call, so a returning tail-jump target cannot fall into the next function. | In `create_call`'s `Call.return = None` arm, restore `create_func_call` with its default `unreachable` terminator. | EMIT-26 FAILs: the fixture contains `unreachable` and no `ret void`. |
+| EMIT-27 | A self-targeted external stub with an ABI return lane is recognized by its external name and emitted as a declaration, not a recursive body. | In `is_self_call_stub`, require `Tid.equal` only and remove the return-register exclusion from `is_plt_trampoline`. | EMIT-27 FAILs: the fixture emits a `define` for `@plt_stub`. |
+| EMIT-28 | A no-return indirect transfer that is not the producer's return marker emits an indirect branch. | Classify every no-return indirect target as `Ret`. | EMIT-28 FAILs: the fixture emits `ret void` or no `indirectbr`. |
+| EMIT-29 | The canonical direct `hike_return` edge emits a return terminator. | Treat `Hike_return.is_jmp` as an ordinary indirect tail. | EMIT-29 FAILs: the fixture emits `indirectbr` or no `ret void`. |

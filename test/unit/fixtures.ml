@@ -16,7 +16,7 @@ let mk_goto (tgt : tid) : jmp term = Jmp.create (Goto (Direct tgt))
 
 (* A terminal Ret to a fresh tid (the exit-block idiom); the edge maker
    ignores the node index. *)
-let mk_ret : tid -> jmp term = fun _ -> Jmp.create (Ret (Direct (Tid.create ())))
+let mk_ret : tid -> jmp term = fun _ -> Hike__Hike_return.create ()
 
 (* One block from a def list (phase 1 of the two-phase builder dance:
    tids are captured from the result before jumps are wired). *)

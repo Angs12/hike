@@ -116,17 +116,20 @@ let infinite (b, s) : t =
     let cardn = dom_size ~width:(width + 1) (width - twos) in
     {base; step; cardn; dir = Circular}
 
-(* Cached per width. *)
-let top_cache : (int, t) Hashtbl.t = Hashtbl.create 16
+(* Cached per width.  Widths are small and bounded, so an array beats a
+   hash table (the profile's hot [caml_hash]). *)
+let top_cache : t option array = Stdlib.Array.make 2049 None
 
 let top (i : int) : t =
   assert(i > 0);
-  match Hashtbl.find_opt top_cache i with
-  | Some t -> t
-  | None ->
-    let t = infinite (W.zero i, W.one i) in
-    Hashtbl.add top_cache i t;
-    t
+  if i < Array.length top_cache then
+    match top_cache.(i) with
+    | Some t -> t
+    | None ->
+      let t = infinite (W.zero i, W.one i) in
+      top_cache.(i) <- Some t;
+      t
+  else infinite (W.zero i, W.one i)
 
 let create_ascending ~width ~base ~step : t =
   assert (width > 0);

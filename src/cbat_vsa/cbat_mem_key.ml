@@ -150,8 +150,7 @@ let of_wordset (p : WordSet.t) : t option =
     hi_w >>= fun hi_w ->
     (match of_word lo_w, of_word hi_w with
      | Some lo, Some hi when le lo hi -> Some {lo; hi; step = stride}
-     | Some _lo, Some _hi ->
-       failwith "hike-mem-key: unordered extrema reached of_wordset"
+     | Some lo, Some hi -> Some {lo = hi; hi = lo; step = stride}
      | _ -> None)
 
 (* Hull of both inputs. *)

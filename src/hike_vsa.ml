@@ -64,7 +64,7 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
               |> Seq.filter_map ~f:(fun j ->
                   match Jmp.kind j with
                   | Int _ -> Some None
-                  | Call c -> (
+                  | Call c when not (Hike_return.is_jmp j) -> (
                       match Call.target c with
                       | Indirect (Bil.Var v)
                       | Indirect (Bil.Cast (_, _, Bil.Var v))
@@ -155,17 +155,18 @@ let fixpoint (target : Theory.Target.t)
     if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)
     else (sol, sub', Core.Set.union fresh fresh', block_addrs')
   in
-  match
+  let converged =
     try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
     with Vsa.Fixpoint_not_converged (n, _, _) ->
 #ifdef VSA_DEBUG
       Vsa.Cbat_attr_census.bump "backstop.sub";
 #endif
       Hike_diag.warn
-        "vsa: sub %s: fixpoint not converged in %d iterations — no environments, no rewrite (every reader takes the top identity)"
+        "vsa: sub %s: fixpoint not converged in %d iterations — shape return canonicalization only (every other reader takes the top identity)"
         (Sub.name sub) n;
       None
-  with
+  in
+  match converged with
   | Some (sol, sub', fresh, block_addrs') ->
     let sub'' =
       Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
@@ -173,4 +174,8 @@ let fixpoint (target : Theory.Target.t)
     in
     let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
     Some (envs, stamped, block_addrs')
-  | None -> None
+  | None ->
+    Some
+      ( Tid.Map.empty,
+        Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
+        block_addrs )

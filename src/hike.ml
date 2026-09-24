@@ -14,6 +14,7 @@ module Resolve = Hike_resolve
 module Dce = Hike_dce
 module Jump = Hike_jump
 module Split_mem = Hike_split_mem
+module Coerce = Hike_coerce
 module Stack_model = Hike_stack_model
 module Def_slots = Hike_def_slots
 module Sections = Hike_sections
@@ -72,6 +73,9 @@ let pass_filter proj =
 let pass_jump proj = map_subs (Hike_jump.compile_sub (Project.target proj)) proj
 
 let pass_split_mem proj = Project.map_program proj ~f:Hike_split_mem.normalize
+
+(* The one width-coercion point: every later consumer reads uniform widths. *)
+let pass_coerce proj = Project.map_program proj ~f:Hike_coerce.coerce_program
 
 let pass_vsa proj =
   let target = Project.target proj in
@@ -234,7 +238,8 @@ let () =
       Project.register_pass ~name:"filter" ~runonce:true pass_filter;
       let jump = chain ~name:"jump" ~prev:"filter" pass_jump in
       let split_mem = chain ~name:"split-mem" ~prev:jump pass_split_mem in
-      let vsa = chain ~name:"vsa" ~prev:split_mem pass_vsa in
+      let coerce = chain ~name:"coerce" ~prev:split_mem pass_coerce in
+      let vsa = chain ~name:"vsa" ~prev:coerce pass_vsa in
       let strip_canaries =
         chain ~name:"strip-canaries" ~prev:vsa pass_strip_canaries
       in

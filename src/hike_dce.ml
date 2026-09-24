@@ -178,29 +178,10 @@ let sweep_worklist ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(roots : Var.Set.t)
               not (Core.Set.mem !removed (Term.tid d)))
         else blk)
 
-(* A return-less call never consumes its target; rendering it Unknown frees
-   the def that produced it. *)
-let ret_replacement ~(word_bits : int) (j : jmp term) : jmp term =
-  match Jmp.kind j with
-  | Call c -> (
-      match (Call.target c, Call.return c) with
-      | Indirect (Bil.Var _), None ->
-        Jmp.with_kind j
-          (Call
-             (Call.with_target c
-                (Indirect (Hike_stack_model.canonical_ret_target ~word_bits))))
-      | _ -> j)
-  | _ -> j
-
 (* [roots] names the storage mem vars whose bytes escape this sub — their
    stores' reader lives outside it.  Intrinsics pass through. *)
 let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else
     let abi = Abi.of_target target in
-    let word_bits = Hike_abi.word_bits abi in
-    let sub =
-      Term.map blk_t sub
-        ~f:(Blk.map_elts ~jmp:(ret_replacement ~word_bits))
-    in
     sweep_worklist ~abi ~call_regs:(call_reg_set ~abi) ~roots sub

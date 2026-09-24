@@ -316,21 +316,26 @@ type cf_type =
   | CallFun
   | Int
   | CallIndirect
+  | CallIndirectTail
 
 let cf_type control_flow =
   let br = Seq.hd_exn control_flow in
-  match Jmp.kind br with
-  | Goto _ -> Br
-  | Ret _ -> Ret
-  | Call c -> (
-      match Call.return c with
-      | Some _ -> (
-          match Call.target c with
-          | Direct _ -> CallFun
-          | Indirect _ -> CallIndirect)
-      | None -> (
-          match Call.target c with Indirect _ -> Ret | Direct _ -> CallFun))
-  | Int _ -> Int
+  if Hike_return.is_jmp br then Ret
+  else
+    match Jmp.kind br with
+    | Goto _ -> Br
+    | Ret _ -> Ret
+    | Call c -> (
+        match Call.return c with
+        | Some _ -> (
+            match Call.target c with
+            | Direct _ -> CallFun
+            | Indirect _ -> CallIndirect)
+        | None -> (
+            match Call.target c with
+            | Indirect _ -> CallIndirectTail
+            | Direct _ -> CallFun))
+    | Int _ -> Int
 
 let insert_bb scope tid llvm_bb =
   scope.ll_bbs := Core.Map.add_exn !(scope.ll_bbs) ~key:tid ~data:llvm_bb

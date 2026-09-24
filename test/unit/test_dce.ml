@@ -64,11 +64,7 @@ let tests : unit Alcotest.test list =
                 Def.create t2 (Bil.Int (bw64 7)) ],
               [ (0,
                  fun _ ->
-                   Jmp.create
-                     (Call
-                        (Call.create
-                           ~target:(Indirect (Bil.Unknown ("hike-cfg-ret", Type.Imm 64)))
-                           ())));
+                   Hike__Hike_return.create ());
                 (0,
                  fun _ ->
                    Jmp.create
@@ -86,13 +82,7 @@ let tests : unit Alcotest.test list =
         let jmps = dce_jmps sub' in
         let epilogue_target_stays_varfree =
           match jmps with
-          | j1 :: _ -> (
-              match Jmp.kind j1 with
-              | Call c -> (
-                  match Call.target c with
-                  | Indirect (Bil.Unknown ("hike-cfg-ret", _)) -> true
-                  | _ -> false)
-              | _ -> false)
+          | j1 :: _ -> Hike__Hike_return.is_jmp j1
           | [] -> false
         in
         let others_untouched =

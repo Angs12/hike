@@ -22,9 +22,25 @@ let mem_idx addr_sz addressable_sz : Mem.idx =
 
 type wordset = WordSet.t
 
+#ifdef VSA_DEBUG
+(* The residual-mismatch log budget (the coercion pass should leave none). *)
+let dbg_left = ref 256
 
+let dbg_one_line (e : exp) : string =
+  let bs = Buffer.create 128 in
+  let fmt = Format.formatter_of_buffer bs in
+  Format.pp_set_margin fmt 1_000_000;
+  Format.fprintf fmt "%a" Exp.pp e;
+  Format.pp_print_flush fmt ();
+  Buffer.contents bs
+#endif
 
-
+(* The binop's result width: a comparison answers one bit, every other op
+   carries its operands' common width. *)
+let binop_result_width (op : Bil.binop) (w1 : int) (w2 : int) : int =
+  match op with
+  | Bil.EQ | Bil.NEQ | Bil.LT | Bil.LE | Bil.SLT | Bil.SLE -> 1
+  | _ -> Stdlib.max w1 w2
 
 (* The width-1 shapes the comparison rows return, built once — the
    hottest solver function reads these on every row. *)
@@ -67,6 +83,7 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   in
 #endif
   (* Shared EQ/NEQ decision. *)
+  (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
     let v1_size = WordSet.cardinality v1 in
     let v2_size = WordSet.cardinality v2 in
@@ -92,8 +109,9 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
     end
     else if negate then btrue else bfalse
   in
-  match op with
-  | Bil.PLUS -> WordSet.add
+  let op_fn : wordset -> wordset -> wordset =
+    match op with
+    | Bil.PLUS -> WordSet.add
   | Bil.MINUS -> WordSet.sub
   | Bil.TIMES -> WordSet.mul
   | Bil.LSHIFT -> WordSet.lshift
@@ -111,7 +129,15 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   | Bil.LT -> ordering ~signed:false ~le:false
   | Bil.LE -> ordering ~signed:false ~le:true
   | Bil.SLT -> ordering ~signed:true ~le:false
-  | Bil.SLE -> ordering ~signed:true ~le:true
+    | Bil.SLE -> ordering ~signed:true ~le:true
+  in
+  fun v1 v2 ->
+    (* The coercion pass makes every binop's operand widths uniform; a
+       divergence is its contract violation, answered by the identity. *)
+    let w1 = WordSet.bitwidth v1 in
+    let w2 = WordSet.bitwidth v2 in
+    if w1 <> w2 then WordSet.top (binop_result_width op w1 w2)
+    else op_fn v1 v2
 
 type val_t = [`Mem of Mem.t | `Word of wordset]
 
@@ -288,6 +314,17 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   | Bil.BinOp (op, e1, e2) ->
     denote_exp e1 env >>= val_as_imm >>= fun v1 ->
     denote_exp e2 env >>= val_as_imm >>= fun v2 ->
+#ifdef VSA_DEBUG
+    (* The coercion pass promises uniform BIR widths; a hit here is a
+       contract violation answered by top.  Bounded output: the first
+       [dbg_left] hits carry the exp, then silence. *)
+    (let w1 = WordSet.bitwidth v1 and w2 = WordSet.bitwidth v2 in
+     if w1 <> w2 && !dbg_left > 0 then begin
+       decr dbg_left;
+       Format.eprintf "DBG denote_binop width-mismatch w1=%d w2=%d e=%s\n%!" w1
+         w2 (dbg_one_line (Bil.BinOp (op, e1, e2)))
+     end);
+#endif
     return_imm @@ denote_binop op v1 v2
   | Bil.Load (m, a, e, s) ->
     denote_exp a env >>= val_as_imm >>= fun addr ->
@@ -362,7 +399,19 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
   let open Monad_type_error in
   denote_exp e env >>| fun ev ->
   (match ev with
-   | `Word p -> AI.add_word env ~key:v ~data:p
+   | `Word p ->
+#ifdef VSA_DEBUG
+     (* A def's value is stored at its lhs's declared width; a divergent
+        store is the source of downstream mismatches. *)
+     (let lw = match Var.typ v with Type.Imm n -> n | _ -> 0 in
+      let pw = WordSet.bitwidth p in
+      if lw > 0 && pw <> lw && !dbg_left > 0 then begin
+        decr dbg_left;
+        Format.eprintf "DBG denote_def store-width lhs=%s:%d width=%d rhs=%s\n%!"
+          (Var.name v) lw pw (dbg_one_line e)
+      end);
+#endif
+     AI.add_word env ~key:v ~data:p
    | `Mem m -> AI.add_memory env ~key:v ~data:m)
 
 let denote_defs (b : blk term) : AI.t -> AI.t =

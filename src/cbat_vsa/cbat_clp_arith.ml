@@ -497,7 +497,7 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
     union res1 res2
   else if not signed then
     create ~width:(hiv+1) (base_of p) ~step:(step_of p) ~cardn:(cardn_of p)
-  else if hiv >= sz then top sz
+  else if hiv >= sz then top (hiv + 1)
   else
     let ext =  W.extract_exn ~hi:hiv in
     let ext_signed w = W.extract_exn ~hi:hiv (W.signed w) in
@@ -539,6 +539,19 @@ let cast ct (sz : int) (p : t) : t =
   | Bil.HIGH when sz > width ->
     not_implemented ~top:(top width)
       (Printf.sprintf "HIGH cast to size %d wider than operand %d" sz width)
+  | Bil.SIGNED when sz > width ->
+    (* Sign-extension: exact when the set stays in one sign half (the
+       progression maps element-wise under [sext]); top otherwise. *)
+    if is_infinite p then top sz
+    else (
+      match finite_end p with
+      | None -> top sz
+      | Some e when W.msb (base_of p) <> W.msb e -> top sz
+      | Some _ ->
+        create ~width:sz
+          ~step:(W.cast Bil.SIGNED sz (step_of p))
+          ~cardn:(cardn_of p)
+          (W.cast Bil.SIGNED sz (base_of p)))
   | Bil.UNSIGNED -> extract_internal ~hi:(sz - 1) p
   | Bil.SIGNED -> extract_internal ~hi:(sz - 1) ~signed:true p
   | Bil.LOW -> extract_internal ~hi:(sz - 1) p
@@ -587,7 +600,9 @@ let div (p1 : t) (p2 : t) : t =
       let cardn = cardn_from_bounds base step e in
       !!(create base ~step ~cardn)
   end with
-  | None -> bottom width
+  (* A missing signed extremum means the operand is bottom (dead) or
+     merely unbounded (live): only bottom is bottom. *)
+  | None -> if is_bottom p1 || is_bottom p2 then bottom width else top width
   | Some x -> x)
 
 (* Word-size signed division/modulus (the ws- prefix is "signed
@@ -647,7 +662,9 @@ let sdiv (p1 : t) (p2 : t) : t =
     end
     else !!(top width)
   end with
-  | None -> bottom width
+  (* A missing signed extremum means the operand is bottom (dead) or
+     merely unbounded (live): only bottom is bottom. *)
+  | None -> if is_bottom p1 || is_bottom p2 then bottom width else top width
   | Some x -> x)
 
 

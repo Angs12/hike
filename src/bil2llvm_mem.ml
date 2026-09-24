@@ -108,15 +108,4 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
       Llvm.build_add w_i64 rel "" llvm_builder
     else res
   in
-  (* The def's value is coerced to the variable's declared width
-     where the value is born, so every phi joining the variable sees
-     the declared type. *)
-  let res =
-    let lw = match Var.typ var with Type.Imm n -> n | _ -> 0 in
-    match Llvm.classify_type (Llvm.type_of res) with
-    | Llvm.TypeKind.Integer when lw > 0 ->
-        coerce_int_width ctx.llvm_ctx llvm_builder
-          ~bits:(Llvm.integer_bitwidth (Llvm.type_of res)) res lw
-    | _ -> res
-  in
   insert_local scope blk_tid var res

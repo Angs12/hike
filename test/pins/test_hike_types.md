@@ -1,7 +1,7 @@
 # Pins: Hike_types
 
 Module `src/hike_types.ml` (no interface; all let-bindings visible).
-One row per pin in `test/unit/test_hike_types.ml` (ids `TYPES-01`..`TYPES-20`).
+One row per pin in `test/unit/test_hike_types.ml` (ids `TYPES-01`..`TYPES-23`).
 
 The module is the home of each lane's type: the program's per-sub emission
 signature.  The pins drive the pure/decidable surface on hand-built BIR
@@ -39,3 +39,6 @@ under that inversion.
 | TYPES-18 | `compute_sub_sig`: an FP-returning sub appends the `YMM0` `Out` lane to the integer returns. | In `compute_sub_sig`, drop the `if is_fp_returning … then rets @ [ymm0]` branch. | TYPES-18 FAILs: YMM0 is missing. |
 | TYPES-19 | `sign_program`: the computed `(rets @ args)` lanes land on the sub's own `arg` terms, intent and pointer tag included. | In `sign_program`, call `Model.set_sig sub rets` (drop the args) or `set_sig` without `compute_sub_sig`. | TYPES-19 FAILs: the arg terms no longer match `rets @ args`. |
 | TYPES-20 | `run`: the project entry signs the project's own program with the project's target. | In `run`, drop the `Project.map_program … sign_program` (return `proj` unchanged). | TYPES-20 FAILs: the sub carries no `arg` terms. |
+| TYPES-21 | A call-containing sub retains every native integer parameter register, including registers absent from its BIL body. | In `compute_sub_sig`, make the call-containing merge use only the existing `args`. | TYPES-21 FAILs: `RSI` is the only call-site parameter lane. |
+| TYPES-22 | A named external call receives the synthetic parameter-register ABI even when its target sub is not in the filtered program. | In `is_native_call`, classify every generated no-return direct target as a real call. | TYPES-22 FAILs: the external-call sub has no synthetic argument lanes. |
+| TYPES-23 | A canonical direct `hike_return` edge is not a native call and does not add synthetic parameter lanes. | In `is_native_call`, count the canonical direct return as a call. | TYPES-23 FAILs: the terminal-return sub has synthetic argument lanes. |

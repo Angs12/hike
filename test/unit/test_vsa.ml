@@ -215,9 +215,11 @@ let tests : unit Alcotest.test list =
         let r = Clp.add p32 q in
         check "VSA-22" (Clp.bitwidth r = 32 && Clp.elem (w32 11) r && Clp.elem (w32 13) r));
 
-    (* D6-14: the exit state is block INPUT (j absent) — denote the def to
-       read the postcondition; the mixed-width rshift computes. *)
-    pin "VSA-23" "D6-14 (BIR loop): mixed-width rshift COMPUTES (lane A), no crash, no guard fire"
+    (* D6-14: a mixed-width rshift reaching the domain is the pass's
+       contract violation; the domain answers top at the common width
+       (no crash, no not_implemented fire). *)
+    pin "VSA-23"
+      "D6-14 (BIR loop): mixed-width rshift answers top (lane A), no crash, no guard fire"
       (fun () ->
         let j = i32 "j" in
         let _, _, sub, exit_tid =
@@ -236,8 +238,8 @@ let tests : unit Alcotest.test list =
                (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))))
             exit_ai
         in
-        check "VSA-23"
-          ((not fired_r) && not (Ws.is_top (AI.find_word 32 j_after j))));
+        let ws = AI.find_word 64 j_after j in
+        check "VSA-23" ((not fired_r) && Ws.is_top ws && Ws.bitwidth ws = 64));
 
     (* D6b: FinSet lift2 default width — mismatched sets widen to 64. *)
     pin "VSA-24" "D6b-1: FinSet union on width-mismatched sets -> no assert, width 64"
@@ -410,6 +412,39 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let c32 = Clp.create (w32 16) in
         check "VSA-47" (Clp.is_top (Clp.extract ~lo:32 c32)));
+
+    (* D8: a signed widening cast is top at the TARGET width; the source
+       width was the bug (an 8-bit top stored under a 64-bit lhs). *)
+    pin "VSA-62" "D8-1: Clp.cast SIGNED widens a top operand to the target width"
+      (fun () ->
+        let r = Clp.cast Bil.SIGNED 64 (Clp.top 8) in
+        check "VSA-62" (Clp.bitwidth r = 64 && Clp.is_top r));
+
+    pin "VSA-63" "D8-2: Clp.cast SIGNED sign-extends a bounded operand"
+      (fun () ->
+        let ones =
+          Clp.cast Bil.SIGNED 64
+            (Clp.singleton (Cbat_word.of_int ~width:8 0xFF))
+        in
+        let minus_one = Cbat_word.of_int64 ~width:64 (-1L) in
+        check "VSA-63"
+          (Clp.bitwidth ones = 64
+          && Cbat_word.is_one (Clp.cardinality ones)
+          && Base.Option.equal Cbat_word.equal (Clp.min_elem ones) (Some minus_one)
+          && Base.Option.equal Cbat_word.equal (Clp.max_elem ones) (Some minus_one)));
+
+    pin "VSA-64" "D8-3: Clp.cast SIGNED keeps a positive bounded operand"
+      (fun () ->
+        let r =
+          Clp.cast Bil.SIGNED 64
+            (Clp.singleton (Cbat_word.of_int ~width:8 0x7F))
+        in
+        let x = Cbat_word.of_int ~width:64 0x7F in
+        check "VSA-64"
+          (Clp.bitwidth r = 64
+          && Cbat_word.is_one (Clp.cardinality r)
+          && Base.Option.equal Cbat_word.equal (Clp.min_elem r) (Some x)
+          && Base.Option.equal Cbat_word.equal (Clp.max_elem r) (Some x)));
 
     pin "VSA-48" "D7-7: Clp.extract ~hi:(-1) -> top (no raise)"
       (fun () ->

@@ -109,6 +109,9 @@ val with_images : section_image list -> (unit -> 'a) -> 'a
 
 val init_sol : abi:Hike_abi.t -> ?entry:AI.t ->  sub term -> vsa_sol
 
+(* The sub's entry block: the CFG's [Start] pseudo-node points to it. *)
+val entry_block_of : sub term -> blk term option
+
 val static_graph_vsa :
   abi:Hike_abi.t ->
   ?written:Var.Set.t option Tid.Map.t ->

@@ -87,7 +87,7 @@ let tests : unit Alcotest.test list =
         check "RES-05" (Core.Set.mem j1_retaddr (Term.tid j1_ld)));
 
     pin "RES-06"
-      "N8-RET: the epilogue lands in the canonical return shape (a var-free return-less call)"
+      "N8-RET: the epilogue lands in the canonical direct return edge"
       (fun () ->
         let j1_ra = v64 "t22_j1_ra" in
         let j1_ld =
@@ -105,18 +105,12 @@ let tests : unit Alcotest.test list =
         in
         check "RES-06"
           (match jmps_of_blk j1' 0 with
-           | [ j ] -> (
-               match Jmp.kind j with
-               | Call c -> (
-                   match (Call.return c, Call.target c) with
-                   | None, Indirect (Bil.Unknown _) -> true
-                   | _ -> false)
-               | _ -> false)
+           | [ j ] -> Hike__Hike_return.is_jmp j
            | _ -> false));
 
     (* The lifted `ret` is a plain `Goto` (BAP lifts `retq` as
        `jmp #retaddr`), not a call; the same retaddr read behind it is
-       the epilogue and canonicalizes the same way. *)
+       the epilogue and canonicalizes to a direct return edge. *)
     pin "RES-22"
       "the lifted `ret` Goto canonicalizes to the var-free return"
       (fun () ->
@@ -137,13 +131,7 @@ let tests : unit Alcotest.test list =
         in
         check "RES-22"
           (match jmps_of_blk j9' 0 with
-           | [ j ] -> (
-               match Jmp.kind j with
-               | Call c -> (
-                   match (Call.return c, Call.target c) with
-                   | None, Indirect (Bil.Unknown _) -> true
-                   | _ -> false)
-               | _ -> false)
+           | [ j ] -> Hike__Hike_return.is_jmp j
            | _ -> false));
 
     (* J1b: the control — the same target read behind a return=Some call

@@ -6,42 +6,7 @@ module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_section
 
-(* Coerces binop operands to one type. *)
-let coerce_to_same_type llvm_builder op llvm_val1 llvm_val2 =
-  let is_integer v =
-    match Llvm.classify_type (Llvm.type_of v) with
-    | Llvm.TypeKind.Integer -> true
-    | _ -> false
-  in
-  let typ1 = Llvm.type_of llvm_val1 in
-  let typ2 = Llvm.type_of llvm_val2 in
-  if (not (is_integer llvm_val1)) || not (is_integer llvm_val2) then
-    (llvm_val1, llvm_val2)
-  else
-    let size1 = Llvm.integer_bitwidth typ1 in
-    let size2 = Llvm.integer_bitwidth typ2 in
-    if size1 = size2 then (llvm_val1, llvm_val2)
-    else
-      let target_typ = if size1 >= size2 then typ1 else typ2 in
-      let build_cast =
-        match op with
-        | SDIVIDE | SMOD | ARSHIFT | SLT | SLE -> Llvm.build_sext
-        | _ -> Llvm.build_zext
-      in
-      let llvm_val1 =
-        if size1 < size2 then build_cast llvm_val1 target_typ "" llvm_builder
-        else llvm_val1
-      in
-      let llvm_val2 =
-        if size2 < size1 then build_cast llvm_val2 target_typ "" llvm_builder
-        else llvm_val2
-      in
-      (llvm_val1, llvm_val2)
-
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
-  let llvm_val1, llvm_val2 =
-    coerce_to_same_type llvm_builder op llvm_val1 llvm_val2
-  in
   match op with
   | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
   | MINUS -> Llvm.build_sub llvm_val1 llvm_val2 "" llvm_builder

@@ -34,8 +34,7 @@ let lanes (l : Arg.t list) : (string * intent option * bool) list =
 let for_all_in (l : Arg.t list) : bool =
   Base.List.for_all l ~f:(fun a -> Arg.intent a = Some In && not (is_ptr a))
 
-(* One block, no jumps: a sub with no call at all, so the PLT signature
-   rule cannot fire.  (BAP encodes a terminal [Ret] as a call internally.) *)
+(* One block, no calls, so the PLT signature rule cannot fire. *)
 let plain_sub (name : string) (defs : def term list) : sub term =
   fst (sub_of name [ defs, [] ])
 
@@ -96,9 +95,12 @@ let tests : unit Alcotest.test list =
       "is_is_fp_returning: a value def off the epilogue path is not a return at all"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
-        let sub =
-          straight_sub "t14_noep"
-            [ Def.create ymm0 (Bil.Var (v64 "t14_src")) ]
+        let sub, _ =
+          sub_of "t14_noep"
+            [ [ Def.create ymm0 (Bil.Var (v64 "t14_src")) ],
+              [ (1, mk_goto) ];
+              [], [ (2, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
         in
         check "TYPES-04" (not (Types.is_fp_returning ~abi sub)));
 
@@ -287,6 +289,57 @@ let tests : unit Alcotest.test list =
         check "TYPES-20"
           (Theory.Target.matches (Project.target proj') "x86_64-gnu-elf"
           && lanes_of_sub sub' = lanes (rets @ args)));
+
+    pin "TYPES-21"
+      "a call preserves the complete native integer-parameter input ABI"
+      (fun () ->
+        let rsi = v64 "RSI" in
+        let sub, _ =
+          sub_of "t14_call_args"
+            [ [ Def.create (v64 "t14_call_t") (Bil.Var rsi) ],
+              [ (1,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Label.direct t)
+                           ~target:(Label.direct (Tid.for_name "callee")) ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let _, args = Types.compute_sub_sig unknown sub in
+        check "TYPES-21"
+          (arg_names args = Base.List.map abi.Abi.int_param_regs ~f:Var.name
+          && for_all_in args));
+
+    pin "TYPES-22"
+      "a named external call absent from the program keeps the synthetic parameter ABI"
+      (fun () ->
+        let target = Tid.for_name "external_call" in
+        let sub, _ =
+          sub_of "t14_external_call"
+            [ [],
+              [ (0,
+                 fun _ ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~target:(Label.direct target) ()))) ] ]
+        in
+        let prog = Program.create ~subs:[ sub ] () in
+        let prog' = Types.sign_program ~target:unknown prog in
+        let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
+        check "TYPES-22"
+          (arg_names (Model.sig_args sub')
+           = Base.List.map (Abi.param_regs abi) ~f:Var.name));
+
+    pin "TYPES-23"
+      "a canonical direct return does not add synthetic call lanes"
+      (fun () ->
+        let sub, _ =
+          sub_of "t14_terminal_return" [ [], [ (0, mk_ret) ] ]
+        in
+        let prog = Program.create ~subs:[ sub ] () in
+        let prog' = Types.sign_program ~target:unknown prog in
+        let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
+        check "TYPES-23" (Model.sig_args sub' = []));
   ]
 
 let () = run "hike_types" tests

@@ -94,12 +94,11 @@ let tile_name (o : Hike.Bil2llvm.sec_owner) =
 
 let tests : unit Alcotest.test list =
   [
-    (* SCOPE: the sub-end undef-read summary folds THIS sub's warned
-       reads only — no leak across the sub boundary. *)
+    (* SCOPE: undef-read diagnostics stay with the sub that reads the lane. *)
     pin "EMIT-01"
-      "the sub-end undef-read summary is per-sub; a clean sub repeats nothing"
+      "undef-read diagnostics stay within their sub"
       (fun () ->
-        let rax = v64 "RAX" in
+        let r15 = v64 "R15" in
         let undef_sub, _ =
           sub_of "scope_leak_a"
             [ [],
@@ -107,7 +106,7 @@ let tests : unit Alcotest.test list =
                  fun t ->
                    mk_jmp_to t
                      (Bil.BinOp
-                        (Bil.EQ, Bil.Var rax,
+                        (Bil.EQ, Bil.Var r15,
                          Bil.Int (Cbat_word.to_word (w64 0)))));
                 (1, mk_goto) ];
               [], [ (0, mk_ret) ] ]
@@ -122,14 +121,17 @@ let tests : unit Alcotest.test list =
         let err =
           capture_stderr (fun () -> ignore (emit_ir [ undef_sub; clean_sub ]))
         in
-        let reports tid =
+        let reports blk =
           String.split_on_char '\n' err
           |> List.filter (fun l ->
-                 contains_substring l ("undef-read: sub " ^ Tid.name tid))
+                 contains_substring l
+                   ("undef-read: blk " ^ Tid.name (Term.tid blk)))
         in
+        let undef_blk = Term.first blk_t undef_sub |> Base.Option.value_exn in
+        let clean_blk = Term.first blk_t clean_sub |> Base.Option.value_exn in
         check "EMIT-01"
-          (List.length (reports (Term.tid undef_sub)) >= 1
-          && List.length (reports (Term.tid clean_sub)) = 0));
+          (List.length (reports undef_blk) >= 1
+          && List.length (reports clean_blk) = 0));
 
     (* POISON: an unbounded-span access warns and emits; a Dead-tagged
        access emits a poison value and warns through Hike_diag. *)
@@ -163,7 +165,7 @@ let tests : unit Alcotest.test list =
        becomes a frozen undef. *)
     pin "EMIT-03" "a never-defined register read warns and becomes a frozen undef"
       (fun () ->
-        let rax = v64 "RAX" in
+        let r15 = v64 "R15" in
         let sub, _ =
           sub_of "undef_read_sub"
             [ [],
@@ -171,7 +173,7 @@ let tests : unit Alcotest.test list =
                  fun t ->
                    mk_jmp_to t
                      (Bil.BinOp
-                        (Bil.EQ, Bil.Var rax,
+                        (Bil.EQ, Bil.Var r15,
                          Bil.Int (Cbat_word.to_word (w64 0)))));
                 (1, mk_goto) ];
               [], [ (0, mk_ret) ] ]
@@ -188,7 +190,7 @@ let tests : unit Alcotest.test list =
       "a never-defined register's entry value is one freeze, read by the register-file phi"
       (fun () ->
         let ymm =
-          Var.create ~is_virtual:false ~fresh:false "YMM3" (Type.Imm 256)
+          Var.create ~is_virtual:false ~fresh:false "YMM9" (Type.Imm 256)
         in
         let lane () =
           Bil.Extract (31, 0, Bil.Extract (127, 0, Bil.Var ymm))
@@ -196,14 +198,32 @@ let tests : unit Alcotest.test list =
         let t1 = Var.create ~is_virtual:true ~fresh:false "sc_t1" (Type.Imm 32) in
         let t2 = Var.create ~is_virtual:true ~fresh:false "sc_t2" (Type.Imm 32) in
         let eq = Bil.BinOp (Bil.EQ, Bil.Var t1, Bil.Var t2) in
+        let leaf = Tid.for_name "selfcmp_leaf" in
+        let callee, _ =
+          sub_of ~tid:(Tid.for_name "selfcmp_callee") "selfcmp_callee"
+            [ [],
+              [ (0,
+                 fun _ ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~target:(Label.direct leaf) ()))) ] ]
+        in
+        let callee_tid = Term.tid callee in
         let sub, _ =
           sub_of "selfcmp_sub"
             [ [ Def.create t1 (lane ()); Def.create t2 (lane ()) ],
-              [ (1, fun t -> mk_jmp_to t eq);
-                (1, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, eq))) ];
+              [ (2, fun t -> mk_jmp_to t eq);
+                (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, eq))) ];
+              [],
+              [ (2,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Label.direct t)
+                           ~target:(Label.direct callee_tid) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ir = emit_ir [ sub ] in
+        let ir = emit_ir [ sub; callee ] in
         check "EMIT-04"
           (contains_substring ir "freeze i256 undef"
           && contains_substring ir "[ %hike_undef,"
@@ -339,7 +359,7 @@ let tests : unit Alcotest.test list =
             (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16)))
         in
         let d_src =
-          Def.create src (Bil.Int (Cbat_word.to_word (w64 0x7B)))
+          Def.create src (Bil.Var (v64 "R15"))
         in
         let d_st =
           Def.create m
@@ -1034,6 +1054,88 @@ let tests : unit Alcotest.test list =
         in
         let ir = emit_ir [ sub ] in
         check "EMIT-25" (contains_substring ir "llvm.trap"));
+
+    (* A terminal direct call has a machine-level return path. *)
+    pin "EMIT-26"
+      "a terminal direct call returns to its caller instead of falling through"
+      (fun () ->
+        let rbx = v64 "RBX" in
+        let callee = straight_sub "tail_callee" [] in
+        let callee_tid = Term.tid callee in
+        let caller, _ =
+          sub_of "tail_caller"
+            [ [ Def.create (v64 "tail_t") (Bil.Var rbx) ],
+              [ (0, fun _ ->
+                  Jmp.create
+                    (Call (Call.create ~target:(Label.direct callee_tid) ()))) ] ]
+        in
+        let ir = emit_ir [ caller; callee ] in
+        check "EMIT-26"
+          (contains_substring ir "ret void"
+           && not (contains_substring ir "unreachable")));
+
+    pin "EMIT-27"
+      "a self-targeted external stub with a return lane is not emitted as a body"
+      (fun () ->
+        let rax = v64 "RAX" in
+        let stub_tid = Tid.create () in
+        let target_tid = Tid.create () in
+        Tid.set_name stub_tid "plt_stub";
+        Tid.set_name target_tid "plt_stub";
+        let stub, _ =
+          sub_of ~tid:stub_tid
+            ~args:[ Arg.create ~intent:Out rax (Bil.Var rax) ]
+            "plt_stub"
+            [ [],
+              [ (1,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Label.direct t)
+                           ~target:(Label.direct target_tid) ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let ir = emit_ir [ stub ] in
+        let defined =
+          List.exists
+            (fun prefix -> contains_substring ir prefix)
+            [ "define void @plt_stub";
+              "define i64 @plt_stub";
+              "define { i64, i64 } @plt_stub" ]
+        in
+        check "EMIT-27" (not defined));
+
+    pin "EMIT-28"
+      "a no-return indirect tail emits an indirect branch"
+      (fun () ->
+        let target = v64 "tail_target" in
+        let sub, _ =
+          sub_of "indirect_tail"
+            [ [ Def.create target
+                  (Bil.Int (Cbat_word.to_word (w64 0x401000))) ],
+              [ (0,
+                 fun _ ->
+                   Jmp.create
+                     (Call
+                        (Call.create
+                           ~target:(Indirect (Bil.Var target)) ()))) ] ]
+        in
+        let ir = emit_ir [ sub ] in
+        check "EMIT-28"
+          (contains_substring ir "indirectbr"
+           && not (contains_substring ir "ret void")));
+
+    pin "EMIT-29"
+      "the canonical direct return edge emits a return"
+      (fun () ->
+        let sub, _ =
+          sub_of "canonical_return"
+            [ [], [ (0, fun _ -> Hike__Hike_return.create ()) ] ]
+        in
+        let ir = emit_ir [ sub ] in
+        check "EMIT-29"
+          (contains_substring ir "ret void"
+           && not (contains_substring ir "indirectbr")));
   ]
 
 let () = run "bil2llvm" tests

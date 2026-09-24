@@ -39,6 +39,7 @@
   test_bil2llvm
   test_emit_fp
   test_jump
+  test_coerce
   test_resolve
   test_strip_canaries
   test_clp_equiv
@@ -48,7 +49,6 @@
   test_hike_types
   test_integration)
  (modules :standard \ harness common fixtures)
-
  (libraries
   hike_test
   alcotest

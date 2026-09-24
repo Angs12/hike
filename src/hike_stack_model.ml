@@ -90,11 +90,13 @@ module Vsa = struct
       (Cbat_vsa.WordSet.Clp.max_elem offs)
 
   (* The denotation's single stack position (absolute), when it has
-     exactly one. *)
+     exactly one: the symbolic arm or the in-band plain arm (the band
+     holds no real x86-64 address, so a plain word there is stack). *)
   let singleton_stack_position (ws : Cbat_vsa.WordSet.t) : int64 option =
-    let open Base.Option in
-    Cbat_vsa.WordSet.stack_offsets ws >>= singleton_offset
-    >>= Cbat_vsa.Cbat_extraction.position_of_offset
+    match Cbat_vsa.WordSet.stack_bounds ws with
+    | Some (lo, hi) when Int64.equal lo hi ->
+        Cbat_vsa.Cbat_extraction.position_of_offset lo
+    | _ -> None
 
   (* The return-address fact and its projections: an address that denotes to
      the stack-symbolic singleton at the entry-RSP cell. *)
@@ -309,12 +311,6 @@ let is_sec_comp_mem (v : var) : bool =
   Base.String.is_prefix (Var.name v) ~prefix:"sec_comp_"
   && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
 
-(* The canonical return shape both passes materialize: a return-less
-   call whose target is this unknown — the emitter classifies it as
-   Ret by shape; nothing reads the label. *)
-let canonical_ret_target ~(word_bits : int) : exp =
-  Bil.Unknown ("hike-ret", Type.Imm word_bits)
-
 (* The tid-name sanitization the symbol-table lookups and the emitted
    names share: a sub's symtab name and its LLVM name stay comparable. *)
 let sanitize_tid_name (n : string) : string =
@@ -403,14 +399,21 @@ let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
                | _ -> acc))
 
 (* A machine call pushes its return address one word below the caller's SP;
-   a modeled op (an intrinsic rendered inline) pushes nothing. *)
+   a modeled op (an intrinsic rendered inline) pushes nothing.  BAP names
+   a mapped intrinsic target [@intrinsic:<name>]; strip the [@]. *)
 let is_intrinsic_target (t : tid) : bool =
-  Base.String.is_prefix (Tid.name t) ~prefix:"intrinsic:"
+  let name = Tid.name t in
+  let name =
+    if String.length name > 0 && name.[0] = '@' then
+      String.sub name 1 (String.length name - 1)
+    else name
+  in
+  Base.String.is_prefix name ~prefix:"intrinsic:"
 
 (* A real (non-intrinsic) call, direct or indirect. *)
 let machine_call (j : jmp term) : bool =
   match Jmp.kind j with
-  | Call c -> (
+  | Call c when not (Hike_return.is_jmp j) -> (
       match Call.target c with
       | Direct t -> not (is_intrinsic_target t)
       | Indirect _ -> true)

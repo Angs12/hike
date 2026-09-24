@@ -70,15 +70,34 @@ type refine_ctx = {
 let with_sol (rc : refine_ctx) (sol : (AI.t * int) Tid.Map.t) : refine_ctx =
   { rc with rc_state = { fs_sol = sol } }
 
+(* BAP names a mapped intrinsic target [@intrinsic:<name>]; the leading
+   [@] is part of the name, so strip it before the prefix test. *)
+let is_intrinsic_target_name (n : string) : bool =
+  let n =
+    match String.chop_prefix n ~prefix:"@" with Some r -> r | None -> n
+  in
+  String.is_prefix n ~prefix:"intrinsic:"
+
 (* Static per-block call facts: the convention's integer-arg lanes the
-   block writes, and whether the block writes SP (the call-push marker). *)
+   block writes, and whether the block's call pushes a return address
+   (a machine call with a return; an intrinsic is rendered inline and a
+   no-return transfer is a tail, so neither pushes). *)
 let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) : var list * bool =
   let defs = Term.enum def_t b |> Seq.to_list in
   let written =
     List.filter abi.Hike_abi.int_param_regs ~f:(fun v ->
         List.exists defs ~f:(fun d -> Var.same (Def.lhs d) v)) in
-  let rsp = abi.Hike_abi.sp in
-  let pushed = List.exists defs ~f:(fun d -> Var.same (Def.lhs d) rsp) in
+  let pushed =
+    Term.enum jmp_t b
+    |> Seq.exists ~f:(fun j ->
+           match Jmp.kind j with
+           | Call c -> (
+               Option.is_some (Call.return c)
+               && (match Call.target c with
+                   | Indirect _ -> true
+                   | Direct t -> not (is_intrinsic_target_name (Tid.name t))))
+           | _ -> false)
+  in
   (written, pushed)
 
 (* Backward may-liveness over base-normalized vars. *)

@@ -16,6 +16,7 @@ let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
     Term.enum jmp_t blk
     |> Seq.exists ~f:(fun j ->
         match Jmp.kind j with
+        | Call c when Hike_return.is_jmp j -> true
         | Call c -> (
             match Call.target c with
             | Indirect _ -> Option.is_none (Call.return c)
@@ -152,23 +153,38 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
         |> Base.List.map ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
         |> fun regs -> regs @ arg_terms
       in
-      (* Signature-shape PLT rule (args = [] + any call); distinct
-         from [is_plt_trampoline]'s BIL-shape rule — different
-         inputs, do not merge. *)
-      let is_plt_sig =
-        args = []
-        && Term.enum blk_t sub
-           |> Seq.exists ~f:(fun blk ->
-                  Term.enum jmp_t blk
-                  |> Seq.exists ~f:(fun j ->
-                         match Jmp.kind j with
-                         | Call _ -> true
-                         | _ -> false))
+      (* A call can consume an incoming register that the BIL body never
+         mentions; retain the complete native integer-parameter ABI. *)
+      let has_call =
+        let is_native_call c =
+          match Call.target c with
+          | Indirect _ -> true
+          | Direct t ->
+              not (Hike_return.is_target t && Option.is_none (Call.return c))
+        in
+        Term.enum blk_t sub
+        |> Seq.exists ~f:(fun blk ->
+               Term.enum jmp_t blk
+               |> Seq.exists ~f:(fun j ->
+                      match Jmp.kind j with
+                      | Call c -> is_native_call c
+                      | _ -> false))
       in
       let args =
-        if is_plt_sig then
-          Base.List.map (Abi.param_regs abi) ~f:(fun reg ->
-              Arg.create ~intent:In reg (Var reg))
+        if has_call then
+          let is_plt_sig = args = [] in
+          let params =
+            if is_plt_sig then Abi.param_regs abi else abi.Abi.int_param_regs
+          in
+          let is_param v = Base.List.exists params ~f:(Var.same v) in
+          let param_args =
+            Base.List.map params ~f:(fun reg ->
+                Arg.create ~intent:In reg (Var reg))
+          in
+          let other_args =
+            Base.List.filter args ~f:(fun arg -> not (is_param (Arg.lhs arg)))
+          in
+          param_args @ other_args
         else args
       in
       (rets, args @ window_arg)

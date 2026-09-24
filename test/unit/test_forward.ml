@@ -346,6 +346,86 @@ let tests : unit Alcotest.test list =
               (Ws.elem (Cbat_word.of_int ~width:1 1) ws
               && not (Ws.elem (Cbat_word.of_int ~width:1 0) ws))
         | Error _ -> check "FWD-15" false);
+
+    (* FWD-16: the coercer makes operand widths uniform; a mismatched
+       equality reaching the domain is a contract violation and answers
+       top — never a coerced comparison.  A one-bit top is the bounded
+       {0,1}, so both booleans must be present. *)
+    pin "FWD-16" "a width-mismatched equality answers top" (fun () ->
+        let v = v64 "t16_v" in
+        let eq =
+          Bil.BinOp (Bil.EQ, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 5)))
+        in
+        let bool_top ws =
+          Ws.bitwidth ws = 1
+          && Ws.elem (Cbat_word.of_int ~width:1 0) ws
+          && Ws.elem (Cbat_word.of_int ~width:1 1) ws
+          && not (Ws.is_bottom ws)
+        in
+        let top1 =
+          match
+            Vsa.Test_seam.denote_imm_exp eq
+              (AI.add_word AI.top ~key:v ~data:(Ws.singleton (w64 5)))
+          with
+          | Ok ws -> bool_top ws
+          | Error _ -> false
+        in
+        let v2 = v64 "t16_w" in
+        let eq2 =
+          Bil.BinOp (Bil.EQ, Bil.Var v2, Bil.Int (Cbat_word.to_word (w32 0)))
+        in
+        let top1' =
+          match
+            Vsa.Test_seam.denote_imm_exp eq2
+              (AI.add_word AI.top ~key:v2
+                 ~data:(Ws.of_list ~width:64 [ w64 0; w64 0x200 ]))
+          with
+          | Ok ws -> bool_top ws
+          | Error _ -> false
+        in
+        check "FWD-16" (top1 && top1'));
+
+    (* FWD-17: a width-mismatched ordering answers top too — the domain
+       never re-derives a comparison on coerced operands. *)
+    pin "FWD-17" "a width-mismatched ordering answers top" (fun () ->
+        let v = v64 "t17_v" in
+        let e =
+          Bil.BinOp
+            ( Bil.LT,
+              Bil.Var v,
+              Bil.Int (Cbat_word.to_word (w32 0x80000000)) )
+        in
+        match
+          Vsa.Test_seam.denote_imm_exp e
+            (AI.add_word AI.top ~key:v ~data:(Ws.singleton (w64 0)))
+        with
+        | Ok ws ->
+            check "FWD-17"
+              (Ws.bitwidth ws = 1
+              && Ws.elem (Cbat_word.of_int ~width:1 0) ws
+              && Ws.elem (Cbat_word.of_int ~width:1 1) ws
+              && not (Ws.is_bottom ws))
+        | Error _ -> check "FWD-17" false);
+
+    (* FWD-18: an arithmetic op with mismatched operand widths answers top
+       at the common width. *)
+    pin "FWD-18"
+      "a width-mismatched arithmetic op answers top at the common width"
+      (fun () ->
+        let a =
+          Var.create ~is_virtual:false ~fresh:false "t18_a" (Type.Imm 32)
+        in
+        let b = v64 "t18_b" in
+        let env =
+          AI.add_word
+            (AI.add_word AI.top ~key:a
+               ~data:(Ws.of_list ~width:32 [ w32 1; w32 2 ]))
+            ~key:b ~data:(Ws.of_list ~width:64 [ w64 1; w64 2 ])
+        in
+        let e = Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b) in
+        match Vsa.Test_seam.denote_imm_exp e env with
+        | Ok ws -> check "FWD-18" (Ws.is_top ws && Ws.bitwidth ws = 64)
+        | Error _ -> check "FWD-18" false);
   ]
 
 let () = run "forward" tests

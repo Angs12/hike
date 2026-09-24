@@ -119,6 +119,14 @@ module Split_mem : sig
   val normalize : program term -> program term
 end
 
+(** The width-coercion pass: every exp the later passes read is made
+    width-honest once, so the VSA and the emitter read uniform widths. *)
+module Coerce : sig
+  val coerce_exp : exp -> exp
+  val coerce_block : blk term -> blk term
+  val coerce_program : program term -> program term
+end
+
 (** Stack split decision and helpers, and the shared section
     vocabulary: the producer/emitter contract point. *)
 module Stack_model : sig

@@ -112,6 +112,9 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
   | CallIndirect ->
       let j = Bap.Std.Seq.hd_exn control_flow in
       create_indirect_call ctx scope llvm_builder tid j
+  | CallIndirectTail ->
+      let j = Bap.Std.Seq.hd_exn control_flow in
+      create_indirect_tail ctx scope llvm_builder tid blk sub j
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call ctx scope llvm_builder tid blk sub call fr
@@ -194,7 +197,7 @@ let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
           Term.enum jmp_t blk
           |> Seq.fold ~init:(Var.Set.empty, Var.Set.empty) ~f:(fun (acc, rets) jmp ->
               match Jmp.kind jmp with
-              | Call c -> (
+              | Call c when not (Hike_return.is_jmp jmp) -> (
                   let rets, args =
                     match Call.target c with
                     | Direct ctid ->
