@@ -83,10 +83,10 @@ let sub_tids (sub : sub term) : Tid.Set.t =
 
 let addressed_starts ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) :
     (Addr.t * tid) list =
-
+  let tids = sub_tids sub in
   block_addrs
   |> Core.Map.to_alist
-  |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem (sub_tids sub) t)
+  |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem tids t)
 
 (* The dispatch's case words: a bounded plain set no larger than the
    run's block count — the words a resolution may target or split at. *)
@@ -305,14 +305,27 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
    words land on the run's map (mid-block entries through the block
    split).  A cross-sub word stays foreign; a word in no block is a
    loud analysis loss.  One split per walk, so the walks terminate. *)
-let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
+let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(fresh : Tid.Set.t ref)
     ~(lift_at : Addr.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
-  let starts = addressed_starts ~block_addrs sub in
-  let dispatch_word blk =
-    let last_defs = Vsa.last_defs blk in
+  (* A block's last-def map is a per-walk fact; a split rewrites the
+     block that produced the word, so that entry drops. *)
+  let last_defs_cache : (Tid.t, def term Var.Map.t) Core.Hashtbl.t =
+    Core.Hashtbl.create (module Tid)
+  in
+  let last_defs_of blk =
+    let tid = Term.tid blk in
+    match Core.Hashtbl.find last_defs_cache tid with
+    | Some m -> m
+    | None ->
+      let m = Vsa.last_defs blk in
+      Core.Hashtbl.set last_defs_cache ~key:tid ~data:m;
+      m
+  in
+  let dispatch_word block_addrs blk =
+    let last_defs = last_defs_of blk in
     Base.List.find_map (Term.enum jmp_t blk |> Seq.to_list) ~f:(fun j ->
         match dispatch_target ~last_defs ~retaddr j with
         | None -> None
@@ -326,34 +339,38 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
                      | Some _ -> None
                      | None -> Some a)))
   in
-  (* Only the FIRST missing word splits: later candidates would
-     rebuild the sub against a map that this split invalidates. *)
-  match
-    Term.enum blk_t sub
-    |> Base.Sequence.find_map ~f:(fun blk ->
-           match dispatch_word blk with
-           | None -> None
-           | Some a ->
-               let sub', t, entries =
-                 split_entry ~starts ~lift_at ~block_addrs a sub
-               in
-               Some (a, sub', t, entries))
-  with
-  | None ->
-      debug_trace "prepare: no missing word, done";
-      (sub, block_addrs)
-  | Some (a, sub', t, entries) ->
-      debug_trace
-        (Printf.sprintf "prepare: split at %s -> tid %s"
-           (Word.to_string a) (Tid.name t));
-      let block_addrs' =
-        Base.List.fold entries
-          ~init:(Core.Map.set block_addrs ~key:a ~data:t)
-          ~f:(fun m (addr, tid) -> Core.Map.set m ~key:addr ~data:tid)
-      in
-      fresh := Core.Set.add !fresh t;
-      prepare_dispatches ~denote ~retaddr ~fresh ~lift_at
-        ~block_addrs:block_addrs' sub'
+  let rec loop (sub : sub term) (block_addrs : Tid.t Addr.Map.t) =
+    let starts = addressed_starts ~block_addrs sub in
+    (* Only the FIRST missing word splits: later candidates would
+       rebuild the sub against a map that this split invalidates. *)
+    match
+      Term.enum blk_t sub
+      |> Base.Sequence.find_map ~f:(fun blk ->
+             match dispatch_word block_addrs blk with
+             | None -> None
+             | Some a ->
+                 let sub', t, entries =
+                   split_entry ~starts ~lift_at ~block_addrs a sub
+                 in
+                 Some (blk, a, sub', t, entries))
+    with
+    | None ->
+        debug_trace "prepare: no missing word, done";
+        (sub, block_addrs)
+    | Some (blk, a, sub', t, entries) ->
+        Core.Hashtbl.remove last_defs_cache (Term.tid blk);
+        debug_trace
+          (Printf.sprintf "prepare: split at %s -> tid %s"
+             (Word.to_string a) (Tid.name t));
+        let block_addrs' =
+          Base.List.fold entries
+            ~init:(Core.Map.set block_addrs ~key:a ~data:t)
+            ~f:(fun m (addr, tid) -> Core.Map.set m ~key:addr ~data:tid)
+        in
+        fresh := Core.Set.add !fresh t;
+        loop sub' block_addrs'
+  in
+  loop sub block_addrs
 
 let delta_subject ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
@@ -719,13 +736,13 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(images : Vsa.section_image list)
     (sub : sub term) : sub term =
-
+  let sub_tids = sub_tids sub in
   let reblock (blk : blk term) : blk term =
     let js = Seq.to_list (Term.enum jmp_t blk) in
     let last_defs = Vsa.last_defs blk in
     let decided =
       Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~sub_tids:(sub_tids sub)
+          rewritten_jmps ~denote ~retaddr ~sub_tids
             ~block_addrs
             ~last_defs
             ~images ~blk j
