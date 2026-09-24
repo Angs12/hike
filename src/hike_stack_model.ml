@@ -15,7 +15,6 @@ module Vocab = struct
       | Stack_unbounded
       | Args of int64 * int64
       | Args_unbounded
-      | Sec of sec * int64 * int64
       | Dead
     [@@deriving equal, compare, sexp]
   end

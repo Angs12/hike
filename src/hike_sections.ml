@@ -375,12 +375,7 @@ let range_of_denotation ~(word : int) ~(entry : int64)
                   rip && whole_in_one
                   && not (Base.List.exists parts ~f:at_slot)
                 in
-                let tag =
-                  match (parts, elig) with
-                  | [ (d, _, _) ], true -> Some (Tag.Sec (d.ds_sec, lo, occ_hi))
-                  | _ -> None
-                in
-                ( tag,
+                ( None,
                   Base.List.map parts ~f:(fun (d, plo, phi) ->
                       { pt_sec = d.ds_sec; pt_lo = plo; pt_hi = phi;
                         pt_elig = elig } ))))

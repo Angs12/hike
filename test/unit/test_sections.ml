@@ -281,13 +281,12 @@ let tests : unit Alcotest.test list =
              A.range_of_denotation ~word:8 ~entry ~spans:top_span ~rip:true
                ~width:8 ws
            with
-           | Some Tag.Sec (_, lo, hi), [ p ] ->
+           | None, [ p ] ->
                (* The whole occupied range [2^64-8, 2^64-1]: hi+7 wrapped
                   and saturated at the domain top, keeping the full
                   coverage. *)
-               Int64.equal lo (-8L) && Int64.equal hi (-1L)
+               Int64.equal p.A.pt_lo (-8L) && Int64.equal p.A.pt_hi (-1L)
                && Int64.unsigned_compare p.A.pt_lo p.A.pt_hi <= 0
-               && Int64.equal p.A.pt_hi (-1L)
            | _ -> false));
 
     pin "SEC-14" "AT1-S02: a signed expansion at the line's top saturates at the ceiling"
@@ -338,19 +337,18 @@ let tests : unit Alcotest.test list =
                && portion_eq p S.Stack (pos (-16L)) (pos (-2L))
            | _ -> false));
 
-    pin "SEC-18" "AT1-S03: a rip-tagged plain access wholly in one span is the Sec proof"
+    pin "SEC-18" "AT1-S03: a rip-tagged plain access wholly in one span proves its portion"
       (fun () ->
         check "SEC-18"
           (let ws =
              Ws.of_clp (Clp.interval ~width:64 (i2w 0x4010L) (i2w 0x4017L))
            in
            match rd_spans ~rip:true ~width:8 ws with
-           | Some Tag.Sec (s, lo, hi), [ p ] ->
-               (* The Sec bounds are the occupied extent (the width rides
-                  in). *)
-               A.equal_sec s S.Data
-               && Int64.equal lo 0x4010L
-               && Int64.equal hi 0x401EL
+           | None, [ p ] ->
+               (* The portion's bounds are the occupied extent (the width
+                  rides in). *)
+               Int64.equal p.A.pt_lo 0x4010L
+               && Int64.equal p.A.pt_hi 0x401EL
                && p.A.pt_elig
            | _ -> false));
 
