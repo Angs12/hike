@@ -12,15 +12,8 @@ type facts = {
   prom_resolved : Tid.t option Tid.Map.t;
 }
 
-(** The resolved target (if any) of each indirect call site. *)
-val caller_side :
-  denote:(blk:blk term -> ?def:def term -> exp ->
-          (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
-  symtab:Symtab.t option ->
-  name_tid:(string * Tid.t) list ->
-  sub term -> Tid.t option Tid.Map.t
-
-(** The resolution product alone. *)
+(** The resolved target (if any) of each indirect call site: the
+    caller-side half of the promotion. *)
 val call_resolution :
   denote:(blk:blk term -> ?def:def term -> exp ->
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->

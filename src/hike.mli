@@ -111,12 +111,6 @@ module Jump : sig
   val compile_sub : Theory.Target.t -> sub term -> sub term
 end
 
-(** The sub filter: named exclusions, stub/extern/intrinsic removal,
-    the symbol-table check. *)
-    module Filter : sig
-      val filter_subs : Project.t -> Project.t
-    end
-
     (** Node fission: every def keeps exactly one memory node inline —
         the per-def tag is then the complete proof of that node. *)
     module Split_mem : sig
@@ -150,14 +144,6 @@ module Stack_model : sig
       positions are absolute, so a frame offset [o] sits at
       [segment_base + o]. *)
   val segment_base : int64
-
-  (** The base's certified width: the low nibble is the ABI entry
-      residue (8 (mod 16)), the only bits that are a fact. *)
-  val certified_bits : int
-
-  (** The plain-arm stack band's lower bound; the band is
-      [stack_band_lo, 2^63). *)
-  val stack_band_lo : int64
 
   (** The denotation's single absolute stack position, when it
       denotates to exactly one — the cell-identity predicate. *)

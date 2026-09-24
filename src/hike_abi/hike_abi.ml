@@ -106,4 +106,3 @@ let value_return_names = [ "RAX"; "EAX"; "RDX"; "EDX" ]
 let is_value_return_reg (t : t) (v : var) : bool =
   Base.List.mem value_return_names (Var.name (Var.base v)) ~equal:String.equal
 
-let vector_param_prefix = "YMM"

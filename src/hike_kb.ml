@@ -23,7 +23,6 @@ type facts = {
   (* An address to the tid of the block whose extent contains it.
      An empty map keeps every dispatch foreign. *)
   block_addrs : Tid.t Addr.Map.t;
-  addr_bits : int;
   target : Bap_core_theory.Theory.Target.t;
   abi : Hike_abi.t;
   (* [e] denotes in the before-env of [def] — the def's Env Tag — or,
@@ -47,7 +46,6 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
   in
   { envs = block_envs;
     block_addrs;
-    addr_bits = Hike_abi.addr_size_bits target;
     target;
     abi = Hike_abi.of_target target;
     denote =
@@ -69,7 +67,3 @@ let facts () =
 (* The attribution pass adds the emitter spec to the installed record. *)
 let with_spec (f : facts) (spec : Bil2llvm_env.section_spec) : facts =
   { f with spec = Some spec }
-
-(* A mid-block case entry becomes its own block, on the map. *)
-let add_block_addr (f : facts) ~addr ~(tid : Tid.t) : facts =
-  { f with block_addrs = Core.Map.set f.block_addrs ~key:addr ~data:tid }

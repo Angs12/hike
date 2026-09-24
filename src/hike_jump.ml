@@ -553,14 +553,15 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
              if Core.Set.mem bi.defined key then acc
              else Core.Map.set acc ~key ~data:(Def.rhs data)) in
     { rhs; xrhs } in
-  (* Two distinct candidates for one flag are ambiguous — no fact. *)
+  (* One reaching def per flag var: the block's last def (the fold
+     keeps one def per var), else the reaching state's. *)
   let flag_def (fl : flag) : (var * (Tid.t * int) * exp) option =
     let within =
       Core.Map.to_alist flag_map
       |> List.filter_map ~f:(fun (v, (i, rhs)) ->
              if is_flag fv fl v then Some (v, (bt, i), rhs) else None) in
     match within with
-    | [ cand ] -> Some cand
+    | cand :: _ -> Some cand
     | [] -> (
         let reaching =
           Core.Map.to_alist in_st.ru
@@ -570,8 +571,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
                    | Some site -> Some (v, site, Def.rhs d)
                    | None -> None
                  else None) in
-        match reaching with [ cand ] -> Some cand | _ -> None)
-    | _ -> None in
+        match reaching with [ cand ] -> Some cand | _ -> None) in
   let facts =
     List.fold_left all_flags ~init:empty_facts ~f:(fun acc fl ->
         match flag_def fl with

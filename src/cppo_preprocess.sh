@@ -16,7 +16,6 @@ case "$input" in
   *.mli) kind="-intf" ;;
 esac
 
-echo "CPPDBG pwd=$(pwd) input=$input md5=$(md5sum < "$input")" >&2
 if [ "$profile" = "vsa-debug" ]; then
   cppo -D VSA_DEBUG "$input"
 else

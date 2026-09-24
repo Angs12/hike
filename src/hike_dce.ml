@@ -26,9 +26,6 @@ type sweep_census = {
   perm : Var.Set.t;
 }
 
-let load_mem_vars (rhs : exp) : Var.Set.t =
-  Hike_stack_model.load_mem_vars rhs
-
 let sweep_census_of (sub : sub term) : sweep_census =
   let bump m v =
     Core.Map.update m v ~f:(function None -> 1 | Some n -> n + 1)
@@ -52,7 +49,7 @@ let sweep_census_of (sub : sub term) : sweep_census =
           let tid = Term.tid d in
           let lhs = Def.lhs d in
           let fvs = Exp.free_vars (Def.rhs d) in
-          let lms = load_mem_vars (Def.rhs d) in
+          let lms = Hike_stack_model.load_mem_vars (Def.rhs d) in
           let by_lhs =
             Core.Map.update acc.by_lhs lhs ~f:(function
               | None -> Tid.Set.singleton tid
@@ -73,15 +70,12 @@ let sweep_census_of (sub : sub term) : sweep_census =
   in
   Term.enum blk_t sub |> Seq.fold ~init ~f:census_blk
 
-let is_intrinsic_var (v : var) : bool =
-  Hike_stack_model.is_intrinsic_name (Var.name (Var.base v))
-
 (* Region and section-component mems survive iff loaded; call-arg defs
    survive (they ARE the call's arguments — the emission consumes them at
    the call); [mem] always survives.  SP needs no special case: the SP local
    binds to the sub's SP Slot, so SP-derived address defs stay live by the
    plain used rule. *)
-let keep ?(load_roots=Var.Set.empty)
+let keep ~(load_roots : Var.Set.t)
     ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
   let lhs = Def.lhs d in
   if Hike_stack_model.is_window_mem lhs then
@@ -95,7 +89,8 @@ let keep ?(load_roots=Var.Set.empty)
     Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
     || Hike_stack_model.is_mem lhs
     || Hike_stack_model.is_call_arg lhs
-    || is_call_reg ~abi lhs || is_intrinsic_var lhs
+    || is_call_reg ~abi lhs
+    || Hike_stack_model.is_intrinsic_name (Var.name (Var.base lhs))
 
 (* Incremental sweep: [used] and [load_roots] start exact and stay exact (a
    var leaves only when its last contributor is removed), so each [keep]

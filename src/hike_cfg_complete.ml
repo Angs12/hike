@@ -385,15 +385,12 @@ let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) (texp : exp) :
     (exp * (word * tid) list * Int64.t) option =
-  let blocks = block_addrs in
   match dispatch_words ~denote ~block_addrs ~last_defs ~blk texp with
   | None -> None
   | Some ws ->
-    if Base.List.length ws > Core.Map.length blocks then None
-    else
-        match delta_subject ~denote ~last_defs ~blk texp with
-        | None -> None
-        | Some (delta_exp, base_exp, bval) ->
+    (match delta_subject ~denote ~last_defs ~blk texp with
+     | None -> None
+     | Some (delta_exp, base_exp, bval) ->
           let subject =
             match texp with
             | Bil.BinOp (Bil.PLUS, _, _) -> delta_exp
@@ -413,17 +410,18 @@ let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
           in
           let pairs = Base.List.map ws ~f:case in
           if Base.List.exists pairs ~f:Option.is_none then None
-          else Some (subject, Base.List.filter_map pairs ~f:(fun p -> p), bval)
+          else Some (subject, Base.List.filter_map pairs ~f:(fun p -> p), bval))
 
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
    The words share the selector's width, so the comparisons typecheck. *)
+(* [ws] is non-empty — a case group is built from at least one word. *)
 let guarded_cond (sel : exp) (ws : word list) : exp =
   let eq w = Bil.BinOp (Bil.EQ, sel, Bil.Int w) in
   match ws with
-  | [] -> Bil.Int (Word.one 1)
   | w :: rest ->
       Base.List.fold rest ~init:(eq w)
         ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
+  | [] -> failwith "hike-cfg-complete: empty case group"
 
 (* The dispatch jmp's own guard narrows every case and the default
    alike. *)

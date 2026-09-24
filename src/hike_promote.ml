@@ -267,8 +267,9 @@ type facts = {
   prom_resolved : Tid.t option Tid.Map.t;
 }
 
-(* Resolves each indirect call's target through its denotation. *)
-let caller_side ~(denote : blk:blk term -> ?def:def term -> exp ->
+(* Resolves each indirect call's target through its denotation: the
+   caller-side half of the promotion. *)
+let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
                   (Vsa.WordSet.t, Type.error) Result.t)
     ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
     (sub : sub term) : Tid.t option Tid.Map.t =
@@ -293,24 +294,6 @@ let caller_side ~(denote : blk:blk term -> ?def:def term -> exp ->
               | Direct _ -> ())
           | _ -> ()));
   !resolved
-
-let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
-                      (Vsa.WordSet.t, Type.error) Result.t)
-    ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
-    (sub : sub term) : Tid.t option Tid.Map.t =
-  caller_side ~denote ~symtab ~name_tid sub
-
-(* Replaces the Load node matching (addr, size) with [x]. *)
-let rewrite_load_to (e : exp) (addr : exp) (size : Size.t) (x : exp) : exp =
-  let v =
-    object
-      inherit Exp.mapper
-      method! map_load ~mem ~addr:a rest s =
-        if Exp.equal a addr && Size.equal s size then x
-        else Bil.Load (mem, a, rest, s)
-    end
-  in
-  v#map_exp e
 
 (* The promotion rewrite: the sub gains its promoted parameters as
    real BIR args, the sites' outgoing stores gain [hike_argN] defs,
@@ -367,7 +350,7 @@ let slot_defs_of ~(demoted : int list) (tree : Sections.sub_tree) :
 
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
-   products; [arity_of] the per-callee promoted arity. *)
+   products. *)
 let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(spans : Sections.data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
@@ -375,7 +358,6 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(ctx : Sections.ctx)
     ~(sites : site_binding list Tid.Map.t)
     ~(resolved : Tid.t option Tid.Map.t)
-    ~(arity_of : Tid.t -> int)
     ~(demoted : int list)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
@@ -474,24 +456,6 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
            let resolved = call_resolution ~denote ~symtab ~name_tid sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in
-  (* Arity from the pre-demotion slots; demotion only shrinks it. *)
-  let slots_of sub =
-    let tree =
-      Core.Map.find ctx.sub_trees (Term.tid sub)
-      |> Core.Option.value ~default:Sections.Tree.empty
-    in
-    Base.List.concat_map (Sections.Tree.to_sequence tree |> Seq.to_list)
-      ~f:(fun (_, rs) ->
-        match rs.storage with Arg_slot i -> [ i ] | _ -> [])
-  in
-  let arity_of (t : Tid.t) : int =
-    if Core.Set.mem exempt t then 0
-    else
-      match Term.find sub_t prog t with
-      | Some sub -> (
-          match slots_of sub with [] -> 0 | is -> 1 + Base.List.fold is ~init:0 ~f:Int.max)
-      | None -> 0
-  in
   (* A slot whose outgoing final store is partial is demoted on both
      sides: the callee's accesses take the window, never the
      parameter. *)
@@ -530,7 +494,6 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
         |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
       in
       rewrite_sub ~word ~entry ~abi ~spans ~denote ~ctx ~sites ~resolved
-        ~arity_of
         ~demoted:(Core.Map.find demotion (Term.tid sub) |> Core.Option.value ~default:[])
         ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
         sub)

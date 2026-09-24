@@ -45,12 +45,6 @@ module Vsa = struct
      SP is base + offset 0); a frame-relative depth is [base − position]. *)
   let segment_base = Cbat_vsa.WordSet.stack_base
 
-  (* The base's certified width and the stack band's lower bound: the
-     base's low nibble is a fact, and a bounded plain set in
-     [stack_band_lo, 2^63) is stack. *)
-  let certified_bits = Cbat_vsa.WordSet.certified_bits
-  let stack_band_lo = Cbat_vsa.WordSet.stack_band_lo
-
   (* The clamp and its bounds are shared with the call abstraction. *)
   include Hike_stack_bounds
 
@@ -85,12 +79,6 @@ module Vsa = struct
     let lo = if cmp lo slo >= 0 then lo else slo in
     let hi = if cmp hi shi <= 0 then hi else shi in
     if cmp lo hi <= 0 then Some (lo, hi) else None
-
-  (* The Clp offset hull on the segment line; [None] when not representable. *)
-  let hull_positions (offs : Cbat_vsa.WordSet.Clp.t) : (int64 * int64) option =
-    let open Base.Option in
-    Cbat_vsa.WordSet.Clp.min_elem offs >>= fun lo ->
-    Cbat_vsa.WordSet.Clp.max_elem offs >>= position_pair lo
 
   (* A single known word; a TOP set is deliberately not one. *)
   let singleton_i64 (ws : Cbat_vsa.WordSet.t) : int64 option =
