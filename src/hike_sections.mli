@@ -205,11 +205,11 @@ val sec_meta : word:int -> Project.t -> sec_meta option list
 
 (** Every copy-relocated slot address (absolute); every access at a
     slot serves through the slot's relocated pointer. *)
-val copy_reloc_slot_addrs : Project.t -> int64 list
+val copy_reloc_slot_addrs : sec_meta option list -> int64 list
 
 (** The attribution's data spans: each reserved section's bounds and
     copy-relocated slot addresses, in the fixed table order. *)
-val attrib_spans : word:int -> Project.t -> data_span list
+val attrib_spans : meta:sec_meta option list -> data_span list
 
 (** The emitter's section spec; a [whole] entry (id, lo, hi) is a span
     served whole — the section's own image global is the id's
@@ -218,4 +218,4 @@ val section_spec_of :
   word:int ->
   comps:Hike_stack_model.sec_comp list ->
   whole:(int * int64 * int64) list ->
-  Project.t -> Bil2llvm_env.section_spec
+  meta:sec_meta option list -> Bil2llvm_env.section_spec

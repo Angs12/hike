@@ -106,8 +106,11 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
    solves warm.  The BIR's claims are immutable during the solve; at
    drain the materialization lands once.  [None] = non-convergence:
    no environments, no rewrite — readers take the top identity. *)
+type lookup_fn = int64 -> Tid.t option
+
 let fixpoint (target : Theory.Target.t)
     ~(prog : program term)
+    ~(lookup : lookup_fn)
     ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
     ~(written : Var.Set.t option Tid.Map.t)
@@ -117,10 +120,9 @@ let fixpoint (target : Theory.Target.t)
     ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t) option =
   self_arm target;
   let abi = Hike_abi.of_target target in
-  let sub_lookup =
-    Hike_resolve.symtab_lookup ~symtab
-      ~name_tid:(Hike_resolve.name_tid_of prog)
-  in
+  (* The program-wide lookup, built once by the caller (memoized
+     against re-deriving per sub). *)
+  let sub_lookup = lookup in
 #ifdef VSA_DEBUG
   let dump_r8 (sol : Vsa.vsa_sol) (sub : sub term) =
     let rep = Base.List.nth_exn abi.Hike_abi.int_param_regs 4 in

@@ -32,14 +32,16 @@ let convert_binary output_program proj =
   let abi = Abi.of_target target in
   let word = abi.Hike_abi.word in
   let addr_bits = Theory.Target.bits target in
+  (* The section rows, read once for this pass. *)
+  let meta = Hike_sections.sec_meta ~word proj in
   let spec =
     match (Hike_kb.facts ()).Hike_kb.spec with
     | Some spec -> spec
     | None ->
         (* No attribution ran: the sections emit with no components. *)
-        Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] proj
+        Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
   in
-  let copy_reloc_addrs_val = Hike_sections.copy_reloc_slot_addrs proj in
+  let copy_reloc_addrs_val = Hike_sections.copy_reloc_slot_addrs meta in
   let symtab_val = Some (Project.symbols proj) in
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
@@ -130,6 +132,11 @@ let pass_vsa proj =
     Hike_vsa.kill_summaries ~abi:(Hike_abi.of_target target)
       (Project.program proj)
   in
+  (* The program-wide resolution lookup: one name table for the run. *)
+  let lookup =
+    Hike_resolve.symtab_lookup ~symtab:(Some (Project.symbols proj))
+      ~table:(Hike_resolve.name_table_of (Project.program proj))
+  in
   let subs_acc, block_addrs =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:(Tid.Map.empty, block_addrs)
@@ -138,6 +145,7 @@ let pass_vsa proj =
           (Base.Option.map
              (Hike_vsa.fixpoint target
                 ~prog:(Project.program proj)
+                ~lookup
                 ~symtab:(Some (Project.symbols proj)) ~images ~written
                 ~lift_at ~block_addrs sub)
              ~f:(fun (envs, sub', block_addrs') ->
@@ -175,7 +183,8 @@ let pass_attrib proj =
   let facts = Hike_kb.facts () in
   let target = facts.target in
   let word = facts.abi.Hike_abi.word in
-  let spans = Hike_sections.attrib_spans ~word proj in
+  let meta = Hike_sections.sec_meta ~word proj in
+  let spans = Hike_sections.attrib_spans ~meta in
   let dyn_allocs =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
@@ -204,7 +213,7 @@ let pass_attrib proj =
              (Hike_sections.section_spec_of ~word
                 ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
                 ~whole:(Hike_sections.whole_comps_of ctx)
-                proj));
+                ~meta));
         (* The DCE's load roots are the vars the rewrite created; its
            escape roots are the storages carrying identity members. *)
         Term.map sub_t prog ~f:(fun sub ->

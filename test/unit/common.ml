@@ -99,7 +99,7 @@ let produce ?(block_addrs = []) ?(images = [])
     ?(lift_at = fun _ -> None) target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
   match
-    Hv.fixpoint target ~prog ~symtab:None ~images
+    Hv.fixpoint target ~prog ~lookup:(fun _ -> None) ~symtab:None ~images
       ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
       ~lift_at
       ~block_addrs:
@@ -158,7 +158,7 @@ let fixture_facts (subs : sub term list) :
         match
           Hv.fixpoint Theory.Target.unknown
             ~prog:(Program.create ~subs:[ sub ] ())
-            ~symtab:None ~images:[]
+            ~lookup:(fun _ -> None) ~symtab:None ~images:[]
             ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                         (Program.create ~subs:[ sub ] ()))
             ~lift_at:(fun _ -> None)

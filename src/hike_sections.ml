@@ -77,15 +77,14 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
 
 (* Every copy-relocated slot address (absolute): loads and stores at a
    slot go through the slot's relocated pointer. *)
-let copy_reloc_slot_addrs proj =
-  Base.Option.value
-    (Base.Option.map (bss_region proj) ~f:(fun (addr, _, copy_relocs) ->
-         Base.List.map copy_relocs
-           ~f:(fun (off, _) -> Stdlib.Int64.add addr (Stdlib.Int64.of_int off))))
-    ~default:[]
-
-let attrib_spans ~(word : int) (proj : Project.t) : data_span list =
-  Base.List.filter_map (sec_meta ~word proj)
+let copy_reloc_slot_addrs (meta : sec_meta option list) : int64 list =
+  Base.List.concat_map meta ~f:(fun m ->
+      Base.Option.value_map m ~default:[] ~f:(fun m ->
+          Base.List.map m.sm_copy_relocs
+            ~f:(fun (off, _) ->
+              Stdlib.Int64.add m.sm_lo (Stdlib.Int64.of_int off))))
+let attrib_spans ~(meta : sec_meta option list) : data_span list =
+  Base.List.filter_map meta
     ~f:(Base.Option.map ~f:(fun m ->
             { ds_sec = m.sm_type;
               ds_lo = m.sm_lo;
@@ -97,7 +96,7 @@ let attrib_spans ~(word : int) (proj : Project.t) : data_span list =
 (* The emitter's section spec; a [whole] entry (id, lo, hi) is a span
    served whole — the section's own image global is the id's storage. *)
 let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
-    ~(whole : (int * int64 * int64) list) (proj : Project.t) :
+    ~(whole : (int * int64 * int64) list) ~(meta : sec_meta option list) :
     Bil2llvm_env.section_spec =
   let spec_section (m : sec_meta) =
     let open Bil2llvm_env in
@@ -122,7 +121,7 @@ let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
     spec_whole = whole;
     spec_word = word;
     spec_sections =
-      Base.List.map (sec_meta ~word proj)
+      Base.List.map meta
         ~f:(Base.Option.map ~f:spec_section) }
 
 type point = { p_sec : sec; p_pos : int64 } [@@deriving sexp]

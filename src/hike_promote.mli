@@ -17,8 +17,7 @@ type facts = {
 val call_resolution :
   denote:(blk:blk term -> ?def:def term -> exp ->
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
-  symtab:Symtab.t option ->
-  name_tid:(string * Tid.t) list ->
+  lookup:(int64 -> Tid.t option) ->
   sub term -> Tid.t option Tid.Map.t
 
 (** The promotion rewrite: the sub gains its promoted parameters as

@@ -321,9 +321,11 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
                      | Some _ -> None
                      | None -> Some a)))
   in
+  (* Only the FIRST missing word splits: later candidates would
+     rebuild the sub against a map that this split invalidates. *)
   match
     Term.enum blk_t sub
-    |> Seq.filter_map ~f:(fun blk ->
+    |> Base.Sequence.find_map ~f:(fun blk ->
            match dispatch_word blk with
            | None -> None
            | Some a ->
@@ -331,8 +333,6 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
                  split_entry ~starts ~lift_at ~block_addrs a sub
                in
                Some (a, sub', t, entries))
-    |> Seq.to_list
-    |> Base.List.hd
   with
   | None ->
       debug_trace "prepare: no missing word, done";

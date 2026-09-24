@@ -53,13 +53,24 @@ let split_def (d : def term) : def term list =
 
 (* Identity unless a def needs splitting. *)
 let split_sub (sub : sub term) : sub term =
-  let offending blk =
-    Term.enum def_t blk
-    |> Seq.exists ~f:(fun d -> mem_count (Def.rhs d) > 1) in
-  if not (Term.enum blk_t sub |> Seq.exists ~f:offending) then sub
+  (* One traversal decides; the map pass re-checks only the blocks it
+     visits after the cheap whole-sub reject. *)
+  let any_offending = ref false in
+  let offending =
+    Term.enum blk_t sub
+    |> Seq.filter_map ~f:(fun blk ->
+        let bad =
+          Term.enum def_t blk
+          |> Seq.exists ~f:(fun d -> mem_count (Def.rhs d) > 1) in
+        if bad then (any_offending := true; Some (Term.tid blk, ()))
+        else None)
+    |> Seq.to_list |> Tid.Map.of_alist_exn
+  in
+  if not !any_offending then sub
   else
     Term.map blk_t sub ~f:(fun blk ->
-        if offending blk then Term.concat_map def_t blk ~f:split_def
+        if Core.Map.mem offending (Term.tid blk) then
+          Term.concat_map def_t blk ~f:split_def
         else blk)
 
 let normalize (prog : program term) : program term =

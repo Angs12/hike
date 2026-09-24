@@ -30,6 +30,7 @@ module Vsa : sig
   val fixpoint :
     Theory.Target.t ->
     prog:program term ->
+    lookup:(int64 -> Tid.t option) ->
     symtab:Symtab.t option ->
     images:section_image list ->
     written:Var.Set.t option Tid.Map.t ->

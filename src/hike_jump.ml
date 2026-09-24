@@ -318,11 +318,14 @@ let rstate_equal (a : rstate) (b : rstate) : bool =
   && Var.Set.equal a.multi_site b.multi_site
 
 let rjoin (a : rstate) (b : rstate) : rstate =
-  let keys =
-    List.fold_left (Core.Map.to_alist b.unique_site) ~init:
-      (List.fold_left (Core.Map.to_alist a.unique_site) ~init:(Core.Set.union a.multi_site b.multi_site)
-         ~f:(fun acc (v, _) -> Core.Set.add acc v))
-      ~f:(fun acc (v, _) -> Core.Set.add acc v) in
+  let key_set =
+    Core.Map.merge a.unique_site b.unique_site
+      ~f:(fun ~key:v -> function
+        | `Both _ | `Left _ | `Right _ -> Some v)
+    |> Core.Map.keys
+    |> Core.Set.of_list (module Var)
+  in
+  let keys = Core.Set.union key_set (Core.Set.union a.multi_site b.multi_site) in
   Core.Set.fold keys ~init:{ unique_site = Var.Map.empty; multi_site = Var.Set.empty }
     ~f:(fun st v ->
         if Core.Set.mem a.multi_site v || Core.Set.mem b.multi_site v then
@@ -343,23 +346,18 @@ let rtrans (bin : rstate) (bi : binfo) : rstate =
       ~f:(fun acc (_, d) ->
         Core.Map.set acc ~key:(Var.base (Def.lhs d)) ~data:d) in
   let unique_site =
-    Core.Map.to_alist bin.unique_site
-    |> List.filter ~f:(fun (k, _) -> not (Core.Set.mem bi.defined k))
-    |> List.fold_left ~init:Var.Map.empty
-         ~f:(fun acc (k, d) -> Core.Map.set acc ~key:k ~data:d) in
-  let unique_site =
-    Core.Map.to_alist gen
-    |> List.fold_left ~init:unique_site
-         ~f:(fun acc (k, d) -> Core.Map.set acc ~key:k ~data:d) in
+    Core.Map.filter_keys bin.unique_site ~f:(fun k -> not (Core.Set.mem bi.defined k))
+  in
+  let unique_site = Core.Map.merge unique_site gen
+      ~f:(fun ~key:_ -> function
+        | `Both (_, d) | `Left d | `Right d -> Some d) in
   let multi_site =
     Core.Set.filter bin.multi_site ~f:(fun v -> not (Core.Set.mem bi.defined v)) in
   (* A phi defines its lhs at the entry with no def site — the var's entry
      value stays site-less (multi). *)
   let multi_site =
     Core.Set.fold bi.defined ~init:multi_site ~f:(fun s v ->
-        if List.exists (Core.Map.to_alist gen) ~f:(fun (v', _) -> Var.equal v' v)
-        then s
-        else Core.Set.add s v) in
+        if Core.Map.mem gen v then s else Core.Set.add s v) in
   { unique_site; multi_site }
 
 (* The jump targets of a block that are blocks of the sub. *)
@@ -381,7 +379,7 @@ type xenv = {
 (* The reaching-defs fixpoint: the unique site per var when every path
    agrees, ambiguity otherwise. *)
 let reaching_defs (blocks : blk term list) : xenv =
-  let all_tids = List.map blocks ~f:(fun b -> Term.tid b) in
+  let all_tids = Core.Set.of_list (module Tid) (List.map blocks ~f:(fun b -> Term.tid b)) in
   let bins =
     List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
         let idefs =
@@ -403,7 +401,7 @@ let reaching_defs (blocks : blk term list) : xenv =
   let preds =
     List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
         List.fold_left (blk_targets b) ~init:m ~f:(fun m t ->
-            if not (List.mem all_tids t ~equal:Tid.equal) then m
+            if not (Core.Set.mem all_tids t) then m
             else
               let ps =
                 Option.value (Core.Map.find m t) ~default:Tid.Set.empty in
@@ -555,6 +553,8 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
     { rhs; xrhs } in
   (* One reaching def per flag var: the block's last def (the fold
      keeps one def per var), else the reaching state's. *)
+  (* Each flag's reaching def, computed once per block and reused by
+     the facts fold and every jmp's compilation. *)
   let flag_def (fl : flag) : (var * (Tid.t * int) * exp) option =
     let within =
       Core.Map.to_alist flag_map
@@ -571,7 +571,12 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
                    | Some site -> Some (v, site, Def.rhs d)
                    | None -> None
                  else None) in
-        match reaching with [ cand ] -> Some cand | _ -> None) in
+        match reaching with [ cand ] -> Some cand | _ -> None)
+  in
+  let flag_defs =
+    List.map all_flags ~f:(fun fl -> (fl, flag_def fl)) in
+  let flag_def (fl : flag) =
+    Option.join (Base.List.Assoc.find flag_defs fl ~equal:Stdlib.( = )) in
   let facts =
     List.fold_left all_flags ~init:empty_facts ~f:(fun acc fl ->
         match flag_def fl with

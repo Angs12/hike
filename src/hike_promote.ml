@@ -262,10 +262,9 @@ type facts = {
    caller-side half of the promotion. *)
 let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
                   (Vsa.WordSet.t, Type.error) Result.t)
-    ~(symtab : Symtab.t option) ~(name_tid : (string * Tid.t) list)
+    ~(lookup : int64 -> Tid.t option)
     (sub : sub term) : Tid.t option Tid.Map.t =
   let resolved = ref Tid.Map.empty in
-  let lookup = Hike_resolve.symtab_lookup ~symtab ~name_tid in
   Term.enum blk_t sub
   |> Seq.iter ~f:(fun blk ->
       Term.enum jmp_t blk
@@ -433,7 +432,9 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   let abi = facts.abi in
   let denote = facts.denote in
   let sp = abi.Hike_abi.sp in
-  let name_tid = Hike_resolve.name_tid_of prog in
+  let lookup =
+    Hike_resolve.symtab_lookup ~symtab
+      ~table:(Hike_resolve.name_table_of prog) in
   let callee_exempt = Hike_stack_model.fixed_signature in
   let exempt =
     Term.enum sub_t prog
@@ -444,7 +445,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
            let sites = site_bindings_of_sub ~word ~abi ~sp ~denote sub in
-           let resolved = call_resolution ~denote ~symtab ~name_tid sub in
+           let resolved = call_resolution ~denote ~lookup sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in
   (* A slot whose outgoing final store is partial is demoted on both

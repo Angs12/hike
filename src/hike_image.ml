@@ -16,11 +16,11 @@ let get_section_mem name proj =
 let get_section_data x =
   Base.Option.map x ~f:(fun (mem, _) ->
       let length = Memory.length mem in
-      let min_addr = Memory.min_addr mem in
+      let buf = Memory.to_buffer mem in
       let arr = Bytes.create length in
-      Memory.iteri ~word_size:`r8 mem ~f:(fun index v ->
-          Bytes.set arr (Word.to_int_exn (Word.( - ) index min_addr))
-            (Stdlib.Char.chr (Word.to_int_exn v)));
+      for i = 0 to length - 1 do
+        Bytes.set arr i (Stdlib.Char.chr (Stdlib.Char.code (Core.Bigsubstring.get buf i)))
+      done;
       (arr, Memory.min_addr mem, Memory.max_addr mem))
 
 let get_copy_relocations proj ~bss_addr ~bss_size =

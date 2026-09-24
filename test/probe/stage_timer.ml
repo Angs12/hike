@@ -31,7 +31,7 @@ let () =
     in
     let _envs, _sub', _ =
       Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
-        ~symtab:None ~images:[]
+        ~lookup:(fun _ -> None) ~symtab:None ~images:[]
         ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi
                     (Program.create ~subs:[ sub ] ()))
         ~lift_at:(fun _ -> None)

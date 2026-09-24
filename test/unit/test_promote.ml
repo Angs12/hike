@@ -467,8 +467,8 @@ let tests : unit Alcotest.test list =
         check "PR-20"
           (let fa6, a6 = fixture_facts_sub a6 in
            let resolved =
-             Hike.Promote.call_resolution ~denote:fa6.denote ~symtab:None
-               ~name_tid:[] a6
+             Hike.Promote.call_resolution ~denote:fa6.denote
+               ~lookup:(fun _ -> None) a6
            in
            Core.Map.find resolved (Term.tid j) = Some None));
 
