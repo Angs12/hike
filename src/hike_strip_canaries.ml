@@ -591,7 +591,9 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
   let abi = facts.abi in
   let denote = facts.denote in
   let name_of t =
-    Base.Option.value (Core.Map.find names t) ~default:(Tid.name t)
+    match Core.Map.find names t with
+    | Some n -> n
+    | None -> Tid.name t
   in
   let cells = cells_of_sub ~denote sub in
   let cell_of tid = Core.Map.find cells tid in

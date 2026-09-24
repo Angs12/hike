@@ -387,7 +387,15 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       plt_trampolines = ref Tid.Map.empty;
       i64_ty = Llvm.i64_type llvm_ctx;
       ptr_ty = Llvm.pointer_type llvm_ctx;
-      word_ty = Llvm.integer_type llvm_ctx (abi.Abi.word * 8) }
+      word_ty = Llvm.integer_type llvm_ctx (abi.Abi.word * 8);
+      native_starts =
+        (match symtab with
+         | Some st ->
+           Symtab.to_sequence st
+           |> Base.Sequence.fold ~init:Core.Int64.Set.empty
+                ~f:(fun acc (_, entry, _) ->
+                  Core.Set.add acc (Word.to_int64_exn (Block.addr entry)))
+         | None -> Core.Int64.Set.empty) }
   in
   (* The named-component map: filled before any body emits; the
      rip-relative path renders through the same owners. *)

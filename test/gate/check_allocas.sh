@@ -29,10 +29,25 @@ PASS=0
 for ll in "$OUT_DIR"/out_*.ll; do
   name="$(basename "$ll" .ll)"
 
+  # The count rules (a/c/e/f/g) read one awk pass over the module;
+  # the state-machine rules (b/d/INFO) keep their own passes.
+  eval "$(awk '
+    { line = $0
+      if (line ~ /%stack_r[0-9]/) n_sr_ref++
+      if (line ~ /%stack_r[0-9]+ = alloca/) n_sr_alloca++
+      if (line ~ /@stack/) n_stack++
+      if (line ~ /phi .*\[ poison, %entry/) n_poison++
+      if (line ~ /^@sec_comp_[0-9]+ =/) n_comp++
+      if (line ~ /^@sec_res_[0-9]+ =/) n_res++
+      if (line ~ /^@sec_(comp|res)_[0-9]+ =/ && line !~ /internal/) n_ext++
+      if (line ~ /ptrtoint ptr getelementptr i8, ptr %stack_r[0-9]/) n_esc++
+      if (line ~ /%hike_window_mem/) n_wm_ref++
+      if (line ~ /%hike_window\)/) n_wp++
+    }
+    END { printf "n_sr_ref=%d n_sr_alloca=%d n_stack=%d n_poison=%d n_comp=%d n_res=%d n_ext=%d n_esc=%d n_wm_ref=%d n_wp=%d", n_sr_ref, n_sr_alloca, n_stack, n_poison, n_comp, n_res, n_ext, n_esc, n_wm_ref, n_wp }
+  ' "$ll")"
   # (a) references imply storage: a stack_rN reference requires the
   #     alloca; a hike_window_mem reference requires the parameter.
-  n_sr_ref="$(grep -c '%stack_r[0-9]' "$ll")"
-  n_sr_alloca="$(grep -c '%stack_r[0-9]\+ = alloca' "$ll")"
   if [ "$n_sr_ref" -gt 0 ] && [ "$n_sr_alloca" -lt 1 ]; then
     echo "FAIL $name: (a) $n_sr_ref stack_rN reference(s) but no region alloca"
     FAIL=$((FAIL + 1))
@@ -40,8 +55,6 @@ for ll in "$OUT_DIR"/out_*.ll; do
     echo "PASS $name: (a) $n_sr_alloca region alloca(s) for $n_sr_ref ref(s)"
     PASS=$((PASS + 1))
   fi
-  n_wm_ref="$(grep -c '%hike_window_mem' "$ll")"
-  n_wp="$(grep -c '%hike_window)' "$ll")"
   if [ "$n_wm_ref" -gt 0 ] && [ "$n_wp" -lt 1 ]; then
     echo "FAIL $name: (a) window mem reference(s) but no %hike_window parameter"
     FAIL=$((FAIL + 1))
@@ -90,7 +103,6 @@ for ll in "$OUT_DIR"/out_*.ll; do
   fi
 
   # (c) no @stack global reference.
-  n_stack="$(grep -c '@stack' "$ll")"
   if [ "$n_stack" -ne 0 ]; then
     echo "FAIL $name: (c) module references the legacy @stack global $n_stack time(s)"
     FAIL=$((FAIL + 1))
@@ -121,7 +133,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
   fi
 
   # (e) no entry-edge poison phis (UB that folds under opt).
-  n_poison_entry="$(grep -c 'phi .*\[ poison, %entry' "$ll")"
+  n_poison_entry="$n_poison"
   if [ "$n_poison_entry" -gt 0 ]; then
     echo "FAIL $name: (e) $n_poison_entry entry-edge poison phi(s) — UB folds under opt"
     FAIL=$((FAIL + 1))
@@ -133,10 +145,9 @@ for ll in "$OUT_DIR"/out_*.ll; do
   # (f) every section component/residue global is internal — external
   # linkage would fork the address world and block the consumer's
   # constant propagation.
-  n_comp="$(grep -c '^@sec_comp_[0-9]\+ =' "$ll")"
-  n_res="$(grep -c '^@sec_res_[0-9]\+ =' "$ll")"
+  n_comp="$n_comp"; n_res="$n_res"
   if [ "$n_comp" -gt 0 ] || [ "$n_res" -gt 0 ]; then
-    bad_ext="$(grep -E '^@sec_(comp|res)_[0-9]+ =' "$ll" | grep -vc 'internal' || true)"
+    bad_ext="$n_ext"
     if [ "$bad_ext" -gt 0 ]; then
       echo "FAIL $name: (f) $bad_ext non-internal sec_comp/sec_res global(s)"
       FAIL=$((FAIL + 1))
@@ -152,7 +163,7 @@ for ll in "$OUT_DIR"/out_*.ll; do
   # (g) the integer world escapes (D4b): no ptrtoint of a GEP into a
   #     stack_rN alloca — GEP-derived pointers never become integers
   #     (their integer is the alloca's base, a different world).
-  n_esc="$(grep -c 'ptrtoint ptr getelementptr i8, ptr %stack_r[0-9]' "$ll")"
+  n_esc="$n_esc"
   if [ "$n_esc" -ne 0 ]; then
     echo "FAIL $name: (g) $n_esc GEP-derived stack pointer(s) escape as integers"
     FAIL=$((FAIL + 1))

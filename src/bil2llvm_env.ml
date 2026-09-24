@@ -160,6 +160,9 @@ type emit_ctx = {
   i64_ty : Llvm.lltype;
   ptr_ty : Llvm.lltype;
   word_ty : Llvm.lltype;
+  (* The symtab's function-start addresses: the initializer path's
+     remap queries precheck this set before touching the symtab. *)
+  native_starts : Core.Int64.Set.t;
 }
 
 (* The sub-emission scope: every per-sub emission state.  [emit_program]'s

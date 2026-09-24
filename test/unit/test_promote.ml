@@ -28,6 +28,9 @@ let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
    slots) and two callers — one resolved indirect site with the outgoing
    stores the slots feed, one unresolvable.  Returns the callee and the
    emitted IR for each caller. *)
+(* Computed once: every pin reads the same emitted IR, nothing
+   mutates the fixture. *)
+let t4_fixture_ref = Lazy.from_fun (fun () ->
 let t4_fixture () : sub term * string * string =
   let m = memv "prom_m" in
   let rsp = v64 "RSP" in
@@ -100,6 +103,11 @@ let t4_fixture () : sub term * string * string =
   let caller2 = stamp caller2_facts caller2 in
   let ir2 = emit_ir [ caller2; callee ] in
   (callee, ir, ir2)
+in
+t4_fixture ())
+
+(* Every pin reads the one computed fixture. *)
+let t4_fixture () = Lazy.force t4_fixture_ref
 
 (* Family 9: the promotion as a BIR rewrite — the sub's structure is the
    emitter's only input. *)

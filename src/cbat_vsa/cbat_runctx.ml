@@ -112,23 +112,36 @@ let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
   let defs =
     List.fold blocks ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b) ~data:(block_defs b)) in
+  (* Pred-worklist: a block re-joins only when a successor's live set
+     changed; reversed term order seeds the first sweep backwards. *)
+  let by_tid_term =
+    Core.Map.of_alist_exn (module Tid)
+      (List.map blocks ~f:(fun b -> (Term.tid b, b)))
+  in
   let live = ref Tid.Map.empty in
-  let rec loop () =
-    let changed = ref false in
-    List.iter (List.rev blocks) ~f:(fun b ->
-        let bt = Term.tid b in
-        let out =
-          Graphs.Tid.Node.succs bt cfg |> Seq.fold ~init:Var.Set.empty
-            ~f:(fun acc t -> Core.Set.union acc (find !live t)) in
-        let inn =
-          Core.Set.union (find uses bt)
-            (Core.Set.diff out (find defs bt)) in
-        if not (Core.Set.equal inn (find !live bt)) then begin
-          live := Core.Map.set !live ~key:bt ~data:inn;
-          changed := true
-        end);
-    if !changed then loop () in
-  loop ();
+  let order = List.rev blocks in
+  let pending =
+    Core.Set.of_list (module Tid) (List.map order ~f:Term.tid) in
+  let pending = ref pending in
+  while not (Core.Set.is_empty !pending) do
+    let bt = Core.Set.choose_exn !pending in
+    pending := Core.Set.remove !pending bt;
+    (match Core.Map.find by_tid_term bt with
+     | Some b ->
+       let out =
+         Graphs.Tid.Node.succs bt cfg |> Seq.fold ~init:Var.Set.empty
+           ~f:(fun acc t -> Core.Set.union acc (find !live t)) in
+       let inn =
+         Core.Set.union (find uses bt)
+           (Core.Set.diff out (find defs bt)) in
+       if not (Core.Set.equal inn (find !live bt)) then begin
+         live := Core.Map.set !live ~key:bt ~data:inn;
+         (* The preds re-join; the block's own preds read [live] next. *)
+         Graphs.Tid.Node.preds bt cfg
+         |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t)
+       end
+     | None -> ())
+  done;
   !live
 
 (* The per-run analysis context: one fold over the sub's blocks builds

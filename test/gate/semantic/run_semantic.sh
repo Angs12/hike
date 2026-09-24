@@ -35,6 +35,22 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
+	# Rebuild only when the IR changed: the recorded sha gates the
+	# rename/llc/link pipeline.  FRESH=1 forces the rebuild.
+	bin="$OUT/${base}_lifted"
+	sha_now="$(sha256sum "$ll" | cut -d' ' -f1)"
+	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
+	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] && [ "$bin" -nt "$ll" ] \
+	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
+		echo "SKIP-RUN $base (IR unchanged)"
+		if hike_run_cmp "$bin" "$native" "$OUT" "$base"; then
+			pass=$((pass + 1))
+		else
+			fail=$((fail + 1))
+			FAILED+=("$base")
+		fi
+		continue
+	fi
 	if ! hike_rename "$ll" "$OUT/${base}_lifted.ll"; then
 		echo "FAIL $base (rename)"
 		fail=$((fail + 1))
@@ -47,12 +63,13 @@ for ll in "$IR"/out_*.ll; do
 		FAILED+=("$base")
 		continue
 	fi
-	if ! hike_link "$OUT/${base}_lifted.o" "$ll" "$OUT/${base}_lifted" "$HERE" 2>/dev/null; then
+	if ! hike_link "$OUT/${base}_lifted.o" "$ll" "$bin" "$HERE" 2>/dev/null; then
 		echo "FAIL $base (link)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
 	fi
+	printf '%s\n' "$sha_now" >"$OUT/.sha_${base}"
 	if hike_run_cmp "$OUT/${base}_lifted" "$native" "$OUT" "$base"; then
 		echo "PASS $base"
 		pass=$((pass + 1))

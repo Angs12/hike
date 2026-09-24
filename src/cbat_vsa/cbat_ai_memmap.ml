@@ -268,6 +268,24 @@ let bottom (i : idx) : t =
 (* [op_demoted] combines data at an intersection piece not fully
    covered by both keys' claims (mixed grids): the incoming fact
    covers only its own stride points there. *)
+(* Drop top cells; merge adjacent ones. *)
+let coalesce (it : itree) : itree =
+  IT.to_sequence it
+  |> Seq.fold ~init:(IT.empty, None) ~f:(fun (acc, pending) (k, v) ->
+      if Val.equal v (Val.top (Val.get_idx v))
+      then (acc, pending) (* drop top *)
+      else match pending with
+        | None -> (acc, Some (k, v))
+        | Some (pk, pv) when Key.equal (Key.lower k) (Key.lower pk) ->
+            (acc, Some (Key.union pk k, Val.join_poly pv v)) (* merge *)
+        | Some (pk, pv) when Val.equal pv v &&
+            (let nxt = Key.succ (Key.upper pk) in
+             not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
+            (acc, Some (Key.union pk k, v))
+        | Some (pk, pv) -> (IT.add acc pk pv, Some (k, v)))
+  |> fun (acc, pending) ->
+  Option.fold ~init:acc pending ~f:(fun acc (k, v) -> IT.add acc k v)
+
 let op_add' ~(op : Val.t -> Val.t -> Val.t)
     ~(op_demoted : Val.t -> Val.t -> Val.t)
     (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
@@ -294,7 +312,9 @@ let op_add' ~(op : Val.t -> Val.t -> Val.t)
       | `one k1 -> IT.add rest k1 d'
       | `two (k1, k2) -> IT.add (IT.add rest k1 d') k2 d'
     end in
-  {itree = Some itree; width}
+  (* One coalesce per store: top pieces drop, adjacent equal-data
+     pieces merge — the tree stays tight between joins. *)
+  {itree = Some (coalesce itree); width}
 
 let op_add ~(op : Val.t -> Val.t -> Val.t) ~(op_demoted : Val.t -> Val.t -> Val.t)
     (m : t) : key:Key.t -> data:Val.t -> t = match m.itree with
@@ -526,23 +546,6 @@ let equal (m1 : t) (m2 : t) : bool =
 
 (* Join may grow the tree. *)
 
-(* Drop top cells; merge adjacent ones. *)
-let coalesce (it : itree) : itree =
-  IT.to_sequence it
-  |> Seq.fold ~init:(IT.empty, None) ~f:(fun (acc, pending) (k, v) ->
-      if Val.equal v (Val.top (Val.get_idx v))
-      then (acc, pending) (* drop top *)
-      else match pending with
-        | None -> (acc, Some (k, v))
-        | Some (pk, pv) when Key.equal (Key.lower k) (Key.lower pk) ->
-            (acc, Some (Key.union pk k, Val.join_poly pv v)) (* merge *)
-        | Some (pk, pv) when Val.equal pv v &&
-            (let nxt = Key.succ (Key.upper pk) in
-             not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
-            (acc, Some (Key.union pk k, v))
-        | Some (pk, pv) -> (IT.add acc pk pv, Some (k, v)))
-  |> fun (acc, pending) ->
-  Option.fold ~init:acc pending ~f:(fun acc (k, v) -> IT.add acc k v)
 
 (* Shared key walk for join and meet. *)
 let fold_keys (op : Val.t -> Val.t -> Val.t) (m1 : itree) (m2 : itree) : itree =

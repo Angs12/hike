@@ -164,14 +164,8 @@ let wbig_main (path : string) : unit =
       try
         let n = ref 0 in
         let sub', sol = analyze_and_fixpoint sp prog sub in
-        let kind_of =
-          let sol =
-            Cbat_vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-              ~resolved:Tid.Map.empty (Program.create ~subs:[ sub' ] ()) sub'
-              (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub')
-          in
-          Probe_common.seam_kinds_of sol sub'
-        in
+        (* The analyze pass's solution is the kind source — no re-solve. *)
+        let kind_of = Probe_common.seam_kinds_of sol sub' in
         Term.enum blk_t sub'
         |> Seq.iter ~f:(fun b ->
             let has_call =

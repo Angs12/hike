@@ -51,9 +51,10 @@ for f in $BINS; do
   } >>"$OUT/diagnostics.txt"
 done
 
-ndiag="$(grep -cE 'hike:' "$OUT/diagnostics.txt" 2>/dev/null || true)"
-classes="$(grep -E 'hike:' "$OUT/diagnostics.txt" 2>/dev/null |
-  sed -E 's/^hike: ([a-z-]+):.*/\1/' | sort -u | tr '\n' ' ')"
+# One pass over the diagnostics: count + class set together.
+diag_stats="$(awk '/^hike:/ { n++; if (match($0, /^hike: [a-z-]+:/)) { c=substr($0, RSTART+6, RLENGTH-7); cls[c]=1 } } END { printf "%d", n; for (k in cls) printf " %s", k }' "$OUT/diagnostics.txt" 2>/dev/null)"
+ndiag="${diag_stats%% *}"
+classes="${diag_stats#* }"
 printf '\nlift: %d binaries, %d failed; %s diagnostic line(s) [classes: %s]\n' \
   "$n" "$fail" "${ndiag:-0}" "${classes:-none}"
 

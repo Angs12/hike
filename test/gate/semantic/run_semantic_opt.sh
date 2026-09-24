@@ -43,6 +43,25 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
+	# Rebuild only when the IR changed (the recorded sha gates the
+	# rename/opt/llc/link pipeline); FRESH=1 forces the rebuild.
+	bin="$OUT/${base}_opt.bin"
+	sha_now="$(sha256sum "$ll" | cut -d' ' -f1)"
+	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
+	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] && [ "$bin" -nt "$ll" ] \
+	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
+		if timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$bin" >"$OUT/${base}_opt.out" 2>&1 &&
+		   timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1; then
+			lrc=$?; nrc=$?
+			if [ "$lrc" -eq "$nrc" ] && cmp -s "$OUT/${base}_opt.out" "$OUT/${base}_native.out"; then
+				echo "PASS $base (opt -O2, IR unchanged)"
+				pass=$((pass + 1))
+				continue
+			fi
+		fi
+		# A cached binary that no longer passes falls through to the
+		# full rebuild below (FRESH-like behavior for the stale one).
+	fi
 	hike_rename "$ll" "$OUT/${base}_renamed.ll" || {
 		echo "FAIL $base (rename)"
 		fail=$((fail + 1))
@@ -71,6 +90,7 @@ for ll in "$IR"/out_*.ll; do
 		FAILED+=("$base")
 		continue
 	fi
+	printf '%s\n' "$sha_now" >"$OUT/.sha_${base}"
 	# The bisect below re-links by hand; keep the stub selection handy.
 	STUB=""
 	if grep -q '@_setjmp\|@longjmp' "$ll"; then STUB="$HERE/setjmp_stub.S"; fi

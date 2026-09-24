@@ -8,7 +8,10 @@ open Bil2llvm_env
 (* Finds the LLVM function at a native address; a promoted sub
    renders to its thunk so unresolvable pointer sites stay sound. *)
 let lookup_native_fn ctx llvm_module v =
-  Base.Option.bind ctx.symtab ~f:(fun symtab ->
+  (* The start-set precheck: the initializer path asks per word and
+     the vast majority name data, not functions. *)
+  if not (Core.Set.mem ctx.native_starts v) then None
+  else Base.Option.bind ctx.symtab ~f:(fun symtab ->
       Base.Option.bind
         (Symtab.find_by_start symtab (Word.of_int64 ~width:64 v))
         ~f:(fun (name, _, _) ->

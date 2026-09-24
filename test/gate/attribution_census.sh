@@ -21,7 +21,8 @@ if ! command -v bap >/dev/null 2>&1; then
 fi
 
 echo "attribution_census: building vsa-debug plugin in $debug" >&2
-dune build --build-dir "$debug" --profile vsa-debug -j 2 @install >&2 || exit 1
+# -j defaults to 2 (the census runs beside other lanes; override with JOBS).
+dune build --build-dir "$debug" --profile vsa-debug -j "${JOBS:-2}" @install >&2 || exit 1
 
 export OCAMLPATH="$debug/install/default/lib:${OCAMLPATH:-}"
 
