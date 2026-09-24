@@ -147,6 +147,7 @@ val dynamic_alloc_tids_of : facts:Hike_kb.facts -> sub term -> Tid.Set.t
 (** The ownership query: the finalized binding owning [r]. *)
 val storage_of_range : range_storage Tree.t -> range -> range_storage option
 
+(** The def's memory access: (address, width in bytes, stores?). *)
 val access_of : def term -> (exp * int * bool) option
 val is_rip_relative : def term -> bool
 val is_const_chain : exp -> bool

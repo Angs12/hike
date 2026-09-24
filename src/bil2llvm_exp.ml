@@ -190,7 +190,7 @@ let create_cast ctx llvm_builder (cast, i, llvm_val) =
 
 (* Immediates keep their native bits; only the section initializers
    remap words that name lifted addresses. *)
-let create_immidiate ctx word =
+let create_immediate ctx word =
   Llvm.const_int_of_string
     (Llvm.integer_type ctx.llvm_ctx (Word.bitwidth word))
     (Word.string_of_value word)
@@ -265,7 +265,7 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
           | None ->
               warn_undef_read ctx scope v blk_tid;
               frozen_undef ctx scope v)
-  | Int i -> create_immidiate ctx i
+  | Int i -> create_immediate ctx i
   | Cast (cast, i, exp) ->
       let var = create_exp ctx scope llvm_builder blk_tid exp in
       create_cast ctx llvm_builder (cast, i, var)

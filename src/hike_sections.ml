@@ -275,115 +275,126 @@ let top_claim ~(cause : top_cause) ~(entry : int64) ~(word : int)
             ~alo:(Model.stack_floor ~entry) ~ahi:Model.args_ceiling
             (Model.stack_floor ~entry) Model.args_ceiling))
 
-let range_of_denotation ~(word : int) ~(entry : int64)
-    ~(spans : data_span list) ~(rip : bool) ~(width : int)
+(* Case 1: the address carries stack offsets.  Bounded positions
+   carve; an unbounded direction takes the full supported bounds of
+   the side it reaches — identity, never carved. *)
+let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
-  let floor = Model.stack_floor ~entry in
   let cei = Model.args_ceiling in
   let a_base = Model.args_base ~entry ~word in
   let sub_portions = sub_portions ~entry ~word in
+  match Model.positions_of_offsets ws with
+  | None -> top_claim ~cause:Unbounded_stack ~entry ~word
+  | Some (lo, hi) ->
+    let occ_hi = Model.expand_hi ~cap:cei hi width in
+    if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
+      let nlo, nhi = Model.full_bounds ws ~flo:(Model.stack_floor ~entry) ~cei lo hi in
+      let t =
+        if Stdlib.Int64.compare nlo a_base >= 0 then Tag.Args_unbounded
+        else Tag.Stack (nlo, nhi)
+      in
+      (Some t, snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
+    else
+      (* Conversion is proven only when the occupied bytes stay
+         in one space. *)
+      let single =
+        Stdlib.Int64.compare occ_hi a_base < 0
+        || Stdlib.Int64.compare lo a_base >= 0
+      in
+      sub_portions ~elig:single ~alo:lo ~ahi:hi lo occ_hi
+
+(* Case 2: a plain (offset-free) address.  A stack-band hull keeps
+   the memory form; an unbounded ascending set's minimum names its
+   section; the remaining bounded sets split across the data spans,
+   with a rip proof where one span owns the whole occupied extent. *)
+let plain_portions ~(word : int) ~(entry : int64)
+    ~(spans : data_span list) ~(rip : bool) ~(width : int)
+    (ws : Vsa.WordSet.t) : sec_tag option * portion list =
+  let cei = Model.args_ceiling in
+  let in_band = Vsa.WordSet.in_stack_segment ws in
+  match (if in_band then Model.unsigned_bounds ws else None) with
+  | Some (lo, hi) ->
+    (* A band hull gets no conversion proof — identity. *)
+    sub_portions ~entry ~word ~elig:false ~alo:lo ~ahi:hi lo
+      (Model.expand_hi ~cap:cei hi width)
+  | None ->
+    match Model.unsigned_bounds ws with
+    | None ->
+      (* Stack-band values with no surviving bound lose the
+         Args-vs-Locals distinction — a loud failure, never
+         the heap claim. *)
+      if in_band then
+        failwith "hike-sections: a stack-band access lost all bounds"
+      else top_claim ~cause:Foreign ~entry ~word
+    | Some (lo, hi) ->
+      if Vsa.WordSet.is_infinite ws && Vsa.WordSet.is_ascending ws then begin
+        (* Accesses never cross sections, so an unbounded ascending
+           access's minimum names its section; the claim clamps into
+           it.  A non-rip address outside every span is the heap. *)
+        if rip then
+          match
+            Base.List.find spans ~f:(fun d ->
+                Stdlib.Int64.unsigned_compare lo d.ds_lo >= 0
+                && Stdlib.Int64.unsigned_compare lo d.ds_hi <= 0)
+          with
+          | Some d ->
+            ( None,
+              [ { pt_sec = d.ds_sec;
+                  pt_lo = Stdlib.Int64.max lo d.ds_lo;
+                  pt_hi = d.ds_hi;
+                  pt_elig = false } ] )
+          | None -> top_claim ~cause:Foreign ~entry ~word
+        else top_claim ~cause:Foreign ~entry ~word
+      end
+      else
+        let occ_hi = Model.expand_hi_unsigned hi width in
+        let parts =
+          Base.List.filter_map spans ~f:(fun d ->
+              Base.Option.map
+                (Model.clip ~cmp:Stdlib.Int64.unsigned_compare lo occ_hi d.ds_lo d.ds_hi)
+                ~f:(fun (plo, phi) -> (d, plo, phi)))
+        in
+        let whole_in_one =
+          match parts with
+          | [ (d, _, _) ] ->
+            Stdlib.Int64.unsigned_compare lo d.ds_lo >= 0
+            && Stdlib.Int64.unsigned_compare occ_hi d.ds_hi <= 0
+          | _ -> false
+        in
+        (* A copy-relocated slot's bytes are externally owned —
+           an access reaching one has no conversion proof. *)
+        let at_slot (d, plo, phi) =
+          Base.List.exists d.ds_slots ~f:(fun s ->
+              Stdlib.Int64.unsigned_compare plo s <= 0
+              && Stdlib.Int64.unsigned_compare s phi <= 0)
+        in
+        let elig =
+          rip && whole_in_one
+          && not (Base.List.exists parts ~f:at_slot)
+        in
+        ( None,
+          Base.List.map parts ~f:(fun (d, plo, phi) ->
+              { pt_sec = d.ds_sec; pt_lo = plo; pt_hi = phi;
+                pt_elig = elig } ))
+
+(* The def's address claim: the sections each reachable position may
+   touch, and whether conversion is proven. *)
+let range_of_denotation ~(word : int) ~(entry : int64)
+    ~(spans : data_span list) ~(rip : bool) ~(width : int)
+    (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   if Vsa.WordSet.is_bottom ws then (Some Tag.Dead, [])
-  else if Vsa.WordSet.is_top ws then (
+  else if Vsa.WordSet.is_top ws then
     (* A rip-relative address is a link-time constant in the encoding —
        top there is an analysis loss. *)
     if Option.is_some (Vsa.WordSet.stack_offsets ws) then
       top_claim ~cause:Unbounded_stack ~entry ~word
     else if rip then
       failwith "hike-sections: a rip-relative access denotated plain top"
-    else top_claim ~cause:Foreign ~entry ~word)
+    else top_claim ~cause:Foreign ~entry ~word
   else
     match Vsa.WordSet.stack_offsets ws with
-    | Some _ -> (
-        match Model.positions_of_offsets ws with
-        | None -> top_claim ~cause:Unbounded_stack ~entry ~word
-        | Some (lo, hi) ->
-            let occ_hi = Model.expand_hi ~cap:cei hi width in
-            if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
-              (* An unbounded direction takes the full supported bounds
-                 of the side it reaches — identity, never carved. *)
-              let nlo, nhi = Model.full_bounds ws ~flo:floor ~cei:cei lo hi in
-              let t =
-                if Stdlib.Int64.compare nlo a_base >= 0 then Tag.Args_unbounded
-                else Tag.Stack (nlo, nhi)
-              in
-              (Some t, snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
-            else
-              (* Conversion is proven only when the occupied bytes stay
-                 in one space. *)
-              let single =
-                Stdlib.Int64.compare occ_hi a_base < 0
-                || Stdlib.Int64.compare lo a_base >= 0
-              in
-              sub_portions ~elig:single ~alo:lo ~ahi:hi lo occ_hi)
-    | None -> (
-        let in_band = Vsa.WordSet.in_stack_segment ws in
-        match (if in_band then Model.unsigned_bounds ws else None) with
-        | Some (lo, hi) ->
-            (* A band hull gets no conversion proof — identity. *)
-            sub_portions ~elig:false ~alo:lo ~ahi:hi lo
-              (Model.expand_hi ~cap:cei hi width)
-        | None -> (
-            match Model.unsigned_bounds ws with
-            | None ->
-                (* Stack-band values with no surviving bound lose the
-                   Args-vs-Locals distinction — a loud failure, never
-                   the heap claim. *)
-                if in_band then
-                  failwith "hike-sections: a stack-band access lost all bounds"
-                else top_claim ~cause:Foreign ~entry ~word
-            | Some (lo, hi) ->
-              if
-                Vsa.WordSet.is_infinite ws
-                && Vsa.WordSet.is_ascending ws
-              then
-                (* Accesses never cross sections, so an unbounded
-                   ascending access's minimum names its section; the
-                   claim clamps into it.  A non-rip address outside
-                   every span is the heap. *)
-                if rip then
-                  match
-                    Base.List.find spans ~f:(fun d ->
-                        Stdlib.Int64.unsigned_compare lo d.ds_lo >= 0
-                        && Stdlib.Int64.unsigned_compare lo d.ds_hi <= 0)
-                  with
-                  | Some d ->
-                      ( None,
-                        [ { pt_sec = d.ds_sec;
-                            pt_lo = Stdlib.Int64.max lo d.ds_lo;
-                            pt_hi = d.ds_hi;
-                            pt_elig = false } ] )
-                  | None -> top_claim ~cause:Foreign ~entry ~word
-                else top_claim ~cause:Foreign ~entry ~word
-              else
-                let occ_hi = Model.expand_hi_unsigned hi width in
-                let parts =
-                  Base.List.filter_map spans ~f:(fun d ->
-                      Base.Option.map
-                        (Model.clip ~cmp:Stdlib.Int64.unsigned_compare lo occ_hi d.ds_lo d.ds_hi)
-                        ~f:(fun (plo, phi) -> (d, plo, phi)))
-                in
-                let whole_in_one =
-                  match parts with
-                  | [ (d, _, _) ] ->
-                      Stdlib.Int64.unsigned_compare lo d.ds_lo >= 0
-                      && Stdlib.Int64.unsigned_compare occ_hi d.ds_hi <= 0
-                  | _ -> false
-                in
-                (* A copy-relocated slot's bytes are externally owned —
-                   an access reaching one has no conversion proof. *)
-                let at_slot (d, plo, phi) =
-                  Base.List.exists d.ds_slots ~f:(fun s ->
-                      Stdlib.Int64.unsigned_compare plo s <= 0
-                      && Stdlib.Int64.unsigned_compare s phi <= 0)
-                in
-                let elig =
-                  rip && whole_in_one
-                  && not (Base.List.exists parts ~f:at_slot)
-                in
-                ( None,
-                  Base.List.map parts ~f:(fun (d, plo, phi) ->
-                      { pt_sec = d.ds_sec; pt_lo = plo; pt_hi = phi;
-                        pt_elig = elig } ))))
+    | Some _ -> stack_offset_portions ~word ~entry ~width ws
+    | None -> plain_portions ~word ~entry ~spans ~rip ~width ws
 
 type env = {
   word : int;
@@ -481,13 +492,17 @@ let rec is_const_chain (e : exp) : bool =
     is_const_chain e1 && is_const_chain e2
   | _ -> false
 
+(* The caller-window hull's slack above the call-time SP: pushes and
+   alignment spillover the window must cover. *)
+let window_push_slop_words = 8
+
 (* The def's memory access: (address, width in bytes, stores). *)
 let access_of (d : def term) : (exp * int * bool) option =
   Option.map (Model.addr_of_rhs (Def.rhs d)) ~f:(fun (addr, size) ->
       (addr, Size.in_bytes size, Option.is_some (Model.store_data_of_rhs (Def.rhs d))))
 
 let collect (env : env) (prog : program term) : collecting =
-  let v =
+  let ownership_visitor =
     object
       inherit [ collecting ] Term.visitor
 
@@ -537,7 +552,8 @@ let collect (env : env) (prog : program term) : collecting =
                 let win_hi =
                   Stdlib.Int64.add
                     (Stdlib.Int64.add sp_abs
-                       (Stdlib.Int64.of_int (8 * env.word)))
+                       (Stdlib.Int64.of_int
+                          (window_push_slop_words * env.word)))
                     Hike_stack_model.caller_window_bytes
                 in
                 Base.List.fold (escape_members ~sub:acc.sub ~env (win_lo, win_hi))
@@ -603,7 +619,7 @@ let collect (env : env) (prog : program term) : collecting =
 
     end
   in
-  v#run prog
+  ownership_visitor#run prog
     { sub = Tid.create ();
       blk = Blk.Builder.result (Blk.Builder.create ());
       tree = Tree.empty;
@@ -658,8 +674,8 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
      is one data region — every range in it shares the span's id;
      carved ranges mint an id each, per sub (stack) / module-wide
      (data). *)
-  let regions = ref 0 in
-  let globals = ref (-1) in
+  let next_region_id = ref 0 in
+  let next_global_id = ref (-1) in
   let span_ids = ref [] in
   let decide (k : range) (ms : member list) : range_storage =
     let any_identity = Base.List.exists ms ~f:(fun m -> m.m_identity) in
@@ -673,8 +689,8 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
         if overlaps_ret || any_identity || Stdlib.Int64.compare bytes region_max_bytes > 0
         then { storage = Stack_residue; members = ms }
         else (
-          incr regions;
-          { storage = Stack_region !regions; members = ms })
+          incr next_region_id;
+          { storage = Stack_region !next_region_id; members = ms })
     | Args -> (
         let base = Model.args_base ~entry ~word in
         let w64 = Stdlib.Int64.of_int word in
@@ -702,14 +718,14 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
         match Base.List.Assoc.find !span_ids sec ~equal:equal_sec with
         | Some id -> id
             | None ->
-                incr globals;
-                span_ids := (sec, !globals) :: !span_ids;
-                !globals
+                incr next_global_id;
+                span_ids := (sec, !next_global_id) :: !span_ids;
+                !next_global_id
           in
           { storage = Data_region id; members = ms }
         else (
-          incr globals;
-          { storage = Data_region !globals; members = ms })
+          incr next_global_id;
+          { storage = Data_region !next_global_id; members = ms })
   in
   Base.List.fold sorted ~init:Tree.empty ~f:(fun t (k, ms) ->
       Tree.add t k (decide k ms))
@@ -814,18 +830,15 @@ let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
          Seq.fold (Term.enum def_t blk) ~init:(events, chain)
            ~f:(fun (events, chain) d ->
              if is_sp (Def.lhs d) then
-               (match Model.addr_of_rhs (Def.rhs d) with
-                | Some (sz, _) ->
-                  if event_rhs chain Var.Set.empty (Def.rhs d)
-                     && runtime_at ~blk ~def:d d sz
-                     && descends ~blk ~def:d d
-                  then (Core.Set.add events (Term.tid d), chain)
-                  else (events, chain)
-                | None ->
-                  if event_rhs chain Var.Set.empty (Def.rhs d)
-                     && descends ~blk ~def:d d
-                  then (Core.Set.add events (Term.tid d), chain)
-                  else (events, chain))
+               let moves =
+                 event_rhs chain Var.Set.empty (Def.rhs d)
+                 && descends ~blk ~def:d d
+                 && (match Model.addr_of_rhs (Def.rhs d) with
+                     | Some (sz, _) -> runtime_at ~blk ~def:d d sz
+                     | None -> true)
+               in
+               if moves then (Core.Set.add events (Term.tid d), chain)
+               else (events, chain)
              else
                (events,
                 Core.Map.set chain ~key:(Var.base (Def.lhs d)) ~data:d)))
@@ -919,14 +932,6 @@ let global_comps_of ~(word : int) ~(spans : data_span list)
                       Model.typed_w = typed_w })
           | _ -> None)
   in
-  Base.List.iter spans ~f:(fun d ->
-      let n =
-        Base.List.count comps ~f:(fun c ->
-            Int64.equal c.Model.sec_lo d.ds_lo
-            && Int64.equal c.Model.sec_hi d.ds_hi)
-      in
-      if n > 0 then
-        Hike_diag.warn "sec: span %.8Lx..%.8Lx: %d component(s)" d.ds_lo d.ds_hi n);
   comps
 
 let sec_tag (d : def term) : sec_tag option = Hike_def_slots.sec_tag d

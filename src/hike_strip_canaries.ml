@@ -396,7 +396,9 @@ let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
                     ~f:(compare_operand_is_reload_value ~denote b))
             in
             if one_cell && reload_tied then
-              let tagged =
+              (* One def per block: the FIRST def naming the cell, in
+                 block order. *)
+              let cell_defs =
                 Base.List.filter_map ctx.blocks ~f:(fun b' ->
                     Base.List.find_map (Array.to_list b'.b_defs) ~f:(fun d ->
                         match cell_of (Term.tid d) with
@@ -404,7 +406,7 @@ let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
                         | _ -> None))
               in
               let stores =
-                Base.List.filter tagged ~f:(fun (_, d) -> is_store_rhs (Def.rhs d))
+                Base.List.filter cell_defs ~f:(fun (_, d) -> is_store_rhs (Def.rhs d))
               in
               match stores with
               | [ (sb, sd) ] ->
@@ -543,8 +545,16 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
   let cells = cells_of_sub ~denote sub in
   let cell_of tid = Core.Map.find cells tid in
   let true_word = Bil.Int (Word.one 1) in
+  (* The strip is a bounded fixpoint: 64 rounds, and hitting the cap
+     is named on the channel rather than passing silently. *)
+  let max_strip_rounds = 64 in
   let rec loop sub depth =
-    if depth > 64 then sub
+    if depth > max_strip_rounds then begin
+      Hike_diag.warn "canary: strip hit the %d-round cap (sub %s)"
+        max_strip_rounds (Base.Option.value (Core.Map.find names (Term.tid sub))
+            ~default:(Tid.name (Term.tid sub)));
+      sub
+    end
     else
       let ctx = build_ctx sub in
       let pre_preds_count t =

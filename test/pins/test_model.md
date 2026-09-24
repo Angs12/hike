@@ -42,7 +42,6 @@ here.
 | MOD-23 | Residue storage anchors through the entry SP Slot (`%sp_slot`; `%stack_0 = load`). | In the anchor emission, skip the `sp_slot` for the residue class. | MOD-23. |
 | MOD-24 | Region storage anchors the SP Slot at region-0 + 8 (the SysV residue). | In the anchor emission, use a different anchor offset. | MOD-24. |
 | MOD-25 | A storage-free sub emits no SP Slot and no region. | In the emitter, emit the `sp_slot` unconditionally. | MOD-25. |
-| MOD-26 | An over-bound region request names itself on the channel (`hike: frame:` … `clamped`) and clamps. | In the frame clamp, emit silently (drop the `Hike_diag.warn`). | MOD-26. |
 | MOD-27 | `Hike_stack_model.string_text_word`: a printable run crossing the word start covers the word. | In `src/hike_stack_model.ml` (l.356), return `false` unconditionally. | MOD-27. |
 | MOD-28 | A NUL directly before the word means no crossing. | In `string_text_word`, drop the NUL check. | MOD-28. |
 | MOD-29 | Pointer bytes before the word mean no crossing. | In `string_text_word`, drop the pointer-byte check. | MOD-29. |

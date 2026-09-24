@@ -311,30 +311,30 @@ type binfo = {
 (* Reaching state: the unique def site per BASE var, plus the vars whose
    entry value has no unique site (several reaching defs, or a phi).  A var
    absent from both is a live-in parameter, whose value is stable. *)
-type rstate = { ru : def term Var.Map.t; rm : Var.Set.t }
+type rstate = { unique_site : def term Var.Map.t; multi_site : Var.Set.t }
 
 let rstate_equal (a : rstate) (b : rstate) : bool =
-  Var.Map.equal (fun d d' -> Tid.equal (Term.tid d) (Term.tid d')) a.ru b.ru
-  && Var.Set.equal a.rm b.rm
+  Var.Map.equal (fun d d' -> Tid.equal (Term.tid d) (Term.tid d')) a.unique_site b.unique_site
+  && Var.Set.equal a.multi_site b.multi_site
 
 let rjoin (a : rstate) (b : rstate) : rstate =
   let keys =
-    List.fold_left (Core.Map.to_alist b.ru) ~init:
-      (List.fold_left (Core.Map.to_alist a.ru) ~init:(Core.Set.union a.rm b.rm)
+    List.fold_left (Core.Map.to_alist b.unique_site) ~init:
+      (List.fold_left (Core.Map.to_alist a.unique_site) ~init:(Core.Set.union a.multi_site b.multi_site)
          ~f:(fun acc (v, _) -> Core.Set.add acc v))
       ~f:(fun acc (v, _) -> Core.Set.add acc v) in
-  Core.Set.fold keys ~init:{ ru = Var.Map.empty; rm = Var.Set.empty }
+  Core.Set.fold keys ~init:{ unique_site = Var.Map.empty; multi_site = Var.Set.empty }
     ~f:(fun st v ->
-        if Core.Set.mem a.rm v || Core.Set.mem b.rm v then
-          { st with rm = Core.Set.add st.rm v }
+        if Core.Set.mem a.multi_site v || Core.Set.mem b.multi_site v then
+          { st with multi_site = Core.Set.add st.multi_site v }
         else
-          match (Core.Map.find a.ru v, Core.Map.find b.ru v) with
+          match (Core.Map.find a.unique_site v, Core.Map.find b.unique_site v) with
           | Some d, Some d' ->
               if Tid.equal (Term.tid d) (Term.tid d') then
-                { st with ru = Core.Map.set st.ru ~key:v ~data:d }
-              else { st with rm = Core.Set.add st.rm v }
+                { st with unique_site = Core.Map.set st.unique_site ~key:v ~data:d }
+              else { st with multi_site = Core.Set.add st.multi_site v }
           | Some d, None | None, Some d ->
-              { st with ru = Core.Map.set st.ru ~key:v ~data:d }
+              { st with unique_site = Core.Map.set st.unique_site ~key:v ~data:d }
           | None, None -> st)
 
 let rtrans (bin : rstate) (bi : binfo) : rstate =
@@ -342,25 +342,25 @@ let rtrans (bin : rstate) (bi : binfo) : rstate =
     List.fold_left bi.idefs ~init:Var.Map.empty
       ~f:(fun acc (_, d) ->
         Core.Map.set acc ~key:(Var.base (Def.lhs d)) ~data:d) in
-  let ru =
-    Core.Map.to_alist bin.ru
+  let unique_site =
+    Core.Map.to_alist bin.unique_site
     |> List.filter ~f:(fun (k, _) -> not (Core.Set.mem bi.defined k))
     |> List.fold_left ~init:Var.Map.empty
          ~f:(fun acc (k, d) -> Core.Map.set acc ~key:k ~data:d) in
-  let ru =
+  let unique_site =
     Core.Map.to_alist gen
-    |> List.fold_left ~init:ru
+    |> List.fold_left ~init:unique_site
          ~f:(fun acc (k, d) -> Core.Map.set acc ~key:k ~data:d) in
-  let rm =
-    Core.Set.filter bin.rm ~f:(fun v -> not (Core.Set.mem bi.defined v)) in
+  let multi_site =
+    Core.Set.filter bin.multi_site ~f:(fun v -> not (Core.Set.mem bi.defined v)) in
   (* A phi defines its lhs at the entry with no def site — the var's entry
      value stays site-less (multi). *)
-  let rm =
-    Core.Set.fold bi.defined ~init:rm ~f:(fun s v ->
+  let multi_site =
+    Core.Set.fold bi.defined ~init:multi_site ~f:(fun s v ->
         if List.exists (Core.Map.to_alist gen) ~f:(fun (v', _) -> Var.equal v' v)
         then s
         else Core.Set.add s v) in
-  { ru; rm }
+  { unique_site; multi_site }
 
 (* The jump targets of a block that are blocks of the sub. *)
 let blk_targets (b : blk term) : tid list =
@@ -408,7 +408,7 @@ let reaching_defs (blocks : blk term list) : xenv =
               let ps =
                 Option.value (Core.Map.find m t) ~default:Tid.Set.empty in
               Core.Map.set m ~key:t ~data:(Core.Set.add ps (Term.tid b)))) in
-  let empty = { ru = Var.Map.empty; rm = Var.Set.empty } in
+  let empty = { unique_site = Var.Map.empty; multi_site = Var.Set.empty } in
   let states =
     ref
       (List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
@@ -465,7 +465,7 @@ let read_def (xenv : xenv) (p : Tid.t) (pos : int) (v : var) : def term option =
       | Some d -> Some d
       | None ->
           Option.bind (Core.Map.find xenv.in_state p) ~f:(fun st ->
-              Core.Map.find st.ru vb))
+              Core.Map.find st.unique_site vb))
 
 (* The inline guard: every var the emitted comparison reads must hold, at the
    jump, the value its flag producer read — a var defined in the branching
@@ -488,7 +488,7 @@ let cross_guard (xenv : xenv) (b : blk term) (bi : binfo) (in_st : rstate)
             | Some p -> p <= produced_at)
       else if not has_there then true
       else
-        match Core.Map.find in_st.ru vb with
+        match Core.Map.find in_st.unique_site vb with
         | Some d ->
             let dk = Term.tid d in
             List.for_all producers ~f:(fun (p, pos) ->
@@ -497,7 +497,7 @@ let cross_guard (xenv : xenv) (b : blk term) (bi : binfo) (in_st : rstate)
                 match read_def xenv p pos v with
                 | Some d' -> Tid.equal (Term.tid d') dk
                 | None -> false)
-        | None -> not (Core.Set.mem in_st.rm vb))
+        | None -> not (Core.Set.mem in_st.multi_site vb))
 
 let all_flags = [ ZF; CF; SF; OF ]
 
@@ -520,7 +520,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
       ~default:{ idefs = []; last_pos = Var.Map.empty; defined = Var.Set.empty } in
   let in_st =
     Option.value (Core.Map.find xenv.in_state bt)
-      ~default:{ ru = Var.Map.empty; rm = Var.Set.empty } in
+      ~default:{ unique_site = Var.Map.empty; multi_site = Var.Set.empty } in
   (* The block's own last def of each flag var. *)
   let flag_map =
     List.fold_left bi.idefs ~init:Var.Map.empty
@@ -547,7 +547,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
           then Core.Map.set acc ~key:v ~data:(Def.rhs d)
           else acc) in
     let xrhs =
-      Core.Map.to_alist in_st.ru
+      Core.Map.to_alist in_st.unique_site
       |> List.fold_left ~init:Var.Map.empty
            ~f:(fun acc (key, data) ->
              if Core.Set.mem bi.defined key then acc
@@ -564,7 +564,7 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
     | cand :: _ -> Some cand
     | [] -> (
         let reaching =
-          Core.Map.to_alist in_st.ru
+          Core.Map.to_alist in_st.unique_site
           |> List.filter_map ~f:(fun (v, d) ->
                  if is_flag fv fl v then
                    match Core.Map.find xenv.site (Term.tid d) with

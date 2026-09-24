@@ -19,43 +19,43 @@ include Bap.Std
 
 module WordSet = Cbat_clp_set_composite
 
-  (* Invariant: lo <= hi. *)
-  (* Points fit in 64 bits; no big-int key. *)
-  type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
+(* Invariant: lo <= hi. *)
+(* Points fit in 64 bits; no big-int key. *)
+type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
-  (* The byte hull plus the address stride: step 1 claims every byte
-     of the hull; step > 1 claims only the grid lo + i*step. *)
-  type t = {lo : point; hi : point; step : int} [@@deriving bin_io, sexp]
-  let compare_point (p1 : point) (p2 : point) : int =
+(* The byte hull plus the address stride: step 1 claims every byte
+   of the hull; step > 1 claims only the grid lo + i*step. *)
+type t = {lo : point; hi : point; step : int} [@@deriving bin_io, sexp]
+let compare_point (p1 : point) (p2 : point) : int =
     let c = Int.compare p1.pwidth p2.pwidth in
     if c <> 0 then c else Stdlib.Int64.unsigned_compare p1.pvalue p2.pvalue
 
-  let equal (p1 : point) (p2 : point) : bool = compare_point p1 p2 = 0
-  let lt (p1 : point) (p2 : point) : bool = compare_point p1 p2 < 0
-  let le (p1 : point) (p2 : point) : bool = compare_point p1 p2 <= 0
-  let gt (p1 : point) (p2 : point) : bool = compare_point p1 p2 > 0
-  let ge (p1 : point) (p2 : point) : bool = compare_point p1 p2 >= 0
-  let min (p1 : point) (p2 : point) : point = if le p1 p2 then p1 else p2
-  let max (p1 : point) (p2 : point) : point = if ge p1 p2 then p1 else p2
-  (* Int64 equality must be qualified. *)
-  let is_zero (p : point) : bool = Stdlib.Int64.equal p.pvalue 0L
+let equal (p1 : point) (p2 : point) : bool = compare_point p1 p2 = 0
+let lt (p1 : point) (p2 : point) : bool = compare_point p1 p2 < 0
+let le (p1 : point) (p2 : point) : bool = compare_point p1 p2 <= 0
+let gt (p1 : point) (p2 : point) : bool = compare_point p1 p2 > 0
+let ge (p1 : point) (p2 : point) : bool = compare_point p1 p2 >= 0
+let min (p1 : point) (p2 : point) : point = if le p1 p2 then p1 else p2
+let max (p1 : point) (p2 : point) : point = if ge p1 p2 then p1 else p2
+(* Int64 equality must be qualified. *)
+let is_zero (p : point) : bool = Stdlib.Int64.equal p.pvalue 0L
 
-  (* Low [w]-bit mask. *)
-  let mask (w : int) : int64 =
+(* Low [w]-bit mask. *)
+let mask (w : int) : int64 =
     if w >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L w)
 
-  (* Wrapping successor/predecessor. *)
-  let succ (p : point) : point =
+(* Wrapping successor/predecessor. *)
+let succ (p : point) : point =
     {pwidth = p.pwidth;
      pvalue = if p.pwidth >= 64 then Stdlib.Int64.succ p.pvalue
               else Stdlib.Int64.logand (Stdlib.Int64.succ p.pvalue) (mask p.pwidth)}
-  let pred (p : point) : point =
+let pred (p : point) : point =
     {pwidth = p.pwidth;
      pvalue = if p.pwidth >= 64 then Stdlib.Int64.pred p.pvalue
               else Stdlib.Int64.logand (Stdlib.Int64.pred p.pvalue) (mask p.pwidth)}
 
-  (* Point from an address word. *)
-  let of_word (w : Cbat_word.t) : point option =
+(* Point from an address word. *)
+let of_word (w : Cbat_word.t) : point option =
     let bw = Cbat_word.bitwidth w in
     if bw <= 64 then
       match Cbat_word.to_int64 w with
@@ -63,36 +63,36 @@ module WordSet = Cbat_clp_set_composite
       | Error _ -> None
     else None
 
-  (* Alignment check for [find']. *)
-  let aligned_mod (lo : point) (hi : point) (m : int) : bool =
+(* Alignment check for [find']. *)
+let aligned_mod (lo : point) (hi : point) (m : int) : bool =
     Stdlib.Int64.equal
       (Stdlib.Int64.logand (Stdlib.Int64.sub hi.pvalue lo.pvalue) (mask m)) 0L
 
-  let create ~lo ~hi : t Or_error.t =
+let create ~lo ~hi : t Or_error.t =
     if le lo hi then Result.Ok {lo; hi; step = 1}
     else Or_error.error "attempted to create key with lo above hi"
         (lo, hi) (fun (lo, hi) -> Sexp.List[sexp_of_point lo;
                                             sexp_of_point hi])
 
-  (* Last writable byte. *)
-  let upper (k : t) : point = k.hi
+(* Last writable byte. *)
+let upper (k : t) : point = k.hi
 
-  (* First writable byte. *)
-  let lower (k : t) : point = k.lo
+(* First writable byte. *)
+let lower (k : t) : point = k.lo
 
-  (* The cell's stride (>= 1). *)
-  let step (k : t) : int = k.step
+(* The cell's stride (>= 1). *)
+let step (k : t) : int = k.step
 
-  (* The key the landmark table records this cell under. *)
-  let cell_key (k : t) : Cbat_landmarks.Cell_key.t =
+(* The key the landmark table records this cell under. *)
+let cell_key (k : t) : Cbat_landmarks.Cell_key.t =
     let lo = lower k and hi = upper k in
     { Cbat_landmarks.Cell_key.lo_width = lo.pwidth;
       lo_value = lo.pvalue;
       hi_width = hi.pwidth; hi_value = hi.pvalue; stride = k.step }
 
-  (* Strides survive a combination only when both keys name the same
+(* Strides survive a combination only when both keys name the same
      grid (equal step, congruent lows); any mix demotes to the hull. *)
-  let combined_step (k1 : t) (k2 : t) : int =
+let combined_step (k1 : t) (k2 : t) : int =
     let s = k1.step in
     if s > 1 && s = k2.step
        && Int.equal k1.lo.pwidth k2.lo.pwidth
@@ -102,9 +102,9 @@ module WordSet = Cbat_clp_set_composite
                (Stdlib.Int64.of_int s)) 0L
     then s else 1
 
-  (* Whether every point [p] claims is also claimed by [k]: a step-1
-     key claims its whole hull; a strided key claims its grid only. *)
-  let covers (k : t) (p : t) : bool =
+(* Whether every point [p] claims is also claimed by [k]: a step-1
+   key claims its whole hull; a strided key claims its grid only. *)
+let covers (k : t) (p : t) : bool =
     if p.step > 1 then
       k.step = 1 || combined_step k p > 1
     else
@@ -116,24 +116,24 @@ module WordSet = Cbat_clp_set_composite
                   (Stdlib.Int64.sub p.lo.pvalue k.lo.pvalue)
                   (Stdlib.Int64.of_int k.step)) 0L)
 
-  (* Sub-range of one owner key: the owner's stride carries. *)
-  let piece (k : t) ~lo ~hi : t = {lo; hi; step = k.step}
+(* Sub-range of one owner key: the owner's stride carries. *)
+let piece (k : t) ~lo ~hi : t = {lo; hi; step = k.step}
 
-  (* Compares lowest addresses; ignores widths. *)
-  let compare (k1 : t) (k2 : t) : int =
+(* Compares lowest addresses; ignores widths. *)
+let compare (k1 : t) (k2 : t) : int =
     compare_point (lower k1) (lower k2)
 
-  let contains (k : t) (pt : point) : bool =
+let contains (k : t) (pt : point) : bool =
     le (lower k) pt && le pt (upper k)
 
-  let overlap (k1 : t) (k2 : t) : bool =
+let overlap (k1 : t) (k2 : t) : bool =
     contains k1 (lower k2) || contains k2 (lower k1)
 
-  (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
+(* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
      the shared base makes the offset the per-sub cell identity.  A
      plain denotation keys by its segment-relative hull or its own
      extrema.  The stride is the denotation's own bounded progression. *)
-  let of_wordset (p : WordSet.t) : t option =
+let of_wordset (p : WordSet.t) : t option =
     let lo_w, hi_w =
       match WordSet.stack_offsets p with
       | Some offs -> (WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs)
@@ -154,20 +154,20 @@ module WordSet = Cbat_clp_set_composite
        failwith "hike-mem-key: unordered extrema reached of_wordset"
      | _ -> None)
 
-  (* Hull of both inputs. *)
-  let union (k1 : t) (k2 : t) : t =
+(* Hull of both inputs. *)
+let union (k1 : t) (k2 : t) : t =
     {lo = min (lower k1) (lower k2);
      hi = max (upper k1) (upper k2);
      step = combined_step k1 k2}
 
-  let intersection (k1 : t) (k2 : t) : t =
+let intersection (k1 : t) (k2 : t) : t =
     {lo = max (lower k1) (lower k2);
      hi = min (upper k1) (upper k2);
      step = combined_step k1 k2}
 
-  (* A read anchored at [q] may join a cell anchored at [c]: a hull
+(* A read anchored at [q] may join a cell anchored at [c]: a hull
      cell by the width grid, a strided cell by its own stride grid. *)
-  let read_aligned ~(bits : int) ~(step : int) (c : point) (q : point) : bool =
+let read_aligned ~(bits : int) ~(step : int) (c : point) (q : point) : bool =
     if step > 1 then
       Stdlib.Int64.equal
         (Stdlib.Int64.rem (Stdlib.Int64.sub q.pvalue c.pvalue)
@@ -175,10 +175,10 @@ module WordSet = Cbat_clp_set_composite
     else aligned_mod c q bits
 
 
-  type 'a up_to_two = [`none | `one of 'a | `two of 'a * 'a]
+type 'a up_to_two = [`none | `one of 'a | `two of 'a * 'a]
 
-  (* Results may be unordered. *)
-  let interval_diff (k1 : t) (k2 : t) : t up_to_two =
+(* Results may be unordered. *)
+let interval_diff (k1 : t) (k2 : t) : t up_to_two =
     if lt (lower k1) (lower k2) then
       if lt (upper k1) (lower k2) then `one k1
       else if contains k2 (upper k1) then
@@ -191,8 +191,8 @@ module WordSet = Cbat_clp_set_composite
       else `none
     else `one k1 (* disjoint *)
 
-  (* Gaps between cells within [k]. *)
-  let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
+(* Gaps between cells within [k]. *)
+let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
     (* Next point, if any. *)
     let next_pt pt =
       let next = succ pt in
@@ -226,42 +226,47 @@ module WordSet = Cbat_clp_set_composite
                          ~default:Seq.Step.Done
                          ~f:finishing_step')
 
-  type side = Left | Right | Both_sides
-  module Seq_ME = Seq.Merge_with_duplicates_element
+type side = Left | Right | Both_sides
+module Seq_ME = Seq.Merge_with_duplicates_element
 
-  type section =
+type section =
     | Left_Mid of t * t
     | Left_Right of t * t
     | Mid_Right of t * t
     | Left_Mid_Right of t * t * t
 
 
-  (* [sections]: exclusive stretches keep their owner's stride; the
-     shared stretch carries the combined stride (the demoted hull when
-     the grids differ). *)
-  let sections (k1 : t) (k2 : t) : side * t * ((t, t) Seq_ME.t) option =
-    let mix lo hi = {lo; hi; step = combined_step k1 k2} in
-    if lt k1.hi k2.lo then Left, k1, Some (Seq_ME.Right k2)
-    else if lt k2.hi k1.lo then Right, k2, Some (Seq_ME.Left k1)
-    else if lt k1.lo k2.lo then
-      let res = piece k1 ~lo:k1.lo ~hi:(pred k2.lo) in
-      let newK1 = mix k2.lo k1.hi in
-      Left, res, Some (Seq_ME.Both (newK1, k2))
-    else if lt k2.lo k1.lo then
-      let res = piece k2 ~lo:k2.lo ~hi:(pred k1.lo) in
-      let newK2 = mix k1.lo k2.hi in
-      Right, res, Some (Seq_ME.Both (k1, newK2))
-    else if lt k1.hi k2.hi then (* equal lows *)
-      let newK2 = piece k2 ~lo:(succ k1.hi) ~hi:k2.hi in
-      Both_sides, mix k1.lo k1.hi, Some (Seq_ME.Right newK2)
-    else if lt k2.hi k1.hi then
-      let newK1 = piece k1 ~lo:(succ k2.hi) ~hi:k1.hi in
-      Both_sides, mix k2.lo k2.hi, Some (Seq_ME.Left newK1)
-    else (* equal highs *)
-      Both_sides, mix k1.lo k1.hi, None
+(* [sections]: exclusive stretches keep their owner's stride; the
+   shared stretch carries the combined stride (the demoted hull when
+   the grids differ).  Ordered relations: disjoint either way, one
+   hull containing the other's head, or shared bounds. *)
+let sections (k1 : t) (k2 : t) : side * t * ((t, t) Seq_ME.t) option =
+  let mix lo hi = {lo; hi; step = combined_step k1 k2} in
+  if lt k1.hi k2.lo then Left, k1, Some (Seq_ME.Right k2)
+  else if lt k2.hi k1.lo then Right, k2, Some (Seq_ME.Left k1)
+  else if lt k1.lo k2.lo then
+    (* k1's head is exclusive; the shared stretch merges. *)
+    let res = piece k1 ~lo:k1.lo ~hi:(pred k2.lo) in
+    let mid1 = mix k2.lo k1.hi in
+    Left, res, Some (Seq_ME.Both (mid1, k2))
+  else if lt k2.lo k1.lo then
+    (* k2's head is exclusive; the shared stretch merges. *)
+    let res = piece k2 ~lo:k2.lo ~hi:(pred k1.lo) in
+    let mid2 = mix k1.lo k2.hi in
+    Right, res, Some (Seq_ME.Both (k1, mid2))
+  else if lt k1.hi k2.hi then
+    (* Equal lows: k2's tail is exclusive. *)
+    let mid2 = piece k2 ~lo:(succ k1.hi) ~hi:k2.hi in
+    Both_sides, mix k1.lo k1.hi, Some (Seq_ME.Right mid2)
+  else if lt k2.hi k1.hi then
+    (* Equal lows: k1's tail is exclusive. *)
+    let mid1 = piece k1 ~lo:(succ k2.hi) ~hi:k1.hi in
+    Both_sides, mix k2.lo k2.hi, Some (Seq_ME.Left mid1)
+  else (* equal highs: one shared stretch, nothing exclusive *)
+    Both_sides, mix k1.lo k1.hi, None
 
-  (* Merge two key sequences with sides. *)
-  let seq_product (s1 : t seq) (s2 : t seq) : (side * t) seq =
+(* Merge two key sequences with sides. *)
+let seq_product (s1 : t seq) (s2 : t seq) : (side * t) seq =
     let combined = Seq.merge_with_duplicates s1 s2 ~compare:compare in
     Seq.unfold_step ~init:combined ~f:begin fun s ->
       Option.value_map ~default:Seq.Step.Done (Seq.next s) ~f: begin
@@ -275,8 +280,8 @@ module WordSet = Cbat_clp_set_composite
       end
     end
 
-  let pp_point ppf (p : point) =
+let pp_point ppf (p : point) =
     Format.fprintf ppf "0x%Lx" p.pvalue
-  let pp ppf (k : t) = Format.fprintf ppf "@[[%a@ ...@ %a]@]" pp_point k.lo pp_point k.hi
+let pp ppf (k : t) = Format.fprintf ppf "@[[%a@ ...@ %a]@]" pp_point k.lo pp_point k.hi
 
 

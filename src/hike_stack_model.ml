@@ -169,7 +169,8 @@ let addr_of_rhs (e : exp) : (exp * Size.t) option =
   | Some (`Load (_, a, s)) | Some (`Store (_, a, _, s)) -> Some (a, s)
   | _ -> None
 
-(* Splits a store rhs into data and cast wrapper using visitor/mapper. *)
+(* The store's data expression and [with_data], which rebuilds the
+   rhs with that data replaced — the pair is (data, with_data). *)
 let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
   let vis =
     object
@@ -179,7 +180,7 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
     end
   in
   Base.Option.map (vis#visit_exp e None) ~f:(fun data ->
-      let wrap x =
+      let with_data x =
         let mapper =
           object
             inherit Exp.mapper
@@ -188,7 +189,7 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
         in
         mapper#map_exp e
       in
-      (data, wrap))
+      (data, with_data))
 
 let word_bits (word : int) : int = 8 * word
 
@@ -357,7 +358,9 @@ let sub_reads (s : sub term) : Var.Set.t =
    before it means the run starts at the word and it renders as a value. *)
 let string_text_word ~(arr : Bytes.t) ~(off : int) : bool =
   let byte i = Char.code (Bytes.get arr i) in
-  let printable b = b >= 0x20 && b <= 0x7e in
+  (* The printable-ASCII range the string detection accepts. *)
+  let printable_lo, printable_hi = 0x20, 0x7e in
+  let printable b = b >= printable_lo && b <= printable_hi in
   let rec crosses i =
     if i < 0 then true
     else if byte i = 0 then i < off - 1

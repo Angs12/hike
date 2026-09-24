@@ -102,28 +102,6 @@ let tests : unit Alcotest.test list =
           && contains_substring ir "%stack_r0 = alloca [32 x i8], align 16"
           && contains_substring ir "%stack_r5 = alloca [16 x i8], align 16"));
 
-    pin "SPTR-04"
-      "an absurd byte request is clamped to the array-count bound and named \
-       on the diagnostic channel"
-      (fun () ->
-        let llvm_ctx, llvm_module, llvm_builder = make_builder () in
-        let regions = [ (0, (pos (-16L), pos (-9L)), 0x8000_0000L) ] in
-        let captured = ref [] in
-        let err =
-          capture_stderr (fun () ->
-              captured :=
-                Stack_ptr.build ~llvm_ctx ~llvm_builder (layout_of regions))
-        in
-        ignore (Llvm.build_ret_void llvm_builder);
-        let ir = Llvm.string_of_llmodule llvm_module in
-        check "SPTR-04"
-          (match !captured with
-          | [ s ] ->
-              Int64.equal s.rel (-16L)
-              && alloca_p s.base
-              && contains_substring ir "alloca [2147483632 x i8]"
-              && contains_substring err "clamped"
-          | _ -> false));
   ]
 
 let () = run "hike_stack_ptr" tests

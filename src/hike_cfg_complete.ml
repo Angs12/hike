@@ -53,7 +53,7 @@ let retaddr_read ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
     ~f:(fun dtid -> Core.Set.mem retaddr dtid)
 
 (* The dispatch resolution's debug trace; compiled out of production. *)
-let option_if_debug msg =
+let debug_trace msg =
 #ifdef VSA_DEBUG
   Printf.eprintf "hike-dbg-dispatch: %s\n%!" msg
 #else
@@ -99,7 +99,7 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
         if Vsa.WordSet.is_top ws || Vsa.WordSet.is_infinite ws
            || Vsa.WordSet.is_bottom ws
         then (
-          option_if_debug
+          debug_trace
             (Printf.sprintf "bounded_words: the target denotation is %s"
                (if Vsa.WordSet.is_top ws then "TOP"
                 else if Vsa.WordSet.is_infinite ws then "INFINITE"
@@ -111,7 +111,7 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
            with
            | Some ws -> Some ws
            | None ->
-             option_if_debug
+             debug_trace
                (Printf.sprintf
                   "bounded_words: card exceeds the map's %d blocks"
                   (Core.Map.length block_addrs));
@@ -335,10 +335,10 @@ let rec prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     |> Base.List.hd
   with
   | None ->
-      option_if_debug "prepare: no missing word, done";
+      debug_trace "prepare: no missing word, done";
       (sub, block_addrs)
   | Some (a, sub', t, entries) ->
-      option_if_debug
+      debug_trace
         (Printf.sprintf "prepare: split at %s -> tid %s"
            (Word.to_string a) (Tid.name t));
       let block_addrs' =

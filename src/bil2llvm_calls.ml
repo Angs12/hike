@@ -40,11 +40,11 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let slot_args =
     Base.List.filter args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
   in
-  (* Slot parameter k binds the block's [call_arg (k-1)] def; both
-     names derive from the index, so the binding is order-independent. *)
-  let arg_value_of_slot k =
+  (* Slot parameter i binds the block's [call_arg i] def; both names
+     derive from the index, so the binding is order-independent. *)
+  let arg_value_of_slot i =
     get_local scope blk_tid
-      (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word (k - 1))
+      (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word i)
   in
   Base.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
@@ -63,13 +63,13 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
              | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
          | _ -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
-        let k =
-          Base.Option.value_map
+        let i =
+          Base.Option.value ~default:0
             (Base.List.findi slot_args
-               ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg)))
-            ~default:0 ~f:(fun (i, _) -> i + 1)
+               ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg))
+               |> Base.Option.map ~f:fst)
         in
-        (match arg_value_of_slot k with
+        (match arg_value_of_slot i with
          | Some v ->
            let v =
              match Llvm.classify_type (Llvm.type_of v) with
@@ -284,6 +284,40 @@ let extern_stack_args ctx scope blk_tid (blk : blk term) =
   in
   slots 0 []
 
+(* An extern float call's return lanes: RAX (and RDX for long
+   doubles) split the FP bits; RDX of float externs stays undef. *)
+let bind_extern_fp_rets ctx scope llvm_builder blk_tid fn_typ fn args rets
+    ~(first : Arg.t) ~(kind : fp_ret_kind) =
+  let ret_val = Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder in
+  let first_ret (v : Llvm.llvalue) = insert_local scope blk_tid (Arg.lhs first) v in
+  let second_ret (v : Llvm.llvalue) =
+    match rets with
+    | _ :: rd :: _ -> insert_local scope blk_tid (Arg.lhs rd) v
+    | _ -> ()
+  in
+  match kind with
+  | FpLongDouble ->
+    let bits =
+      Llvm.build_bitcast ret_val (Llvm.integer_type ctx.llvm_ctx 80) ""
+        llvm_builder
+    in
+    let rax = Llvm.build_trunc bits (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder in
+    let high =
+      Llvm.build_lshr bits
+        (Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 80) 64)
+        "" llvm_builder
+    in
+    let rdx = Llvm.build_trunc high (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder in
+    first_ret rax;
+    second_ret rdx
+  | FpFloat | FpDouble ->
+    let d =
+      Llvm.build_fpcast ret_val (Llvm.double_type ctx.llvm_ctx) "" llvm_builder
+    in
+    let i = Llvm.build_bitcast d (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder in
+    first_ret i;
+    second_ret (Llvm.undef (Llvm.i64_type ctx.llvm_ctx))
+
 let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
   let args = create_call_args ctx scope blk_tid llvm_builder target in
@@ -296,46 +330,8 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
   let fn, fn_typ = get_func ctx target in
   (match (fp_ret_kind_of_extern ctx target, rets) with
   | Some kind, ret :: _ ->
-      (* Extern float returns bypass the model. *)
-      let ret_val =
-        Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
-      in
-      (match kind with
-       | FpLongDouble ->
-           let bits =
-             Llvm.build_bitcast ret_val (Llvm.integer_type ctx.llvm_ctx 80) ""
-               llvm_builder
-           in
-           let rax =
-             Llvm.build_trunc bits (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
-           in
-           let high =
-             Llvm.build_lshr bits
-               (Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 80) 64)
-               "" llvm_builder
-           in
-           let rdx =
-             Llvm.build_trunc high (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
-           in
-           insert_local scope blk_tid (Arg.lhs ret) rax;
-           (match rets with
-            | _ :: rd :: _ -> insert_local scope blk_tid (Arg.lhs rd) rdx
-            | _ -> ())
-       | FpFloat | FpDouble ->
-           let d =
-             Llvm.build_fpcast ret_val (Llvm.double_type ctx.llvm_ctx) ""
-               llvm_builder
-           in
-           let i =
-             Llvm.build_bitcast d (Llvm.i64_type ctx.llvm_ctx) "" llvm_builder
-           in
-           insert_local scope blk_tid (Arg.lhs ret) i;
-           (match rets with
-            | _ :: rd :: _ ->
-                (* RDX of float externs stays undef. *)
-                insert_local scope blk_tid (Arg.lhs rd)
-                  (Llvm.undef (Llvm.i64_type ctx.llvm_ctx))
-            | _ -> ()))
+    bind_extern_fp_rets ctx scope llvm_builder blk_tid fn_typ fn args rets
+      ~first:ret ~kind
   | _, rets -> bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets);
   (match fallthrough with
   | Some fallthrough ->
@@ -410,76 +406,76 @@ let create_thunk ctx (sub_tid : tid) =
   if arity = 0 then ()
   else if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then ()
   else begin
-      let args = get_args ctx sub_tid in
-      let rets = get_rets ctx sub_tid in
-      let word = ctx.abi.Abi.word in
-      let window_var = Hike_stack_model.hike_window_var ~word in
-        (* The twin carries the synthetic indirect convention — exactly
-           what a pointer call passes. *)
-        let conv = Abi.of_target ctx.target in
-        let twin_args = window_conv_args ~word conv in
+    let args = get_args ctx sub_tid in
+    let rets = get_rets ctx sub_tid in
+    let word = ctx.abi.Abi.word in
+    let window_var = Hike_stack_model.hike_window_var ~word in
+    (* The twin carries the synthetic indirect convention — exactly
+       what a pointer call passes. *)
+    let conv = Abi.of_target ctx.target in
+    let twin_args = window_conv_args ~word conv in
         let reg_args =
           Base.List.filter args ~f:(fun a ->
               (not (Hike_stack_model.is_arg_slot (Arg.lhs a)))
               && not (Var.same (Arg.lhs a) window_var))
         in
-        let ret_typ = ret_type_of_rets ctx rets in
-        let arg_typs =
-          Base.List.map twin_args ~f:(fun a ->
-              if Var.same (Arg.lhs a) window_var then
-                Llvm.pointer_type llvm_ctx
-              else lane_type ctx a)
-        in
-        let fn_typ =
-          Llvm.function_type ret_typ (Array.of_list arg_typs)
-        in
-        let fn =
-          Llvm.define_function (thunk_name_of sub_tid) fn_typ llvm_module
-        in
-        Llvm.set_linkage Llvm.Linkage.Internal fn;
-        Base.List.iteri twin_args ~f:(fun i a ->
-            Llvm.set_value_name (Var.name (Arg.lhs a)) (Llvm.param fn i));
-        register_fn ctx (thunk_tid_of sub_tid) fn fn_typ;
-        (* The twin's body: unpack the window, forward, return. *)
-        let builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
-        let window = Llvm.param fn (Base.List.length twin_args - 1) in
-        let slot_vals =
-          Base.List.init arity ~f:(fun i ->
-              let off =
-                Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-                  (slot_offset ~word:ctx.abi.Abi.word i) false
-              in
-              let ptr =
-                Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
-                  builder
-              in
-              Llvm.build_load
-                (Llvm.integer_type llvm_ctx (8 * word)) ptr "" builder)
-        in
-        (* Forwards [sub]'s register lanes by name from the twin's
-           params, then the unpacked slots; a lane the twin's
-           convention lacks reads undef. *)
-        let param_named (v : var) : Llvm.llvalue =
-          let n = Var.name v in
-          Base.Option.value
-            (Base.List.findi twin_args ~f:(fun i a -> Var.name (Arg.lhs a) = n)
-             |> Base.Option.map ~f:(fun (i, _) -> Llvm.param fn i))
-            ~default:(Llvm.undef (Llvm.i64_type llvm_ctx))
-        in
-        let call_args =
-          Base.List.map reg_args ~f:(fun a -> param_named (Arg.lhs a))
-          |> fun regs -> regs @ slot_vals
-        in
-        let callee_fn, callee_typ = get_func ctx sub_tid in
-        let r =
-          Llvm.build_call callee_typ callee_fn
-            (Array.of_list call_args) "" builder
-        in
-        (match rets with
-         | [] -> ignore (Llvm.build_ret_void builder)
-         | _ -> ignore (Llvm.build_ret r builder));
-        ctx.thunks :=
-          (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks)
+      let ret_typ = ret_type_of_rets ctx rets in
+      let arg_typs =
+        Base.List.map twin_args ~f:(fun a ->
+            if Var.same (Arg.lhs a) window_var then
+              Llvm.pointer_type llvm_ctx
+            else lane_type ctx a)
+      in
+      let fn_typ =
+        Llvm.function_type ret_typ (Array.of_list arg_typs)
+      in
+      let fn =
+        Llvm.define_function (thunk_name_of sub_tid) fn_typ llvm_module
+      in
+      Llvm.set_linkage Llvm.Linkage.Internal fn;
+      Base.List.iteri twin_args ~f:(fun i a ->
+          Llvm.set_value_name (Var.name (Arg.lhs a)) (Llvm.param fn i));
+      register_fn ctx (thunk_tid_of sub_tid) fn fn_typ;
+      (* The twin's body: unpack the window, forward, return. *)
+      let builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
+      let window = Llvm.param fn (Base.List.length twin_args - 1) in
+      let slot_vals =
+        Base.List.init arity ~f:(fun i ->
+            let off =
+              Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+                (slot_offset ~word:ctx.abi.Abi.word i) false
+            in
+            let ptr =
+              Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
+                builder
+            in
+            Llvm.build_load
+              (Llvm.integer_type llvm_ctx (8 * word)) ptr "" builder)
+      in
+      (* Forwards [sub]'s register lanes by name from the twin's
+         params, then the unpacked slots; a lane the twin's
+         convention lacks reads undef. *)
+      let param_named (v : var) : Llvm.llvalue =
+        let n = Var.name v in
+        Base.Option.value
+          (Base.List.findi twin_args ~f:(fun i a -> Var.name (Arg.lhs a) = n)
+           |> Base.Option.map ~f:(fun (i, _) -> Llvm.param fn i))
+          ~default:(Llvm.undef (Llvm.i64_type llvm_ctx))
+      in
+      let call_args =
+        Base.List.map reg_args ~f:(fun a -> param_named (Arg.lhs a))
+        |> fun regs -> regs @ slot_vals
+      in
+      let callee_fn, callee_typ = get_func ctx sub_tid in
+      let r =
+        Llvm.build_call callee_typ callee_fn
+          (Array.of_list call_args) "" builder
+      in
+      (match rets with
+       | [] -> ignore (Llvm.build_ret_void builder)
+       | _ -> ignore (Llvm.build_ret r builder));
+      ctx.thunks :=
+        (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks)
     end
 
 let create_return ctx scope blk_tid llvm_builder cur_sub =

@@ -41,6 +41,20 @@ let create_branches ctx scope blk_tid llvm_builder branches =
   let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
     Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:tid ~term_bb:cur ()
   in
+  (* The series' terminal guard: an unconditional branch when no
+     other path can fall through (a true condition, or the first edge
+     of a two-way branch); otherwise the condition selects between the
+     target and a dead end. *)
+  let emit_terminal_guard ~(first : bool) ~bb ~(cond : exp) =
+    if Hike_stack_model.is_true_cond cond || first then
+      Llvm.build_br bb llvm_builder |> ignore
+    else
+      let dead = Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-dead") fn in
+      let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
+      Llvm.build_cond_br cond_val bb dead llvm_builder |> ignore;
+      Llvm.position_at_end dead llvm_builder;
+      Llvm.build_unreachable llvm_builder |> ignore
+  in
   let rec step ~(first : bool) cur = function
     | [] -> ()
     | j :: rest -> (
@@ -56,28 +70,15 @@ let create_branches ctx scope blk_tid llvm_builder branches =
                  interrupt sub; it is terminal. *)
               create_interrupt ctx llvm_builder
             else (
-            let bb = get_bb scope tid in
-            note_edge ~cur tid;
-            match cont_bb with
-            | Some next ->
+              let bb = get_bb scope tid in
+              note_edge ~cur tid;
+              match cont_bb with
+              | Some next ->
                 let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
                 Llvm.build_cond_br cond bb next llvm_builder |> ignore;
                 Llvm.position_at_end next llvm_builder;
                 step ~first:false next rest
-            | None ->
-                if Hike_stack_model.is_true_cond (Jmp.cond j) || first
-                then (
-                  Llvm.build_br bb llvm_builder |> ignore)
-                else
-                  let dead =
-                    Llvm.append_block llvm_ctx
-                      (Tid.name blk_tid ^ "-dead")
-                      fn
-                  in
-                  let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
-                  Llvm.build_cond_br cond bb dead llvm_builder |> ignore;
-                  Llvm.position_at_end dead llvm_builder;
-                  Llvm.build_unreachable llvm_builder |> ignore)
+              | None -> emit_terminal_guard ~first ~bb ~cond:(Jmp.cond j))
         | Indirect exp -> (
             (* An indirect jmp ends its own path; later jmps still
                render. *)

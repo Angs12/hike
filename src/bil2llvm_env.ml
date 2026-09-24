@@ -155,7 +155,7 @@ type sub_scope = {
   blk_llvals : blk_llvals Tid.Map.t ref;
   (* One Dead-classification warn per sub. *)
   dead_warned : Tid.Set.t ref;
-  (* Dedups [hike: undef-read:] warnings per (sub, var). *)
+  (* Dedups [hike: undef-read:] warnings per (block, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* The body's frame: routes region/window mem vars; bound around
      body emission. *)
@@ -391,14 +391,13 @@ let warn_undef_read ctx scope var blk_tid =
   let v = Var.base var in
   let abi = ctx.abi in
   let is_lane = Abi.is_vector_param_reg abi v || Abi.is_return_reg abi v in
-  let sub_key = blk_tid in
   let warned_vars =
-    match Core.Map.find !(scope.undef_warned) sub_key with
+    match Core.Map.find !(scope.undef_warned) blk_tid with
     | Some r -> r
     | None ->
         let r = ref Var.Set.empty in
         scope.undef_warned :=
-          Core.Map.set !(scope.undef_warned) ~key:sub_key ~data:r;
+          Core.Map.set !(scope.undef_warned) ~key:blk_tid ~data:r;
         r
   in
   if not (Core.Set.mem !warned_vars v) then begin

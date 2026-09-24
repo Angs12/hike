@@ -120,13 +120,15 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
          (promoted slots included). *)
       let arg_terms = Term.enum arg_t sub |> Base.Sequence.to_list in
       let args =
+        (* Non-parameters sort after every convention register. *)
+        let nonparam_rank = 100 in
         let rank_of_var (v : var) : int * string =
           let n = Var.name (Var.base v) in
           match
             Base.List.findi (Abi.param_regs abi) ~f:(fun _ r -> Var.same r v)
           with
           | Some (i, _) -> (i, n)
-          | None -> (100, n)
+          | None -> (nonparam_rank, n)
         in
         Base.List.filter free_vars ~f:(fun reg ->
             let n = Var.name (Var.base reg) in

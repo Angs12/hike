@@ -18,7 +18,7 @@ type site_binding = {
   sb_full : bool;
 }
 
-let stage_a ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
+let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     (sub : sub term) : site_binding list Tid.Map.t =
@@ -175,29 +175,22 @@ let rewrite_load_node ~(dst : exp) (e : exp) : exp =
   let v =
     object
       inherit Exp.mapper
-      method! map_load ~mem ~addr rest s =
-        ignore mem;
-        ignore addr;
-        ignore rest;
-        ignore s;
-        dst
-      method! map_store ~mem ~addr ~exp rest s =
-        ignore mem; ignore addr; ignore exp; ignore rest; ignore s;
-        dst
+      method! map_load ~mem:_ ~addr:_ (endian : endian) (size : Size.t) : exp = dst
+      method! map_store ~mem:_ ~addr:_ ~exp:_ (endian : endian) (size : Size.t) : exp = dst
     end
   in
   v#map_exp e
 
 (* A read starting [d] bytes into the word cell selects bits
    [8d, 8d+bits) — BIL's little-endian bit numbering. *)
-let slot_read ~(word : int) (i : int) (d : int) (bits : int) : exp =
+let slot_read ~(word : int) (i : int) (byte_offset : int) (bits : int) : exp =
   let slot = Bil.Var (Model.arg_slot ~word i) in
   let wbits = word * 8 in
-  if d = 0 then
+  if byte_offset = 0 then
     if Int.equal bits wbits then slot
     else Bil.Cast (Bil.LOW, bits, slot)
   else if Int.equal bits wbits then slot
-  else Bil.Extract (8 * d + bits - 1, 8 * d, slot)
+  else Bil.Extract (8 * byte_offset + bits - 1, 8 * byte_offset, slot)
 
 (* Every memory node of the expression re-points at [mem_var] — a
    converted def keeps no model-memory node.  The override receives
@@ -236,8 +229,8 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int) (d : def term) :
         Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Conv_slot (i, din) ->
-      let read = slot_read ~word i din bits in
+  | Conv_slot (i, byte_offset) ->
+      let read = slot_read ~word i byte_offset bits in
       Def.map_exp d ~f:(fun e -> rewrite_load_node ~dst:read e)
 
 (* Each site's full-cell store gains its [hike_argN] def binding the
@@ -452,7 +445,7 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   let sides =
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-           let sites = stage_a ~word ~abi ~sp ~denote sub in
+           let sites = site_bindings_of_sub ~word ~abi ~sp ~denote sub in
            let resolved = call_resolution ~denote ~symtab ~name_tid sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in

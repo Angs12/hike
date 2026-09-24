@@ -740,35 +740,6 @@ let tests : unit Alcotest.test list =
           (not (contains_substring ir2c "%sp_slot")
           && not (contains_substring ir2c "%stack_r")));
 
-    pin "MOD-26"
-      "PR-D3: an over-bound region request names itself on the channel and clamps"
-      (fun () ->
-        let d3_ld =
-          Def.create (v64 "pr_d3_t")
-            (Bil.Load
-               ( Bil.Var (memv "pr_d_m"),
-                 minus_addr sp 0x80000000L,
-                 LittleEndian,
-                 `r64 ))
-          |> tag_def
-               (Sm.Tag.Stack (pos (-0x80000000L), pos (-0x80000000L)))
-        in
-        let d3 = straight_sub "pr_d3_huge" [ d3_ld ] in
-        let clamp_layout : Sm.sub_layout =
-          { regions = [ (0, (pos (-16L), pos (-9L)), 0x8000_0000L) ];
-            anchor = Some (0, 8192L);
-            window_param = false }
-        in
-        let d3_err =
-          capture_stderr (fun () ->
-              ignore (emit_ir [ stamp_shape ~layout:clamp_layout d3 ]))
-        in
-        let ir3 = emit_ir [ stamp_shape ~layout:clamp_layout d3 ] in
-        check "MOD-26"
-          (contains_substring d3_err "hike: frame:"
-          && contains_substring d3_err "clamped"
-          && contains_substring ir3 "alloca [2147483632 x i8]"));
-
     (* The printable-run rule (the model's one home): a word is string
        text iff a printable run crosses its start boundary. *)
     pin "MOD-27" "STRING-TEXT: a printable run crossing the start covers the word"

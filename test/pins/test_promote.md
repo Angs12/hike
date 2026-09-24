@@ -10,7 +10,7 @@ is retired.  The swallowing `try … with _ -> ()` that wrote
 were neither pins nor assertions and are dropped.
 
 Production mechanisms: `src/hike_promote.ml` (`promote_sub`,
-`rewrite_program`, `stage_a`, `call_resolution`), `src/hike_sections.ml`
+`rewrite_program`, `site_bindings_of_sub`, `call_resolution`), `src/hike_sections.ml`
 (`attribute` / `stamp_tags` / `storage_of_range`), `src/hike_cfg_complete.ml`
 (`retaddr_defs`), `src/hike_stack_model.ml` (`arg_slot`, `is_call_arg`), and
 the emitter's promotion rendering `src/bil2llvm.ml` +
@@ -43,7 +43,7 @@ closure — no cross-pin state.
 | PR-16 | `Hike_cfg_complete.retaddr_defs` puts the `[RSP+0]` load in the return-address set (it never forces a window parameter). | In `src/hike_cfg_complete.ml` `retaddr_defs`, stop filtering loads at the entry-RSP cell `{0}`. | PR-16: `Core.Set.mem a2_retaddr (Term.tid a2_ld)` is false (review). |
 | PR-17 | A store into the caller window writes real memory: the touched slot is write-closed into `Stack_residue` (Window), so its reads take the window. | In `src/hike_sections.ml`, treat written args slots as unbound `Arg_slot` (skip the write-closed demotion). | PR-17: `storage_of_range` at `[+8,+15]` is not `Some Stack_residue` (review). |
 | PR-18 | The demotion is exact: an 8-byte store at `[entry RSP+8]` touches slot 0's cell only; slot 1 stays `Arg_slot 1`. | In `src/hike_sections.ml`, widen the written range by one slot on either side. | PR-18: `storage_of_range` at `[+16,+23]` is no longer `Some (Arg_slot 1)` (review). |
-| PR-19 | `Hike_promote.stage_a` maps a site's outgoing stores to SysV slots by the store's own start address; a same-slot re-store is last-wins. | In `src/hike_promote.ml` `stage_a`, take the first store per slot instead of the last. | PR-19: the single binding's `sb_def` is `a6_st1`, not `a6_st2` (review). |
+| PR-19 | `Hike_promote.site_bindings_of_sub` maps a site's outgoing stores to SysV slots by the store's own start address; a same-slot re-store is last-wins. | In `src/hike_promote.ml` `site_bindings_of_sub`, take the first store per slot instead of the last. | PR-19: the single binding's `sb_def` is `a6_st1`, not `a6_st2` (review). |
 | PR-20 | `Hike_promote.call_resolution` records no resolution for an indirect target with `symtab = None` (the target denotation is symbolic/unbounded). | In `src/hike_promote.ml` `call_resolution`, fabricate a direct resolution when the target is symbolic. | PR-20: `Core.Map.find resolved (Term.tid j)` is `Some (Some _)` instead of `Some None` (review). |
 | PR-21 | The va_start triangle's middle sub (six GP args, no incoming stack-arg read) keeps every slot unbound (arity 0) and serves the SP-derived pointer from the window (`Stack_residue`). | In `src/hike_sections.ml`, classify the mid sub's `Sm.Args` members as `Arg_slot` regardless of the absent incoming read. | PR-21: an `Arg_slot` appears in the tree, so the `for_all` unbound check fails (review). |
 | PR-22 | A pointer SP-derived at the storing block's entry is visible to the escape evaluation (the boundary-visible twin), so the anchor's cell is Window-served. | In `src/hike_sections.ml`, evaluate escapes only at a def's own pre-state and drop the block-entry fallback. | PR-22: the twin's tree carries no `Stack_residue` member (review). |
