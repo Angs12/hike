@@ -79,6 +79,10 @@ type ctx = {
   succs : Tid.Set.t Tid.Map.t;
   (* Every def's site: its block and position. *)
   def_site : (Tid.t * int) Tid.Map.t;
+  (* Each def's lhs base var, by tid. *)
+  def_lhs : Var.t Tid.Map.t;
+  (* Each block's last def index per base var. *)
+  last_def : int Var.Map.t Tid.Map.t;
 }
 
 let jmp_targets (acc : Tid.Set.t) (j : jmp term) : Tid.Set.t =
@@ -149,18 +153,27 @@ let build_ctx (sub : sub term) : ctx =
         | `Both (x, y) -> Some (Core.Set.union x y)
         | `Left s | `Right s -> Some s)
   in
+  (* The predecessor transpose, built once: each block's entry merge
+     walks its preds, not the whole successor map. *)
+  let preds =
+    Core.Map.fold succs ~init:Tid.Map.empty
+      ~f:(fun ~key:src ~data:ts acc ->
+        Core.Set.fold ts ~init:acc ~f:(fun acc t ->
+            Core.Map.add_multi acc ~key:t ~data:src))
+  in
   let state = ref Tid.Map.empty in
   let changed = ref true in
   while !changed do
     changed := false;
     Base.List.iter blocks ~f:(fun b ->
         let inn =
-          Core.Map.fold succs ~init:Var.Map.empty
-            ~f:(fun ~key:src ~data:ts acc ->
-              if Core.Set.mem ts b.b_tid then
-                merge_st acc
-                  (Option.value (Core.Map.find !state src) ~default:Var.Map.empty)
-              else acc)
+          Core.Set.fold
+            (Core.Set.of_list (module Tid)
+               (Core.Map.find preds b.b_tid |> Option.value ~default:[]))
+            ~init:Var.Map.empty
+            ~f:(fun acc src ->
+              merge_st acc
+                (Option.value (Core.Map.find !state src) ~default:Var.Map.empty))
         in
         let out = transfer inn b in
         if
@@ -171,23 +184,45 @@ let build_ctx (sub : sub term) : ctx =
           changed := true;
           state := Core.Map.set !state ~key:b.b_tid ~data:out));
   done;
-  { blocks; by_tid; entry_in = !state; succs; def_site }
+  let def_lhs =
+    Base.List.concat_map blocks ~f:(fun b ->
+        Base.List.map (Array.to_list b.b_defs) ~f:(fun d ->
+            (Term.tid d, Var.base (Def.lhs d))))
+    |> Core.Map.of_alist_exn (module Tid)
+  in
+  let last_def =
+    Base.List.map blocks ~f:(fun b ->
+        let m =
+          Base.List.foldi (Array.to_list b.b_defs) ~init:Var.Map.empty
+            ~f:(fun i acc d -> Core.Map.set acc ~key:(Var.base (Def.lhs d)) ~data:i)
+        in
+        (b.b_tid, m))
+    |> Core.Map.of_alist_exn (module Tid)
+  in
+  { blocks; by_tid; entry_in = !state; succs; def_site; def_lhs; last_def }
 
 (* The def tids of [v] reaching def index [i] in block [b]: the block's
    last def of the var before [i], else the entry state. *)
 let reaching_at (ctx : ctx) (b : block_data) (i : int) (v : var) : Tid.Set.t =
   let vb = Var.base v in
-  let rec go j =
-    if j < 0 then
-      Core.Map.find
-        (Option.value (Core.Map.find ctx.entry_in b.b_tid) ~default:Var.Map.empty)
-        vb
-      |> Option.value ~default:Tid.Set.empty
-    else if Var.equal (Var.base (Def.lhs b.b_defs.(j))) vb then
-      Tid.Set.singleton (Term.tid b.b_defs.(j))
-    else go (j - 1)
+  let entry () =
+    Core.Map.find
+      (Option.value (Core.Map.find ctx.entry_in b.b_tid) ~default:Var.Map.empty)
+      vb
+    |> Option.value ~default:Tid.Set.empty
   in
-  go (i - 1)
+  (* The block's last def of [vb] answers directly when it precedes
+     [i]; only a def at/after [i] falls back to the backward scan. *)
+  match Option.bind (Core.Map.find ctx.last_def b.b_tid) (fun m -> Core.Map.find m vb) with
+  | Some j when j < i -> Tid.Set.singleton (Term.tid b.b_defs.(j))
+  | _ ->
+    let rec go j =
+      if j < 0 then entry ()
+      else if Var.equal (Var.base (Def.lhs b.b_defs.(j))) vb then
+        Tid.Set.singleton (Term.tid b.b_defs.(j))
+      else go (j - 1)
+    in
+    go (i - 1)
 
 (* The stored value is the TLS read's value: the data exp is the read
    def's lhs, the read is its unique reaching def, both denote equal. *)
@@ -261,15 +296,16 @@ let in_block_chain (b : block_data) (from_vars : Var.Set.t) : Tid.Set.t =
 
 (* The compare family: the chain plus every block def whose value
    operands mention a family lhs; memory-typed lhs never propagates. *)
-let compare_family (b : block_data) (chain : Tid.Set.t) : Tid.Set.t =
+let compare_family ~(ctx : ctx) (b : block_data) (chain : Tid.Set.t) :
+    Tid.Set.t =
   let fam = ref chain in
   let changed = ref true in
   while !changed do
     changed := false;
     let vars =
       Core.Set.fold !fam ~init:Var.Set.empty ~f:(fun acc tid ->
-          match find_def b tid with
-          | Some d -> Core.Set.union acc (value_vars (Bil.Var (Def.lhs d)))
+          match Core.Map.find ctx.def_lhs tid with
+          | Some v -> Core.Set.union acc (value_vars (Bil.Var v))
           | None -> acc)
     in
     Base.List.iter (Array.to_list b.b_defs) ~f:(fun d ->
@@ -425,7 +461,7 @@ let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
                  | Some (_, rd) ->
                    let rtid = Term.tid rd in
                    let fam =
-                    compare_family b
+                    compare_family ~ctx b
                       (Core.Set.union chain (Tid.Set.singleton rtid))
                   in
                   let delete =
@@ -453,13 +489,19 @@ let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
    must be the composition's store or a tied reload of this round. *)
 let cells_accounted ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx)
     (comps : comp list) : comp list =
+  (* One pass groups each cell's deletions; no per-composition rescan. *)
+  let groups =
+    Base.List.fold comps ~init:[] ~f:(fun acc c ->
+        match Base.List.Assoc.find acc c.c_cell ~equal:Int64.equal with
+        | Some s ->
+          Base.List.Assoc.add acc c.c_cell
+            (Core.Set.union s c.c_delete) ~equal:Int64.equal
+        | None -> (c.c_cell, c.c_delete) :: acc)
+  in
   Base.List.filter comps ~f:(fun c ->
-      let group =
-        Base.List.filter comps ~f:(fun c' -> Int64.equal c'.c_cell c.c_cell)
-      in
       let group_deleted =
-        Base.List.fold group ~init:Tid.Set.empty ~f:(fun acc c' ->
-            Core.Set.union acc c'.c_delete)
+        Option.value (Base.List.Assoc.find groups c.c_cell ~equal:Int64.equal)
+          ~default:Tid.Set.empty
       in
       Base.List.for_all ctx.blocks ~f:(fun b ->
           Base.List.for_all (Array.to_list b.b_defs) ~f:(fun d ->
@@ -478,9 +520,18 @@ let cells_accounted ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx)
    def (exact reaching analysis). *)
 let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t)
     ~(edge_srcs : Tid.Set.t) : bool =
+  (* Only the deleted defs' lhs vars can reach a surviving use; every
+     other operand var skips the scan. *)
+  let deleted_vars =
+    Core.Set.fold deleted ~init:Var.Set.empty ~f:(fun acc t ->
+        match Core.Map.find ctx.def_lhs t with
+        | Some v -> Core.Set.add acc v
+        | None -> acc)
+  in
   let check_use b i e =
     Core.Set.for_all (value_vars e) ~f:(fun v ->
-        Core.Set.is_empty (Core.Set.inter deleted (reaching_at ctx b i v)))
+        (not (Core.Set.mem deleted_vars v))
+        || Core.Set.is_empty (Core.Set.inter deleted (reaching_at ctx b i v)))
   in
   Base.List.for_all ctx.blocks ~f:(fun b ->
       Base.List.for_all (Array.to_list b.b_defs) ~f:(fun d ->
@@ -509,9 +560,12 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
             (Term.enum jmp_t b
             |> Seq.fold ~init:Tid.Set.empty ~f:(fun a j -> jmp_targets a j)))
   in
+  (* The successor map builds once per removal and decrements
+     incrementally; the preds transpose rebuilds from it. *)
   let rec go s pending =
+    let succ_m = succs_of s in
     let preds =
-      Core.Map.fold (succs_of s) ~init:Tid.Map.empty
+      Core.Map.fold succ_m ~init:Tid.Map.empty
         ~f:(fun ~key:src ~data:ts acc ->
           Core.Set.fold ts ~init:acc ~f:(fun acc t ->
               Core.Map.update acc t ~f:(fun ps ->
@@ -525,12 +579,9 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
     with
     | None -> s
     | Some t ->
-      let succ_ts =
-        Option.value (Core.Map.find (succs_of s) t) ~default:Tid.Set.empty
-      in
-      go
-        (Term.filter blk_t s ~f:(fun b -> not (Tid.equal (Term.tid b) t)))
-        (Core.Set.union (Core.Set.remove pending t) succ_ts)
+      let succ_ts = Option.value (Core.Map.find succ_m t) ~default:Tid.Set.empty in
+      let s' = Term.filter blk_t s ~f:(fun b -> not (Tid.equal (Term.tid b) t)) in
+      go s' (Core.Set.union (Core.Set.remove pending t) succ_ts)
   in
   go sub seeds
 
@@ -557,10 +608,15 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
     end
     else
       let ctx = build_ctx sub in
-      let pre_preds_count t =
-        Core.Map.fold ctx.succs ~init:0 ~f:(fun ~key:_ ~data:ts acc ->
-            if Core.Set.mem ts t then acc + 1 else acc)
+      (* The pre-rewrite predecessor counts, one fold per round. *)
+      let pre_preds =
+        Core.Map.fold ctx.succs ~init:Tid.Map.empty
+          ~f:(fun ~key:_ ~data:ts acc ->
+            Core.Set.fold ts ~init:acc ~f:(fun acc t ->
+                Core.Map.update acc t ~f:(function
+                    | None -> 1 | Some n -> n + 1)))
       in
+      let pre_preds_count t = Option.value (Core.Map.find pre_preds t) ~default:0 in
       match
         find_comps ~denote ~abi ~names:name_of ~cell_of ~ctx
         |> cells_accounted ~cell_of ~ctx

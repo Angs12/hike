@@ -3,10 +3,14 @@ open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
 
-(* Registers read implicitly by calls. *)
-let is_call_reg ~(abi : Abi.t) (v : var) : bool =
-  let regs = Abi.param_regs abi @ abi.Abi.return_regs in
-  Base.List.exists regs ~f:(fun r -> Var.same r (Var.base v))
+(* The call-register set, built once per sub's sweep; membership is
+   the per-def predicate. *)
+let call_reg_set ~(abi : Abi.t) : Var.Set.t =
+  Base.List.fold (Abi.param_regs abi @ abi.Abi.return_regs)
+    ~init:Var.Set.empty ~f:(fun acc r -> Core.Set.add acc (Var.base r))
+
+let is_call_reg ~(call_regs : Var.Set.t) (v : var) : bool =
+  Core.Set.mem call_regs (Var.base v)
 
 (* The sweep census: contributor counts behind [used]/[roots].  Jmp/phi
    mentions are permanent (only defs are ever removed); [cnt]/[rcnt] count
@@ -76,7 +80,8 @@ let sweep_census_of (sub : sub term) : sweep_census =
    binds to the sub's SP Slot, so SP-derived address defs stay live by the
    plain used rule. *)
 let keep ~(load_roots : Var.Set.t)
-    ~(abi : Abi.t) (d : def term) (used : Var.Set.t) : bool =
+    ~(abi : Abi.t) ~(call_regs : Var.Set.t) (d : def term) (used : Var.Set.t) :
+    bool =
   let lhs = Def.lhs d in
   if Hike_stack_model.is_window_mem lhs then
     (* The incoming window's stores are the call's outgoing arguments —
@@ -89,13 +94,14 @@ let keep ~(load_roots : Var.Set.t)
     Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
     || Hike_stack_model.is_mem lhs
     || Hike_stack_model.is_call_arg lhs
-    || is_call_reg ~abi lhs
+    || is_call_reg ~call_regs lhs
     || Hike_stack_model.is_intrinsic_name (Var.name (Var.base lhs))
 
 (* Incremental sweep: [used] and [load_roots] start exact and stay exact (a
    var leaves only when its last contributor is removed), so each [keep]
    verdict is final. *)
-let sweep_worklist ~(abi : Abi.t) ~(roots : Var.Set.t) (sub : sub term) :
+let sweep_worklist ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(roots : Var.Set.t)
+    (sub : sub term) :
     sub term =
   let census = sweep_census_of sub in
   let dom m =
@@ -131,7 +137,7 @@ let sweep_worklist ~(abi : Abi.t) ~(roots : Var.Set.t) (sub : sub term) :
         | Some d ->
             if
               Core.Set.mem !removed tid
-              || keep ~load_roots:!load_roots ~abi d !used
+              || keep ~load_roots:!load_roots ~abi ~call_regs d !used
             then drain rest
             else begin
               removed := Core.Set.add !removed tid;
@@ -197,4 +203,4 @@ let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
       Term.map blk_t sub
         ~f:(Blk.map_elts ~jmp:(ret_replacement ~word_bits))
     in
-    sweep_worklist ~abi ~roots sub
+    sweep_worklist ~abi ~call_regs:(call_reg_set ~abi) ~roots sub

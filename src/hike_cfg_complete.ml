@@ -658,6 +658,12 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
   else
     let entry = Base.Option.value_exn (Term.first blk_t sub) in
     let blocks = Seq.to_list (Term.enum blk_t sub) in
+    (* Tid -> block, the DFS's lookup; linear finds would be O(V.E). *)
+    let by_tid =
+      Core.Map.of_alist_exn (module Tid)
+        (Base.List.map blocks ~f:(fun b -> (Term.tid b, b)))
+    in
+    let find_block t = Core.Map.find by_tid t in
     let rec nexts = function
       | [] -> []
       | b :: tl -> (
@@ -682,20 +688,14 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
                 | _ -> []
               in
               Base.List.fold targets ~init:seen ~f:(fun seen t ->
-                  match
-                    Base.List.find blocks ~f:(fun b ->
-                        Tid.equal (Term.tid b) t)
-                  with
+                  match find_block t with
                   | Some b -> go seen b
                   | None -> seen))
         in
         if Base.List.is_empty js then
           match Core.Map.find fall_tbl (Term.tid blk) with
           | Some (Some t) -> (
-              match
-                Base.List.find blocks ~f:(fun b ->
-                    Tid.equal (Term.tid b) t)
-              with
+              match find_block t with
               | Some b -> go seen b
               | None -> seen)
           | _ -> seen
@@ -704,9 +704,7 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
     let reachable = go Tid.Set.empty entry in
     let reachable =
       Core.Set.fold live ~init:reachable ~f:(fun seen t ->
-          match
-            Base.List.find blocks ~f:(fun b -> Tid.equal (Term.tid b) t)
-          with
+          match find_block t with
           | Some b -> go seen b
           | None -> seen)
     in
