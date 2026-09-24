@@ -105,9 +105,20 @@ let mk_rctx_with_oracle ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
   let rctx = Cbat_runctx.mk_rctx ~cfg ~abi ?sub_lookup s in
   let defs = defs_of_sub s in
   let stores = stores_of_sub s in
+  (* The stores grouped by their address exp: the witness reads the
+     matching group, never every store in the sub. *)
+  let store_index =
+    Base.List.fold stores ~init:[] ~f:(fun acc d ->
+        match Def.rhs d with
+        | Bil.Store (_, addr', _, _, _) ->
+          (match Base.List.Assoc.find acc addr' ~equal:Exp.equal with
+           | Some grp -> Base.List.Assoc.add acc addr' (d :: grp) ~equal:Exp.equal
+           | None -> (addr', [ d ]) :: acc)
+          | _ -> acc)
+  in
   { rctx with
     Cbat_runctx.rc_nonneg =
-      (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~stores ~env e) }
+      (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~index:store_index ~env e) }
 
 (* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
 let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
@@ -346,11 +357,26 @@ let rec static_graph_vsa
         let outs = List.map preds ~f:(fun p ->
             Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks
               (Hashtbl.find block_to_head p) (fun () ->
+              (* The disabled continuations are observed once per (visit,
+                 pred), not once per successor edge — the observation
+                 reads the pred's entry state and no target. *)
 #ifdef VSA_DEBUG
                 Cbat_attr_census.bump "bottomskip.edge.total";
 #endif
                 let p_entry = Stages.time `Glue (fun () -> get p) in
                 let rc = !rc_cell in
+                (match Core.Map.find rc.rc_blocks p with
+                 | Some bf ->
+                   Cbat_transfer.reachable_jumps p_entry
+                     (Term.enum jmp_t bf.bf_term)
+                   |> Seq.iter ~f:(fun j ->
+                       Option.iter (Core.Map.find disabled_conds (Term.tid j))
+                         ~f:(fun dc ->
+                           Cbat_backward.acquire_unsat ~entry:p_entry
+                             ~landmarks:rctx.Cbat_runctx.rc_landmarks
+                             ~witness:rctx.Cbat_runctx.rc_nonneg
+                             p_entry bf.bf_term dc))
+                 | None -> ());
                 let res = Stages.time `Denote (fun () ->
                   Cbat_forward.denote_block ~preserved ~written ~resolved
                         ~edge_conds ~disabled:disabled_conds

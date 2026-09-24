@@ -67,15 +67,6 @@ let denote_jump
   let per_jump acc jmp =
     let edge_cond = lookup_cond jmp in
     let rel = edge_rel_of ~resolved jmp in
-    (* Observes the disabled continuation (the widening landmarks); the
-       observation needs the walk, so it rides the same sol-carrying
-       arm. *)
-    Option.iter (Core.Map.find disabled (Term.tid jmp))
-      ~f:(fun dc ->
-        Cbat_backward.acquire_unsat ~entry:env
-          ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
-          ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
-          env b dc);
     let env =
       match edge_cond with
       | Some acc_cond ->

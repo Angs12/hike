@@ -19,7 +19,7 @@ type guard_op = ULT | ULE | UGT | UGE | EQ | NEQ | SLT | SLE | SGT | SGE
    literals, positive-preserving arithmetic, and — through unique defs —
    anchored loads seeded and written only with non-negative data. *)
 let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
-    ~(stores : def term list)
+    ~(index : (exp * def term list) list)
     ~(env : AI.t) (e : exp) : bool =
   let nonneg_word (n : Cbat_word.t) : bool =
     let w = Cbat_word.bitwidth n in
@@ -93,10 +93,11 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
       else if reentry then true
       else
         let cells' = Core.Set.add cells addr in
-        let matches = List.filter stores ~f:(fun d ->
-            match Def.rhs d with
-            | Bil.Store (_, addr', _, _, _) -> Exp.equal addr addr'
-            | _ -> false) in
+        let matches =
+          match Base.List.Assoc.find index addr ~equal:Exp.equal with
+          | Some grp -> grp
+          | None -> []
+        in
         let has_seed = List.exists matches ~f:(fun d ->
             match Def.rhs d with
             | Bil.Store (_, _, Bil.Int n, _, _) ->

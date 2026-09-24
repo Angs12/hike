@@ -105,7 +105,10 @@ module Make_indexed_from_map
 
   let lift_join (f : map -> map -> map) (t1 : t) (t2 : t) : t =
     match t1, t2 with
-    | Some m1, Some m2 -> Some (f m1 m2)
+    | Some m1, Some m2 ->
+      (* Joins run per edge per sweep on mostly-stable maps: the
+         physical-equality fast path skips the merge. *)
+      if Stdlib.( == ) m1 m2 then t1 else Some (f m1 m2)
     | Some m1, None -> Some m1
     | None, Some m2 -> Some m2
     | None, None -> None

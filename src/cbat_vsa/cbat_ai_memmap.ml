@@ -282,8 +282,12 @@ let op_add' ~(op : Val.t -> Val.t -> Val.t)
         if Key.covers k k_int && Key.covers k' k_int
         then op else op_demoted in
       let new_data = combine d d' in
-      (* Overlapping range. *)
-      let rest = IT.add rest k_int new_data in
+      (* Overlapping range; a top-data overlap carries no fact —
+         absence reads top, so adding it only bloats the tree. *)
+      let rest =
+        if Val.is_top new_data then rest
+        else IT.add rest k_int new_data
+      in
       (* Non-overlapping ranges. *)
       match Key.interval_diff k' k with
       | `none -> rest
@@ -347,7 +351,8 @@ let has_cell_in (m : t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool =
       match Key.of_word lo, Key.of_word hi with
       | Some plo, Some phi when Key.le plo phi ->
         let k = { Key.lo = plo; hi = phi; step = 1 } in
-        Seq.exists (IT.to_sequence it) ~f:(fun (k', _) -> Key.overlap k' k)
+        (* The intersections index answers; no full-tree scan. *)
+        not (Seq.is_empty (IT.intersections it k))
       | _ -> true)
 
 (* Width-aware point-store merge. *)
@@ -502,6 +507,10 @@ let precedes (m1 : t) (m2 : t) : bool =
 
 
 let equal' (m1 : itree) (m2 : itree) : bool =
+  (* The stabilization check re-compares mostly-identical trees: the
+     physical-equality fast path skips the per-cell semantic walk. *)
+  if phys_equal m1 m2 then true
+  else
   Seq.for_all (IT.to_sequence m1) ~f: begin fun (key, d1) ->
     let d2 = find' (Val.get_idx d1) m2 key in
     (* Keys are disjoint. *)

@@ -159,9 +159,12 @@ let create_descending ~width ~base ~step : t =
 let cardn_from_bounds base step e : W.t =
   let width = W.bitwidth base in
   assert(W.bitwidth step = width);
-  
+
     if W.is_zero step then W.one (width + 1) else
-    let div_by_step = W.div (W.sub e base) step in
+    (* Step 1 (every interval) needs no division. *)
+    let diff = W.sub e base in
+    let div_by_step =
+      if W.is_one step then diff else W.div diff step in
     (* Extra bit so succ never wraps. *)
     W.succ (W.extract_exn ~hi:width div_by_step)
 

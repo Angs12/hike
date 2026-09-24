@@ -207,9 +207,11 @@ let precedes (e1 : t) (e2 : t) : bool =
 
 (* Top every word key not in [preserved]; the memories stay. *)
 let top_words_except ~(preserved : Var.Set.t) (env : t) : t =
+  (* Both the set's elements and the lane's keys are base vars, so
+     membership is a direct set lookup, not a Var.same scan. *)
   let words = WordEnv.fold env.words ~init:env.words
     ~f:(fun ~key ~data acc ->
-      if Core.Set.exists preserved ~f:(fun p -> Var.same p key)
+      if Core.Set.mem preserved key
       then acc
       else WordEnv.add acc ~key ~data:(WordSet.top (WordSet.bitwidth data))) in
   { env with words }
