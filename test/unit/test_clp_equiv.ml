@@ -58,7 +58,7 @@ let ref_bottom (width : int) : Ws.Clp.t =
    reference so the pin MUST go red.  Production src/ may hold no
    runtime-variable switch (the instrumentation rule), so this is the one
    mechanical sabotage; every other pin's disable recipe lives in
-   test/pins.md and is re-demonstrated by review. *)
+   test/pins/ and is re-demonstrated by review. *)
 let sabotage =
   match Sys.getenv_opt "HIKE_FAIL_BEFORE" with Some _ -> true | None -> false
 
@@ -344,12 +344,14 @@ let run_sweep () : int * int * int =
     cw2 "mul_exact" Ref_word.mul_exact CW.mul_exact w1 w2;
     cw2 "add_exact" Ref_word.add_exact CW.add_exact w1 w2;
     cw1 "succ_exact" Ref_word.succ_exact CW.succ_exact w1;
+    cw1 "succ_exact" Ref_word.succ_exact CW.succ_exact w2;
     CKL.iter [ 0; 1; 2; 3 ] ~f:(fun i ->
         cw1 (Printf.sprintf "lshift_exact %d" i)
           (fun w -> Ref_word.lshift_exact w i) (fun w -> CW.lshift_exact w i) w1);
     cw2 "bounded_gcd" Ref_word.bounded_gcd CW.bounded_gcd w1 w2;
     cw2 "cdiv" Ref_word.cdiv CW.cdiv w1 w2;
     cw1b "is_one(ops)" Ref_word.is_one CW.is_one w1;
+    cw1b "is_one(ops)" Ref_word.is_one CW.is_one w2;
     CKL.iter [ w1; w2; w3 ] ~f:(fun c ->
         incr checked;
         match
@@ -389,63 +391,7 @@ let run_sweep () : int * int * int =
         let rh = Ref_word.half tgt and ph = CW.half tgt in
         if not (eqw rh (CW.to_word ph)) then
           bad (Printf.sprintf "CW half width=%d: ref=%s cw=%s" tgt (show rh)
-                 (show (CW.to_word ph))))
-  in
-
-  (* All the ops, over one (width, v1, v2) triple. *)
-  let check_word_ops (width : int) (v1 : Z.t) (v2 : Z.t) =
-    let w1 = cw_of (word_of_z width v1) in
-    let w2 = cw_of (word_of_z width v2) in
-    (* [c] is INDEPENDENT of (a, b): taking c = a makes [c mod gcd = 0]
-       hold identically, so only an independent c exercises
-       bounded_diophantine's None arm (ax + by = c unsolvable). *)
-    let w3 = word_of_z width (Z.add v1 v2) in
-    cw2 "mul_exact" Ref_word.mul_exact CW.mul_exact w1 w2;
-    cw2 "add_exact" Ref_word.add_exact CW.add_exact w1 w2;
-    cw1 "succ_exact" Ref_word.succ_exact CW.succ_exact w1;
-    cw1 "succ_exact" Ref_word.succ_exact CW.succ_exact w2;
-    CKL.iter [ 0; 1; 2; 3 ] ~f:(fun i ->
-        cw1 (Printf.sprintf "lshift_exact %d" i)
-          (fun w -> Ref_word.lshift_exact w i) (fun w -> CW.lshift_exact w i) w1);
-    cw2 "bounded_gcd" Ref_word.bounded_gcd CW.bounded_gcd w1 w2;
-    cw2 "cdiv" Ref_word.cdiv CW.cdiv w1 w2;
-    cw1b "is_one" Ref_word.is_one CW.is_one w1;
-    cw1b "is_one" Ref_word.is_one CW.is_one w2;
-    CKL.iter [ w1; w2; cw_of w3 ] ~f:(fun c ->
-        incr checked;
-        match
-          (try Ok (Ref_word.bounded_diophantine (CW.to_word w1) (CW.to_word w2) (CW.to_word c)) with e -> Error e),
-          (try Ok (CW.bounded_diophantine w1 w2 c) with e -> Error e)
-        with
-        | Ok (Some (rx, ry)), Ok (Some (px, py)) ->
-          let gx = CW.to_word px and gy = CW.to_word py in
-          if not (eqw rx gx && eqw ry gy) then
-            bad (Printf.sprintf "CW bounded_diophantine(%s,%s,%s): ref=(%s,%s) prod=(%s,%s)"
-                   (CW.to_string w1) (CW.to_string w2) (CW.to_string c) (show rx) (show ry) (show gx) (show gy))
-        | Ok None, Ok None -> ()
-        | Error _, Error _ -> incr both_raised
-        | _ ->
-          bad (Printf.sprintf "CW bounded_diophantine(%s,%s,%s): shape differs"
-                 (CW.to_string w1) (CW.to_string w2) (CW.to_string c)));
-    (let rf = Ref_word.factor_2s (CW.to_word w1) and pf = CW.factor_2s w1 in
-     incr checked;
-     if not (eqw (fst rf) (CW.to_word (fst pf)) && Stdlib.( = ) (snd rf) (snd pf)) then
-       bad (Printf.sprintf "CW factor_2s(%s): ref=(%s,%d) prod=(%s,%d)"
-              (CW.to_string w1) (show (fst rf)) (snd rf) (show (CW.to_word (fst pf))) (snd pf)));
-    (* dom_size / cap_at_width: no-argument-width and explicit widths. *)
-    CKL.iter [ width; width + 1; 2 * width + 1 ] ~f:(fun tgt ->
-        incr checked;
-        let rd = Ref_word.dom_size ~width:tgt (Z.to_int (Z.erem v1 (Z.of_int 8))) in
-        let pd = CW.dom_size ~width:tgt (Z.to_int (Z.erem v1 (Z.of_int 8))) in
-        if not (eqw rd (CW.to_word pd)) then
-          bad (Printf.sprintf "CW dom_size i=%d width=%d: ref=%s prod=%s"
-                 (Z.to_int (Z.erem v1 (Z.of_int 8))) tgt (show rd) (show (CW.to_word pd)));
-        incr checked;
-        let rc = Ref_word.cap_at_width ~width:tgt (CW.to_word w1) in
-        let pc = CW.cap_at_width ~width:tgt w1 in
-        if not (eqw rc (CW.to_word pc)) then
-          bad (Printf.sprintf "CW cap_at_width(%s) width=%d: ref=%s prod=%s"
-                 (CW.to_string w1) tgt (show rc) (show (CW.to_word pc))));
+                 (show (CW.to_word ph))));
     (* The int63 fast path's precondition: whenever the true result is
        itself in the small range, native int arithmetic is exact. The
        guard is load-bearing — (2^62-1) + 1 leaves the range, so
@@ -490,7 +436,6 @@ let run_sweep () : int * int * int =
       let vals : Z.t list = List.append small wide in
       CKL.iter vals ~f:(fun v1 ->
           CKL.iter vals ~f:(fun v2 ->
-              check_word_ops width v1 v2;
               check_cbat_word width v1 v2)));
 
   (* ---- CLP sweep --------------------------- *)
@@ -523,10 +468,8 @@ let run_sweep () : int * int * int =
             if not (Bool.equal (Ws.Clp.is_top p1) (ref_is_top p1)) then
               bad (Printf.sprintf "IS_TOP w=%d b=%d s=%d c=%d" w b1 s1 c1);
             (* the word ops, driven by the swept (base, step, cardn) *)
-            if c1 land 3 = 0 && s1 land 3 = 0 && b1 land 3 = 0 then begin
-              check_word_ops w (Z.of_int b1) (Z.of_int s1);
-              check_cbat_word w (Z.of_int b1) (Z.of_int s1)
-            end;
+            if c1 land 3 = 0 && s1 land 3 = 0 && b1 land 3 = 0 then
+              check_cbat_word w (Z.of_int b1) (Z.of_int s1);
             for b2 = 0 to n - 1 do
               let p2 =
                 Ws.Clp.create (Cbat_word.of_int ~width:w b2)

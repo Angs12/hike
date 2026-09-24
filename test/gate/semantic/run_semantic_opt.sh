@@ -8,7 +8,7 @@
 
 set -u
 CORPUS="${1:-/tmp/corpus}"
-IR="${2:-/tmp/heritage_p6}"
+IR="${2:-/tmp/emit}"
 OUT="${3:-/tmp/sem_opt}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib.sh"

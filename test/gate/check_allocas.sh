@@ -21,7 +21,7 @@
 
 set -u
 
-OUT_DIR="${1:-/tmp/heritage_p5}"
+OUT_DIR="${1:?usage: check_allocas.sh <out_dir>}"
 FAIL=0
 PASS=0
 

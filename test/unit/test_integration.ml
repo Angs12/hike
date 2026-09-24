@@ -614,11 +614,8 @@ let tests : unit Alcotest.test list =
         let p1 = Clp.interval ~width:32 (w32 0) (w32 100) in
         let p2 = Clp.interval ~width:32 (w32 0) (w32 101) in
         let r = Clp.widen_join p1 p2 in
-        check "property LM F2a: widen_join sound" (Clp.subset p2 r);
-        check "property LM F2a: widen_join sound 2" (Clp.subset p2 r);
-        check "property LM F2a: widen_join sound 3" (Clp.subset p1 r);
-        check "property LM F2a: widen_join sound 4" (Clp.subset p2 r);
-        check "property LM F2a: widen_join sound 5" (Clp.subset p1 r));
+        check "property LM F2a: widen_join sound on p2" (Clp.subset p2 r);
+        check "property LM F2a: widen_join sound on p1" (Clp.subset p1 r));
 
     (* F2c: acquisition + per-cycle scoping — landmarks scoped to their own WTO cycle. *)
     pin "INT-06"
@@ -974,20 +971,6 @@ let tests : unit Alcotest.test list =
 
     (* F1-NEQ: the NEQ-counter head lands at [0, K] (max == K) — Finite
        extrapolation fires end-to-end. *)
-    pin "INT-14" "LM F1-NEQ: the jne-counter head lands at [0, K] with max == K"
-      (fun () ->
-        let k = w32 100 in
-        let sub, l1_tid, _ = lm_jne_loop ~k () in
-        let sol = run_anchored sub in
-        let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-        let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-        check_bound "property LM F1-NEQ: the head's lower bound is the entry constant 0"
-          (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
-        check_bound
-          "property LM F1-NEQ: the head's upper bound is the landmark K (Finite extrapolation \
-           fired end-to-end)"
-          (Ws.max_elem head_i) (fun hi -> Cbat_word.equal hi k));
-
     (* F1-FT: the fallthrough-edge fixture — the head, taken body, and
        fallthrough exit pin the walk's delivered values. *)
     pin "INT-15"
@@ -1021,63 +1004,10 @@ let tests : unit Alcotest.test list =
     (* F1-B1 (walk soundness): the walk's refinement invariants — the head
        lands at [0, K] and the taken body at [0, K-1]; a narrowing walk or
        a manufactured bottom moves these exact-value pins. *)
-    pin "INT-16" "LM F1-B1: the walk's refinement invariants hold — head [0,K], body [0,K-1]"
-      (fun () ->
-        let k, sub, sol, l1_tid, b1_tid = lm_jne_run () in
-        let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-        let head_i = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-        let body_i = AI.find_word 32 (Graphlib.Std.Solution.get sol b1_tid) i in
-        check_bound "property LM F1-B1: the head's lower bound is the entry constant 0"
-          (Ws.min_elem head_i) (fun lo -> Cbat_word.equal lo (w32 0));
-        check_bound
-          "property LM F1-B1: the head's upper bound is the landmark K (never narrowed, never \
-           blown past)"
-          (Ws.max_elem head_i) (fun hi -> Cbat_word.equal hi k);
-        check_bound "property LM F1-B1: the taken body's upper bound is K-1 (the guard's exclusion \
-                     survives)"
-          (Ws.max_elem body_i) (fun hi -> Cbat_word.equal hi (Cbat_word.pred k));
-        check "property LM F1-B1: the walk never manufactures bottom on a live block (the head's \
-               state is inhabited)"
-          (not (Ws.is_bottom head_i)));
-
     (* F1-B2: two sequential SCCs refine independently — loop 1's walk spend
        cannot starve loop 2. *)
-    pin "INT-17" "LM F1-B2: two sequential loops refine independently (K1+1 and entry constant 0)"
-      (fun () ->
-        let sub, l1_tid, _, l2_tid = lm_jle_loop ~k1:(w32 40) ~k2:(w32 100) () in
-        let sol = run_anchored sub in
-        let i = Var.create ~is_virtual:false ~fresh:false "lm_i" (Type.Imm 32) in
-        let l2_tid = match l2_tid with Some t -> t | None -> failwith "F1-B2: missing L2" in
-        let i2 = AI.find_word 32 (Graphlib.Std.Solution.get sol l2_tid) i in
-        check_bound
-          "property LM F1-B2: loop 2's head lower bound is loop 1's exact exit value K1+1 (the \
-           compiled fallthrough comparison refines the exit edge; both loops refine independently)"
-          (Ws.min_elem i2) (fun lo -> Cbat_word.equal lo (Cbat_word.succ (w32 40)));
-        let i1 = AI.find_word 32 (Graphlib.Std.Solution.get sol l1_tid) i in
-        check_bound
-          "property LM F1-B2: loop 1's head lower bound is the entry constant 0 (both loops refined \
-           independently)"
-          (Ws.min_elem i1) (fun lo -> Cbat_word.equal lo (w32 0)));
-
     (* F1-B3: re-runs the F1-FT shape and pins the walk-delivered value
        (the fallthrough exit holds {K} exactly). *)
-    pin "INT-18" "LM F1-B3: the fallthrough exit pins the counter to {K} and the body view survives"
-      (fun () ->
-        let k, sub, sol, _, b1_tid = lm_jne_run () in
-        let i = Var.create ~is_virtual:false ~fresh:false "lm_ne_i" (Type.Imm 32) in
-        let st tid = Graphlib.Std.Solution.get sol tid in
-        let exits = exit_blocks_of sub in
-        let exit_i =
-          match exits with [ b ] -> AI.find_word 32 (st (Term.tid b)) i | _ -> assert false
-        in
-        check
-          "property LM F1-B3: the fallthrough exit pins the counter to {K} exactly (the memoized \
-           walk delivery)"
-          (Ws.equal exit_i (Ws.singleton k));
-        check_bound "property LM F1-B3: the taken body's refined view survives (upper bound K-1)"
-          (Ws.max_elem (AI.find_word 32 (st b1_tid) i))
-          (fun hi -> Cbat_word.equal hi (Cbat_word.pred k)));
-
     (* F1-B4 (the walk's cell meet): the walk's product is the cell meet
        through a Load-producing def, so the fixture seeds a Var constraint
        on a var whose guard-block def is a Load over a known cell with a

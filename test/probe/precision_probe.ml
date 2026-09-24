@@ -1,7 +1,7 @@
 (* Precision measurement driver: per-sub fixpoint, TSV precision buckets + BIN rollup.
    Usage: dune exec test_cbat/precision_probe.exe -- <binary> [<binary> ...]
    Gate-free: every def is denoted; entry is [Vsa.init_sol sub] (AI.top).
-   Columns: binary, sub, sub_ms, 8 def, 9 tagged, 6 ld, 5 ldstk, 5 ldstk_w (see [row_of]).
+   Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w (see [row_of]).
    L2a diag mode (HIKE_VSA_DIAG_BOTTOM=1) adds DIAG/DIAG_SUM lines; OFF output is plain. *)
 
 open Bap.Std
@@ -65,15 +65,6 @@ module Sub_stats = struct
     mutable def_bottom_live : int;
     mutable def_bottom_dead : int;
     (* tagged-defs-only series (8 buckets + count) *)
-    mutable def_tagged_exact : int;
-    mutable def_tagged_b2_3 : int;
-    mutable def_tagged_b4_8 : int;
-    mutable def_tagged_b9_64 : int;
-    mutable def_tagged_b65p : int;
-    mutable def_tagged_top : int;
-    mutable def_tagged_bottom_live : int;
-    mutable def_tagged_bottom_dead : int;
-    mutable def_tagged_count : int;
     (* load/store address series (6) *)
     mutable ld_exact : int;
     mutable ld_bounded : int;
@@ -100,10 +91,6 @@ module Sub_stats = struct
       def_exact = 0; def_b2_3 = 0; def_b4_8 = 0; def_b9_64 = 0;
       def_b65p = 0; def_top = 0; def_bottom_live = 0;
       def_bottom_dead = 0;
-      def_tagged_exact = 0; def_tagged_b2_3 = 0; def_tagged_b4_8 = 0;
-      def_tagged_b9_64 = 0; def_tagged_b65p = 0; def_tagged_top = 0;
-      def_tagged_bottom_live = 0; def_tagged_bottom_dead = 0;
-      def_tagged_count = 0;
       ld_exact = 0; ld_bounded = 0; ld_top = 0; ld_bottom_live = 0;
       ld_bottom_dead = 0; ld_denote_err = 0;
       ldstk_exact = 0; ldstk_bounded = 0; ldstk_top = 0;
@@ -111,31 +98,17 @@ module Sub_stats = struct
       ldstk_w_b64 = 0; ldstk_w_4k = 0; ldstk_w_2m = 0; ldstk_w_big = 0;
       ldstk_w_max = 0L }
 
-  (* Count a word def into both series when tagged. *)
-  let add_def (s : t) (tagged : bool) (b : def_bucket) : unit =
-    (match b with
-     | `Exact -> s.def_exact <- s.def_exact + 1
-     | `B2_3 -> s.def_b2_3 <- s.def_b2_3 + 1
-     | `B4_8 -> s.def_b4_8 <- s.def_b4_8 + 1
-     | `B9_64 -> s.def_b9_64 <- s.def_b9_64 + 1
-     | `B65p -> s.def_b65p <- s.def_b65p + 1
-     | `Top -> s.def_top <- s.def_top + 1
-     | `Bottom_live -> s.def_bottom_live <- s.def_bottom_live + 1
-     | `Bottom_dead -> s.def_bottom_dead <- s.def_bottom_dead + 1);
-    if tagged then begin
-      s.def_tagged_count <- s.def_tagged_count + 1;
-      match b with
-      | `Exact -> s.def_tagged_exact <- s.def_tagged_exact + 1
-      | `B2_3 -> s.def_tagged_b2_3 <- s.def_tagged_b2_3 + 1
-      | `B4_8 -> s.def_tagged_b4_8 <- s.def_tagged_b4_8 + 1
-      | `B9_64 -> s.def_tagged_b9_64 <- s.def_tagged_b9_64 + 1
-      | `B65p -> s.def_tagged_b65p <- s.def_tagged_b65p + 1
-      | `Top -> s.def_tagged_top <- s.def_tagged_top + 1
-      | `Bottom_live ->
-        s.def_tagged_bottom_live <- s.def_tagged_bottom_live + 1
-      | `Bottom_dead ->
-        s.def_tagged_bottom_dead <- s.def_tagged_bottom_dead + 1
-    end
+  (* Count a word def into the series. *)
+  let add_def (s : t) (b : def_bucket) : unit =
+    match b with
+    | `Exact -> s.def_exact <- s.def_exact + 1
+    | `B2_3 -> s.def_b2_3 <- s.def_b2_3 + 1
+    | `B4_8 -> s.def_b4_8 <- s.def_b4_8 + 1
+    | `B9_64 -> s.def_b9_64 <- s.def_b9_64 + 1
+    | `B65p -> s.def_b65p <- s.def_b65p + 1
+    | `Top -> s.def_top <- s.def_top + 1
+    | `Bottom_live -> s.def_bottom_live <- s.def_bottom_live + 1
+    | `Bottom_dead -> s.def_bottom_dead <- s.def_bottom_dead + 1
 
   let add_ld (s : t) (stack : bool) (b : ld_bucket) : unit =
     match b with
@@ -268,8 +241,7 @@ let addr_exp_of_rhs (e : exp) : exp option =
 
 (* One L2a DIAG line for a bottom word def. *)
 let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
-    (d : def term) (input_bottom : bool) (tagged : bool)
-    (st_before : AI.t) : unit =
+    (d : def term) (input_bottom : bool) (st_before : AI.t) : unit =
   let class_of (e : exp) : string =
     match Vsa.Test_seam.denote_imm_exp e st_before with
     | Error _ -> "err"
@@ -280,10 +252,10 @@ let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
     | Bil.Load (_, a, _, _) -> "load", class_of a, "n/a"
     | Bil.Cast (ct, _, _) -> "cast:" ^ cast_name ct, "n/a", "n/a"
     | _ -> "other", "n/a", "n/a" in
-  Printf.printf "DIAG\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\n"
+  Printf.printf "DIAG\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n"
     bname (Sub.name sub') (Tid.to_string (Term.tid b))
     (Tid.to_string (Term.tid d))
-    (if input_bottom then 1 else 0) (if tagged then 1 else 0)
+    (if input_bottom then 1 else 0)
     (Var.name (Def.lhs d)) kind op1 op2;
   flush stdout
 
@@ -360,7 +332,6 @@ let collect_stats (bname : string) (sub' : sub term)
            | Type.Imm w ->
              let ws = AI.find_word w !st (Def.lhs d) in
               (* Gate-free: every def is denoted (spec §2.1). *)
-              let tagged = true in
              let b =
                match classify_def ws with
                | `Bottom ->
@@ -368,12 +339,12 @@ let collect_stats (bname : string) (sub' : sub term)
                  if input_bottom then begin
                    incr bottom_dead;
                    if diag_on () then
-                     diag_bottom bname sub' b d input_bottom tagged
+                     diag_bottom bname sub' b d input_bottom
                        st_before
                  end else begin
                    incr bottom_live;
                    if diag_on () then
-                     diag_bottom bname sub' b d input_bottom tagged
+                     diag_bottom bname sub' b d input_bottom
                        st_before
                  end;
                  if input_bottom then `Bottom_dead else `Bottom_live
@@ -384,7 +355,7 @@ let collect_stats (bname : string) (sub' : sub term)
                | `B65p -> `B65p
                | `Top -> `Top
              in
-             Sub_stats.add_def s tagged b
+             Sub_stats.add_def s b
            | Type.Mem _ | Type.Unk -> ());
           (* Address metric in the PRE-def state. *)
           (match addr_exp_of_rhs (Def.rhs d) with
@@ -442,15 +413,6 @@ let row_of (s : Sub_stats.t) : string list =
     string_of_int s.Sub_stats.def_top;
     string_of_int s.Sub_stats.def_bottom_live;
     string_of_int s.Sub_stats.def_bottom_dead;
-    string_of_int s.Sub_stats.def_tagged_exact;
-    string_of_int s.Sub_stats.def_tagged_b2_3;
-    string_of_int s.Sub_stats.def_tagged_b4_8;
-    string_of_int s.Sub_stats.def_tagged_b9_64;
-    string_of_int s.Sub_stats.def_tagged_b65p;
-    string_of_int s.Sub_stats.def_tagged_top;
-    string_of_int s.Sub_stats.def_tagged_bottom_live;
-    string_of_int s.Sub_stats.def_tagged_bottom_dead;
-    string_of_int s.Sub_stats.def_tagged_count;
     string_of_int s.Sub_stats.ld_exact;
     string_of_int s.Sub_stats.ld_bounded;
     string_of_int s.Sub_stats.ld_top;
@@ -485,24 +447,6 @@ let add_sum (dst : Sub_stats.t) (src : Sub_stats.t) : unit =
     dst.Sub_stats.def_bottom_live + src.Sub_stats.def_bottom_live;
   dst.Sub_stats.def_bottom_dead <-
     dst.Sub_stats.def_bottom_dead + src.Sub_stats.def_bottom_dead;
-  dst.Sub_stats.def_tagged_exact <-
-    dst.Sub_stats.def_tagged_exact + src.Sub_stats.def_tagged_exact;
-  dst.Sub_stats.def_tagged_b2_3 <-
-    dst.Sub_stats.def_tagged_b2_3 + src.Sub_stats.def_tagged_b2_3;
-  dst.Sub_stats.def_tagged_b4_8 <-
-    dst.Sub_stats.def_tagged_b4_8 + src.Sub_stats.def_tagged_b4_8;
-  dst.Sub_stats.def_tagged_b9_64 <-
-    dst.Sub_stats.def_tagged_b9_64 + src.Sub_stats.def_tagged_b9_64;
-  dst.Sub_stats.def_tagged_b65p <-
-    dst.Sub_stats.def_tagged_b65p + src.Sub_stats.def_tagged_b65p;
-  dst.Sub_stats.def_tagged_top <-
-    dst.Sub_stats.def_tagged_top + src.Sub_stats.def_tagged_top;
-  dst.Sub_stats.def_tagged_bottom_live <-
-    dst.Sub_stats.def_tagged_bottom_live + src.Sub_stats.def_tagged_bottom_live;
-  dst.Sub_stats.def_tagged_bottom_dead <-
-    dst.Sub_stats.def_tagged_bottom_dead + src.Sub_stats.def_tagged_bottom_dead;
-  dst.Sub_stats.def_tagged_count <-
-    dst.Sub_stats.def_tagged_count + src.Sub_stats.def_tagged_count;
   dst.Sub_stats.ld_exact <- dst.Sub_stats.ld_exact + src.Sub_stats.ld_exact;
   dst.Sub_stats.ld_bounded <- dst.Sub_stats.ld_bounded + src.Sub_stats.ld_bounded;
   dst.Sub_stats.ld_top <- dst.Sub_stats.ld_top + src.Sub_stats.ld_top;

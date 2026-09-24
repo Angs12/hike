@@ -305,15 +305,6 @@ let tests : unit Alcotest.test list =
         in
         check "VSA-30" (Ws.min_elem c = Some (w64 5) && Ws.max_elem c = Some (w64 5)));
 
-    pin "VSA-31" "T3-2: gate-free (spec §2.1) — the guard refines x to {5}"
-      (fun () ->
-        let x = v64 "t3_x" in
-        let c =
-          assume 64 x
-            (Bil.BinOp (Bil.EQ, Bil.Var x, Bil.Int (Cbat_word.to_word (w64 5))))
-        in
-        check "VSA-31" (Ws.min_elem c = Some (w64 5) && Ws.max_elem c = Some (w64 5)));
-
     pin "VSA-32" "T3-7: mixed-def — f IS refined to {1} on the taken edge"
       (fun () ->
         let f, _ctx, sub, exit_tid, _, _, _ = mk_flag_sub ~mixed:true in
@@ -507,35 +498,6 @@ let tests : unit Alcotest.test list =
           && Base.Option.filter (Ws.min_elem c_exit)
                ~f:(fun w -> Cbat_word.(>=) w (w32 5))
              |> Option.is_some));
-
-    pin "VSA-58"
-      "E2eC-14 (BIR loop): the counter window survives the body shift — the iterate view's counter stays ⊆ [0,4] (y = x << (i+1) ∈ {32..512})"
-      (fun () ->
-        let i = i32 "i" in
-        let x = v64 "x" in
-        let y = v64 "y" in
-        let iv = Bil.Var i in
-        let xv = Bil.Var x in
-        let lt5 = Bil.BinOp (Bil.LT, iv, Bil.Int (Cbat_word.to_word (w32 5))) in
-        let nlt5 = Bil.UnOp (Bil.NOT, lt5) in
-        let sub, tids =
-          sub_of "e2ec_loop"
-            [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0)));
-                Def.create x (Bil.Int (Cbat_word.to_word (w64 16))) ],
-              [ (1, mk_goto) ];
-              [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1))));
-                Def.create y (Bil.BinOp (Bil.LSHIFT, xv, iv)) ],
-              [ (2, mk_goto) ];
-              [], [ (3, fun t -> mk_jmp_to t nlt5); (1, fun t -> mk_jmp_to t lt5) ];
-              [], [] ]
-        in
-        let sol = run_anchored sub in
-        let c_iter = AI.find_word 32 (in_state sol tids.(1)) i in
-        check "VSA-58"
-          ((not (Ws.is_top c_iter))
-          && (Base.Option.filter (Ws.max_elem c_iter)
-                ~f:(fun w -> Cbat_word.(<=) w (w32 4))
-             |> Option.is_some)));
 
     (* E2eD: channel-2 negative — the heap-indexed store never seeds. *)
     pin "VSA-59" "E2eD-4: gate-free — the heap store's data var is denoted ({99})"

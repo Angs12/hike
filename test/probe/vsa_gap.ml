@@ -1,8 +1,7 @@
 (* The production-config non-convergence diagnostic: replicates the
    pass's per-sub solve (jump -> split-mem terms, whole-program kill
-   summaries, .rodata image, symtab, block addrs) and on
-   Fixpoint_not_converged prints the gap, the widening heads, and the
-   head states.
+   summaries) and on Fixpoint_not_converged prints the gap, the
+   widening heads, and the head states.
    Usage: vsa_gap.exe <binary> <subname> [raw|jump|split|both] *)
 
 open Bap.Std
@@ -56,30 +55,6 @@ let () =
       | Some s -> s
       | None -> usage Sys.argv.(0) usage_text
     in
-    let images =
-      Hike.Image.get_section_mem ".rodata" proj
-      |> Hike.Image.get_section_data
-      |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
-             [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
-                 img_hi = Word.to_int64_exn max_addr;
-                 img_bytes = arr } ])
-      |> Base.Option.value ~default:[]
-    in
-    ignore images;
-    (* symtab/block_addrs ride the pass's fixpoint (resolution +
-       materialization); the raw first-phase solve here doesn't take
-       them. *)
-    ignore (Some (Project.symbols proj));
-    let block_addrs =
-      Term.enum sub_t prog
-      |> Seq.concat_map ~f:(Term.enum blk_t)
-      |> Seq.filter_map ~f:(fun b ->
-             Base.Option.map (Term.get_attr b address)
-               ~f:(fun a -> (a, Term.tid b)))
-      |> Seq.to_list
-      |> Core.Map.of_alist_exn (module Addr)
-    in
-    ignore block_addrs;
     (* The kill-summary regime: the pass computes whole-program
        summaries; a single-sub run degrades every callee to unknown. *)
     let written =

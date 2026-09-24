@@ -38,7 +38,6 @@ The Call_effects transfer pins (C1-1..C1-5) live in `test_call_effects`.
 | VSA-28 | `Cbat_vsa_utils.not_implemented` (`cbat_vsa_utils.ml:21`) — logs through `Event.Log` only, no stderr line | replace the log arm with `Format.eprintf` of the component | VSA-28 red: `probe_lines` non-empty |
 | VSA-29 | `not_implemented` — no marker leaks to stderr at all | add a `prerr_endline "not_implemented (degrading to top)"` arm | VSA-29 red: the captured stderr contains the marker |
 | VSA-30 | `constrain_edge` — the gate-free `EQ` guard refines `x` to `{5}` (T3 fixture) | make the `EQ` row answer `env` unchanged | VSA-30 red: min/max are not both `5` |
-| VSA-31 | `constrain_edge` — same `EQ` refinement, second read (the gate-free contract) | same `EQ`-row recipe as VSA-30 | VSA-31 red: min/max are not both `5` |
 | VSA-32 | `constrain_edge` + the flag def chain — the mixed-def flag IS refined to `{1}` on the taken edge | make the flag-guard arm answer `env` unchanged | VSA-32 red: `{1}` not the taken flag value |
 | VSA-33 | the single-def flag control refines identically | same flag-guard recipe as VSA-32 | VSA-33 red: `{1}` not the taken flag value |
 | VSA-34 | `Cbat_call_effects.transfer` (`src/cbat_vsa/cbat_call_effects.ml:31`) — the post-call reload reads TOP | keep the aliased cell live across the call (skip the escape/kill) | VSA-34 red: `find_word 64` is not top |
@@ -65,7 +64,6 @@ The Call_effects transfer pins (C1-1..C1-5) live in `test_call_effects`.
 | VSA-55 | `Cbat_clp.equal` unequal values still false | make `equal` answer true when the canonical forms share elements | VSA-55 red: `equal p r` true |
 | VSA-56 | `Cbat_clp.equal` width-mismatched values false, no raise | make `equal` raise on width mismatch | VSA-56 red: raise or true |
 | VSA-57 | `static_graph_vsa` / `Cbat_forward.denote_block` — the counter-shift loop's trace partition (iterate ⊆ [0,4], exit min ≥ 5) | drop the taken-edge refinement so the body IN-state is unrefined | VSA-57 red: `max_elem c_iter > 4` / `min_elem c_exit < 5` |
-| VSA-58 | the counter window survives the body shift (`y = x << (i+1)`) | make the shifted def flow back unrefined into the header | VSA-58 red: `is_top c_iter` or `max_elem > 4` |
 | VSA-59 | `Cbat_transfer.denote_def` store cell (`cbat_transfer.ml:268`) — the heap-indexed store's data var is denoted `{99}` | make the store arm leave the environment unchanged | VSA-59 red: `vv ≠ {99}` |
 | VSA-60 | `Cbat_vsa.init_sol` (`cbat_vsa.ml:49`) — the entry `RSP` anchor is the symbolic segment base at offset 0 (`StackOff{0}`) | seed the entry `RSP` with `Ws.top 64` instead of `stack_word_i64 0` | VSA-60 red: `find_word 64` ≠ `stack_word_i64 0` |
 | VSA-61 | `Cbat_clp_set_composite.cardinality` (`:257`) + `Cbat_fin_set.cardinality` (`:35`) — the full 1-bit domain reads cardn 2 (width+1 bits) | read the cardinality at the set width (1 bit) | VSA-61 red: cardn wraps to 0 / ≠ 2 |

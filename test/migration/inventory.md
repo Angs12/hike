@@ -62,4 +62,4 @@ with co-located `check_ir` calls conjoined — the module's own report lists
 the fold. The other fourteen rows reconcile exactly.
 
 Detail per pin: `test/pins/<module>.md` (concatenated into
-`test/pins.md`).
+`test/pins/`).

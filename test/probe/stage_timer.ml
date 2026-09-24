@@ -50,18 +50,12 @@ let () =
     Printf.printf "STAGE event-detect             %8.3fs\n" t_analyze;
 
     let t0 = Unix.gettimeofday () in
-    let sol = Probe_common.run_sub_fixpoint sub in
+    let _sol = Probe_common.run_sub_fixpoint sub in
     let t_fix = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE fixpoint (inline refines) %8.3fs\n" t_fix;
-
-    (* Refinement is inline in the fixpoint; per-block IN-states are the solution. *)
-    let t0 = Unix.gettimeofday () in
-    let _tags = sol in
-    let t_part = Unix.gettimeofday () -. t0 in
-    Printf.printf "STAGE (merged, no post-pass)     %8.3fs\n" t_part;
 
     Printf.printf "STAGE walk+merge (tags)         (inside the producer — not separable through the Hike seam)\n";
     Printf.printf "STAGE stack_to_locals / dce     (separate pipeline passes — time via the pipeline, not this probe)\n";
     Printf.printf "TOTAL (pass 1, production)      %8.3fs\n" t_total;
     Printf.printf "TOTAL (pass 2, decomposition)   %8.3fs   (seed-detect+fixpoint)\n"
-      (t_analyze +. t_fix +. t_part)
+      (t_analyze +. t_fix)

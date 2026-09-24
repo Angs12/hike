@@ -384,6 +384,7 @@ let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
 let is_intrinsic_target (t : tid) : bool =
   Base.String.is_prefix (Tid.name t) ~prefix:"intrinsic:"
 
+(* A real (non-intrinsic) call, direct or indirect. *)
 let machine_call (j : jmp term) : bool =
   match Jmp.kind j with
   | Call c -> (
@@ -392,6 +393,7 @@ let machine_call (j : jmp term) : bool =
       | Indirect _ -> true)
   | _ -> false
 
+(* A real call with a continuation pushes its return address. *)
 let call_pushes (j : jmp term) : bool =
   match Jmp.kind j with
   | Call c -> machine_call j && Option.is_some (Call.return c)
@@ -420,33 +422,7 @@ module Sub_layout = struct
        the hike_window parameter. *)
     window_param : bool;
   }
-
-  let equal_region (i1, (l1, h1), b1) (i2, (l2, h2), b2) =
-    Int.equal i1 i2 && Int64.equal l1 l2 && Int64.equal h1 h2
-    && Int64.equal b1 b2
-
-  let compare_region (i1, (l1, h1), b1) (i2, (l2, h2), b2) =
-    match Int.compare i1 i2 with
-    | 0 -> (
-        match Int64.compare l1 l2 with
-        | 0 -> (
-            match Int64.compare h1 h2 with
-            | 0 -> Int64.compare b1 b2
-            | c -> c)
-        | c -> c)
-    | c -> c
-
-  let equal (a : t) (b : t) =
-    Base.List.equal equal_region a.regions b.regions
-    && Base.Option.equal
-         (fun (i1, x1) (i2, x2) -> Int.equal i1 i2 && Int64.equal x1 x2)
-         a.anchor b.anchor
-    && Bool.equal a.window_param b.window_param
-
-  let compare (a : t) (b : t) : int =
-    match Base.List.compare compare_region a.regions b.regions with
-    | 0 -> Bool.compare a.window_param b.window_param
-    | c -> c
+  [@@deriving equal, compare, sexp]
 
   (* Required by [Value.Tag.register]. *)
   let pp fmt { regions; anchor; window_param } =
@@ -455,52 +431,6 @@ module Sub_layout = struct
       (Base.Option.value_map anchor ~default:"none"
          ~f:(fun (i, idx) -> Printf.sprintf "r%d@%Ld" i idx))
       window_param
-
-  let sexp_of_t (t : t) : Sexp.t =
-    Sexp.List
-      (Base.List.map t.regions ~f:(fun (id, (lo, hi), b) ->
-           Sexp.Atom (Printf.sprintf "%d:%Ld:%Ld:%Ld" id lo hi b))
-       @ (Base.Option.value_map t.anchor ~default:[]
-            ~f:(fun (i, idx) ->
-              [ Sexp.Atom (Printf.sprintf "anchor=%d:%Ld" i idx) ]))
-       @ if t.window_param then [ Sexp.Atom "window" ] else [])
-
-  let t_of_sexp (s : Sexp.t) : t =
-    match s with
-    | Sexp.List items ->
-        let regions =
-          Base.List.filter_map items ~f:(fun item ->
-              match item with
-              | Sexp.Atom a when not (Base.String.is_prefix a ~prefix:"anchor=") ->
-                  (match Stdlib.String.split_on_char ':' a with
-                   | [ id; lo; hi; b ] ->
-                       Some
-                         ( int_of_string id,
-                           (Int64.of_string lo, Int64.of_string hi),
-                           Int64.of_string b )
-                   | _ -> failwith "hike-layout: bad region sexp")
-              | _ -> None)
-        in
-        let anchor =
-          Base.List.find_map items ~f:(fun item ->
-              match item with
-              | Sexp.Atom a when Base.String.is_prefix a ~prefix:"anchor=" ->
-                  (match
-                     Stdlib.String.split_on_char ':'
-                       (Base.String.drop_prefix a 7)
-                   with
-                   | [ i; idx ] -> Some (int_of_string i, Int64.of_string idx)
-                   | _ -> failwith "hike-layout: bad anchor sexp")
-              | _ -> None)
-        in
-        let window_param =
-          Base.List.exists items ~f:(fun item ->
-              match item with
-              | Sexp.Atom a -> String.equal a "window"
-              | _ -> false)
-        in
-        { regions; anchor; window_param }
-    | _ -> failwith "hike-layout: bad sexp"
 
   module Stringable = struct
     type nonrec t = t
@@ -512,7 +442,7 @@ module Sub_layout = struct
     include Stringable
 
     let caller_identity =
-      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/2"
+      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/3"
   end)
 end
 

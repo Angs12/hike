@@ -4,7 +4,7 @@
 #
 # One pin has a clean, test-only sabotage hook: CLEQ-01 (the CLP referee)
 # corrupts its inlined reference under HIKE_FAIL_BEFORE.  Every other pin's
-# disable recipe lives in test/pins.md and is re-demonstrated by review,
+# disable recipe lives in test/pins/ and is re-demonstrated by review,
 # because production src/ may hold no runtime-variable switch (ADR 0017,
 # the instrumentation rule).
 #

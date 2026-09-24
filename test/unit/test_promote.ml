@@ -187,7 +187,6 @@ let pr_a4_sub () : sub term =
       (Bil.Load (Bil.Var m, plus_addr sp 16L, LittleEndian, `r64))
   in
   let a4 = straight_sub "pr_a4_storing" [ a4_st; a4_ld; a4_ld1 ] in
-  ignore (produce Theory.Target.unknown (Program.create ~subs:[ a4 ] ()) a4);
   a4
 
 (* The A4 sub's storage over [sec; lo, hi], read through its tree. *)
@@ -513,7 +512,6 @@ let tests : unit Alcotest.test list =
             [ [ prologue; al; ptr ], [ (1, mk_goto) ];
               [ store ], [ (0, mk_ret) ] ]
         in
-        ignore (produce Theory.Target.unknown (Program.create ~subs:[ twin ] ()) twin);
         check "PR-22"
           (let ctx = fixture_ctx [ twin ] in
            match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid twin) with
