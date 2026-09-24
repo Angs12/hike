@@ -281,9 +281,9 @@ let op_add' ~(op : Val.t -> Val.t -> Val.t)
       let combine =
         if Key.covers k k_int && Key.covers k' k_int
         then op else op_demoted in
-      let newD = combine d d' in
+      let new_data = combine d d' in
       (* Overlapping range. *)
-      let rest = IT.add rest k_int newD in
+      let rest = IT.add rest k_int new_data in
       (* Non-overlapping ranges. *)
       match Key.interval_diff k' k with
       | `none -> rest

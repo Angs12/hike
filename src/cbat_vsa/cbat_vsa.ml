@@ -34,6 +34,13 @@ module Cbat_attr_census = Cbat_attr_census
 (* WTO over the engine cfg; [succ]/[pred] are the dispatch graph's
    accessors — the resolved dispatches' extra edges ride BOTH, so the
    ordering closes on the same graph pair it walks. *)
+(* The fixpoint's visit budget: a floor for tiny subs plus a
+   per-block allowance, so a sub's sweep count is size-independent. *)
+let min_visit_budget = 6000
+let visits_per_block = 8
+(* A head widens only after this many warmup visits. *)
+let head_warmup_visits = 10
+
 let wto_of_cfg ~(succ : tid -> tid list) ~(pred : tid -> tid list)
     (cfg : Graphs.Tid.t) : Cbat_wto.comp list =
   Cbat_wto.wto
@@ -275,11 +282,14 @@ let rec static_graph_vsa
   let total_processed = ref 0 in
   (* The visit budget scales with the block count so a sub's sweep
      allowance is size-independent; the floor bounds tiny subs. *)
-  let max_steps = Stdlib.max 6000 (8 * Core.Map.length rctx.rc_blocks) in
+  let max_steps =
+    Stdlib.max min_visit_budget
+      (visits_per_block * Core.Map.length rctx.rc_blocks) in
   (* Per-head visit counts; each head gets its own warmup window. *)
   let head_visits : (Tid.t, int) Hashtbl.t = Hashtbl.create (module Tid) in
   let head_warmed (v : Tid.t) : bool =
-    Option.value ~default:0 (Hashtbl.find head_visits v) > 10 in
+    Option.value ~default:0 (Hashtbl.find head_visits v)
+    > head_warmup_visits in
 #ifdef VSA_DEBUG
   (* Forward witness: every guard cond from [p] to [v] denotates false on
      the pred's entry state, so the edge is dead without the backward

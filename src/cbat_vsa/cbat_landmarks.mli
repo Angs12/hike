@@ -48,15 +48,16 @@ val translate_to :
 (* Run [f] with [head] widened; the previous head is restored. *)
 val with_widening_head : t -> Tid.t option -> (unit -> 'a) -> 'a
 
-(* The cell an entry is keyed by: the memory key's byte hull and stride —
-   per-stride cells keep their own landmark rows. *)
+(* The cell an entry is keyed by: the memory key's byte hull (each
+   end as width/value) and stride — per-stride cells keep their own
+   landmark rows. *)
 module Cell_key : sig
   type t = {
-    cw_lo : int;
-    cv_lo : int64;
-    cw_hi : int;
-    cv_hi : int64;
-    cstep : int;
+    lo_width : int;
+    lo_value : int64;
+    hi_width : int;
+    hi_value : int64;
+    stride : int;
   }
 
   val equal : t -> t -> bool

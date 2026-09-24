@@ -11,23 +11,25 @@ type lm_entry = {
   mutable dist_p : int option;  (* previous distance *)
 }
 
-let cap = 1 lsl 40
-let cap_distance (d : int) : int = min d cap
+(* Distance readings cap at 2^40. *)
+let max_landmark_distance = 1 lsl 40
+let cap_distance (d : int) : int = min d max_landmark_distance
 let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
   let diff = Cbat_word.sub b a in
-  try Cbat_word.to_int_exn diff with _ -> cap
+  try Cbat_word.to_int_exn diff with _ -> max_landmark_distance
   (* Cap unrepresentable distances. *)
 
-(* The cell an entry is keyed by: the memory key's byte hull and
-   stride — per-stride cells keep their own landmark rows. *)
+(* The cell an entry is keyed by: the memory key's byte hull (each
+   end as width/value) and stride — per-stride cells keep their own
+   landmark rows. *)
 module Cell_key = struct
-  type t = { cw_lo : int; cv_lo : int64; cw_hi : int; cv_hi : int64;
-             cstep : int }
+  type t = { lo_width : int; lo_value : int64; hi_width : int;
+             hi_value : int64; stride : int }
 
   let equal a b =
-    Int.equal a.cw_lo b.cw_lo && Stdlib.Int64.equal a.cv_lo b.cv_lo
-    && Int.equal a.cw_hi b.cw_hi && Stdlib.Int64.equal a.cv_hi b.cv_hi
-    && Int.equal a.cstep b.cstep
+    Int.equal a.lo_width b.lo_width && Stdlib.Int64.equal a.lo_value b.lo_value
+    && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
+    && Int.equal a.stride b.stride
 end
 
 (* Per-head cell rows, oldest entry first. *)
@@ -159,12 +161,11 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
   if width <> Cbat_clp_set_composite.bitwidth data_new then data_new
   else begin
     (* Growth per traversal times steps, clamped at landmark and bound. *)
-    let cap = 1 lsl 40 in
     let delta_of (e : lm_entry) : int =
       Option.value ~default:0 (Option.map e.dist ~f:(fun dc ->
           let g = match e.dist_p with Some dp when dp > dc -> dp - dc | _ -> 0 in
           let d = g * steps in
-          if d > cap then cap else d))
+          if d > max_landmark_distance then max_landmark_distance else d))
     in
     let lo_base = Option.value (Cbat_clp_set_composite.min_elem data_new) ~default:(Cbat_word.zero width) in
     let hi_base = Option.value (Cbat_clp_set_composite.max_elem data_new) ~default:(Cbat_word.zero width) in

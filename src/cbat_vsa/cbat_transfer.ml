@@ -64,10 +64,10 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
 #endif
   (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
-    let v1Size = WordSet.cardinality v1 in
-    let v2Size = WordSet.cardinality v2 in
-    if Cbat_word.is_zero v1Size || Cbat_word.is_zero v2Size then bool_bottom
-    else if Word_ops.is_one v1Size && Word_ops.is_one v2Size then begin
+    let v1_size = WordSet.cardinality v1 in
+    let v2_size = WordSet.cardinality v2 in
+    if Cbat_word.is_zero v1_size || Cbat_word.is_zero v2_size then bool_bottom
+    else if Word_ops.is_one v1_size && Word_ops.is_one v2_size then begin
 #ifdef VSA_DEBUG
       (if stack_singleton v1 && stack_singleton v2 && WordSet.equal v1 v2 then
          Format.eprintf "DBG B16 stack-singleton-eq GATE-FIRED\n%!"
@@ -195,31 +195,50 @@ let image_load_card_cap = 64
    threaded image, with no stored cell intersecting the access extent
    and an enumerable address set, reads the image's bytes — the exact
    value set.  Anything else keeps the abstract read. *)
+let word_i64 (w : Cbat_word.t) : int64 option = Cbat_word.to_int64_opt w
+
+(* The image arm's address preconditions: a bounded, non-stack,
+   byte-width set the enumerate-and-read can walk. *)
+let image_address_ok (addr : wordset) (bits : int) : bool =
+  bits > 0 && bits <= 64
+  && not (WordSet.is_top addr)
+  && not (WordSet.is_bottom addr)
+  && not (WordSet.is_infinite addr)
+  && Option.is_none (WordSet.stack_offsets addr)
+  && not (WordSet.in_stack_segment addr)
+
+(* The enumerate-and-read: each enumerated address reads its image
+   word; one unreadable word refuses the arm for the whole set. *)
+let read_image_words ~(img_bytes : Bytes.t) ~(img_lo : int64)
+    ~(endian : endian) ~(bits : int) (addr : wordset) : wordset option =
+  Base.List.fold (WordSet.iter addr) ~init:(Some [])
+    ~f:(fun acc a ->
+        Base.Option.bind acc ~f:(fun ws ->
+            Base.Option.bind (word_i64 a) ~f:(fun ai ->
+                Base.Option.map
+                  (image_word img_bytes
+                     (Stdlib.Int64.to_int (Stdlib.Int64.sub ai img_lo))
+                     ~endian ~bits)
+                  ~f:(fun w -> w :: ws))))
+  |> Option.map ~f:(fun words -> WordSet.of_list ~width:bits words)
+
 let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
     (mv : Mem.t) : wordset option =
   (* A live (non-bottom) memory reads top where no cell covers the
      bytes; a bottom memory — the unreached state's default — keeps
      the load's own abstract value. *)
-  if not (Mem.is_bottom mv) then
+  if Mem.is_bottom mv then None
+  else
     match !section_images_ref with
     | [] -> None
     | images ->
-    if
-      bits <= 0 || bits > 64
-      || WordSet.is_top addr || WordSet.is_bottom addr
-      || WordSet.is_infinite addr
-      || Option.is_some (WordSet.stack_offsets addr)
-      || WordSet.in_stack_segment addr
-    then None
-    else
-      let i64 w =
-        Cbat_word.to_int64_opt w
-      in
-      let mn_w = WordSet.min_elem addr and mx_w = WordSet.max_elem addr in
-      match
-        Base.Option.bind mn_w ~f:i64, Base.Option.bind mx_w ~f:i64
-      with
-      | Some lo_a, Some hi_a -> (
+      if not (image_address_ok addr bits) then None
+      else
+        let mn_w = WordSet.min_elem addr and mx_w = WordSet.max_elem addr in
+        match
+          Base.Option.bind mn_w ~f:word_i64, Base.Option.bind mx_w ~f:word_i64
+        with
+        | Some lo_a, Some hi_a -> (
           let nb = bits / 8 in
           let last = Stdlib.Int64.add hi_a (Stdlib.Int64.of_int (nb - 1)) in
           if Stdlib.Int64.unsigned_compare last hi_a < 0 then None
@@ -243,22 +262,9 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
               else
                 (* Every enumerated address lies inside the hull, whose
                    whole extent the span check covered — the reads stay
-                   in bounds; one unreadable word refuses the arm for
-                   the whole set. *)
-                Base.List.fold (WordSet.iter addr) ~init:(Some [])
-                  ~f:(fun acc a ->
-                      Base.Option.bind acc ~f:(fun ws ->
-                          Base.Option.bind (i64 a) ~f:(fun ai ->
-                              Base.Option.map
-                                (image_word img_bytes
-                                   (Stdlib.Int64.to_int
-                                      (Stdlib.Int64.sub ai img_lo))
-                                   ~endian ~bits)
-                                ~f:(fun w -> w :: ws))))
-                |> Option.map ~f:(fun words ->
-                        WordSet.of_list ~width:bits words))
-      | _ -> None
-  else None
+                   in bounds. *)
+                read_image_words ~img_bytes ~img_lo ~endian ~bits addr)
+        | _ -> None
 
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let open Monad_type_error in
@@ -282,14 +288,14 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   | Bil.Load (m, a, e, s) ->
     denote_exp a env >>= val_as_imm >>= fun addr ->
     denote_exp m env >>= val_as_mem >>= fun mv ->
-    let resSize = Size.in_bits s in
-    (match section_image_load ~addr ~endian:e ~bits:resSize mv with
+    let res_size = Size.in_bits s in
+    (match section_image_load ~addr ~endian:e ~bits:res_size mv with
     | Some ws -> return_imm ws
     | None ->
-      if WordSet.splits_by addr (Cbat_word.of_int ~width:resSize (Size.in_bytes s))
-      then Option.value_map ~default:(return_imm @@ WordSet.bottom resSize) (Mem.Key.of_wordset addr)
-          ~f:(fun k -> Mem.find (resSize, e) mv k |> Mem.Val.data |> return_imm)
-      else return_imm @@ WordSet.top resSize)
+      if WordSet.splits_by addr (Cbat_word.of_int ~width:res_size (Size.in_bytes s))
+      then Option.value_map ~default:(return_imm @@ WordSet.bottom res_size) (Mem.Key.of_wordset addr)
+          ~f:(fun k -> Mem.find (res_size, e) mv k |> Mem.Val.data |> return_imm)
+      else return_imm @@ WordSet.top res_size)
   | Bil.Store (m, a, u, e, s) ->
     Type.infer u >>= fun u_typ ->
     let sz = Size.in_bits s in
@@ -314,10 +320,8 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     denote_exp cond env >>= val_as_imm >>= fun condv ->
     denote_exp yes env >>= fun yesv ->
     denote_exp no env >>= fun nov ->
-    if WordSet.is_top condv then val_join yesv nov
-    else if WordSet.equal condv (WordSet.singleton (Cbat_word.b1)) then return yesv
+    if WordSet.equal condv (WordSet.singleton (Cbat_word.b1)) then return yesv
     else if WordSet.equal condv (WordSet.singleton Cbat_word.b0) then return nov
-    
     else val_join yesv nov
   | Bil.Extract (hi, lo, e) ->
     denote_exp e env >>= val_as_imm >>= fun v ->

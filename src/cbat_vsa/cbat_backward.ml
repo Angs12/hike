@@ -768,7 +768,7 @@ let rec inverse_denote ~(env : AI.t)
        (match !cells with
         | [] -> env
         | pending ->
-          let resSize = Size.in_bits s in
+          let res_size = Size.in_bits s in
           let ks = Option.bind (Base.Result.ok (denote_imm_exp a env)) ~f:bounded_cell_key in
           (match ks with
            | None -> env
@@ -777,7 +777,7 @@ let rec inverse_denote ~(env : AI.t)
                | [] -> None
                | cell :: rest ->
                  if Var.same cell.pc_mem mv
-                    && WordSet.bitwidth cell.pc_cstr = resSize
+                    && WordSet.bitwidth cell.pc_cstr = res_size
                     && Mem.Key.overlap ks cell.pc_key
                  then Some (cell, rest)
                  else
@@ -897,13 +897,13 @@ and meet_cell ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
 #endif
              env
            | Some key ->
-             let resSize = Size.in_bits size in
-             if WordSet.bitwidth produced <> resSize then env
+             let res_size = Size.in_bits size in
+             if WordSet.bitwidth produced <> res_size then env
              else
                let mv = AI.find_memory k env m in
                let data = Mem.Val.create produced endian in
 #ifdef VSA_DEBUG
-               let pre = Mem.Val.data (Mem.find (resSize, endian) mv key) in
+               let pre = Mem.Val.data (Mem.find (res_size, endian) mv key) in
                if Cbat_landmarks.observe_unsat_cell landmarks
                     ~cell:(Mem.Key.cell_key key) ~p:pre ~cstr:produced
                then incr Stages.cell_lm_recorded;
@@ -918,7 +918,7 @@ and meet_cell ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
 #else
                ignore (Cbat_landmarks.observe_unsat_cell landmarks
                          ~cell:(Mem.Key.cell_key key)
-                         ~p:(Mem.Val.data (Mem.find (resSize, endian) mv key))
+                         ~p:(Mem.Val.data (Mem.find (res_size, endian) mv key))
                          ~cstr:produced);
 #endif
                AI.add_memory env ~key:m

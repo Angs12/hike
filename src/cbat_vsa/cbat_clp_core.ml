@@ -344,26 +344,29 @@ let unwrap (p : t) : t = unwrap_with ~default:bottom min_elem max_elem p
 let unwrap_signed (p : t) : t =
   unwrap_with ~default:top min_elem_signed max_elem_signed p
 
-(* Smallest circular hull of two intervals. *)
+(* Smallest circular hull of two intervals.  The offsets are rebased
+   to a1 (the *_rel suffix); all comparisons run in the rebased line,
+   which never wraps when the intervals overlap. *)
 let interval_union (a1,b1) (a2,b2) : (W.t * W.t) =
-  let szInt = W.bitwidth a1 in
-  
-  let b1' = W.sub b1 a1 in
-  let a2' = W.sub a2 a1 in
-  let b2' = W.sub b2 a1 in
-  let zero = W.zero szInt in
-  
-  if W.(>=) b1' a2' && W.(<) b2' a2' then (b1, W.pred b1)
-  
-  else if W.(>=) b1' a2' && W.(>=) b1' b2' then (a1, b1)
-  
-  else if W.(>=) b1' a2' then (a1, b2)
-  
-  else if W.(<) b2' b1' then (a2, b1)
-  
-  else if W.(<) b2' a2' then (a2, b2)
-  
-  else if W.(>) (W.sub a2' b1') (W.sub zero b2') then (a2,b1)
+  let sz_int = W.bitwidth a1 in
+  let b1_rel = W.sub b1 a1 in
+  let a2_rel = W.sub a2 a1 in
+  let b2_rel = W.sub b2 a1 in
+  let zero = W.zero sz_int in
+  (* Interleaved across the wrap: the hull is the full circle,
+     spelled as the degenerate interval [b, b-1]. *)
+  if W.(>=) b1_rel a2_rel && W.(<) b2_rel a2_rel then (b1, W.pred b1)
+  (* [a1,b1] contains [a2,b2]. *)
+  else if W.(>=) b1_rel a2_rel && W.(>=) b1_rel b2_rel then (a1, b1)
+  (* [a1,b1] reaches into [a2,b2]: the hull spans to the farther end. *)
+  else if W.(>=) b1_rel a2_rel then (a1, b2)
+  (* Disjoint by a gap: take the spanning pair around the gap. *)
+  else if W.(<) b2_rel b1_rel then (a2, b1)
+  (* [a2,b2] contains [a1,b1]. *)
+  else if W.(<) b2_rel a2_rel then (a2, b2)
+  (* Overlapping tails: the hull starts at the interval whose tail
+     covers less of the gap. *)
+  else if W.(>) (W.sub a2_rel b1_rel) (W.sub zero b2_rel) then (a2,b1)
   else (a1, b2)
 
 
@@ -391,11 +394,11 @@ let translate (p : t) i : t =
 
 (* Largest step covering both progressions. *)
 let common_step (b1,s1) (b2,s2) : W.t =
-  let bDiff = if W.(>) b1 b2 then W.sub b1 b2 else W.sub b2 b1 in
-  if W.is_zero s1 then bounded_gcd s2 bDiff
-  else if W.is_zero s2 then bounded_gcd s1 bDiff
-  else let gcdS = (bounded_gcd s1 s2) in
-    bounded_gcd gcdS bDiff
+  let b_diff = if W.(>) b1 b2 then W.sub b1 b2 else W.sub b2 b1 in
+  if W.is_zero s1 then bounded_gcd s2 b_diff
+  else if W.is_zero s2 then bounded_gcd s1 b_diff
+  else let gcd_s = (bounded_gcd s1 s2) in
+    bounded_gcd gcd_s b_diff
 
 let subset_finite (p1 : t) (p2 : t) : bool =
   let width = bitwidth p1 in
@@ -607,9 +610,9 @@ let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
               let up = W.add (W.extract_exn ~hi:width base) (W.mul k s) in
               if W.(>=) up (dom_size ~width:w1 width) then W.ones width else W.extract_exn ~hi:(width - 1) up
             | Some _ -> base in
-        let minE = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
-        if W.(<=) base minE then begin
-          let cardn = cardn_from_bounds base step minE in
+        let min_e = if p1_infinite then e2 else if p2_infinite then e1 else min e1 e2 in
+        if W.(<=) base min_e then begin
+          let cardn = cardn_from_bounds base step min_e in
           !!(create base ~step ~cardn)
         end else begin
           let safe_operand = if subset p1 p2 then p2 else if subset p2 p1 then p1 else if W.(>=) (cardinality p1) (cardinality p2) then p1 else p2 in
@@ -735,12 +738,54 @@ let rec intersection (p1 : t) (p2 : t) : t =
 let overlap (p1 : t) (p2 : t) : bool = not (is_bottom (intersection p1 p2))
 
 (* Difference; exact when one CLP, else identity. *)
+(* The remainder past a removed run [i] ending at [i_end], per the
+   minuend's direction; [cardn] is the removed run's cardinality and
+   [fallback] the survivor hull when no closed form applies. *)
+let diff_ascending (p1 : t) (i : t) (i_end : W.t) : t =
+  match min_elem i with
+  | Some i_lo when W.(=) i_lo p1.base ->
+    let new_base = W.add i_end (step_of p1) in
+    if W.(<) new_base i_end then bottom (bitwidth p1)
+    else create_ascending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
+  | _ -> p1
+
+let diff_descending (p1 : t) (i : t) (i_end : W.t) : t =
+  match min_elem i with
+  | Some i_lo when W.(=) i_end p1.base ->
+    let new_base = W.sub i_lo (step_of p1) in
+    if W.(>) new_base i_lo then bottom (bitwidth p1)
+    else create_descending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
+  | _ -> p1
+
+let diff_circular (p1 : t) (i_end : W.t) (cardn : W.t) : t =
+  (* Wrapping remainder. *)
+  create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
+
+let diff_finite (p1 : t) (i : t) (i_end : W.t) (cardn : W.t)
+    ~(fallback : unit -> t) : t =
+  (* The edges are one interval only on a non-wrapping traversal,
+     where the unsigned minimum is the start; a wrapped Finite set
+     decides by its survivors. *)
+  match finite_end p1 with
+  | Some p_end when W.(<) p_end (base_of p1) -> fallback ()
+  | _ ->
+    (match min_elem i, min_elem p1 with
+     | Some i_lo, Some p_lo ->
+       if W.(=) i_lo p_lo then
+         create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
+       else
+         (match finite_end p1 with
+          | Some p_end when W.(=) i_end p_end ->
+            create p_lo ~step:(step_of p1) ~cardn
+          | _ -> p1)
+     | _ -> p1)
+
 let diff (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then p1
   else if is_bottom p1 then p1
   else if is_bottom p2 then p1
   else
-            let i = intersection p1 p2 in
+    let i = intersection p1 p2 in
     if is_bottom i then p1
     else
       let run =
@@ -768,41 +813,10 @@ let diff (p1 : t) (p2 : t) : t =
         | Some i_end ->
           let cardn = W.sub (cardn_of p1) (cardn_of i) in
           if W.is_zero cardn then bottom (bitwidth p1)
-          else if is_ascending p1 then
-            match min_elem i with
-            | Some i_lo when W.(=) i_lo p1.base ->
-              let new_base = W.add i_end (step_of p1) in
-              if W.(<) new_base i_end then bottom (bitwidth p1)
-              else create_ascending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
-            | _ -> p1
-          else if is_descending p1 then
-            match min_elem i with
-            | Some i_lo when W.(=) i_end p1.base ->
-              let new_base = W.sub i_lo (step_of p1) in
-              if W.(>) new_base i_lo then bottom (bitwidth p1)
-              else create_descending ~width:(bitwidth p1) ~base:new_base ~step:(step_of p1)
-            | _ -> p1
-          else if is_circular p1 then
-            (* Wrapping remainder. *)
-            create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
-          else
-            (* The edges are one interval only on a non-wrapping
-               traversal, where the unsigned minimum is the start; a
-               wrapped Finite AP decides by its survivors. *)
-            (match finite_end p1 with
-             | Some p_end when W.(<) p_end (base_of p1) ->
-               enumerate_or_identity ()
-             | _ ->
-               (match min_elem i, min_elem p1 with
-                | Some i_lo, Some p_lo ->
-                  if W.(=) i_lo p_lo then
-                    create (W.add i_end (step_of p1)) ~step:(step_of p1) ~cardn
-                  else
-                    (match finite_end p1 with
-                     | Some p_end when W.(=) i_end p_end ->
-                       create p_lo ~step:(step_of p1) ~cardn
-                     | _ -> p1)
-                | _ -> p1))
+          else if is_ascending p1 then diff_ascending p1 i i_end
+          else if is_descending p1 then diff_descending p1 i i_end
+          else if is_circular p1 then diff_circular p1 i_end cardn
+          else diff_finite p1 i i_end cardn ~fallback:enumerate_or_identity
 
 
 (* Union; same width expected. *)

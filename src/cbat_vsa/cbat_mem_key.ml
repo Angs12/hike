@@ -86,8 +86,9 @@ module WordSet = Cbat_clp_set_composite
   (* The key the landmark table records this cell under. *)
   let cell_key (k : t) : Cbat_landmarks.Cell_key.t =
     let lo = lower k and hi = upper k in
-    { Cbat_landmarks.Cell_key.cw_lo = lo.pwidth; cv_lo = lo.pvalue;
-      cw_hi = hi.pwidth; cv_hi = hi.pvalue; cstep = k.step }
+    { Cbat_landmarks.Cell_key.lo_width = lo.pwidth;
+      lo_value = lo.pvalue;
+      hi_width = hi.pwidth; hi_value = hi.pvalue; stride = k.step }
 
   (* Strides survive a combination only when both keys name the same
      grid (equal step, congruent lows); any mix demotes to the hull. *)

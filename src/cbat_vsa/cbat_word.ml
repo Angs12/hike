@@ -572,7 +572,7 @@ let count_initial_1s (w : t) : int = snd @@ factor_2s @@ lnot w
 
 let endian_string : Word.endian -> string = function
   | BigEndian -> "BE"
-  | LittleEndian -> "le"
+  | LittleEndian -> "LE"
 
 let gt_int (w : t) (i : int) : bool =
   compare w (of_int ~width:(bitwidth w) i) > 0

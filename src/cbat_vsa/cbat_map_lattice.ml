@@ -112,12 +112,12 @@ module Make_indexed_from_map
 
   let meet' (m1 : map) (m2 : map) : map =
     (* One-sided keys meet the other side's default. *)
-    let mFunc ~key:_ vs = match vs with
+    let merge_f ~key:_ vs = match vs with
       | `Left v1 -> Some v1
       | `Right v2 -> Some v2
       | `Both (v1,v2) -> Some (L.meet v1 v2)
     in
-    Map.merge m1 m2 ~f:mFunc
+    Map.merge m1 m2 ~f:merge_f
 
   let meet : t -> t -> t = lift_meet meet'
 

@@ -550,12 +550,13 @@ let concat (p1 : t) (p2 : t) : t =
   let width1 = bitwidth p1 in
   let width2 = bitwidth p2 in
   let width = width1 + width2 in
-  let p1'base = lshift_exact (base_of p1) width2 in
-  let p1'step = lshift_exact (step_of p1) width2 in
-  let p1' = create p1'base ~step:p1'step ~cardn:(cardn_of p1) in
+  let p1_shifted_base = lshift_exact (base_of p1) width2 in
+  let p1_shifted_step = lshift_exact (step_of p1) width2 in
+  let p1_shifted =
+    create p1_shifted_base ~step:p1_shifted_step ~cardn:(cardn_of p1) in
   let p2' = cast Bil.UNSIGNED width p2 in
   
-  (add p1' p2')
+  (add p1_shifted p2')
 
 
 (* BAP div truncates; ediv is Euclidean. *)
