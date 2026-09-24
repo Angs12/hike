@@ -153,9 +153,17 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       let q = Cbat_word.div x k in
       let r = Cbat_word.modulo x k in
       if Cbat_word.is_zero r then q else Cbat_word.succ q in
+    (* The constraint's and the right operand's extrema, computed
+       once; every arm opens with the pair it needs. *)
+    let v_extrema = (WordSet.min_elem cstr, WordSet.max_elem cstr) in
+    let b_extrema = (WordSet.min_elem b_ws, WordSet.max_elem b_ws) in
+    let b_single =
+      match b_extrema with
+      | Some k, Some k' when Cbat_word.(=) k k' -> Some k
+      | _ -> None in
     match op with
     | Bil.PLUS ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
+      (match v_extrema with
        | Some vlo, Some vhi ->
          let a' = Option.map2 (WordSet.min_elem b_ws) (WordSet.max_elem b_ws)
              ~f:(fun bmin bmax ->
@@ -166,7 +174,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
          a', b'
        | _ -> None, None)
     | Bil.MINUS ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
+      (match v_extrema with
        | Some vlo, Some vhi ->
          let a' = Option.map2 (WordSet.min_elem b_ws) (WordSet.max_elem b_ws)
              ~f:(fun bmin bmax ->
@@ -177,9 +185,8 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
          a', b'
        | _ -> None, None)
     | Bil.TIMES ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr,
-             WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some vlo, Some vhi, Some k, Some k' when Cbat_word.(=) k k' ->
+      (match v_extrema, b_single with
+       | (Some vlo, Some vhi), Some k ->
          (match Cbat_word.to_int k with
           | Ok kk when kk > 0 && operand_bounded (wrap_limit k) ->
             (match hull ~wrapping:false width (ceil_div k vlo)
@@ -189,9 +196,8 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.LSHIFT ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr,
-             WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some vlo, Some vhi, Some smin, Some smax ->
+      (match v_extrema, b_extrema with
+       | (Some vlo, Some vhi), (Some smin, Some smax) ->
          (match Cbat_word.to_int smin, Cbat_word.to_int smax with
           | Ok smin_i, Ok smax_i
             when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
@@ -203,9 +209,8 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.RSHIFT | Bil.ARSHIFT ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr,
-             WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some vlo, Some vhi, Some smin, Some smax ->
+      (match v_extrema, b_extrema with
+       | (Some vlo, Some vhi), (Some smin, Some smax) ->
          (match Cbat_word.to_int smin, Cbat_word.to_int smax with
           | Ok smin_i, Ok smax_i
             when smin_i >= 0 && smax_i < width && smin_i <= smax_i ->
@@ -222,9 +227,8 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.DIVIDE ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr,
-             WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some vlo, Some vhi, Some kmin, Some kmax ->
+      (match v_extrema, b_extrema with
+       | (Some vlo, Some vhi), (Some kmin, Some kmax) ->
          (match Cbat_word.to_int kmin, Cbat_word.to_int kmax with
           | Ok kmin_i, Ok kmax_i when kmin_i > 0 && kmin_i <= kmax_i ->
             let hi1 = Cbat_word.succ vhi in
@@ -240,10 +244,8 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
           | _ -> None, None)
        | _ -> None, None)
     | Bil.SDIVIDE ->
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr,
-             WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some vlo, Some vhi, Some k, Some k' when
-           width <= 32 && Cbat_word.(=) k k' ->
+      (match v_extrema, b_single with
+       | (Some vlo, Some vhi), Some k when width <= 32 ->
          (match Cbat_word.to_int k with
           | Ok kk when kk > 0 ->
             (* Small widths avoid overflow. *)
@@ -262,8 +264,8 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
       None, None
     | Bil.AND | Bil.OR | Bil.XOR ->
       (* Exact masks constrain; general masks stay identity. *)
-      (match WordSet.min_elem b_ws, WordSet.max_elem b_ws with
-       | Some k, Some k' when Cbat_word.(=) k k' ->
+      (match b_single with
+       | Some k ->
          if Cbat_word.is_zero k then
            (match op with
             | Bil.OR | Bil.XOR -> Some cstr, None
