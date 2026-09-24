@@ -96,7 +96,7 @@ let top_facts : Hike.Kb.facts =
    environments and the REWRITTEN SUB) — the tests' one-line driver.
    [written] is computed at the boundary, exactly like the pass. *)
 let produce ?(block_addrs = []) ?(images = [])
-    ?(lift_at = fun _ -> None) target (prog : program term) (sub : sub term) :
+    ?(lift_at = fun _ ~block_addrs:_ -> None) target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
   match
     Hv.fixpoint target ~prog ~lookup:(fun _ -> None) ~symtab:None ~images
@@ -161,7 +161,7 @@ let fixture_facts (subs : sub term list) :
             ~lookup:(fun _ -> None) ~symtab:None ~images:[]
             ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                         (Program.create ~subs:[ sub ] ()))
-            ~lift_at:(fun _ -> None)
+            ~lift_at:(fun _ ~block_addrs:_ -> None)
             ~block_addrs:(Core.Map.empty (module Addr)) sub
         with
         | None -> (m, stamped, false)

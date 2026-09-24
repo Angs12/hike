@@ -56,7 +56,7 @@ let passcost_main (args : string list) : unit =
                 Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
                   ~lookup:(fun _ -> None) ~symtab:None ~images:[]
                   ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi prog)
-                  ~lift_at:(fun _ -> None)
+                  ~lift_at:(fun _ ~block_addrs:_ -> None)
                   ~block_addrs:(Core.Map.empty (module Addr)) sub)
           in
           let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in
@@ -127,7 +127,7 @@ let () =
           let _envs, _sub', _ =
             Hike.Vsa.fixpoint target ~prog
               ~lookup:(fun _ -> None) ~symtab ~images ~written
-              ~lift_at:(fun _ -> None)
+              ~lift_at:(fun _ ~block_addrs:_ -> None)
               ~block_addrs sub
             |> Base.Option.value
                  ~default:(Tid.Map.empty, sub, Core.Map.empty (module Addr))

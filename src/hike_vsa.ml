@@ -114,7 +114,7 @@ let fixpoint (target : Theory.Target.t)
     ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
     ~(written : Var.Set.t option Tid.Map.t)
-    ~(lift_at : Addr.t -> blk term list option)
+    ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) :
     ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t) option =

@@ -145,10 +145,11 @@ let remap_jmp f (j : jmp term) : jmp term =
    and their addresses join the run's map.  A lifted block that only
    repeats a block already present (its address or tid is known) is not
    added twice — references to it are retargeted to that block. *)
-let materialize_block ~(lift_at : Addr.t -> blk term list option)
+let materialize_block
+    ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) (a : Addr.t) :
     (sub term * tid * (Addr.t * tid) list) option =
-  match lift_at a with
+  match lift_at a ~block_addrs with
   | None | Some [] -> None
   | Some blks ->
     let addr_of b = Term.get_attr b address in
@@ -194,7 +195,7 @@ let materialize_block ~(lift_at : Addr.t -> blk term list option)
    takes the address; sound only when the prefix is transparent.  A word
    in no block at all materializes its case body instead. *)
 let split_entry ~(starts : (Addr.t * tid) list)
-    ~(lift_at : Addr.t -> blk term list option)
+    ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t) (a : Addr.t) (sub : sub term) :
     sub term * tid * (Addr.t * tid) list =
   let container =
@@ -307,7 +308,7 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
    loud analysis loss.  One split per walk, so the walks terminate. *)
 let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(fresh : Tid.Set.t ref)
-    ~(lift_at : Addr.t -> blk term list option)
+    ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
   (* A block's last-def map is a per-walk fact; a split rewrites the
@@ -818,7 +819,7 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
    change and it is additive. *)
 let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
-    ~(lift_at : Addr.t -> blk term list option)
+    ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool =

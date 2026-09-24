@@ -96,7 +96,8 @@ let pass_vsa proj =
      the lift never made a block.  The view starts at the word so the
      body's first block is aligned there; only the blocks reachable from
      it are kept (the sweep's tail past the terminator is dropped). *)
-  let lift_at (a : Addr.t) : blk term list option =
+  let lift_at (a : Addr.t) ~(block_addrs : Tid.t Addr.Map.t) :
+      blk term list option =
     match Seq.to_list (Memmap.lookup (Project.memory proj) a) with
     | [] -> None
     | (seg, _) :: _ -> (
@@ -117,6 +118,12 @@ let pass_vsa proj =
               let others =
                 Base.List.filter nodes ~f:(fun n ->
                     not (Addr.equal (Block.addr n) a))
+              in
+              (* A block the run already names is not lifted again; the
+                 retarget resolves references to it. *)
+              let others =
+                Base.List.filter others ~f:(fun n ->
+                    not (Core.Map.mem block_addrs (Block.addr n)))
               in
               Base.List.concat_map (root :: others) ~f:(Blk.lift cfg)))
   in

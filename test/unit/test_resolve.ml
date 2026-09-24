@@ -462,7 +462,7 @@ let tests : unit Alcotest.test list =
           produce Theory.Target.unknown
             ~block_addrs:
               [ (0x3008L, j8_tids.(4)); (0x400000L, j8_tids.(5)) ]
-            ~lift_at:(fun a' ->
+            ~lift_at:(fun a' ~block_addrs:_ ->
               if Addr.equal a' a then Some materialized else None)
             (Program.create ~subs:[ j8 ] ()) j8
         in
@@ -609,7 +609,7 @@ let tests : unit Alcotest.test list =
             let sub5', resolved5', fresh5', _, events5 =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                 ~images:[]
-                ~lift_at:(fun _ -> None)
+                ~lift_at:(fun _ ~block_addrs:_ -> None)
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
@@ -654,7 +654,7 @@ let tests : unit Alcotest.test list =
             let sub5', _, _, _, _ =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                 ~images:[]
-                ~lift_at:(fun _ -> None)
+                ~lift_at:(fun _ ~block_addrs:_ -> None)
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
