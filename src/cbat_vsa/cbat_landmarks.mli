@@ -23,7 +23,8 @@ val clear_head : t -> Tid.t -> Tid.Set.t -> unit
 
 (* Record an empty meet's disabled boundary at the enclosing head. *)
 val observe_unsat_var :
-  t -> var -> p:Cbat_clp_set_composite.t -> cstr:Cbat_clp_set_composite.t -> unit
+  t -> var -> p:Cbat_clp_set_composite.t -> cstr:Cbat_clp_set_composite.t ->
+  meet:Cbat_clp_set_composite.t -> unit
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf
    widens. *)

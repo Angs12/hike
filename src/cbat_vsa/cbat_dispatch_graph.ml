@@ -49,13 +49,26 @@ let extras_of_sub ~(blocks : Tid.Set.t)
 let make ~(cfg : Graphs.Tid.t) ~(blocks : Tid.Set.t)
     (resolved : Tid.Set.t Tid.Map.t) (sub : sub term) : t =
   let extras = extras_of_sub ~blocks resolved sub in
+  (* Successor lists precompute exactly like the preds transpose:
+     one table, queried per node per WTO level and per enqueue. *)
+  let succs_map =
+    Graphs.Tid.nodes cfg
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m v ->
+        Core.Map.set m ~key:v
+          ~data:(Graphs.Tid.Node.succs v cfg |> Seq.to_list))
+  in
+  let succs_map =
+    Core.Map.fold extras ~init:succs_map
+      ~f:(fun ~key:v ~data:es acc ->
+        let ss = Option.value (Core.Map.find acc v) ~default:[] in
+        let ss =
+          Base.List.fold (Core.Set.to_list es) ~init:ss ~f:(fun acc t ->
+              if Base.List.mem acc t ~equal:Tid.equal then acc else t :: acc)
+        in
+        Core.Map.set acc ~key:v ~data:ss)
+  in
   let succs (v : tid) : tid list =
-    let base = Graphs.Tid.Node.succs v cfg |> Seq.to_list in
-    match Core.Map.find extras v with
-    | None -> base
-    | Some es ->
-      Base.List.fold (Core.Set.to_list es) ~init:base ~f:(fun acc t ->
-          if Base.List.mem acc t ~equal:Tid.equal then acc else t :: acc)
+    Option.value (Core.Map.find succs_map v) ~default:[]
   in
   let preds =
     Graphs.Tid.nodes cfg

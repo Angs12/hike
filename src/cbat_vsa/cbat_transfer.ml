@@ -26,12 +26,16 @@ type wordset = WordSet.t
 
 
 
-let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
+(* The width-1 shapes the comparison rows return, built once — the
+   hottest solver function reads these on every row. *)
+let bool_row =
   let btrue = WordSet.singleton (Cbat_word.b1) in
   let bfalse = WordSet.singleton (Cbat_word.b0) in
+  (btrue, bfalse, WordSet.top 1, WordSet.bottom 1)
+
+let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
+  let btrue, bfalse, bool_top, bool_bottom = bool_row in
   let wordset_of_bool b = if b then btrue else bfalse in
-  let bool_top = WordSet.top 1 in
-  let bool_bottom = WordSet.bottom 1 in
   (* Shared LT/LE/SLT/SLE endpoint test. *)
   let ordering ~(signed : bool) ~(le : bool) v1 v2 =
     let open Monads.Std.Monad.Option in

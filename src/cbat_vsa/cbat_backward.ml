@@ -629,7 +629,8 @@ let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
         Format.eprintf "DBG OBSERVE-UNSAT var=%s cur=%a cstr=%a\n%!"
           (Var.name v) WordSet.pp cur WordSet.pp refined;
 #endif
-        Cbat_landmarks.observe_unsat_var landmarks v ~p:cur ~cstr:refined;
+        Cbat_landmarks.observe_unsat_var landmarks v ~p:cur ~cstr:refined
+          ~meet:m;
         env
       end else if not (WordSet.precedes m cur)
       then env

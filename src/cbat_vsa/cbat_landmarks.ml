@@ -96,7 +96,9 @@ let entries_for_head (t : t) (head : Tid.t) : lm_entry list =
 (* Record an empty meet's disabled boundary at the enclosing head. The
    head check comes first: outside a cycle the meet below is pure
    computation whose result is discarded. *)
-let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : unit =
+let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t)
+    ~(cstr : Cbat_clp_set_composite.t)
+    ~(meet : Cbat_clp_set_composite.t) : unit =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then ()
   else
     match t.widening_at_head with
@@ -104,7 +106,7 @@ let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t) ~(cstr :
       (* Outside a cycle: no-op. *)
       ()
     | Some h ->
-      let m = Cbat_clp_set_composite.meet p cstr in
+      let m = meet in
       if not (Cbat_clp_set_composite.is_bottom m) then ()
       else
         match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,

@@ -79,31 +79,32 @@ module Scc (K : sig
 struct
   let partition (nodes : K.t list) (succ : K.t -> K.t list)
       (pred : K.t -> K.t list) : K.t list list =
-    let eq a b = K.compare a b = 0 in
-    let mem x l = List.exists l ~f:(eq x) in
-    let node_set = nodes in
-    let visited = ref [] in
+    (* Membership is hashed, not scanned — the DFS visits are O(V.E)
+       total, not O(V^2.E).  Visit order is unchanged. *)
+    let in_nodes = Stdlib.Hashtbl.create 64 in
+    List.iter nodes ~f:(fun n -> Stdlib.Hashtbl.replace in_nodes n true);
+    let visited = Stdlib.Hashtbl.create 64 in
     let order = ref [] in
     let rec dfs1 (n : K.t) : unit =
-      if not (mem n !visited) then begin
-        visited := n :: !visited;
+      if not (Stdlib.Hashtbl.mem visited n) then begin
+        Stdlib.Hashtbl.replace visited n true;
         List.iter (succ n) ~f:(fun m ->
-            if mem m node_set then dfs1 m);
+            if Stdlib.Hashtbl.mem in_nodes m then dfs1 m);
         order := n :: !order
       end
     in
     List.iter nodes ~f:dfs1;
-    let visited2 = ref [] in
+    let visited2 = Stdlib.Hashtbl.create 64 in
     let comps = ref [] in
     List.iter !order ~f:(fun n ->
-        if not (mem n !visited2) then begin
+        if not (Stdlib.Hashtbl.mem visited2 n) then begin
           let cur = ref [] in
           let rec dfs2 (x : K.t) : unit =
-            if not (mem x !visited2) then begin
-              visited2 := x :: !visited2;
+            if not (Stdlib.Hashtbl.mem visited2 x) then begin
+              Stdlib.Hashtbl.replace visited2 x true;
               cur := x :: !cur;
               List.iter (pred x) ~f:(fun p ->
-                  if mem p node_set then dfs2 p)
+                  if Stdlib.Hashtbl.mem in_nodes p then dfs2 p)
             end
           in
           dfs2 n;
@@ -155,11 +156,15 @@ let wto ~(nodes : Tid.t list) ~(succ : Tid.t -> Tid.t list)
       let pred (n : Tid.t) : Tid.t list =
         List.filter (pred n) ~f:(fun m -> Core.Set.mem node_set m) in
       let sccs = scc_partition nodes succ pred in
+      (* Decorate each SCC with its minimal RPO once; sort on the key. *)
+      let key scc =
+        List.fold scc ~init:Int.max_value
+          ~f:(fun acc v -> Int.min acc (get_rpo v))
+      in
       let sccs_sorted =
-        List.sort sccs ~compare:(fun a b ->
-            let ma = List.map a ~f:get_rpo |> List.min_elt ~compare:Int.compare |> Option.value ~default:Int.max_value in
-            let mb = List.map b ~f:get_rpo |> List.min_elt ~compare:Int.compare |> Option.value ~default:Int.max_value in
-            Int.compare ma mb) in
+        List.map sccs ~f:(fun scc -> (key scc, scc))
+        |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+        |> List.map ~f:snd in
       List.concat_map sccs_sorted ~f:(fun scc ->
           match scc with
           | [v] when not (has_self_loop v) -> [Vertex v]
