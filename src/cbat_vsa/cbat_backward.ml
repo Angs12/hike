@@ -313,6 +313,8 @@ let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
        | _ -> None)
   | Error _ -> None
 
+(* The six comparisons, exhaustive: any other binop is not a guard
+   op and fails loudly. *)
 let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
   | Bil.LT -> ULT
   | Bil.LE -> ULE
@@ -320,7 +322,9 @@ let guard_op_of_binop (op : Bil.binop) : guard_op = match op with
   | Bil.NEQ -> NEQ
   | Bil.SLT -> SLT
   | Bil.SLE -> SLE
-  | _ -> EQ
+  | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
+  | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
+  | Bil.AND | Bil.OR | Bil.XOR -> assert false
 
 let flip_guard_op (op : guard_op) : guard_op = match op with
   | ULT -> UGT | UGT -> ULT
@@ -599,8 +603,13 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
    windows.  A node with no closed-form inverse takes identity; a
    genuinely empty pre-image is the dead edge. *)
 (* A cell fact awaiting delivery to the same-block store that wrote
-   it: the memory var, the key the load read, the value constraint. *)
-type pending_cell = var * Mem.Key.t * wordset * endian
+   it. *)
+type pending_cell = {
+  pc_mem : var;          (* the memory var *)
+  pc_key : Mem.Key.t;    (* the key the load read *)
+  pc_cstr : wordset;     (* the produced value's constraint *)
+  pc_endian : endian;
+}
 
 (* The leaf var's inverse: the meet; an empty meet is observed as a
    widening landmark and takes identity. *)
@@ -745,7 +754,9 @@ let rec inverse_denote ~(env : AI.t)
        (match denote_imm_exp a env with
         | Ok aws ->
           Option.iter (bounded_cell_key aws)
-            ~f:(fun k -> cells := (mv, k, produced, en) :: !cells)
+            ~f:(fun k ->
+               cells := { pc_mem = mv; pc_key = k; pc_cstr = produced;
+                          pc_endian = en } :: !cells)
         | Error _ -> ())
      | _ -> ());
     env
@@ -764,22 +775,22 @@ let rec inverse_denote ~(env : AI.t)
            | Some ks ->
              let rec take pending = match pending with
                | [] -> None
-               | ((mv', kc, c, _en) as cell) :: rest ->
-                 if Var.same mv' mv
-                    && WordSet.bitwidth c = resSize
-                    && Mem.Key.overlap ks kc
+               | cell :: rest ->
+                 if Var.same cell.pc_mem mv
+                    && WordSet.bitwidth cell.pc_cstr = resSize
+                    && Mem.Key.overlap ks cell.pc_key
                  then Some (cell, rest)
                  else
-                   match take rest with
-                   | Some (cell', rest') -> Some (cell', cell :: rest')
-                   | None -> None in
+                   (match take rest with
+                    | Some (cell', rest') -> Some (cell', cell :: rest')
+                    | None -> None) in
              (match take pending with
               | None -> env
-              | Some ((_, _, cstr_cell, _), rest) ->
+              | Some (cell, rest) ->
                 cells := rest;
                 let data_cstr =
                   Option.value_map (Base.Result.ok (denote_imm_exp u env))
-                    ~default:cstr_cell ~f:(WordSet.meet cstr_cell) in
+                    ~default:cell.pc_cstr ~f:(WordSet.meet cell.pc_cstr) in
                 if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
                 else inverse_denote ~env ~cells ~nonneg ~landmarks u data_cstr)))
      | _ -> env)
@@ -930,6 +941,26 @@ type live_map = wordset Var.Map.t
    with [live].  [~raw] applies the constraint AS GIVEN, skipping the
    producer subtraction — the acquisition's hypothetical; raw walks
    write nothing, only the empty-meet observations fire. *)
+(* Constraints on vars the block never defines cross unchanged. *)
+let carry_undefined ~(raw : bool) (live : wordset Var.Map.t)
+    (env : AI.t) : AI.t =
+  Core.Map.fold live ~init:env ~f:(fun ~key:v ~data:c acc ->
+      if raw then acc
+      else
+        match Var.typ v with
+        | Type.Imm w when WordSet.bitwidth c = w ->
+          let cur = AI.find_word w acc v in
+          let m = WordSet.meet cur c in
+          if (not (Cbat_word.is_zero (WordSet.cardinality m)))
+             && WordSet.precedes m cur
+          then AI.add_word acc ~key:v ~data:m
+          else acc
+        | _ -> acc)
+
+(* A produced-width dummy for mem defs: their inverse reads ~cells,
+   never the width. *)
+let undefined_width = WordSet.bottom 8
+
 let walk ?(raw : bool = false)
     ~(sol : (tid, AI.t) Solution.t)
     ~(landmarks : Cbat_landmarks.t)
@@ -999,10 +1030,10 @@ let walk ?(raw : bool = false)
         Option.iter (mem_idx_of m) ~f:(fun (k, m) ->
             env_out := AI.add_memory !env_out ~key:m
                 ~data:(AI.find_memory k env' m))) in
-  List.iter prefixed ~f:(fun (d, pre, post) ->
-      let v = Def.lhs d in
-      match Var.typ v with
-      | Type.Imm w ->
+  let walk_word_def (d, pre, post) =
+    let v = Def.lhs d in
+    match Var.typ v with
+    | Type.Imm w ->
         let cstr = Core.Map.find !live (Var.base v) in
         (* The def consumes its var's constraint, whatever it says. *)
         live := Core.Map.remove !live (Var.base v);
@@ -1040,31 +1071,23 @@ let walk ?(raw : bool = false)
                end
              end
            end)
-      | Type.Mem _ ->
-        (* Driven by the pending cells the loads pushed. *)
-        if not raw then
-          (match !cells with
-           | [] -> ()
-           | _ ->
-             let ce = call_env pre in
-             let env' =
-               inverse_denote ~env:ce ~cells ~landmarks
-                 ~nonneg:(fun e -> witness ~env:ce e)
-                 (Def.rhs d) (WordSet.bottom 8) in
-             commit_memory env';
-             harvest ~base:ce env' (Def.rhs d))
-      | Type.Unk -> ());
-  (* Constraints on vars the block never defines cross unchanged. *)
-  Core.Map.fold !live ~init:() ~f:(fun ~key:v ~data:c () ->
-      if raw then () else
-      match Var.typ v with
-      | Type.Imm w when WordSet.bitwidth c = w ->
-        let cur = AI.find_word w !env_out v in
-        let m = WordSet.meet cur c in
-        if (not (Cbat_word.is_zero (WordSet.cardinality m)))
-           && WordSet.precedes m cur
-        then env_out := AI.add_word !env_out ~key:v ~data:m
-      | _ -> ());
+    | Type.Mem _ ->
+      (* Driven by the pending cells the loads pushed. *)
+      if not raw then
+        (match !cells with
+         | [] -> ()
+         | _ ->
+           let ce = call_env pre in
+           let env' =
+             inverse_denote ~env:ce ~cells ~landmarks
+               ~nonneg:(fun e -> witness ~env:ce e)
+               (Def.rhs d) undefined_width in
+           commit_memory env';
+           harvest ~base:ce env' (Def.rhs d))
+    | Type.Unk -> ()
+  in
+  List.iter prefixed ~f:walk_word_def;
+  env_out := carry_undefined ~raw !live !env_out;
   !env_out
 
 (* The walk's seeds: the cond's OWN narrowings — the strict per-var

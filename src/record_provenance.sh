@@ -8,9 +8,9 @@ set -euo pipefail
 
 PLUGIN_DST="${HIKE_PLUGIN_DST:-}"
 if [ -z "$PLUGIN_DST" ]; then
-  # The plugin is built by dune (bapbuild retired): the dynlinked object is
-  # <switch>/lib/hike/hike.cmxs; the bap-common/plugins/hike/META stub only
-  # requires the hike package. Locate the object via the active switch.
+  # The plugin's dynlinked object is <switch>/lib/hike/hike.cmxs; the
+  # bap-common/plugins/hike/META stub only requires the hike package.
+  # Locate the object via the active switch.
   for base in "${OPAM_SWITCH_PREFIX:-}" "$(opam switch show --safe 2>/dev/null | sed "s|^|$HOME/.opam/|")" "$HOME/.opam"; do
     [ -n "$base" ] || continue
     cand=$(find "$base/lib/hike" -maxdepth 1 -name 'hike.cmxs' 2>/dev/null | head -1)

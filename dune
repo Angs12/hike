@@ -4,7 +4,7 @@
 (dirs :standard \ bap.dev)
 
 ; The workspace-wide env stanzas live here (NOT in dune-project: profiles
-; are not dune-project fields — see commit e9c8d95 and d4d31a5).
+; are not dune-project fields).
 ;
 ; [vsa-debug] is the sanctioned home for EVERYTHING diagnostic (AGENTS.md
 ; §6): temporary debug prints, env-gated instrumentation, profiling

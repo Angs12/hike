@@ -93,8 +93,7 @@ let addressed_starts ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) :
 let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) ?def
     (texp : exp) : Cbat_word.t list option =
-  let blocks = block_addrs in
-  if Core.Map.is_empty blocks then None
+  if Core.Map.is_empty block_addrs then None
   else
     Base.Option.bind (Base.Result.ok (denote ~blk ?def texp)) ~f:(fun ws ->
         if Vsa.WordSet.is_top ws || Vsa.WordSet.is_infinite ws
@@ -107,13 +106,15 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
                 else "BOTTOM"));
           None)
         else
-          (match Vsa.WordSet.enumerate ~cap:(Core.Map.length blocks) ws with
+          (match
+             Vsa.WordSet.enumerate ~cap:(Core.Map.length block_addrs) ws
+           with
            | Some ws -> Some ws
            | None ->
              option_if_debug
                (Printf.sprintf
                   "bounded_words: card exceeds the map's %d blocks"
-                  (Core.Map.length blocks));
+                  (Core.Map.length block_addrs));
              None))
 
 (* Rewrite a lifted term's direct targets through [f]; indirect targets

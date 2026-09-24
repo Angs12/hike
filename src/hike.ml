@@ -159,8 +159,8 @@ let pass_vsa proj =
           Option.value (Base.Option.map (Core.Map.find subs_acc (Term.tid sub)) ~f:snd)
             ~default:sub))
 
-(* The canary strip runs before the fission: a proven canary
-   composition is deleted before emission. *)
+(* The canary strip runs after the solve, before the attribution: a
+   proven canary composition is deleted before emission. *)
 let pass_strip_canaries proj =
   let facts = Hike_kb.facts () in
   let names =

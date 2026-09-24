@@ -212,14 +212,13 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op 
         Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | FHLT -> assert false
   in
-  let r = result in
   (* Ret temps bind in both scopes: the call block (phi consumers)
      and the fallthrough block (direct reads). *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
       let rw = match Var.typ ret with Type.Imm w -> w | _ -> word_bits in
       let r_lane =
         coerce_int_width llvm_ctx llvm_builder
-          ~bits:(int_width_or word_bits r) r rw in
+          ~bits:(int_width_or word_bits result) result rw in
       insert_local scope blk_tid ret r_lane;
       Option.iter (fun t -> insert_local scope t ret r_lane) fallthrough);
   Option.iter

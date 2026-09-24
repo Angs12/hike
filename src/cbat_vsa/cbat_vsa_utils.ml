@@ -56,7 +56,10 @@ let negate_comparison (op : Bil.binop) : Bil.binop * bool =
   | Bil.SLT -> (Bil.SLE, true)
   | Bil.SLE -> (Bil.SLT, true)
   | Bil.EQ -> (Bil.NEQ, false)
-  | _ -> (Bil.EQ, false)
+  | Bil.NEQ -> (Bil.EQ, false)
+  | Bil.PLUS | Bil.MINUS | Bil.TIMES | Bil.DIVIDE | Bil.SDIVIDE
+  | Bil.MOD | Bil.SMOD | Bil.LSHIFT | Bil.RSHIFT | Bil.ARSHIFT
+  | Bil.AND | Bil.OR | Bil.XOR -> assert false
 
 let is_comparison_op (op : Bil.binop) : bool =
   match op with

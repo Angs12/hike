@@ -111,9 +111,9 @@ module Jump : sig
   val compile_sub : Theory.Target.t -> sub term -> sub term
 end
 
-    (** Node fission: every def keeps exactly one memory node inline —
-        the per-def tag is then the complete proof of that node. *)
-    module Split_mem : sig
+(** Node fission: every def keeps exactly one memory node inline —
+    the per-def tag is then the complete proof of that node. *)
+module Split_mem : sig
   val split_sub : sub term -> sub term
   val normalize : program term -> program term
 end
@@ -238,7 +238,8 @@ module Promote = Hike_promote
     value slots' home. *)
 module Kb = Hike_kb
 
-(** The canary-strip pass: proven canary compositions delete before
+(** The canary-strip pass (after the solve, before the attribution):
+    proven canary compositions delete before
     the fission. *)
 module Strip_canaries : sig
   (** [strip_sub ~facts ~names sub] removes every proven canary
