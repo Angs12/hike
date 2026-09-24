@@ -201,11 +201,19 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
     Seq.take res_inf_seq seq_len
 
 
-  (* The op per [sz]-cell, composed from [op_at_seq]: the sequence's
-     pieces place into the result's endianness and join.  The same-
-     width case rides the same path (its single piece shifts by 0). *)
-  let op_at (op : WordSet.t -> WordSet.t -> WordSet.t) ((sz, e) as idx) (v1 : t) (v2 : t) : t =
-    let wordset_seq  = op_at_seq op idx v1 v2 in
+  let op_at (op : WordSet.t -> WordSet.t -> WordSet.t) (sz, e : idx) (v1 : t) (v2 : t) : t =
+    let w1, _ = get_idx v1 in
+    let w2, _ = get_idx v2 in
+    if
+      w1 = sz && w2 = sz
+      && Bitvector.compare_endian e v1.endian = 0
+      && Bitvector.compare_endian e v2.endian = 0
+    then
+      (* Same width: direct — the composed path's cast/lshift would
+         collapse the CLP direction metadata the widening reads. *)
+      create (op v1.data v2.data) e
+    else
+    let wordset_seq  = op_at_seq op (sz, e) v1 v2 in
     let wordset_of_int i = WordSet.singleton (Cbat_word.of_int ~width:sz i) in
     let place_in_result = match e with
       | LittleEndian -> fun i p ->
