@@ -325,9 +325,9 @@ let equal (p1 : t) (p2 : t) : bool =
   else if bitwidth p1 <> bitwidth p2 then false
   else p1 = p2
 
-(* Rebase onto extrema interval. *)
-let unwrap_with ~(default : unit -> t) ~(min : t -> W.t option)
-    ~(max : t -> W.t option) (p : t) : t =
+(* Rebase onto an extrema interval; [default] when the extrema give
+   out (bottom). *)
+let unwrap_with ~default min max (p : t) : t =
   let open Monads.Std.Monad.Option.Syntax in
   match begin
     min p >>= fun base ->
@@ -336,15 +336,13 @@ let unwrap_with ~(default : unit -> t) ~(min : t -> W.t option)
     let cardn = cardn_from_bounds base step e in
     !!(create base ~step ~cardn)
   end with
-  | None -> default ()
+  | None -> default (bitwidth p)
   | Some x -> x
 
-let unwrap (p : t) : t =
-  unwrap_with ~default:(fun () -> bottom (bitwidth p)) ~min:min_elem ~max:max_elem p
+let unwrap (p : t) : t = unwrap_with ~default:bottom min_elem max_elem p
 
 let unwrap_signed (p : t) : t =
-  unwrap_with ~default:(fun () -> top (bitwidth p))
-    ~min:min_elem_signed ~max:max_elem_signed p
+  unwrap_with ~default:top min_elem_signed max_elem_signed p
 
 (* Smallest circular hull of two intervals. *)
 let interval_union (a1,b1) (a2,b2) : (W.t * W.t) =

@@ -138,8 +138,8 @@ let splits_by (s, _ : t) (w : Cbat_word.t) : bool =
     | [], _
     | _, [] -> []
     | e1::l1', e2::l2' -> f e1 e2 :: (map2_shortest ~f l1' l2') in
-  let elems = Core.Set.elements s
-              |> List.sort ~compare:Cbat_word.compare in
+  (* Core.Set.elements is ascending in the set's ordering. *)
+  let elems = Core.Set.elements s in
   let open Monads.Std.Monad.Option.Syntax in
   Option.value ~default:true begin
     List.tl elems >>| fun tl ->

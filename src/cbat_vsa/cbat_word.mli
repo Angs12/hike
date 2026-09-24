@@ -43,7 +43,6 @@ val succ : t -> t
 val pred : t -> t
 val neg : t -> t
 val lnot : t -> t
-val abs : t -> t
 val add : t -> t -> t
 val sub : t -> t -> t
 val mul : t -> t -> t

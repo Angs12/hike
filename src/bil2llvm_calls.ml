@@ -43,10 +43,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
   (* Slot parameter k binds the block's [call_arg (k-1)] def; both
      names derive from the index, so the binding is order-independent. *)
   let arg_value_of_slot k =
-    if k < 1 then None
-    else
-      get_local scope blk_tid
-        (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word (k - 1))
+    get_local scope blk_tid
+      (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word (k - 1))
   in
   Base.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
@@ -248,9 +246,15 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
       let ret_var =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
-      Llvm.add_call_site_attr ret_var
-        (Llvm.create_enum_attr ctx.llvm_ctx "zeroext" 0L)
-        Llvm.AttrIndex.Return;
+      (* A sub-register lane needs the extension promise; a full-width
+         lane carries it vacuously. *)
+      (match Llvm.classify_type (Llvm.type_of ret_var) with
+       | Llvm.TypeKind.Integer when
+           Llvm.integer_bitwidth (Llvm.type_of ret_var) < ctx.addr_bits ->
+         Llvm.add_call_site_attr ret_var
+           (Llvm.create_enum_attr ctx.llvm_ctx "zeroext" 0L)
+           Llvm.AttrIndex.Return
+       | _ -> ());
       insert_local scope blk_tid (Arg.lhs ret) ret_var
   | rets ->
       let ret_struct =
@@ -280,7 +284,7 @@ let extern_stack_args ctx scope blk_tid (blk : blk term) =
   in
   slots 0 []
 
-let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk sub
+let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid blk
     fallthrough target =
   let args = create_call_args ctx scope blk_tid llvm_builder target in
   let args =
@@ -343,7 +347,7 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
 (* An indirect site with an unresolved target: the pointer lands in
    a promoted target's thunk (via address rendering), else the
    target's existing convention. *)
-let create_indirect_call ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
+let create_indirect_call ctx scope llvm_builder blk_tid (j : jmp term) =
   let icall_tid = indirect_call_tid in
   let call = call_exn j in
   let target = Call.target call |> label_exp in
@@ -561,11 +565,11 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
         match Call.return call with
         | Some l ->
             let fallthrough = Some (label_tid l) in
-            create_func_call ctx scope llvm_builder blk_tid blk sub fallthrough target
+            create_func_call ctx scope llvm_builder blk_tid blk fallthrough target
         | None ->
             if is_plt_trampoline ctx sub then begin
-              create_func_call ~emit_unreachable:false ctx scope llvm_builder blk_tid
-                blk sub None target;
+              create_func_call ~emit_unreachable:false ctx scope llvm_builder
+                blk_tid blk None target;
               create_return ctx scope blk_tid llvm_builder sub
             end
-            else create_func_call ctx scope llvm_builder blk_tid blk sub None target)
+            else create_func_call ctx scope llvm_builder blk_tid blk None target)

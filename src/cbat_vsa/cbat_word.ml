@@ -109,8 +109,6 @@ let lnot (t : t) : t =
   | Small (v, w, _) -> mkz (Z.lognot (Z.of_int v)) w
   | Big (z, w, _) -> mkz (Z.lognot z) w
 
-let abs (t : t) : t = if msb t then neg t else t
-
 let add (a : t) (b : t) : t =
   let w = bitwidth a in
   match a, b with

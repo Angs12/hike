@@ -326,7 +326,6 @@ let run_sweep () : int * int * int =
     cw1 "lnot" Word.lnot CW.lnot w1;
     cw1 "succ" Word.succ CW.succ w1;
     cw1 "pred" Word.pred CW.pred w1;
-    cw1 "abs" Word.abs CW.abs w1;
     cw1 "signed" Word.signed CW.signed w1;
     cw1 "unsigned" Word.unsigned CW.unsigned w1;
     cw1b "is_zero" Word.is_zero CW.is_zero w1;

@@ -8,7 +8,12 @@ open Bap.Std
 module Model = Hike_stack_model
 module Vsa = Cbat_vsa
 
-type sec = Hike_stack_model.sec [@@deriving equal, compare, sexp]
+type sec = Hike_stack_model.sec
+
+let equal_sec = Hike_stack_model.equal_sec
+let compare_sec = Hike_stack_model.compare_sec
+let sexp_of_sec = Hike_stack_model.sexp_of_sec
+let sec_of_sexp = Hike_stack_model.sec_of_sexp
 
 type data_span = {
   ds_sec : sec;

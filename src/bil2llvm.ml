@@ -104,7 +104,7 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
   | Ret -> create_return ctx scope tid llvm_builder sub
   | CallIndirect ->
       let j = Bap.Std.Seq.hd_exn control_flow in
-      create_indirect_call ctx scope llvm_builder tid blk sub j
+      create_indirect_call ctx scope llvm_builder tid j
   | CallFun ->
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call ctx scope llvm_builder tid blk sub call fr
@@ -424,17 +424,18 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
        data lands on a promoted sub's thunk. *)
   Base.List.iter sections ~f:(fun section ->
       match section.bytes with
-      | Some arr when Base.List.is_empty section.owners ->
-          let word = ctx.abi.Abi.word in
-          Bil2llvm_section.set_owner_initializer ctx llvm_ctx
-            llvm_module section.base arr
-            ~word_lo:0
-            ~word_hi:((Bytes.length arr + word - 1) / word - 1)
-            ~typed_w:word ~bss:false ~word
       | Some arr ->
           let lo = Word.to_int64_exn section.min_addr in
           let word = ctx.abi.Abi.word in
-          Base.List.iter section.owners ~f:(fun o ->
+          (* An ownerless section serves whole: one row spanning it. *)
+          let owners =
+            if Base.List.is_empty section.owners then
+              [ { own_id = None; own_lo = lo;
+                  own_hi = Word.to_int64_exn section.max_addr;
+                  base = section.base; typed_w = word } ]
+            else section.owners
+          in
+          Base.List.iter owners ~f:(fun o ->
               let w (a : int64) =
                 Int64.to_int (Int64.sub a lo) / word
               in
@@ -442,9 +443,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                 llvm_module o.base arr
                 ~word_lo:(w o.own_lo)
                 ~word_hi:(w o.own_hi)
-                ~typed_w:
-                  (if Option.is_none o.own_id then word
-                   else o.typed_w)
+                ~typed_w:o.typed_w
                 ~bss:false ~word)
       | None -> ())
   in
