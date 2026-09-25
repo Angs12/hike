@@ -19,7 +19,7 @@ let get_section_data x =
       let buf = Memory.to_buffer mem in
       let arr = Bytes.create length in
       for i = 0 to length - 1 do
-        Bytes.set arr i (Stdlib.Char.chr (Stdlib.Char.code (Core.Bigsubstring.get buf i)))
+        Bytes.set arr i (Core.Bigsubstring.get buf i)
       done;
       (arr, Memory.min_addr mem, Memory.max_addr mem))
 
@@ -43,8 +43,7 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
            && Stdlib.Int64.compare off bss_size < 0
          then Some (Stdlib.Int64.to_int off, name)
          else None)
-  |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) ->
-         Stdlib.Int64.compare (Stdlib.Int64.of_int a) (Stdlib.Int64.of_int b))
+  |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
 
 let get_named_region_info proj =
   let query =

@@ -87,6 +87,9 @@ let coerce_to (w : int) (e : exp) : exp =
     | None -> Bil.Cast (Bil.UNSIGNED, w, e)
   else widen Bil.UNSIGNED w we e
 
+let coerce_to_known (w : int) (e : exp) : exp =
+  if w = 0 then e else coerce_to w e
+
 (* The exp coercer: widths the tree fixes must agree. *)
 class coercer = object(self)
   inherit Exp.mapper
@@ -140,7 +143,7 @@ class coercer = object(self)
   method! map_let var ~exp:value ~body =
     let value = self#map_exp value in
     let w = var_width var in
-    let value = if w = 0 then value else coerce_to w value in
+    let value = coerce_to_known w value in
     let body = self#map_exp body in
     Bil.Let (var, value, body)
 end
@@ -150,8 +153,7 @@ let coerce_exp (e : exp) : exp = (new coercer)#map_exp e
 (* A def's value is born at its lhs's declared width; a phi's values at
    the phi's. *)
 let coerce_to_lhs (v : var) (e : exp) : exp =
-  let w = var_width v in
-  if w = 0 then e else coerce_to w e
+  coerce_to_known (var_width v) e
 
 let coerce_def (d : def term) : def term =
   Def.map_exp d ~f:(fun rhs -> coerce_to_lhs (Def.lhs d) (coerce_exp rhs))

@@ -75,7 +75,8 @@ let tile_build specs comps =
     Hike.Bil2llvm.build_sections ctx md
       { Hike.Bil2llvm.spec_comps = comps; Hike.Bil2llvm.spec_whole = [];
         Hike.Bil2llvm.spec_word = 8;
-        Hike.Bil2llvm.spec_sections = specs }
+        Hike.Bil2llvm.spec_sections = specs;
+        Hike.Bil2llvm.spec_copy_relocs = [] }
   in
   (ctx, md, built)
 

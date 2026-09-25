@@ -336,11 +336,11 @@ let create_sub ctx scope sub =
 let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(target : Bap_core_theory.Theory.Target.t) ~(addr_bits : int)
     ~(symtab : Symtab.t option)
-    ~(copy_relocs : int64 list)
     (spec : section_spec)
     (prog : program term) : unit =
   (* The sections construct from the spec before any function declares. *)
   let sections = Bil2llvm_section.build_sections llvm_ctx llvm_module spec in
+  let copy_relocs = spec.spec_copy_relocs in
   let abi = Abi.of_target target in
   (* The signature rides each sub's own [arg] terms (written by the types
      pass); the emitter reads it off the sub. *)
@@ -513,6 +513,7 @@ type section_spec = Bil2llvm_env.section_spec = {
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
   spec_sections : sec_input option list;
+  spec_copy_relocs : int64 list;
 }
 
 let native_fp_op = Bil2llvm_fp.native_fp_op

@@ -81,10 +81,6 @@ let slot_addrs_of (m : sec_meta) : int64 list =
   Base.List.map m.sm_copy_relocs
     ~f:(fun (off, _) -> Stdlib.Int64.add m.sm_lo (Stdlib.Int64.of_int off))
 
-let copy_reloc_slot_addrs (meta : sec_meta option list) : int64 list =
-  Base.List.concat_map meta ~f:(fun m ->
-      Base.Option.value_map m ~default:[] ~f:slot_addrs_of)
-
 let attrib_spans ~(meta : sec_meta option list) : data_span list =
   Base.List.filter_map meta
     ~f:(Base.Option.map ~f:(fun m ->
@@ -122,7 +118,10 @@ let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
     spec_word = word;
     spec_sections =
       Base.List.map meta
-        ~f:(Base.Option.map ~f:spec_section) }
+        ~f:(Base.Option.map ~f:spec_section);
+    spec_copy_relocs =
+      Base.List.concat_map meta ~f:(fun m ->
+          Base.Option.value_map m ~default:[] ~f:slot_addrs_of) }
 
 type point = { p_sec : sec; p_pos : int64 } [@@deriving sexp]
 type range = { lo : point; hi : point } [@@deriving sexp]

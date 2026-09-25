@@ -42,7 +42,6 @@ let convert_binary output_program proj =
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
     ~symtab:(Some (Project.symbols proj))
-    ~copy_relocs:(Hike_sections.copy_reloc_slot_addrs meta)
     spec (Project.program proj);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
@@ -196,38 +195,41 @@ let pass_attrib proj =
            Core.Map.set m ~key:(Term.tid sub)
              ~data:(Hike_sections.dynamic_alloc_tids_of ~facts sub))
   in
-  Project.map_program proj ~f:(fun prog ->
-      let prog =
-        Term.map sub_t prog ~f:(fun sub ->
-            Hike_def_slots.stamp_dyn_allocs
-              ~dynamic_alloc_tids:(Core.Map.find dyn_allocs (Term.tid sub)
-                                   |> Option.value ~default:Tid.Set.empty)
-              sub)
-      in
-      let ctx =
-        Hike_sections.attribute ~facts ~word ~entry:Hike_stack_model.segment_base
-          ~spans prog
-      in
-      let prog =
-        Term.map sub_t prog ~f:(Hike_sections.stamp_tags ctx)
-        |> Hike_promote.rewrite_program ~word ~entry:Hike_stack_model.segment_base
-              ~facts ~spans ~ctx
-      in
-      Hike_kb.install
-        (Hike_kb.with_spec (Hike_kb.facts ())
-           (Hike_sections.section_spec_of ~word
-              ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
-              ~whole:(Hike_sections.whole_comps_of ctx)
-              ~meta));
-      (* The DCE's load roots are the vars the rewrite created; its
-         escape roots are the storages carrying identity members. *)
-      Term.map sub_t prog ~f:(fun sub ->
-          let roots =
-            Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
-            |> Option.value ~default:Hike_sections.Tree.empty
-            |> Hike_sections.escape_roots_of_tree
-          in
-          Hike_dce.dce ~roots ~target sub))
+  let program =
+    Term.map sub_t (Project.program proj) ~f:(fun sub ->
+        Hike_def_slots.stamp_dyn_allocs
+          ~dynamic_alloc_tids:(Core.Map.find dyn_allocs (Term.tid sub)
+                               |> Option.value ~default:Tid.Set.empty)
+          sub)
+  in
+  let ctx =
+    Hike_sections.attribute ~facts ~word ~entry:Hike_stack_model.segment_base
+      ~spans program
+  in
+  let program =
+    Term.map sub_t program ~f:(Hike_sections.stamp_tags ctx)
+    |> Hike_promote.rewrite_program ~word ~entry:Hike_stack_model.segment_base
+          ~facts ~spans ~ctx
+  in
+  let spec =
+    Hike_sections.section_spec_of ~word
+      ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
+      ~whole:(Hike_sections.whole_comps_of ctx)
+      ~meta
+  in
+  (* The DCE's load roots are the vars the rewrite created; its
+     escape roots are the storages carrying identity members. *)
+  let program =
+    Term.map sub_t program ~f:(fun sub ->
+        let roots =
+          Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
+          |> Option.value ~default:Hike_sections.Tree.empty
+          |> Hike_sections.escape_roots_of_tree
+        in
+        Hike_dce.dce ~roots ~target sub)
+  in
+  Hike_kb.install (Hike_kb.with_spec facts spec);
+  Project.with_program proj program
 
 let pass_convlir ~output proj = convert_binary output proj
 

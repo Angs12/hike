@@ -68,13 +68,15 @@ type sec_input = Bil2llvm_env.sec_input =
     }
 
 (** The section spec: the components, the spans served whole
-    (each (id, lo, hi)), the word grid, and the input sections in the
-    fixed section-list order ([None] = absent from the binary). *)
+    (each (id, lo, hi)), the word grid, the input sections in the
+    fixed section-list order ([None] = absent from the binary), and the
+    absolute copy-relocation slot addresses used by access routing. *)
 type section_spec = Bil2llvm_env.section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
   spec_sections : sec_input option list;
+  spec_copy_relocs : int64 list;
 }
 
 (** Constructs the sections from the spec.  Gap-run names draw from
@@ -91,7 +93,6 @@ val emit_program :
   target:Theory.Target.t ->
   addr_bits:int ->
   symtab:Symtab.t option ->
-  copy_relocs:int64 list ->
   section_spec ->
   program term ->
   unit

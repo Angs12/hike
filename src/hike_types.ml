@@ -16,7 +16,7 @@ let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
     Term.enum jmp_t blk
     |> Seq.exists ~f:(fun j ->
         match Jmp.kind j with
-        | Call c when Hike_return.is_jmp j -> true
+        | Call _ when Hike_return.is_jmp j -> true
         | Call c -> (
             match Call.target c with
             | Indirect _ -> Option.is_none (Call.return c)

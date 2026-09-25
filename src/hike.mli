@@ -10,7 +10,8 @@ module Abi = Hike_abi
 module Diag = Hike_diag
 
 module Vsa : sig
-  (** Arms the classifier's address width; analysis entries self-arm. *)
+  (** Arms the classifier's address width.  Analysis entries self-arm;
+    probes may set it directly before a standalone solve. *)
   val set_addr_bits : int -> unit
 
   (** An image-backed section: inclusive bounds plus static content. *)
@@ -248,8 +249,7 @@ module Promote = Hike_promote
     value slots' home. *)
 module Kb = Hike_kb
 (** The canary-strip pass (after the solve, before the attribution):
-    proven canary compositions delete before
-    the fission. *)
+    proven canary compositions delete before the sections pass. *)
 module Strip_canaries : sig
   (** [strip_sub ~facts ~names sub] removes every proven canary
       composition; an unrecognized composition is the identity. *)
