@@ -7,15 +7,6 @@ module AI = Cbat_vsa.AI
 module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
 
-(* BAP init; call before opening a project. *)
-let init () =
-  match Bap_main.init ~argv:[|Sys.executable_name|] () with
-  | Ok () -> ()
-  | Error failed ->
-    Format.eprintf "probe: BAP initialization failed: %a@\n%!"
-      Bap_main.Extension.Error.pp failed;
-    exit 1
-
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
    Output contracts (the PASS lines, exit codes) are byte-stable: scripts
    grep them. *)
@@ -43,6 +34,9 @@ let ws_init (tool : string) : unit =
     Format.eprintf "%s: BAP initialization failed: %a@\n%!" tool
       Bap_main.Extension.Error.pp failed;
     exit 1
+
+(* BAP init; call before opening a project. *)
+let init () = ws_init "probe"
 
 (* Load-failure lines (the LOAD-FAIL contract). *)
 let ws_load_fail (path : string) (e : Core.Error.t) : unit =
@@ -106,8 +100,7 @@ let run_sub_fixpoint (sub : sub term) : Vsa.vsa_sol =
   Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub
     (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub)
 
-let analyze_and_fixpoint (_sp : var) (_prog : program term) (sub : sub term)
-    : sub term * Vsa.vsa_sol =
+let analyze_and_fixpoint (sub : sub term) : sub term * Vsa.vsa_sol =
   (sub, run_sub_fixpoint sub)
 
 (* Word-set printers. *)

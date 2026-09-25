@@ -577,8 +577,10 @@ let tests : unit Alcotest.test list =
         let distinct = count_two_incoming_phis (build ~both_to_t:false ()) in
         check "EMIT-12" (duplicated >= 1 && distinct = 0));
 
-    (* WFAM: the read stays total across binding widths. *)
-    pin "EMIT-13" "an i64 binding read at i32 truncates; the same-width control emits no coercion"
+    (* WFAM: the BIR is width-honest post-coerce (ADR 0018), so a
+       width-mismatched read is the frozen-undef identity — no silent
+       coercion. *)
+    pin "EMIT-13" "a width-mismatched read is a frozen undef (no trunc); the same-width control binds normally"
       (fun () ->
         let wfam = v64 "wfam_val" in
         let wfam32 =
@@ -611,7 +613,8 @@ let tests : unit Alcotest.test list =
         let mismatched = build_mismatched () in
         let control = build_control () in
         check "EMIT-13"
-          (contains_substring mismatched "trunc i64 "
+          (not (contains_substring mismatched "trunc i64 ")
+          && contains_substring mismatched "freeze"
           && not (contains_substring control "trunc i64 ")));
 
     (* TLS: the stack-protector canary's thread-pointer access renders as

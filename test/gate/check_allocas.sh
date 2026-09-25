@@ -115,13 +115,8 @@ for ll in "$OUT_DIR"/out_*.ll; do
   #     stack_r0 and a define carries at most one.
   n_frame="$(grep -c '%frame = alloca' "$ll")"
   n_multi="$(awk '
-    /^define / { n_r0 = 0 }
+    /^define / { if (in_d && n_r0 > 1) bad++; in_d = 1; n_r0 = 0 }
     /%stack_r0 = alloca/ { n_r0++ }
-    /^define / { if (NR > 1 && seen) { } }
-    { if (/^define /) { if (in_d && n_r0 > 1) bad++; in_d = 1; n_r0 = 0 }
-      else if (/^declare/) { }
-    }
-    /%stack_r0 = alloca/ { if (in_d && n_r0 > 1) bad++ }
     END { if (in_d && n_r0 > 1) bad++; print bad + 0 }
   ' "$ll")"
   if [ "$n_frame" -ne 0 ] || [ "$n_multi" -ne 0 ]; then
@@ -145,11 +140,9 @@ for ll in "$OUT_DIR"/out_*.ll; do
   # (f) every section component/residue global is internal — external
   # linkage would fork the address world and block the consumer's
   # constant propagation.
-  n_comp="$n_comp"; n_res="$n_res"
   if [ "$n_comp" -gt 0 ] || [ "$n_res" -gt 0 ]; then
-    bad_ext="$n_ext"
-    if [ "$bad_ext" -gt 0 ]; then
-      echo "FAIL $name: (f) $bad_ext non-internal sec_comp/sec_res global(s)"
+    if [ "$n_ext" -gt 0 ]; then
+      echo "FAIL $name: (f) $n_ext non-internal sec_comp/sec_res global(s)"
       FAIL=$((FAIL + 1))
     else
       echo "PASS $name: (f) sec globals internal ($n_comp comp(s), $n_res run(s))"
@@ -163,7 +156,6 @@ for ll in "$OUT_DIR"/out_*.ll; do
   # (g) the integer world escapes (D4b): no ptrtoint of a GEP into a
   #     stack_rN alloca — GEP-derived pointers never become integers
   #     (their integer is the alloca's base, a different world).
-  n_esc="$n_esc"
   if [ "$n_esc" -ne 0 ]; then
     echo "FAIL $name: (g) $n_esc GEP-derived stack pointer(s) escape as integers"
     FAIL=$((FAIL + 1))

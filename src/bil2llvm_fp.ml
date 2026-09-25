@@ -60,6 +60,12 @@ let native_fp_op (name : string) : native_fp option =
    (fp_rets); FCONVERT w reads x0 at the complementary width. *)
 type fp_sig = { fp_args : Var.t list; fp_rets : Var.t list }
 
+(* The complementary FP input width of a conversion (fpext widens,
+   fptrunc narrows); the identity for the non-conversion ops. *)
+let conv_in_w = function
+  | FCONVERT res_w -> if res_w = 64 then 32 else 64
+  | _ -> 64
+
 let fp_sig_of (op : native_fp) : fp_sig =
   let v n w = Var.create ~is_virtual:false ~fresh:false n (Type.Imm w) in
   let x0 w = v "intrinsic:x0" w in
@@ -70,7 +76,7 @@ let fp_sig_of (op : native_fp) : fp_sig =
   | SFLOAT | SINT | ISNAN ->
     { fp_args = [ x0 64 ]; fp_rets = [ y0 64 ] }
   | FCONVERT res_w ->
-    { fp_args = [ x0 (if res_w = 64 then 32 else 64) ];
+    { fp_args = [ x0 (conv_in_w op) ];
       fp_rets = [ y0 res_w ] }
   | FHLT -> { fp_args = []; fp_rets = [] }
 
@@ -103,7 +109,7 @@ let build_fp_binop ctx llvm_builder op a b ~(w : int) =
     | FSUB -> Llvm.build_fsub da db "" llvm_builder
     | FDIV -> Llvm.build_fdiv da db "" llvm_builder
     | FREM -> Llvm.build_frem da db "" llvm_builder
-    | SFLOAT | SINT | FCONVERT _ | FORDER | FHLT | ISNAN -> assert false
+    | _ -> assert false
   in
   Llvm.build_bitcast d ret_ty "" llvm_builder
 
@@ -128,7 +134,7 @@ let fp_intrinsic_sizes ~(word_bits : int) (args : Arg.t list)
   in
   (arg_w 0, res_w)
 
-let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op =
+let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op =
   match op with
   | FHLT ->
       (* Halt traps without binding results or emitting fallthrough. *)
@@ -151,7 +157,7 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op 
     let av = Base.List.nth_exn sig_.fp_args i in
     match Core.Map.find temp_defs av with
     | Some d ->
-        mem_access ctx scope llvm_builder blk_tid sub_tid fr (find_def_tag d) d
+        mem_access ctx scope llvm_builder blk_tid sub_tid (find_def_tag d) d
           (Def.rhs d)
     | None -> create_exp ctx scope llvm_builder blk_tid (Bil.Var av)
   in
@@ -178,10 +184,8 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid fr blk call op 
         let d = Llvm.build_bitcast x src_fp_ty "" llvm_builder in
         Llvm.build_fptosi d res_lane_ty "" llvm_builder
     | FCONVERT res_w ->
-        (* The name's suffix is the result width; the input is the
-           complementary FP width (fpext widens, fptrunc narrows). *)
         let x = arg_value 0 in
-        let in_w = if res_w = 64 then 32 else 64 in
+        let in_w = conv_in_w op in
         let x =
           coerce_int_width llvm_ctx llvm_builder
             ~bits:(int_width_or in_w x) x in_w

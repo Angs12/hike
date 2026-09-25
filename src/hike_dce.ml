@@ -95,6 +95,9 @@ let keep ~(load_roots : Var.Set.t)
     || Hike_stack_model.is_mem lhs
     || Hike_stack_model.is_call_arg lhs
     || is_call_reg ~call_regs lhs
+    (* Mapped-intrinsic results keep hike's own [intrinsic:<name>]
+       var namespace (the sub-level [Sub.intrinsic] attr is BAP's
+       twin fact for the whole sub). *)
     || Hike_stack_model.is_intrinsic_name (Var.name (Var.base lhs))
 
 (* Incremental sweep: [used] and [load_roots] start exact and stay exact (a

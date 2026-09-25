@@ -4,7 +4,7 @@ open Bap.Std
 open Bap.Std.Bil.Types
 
 
-module StrSet = Set.Make (String)
+module StrSet = Core.String.Set
 
 let is_goto jmp = match Jmp.kind jmp with Goto _ -> true | _ -> false
 
@@ -44,7 +44,6 @@ let excluded_subs =
     "_init";
     "_fini";
     "__cxa_finalize";
-    "_start";
     "__libc_start_main";
     "register_tm_clones";
     "deregister_tm_clones";
@@ -64,13 +63,13 @@ let should_filter syms sub =
     || Term.has_attr sub Sub.extern
     || Term.has_attr sub Sub.entry_point
     || is_intrinsic sub
-    || (not @@ StrSet.mem (Sub.name sub) syms)
+    || (not @@ Core.Set.mem syms (Sub.name sub))
 
 let filter_subs proj =
   let syms =
     Symtab.to_sequence (Project.symbols proj)
     |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
-        StrSet.add name set)
+        Core.Set.add set name)
   in
   Project.map_program proj ~f:(fun prog ->
       Term.filter_map sub_t prog ~f:(fun sub ->

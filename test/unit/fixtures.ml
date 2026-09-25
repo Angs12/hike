@@ -466,12 +466,6 @@ let mk_l3c3_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(cmp : Bil.binop) 
   mk_l3_chain_loop ~name:"l3c3" ~seed ~v_w:32 ~chain:(Some chain)
     ~cond:(Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c))) ~body_k
 
-let mk_l3c4_loop ~(seed : Cbat_word.t option) ~(chain : exp) ~(v_w : int) ~(cmp : Bil.binop) ~(c : Cbat_word.t)
-    ~(body_k : Cbat_word.t) : sub term * tid =
-  let v = Var.create ~is_virtual:false ~fresh:false "l3c4_v" (Type.Imm v_w) in
-  mk_l3_chain_loop ~name:"l3c4" ~seed ~v_w ~chain:(Some chain)
-    ~cond:(Bil.BinOp (cmp, Bil.Var v, Bil.Int (Cbat_word.to_word c))) ~body_k
-
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c3_run (sub : sub term) (body_tid : tid) : Ws.t =
   iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c3_m") (v64 "RBP"))

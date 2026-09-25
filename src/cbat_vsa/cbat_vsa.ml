@@ -50,7 +50,6 @@ let wto_of_cfg ~(succ : tid -> tid list) ~(pred : tid -> tid list)
 
 (* Solution still changing at the step cap. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
-  * (tid * tid) option
 
 type vsa_sol = (tid, AI.t) Solution.t
 
@@ -351,7 +350,7 @@ let rec static_graph_vsa
     end;
     if !total_processed > max_steps then begin
       let sol = mk_sol () in
-      raise (Fixpoint_not_converged (max_steps, sol, None))
+      raise (Fixpoint_not_converged (max_steps, sol))
     end;
     let old = get v in
     let preds = preds v in

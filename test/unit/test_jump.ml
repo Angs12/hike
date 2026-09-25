@@ -26,9 +26,9 @@ let xv = Bil.Var x
 let yv = Bil.Var y
 let tv = Bil.Var t
 
-let sub_of_defs_and_jmp (name : string) (defs : def term list) (cond : exp) : sub term * tid =
-  let sub, tids = sub_of name [ defs, [ (1, fun t -> mk_jmp_to t cond) ]; [], [] ] in
-  (sub, tids.(1))
+let sub_of_defs_and_jmp (name : string) (defs : def term list) (cond : exp) : sub term =
+  let sub, _tids = sub_of name [ defs, [ (1, fun t -> mk_jmp_to t cond) ]; [], [] ] in
+  sub
 
 (* The entry block of the compiled sub (the first block). *)
 let entry_of (s : sub term) : blk term = Term.enum blk_t s |> Seq.hd_exn
@@ -97,13 +97,8 @@ let test_group_defs ?(with_of = true) () : def term list =
   in
   if with_of then Def.create ovf (Bil.Int (Word.zero 1)) :: base else base
 
-let test_core =
-  Bil.BinOp
-    ( Bil.AND
-    , Bil.BinOp (Bil.OR, Bil.Var sf, Bil.Var ovf)
-    , Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.AND, Bil.Var sf, Bil.Var ovf)) )
-let test_jl_cond = test_core
-let test_jle_cond = Bil.BinOp (Bil.OR, Bil.Var zf, test_core)
+let test_jl_cond = xor_core
+let test_jle_cond = Bil.BinOp (Bil.OR, Bil.Var zf, xor_core)
 let zero64 = Bil.Int (Word.zero 64)
 let and_e = Bil.BinOp (Bil.AND, xv, yv)
 
@@ -111,40 +106,40 @@ let tests : unit Alcotest.test list =
   [
     (* jz over cmp, inline diff: (x−y)=0 folds to x=y. *)
     pin "JMP-01" "jz over cmp, inline diff folds to x = y" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jz" (cmp_defs ~zf_rhs:`Inline ()) (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_jz" (cmp_defs ~zf_rhs:`Inline ()) (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-01" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, xv, yv))));
 
     pin "JMP-02" "jz consumed ZF def" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jz" (cmp_defs ~zf_rhs:`Inline ()) (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_jz" (cmp_defs ~zf_rhs:`Inline ()) (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-02" (not (has_def_for s' zf)));
 
     (* the counter-loop shape (F1), reuse form: tmp := i−k; ZF := 0 =
        t; jnz → t != 0 — the var REUSED, never re-substituted. *)
     pin "JMP-03" "jne over the tmp flag folds to t != 0 (reuse)" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jne_tmp" (cmp_defs ()) v_not in
+        let s = sub_of_defs_and_jmp "t13_jne_tmp" (cmp_defs ()) v_not in
         let s' = compile_sub s in
         check "JMP-03" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.NEQ, tv, w0_64))));
 
     pin "JMP-04" "jne consumed ZF def" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jne_tmp" (cmp_defs ()) v_not in
+        let s = sub_of_defs_and_jmp "t13_jne_tmp" (cmp_defs ()) v_not in
         let s' = compile_sub s in
         check "JMP-04" (not (has_def_for s' zf)));
 
     pin "JMP-05" "reused tmp def survives" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jne_tmp" (cmp_defs ()) v_not in
+        let s = sub_of_defs_and_jmp "t13_jne_tmp" (cmp_defs ()) v_not in
         let s' = compile_sub s in
         check "JMP-05" (has_def_for s' t));
 
     (* the unsigned borrow family. *)
     pin "JMP-06" "jb over cmp folds to x <u y" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jb" (cmp_defs ~with_all:false ()) (Bil.Var cf) in
+        let s = sub_of_defs_and_jmp "t13_jb" (cmp_defs ~with_all:false ()) (Bil.Var cf) in
         let s' = compile_sub s in
         check "JMP-06" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LT, xv, yv))));
 
     pin "JMP-07" "jb consumed CF def" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jb" (cmp_defs ~with_all:false ()) (Bil.Var cf) in
+        let s = sub_of_defs_and_jmp "t13_jb" (cmp_defs ~with_all:false ()) (Bil.Var cf) in
         let s' = compile_sub s in
         check "JMP-07" (not (has_def_for s' cf)));
 
@@ -156,7 +151,7 @@ let tests : unit Alcotest.test list =
             Def.create cf (Bil.BinOp (Bil.LT, tv, xv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
+        let s = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
         let s' = compile_sub s in
         check "JMP-08" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LT, tv, xv))));
 
@@ -167,7 +162,7 @@ let tests : unit Alcotest.test list =
             Def.create cf (Bil.BinOp (Bil.LT, tv, xv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
+        let s = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
         let s' = compile_sub s in
         check "JMP-09" (not (has_def_for s' cf)));
 
@@ -178,50 +173,50 @@ let tests : unit Alcotest.test list =
             Def.create cf (Bil.BinOp (Bil.LT, tv, xv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
+        let s = sub_of_defs_and_jmp "t13_jb_add" add_defs (Bil.Var cf) in
         let s' = compile_sub s in
         check "JMP-10" (has_def_for s' t));
 
     pin "JMP-11" "jae folds to y <=u x (complement flips operands, no NOT)" (fun () ->
-        let s, _ =
+        let s =
           sub_of_defs_and_jmp "t13_jae" (cmp_defs ~with_all:false ()) (Bil.UnOp (Bil.NOT, Bil.Var cf))
         in
         let s' = compile_sub s in
         check "JMP-11" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LE, yv, xv))));
 
     pin "JMP-12" "jbe folds to x <=u y" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jbe" (cmp_defs ()) cf_or_zf in
+        let s = sub_of_defs_and_jmp "t13_jbe" (cmp_defs ()) cf_or_zf in
         let s' = compile_sub s in
         check "JMP-12" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LE, xv, yv))));
 
     pin "JMP-13" "jbe consumed CF and ZF" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jbe" (cmp_defs ()) cf_or_zf in
+        let s = sub_of_defs_and_jmp "t13_jbe" (cmp_defs ()) cf_or_zf in
         let s' = compile_sub s in
         check "JMP-13" (not (has_def_for s' cf) && not (has_def_for s' zf)));
 
     pin "JMP-14" "ja folds to y <u x" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_ja" (cmp_defs ()) n_cf_or_zf in
+        let s = sub_of_defs_and_jmp "t13_ja" (cmp_defs ()) n_cf_or_zf in
         let s' = compile_sub s in
         check "JMP-14" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.LT, yv, xv))));
 
     (* the signed family over the sub shapes. *)
     pin "JMP-15" "jl folds to x <s y" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jl" (cmp_defs ()) xor_core in
+        let s = sub_of_defs_and_jmp "t13_jl" (cmp_defs ()) xor_core in
         let s' = compile_sub s in
         check "JMP-15" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLT, xv, yv))));
 
     pin "JMP-16" "jle folds to x <=s y" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jle" (cmp_defs ()) zf_or_core in
+        let s = sub_of_defs_and_jmp "t13_jle" (cmp_defs ()) zf_or_core in
         let s' = compile_sub s in
         check "JMP-16" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, xv, yv))));
 
     pin "JMP-17" "jg folds to y <s x" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jg" (cmp_defs ()) n_zf_or_core in
+        let s = sub_of_defs_and_jmp "t13_jg" (cmp_defs ()) n_zf_or_core in
         let s' = compile_sub s in
         check "JMP-17" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLT, yv, xv))));
 
     pin "JMP-18" "jge folds to y <=s x" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_jge" (cmp_defs ()) n_core in
+        let s = sub_of_defs_and_jmp "t13_jge" (cmp_defs ()) n_core in
         let s' = compile_sub s in
         check "JMP-18" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, yv, xv))));
 
@@ -230,7 +225,7 @@ let tests : unit Alcotest.test list =
         let and_defs =
           [ Def.create zf (Bil.BinOp (Bil.EQ, w0_32, Bil.BinOp (Bil.AND, xv, yv))) ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_test" and_defs (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_test" and_defs (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-19"
           (Exp.equal
@@ -238,24 +233,24 @@ let tests : unit Alcotest.test list =
              (Bil.BinOp (Bil.EQ, Bil.BinOp (Bil.AND, xv, yv), Bil.Int (Word.zero 64)))));
 
     pin "JMP-20" "test jl folds to (x&y) <s 0 (OF ≡ 0)" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_test_jl" (test_group_defs ()) test_jl_cond in
+        let s = sub_of_defs_and_jmp "t13_test_jl" (test_group_defs ()) test_jl_cond in
         let s' = compile_sub s in
         check "JMP-20"
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLT, and_e, zero64))));
 
     pin "JMP-21" "test jl consumed SF and OF defs" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_test_jl" (test_group_defs ()) test_jl_cond in
+        let s = sub_of_defs_and_jmp "t13_test_jl" (test_group_defs ()) test_jl_cond in
         let s' = compile_sub s in
         check "JMP-21" (not (has_def_for s' sf) && not (has_def_for s' ovf)));
 
     pin "JMP-22" "test jle folds to (x&y) <=s 0" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_test_jle" (test_group_defs ()) test_jle_cond in
+        let s = sub_of_defs_and_jmp "t13_test_jle" (test_group_defs ()) test_jle_cond in
         let s' = compile_sub s in
         check "JMP-22"
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, and_e, zero64))));
 
     pin "JMP-23" "test jg folds to 0 <s (x&y)" (fun () ->
-        let s, _ =
+        let s =
           sub_of_defs_and_jmp "t13_test_jg"
             (test_group_defs ())
             (Bil.UnOp (Bil.NOT, test_jle_cond))
@@ -265,7 +260,7 @@ let tests : unit Alcotest.test list =
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLT, zero64, and_e))));
 
     pin "JMP-24" "test jge folds to 0 <=s (x&y)" (fun () ->
-        let s, _ =
+        let s =
           sub_of_defs_and_jmp "t13_test_jge"
             (test_group_defs ())
             (Bil.UnOp (Bil.NOT, test_jl_cond))
@@ -275,13 +270,13 @@ let tests : unit Alcotest.test list =
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.SLE, zero64, and_e))));
 
     pin "JMP-25" "test je folds to (x&y) = 0 (full group)" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_test_je" (test_group_defs ()) (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_test_je" (test_group_defs ()) (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-25"
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, and_e, zero64))));
 
     pin "JMP-26" "test jne folds to (x&y) != 0 (full group)" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_test_jne" (test_group_defs ()) v_not in
+        let s = sub_of_defs_and_jmp "t13_test_jne" (test_group_defs ()) v_not in
         let s' = compile_sub s in
         check "JMP-26"
           (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.NEQ, and_e, zero64))));
@@ -289,7 +284,7 @@ let tests : unit Alcotest.test list =
     (* RESIDUAL: the signed family over a test group whose OF def is
        MISSING (cross-block OF): no OF fact, no OF ≡ 0 fact → the identity. *)
     pin "JMP-27" "test jl without OF stays residual" (fun () ->
-        let s, _ =
+        let s =
           sub_of_defs_and_jmp "t13_test_noof" (test_group_defs ~with_of:false ()) test_jl_cond
         in
         let s' = compile_sub s in
@@ -304,7 +299,7 @@ let tests : unit Alcotest.test list =
             Def.create cf (Bil.BinOp (Bil.LT, xv, zero));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_fold0" fold_defs v_not in
+        let s = sub_of_defs_and_jmp "t13_fold0" fold_defs v_not in
         let s' = compile_sub s in
         check "JMP-28" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.NEQ, xv, zero))));
 
@@ -313,7 +308,7 @@ let tests : unit Alcotest.test list =
         let aa_defs =
           [ Def.create zf (Bil.BinOp (Bil.EQ, w0_32, Bil.BinOp (Bil.MINUS, xv, xv))) ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_aa" aa_defs (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_aa" aa_defs (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-29" (Exp.equal (jmp_cond_of s') (Bil.Int (Word.one 1))));
 
@@ -329,7 +324,7 @@ let tests : unit Alcotest.test list =
               (Bil.BinOp (Bil.EQ, Bil.Int (Word.zero 32), Bil.BinOp (Bil.MINUS, x32v, y32v)));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_w32" w32_defs (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_w32" w32_defs (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-30" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, x32v, y32v))));
 
@@ -448,7 +443,7 @@ let tests : unit Alcotest.test list =
     (* RESIDUAL: unknown opcode (PF:unknown) — the identity. *)
     pin "JMP-36" "unknown opcode stays residual" (fun () ->
         let pf_defs = [ Def.create pf (Bil.Unknown ("unknown[bits]", Type.Imm 1)) ] in
-        let s, _ = sub_of_defs_and_jmp "t13_pf" pf_defs (Bil.Var pf) in
+        let s = sub_of_defs_and_jmp "t13_pf" pf_defs (Bil.Var pf) in
         let s' = compile_sub s in
         check "JMP-36" (Exp.equal (jmp_cond_of s') (Bil.Var pf)));
 
@@ -463,7 +458,7 @@ let tests : unit Alcotest.test list =
             Def.create cf (Bil.BinOp (Bil.LT, xv, yv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_inc" inc_defs cf_or_zf in
+        let s = sub_of_defs_and_jmp "t13_inc" inc_defs cf_or_zf in
         let s' = compile_sub s in
         check "JMP-37" (Exp.equal (jmp_cond_of s') cf_or_zf));
 
@@ -478,7 +473,7 @@ let tests : unit Alcotest.test list =
             Def.create zf (Bil.BinOp (Bil.EQ, w0_32, tv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
+        let s = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
         let s' = compile_sub s in
         check "JMP-38" (Exp.equal (jmp_cond_of s') cf_or_zf));
 
@@ -489,7 +484,7 @@ let tests : unit Alcotest.test list =
             Def.create zf (Bil.BinOp (Bil.EQ, w0_32, tv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
+        let s = sub_of_defs_and_jmp "t13_incdec" incdec_defs cf_or_zf in
         let s' = compile_sub s in
         check "JMP-39" (Int.equal (Base.List.length (defs_of s')) 2));
 
@@ -503,7 +498,7 @@ let tests : unit Alcotest.test list =
             Def.create zf (Bil.BinOp (Bil.EQ, w0_32, yv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_reaching" amb_defs (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_reaching" amb_defs (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-40" (Exp.equal (jmp_cond_of s') (Bil.BinOp (Bil.EQ, yv, w0_64))));
 
@@ -514,18 +509,18 @@ let tests : unit Alcotest.test list =
             Def.create zf (Bil.BinOp (Bil.EQ, w0_32, yv));
           ]
         in
-        let s, _ = sub_of_defs_and_jmp "t13_reaching" amb_defs (Bil.Var zf) in
+        let s = sub_of_defs_and_jmp "t13_reaching" amb_defs (Bil.Var zf) in
         let s' = compile_sub s in
         check "JMP-41" (not (has_def_for s' zf)));
 
     (* unconditional jumps untouched. *)
     pin "JMP-42" "unconditional untouched" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
+        let s = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
         let s' = compile_sub s in
         check "JMP-42" (Exp.equal (jmp_cond_of s') (Bil.Int (Word.one 1))));
 
     pin "JMP-43" "unconditional defs untouched" (fun () ->
-        let s, _ = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
+        let s = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
         let s' = compile_sub s in
         check "JMP-43" (Int.equal (Base.List.length (defs_of s')) 5));
   ]

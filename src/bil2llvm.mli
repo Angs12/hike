@@ -50,8 +50,6 @@ type section = Bil2llvm_env.section = {
     carry the section table. *)
 type section_type = Bil2llvm_env.section_type
 
-val section_type_to_string : section_type -> string
-
 (** One input section of the spec: a byte-image section or the bss span. *)
 type sec_input = Bil2llvm_env.sec_input =
   | Sec_bytes of {
@@ -97,22 +95,3 @@ val emit_program :
   section_spec ->
   program term ->
   unit
-
-(** Declares a section global as [n x iN], [word] bytes per cell. *)
-val create_section_global :
-  Llvm.llcontext -> Llvm.llmodule -> int -> string -> is_const:bool ->
-  word:int -> Llvm.llvalue
-
-(** Uninitialized byte-array global ([n x i8]). *)
-val create_uninitialized_global :
-  Llvm.llcontext -> Llvm.llmodule -> int64 -> string -> Llvm.llvalue
-
-(** [bss]-backed global with copy-relocated symbol slots. *)
-val create_copy_reloc_bss :
-  Llvm.llcontext ->
-  Llvm.llmodule ->
-  int64 ->
-  string ->
-  (int * string) list ->
-  word:int ->
-  Llvm.llvalue

@@ -8,12 +8,10 @@ open Bap.Std
 open Probe_common
 
 module AI = Cbat_vsa.AI
-module Mem = Cbat_vsa.Mem
 module Vsa = Cbat_vsa
 
 (* Set-composite domain of AI word values. *)
 module Ws = Cbat_clp_set_composite
-module W = Word
 
 (* Default OFF; HIKE_VSA_DIAG_BOTTOM=1 enables L2a diag mode. *)
 let diag_on () : bool =
@@ -28,10 +26,6 @@ let acc_on () : bool =
   match Sys.getenv_opt "HIKE_VSA_DIAG_ACC" with
   | Some "1" -> true
   | _ -> false
-
-(* Fixpoint entry solution: production default. *)
-let init_sol_of (sub' : sub term) : Vsa.vsa_sol =
-  Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub'
 
 let () = Printexc.record_backtrace true
 

@@ -611,7 +611,6 @@ type pending_cell = {
   pc_mem : var;          (* the memory var *)
   pc_key : Mem.Key.t;    (* the key the load read *)
   pc_cstr : wordset;     (* the produced value's constraint *)
-  pc_endian : endian;
 }
 
 (* The leaf var's inverse: the meet; an empty meet is observed as a
@@ -759,8 +758,7 @@ let rec inverse_denote ~(env : AI.t)
         | Ok aws ->
           Option.iter (bounded_cell_key aws)
             ~f:(fun k ->
-               cells := { pc_mem = mv; pc_key = k; pc_cstr = produced;
-                          pc_endian = en } :: !cells)
+               cells := { pc_mem = mv; pc_key = k; pc_cstr = produced } :: !cells)
         | Error _ -> ())
      | _ -> ());
     env
@@ -1004,16 +1002,16 @@ let walk ?(raw : bool = false)
         match Var.typ v with
         | Type.Mem _ -> if List.mem acc v ~equal:Var.equal then acc else v :: acc
         | _ -> acc) in
-  let mem_vars, _word_mentions =
-    List.fold prefixed ~init:([], Var.Set.empty)
-      ~f:(fun (ms, ws) (d, _, _) ->
+  let mem_vars =
+    List.fold prefixed ~init:[]
+      ~f:(fun ms (d, _, _) ->
           let ms = mem_vars_of (Def.rhs d) ms in
-          (match Var.typ (Def.lhs d) with
-           | Type.Mem _ ->
-             if List.mem ms (Def.lhs d) ~equal:Var.equal then ms
-             else Def.lhs d :: ms
-           | _ -> ms),
-          Core.Set.union ws (Exp.free_vars (Def.rhs d))) in
+          match Var.typ (Def.lhs d) with
+          | Type.Mem _ ->
+            if List.mem ms (Def.lhs d) ~equal:Var.equal then ms
+            else Def.lhs d :: ms
+          | _ -> ms)
+  in
   let mem_idx_of m =
     match Var.typ m with
     | Type.Mem (ai, asz) -> Some (mem_idx ai asz, m)

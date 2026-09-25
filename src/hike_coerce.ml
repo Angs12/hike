@@ -123,7 +123,7 @@ class coercer = object(self)
       Bil.Ite (cond, widen Bil.UNSIGNED w wy yes, widen Bil.UNSIGNED w wn no)
 
   (* A zero-width operand contributes no bits: the concat is the other
-     operand (the emitter's [exp_size] rule, made explicit here). *)
+     operand. *)
   method! map_concat e1 e2 =
     let e1 = self#map_exp e1 in
     let e2 = self#map_exp e2 in

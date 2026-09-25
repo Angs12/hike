@@ -21,7 +21,7 @@ let ws_str (w : Ws.t) : string =
 let exp_str (e : exp) : string = Format.asprintf "%a" Exp.pp e
 
 (* Walks the sub like the production producer; `on_unbounded` compares replica vs production. *)
-let audit_sub (sp : var) (sub : sub term) : unit =
+let audit_sub (sub : sub term) : unit =
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
   (* The PROD verdict through the seam: the per-def classification the
@@ -83,9 +83,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                     when Core.Map.mem prod_map (Term.tid d) ->
                       let is_prod_ub = Hashtbl.mem prod_unbounded (Term.tid d) in
                       if is_prod_ub then begin
-                        let addr' = addr in
                         let st_tag =
-                          Exp.free_vars addr'
+                          Exp.free_vars addr
                           |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
                               match Var.typ v with
                               | Type.Imm w ->
@@ -99,21 +98,21 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                                 then acc
                                 else AI.add_word acc ~key:v ~data:mm
                               | Type.Mem _ | Type.Unk -> acc) in
-                        let ws_before = Vsa.Test_seam.denote_imm_exp addr' st_before in
-                        let ws_tag = Vsa.Test_seam.denote_imm_exp addr' st_tag in
+                        let ws_before = Vsa.Test_seam.denote_imm_exp addr st_before in
+                        let ws_tag = Vsa.Test_seam.denote_imm_exp addr st_tag in
                         Printf.printf "  DEF %s (blk %s): %s\n"
                           (Tid.to_string (Term.tid d))
                           (Tid.to_string (Term.tid blk))
                           (exp_str (Def.rhs d));
                         Printf.printf "    raw addr     : %s\n" (exp_str addr);
-                        Printf.printf "    addr (used)  : %s\n" (exp_str addr');
+                        Printf.printf "    addr (used)  : %s\n" (exp_str addr);
                         (match ws_before with
                          | Ok ws -> Printf.printf "    denote(before): %s\n" (ws_str ws)
                          | Error _ -> Printf.printf "    denote(before): ERROR\n");
                         (match ws_tag with
                          | Ok ws -> Printf.printf "    denote(tag)   : %s\n" (ws_str ws)
                          | Error _ -> Printf.printf "    denote(tag)   : ERROR\n");
-                        Exp.free_vars addr' |> Core.Set.iter ~f:(fun v ->
+                        Exp.free_vars addr |> Core.Set.iter ~f:(fun v ->
                             match Var.typ v with
                             | Type.Imm w ->
                               let cur = AI.find_word w st_before v in
@@ -122,15 +121,11 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                               Printf.printf "    free var %s: cur(before)=%s tag=%s\n"
                                 (Var.name v) (ws_str cur) (ws_str tag_v)
                             | _ -> ());
-                        (* Classify the failure from the four candidates. *)
+                        (* Classify the failure from the candidates. *)
                         let diag =
-                          let addr_unchanged = Exp.equal addr addr' in
                           match ws_before, ws_tag with
-                          | Ok ws, _ when Ws.is_top ws && addr_unchanged ->
-                            "candidate 1: the address denotes TOP (no stack word in scope)"
                           | Ok ws, _ when Ws.is_top ws ->
-                            Printf.sprintf "candidate 2: denote_imm_exp returned TOP (addr transformed to %s)"
-                              (exp_str addr')
+                            "candidate 1: the address denotes TOP (no stack word in scope)"
                           | Error _, _ -> "candidate 3: denote_imm_exp returned Error (val_as_imm failure)"
                           | Ok _, Ok _ ->
                             (match ws_before, ws_tag with
@@ -139,8 +134,8 @@ let audit_sub (sp : var) (sub : sub term) : unit =
                              | _ ->
                                (match ws_before with
                                 | Ok ws ->
-                                  Printf.sprintf "unclassified: ws=%s addr_unchanged=%b"
-                                    (ws_str ws) addr_unchanged
+                                  Printf.sprintf "unclassified: ws=%s"
+                                    (ws_str ws)
                                 | _ -> "unclassified: unknown"))
                           | _ -> "unclassified: unknown" in
                         Printf.printf "    DIAGNOSIS: %s\n" diag
@@ -156,14 +151,13 @@ let audit_sub (sp : var) (sub : sub term) : unit =
 let wbig_main (path : string) : unit =
   let proj = load_project path in
   let prog = Project.program proj in
-  let sp = sp_of proj in
   let total = ref 0 in
   let skipped = ref 0 in
   all_subs prog
   |> List.iter (fun sub ->
       try
         let n = ref 0 in
-        let sub', sol = analyze_and_fixpoint sp prog sub in
+        let sub', sol = analyze_and_fixpoint sub in
         (* The analyze pass's solution is the kind source — no re-solve. *)
         let kind_of = Probe_common.seam_kinds_of sol sub' in
         Term.enum blk_t sub'
@@ -210,14 +204,13 @@ let () =
      | Error e ->
        Printf.printf "LOAD-FAIL %s: %s\n" binary (Core.Error.to_string_hum e); exit 1
      | Ok proj ->
-       let sp = sp_of proj in
        (* One set: Hike.Vsa.set_addr_bits is the same cell (Hike_vsa pass-through). *)
        Vsa.set_addr_bits 64;
        let prog = Project.program proj in
        (if String.equal subname "ALL" then
-          Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub sp sub)
+          Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub sub)
         else
           match Seq.find (Term.enum sub_t prog) ~f:(fun s -> String.equal (Sub.name s) subname) with
-          | Some sub -> audit_sub sp sub
+          | Some sub -> audit_sub sub
           | None -> Printf.printf "sub '%s' not found\n" subname);
        flush stdout)

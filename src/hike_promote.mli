@@ -51,7 +51,6 @@ val rewrite_program :
   word:int ->
   entry:int64 ->
   facts:Hike_kb.facts ->
-  symtab:Symtab.t option ->
   spans:Hike_sections.data_span list ->
   ctx:Hike_sections.ctx ->
   program term ->

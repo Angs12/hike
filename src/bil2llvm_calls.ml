@@ -401,11 +401,6 @@ and is_plt_trampoline_slow ctx (sub : sub term) : bool =
 let thunk_tid_of (sub_tid : tid) : tid =
   Tid.for_name (Tid.name sub_tid ^ ":thunk")
 
-(* A slot's offset in the caller window (SysV: [entry_rsp + word +
-   word*i]). *)
-let slot_offset ~(word : int) (i : int) : Int64.t =
-  Int64.of_int (word + (word * i))
-
 (* The twin unpacks the window into the promoted body's slot
    parameters and forwards the register lanes.  Internal linkage: the
    consumer's optimizer inlines it where the call site resolves. *)
@@ -455,7 +450,7 @@ let create_thunk ctx (sub_tid : tid) =
         Base.List.init arity ~f:(fun i ->
             let off =
               Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
-                (slot_offset ~word:ctx.abi.Abi.word i) false
+                (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i) false
             in
             let ptr =
               Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
@@ -573,7 +568,7 @@ let is_self_call_stub (ctx : emit_ctx) (sub : sub term) : bool =
 let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in
   let name = Tid.name target |> fp_intrinsic_name in
-  if Base.String.is_prefix (Tid.name target) ~prefix:"@interrupt:" then
+  if Bil2llvm_env.is_interrupt_name (Tid.name target) then
     create_interrupt ctx llvm_builder
   else
     match native_fp_op (Tid.name target) with

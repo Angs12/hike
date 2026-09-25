@@ -100,9 +100,13 @@ let word_bits (t : t) : int = 8 * t.word
 (* SysV stack alignment: every stack object is 16-byte aligned. *)
 let stack_align = 16
 
-(* Value-register names for the FP-return detector. *)
-let value_return_names = [ "RAX"; "EAX"; "RDX"; "EDX" ]
+(* The convention's named lanes: the FP return rides the first vector
+   register; the fixed (argc, argv) signature reads the first two
+   integer params. *)
+let fp_return_reg (t : t) : var = Base.List.nth_exn t.vector_param_regs 0
 
-let is_value_return_reg (t : t) (v : var) : bool =
-  Base.List.mem value_return_names (Var.name (Var.base v)) ~equal:String.equal
+let argc_argv_regs (t : t) : var * var =
+  match t.int_param_regs with
+  | rdi :: rsi :: _ -> (rdi, rsi)
+  | _ -> failwith "hike_abi: fewer than two integer param registers"
 

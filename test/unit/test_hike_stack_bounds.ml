@@ -69,12 +69,11 @@ let tests : unit Alcotest.test list =
     pin "HSB-06" "stack_floor: entry + Int64.min_int is the below-entry scope bound"
       (fun () ->
         check "HSB-06"
-          (Hsb.stack_floor ~entry:base = -4611686018427387896L
-          && Hsb.stack_floor ~entry:0L = Int64.min_int
+          (Hsb.stack_floor ~entry:0L = Int64.min_int
           && Hsb.stack_floor ~entry:base = floor));
 
     pin "HSB-07" "args_ceiling: the top of the position line"
-      (fun () -> check "HSB-07" (Hsb.args_ceiling = Int64.max_int && Hsb.args_ceiling = cei));
+      (fun () -> check "HSB-07" (Hsb.args_ceiling = cei));
 
     pin "HSB-08"
       "positions_of_offsets: a finite offset interval projects to its exact positions"

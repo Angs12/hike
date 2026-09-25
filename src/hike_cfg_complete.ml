@@ -193,7 +193,10 @@ let materialize_block
 (* One mid-block case entry: the prefix keeps the block's tid (its
    incoming edges) and falls through to the fresh entry block, which
    takes the address; sound only when the prefix is transparent.  A word
-   in no block at all materializes its case body instead. *)
+   in no block at all materializes its case body instead.  A split the
+   materialization later declines stays: the prefix fallthrough keeps
+   the block connected, and the prune retracts only unreachable fresh
+   blocks. *)
 let split_entry ~(starts : (Addr.t * tid) list)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t) (a : Addr.t) (sub : sub term) :
@@ -331,8 +334,7 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
         match dispatch_target ~last_defs ~retaddr j with
         | None -> None
         | Some texp ->
-          Base.Option.bind
-            ~f:(dispatch_words ~denote ~block_addrs ~last_defs ~blk) (Some texp)
+          dispatch_words ~denote ~block_addrs ~last_defs ~blk texp
           |> Base.Option.bind ~f:(fun words ->
                  Base.List.find_map words ~f:(fun w ->
                      let a = Cbat_word.to_word w in
@@ -432,9 +434,10 @@ let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
                      "hike-cfg-complete: dispatch word %s names no block in the run's block-address map"
                      (Word.to_string a))
           in
-          let pairs = Base.List.map ws ~f:case in
-          if Base.List.exists pairs ~f:Option.is_none then None
-          else Some (subject, Base.List.filter_map pairs ~f:(fun p -> p), bval))
+          let pairs = Base.List.filter_map ws ~f:case in
+          if Base.List.length pairs = Base.List.length ws
+          then Some (subject, pairs, bval)
+          else None)
 
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
    The words share the selector's width, so the comparisons typecheck. *)
@@ -629,6 +632,27 @@ let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
   Base.List.iter js' ~f:(Blk.Builder.add_jmp b);
   Term.with_attrs (Blk.Builder.result b) (Term.attrs blk)
 
+(* Rebuilds [blk] replacing each jmp its classifier rewrites; a
+   classifier [None] keeps the jmp. *)
+let splice_jmps (blk : blk term)
+    ~(classify : jmp term -> jmp term list option) : blk term =
+  let js = Seq.to_list (Term.enum jmp_t blk) in
+  let decided =
+    Base.List.filter_map js ~f:(fun j ->
+        Base.Option.map (classify j) ~f:(fun js' -> (Term.tid j, js')))
+  in
+  match decided with
+  | [] -> blk
+  | _ ->
+      let rewr = Core.Map.of_alist_exn (module Tid) decided in
+      let spliced =
+        Base.List.concat_map js ~f:(fun j ->
+            match Core.Map.find rewr (Term.tid j) with
+            | Some js' -> js'
+            | None -> [ j ])
+      in
+      with_jmps blk spliced
+
 (* The fresh blocks a surviving indirect transfer may still denote:
    [go] does not follow indirect edges, so an unresolved transfer whose
    target denotation names a split entry keeps it live.  A transfer
@@ -738,30 +762,10 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(images : Vsa.section_image list)
     (sub : sub term) : sub term =
   let sub_tids = sub_tids sub in
-  let reblock (blk : blk term) : blk term =
-    let js = Seq.to_list (Term.enum jmp_t blk) in
-    let last_defs = Vsa.last_defs blk in
-    let decided =
-      Base.List.filter_map js ~f:(fun j ->
-          rewritten_jmps ~denote ~retaddr ~sub_tids
-            ~block_addrs
-            ~last_defs
-            ~images ~blk j
-          |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
-    in
-    match decided with
-    | [] -> blk
-    | _ ->
-        let rewr = Core.Map.of_alist_exn (module Tid) decided in
-        let spliced =
-          Base.List.concat_map js ~f:(fun j ->
-              match Core.Map.find rewr (Term.tid j) with
-              | Some js' -> js'
-              | None -> [ j ])
-        in
-        with_jmps blk spliced
-  in
-  Term.map blk_t sub ~f:reblock
+  Term.map blk_t sub ~f:(fun blk ->
+      let last_defs = Vsa.last_defs blk in
+      splice_jmps blk ~classify:(rewritten_jmps ~denote ~retaddr ~sub_tids
+                                   ~block_addrs ~last_defs ~images ~blk))
 
 (* The shape-only return canonicalization, for a sub whose fixpoint did
    not converge: a target var whose reaching def loads the entry SP
@@ -780,7 +784,7 @@ let rewritten_shape_returns ~(retaddr : Tid.Set.t)
   | _ -> None
 
 let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
-  let word_bits = 8 * abi.Hike_abi.word in
+  let word_bits = Hike_abi.word_bits abi in
   let retaddr =
     Term.enum blk_t sub
     |> Seq.concat_map ~f:(Term.enum def_t)
@@ -794,24 +798,9 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
   if Core.Set.is_empty retaddr then sub
   else
     Term.map blk_t sub ~f:(fun blk ->
-        let js = Seq.to_list (Term.enum jmp_t blk) in
         let last_defs = Vsa.last_defs blk in
-        let decided =
-          Base.List.filter_map js ~f:(fun j ->
-              rewritten_shape_returns ~retaddr ~last_defs j
-              |> Base.Option.map ~f:(fun js' -> (Term.tid j, js')))
-        in
-        match decided with
-        | [] -> blk
-        | _ ->
-            let rewr = Core.Map.of_alist_exn (module Tid) decided in
-            let spliced =
-              Base.List.concat_map js ~f:(fun j ->
-                  match Core.Map.find rewr (Term.tid j) with
-                  | Some js' -> js'
-                  | None -> [ j ])
-            in
-            with_jmps blk spliced)
+        splice_jmps blk
+          ~classify:(rewritten_shape_returns ~retaddr ~last_defs))
 
 (* One resolution event pass on the phase's own solution: the case
    words land on the run's map and resolved dispatches contribute

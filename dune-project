@@ -7,24 +7,40 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github Angs12/hike))
 
-(authors "Author Name <author@example.com>")
+(authors "Angs12")
 
-(maintainers "Maintainer Name <maintainer@example.com>")
-
-(license LICENSE)
-
-(documentation https://url/to/documentation)
+(maintainers "Angs12")
 
 (package
  (name hike)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (synopsis "Lifts x86-64 ELF binaries to LLVM IR through a value-set analysis")
+ (description
+  "A BAP plugin that lifts x86-64 ELF binaries to LLVM IR.  A vendored \
+   value-set analysis attributes every memory access to a section; the \
+   stack splits into real LLVM allocas (regions, VLA allocas, the \
+   residue fallback), and the emitter renders the program through one \
+   seam (bil2llvm) with the semantic harness as the acceptance oracle.")
  (depends
   ocaml
-  (alcotest :with-test))
- (tags
-  ("add topics" "to describe" your project)))
+  dune
+  bap
+  llvm
+  bap-core-theory
+  bap-future
+  bap-knowledge
+  bap-main
+  bitvec
+  bitvec-order
+  bin_prot
+  core
+  monads
+  hashcons
+  zarith
+  str
+  unix
+  (ppx_bap :build)
+  (alcotest :with-test)))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html

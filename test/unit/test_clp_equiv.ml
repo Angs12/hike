@@ -349,7 +349,6 @@ let run_sweep () : int * int * int =
         cw1 (Printf.sprintf "lshift_exact %d" i)
           (fun w -> Ref_word.lshift_exact w i) (fun w -> CW.lshift_exact w i) w1);
     cw2 "bounded_gcd" Ref_word.bounded_gcd CW.bounded_gcd w1 w2;
-    cw2 "cdiv" Ref_word.cdiv CW.cdiv w1 w2;
     cw1b "is_one(ops)" Ref_word.is_one CW.is_one w1;
     cw1b "is_one(ops)" Ref_word.is_one CW.is_one w2;
     CKL.iter [ w1; w2; w3 ] ~f:(fun c ->

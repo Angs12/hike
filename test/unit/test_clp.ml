@@ -35,6 +35,7 @@ let lshift_comp = "During lshift, maximum element of CLP2 is >= CLP1's width"
 let rshift_comp = "During rshift, maximum element of CLP2 is >= CLP1's width"
 let arshift_comp = "During arshift, maximum element of CLP2 is >= CLP1's width"
 let sh16 = Clp.create (w64 16)
+let amt2 = Clp.of_list ~width:2 [ Cbat_word.of_int ~width:2 2 ]
 let amt64 = Clp.of_list ~width:64 [ w64 64 ]
 let straddle = Clp.create ~width:64 ~step:(w64 2) ~cardn:(Cbat_word.of_int ~width:65 32) (w64 8)
 let antipodal64 = Clp.of_list ~width:64 [ w64 1; Cbat_word.lshift (w64 1) (w64 63) ]
@@ -752,8 +753,6 @@ let tests : unit Alcotest.test list =
 
     pin "CLP-82" "D7-10: lshift 2-bit {2} amount vs 64-bit operand -> computes {64}, no spurious fire"
       (fun () ->
-        let w2 = Cbat_word.of_int ~width:2 in
-        let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
         let fire_l = fired lshift_comp (fun () -> ignore (Clp.lshift sh16 amt2)) in
         let r = Clp.lshift sh16 amt2 in
         check "CLP-82"
@@ -761,8 +760,6 @@ let tests : unit Alcotest.test list =
 
     pin "CLP-83" "D7-11: lshift overshift (6-bit {40} amount vs 32-bit operand) -> {0} exactly, no fire"
       (fun () ->
-        let w2 = Cbat_word.of_int ~width:2 in
-        let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
         let fire_l = fired lshift_comp (fun () -> ignore (Clp.lshift sh16 amt2)) in
         check "CLP-83"
           (let r =
@@ -773,16 +770,12 @@ let tests : unit Alcotest.test list =
     pin "CLP-84"
       "D7-12: rshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never fires"
       (fun () ->
-        let w2 = Cbat_word.of_int ~width:2 in
-        let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
         let fire_r = fired rshift_comp (fun () -> ignore (Clp.rshift sh16 amt2)) in
         check "CLP-84" (Clp.equal (Clp.rshift sh16 amt2) (Clp.create (w64 4)) && not fire_r));
 
     pin "CLP-85"
       "D7-13: arshift 2-bit {2} amount vs 64-bit operand COMPUTES {4} (lane A), wrapped guard never fires"
       (fun () ->
-        let w2 = Cbat_word.of_int ~width:2 in
-        let amt2 = Clp.of_list ~width:2 [ w2 2 ] in
         let fire_a = fired arshift_comp (fun () -> ignore (Clp.arshift sh16 amt2)) in
         check "CLP-85" (Clp.equal (Clp.arshift sh16 amt2) (Clp.create (w64 4)) && not fire_a));
 
@@ -915,33 +908,6 @@ let tests : unit Alcotest.test list =
           (let r = Clp.lshift base a8 in
            is_zero_clp (Cbat_word.of_int ~width:8 0) r && not fire_l));
 
-    pin "CLP-99" "property Clp->FinSet->Clp round-trip (sampled progressions)"
-      (fun () ->
-        let clps : Clp.t list =
-          [
-            Clp.create (w32 10) ~step:(w32 2) ~cardn:(Cbat_word.of_int ~width:33 3);
-            Clp.create (w32 0) ~step:(w32 1) ~cardn:(Cbat_word.of_int ~width:33 5);
-            Clp.create (Cbat_word.of_int ~width:8 1) ~step:(Cbat_word.of_int ~width:8 1)
-              ~cardn:(Cbat_word.of_int ~width:9 3);
-          ]
-        in
-        check "CLP-99"
-          (List.for_all
-             (fun p ->
-               let cardn = Clp.cardinality p in
-               if
-                 (not (Cbat_word.is_zero cardn))
-                 && Cbat_word.compare cardn
-                      (Cbat_word.of_int ~width:(Cbat_word.bitwidth cardn) 11)
-                    < 0
-               then begin
-                 let s = Fs.of_list ~width:(Clp.bitwidth p) (Clp.iter p) in
-                 let p2 = Clp.of_list ~width:(Fs.bitwidth s) (Fs.iter s) in
-                 Clp.equal p p2
-               end
-               else true)
-             clps));
-
     pin "CLP-100"
       "property m6 FinSet↔Clp round-trips enumerated (200 random progression trials: soundness always, \
        exactness on wrap-free arcs)"
@@ -949,9 +915,14 @@ let tests : unit Alcotest.test list =
         Random.init 20260822;
         let failures = ref 0 in
         for _i = 1 to 200 do
-          let w = [| 4; 8; 12 |].(Random.int 3) in
+          let w = [| 4; 8; 12; 32 |].(Random.int 4) in
           let dom = 1 lsl w in
-          let base = Random.int dom in
+          (* Random.int's bound stays under 2^31: a 32-bit domain draws
+             its base in two halves. *)
+          let base =
+            if dom <= 1 lsl 29 then Random.int dom
+            else (Random.int (dom lsr 16) lsl 16) + Random.int (1 lsl 16)
+          in
           let step = 1 + Random.int 5 in
           let n = 1 + Random.int 10 in
           let rec els acc k =

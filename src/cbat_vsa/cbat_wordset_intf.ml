@@ -39,9 +39,6 @@ module type S = sig
   val min_elem_signed : t -> word option
   val max_elem_signed : t -> word option
 
-  val nearest_pred : word -> t ->  word option
-  val nearest_succ : word -> t ->  word option
-
   (* True when elements are spaced by a multiple of [w]. *)
   val splits_by : t -> word -> bool
 

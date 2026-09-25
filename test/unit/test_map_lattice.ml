@@ -106,8 +106,10 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let v32 = Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) LittleEndian in
         check "MAP-12"
-          (let v1 = Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) LittleEndian in
-           Mem.Val.equal v1 v32 && Ws.elem (w32 1) (Mem.Val.data (Mem.Val.join v1 v32))));
+          (Mem.Val.equal
+             (Mem.Val.create (Ws.of_list ~width:32 [ w32 1 ]) LittleEndian)
+             v32
+          && Ws.elem (w32 1) (Mem.Val.data (Mem.Val.join v32 v32))));
 
     pin "MAP-13" "D2-9: Mem.widen_join of non-preceding maps -> join fallback (no assert)"
       (fun () ->

@@ -138,13 +138,18 @@ module Make_indexed_from_map
     let old_data = Option.value ~default:(L.top idx) (Map.find m key) in
     Option.return @@ Map.set m ~key ~data:(op data old_data)
 
-  let lift_add op : t -> key:Key.t -> data:Val.t -> t =
-    let default = fun ~key:_ ~data:_ -> None in
-    Option.value_map ~default ~f:(op_add op)
-
-  let join_add : t -> key:Key.t -> data:Val.t -> t = lift_add L.join
-  let meet_add = lift_add L.meet
-  let add = lift_add (fun x _ -> x)
+  let join_add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
+    match t with
+    | None -> None
+    | Some m -> op_add L.join m ~key ~data
+  let meet_add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
+    match t with
+    | None -> None
+    | Some m -> op_add L.meet m ~key ~data
+  let add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
+    match t with
+    | None -> None
+    | Some m -> op_add (fun x _ -> x) m ~key ~data
 
   let find' (idx : idx) (m : map) (k : K.t) : L.t =
     Option.value ~default:(L.top idx) (Map.find m k)

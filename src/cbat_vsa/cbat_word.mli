@@ -48,7 +48,6 @@ val sub : t -> t -> t
 val mul : t -> t -> t
 val div : t -> t -> t
 val modulo : t -> t -> t
-val smodulo : t -> t -> t
 val logand : t -> t -> t
 val logor : t -> t -> t
 val logxor : t -> t -> t
@@ -102,9 +101,6 @@ val lshift_exact : t -> int -> t
 (* Both require equal-width operands. *)
 val bounded_gcd : t -> t -> t
 val bounded_diophantine : t -> t -> t -> (t * t) option
-
-(* Unsigned division rounding up. *)
-val cdiv : t -> t -> t
 
 (* Splits into the odd part and the power of two. *)
 val factor_2s : t -> t * int

@@ -5,11 +5,7 @@ open Bap.Std
 open Probe_common
 
 (* The CFG view lives in Probe_common (shared with vsa_gap). *)
-let succs = cfg_succs
 let cfg_of = cfg_of
-let succs_of = succs_of
-let reachable = reachable
-let on_cycle = on_cycle
 let cyclic_heads = cyclic_heads
 
 let () =
@@ -20,7 +16,6 @@ let () =
   | path :: rest ->
     let proj = load_project path in
     let prog = Project.program proj in
-    let _sp = sp_of proj in
     let name = match rest with n :: _ -> n | [] -> "main" in
     let sub =
       match find_sub prog name with
@@ -34,13 +29,8 @@ let () =
     let sub' = sub in
     let sol, converged =
       try (Probe_common.run_sub_fixpoint sub', true)
-      with Vsa.Fixpoint_not_converged (n, sol, gap) ->
+      with Vsa.Fixpoint_not_converged (n, sol) ->
         Printf.printf "FIXPOINT NOT CONVERGED after %d rounds\n" n;
-        (match gap with
-         | Some (b, s) ->
-           Printf.printf "  first still-growing (block, successor): (%s -> %s)\n"
-             (Tid.name b) (Tid.name s)
-         | None -> Printf.printf "  (no gap pair captured)\n");
         (sol, false)
     in
     Printf.printf

@@ -1,7 +1,5 @@
 #include <stdio.h>
-#include <stdlib.h>
 
-int main(int argc, char *argv[]) {
-  char *s = malloc(10);
+int main(void) {
   printf("Hello %s", "World!\n");
 }

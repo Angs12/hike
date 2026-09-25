@@ -39,7 +39,7 @@ let passcost_main (args : string list) : unit =
       let target = Project.target proj in
       let prog = Project.program proj in
       let facts =
-        Hike.Kb.build ~block_envs:Tid.Map.empty
+        Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
           ~block_addrs:(Core.Map.empty (module Addr)) ~target
       in
       Base.List.iter (all_subs prog) ~f:(fun sub ->
@@ -53,8 +53,7 @@ let passcost_main (args : string list) : unit =
           in
           let _envs, t_vsa =
             time (fun () ->
-                Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
-                  ~lookup:(fun _ -> None) ~symtab:None ~images:[]
+                Hike.Vsa.fixpoint target ~lookup:(fun _ -> None) ~images:[]
                   ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi prog)
                   ~lift_at:(fun _ ~block_addrs:_ -> None)
                   ~block_addrs:(Core.Map.empty (module Addr)) sub)
@@ -81,7 +80,7 @@ let () =
     Printf.printf "# subs: %d\n" (List.length subs);
     (* pass_vsa's image set: the .rodata section only. *)
     let images =
-      Hike.Image.get_section_mem ".rodata" proj
+      Hike.Image.get_section_mem ("." ^ Hike.Stack_model.sec_name Hike.Stack_model.Rodata) proj
       |> Hike.Image.get_section_data
       |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
              [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
@@ -93,7 +92,6 @@ let () =
       (match images with
        | [ im ] -> Bytes.length im.Cbat_vsa.img_bytes
        | _ -> 0);
-    let symtab = Some (Project.symbols proj) in
     let written = Hike.Vsa.kill_summaries ~abi:(Hike.Abi.of_target target) prog in
     let block_addrs =
       Term.enum sub_t prog
@@ -125,16 +123,13 @@ let () =
           Printf.eprintf "probe: solving %s (%d blk %d defs)\n%!" name nblk ndefs;
           let t0 = Unix.gettimeofday () in
           let _envs, _sub', _ =
-            Hike.Vsa.fixpoint target ~prog
-              ~lookup:(fun _ -> None) ~symtab ~images ~written
+            Hike.Vsa.fixpoint target ~lookup:(fun _ -> None) ~images ~written
               ~lift_at:(fun _ ~block_addrs:_ -> None)
               ~block_addrs sub
-            |> Base.Option.value
-                 ~default:(Tid.Map.empty, sub, Core.Map.empty (module Addr))
           in
           let dt = Unix.gettimeofday () -. t0 in
           let facts =
-            Hike.Kb.build ~block_envs:Tid.Map.empty
+            Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
               ~block_addrs:(Core.Map.empty (module Addr)) ~target
           in
           let ntags = Core.Set.length (Hike.Sections.dynamic_alloc_tids_of ~facts sub) in

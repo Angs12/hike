@@ -54,8 +54,6 @@ let time (which : [ `Denote | `Equal | `Glue | `Join | `Scaffold | `Walk | `Wide
    | `Glue -> incr glue_calls; t_glue := !t_glue +. dt);
   r
 
-(* Commit one walk's schedule metrics. *)
-
 (* Print totals, call counts, and GC deltas. *)
 let gc_minor_words () =
   (Gc.quick_stat ()).Gc.minor_words -. (!gc0).Gc.minor_words

@@ -1,9 +1,7 @@
 open Bap.Std
 open Bap_main
 open Bap_core_theory
-open Bil2llvm_env
 module Abi = Hike_abi
-open Hike_filter
 
 
 (* Public re-exports; consumers use [Hike.Abi], etc. *)
@@ -20,7 +18,6 @@ module Def_slots = Hike_def_slots
 module Sections = Hike_sections
 module Image = Hike_image
 module Promote = Hike_promote
-module Filter = Hike_filter
 module Kb = Hike_kb
 module Types = Hike_types
 module Strip_canaries = Hike_strip_canaries
@@ -31,7 +28,7 @@ let convert_binary output_program proj =
   let llvm_module = Llvm.create_module llvm_ctx "Convlir" in
   let target = Project.target proj in
   let abi = Abi.of_target target in
-  let word = abi.Hike_abi.word in
+  let word = abi.Abi.word in
   let addr_bits = Theory.Target.bits target in
   (* The section rows, read once for this pass. *)
   let meta = Hike_sections.sec_meta ~word proj in
@@ -42,12 +39,10 @@ let convert_binary output_program proj =
         (* No attribution ran: the sections emit with no components. *)
         Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
   in
-  let copy_reloc_addrs_val = Hike_sections.copy_reloc_slot_addrs meta in
-  let symtab_val = Some (Project.symbols proj) in
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
-    ~symtab:symtab_val
-    ~copy_relocs:copy_reloc_addrs_val
+    ~symtab:(Some (Project.symbols proj))
+    ~copy_relocs:(Hike_sections.copy_reloc_slot_addrs meta)
     spec (Project.program proj);
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
@@ -59,16 +54,20 @@ let output =
     "output-file" ~doc:"File to output LLVM IR"
 
 (* Registers the pass and returns its name for the next link's deps:
-   the chain is linear, each pass depending on its predecessor. *)
+   the chain is linear, each pass depending on its predecessor.  [chain']
+   is the parameter-passing registrar's twin (the emitting last link). *)
 let chain ~name ~prev run =
   Project.register_pass ~name ~deps:[ "hike-" ^ prev ] ~runonce:true run;
+  name
+
+let chain' ~name ~prev run =
+  Project.register_pass' ~name ~deps:[ "hike-" ^ prev ] ~runonce:true run;
   name
 
 let map_subs f proj =
   Project.map_program proj ~f:(fun prog -> Term.map sub_t prog ~f)
 
-let pass_filter proj =
-  filter_subs proj
+let pass_filter proj = Hike_filter.filter_subs proj
 
 let pass_jump proj = map_subs (Hike_jump.compile_sub (Project.target proj)) proj
 
@@ -84,7 +83,7 @@ let pass_vsa proj =
      relocates it (relocated data lands in .data.rel.ro). *)
   let images =
     Hike_image.get_section_mem
-      ("." ^ section_type_to_string Hike_stack_model.Rodata) proj
+      ("." ^ Hike_stack_model.sec_name Hike_stack_model.Rodata) proj
     |> Hike_image.get_section_data
     |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
            [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
@@ -152,17 +151,11 @@ let pass_vsa proj =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:(Tid.Map.empty, block_addrs)
          ~f:(fun (acc, block_addrs) sub ->
-        Option.value
-          (Base.Option.map
-             (Hike_vsa.fixpoint target
-                ~prog:(Project.program proj)
-                ~lookup
-                ~symtab:(Some (Project.symbols proj)) ~images ~written
-                ~lift_at ~block_addrs sub)
-             ~f:(fun (envs, sub', block_addrs') ->
-               (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'),
-                block_addrs')))
-          ~default:(acc, block_addrs))
+        let envs, sub', block_addrs' =
+          Hike_vsa.fixpoint target ~lookup ~images ~written ~lift_at
+            ~block_addrs sub
+        in
+        (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'), block_addrs'))
   in
   let all_envs =
     Core.Map.fold subs_acc ~init:Tid.Map.empty
@@ -171,7 +164,7 @@ let pass_vsa proj =
           ~f:(fun ~key ~data m' -> Core.Map.set m' ~key ~data))
   in
   Hike_kb.install
-    (Hike_kb.build ~block_envs:all_envs ~block_addrs ~target);
+    (Hike_kb.build ~block_envs:all_envs ~block_addrs ~target ~lookup);
   (* The rewritten subs are the program from here on. *)
   Project.map_program proj ~f:(fun prog ->
       Term.map sub_t prog ~f:(fun sub ->
@@ -188,6 +181,7 @@ let pass_strip_canaries proj =
         Core.Map.set m ~key:(Term.tid s) ~data:(Sub.name s))
   in
   map_subs (Hike_strip_canaries.strip_sub ~facts ~names) proj
+
 (* The sections pass: attribution, promotion, DCE; the emitter spec is
    installed into the KB facts for convert_binary. *)
 let pass_attrib proj =
@@ -214,26 +208,26 @@ let pass_attrib proj =
         Hike_sections.attribute ~facts ~word ~entry:Hike_stack_model.segment_base
           ~spans prog
       in
-      Term.map sub_t prog ~f:(Hike_sections.stamp_tags ctx)
-      |> Hike_promote.rewrite_program ~word ~entry:Hike_stack_model.segment_base
-            ~facts ~symtab:(Some (Project.symbols proj)) ~spans
-            ~ctx
-      |> fun prog ->
-        Hike_kb.install
-          (Hike_kb.with_spec (Hike_kb.facts ())
-             (Hike_sections.section_spec_of ~word
-                ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
-                ~whole:(Hike_sections.whole_comps_of ctx)
-                ~meta));
-        (* The DCE's load roots are the vars the rewrite created; its
-           escape roots are the storages carrying identity members. *)
-        Term.map sub_t prog ~f:(fun sub ->
-            let roots =
-              Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
-              |> Option.value ~default:Hike_sections.Tree.empty
-              |> Hike_sections.escape_roots_of_tree
-            in
-            Hike_dce.dce ~roots ~target sub))
+      let prog =
+        Term.map sub_t prog ~f:(Hike_sections.stamp_tags ctx)
+        |> Hike_promote.rewrite_program ~word ~entry:Hike_stack_model.segment_base
+              ~facts ~spans ~ctx
+      in
+      Hike_kb.install
+        (Hike_kb.with_spec (Hike_kb.facts ())
+           (Hike_sections.section_spec_of ~word
+              ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
+              ~whole:(Hike_sections.whole_comps_of ctx)
+              ~meta));
+      (* The DCE's load roots are the vars the rewrite created; its
+         escape roots are the storages carrying identity members. *)
+      Term.map sub_t prog ~f:(fun sub ->
+          let roots =
+            Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
+            |> Option.value ~default:Hike_sections.Tree.empty
+            |> Hike_sections.escape_roots_of_tree
+          in
+          Hike_dce.dce ~roots ~target sub))
 
 let pass_convlir ~output proj = convert_binary output proj
 
@@ -252,7 +246,6 @@ let () =
       in
       let sections = chain ~name:"sections" ~prev:strip_canaries pass_attrib in
       let types = chain ~name:"types" ~prev:sections pass_types in
-      Project.register_pass' ~name:"convlir" ~runonce:true
-        ~deps:[ "hike-" ^ types ]
-        (pass_convlir ~output:output_file);
+      let convlir = chain' ~name:"convlir" ~prev:types (pass_convlir ~output:output_file) in
+      ignore convlir;
       Ok ())

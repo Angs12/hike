@@ -33,14 +33,6 @@ let create_unop llvm_builder (op, llvm_val) =
   | NEG -> Llvm.build_neg llvm_val "" llvm_builder
   | NOT -> Llvm.build_not llvm_val "" llvm_builder
 
-let rec exp_size (e : exp) : int =
-  match e with
-  | Bil.Extract (hi, lo, _) -> max 0 (hi - lo + 1)
-  | Bil.Cast (_, i, _) -> i
-  | _ -> (
-    match Type.infer e with
-    | Ok (Type.Imm n) -> n
-    | _ -> 0)
 
 let create_concat ctx llvm_builder (llvm_var1, llvm_var2) =
   let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
@@ -188,12 +180,10 @@ let marker_of_size size =
 
 (* The Let-binder's evaluation temp: a fresh identity with a name the
    lifted vocabulary never uses, so the substitution cannot capture. *)
-let let_counter = ref 0
-
-let fresh_let_var (v : Var.t) : Var.t =
-  incr let_counter;
+let fresh_let_var scope (v : Var.t) : Var.t =
+  incr scope.let_counter;
   Var.create ~is_virtual:true ~fresh:false
-    (Printf.sprintf "hike_let%d" !let_counter)
+    (Printf.sprintf "hike_let%d" !(scope.let_counter))
     (Var.typ v)
 
 (* Maps only the mem node matching (addr, size) to a var, preserving
@@ -222,37 +212,19 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
       let var = create_exp ctx scope llvm_builder blk_tid e in
       create_unop llvm_builder (op, var)
   | Var v -> (
-      (* Width-family fallback, else undef. *)
       match get_local scope blk_tid v with
       | Some x -> x
       | None ->
-          let want_w =
-            match Var.typ v with Type.Imm w -> w | _ -> Hike_abi.word_bits ctx.abi
-          in
-          match probe_local_family scope blk_tid v ~want_w with
-          | Some (val_at_w, bound_w) ->
-              let want_ty = Llvm.integer_type ctx.llvm_ctx want_w in
-              if bound_w = want_w then val_at_w
-              else if bound_w > want_w then
-                Llvm.build_trunc val_at_w want_ty "" llvm_builder
-              else
-                Llvm.build_zext val_at_w want_ty "" llvm_builder
-          | None ->
-              warn_undef_read ctx scope v blk_tid;
-              frozen_undef ctx scope v)
+          warn_undef_read ctx scope v blk_tid;
+          frozen_undef ctx scope v)
   | Int i -> create_immediate ctx i
   | Cast (cast, i, exp) ->
       let var = create_exp ctx scope llvm_builder blk_tid exp in
       create_cast ctx llvm_builder (cast, i, var)
   | Concat (exp1, exp2) ->
-      let s1 = exp_size exp1 in
-      let s2 = exp_size exp2 in
-      if s1 = 0 then create_exp ctx scope llvm_builder blk_tid exp2
-      else if s2 = 0 then create_exp ctx scope llvm_builder blk_tid exp1
-      else
-        let llvm_var1 = create_exp ctx scope llvm_builder blk_tid exp1 in
-        let llvm_var2 = create_exp ctx scope llvm_builder blk_tid exp2 in
-        create_concat ctx llvm_builder (llvm_var1, llvm_var2)
+      let llvm_var1 = create_exp ctx scope llvm_builder blk_tid exp1 in
+      let llvm_var2 = create_exp ctx scope llvm_builder blk_tid exp2 in
+      create_concat ctx llvm_builder (llvm_var1, llvm_var2)
   | Extract (hi, lo, exp) ->
       let llvm_var = create_exp ctx scope llvm_builder blk_tid exp in
       create_extract ctx llvm_builder (hi, lo, llvm_var)
@@ -298,7 +270,7 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
       let addr = create_exp ctx scope llvm_builder blk_tid addr in
       create_load ctx llvm_builder (addr, Size.in_bits size)
   | Let (var, exp, body) ->
-      let unique_var = fresh_let_var var in
+      let unique_var = fresh_let_var scope var in
       let v = create_exp ctx scope llvm_builder blk_tid exp in
       insert_local scope blk_tid unique_var v;
       let body = Exp.substitute (Var var) (Var unique_var) body in
@@ -354,52 +326,17 @@ and sec_comp_access ctx scope llvm_builder blk_tid ~(store : bool)
       let a = create_exp ctx scope llvm_builder blk_tid addr in
       create_load ctx llvm_builder (a, size)
 
+(* A rip-relative def's VALUE is a constant address: the section
+   owner's base plus its offset — never the native constant.  Every
+   other shape renders through the generic exp path, whose load/store
+   arms own the const-address and section routing. *)
 and create_rip_relative_addr ctx scope llvm_builder blk_tid exp =
   match exp with
   | Bil.Int w ->
       let v = Word.to_int64_exn w in
       remapped_const ctx ctx.llvm_ctx ctx.llvm_module v
         (ctx.i64_ty)
-  | Store (Bil.Var mv, addr, data, _, s)
-    when Hike_stack_model.is_sec_comp_mem mv ->
-      sec_comp_access ctx scope llvm_builder blk_tid ~store:true mv addr
-        ~data:(Some data) (Size.in_bits s)
-  | Load (Bil.Var mv, addr, _, s)
-    when Hike_stack_model.is_sec_comp_mem mv ->
-      sec_comp_access ctx scope llvm_builder blk_tid ~store:false mv addr
-        ~data:None (Size.in_bits s)
-  | Store (_, addr, data, _, _) ->
-      let addr = create_exp ctx scope llvm_builder blk_tid addr in
-      (match Llvm.int64_of_const addr with
-       | Some i64 ->
-           let addr_w = Word.of_int64 ~width:64 i64 in
-           const_addr_store ctx llvm_builder addr_w
-             ~data:(fun () -> create_exp ctx scope llvm_builder blk_tid data)
-             ~fallback:(fun () ->
-               let base = resolve_addr ctx llvm_builder addr_w in
-               let data = create_exp ctx scope llvm_builder blk_tid data in
-               let _ : Llvm.llvalue =
-                 Llvm.build_store data base llvm_builder in
-               data)
-       | None ->
-           let data = create_exp ctx scope llvm_builder blk_tid data in
-           create_store ctx llvm_builder (data, addr))
-  | Load (_, addr, _, size) ->
-      let addr = create_exp ctx scope llvm_builder blk_tid addr in
-      (match Llvm.int64_of_const addr with
-       | Some i64 ->
-           let addr_w = Word.of_int64 ~width:64 i64 in
-           const_addr_load ctx llvm_builder addr_w (Size.in_bits size)
-             ~fallback:(fun () ->
-               section_load ctx llvm_builder ctx.llvm_ctx addr_w i64
-                 (Size.in_bits size))
-       | None ->
-           create_load ctx llvm_builder (addr, Size.in_bits size))
-  | Cast (cast, i, (Load _ as load)) ->
-      (* RIP-relative widening loads. *)
-      let v = create_rip_relative_addr ctx scope llvm_builder blk_tid load in
-      create_cast ctx llvm_builder (cast, i, v)
-  | _ -> create_exp ctx scope llvm_builder blk_tid exp
+  | exp -> create_exp ctx scope llvm_builder blk_tid exp
 
 and emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite =
   let v = emit () in
@@ -449,25 +386,21 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
    base), both relative to the SP anchor.  Window accesses normalize
    the same way against the hike_window parameter — a pointer into the
    caller's residue. *)
-and window_mem_access ctx scope llvm_builder blk_tid fr mv exp =
-  match Hike_stack_model.is_window_mem mv with
-  | false -> create_exp ctx scope llvm_builder blk_tid exp
-  | true -> (
-      let w_ptr =
-        let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
-        match get_local scope blk_tid w with
-        | Some v -> v
-        | None -> Llvm.undef (var_lltype ctx w)
-      in
-      match find_mem_node exp with
-      | Some node ->
-          (* The window parameter IS its own base: an access's address
-             minus the sub's stack0 is the offset into the window. *)
-          storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
-            ~index_of:(fun a ->
-                Llvm.build_sub a (frame_stack0 fr) "" llvm_builder)
-            node exp
-      | None -> create_exp ctx scope llvm_builder blk_tid exp)
+and window_mem_access ctx scope llvm_builder blk_tid fr exp =
+  let w_ptr =
+    let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
+    match get_local scope blk_tid w with
+    | Some v -> v
+    | None -> Llvm.undef (var_lltype ctx w)
+  in
+  match find_mem_node exp with
+  | Some node ->
+      (* The window parameter IS its own base: an access's address
+         minus the sub's stack0 is the offset into the window. *)
+      storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
+        ~index_of:(fun a -> Llvm.build_sub a (frame_stack0 fr) "" llvm_builder)
+        node exp
+  | None -> create_exp ctx scope llvm_builder blk_tid exp
 
 and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
   let stack0 = frame_stack0 fr in
@@ -496,5 +429,5 @@ and region_window_access ctx scope llvm_builder blk_tid mv exp ~raw =
   | Some fr when Hike_stack_model.is_region_mem mv ->
       region_mem_access ctx scope llvm_builder blk_tid fr mv exp
   | Some fr when Hike_stack_model.is_window_mem mv ->
-      window_mem_access ctx scope llvm_builder blk_tid fr mv exp
+      window_mem_access ctx scope llvm_builder blk_tid fr exp
   | _ -> raw ()

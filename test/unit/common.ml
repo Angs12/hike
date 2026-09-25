@@ -88,7 +88,7 @@ module Hv = Hike.Vsa
 (* The analysis facts over no envs and no addresses: the pre-solver
    world every top-identity consumer reads. *)
 let top_facts : Hike.Kb.facts =
-  Hike.Kb.build ~block_envs:Tid.Map.empty
+  Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
     ~block_addrs:(Core.Map.empty (module Addr))
     ~target:Theory.Target.unknown
 
@@ -98,17 +98,13 @@ let top_facts : Hike.Kb.facts =
 let produce ?(block_addrs = []) ?(images = [])
     ?(lift_at = fun _ ~block_addrs:_ -> None) target (prog : program term) (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
-  match
-    Hv.fixpoint target ~prog ~lookup:(fun _ -> None) ~symtab:None ~images
-      ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
-      ~lift_at
-      ~block_addrs:
-        (Core.Map.of_alist_exn (module Addr)
-           (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
-      sub
-  with
-  | Some (envs, sub', block_addrs') -> (envs, sub', block_addrs')
-  | None -> (Tid.Map.empty, sub, Core.Map.empty (module Addr))
+  Hv.fixpoint target ~lookup:(fun _ -> None) ~images
+    ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
+    ~lift_at
+    ~block_addrs:
+      (Core.Map.of_alist_exn (module Addr)
+         (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
+    sub
 
 (* The T2 chain replica over fixtures: the composed production entries
    (fixpoint, facts, the one install, the jmp/dyn stamps, the
@@ -127,7 +123,7 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
         Core.Map.fold e ~init:m ~f:(fun ~key ~data m' -> Core.Map.set m' ~key ~data))
   in
   let facts =
-    Hike.Kb.build ~block_envs:all_envs
+    Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
       ~block_addrs:(Core.Map.empty (module Addr)) ~target
   in
   let prog =
@@ -145,7 +141,7 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
   in
   let prog = Term.map sub_t prog ~f:(Hike.Sections.stamp_tags ctx) in
   Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base ~facts
-    ~symtab:None ~spans ~ctx prog
+    ~spans ~ctx prog
 
 (* The fixtures' analysis facts: the subs' converged environments, plus
    the stamped subs the seam reads (the fixpoint's sweep tags every def
@@ -155,25 +151,22 @@ let fixture_facts (subs : sub term list) :
   let all_envs, stamped, ok =
     Base.List.fold subs ~init:(Tid.Map.empty, [], true)
       ~f:(fun (m, stamped, ok) sub ->
-        match
+        let envs, sub', _ =
           Hv.fixpoint Theory.Target.unknown
-            ~prog:(Program.create ~subs:[ sub ] ())
-            ~lookup:(fun _ -> None) ~symtab:None ~images:[]
+            ~lookup:(fun _ -> None) ~images:[]
             ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                         (Program.create ~subs:[ sub ] ()))
             ~lift_at:(fun _ ~block_addrs:_ -> None)
             ~block_addrs:(Core.Map.empty (module Addr)) sub
-        with
-        | None -> (m, stamped, false)
-        | Some (envs, sub', _) ->
-            (Core.Map.merge m envs
-               ~f:(fun ~key:_ el ->
-                 match el with
-                   | `Left v | `Right v | `Both (_, v) -> Some v),
-             sub' :: stamped,
-             ok))
+        in
+        (Core.Map.merge m envs
+           ~f:(fun ~key:_ el ->
+             match el with
+               | `Left v | `Right v | `Both (_, v) -> Some v),
+         sub' :: stamped,
+         ok && not (Core.Map.is_empty envs)))
   in
-  (Hike.Kb.build ~block_envs:all_envs
+  (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:all_envs
      ~block_addrs:(Core.Map.empty (module Addr)) ~target:Theory.Target.unknown,
    Base.List.rev stamped,
    ok && not (Core.Map.is_empty all_envs))

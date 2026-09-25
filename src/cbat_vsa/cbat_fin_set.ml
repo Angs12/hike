@@ -159,14 +159,17 @@ let concat = lift2 ~width:(fun w1 w2 -> w1 + w2) (lift_binop Cbat_word.concat)
 
 (* Lattice. *)
 let precedes = lift2_pred (fun s1 s2 -> Core.Set.is_subset s1 ~of_:s2)
-(* Interface stub; unreachable via the composite. *)
-let widen_join _ _ = failwith "widen not implemented; usually impractical"
+(* The composite promotes any set that could grow past the tier
+   boundary, so widening never reaches this bounded tier; the union is
+   the sound answer if it ever does. *)
+let widen_join = union
 let join = union
 let meet = intersection
 let bottom bw = WSet.empty, bw
 
-(* Interface stub; unreachable via the composite. *)
-let top _ = failwith "top not implemented; usually impractical"
+(* A bounded tier has no top: the composite promotes past the
+   boundary. *)
+let top _ = failwith "fin_set: no top (the composite promotes past the tier boundary)"
 let get_idx = snd
 
 let pp ppf (s, _) =

@@ -68,12 +68,6 @@ let aligned_mod (lo : point) (hi : point) (m : int) : bool =
     Stdlib.Int64.equal
       (Stdlib.Int64.logand (Stdlib.Int64.sub hi.pvalue lo.pvalue) (mask m)) 0L
 
-let create ~lo ~hi : t Or_error.t =
-    if le lo hi then Result.Ok {lo; hi; step = 1}
-    else Or_error.error "attempted to create key with lo above hi"
-        (lo, hi) (fun (lo, hi) -> Sexp.List[sexp_of_point lo;
-                                            sexp_of_point hi])
-
 (* Last writable byte. *)
 let upper (k : t) : point = k.hi
 

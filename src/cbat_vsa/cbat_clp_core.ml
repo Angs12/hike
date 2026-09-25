@@ -264,7 +264,7 @@ let nearest_inf_succ (w : W.t) (base : W.t) (step : W.t) : W.t =
 let max_elem (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
-  | Finite ->
+  | Finite | Circular ->
     let max_wd = W.ones (bitwidth p) in
     nearest_pred max_wd p
   | Ascending ->
@@ -273,22 +273,16 @@ let max_elem (p : t) : W.t option =
     let rem = if W.is_zero p.step then W.zero (bitwidth p) else W.modulo diff p.step in
     Some (W.sub max_wd rem)
   | Descending -> Some p.base
-  | Circular ->
-    let max_wd = W.ones (bitwidth p) in
-    nearest_pred max_wd p
 
 let min_elem (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
-  | Finite ->
+  | Finite | Circular ->
     let min_wd = W.zero (bitwidth p) in
     nearest_succ min_wd p
   | Ascending -> Some p.base
   | Descending ->
     if W.is_zero p.step then Some p.base else Some (W.modulo p.base p.step)
-  | Circular ->
-    let min_wd = W.zero (bitwidth p) in
-    nearest_succ min_wd p
 
 (* Max signed element. *)
 let max_elem_signed (p : t) : W.t option =
@@ -969,54 +963,6 @@ let extrapolate_steps ~steps:(steps:int) (p1 : t) (p2 : t) : t =
             else try_create extrap_lo hi2
       | _ -> widen_join p1 p2
   else join p1 p2
-
-
-
-
-
-let compare (p1 : t) (p2 : t) : int =
-  let base_comp = W.compare (base_of p1) (base_of p2) in
-  let step_comp = W.compare (step_of p1) (step_of p2) in
-  let cardn_comp = W.compare (cardn_of p1) (cardn_of p2) in
-  let dir_comp = compare_direction p1.dir p2.dir in
-  let if_nzero_else a b = if a = 0 then b else a in
-  if_nzero_else base_comp @@
-  if_nzero_else step_comp @@
-  if_nzero_else cardn_comp @@
-  dir_comp
-
-
-let sexp_of_t (p : t) : Sexp.t =
-  Sexp.List begin match finite_end p with
-    | Some e ->
-      if W.is_one (cardn_of p) then [W.sexp_of_t (base_of p)]
-      else if W.is_one @@ W.pred @@ (cardn_of p) then
-        [W.sexp_of_t (base_of p); W.sexp_of_t e]
-      else [W.sexp_of_t (base_of p);
-            W.sexp_of_t (W.add (base_of p) (step_of p));
-            Sexp.Atom "...";
-            W.sexp_of_t e]
-    | None -> [Sexp.Atom "{}"; Sexp.Atom (string_of_int (bitwidth p))]
-  end
-
-let t_of_sexp : Sexp.t -> t = function
-  | Sexp.List [Sexp.Atom "{}"; Sexp.Atom s] ->
-    let width = int_of_string s in
-    bottom width
-  | Sexp.List [be] ->
-    let base = W.of_word (Word.t_of_sexp be) in
-    create base
-  | Sexp.List [be; ne as ee]
-  | Sexp.List [be; ne; Sexp.Atom "..."; ee] ->
-    let base = W.of_word (Word.t_of_sexp be) in
-    let next = W.of_word (Word.t_of_sexp ne) in
-    let e = W.of_word (Word.t_of_sexp ee) in
-    let step = W.sub next base in
-    let cardn = cardn_from_bounds base step e in
-    create base ~step ~cardn
-  | Sexp.List _
-  | Sexp.Atom _ -> failwith "Sexp not a CLP"
-
 
 
 let pp ppf (p : t) =

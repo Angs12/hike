@@ -6,7 +6,6 @@
    boundary, one fetch per pass entry. *)
 
 open Bap.Std
-module Hike_abi = Hike_abi
 
 (* The denotation seam: [exp] in the before-env of [def], or the
    block's postcondition with no [def]. *)
@@ -30,6 +29,9 @@ type facts = {
      reads).  A def with no tag (minted after the boundary) answers
      [AI.top]. *)
   denote : denote;
+  (* The run's resolution lookup: one name table for the program,
+     built at the pass_vsa boundary beside the other facts. *)
+  lookup : int64 -> Tid.t option;
   (* The emitter's section spec, installed by the attribution pass in
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
@@ -37,6 +39,7 @@ type facts = {
 }
 
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
+    ~(lookup : int64 -> Tid.t option)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(target : Bap_core_theory.Theory.Target.t) : facts =
   let blk_envs blk =
@@ -48,6 +51,7 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     block_addrs;
     target;
     abi = Hike_abi.of_target target;
+    lookup;
     denote =
       (fun ~blk ?def e ->
         let pre, post = blk_envs blk in

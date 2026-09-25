@@ -42,12 +42,12 @@ here.
 | MOD-23 | Residue storage anchors through the entry SP Slot (`%sp_slot`; `%stack_0 = load`). | In the anchor emission, skip the `sp_slot` for the residue class. | MOD-23. |
 | MOD-24 | Region storage anchors the SP Slot at region-0 + 8 (the SysV residue). | In the anchor emission, use a different anchor offset. | MOD-24. |
 | MOD-25 | A storage-free sub emits no SP Slot and no region. | In the emitter, emit the `sp_slot` unconditionally. | MOD-25. |
-| MOD-27 | `Hike_stack_model.string_text_word`: a printable run crossing the word start covers the word. | In `src/hike_stack_model.ml` (l.356), return `false` unconditionally. | MOD-27. |
-| MOD-28 | A NUL directly before the word means no crossing. | In `string_text_word`, drop the NUL check. | MOD-28. |
-| MOD-29 | Pointer bytes before the word mean no crossing. | In `string_text_word`, drop the pointer-byte check. | MOD-29. |
-| MOD-30 | A non-printable start byte never covers. | In `string_text_word`, treat a non-printable start byte as printable. | MOD-30. |
-| MOD-31 | The first word of the image never crosses. | In `string_text_word`, drop the first-word guard. | MOD-31. |
-| MOD-32 | Running off the front crosses iff the prefix is all printable. | In `string_text_word`, drop the all-printable-prefix scan. | MOD-32. |
+| MOD-27 | `Hike_stack_model.string_text_table`: a printable run crossing the word start covers the word. | In `src/hike_stack_model.ml` (`string_text_table`'s prepass), record every byte as printable. | MOD-27. |
+| MOD-28 | A NUL directly before the word means no crossing. | In `string_text_table`'s answer, drop the NUL check on the last non-printable byte. | MOD-28. |
+| MOD-29 | Pointer bytes before the word mean no crossing. | In `string_text_table`'s answer, drop the NUL-ness test of the last non-printable byte. | MOD-29. |
+| MOD-30 | A non-printable start byte never covers. | In `string_text_table`'s answer, drop the start-byte printable test. | MOD-30. |
+| MOD-31 | The first word of the image never crosses. | In `string_text_table`'s answer, drop the `off > 0` guard. | MOD-31. |
+| MOD-32 | Running off the front crosses iff the prefix is all printable. | In `string_text_table`'s answer, treat a `-1` prepass entry as a non-printable stop. | MOD-32. |
 | MOD-33 | `Hike_abi.is_sp` / `sp`: the stack pointer is RSP, and only RSP (SP-only, ADR 0008). | In `src/hike_abi.ml`, set the SysV `sp` to RBP (or make `is_sp` true for RBP). | MOD-33. |
 | MOD-34 | RBP is an ordinary callee-saved GPR; no frame-pointer fact exists. | In `hike_abi.ml`, remove RBP from `callee_saved` (or `is_callee_saved`). | MOD-34. |
 | MOD-35 | The SysV lanes: 6 integer args, 8 vector args, RAX/RDX returns; the unknown target totals 14 param lanes. | In `hike_abi.ml`, alter `int_param_regs`/`vector_param_regs`/`return_regs`. | MOD-35. |

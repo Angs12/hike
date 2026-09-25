@@ -41,9 +41,6 @@ type llvalue_map = Llvm.llvalue WVarMap.t
 type blk_llvals = {
   phis : llvalue_map ref;
   locals : llvalue_map ref;
-  (* The same bindings indexed by base var (width, value) lists —
-     the width-miss probe reads this, not the whole locals map. *)
-  family : (int * Llvm.llvalue) list WVarMap.t ref;
 }
 
 (* One owner of a byte range of a section: a component or a gap
@@ -72,16 +69,9 @@ type section = {
    the section table carries the data sections only. *)
 type section_type = Hike_stack_model.sec
 
-let section_type_to_string = function
-  | Hike_stack_model.Stack -> "stack"
-  | Hike_stack_model.Args -> "args"
-  | Hike_stack_model.Data -> "data"
-  | Hike_stack_model.Rodata -> "rodata"
-  | Hike_stack_model.Bss -> "bss"
-  | Hike_stack_model.Got -> "got"
-  | Hike_stack_model.Gotplt -> "got.plt"
-  | Hike_stack_model.Datarelro -> "data.rel.ro"
-  | Hike_stack_model.Text -> "text"
+(* The trap-id vocabulary's one test (the divide-by-zero interrupt sub). *)
+let is_interrupt_name (n : string) : bool =
+  Base.String.is_prefix n ~prefix:"@interrupt:"
 
 (* One input section of the spec. *)
 type sec_input =
@@ -172,7 +162,7 @@ type sub_scope = {
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
   blk_llvals : blk_llvals Tid.Map.t ref;
   (* One Dead-classification warn per sub. *)
-  dead_warned : Tid.Set.t ref;
+  dead_warned : bool ref;
   (* Dedups [hike: undef-read:] warnings per (block, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* The body's frame: routes region/window mem vars; bound around
@@ -184,16 +174,19 @@ type sub_scope = {
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
   undef_vals : llvalue_map ref;
+  (* The Let-temp counter: names need only sub-scoped uniqueness. *)
+  let_counter : int ref;
 }
 
 let fresh_scope () : sub_scope =
   { ll_bbs = ref Tid.Map.empty;
     blk_llvals = ref Tid.Map.empty;
-    dead_warned = ref Tid.Set.empty;
+    dead_warned = ref false;
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
     edges = ref [];
-    undef_vals = ref WVarMap.empty }
+    undef_vals = ref WVarMap.empty;
+    let_counter = ref 0 }
 
 let typ_lltype ctx typ =
   match typ with
@@ -345,10 +338,9 @@ let get_bb scope tid = bb_find !(scope.ll_bbs) tid
 let init_blk_llvals scope blk_tid =
   let phis = ref WVarMap.empty in
   let locals = ref WVarMap.empty in
-  let family = ref WVarMap.empty in
   scope.blk_llvals :=
     Core.Map.add_exn !(scope.blk_llvals) ~key:blk_tid
-      ~data:{ phis; locals; family }
+      ~data:{ phis; locals }
 
 let insert_phi scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
@@ -364,42 +356,11 @@ let get_phi scope blk_tid var =
 
 let insert_local scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
-  blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals);
-  let wvar = wvar_of var in
-  let WVar (base, _) = wvar in
-  let prev = WVarMap.find_opt (WVar (base, -1)) !(blk_llvals.family) in
-  let width =
-    match Var.typ var with Type.Imm w -> w | _ -> 0
-  in
-  blk_llvals.family :=
-    WVarMap.add (WVar (base, -1))
-      ((width, value) :: Option.value prev ~default:[])
-      !(blk_llvals.family)
+  blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals)
 
 let get_local scope blk_tid var =
   let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
   WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
-
-(* Finds [v]'s binding at another width. *)
-let probe_local_family scope blk_tid (v : Var.t) ~(want_w : int) :
-    (Llvm.llvalue * int) option =
-  let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
-  let base = Var.base v in
-  let bindings =
-    match WVarMap.find_opt (WVar (base, -1)) !(blk_vars.family) with
-    | Some l -> l
-    | None -> []
-  in
-  match
-    List.sort (fun (w1, _) (w2, _) -> compare w2 w1) bindings
-  with
-  | [] -> None
-  | (w, value) :: _ ->
-      Some
-        ( value,
-          match List.assoc_opt want_w bindings with
-          | Some _ -> want_w
-          | None -> w )
 
 (* One frozen value per never-defined var, memoized per sub and
    placed in the entry block so it dominates every reader. *)

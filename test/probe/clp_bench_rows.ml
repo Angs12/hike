@@ -24,11 +24,6 @@ module CW = Cbat_word
 module Clp = Cbat_clp
 module Comp = Cbat_clp_set_composite
 
-let now = Unix.gettimeofday
-
-(* Exact minor words allocated since start. *)
-let minor_words () : float = Gc.minor_words ()
-
 type row = Probe_common.bench_row
 
 (* Two consecutive loops, each preceded by a warmup; [w_a]/[w_b] are the

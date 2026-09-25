@@ -192,22 +192,6 @@ let modulo (a : t) (b : t) : t =
     mkz r w
   end
 
-(* Sign follows the divisor, as [Bitvec.smod] defines it. *)
-let smodulo (a : t) (b : t) : t =
-  let w = bitwidth a in
-  let x = to_z a and y = to_z b in
-  let u = urem_z x y w in
-  let r =
-    if Z.sign u = 0 then u
-    else
-      match msb_z x w, msb_z y w with
-      | false, false -> u
-      | true, false -> addz (negz u w) y w
-      | false, true -> addz u y w
-      | true, true -> negz u w
-  in
-  mkz r w
-
 let logand (a : t) (b : t) : t =
   let w = bitwidth a in
   match a, b with
@@ -466,10 +450,6 @@ let bounded_gcd (a : t) (b : t) : t =
   let w = bitwidth a in
   assert (w = bitwidth b);
   if is_zero a then b else if is_zero b then a else gcd_exn a b
-
-let cdiv (a : t) (b : t) : t =
-  let d = div a b in
-  if is_zero (modulo a b) then d else succ d
 
 (* Least non-negative (x, y) with ax + by = c.  Not total: equal widths. *)
 let bounded_diophantine (a : t) (b : t) (c : t) : (t * t) option =

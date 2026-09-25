@@ -52,30 +52,31 @@ let def_is_window_value (d : def term) : bool =
 #endif
   KB.Value.get def_window_value_slot (Def.value d)
 
-let stamp_window_values ~(window_values : Tid.Set.t)
-    (sub : sub term) : sub term =
+(* One map applies [stamp] to every def whose tid is in [tids] — the
+   two bool slots' shared stamper. *)
+let stamp_tids ~(tids : Tid.Set.t) ~stamp (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
-          if Core.Set.mem window_values (Term.tid d) then (
+          if Core.Set.mem tids (Term.tid d) then stamp d else d))
+
+let stamp_window_values ~(window_values : Tid.Set.t)
+    (sub : sub term) : sub term =
+  stamp_tids ~tids:window_values sub ~stamp:(fun d ->
 #ifdef VSA_DEBUG
-            let () = Cbat_vsa.Cbat_kb_census.bump "window_value.put" in
+      let () = Cbat_vsa.Cbat_kb_census.bump "window_value.put" in
 #endif
-            Def.with_value d
-              (KB.Value.put def_window_value_slot (Def.value d) true))
-          else d))
+      Def.with_value d
+        (KB.Value.put def_window_value_slot (Def.value d) true))
 
 (* Stamps the dynamic-allocation fact onto the event defs. *)
 let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
     (sub : sub term) : sub term =
-  Term.map blk_t sub ~f:(fun blk ->
-      Term.map def_t blk ~f:(fun d ->
-          if Core.Set.mem dynamic_alloc_tids (Term.tid d) then (
+  stamp_tids ~tids:dynamic_alloc_tids sub ~stamp:(fun d ->
 #ifdef VSA_DEBUG
-            let () = Cbat_vsa.Cbat_kb_census.bump "dyn_alloc.put" in
+      let () = Cbat_vsa.Cbat_kb_census.bump "dyn_alloc.put" in
 #endif
-            Def.with_value d
-              (KB.Value.put def_dyn_alloc_slot (Def.value d) true))
-          else d))
+      Def.with_value d
+        (KB.Value.put def_dyn_alloc_slot (Def.value d) true))
 
 (* The section tag rides the def's value: the producer stamps it, the
    emitter's dispatch reads it off the term. *)

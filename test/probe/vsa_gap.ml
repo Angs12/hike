@@ -1,7 +1,7 @@
 (* The production-config non-convergence diagnostic: replicates the
    pass's per-sub solve (jump -> split-mem terms, whole-program kill
-   summaries) and on Fixpoint_not_converged prints the gap, the
-   widening heads, and the head states.
+   summaries) and on Fixpoint_not_converged prints the widening heads
+   and the head states.
    Usage: vsa_gap.exe <binary> <subname> [raw|jump|split|both] *)
 
 open Bap.Std
@@ -12,11 +12,7 @@ module AI = Cbat_vsa.AI
 module Vsa = Cbat_vsa
 
 (* The CFG view lives in Probe_common (shared with conv_diag). *)
-let succs = cfg_succs
 let cfg_of = cfg_of
-let succs_of = succs_of
-let reachable = reachable
-let on_cycle = on_cycle
 let cyclic_heads = cyclic_heads
 
 (* The jump lines of a block - the guard shapes. *)
@@ -90,14 +86,9 @@ let () =
     | sol ->
       Printf.printf "CONVERGED in %.3fs\n%!" (Unix.gettimeofday () -. t0);
       ignore sol
-    | exception Vsa.Fixpoint_not_converged (n, sol, gap) ->
+    | exception Vsa.Fixpoint_not_converged (n, sol) ->
       Printf.printf "NOT CONVERGED after %d visits (%.3fs)\n%!"
         n (Unix.gettimeofday () -. t0);
-      (match gap with
-       | Some (b, s) ->
-         Printf.printf "first still-growing (block, successor): %s -> %s\n%!"
-           (Tid.name b) (Tid.name s)
-       | None -> Printf.printf "(no gap pair captured)\n%!");
       let cfg = cfg_of sub in
       let heads = cyclic_heads cfg in
       Printf.printf "widening-point set: %d cyclic SCCs\n%!"

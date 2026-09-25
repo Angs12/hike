@@ -81,7 +81,7 @@ let st_plus (m : var) (base : var) (off : int64) (bits : int) : def term =
 let tag_of (sub : sub term) (d : def term) =
   Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
   |> Seq.find_map ~f:(fun dd ->
-         if Tid.equal (Term.tid dd) (Term.tid d) then A.sec_tag dd else None)
+         if Tid.equal (Term.tid dd) (Term.tid d) then Ds.sec_tag dd else None)
 
 let storage_of_def ctx sub dtid : A.range_storage option =
   match Core.Map.find ctx.A.sub_trees (Term.tid sub) with

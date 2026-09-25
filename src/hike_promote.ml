@@ -101,7 +101,7 @@ let region_id_of_storage (s : Sections.storage) : int =
   | Stack_residue | Arg_slot _ -> Model.residue_id
 
 type conv =
-  | Conv_region of int * (int64 * int64)  (* the region id and span *)
+  | Conv_region of int                    (* the region id *)
   | Conv_window                           (* the incoming window: the caller's world *)
   | Conv_slot of int * int                (* slot index, intra-slot byte *)
   | Conv_global of int                    (* the component id *)
@@ -151,7 +151,7 @@ let conversion_of ~(word : int) ~(entry : int64)
               | Some rs -> (
                   match (p.pt_sec, rs.storage) with
                   | (Stack, (Stack_region _ | Stack_residue)) ->
-                    (Conv_region (region_id_of_storage rs.storage, (p.pt_lo, p.pt_hi)), tag)
+                    (Conv_region (region_id_of_storage rs.storage), tag)
                   | (Args, Stack_residue) -> (Conv_window, tag)
                   | Args, Arg_slot i -> (
                       let d_in =
@@ -209,7 +209,7 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int) (d : def term) :
     def term =
   match conv with
   | Keep -> d
-  | Conv_region (id, _) ->
+  | Conv_region id ->
       let mem_var = Model.region_mem id in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
@@ -244,7 +244,7 @@ let bind_site_args ~(word : int) (bindings : site_binding list)
            var). *)
         let data =
           match Model.store_data_of_rhs (Def.rhs b.sb_def) with
-          | Some (data, _) -> data
+          | Some data -> data
           | None -> Bil.Var (Def.lhs b.sb_def)
         in
         let arg = Def.create (Model.call_arg ~word b.sb_slot) data in
@@ -290,6 +290,19 @@ let call_resolution ~(denote : blk:blk term -> ?def:def term -> exp ->
    and singleton-resolved indirect targets become direct.
    Fixed-signature subs (the intrinsics, @main) get no callee-side
    rewrite; the caller side runs for every sub. *)
+(* The caller side: a resolved target becomes direct; the jmp keeps
+   its tid, guard, and tag. *)
+let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
+    (sub : sub term) : sub term =
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.map jmp_t blk ~f:(fun j ->
+          match Core.Map.find resolved (Term.tid j) with
+          | Some (Some t) -> (
+              match Jmp.kind j with
+              | Call c -> Jmp.with_kind j (Call (Call.with_target c (Direct t)))
+              | _ -> j)
+          | _ -> j))
+
 let promote_sub ~(abi : Hike_abi.t) (facts : facts)
     (sub : sub term) : sub term =
   let callee_exempt = Hike_stack_model.fixed_signature sub in
@@ -306,20 +319,7 @@ let promote_sub ~(abi : Hike_abi.t) (facts : facts)
       in
       Model.set_sig sub slots
   in
-    Term.map blk_t sub ~f:(fun blk ->
-        (* A resolved target becomes direct; the jmp keeps its tid,
-           guard, and tag. *)
-        let blk =
-          Term.map jmp_t blk ~f:(fun j ->
-              match Core.Map.find facts.prom_resolved (Term.tid j) with
-              | Some (Some t) -> (
-                  match Jmp.kind j with
-                  | Call c ->
-                      Jmp.with_kind j (Call (Call.with_target c (Direct t)))
-                  | _ -> j)
-              | _ -> j)
-        in
-        blk)
+  resolve_targets ~resolved:facts.prom_resolved sub
 
 
 (* The tree's Arg_slot member defs, minus the demoted slots. *)
@@ -400,14 +400,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                   ~projected:(Base.Option.join (Core.Map.find ctx.projections (Term.tid d)))
                   ~d ~demoted
               in
-              let d' = rewrite_def ~word ~conv ~bits d in
-              match conv with
-              | Keep -> d'
-              | Conv_region _ | Conv_slot _ | Conv_global _ | Conv_window ->
-                  (* Conversion supersedes the tag: the re-pointed
-                     memory node names the storage, so the tag drives
-                     only the defs that keep their memory form. *)
-                  d')
+              rewrite_def ~word ~conv ~bits d)
         in
         match Core.Map.find sites (Term.tid blk) with
         | Some bs -> bind_site_args ~word bs blk
@@ -425,16 +418,13 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
 (* The program driver: per-sub sites and resolution, the cross-sub
    demotion, the rewrite. *)
 let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
-    ~(symtab : Symtab.t option)
     ~(spans : Sections.data_span list)
     ~(ctx : Sections.ctx)
     (prog : program term) : program term =
   let abi = facts.abi in
   let denote = facts.denote in
   let sp = abi.Hike_abi.sp in
-  let lookup =
-    Hike_resolve.symtab_lookup ~symtab
-      ~table:(Hike_resolve.name_table_of prog) in
+  let lookup = facts.lookup in
   let callee_exempt = Hike_stack_model.fixed_signature in
   let exempt =
     Term.enum sub_t prog
@@ -486,7 +476,8 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
         |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
       in
       rewrite_sub ~word ~entry ~abi ~spans ~denote ~ctx ~sites ~resolved
-        ~demoted:(Core.Map.find demotion (Term.tid sub) |> Core.Option.value ~default:[])
+        ~demoted:(Core.Map.find demotion (Term.tid sub)
+                  |> Core.Option.value ~default:[])
         ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
         sub)
 

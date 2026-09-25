@@ -48,7 +48,7 @@ for ll in "$IR"/out_*.ll; do
 	bin="$OUT/${base}_opt.bin"
 	sha_now="$(sha256sum "$ll" | cut -d' ' -f1)"
 	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
-	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] && [ "$bin" -nt "$ll" ] \
+	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] \
 	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
 		if timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$bin" >"$OUT/${base}_opt.out" 2>&1 &&
 		   timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1; then

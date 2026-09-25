@@ -40,7 +40,7 @@ for ll in "$IR"/out_*.ll; do
 	bin="$OUT/${base}_lifted"
 	sha_now="$(sha256sum "$ll" | cut -d' ' -f1)"
 	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
-	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] && [ "$bin" -nt "$ll" ] \
+	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] \
 	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
 		echo "SKIP-RUN $base (IR unchanged)"
 		if hike_run_cmp "$bin" "$native" "$OUT" "$base"; then

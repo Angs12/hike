@@ -107,25 +107,21 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
    extra-edge set, then the resolver grows the edges and splits
    mid-block case entries — a resolution event — and the next phase
    solves warm.  The BIR's claims are immutable during the solve; at
-   drain the materialization lands once.  [None] = non-convergence:
-   no environments, no rewrite — readers take the top identity. *)
+   drain the materialization lands once.  Non-convergence is the top
+   identity: empty environments, the shape-canonicalized sub, the
+   input block-address map. *)
 type lookup_fn = int64 -> Tid.t option
 
 let fixpoint (target : Theory.Target.t)
-    ~(prog : program term)
     ~(lookup : lookup_fn)
-    ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
     ~(written : Core.Int.Set.t option Tid.Map.t)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) :
-    ((Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t) option =
+    (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
   self_arm target;
   let abi = Hike_abi.of_target target in
-  (* The program-wide lookup, built once by the caller (memoized
-     against re-deriving per sub). *)
-  let sub_lookup = lookup in
 #ifdef VSA_DEBUG
   let dump_r8 (sol : Vsa.vsa_sol) (sub : sub term) =
     let rep = Base.List.nth_exn abi.Hike_abi.int_param_regs 4 in
@@ -146,7 +142,7 @@ let fixpoint (target : Theory.Target.t)
     let prog' = Program.create ~subs:[ sub ] () in
     let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
     let sol =
-      Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup prog' sub seed
+      Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup:lookup prog' sub seed
     in
 #ifdef VSA_DEBUG
     dump_r8 sol sub;
@@ -160,7 +156,7 @@ let fixpoint (target : Theory.Target.t)
   in
   let converged =
     try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
-    with Vsa.Fixpoint_not_converged (n, _, _) ->
+    with Vsa.Fixpoint_not_converged (n, _) ->
 #ifdef VSA_DEBUG
       Vsa.Cbat_attr_census.bump "backstop.sub";
 #endif
@@ -176,9 +172,8 @@ let fixpoint (target : Theory.Target.t)
         ~fresh sub'
     in
     let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
-    Some (envs, stamped, block_addrs')
+    (envs, stamped, block_addrs')
   | None ->
-    Some
-      ( Tid.Map.empty,
-        Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
-        block_addrs )
+    ( Tid.Map.empty,
+      Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
+      block_addrs )

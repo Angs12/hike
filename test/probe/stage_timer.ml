@@ -26,17 +26,15 @@ let () =
     (* Production single call: the total the pass pays per sub. *)
     let t0 = Unix.gettimeofday () in
     let facts =
-      Hike.Kb.build ~block_envs:Tid.Map.empty
+      Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
         ~block_addrs:(Core.Map.empty (module Addr)) ~target
     in
     let _envs, _sub', _ =
-      Hike.Vsa.fixpoint target ~prog:(Program.create ~subs:[ sub ] ())
-        ~lookup:(fun _ -> None) ~symtab:None ~images:[]
+      Hike.Vsa.fixpoint target ~lookup:(fun _ -> None) ~images:[]
         ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi
                     (Program.create ~subs:[ sub ] ()))
         ~lift_at:(fun _ ~block_addrs:_ -> None)
         ~block_addrs:(Core.Map.empty (module Addr)) sub
-      |> Base.Option.value ~default:(Tid.Map.empty, sub, Core.Map.empty (module Addr))
     in
     let t_total = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE producer (fixpoint)        %8.3fs   (the pass pays the solve and the completion rounds)\n"
@@ -45,7 +43,7 @@ let () =
     (* Decomposition: the VLA events are the shape test. *)
     let t0 = Unix.gettimeofday () in
     let _events =
-      Hike.Sections.dynamic_alloc_tids_of ~facts:(Hike.Kb.build ~block_envs:Tid.Map.empty ~block_addrs:(Core.Map.empty (module Addr)) ~target) sub in
+      Hike.Sections.dynamic_alloc_tids_of ~facts:(Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty ~block_addrs:(Core.Map.empty (module Addr)) ~target) sub in
     let t_analyze = Unix.gettimeofday () -. t0 in
     Printf.printf "STAGE event-detect             %8.3fs\n" t_analyze;
 

@@ -89,7 +89,6 @@ type vsa_sol = (tid, AI.t) Solution.t
 
 (* Solution still changing at the step cap. *)
 exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
-  * (tid * tid) option
 
 (* Set the address width in bits. *)
 val set_addr_bits : int -> unit

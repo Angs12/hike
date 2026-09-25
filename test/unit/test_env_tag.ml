@@ -26,7 +26,7 @@ let promote_rewrite (facts : Hike.Kb.facts) (sub : sub term) : sub term =
   in
   let prog =
     Hike.Promote.rewrite_program ~word:8
-      ~entry:Hike.Stack_model.segment_base ~facts ~symtab:None ~spans:[] ~ctx
+      ~entry:Hike.Stack_model.segment_base ~facts ~spans:[] ~ctx
       prog
   in
   Term.first sub_t prog |> Base.Option.value_exn
@@ -151,7 +151,7 @@ let tests : unit Alcotest.test list =
     pin "ENV-09" "a memory-bearing query on a tagged def answers in its tag env"
       (fun () ->
         let facts0 =
-          Kb.build ~block_envs:Tid.Map.empty
+          Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
             ~block_addrs:(Core.Map.empty (module Addr))
             ~target:Theory.Target.unknown
         in
@@ -202,7 +202,7 @@ let tests : unit Alcotest.test list =
         let blk5 = blk_of_defs [ Def.create y (Bil.Var x) ] in
         let d5 = Term.first def_t blk5 |> Base.Option.value_exn in
         let facts5 =
-          Kb.build
+          Kb.build ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk5) (pre5, pre5))
             ~block_addrs:(Core.Map.empty (module Addr))
             ~target:Theory.Target.unknown
@@ -219,7 +219,7 @@ let tests : unit Alcotest.test list =
         let post6 = mk_env [ (x, Ws.singleton (w64 2)) ] in
         let blk6 = blk_of_defs [] in
         let facts6 =
-          Kb.build
+          Kb.build ~lookup:(fun _ -> None)
             ~block_envs:(Tid.Map.singleton (Term.tid blk6) (pre6, post6))
             ~block_addrs:(Core.Map.empty (module Addr))
             ~target:Theory.Target.unknown

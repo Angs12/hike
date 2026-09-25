@@ -745,33 +745,33 @@ let tests : unit Alcotest.test list =
     pin "MOD-27" "STRING-TEXT: a printable run crossing the start covers the word"
       (fun () ->
         let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-27" (Sm.string_text_word ~arr:txt ~off:1));
+        check "MOD-27" (Sm.string_text_table txt 1));
 
     pin "MOD-28" "STRING-TEXT: a NUL directly before the word means no crossing"
       (fun () ->
         let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-28" (not (Sm.string_text_word ~arr:txt ~off:4)));
+        check "MOD-28" (not (Sm.string_text_table txt 4)));
 
     pin "MOD-29" "STRING-TEXT: pointer bytes before the word mean no crossing"
       (fun () ->
         let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-29" (not (Sm.string_text_word ~arr:txt ~off:6)));
+        check "MOD-29" (not (Sm.string_text_table txt 6)));
 
     pin "MOD-30" "STRING-TEXT: a non-printable start byte never covers"
       (fun () ->
         let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-30" (not (Sm.string_text_word ~arr:txt ~off:5)));
+        check "MOD-30" (not (Sm.string_text_table txt 5)));
 
     pin "MOD-31" "STRING-TEXT: the first word of the image never crosses"
       (fun () ->
         let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-31" (not (Sm.string_text_word ~arr:txt ~off:0)));
+        check "MOD-31" (not (Sm.string_text_table txt 0)));
 
     pin "MOD-32"
       "STRING-TEXT: running off the front crosses iff the prefix is all printable"
       (fun () ->
         let all_txt = Bytes.of_string "\x63\x61\x74\x20\x7e" in
-        check "MOD-32" (Sm.string_text_word ~arr:all_txt ~off:4));
+        check "MOD-32" (Sm.string_text_table all_txt 4));
 
     (* Lane E: the register/convention facts (Hike_abi, ADR 0008: SP is the
        only stack-semantics register, fp an ordinary callee-saved GPR) and

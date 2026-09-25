@@ -159,12 +159,6 @@ let of_list ~width l : t =
 
 let singleton w = FinSet (FinSet.singleton w)
 
-let rec lift_consume (f_clp : clp -> 'a) (f_fs : fset -> 'a) : t -> 'a = fun t ->
-  match t with
-  | Clp p -> f_clp p
-  | FinSet s -> f_fs s
-  | StackOff _ -> lift_consume f_clp f_fs (to_plain t)
-
 (* Small sets convert directly from the materialized element list. *)
 let clp_of_finset fs : clp =
   let width = FinSet.bitwidth fs in
@@ -360,12 +354,6 @@ let cardinality (t : t) = match t with
       else Cbat_word.ones width
   | Clp p -> Clp.cardinality p
   | FinSet s -> FinSet.cardinality s
-
-(* Smear-bounds queries: the concrete twin decides. *)
-let nearest_pred w (t : t) =
-  lift_consume (Clp.nearest_pred w) (FinSet.nearest_pred w) (to_plain t)
-let nearest_succ w (t : t) =
-  lift_consume (Clp.nearest_succ w) (FinSet.nearest_succ w) (to_plain t)
 
 let min_elem (t : t) = match t with
   | StackOff offs ->

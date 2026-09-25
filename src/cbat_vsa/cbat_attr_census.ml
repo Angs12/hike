@@ -16,8 +16,6 @@ let bump (key : string) : unit =
   let n = Hashtbl.find counts key |> Option.value ~default:0 in
   Hashtbl.set counts ~key ~data:(n + 1)
 
-let bumpf fmt = Printf.ksprintf bump fmt
-
 let dump () =
   Hashtbl.to_alist counts
   |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)

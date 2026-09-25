@@ -23,22 +23,20 @@ module Vsa : sig
   (** The fused solve: phases of solve + resolution growth until
       stable, materialization once at drain.  Returns the per-block
       (pre, post) environments, the rewritten sub, and the grown
-      block-address map; [None] = non-convergence (readers take the
-      top identity).  [prog] is the whole program; [images] arm the
-      resolver's denotations only; [written] is the program's
-      kill-summary pass, computed once at the boundary. *)
+      block-address map.  Non-convergence is the top identity: empty
+      environments, the shape-canonicalized sub, the input
+      block-address map.  [images] arm the resolver's denotations
+      only; [written] is the program's kill-summary pass, computed
+      once at the boundary. *)
   val fixpoint :
     Theory.Target.t ->
-    prog:program term ->
     lookup:(int64 -> Tid.t option) ->
-    symtab:Symtab.t option ->
     images:section_image list ->
     written:Core.Int.Set.t option Tid.Map.t ->
     lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
     block_addrs:Tid.t Addr.Map.t ->
     sub term ->
-    ((Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term *
-     Tid.t Addr.Map.t) option
+    (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
 
   (** The program's kill summaries (every subs' transitive written
       register set); computed once per program at the boundary and
@@ -143,6 +141,9 @@ module Stack_model : sig
     | Bss
   [@@deriving equal, compare, sexp]
 
+  (** The section's ELF name — the one spelling of the name grammar. *)
+  val sec_name : sec -> string
+
   (** The slim def-carried classification. *)
   module Tag = Hike_stack_model.Tag
 
@@ -177,12 +178,13 @@ module Stack_model : sig
   }
 
   (** A word of a section image is string text iff a printable run
-      crosses its start boundary. *)
-  val string_text_word : arr:Bytes.t -> off:int -> bool
+      crosses its start boundary; one backward prepass answers every
+      offset. *)
+  val string_text_table : Bytes.t -> int -> bool
 
   (** The stack-address / store-data readers over the one mem-node scan. *)
   val addr_of_rhs : exp -> (exp * Size.t) option
-  val store_data_of_rhs : exp -> (exp * (exp -> exp)) option
+  val store_data_of_rhs : exp -> exp option
 
   (** Mints and recognizes fission vars. *)
   val region_mem : int -> var
@@ -246,7 +248,6 @@ module Promote = Hike_promote
     through every consumer as a parameter.  Also the term-carried KB
     value slots' home. *)
 module Kb = Hike_kb
-
 (** The canary-strip pass (after the solve, before the attribution):
     proven canary compositions delete before
     the fission. *)

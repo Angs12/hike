@@ -154,17 +154,12 @@ val is_data_sec : sec -> bool
 val is_sub_local : sec -> bool
 
 val access_of : def term -> (exp * int * bool) option
-val is_rip_relative : def term -> bool
 val is_const_chain : exp -> bool
 
 (** The mem vars of storages carrying identity members — bytes another
     world reads through an escaped address; the DCE sweep keeps them
     as roots. *)
 val escape_roots_of_tree : sub_tree -> Var.Set.t
-
-(** The slim tag read off the def's value; [set_sec_tag] stamps it. *)
-val sec_tag : def term -> sec_tag option
-val set_sec_tag : sec_tag -> def term -> def term
 
 (** Stamps the ctx's slim tags onto the sub's defs (a term mapper). *)
 val stamp_tags : ctx -> sub term -> sub term

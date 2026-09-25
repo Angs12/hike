@@ -77,7 +77,7 @@ let run_binary (path : string) (name : string) : unit =
     | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] - %s not found" name)
   in
   Printf.printf "=== binary %s (%s) ===\n" (Filename.basename path) (Sub.name sub);
-  let sub', sol = analyze_and_fixpoint sp prog sub in
+  let sub', sol = analyze_and_fixpoint sub in
   Printf.printf "(fused single-pass: no views — the per-block IN-states are the solution)\n";
   let vars = lhs_vars_of sub' in
   Term.enum blk_t sub'

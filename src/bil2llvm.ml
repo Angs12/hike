@@ -12,8 +12,6 @@ open Bil2llvm_calls
 open Bil2llvm_fp
 open Bil2llvm_section
 
-let section_type_to_string = Bil2llvm_env.section_type_to_string
-
 (* The phi incomings ARE the emitted CFG's edges: the per-sub row table
    records every rendered terminator, so a block the emitter never
    branches to takes no incoming. *)
@@ -71,7 +69,7 @@ let create_branches ctx scope blk_tid llvm_builder branches =
         in
         match Jmp.kind j |> goto_label_exn with
         | Direct tid ->
-            if Base.String.is_prefix (Tid.name tid) ~prefix:"@interrupt:" then
+            if Bil2llvm_env.is_interrupt_name (Tid.name tid) then
               (* A divide-by-zero trap lifts as a direct goto to the
                  interrupt sub; it is terminal. *)
               create_interrupt ctx llvm_builder
@@ -176,8 +174,7 @@ let build_entry_block ctx scope llvm_builder transfer_vars fr sub fn =
     frame_stack0 fr
   in
   insert_local scope tid ctx.sp sp0;
-  exit_entry scope llvm_builder sub;
-  fr
+  exit_entry scope llvm_builder sub
 
 (* Builds blocks and transfer set in one walk. *)
 let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
@@ -231,7 +228,7 @@ let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
   in
   (* [def_set] never joins the transfer set. *)
   reg_set
-  |> Core.Set.union (ret_set ctx)
+  |> Core.Set.union indirect_rets
   |> Core.Set.union arg_set
   |> Core.Set.filter ~f:(fun var ->
       ((not @@ Hike_stack_model.is_mem var) || Var.same var (Abi.pc ctx.target))
@@ -313,8 +310,7 @@ let create_sub ctx scope sub =
     let fr : sub_frame = { anchor_i64; stack0; anchor_ptr; regions } in
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
-    let fr = build_entry_block ctx scope llvm_builder transfer_vars fr sub fn in
-    scope.cur_frame := Some fr;
+    build_entry_block ctx scope llvm_builder transfer_vars fr sub fn;
     populate_blks ctx scope transfer_vars blks sub fr;
     update_phis ctx scope transfer_vars blks;
     scope.cur_frame := None;
@@ -431,8 +427,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     Base.List.iter subs_list ~f:(fun sub -> create_thunk ctx (Term.tid sub))
   in
   let bodies_phase () =
-    Term.enum sub_t prog
-    |> Seq.iter ~f:(fun s ->
+    Base.List.iter subs_list ~f:(fun s ->
         if is_self_call_stub_tid (Term.tid s) then ()
         else
           let scope = fresh_scope () in
@@ -528,6 +523,3 @@ let sanitize_name = Bil2llvm_env.sanitize_name
 let sign_program = Hike_types.sign_program
 
 let build_sections = Bil2llvm_section.build_sections
-let create_section_global = Bil2llvm_section.create_section_global
-let create_uninitialized_global = Bil2llvm_section.create_uninitialized_global
-let create_copy_reloc_bss = Bil2llvm_section.create_copy_reloc_bss

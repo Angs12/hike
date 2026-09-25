@@ -10,7 +10,7 @@ module Abi = Hike_abi
 
 let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
   let is_value_reg v =
-    Abi.is_value_return_reg abi v || Abi.is_vector_param_reg abi v
+    Abi.is_return_reg abi v || Abi.is_vector_param_reg abi v
   in
   let is_epilogue blk =
     Term.enum jmp_t blk
@@ -69,7 +69,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
   let rets =
     (* Double returns arrive via [%YMM0]. *)
     if is_fp_returning ~abi sub then
-      let ymm0 = Base.List.nth_exn abi.vector_param_regs 0 in
+      let ymm0 = Abi.fp_return_reg abi in
       rets @ [ Arg.create ~intent:Out ymm0 (Var ymm0) ]
     else rets
   in
@@ -107,8 +107,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
       (rets, args)
     end
     else if Model.fixed_signature sub then
-      let rdi = Base.List.nth_exn abi.int_param_regs 0 in
-      let rsi = Base.List.nth_exn abi.int_param_regs 1 in
+      let rdi, rsi = Abi.argc_argv_regs abi in
       let args =
         [
           Arg.create ~intent:In rdi (Var rdi);

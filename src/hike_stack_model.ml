@@ -6,6 +6,18 @@ module Vocab = struct
   type sec = Stack | Args | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
   [@@deriving equal, compare, sexp]
 
+  (* The section's ELF name — the one spelling of the name grammar. *)
+  let sec_name = function
+    | Stack -> "stack"
+    | Args -> "args"
+    | Data -> "data"
+    | Rodata -> "rodata"
+    | Bss -> "bss"
+    | Got -> "got"
+    | Gotplt -> "got.plt"
+    | Datarelro -> "data.rel.ro"
+    | Text -> "text"
+
   (* The def-carried classification: a section with its ADDRESS bounds, the
      justified unbounded form, or Dead.  Absence is the identity.  In [Tag]
      so the [sec] constructors stay unshadowed. *)
@@ -171,9 +183,8 @@ let addr_of_rhs (e : exp) : (exp * Size.t) option =
   | Some (`Load (_, a, s)) | Some (`Store (_, a, _, s)) -> Some (a, s)
   | _ -> None
 
-(* The store's data expression and [with_data], which rebuilds the
-   rhs with that data replaced — the pair is (data, with_data). *)
-let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
+(* The store's data expression, if the rhs holds a store. *)
+let store_data_of_rhs (e : exp) : exp option =
   let vis =
     object
       inherit [ exp option ] Exp.visitor
@@ -181,17 +192,7 @@ let store_data_of_rhs (e : exp) : (exp * (exp -> exp)) option =
         Base.Option.first_some acc (Some data)
     end
   in
-  Base.Option.map (vis#visit_exp e None) ~f:(fun data ->
-      let with_data x =
-        let mapper =
-          object
-            inherit Exp.mapper
-            method! map_store ~mem:_ ~addr:_ ~exp:_ _ _ = x
-          end
-        in
-        mapper#map_exp e
-      in
-      (data, with_data))
+  vis#visit_exp e None
 
 let word_bits (word : int) : int = 8 * word
 
@@ -215,24 +216,40 @@ let fixed_signature (term : sub term) : bool =
 
 (* The promoted stack-slot parameter of index [i]; minted deterministically
    so the signature and the body agree on the same var. *)
+(* The parameterized families of the hike var grammar: one record per
+   name shape, shared by the minter and the recognizer, so the two
+   cannot drift (a drift would silently mis-route at emission). *)
+type name_family = { prefix : string; suffix : string }
+
+let slot_family = { prefix = "hike_slot"; suffix = "" }
+let call_arg_family = { prefix = "hike_arg"; suffix = "" }
+let region_family = { prefix = "stack_r"; suffix = "_mem" }
+let sec_comp_family = { prefix = "sec_comp_"; suffix = "_mem" }
+
+let family_name { prefix; suffix } (i : int) : string =
+  Printf.sprintf "%s%d%s" prefix i suffix
+
+let is_in_family { prefix; suffix } (v : var) : bool =
+  Base.String.is_prefix (Var.name v) ~prefix
+  && (String.equal suffix ""
+      || Base.String.is_suffix (Var.name v) ~suffix)
+
 let arg_slot ~(word : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (Printf.sprintf "hike_slot%d" i)
+    (family_name slot_family i)
     (Type.Imm (word_bits word))
 
 (* The call-argument temp of slot [i]; deterministically minted like the
    slots. *)
 let call_arg ~(word : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (Printf.sprintf "hike_arg%d" i)
+    (family_name call_arg_family i)
     (Type.Imm (word_bits word))
 
 (* The call-argument temps survive DCE: they are the call's arguments. *)
-let is_call_arg (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix:"hike_arg"
+let is_call_arg (v : var) : bool = is_in_family call_arg_family v
 
-let is_arg_slot (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix:"hike_slot"
+let is_arg_slot (v : var) : bool = is_in_family slot_family v
 
 (* The incoming-window memory var: a callee's above-entry accesses are
    materialized against the caller's window through it. *)
@@ -271,15 +288,13 @@ let slot_index_of_offset ~(word : int) (rel : int64) : int =
 
 let region_mem (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (region_name id ^ "_mem")
+    (family_name region_family id)
     (mem64_t (Size.of_int_exn 8))
 
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
-let is_region_mem (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix:"stack_r"
-  && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+let is_region_mem (v : var) : bool = is_in_family region_family v
 
 (* The section partition: each reserved span's components are carried in the
    mem var [sec_comp_N_mem] and the emitter routes by name.  A section's
@@ -300,16 +315,14 @@ let sec_comp_name (n : int) : string = Printf.sprintf "sec_comp_%d" n
 
 let sec_comp_mem (n : int) : var =
   Var.create ~is_virtual:false ~fresh:false
-    (sec_comp_name n ^ "_mem")
+    (family_name sec_comp_family n)
     (mem64_t (Size.of_int_exn 8))
 
 (* The gap runs continue the same numbering; they emit globals but carry no
    BIL var. *)
 let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
 
-let is_sec_comp_mem (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix:"sec_comp_"
-  && Base.String.is_suffix (Var.name v) ~suffix:"_mem"
+let is_sec_comp_mem (v : var) : bool = is_in_family sec_comp_family v
 
 (* The tid-name sanitization the symbol-table lookups and the emitted
    names share: a sub's symtab name and its LLVM name stay comparable. *)
@@ -351,24 +364,9 @@ let sub_reads (s : sub term) : Var.Set.t =
 
 (* A word is string text iff a printable run crosses its start boundary —
    printable back to the last NUL (or the array start); a NUL directly
-   before it means the run starts at the word and it renders as a value. *)
-let string_text_word ~(arr : Bytes.t) ~(off : int) : bool =
-  let byte i = Char.code (Bytes.get arr i) in
-  (* The printable-ASCII range the string detection accepts. *)
-  let printable_lo, printable_hi = 0x20, 0x7e in
-  let printable b = b >= printable_lo && b <= printable_hi in
-  let rec crosses i =
-    if i < 0 then true
-    else if byte i = 0 then i < off - 1
-    else if printable (byte i) then crosses (i - 1)
-    else false
-  in
-  off > 0 && off < Bytes.length arr && printable (byte off) && crosses (off - 1)
-
-(* The string-text test over one image, as a table: one backward
-   prepass answers every word offset with array reads (the naive scan
-   is quadratic over printable runs).  Same predicate as
-   [string_text_word]. *)
+   before it means the run starts at the word and it renders as a value.
+   The table answers every offset with one backward prepass (the naive
+   scan is quadratic over printable runs). *)
 let string_text_table (arr : Bytes.t) : int -> bool =
   let n = Bytes.length arr in
   let printable b = b >= 0x20 && b <= 0x7e in

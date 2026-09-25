@@ -15,8 +15,6 @@ module Mem = Cbat_vsa.Mem
 module Fs = Cbat_fin_set
 module CW = Cbat_word
 
-let now = Unix.gettimeofday
-
 let sink = ref 0
 let keep (i : int) : unit = sink := !sink lxor i
 

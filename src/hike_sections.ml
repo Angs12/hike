@@ -43,7 +43,7 @@ let bss_region proj =
 
 let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
   let byte_row (sm_type : sec) ~is_const =
-    let llvm_name = Bil2llvm_env.section_type_to_string sm_type in
+    let llvm_name = Model.sec_name sm_type in
     Hike_image.get_section_mem ("." ^ llvm_name) proj |> Hike_image.get_section_data
     |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
         { sm_type;
@@ -77,21 +77,21 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
 
 (* Every copy-relocated slot address (absolute): loads and stores at a
    slot go through the slot's relocated pointer. *)
+let slot_addrs_of (m : sec_meta) : int64 list =
+  Base.List.map m.sm_copy_relocs
+    ~f:(fun (off, _) -> Stdlib.Int64.add m.sm_lo (Stdlib.Int64.of_int off))
+
 let copy_reloc_slot_addrs (meta : sec_meta option list) : int64 list =
   Base.List.concat_map meta ~f:(fun m ->
-      Base.Option.value_map m ~default:[] ~f:(fun m ->
-          Base.List.map m.sm_copy_relocs
-            ~f:(fun (off, _) ->
-              Stdlib.Int64.add m.sm_lo (Stdlib.Int64.of_int off))))
+      Base.Option.value_map m ~default:[] ~f:slot_addrs_of)
+
 let attrib_spans ~(meta : sec_meta option list) : data_span list =
   Base.List.filter_map meta
     ~f:(Base.Option.map ~f:(fun m ->
             { ds_sec = m.sm_type;
               ds_lo = m.sm_lo;
               ds_hi = m.sm_hi;
-              ds_slots =
-                Base.List.map m.sm_copy_relocs ~f:(fun (off, _) ->
-                    Stdlib.Int64.add m.sm_lo (Stdlib.Int64.of_int off)) }))
+              ds_slots = slot_addrs_of m }))
 
 (* The emitter's section spec; a [whole] entry (id, lo, hi) is a span
    served whole — the section's own image global is the id's storage. *)
@@ -266,8 +266,10 @@ let top_claim ~(cause : top_cause) ~(entry : int64) ~(word : int)
   | Unbounded_stack ->
     let lo = Stdlib.Int64.sub entry Hike_stack_model.stack_max in
     ( Some Tag.Stack_unbounded,
-      snd (sub_portions ~entry ~word ~elig:false ~alo:lo
-             ~ahi:(Stdlib.Int64.pred entry) lo (Stdlib.Int64.pred entry)) )
+      [ { pt_sec = Stack;
+          pt_lo = lo;
+          pt_hi = Stdlib.Int64.pred entry;
+          pt_elig = false } ] )
   | Query_failed | Foreign ->
     (None,
      snd (sub_portions ~entry ~word ~elig:false
@@ -454,6 +456,10 @@ let is_data_sec (s : sec) : bool =
    slots — everything a per-sub alloca serves. *)
 let is_sub_local (s : sec) : bool = not (is_data_sec s)
 
+(* The span owning [s] — one row per section, so the find is total. *)
+let span_of (spans : data_span list) (s : sec) : data_span option =
+  Base.List.find spans ~f:(fun d -> equal_sec d.ds_sec s)
+
 let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool)
     ~(word : int) ~(spans : data_span list) (p : portion) : member =
   let lo, hi =
@@ -462,8 +468,7 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
         (* The data side owns the emitter's word grid: a member's
            extent is its occupied bytes snapped OUT to the owning
            span's word hull. *)
-        Option.value_map
-          (Base.List.find spans ~f:(fun d -> equal_sec d.ds_sec p.pt_sec))
+        Option.value_map (span_of spans p.pt_sec)
           ~default:(p.pt_lo, p.pt_hi)
           ~f:(fun d -> word_hull ~word d p.pt_lo p.pt_hi)
   in
@@ -484,9 +489,6 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
   Base.List.map parts ~f:(fun p ->
       { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
         m_def = None; m_width = 0; m_store = false; m_identity = true })
-
-let is_rip_relative (d : def term) : bool =
-  Hike_def_slots.def_is_rip_relative d
 
 (* Pure constant arithmetic — the address shape whose emission
    evaluates to the exact native bits. *)
@@ -578,7 +580,7 @@ let collect (env : env) (prog : program term) : collecting =
               | Ok ws ->
                 Some
                   (range_of_denotation ~word:env.word ~entry:env.entry
-                     ~spans:env.spans ~rip:(is_rip_relative d) ~width ws)
+                     ~spans:env.spans ~rip:(Hike_def_slots.def_is_rip_relative d) ~width ws)
             in
             let tag, portions =
               match projected with
@@ -610,7 +612,7 @@ let collect (env : env) (prog : program term) : collecting =
                reloaded copies deref through the raw lane. *)
             Option.fold
               (Option.bind (Model.store_data_of_rhs (Def.rhs d))
-                 ~f:(fun (data, _) ->
+                 ~f:(fun data ->
                    Option.bind
                      (Result.ok (env.denote ~blk:acc.blk ~def:d data))
                      ~f:(Model.escape_extent ~entry:env.entry)))
@@ -629,22 +631,25 @@ let collect (env : env) (prog : program term) : collecting =
       data = Tree.empty; subs = Tid.Map.empty; tags = Tid.Map.empty;
       projections = Tid.Map.empty }
 
-let align16_up n =
-  let r = Stdlib.Int64.rem n 16L in
-  if Stdlib.Int64.equal r 0L then n else Stdlib.Int64.add n (Stdlib.Int64.sub 16L r)
+(* Rounds [n] up to the ABI's stack alignment. *)
+let align_up n =
+  let align = Stdlib.Int64.of_int Hike_abi.stack_align in
+  let r = Stdlib.Int64.rem n align in
+  if Stdlib.Int64.equal r 0L then n else Stdlib.Int64.add n (Stdlib.Int64.sub align r)
 
-let region_max_bytes : int64 = 67108864L
+let region_max_bytes : int64 = 67108864L (* a binding above this stays in the residue *)
 
 (* A stack region's alloca size: its byte span, 16-aligned. *)
 let region_bytes (k : range) : int64 =
-  align16_up (Stdlib.Int64.add (Stdlib.Int64.sub k.hi.p_pos k.lo.p_pos) 1L)
+  align_up (Stdlib.Int64.add (Stdlib.Int64.sub k.hi.p_pos k.lo.p_pos) 1L)
 
-(* Whether [pos] sits inside one of the spans served whole. *)
+(* Whether [pos] sits inside the span served whole. *)
 let in_whole_span (whole : data_span list) (s : sec) (pos : int64) : bool =
-  Base.List.exists whole ~f:(fun d ->
-      equal_sec d.ds_sec s
-      && Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
-      && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0)
+  match span_of whole s with
+  | Some d ->
+    Stdlib.Int64.unsigned_compare pos d.ds_lo >= 0
+    && Stdlib.Int64.unsigned_compare pos d.ds_hi <= 0
+  | None -> false
 
 
 (* The data spans served whole (identity): a span with any identity
@@ -655,17 +660,18 @@ let whole_spans_of (spans : data_span list) (bindings : (range * member list) li
     Base.List.filter_map bindings ~f:(fun (k, ms) ->
         if is_data_sec k.lo.p_sec && Base.List.exists ms ~f:(fun m -> m.m_identity)
         then
-          Base.List.find spans ~f:(fun d ->
-              equal_sec d.ds_sec k.lo.p_sec
-              && Stdlib.Int64.unsigned_compare k.lo.p_pos d.ds_lo >= 0
-              && Stdlib.Int64.unsigned_compare k.lo.p_pos d.ds_hi <= 0)
+          Option.bind (span_of spans k.lo.p_sec)
+            ~f:(fun d ->
+              if Stdlib.Int64.unsigned_compare k.lo.p_pos d.ds_lo >= 0
+                 && Stdlib.Int64.unsigned_compare k.lo.p_pos d.ds_hi <= 0
+              then Some d else None)
         else None)
   in
   Base.List.filter spans ~f:(fun d ->
       (not (Base.List.is_empty d.ds_slots)) || Base.List.mem tainted d ~equal:equal_data_span)
 
-let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
-    ~(kind : [ `Sub | `Data ]) ~(whole : data_span list)
+let finalize_tree ~(word : int) ~(entry : int64)
+    ~(whole : data_span list)
     (tree : member list Tree.t) : range_storage Tree.t =
   let bindings = Tree.to_sequence tree |> Seq.to_list in
   let sorted = Base.List.sort bindings ~compare:(fun (k1, _) (k2, _) -> compare k1 k2) in
@@ -674,8 +680,8 @@ let finalize_tree ~(word : int) ~(entry : int64) ~(spans : data_span list)
   (* The residue (id 0) is the stack's fallback region.  A whole span
      is one data region — every range in it shares the span's id;
      carved ranges mint an id each, per sub (stack) / module-wide
-     (data). *)
-  let next_region_id = ref 0 in
+     (data, minting from 0). *)
+  let next_region_id = ref Model.residue_id in
   let next_global_id = ref (-1) in
   let span_ids = ref [] in
   let decide (k : range) (ms : member list) : range_storage =
@@ -749,10 +755,10 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   in
   let sub_trees =
     Core.Map.map collected.subs ~f:(fun tree ->
-        finalize_tree ~word ~entry ~spans ~kind:`Sub ~whole:[] tree)
+        finalize_tree ~word ~entry ~whole:[] tree)
   in
   let data_tree =
-    finalize_tree ~word ~entry ~spans ~kind:`Data ~whole collected.data in
+    finalize_tree ~word ~entry ~whole collected.data in
   { sub_trees; data_tree; tags = collected.tags; projections = collected.projections;
     whole }
 
@@ -939,16 +945,11 @@ let global_comps_of ~(word : int) ~(spans : data_span list)
   in
   comps
 
-let sec_tag (d : def term) : sec_tag option = Hike_def_slots.sec_tag d
-
-let set_sec_tag (t : sec_tag) (d : def term) : def term =
-  Hike_def_slots.set_sec_tag t d
-
 let stamp_tags (c : ctx) (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
           Option.value_map (Core.Map.find c.tags (Term.tid d)) ~default:d
-            ~f:(fun t -> set_sec_tag t d)))
+            ~f:(fun t -> Hike_def_slots.set_sec_tag t d)))
 
 (* The layout is the fold of the finalized tree: an unserved member
    fails loudly.  The residue (id 0) is the fallback alloca, sized to
@@ -993,8 +994,6 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
             ((below, window, carved), true)
         | Stack_region id ->
             let bytes = region_bytes k in
-            if Stdlib.Int64.compare bytes region_max_bytes > 0 then
-              fail_unserved "oversized region" k;
             (( below,
                window,
                (id, (k.lo.p_pos, k.hi.p_pos), bytes) :: carved ),
@@ -1012,18 +1011,20 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     else 0L
   in
   (* The anchor sits at the SysV entry-SP alignment inside the
-     residue: idx ≡ 16 − word (mod 16), so the lifted arithmetic (an
-     SSE #GP guard tests (stack_0 + k) & 15) matches the native. *)
-  let residue_mod = Stdlib.Int64.sub 16L (Stdlib.Int64.rem w64 16L) in
+     residue: idx ≡ align − word (mod align), so the lifted arithmetic
+     (an SSE #GP guard tests (stack_0 + k) & (align − 1)) matches the
+     native. *)
+  let align = Stdlib.Int64.of_int Hike_abi.stack_align in
+  let residue_mod = Stdlib.Int64.sub align (Stdlib.Int64.rem w64 align) in
   let anchor_idx =
     Stdlib.Int64.add below
       (Stdlib.Int64.logand
          (Stdlib.Int64.sub residue_mod
-            (Stdlib.Int64.rem below 16L))
-         15L)
+            (Stdlib.Int64.rem below align))
+         (Stdlib.Int64.sub align 1L))
   in
   let residue_bytes =
-    align16_up (Stdlib.Int64.add anchor_idx window) in
+    align_up (Stdlib.Int64.add anchor_idx window) in
   let rlo = Stdlib.Int64.sub entry anchor_idx in
   let rhi = Stdlib.Int64.pred (Stdlib.Int64.add entry window) in
   let regions =

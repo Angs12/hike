@@ -399,7 +399,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   let build_entry (entry : sec_input) : section =
     match entry with
     | Sec_bss { si_lo; si_hi; si_words; si_copy_relocs } ->
-        let llvm_name = section_type_to_string Model.Bss in
+        let llvm_name = Model.sec_name Model.Bss in
         let comps = comps_of si_lo si_hi in
         let whole = whole_id si_lo si_hi in
         if not (Base.List.is_empty comps) && Option.is_none whole then
@@ -430,7 +430,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
             bytes = None;
             owners }
     | Sec_bytes { si_type; si_lo; si_hi; si_words; si_const; si_image } ->
-        let llvm_name = section_type_to_string si_type in
+        let llvm_name = Model.sec_name si_type in
         let comps = comps_of si_lo si_hi in
         let whole = whole_id si_lo si_hi in
         if not (Base.List.is_empty comps) && Option.is_none whole then
