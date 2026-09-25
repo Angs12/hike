@@ -265,7 +265,9 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
     | Bil.MOD | Bil.SMOD ->
       None, None
     | Bil.AND | Bil.OR | Bil.XOR ->
-      (* Exact masks constrain; general masks stay identity. *)
+      (* Singleton masks constrain: XOR is a bitwise bijection, so its
+         pre-image is exact; AND keeps the mask's bits from the
+         constraint and leaves the others free (the hull). *)
       (match b_single with
        | Some k ->
          if Cbat_word.is_zero k then
@@ -277,7 +279,21 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
             | Bil.AND -> Some cstr, None
             | Bil.XOR -> Some (WordSet.lnot cstr), None
             | _ -> None, None)
-         else None, None
+         else
+           (match op with
+            | Bil.XOR ->
+              Some (WordSet.logxor cstr (WordSet.singleton k)), None
+            | Bil.AND ->
+              (match v_extrema with
+               | Some vlo, Some vhi -> (
+                 match
+                   hull ~wrapping:false width vlo
+                     (Cbat_word.logor vhi (Cbat_word.lnot k))
+                 with
+                 | Some a' -> Some a', None
+                 | None -> None, None)
+               | _ -> None, None)
+            | _ -> None, None)
        | _ -> None, None)
     | _ -> None, None
 

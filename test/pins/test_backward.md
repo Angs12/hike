@@ -102,3 +102,5 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-79 | S17 Var-vs-Var NEQ with a multi-element partner is the identity (every `t` keeps a differing `u`). | Subtract the intersection whenever it is non-empty. | BK-79 (`6 ∈` false). |
 | BK-80 | S18 Ite with a singleton true condition constrains only the true branch. | Constrain both branch operands. | BK-80 (`u` narrowed). |
 | BK-81 | S19 Ite with an unknown condition keeps both branches. | Constrain both branch operands. | BK-81 (`t`/`u` narrowed). |
+| BK-82 | S20 the XOR singleton mask's pre-image is the exact bitwise bijection (`{0x6}` under `^0xA` → `{0xC}`). | Make the general-mask XOR arm identity. | BK-82 (`Ws.equal` false). |
+| BK-83 | S21 the AND singleton mask keeps the mask's bits from the constraint and frees the rest (hull `[0x30, 0xFFFFFF3F]`). | Make the general-mask AND arm identity. | BK-83 (`0x30 ∈` false). |

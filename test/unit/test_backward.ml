@@ -1408,6 +1408,38 @@ let tests : unit Alcotest.test list =
              (AI.find_word 32 env11 (Var.base s_t))
           && Ws.equal (s_w32_of_env env11' s_u)
                (AI.find_word 32 env11 (Var.base s_u))));
+
+    pin "BK-82"
+      "the XOR singleton mask is an exact bitwise bijection — the pre-image of \
+       {0x6} under ^0xA is {0xC}"
+      (fun () ->
+        let env12 =
+          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+            ~env:(mk_env [])
+            (Bil.BinOp (Bil.XOR, Bil.Var s_t,
+               Bil.Int (Cbat_word.to_word (s_r32 0xA))))
+            (Ws.singleton (s_r32 0x6))
+        in
+        check "BK-82"
+          (Ws.equal (s_w32_of_env env12 s_t) (Ws.singleton (s_r32 0xC))));
+
+    pin "BK-83"
+      "the AND singleton mask keeps the constrained bits and leaves the rest \
+       free — the hull [0x30, 0xFFFFFF3F]"
+      (fun () ->
+        let env13 =
+          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+            ~env:(mk_env [])
+            (Bil.BinOp (Bil.AND, Bil.Var s_t,
+               Bil.Int (Cbat_word.to_word (s_r32 0xF0))))
+            (Ws.singleton (s_r32 0x30))
+        in
+        let r = s_w32_of_env env13 s_t in
+        check "BK-83"
+          (Ws.elem (s_r32 0x30) r
+          && Ws.elem (s_r32 0xFFFFFF3F) r
+          && (not (Ws.elem (s_r32 0x2F) r))
+          && not (Ws.elem (s_r32 0xFFFFFF40) r)));
   ]
 
 let () = run "backward" tests

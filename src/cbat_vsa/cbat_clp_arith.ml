@@ -679,6 +679,12 @@ let modulo (p1 : t) (p2 : t) : t =
     let width = bitwidth p1 in
     match min_elem p2, max_elem p2 with
     | Some kmin, Some kmax when W.is_zero kmin && W.equal kmin kmax -> p1
+    | Some kmin, Some kmax when W.is_zero kmin ->
+      (* The divisor may be zero, and x mod 0 is x: every residue hull
+         covers both. *)
+      (match max_elem p1 with
+       | Some hi -> interval ~width (W.zero width) (W.max hi (W.pred kmax))
+       | None -> top width)
     | Some kmin, Some kmax when not (W.is_zero kmin) ->
       (match min_elem p1, max_elem p1 with
        | Some lo, Some hi when W.equal kmin kmax ->

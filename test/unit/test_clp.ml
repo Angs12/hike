@@ -1053,6 +1053,18 @@ let tests : unit Alcotest.test list =
         let unsound, inexact = pbh_mod_sweep () in
         check "CLP-110" (unsound = 0);
         check "CLP-111" (inexact = 0));
+
+    pin "CLP-112" "PBH-M11: mod by a zero-straddling divisor keeps the dividend's hull (never top)"
+      (fun () ->
+        check "CLP-112"
+          (let r =
+             Clp.modulo (pbh_iv 64 10 20)
+               (Clp.interval ~width:64 (Wo.of_int ~width:64 0)
+                  (Wo.of_int ~width:64 4))
+           in
+           (not (Clp.is_top r))
+           && Clp.min_elem r = Some (Wo.of_int ~width:64 0)
+           && Clp.max_elem r = Some (Wo.of_int ~width:64 20)));
   ]
 
 let () = run "clp" tests

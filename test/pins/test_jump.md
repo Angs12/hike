@@ -62,3 +62,4 @@ measured red is claimed here.
 | JMP-41 | Both same-block ZF defs drop after the rewrite (the var is unused sub-wide). | `let drop_consumed sub _ = sub`. | to be recorded |
 | JMP-42 | An unconditional jump cond (`Int 1`) is not a bexp — `parse_bexp` returns `None` and the cond is untouched. | In `plan_block`, default a failed `parse_bexp` to a compiled constant. | to be recorded |
 | JMP-43 | No `Int`-cond def family is consumed, so all five cmp defs survive. | In `plan_block`, set `changed = true` unconditionally (consuming flag defs for the `Int 1` cond). | to be recorded |
+| JMP-44 | `CF := 1` is the const-true flag fact: a `jb` over it compiles to the const-true branch and the CF def dies. | Drop the `CF, e when is_one_int e` arm in `extract_facts`. | JMP-44 red: the cond stays `Var CF` and the def survives. |

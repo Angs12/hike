@@ -114,6 +114,8 @@ let extract_facts (fl : flag) (rhs : exp) (f : facts) : facts option =
       match f.zf with None -> Some { f with zf = Some (Zconst false) } | _ -> None)
   | CF, Bil.BinOp (Bil.LT, a, b) -> (
       match f.cf with None -> Some { f with cf = Some (Ult (a, b)) } | _ -> None)
+  | CF, e when is_one_int e -> (
+      match f.cf with None -> Some { f with cf = Some (Cconst true) } | _ -> None)
   | CF, e when is_zero_int e -> (
       match f.cf with None -> Some { f with cf = Some (Cconst false) } | _ -> None)
   | SF, Bil.Cast (Bil.HIGH, 1, e) -> (

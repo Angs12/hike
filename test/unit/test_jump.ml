@@ -523,6 +523,17 @@ let tests : unit Alcotest.test list =
         let s = sub_of_defs_and_jmp "t13_uncond" (cmp_defs ()) (Bil.Int (Word.one 1)) in
         let s' = compile_sub s in
         check "JMP-43" (Int.equal (Base.List.length (defs_of s')) 5));
+
+    pin "JMP-44" "jb over CF := 1 compiles to the const-true branch and CF dies" (fun () ->
+        let s =
+          sub_of_defs_and_jmp "t13_cf1"
+            [ Def.create cf (Bil.Int (Word.one 1)) ]
+            (Bil.Var cf)
+        in
+        let s' = compile_sub s in
+        check "JMP-44"
+          (Exp.equal (jmp_cond_of s') (Bil.Int (Word.one 1))
+          && not (has_def_for s' cf)));
   ]
 
 let () = run "jump" tests
