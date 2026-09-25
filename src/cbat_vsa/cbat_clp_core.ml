@@ -11,7 +11,6 @@ module List = Core.List
 
 open !Cbat_word
 open Core
-module Hashtbl = Stdlib.Hashtbl
 let min = Stdlib.min
 let max = Stdlib.max
 let ( = ) = Stdlib.( = )
@@ -207,12 +206,11 @@ let of_list ~width l : t =
 
 
 
-(* Cardinality as a (width+1)-bit W.t.  Exact for a finite Clp; a
-   StackOff's reading is the step product SATURATED at 2^width —
-   "at least this many", never an exact count. *)
+(* Cardinality as a (width+1)-bit W.t; exact for a finite CLP. *)
 let cardinality (p : t) : W.t = cardn_of p
 
-(* Last point; meaningless for infinite CLPs. *)
+(* Last point of the stored progression; for circular forms it is the
+   wrap predecessor, and for directional rays the ray's finite edge. *)
 let finite_end (p : t) : W.t option =
   let width = bitwidth p in
   let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
@@ -372,8 +370,7 @@ let interval_union (a1,b1) (a2,b2) : (W.t * W.t) =
   else if W.(<) b2_rel b1_rel then (a2, b1)
   (* [a2,b2] contains [a1,b1]. *)
   else if W.(<) b2_rel a2_rel then (a2, b2)
-  (* Overlapping tails: the hull starts at the interval whose tail
-     covers less of the gap. *)
+  (* [a2,b2] wraps the rebase and covers [a1,b1]. *)
   else if W.(>) (W.sub a2_rel b1_rel) (W.sub zero b2_rel) then (a2,b1)
   else (a1, b2)
 

@@ -19,7 +19,6 @@ module MapLattice = Cbat_map_lattice
 module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
 module Clp = Cbat_clp
-module Utils = Cbat_vsa_utils
 
 (* Abstract state: words, memories.  Stack provenance is the WORD value
    itself — the entry RSP's word is seeded with the symbolic segment

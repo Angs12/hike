@@ -39,3 +39,4 @@ recipe is the textual inversion of the pinned contract recorded below.
 | WS-29 | PW-R7: an unconfined mask keeps fabricated bits and answers top | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-30 | PW-R8: two stack addresses' AND answers top | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-31 | PW-R9: a HIGH cast keeps the unknown bits and answers top | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-32 | DOM-44: a blind stack binop keeps the wider operand width | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |

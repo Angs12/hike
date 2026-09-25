@@ -43,10 +43,13 @@ let stack_base =
    stack claim covers at most [stack_span] bytes. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
+let w64_of_i64 (i : int64) : Cbat_word.t =
+  Cbat_word.of_word (Word.of_int64 ~width:64 i)
+
 let stack_word (offs : Clp.t) : t = StackOff offs
 
 let stack_word_i64 (k : int64) : t =
-  StackOff (Clp.singleton (Cbat_word.of_word (Word.of_int64 ~width:64 k)))
+  StackOff (Clp.singleton (w64_of_i64 k))
 
 (* The offset set of a stack-symbolic value — answers ONLY for the
    symbolic arm; a plain in-band set is None. *)
@@ -95,9 +98,6 @@ let stride (t : t) : int =
   | Clp c -> of_clp c
   | StackOff offs -> of_clp offs
   | FinSet s -> of_finset s
-
-let w64_of_i64 (i : int64) : Cbat_word.t =
-  Cbat_word.of_word (Word.of_int64 ~width:64 i)
 
 (* a + b + c with int64 overflow check. *)
 let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
@@ -285,31 +285,43 @@ let in_band_words (lo : Cbat_word.t) (hi : Cbat_word.t) : bool =
     && Stdlib.Int64.compare hii stack_band_lo >= 0
   | _ -> false
 
+(* The concrete extrema of a set, before any stack projection. *)
+let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
+  let pair lo hi = Option.map2 lo hi ~f:(fun lo hi -> (lo, hi)) in
+  match t with
+  | StackOff offs -> pair (Clp.min_elem offs) (Clp.max_elem offs)
+  | Clp p -> pair (Clp.min_elem p) (Clp.max_elem p)
+  | FinSet s -> pair (FinSet.min_elem s) (FinSet.max_elem s)
+
+(* Plain extrema are stack facts only when the whole hull is in the
+   positive stack band; symbolic offsets are handled separately. *)
+let stack_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
+  match t with
+  | StackOff _ -> None
+  | Clp p when Clp.is_top p || Clp.is_circular p -> None
+  | Clp _ | FinSet _ ->
+    Option.bind (extrema t) ~f:(fun (lo, hi) ->
+      if in_band_words lo hi then Some (lo, hi) else None)
+
 (* Tests stack residency: the symbolic arm, or the plain degraded arm. *)
 let in_stack_segment (t : t) : bool =
   match t with
   | StackOff _ -> true
-  | Clp p ->
-    (not (Clp.is_top p)) && (not (Clp.is_circular p))
-    && (match Clp.min_elem p, Clp.max_elem p with
-        | Some lo, Some hi -> in_band_words lo hi
-        | _ -> false)
-  | FinSet s ->
-    (match FinSet.min_elem s, FinSet.max_elem s with
-     | Some lo, Some hi -> in_band_words lo hi
-     | _ -> false)
+  | Clp _ | FinSet _ -> Option.is_some (stack_extrema t)
+
+let relative_bounds (lo : Cbat_word.t) (hi : Cbat_word.t)
+    : (int64 * int64) option =
+  match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+  | Ok loi, Ok hii ->
+    (match checked_add3 (Stdlib.Int64.neg stack_base) 0L loi,
+            checked_add3 (Stdlib.Int64.neg stack_base) 0L hii with
+     | Some rlo, Some rhi -> Some (rlo, rhi)
+     | _ -> None)
+  | _ -> None
 
 (* Segment-relative bounds: StackOff keeps its exact offsets; a plain
    in-band set maps to its own hull. *)
 let stack_bounds (t : t) : (int64 * int64) option =
-  let of_words (lo : Cbat_word.t) (hi : Cbat_word.t) =
-    match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-    | Ok loi, Ok hii ->
-      (match checked_add3 (Stdlib.Int64.neg stack_base) 0L loi,
-              checked_add3 (Stdlib.Int64.neg stack_base) 0L hii with
-       | Some rlo, Some rhi -> Some (rlo, rhi)
-       | _ -> None)
-    | _ -> None in
   match t with
   | StackOff offs ->
     (match Clp.min_elem offs, Clp.max_elem offs with
@@ -318,18 +330,8 @@ let stack_bounds (t : t) : (int64 * int64) option =
         | Ok loi, Ok hii -> Some (loi, hii)
         | _ -> None)
      | _ -> None)
-  | Clp p ->
-    if in_stack_segment t then
-      match Clp.min_elem p, Clp.max_elem p with
-      | Some lo, Some hi -> of_words lo hi
-      | _ -> None
-    else None
-  | FinSet s ->
-    if in_stack_segment t then
-      match FinSet.min_elem s, FinSet.max_elem s with
-      | Some lo, Some hi -> of_words lo hi
-      | _ -> None
-    else None
+  | Clp _ | FinSet _ ->
+    Option.bind (stack_extrema t) ~f:(fun (lo, hi) -> relative_bounds lo hi)
 
 let bitwidth (t : t) : int = match t with
   | StackOff _ -> 64
@@ -370,14 +372,12 @@ let max_elem (t : t) = match t with
 (* The SEGMENT-RELATIVE extrema of a stack value: a [StackOff]'s offset
    set, or a plain in-band set's segment-relative hull. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
-  let twin = match t with
-    | StackOff offs -> Some (of_clp offs)
-    | Clp _ | FinSet _ ->
-      Option.map (stack_bounds t) ~f:(fun (lo, hi) ->
-          of_clp (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi)))
-  in
-  Option.bind twin ~f:(fun t' ->
-    Option.map2 (min_elem t') (max_elem t') ~f:(fun lo hi -> (lo, hi)))
+  match t with
+  | StackOff _ -> extrema t
+  | Clp _ | FinSet _ ->
+    Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
+      Option.map (relative_bounds lo hi) ~f:(fun (rlo, rhi) ->
+        (w64_of_i64 rlo, w64_of_i64 rhi)))
 
 (* Signed extrema: the projection is signed-positive, so its signed
    and unsigned extrema agree; a set spanning the sign boundary has
@@ -586,8 +586,8 @@ let rec diff (t1 : t) (t2 : t) : t = match t1, t2 with
   | StackOff _, _ | _, StackOff _ ->
     diff (to_plain t1) (to_plain t2)
   | Clp p1, Clp p2 ->
-    (* G2a: within the budget the enumerated difference is exact, two
-       runs included; past it the bound identity stands. *)
+    (* Within the budget the enumerated difference is exact, including
+       two runs; past it the bound identity stands. *)
     if Clp.bitwidth p1 <> Clp.bitwidth p2
        || Word_ops.gt_int (Clp.cardinality p1) Utils.fin_set_size
     then bound_set_size (Clp (Clp.diff p1 p2))
@@ -644,7 +644,7 @@ let certified_bits = 4
 
 let blind_binop (op : binop) (t1 : t) (t2 : t) : t =
   match t1, t2 with
-  | StackOff _, _ | _, StackOff _ -> top (bitwidth t1)
+  | StackOff _, _ | _, StackOff _ -> top (Stdlib.max (bitwidth t1) (bitwidth t2))
   | _ -> lift_binop op t1 t2
 
 let blind_unop (f_clp : clp -> clp) (f_fs : fset -> fset) (t : t) : t =
@@ -724,7 +724,9 @@ let on_offs (f : clp -> bool) (t : t) : bool =
 
 let is_top t = on_offs Clp.is_top t
 
-let is_bottom (t : t) = match t with
+let is_bottom (t : t) =
+  (* [bound_set_size] canonicalizes a bottom CLP into the FinSet arm. *)
+  match t with
   | StackOff offs -> Clp.is_bottom offs
   | Clp _ -> false
   | FinSet s -> Cbat_word.is_zero (FinSet.cardinality s)

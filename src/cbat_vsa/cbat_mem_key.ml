@@ -113,7 +113,7 @@ let covers (k : t) (p : t) : bool =
 (* Sub-range of one owner key: the owner's stride carries. *)
 let piece (k : t) ~lo ~hi : t = {lo; hi; step = k.step}
 
-(* Compares lowest addresses; ignores widths. *)
+(* Orders by point width, then unsigned value. *)
 let compare (k1 : t) (k2 : t) : int =
     compare_point (lower k1) (lower k2)
 

@@ -35,7 +35,7 @@ val step_of : t -> Cbat_word.t
 val nearest_pred : Cbat_word.t -> t -> Cbat_word.t option
 val nearest_succ : Cbat_word.t -> t -> Cbat_word.t option
 
-(* Step-1 CLP from (base, step); circular when the progression wraps. *)
+(* Unbounded progression at (base, step). *)
 val infinite : Cbat_word.t * Cbat_word.t -> t
 
 val is_top : t -> bool

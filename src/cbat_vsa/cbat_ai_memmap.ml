@@ -259,15 +259,6 @@ let bottom (i : idx) : t =
   assert(i.addressable_width = addressable_width);
   {itree=None; width=i.addr_width}
 
-(* Many ops are linear in overlaps. *)
-
-
-
-
-
-(* [op_demoted] combines data at an intersection piece not fully
-   covered by both keys' claims (mixed grids): the incoming fact
-   covers only its own stride points there. *)
 (* Drop top cells; merge adjacent ones. *)
 let coalesce (it : itree) : itree =
   IT.to_sequence it
@@ -286,6 +277,9 @@ let coalesce (it : itree) : itree =
   |> fun (acc, pending) ->
   Option.fold ~init:acc pending ~f:(fun acc (k, v) -> IT.add acc k v)
 
+(* [op_demoted] combines data at an intersection piece not fully
+   covered by both keys' claims (mixed grids): the incoming fact
+   covers only its own stride points there. *)
 let op_add' ~(op : Val.t -> Val.t -> Val.t)
     ~(op_demoted : Val.t -> Val.t -> Val.t)
     (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
@@ -423,7 +417,7 @@ let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
         let first_w = WordSet.bitwidth (Val.data first_v) in
         let first_end =
           Stdlib.Int64.add (Key.lower first_k).pvalue
-            (Stdlib.Int64.of_int (first_w / 8 - 1)) in
+            (Stdlib.Int64.of_int (first_w / addressable_width - 1)) in
         let rec check_contiguous prev_end rest =
           match rest with
           | [] -> Some prev_end
@@ -434,7 +428,7 @@ let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
               let next_w = WordSet.bitwidth (Val.data next_v) in
               let next_end =
                 Stdlib.Int64.add (Key.lower next_k).pvalue
-                  (Stdlib.Int64.of_int (next_w / 8 - 1)) in
+                  (Stdlib.Int64.of_int (next_w / addressable_width - 1)) in
               check_contiguous next_end rest'
             else None
         in
@@ -444,7 +438,9 @@ let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
             let offset_bytes =
               Stdlib.Int64.sub (Key.lower cell_k).pvalue (Key.lower k).pvalue in
             let bit_offset =
-              Stdlib.Int64.to_int (Stdlib.Int64.mul offset_bytes 8L) in
+              Stdlib.Int64.to_int
+               (Stdlib.Int64.mul offset_bytes
+                  (Stdlib.Int64.of_int addressable_width)) in
             let cell_w = WordSet.bitwidth (Val.data cell_v) in
             let shift_amt = match endian with
               | LittleEndian -> bit_offset
@@ -461,7 +457,7 @@ let try_assemble_cells ((req_width, endian) : Val.idx) (k : Key.t)
 (* Values stored at a key. *)
 let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
   assert(fst i > 0);
-  let req_bytes = fst i / 8 in
+  let req_bytes = fst i / addressable_width in
   let query_k =
     if req_bytes > 1 && Key.equal (Key.lower k) (Key.upper k) then
       let hi =

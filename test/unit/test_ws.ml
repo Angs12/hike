@@ -311,6 +311,16 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let p = Ws.stack_word_i64 (-72L) in
         check "WS-31" (Ws.is_top (Ws.cast Bil.HIGH 4 p)));
+
+    pin "WS-32" "DOM-44: a blind stack binop keeps the wider operand width"
+      (fun () ->
+        let stack = Ws.stack_word_i64 0L in
+        let plain = Ws.singleton (w32 1) in
+        let left = Ws.logor stack plain in
+        let right = Ws.logor plain stack in
+        check "WS-32"
+          (Ws.bitwidth left = 64 && Ws.bitwidth right = 64
+          && Ws.is_top left && Ws.is_top right));
   ]
 
 let () = run "ws" tests

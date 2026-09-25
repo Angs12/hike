@@ -31,16 +31,10 @@ module type S_indexed = sig
 
   include Lattice.S_indexed with type t := t and type idx := idx
 
-  (* Meet the new value into the key. *)
   val meet_add : t -> key:Key.t -> data:Val.t -> t
-  (* Join the new value into the key. *)
   val join_add : t -> key:Key.t -> data:Val.t -> t
-  (* Overwrite the key. *)
   val add : t -> key:Key.t -> data:Val.t -> t
-
-  (* Read a key; unmapped keys read the default. *)
   val find : Val.idx -> t -> Key.t -> Val.t
-
 end
 
 module type S = sig

@@ -11,8 +11,6 @@ module List = Core.List
 
 open !Cbat_word
 open Core
-module Hashtbl = Stdlib.Hashtbl
-
 let min = Stdlib.min
 let max = Stdlib.max
 let ( = ) = Stdlib.( = )
@@ -276,12 +274,14 @@ let cap_amount (p2 : t) (cap : W.t) (min_p2 : W.t) (e2 : W.t) : t list =
 
 
 (* Overshift: exact, overshifted, straddling. *)
+let compare_width = 64
+
 let split_shift ~(sz1 : int) ~(overshift : t)
     ~(exact : t -> W.t -> W.t -> t) (p2 : t) : t option =
   let open Monads.Std.Monad.Option.Syntax in
   min_elem p2 >>= fun min_p2 ->
   max_elem p2 >>= fun max_p2 ->
-  let amount_w = Stdlib.max 64 (W.bitwidth max_p2) in
+  let amount_w = Stdlib.max compare_width (W.bitwidth max_p2) in
   let width_i = W.of_int sz1 ~width:amount_w in
   let max_p2_i = W.extract_exn ~hi:(amount_w - 1) max_p2 in
   let min_p2_i = W.extract_exn ~hi:(amount_w - 1) min_p2 in
@@ -605,10 +605,8 @@ let div (p1 : t) (p2 : t) : t =
   | None -> if is_bottom p1 || is_bottom p2 then bottom width else top width
   | Some x -> x)
 
-(* Word-size signed division/modulus (the ws- prefix is "signed
-   word ops", not a WebAssembly spelling). *)
-let wsdiv (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
-let wsmod (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
+let sdiv_word (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
+let smod_word (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
 
 let sdiv (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
@@ -634,14 +632,14 @@ let sdiv (p1 : t) (p2 : t) : t =
             else top width)
     else if W.is_one (cardinality p1) &&
             W.is_one (cardinality p2)
-    then !!(singleton (wsdiv (base_of p1) (base_of p2)))
+    then !!(singleton (sdiv_word (base_of p1) (base_of p2)))
     else if W.(<) max_e2 (half width) || W.(>=) min_e2 (half width) then begin
       (* One-signed divisor: the truncated quotient's extrema sit at the
          corner pairs of the signed extrema. *)
-      let minmax = wsdiv min_e1 max_e2 in
-      let minmin = wsdiv min_e1 min_e2 in
-      let maxmax = wsdiv max_e1 max_e2 in
-      let maxmin = wsdiv max_e1 min_e2 in
+      let minmax = sdiv_word min_e1 max_e2 in
+      let minmin = sdiv_word min_e1 min_e2 in
+      let maxmax = sdiv_word max_e1 max_e2 in
+      let maxmin = sdiv_word max_e1 min_e2 in
       (* The hull is the signed-order interval (it may wrap). *)
       let h = half width in
       let scmp a b =
@@ -712,12 +710,12 @@ let smodulo (p1 : t) (p2 : t) : t =
       (match min_elem_signed p1, max_elem_signed p1 with
        | Some slo, Some shi ->
          if W.(<) slo (half width) then
-           if W.equal (wsdiv slo k) (wsdiv shi k)
-           then interval ~width (wsmod slo k) (wsmod shi k)
+           if W.equal (sdiv_word slo k) (sdiv_word shi k)
+           then interval ~width (smod_word slo k) (smod_word shi k)
            else interval ~width (W.zero width) (W.pred k)
          else if W.(>=) shi (half width) then
-           if W.equal (wsdiv slo k) (wsdiv shi k)
-           then interval ~width (wsmod slo k) (wsmod shi k)
+           if W.equal (sdiv_word slo k) (sdiv_word shi k)
+           then interval ~width (smod_word slo k) (smod_word shi k)
            else interval ~width neg_band (W.zero width)
          else interval ~width neg_band (W.pred k)
        | _ -> sub p1 (mul (sdiv p1 p2) p2))

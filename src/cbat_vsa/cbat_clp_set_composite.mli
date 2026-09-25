@@ -67,9 +67,6 @@ val in_stack_segment : t -> bool
    plain value. *)
 val offset_extrema : t -> (Cbat_word.t * Cbat_word.t) option
 
-(* The offset set's extrema of a stack-symbolic value; None for a
-   plain value. *)
-
 (* Segment-relative bounds of a stack value; None when not stack. *)
 val stack_bounds : t -> (int64 * int64) option
 

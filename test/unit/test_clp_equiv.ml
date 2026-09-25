@@ -117,10 +117,6 @@ module Ref_word = struct
     else if Word.is_zero w2 then w1
     else Word.gcd_exn w1 w2
 
-  (* Unsigned division rounding up. *)
-  let cdiv a b : word = if Word.is_zero (Word.modulo a b)
-    then Word.div a b else Word.succ (Word.div a b)
-
   let is_one (w : word) : bool = Word.is_zero (Word.pred w)
 
   (* Least non-negative x solving ax + by = c. *)

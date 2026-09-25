@@ -67,7 +67,10 @@ let of_int ~width (v : int) : t =
   else if v >= 0 then Small (v, width, false)
   else mkz (Z.add (Z.shift_left Z.one width) (Z.of_int v)) width
 
-let of_int64 ?(width = 64) (v : int64) : t = of_z (Z.of_int64 v) width
+let of_int64 ?(width = 64) (v : int64) : t =
+  if Int64.compare v 0L >= 0 && Int64.compare v (Int64.of_int max_int) <= 0 then
+    Small (Int64.to_int v land mask width, width, false)
+  else of_z (Z.of_int64 v) width
 
 let[@inline] is_zero (t : t) : bool =
   match t with Small (v, _, _) -> v = 0 | Big (z, _, _) -> Z.sign z = 0
