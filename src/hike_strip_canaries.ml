@@ -469,7 +469,6 @@ let comp_of_block ~(denote : denote) ~(reach : Tid.t -> bool)
 
 let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
     ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx) : comp list =
-  let reach = reach_fail ~ctx ~names in
   let tp = abi.Abi.thread_pointer in
   let tls_reads =
     Base.List.concat
@@ -478,14 +477,19 @@ let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
            |> Base.List.filter_map ~f:(fun d ->
                   if is_tls_read tp d then Some (b, d) else None)))
   in
-  let comps = ref [] in
-  Base.List.iter ctx.blocks ~f:(fun b ->
-      match
-        comp_of_block ~denote ~reach ~tp ~tls_reads ~cell_of ~ctx b
-      with
-      | Some c -> comps := c :: !comps
-      | None -> ());
-  !comps
+  (* Every composition names a TLS read; without one there is nothing to
+     classify. *)
+  if Base.List.is_empty tls_reads then []
+  else
+    let reach = reach_fail ~ctx ~names in
+    let comps = ref [] in
+    Base.List.iter ctx.blocks ~f:(fun b ->
+        match
+          comp_of_block ~denote ~reach ~tp ~tls_reads ~cell_of ~ctx b
+        with
+        | Some c -> comps := c :: !comps
+        | None -> ());
+    !comps
 
 (* A cell converts together: every access the VSA proves lands on it
    must be the composition's store or a tied reload of this round. *)
