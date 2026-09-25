@@ -18,10 +18,10 @@ type site_binding = {
   sb_full : bool;
 }
 
-let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
+let site_bindings_of_sub_with_blocks ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
-    (sub : sub term) : site_binding list Tid.Map.t =
+    (sub : sub term) : (site_binding list * blk term) Tid.Map.t =
   let w64 = Stdlib.Int64.of_int word in
   let singleton_at ?(def : def term option) ~(blk : blk term) (e : exp) :
       int64 option =
@@ -47,7 +47,7 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
          if not has_call then sites
          else
            match singleton_at ~blk (Bil.Var sp) with
-           | None -> Core.Map.set sites ~key:btid ~data:[]
+           | None -> Core.Map.set sites ~key:btid ~data:([], blk)
            | Some d_sp ->
                let bindings =
                  Term.enum def_t blk
@@ -84,8 +84,17 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
                         | _ -> acc)
                in
                Core.Map.set sites ~key:btid
-                 ~data:(Base.List.sort bindings ~compare:(fun a b ->
-                      Int.compare a.sb_slot b.sb_slot)))
+                 ~data:
+                   ( Base.List.sort bindings ~compare:(fun a b ->
+                        Int.compare a.sb_slot b.sb_slot),
+                     blk ))
+
+let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
+    ~(denote : blk:blk term -> ?def:def term -> exp ->
+                (Vsa.WordSet.t, Type.error) Result.t)
+    (sub : sub term) : site_binding list Tid.Map.t =
+  site_bindings_of_sub_with_blocks ~word ~abi ~sp ~denote sub
+  |> Core.Map.map ~f:fst
 
 let region_id_of_storage (s : Sections.storage) : int =
   match s with
@@ -105,9 +114,9 @@ type conv =
 let conversion_of ~(word : int) ~(entry : int64)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
     ~(projected : (Sections.Tag.t option * Sections.portion list) option)
-    ~(d : def term)
+    ~(access : (exp * int * bool) option)
     ~(demoted : int list) : conv * Sections.Tag.t option =
-  match Sections.access_of d with
+  match access with
   | None -> (Keep, None)
   | Some (addr, _, _) -> (
       match projected with
@@ -342,7 +351,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
     ~(ctx : Sections.ctx)
-    ~(sites : site_binding list Tid.Map.t)
+    ~(sites : (site_binding list * blk term) Tid.Map.t)
     ~(resolved : Tid.t option Tid.Map.t)
     ~(demoted : int list)
     ~(callee_exempt : bool)
@@ -385,8 +394,9 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     Term.map blk_t sub ~f:(fun blk ->
         let blk =
           Term.map def_t blk ~f:(fun d ->
+              let access = Sections.access_of d in
               let bits =
-                match Sections.access_of d with
+                match access with
                 | Some (_, w, _) -> 8 * w
                 | None -> 0
               in
@@ -394,12 +404,12 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                 conversion_of ~word ~entry ~tree
                   ~data:ctx.data_tree
                   ~projected:(Base.Option.join (Core.Map.find ctx.projections (Term.tid d)))
-                  ~d ~demoted
+                  ~access ~demoted
               in
               rewrite_def ~word ~conv ~bits d)
         in
         match Core.Map.find sites (Term.tid blk) with
-        | Some bs -> bind_site_args ~word bs blk
+        | Some (bs, _) -> bind_site_args ~word bs blk
         | None -> blk)
   in
   (* The signature carries the window parameter whenever a
@@ -430,7 +440,9 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   let sides =
     Term.enum sub_t prog
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
-           let sites = site_bindings_of_sub ~word ~abi ~sp ~denote sub in
+           let sites =
+             site_bindings_of_sub_with_blocks ~word ~abi ~sp ~denote sub
+           in
            let resolved = call_resolution ~denote ~lookup sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in
@@ -444,17 +456,15 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
           Core.Map.find sides (Term.tid caller)
           |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
         in
-        Core.Map.fold sites ~init:acc ~f:(fun ~key:btid ~data:bs acc ->
+        Core.Map.fold sites ~init:acc
+          ~f:(fun ~key:_ ~data:(bs, blk) acc ->
             let callees =
-              match Term.find blk_t caller btid with
-              | Some blk ->
-                  Term.enum jmp_t blk
-                  |> Seq.filter_map ~f:(fun j ->
-                         match Core.Map.find resolved (Term.tid j) with
-                         | Some (Some t) -> Some t
-                         | _ -> None)
-                  |> Seq.to_list
-              | None -> []
+              Term.enum jmp_t blk
+              |> Seq.filter_map ~f:(fun j ->
+                     match Core.Map.find resolved (Term.tid j) with
+                     | Some (Some t) -> Some t
+                     | _ -> None)
+              |> Seq.to_list
             in
             Base.List.fold callees ~init:acc ~f:(fun acc callee ->
                 Base.List.fold bs ~init:acc ~f:(fun acc b ->

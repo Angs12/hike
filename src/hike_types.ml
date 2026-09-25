@@ -29,6 +29,11 @@ let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
         if is_value_reg (Def.lhs d) then d :: acc else acc)
   in
   let cfg = Sub.to_graph sub in
+  let blocks =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
+           Core.Map.set acc ~key:(Term.tid blk) ~data:blk)
+  in
   let return_path_defs =
     Term.enum blk_t sub
     |> Seq.fold ~init:[] ~f:(fun acc blk ->
@@ -37,7 +42,7 @@ let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
           let preds = Graphs.Tid.Node.preds (Term.tid blk) cfg in
           let pred_defs =
             Seq.fold preds ~init:[] ~f:(fun acc p ->
-                match Term.find blk_t sub p with
+                match Core.Map.find blocks p with
                 | Some pb -> value_defs pb @ acc
                 | None -> acc)
           in

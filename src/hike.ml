@@ -30,13 +30,12 @@ let convert_binary output_program proj =
   let abi = Abi.of_target target in
   let word = abi.Abi.word in
   let addr_bits = Theory.Target.bits target in
-  (* The section rows, read once for this pass. *)
-  let meta = Hike_sections.sec_meta ~word proj in
   let spec =
     match (Hike_kb.facts ()).Hike_kb.spec with
     | Some spec -> spec
     | None ->
         (* No attribution ran: the sections emit with no components. *)
+        let meta = Hike_sections.sec_meta ~word proj in
         Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
   in
   Bil2llvm.emit_program llvm_ctx llvm_module
