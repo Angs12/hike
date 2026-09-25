@@ -42,6 +42,8 @@ let stack_base =
 (* The symbolic stack segment spans 8 MiB above the base — a TOP
    stack claim covers at most [stack_span] bytes. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
+let stack_segment_cardinality =
+  Cbat_word.of_int ~width:65 (Stdlib.Int64.to_int stack_span + 1)
 
 let w64_of_i64 (i : int64) : Cbat_word.t =
   Cbat_word.of_word (Word.of_int64 ~width:64 i)
@@ -343,7 +345,7 @@ let bitwidth (t : t) : int = match t with
 let cardinality (t : t) = match t with
   | StackOff offs ->
     let width = 65 in
-    let a = Cbat_word.of_int ~width (Stdlib.Int64.to_int stack_span + 1) in
+    let a = stack_segment_cardinality in
     let b = Cbat_word.cap_at_width ~width (Clp.cardinality offs) in
     if Cbat_word.is_zero a || Cbat_word.is_zero b then
       Cbat_word.zero width

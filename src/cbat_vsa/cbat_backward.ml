@@ -751,15 +751,13 @@ let rec constrain_operands ~(env : AI.t)
   | Bil.Load (m, a, en, s) ->
     (* The cell fact meets the env's memory and threads to the store
        that wrote it. *)
-    let env = constrain_cell_on_trace ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
+    let env, key = constrain_cell_on_trace ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
     (match m with
      | Bil.Var mv ->
-       (match denote_imm_exp a env with
-        | Ok aws ->
-          Option.iter (bounded_cell_key aws)
-            ~f:(fun k ->
-               cells := { pc_mem = mv; pc_key = k; pc_cstr = produced } :: !cells)
-        | Error _ -> ())
+       (match key with
+        | Some key ->
+          cells := { pc_mem = mv; pc_key = key; pc_cstr = produced } :: !cells
+        | None -> ())
      | _ -> ());
     env
   | Bil.Store (m, a, u, _en, s) ->
@@ -878,7 +876,9 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
    stack-symbolic addresses key by segment offsets, foreign by their
    concrete hulls; identity on doubt. *)
 and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
-    ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) : AI.t =
+    ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) :
+    AI.t * Mem.Key.t option =
+  let no_key env = (env, None) in
   match mem with
   | Bil.Var m ->
     (match Var.typ m with
@@ -889,7 +889,7 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
 #ifdef VSA_DEBUG
           Format.eprintf "DBG MEET-CELL: addr denote ERROR\n%!";
 #endif
-          env
+          no_key env
         | Ok addr_ws ->
           (match bounded_cell_key addr_ws with
            | None ->
@@ -897,10 +897,10 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
              Format.eprintf "DBG MEET-CELL: no key from %a\n%!"
                WordSet.pp addr_ws;
 #endif
-             env
+             no_key env
            | Some key ->
              let res_size = Size.in_bits size in
-             if WordSet.bitwidth produced <> res_size then env
+             if WordSet.bitwidth produced <> res_size then no_key env
              else
                let mv = AI.find_memory k env m in
                let data = Mem.Val.create produced endian in
@@ -923,10 +923,10 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
                          ~p:(Mem.Val.data (Mem.find (res_size, endian) mv key))
                          ~cstr:produced);
 #endif
-               AI.add_memory env ~key:m
-                 ~data:(Mem.meet_range mv ~key ~data)))
-     | Type.Imm _ | Type.Unk -> env)
-  | _ -> env
+               (AI.add_memory env ~key:m
+                  ~data:(Mem.meet_range mv ~key ~data), Some key)))
+     | Type.Imm _ | Type.Unk -> no_key env)
+  | _ -> no_key env
 
 (* The edge step: the graph's completed cond constrained TRUE — the {1}
    lives here only. *)
@@ -1130,8 +1130,10 @@ let walk_block ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
 
 (* The acquisition's hypothetical: the constraint applies AS GIVEN,
    skipping the producer subtraction. *)
-let walk_block_raw ~entry ~landmarks ~witness ~seeds env blk =
-  walk ~raw:true ~entry ~landmarks ~witness ~seeds env blk
+let walk_block_raw ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks
+    ~witness ~seeds env blk =
+  walk ~raw:true ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
+    ~witness ~seeds env blk
 
 (* The deep walk: the guard block's defs backwards; leftover
    constraints and cell meets flow into the returned edge env. *)
@@ -1147,8 +1149,8 @@ let refine_edge ~(entry : AI.t)
    result DISCARDED: every empty meet records the excluded boundary +
    distance as the enclosing WTO cycle's widening landmark (words and
    memory cells alike). *)
-let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
-    ~(witness : env:AI.t -> exp -> bool)
+let acquire_unsat ~(rctx : Cbat_runctx.refine_ctx) ~(entry : AI.t)
+    ~(landmarks : Cbat_landmarks.t) ~(witness : env:AI.t -> exp -> bool)
     (env : AI.t) (blk : blk term) (disabled : exp) : unit =
   (* The raw walk pushes the disabled cond's constraints through the
      producers so the empty meets land on the counters. *)
@@ -1166,7 +1168,8 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
                 ~data:(WordSet.singleton Cbat_word.b1)
             | _ -> acc)
       else seeds in
-    ignore (walk_block_raw ~entry ~landmarks ~witness ~seeds:raw_seeds constrained blk)
+    ignore (walk_block_raw ~rctx ~entry ~landmarks ~witness
+              ~seeds:raw_seeds constrained blk)
   end
 
 let refine_edge_inline

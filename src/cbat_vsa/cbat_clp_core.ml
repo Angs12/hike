@@ -315,10 +315,6 @@ let elem (i : W.t) (p : t) : bool =
   assert (W.bitwidth i = bitwidth p);
   Option.value_map (nearest_pred i p) ~default:false ~f:(W.( = ) i)
 
-(* Top test via coprime step. *)
-let is_top (p : t) : bool = p = top (bitwidth p)
-
-
 (* Equivalence; faster than subset.  The structural comparison over
    the record's fields (all comparable words/directions), not the
    polymorphic hook. *)
@@ -330,6 +326,9 @@ let equal (p1 : t) (p2 : t) : bool =
     && W.equal p1.base p2.base
     && W.equal p1.step p2.step
     && W.equal p1.cardn p2.cardn
+
+(* Top test via the canonical top value. *)
+let is_top (p : t) : bool = equal p (top (bitwidth p))
 
 (* Rebase onto an extrema interval; [default] when the extrema give
    out (bottom). *)

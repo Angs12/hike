@@ -72,7 +72,7 @@ let denote_jump
        arm. *)
     Option.iter (Core.Map.find disabled (Term.tid jmp))
       ~f:(fun dc ->
-        Cbat_backward.acquire_unsat ~entry:env
+        Cbat_backward.acquire_unsat ~rctx ~entry:env
           ~landmarks:(rctx : Cbat_runctx.refine_ctx).rc_landmarks
           ~witness:(rctx : Cbat_runctx.refine_ctx).rc_nonneg
           env b dc);
