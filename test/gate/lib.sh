@@ -72,5 +72,28 @@ provenance_ok() {
     echo "       rebuild+reinstall from this tree, then re-run src/record_provenance.sh" >&2
     return 3
   fi
+  # The sources must match the record: a stale install (sources newer than
+  # the build) is a hard stop.
+  local rec_src src
+  rec_src="$(sed -n 's/^src_sha16: //p' "$prov")"
+  src="$(find "$tree/src" -name '*.ml' -o -name '*.mli' -o -name 'dune' \
+           | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)"
+  if [ "$rec_src" != "$src" ]; then
+    echo "FATAL: installed plugin sources differ from this tree ($rec_src != $src)" >&2
+    echo "       rebuild+reinstall from this tree, then re-run src/record_provenance.sh" >&2
+    return 4
+  fi
+  # And the installed objects must match the record: the analysis code lives
+  # in the sub-library objects, so the whole set is checked.
+  local libdir rec_bundle bundle
+  libdir="$(opam var lib 2>/dev/null)/hike"
+  rec_bundle="$(sed -n 's/^bundle_sha16: //p' "$prov")"
+  bundle="$( (cd "$libdir" && find . -name '*.cmxs' | sort | xargs sha256sum) \
+             | sha256sum | cut -c1-16)"
+  if [ "$rec_bundle" != "$bundle" ]; then
+    echo "FATAL: the installed plugin set does not match the record ($rec_bundle != $bundle)" >&2
+    echo "       another session may have reinstalled; reinstall from this tree" >&2
+    return 5
+  fi
   return 0
 }

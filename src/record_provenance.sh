@@ -22,7 +22,10 @@ fi
 TREE="$(cd "$(git rev-parse --show-toplevel)" && pwd)"
 GIT_DESC=$(git -C "$TREE" describe --always --dirty 2>/dev/null || echo unknown)
 SRC_HASH=$(find "$TREE/src" -name '*.ml' -o -name '*.mli' -o -name 'dune' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)
-BUNDLE_HASH=$(sha256sum "$PLUGIN_DST" | cut -c1-16)
+# The plugin SET: the top-level object plus the sub-library objects bap
+# loads with it (the analysis code lives in hike/cbat_vsa/*.cmxs).
+PLUGIN_DIR=$(dirname "$PLUGIN_DST")
+BUNDLE_HASH=$( (cd "$PLUGIN_DIR" && find . -name '*.cmxs' | sort | xargs sha256sum) | sha256sum | cut -c1-16)
 
 cat > "${PLUGIN_DST}.provenance" <<EOF
 # hike plugin provenance — written by src/record_provenance.sh at install time.

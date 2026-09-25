@@ -244,6 +244,7 @@ let () =
   Extension.declare (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
       Project.register_pass ~name:"filter" ~runonce:true pass_filter;
+      (* The ids every env key derives from. *)
       let vars = chain ~name:"vars" ~prev:"filter" pass_vars in
       let jump = chain ~name:"jump" ~prev:vars pass_jump in
       let split_mem = chain ~name:"split-mem" ~prev:jump pass_split_mem in
