@@ -312,22 +312,8 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
-  (* A block's last-def map is a per-walk fact; a split rewrites the
-     block that produced the word, so that entry drops. *)
-  let last_defs_cache : (Tid.t, def term Var.Map.t) Core.Hashtbl.t =
-    Core.Hashtbl.create (module Tid)
-  in
-  let last_defs_of blk =
-    let tid = Term.tid blk in
-    match Core.Hashtbl.find last_defs_cache tid with
-    | Some m -> m
-    | None ->
-      let m = Vsa.last_defs blk in
-      Core.Hashtbl.set last_defs_cache ~key:tid ~data:m;
-      m
-  in
   let dispatch_word block_addrs blk =
-    let last_defs = last_defs_of blk in
+    let last_defs = Vsa.last_defs blk in
     Base.List.find_map (Term.enum jmp_t blk |> Seq.to_list) ~f:(fun j ->
         match dispatch_target ~last_defs ~retaddr j with
         | None -> None
@@ -359,7 +345,6 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
         debug_trace (fun () -> "prepare: no missing word, done");
         (sub, block_addrs)
     | Some (blk, a, sub', t, entries) ->
-        Core.Hashtbl.remove last_defs_cache (Term.tid blk);
         debug_trace (fun () ->
             Printf.sprintf "prepare: split at %s -> tid %s"
               (Word.to_string a) (Tid.name t));
