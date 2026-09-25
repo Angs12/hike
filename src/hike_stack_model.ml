@@ -1,5 +1,5 @@
-
-(* A range carries its section, so merging across sections is impossible. *)
+(* The section vocabulary, denotation predicates, and the shared
+   stack/var/layout contracts used by the attribution and emitter. *)
 module Vocab = struct
   open! Core
 
@@ -36,10 +36,8 @@ end
 
 include Vocab
 
-(* The pure stack model: the VSA tags every frame-resident access with its
-   proven offset span; this module merges overlapping spans into regions
-   from those tags alone.  An oversized region joins to Frame with a
-   diagnostic naming it. *)
+(* The stack-position predicates and frame arithmetic shared by the
+   attribution, promotion, and emitter. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types
@@ -105,10 +103,14 @@ module Vsa = struct
      exactly one: the symbolic arm or the in-band plain arm (the band
      holds no real x86-64 address, so a plain word there is stack). *)
   let singleton_stack_position (ws : Cbat_vsa.WordSet.t) : int64 option =
-    match Cbat_vsa.WordSet.stack_bounds ws with
-    | Some (lo, hi) when Int64.equal lo hi ->
-        Cbat_vsa.Cbat_extraction.position_of_offset lo
-    | _ -> None
+    match Cbat_vsa.WordSet.stack_offsets ws with
+    | Some _ -> (
+        match positions_of_offsets ws with
+        | Some (lo, hi) when Int64.equal lo hi -> Some lo
+        | _ -> None)
+    | None ->
+        if Cbat_vsa.WordSet.in_stack_segment ws then singleton_i64 ws
+        else None
 
   (* The return-address fact and its projections: an address that denotes to
      the stack-symbolic singleton at the entry-RSP cell. *)

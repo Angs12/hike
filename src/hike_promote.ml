@@ -27,15 +27,7 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
       int64 option =
     match denote ~blk ?def e with
     | Error _ -> None
-    | Ok ws -> (
-        match Vsa.WordSet.stack_offsets ws with
-        | Some _ -> (
-            match Model.positions_of_offsets ws with
-            | Some (lo, hi) when Stdlib.Int64.equal lo hi -> Some lo
-            | _ -> None)
-        | None ->
-            if Vsa.WordSet.in_stack_segment ws then Model.singleton_i64 ws
-            else None)
+    | Ok ws -> Model.singleton_stack_position ws
   in
   let slot_of_start (a : int64) (d_sp : int64) : int option =
     let rel = Stdlib.Int64.sub a d_sp in
@@ -305,10 +297,9 @@ let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
 
 let promote_sub ~(abi : Hike_abi.t) (facts : facts)
     (sub : sub term) : sub term =
-  let callee_exempt = Hike_stack_model.fixed_signature sub in
   let word = abi.Hike_abi.word in
-  let sub =
-    if callee_exempt then sub
+  let with_signature sub =
+    if Hike_stack_model.fixed_signature sub then sub
     else
       (* Promotion defines the sub's whole argument convention: the
          slots in signature order replace the sub's args. *)
@@ -319,7 +310,7 @@ let promote_sub ~(abi : Hike_abi.t) (facts : facts)
       in
       Model.set_sig sub slots
   in
-  resolve_targets ~resolved:facts.prom_resolved sub
+  resolve_targets ~resolved:facts.prom_resolved (with_signature sub)
 
 
 (* The tree's Arg_slot member defs, minus the demoted slots. *)
@@ -327,16 +318,21 @@ let slot_defs_of ~(demoted : int list) (tree : Sections.sub_tree) :
     int Tid.Map.t * int =
   let bindings = Sections.Tree.to_sequence tree |> Seq.to_list in
   let slots, arity =
-    Base.List.fold bindings ~init:(Tid.Map.empty, -1) ~f:(fun (m, mx) (_, rs) ->
+    Base.List.fold bindings ~init:(Tid.Map.empty, None)
+      ~f:(fun (m, mx) (_, rs) ->
         match rs.storage with
         | Arg_slot i when not (Base.List.mem demoted i ~equal:Int.equal) ->
             Base.List.fold rs.members ~init:(m, mx) ~f:(fun (m, mx) mm ->
                 match mm.m_def with
-                | Some dtid -> (Core.Map.set m ~key:dtid ~data:i, Int.max mx i)
+                | Some dtid ->
+                    ( Core.Map.set m ~key:dtid ~data:i,
+                      (match mx with
+                       | Some n -> Some (Int.max n i)
+                       | None -> Some i) )
                 | None -> (m, mx))
         | _ -> (m, mx))
   in
-  (slots, if arity < 0 then 0 else arity + 1)
+  (slots, match arity with Some i -> i + 1 | None -> 0)
 
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
