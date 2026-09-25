@@ -145,14 +145,14 @@ let st_pre (sub : sub term) (blk0 : blk term) (blk1 : blk term) : AI.t =
 
 let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
   match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with
-  | Some k ->
+  | [ k ] ->
       Mem.Val.data
         (Mem.find (64, LittleEndian)
            (AI.find_memory
               { Mem.addr_width = 64; Mem.addressable_width = 8 }
               ai m)
            k)
-  | None -> assert false
+  | _ -> assert false
 
 (* The full-span claim shapes. *)
 let plain (t, ps) =

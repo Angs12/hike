@@ -63,7 +63,9 @@ let straight_sub (name : string) (defs : def term list) : sub term =
 
 (* Mem fixture: a singleton map holding one key/data cell. *)
 let key_of ws =
-  match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of"
+  match Mem.Key.of_wordset ws with
+  | [ k ] -> k
+  | _ -> failwith "key_of"
 
 let mk_mem ~key ~data =
   let k = key_of key in

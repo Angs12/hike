@@ -13,8 +13,8 @@ let opadd_axis = { Mem.addr_width = 32; Mem.addressable_width = 8 }
 
 let opadd_key_of ws =
   match Mem.Key.of_wordset ws with
-  | Some k -> k
-  | None -> failwith "opadd key_of: of_wordset None"
+  | [ k ] -> k
+  | _ -> failwith "key"
 
 let point c = opadd_key_of (Ws.singleton (w32 c))
 let range lo hi = opadd_key_of (Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi)))
@@ -191,15 +191,18 @@ let tests : unit Alcotest.test list =
           && Ws.is_top (read32 m 23)));
 
     pin "MAP-20"
-      "opadd-d1: a circular WordSet -> Key.of_wordset is the FULL span [0, 0xFFFFFFFF] (lo 0 = {7}, \
-       interior 0x50 and 0xFFFFFFF0 are misaligned top)"
+      "opadd-d1: a wrapped-interval WordSet fans per piece — both arcs carry the \
+       fact (lo 0 = {7}, hi 0xFFFFFFF0 = {7}), the true interior 0x50 is top"
       (fun () ->
         let wrap_ws = Ws.of_clp (Clp.interval ~width:32 (w32 0xFFFFFFF0) (w32 0x0F)) in
-        let m = Mem.meet_add empty ~key:(opadd_key_of wrap_ws) ~data:(cell 7) in
+        let m =
+          Base.List.fold (Mem.Key.of_wordset wrap_ws) ~init:empty
+            ~f:(fun m k -> Mem.meet_add m ~key:k ~data:(cell 7))
+        in
         check "MAP-20"
           (Ws.equal (read32 m 0) (Ws.singleton (w32 7))
           && Ws.is_top (read32 m 0x50)
-          && Ws.is_top (read32 m 0xFFFFFFF0)));
+          && Ws.equal (read32 m 0xFFFFFFF0) (Ws.singleton (w32 7))));
 
     pin "MAP-21"
       "opadd-d2: a key with hi = 0xFFFFFFFF — the finishing gap terminates at max (lo 10 = {1}; no \

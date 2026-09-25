@@ -125,27 +125,32 @@ let overlap (k1 : t) (k2 : t) : bool =
 
 (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
      the shared base makes the offset the per-sub cell identity.  A
-     plain denotation keys by its segment-relative hull or its own
-     extrema.  The stride is the denotation's own bounded progression. *)
-let of_wordset (p : WordSet.t) : t option =
-    let lo_w, hi_w =
-      match WordSet.stack_offsets p with
-      | Some offs -> (WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs)
-      | None ->
-        (match WordSet.stack_bounds p with
-         | Some (lo, hi) ->
-           let w i = Cbat_word.of_word (Word.of_int64 ~width:64 i) in
-           (Some (w lo), Some (w hi))
-         | None -> (WordSet.min_elem p, WordSet.max_elem p))
-    in
-    let stride = WordSet.stride p in
-    let open Monads.Std.Monad.Option.Syntax in
-    lo_w >>= fun lo_w ->
-    hi_w >>= fun hi_w ->
-    (match of_word lo_w, of_word hi_w with
-     | Some lo, Some hi when le lo hi -> Some {lo; hi; step = stride}
-     | Some lo, Some hi -> Some {lo = hi; hi = lo; step = stride}
-     | _ -> None)
+     plain denotation keys by its segment-relative pieces or its own.
+   The key FANS OUT per piece: each entry names one piece's line, the
+   stride is that piece's own bounded progression, and every fanned
+   entry stores the full value (the tree stays single-keyed). *)
+let of_wordset (p : WordSet.t) : t list =
+  let open Monads.Std.Monad.Option.Syntax in
+  let of_piece (q : WordSet.Clp.t) : t option =
+    let stride =
+      if WordSet.Clp.is_infinite q then 1
+      else
+        match Cbat_word.to_int64 (WordSet.Clp.step_of q) with
+        | Ok i when Stdlib.Int64.compare i 1L > 0
+                    && Stdlib.Int64.compare i
+                         (Stdlib.Int64.of_int Stdlib.max_int) <= 0 ->
+          Stdlib.Int64.to_int i
+        | _ -> 1 in
+    WordSet.Clp.min_elem q >>= fun lo_w ->
+    WordSet.Clp.max_elem q >>= fun hi_w ->
+    of_word lo_w >>= fun lo ->
+    of_word hi_w >>= fun hi ->
+    if le lo hi then Some {lo; hi; step = stride}
+    else Some {lo = hi; hi = lo; step = stride}
+  in
+  match WordSet.address_pieces p with
+  | None -> []
+  | Some ps -> List.filter_map (WordSet.Clp.Pieces.to_list ps) ~f:of_piece
 
 (* Hull of both inputs. *)
 let union (k1 : t) (k2 : t) : t =
@@ -168,21 +173,20 @@ let read_aligned ~(bits : int) ~(step : int) (c : point) (q : point) : bool =
     else aligned_mod c q bits
 
 
-type 'a up_to_two = [`none | `one of 'a | `two of 'a * 'a]
-
 (* Results may be unordered. *)
-let interval_diff (k1 : t) (k2 : t) : t up_to_two =
-    if lt (lower k1) (lower k2) then
-      if lt (upper k1) (lower k2) then `one k1
-      else if contains k2 (upper k1) then
-        `one (piece k1 ~lo:k1.lo ~hi:(pred k2.lo))
-      else `two (piece k1 ~lo:k1.lo ~hi:(pred k2.lo),
-                 piece k1 ~lo:(succ k2.hi) ~hi:k1.hi)
-    else if contains k2 (lower k1) then
-      if gt (upper k1) (upper k2) then
-        `one (piece k1 ~lo:(succ k2.hi) ~hi:k1.hi)
-      else `none
-    else `one k1 (* disjoint *)
+let interval_diff (k1 : t) (k2 : t) : t list =
+  if lt (lower k1) (lower k2) then
+    if lt (upper k1) (lower k2) then [ k1 ]
+    else if contains k2 (upper k1) then
+      [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo) ]
+    else
+      [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo);
+        piece k1 ~lo:(succ k2.hi) ~hi:k1.hi ]
+  else if contains k2 (lower k1) then
+    if gt (upper k1) (upper k2) then
+      [ piece k1 ~lo:(succ k2.hi) ~hi:k1.hi ]
+    else []
+  else [ k1 ] (* disjoint *)
 
 (* Gaps between cells within [k]. *)
 let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =

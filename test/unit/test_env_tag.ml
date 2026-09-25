@@ -165,8 +165,8 @@ let tests : unit Alcotest.test list =
           Mem.add (Mem.top mem_idx)
             ~key:
               (match Mem.Key.of_wordset (Ws.singleton addr_w) with
-              | Some k -> k
-              | None -> assert false)
+              | [ k ] -> k
+              | _ -> failwith "key")
             ~data:
               (Mem.Val.create
                  (Ws.singleton (Cbat_word.of_int ~width:32 7))

@@ -709,8 +709,8 @@ let tests : unit Alcotest.test list =
         let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
         let key =
           match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
-          | Some k -> k
-          | None -> failwith "T5-1: bad key"
+          | [ k ] -> k
+  | _ -> failwith "key"
         in
         let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
         let wide_mem =
@@ -773,8 +773,8 @@ let tests : unit Alcotest.test list =
         let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
         let key_of w =
           match Mem.Key.of_wordset (Ws.singleton (w64 w)) with
-          | Some k -> k
-          | None -> failwith "T5-2: bad key"
+          | [ k ] -> k
+  | _ -> failwith "key"
         in
         let k16 = key_of (-16) and k8 = key_of (-8) in
         let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
@@ -1047,8 +1047,8 @@ let tests : unit Alcotest.test list =
         let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
         let key =
           match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
-          | Some k -> k
-          | None -> failwith "F1-B4: bad key"
+          | [ k ] -> k
+  | _ -> failwith "key"
         in
         let wide_mem =
           Mem.add

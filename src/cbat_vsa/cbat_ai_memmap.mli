@@ -25,7 +25,7 @@ module Key : sig
   val t_of_sexp : Sexp.t -> t
   val sexp_of_t : t -> Sexp.t
 
-  val of_wordset : WordSet.t -> t option
+  val of_wordset : WordSet.t -> t list
 
   (* The cell's stride: > 1 for a bounded strided address progression,
      1 for a plain hull. *)

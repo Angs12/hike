@@ -334,8 +334,15 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     | Some ws -> return_imm ws
     | None ->
       if WordSet.splits_by addr (Cbat_word.of_int ~width:res_size (Size.in_bytes s))
-      then Option.value_map ~default:(return_imm @@ WordSet.bottom res_size) (Mem.Key.of_wordset addr)
-          ~f:(fun k -> Mem.find (res_size, e) mv k |> Mem.Val.data |> return_imm)
+      then
+        (match Mem.Key.of_wordset addr with
+         | [] -> return_imm @@ WordSet.bottom res_size
+         | ks ->
+           return_imm
+           @@ Base.List.fold ks ~init:(WordSet.bottom res_size)
+                ~f:(fun acc k ->
+                    WordSet.join acc
+                      (Mem.find (res_size, e) mv k |> Mem.Val.data)))
       else return_imm @@ WordSet.top res_size)
   | Bil.Store (m, a, u, e, s) ->
     Type.infer u >>= fun u_typ ->
@@ -355,8 +362,9 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     let v' = if WordSet.splits_by addr (Cbat_word.of_int ~width:sz (Size.in_bytes s))
       then v else WordSet.top sz in
     let data = Mem.Val.create v' e in
-    return_mem @@ Option.value_map ~default:mv (Mem.Key.of_wordset addr)
-      ~f:(fun key -> Mem.add mv ~key ~data)
+    return_mem
+      @@ Base.List.fold (Mem.Key.of_wordset addr) ~init:mv
+           ~f:(fun mv key -> Mem.add mv ~key ~data)
   | Bil.Ite (cond, yes, no) ->
     denote_exp cond env >>= val_as_imm >>= fun condv ->
     denote_exp yes env >>= fun yesv ->

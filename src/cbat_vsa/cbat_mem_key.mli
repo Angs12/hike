@@ -38,12 +38,12 @@ val cell_key : t -> Cbat_landmarks.Cell_key.t
 val combined_step : t -> t -> int
 val covers : t -> t -> bool
 val piece : t -> lo:point -> hi:point -> t
-type 'a up_to_two = [`none | `one of 'a | `two of 'a * 'a]
-
-val interval_diff : t -> t -> t up_to_two
+val interval_diff : t -> t -> t list
 val gaps : 'a -> t -> (t * 'a) seq -> (t * 'a) seq
 val overlap : t -> t -> bool
-val of_wordset : Cbat_clp_set_composite.t -> t option
+(* One key per piece of the value's address line (capped at the piece
+   union's cap); every fanned entry stores the full value. *)
+val of_wordset : Cbat_clp_set_composite.t -> t list
 val union : t -> t -> t
 val intersection : t -> t -> t
 val read_aligned : bits:int -> step:int -> point -> point -> bool

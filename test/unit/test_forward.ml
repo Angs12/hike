@@ -60,7 +60,7 @@ let tests : unit Alcotest.test list =
         in
         let pre = Vsa.Test_seam.denote_defs entry_blk' AI.top in
         let mkey =
-          match Mem.Key.of_wordset (Ws.singleton (w64 0xd0)) with Some k -> k | None -> assert false
+          match Mem.Key.of_wordset (Ws.singleton (w64 0xd0)) with [ k ] -> k | _ -> assert false
         in
         let pre_val =
           Mem.Val.data
@@ -306,7 +306,7 @@ let tests : unit Alcotest.test list =
           let st = env_with_addrs [ w64 0x4000 ] in
           let mv = AI.find_memory k st m in
           let key =
-            match Mem.Key.of_wordset cell_addr with Some k' -> k' | None -> assert false
+            match Mem.Key.of_wordset cell_addr with [ k' ] -> k' | _ -> assert false
           in
           let mv' = Mem.add mv ~key ~data:(Mem.Val.create stored LittleEndian) in
           AI.add_memory st ~key:m ~data:mv'

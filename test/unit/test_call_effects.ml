@@ -15,8 +15,8 @@ let ce_idx = { Mem.addr_width = 64; Mem.addressable_width = 8 }
 
 let ce_mkey lo =
   match Mem.Key.of_wordset (Ws.singleton (w64 lo)) with
-  | Some k -> k
-  | None -> assert false
+  | [ k ] -> k
+  | _ -> failwith "key"
 
 let ce_reads m lo post =
   Mem.Val.data (Mem.find (64, LittleEndian) (AI.find_memory ce_idx post m) (ce_mkey lo))
@@ -258,8 +258,8 @@ let tests : unit Alcotest.test list =
         let m0 = memv "c1_m0" in
         let mkey =
           match Mem.Key.of_wordset (Ws.singleton (w64 0x10)) with
-          | Some k -> k
-          | None -> assert false
+          | [ k ] -> k
+  | _ -> failwith "key"
         in
         let mem =
           Mem.add

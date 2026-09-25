@@ -54,6 +54,12 @@ val stack_word_i64 : int64 -> t
    symbolic arm; a plain in-band set is None. *)
 val stack_offsets : t -> Cbat_clp.t option
 
+(* The address pieces a memory key fans over: the symbolic offsets'
+   piece union, a plain in-band value's segment-relative translation,
+   or a plain out-of-band value's own pieces.  None when the value
+   names no bounded address line. *)
+val address_pieces : t -> Cbat_clp.Pieces.t option
+
 (* The set's own address stride: > 1 only for a bounded strided Clp or
    stack-offset progression; 1 otherwise. *)
 val stride : t -> int

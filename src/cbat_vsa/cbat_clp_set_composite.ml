@@ -661,6 +661,29 @@ let stack_offsets (t : t) : Clp.t option =
      | None -> Some (Clp.bottom 64))
   | _ -> None
 
+(* The address pieces a memory key fans over: the symbolic offsets'
+   piece union, a plain in-band value's segment-relative translation,
+   or a plain out-of-band value's own pieces.  None when the value
+   names no bounded address line. *)
+let address_pieces (t : t) : P.t option =
+  match t with
+  | [ StackOff offs ] -> Some offs
+  | _ ->
+    (match stack_extrema t with
+     | Some (lo, hi) ->
+       (match relative_bounds lo hi with
+        | Some (rlo, rhi) ->
+          Some
+            (P.of_progression
+               (Clp.interval ~width:64 (w64_of_i64 rlo) (w64_of_i64 rhi)))
+        | None -> None)
+     | None ->
+       (* Out-of-band plain: its own absolute pieces. *)
+       (match t with
+        | [ Clp ps ] -> Some ps
+        | [ FinSet s ] -> Some (pieces_of_finset s)
+        | _ -> None))
+
 (* The value's own address stride: > 1 only when every piece shares one
    bounded stride; everything else is 1. *)
 let stride (t : t) : int =

@@ -301,10 +301,8 @@ let op_add' ~(op : Val.t -> Val.t -> Val.t)
         else IT.add rest k_int new_data
       in
       (* Non-overlapping ranges. *)
-      match Key.interval_diff k' k with
-      | `none -> rest
-      | `one k1 -> IT.add rest k1 d'
-      | `two (k1, k2) -> IT.add (IT.add rest k1 d') k2 d'
+      List.fold (Key.interval_diff k' k) ~init:rest
+        ~f:(fun rest k1 -> IT.add rest k1 d')
     end in
   (* One coalesce per store: top pieces drop, adjacent equal-data
      pieces merge — the tree stays tight between joins. *)

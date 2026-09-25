@@ -33,13 +33,13 @@ let () =
   let idx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
   let key_range lo hi =
     match Mem.Key.of_wordset (Ws.of_clp (Clp.interval ~width:32 (w32 lo) (w32 hi))) with
-    | Some k -> k
-    | None -> failwith "key_range"
+    | [ k ] -> k
+    | _ -> failwith "key_range"
   in
   let point c =
     match Mem.Key.of_wordset (Ws.singleton (w32 c)) with
-    | Some k -> k
-    | None -> failwith "point"
+    | [ k ] -> k
+    | _ -> failwith "point"
   in
   let cell v = Mem.Val.create (Ws.singleton (w32 v)) LittleEndian in
   let data_at m c =

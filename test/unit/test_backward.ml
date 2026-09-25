@@ -32,7 +32,7 @@ let t_m = Var.create ~is_virtual:false ~fresh:false "t_m" (Type.Mem (`r64, `r8))
 let t_mem_idx = { Mem.addr_width = 64; Mem.addressable_width = 8 }
 
 let t_key_of (ws : Ws.t) =
-  match Mem.Key.of_wordset ws with Some k -> k | None -> failwith "key_of"
+  match Mem.Key.of_wordset ws with [ k ] -> k | _ -> failwith "key_of"
 
 let t_add_cell st addr_ws data =
   let mv = AI.find_memory t_mem_idx st t_m in

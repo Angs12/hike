@@ -709,8 +709,8 @@ let cell_meet_diff ~(ckey : string) ~(pre : wordset) ~(cstr : wordset)
 (* The cell key a backward meet may name: only a bounded address set
    denotes the cell a trace reads.  An unbounded address names no cell,
    so its constraint must stay identity rather than narrow every cell. *)
-let bounded_cell_key (ws : wordset) : Mem.Key.t option =
-  if WordSet.is_top ws || WordSet.is_infinite ws then None
+let bounded_cell_key (ws : wordset) : Mem.Key.t list =
+  if WordSet.is_top ws || WordSet.is_infinite ws then []
   else Mem.Key.of_wordset ws
 
 let rec constrain_operands ~(env : AI.t)
@@ -788,7 +788,7 @@ let rec constrain_operands ~(env : AI.t)
      | Bil.Var mv ->
        (match denote_imm_exp a env with
         | Ok aws ->
-          Option.iter (bounded_cell_key aws)
+          List.iter (bounded_cell_key aws)
             ~f:(fun k ->
                cells := { pc_mem = mv; pc_key = k; pc_cstr = produced } :: !cells)
         | Error _ -> ())
@@ -803,16 +803,18 @@ let rec constrain_operands ~(env : AI.t)
         | [] -> env
         | pending ->
           let res_size = Size.in_bits s in
-          let ks = Option.bind (Base.Result.ok (denote_imm_exp a env)) ~f:bounded_cell_key in
+          let ks =
+            Base.Result.ok (denote_imm_exp a env)
+            |> Base.Option.value_map ~default:[] ~f:bounded_cell_key in
           (match ks with
-           | None -> env
-           | Some ks ->
+           | [] -> env
+           | ks ->
              let rec take pending = match pending with
                | [] -> None
                | cell :: rest ->
                  if Var.same cell.pc_mem mv
                     && WordSet.bitwidth cell.pc_cstr = res_size
-                    && Mem.Key.overlap ks cell.pc_key
+                    && List.exists ks ~f:(fun k -> Mem.Key.overlap k cell.pc_key)
                  then Some (cell, rest)
                  else
                    (match take rest with
@@ -924,39 +926,44 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
           env
         | Ok addr_ws ->
           (match bounded_cell_key addr_ws with
-           | None ->
+           | [] ->
 #ifdef VSA_DEBUG
              Format.eprintf "DBG MEET-CELL: no key from %a\n%!"
                WordSet.pp addr_ws;
 #endif
              env
-           | Some key ->
+           | keys ->
              let res_size = Size.in_bits size in
              if WordSet.bitwidth produced <> res_size then env
              else
                let mv = AI.find_memory k env m in
                let data = Mem.Val.create produced endian in
 #ifdef VSA_DEBUG
-               let pre = Mem.Val.data (Mem.find (res_size, endian) mv key) in
-               if Cbat_landmarks.observe_unsat_cell landmarks
-                    ~cell:(Mem.Key.cell_key key) ~p:pre ~cstr:produced
-               then incr Stages.cell_lm_recorded;
-               let res = WordSet.meet pre produced in
-               if not (WordSet.equal res pre) then
-                 cell_meet_diff
-                   ~ckey:(Sexp.to_string (Mem.Key.sexp_of_t key))
-                   ~pre ~cstr:produced ~res;
-               Format.eprintf "DBG MEET-CELL: meet %a into key %s\n%!"
-                 WordSet.pp produced
-                 (Sexp.to_string (Mem.Key.sexp_of_t key));
+               List.iter keys ~f:(fun key ->
+                   let pre =
+                     Mem.Val.data (Mem.find (res_size, endian) mv key) in
+                   if Cbat_landmarks.observe_unsat_cell landmarks
+                        ~cell:(Mem.Key.cell_key key) ~p:pre ~cstr:produced
+                   then incr Stages.cell_lm_recorded;
+                   let res = WordSet.meet pre produced in
+                   if not (WordSet.equal res pre) then
+                     cell_meet_diff
+                       ~ckey:(Sexp.to_string (Mem.Key.sexp_of_t key))
+                       ~pre ~cstr:produced ~res;
+                   Format.eprintf "DBG MEET-CELL: meet %a into key %s\n%!"
+                     WordSet.pp produced
+                     (Sexp.to_string (Mem.Key.sexp_of_t key)));
 #else
-               ignore (Cbat_landmarks.observe_unsat_cell landmarks
-                         ~cell:(Mem.Key.cell_key key)
-                         ~p:(Mem.Val.data (Mem.find (res_size, endian) mv key))
-                         ~cstr:produced);
+               List.iter keys ~f:(fun key ->
+                   ignore (Cbat_landmarks.observe_unsat_cell landmarks
+                             ~cell:(Mem.Key.cell_key key)
+                             ~p:(Mem.Val.data
+                                   (Mem.find (res_size, endian) mv key))
+                             ~cstr:produced));
 #endif
                AI.add_memory env ~key:m
-                 ~data:(Mem.meet_range mv ~key ~data)))
+                 ~data:(List.fold keys ~init:mv
+                          ~f:(fun mv key -> Mem.meet_range mv ~key ~data))))
      | Type.Imm _ | Type.Unk -> env)
   | _ -> env
 

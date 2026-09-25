@@ -26,6 +26,10 @@ let eq_delta v w j =
     Var.equal v' v && Int64.equal (Word.to_int64_exn w') w
   | _ -> false
 
+(* [of_wordset] fans: the pinned fixtures are single-piece address lines. *)
+let check_key1 name ks f =
+  check name (match ks with [ k ] -> f k | _ -> false)
+
 let tests : unit Alcotest.test list =
   [
     (* T4-RES: the target-resolution predicate's four classes. *)
@@ -532,9 +536,10 @@ let tests : unit Alcotest.test list =
        the load's ADDRESS denotation (the entry-RSP cell). *)
     pin "RES-17" "RET-ND1: the entry-RSP cell is keyable"
       (fun () ->
-        check_bound "RES-17"
-          (Mem.Key.of_wordset (Ws.stack_word_i64 0L))
-          (fun _ -> true));
+        check "RES-17"
+          (match Mem.Key.of_wordset (Ws.stack_word_i64 0L) with
+           | [ _ ] -> true
+           | _ -> false));
 
     pin "RES-18" "RET-ND1: the seeded [RSP] load is the retaddr read"
       (fun () ->
@@ -552,9 +557,9 @@ let tests : unit Alcotest.test list =
                       (Call (Call.create ~target:(Indirect (Bil.Var j5_ra)) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        check_bound "RES-18"
-          (Mem.Key.of_wordset (Ws.stack_word_i64 0L))
-          (fun k ->
+        check "RES-18"
+          (match Mem.Key.of_wordset (Ws.stack_word_i64 0L) with
+           | [ k ] ->
             let entry =
               AI.add_memory (anchored_entry ()) ~key:j5_m
                 ~data:
@@ -571,7 +576,8 @@ let tests : unit Alcotest.test list =
             let retaddr5 =
               Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol j5
             in
-            Core.Set.mem retaddr5 (Term.tid j5_ld)));
+            Core.Set.mem retaddr5 (Term.tid j5_ld)
+           | _ -> false));
 
     pin "RES-19"
       "RET-ND1: a bounded retaddr target is not a dispatch (no raise, no growth)"
@@ -590,7 +596,7 @@ let tests : unit Alcotest.test list =
                       (Call (Call.create ~target:(Indirect (Bil.Var j5_ra)) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        check_bound "RES-19"
+        check_key1 "RES-19"
           (Mem.Key.of_wordset (Ws.stack_word_i64 0L))
           (fun k ->
             let entry =
@@ -635,7 +641,7 @@ let tests : unit Alcotest.test list =
                       (Call (Call.create ~target:(Indirect (Bil.Var j5_ra)) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        check_bound "RES-20"
+        check_key1 "RES-20"
           (Mem.Key.of_wordset (Ws.stack_word_i64 0L))
           (fun k ->
             let entry =
