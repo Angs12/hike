@@ -9,14 +9,14 @@ module Mem = Cbat_ai_memmap
 module WordSet = Cbat_clp_set_composite
 
 type site = {
-  summary : Var.Set.t option;
+  summary : Int.Set.t option;
   written_lanes : var list;
   pushed : bool;
 }
 
 let indirect_summary ~(lookup : int64 -> Tid.t option)
-    ~(summary_of : Tid.t -> Var.Set.t option) ~(env : AI.t)
-    (texp : exp) : Var.Set.t option =
+    ~(summary_of : Tid.t -> Int.Set.t option) ~(env : AI.t)
+    (texp : exp) : Int.Set.t option =
   match Cbat_transfer.denote_imm_exp texp env with
   | Error _ -> None
   | Ok ws ->
@@ -42,7 +42,7 @@ let range_of (ws : WordSet.t) : (word * word) option =
    at keys at/above the HIGHEST possible call-time RSP survive every
    call site; the whole-memory top stays the sound fallback on any
    doubt. *)
-let frame_keep ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
+let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =
 #ifdef VSA_DEBUG
   Cbat_attr_census.bump "call.frame";
@@ -70,7 +70,7 @@ let frame_keep ~(preserved : Var.Set.t) ~(rsp : WordSet.t)
 #endif
     AI.top_memories env
 
-let transfer ~(abi : Hike_abi.t) ~(preserved : Var.Set.t) ~(site : site)
+let transfer ~(abi : Hike_abi.t) ~(preserved : Int.Set.t) ~(site : site)
     (env : AI.t) : AI.t =
   let word_bits = Hike_abi.word_bits abi in
   let rsp = abi.Hike_abi.sp in
@@ -82,11 +82,12 @@ let transfer ~(abi : Hike_abi.t) ~(preserved : Var.Set.t) ~(site : site)
     | Some ws ->
       Base.List.fold abi.Hike_abi.caller_saved_gprs
         ~init:preserved ~f:(fun acc v ->
-            if Core.Set.mem ws v then acc
+            let id = Cbat_var_id.intern v in
+            if Core.Set.mem ws id then acc
             else if
               Base.List.exists abi.Hike_abi.return_regs ~f:(Var.same v)
             then acc
-            else Core.Set.add acc v)
+            else Core.Set.add acc id)
     | None -> preserved
   in
   (* The escape: the registers the call block wrote. *)

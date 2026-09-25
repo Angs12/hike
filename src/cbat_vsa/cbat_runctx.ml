@@ -36,7 +36,7 @@ type fix_state = {
 type block_facts = {
   bf_term : blk term;
   bf_call_facts : var list * bool;
-  bf_live_in : Var.Set.t;
+  bf_live_ids : Int.Set.t;
 }
 
 type refine_ctx = {
@@ -185,9 +185,10 @@ let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
           ~data:{
             bf_term = b;
             bf_call_facts = call_facts_of_block ~abi b;
-            bf_live_in =
-              Option.value ~default:Var.Set.empty
-                (Core.Map.find live (Term.tid b)) });
+            bf_live_ids =
+              Cbat_var_id.intern_set
+                (Option.value ~default:Var.Set.empty
+                   (Core.Map.find live (Term.tid b))) });
 }
 
 let ver_of (rc : refine_ctx) (t : Tid.t) : int =

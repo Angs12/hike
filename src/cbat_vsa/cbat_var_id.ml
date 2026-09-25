@@ -50,3 +50,7 @@ let reset () : unit =
   vars := Base.Array.create ~len:256 None;
   bases := Base.Array.create ~len:256 (-1);
   virtuals := Base.Array.create ~len:256 false
+
+let intern_set (vs : Var.Set.t) : Core.Int.Set.t =
+  Core.Set.fold vs ~init:(Core.Set.empty (module Core.Int))
+    ~f:(fun acc v -> Core.Set.add acc (intern v))

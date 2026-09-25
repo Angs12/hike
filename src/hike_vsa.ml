@@ -33,7 +33,7 @@ let written_regs_of_sub (sub : sub term) : Var.Set.t =
       | _ -> acc)
 
 let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
-    Var.Set.t option Tid.Map.t =
+    Core.Int.Set.t option Tid.Map.t =
   let subs = Hike_stack_model.sub_map prog in
   let reads_retaddr (rhs : exp) : bool =
     Base.Option.value_map (Model.addr_of_rhs rhs) ~default:false
@@ -95,7 +95,10 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
   in
   Term.enum sub_t prog
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
-      Core.Map.set m ~key:(Term.tid s) ~data:(summary ~visited:(Tid.Set.empty : Tid.Set.t) s))
+      Core.Map.set m ~key:(Term.tid s)
+        ~data:(Base.Option.map
+                 ~f:Cbat_var_id.intern_set
+                 (summary ~visited:(Tid.Set.empty : Tid.Set.t) s)))
 
 (* One computation per program, at the pass_vsa boundary; the fixpoint
    consumes the summaries per phase. *)
@@ -113,7 +116,7 @@ let fixpoint (target : Theory.Target.t)
     ~(lookup : lookup_fn)
     ~(symtab : Symtab.t option)
     ~(images : Vsa.section_image list)
-    ~(written : Var.Set.t option Tid.Map.t)
+    ~(written : Core.Int.Set.t option Tid.Map.t)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     (sub : sub term) :

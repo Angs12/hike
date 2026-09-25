@@ -22,6 +22,9 @@ let ce_reads m lo post =
   Mem.Val.data (Mem.find (64, LittleEndian) (AI.find_memory ce_idx post m) (ce_mkey lo))
 
 (* The two leading non-return caller-saved GPRs. *)
+let ids vs = Cbat_var_id.intern_set vs
+let ids1 v = ids (Var.Set.singleton v)
+
 let ce_gprs abi =
   let not_return v = not (Base.List.exists abi.Hike_abi.return_regs ~f:(Var.same v)) in
   match Base.List.filter abi.Hike_abi.caller_saved_gprs ~f:not_return with
@@ -76,7 +79,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let g1, g2 = ce_gprs ce_abi in
         let x = v64 "ce_x" in
-        let summary = Core.Set.singleton (module Var) g1 in
+        let summary = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g1) in
         let words_env =
           AI.add_word
             (AI.add_word AI.top ~key:g1 ~data:(Ws.singleton (w64 1)))
@@ -84,7 +87,7 @@ let tests : unit Alcotest.test list =
             ~data:(Ws.singleton (w64 2))
         in
         let kept =
-          Ce.transfer ~abi:ce_abi ~preserved:(Var.Set.singleton x)
+          Ce.transfer ~abi:ce_abi ~preserved:(ids1 x)
             ~site:{ Ce.summary = Some summary; written_lanes = []; pushed = false }
             (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5)))
         in
@@ -105,7 +108,7 @@ let tests : unit Alcotest.test list =
             ~data:(Ws.singleton (w64 2))
         in
         let killed =
-          Ce.transfer ~abi:ce_abi ~preserved:(Var.Set.singleton x)
+          Ce.transfer ~abi:ce_abi ~preserved:(ids1 x)
             ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
             (AI.add_word words_env ~key:x ~data:(Ws.singleton (w64 5)))
         in
@@ -119,7 +122,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let e, m = ce_raw_env () in
         let kept_frame =
-          Ce.transfer ~abi:ce_abi ~preserved:Var.Set.empty
+          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
             ~site:{ Ce.summary = None; written_lanes = []; pushed = false } e
         in
         check "CE-03"
@@ -133,7 +136,7 @@ let tests : unit Alcotest.test list =
         let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
         let e, m = ce_raw_env ~lanes:[ rdi ] () in
         let escaped =
-          Ce.transfer ~abi:ce_abi ~preserved:Var.Set.empty
+          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
             ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false } e
         in
         check "CE-04"
@@ -143,7 +146,7 @@ let tests : unit Alcotest.test list =
     (* A pushed site's SP gains one word — the popped retaddr. *)
     pin "CE-05" "a pushed site's SP gains one word — the popped retaddr" (fun () ->
         let restored =
-          Ce.transfer ~abi:ce_abi ~preserved:Var.Set.empty
+          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
             ~site:{ Ce.summary = None; written_lanes = []; pushed = true }
             (AI.add_word AI.top ~key:ce_abi.Hike_abi.sp
                ~data:(Ws.singleton (w64 0x1000)))
@@ -156,7 +159,7 @@ let tests : unit Alcotest.test list =
         let trap_env, _ = ce_raw_env () in
         let trap =
           Ce.transfer ~abi:ce_abi
-            ~preserved:(Var.Set.singleton ce_abi.Hike_abi.sp)
+            ~preserved:(ids1 ce_abi.Hike_abi.sp)
             ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
             trap_env
         in
@@ -169,7 +172,7 @@ let tests : unit Alcotest.test list =
         let trap_env, m_trap = ce_raw_env () in
         let trap_frame =
           Ce.transfer ~abi:ce_abi
-            ~preserved:(Var.Set.singleton ce_abi.Hike_abi.sp)
+            ~preserved:(ids1 ce_abi.Hike_abi.sp)
             ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
             trap_env
         in
@@ -183,7 +186,7 @@ let tests : unit Alcotest.test list =
         let tgt = v64 "ce_tgt" in
         let sub_tid = Tid.create () in
         let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
-        let gs = Core.Set.singleton (module Var) g in
+        let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
         let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
         let summary_of t = if Tid.equal t sub_tid then Some gs else None in
         let bounded =
@@ -191,7 +194,7 @@ let tests : unit Alcotest.test list =
         in
         check "CE-08"
           (match Ce.indirect_summary ~lookup ~summary_of ~env:bounded (Bil.Var tgt) with
-          | Some ws -> Var.Set.equal ws gs
+          | Some ws -> Core.Int.Set.equal ws gs
           | None -> false));
 
     (* An unbounded target resolves to nothing. *)
@@ -199,7 +202,7 @@ let tests : unit Alcotest.test list =
         let tgt = v64 "ce_tgt" in
         let sub_tid = Tid.create () in
         let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
-        let gs = Core.Set.singleton (module Var) g in
+        let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
         let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
         let summary_of t = if Tid.equal t sub_tid then Some gs else None in
         let spread =
@@ -216,7 +219,7 @@ let tests : unit Alcotest.test list =
         let tgt = v64 "ce_tgt" in
         let sub_tid = Tid.create () in
         let g = Base.List.nth_exn ce_abi.Hike_abi.caller_saved_gprs 0 in
-        let gs = Core.Set.singleton (module Var) g in
+        let gs = Cbat_var_id.intern_set (Core.Set.singleton (module Var) g) in
         let lookup v = if Int64.equal v 0x5000L then Some sub_tid else None in
         let summary_of t = if Tid.equal t sub_tid then Some gs else None in
         let foreign =
@@ -230,13 +233,13 @@ let tests : unit Alcotest.test list =
     (* A preserved word keeps its value-set. *)
     pin "CE-11" "a preserved word keeps its value-set" (fun () ->
         let x, _, env = ce_xy_env () in
-        let env' = ce_call env (Var.Set.singleton x) in
+        let env' = ce_call env (ids1 x) in
         check "CE-11" (Ws.equal (AI.find_word 64 env' x) (Ws.singleton (w64 5))));
 
     (* A non-preserved word is TOPed. *)
     pin "CE-12" "a non-preserved word is TOPed" (fun () ->
         let x, y, env = ce_xy_env () in
-        let env' = ce_call env (Var.Set.singleton x) in
+        let env' = ce_call env (ids1 x) in
         check "CE-12" (Ws.is_top (AI.find_word 64 env' y)));
 
     (* RSP is preserved when it is in the preserved set. *)
@@ -244,7 +247,7 @@ let tests : unit Alcotest.test list =
         let x, _, env = ce_xy_env () in
         let rsp = v64 "RSP" in
         let env'' = AI.add_word env ~key:rsp ~data:(Ws.singleton (w64 0x10)) in
-        let e' = ce_call env'' (Var.Set.of_list [ x; rsp ]) in
+        let e' = ce_call env'' (ids (Var.Set.of_list [ x; rsp ])) in
         check "CE-13"
           (Ws.equal (AI.find_word 64 e' rsp) (Ws.singleton (w64 0x10))
           && Ws.equal (AI.find_word 64 e' x) (Ws.singleton (w64 5))));
@@ -265,7 +268,7 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.Val.create (Ws.singleton (w64 0x11)) LittleEndian)
         in
         let env_m = AI.add_memory AI.top ~key:m0 ~data:mem in
-        let e_m = ce_call env_m Var.Set.empty in
+        let e_m = ce_call env_m Core.Int.Set.empty in
         check "CE-14"
           (Mem.equal
              (AI.find_memory { addr_width = 64; addressable_width = 8 } e_m m0)
@@ -276,7 +279,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let vv = Var.create ~is_virtual:true ~fresh:false "c1_vv" (Type.Imm 64) in
         let env_v = AI.add_word AI.top ~key:vv ~data:(Ws.singleton (w64 3)) in
-        let e_v = ce_call env_v (Var.Set.singleton vv) in
+        let e_v = ce_call env_v (ids1 vv) in
         check "CE-15"
           (Ws.equal (AI.find_word 64 e_v vv) (Ws.singleton (w64 3))));
   ]

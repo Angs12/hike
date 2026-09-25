@@ -883,7 +883,7 @@ let tests : unit Alcotest.test list =
         in
         let h = Tid.for_name "t5x_head" in
         let lm = Cbat_landmarks.create () in
-        let need = Var.Set.singleton (Var.base xv) in
+        let need = Cbat_var_id.intern_set (Var.Set.singleton (Var.base xv)) in
         let d_old = Ws.singleton (w32 1) in
         let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
         let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
@@ -911,7 +911,7 @@ let tests : unit Alcotest.test list =
         in
         let h = Tid.for_name "t5x_head" in
         let lm = Cbat_landmarks.create () in
-        let need = Var.Set.singleton (Var.base xv) in
+        let need = Cbat_var_id.intern_set (Var.Set.singleton (Var.base xv)) in
         let d_old = Ws.singleton (w32 1) in
         let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
         let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
@@ -944,7 +944,7 @@ let tests : unit Alcotest.test list =
         in
         let h = Tid.for_name "t5x_head" in
         let lm = Cbat_landmarks.create () in
-        let need = Var.Set.singleton (Var.base xv) in
+        let need = Cbat_var_id.intern_set (Var.Set.singleton (Var.base xv)) in
         let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
         let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
         let r_ex =

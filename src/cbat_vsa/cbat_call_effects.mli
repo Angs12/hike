@@ -11,7 +11,7 @@ type site = {
   (* The callee's written-register (kill) summary over caller-saved
      GPRs; preserved = not in it and not a return lane.  [None] = an
      unknown or kill-all callee, or a non-ABI trap. *)
-  summary : Var.Set.t option;
+  summary : Core.Int.Set.t option;
   (* The convention's integer/pointer arg lanes the call block writes —
      the escape bounding which caller-frame cells the callee may
      clobber. *)
@@ -27,8 +27,8 @@ type site = {
    unresolved reads [None]. *)
 val indirect_summary :
   lookup:(int64 -> Tid.t option) ->
-  summary_of:(Tid.t -> Var.Set.t option) ->
-  env:AI.t -> exp -> Var.Set.t option
+  summary_of:(Tid.t -> Core.Int.Set.t option) ->
+  env:AI.t -> exp -> Core.Int.Set.t option
 
 (* The caller's post-call state: the preserved caller-saved GPRs kept,
    the rest topped; the frame kept at/above the highest possible
@@ -36,4 +36,4 @@ val indirect_summary :
    with the whole-memory top as the fallback on any doubt.  A pushed
    site's SP gains one word — the popped retaddr. *)
 val transfer :
-  abi:Hike_abi.t -> preserved:Var.Set.t -> site:site -> AI.t -> AI.t
+  abi:Hike_abi.t -> preserved:Core.Int.Set.t -> site:site -> AI.t -> AI.t

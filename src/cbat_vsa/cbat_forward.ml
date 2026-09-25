@@ -48,8 +48,8 @@ let walk_discards ~(target : tid) (rel : edge_rel) : bool =
 
 (* Denotation of a block's jumps. *)
 let denote_jump
-    ~(preserved : Var.Set.t)
-    ~(written : Var.Set.t option Tid.Map.t)
+    ~(preserved : Int.Set.t)
+    ~(written : Int.Set.t option Tid.Map.t)
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
@@ -145,8 +145,8 @@ let denote_jump
 
 (* Block denotation toward a target. *)
 let denote_block
-    ~(preserved : Var.Set.t)
-    ~(written : Var.Set.t option Tid.Map.t)
+    ~(preserved : Int.Set.t)
+    ~(written : Int.Set.t option Tid.Map.t)
     ~(resolved : Tid.Set.t Tid.Map.t)
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)

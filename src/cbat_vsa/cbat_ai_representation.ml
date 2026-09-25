@@ -73,11 +73,7 @@ let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t =
 
 (* Drop dead virtual temps; machine regs are the ABI surface and stay.
    Missing keys read top, so dropping only weakens. *)
-let gc (e : t) ~(keep : Var.Set.t) : t =
-  let keep =
-    Core.Set.fold keep ~init:(Core.Set.empty (module Int))
-      ~f:(fun acc v -> Core.Set.add acc (Cbat_var_id.intern v))
-  in
+let gc (e : t) ~(keep : Int.Set.t) : t =
   { e with
     words =
       WordEnv.filter_keys e.words ~f:(fun k ->
@@ -140,15 +136,11 @@ let extrapolate_data ~(entries : Cbat_landmarks.lm_entry list) ~(steps : int)
 (* Extrapolate [need] vars by [steps]; negative steps widen. *)
 let selective_widen_extrapolate ?(head:Tid.t option=None)
     ~(landmarks : Cbat_landmarks.t)
-    ~(need : Var.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
+    ~(need : Int.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
   if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
   else if Core.Set.is_empty need && Option.is_none head then join e1 e2
   else
-    let need_ids =
-      Core.Set.fold need ~init:(Core.Set.empty (module Int))
-        ~f:(fun acc v -> Core.Set.add acc (Cbat_var_id.intern v))
-    in
     let words =
       if Core.Set.is_empty need then WordEnv.join e1.words e2.words
       else
@@ -159,7 +151,7 @@ let selective_widen_extrapolate ?(head:Tid.t option=None)
         if WordSet.is_top data_new then acc
         else
           let data_res =
-            if Core.Set.mem need_ids (Cbat_var_id.base_of key) then
+            if Core.Set.mem need (Cbat_var_id.base_of key) then
               match head with
               | Some h ->
                 extrapolate_data ~entries:(Cbat_landmarks.entries_for_head landmarks h)
@@ -229,13 +221,9 @@ let precedes (e1 : t) (e2 : t) : bool =
   WordEnv.precedes e1.words e2.words
 
 (* Top every word key not in [preserved]; the memories stay. *)
-let top_words_except ~(preserved : Var.Set.t) (env : t) : t =
+let top_words_except ~(preserved : Int.Set.t) (env : t) : t =
   (* Both the set's elements and the lane's keys are base vars, so
      membership is a direct set lookup, not a Var.same scan. *)
-  let preserved =
-    Core.Set.fold preserved ~init:(Core.Set.empty (module Int))
-      ~f:(fun acc v -> Core.Set.add acc (Cbat_var_id.intern v))
-  in
   let words = WordEnv.fold env.words ~init:env.words
     ~f:(fun ~key ~data acc ->
       if Core.Set.mem preserved key

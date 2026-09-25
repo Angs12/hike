@@ -131,7 +131,7 @@ let mk_rctx_with_oracle ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
       (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~index:store_index ~env e) }
 
 (* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
-let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
+let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Int.Set.t =
   let regs =
     abi.Hike_abi.sp :: abi.Hike_abi.callee_saved
     |> Var.Set.of_list in
@@ -147,7 +147,7 @@ let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
         if Var.is_virtual v then Core.Set.add acc (Var.base v) else acc
       end
     end in
-  Core.Set.union regs virt
+  Cbat_var_id.intern_set (Core.Set.union regs virt)
 
 
 (* Per-sub static edge table: per (block, jmp) accumulated cond, in
@@ -240,7 +240,7 @@ let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
 
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)
-    ?(written : Var.Set.t option Tid.Map.t = Tid.Map.empty)
+    ?(written : Int.Set.t option Tid.Map.t = Tid.Map.empty)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
@@ -266,10 +266,10 @@ let rec static_graph_vsa
   let heads = smry.Cbat_wto.heads in
   let head_to_blocks = smry.Cbat_wto.head_to_blocks in
   let block_to_head = smry.Cbat_wto.block_to_head in
-  let need_map : Var.Set.t Tid.Map.t =
+  let need_map : Core.Int.Set.t Tid.Map.t =
     Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
       ~f:(fun ~key:h ~data:blocks acc ->
-        Core.Map.set acc ~key:h ~data:(compute_need ~rc_blocks:rctx.rc_blocks blocks))
+        Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~rc_blocks:rctx.rc_blocks blocks)))
   in
   
   let sol_default = Solution.default init in
@@ -359,7 +359,7 @@ let rec static_graph_vsa
        the visited block, not on the predecessor. *)
     let keep =
       Option.value_map (Core.Map.find (!rc_cell).rc_blocks v)
-        ~default:Var.Set.empty ~f:(fun bf -> bf.bf_live_in)
+        ~default:Int.Set.empty ~f:(fun bf -> bf.bf_live_ids)
     in
     let incoming =
       if List.is_empty preds then old
@@ -408,7 +408,7 @@ let rec static_graph_vsa
         then old
         else begin
         (* Finite extrapolates; Zero joins; Inf widens. *)
-        let need = Option.value ~default:Var.Set.empty (Core.Map.find need_map v) in
+        let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
         Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
           (fun () ->
             match Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v with

@@ -33,7 +33,7 @@ module Vsa : sig
     lookup:(int64 -> Tid.t option) ->
     symtab:Symtab.t option ->
     images:section_image list ->
-    written:Var.Set.t option Tid.Map.t ->
+    written:Core.Int.Set.t option Tid.Map.t ->
     lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
     block_addrs:Tid.t Addr.Map.t ->
     sub term ->
@@ -44,7 +44,7 @@ module Vsa : sig
       register set); computed once per program at the boundary and
       consumed by the fixpoint. *)
   val kill_summaries :
-    abi:Abi.t -> program term -> Var.Set.t option Tid.Map.t
+    abi:Abi.t -> program term -> Core.Int.Set.t option Tid.Map.t
 end
 
 (** The CFG completion, fused into the solver's loop: resolution is an

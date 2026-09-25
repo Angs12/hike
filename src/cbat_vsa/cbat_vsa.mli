@@ -114,7 +114,7 @@ val entry_block_of : sub term -> blk term option
 
 val static_graph_vsa :
   abi:Hike_abi.t ->
-  ?written:Var.Set.t option Tid.Map.t ->
+  ?written:Core.Int.Set.t option Tid.Map.t ->
   ?resolved:Tid.Set.t Tid.Map.t ->
   ?sub_lookup:(int64 -> Tid.t option) ->
   Program.t -> Sub.t -> vsa_sol -> vsa_sol
