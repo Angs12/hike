@@ -24,7 +24,7 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-01 | L3a PLUS row: the walk's per-def producer subtraction through `operand_constraints`' PLUS arm met `{4}` into the `[RBP-8]` load cell. | In `cbat_backward.ml`'s `inverse_denote`, make the general `Bil.BinOp` `_` arm `env` (skip `operand_constraints`). | BK-01 (`bounded_above` false; cell stays top). |
 | BK-02 | L3a MINUS row: the subtraction pre-image `[1,10]`. | As BK-01 (the same general BinOp arm). | BK-02. |
 | BK-03 | L3a LSHIFT-const row: the shift pre-image `[0,9]` (40>>2). | Drop the shift arm's row (`| Bil.BinOp ((LSHIFT\|RSHIFT\|ARSHIFT), _, _) -> env`). | BK-03. |
-| BK-04 | L3a TIMES over an unbounded operand is the identity (sound stop). | Invert the stop: make the TIMES arm return a bounded hull instead of identity. | BK-04 (`not (bounded_above … 19)` becomes false). |
+| BK-04 | L3a TIMES over an unbounded operand is the identity (sound stop); the cell is TOP, never BOTTOM. | Invert the stop: make the TIMES arm return a bounded hull or bottom. | BK-04 (`is_top` false). |
 | BK-05 | L3a NEQ guard is doubt: `cmp_inverse` leaves the env for NEQ. | Make the NEQ case walk the complement (`neq_complement`) instead of `env`. | BK-05 (`Ws.is_top` false). |
 | BK-06 | L3c1-1 flag record: `Hike.Jump.compile_sub`'s `cross_guard`/`plan_block` recovers `CF := SLT(t,10)` from a bare `when CF`. | In `hike_jump.ml`, make `plan_block` return `[]` (no flag rewrite) so the guard stays `Bil.Var cf`. | BK-06 (cell stays top). |
 | BK-07 | L3c1-2 a redefinition of the compared operand makes the guard constant-false; the taken edge is dead (`Ws.is_bottom`). | Make `read_def` position-insensitive (return the load def even when a later def redefines the operand). | BK-07 (cell is refined, not bottom). |
@@ -37,20 +37,20 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-14 | L3c2-4 flag-indirected signed guard (record + signed row). | As BK-06 (`plan_block = []`). | BK-14. |
 | BK-15 | L3c2-5 trace-exact cell refinement with no RBP prologue def (`constrain_cell_on_trace`). | Make `constrain_cell_on_trace` the identity (`fun ~env … -> env`). | BK-15. |
 | BK-16 | L3c3-1 PLUS-HULL: the circular hull `{−1} ∪ [0,8]` on `t`. | As BK-01 (PLUS arm identity). | BK-16. |
-| BK-17 | L3c3-2 TIMES over an unbounded operand is the identity (sound stop). | As BK-04 (force a bounded TIMES answer). | BK-17. |
+| BK-17 | L3c3-2 TIMES over an unbounded operand is the identity (sound stop); the cell is TOP. | As BK-04 (force a bounded or bottom answer). | BK-17 (`is_top` false). |
 | BK-18 | L3c3-2b seeded operand: the guard's signed row bounds `t`, so the exact TIMES slice applies. | Drop the TIMES slice in `operand_constraints` (return `None,None` for TIMES). | BK-18. |
 | BK-19 | L3c3-3 RSHIFT-const row. | As BK-03 (drop the shift arms). | BK-19. |
 | BK-20 | L3c3-4a ARSHIFT-const row with a provably non-negative operand. | Make the ARSHIFT arm consult `nonneg` and return identity when it holds. | BK-20. |
 | BK-21 | L3c3-4b ARSHIFT on a top operand is a sound stop (identity). | Remove the non-negativity gate so ARSHIFT always refines. | BK-21 (`Ws.is_top` false). |
 | BK-22 | L3c3-5 TIMES k = 0 is the identity. | Invert the k=0 stop (return a row). | BK-22 (`Ws.is_top` false). |
-| BK-23 | L3c3-6 TIMES EQ non-divisible is the empty pre-image (no refinement). | Invert the divisibility check so the row is non-empty. | BK-23 (`bounded_above … 39` becomes true). |
+| BK-23 | L3c3-6 TIMES EQ non-divisible is the empty pre-image — the dead edge prunes, so the cell is BOTTOM. | Invert the divisibility check so the row is non-empty. | BK-23 (`is_bottom` false). |
 | BK-24 | L3c4-1 Var-vs-Var LT: `overlap_constraints` caps `t` at `u`'s max. | Make `overlap_constraints` the identity (`fun _ _ _ -> None,None`). | BK-24. |
-| BK-25 | L3c4-2 a TOP Var-vs-Var operand makes the refinement vacuous. | Force `overlap_constraints` to emit `[0,c]` even when an operand is top. | BK-25 (`not (bounded_above … 1000)` false). |
+| BK-25 | L3c4-2 a TOP Var-vs-Var operand makes the refinement vacuous; the cell is an unbounded ray, never BOTTOM. | Force `overlap_constraints` to emit `[0,c]` even when an operand is top. | BK-25 (`is_bottom` true, or `bounded_above … 1000`). |
 | BK-26 | L3c4-3 DIVIDE-const row. | Drop the DIVIDE arm in `inverse_denote` (identity). | BK-26. |
 | BK-27 | L3c4-4 HIGH-extract producer row (`high_cast_constraint`). | Make `high_cast_constraint` return `None`. | BK-27. |
-| BK-28 | L3c4-5 DIVIDE k = 0 is a sound stop (identity). | Remove the k=0 guard so DIVIDE 0 refines. | BK-28 (`not (bounded_above … 39)` false). |
+| BK-28 | L3c4-5 DIVIDE k = 0 is a sound stop (identity); the cell is TOP. | Remove the k=0 guard so DIVIDE 0 refines. | BK-28 (`is_top` false). |
 | BK-29 | L3c5-1 const-first EQ normalizes to const-second (`cmp_inverse`'s `Bil.Int c0, e0` arm). | Drop the const-first arm in `cmp_inverse` (`| Bil.Int _, _ -> env`). | BK-29. |
-| BK-30 | L3c5-2 MOD has no closed form — identity. | Remove the MOD identity arm and add a row. | BK-30 (`not (bounded_above … 39)` false). |
+| BK-30 | L3c5-2 MOD has no closed form — identity; the cell is TOP. | Remove the MOD identity arm and add a row. | BK-30 (`is_top` false). |
 | BK-31 | L3c5-3a AND-identity row (`t AND ~0 ≡ t`). | Drop the AND/OR identity rows in `inverse_denote`. | BK-31. |
 | BK-32 | L3c5-3b OR-identity row (`t OR 0 ≡ t`). | As BK-31. | BK-32. |
 | BK-33 | L3c5-4 an Unknown condition keeps the env unchanged (never asserts). | Make `inverse_denote`'s `Bil.Unknown` arm return `AI.bottom`. | BK-33 (`AI.equal` false). |
@@ -68,7 +68,7 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-45 | E1-2 straight-line call: the continuation RSP is exactly `{0x2000}`. | As BK-44. | BK-45 (RSP `{0x1ff8}`). |
 | BK-46 | L-D6 RBP-anchored gate-free loop: the jcc meet binds `[RBP−8]` at BODY input. | As BK-06 (no flag rewrite) or skip the dead epilogue denotation. | BK-46 (cell top). |
 | BK-47 | R2-1 inline-arithmetic condition `(t+1) < 64`: the producer recursion yields the 64-element hull. | Drop the inline-BinOp fallthrough in `constrain_def_chain`/`cmp_inverse`. | BK-47 (cardn > 64 / top). |
-| BK-48 | R2-2 NOT-of-comparison: the NOT-edge keeps its env (the false-edge row never confines the taken edge). | Make the `has0` arm apply the false-edge row to the taken edge. | BK-48 (`bounded_above … 4` becomes true). |
+| BK-48 | R2-2 NOT-of-comparison: the NOT-edge keeps its env (the false-edge row never confines the taken edge); the seeded taken value 8 survives. | Make the `has0` arm apply the false-edge row to the taken edge. | BK-48 (`8 ∈` false, or `bounded_above … 4`). |
 | BK-49 | R2-3 const-first LT flip dispatches UGT (`10 < t` → `[11, 2^w)`). | Drop `flip_guard_op` for the const-first arm. | BK-49. |
 | BK-50 | R2-4 nested TIMES chain: the exact no-wrap slice yields the body-IN singleton `{63}`. | Drop the TIMES no-wrap slice. | BK-50 (`Ws.equal` false). |
 | BK-51 | M5-1 the MINUS wrap hull `{0xFFFFFFFF, 0..3}` (cardn 5). | Make the wrap hull return the unwrapped interval only. | BK-51 (cardn ≠ 5). |

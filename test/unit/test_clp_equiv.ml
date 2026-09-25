@@ -1,9 +1,10 @@
 (* CLP/word differential referee pin.
 
-   Compares the selected CLP binary operations and identity elements across a
-   dense sweep of (width, base, step, cardn) against inlined, independent
-   reference implementations.  The reference implementations below are
-   independent of the production code.
+   Compares the selected CLP binary operations against a concrete
+   FinSet oracle (every enumerated pair's result must be in the CLP
+   answer) and the identity/directional elements against inlined,
+   independent reference implementations.  The reference
+   implementations below are independent of the production code.
 
    [Ref_word] holds the frozen reference word implementations verbatim;
    the sweep cross-checks the production word ops against them.
@@ -22,7 +23,8 @@ module CKL = Core.List
 module CW = Cbat_word
 
 (* The word-gcd oracle, inlined for the sweep (the referee's own copy
-   of the op it cross-checks). *)
+   of the op it cross-checks).  Production gcd_exn is not exported; it
+   is exercised through lcm_exn's Small path. *)
 let cw_mask (w : int) : int =
   if w >= 62 then max_int else if w <= 0 then 0 else (1 lsl w) - 1
 
@@ -68,11 +70,20 @@ let ref_top (i : int) : Ws.Clp.t =
 
 let ref_is_top (p : Ws.Clp.t) : bool = Ws.Clp.equal p (ref_top (Ws.Clp.bitwidth p))
 
-let ops : (string * (Ws.Clp.t -> Ws.Clp.t -> Ws.Clp.t)) list =
-  [ ("add", Ws.Clp.add); ("sub", Ws.Clp.sub); ("mul", Ws.Clp.mul)
-  ; ("logand", Ws.Clp.logand); ("logor", Ws.Clp.logor); ("logxor", Ws.Clp.logxor)
-  ; ("intersection", Ws.Clp.intersection)
-  ; ("join", Ws.Clp.join); ("meet", Ws.Clp.meet) ]
+let ops :
+    (string * (Ws.Clp.t -> Ws.Clp.t -> Ws.Clp.t)
+     * (Cbat_word.t -> Cbat_word.t -> Cbat_word.t)) list =
+  [ ("add", Ws.Clp.add, CW.add); ("sub", Ws.Clp.sub, CW.sub)
+  ; ("mul", Ws.Clp.mul, CW.mul)
+  ; ("logand", Ws.Clp.logand, CW.logand); ("logor", Ws.Clp.logor, CW.logor)
+  ; ("logxor", Ws.Clp.logxor, CW.logxor) ]
+
+(* The FinSet oracle: a CLP's concrete elements when it is finite and
+   small enough to enumerate. *)
+let small_elems (p : Ws.Clp.t) : Cbat_word.t list option =
+  if Ws.Clp.is_infinite p then None
+  else if CW.gt_int (Ws.Clp.cardinality p) 64 then None
+  else Some (Ws.Clp.iter p)
 
 (* ========================================================================= *)
 (* Ref_word: the frozen reference word implementations, verbatim. *)
@@ -199,6 +210,9 @@ let run_sweep () : int * int * int =
      count is reported rather than hidden. A jump in this number means an
      op stopped being exercised. *)
   let both_raised = ref 0 in
+  (* Sweep cases whose operands were not finite/small enough for the
+     concrete-pair oracle; reported, never counted as checks. *)
+  let skipped = ref 0 in
 
   (* ---- word-op checks ------------------------------------------------- *)
 
@@ -471,12 +485,21 @@ let run_sweep () : int * int * int =
                   ~step:(Cbat_word.of_int ~width:w s1)
                   ~cardn:(Cbat_word.of_int ~width:(w + 1) c1)
               in
-              CKL.iter ops ~f:(fun (nm, f) ->
-                  incr checked;
-                  try
+              CKL.iter ops ~f:(fun (nm, f, wop) ->
+                  match small_elems p1, small_elems p2 with
+                  | Some xs, Some ys ->
+                    incr checked;
                     let got = f p1 p2 in
-                    ignore got
-                  with _ -> ())
+                    if not
+                         (CKL.for_all xs ~f:(fun x ->
+                              CKL.for_all ys ~f:(fun y ->
+                                  Ws.Clp.elem (wop x y) got)))
+                    then
+                      bad
+                        (Printf.sprintf
+                           "CLP %s w=%d b1=%d s1=%d c1=%d b2=%d: a concrete pair is outside the result"
+                           nm w b1 s1 c1 b2)
+                  | _ -> incr skipped)
             done
           done
         done
@@ -647,8 +670,8 @@ let run_sweep () : int * int * int =
   in
   check_directional ();
 
-  Printf.printf "clpequiv: checked=%d mismatches=%d both-raised=%d\n"
-    !checked !mism !both_raised;
+  Printf.printf "clpequiv: checked=%d mismatches=%d both-raised=%d skipped=%d\n"
+    !checked !mism !both_raised !skipped;
   (!checked, !mism, !both_raised)
 
 let tests : unit Alcotest.test list =

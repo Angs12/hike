@@ -119,7 +119,7 @@ let tests : unit Alcotest.test list =
                    Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
                    Bil.Int (Cbat_word.to_word (w32 2)) ))
         in
-        check "BK-04" (not (bounded_above (l3a_run_analyzed sub4 body4) (w32 19))));
+        check "BK-04" (Ws.is_top (l3a_run_analyzed sub4 body4)));
 
     pin "BK-05"
       "a NEQ guard is doubt (constraint_of_compare None) — no walk, the cell \
@@ -338,7 +338,7 @@ let tests : unit Alcotest.test list =
             ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
             ~cmp:Bil.SLT ~c:(w32 80) ~body_k:(w32 4)
         in
-        check "BK-17" (not (bounded_above (l3c3_run sub2 body2) (w32 9))));
+        check "BK-17" (Ws.is_top (l3c3_run sub2 body2)));
 
     pin "BK-18"
       "the seeded operand is bounded by the guard's signed row, so the TIMES \
@@ -414,7 +414,7 @@ let tests : unit Alcotest.test list =
             ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
             ~cmp:Bil.EQ ~c:(w32 5) ~body_k:(w32 4)
         in
-        check "BK-23" (not (bounded_above (l3c3_run sub6 body6) (w32 39))));
+        check "BK-23" (Ws.is_bottom (l3c3_run sub6 body6)));
 
     (* L3c4: Var-vs-Var overlap, DIVIDE-const, HIGH-extract rows. *)
     pin "BK-24"
@@ -435,7 +435,7 @@ let tests : unit Alcotest.test list =
           mk_l3c4_vv_loop ~seed:(Some (w32 0)) ~seed2:None ~cmp:Bil.LT
             ~body_k:(w32 4)
         in
-        check "BK-25" (not (bounded_above (l3c4_run sub2 body2) (w32 1000))));
+        check "BK-25" (let c = l3c4_run sub2 body2 in not (Ws.is_bottom c) && not (bounded_above c (w32 1000))));
 
     pin "BK-26"
       "the DIVIDE-const row — `v := t / 2; if SLT(v, 10)` — the cell at RBP-8 \
@@ -473,7 +473,7 @@ let tests : unit Alcotest.test list =
             ~chain:(Bil.BinOp (Bil.DIVIDE, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0))))
             ~v_w:32 ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
         in
-        check "BK-28" (not (bounded_above (l3c4_run sub5 body5) (w32 39))));
+        check "BK-28" (Ws.is_top (l3c4_run sub5 body5)));
 
     (* L3c5: structural closure — identity rows, const-first arm, catch-all. *)
     pin "BK-29"
@@ -500,7 +500,7 @@ let tests : unit Alcotest.test list =
             ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 10))))
             ~body_k:(w32 4)
         in
-        check "BK-30" (not (bounded_above (l3c5_run sub2 body2) (w32 39))));
+        check "BK-30" (Ws.is_top (l3c5_run sub2 body2)));
 
     pin "BK-31"
       "the AND-identity row — `v := t AND ~0` (≡ t) — the cell at RBP-8 is \
@@ -815,7 +815,7 @@ let tests : unit Alcotest.test list =
                   Bil.BinOp (Bil.LT, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 5))) ))
         in
         let cell2 = r2_run sub2 body2 in
-        check "BK-48" (not (bounded_above cell2 (w32 4))));
+        check "BK-48" (Ws.elem (w32 8) cell2 && not (bounded_above cell2 (w32 4))));
 
     pin "BK-49"
       "the CONST-FIRST LT flip `10 < t` (Bil.BinOp (Bil.LT, Bil.Int 10, t)) — \
