@@ -19,6 +19,20 @@ CORPUS="${1:-/tmp/corpus}"
 OUT="${2:-/tmp/hike-emit}"
 mkdir -p "$OUT"
 
+if [ -z "$(ls -A "$CORPUS" 2>/dev/null)" ]; then
+  echo "FATAL: no corpus at $CORPUS (run the corpus gate first)" >&2
+  exit 2
+fi
+
+# Bind every emission in $OUT to the plugin that produced it: a later
+# consumer compares this copy with the installed plugin's provenance.
+PROV="$(opam var lib 2>/dev/null || true)/hike/hike.cmxs.provenance"
+if [ ! -f "$PROV" ]; then
+  echo "FATAL: no installed plugin provenance — run src/record_provenance.sh" >&2
+  exit 2
+fi
+cp "$PROV" "$OUT/.plugin_provenance"
+
 # Corpus executables in sorted order (skips sources/stubs).
 BINS=""
 for f in "$CORPUS"/*; do
@@ -26,6 +40,11 @@ for f in "$CORPUS"/*; do
   case "$f" in *.c|*.h) continue ;; esac
   BINS="$BINS $(basename "$f")"
 done
+
+if [ -z "$BINS" ]; then
+  echo "FATAL: no corpus executables under $CORPUS" >&2
+  exit 2
+fi
 
 : >"$OUT/diagnostics.txt"
 fail=0

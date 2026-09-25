@@ -17,7 +17,8 @@ import re, sys, os
 
 dirs = sys.argv[1:] or ["src"]
 
-# OCaml comment stripper (handles nesting)
+# OCaml comment stripper (handles nesting; string literals are blanked
+# so a `(*` inside them cannot open a comment, nor `*)` close one).
 def strip_comments(text):
     out = []
     i, depth, n = 0, 0, len(text)
@@ -28,8 +29,17 @@ def strip_comments(text):
             depth += 1; i += 2; out.append(" " * 2)
         elif depth > 0 and text.startswith("*)", i):
             depth -= 1; i += 2; out.append(" " * 2)
+        elif depth == 0 and text[i] == '"':
+            # Consume the literal, preserving the newlines.
+            out.append('"'); i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    out.append("  "); i += 2
+                else:
+                    out.append("\n" if text[i] == "\n" else " "); i += 1
+            if i < n:
+                out.append('"'); i += 1
         elif depth > 0 and text[i] == '"':
-            # strings inside comments need no handling
             i += 1; out.append(" ")
         else:
             out.append(text[i] if depth == 0 else
@@ -37,9 +47,19 @@ def strip_comments(text):
             i += 1
     return "".join(out)
 
-ENV_RE = re.compile(r"Sys\.getenv|getenv_opt|Unix\.getenv")
-PRINT_RE = re.compile(r"eprintf|print_endline|Printf\.printf|Format\.printf")
-OK_RE = re.compile(r"sprintf|ksprintf|failwith|invalid_arg|Location\.raise_errorf")
+ENV_RE = re.compile(r"\bgetenv(_opt)?\b|Sys\.getenv|Unix\.getenv")
+# Direct output only: formatter-parameter fprintf (a `pp` function) is
+# not a print; fprintf to stderr is.
+PRINT_RE = re.compile(
+    r"\b(print_string|print_bytes|print_char|print_int|print_float|"
+    r"print_endline|print_newline|prerr_[a-z_]+|"
+    r"(Printf|Format)\.(printf|eprintf|kprintf|kfprintf|ikfprintf|ifprintf)|"
+    r"(Printf|Format)\.fprintf\s+(Stdlib\.)?stderr)")
+# Non-output constructs that may embed a print-looking name.
+OK_RE = re.compile(r"failwith|invalid_arg|Location\.raise_errorf|assert")
+# `sprintf`-family identifiers never print; strip them before the print
+# test so `eprintf (sprintf ...)` is still caught.
+SPRINTF_RE = re.compile(r"\b\w*sprintf\b")
 
 files = []
 for d in dirs:
@@ -63,13 +83,16 @@ for f in sorted(set(files)):
         s = raw.strip()
         if s.startswith("#ifdef VSA_DEBUG"):
             indebug = True; continue
+        if s.startswith("#else"):
+            indebug = not indebug; continue
         if s.startswith("#endif"):
             indebug = False; continue
         if indebug:
             continue
         if ENV_RE.search(code):
             violations.append(f"RULE 1 (env read): {f}:{no}: {s}")
-        if PRINT_RE.search(code) and not OK_RE.search(code):
+        code_ns = SPRINTF_RE.sub("", code)
+        if PRINT_RE.search(code_ns) and not OK_RE.search(code_ns):
             violations.append(f"RULE 2 (direct print): {f}:{no}: {s}")
 
 if violations:

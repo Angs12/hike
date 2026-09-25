@@ -37,7 +37,7 @@ mkdir -p "$emit"
 for b in "${bins[@]}"; do
   name="$(basename "$b")"
   err="$(mktemp)"
-  bap "$b" --pass=hike-convlir --hike-output-file="$emit/$name.ll" \
+  bap "$b" --pass=hike-convlir --no-cache --hike-output-file="$emit/$name.ll" \
     >/dev/null 2>"$err"
   rc=$?
   printf '### %s rc=%d\n' "$name" "$rc"

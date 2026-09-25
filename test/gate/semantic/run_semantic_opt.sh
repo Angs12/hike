@@ -14,10 +14,28 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib.sh"
 mkdir -p "$OUT"
 
+if ! compgen -G "$IR/out_*.ll" >/dev/null; then
+	echo "FATAL: no emitted IR in $IR (run the lift gate first)" >&2
+	exit 2
+fi
+
+# The IR must be bound to the installed plugin that will render it; a
+# stale emission dir is the stale-IR-green class.
+IR_PROV="$IR/.plugin_provenance"
+INST_PROV="$(opam var lib 2>/dev/null || true)/hike/hike.cmxs.provenance"
+if [ ! -f "$IR_PROV" ] || [ ! -f "$INST_PROV" ] || ! cmp -s "$IR_PROV" "$INST_PROV"; then
+	echo "FATAL: the IR in $IR was not produced by the installed plugin — re-run the lift gate" >&2
+	exit 2
+fi
+
 # Pinned optimizer; a default switch must not silently change the gate.
 OPT=opt-21
 command -v "$OPT" >/dev/null 2>&1 || {
 	echo "FATAL: $OPT not found (the gate pins the opt version; NO FALLBACKS)"
+	exit 2
+}
+command -v "$LLC" >/dev/null 2>&1 || {
+	echo "FATAL: $LLC not found (set HIKE_LLC to pin one)"
 	exit 2
 }
 
@@ -50,14 +68,20 @@ for ll in "$IR"/out_*.ll; do
 	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
 	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] \
 	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
-		if timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$bin" >"$OUT/${base}_opt.out" 2>&1 &&
-		   timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1; then
-			lrc=$?; nrc=$?
-			if [ "$lrc" -eq "$nrc" ] && cmp -s "$OUT/${base}_opt.out" "$OUT/${base}_native.out"; then
-				echo "PASS $base (opt -O2, IR unchanged)"
-				pass=$((pass + 1))
-				continue
-			fi
+		timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$bin" >"$OUT/${base}_opt.out" 2>&1
+		lrc=$?
+		timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
+		nrc=$?
+		if [ "$lrc" -eq 124 ] || [ "$nrc" -eq 124 ]; then
+			echo "FAIL $base (timeout, cached: lifted rc=$lrc native rc=$nrc)"
+			fail=$((fail + 1))
+			FAILED+=("$base (timeout)")
+			continue
+		fi
+		if [ "$lrc" -eq "$nrc" ] && cmp -s "$OUT/${base}_opt.out" "$OUT/${base}_native.out"; then
+			echo "PASS $base (opt -O2, IR unchanged)"
+			pass=$((pass + 1))
+			continue
 		fi
 		# A cached binary that no longer passes falls through to the
 		# full rebuild below (FRESH-like behavior for the stale one).
@@ -77,15 +101,15 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
-	hike_llc "$OUT/${base}_opt.ll" "$OUT/${base}_opt.o" 2>/dev/null ||
+	hike_llc "$OUT/${base}_opt.ll" "$OUT/${base}_opt.o" 2>>"$OUT/.llc.log" ||
 		{
-			echo "FAIL $base (llc after opt)"
+			echo "FAIL $base (llc after opt; see $OUT/.llc.log)"
 			fail=$((fail + 1))
 			FAILED+=("$base")
 			continue
 		}
-	if ! hike_link "$OUT/${base}_opt.o" "$ll" "$OUT/${base}_opt.bin" "$HERE" 2>/dev/null; then
-		echo "FAIL $base (link after opt)"
+	if ! hike_link "$OUT/${base}_opt.o" "$ll" "$OUT/${base}_opt.bin" "$HERE" 2>>"$OUT/.gcc.log"; then
+		echo "FAIL $base (link after opt; see $OUT/.gcc.log)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
@@ -153,4 +177,7 @@ echo "semantic-opt: $pass PASS, $fail FAIL, $skip SKIP (of $(ls "$IR"/out_*.ll |
 if [ "$fail" -gt 0 ]; then
 	printf 'failed: %s\n' "${FAILED[@]}"
 fi
-exit $((fail > 0))
+if [ "$skip" -gt 0 ]; then
+	echo "FATAL: $skip emitted binaries had no native counterpart — corpus/emission mismatch" >&2
+fi
+exit $((fail > 0 || skip > 0))

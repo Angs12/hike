@@ -12,6 +12,14 @@ W="${5:-/tmp/conv_work}"; mkdir -p "$W"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HARNESS="$HERE/harness.c"
 
+# The pinned tools: a missing one is a loud stop, never a silent nobuild.
+for tool in opt-21 llc gcc; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "FATAL: $tool not found (the gate pins its tools; NO FALLBACKS)" >&2
+    exit 2
+  }
+done
+
 insns() { grep -cE '^[ ]*%[a-z0-9]+ = |^[ ]+(ret|br|store|call|load) ' "$1" 2>/dev/null; }
 textsz() { size "$1" 2>/dev/null | awk 'NR==2 {print $1}'; }
 
@@ -37,7 +45,7 @@ for b in $(ls "$C0"); do
   [ -f "$f0" ] && [ -f "$f2" ] || continue
   native_out="$W/$b.native"
   timeout "${HIKE_RUN_TIMEOUT:-15}" "$C0/$b" > "$native_out" 2>&1; nrc=$?
-  cls0="crash"; cls2="crash"; i0="-"; i2="-"
+  cls0="nobuild"; cls2="nobuild"; i0="-"; i2="-"
   if [ -f "$f0" ] && opt-21 -O2 -S "$f0" -o "$W/m0.ll" 2>/dev/null \
      && run_model "$W/m0.ll" o0 "$native_out"; then
     i0=$(insns "$W/m0.ll")

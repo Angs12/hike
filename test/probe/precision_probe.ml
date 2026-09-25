@@ -465,25 +465,26 @@ let add_sum (dst : Sub_stats.t) (src : Sub_stats.t) : unit =
       dst.Sub_stats.ldstk_w_max > 0 then
     dst.Sub_stats.ldstk_w_max <- src.Sub_stats.ldstk_w_max
 
-(* BIN rollup: summed columns + filtered/full percentages. *)
+(* BIN rollup: summed columns + the exact, full, and bound
+   percentages.  The bound rate is the address-precision headline;
+   [ldstk_exact] alone is shape-blind. *)
 let print_bin_line (r : bin_report) : unit =
   let s = r.sum in
   let denom_filtered = s.Sub_stats.ldstk_exact + s.Sub_stats.ldstk_bounded
                        + s.Sub_stats.ldstk_top
                        + s.Sub_stats.ldstk_bottom_live in
   let denom_full = denom_filtered + s.Sub_stats.ldstk_bottom_dead in
-  let pct_filtered =
-    if denom_filtered = 0 then "n/a"
-    else Printf.sprintf "%.2f"
-        (100.0 *. float s.Sub_stats.ldstk_exact /. float denom_filtered) in
-  let pct_full =
-    if denom_full = 0 then "n/a"
-    else Printf.sprintf "%.2f"
-        (100.0 *. float s.Sub_stats.ldstk_exact /. float denom_full) in
+  let pct n d =
+    if d = 0 then "n/a"
+    else Printf.sprintf "%.2f" (100.0 *. float n /. float d) in
+  let pct_filtered = pct s.Sub_stats.ldstk_exact denom_filtered in
+  let pct_full = pct s.Sub_stats.ldstk_exact denom_full in
+  let pct_bound =
+    pct (s.Sub_stats.ldstk_exact + s.Sub_stats.ldstk_bounded) denom_filtered in
   (* BIN reuses the sub layout ("BIN", basename, sums). *)
   let cols = Filename.basename r.bname :: List.tl (row_of s) in
   Printf.printf "%s\n"
-    (String.concat "\t" ("BIN" :: cols @ [ pct_filtered; pct_full ]));
+    (String.concat "\t" ("BIN" :: cols @ [ pct_filtered; pct_full; pct_bound ]));
   flush stdout
 
 (* One sub, one fixpoint + measurement walk. *)

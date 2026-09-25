@@ -15,7 +15,17 @@ OCAMLOPT="${OCAMLOPT:-ocamlopt.opt}"
 if ! command -v "$OCAMLOPT" >/dev/null 2>&1; then OCAMLOPT=ocamlopt; fi
 
 cd "$LLVM_DIR"
-if [ llvm.cmxs -nt llvm.cmxa ] 2>/dev/null; then
+# Fresh only when the cmxs is newer than every input and META exists: a
+# stale cmxa/libllvm_*.a must rebuild, and the missing-META backfill must
+# still run.
+needs=0
+[ -f llvm.cmxs ] || needs=1
+[ -f META ] || needs=1
+for f in llvm.cmxa libllvm_*.a; do
+  [ -e "$f" ] || continue
+  if [ "$needs" -eq 0 ] && [ "$f" -nt llvm.cmxs ]; then needs=1; fi
+done
+if [ "$needs" -eq 0 ]; then
   exit 0   # fresh — nothing to do
 fi
 

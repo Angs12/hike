@@ -16,6 +16,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib.sh"
 mkdir -p "$OUT"
 
+if ! compgen -G "$IR/out_*.ll" >/dev/null; then
+	echo "FATAL: no emitted IR in $IR (run the lift gate first)" >&2
+	exit 2
+fi
+
+# The IR must be bound to the installed plugin that will render it; a
+# stale emission dir is the stale-IR-green class.
+IR_PROV="$IR/.plugin_provenance"
+INST_PROV="$(opam var lib 2>/dev/null || true)/hike/hike.cmxs.provenance"
+if [ ! -f "$IR_PROV" ] || [ ! -f "$INST_PROV" ] || ! cmp -s "$IR_PROV" "$INST_PROV"; then
+	echo "FATAL: the IR in $IR was not produced by the installed plugin — re-run the lift gate" >&2
+	exit 2
+fi
+
 pass=0
 fail=0
 skip=0
@@ -57,14 +71,14 @@ for ll in "$IR"/out_*.ll; do
 		FAILED+=("$base")
 		continue
 	fi
-	if ! hike_llc "$OUT/${base}_lifted.ll" "$OUT/${base}_lifted.o" 2>/dev/null; then
-		echo "FAIL $base (llc)"
+	if ! hike_llc "$OUT/${base}_lifted.ll" "$OUT/${base}_lifted.o" 2>>"$OUT/.llc.log"; then
+		echo "FAIL $base (llc; see $OUT/.llc.log)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
 	fi
-	if ! hike_link "$OUT/${base}_lifted.o" "$ll" "$bin" "$HERE" 2>/dev/null; then
-		echo "FAIL $base (link)"
+	if ! hike_link "$OUT/${base}_lifted.o" "$ll" "$bin" "$HERE" 2>>"$OUT/.gcc.log"; then
+		echo "FAIL $base (link; see $OUT/.gcc.log)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
@@ -84,4 +98,7 @@ echo "semantic-all: $pass PASS, $fail FAIL, $skip SKIP (of $(ls "$IR"/out_*.ll |
 if [ "$fail" -gt 0 ]; then
 	printf 'failed: %s\n' "${FAILED[@]}"
 fi
-exit $((fail > 0))
+if [ "$skip" -gt 0 ]; then
+	echo "FATAL: $skip emitted binaries had no native counterpart — corpus/emission mismatch" >&2
+fi
+exit $((fail > 0 || skip > 0))

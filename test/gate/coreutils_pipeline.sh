@@ -286,17 +286,21 @@ do_suite() {
 # -------------------------------------------------------------- summary ----
 do_summary() {
     local lifts
-    lifts=$(grep -c '^OK' "$LIFT_LOG" 2>/dev/null || echo 0)
+    lifts=$(grep -c '^OK' "$LIFT_LOG" 2>/dev/null) || true
+    lifts=${lifts:-0}
     if [ "$lifts" -eq 0 ]; then
         # A resumed run's log may hold only the new lifts; the emitted
         # IR is the ground truth.
         lifts=$(ls "$IR"/out_*.ll 2>/dev/null | wc -l)
     fi
     local total; total=$(ls "$BINS" 2>/dev/null | wc -l)
+    local relinked
+    relinked=$(grep -c '^OK' "$TEST_LOG" 2>/dev/null) || true
+    relinked=${relinked:-0}
     echo "==================== COREUTILS SUCCESS RATE ===================="
     echo "binaries collected : $total"
     echo "hike-lifted OK     : $lifts / $total"
-    echo "recompiled (link)  : $(grep -c '^OK' "$TEST_LOG" 2>/dev/null || echo 0)"
+    echo "recompiled (link)  : $relinked"
     local slog="$WORK/suite"
     if [ -s "$slog/native.test-suite.log" ] && [ -s "$slog/lifted.test-suite.log" ]; then
         echo "--- the upstream suite (make check): native vs lifted ---"

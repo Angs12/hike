@@ -26,6 +26,11 @@ OUT_DIR="${1:?usage: check_allocas.sh <out_dir>}"
 FAIL=0
 PASS=0
 
+if ! compgen -G "$OUT_DIR/out_*.ll" >/dev/null; then
+  echo "FATAL: no emitted IR under $OUT_DIR (run the lift gate first)" >&2
+  exit 2
+fi
+
 for ll in "$OUT_DIR"/out_*.ll; do
   name="$(basename "$ll" .ll)"
 
@@ -33,6 +38,11 @@ for ll in "$OUT_DIR"/out_*.ll; do
   # the state-machine rules (b/d/INFO) keep their own passes.
   eval "$(awk '
     { line = $0
+      if (match(line, /%stack_r[0-9]+ = alloca/)) {
+        id = substr(line, RSTART, RLENGTH)
+        sub(/ = alloca/, "", id)
+        defined_sr[id] = 1
+      }
       if (line ~ /%stack_r[0-9]/) n_sr_ref++
       if (line ~ /%stack_r[0-9]+ = alloca/) n_sr_alloca++
       if (line ~ /@stack/) n_stack++
@@ -43,13 +53,24 @@ for ll in "$OUT_DIR"/out_*.ll; do
       if (line ~ /ptrtoint ptr getelementptr i8, ptr %stack_r[0-9]/) n_esc++
       if (line ~ /%hike_window_mem/) n_wm_ref++
       if (line ~ /%hike_window\)/) n_wp++
+      # every referenced region id must have its own alloca
+      rest = line
+      while (match(rest, /%stack_r[0-9]+/)) {
+        id = substr(rest, RSTART, RLENGTH)
+        if (!(id in defined_sr)) missing_sr[id] = 1
+        rest = substr(rest, RSTART + RLENGTH)
+      }
     }
-    END { printf "n_sr_ref=%d n_sr_alloca=%d n_stack=%d n_poison=%d n_comp=%d n_res=%d n_ext=%d n_esc=%d n_wm_ref=%d n_wp=%d", n_sr_ref, n_sr_alloca, n_stack, n_poison, n_comp, n_res, n_ext, n_esc, n_wm_ref, n_wp }
+    END {
+      m = 0
+      for (id in missing_sr) m++
+      printf "n_sr_ref=%d n_sr_alloca=%d n_sr_missing=%d n_stack=%d n_poison=%d n_comp=%d n_res=%d n_ext=%d n_esc=%d n_wm_ref=%d n_wp=%d", n_sr_ref, n_sr_alloca, m, n_stack, n_poison, n_comp, n_res, n_ext, n_esc, n_wm_ref, n_wp
+    }
   ' "$ll")"
-  # (a) references imply storage: a stack_rN reference requires the
-  #     alloca; a hike_window_mem reference requires the parameter.
-  if [ "$n_sr_ref" -gt 0 ] && [ "$n_sr_alloca" -lt 1 ]; then
-    echo "FAIL $name: (a) $n_sr_ref stack_rN reference(s) but no region alloca"
+  # (a) references imply storage: every referenced stack_rN id needs its
+  #     own alloca; a hike_window_mem reference requires the parameter.
+  if [ "$n_sr_missing" -gt 0 ] || { [ "$n_sr_ref" -gt 0 ] && [ "$n_sr_alloca" -lt 1 ]; }; then
+    echo "FAIL $name: (a) $n_sr_ref stack_rN reference(s), $n_sr_alloca alloca(s), $n_sr_missing undefined id(s)"
     FAIL=$((FAIL + 1))
   else
     echo "PASS $name: (a) $n_sr_alloca region alloca(s) for $n_sr_ref ref(s)"
@@ -85,11 +106,12 @@ for ll in "$OUT_DIR"/out_*.ll; do
     }
     /getelementptr.*%stack_r[0-9]+/ {
       line = $0
-      sub(/.*%stack_r[0-9]+, /, "", line)
-      if (match(line, /i64 %[A-Za-z0-9_.]+/)) {
+      # every variable index on the GEP, not just the first
+      while (match(line, /i64 %[A-Za-z0-9_.]+/)) {
         idx = substr(line, RSTART+4, RLENGTH-4)
         if (idx !~ /^-?[0-9]+$/ && !chain(idx))
           print "non-normalized GEP index into stack_r: " idx " in: " $0
+        line = substr(line, RSTART+RLENGTH)
       }
     }
   ' "$ll" | head -5)"
@@ -166,11 +188,13 @@ for ll in "$OUT_DIR"/out_*.ll; do
 
   # INFO (non-failing): per-module inttoptr-derived load count.
   n_itop_loads="$(awk '
-    /^  %[0-9]+ = inttoptr / {
-      line = $0; sub(/^  /, "", line); split(line, a, " "); defs[a[1]] = 1
+    / = inttoptr / {
+      if (match($0, /^  %[A-Za-z0-9_.]+ = inttoptr /)) {
+        line = $0; sub(/^  /, "", line); split(line, a, " "); defs[a[1]] = 1
+      }
     }
     / = load / {
-      if (match($0, /ptr %[0-9]+/)) {
+      if (match($0, /ptr %[A-Za-z0-9_.]+/)) {
         v = substr($0, RSTART + 4, RLENGTH - 4)
         if (v in defs) n++
       }

@@ -28,14 +28,22 @@ usage() {
 
 need_provenance() { provenance_ok "$TREE" || exit $?; }
 
+need_renderer() {
+  command -v "$LLC" >/dev/null 2>&1 || {
+    echo "FATAL: $LLC not found on PATH (set HIKE_LLC to pin one)" >&2
+    exit 2
+  }
+  echo "  tools: $("$LLC" --version 2>/dev/null | head -1)"
+}
+
 stage() {
   case "$1" in
     provenance) need_provenance ;;
     corpus)     "$HERE/compile_corpus.sh" "$CORPUS" ;;
     lift)       need_provenance; "$HERE/run_corpus.sh" "$CORPUS" "$EMIT" ;;
     allocas)    "$HERE/check_allocas.sh" "$EMIT" ;;
-    semantics)  need_provenance; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
-    opt-safety) need_provenance; "$HERE/semantic/run_semantic_opt.sh" "$CORPUS" "$EMIT" "$SEMOPT" ;;
+    semantics)  need_provenance; need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
+    opt-safety) need_provenance; need_renderer; "$HERE/semantic/run_semantic_opt.sh" "$CORPUS" "$EMIT" "$SEMOPT" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
     fail-before) "$HERE/fail_before.sh" ;;
     *)          usage ;;

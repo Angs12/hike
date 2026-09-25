@@ -11,11 +11,18 @@ hike_rename() {
       "$1" >"$2"
 }
 
+# The renderer: the llc on PATH, overridable for a pinned toolchain.
+LLC="${HIKE_LLC:-llc}"
+
 # llc a module to an object; no flags means -O0.
 hike_llc() {
   local ll="$1" obj="$2"; shift 2
   if [ "$#" -eq 0 ]; then set -- -O0; fi
-  llc "$@" -filetype=obj "$ll" -o "$obj"
+  command -v "$LLC" >/dev/null 2>&1 || {
+    echo "FATAL: $LLC not found on PATH (set HIKE_LLC to pin one)" >&2
+    return 127
+  }
+  "$LLC" "$@" -filetype=obj "$ll" -o "$obj"
 }
 
 # Link a lifted object with harness.c, plus setjmp_stub.S when the module
@@ -60,8 +67,12 @@ hike_run_cmp() {
 # given tree.  The shared switch can hold another session's build, so a
 # mismatch is a hard stop, never a warning.
 provenance_ok() {
-  local tree="$1" prov rec
-  prov="$(opam var lib 2>/dev/null)/hike/hike.cmxs.provenance"
+  local tree="$1" prov rec lib
+  if ! command -v opam >/dev/null 2>&1 || ! lib="$(opam var lib 2>/dev/null)" || [ -z "$lib" ]; then
+    echo "FATAL: the opam environment is not loaded — run: eval \$(opam env)" >&2
+    return 2
+  fi
+  prov="$lib/hike/hike.cmxs.provenance"
   if [ ! -f "$prov" ]; then
     echo "FATAL: no installed plugin provenance at $prov — run src/record_provenance.sh" >&2
     return 2
@@ -76,8 +87,10 @@ provenance_ok() {
   # the build) is a hard stop.
   local rec_src src
   rec_src="$(sed -n 's/^src_sha16: //p' "$prov")"
-  src="$(find "$tree/src" -name '*.ml' -o -name '*.mli' -o -name 'dune' \
-           | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16)"
+  src="$({ find "$tree/src" \( -name '*.ml' -o -name '*.mli' -o -name 'dune' -o -name '*.sh' \) -print \
+            | sort | xargs sha256sum 2>/dev/null; \
+           sha256sum "$tree/dune-project" 2>/dev/null; } \
+         | sha256sum | cut -c1-16)"
   if [ "$rec_src" != "$src" ]; then
     echo "FATAL: installed plugin sources differ from this tree ($rec_src != $src)" >&2
     echo "       rebuild+reinstall from this tree, then re-run src/record_provenance.sh" >&2

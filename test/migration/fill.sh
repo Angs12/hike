@@ -23,8 +23,10 @@ new_ids() {
 mapfile -t OLD < <(old_labels)
 mapfile -t NEW < <(new_ids)
 
+rc=0
 if [ "${#OLD[@]}" -ne "${#NEW[@]}" ]; then
   printf 'MISMATCH %s -> %s: %d old sites, %d pins\n' "$SRC" "$TGT" "${#OLD[@]}" "${#NEW[@]}" >&2
+  rc=1
 fi
 
 n=${#OLD[@]}
@@ -33,3 +35,5 @@ for ((i = 0; i < n; i++)); do
   ol="${OLD[$i]#*$'\t'}"; nl="${NEW[$i]#*$'\t'}"
   printf '| %s | %s | CARRIED | %s |\n' "${SRC}:$i" "$ol" "$nl"
 done
+
+exit "$rc"
