@@ -427,12 +427,17 @@ let tests : unit Alcotest.test list =
         let m = Clp.meet a b in
         check "CLP-39" (Clp.elem (w32 16) m && Clp.elem (w32 18) m));
 
-    pin "CLP-40" "A1: ... it is the wider operand {10,12,14,16,18} (over-approx)"
+    pin "CLP-40"
+      "A1: ... the wrapped-finite meet is the exact intersection {16,18}"
       (fun () ->
         let a = Clp.of_list ~width:32 [ w32 10; w32 12; w32 14; w32 16; w32 18 ] in
         let b = Clp.of_list ~width:32 [ w32 16; w32 17; w32 18; w32 19 ] in
         let m = Clp.meet a b in
-        check "CLP-40" (Clp.elem (w32 10) m && Clp.elem (w32 12) m && Clp.elem (w32 14) m));
+        check "CLP-40"
+          (Clp.elem (w32 16) m && Clp.elem (w32 18) m
+          && (not (Clp.elem (w32 10) m)) && (not (Clp.elem (w32 12) m))
+          && (not (Clp.elem (w32 14) m)) && (not (Clp.elem (w32 17) m))
+          && not (Clp.elem (w32 19) m)));
 
     pin "CLP-41" "A2: wrap {3,4,5} n {0,2,4} not bottom, contains 4"
       (fun () ->
@@ -1065,6 +1070,33 @@ let tests : unit Alcotest.test list =
            (not (Clp.is_top r))
            && Clp.min_elem r = Some (Wo.of_int ~width:64 0)
            && Clp.max_elem r = Some (Wo.of_int ~width:64 20)));
+
+    pin "CLP-114"
+      "WF-2: the wrapped-finite meet is sound — logxor {0x75..0x7B step 2} \
+       {0x88} contains all four concrete xors"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let q1 =
+          Clp.create ~width:8 ~step:(w8 2) ~cardn:(Cbat_word.of_int ~width:9 4)
+            (w8 0x75) in
+        let q2 = Clp.singleton (w8 0x88) in
+        let lx = Clp.logxor q1 q2 in
+        check "CLP-114"
+          (List.for_all (fun v -> Clp.elem (w8 v) lx)
+             [ 0xFD; 0xFF; 0xF1; 0xF3 ]));
+
+    pin "CLP-115"
+      "WF-3: the wrapped-finite meet is sound — logxor {0xCF} {0xE9,0xEC} \
+       contains both concrete xors"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let s1 = Clp.singleton (w8 0xCF) in
+        let s2 =
+          Clp.create ~width:8 ~step:(w8 3) ~cardn:(Cbat_word.of_int ~width:9 2)
+            (w8 0xE9) in
+        let lx = Clp.logxor s1 s2 in
+        check "CLP-115"
+          (List.for_all (fun v -> Clp.elem (w8 v) lx) [ 0x26; 0x23 ]));
   ]
 
 let () = run "clp" tests

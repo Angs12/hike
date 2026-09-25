@@ -505,6 +505,92 @@ let run_sweep () : int * int * int =
         done
       done);
 
+  (* ---- piece-list sweep: the distributed ops vs the concrete oracle ---- *)
+
+  (* Each piece op distributes over the canonical union; the concrete
+     pair oracle must land in the result.  The union/meet/diff rows pin
+     exactness for small operands. *)
+  let piece_widths = [ 4; 8 ] in
+  let piece_vals = [ 0; 1; 2; 3 ] in
+  let piece_cards = [ 1; 2; 3; 5 ] in
+  CKL.iter piece_widths ~f:(fun w ->
+      CKL.iter piece_vals ~f:(fun b1 ->
+          CKL.iter piece_vals ~f:(fun s1 ->
+              CKL.iter piece_cards ~f:(fun c1 ->
+                  CKL.iter piece_vals ~f:(fun b2 ->
+                      CKL.iter piece_vals ~f:(fun s2 ->
+                          CKL.iter piece_cards ~f:(fun c2 ->
+                              let p1 =
+                                Ws.Clp.create (CW.of_int ~width:w b1)
+                                  ~step:(CW.of_int ~width:w s1)
+                                  ~cardn:(CW.of_int ~width:(w + 1) c1) in
+                              let p2 =
+                                Ws.Clp.create (CW.of_int ~width:w b2)
+                                  ~step:(CW.of_int ~width:w s2)
+                                  ~cardn:(CW.of_int ~width:(w + 1) c2) in
+                              let pa = Ws.Clp.Pieces.of_progression p1 in
+                              let pb = Ws.Clp.Pieces.of_progression p2 in
+                              let a = Ws.Clp.Pieces.union pa pb in
+                              let xa = Ws.Clp.Pieces.elements a in
+                              let xb = Ws.Clp.Pieces.elements pb in
+                              let show =
+                                Printf.sprintf "w=%d b1=%d s1=%d c1=%d b2=%d s2=%d c2=%d"
+                                  w b1 s1 c1 b2 s2 c2 in
+                              CKL.iter
+                                [ ("add", Ws.Clp.Pieces.add, CW.add);
+                                  ("sub", Ws.Clp.Pieces.sub, CW.sub);
+                                  ("mul", Ws.Clp.Pieces.mul, CW.mul);
+                                  ("logand", Ws.Clp.Pieces.logand, CW.logand);
+                                  ("logor", Ws.Clp.Pieces.logor, CW.logor);
+                                  ("logxor", Ws.Clp.Pieces.logxor, CW.logxor) ]
+                                ~f:(fun (nm, f, wop) ->
+                                  incr checked;
+                                  let got = f a pb in
+                                  if not
+                                       (CKL.for_all xa ~f:(fun x ->
+                                            CKL.for_all xb ~f:(fun y ->
+                                                Ws.Clp.Pieces.elem (wop x y) got)))
+                                  then
+                                    bad
+                                      (Printf.sprintf
+                                         "PIECES %s %s: a concrete pair is outside the result"
+                                         nm show));
+                              incr checked;
+                              if not
+                                   (Ws.Clp.Pieces.equal (Ws.Clp.Pieces.union a pb) a)
+                              then bad (Printf.sprintf "PIECES union not exact %s" show);
+                              incr checked;
+                              let m = Ws.Clp.Pieces.meet a pb in
+                              if
+                                not
+                                  (CKL.for_all xb ~f:(fun x ->
+                                       Ws.Clp.Pieces.elem x m)
+                                  && CW.equal
+                                       (Ws.Clp.Pieces.cardinality m)
+                                       (Ws.Clp.Pieces.cardinality pb))
+                              then bad (Printf.sprintf "PIECES meet not exact %s" show);
+                              incr checked;
+                              let d = Ws.Clp.Pieces.diff a pb in
+                              let survivors =
+                                CKL.filter (Ws.Clp.Pieces.elements a)
+                                  ~f:(fun x -> not (Ws.Clp.elem x p2)) in
+                              let exact_d = List.length survivors <= 4 in
+                              if
+                                not
+                                  (CKL.for_all (Ws.Clp.Pieces.elements a)
+                                     ~f:(fun x ->
+                                       if Ws.Clp.elem x p2 then
+                                         (not exact_d)
+                                         || not (Ws.Clp.Pieces.elem x d)
+                                       else Ws.Clp.Pieces.elem x d))
+                              then bad (Printf.sprintf "PIECES diff not exact %s" show))))))));
+  CKL.iter piece_widths ~f:(fun w ->
+      let big = Ws.Clp.top w in
+      incr checked;
+      if not
+           (Ws.Clp.Pieces.elem (CW.zero w) (Ws.Clp.Pieces.of_progression big))
+      then bad (Printf.sprintf "PIECES top membership w=%d" w));
+
   (* Directional CLP checks. *)
   let check_directional () =
     let w64 = 64 in

@@ -404,6 +404,38 @@ let common_step (b1,s1) (b2,s2) : W.t =
   else let gcd_s = (bounded_gcd s1 s2) in
     bounded_gcd gcd_s b_diff
 
+let is_wrapped (p : t) : bool =
+  if is_infinite p || is_bottom p then false
+  else
+    match finite_end p with
+    | Some e -> W.(<) e (base_of p)
+    | None -> false
+
+(* A wrapped Finite piece is two non-wrapping arcs (the high arc before
+   the modulus and the low arc after the wrap); the meet of each arc is
+   joined. *)
+let split_wrapped (p : t) : t list =
+  if not (is_wrapped p) then [ p ]
+  else
+    let width = bitwidth p in
+    let b = base_of p and s = step_of p in
+    if W.is_zero s then [ p ]
+    else
+      let max_w = W.ones width in
+      let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
+      if W.is_zero n then [ infinite (b, s) ]
+      else
+        (* First index whose element wraps past the modulus. *)
+        let k_wrap = W.succ (W.div (W.sub max_w b) s) in
+        let high = create ~width ~step:s ~cardn:k_wrap b in
+        let low_count = W.sub n k_wrap in
+        if W.is_zero low_count then [ high ]
+        else
+          let low_base = W.add b (W.mul k_wrap s) in
+          let low = create ~width ~step:s ~cardn:low_count low_base in
+          [ high; low ]
+
+
 let subset_finite (p1 : t) (p2 : t) : bool =
   let width = bitwidth p1 in
   let nb2 = W.neg (base_of p2) in
@@ -464,7 +496,6 @@ let subset (p1 : t) (p2 : t) : bool =
     | Circular, _ -> false
     | (Ascending | Descending), Finite -> false
     | Ascending, Descending | Descending, Ascending -> false
-
 let safe_lcm s1 s2 =
   try
     let step = W.lcm_exn s1 s2 in
@@ -575,6 +606,60 @@ let solve_descending_circular ~width (desc : t) (circ : t) : t =
     | None -> bottom width
     | Some (x, step) -> create_descending ~width ~base:x ~step
 
+(* Union; same width expected. *)
+let union (p1 : t) (p2 : t) : t =
+  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
+  else
+    let width = bitwidth p1 in
+    if is_bottom p1 then p2
+    else if is_bottom p2 then p1
+    else if is_top p1 || is_top p2 then top width
+    else if equal p1 p2 then p1
+    else match p1.dir, p2.dir with
+    | Finite, Finite ->
+      Option.value_map ~default:p2 (finite_end p1) ~f:begin fun e1 ->
+        Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
+          let base, newE = interval_union ((base_of p1), e1) ((base_of p2), e2) in
+          let step = common_step ((base_of p1), (step_of p1)) ((base_of p2), (step_of p2)) in
+          let cardn = cardn_from_bounds base step newE in
+          create base ~step ~cardn
+        end
+      end
+    | Ascending, Ascending ->
+      let base = W.min p1.base p2.base in
+      let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
+      create_ascending ~width ~base ~step
+    | Descending, Descending ->
+      let base = W.max p1.base p2.base in
+      let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
+      create_descending ~width ~base ~step
+    | Ascending, Finite ->
+      let lo2 = Option.value (min_elem p2) ~default:p2.base in
+      let base = W.min p1.base lo2 in
+      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
+      create_ascending ~width ~base ~step
+    | Finite, Ascending ->
+      let lo1 = Option.value (min_elem p1) ~default:p1.base in
+      let base = W.min lo1 p2.base in
+      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
+      create_ascending ~width ~base ~step
+    | Descending, Finite ->
+      let hi2 = Option.value (max_elem p2) ~default:p2.base in
+      let base = W.max p1.base hi2 in
+      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
+      create_descending ~width ~base ~step
+    | Finite, Descending ->
+      let hi1 = Option.value (max_elem p1) ~default:p1.base in
+      let base = W.max hi1 p2.base in
+      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
+      create_descending ~width ~base ~step
+    | _ ->
+      let step = common_step (base_of p1, step_of p1) (base_of p2, step_of p2) in
+      infinite (base_of p1, step)
+
+(* First common point of both progressions. *)
+
+
 let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
   let width = bitwidth p1 in
   let p1, p2 = if W.(>=) (base_of p1) (base_of p2) then p1, p2 else p2, p1 in
@@ -582,6 +667,26 @@ let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
   let translated_p1 = translate p1 (W.neg (base_of p1)) in
   let translated_p2 = translate p2 (W.neg (base_of p1)) in
   let p1, p2 = translated_p1, translated_p2 in
+  if is_wrapped p2 then begin
+    (* The translated second operand wraps: its high arc [base, max]
+       and low arc [0, finite_end] meet the base-0 first operand
+       separately; the results join. *)
+    let max_w = W.ones width in
+    let s1 = step_of p1 and s2 = step_of p2 in
+    let e1 = Option.value (finite_end p1) ~default:(base_of p1) in
+    let e2 = Option.value (finite_end p2) ~default:(base_of p2) in
+    let lo1 = base_of p1 in
+    let high =
+      solve_grid_interval ~width ~lo1 ~s1 ~lo2:(base_of p2) ~s2
+        ~min_bound:(base_of p2) ~max_bound:(W.min e1 max_w) in
+    let k_wrap = W.succ (W.div (W.sub max_w (base_of p2)) s2) in
+    let low_base = W.add (base_of p2) (W.mul k_wrap s2) in
+    let low =
+      solve_grid_interval ~width ~lo1 ~s1 ~lo2:low_base ~s2
+        ~min_bound:low_base ~max_bound:(W.min e1 e2) in
+    translate (union high low) translation
+  end
+  else
   let p1_infinite = is_infinite p1 in
   let p2_infinite = is_infinite p2 in
   let open Monads.Std.Monad.Option.Syntax in
@@ -682,7 +787,9 @@ let step1_intersection (width : int) (p1 : t) (p2 : t) : t option =
       end
   | _ -> None
 
-(* First common point of both progressions. *)
+(* A wrapped Finite piece: its traversal wraps, so its finite_end sits
+   below its base. *)
+
 let rec intersection (p1 : t) (p2 : t) : t =
   (* Width mismatch returns the wider operand. *)
   if bitwidth p1 <> bitwidth p2 then
@@ -696,6 +803,15 @@ let rec intersection (p1 : t) (p2 : t) : t =
     else (match step1_intersection width p1 p2 with
     | Some p -> p
     | None ->
+          (* A wrapped Finite operand must meet arc-by-arc: its
+             finite_end is the wrap edge, not its upper bound. *)
+          if is_wrapped p1 || is_wrapped p2 then
+            List.fold
+              (List.concat_map (split_wrapped p1) ~f:(fun q1 ->
+                   List.map (split_wrapped p2) ~f:(fun q2 ->
+                       intersection q1 q2)))
+              ~init:(bottom width) ~f:union
+          else
           (match p1.dir, p2.dir with
           | Finite, Finite -> intersection_finite_or_circular p1 p2
           | Circular, Circular -> intersection_finite_or_circular p1 p2
@@ -823,56 +939,6 @@ let diff (p1 : t) (p2 : t) : t =
           else diff_finite p1 i i_end cardn ~fallback:enumerate_or_identity
 
 
-(* Union; same width expected. *)
-let union (p1 : t) (p2 : t) : t =
-  if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
-  else
-    let width = bitwidth p1 in
-    if is_bottom p1 then p2
-    else if is_bottom p2 then p1
-    else if is_top p1 || is_top p2 then top width
-    else if equal p1 p2 then p1
-    else match p1.dir, p2.dir with
-    | Finite, Finite ->
-      Option.value_map ~default:p2 (finite_end p1) ~f:begin fun e1 ->
-        Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
-          let base, newE = interval_union ((base_of p1), e1) ((base_of p2), e2) in
-          let step = common_step ((base_of p1), (step_of p1)) ((base_of p2), (step_of p2)) in
-          let cardn = cardn_from_bounds base step newE in
-          create base ~step ~cardn
-        end
-      end
-    | Ascending, Ascending ->
-      let base = W.min p1.base p2.base in
-      let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
-      create_ascending ~width ~base ~step
-    | Descending, Descending ->
-      let base = W.max p1.base p2.base in
-      let step = common_step (p1.base, p1.step) (p2.base, p2.step) in
-      create_descending ~width ~base ~step
-    | Ascending, Finite ->
-      let lo2 = Option.value (min_elem p2) ~default:p2.base in
-      let base = W.min p1.base lo2 in
-      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
-      create_ascending ~width ~base ~step
-    | Finite, Ascending ->
-      let lo1 = Option.value (min_elem p1) ~default:p1.base in
-      let base = W.min lo1 p2.base in
-      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
-      create_ascending ~width ~base ~step
-    | Descending, Finite ->
-      let hi2 = Option.value (max_elem p2) ~default:p2.base in
-      let base = W.max p1.base hi2 in
-      let step = common_step (p1.base, p1.step) (p2.base, step_of p2) in
-      create_descending ~width ~base ~step
-    | Finite, Descending ->
-      let hi1 = Option.value (max_elem p1) ~default:p1.base in
-      let base = W.max hi1 p2.base in
-      let step = common_step (p1.base, step_of p1) (p2.base, p2.step) in
-      create_descending ~width ~base ~step
-    | _ ->
-      let step = common_step (base_of p1, step_of p1) (base_of p2, step_of p2) in
-      infinite (base_of p1, step)
 
 
 type idx = int

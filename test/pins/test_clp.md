@@ -47,7 +47,7 @@ recipe is the textual inversion of the pinned contract recorded below.
 | CLP-37 | P5: the top-path hit emits a warning log line (section cbat_vsa) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-38 | A1: meet wrap {10..18} n {16..19} is NOT bottom (live path) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-39 | A1: ... and still contains the true intersection {16,18} | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
-| CLP-40 | A1: ... it is the wider operand {10,12,14,16,18} (over-approx) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
+| CLP-40 | A1: ... the wrapped-finite meet is the exact intersection {16,18} | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-41 | A2: wrap {3,4,5} n {0,2,4} not bottom, contains 4 | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-42 | A3: genuinely disjoint meets are still bottom (unchanged) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-43 | A3: bottom is still the meet zero; top the meet identity | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
@@ -119,3 +119,5 @@ recipe is the textual inversion of the pinned contract recorded below.
 | CLP-110 | PBH-M9: mod/smod row soundness sweep (widths 4..8, all intervals, k<=5) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-111 | PBH-M10: same-quotient mod results are the exact residue hull | share CLP-110's recipe (one sweep, two checks) | pin FAILs under that inversion (re-demonstrated by review) |
 | CLP-112 | PBH-M12: mod by a zero-straddling divisor keeps the dividend hull (never top) | drop the zero-straddling arm in `Cbat_clp.modulo` | pin FAILs (top, not `[0,20]`) |
+| CLP-114 | WF-2: the wrapped-finite meet is sound — logxor {0x75..0x7B step 2} {0x88} contains all four concrete xors | drop the wrapped branch in `intersection` | pin FAILs (0xF3 missing) |
+| CLP-115 | WF-3: the wrapped-finite meet is sound — logxor {0xCF} {0xE9,0xEC} contains both concrete xors | drop the wrapped branch in `intersection_finite_or_circular` | pin FAILs (the meet is bottom) |

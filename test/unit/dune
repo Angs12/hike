@@ -27,6 +27,7 @@
   test_map_lattice
   test_word
   test_ws
+  test_pieces
   test_call_effects
   test_backward
   test_wto

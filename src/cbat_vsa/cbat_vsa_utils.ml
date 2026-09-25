@@ -30,6 +30,9 @@ let not_implemented ?(top : 'a option) component : 'a = match top with
 (* Max elements of an exact set. *)
 let fin_set_size : int = 10
 
+(* Max progressions in a canonical piece union. *)
+let max_pieces : int = 4
+
 (* Integer division rounding up. *)
 let cdiv_int (x : int) (y : int) : int = (x - 1)/y + 1
 

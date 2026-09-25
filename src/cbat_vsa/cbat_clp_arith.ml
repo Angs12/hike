@@ -28,6 +28,18 @@ let width_mismatch (p1 : t) (p2 : t) : int option =
   if bitwidth p1 = bitwidth p2 then None
   else Some (Stdlib.max (bitwidth p1) (bitwidth p2))
 
+(* A wrapped Finite operand is two arcs: the op distributes over them and
+   the results merge through the sound union. *)
+let arcs1 (f : t -> t) (p : t) : t =
+  List.fold (split_wrapped p) ~init:(bottom (bitwidth p))
+    ~f:(fun acc q -> union acc (f q))
+
+let arcs2 (f : t -> t -> t) (p1 : t) (p2 : t) : t =
+  let width = Stdlib.max (bitwidth p1) (bitwidth p2) in
+  List.fold (split_wrapped p1) ~init:(bottom width) ~f:(fun acc q1 ->
+      List.fold (split_wrapped p2) ~init:acc
+        ~f:(fun acc q2 -> union acc (f q1 q2)))
+
 let add (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
@@ -51,7 +63,6 @@ let add (p1 : t) (p2 : t) : t =
         let step = bounded_gcd (step_of p1) (step_of p2) in
         if W.(<) e' e1' then infinite (base, step)
         else let cardn = cardn_from_bounds (W.zero sz) step e' in create base ~step ~cardn
-
 
 
 let neg (p : t) : t =
@@ -95,6 +106,7 @@ let mul (p1 : t) (p2 : t) : t =
           let fit = W.extract_exn ~hi:(sz - 1) in
           infinite (fit base, fit step)
         else create ~width:sz base ~step ~cardn
+
 
 
 
@@ -193,6 +205,7 @@ let logand_rule ?f (cp1 : t) (cp2 : t) : t =
 
 let logand (p1 : t) (p2 : t) : t = logand_rule p1 p2
 
+
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
 
 (* [q] is [lnot p].  When [p] is create-normalized (Finite or Circular)
@@ -235,6 +248,7 @@ let logxor (p1 : t) (p2 : t) : t =
   (* Meet of two sound approximations. *)
   intersection approx1 approx2
 
+
 (* Overshift image is sign extension. *)
 let overshift_sign_extend (sz : int) : t =
   create ~width:sz ~step:(W.ones sz)
@@ -276,8 +290,8 @@ let cap_amount (p2 : t) (cap : W.t) (min_p2 : W.t) (e2 : W.t) : t list =
 (* Overshift: exact, overshifted, straddling. *)
 let compare_width = 64
 
-let split_shift ~(sz1 : int) ~(overshift : t)
-    ~(exact : t -> W.t -> W.t -> t) (p2 : t) : t option =
+let split_shift_parts ~(sz1 : int) ~(overshift : t)
+    ~(exact : t -> W.t -> W.t -> t) (p2 : t) : t list option =
   let open Monads.Std.Monad.Option.Syntax in
   min_elem p2 >>= fun min_p2 ->
   max_elem p2 >>= fun max_p2 ->
@@ -287,20 +301,26 @@ let split_shift ~(sz1 : int) ~(overshift : t)
   let min_p2_i = W.extract_exn ~hi:(amount_w - 1) min_p2 in
   if W.(<) max_p2_i width_i then
     (* All amounts exact. *)
-    !!(exact p2 min_p2 max_p2)
+    !!([ exact p2 min_p2 max_p2 ])
   else if W.(>=) min_p2_i width_i then
     (* All amounts overshifted. *)
-    !!overshift
+    !!([ overshift ])
   else
     (* Mixed amounts: capped exact plus overshift. *)
     let cap = W.of_int (sz1 - 1) ~width:(W.bitwidth min_p2) in
     let e2 = Option.value (finite_end p2) ~default:min_p2 in
     let parts = cap_amount p2 cap min_p2 e2 in
-    !!(List.fold parts ~init:overshift ~f:(fun acc p2' ->
-        union acc (exact p2' (base_of p2')
-                     (Option.value (finite_end p2') ~default:(base_of p2')))))
+    !!(overshift :: List.map parts ~f:(fun p2' ->
+        exact p2' (base_of p2')
+          (Option.value (finite_end p2') ~default:(base_of p2'))))
 
-let lshift (p1 : t) (p2 : t) : t =
+let split_shift ~sz1 ~overshift ~exact (p2 : t) : t option =
+  Option.map (split_shift_parts ~sz1 ~overshift ~exact p2)
+    ~f:(function
+      | [] -> overshift
+      | x :: rest -> List.fold rest ~init:x ~f:union)
+
+let lshift_parts (p1 : t) (p2 : t) : t list =
   let sz1 = bitwidth p1 in
     let open Monads.Std.Monad.Option.Syntax in
   (match begin
@@ -322,11 +342,17 @@ let lshift (p1 : t) (p2 : t) : t =
           (* Extra bit so succ never wraps. *)
           W.succ (W.extract_exn ~hi:e_width div_by_step) in
       create base ~step ~cardn in
-    split_shift ~sz1 ~overshift:(create (W.zero sz1))
+    split_shift_parts ~sz1 ~overshift:(create (W.zero sz1))
       ~exact:exact_path p2
   end with
-  | None -> bottom sz1
-  | Some x -> x)
+  | None -> [ bottom sz1 ]
+  | Some parts -> parts)
+
+let lshift (p1 : t) (p2 : t) : t =
+  match lshift_parts p1 p2 with
+  | [] -> bottom (bitwidth p1)
+  | x :: rest -> List.fold rest ~init:x ~f:union
+
 
 let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
   (* Widths match after coercion. *)
@@ -342,7 +368,7 @@ let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
       (rshift (base_of p1) @@ e2)
   else W.one sz1
 
-let rec rshift (p1 : t) (p2 : t) : t =
+let rec rshift_parts (p1 : t) (p2 : t) : t list =
   let sz1 = bitwidth p1 in
   let sz2 = bitwidth p2 in
   if sz1 <> sz2 then
@@ -350,8 +376,10 @@ let rec rshift (p1 : t) (p2 : t) : t =
     let w = Stdlib.max sz1 sz2 in
     let ext_zero (p : t) : t =
       create ~width:w (base_of p) ~step:(step_of p) ~cardn:(cardn_of p) in
-    let shifted = rshift (ext_zero p1) (ext_zero p2) in
-    create ~width:sz1 (base_of shifted) ~step:(step_of shifted) ~cardn:(cardn_of shifted)
+    List.map (rshift_parts (ext_zero p1) (ext_zero p2))
+      ~f:(fun shifted ->
+        create ~width:sz1 (base_of shifted) ~step:(step_of shifted)
+          ~cardn:(cardn_of shifted))
   else
   let p1 = unwrap p1 in
   let p2 = unwrap p2 in
@@ -367,15 +395,21 @@ let rec rshift (p1 : t) (p2 : t) : t =
         let step = rshift_step W.rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 in
         let cardn = cardn_from_bounds base step (W.rshift e1 (base_of p2)) in
         create base ~step ~cardn in
-    split_shift ~sz1 ~overshift:(create (W.zero sz1))
+    split_shift_parts ~sz1 ~overshift:(create (W.zero sz1))
       ~exact:(fun p2 min_p2 _ ->
         exact_path p2 (Option.value ~default:min_p2 (finite_end p2)))
       p2
   end with
-  | None -> bottom sz1
-  | Some x -> x)
+  | None -> [ bottom sz1 ]
+  | Some parts -> parts)
 
-let rec arshift (p1 : t) (p2 : t) : t =
+let rshift (p1 : t) (p2 : t) : t =
+  match rshift_parts p1 p2 with
+  | [] -> bottom (bitwidth p1)
+  | x :: rest -> List.fold rest ~init:x ~f:union
+
+
+let rec arshift_parts (p1 : t) (p2 : t) : t list =
   let sz1 = bitwidth p1 in
   let sz2 = bitwidth p2 in
   if sz1 <> sz2 then
@@ -397,12 +431,13 @@ let rec arshift (p1 : t) (p2 : t) : t =
           (* Mixed sign: top. *)
           top sz1
       | _ -> top sz1 in
-    if is_top p1' then top sz1
+    if is_top p1' then [ top sz1 ]
     else
       let p2' =
         create ~width:w (base_of p2) ~step:(step_of p2) ~cardn:(cardn_of p2) in
-      let shifted = arshift p1' p2' in
-      create ~width:sz1 (base_of shifted) ~step:(step_of shifted) ~cardn:(cardn_of shifted)
+      List.map (arshift_parts p1' p2') ~f:(fun shifted ->
+        create ~width:sz1 (base_of shifted) ~step:(step_of shifted)
+          ~cardn:(cardn_of shifted))
   else
   let zero = W.zero sz1 in
   (* True set drives sign classification. *)
@@ -432,13 +467,19 @@ let rec arshift (p1 : t) (p2 : t) : t =
           in
         let cardn = cardn_from_bounds base step new_end in
         create base ~step ~cardn in
-    split_shift ~sz1 ~overshift:(overshift_value p1c)
+    split_shift_parts ~sz1 ~overshift:(overshift_value p1c)
       ~exact:(fun p2 min_p2 _ ->
         exact_path p2 (Option.value ~default:min_p2 (finite_end p2)))
       p2
   end with
-  | None -> bottom sz1
-  | Some x -> x)
+  | None -> [ bottom sz1 ]
+  | Some parts -> parts)
+
+let arshift (p1 : t) (p2 : t) : t =
+  match arshift_parts p1 p2 with
+  | [] -> bottom (bitwidth p1)
+  | x :: rest -> List.fold rest ~init:x ~f:union
+
 
 let split_at_n (p : t) n : t * t =
   
@@ -487,24 +528,26 @@ let extract_lo ?(lo = 0) (p : t) : t =
         create base ~step ~cardn
   end
 
-let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
+(* The high-extract parts: the full-width case keeps its two pieces
+   instead of hulling them. *)
+let extract_hi_parts ?(hi = None) ?(signed = false) (p : t) : t list =
   let sz = bitwidth p in
   let hiv = Option.value ~default:(bitwidth p - 1) hi in
   (* Degenerate cast keeps top. *)
-  if hiv < 0 then top sz
+  if hiv < 0 then [ top sz ]
   else if not signed && hiv + 1 >= sz then
     let res1, res2 = extract_exact ~width:(hiv + 1) p in
-    union res1 res2
+    [ res1; res2 ]
   else if not signed then
-    create ~width:(hiv+1) (base_of p) ~step:(step_of p) ~cardn:(cardn_of p)
-  else if hiv >= sz then top (hiv + 1)
+    [ create ~width:(hiv+1) (base_of p) ~step:(step_of p) ~cardn:(cardn_of p) ]
+  else if hiv >= sz then [ top (hiv + 1) ]
   else
     let ext =  W.extract_exn ~hi:hiv in
     let ext_signed w = W.extract_exn ~hi:hiv (W.signed w) in
     match finite_end p with
-    | None -> bottom (hiv + 1)
+    | None -> [ bottom (hiv + 1) ]
     | Some e ->
-        if is_infinite p then infinite (ext (base_of p), ext (step_of p))
+        if is_infinite p then [ infinite (ext (base_of p), ext (step_of p)) ]
         else
           (* negmin precedes maxint. *)
           let negmin = half sz in
@@ -512,52 +555,70 @@ let extract_hi ?(hi = None) ?(signed = false) (p : t) : t =
           if elem negmin p && elem posmax p &&
              ((base_of p) <> negmin || e <> posmax) then
             
-            not_implemented ~top:(top (hiv + 1))
-              "extract signed crossing max signed int"
+            [ not_implemented ~top:(top (hiv + 1))
+                "extract signed crossing max signed int" ]
           else
             let e' = W.sub e (base_of p) in
             let newE' = ext e' in
             let base = if signed then ext_signed (base_of p) else ext (base_of p) in
             let step = ext (step_of p) in
             (* Wrap covers the full circle. *)
-            if W.(<) newE' e' then infinite(base, step)
+            if W.(<) newE' e' then [ infinite(base, step) ]
             else
               let cardn = cardn_from_bounds (W.zero (hiv + 1)) step newE' in
-              create base ~step ~cardn
+              [ create base ~step ~cardn ]
+
+let extract_hi ?hi ?signed (p : t) : t =
+  match extract_hi_parts ?hi ?signed p with
+  | [] -> bottom (bitwidth p)
+  | x :: rest -> List.fold rest ~init:x ~f:union
 
 let extract_internal ?hi ?(lo = 0) ?(signed = false) (p : t) : t =
   let hi = Option.map hi ~f:(fun hi -> hi - lo) in
   extract_lo ~lo p |> extract_hi ~hi ~signed
 
+let extract_internal_parts ?hi ?(lo = 0) ?(signed = false) (p : t) : t list =
+  let hi = Option.map hi ~f:(fun hi -> hi - lo) in
+  extract_hi_parts ~hi ~signed (extract_lo ~lo p)
+
 (* Degenerate cast keeps top. *)
-let cast ct (sz : int) (p : t) : t =
+let cast_parts ct (sz : int) (p : t) : t list =
   let width = bitwidth p in
   if sz <= 0 then
-    not_implemented ~top:(top width)
-      (Printf.sprintf "cast to degenerate size %d" sz)
+    [ not_implemented ~top:(top width)
+        (Printf.sprintf "cast to degenerate size %d" sz) ]
   else match ct with
   | Bil.HIGH when sz > width ->
-    not_implemented ~top:(top width)
-      (Printf.sprintf "HIGH cast to size %d wider than operand %d" sz width)
+    [ not_implemented ~top:(top width)
+        (Printf.sprintf "HIGH cast to size %d wider than operand %d" sz width) ]
   | Bil.SIGNED when sz > width ->
     (* Sign-extension: exact when the set stays in one sign half (the
        progression maps element-wise under [sext]); top otherwise. *)
-    if is_infinite p then top sz
+    if is_infinite p then [ top sz ]
     else (
       match finite_end p with
-      | None -> top sz
-      | Some e when W.msb (base_of p) <> W.msb e -> top sz
+      | None -> [ top sz ]
+      | Some e when W.msb (base_of p) <> W.msb e -> [ top sz ]
       | Some _ ->
-        create ~width:sz
-          ~step:(W.cast Bil.SIGNED sz (step_of p))
-          ~cardn:(cardn_of p)
-          (W.cast Bil.SIGNED sz (base_of p)))
-  | Bil.UNSIGNED -> extract_internal ~hi:(sz - 1) p
-  | Bil.SIGNED -> extract_internal ~hi:(sz - 1) ~signed:true p
-  | Bil.LOW -> extract_internal ~hi:(sz - 1) p
-  | Bil.HIGH -> extract_internal ~lo:(width - sz) p
+        [ create ~width:sz
+            ~step:(W.cast Bil.SIGNED sz (step_of p))
+            ~cardn:(cardn_of p)
+            (W.cast Bil.SIGNED sz (base_of p)) ])
+  | Bil.UNSIGNED -> extract_internal_parts ~hi:(sz - 1) p
+  | Bil.SIGNED -> extract_internal_parts ~hi:(sz - 1) ~signed:true p
+  | Bil.LOW -> extract_internal_parts ~hi:(sz - 1) p
+  | Bil.HIGH -> extract_internal_parts ~lo:(width - sz) p
+
+let cast ct sz p : t =
+  match cast_parts ct sz p with
+  | [] -> bottom (bitwidth p)
+  | x :: rest -> List.fold rest ~init:x ~f:union
+
 
 let extract ?hi:hi ?lo:lo (p : t) : t = extract_internal ?hi ?lo p
+
+
+let extract_parts ?hi:hi ?lo:lo (p : t) : t list = extract_internal_parts ?hi ?lo p
 
 let concat (p1 : t) (p2 : t) : t =
   let width1 = bitwidth p1 in
@@ -570,6 +631,7 @@ let concat (p1 : t) (p2 : t) : t =
   let p2' = cast Bil.UNSIGNED width p2 in
   
   (add p1_shifted p2')
+
 
 
 (* BAP div truncates; ediv is Euclidean. *)
@@ -604,6 +666,7 @@ let div (p1 : t) (p2 : t) : t =
      merely unbounded (live): only bottom is bottom. *)
   | None -> if is_bottom p1 || is_bottom p2 then bottom width else top width
   | Some x -> x)
+
 
 let sdiv_word (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
 let smod_word (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
@@ -698,6 +761,7 @@ let modulo (p1 : t) (p2 : t) : t =
           | _ -> interval ~width (W.zero width) (W.pred kmax)))
     | _ -> sub p1 (mul (div p1 p2) p2)
 
+
 (* The signed residue bound for a positive constant divisor: |r| <=
    k-1, refined to the exact sub-interval inside one truncated
    quotient block; a mixed-sign dividend takes the wrapping band
@@ -726,3 +790,4 @@ let smodulo (p1 : t) (p2 : t) : t =
          else interval ~width neg_band (W.pred k)
        | _ -> sub p1 (mul (sdiv p1 p2) p2))
     | _ -> sub p1 (mul (sdiv p1 p2) p2)
+

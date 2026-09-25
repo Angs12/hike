@@ -44,12 +44,82 @@ val is_bottom : t -> bool
 val is_ascending : t -> bool
 val is_descending : t -> bool
 val is_circular : t -> bool
+val is_wrapped : t -> bool
+
+(* A wrapped Finite piece's two non-wrapping arcs. *)
+val split_wrapped : t -> t list
 
 val subset : t -> t -> bool
 val translate : t -> Cbat_word.t -> t
 
 val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t
+
+(* The progression type, named for the [Pieces] signature. *)
+type progression = t
+
+(* The canonical, capped union of progressions.  The smart constructors
+   are the only way in; the type is abstract and the list is never
+   exposed as a raw value. *)
+module Pieces : sig
+  type t
+
+  val to_list : t -> progression list
+  val fold : t -> init:'a -> f:('a -> progression -> 'a) -> 'a
+  val iter : t -> f:(progression -> unit) -> unit
+  val elements : t -> Cbat_word.t list
+
+  val of_progression : progression -> t
+  val of_list : width:int -> Cbat_word.t list -> t
+  val singleton : Cbat_word.t -> t
+  val top : int -> t
+  val bottom : int -> t
+
+  val bitwidth : t -> int
+  val is_top : t -> bool
+  val is_bottom : t -> bool
+  val min_elem : t -> Cbat_word.t option
+  val max_elem : t -> Cbat_word.t option
+  val min_elem_signed : t -> Cbat_word.t option
+  val max_elem_signed : t -> Cbat_word.t option
+  val cardinality : t -> Cbat_word.t
+  val elem : Cbat_word.t -> t -> bool
+  val equal : t -> t -> bool
+  val precedes : t -> t -> bool
+  val overlap : t -> t -> bool
+  val splits_by : t -> Cbat_word.t -> bool
+  val is_ascending : t -> bool
+  val is_descending : t -> bool
+  val is_circular : t -> bool
+
+  val union : t -> t -> t
+  val intersection : t -> t -> t
+  val diff : t -> t -> t
+  val join : t -> t -> t
+  val meet : t -> t -> t
+  val widen_join : t -> t -> t
+  val extrapolate_steps : steps:int -> t -> t -> t
+  val translate : t -> Cbat_word.t -> t
+
+  val add : t -> t -> t
+  val sub : t -> t -> t
+  val mul : t -> t -> t
+  val div : t -> t -> t
+  val sdiv : t -> t -> t
+  val modulo : t -> t -> t
+  val smodulo : t -> t -> t
+  val arshift : t -> t -> t
+  val rshift : t -> t -> t
+  val lshift : t -> t -> t
+  val logand : t -> t -> t
+  val logor : t -> t -> t
+  val logxor : t -> t -> t
+  val lnot : t -> t
+  val neg : t -> t
+  val extract : ?hi:int -> ?lo:int -> t -> t
+  val cast : Bil.cast -> int -> t -> t
+  val concat : t -> t -> t
+end
 
 
 
