@@ -24,6 +24,11 @@ let minus_addr sp (off : int64) : exp =
       Bil.Var sp,
       Bil.Int (Cbat_word.to_word (w64 (Int64.to_int off))) )
 
+(* The model's 64-KiB below-entry floor plus the ABI entry word. *)
+let stack_floor_bytes = Int64.mul 64L 1024L
+let residue_index = Int64.add stack_floor_bytes 8L
+let unbounded_residue_bytes = Int64.mul 2L residue_index
+
 let tid_set (tids : tid list) : Tid.Set.t =
   List.fold_left (fun s t -> Core.Set.add s t) Tid.Set.empty tids
 
@@ -327,10 +332,10 @@ let tests : unit Alcotest.test list =
         in
         check "MOD-10"
           ((match l2.Sm.anchor with
-           | Some (0, idx) -> Int64.equal idx 65544L
+           | Some (0, idx) -> Int64.equal idx residue_index
            | _ -> false)
           && Base.List.exists l2.Sm.regions ~f:(fun (id, _, b) ->
-                 Int.equal id 0 && Int64.equal b 131088L)));
+                 Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
 
     pin "MOD-11" "PR-B6: a plain-TOP-only residue sub takes the same unbounded floor"
       (fun () ->
@@ -354,7 +359,7 @@ let tests : unit Alcotest.test list =
         in
         check "MOD-11"
           (Base.List.exists l3.Sm.regions ~f:(fun (id, _, b) ->
-               Int.equal id 0 && Int64.equal b 131088L)));
+               Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
 
     (* Lane C: stack-to-locals fission. *)
     pin "MOD-12"

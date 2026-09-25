@@ -412,8 +412,8 @@ let tests : unit Alcotest.test list =
              false
            with Failure _ -> true));
 
-    (* J3: a foreign pointer target (a constant naming no block) — the
-       indirect transfer stays. *)
+    (* The materializer retargets an existing indirect transfer to the
+       addresses named by the case. *)
     pin "RES-21"
       "the materializer: a gap word re-lifts its case body and retargets existing blocks"
       (fun () ->

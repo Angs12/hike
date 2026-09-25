@@ -682,7 +682,7 @@ let tests : unit Alcotest.test list =
         check "CLP-72" (Clp.equal r1 (Clp.create (w32 0x3F))));
 
     pin "CLP-73"
-      "A-2: the 252-hit shape (32-bit >> 64-bit [0,40)) — the coerced three-way split yields a non-top, \
+      "A-2: the 32-bit shift over a 64-bit interval [0,40) yields a non-top, \
        non-bottom result"
       (fun () ->
         let amt40 = Clp.create ~width:64 ~step:(w64 1) ~cardn:(Cbat_word.of_int ~width:65 40) (w64 0) in

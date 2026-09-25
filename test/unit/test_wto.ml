@@ -68,9 +68,10 @@ let wsccs_of comps =
   Base.List.map (scc_comps comps) ~f:(fun (_, ms) -> Core.Set.of_list (module Tid) ms)
 
 (* The Bourdoncle battery over one graph: vertex coverage, heads are
-   exactly cycle-bound widening points, every loop's Cw.SCC is one WTO
-   component carrying a head.  Five pins per call; [setup] rebuilds the
-   graph inside each closure. *)
+   exactly cycle-bound widening points, and every nontrivial graph SCC is
+   compared with the WTO component sets.  The SCC helper is an independent
+   graph-level oracle; five pins run per call and [setup] rebuilds the graph
+   inside each closure. *)
 let wto_battery_pins ~(ids : string list) ~(label : string)
     (setup : unit -> Tid.t list * (Tid.t * Tid.t) list) : unit Alcotest.test list =
   match ids with

@@ -979,9 +979,7 @@ let tests : unit Alcotest.test list =
         check_bound "property LM F1: the taken view's lower bound is the entry constant 0"
           (Ws.min_elem taken_i) (fun lo -> Cbat_word.equal lo (w32 0)));
 
-    (* F1-NEQ: the NEQ-counter head lands at [0, K] (max == K) — Finite
-       extrapolation fires end-to-end. *)
-    (* F1-FT: the fallthrough-edge fixture — the head, taken body, and
+        (* F1-FT: the fallthrough-edge fixture — the head, taken body, and
        fallthrough exit pin the walk's delivered values. *)
     pin "INT-15"
       "LM F1-FT: the head, taken body, and fallthrough exit pin the walk-delivered counter values"
@@ -1011,14 +1009,7 @@ let tests : unit Alcotest.test list =
            the pin)"
           (Ws.equal exit_i (Ws.singleton k)));
 
-    (* F1-B1 (walk soundness): the walk's refinement invariants — the head
-       lands at [0, K] and the taken body at [0, K-1]; a narrowing walk or
-       a manufactured bottom moves these exact-value pins. *)
-    (* F1-B2: two sequential SCCs refine independently — loop 1's walk spend
-       cannot starve loop 2. *)
-    (* F1-B3: re-runs the F1-FT shape and pins the walk-delivered value
-       (the fallthrough exit holds {K} exactly). *)
-    (* F1-B4 (the walk's cell meet): the walk's product is the cell meet
+                (* F1-B4 (the walk's cell meet): the walk's product is the cell meet
        through a Load-producing def, so the fixture seeds a Var constraint
        on a var whose guard-block def is a Load over a known cell with a
        WIDE stored range. *)

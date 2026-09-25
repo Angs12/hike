@@ -1,8 +1,8 @@
 (* CLP/word differential referee pin.
 
-   Compares every binary operation and the identity elements across a dense
-   sweep of (width, base, step, cardn) against inlined, independent reference
-   implementations.  The reference implementations below are verbatim copies,
+   Compares the selected CLP binary operations and identity elements across a
+   dense sweep of (width, base, step, cardn) against inlined, independent
+   reference implementations.  The reference implementations below are
    independent of the production code.
 
    [Ref_word] holds the frozen reference word implementations verbatim;

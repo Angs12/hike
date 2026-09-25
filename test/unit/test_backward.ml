@@ -571,8 +571,7 @@ let tests : unit Alcotest.test list =
     (* L-3b: the equal-lower merge arm and the partition views. *)
     pin "BK-34"
       "the traverse shape (the seeded RMW counter) collapses to <= 3 cells in \
-       the solution state (pre-fix the [RSP-8] point-key pile was 16-17 — the \
-       restored equal-lower hull union)"
+       the solution state (the equal-lower hull union keeps the cell count bounded)"
       (fun () ->
         let sub1, body1, _ = mk_l3b1_loop () in
         let sol1 = run_anchored sub1 in
@@ -589,7 +588,7 @@ let tests : unit Alcotest.test list =
         let exit1 =
           match Term.enum blk_t sub1 |> Seq.to_list with
           | [ _; _; _; e ] -> e
-          | _ -> failwith "S-1: fixture block layout changed"
+          | _ -> failwith "BK-35: fixture block layout changed"
         in
         let icell =
           cell_at (memv "l3b1_m") (v64 "RSP")

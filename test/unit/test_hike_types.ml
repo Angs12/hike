@@ -81,18 +81,18 @@ let tests : unit Alcotest.test list =
         check "TYPES-01"
           (Base.List.map (Model.free_regs sub) ~f:Var.name = [ "RDI" ]));
 
-    pin "TYPES-02" "is_is_fp_returning: a YMM def on the epilogue path is an FP return"
+    pin "TYPES-02" "is_fp_returning: a YMM def on the epilogue path is an FP return"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
         check "TYPES-02" (Types.is_fp_returning ~abi (epilogue_sub ymm0)));
 
-    pin "TYPES-03" "is_is_is_fp_returning: an integer return register is not an FP return"
+    pin "TYPES-03" "is_fp_returning: an integer return register is not an FP return"
       (fun () ->
         let rax = Base.List.nth_exn abi.Abi.return_regs 0 in
         check "TYPES-03" (not (Types.is_fp_returning ~abi (epilogue_sub rax))));
 
     pin "TYPES-04"
-      "is_is_fp_returning: a value def off the epilogue path is not a return at all"
+      "is_fp_returning: a value def off the epilogue path is not a return at all"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
         let sub, _ =

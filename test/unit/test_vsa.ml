@@ -1,6 +1,6 @@
 (* VSA pass pins.  One Alcotest group per pin; each pin builds its own
    fixture, so no state crosses pins.  The Call_effects transfer pins
-   (C1-1..C1-5) live with their module, not here. *)
+   (CE-01..CE-15) live with their module, not here. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -421,8 +421,8 @@ let tests : unit Alcotest.test list =
         let c32 = Clp.create (w32 16) in
         check "VSA-47" (Clp.is_top (Clp.extract ~lo:32 c32)));
 
-    (* D8: a signed widening cast is top at the TARGET width; the source
-       width was the bug (an 8-bit top stored under a 64-bit lhs). *)
+    (* D8: a signed widening cast is top at the target width; the source
+   width remains part of the input value's identity. *)
     pin "VSA-62" "D8-1: Clp.cast SIGNED widens a top operand to the target width"
       (fun () ->
         let r = Clp.cast Bil.SIGNED 64 (Clp.top 8) in

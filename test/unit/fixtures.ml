@@ -715,7 +715,7 @@ let lm_jne_loop ~(k : Cbat_word.t) () : sub term * tid * tid =
   in
   (sub, tids.(1), tids.(2))
 
-(* Shared F1-FT/B1/B3 build: the same jne-counter loop + anchored run.
+(* Shared F1-FT/B4 build: the same jne-counter loop + anchored run.
    Returns (k, sub, sol, head tid, body tid); the distinct pins stay in the tests. *)
 let lm_jne_run () : Cbat_word.t * sub term * Vsa.vsa_sol * tid * tid =
   let k = w32 100 in

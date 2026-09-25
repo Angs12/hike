@@ -148,12 +148,12 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let x0b = ivar64 "intrinsic:x0" in
         let db = Def.create x0b (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let ir_un =
+        let captured =
           capture_stderr (fun () ->
               ignore (emit_ir (mk_fp_program "intrinsic:not_a_real_intrinsic" [ db ])))
         in
         check "FP-TABLE: an unmapped name emits the guarded warning on stderr"
-          (contains_substring ir_un "hike: guarded:"));
+          (contains_substring captured "hike: guarded:"));
 
     (* FP-33: the fp-GPR cast width is the operand value's own type, never a
        register-name fact. *)
@@ -225,11 +225,17 @@ let tests : unit Alcotest.test list =
           Def.create (ivar64 "intrinsic:x1")
             (Bil.Load (Bil.Var (Sm.region_mem 1), minus_addr sp 16L, LittleEndian, `r64))
         in
+        let residue_lo = -8200L
+        and residue_hi = -17L
+        and residue_bytes = 8192L
+        and arg_lo = -16L
+        and arg_hi = -9L
+        and arg_bytes = 16L in
         let layout : Sm.sub_layout =
           {
             regions =
-              [ (0, (pos (-8200L), pos (-17L)), 8192L);
-                (1, (pos (-16L), pos (-9L)), 16L) ];
+              [ (0, (pos residue_lo, pos residue_hi), residue_bytes);
+                (1, (pos arg_lo, pos arg_hi), arg_bytes) ];
             anchor = Some (0, 8L);
             window_param = false;
           }

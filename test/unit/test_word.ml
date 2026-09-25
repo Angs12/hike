@@ -99,9 +99,9 @@ let tests : unit Alcotest.test list =
 
     pin "WORD-11" "WORD-BC: of_word keeps the unsigned value (all-ones stays 2^64-1)"
       (fun () ->
-        let w64 v = Word.of_int64 ~width:64 v in
+        let word64 v = Word.of_int64 ~width:64 v in
         check "WORD-11"
-          (match Cbat_word.of_word (w64 (-1L)) with
+          (match Cbat_word.of_word (word64 (-1L)) with
            | Cbat_word.Big (z, 64, false) -> Z.equal z (Z.of_string "18446744073709551615")
            | _ -> false));
 
@@ -137,11 +137,11 @@ let tests : unit Alcotest.test list =
 
     pin "WORD-17" "WORD-BC: the high-bit unsigned word's int64 bit pattern survives"
       (fun () ->
-        let w64 v = Word.of_int64 ~width:64 v in
+        let word64 v = Word.of_int64 ~width:64 v in
         check "WORD-17"
           (Word.equal
              (Cbat_word.to_word (Cbat_word.of_string "0x8000000000000000:64u"))
-             (w64 Int64.min_int)));
+             (word64 Int64.min_int)));
 
     pin "WORD-18" "WORD-BC: a 80-bit word round-trips with no string path"
       (fun () ->
