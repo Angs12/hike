@@ -22,7 +22,8 @@ let restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough_tid =
     | None -> None
     | Some post_push ->
         let restored =
-          Llvm.build_add post_push ctx.sp_restore_step
+          Llvm.build_add post_push
+            (Llvm.const_int (ctx.i64_ty) ctx.abi.Abi.word)
             "sp_restored" llvm_builder
         in
         (match get_local scope fallthrough_tid sp_key with
@@ -42,11 +43,13 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
   (* Slot parameter i binds the block's [call_arg i] def; both names
      derive from the index, so the binding is order-independent. *)
   let arg_value_of_slot i =
-    get_local scope blk_tid (call_arg_var ctx i)
+    get_local scope blk_tid
+      (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word i)
   in
   Base.List.map args ~f:(fun arg ->
       let exp = Arg.rhs arg in
-      if Var.same (Arg.lhs arg) ctx.window_var
+      if Var.same (Arg.lhs arg)
+          (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
       then
         (* The caller-window base is the caller's SP at the call, as a
            pointer into the caller's residue. *)
@@ -55,7 +58,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
              match fr.anchor_ptr with
              | Some aptr ->
                  let delta = Llvm.build_sub sp fr.anchor_i64 "" llvm_builder in
-                 Llvm.build_gep ctx.i8_ty aptr [| delta |] ""
+                 Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) aptr [| delta |] ""
                    llvm_builder
              | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
          | _ -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
@@ -249,7 +252,7 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
        | Llvm.TypeKind.Integer when
            Llvm.integer_bitwidth (Llvm.type_of ret_var) < ctx.addr_bits ->
          Llvm.add_call_site_attr ret_var
-           ctx.zeroext_attr
+           (Llvm.create_enum_attr ctx.llvm_ctx "zeroext" 0L)
            Llvm.AttrIndex.Return
        | _ -> ());
       insert_local scope blk_tid (Arg.lhs ret) ret_var
@@ -266,6 +269,7 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
   consumes stack slots after the register args, so the window stores
   are its trailing varargs. *)
 let extern_stack_args ctx scope blk_tid (blk : blk term) =
+  let word = ctx.abi.Abi.word in
   (* The block's defined lhs vars, one pass; the slot walk conses and
      one rev restores slot order. *)
   let defined_vars =
@@ -274,7 +278,7 @@ let extern_stack_args ctx scope blk_tid (blk : blk term) =
         Core.Set.add acc (Def.lhs d))
   in
   let rec slots i acc =
-    let v = call_arg_var ctx i in
+    let v = Hike_stack_model.call_arg ~word i in
     if Core.Set.mem defined_vars v then
       match get_local scope blk_tid v with
       | Some value -> slots (i + 1) (value :: acc)
@@ -412,11 +416,11 @@ let create_thunk ctx (sub_tid : tid) =
     let args = get_args ctx sub_tid in
     let rets = get_rets ctx sub_tid in
     let word = ctx.abi.Abi.word in
-    let window_var = ctx.window_var in
+    let window_var = Hike_stack_model.hike_window_var ~word in
     (* The twin carries the synthetic indirect convention — exactly
        what a pointer call passes. *)
     let conv = ctx.abi in
-    let twin_args = window_conv_args conv ~window:ctx.window_var in
+    let twin_args = window_conv_args ~word conv in
         let reg_args =
           Base.List.filter args ~f:(fun a ->
               (not (Hike_stack_model.is_arg_slot (Arg.lhs a)))
@@ -449,7 +453,7 @@ let create_thunk ctx (sub_tid : tid) =
                 (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i) false
             in
             let ptr =
-              Llvm.build_gep ctx.i8_ty window [| off |] ""
+              Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
                 builder
             in
             Llvm.build_load

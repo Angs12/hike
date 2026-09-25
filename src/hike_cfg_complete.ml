@@ -673,14 +673,13 @@ let splice_jmps (blk : blk term)
    [go] does not follow indirect edges, so an unresolved transfer whose
    target denotation names a split entry keeps it live.  A transfer
    whose denotation cannot be bounded keeps every fresh block. *)
-let indirect_live ~(denote : denote)
-    ~(last_defs_of : blk term -> def term Var.Map.t)
-    ~(retaddr : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(fresh : Tid.Set.t) (sub : sub term) : Tid.Set.t =
+let indirect_live ~(denote : denote) ~(retaddr : Tid.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t) ~(fresh : Tid.Set.t)
+    (sub : sub term) : Tid.Set.t =
   if Core.Set.is_empty fresh then Tid.Set.empty
   else
     let add_target acc blk texp =
-      let last_defs = last_defs_of blk in
+      let last_defs = Vsa.last_defs blk in
       match texp with
       | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> acc
       | _ -> (
@@ -774,13 +773,13 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
 
 (* The exit rewrite, once at drain; a sub with no decision comes back
    unchanged. *)
-let rewrite_jmps_once ~(denote : denote)
-    ~(last_defs_of : blk term -> def term Var.Map.t)
-    ~(retaddr : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(images : Vsa.section_image list) (sub : sub term) : sub term =
+let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(images : Vsa.section_image list)
+    (sub : sub term) : sub term =
   let sub_tids = sub_tids sub in
   Term.map blk_t sub ~f:(fun blk ->
-      let last_defs = last_defs_of blk in
+      let last_defs = Vsa.last_defs blk in
       splice_jmps blk ~classify:(rewritten_jmps ~denote ~retaddr ~sub_tids
                                    ~block_addrs ~last_defs ~images ~blk))
 
@@ -864,25 +863,14 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(fresh : Tid.Set.t)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
-  (* The drain's two walks share this map; it does not outlive the
-     materialization. *)
-  let drain_last_defs =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:(Tid.Map.empty : def term Var.Map.t Tid.Map.t)
-         ~f:(fun m blk ->
-              Core.Map.set m ~key:(Term.tid blk) ~data:(Vsa.last_defs blk))
-  in
-  let last_defs_of blk =
-    Core.Map.find drain_last_defs (Term.tid blk) |> Base.Option.value_exn
-  in
   let sub, live =
     Vsa.with_images images (fun () ->
         let live =
-          indirect_live ~denote:(denote_of_sol sol) ~last_defs_of ~retaddr
-            ~block_addrs ~fresh sub
+          indirect_live ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
+            ~fresh sub
         in
         let sub =
-          rewrite_jmps_once ~denote:(denote_of_sol sol) ~last_defs_of ~retaddr
+          rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr
             ~block_addrs ~images sub
         in
         (sub, live))

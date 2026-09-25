@@ -19,7 +19,7 @@ let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
   let new_sp = create_exp ctx scope llvm_builder blk_tid exp in
   let size = Llvm.build_sub old_sp new_sp "vla_size" llvm_builder in
   let vla =
-    Llvm.build_array_alloca ctx.i8_ty size "vla"
+    Llvm.build_array_alloca (Llvm.i8_type ctx.llvm_ctx) size "vla"
       llvm_builder
   in
   Llvm.set_alignment Hike_abi.stack_align vla;
@@ -79,7 +79,8 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
   let res =
     if Hike_def_slots.def_is_window_value def then
       let w_i64 =
-        match get_local scope blk_tid ctx.window_var with
+        let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
+        match get_local scope blk_tid wv with
         | Some v ->
             Llvm.build_ptrtoint v (ctx.i64_ty) "" llvm_builder
         | None -> Llvm.undef (ctx.i64_ty)

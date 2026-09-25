@@ -54,19 +54,11 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
         let callees =
           Term.enum blk_t s
           |> Seq.concat_map ~f:(fun blk ->
-              let last_cache = ref None in
-              let last_defs () =
-                match !last_cache with
-                | Some last_defs -> last_defs
-                | None ->
-                    let last_defs =
-                      Core.Map.fold (Vsa.last_defs blk) ~init:Var.Map.empty
-                        ~f:(fun ~key ~data acc ->
-                            Core.Map.set acc ~key:(Var.base key)
-                              ~data:(Def.rhs data))
-                    in
-                    last_cache := Some last_defs;
-                    last_defs
+              let last =
+                Core.Map.fold (Vsa.last_defs blk) ~init:Var.Map.empty
+                  ~f:(fun ~key ~data acc ->
+                      Core.Map.set acc ~key:(Var.base key)
+                        ~data:(Def.rhs data))
               in
               Term.enum jmp_t blk
               |> Seq.filter_map ~f:(fun j ->
@@ -77,7 +69,7 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
                       | Indirect (Bil.Var v)
                       | Indirect (Bil.Cast (_, _, Bil.Var v))
                         when Base.Option.is_none (Call.return c) -> (
-                          match Core.Map.find (last_defs ()) (Var.base v) with
+                          match Core.Map.find last (Var.base v) with
                           | Some rhs when reads_retaddr rhs -> None
                           | _ -> Some None)
                       | Indirect _ -> Some None

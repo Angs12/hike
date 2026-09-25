@@ -23,7 +23,7 @@ let update_phis ctx scope transfer_vars blks =
       ~f:(fun m r ->
         Core.Map.add_multi m ~key:r.e_target ~data:r)
   in
-  Base.List.iter blks ~f:(fun blk ->
+  Seq.iter blks ~f:(fun blk ->
       let blk_tid = Term.tid blk in
       let rows =
         Core.Map.find by_target blk_tid |> Option.value ~default:[]
@@ -134,12 +134,13 @@ let create_elts ctx scope llvm_builder blk sub_tid fr =
       | `Phi _ -> ()
       | `Jmp _ -> ())
 
-let populate_blks ctx scope transfer_vars llvm_builder blks sub fr =
+let populate_blks ctx scope transfer_vars blks sub fr =
   let sub_tid = Term.tid sub in
-  Base.List.iter blks ~f:(fun blk ->
-      let blk_tid = Term.tid blk in
-      Llvm.position_at_end (get_bb scope blk_tid) llvm_builder;
-      transfer_with_phis ctx scope transfer_vars llvm_builder blk_tid;
+  Seq.iter blks ~f:(fun blk ->
+      let llvm_builder =
+        Llvm.builder_at_end ctx.llvm_ctx (get_bb scope (Term.tid blk))
+      in
+      transfer_with_phis ctx scope transfer_vars llvm_builder (Term.tid blk);
       create_elts ctx scope llvm_builder blk sub_tid fr;
       create_control_flow ctx scope llvm_builder blk sub fr)
 
@@ -184,7 +185,7 @@ let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
      phi lanes need definedness. *)
   let indirect_rets = ret_set ctx in
   let defined_and_transferred =
-    Base.List.fold blks
+    Seq.fold blks
       ~f:(fun (reg_set, def_set) blk ->
         let tid = Term.tid blk in
         init_blk_llvals scope tid;
@@ -245,8 +246,8 @@ let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
 (* The anchor pointer: the alloca position the SP Slot's stored integer
    relativizes against.  [idx] keeps the SysV entry-SP residue mod 16, so
    lifted alignment tests evaluate as the native. *)
-let anchor_gep llvm_ctx i8_ty llvm_builder base idx =
-  Llvm.build_gep i8_ty base
+let anchor_gep llvm_ctx llvm_builder base idx =
+  Llvm.build_gep (Llvm.i8_type llvm_ctx) base
     [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) idx false |]
     "anchor" llvm_builder
 
@@ -259,7 +260,7 @@ let create_sub ctx scope sub =
   then ()
   else
     let llvm_ctx = ctx.llvm_ctx in
-    let blks = Term.enum blk_t sub |> Base.Sequence.to_list in
+    let blks = Term.enum blk_t sub in
     let fn, _ =
       Core.Map.find !(ctx.ll_funcs) (Term.tid sub)
       |> Base.Option.value_exn ~message:"create sub : function not found"
@@ -285,7 +286,7 @@ let create_sub ctx scope sub =
             (Base.List.find regions
                ~f:(fun (v, _) -> Var.equal v (Hike_stack_model.region_mem rid)))
             ~f:(fun (_, (base, _)) ->
-              Some (anchor_gep llvm_ctx ctx.i8_ty llvm_builder base idx)))
+              Some (anchor_gep llvm_ctx llvm_builder base idx)))
     in
     Base.List.iter regions ~f:(fun (v, (base, _)) ->
         insert_local scope Graphs.Tid.start v base);
@@ -311,7 +312,7 @@ let create_sub ctx scope sub =
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder transfer_vars fr sub fn;
-    populate_blks ctx scope transfer_vars llvm_builder blks sub fr;
+    populate_blks ctx scope transfer_vars blks sub fr;
     update_phis ctx scope transfer_vars blks;
     scope.cur_frame := None;
     let sub_tid = Term.tid sub in
@@ -366,19 +367,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
         then Core.Set.add acc (Bil2llvm_calls.thunk_tid_of (Term.tid sub))
         else acc)
   in
-  let i8_ty = Llvm.i8_type llvm_ctx in
-  let i64_ty = Llvm.i64_type llvm_ctx in
-  let ptr_ty = Llvm.pointer_type llvm_ctx in
-  let word_ty = Llvm.integer_type llvm_ctx (abi.Abi.word * 8) in
-  let window_var = Hike_stack_model.hike_window_var ~word:abi.Abi.word in
-  let max_slot =
-    Base.List.fold subs_list ~init:0 ~f:(fun n sub ->
-        Int.max n (count_slot_args (Hike_stack_model.sig_args sub)))
-  in
-  let call_arg_vars =
-    Array.init max_slot (fun i ->
-        Hike_stack_model.call_arg ~word:abi.Abi.word i)
-  in
   let ctx =
     { symtab;
       copy_relocs;
@@ -395,17 +383,11 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       thunks = ref [];
       sec_comps = ref Var.Map.empty;
       tls_anchor = ref None;
-      tls_addr_fn = ref None;
       trap_fn = ref None;
       plt_trampolines = ref Tid.Map.empty;
-      i8_ty;
-      i64_ty;
-      ptr_ty;
-      word_ty;
-      zeroext_attr = Llvm.create_enum_attr llvm_ctx "zeroext" 0L;
-      window_var;
-      call_arg_vars;
-      sp_restore_step = Llvm.const_int i64_ty abi.Abi.word;
+      i64_ty = Llvm.i64_type llvm_ctx;
+      ptr_ty = Llvm.pointer_type llvm_ctx;
+      word_ty = Llvm.integer_type llvm_ctx (abi.Abi.word * 8);
       native_starts =
         (match symtab with
          | Some st ->
@@ -460,7 +442,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       | Some arr ->
           let lo = Word.to_int64_exn section.min_addr in
           let word = ctx.abi.Abi.word in
-          let text = Hike_stack_model.string_text_table arr in
           (* An ownerless section serves whole: one row spanning it. *)
           let owners =
             if Base.List.is_empty section.owners then
@@ -478,7 +459,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                 ~word_lo:(w o.own_lo)
                 ~word_hi:(w o.own_hi)
                 ~typed_w:o.typed_w
-                ~bss:false ~word ~text)
+                ~bss:false ~word)
       | None -> ())
   in
   (* Phase order — sigs, thunks, bodies, initializers — is load-bearing. *)

@@ -6,26 +6,7 @@
 
 open Bap.Std
 
-(* The split decision only needs to know whether the rhs carries a
-   second memory node; the counter stops at that answer. *)
-let mem_count (e : exp) : int =
-  let exception Two_nodes in
-  let count = ref 0 in
-  let vis =
-    object
-      inherit [ unit ] Exp.visitor
-      method! visit_load ~mem:_ ~addr:_ _ _ () =
-        incr count;
-        if !count >= 2 then raise Two_nodes
-      method! visit_store ~mem:_ ~addr:_ ~exp:_ _ _ () =
-        incr count;
-        if !count >= 2 then raise Two_nodes
-    end
-  in
-  try
-    vis#visit_exp e ();
-    !count
-  with Two_nodes -> 2
+let mem_count (e : exp) : int = Hike_stack_model.mem_node_count e
 
 (* The first memory node stays inline (the one the VSA's
    classification describes); every distinct later load becomes a

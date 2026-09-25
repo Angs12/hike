@@ -51,7 +51,7 @@ let remap_native ctx llvm_ctx llvm_module v ~finish =
          let base, own_lo = owner_of section v in
          Some
            (finish
-              (Llvm.const_in_bounds_gep ctx.i8_ty base
+              (Llvm.const_in_bounds_gep (Llvm.i8_type llvm_ctx) base
                  [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
                       (Int64.sub v own_lo) false |]))))
 
@@ -100,7 +100,7 @@ let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
    BSS is zero. *)
 let set_owner_initializer ctx llvm_ctx llvm_module g
     (arr : Bytes.t) ~(word_lo : int) ~(word_hi : int)
-    ~(typed_w : int) ~(bss : bool) ~word ~text =
+    ~(typed_w : int) ~(bss : bool) ~word =
   let words = word_hi - word_lo + 1 in
   let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
   let elem_ty =
@@ -108,7 +108,9 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     else Llvm.integer_type llvm_ctx (typed_w * 8)
   in
   (* A word inside a printable string run keeps its raw bits:
-     remapping it would relocate the string's own bytes. *)
+     remapping it would relocate the string's own bytes.  The text
+     table is one prepass over the image, not a rescan per word. *)
+  let text = Hike_stack_model.string_text_table arr in
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
@@ -142,7 +144,7 @@ let resolve_addr_in ctx llvm_builder section addr =
       (Int64.sub (Word.to_int64_exn addr) own_lo)
       false
   in
-  Llvm.build_gep ctx.i8_ty base [| offset |] ""
+  Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| offset |] ""
     llvm_builder
 
 let resolve_addr ctx llvm_builder addr =
@@ -243,12 +245,12 @@ let create_array_global llvm_ctx llvm_module name elem_ty n slots =
   Llvm.set_global_constant false g;
   g
 
-let create_uninitialized_global llvm_ctx llvm_module size name ~i8_ty =
-  create_array_global llvm_ctx llvm_module name i8_ty
+let create_uninitialized_global llvm_ctx llvm_module size name =
+  create_array_global llvm_ctx llvm_module name (Llvm.i8_type llvm_ctx)
     (Int64.to_int size) None
 
 let create_copy_reloc_bss llvm_ctx llvm_module size name copy_relocs ~word
-    ~i8_ty =
+    =
   let size = Int64.to_int size in
   let n64 = (size + word - 1) / word in
   let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
@@ -258,7 +260,7 @@ let create_copy_reloc_bss llvm_ctx llvm_module size name copy_relocs ~word
       let arr = Array.init n64 (fun _ -> Llvm.const_int word_ty 0) in
       Base.List.iter copy_relocs ~f:(fun (off, sym_name) ->
           let extern =
-            Llvm.declare_global i8_ty sym_name llvm_module
+            Llvm.declare_global (Llvm.i8_type llvm_ctx) sym_name llvm_module
           in
           arr.(off / word)
           <- Llvm.const_ptrtoint extern word_ty);
@@ -281,7 +283,6 @@ let align_of native_lo =
 let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   let module Model = Hike_stack_model in
   let word = spec.spec_word in
-  let i8_ty = Llvm.i8_type llvm_ctx in
   let comps_of lo hi =
     Base.List.filter spec.spec_comps ~f:(fun c ->
         Int64.equal c.Model.sec_lo lo && Int64.equal c.Model.sec_hi hi)
@@ -408,10 +409,10 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
           let size = Int64.sub (Int64.add si_hi 1L) si_lo in
           let base =
             if si_copy_relocs = [] then
-              create_uninitialized_global llvm_ctx llvm_module size llvm_name ~i8_ty
+              create_uninitialized_global llvm_ctx llvm_module size llvm_name
             else
               create_copy_reloc_bss llvm_ctx llvm_module size llvm_name
-                si_copy_relocs ~word ~i8_ty
+                si_copy_relocs ~word
           in
           let owners =
             Base.Option.value_map whole ~default:[] ~f:(fun id ->

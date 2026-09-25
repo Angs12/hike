@@ -96,16 +96,7 @@ let tls_anchor_addr ctx llvm_builder =
   in
   let tp = ctx.ptr_ty in
   let fty = Llvm.function_type tp [| tp |] in
-  let f =
-    match !(ctx.tls_addr_fn) with
-    | Some f -> f
-    | None ->
-        let f =
-          Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
-        in
-        ctx.tls_addr_fn := Some f;
-        f
-  in
+  let f = Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module in
   Llvm.build_call fty f [| g |] "tls_anchor" llvm_builder
 
 let create_load ctx llvm_builder (addr, size) =
@@ -309,7 +300,7 @@ and sec_comp_access ctx scope llvm_builder blk_tid ~(store : bool)
         "" llvm_builder
     in
     let p =
-      Llvm.build_gep ctx.i8_ty base [| idx |] ""
+      Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| idx |] ""
         llvm_builder
     in
     if store then
@@ -365,7 +356,7 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
   | `Load (addr, size) ->
       let marker = marker_of_size size in
       let p =
-        Llvm.build_gep ctx.i8_ty base
+        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base
           [| index_of (create_exp ctx scope llvm_builder blk_tid addr) |]
           "" llvm_builder
       in
@@ -379,7 +370,7 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
   | `Store (addr, data, size) ->
       let marker = marker_of_size size in
       let p =
-        Llvm.build_gep ctx.i8_ty base
+        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base
           [| index_of (create_exp ctx scope llvm_builder blk_tid addr) |]
           "" llvm_builder
       in
@@ -397,9 +388,10 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
    caller's residue. *)
 and window_mem_access ctx scope llvm_builder blk_tid fr exp =
   let w_ptr =
-    match get_local scope blk_tid ctx.window_var with
+    let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
+    match get_local scope blk_tid w with
     | Some v -> v
-    | None -> Llvm.undef (var_lltype ctx ctx.window_var)
+    | None -> Llvm.undef (var_lltype ctx w)
   in
   match find_mem_node exp with
   | Some node ->

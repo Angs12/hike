@@ -502,30 +502,10 @@ let rec is_const_chain (e : exp) : bool =
    alignment spillover the window must cover. *)
 let window_push_slop_words = 8
 
-(* The def's memory access and the store data.  A single memory node
-   carries the same store-data choice as the general predicate; a
-   multi-node rhs keeps that predicate's choice. *)
-let access_data_of (d : def term) : (exp * int * exp option) option =
-  let rhs = Def.rhs d in
-  match Model.mem_nodes rhs with
-  | [] -> None
-  | [ `Load (_, addr, size) ] -> Some (addr, Size.in_bytes size, None)
-  | [ `Store (_, addr, data, size) ] ->
-      Some (addr, Size.in_bytes size, Some data)
-  | first :: _ ->
-      let addr, size =
-        match first with
-        | `Load (_, addr, size) | `Store (_, addr, _, size) -> (addr, size)
-      in
-      Some
-        (addr,
-         Size.in_bytes size,
-         Model.store_data_of_rhs rhs)
-
 (* The def's memory access: (address, width in bytes, stores). *)
 let access_of (d : def term) : (exp * int * bool) option =
-  Option.map (access_data_of d) ~f:(fun (addr, width, data) ->
-      (addr, width, Option.is_some data))
+  Option.map (Model.addr_of_rhs (Def.rhs d)) ~f:(fun (addr, size) ->
+      (addr, Size.in_bytes size, Option.is_some (Model.store_data_of_rhs (Def.rhs d))))
 
 let collect (env : env) (prog : program term) : collecting =
   let ownership_visitor =
@@ -588,10 +568,9 @@ let collect (env : env) (prog : program term) : collecting =
 
       method! enter_def d acc =
         let dtid = Term.tid d in
-        match access_data_of d with
+        match access_of d with
         | None -> acc
-        | Some (addr, width, store_data) -> (
-            let store = Option.is_some store_data in
+        | Some (addr, width, store) -> (
             (* The def's projection, computed once: the rewrite reads
                this record instead of re-deriving it from the seam. *)
             let projected : (sec_tag option * portion list) option =
@@ -631,7 +610,7 @@ let collect (env : env) (prog : program term) : collecting =
             (* A stored stack-symbolic value escapes into memory: its
                reloaded copies deref through the raw lane. *)
             Option.fold
-              (Option.bind store_data
+              (Option.bind (Model.store_data_of_rhs (Def.rhs d))
                  ~f:(fun data ->
                    Option.bind
                      (Result.ok (env.denote ~blk:acc.blk ~def:d data))

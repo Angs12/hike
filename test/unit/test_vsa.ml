@@ -228,16 +228,8 @@ let tests : unit Alcotest.test list =
                   (Bil.BinOp (Bil.RSHIFT, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 1)))) ])
         in
         let comp = "rshift: mixed-width shift operands (32 and 64 bits)" in
-        let solution = ref None in
-        let captured =
-          capture_stderr (fun () -> solution := Some (run_anchored sub))
-        in
-        let fired_r = contains_substring captured comp in
-        let sol =
-          match !solution with
-          | Some sol -> sol
-          | None -> failwith "VSA-23: the captured solve returned no solution"
-        in
+        let fired_r = fired comp (fun () -> ignore (run_anchored sub)) in
+        let sol = run_anchored sub in
         let exit_ai = in_state sol exit_tid in
         let i = i32 "i" in
         let j_after =

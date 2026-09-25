@@ -151,24 +151,15 @@ type emit_ctx = {
   thunks : (string * Llvm.llvalue) list ref;
   (* [sec_comp_N_mem] var -> (global, native base). *)
   sec_comps : (Llvm.llvalue * int64) Var.Map.t ref;
-  (* The TLS anchor global and its accessor, declared once. *)
+  (* The TLS anchor global and the llvm.trap function, declared once. *)
   tls_anchor : Llvm.llvalue option ref;
-  tls_addr_fn : Llvm.llvalue option ref;
   trap_fn : Llvm.llvalue option ref;
   (* PLT-trampoline verdicts, per sub: the O(sub) walk runs once. *)
   plt_trampolines : bool Tid.Map.t ref;
   (* The hot LLVM types, bound once per emission. *)
-  i8_ty : Llvm.lltype;
   i64_ty : Llvm.lltype;
   ptr_ty : Llvm.lltype;
   word_ty : Llvm.lltype;
-  (* The call-site return extension shared by every narrow return. *)
-  zeroext_attr : Llvm.llattribute;
-  (* Model-minted emitter vars, bound once per emission. *)
-  window_var : var;
-  call_arg_vars : var array;
-  (* The word step a machine call's push adds to SP. *)
-  sp_restore_step : Llvm.llvalue;
   (* The symtab's function-start addresses: the initializer path's
      remap queries precheck this set before touching the symtab. *)
   native_starts : Core.Int64.Set.t;
@@ -273,7 +264,8 @@ let reg_args ~intent (regs : var list) : Arg.t list =
 (* The synthetic indirect-call convention: every register lane plus
    the caller-window base — exactly what a pointer call passes and a
    thunk accepts. *)
-let window_conv_args (conv : Abi.t) ~(window : var) : Arg.t list =
+let window_conv_args ~(word : int) (conv : Abi.t) : Arg.t list =
+  let window = Hike_stack_model.hike_window_var ~word in
   reg_args ~intent:In (Abi.param_regs conv)
   @ [ Arg.create ~intent:In window (Var window) ]
 
@@ -281,7 +273,7 @@ let window_conv_args (conv : Abi.t) ~(window : var) : Arg.t list =
    are the [Out] intents); the synthetic conventions (the indirect call
    and the twins) are DERIVED from the ABI — nothing is stored. *)
 let synthetic_args ctx =
-  window_conv_args ctx.abi ~window:ctx.window_var
+  window_conv_args ~word:ctx.abi.Hike_abi.word ctx.abi
 
 let synthetic_rets ctx =
   reg_args ~intent:Out ctx.abi.Abi.return_regs
@@ -305,12 +297,6 @@ let get_rets ctx sub_tid =
   | None ->
       if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
       else reg_args ~intent:Out ctx.abi.Abi.return_regs
-
-(* The signature-sized call-argument table; the model remains the
-   source of the var's name and type for an out-of-range index. *)
-let call_arg_var ctx i =
-  if i < Array.length ctx.call_arg_vars then ctx.call_arg_vars.(i)
-  else Hike_stack_model.call_arg ~word:ctx.abi.Abi.word i
 
 let ret_set ctx = Var.Set.of_list ctx.abi.Abi.return_regs
 

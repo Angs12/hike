@@ -73,7 +73,9 @@ let tests : unit Alcotest.test list =
                 go 0 m0 []
           else (Clp.iter p, false)
         in
-        let check_pair (w : int) (l1, p1, es1, pre1) (l2, p2, es2, pre2) : unit =
+        let check_pair (w : int) (l1 : string) (p1 : Clp.t) (l2 : string) (p2 : Clp.t) : unit =
+          let es1, pre1 = enum p1 in
+          let es2, pre2 = enum p2 in
           if pre1 || pre2 then incr prefix;
           if List.length es1 * List.length es2 > product_cap then incr skipped
           else begin
@@ -164,44 +166,32 @@ let tests : unit Alcotest.test list =
             ]
           else []
         in
-        let enumerated (w : int) =
-          List.map
-            (fun (label, p) ->
-              let values, sampled = enum p in
-              (label, p, values, sampled))
-            (operands w)
-        in
-        let widths = [ 8; 16; 32; 64 ] in
-        let enumed_by_width = List.map (fun w -> (w, enumerated w)) widths in
         let per_width = ref [] in
         List.iter
           (fun w ->
-            let ops = List.assoc w enumed_by_width in
+            let ops = operands w in
             let before = !pairs in
             let rec go = function
               | [] -> ()
-              | (l1, p1, es1, pre1) :: rest ->
-                  check_pair w (l1, p1, es1, pre1) (l1, p1, es1, pre1);
-                  List.iter
-                    (fun (l2, p2, es2, pre2) ->
-                      check_pair w (l1, p1, es1, pre1) (l2, p2, es2, pre2))
-                    rest;
+              | (l1, p1) :: rest ->
+                  check_pair w l1 p1 l1 p1;
+                  List.iter (fun (l2, p2) -> check_pair w l1 p1 l2 p2) rest;
                   go rest
             in
             go ops;
             per_width := (w, !pairs - before) :: !per_width)
-          widths;
+          [ 8; 16; 32; 64 ];
         (* Mixed-width pin: the domain zero-extends; ground truth = the
            zero-extended AND. *)
         let zx w x =
           if Cbat_word.bitwidth x = w then x
           else Cbat_word.of_int64 ~width:w (Cbat_word.to_int64_exn x)
         in
-        let find w lbl =
-          List.find (fun (label, _, _, _) -> label = lbl) (List.assoc w enumed_by_width)
-        in
-        let check_mixed (wa, (_, pa, es1, _)) (wb, (_, pb, es2, _)) =
+        let find w lbl = List.assoc lbl (operands w) in
+        let check_mixed (wa, pa) (wb, pb) =
           let w = Stdlib.max wa wb in
+          let es1, _ = enum pa in
+          let es2, _ = enum pb in
           if List.length es1 * List.length es2 > product_cap then true
           else begin
             let res = Clp.logand pa pb in
