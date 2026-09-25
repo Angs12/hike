@@ -85,7 +85,11 @@ let create_branches ctx scope blk_tid llvm_builder branches =
               | None -> emit_terminal_guard ~first ~bb ~cond:(Jmp.cond j))
         | Indirect exp -> (
             (* An indirect jmp ends its own path; later jmps still
-               render. *)
+               render.  A label-less indirectbr is UB when taken, so
+               the class is named on the channel. *)
+            Hike_diag.warn
+              "emit: indirect jump at block %s has no enumerated destinations (UB when taken)"
+              (Tid.name blk_tid);
             let target_val = create_exp ctx scope llvm_builder blk_tid exp in
             build_indirect_br llvm_builder target_val
                ~reserved_destinations:indirect_br_one_reserved |> ignore;

@@ -48,9 +48,8 @@ let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
           in
           value_defs blk @ pred_defs @ acc)
   in
-  match return_path_defs with
-  | [] -> false
-  | d :: _ -> Abi.is_vector_param_reg abi (Def.lhs d)
+  Base.List.exists return_path_defs ~f:(fun d ->
+      Abi.is_vector_param_reg abi (Def.lhs d))
 
 (* A lane is a pointer when it is an address lane: a by-reference
    argument, a memory var (its storage), or the caller window. *)

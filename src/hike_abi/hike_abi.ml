@@ -82,6 +82,11 @@ let thread_pointer target =
 let is_primary_target (t : Theory.Target.t) : bool =
   Theory.Target.matches t "x86_64-gnu-elf"
 
+(* A recognized target that is not the primary one: the pass entry warns
+   that the x86-64 convention record serves it. *)
+let is_known_foreign (t : Theory.Target.t) : bool =
+  not (Theory.Target.is_unknown t) && not (is_primary_target t)
+
 let pc target =
   if is_primary_target target then
     Var.create "RIP" (Imm (Theory.Target.data_addr_size target))

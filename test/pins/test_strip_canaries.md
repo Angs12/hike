@@ -1,6 +1,6 @@
 # Pins — test_strip_canaries
 
-Module: `test/unit/test_strip_canaries.ml` (group `strip_canaries`, ids `SC-01`…`SC-06`).
+Module: `test/unit/test_strip_canaries.ml` (group `strip_canaries`, ids `SC-01`…`SC-08`).
 Production mechanism: `src/hike_strip_canaries.ml` (`Hike.Strip_canaries.strip_sub`).
 
 There is **no `Test_seam`** for this pass, so no fail-before switch can be
@@ -17,3 +17,5 @@ builds its own fixture inside its closure — no cross-pin state.
 | SC-04 | Value tie, not name match: `stored_value_is_read_value` requires the store data to be the read def's lhs, that read to be the unique reaching def, and the two denotations to be equal. An alias byte-store whose address mentions the read register is not the canary store. | Replace the tie with a name match (drop `Core.Set.equal (reaching v) (Tid.Set.singleton (Term.tid read))` and the denotation equality), accepting any store whose data mentions the read lhs. | `check "SC-04"` fails: `has_def stripped alias_read`/`alias_st` is false (the alias store/read are eaten). |
 | SC-05 | Stored value is the TLS read: a local stored to the same cell is refused even with a decoy TLS read present (the `Bil.Var` + denotation test in `stored_value_is_read_value`). | Drop the `stored_value_is_read_value` filter over `tls_reads` (accept any store on the cell). | `check "SC-05"` fails: `has_def stripped read` is false. |
 | SC-06 | Multi-check shared cell/fail block: `cells_accounted` plus the per-`comp` rewrite remove both compositions together, `Phi.remove` drops the deleted edges' entries, and `prune` removes the now-unreachable shared fail block; both equality edges go unconditional. | Force the identity (`find_comps = []`), or remove only one of the two compositions (rewrite the first `comp` only). | `check "SC-06"` fails: `has_block stripped tids.(5)` is true (the shared fail block survives). |
+| SC-07 | The guard shape gate: the equality edge continues unconditionally only when the fail edge is the later unconditional fallthrough (or the conditions are complements). Two conditional edges with unrelated conditions keep the canary. | Drop the `eq_is_complement` gate in `comp_of_block`. | `check "SC-07"` fails: the read/reload defs and the fail block are deleted. |
+| SC-08 | The fail name is exactly `__stack_chk_fail` (optionally `@`-suffixed), never a user symbol containing the substring. | Restore `Base.String.is_substring n ~substring:"stack_chk_fail"`. | `check "SC-08"` fails: the canary is stripped under `my_stack_chk_fail`. |

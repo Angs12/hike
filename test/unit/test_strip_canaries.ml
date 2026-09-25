@@ -364,6 +364,68 @@ let tests : unit Alcotest.test list =
           && has_block stripped tids.(4)
           && not (has_def stripped (Term.tid (nth_def fixture tids.(2) 0)))
           && not (has_def stripped (Term.tid (nth_def fixture tids.(3) 0)))));
+
+    (* SC7: two conditional edges, neither the fallthrough nor a
+       complement — the composition must not fire (forcing the eq edge
+       true would drop the other condition). *)
+    pin "SC-07"
+      "two conditional edges with unrelated conditions keep the canary — the \
+       equality edge is not forced unconditional"
+      (fun () ->
+        let stub = mk_stub () in
+        let fail_jmp () =
+          Jmp.create (Call (Call.create ~target:(Label.direct (Term.tid stub)) ()))
+        in
+        let zf2 = v1 "sc_zf2" in
+        let fixture, tids =
+          build_idiom ~off:8 ~store_data:(Bil.Var rax)
+            ~extra_entry:[ def zf2 (Bil.Var zf) ]
+            ~fail_jmp:(fail_jmp ())
+        in
+        (* Swap the compare block's conditions: the eq edge carries an
+           unrelated condition and the fail edge is conditional too. *)
+        let cmp =
+          Term.map jmp_t (blk_of fixture tids.(1)) ~f:(fun j ->
+              match Jmp.kind j with
+              | Goto (Direct t) when Tid.equal t tids.(2) ->
+                Jmp.with_cond j (Bil.Var zf2)
+              | _ -> Jmp.with_cond j (Bil.Var zf))
+        in
+        let fixture =
+          Term.map blk_t fixture ~f:(fun b ->
+              if Tid.equal (Term.tid b) tids.(1) then cmp else b)
+        in
+        let fixture, prog, facts = run_to_strip fixture stub in
+        let read = nth_def fixture tids.(0) 1 in
+        let reload = nth_def fixture tids.(1) 0 in
+        let stripped = strip ~facts prog fixture in
+        check "SC-07"
+          (has_def stripped (Term.tid read)
+          && has_def stripped (Term.tid reload)
+          && has_block stripped tids.(3)));
+
+    (* SC8: a user symbol that merely contains the substring is not the
+       glibc fail name. *)
+    pin "SC-08"
+      "a user symbol containing stack_chk_fail is not the glibc name — the \
+       canary stays"
+      (fun () ->
+        let stub = fst (sub_of "my_stack_chk_fail" [ [], [] ]) in
+        let fail_jmp () =
+          Jmp.create (Call (Call.create ~target:(Label.direct (Term.tid stub)) ()))
+        in
+        let fixture, tids =
+          build_idiom ~off:8 ~store_data:(Bil.Var rax) ~extra_entry:[]
+            ~fail_jmp:(fail_jmp ())
+        in
+        let fixture, prog, facts = run_to_strip fixture stub in
+        let read = nth_def fixture tids.(0) 1 in
+        let reload = nth_def fixture tids.(1) 0 in
+        let stripped = strip ~facts prog fixture in
+        check "SC-08"
+          (has_def stripped (Term.tid read)
+          && has_def stripped (Term.tid reload)
+          && has_block stripped tids.(3)));
   ]
 
 let () = run "strip_canaries" tests

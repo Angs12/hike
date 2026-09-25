@@ -281,8 +281,10 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
       let false_exp = create_exp ctx scope llvm_builder blk_tid false_exp in
       Llvm.build_select cond true_exp false_exp "" llvm_builder
   | Unknown (_, typ) ->
+      (* The boundary identity is a frozen undef, never poison: poison
+         is UB and folds under opt. *)
       let typ = typ_lltype ctx typ in
-      Llvm.poison typ
+      Llvm.build_freeze (Llvm.undef typ) "hike_unknown" llvm_builder
 
 
 (* Named-component routing: the mem var is the component's identity,

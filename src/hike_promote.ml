@@ -188,7 +188,6 @@ let slot_read ~(word : int) (i : int) (byte_offset : int) (bits : int) : exp =
   if byte_offset = 0 then
     if Int.equal bits wbits then slot
     else Bil.Cast (Bil.LOW, bits, slot)
-  else if Int.equal bits wbits then slot
   else Bil.Extract (8 * byte_offset + bits - 1, 8 * byte_offset, slot)
 
 (* Every memory node of the expression re-points at [mem_var] — a

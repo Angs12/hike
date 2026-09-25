@@ -322,8 +322,13 @@ let compare_family ~(ctx : ctx) (b : block_data) (chain : Tid.Set.t) :
   done;
   !fam
 
+(* The glibc fail names: exactly [__stack_chk_fail] or its
+   version/PLT-suffixed forms, never a user symbol that merely
+   contains the substring. *)
 let is_fail_name (n : string) : bool =
-  Base.String.is_substring n ~substring:"stack_chk_fail"
+  match Base.String.lsplit2 n ~on:'@' with
+  | Some (base, _) -> Base.String.equal base "__stack_chk_fail"
+  | None -> Base.String.equal n "__stack_chk_fail"
 
 (* A direct call whose target resolves to [__stack_chk_fail]. *)
 let is_fail_block ~(names : Tid.t -> string) (b : block_data) : bool =
@@ -387,6 +392,19 @@ let comp_of_block ~(denote : denote) ~(reach : Tid.t -> bool)
         let fail_t = if f1 then t1 else t2 in
         let fail_i = if f1 then 0 else 1 in
         let eq_i = 1 - fail_i in
+        (* The equality edge continues unconditionally only in the
+           guard shape: the fail edge is the later unconditional
+           fallthrough and the eq edge is the earlier conditional
+           branch; or the two conditions are syntactic complements. *)
+        let eq_j = b.b_jmps.(eq_i) and fail_j = b.b_jmps.(fail_i) in
+        let eq_is_complement =
+          (Model.is_true_cond (Jmp.cond fail_j) && eq_i < fail_i)
+          || Model.is_true_cond (Jmp.cond eq_j)
+          || Exp.equal (Jmp.cond eq_j) (Bil.UnOp (Bil.NOT, Jmp.cond fail_j))
+          || Exp.equal (Jmp.cond fail_j) (Bil.UnOp (Bil.NOT, Jmp.cond eq_j))
+        in
+        if not eq_is_complement then None
+        else
         let from_vars =
           Base.List.fold (Array.to_list b.b_jmps) ~init:Var.Set.empty
             ~f:(fun acc j -> Core.Set.union acc (value_vars (Jmp.cond j)))
@@ -553,7 +571,11 @@ let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t)
       && Base.List.for_all b.b_phis ~f:(fun p ->
                 Base.List.for_all (Phi.values p |> Seq.to_list)
                   ~f:(fun (pred, e) ->
-                    Core.Set.mem edge_srcs pred || check_use b 0 e)))
+                    (* An edge value flows from the predecessor's end
+                       state, not this block's entry. *)
+                    match Core.Map.find ctx.by_tid pred with
+                    | Some pb -> check_use pb (Array.length pb.b_defs) e
+                    | None -> check_use b 0 e)))
 
 (* Removes the blocks the rewrite left with zero predecessors,
    cascading.  [pre_preds_count] is the pre-rewrite count: a block

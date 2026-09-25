@@ -503,8 +503,16 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
   let call = call_exn j in
   match Call.target call with
   | Indirect (Bil.Unknown _) ->
+      (* The target cannot be denoted: the identity at the boundary is
+         the return. *)
+      Hike_diag.warn
+        "emit: indirect tail call at block %s has an unknown target — rendered as a return"
+        (Tid.name blk_tid);
       create_return ctx scope blk_tid llvm_builder sub
   | Indirect target ->
+      Hike_diag.warn
+        "emit: indirect tail call at block %s has no enumerated destinations (UB when taken)"
+        (Tid.name blk_tid);
       let target_exp = create_exp ctx scope llvm_builder blk_tid target in
       let target_ptr =
         if Llvm.classify_type (Llvm.type_of target_exp) = Llvm.TypeKind.Pointer

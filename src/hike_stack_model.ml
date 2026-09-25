@@ -382,18 +382,41 @@ let string_text_table (arr : Bytes.t) : int -> bool =
        | -1 -> true
        | j -> Char.code (Bytes.get arr j) = 0 && j < off - 1)
 
-(* The deepest literal SP decrement in the sub (prologues and VLAs). *)
+(* The deepest literal SP decrement in the sub (prologues and VLAs),
+   through a copy chain as in the dynamic-allocation walk. *)
 let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
   let is_sp v = Abi.is_sp abi (Var.base v) in
+  (* The literal displacement of [SP - k] through copies defined
+     earlier in term order. *)
+  let rec disp chain seen rhs =
+    match rhs with
+    | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w) when is_sp r ->
+      Some (Word.to_int64_exn w)
+    | Bil.Var v ->
+      let b = Var.base v in
+      if Core.Set.mem seen b then None
+      else
+        Core.Option.bind (Core.Map.find chain b)
+          ~f:(fun d -> disp chain (Core.Set.add seen b) (Def.rhs d))
+    | _ -> None
+  in
   Term.enum blk_t sub
-  |> Seq.fold ~init:0L ~f:(fun acc blk ->
-         Term.enum def_t blk
-         |> Seq.fold ~init:acc ~f:(fun acc d ->
-               match Def.rhs d with
-               | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w)
-                 when is_sp r ->
-                   Int64.max acc (Word.to_int64_exn w)
-               | _ -> acc))
+  |> Seq.fold ~init:(0L, Var.Map.empty) ~f:(fun (acc, chain) blk ->
+         Seq.fold (Term.enum def_t blk) ~init:(acc, chain)
+           ~f:(fun (acc, chain) d ->
+             if is_sp (Def.lhs d) then
+               let acc =
+                 match
+                   disp chain (Var.Set.singleton (Var.base (Def.lhs d)))
+                     (Def.rhs d)
+                 with
+                 | Some w -> Int64.max acc w
+                 | None -> acc
+               in
+               (acc, chain)
+             else
+               (acc, Core.Map.set chain ~key:(Var.base (Def.lhs d)) ~data:d)))
+  |> fst
 
 (* A real (non-intrinsic) call, direct or indirect. *)
 let machine_call (j : jmp term) : bool =

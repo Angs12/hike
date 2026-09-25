@@ -76,6 +76,10 @@ let pass_coerce proj = Project.map_program proj ~f:Hike_coerce.coerce_program
 
 let pass_vsa proj =
   let target = Project.target proj in
+  if Hike_abi.is_known_foreign target then
+    Hike_diag.warn
+      "target %s is not x86_64-gnu-elf; the x86-64 SysV convention record serves it"
+      (KB.Name.to_string (Theory.Target.name target));
   (* Image-backed loads are sound only where the runtime content IS
      the static image: .rodata is read-only and a valid PIE never
      relocates it (relocated data lands in .data.rel.ro). *)

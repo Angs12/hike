@@ -256,6 +256,7 @@ let split_entry ~(starts : (Addr.t * tid) list)
           |> Seq.exists ~f:(fun j ->
                  match Jmp.kind j with
                  | Goto (Direct t) -> Tid.equal t tid
+                 | Int (_, t) -> Tid.equal t tid
                  | Call c -> (
                      match Call.return c with
                      | Some (Direct t) -> Tid.equal t tid
@@ -499,16 +500,22 @@ let dispatch_jmps (j : jmp term) (sel : exp)
 (* The return epilogue's replacement: the canonical direct return edge. *)
 let ret_jmp : jmp term = Hike_return.create ()
 
+(* The canonical return keeps the original edge's condition; an
+   unconditional return stays unconditional. *)
+let canonical_ret (j : jmp term) : jmp term =
+  if Model.is_true_cond (Jmp.cond j) then ret_jmp
+  else Jmp.with_cond ret_jmp (Jmp.cond j)
+
 let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
     (j : jmp term) : jmp term list option =
   match Jmp.kind j with
   | Call c -> (
       match (Call.return c, Call.target c) with
       | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
-          Some [ ret_jmp ]
+          Some [ canonical_ret j ]
       | _ -> None)
   | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
-      Some [ ret_jmp ]
+      Some [ canonical_ret j ]
   | _ -> None
 
 (* The [bits]-bit word of an image's byte array at [off], in [endian]. *)
@@ -738,6 +745,7 @@ let prune_unreachable ~(fresh : Tid.Set.t) ~(live : Tid.Set.t)
               let targets =
                 match Jmp.kind j with
                 | Goto (Direct t) -> [ t ]
+                | Int (_, t) -> [ t ]
                 | Call c -> (
                     match Call.return c with
                     | Some (Direct t) -> [ t ]
