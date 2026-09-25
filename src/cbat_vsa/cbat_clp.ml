@@ -15,6 +15,8 @@
    per op. *)
 
 open Bap.Std
+open Bin_prot.Std
+open !Core
 
 include Cbat_clp_core
 
@@ -37,7 +39,7 @@ let cast = Cbat_clp_arith.cast
 let concat = Cbat_clp_arith.concat
 
 (* The progression type, named for the [Pieces] signature. *)
-type progression = t
+type progression = t [@@deriving bin_io, sexp, compare]
 
 (* The VSA_DEBUG census of the piece unions: canonical list lengths and
    cap events, dumped at exit. *)
@@ -63,7 +65,7 @@ let () =
    The list is the set union; [] is bottom.  Smart constructors are the
    only way in; no raw list escapes except through [to_list]. *)
 module Pieces = struct
-  type t = progression list
+  type t = progression list [@@deriving bin_io, sexp, compare]
 
   module C = Cbat_clp_core
   module A = Cbat_clp_arith

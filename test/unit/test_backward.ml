@@ -797,7 +797,7 @@ let tests : unit Alcotest.test list =
         check "BK-47"
           ((not (Ws.is_top cell1))
           && (not (Ws.is_bottom cell1))
-          && Cbat_word.(<=) (Ws.cardinality cell1) (Cbat_word.of_int ~width:33 64)
+          && Cbat_word.leq_int (Ws.cardinality cell1) 64
           && not (Ws.elem (w32 100) cell1)));
 
     pin "BK-48"
@@ -872,7 +872,7 @@ let tests : unit Alcotest.test list =
         check "BK-51"
           ((not (Ws.is_top cell1))
           && (not (Ws.is_bottom cell1))
-          && Cbat_word.(=) (Ws.cardinality cell1) (Cbat_word.of_int ~width:33 5)
+          && Cbat_word.to_int_exn (Ws.cardinality cell1) = 5
           && Ws.elem (w32 0xFFFFFFFF) cell1
           && Ws.elem (w32 0) cell1
           && not (Ws.elem (w32 4) cell1)));

@@ -561,9 +561,9 @@ let tests : unit Alcotest.test list =
         let full_l = Ws.of_list ~width:1 [ Cbat_word.b0; Cbat_word.b1 ] in
         check "VSA-61"
           ((not (Ws.is_bottom full))
-          && Cbat_word.(=) (Ws.cardinality full) (Cbat_word.of_int ~width:2 2)
+          && Cbat_word.to_int_exn (Ws.cardinality full) = 2
           && (not (Ws.is_bottom full_l))
-          && Cbat_word.(=) (Ws.cardinality full_l) (Cbat_word.of_int ~width:2 2)));
+          && Cbat_word.to_int_exn (Ws.cardinality full_l) = 2));
 
     (* PIPE-40: the recursive may-write summary is the least fixpoint
        over the direct-call graph — a cycle unions, it does not kill. *)

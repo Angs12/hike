@@ -56,13 +56,13 @@ val widen_join : t -> t -> t
 val extrapolate_steps : steps:int -> t -> t -> t
 
 (* The progression type, named for the [Pieces] signature. *)
-type progression = t
+type progression = t [@@deriving bin_io, sexp, compare]
 
 (* The canonical, capped union of progressions.  The smart constructors
    are the only way in; the type is abstract and the list is never
    exposed as a raw value. *)
 module Pieces : sig
-  type t
+  type t [@@deriving bin_io, sexp, compare]
 
   val to_list : t -> progression list
   val fold : t -> init:'a -> f:('a -> progression -> 'a) -> 'a

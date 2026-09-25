@@ -43,24 +43,37 @@ let tests : unit Alcotest.test list =
         let p8 = Ws.of_clp (int32 ~lo:0 ~hi:10) in
         let d8 = Ws.diff p8 (Ws.of_list ~width:32 [ w32 0; w32 1; w32 2 ]) in
         check "WS-02"
-          (Ws.cardinality d8 = Cbat_word.of_int ~width:33 8
+          (Cbat_word.to_int_exn (Ws.cardinality d8) = 8
           && List.for_all
                (fun w -> Ws.elem w d8)
                [ w32 3; w32 4; w32 5; w32 6; w32 7; w32 8; w32 9; w32 10 ]
           && (not (Ws.elem (w32 0) d8))
           && not (Ws.elem (w32 2) d8)));
 
-    pin "WS-03" "W8b: the Clp\\FinSet interior run — the identity (the two pieces are not one CLP)"
+    pin "WS-03"
+      "W8b: the Clp\\FinSet interior run — EXACT: [0,10] \\ {3,4,5} = [0,2] ∪ [6,10]"
       (fun () ->
         let p8 = Ws.of_clp (int32 ~lo:0 ~hi:10) in
         let d8i = Ws.diff p8 (Ws.of_list ~width:32 [ w32 3; w32 4; w32 5 ]) in
-        check "WS-03" (Ws.equal d8i p8));
+        check "WS-03"
+          (Ws.equal d8i
+             (Ws.of_list ~width:32
+                [ w32 0; w32 1; w32 2; w32 6; w32 7; w32 8; w32 9; w32 10 ])
+          && (not (Ws.elem (w32 3) d8i))
+          && not (Ws.elem (w32 5) d8i)));
 
-    pin "WS-04" "W8c: the Clp\\FinSet with gaps — the identity (the sound over-approximation)"
+    pin "WS-04"
+      "W8c: the Clp\\FinSet with gaps — EXACT: [0,10] \\ {3,5} keeps its pieces (the \
+       survivors, 3 and 4 apart, never hull)"
       (fun () ->
         let p8 = Ws.of_clp (int32 ~lo:0 ~hi:10) in
         let d8c = Ws.diff p8 (Ws.of_list ~width:32 [ w32 3; w32 5 ]) in
-        check "WS-04" (Ws.equal d8c p8));
+        check "WS-04"
+          (Ws.equal d8c
+             (Ws.of_list ~width:32
+                [ w32 0; w32 1; w32 2; w32 4; w32 6; w32 7; w32 8; w32 9; w32 10 ])
+          && (not (Ws.elem (w32 3) d8c))
+          && not (Ws.elem (w32 5) d8c)));
 
     pin "WS-05" "D1-5: composite meet on width-mismatched sets -> no assert, not bottom"
       (fun () ->
@@ -321,6 +334,33 @@ let tests : unit Alcotest.test list =
         check "WS-32"
           (Ws.bitwidth left = 64 && Ws.bitwidth right = 64
           && Ws.is_top left && Ws.is_top right));
+
+    pin "WS-33"
+      "UT1-42: the composite mixed-step meet is EXACT — {10,12,14,16,18} ∩ \
+       {16,17,18,19} = {16,18}"
+      (fun () ->
+        let a = Ws.of_list ~width:32 [ w32 10; w32 12; w32 14; w32 16; w32 18 ] in
+        let b = Ws.of_list ~width:32 [ w32 16; w32 17; w32 18; w32 19 ] in
+        let m = Ws.meet a b in
+        check "WS-33"
+          (Ws.equal m (Ws.of_list ~width:32 [ w32 16; w32 18 ])
+          && Cbat_word.to_int_exn (Ws.cardinality m) = 2
+          && (not (Ws.elem (w32 10) m))
+          && (not (Ws.elem (w32 17) m))
+          && not (Ws.elem (w32 19) m)));
+
+    pin "WS-34"
+      "the disjoint union: two case targets stay two pieces — the union never \
+       hulls {0,100} into [0,100]"
+      (fun () ->
+        let u = Ws.union (Ws.singleton (w32 0)) (Ws.singleton (w32 100)) in
+        check "WS-34"
+          (Ws.equal u (Ws.of_list ~width:32 [ w32 0; w32 100 ])
+          && Ws.elem (w32 0) u
+          && Ws.elem (w32 100) u
+          && (not (Ws.elem (w32 50) u))
+          && (not (Ws.elem (w32 1) u))
+          && not (Ws.elem (w32 99) u)));
   ]
 
 let () = run "ws" tests

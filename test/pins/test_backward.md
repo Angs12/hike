@@ -67,11 +67,11 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-44 | E1-1 the ON-path matched-pair `+word` RSP restore keeps the loop header at `{0x1000}`. | In `cbat_call_effects.ml`, delete the matched-pair restore arm. | BK-44 (RSP drifts by 8 per call). |
 | BK-45 | E1-2 straight-line call: the continuation RSP is exactly `{0x2000}`. | As BK-44. | BK-45 (RSP `{0x1ff8}`). |
 | BK-46 | L-D6 RBP-anchored gate-free loop: the jcc meet binds `[RBP−8]` at BODY input. | As BK-06 (no flag rewrite) or skip the dead epilogue denotation. | BK-46 (cell top). |
-| BK-47 | R2-1 inline-arithmetic condition `(t+1) < 64`: the producer recursion yields the 64-element hull. | Drop the inline-BinOp fallthrough in `constrain_def_chain`/`cmp_inverse`. | BK-47 (cardn > 64 / top). |
+| BK-47 | R2-1 inline-arithmetic condition `(t+1) < 64`: the producer recursion yields the 64-element hull (cardinality compared numerically). | Drop the inline-BinOp fallthrough in `constrain_def_chain`/`cmp_inverse`. | BK-47 (cardn > 64 / top). |
 | BK-48 | R2-2 NOT-of-comparison: the NOT-edge keeps its env (the false-edge row never confines the taken edge); the seeded taken value 8 survives. | Make the `has0` arm apply the false-edge row to the taken edge. | BK-48 (`8 ∈` false, or `bounded_above … 4`). |
 | BK-49 | R2-3 const-first LT flip dispatches UGT (`10 < t` → `[11, 2^w)`). | Drop `flip_guard_op` for the const-first arm. | BK-49. |
 | BK-50 | R2-4 nested TIMES chain: the exact no-wrap slice yields the body-IN singleton `{63}`. | Drop the TIMES no-wrap slice. | BK-50 (`Ws.equal` false). |
-| BK-51 | M5-1 the MINUS wrap hull `{0xFFFFFFFF, 0..3}` (cardn 5). | Make the wrap hull return the unwrapped interval only. | BK-51 (cardn ≠ 5). |
+| BK-51 | M5-1 the MINUS wrap hull `{0xFFFFFFFF, 0..3}` (cardinality 5, compared numerically). | Make the wrap hull return the unwrapped interval only. | BK-51 (cardn ≠ 5). |
 | BK-52 | M5-2 TIMES k=0 identity. | As BK-22. | BK-52 (`Ws.is_top` false). |
 | BK-53 | M5-3 XOR-~0 bijection `{~5}`. | Drop the XOR/lnot bijection row. | BK-53. |
 | BK-54 | M5-4 LOW cast in the walk: truncation hull `[5, 0xFFFFFF05]`. | Make `low_cast_constraint` return `None`. | BK-54. |

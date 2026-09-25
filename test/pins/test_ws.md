@@ -10,8 +10,8 @@ recipe is the textual inversion of the pinned contract recorded below.
 |---|---|---|---|
 | WS-01 | W7: the FinSet diffs — exact; the mixed-width pair shares no elements | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-02 | W8: the Clp\FinSet — the boundary-touch run removed exactly: [0,10] \ {0,1,2} = {3..10} | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
-| WS-03 | W8b: the Clp\FinSet interior run — the identity (the two pieces are not one CLP) | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
-| WS-04 | W8c: the Clp\FinSet with gaps — the identity (the sound over-approximation) | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-03 | W8b: the Clp\FinSet interior run — EXACT: [0,10] \ {3,4,5} = [0,2] ∪ [6,10] (the piece diff) | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-04 | W8c: the Clp\FinSet with gaps — EXACT: [0,10] \ {3,5} keeps its pieces (never hulls) | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-05 | D1-5: composite meet on width-mismatched sets -> no assert, not bottom | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-06 | D1-6: composite meet on matching widths is still exact | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-07 | D5-6: composite rshift on mixed-width CLPs COMPUTES (lane A) — non-top, no assert | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
@@ -40,3 +40,5 @@ recipe is the textual inversion of the pinned contract recorded below.
 | WS-30 | PW-R8: two stack addresses' AND answers top | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-31 | PW-R9: a HIGH cast keeps the unknown bits and answers top | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
 | WS-32 | DOM-44: a blind stack binop keeps the wider operand width | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-33 | UT1-42: the composite mixed-step meet is EXACT — {10,12,14,16,18} ∩ {16,17,18,19} = {16,18} | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
+| WS-34 | the disjoint union: two case targets stay two pieces — {0,100} never hulls into [0,100] | textually invert the pinned contract in `Cbat_clp_set_composite` | pin FAILs under that inversion (re-demonstrated by review) |
