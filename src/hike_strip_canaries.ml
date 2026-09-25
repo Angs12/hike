@@ -366,6 +366,107 @@ type comp = {
   c_fail_blk : Tid.t;
 }
 
+let comp_of_block ~(denote : denote) ~(reach : Tid.t -> bool)
+    ~(tp : var) ~(tls_reads : (block_data * def term) list)
+    ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx)
+    (b : block_data) : comp option =
+  let targets =
+    Base.List.map (Array.to_list b.b_jmps) ~f:(fun j ->
+        match Jmp.kind j with
+        | Goto (Direct t) when Core.Map.mem ctx.by_tid t -> Some t
+        | _ -> None)
+  in
+  match targets with
+  | [ Some t1; Some t2 ] when Array.length b.b_jmps = 2 ->
+      let f1 = reach t1 in
+      let f2 = reach t2 in
+      if f1 = f2 then None
+      else
+        let fail_t = if f1 then t1 else t2 in
+        let fail_i = if f1 then 0 else 1 in
+        let eq_i = 1 - fail_i in
+        let from_vars =
+          Base.List.fold (Array.to_list b.b_jmps) ~init:Var.Set.empty
+            ~f:(fun acc j -> Core.Set.union acc (value_vars (Jmp.cond j)))
+        in
+        let chain = in_block_chain b from_vars in
+        let cell_of_load tid =
+          match find_def b tid with
+          | Some d when is_load_rhs (Def.rhs d) -> cell_of tid
+          | _ -> None
+        in
+        let cells =
+          Base.List.filter_map (Core.Set.to_list chain) ~f:cell_of_load
+          |> Base.List.dedup_and_sort ~compare:Int64.compare
+        in
+        (match cells with
+         | [ cell ] ->
+             let one_cell =
+               Core.Set.for_all chain ~f:(fun tid ->
+                   Base.Option.value_map (cell_of_load tid) ~default:true
+                     ~f:(fun c -> Int64.equal c cell))
+             in
+             let reloads =
+               Core.Set.filter chain ~f:(fun tid ->
+                   Base.Option.value_map (cell_of_load tid) ~default:false
+                     ~f:(fun c -> Int64.equal c cell))
+             in
+             let reload_tied =
+               Core.Set.exists reloads ~f:(fun tid ->
+                   Base.Option.value_map (find_def b tid) ~default:false
+                     ~f:(compare_operand_is_reload_value ~denote b))
+             in
+             if not one_cell || not reload_tied then None
+             else
+               (* The first cell-naming def per block supplies the candidate store. *)
+               let cell_defs =
+                 Base.List.filter_map ctx.blocks ~f:(fun b' ->
+                     Base.List.find_map (Array.to_list b'.b_defs) ~f:(fun d ->
+                         match cell_of (Term.tid d) with
+                         | Some c when Int64.equal c cell -> Some (b', d)
+                         | _ -> None))
+               in
+               let stores =
+                 Base.List.filter cell_defs
+                   ~f:(fun (_, d) -> is_store_rhs (Def.rhs d))
+               in
+               (match stores with
+                | [ (sb, sd) ] ->
+                    let reaching v =
+                      Base.Option.value
+                        (Base.Option.map
+                           (Core.Map.find ctx.def_site (Term.tid sd))
+                           ~f:(fun (_, i) -> reaching_at ctx sb i v))
+                        ~default:Tid.Set.empty
+                    in
+                    let read =
+                      Base.List.find tls_reads ~f:(fun (rb, rd) ->
+                          stored_value_is_read_value ~denote
+                            ~store_blk:sb.b_blk ~read_blk:rb.b_blk ~reaching
+                            ~tp ~read:rd sd)
+                    in
+                    Base.Option.map read ~f:(fun (_, rd) ->
+                        let rtid = Term.tid rd in
+                        let fam =
+                          compare_family ~ctx b
+                            (Core.Set.union chain (Tid.Set.singleton rtid))
+                        in
+                        let delete =
+                          Core.Set.union fam
+                            (Core.Set.add (Tid.Set.singleton (Term.tid sd)) rtid)
+                        in
+                        { c_read = rtid;
+                          c_store = Term.tid sd;
+                          c_cell = cell;
+                          c_delete = delete;
+                          c_fail_jmp = Term.tid b.b_jmps.(fail_i);
+                          c_eq_jmp = Term.tid b.b_jmps.(eq_i);
+                          c_cmp_blk = b.b_tid;
+                          c_fail_blk = fail_t })
+                | _ -> None)
+         | _ -> None)
+  | _ -> None
+
 let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
     ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx) : comp list =
   let reach = reach_fail ~ctx ~names in
@@ -379,110 +480,11 @@ let find_comps ~(denote : denote) ~(abi : Abi.t) ~(names : Tid.t -> string)
   in
   let comps = ref [] in
   Base.List.iter ctx.blocks ~f:(fun b ->
-      let targets =
-        Base.List.map (Array.to_list b.b_jmps) ~f:(fun j ->
-            match Jmp.kind j with
-            | Goto (Direct t) when Core.Map.mem ctx.by_tid t -> Some t
-            | _ -> None)
-      in
-      let both_direct =
-        Array.length b.b_jmps = 2
-        && Base.List.for_all targets ~f:Base.Option.is_some
-      in
-      if both_direct then
-        let t1 = Base.Option.value_exn (Base.List.nth_exn targets 0) in
-        let t2 = Base.Option.value_exn (Base.List.nth_exn targets 1) in
-        let f1 = reach t1 in
-        let f2 = reach t2 in
-        if f1 <> f2 then
-          let fail_t = if f1 then t1 else t2 in
-          let fail_i = if f1 then 0 else 1 in
-          let eq_i = 1 - fail_i in
-          let from_vars =
-            Base.List.fold (Array.to_list b.b_jmps) ~init:Var.Set.empty ~f:(fun acc j ->
-                Core.Set.union acc (value_vars (Jmp.cond j)))
-          in
-          let chain = in_block_chain b from_vars in
-          (* The tied reloads: chain members whose rhs is a
-             singleton-cell load. *)
-          let cell_of_load tid =
-            match find_def b tid with
-            | Some d when is_load_rhs (Def.rhs d) -> cell_of tid
-            | _ -> None
-          in
-          let cells =
-            Base.List.filter_map (Core.Set.to_list chain) ~f:cell_of_load
-            |> Base.List.dedup_and_sort ~compare:Int64.compare
-          in
-          match cells with
-          | [ cell ] ->
-            let one_cell =
-              Core.Set.for_all chain ~f:(fun tid ->
-                  Base.Option.value_map (cell_of_load tid) ~default:true
-                    ~f:(fun c -> Int64.equal c cell))
-            in
-            let reloads =
-              Core.Set.filter chain ~f:(fun tid ->
-                  Base.Option.value_map (cell_of_load tid) ~default:false
-                    ~f:(fun c -> Int64.equal c cell))
-            in
-            let reload_tied =
-              Core.Set.exists reloads ~f:(fun tid ->
-                  Base.Option.value_map (find_def b tid) ~default:false
-                    ~f:(compare_operand_is_reload_value ~denote b))
-            in
-            if one_cell && reload_tied then
-              (* One def per block: the FIRST def naming the cell, in
-                 block order. *)
-              let cell_defs =
-                Base.List.filter_map ctx.blocks ~f:(fun b' ->
-                    Base.List.find_map (Array.to_list b'.b_defs) ~f:(fun d ->
-                        match cell_of (Term.tid d) with
-                        | Some c when Int64.equal c cell -> Some (b', d)
-                        | _ -> None))
-              in
-              let stores =
-                Base.List.filter cell_defs ~f:(fun (_, d) -> is_store_rhs (Def.rhs d))
-              in
-              match stores with
-              | [ (sb, sd) ] ->
-                let reaching v =
-                  Base.Option.value
-                    (Base.Option.map (Core.Map.find ctx.def_site (Term.tid sd))
-                       ~f:(fun (_, i) -> reaching_at ctx sb i v))
-                    ~default:Tid.Set.empty
-                in
-                let read =
-                  Base.List.find tls_reads ~f:(fun (rb, rd) ->
-                      stored_value_is_read_value ~denote ~store_blk:sb.b_blk
-                        ~read_blk:rb.b_blk ~reaching ~tp ~read:rd sd)
-                in
-                (match read with
-                 | Some (_, rd) ->
-                   let rtid = Term.tid rd in
-                   let fam =
-                    compare_family ~ctx b
-                      (Core.Set.union chain (Tid.Set.singleton rtid))
-                  in
-                  let delete =
-                    Core.Set.union fam
-                      (Core.Set.add (Tid.Set.singleton (Term.tid sd)) rtid)
-                  in
-                   comps :=
-                     { c_read = rtid;
-                       c_store = Term.tid sd;
-                       c_cell = cell;
-                       c_delete = delete;
-                       c_fail_jmp = Term.tid b.b_jmps.(fail_i);
-                       c_eq_jmp = Term.tid b.b_jmps.(eq_i);
-                       c_cmp_blk = b.b_tid;
-                       c_fail_blk = fail_t }
-                     :: !comps
-                 | None -> ());
-              | _ -> ()
-            else ()
-          | _ -> ()
-      else ());
+      match
+        comp_of_block ~denote ~reach ~tp ~tls_reads ~cell_of ~ctx b
+      with
+      | Some c -> comps := c :: !comps
+      | None -> ());
   !comps
 
 (* A cell converts together: every access the VSA proves lands on it
@@ -560,8 +562,7 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
             (Term.enum jmp_t b
             |> Seq.fold ~init:Tid.Set.empty ~f:(fun a j -> jmp_targets a j)))
   in
-  (* The successor map builds once per removal and decrements
-     incrementally; the preds transpose rebuilds from it. *)
+  (* Each cascade round derives the current predecessor transpose. *)
   let rec go s pending =
     let succ_m = succs_of s in
     let preds =

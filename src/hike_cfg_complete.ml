@@ -74,13 +74,13 @@ let dispatch_target ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
   | Some (Bil.Var v) when retaddr_read ~last_defs ~retaddr v -> None
   | t -> t
 
-(* The run's block-address entries restricted to this sub — the block
-   extents' bounds; cross-sub entries never contain a split. *)
 (* The sub's block tids. *)
 let sub_tids (sub : sub term) : Tid.Set.t =
   Core.Set.of_list (module Tid)
     (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
 
+(* The run's block-address entries restricted to this sub — the block
+   extents' bounds; cross-sub entries never contain a split. *)
 let addressed_starts ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) :
     (Addr.t * tid) list =
   let tids = sub_tids sub in
@@ -301,10 +301,6 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
         bounded_words ~denote ~block_addrs ~blk ~def:add_def (Def.rhs add_def))
   | _ -> None
 
-(* The dispatch's guard subject and base: of the target's top-level
-   summands, one denotates to a singleton (the base) and the other
-   carries the table's delta and is the guard's subject. *)
-
 (* The resolution's preparation walk: every resolvable dispatch's case
    words land on the run's map (mid-block entries through the block
    split).  A cross-sub word stays foreign; a word in no block is a
@@ -375,6 +371,9 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
   in
   loop sub block_addrs
 
+(* The dispatch's guard subject and base: of the target's top-level
+   summands, one denotates to a singleton (the base) and the other
+   carries the table's delta and is the guard's subject. *)
 let delta_subject ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(blk : blk term) (texp : exp) : (exp * exp * Int64.t) option =
   let singleton_value ?def e =
@@ -499,23 +498,38 @@ let dispatch_jmps (j : jmp term) (sel : exp)
 (* The return epilogue's replacement: the canonical direct return edge. *)
 let ret_jmp : jmp term = Hike_return.create ()
 
+let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
+    (j : jmp term) : jmp term list option =
+  match Jmp.kind j with
+  | Call c -> (
+      match (Call.return c, Call.target c) with
+      | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
+          Some [ ret_jmp ]
+      | _ -> None)
+  | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
+      Some [ ret_jmp ]
+  | _ -> None
+
 (* The [bits]-bit word of an image's byte array at [off], in [endian]. *)
 let image_word_at (bytes : Bytes.t) (off : int) ~(endian : endian)
     ~(bits : int) : int64 option =
-  let n = bits / 8 in
-  if off < 0 || off + n > Bytes.length bytes then None
+  let byte_width = bits / 8 in
+  if off < 0 || off + byte_width > Bytes.length bytes then None
   else
     let byte i = Int64.of_int (Char.code (Bytes.get bytes (off + i))) in
-    let w =
-      match endian with
-      | LittleEndian ->
-        Base.List.fold (Base.List.init n ~f:(fun i -> i)) ~init:0L
-          ~f:(fun acc i -> Int64.logor acc (Int64.shift_left (byte i) (8 * i)))
-      | BigEndian ->
-        Base.List.fold (Base.List.init n ~f:(fun i -> i)) ~init:0L
-          ~f:(fun acc i -> Int64.logor (Int64.shift_left acc 8) (byte i))
-    in
-    Some w
+    let word = ref 0L in
+    (match endian with
+     | LittleEndian ->
+       for i = 0 to byte_width - 1 do
+         word := Int64.logor !word (Int64.shift_left (byte i) (8 * i))
+       done
+     | BigEndian ->
+       for i = 0 to byte_width - 1 do
+         word := Int64.logor (Int64.shift_left !word 8) (byte i)
+       done);
+    Some !word
+
+let max_table_slots = 64
 
 (* The completeness premise: the enumerated words cover every value
    the dispatch's source may produce; a memory-read value only when
@@ -583,7 +597,9 @@ let table_covered ~(denote : denote) ~(last_defs : def term Var.Map.t)
         when (not (Vsa.WordSet.is_top addrs))
              && (not (Vsa.WordSet.is_infinite addrs))
              && (not (Vsa.WordSet.is_bottom addrs))
-             && not (Cbat_word.gt_int (Vsa.WordSet.cardinality addrs) 64)
+             && not
+                  (Cbat_word.gt_int (Vsa.WordSet.cardinality addrs)
+                     max_table_slots)
         -> Base.List.for_all (Vsa.WordSet.iter addrs)
              ~f:(slot_covered ~endian ~bits)
       | _ -> false)
@@ -608,23 +624,22 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
           then dispatch_jmps j subject pairs cont
           else None)
   in
-  match Jmp.kind j with
-  | Call c -> (
-      match (Call.return c, Call.target c) with
-      | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
-          Some [ ret_jmp ]
-      | _, Indirect texp ->
-          let cont =
-            match Call.return c with
-            | Some (Direct t) -> Some t
-            | Some (Indirect _) | None -> None
-          in
-          series texp cont
+  match ret_rewrite ~last_defs ~retaddr j with
+  | Some rewritten -> Some rewritten
+  | None -> (
+      match Jmp.kind j with
+      | Call c -> (
+          match Call.target c with
+          | Indirect texp ->
+            let cont =
+              match Call.return c with
+              | Some (Direct t) -> Some t
+              | Some (Indirect _) | None -> None
+            in
+            series texp cont
+          | _ -> None)
+      | Goto (Indirect texp) -> series texp None
       | _ -> None)
-  | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
-      Some [ ret_jmp ]
-  | Goto (Indirect texp) -> series texp None
-  | _ -> None
 
 (* Rebuilds [blk] with exactly [js'] as its jmps. *)
 let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
@@ -771,18 +786,6 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
    not converge: a target var whose reaching def loads the entry SP
    cell.  This is the sanctioned pre-solution projection — the
    denotation path supersedes it wherever a solution exists. *)
-let rewritten_shape_returns ~(retaddr : Tid.Set.t)
-    ~(last_defs : def term Var.Map.t) (j : jmp term) : jmp term list option =
-  match Jmp.kind j with
-  | Call c -> (
-      match (Call.return c, Call.target c) with
-      | None, Indirect (Bil.Var v) when retaddr_read ~last_defs ~retaddr v ->
-          Some [ ret_jmp ]
-      | _ -> None)
-  | Goto (Indirect (Bil.Var v)) when retaddr_read ~last_defs ~retaddr v ->
-      Some [ ret_jmp ]
-  | _ -> None
-
 let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
   let word_bits = Hike_abi.word_bits abi in
   let retaddr =
@@ -800,7 +803,7 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
     Term.map blk_t sub ~f:(fun blk ->
         let last_defs = Vsa.last_defs blk in
         splice_jmps blk
-          ~classify:(rewritten_shape_returns ~retaddr ~last_defs))
+          ~classify:(ret_rewrite ~retaddr ~last_defs))
 
 (* One resolution event pass on the phase's own solution: the case
    words land on the run's map and resolved dispatches contribute
