@@ -28,6 +28,7 @@
   cbat_extraction
   cbat_wordset_intf
   cbat_vsa_utils
+  cbat_var_id
   cbat_landmarks)
  (libraries hike_abi bap bitvec bitvec-order bin_prot core monads hashcons)
  (preprocess

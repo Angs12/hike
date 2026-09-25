@@ -238,12 +238,14 @@ let pass_attrib proj =
 let pass_convlir ~output proj = convert_binary output proj
 
 let pass_types proj = Hike_types.run proj
+let pass_vars proj = Hike_vars.run proj
 
 let () =
   Extension.declare (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
       Project.register_pass ~name:"filter" ~runonce:true pass_filter;
-      let jump = chain ~name:"jump" ~prev:"filter" pass_jump in
+      let vars = chain ~name:"vars" ~prev:"filter" pass_vars in
+      let jump = chain ~name:"jump" ~prev:vars pass_jump in
       let split_mem = chain ~name:"split-mem" ~prev:jump pass_split_mem in
       let coerce = chain ~name:"coerce" ~prev:split_mem pass_coerce in
       let vsa = chain ~name:"vsa" ~prev:coerce pass_vsa in

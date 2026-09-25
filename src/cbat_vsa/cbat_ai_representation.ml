@@ -29,14 +29,15 @@ module Utils = Cbat_vsa_utils
 type wordset = WordSet.t
 
 
-(* Env keys compare by [Var.same]. *)
-module VarKey = struct
-  include Var
-  let equal = same
+(* Env keys are the vars' program-wide ids (Cbat_var_id): the maps
+   compare ints, so a lookup never walks variable identifiers. *)
+module SlotKey = struct
+  type t = int [@@deriving bin_io, compare, sexp]
+  let pp = Int.pp
 end
 
-module MemEnv = MapLattice.Make_indexed_val(VarKey)(Mem)
-module WordEnv = MapLattice.Make_indexed_val(VarKey)(WordSet)
+module MemEnv = MapLattice.Make_indexed_val(SlotKey)(Mem)
+module WordEnv = MapLattice.Make_indexed_val(SlotKey)(WordSet)
 
 type t = {
   memories : MemEnv.t;
@@ -57,27 +58,45 @@ let equal (e1 : t) e2 : bool =
   WordEnv.equal e1.words e2.words
 
 let add_memory (e : t) ~(key : var) ~(data : Mem.t) : t =
-  {memories = MemEnv.add e.memories ~key ~data;
+  {memories = MemEnv.add e.memories ~key:(Cbat_var_id.intern key) ~data;
    words = e.words}
 
 let add_word (e : t) ~(key : var) ~(data : wordset) : t =
   {memories = e.memories;
-   words = WordEnv.add e.words ~key ~data}
+   words = WordEnv.add e.words ~key:(Cbat_var_id.intern key) ~data}
 
-let find_word (i : WordSet.idx) (env : t) (v : var) : wordset = WordEnv.find i env.words v
-let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t = MemEnv.find i env.memories v
+let find_word (i : WordSet.idx) (env : t) (v : var) : wordset =
+  WordEnv.find i env.words (Cbat_var_id.intern v)
+
+let find_memory (i : Mem.idx) (env : t) (v : var) : Mem.t =
+  MemEnv.find i env.memories (Cbat_var_id.intern v)
 
 (* Drop dead virtual temps; machine regs are the ABI surface and stay.
    Missing keys read top, so dropping only weakens. *)
 let gc (e : t) ~(keep : Var.Set.t) : t =
+  let keep =
+    Core.Set.fold keep ~init:(Core.Set.empty (module Int))
+      ~f:(fun acc v -> Core.Set.add acc (Cbat_var_id.intern v))
+  in
   { e with
     words =
       WordEnv.filter_keys e.words ~f:(fun k ->
-          (not (Var.is_virtual k))
-          || Core.Set.mem keep (Var.base k)) }
+          (not (Cbat_var_id.is_virtual k))
+          || Core.Set.mem keep (Cbat_var_id.base_of k)) }
 
 
 
+
+(* Bindings print by variable, not by id. *)
+let pp_words ppf (m : WordEnv.t) =
+  WordEnv.fold m ~init:() ~f:(fun ~key ~data () ->
+      Format.fprintf ppf "@[<hov 1>[%a@ -> %a]@]@ "
+        Var.pp (Cbat_var_id.var_of key) WordSet.pp data)
+
+let pp_memories ppf (m : MemEnv.t) =
+  MemEnv.fold m ~init:() ~f:(fun ~key ~data () ->
+      Format.fprintf ppf "@[<hov 1>[%a@ -> %a]@]@ "
+        Var.pp (Cbat_var_id.var_of key) Mem.pp data)
 
 let pp ppf (e : t) =
   if equal e bottom then
@@ -85,10 +104,10 @@ let pp ppf (e : t) =
   else if equal e top then
     Format.fprintf ppf "unknown"
   else begin
-    Format.fprintf ppf "@[@[<2>Immediate Variables:@ %a@]@ "
-      WordEnv.pp e.words;
-    Format.fprintf ppf "@[<2>Memory:@ @ %a@]@]"
-      MemEnv.pp e.memories
+    Format.fprintf ppf "@[@[<2>Immediate Variables:@ @[<2>{@ %a}@]@]@ "
+      pp_words e.words;
+    Format.fprintf ppf "@[<2>Memory:@ @[<2>{@ %a}@]@]@]"
+      pp_memories e.memories
   end
 
 let join (e1 : t) (e2 : t) : t =
@@ -126,6 +145,10 @@ let selective_widen_extrapolate ?(head:Tid.t option=None)
   else if WordEnv.equal e2.words WordEnv.bottom then e1
   else if Core.Set.is_empty need && Option.is_none head then join e1 e2
   else
+    let need_ids =
+      Core.Set.fold need ~init:(Core.Set.empty (module Int))
+        ~f:(fun acc v -> Core.Set.add acc (Cbat_var_id.intern v))
+    in
     let words =
       if Core.Set.is_empty need then WordEnv.join e1.words e2.words
       else
@@ -136,7 +159,7 @@ let selective_widen_extrapolate ?(head:Tid.t option=None)
         if WordSet.is_top data_new then acc
         else
           let data_res =
-            if Core.Set.mem need (Var.base key) then
+            if Core.Set.mem need_ids (Cbat_var_id.base_of key) then
               match head with
               | Some h ->
                 extrapolate_data ~entries:(Cbat_landmarks.entries_for_head landmarks h)
@@ -209,6 +232,10 @@ let precedes (e1 : t) (e2 : t) : bool =
 let top_words_except ~(preserved : Var.Set.t) (env : t) : t =
   (* Both the set's elements and the lane's keys are base vars, so
      membership is a direct set lookup, not a Var.same scan. *)
+  let preserved =
+    Core.Set.fold preserved ~init:(Core.Set.empty (module Int))
+      ~f:(fun acc v -> Core.Set.add acc (Cbat_var_id.intern v))
+  in
   let words = WordEnv.fold env.words ~init:env.words
     ~f:(fun ~key ~data acc ->
       if Core.Set.mem preserved key
@@ -219,7 +246,8 @@ let top_words_except ~(preserved : Var.Set.t) (env : t) : t =
 (* Apply [f] to every memory cell; the words stay. *)
 let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =
   let memories = MemEnv.fold env.memories ~init:env.memories
-    ~f:(fun ~key ~data acc -> MemEnv.add acc ~key ~data:(f ~key ~data)) in
+    ~f:(fun ~key ~data acc ->
+      MemEnv.add acc ~key ~data:(f ~key:(Cbat_var_id.var_of key) ~data)) in
   { env with memories }
 
 (* The whole-memory-top fallback; the words stay. *)
