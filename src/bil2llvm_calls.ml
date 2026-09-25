@@ -511,9 +511,13 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
         then target_exp
         else Bil2llvm_section.create_addr_ptr ctx llvm_builder target_exp
       in
-      ignore (Llvm.build_indirect_br target_ptr 0 llvm_builder)
+      ignore
+        (build_indirect_br llvm_builder target_ptr
+           ~reserved_destinations:indirect_br_no_reserved)
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
+(* Unmapped intrinsic stubs use a fixed i64 synthetic ABI; normalize
+   their operands to that interface before the external call. *)
 let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   let target = Call.target call |> label_tid in
   let args = get_args ctx target in
@@ -578,7 +582,7 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
     | None ->
         if Hike_abi.is_intrinsic_name name then begin
           Hike_diag.warn
-            "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
+            "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes bind the external result"
             name (Tid.name (Term.tid sub));
           create_external_intrinsic_call ctx scope llvm_builder blk_tid call name
         end

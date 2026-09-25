@@ -87,7 +87,8 @@ let create_branches ctx scope blk_tid llvm_builder branches =
             (* An indirect jmp ends its own path; later jmps still
                render. *)
             let target_val = create_exp ctx scope llvm_builder blk_tid exp in
-            Llvm.build_indirect_br target_val 1 llvm_builder |> ignore;
+            build_indirect_br llvm_builder target_val
+               ~reserved_destinations:indirect_br_one_reserved |> ignore;
             (match cont_bb with
              | Some next ->
                  Llvm.position_at_end next llvm_builder;
