@@ -1097,6 +1097,33 @@ let tests : unit Alcotest.test list =
         let lx = Clp.logxor s1 s2 in
         check "CLP-115"
           (List.for_all (fun v -> Clp.elem (w8 v) lx) [ 0x26; 0x23 ]));
+
+    pin "CLP-116"
+      "WF-4: the interleaved union is exact — {0xF8} ∪ {0} = {0, 0xF8}"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let u =
+          Clp.union (Clp.singleton (w8 0xF8)) (Clp.singleton (w8 0)) in
+        check "CLP-116"
+          (Clp.elem (w8 0) u
+          && Clp.elem (w8 0xF8) u
+          && Clp.cardinality u = Cbat_word.of_int ~width:9 2));
+
+    pin "CLP-117"
+      "WF-5: mul distributes over a wrapped grid — {0xE,0xF,0} × {0,0xD} \
+       contains 0, 3 and 6"
+      (fun () ->
+        let w4 = Cbat_word.of_int ~width:4 in
+        let q1 =
+          Clp.create ~width:4 ~step:(w4 1) ~cardn:(Cbat_word.of_int ~width:5 3)
+            (w4 0xE) in
+        let q2 =
+          Clp.create ~width:4 ~step:(w4 0xD) ~cardn:(Cbat_word.of_int ~width:5 2)
+            (w4 0) in
+        let r = Clp.mul q1 q2 in
+        check "CLP-117"
+          (Clp.is_wrapped q1
+          && List.for_all (fun v -> Clp.elem (w4 v) r) [ 0; 3; 6 ]));
   ]
 
 let () = run "clp" tests

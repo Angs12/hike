@@ -16,4 +16,7 @@ recipe is the textual inversion of the pinned contract recorded below.
 | PCS-06 | the union-order precedes: one covering piece or element-wise coverage | replace `precedes` with hull containment | pin FAILs under that inversion (re-demonstrated by review) |
 | PCS-07 | the exact mixed-step meet: {10,12,14,16,18} ∩ {16..19} = {16,18} | drop the enumeration arm of `pair_intersection` | pin FAILs under that inversion (re-demonstrated by review) |
 | PCS-08 | the parts exactness: a straddling lshift keeps the overshift and the capped exact pieces apart | collapse the parts in `Pieces.lshift` | pin FAILs under that inversion (re-demonstrated by review) |
-| PCS-09 | the piece differential: binops sound and meet/diff exact on non-wrapped operands (200 random trials; the wrapped class is ticket 05) | drop the enumeration arm of `pair_intersection`/`diff_piece` | pin FAILs under that inversion (re-demonstrated by review) |
+
+
+| PCS-09 | the piece differential: binops sound and meet/diff exact on arbitrary (incl. wrapped) small operands (200 random trials) | drop the enumeration arm of `pair_intersection`/`diff_piece` | pin FAILs under that inversion (re-demonstrated by review) |
+| PCS-10 | the wrapped class: distributed add keeps every wrapped sum, the interleaved union stays two pieces, no canonical piece wraps | drop the `split_wrapped` pass in `Pieces.normalize` | pin FAILs (8+8=0 missing; a wrapped piece survives) |

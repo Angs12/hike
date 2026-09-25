@@ -606,8 +606,13 @@ let solve_descending_circular ~width (desc : t) (circ : t) : t =
     | None -> bottom width
     | Some (x, step) -> create_descending ~width ~base:x ~step
 
-(* Union; same width expected. *)
-let union (p1 : t) (p2 : t) : t =
+(* Union; same width expected.  The finite arm's hull is MODULAR: the
+   grid step divides both steps and every endpoint's modular distance
+   from the hull base, so a wrap-traversing hull keeps its far end (an
+   absolute-difference step can leave the wrapped end unreachable).
+   Wrapped finite operands ride the same path: their traversal is the
+   forward arc [base, finite_end]. *)
+let rec union (p1 : t) (p2 : t) : t =
   if bitwidth p1 <> bitwidth p2 then top (Stdlib.max (bitwidth p1) (bitwidth p2))
   else
     let width = bitwidth p1 in
@@ -616,11 +621,21 @@ let union (p1 : t) (p2 : t) : t =
     else if is_top p1 || is_top p2 then top width
     else if equal p1 p2 then p1
     else match p1.dir, p2.dir with
+    | (Ascending | Descending | Circular), Finite when is_wrapped p2 ->
+      List.fold (split_wrapped p2) ~init:(bottom width)
+        ~f:(fun acc q -> union acc (union p1 q))
+    | Finite, (Ascending | Descending | Circular) when is_wrapped p1 ->
+      List.fold (split_wrapped p1) ~init:(bottom width)
+        ~f:(fun acc q -> union acc (union q p2))
     | Finite, Finite ->
       Option.value_map ~default:p2 (finite_end p1) ~f:begin fun e1 ->
         Option.value_map ~default:p1 (finite_end p2) ~f:begin fun e2 ->
-          let base, newE = interval_union ((base_of p1), e1) ((base_of p2), e2) in
-          let step = common_step ((base_of p1), (step_of p1)) ((base_of p2), (step_of p2)) in
+          let b1 = base_of p1 and b2 = base_of p2 in
+          let base, newE = interval_union (b1, e1) (b2, e2) in
+          let step =
+            List.fold [ b1; e1; b2; e2 ]
+              ~init:(bounded_gcd (step_of p1) (step_of p2))
+              ~f:(fun acc x -> bounded_gcd acc (W.sub x base)) in
           let cardn = cardn_from_bounds base step newE in
           create base ~step ~cardn
         end
@@ -656,9 +671,6 @@ let union (p1 : t) (p2 : t) : t =
     | _ ->
       let step = common_step (base_of p1, step_of p1) (base_of p2, step_of p2) in
       infinite (base_of p1, step)
-
-(* First common point of both progressions. *)
-
 
 let intersection_finite_or_circular (p1 : t) (p2 : t) : t =
   let width = bitwidth p1 in

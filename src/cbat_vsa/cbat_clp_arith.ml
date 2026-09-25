@@ -29,18 +29,23 @@ let width_mismatch (p1 : t) (p2 : t) : int option =
   else Some (Stdlib.max (bitwidth p1) (bitwidth p2))
 
 (* A wrapped Finite operand is two arcs: the op distributes over them and
-   the results merge through the sound union. *)
-let arcs1 (f : t -> t) (p : t) : t =
-  List.fold (split_wrapped p) ~init:(bottom (bitwidth p))
-    ~f:(fun acc q -> union acc (f q))
-
+   the results join through the union.  The dispatched op is the public
+   one; the [*_core] bodies see non-wrapped operands only. *)
 let arcs2 (f : t -> t -> t) (p1 : t) (p2 : t) : t =
-  let width = Stdlib.max (bitwidth p1) (bitwidth p2) in
-  List.fold (split_wrapped p1) ~init:(bottom width) ~f:(fun acc q1 ->
-      List.fold (split_wrapped p2) ~init:acc
-        ~f:(fun acc q2 -> union acc (f q1 q2)))
+  match split_wrapped p1, split_wrapped p2 with
+  | [ q1 ], [ q2 ] -> f q1 q2
+  | qs1, qs2 ->
+    List.fold
+      (List.concat_map qs1 ~f:(fun q1 ->
+           List.map qs2 ~f:(fun q2 -> q1, q2)))
+      ~init:None
+      ~f:(fun acc (q1, q2) ->
+          let r = f q1 q2 in
+          match acc with None -> Some r | Some a -> Some (union a r))
+    |> Option.value
+         ~default:(bottom (Stdlib.max (bitwidth p1) (bitwidth p2)))
 
-let add (p1 : t) (p2 : t) : t =
+let add_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
     | Some w -> top w
@@ -64,6 +69,7 @@ let add (p1 : t) (p2 : t) : t =
         if W.(<) e' e1' then infinite (base, step)
         else let cardn = cardn_from_bounds (W.zero sz) step e' in create base ~step ~cardn
 
+let add (p1 : t) (p2 : t) : t = arcs2 add_core p1 p2
 
 let neg (p : t) : t =
   (* Any point works as the infinite base. *)
@@ -72,7 +78,7 @@ let neg (p : t) : t =
 
 let sub (p1: t) (p2 : t) : t = add p1 (neg p2)
 
-let mul (p1 : t) (p2 : t) : t =
+let mul_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
     | Some w -> top w
@@ -106,6 +112,8 @@ let mul (p1 : t) (p2 : t) : t =
           let fit = W.extract_exn ~hi:(sz - 1) in
           infinite (fit base, fit step)
         else create ~width:sz base ~step ~cardn
+
+let mul (p1 : t) (p2 : t) : t = arcs2 mul_core p1 p2
 
 
 
@@ -203,7 +211,8 @@ let logand_rule ?f (cp1 : t) (cp2 : t) : t =
   | None -> top sz
   | Some x -> x)
 
-let logand (p1 : t) (p2 : t) : t = logand_rule p1 p2
+let logand (p1 : t) (p2 : t) : t =
+  arcs2 (fun a b -> logand_rule a b) p1 p2
 
 
 let logor (p1 : t) (p2 : t) : t = lnot (logand (lnot p1) (lnot p2))
@@ -220,7 +229,7 @@ let lnot_facts (p : t) (q : t) (f : and_facts option) : and_facts option =
            af_fixed = af.af_fixed }
   | _ -> and_facts_of q
 
-let logxor (p1 : t) (p2 : t) : t =
+let logxor_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
     | Some w -> top w
@@ -247,6 +256,8 @@ let logxor (p1 : t) (p2 : t) : t =
   let approx2 = sub (add p1 p2) (mul (logand_rule ~f:resolve p1 p2) two) in
   (* Meet of two sound approximations. *)
   intersection approx1 approx2
+
+let logxor (p1 : t) (p2 : t) : t = arcs2 logxor_core p1 p2
 
 
 (* Overshift image is sign extension. *)
@@ -349,9 +360,12 @@ let lshift_parts (p1 : t) (p2 : t) : t list =
   | Some parts -> parts)
 
 let lshift (p1 : t) (p2 : t) : t =
-  match lshift_parts p1 p2 with
-  | [] -> bottom (bitwidth p1)
-  | x :: rest -> List.fold rest ~init:x ~f:union
+  arcs2
+    (fun a b ->
+      match lshift_parts a b with
+      | [] -> bottom (bitwidth a)
+      | x :: rest -> List.fold rest ~init:x ~f:union)
+    p1 p2
 
 
 let rshift_step rshift ~p1 ~p2 ~e2 ~sz1 ~sz2 =
@@ -404,9 +418,12 @@ let rec rshift_parts (p1 : t) (p2 : t) : t list =
   | Some parts -> parts)
 
 let rshift (p1 : t) (p2 : t) : t =
-  match rshift_parts p1 p2 with
-  | [] -> bottom (bitwidth p1)
-  | x :: rest -> List.fold rest ~init:x ~f:union
+  arcs2
+    (fun a b ->
+      match rshift_parts a b with
+      | [] -> bottom (bitwidth a)
+      | x :: rest -> List.fold rest ~init:x ~f:union)
+    p1 p2
 
 
 let rec arshift_parts (p1 : t) (p2 : t) : t list =
@@ -476,9 +493,12 @@ let rec arshift_parts (p1 : t) (p2 : t) : t list =
   | Some parts -> parts)
 
 let arshift (p1 : t) (p2 : t) : t =
-  match arshift_parts p1 p2 with
-  | [] -> bottom (bitwidth p1)
-  | x :: rest -> List.fold rest ~init:x ~f:union
+  arcs2
+    (fun a b ->
+      match arshift_parts a b with
+      | [] -> bottom (bitwidth a)
+      | x :: rest -> List.fold rest ~init:x ~f:union)
+    p1 p2
 
 
 let split_at_n (p : t) n : t * t =
@@ -530,7 +550,7 @@ let extract_lo ?(lo = 0) (p : t) : t =
 
 (* The high-extract parts: the full-width case keeps its two pieces
    instead of hulling them. *)
-let extract_hi_parts ?(hi = None) ?(signed = false) (p : t) : t list =
+let extract_hi_one ?(hi = None) ?(signed = false) (p : t) : t list =
   let sz = bitwidth p in
   let hiv = Option.value ~default:(bitwidth p - 1) hi in
   (* Degenerate cast keeps top. *)
@@ -567,6 +587,12 @@ let extract_hi_parts ?(hi = None) ?(signed = false) (p : t) : t list =
             else
               let cardn = cardn_from_bounds (W.zero (hiv + 1)) step newE' in
               [ create base ~step ~cardn ]
+
+(* A wrapped input (possible after [extract_lo] narrowed the width)
+   splits into its arcs first: the span reasoning above assumes
+   [finite_end] is the max. *)
+let extract_hi_parts ?hi ?signed (p : t) : t list =
+  List.concat_map (split_wrapped p) ~f:(extract_hi_one ?hi ?signed)
 
 let extract_hi ?hi ?signed (p : t) : t =
   match extract_hi_parts ?hi ?signed p with
@@ -635,7 +661,7 @@ let concat (p1 : t) (p2 : t) : t =
 
 
 (* BAP div truncates; ediv is Euclidean. *)
-let div (p1 : t) (p2 : t) : t =
+let div_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
     | Some w -> top w
@@ -667,11 +693,13 @@ let div (p1 : t) (p2 : t) : t =
   | None -> if is_bottom p1 || is_bottom p2 then bottom width else top width
   | Some x -> x)
 
+let div (p1 : t) (p2 : t) : t = arcs2 div_core p1 p2
+
 
 let sdiv_word (a : word) (b : word) : word = W.div (W.signed a) (W.signed b)
 let smod_word (a : word) (b : word) : word = W.modulo (W.signed a) (W.signed b)
 
-let sdiv (p1 : t) (p2 : t) : t =
+let sdiv_core (p1 : t) (p2 : t) : t =
   (* Mixed widths coerce to max. *)
   match width_mismatch p1 p2 with
     | Some w -> top w
@@ -728,12 +756,14 @@ let sdiv (p1 : t) (p2 : t) : t =
   | None -> if is_bottom p1 || is_bottom p2 then bottom width else top width
   | Some x -> x)
 
+let sdiv (p1 : t) (p2 : t) : t = arcs2 sdiv_core p1 p2
+
 
 (* The unsigned residue bound: x mod k lands in [0, k-1] for every k >
    0, exactly [lo mod k, hi mod k] when lo and hi share their quotient,
    and x itself when every divisor exceeds x or the divisor is {0}
    (the word identity). *)
-let modulo (p1 : t) (p2 : t) : t =
+let modulo_core (p1 : t) (p2 : t) : t =
   match width_mismatch p1 p2 with
   | Some w -> top w
   | None ->
@@ -761,12 +791,14 @@ let modulo (p1 : t) (p2 : t) : t =
           | _ -> interval ~width (W.zero width) (W.pred kmax)))
     | _ -> sub p1 (mul (div p1 p2) p2)
 
+let modulo (p1 : t) (p2 : t) : t = arcs2 modulo_core p1 p2
+
 
 (* The signed residue bound for a positive constant divisor: |r| <=
    k-1, refined to the exact sub-interval inside one truncated
    quotient block; a mixed-sign dividend takes the wrapping band
    [-(k-1), k-1]. *)
-let smodulo (p1 : t) (p2 : t) : t =
+let smodulo_core (p1 : t) (p2 : t) : t =
   match width_mismatch p1 p2 with
   | Some w -> top w
   | None ->
@@ -790,4 +822,6 @@ let smodulo (p1 : t) (p2 : t) : t =
          else interval ~width neg_band (W.pred k)
        | _ -> sub p1 (mul (sdiv p1 p2) p2))
     | _ -> sub p1 (mul (sdiv p1 p2) p2)
+
+let smodulo (p1 : t) (p2 : t) : t = arcs2 smodulo_core p1 p2
 

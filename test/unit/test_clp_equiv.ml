@@ -505,20 +505,60 @@ let run_sweep () : int * int * int =
         done
       done);
 
+  (* Independent (base, step, cardn) pairs at width 4: the shared-shape
+     sweep above never pairs different steps/counts, so wrapped-operand
+     images (e.g. mul over a wrapping grid) escape it.  The bases include
+     near-top values and the counts reach past the wrap. *)
+  let ind_bases = [ 0; 1; 4; 12 ] and ind_steps = [ 0; 1; 3 ] in
+  let ind_cards = [ 1; 2; 3; 5 ] in
+  CKL.iter ops ~f:(fun (nm, f, wop) ->
+      CKL.iter ind_bases ~f:(fun b1 ->
+          CKL.iter ind_steps ~f:(fun s1 ->
+              CKL.iter ind_cards ~f:(fun c1 ->
+                  CKL.iter ind_bases ~f:(fun b2 ->
+                      CKL.iter ind_steps ~f:(fun s2 ->
+                          CKL.iter ind_cards ~f:(fun c2 ->
+                              let p1 =
+                                Ws.Clp.create (Cbat_word.of_int ~width:4 b1)
+                                  ~step:(Cbat_word.of_int ~width:4 s1)
+                                  ~cardn:(Cbat_word.of_int ~width:5 c1)
+                              in
+                              let p2 =
+                                Ws.Clp.create (Cbat_word.of_int ~width:4 b2)
+                                  ~step:(Cbat_word.of_int ~width:4 s2)
+                                  ~cardn:(Cbat_word.of_int ~width:5 c2)
+                              in
+                              match small_elems p1, small_elems p2 with
+                              | Some xs, Some ys ->
+                                incr checked;
+                                let got = f p1 p2 in
+                                if not
+                                     (CKL.for_all xs ~f:(fun x ->
+                                          CKL.for_all ys ~f:(fun y ->
+                                              Ws.Clp.elem (wop x y) got)))
+                                then
+                                  bad
+                                    (Printf.sprintf
+                                       "CLPX %s b1=%d s1=%d c1=%d b2=%d s2=%d c2=%d: a concrete pair is outside the result"
+                                       nm b1 s1 c1 b2 s2 c2)
+                              | _ -> incr skipped)))))));
+
   (* ---- piece-list sweep: the distributed ops vs the concrete oracle ---- *)
 
   (* Each piece op distributes over the canonical union; the concrete
      pair oracle must land in the result.  The union/meet/diff rows pin
-     exactness for small operands. *)
+     exactness for small operands.  The near-top bases and the card-6
+     counts build WRAPPED finite pieces at both widths, so the wrapped
+     class is in the swept operand space. *)
   let piece_widths = [ 4; 8 ] in
-  let piece_vals = [ 0; 1; 2; 3 ] in
+  let piece_vals w = [ 0; 1; 3; (1 lsl w) - 4; (1 lsl w) - 3 ] in
   let piece_cards = [ 1; 2; 3; 5 ] in
   CKL.iter piece_widths ~f:(fun w ->
-      CKL.iter piece_vals ~f:(fun b1 ->
-          CKL.iter piece_vals ~f:(fun s1 ->
+      CKL.iter (piece_vals w) ~f:(fun b1 ->
+          CKL.iter (piece_vals w) ~f:(fun s1 ->
               CKL.iter piece_cards ~f:(fun c1 ->
-                  CKL.iter piece_vals ~f:(fun b2 ->
-                      CKL.iter piece_vals ~f:(fun s2 ->
+                  CKL.iter (piece_vals w) ~f:(fun b2 ->
+                      CKL.iter (piece_vals w) ~f:(fun s2 ->
                           CKL.iter piece_cards ~f:(fun c2 ->
                               let p1 =
                                 Ws.Clp.create (CW.of_int ~width:w b1)

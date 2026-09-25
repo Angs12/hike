@@ -158,12 +158,7 @@ let tests : unit Alcotest.test list =
           let base =
             Cbat_word.of_int ~width:w
               (Random.bits () land ((1 lsl Stdlib.(min w 20)) - 1)) in
-          let p = Clp.create base ~step ~cardn in
-          (* The sweep's domain is the non-wrapped pieces; the wrapped
-             class is the soundness ticket's subject. *)
-          if Clp.is_wrapped p then Clp.create (Cbat_word.zero w) ~step ~cardn
-          else p
-        in
+          Clp.create base ~step ~cardn in
         for _ = 1 to 200 do
           let w = [| 4; 8 |].(Random.int 2) in
           let p1 = rand_clp w and p2 = rand_clp w in
@@ -218,6 +213,35 @@ let tests : unit Alcotest.test list =
             xa
         done;
         check "PCS-09" (!failures = 0));
+
+    pin "PCS-10"
+      "the wrapped class: distributed add keeps every sum, the interleaved \
+       union stays two pieces, and no canonical piece wraps"
+      (fun () ->
+        let w4 = Cbat_word.of_int ~width:4 in
+        let p2 =
+          Clp.create (w4 12) ~step:(w4 3) ~cardn:(Cbat_word.of_int ~width:5 5) in
+        let a = P.union (P.of_progression (Clp.create (w4 0))) (P.of_progression p2) in
+        let got = P.add a (P.of_progression p2) in
+        let sums_ok =
+          List.for_all (fun x ->
+              List.for_all (fun y -> P.elem (Cbat_word.add x y) got)
+                (P.elements (P.of_progression p2)))
+            (P.elements a) in
+        let w8 = Cbat_word.of_int ~width:8 in
+        let far =
+          P.union (P.singleton (w8 0xF8)) (P.singleton (w8 0)) in
+        check "PCS-10"
+          (sums_ok
+          && P.elem (w4 0) got
+          (* 8 + 8 wraps the modulus *)
+          && P.elem (Cbat_word.add (w4 8) (w4 8)) got
+          && List.length (P.to_list far) = 2
+          && P.elem (w8 0) far && P.elem (w8 0xF8) far
+          && List.for_all
+               (fun ps ->
+                 List.for_all (fun q -> not (Clp.is_wrapped q)) (P.to_list ps))
+               [ got; far; a ]));
   ]
 
 let () = run "pieces" tests

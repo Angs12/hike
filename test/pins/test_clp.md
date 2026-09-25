@@ -121,3 +121,5 @@ recipe is the textual inversion of the pinned contract recorded below.
 | CLP-112 | PBH-M12: mod by a zero-straddling divisor keeps the dividend hull (never top) | drop the zero-straddling arm in `Cbat_clp.modulo` | pin FAILs (top, not `[0,20]`) |
 | CLP-114 | WF-2: the wrapped-finite meet is sound — logxor {0x75..0x7B step 2} {0x88} contains all four concrete xors | drop the wrapped branch in `intersection` | pin FAILs (0xF3 missing) |
 | CLP-115 | WF-3: the wrapped-finite meet is sound — logxor {0xCF} {0xE9,0xEC} contains both concrete xors | drop the wrapped branch in `intersection_finite_or_circular` | pin FAILs (the meet is bottom) |
+| CLP-116 | WF-4: the interleaved union is exact — {0xF8} ∪ {0} = {0, 0xF8} | revert the wrapped-hull branch of `union_nowrap` to the absolute `common_step` | pin FAILs (cardinality 1, 0 dropped) |
+| CLP-117 | WF-5: mul distributes over a wrapped grid — {0xE,0xF,0} × {0,0xD} contains 0, 3 and 6 | drop the `arcs2` dispatch on `mul` | pin FAILs (6 missing) |

@@ -39,6 +39,23 @@ let concat = Cbat_clp_arith.concat
 (* The progression type, named for the [Pieces] signature. *)
 type progression = t
 
+(* The VSA_DEBUG census of the piece unions: canonical list lengths and
+   cap events, dumped at exit. *)
+#ifdef VSA_DEBUG
+let census_len_counts = Stdlib.Array.make (Cbat_vsa_utils.max_pieces + 2) 0
+let census_cap_hits = Stdlib.ref 0
+let census_len (n : int) : unit =
+  if n < Stdlib.Array.length census_len_counts then
+    census_len_counts.(n) <- census_len_counts.(n) + 1
+let census_cap () : unit = Stdlib.incr census_cap_hits
+let () =
+  Stdlib.at_exit (fun () ->
+      Stdlib.Array.iteri
+        (fun i n -> Printf.eprintf "hike-pieces-census: len.%d=%d\n%!" i n)
+        census_len_counts;
+      Printf.eprintf "hike-pieces-census: cap=%d\n%!" !census_cap_hits)
+#endif
+
 (* ====================== Pieces: the canonical progression union ======== *)
 
 (* A canonical, capped union of progressions: sorted by unsigned minimum,
@@ -53,22 +70,6 @@ module Pieces = struct
   module U = Cbat_vsa_utils
 
   let max_pieces : int = U.max_pieces
-
-  (* The VSA_DEBUG census: canonical list lengths and cap events. *)
-#ifdef VSA_DEBUG
-  let census_len_counts = Stdlib.Array.make (max_pieces + 2) 0
-  let census_cap_hits = Stdlib.ref 0
-  let census_len (n : int) : unit =
-    if n < Stdlib.Array.length census_len_counts then
-      census_len_counts.(n) <- census_len_counts.(n) + 1
-  let census_cap () : unit = Stdlib.incr census_cap_hits
-  let () =
-    Stdlib.at_exit (fun () ->
-        Stdlib.Array.iteri
-          (fun i n -> Printf.eprintf "hike-pieces-census: len.%d=%d\n%!" i n)
-          census_len_counts;
-        Printf.eprintf "hike-pieces-census: cap=%d\n%!" !census_cap_hits)
-#endif
 
   let width_of (ps : t) : int =
     match ps with [] -> 0 | p :: _ -> C.bitwidth p
@@ -172,17 +173,44 @@ module Pieces = struct
          | Some merged -> insert rest merged
          | None -> p :: acc)
 
-  (* The pair-hull cost: cardinality growth when both are finite, the
-     unsigned gap otherwise. *)
-  let pair_growth (pi : progression) (pj : progression) : Cbat_word.t =
+  (* Two pieces interleave when each sits below the other across the
+     wrap: their exact union is two arcs, which the cap cannot use (it
+     would split back apart and never reduce the count).  The cap hull
+     takes the aligned circular grid instead — sound, and one piece. *)
+  let interleaved (pi : progression) (pj : progression) : bool =
+    match C.max_elem pi, C.min_elem pj, C.max_elem pj, C.min_elem pi with
+    | Some hi_i, Some lo_j, Some hi_j, Some lo_i ->
+      Cbat_word.(<) hi_i lo_j && Cbat_word.(<) hi_j lo_i
+    | _ -> false
+
+  (* The cap hull: one piece the canonicalizer cannot split back apart.
+     Interleaved pairs and wrap-traversing unions circulate to the
+     aligned circular grid (the grid dividing both steps and the modular
+     base difference — it covers both pieces); everything else takes the
+     plain union. *)
+  let coalesce (pi : progression) (pj : progression) : progression =
+    if interleaved pi pj then
+      let g =
+        Cbat_word.bounded_gcd
+          (Cbat_word.bounded_gcd (C.step_of pi) (C.step_of pj))
+          (Cbat_word.sub (C.base_of pj) (C.base_of pi)) in
+      C.infinite (C.base_of pi, g)
+    else
+      let r = C.union pi pj in
+      if C.is_wrapped r then C.infinite (C.base_of r, C.step_of r) else r
+
+  (* The pair-hull cost: cardinality growth of the cap hull when all
+     three are finite, the unsigned gap otherwise. *)
+  let pair_growth (hull : progression) (pi : progression) (pj : progression)
+    : Cbat_word.t =
     let width = C.bitwidth pi in
     let w1 = width + 1 in
     let finite p = not (C.is_infinite p) && not (C.is_bottom p) in
-    if finite pi && finite pj then begin
+    if finite pi && finite pj && finite hull then begin
       let sum = Cbat_word.add (C.cardinality pi) (C.cardinality pj) in
-      let hull = C.cardinality (C.union pi pj) in
-      if Cbat_word.(<) hull sum then Cbat_word.zero w1
-      else Cbat_word.sub hull sum
+      let h = Cbat_word.cast Bil.UNSIGNED w1 (C.cardinality hull) in
+      if Cbat_word.(<) h sum then Cbat_word.zero w1
+      else Cbat_word.sub h sum
     end
     else
       match C.min_elem pj, C.max_elem pi with
@@ -199,7 +227,7 @@ module Pieces = struct
     let best = Stdlib.ref None in
     for i = 0 to n - 1 do
       for j = i + 1 to n - 1 do
-        let g = pair_growth arr.(i) arr.(j) in
+        let g = pair_growth (coalesce arr.(i) arr.(j)) arr.(i) arr.(j) in
         let same_step =
           Cbat_word.equal (C.step_of arr.(i)) (C.step_of arr.(j)) in
         let better =
@@ -215,14 +243,18 @@ module Pieces = struct
     match !best with
     | None -> None
     | Some (i, j, _, _) ->
-      let hull = C.union arr.(i) arr.(j) in
+      let hull = coalesce arr.(i) arr.(j) in
       let rest = List.filteri ps ~f:(fun k _ -> k <> i && k <> j) in
       Some (hull, rest)
 
-  (* Canonicalize and cap: sort, merge, then hull the smallest-growth pair
-     until the list fits. *)
+  (* Canonicalize and cap: split wrapped pieces into their arcs, sort,
+     merge, then hull the smallest-growth pair until the list fits.  No
+     piece in a canonical list wraps. *)
   let rec normalize (ps : progression list) : t =
-    let ps = List.filter ps ~f:(fun p -> not (C.is_bottom p)) in
+    let ps =
+      List.filter
+        (List.concat_map ps ~f:C.split_wrapped)
+        ~f:(fun p -> not (C.is_bottom p)) in
     let ps = List.sort ps ~compare:compare_piece in
     let ps = List.rev (List.fold ps ~init:[] ~f:insert) in
     let ps =
@@ -613,7 +645,7 @@ module Pieces = struct
           match List.rev out, excess with
           | _, [] -> out
           | last :: rev_rest, _ ->
-            List.rev (List.fold excess ~init:last ~f:C.union :: rev_rest)
+            List.rev (List.fold excess ~init:last ~f:coalesce :: rev_rest)
           | [], _ -> excess
         in
         normalize out
