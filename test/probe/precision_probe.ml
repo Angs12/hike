@@ -142,15 +142,9 @@ let classify_def (ws : Ws.t) :
   if Ws.is_top ws then `Top
   else if Ws.is_bottom ws then `Bottom
   else
-    let cardn = Ws.cardinality ws in
-    match Cbat_word.to_int cardn with
-    | Error _ -> `B65p
-    | Ok n ->
-      if n = 1 then `Exact
-      else if n <= 3 then `B2_3
-      else if n <= 8 then `B4_8
-      else if n <= 64 then `B9_64
-      else `B65p
+    match Probe_common.cardn_bucket_of_ws ws with
+    | Some b -> b
+    | None -> `B65p
 
 (* Bottom first; exact/bounded/top/split-bottom. *)
 let classify_ld (ws : Ws.t) (input_bottom : bool) : ld_bucket =
@@ -280,8 +274,8 @@ let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
   flush stdout
 
 (* Walk blocks in def order, re-denote, classify. *)
-(* The seeding predicate and the tag-state meet for one address — the
-   probes' copies of the extraction's arms. *)
+(* The seeding predicate and the tag-state meet come from the shared probe
+   seam. *)
 let is_stack_access st addr =
   match Vsa.Test_seam.denote_imm_exp addr st with
   | Error _ -> false
@@ -289,7 +283,8 @@ let is_stack_access st addr =
 
 let st_tag_of ~(tags : Vsa.vsa_sol) (blk : blk term) (addr : exp)
     (st_before : AI.t) : AI.t =
-  Exp.free_vars addr |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
+  Exp.free_vars addr
+  |> Core.Set.fold ~init:st_before ~f:(fun acc v ->
       match Var.typ v with
       | Type.Imm w ->
         let tag_v = AI.find_word w
@@ -356,8 +351,7 @@ let collect_stats (bname : string) (sub' : sub term)
            | Some a ->
              let stack = is_stack_access st_before a in
              (* Addresses denoted with block IN-state, not re-denoted values. *)
-             (* M6 meet is the st_tag meet (genuine-subset gate). *)
-             let st_tag = st_tag_of ~tags b a st_before in
+              let st_tag = st_tag_of ~tags b a st_before in
              (match Vsa.Test_seam.denote_imm_exp a st_tag with
               | Error _ ->
                 s.Sub_stats.ld_denote_err <- s.Sub_stats.ld_denote_err + 1
@@ -492,49 +486,11 @@ let print_bin_line (r : bin_report) : unit =
     (String.concat "\t" ("BIN" :: cols @ [ pct_filtered; pct_full ]));
   flush stdout
 
-let rec run_binary (path : string) : bin_report =
-  let r = { bname = path; nsubs = 0; nok = 0; ncrashes = 0; nloadfail = 0;
-            sum = Sub_stats.create "BIN" } in
-  try
-    match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
-    | Error e ->
-      r.nloadfail <- 1;
-      ws_load_fail path e;
-      r
-    | Ok proj ->
-      let prog = Project.program proj in
-      let bname = Filename.basename path in
-      let sp = Hike.Abi.sp (Project.target proj) in
-      Term.enum sub_t prog
-      |> Seq.iter ~f:(fun sub ->
-          r.nsubs <- r.nsubs + 1;
-          match run_sub sp prog bname sub with
-          | Ok st ->
-            r.nok <- r.nok + 1;
-            add_sum r.sum st;
-            print_sub_line path st
-          | Crash (es, bt) ->
-            r.ncrashes <- r.ncrashes + 1;
-            Printf.printf "CRASH\t%s\t%s\t%s\n" path (Sub.name sub) es;
-            (match bt with
-             | "" -> ()
-             | _ -> Printf.printf "  backtrace:\n%s\n" bt);
-            flush stdout);
-      print_bin_line r;
-      r
-  with e ->
-    (* Project.create / enumeration blew up. *)
-    r.nloadfail <- 1;
-    ws_load_exn path e;
-    r
-
 (* One sub, one fixpoint + measurement walk. *)
-and run_sub (_sp : var) (_prog : program term) (bname : string)
-    (sub : sub term) : outcome =
+let run_sub (bname : string) (sub : sub term) : outcome =
   try
     let t0 = Unix.gettimeofday () in
-    let sol =
-      Probe_common.run_sub_fixpoint sub in
+    let sol = Probe_common.run_sub_fixpoint sub in
     let t1 = Unix.gettimeofday () in
     (* Per-block TAG state is the IN-state ([tags = sol]). *)
     let st = collect_stats bname sub sol sol in
@@ -542,6 +498,36 @@ and run_sub (_sp : var) (_prog : program term) (bname : string)
     Ok st
   with e ->
     Crash (describe_exn e, Printexc.get_backtrace ())
+
+let run_binary (path : string) : bin_report =
+  let r = { bname = path; nsubs = 0; nok = 0; ncrashes = 0; nloadfail = 0;
+            sum = Sub_stats.create "BIN" } in
+  let bname = Filename.basename path in
+  let run_one sub =
+    r.nsubs <- r.nsubs + 1;
+    match run_sub bname sub with
+    | Ok st ->
+      r.nok <- r.nok + 1;
+      add_sum r.sum st;
+      print_sub_line path st
+    | Crash (es, bt) ->
+      r.ncrashes <- r.ncrashes + 1;
+      Printf.printf "CRASH\t%s\t%s\t%s\n" path (Sub.name sub) es;
+      (match bt with
+       | "" -> ()
+       | _ -> Printf.printf "  backtrace:\n%s\n" bt);
+      flush stdout
+  in
+  match Probe_common.ws_run_binary path run_one with
+  | Ok _ -> print_bin_line r; r
+  | Error (Probe_common.Load_error e) ->
+    r.nloadfail <- 1;
+    ws_load_fail path e;
+    r
+  | Error (Probe_common.Run_error e) ->
+    r.nloadfail <- 1;
+    ws_load_exn path e;
+    r
 
 let () =
   let paths = List.tl (Array.to_list Sys.argv) in

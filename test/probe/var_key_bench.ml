@@ -27,21 +27,17 @@ end
 
 module WordEnv = Cbat_map_lattice.Make_indexed_val (VarKey) (Ws)
 
-let now = Unix.gettimeofday
+(* The shared bench row carries an optional key-count column. *)
+type row = Probe_common.bench_row
+
+let measure = Probe_common.bench_measure
 
 (* Exact minor words allocated since start; [Gc.minor_words] advances per
    allocation, unlike [Gc.quick_stat]'s counter which advances at minor
    GCs on OCaml 5. *)
 let minor_words () : float = Gc.minor_words ()
 
-type row = {
-  keys : int;
-  name : string;
-  ns_a : float;
-  ns_b : float;
-  w_a : float;
-  w_b : float;
-}
+
 
 (* Two consecutive loops, each preceded by a warmup; the bill is the
    minor-word delta divided by the iteration count.  [f] receives the
@@ -51,15 +47,15 @@ let measure ~keys ~name ~n (f : int -> unit) : row =
   for i = 1 to warm do f i done;
   let loop () =
     let w0 = minor_words () in
-    let t0 = now () in
+    let t0 = Probe_common.bench_now () in
     for i = 1 to n do f i done;
-    let t1 = now () in
+    let t1 = Probe_common.bench_now () in
     let w1 = minor_words () in
     ((t1 -. t0) *. 1e9 /. float_of_int n, (w1 -. w0) /. float_of_int n)
   in
   let ns_a, w_a = loop () in
   let ns_b, w_b = loop () in
-  { keys; name; ns_a; ns_b; w_a; w_b }
+  { keys = Some keys; name; n; ns_a; ns_b; w_a; w_b }
 
 let sink = ref 0
 let keep (i : int) : unit = sink := !sink lxor i
@@ -193,7 +189,8 @@ let print_header () =
     "ns/op B" "words/op A" "words/op B" "agree"
 
 let print_row (r : row) : unit =
-  Printf.printf "%-38s %5d %11.1f %11.1f %12.1f %12.1f %6s\n" r.name r.keys
+  Printf.printf "%-38s %5d %11.1f %11.1f %12.1f %12.1f %6s\n" r.name
+    (Option.value r.keys ~default:0)
     r.ns_a r.ns_b r.w_a r.w_b
     (if r.w_a = r.w_b then "yes" else "NO")
 

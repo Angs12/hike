@@ -138,14 +138,9 @@ let def_bucket (v : Ws.t) : string =
   if Ws.is_top v then "top"
   else if Ws.is_bottom v then "bottom"
   else
-    match Cbat_word.to_int (Ws.cardinality v) with
-    | Error _ -> "b65p"
-    | Ok n ->
-      if n = 1 then "exact"
-      else if n <= 3 then "b2_3"
-      else if n <= 8 then "b4_8"
-      else if n <= 64 then "b9_64"
-      else "b65p"
+    match Probe_common.cardn_bucket_of_ws v with
+    | Some b -> Probe_common.cardn_bucket_name b
+    | None -> "b65p"
 
 let band_shape (v : Ws.t) : string =
   if Ws.is_circular v then "circular"

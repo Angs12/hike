@@ -61,9 +61,9 @@ let audit_sub (sub : sub term) : unit =
       | _ -> ());
   let prod_unbounded_count = Hashtbl.length prod_unbounded in
   let stack_count = Core.Map.length prod_map in
-  Printf.printf "=== sub %s (%s) — stack=%d offsets=%d unbounded-span(PROD)=%d ===\n"
+  Printf.printf "=== sub %s (%s) — stack=%d unbounded-span(PROD)=%d ===\n"
     (Sub.name sub) (Tid.to_string (Term.tid sub))
-    stack_count (Core.Map.length prod_map) prod_unbounded_count;
+    stack_count prod_unbounded_count;
   if stack_count = 0 then ()
   else begin
     let tags = sol in
@@ -204,8 +204,9 @@ let () =
      | Error e ->
        Printf.printf "LOAD-FAIL %s: %s\n" binary (Core.Error.to_string_hum e); exit 1
      | Ok proj ->
-       (* One set: Hike.Vsa.set_addr_bits is the same cell (Hike_vsa pass-through). *)
-       Vsa.set_addr_bits 64;
+       (* The address width follows the loaded target ABI. *)
+       let target = Project.target proj in
+         Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
        let prog = Project.program proj in
        (if String.equal subname "ALL" then
           Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub sub)

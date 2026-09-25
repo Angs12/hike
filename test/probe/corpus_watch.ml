@@ -4,10 +4,6 @@
 open Bap.Std
 open Probe_common
 
-module AI = Cbat_vsa.AI
-module Mem = Cbat_vsa.Mem
-module Vsa = Cbat_vsa
-
 let () = Printexc.record_backtrace true
 
 (* Slow-sub threshold, seconds. *)
@@ -18,7 +14,7 @@ type outcome =
   | Crash of string * string (* exception description * backtrace *)
 
 (* One sub, one full fixpoint on the raw sub (spec §2.1). *)
-let run_sub (_sp : var) (_prog : program term) (sub : sub term) : outcome =
+let run_sub (sub : sub term) : outcome =
   let t0 = Unix.gettimeofday () in
   try
     let _sol = Probe_common.run_sub_fixpoint sub in
@@ -40,36 +36,30 @@ type bin_report = {
 let run_binary (path : string) : bin_report =
   let r = { bname = path; nsubs = 0; nok = 0; ncrashes = 0;
             nloadfail = 0; ftime = 0.0; slow = [] } in
-  try
-    match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
-    | Error e ->
-      r.nloadfail <- 1;
-      ws_load_fail path e;
-      r
-    | Ok proj ->
-      let prog = Project.program proj in
-      let sp = Hike.Abi.sp (Project.target proj) in
-      Term.enum sub_t prog
-      |> Seq.iter ~f:(fun sub ->
-          let tid = Term.tid sub in
-          let name = Sub.name sub in
-          r.nsubs <- r.nsubs + 1;
-          match run_sub sp prog sub with
-          | Ok dt ->
-            r.nok <- r.nok + 1;
-            r.ftime <- r.ftime +. dt;
-            if dt > slow_threshold then r.slow <- (name, dt) :: r.slow;
-            Printf.printf "%s\t%s\t%s\tOK\t%.1fs\n" path name (Tid.to_string tid) dt
-          | Crash (es, bt) ->
-            r.ncrashes <- r.ncrashes + 1;
-            Printf.printf "%s\t%s\t%s\tCRASH\t%s\n" path name (Tid.to_string tid) es;
-            (match bt with
-             | "" -> ()
-             | _ -> Printf.printf "  backtrace:\n%s\n" bt));
-      flush stdout;
-      r
-  with e ->
-    (* Project.create / enumeration blew up. *)
+  let run_one sub =
+    let tid = Term.tid sub in
+    let name = Sub.name sub in
+    r.nsubs <- r.nsubs + 1;
+    match run_sub sub with
+    | Ok dt ->
+      r.nok <- r.nok + 1;
+      r.ftime <- r.ftime +. dt;
+      if dt > slow_threshold then r.slow <- (name, dt) :: r.slow;
+      Printf.printf "%s\t%s\t%s\tOK\t%.1fs\n" path name (Tid.to_string tid) dt
+    | Crash (es, bt) ->
+      r.ncrashes <- r.ncrashes + 1;
+      Printf.printf "%s\t%s\t%s\tCRASH\t%s\n" path name (Tid.to_string tid) es;
+      (match bt with
+       | "" -> ()
+       | _ -> Printf.printf "  backtrace:\n%s\n" bt)
+  in
+  match Probe_common.ws_run_binary path run_one with
+  | Ok _ -> flush stdout; r
+  | Error (Probe_common.Load_error e) ->
+    r.nloadfail <- 1;
+    ws_load_fail path e;
+    r
+  | Error (Probe_common.Run_error e) ->
     r.nloadfail <- 1;
     ws_load_exn path e;
     r

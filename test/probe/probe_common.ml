@@ -8,8 +8,8 @@ module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
-   Output contracts (the PASS lines, exit codes) are byte-stable: scripts
-   grep them. *)
+   Each probe owns its per-sub report; this seam owns project loading and
+   the common load-failure contract. *)
 
 (* Exception description. *)
 let describe_exn (e : exn) : string =
@@ -70,6 +70,21 @@ let load_project (path : string) : Project.t =
     Format.eprintf "probe: load failed: %s: %s\n%!" path
       (Core.Error.to_string_hum e);
     exit 1
+
+type ws_binary_error =
+  | Load_error of Core.Error.t
+  | Run_error of exn
+
+(* Load a binary and apply [run_sub] to each sub in program order. *)
+let ws_run_binary (path : string) (run_sub : sub term -> 'a) :
+    ('a list, ws_binary_error) result =
+  try
+    match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
+    | Error e -> Error (Load_error e)
+    | Ok proj ->
+      let subs = Term.enum sub_t (Project.program proj) |> Seq.to_list in
+      Ok (List.map run_sub subs)
+  with e -> Error (Run_error e)
 
 let sp_of (proj : Project.t) : var = Hike.Abi.sp (Project.target proj)
 
@@ -196,6 +211,34 @@ let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
           | Some k -> Core.Map.set m ~key:(Term.tid d) ~data:k
           | None -> m))
 
+(* Shared cardinality ladder for the census probes. *)
+type cardn_bucket =
+  [ `Bottom | `Top | `Exact | `B2_3 | `B4_8 | `B9_64 | `B65p ]
+
+let cardn_bucket_of_count (n : int) : cardn_bucket =
+  if n = 1 then `Exact
+  else if n <= 3 then `B2_3
+  else if n <= 8 then `B4_8
+  else if n <= 64 then `B9_64
+  else `B65p
+
+let cardn_bucket_of_ws (ws : Ws.t) : cardn_bucket option =
+  if Ws.is_top ws then Some `Top
+  else if Ws.is_bottom ws then Some `Bottom
+  else
+    match Cbat_word.to_int (Ws.cardinality ws) with
+    | Error _ -> Some `B65p
+    | Ok n -> Some (cardn_bucket_of_count n)
+
+let cardn_bucket_name : cardn_bucket -> string = function
+  | `Bottom -> "bottom"
+  | `Top -> "top"
+  | `Exact -> "exact"
+  | `B2_3 -> "b2_3"
+  | `B4_8 -> "b4_8"
+  | `B9_64 -> "b9_64"
+  | `B65p -> "b65p"
+
 let vsa_kind_to_string (k : Vsa.Cbat_extraction.kind) : string =
   match k with
   | Vsa.Cbat_extraction.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
@@ -278,11 +321,46 @@ let cyclic_heads (cfg : (tid * tid list) list) : (tid * tid list) list =
   in
   group cyc
 
+type cyclic_head_report = {
+  head : tid;
+  members : tid list;
+  block : blk term;
+  vars : var list;
+  state : AI.t;
+}
+
+let cyclic_head_reports (sub : sub term) (sol : Vsa.vsa_sol) :
+    cyclic_head_report list =
+  let block_of_tid t =
+    Term.enum blk_t sub
+    |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) t)
+  in
+  cyclic_heads (cfg_of sub)
+  |> List.map (fun (head, members) ->
+         let block = block_of_tid head in
+         let vars =
+           members
+           |> Base.List.concat_map ~f:(fun t ->
+                  Term.enum def_t (block_of_tid t)
+                  |> Seq.map ~f:(fun d -> Var.base (Def.lhs d))
+                  |> Seq.to_list)
+           |> Base.List.dedup_and_sort
+                ~compare:(fun a b -> String.compare (Var.name a) (Var.name b))
+         in
+         { head; members; block; vars; state = Graphlib.Std.Solution.get sol head })
+
+let report_cyclic_heads ~(label : string) ~(sub : sub term)
+    ~(sol : Vsa.vsa_sol) ~(print_one : cyclic_head_report -> unit) : unit =
+  let reports = cyclic_head_reports sub sol in
+  Printf.printf "%s (%d cyclic SCCs)\n" label (List.length reports);
+  List.iter print_one reports
+
 (* The probes' bench harness: the warmup + two-loop measure and the
    table printer, shared by the three bench probes. *)
 let bench_now = Unix.gettimeofday
 
 type bench_row = {
+  keys : int option;
   name : string;
   n : int;
   ns_a : float;
@@ -291,7 +369,7 @@ type bench_row = {
   w_b : float;
 }
 
-let bench_measure ~name ~n (f : unit -> unit) : bench_row =
+let bench_measure ?keys ~name ~n (f : unit -> unit) : bench_row =
   let warm = 1 + (n / 10) in
   for _ = 1 to warm do f () done;
   let loop () =
@@ -304,15 +382,25 @@ let bench_measure ~name ~n (f : unit -> unit) : bench_row =
   in
   let ns_a, w_a = loop () in
   let ns_b, w_b = loop () in
-  { name; n; ns_a; ns_b; w_a; w_b }
+  { keys; name; n; ns_a; ns_b; w_a; w_b }
 
-(* The three probes standardize on one name column. *)
-let bench_print_table (rows : bench_row list) : unit =
-  Printf.printf "%-46s %8s %11s %11s %12s %12s %5s\n" "op" "n" "ns/op A"
-    "ns/op B" "words/op A" "words/op B" "agree";
+(* The bench probes share one optional key column and one measurement row. *)
+let bench_print_table ?(name_width = 46) (rows : bench_row list) : unit =
+  let has_keys = List.exists (fun r -> r.keys <> None) rows in
+  if has_keys then
+    Printf.printf "%-*s %5s %8s %11s %11s %12s %12s %5s\n" name_width "op"
+      "keys" "n" "ns/op A" "ns/op B" "words/op A" "words/op B" "agree"
+  else
+    Printf.printf "%-*s %8s %11s %11s %12s %12s %5s\n" name_width "op" "n"
+      "ns/op A" "ns/op B" "words/op A" "words/op B" "agree";
   List.iter
     (fun r ->
-      Printf.printf "%-46s %8d %11.1f %11.1f %12.1f %12.1f %5s\n" r.name
-        r.n r.ns_a r.ns_b r.w_a r.w_b
-        (if r.w_a = r.w_b then "yes" else "NO"))
+      let agree = if r.w_a = r.w_b then "yes" else "NO" in
+      match r.keys with
+      | Some keys ->
+        Printf.printf "%-*s %5d %8d %11.1f %11.1f %12.1f %12.1f %5s\n"
+          name_width r.name keys r.n r.ns_a r.ns_b r.w_a r.w_b agree
+      | None ->
+        Printf.printf "%-*s %8d %11.1f %11.1f %12.1f %12.1f %5s\n"
+          name_width r.name r.n r.ns_a r.ns_b r.w_a r.w_b agree)
     rows
