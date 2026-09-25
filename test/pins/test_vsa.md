@@ -70,3 +70,4 @@ The Call_effects transfer pins (C1-1..C1-5) live in `test_call_effects`.
 | VSA-62 | `Cbat_clp_arith.cast`'s `SIGNED when sz > width` arm answers top at the TARGET width (`extract_hi`'s widening arm keeps the target width too) | drop the cast arm and restore `top sz` (the operand width) in `extract_hi` | VSA-62 red: an 8-bit top, not a 64-bit one |
 | VSA-63 | `Cbat_clp_arith.cast` — a `SIGNED` widening of a bounded operand sign-extends the progression | drop the `SIGNED when sz > width` arm so `extract_internal` answers top | VSA-63 red: top at 64 bits, not `{-1}` |
 | VSA-64 | the same arm keeps a positive bounded operand (`{0x7f}:8` → `{0x7f}:64`) | as VSA-63 | VSA-64 red: top, not `{0x7f}` |
+| VSA-65 | a recursive callee's may-write summary unions through the cycle; its caller sees the union | restore the visited-set kill-all answer in `kill_summaries` | VSA-65 red: the caller's summary is `None` |

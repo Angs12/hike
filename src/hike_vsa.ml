@@ -39,66 +39,96 @@ let kill_summaries ~(abi : Hike_abi.t) (prog : program term) :
     Base.Option.value_map (Model.addr_of_rhs rhs) ~default:false
       ~f:(fun (addr, _) -> Model.is_return_address_shape ~abi addr)
   in
-  let memo = ref Tid.Map.empty in
-  let rec summary ~(visited : Tid.Set.t) (s : sub term) : Var.Set.t option =
-    let stid = Term.tid s in
-    match Core.Map.find !memo stid with
-    | Some v -> v
-    | None ->
-      if Core.Set.mem visited stid then None
-      else
-        let visited = Core.Set.add visited stid in
-        (* Callee marks: [Some None] = a kill-all site (indirect target,
-           trap, extern); [Some (Some c)] = a direct known callee.  The
-           return epilogue is no mark at all. *)
-        let callees =
-          Term.enum blk_t s
-          |> Seq.concat_map ~f:(fun blk ->
-              let last =
-                Core.Map.fold (Vsa.last_defs blk) ~init:Var.Map.empty
-                  ~f:(fun ~key ~data acc ->
-                      Core.Map.set acc ~key:(Var.base key)
-                        ~data:(Def.rhs data))
-              in
-              Term.enum jmp_t blk
-              |> Seq.filter_map ~f:(fun j ->
-                  match Jmp.kind j with
-                  | Int _ -> Some None
-                  | Call c when not (Hike_return.is_jmp j) -> (
-                      match Call.target c with
-                      | Indirect (Bil.Var v)
-                      | Indirect (Bil.Cast (_, _, Bil.Var v))
-                        when Base.Option.is_none (Call.return c) -> (
-                          match Core.Map.find last (Var.base v) with
-                          | Some rhs when reads_retaddr rhs -> None
-                          | _ -> Some None)
-                      | Indirect _ -> Some None
-                      | Direct t -> Some (Core.Map.find subs t))
-                  | _ -> None))
-          |> Seq.to_list
+  (* The sub's call sites: a lifted direct callee, a kill-all site (an
+     indirect target, trap, or extern), or no site (the return epilogue
+     is no mark at all). *)
+  let sites (s : sub term) : Tid.t list * bool =
+    Term.enum blk_t s
+    |> Seq.concat_map ~f:(fun blk ->
+        let last =
+          Core.Map.fold (Vsa.last_defs blk) ~init:Var.Map.empty
+            ~f:(fun ~key ~data acc ->
+                Core.Map.set acc ~key:(Var.base key)
+                  ~data:(Def.rhs data))
         in
-        let v =
-          if Base.List.exists callees ~f:(fun c -> Base.Option.is_none c) then None
-          else
-            let kill = ref false in
-            let ws =
-              Base.List.fold callees ~init:(written_regs_of_sub s)
-                ~f:(fun acc c ->
-                    match Base.Option.bind ~f:(summary ~visited) c with
-                    | None -> (kill := true; acc)
-                    | Some cw -> Core.Set.union acc cw)
-            in
-            if !kill then None else Some ws
-        in
-        memo := Core.Map.set !memo ~key:stid ~data:v;
-        v
+        Term.enum jmp_t blk
+        |> Seq.filter_map ~f:(fun j ->
+            match Jmp.kind j with
+            | Int _ -> Some `Kill
+            | Call c when not (Hike_return.is_jmp j) -> (
+                match Call.target c with
+                | Indirect (Bil.Var v)
+                | Indirect (Bil.Cast (_, _, Bil.Var v))
+                  when Base.Option.is_none (Call.return c) -> (
+                    match Core.Map.find last (Var.base v) with
+                    | Some rhs when reads_retaddr rhs -> None
+                    | _ -> Some `Kill)
+                | Indirect _ -> Some `Kill
+                | Direct t ->
+                  if Core.Map.mem subs t then Some (`Call t) else Some `Kill)
+            | _ -> None))
+    |> Seq.fold ~init:([], false) ~f:(fun (edges, kill) site ->
+        match site with
+        | `Kill -> (edges, true)
+        | `Call c -> (c :: edges, kill))
   in
+  (* The may-write summary is the least fixpoint of
+     [direct(s) ∪ ⋃ callees' summaries] over the direct-call graph; a
+     cycle unions its members instead of killing the whole component.
+     A kill-all site or a kill-all callee makes its callers kill-all. *)
+  let written = ref Tid.Map.empty in
+  let kill = ref Tid.Set.empty in
+  let callers = ref Tid.Map.empty in
+  Term.enum sub_t prog
+  |> Seq.iter ~f:(fun s ->
+      let stid = Term.tid s in
+      let edges, own_kill = sites s in
+      written := Core.Map.set !written ~key:stid ~data:(written_regs_of_sub s);
+      if own_kill then kill := Core.Set.add !kill stid;
+      Base.List.iter edges ~f:(fun c ->
+          callers := Core.Map.add_multi !callers ~key:c ~data:stid));
+  let work = ref (Core.Set.of_list (module Tid) (Core.Map.keys !written)) in
+  while not (Core.Set.is_empty !work) do
+    let t = Core.Set.choose_exn !work in
+    work := Core.Set.remove !work t;
+    Base.List.iter
+      (Base.Option.value (Core.Map.find !callers t) ~default:[])
+      ~f:(fun p ->
+        if not (Core.Set.mem !kill p) then begin
+          let changed =
+            if Core.Set.mem !kill t then begin
+              kill := Core.Set.add !kill p;
+              true
+            end
+            else
+              match Core.Map.find !written t with
+              | None -> false
+              | Some ws ->
+                let before =
+                  Base.Option.value (Core.Map.find !written p)
+                    ~default:Var.Set.empty in
+                let after = Core.Set.union before ws in
+                if Core.Set.equal before after then false
+                else begin
+                  written := Core.Map.set !written ~key:p ~data:after;
+                  true
+                end
+          in
+          if changed then work := Core.Set.add !work p
+        end)
+  done;
   Term.enum sub_t prog
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
-      Core.Map.set m ~key:(Term.tid s)
-        ~data:(Base.Option.map
-                 ~f:Cbat_var_id.intern_set
-                 (summary ~visited:(Tid.Set.empty : Tid.Set.t) s)))
+      let stid = Term.tid s in
+      let v =
+        if Core.Set.mem !kill stid then None
+        else
+          Some
+            (Cbat_var_id.intern_set
+               (Base.Option.value (Core.Map.find !written stid)
+                  ~default:Var.Set.empty))
+      in
+      Core.Map.set m ~key:stid ~data:v)
 
 (* One computation per program, at the pass_vsa boundary; the fixpoint
    consumes the summaries per phase. *)
