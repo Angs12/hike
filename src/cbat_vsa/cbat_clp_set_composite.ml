@@ -65,10 +65,12 @@ let stride (t : t) : int =
     if Clp.is_infinite c || Clp.is_bottom c then 1
     else
       match Cbat_word.to_int64 (Clp.step_of c) with
-      | Ok s ->
-        let i = Stdlib.Int64.to_int s in
-        if i > 1 then i else 1
-      | Error _ -> 1
+      | Ok s
+        when Stdlib.Int64.compare s 1L > 0
+             && Stdlib.Int64.compare s
+                  (Stdlib.Int64.of_int Stdlib.max_int) <= 0 ->
+        Stdlib.Int64.to_int s
+      | _ -> 1
   in
   (* The one common difference of consecutive elements, if uniform. *)
   let rec common_diff prev d (ws : Cbat_word.t list) : Cbat_word.t option =
@@ -820,9 +822,7 @@ let is_unbounded_span (lo : int64) (hi : int64) : bool =
 
 (* Overflow-checked absolute position of one frame offset. *)
 let position_of_offset (o : int64) : int64 option =
-  let r = Stdlib.Int64.add stack_base o in
-  if Stdlib.Int64.compare o 0L > 0 && Stdlib.Int64.compare r o < 0 then None
-  else Some r
+  checked_add3 stack_base 0L o
 
 let int64_pair_of (lo : Cbat_word.t) (hi : Cbat_word.t)
   : (int64 * int64) option =

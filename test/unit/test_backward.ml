@@ -1362,6 +1362,52 @@ let tests : unit Alcotest.test list =
                   (Bil.Int (Cbat_word.to_word (s_r32 5)))
                   (Ws.singleton (s_r32 5)))
                (mk_env [])));
+
+    pin "BK-79"
+      "the var-vs-var NEQ with a multi-element partner — the identity (every t \
+       keeps a differing u)"
+      (fun () ->
+        let env9 =
+          mk_env [ (s_t, bk_iv32 ~lo:5 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:8) ]
+        in
+        let c9 = s_window_of env9 (Bil.BinOp (Bil.NEQ, Bil.Var s_t, Bil.Var s_u)) s_t in
+        check "BK-79" (Ws.elem (s_r32 6) c9 && Ws.elem (s_r32 10) c9));
+
+    pin "BK-80"
+      "the Ite inverse with a true condition — only the true branch is constrained"
+      (fun () ->
+        let env10 =
+          mk_env [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:10) ]
+        in
+        let env10' =
+          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env10
+            (Bil.Ite (Bil.Int Word.b1, Bil.Var s_t, Bil.Var s_u))
+            (Ws.singleton (s_r32 5))
+        in
+        check "BK-80"
+          (Ws.elem (s_r32 5) (s_w32_of_env env10' s_t)
+          && Ws.equal (s_w32_of_env env10' s_u)
+               (AI.find_word 32 env10 (Var.base s_u))));
+
+    pin "BK-81"
+      "the Ite inverse with an unknown condition — both branches keep their state"
+      (fun () ->
+        let c11 = Var.create ~is_virtual:true ~fresh:false "s_c11" (Type.Imm 1) in
+        let env11 =
+          mk_env
+            [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:10);
+              (c11, Ws.top 1) ]
+        in
+        let env11' =
+          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env11
+            (Bil.Ite (Bil.Var c11, Bil.Var s_t, Bil.Var s_u))
+            (Ws.singleton (s_r32 5))
+        in
+        check "BK-81"
+          (Ws.equal (s_w32_of_env env11' s_t)
+             (AI.find_word 32 env11 (Var.base s_t))
+          && Ws.equal (s_w32_of_env env11' s_u)
+               (AI.find_word 32 env11 (Var.base s_u))));
   ]
 
 let () = run "backward" tests

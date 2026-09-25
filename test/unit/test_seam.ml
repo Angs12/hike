@@ -112,6 +112,70 @@ let tests : unit Alcotest.test list =
           (match Cbat_landmarks.entries_for_head lm head with
           | e :: _ -> Cbat_word.equal e.Cbat_landmarks.bound (w32 20)
           | [] -> false));
+
+    (* SC-D: x := y * -1 over the same provably non-negative y.  x is
+       non-positive, so the SLT row must not take the non-negativity
+       tier; the identity keeps x's value. *)
+    pin "SEAM-04"
+      "TIMES by a negative literal is not a non-negativity proof — the SLT row on x = y * -1 leaves x unconstrained"
+      (fun () ->
+        let m = memv "sc_neg_m" in
+        let rsp = v64 "RSP" in
+        let rbp = v64 "RBP" in
+        let y = Var.create ~is_virtual:false ~fresh:false "sc_neg_y" (Type.Imm 32) in
+        let x = Var.create ~is_virtual:false ~fresh:false "sc_neg_x" (Type.Imm 32) in
+        let zf = v1 "sc_neg_zf" in
+        let addr =
+          Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8)))
+        in
+        let sub, tids =
+          sub_of "sc_neg"
+            [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
+              [ Def.create y (Bil.Load (Bil.Var m, addr, LittleEndian, `r32));
+                Def.create x
+                  (Bil.BinOp (Bil.TIMES, Bil.Var y,
+                     Bil.Int (Cbat_word.to_word
+                                (Cbat_word.of_int64 ~width:32 (-1L)))));
+                Def.create zf
+                  (Bil.BinOp
+                     (Bil.SLT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5)))) ],
+              [ (2, mk_goto) ];
+              [ Def.create m
+                  (Bil.Store
+                     ( Bil.Var m,
+                       addr,
+                       Bil.Int (Cbat_word.to_word (w32 5)),
+                       LittleEndian,
+                       `r32 )) ],
+              [] ]
+        in
+        let guard_tid = tids.(1) in
+        let entry =
+          AI.add_memory (anchored_entry ()) ~key:m
+            ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+        in
+        let sol =
+          Vsa.static_graph_vsa ~abi (Program.create ~subs:[ sub ] ()) sub
+            (Vsa.init_sol ~abi ~entry sub)
+        in
+        let cfg =
+          Sub.to_graph sub
+          |> Graphs.Tid.Node.remove Graphs.Tid.start
+          |> Graphs.Tid.Node.remove Graphs.Tid.exit
+        in
+        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi sub in
+        let guard_blk =
+          Term.enum blk_t sub |> Seq.to_list
+          |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
+        in
+        let out =
+          Vsa.Test_seam.refine_edge ~sol ~rctx
+            ~seeds:[ (zf, Ws.singleton Cbat_word.b1) ]
+            (Graphlib.Std.Solution.get sol guard_tid) guard_blk
+        in
+        check "SEAM-04"
+          (Ws.elem (Cbat_word.of_int64 ~width:32 (-1L))
+             (AI.find_word 32 out x)));
   ]
 
 let () = run "seam" tests

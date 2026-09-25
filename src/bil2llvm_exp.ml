@@ -386,7 +386,7 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
    base), both relative to the SP anchor.  Window accesses normalize
    the same way against the hike_window parameter — a pointer into the
    caller's residue. *)
-and window_mem_access ctx scope llvm_builder blk_tid fr exp =
+and window_mem_access ctx scope llvm_builder blk_tid fr exp ~raw =
   let w_ptr =
     let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
     match get_local scope blk_tid w with
@@ -400,9 +400,9 @@ and window_mem_access ctx scope llvm_builder blk_tid fr exp =
       storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
         ~index_of:(fun a -> Llvm.build_sub a (frame_stack0 fr) "" llvm_builder)
         node exp
-  | None -> create_exp ctx scope llvm_builder blk_tid exp
+  | None -> raw ()
 
-and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
+and region_mem_access ctx scope llvm_builder blk_tid fr mv exp ~raw =
   let stack0 = frame_stack0 fr in
   (* The region alloca's base sits [rel_rlo] above the sub's stack0
      (the region's lowest byte): anchor-normalized minus that offset
@@ -414,20 +414,20 @@ and region_mem_access ctx scope llvm_builder blk_tid fr mv exp =
       "" llvm_builder
   in
   match Base.List.Assoc.find ~equal:Var.equal fr.regions mv with
-  | None -> create_exp ctx scope llvm_builder blk_tid exp
+  | None -> raw ()
   | Some (base, rel_rlo) -> (
       match find_mem_node exp with
       | Some node ->
           storage_access ctx scope llvm_builder blk_tid ~base
             ~index_of:(fun a -> region_index llvm_builder rel_rlo a) node exp
-      | None -> create_exp ctx scope llvm_builder blk_tid exp)
+      | None -> raw ())
 
 (* Routes a region/window mem var to its storage; with no frame
    bound, the raw arm serves the access. *)
 and region_window_access ctx scope llvm_builder blk_tid mv exp ~raw =
   match !(scope.cur_frame) with
   | Some fr when Hike_stack_model.is_region_mem mv ->
-      region_mem_access ctx scope llvm_builder blk_tid fr mv exp
+      region_mem_access ctx scope llvm_builder blk_tid fr mv exp ~raw
   | Some fr when Hike_stack_model.is_window_mem mv ->
-      window_mem_access ctx scope llvm_builder blk_tid fr exp
+      window_mem_access ctx scope llvm_builder blk_tid fr exp ~raw
   | _ -> raw ()

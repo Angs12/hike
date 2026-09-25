@@ -99,3 +99,6 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-76 | S16b the completed fallthrough of `(x <u y)` seeds `y ⊆ [0,3]`. | As BK-70. | BK-76. |
 | BK-77 | S16c the 3-comparison AND chain narrows `a` to `[0,6]` and leaves `y`,`c`. | Make the `Bil.BinOp (AND, …)` `{1}` arm identity. | BK-77. |
 | BK-78 | S14 an infeasible constant is `AI.bottom`; a consistent one is the identity. | Make `inverse_denote`'s `Bil.Int` arm always `env`. | BK-78 (bottom check false). |
+| BK-79 | S17 Var-vs-Var NEQ with a multi-element partner is the identity (every `t` keeps a differing `u`). | Subtract the intersection whenever it is non-empty. | BK-79 (`6 ∈` false). |
+| BK-80 | S18 Ite with a singleton true condition constrains only the true branch. | Constrain both branch operands. | BK-80 (`u` narrowed). |
+| BK-81 | S19 Ite with an unknown condition keeps both branches. | Constrain both branch operands. | BK-81 (`t`/`u` narrowed). |

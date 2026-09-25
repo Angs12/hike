@@ -77,6 +77,8 @@ type ctx = {
   entry_in : Tid.Set.t Var.Map.t Tid.Map.t;
   (* In-sub successors per block. *)
   succs : Tid.Set.t Tid.Map.t;
+  (* The predecessor transpose of [succs]. *)
+  preds : Tid.t list Tid.Map.t;
   (* Every def's site: its block and position. *)
   def_site : (Tid.t * int) Tid.Map.t;
   (* Each def's lhs base var, by tid. *)
@@ -199,7 +201,7 @@ let build_ctx (sub : sub term) : ctx =
         (b.b_tid, m))
     |> Core.Map.of_alist_exn (module Tid)
   in
-  { blocks; by_tid; entry_in = !state; succs; def_site; def_lhs; last_def }
+  { blocks; by_tid; entry_in = !state; succs; preds; def_site; def_lhs; last_def }
 
 (* The def tids of [v] reaching def index [i] in block [b]: the block's
    last def of the var before [i], else the entry state. *)
@@ -333,26 +335,26 @@ let is_fail_block ~(names : Tid.t -> string) (b : block_data) : bool =
           | Indirect _ -> false)
       | _ -> false)
 
+(* Blocks that can reach a [__stack_chk_fail] call: reverse
+   reachability over the predecessor transpose.  A cycle answer does
+   not depend on the exploration order. *)
 let reach_fail ~(ctx : ctx) ~(names : Tid.t -> string) : Tid.t -> bool =
-  let memo = ref Tid.Map.empty in
-  let rec go (path : Tid.Set.t) (t : Tid.t) : bool =
-    match Core.Map.find !memo t with
-    | Some v -> v
-    | None ->
-      if Core.Set.mem path t then false
-      else
-        let v =
-          Base.Option.value_map (Core.Map.find ctx.by_tid t) ~default:false
-            ~f:(fun b ->
-              is_fail_block ~names b
-              || Core.Set.exists
-                   (Base.Option.value (Core.Map.find ctx.succs t) ~default:Tid.Set.empty)
-                   ~f:(go (Core.Set.add path t)))
-        in
-        memo := Core.Map.set !memo ~key:t ~data:v;
-        v
+  let rec close (reaches : Tid.Set.t) : Tid.Set.t =
+    let grown =
+      Core.Set.fold reaches ~init:reaches ~f:(fun acc t ->
+          Base.List.fold
+            (Base.Option.value (Core.Map.find ctx.preds t) ~default:[])
+            ~init:acc ~f:(fun acc p -> Core.Set.add acc p))
+    in
+    if Int.equal (Core.Set.length grown) (Core.Set.length reaches) then reaches
+    else close grown
   in
-  go Tid.Set.empty
+  let reaches =
+    close
+      (Base.List.fold ctx.blocks ~init:Tid.Set.empty ~f:(fun acc b ->
+           if is_fail_block ~names b then Core.Set.add acc b.b_tid else acc))
+  in
+  fun t -> Core.Set.mem reaches t
 
 (* One proven composition: the deleted defs and the deleted edge. *)
 type comp = {

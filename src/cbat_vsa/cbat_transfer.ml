@@ -159,12 +159,12 @@ let val_join (v1 : val_t) (v2 : val_t) : val_t or_type_error =
   | `Word p1 -> val_as_imm v2 >>= fun p2 -> return @@ `Word (WordSet.join p1 p2)
   | `Mem m1 -> val_as_mem v2 >>= fun m2 -> return @@ `Mem (Mem.join m1 m2)
 
-let val_top : typ -> val_t = function
-  | Type.Imm i -> `Word (WordSet.top i)
+let val_top : typ -> val_t or_type_error = function
+  | Type.Imm i -> Ok (`Word (WordSet.top i))
   | Type.Mem (addr_sz, addressable_sz) ->
     let k = mem_idx addr_sz addressable_sz in
-    `Mem (Mem.top k)
-  | Type.Unk -> failwith "Error in val_top: typ is not representable by Type.t"
+    Ok (`Mem (Mem.top k))
+  | Type.Unk -> Error Type.Error.bad_imm
 
 (* An image-backed section: [img_lo..img_hi] are the span's inclusive
    address bounds, [img_bytes] the section's static content.  The
@@ -308,7 +308,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     | Type.Mem (addr_i, addressable_size) ->
       let k = mem_idx addr_i addressable_size in
       return_mem @@ AI.find_memory k env v
-    | Type.Unk -> failwith "Error in denote_exp: var type is not representable by Type.t"
+    | Type.Unk -> Error Type.Error.bad_imm
     end
   | Bil.Int bv -> return_imm @@ WordSet.singleton (Cbat_word.of_word bv)
   | Bil.BinOp (op, e1, e2) ->
@@ -384,35 +384,43 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
       | `Mem m -> AI.add_memory ~key:var ~data:m env
     in
     denote_exp body env'
-  | Bil.Unknown (_,typ) -> return @@ val_top typ
+  | Bil.Unknown (_,typ) -> val_top typ
 
 let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
 (* Every def is denoted: SP-derived addresses arrive as [StackOff]
-   words and memory ops key cells by their segment offsets. *)
+   words and memory ops key cells by their segment offsets.  A def the
+   denotation cannot type adds nothing: its readers take the top
+   identity. *)
 let denote_def (df : def term) (env : AI.t) : AI.t =
   let v = Def.lhs df in
   let e = Def.rhs df in
-  exn_on_err @@
-  let open Monad_type_error in
-  denote_exp e env >>| fun ev ->
-  (match ev with
-   | `Word p ->
+  match
+    (let open Monad_type_error in
+     denote_exp e env >>| fun ev ->
+     (match ev with
+      | `Word p ->
 #ifdef VSA_DEBUG
-     (* A def's value is stored at its lhs's declared width; a divergent
-        store is the source of downstream mismatches. *)
-     (let lw = match Var.typ v with Type.Imm n -> n | _ -> 0 in
-      let pw = WordSet.bitwidth p in
-      if lw > 0 && pw <> lw && !dbg_left > 0 then begin
-        decr dbg_left;
-        Format.eprintf "DBG denote_def store-width lhs=%s:%d width=%d rhs=%s\n%!"
-          (Var.name v) lw pw (dbg_one_line e)
-      end);
+        (* A def's value is stored at its lhs's declared width; a divergent
+           store is the source of downstream mismatches. *)
+        (let lw = match Var.typ v with Type.Imm n -> n | _ -> 0 in
+         let pw = WordSet.bitwidth p in
+         if lw > 0 && pw <> lw && !dbg_left > 0 then begin
+           decr dbg_left;
+           Format.eprintf "DBG denote_def store-width lhs=%s:%d width=%d rhs=%s\n%!"
+             (Var.name v) lw pw (dbg_one_line e)
+         end);
 #endif
-     AI.add_word env ~key:v ~data:p
-   | `Mem m -> AI.add_memory env ~key:v ~data:m)
+        AI.add_word env ~key:v ~data:p
+      | `Mem m -> AI.add_memory env ~key:v ~data:m))
+  with
+  | Ok env' -> env'
+  | Error err ->
+    not_implemented ~top:env
+      (Format.asprintf "denote_def %s: %s" (Var.name v)
+         (Type.Error.to_string err))
 
 let denote_defs (b : blk term) : AI.t -> AI.t =
   (* Phis are the identity. *)
@@ -450,7 +458,11 @@ let last_defs (blk : blk term) : def term Var.Map.t =
    behavior. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
-    let cond = exn_on_err @@ denote_imm_exp (Jmp.cond jmp) env in
+    let cond =
+      match denote_imm_exp (Jmp.cond jmp) env with
+      | Ok c -> c
+      | Error _ -> WordSet.top 1
+    in
     let can_fall_through = WordSet.elem Cbat_word.b0 cond in
     if not reachable then Seq.Step.Done
     else if WordSet.elem (Cbat_word.b1) cond then Seq.Step.Yield {value = jmp; state = can_fall_through}

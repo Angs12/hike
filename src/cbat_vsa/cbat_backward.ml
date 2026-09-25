@@ -69,7 +69,8 @@ let prove_nonneg ~(defs : (def term * bool) Var.Map.t)
        | Ok n when n >= 0 -> walk cells vars a
        | _ -> false)
     | Bil.BinOp (Bil.TIMES, a, Bil.Int k) ->
-      Cbat_word.is_zero (Cbat_word.of_word k) || walk cells vars a
+      let k = Cbat_word.of_word k in
+      nonneg_word k && (Cbat_word.is_zero k || walk cells vars a)
     | Bil.BinOp (Bil.DIVIDE, a, Bil.Int k) ->
       (match Cbat_word.to_int (Cbat_word.of_word k) with
        | Ok n when n >= 2 -> true
@@ -450,7 +451,9 @@ let guard_constraint ?(cur : wordset option = None)
   | NEQ | UGT | UGE | SGT | SGE -> total_constraint op c
 
 
-(* The var-var meet: EQ keeps the intersection, NEQ subtracts it. *)
+(* The var-var meet: EQ keeps the intersection; NEQ removes the other
+   side's values exactly when that side is a singleton — with two or
+   more partners every value keeps a differing one. *)
 let overlap_eq (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
     : wordset option * wordset option =
   let ov = WordSet.meet a_ws b_ws in
@@ -462,7 +465,14 @@ let overlap_eq (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
   else
     (match op with
      | Bil.NEQ ->
-       let da = WordSet.diff a_ws ov and db = WordSet.diff b_ws ov in
+       let da =
+         if Cbat_word.is_one (WordSet.cardinality b_ws) then WordSet.diff a_ws ov
+         else a_ws
+       in
+       let db =
+         if Cbat_word.is_one (WordSet.cardinality a_ws) then WordSet.diff b_ws ov
+         else b_ws
+       in
 #ifdef VSA_DEBUG
        (if WordSet.equal da a_ws then
           Cbat_attr_census.bump "band.diff.identity"
@@ -743,10 +753,16 @@ let rec constrain_operands ~(env : AI.t)
          constrain_operands ~env ~cells ~nonneg ~landmarks b
            (WordSet.extract ~hi:(bw - 1) ~lo:0 produced)
      | Error _ -> env)
-  | Bil.Ite (_, t, f) ->
-    (* The forward joins the branches; the inverse constrains both. *)
-    let env = constrain_operands ~env ~cells ~nonneg ~landmarks t produced in
-    constrain_operands ~env ~cells ~nonneg ~landmarks f produced
+  | Bil.Ite (c, t, f) ->
+    (* The branches are alternatives: a condition whose denotation names
+       one branch constrains that branch; any other condition leaves the
+       state unconstrained. *)
+    (match denote_imm_exp c env with
+     | Ok c_ws when Cbat_word.is_one (WordSet.cardinality c_ws) ->
+       if WordSet.elem Cbat_word.b0 c_ws
+       then constrain_operands ~env ~cells ~nonneg ~landmarks f produced
+       else constrain_operands ~env ~cells ~nonneg ~landmarks t produced
+     | Ok _ | Error _ -> env)
   | Bil.Let (_, _, body) -> constrain_operands ~env ~cells ~nonneg ~landmarks body produced
   | Bil.Load (m, a, en, s) ->
     (* The cell fact meets the env's memory and threads to the store

@@ -320,12 +320,8 @@ let plain_portions ~(word : int) ~(entry : int64)
   | None ->
     match Model.unsigned_bounds ws with
     | None ->
-      (* Stack-band values with no surviving bound lose the
-         Args-vs-Locals distinction — a loud failure, never
-         the heap claim. *)
-      if in_band then
-        failwith "hike-sections: a stack-band access lost all bounds"
-      else top_claim ~cause:Foreign ~entry ~word
+      (* No surviving bound: the identity claim, never the heap claim. *)
+      top_claim ~cause:Foreign ~entry ~word
     | Some (lo, hi) ->
       if Vsa.WordSet.is_infinite ws && Vsa.WordSet.is_ascending ws then begin
         (* Accesses never cross sections, so an unbounded ascending
@@ -384,12 +380,12 @@ let range_of_denotation ~(word : int) ~(entry : int64)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   if Vsa.WordSet.is_bottom ws then (Some Tag.Dead, [])
   else if Vsa.WordSet.is_top ws then
-    (* A rip-relative address is a link-time constant in the encoding —
-       top there is an analysis loss. *)
+    (* A plain top claims the sub-local spaces' full range — the
+       identity member forcing write closure; a rip-relative address
+       is a link-time constant in the encoding, so plain top there is
+       an analysis loss answered the same way. *)
     if Option.is_some (Vsa.WordSet.stack_offsets ws) then
       top_claim ~cause:Unbounded_stack ~entry ~word
-    else if rip then
-      failwith "hike-sections: a rip-relative access denotated plain top"
     else top_claim ~cause:Foreign ~entry ~word
   else
     match Vsa.WordSet.stack_offsets ws with
