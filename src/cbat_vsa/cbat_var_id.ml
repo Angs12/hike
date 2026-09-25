@@ -1,7 +1,7 @@
-(* Program-wide variable ids: the hike-vars pass interns every variable
-   the analysis can meet, in BIR order; the environments key by the id,
-   so their maps and sets compare ints, never variable identifiers.
-   Ids are stable for the process; environments are never persisted. *)
+(* Program-wide variable ids: the analysis interns every variable it
+   meets; the environments key by the id, so their maps and sets compare
+   ints, never variable identifiers.  Ids are stable for the process;
+   environments are never persisted. *)
 
 open Bap.Std
 
