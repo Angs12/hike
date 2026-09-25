@@ -83,49 +83,48 @@ let denote_jump
           ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
       | None -> env in
 
+    let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
+      let written_lanes, _ =
+        match Core.Map.find rctx.rc_blocks (Term.tid b) with
+        | Some bf -> bf.bf_call_facts
+        | None -> failwith "hike: no call facts for block (rctx)"
+      in
+      Cbat_call_effects.transfer ~abi:rctx.Cbat_runctx.rc_abi ~preserved
+        ~site:{ Cbat_call_effects.summary; written_lanes; pushed }
+        env
+    in
     let inspect_call c =
       match Call.return c with
-        | None -> AI.bottom
-        | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
-        | Some (Indirect _)
-        | Some (Direct _) ->
-          (* Calls abstract; every caller's def is denoted. *)
-          begin
-            let abi = rctx.Cbat_runctx.rc_abi in
-            let written_lanes, pushed =
-              match Core.Map.find rctx.rc_blocks (Term.tid b) with
-              | Some bf -> bf.bf_call_facts
-              | None -> failwith "hike: no call facts for block (rctx)" in
-            let summary =
-              match Call.target c with
-              | Direct ct ->
-                (match Core.Map.find written ct with
-                 | Some (Some ws) -> Some ws
-                 | _ -> None)
-              | Indirect texp ->
-                Cbat_call_effects.indirect_summary
-                  ~lookup:(rctx.Cbat_runctx.rc_sub_lookup)
-                  ~summary_of:(fun tid -> Option.join (Core.Map.find written tid))
-                  ~env texp
-            in
-            Cbat_call_effects.transfer ~abi ~preserved
-              ~site:{ Cbat_call_effects.summary; written_lanes; pushed }
-              env
-          end in
+      | None -> AI.bottom
+      | Some (Direct tid) when compare_tid target tid <> 0 -> AI.bottom
+      | Some (Indirect _)
+      | Some (Direct _) ->
+        (* Calls abstract; every caller's def is denoted. *)
+        let summary =
+          match Call.target c with
+          | Direct ct ->
+            (match Core.Map.find written ct with
+             | Some (Some ws) -> Some ws
+             | _ -> None)
+          | Indirect texp ->
+            Cbat_call_effects.indirect_summary
+              ~lookup:rctx.Cbat_runctx.rc_sub_lookup
+              ~summary_of:(fun tid -> Option.join (Core.Map.find written tid))
+              ~env texp
+        in
+        let _written_lanes, pushed =
+          match Core.Map.find rctx.rc_blocks (Term.tid b) with
+          | Some bf -> bf.bf_call_facts
+          | None -> failwith "hike: no call facts for block (rctx)"
+        in
+        call_site_transfer ~summary ~pushed
+    in
     let env_res =
       match Jmp.kind jmp with
       | Int _ ->
         (* Traps ride the same frame-keep rule as ABI calls; a trap
            pushes no retaddr. *)
-        let written_lanes, _pushed =
-          match Core.Map.find rctx.rc_blocks (Term.tid b) with
-          | Some bf -> bf.bf_call_facts
-          | None -> failwith "hike: no call facts for block (rctx)" in
-        Cbat_call_effects.transfer
-           ~abi:(rctx.Cbat_runctx.rc_abi) ~preserved
-           ~site:{ Cbat_call_effects.summary = None; written_lanes;
-                   pushed = false }
-           env
+        call_site_transfer ~summary:None ~pushed:false
       | Call c -> (
         match Core.Map.find resolved (Term.tid jmp) with
         | Some _ ->

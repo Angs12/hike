@@ -206,7 +206,6 @@ module Stack_model : sig
       signature (the emittable intrinsics and @main). *)
   val is_intrinsic : sub term -> bool
   val is_emittable_intrinsic : sub term -> bool
-  val is_intrinsic_name : string -> bool
   val fixed_signature : sub term -> bool
 
   (** The promoted incoming stack-slot parameter of index [i]. *)

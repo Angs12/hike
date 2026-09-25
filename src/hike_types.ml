@@ -140,7 +140,7 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
               (Var.same reg (Abi.sp target)
               || Var.same reg abi.thread_pointer
               || is_callee_saved
-              || Model.is_intrinsic_name n
+              || Hike_abi.is_intrinsic_name n
               || Model.is_arg_slot (Var.base reg)
               || Model.is_call_arg (Var.base reg)))
         |> Base.List.sort ~compare:(fun a b ->

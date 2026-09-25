@@ -31,7 +31,7 @@ val find_memory : Cbat_ai_memmap.idx -> t -> var -> Cbat_ai_memmap.t
 (* Drop dead virtual temps; machine regs are the ABI surface and stay. *)
 val gc : t -> keep:Core.Int.Set.t -> t
 
-val selective_widen_extrapolate : ?head:Tid.t option -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> steps:int -> t -> t -> t
+val selective_widen_extrapolate : head:Tid.t -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> steps:int -> t -> t -> t
 
 (* Top every word key not in [preserved]; the memories stay. *)
 val top_words_except : preserved:Core.Int.Set.t -> t -> t

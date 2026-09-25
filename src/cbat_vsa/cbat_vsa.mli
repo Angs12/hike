@@ -106,7 +106,7 @@ type section_image = Cbat_transfer.section_image = {
 val set_section_images : section_image list -> unit
 val with_images : section_image list -> (unit -> 'a) -> 'a
 
-val init_sol : abi:Hike_abi.t -> ?entry:AI.t ->  sub term -> vsa_sol
+val init_sol : abi:Hike_abi.t -> ?entry:AI.t -> sub term -> vsa_sol
 
 (* The sub's entry block: the CFG's [Start] pseudo-node points to it. *)
 val entry_block_of : sub term -> blk term option
@@ -195,10 +195,10 @@ module Test_seam : sig
   val constrain_edge :
     env:AI.t -> landmarks:Cbat_landmarks.t -> exp -> AI.t
 
-  (* The inverse denote: one backward rule per node kind, the mirror of
+  (* One backward rule per node kind, the mirror of the forward transfer —
      the forward transfer — env + expression + the constraint the value
      must satisfy -> the refined env. *)
-  val inverse_denote : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
+  val constrain_operands : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
   (* One fixpoint run's context: the static per-block facts, the
      convention facts, and the run's mutable state. *)

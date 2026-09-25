@@ -576,7 +576,7 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
         create_native_fp_call ctx scope llvm_builder blk_tid (Term.tid sub) fr blk call
           op
     | None ->
-        if Hike_stack_model.is_intrinsic_name name then begin
+        if Hike_abi.is_intrinsic_name name then begin
           Hike_diag.warn
             "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes are poison"
             name (Tid.name (Term.tid sub));

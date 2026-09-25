@@ -207,9 +207,6 @@ let is_intrinsic (term : sub term) : bool =
 let is_emittable_intrinsic (term : sub term) : bool =
   is_intrinsic term && not (Seq.is_empty (Term.enum blk_t term))
 
-let is_intrinsic_name (s : string) : bool =
-  Base.String.is_prefix s ~prefix:"intrinsic:"
-
 let fixed_signature (term : sub term) : bool =
   is_emittable_intrinsic term
   || String.equal (Tid.name (Term.tid term)) "@main"
@@ -396,24 +393,12 @@ let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
                    Int64.max acc (Word.to_int64_exn w)
                | _ -> acc))
 
-(* A machine call pushes its return address one word below the caller's SP;
-   a modeled op (an intrinsic rendered inline) pushes nothing.  BAP names
-   a mapped intrinsic target [@intrinsic:<name>]; strip the [@]. *)
-let is_intrinsic_target (t : tid) : bool =
-  let name = Tid.name t in
-  let name =
-    if String.length name > 0 && name.[0] = '@' then
-      String.sub name 1 (String.length name - 1)
-    else name
-  in
-  Base.String.is_prefix name ~prefix:"intrinsic:"
-
 (* A real (non-intrinsic) call, direct or indirect. *)
 let machine_call (j : jmp term) : bool =
   match Jmp.kind j with
   | Call c when not (Hike_return.is_jmp j) -> (
       match Call.target c with
-      | Direct t -> not (is_intrinsic_target t)
+      | Direct t -> not (Hike_abi.is_intrinsic_target t)
       | Indirect _ -> true)
   | _ -> false
 

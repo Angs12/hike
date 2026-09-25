@@ -283,7 +283,7 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
 (* Bit-window pre-image: the constraint hull placed at bit position
    [k], width [d] — the window's bits are the constraint's, the rest
    free.  Identity on doubt. *)
-let shift_fill_preimage ~(w : int) ~(ew : int) (k : int) (d : int)
+let shift_fill_constraint ~(w : int) ~(ew : int) (k : int) (d : int)
     (vlo : Cbat_word.t) (vhi : Cbat_word.t) : wordset option =
   let sh = Cbat_word.of_int ~width:w k in
   let lo_a = Cbat_word.lshift (Cbat_word.extract_exn ~hi:(ew - 1) vlo) sh in
@@ -312,7 +312,7 @@ let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
        | Some vlo, Some vhi ->
          (* An open-top constraint (the succ wraps) has no closed hull. *)
          if Cbat_word.is_zero (Cbat_word.succ vhi) then None
-         else shift_fill_preimage ~w ~ew:w (w - n) n vlo vhi
+         else shift_fill_constraint ~w ~ew:w (w - n) n vlo vhi
        | _ -> None)
   | Error _ -> None
 
@@ -337,10 +337,10 @@ let flip_guard_op (op : guard_op) : guard_op = match op with
   | EQ -> EQ | NEQ -> NEQ
 
 
-(* The row a true guard [x op c] admits on [x]: [constraint_row] is the
-   CLP-interval evidence row ([None] = identity), [total_row] the
-   always-sound row; [guard_row] falls from evidence to total. *)
-let constraint_row ?(cur : wordset option = None)
+(* The row a true guard [x op c] admits on [x]: [evidence_constraint] is the
+   CLP-interval evidence row ([None] = identity), [total_constraint] the
+   always-sound row; [guard_constraint] falls from evidence to total. *)
+let evidence_constraint ?(cur : wordset option = None)
     ?(known_nonneg : bool = false)
     (op : guard_op) (c : Cbat_word.t) : wordset option =
   let width = Cbat_word.bitwidth c in
@@ -379,7 +379,7 @@ let constraint_row ?(cur : wordset option = None)
     else None
   | NEQ | UGT | UGE | SGT | SGE -> None
 
-let total_row (op : guard_op) (c : Cbat_word.t) : wordset option =
+let total_constraint (op : guard_op) (c : Cbat_word.t) : wordset option =
 #ifdef VSA_DEBUG
   Cbat_attr_census.bump
     (match op with
@@ -431,12 +431,12 @@ let total_row (op : guard_op) (c : Cbat_word.t) : wordset option =
      else iv (Cbat_word.succ c) (Cbat_word.pred half))
   | SGE -> iv c (Cbat_word.pred half)
 
-let guard_row ?(cur : wordset option = None)
+let guard_constraint ?(cur : wordset option = None)
     ?(known_nonneg : bool = false)
     (op : guard_op) (c : Cbat_word.t) : wordset option =
   match op with
   | ULT | ULE | EQ | SLT | SLE ->
-    (match constraint_row ~cur ~known_nonneg op c with
+    (match evidence_constraint ~cur ~known_nonneg op c with
      | Some row ->
 #ifdef VSA_DEBUG
        Cbat_attr_census.bump "band.constraint.ok";
@@ -446,8 +446,8 @@ let guard_row ?(cur : wordset option = None)
 #ifdef VSA_DEBUG
        Cbat_attr_census.bump "band.constraint.fallback";
 #endif
-       total_row op c)
-  | NEQ | UGT | UGE | SGT | SGE -> total_row op c
+       total_constraint op c)
+  | NEQ | UGT | UGE | SGT | SGE -> total_constraint op c
 
 
 (* The var-var meet: EQ keeps the intersection, NEQ subtracts it. *)
@@ -491,26 +491,26 @@ let overlap_constraints (op : Bil.binop) (a_ws : wordset) (b_ws : wordset)
         | Some m -> Cbat_word.(<) m half
         | None -> false in
       (match op with
-       | Bil.LT -> total_row ULT mx_y, total_row UGT mn_x
-       | Bil.LE -> total_row ULE mx_y, total_row UGE mn_x
+       | Bil.LT -> total_constraint ULT mx_y, total_constraint UGT mn_x
+       | Bil.LE -> total_constraint ULE mx_y, total_constraint UGE mn_x
        | Bil.SLT ->
-         constraint_row ~known_nonneg:nonneg_x SLT mx_y, total_row SGT mn_x
+         evidence_constraint ~known_nonneg:nonneg_x SLT mx_y, total_constraint SGT mn_x
        | Bil.SLE ->
-         constraint_row ~known_nonneg:nonneg_x SLE mx_y, total_row SGE mn_x
+         evidence_constraint ~known_nonneg:nonneg_x SLE mx_y, total_constraint SGE mn_x
        | Bil.EQ | Bil.NEQ -> overlap_eq op a_ws b_ws
        | _ -> None, None)
     | _ -> None, None
 
 (* The constraint row for an operand; signed rows consult the
    non-negativity proof. *)
-let row_for ~(env : AI.t) ?(nonneg : exp -> bool = fun _ -> false)
+let constraint_for_operand ~(env : AI.t) ?(nonneg : exp -> bool = fun _ -> false)
     (e : exp) (op : guard_op) (c : Cbat_word.t)
     : wordset option =
   let cur = Base.Result.ok (denote_imm_exp e env) in
   match op with
-  | SLT | SLE -> guard_row ~cur ~known_nonneg:(nonneg e) op c
-  | ULT | ULE | EQ -> guard_row ~cur op c
-  | NEQ | UGT | UGE | SGT | SGE -> guard_row op c
+  | SLT | SLE -> guard_constraint ~cur ~known_nonneg:(nonneg e) op c
+  | ULT | ULE | EQ -> guard_constraint ~cur op c
+  | NEQ | UGT | UGE | SGT | SGE -> guard_constraint op c
 
 let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
     (cstr : wordset) : wordset option =
@@ -594,7 +594,7 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     if n <> hi - lo + 1 then None
     else
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some vlo, Some vhi -> shift_fill_preimage ~w ~ew:n lo n vlo vhi
+       | Some vlo, Some vhi -> shift_fill_constraint ~w ~ew:n lo n vlo vhi
        | _ -> None)
   | Error _ -> None
 
@@ -687,7 +687,7 @@ let bounded_cell_key (ws : wordset) : Mem.Key.t option =
   if WordSet.is_top ws || WordSet.is_infinite ws then None
   else Mem.Key.of_wordset ws
 
-let rec inverse_denote ~(env : AI.t)
+let rec constrain_operands ~(env : AI.t)
     ?(cells : pending_cell list ref = ref [])
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
@@ -710,12 +710,12 @@ let rec inverse_denote ~(env : AI.t)
     end
     else env
   | Bil.UnOp (Bil.NOT, a) ->
-    inverse_denote ~env ~cells ~nonneg ~landmarks a (WordSet.lnot produced)
+    constrain_operands ~env ~cells ~nonneg ~landmarks a (WordSet.lnot produced)
   | Bil.UnOp (Bil.NEG, a) ->
-    inverse_denote ~env ~cells ~nonneg ~landmarks a (WordSet.neg produced)
+    constrain_operands ~env ~cells ~nonneg ~landmarks a (WordSet.neg produced)
   | Bil.Cast (Bil.HIGH, sz, a) ->
     Option.value_map (high_cast_constraint env a sz produced) ~default:env
-      ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg ~landmarks a a')
+      ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
   | Bil.Cast (ct, _, a) ->
     (match ct with
      | Bil.SIGNED | Bil.UNSIGNED ->
@@ -723,31 +723,31 @@ let rec inverse_denote ~(env : AI.t)
          (ext_cast_constraint
             ~is_signed:(match ct with Bil.SIGNED -> true | _ -> false)
             env a produced) ~default:env
-         ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg ~landmarks a a')
+         ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
      | _ ->
        Option.value_map (low_cast_constraint env a produced) ~default:env
-         ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg ~landmarks a a'))
+         ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a'))
   | Bil.Extract (hi, lo, a) ->
     Option.value_map (extract_constraint env a hi lo produced) ~default:env
-      ~f:(fun a' -> inverse_denote ~env ~cells ~nonneg ~landmarks a a')
+      ~f:(fun a' -> constrain_operands ~env ~cells ~nonneg ~landmarks a a')
   | Bil.Concat (a, b) ->
     (* The inverse splits the window on the width boundary. *)
     (match denote_imm_exp b env with
      | Ok b_ws ->
        let bw = WordSet.bitwidth b_ws in
        let cw = WordSet.bitwidth produced in
-       if bw >= cw then inverse_denote ~env ~cells ~nonneg ~landmarks a produced
+       if bw >= cw then constrain_operands ~env ~cells ~nonneg ~landmarks a produced
        else
-         let env = inverse_denote ~env ~cells ~nonneg ~landmarks a
+         let env = constrain_operands ~env ~cells ~nonneg ~landmarks a
              (WordSet.extract ~hi:(cw - 1) ~lo:bw produced) in
-         inverse_denote ~env ~cells ~nonneg ~landmarks b
+         constrain_operands ~env ~cells ~nonneg ~landmarks b
            (WordSet.extract ~hi:(bw - 1) ~lo:0 produced)
      | Error _ -> env)
   | Bil.Ite (_, t, f) ->
     (* The forward joins the branches; the inverse constrains both. *)
-    let env = inverse_denote ~env ~cells ~nonneg ~landmarks t produced in
-    inverse_denote ~env ~cells ~nonneg ~landmarks f produced
-  | Bil.Let (_, _, body) -> inverse_denote ~env ~cells ~nonneg ~landmarks body produced
+    let env = constrain_operands ~env ~cells ~nonneg ~landmarks t produced in
+    constrain_operands ~env ~cells ~nonneg ~landmarks f produced
+  | Bil.Let (_, _, body) -> constrain_operands ~env ~cells ~nonneg ~landmarks body produced
   | Bil.Load (m, a, en, s) ->
     (* The cell fact meets the env's memory and threads to the store
        that wrote it. *)
@@ -794,15 +794,15 @@ let rec inverse_denote ~(env : AI.t)
                   Option.value_map (Base.Result.ok (denote_imm_exp u env))
                     ~default:cell.pc_cstr ~f:(WordSet.meet cell.pc_cstr) in
                 if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
-                else inverse_denote ~env ~cells ~nonneg ~landmarks u data_cstr)))
+                else constrain_operands ~env ~cells ~nonneg ~landmarks u data_cstr)))
      | _ -> env)
   | Bil.BinOp (Bil.AND, a, b) when WordSet.bitwidth produced = 1 ->
     (* AND = true constrains both operands. *)
     if WordSet.elem Cbat_word.b1 produced
        && not (WordSet.elem Cbat_word.b0 produced)
     then
-      let env = inverse_denote ~env ~cells ~nonneg ~landmarks a produced in
-      inverse_denote ~env ~cells ~nonneg ~landmarks b produced
+      let env = constrain_operands ~env ~cells ~nonneg ~landmarks a produced in
+      constrain_operands ~env ~cells ~nonneg ~landmarks b produced
     else if WordSet.elem Cbat_word.b0 produced
             && not (WordSet.elem Cbat_word.b1 produced)
     then
@@ -834,7 +834,7 @@ let rec inverse_denote ~(env : AI.t)
        let deliver (e : exp) (c : wordset option) (env : AI.t) : AI.t =
          match e, c with
          | Bil.Int _, _ | Bil.Let _, _ -> env
-         | _, Some c' -> inverse_denote ~env ~cells ~nonneg ~landmarks e c'
+         | _, Some c' -> constrain_operands ~env ~cells ~nonneg ~landmarks e c'
          | _ -> env in
        (match denote_imm_exp a env, denote_imm_exp b env with
         | Ok a_ws, Ok b_ws ->
@@ -855,9 +855,9 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
     let row o = if flip then flip_guard_op o else o in
     let cstr_opt = match op with
       | Bil.NEQ -> neq_complement c0
-      | _ -> row_for ~env ~nonneg x (row (guard_op_of_binop op)) c0 in
+      | _ -> constraint_for_operand ~env ~nonneg x (row (guard_op_of_binop op)) c0 in
     match cstr_opt with
-    | Some cstr -> inverse_denote ~env ~cells ~nonneg ~landmarks x cstr
+    | Some cstr -> constrain_operands ~env ~cells ~nonneg ~landmarks x cstr
     | None -> env in
   match a, b with
   | _, Bil.Int c0 -> const_side a false op c0
@@ -867,10 +867,10 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
      | Ok a_ws, Ok b_ws ->
        let x_cstr, y_cstr = overlap_constraints op a_ws b_ws in
        let env = match x_cstr with
-         | Some xc -> inverse_denote ~env ~cells ~nonneg ~landmarks a xc
+         | Some xc -> constrain_operands ~env ~cells ~nonneg ~landmarks a xc
          | None -> env in
        (match y_cstr with
-        | Some yc -> inverse_denote ~env ~cells ~nonneg ~landmarks b yc
+        | Some yc -> constrain_operands ~env ~cells ~nonneg ~landmarks b yc
         | None -> env)
      | _ -> env)
 
@@ -932,7 +932,7 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
    lives here only. *)
 let constrain_edge ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
     (cond : exp) : AI.t =
-  inverse_denote ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
+  constrain_operands ~landmarks ~env cond (WordSet.singleton Cbat_word.b1)
 
 (* Var→constraint map; a constraint is consumed at its var's def. *)
 type live_map = wordset Var.Map.t
@@ -959,9 +959,12 @@ let carry_undefined ~(raw : bool) (live : wordset Var.Map.t)
           else acc
         | _ -> acc)
 
-(* A produced-width dummy for mem defs: their inverse reads ~cells,
-   never the width. *)
+(* A produced-width dummy for mem defs: their constraint derivation reads
+   ~cells, never the width. *)
 let undefined_width = WordSet.bottom 8
+
+let strictly_precedes (narrow : wordset) (wide : wordset) : bool =
+  WordSet.precedes narrow wide && not (WordSet.equal narrow wide)
 
 let walk ?(raw : bool = false)
     ?(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
@@ -1032,15 +1035,15 @@ let walk ?(raw : bool = false)
           AI.add_word acc ~key:v
             ~data:(WordSet.meet (AI.find_word w pre v) c)
         | _ -> acc) in
-  (* Records the rhs's free vars the inversion narrowed; each lives
-     until its var's def consumes it. *)
+  (* Records the rhs's free vars the constraint derivation narrowed; each
+     lives until its var's def consumes it. *)
   let harvest ~(base : AI.t) (env' : AI.t) (rhs : exp) =
     Core.Set.fold (Exp.free_vars rhs) ~init:() ~f:(fun () v ->
         match Var.typ v with
         | Type.Imm w ->
           let before = AI.find_word w base v in
           let after = AI.find_word w env' v in
-          if (not (WordSet.is_bottom after)) && WordSet.precedes after before
+          if (not (WordSet.is_bottom after)) && strictly_precedes after before
           then live := Core.Map.set !live ~key:(Var.base v) ~data:after
         | _ -> ()) in
   let commit_memory (env' : AI.t) =
@@ -1048,6 +1051,28 @@ let walk ?(raw : bool = false)
         Option.iter (mem_idx_of m) ~f:(fun (k, m) ->
             env_out := AI.add_memory !env_out ~key:m
                 ~data:(AI.find_memory k env' m))) in
+  let confine_last_def (v : var) (w : int) (cstr' : wordset) =
+    if not raw && not (Core.Set.mem !confined (Var.base v)) then begin
+      confined := Core.Set.add !confined (Var.base v);
+      let cur = AI.find_word w !env_out v in
+      let m = WordSet.meet cur cstr' in
+      if (not (Cbat_word.is_zero (WordSet.cardinality m)))
+         && WordSet.precedes m cur
+      then env_out := AI.add_word !env_out ~key:v ~data:m
+    end
+  in
+  let invert_def (d : def term) (pre : AI.t) (cstr' : wordset) =
+    let ce = call_env pre in
+    let env' =
+      constrain_operands ~env:ce ~cells ~landmarks
+        ~nonneg:(fun e -> witness ~env:ce e)
+        (Def.rhs d) cstr'
+    in
+    if not raw then begin
+      commit_memory env';
+      harvest ~base:ce env' (Def.rhs d)
+    end
+  in
   let walk_word_def (d, pre, post) =
     let v = Def.lhs d in
     match Var.typ v with
@@ -1059,49 +1084,23 @@ let walk ?(raw : bool = false)
          | None -> ()
          | Some cstr ->
            let post_v = AI.find_word w post v in
-           let cstr' =
-             if raw then cstr else WordSet.meet cstr post_v in
-           if (not raw)
-              && Cbat_word.is_zero (WordSet.cardinality cstr') then
-             (* The produced value cannot satisfy the constraint: it
-                does not hold before this def — dropped. *)
-             ()
-           else begin
-             (* The first processing of a var is its LAST def. *)
-             if not raw
-                && not (Core.Set.mem !confined (Var.base v)) then begin
-               confined := Core.Set.add !confined (Var.base v);
-               let cur = AI.find_word w !env_out v in
-               let m = WordSet.meet cur cstr' in
-               if (not (Cbat_word.is_zero (WordSet.cardinality m)))
-                  && WordSet.precedes m cur
-               then env_out := AI.add_word !env_out ~key:v ~data:m
-             end;
-             if raw || WordSet.precedes cstr' post_v then begin
-               let ce = call_env pre in
-               let env' =
-                 inverse_denote ~env:ce ~cells ~landmarks
-                   ~nonneg:(fun e -> witness ~env:ce e)
-                   (Def.rhs d) cstr' in
-               if not raw then begin
-                 commit_memory env';
-                 harvest ~base:ce env' (Def.rhs d)
-               end
-             end
-           end)
+         let cstr' = if raw then cstr else WordSet.meet cstr post_v in
+         if (not raw)
+            && Cbat_word.is_zero (WordSet.cardinality cstr') then
+           (* The produced value cannot satisfy the constraint: it does not
+              hold before this def. *)
+           ()
+         else begin
+           confine_last_def v w cstr';
+           if raw || WordSet.precedes cstr' post_v then
+             invert_def d pre cstr'
+         end)
     | Type.Mem _ ->
       (* Driven by the pending cells the loads pushed. *)
       if not raw then
         (match !cells with
          | [] -> ()
-         | _ ->
-           let ce = call_env pre in
-           let env' =
-             inverse_denote ~env:ce ~cells ~landmarks
-               ~nonneg:(fun e -> witness ~env:ce e)
-               (Def.rhs d) undefined_width in
-           commit_memory env';
-           harvest ~base:ce env' (Def.rhs d))
+         | _ -> invert_def d pre undefined_width)
     | Type.Unk -> ()
   in
   List.iter prefixed ~f:walk_word_def;
@@ -1117,8 +1116,7 @@ let cond_seeds ~(base : AI.t) (env : AI.t) (cond : exp) : live_map =
         let before = AI.find_word w base v in
         let after = AI.find_word w env v in
         if (not (WordSet.is_bottom after))
-           && WordSet.precedes after before
-           && not (WordSet.equal after before)
+           && strictly_precedes after before
         then Core.Map.set acc ~key:(Var.base v) ~data:after
         else acc
       | _ -> acc)
@@ -1179,10 +1177,9 @@ let refine_edge_inline
   let env_in = env in
   let env = constrain_edge ~env ~landmarks:rctx.rc_landmarks acc_cond in
   (* No constraint derived: nothing to deliver. *)
-  if discarded || AI.equal env env_in || AI.equal env AI.bottom then env
+  if discarded then env_in
+  else if AI.equal env env_in || AI.equal env AI.bottom then env
   else
     let seeds = cond_seeds ~base:env_in env acc_cond in
-    let refined =
-      Stages.time `Walk (fun () ->
-          refine_edge ~entry:env_in ~rctx ~seeds env b) in
-    refined
+    Stages.time `Walk (fun () ->
+        refine_edge ~entry:env_in ~rctx ~seeds env b)

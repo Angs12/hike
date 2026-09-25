@@ -41,7 +41,6 @@ val summary : comp list -> summary
 (* Kosaraju SCC over any ordered key. *)
 module Scc (K : sig
     type t
-    val compare : t -> t -> int
   end) : sig
   val partition :
     K.t list -> (K.t -> K.t list) -> (K.t -> K.t list) -> K.t list list

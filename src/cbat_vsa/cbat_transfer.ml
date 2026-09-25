@@ -83,7 +83,6 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   in
 #endif
   (* Shared EQ/NEQ decision. *)
-  (* Shared EQ/NEQ decision. *)
   let compare_eq ~(negate : bool) v1 v2 =
     let v1_size = WordSet.cardinality v1 in
     let v2_size = WordSet.cardinality v2 in
@@ -129,7 +128,7 @@ let denote_binop (op : Bil.binop) : wordset -> wordset -> wordset =
   | Bil.LT -> ordering ~signed:false ~le:false
   | Bil.LE -> ordering ~signed:false ~le:true
   | Bil.SLT -> ordering ~signed:true ~le:false
-    | Bil.SLE -> ordering ~signed:true ~le:true
+  | Bil.SLE -> ordering ~signed:true ~le:true
   in
   fun v1 v2 ->
     (* The coercion pass makes every binop's operand widths uniform; a
@@ -182,12 +181,13 @@ let section_images_ref : section_image list ref = ref []
 let set_section_images (imgs : section_image list) : unit =
   section_images_ref := imgs
 
-(* Runs [f] with [imgs] armed, disarmed on every exit. *)
+(* Runs [f] with [imgs] armed, restoring the surrounding images on every exit. *)
 let with_images (imgs : section_image list) (f : unit -> 'a) : 'a =
+  let surrounding = !section_images_ref in
   section_images_ref := imgs;
   match f () with
-  | v -> section_images_ref := []; v
-  | exception e -> section_images_ref := []; raise e
+  | v -> section_images_ref := surrounding; v
+  | exception e -> section_images_ref := surrounding; raise e
 
 (* The image's [bits]-bit word at byte offset [off], assembled in the
    load's endianness; [None] when the bytes leave the array. *)

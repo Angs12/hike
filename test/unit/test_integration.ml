@@ -582,12 +582,12 @@ let tests : unit Alcotest.test list =
           "property LM VSK-EMPTY-SEED: a constant-true guard produces no seeds (the early-exit \
            shape)"
           (AI.equal
-             (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1))
+             (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:entry (Bil.Int (W.to_word W.b1)) (Ws.singleton W.b1))
              entry);
         check "property LM VSK-MIXED-SEED: the taken guard produces the single Var seed x in [0,9]"
           (Ws.equal
              (AI.find_word 32
-                (Vsa.Test_seam.inverse_denote ~landmarks:(Cbat_landmarks.create ()) ~env:entry
+                (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:entry
                    (Bil.BinOp (Bil.LT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 10))))
                    (Ws.singleton W.b1))
                 x)
@@ -889,7 +889,7 @@ let tests : unit Alcotest.test list =
         let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
         let plain = AI.widen_join (mkstate d_old w_old) (mkstate d_new w_new) in
         let r =
-          AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
+          AI.selective_widen_extrapolate ~head:h ~landmarks:lm ~need ~steps:1
             (mkstate d_old w_old) (mkstate d_new w_new)
         in
         check "T5-4 (ownership): a cell with no own entries plain-widens"
@@ -922,7 +922,7 @@ let tests : unit Alcotest.test list =
         | e :: _ -> e.Cbat_landmarks.dist_p <- Some 4
         | [] -> failwith "T5-4: landmark not recorded");
         let rl =
-          AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
+          AI.selective_widen_extrapolate ~head:h ~landmarks:lm ~need ~steps:1
             (mkstate d_old w_old) (mkstate d_new w_new)
         in
         check_bound
@@ -948,7 +948,7 @@ let tests : unit Alcotest.test list =
         let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
         let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
         let r_ex =
-          AI.selective_widen_extrapolate ~head:(Some h) ~landmarks:lm ~need ~steps:1
+          AI.selective_widen_extrapolate ~head:h ~landmarks:lm ~need ~steps:1
             (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new)
         in
         let r_w = AI.widen_join (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in

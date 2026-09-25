@@ -133,80 +133,72 @@ let extrapolate_data ~(entries : Cbat_landmarks.lm_entry list) ~(steps : int)
   | _ -> Cbat_landmarks.translate_to ~steps old new_ entries
 
 (* Extrapolate [need] vars by [steps]; negative steps widen. *)
-let selective_widen_extrapolate ?(head:Tid.t option=None)
+let selective_widen_extrapolate ~(head : Tid.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(need : Int.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
   if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
-  else if Core.Set.is_empty need && Option.is_none head then join e1 e2
+  else if Core.Set.is_empty need then join e1 e2
   else
     let words =
-      if Core.Set.is_empty need then WordEnv.join e1.words e2.words
-      else
       WordEnv.fold e1.words ~init:WordEnv.top ~f:(fun ~key ~data:data_old acc ->
-        let idx = WordSet.bitwidth data_old
-        in
+        let idx = WordSet.bitwidth data_old in
         let data_new = WordEnv.find idx e2.words key in
         if WordSet.is_top data_new then acc
         else
           let data_res =
             if Core.Set.mem need (Cbat_var_id.base_of key) then
-              match head with
-              | Some h ->
-                extrapolate_data ~entries:(Cbat_landmarks.entries_for_head landmarks h)
-                  ~steps data_old data_new
-              | None -> extrapolate_data ~entries:[] ~steps data_old data_new
+              extrapolate_data
+                ~entries:(Cbat_landmarks.entries_for_head landmarks head)
+                ~steps data_old data_new
             else
               WordSet.join data_old data_new
           in
           if WordSet.is_top data_res then acc
-          else WordEnv.add acc ~key ~data:data_res
-      )
+          else WordEnv.add acc ~key ~data:data_res)
     in
     let memories =
-      match head with
-      | Some h ->
-        (* Each cell widens by its OWN entries' three-way — Finite
-           translates, Zero advances and joins, Inf plain-widens; a cell
-           without own entries plain-widens. *)
-        MemEnv.fold e1.memories ~init:MemEnv.top
-          ~f:(fun ~key:mv ~data:old acc ->
-              let idx = Mem.get_idx old in
-              let nw = MemEnv.find idx e2.memories mv in
-              if Mem.equal nw (Mem.top idx) then acc
-              else begin
-                let extr ck v1 v2 =
-                  if Mem.Val.equal v1 v2 then Mem.Val.widen_join v1 v2
-                  else
-                    let cl = Mem.Key.cell_key ck in
-                    match Cbat_landmarks.entries_for_cell landmarks h cl with
-                    | [] -> Mem.Val.widen_join v1 v2
-                    | entries ->
-                      (match Cbat_landmarks.lm_calc_steps_for_cell landmarks h cl with
-                       | `Zero ->
-                         Cbat_landmarks.advance_cell landmarks h cl;
-                         Mem.Val.widen_join v1 v2
-                       | `Inf -> Mem.Val.widen_join v1 v2
-                       | `Finite n ->
+      (* Each cell widens by its OWN entries' three-way — Finite
+         translates, Zero advances and joins, Inf plain-widens; a cell
+         without own entries plain-widens. *)
+      MemEnv.fold e1.memories ~init:MemEnv.top
+        ~f:(fun ~key:mv ~data:old acc ->
+            let idx = Mem.get_idx old in
+            let nw = MemEnv.find idx e2.memories mv in
+            if Mem.equal nw (Mem.top idx) then acc
+            else begin
+              let extr ck v1 v2 =
+                if Mem.Val.equal v1 v2 then Mem.Val.widen_join v1 v2
+                else
+                  let cl = Mem.Key.cell_key ck in
+                  match Cbat_landmarks.entries_for_cell landmarks head cl with
+                  | [] -> Mem.Val.widen_join v1 v2
+                  | entries ->
+                    (match Cbat_landmarks.lm_calc_steps_for_cell landmarks head cl with
+                     | `Zero ->
+                       Cbat_landmarks.advance_cell landmarks head cl;
+                       Mem.Val.widen_join v1 v2
+                     | `Inf -> Mem.Val.widen_join v1 v2
+                     | `Finite n ->
 #ifdef VSA_DEBUG
-                         incr Cbat_vsa_stages.cell_lm_consumed;
+                       incr Cbat_vsa_stages.cell_lm_consumed;
 #endif
-                         let data_old = Mem.Val.data v1 in
-                         let data_new = Mem.Val.data v2 in
-                         let data = extrapolate_data ~entries ~steps:n data_old data_new in
-                         (* Overflow escapes to the plain-widen arm. *)
-                         let data =
-                           if WordSet.is_top data
-                           then WordSet.widen_join data_old data_new
-                           else data in
-                         Cbat_landmarks.clear_cell landmarks h cl;
-                         let _, e = Mem.Val.get_idx v2 in
-                         Mem.Val.create data e)
-                in
-                MemEnv.add acc ~key:mv
-                  ~data:(Mem.widen_join_op extr old nw)
-              end)
-      | None -> MemEnv.widen_join e1.memories e2.memories in
+                       let data_old = Mem.Val.data v1 in
+                       let data_new = Mem.Val.data v2 in
+                       let data = extrapolate_data ~entries ~steps:n data_old data_new in
+                       (* Overflow escapes to the plain-widen arm. *)
+                       let data =
+                         if WordSet.is_top data
+                         then WordSet.widen_join data_old data_new
+                         else data in
+                       Cbat_landmarks.clear_cell landmarks head cl;
+                       let _, e = Mem.Val.get_idx v2 in
+                       Mem.Val.create data e)
+              in
+              MemEnv.add acc ~key:mv
+                ~data:(Mem.widen_join_op extr old nw)
+            end)
+    in
     { memories; words }
 
 let meet (e1 : t) (e2 : t) : t =

@@ -106,8 +106,7 @@ let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t)
       (* Outside a cycle: no-op. *)
       ()
     | Some h ->
-      let m = meet in
-      if not (Cbat_clp_set_composite.is_bottom m) then ()
+      if not (Cbat_clp_set_composite.is_bottom meet) then ()
       else
         match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
               Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with

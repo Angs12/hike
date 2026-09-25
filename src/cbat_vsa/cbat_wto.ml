@@ -74,7 +74,6 @@ let summary (cs : comp list) : summary =
    widening-need var graph both call it (one interface, two adapters). *)
 module Scc (K : sig
     type t
-    val compare : t -> t -> int
   end) =
 struct
   let partition (nodes : K.t list) (succ : K.t -> K.t list)
@@ -115,7 +114,6 @@ end
 
 module Tid_scc = Scc (struct
     type t = Tid.t
-    let compare = Tid.compare
   end)
 
 (* Recursive SCC partition. *)

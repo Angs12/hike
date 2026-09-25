@@ -219,7 +219,6 @@ let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
         end));
     let module Var_scc = Cbat_wto.Scc (struct
         type t = Var.t
-        let compare = Var.compare
       end) in
     let comps =
       Var_scc.partition (Core.Set.to_list cycle_vars)
@@ -279,25 +278,16 @@ let rec static_graph_vsa
       (Cbat_runctx.with_sol rctx
          (Solution.enum init
           |> Seq.fold ~init:Tid.Map.empty
-               ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:(v, 0)))) in
+               ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v))) in
   let get n =
-    Option.value_map (Core.Map.find (!rc_cell).rc_state.fs_sol n)
-      ~default:sol_default ~f:fst in
-  (* Store plus version bump; the stability check below compares first. *)
+    Option.value (Core.Map.find (!rc_cell).rc_state.fs_sol n) ~default:sol_default in
   let set n v =
     let rc = !rc_cell in
-    let st = rc.rc_state in
-    let ver =
-      Option.value_map (Core.Map.find st.fs_sol n) ~default:1
-        ~f:(fun (_, k) -> k + 1) in
     rc_cell :=
       Cbat_runctx.with_sol rc
-        (Core.Map.set st.fs_sol ~key:n ~data:(v, ver)) in
-  (* The plain solution view of the versioned store. *)
+        (Core.Map.set rc.rc_state.fs_sol ~key:n ~data:v) in
   let mk_sol () =
-    Solution.create
-      (Core.Map.map (!rc_cell).rc_state.fs_sol ~f:fst)
-      sol_default in
+    Solution.create (!rc_cell).rc_state.fs_sol sol_default in
   Stages.reset ();
   let total_processed = ref 0 in
   (* The visit budget scales with the block count so a sub's sweep
@@ -412,7 +402,7 @@ let rec static_graph_vsa
           (fun () ->
             match Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v with
             | `Finite n ->
-              let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:(Some v) ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
+              let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
               Cbat_landmarks.clear_head rctx.Cbat_runctx.rc_landmarks v (Hashtbl.find_exn head_to_blocks v);
               r
             | `Zero ->
@@ -423,7 +413,7 @@ let rec static_graph_vsa
                 (* No word landmarks at the head; the memory arm runs the
                    cells' own three-way. Negative steps widen the words. *)
                 Stages.time `Widen (fun () ->
-                    AI.selective_widen_extrapolate ~head:(Some v)
+                    AI.selective_widen_extrapolate ~head:v
                       ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:(-1)
                       old incoming)
               else
@@ -517,10 +507,8 @@ let stamp_envs_of_sol = Cbat_env_tag.stamp_envs_of_sol
 let env_tag = Cbat_env_tag.env_tag
 let set_env_tag = Cbat_env_tag.set_env_tag
 let solve_denote = Cbat_env_tag.solve_denote
-let constrain_edge = Cbat_backward.constrain_edge
-let inverse_denote = Cbat_backward.inverse_denote
 
-(* The seam's seed shape: the cond's leaf constraints as (var, row)
+(* The seam's seed shape: the cond's leaf constraints as (var, constraint)
    pairs. *)
 let refine_edge ~sol ~rctx ~seeds env blk =
   (* The walked block's IN state is its entry in [sol]. *)
@@ -539,8 +527,8 @@ module Test_seam = struct
   let denote_imm_exp = denote_imm_exp
   let fold_block_states = fold_block_states
   let reachable_jumps = reachable_jumps
-  let constrain_edge = constrain_edge
-  let inverse_denote = inverse_denote
+  let constrain_edge = Cbat_backward.constrain_edge
+  let constrain_operands = Cbat_backward.constrain_operands
   let mk_rctx = mk_rctx_with_oracle
   (* The context's landmark table and the widening-head bracket: a refine
      run through the seam uses the context's own table. *)

@@ -21,13 +21,11 @@ open Graphlib.Std
 module Utils = Cbat_vsa_utils
 module AI = Cbat_ai_representation
 
-(* Mutable per-analysis state: the versioned solution values.  The
-   fixpoint builds one per sub and the call abstraction one per callee
-   — Tids are only unique per sub, so each context owns its own. *)
+(* Mutable per-analysis state: the solution values.  The fixpoint builds
+   one per sub and the call abstraction one per callee — Tids are only
+   unique per sub, so each context owns its own. *)
 type fix_state = {
-  (* Per-block solution values with their version stamps; a bump means
-     the value changed. *)
-  fs_sol : (AI.t * int) Tid.Map.t;
+  fs_sol : AI.t Tid.Map.t;
 }
 
 (* Static per-block facts, one per sub block: the block's term, the
@@ -67,16 +65,8 @@ type refine_ctx = {
   rc_sub_lookup : int64 -> Tid.t option;
 }
 
-let with_sol (rc : refine_ctx) (sol : (AI.t * int) Tid.Map.t) : refine_ctx =
+let with_sol (rc : refine_ctx) (sol : AI.t Tid.Map.t) : refine_ctx =
   { rc with rc_state = { fs_sol = sol } }
-
-(* BAP names a mapped intrinsic target [@intrinsic:<name>]; the leading
-   [@] is part of the name, so strip it before the prefix test. *)
-let is_intrinsic_target_name (n : string) : bool =
-  let n =
-    match String.chop_prefix n ~prefix:"@" with Some r -> r | None -> n
-  in
-  String.is_prefix n ~prefix:"intrinsic:"
 
 (* Static per-block call facts: the convention's integer-arg lanes the
    block writes, and whether the block's call pushes a return address
@@ -95,7 +85,7 @@ let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) : var list * bool =
                Option.is_some (Call.return c)
                && (match Call.target c with
                    | Indirect _ -> true
-                   | Direct t -> not (is_intrinsic_target_name (Tid.name t))))
+                   | Direct t -> not (Hike_abi.is_intrinsic_target t)))
            | _ -> false)
   in
   (written, pushed)
@@ -191,5 +181,5 @@ let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
                    (Core.Map.find live (Term.tid b))) });
 }
 
-let ver_of (rc : refine_ctx) (t : Tid.t) : int =
-  Option.value_map (Core.Map.find rc.rc_state.fs_sol t) ~default:0 ~f:snd
+(* The per-run analysis context: one fold over the sub's blocks builds
+   the per-block fact records; the live-in fixpoint feeds them. *)
