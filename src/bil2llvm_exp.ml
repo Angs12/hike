@@ -212,11 +212,14 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
       let var = create_exp ctx scope llvm_builder blk_tid e in
       create_unop llvm_builder (op, var)
   | Var v -> (
-      match get_local scope blk_tid v with
+      match get_ssaval scope v with
       | Some x -> x
-      | None ->
-          warn_undef_read ctx scope v blk_tid;
-          frozen_undef ctx scope v)
+      | None -> (
+          match get_local scope blk_tid v with
+          | Some x -> x
+          | None ->
+              warn_undef_read ctx scope v blk_tid;
+              frozen_undef ctx scope v))
   | Int i -> create_immediate ctx i
   | Cast (cast, i, exp) ->
       let var = create_exp ctx scope llvm_builder blk_tid exp in

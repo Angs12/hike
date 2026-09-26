@@ -1212,6 +1212,61 @@ let tests : unit Alcotest.test list =
                ("label %\"" ^ Tid.name tids.(1) ^ "\", label %\""
                 ^ Tid.name (Term.tid p2) ^ "\"")
           && not (contains_substring ir "-sw")));
+
+    (* BIRPHI: a Phi term renders as its own LLVM phi — one incoming
+       per (source block, exp), the value read in the source's
+       context; the planner does not duplicate the var. *)
+    pin "EMIT-32"
+      "a BIR phi renders as the LLVM phi with one incoming per source block"
+      (fun () ->
+        let v = v64 "bp_v" in
+        let p1 = blk_of_defs [ Def.create v (Bil.Int (Cbat_word.to_word (w64 1))) ] in
+        let p2 = blk_of_defs [ Def.create v (Bil.Int (Cbat_word.to_word (w64 2))) ] in
+        (* The SSA convention: the phi's lhs is a fresh version of the
+           var; the incomings name the defs' versions in their source
+           blocks. *)
+        let v1 = Var.with_index v 1 in
+        let j =
+          let b = Blk.Builder.create () in
+          Blk.Builder.add_phi b
+            (Phi.of_list v1
+               [ (Term.tid p1, Bil.Var v);
+                 (Term.tid p2, Bil.Var v) ]);
+          Blk.Builder.add_def b
+            (Def.create (v64 "bp_x")
+               (Bil.BinOp
+                  (Bil.PLUS, Bil.Var v1,
+                   Bil.Int (Cbat_word.to_word (w64 1)))));
+          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          Blk.Builder.result b
+        in
+        let e =
+          with_jmps (blk_of_defs [])
+            [ mk_jmp_to (Term.tid p1)
+                (Bil.BinOp
+                   (Bil.EQ, Bil.Var (v64 "bp_c"),
+                    Bil.Int (Cbat_word.to_word (w64 0))));
+              mk_goto (Term.tid p2) ]
+        in
+        let sub =
+          let sb = Sub.Builder.create ~name:"bir_phi" () in
+          Sub.Builder.add_blk sb e;
+          Sub.Builder.add_blk sb p1;
+          Sub.Builder.add_blk sb p2;
+          Sub.Builder.add_blk sb j;
+          Sub.Builder.result sb
+        in
+        let ir = emit_ir [ sub ] in
+        let phi_lines =
+          String.split_on_char '\n' ir
+          |> Base.List.filter ~f:(fun l ->
+                 contains_substring l " = phi i64 [")
+        in
+        check "EMIT-32"
+          (Base.List.length phi_lines = 1
+          && Base.List.exists phi_lines ~f:(fun l ->
+                 contains_substring l "1, %"
+                 && contains_substring l "2, %")));
   ]
 
 let () = run "bil2llvm" tests

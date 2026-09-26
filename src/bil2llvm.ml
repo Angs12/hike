@@ -142,10 +142,15 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
 
 let transfer_with_phis ctx scope transfer_vars llvm_builder blk_tid =
   Base.List.iter transfer_vars ~f:(fun var ->
-      let typ = var_lltype ctx var in
-      let res = Llvm.build_empty_phi typ "" llvm_builder in
-      insert_phi scope blk_tid var res;
-      insert_local scope blk_tid var res)
+      (* A var with its own BIR phi at this block needs no planner
+         phi; the BIR phi is the value. *)
+      if has_bir_phi scope blk_tid var then ()
+      else begin
+        let typ = var_lltype ctx var in
+        let res = Llvm.build_empty_phi typ "" llvm_builder in
+        insert_phi scope blk_tid var res;
+        insert_local scope blk_tid var res
+      end)
 
 let create_elts ctx scope llvm_builder blk sub_tid fr =
   let tid = Term.tid blk in
@@ -153,8 +158,45 @@ let create_elts ctx scope llvm_builder blk sub_tid fr =
   |> Seq.iter ~f:(fun elt ->
       match elt with
       | `Def def -> create_def ctx scope tid llvm_builder sub_tid fr def
-      | `Phi _ -> ()
+      | `Phi phi ->
+          (* A BIR phi renders as the LLVM phi of its own lhs; the
+             incomings fill after every body (a compound incoming
+             builds before its source block's terminator). *)
+          let var = Phi.lhs phi in
+          let typ = var_lltype ctx var in
+          let res = Llvm.build_empty_phi typ "" llvm_builder in
+          insert_bir_phi scope tid var res;
+          insert_local scope tid var res;
+          bind_ssaval scope var res
       | `Jmp _ -> ())
+
+(* One incoming per (source block, exp): the exp evaluates in the
+   source block's context, before its terminator. *)
+let fill_bir_phis ctx scope blks =
+  Seq.iter blks ~f:(fun blk ->
+      let tid = Term.tid blk in
+      Term.enum phi_t blk
+      |> Seq.iter ~f:(fun phi ->
+          let phi_ll =
+            Base.Option.value_exn
+              (get_bir_phi scope tid (Phi.lhs phi))
+          in
+          Phi.values phi
+          |> Seq.iter ~f:(fun (src, exp) ->
+              let value =
+                match exp with
+                | Bil.Var v when Base.Option.is_some (get_ssaval scope v) ->
+                    Base.Option.value_exn (get_ssaval scope v)
+                | _ ->
+                    let bb = get_bb scope src in
+                    let b =
+                      match Llvm.block_terminator bb with
+                      | Some t -> Llvm.builder_before ctx.llvm_ctx t
+                      | None -> Llvm.builder_at_end ctx.llvm_ctx bb
+                    in
+                    create_exp ctx scope b src exp
+              in
+              Llvm.add_incoming (value, get_bb scope src) phi_ll)))
 
 let populate_blks ctx scope transfer_vars blks sub fr =
   let sub_tid = Term.tid sub in
@@ -336,6 +378,7 @@ let create_sub ctx scope sub =
     build_entry_block ctx scope llvm_builder transfer_vars fr sub fn;
     populate_blks ctx scope transfer_vars blks sub fr;
     update_phis ctx scope transfer_vars blks;
+    fill_bir_phis ctx scope blks;
     Bil2llvm_phi.prune_phis scope;
     scope.cur_frame := None;
     let sub_tid = Term.tid sub in

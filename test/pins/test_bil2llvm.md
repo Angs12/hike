@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-31`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-32`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -51,3 +51,4 @@ one failing fixture never hides the rest of the module.
 | EMIT-29 | The canonical direct `hike_return` edge emits a return terminator. | Treat `Hike_return.is_jmp` as an ordinary indirect tail. | EMIT-29 FAILs: the fixture emits `indirectbr` or no `ret void`. |
 | EMIT-30 | A lone guarded goto (the split shape) renders `cond_br(cond, target, term-order successor)`; the false edge is recorded, so the successor's phi carries one incoming per rendered predecessor. | In `emit_terminal_guard`, skip the `note_edge ~cur succ`. | EMIT-30 FAILs: the phi line count drops to 0 (the join lost its incoming). |
 | EMIT-31 | After an entry-block split, the entry still names the ORIGINAL entry tid (fresh piece tids sort above lift-time tids, so `entry_blk_tid`'s min keeps piece 1). | In `bil2llvm_env.ml` `entry_blk_tid`, take `Seq.max_elt` instead of `min_elt`. | EMIT-31 FAILs: the entry br names the fresh piece-2 label. |
+| EMIT-32 | A BIR `Phi` term renders as its own LLVM phi (lhs = a fresh `Var.with_index` version, sub-wide bound): one incoming per (source block, exp), the exp evaluated in the source block's context; the planner skips a var that has its own BIR phi at the block. | In `create_elts`'s `Phi` arm, drop the `bind_ssaval`/`insert_bir_phi` (render nothing). | EMIT-32 FAILs: no ` = phi i64 [` line survives (the join loses its merge). |

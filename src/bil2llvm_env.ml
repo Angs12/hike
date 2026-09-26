@@ -186,6 +186,12 @@ type sub_scope = {
   undef_vals : llvalue_map ref;
   (* The Let-temp counter: names need only sub-scoped uniqueness. *)
   let_counter : int ref;
+  (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
+     call ret — one var, one value, valid wherever the def dominates. *)
+  ssavals : llvalue_map ref;
+  (* The BIR phi terms' own llvalues, per block: the planner's
+     per-var machinery does not touch these. *)
+  bir_phis : llvalue_map ref Tid.Map.t ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -196,7 +202,9 @@ let fresh_scope () : sub_scope =
     cur_frame = ref None;
     edges = ref [];
     undef_vals = ref WVarMap.empty;
-    let_counter = ref 0 }
+    let_counter = ref 0;
+    ssavals = ref WVarMap.empty;
+    bir_phis = ref Tid.Map.empty }
 
 let typ_lltype ctx typ =
   match typ with
@@ -371,6 +379,33 @@ let insert_local scope blk_tid var value =
 let get_local scope blk_tid var =
   let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in
   WVarMap.find_opt (wvar_of var) !(blk_vars.locals)
+
+(* The sub-wide SSA binding: one var one value (a phi lhs, a
+   versioned def, a stamped call ret, or a parameter). *)
+let bind_ssaval scope var value =
+  scope.ssavals := WVarMap.add (wvar_of var) value !(scope.ssavals)
+
+let get_ssaval scope var =
+  WVarMap.find_opt (wvar_of var) !(scope.ssavals)
+
+(* The BIR phi registry: one llvalue per (block, var). *)
+let insert_bir_phi scope blk_tid var value =
+  let for_blk =
+    match Core.Map.find !(scope.bir_phis) blk_tid with
+    | Some m -> m
+    | None -> ref WVarMap.empty
+  in
+  for_blk := WVarMap.add (wvar_of var) value !for_blk;
+  scope.bir_phis :=
+    Core.Map.set !(scope.bir_phis) ~key:blk_tid ~data:for_blk
+
+let get_bir_phi scope blk_tid var =
+  match Core.Map.find !(scope.bir_phis) blk_tid with
+  | Some m -> WVarMap.find_opt (wvar_of var) !m
+  | None -> None
+
+let has_bir_phi scope blk_tid var =
+  Base.Option.is_some (get_bir_phi scope blk_tid var)
 
 (* One frozen value per never-defined var, memoized per sub and
    placed in the entry block so it dominates every reader. *)
