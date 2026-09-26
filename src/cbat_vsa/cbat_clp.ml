@@ -260,6 +260,21 @@ module Pieces = struct
         List.filter
           (List.concat_map ps ~f:C.split_wrapped)
           ~f:(fun p -> not (C.is_bottom p)) in
+    (* A mixed-width union has no progression algebra (the word ops
+       demand equal widths): it is top at the widest — sound, and the
+       one choke point every piece constructor funnels through. *)
+    let ps =
+      match ps with
+      | [] | [ _ ] -> ps
+      | p :: rest ->
+        let w = C.bitwidth p in
+        if List.for_all rest ~f:(fun q -> Stdlib.Int.equal (C.bitwidth q) w)
+        then ps
+        else
+          [ C.top
+              (List.fold rest ~init:w
+                 ~f:(fun a q -> Stdlib.max a (C.bitwidth q))) ]
+    in
     let ps = List.sort ps ~compare:compare_piece in
     let ps = List.rev (List.fold ps ~init:[] ~f:insert) in
     let ps =
