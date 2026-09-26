@@ -248,9 +248,11 @@ let to_plain_piece (offs : P.t) : piece =
   | _ -> Clp (P.top 64)
 
 let to_plain (t : t) : t =
-  canonical (List.map t ~f:(function
-    | StackOff offs -> to_plain_piece offs
-    | q -> q))
+  if List.exists t ~f:(function StackOff _ -> true | _ -> false) then
+    canonical (List.map t ~f:(function
+      | StackOff offs -> to_plain_piece offs
+      | q -> q))
+  else t
 
 (* Plain-operand top test. *)
 let plain_is_top (t : t) : bool =
@@ -380,6 +382,9 @@ let bitwidth (t : t) : int =
 let cardinality (t : t) : word =
   match t with
   | [] -> Cbat_word.zero 1
+  | [ Clp ps ] -> P.cardinality ps
+  | [ FinSet s ] -> FinSet.cardinality s
+  | [ StackOff offs ] -> stack_cardinality offs
   | _ ->
     let width = Stdlib.max 65 (bitwidth t + 1) in
     List.fold t ~init:(Cbat_word.zero width) ~f:(fun acc q ->
@@ -535,7 +540,21 @@ let iter (t : t) : word list =
       | Clp ps -> P.elements ps
       | FinSet s -> FinSet.iter s)
 
-let equal (t1 : t) (t2 : t) : bool = compare t1 t2 = 0
+(* The fixpoint's convergence check calls this on every var of every
+   visit: the singleton arms avoid the derived compare's list machinery. *)
+let rec equal (t1 : t) (t2 : t) : bool =
+  match t1, t2 with
+  | [], [] -> true
+  | [], _ | _, [] -> false
+  | [ q1 ], [ q2 ] -> piece_equal q1 q2
+  | _ -> compare t1 t2 = 0
+
+and piece_equal (q1 : piece) (q2 : piece) : bool =
+  match q1, q2 with
+  | Clp a, Clp b -> P.equal a b
+  | FinSet a, FinSet b -> FinSet.equal a b
+  | StackOff a, StackOff b -> P.equal a b
+  | _ -> false
 
 let overlap (t1 : t) (t2 : t) : bool =
   let hull (ps : P.t) : clp =
@@ -645,9 +664,12 @@ let op_pair (op : binop) (q1 : piece) (q2 : piece) : piece list =
     [ Clp (P.top (Stdlib.max (piece_bitwidth q1) (piece_bitwidth q2))) ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
-  canonical
-    (List.concat_map (to_plain t1) ~f:(fun q1 ->
-         List.concat_map (to_plain t2) ~f:(fun q2 -> op_pair op q1 q2)))
+  match to_plain t1, to_plain t2 with
+  | [ q1 ], [ q2 ] -> canonical (op_pair op q1 q2)
+  | p1, p2 ->
+    canonical
+      (List.concat_map p1 ~f:(fun q1 ->
+           List.concat_map p2 ~f:(fun q2 -> op_pair op q1 q2)))
 
 let lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
   canonical
@@ -797,18 +819,23 @@ let rec intersection (t1 : t) (t2 : t) : t =
     intersection (to_plain t1) (to_plain t2)
   | _ ->
     (* Plain pieces meet pairwise; results merge. *)
-    canonical
-      (List.concat_map t1 ~f:(fun q1 ->
-           List.concat_map t2 ~f:(fun q2 ->
-               match q1, q2 with
-               | FinSet s1, FinSet s2 -> [ FinSet (FinSet.intersection s1 s2) ]
-               | FinSet s, Clp ps | Clp ps, FinSet s ->
-                 [ FinSet
-                     (FinSet.of_list ~width:(FinSet.bitwidth s)
-                        (List.filter (FinSet.iter s)
-                           ~f:(fun w -> P.elem w ps))) ]
-               | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
-               | StackOff _, _ | _, StackOff _ -> [])))
+    let pair q1 q2 =
+      match q1, q2 with
+      | FinSet s1, FinSet s2 -> [ FinSet (FinSet.intersection s1 s2) ]
+      | FinSet s, Clp ps | Clp ps, FinSet s ->
+        [ FinSet
+            (FinSet.of_list ~width:(FinSet.bitwidth s)
+               (List.filter (FinSet.iter s)
+                  ~f:(fun w -> P.elem w ps))) ]
+      | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
+      | StackOff _, _ | _, StackOff _ -> []
+    in
+    (match t1, t2 with
+     | [ q1 ], [ q2 ] -> canonical (pair q1 q2)
+     | _ ->
+       canonical
+         (List.concat_map t1 ~f:(fun q1 ->
+              List.concat_map t2 ~f:(fun q2 -> pair q1 q2))))
 
 (* Set difference; the piece union keeps the survivors when the cheap
    side enumerates, the sound identity otherwise. *)
@@ -817,22 +844,27 @@ let rec diff (t1 : t) (t2 : t) : t =
   | StackOff _ :: _, _ | _, StackOff _ :: _ ->
     diff (to_plain t1) (to_plain t2)
   | _ ->
-    canonical
-      (List.concat_map t1 ~f:(fun q1 ->
-           List.concat_map t2 ~f:(fun q2 ->
-               if piece_bitwidth q1 <> piece_bitwidth q2 then [ q1 ]
-               else
-                 match q1, q2 with
-                 | FinSet s1, FinSet s2 -> [ FinSet (FinSet.diff s1 s2) ]
-                 | FinSet s, Clp ps ->
-                   [ FinSet
-                       (FinSet.of_list ~width:(FinSet.bitwidth s)
-                          (List.filter (FinSet.iter s)
-                             ~f:(fun w -> not (P.elem w ps)))) ]
-                 | Clp ps, FinSet s ->
-                   [ Clp (P.diff ps (pieces_of_finset s)) ]
-                 | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
-                 | StackOff _, _ | _, StackOff _ -> [])))
+    let pair q1 q2 =
+      if piece_bitwidth q1 <> piece_bitwidth q2 then [ q1 ]
+      else
+        match q1, q2 with
+        | FinSet s1, FinSet s2 -> [ FinSet (FinSet.diff s1 s2) ]
+        | FinSet s, Clp ps ->
+          [ FinSet
+              (FinSet.of_list ~width:(FinSet.bitwidth s)
+                 (List.filter (FinSet.iter s)
+                    ~f:(fun w -> not (P.elem w ps)))) ]
+        | Clp ps, FinSet s ->
+          [ Clp (P.diff ps (pieces_of_finset s)) ]
+        | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
+        | StackOff _, _ | _, StackOff _ -> []
+    in
+    (match t1, t2 with
+     | [ q1 ], [ q2 ] -> canonical (pair q1 q2)
+     | _ ->
+       canonical
+         (List.concat_map t1 ~f:(fun q1 ->
+              List.concat_map t2 ~f:(fun q2 -> pair q1 q2))))
 
 (* Adds a base-free operand to a stack word: the offsets shift exactly;
    the shifted offsets collapse to one progression (stack arithmetic

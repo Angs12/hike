@@ -254,9 +254,12 @@ module Pieces = struct
      piece in a canonical list wraps. *)
   let rec normalize (ps : progression list) : t =
     let ps =
-      List.filter
-        (List.concat_map ps ~f:C.split_wrapped)
-        ~f:(fun p -> not (C.is_bottom p)) in
+      match ps with
+      | [ p ] when not (C.is_bottom p) && not (C.is_wrapped p) -> [ p ]
+      | _ ->
+        List.filter
+          (List.concat_map ps ~f:C.split_wrapped)
+          ~f:(fun p -> not (C.is_bottom p)) in
     let ps = List.sort ps ~compare:compare_piece in
     let ps = List.rev (List.fold ps ~init:[] ~f:insert) in
     let ps =
@@ -361,6 +364,9 @@ module Pieces = struct
 
   (* Saturating sum of the pieces' cardinalities. *)
   let cardinality (ps : t) : Cbat_word.t =
+    match ps with
+    | [ p ] -> C.cardinality p
+    | _ ->
     let width = width_of ps in
     if width = 0 then Cbat_word.zero 1
     else
@@ -374,7 +380,10 @@ module Pieces = struct
     List.exists ps ~f:(fun p -> C.elem w p)
 
   let equal (a : t) (b : t) : bool =
-    List.length a = List.length b && List.for_all2_exn a b ~f:C.equal
+    match a, b with
+    | [ x ], [ y ] -> C.equal x y
+    | _ ->
+      List.length a = List.length b && List.for_all2_exn a b ~f:C.equal
 
   let overlap (a : t) (b : t) : bool =
     List.exists a ~f:(fun pa -> List.exists b ~f:(fun pb -> overlap_exact pa pb))
