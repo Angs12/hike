@@ -113,6 +113,19 @@ let clp_of_finset fs : clp =
    promotes to its exact piece runs; a lone small plain piece union
    keeps its exact FinSet twin (the tier). *)
 let canonical (ps : piece list) : t =
+  match ps with
+  | [ Clp cps ] when not (P.is_bottom cps) ->
+    if P.is_top cps || Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size
+    then ps
+    else [ FinSet (FinSet.of_list ~width:(P.bitwidth cps) (P.elements cps)) ]
+  | [ FinSet s ] when not (piece_is_bottom (List.hd_exn ps)) ->
+    (* The tier bound is load-bearing: an over-budget FinSet promotes to
+       its exact piece runs, or the set grows unbounded. *)
+    if Cbat_word.gt_int (FinSet.cardinality s) Utils.fin_set_size
+    then [ Clp (pieces_of_finset s) ]
+    else ps
+  | [ StackOff _ ] when not (piece_is_bottom (List.hd_exn ps)) -> ps
+  | _ ->
   let alive = List.filter ps ~f:(fun q -> not (piece_is_bottom q)) in
   let sos =
     List.filter_map ps ~f:(function StackOff x -> Some x | _ -> None) in
