@@ -326,8 +326,12 @@ let meet_add : t -> key:Key.t -> data:Val.t -> t =
 (* Meet [data] into intersecting cells. *)
 let meet_range (m : t) ~key ~data : t = meet_add m ~key ~data
 
-(* Keep cells at/above [keep_lo] outside [escape]. *)
-let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
+(* Keep cells at/above [keep_lo] outside [escape].  [band_split] marks
+   the VLA band's floor: keys below it are frame-line cells the callee
+   cannot reach (the real RSP sits below the real frame), so they keep
+   regardless of [keep_lo]. *)
+let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list)
+    ~(band_split : word option) : t =
   match m.itree with
   | None -> m
   | Some it ->
@@ -335,16 +339,25 @@ let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
     let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
         Option.map2 (Key.of_word (Cbat_word.of_word lo))
           (Key.of_word (Cbat_word.of_word hi)) ~f:(fun lo hi -> (lo, hi)))) in
+    let band_pt =
+      Option.map band_split ~f:(fun w -> Key.of_word (Cbat_word.of_word w)) in
     Option.value ~default:m
       (Option.map2 (Key.of_word (Cbat_word.of_word keep_lo)) escape_pts
          ~f:(fun keep_lo_pt escape_pts ->
            let in_escape (k : Key.t) : bool =
              List.exists escape_pts ~f:(fun (lo, hi) ->
                  Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
+           let below_band k =
+             match band_pt with
+             | Some (Some b) -> Key.lt (Key.lower k) b
+             | _ -> false
+           in
            let kept =
              IT.to_sequence it
              |> Seq.fold ~init:IT.empty ~f:(fun acc (k, v) ->
-                 if Key.lt (Key.lower k) keep_lo_pt || in_escape k then acc
+                 if in_escape k then acc
+                 else if below_band k then IT.add acc k v
+                 else if Key.lt (Key.lower k) keep_lo_pt then acc
                  else IT.add acc k v) in
            {itree = Some kept; width = m.width}))
 

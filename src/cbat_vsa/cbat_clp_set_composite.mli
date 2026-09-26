@@ -47,6 +47,14 @@ val certified_bits : int
    [stack_band_lo, 2^63) — unreachable for real addresses. *)
 val stack_band_lo : int64
 
+(* The VLA band: a runtime-sized allocation relocates its SP to
+   [stack_base + vla_anchor] minus the size, so its claims live in
+   [vla_floor, vla_anchor) — disjoint from the frame line by
+   construction.  [vla_span] caps the rebased sizes. *)
+val vla_anchor : int64
+val vla_span : int64
+val vla_floor : int64
+
 val stack_word : Cbat_clp.t -> t
 val stack_word_i64 : int64 -> t
 
@@ -90,6 +98,10 @@ val equal_kind : kind -> kind -> bool
 val unbounded_span : kind
 val is_unbounded_span : int64 -> int64 -> bool
 val position_of_offset : int64 -> int64 option
+
+(* The per-progression [min, max] positions of a stack-symbolic value's
+   offsets — the disjoint runs the attribution clips per run. *)
+val offset_runs : t -> (int64 * int64) list
 val caller_split : kind -> kind
 val classify : t -> kind
 

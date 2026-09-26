@@ -93,6 +93,9 @@ exception Fixpoint_not_converged of int * (tid, AI.t) Solution.t
 (* Set the address width in bits. *)
 val set_addr_bits : int -> unit
 
+(* Set the SP var the VLA rebase anchors on. *)
+val set_sp_var : var -> unit
+
 (* An image-backed section: the span's inclusive bounds plus the
    section's static content. *)
 type section_image = Cbat_transfer.section_image = {
@@ -110,6 +113,10 @@ val init_sol : abi:Hike_abi.t -> ?entry:AI.t -> sub term -> vsa_sol
 
 (* The sub's entry block: the CFG's [Start] pseudo-node points to it. *)
 val entry_block_of : sub term -> blk term option
+
+(* The round-down idiom normalization: the two-def [(x >> k) << k]
+   pair becomes the mask AND + identity copy. *)
+val normalize_round : Sub.t -> Sub.t
 
 val static_graph_vsa :
   abi:Hike_abi.t ->
@@ -207,6 +214,7 @@ module Test_seam : sig
   (* The per-run context: the library builder with production's own
      defaults — the non-negativity oracle, the run's sub-address lookup,
      and one landmark table. *)
+  val normalize_round : Sub.t -> Sub.t
   val mk_rctx :
     cfg:Graphs.Tid.t -> abi:Hike_abi.t ->
     ?sub_lookup:(int64 -> Tid.t option) -> sub term -> refine_ctx

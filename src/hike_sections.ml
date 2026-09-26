@@ -226,8 +226,18 @@ type ctx = {
    stack basis and no rip proof (the heap). *)
 type top_cause = Query_failed | Unbounded_stack | Foreign
 
+(* The VLA band's absolute positions: [base + vla_floor, base + vla_anchor)
+   — disjoint from the frame line by construction. *)
+let vla_band_positions () : int64 * int64 =
+  let base = Model.Vsa.segment_base in
+  ( Stdlib.Int64.add base Vsa.WordSet.vla_floor,
+    Stdlib.Int64.pred (Stdlib.Int64.add base Vsa.WordSet.vla_anchor) )
+
 (* Portions of the occupied interval [lo,hi]; the tag carries the
-   ADDRESS bounds [alo,ahi]. *)
+   ADDRESS bounds [alo,ahi].  The sub-local line's spaces are the
+   frame [floor, s_top], the args [a_base, args_hi], and the VLA band;
+   an args claim crossing the band floor claims the whole args space
+   (the merge with the band is the sound over-approximation). *)
 let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
     ~(alo : int64) ~(ahi : int64) (lo : int64) (hi : int64)
     : sec_tag option * portion list =
@@ -235,18 +245,31 @@ let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
   let cei = Model.args_ceiling in
   let a_base = Model.args_base ~entry ~word in
   let s_top = Model.stack_top ~entry ~word in
+  let vla_lo, vla_hi = vla_band_positions () in
   let tag l h =
-    if Stdlib.Int64.compare l a_base >= 0 then Tag.Args (l, h)
+    if Stdlib.Int64.compare l vla_lo >= 0 then Tag.Vla (l, h)
+    else if Stdlib.Int64.compare l a_base >= 0 then Tag.Args (l, h)
     else Tag.Stack (l, h)
   in
-  let portion s part =
+  let portion s part elig =
     Base.Option.map part ~f:(fun (plo, phi) ->
         { pt_sec = s; pt_lo = plo; pt_hi = phi; pt_elig = elig })
   in
+  let args_hi =
+    if Stdlib.Int64.compare hi vla_lo >= 0 then cei
+    else Stdlib.Int64.pred vla_lo
+  in
   let parts =
     Base.List.filter_map
-      [ portion Stack (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top);
-        portion Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base cei) ]
+      [ portion Stack
+          (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top)
+          elig;
+        portion Args
+          (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base args_hi)
+          elig;
+        portion Vla
+          (Model.clip ~cmp:Stdlib.Int64.compare lo hi vla_lo vla_hi)
+          false ]
       ~f:(fun x -> x)
   in
   ( (if Option.is_some (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
@@ -255,7 +278,8 @@ let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
     parts )
 
 (* The full-span claim for a TOP address: a stack-symbolic top claims
-   below-entry only, clamped by [stack_max] — imprecision never
+   below-entry only, clamped by [stack_max], plus the VLA band — a top
+   derived from a band value stays in the band; imprecision never
    reaches the Args slots; any other top claims the sub-local spaces'
    full range — the identity member forcing write closure with the
    carved cells. *)
@@ -264,44 +288,78 @@ let top_claim ~(cause : top_cause) ~(entry : int64) ~(word : int)
   match cause with
   | Unbounded_stack ->
     let lo = Stdlib.Int64.sub entry Hike_stack_model.stack_max in
+    let vla_lo, vla_hi = vla_band_positions () in
     ( Some Tag.Stack_unbounded,
       [ { pt_sec = Stack;
           pt_lo = lo;
           pt_hi = Stdlib.Int64.pred entry;
-          pt_elig = false } ] )
+          pt_elig = false };
+        { pt_sec = Vla; pt_lo = vla_lo; pt_hi = vla_hi; pt_elig = false } ] )
   | Query_failed | Foreign ->
     (None,
      snd (sub_portions ~entry ~word ~elig:false
             ~alo:(Model.stack_floor ~entry) ~ahi:Model.args_ceiling
             (Model.stack_floor ~entry) Model.args_ceiling))
 
-(* Case 1: the address carries stack offsets.  Bounded positions
-   carve; an unbounded direction takes the full supported bounds of
-   the side it reaches — identity, never carved. *)
+(* Case 1: the address carries stack offsets.  Bounded positions carve;
+   an unbounded direction takes the full supported bounds of the side
+   it reaches — a band claim stops at the band's own bounds.  The
+   bounded case clips PER RUN: a disjoint-run address (the va_arg
+   reg-save/overflow join) keeps both bands instead of hulling across
+   the entry line. *)
 let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   let cei = Model.args_ceiling in
   let a_base = Model.args_base ~entry ~word in
   let sub_portions = sub_portions ~entry ~word in
+  let vla_lo, vla_hi = vla_band_positions () in
+  let band_full lo hi =
+    if Stdlib.Int64.compare lo hi > 0 then (vla_lo, vla_hi)
+    else if Vsa.WordSet.is_ascending ws then (lo, vla_hi)
+    else if Vsa.WordSet.is_descending ws then (vla_lo, hi)
+    else (vla_lo, vla_hi)
+  in
   match Model.positions_of_offsets ws with
   | None -> top_claim ~cause:Unbounded_stack ~entry ~word
-  | Some (lo, hi) ->
-    let occ_hi = Model.expand_hi ~cap:cei hi width in
-    if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
-      let nlo, nhi = Model.full_bounds ws ~flo:(Model.stack_floor ~entry) ~cei lo hi in
-      let t =
-        if Stdlib.Int64.compare nlo a_base >= 0 then Tag.Args_unbounded
-        else Tag.Stack (nlo, nhi)
-      in
-      (Some t, snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
-    else
-      (* Conversion is proven only when the occupied bytes stay
-         in one space. *)
-      let single =
-        Stdlib.Int64.compare occ_hi a_base < 0
-        || Stdlib.Int64.compare lo a_base >= 0
-      in
-      sub_portions ~elig:single ~alo:lo ~ahi:hi lo occ_hi
+  | Some (lo, hi) -> (
+      let occ_hi = Model.expand_hi ~cap:cei hi width in
+      if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
+        let nlo, nhi =
+          if Stdlib.Int64.compare lo vla_lo >= 0 then band_full lo hi
+          else
+            Model.full_bounds ws ~flo:(Model.stack_floor ~entry) ~cei lo hi
+        in
+        let t =
+          if Stdlib.Int64.compare nlo vla_lo >= 0 then Tag.Vla (nlo, nhi)
+          else if Stdlib.Int64.compare nlo a_base >= 0 then Tag.Args_unbounded
+          else Tag.Stack (nlo, nhi)
+        in
+        (Some t, snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
+      else
+        let runs = Vsa.WordSet.offset_runs ws in
+        let single =
+          Stdlib.Int64.compare occ_hi a_base < 0
+          || (Stdlib.Int64.compare lo a_base >= 0
+             && Stdlib.Int64.compare occ_hi vla_lo < 0)
+        in
+        (match runs with
+         | [ (rlo, rhi) ] ->
+           let occ = Model.expand_hi ~cap:cei rhi width in
+           sub_portions ~elig:single ~alo:lo ~ahi:hi rlo occ
+         | [] -> sub_portions ~elig:single ~alo:lo ~ahi:hi lo occ_hi
+         | _ ->
+           let parts =
+             Base.List.concat_map runs ~f:(fun (rlo, rhi) ->
+                 let occ = Model.expand_hi ~cap:cei rhi width in
+                 snd (sub_portions ~elig:false ~alo:lo ~ahi:hi rlo occ))
+           in
+           let t =
+             if Stdlib.Int64.compare lo vla_lo >= 0 then Tag.Vla (lo, occ_hi)
+             else if Stdlib.Int64.compare lo a_base >= 0 then
+               Tag.Args (lo, occ_hi)
+             else Tag.Stack (lo, occ_hi)
+           in
+           (Some t, parts)))
 
 (* Case 2: a plain (offset-free) address.  A stack-band hull keeps
    the memory form; an unbounded ascending set's minimum names its
@@ -481,7 +539,9 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
     sub_portions ~entry:env.entry ~word:env.word ~elig:false
       ~alo:lo ~ahi:hi lo hi
   in
-  Base.List.map parts ~f:(fun p ->
+  Base.List.map
+    (Base.List.filter parts ~f:(fun p -> not (equal_sec p.pt_sec Vla)))
+    ~f:(fun p ->
       { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
         m_def = None; m_width = 0; m_store = false; m_identity = true })
 
@@ -595,13 +655,17 @@ let collect (env : env) (prog : program term) : collecting =
                 projections = Core.Map.set acc.projections ~key:dtid ~data:projected }
             in
             Base.List.fold portions ~init:acc ~f:(fun acc p ->
-                let m =
-                  member_of ~sub:acc.sub ~def:(Some dtid) ~width ~store
-                    ~word:env.word ~spans:env.spans p
-                in
-                if is_sub_local p.pt_sec then
-                  { acc with tree = insert acc.tree m }
-                else { acc with data = insert acc.data m })
+                (* A VLA-band portion binds nowhere: its real storage is
+                   the dynamic alloca the pointer chain already names. *)
+                if equal_sec p.pt_sec Vla then acc
+                else
+                  let m =
+                    member_of ~sub:acc.sub ~def:(Some dtid) ~width ~store
+                      ~word:env.word ~spans:env.spans p
+                  in
+                  if is_sub_local p.pt_sec then
+                    { acc with tree = insert acc.tree m }
+                  else { acc with data = insert acc.data m })
             |> fun acc ->
             (* A stored stack-symbolic value escapes into memory: its
                reloaded copies deref through the raw lane. *)
@@ -681,6 +745,11 @@ let finalize_tree ~(word : int) ~(entry : int64)
   let span_ids = ref [] in
   let decide (k : range) (ms : member list) : range_storage =
     let any_identity = Base.List.exists ms ~f:(fun m -> m.m_identity) in
+#ifdef VSA_DEBUG
+    let bump name = Cbat_vsa.Cbat_attr_census.bump name in
+#else
+    let bump name = () in
+#endif
     match k.lo.p_sec with
     | Stack ->
         let overlaps_ret =
@@ -688,9 +757,14 @@ let finalize_tree ~(word : int) ~(entry : int64)
           && Stdlib.Int64.compare k.lo.p_pos ret_hi <= 0
         in
         let bytes = region_bytes k in
+        if overlaps_ret then bump "region.stack.retaddr";
+        if any_identity then bump "region.stack.identity";
+        if Stdlib.Int64.compare bytes region_max_bytes > 0 then
+          bump "region.stack.oversize";
         if overlaps_ret || any_identity || Stdlib.Int64.compare bytes region_max_bytes > 0
         then { storage = Stack_residue; members = ms }
         else (
+          bump "region.stack.carved";
           incr next_region_id;
           { storage = Stack_region !next_region_id; members = ms })
     | Args -> (
@@ -708,12 +782,15 @@ let finalize_tree ~(word : int) ~(entry : int64)
           && Base.List.for_all ms ~f:(fun m ->
                  (not m.m_store) && 0 < m.m_width && m.m_width <= word)
         then
+          let () = bump "region.args.slot" in
           { storage =
               Arg_slot
                 (Model.slot_index_of_offset ~word
                    (Stdlib.Int64.sub k.lo.p_pos entry));
             members = ms }
-        else { storage = Stack_residue; members = ms })
+        else (
+          bump "region.args.residue";
+          { storage = Stack_residue; members = ms }))
     | sec ->
         if in_whole_span whole sec k.lo.p_pos then
       let id =

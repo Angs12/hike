@@ -133,6 +133,7 @@ module Stack_model : sig
   type sec = Hike_stack_model.sec =
     | Stack
     | Args
+    | Vla
     | Text
     | Rodata
     | Data

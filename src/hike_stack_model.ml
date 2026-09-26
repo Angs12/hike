@@ -3,13 +3,14 @@
 module Vocab = struct
   open! Core
 
-  type sec = Stack | Args | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
+  type sec = Stack | Args | Vla | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
   [@@deriving equal, compare, sexp]
 
   (* The section's ELF name — the one spelling of the name grammar. *)
   let sec_name = function
     | Stack -> "stack"
     | Args -> "args"
+    | Vla -> "vla"
     | Data -> "data"
     | Rodata -> "rodata"
     | Bss -> "bss"
@@ -22,13 +23,14 @@ module Vocab = struct
      justified unbounded form, or Dead.  Absence is the identity.  In [Tag]
      so the [sec] constructors stay unshadowed. *)
   module Tag = struct
-    type t =
-      | Stack of int64 * int64
-      | Stack_unbounded
-      | Args of int64 * int64
-      | Args_unbounded
-      | Dead
-    [@@deriving equal, compare, sexp]
+  type t =
+    | Stack of int64 * int64
+    | Stack_unbounded
+    | Args of int64 * int64
+    | Args_unbounded
+    | Vla of int64 * int64
+    | Dead
+  [@@deriving equal, compare, sexp]
   end
 
   type sec_tag = Tag.t

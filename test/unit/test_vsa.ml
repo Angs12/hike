@@ -597,6 +597,65 @@ let tests : unit Alcotest.test list =
            && has (Term.tid main) rbx
            && has (Term.tid main) rax
            && not (has ftid rax)));
+
+    pin "VSA-66"
+      "round-pair: the two-def [(x >> k) << k] idiom rewrites to the mask AND + identity copy"
+      (fun () ->
+        let rax = v64 "at_rr_rax" in
+        let d_shr =
+          Def.create rax
+            (Bil.BinOp (Bil.RSHIFT, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 2))))
+        in
+        let d_shl =
+          Def.create rax
+            (Bil.BinOp (Bil.LSHIFT, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 2))))
+        in
+        let sub = straight_sub "at_round" [ d_shr; d_shl ] in
+        let sub' = Vsa.Test_seam.normalize_round sub in
+        let rhs_of tid =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find_map ~f:(fun d ->
+                 if Tid.equal (Term.tid d) tid then Some (Def.rhs d) else None)
+        in
+        let mask = Word.of_int64 ~width:64 (-4L) in
+        check "VSA-66"
+          (match rhs_of (Term.tid d_shr), rhs_of (Term.tid d_shl) with
+           | Some (Bil.BinOp (Bil.AND, Bil.Var _, Bil.Int m)), Some (Bil.Var _) ->
+             Word.equal m mask
+           | _ -> false));
+
+    pin "VSA-67"
+      "round-pair: the producer's returned sub keeps the mask form through the solve"
+      (fun () ->
+        let rax = v64 "at_rr2_rax" in
+        let d_shr =
+          Def.create rax
+            (Bil.BinOp (Bil.RSHIFT, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 2))))
+        in
+        let d_shl =
+          Def.create rax
+            (Bil.BinOp (Bil.LSHIFT, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 2))))
+        in
+        let sub = straight_sub "at_round2" [ d_shr; d_shl ] in
+        let _, sub', _ =
+          Hv.fixpoint Theory.Target.unknown
+            ~lookup:(fun _ -> None) ~images:[]
+            ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
+                        (Program.create ~subs:[ sub ] ()))
+            ~lift_at:(fun _ ~block_addrs:_ -> None)
+            ~block_addrs:(Core.Map.empty (module Addr)) sub
+        in
+        let rhs_of tid =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find_map ~f:(fun d ->
+                 if Tid.equal (Term.tid d) tid then Some (Def.rhs d) else None)
+        in
+        let mask = Word.of_int64 ~width:64 (-4L) in
+        check "VSA-67"
+          (match rhs_of (Term.tid d_shr), rhs_of (Term.tid d_shl) with
+           | Some (Bil.BinOp (Bil.AND, Bil.Var _, Bil.Int m)), Some (Bil.Var _) ->
+             Word.equal m mask
+           | _ -> false));
   ]
 
 let () = run "vsa" tests

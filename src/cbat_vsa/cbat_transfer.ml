@@ -15,6 +15,11 @@ module Word_ops = Cbat_word
 let addr_bits_ref = ref 0
 let set_addr_bits (n : int) : unit = addr_bits_ref := n
 
+(* The SP var the VLA rebase anchors on; set at the solve entry next
+   to the address bits. *)
+let sp_var_ref : var option ref = ref None
+let set_sp_var (v : var) : unit = sp_var_ref := Some v
+
 let mem_idx addr_sz addressable_sz : Mem.idx =
   { Mem.addr_width =
       (if !addr_bits_ref > 0 then !addr_bits_ref else Size.in_bits addr_sz);
@@ -398,6 +403,54 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
+(* The VLA rebase: a def that assigns SP the runtime decrement
+   [SP - x] relocates the result onto the VLA band — [anchor - size] —
+   so the allocation's claims stay disjoint from the frame line
+   whatever the size.  Fires on the direct form (lhs = SP) only, for a
+   bounded non-singleton strictly-positive size, and only when the
+   SP-before is still frame-form (a band-form SP is already coherent;
+   the plain arithmetic keeps it). *)
+let vla_rebase (lhs : var) (e : exp) (env : AI.t) (p : wordset) : wordset =
+  match (!sp_var_ref, e) with
+  | Some sp, Bil.BinOp (Bil.MINUS, Bil.Var a, x)
+    when Var.equal (Var.base lhs) (Var.base sp)
+         && Var.equal (Var.base a) (Var.base sp) -> (
+      let literal = match x with Bil.Int _ -> true | _ -> false in
+      if literal then p
+      else
+        match (denote_imm_exp x env, denote_imm_exp (Bil.Var a) env) with
+        | Ok size_ws, Ok before_ws -> (
+            let size_range =
+              match WordSet.min_elem size_ws, WordSet.max_elem size_ws with
+              | Some lo, Some hi -> (
+                  match (Cbat_word.to_int64 lo, Cbat_word.to_int64 hi) with
+                  | Ok lo, Ok hi
+                    when Stdlib.Int64.compare lo 1L >= 0
+                         && Stdlib.Int64.compare hi WordSet.vla_span < 0 ->
+                    Some (lo, hi)
+                  | _ -> None)
+              | _ -> None
+            in
+            let frame_form =
+              match WordSet.stack_offsets before_ws with
+              | Some offs -> (
+                  match WordSet.Clp.max_elem offs with
+                  | Some hi -> (
+                      match Cbat_word.to_int64 hi with
+                      | Ok hi -> Stdlib.Int64.compare hi WordSet.vla_floor < 0
+                      | Error _ -> false)
+                  | None -> false)
+              | None -> false
+            in
+            let not_top =
+              not (WordSet.is_top size_ws) && not (WordSet.is_infinite size_ws)
+            in
+            if Option.is_some size_range && frame_form && not_top then
+              WordSet.sub (WordSet.stack_word_i64 WordSet.vla_anchor) size_ws
+            else p)
+        | _ -> p)
+  | _ -> p
+
 (* Every def is denoted: SP-derived addresses arrive as [StackOff]
    words and memory ops key cells by their segment offsets.  A def the
    denotation cannot type adds nothing: its readers take the top
@@ -410,6 +463,16 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
      denote_exp e env >>| fun ev ->
      (match ev with
       | `Word p ->
+        (* A partial-register write (EAX into RAX) zero-fills the base
+           register's remaining bytes — the machine's narrow write.
+           Wider-than-declared values keep their width. *)
+        let p =
+          match Var.typ (Var.base v) with
+          | Type.Imm n when n > WordSet.bitwidth p ->
+            WordSet.cast Bil.UNSIGNED n p
+          | _ -> p
+        in
+        let p = vla_rebase v e env p in
 #ifdef VSA_DEBUG
         (* A def's value is stored at its lhs's declared width; a divergent
            store is the source of downstream mismatches. *)

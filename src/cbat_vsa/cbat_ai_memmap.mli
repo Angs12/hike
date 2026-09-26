@@ -87,8 +87,14 @@ val meet_range : t -> key:Key.t -> data:Val.t -> t
    tree's value at the same key; join otherwise. *)
 val widen_join_op : (Key.t -> Val.t -> Val.t -> Val.t) -> t -> t -> t
 
-(* Keep cells at key >= [keep_lo] outside [escape]. *)
-val call_keep : t -> keep_lo:Bap.Std.word -> escape:(Bap.Std.word * Bap.Std.word) list -> t
+(* Keep cells at key >= [keep_lo] outside [escape]; keys below
+   [band_split] (the VLA band's floor) keep unconditionally — frame-line
+   cells a callee cannot reach. *)
+val call_keep :
+  t ->
+  keep_lo:Bap.Std.word ->
+  escape:(Bap.Std.word * Bap.Std.word) list ->
+  band_split:Bap.Std.word option -> t
 
 (* Whether the map is the bottom map (no tree, no reads). *)
 val is_bottom : t -> bool

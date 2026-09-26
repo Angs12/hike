@@ -81,8 +81,8 @@
   (pps ppx_bap)))
 
 (executables
- (names vsa_debug)
- (modules vsa_debug)
+ (names vsa_debug bir_dump region_dump)
+ (modules vsa_debug bir_dump region_dump)
  (enabled_if
   (= %{profile} vsa-debug))
  (libraries

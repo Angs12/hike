@@ -129,6 +129,7 @@ let conversion_of ~(word : int) ~(entry : int64)
              the residue alloca, exactly like a bounded one. *)
           match tag with
           | Some Sections.Tag.Args_unbounded -> (Keep, tag)
+          | Some Sections.Tag.Vla _ -> (Keep, tag)
           | _ ->
           (* A return-address cell keeps its tag — the emitter's
              return arm. *)
@@ -376,17 +377,23 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
               match denote ~blk ~def:d (Def.rhs d) with
               | Error _ -> acc
               | Ok ws -> (
-                  match Vsa.WordSet.stack_offsets ws with
-                  | None -> acc
-                  | Some _ -> (
-                      let a_base = Model.args_base ~entry ~word in
-                      match Model.positions_of_offsets ws with
-                      | Some (lo, hi)
-                        when Stdlib.Int64.compare lo a_base >= 0
-                             && Stdlib.Int64.compare hi a_base >= 0
-                             && Stdlib.Int64.compare lo hi <= 0 ->
-                        Core.Set.add acc (Term.tid d)
-                      | _ -> acc))))
+              match Vsa.WordSet.stack_offsets ws with
+              | None -> acc
+              | Some _ -> (
+                  let a_base = Model.args_base ~entry ~word in
+                  let vla_lo =
+                    Stdlib.Int64.add Model.Vsa.segment_base
+                      Vsa.WordSet.vla_floor in
+                  match Model.positions_of_offsets ws with
+                  (* Below the VLA band's floor: a band address is this
+                     sub's dynamic alloca, never the caller's window. *)
+                  | Some (lo, hi)
+                    when Stdlib.Int64.compare lo a_base >= 0
+                         && Stdlib.Int64.compare hi a_base >= 0
+                         && Stdlib.Int64.compare hi vla_lo < 0
+                         && Stdlib.Int64.compare lo hi <= 0 ->
+                    Core.Set.add acc (Term.tid d)
+                  | _ -> acc))))
   in
   let sub = Hike_def_slots.stamp_window_values ~window_values sub in
   let sub =

@@ -47,7 +47,7 @@ let ceilings : (string * int) list =
     ("composite.logand(fin,fin)", 2902);
     ("composite.logand(clp,fin)", 3634);
     ("composite.logand(stack,nib)", 254);
-    ("composite.logand(stack,mask)", 62);
+    ("composite.logand(stack,mask)", 224);
     ("composite.logand(stack,stack)", 32);
     ("composite.logor(clp,clp)", 2668);
     ("composite.logor(fin,fin)", 86);

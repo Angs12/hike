@@ -201,6 +201,10 @@ let fixpoint (target : Theory.Target.t)
       Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
         ~fresh sub'
     in
+    (* The round-down normalization rides the returned sub: the
+       attribution re-denotes from these rhs's, and the solve's
+       materialization may reintroduce the shift pair. *)
+    let sub'' = Vsa.normalize_round sub'' in
     let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
     (envs, stamped, block_addrs')
   | None ->

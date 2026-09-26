@@ -70,6 +70,7 @@ let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
   let msb = entry_block_of sub in
   let entry_state = Option.value ~default:(default_entry ()) entry in
+  Cbat_transfer.set_sp_var abi.Hike_abi.sp;
   (* The default entry seeds the SP with the SYMBOLIC SEGMENT BASE:
      every SP-derived address denotes [StackOff]; explicit fixture
      entries keep their own words. *)
@@ -236,12 +237,68 @@ let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
         | _ -> need)
   end
 
+(* The round-down idiom [(x >> k) << k] with a literal k is the mask
+   [x & ~(2^k - 1)]; the mask form computes exactly on a stack-symbolic
+   operand, while the shifts alone read the base's unknown bits and
+   answer top.  At -O0 the idiom spans two defs ([v := x >> k] then
+   [v := v << k]) — the pair rewrites to the mask on the first def and
+   the identity copy on the second. *)
+let normalize_round (s : Sub.t) : Sub.t =
+  let mask_of (k : word) (w : int) : word option =
+    let kk = Word.to_int64_exn k in
+    if w > 0 && w <= 64 && Stdlib.Int64.compare kk 0L > 0
+       && Stdlib.Int64.compare kk (Int64.of_int w) < 0
+    then
+      Some
+        (Word.of_int64 ~width:w
+           (Stdlib.Int64.neg (Stdlib.Int64.shift_left 1L (Option.value_exn (Int64.to_int kk)))))
+    else None
+  in
+  let pairs =
+    Term.enum blk_t s
+    |> Seq.concat_map ~f:(fun blk ->
+        let rec walk = function
+          | d1 :: d2 :: rest -> (
+              match (Def.rhs d1, Def.rhs d2) with
+              | ( Bil.BinOp (Bil.RSHIFT, x, Bil.Int k),
+                  Bil.BinOp (Bil.LSHIFT, Bil.Var v, Bil.Int j) )
+                when Var.equal v (Def.lhs d1)
+                     && Var.equal (Def.lhs d2) (Def.lhs d1)
+                     && Word.equal k j -> (
+                  let w =
+                    match x with
+                    | Bil.Var v -> (
+                        match Var.typ v with Type.Imm n -> n | _ -> 64)
+                    | _ -> 64
+                  in
+                  match mask_of k w with
+                  | Some mask ->
+                    (Term.tid d1, Bil.BinOp (Bil.AND, x, Bil.Int mask))
+                    :: (Term.tid d2, Bil.Var (Def.lhs d1))
+                    :: walk rest
+                  | None -> walk rest)
+              | _ -> walk rest)
+          | _ -> []
+        in
+        walk (Term.enum def_t blk |> Seq.to_list) |> Seq.of_list)
+    |> Seq.fold ~init:Tid.Map.empty
+         ~f:(fun m (t, r) -> Map.set m ~key:t ~data:r)
+  in
+  if Map.is_empty pairs then s
+  else
+    Term.map blk_t s ~f:(fun blk ->
+        Term.map def_t blk ~f:(fun d ->
+            match Map.find pairs (Term.tid d) with
+            | Some r -> Def.with_rhs d r
+            | None -> d))
+
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)
     ?(written : Int.Set.t option Tid.Map.t = Tid.Map.empty)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
+  let s = normalize_round s in
   let preserved = preserved_of_sub ~abi s in
   let edge_conds = edge_conds_of s in
   let disabled_conds = disabled_conds_of ~edge_conds s in
@@ -481,6 +538,7 @@ type refine_ctx = Cbat_runctx.refine_ctx
 
 (* Re-exports of the sibling transfer/forward/backward modules. *)
 let set_addr_bits = Cbat_transfer.set_addr_bits
+let set_sp_var = Cbat_transfer.set_sp_var
 
 type section_image = Cbat_transfer.section_image = {
   img_lo : int64;
@@ -530,6 +588,7 @@ module Test_seam = struct
   let constrain_edge = Cbat_backward.constrain_edge
   let constrain_operands = Cbat_backward.constrain_operands
   let mk_rctx = mk_rctx_with_oracle
+  let normalize_round = normalize_round
   (* The context's landmark table and the widening-head bracket: a refine
      run through the seam uses the context's own table. *)
   let landmarks_of (rctx : refine_ctx) = rctx.Cbat_runctx.rc_landmarks

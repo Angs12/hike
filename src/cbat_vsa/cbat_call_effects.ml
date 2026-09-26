@@ -58,8 +58,23 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
 #ifdef VSA_DEBUG
     Cbat_attr_census.bump "call.frame.kept";
 #endif
+    (* A band-form SP (a live VLA) splits the keep: frame-line cells
+       keep unconditionally — the real RSP sits below the real frame —
+       and the band cells keep from the SP's own extent. *)
+    let band_split =
+      match WordSet.stack_offsets rsp with
+      | Some offs -> (
+          match WordSet.Clp.min_elem offs with
+          | Some mlo -> (
+              match Cbat_word.to_int64 mlo with
+              | Ok mlo when Stdlib.Int64.compare mlo WordSet.vla_floor >= 0 ->
+                Some (Word.of_int64 ~width:64 WordSet.vla_floor)
+              | _ -> None)
+          | None -> None)
+      | None -> None
+    in
     AI.map_memories env ~f:(fun ~key:_ ~data ->
-        Mem.call_keep data ~keep_lo:lo ~escape:ranges)
+        Mem.call_keep data ~keep_lo:lo ~escape:ranges ~band_split)
   | _ ->
 #ifdef VSA_DEBUG
     (match keep_lo, escape_ranges with

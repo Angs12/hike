@@ -48,6 +48,15 @@ let stack_base =
    stack claim covers at most [stack_span] bytes. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
+(* The VLA band: a runtime-sized allocation relocates its SP to
+   [stack_base + vla_anchor] minus the allocation size, so its claims
+   live in [vla_floor, vla_anchor) — disjoint from the frame line by
+   construction, whatever the size.  [vla_span] caps the rebased
+   sizes; a size without an upper bound keeps the unrebased claim. *)
+let vla_anchor = Stdlib.Int64.shift_left 1L 21
+let vla_span = Stdlib.Int64.shift_left 1L 20
+let vla_floor = Stdlib.Int64.sub vla_anchor vla_span
+
 let w64_of_i64 (i : int64) : Cbat_word.t =
   Cbat_word.of_word (Word.of_int64 ~width:64 i)
 
@@ -1027,20 +1036,89 @@ let div t1 t2 = blind_binop Div t1 t2
 let sdiv t1 t2 = blind_binop Sdiv t1 t2
 let modulo t1 t2 = blind_binop Modulo t1 t2
 let smodulo t1 t2 = blind_binop Smodulo t1 t2
-let arshift t1 t2 = blind_binop Arshift t1 t2
-let rshift t1 t2 = blind_binop Rshift t1 t2
-let lshift t1 t2 = blind_binop Lshift t1 t2
-(* A mask confined to the certified nibble computes; a wider mask
-   keeps unknown bits and answers top. *)
+
+(* The round-down mask class: [k = ~m] with [m = 2^s - 1] (all-ones is
+   s = 64, the identity).  The shift the mask implies, if [k] is one. *)
+let round_down_shift (k : word) : int option =
+  if Cbat_word.equal k (Cbat_word.ones 64) then Some 64
+  else
+    let m = Cbat_word.sub (Cbat_word.ones 64) k in
+    let m1 = Cbat_word.add m (Cbat_word.one 64) in
+    if Cbat_word.is_zero m1 then None
+    else if Cbat_word.is_zero (Cbat_word.logand m m1) then
+      let rec count v acc =
+        if Cbat_word.is_zero v then Some acc
+        else count (Cbat_word.rshift v (Cbat_word.one 64)) (acc + 1)
+      in
+      count m 0
+    else None
+
+(* The image of the offsets under a round-down mask: per progression,
+   [o |-> o - ((stack_base_lo + o) mod 2^s)] — the base's low bits are
+   concrete, so the result stays a base+offset value; the touched
+   blocks form the step-2^s progression [block(min), block(max)] (the
+   exact image of a contiguous run, an over-approximation of a sparse
+   one).  None when an extremum is not an int64. *)
+let round_down_image (s : int) (offs : P.t) : P.t option =
+  let m64 =
+    if s >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s)
+  in
+  let b_lo = Stdlib.Int64.logand stack_base m64 in
+  let block (o : word) : word option =
+    match Cbat_word.to_int64 o with
+    | Error _ -> None
+    | Ok v ->
+      let r = Stdlib.Int64.logand (Stdlib.Int64.add b_lo v) m64 in
+      Some (Cbat_word.of_int64 ~width:64 (Stdlib.Int64.sub v r))
+  in
+  let step =
+    if s >= 64 then Cbat_word.zero 64
+    else Cbat_word.of_int64 ~width:64 (Stdlib.Int64.shift_left 1L s)
+  in
+  let imgs =
+    List.filter_map (P.to_list offs) ~f:(fun g ->
+        match Clp.min_elem g, Clp.max_elem g with
+        | Some a, Some b -> (
+            match block a, block b with
+            | Some a', Some b' ->
+              let span65 = Cbat_word.cast Bil.UNSIGNED 65 (Cbat_word.sub b a) in
+              let cnt =
+                Cbat_word.add
+                  (Cbat_word.rshift span65 (Cbat_word.of_int ~width:65 s))
+                  (Cbat_word.one 65)
+              in
+              Some (Clp.create a' ~step ~cardn:cnt)
+            | _ -> None)
+        | _ -> None)
+  in
+  let rec union_all = function
+    | [] -> P.bottom 64
+    | [ g ] -> P.of_progression g
+    | g :: rest -> P.union (P.of_progression g) (union_all rest)
+  in
+  if List.length imgs = List.length (P.to_list offs) then Some (union_all imgs)
+  else None
+
+(* A mask confined to the certified nibble computes; a round-down mask
+   keeps the base and computes on the offsets; a wider mask keeps
+   unknown bits and answers top. *)
 let logand t1 t2 : t =
   match t1, t2 with
   | StackOff offs, (Clp _ | FinSet _ as plain)
-  | (Clp _ | FinSet _ as plain), StackOff offs ->
-    (match singleton_of plain with
-     | Some k when Cbat_word.leq_int k ((1 lsl certified_bits) - 1) ->
-       let k64 = Cbat_word.cast Bil.UNSIGNED 64 k in
-       certified_image ~width:64 (fun v -> Cbat_word.logand v k64) offs
-     | _ -> top 64)
+  | (Clp _ | FinSet _ as plain), StackOff offs -> (
+      match singleton_of plain with
+      | Some k -> (
+          match round_down_shift k with
+          | Some s -> (
+              match round_down_image s offs with
+              | Some offs' -> canonical [ StackOff offs' ]
+              | None -> top 64)
+          | None ->
+            if Cbat_word.leq_int k ((1 lsl certified_bits) - 1) then
+              let k64 = Cbat_word.cast Bil.UNSIGNED 64 k in
+              certified_image ~width:64 (fun v -> Cbat_word.logand v k64) offs
+            else top 64)
+      | None -> top 64)
   | StackOff _, _ | _, StackOff _ ->
     top (Stdlib.max (bitwidth t1) (bitwidth t2))
   | _ -> lift_binop Logand t1 t2
@@ -1181,6 +1259,20 @@ let cast c sz t =
     | StackOff _ -> top sz
     | _ -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
 
+(* The shift count's width is incidental: a narrower count zero-extends
+   to the shifted operand's width (the machine masks the count; the
+   lift's count value is already masked). *)
+let shift op t1 t2 =
+  if bitwidth t2 < bitwidth t1 then
+    match t2 with
+    | StackOff _ | Many _ -> blind_binop op t1 t2
+    | _ -> lift_binop op t1 (cast Bil.UNSIGNED (bitwidth t1) t2)
+  else blind_binop op t1 t2
+
+let arshift t1 t2 = shift Arshift t1 t2
+let rshift t1 t2 = shift Rshift t1 t2
+let lshift t1 t2 = shift Lshift t1 t2
+
 let rec get_idx (t : t) : idx =
   match t with
   | StackOff _ -> 64
@@ -1237,8 +1329,25 @@ let is_unbounded_span (lo : int64) (hi : int64) : bool =
   Int64.equal lo Stdlib.Int64.min_int && Int64.equal hi Stdlib.Int64.max_int
 
 (* Overflow-checked absolute position of one frame offset. *)
-let position_of_offset (o : int64) : int64 option =
-  checked_add3 stack_base 0L o
+let position_of_offset (o : int64) : int64 option =  checked_add3 stack_base 0L o
+
+(* The per-progression [min, max] positions of a stack-symbolic value's
+   offsets — the disjoint runs the attribution clips per run instead of
+   hulling (a two-band address keeps both bands in the portions). *)
+let offset_runs (t : t) : (int64 * int64) list =
+  match t with
+  | StackOff offs ->
+    List.filter_map (P.to_list offs) ~f:(fun g ->
+        match Clp.min_elem g, Clp.max_elem g with
+        | Some a, Some b -> (
+            match (Cbat_word.to_int64 a, Cbat_word.to_int64 b) with
+            | Ok a, Ok b -> (
+                match (position_of_offset a, position_of_offset b) with
+                | Some lo, Some hi -> Some (lo, hi)
+                | _ -> None)
+            | _ -> None)
+        | _ -> None)
+  | _ -> []
 
 let int64_pair_of (lo : Cbat_word.t) (hi : Cbat_word.t)
     : (int64 * int64) option =

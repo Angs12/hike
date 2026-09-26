@@ -154,18 +154,24 @@ let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
            k)
   | _ -> assert false
 
-(* The full-span claim shapes. *)
+(* The full-span claim shapes.  Both tops also claim the VLA band:
+   [segment_base + 2^20, segment_base + 2^21). *)
+let vla_lo = pos 0x100000L
+let vla_hi = pos 0x1FFFFFL
+
 let plain (t, ps) =
   match t, ps with
-  | None, [ p1; p2 ] ->
+  | None, [ p1; p2; p3 ] ->
       portion_eq p1 S.Stack (Int64.add entry Stdlib.Int64.min_int) (pos 7L)
       && portion_eq p2 S.Args (pos 8L) Stdlib.Int64.max_int
+      && portion_eq p3 S.Vla vla_lo vla_hi
   | _ -> false
 
 let clamped (t, ps) =
   match t, ps with
-  | Some Tag.Stack_unbounded, [ p ] ->
-      portion_eq p S.Stack (pos (-65536L)) (pos (-1L))
+  | Some Tag.Stack_unbounded, [ p1; p2 ] ->
+      portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
+      && portion_eq p2 S.Vla vla_lo vla_hi
   | _ -> false
 
 (* S2's shape: a heap-pointing GPR store beside the [RSP-16] cell
@@ -263,24 +269,26 @@ let tests : unit Alcotest.test list =
            | Some Tag.Dead, [] -> true
            | _ -> false));
 
-    pin "SEC-08" "AT1-S02: a plain TOP claims the sub-local line, no data span, no tag"
+    pin "SEC-08" "AT1-S02: a plain TOP claims the sub-local line, the VLA band, no tag"
       (fun () ->
         check "SEC-08"
           (match rd (Ws.top 64) with
-           | None, [ p1; p2 ] ->
+           | None, [ p1; p2; p3 ] ->
                portion_eq p1 S.Stack
                  (Int64.add entry Stdlib.Int64.min_int)
                  (pos 7L)
                && portion_eq p2 S.Args (pos 8L) Stdlib.Int64.max_int
+               && portion_eq p3 S.Vla vla_lo vla_hi
            | _ -> false));
 
     pin "SEC-09"
-      "AT1-S02: a symbolic TOP clamps to [entry-stack_max, entry), below-entry only"
+      "AT1-S02: a symbolic TOP clamps to [entry-stack_max, entry) plus the VLA band"
       (fun () ->
         check "SEC-09"
           (match rd (Ws.stack_word (Clp.top 64)) with
-           | Some Tag.Stack_unbounded, [ p ] ->
-               portion_eq p S.Stack (pos (-65536L)) (pos (-1L))
+           | Some Tag.Stack_unbounded, [ p1; p2 ] ->
+               portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
+               && portion_eq p2 S.Vla vla_lo vla_hi
            | _ -> false));
 
     pin "SEC-10"
@@ -289,7 +297,7 @@ let tests : unit Alcotest.test list =
         check "SEC-10"
           (let _, ps = rd_spans (Ws.top 64) in
            Base.List.for_all ps ~f:(fun p ->
-               match p.A.pt_sec with S.Stack | S.Args -> true | _ -> false)));
+               match p.A.pt_sec with S.Stack | S.Args | S.Vla -> true | _ -> false)));
 
     pin "SEC-11" "AT1-S02: the full data domain [0,2^64-1] is a valid ordered range"
       (fun () ->
@@ -1155,6 +1163,91 @@ let tests : unit Alcotest.test list =
         check "SEC-68"
           (storage_at ctx sub Sm.Stack (pos (-48L)) (pos (-41L))
           = Some (A.Stack_region 1)));
-  ]
+
+    pin "SEC-69"
+      "AT4-VLA: the band claims bind nowhere — the static frame carves beside a live VLA"
+      (fun () ->
+        let m, rsp, rbp = mem_rbp () in
+        let rax = v64 "at_vla_rax" in
+        let def_rbp = Def.create rbp (Bil.Var rsp) in
+        let def_n_cell =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 20))),
+                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 32)),
+                 LittleEndian,
+                 `r32 ))
+        in
+        let def_load =
+          Def.create rax
+            (Bil.Load
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 20))),
+                 LittleEndian,
+                 Size.of_int_exn 32 ))
+        in
+        let def_sub =
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
+        in
+        let def_ptr = Def.create rax (Bil.Var rsp) in
+        let def_align =
+          Def.create rax
+            (Bil.BinOp
+               ( Bil.AND,
+                 Bil.Var rax,
+                 Bil.Int
+                   (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 (-4L))) ))
+        in
+        let def_save =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+                 Bil.Var rax,
+                 LittleEndian,
+                 `r64 ))
+        in
+        let def_n2 =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 4))),
+                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 8)),
+                 LittleEndian,
+                 `r32 ))
+        in
+        let def_band =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.PLUS, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 12))),
+                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 1)),
+                 LittleEndian,
+                 `r32 ))
+        in
+        let sub =
+          straight_sub "vla_frame"
+            [ def_rbp; def_n_cell; def_load; def_sub; def_ptr; def_align;
+              def_save; def_n2; def_band ]
+        in
+        let ctx = fixture_ctx [ sub ] in
+        check "SEC-69"
+          ((match tag_of (A.stamp_tags ctx sub) def_band with
+            | Some (Sm.Tag.Vla _) -> true
+            | _ -> false)
+           && (match storage_at ctx sub Sm.Stack (pos (-8L)) (pos (-1L)) with
+               | Some (A.Stack_region _) -> true
+               | _ -> false)));
+]
+
+let () = run "sections" tests
+
+let () = run "sections" tests
 
 let () = run "sections" tests
