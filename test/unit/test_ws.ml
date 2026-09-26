@@ -361,6 +361,35 @@ let tests : unit Alcotest.test list =
           && (not (Ws.elem (w32 50) u))
           && (not (Ws.elem (w32 1) u))
           && not (Ws.elem (w32 99) u)));
+
+    pin "WS-35"
+      "the wrapped SP piece measures — a stack value whose offsets wrap the \
+       modulus ({-16, 0} as a wrapped pair) keeps signed extrema and \
+       segment-relative bounds (-16, 0) instead of answering None"
+      (fun () ->
+        let w64 = Cbat_word.of_int ~width:64 in
+        (* The vasnprintf shape: a wrapped finite offsets piece whose
+           elements are {-16, 0, 16} — the traversal crosses the
+           modulus. *)
+        let offs =
+          Clp.create ~width:64 ~step:(w64 16) ~cardn:(Cbat_word.of_int ~width:65 3)
+            (Cbat_word.neg (w64 16)) in
+        let v = Ws.stack_word offs in
+        (* stack_base 2^62+8: the absolute signed extrema are
+           stack_base-16 and stack_base+16. *)
+        let base = 0x3FFF_FFFF_FFFF_FFF8L in
+        check "WS-35"
+          (Clp.is_wrapped offs
+          && (match Ws.stack_bounds v with
+              | Some (lo, hi) ->
+                Stdlib.Int64.equal lo (-16L) && Stdlib.Int64.equal hi 16L
+              | None -> false)
+          && (match Ws.min_elem_signed v, Ws.max_elem_signed v with
+              | Some mn, Some mx ->
+                Stdlib.Int64.equal (Cbat_word.to_int64_exn mn) base
+                && Stdlib.Int64.equal (Cbat_word.to_int64_exn mx)
+                  (Int64.add base 32L)
+              | None, _ | _, None -> false)));
   ]
 
 let () = run "ws" tests

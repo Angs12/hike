@@ -365,17 +365,36 @@ let relative_bounds (lo : Cbat_word.t) (hi : Cbat_word.t)
      | _ -> None)
   | _ -> None
 
+(* The offsets' SIGNED extrema of a stack value (the offset line is
+   signed: negative below the entry).  Exact over the arcs of every
+   progression — a wrapped SP piece measures instead of failing. *)
+let offsets_signed_extrema (offs : P.t)
+    : (Cbat_word.t * Cbat_word.t) option =
+  let fold (acc : (Cbat_word.t * Cbat_word.t) option)
+      (p : Clp.t) : (Cbat_word.t * Cbat_word.t) option =
+    match Clp.min_elem_signed p, Clp.max_elem_signed p with
+    | Some lo, Some hi ->
+      (match acc with
+       | None -> Some (lo, hi)
+       | Some (alo, ahi) ->
+         Some
+           ((if Cbat_word.compare (Cbat_word.signed lo) (Cbat_word.signed alo)
+                < 0 then lo else alo),
+            (if Cbat_word.compare (Cbat_word.signed hi) (Cbat_word.signed ahi)
+                > 0 then hi else ahi)))
+    | _ -> acc
+  in
+  List.fold (P.to_list offs) ~init:None ~f:fold
+
 (* Segment-relative bounds: StackOff keeps its exact offsets; a plain
    in-band set maps to its own hull. *)
 let stack_bounds (t : t) : (int64 * int64) option =
   match t with
   | StackOff offs ->
-    (match P.min_elem offs, P.max_elem offs with
-     | Some lo, Some hi ->
-       (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+    Option.bind (offsets_signed_extrema offs) ~f:(fun (lo, hi) ->
+        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
         | Ok loi, Ok hii -> Some (loi, hii)
         | _ -> None)
-     | _ -> None)
   | _ ->
     Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
         relative_bounds lo hi)
@@ -436,10 +455,7 @@ let max_elem (t : t) : word option =
    set, or a plain in-band set's segment-relative hull. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   match t with
-  | StackOff offs ->
-    (match P.min_elem offs, P.max_elem offs with
-     | Some lo, Some hi -> Some (lo, hi)
-     | _ -> None)
+  | StackOff offs -> offsets_signed_extrema offs
   | _ ->
     Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
         Option.map (relative_bounds lo hi) ~f:(fun (rlo, rhi) ->
@@ -452,7 +468,13 @@ let min_elem_signed (t : t) : word option =
   let leaf (q : t) : word option =
     match q with
     | StackOff offs ->
-      Option.map (plain_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
+      Option.bind (offsets_signed_extrema offs)
+        ~f:(fun (lo, _) ->
+          Option.bind (checked_add3 stack_base 0L
+                         (match Cbat_word.to_int64 lo with
+                          | Ok v -> v
+                          | Error _ -> Stdlib.Int64.min_int))
+            ~f:(fun v -> Some (w64_of_i64 v)))
     | Clp ps ->
       List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
           let r =
@@ -493,7 +515,13 @@ let max_elem_signed (t : t) : word option =
   let leaf (q : t) : word option =
     match q with
     | StackOff offs ->
-      Option.map (plain_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
+      Option.bind (offsets_signed_extrema offs)
+        ~f:(fun (_, hi) ->
+          Option.bind (checked_add3 stack_base 0L
+                         (match Cbat_word.to_int64 hi with
+                          | Ok v -> v
+                          | Error _ -> Stdlib.Int64.max_int))
+            ~f:(fun v -> Some (w64_of_i64 v)))
     | Clp ps ->
       List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
           let r =

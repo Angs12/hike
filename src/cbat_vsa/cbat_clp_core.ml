@@ -283,18 +283,108 @@ let min_elem (p : t) : W.t option =
     if W.is_zero p.step then Some p.base else Some (W.modulo p.base p.step)
 
 (* Max signed element. *)
+let is_wrapped (p : t) : bool =
+  if is_infinite p || is_bottom p then false
+  else
+    match finite_end p with
+    | Some e -> W.(<) e (base_of p)
+    | None -> false
+
+(* A wrapped Finite piece is two non-wrapping arcs (the high arc before
+   the modulus and the low arc after the wrap); the meet of each arc is
+   joined. *)
+let split_wrapped (p : t) : t list =
+  if not (is_wrapped p) then [ p ]
+  else
+    let width = bitwidth p in
+    let b = base_of p and s = step_of p in
+    if W.is_zero s then [ p ]
+    else
+      let max_w = W.ones width in
+      let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
+      if W.is_zero n then [ infinite (b, s) ]
+      else
+        (* First index whose element wraps past the modulus. *)
+        let k_wrap = W.succ (W.div (W.sub max_w b) s) in
+        let high = create ~width ~step:s ~cardn:k_wrap b in
+        let low_count = W.sub n k_wrap in
+        if W.is_zero low_count then [ high ]
+        else
+          let low_base = W.add b (W.mul k_wrap s) in
+          let low = create ~width ~step:s ~cardn:low_count low_base in
+          [ high; low ]
+
+(* Signed order: at/above the half the word is negative. *)
+let signed_le (width : int) (x : W.t) (y : W.t) : bool =
+  let h = half width in
+  match W.(>=) x h, W.(>=) y h with
+  | true, false -> true
+  | false, true -> false
+  | _ -> W.(<=) x y
+
+(* The signed extrema of one NON-wrapped finite arc [a, a+s, ..., l]
+   (l >= a unsigned).  Elements at/above the half are negative: the
+   signed max is the largest element below the half (the whole arc
+   when every element is at/above it), the signed min the smallest
+   element at/above the half (the whole arc when every element is
+   below it). *)
+let arc_max_signed (p : t) : W.t =
+  let width = bitwidth p in
+  let h = half width in
+  let a = base_of p and s = step_of p in
+  let l = Option.value (finite_end p) ~default:a in
+  if W.(>=) a h then l
+  else if W.(<) l h then l
+  else
+    let n = W.extract_exn ~hi:width (cardn_of p) in
+    let k = W.div (W.sub (W.pred h) a) s in
+    let k = if W.(>=) k (W.pred n) then W.pred n else k in
+    W.add a (W.mul k s)
+
+let arc_min_signed (p : t) : W.t =
+  let width = bitwidth p in
+  let h = half width in
+  let a = base_of p and s = step_of p in
+  let l = Option.value (finite_end p) ~default:a in
+  if W.(<) l h then a
+  else if W.(>=) a h then a
+  else
+    let n = W.extract_exn ~hi:width (cardn_of p) in
+    let k = W.div (W.sub h a) s in
+    let rem = W.modulo (W.sub h a) s in
+    let k = if W.is_zero rem then k else W.succ k in
+    let k = if W.(>=) k (W.pred n) then W.pred n else k in
+    W.add a (W.mul k s)
+
+(* The signed extrema of a finite piece: its (possibly two) arcs
+   answer separately and the signed order folds them — a wrapped
+   traversal measures exactly instead of answering None. *)
 let max_elem_signed (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Descending -> Some p.base
-  | _ -> nearest_pred (W.pred (half (bitwidth p))) p
+  | Ascending | Circular -> nearest_pred (W.pred (half (bitwidth p))) p
+  | Finite ->
+    let width = bitwidth p in
+    List.fold (split_wrapped p) ~init:None ~f:(fun acc arc ->
+        let c = arc_max_signed arc in
+        match acc with
+        | None -> Some c
+        | Some b -> Some (if signed_le width c b then b else c))
 
 (* Min signed element. *)
 let min_elem_signed (p : t) : W.t option =
   if is_bottom p then None
   else match p.dir with
   | Ascending -> Some p.base
-  | _ -> nearest_succ (half (bitwidth p)) p
+  | Descending | Circular -> nearest_succ (half (bitwidth p)) p
+  | Finite ->
+    let width = bitwidth p in
+    List.fold (split_wrapped p) ~init:None ~f:(fun acc arc ->
+        let c = arc_min_signed arc in
+        match acc with
+        | None -> Some c
+        | Some b -> Some (if signed_le width c b then c else b))
 
 let splits_by (p : t) (w : W.t) : bool =
   let divides a b = W.is_zero (W.modulo b a) in
@@ -403,38 +493,6 @@ let common_step (b1,s1) (b2,s2) : W.t =
   else if W.is_zero s2 then bounded_gcd s1 b_diff
   else let gcd_s = (bounded_gcd s1 s2) in
     bounded_gcd gcd_s b_diff
-
-let is_wrapped (p : t) : bool =
-  if is_infinite p || is_bottom p then false
-  else
-    match finite_end p with
-    | Some e -> W.(<) e (base_of p)
-    | None -> false
-
-(* A wrapped Finite piece is two non-wrapping arcs (the high arc before
-   the modulus and the low arc after the wrap); the meet of each arc is
-   joined. *)
-let split_wrapped (p : t) : t list =
-  if not (is_wrapped p) then [ p ]
-  else
-    let width = bitwidth p in
-    let b = base_of p and s = step_of p in
-    if W.is_zero s then [ p ]
-    else
-      let max_w = W.ones width in
-      let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
-      if W.is_zero n then [ infinite (b, s) ]
-      else
-        (* First index whose element wraps past the modulus. *)
-        let k_wrap = W.succ (W.div (W.sub max_w b) s) in
-        let high = create ~width ~step:s ~cardn:k_wrap b in
-        let low_count = W.sub n k_wrap in
-        if W.is_zero low_count then [ high ]
-        else
-          let low_base = W.add b (W.mul k_wrap s) in
-          let low = create ~width ~step:s ~cardn:low_count low_base in
-          [ high; low ]
-
 
 let subset_finite (p1 : t) (p2 : t) : bool =
   let width = bitwidth p1 in

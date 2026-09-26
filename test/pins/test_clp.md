@@ -123,3 +123,5 @@ recipe is the textual inversion of the pinned contract recorded below.
 | CLP-115 | WF-3: the wrapped-finite meet is sound — logxor {0xCF} {0xE9,0xEC} contains both concrete xors | drop the wrapped branch in `intersection_finite_or_circular` | pin FAILs (the meet is bottom) |
 | CLP-116 | WF-4: the interleaved union is exact — {0xF8} ∪ {0} = {0, 0xF8} | revert the wrapped-hull branch of `union_nowrap` to the absolute `common_step` | pin FAILs (cardinality 1, 0 dropped) |
 | CLP-117 | WF-5: mul distributes over a wrapped grid — {0xE,0xF,0} × {0,0xD} contains 0, 3 and 6 | drop the `arcs2` dispatch on `mul` | pin FAILs (6 missing) |
+| CLP-118 | WF-6: the signed extrema of a wrapped traversal are exact — {0xFA,0xFC,0xFE,0x00,0x02} answers signed min 0xFA (-6) and max 0x02 | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |
+| CLP-119 | WF-7: the signed extrema of an all-negative wrapped traversal — {0xF8,0xFC} answers signed min 0xF8 (-8) and max 0xFC (-4) | textually invert the pinned contract in `Cbat_clp` | pin FAILs under that inversion (re-demonstrated by review) |

@@ -1124,6 +1124,31 @@ let tests : unit Alcotest.test list =
         check "CLP-117"
           (Clp.is_wrapped q1
           && List.for_all (fun v -> Clp.elem (w4 v) r) [ 0; 3; 6 ]));
+
+    pin "CLP-118"
+      "WF-6: the signed extrema of a WRAPPED traversal are exact — \
+       {0xFA,0xFC,0xFE,0x00,0x02} answers signed min 0xFA (-6) and max 0x02"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let p =
+          Clp.create ~width:8 ~step:(w8 2) ~cardn:(Cbat_word.of_int ~width:9 5)
+            (w8 0xFA) in
+        check "CLP-118"
+          (Clp.is_wrapped p
+          && Clp.min_elem_signed p = Some (w8 0xFA)
+          && Clp.max_elem_signed p = Some (w8 2)));
+
+    pin "CLP-119"
+      "WF-7: the signed extrema of an all-negative wrapped traversal — \
+       {0xF8,0xFC} answers signed min 0xF8 (-8) and max 0xFC (-4)"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let p =
+          Clp.create ~width:8 ~step:(w8 4) ~cardn:(Cbat_word.of_int ~width:9 2)
+            (w8 0xF8) in
+        check "CLP-119"
+          (Clp.min_elem_signed p = Some (w8 0xF8)
+          && Clp.max_elem_signed p = Some (w8 0xFC)));
   ]
 
 let () = run "clp" tests

@@ -511,6 +511,7 @@ let run_sweep () : int * int * int =
      near-top values and the counts reach past the wrap. *)
   let ind_bases = [ 0; 1; 4; 12 ] and ind_steps = [ 0; 1; 3 ] in
   let ind_cards = [ 1; 2; 3; 5 ] in
+
   CKL.iter ops ~f:(fun (nm, f, wop) ->
       CKL.iter ind_bases ~f:(fun b1 ->
           CKL.iter ind_steps ~f:(fun s1 ->
@@ -631,7 +632,59 @@ let run_sweep () : int * int * int =
            (Ws.Clp.Pieces.elem (CW.zero w) (Ws.Clp.Pieces.of_progression big))
       then bad (Printf.sprintf "PIECES top membership w=%d" w));
 
-  (* Directional CLP checks. *)
+  (* Signed extrema vs the concrete oracle, over WRAPPED and plain
+     finite shapes: the signed min/max must be the true signed
+     smallest/largest element (a wrapped traversal measures through
+     its arcs, never None). *)
+  CKL.iter piece_widths ~f:(fun w ->
+      let modulus = Z.shift_left Z.one w in
+      let half = Z.shift_left Z.one (w - 1) in
+      let signed_z x =
+        let z = z_of (CW.to_word x) in
+        if Z.geq z half then Z.sub z modulus else z in
+      let extremum ~better xs =
+        CKL.fold xs ~init:None
+          ~f:(fun acc x ->
+            let z = signed_z x in
+            match acc with
+            | None -> Some z
+            | Some a -> Some (if better z a then z else a))
+      in
+      CKL.iter (piece_vals w) ~f:(fun b1 ->
+          CKL.iter (piece_vals w) ~f:(fun s1 ->
+              CKL.iter piece_cards ~f:(fun c1 ->
+                  let p =
+                    Ws.Clp.create (CW.of_int ~width:w b1)
+                      ~step:(CW.of_int ~width:w s1)
+                      ~cardn:(CW.of_int ~width:(w + 1) c1)
+                  in
+                  match small_elems p with
+                  | None -> incr skipped
+                  | Some xs ->
+                    let tmin = extremum ~better:Z.lt xs in
+                    let tmax = extremum ~better:Z.gt xs in
+                    let report nm got want =
+                      incr checked;
+                      if Z.equal got want then ()
+                      else
+                        bad
+                          (Printf.sprintf
+                             "SGN-%s w=%d b=%d s=%d c=%d: got %s want %s"
+                             nm w b1 s1 c1 (Z.to_string got)
+                             (Z.to_string want))
+                    in
+                    report "MIN"
+                      (match Ws.Clp.min_elem_signed p with
+                       | Some v -> signed_z v
+                       | None -> Z.of_string "unused")
+                      (match tmin with Some z -> z | None -> Z.zero);
+                    report "MAX"
+                      (match Ws.Clp.max_elem_signed p with
+                       | Some v -> signed_z v
+                       | None -> Z.of_string "unused")
+                      (match tmax with Some z -> z | None -> Z.zero)))));
+
+(* Directional CLP checks. *)
   let check_directional () =
     let w64 = 64 in
     let w_8 = CW.of_int ~width:w64 8 in
