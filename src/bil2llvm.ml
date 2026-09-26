@@ -44,31 +44,38 @@ let update_phis ctx scope transfer_vars blks =
 
 (* Each jmp of a series renders in its own basic block; every direct
    edge lands in the edge table so target phis name the terminator's
-   block.  The terminal guard is complete: literal-true branches
-   unconditionally, else the false edge is [unreachable]. *)
-let create_branches ctx scope blk_tid llvm_builder branches =
+   block.  The terminal guard's false edge is the block's term-order
+   successor; a block with none keeps the dead end. *)
+let create_branches ctx scope sub blk llvm_builder branches =
   let open Bap.Std in
+  let blk_tid = Term.tid blk in
   let llvm_ctx = ctx.llvm_ctx in
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
   let jmps = Seq.to_list branches in
   let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
     Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:tid ~term_bb:cur ()
   in
-  (* The series' terminal guard: an unconditional branch when no
-     other path can fall through (a true condition, or the first edge
-     of a two-way branch); otherwise the condition selects between the
-     target and a dead end. *)
-  let emit_terminal_guard ~(first : bool) ~bb ~(cond : exp) =
-    if Hike_stack_model.is_true_cond cond || first then
-      Llvm.build_br bb llvm_builder |> ignore
-    else
-      let dead = Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-dead") fn in
-      let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
-      Llvm.build_cond_br cond_val bb dead llvm_builder |> ignore;
-      Llvm.position_at_end dead llvm_builder;
-      Llvm.build_unreachable llvm_builder |> ignore
+  let emit_terminal_guard ~cur ~tid ~bb ~(cond : exp) =
+    match (Hike_stack_model.is_true_cond cond, Hike_split_blocks.fallthrough sub blk) with
+    | true, _ -> Llvm.build_br bb llvm_builder |> ignore
+    | false, Some succ when Tid.equal succ tid ->
+        (* Both edges land on the target: the guard selects nothing. *)
+        let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
+        ignore cond_val;
+        Llvm.build_br bb llvm_builder |> ignore
+    | false, Some succ ->
+        let cont = get_bb scope succ in
+        let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
+        note_edge ~cur succ;
+        Llvm.build_cond_br cond_val bb cont llvm_builder |> ignore
+    | false, None ->
+        let dead = Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-dead") fn in
+        let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
+        Llvm.build_cond_br cond_val bb dead llvm_builder |> ignore;
+        Llvm.position_at_end dead llvm_builder;
+        Llvm.build_unreachable llvm_builder |> ignore
   in
-  let rec step ~(first : bool) cur = function
+  let rec step cur = function
     | [] -> ()
     | j :: rest -> (
         let cont_bb =
@@ -90,8 +97,9 @@ let create_branches ctx scope blk_tid llvm_builder branches =
                 let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
                 Llvm.build_cond_br cond bb next llvm_builder |> ignore;
                 Llvm.position_at_end next llvm_builder;
-                step ~first:false next rest
-              | None -> emit_terminal_guard ~first ~bb ~cond:(Jmp.cond j))
+                step next rest
+              | None ->
+                  emit_terminal_guard ~cur ~tid ~bb ~cond:(Jmp.cond j))
         | Indirect exp -> (
             (* An indirect jmp ends its own path; later jmps still
                render.  A label-less indirectbr is UB when taken, so
@@ -105,10 +113,11 @@ let create_branches ctx scope blk_tid llvm_builder branches =
             (match cont_bb with
              | Some next ->
                  Llvm.position_at_end next llvm_builder;
-                 step ~first:false next rest
-             | None -> ())))
+                 step next rest
+             | None -> ())
+        ))
   in
-  step ~first:true (Llvm.insertion_block llvm_builder) jmps
+  step (Llvm.insertion_block llvm_builder) jmps
 
 let create_control_flow ctx scope llvm_builder blk sub fr =
   let control_flow = Term.enum jmp_t blk in
@@ -118,7 +127,7 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
     create_return ctx scope tid llvm_builder sub
   else
   match cf_type control_flow with
-  | Br -> create_branches ctx scope tid llvm_builder control_flow
+  | Br -> create_branches ctx scope sub blk llvm_builder control_flow
   | Int -> create_interrupt ctx llvm_builder
   | Ret -> create_return ctx scope tid llvm_builder sub
   | CallIndirect ->

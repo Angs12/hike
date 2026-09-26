@@ -12,6 +12,7 @@ module Resolve = Hike_resolve
 module Dce = Hike_dce
 module Jump = Hike_jump
 module Split_mem = Hike_split_mem
+module Split_blocks = Hike_split_blocks
 module Coerce = Hike_coerce
 module Stack_model = Hike_stack_model
 module Def_slots = Hike_def_slots
@@ -236,6 +237,9 @@ let pass_attrib proj =
 
 let pass_convlir ~output proj = convert_binary output proj
 
+let pass_split_blocks proj =
+  Project.map_program proj ~f:Hike_split_blocks.normalize
+
 let pass_types proj = Hike_types.run proj
 
 let () =
@@ -250,7 +254,10 @@ let () =
         chain ~name:"strip-canaries" ~prev:vsa pass_strip_canaries
       in
       let sections = chain ~name:"sections" ~prev:strip_canaries pass_attrib in
-      let types = chain ~name:"types" ~prev:sections pass_types in
+      let split_blocks =
+        chain ~name:"split-blocks" ~prev:sections pass_split_blocks
+      in
+      let types = chain ~name:"types" ~prev:split_blocks pass_types in
       let convlir = chain' ~name:"convlir" ~prev:types (pass_convlir ~output:output_file) in
       ignore convlir;
       Ok ())

@@ -66,7 +66,7 @@ let tag_lane (a : Arg.t) : Arg.t =
 let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : Arg.t list * Arg.t list =
   let abi = Abi.of_target target in
-  let free_vars = Model.free_regs sub in
+  let free_vars = Hike_split_blocks.free_regs sub in
   let rets =
     (if Abi.is_primary_target target then abi.return_regs else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))

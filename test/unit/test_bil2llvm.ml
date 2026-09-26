@@ -881,7 +881,7 @@ let tests : unit Alcotest.test list =
         let g k =
           Bil.BinOp (Bil.EQ, Bil.Var flag, Bil.Int (Cbat_word.to_word (w64 k)))
         in
-        let guarded, _ =
+        let guarded, tids =
           sub_of "nb_series"
             [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
               [ (1, fun t -> mk_jmp_to t (g 1));
@@ -899,12 +899,18 @@ let tests : unit Alcotest.test list =
         in
         check "EMIT-21"
           (cond_brs = 3
-          && contains_substring ir "-dead"
-          && contains_substring ir "unreachable"
+          && not (contains_substring ir "-dead")
+          && not (contains_substring ir "unreachable")
           && Base.List.length
                (String.split_on_char '\n' ir
                |> Base.List.filter ~f:(fun l -> contains_substring l " = phi "))
              = 0);
+        (* The terminal guard's false edge is the series block's
+           term-order successor (node 1), not a dead end. *)
+        check "EMIT-21"
+          (contains_substring ir
+             ("label %\"" ^ Tid.name tids.(3) ^ "\", label %\""
+              ^ Tid.name tids.(1) ^ "\""));
         (* The call-dispatch series: guarded cases plus the literal-true
            terminal (the call's own continuation). *)
         let terminal, _ =
@@ -1130,6 +1136,82 @@ let tests : unit Alcotest.test list =
         check "EMIT-29"
           (contains_substring ir "ret void"
            && not (contains_substring ir "indirectbr")));
+
+    (* LGUARD: the lone guarded goto — the split shape — renders its
+       false edge to the term-order successor and records it, so the
+       successor's phis carry the incoming. *)
+    pin "EMIT-30"
+      "a lone guarded goto renders cond_br(cond, target, successor) with the false edge recorded"
+      (fun () ->
+        let c = v64 "lg_c" in
+        let sub, tids =
+          sub_of "lone_guard"
+            [ [ Def.create c (Bil.Int (Cbat_word.to_word (w64 1))) ],
+              [ (2,
+                 fun t ->
+                   mk_jmp_to t
+                     (Bil.BinOp
+                        (Bil.EQ, Bil.Var c,
+                         Bil.Int (Cbat_word.to_word (w64 0))))) ];
+              [ Def.create (v64 "lg_d")
+                  (Bil.BinOp
+                     (Bil.PLUS, Bil.Var c,
+                      Bil.Int (Cbat_word.to_word (w64 1)))) ],
+              [ (0, mk_ret) ];
+              [ Def.create c (Bil.Int (Cbat_word.to_word (w64 2))) ],
+              [ (1, mk_goto) ] ]
+        in
+        let ir = emit_ir [ sub ] in
+        check "EMIT-30"
+          (contains_substring ir
+             ("label %\"" ^ Tid.name tids.(2) ^ "\", label %\""
+              ^ Tid.name tids.(1) ^ "\"")
+          && not (contains_substring ir "-dead")
+          && not (contains_substring ir "unreachable"));
+        let phi_lines =
+          String.split_on_char '\n' ir
+          |> Base.List.filter ~f:(fun l -> contains_substring l " = phi i64 ")
+        in
+        check "EMIT-30"
+          (Base.List.length
+             (Base.List.filter phi_lines ~f:(fun l ->
+                  match String.split_on_char '[' l with
+                  | _ :: rest -> Base.List.length rest = 2
+                  | [] -> false))
+          = 1
+          && Base.List.exists phi_lines ~f:(fun l ->
+                 contains_substring l "1, %"
+                 && contains_substring l "2, %")));
+
+    (* ENTRYPIECE: after an entry-block split, the original entry tid
+       stays the emitted entry (fresh piece ids sort above it). *)
+    pin "EMIT-31"
+      "an entry block's piece 1 wins entry_blk_tid after the split"
+      (fun () ->
+        let flag = v64 "ep_flag" in
+        let sub, tids =
+          sub_of "entry_split"
+            [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
+              [ (1, fun t -> mk_jmp_to t
+                    (Bil.BinOp
+                       (Bil.EQ, Bil.Var flag,
+                        Bil.Int (Cbat_word.to_word (w64 1)))));
+                (2, mk_goto) ];
+              [], [ (0, mk_ret) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let split = Hike.Split_blocks.split_sub sub in
+        let ir = emit_ir [ split ] in
+        let pieces =
+          Term.enum blk_t split |> Seq.to_list
+        in
+        let p2 = Base.List.nth_exn pieces 1 in
+        check "EMIT-31"
+          (contains_substring ir ("br label %\"" ^ Tid.name tids.(0) ^ "\"")
+          && contains_substring ir
+               ("label %\"" ^ Tid.name tids.(1) ^ "\", label %\""
+                ^ Tid.name (Term.tid p2) ^ "\"")
+          && not (contains_substring ir "-sw")));
   ]
 
 let () = run "bil2llvm" tests

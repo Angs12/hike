@@ -383,7 +383,7 @@ let rec is_plt_trampoline ctx (sub : sub term) : bool =
     verdict
 
 and is_plt_trampoline_slow ctx (sub : sub term) : bool =
-  let free_vars = Hike_stack_model.free_regs sub in
+  let free_vars = Hike_split_blocks.free_regs sub in
   let reg_vars =
     Base.List.filter free_vars ~f:(fun reg ->
         not (Var.same reg ctx.sp)

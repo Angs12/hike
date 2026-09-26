@@ -346,12 +346,6 @@ let sub_map (prog : program term) : sub term Tid.Map.t =
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
       Core.Map.set m ~key:(Term.tid s) ~data:s)
 
-(* The sub's free register lanes: its free vars minus the memory vars. *)
-let free_regs (sub : sub term) : var list =
-  Sub.free_vars sub
-  |> Core.Set.filter ~f:(fun var -> not @@ is_mem var)
-  |> Core.Set.to_list
-
 (* The vars a sub reads: every def's rhs plus each block's reads. *)
 let sub_reads (s : sub term) : Var.Set.t =
   Term.enum blk_t s

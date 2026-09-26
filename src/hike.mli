@@ -118,6 +118,21 @@ module Split_mem : sig
   val normalize : program term -> program term
 end
 
+(** The block/jmp-series split: one jmp per block, pieces consecutive
+    in term order — the BIR CFG equals the CFG the emitter renders. *)
+module Split_blocks : sig
+  val split_sub : sub term -> sub term
+  val normalize : program term -> program term
+
+  (** [fallthrough sub blk] is the block that follows [blk] in [sub]'s
+      term order — where an implicit fallthrough edge lands. *)
+  val fallthrough : sub term -> blk term -> Tid.t option
+
+  (** The sub's free registers over the rendered CFG (explicit targets
+      plus guarded-terminal fallthroughs), memory vars dropped. *)
+  val free_regs : sub term -> var list
+end
+
 (** The width-coercion pass: every exp the later passes read is made
     width-honest once, so the VSA and the emitter read uniform widths. *)
 module Coerce : sig

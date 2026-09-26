@@ -48,6 +48,7 @@
   test_hike_stack_bounds
   test_hike_stack_ptr
   test_hike_types
+  test_split_blocks
   test_integration)
  (modules :standard \ harness common fixtures)
  (libraries

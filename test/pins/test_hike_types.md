@@ -19,7 +19,7 @@ under that inversion.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| TYPES-01 | `free_vars` drops memory-typed vars from `Sub.free_vars` and keeps registers. | In `src/hike_types.ml` `free_vars`, drop the `not @@ Model.is_mem` filter. | TYPES-01 FAILs: the mem var joins the list. |
+| TYPES-01 | `Hike_split_blocks.free_regs` (the rendered-CFG free set) drops memory-typed vars and keeps registers. | In `Hike_split_blocks.free_regs`, drop the `Type.Mem` filter. | TYPES-01 FAILs: the mem var joins the list. |
 | TYPES-02 | `is_fp_returning`: a YMM def on the epilogue path (an indirect call with no return) is an FP return. | In `is_fp_returning`, make `is_epilogue` always `false` (or drop the `Seq.exists`). | TYPES-02 FAILs: the FP sub answers `false`. |
 | TYPES-03 | `is_fp_returning`: an integer return register (`RAX`) on the epilogue path is not an FP return. | In `is_fp_returning`, drop the final `is_vector_param_reg` test (return `return_path_defs <> []`). | TYPES-03 FAILs: the integer sub answers `true`. |
 | TYPES-04 | `is_fp_returning`: a value def off the epilogue path is not a return at all. | In `is_fp_returning`, treat every value-reg def as a return path (drop the `is_epilogue` filter). | TYPES-04 FAILs: the no-epilogue sub answers `true`. |
