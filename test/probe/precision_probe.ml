@@ -267,10 +267,14 @@ let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
   let pre = match Vsa.Test_seam.denote_imm_exp a st_before with
     | Ok ws' -> offs_of ws'
     | Error _ -> "err" in
-  Printf.printf "DIAG_ACC\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n"
+  let signed_of ws' = match Ws.min_elem_signed ws', Ws.max_elem_signed ws' with
+    | Some mn, Some mx -> Printf.sprintf "%s..%s" (i64_of_word mn) (i64_of_word mx)
+    | _ -> "n/a" in
+  Printf.printf "DIAG_ACC\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n"
     bname (Sub.name sub') (Tid.to_string (Term.tid b))
     (Tid.to_string (Term.tid d)) (def_to_string d)
-    (classify_operand ws) (offs_of ws) pre abs (if stack then 1 else 0);
+    (classify_operand ws) (offs_of ws) pre abs (if stack then 1 else 0)
+    (Ws.bitwidth ws) (signed_of ws);
   flush stdout
 
 (* Walk blocks in def order, re-denote, classify. *)
