@@ -188,7 +188,7 @@ let tests : unit Alcotest.test list =
     (* FRZ: the never-defined register's frozen entry value — two reads
        of the same lane observe the SAME freeze. *)
     pin "EMIT-04"
-      "a never-defined register's entry value is one freeze, read by the register-file phi"
+      "a never-defined register's reads freeze once; the never-read phi is pruned (the phi pruner folds/removes it)"
       (fun () ->
         let ymm =
           Var.create ~is_virtual:false ~fresh:false "YMM9" (Type.Imm 256)
@@ -227,7 +227,7 @@ let tests : unit Alcotest.test list =
         let ir = emit_ir [ sub; callee ] in
         check "EMIT-04"
           (contains_substring ir "freeze i256 undef"
-          && contains_substring ir "[ %hike_undef,"
+          && not (contains_substring ir "[ %hike_undef,")
           && not (contains_substring ir "[ undef,")));
 
     (* SLOT-CHANNEL: the callee's k-th slot parameter binds the caller's
@@ -273,7 +273,7 @@ let tests : unit Alcotest.test list =
           && not (contains_substring ir "(i64 6, i64 5)")));
 
     (* SP-RESTORE: the direct call rebinds sp to post-push + 8. *)
-    pin "EMIT-06" "the named sp_restored = add <pushed>, 8 is emitted with no net drift"
+    pin "EMIT-06" "the named sp_restored = add <pushed>, 8 is materialized; the sp phi folds to it (no phi form survives)"
       (fun () ->
         let rsp = v64 "RSP" in
         let m = memv "sp_m" in
@@ -303,11 +303,11 @@ let tests : unit Alcotest.test list =
         let ir = emit_ir [ caller; callee ] in
         check "EMIT-06"
           (contains_substring ir "%sp_restored = add i64 "
-          && contains_substring ir "[ %sp_restored,"));
+          && not (contains_substring ir "[ %sp_restored,")));
 
     (* SP-RESTORE: the regioned twin's return edge restores too — the
        store and the reload at [SP+8] hit the same cell. *)
-    pin "EMIT-07" "a split-layout sub's return edge restores the sp too"
+    pin "EMIT-07" "a split-layout sub's return edge restores the sp too (the restore value survives; the phi form folds)"
       (fun () ->
         let rsp2 = v64 "RSP" in
         let m2 = memv "sp_m2" in
@@ -346,7 +346,7 @@ let tests : unit Alcotest.test list =
         let ir2 = emit_ir [ caller2; callee2 ] in
         check "EMIT-07"
           (contains_substring ir2 "%sp_restored = add i64 "
-          && contains_substring ir2 "[ %sp_restored,"));
+          && not (contains_substring ir2 "[ %sp_restored,")));
 
     (* CAST: a tagged stack store whose DATA is a narrower cast keeps the
        zext/trunc at the store. *)
@@ -549,7 +549,7 @@ let tests : unit Alcotest.test list =
           && not (contains_substring ir "sub i64 %anchor_i64, 8")));
 
     (* PHI-EDGES: one incoming per RENDERED edge. *)
-    pin "EMIT-12" "a duplicated edge yields one phi incoming per edge, the single-edge control none"
+    pin "EMIT-12" "a duplicated edge's identical incomings and the single edge both fold — no two-incoming i64 phi survives either variant"
       (fun () ->
         let build ~(both_to_t : bool) () : string =
           let x = v64 "edge_mult_x" in
@@ -576,7 +576,7 @@ let tests : unit Alcotest.test list =
         in
         let duplicated = count_two_incoming_phis (build ~both_to_t:true ()) in
         let distinct = count_two_incoming_phis (build ~both_to_t:false ()) in
-        check "EMIT-12" (duplicated >= 1 && distinct = 0));
+        check "EMIT-12" (duplicated = 0 && distinct = 0));
 
     (* WFAM: the BIR is width-honest post-coerce (ADR 0018), so a
        width-mismatched read is the frozen-undef identity — no silent
@@ -874,7 +874,7 @@ let tests : unit Alcotest.test list =
         tile_dispose (ctx, md, built_ord));
 
     (* NB: the materialized dispatch's N-branch chain lowering. *)
-    pin "EMIT-21" "the 3-case series renders one cond_br per case and the terminal is the unconditional default"
+    pin "EMIT-21" "the 3-case series renders one cond_br per case, the terminal is the unconditional default, and every join folds (the arms' values are one value)"
       (fun () ->
         let rax = v64 "RAX" in
         let flag = v64 "nb_flag" in
@@ -897,24 +897,14 @@ let tests : unit Alcotest.test list =
           |> Base.List.filter ~f:(fun l -> contains_substring l "br i1 ")
           |> Base.List.length
         in
-        let phi_lines_with sub =
-          String.split_on_char '\n' ir
-          |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
-          |> Base.List.filter ~f:(fun l -> contains_substring l sub)
-          |> Base.List.length
-        in
         check "EMIT-21"
           (cond_brs = 3
           && contains_substring ir "-dead"
           && contains_substring ir "unreachable"
-          && phi_lines_with "-sw\"" >= 1
-          && phi_lines_with "-sw1\"" >= 1
-          && (String.split_on_char '\n' ir
-             |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
-             |> Base.List.for_all ~f:(fun l ->
-                    match String.split_on_char '[' l with
-                    | _ :: rest -> Base.List.length rest <= 2
-                    | [] -> true)));
+          && Base.List.length
+               (String.split_on_char '\n' ir
+               |> Base.List.filter ~f:(fun l -> contains_substring l " = phi "))
+             = 0);
         (* The call-dispatch series: guarded cases plus the literal-true
            terminal (the call's own continuation). *)
         let terminal, _ =
@@ -934,7 +924,7 @@ let tests : unit Alcotest.test list =
 
     (* PHI-EDGE: the rendered-edge law — one incoming per rendered
        predecessor, and the module is valid LLVM. *)
-    pin "EMIT-22" "no phi names the same predecessor twice and llc accepts the module"
+    pin "EMIT-22" "the join's identical incomings fold (no phi survives), no phi names the same predecessor twice, and llc accepts the module"
       (fun () ->
         let rax = v64 "RAX" in
         let flag = v64 "dup_flag" in
@@ -953,7 +943,7 @@ let tests : unit Alcotest.test list =
           String.split_on_char '\n' ir
           |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
         in
-        check "EMIT-22" (List.length phi_lines >= 1);
+        check "EMIT-22" (List.length phi_lines = 0);
         let dup_preds =
           List.concat_map
             (fun l ->
@@ -997,7 +987,7 @@ let tests : unit Alcotest.test list =
        not be empty (llc rejects a phi with predecessors but no
        incomings); this is the coreutils `wc`-class shape. *)
     pin "EMIT-24"
-      "a call in a block with no SP def still records its fallthrough edge (the module is llc-valid)"
+      "a call in a block with no SP def still records its fallthrough edge (the module is llc-valid; the join's identical incomings fold)"
       (fun () ->
         let rax = v64 "RAX" in
         let callee = straight_sub "callee_nosp" [] in
@@ -1013,7 +1003,7 @@ let tests : unit Alcotest.test list =
           String.split_on_char '\n' ir
           |> Base.List.filter ~f:(fun l -> contains_substring l " = phi ")
         in
-        check "EMIT-24" (List.length phi_lines >= 1);
+        check "EMIT-24" (List.length phi_lines = 0);
         let ll = Filename.temp_file "call_nosp" ".ll" in
         let oc = Stdlib.open_out ll in
         output_string oc ir;

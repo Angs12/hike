@@ -29,8 +29,17 @@ let update_phis ctx scope transfer_vars blks =
         Core.Map.find by_target blk_tid |> Option.value ~default:[]
       in
       Base.List.iter transfer_vars ~f:(fun var ->
-          let phi = get_phi scope blk_tid var in
-          Bil2llvm_phi.add_incomings ctx scope ~phi ~rows ~target:blk_tid var))
+          (* Only created phis take incomings: the liveness pass prunes
+             the rest at creation. *)
+          let has_phi =
+            match Core.Map.find !(scope.blk_llvals) blk_tid with
+            | Some bv -> WVarMap.mem (Bil2llvm_env.wvar_of var) !(bv.phis)
+            | None -> false
+          in
+          if has_phi then begin
+            let phi = get_phi scope blk_tid var in
+            Bil2llvm_phi.add_incomings ctx scope ~phi ~rows ~target:blk_tid var
+          end))
 
 
 (* Each jmp of a series renders in its own basic block; every direct
@@ -318,6 +327,7 @@ let create_sub ctx scope sub =
     build_entry_block ctx scope llvm_builder transfer_vars fr sub fn;
     populate_blks ctx scope transfer_vars blks sub fr;
     update_phis ctx scope transfer_vars blks;
+    Bil2llvm_phi.prune_phis scope;
     scope.cur_frame := None;
     let sub_tid = Term.tid sub in
     let lane_reads =
@@ -330,8 +340,10 @@ let create_sub ctx scope sub =
     in
     if not (Core.Set.is_empty lane_reads) then
       Hike_diag.warn
-        "undef-read: sub %s: %d never-defined model-ABI lane read(s) [undef]"
+        "undef-read: sub %s: %d never-defined model-ABI lane read(s) [undef] {%s}"
         (Tid.name sub_tid) (Core.Set.length lane_reads)
+        (String.concat ","
+           (Core.Set.to_list lane_reads |> Base.List.map ~f:Var.name))
 
 (* The emission entry: signature collection, declarations, bodies.
    Phase order — sigs, thunks, bodies, initializers — is load-bearing;
