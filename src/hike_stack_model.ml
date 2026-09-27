@@ -491,6 +491,43 @@ let layout_tag : Sub_layout.t Value.Tag.t =
     ~uuid:"3f5e1c2a-9b47-4d60-8a15-c4d9e07b2f11"
     (module Sub_layout)
 
+(* The SSA pass's block stamp.  [args] holds the versions in effect
+   after the block's defs — BEFORE any call-ret minting, so a call
+   argument read resolves to the value the machine passes.  [rets]
+   holds the call-ret mints — the versions the call's own result
+   binds. *)
+module Versions = struct
+  open! Core
+
+  type t =
+    { args : (var * var) list
+    ; rets : (var * var) list
+    ; entry : (var * var) list
+    }
+  [@@deriving bin_io, compare, sexp]
+
+  let pp ppf { args; rets; entry } =
+    let one ppf (a, b) =
+      Format.fprintf ppf "(%a, %a)" Var.pp a Var.pp b
+    in
+    Format.fprintf ppf "args=[%a] rets=[%a] entry=[%a]"
+      (Format.pp_print_list one) args
+      (Format.pp_print_list one) rets
+      (Format.pp_print_list one) entry
+end
+
+let versions_tag : Versions.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-ssa-versions"
+    ~uuid:"1f0d4b8e-52a6-4c11-9f0a-3d7c2b1e8a44"
+    (module Versions)
+
+let ssa_tag : unit Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-ssa"
+    ~uuid:"2c1e5f9a-63b7-4d22-8a1b-4e8d3f2c9b55"
+    (module Core.Unit)
+
+let is_ssa (sub : sub term) : bool = Term.has_attr sub ssa_tag
+
 let set_layout (l : Sub_layout.t) (sub : sub term) : sub term =
   Term.set_attr sub layout_tag l
 

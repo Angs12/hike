@@ -12,36 +12,6 @@ open Bil2llvm_calls
 open Bil2llvm_fp
 open Bil2llvm_section
 
-(* The phi incomings ARE the emitted CFG's edges: the per-sub row table
-   records every rendered terminator, so a block the emitter never
-   branches to takes no incoming. *)
-let update_phis ctx scope transfer_vars blks =
-  (* The rendered edges group by target once; per block the join is a
-     lookup, not a filter over every edge. *)
-  let by_target =
-    Base.List.fold !(scope.edges) ~init:Tid.Map.empty
-      ~f:(fun m r ->
-        Core.Map.add_multi m ~key:r.e_target ~data:r)
-  in
-  Seq.iter blks ~f:(fun blk ->
-      let blk_tid = Term.tid blk in
-      let rows =
-        Core.Map.find by_target blk_tid |> Option.value ~default:[]
-      in
-      Base.List.iter transfer_vars ~f:(fun var ->
-          (* Only created phis take incomings: the liveness pass prunes
-             the rest at creation. *)
-          let has_phi =
-            match Core.Map.find !(scope.blk_llvals) blk_tid with
-            | Some bv -> WVarMap.mem (Bil2llvm_env.wvar_of var) !(bv.phis)
-            | None -> false
-          in
-          if has_phi then begin
-            let phi = get_phi scope blk_tid var in
-            Bil2llvm_phi.add_incomings ctx scope ~phi ~rows ~target:blk_tid var
-          end))
-
-
 (* Each jmp of a series renders in its own basic block; every direct
    edge lands in the edge table so target phis name the terminator's
    block.  The terminal guard's false edge is the block's term-order
@@ -52,9 +22,12 @@ let create_branches ctx scope sub blk llvm_builder branches =
   let llvm_ctx = ctx.llvm_ctx in
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
   let jmps = Seq.to_list branches in
-  let note_edge ~(cur : Llvm.llbasicblock) (tid : Tid.t) =
-    Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:tid ~term_bb:cur ()
-  in
+  (match jmps with
+  | _ :: _ :: _ ->
+      failwith
+        "hike-ssa: unsplit multi-jmp series reached the emitter \
+         (the splitter leaves none in production)"
+  | _ -> ());
   let emit_terminal_guard ~cur ~tid ~bb ~(cond : exp) =
     match (Hike_stack_model.is_true_cond cond, Hike_split_blocks.fallthrough sub blk) with
     | true, _ -> Llvm.build_br bb llvm_builder |> ignore
@@ -66,7 +39,6 @@ let create_branches ctx scope sub blk llvm_builder branches =
     | false, Some succ ->
         let cont = get_bb scope succ in
         let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
-        note_edge ~cur succ;
         Llvm.build_cond_br cond_val bb cont llvm_builder |> ignore
     | false, None ->
         let dead = Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-dead") fn in
@@ -91,7 +63,6 @@ let create_branches ctx scope sub blk llvm_builder branches =
               create_interrupt ctx llvm_builder
             else (
               let bb = get_bb scope tid in
-              note_edge ~cur tid;
               match cont_bb with
               | Some next ->
                 let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
@@ -140,18 +111,6 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call ctx scope llvm_builder tid blk sub call fr
 
-let transfer_with_phis ctx scope transfer_vars llvm_builder blk_tid =
-  Base.List.iter transfer_vars ~f:(fun var ->
-      (* A var with its own BIR phi at this block needs no planner
-         phi; the BIR phi is the value. *)
-      if has_bir_phi scope blk_tid var then ()
-      else begin
-        let typ = var_lltype ctx var in
-        let res = Llvm.build_empty_phi typ "" llvm_builder in
-        insert_phi scope blk_tid var res;
-        insert_local scope blk_tid var res
-      end)
-
 let create_elts ctx scope llvm_builder blk sub_tid fr =
   let tid = Term.tid blk in
   Blk.elts blk
@@ -198,114 +157,40 @@ let fill_bir_phis ctx scope blks =
               in
               Llvm.add_incoming (value, get_bb scope src) phi_ll)))
 
-let populate_blks ctx scope transfer_vars blks sub fr =
+let populate_blks ctx scope blks sub fr =
   let sub_tid = Term.tid sub in
   Seq.iter blks ~f:(fun blk ->
       let llvm_builder =
         Llvm.builder_at_end ctx.llvm_ctx (get_bb scope (Term.tid blk))
       in
-      transfer_with_phis ctx scope transfer_vars llvm_builder (Term.tid blk);
       create_elts ctx scope llvm_builder blk sub_tid fr;
       create_control_flow ctx scope llvm_builder blk sub fr)
 
 
 let exit_entry scope llvm_builder sub =
   let target = entry_blk_tid sub in
-  ignore (Llvm.build_br (get_bb scope target) llvm_builder);
-  Bil2llvm_phi.record_edge scope ~pred:Graphs.Tid.start ~target
-    ~term_bb:(get_bb scope Graphs.Tid.start) ()
+  ignore (Llvm.build_br (get_bb scope target) llvm_builder)
 
-let build_entry_block ctx scope llvm_builder transfer_vars fr sub fn =
-  let tid = Graphs.Tid.start in
-  let args = get_args ctx (Term.tid sub) in
-  Base.List.iter transfer_vars ~f:(fun var ->
-      let arg =
-        Base.List.find args ~f:(fun arg -> Var.same (Arg.lhs arg) var)
-      in
-      let llval =
-        match arg with
-        | Some arg -> create_exp ctx scope llvm_builder tid (Arg.rhs arg)
-        | None ->
-            (* Unbound transfer vars freeze to one fixed value:
-               repeated reads of an undefined register observe
-               identical bits. *)
-            frozen_undef ctx scope ~builder:llvm_builder var
-      in
-      insert_local scope tid var llval);
+let build_entry_block ctx scope llvm_builder fr sub =
   (* The SP local binds to a per-invocation entry-block alloca: the
-     anchor is invocation-private — reentrancy-safe, no SP parameter. *)
+     anchor is invocation-private — reentrancy-safe, no SP parameter.
+     The sub-wide binding serves every pre-def read. *)
   let sp0 =
     (* storage-free subs: the constant anchor *)
     frame_stack0 fr
   in
-  insert_local scope tid ctx.sp sp0;
+  insert_local scope Graphs.Tid.start ctx.sp sp0;
+  bind_ssaval scope ctx.sp sp0;
   exit_entry scope llvm_builder sub
 
-(* Builds blocks and transfer set in one walk. *)
-let transfer_vars_of_sub ctx scope llvm_ctx blks fn sub =
+(* Creates the LLVM blocks: one per BIR block plus the entry. *)
+let create_blocks ctx scope llvm_ctx blks fn sub =
   insert_bb scope Graphs.Tid.start (Llvm.entry_block fn);
   init_blk_llvals scope Graphs.Tid.start;
-  (* (transfer set, defined set); the defined set includes phi lhs —
-     phi lanes need definedness. *)
-  let indirect_rets = ret_set ctx in
-  let defined_and_transferred =
-    Seq.fold blks
-      ~f:(fun (reg_set, def_set) blk ->
-        let tid = Term.tid blk in
-        init_blk_llvals scope tid;
-        insert_bb scope tid (Llvm.append_block llvm_ctx (Term.name blk) fn);
-        let blk_free = Blk.free_vars blk in
-        let call_args, call_rets =
-          Term.enum jmp_t blk
-          |> Seq.fold ~init:(Var.Set.empty, Var.Set.empty) ~f:(fun (acc, rets) jmp ->
-              match Jmp.kind jmp with
-              | Call c when not (Hike_return.is_jmp jmp) -> (
-                  let rets, args =
-                    match Call.target c with
-                    | Direct ctid ->
-                        ( Base.List.fold (get_rets ctx ctid) ~init:rets
-                            ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg))),
-                          get_args ctx ctid )
-                    | Indirect _ -> (Core.Set.union rets indirect_rets, [])
-                  in
-                  ( Base.List.fold args ~init:acc ~f:(fun acc arg ->
-                        Core.Set.add acc (Var.base (Arg.lhs arg))),
-                    rets ))
-              | _ -> (acc, rets))
-        in
-        let blk_defs =
-          Blk.elts blk
-          |> Seq.fold ~init:Var.Set.empty ~f:(fun acc elt ->
-                 match elt with
-                 | `Def def -> Core.Set.add acc (Var.base (Def.lhs def))
-                 | `Phi phi -> Core.Set.add acc (Var.base (Phi.lhs phi))
-                 | _ -> acc)
-        in
-        ( Core.Set.union (Core.Set.union reg_set (Core.Set.union blk_free call_args))
-            call_rets,
-          Core.Set.union (Core.Set.union def_set blk_defs) call_rets ))
-      ~init:(Var.Set.empty, Var.Set.empty)
-  in
-  let reg_set, def_set = defined_and_transferred in
-  let arg_set =
-    Base.List.fold (get_args ctx (Term.tid sub)) ~init:Var.Set.empty
-      ~f:(fun acc arg -> Core.Set.add acc (Var.base (Arg.lhs arg)))
-  in
-  (* [def_set] never joins the transfer set. *)
-  reg_set
-  |> Core.Set.union indirect_rets
-  |> Core.Set.union arg_set
-  |> Core.Set.filter ~f:(fun var ->
-      ((not @@ Hike_stack_model.is_mem var) || Var.same var (Abi.pc ctx.target))
-      (* SP and callee-saved lanes stay live. *)
-      || Var.same var ctx.sp
-      || Abi.is_callee_saved ctx.abi var)
-  |> Core.Set.filter ~f:(fun var ->
-      Core.Set.mem def_set var
-      || Core.Set.mem arg_set var
-      || Var.same var ctx.sp)
-  |> Core.Set.to_list
-
+  Seq.iter blks ~f:(fun blk ->
+      let tid = Term.tid blk in
+      init_blk_llvals scope tid;
+      insert_bb scope tid (Llvm.append_block llvm_ctx (Term.name blk) fn))
 
 (* The anchor pointer: the alloca position the SP Slot's stored integer
    relativizes against.  [idx] keeps the SysV entry-SP residue mod 16, so
@@ -331,7 +216,8 @@ let create_sub ctx scope sub =
     in
     let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
 
-    let transfer_vars = transfer_vars_of_sub ctx scope llvm_ctx blks fn sub in
+    create_blocks ctx scope llvm_ctx blks fn sub;
+    load_ssa_versions scope blks;
     let layout =
       Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:{ Hike_stack_model.Sub_layout.regions = [];
@@ -375,11 +261,9 @@ let create_sub ctx scope sub =
     let fr : sub_frame = { anchor_i64; stack0; anchor_ptr; regions } in
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
-    build_entry_block ctx scope llvm_builder transfer_vars fr sub fn;
-    populate_blks ctx scope transfer_vars blks sub fr;
-    update_phis ctx scope transfer_vars blks;
+    build_entry_block ctx scope llvm_builder fr sub;
+    populate_blks ctx scope blks sub fr;
     fill_bir_phis ctx scope blks;
-    Bil2llvm_phi.prune_phis scope;
     scope.cur_frame := None;
     let sub_tid = Term.tid sub in
     let lane_reads =

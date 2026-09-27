@@ -133,6 +133,16 @@ module Split_blocks : sig
   val free_regs : sub term -> var list
 end
 
+(** SSA materialization: cross-block register values flow through BIR
+    phi terms; call rets mint versions stamped per block. *)
+module Ssa : sig
+  val ssa_program :
+    target:Theory.Target.t -> program term -> program term
+
+  (** The input lanes of an SSA sub: its index-0 reads. *)
+  val free_regs_ssa : sub term -> var list
+end
+
 (** The width-coercion pass: every exp the later passes read is made
     width-honest once, so the VSA and the emitter read uniform widths. *)
 module Coerce : sig
@@ -144,6 +154,19 @@ end
 (** Stack split decision and helpers, and the shared section
     vocabulary: the producer/emitter contract point. *)
 module Stack_model : sig
+  (** The SSA block stamp: base var -> live version at block end. *)
+  module Versions : sig
+    type t =
+      { args : (var * var) list
+      ; rets : (var * var) list
+      ; entry : (var * var) list
+      }
+  end
+
+  val versions_tag : Versions.t Value.Tag.t
+  val ssa_tag : unit Value.Tag.t
+  val is_ssa : sub term -> bool
+
   (** The sections in declaration order. *)
   type sec = Hike_stack_model.sec =
     | Stack

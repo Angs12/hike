@@ -222,18 +222,13 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
         Llvm.build_zext p (Llvm.i64_type llvm_ctx) "" llvm_builder
     | FHLT -> assert false
   in
-  (* Ret temps bind in both scopes: the call block (phi consumers)
-     and the fallthrough block (direct reads). *)
+  (* Ret temps bind their stamped version at the call block: the SSA
+     pass minted one per call, so every read downstream resolves. *)
   Base.List.iter sig_.fp_rets ~f:(fun ret ->
       let rw = match Var.typ ret with Type.Imm w -> w | _ -> word_bits in
       let r_lane =
         coerce_int_width llvm_ctx llvm_builder
           ~bits:(int_width_or word_bits result) result rw in
-      insert_local scope blk_tid ret r_lane;
-      Option.iter (fun t -> insert_local scope t ret r_lane) fallthrough);
-  Option.iter
-    (fun t ->
-      Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:t
-        ~term_bb:(get_bb scope blk_tid) ())
-    fallthrough;
+      let arg = Arg.create ret (Bil.Var ret) in
+      bind_call_ret ctx scope blk_tid arg r_lane);
   finish_call scope llvm_builder fallthrough

@@ -394,7 +394,11 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
 and window_mem_access ctx scope llvm_builder blk_tid fr exp ~raw =
   let w_ptr =
     let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
-    match get_local scope blk_tid w with
+    match
+      (match get_ssaval scope w with
+       | Some v -> Some v
+       | None -> get_local scope blk_tid w)
+    with
     | Some v -> v
     | None -> Llvm.undef (var_lltype ctx w)
   in

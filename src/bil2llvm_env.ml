@@ -14,12 +14,6 @@ module EHashtbl = Core.Hashtbl
    Rows are appended per rendered jmp — never merged, so two
    conditional gotos to one target are two rows with two distinct
    terminator blocks. *)
-type phi_edge = {
-  e_pred : Tid.t;                    (* the edge's BIR block *)
-  e_term_bb : Llvm.llbasicblock;     (* the block holding the terminator *)
-  e_sp_restore : Llvm.llvalue option;
-  e_target : Tid.t;
-}
 
 (* Vars keyed by (name, width). *)
 type wvar = WVar of Var.t * int
@@ -178,8 +172,6 @@ type sub_scope = {
   (* The body's frame: routes region/window mem vars; bound around
      body emission. *)
   cur_frame : sub_frame option ref;
-  (* The rendered edges: fresh per scope, owned by Bil2llvm_phi. *)
-  edges : phi_edge list ref;
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
@@ -192,6 +184,9 @@ type sub_scope = {
   (* The BIR phi terms' own llvalues, per block: the planner's
      per-var machinery does not touch these. *)
   bir_phis : llvalue_map ref Tid.Map.t ref;
+  (* The SSA version maps, read off the blocks' [hike-ssa-versions]
+     stamps before any body emits. *)
+  ssa_versions : Hike_stack_model.Versions.t Tid.Map.t ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -200,11 +195,11 @@ let fresh_scope () : sub_scope =
     dead_warned = ref false;
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
-    edges = ref [];
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
     ssavals = ref WVarMap.empty;
-    bir_phis = ref Tid.Map.empty }
+    bir_phis = ref Tid.Map.empty;
+    ssa_versions = ref Tid.Map.empty }
 
 let typ_lltype ctx typ =
   match typ with
@@ -360,18 +355,6 @@ let init_blk_llvals scope blk_tid =
     Core.Map.add_exn !(scope.blk_llvals) ~key:blk_tid
       ~data:{ phis; locals }
 
-let insert_phi scope blk_tid var value =
-  let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
-  blk_llvals.phis := WVarMap.add (wvar_of var) value !(blk_llvals.phis)
-
-let get_phi scope blk_tid var =
-  let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
-  match WVarMap.find_opt (wvar_of var) !(blk_llvals.phis) with
-  | Some v -> v
-  | None ->
-      failwith @@ "Phi " ^ Var.name var ^ " not found at blk "
-      ^ Tid.name blk_tid
-
 let insert_local scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
   blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals)
@@ -387,6 +370,39 @@ let bind_ssaval scope var value =
 
 let get_ssaval scope var =
   WVarMap.find_opt (wvar_of var) !(scope.ssavals)
+
+(* The SSA stamps: one read per sub, before any body emits. *)
+let load_ssa_versions scope blks =
+  Seq.iter blks ~f:(fun blk ->
+      match Term.get_attr blk Hike_stack_model.versions_tag with
+      | Some vs ->
+          scope.ssa_versions :=
+            Core.Map.set !(scope.ssa_versions) ~key:(Term.tid blk) ~data:vs
+      | None -> ())
+
+(* A base lane's live version at a block, when it has one: the
+   end-of-defs map (pre-mint). *)
+let lane_version scope blk_tid v =
+  Core.Map.find !(scope.ssa_versions) blk_tid
+  |> Base.Option.bind ~f:(fun vs ->
+         Base.List.Assoc.find vs.Hike_stack_model.Versions.args v
+           ~equal:Var.same)
+
+(* The block's entry versions: the tops before its defs. *)
+let entry_version scope blk_tid v =
+  Core.Map.find !(scope.ssa_versions) blk_tid
+  |> Base.Option.bind ~f:(fun vs ->
+         Base.List.Assoc.find vs.Hike_stack_model.Versions.entry v
+           ~equal:Var.same)
+
+(* The block's call-ret mints. *)
+let mint_version scope blk_tid v =
+  Core.Map.find !(scope.ssa_versions) blk_tid
+  |> Base.Option.bind ~f:(fun vs ->
+         Base.List.Assoc.find vs.Hike_stack_model.Versions.rets v
+           ~equal:Var.same)
+
+
 
 (* The BIR phi registry: one llvalue per (block, var). *)
 let insert_bir_phi scope blk_tid var value =
@@ -447,6 +463,45 @@ let warn_undef_read ctx scope var blk_tid =
       Hike_diag.warn "undef-read: blk %s: var %s never defined"
         (Tid.name blk_tid) (Var.name v)
   end
+
+(* Rewrites a lane read to its live version at the block. *)
+let lane_exp scope blk_tid (e : exp) : exp =
+  (object
+    inherit Exp.mapper
+
+    method! map_sym v =
+      match lane_version scope blk_tid v with
+      | Some w -> w
+      | None -> v
+  end)#map_exp e
+
+
+(* Binds one call-ret lane: the stamped version when the SSA pass
+   minted one, else the base lane. *)
+let bind_call_ret ctx scope blk_tid (ret : Arg.t) value =
+  match mint_version scope blk_tid (Arg.lhs ret) with
+  | Some v ->
+      bind_ssaval scope v value;
+      insert_local scope blk_tid v value
+  | None -> insert_local scope blk_tid (Arg.lhs ret) value
+
+(* A lane's value at a block: its end-of-defs version, then the
+   sub-wide and per-block bindings of the base. *)
+let lane_value ctx scope blk_tid v =
+  match
+    Base.Option.bind (lane_version scope blk_tid v) ~f:(get_ssaval scope)
+  with
+  | Some x -> x
+  | None -> (
+      match get_ssaval scope v with
+      | Some x -> x
+      | None -> (
+          match get_local scope blk_tid v with
+          | Some x -> x
+          | None ->
+              warn_undef_read ctx scope v blk_tid;
+              frozen_undef ctx scope v))
+
 
 let call_exn jmp =
   match Jmp.kind jmp with Call j -> j | _ -> failwith "call_exn:"

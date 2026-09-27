@@ -21,6 +21,7 @@ module Image = Hike_image
 module Promote = Hike_promote
 module Kb = Hike_kb
 module Types = Hike_types
+module Ssa = Hike_ssa
 module Strip_canaries = Hike_strip_canaries
 module Bil2llvm = Bil2llvm
 
@@ -242,6 +243,10 @@ let pass_split_blocks proj =
 
 let pass_types proj = Hike_types.run proj
 
+let pass_ssa proj =
+  let target = Project.target proj in
+  Project.map_program proj ~f:(Hike_ssa.ssa_program ~target)
+
 let () =
   Extension.declare (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
@@ -258,6 +263,7 @@ let () =
         chain ~name:"split-blocks" ~prev:sections pass_split_blocks
       in
       let types = chain ~name:"types" ~prev:split_blocks pass_types in
-      let convlir = chain' ~name:"convlir" ~prev:types (pass_convlir ~output:output_file) in
+      let ssa = chain ~name:"ssa" ~prev:types pass_ssa in
+      let convlir = chain' ~name:"convlir" ~prev:ssa (pass_convlir ~output:output_file) in
       ignore convlir;
       Ok ())

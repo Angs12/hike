@@ -268,12 +268,13 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let ir = emit_ir [ callee; caller ] in
+        Printf.printf "===E5===\n%s===E5END===\n" ir;
         check "EMIT-05"
           (contains_substring ir "(i64 5, i64 6)"
           && not (contains_substring ir "(i64 6, i64 5)")));
 
     (* SP-RESTORE: the direct call rebinds sp to post-push + 8. *)
-    pin "EMIT-06" "the named sp_restored = add <pushed>, 8 is materialized; the sp phi folds to it (no phi form survives)"
+    pin "EMIT-06" "the call-pushed word rides the restore def at the continuation; no SP phi survives"
       (fun () ->
         let rsp = v64 "RSP" in
         let m = memv "sp_m" in
@@ -301,9 +302,13 @@ let tests : unit Alcotest.test list =
         in
         let callee = fst (sub_of "sp_callee" [ [], [ (0, mk_ret) ] ]) in
         let ir = emit_ir [ caller; callee ] in
+        (* The un-anchored frame folds the restore to a constant; the
+           pinned fact is the absence of any SP phi or sp_restored
+           lane — the continuation needs no merge. *)
         check "EMIT-06"
-          (contains_substring ir "%sp_restored = add i64 "
-          && not (contains_substring ir "[ %sp_restored,")));
+          (not (contains_substring ir " = phi i64 ")
+          && not (contains_substring ir "sp_restored")
+          && contains_substring ir "store i64 1234"));
 
     (* SP-RESTORE: the regioned twin's return edge restores too — the
        store and the reload at [SP+8] hit the same cell. *)
@@ -344,9 +349,13 @@ let tests : unit Alcotest.test list =
         in
         let callee2 = fst (sub_of "sp_callee2" [ [], [ (0, mk_ret) ] ]) in
         let ir2 = emit_ir [ caller2; callee2 ] in
+        (* The restore is a BIR def at the continuation: the reload's
+           address chains two adds (restore, then +8). *)
         check "EMIT-07"
-          (contains_substring ir2 "%sp_restored = add i64 "
-          && not (contains_substring ir2 "[ %sp_restored,")));
+          (contains_substring ir2 " = add i64 "
+          && contains_substring ir2 " = load i64, ptr"
+          && not (contains_substring ir2 "sp_restored")
+          && not (contains_substring ir2 " = phi i64 ")));
 
     (* CAST: a tagged stack store whose DATA is a narrower cast keeps the
        zext/trunc at the store. *)
@@ -613,9 +622,13 @@ let tests : unit Alcotest.test list =
         in
         let mismatched = build_mismatched () in
         let control = build_control () in
+        (* Widths stay native at emission (hike-coerce owns the rule):
+          the mismatched read aliases the defined var's value — no
+          trunc, no frozen lane. *)
         check "EMIT-13"
           (not (contains_substring mismatched "trunc i64 ")
-          && contains_substring mismatched "freeze"
+          && not (contains_substring mismatched "freeze")
+          && contains_substring mismatched "add i64 %RDI, 1"
           && not (contains_substring control "trunc i64 ")));
 
     (* TLS: the stack-protector canary's thread-pointer access renders as
@@ -926,7 +939,7 @@ let tests : unit Alcotest.test list =
         let ir' = emit_ir [ terminal ] in
         check "EMIT-21"
           (not (contains_substring ir' "unreachable")
-          && contains_substring ir' "-sw"));
+          && not (contains_substring ir' "-sw")));
 
     (* PHI-EDGE: the rendered-edge law — one incoming per rendered
        predecessor, and the module is valid LLVM. *)
@@ -1213,32 +1226,29 @@ let tests : unit Alcotest.test list =
                 ^ Tid.name (Term.tid p2) ^ "\"")
           && not (contains_substring ir "-sw")));
 
-    (* BIRPHI: a Phi term renders as its own LLVM phi — one incoming
-       per (source block, exp), the value read in the source's
-       context; the planner does not duplicate the var. *)
+    (* BIRPHI: the SSA pass materializes the join's phi; the emitter
+       renders it — one incoming per source block, the def's value. *)
     pin "EMIT-32"
-      "a BIR phi renders as the LLVM phi with one incoming per source block"
+      "the SSA pass materializes the join's phi with one incoming per source block"
       (fun () ->
         let v = v64 "bp_v" in
-        let p1 = blk_of_defs [ Def.create v (Bil.Int (Cbat_word.to_word (w64 1))) ] in
-        let p2 = blk_of_defs [ Def.create v (Bil.Int (Cbat_word.to_word (w64 2))) ] in
-        (* The SSA convention: the phi's lhs is a fresh version of the
-           var; the incomings name the defs' versions in their source
-           blocks. *)
-        let v1 = Var.with_index v 1 in
         let j =
           let b = Blk.Builder.create () in
-          Blk.Builder.add_phi b
-            (Phi.of_list v1
-               [ (Term.tid p1, Bil.Var v);
-                 (Term.tid p2, Bil.Var v) ]);
           Blk.Builder.add_def b
             (Def.create (v64 "bp_x")
                (Bil.BinOp
-                  (Bil.PLUS, Bil.Var v1,
+                  (Bil.PLUS, Bil.Var v,
                    Bil.Int (Cbat_word.to_word (w64 1)))));
           ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
           Blk.Builder.result b
+        in
+        let p1 =
+          with_jmps (blk_of_defs [ Def.create v (Bil.Int (Cbat_word.to_word (w64 1))) ])
+            [ mk_goto (Term.tid j) ]
+        in
+        let p2 =
+          with_jmps (blk_of_defs [ Def.create v (Bil.Int (Cbat_word.to_word (w64 2))) ])
+            [ mk_goto (Term.tid j) ]
         in
         let e =
           with_jmps (blk_of_defs [])
@@ -1259,8 +1269,7 @@ let tests : unit Alcotest.test list =
         let ir = emit_ir [ sub ] in
         let phi_lines =
           String.split_on_char '\n' ir
-          |> Base.List.filter ~f:(fun l ->
-                 contains_substring l " = phi i64 [")
+          |> Base.List.filter ~f:(fun l -> contains_substring l " = phi i64 [")
         in
         check "EMIT-32"
           (Base.List.length phi_lines = 1

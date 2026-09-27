@@ -9,31 +9,6 @@ open Bil2llvm_fp
 open Bil2llvm_mem
 
 
-(* Machine calls push a return address the callee's ret pops, so the
-   call's fallthrough edge rebinds SP to its pre-call value.  The
-   binding is edge-keyed.  The edge is recorded unconditionally — the
-   phi planner's predecessor set is the rendered edges, so a call whose
-   block does not track SP still needs its fallthrough recorded or the
-   target's phis come out with no incoming. *)
-let restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough_tid =
-  let sp_key = ctx.sp in
-  let sp_restore =
-    match get_local scope blk_tid sp_key with
-    | None -> None
-    | Some post_push ->
-        let restored =
-          Llvm.build_add post_push
-            (Llvm.const_int (ctx.i64_ty) ctx.abi.Abi.word)
-            "sp_restored" llvm_builder
-        in
-        (match get_local scope fallthrough_tid sp_key with
-         | None -> insert_local scope fallthrough_tid sp_key restored
-         | Some _ -> ());
-        Some restored
-  in
-  Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:fallthrough_tid
-    ~term_bb:(get_bb scope blk_tid) ?sp_restore ()
-
 let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let args = get_args ctx call_tid in
   let extern = is_extern ctx call_tid in
@@ -47,21 +22,24 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word i)
   in
   Base.List.map args ~f:(fun arg ->
-      let exp = Arg.rhs arg in
+      (* Every lane read resolves through the block's version stamp —
+         including the fp-lowered extern lanes. *)
+      let exp = lane_exp scope blk_tid (Arg.rhs arg) in
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
       then
         (* The caller-window base is the caller's SP at the call, as a
            pointer into the caller's residue. *)
-        (match (get_local scope blk_tid ctx.sp, !(scope.cur_frame)) with
-         | Some sp, Some fr -> (
+        (match !(scope.cur_frame) with
+         | Some fr -> (
              match fr.anchor_ptr with
              | Some aptr ->
+                 let sp = lane_value ctx scope blk_tid ctx.sp in
                  let delta = Llvm.build_sub sp fr.anchor_i64 "" llvm_builder in
                  Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) aptr [| delta |] ""
                    llvm_builder
              | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
-         | _ -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+         | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let i =
           Base.Option.value ~default:0
@@ -197,7 +175,9 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
               "" llvm_builder
         | _ -> param
       in
-      insert_local scope blk_tid (Arg.lhs arg) value)
+      insert_local scope blk_tid (Arg.lhs arg) value;
+      (* A parameter dominates every reader: bind it sub-wide too. *)
+      bind_ssaval scope (Arg.lhs arg) value)
     fn
 
 let create_fun_declaration ctx sub_tid =
@@ -255,14 +235,14 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
            (Llvm.create_enum_attr ctx.llvm_ctx "zeroext" 0L)
            Llvm.AttrIndex.Return
        | _ -> ());
-      insert_local scope blk_tid (Arg.lhs ret) ret_var
+      bind_call_ret ctx scope blk_tid ret ret_var
   | rets ->
       let ret_struct =
         Llvm.build_call fn_typ fn (Array.of_list args) "" llvm_builder
       in
       Base.List.iteri rets ~f:(fun i ret ->
           let ret_val = Llvm.build_extractvalue ret_struct i "" llvm_builder in
-          insert_local scope blk_tid (Arg.lhs ret) ret_val)
+          bind_call_ret ctx scope blk_tid ret ret_val)
 
 (* The outgoing stack args in slot order: [call_arg k] defs
   enumerated by index, stopping at the first absent slot.  An extern
@@ -337,11 +317,8 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
       ~first:ret ~kind
   | _, rets -> bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets);
   (match fallthrough with
-  | Some fallthrough ->
-      restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough;
-      finish_call scope llvm_builder (Some fallthrough)
-  | None ->
-      if emit_unreachable then finish_call scope llvm_builder None)
+  | Some fallthrough -> finish_call scope llvm_builder (Some fallthrough)
+  | None -> if emit_unreachable then finish_call scope llvm_builder None)
 
 (* An indirect site with an unresolved target: the pointer lands in
    a promoted target's thunk (via address rendering), else the
@@ -365,7 +342,6 @@ let create_indirect_call ctx scope llvm_builder blk_tid (j : jmp term) =
   let rets = get_rets ctx icall_tid in
   let args = create_call_args ctx scope blk_tid llvm_builder icall_tid in
   bind_call_rets ctx scope blk_tid llvm_builder fn_typ func_ptr args rets;
-  restore_sp_after_call llvm_builder ctx scope blk_tid fallthrough;
   finish_call scope llvm_builder (Some fallthrough)
 
 (* The Thunk — the memory-convention twin of a promoted sub. *)
@@ -383,7 +359,10 @@ let rec is_plt_trampoline ctx (sub : sub term) : bool =
     verdict
 
 and is_plt_trampoline_slow ctx (sub : sub term) : bool =
-  let free_vars = Hike_split_blocks.free_regs sub in
+  let free_vars =
+    if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa sub
+    else Hike_split_blocks.free_regs sub
+  in
   let reg_vars =
     Base.List.filter free_vars ~f:(fun reg ->
         not (Var.same reg ctx.sp)
@@ -488,11 +467,14 @@ let create_thunk ctx (sub_tid : tid) =
 let create_return ctx scope blk_tid llvm_builder cur_sub =
   let rets =
     Base.List.map (get_rets ctx (Term.tid cur_sub)) ~f:(fun ret ->
-        match get_local scope blk_tid (Arg.lhs ret) with
-        | Some v -> v
-        | None ->
-            warn_undef_read ctx scope (Arg.lhs ret) blk_tid;
-            Llvm.undef (var_lltype ctx (Arg.lhs ret)))
+        let lane = Arg.lhs ret in
+        (* A ret lane read at its own call site carries the mint. *)
+        match
+          Base.Option.bind (mint_version scope blk_tid lane)
+            ~f:(get_ssaval scope)
+        with
+        | Some x -> x
+        | None -> lane_value ctx scope blk_tid lane)
   in
   match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -546,14 +528,9 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   let r = Llvm.build_call fn_ty callee
       (Array.of_list arg_vals) "" llvm_builder in
   (match get_rets ctx target with
-   | [ ret ] -> insert_local scope blk_tid (Arg.lhs ret) r
+   | [ ret ] -> bind_call_ret ctx scope blk_tid ret r
    | _ -> ());
   let fallthrough = Option.map label_tid (Call.return call) in
-  Option.iter
-    (fun t ->
-      Bil2llvm_phi.record_edge scope ~pred:blk_tid ~target:t
-        ~term_bb:(get_bb scope blk_tid) ())
-    fallthrough;
   finish_call scope llvm_builder fallthrough
 
 (* A self-call stub targets its own address (the symtab names an

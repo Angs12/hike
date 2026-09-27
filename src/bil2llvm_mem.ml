@@ -13,8 +13,17 @@ let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
 (* Runtime-sized allocas: the def's value is the post-event SP, so
    the alloca size is (old SP − new SP) however the size was spelled. *)
 let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
+  (* The SP in scope before this def: the block's entry version (the
+     def's own lhs is a fresh SSA version, bound only by it). *)
   let old_sp =
-    create_exp ctx scope llvm_builder blk_tid (Bil.Var (Def.lhs def))
+    match
+      Base.Option.bind (entry_version scope blk_tid ctx.sp)
+        ~f:(get_ssaval scope)
+    with
+    | Some v -> v
+    | None ->
+        create_exp ctx scope llvm_builder blk_tid
+          (Bil.Var (Var.base (Def.lhs def)))
   in
   let new_sp = create_exp ctx scope llvm_builder blk_tid exp in
   let size = Llvm.build_sub old_sp new_sp "vla_size" llvm_builder in
@@ -80,9 +89,12 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
     if Hike_def_slots.def_is_window_value def then
       let w_i64 =
         let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
-        match get_local scope blk_tid wv with
-        | Some v ->
-            Llvm.build_ptrtoint v (ctx.i64_ty) "" llvm_builder
+        match
+          (match get_ssaval scope wv with
+           | Some v -> Some v
+           | None -> get_local scope blk_tid wv)
+        with
+        | Some v -> Llvm.build_ptrtoint v (ctx.i64_ty) "" llvm_builder
         | None -> Llvm.undef (ctx.i64_ty)
       in
       let stack0 = frame_stack0 fr in
@@ -90,4 +102,7 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
       Llvm.build_add w_i64 rel "" llvm_builder
     else res
   in
-  insert_local scope blk_tid var res
+  insert_local scope blk_tid var res;
+  (* An SSA version has one def: its value is valid wherever the def
+     dominates, so the binding is sub-wide. *)
+  if Var.index var > 0 then bind_ssaval scope var res

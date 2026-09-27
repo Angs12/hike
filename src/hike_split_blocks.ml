@@ -71,7 +71,9 @@ let normalize (prog : program term) : program term =
   Term.map sub_t prog ~f:split_sub
 
 (* The rendered CFG's edge set: every explicit jmp target, plus the
-   term-order successor of a guarded goto terminal (its false edge). *)
+   term-order successor of a guarded goto terminal (its false edge).
+   The liveness and SSA passes read the CFG from here — one successor
+   relation. *)
 let succs_of_sub (sub : sub term) : Tid.t list Tid.Map.t =
   let blks = Term.enum blk_t sub |> Seq.to_list in
   Base.List.fold blks ~init:Tid.Map.empty ~f:(fun m blk ->

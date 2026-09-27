@@ -26,7 +26,15 @@ let () =
     in
     let solved = sub in
     (* The emitter input: the split runs after the attribution. *)
-    let split = Hike.Split_blocks.split_sub solved in
+    let split =
+      let prog =
+        Program.create ~subs:[ Hike.Split_blocks.split_sub solved ] ()
+      in
+      fst
+        (Hike.Ssa.ssa_program ~target:(Project.target proj) prog
+         |> Term.enum sub_t |> Seq.hd_exn
+         |> fun s -> (s, ()))
+    in
     let names regs = Base.List.map regs ~f:Var.name |> String.concat "," in
     Printf.printf "bap-free before: [%s]\n"
       (names (Sub.free_vars solved |> Core.Set.to_list));
@@ -39,7 +47,27 @@ let () =
     let sub = split in
     Term.enum blk_t sub
     |> Seq.iter ~f:(fun blk ->
-        Printf.printf "block %s:\n" (Tid.name (Term.tid blk));
+        (match Term.get_attr blk Hike.Stack_model.versions_tag with
+         | Some st ->
+             Printf.printf "block %s STAMP args=[%s] rets=[%s]\n"
+               (Tid.name (Term.tid blk))
+               (String.concat ","
+                  (Base.List.map st.Hike.Stack_model.Versions.args
+                     ~f:(fun (a, b) -> Var.name a ^ ">" ^ Var.name b)))
+               (String.concat ","
+                  (Base.List.map st.Hike.Stack_model.Versions.rets
+                     ~f:(fun (a, b) -> Var.name a ^ ">" ^ Var.name b)))
+         | None -> Printf.printf "block %s STAMP none\n" (Tid.name (Term.tid blk)));
+        Term.enum phi_t blk
+        |> Seq.iter ~f:(fun ph ->
+            let incom =
+              Phi.values ph |> Seq.to_list
+              |> Base.List.map ~f:(fun (t, e) ->
+                     Tid.name t ^ ":" ^ (Format.asprintf "%a" Exp.pp e))
+              |> String.concat " "
+            in
+            Printf.printf "  PHI %s := [%s]\n"
+              (Var.name (Phi.lhs ph)) incom);
         Term.enum def_t blk
         |> Seq.iter ~f:(fun d ->
             let lhs = Var.name (Def.lhs d) in
