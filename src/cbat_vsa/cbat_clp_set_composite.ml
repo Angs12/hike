@@ -297,6 +297,15 @@ let of_clp (p : clp) : t = canonical [ Clp (P.of_progression p) ]
 let bottom i = FinSet (FinSet.bottom i)
 let top i = canonical [ Clp (P.top i) ]
 
+(* One leaf, or the [Many] pieces. *)
+let leaves (t : t) : t list = match t with Many ps -> ps | q -> [ q ]
+
+(* The pairwise leaf fan-out: [f] per leaf pair, canonically merged. *)
+let pairwise (f : t -> t -> t list) (t1 : t) (t2 : t) : t =
+  canonical
+    (List.concat_map (leaves t1) ~f:(fun q1 ->
+         List.concat_map (leaves t2) ~f:(fun q2 -> f q1 q2)))
+
 (* The plain-arm band: signed-positive [2^61, 2^63); no real x86-64
    address can be there, so re-tagging a bounded set inside it stack is
    sound. *)
@@ -420,15 +429,10 @@ let rec cardinality (t : t) : word =
         let s = Cbat_word.add acc c in
         if Cbat_word.(<) s acc then Cbat_word.ones width else s)
 
-let min_elem (t : t) : word option =
-  let leaf (q : t) : word option =
-    match q with
-    | StackOff offs ->
-      Option.map (plain_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
-    | Clp ps -> P.min_elem ps
-    | FinSet s -> FinSet.min_elem s
-    | Many _ -> None
-  in
+(* Fold the leaves' extrema left-to-right, [better] picking the winner
+   (ties go to the accumulator, matching the historical order). *)
+let extremum (leaf : t -> word option)
+    (better : Cbat_word.t -> Cbat_word.t -> Cbat_word.t) (t : t) : word option =
   let rec go acc (t : t) =
     match t with
     | Many ps -> List.fold ps ~init:acc ~f:go
@@ -436,29 +440,33 @@ let min_elem (t : t) : word option =
       (match leaf q, acc with
        | None, acc -> acc
        | Some m, None -> Some m
-       | Some m, Some a -> Some (if Cbat_word.compare m a < 0 then m else a))
+       | Some m, Some a -> Some (better m a))
   in
   go None t
 
+let min_elem (t : t) : word option =
+  extremum
+    (fun q ->
+       match q with
+       | StackOff offs ->
+         Option.map (plain_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
+       | Clp ps -> P.min_elem ps
+       | FinSet s -> FinSet.min_elem s
+       | Many _ -> None)
+    (fun m a -> if Cbat_word.compare m a < 0 then m else a)
+    t
+
 let max_elem (t : t) : word option =
-  let leaf (q : t) : word option =
-    match q with
-    | StackOff offs ->
-      Option.map (plain_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
-    | Clp ps -> P.max_elem ps
-    | FinSet s -> FinSet.max_elem s
-    | Many _ -> None
-  in
-  let rec go acc (t : t) =
-    match t with
-    | Many ps -> List.fold ps ~init:acc ~f:go
-    | q ->
-      (match leaf q, acc with
-       | None, acc -> acc
-       | Some m, None -> Some m
-       | Some m, Some a -> Some (if Cbat_word.compare m a > 0 then m else a))
-  in
-  go None t
+  extremum
+    (fun q ->
+       match q with
+       | StackOff offs ->
+         Option.map (plain_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
+       | Clp ps -> P.max_elem ps
+       | FinSet s -> FinSet.max_elem s
+       | Many _ -> None)
+    (fun m a -> if Cbat_word.compare m a > 0 then m else a)
+    t
 
 (* The SEGMENT-RELATIVE extrema of a stack value: a [StackOff]'s offset
    set, or a plain in-band set's segment-relative hull. *)
@@ -473,99 +481,65 @@ let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
 (* Signed extrema: the projection is signed-positive, so its signed
    and unsigned extrema agree; a set spanning the sign boundary has
    no signed extremum. *)
-let min_elem_signed (t : t) : word option =
-  let leaf (q : t) : word option =
-    match q with
-    | StackOff offs ->
-      Option.bind (offsets_signed_extrema offs)
-        ~f:(fun (lo, _) ->
-          Option.bind (checked_add3 stack_base 0L
-                         (match Cbat_word.to_int64 lo with
-                          | Ok v -> v
-                          | Error _ -> Stdlib.Int64.min_int))
-            ~f:(fun v -> Some (w64_of_i64 v)))
-    | Clp ps ->
-      List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
-          let r =
-            match Clp.min_elem_signed p with
-            | Some _ as r -> r
-            | None ->
+(* The signed extreme of one leaf; [dir] < 0 is the minimum, > 0 the
+   maximum.  A sign-spanning piece has no signed extreme on that side. *)
+let signed_leaf ~(dir : int) (q : t) : word option =
+  let pick (a, b) = if dir < 0 then a else b in
+  let clamp = if dir < 0 then Stdlib.Int64.min_int else Stdlib.Int64.max_int in
+  let better m a =
+    let c = Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) in
+    if (if dir < 0 then c < 0 else c > 0) then m else a
+  in
+  let via_offsets offs =
+    Option.bind (offsets_signed_extrema offs)
+      ~f:(fun ex ->
+        Option.bind (checked_add3 stack_base 0L
+                       (match Cbat_word.to_int64 (pick ex) with
+                        | Ok v -> v
+                        | Error _ -> clamp))
+          ~f:(fun v -> Some (w64_of_i64 v)))
+  in
+  let via_pieces ps =
+    List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
+        let r =
+          match (if dir < 0 then Clp.min_elem_signed p
+                 else Clp.max_elem_signed p) with
+          | Some _ as r -> r
+          | None ->
+            if dir < 0 then
               (match Clp.max_elem p with
                | Some mx
                  when Cbat_word.(<) mx (Word_ops.half (Cbat_word.bitwidth mx)) ->
                  Clp.min_elem p
                | _ -> None)
-          in
-          match r, acc with
-          | None, acc -> acc
-          | Some m, None -> Some m
-          | Some m, Some a ->
-            Some
-              (if Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) < 0
-               then m else a))
-    | FinSet s -> FinSet.min_elem_signed s
-    | Many _ -> None
-  in
-  let rec go acc (t : t) =
-    match t with
-    | Many ps -> List.fold ps ~init:acc ~f:go
-    | q ->
-      (match leaf q, acc with
-       | None, acc -> acc
-       | Some m, None -> Some m
-       | Some m, Some a ->
-         Some
-           (if Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) < 0
-            then m else a))
-  in
-  go None t
-
-let max_elem_signed (t : t) : word option =
-  let leaf (q : t) : word option =
-    match q with
-    | StackOff offs ->
-      Option.bind (offsets_signed_extrema offs)
-        ~f:(fun (_, hi) ->
-          Option.bind (checked_add3 stack_base 0L
-                         (match Cbat_word.to_int64 hi with
-                          | Ok v -> v
-                          | Error _ -> Stdlib.Int64.max_int))
-            ~f:(fun v -> Some (w64_of_i64 v)))
-    | Clp ps ->
-      List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
-          let r =
-            match Clp.max_elem_signed p with
-            | Some _ as r -> r
-            | None ->
+            else
               (match Clp.min_elem p with
                | Some mn
                  when Cbat_word.(>=) mn (Word_ops.half (Cbat_word.bitwidth mn)) ->
                  Clp.max_elem p
                | _ -> None)
-          in
-          match r, acc with
-          | None, acc -> acc
-          | Some m, None -> Some m
-          | Some m, Some a ->
-            Some
-              (if Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) > 0
-               then m else a))
-    | FinSet s -> FinSet.max_elem_signed s
-    | Many _ -> None
+        in
+        match r, acc with
+        | None, acc -> acc
+        | Some m, None -> Some m
+        | Some m, Some a -> Some (better m a))
   in
-  let rec go acc (t : t) =
-    match t with
-    | Many ps -> List.fold ps ~init:acc ~f:go
-    | q ->
-      (match leaf q, acc with
-       | None, acc -> acc
-       | Some m, None -> Some m
-       | Some m, Some a ->
-         Some
-           (if Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) > 0
-            then m else a))
-  in
-  go None t
+  match q with
+  | StackOff offs -> via_offsets offs
+  | Clp ps -> via_pieces ps
+  | FinSet s ->
+    (if dir < 0 then FinSet.min_elem_signed s else FinSet.max_elem_signed s)
+  | Many _ -> None
+
+let extremum_signed ~(dir : int) (t : t) : word option =
+  extremum (signed_leaf ~dir)
+    (fun m a ->
+       let c = Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) in
+       if (if dir < 0 then c < 0 else c > 0) then m else a)
+    t
+
+let min_elem_signed (t : t) : word option = extremum_signed ~dir:(-1) t
+let max_elem_signed (t : t) : word option = extremum_signed ~dir:1 t
 
 (* Offset space: the per-sub cell-key universe keys by offsets. *)
 let rec splits_by (t : t) (w : Cbat_word.t) =
@@ -721,12 +695,7 @@ let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   | ((Clp _ | FinSet _ | StackOff _) as q1),
     ((Clp _ | FinSet _ | StackOff _) as q2) ->
     canonical (op_pair op q1 q2)
-  | p1, p2 ->
-    let l1 = match p1 with Many ps -> ps | q -> [ q ] in
-    let l2 = match p2 with Many ps -> ps | q -> [ q ] in
-    canonical
-      (List.concat_map l1 ~f:(fun q1 ->
-           List.concat_map l2 ~f:(fun q2 -> op_pair op q1 q2)))
+  | p1, p2 -> pairwise (op_pair op) p1 p2
 
 let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
   match t with
@@ -857,12 +826,7 @@ let union t1 t2 : t =
   | StackOff o1, StackOff o2 -> canonical [ StackOff (P.union o1 o2) ]
   | StackOff _, _ | _, StackOff _ ->
     lift_binop Union (to_plain t1) (to_plain t2)
-  | _ ->
-    let l1 = match t1 with Many ps -> ps | q -> [ q ] in
-    let l2 = match t2 with Many ps -> ps | q -> [ q ] in
-    canonical
-      (List.concat_map l1 ~f:(fun q1 ->
-           List.concat_map l2 ~f:(fun q2 -> op_pair Union q1 q2)))
+  | _ -> pairwise (op_pair Union) t1 t2
 
 (* The plain side of a mixed meet, translated into the offset space
    (positions minus the base): the meet stays stack-symbolic. *)
@@ -908,11 +872,7 @@ let rec intersection (t1 : t) (t2 : t) : t =
       | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
       | _ -> []
     in
-    let l1 = match t1 with Many ps -> ps | q -> [ q ] in
-    let l2 = match t2 with Many ps -> ps | q -> [ q ] in
-    canonical
-      (List.concat_map l1 ~f:(fun q1 ->
-           List.concat_map l2 ~f:(fun q2 -> pair q1 q2)))
+    pairwise pair t1 t2
 
 (* Set difference; the piece union keeps the survivors when the cheap
    side enumerates, the sound identity otherwise. *)
@@ -935,11 +895,7 @@ let rec diff (t1 : t) (t2 : t) : t =
         | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
         | _ -> []
     in
-    let l1 = match t1 with Many ps -> ps | q -> [ q ] in
-    let l2 = match t2 with Many ps -> ps | q -> [ q ] in
-    canonical
-      (List.concat_map l1 ~f:(fun q1 ->
-           List.concat_map l2 ~f:(fun q2 -> pair q1 q2)))
+    pairwise pair t1 t2
 
 (* Adds a base-free operand to a stack word: the offsets shift exactly;
    the shift runs progression-level on the hulls (single-progression
@@ -1195,7 +1151,9 @@ let rec precedes t1 t2 : bool =
    churn, and the memory keys derived from the hulls never stabilize
    (measured: four fresh fixpoint backstops on expr's regex subs).
    Mixed pairs degrade via the plain hull. *)
-let widen_join t1 t2 : t =
+(* Widen the two hulled progressions, keeping the origin: the offsets
+   widen for two symbolic pieces, the plain hulls otherwise. *)
+let hull_join (f : Clp.t -> Clp.t -> Clp.t) t1 t2 : t =
   canonical
     [ (match t1, t2 with
       | StackOff o1, StackOff o2 ->
@@ -1203,24 +1161,13 @@ let widen_join t1 t2 : t =
           match hull_of_pieces ps with
           | Some p -> p
           | None -> Clp.bottom 64 in
-        StackOff (P.of_progression (Clp.widen_join (hull o1) (hull o2)))
+        StackOff (P.of_progression (f (hull o1) (hull o2)))
       | _ ->
-        Clp (P.of_progression (Clp.widen_join (as_clp t1) (as_clp t2)))) ]
+        Clp (P.of_progression (f (as_clp t1) (as_clp t2)))) ]
 
+let widen_join t1 t2 : t = hull_join Clp.widen_join t1 t2
 let extrapolate_steps ~steps t1 t2 : t =
-  canonical
-    [ (match t1, t2 with
-      | StackOff o1, StackOff o2 ->
-        let hull ps =
-          match hull_of_pieces ps with
-          | Some p -> p
-          | None -> Clp.bottom 64 in
-        StackOff
-          (P.of_progression (Clp.extrapolate_steps ~steps (hull o1) (hull o2)))
-      | _ ->
-        Clp
-          (P.of_progression
-             (Clp.extrapolate_steps ~steps (as_clp t1) (as_clp t2)))) ]
+  hull_join (Clp.extrapolate_steps ~steps) t1 t2
 
 let join = union
 let meet = intersection
