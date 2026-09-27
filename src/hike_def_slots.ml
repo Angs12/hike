@@ -52,6 +52,18 @@ let def_is_window_value (d : def term) : bool =
 #endif
   KB.Value.get def_window_value_slot (Def.value d)
 
+(* The def's value is a bounded stack or VLA address, so the emitter's
+   ptr discipline emits it as a pointer.  Computed pre-SSA (where the
+   denotation resolves) by [hike_types]; rides the def's value. *)
+let def_ptr_kind_slot : (Theory.Value.cls, bool) KB.slot =
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-ptr-kind"
+    (KB.Domain.flat
+       ~inspect:(fun b -> Base.Sexp.Atom (string_of_bool b))
+       ~equal:Bool.equal ~empty:false "hike:ptr-kind")
+
+let def_ptr_kind (d : def term) : bool =
+  KB.Value.get def_ptr_kind_slot (Def.value d)
+
 (* One map applies [stamp] to every def whose tid is in [tids] — the
    two bool slots' shared stamper. *)
 let stamp_tids ~(tids : Tid.Set.t) ~stamp (sub : sub term) : sub term =
@@ -77,6 +89,14 @@ let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
 #endif
       Def.with_value d
         (KB.Value.put def_dyn_alloc_slot (Def.value d) true))
+
+let stamp_ptr_kinds ~(ptr_tids : Tid.Set.t) (sub : sub term) : sub term =
+  stamp_tids ~tids:ptr_tids sub ~stamp:(fun d ->
+#ifdef VSA_DEBUG
+      let () = Cbat_vsa.Cbat_kb_census.bump "ptr_kind.put" in
+#endif
+      Def.with_value d
+        (KB.Value.put def_ptr_kind_slot (Def.value d) true))
 
 (* The section tag rides the def's value: the producer stamps it, the
    emitter's dispatch reads it off the term. *)

@@ -204,8 +204,125 @@ let sign_program ~(target : Bap_core_theory.Theory.Target.t)
       let rets, args = compute_sub_sig target sub in
       Model.set_sig sub (rets @ args))
 
+(* ---- The value kind (ptr vs int) ----
+   A value is a pointer when any part of its denotation is a bounded
+   stack or VLA address.  Computed here, pre-SSA, where the denotation
+   resolves; the emitter's ptr discipline consumes it. *)
+
+module Vsa = Cbat_vsa
+
+let ptr_kind_of ~(facts : Hike_kb.facts) ~(blk : blk term) ?def (e : exp) :
+    bool =
+  match facts.Hike_kb.denote ~blk ?def e with
+  | Ok ws -> Vsa.WordSet.in_stack_segment ws
+  | Error _ -> false
+
+(* The defs whose value denotes a stack or VLA address. *)
+let ptr_def_tids ~(facts : Hike_kb.facts) (sub : sub term) : Tid.Set.t =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
+      Term.enum def_t blk
+      |> Seq.fold ~init:acc ~f:(fun acc d ->
+          if ptr_kind_of ~facts ~blk ~def:d (Def.rhs d) then
+            Core.Set.add acc (Term.tid d)
+          else acc))
+
+let sub_of_program (prog : program term) : sub term Tid.Map.t =
+  Term.enum sub_t prog
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
+      Core.Map.set m ~key:(Term.tid s) ~data:s)
+
+(* The callee's In lanes: its own signature, or the ABI integer
+   parameters for an extern. *)
+let callee_lanes ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
+    (t : tid) : Arg.t list =
+  match Core.Map.find sub_of t with
+  | Some callee -> Hike_stack_model.sig_args callee
+  | None ->
+      Base.List.map facts.Hike_kb.abi.Hike_abi.int_param_regs
+        ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
+
+(* A callee parameter is a pointer when any caller passes a stack or VLA
+   address at that lane (NULL counts as an address; a genuine address/
+   integer mix is a buggy program and is typed a pointer). *)
+let param_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
+    (prog : program term) : Var.Set.t Tid.Map.t =
+  let add acc t v =
+    Core.Map.update acc t ~f:(function
+        | None -> Var.Set.singleton v
+        | Some s -> Core.Set.add s v)
+  in
+  Term.enum sub_t prog
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc caller ->
+      Term.enum blk_t caller
+      |> Seq.fold ~init:acc ~f:(fun acc blk ->
+          Term.enum jmp_t blk
+          |> Seq.fold ~init:acc ~f:(fun acc j ->
+              match Jmp.kind j with
+              | Call c -> (
+                  match Call.target c with
+                  | Direct t ->
+                      Base.List.fold (callee_lanes ~facts ~sub_of t)
+                        ~init:acc ~f:(fun acc a ->
+                          if Hike_stack_model.is_ret a then acc
+                          else if ptr_kind_of ~facts ~blk (Arg.rhs a) then
+                            add acc t (Arg.lhs a)
+                          else acc)
+                  | Indirect _ -> acc)
+              | _ -> acc)))
+
+(* Stamps each In lane's kind: the mem/window lanes are pointers by
+   construction; a value lane is a pointer when its parameter is. *)
+let stamp_arg_kinds ~(param_kinds : Var.Set.t Tid.Map.t)
+    (prog : program term) : program term =
+  Term.map sub_t prog ~f:(fun sub ->
+      let kinds =
+        Core.Map.find param_kinds (Term.tid sub)
+        |> Base.Option.value ~default:Var.Set.empty
+      in
+      Term.map arg_t sub ~f:(fun a ->
+          if Hike_stack_model.is_ret a then a
+          else if
+            Hike_stack_model.is_ptr_arg a
+            || Hike_stack_model.is_window_var (Arg.lhs a)
+            || Core.Set.mem kinds (Arg.lhs a)
+          then Hike_stack_model.set_arg_ptr_kind a
+          else a))
+
+#ifdef VSA_DEBUG
+let kind_census (prog : program term) : unit =
+  let defs = ref 0 and ptrs = ref 0 and wins = ref 0 in
+  Term.enum sub_t prog
+  |> Seq.iter ~f:(fun sub ->
+      Term.enum blk_t sub
+      |> Seq.iter ~f:(fun blk ->
+          Term.enum def_t blk
+          |> Seq.iter ~f:(fun d ->
+              incr defs;
+              if Hike_def_slots.def_ptr_kind d then incr ptrs;
+              if Hike_def_slots.def_is_window_value d then incr wins)));
+  Printf.eprintf "hike-kinds: defs=%d ptr=%d window=%d\n%!" !defs !ptrs !wins
+#endif
+
 (* The pass: write every sub's signature, with its lane types, onto the
-   sub's own [arg] terms. *)
+   sub's own [arg] terms, then stamp the value/lane kinds (when the
+   analysis ran). *)
 let run (proj : Project.t) : Project.t =
   let target = Project.target proj in
-  Project.map_program proj ~f:(fun prog -> sign_program ~target prog)
+  Project.map_program proj ~f:(fun prog ->
+      let prog = sign_program ~target prog in
+      match Hike_kb.facts_opt () with
+      | None -> prog
+      | Some facts ->
+          let sub_of = sub_of_program prog in
+          let pks = param_kinds ~facts ~sub_of prog in
+          let prog = stamp_arg_kinds ~param_kinds:pks prog in
+          let prog =
+            Term.map sub_t prog ~f:(fun sub ->
+                Hike_def_slots.stamp_ptr_kinds
+                  ~ptr_tids:(ptr_def_tids ~facts sub) sub)
+          in
+#ifdef VSA_DEBUG
+          kind_census prog;
+#endif
+          prog)

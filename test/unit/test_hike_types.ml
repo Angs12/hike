@@ -341,6 +341,96 @@ let tests : unit Alcotest.test list =
         let prog' = Types.sign_program ~target:unknown prog in
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
         check "TYPES-23" (Model.sig_args sub' = []));
+    pin "KIND-01"
+      "a def computing a stack address is ptr-kind (its denotation is \
+       stack-resident)"
+      (fun () ->
+        let rbp = v64 "RBP" and rax = v64 "RAX" in
+        let sub =
+          straight_sub "k01"
+            [ Def.create rbp (Bil.Var sp);
+              Def.create rax
+                (Bil.BinOp
+                   ( Bil.PLUS,
+                     Bil.Var rbp,
+                     Bil.Int (Cbat_word.to_word (w64 8)) )) ]
+        in
+        let facts, stamped = fixture_facts_sub sub in
+        let ptrs = Types.ptr_def_tids ~facts stamped in
+        let rax_def =
+          Term.enum blk_t stamped
+          |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d -> Var.same (Def.lhs d) rax)
+        in
+        check "KIND-01"
+          (match rax_def with
+           | Some d -> Core.Set.mem ptrs (Term.tid d)
+           | None -> false));
+
+    pin "KIND-02" "a plain integer def is not ptr-kind" (fun () ->
+        let rcx = v64 "RCX" in
+        let sub =
+          straight_sub "k02"
+            [ Def.create rcx (Bil.Int (Cbat_word.to_word (w64 5))) ]
+        in
+        let facts, stamped = fixture_facts_sub sub in
+        let ptrs = Types.ptr_def_tids ~facts stamped in
+        let def =
+          Term.enum blk_t stamped
+          |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d -> Var.same (Def.lhs d) rcx)
+        in
+        check "KIND-02"
+          (match def with
+           | Some d -> not (Core.Set.mem ptrs (Term.tid d))
+           | None -> false));
+
+    pin "KIND-03" "stamp_ptr_kinds round-trips through def_ptr_kind"
+      (fun () ->
+        let rax = v64 "RAX" in
+        let sub =
+          straight_sub "k03"
+            [ Def.create rax (Bil.Int (Cbat_word.to_word (w64 1))) ]
+        in
+        let d = Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.hd_exn in
+        let sub' =
+          Hike.Def_slots.stamp_ptr_kinds ~ptr_tids:(Tid.Set.singleton (Term.tid d))
+            sub
+        in
+        let d' =
+          Term.enum blk_t sub'
+          |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.hd_exn
+        in
+        check "KIND-03" (Hike.Def_slots.def_ptr_kind d'));
+
+    pin "KIND-04"
+      "a callee parameter passed a stack address is ptr-kind" (fun () ->
+        let rdi = v64 "RDI" in
+        let callee, _ =
+          sub_of ~args:[ Arg.create ~intent:In rdi (Bil.Var rdi) ] "k04_callee"
+            [ [], [ (0, mk_ret) ] ]
+        in
+        let caller, _ =
+          sub_of "k04_caller"
+            [ [ Def.create rdi (Bil.Var sp) ],
+              [ (1,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Label.direct t)
+                           ~target:(Label.direct (Term.tid callee))
+                           ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let facts, stamped, _ = fixture_facts [ caller; callee ] in
+        let prog = Program.create ~subs:stamped () in
+        let sub_of_m = Types.sub_of_program prog in
+        let pks = Types.param_kinds ~facts ~sub_of:sub_of_m prog in
+        check "KIND-04"
+          (match Core.Map.find pks (Term.tid callee) with
+           | Some s -> Core.Set.mem s rdi
+           | None -> false));
   ]
 
 let () = run "hike_types" tests

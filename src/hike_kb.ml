@@ -68,6 +68,9 @@ let facts () =
   | Some f -> f
   | None -> failwith "hike: no analysis facts installed (pass_vsa did not run)"
 
+(* The optional read for passes that also run on fixtures (no analysis). *)
+let facts_opt () : facts option = !run
+
 (* The attribution pass adds the emitter spec to the installed record. *)
 let with_spec (f : facts) (spec : Bil2llvm_env.section_spec) : facts =
   { f with spec = Some spec }
