@@ -70,7 +70,7 @@ let mem_access ctx scope llvm_builder blk_tid sub_tid def_tag
       | _ -> create_exp ctx scope llvm_builder blk_tid exp)
   | _ -> create_exp ctx scope llvm_builder blk_tid exp
 
-let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
+let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
@@ -80,27 +80,6 @@ let create_def ctx scope blk_tid llvm_builder sub_tid fr def =
     else if Hike_def_slots.def_is_rip_relative def then
       create_rip_relative_addr ctx scope llvm_builder blk_tid exp
     else mem_access ctx scope llvm_builder blk_tid sub_tid def_tag def exp
-  in
-  (* A def whose value lives at/above the entry line addresses the
-     caller's window: re-base from this sub's anchor to the
-     hike_window parameter.  Memory-node defs are skipped — their
-     value is loaded data, not an address. *)
-  let res =
-    if Hike_def_slots.def_is_window_value def then
-      let w_i64 =
-        let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
-        match
-          (match get_ssaval scope wv with
-           | Some v -> Some v
-           | None -> get_local scope blk_tid wv)
-        with
-        | Some v -> Llvm.build_ptrtoint v (ctx.i64_ty) "" llvm_builder
-        | None -> Llvm.undef (ctx.i64_ty)
-      in
-      let stack0 = frame_stack0 fr in
-      let rel = Llvm.build_sub res stack0 "" llvm_builder in
-      Llvm.build_add w_i64 rel "" llvm_builder
-    else res
   in
   insert_local scope blk_tid var res;
   (* An SSA version has one def: its value is valid wherever the def

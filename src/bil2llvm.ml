@@ -233,6 +233,15 @@ let create_sub ctx scope sub =
     in
     let fr : sub_frame = { anchor_i64; stack0; anchor_ptr; regions } in
     scope.cur_frame := Some fr;
+    (* The window-value vars: a store of one materializes the real
+       address at the use. *)
+    scope.window_vars :=
+      Term.enum blk_t sub
+      |> Seq.concat_map ~f:(Term.enum def_t)
+      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+          if Hike_def_slots.def_is_window_value d then
+            Core.Set.add acc (Def.lhs d)
+          else acc);
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
     populate_blks ctx scope blks sub fr;

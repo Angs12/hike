@@ -202,6 +202,34 @@ let rewrite_mem_node exp addr size marker =
   in
   v#map_exp exp
 
+(* A window value is a model address; when it escapes into i64 memory
+   (a store) or a numeric lane, materialize the real address — the
+   caller-window pointer plus the entry-relative offset.  This is the
+   ONE as_int boundary. *)
+let is_window_exp scope (e : exp) : bool =
+  match e with
+  | Bil.Var w -> Core.Set.mem !(scope.window_vars) w
+  | _ -> false
+
+let as_int ctx scope llvm_builder blk_tid (is_window : bool) (v : Llvm.llvalue) :
+    Llvm.llvalue =
+  if not is_window then v
+  else
+    match !(scope.cur_frame) with
+    | None -> v
+    | Some fr -> (
+        let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
+        match
+          (match get_ssaval scope wv with
+           | Some x -> Some x
+           | None -> get_local scope blk_tid wv)
+        with
+        | Some wp ->
+            let w_i64 = Llvm.build_ptrtoint wp (ctx.i64_ty) "" llvm_builder in
+            let rel = Llvm.build_sub v (frame_stack0 fr) "" llvm_builder in
+            Llvm.build_add w_i64 rel "" llvm_builder
+        | None -> v)
+
 let rec create_exp ctx scope llvm_builder blk_tid exp =
   match exp with
   | BinOp (op, e1, e2) ->
@@ -239,20 +267,23 @@ let rec create_exp ctx scope llvm_builder blk_tid exp =
       region_window_access ctx scope llvm_builder blk_tid mv exp
         ~raw:(fun () ->
           let addr = create_exp ctx scope llvm_builder blk_tid addr in
-          let data = create_exp ctx scope llvm_builder blk_tid data in
-          create_store ctx llvm_builder (data, addr))
+          let d = create_exp ctx scope llvm_builder blk_tid data in
+          let d = as_int ctx scope llvm_builder blk_tid (is_window_exp scope data) d in
+          create_store ctx llvm_builder (d, addr))
   | Store (Bil.Var mv, addr, data, _, s)
     when Hike_stack_model.is_sec_comp_mem mv ->
       sec_comp_access ctx scope llvm_builder blk_tid ~store:true mv addr
         ~data:(Some data) (Size.in_bits s)
   | Store (_, addr, data, _, _) when is_tls_addr ctx addr ->
       let ptr = tls_anchor_addr ctx llvm_builder in
-      let data = create_exp ctx scope llvm_builder blk_tid data in
-      Llvm.build_store data ptr llvm_builder
+      let d = create_exp ctx scope llvm_builder blk_tid data in
+      let d = as_int ctx scope llvm_builder blk_tid (is_window_exp scope data) d in
+      Llvm.build_store d ptr llvm_builder
   | Store (_, addr, data, _, _) ->
       let addr = create_exp ctx scope llvm_builder blk_tid addr in
-      let data = create_exp ctx scope llvm_builder blk_tid data in
-      create_store ctx llvm_builder (data, addr)
+      let d = create_exp ctx scope llvm_builder blk_tid data in
+      let d = as_int ctx scope llvm_builder blk_tid (is_window_exp scope data) d in
+      create_store ctx llvm_builder (d, addr)
   | Load (Bil.Var mv, addr, _, size)
     when Hike_stack_model.is_region_mem mv
          || Hike_stack_model.is_window_mem mv ->
@@ -373,6 +404,9 @@ and storage_access ctx scope llvm_builder blk_tid
       let p = pointer_of (create_exp ctx scope llvm_builder blk_tid addr) in
       let emit () =
         let d = create_exp ctx scope llvm_builder blk_tid data in
+        let d =
+          as_int ctx scope llvm_builder blk_tid (is_window_exp scope data) d
+        in
         let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
         d
       in

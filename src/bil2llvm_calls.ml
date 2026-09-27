@@ -469,12 +469,20 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
     Base.List.map (get_rets ctx (Term.tid cur_sub)) ~f:(fun ret ->
         let lane = Arg.lhs ret in
         (* A ret lane read at its own call site carries the mint. *)
-        match
-          Base.Option.bind (mint_version scope blk_tid lane)
-            ~f:(get_ssaval scope)
-        with
-        | Some x -> x
-        | None -> lane_value ctx scope blk_tid lane)
+        let v =
+          match
+            Base.Option.bind (mint_version scope blk_tid lane)
+              ~f:(get_ssaval scope)
+          with
+          | Some x -> x
+          | None -> lane_value ctx scope blk_tid lane
+        in
+        let is_window =
+          match lane_version scope blk_tid lane with
+          | Some ver -> Core.Set.mem !(scope.window_vars) ver
+          | None -> Core.Set.mem !(scope.window_vars) lane
+        in
+        as_int ctx scope llvm_builder blk_tid is_window v)
   in
   match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore

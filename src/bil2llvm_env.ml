@@ -166,6 +166,9 @@ type sub_scope = {
   (* The body's frame: routes region/window mem vars; bound around
      body emission. *)
   cur_frame : sub_frame option ref;
+  (* The vars whose value is an above-entry stack address (a window
+     value): a store of one materializes the real address. *)
+  window_vars : Var.Set.t ref;
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
@@ -188,6 +191,7 @@ let fresh_scope () : sub_scope =
     dead_warned = ref false;
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
+    window_vars = ref Var.Set.empty;
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
     ssavals = ref WVarMap.empty;
