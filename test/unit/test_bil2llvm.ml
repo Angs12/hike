@@ -188,7 +188,7 @@ let tests : unit Alcotest.test list =
     (* FRZ: the never-defined register's frozen entry value — two reads
        of the same lane observe the SAME freeze. *)
     pin "EMIT-04"
-      "a never-defined register's reads freeze once; the never-read phi is pruned (the phi pruner folds/removes it)"
+      "a never-defined register's reads freeze once; a never-read var never enters the SSA var set, so no phi is placed"
       (fun () ->
         let ymm =
           Var.create ~is_virtual:false ~fresh:false "YMM9" (Type.Imm 256)
@@ -268,7 +268,6 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let ir = emit_ir [ callee; caller ] in
-        Printf.printf "===E5===\n%s===E5END===\n" ir;
         check "EMIT-05"
           (contains_substring ir "(i64 5, i64 6)"
           && not (contains_substring ir "(i64 6, i64 5)")));
@@ -1276,6 +1275,32 @@ let tests : unit Alcotest.test list =
           && Base.List.exists phi_lines ~f:(fun l ->
                  contains_substring l "1, %"
                  && contains_substring l "2, %")));
+
+    (* The splitter leaves a non-compilable series alone; reaching the
+       emitter with it is a loud failure, never a silent render. *)
+    pin "EMIT-33"
+      "an unsplit multi-jmp series reaching the emitter is a loud failure"
+      (fun () ->
+        let sub, _ =
+          sub_of "unsplit_series"
+            [ [],
+              [ (1, mk_goto);
+                (0,
+                 fun _ ->
+                   Jmp.create
+                     (Goto
+                        (Indirect
+                           (Bil.Int (Cbat_word.to_word (w64 0)))))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let loud =
+          try
+            ignore (emit_ir [ sub ]);
+            false
+          with Failure m ->
+            Base.String.is_substring m ~substring:"unsplit multi-jmp"
+        in
+        check "EMIT-33" loud);
   ]
 
 let () = run "bil2llvm" tests

@@ -20,11 +20,6 @@ let ssa_tag = Model.ssa_tag
 let is_ssa = Model.is_ssa
 module Versions = Model.Versions
 
-let direct_tid label =
-  match label with
-  | Direct t -> t
-  | Indirect _ -> failwith "hike_ssa: indirect label where direct needed"
-
 (* Every non-interrupt, non-halt call jmp mints its ret lanes. *)
 let call_of_jmp (j : jmp term) : Call.t option =
   match Jmp.kind j with
@@ -322,14 +317,23 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
           iterated_frontier bs
           |> Core.Set.to_list
           |> Base.List.fold ~init:sub ~f:(fun sub tid ->
-                 Term.map blk_t sub ~f:(fun blk ->
-                     if Tid.equal (Term.tid blk) tid then
-                       insert_phi ~preds:(preds_of tid) blk v
-                     else blk)))
+                 match Term.find blk_t sub tid with
+                 | None -> sub
+                 | Some blk ->
+                     Term.update blk_t sub
+                       (insert_phi ~preds:(preds_of tid) blk v)))
     in
     (* The rename walk, dominator-tree ordered from [start]. *)
     let vars_tbl : var list Var.Table.t = Core.Hashtbl.create (module Var) in
     let nums : int Var.Table.t = Core.Hashtbl.create (module Var) in
+    (* Each var's live version: the top entry, when it is versioned. *)
+    let live_vers () : (var * var) list =
+      Core.Hashtbl.to_alist vars_tbl
+      |> Base.List.filter_map ~f:(fun (k, vs) ->
+             match vs with
+             | d :: _ when Var.index d > 0 -> Some (k, d)
+             | _ -> None)
+    in
     let top v =
       match Core.Hashtbl.find vars_tbl v with Some (d :: _) -> d | _ -> v
     in
@@ -363,12 +367,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
         | None -> sub'
         | Some blk ->
             (* The entry map reads BEFORE this block's own defs. *)
-            entry_vers :=
-              Core.Hashtbl.to_alist vars_tbl
-              |> Base.List.filter_map ~f:(fun (k, vs) ->
-                     match vs with
-                     | d :: _ when Var.index d > 0 -> Some (k, d)
-                     | _ -> None);
+            entry_vers := live_vers ();
             let blk =
               Term.map phi_t blk ~f:(fun phi ->
                   Phi.with_lhs phi (new_name (Phi.lhs phi)))
@@ -387,13 +386,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
             (* The argument map reads BEFORE the call's ret mints: an
                argument lane passes the machine's current value, not
                the callee's future result. *)
-            let arg_vers =
-              Core.Hashtbl.to_alist vars_tbl
-              |> Base.List.filter_map ~f:(fun (k, vs) ->
-                     match vs with
-                     | d :: _ when Var.index d > 0 -> Some (k, d)
-                     | _ -> None)
-            in
+            let arg_vers = live_vers () in
             if Core.Set.mem call_blk_tids tid then
               Base.List.iter (mint_of (call_info blk)) ~f:(fun v ->
                   minted := (v, new_name v) :: !minted);
@@ -444,10 +437,10 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     let sub =
       !stamps
       |> Core.Map.fold ~init:sub ~f:(fun ~key ~data sub ->
-             Term.map blk_t sub ~f:(fun blk ->
-                 if Tid.equal (Term.tid blk) key then
-                   Term.set_attr blk versions_tag data
-                 else blk))
+             match Term.find blk_t sub key with
+             | None -> sub
+             | Some blk ->
+                 Term.update blk_t sub (Term.set_attr blk versions_tag data))
     in
     Term.set_attr sub ssa_tag ()
 

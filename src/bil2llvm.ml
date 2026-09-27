@@ -12,29 +12,20 @@ open Bil2llvm_calls
 open Bil2llvm_fp
 open Bil2llvm_section
 
-(* Each jmp of a series renders in its own basic block; every direct
-   edge lands in the edge table so target phis name the terminator's
-   block.  The terminal guard's false edge is the block's term-order
-   successor; a block with none keeps the dead end. *)
+(* One jmp per block: the splitter guarantees the lone terminator, and
+   the terminal guard's false edge is the block's term-order successor;
+   a block with none keeps the dead end.  A multi-jmp series is a loud
+   failure (the splitter leaves none in production). *)
 let create_branches ctx scope sub blk llvm_builder branches =
   let open Bap.Std in
   let blk_tid = Term.tid blk in
   let llvm_ctx = ctx.llvm_ctx in
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
-  let jmps = Seq.to_list branches in
-  (match jmps with
-  | _ :: _ :: _ ->
-      failwith
-        "hike-ssa: unsplit multi-jmp series reached the emitter \
-         (the splitter leaves none in production)"
-  | _ -> ());
-  let emit_terminal_guard ~cur ~tid ~bb ~(cond : exp) =
+  let emit_terminal_guard ~tid ~bb ~(cond : exp) =
     match (Hike_stack_model.is_true_cond cond, Hike_split_blocks.fallthrough sub blk) with
     | true, _ -> Llvm.build_br bb llvm_builder |> ignore
     | false, Some succ when Tid.equal succ tid ->
         (* Both edges land on the target: the guard selects nothing. *)
-        let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
-        ignore cond_val;
         Llvm.build_br bb llvm_builder |> ignore
     | false, Some succ ->
         let cont = get_bb scope succ in
@@ -47,48 +38,30 @@ let create_branches ctx scope sub blk llvm_builder branches =
         Llvm.position_at_end dead llvm_builder;
         Llvm.build_unreachable llvm_builder |> ignore
   in
-  let rec step cur = function
-    | [] -> ()
-    | j :: rest -> (
-        let cont_bb =
-          match rest with
-          | [] -> None
-          | _ -> Some (Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-sw") fn)
-        in
-        match Jmp.kind j |> goto_label_exn with
-        | Direct tid ->
-            if Bil2llvm_env.is_interrupt_name (Tid.name tid) then
-              (* A divide-by-zero trap lifts as a direct goto to the
-                 interrupt sub; it is terminal. *)
-              create_interrupt ctx llvm_builder
-            else (
-              let bb = get_bb scope tid in
-              match cont_bb with
-              | Some next ->
-                let cond = create_exp ctx scope llvm_builder blk_tid (Jmp.cond j) in
-                Llvm.build_cond_br cond bb next llvm_builder |> ignore;
-                Llvm.position_at_end next llvm_builder;
-                step next rest
-              | None ->
-                  emit_terminal_guard ~cur ~tid ~bb ~cond:(Jmp.cond j))
-        | Indirect exp -> (
-            (* An indirect jmp ends its own path; later jmps still
-               render.  A label-less indirectbr is UB when taken, so
-               the class is named on the channel. *)
-            Hike_diag.warn
-              "emit: indirect jump at block %s has no enumerated destinations (UB when taken)"
-              (Tid.name blk_tid);
-            let target_val = create_exp ctx scope llvm_builder blk_tid exp in
-            build_indirect_br llvm_builder target_val
-               ~reserved_destinations:indirect_br_one_reserved |> ignore;
-            (match cont_bb with
-             | Some next ->
-                 Llvm.position_at_end next llvm_builder;
-                 step next rest
-             | None -> ())
-        ))
-  in
-  step (Llvm.insertion_block llvm_builder) jmps
+  match Seq.to_list branches with
+  | [ j ] -> (
+      match Jmp.kind j |> goto_label_exn with
+      | Direct tid ->
+          if Bil2llvm_env.is_interrupt_name (Tid.name tid) then
+            (* A divide-by-zero trap lifts as a direct goto to the
+               interrupt sub; it is terminal. *)
+            create_interrupt ctx llvm_builder
+          else
+            emit_terminal_guard ~tid ~bb:(get_bb scope tid)
+              ~cond:(Jmp.cond j)
+      | Indirect exp ->
+          (* A label-less indirectbr is UB when taken, so the class is
+             named on the channel. *)
+          Hike_diag.warn
+            "emit: indirect jump at block %s has no enumerated destinations (UB when taken)"
+            (Tid.name blk_tid);
+          let target_val = create_exp ctx scope llvm_builder blk_tid exp in
+          build_indirect_br llvm_builder target_val
+            ~reserved_destinations:indirect_br_one_reserved |> ignore)
+  | _ ->
+      failwith
+        "hike-ssa: unsplit multi-jmp series reached the emitter \
+         (the splitter leaves none in production)"
 
 let create_control_flow ctx scope llvm_builder blk sub fr =
   let control_flow = Term.enum jmp_t blk in

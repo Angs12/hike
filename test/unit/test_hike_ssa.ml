@@ -134,13 +134,6 @@ let tests : unit Alcotest.test list =
           |> Base.Option.value_exn
         in
         let incomings = Phi.values sj_phi |> Seq.to_list in
-        Printf.printf "===S2 phi=%s incomings=[%s]\n"
-          (Var.name (Phi.lhs sj_phi))
-          (String.concat ";"
-             (Base.List.map incomings ~f:(fun (_, e) ->
-                  match e with
-                  | Bil.Var w -> Var.name w ^ "/" ^ string_of_int (Var.index w)
-                  | _ -> "exp")));
         check "SSA-02"
           (Var.index (Phi.lhs sj_phi) > 0
           && Base.List.length incomings = 2

@@ -51,10 +51,20 @@ let split_sub (sub : sub term) : sub term =
           let jmps = Term.enum jmp_t blk |> Seq.to_list in
           if compilable_series jmps then Some (Term.tid blk)
           else begin
+            let shape =
+              Base.String.concat ~sep:","
+                (Base.List.map jmps ~f:(fun j ->
+                     match Jmp.kind j with
+                     | Goto (Direct _) -> "goto"
+                     | Goto (Indirect _) -> "goto*"
+                     | Ret _ -> "ret"
+                     | Call _ -> "call"
+                     | Int _ -> "int"))
+            in
             Hike_diag.warn
-              "split-blocks: sub %s: block %s: multi-jmp series not all \
+              "split-blocks: sub %s: block %s: multi-jmp series [%s] not all \
                direct gotos; left unsplit"
-              (Sub.name sub) (Tid.name (Term.tid blk));
+              (Sub.name sub) (Tid.name (Term.tid blk)) shape;
             None
           end)
     in

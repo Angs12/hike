@@ -8,7 +8,7 @@ bindings; `bil2llvm_calls.ml`'s `bind_call_ret`).
 Fixtures are hand-built BIR signed through the real `sign_program` +
 `ssa_program` pair.  `emit_ir` (fixtures.ml) runs the same pipeline the
 production chain runs: types → split → ssa → emit; the emitter pins
-(EXMIT-*) therefore exercise the SSA BIR end to end.
+(EMIT-*) therefore exercise the SSA BIR end to end.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|

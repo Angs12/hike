@@ -9,12 +9,6 @@ module Abi = Hike_abi
 
 module EHashtbl = Core.Hashtbl
 
-(* One RENDERED edge: the block holding the winning terminator, the
-   BIR block it belongs to, the edge's SP restore, the jump target.
-   Rows are appended per rendered jmp — never merged, so two
-   conditional gotos to one target are two rows with two distinct
-   terminator blocks. *)
-
 (* Vars keyed by (name, width). *)
 type wvar = WVar of Var.t * int
 
@@ -181,8 +175,7 @@ type sub_scope = {
   (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
      call ret — one var, one value, valid wherever the def dominates. *)
   ssavals : llvalue_map ref;
-  (* The BIR phi terms' own llvalues, per block: the planner's
-     per-var machinery does not touch these. *)
+  (* The BIR phi terms' own llvalues, per block. *)
   bir_phis : llvalue_map ref Tid.Map.t ref;
   (* The SSA version maps, read off the blocks' [hike-ssa-versions]
      stamps before any body emits. *)
