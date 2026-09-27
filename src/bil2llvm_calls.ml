@@ -69,8 +69,14 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
         in
         Llvm.build_bitcast v (Llvm.double_type ctx.llvm_ctx) ""
           llvm_builder
+      else if Hike_stack_model.is_arg_ptr_kind arg then
+        (* A stack/VLA address is passed as a pointer into the caller's
+           own storage. *)
+        let v = create_exp ctx scope llvm_builder blk_tid exp in
+        as_arg ctx scope llvm_builder blk_tid exp v
       else
-        create_exp ctx scope llvm_builder blk_tid exp)
+        let v = create_exp ctx scope llvm_builder blk_tid exp in
+        as_int ctx scope llvm_builder blk_tid (is_window_exp scope exp) v)
 
 type fp_ret_kind = FpFloat | FpDouble | FpLongDouble
 

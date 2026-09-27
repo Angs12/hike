@@ -98,6 +98,42 @@ let stamp_ptr_kinds ~(ptr_tids : Tid.Set.t) (sub : sub term) : sub term =
       Def.with_value d
         (KB.Value.put def_ptr_kind_slot (Def.value d) true))
 
+(* The storage a ptr-kind value lives in: the region/residue alloca, the
+   caller frame base, or a VLA.  Stamped by [hike_types] beside the
+   kind; the emitter's pointer arguments read it. *)
+type KB.conflict += Ptr_storage_conflict
+
+let () =
+  KB.Conflict.register_printer (function
+    | Ptr_storage_conflict ->
+        Some
+          "hike: ptr-storage conflict: two different storages were stamped for one def"
+    | _ -> None)
+
+let def_ptr_storage_slot :
+    (Theory.Value.cls, Hike_stack_model.ptr_storage option) KB.slot =
+  KB.Class.property ~package:"hike" Theory.Value.cls "hike-ptr-storage"
+    (KB.Domain.optional
+       ~inspect:(fun _ -> Base.Sexp.Atom "hike:ptr-storage")
+       ~join:(fun a b ->
+         if Hike_stack_model.equal_ptr_storage a b then Ok a
+         else Error Ptr_storage_conflict)
+       ~equal:Hike_stack_model.equal_ptr_storage
+       "hike:ptr-storage")
+
+let def_ptr_storage (d : def term) : Hike_stack_model.ptr_storage option =
+  KB.Value.get def_ptr_storage_slot (Def.value d)
+
+let stamp_ptr_storages ~(storages : Hike_stack_model.ptr_storage Tid.Map.t)
+    (sub : sub term) : sub term =
+  Term.map blk_t sub ~f:(fun blk ->
+      Term.map def_t blk ~f:(fun d ->
+          match Core.Map.find storages (Term.tid d) with
+          | Some s ->
+              Def.with_value d
+                (KB.Value.put def_ptr_storage_slot (Def.value d) (Some s))
+          | None -> d))
+
 (* The section tag rides the def's value: the producer stamps it, the
    emitter's dispatch reads it off the term. *)
 

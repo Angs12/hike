@@ -169,6 +169,8 @@ type sub_scope = {
   (* The vars whose value is an above-entry stack address (a window
      value): a store of one materializes the real address. *)
   window_vars : Var.Set.t ref;
+  (* Each address def's storage: the base a pointer argument GEPs into. *)
+  ptr_storages : Hike_stack_model.ptr_storage Var.Map.t ref;
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
@@ -192,6 +194,7 @@ let fresh_scope () : sub_scope =
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
     window_vars = ref Var.Set.empty;
+    ptr_storages = ref Var.Map.empty;
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
     ssavals = ref WVarMap.empty;
@@ -281,7 +284,8 @@ let synthetic_rets ctx =
 (* One signature lane's LLVM type: the pointer-tagged lanes pass
    pointers, the rest keep the BIR type. *)
 let lane_type ctx (a : Arg.t) : Llvm.lltype =
-  if Hike_stack_model.is_ptr_arg a then ctx.ptr_ty
+  if Hike_stack_model.is_ptr_arg a || Hike_stack_model.is_arg_ptr_kind a then
+    ctx.ptr_ty
   else var_lltype ctx (Arg.lhs a)
 
 let get_args ctx sub_tid =

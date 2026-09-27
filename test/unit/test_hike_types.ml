@@ -356,7 +356,7 @@ let tests : unit Alcotest.test list =
                      Bil.Int (Cbat_word.to_word (w64 8)) )) ]
         in
         let facts, stamped = fixture_facts_sub sub in
-        let ptrs = Types.ptr_def_tids ~facts stamped in
+        let ptrs, _ = Types.ptr_defs ~facts stamped in
         let rax_def =
           Term.enum blk_t stamped
           |> Seq.concat_map ~f:(Term.enum def_t)
@@ -374,7 +374,7 @@ let tests : unit Alcotest.test list =
             [ Def.create rcx (Bil.Int (Cbat_word.to_word (w64 5))) ]
         in
         let facts, stamped = fixture_facts_sub sub in
-        let ptrs = Types.ptr_def_tids ~facts stamped in
+        let ptrs, _ = Types.ptr_defs ~facts stamped in
         let def =
           Term.enum blk_t stamped
           |> Seq.concat_map ~f:(Term.enum def_t)

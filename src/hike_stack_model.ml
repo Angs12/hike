@@ -138,6 +138,21 @@ module Vsa = struct
 end
 include Vsa
 
+(* The storage a ptr-kind value lives in: a region or residue alloca of
+   this sub, the caller frame base (the window), or a VLA. *)
+type ptr_storage =
+  | Ptr_region of int
+  | Ptr_residue
+  | Ptr_window
+  | Ptr_vla
+
+let equal_ptr_storage (a : ptr_storage) (b : ptr_storage) : bool =
+  match a, b with
+  | Ptr_region x, Ptr_region y -> Int.equal x y
+  | Ptr_residue, Ptr_residue | Ptr_window, Ptr_window | Ptr_vla, Ptr_vla ->
+      true
+  | _ -> false
+
 
 
 (* A def keeps exactly one inline mem node, so one scan serves every

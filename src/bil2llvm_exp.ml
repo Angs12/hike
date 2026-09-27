@@ -211,6 +211,59 @@ let is_window_exp scope (e : exp) : bool =
   | Bil.Var w -> Core.Set.mem !(scope.window_vars) w
   | _ -> false
 
+(* A stack/VLA address passed at a call is passed as a pointer into the
+   caller's own storage: a below-entry address GEPs its region alloca, an
+   above-entry one GEPs the frame base, and NULL is the null pointer. *)
+let as_arg ctx scope llvm_builder blk_tid (a_exp : exp) (v : Llvm.llvalue) :
+    Llvm.llvalue =
+  let window_ptr () =
+    let wv = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
+    match
+      (match get_ssaval scope wv with
+       | Some x -> Some x
+       | None -> get_local scope blk_tid wv)
+    with
+    | Some wp -> Some wp
+    | None -> None
+  in
+  let geps fr ~base ~rel =
+    Hike_stack_ptr.ptr_of ~llvm_ctx:ctx.llvm_ctx ~llvm_builder ~base ~rel
+      ~stack0:(frame_stack0 fr) v
+  in
+  match Llvm.int64_of_const v with
+  | Some 0L -> Llvm.const_null ctx.ptr_ty
+  | _ -> (
+      match !(scope.cur_frame) with
+      | None -> Llvm.build_inttoptr v ctx.ptr_ty "" llvm_builder
+      | Some fr -> (
+          let storage =
+            match a_exp with
+            | Bil.Var w -> Core.Map.find !(scope.ptr_storages) w
+            | _ -> None
+          in
+          match storage with
+          | Some Hike_stack_model.Ptr_window -> (
+              match window_ptr () with
+              | Some wp -> geps fr ~base:wp ~rel:0L
+              | None -> Llvm.build_inttoptr v ctx.ptr_ty "" llvm_builder)
+          | Some (Hike_stack_model.Ptr_region id) -> (
+              match
+                Base.List.find fr.regions ~f:(fun (m, _) ->
+                    Var.equal m (Hike_stack_model.region_mem id))
+              with
+              | Some (_, (base, rel)) -> geps fr ~base ~rel
+              | None -> Llvm.build_inttoptr v ctx.ptr_ty "" llvm_builder)
+          | Some Hike_stack_model.Ptr_residue -> (
+              match
+                Base.List.find fr.regions ~f:(fun (m, _) ->
+                    Var.equal m
+                      (Hike_stack_model.region_mem
+                         Hike_stack_model.residue_id))
+              with
+              | Some (_, (base, rel)) -> geps fr ~base ~rel
+              | None -> Llvm.build_inttoptr v ctx.ptr_ty "" llvm_builder)
+          | _ -> Llvm.build_inttoptr v ctx.ptr_ty "" llvm_builder))
+
 let as_int ctx scope llvm_builder blk_tid (is_window : bool) (v : Llvm.llvalue) :
     Llvm.llvalue =
   if not is_window then v

@@ -217,15 +217,48 @@ let ptr_kind_of ~(facts : Hike_kb.facts) ~(blk : blk term) ?def (e : exp) :
   | Ok ws -> Vsa.WordSet.in_stack_segment ws
   | Error _ -> false
 
-(* The defs whose value denotes a stack or VLA address. *)
-let ptr_def_tids ~(facts : Hike_kb.facts) (sub : sub term) : Tid.Set.t =
+(* The defs whose value denotes a stack or VLA address, with the storage
+   each lives in. *)
+let ptr_defs ~(facts : Hike_kb.facts) (sub : sub term) :
+    Tid.Set.t * Hike_stack_model.ptr_storage Tid.Map.t =
+  let layout =
+    Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
+      ~default:
+        { Hike_stack_model.Sub_layout.regions = []; anchor = None;
+          window_param = false }
+  in
+  let word = facts.Hike_kb.abi.Hike_abi.word in
+  let a_base =
+    Hike_stack_model.args_base ~entry:Hike_stack_model.segment_base ~word
+  in
+  let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage =
+    match Hike_stack_model.positions_of_offsets ws with
+    | Some (lo, _) when Stdlib.Int64.compare lo a_base >= 0 ->
+        Hike_stack_model.Ptr_window
+    | Some (lo, hi) -> (
+        match
+          Base.List.find layout.Hike_stack_model.Sub_layout.regions
+            ~f:(fun (_, (rlo, rhi), _) ->
+              Stdlib.Int64.compare lo rlo >= 0
+              && Stdlib.Int64.compare hi rhi <= 0)
+        with
+        | Some (id, _, _) -> Hike_stack_model.Ptr_region id
+        | None -> Hike_stack_model.Ptr_residue)
+    | None -> Hike_stack_model.Ptr_residue
+  in
   Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
-      Term.enum def_t blk
-      |> Seq.fold ~init:acc ~f:(fun acc d ->
-          if ptr_kind_of ~facts ~blk ~def:d (Def.rhs d) then
-            Core.Set.add acc (Term.tid d)
-          else acc))
+  |> Seq.fold ~init:(Tid.Set.empty, Tid.Map.empty)
+       ~f:(fun (tids, stors) blk ->
+         Term.enum def_t blk
+         |> Seq.fold ~init:(tids, stors) ~f:(fun (tids, stors) d ->
+             match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
+             | Error _ -> (tids, stors)
+             | Ok ws ->
+                 if not (Vsa.WordSet.in_stack_segment ws) then (tids, stors)
+                 else
+                   ( Core.Set.add tids (Term.tid d),
+                     Core.Map.set stors ~key:(Term.tid d)
+                       ~data:(storage_of ws) )))
 
 let sub_of_program (prog : program term) : sub term Tid.Map.t =
   Term.enum sub_t prog
@@ -319,8 +352,9 @@ let run (proj : Project.t) : Project.t =
           let prog = stamp_arg_kinds ~param_kinds:pks prog in
           let prog =
             Term.map sub_t prog ~f:(fun sub ->
-                Hike_def_slots.stamp_ptr_kinds
-                  ~ptr_tids:(ptr_def_tids ~facts sub) sub)
+                let tids, stors = ptr_defs ~facts sub in
+                let sub = Hike_def_slots.stamp_ptr_kinds ~ptr_tids:tids sub in
+                Hike_def_slots.stamp_ptr_storages ~storages:stors sub)
           in
 #ifdef VSA_DEBUG
           kind_census prog;

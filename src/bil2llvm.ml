@@ -242,6 +242,13 @@ let create_sub ctx scope sub =
           if Hike_def_slots.def_is_window_value d then
             Core.Set.add acc (Def.lhs d)
           else acc);
+    scope.ptr_storages :=
+      Term.enum blk_t sub
+      |> Seq.concat_map ~f:(Term.enum def_t)
+      |> Seq.fold ~init:Var.Map.empty ~f:(fun acc d ->
+          match Hike_def_slots.def_ptr_storage d with
+          | Some s -> Core.Map.set acc ~key:(Def.lhs d) ~data:s
+          | None -> acc);
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
     populate_blks ctx scope blks sub fr;
