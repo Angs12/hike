@@ -53,7 +53,8 @@ let passcost_main (args : string list) : unit =
           in
           let _envs, t_vsa =
             time (fun () ->
-                Hike.Vsa.fixpoint target ~lookup:(fun _ -> None) ~images:[]
+                Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
+                  ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
                   ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi prog)
                   ~lift_at:(fun _ ~block_addrs:_ -> None)
                   ~block_addrs:(Core.Map.empty (module Addr)) sub)
@@ -123,7 +124,8 @@ let () =
           Printf.eprintf "probe: solving %s (%d blk %d defs)\n%!" name nblk ndefs;
           let t0 = Unix.gettimeofday () in
           let _envs, _sub', _ =
-            Hike.Vsa.fixpoint target ~lookup:(fun _ -> None) ~images ~written
+            Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
+              ~sub_addrs:(Core.Map.empty (module Addr)) ~images ~written
               ~lift_at:(fun _ ~block_addrs:_ -> None)
               ~block_addrs sub
           in

@@ -10,7 +10,8 @@ module Hv = Hike.Vsa
 let dump_sub ~(word : int) (proj : Project.t) (sub : sub term) : unit =
   let envs, sub', _ =
     Hv.fixpoint (Project.target proj)
-      ~lookup:(fun _ -> None) ~images:[]
+      ~lookup:(fun _ -> None)
+      ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
       ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                   (Program.create ~subs:[ sub ] ()))
       ~lift_at:(fun _ ~block_addrs:_ -> None)

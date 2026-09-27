@@ -15,7 +15,8 @@ let () =
     let sub =
       let envs, sub', _ =
         Hike.Vsa.fixpoint (Project.target proj)
-          ~lookup:(fun _ -> None) ~images:[]
+          ~lookup:(fun _ -> None)
+          ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
           ~written:(Hike.Vsa.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                       (Program.create ~subs:[ sub0 ] ()))
           ~lift_at:(fun _ ~block_addrs:_ -> None)

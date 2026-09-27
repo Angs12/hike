@@ -30,7 +30,8 @@ let () =
         ~block_addrs:(Core.Map.empty (module Addr)) ~target
     in
     let _envs, _sub', _ =
-      Hike.Vsa.fixpoint target ~lookup:(fun _ -> None) ~images:[]
+      Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
+        ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
         ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi
                     (Program.create ~subs:[ sub ] ()))
         ~lift_at:(fun _ ~block_addrs:_ -> None)
