@@ -108,6 +108,44 @@ let ori_06 () =
   check "window-side def stamps Window"
     (Option.equal Origin.equal (Vsa.Def_origin.def_origin d) (Some Origin.Window))
 
+
+(* The store-to-load round-trip: a relative value stored to a cell
+   reads back with its origin.  [offs] is the pointer's offset (the
+   cell address too): negative = the sub's frame (Stack), positive =
+   the caller's window (Window). *)
+let round_trip (offs : int64) : Origin.t option =
+  let m = memv "rt_m" in
+  let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
+  let x = Var.create ~is_virtual:false ~fresh:false "rt_x" (Type.Imm 64) in
+  let ptr = Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (i2w offs))) in
+  let store =
+    Def.create m
+      (Bil.Store (Bil.Var m, ptr, ptr, LittleEndian, `r64))
+  in
+  let load = Def.create x (Bil.Load (Bil.Var m, ptr, LittleEndian, `r64)) in
+  let sub = straight_sub "rt" [ store; load ] in
+  let entry = anchored_entry () in
+  let sol =
+    Vsa.static_graph_vsa ~abi (Program.create ~subs:[ sub ] ()) sub
+      (Vsa.init_sol ~abi ~entry sub)
+  in
+  let _, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  let blk = Term.enum blk_t stamped |> Seq.to_list |> List.hd_exn in
+  let defs = Term.enum def_t blk |> Seq.to_list in
+  match List.rev defs with
+  | load_def :: _ -> Vsa.Def_origin.def_origin load_def
+  | _ -> None
+
+(* ORI-07: a frame pointer stored to a cell reads back Stack. *)
+let ori_07 () =
+  check "stored frame pointer reads back Stack"
+    (Option.equal Origin.equal (round_trip (-8L)) (Some Origin.Stack))
+
+(* ORI-08: a caller-window pointer stored to a cell reads back Window. *)
+let ori_08 () =
+  check "stored window pointer reads back Window"
+    (Option.equal Origin.equal (round_trip 16L) (Some Origin.Window))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -115,4 +153,6 @@ let () =
       pin "ORI-03" "the one-origin accessor" ori_03;
       pin "ORI-04" "same-origin ops keep the origin" ori_04;
       pin "ORI-05" "the band refinement" ori_05;
-      pin "ORI-06" "the per-def origin stamp" ori_06 ]
+      pin "ORI-06" "the per-def origin stamp" ori_06;
+      pin "ORI-07" "store-to-load round-trip (frame)" ori_07;
+      pin "ORI-08" "store-to-load round-trip (window)" ori_08 ]

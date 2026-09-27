@@ -342,12 +342,16 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
       then
         (match Mem.Key.of_wordset addr with
          | [] -> return_imm @@ WordSet.bottom res_size
-         | ks ->
+         | k0 :: ks' ->
+           (* The first cell's data seeds the fold: join's identity is
+              the seed, so a stored relative value reads back with its
+              origin, and multi-cell joins merge per the algebra. *)
            return_imm
-           @@ Base.List.fold ks ~init:(WordSet.bottom res_size)
-                ~f:(fun acc k ->
-                    WordSet.join acc
-                      (Mem.find (res_size, e) mv k |> Mem.Val.data)))
+           @@ Base.List.fold ks'
+                 ~init:(Mem.find (res_size, e) mv k0 |> Mem.Val.data)
+                 ~f:(fun acc k ->
+                     WordSet.join acc
+                       (Mem.find (res_size, e) mv k |> Mem.Val.data)))
       else return_imm @@ WordSet.top res_size)
   | Bil.Store (m, a, u, e, s) ->
     Type.infer u >>= fun u_typ ->
