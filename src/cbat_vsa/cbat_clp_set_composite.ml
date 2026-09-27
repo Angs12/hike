@@ -256,6 +256,12 @@ let rec to_plain (t : t) : t =
      | Many ps' -> Many ps')
   | Clp _ | FinSet _ -> t
 
+(* The plain twin: a symbolic piece materialized, a plain value as-is. *)
+let plain_view (t : t) : t = match t with StackOff _ -> to_plain t | q -> q
+
+(* The origin tests. *)
+let is_stack (t : t) : bool = match t with StackOff _ -> true | _ -> false
+
 (* Plain-operand top test. *)
 let rec plain_is_top (t : t) : bool =
   match t with
@@ -352,7 +358,7 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
    positive stack band; symbolic offsets are handled separately. *)
 let stack_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   let leaves = match t with Many ps -> ps | q -> [ q ] in
-  if List.exists leaves ~f:(function StackOff _ -> true | _ -> false) then None
+  if List.exists leaves ~f:is_stack then None
   else
     let circular =
       List.exists leaves ~f:(function
@@ -369,7 +375,7 @@ let in_stack_segment (t : t) : bool =
   match t with
   | StackOff _ -> true
   | Many ps ->
-    List.exists ps ~f:(function StackOff _ -> true | _ -> false)
+    List.exists ps ~f:is_stack
     || Option.is_some (stack_extrema t)
   | _ -> Option.is_some (stack_extrema t)
 
@@ -598,9 +604,7 @@ let overlap (t1 : t) (t2 : t) : bool =
     | Clp ps1, Clp ps2 -> P.overlap ps1 ps2
     | _ -> false
   in
-  let plain (q : t) : t =
-    match q with StackOff _ -> to_plain q | q -> q in
-  match plain t1, plain t2 with
+  match plain_view t1, plain_view t2 with
   | Many a, Many b ->
     List.exists a ~f:(fun q1 -> List.exists b ~f:(fun q2 -> leaf_pair q1 q2))
   | Many a, q2 -> List.exists a ~f:(fun q1 -> leaf_pair q1 q2)
@@ -949,8 +953,7 @@ let certified_bits = 4
 let has_stack (t : t) : bool =
   match t with
   | StackOff _ -> true
-  | Many ps ->
-    List.exists ps ~f:(function StackOff _ -> true | _ -> false)
+  | Many ps -> List.exists ps ~f:is_stack
   | _ -> false
 
 let blind_binop (op : binop) (t1 : t) (t2 : t) : t =
