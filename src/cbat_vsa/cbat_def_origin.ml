@@ -39,22 +39,21 @@ let def_origin_slot : (Theory.Value.cls, Origin.t option) KB.slot =
 let def_origin (d : def term) : Origin.t option =
   KB.Value.get def_origin_slot (Def.value d)
 
-(* The def's stamped origin: its value's own origin, refined by its
-   offset band. *)
-let origin_of_def_value ~(word : int) (v : WordSet.t) : Origin.t =
-  let v = WordSet.refine_origin ~word v in
+(* The def's stamped origin: its value's own origin, derived from the
+   offset bands; an absolute or band-spanning value reads Abs. *)
+let origin_of_def_value (v : WordSet.t) : Origin.t =
   match WordSet.origin v with
   | Some o -> o
   | None -> Origin.Abs
 
 (* The stamp sweep's per-def step: the after-state carries the def's
    value; the origin reads off it. *)
-let stamp_origin ~(word : int) (d : def term) (after : AI.t) : def term =
+let stamp_origin (d : def term) (after : AI.t) : def term =
   let width =
     match Var.typ (Def.lhs d) with
     | Type.Imm n -> n
     | _ -> 64
   in
   let v = AI.find_word width after (Def.lhs d) in
-  let o = origin_of_def_value ~word v in
+  let o = origin_of_def_value v in
   Def.with_value d (KB.Value.put def_origin_slot (Def.value d) (Some o))

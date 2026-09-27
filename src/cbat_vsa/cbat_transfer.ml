@@ -477,14 +477,6 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
           | _ -> p
         in
         let p = vla_rebase v e env p in
-        (* The solve-boundary origin: a wholly window-side value names
-           the caller's frame; a wholly VLA-band value names the
-           rebased SP. *)
-        let p =
-          WordSet.refine_origin
-            ~word:(if !addr_bits_ref > 0 then !addr_bits_ref / 8 else 8)
-            p
-        in
 #ifdef VSA_DEBUG
         (* A def's value is stored at its lhs's declared width; a divergent
            store is the source of downstream mismatches. *)

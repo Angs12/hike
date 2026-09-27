@@ -89,11 +89,10 @@ val in_stack_segment : t -> bool
    plain value. *)
 val offset_extrema : t -> (Cbat_word.t * Cbat_word.t) option
 
-(* The solve-boundary band refinement: a wholly window-side relative
-   value (every offset at/above the ABI word) names the caller's frame
-   origin; a wholly VLA-band value names the rebased SP; a value
-   spanning the bands keeps the entry-SP origin. *)
-val refine_origin : word:int -> t -> t
+(* The solve-boundary band classification behind [origin]: Vla inside
+   the band, Window at/above the ABI word, Stack below; [None] when
+   the offsets span bands (a mixed value). *)
+val band_of_offsets : Cbat_clp.Pieces.t -> Origin.t option
 
 (* Segment-relative bounds of a stack value; None when not stack. *)
 val stack_bounds : t -> (int64 * int64) option

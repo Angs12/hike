@@ -65,27 +65,24 @@ let ori_04 () =
   check "stack meet reads Stack"
     (Option.equal String.equal (origin_name (Ws.origin (Ws.intersection a b))) (Some "stack"))
 
-(* ORI-05: the solve-boundary band refinement — window-side values
-   name the caller's frame, VLA-band values the rebased SP, and a
-   value spanning the bands keeps the entry-SP origin. *)
+(* ORI-05: the band classification — window-side offsets name the
+   caller's frame, VLA-band offsets the rebased SP, and a cross-band
+   union materialises to plain (a mixed value cannot exist). *)
 let ori_05 () =
-  let window_side = Ws.stack_word_i64 16L in
-  let refined = Ws.refine_origin ~word:8 window_side in
-  check "window-side value refines to Window"
-    (Option.equal Origin.equal (Ws.origin refined) (Some Origin.Window));
-  let frame = Ws.stack_word_i64 (-8L) in
-  check "below-entry value keeps Stack"
-    (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 frame)) (Some Origin.Stack));
-  let vla = Ws.refine_origin ~word:8 (Ws.stack_word_i64 Origin.vla_floor) in
-  check "vla-band value refines to Vla" (Option.equal Origin.equal (Ws.origin vla) (Some Origin.Vla));
-  let crossing =
-    Ws.union (Ws.stack_word_i64 0L) (Ws.stack_word_i64 16L)
-  in
-  check "value spanning the entry line keeps Stack"
-    (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 crossing)) (Some Origin.Stack));
-  let plain = Ws.singleton (i2w 5L) in
-  check "plain values pass through unchanged"
-    (Option.is_none (Ws.origin (Ws.refine_origin ~word:8 plain)))
+  check "window-side value reads Window"
+    (Option.equal Origin.equal (Ws.origin (Ws.stack_word_i64 16L))
+       (Some Origin.Window));
+  check "below-entry value reads Stack"
+    (Option.equal Origin.equal (Ws.origin (Ws.stack_word_i64 (-8L)))
+       (Some Origin.Stack));
+  check "vla-band value reads Vla"
+    (Option.equal Origin.equal
+       (Ws.origin (Ws.stack_word_i64 Origin.vla_floor))
+       (Some Origin.Vla));
+  let crossing = Ws.union (Ws.stack_word_i64 0L) (Ws.stack_word_i64 16L) in
+  check "cross-band union materialises to plain"
+    (Option.is_none (Ws.origin crossing));
+  check "plain values read None" (Option.is_none (Ws.origin (Ws.singleton (i2w 5L))))
 
 (* ORI-06: the per-def origin slot, stamped at the solve boundary — a
    window-side address def reads Window through the seam. *)
