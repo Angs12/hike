@@ -682,6 +682,7 @@ let overlap (t1 : t) (t2 : t) : bool =
    crosses the lift. *)
 type binop =
   | Union
+  | Meet
   | Add
   | Sub
   | Mul
@@ -710,6 +711,7 @@ let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
   in
   collapse @@ (match op with
   | Union -> P.union a b
+  | Meet -> P.intersection a b
   | Add -> P.add a b
   | Sub -> P.sub a b
   | Mul -> P.mul a b
@@ -728,6 +730,7 @@ let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
 let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
   match op with
   | Union -> FinSet.union s1 s2
+  | Meet -> FinSet.intersection s1 s2
   | Add -> FinSet.add s1 s2
   | Sub -> FinSet.sub s1 s2
   | Mul -> FinSet.mul s1 s2
@@ -888,14 +891,75 @@ let stride (t : t) : int =
      | Some s -> s
      | None -> 1)
 
-let union t1 t2 : t =
-  match t1, t2 with
-  (* Same origin: the offsets union stays relative. *)
-  | (Rel (o1, a), Rel (o2, b)) when Origin.equal o1 o2 ->
-    canonical [ Rel (o1, P.union a b) ]
-  | Rel _, _ | _, Rel _ ->
-    lift_binop Union (to_plain t1) (to_plain t2)
-  | _ -> pairwise (op_pair Union) t1 t2
+(* THE per-op type table: what [op] yields when its operands meet at
+   origins [o1] and [o2] (an absolute operand is [Origin.Abs]).
+   [Wrap o] = the offsets stay relative at [o]; [Materialise] = the
+   bases do not survive — both hulls, the plain op; [Top] = the op
+   keeps unknown base bits: top.  THE table is the one home of "what
+   type dominates"; a new origin lands by extending [Origin.t], a new
+   op by one row here. *)
+let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
+    Hike_origin.rel_row =
+  let rel x = not (Origin.equal x Origin.Abs) in
+  match op with
+  | Union ->
+    if rel o1 && rel o2 then
+      if Origin.equal o1 o2 then Wrap o1 else Materialise
+    else Materialise
+  | Meet ->
+    if rel o1 && rel o2 then
+      if Origin.equal o1 o2 then Wrap o1 else Materialise
+    else if rel o1 then Wrap o1
+    else if rel o2 then Wrap o2
+    else Materialise
+  | Add | Sub ->
+    if rel o1 && rel o2 then Materialise
+    (* the base appears twice [Add] / cancels [Sub]; a relative operand
+       shifts its offsets by the absolute one *)
+    else if rel o1 then Wrap o1
+    else if rel o2 then Wrap o2
+    else Materialise
+  | Logand ->
+    if rel o1 && rel o2 then Top
+    else if rel o1 then Wrap o1
+    else if rel o2 then Wrap o2
+    else Materialise
+  | Mul | Div | Sdiv | Modulo | Smodulo
+  | Lshift | Rshift | Arshift | Logor | Logxor | Concat ->
+    if rel o1 || rel o2 then Top else Materialise
+
+(* The Top rows' width: concat's result is the concatenated width. *)
+let top_width (op : binop) (w1 : int) (w2 : int) : int =
+  match op with Concat -> w1 + w2 | _ -> Stdlib.max w1 w2
+
+(* The same-origin payload: the op on the offset piece unions — the
+   piece ops run bare (no collapse: the relative unions keep their
+   exact runs). *)
+let rel_rel (op : binop) (a : P.t) (b : P.t) : P.t =
+  match op with
+  | Union -> P.union a b
+  | Meet -> P.intersection a b
+  | _ -> binop_pieces op a b
+
+(* The [Materialise] payload: both hulls, the plain op; [Sub]'s
+   relative-relative row keeps the exact offset difference (the base
+   cancels — no collapse). *)
+let materialise2 (op : binop) (t1 : t) (t2 : t) : t =
+  match op, t1, t2 with
+  | Sub, Rel (_, a), Rel (_, b) -> canonical [ Clp (P.sub a b) ]
+  | _ -> lift_binop op (to_plain t1) (to_plain t2)
+
+(* Only the base's low nibble is a fact (the ABI entry residue): an
+   op confined to it computes; an op keeping unknown bits answers
+   top.  The relative ops (add, sub, comparisons) keep exact offsets. *)
+let certified_bits = 4
+
+let has_stack (t : t) : bool =
+  match t with
+  | Rel _ -> true
+  | Many ps -> List.exists ps ~f:is_stack
+  | _ -> false
+
 
 (* The plain side of a mixed meet, translated into the offset space
    (positions minus the base): the meet stays stack-symbolic. *)
@@ -911,123 +975,6 @@ let plain_offsets (p : t) : P.t option =
      | _ -> Some (pieces_of_words ~width:64 ws))
   | _ -> None
 
-(* Precise meet across representations. *)
-let rec intersection (t1 : t) (t2 : t) : t =
-  (* Width mismatch returns the wider operand. *)
-  if bitwidth t1 <> bitwidth t2 then
-    (if bitwidth t1 > bitwidth t2 then t1 else t2)
-  else match t1, t2 with
-  | (Rel _, q2) when plain_is_top q2 -> t1
-  | (q1, Rel _) when plain_is_top q1 -> t2
-  | (Rel (o1, a), Rel (o2, b)) when Origin.equal o1 o2 ->
-    canonical [ Rel (o1, P.intersection a b) ]
-  | (Rel (o, a) as sym), (Clp _ | FinSet _ as plain)
-  | (Clp _ | FinSet _ as plain), (Rel (o, a) as sym) ->
-    (match plain_offsets plain with
-     | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
-     | None -> intersection (to_plain sym) (to_plain plain))
-  | Rel _, _ | _, Rel _ ->
-    intersection (to_plain t1) (to_plain t2)
-  | _ ->
-    (* Plain leaves meet pairwise; results merge. *)
-    let pair q1 q2 =
-      match q1, q2 with
-      | FinSet s1, FinSet s2 -> [ FinSet (FinSet.intersection s1 s2) ]
-      | FinSet s, Clp ps | Clp ps, FinSet s ->
-        [ FinSet
-            (FinSet.of_list ~width:(FinSet.bitwidth s)
-               (List.filter (FinSet.iter s)
-                  ~f:(fun w -> P.elem w ps))) ]
-      | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
-      | _ -> []
-    in
-    pairwise pair t1 t2
-
-(* Set difference; the piece union keeps the survivors when the cheap
-   side enumerates, the sound identity otherwise. *)
-let rec diff (t1 : t) (t2 : t) : t =
-  match t1, t2 with
-  | Rel _, _ | _, Rel _ ->
-    diff (to_plain t1) (to_plain t2)
-  | _ ->
-    let pair q1 q2 =
-      if bitwidth q1 <> bitwidth q2 then [ q1 ]
-      else
-        match q1, q2 with
-        | FinSet s1, FinSet s2 -> [ FinSet (FinSet.diff s1 s2) ]
-        | FinSet s, Clp ps ->
-          [ FinSet
-              (FinSet.of_list ~width:(FinSet.bitwidth s)
-                 (List.filter (FinSet.iter s)
-                    ~f:(fun w -> not (P.elem w ps)))) ]
-        | Clp ps, FinSet s -> [ Clp (P.diff ps (pieces_of_finset s)) ]
-        | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
-        | _ -> []
-    in
-    pairwise pair t1 t2
-
-(* Adds a base-free operand to a stack word: the offsets shift exactly;
-   the shift runs progression-level on the hulls (single-progression
-   result, one normalization). *)
-let stack_lift2 (f : clp -> clp -> clp) (t1 : t) (t2 : t) : t option =
-  let hull_of_plain (q : t) : clp option =
-    match q with
-    | Clp ps -> hull_of_pieces ps
-    | FinSet s -> Some (clp_of_finset s)
-    | Rel _ | Many _ -> None
-  in
-  let hull (ps : P.t) : clp =
-    match hull_of_pieces ps with
-    | Some p -> p
-    | None -> Clp.bottom 64
-  in
-  match t1, t2 with
-  | Rel (o1, a1), q2 when bitwidth q2 = 64 ->
-    Option.map (hull_of_plain q2)
-      ~f:(fun p2 -> Rel (o1, P.of_progression (f (hull a1) p2)))
-  | q1, Rel (o2, a2) when bitwidth q1 = 64 ->
-    Option.map (hull_of_plain q1)
-      ~f:(fun p1 -> Rel (o2, P.of_progression (f p1 (hull a2))))
-  | _ -> None
-
-let add t1 t2 : t =
-  match t1, t2 with
-  (* Two stack words: the base appears twice — the plain hulls. *)
-  | Rel _, Rel _ ->
-    lift_binop Add (to_plain t1) (to_plain t2)
-  | _ ->
-    (match stack_lift2 Clp.add t1 t2 with
-     | Some t -> t
-     | None -> lift_binop Add t1 t2)
-
-let sub t1 t2 : t =
-  match t1, t2 with
-  (* Two stack words: the base cancels — the exact offset difference. *)
-  | Rel (_, o1), Rel (_, o2) -> canonical [ Clp (P.sub o1 o2) ]
-  | _ ->
-    (match stack_lift2 Clp.sub t1 t2 with
-     | Some t -> t
-     | None -> lift_binop Sub t1 t2)
-
-(* Only the base's low nibble is a fact (the ABI entry residue): an
-   op confined to it computes; an op keeping unknown bits answers
-   top.  The relative ops (add, sub, comparisons) keep exact offsets. *)
-let certified_bits = 4
-
-let has_stack (t : t) : bool =
-  match t with
-  | Rel _ -> true
-  | Many ps -> List.exists ps ~f:is_stack
-  | _ -> false
-
-let blind_binop (op : binop) (t1 : t) (t2 : t) : t =
-  if has_stack t1 || has_stack t2 then
-    top (Stdlib.max (bitwidth t1) (bitwidth t2))
-  else lift_binop op t1 t2
-
-let blind_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) (t : t) : t =
-  if has_stack t then top (Stdlib.max 1 (bitwidth t))
-  else lift_unop f_clp f_fs t
 
 (* The singleton word of a plain operand, if it is one. *)
 let singleton_of (q : t) : word option =
@@ -1043,6 +990,7 @@ let singleton_of (q : t) : word option =
      | _ -> None)
   | Rel _ | Many _ -> None
 
+
 (* [f] over the offsets while enumerable; top past the budget. *)
 let certified_image ~(width : int) (f : word -> word) (offs : P.t) : t =
   let base = w64_of_i64 stack_base in
@@ -1054,11 +1002,6 @@ let certified_image ~(width : int) (f : word -> word) (offs : P.t) : t =
              Cbat_word.cast Bil.UNSIGNED width (f (Cbat_word.add base o))))
   | _ -> top width
 
-let mul t1 t2 = blind_binop Mul t1 t2
-let div t1 t2 = blind_binop Div t1 t2
-let sdiv t1 t2 = blind_binop Sdiv t1 t2
-let modulo t1 t2 = blind_binop Modulo t1 t2
-let smodulo t1 t2 = blind_binop Smodulo t1 t2
 
 (* The round-down mask class: [k = ~m] with [m = 2^s - 1] (all-ones is
    s = 64, the identity).  The shift the mask implies, if [k] is one. *)
@@ -1122,39 +1065,180 @@ let round_down_image (s : int) (offs : P.t) : P.t option =
   if List.length imgs = List.length (P.to_list offs) then Some (union_all imgs)
   else None
 
-(* A mask confined to the certified nibble computes; a round-down mask
-   keeps the base and computes on the offsets; a wider mask keeps
-   unknown bits and answers top. *)
-let logand t1 t2 : t =
+
+(* The plain meet: plain leaves meet pairwise; results merge. *)
+let meet_plain (t1 : t) (t2 : t) : t =
+  let pair q1 q2 =
+    match q1, q2 with
+    | FinSet s1, FinSet s2 -> [ FinSet (FinSet.intersection s1 s2) ]
+    | FinSet s, Clp ps | Clp ps, FinSet s ->
+      [ FinSet
+          (FinSet.of_list ~width:(FinSet.bitwidth s)
+             (List.filter (FinSet.iter s)
+                ~f:(fun w -> P.elem w ps))) ]
+    | Clp ps1, Clp ps2 -> [ Clp (P.intersection ps1 ps2) ]
+    | _ -> []
+  in
+  pairwise pair t1 t2
+
+(* The plain-plain payload: meet meets pairwise; every other op lifts
+   through the common plain machinery. *)
+let generic (op : binop) (t1 : t) (t2 : t) : t =
+  match op with Meet -> meet_plain t1 t2 | _ -> lift_binop op t1 t2
+
+(* The [Wrap] payloads: the relative operand's offsets meet, shift, or
+   mask with the absolute one, and the result wraps at the operand's
+   origin. *)
+let meet_rel (t1 : t) (t2 : t) : t =
   match t1, t2 with
-  | (Rel (o, offs)), (Clp _ | FinSet _ as plain)
-  | (Clp _ | FinSet _ as plain), (Rel (o, offs)) -> (
-      match singleton_of plain with
-      | Some k -> (
-          match round_down_shift k with
-          | Some s -> (
-              match round_down_image s offs with
-              | Some offs' -> canonical [ Rel (o, offs') ]
-              | None -> top 64)
-          | None ->
-            if Cbat_word.leq_int k ((1 lsl certified_bits) - 1) then
-              let k64 = Cbat_word.cast Bil.UNSIGNED 64 k in
-              certified_image ~width:64 (fun v -> Cbat_word.logand v k64) offs
-            else top 64)
-      | None -> top 64)
+  | Rel (o, a), (Clp _ | FinSet _ as plain) ->
+    (match plain_offsets plain with
+     | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
+     | None -> meet_plain (to_plain t1) (to_plain plain))
+  | (Clp _ | FinSet _ as plain), Rel (o, a) ->
+    (match plain_offsets plain with
+     | Some o2 -> canonical [ Rel (o, P.intersection a o2) ]
+     | None -> meet_plain (to_plain plain) (to_plain t2))
+  | _ -> meet_plain (to_plain t1) (to_plain t2)
+
+let logand_rel (o : Origin.t) (offs : P.t) (plain : t) : t =
+  match singleton_of plain with
+  | Some k -> (
+      match round_down_shift k with
+      | Some s -> (
+          match round_down_image s offs with
+          | Some offs' -> canonical [ Rel (o, offs') ]
+          | None -> top 64)
+      | None ->
+        if Cbat_word.leq_int k ((1 lsl certified_bits) - 1) then
+          let k64 = Cbat_word.cast Bil.UNSIGNED 64 k in
+          certified_image ~width:64 (fun v -> Cbat_word.logand v k64) offs
+        else top 64)
+  | None -> top 64
+
+let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
+  match op with
+  | Add | Sub ->
+    let f = match op with Sub -> Clp.sub | _ -> Clp.add in
+    let hull (ps : P.t) : clp =
+      match hull_of_pieces ps with
+      | Some p -> p
+      | None -> Clp.bottom 64
+    in
+    let hull_of_plain (q : t) : clp option =
+      match q with
+      | Clp ps -> hull_of_pieces ps
+      | FinSet s -> Some (clp_of_finset s)
+      | _ -> None
+    in
+    (match t1, t2 with
+     | Rel (o, a1), q2 when bitwidth q2 = 64 ->
+       (match hull_of_plain q2 with
+        | Some p2 -> canonical [ Rel (o, P.of_progression (f (hull a1) p2)) ]
+        | None -> lift_binop op t1 t2)
+     | q1, Rel (o, a2) when bitwidth q1 = 64 ->
+       (match hull_of_plain q1 with
+        | Some p1 -> canonical [ Rel (o, P.of_progression (f p1 (hull a2))) ]
+        | None -> lift_binop op t1 t2)
+     | _ -> lift_binop op t1 t2)
+  | Meet -> meet_rel t1 t2
+  | Logand -> (
+      match t1, t2 with
+      | Rel (o, offs), plain -> logand_rel o offs plain
+      | plain, Rel (o, offs) -> logand_rel o offs plain
+      | _ -> top (Stdlib.max (bitwidth t1) (bitwidth t2)))
+  | _ -> lift_binop op t1 t2
+
+(* THE general binary operator: the operands classify by pattern (a
+   relative leaf allocates nothing), the table decides the row, the
+   payload computes once, and the row wraps the result. *)
+let lift2 (op : binop) (t1 : t) (t2 : t) : t =
+  let top_w () = top (top_width op (bitwidth t1) (bitwidth t2)) in
+  if
+    (match op with
+     | Mul | Div | Sdiv | Modulo | Smodulo | Lshift | Rshift | Arshift
+     | Logor | Logxor | Concat ->
+       has_stack t1 || has_stack t2
+     | _ -> false)
+  then top_w ()
+  else
+    match t1, t2 with
+    | Rel (o1, a1), Rel (o2, a2) -> (
+        match rel_table op o1 o2 with
+        | Wrap o -> canonical [ Rel (o, rel_rel op a1 a2) ]
+        | Materialise -> materialise2 op t1 t2
+        | Top -> top_w ())
+    | Rel (o1, _), _ -> (
+        match rel_table op o1 Origin.Abs with
+        | Wrap _ -> rel_abs op t1 t2
+        | Materialise -> materialise2 op t1 t2
+        | Top -> top_w ())
+    | _, Rel (o2, _) -> (
+        match rel_table op Origin.Abs o2 with
+        | Wrap _ -> rel_abs op t1 t2
+        | Materialise -> materialise2 op t1 t2
+        | Top -> top_w ())
+    | _ -> generic op t1 t2
+
+let union t1 t2 : t = lift2 Union t1 t2
+
+(* Precise meet across representations: the width mismatch returns the
+   wider operand; a top plain side makes the meet the relative operand
+   itself. *)
+let intersection t1 t2 : t =
+  if bitwidth t1 <> bitwidth t2 then
+    (if bitwidth t1 > bitwidth t2 then t1 else t2)
+  else
+    match t1, t2 with
+    | Rel _, q2 when plain_is_top q2 -> t1
+    | q1, Rel _ when plain_is_top q1 -> t2
+    | _ -> lift2 Meet t1 t2
+
+(* Set difference; the piece union keeps the survivors when the cheap
+   side enumerates, the sound identity otherwise. *)
+let rec diff (t1 : t) (t2 : t) : t =
+  match t1, t2 with
   | Rel _, _ | _, Rel _ ->
-    top (Stdlib.max (bitwidth t1) (bitwidth t2))
-  | _ -> lift_binop Logand t1 t2
-let logor t1 t2 = blind_binop Logor t1 t2
-let logxor t1 t2 = blind_binop Logxor t1 t2
+    diff (to_plain t1) (to_plain t2)
+  | _ ->
+    let pair q1 q2 =
+      if bitwidth q1 <> bitwidth q2 then [ q1 ]
+      else
+        match q1, q2 with
+        | FinSet s1, FinSet s2 -> [ FinSet (FinSet.diff s1 s2) ]
+        | FinSet s, Clp ps ->
+          [ FinSet
+              (FinSet.of_list ~width:(FinSet.bitwidth s)
+                 (List.filter (FinSet.iter s)
+                    ~f:(fun w -> not (P.elem w ps)))) ]
+        | Clp ps, FinSet s -> [ Clp (P.diff ps (pieces_of_finset s)) ]
+        | Clp ps1, Clp ps2 -> [ Clp (P.diff ps1 ps2) ]
+        | _ -> []
+    in
+    pairwise pair t1 t2
+
+
+let add t1 t2 : t = lift2 Add t1 t2
+let sub t1 t2 : t = lift2 Sub t1 t2
+let mul t1 t2 = lift2 Mul t1 t2
+let div t1 t2 = lift2 Div t1 t2
+let sdiv t1 t2 = lift2 Sdiv t1 t2
+let modulo t1 t2 = lift2 Modulo t1 t2
+let smodulo t1 t2 = lift2 Smodulo t1 t2
+
+let logand t1 t2 : t = lift2 Logand t1 t2
+let logor t1 t2 = lift2 Logor t1 t2
+let logxor t1 t2 = lift2 Logxor t1 t2
+
+let blind_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) (t : t) : t =
+  if has_stack t then top (Stdlib.max 1 (bitwidth t))
+  else lift_unop f_clp f_fs t
 
 let lnot t = blind_unop P.lnot FinSet.lnot t
 let neg t = blind_unop P.neg FinSet.neg t
 
-let concat t1 t2 =
-  if has_stack t1 || has_stack t2 then
-    top (bitwidth t1 + bitwidth t2)
-  else lift_binop Concat t1 t2
+
+let concat t1 t2 = lift2 Concat t1 t2
 
 (* ---------------- predicates ---------------- *)
 
@@ -1280,9 +1364,9 @@ let cast c sz t =
 let shift op t1 t2 =
   if bitwidth t2 < bitwidth t1 then
     match t2 with
-    | Rel _ | Many _ -> blind_binop op t1 t2
-    | _ -> lift_binop op t1 (cast Bil.UNSIGNED (bitwidth t1) t2)
-  else blind_binop op t1 t2
+    | Rel _ | Many _ -> lift2 op t1 t2
+    | _ -> lift2 op t1 (cast Bil.UNSIGNED (bitwidth t1) t2)
+  else lift2 op t1 t2
 
 let arshift t1 t2 = shift Arshift t1 t2
 let rshift t1 t2 = shift Rshift t1 t2
