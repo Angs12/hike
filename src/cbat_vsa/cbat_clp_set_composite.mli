@@ -16,6 +16,14 @@ type t
 (* The CLP domain this set is built over. *)
 module Clp = Cbat_clp
 
+(* The runtime origin of a relative value. *)
+module Origin = Hike_origin
+
+(* The value's runtime origin: [Some o] exactly when every piece of the
+   value is relative to the one origin [o]; absolute, plain, and
+   mixed-origin values are [None]. *)
+val origin : t -> Origin.t option
+
 include Cbat_wordset_intf.S with type t := t
 
 val is_top : t -> bool

@@ -19,6 +19,7 @@ module Utils = Cbat_vsa_utils
 module Clp = Cbat_clp
 module P = Clp.Pieces
 module FinSet = Cbat_fin_set
+module Origin = Hike_origin
 
 type clp = Clp.t
 type word = Cbat_word.t
@@ -26,9 +27,10 @@ type fset = FinSet.t
 
 (* Large sets are one Clp piece union; small ones FinSets; stack
    addresses carry the symbolic segment base: [StackOff offs] = the
-   base plus the exact offset piece union [offs].  A value is ONE of
-   those (the common case — no list cell), or [Many] of the canonical
-   multi-piece list ([Many] never nests: [canonical] flattens).
+   base plus the exact offset piece union [offs] — [Rel (o, offs)] is
+   the same shape at origin [o].  A value is ONE of those (the common
+   case — no list cell), or [Many] of the canonical multi-piece list
+   ([Many] never nests: [canonical] flattens).
    Extrema answer from the offsets; shape-losing ops degrade to that
    plain hull; ops keeping unknown base bits answer top — the base is
    a tag except its certified low nibble. *)
@@ -37,6 +39,7 @@ type t =
   | FinSet of FinSet.t
   | StackOff of P.t
   | Many of t list
+  | Rel of Origin.t * P.t
 [@@deriving bin_io, sexp, compare]
 type idx = int
 
@@ -64,14 +67,14 @@ let w64_of_i64 (i : int64) : Cbat_word.t =
 
 let rec bitwidth (t : t) : int =
   match t with
-  | StackOff _ -> 64
+  | StackOff _ | Rel (_, _) -> 64
   | Clp ps -> P.bitwidth ps
   | FinSet s -> FinSet.bitwidth s
   | Many ps -> List.fold ps ~init:0 ~f:(fun a q -> Stdlib.max a (bitwidth q))
 
 let rec is_bottom (t : t) : bool =
   match t with
-  | Clp ps | StackOff ps -> P.is_bottom ps
+  | Clp ps | StackOff ps | Rel (_, ps) -> P.is_bottom ps
   | FinSet s -> Cbat_word.is_zero (FinSet.cardinality s)
   | Many ps -> List.for_all ps ~f:is_bottom
 
@@ -119,7 +122,10 @@ let clp_of_finset fs : clp =
 let canonical (ps : t list) : t =
   let alive = List.filter ps ~f:(fun q -> not (is_bottom q)) in
   let sos =
-    List.filter_map ps ~f:(function StackOff x -> Some x | _ -> None) in
+    List.filter_map ps
+      ~f:(function
+        | StackOff x | Rel (Origin.Stack, x) -> Some x
+        | _ -> None) in
   let so_pool =
     match sos with
     | [] -> None
@@ -242,7 +248,7 @@ let plain_bounds (offs : P.t) : (int64 * int64) option =
 (* The StackOff piece's plain twin: the exact hull as a step-1 piece. *)
 let rec to_plain (t : t) : t =
   match t with
-  | StackOff offs ->
+  | StackOff offs | Rel (_, offs) ->
     (match plain_bounds offs with
      | Some (cmin, cmax)
        when Stdlib.Int64.compare cmin 0L >= 0
@@ -252,22 +258,40 @@ let rec to_plain (t : t) : t =
      | _ -> Clp (P.top 64))
   | Many ps ->
     (match canonical (List.map ps ~f:to_plain) with
-     | Clp _ | FinSet _ | StackOff _ as q -> q
+     | Clp _ | FinSet _ | StackOff _ | Rel _ as q -> q
      | Many ps' -> Many ps')
   | Clp _ | FinSet _ -> t
 
 (* The plain twin: a symbolic piece materialized, a plain value as-is. *)
-let plain_view (t : t) : t = match t with StackOff _ -> to_plain t | q -> q
+let plain_view (t : t) : t = match t with StackOff _ | Rel _ -> to_plain t | q -> q
 
 (* The origin tests. *)
-let is_stack (t : t) : bool = match t with StackOff _ -> true | _ -> false
+let is_stack (t : t) : bool = match t with StackOff _ | Rel _ -> true | _ -> false
+
+(* The value's runtime origin: [Some o] exactly when every piece of the
+   value is relative to the one origin [o]; absolute, plain, and
+   mixed-origin values are [None]. *)
+let rec origin (t : t) : Origin.t option =
+  match t with
+  | StackOff _ -> Some Origin.Stack
+  | Rel (o, _) -> Some o
+  | Clp _ | FinSet _ -> None
+  | Many ps ->
+    (match List.map ps ~f:origin with
+     | (Some o) :: rest ->
+       if
+         List.for_all rest
+           ~f:(function Some o' -> Poly.( = ) o o' | None -> false)
+       then Some o
+       else None
+     | _ -> None)
 
 (* Plain-operand top test. *)
 let rec plain_is_top (t : t) : bool =
   match t with
   | Clp ps -> P.is_top ps
   | FinSet _ -> false
-  | StackOff offs -> P.is_top offs
+  | StackOff offs | Rel (_, offs) -> P.is_top offs
   | Many ps -> List.exists ps ~f:plain_is_top
 
 (* The plain single-progression hull of the whole value. *)
@@ -278,13 +302,13 @@ let as_clp (t : t) : clp =
      | Some p -> p
      | None -> Clp.top (Stdlib.max 1 (P.bitwidth ps)))
   | FinSet s -> clp_of_finset s
-  | StackOff _ -> Clp.top 64
+  | StackOff _ | Rel _ -> Clp.top 64
   | Many ps ->
     let hulls =
       List.filter_map ps ~f:(function
         | FinSet s -> Some (clp_of_finset s)
         | Clp hps -> hull_of_pieces hps
-        | StackOff _ -> None
+        | StackOff _ | Rel _ -> None
         | Many _ -> None)
     in
     (match hulls with
@@ -332,7 +356,7 @@ let extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   let leaf (q : t) : (Cbat_word.t * Cbat_word.t) option =
     let pair lo hi = Option.map2 lo hi ~f:(fun lo hi -> (lo, hi)) in
     match q with
-    | StackOff offs ->
+    | StackOff offs | Rel (_, offs) ->
       (match plain_bounds offs with
        | Some (cmin, cmax) -> Some (w64_of_i64 cmin, w64_of_i64 cmax)
        | None -> None)
@@ -373,7 +397,7 @@ let stack_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
 (* Tests stack residency: the symbolic arm, or the plain degraded arm. *)
 let in_stack_segment (t : t) : bool =
   match t with
-  | StackOff _ -> true
+  | StackOff _ | Rel _ -> true
   | Many ps ->
     List.exists ps ~f:is_stack
     || Option.is_some (stack_extrema t)
@@ -427,7 +451,7 @@ let rec cardinality (t : t) : word =
   match t with
   | Clp ps -> P.cardinality ps
   | FinSet s -> FinSet.cardinality s
-  | StackOff offs -> stack_cardinality offs
+  | StackOff offs | Rel (_, offs) -> stack_cardinality offs
   | Many ps ->
     let width = Stdlib.max 65 (bitwidth t + 1) in
     List.fold ps ~init:(Cbat_word.zero width) ~f:(fun acc q ->
@@ -454,7 +478,7 @@ let min_elem (t : t) : word option =
   extremum
     (fun q ->
        match q with
-       | StackOff offs ->
+       | StackOff offs | Rel (_, offs) ->
          Option.map (plain_bounds offs) ~f:(fun (cmin, _) -> w64_of_i64 cmin)
        | Clp ps -> P.min_elem ps
        | FinSet s -> FinSet.min_elem s
@@ -466,7 +490,7 @@ let max_elem (t : t) : word option =
   extremum
     (fun q ->
        match q with
-       | StackOff offs ->
+       | StackOff offs | Rel (_, offs) ->
          Option.map (plain_bounds offs) ~f:(fun (_, cmax) -> w64_of_i64 cmax)
        | Clp ps -> P.max_elem ps
        | FinSet s -> FinSet.max_elem s
@@ -478,7 +502,7 @@ let max_elem (t : t) : word option =
    set, or a plain in-band set's segment-relative hull. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   match t with
-  | StackOff offs -> offsets_signed_extrema offs
+  | StackOff offs | Rel (_, offs) -> offsets_signed_extrema offs
   | _ ->
     Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
         Option.map (relative_bounds lo hi) ~f:(fun (rlo, rhi) ->
@@ -531,7 +555,7 @@ let signed_leaf ~(dir : int) (q : t) : word option =
         | Some m, Some a -> Some (better m a))
   in
   match q with
-  | StackOff offs -> via_offsets offs
+  | StackOff offs | Rel (_, offs) -> via_offsets offs
   | Clp ps -> via_pieces ps
   | FinSet s ->
     (if dir < 0 then FinSet.min_elem_signed s else FinSet.max_elem_signed s)
@@ -550,14 +574,14 @@ let max_elem_signed (t : t) : word option = extremum_signed ~dir:1 t
 (* Offset space: the per-sub cell-key universe keys by offsets. *)
 let rec splits_by (t : t) (w : Cbat_word.t) =
   match t with
-  | StackOff offs | Clp offs -> P.splits_by offs w
+  | StackOff offs | Clp offs | Rel (_, offs) -> P.splits_by offs w
   | FinSet s -> FinSet.splits_by s w
   | Many ps -> List.for_all ps ~f:(fun q -> splits_by q w)
 
 (* Hull test: an over-approximation of membership in the projection. *)
 let rec elem w (t : t) =
   match t with
-  | StackOff offs ->
+  | StackOff offs | Rel (_, offs) ->
     (match plain_bounds offs with
      | Some (cmin, cmax) ->
        (match Cbat_word.to_int64 w with
@@ -574,7 +598,7 @@ let rec elem w (t : t) =
    8 MiB of elements. *)
 let rec iter (t : t) : word list =
   match t with
-  | StackOff offs ->
+  | StackOff offs | Rel (_, offs) ->
     List.map (P.elements offs)
       ~f:(fun w -> Cbat_word.add (w64_of_i64 stack_base) w)
   | Clp ps -> P.elements ps
@@ -587,7 +611,7 @@ let rec equal (t1 : t) (t2 : t) : bool =
   match t1, t2 with
   | Clp a, Clp b -> P.equal a b
   | FinSet a, FinSet b -> FinSet.equal a b
-  | StackOff a, StackOff b -> P.equal a b
+  | (StackOff a, StackOff b) | (Rel (_, a), Rel (_, b)) -> P.equal a b
   | Many a, Many b ->
     List.length a = List.length b
     && List.for_all2_exn a b ~f:equal
@@ -687,7 +711,7 @@ let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   | Clp ps1, Clp ps2 -> [ Clp (binop_pieces op ps1 ps2) ]
   | Clp ps1, FinSet s2 | FinSet s2, Clp ps1 ->
     [ Clp (binop_pieces op ps1 (pieces_of_finset s2)) ]
-  | StackOff _, _ | _, StackOff _ ->
+  | StackOff _, _ | _, StackOff _ | Rel _, _ | _, Rel _ ->
     (* The generic lift is blind to the base; the stack-aware ops route
        around it. *)
     [ Clp (P.top (Stdlib.max (bitwidth q1) (bitwidth q2))) ]
@@ -696,8 +720,8 @@ let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   match to_plain t1, to_plain t2 with
-  | ((Clp _ | FinSet _ | StackOff _) as q1),
-    ((Clp _ | FinSet _ | StackOff _) as q2) ->
+  | ((Clp _ | FinSet _ | StackOff _ | Rel _) as q1),
+    ((Clp _ | FinSet _ | StackOff _ | Rel _) as q2) ->
     canonical (op_pair op q1 q2)
   | p1, p2 -> pairwise (op_pair op) p1 p2
 
@@ -705,11 +729,11 @@ let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
   match t with
   | Clp ps -> canonical [ Clp (f_clp ps) ]
   | FinSet s -> canonical [ FinSet (f_fs s) ]
-  | StackOff offs ->
-    (match to_plain (StackOff offs) with
+  | StackOff _ | Rel _ as q ->
+    (match to_plain q with
      | Clp ps -> canonical [ Clp (f_clp ps) ]
      | FinSet s -> canonical [ FinSet (f_fs s) ]
-     | StackOff _ | Many _ -> t)
+     | StackOff _ | Rel _ | Many _ -> t)
   | Many ps -> canonical (List.map ps ~f:(fun q -> lift_unop f_clp f_fs q))
 
 (* ---------------- stack queries ---------------- *)
@@ -719,7 +743,7 @@ let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
    view is the hull (the exact union is the piece list itself). *)
 let stack_offsets (t : t) : Clp.t option =
   match t with
-  | StackOff offs ->
+  | StackOff offs | Rel (_, offs) ->
     (match hull_of_pieces offs with
      | Some p -> Some p
      | None -> Some (Clp.bottom 64))
@@ -731,7 +755,7 @@ let stack_offsets (t : t) : Clp.t option =
    names no bounded address line. *)
 let address_pieces (t : t) : P.t option =
   match t with
-  | StackOff offs -> Some offs
+  | StackOff offs | Rel (_, offs) -> Some offs
   | _ ->
     (match stack_extrema t with
      | Some (lo, hi) ->
@@ -771,7 +795,7 @@ let stride (t : t) : int =
   in
   let leaf_stride (q : t) : int option =
     match q with
-    | Clp ps | StackOff ps -> of_clp_pieces ps
+    | Clp ps | StackOff ps | Rel (_, ps) -> of_clp_pieces ps
     | FinSet s ->
       (match FinSet.iter s with
        | [] | [ _ ] -> Some 1
@@ -827,8 +851,9 @@ let stride (t : t) : int =
 let union t1 t2 : t =
   match t1, t2 with
   (* Same sub, same base symbol: the offsets union stays symbolic. *)
-  | StackOff o1, StackOff o2 -> canonical [ StackOff (P.union o1 o2) ]
-  | StackOff _, _ | _, StackOff _ ->
+  | (StackOff o1, StackOff o2) | (Rel (_, o1), Rel (_, o2)) ->
+    canonical [ StackOff (P.union o1 o2) ]
+  | StackOff _, _ | _, StackOff _ | Rel _, _ | _, Rel _ ->
     lift_binop Union (to_plain t1) (to_plain t2)
   | _ -> pairwise (op_pair Union) t1 t2
 
@@ -852,16 +877,16 @@ let rec intersection (t1 : t) (t2 : t) : t =
   if bitwidth t1 <> bitwidth t2 then
     (if bitwidth t1 > bitwidth t2 then t1 else t2)
   else match t1, t2 with
-  | StackOff _, q2 when plain_is_top q2 -> t1
-  | q1, StackOff _ when plain_is_top q1 -> t2
-  | StackOff o1, StackOff o2 ->
+  | (StackOff _, q2) | (Rel _, q2) when plain_is_top q2 -> t1
+  | (q1, StackOff _) | (q1, Rel _) when plain_is_top q1 -> t2
+  | (StackOff o1, StackOff o2) | (Rel (_, o1), Rel (_, o2)) ->
     canonical [ StackOff (P.intersection o1 o2) ]
-  | StackOff o1, (Clp _ | FinSet _ as plain)
-  | (Clp _ | FinSet _ as plain), StackOff o1 ->
+  | (StackOff o1 | Rel (_, o1)), (Clp _ | FinSet _ as plain)
+  | (Clp _ | FinSet _ as plain), (StackOff o1 | Rel (_, o1)) ->
     (match plain_offsets plain with
      | Some o2 -> canonical [ StackOff (P.intersection o1 o2) ]
      | None -> intersection (to_plain t1) (to_plain t2))
-  | StackOff _, _ | _, StackOff _ ->
+  | StackOff _, _ | _, StackOff _ | Rel _, _ | _, Rel _ ->
     intersection (to_plain t1) (to_plain t2)
   | _ ->
     (* Plain leaves meet pairwise; results merge. *)
@@ -882,7 +907,7 @@ let rec intersection (t1 : t) (t2 : t) : t =
    side enumerates, the sound identity otherwise. *)
 let rec diff (t1 : t) (t2 : t) : t =
   match t1, t2 with
-  | StackOff _, _ | _, StackOff _ ->
+  | StackOff _, _ | _, StackOff _ | Rel _, _ | _, Rel _ ->
     diff (to_plain t1) (to_plain t2)
   | _ ->
     let pair q1 q2 =
@@ -909,7 +934,7 @@ let stack_lift2 (f : clp -> clp -> clp) (t1 : t) (t2 : t) : t option =
     match q with
     | Clp ps -> hull_of_pieces ps
     | FinSet s -> Some (clp_of_finset s)
-    | StackOff _ -> None
+    | StackOff _ | Rel _ -> None
     | Many _ -> None
   in
   let hull (ps : P.t) : clp =
@@ -918,10 +943,10 @@ let stack_lift2 (f : clp -> clp -> clp) (t1 : t) (t2 : t) : t option =
     | None -> Clp.bottom 64
   in
   match t1, t2 with
-  | StackOff o1, q2 when bitwidth q2 = 64 ->
+  | (StackOff o1 | Rel (_, o1)), q2 when bitwidth q2 = 64 ->
     Option.map (hull_of_plain q2)
       ~f:(fun p2 -> StackOff (P.of_progression (f (hull o1) p2)))
-  | q1, StackOff o2 when bitwidth q1 = 64 ->
+  | q1, (StackOff o2 | Rel (_, o2)) when bitwidth q1 = 64 ->
     Option.map (hull_of_plain q1)
       ~f:(fun p1 -> StackOff (P.of_progression (f p1 (hull o2))))
   | _ -> None
@@ -952,7 +977,7 @@ let certified_bits = 4
 
 let has_stack (t : t) : bool =
   match t with
-  | StackOff _ -> true
+  | StackOff _ | Rel _ -> true
   | Many ps -> List.exists ps ~f:is_stack
   | _ -> false
 
@@ -977,7 +1002,7 @@ let singleton_of (q : t) : word option =
     (match FinSet.min_elem s, FinSet.max_elem s with
      | Some a, Some b -> pair a b
      | _ -> None)
-  | StackOff _ | Many _ -> None
+  | StackOff _ | Rel _ | Many _ -> None
 
 (* [f] over the offsets while enumerable; top past the budget. *)
 let certified_image ~(width : int) (f : word -> word) (offs : P.t) : t =
@@ -1063,8 +1088,8 @@ let round_down_image (s : int) (offs : P.t) : P.t option =
    unknown bits and answers top. *)
 let logand t1 t2 : t =
   match t1, t2 with
-  | StackOff offs, (Clp _ | FinSet _ as plain)
-  | (Clp _ | FinSet _ as plain), StackOff offs -> (
+  | (StackOff offs | Rel (_, offs)), (Clp _ | FinSet _ as plain)
+  | (Clp _ | FinSet _ as plain), (StackOff offs | Rel (_, offs)) -> (
       match singleton_of plain with
       | Some k -> (
           match round_down_shift k with
@@ -1078,7 +1103,7 @@ let logand t1 t2 : t =
               certified_image ~width:64 (fun v -> Cbat_word.logand v k64) offs
             else top 64)
       | None -> top 64)
-  | StackOff _, _ | _, StackOff _ ->
+  | StackOff _, _ | _, StackOff _ | Rel _, _ | _, Rel _ ->
     top (Stdlib.max (bitwidth t1) (bitwidth t2))
   | _ -> lift_binop Logand t1 t2
 let logor t1 t2 = blind_binop Logor t1 t2
@@ -1096,19 +1121,20 @@ let concat t1 t2 =
 
 let is_top t =
   match t with
-  | Clp ps | StackOff ps -> P.is_top ps
+  | Clp ps | StackOff ps | Rel (_, ps) -> P.is_top ps
   | FinSet _ -> false
   | Many ps ->
     List.for_all ps ~f:(function
-      | Clp ps | StackOff ps -> P.is_top ps
+      | Clp ps | StackOff ps | Rel (_, ps) -> P.is_top ps
       | _ -> false)
     && List.exists ps ~f:(function
-        | Clp _ | StackOff _ -> true
+        | Clp _ | StackOff _ | Rel _ -> true
         | _ -> false)
 
 let piece_is_infinite (q : t) =
   match q with
-  | Clp ps | StackOff ps -> List.exists (P.to_list ps) ~f:Clp.is_infinite
+  | Clp ps | StackOff ps | Rel (_, ps) ->
+    List.exists (P.to_list ps) ~f:Clp.is_infinite
   | FinSet _ -> false
   | Many _ -> false
 
@@ -1123,7 +1149,7 @@ let is_infinite t =
 let shape_pred (which : Clp.t -> bool) (t : t) : bool =
   let leaf q =
     match q with
-    | Clp ps | StackOff ps -> List.for_all (P.to_list ps) ~f:which
+    | Clp ps | StackOff ps | Rel (_, ps) -> List.for_all (P.to_list ps) ~f:which
     | FinSet _ -> false
     | Many _ -> false
   in
@@ -1140,8 +1166,9 @@ let is_circular t = shape_pred Clp.is_circular t
 
 let rec precedes t1 t2 : bool =
   match t1, t2 with
-  | StackOff o1, StackOff o2 -> P.precedes o1 o2
-  | StackOff _, _ | _, StackOff _ ->
+  | (StackOff o1, StackOff o2) | (Rel (_, o1), Rel (_, o2)) ->
+    P.precedes o1 o2
+  | StackOff _, _ | _, StackOff _ | Rel _, _ | _, Rel _ ->
     precedes (to_plain t1) (to_plain t2)
   | Clp p1, Clp p2 -> P.precedes p1 p2
   | FinSet s1, FinSet s2 -> FinSet.precedes s1 s2
@@ -1159,7 +1186,7 @@ let rec precedes t1 t2 : bool =
 let hull_join (f : Clp.t -> Clp.t -> Clp.t) t1 t2 : t =
   canonical
     [ (match t1, t2 with
-      | StackOff o1, StackOff o2 ->
+      | (StackOff o1, StackOff o2) | (Rel (_, o1), Rel (_, o2)) ->
         let hull ps =
           match hull_of_pieces ps with
           | Some p -> p
@@ -1182,15 +1209,15 @@ let extract ?hi ?lo t =
   then top (Stdlib.max 1 (bitwidth t))
   else
     match t with
-    | StackOff _
+    | StackOff _ | Rel _
       when lo_v = 0 && (match hi with Some 63 -> true | _ -> false) ->
       (* The full-width extract is the identity. *)
       t
-    | StackOff offs when Option.value ~default:63 hi < certified_bits ->
+    | StackOff offs | Rel (_, offs) when Option.value ~default:63 hi < certified_bits ->
       let hi_v = Option.value ~default:63 hi in
       certified_image ~width:(hi_v - lo_v + 1)
         (Cbat_word.extract_exn ~hi:hi_v ~lo:lo_v) offs
-    | StackOff _ ->
+    | StackOff _ | Rel _ ->
       let hi_v = Option.value ~default:(bitwidth t - 1) hi in
       top (hi_v - lo_v + 1)
     | _ ->
@@ -1202,11 +1229,11 @@ let cast c sz t =
     (* A cast at the operand's width is the identity; width changes
        follow the certified-nibble law. *)
     match t with
-    | StackOff _ when sz = 64 -> t
-    | StackOff offs
+    | StackOff _ | Rel _ when sz = 64 -> t
+    | StackOff offs | Rel (_, offs)
       when sz <= certified_bits && not (match c with Bil.HIGH -> true | _ -> false) ->
       certified_image ~width:sz (Cbat_word.cast c sz) offs
-    | StackOff _ -> top sz
+    | StackOff _ | Rel _ -> top sz
     | _ -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
 
 (* The shift count's width is incidental: a narrower count zero-extends
@@ -1215,7 +1242,7 @@ let cast c sz t =
 let shift op t1 t2 =
   if bitwidth t2 < bitwidth t1 then
     match t2 with
-    | StackOff _ | Many _ -> blind_binop op t1 t2
+    | StackOff _ | Rel _ | Many _ -> blind_binop op t1 t2
     | _ -> lift_binop op t1 (cast Bil.UNSIGNED (bitwidth t1) t2)
   else blind_binop op t1 t2
 
@@ -1225,7 +1252,7 @@ let lshift t1 t2 = shift Lshift t1 t2
 
 let rec get_idx (t : t) : idx =
   match t with
-  | StackOff _ -> 64
+  | StackOff _ | Rel _ -> 64
   | Clp ps ->
     (match hull_of_pieces ps with
      | Some p -> Clp.get_idx p
@@ -1236,7 +1263,7 @@ let rec get_idx (t : t) : idx =
 
 let pp_leaf ppf (t : t) =
   match t with
-  | StackOff offs ->
+  | StackOff offs | Rel (_, offs) ->
     Format.fprintf ppf "@[stk%a@]" (fun ppf ps ->
         match hull_of_pieces ps with
         | Some p -> Clp.pp ppf p
@@ -1286,7 +1313,7 @@ let position_of_offset (o : int64) : int64 option =  checked_add3 stack_base 0L 
    hulling (a two-band address keeps both bands in the portions). *)
 let offset_runs (t : t) : (int64 * int64) list =
   match t with
-  | StackOff offs ->
+  | StackOff offs | Rel (_, offs) ->
     List.filter_map (P.to_list offs) ~f:(fun g ->
         match Clp.min_elem g, Clp.max_elem g with
         | Some a, Some b -> (
