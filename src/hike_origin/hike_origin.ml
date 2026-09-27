@@ -10,6 +10,9 @@ type t =
   | Rip  (* the module base (BAP's rip_relative_addr slot) *)
 [@@deriving bin_io, sexp, compare]
 
+(* Core's [(=)] is int equality; origins compare structurally. *)
+let equal (a : t) (b : t) : bool = Int.equal (compare a b) 0
+
 (* The per-origin facts on the shared offset line: [base] is the
    constant the offsets add to, [certified] the count of low base bits
    that are facts (ops confined to them compute), [lo]/[hi] the
