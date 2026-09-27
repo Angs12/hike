@@ -353,18 +353,14 @@ and emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite =
    forward.  The index arithmetic is the caller's — the window's
    (a − stack0) and the region's (a − stack0 − rel_rlo) are the two
    spellings of "access offset relative to the storage base". *)
-and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
-    ~(index_of : Llvm.llvalue -> Llvm.llvalue) node (exp : exp) :
+and storage_access ctx scope llvm_builder blk_tid
+    ~(pointer_of : Llvm.llvalue -> Llvm.llvalue) node (exp : exp) :
     Llvm.llvalue =
   let rewrite addr size marker = rewrite_mem_node exp addr size marker in
   match node with
   | `Load (addr, size) ->
       let marker = marker_of_size size in
-      let p =
-        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base
-          [| index_of (create_exp ctx scope llvm_builder blk_tid addr) |]
-          "" llvm_builder
-      in
+      let p = pointer_of (create_exp ctx scope llvm_builder blk_tid addr) in
       let emit () =
         Llvm.build_load
           (Llvm.integer_type ctx.llvm_ctx (Size.in_bits size))
@@ -374,11 +370,7 @@ and storage_access ctx scope llvm_builder blk_tid ~(base : Llvm.llvalue)
         ~rewrite:(rewrite addr size)
   | `Store (addr, data, size) ->
       let marker = marker_of_size size in
-      let p =
-        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base
-          [| index_of (create_exp ctx scope llvm_builder blk_tid addr) |]
-          "" llvm_builder
-      in
+      let p = pointer_of (create_exp ctx scope llvm_builder blk_tid addr) in
       let emit () =
         let d = create_exp ctx scope llvm_builder blk_tid data in
         let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
@@ -406,29 +398,27 @@ and window_mem_access ctx scope llvm_builder blk_tid fr exp ~raw =
   | Some node ->
       (* The window parameter IS its own base: an access's address
          minus the sub's stack0 is the offset into the window. *)
-      storage_access ctx scope llvm_builder blk_tid ~base:w_ptr
-        ~index_of:(fun a -> Llvm.build_sub a (frame_stack0 fr) "" llvm_builder)
+      let stack0 = frame_stack0 fr in
+      storage_access ctx scope llvm_builder blk_tid
+        ~pointer_of:(fun a ->
+          Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w_ptr
+            [| Llvm.build_sub a stack0 "" llvm_builder |]
+            "" llvm_builder)
         node exp
   | None -> raw ()
 
 and region_mem_access ctx scope llvm_builder blk_tid fr mv exp ~raw =
   let stack0 = frame_stack0 fr in
-  (* The region alloca's base sits [rel_rlo] above the sub's stack0
-     (the region's lowest byte): anchor-normalized minus that offset
-     is the byte index inside the alloca. *)
-  let region_index llvm_builder rel_rlo a =
-    let rel = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
-    Llvm.build_sub rel
-      (Llvm.const_of_int64 (ctx.i64_ty) rel_rlo false)
-      "" llvm_builder
-  in
   match Base.List.Assoc.find ~equal:Var.equal fr.regions mv with
   | None -> raw ()
   | Some (base, rel_rlo) -> (
       match find_mem_node exp with
       | Some node ->
-          storage_access ctx scope llvm_builder blk_tid ~base
-            ~index_of:(fun a -> region_index llvm_builder rel_rlo a) node exp
+          storage_access ctx scope llvm_builder blk_tid
+            ~pointer_of:
+              (Hike_stack_ptr.ptr_of ~llvm_ctx:ctx.llvm_ctx ~llvm_builder
+                 ~base ~rel:rel_rlo ~stack0)
+            node exp
       | None -> raw ())
 
 (* Routes a region/window mem var to its storage; with no frame

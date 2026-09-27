@@ -27,3 +27,17 @@ let build ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
       { mem = Model.region_mem id;
         base;
         rel = Stdlib.Int64.sub lo Model.segment_base })
+
+(* The storage's alloca GEP'd at the address's byte index: the address is
+   relative to the sub's entry SP ([stack0]), and the storage's base sits
+   [rel] above that same entry line. *)
+let ptr_of ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
+    ~(base : Llvm.llvalue) ~(rel : int64) ~(stack0 : Llvm.llvalue)
+    (a : Llvm.llvalue) : Llvm.llvalue =
+  let rel_addr = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
+  let idx =
+    Llvm.build_sub rel_addr
+      (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) rel false)
+      "" llvm_builder
+  in
+  Llvm.build_gep (Llvm.i8_type llvm_ctx) base [| idx |] "" llvm_builder
