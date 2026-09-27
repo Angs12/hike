@@ -48,7 +48,8 @@
   var_key_bench
   attr_census
   memmap_bench
-  clp_bench)
+  clp_bench
+  env_footprint)
  (modules
   audit02
   conv_diag
@@ -60,7 +61,8 @@
   var_key_bench
   attr_census
   memmap_bench
-  clp_bench)
+  clp_bench
+  env_footprint)
  (libraries
   clp_bench_rows
   probe_common
