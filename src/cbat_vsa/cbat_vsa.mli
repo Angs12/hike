@@ -69,6 +69,13 @@ module Cbat_extraction : sig
 
 end
 
+(* The per-def runtime origin: the origin the solve computed for the
+   def's value, stamped at the solve boundary.  [None] = outside the
+   analysis boundary (reads Abs). *)
+module Def_origin : sig
+  val def_origin : def term -> Hike_origin.t option
+end
+
 (* Re-exported profiling interface. *)
 module Stages = Cbat_vsa_stages
 

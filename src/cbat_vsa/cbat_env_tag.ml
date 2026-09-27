@@ -201,6 +201,12 @@ let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
               let before = !env in
               let after = denote_def d before in
               env := after;
+              let word =
+                if !Cbat_transfer.addr_bits_ref > 0 then
+                  !Cbat_transfer.addr_bits_ref / 8
+                else 8
+              in
+              let d = Cbat_def_origin.stamp_origin ~word d after in
 #ifdef VSA_DEBUG
               Hashtbl.set env_tag_stamped ~key:(Term.tid d) ~data:();
               env_tag_bump ~sub:(Sub.name sub) ~stamped:1 ~queried:0

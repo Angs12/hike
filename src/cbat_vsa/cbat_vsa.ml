@@ -560,6 +560,7 @@ let last_defs = Cbat_transfer.last_defs
    lives in Cbat_env_tag; re-exported so the consumers keep their
    [Vsa.*] paths. *)
 module Env_tag = Cbat_env_tag
+module Def_origin = Cbat_def_origin
 let denote_exp_at = Cbat_env_tag.denote_exp_at
 let stamp_envs_of_sol = Cbat_env_tag.stamp_envs_of_sol
 let env_tag = Cbat_env_tag.env_tag

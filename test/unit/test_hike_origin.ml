@@ -6,8 +6,11 @@ open Bap.Std
 open Bap_core_theory
 open Hike_test.Harness
 open Hike_test.Common
+open Hike_test.Fixtures
 
 module Origin = Hike_origin
+
+let abi = Hike_abi.x86_64_sysv
 
 (* ORI-01: the facts table — every origin's base sits on the segment
    line and carries the certified entry nibble. *)
@@ -62,9 +65,54 @@ let ori_04 () =
   check "stack meet reads Stack"
     (Option.equal String.equal (origin_name (Ws.origin (Ws.intersection a b))) (Some "stack"))
 
+(* ORI-05: the solve-boundary band refinement — window-side values
+   name the caller's frame, VLA-band values the rebased SP, and a
+   value spanning the bands keeps the entry-SP origin. *)
+let ori_05 () =
+  let window_side = Ws.stack_word_i64 16L in
+  let refined = Ws.refine_origin ~word:8 window_side in
+  check "window-side value refines to Window"
+    (Option.equal Origin.equal (Ws.origin refined) (Some Origin.Window));
+  let frame = Ws.stack_word_i64 (-8L) in
+  check "below-entry value keeps Stack"
+    (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 frame)) (Some Origin.Stack));
+  let vla = Ws.refine_origin ~word:8 (Ws.stack_word_i64 Origin.vla_floor) in
+  check "vla-band value refines to Vla" (Option.equal Origin.equal (Ws.origin vla) (Some Origin.Vla));
+  let crossing =
+    Ws.union (Ws.stack_word_i64 0L) (Ws.stack_word_i64 16L)
+  in
+  check "value spanning the entry line keeps Stack"
+    (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 crossing)) (Some Origin.Stack));
+  let plain = Ws.singleton (i2w 5L) in
+  check "plain values pass through unchanged"
+    (Option.is_none (Ws.origin (Ws.refine_origin ~word:8 plain)))
+
+(* ORI-06: the per-def origin slot, stamped at the solve boundary — a
+   window-side address def reads Window through the seam. *)
+let ori_06 () =
+  let rsp = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
+  let p = Var.create ~is_virtual:false ~fresh:false "ori_p" (Type.Imm 64) in
+  let defs =
+    [ Def.create p
+        (Bil.BinOp (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (i2w 16L)))) ]
+  in
+  let sub = straight_sub "ori_stamp" defs in
+  let entry = anchored_entry () in
+  let sol =
+    Vsa.static_graph_vsa ~abi (Program.create ~subs:[ sub ] ()) sub
+      (Vsa.init_sol ~abi ~entry sub)
+  in
+  let _, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  let blk = Term.enum blk_t stamped |> Seq.to_list |> List.hd_exn in
+  let d = Term.enum def_t blk |> Seq.to_list |> List.hd_exn in
+  check "window-side def stamps Window"
+    (Option.equal Origin.equal (Vsa.Def_origin.def_origin d) (Some Origin.Window))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
       pin "ORI-02" "the ADT is total" ori_02;
       pin "ORI-03" "the one-origin accessor" ori_03;
-      pin "ORI-04" "same-origin ops keep the origin" ori_04 ]
+      pin "ORI-04" "same-origin ops keep the origin" ori_04;
+      pin "ORI-05" "the band refinement" ori_05;
+      pin "ORI-06" "the per-def origin stamp" ori_06 ]

@@ -453,6 +453,27 @@ let offsets_signed_extrema (offs : P.t)
   in
   List.fold (P.to_list offs) ~init:None ~f:fold
 
+(* The solve-boundary band refinement: a wholly window-side relative
+   value (every offset at/above the ABI word) names the caller's frame
+   origin; a wholly VLA-band value names the rebased SP; a value
+   spanning the bands keeps the entry-SP origin. *)
+let refine_origin ~(word : int) (t : t) : t =
+  match t with
+  | Rel (Origin.Stack, offs) when word > 0 ->
+    let w = Stdlib.Int64.of_int word in
+    (match offsets_signed_extrema offs with
+     | Some (lo, hi) ->
+       (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+        | Ok lo, Ok hi ->
+          if Stdlib.Int64.compare lo vla_floor >= 0
+             && Stdlib.Int64.compare hi vla_anchor < 0
+          then Rel (Origin.Vla, offs)
+          else if Stdlib.Int64.compare lo w >= 0 then Rel (Origin.Window, offs)
+          else t
+        | _ -> t)
+     | None -> t)
+  | q -> q
+
 (* Segment-relative bounds: a relative value keeps its exact offsets;
    a plain in-band set maps to its own hull. *)
 let stack_bounds (t : t) : (int64 * int64) option =

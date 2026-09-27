@@ -57,6 +57,7 @@
   cbat_kb_census
   cbat_attr_census
   cbat_env_tag
+  cbat_def_origin
   cbat_vsa_stages)
  (libraries bap bap-knowledge hike_abi hike_stack_bounds cbat_vsa_domain bitvec core monads )
  ; The cppo chain (mirrors src/dune's hike library): the stages debug
