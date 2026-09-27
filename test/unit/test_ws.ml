@@ -390,6 +390,16 @@ let tests : unit Alcotest.test list =
                 && Stdlib.Int64.equal (Cbat_word.to_int64_exn mx)
                   (Int64.add base 32L)
               | None, _ | _, None -> false)));
+
+    pin "WS-36"
+      "a symbolic stack top is not the lattice top (structural equality; the map \
+       lattice must test [equal], not [is_top], before dropping a top binding)"
+      (fun () ->
+        let st = Ws.stack_word (Clp.top 64) in
+        check "WS-36"
+          (Ws.is_top st
+          && (not (Ws.equal st (Ws.top 64)))
+          && not (Ws.equal (Ws.top 64) st)));
   ]
 
 let () = run "ws" tests

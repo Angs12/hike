@@ -127,10 +127,16 @@ module Make_indexed_from_map
   let join : t -> t -> t = lift_join (join' L.join)
   let widen_join = lift_join (join' L.widen_join)
 
+  (* Absent keys read top, so a stored top binding is pure bloat —
+     remove it.  [equal] is structural: a symbolic top (a stack-segment
+     value) is not the lattice top and stays. *)
   let op_add op (m : map) ~key:key ~data:data : t =
-    let idx = L.get_idx data in
-    let old_data = Option.value ~default:(L.top idx) (Map.find m key) in
-    Option.return @@ Map.set m ~key ~data:(op data old_data)
+    let old_data =
+      Option.value ~default:(L.top (L.get_idx data)) (Map.find m key) in
+    let v = op data old_data in
+    Option.return
+      (if L.equal v (L.top (L.get_idx v)) then Map.remove m key
+       else Map.set m ~key ~data:v)
 
   let join_add (t : t) ~(key : Key.t) ~(data : Val.t) : t =
     match t with

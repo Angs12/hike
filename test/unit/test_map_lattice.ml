@@ -240,6 +240,18 @@ let tests : unit Alcotest.test list =
         check "MAP-24"
           (let v = Mem.Val.data (Mem.find (64, LittleEndian) m (point 10)) in
            Ws.is_top v));
+
+    pin "MAP-25"
+      "ML8: a top-valued add stores no binding (absent reads top; the add is a remove)"
+      (fun () ->
+        let folded m =
+          Map.fold m ~init:0 ~f:(fun ~key:_ ~data v -> v + data) in
+        check "MAP-25"
+          (folded (Map.add Map.top ~key:5 ~data:IntLattice.top) = 0
+          && Map.find () (Map.add Map.top ~key:5 ~data:IntLattice.top) 5
+             = IntLattice.top
+          && folded (Map.add Map.top ~key:5 ~data:7) = 7
+          && folded (Map.join_add Map.top ~key:5 ~data:IntLattice.top) = 0));
   ]
 
 let () = run "map_lattice" tests
