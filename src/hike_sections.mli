@@ -95,13 +95,22 @@ type portion = {
 }
 [@@deriving equal, compare, sexp]
 
+(** The def's projection: the reduced tag, the address denotation's
+    runtime origin (the analysis's own fact — the rewrite consumes it;
+    no band re-derivation), and the portions. *)
+type projection = {
+  tag : sec_tag option;
+  origin : Hike_origin.t option;
+  portions : portion list;
+}
+
 (** The completed attribution: the finalized trees, the def tags, each
     access def's projection, and the data spans served whole. *)
 type ctx = {
   sub_trees : sub_tree Tid.Map.t;
   data_tree : data_tree;
   tags : sec_tag Tid.Map.t;
-  projections : (sec_tag option * portion list) option Tid.Map.t;
+  projections : projection option Tid.Map.t;
   whole : data_span list;
 }
 

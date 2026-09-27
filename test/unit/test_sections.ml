@@ -169,7 +169,7 @@ let plain (t, ps) =
 
 let clamped (t, ps) =
   match t, ps with
-  | Some Tag.Stack_unbounded, [ p1; p2 ] ->
+  | Some Tag.Unbounded, [ p1; p2 ] ->
       portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
       && portion_eq p2 S.Vla vla_lo vla_hi
   | _ -> false
@@ -244,7 +244,7 @@ let tests : unit Alcotest.test list =
                portion_eq p S.Stack entry (pos 7L)
                &&
                (match t with
-                | Some Tag.Stack (l, h) ->
+                | Some Tag.Range (l, h) ->
                     Int64.equal l entry && Int64.equal h entry
                 | _ -> false)
            | _ -> false));
@@ -257,7 +257,7 @@ let tests : unit Alcotest.test list =
                portion_eq p S.Args (pos 8L) (pos 15L)
                &&
                (match t with
-                | Some Tag.Args (l, h) ->
+                | Some Tag.Range (l, h) ->
                     Int64.equal l (pos 8L) && Int64.equal h (pos 8L)
                 | _ -> false)
            | _ -> false));
@@ -286,7 +286,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "SEC-09"
           (match rd (Ws.stack_word (Clp.top 64)) with
-           | Some Tag.Stack_unbounded, [ p1; p2 ] ->
+           | Some Tag.Unbounded, [ p1; p2 ] ->
                portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
                && portion_eq p2 S.Vla vla_lo vla_hi
            | _ -> false));
@@ -357,7 +357,7 @@ let tests : unit Alcotest.test list =
                (Clp.interval ~width:64 (i2w (pos (-4L))) (i2w (pos 12L)))
            in
            match rd ~width:1 ws with
-           | Some Tag.Stack (l, h), [ p1; p2 ] ->
+           | Some Tag.Range (l, h), [ p1; p2 ] ->
                Int64.equal l (pos (-4L)) && Int64.equal h (pos 12L)
                && portion_eq p1 S.Stack (pos (-4L)) (pos 7L)
                && portion_eq p2 S.Args (pos 8L) (pos 12L)
@@ -379,7 +379,7 @@ let tests : unit Alcotest.test list =
                (Clp.interval ~width:64 (i2w (pos (-16L))) (i2w (pos (-9L))))
            in
            match rd ~width:8 ws with
-           | Some Tag.Stack (l, h), [ p ] ->
+           | Some Tag.Range (l, h), [ p ] ->
                Int64.equal l (pos (-16L)) && Int64.equal h (pos (-9L))
                && (not p.A.pt_elig)
                && portion_eq p S.Stack (pos (-16L)) (pos (-2L))
@@ -788,7 +788,7 @@ let tests : unit Alcotest.test list =
         let ctx1 = tree_ctx [ sub1 ] in
         check "SEC-40"
           (match tag_of (A.stamp_tags ctx1 sub1) l16 with
-           | Some Tag.Stack (l, h) ->
+           | Some Tag.Range (l, h) ->
                Int64.equal l (pos (-16L)) && Int64.equal h (pos (-16L))
            | _ -> false));
 
@@ -803,7 +803,7 @@ let tests : unit Alcotest.test list =
         let ctx5 = tree_ctx [ sub5 ] in
         check "SEC-41"
           (match tag_of (A.stamp_tags ctx5 sub5) a_intra with
-           | Some Tag.Args (l, h) ->
+           | Some Tag.Range (l, h) ->
                Int64.equal l (pos 12L) && Int64.equal h (pos 12L)
            | _ -> false));
 
@@ -1239,7 +1239,16 @@ let tests : unit Alcotest.test list =
         let ctx = fixture_ctx [ sub ] in
         check "SEC-69"
           ((match tag_of (A.stamp_tags ctx sub) def_band with
-            | Some (Sm.Tag.Vla _) -> true
+            | Some (Sm.Tag.Range _) ->
+              (* The band fact rides the projection's origin: the
+                 attribution reads the analysis's origin, not a
+                 re-derived band. *)
+              let origin =
+                match Core.Map.find ctx.A.projections (Term.tid def_band) with
+                | Some (Some p) -> p.A.origin
+                | _ -> None
+              in
+              Option.equal Hike_origin.equal origin (Some Hike_origin.Vla)
             | _ -> false)
            && (match storage_at ctx sub Sm.Stack (pos (-8L)) (pos (-1L)) with
                | Some (A.Stack_region _) -> true

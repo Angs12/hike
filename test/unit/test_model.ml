@@ -702,7 +702,7 @@ let tests : unit Alcotest.test list =
                  minus_addr sp 16L,
                  LittleEndian,
                  `r64 ))
-          |> tag_def (Sm.Tag.Stack (pos (-16L), pos (-16L)))
+          |> tag_def (Sm.Tag.Range (pos (-16L), pos (-16L)))
         in
         let d2 = straight_sub "pr_d2_residue" [ d_ld ] in
         let ir2 =

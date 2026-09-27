@@ -113,7 +113,7 @@ type conv =
    cannot disagree with the tree. *)
 let conversion_of ~(word : int) ~(entry : int64)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
-    ~(projected : (Sections.Tag.t option * Sections.portion list) option)
+    ~(projected : Sections.projection option)
     ~(access : (exp * int * bool) option)
     ~(demoted : int list) : conv * Sections.Tag.t option =
   match access with
@@ -122,14 +122,18 @@ let conversion_of ~(word : int) ~(entry : int64)
       match projected with
       (* A failed attribution query keeps the memory form. *)
       | None -> (Keep, None)
-      | Some (tag, portions) ->
-          (* An above-entry unbounded address keeps its memory form: its
-             storage is the caller's world, which the typed arguments
-             carry.  A below-entry unbounded address is a pointer into
-             the residue alloca, exactly like a bounded one. *)
-          match tag with
-          | Some Sections.Tag.Args_unbounded -> (Keep, tag)
-          | Some Sections.Tag.Vla _ -> (Keep, tag)
+      | Some p ->
+          (* An unbounded address keeps its memory form: an above-entry
+             direction's storage is the caller's world, which the typed
+             arguments carry; a below-entry one is a pointer into the
+             residue alloca, exactly like a bounded one.  A VLA-origin
+             claim keeps its memory form too: the band's real storage is
+             the dynamic alloca the pointer chain names. *)
+          let tag = p.Sections.tag in
+          let portions = p.Sections.portions in
+          match (tag, p.Sections.origin) with
+          | (Some Sections.Tag.Unbounded, _) -> (Keep, tag)
+          | (_, Some Hike_origin.Vla) -> (Keep, tag)
           | _ ->
           (* A return-address cell keeps its tag — the emitter's
              return arm. *)

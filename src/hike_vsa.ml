@@ -5,6 +5,7 @@
 open Bap.Std
 open Bap_core_theory
 module Vsa = Cbat_vsa
+module Def_origin = Cbat_vsa.Def_origin
 module Model = Hike_stack_model
 
 let set_addr_bits (n : int) : unit = Vsa.set_addr_bits n

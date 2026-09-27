@@ -18,6 +18,10 @@ let equal (a : t) (b : t) : bool = Int.equal (compare a b) 0
    hulls, the plain op; [Top] = the op keeps unknown base bits. *)
 type rel_row = Wrap of t | Materialise | Top
 
+(* The unary table's row: [Wrap] = the identity; [Image] = the
+   certified image of the offsets into the plain tier; [Top]. *)
+type un_row = Wrap | Image | Top
+
 (* The per-origin facts on the shared offset line: [base] is the
    constant the offsets add to, [certified] the count of low base bits
    that are facts (ops confined to them compute), [lo]/[hi] the

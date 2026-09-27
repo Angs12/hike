@@ -14,6 +14,13 @@ module Vsa : sig
     probes may set it directly before a standalone solve. *)
   val set_addr_bits : int -> unit
 
+  (** The per-def runtime origin: the origin the solve computed for
+    the def's value, stamped at the solve boundary.  [None] = outside
+    the analysis boundary (reads [Abs]). *)
+  module Def_origin : sig
+    val def_origin : def term -> Hike_origin.t option
+  end
+
   (** An image-backed section: inclusive bounds plus static content. *)
   type section_image = Cbat_vsa.section_image = {
     img_lo : int64;

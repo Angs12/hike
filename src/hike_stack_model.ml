@@ -19,16 +19,15 @@ module Vocab = struct
     | Datarelro -> "data.rel.ro"
     | Text -> "text"
 
-  (* The def-carried classification: a section with its ADDRESS bounds, the
-     justified unbounded form, or Dead.  Absence is the identity.  In [Tag]
-     so the [sec] constructors stay unshadowed. *)
+  (* The def-carried classification: the occupied extent, the justified
+     unbounded form, or Dead.  The RUNTIME ORIGIN is not here — it rides
+     the def's origin slot (one carrier); the band rules that consumed
+     the kind read the denotation's origin instead.  Absence is the
+     identity.  In [Tag] so the [sec] constructors stay unshadowed. *)
   module Tag = struct
   type t =
-    | Stack of int64 * int64
-    | Stack_unbounded
-    | Args of int64 * int64
-    | Args_unbounded
-    | Vla of int64 * int64
+    | Range of int64 * int64
+    | Unbounded
     | Dead
   [@@deriving equal, compare, sexp]
   end
@@ -124,7 +123,7 @@ module Vsa = struct
   (* The same denotation, read off the def's section tag. *)
   let is_return_address_tag (t : sec_tag) : bool =
     match t with
-    | Tag.Stack (lo, hi) ->
+    | Tag.Range (lo, hi) ->
         Int64.equal lo segment_base && Int64.equal hi segment_base
     | _ -> false
 

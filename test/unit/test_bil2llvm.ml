@@ -390,7 +390,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let sub =
-          stamp [ (Term.tid d_st, Sm.Tag.Stack (pos (-16L), pos (-16L))) ] sub
+          stamp [ (Term.tid d_st, Sm.Tag.Range (pos (-16L), pos (-16L))) ] sub
         in
         let ir = emit_ir [ sub ] in
         check "EMIT-08"
@@ -439,8 +439,8 @@ let tests : unit Alcotest.test list =
         in
         let sub =
           stamp
-            [ (Term.tid d_ld, Sm.Tag.Stack (pos (-16L), pos (-16L)));
-              (Term.tid d_st, Sm.Tag.Stack (pos (-24L), pos (-24L))) ]
+            [ (Term.tid d_ld, Sm.Tag.Range (pos (-16L), pos (-16L)));
+              (Term.tid d_st, Sm.Tag.Range (pos (-24L), pos (-24L))) ]
             sub
         in
         let sub =
@@ -486,7 +486,7 @@ let tests : unit Alcotest.test list =
               [], [ (0, mk_ret) ] ]
         in
         let sub =
-          stamp [ (Term.tid d_st, Sm.Tag.Stack (pos (-16L), pos (-16L))) ] sub0
+          stamp [ (Term.tid d_st, Sm.Tag.Range (pos (-16L), pos (-16L))) ] sub0
         in
         let sub =
           Cu.set_layout
@@ -543,7 +543,7 @@ let tests : unit Alcotest.test list =
         let callee = fst (sub_of "fpg_callee" [ [], [ (0, mk_ret) ] ]) in
         let caller_sub =
           stamp
-            [ (Term.tid d_st, Sm.Tag.Stack (pos (-16L), pos (-16L))) ]
+            [ (Term.tid d_st, Sm.Tag.Range (pos (-16L), pos (-16L))) ]
             caller_sub
         in
         let ir_holder = ref "" in

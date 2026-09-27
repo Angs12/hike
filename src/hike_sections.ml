@@ -202,13 +202,22 @@ type portion = {
 }
 [@@deriving equal, compare, sexp]
 
+(* The def's projection: the reduced tag, the address denotation's
+   runtime origin (the analysis's own fact — the rewrite consumes it;
+   no band re-derivation), and the portions. *)
+type projection = {
+  tag : sec_tag option;
+  origin : Hike_origin.t option;
+  portions : portion list;
+}
+
 type ctx = {
   sub_trees : sub_tree Tid.Map.t;
   data_tree : data_tree;
   tags : sec_tag Tid.Map.t;
-  (* Each access def's (tag, portions) projection; [None] = the
-     attribution's query failed and the rewrite keeps the memory form. *)
-  projections : (sec_tag option * portion list) option Tid.Map.t;
+  (* Each access def's projection; [None] = the attribution's query
+     failed and the rewrite keeps the memory form. *)
+  projections : projection option Tid.Map.t;
   (* The data spans served whole, computed once by [attribute] and
      shared by the finalize and both spec projections. *)
   whole : data_span list;
@@ -246,11 +255,6 @@ let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
   let a_base = Model.args_base ~entry ~word in
   let s_top = Model.stack_top ~entry ~word in
   let vla_lo, vla_hi = vla_band_positions () in
-  let tag l h =
-    if Stdlib.Int64.compare l vla_lo >= 0 then Tag.Vla (l, h)
-    else if Stdlib.Int64.compare l a_base >= 0 then Tag.Args (l, h)
-    else Tag.Stack (l, h)
-  in
   let portion s part elig =
     Base.Option.map part ~f:(fun (plo, phi) ->
         { pt_sec = s; pt_lo = plo; pt_hi = phi; pt_elig = elig })
@@ -273,7 +277,7 @@ let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
       ~f:(fun x -> x)
   in
   ( (if Option.is_some (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
-     then Some (tag alo ahi)
+     then Some (Tag.Range (alo, ahi))
      else None),
     parts )
 
@@ -289,7 +293,7 @@ let top_claim ~(cause : top_cause) ~(entry : int64) ~(word : int)
   | Unbounded_stack ->
     let lo = Stdlib.Int64.sub entry Hike_stack_model.stack_max in
     let vla_lo, vla_hi = vla_band_positions () in
-    ( Some Tag.Stack_unbounded,
+    ( Some Tag.Unbounded,
       [ { pt_sec = Stack;
           pt_lo = lo;
           pt_hi = Stdlib.Int64.pred entry;
@@ -329,12 +333,8 @@ let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
           else
             Model.full_bounds ws ~flo:(Model.stack_floor ~entry) ~cei lo hi
         in
-        let t =
-          if Stdlib.Int64.compare nlo vla_lo >= 0 then Tag.Vla (nlo, nhi)
-          else if Stdlib.Int64.compare nlo a_base >= 0 then Tag.Args_unbounded
-          else Tag.Stack (nlo, nhi)
-        in
-        (Some t, snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
+        (Some Tag.Unbounded,
+         snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
       else
         let runs = Vsa.WordSet.offset_runs ws in
         let single =
@@ -353,13 +353,7 @@ let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
                  let occ = Model.expand_hi ~cap:cei rhi width in
                  snd (sub_portions ~elig:false ~alo:lo ~ahi:hi rlo occ))
            in
-           let t =
-             if Stdlib.Int64.compare lo vla_lo >= 0 then Tag.Vla (lo, occ_hi)
-             else if Stdlib.Int64.compare lo a_base >= 0 then
-               Tag.Args (lo, occ_hi)
-             else Tag.Stack (lo, occ_hi)
-           in
-           (Some t, parts)))
+           (Some (Tag.Range (lo, occ_hi)), parts)))
 
 (* Case 2: a plain (offset-free) address.  A stack-band hull keeps
    the memory form; an unbounded ascending set's minimum names its
@@ -470,7 +464,7 @@ type collecting = {
   (* The projection the rewrite consumes: [None] = the query failed
      (the collect path claims the full span; the rewrite keeps the
      memory form). *)
-  projections : (sec_tag option * portion list) option Tid.Map.t;
+  projections : projection option Tid.Map.t;
 }
 
 (* The intersecting bindings merge into one: the inclusive hull, the
@@ -629,17 +623,20 @@ let collect (env : env) (prog : program term) : collecting =
         | Some (addr, width, store) -> (
             (* The def's projection, computed once: the rewrite reads
                this record instead of re-deriving it from the seam. *)
-            let projected : (sec_tag option * portion list) option =
+            let projected : projection option =
               match env.denote ~blk:acc.blk ~def:d addr with
               | Error _ -> None
               | Ok ws ->
-                Some
-                  (range_of_denotation ~word:env.word ~entry:env.entry
-                     ~spans:env.spans ~rip:(Hike_def_slots.def_is_rip_relative d) ~width ws)
+                let tag, portions =
+                  range_of_denotation ~word:env.word ~entry:env.entry
+                     ~spans:env.spans
+                     ~rip:(Hike_def_slots.def_is_rip_relative d) ~width ws
+                in
+                Some { tag; origin = Vsa.WordSet.origin ws; portions }
             in
             let tag, portions =
               match projected with
-              | Some pair -> pair
+              | Some p -> (p.tag, p.portions)
               | None ->
                   (* A failed query keeps the access: the unknown
                      identity contributes full members. *)

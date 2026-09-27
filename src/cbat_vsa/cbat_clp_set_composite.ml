@@ -1180,6 +1180,73 @@ let lift2 (op : binop) (t1 : t) (t2 : t) : t =
         | Top -> top_w ())
     | _ -> generic op t1 t2
 
+let blind_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) (t : t) : t =
+  if has_stack t then top (Stdlib.max 1 (bitwidth t))
+  else lift_unop f_clp f_fs t
+
+(* The unary op ADT: the certified-nibble family over one operand.
+   [Extract] carries hi as written (the [Some 63] identity test reads
+   the option, not the default) and the defaulted lo. *)
+type unop =
+  | Lnot
+  | Neg
+  | Extract of int option * int
+  | Cast of Bil.cast * int
+
+(* THE unary table: the certified-nibble law, per origin — [Wrap] = the
+   identity, [Image] = the certified image of the offsets into the
+   plain tier, [Top] = the op keeps unknown base bits. *)
+let unop_table (op : unop) : Hike_origin.un_row =
+  match op with
+  | Lnot | Neg -> Top
+  | Extract (hi, lo) ->
+    if lo = 0 && (match hi with Some 63 -> true | _ -> false) then Wrap
+    else if Option.value ~default:63 hi < certified_bits then Image
+    else Top
+  | Cast (c, sz) ->
+    if sz = 64 then Wrap
+    else if sz <= certified_bits && not (match c with Bil.HIGH -> true | _ -> false)
+    then Image
+    else Top
+
+(* THE general unary operator: the table decides the row, the payload
+   computes once, the row wraps the result. *)
+let rec lift1 (op : unop) (t : t) : t =
+  let top_w () =
+    match op with
+    | Extract (hi, lo) -> top (Option.value ~default:63 hi - lo + 1)
+    | Cast (_, sz) -> top sz
+    | _ -> top (Stdlib.max 1 (bitwidth t))
+  in
+  match t with
+  | Rel (_, offs) as v -> (
+      let image () =
+        match op with
+        | Extract (hi, lo) ->
+          let hi_v = Option.value ~default:63 hi in
+          certified_image ~width:(hi_v - lo + 1)
+            (Cbat_word.extract_exn ~hi:hi_v ~lo:lo) offs
+        | Cast (c, sz) ->
+          certified_image ~width:sz (Cbat_word.cast c sz) offs
+        | Lnot | Neg -> top_w ()
+      in
+      match unop_table op with
+      | Wrap -> v
+      | Image -> image ()
+      | Top -> top_w ())
+  | _ -> plain_unop op t
+
+(* The plain-plain payload: the op over the plain leaves. *)
+and plain_unop (op : unop) (t : t) : t =
+  match op with
+  | Extract (hi, lo) ->
+    lift_unop
+      (P.extract ?hi ?lo:(Some lo))
+      (FinSet.extract ?hi ?lo:(Some lo)) t
+  | Cast (c, sz) -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
+  | Lnot -> blind_unop P.lnot FinSet.lnot t
+  | Neg -> blind_unop P.neg FinSet.neg t
+
 let union t1 t2 : t = lift2 Union t1 t2
 
 (* Precise meet across representations: the width mismatch returns the
@@ -1230,12 +1297,8 @@ let logand t1 t2 : t = lift2 Logand t1 t2
 let logor t1 t2 = lift2 Logor t1 t2
 let logxor t1 t2 = lift2 Logxor t1 t2
 
-let blind_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) (t : t) : t =
-  if has_stack t then top (Stdlib.max 1 (bitwidth t))
-  else lift_unop f_clp f_fs t
-
-let lnot t = blind_unop P.lnot FinSet.lnot t
-let neg t = blind_unop P.neg FinSet.neg t
+let lnot t = match t with Rel _ -> lift1 Lnot t | _ -> blind_unop P.lnot FinSet.lnot t
+let neg t = match t with Rel _ -> lift1 Neg t | _ -> blind_unop P.neg FinSet.neg t
 
 
 let concat t1 t2 = lift2 Concat t1 t2
@@ -1331,31 +1394,14 @@ let extract ?hi ?lo t =
   then top (Stdlib.max 1 (bitwidth t))
   else
     match t with
-    | Rel _
-      when lo_v = 0 && (match hi with Some 63 -> true | _ -> false) ->
-      (* The full-width extract is the identity. *)
-      t
-    | Rel (_, offs) when Option.value ~default:63 hi < certified_bits ->
-      let hi_v = Option.value ~default:63 hi in
-      certified_image ~width:(hi_v - lo_v + 1)
-        (Cbat_word.extract_exn ~hi:hi_v ~lo:lo_v) offs
-    | Rel _ ->
-      let hi_v = Option.value ~default:(bitwidth t - 1) hi in
-      top (hi_v - lo_v + 1)
-    | _ ->
-      lift_unop (P.extract ?hi ?lo) (FinSet.extract ?hi ?lo) t
+    | Rel _ -> lift1 (Extract (hi, lo_v)) t
+    | _ -> lift_unop (P.extract ?hi ?lo) (FinSet.extract ?hi ?lo) t
 
 let cast c sz t =
   if sz <= 0 then top (Stdlib.max 1 (bitwidth t))
   else
-    (* A cast at the operand's width is the identity; width changes
-       follow the certified-nibble law. *)
     match t with
-    | Rel _ when sz = 64 -> t
-    | Rel (_, offs)
-      when sz <= certified_bits && not (match c with Bil.HIGH -> true | _ -> false) ->
-      certified_image ~width:sz (Cbat_word.cast c sz) offs
-    | Rel _ -> top sz
+    | Rel _ -> lift1 (Cast (c, sz)) t
     | _ -> lift_unop (P.cast c sz) (FinSet.cast c sz) t
 
 (* The shift count's width is incidental: a narrower count zero-extends
