@@ -379,10 +379,9 @@ and storage_access ctx scope llvm_builder blk_tid
       emit_with_marker ctx scope llvm_builder blk_tid marker ~emit
         ~rewrite:(rewrite addr size)
 
-(* Region accesses GEP the region alloca at (access offset − region
-   base), both relative to the SP anchor.  Window accesses normalize
-   the same way against the hike_window parameter — a pointer into the
-   caller's residue. *)
+(* Both storage kinds GEP their base at (address − entry line − base
+   offset) through [Hike_stack_ptr.ptr_of]: a region's base sits [rel]
+   above the entry line, the window's base IS the entry line ([rel=0]). *)
 and window_mem_access ctx scope llvm_builder blk_tid fr exp ~raw =
   let w_ptr =
     let w = Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word in
@@ -396,14 +395,13 @@ and window_mem_access ctx scope llvm_builder blk_tid fr exp ~raw =
   in
   match find_mem_node exp with
   | Some node ->
-      (* The window parameter IS its own base: an access's address
-         minus the sub's stack0 is the offset into the window. *)
+      (* The window storage's base is the entry line itself ([rel = 0]):
+         the same storage rule as a region, different base. *)
       let stack0 = frame_stack0 fr in
       storage_access ctx scope llvm_builder blk_tid
-        ~pointer_of:(fun a ->
-          Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w_ptr
-            [| Llvm.build_sub a stack0 "" llvm_builder |]
-            "" llvm_builder)
+        ~pointer_of:
+          (Hike_stack_ptr.ptr_of ~llvm_ctx:ctx.llvm_ctx ~llvm_builder
+             ~base:w_ptr ~rel:0L ~stack0)
         node exp
   | None -> raw ()
 

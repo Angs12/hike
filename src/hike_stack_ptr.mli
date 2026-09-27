@@ -15,10 +15,12 @@ val build :
   Hike_stack_model.Sub_layout.t ->
   storage list
 
-(* The pointer form of an address into a storage: the storage's alloca
+(* The pointer form of an address into a storage: the storage's base
    GEP'd at the address's byte index, the address normalized by the sub's
-   entry SP and the storage's own base.  An address VALUE stays an i64;
-   this is the one place it becomes the pointer it denotes. *)
+   entry SP and the storage's own base offset.  An address VALUE stays an
+   i64; this is the one place it becomes the pointer it denotes.  A
+   [rel] of 0 is a storage whose base is the entry line (the caller
+   window). *)
 val ptr_of :
   llvm_ctx:Llvm.llcontext ->
   llvm_builder:Llvm.llbuilder ->
