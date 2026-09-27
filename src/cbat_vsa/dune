@@ -30,7 +30,7 @@
   cbat_vsa_utils
   cbat_var_id
   cbat_landmarks)
- (libraries hike_abi bap bitvec bitvec-order bin_prot core monads hashcons)
+ (libraries hike_abi bap bitvec  bin_prot core monads )
  ; The cppo chain (mirrors src/dune and cbat_vsa): the VSA_DEBUG census
  ; blocks in cbat_clp.ml vanish from every non-vsa-debug build.
  (preprocess
@@ -58,7 +58,7 @@
   cbat_attr_census
   cbat_env_tag
   cbat_vsa_stages)
- (libraries bap bap-knowledge hike_abi hike_stack_bounds cbat_vsa_domain bitvec core monads hashcons)
+ (libraries bap bap-knowledge hike_abi hike_stack_bounds cbat_vsa_domain bitvec core monads )
  ; The cppo chain (mirrors src/dune's hike library): the stages debug
  ; adapter carries #ifdef VSA_DEBUG, and without this stanza the raw
  ; directive reaches the parser — the trailing #ifdef then parses as a

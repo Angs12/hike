@@ -12,7 +12,7 @@ let initialized = ref false
 let init () =
   if not !initialized then (
     initialized := true;
-    match Bap_main.init ~argv:[| Sys.executable_name |] () with
+    match Bap_main.init ~requires:[ "disassembler" ] ~argv:[| Sys.executable_name |] () with
     | Ok () -> ()
     | Error _ ->
       Format.eprintf "hike-test: Bap_main.init failed@.";

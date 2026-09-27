@@ -6,7 +6,7 @@
   bap
   bap-core-theory
   bap-main
-  bap-future
+
   cbat_vsa
   cbat_vsa_domain
   core
@@ -68,7 +68,7 @@
   bap
   bap-core-theory
   bap-main
-  bap-future
+
   cbat_vsa
   cbat_vsa_domain
   core
@@ -91,7 +91,7 @@
   bap
   bap-core-theory
   bap-main
-  bap-future
+
   cbat_vsa
   cbat_vsa_domain
   core

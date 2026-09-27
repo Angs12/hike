@@ -28,7 +28,7 @@ let ws_usage (argv0 : string) : 'a =
 
 (* BAP init with a tool-named failure line. *)
 let ws_init (tool : string) : unit =
-  match Bap_main.init ~argv:[|Sys.executable_name|] () with
+  match Bap_main.init ~requires:[ "disassembler" ] ~argv:[|Sys.executable_name|] () with
   | Ok () -> ()
   | Error failed ->
     Format.eprintf "%s: BAP initialization failed: %a@\n%!" tool

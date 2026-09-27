@@ -32,6 +32,7 @@ module Vsa : sig
   val fixpoint :
     Theory.Target.t ->
     lookup:(int64 -> Tid.t option) ->
+    sub_addrs:Tid.t Addr.Map.t ->
     images:section_image list ->
     written:Core.Int.Set.t option Tid.Map.t ->
     lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
@@ -71,6 +72,7 @@ module Cfg_complete : sig
     images:Cbat_vsa.section_image list ->
     lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
     block_addrs:Tid.t Addr.Map.t ->
+    sub_addrs:Tid.t Addr.Map.t ->
     sub term ->
     Tid.Set.t Tid.Map.t ->
     sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool

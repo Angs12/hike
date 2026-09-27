@@ -5,16 +5,16 @@
   (action
    (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file})))
   (libraries
-    str
+
     unix
     bap
     llvm
     bap-core-theory
-    bap-future
+
     bap-knowledge
     bap-main
     bitvec
-    bitvec-order
+
     bin_prot
     core
     monads

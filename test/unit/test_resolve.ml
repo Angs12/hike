@@ -619,6 +619,7 @@ let tests : unit Alcotest.test list =
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
+                ~sub_addrs:(Core.Map.empty (module Addr))
                 j5 Tid.Map.empty
             in
             (not events5) && Core.Set.is_empty fresh5'
@@ -664,6 +665,7 @@ let tests : unit Alcotest.test list =
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
+                ~sub_addrs:(Core.Map.empty (module Addr))
                 j5 Tid.Map.empty
             in
             Base.List.map (Term.enum blk_t sub5' |> Seq.to_list) ~f:Term.tid

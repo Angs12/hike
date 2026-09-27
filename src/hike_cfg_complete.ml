@@ -118,24 +118,26 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
                    (Core.Map.length block_addrs));
              None))
 
-(* Rewrite a lifted term's direct targets through [f]; indirect targets
-   stay the resolution's own. *)
+(* Rewrite a lifted term's direct targets: a call's target names a
+   subroutine, a goto's a block, so the two resolve through different
+   maps.  Indirect targets stay the resolution's own. *)
 let remap_label f = function
   | Direct t -> Direct (f t)
   | Indirect e -> Indirect e
 
-let remap_jmp f (j : jmp term) : jmp term =
+let remap_jmp ~(call : Tid.t -> Tid.t) ~(blk : Tid.t -> Tid.t) (j : jmp term) :
+    jmp term =
   if Hike_return.is_jmp j then j
   else
     let kind =
       match Jmp.kind j with
-      | Goto l -> Goto (remap_label f l)
-      | Ret l -> Ret (remap_label f l)
-      | Int (n, t) -> Int (n, f t)
+      | Goto l -> Goto (remap_label blk l)
+      | Ret l -> Ret (remap_label blk l)
+      | Int (n, t) -> Int (n, blk t)
       | Call c ->
         Call
-          (Call.create ~target:(remap_label f (Call.target c))
-             ?return:(Base.Option.map (Call.return c) ~f:(remap_label f))
+          (Call.create ~target:(remap_label call (Call.target c))
+             ?return:(Base.Option.map (Call.return c) ~f:(remap_label blk))
              ())
     in
     Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j) kind
@@ -148,7 +150,8 @@ let remap_jmp f (j : jmp term) : jmp term =
    added twice — references to it are retargeted to that block. *)
 let materialize_block
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
-    ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) (a : Addr.t) :
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(sub_addrs : Tid.t Addr.Map.t) (sub : sub term) (a : Addr.t) :
     (sub term * tid * (Addr.t * tid) list) option =
   match lift_at a ~block_addrs with
   | None | Some [] -> None
@@ -159,15 +162,21 @@ let materialize_block
       | Some addr -> Core.Map.mem block_addrs addr
       | None -> false
     in
-    (* A lifted direct target is address-derived; an address that already
-       names a block resolves to that block's tid. *)
+    (* A lifted direct target is address-derived.  A goto names the
+       block at that address; a call names the subroutine there, which
+       the program's subs carry under their own tid (the symtab side). *)
     let existing =
       Core.Map.fold block_addrs ~init:Tid.Map.empty
         ~f:(fun ~key:addr ~data:t m ->
           Core.Map.set m ~key:(Tid.for_addr addr) ~data:t)
     in
-    let retarget t =
-      Base.Option.value (Core.Map.find existing t) ~default:t
+    let call_existing =
+      Core.Map.fold sub_addrs ~init:existing
+        ~f:(fun ~key:addr ~data:sub_tid m ->
+          Core.Map.set m ~key:(Tid.for_addr addr) ~data:sub_tid)
+    in
+    let retarget map t =
+      Base.Option.value (Core.Map.find map t) ~default:t
     in
     let present =
       Term.enum blk_t sub
@@ -179,7 +188,9 @@ let materialize_block
           if duplicate b || Core.Set.mem present (Term.tid b) then None
           else
             Some
-              (Term.map jmp_t b ~f:(remap_jmp retarget)
+              (Term.map jmp_t b
+                 ~f:(remap_jmp ~call:(retarget call_existing)
+                        ~blk:(retarget existing))
               |> Hike_coerce.coerce_block))
     in
     let entries =
@@ -189,7 +200,7 @@ let materialize_block
     let sub' =
       Base.List.fold kept ~init:sub ~f:(fun s b -> Term.append blk_t s b)
     in
-    Some (sub', retarget (Term.tid (Base.List.hd_exn blks)), entries)
+    Some (sub', retarget existing (Term.tid (Base.List.hd_exn blks)), entries)
 
 (* One mid-block case entry: the prefix keeps the block's tid (its
    incoming edges) and falls through to the fresh entry block, which
@@ -200,7 +211,8 @@ let materialize_block
    blocks. *)
 let split_entry ~(starts : (Addr.t * tid) list)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
-    ~(block_addrs : Tid.t Addr.Map.t) (a : Addr.t) (sub : sub term) :
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(sub_addrs : Tid.t Addr.Map.t) (a : Addr.t) (sub : sub term) :
     sub term * tid * (Addr.t * tid) list =
   let container =
     Base.List.fold starts ~init:None ~f:(fun best (sa, t) ->
@@ -230,7 +242,7 @@ let split_entry ~(starts : (Addr.t * tid) list)
     in
     match pivot with
     | None -> (
-        match materialize_block ~lift_at ~block_addrs sub a with
+        match materialize_block ~lift_at ~block_addrs ~sub_addrs sub a with
         | Some (sub', t, entries) -> (sub', t, entries)
         | None ->
           failwith
@@ -311,6 +323,7 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(fresh : Tid.Set.t ref)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
+    ~(sub_addrs : Tid.t Addr.Map.t)
     (sub : sub term) : sub term * Tid.t Addr.Map.t =
   let dispatch_word block_addrs blk =
     let last_defs = Vsa.last_defs blk in
@@ -337,7 +350,7 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
              | None -> None
              | Some a ->
                  let sub', t, entries =
-                   split_entry ~starts ~lift_at ~block_addrs a sub
+                   split_entry ~starts ~lift_at ~block_addrs ~sub_addrs a sub
                  in
                  Some (blk, a, sub', t, entries))
     with
@@ -807,6 +820,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
+    ~(sub_addrs : Tid.t Addr.Map.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     sub term * Tid.Set.t Tid.Map.t * Tid.Set.t * Tid.t Addr.Map.t * bool =
   let denote = denote_of_sol sol in
@@ -815,7 +829,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   let fresh = ref Tid.Set.empty in
   Vsa.with_images images (fun () ->
       let sub, block_addrs' =
-        prepare_dispatches ~denote ~retaddr ~fresh ~lift_at ~block_addrs sub
+        prepare_dispatches ~denote ~retaddr ~fresh ~lift_at ~block_addrs ~sub_addrs sub
       in
 
       let grew = ref false in

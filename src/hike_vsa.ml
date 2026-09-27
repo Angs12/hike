@@ -144,6 +144,7 @@ type lookup_fn = int64 -> Tid.t option
 
 let fixpoint (target : Theory.Target.t)
     ~(lookup : lookup_fn)
+    ~(sub_addrs : Tid.t Addr.Map.t)
     ~(images : Vsa.section_image list)
     ~(written : Core.Int.Set.t option Tid.Map.t)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
@@ -179,6 +180,7 @@ let fixpoint (target : Theory.Target.t)
 #endif
     let sub', resolved', fresh', block_addrs', events =
       Hike_cfg_complete.resolve_phase ~abi ~sol ~images ~lift_at ~block_addrs
+        ~sub_addrs
         sub resolved
     in
     if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)

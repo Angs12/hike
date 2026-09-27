@@ -10,7 +10,7 @@
   cbat_vsa_domain
   graphlib
   core
-  bap-future
+
   threads
   unix
   alcotest)
@@ -63,7 +63,7 @@
   cbat_vsa_domain
   graphlib
   core
-  bap-future
+
   llvm
   hike.hike_stack_bounds
   unix)

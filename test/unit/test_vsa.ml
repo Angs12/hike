@@ -639,7 +639,8 @@ let tests : unit Alcotest.test list =
         let sub = straight_sub "at_round2" [ d_shr; d_shl ] in
         let _, sub', _ =
           Hv.fixpoint Theory.Target.unknown
-            ~lookup:(fun _ -> None) ~images:[]
+            ~lookup:(fun _ -> None)
+            ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
             ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                         (Program.create ~subs:[ sub ] ()))
             ~lift_at:(fun _ ~block_addrs:_ -> None)

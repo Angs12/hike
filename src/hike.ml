@@ -53,16 +53,18 @@ let output =
     Extension.Type.("output file" %: string)
     "output-file" ~doc:"File to output LLVM IR"
 
-(* Registers the pass and returns its name for the next link's deps:
-   the chain is linear, each pass depending on its predecessor.  [chain']
-   is the parameter-passing registrar's twin (the emitting last link). *)
-let chain ~name ~prev run =
-  Project.register_pass ~name ~deps:[ "hike-" ^ prev ] ~runonce:true run;
-  name
+(* The previous pass's ACTUAL registered name: BAP prefixes every pass
+   with the bundle name, so the chain reads back the registered name
+   instead of assuming a bundle prefix. *)
+let last_pass () = Project.Pass.name (Core.List.last_exn (Project.passes ()))
 
-let chain' ~name ~prev run =
-  Project.register_pass' ~name ~deps:[ "hike-" ^ prev ] ~runonce:true run;
-  name
+let chain ~name ~deps run =
+  Project.register_pass ~name ~deps ~runonce:true run;
+  last_pass ()
+
+let chain' ~name ~deps run =
+  Project.register_pass' ~name ~deps ~runonce:true run;
+  last_pass ()
 
 let map_subs f proj =
   Project.map_program proj ~f:(fun prog -> Term.map sub_t prog ~f)
@@ -151,12 +153,22 @@ let pass_vsa proj =
     Hike_resolve.symtab_lookup ~symtab:(Some (Project.symbols proj))
       ~table:(Hike_resolve.name_table_of (Project.program proj))
   in
+  (* The run's sub-entry index: the symtab resolves every block address
+     that names a lifted subroutine to that subroutine's tid — the
+     target a re-lifted direct call lands on. *)
+  let sub_addrs =
+    Core.Map.fold block_addrs ~init:Addr.Map.empty
+      ~f:(fun ~key:addr ~data:_ m ->
+          match lookup (Word.to_int64_exn addr) with
+          | Some sub -> Core.Map.set m ~key:addr ~data:sub
+          | None -> m)
+  in
   let subs_acc, block_addrs =
     Term.enum sub_t (Project.program proj)
     |> Seq.fold ~init:(Tid.Map.empty, block_addrs)
          ~f:(fun (acc, block_addrs) sub ->
         let envs, sub', block_addrs' =
-          Hike_vsa.fixpoint target ~lookup ~images ~written ~lift_at
+          Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images ~written ~lift_at
             ~block_addrs sub
         in
         (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'), block_addrs'))
@@ -248,22 +260,23 @@ let pass_ssa proj =
   Project.map_program proj ~f:(Hike_ssa.ssa_program ~target)
 
 let () =
-  Extension.declare (fun ctx ->
+  Extension.declare ~provides:["pass"; "hike"] (fun ctx ->
       let output_file = Extension.Configuration.get ctx output in
       Project.register_pass ~name:"filter" ~runonce:true pass_filter;
-      let jump = chain ~name:"jump" ~prev:"filter" pass_jump in
-      let split_mem = chain ~name:"split-mem" ~prev:jump pass_split_mem in
-      let coerce = chain ~name:"coerce" ~prev:split_mem pass_coerce in
-      let vsa = chain ~name:"vsa" ~prev:coerce pass_vsa in
+      let filter = last_pass () in
+      let jump = chain ~name:"jump" ~deps:[ filter ] pass_jump in
+      let split_mem = chain ~name:"split-mem" ~deps:[ jump ] pass_split_mem in
+      let coerce = chain ~name:"coerce" ~deps:[ split_mem ] pass_coerce in
+      let vsa = chain ~name:"vsa" ~deps:[ coerce ] pass_vsa in
       let strip_canaries =
-        chain ~name:"strip-canaries" ~prev:vsa pass_strip_canaries
+        chain ~name:"strip-canaries" ~deps:[ vsa ] pass_strip_canaries
       in
-      let sections = chain ~name:"sections" ~prev:strip_canaries pass_attrib in
+      let sections = chain ~name:"sections" ~deps:[ strip_canaries ] pass_attrib in
       let split_blocks =
-        chain ~name:"split-blocks" ~prev:sections pass_split_blocks
+        chain ~name:"split-blocks" ~deps:[ sections ] pass_split_blocks
       in
-      let types = chain ~name:"types" ~prev:split_blocks pass_types in
-      let ssa = chain ~name:"ssa" ~prev:types pass_ssa in
-      let convlir = chain' ~name:"convlir" ~prev:ssa (pass_convlir ~output:output_file) in
+      let types = chain ~name:"types" ~deps:[ split_blocks ] pass_types in
+      let ssa = chain ~name:"ssa" ~deps:[ types ] pass_ssa in
+      let convlir = chain' ~name:"convlir" ~deps:[ ssa ] (pass_convlir ~output:output_file) in
       ignore convlir;
       Ok ())
