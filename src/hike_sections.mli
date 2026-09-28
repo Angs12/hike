@@ -119,6 +119,7 @@ type ctx = {
     Bottom yields no portion; an unknown address contributes its full
     possible range to each space it may touch. *)
 val range_of_denotation :
+  extents:(int64 * int64) list ->
   word:int ->
   entry:int64 ->
   spans:data_span list ->
@@ -136,6 +137,7 @@ type top_cause = Query_failed | Unbounded_stack | Foreign
     below the entry; any other top claims the whole sub-local line.
     Every full-span member is identity, never carved. *)
 val top_claim :
+  extents:(int64 * int64) list ->
   cause:top_cause -> entry:int64 -> word:int -> sec_tag option * portion list
 
 (** Collects the program's membership facts (memory accesses and

@@ -40,7 +40,10 @@ let range_of (ws : WordSet.t) : (word * word) option =
    stack-derived cells key by segment offsets, foreign cells by their
    concrete addresses.  The callee writes below its own RSP, so cells
    at keys at/above the HIGHEST possible call-time RSP survive every
-   call site; the whole-memory top stays the sound fallback on any
+   call site; a VLA-frame SP keeps from its extent's LOW end instead —
+   every run's live bytes (the allocation's own, the frame above) sit
+   at/above that run's SP, and the callee reaches below its entry
+   only.  The whole-memory top stays the sound fallback on any
    doubt. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =
@@ -48,7 +51,13 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
   Cbat_attr_census.bump "call.frame";
 #endif
   let env = AI.top_words_except ~preserved env in
-  let keep_lo = Option.map ~f:snd (range_of rsp) in
+  let keep_lo =
+    Option.map ~f:(fun (lo, hi) ->
+        match WordSet.origin rsp with
+        | Some (WordSet.Origin.Vla _) -> lo
+        | _ -> hi)
+      (range_of rsp)
+  in
   let escape_ranges =
     match List.filter_map escape ~f:range_of with
     | ranges when List.length ranges = List.length escape -> Some ranges
@@ -58,23 +67,8 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
 #ifdef VSA_DEBUG
     Cbat_attr_census.bump "call.frame.kept";
 #endif
-    (* A band-form SP (a live VLA) splits the keep: frame-line cells
-       keep unconditionally — the real RSP sits below the real frame —
-       and the band cells keep from the SP's own extent. *)
-    let band_split =
-      match WordSet.stack_offsets rsp with
-      | Some offs -> (
-          match WordSet.Clp.min_elem offs with
-          | Some mlo -> (
-              match Cbat_word.to_int64 mlo with
-              | Ok mlo when Stdlib.Int64.compare mlo WordSet.vla_floor >= 0 ->
-                Some (Word.of_int64 ~width:64 WordSet.vla_floor)
-              | _ -> None)
-          | None -> None)
-      | None -> None
-    in
     AI.map_memories env ~f:(fun ~key:_ ~data ->
-        Mem.call_keep data ~keep_lo:lo ~escape:ranges ~band_split)
+        Mem.call_keep data ~keep_lo:lo ~escape:ranges)
   | _ ->
 #ifdef VSA_DEBUG
     (match keep_lo, escape_ranges with

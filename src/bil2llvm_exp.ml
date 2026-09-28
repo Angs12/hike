@@ -242,6 +242,10 @@ let as_arg ctx scope llvm_builder blk_tid (a_exp : exp) (v : Llvm.llvalue) :
             | _ -> None
           in
           match storage with
+          | Some Hike_stack_model.Ptr_vla ->
+              (* The dynamic alloca's own address: the integer IS the
+                 real pointer. *)
+              Llvm.build_inttoptr v ctx.ptr_ty "" llvm_builder
           | Some Hike_stack_model.Ptr_window -> (
               match window_ptr () with
               | Some wp -> geps fr ~base:wp ~rel:0L

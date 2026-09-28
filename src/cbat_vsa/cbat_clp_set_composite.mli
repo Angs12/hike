@@ -24,6 +24,10 @@ module Origin = Hike_origin
    mixed-origin values are [None]. *)
 val origin : t -> Origin.t option
 
+(* Re-tags a relative value's origin, offsets unchanged — the VLA
+   seed's framing step (the entry-line positions ARE the new frame's). *)
+val set_origin : Origin.t -> t -> t
+
 include Cbat_wordset_intf.S with type t := t
 
 val is_top : t -> bool
@@ -55,14 +59,6 @@ val certified_bits : int
    [stack_band_lo, 2^63) — unreachable for real addresses. *)
 val stack_band_lo : int64
 
-(* The VLA band: a runtime-sized allocation relocates its SP to
-   [stack_base + vla_anchor] minus the size, so its claims live in
-   [vla_floor, vla_anchor) — disjoint from the frame line by
-   construction.  [vla_span] caps the rebased sizes. *)
-val vla_anchor : int64
-val vla_span : int64
-val vla_floor : int64
-
 val stack_word : Cbat_clp.t -> t
 val stack_word_i64 : int64 -> t
 
@@ -89,10 +85,10 @@ val in_stack_segment : t -> bool
    plain value. *)
 val offset_extrema : t -> (Cbat_word.t * Cbat_word.t) option
 
-(* The solve-boundary band refinement: a wholly window-side relative
-   value (every offset at/above the ABI word) names the caller's frame
-   origin; a wholly VLA-band value names the rebased SP; a value
-   spanning the bands keeps the entry-SP origin. *)
+(* The solve-boundary refinement: a wholly window-side relative value
+   (every offset at/above the ABI word) names the caller's frame
+   origin; a VLA-frame value whose offsets left its allocation's
+   extent re-absorbs onto the entry line. *)
 val refine_origin : word:int -> t -> t
 
 (* Segment-relative bounds of a stack value; None when not stack. *)

@@ -407,14 +407,29 @@ let denote_imm_exp (e : exp) (env : AI.t) : WordSet.t or_type_error =
   let open Monad_type_error in
   denote_exp e env >>= val_as_imm
 
-(* The VLA rebase: a def that assigns SP the runtime decrement
-   [SP - x] relocates the result onto the VLA band — [anchor - size] —
-   so the allocation's claims stay disjoint from the frame line
-   whatever the size.  Fires on the direct form (lhs = SP) only, for a
-   bounded non-singleton strictly-positive size, and only when the
-   SP-before is still frame-form (a band-form SP is already coherent;
-   the plain arithmetic keeps it). *)
-let vla_rebase (lhs : var) (e : exp) (env : AI.t) (p : wordset) : wordset =
+(* The offset extrema (signed) of a stack-symbolic value's hull. *)
+let offset_bounds (ws : wordset) : (int64 * int64) option =
+  match WordSet.stack_offsets ws with
+  | Some offs -> (
+      match WordSet.Clp.min_elem offs, WordSet.Clp.max_elem offs with
+      | Some lo, Some hi -> (
+          match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+          | Ok lo, Ok hi -> Some (lo, hi)
+          | _ -> None)
+      | _ -> None)
+  | None -> None
+
+(* The VLA seed: the def that assigns SP the runtime decrement
+   [SP - x] opens a VLA frame — a coordinate frame whose zero is the
+   post-decrement SP, named by the def's tid.  The value's offsets are
+   the TRUE entry-line positions [B - S], so every consumer works in
+   real positions and the origin only routes; the allocation extent
+   [min(B - S), max(B)) rides the seed table for the boundary flip and
+   the attribution's extent cut.  Fires on the direct form (lhs = SP)
+   for a bounded strictly-positive size; anything else keeps the
+   plain-arithmetic result — the sound identity. *)
+let vla_seed (df : def term) (lhs : var) (e : exp) (env : AI.t)
+    (p : wordset) : wordset =
   match (!sp_var_ref, e) with
   | Some sp, Bil.BinOp (Bil.MINUS, Bil.Var a, x)
     when Var.equal (Var.base lhs) (Var.base sp)
@@ -424,33 +439,40 @@ let vla_rebase (lhs : var) (e : exp) (env : AI.t) (p : wordset) : wordset =
       else
         match (denote_imm_exp x env, denote_imm_exp (Bil.Var a) env) with
         | Ok size_ws, Ok before_ws -> (
-            let size_range =
-              match WordSet.min_elem size_ws, WordSet.max_elem size_ws with
-              | Some lo, Some hi -> (
-                  match (Cbat_word.to_int64 lo, Cbat_word.to_int64 hi) with
-                  | Ok lo, Ok hi
-                    when Stdlib.Int64.compare lo 1L >= 0
-                         && Stdlib.Int64.compare hi WordSet.vla_span < 0 ->
-                    Some (lo, hi)
-                  | _ -> None)
-              | _ -> None
+            let size_ok =
+              not (WordSet.is_top size_ws)
+              && not (WordSet.is_infinite size_ws)
+              && (match WordSet.min_elem size_ws, WordSet.max_elem size_ws with
+                  | Some lo, Some hi -> (
+                      match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+                      | Ok lo, Ok hi ->
+                        Stdlib.Int64.compare lo 1L >= 0
+                        && Stdlib.Int64.compare lo hi <= 0
+                      | _ -> false)
+                  | _ -> false)
             in
-            let frame_form =
-              match WordSet.stack_offsets before_ws with
-              | Some offs -> (
-                  match WordSet.Clp.max_elem offs with
-                  | Some hi -> (
-                      match Cbat_word.to_int64 hi with
-                      | Ok hi -> Stdlib.Int64.compare hi WordSet.vla_floor < 0
-                      | Error _ -> false)
+            let shifted = WordSet.sub before_ws size_ws in
+            let seedable =
+              size_ok
+              && (match offset_bounds before_ws with
+                  | Some (_, bhi) -> Stdlib.Int64.compare bhi 0L <= 0
                   | None -> false)
-              | None -> false
+              && Option.is_some (offset_bounds shifted)
             in
-            let not_top =
-              not (WordSet.is_top size_ws) && not (WordSet.is_infinite size_ws)
-            in
-            if Option.is_some size_range && frame_form && not_top then
-              WordSet.sub (WordSet.stack_word_i64 WordSet.vla_anchor) size_ws
+            if seedable then
+              match (offset_bounds before_ws, offset_bounds shifted) with
+              | Some (_, bhi), Some (slo, _) -> (
+                  match
+                    ( WordSet.position_of_offset slo,
+                      WordSet.position_of_offset
+                        (Stdlib.Int64.pred bhi) )
+                  with
+                  | Some plo, Some phi ->
+                    let tid = Term.tid df in
+                    WordSet.Origin.Vla_seed.record tid (plo, phi);
+                    WordSet.set_origin (WordSet.Origin.Vla tid) shifted
+                  | _ -> p)
+              | _ -> p
             else p)
         | _ -> p)
   | _ -> p
@@ -476,7 +498,7 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
             WordSet.cast Bil.UNSIGNED n p
           | _ -> p
         in
-        let p = vla_rebase v e env p in
+        let p = vla_seed df v e env p in
         (* The solve-boundary origin: a wholly window-side value names
            the caller's frame; a wholly VLA-band value names the
            rebased SP. *)

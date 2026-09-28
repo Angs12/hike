@@ -133,7 +133,7 @@ let conversion_of ~(word : int) ~(entry : int64)
           let portions = p.Sections.portions in
           match (tag, p.Sections.origin) with
           | (Some Sections.Tag.Unbounded, _) -> (Keep, tag)
-          | (_, Some Hike_origin.Vla) -> (Keep, tag)
+          | (_, Some (Hike_origin.Vla _)) -> (Keep, tag)
           | _ ->
           (* A return-address cell keeps its tag — the emitter's
              return arm. *)
@@ -142,10 +142,14 @@ let conversion_of ~(word : int) ~(entry : int64)
             | Some t -> Model.is_return_address_tag t
             | None -> false
           in
+          (* A conversion needs the eligibility proof: an identity
+             portion (an escape, a full-span claim, a VLA extent) keeps
+             the memory form — the raw lane is its sound answer. *)
           let owned =
             Base.List.filter portions ~f:(fun p ->
-                if Sections.is_sub_local p.pt_sec then not retaddr_cell
-                else p.pt_elig && Sections.is_const_chain addr)
+                p.pt_elig
+                && (if Sections.is_sub_local p.pt_sec then not retaddr_cell
+                    else Sections.is_const_chain addr))
           in
           match owned with
           | [ p ] -> (
@@ -385,16 +389,13 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
               | None -> acc
               | Some _ -> (
                   let a_base = Model.args_base ~entry ~word in
-                  let vla_lo =
-                    Stdlib.Int64.add Model.Vsa.segment_base
-                      Vsa.WordSet.vla_floor in
                   match Model.positions_of_offsets ws with
-                  (* Below the VLA band's floor: a band address is this
-                     sub's dynamic alloca, never the caller's window. *)
+                  (* At/above the args base: a caller-window address —
+                     the VLA extents sit below the entry line, never
+                     here. *)
                   | Some (lo, hi)
                     when Stdlib.Int64.compare lo a_base >= 0
                          && Stdlib.Int64.compare hi a_base >= 0
-                         && Stdlib.Int64.compare hi vla_lo < 0
                          && Stdlib.Int64.compare lo hi <= 0 ->
                     Core.Set.add acc (Term.tid d)
                   | _ -> acc))))

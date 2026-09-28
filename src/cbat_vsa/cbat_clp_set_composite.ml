@@ -50,15 +50,6 @@ let stack_base =
    stack claim covers at most [stack_span] bytes. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
-(* The VLA band: a runtime-sized allocation relocates its SP to
-   [stack_base + vla_anchor] minus the allocation size, so its claims
-   live in [vla_floor, vla_anchor) — disjoint from the frame line by
-   construction, whatever the size.  [vla_span] caps the rebased
-   sizes; a size without an upper bound keeps the unrebased claim. *)
-let vla_anchor = Stdlib.Int64.shift_left 1L 21
-let vla_span = Stdlib.Int64.shift_left 1L 20
-let vla_floor = Stdlib.Int64.sub vla_anchor vla_span
-
 let w64_of_i64 (i : int64) : Cbat_word.t =
   Cbat_word.of_word (Word.of_int64 ~width:64 i)
 
@@ -300,10 +291,15 @@ let rec origin (t : t) : Origin.t option =
      | (Some o) :: rest ->
        if
          List.for_all rest
-           ~f:(function Some o' -> Poly.( = ) o o' | None -> false)
+           ~f:(function Some o' -> Origin.equal o o' | None -> false)
        then Some o
        else None
      | _ -> None)
+
+(* Re-tags a relative value's origin, offsets unchanged — the VLA
+   seed's framing step (the entry-line positions ARE the new frame's). *)
+let set_origin (o : Origin.t) (t : t) : t =
+  match t with Rel (_, offs) -> Rel (o, offs) | q -> q
 
 (* Plain-operand top test. *)
 let rec plain_is_top (t : t) : bool =
@@ -453,25 +449,37 @@ let offsets_signed_extrema (offs : P.t)
   in
   List.fold (P.to_list offs) ~init:None ~f:fold
 
-(* The solve-boundary band refinement: a wholly window-side relative
-   value (every offset at/above the ABI word) names the caller's frame
-   origin; a wholly VLA-band value names the rebased SP; a value
-   spanning the bands keeps the entry-SP origin. *)
+(* The solve-boundary refinement: a wholly window-side relative value
+   (every offset at/above the ABI word) names the caller's frame
+   origin; a VLA-frame value whose offsets left its allocation's
+   extent re-absorbs onto the entry line — the positions were always
+   entry-line, only the routing fact changes. *)
 let refine_origin ~(word : int) (t : t) : t =
+  let extrema_i64 offs =
+    Option.bind (offsets_signed_extrema offs) ~f:(fun (lo, hi) ->
+        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+        | Ok lo, Ok hi -> Some (lo, hi)
+        | _ -> None)
+  in
   match t with
   | Rel (Origin.Stack, offs) when word > 0 ->
     let w = Stdlib.Int64.of_int word in
-    (match offsets_signed_extrema offs with
-     | Some (lo, hi) ->
-       (match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok lo, Ok hi ->
-          if Stdlib.Int64.compare lo vla_floor >= 0
-             && Stdlib.Int64.compare hi vla_anchor < 0
-          then Rel (Origin.Vla, offs)
-          else if Stdlib.Int64.compare lo w >= 0 then Rel (Origin.Window, offs)
-          else t
-        | _ -> t)
-     | None -> t)
+    (match extrema_i64 offs with
+     | Some (lo, _) when Stdlib.Int64.compare lo w >= 0 ->
+       Rel (Origin.Window, offs)
+     | _ -> t)
+  | Rel (Origin.Vla tid, offs) -> (
+    match Origin.Vla_seed.extent tid with
+    | Some (plo, phi) ->
+      let base = Origin.segment_base in
+      let lo = Stdlib.Int64.sub plo base in
+      let hi = Stdlib.Int64.sub phi base in
+      (match extrema_i64 offs with
+       | Some (mn, mx)
+         when Stdlib.Int64.compare mn lo >= 0
+              && Stdlib.Int64.compare mx hi <= 0 -> t
+       | _ -> Rel (Origin.Stack, offs))
+    | None -> t)
   | q -> q
 
 (* Segment-relative bounds: a relative value keeps its exact offsets;
@@ -897,18 +905,42 @@ let stride (t : t) : int =
    bases do not survive — both hulls, the plain op; [Top] = the op
    keeps unknown base bits: top.  THE table is the one home of "what
    type dominates"; a new origin lands by extending [Origin.t], a new
-   op by one row here. *)
+   op by one row here.  A VLA value meeting the entry line absorbs
+   onto [Stack]: the offsets are entry-line already, so the union is
+   exact and the per-run portions route each run to its own space. *)
+let origin_is_relative x = not (Origin.equal x Origin.Abs)
+
+(* The stack-family origins share the segment base. *)
+let origin_on_line x =
+  match x with
+  | Origin.Abs | Origin.Rip -> false
+  | Origin.Stack | Origin.Vla _ | Origin.Window -> true
+
 let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     Hike_origin.rel_row =
-  let rel x = not (Origin.equal x Origin.Abs) in
+  let rel x = origin_is_relative x in
+  (* A VLA value meeting the entry line absorbs onto [Stack]; two
+     different VLA frames never merge (different allocations). *)
+  let cross_line =
+    rel o1 && rel o2 && not (Origin.equal o1 o2)
+    && (match o1, o2 with
+        | Origin.Vla _, Origin.Vla _ -> false
+        | Origin.Vla _, _ | _, Origin.Vla _ ->
+            origin_on_line o1 && origin_on_line o2
+        | _ -> false)
+  in
   match op with
   | Union ->
     if rel o1 && rel o2 then
-      if Origin.equal o1 o2 then Wrap o1 else Materialise
+      if Origin.equal o1 o2 then Wrap o1
+      else if cross_line then Wrap Origin.Stack
+      else Materialise
     else Materialise
   | Meet ->
     if rel o1 && rel o2 then
-      if Origin.equal o1 o2 then Wrap o1 else Materialise
+      if Origin.equal o1 o2 then Wrap o1
+      else if cross_line then Wrap Origin.Stack
+      else Materialise
     else if rel o1 then Wrap o1
     else if rel o2 then Wrap o2
     else Materialise

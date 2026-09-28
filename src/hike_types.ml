@@ -231,20 +231,37 @@ let ptr_defs ~(facts : Hike_kb.facts) (sub : sub term) :
   let a_base =
     Hike_stack_model.args_base ~entry:Hike_stack_model.segment_base ~word
   in
+  (* A VLA address — its origin names the frame, or its positions
+     reach into one's extent — is its own storage: the real pointer,
+     never a GEP into a region alloca its address does not live in. *)
+  let vla_reach (ws : Vsa.WordSet.t) : bool =
+    match Vsa.WordSet.origin ws with
+    | Some (Vsa.WordSet.Origin.Vla _) -> true
+    | None -> false
+    | Some _ -> (
+      match Hike_stack_model.positions_of_offsets ws with
+      | Some (lo, hi) ->
+        Core.Map.exists facts.Hike_kb.vla_extents ~f:(fun (elo, ehi) ->
+              Stdlib.Int64.compare hi elo >= 0
+              && Stdlib.Int64.compare lo ehi <= 0)
+      | None -> false)
+  in
   let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage =
-    match Hike_stack_model.positions_of_offsets ws with
-    | Some (lo, _) when Stdlib.Int64.compare lo a_base >= 0 ->
-        Hike_stack_model.Ptr_window
-    | Some (lo, hi) -> (
-        match
-          Base.List.find layout.Hike_stack_model.Sub_layout.regions
-            ~f:(fun (_, (rlo, rhi), _) ->
-              Stdlib.Int64.compare lo rlo >= 0
-              && Stdlib.Int64.compare hi rhi <= 0)
-        with
-        | Some (id, _, _) -> Hike_stack_model.Ptr_region id
-        | None -> Hike_stack_model.Ptr_residue)
-    | None -> Hike_stack_model.Ptr_residue
+    if vla_reach ws then Hike_stack_model.Ptr_vla
+    else
+      match Hike_stack_model.positions_of_offsets ws with
+      | Some (lo, _) when Stdlib.Int64.compare lo a_base >= 0 ->
+          Hike_stack_model.Ptr_window
+      | Some (lo, hi) -> (
+          match
+            Base.List.find layout.Hike_stack_model.Sub_layout.regions
+              ~f:(fun (_, (rlo, rhi), _) ->
+                Stdlib.Int64.compare lo rlo >= 0
+                && Stdlib.Int64.compare hi rhi <= 0)
+          with
+          | Some (id, _, _) -> Hike_stack_model.Ptr_region id
+          | None -> Hike_stack_model.Ptr_residue)
+      | None -> Hike_stack_model.Ptr_residue
   in
   Term.enum blk_t sub
   |> Seq.fold ~init:(Tid.Set.empty, Tid.Map.empty)

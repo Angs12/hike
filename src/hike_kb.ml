@@ -32,6 +32,10 @@ type facts = {
   (* The run's resolution lookup: one name table for the program,
      built at the pass_vsa boundary beside the other facts. *)
   lookup : int64 -> Tid.t option;
+  (* Each VLA allocation's byte extent on the segment line (absolute,
+     inclusive), keyed by its decrement def's tid — the seed's own
+     fact, drained here so nothing crosses a program run. *)
+  vla_extents : (int64 * int64) Tid.Map.t;
   (* The emitter's section spec, installed by the attribution pass in
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
@@ -52,6 +56,7 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
     target;
     abi = Hike_abi.of_target target;
     lookup;
+    vla_extents = Hike_origin.Vla_seed.take ();
     denote =
       (fun ~blk ?def e ->
         let pre, post = blk_envs blk in

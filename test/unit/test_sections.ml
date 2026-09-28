@@ -31,15 +31,16 @@ let stack_rng (a : int64) (b : int64) : Ws.t =
   Ws.stack_word (Clp.interval ~width:64 (i2w a) (i2w b))
 
 (* The pure mechanism over constructed word sets. *)
-let rd ?(rip = false) ?(width = 8) (ws : Ws.t) =
-  A.range_of_denotation ~word:8 ~entry ~spans:[] ~rip ~width ws
+let rd ?(rip = false) ?(width = 8) ?(extents = []) (ws : Ws.t) =
+  A.range_of_denotation ~extents ~word:8 ~entry ~spans:[] ~rip ~width ws
 
 let spans_of () =
   [ { A.ds_sec = S.Data; ds_lo = 0x4000L; ds_hi = 0x403FL; ds_slots = [] };
     { A.ds_sec = S.Rodata; ds_lo = 0x5000L; ds_hi = 0x501FL; ds_slots = [] } ]
 
 let rd_spans ?(rip = false) ?(width = 8) (ws : Ws.t) =
-  A.range_of_denotation ~word:8 ~entry ~spans:(spans_of ()) ~rip ~width ws
+  A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:(spans_of ()) ~rip
+    ~width ws
 
 (* Fixture stack frame: the mem, the SP and the frame pointer. *)
 let mem_rbp () = (memv "at_m", v64 "RSP", v64 "RBP")
@@ -154,24 +155,20 @@ let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
            k)
   | _ -> assert false
 
-(* The full-span claim shapes.  Both tops also claim the VLA band:
-   [segment_base + 2^20, segment_base + 2^21). *)
-let vla_lo = pos 0x100000L
-let vla_hi = pos 0x1FFFFFL
-
+(* The full-span claim shapes.  With no VLA live, the tops claim the
+   sub-local line only — a VLA's bytes enter a claim solely through
+   its recorded extent. *)
 let plain (t, ps) =
   match t, ps with
-  | None, [ p1; p2; p3 ] ->
+  | None, [ p1; p2 ] ->
       portion_eq p1 S.Stack (Int64.add entry Stdlib.Int64.min_int) (pos 7L)
       && portion_eq p2 S.Args (pos 8L) Stdlib.Int64.max_int
-      && portion_eq p3 S.Vla vla_lo vla_hi
   | _ -> false
 
 let clamped (t, ps) =
   match t, ps with
-  | Some Tag.Unbounded, [ p1; p2 ] ->
+  | Some Tag.Unbounded, [ p1 ] ->
       portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
-      && portion_eq p2 S.Vla vla_lo vla_hi
   | _ -> false
 
 (* S2's shape: a heap-pointing GPR store beside the [RSP-16] cell
@@ -269,26 +266,24 @@ let tests : unit Alcotest.test list =
            | Some Tag.Dead, [] -> true
            | _ -> false));
 
-    pin "SEC-08" "AT1-S02: a plain TOP claims the sub-local line, the VLA band, no tag"
+    pin "SEC-08" "AT1-S02: a plain TOP claims the sub-local line, no tag"
       (fun () ->
         check "SEC-08"
           (match rd (Ws.top 64) with
-           | None, [ p1; p2; p3 ] ->
+           | None, [ p1; p2 ] ->
                portion_eq p1 S.Stack
                  (Int64.add entry Stdlib.Int64.min_int)
                  (pos 7L)
                && portion_eq p2 S.Args (pos 8L) Stdlib.Int64.max_int
-               && portion_eq p3 S.Vla vla_lo vla_hi
            | _ -> false));
 
     pin "SEC-09"
-      "AT1-S02: a symbolic TOP clamps to [entry-stack_max, entry) plus the VLA band"
+      "AT1-S02: a symbolic TOP clamps to [entry-stack_max, entry)"
       (fun () ->
         check "SEC-09"
           (match rd (Ws.stack_word (Clp.top 64)) with
-           | Some Tag.Unbounded, [ p1; p2 ] ->
+           | Some Tag.Unbounded, [ p1 ] ->
                portion_eq p1 S.Stack (pos (-65536L)) (pos (-1L))
-               && portion_eq p2 S.Vla vla_lo vla_hi
            | _ -> false));
 
     pin "SEC-10"
@@ -326,8 +321,8 @@ let tests : unit Alcotest.test list =
                  ds_slots = [] } ]
            in
            match
-             A.range_of_denotation ~word:8 ~entry ~spans:top_span ~rip:true
-               ~width:8 ws
+             A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:top_span
+               ~rip:true ~width:8 ws
            with
            | None, [ p ] ->
                (* The whole occupied range [2^64-8, 2^64-1]: hi+7 wrapped
@@ -920,16 +915,16 @@ let tests : unit Alcotest.test list =
     pin "SEC-51" "AT1-TC1: the query-failed claim is the plain full-line claim"
       (fun () ->
         check "SEC-51"
-          (plain (A.top_claim ~cause:A.Query_failed ~entry ~word:8)));
+          (plain (A.top_claim ~extents:[] ~cause:A.Query_failed ~entry ~word:8)));
 
     pin "SEC-52" "AT1-TC2: the foreign claim is the plain full-line claim"
       (fun () ->
-        check "SEC-52" (plain (A.top_claim ~cause:A.Foreign ~entry ~word:8)));
+        check "SEC-52" (plain (A.top_claim ~extents:[] ~cause:A.Foreign ~entry ~word:8)));
 
     pin "SEC-53" "AT1-TC3: the unbounded-stack claim clamps below the entry"
       (fun () ->
         check "SEC-53"
-          (clamped (A.top_claim ~cause:A.Unbounded_stack ~entry ~word:8)));
+          (clamped (A.top_claim ~extents:[] ~cause:A.Unbounded_stack ~entry ~word:8)));
 
     pin "SEC-54" "AT1-TC4: the denotation paths land on their claims"
       (fun () ->
@@ -1165,17 +1160,23 @@ let tests : unit Alcotest.test list =
           = Some (A.Stack_region 1)));
 
     pin "SEC-69"
-      "AT4-VLA: the band claims bind nowhere — the static frame carves beside a live VLA"
+      "AT4-VLA: the extent claims bind nowhere — the static frame carves beside a live VLA"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let rax = v64 "at_vla_rax" in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
+        (* The literal frame decrement: the static slots [rbp-12, rbp-1]
+           sit at/above the cut, the VLA strictly below it. *)
+        let def_frame =
+          Def.create rsp
+            (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))))
+        in
         let def_n_cell =
           Def.create m
             (Bil.Store
                ( Bil.Var m,
                  Bil.BinOp
-                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 20))),
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
                  Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 32)),
                  LittleEndian,
                  `r32 ))
@@ -1185,7 +1186,7 @@ let tests : unit Alcotest.test list =
             (Bil.Load
                ( Bil.Var m,
                  Bil.BinOp
-                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 20))),
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
                  LittleEndian,
                  Size.of_int_exn 32 ))
         in
@@ -1196,10 +1197,8 @@ let tests : unit Alcotest.test list =
         let def_align =
           Def.create rax
             (Bil.BinOp
-               ( Bil.AND,
-                 Bil.Var rax,
-                 Bil.Int
-                   (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 (-4L))) ))
+               (Bil.AND, Bil.Var rax,
+                Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 (-4L)))))
         in
         let def_save =
           Def.create m
@@ -1210,16 +1209,6 @@ let tests : unit Alcotest.test list =
                  Bil.Var rax,
                  LittleEndian,
                  `r64 ))
-        in
-        let def_n2 =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 4))),
-                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 8)),
-                 LittleEndian,
-                 `r32 ))
         in
         let def_band =
           Def.create m
@@ -1233,26 +1222,95 @@ let tests : unit Alcotest.test list =
         in
         let sub =
           straight_sub "vla_frame"
-            [ def_rbp; def_n_cell; def_load; def_sub; def_ptr; def_align;
-              def_save; def_n2; def_band ]
+            [ def_rbp; def_frame; def_n_cell; def_load; def_sub; def_ptr;
+              def_align; def_save; def_band ]
         in
         let ctx = fixture_ctx [ sub ] in
+        let projection d =
+          match Core.Map.find ctx.A.projections (Term.tid d) with
+          | Some (Some p) -> Some p
+          | _ -> None
+        in
         check "SEC-69"
-          ((match tag_of (A.stamp_tags ctx sub) def_band with
-            | Some (Sm.Tag.Range _) ->
-              (* The band fact rides the projection's origin: the
-                 attribution reads the analysis's origin, not a
-                 re-derived band. *)
-              let origin =
-                match Core.Map.find ctx.A.projections (Term.tid def_band) with
-                | Some (Some p) -> p.A.origin
-                | _ -> None
-              in
-              Option.equal Hike_origin.equal origin (Some Hike_origin.Vla)
-            | _ -> false)
+          ((match projection def_band with
+            | Some p ->
+                (* The frame fact rides the projection's origin, named by
+                   the decrement def's own tid; the claim's portion is the
+                   extent cut, binding nowhere in the tree. *)
+                Option.equal Hike_origin.equal p.A.origin
+                  (Some (Hike_origin.Vla (Term.tid def_sub)))
+                && (match p.A.portions with
+                    | [ vla ] -> portion_eq vla S.Vla (pos (-36L)) (pos (-33L))
+                    | _ -> false)
+            | None -> false)
            && (match storage_at ctx sub Sm.Stack (pos (-8L)) (pos (-1L)) with
                | Some (A.Stack_region _) -> true
+               | _ -> false)
+           && (match storage_at ctx sub Sm.Stack (pos (-12L)) (pos (-9L)) with
+               | Some (A.Stack_region _) -> true
                | _ -> false)));
+
+    pin "SEC-70"
+      "AT4-VLA: a claim reaching into the extent is cut around it — the allocation's bytes bind nowhere"
+      (fun () ->
+        let m, rsp, rbp = mem_rbp () in
+        let rax = v64 "at_vla_rax" in
+        let def_rbp = Def.create rbp (Bil.Var rsp) in
+        let def_frame =
+          Def.create rsp
+            (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))))
+        in
+        let def_n_cell =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
+                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 32)),
+                 LittleEndian,
+                 `r32 ))
+        in
+        let def_load =
+          Def.create rax
+            (Bil.Load
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
+                 LittleEndian,
+                 Size.of_int_exn 32 ))
+        in
+        let def_sub =
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
+        in
+        (* A frame-pointer store whose occupied window straddles the
+           extent's top: the claim splits — the extent bytes are a Vla
+           portion, the rest keeps the frame line. *)
+        let def_straddle =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 20))),
+                 Bil.Int (Cbat_word.to_word (w64 7)),
+                 LittleEndian,
+                 `r64 ))
+        in
+        let sub =
+          straight_sub "vla_cut"
+            [ def_rbp; def_frame; def_n_cell; def_load; def_sub; def_straddle ]
+        in
+        let ctx = fixture_ctx [ sub ] in
+        check "SEC-70"
+          (match
+             Core.Map.find ctx.A.projections (Term.tid def_straddle)
+           with
+           | Some (Some p) ->
+               Base.List.exists p.A.portions ~f:(fun q ->
+                   portion_eq q S.Vla (pos (-20L)) (pos (-17L)))
+               && Base.List.exists p.A.portions ~f:(fun q ->
+                      portion_eq q S.Stack (pos (-16L)) (pos (-13L)))
+               && List.length p.A.portions = 2
+           | _ -> false));
 ]
 
 let () = run "sections" tests

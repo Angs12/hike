@@ -235,45 +235,54 @@ type ctx = {
    stack basis and no rip proof (the heap). *)
 type top_cause = Query_failed | Unbounded_stack | Foreign
 
-(* The VLA band's absolute positions: [base + vla_floor, base + vla_anchor)
-   — disjoint from the frame line by construction. *)
-let vla_band_positions () : int64 * int64 =
-  let base = Model.Vsa.segment_base in
-  ( Stdlib.Int64.add base Vsa.WordSet.vla_floor,
-    Stdlib.Int64.pred (Stdlib.Int64.add base Vsa.WordSet.vla_anchor) )
+(* Splits [lo, hi] around the run's VLA extents: the surviving runs,
+   and the extent intersections — the allocation's bytes bind to their
+   own dynamic alloca, so every claim is cut around them. *)
+let split_around_extents (extents : (int64 * int64) list) (lo : int64)
+    (hi : int64) : (int64 * int64) list * (int64 * int64) list =
+  let c = Stdlib.Int64.compare in
+  Base.List.sort extents ~compare:(fun (a, _) (b, _) -> c a b)
+  |> Base.List.fold ~init:([], [], lo)
+       ~f:(fun (stack, vlas, cur) ext ->
+         let elo = if c (fst ext) lo > 0 then fst ext else lo in
+         let ehi = if c (snd ext) hi < 0 then snd ext else hi in
+         if c elo ehi > 0 then (stack, vlas, cur)
+         else
+           let stack' =
+             if c cur (Stdlib.Int64.pred elo) >= 0 then stack
+             else (cur, Stdlib.Int64.pred elo) :: stack
+           in
+           (stack', (elo, ehi) :: vlas, Stdlib.Int64.succ ehi))
+  |> fun (stack, vlas, cur) ->
+     ( (if c cur hi <= 0 then (cur, hi) :: stack else Base.List.rev stack),
+       Base.List.rev vlas )
 
 (* Portions of the occupied interval [lo,hi]; the tag carries the
    ADDRESS bounds [alo,ahi].  The sub-local line's spaces are the
-   frame [floor, s_top], the args [a_base, args_hi], and the VLA band;
-   an args claim crossing the band floor claims the whole args space
-   (the merge with the band is the sound over-approximation). *)
-let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
-    ~(alo : int64) ~(ahi : int64) (lo : int64) (hi : int64)
-    : sec_tag option * portion list =
+   frame [floor, s_top] cut around the VLA extents, and the args
+   [a_base, ceiling]; the extent cuts are the VLA portions. *)
+let sub_portions ~(extents : (int64 * int64) list) ~(entry : int64)
+    ~(word : int) ~(elig : bool) ~(alo : int64) ~(ahi : int64)
+    (lo : int64) (hi : int64) : sec_tag option * portion list =
   let floor = Model.stack_floor ~entry in
   let cei = Model.args_ceiling in
   let a_base = Model.args_base ~entry ~word in
   let s_top = Model.stack_top ~entry ~word in
-  let vla_lo, vla_hi = vla_band_positions () in
   let portion s part elig =
     Base.Option.map part ~f:(fun (plo, phi) ->
         { pt_sec = s; pt_lo = plo; pt_hi = phi; pt_elig = elig })
   in
-  let args_hi =
-    if Stdlib.Int64.compare hi vla_lo >= 0 then cei
-    else Stdlib.Int64.pred vla_lo
+  let stack_runs, vla_runs =
+    match Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top with
+    | Some (slo, shi) -> split_around_extents extents slo shi
+    | None -> ([], [])
   in
   let parts =
     Base.List.filter_map
-      [ portion Stack
-          (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor s_top)
-          elig;
-        portion Args
-          (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base args_hi)
-          elig;
-        portion Vla
-          (Model.clip ~cmp:Stdlib.Int64.compare lo hi vla_lo vla_hi)
-          false ]
+      ( Base.List.map stack_runs ~f:(fun r -> portion Stack (Some r) elig)
+        @ [ portion Args (Model.clip ~cmp:Stdlib.Int64.compare lo hi a_base cei)
+              elig ]
+        @ Base.List.map vla_runs ~f:(fun r -> portion Vla (Some r) false) )
       ~f:(fun x -> x)
   in
   ( (if Option.is_some (Model.clip ~cmp:Stdlib.Int64.compare lo hi floor cei)
@@ -282,56 +291,43 @@ let sub_portions ~(entry : int64) ~(word : int) ~(elig : bool)
     parts )
 
 (* The full-span claim for a TOP address: a stack-symbolic top claims
-   below-entry only, clamped by [stack_max], plus the VLA band — a top
-   derived from a band value stays in the band; imprecision never
-   reaches the Args slots; any other top claims the sub-local spaces'
-   full range — the identity member forcing write closure with the
-   carved cells. *)
-let top_claim ~(cause : top_cause) ~(entry : int64) ~(word : int)
-    : sec_tag option * portion list =
+   below-entry only, clamped by [stack_max], cut around the VLA
+   extents; imprecision never reaches the Args slots; any other top
+   claims the sub-local spaces' full range — the identity member
+   forcing write closure with the carved cells. *)
+let top_claim ~(extents : (int64 * int64) list) ~(cause : top_cause)
+    ~(entry : int64) ~(word : int) : sec_tag option * portion list =
   match cause with
   | Unbounded_stack ->
-    let lo = Stdlib.Int64.sub entry Hike_stack_model.stack_max in
-    let vla_lo, vla_hi = vla_band_positions () in
     ( Some Tag.Unbounded,
-      [ { pt_sec = Stack;
-          pt_lo = lo;
-          pt_hi = Stdlib.Int64.pred entry;
-          pt_elig = false };
-        { pt_sec = Vla; pt_lo = vla_lo; pt_hi = vla_hi; pt_elig = false } ] )
+      snd (sub_portions ~extents ~entry ~word ~elig:false
+             ~alo:(Model.stack_floor ~entry) ~ahi:Model.args_ceiling
+             (Stdlib.Int64.sub entry Hike_stack_model.stack_max)
+             (Stdlib.Int64.pred entry)) )
   | Query_failed | Foreign ->
     (None,
-     snd (sub_portions ~entry ~word ~elig:false
+     snd (sub_portions ~extents ~entry ~word ~elig:false
             ~alo:(Model.stack_floor ~entry) ~ahi:Model.args_ceiling
             (Model.stack_floor ~entry) Model.args_ceiling))
 
 (* Case 1: the address carries stack offsets.  Bounded positions carve;
    an unbounded direction takes the full supported bounds of the side
-   it reaches — a band claim stops at the band's own bounds.  The
-   bounded case clips PER RUN: a disjoint-run address (the va_arg
-   reg-save/overflow join) keeps both bands instead of hulling across
-   the entry line. *)
-let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
-    (ws : Vsa.WordSet.t) : sec_tag option * portion list =
+   it reaches.  The bounded case clips PER RUN: a disjoint-run address
+   (the va_arg reg-save/overflow join) keeps both bands instead of
+   hulling across the entry line. *)
+let stack_offset_portions ~(extents : (int64 * int64) list) ~(word : int)
+    ~(entry : int64) ~(width : int) (ws : Vsa.WordSet.t) :
+    sec_tag option * portion list =
   let cei = Model.args_ceiling in
   let a_base = Model.args_base ~entry ~word in
-  let sub_portions = sub_portions ~entry ~word in
-  let vla_lo, vla_hi = vla_band_positions () in
-  let band_full lo hi =
-    if Stdlib.Int64.compare lo hi > 0 then (vla_lo, vla_hi)
-    else if Vsa.WordSet.is_ascending ws then (lo, vla_hi)
-    else if Vsa.WordSet.is_descending ws then (vla_lo, hi)
-    else (vla_lo, vla_hi)
-  in
+  let sub_portions = sub_portions ~extents ~entry ~word in
   match Model.positions_of_offsets ws with
-  | None -> top_claim ~cause:Unbounded_stack ~entry ~word
+  | None -> top_claim ~extents ~cause:Unbounded_stack ~entry ~word
   | Some (lo, hi) -> (
       let occ_hi = Model.expand_hi ~cap:cei hi width in
       if Vsa.WordSet.is_infinite ws || Stdlib.Int64.compare lo hi > 0 then
         let nlo, nhi =
-          if Stdlib.Int64.compare lo vla_lo >= 0 then band_full lo hi
-          else
-            Model.full_bounds ws ~flo:(Model.stack_floor ~entry) ~cei lo hi
+          Model.full_bounds ws ~flo:(Model.stack_floor ~entry) ~cei lo hi
         in
         (Some Tag.Unbounded,
          snd (sub_portions ~elig:false ~alo:nlo ~ahi:nhi nlo nhi))
@@ -339,8 +335,7 @@ let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
         let runs = Vsa.WordSet.offset_runs ws in
         let single =
           Stdlib.Int64.compare occ_hi a_base < 0
-          || (Stdlib.Int64.compare lo a_base >= 0
-             && Stdlib.Int64.compare occ_hi vla_lo < 0)
+          || Stdlib.Int64.compare lo a_base >= 0
         in
         (match runs with
          | [ (rlo, rhi) ] ->
@@ -359,21 +354,21 @@ let stack_offset_portions ~(word : int) ~(entry : int64) ~(width : int)
    the memory form; an unbounded ascending set's minimum names its
    section; the remaining bounded sets split across the data spans,
    with a rip proof where one span owns the whole occupied extent. *)
-let plain_portions ~(word : int) ~(entry : int64)
-    ~(spans : data_span list) ~(rip : bool) ~(width : int)
+let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
+    ~(entry : int64) ~(spans : data_span list) ~(rip : bool) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   let cei = Model.args_ceiling in
   let in_band = Vsa.WordSet.in_stack_segment ws in
   match (if in_band then Model.unsigned_bounds ws else None) with
   | Some (lo, hi) ->
     (* A band hull gets no conversion proof — identity. *)
-    sub_portions ~entry ~word ~elig:false ~alo:lo ~ahi:hi lo
+    sub_portions ~extents ~entry ~word ~elig:false ~alo:lo ~ahi:hi lo
       (Model.expand_hi ~cap:cei hi width)
   | None ->
     match Model.unsigned_bounds ws with
     | None ->
       (* No surviving bound: the identity claim, never the heap claim. *)
-      top_claim ~cause:Foreign ~entry ~word
+      top_claim ~extents ~cause:Foreign ~entry ~word
     | Some (lo, hi) ->
       if Vsa.WordSet.is_infinite ws && Vsa.WordSet.is_ascending ws then begin
         (* Accesses never cross sections, so an unbounded ascending
@@ -391,8 +386,8 @@ let plain_portions ~(word : int) ~(entry : int64)
                   pt_lo = Stdlib.Int64.max lo d.ds_lo;
                   pt_hi = d.ds_hi;
                   pt_elig = false } ] )
-          | None -> top_claim ~cause:Foreign ~entry ~word
-        else top_claim ~cause:Foreign ~entry ~word
+          | None -> top_claim ~extents ~cause:Foreign ~entry ~word
+        else top_claim ~extents ~cause:Foreign ~entry ~word
       end
       else
         let occ_hi = Model.expand_hi_unsigned hi width in
@@ -427,8 +422,8 @@ let plain_portions ~(word : int) ~(entry : int64)
 
 (* The def's address claim: the sections each reachable position may
    touch, and whether conversion is proven. *)
-let range_of_denotation ~(word : int) ~(entry : int64)
-    ~(spans : data_span list) ~(rip : bool) ~(width : int)
+let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
+    ~(entry : int64) ~(spans : data_span list) ~(rip : bool) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   if Vsa.WordSet.is_bottom ws then (Some Tag.Dead, [])
   else if Vsa.WordSet.is_top ws then
@@ -437,17 +432,18 @@ let range_of_denotation ~(word : int) ~(entry : int64)
        is a link-time constant in the encoding, so plain top there is
        an analysis loss answered the same way. *)
     if Option.is_some (Vsa.WordSet.stack_offsets ws) then
-      top_claim ~cause:Unbounded_stack ~entry ~word
-    else top_claim ~cause:Foreign ~entry ~word
+      top_claim ~extents ~cause:Unbounded_stack ~entry ~word
+    else top_claim ~extents ~cause:Foreign ~entry ~word
   else
     match Vsa.WordSet.stack_offsets ws with
-    | Some _ -> stack_offset_portions ~word ~entry ~width ws
-    | None -> plain_portions ~word ~entry ~spans ~rip ~width ws
+    | Some _ -> stack_offset_portions ~extents ~word ~entry ~width ws
+    | None -> plain_portions ~extents ~word ~entry ~spans ~rip ~width ws
 
 type env = {
   word : int;
   entry : int64;
   spans : data_span list;
+  extents : (int64 * int64) list;
   params : var list;
   sp : var;
   denote : blk:blk term -> ?def:def term -> exp ->
@@ -530,8 +526,8 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
     member list =
   let lo, hi = ext in
   let _, parts =
-    sub_portions ~entry:env.entry ~word:env.word ~elig:false
-      ~alo:lo ~ahi:hi lo hi
+    sub_portions ~extents:env.extents ~entry:env.entry ~word:env.word
+      ~elig:false ~alo:lo ~ahi:hi lo hi
   in
   Base.List.map
     (Base.List.filter parts ~f:(fun p -> not (equal_sec p.pt_sec Vla)))
@@ -628,8 +624,8 @@ let collect (env : env) (prog : program term) : collecting =
               | Error _ -> None
               | Ok ws ->
                 let tag, portions =
-                  range_of_denotation ~word:env.word ~entry:env.entry
-                     ~spans:env.spans
+                  range_of_denotation ~extents:env.extents
+                     ~word:env.word ~entry:env.entry ~spans:env.spans
                      ~rip:(Hike_def_slots.def_is_rip_relative d) ~width ws
                 in
                 Some { tag; origin = Vsa.WordSet.origin ws; portions }
@@ -640,7 +636,8 @@ let collect (env : env) (prog : program term) : collecting =
               | None ->
                   (* A failed query keeps the access: the unknown
                      identity contributes full members. *)
-                  top_claim ~cause:Query_failed ~entry:env.entry ~word:env.word
+                  top_claim ~extents:env.extents ~cause:Query_failed
+                    ~entry:env.entry ~word:env.word
             in
             let acc =
               match tag with
@@ -813,7 +810,9 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   let env =
     (* Only the integer params ride the escape fold: the vector lanes
        are FP values the model's stack offsets never serve. *)
-    { word; entry; spans; params = abi.Hike_abi.int_param_regs;
+    { word; entry; spans;
+      extents = Core.Map.data facts.Hike_kb.vla_extents;
+      params = abi.Hike_abi.int_param_regs;
       sp = abi.Hike_abi.sp; denote = facts.denote }
   in
   let collected = collect env prog in

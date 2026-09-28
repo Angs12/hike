@@ -2,10 +2,12 @@
    offsets are measured from.  One origin per value; the algebra's
    cross-origin rule materialises a mixed computation to [Abs]. *)
 
+open Bap.Std
+
 type t =
   | Abs  (* no origin: the absolute piece union *)
   | Stack  (* the sub's entry SP *)
-  | Vla  (* the VLA-rebased SP (the dynamic SP decrement) *)
+  | Vla of Tid.t  (* the SP after that def's dynamic decrement *)
   | Window  (* the caller's frame (the call boundary) *)
   | Rip  (* the module base (BAP's rip_relative_addr slot) *)
 [@@deriving bin_io, sexp, compare]
@@ -41,31 +43,22 @@ let segment_base = Stdlib.Int64.add (Stdlib.Int64.shift_left 1L 62) 8L
 (* The symbolic stack segment spans 8 MiB around the base. *)
 let stack_span = Stdlib.Int64.shift_left 1L 23
 
-(* The VLA band: a runtime-sized allocation relocates its SP to
-   [base + anchor] minus the size, so its claims live in
-   [floor, anchor) — disjoint from the frame line by construction. *)
-let vla_anchor = Stdlib.Int64.shift_left 1L 21
-let vla_span = Stdlib.Int64.shift_left 1L 20
-let vla_floor = Stdlib.Int64.sub vla_anchor vla_span
-
 (* The window side of the entry line: every positive offset is the
    caller's world; the model layer's args band (which knows the target
    word) starts above the return-address slot. *)
 let window_floor = 1L
 
+(* A VLA frame's base is runtime-dependent, so its materialisation
+   clamps are the segment's own — the allocation lives on the frame
+   line, inside the symbolic span. *)
 let facts (t : t) : facts =
   match t with
   | Abs -> { base = 0L; certified = 64; lo = 0L; hi = 0L }
-  | Stack ->
+  | Stack | Vla _ ->
     { base = segment_base;
       certified = 4;
       lo = Stdlib.Int64.neg stack_span;
       hi = stack_span }
-  | Vla ->
-    { base = segment_base;
-      certified = 4;
-      lo = vla_floor;
-      hi = Stdlib.Int64.pred vla_anchor }
   | Window ->
     { base = segment_base;
       certified = 4;
@@ -77,6 +70,28 @@ let name (t : t) : string =
   match t with
   | Abs -> "abs"
   | Stack -> "stack"
-  | Vla -> "vla"
+  | Vla _ -> "vla"
   | Window -> "window"
   | Rip -> "rip"
+
+(* The run's VLA extents: the allocation's byte range on the segment
+   line (absolute, inclusive), keyed by the decrement def's tid — the
+   seed records, the boundary refinement and the attribution read.  The
+   one mutable cell of the origin algebra; [take] drains at the facts
+   boundary so nothing crosses a program run. *)
+module Vla_seed = struct
+  let empty : (int64 * int64) Tid.Map.t = Tid.Map.empty
+
+  let extents : (int64 * int64) Tid.Map.t ref = ref empty
+
+  let record (t : Tid.t) (ext : int64 * int64) : unit =
+    extents := Core.Map.set !extents ~key:t ~data:ext
+
+  let extent (t : Tid.t) : (int64 * int64) option =
+    Core.Map.find !extents t
+
+  let take () : (int64 * int64) Tid.Map.t =
+    let e = !extents in
+    extents := empty;
+    e
+end
