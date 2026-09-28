@@ -1301,6 +1301,73 @@ let tests : unit Alcotest.test list =
             Base.String.is_substring m ~substring:"unsplit multi-jmp"
         in
         check "EMIT-33" loud);
+
+    pin "EMIT-34"
+      "a Vla(T)-origin access GEPs the %vla created at T — two VLAs each hit their own"
+      (fun () ->
+        let m = memv "emit_vla_m" in
+        let rsp = v64 "RSP" in
+        let rax = v64 "RAX" in
+        let rbx = v64 "RBX" in
+        let p1 = v64 "emit_vla_p1" in
+        let p2 = v64 "emit_vla_p2" in
+        let w (x : int) = Cbat_word.to_word (w64 x) in
+        let d_dec1 =
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
+        in
+        let d_p1 = Def.create p1 (Bil.Var rsp) in
+        let d_ld1 =
+          Hike.Vsa.Def_origin.with_origin
+            (Hike_origin.Vla (Term.tid d_dec1))
+            (Def.create (v64 "emit_vla_t1")
+               (Bil.Load
+                  ( Bil.Var m,
+                    Bil.BinOp (Bil.PLUS, Bil.Var p1, Bil.Int (w 4)),
+                    LittleEndian,
+                    `r32 )))
+        in
+        let d_dec2 =
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rbx))
+        in
+        let d_p2 = Def.create p2 (Bil.Var rsp) in
+        let d_st2 =
+          Hike.Vsa.Def_origin.with_origin
+            (Hike_origin.Vla (Term.tid d_dec2))
+            (Def.create m
+               (Bil.Store
+                  ( Bil.Var m,
+                    Bil.BinOp (Bil.PLUS, Bil.Var p2, Bil.Int (w 8)),
+                    Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 5)),
+                    LittleEndian,
+                    `r32 )))
+        in
+        let sub =
+          straight_sub "emit_vla_two"
+            [ d_dec1; d_p1; d_ld1; d_dec2; d_p2; d_st2 ]
+        in
+        let sub =
+          Ds.stamp_dyn_allocs
+            ~dynamic_alloc_tids:
+              (Core.Set.of_list (module Tid) [ Term.tid d_dec1; Term.tid d_dec2 ])
+            sub
+          |> Sm.set_layout
+               { Sm.regions = []; anchor = None; window_param = false }
+        in
+        let ir = emit_ir [ sub ] in
+        let count sub_str =
+          String.split_on_char '\n' ir
+          |> List.filter (fun l -> contains_substring l sub_str)
+          |> List.length
+        in
+        check "EMIT-34"
+          (contains_substring ir "getelementptr i8, ptr %vla, i64"
+          && contains_substring ir "getelementptr i8, ptr %vla2, i64"
+          &&
+          (* each alloca is GEP'd exactly once — the load's access into
+             the first, the store's into the second. *)
+          count "getelementptr i8, ptr %vla, " = 1
+          && count "getelementptr i8, ptr %vla2, " = 1
+          && count " = alloca i8, i64 " = 2));
   ]
 
 let () = run "bil2llvm" tests

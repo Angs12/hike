@@ -19,6 +19,7 @@ module Vsa : sig
     the analysis boundary (reads [Abs]). *)
   module Def_origin : sig
     val def_origin : def term -> Hike_origin.t option
+    val with_origin : Hike_origin.t -> def term -> def term
   end
 
   (** An image-backed section: inclusive bounds plus static content. *)

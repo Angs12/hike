@@ -185,6 +185,9 @@ type sub_scope = {
   (* The SSA version maps, read off the blocks' [hike-ssa-versions]
      stamps before any body emits. *)
   ssa_versions : Hike_stack_model.Versions.t Tid.Map.t ref;
+  (* Each dynamic alloca by its decrement def's tid: (ptr, i64).  A
+     [Vla tid]-origin access GEPs its own allocation. *)
+  vlas : (Llvm.llvalue * Llvm.llvalue) Tid.Map.t ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -199,7 +202,8 @@ let fresh_scope () : sub_scope =
     let_counter = ref 0;
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
-    ssa_versions = ref Tid.Map.empty }
+    ssa_versions = ref Tid.Map.empty;
+    vlas = ref Tid.Map.empty }
 
 let typ_lltype ctx typ =
   match typ with

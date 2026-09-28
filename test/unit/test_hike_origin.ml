@@ -401,6 +401,194 @@ let ori_14 () =
     (Option.equal Origin.equal (stamped_origin fix "RCX")
        (Some (Origin.Vla tid)))
 
+
+(* ORI-15 (experiment): a VLA pointer saved before a machine call reads
+   back its frame after it — the call keep reads the VLA-frame SP's own
+   extent. *)
+let ori_15 () =
+  let rcx = v64 "RCX" in
+  let callee = mk_selfloop_callee "vla_callee" in
+  let after rsp rbp m =
+    [ Def.create m
+        (Bil.Store
+           ( Bil.Var m,
+             Bil.BinOp
+               (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+             Bil.Var rsp,
+             LittleEndian,
+             `r64 ));
+      Def.create rcx
+        (Bil.Load
+           ( Bil.Var m,
+             Bil.BinOp
+               (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+             LittleEndian,
+             `r64 )) ]
+  in
+  ignore after;
+  let m = memv "vla_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let rax = v64 "RAX" in
+  let f = v1 "vla_f" in
+  let frame_w = Cbat_word.to_word (w64 16) in
+  let cell =
+    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12)))
+  in
+  let def_dec =
+    Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
+  in
+  let save =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp
+             (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+           Bil.Var rsp,
+           LittleEndian,
+           `r64 ))
+  in
+  let load =
+    Def.create rcx
+      (Bil.Load
+         ( Bil.Var m,
+           Bil.BinOp
+             (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+           LittleEndian,
+           `r64 ))
+  in
+  let lo = 32L in
+  let hi = 32L in
+  let w64_of (i : int64) = Cbat_word.to_word (i2w i) in
+  let sub, tids =
+    sub_of "vla_call"
+      [ [ Def.create rax (Bil.Int (w64_of lo)) ],
+        [ (2, fun t -> mk_jmp_to t (Bil.Var f)); (1, mk_goto) ];
+        [ Def.create rax (Bil.Int (w64_of hi)) ],
+        [ (2, mk_goto) ];
+        [ Def.create rbp (Bil.Var rsp);
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int frame_w));
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m, cell,
+                 Bil.Cast (Bil.LOW, 32, Bil.Var rax),
+                 LittleEndian, `r32 ));
+          Def.create rax
+            (Bil.Load (Bil.Var m, cell, LittleEndian, Size.of_int_exn 32));
+          def_dec;
+          save ],
+        [ (3, mk_goto) ];
+        [],
+        [ (4, fun t -> mk_call_jmp t (Term.tid callee)) ];
+        [ load ],
+        [ (0, mk_ret) ] ]
+  in
+  ignore sub;
+  ignore tids;
+  ignore (Term.tid def_dec);
+  let entry = anchored_entry () in
+  let prog = Program.create ~subs:[ sub; callee ] () in
+  let sol =
+    Vsa.static_graph_vsa ~abi prog sub (Vsa.init_sol ~abi ~entry sub)
+  in
+  let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  ignore envs;
+  let got =
+    Term.enum blk_t stamped
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) rcx)
+    |> Base.Option.bind ~f:Vsa.Def_origin.def_origin
+  in
+  (Printf.eprintf "DBG ORI-15 got=%s extents=%b\n%!"
+     (match got with
+      | Some o -> Hike_origin.name o | None -> "none")
+     (Option.is_some (Origin.Vla_seed.extent (Term.tid def_dec))));
+  check "ORI-15 saved pointer survives the call"
+    (Option.equal Origin.equal got
+       (Some (Origin.Vla (Term.tid def_dec))))
+
+
+
+(* ORI-16: the pointer load at a LOOP head — the join/widen of the back
+   edge must keep the cell's VLA frame. *)
+let ori_16 () =
+  let rcx = v64 "RCX" in
+  let callee = mk_selfloop_callee "vla_callee2" in
+  let m = memv "vla_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let rax = v64 "RAX" in
+  let f = v1 "vla_f" in
+  let g = v1 "vla_g" in
+  let ng = Bil.UnOp (Bil.NOT, Bil.Var g) in
+  let frame_w = Cbat_word.to_word (w64 16) in
+  let cell =
+    Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12)))
+  in
+  let def_dec =
+    Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
+  in
+  let save =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp
+             (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+           Bil.Var rsp,
+           LittleEndian,
+           `r64 ))
+  in
+  let load =
+    Def.create rcx
+      (Bil.Load
+         ( Bil.Var m,
+           Bil.BinOp
+             (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))),
+           LittleEndian,
+           `r64 ))
+  in
+  let w64_of (i : int64) = Cbat_word.to_word (i2w i) in
+  let sub, _ =
+    sub_of "vla_loop"
+      [ [ Def.create rax (Bil.Int (w64_of 32L)) ],
+        [ (2, fun t -> mk_jmp_to t (Bil.Var f)); (1, mk_goto) ];
+        [ Def.create rax (Bil.Int (w64_of 32L)) ],
+        [ (2, mk_goto) ];
+        [ Def.create rbp (Bil.Var rsp);
+          Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int frame_w));
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m, cell,
+                 Bil.Cast (Bil.LOW, 32, Bil.Var rax),
+                 LittleEndian, `r32 ));
+          Def.create rax
+            (Bil.Load (Bil.Var m, cell, LittleEndian, Size.of_int_exn 32));
+          def_dec;
+          save ],
+        [ (3, mk_goto) ];
+        [ load ],
+        [ (4, fun t -> mk_jmp_to t ng); (5, mk_goto) ];
+        [],
+        [ (3, mk_goto) ];
+        [],
+        [ (3, mk_ret) ] ]
+  in
+  ignore sub;
+  let entry = anchored_entry () in
+  let prog = Program.create ~subs:[ sub; callee ] () in
+  let sol = Vsa.static_graph_vsa ~abi prog sub (Vsa.init_sol ~abi ~entry sub) in
+  let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
+  ignore envs;
+  let got =
+    Term.enum blk_t stamped
+    |> Seq.concat_map ~f:(Term.enum def_t)
+    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) rcx)
+    |> Base.Option.bind ~f:Vsa.Def_origin.def_origin
+  in
+  check "ORI-16 loop-head load keeps the frame"
+    (Option.equal Origin.equal got (Some (Origin.Vla (Term.tid def_dec))))
+
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -416,4 +604,6 @@ let () =
       pin "ORI-11" "crossing out flips to Stack" ori_11;
       pin "ORI-12" "same-frame exact / different-frame materialise" ori_12;
       pin "ORI-13" "vla+stack union wraps at Stack" ori_13;
-      pin "ORI-14" "store-to-load round-trip (VLA)" ori_14 ]
+      pin "ORI-14" "store-to-load round-trip (VLA)" ori_14;
+      pin "ORI-15" "round-trip across a call" ori_15;
+      pin "ORI-16" "round-trip across a loop" ori_16 ]

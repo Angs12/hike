@@ -599,7 +599,7 @@ let tests : unit Alcotest.test list =
            && not (has ftid rax)));
 
     pin "VSA-66"
-      "round-pair: the two-def [(x >> k) << k] idiom rewrites to the mask AND + identity copy"
+      "round-pair: the two-def [(x >> k) << k] idiom — a temp saves x, the shift-back becomes the mask"
       (fun () ->
         let rax = v64 "at_rr_rax" in
         let d_shr =
@@ -618,14 +618,39 @@ let tests : unit Alcotest.test list =
                  if Tid.equal (Term.tid d) tid then Some (Def.rhs d) else None)
         in
         let mask = Word.of_int64 ~width:64 (-4L) in
+        (* The shift def keeps the true shifted value (its flag readers
+           stay exact); a temp holds the pre-shift operand; the
+           shift-back is the mask over the temp. *)
+        let defs =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list
+        in
+        (* The mask's operand is a temp whose own def copies the
+           pre-shift operand [rax]. *)
+        let temp_of_shl =
+          match rhs_of (Term.tid d_shl) with
+          | Some (Bil.BinOp (Bil.AND, Bil.Var tv, Bil.Int _)) -> Some tv
+          | _ -> None
+        in
+        let temp_copies_x =
+          Base.Option.value_map temp_of_shl ~default:false ~f:(fun tv ->
+              Base.List.exists defs ~f:(fun d ->
+                  Var.equal (Def.lhs d) tv
+                  &&
+                  match Def.rhs d with
+                  | Bil.Var v -> Var.equal v rax
+                  | _ -> false))
+        in
         check "VSA-66"
-          (match rhs_of (Term.tid d_shr), rhs_of (Term.tid d_shl) with
-           | Some (Bil.BinOp (Bil.AND, Bil.Var _, Bil.Int m)), Some (Bil.Var _) ->
+          (temp_copies_x
+           &&
+           match rhs_of (Term.tid d_shr), rhs_of (Term.tid d_shl) with
+           | Some (Bil.BinOp (Bil.RSHIFT, _, _)),
+             Some (Bil.BinOp (Bil.AND, _, Bil.Int m)) ->
              Word.equal m mask
            | _ -> false));
 
     pin "VSA-67"
-      "round-pair: the producer's returned sub keeps the mask form through the solve"
+      "round-pair: the producer's returned sub keeps the shift-back mask through the solve"
       (fun () ->
         let rax = v64 "at_rr2_rax" in
         let d_shr =
@@ -653,9 +678,9 @@ let tests : unit Alcotest.test list =
         in
         let mask = Word.of_int64 ~width:64 (-4L) in
         check "VSA-67"
-          (match rhs_of (Term.tid d_shr), rhs_of (Term.tid d_shl) with
-           | Some (Bil.BinOp (Bil.AND, Bil.Var _, Bil.Int m)), Some (Bil.Var _) ->
-             Word.equal m mask
+          (match rhs_of (Term.tid d_shl) with
+           | Some (Bil.BinOp (Bil.AND, Bil.Var _, Bil.Int m)) ->
+               Word.equal m mask
            | _ -> false));
   ]
 

@@ -38,13 +38,14 @@ let range_of (ws : WordSet.t) : (word * word) option =
 
 (* The frame-keep boundary and the escape ranges are KEY-space:
    stack-derived cells key by segment offsets, foreign cells by their
-   concrete addresses.  The callee writes below its own RSP, so cells
-   at keys at/above the HIGHEST possible call-time RSP survive every
-   call site; a VLA-frame SP keeps from its extent's LOW end instead —
-   every run's live bytes (the allocation's own, the frame above) sit
-   at/above that run's SP, and the callee reaches below its entry
-   only.  The whole-memory top stays the sound fallback on any
-   doubt. *)
+   concrete addresses.  The callee writes below its own RSP, so the
+   keep boundary is the HIGHEST possible call-time SP's position — an
+   unbounded-below SP still has a highest position; a VLA-frame SP
+   keeps from its extent's LOW end instead — every run's live bytes
+   (the allocation's own, the frame above) sit at/above that run's SP,
+   and the callee reaches below its entry only.  An unbounded-above SP
+   keeps nothing — the whole-memory top stays the sound fallback on
+   any doubt. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =
 #ifdef VSA_DEBUG
@@ -52,11 +53,26 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
 #endif
   let env = AI.top_words_except ~preserved env in
   let keep_lo =
-    Option.map ~f:(fun (lo, hi) ->
-        match WordSet.origin rsp with
-        | Some (WordSet.Origin.Vla _) -> lo
-        | _ -> hi)
-      (range_of rsp)
+    (* An ascending, circular, or wrapped SP hull names no highest
+       position — nothing provably survives; the top fallback below is
+       the sound answer. *)
+    if WordSet.is_ascending rsp || WordSet.is_circular rsp then None
+    else
+      match WordSet.stack_offsets rsp with
+      | Some offs -> (
+          let int64_of w =
+            match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None
+          in
+          let bound w =
+            Option.bind w ~f:(fun x ->
+                Option.map (int64_of x) ~f:(fun off ->
+                    Word.of_int64 ~width:64
+                      (Stdlib.Int64.add WordSet.stack_base off)))
+          in
+          match WordSet.origin rsp with
+          | Some (WordSet.Origin.Vla _) -> bound (WordSet.Clp.min_elem offs)
+          | _ -> bound (WordSet.Clp.max_elem offs))
+      | None -> Option.map ~f:snd (range_of rsp)
   in
   let escape_ranges =
     match List.filter_map escape ~f:range_of with

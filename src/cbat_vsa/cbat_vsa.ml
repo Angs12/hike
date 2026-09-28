@@ -240,9 +240,14 @@ let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
 (* The round-down idiom [(x >> k) << k] with a literal k is the mask
    [x & ~(2^k - 1)]; the mask form computes exactly on a stack-symbolic
    operand, while the shifts alone read the base's unknown bits and
-   answer top.  At -O0 the idiom spans two defs ([v := x >> k] then
-   [v := v << k]) — the pair rewrites to the mask on the first def and
-   the identity copy on the second. *)
+   answer top.  The idiom spans two defs ([v1 := x >> k] ... later ...
+   [v2 := v1 << k]), with flag defs reading the shifted value between:
+   the rewrite inserts a temp [t := x] BEFORE the shift def and rewrites
+   ONLY the shift-back to [t & ~(2^k - 1)] — the shift def and every
+   reader of it keep the true value, and the shift-back is the mask
+   identity exactly. *)
+type rewrite = [ `Mask of var * exp * word | `Temp of var * exp * word ]
+
 let normalize_round (s : Sub.t) : Sub.t =
   let mask_of (k : word) (w : int) : word option =
     let kk = Word.to_int64_exn k in
@@ -254,43 +259,83 @@ let normalize_round (s : Sub.t) : Sub.t =
            (Stdlib.Int64.neg (Stdlib.Int64.shift_left 1L (Option.value_exn (Int64.to_int kk)))))
     else None
   in
-  let pairs =
-    Term.enum blk_t s
-    |> Seq.concat_map ~f:(fun blk ->
-        let rec walk = function
-          | d1 :: d2 :: rest -> (
-              match (Def.rhs d1, Def.rhs d2) with
-              | ( Bil.BinOp (Bil.RSHIFT, x, Bil.Int k),
-                  Bil.BinOp (Bil.LSHIFT, Bil.Var v, Bil.Int j) )
-                when Var.equal v (Def.lhs d1)
-                     && Var.equal (Def.lhs d2) (Def.lhs d1)
-                     && Word.equal k j -> (
-                  let w =
-                    match x with
-                    | Bil.Var v -> (
-                        match Var.typ v with Type.Imm n -> n | _ -> 64)
-                    | _ -> 64
-                  in
-                  match mask_of k w with
-                  | Some mask ->
-                    (Term.tid d1, Bil.BinOp (Bil.AND, x, Bil.Int mask))
-                    :: (Term.tid d2, Bil.Var (Def.lhs d1))
-                    :: walk rest
-                  | None -> walk rest)
-              | _ -> walk rest)
-          | _ -> []
-        in
-        walk (Term.enum def_t blk |> Seq.to_list) |> Seq.of_list)
-    |> Seq.fold ~init:Tid.Map.empty
-         ~f:(fun m (t, r) -> Map.set m ~key:t ~data:r)
+  let width_of (x : exp) : int =
+    match x with
+    | Bil.Var v -> (match Var.typ v with Type.Imm n -> n | _ -> 64)
+    | _ -> 64
   in
-  if Map.is_empty pairs then s
+  let temps = ref 0 in
+  let rewrites =
+    Term.enum blk_t s
+    |> Seq.fold
+         ~init:(Tid.Map.empty : rewrite Tid.Map.t)
+         ~f:(fun acc blk ->
+        (* The shift defs seen so far, by lhs. *)
+        (* Each lhs whose LAST def is the shift; a redefinition
+           retires the entry (the shift-back would read the new
+           value). *)
+        let shifted : (def term * exp * word * int) Var.Map.t ref =
+          ref Var.Map.empty
+        in
+        let retire v = shifted := Core.Map.remove !shifted v in
+        Term.enum def_t blk
+        |> Seq.fold ~init:acc ~f:(fun acc d ->
+            let acc =
+              match Def.rhs d with
+              | Bil.BinOp (Bil.LSHIFT, Bil.Var v, Bil.Int j) -> (
+                  match Core.Map.find !shifted v with
+                  | Some (d0, x, k, w) when Word.equal k j -> (
+                      match mask_of k w with
+                      | Some mask ->
+                          incr temps;
+                          let t =
+                            Var.create ~is_virtual:true ~fresh:false
+                              (Printf.sprintf "hike_rd%d" !temps)
+                              (Type.Imm w)
+                          in
+                          (* d0's tid keys the temp insertion; d's tid keys
+                             the mask rewrite. *)
+                          let m =
+                            Core.Map.set acc ~key:(Term.tid d)
+                              ~data:(`Mask (t, x, mask))
+                          in
+                          Core.Map.set m ~key:(Term.tid d0)
+                            ~data:(`Temp (t, x, mask))
+                      | None -> acc)
+                  | _ -> acc)
+              | _ -> acc
+            in
+            retire (Def.lhs d);
+            (match Def.rhs d with
+             | Bil.BinOp (Bil.RSHIFT, x, Bil.Int k) ->
+               shifted := Core.Map.set !shifted ~key:(Def.lhs d)
+                 ~data:(d, x, k, width_of x)
+             | _ -> ());
+            acc))
+  in
+  if Core.Map.is_empty rewrites then s
   else
     Term.map blk_t s ~f:(fun blk ->
-        Term.map def_t blk ~f:(fun d ->
-            match Map.find pairs (Term.tid d) with
-            | Some r -> Def.with_rhs d r
-            | None -> d))
+        let has_rewrite =
+          Term.enum def_t blk
+          |> Seq.exists ~f:(fun d -> Core.Map.mem rewrites (Term.tid d))
+        in
+        if not has_rewrite then blk
+        else
+          let b = Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk in
+          Term.enum def_t blk
+          |> Seq.iter ~f:(fun d ->
+              match Core.Map.find rewrites (Term.tid d) with
+              | Some (`Mask (t, _, mask)) ->
+                Blk.Builder.add_def b
+                  (Def.with_rhs d
+                     (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int mask)))
+              | Some (`Temp (t, x, _)) ->
+                (* The temp reads [x] before the shift overwrites it. *)
+                Blk.Builder.add_def b (Def.create t x);
+                Blk.Builder.add_def b d
+              | None -> Blk.Builder.add_def b d);
+          Blk.Builder.result b)
 
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)

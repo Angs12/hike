@@ -11,7 +11,9 @@ let find_def_tag (def : def term) : Hike_stack_model.Tag.t option =
   Hike_def_slots.sec_tag def
 
 (* Runtime-sized allocas: the def's value is the post-event SP, so
-   the alloca size is (old SP − new SP) however the size was spelled. *)
+   the alloca size is (old SP − new SP) however the size was spelled.
+   The (ptr, i64) pair rides the scope keyed by the def's tid — the
+   [Vla tid]-origin accesses GEP this allocation. *)
 let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
   (* The SP in scope before this def: the block's entry version (the
      def's own lhs is a fresh SSA version, bound only by it). *)
@@ -32,7 +34,17 @@ let create_dynamic_alloc ctx scope llvm_builder blk_tid (def : def term) exp =
       llvm_builder
   in
   Llvm.set_alignment Hike_abi.stack_align vla;
-  Llvm.build_ptrtoint vla (ctx.i64_ty) "vla_i64"
+  let vla_i64 = Llvm.build_ptrtoint vla (ctx.i64_ty) "vla_i64" llvm_builder in
+  scope.vlas := Core.Map.set !(scope.vlas) ~key:(Term.tid def)
+      ~data:(vla, vla_i64);
+  vla_i64
+
+(* A [Vla tid] address resolves to its own runtime alloca: the GEP
+   index is the address minus the allocation's own integer — the
+   frame-relative offset, in bounds by the origin's extent fact. *)
+let vla_pointer_of ctx llvm_builder (vla, vla_i64) v =
+  let off = Llvm.build_sub v vla_i64 "vla_off" llvm_builder in
+  Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) vla [| off |] "vla_gep"
     llvm_builder
 
 (* Region/window access emission lives in [Bil2llvm_exp]. *)
@@ -68,7 +80,23 @@ let mem_access ctx scope llvm_builder blk_tid sub_tid def_tag
           let rewrite marker = rewrite_mem_node exp addr size marker in
           emit_with_marker ctx scope llvm_builder blk_tid marker ~emit ~rewrite
       | _ -> create_exp ctx scope llvm_builder blk_tid exp)
-  | _ -> create_exp ctx scope llvm_builder blk_tid exp
+  | _ -> (
+      (* The access's address names a VLA frame: the access lands in
+         THAT allocation's storage, never a frame region or the raw
+         pointer.  An alloca not yet bound (the decrement def not
+         emitted yet) keeps the generic path — the sound identity. *)
+      match Hike_vsa.Def_origin.def_origin def with
+      | Some (Hike_origin.Vla tid) -> (
+          match Core.Map.find !(scope.vlas) tid with
+          | Some pair -> (
+              match find_mem_node exp with
+              | Some node ->
+                  storage_access ctx scope llvm_builder blk_tid
+                    ~pointer_of:(vla_pointer_of ctx llvm_builder pair)
+                    node exp
+              | None -> create_exp ctx scope llvm_builder blk_tid exp)
+          | None -> create_exp ctx scope llvm_builder blk_tid exp)
+      | _ -> create_exp ctx scope llvm_builder blk_tid exp)
 
 let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in

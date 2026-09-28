@@ -51,6 +51,10 @@ let def_origin_slot : (Theory.Value.cls, Origin.t option) KB.slot =
 let def_origin (d : def term) : Origin.t option =
   KB.Value.get def_origin_slot (Def.value d)
 
+(* Writes the origin onto the def (the fixture seam's writer). *)
+let with_origin (o : Origin.t) (d : def term) : def term =
+  Def.with_value d (KB.Value.put def_origin_slot (Def.value d) (Some o))
+
 (* The def's stamped origin: its value's own (band-refined) origin.
    An absolute or band-spanning value reads Abs. *)
 let origin_of_def_value (v : WordSet.t) : Origin.t =
