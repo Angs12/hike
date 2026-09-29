@@ -656,8 +656,8 @@ let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
           (Var.name v) WordSet.pp cur WordSet.pp refined;
 #endif
         ignore
-          (Cbat_landmarks.observe_unsat landmarks ~key:Cbat_landmarks.Word
-             ~p:cur ~cstr:refined);
+          (Cbat_landmarks.observe_unsat landmarks
+             ~key:(Cbat_landmarks.Word v) ~p:cur ~cstr:refined);
         env
       end else if not (WordSet.precedes m cur)
       then env

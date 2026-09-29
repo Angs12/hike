@@ -48,18 +48,23 @@ let equal_cell (a : cell_desc) (b : cell_desc) : bool =
   && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
   && Int.equal a.stride b.stride
 
-(* What a landmark is about.  The head is the table's outer key: the cycle
-   owns its rows. *)
-type key = Word | Cell of cell_desc
+(* What a landmark is about: a variable at the head, or a memory cell at
+   the head.  The head is the table's outer key (the cycle owns its
+   rows); the key is the base variable — a versioned var names the same
+   abstract value. *)
+type key = Word of var | Cell of cell_desc
+
+let norm_key (k : key) : key =
+  match k with Word v -> Word (Var.base v) | Cell _ -> k
 
 let equal_key (a : key) (b : key) : bool =
-  match a, b with
-  | Word, Word -> true
+  match norm_key a, norm_key b with
+  | Word x, Word y -> Var.same x y
   | Cell x, Cell y -> equal_cell x y
-  | Word, Cell _ | Cell _, Word -> false
+  | Word _, Cell _ | Cell _, Word _ -> false
 
 let kind_of_key (k : key) : string =
-  match k with Word -> "word" | Cell _ -> "cell"
+  match k with Word _ -> "word" | Cell _ -> "cell"
 
 (* One row per key at a head; a new entry appends, so the oldest entry is
    the list's head. *)
@@ -107,7 +112,7 @@ let clear_head (t : t) (h : Tid.t) (blocks : Tid.Set.t) : unit =
 let cell_cap = 64
 
 let cap_of (k : key) : int option =
-  match k with Word -> None | Cell _ -> Some cell_cap
+  match k with Word _ -> None | Cell _ -> Some cell_cap
 
 let capped_total (rows : row list) : int =
   List.fold rows ~init:0 ~f:(fun n (r : row) ->
@@ -232,7 +237,7 @@ let observe_unsat (t : t) ~(key : key)
     | Some h ->
       let m = Cbat_clp_set_composite.meet p cstr in
       (match key with
-       | Word ->
+       | Word _ ->
          if not (Cbat_clp_set_composite.is_bottom m) then false
          else if not (same_line p cstr) then false
          else record_excluded t ~head:h ~key ~p ~cstr
@@ -303,6 +308,14 @@ let steps (t : t) (h : Tid.t) (key : key) :
           (if List.is_empty fresh then "stale" else "held")));
 #endif
   answer
+
+(* The head's own arm: its word keys' entries folded, so the caller's
+   decision keeps the shape it had when the table was per head.  A
+   variable's own arm is [steps]. *)
+let steps_head (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf ] =
+  steps_of_entries
+    (List.concat_map (keys_at t h) ~f:(fun k ->
+         match k with Word _ -> entries t h k | Cell _ -> []))
 
 (* The rotation: the current reading becomes the previous one.  An entry
    with no fresh reading keeps the history it holds — erasing it would
@@ -392,6 +405,8 @@ let cell_driven (t : t) (h : Tid.t) : bool =
   match Hashtbl.find t.rows h with
   | None -> false
   | Some rows ->
-    (not (List.exists rows ~f:(fun r -> equal_key r.key Word)))
+    (not
+       (List.exists rows ~f:(fun r ->
+            match r.key with Word _ -> true | Cell _ -> false)))
     && List.exists rows ~f:(fun r ->
-           match r.key with Cell _ -> true | Word -> false)
+           match r.key with Cell _ -> true | Word _ -> false)

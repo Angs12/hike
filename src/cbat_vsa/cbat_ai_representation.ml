@@ -149,7 +149,9 @@ let selective_widen_extrapolate ~(head : Tid.t)
           let data_res =
             if Core.Set.mem need (Cbat_var_id.base_of key) then
               extrapolate_data
-                ~entries:(Cbat_landmarks.entries landmarks head Cbat_landmarks.Word)
+                ~entries:
+                  (Cbat_landmarks.entries landmarks head
+                     (Cbat_landmarks.Word (Cbat_var_id.var_of key)))
                 ~steps data_old data_new
             else
               WordSet.join data_old data_new

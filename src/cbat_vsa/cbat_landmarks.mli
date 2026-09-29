@@ -24,9 +24,10 @@ type cell_desc = {
   stride : int;
 }
 
-(* What a landmark is about: a word at the head, or a memory cell at the
-   head.  The head is the table's outer key. *)
-type key = Word | Cell of cell_desc
+(* What a landmark is about: a variable at the head, or a memory cell at
+   the head.  The head is the table's outer key; a word key is the base
+   variable (a versioned var names the same abstract value). *)
+type key = Word of var | Cell of cell_desc
 
 (* The per-solve landmark table. *)
 type t
@@ -50,8 +51,10 @@ val entries : t -> Tid.t -> key -> lm_entry list
 val keys_at : t -> Tid.t -> key list
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf
-   widens. *)
+   widens.  Per key, and per head: [steps_head] folds the head's word
+   keys so a caller that decides for the whole state keeps one answer. *)
 val steps : t -> Tid.t -> key -> [> `Zero | `Finite of int | `Inf ]
+val steps_head : t -> Tid.t -> [> `Zero | `Finite of int | `Inf ]
 
 (* Record a landmark for [key] at [head]. *)
 val record :

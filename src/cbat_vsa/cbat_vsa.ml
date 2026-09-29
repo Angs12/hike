@@ -507,8 +507,7 @@ let rec static_graph_vsa
         Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
           (fun () ->
             let arm =
-              Cbat_landmarks.steps rctx.Cbat_runctx.rc_landmarks v
-                Cbat_landmarks.Word in
+              Cbat_landmarks.steps_head rctx.Cbat_runctx.rc_landmarks v in
 #ifdef VSA_DEBUG
             Cbat_attr_census.bump
               (match arm with

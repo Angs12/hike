@@ -30,6 +30,10 @@ let vsk_diamond () : sub term * tid * tid * tid * var =
   in
   (sub, tids.(1), tids.(2), tids.(3), x)
 
+(* The word key the landmark pins use: each pin builds its own table, so
+   one base variable serves them all. *)
+let lw = Cbat_landmarks.Word (v64 "lm_word")
+
 let tests : unit Alcotest.test list =
   [
     (* R10b: every elementwise AND of enumerated operands lands in the
@@ -1101,17 +1105,17 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let h = Tid.for_name "lm_steps_head" in
         let lm = Cbat_landmarks.create () in
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 100)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
           ~is_upper:true ~dist:10;
         check "LM steps: a just-recorded entry waits for a second measurement"
-          (match Cbat_landmarks.steps lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.steps lm h lw with
            | `Zero -> true
            | _ -> false);
         Cbat_landmarks.advance_head lm h;
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 100)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
           ~is_upper:true ~dist:6;
         check "LM steps: the closer reading fires the steps ((6) / (10 - 6) = 1)"
-          (match Cbat_landmarks.steps lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.steps lm h lw with
            | `Finite 1 -> true
            | _ -> false));
 
@@ -1122,16 +1126,16 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let h = Tid.for_name "lm_stale_head" in
         let lm = Cbat_landmarks.create () in
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 100)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
           ~is_upper:true ~dist:10;
         Cbat_landmarks.advance_head lm h;
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 200)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 200)
           ~is_upper:true ~dist:5;
         Cbat_landmarks.advance_head lm h;
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 200)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 200)
           ~is_upper:true ~dist:4;
         check "LM steps: the live entry still fires ((4) / (5 - 4) = 4)"
-          (match Cbat_landmarks.steps lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.steps lm h lw with
            | `Finite 4 -> true
            | _ -> false));
 
@@ -1143,14 +1147,14 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let h = Tid.for_name "lm_rotate_head" in
         let lm = Cbat_landmarks.create () in
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 100)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
           ~is_upper:true ~dist:10;
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.advance_head lm h;
-        Cbat_landmarks.record lm ~key:Cbat_landmarks.Word ~head:h ~bound:(w32 100)
+        Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
           ~is_upper:true ~dist:5;
         check "LM steps: the reading after an empty round still pairs ((5) / (10 - 5) = 1)"
-          (match Cbat_landmarks.steps lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.steps lm h lw with
            | `Finite 1 -> true
            | _ -> false));
 
@@ -1162,11 +1166,11 @@ let tests : unit Alcotest.test list =
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:Cbat_landmarks.Word
+              (Cbat_landmarks.observe_unsat lm ~key:lw
                  ~p:(Ws.singleton (w64 0))
                  ~cstr:(Ws.singleton (Cbat_word.of_int64 Stdlib.Int64.min_int))));
         check "LM distance: the 2^63 difference reads the cap"
-          (match Cbat_landmarks.entries lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.entries lm h lw with
            | e :: _ -> (
                match e.Cbat_landmarks.dist with
                | Some d -> d = 1 lsl 40
@@ -1183,11 +1187,11 @@ let tests : unit Alcotest.test list =
         let p = Ws.stack_word (Clp.interval ~width:64 (w64 0) (w64 16)) in
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:Cbat_landmarks.Word ~p
+              (Cbat_landmarks.observe_unsat lm ~key:lw ~p
                  ~cstr:(Ws.singleton (w64 4))));
         check
           "LM acquisition: a stack-symbolic value against a plain word is no landmark"
-          (Cbat_landmarks.entries lm h Cbat_landmarks.Word = []));
+          (Cbat_landmarks.entries lm h lw = []));
 
     (* The distance is the counter's own (signed) walk: a value below
        zero is one step from 0, not 2^64 - 1. *)
@@ -1198,11 +1202,11 @@ let tests : unit Alcotest.test list =
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
             ignore
-              (Cbat_landmarks.observe_unsat lm ~key:Cbat_landmarks.Word
+              (Cbat_landmarks.observe_unsat lm ~key:lw
                  ~p:(Ws.singleton (w64 (-99999)))
                  ~cstr:(Ws.singleton (w64 0))));
         check_bound "LM distance: the recorded distance is 99999"
-          (match Cbat_landmarks.entries lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.entries lm h lw with
            | e :: _ -> e.Cbat_landmarks.dist
            | [] -> None)
           (fun d -> d = 99999));
@@ -1231,10 +1235,12 @@ let tests : unit Alcotest.test list =
         in
         let cells = count (function Cbat_landmarks.Cell _ -> true | _ -> false) in
         for i = 0 to 99 do
-          Cbat_landmarks.record lm ~head:h ~key:Cbat_landmarks.Word
+          Cbat_landmarks.record lm ~head:h ~key:lw
             ~bound:(w64 i) ~is_upper:true ~dist:1
         done;
-        let words = count (function Cbat_landmarks.Word -> true | _ -> false) in
+        let words =
+          count (function Cbat_landmarks.Word _ -> true | _ -> false)
+        in
         check "LM table (a): a cell head holds its cap" (cells = 64);
         check "LM table (b): a word row is not capped at the cell cap"
           (words = 100));
@@ -1243,13 +1249,13 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let h = Tid.for_name "lm_upsert_head" in
         let lm = Cbat_landmarks.create () in
-        Cbat_landmarks.record lm ~head:h ~key:Cbat_landmarks.Word ~bound:(w64 7)
+        Cbat_landmarks.record lm ~head:h ~key:lw ~bound:(w64 7)
           ~is_upper:true ~dist:10;
         Cbat_landmarks.advance_head lm h;
-        Cbat_landmarks.record lm ~head:h ~key:Cbat_landmarks.Word ~bound:(w64 7)
+        Cbat_landmarks.record lm ~head:h ~key:lw ~bound:(w64 7)
           ~is_upper:true ~dist:6;
         check "LM table: one entry per (bound, upper); 6 wins and 10 is the history"
-          (match Cbat_landmarks.entries lm h Cbat_landmarks.Word with
+          (match Cbat_landmarks.entries lm h lw with
            | [ e ] -> (
                match e.Cbat_landmarks.dist_p, e.Cbat_landmarks.dist with
                | Some 10, Some 6 -> true
