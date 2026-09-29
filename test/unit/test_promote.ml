@@ -849,13 +849,6 @@ let tests : unit Alcotest.test list =
     pin "PR-29" "a VLA address def's value is its allocation base" (fun () ->
         let sub' = rw_vla () in
         ignore (install_fixture_envs [ sub' ]);
-        (Term.enum blk_t sub'
-        |> Seq.iter ~f:(fun b ->
-               Term.enum def_t b
-               |> Seq.iter ~f:(fun d ->
-                      Printf.printf "VLADEF %s := %s\n%!" (Var.name (Def.lhs d))
-                        (Format.asprintf "%a" (fun ppf e -> Exp.pp ppf e)
-                           (Def.rhs d)))));
         let t =
           Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
           |> Seq.find ~f:(fun d ->

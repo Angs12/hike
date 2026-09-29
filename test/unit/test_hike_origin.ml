@@ -515,10 +515,6 @@ let ori_15 () =
              |> Base.Option.bind ~f:Ws.origin
            else None)
   in
-  (Printf.eprintf "DBG ORI-15 got=%s extents=%b\n%!"
-     (match got with
-      | Some o -> Hike_origin.name o | None -> "none")
-     (Option.is_some (Origin.Vla_seed.extent (Term.tid def_dec))));
   check "ORI-15 saved pointer survives the call"
     (Option.equal Origin.equal got
        (Some (Origin.Vla (Term.tid def_dec))))

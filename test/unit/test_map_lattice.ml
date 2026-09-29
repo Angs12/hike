@@ -292,9 +292,6 @@ let tests : unit Alcotest.test list =
             ~data:(cell64 1) in
         let m = Mem.add m ~key:(key_of (Ws.singleton (w64 (-8))))
             ~data:(cell64 2) in
-        Format.eprintf "DBG MAP28 stack=%a abs=%a\n%!"
-          Ws.pp (read64 m (key_of (Ws.stack_word_i64 (-8L))))
-          Ws.pp (read64 m (key_of (Ws.singleton (w64 (-8)))));
         check "MAP-28 (Stack cell survives)"
           (Ws.equal (read64 m (key_of (Ws.stack_word_i64 (-8L))))
              (Ws.singleton (w64 1)));

@@ -9,7 +9,7 @@
 # Every stage is strict (non-zero exit on any failure) and provenance is
 # verified before any stage that consumes an emission.
 #
-# Paths are overridable: HIKE_CORPUS, HIKE_EMIT, HIKE_SEMOUT, HIKE_SEMOPT.
+# Paths are overridable: HIKE_CORPUS, HIKE_EMIT, HIKE_SEMOUT.
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"

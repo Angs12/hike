@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Native-vs-lifted equivalence with the consumer optimizer at HIKE_OPT_LEVEL (default 2; 0 = none).
-# between rename and llc. Strict: no allowlist; failures auto-bisect
-# every pass in BISECT_PASSES and list each breaking pass (CRASH = opt
-# crashed). Keeps *_renamed.ll/*_opt.ll as repro artifacts.
+# THE semantic gate: native-vs-lifted stdout equivalence at the consumer
+# optimizer's HIKE_OPT_LEVEL (default 2; 0 = no optimization passes),
+# applied between rename and llc.  Strict: no allowlist; failures
+# auto-bisect every pass in BISECT_PASSES and list each breaking pass
+# (CRASH = opt crashed).  Keeps *_renamed.ll/*_opt.ll as repro artifacts.
 # Pins opt-21 (fails loudly when missing); exit 0 iff all pass.
-# Usage: run_semantic_opt.sh [corpus_dir] [ir_dir] [out_dir]
+# Usage: run_semantic.sh [corpus_dir] [ir_dir] [out_dir]
 
 set -u
 CORPUS="${1:-/tmp/corpus}"

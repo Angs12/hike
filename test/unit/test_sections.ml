@@ -1311,7 +1311,3 @@ let tests : unit Alcotest.test list =
 ]
 
 let () = run "sections" tests
-
-let () = run "sections" tests
-
-let () = run "sections" tests
