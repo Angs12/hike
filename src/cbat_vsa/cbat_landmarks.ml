@@ -106,38 +106,11 @@ let clear_head (t : t) (h : Tid.t) (blocks : Tid.Set.t) : unit =
   Hashtbl.remove t.rows h;
   Core.Set.iter blocks ~f:(fun btid -> Hashtbl.remove t.rows btid)
 
-(* A key's entry cap.  A word row is bounded by the guards that produce
-   it; a cell row is capped per head, so a long solve cannot grow the
-   table without bound. *)
-let cell_cap = 64
-
-let cap_of (k : key) : int option =
-  match k with Word _ -> None | Cell _ -> Some cell_cap
-
-let capped_total (rows : row list) : int =
-  List.fold rows ~init:0 ~f:(fun n (r : row) ->
-      match cap_of r.key with
-      | None -> n
-      | Some _ -> n + List.length r.entries)
-
-(* Drop the oldest entries of the capped rows until the head is within its
-   cap; an uncapped row is never trimmed. *)
-let trim (rows : row list) : row list =
-  let rec go rows n =
-    if n <= cell_cap then rows
-    else
-      match rows with
-      | [] -> rows
-      | (r : row) :: rest -> (
-        match cap_of r.key with
-        | None -> r :: go rest n
-        | Some _ -> (
-          match r.entries with
-          | [] -> go rest n
-          | [ _ ] -> go rest (n - 1)
-          | _ :: tl -> { r with entries = tl } :: go rest (n - 1)))
-  in
-  go rows (capped_total rows)
+(* No entry cap.  The upsert keeps one entry per (bound, is_upper) with the
+   smallest distance, so a row grows only with the distinct boundaries its
+   key is measured against — and the same-line acquisition guard is what
+   keeps those stable.  A head that grinds to the visit budget is bounded
+   by that budget, not by a cap here. *)
 
 (* The upsert: one entry per (bound, is_upper); a smaller distance wins and
    the history is preserved — only [advance] rotates it. *)
@@ -168,7 +141,7 @@ let record (t : t) ~(head : Tid.t) ~(key : key) ~(bound : Cbat_word.t)
           else r)
     else rows @ [ { key; entries = [ entry ] } ]
   in
-  Hashtbl.set t.rows ~key:head ~data:(trim rows)
+  Hashtbl.set t.rows ~key:head ~data:rows
 
 (* Two values live on the same coordinate line: an excluded set from a
    different line is a category mismatch, not a disabled behavior. *)

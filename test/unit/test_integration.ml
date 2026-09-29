@@ -1212,7 +1212,7 @@ let tests : unit Alcotest.test list =
           (fun d -> d = 99999));
 
     (* The one module's own rules: the per-key cap and the upsert. *)
-    pin "INT-30" "LM table: the cap bounds a cell head and never a word row"
+    pin "INT-30" "LM table: every distinct boundary is kept, for either key"
       (fun () ->
         let h = Tid.for_name "lm_cap_head" in
         let lm = Cbat_landmarks.create () in
@@ -1241,8 +1241,9 @@ let tests : unit Alcotest.test list =
         let words =
           count (function Cbat_landmarks.Word _ -> true | _ -> false)
         in
-        check "LM table (a): a cell head holds its cap" (cells = 64);
-        check "LM table (b): a word row is not capped at the cell cap"
+        check "LM table (a): a cell head keeps every distinct boundary"
+          (cells = 100);
+        check "LM table (b): a word row keeps every distinct boundary"
           (words = 100));
 
     pin "INT-31" "LM table: a smaller distance replaces and keeps the history"
