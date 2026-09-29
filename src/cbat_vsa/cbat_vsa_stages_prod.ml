@@ -11,10 +11,6 @@ let incr_walk () = ()
 let t_scaffold = ref 0.
 let scaffold_calls = ref 0
 
-(* Unused cell-landmark census refs; parity with the debug adapter. *)
-let cell_lm_recorded = ref 0
-let cell_lm_consumed = ref 0
-
 let t_glue = ref 0.
 let glue_calls = ref 0
 

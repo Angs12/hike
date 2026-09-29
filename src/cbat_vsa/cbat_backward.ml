@@ -947,9 +947,10 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
                List.iter keys ~f:(fun key ->
                    let pre =
                      Mem.Val.data (Mem.find (res_size, endian) mv key) in
-                   if Cbat_landmarks.observe_unsat landmarks
-                        ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key)) ~p:pre ~cstr:produced
-                   then incr Stages.cell_lm_recorded;
+                   ignore
+                     (Cbat_landmarks.observe_unsat landmarks
+                        ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key))
+                        ~p:pre ~cstr:produced);
                    let res = WordSet.meet pre produced in
                    if not (WordSet.equal res pre) then
                      cell_meet_diff

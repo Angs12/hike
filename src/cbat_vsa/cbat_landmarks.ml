@@ -66,6 +66,19 @@ let equal_key (a : key) (b : key) : bool =
 let kind_of_key (k : key) : string =
   match k with Word _ -> "word" | Cell _ -> "cell"
 
+#ifdef VSA_DEBUG
+let steps_census : (string, int) Hashtbl.t = Hashtbl.create (module String)
+
+let bump_steps (k : string) : unit =
+  Hashtbl.update steps_census k ~f:(function Some n -> n + 1 | None -> 1)
+
+let () =
+  at_exit (fun () ->
+      Hashtbl.to_alist steps_census
+      |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+      |> List.iter ~f:(fun (k, n) -> Printf.eprintf "hike-lm-steps: %s=%d\n%!" k n))
+#endif
+
 (* One row per key at a head; a new entry appends, so the oldest entry is
    the list's head. *)
 type row = { key : key; entries : lm_entry list }
@@ -141,6 +154,9 @@ let record (t : t) ~(head : Tid.t) ~(key : key) ~(bound : Cbat_word.t)
           else r)
     else rows @ [ { key; entries = [ entry ] } ]
   in
+#ifdef VSA_DEBUG
+  bump_steps (Printf.sprintf "recorded.%s" (kind_of_key key));
+#endif
   Hashtbl.set t.rows ~key:head ~data:rows
 
 (* Two values live on the same coordinate line: an excluded set from a
@@ -196,8 +212,12 @@ let record_narrowed (t : t) ~(head : Tid.t) ~(key : key)
   | _ -> false
 
 (* Record an excluded behavior's boundary at the enclosing head.  The head
-   check comes first: outside a cycle the meet below is pure computation
-   whose result is discarded.  [true] when a landmark was recorded. *)
+   check comes first — outside a cycle the meet below is pure computation
+   whose result is discarded — then the line guard: an excluded set from a
+   different coordinate line is a category mismatch, not a behavior, and
+   its "boundary" travels with the state.  Then the discarded region is the
+   landmark, whether the meet emptied the prior set or trimmed it.  [true]
+   when one was recorded. *)
 let observe_unsat (t : t) ~(key : key)
     ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : bool =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr
@@ -208,29 +228,12 @@ let observe_unsat (t : t) ~(key : key)
       (* Outside a cycle: no-op. *)
       false
     | Some h ->
-      let m = Cbat_clp_set_composite.meet p cstr in
-      (match key with
-       | Word _ ->
-         if not (Cbat_clp_set_composite.is_bottom m) then false
-         else if not (same_line p cstr) then false
-         else record_excluded t ~head:h ~key ~p ~cstr
-       | Cell _ ->
-         if not (Cbat_clp_set_composite.is_bottom m) then
-           record_narrowed t ~head:h ~key ~p ~m
-         else record_excluded t ~head:h ~key ~p ~cstr)
-
-#ifdef VSA_DEBUG
-let steps_census : (string, int) Hashtbl.t = Hashtbl.create (module String)
-
-let bump_steps (k : string) : unit =
-  Hashtbl.update steps_census k ~f:(function Some n -> n + 1 | None -> 1)
-
-let () =
-  at_exit (fun () ->
-      Hashtbl.to_alist steps_census
-      |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
-      |> List.iter ~f:(fun (k, n) -> Printf.eprintf "hike-lm-steps: %s=%d\n%!" k n))
-#endif
+      if not (same_line p cstr) then false
+      else
+        let m = Cbat_clp_set_composite.meet p cstr in
+        if not (Cbat_clp_set_composite.is_bottom m) then
+          record_narrowed t ~head:h ~key ~p ~m
+        else record_excluded t ~head:h ~key ~p ~cstr
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf
    widens.  Only an entry holding a fresh measurement speaks: an entry

@@ -182,9 +182,6 @@ let selective_widen_extrapolate ~(head : Tid.t)
                        Mem.Val.widen_join v1 v2
                      | `Inf -> Mem.Val.widen_join v1 v2
                      | `Finite n ->
-#ifdef VSA_DEBUG
-                       incr Cbat_vsa_stages.cell_lm_consumed;
-#endif
                        let data_old = Mem.Val.data v1 in
                        let data_new = Mem.Val.data v2 in
                        let data = extrapolate_data ~entries ~steps:n data_old data_new in
