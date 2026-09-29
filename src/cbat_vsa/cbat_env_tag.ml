@@ -191,6 +191,10 @@ let denote_exp_at :
    the sub with every def stamped with the env its own transfer reads. *)
 let stamp_envs_of_sol ~(sol : (tid, AI.t) Solution.t) (sub : sub term) :
     (AI.t * AI.t) Tid.Map.t * sub term =
+  (* The final replay is the seed's authoritative pass: clear the
+     fixpoint-transient events so the table holds only the events the
+     converged denotations still satisfy. *)
+  WordSet.Origin.Vla_seed.reset ();
   let envs = ref Tid.Map.empty in
   let sub' =
     Term.map blk_t sub ~f:(fun blk ->

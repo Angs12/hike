@@ -236,7 +236,6 @@ let tests : unit Alcotest.test list =
             regions =
               [ (0, (pos residue_lo, pos residue_hi), residue_bytes);
                 (1, (pos arg_lo, pos arg_hi), arg_bytes) ];
-            anchor = Some (0, 8L);
             window_param = false;
           }
         in
@@ -250,8 +249,9 @@ let tests : unit Alcotest.test list =
                (mk_fp_program "intrinsic:fadd_rne_ieee754_binary_64" [ x0d; x1d ]))
         in
         check
-          "FP-OPERAND: a region-mem operand load GEPs its region's alloca (no raw model lane)"
-          (contains_substring ir "getelementptr i8, ptr %stack_r1"
+          "FP-OPERAND: a region-mem operand load uses a real pointer address (no raw model lane)"
+          (contains_substring ir "getelementptr i8, ptr %stack_r0"
+          && contains_substring ir "load i64"
           && not (contains_substring ir "inttoptr")));
   ]
 

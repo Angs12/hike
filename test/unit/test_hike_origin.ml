@@ -77,8 +77,8 @@ let ori_04 () =
     (Option.equal String.equal (origin_name (Ws.origin (Ws.intersection a b))) (Some "stack"))
 
 (* ORI-05: the solve-boundary refinement — window-side values name the
-   caller's frame, a VLA-frame value inside its extent keeps the
-   frame, and one crossing out re-absorbs onto the entry line. *)
+   caller's frame; a VLA frame keeps its origin (the routing gate
+   decides routability at the stamp, not here). *)
 let ori_05 () =
   let window_side = Ws.stack_word_i64 16L in
   let refined = Ws.refine_origin ~word:8 window_side in
@@ -88,9 +88,9 @@ let ori_05 () =
   check "below-entry value keeps Stack"
     (Option.equal Origin.equal (Ws.origin (Ws.refine_origin ~word:8 frame)) (Some Origin.Stack));
   let tid = Tid.create () in
-  let base = Hike.Stack_model.segment_base in
   Origin.Vla_seed.record tid
-    (Stdlib.Int64.add base 8L, Stdlib.Int64.add base 32L);
+    { Origin.off_lo = 0L; off_hi = Some 32L;
+      base_lo = Some (-48L); base_hi = Some (-32L) };
   let inside =
     Ws.set_origin (Origin.Vla tid) (Ws.stack_word_i64 16L)
     |> Ws.refine_origin ~word:8
@@ -101,8 +101,8 @@ let ori_05 () =
     Ws.set_origin (Origin.Vla tid) (Ws.stack_word_i64 (-8L))
     |> Ws.refine_origin ~word:8
   in
-  check "crossed-out vla value re-absorbs to Stack"
-    (Option.equal Origin.equal (Ws.origin below) (Some Origin.Stack));
+  check "an out-of-frame vla value keeps its frame"
+    (Option.equal Origin.equal (Ws.origin below) (Some (Origin.Vla tid)));
   let crossing =
     Ws.union (Ws.stack_word_i64 0L) (Ws.stack_word_i64 16L)
   in
@@ -263,9 +263,10 @@ let post_word_named (fix : vla_fix) (name : string) : Ws.t option =
       |> Base.Option.map ~f:(fun (_, post) ->
              AI.find_word 64 post (v64 name)))
 
-(* ORI-09: the seed — the dynamic decrement's value opens the VLA
-   frame named by the def's own tid, at the TRUE entry-line
-   positions, with the extent recorded. *)
+(* ORI-09: the seed — the dynamic decrement opens the VLA frame named
+   by the def's own tid; the value is the allocation base
+   (frame-relative 0) and the extent records the gate and the base's
+   entry-line range. *)
 let ori_09 () =
   let fix = vla_fixture ~frame:16 ~sizes:[ 16L; 32L ] ~after:(fun _ _ _ -> []) in
   let tid = Term.tid fix.vla_dec in
@@ -278,7 +279,7 @@ let ori_09 () =
                       Vsa.Def_origin.def_origin d
                     else acc))
      |> fun o -> Option.equal Origin.equal o (Some (Origin.Vla tid)));
-  check "the post value carries the true positions"
+  check "the post value is the allocation base, materialised to its entry-line range"
     (Base.Option.value_map (post_word_named fix "RSP") ~default:false
        ~f:(fun ws ->
          Option.equal Origin.equal (Ws.origin ws) (Some (Origin.Vla tid))
@@ -287,18 +288,20 @@ let ori_09 () =
          | Some (lo, hi) ->
              Stdlib.Int64.equal lo (-48L) && Stdlib.Int64.equal hi (-32L)
          | None -> false));
-  let base = Hike.Stack_model.segment_base in
-  check "the extent covers [frame+min size, frame)"
-    (Base.Option.equal
-       (fun (a, b) (c, d) -> Stdlib.Int64.equal a c && Stdlib.Int64.equal b d)
-       (Origin.Vla_seed.extent tid)
-       (Some (Stdlib.Int64.sub base 48L, Stdlib.Int64.sub base 17L)))
+  check "the extent records the frame gate and the base range"
+    (match Origin.Vla_seed.extent tid with
+     | Some e ->
+       Stdlib.Int64.equal e.Origin.off_lo 0L
+       && Option.equal Int64.equal e.Origin.off_hi (Some 32L)
+       && Option.equal Int64.equal e.Origin.base_lo (Some (-48L))
+       && Option.equal Int64.equal e.Origin.base_hi (Some (-32L))
+     | None -> false)
 
-(* ORI-10: +INT inside the extent shifts the offsets exactly and
-   keeps the frame. *)
+(* ORI-10: +INT inside the extent shifts the frame-relative offsets
+   exactly and keeps the frame. *)
 let ori_10 () =
   let fix =
-    vla_fixture ~frame:16 ~sizes:[ 32L ]
+    vla_fixture ~frame:16 ~sizes:[ 16L; 32L ]
       ~after:(fun rsp _ _ ->
         [ Def.create (v64 "RAX")
             (Bil.BinOp
@@ -308,37 +311,38 @@ let ori_10 () =
                (Bil.PLUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 24)))) ])
   in
   let tid = Term.tid fix.vla_dec in
-  let keeps name at =
+  let keeps name lo hi =
     Base.Option.value_map (post_word_named fix name) ~default:false
        ~f:(fun ws ->
          Option.equal Origin.equal (Ws.origin ws) (Some (Origin.Vla tid))
          &&
          match Ws.stack_bounds ws with
-         | Some (l, h) -> Stdlib.Int64.equal l at && Stdlib.Int64.equal h at
+         | Some (l, h) -> Stdlib.Int64.equal l lo && Stdlib.Int64.equal h hi
          | None -> false)
   in
-  check "rsp+12 keeps the frame at -36" (keeps "RAX" (-36L));
-  check "rsp+24 keeps the frame at -24" (keeps "RBX" (-24L))
+  check "rsp+12 keeps the frame at the shifted range" (keeps "RAX" (-36L) (-20L));
+  check "rsp+24 keeps the frame at the shifted range" (keeps "RBX" (-24L) (-8L))
 
-(* ORI-11: a value crossing out of the extent re-absorbs to Stack at
-   the boundary. *)
+(* ORI-11: a value crossing below the gate is refused at the origin
+   stamp (Abs); the frame-relative value keeps its frame raw. *)
 let ori_11 () =
   let fix =
-    vla_fixture ~frame:16 ~sizes:[ 32L ]
+    vla_fixture ~frame:16 ~sizes:[ 16L; 32L ]
       ~after:(fun rsp _ _ ->
         [ Def.create (v64 "RAX")
             (Bil.BinOp
                (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 12)))) ])
   in
-  check "rsp-12 (past the extent's bottom) stamps Stack"
-    (Option.equal Origin.equal (stamped_origin fix "RAX") (Some Origin.Stack));
-  check "the positions are unchanged entry-line offsets"
+  check "rsp-12 (below the gate) stamps Abs"
+    (Option.equal Origin.equal (stamped_origin fix "RAX") (Some Origin.Abs));
+  check "the frame-relative value keeps its origin and materialises"
     (Base.Option.value_map (post_word_named fix "RAX") ~default:false
        ~f:(fun ws ->
-         Option.equal Origin.equal (Ws.origin ws) (Some Origin.Stack)
+         Option.equal Origin.equal (Ws.origin ws)
+           (Some (Origin.Vla (Term.tid fix.vla_dec)))
          &&
          match Ws.stack_bounds ws with
-         | Some (l, h) -> Stdlib.Int64.equal l (-60L) && Stdlib.Int64.equal h (-60L)
+         | Some (l, h) -> Stdlib.Int64.equal l (-60L) && Stdlib.Int64.equal h (-44L)
          | None -> false))
 
 (* ORI-12: same-frame unions stay exact; different frames
@@ -357,16 +361,20 @@ let ori_12 () =
   check "different-frame union materialises"
     (Option.is_none (Ws.origin (Ws.union a b)))
 
-(* ORI-13: a VLA value unioned with a Stack value wraps at Stack. *)
+(* ORI-13: a VLA value unioned with an entry-line value materialises
+   through the base range (the frames do not merge). *)
 let ori_13 () =
   let t = Tid.create () in
+  Origin.Vla_seed.record t
+    { Origin.off_lo = 0L; off_hi = Some 32L;
+      base_lo = Some 0L; base_hi = Some 0L };
   let u =
     Ws.union
       (Ws.set_origin (Origin.Vla t) (Ws.stack_word_i64 (-20L)))
       (Ws.stack_word_i64 (-8L))
   in
-  check "vla+stack union reads Stack"
-    (Option.equal Origin.equal (Ws.origin u) (Some Origin.Stack));
+  check "vla+stack union materialises (no single origin)"
+    (Option.is_none (Ws.origin u));
   check "the offsets keep both runs"
     (match Ws.stack_bounds u with
      | Some (lo, hi) ->
@@ -378,7 +386,7 @@ let ori_13 () =
 let ori_14 () =
   let rcx = v64 "RCX" in
   let fix =
-    vla_fixture ~frame:16 ~sizes:[ 32L ]
+    vla_fixture ~frame:16 ~sizes:[ 16L; 32L ]
       ~after:(fun rsp rbp m ->
         [ Def.create m
             (Bil.Store
@@ -397,9 +405,9 @@ let ori_14 () =
                  `r64 )) ])
   in
   let tid = Term.tid fix.vla_dec in
-  check "the saved pointer reads back its frame and tid"
-    (Option.equal Origin.equal (stamped_origin fix "RCX")
-       (Some (Origin.Vla tid)))
+  check "the saved pointer value reads back its frame and tid"
+    (Base.Option.value_map (post_word_named fix "RCX") ~default:false
+       ~f:(fun ws -> Option.equal Origin.equal (Ws.origin ws) (Some (Origin.Vla tid))))
 
 
 (* ORI-15 (experiment): a VLA pointer saved before a machine call reads
@@ -458,7 +466,7 @@ let ori_15 () =
            `r64 ))
   in
   let lo = 32L in
-  let hi = 32L in
+  let hi = 16L in
   let w64_of (i : int64) = Cbat_word.to_word (i2w i) in
   let sub, tids =
     sub_of "vla_call"
@@ -492,12 +500,20 @@ let ori_15 () =
     Vsa.static_graph_vsa ~abi prog sub (Vsa.init_sol ~abi ~entry sub)
   in
   let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
-  ignore envs;
+  ignore stamped;
+  (* The load's def stamp is its ADDRESS's origin (a frame cell); the
+     loaded pointer VALUE keeps the VLA frame. *)
   let got =
-    Term.enum blk_t stamped
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) rcx)
-    |> Base.Option.bind ~f:Vsa.Def_origin.def_origin
+    Term.enum blk_t sub
+    |> Seq.find_map ~f:(fun blk ->
+           if
+             Term.enum def_t blk
+             |> Seq.exists ~f:(fun d -> Var.equal (Def.lhs d) rcx)
+           then
+             Core.Map.find envs (Term.tid blk)
+             |> Base.Option.map ~f:(fun (_, post) -> AI.find_word 64 post rcx)
+             |> Base.Option.bind ~f:Ws.origin
+           else None)
   in
   (Printf.eprintf "DBG ORI-15 got=%s extents=%b\n%!"
      (match got with
@@ -552,7 +568,7 @@ let ori_16 () =
     sub_of "vla_loop"
       [ [ Def.create rax (Bil.Int (w64_of 32L)) ],
         [ (2, fun t -> mk_jmp_to t (Bil.Var f)); (1, mk_goto) ];
-        [ Def.create rax (Bil.Int (w64_of 32L)) ],
+        [ Def.create rax (Bil.Int (w64_of 16L)) ],
         [ (2, mk_goto) ];
         [ Def.create rbp (Bil.Var rsp);
           Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int frame_w));
@@ -578,16 +594,45 @@ let ori_16 () =
   let prog = Program.create ~subs:[ sub; callee ] () in
   let sol = Vsa.static_graph_vsa ~abi prog sub (Vsa.init_sol ~abi ~entry sub) in
   let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in
-  ignore envs;
+  ignore stamped;
   let got =
-    Term.enum blk_t stamped
-    |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) rcx)
-    |> Base.Option.bind ~f:Vsa.Def_origin.def_origin
+    Term.enum blk_t sub
+    |> Seq.find_map ~f:(fun blk ->
+           if
+             Term.enum def_t blk
+             |> Seq.exists ~f:(fun d -> Var.equal (Def.lhs d) rcx)
+           then
+             Core.Map.find envs (Term.tid blk)
+             |> Base.Option.map ~f:(fun (_, post) -> AI.find_word 64 post rcx)
+             |> Base.Option.bind ~f:Ws.origin
+           else None)
   in
   check "ORI-16 loop-head load keeps the frame"
     (Option.equal Origin.equal got (Some (Origin.Vla (Term.tid def_dec))))
 
+
+(* ORI-17: the D1 predicate — a singleton move is a static frame adjust,
+   a TOP size and a directional-infinite size are events. *)
+let ori_17 () =
+  let before = Ws.stack_word_i64 0L in
+  let singleton = Ws.sub before (Ws.stack_word_i64 16L) in
+  check "a singleton move is not a VLA event"
+    (Option.is_none (Vsa.vla_event ~before ~after:singleton));
+  let top = Ws.sub before (Ws.top 64) in
+  check "a TOP size is a VLA event"
+    (match Vsa.vla_event ~before ~after:top with
+     | Some e -> Stdlib.Int64.equal e.Hike_origin.off_lo 0L
+                 && Option.is_none e.Hike_origin.off_hi
+                 && Option.is_none e.Hike_origin.base_lo
+     | None -> false);
+  let inf =
+    Ws.stack_word
+      (Clp.create_descending ~width:64 ~base:(w64 (-8)) ~step:(w64 1))
+  in
+  check "a directional-infinite size is a VLA event"
+    (match Vsa.vla_event ~before ~after:inf with
+     | Some e -> Option.is_none e.Hike_origin.off_hi
+     | None -> false)
 
 let () =
   run "hike_origin"
@@ -606,4 +651,5 @@ let () =
       pin "ORI-13" "vla+stack union wraps at Stack" ori_13;
       pin "ORI-14" "store-to-load round-trip (VLA)" ori_14;
       pin "ORI-15" "round-trip across a call" ori_15;
-      pin "ORI-16" "round-trip across a loop" ori_16 ]
+      pin "ORI-16" "round-trip across a loop" ori_16;
+      pin "ORI-17" "the D1 shape predicate (singleton / TOP / infinite)" ori_17 ]

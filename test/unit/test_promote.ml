@@ -260,6 +260,195 @@ let prwc_mk_defs () : def term * def term * def term * def term * def term * var
            `r64 )),
     gp_args )
 
+
+(* Family RW: the one address map — a below-entry frame whose carved
+   regions and reloaded pointers route every address def to its
+   storage's base + displacement. *)
+
+(* The -O0 frame shape: push rbp; mov rbp, rsp; sub rsp, 16 — one local
+   store/load pair at [RBP-16] and an indexed store at [RBP-16+i*8]. *)
+let rw_frame () : sub term =
+  let m = memv "rw_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let i = v64 "rw_i" in
+  let push =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m, Bil.Var rsp, Bil.Var rbp, LittleEndian, `r64 ))
+  in
+  let k8 = Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w in
+  let k16 = Cbat_word.to_word (w64 16) |> fun w -> Bil.Int w in
+  let defs =
+    [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k8));
+      push;
+      Def.create rbp (Bil.Var rsp);
+      Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k16));
+      Def.create i (Bil.Int (Cbat_word.to_word (w64 0)));
+      Def.create m
+        (Bil.Store
+           ( Bil.Var m,
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k16),
+             Bil.Int (Cbat_word.to_word (w64 42)),
+             LittleEndian, `r64 ));
+      Def.create (v64 "rw_t")
+        (Bil.Load
+           ( Bil.Var m,
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k16),
+             LittleEndian, `r64 ));
+      Def.create m
+        (Bil.Store
+           ( Bil.Var m,
+             Bil.BinOp
+               ( Bil.PLUS,
+                 Bil.BinOp (Bil.MINUS, Bil.Var rbp, k16),
+                 Bil.BinOp (Bil.TIMES, Bil.Var i, k8) ),
+             Bil.Int (Cbat_word.to_word (w64 7)),
+             LittleEndian, `r64 )) ]
+  in
+  rewrite_one (straight_sub "rw_frame" defs)
+
+(* The saved-then-reloaded pointer: the address of the local is stored
+   into a cell and the through-pointer store dereferences the reload —
+   the escaped cell write-closes into the residue, and the reloaded
+   base still routes to the storage's base + displacement. *)
+let rw_reload () : sub term =
+  let m = memv "rw_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let p = v64 "rw_p" in
+  let push =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m, Bil.Var rsp, Bil.Var rbp, LittleEndian, `r64 ))
+  in
+  let k8 = Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w in
+  let k24 = Cbat_word.to_word (w64 24) |> fun w -> Bil.Int w in
+  let k40 = Cbat_word.to_word (w64 40) |> fun w -> Bil.Int w in
+  let defs =
+    [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k8));
+      push;
+      Def.create rbp (Bil.Var rsp);
+      Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k40));
+      Def.create m
+        (Bil.Store
+           ( Bil.Var m,
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k24),
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k40),
+             LittleEndian, `r64 ));
+      Def.create (v64 "rw_q")
+        (Bil.BinOp (Bil.MINUS, Bil.Var rbp, k40));
+      Def.create p
+        (Bil.Load
+           ( Bil.Var m,
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k24),
+             LittleEndian, `r64 ));
+      Def.create m
+        (Bil.Store
+           ( Bil.Var m, Bil.Var p, Bil.Int (Cbat_word.to_word (w64 7)),
+             LittleEndian, `r64 )) ]
+  in
+  rewrite_one (straight_sub "rw_reload" defs)
+
+(* The defs of [sub] whose address expression references [name]. *)
+let rw_accesses_named (sub : sub term) (name : string) : def term list =
+  Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
+  |> Seq.filter ~f:(fun d ->
+         match Cu.addr_of_rhs (Def.rhs d) with
+         | Some (a, _) ->
+             Core.Set.exists (Exp.free_vars a) ~f:(fun v ->
+                 String.equal (Var.name (Var.base v)) name)
+         | None -> false)
+  |> Seq.to_list
+
+
+(* The caller-window fixture: a callee whose above-entry (Args) read
+   crosses slot cells (write-closed, never an Arg_slot) and a pure
+   window-value def. *)
+let rw_window () : sub term =
+  let m = memv "rw_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let push =
+    Def.create m
+      (Bil.Store (Bil.Var m, Bil.Var rsp, Bil.Var rbp, LittleEndian, `r64))
+  in
+  let k8 = Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w in
+  (* +20 off RBP is +12 above the entry: the 8-byte read crosses the
+     slot cells, so the Args binding is write-closed (never a slot). *)
+  let k20 = Cbat_word.to_word (w64 20) |> fun w -> Bil.Int w in
+  let defs =
+    [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k8));
+      push;
+      Def.create rbp (Bil.Var rsp);
+      Def.create (v64 "rw_w")
+        (Bil.BinOp (Bil.PLUS, Bil.Var rbp, k20));
+      Def.create (v64 "rw_t")
+        (Bil.Load
+           ( Bil.Var m,
+             Bil.BinOp (Bil.PLUS, Bil.Var rbp, k20),
+             LittleEndian, `r64 )) ]
+  in
+  rewrite_one (straight_sub "rw_window" defs)
+
+
+(* The VLA fixture: a runtime-sized decrement (a guarded size join)
+   seeds the allocation; the post-decrement SP copy carries the Vla
+   origin and takes the allocation's base var. *)
+let rw_vla () : sub term =
+  let rsp = v64 "RSP" in
+  let rax = v64 "RAX" in
+  let c = v1 "rw_c" in
+  let k16 = Cbat_word.to_word (w64 16) |> fun w -> Bil.Int w in
+  let k32 = Cbat_word.to_word (w64 32) |> fun w -> Bil.Int w in
+  let defs =
+    [ Def.create rax
+        (Bil.Ite (Bil.Var c, k16, k32));
+      Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax));
+      Def.create (v64 "rw_t") (Bil.Var rsp) ]
+  in
+  rewrite_one (straight_sub "rw_vla" defs)
+
+
+(* The section-constant fixture: a def whose value is a .rodata
+   constant address; the span owns it, so the value takes the
+   component's base var. *)
+let rw_sec () : sub term =
+  let m = memv "rw_m" in
+  let sub0 =
+    straight_sub "rw_sec"
+      [ (* the constant address (a .rodata word) *)
+        Def.create (v64 "rw_c")
+          (Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 0x1000L)));
+        (* an access through it: carves the component the value names *)
+        Def.create (v64 "rw_t")
+          (Bil.Load (Bil.Var m, Bil.Var (v64 "rw_c"), LittleEndian, `r64)) ]
+  in
+  let spans =
+    [ { Hike.Sections.ds_sec = Hike.Stack_model.Rodata;
+        Hike.Sections.ds_lo = 0x1000L;
+        Hike.Sections.ds_hi = 0x1010L;
+        Hike.Sections.ds_slots = [] } ]
+  in
+  let facts, subs, _ = fixture_facts [ sub0 ] in
+  let prog = Program.create ~subs () in
+  let prog =
+    Term.map sub_t prog ~f:(fun sub ->
+        Hike.Def_slots.stamp_dyn_allocs
+          ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts sub)
+          sub)
+  in
+  let ctx =
+    Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
+      ~spans prog
+  in
+  let prog = Term.map sub_t prog ~f:(Hike.Sections.stamp_tags ctx) in
+  let prog =
+    Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base
+      ~facts ~spans ~ctx prog
+  in
+  Term.first sub_t prog |> Base.Option.value_exn
+
 let tests : unit Alcotest.test list =
   [
     (* PR-01: the promoted signature carries the register lanes then the
@@ -530,6 +719,172 @@ let tests : unit Alcotest.test list =
                      match rs.Hike.Sections.storage with
                      | Hike.Sections.Stack_residue -> true
                      | _ -> false)));
+
+    (* PR-23: a region address def's value is its storage's base plus the
+       folded displacement (zero here — the base itself). *)
+    pin "PR-23" "a region address def's value is its storage base + displacement"
+      (fun () ->
+        let sub' = rw_frame () in
+        let find v =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d -> Var.equal (Var.base (Def.lhs d)) v)
+        in
+        let st42 =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 match Cu.store_data_of_rhs (Def.rhs d) with
+                 | Some (Bil.Int w) ->
+                     (match Cbat_word.to_int64 (Cbat_word.of_word w) with
+                      | Ok k -> Stdlib.Int64.equal k 42L
+                      | Error _ -> false)
+                 | _ -> false)
+        in
+        check "PR-23"
+          (match
+             ( Base.Option.map (find (v64 "RBP")) ~f:Def.rhs,
+               Base.Option.bind st42 ~f:(fun d ->
+                   Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst) )
+           with
+           | Some (Bil.Var pv), Some (Bil.Var av) ->
+               Cu.region_ptr_id_of pv = Some 2
+               && Cu.region_ptr_id_of av = Some 1
+           | _ -> false));
+
+    (* PR-24: the emitter lowers the rewritten address as the storage's
+       own alloca (or one GEP) — never a re-derived offset. *)
+    pin "PR-24" "a rewritten region access emits into its own alloca" (fun () ->
+        let ir = emit_ir [ rw_frame () ] in
+        check_ir "PR-24" "store i64 42, ptr %stack_r1" ir;
+        check_ir "PR-24" "load i64, ptr %stack_r1" ir);
+
+    (* PR-26: the residue's accesses and values take the same base +
+       displacement form as a region's — the escaped cell write-closes
+       into the residue and the pure address def over it names it. *)
+    pin "PR-26" "a residue access and value name the residue base"
+      (fun () ->
+        let sub' = rw_reload () in
+        let through = rw_accesses_named sub' "rw_p" in
+        let addr_ok a =
+          match a with
+          | Bil.Var b -> Cu.region_ptr_id_of b = Some 0
+          | Bil.BinOp (Bil.PLUS, Bil.Var b, _) ->
+              Cu.region_ptr_id_of b = Some 0
+          | _ -> false
+        in
+        let q =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 String.equal (Var.name (Var.base (Def.lhs d))) "rw_q")
+          |> Base.Option.map ~f:Def.rhs
+          |> Base.Option.map ~f:(function
+               | Bil.Var b -> Some b
+               | Bil.BinOp (Bil.PLUS, Bil.Var b, _) -> Some b
+               | _ -> None)
+          |> Base.Option.join
+        in
+        check "PR-26"
+          (Base.List.for_all through ~f:(fun d ->
+               match Cu.addr_of_rhs (Def.rhs d) with
+               | Some (a, _) -> addr_ok a
+               | None -> false)
+          && Base.Option.value_map q ~default:false
+               ~f:(fun b -> Cu.region_ptr_id_of b = Some 0)));
+
+    (* PR-25: a reloaded-base access routes to its proven storage — the
+       through-pointer store's address is the storage base plus the
+       displacement over the reloaded pointer's offset, never the raw
+       lane. *)
+    pin "PR-25" "a reloaded-base access routes to its storage base" (fun () ->
+        let sub' = rw_reload () in
+        let through = rw_accesses_named sub' "rw_p" in
+        let addr_base a =
+          match a with
+          | Bil.Var b -> Some b
+          | Bil.BinOp (Bil.PLUS, Bil.Var b, _) -> Some b
+          | _ -> None
+        in
+        check "PR-25"
+          (Base.List.for_all through ~f:(fun d ->
+               match Cu.addr_of_rhs (Def.rhs d) with
+               | Some (a, _) ->
+                   Base.Option.value_map (addr_base a) ~default:false
+                     ~f:Cu.is_region_ptr
+               | None -> false)));
+
+    (* PR-27: a window access's address is the window parameter plus the
+       entry-relative displacement. *)
+    pin "PR-27" "a window access address is hike_window plus off" (fun () ->
+        let sub' = rw_window () in
+        let win_addr =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.filter_map ~f:(fun d ->
+                 Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst)
+          |> Seq.exists ~f:(fun a ->
+                 match a with
+                 | Bil.BinOp (Bil.PLUS, Bil.Var b, _) ->
+                     Cu.is_window_var b
+                 | Bil.Var b -> Cu.is_window_var b
+                 | _ -> false)
+        in
+        check "PR-27" win_addr);
+
+    (* PR-28: a window value def (at/above the args base) takes the
+       window parameter as its base. *)
+    pin "PR-28" "a window value def value is hike_window plus off" (fun () ->
+        let sub' = rw_window () in
+        let w =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 String.equal (Var.name (Var.base (Def.lhs d))) "rw_w")
+          |> Base.Option.map ~f:Def.rhs
+        in
+        check "PR-28"
+          (match w with
+           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) -> Cu.is_window_var b
+           | Some (Bil.Var b) -> Cu.is_window_var b
+           | _ -> false));
+
+    (* PR-29: a VLA address def's value is the allocation's base var
+       (the offsets are frame-relative — byte zero is the base). *)
+    pin "PR-29" "a VLA address def's value is its allocation base" (fun () ->
+        let sub' = rw_vla () in
+        ignore (install_fixture_envs [ sub' ]);
+        (Term.enum blk_t sub'
+        |> Seq.iter ~f:(fun b ->
+               Term.enum def_t b
+               |> Seq.iter ~f:(fun d ->
+                      Printf.printf "VLADEF %s := %s\n%!" (Var.name (Def.lhs d))
+                        (Format.asprintf "%a" (fun ppf e -> Exp.pp ppf e)
+                           (Def.rhs d)))));
+        let t =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 String.equal (Var.name (Var.base (Def.lhs d))) "rw_t")
+          |> Base.Option.map ~f:Def.rhs
+        in
+        check "PR-29"
+          (match t with
+           | Some (Bil.Var pv) -> Cu.is_vla_ptr pv
+           | Some (Bil.BinOp (Bil.PLUS, Bil.Var pv, _)) ->
+               Cu.is_vla_ptr pv
+           | _ -> false));
+
+    (* PR-30: a constant address def's value is its component's base var
+       (the displacement folds to zero at the component's low bound). *)
+    pin "PR-30" "a constant address def's value is its component base" (fun () ->
+        let sub' = rw_sec () in
+        let c =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 String.equal (Var.name (Var.base (Def.lhs d))) "rw_c")
+          |> Base.Option.map ~f:Def.rhs
+        in
+        check "PR-30"
+          (match c with
+           | Some (Bil.Var pv) -> Cu.is_sec_comp_ptr pv
+           | Some (Bil.BinOp (Bil.PLUS, Bil.Var pv, _)) ->
+               Cu.is_sec_comp_ptr pv
+           | _ -> false))
   ]
 
 let () = run "promote" tests

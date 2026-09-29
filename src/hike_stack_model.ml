@@ -306,10 +306,67 @@ let region_mem (id : int) : var =
     (family_name region_family id)
     (mem64_t (Size.of_int_exn 8))
 
+(* The storage base family: one Mem-typed value per storage, minted by
+   the attribution's rewrite and bound by the emitter to the storage's
+   alloca/global (a parameter-backed storage binds nothing).  A
+   rewritten address def's value is [base + displacement]. *)
+let region_ptr_family = { prefix = "stack_r"; suffix = "_ptr" }
+
+let region_ptr ~(addr_bits : int) (id : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (family_name region_ptr_family id)
+    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
+
+let is_region_ptr (v : var) : bool = is_in_family region_ptr_family v
+
+(* The VLA storage base: one var per allocation, keyed by the
+   decrement def's tid — the emitter binds it to that %vla alloca. *)
+let vla_ptr_family = { prefix = "hike_vla_"; suffix = "_ptr" }
+
+let vla_ptr ~(addr_bits : int) (t : Tid.t) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (family_name vla_ptr_family (Tid.hash t))
+    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
+
+let is_vla_ptr (v : var) : bool = is_in_family vla_ptr_family v
+
+(* The section-component storage base: one var per component id, the
+   emitter binds it to the component's global. *)
+let sec_comp_ptr_family = { prefix = "sec_comp_"; suffix = "_ptr" }
+
+let sec_comp_ptr ~(addr_bits : int) (id : int) : var =
+  Var.create ~is_virtual:false ~fresh:false
+    (family_name sec_comp_ptr_family id)
+    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
+
+let is_sec_comp_ptr (v : var) : bool = is_in_family sec_comp_ptr_family v
+
+(* A storage's base value: never renamed, never a lane. *)
+let is_storage_base (v : var) : bool =
+  is_region_ptr v || is_vla_ptr v || is_sec_comp_ptr v
+
+let region_ptr_id_of (v : var) : int option =
+  if is_in_family region_ptr_family v then
+    let name = Var.name v in
+    let plen = String.length region_ptr_family.prefix in
+    let slen = String.length region_ptr_family.suffix in
+    Stdlib.int_of_string_opt
+      (String.sub name plen (String.length name - plen - slen))
+  else None
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
 let is_region_mem (v : var) : bool = is_in_family region_family v
+
+(* The region id a [stack_rN_mem] var names; [None] for any other var. *)
+let region_id_of_mem (v : var) : int option =
+  if is_in_family region_family v then
+    let name = Var.name v in
+    let plen = String.length region_family.prefix in
+    let slen = String.length region_family.suffix in
+    Stdlib.int_of_string_opt
+      (String.sub name plen (String.length name - plen - slen))
+  else None
 
 (* The section partition: each reserved span's components are carried in the
    mem var [sec_comp_N_mem] and the emitter routes by name.  A section's
@@ -397,7 +454,8 @@ let string_text_table (arr : Bytes.t) : int -> bool =
 let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
   let is_sp v = Abi.is_sp abi (Var.base v) in
   (* The literal displacement of [SP - k] through copies defined
-     earlier in term order. *)
+     earlier in term order; a cycle through the copy chain stops
+     ([seen] carries the visited bases). *)
   let rec disp chain seen rhs =
     match rhs with
     | Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Int w) when is_sp r ->
@@ -455,13 +513,10 @@ module Sub_layout = struct
   open Core
 
   (* [regions] is every alloca of the sub — the carved regions plus the
-     stack residue (id 0, whose extent contains the anchor and the caller
-     window).  [anchor] is the entry RSP's runtime position (region id, byte
-     index inside that alloca), so every model address resolves against one
-     base. *)
+     stack residue (id 0, whose extent contains the caller window).  Every
+     model address resolves against one region's base. *)
   type t = {
     regions : (int * (int64 * int64) * int64) list;
-    anchor : (int * int64) option;
     (* The sub reads its incoming window: its direct-call signature carries
        the hike_window parameter. *)
     window_param : bool;
@@ -469,11 +524,9 @@ module Sub_layout = struct
   [@@deriving equal, compare, sexp]
 
   (* Required by [Value.Tag.register]. *)
-  let pp fmt { regions; anchor; window_param } =
-    Format.fprintf fmt "regions=%d;anchor=%s;window=%b"
+  let pp fmt { regions; window_param } =
+    Format.fprintf fmt "regions=%d;window=%b"
       (Base.List.length regions)
-      (Base.Option.value_map anchor ~default:"none"
-         ~f:(fun (i, idx) -> Printf.sprintf "r%d@%Ld" i idx))
       window_param
 
   module Stringable = struct
@@ -486,13 +539,12 @@ module Sub_layout = struct
     include Stringable
 
     let caller_identity =
-      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/3"
+      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/4"
   end)
 end
 
 type sub_layout = Sub_layout.t = {
   regions : (int * (int64 * int64) * int64) list;
-  anchor : (int * int64) option;
   window_param : bool;
 }
 

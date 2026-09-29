@@ -48,16 +48,18 @@ let is_flag (fv : flag_vars) (f : flag) (v : var) : bool =
   | OF -> same fv.of_
 
 let parse_bexp (e : exp) : bexp option =
-  let rec go e =
-    match e with
-    | Bil.Var v -> (match Var.typ v with Type.Imm 1 -> Some (V v) | _ -> None)
-    | Bil.UnOp (Bil.NOT, e) -> Option.map ~f:(fun b -> N b) (go e)
-    | Bil.BinOp (Bil.AND, a, b) -> pair (fun x y -> A (x, y)) a b
-    | Bil.BinOp (Bil.OR, a, b) -> pair (fun x y -> O (x, y)) a b
-    | _ -> None
-  and pair c a b =
-    Option.bind (go a) ~f:(fun a -> Option.map (go b) ~f:(c a)) in
-  go e
+  let pair c x y =
+    Option.bind x ~f:(fun x -> Option.map y ~f:(c x))
+  in
+  Hike_exp_fold.fold
+    (fun e child ->
+      match e with
+      | Bil.Var v -> (match Var.typ v with Type.Imm 1 -> Some (V v) | _ -> None)
+      | Bil.UnOp (Bil.NOT, a) -> Option.map ~f:(fun b -> N b) (child a)
+      | Bil.BinOp (Bil.AND, a, b) -> pair (fun x y -> A (x, y)) (child a) (child b)
+      | Bil.BinOp (Bil.OR, a, b) -> pair (fun x y -> O (x, y)) (child a) (child b)
+      | _ -> None)
+    e
 
 (* The signed xor core: (SF|OF) & ~(SF&OF) — OF xor SF. *)
 let is_xor_core (fv : flag_vars) (b : bexp) : bool =

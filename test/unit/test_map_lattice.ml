@@ -23,6 +23,11 @@ let read32 m c = Mem.Val.data (Mem.find (32, LittleEndian) m (point c))
 let empty = Mem.top opadd_axis
 let range_cell lo hi n = Mem.meet_add empty ~key:(range lo hi) ~data:(cell n)
 
+(* The key namespace helpers: the origin a key carries, and a 64-bit cell. *)
+let key_origin k = (Mem.Key.cell_key k).Cbat_landmarks.Cell_key.origin
+let cell64 n = Mem.Val.create (Ws.singleton (w64 n)) LittleEndian
+let read64 m k = Mem.Val.data (Mem.find (64, LittleEndian) m k)
+
 let tests : unit Alcotest.test list =
   [
     pin "MAP-01" "ML1: add on bottom stays bottom"
@@ -252,6 +257,50 @@ let tests : unit Alcotest.test list =
              = IntLattice.top
           && folded (Map.add Map.top ~key:5 ~data:7) = 7
           && folded (Map.join_add Map.top ~key:5 ~data:IntLattice.top) = 0));
+
+    (* The key namespace: a key carries the value's origin, and cells of
+       different origins are disjoint. *)
+    pin "MAP-26"
+      "the key namespace: an origin-aware key round-trips (a stack word keys in \
+       the Stack namespace, a plain out-of-band word in Abs) and two keys of the \
+       same byte range but different origins do not overlap"
+      (fun () ->
+        let k_stack = key_of (Ws.stack_word_i64 (-8L)) in
+        let k_abs = key_of (Ws.singleton (w64 (-8))) in
+        check "MAP-26"
+          (Hike_origin.equal (key_origin k_stack) Hike_origin.Stack
+          && Hike_origin.equal (key_origin k_abs) Hike_origin.Abs
+          && not (Mem.Key.overlap k_stack k_abs)));
+
+    pin "MAP-27"
+      "the key namespace: a wrapping out-of-band value names no bounded key — its \
+       coordinate reaches the stack band, so it stays the top identity"
+      (fun () ->
+        let wrap =
+          Ws.of_clp
+            (Clp.create ~width:64 ~step:(w64 0x100000000)
+               ~cardn:(Cbat_word.of_int ~width:65 0x200000000) (w64 0))
+        in
+        check "MAP-27" (Mem.Key.of_wordset wrap = []));
+
+    pin "MAP-28"
+      "the key namespace: a cross-origin coalesce keeps both cells — a Stack cell \
+       and an Abs cell at the same byte range both survive a store-add"
+      (fun () ->
+        let axis = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
+        let m = Mem.add (Mem.top axis) ~key:(key_of (Ws.stack_word_i64 (-8L)))
+            ~data:(cell64 1) in
+        let m = Mem.add m ~key:(key_of (Ws.singleton (w64 (-8))))
+            ~data:(cell64 2) in
+        Format.eprintf "DBG MAP28 stack=%a abs=%a\n%!"
+          Ws.pp (read64 m (key_of (Ws.stack_word_i64 (-8L))))
+          Ws.pp (read64 m (key_of (Ws.singleton (w64 (-8)))));
+        check "MAP-28 (Stack cell survives)"
+          (Ws.equal (read64 m (key_of (Ws.stack_word_i64 (-8L))))
+             (Ws.singleton (w64 1)));
+        check "MAP-28 (Abs cell survives)"
+          (Ws.equal (read64 m (key_of (Ws.singleton (w64 (-8)))))
+               (Ws.singleton (w64 2))));
   ]
 
 let () = run "map_lattice" tests

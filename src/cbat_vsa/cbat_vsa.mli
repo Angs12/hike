@@ -119,6 +119,11 @@ val with_images : section_image list -> (unit -> 'a) -> 'a
 
 val init_sol : abi:Hike_abi.t -> ?entry:AI.t -> sub term -> vsa_sol
 
+(* The D1 VLA-event predicate: a non-singleton, strictly descending SP
+   move opens a frame; the extent is the seed's own fact. *)
+val vla_event :
+  before:WordSet.t -> after:WordSet.t -> Hike_origin.vla_extent option
+
 (* The sub's entry block: the CFG's [Start] pseudo-node points to it. *)
 val entry_block_of : sub term -> blk term option
 

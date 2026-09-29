@@ -28,17 +28,23 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
       then
-        (* The caller-window base is the caller's SP at the call, as a
-           pointer into the caller's residue. *)
+        (* The caller-window base is the caller's SP at the call: its
+           position in the caller's residue (the shadow that covers the
+           above-entry window). *)
         (match !(scope.cur_frame) with
-         | Some fr -> (
-             match fr.anchor_ptr with
-             | Some aptr ->
+         | Some _ -> (
+             let sp_ver =
+               match lane_version scope blk_tid ctx.sp with
+               | Some v -> v
+               | None -> ctx.sp
+             in
+             match get_ptr_offset scope sp_ver with
+             | Some off ->
+                 Bil2llvm_ptr.materialize ctx scope llvm_builder blk_tid
+                   Hike_stack_model.Ptr_residue off
+             | None ->
                  let sp = lane_value ctx scope blk_tid ctx.sp in
-                 let delta = Llvm.build_sub sp fr.anchor_i64 "" llvm_builder in
-                 Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) aptr [| delta |] ""
-                   llvm_builder
-             | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+                 Bil2llvm_ptr.as_pointer ctx llvm_builder sp)
          | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let i =
@@ -175,7 +181,8 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
       let value =
         match Llvm.classify_type (Llvm.type_of param) with
         | Llvm.TypeKind.Pointer
-          when not (Hike_stack_model.is_ptr_arg arg) ->
+          when not (Hike_stack_model.is_ptr_arg arg)
+               && not (is_ptr_var (Arg.lhs arg)) ->
             Llvm.build_ptrtoint param
               (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits)
               "" llvm_builder
@@ -488,7 +495,13 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
           | Some ver -> Core.Set.mem !(scope.window_vars) ver
           | None -> Core.Set.mem !(scope.window_vars) lane
         in
-        as_int ctx scope llvm_builder blk_tid is_window v)
+        ignore is_window;
+        (* The ret lane's LLVM type drives: pointer lanes return the
+           pointer, integer lanes the integer form. *)
+        match Llvm.classify_type (lane_type ctx ret) with
+        | Llvm.TypeKind.Pointer ->
+            Bil2llvm_ptr.as_pointer ctx llvm_builder v
+        | _ -> Bil2llvm_ptr.as_integer ctx llvm_builder v)
   in
   match rets with
   | [] -> Llvm.build_ret_void llvm_builder |> ignore
@@ -531,12 +544,12 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   let callee = Llvm.declare_function name fn_ty ctx.llvm_module in
   let arg_vals =
     Base.List.map ~f:(fun a ->
-        let v = create_exp ctx scope llvm_builder blk_tid (Arg.rhs a) in
-        match Llvm.classify_type (Llvm.type_of v) with
-        | Llvm.TypeKind.Integer ->
-            let bits = Llvm.integer_bitwidth (Llvm.type_of v) in
-            coerce_int_width ctx.llvm_ctx llvm_builder ~bits v 64
-        | _ -> v)
+        let v =
+          Bil2llvm_ptr.as_integer ctx llvm_builder
+            (create_exp ctx scope llvm_builder blk_tid (Arg.rhs a))
+        in
+        let bits = Llvm.integer_bitwidth (Llvm.type_of v) in
+        coerce_int_width ctx.llvm_ctx llvm_builder ~bits v 64)
       args
   in
   let r = Llvm.build_call fn_ty callee

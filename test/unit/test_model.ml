@@ -67,7 +67,7 @@ let stamp_shape
 
 (* The storage-free layout: no frame, no regions, no window. *)
 let empty_layout : Sm.sub_layout =
-  { regions = []; anchor = None; window_param = false }
+  { regions = []; window_param = false }
 
 (* Stamps the production tag onto a fixture def. *)
 let tag_def (t : Ds.sec_tag) (d : def term) : def term = Ds.set_sec_tag t d
@@ -137,9 +137,10 @@ let tests : unit Alcotest.test list =
           Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rbx))
         in
         let a5 = straight_sub "pr_a5_vla" [ a5_lit; a5_rbx_def; a5_bnd ] in
+        let facts, a5 = fixture_facts_sub a5 in
         check "MOD-01"
           (Core.Set.is_empty
-             (Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5)));
+             (Hike.Sections.dynamic_alloc_tids_of ~facts a5)));
 
     pin "MOD-02"
       "PR-A5: the runtime-unbounded decrement is the event; the literal decrement is not"
@@ -149,8 +150,9 @@ let tests : unit Alcotest.test list =
           Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx))
         in
         let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
+        let facts, a5u = fixture_facts_sub a5u in
         let a5u_events =
-          Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5u
+          Hike.Sections.dynamic_alloc_tids_of ~facts a5u
         in
         check "MOD-02"
           (Core.Set.equal a5u_events (tid_set [ Term.tid a5_vla ])));
@@ -163,8 +165,9 @@ let tests : unit Alcotest.test list =
           Def.create sp (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx))
         in
         let a5u = straight_sub "pr_a5_vla_unb" [ a5_vla ] in
+        let facts, a5u = fixture_facts_sub a5u in
         let a5u_events =
-          Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5u
+          Hike.Sections.dynamic_alloc_tids_of ~facts a5u
         in
         let a5_stamped =
           Ds.stamp_dyn_allocs ~dynamic_alloc_tids:a5u_events a5u
@@ -187,9 +190,10 @@ let tests : unit Alcotest.test list =
         let a5c_d2 = Def.create a5c_t2 (Bil.Var a5c_t1) in
         let a5c_sp = Def.create sp (Bil.Var a5c_t2) in
         let a5c = straight_sub "pr_a5c_chain" [ a5c_d1; a5c_d2; a5c_sp ] in
+        let facts, a5c = fixture_facts_sub a5c in
         check "MOD-04"
           (Core.Set.equal
-             (Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5c)
+             (Hike.Sections.dynamic_alloc_tids_of ~facts a5c)
              (tid_set [ Term.tid a5c_sp ])));
 
     pin "MOD-05"
@@ -208,9 +212,10 @@ let tests : unit Alcotest.test list =
           Def.create sp (Bil.BinOp (Bil.PLUS, Bil.Var sp, Bil.Var a5d_t))
         in
         let a5d = straight_sub "pr_a5d_plus" [ a5d_d1; a5d_sp ] in
+        let facts, a5d = fixture_facts_sub a5d in
         check "MOD-05"
           (Core.Set.equal
-             (Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5d)
+             (Hike.Sections.dynamic_alloc_tids_of ~facts a5d)
              (tid_set [ Term.tid a5d_sp ])));
 
     pin "MOD-06"
@@ -235,7 +240,7 @@ let tests : unit Alcotest.test list =
              (Hike.Sections.dynamic_alloc_tids_of ~facts:fa5e a5e)));
 
     pin "MOD-07"
-      "PR-A5b: the LOOP-CARRIED VLA is the event — the widened head does not hide it"
+      "PR-A5b: a VLA in a looping sub is the event — the widened loop does not hide it"
       (fun () ->
         let a5_rcx = v64 "pr_a5_rcx" in
         let a5b_loop =
@@ -244,17 +249,14 @@ let tests : unit Alcotest.test list =
         in
         let a5b, _ =
           sub_of "pr_a5b_loop_vla"
-            [ [], [ (1, mk_goto) ];
-              [ Def.create sp
+            [ [ Def.create sp
                   (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var a5_rcx)) ],
-              [ (2, mk_goto) ];
+              [ (1, mk_goto) ];
               [],
-              [ (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, a5b_loop)));
-                (1, fun t -> mk_jmp_to t a5b_loop) ];
-              [], [] ]
-        in
-        let a5b_events =
-          Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts a5b
+              [ (2, fun t -> mk_jmp_to t a5b_loop);
+                (3, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, a5b_loop))) ];
+              [], [ (1, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
         in
         let a5b_body_sp =
           Term.enum blk_t a5b
@@ -264,6 +266,10 @@ let tests : unit Alcotest.test list =
                         if Var.same (Def.lhs d) sp then Some (Term.tid d)
                         else None))
           |> Base.Option.value_exn
+        in
+        let facts, a5b = fixture_facts_sub a5b in
+        let a5b_events =
+          Hike.Sections.dynamic_alloc_tids_of ~facts a5b
         in
         check "MOD-07"
           (Core.Set.equal a5b_events (tid_set [ a5b_body_sp ])));
@@ -284,8 +290,7 @@ let tests : unit Alcotest.test list =
             (tree_of sub1)
         in
         check "MOD-08"
-          (l1.Sm.anchor = Some (1, 8L)
-          && l1.Sm.regions =
+          (l1.Sm.regions =
              [ (1, (pos (-24L), pos (-17L)), 16L);
                (2, (pos (-16L), pos (-9L)), 16L) ]));
 
@@ -331,11 +336,8 @@ let tests : unit Alcotest.test list =
             (tree_of sub2)
         in
         check "MOD-10"
-          ((match l2.Sm.anchor with
-           | Some (0, idx) -> Int64.equal idx residue_index
-           | _ -> false)
-          && Base.List.exists l2.Sm.regions ~f:(fun (id, _, b) ->
-                 Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
+          (Base.List.exists l2.Sm.regions ~f:(fun (id, _, b) ->
+               Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
 
     pin "MOD-11" "PR-B6: a plain-TOP-only residue sub takes the same unbounded floor"
       (fun () ->
@@ -363,7 +365,7 @@ let tests : unit Alcotest.test list =
 
     (* Lane C: stack-to-locals fission. *)
     pin "MOD-12"
-      "PR-C1: the whole-access store rebinds lhs and mem node to the region mem, keeping the SP address arithmetic"
+      "PR-C1: the whole-access store rebinds lhs and mem node to the region mem, its address the storage's base"
       (fun () ->
         let c1_st0 = mk_store 24L 1 `r64 in
         let c1_st1 = mk_store 16L 2 `r64 in
@@ -384,13 +386,9 @@ let tests : unit Alcotest.test list =
           (def_of_lhs c1' (Sm.region_mem 1))
           (fun d ->
             match Def.rhs d with
-            | Bil.Store
-                ( Bil.Var mem,
-                  Bil.BinOp (Bil.MINUS, Bil.Var b, Bil.Int _),
-                  _,
-                  _,
-                  _ ) ->
-                Var.same mem (Sm.region_mem 1) && Var.same b sp
+            | Bil.Store (Bil.Var mem, Bil.Var b, _, _, _) ->
+                Var.same mem (Sm.region_mem 1)
+                && Sm.region_ptr_id_of b = Some 1
             | _ -> false));
 
     pin "MOD-13"
@@ -659,7 +657,7 @@ let tests : unit Alcotest.test list =
         in
         check "MOD-21" (contains_substring ir1 "%vla = alloca i8, i64"));
 
-    pin "MOD-22" "PR-D1: the model SP binds to the alloca's integer (vla_i64)"
+    pin "MOD-22" "PR-D1: the model SP binds to the residue's entry pointer"
       (fun () ->
         let m = memv "pr_d_m" in
         let d_rbx =
@@ -679,20 +677,27 @@ let tests : unit Alcotest.test list =
                  `r64 ))
         in
         let d1 = straight_sub "pr_d1_vla" [ d_rbx; d_vla; d_st ] in
+        let layout : Sm.sub_layout =
+          { regions = [ (0, (pos (-32L), pos 7L), 40L) ];
+            window_param = false }
+        in
         let ir1 =
           emit_ir
             [ stamp_shape
                 ~dynamic_alloc_tids:(tid_set [ Term.tid d_vla ])
-                ~layout:empty_layout d1 ]
+                ~layout d1 ]
         in
-        check "MOD-22" (contains_substring ir1 "%vla_i64 = ptrtoint"));
+        check "MOD-22"
+          (contains_substring ir1 "%vla = alloca i8, i64"
+          && contains_substring ir1 "getelementptr i8, ptr %stack_r0"
+          && not (contains_substring ir1 "vla_i64")
+          && not (contains_substring ir1 "sp_slot")));
 
     pin "MOD-23"
-      "PR-D2: residue storage anchors through the entry SP Slot (per-invocation stack_0)"
+      "PR-D2: a residue access GEPs the residue alloca at the model address"
       (fun () ->
-        let residue_layout bytes idx : Sm.sub_layout =
+        let residue_layout bytes : Sm.sub_layout =
           { regions = [ (0, (pos (-16L), pos (-9L)), bytes) ];
-            anchor = Some (0, idx);
             window_param = false }
         in
         let d_ld =
@@ -706,36 +711,36 @@ let tests : unit Alcotest.test list =
         in
         let d2 = straight_sub "pr_d2_residue" [ d_ld ] in
         let ir2 =
-          emit_ir [ stamp_shape ~layout:(residue_layout 32L 8192L) d2 ]
+          emit_ir [ stamp_shape ~layout:(residue_layout 32L) d2 ]
         in
         check "MOD-23"
-          (contains_substring ir2 "%sp_slot = alloca i64"
-          && contains_substring ir2 "%stack_0 = load i64, ptr %sp_slot"));
+          (contains_substring ir2 "getelementptr i8, ptr %stack_r0"
+          && contains_substring ir2 "load i64"
+          && not (contains_substring ir2 "sp_slot")
+          && not (contains_substring ir2 "stack_0")));
 
     pin "MOD-24"
-      "PR-D2b: region storage anchors the SP Slot at region-0 + 8 (the SysV residue)"
+      "PR-D2b: a carved region access GEPs the region's own alloca"
       (fun () ->
         let d2b_ld =
           Def.create (v64 "pr_d2b_t")
             (Bil.Load
-               ( Bil.Var (Sm.region_mem 0),
+               ( Bil.Var (Sm.region_mem 1),
                  minus_addr sp 16L,
                  LittleEndian,
                  `r64 ))
         in
         let d2b = straight_sub "pr_d2b_region" [ d2b_ld ] in
         let region_layout : Sm.sub_layout =
-          { regions = [ (0, (pos (-16L), pos (-9L)), 16L) ];
-            anchor = Some (0, 8L);
+          { regions = [ (0, (pos (-32L), pos (-1L)), 48L);
+                        (1, (pos (-16L), pos (-9L)), 16L) ];
             window_param = false }
         in
         let ir2b = emit_ir [ stamp_shape ~layout:region_layout d2b ] in
         check "MOD-24"
-          (contains_substring ir2b
-             "getelementptr i8, ptr %stack_r0, i64 8"
-          && contains_substring ir2b
-               "%anchor_i64 = ptrtoint ptr %anchor to i64"
-          && contains_substring ir2b "%sp_slot = alloca i64"));
+          (contains_substring ir2b "%stack_r1"
+          && not (contains_substring ir2b "%anchor")
+          && not (contains_substring ir2b "%sp_slot")));
 
     pin "MOD-25" "PR-D2c: a storage-free sub emits no SP Slot and no region"
       (fun () ->

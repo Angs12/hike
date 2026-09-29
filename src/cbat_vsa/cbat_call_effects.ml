@@ -46,6 +46,11 @@ let range_of (ws : WordSet.t) : (word * word) option =
    and the callee reaches below its entry only.  An unbounded-above SP
    keeps nothing — the whole-memory top stays the sound fallback on
    any doubt. *)
+(* The frame-keep namespace rule: a stack address is [Rel]; a plain or
+   absolute value cannot name the model's stack line, so it never
+   forces the whole-memory top and never enters the escape list.  All
+   inputs are OFFSET-space (segment-relative), matching the Stack cells
+   [call_keep] filters. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =
 #ifdef VSA_DEBUG
@@ -66,32 +71,45 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
           let bound w =
             Option.bind w ~f:(fun x ->
                 Option.map (int64_of x) ~f:(fun off ->
-                    Word.of_int64 ~width:64
-                      (Stdlib.Int64.add WordSet.stack_base off)))
+                    Word.of_int64 ~width:64 off))
           in
           match WordSet.origin rsp with
-          | Some (WordSet.Origin.Vla _) -> bound (WordSet.Clp.min_elem offs)
+          | Some (WordSet.Origin.Vla tid) -> (
+            (* Keep from the allocation's base; an unknown base cannot
+               place the frame — the top fallback. *)
+            match WordSet.Origin.Vla_seed.extent tid with
+            | Some { WordSet.Origin.base_lo = Some blo; _ } ->
+              bound (Some (Cbat_word.of_int64 ~width:64 blo))
+            | _ -> None)
           | _ -> bound (WordSet.Clp.max_elem offs))
       | None -> Option.map ~f:snd (range_of rsp)
   in
+  (* The escape list: the stack-line-capable (relative-origin) escapes
+     only.  A plain/absolute escape cannot collide with a Stack-line
+     cell (the key namespaces by origin); a bottom escape writes
+     nothing.  A relative escape keeps its bounded extent; a top one
+     spans the whole line (the sound claim). *)
   let escape_ranges =
-    match List.filter_map escape ~f:range_of with
-    | ranges when List.length ranges = List.length escape -> Some ranges
-    | _ -> None in
-  match keep_lo, escape_ranges with
-  | Some lo, Some ranges ->
+    List.filter_map escape ~f:(fun ws ->
+        match WordSet.origin ws with
+        | Some (WordSet.Origin.Stack | WordSet.Origin.Vla _ | WordSet.Origin.Window)
+          -> range_of ws
+        | Some _ -> None
+        | None ->
+            (* A plain bounded set keyed in its own space — it cannot
+               name a Stack cell. *)
+            None)
+  in
+  match keep_lo with
+  | Some lo ->
 #ifdef VSA_DEBUG
     Cbat_attr_census.bump "call.frame.kept";
 #endif
     AI.map_memories env ~f:(fun ~key:_ ~data ->
-        Mem.call_keep data ~keep_lo:lo ~escape:ranges)
-  | _ ->
+        Mem.call_keep data ~keep_lo:lo ~escape:escape_ranges)
+  | None ->
 #ifdef VSA_DEBUG
-    (match keep_lo, escape_ranges with
-     | None, None -> Cbat_attr_census.bump "call.frame.top.rsp_and_escape"
-     | None, Some _ -> Cbat_attr_census.bump "call.frame.top.rsp"
-     | Some _, None -> Cbat_attr_census.bump "call.frame.top.escape"
-     | Some _, Some _ -> ());
+    Cbat_attr_census.bump "call.frame.top.rsp";
 #endif
     AI.top_memories env
 

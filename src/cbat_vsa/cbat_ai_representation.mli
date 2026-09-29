@@ -41,3 +41,12 @@ val map_memories : t -> f:(key:var -> data:Cbat_ai_memmap.t -> Cbat_ai_memmap.t)
 
 (* The whole-memory-top fallback; the words stay. *)
 val top_memories : t -> t
+
+#ifdef VSA_DEBUG
+(* The per-visit witness for the fixpoint's churn diagnosis, and the
+   count of the bindings that differ in representation alone. *)
+val diff : t -> t -> string * int
+
+(* Every word binding, tagged and printed, in one line. *)
+val head_summary : t -> string
+#endif

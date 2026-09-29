@@ -66,7 +66,10 @@ let tag_lane (a : Arg.t) : Arg.t =
 let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : Arg.t list * Arg.t list =
   let abi = Abi.of_target target in
-  let free_vars = Hike_split_blocks.free_regs sub in
+  let free_vars =
+    if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa sub
+    else Hike_split_blocks.free_regs sub
+  in
   let rets =
     (if Abi.is_primary_target target then abi.return_regs else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
@@ -147,7 +150,9 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
               || is_callee_saved
               || Hike_abi.is_intrinsic_name n
               || Model.is_arg_slot (Var.base reg)
-              || Model.is_call_arg (Var.base reg)))
+              || Model.is_call_arg (Var.base reg)
+              || Model.is_window_var reg
+              || Model.is_storage_base reg))
         |> Base.List.sort ~compare:(fun a b ->
             let ra, na = rank_of_var a in
             let rb, nb = rank_of_var b in
@@ -217,34 +222,39 @@ let ptr_kind_of ~(facts : Hike_kb.facts) ~(blk : blk term) ?def (e : exp) :
   | Ok ws -> Vsa.WordSet.in_stack_segment ws
   | Error _ -> false
 
-(* The defs whose value denotes a stack or VLA address, with the storage
-   each lives in. *)
-let ptr_defs ~(facts : Hike_kb.facts) (sub : sub term) :
-    Tid.Set.t * Hike_stack_model.ptr_storage Tid.Map.t =
+(* The pointer facts of one sub: the defs proved to be pointers, each such
+   def's storage, and the pointer value vars. *)
+type ptr_facts = {
+  def_tids : Tid.Set.t;
+  def_storages : Hike_stack_model.ptr_storage Tid.Map.t;
+  vars : Var.Set.t;
+}
+
+let ptr_facts_empty =
+  { def_tids = Tid.Set.empty; def_storages = Tid.Map.empty; vars = Var.Set.empty }
+
+(* The pointer-kind inference: a forward may-analysis over the sub's CFG
+   (the BAP [Graphlib] fixpoint).  The data is the set of vars proven to
+   be stack/VLA addresses; the seed is the VSA denotation (a bounded
+   stack/VLA value) plus the caller-proven lanes; the transfer adds every
+   def whose rhs is a pointer-preserving shape over a proven operand.
+   The join is set union (any pointer use makes a var a pointer). *)
+let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
+    (sub : sub term) : ptr_facts =
   let layout =
     Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
       ~default:
-        { Hike_stack_model.Sub_layout.regions = []; anchor = None;
+        { Hike_stack_model.Sub_layout.regions = [];
           window_param = false }
   in
   let word = facts.Hike_kb.abi.Hike_abi.word in
   let a_base =
     Hike_stack_model.args_base ~entry:Hike_stack_model.segment_base ~word
   in
-  (* A VLA address — its origin names the frame, or its positions
-     reach into one's extent — is its own storage: the real pointer,
-     never a GEP into a region alloca its address does not live in. *)
   let vla_reach (ws : Vsa.WordSet.t) : bool =
     match Vsa.WordSet.origin ws with
     | Some (Vsa.WordSet.Origin.Vla _) -> true
-    | None -> false
-    | Some _ -> (
-      match Hike_stack_model.positions_of_offsets ws with
-      | Some (lo, hi) ->
-        Core.Map.exists facts.Hike_kb.vla_extents ~f:(fun (elo, ehi) ->
-              Stdlib.Int64.compare hi elo >= 0
-              && Stdlib.Int64.compare lo ehi <= 0)
-      | None -> false)
+    | _ -> false
   in
   let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage =
     if vla_reach ws then Hike_stack_model.Ptr_vla
@@ -263,19 +273,205 @@ let ptr_defs ~(facts : Hike_kb.facts) (sub : sub term) :
           | None -> Hike_stack_model.Ptr_residue)
       | None -> Hike_stack_model.Ptr_residue
   in
-  Term.enum blk_t sub
-  |> Seq.fold ~init:(Tid.Set.empty, Tid.Map.empty)
-       ~f:(fun (tids, stors) blk ->
-         Term.enum def_t blk
-         |> Seq.fold ~init:(tids, stors) ~f:(fun (tids, stors) d ->
+  let addr_width = word * 8 in
+  let is_addr_width (d : def term) : bool =
+    match Var.typ (Def.lhs d) with
+    | Type.Imm n -> Int.equal n addr_width
+    | _ -> true
+  in
+  (* A model memory-state var is storage, never a pointer value. *)
+  let is_value_var v =
+    not
+      (Hike_stack_model.is_region_mem v
+      || Hike_stack_model.is_window_mem v
+      || Hike_stack_model.is_sec_comp_mem v)
+  in
+  let add_value acc d =
+    let v = Def.lhs d in
+    let load_word =
+      match Hike_stack_model.addr_of_rhs (Def.rhs d) with
+      | Some (_, size) -> Int.equal (Size.in_bytes size) word
+      | None -> true
+    in
+    if
+      is_value_var v
+      && Base.Option.is_none (Hike_stack_model.store_data_of_rhs (Def.rhs d))
+      && is_addr_width d && load_word
+    then Core.Set.add acc v
+    else acc
+  in
+  (* The entry SP is a pointer by construction; the window lane too. *)
+  let extra =
+    let sp = facts.Hike_kb.abi.Hike_abi.sp in
+    let window =
+      Hike_stack_model.hike_window_var ~word:facts.Hike_kb.abi.Hike_abi.word
+    in
+    Core.Set.add (Core.Set.add extra sp) window
+  in
+  (* A provably-stack denotation: the symbolic arm (a real stack offset).
+     The degraded in-band plain arm can hold a genuine constant (an
+     arithmetic magic), so it is not proof of a stack address. *)
+  let is_stack_addr (ws : Vsa.WordSet.t) : bool =
+    Vsa.WordSet.in_stack_segment ws
+    && Base.Option.is_some (Hike_stack_model.positions_of_offsets ws)
+  in
+  (* A literal constant is an integer value, never a stack address (the
+     VSA's in-band plain arm can catch an arithmetic magic). *)
+  let is_literal (d : def term) : bool =
+    match Def.rhs d with Bil.Int _ -> true | _ -> false
+  in
+  let denot_storage blk d =
+    if is_literal d then None
+    else
+      match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
+      | Ok ws when is_stack_addr ws -> Some (storage_of ws)
+      | _ -> None
+  in
+  let shape_ptr (ptrs : Var.Set.t) (e : exp) : bool =
+    Hike_exp_fold.fold
+      (fun e child ->
+        match e with
+        | Bil.Var v ->
+            Core.Set.mem ptrs v
+            || Core.Set.mem ptrs (Var.base v)
+            || (match Var.typ (Var.base v) with
+               | Type.Mem _ -> true
+               | _ -> false)
+        | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) -> child a || child b
+        | Bil.Ite (_, a, b) -> child a || child b
+        | _ -> false)
+      e
+  in
+  let seed_of blk =
+    Term.enum def_t blk
+    |> Seq.fold ~init:extra ~f:(fun acc d ->
+           if is_literal d then acc
+           else
              match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
-             | Error _ -> (tids, stors)
-             | Ok ws ->
-                 if not (Vsa.WordSet.in_stack_segment ws) then (tids, stors)
-                 else
-                   ( Core.Set.add tids (Term.tid d),
-                     Core.Map.set stors ~key:(Term.tid d)
-                       ~data:(storage_of ws) )))
+             | Ok ws when is_stack_addr ws -> add_value acc d
+             | _ -> acc)
+  in
+  let transfer tid ptrs =
+    match Term.find blk_t sub tid with
+    | None -> ptrs
+    | Some blk ->
+        let ptrs = Core.Set.union ptrs (seed_of blk) in
+        let defs = Term.enum def_t blk |> Seq.to_list in
+        (* The block's defs reach a local fixpoint, so a use is found
+           however the defs are ordered. *)
+        let rec fold ptrs =
+          let ptrs' =
+            Base.List.fold defs ~init:ptrs ~f:(fun acc d ->
+                if shape_ptr acc (Def.rhs d) then add_value acc d else acc)
+          in
+          if Core.Set.equal ptrs ptrs' then ptrs' else fold ptrs'
+        in
+        let ptrs = fold ptrs in
+        Term.enum phi_t blk
+        |> Seq.fold ~init:ptrs ~f:(fun acc p ->
+               let inc =
+                 Phi.values p
+                 |> Seq.exists ~f:(fun (_, e) ->
+                        match e with
+                        | Bil.Var v ->
+                            Core.Set.mem acc v
+                            || Core.Set.mem acc (Var.base v)
+                        | _ -> false)
+               in
+               if inc && is_value_var (Phi.lhs p) then
+                 Core.Set.add acc (Phi.lhs p)
+               else acc)
+  in
+  let base_map =
+    Term.enum blk_t sub
+    |> Seq.fold
+         ~init:(Core.Map.set Tid.Map.empty ~key:Graphs.Tid.start ~data:extra)
+         ~f:(fun m blk ->
+           Core.Map.set m ~key:(Term.tid blk) ~data:(seed_of blk))
+  in
+  (* The sub's CFG, straight from the BIR (every edge is an explicit jmp:
+     the splitter materializes the guards' fallthroughs). *)
+  let g = Sub.to_graph sub in
+  let sol =
+    Graphlib.Std.Graphlib.fixpoint
+      (module Graphs.Tid)
+      ~start:Graphs.Tid.start
+      ~init:(Graphlib.Std.Solution.create base_map Var.Set.empty)
+      ~equal:Core.Set.equal ~merge:Core.Set.union ~f:transfer g
+  in
+  let ptrs =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:extra ~f:(fun acc blk ->
+           let tid = Term.tid blk in
+           Core.Set.union acc
+             (transfer tid (Graphlib.Std.Solution.get sol tid)))
+  in
+  (* The storage of each pointer def: the denotation's, else inherited
+     from a pointer operand. *)
+  let struct_storage (var_stors : Hike_stack_model.ptr_storage Var.Map.t)
+      (e : exp) : Hike_stack_model.ptr_storage option =
+    Hike_exp_fold.fold
+      (fun e child ->
+        match e with
+        | Bil.Var v -> (
+            let self =
+              match Hike_stack_model.region_ptr_id_of (Var.base v) with
+              | Some id -> Some (Hike_stack_model.Ptr_region id)
+              | None -> None
+            in
+            match self with
+            | Some st -> Some st
+            | None -> (
+                match Core.Map.find var_stors v with
+                | Some st -> Some st
+                | None -> Core.Map.find var_stors (Var.base v)))
+        | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) ->
+            Base.Option.first_some (child a) (child b)
+        | Bil.Ite (_, a, b) -> Base.Option.first_some (child a) (child b)
+        | _ -> None)
+      e
+  in
+  let defs =
+    Term.enum blk_t sub
+    |> Seq.concat_map ~f:(fun blk ->
+           Term.enum def_t blk |> Seq.map ~f:(fun d -> (blk, d)))
+    |> Seq.to_list
+  in
+  let rec stor_loop stors var_stors =
+    let stors', var_stors' =
+      Base.List.fold defs ~init:(stors, var_stors)
+        ~f:(fun (stors, var_stors) (blk, d) ->
+          let v = Def.lhs d in
+          if not (Core.Set.mem ptrs v) then (stors, var_stors)
+          else
+            let st =
+              match denot_storage blk d with
+              | Some st -> Some st
+              | None -> struct_storage var_stors (Def.rhs d)
+            in
+            match st with
+            | None -> (stors, var_stors)
+            | Some st ->
+                let stors =
+                  if Core.Map.mem stors (Term.tid d) then stors
+                  else Core.Map.set stors ~key:(Term.tid d) ~data:st
+                in
+                let var_stors =
+                  if Core.Map.mem var_stors v then var_stors
+                  else Core.Map.set var_stors ~key:v ~data:st
+                in
+                (stors, var_stors))
+    in
+    if Core.Map.length stors' = Core.Map.length stors then (stors', var_stors')
+    else stor_loop stors' var_stors'
+  in
+  let stors, _ = stor_loop Tid.Map.empty Var.Map.empty in
+  let tids =
+    Base.List.fold defs ~init:Tid.Set.empty ~f:(fun acc (_, d) ->
+        if Core.Set.mem ptrs (Def.lhs d) then Core.Set.add acc (Term.tid d)
+        else acc)
+  in
+  { def_tids = tids; def_storages = stors; vars = ptrs }
 
 let sub_of_program (prog : program term) : sub term Tid.Map.t =
   Term.enum sub_t prog
@@ -321,6 +517,84 @@ let param_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
                   | Indirect _ -> acc)
               | _ -> acc)))
 
+(* The whole-program pointer-kind fixpoint.  A value is a pointer when
+   the VSA proves its denotation is a stack/VLA address, or it flows
+   from one: a copy, an address offset, an ite; a callee parameter a
+   caller proves; a caller's return lane whose callee proves.  The
+   def-use part runs per sub ([ptr_defs]); the call-graph edges run to a
+   fixpoint over the subs.  A var is a pointer when any of its defs is
+   (the join is [int ⊑ ptr]; the emitter inttoptrs the integer paths). *)
+let ptr_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
+    (prog : program term) : Var.Set.t Tid.Map.t * ptr_facts Tid.Map.t =
+  let add acc t v =
+    Core.Map.update acc t ~f:(function
+        | None -> Var.Set.singleton v
+        | Some s -> Core.Set.add s v)
+  in
+  let subs = Term.enum sub_t prog |> Seq.to_list in
+  let rec fix pks inferred =
+    let inferred' =
+      Base.List.fold subs ~init:Tid.Map.empty ~f:(fun acc sub ->
+          let extra =
+            Core.Map.find pks (Term.tid sub)
+            |> Base.Option.value ~default:Var.Set.empty
+          in
+          Core.Map.set acc ~key:(Term.tid sub)
+            ~data:(ptr_defs ~extra ~facts sub))
+    in
+    let ptr_vars_of sub =
+      let vars =
+        Core.Map.find inferred' (Term.tid sub)
+        |> Base.Option.value ~default:ptr_facts_empty
+        |> fun pf -> pf.vars
+      in
+      Core.Set.union vars
+        (Core.Map.find pks (Term.tid sub)
+        |> Base.Option.value ~default:Var.Set.empty)
+    in
+    let pks' =
+      Base.List.fold subs ~init:pks ~f:(fun pks caller ->
+          let ctv = ptr_vars_of caller in
+          Term.enum blk_t caller
+          |> Seq.fold ~init:pks ~f:(fun pks blk ->
+                 Term.enum jmp_t blk
+                 |> Seq.fold ~init:pks ~f:(fun pks j ->
+                        match Jmp.kind j with
+                        | Call c -> (
+                            match Call.target c with
+                            | Direct t -> (
+                                match Core.Map.find sub_of t with
+                                | Some callee ->
+                                    let callee_ptr = ptr_vars_of callee in
+                                    (* caller arg -> callee param *)
+                                    let pks =
+                                      Base.List.fold
+                                        (Hike_stack_model.sig_args callee)
+                                        ~init:pks ~f:(fun pks a ->
+                                          if Hike_stack_model.is_ret a then pks
+                                          else if
+                                            Core.Set.mem ctv (Arg.lhs a)
+                                            || ptr_kind_of ~facts ~blk
+                                                 (Arg.rhs a)
+                                          then add pks t (Arg.lhs a)
+                                          else pks)
+                                    in
+                                    (* callee ret -> caller ret lane *)
+                                    Base.List.fold
+                                      facts.Hike_kb.abi.Hike_abi.return_regs
+                                      ~init:pks ~f:(fun pks r ->
+                                        if Core.Set.mem callee_ptr r then
+                                          add pks (Term.tid caller) r
+                                        else pks)
+                                | None -> pks)
+                            | Indirect _ -> pks)
+                        | _ -> pks)))
+    in
+    if Core.Map.equal Var.Set.equal pks pks' then (pks', inferred')
+    else fix pks' inferred'
+  in
+  fix Tid.Map.empty Tid.Map.empty
+
 (* Stamps each In lane's kind: the mem/window lanes are pointers by
    construction; a value lane is a pointer when its parameter is. *)
 let stamp_arg_kinds ~(param_kinds : Var.Set.t Tid.Map.t)
@@ -354,25 +628,146 @@ let kind_census (prog : program term) : unit =
   Printf.eprintf "hike-kinds: defs=%d ptr=%d window=%d\n%!" !defs !ptrs !wins
 #endif
 
-(* The pass: write every sub's signature, with its lane types, onto the
-   sub's own [arg] terms, then stamp the value/lane kinds (when the
-   analysis ran). *)
+(* The value type of a pointer lane: `Mem (addr, byte)`; the emitter's
+   `typ_lltype` lowers it to LLVM `ptr`.  The address size is the
+   target's, never a literal. *)
+let mem_type_of_target (target : Bap_core_theory.Theory.Target.t) : Type.t =
+  let bits = Bap_core_theory.Theory.Target.bits target in
+  let addr_size = if bits <= 32 then `r32 else `r64 in
+  Type.Mem (addr_size, `r8)
+
+(* Retypes EVERY var occurrence to its inferred sort: a pointer var to
+   [Mem], every other var to the sort it already has.  The pass owns the
+   typing; the emitter reads [Var.typ] and never re-derives. *)
+let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t) (sub : sub term) :
+    sub term =
+  (* Only the sort changes: the var's ident (name and SSA version) is
+     preserved, so defs and reads keep matching across blocks. *)
+  let mem_sort =
+    match mem_typ with
+    | Type.Mem (a, b) ->
+        Bap_core_theory.Theory.Value.Sort.forget
+          (Bap_core_theory.Theory.Mem.define
+             (Bap_core_theory.Theory.Bitv.define (Size.in_bits a))
+             (Bap_core_theory.Theory.Bitv.define (Size.in_bits b)))
+    | _ -> assert false
+  in
+  let repl v =
+    if Core.Set.mem ptr_vars v || Core.Set.mem ptr_vars (Var.base v) then
+      Var.reify (Bap_core_theory.Theory.Var.create mem_sort (Var.ident v))
+    else v
+  in
+  (object
+     inherit Term.mapper as super
+
+     method! map_sym v = repl v
+     method! map_def d = Def.with_lhs (super#map_def d) (repl (Def.lhs d))
+     method! map_phi p = Phi.with_lhs (super#map_phi p) (repl (Phi.lhs p))
+     method! map_arg a =
+       let a = super#map_arg a in
+       Arg.create ?intent:(Arg.intent a) (repl (Arg.lhs a)) (Arg.rhs a)
+   end)#map_sub sub
+
+(* The signature pass: write every sub's lane list onto its own [arg]
+   terms.  It does not need the value types, so it runs BEFORE SSA. *)
+let sign_run (proj : Project.t) : Project.t =
+  let target = Project.target proj in
+  Project.map_program proj ~f:(sign_program ~target)
+
+(* The type pass: infer every value's sort (AFTER SSA, per version),
+   retype every var, and stamp the lane kinds.  The emitter then lowers
+   mechanically. *)
 let run (proj : Project.t) : Project.t =
   let target = Project.target proj in
+  let mem_typ = mem_type_of_target target in
   Project.map_program proj ~f:(fun prog ->
-      let prog = sign_program ~target prog in
       match Hike_kb.facts_opt () with
       | None -> prog
       | Some facts ->
           let sub_of = sub_of_program prog in
-          let pks = param_kinds ~facts ~sub_of prog in
-          let prog = stamp_arg_kinds ~param_kinds:pks prog in
+          let pks, inferred = ptr_kinds ~facts ~sub_of prog in
+          let ptr_vars_of_sub sub =
+            let vars =
+              Core.Map.find inferred (Term.tid sub)
+              |> Base.Option.value ~default:ptr_facts_empty
+              |> fun pf -> pf.vars
+            in
+            Core.Set.union vars
+              (Core.Map.find pks (Term.tid sub)
+              |> Base.Option.value ~default:Var.Set.empty)
+          in
           let prog =
             Term.map sub_t prog ~f:(fun sub ->
-                let tids, stors = ptr_defs ~facts sub in
-                let sub = Hike_def_slots.stamp_ptr_kinds ~ptr_tids:tids sub in
-                Hike_def_slots.stamp_ptr_storages ~storages:stors sub)
+                let pf =
+                  Core.Map.find inferred (Term.tid sub)
+                  |> Base.Option.value ~default:ptr_facts_empty
+                in
+                let sub =
+                  Hike_def_slots.stamp_ptr_kinds ~ptr_tids:pf.def_tids sub
+                in
+                let sub =
+                  Hike_def_slots.stamp_ptr_storages ~storages:pf.def_storages
+                    sub
+                in
+                let lane_vars =
+                  Term.enum arg_t sub
+                  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc a ->
+                         Core.Set.add acc (Arg.lhs a))
+                in
+                let param_vars =
+                  Core.Map.find pks (Term.tid sub)
+                  |> Base.Option.value ~default:Var.Set.empty
+                  |> Core.Set.filter ~f:(fun v ->
+                         Core.Set.mem lane_vars v
+                         || Core.Set.mem lane_vars (Var.base v))
+                in
+                (* A call-ret version is a pointer when its callee's ret
+                   lane is. *)
+                let minted =
+                  Term.enum blk_t sub
+                  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+                         let cptr =
+                           Term.enum jmp_t blk
+                           |> Seq.fold ~init:Var.Set.empty ~f:(fun a j ->
+                                  match Jmp.kind j with
+                                  | Call c -> (
+                                      match Call.target c with
+                                      | Direct t -> (
+                                          match Core.Map.find sub_of t with
+                                          | Some callee ->
+                                              Core.Set.union a
+                                                (ptr_vars_of_sub callee)
+                                          | None -> a)
+                                      | Indirect _ -> a)
+                                  | _ -> a)
+                         in
+                         match
+                           Term.get_attr blk Hike_stack_model.versions_tag
+                         with
+                         | Some vs ->
+                             Base.List.fold
+                               vs.Hike_stack_model.Versions.rets ~init:acc
+                               ~f:(fun acc (v, v') ->
+                                 if Core.Set.mem cptr v then
+                                   Core.Set.add acc v'
+                                 else acc)
+                         | None -> acc)
+                in
+                let ptr_vars =
+                  Core.Set.union pf.vars
+                    (Core.Set.union param_vars minted)
+                in
+                let ptr_vars =
+                  Core.Set.add ptr_vars facts.Hike_kb.abi.Hike_abi.sp
+                in
+                let ptr_vars =
+                  Core.Set.add ptr_vars
+                    (Hike_stack_model.hike_window_var
+                       ~word:facts.Hike_kb.abi.Hike_abi.word)
+                in
+                retype_sub ~mem_typ ~ptr_vars sub)
           in
+          let prog = stamp_arg_kinds ~param_kinds:pks prog in
 #ifdef VSA_DEBUG
           kind_census prog;
 #endif

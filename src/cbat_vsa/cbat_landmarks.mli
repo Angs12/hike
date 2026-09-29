@@ -54,6 +54,7 @@ val with_widening_head : t -> Tid.t option -> (unit -> 'a) -> 'a
    landmark rows. *)
 module Cell_key : sig
   type t = {
+    origin : Hike_origin.t;
     lo_width : int;
     lo_value : int64;
     hi_width : int;

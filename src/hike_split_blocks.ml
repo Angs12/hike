@@ -1,23 +1,13 @@
-(* The block/jmp-series split: a block whose jmps are all direct Gotos
-   (none naming an interrupt sub) becomes one block per jmp, the pieces
-   consecutive in term order — piece 1 keeps the tid, defs, phis, and
-   attrs.  The BIR CFG then equals the CFG the emitter renders: the
-   implicit fallthrough of a piece is its guard's false edge.  Any other
-   multi-jmp block stays whole, named on the channel. *)
+(* The block/jmp split: every guard's false edge becomes an explicit
+   Goto (BAP's lifting leaves it implicit in the term order), and a
+   3+-jmp direct-goto series becomes one block per jmp — piece 1 keeps
+   the tid, defs, phis, and attrs; every piece carries an explicit Goto
+   to the next.  The BIR's edges are then the jmps themselves, so every
+   later pass (the emitter included) reads the BIR, never a term order.
+   A series that is not all direct gotos stays whole, named on the
+   channel. *)
 
 open Bap.Std
-
-(* The block that follows [blk] in [sub]'s term order: where an implicit
-   fallthrough edge lands. *)
-let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
-  let tid = Term.tid blk in
-  let rec go seen = function
-    | [] -> None
-    | b :: rest ->
-        if seen then Some (Term.tid b)
-        else go (Tid.equal (Term.tid b) tid) rest
-  in
-  go false (Term.enum blk_t sub |> Seq.to_list)
 
 (* A compilable series: every jmp a direct Goto to a non-interrupt. *)
 let compilable_series (jmps : jmp term list) : bool =
@@ -28,20 +18,65 @@ let compilable_series (jmps : jmp term list) : bool =
       | _ -> false)
 
 (* One block per jmp: piece 1 is the original block minus the later
-   jmps; each later jmp becomes a fresh block of its own. *)
+   jmps; each later jmp becomes a fresh block of its own.  Every piece
+   but the last carries an explicit [Goto] to the next piece, so a
+   guard's false edge is a jmp target — the BIR carries its own edges
+   and no pass reads the term order. *)
 let pieces (blk : blk term) : blk term list =
   match Term.enum jmp_t blk |> Seq.to_list with
   | [] | [ _ ] -> [ blk ]
-  | first :: rest ->
-      let first_tid = Term.tid first in
-      Term.filter jmp_t blk ~f:(fun j -> Tid.equal (Term.tid j) first_tid)
-      :: Base.List.map rest ~f:(fun j -> Blk.create ~jmps:[ j ] ())
+  | jmps ->
+      let tids =
+        match jmps with
+        | _ :: rest ->
+            Term.tid blk :: Base.List.map rest ~f:(fun _ -> Tid.create ())
+        | [] -> []
+      in
+      let n = Base.List.length jmps in
+      Base.List.mapi jmps ~f:(fun i j ->
+          let blk_i =
+            if Int.equal i 0 then
+              Term.filter jmp_t blk ~f:(fun x ->
+                  Tid.equal (Term.tid x) (Term.tid j))
+            else Blk.create ~tid:(Base.List.nth_exn tids i) ~jmps:[ j ] ()
+          in
+          if i + 1 < n then
+            Term.append jmp_t blk_i
+              (Jmp.create (Goto (Direct (Base.List.nth_exn tids (i + 1)))))
+          else blk_i)
+
+(* The block that follows [blk] in [sub]'s term order: the false target of
+   a guard whose block has no later jmp. *)
+let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
+  let tid = Term.tid blk in
+  let rec go seen = function
+    | [] -> None
+    | b :: rest ->
+        if seen then Some (Term.tid b)
+        else go (Tid.equal (Term.tid b) tid) rest
+  in
+  go false (Term.enum blk_t sub |> Seq.to_list)
 
 let split_sub (sub : sub term) : sub term =
+  (* Every guard's false edge becomes an explicit Goto.  BAP's lifting
+     leaves it implicit (the term-order successor); materializing it here
+     means no later pass — the emitter included — reads a term order. *)
+  let sub =
+    Term.map blk_t sub ~f:(fun blk ->
+        match Base.List.last (Term.enum jmp_t blk |> Seq.to_list) with
+        | Some j when not (Hike_stack_model.is_true_cond (Jmp.cond j)) -> (
+            match fallthrough sub blk with
+            | Some succ ->
+                Term.append jmp_t blk (Jmp.create (Goto (Direct succ)))
+            | None -> blk)
+        | _ -> blk)
+  in
+  (* A 3+-jmp block becomes one piece per jmp, each carrying an explicit
+     Goto to the next. *)
   let multi =
     Term.enum blk_t sub
     |> Seq.filter ~f:(fun blk ->
-           Base.List.length (Term.enum jmp_t blk |> Seq.to_list) > 1)
+           Base.List.length (Term.enum jmp_t blk |> Seq.to_list) > 2)
     |> Seq.to_list
   in
   if Base.List.is_empty multi then sub
@@ -80,14 +115,13 @@ let split_sub (sub : sub term) : sub term =
 let normalize (prog : program term) : program term =
   Term.map sub_t prog ~f:split_sub
 
-(* The rendered CFG's edge set: every explicit jmp target, plus the
-   term-order successor of a guarded goto terminal (its false edge).
+(* The rendered CFG's edge set: every jmp target, explicit in the BIR.
    The liveness and SSA passes read the CFG from here — one successor
-   relation. *)
+   relation, no term-order fallthrough. *)
 let succs_of_sub (sub : sub term) : Tid.t list Tid.Map.t =
-  let blks = Term.enum blk_t sub |> Seq.to_list in
-  Base.List.fold blks ~init:Tid.Map.empty ~f:(fun m blk ->
-      let explicit =
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+      let succs =
         Term.enum jmp_t blk
         |> Seq.filter_map ~f:(fun j ->
                match Jmp.kind j with
@@ -99,25 +133,12 @@ let succs_of_sub (sub : sub term) : Tid.t list Tid.Map.t =
                | _ -> None)
         |> Seq.to_list
       in
-      let last_guarded =
-        let jmps = Term.enum jmp_t blk |> Seq.to_list in
-        match Base.List.last jmps with
-        | Some j when not (Hike_stack_model.is_true_cond (Jmp.cond j)) -> (
-            match Jmp.kind j with Goto (Direct _) -> true | _ -> false)
-        | _ -> false
-      in
-      let succs =
-        match (last_guarded, fallthrough sub blk) with
-        | true, Some succ -> succ :: explicit
-        | _ -> explicit
-      in
       Core.Map.set m ~key:(Term.tid blk) ~data:succs)
 
-(* The sub's free registers, read at its own entries over the rendered
-   CFG.  A split piece carries no defs, so the BAP tid graph's
-   in-degree-0 glue would transport its jmp target's live set to the
-   sub entry and fatten the signature with registers never read there;
-   the fallthrough edge gives the piece its real predecessor. *)
+(* The sub's free registers, read at its own entries over the BIR's
+   explicit edges.  A split piece carries no defs; its entering edge is
+   the previous piece's explicit Goto, so liveness does not transport a
+   target's live set to the sub entry. *)
 let free_regs (sub : sub term) : var list =
   let blks = Term.enum blk_t sub |> Seq.to_list in
   let succs = succs_of_sub sub in

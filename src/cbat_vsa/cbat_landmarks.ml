@@ -14,20 +14,26 @@ type lm_entry = {
 (* Distance readings cap at 2^40. *)
 let max_landmark_distance = 1 lsl 40
 let cap_distance (d : int) : int = min d max_landmark_distance
+(* The distance from [a] to [b] on the counter's own (signed) line: a
+   counter walking toward a negative boundary reads small, not as a
+   2^width jump.  Unrepresentable distances cap. *)
 let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
   let diff = Cbat_word.sub b a in
-  try Cbat_word.to_int_exn diff with _ -> max_landmark_distance
-  (* Cap unrepresentable distances. *)
+  match Cbat_word.to_int64 diff with
+  | Ok d when Int64.compare (Int64.abs d) (Int64.of_int max_landmark_distance) < 0
+    -> Option.value_exn (Int64.to_int (Int64.abs d))
+  | Ok _ | Error _ -> max_landmark_distance
 
 (* The cell an entry is keyed by: the memory key's byte hull (each
    end as width/value) and stride — per-stride cells keep their own
    landmark rows. *)
 module Cell_key = struct
-  type t = { lo_width : int; lo_value : int64; hi_width : int;
-             hi_value : int64; stride : int }
+  type t = { origin : Hike_origin.t; lo_width : int; lo_value : int64;
+             hi_width : int; hi_value : int64; stride : int }
 
   let equal a b =
-    Int.equal a.lo_width b.lo_width && Stdlib.Int64.equal a.lo_value b.lo_value
+    Hike_origin.equal a.origin b.origin
+    && Int.equal a.lo_width b.lo_width && Stdlib.Int64.equal a.lo_value b.lo_value
     && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
     && Int.equal a.stride b.stride
 end
@@ -93,6 +99,17 @@ let record_landmark_for_head (t : t) ~(head : Tid.t) ~(bound : Cbat_word.t) ~(is
 let entries_for_head (t : t) (head : Tid.t) : lm_entry list =
   Hashtbl.find t.lm_env head |> Option.value ~default:[]
 
+(* Two values live on the same coordinate line: an empty meet between
+   different lines is a category mismatch, not a disabled behavior. *)
+let same_line (a : Cbat_clp_set_composite.t) (b : Cbat_clp_set_composite.t) :
+    bool =
+  match Cbat_clp_set_composite.origin a, Cbat_clp_set_composite.origin b with
+  | Some oa, Some ob ->
+    Hike_origin.equal (Cbat_clp_set_composite.key_line oa)
+      (Cbat_clp_set_composite.key_line ob)
+  | None, None -> true
+  | Some _, None | None, Some _ -> false
+
 (* Record an empty meet's disabled boundary at the enclosing head. The
    head check comes first: outside a cycle the meet below is pure
    computation whose result is discarded. *)
@@ -100,6 +117,7 @@ let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t)
     ~(cstr : Cbat_clp_set_composite.t)
     ~(meet : Cbat_clp_set_composite.t) : unit =
   if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then ()
+  else if not (same_line p cstr) then ()
   else
     match t.widening_at_head with
     | None ->
@@ -122,34 +140,78 @@ let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t)
           end else ()
         | _ -> ()
 
-(* Steps until the closest landmark; Zero needs another measurement, Inf widens. *)
+#ifdef VSA_DEBUG
+let steps_census : (string, int) Hashtbl.t = Hashtbl.create (module String)
+
+let bump_steps (k : string) : unit =
+  Hashtbl.update steps_census k ~f:(function Some n -> n + 1 | None -> 1)
+
+let () =
+  at_exit (fun () ->
+      Hashtbl.to_alist steps_census
+      |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+      |> List.iter ~f:(fun (k, n) -> Printf.eprintf "hike-lm-steps: %s=%d\n%!" k n))
+#endif
+
+(* Steps until the closest landmark; Zero needs another measurement, Inf
+   widens.  Only an entry holding a fresh measurement speaks: an entry
+   already consumed by [lm_advance] carries no reading, and a table keeps
+   entries whose boundary the guard stopped reaching — neither may hold
+   the head in [Zero], which never widens. *)
 let steps_of_entries (lst : lm_entry list) : [> `Zero | `Finite of int | `Inf] =
-  let has_zero = List.exists lst ~f:(fun e -> Option.is_none e.dist_p) in
-  if has_zero then `Zero
-  else
-    let finite =
-      List.filter_map lst ~f:(fun e ->
+  let fresh = List.filter lst ~f:(fun e -> Option.is_some e.dist) in
+  let steps =
+    List.filter_map fresh ~f:(fun e ->
         match e.dist_p, e.dist with
         | Some dp, Some dc when dp > dc -> Some (dc / (dp - dc))
         | _ -> None)
-    in
-    if List.is_empty finite then `Inf
-    else `Finite (List.min_elt finite ~compare:Int.compare |> Option.value_exn)
+  in
+  let answer =
+    if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then `Zero
+    else if List.is_empty steps then `Inf
+    else `Finite (List.min_elt steps ~compare:Int.compare |> Option.value_exn)
+  in
+#ifdef VSA_DEBUG
+  (* Which shape the head is in: how many entries the table holds, how
+     many carry a fresh reading, and whether the distances move. *)
+  bump_steps
+    (Printf.sprintf "table.%d.%s" (List.length lst)
+       (if List.is_empty lst then "empty"
+        else if List.is_empty fresh then "stale"
+        else if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then "warm"
+        else "live"));
+  List.iter fresh ~f:(fun e ->
+      match e.dist_p, e.dist with
+      | Some dp, Some dc ->
+        bump_steps (if dp > dc then "live.shrink" else "live.hold")
+      | _ -> ());
+  (match answer with
+   | `Finite _ -> bump_steps "fire.finite"
+   | `Zero -> bump_steps "fire.zero"
+   | `Inf -> bump_steps ("fire.inf." ^ (if List.is_empty fresh then "stale" else "held")));
+#endif
+  answer
 
 let lm_calc_steps (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
   match Hashtbl.find t.lm_env h with
   | None -> `Inf
   | Some lst -> steps_of_entries lst
 
+(* The rotation: the current reading becomes the previous one.  An entry
+   with no fresh reading keeps the history it holds — erasing it would
+   drop a measurement the next reading must pair against. *)
+let rotate (entries : lm_entry list) : unit =
+  List.iter entries ~f:(fun entry ->
+      (match entry.dist with
+       | Some d -> entry.dist_p <- Some d
+       | None -> ());
+      entry.dist <- None)
+
 (* Commit current distances as previous. *)
 let lm_advance (t : t) (h : Tid.t) : unit =
-  let commit lst =
-    List.iter lst ~f:(fun entry ->
-      entry.dist_p <- entry.dist;
-      entry.dist <- None) in
-  Option.iter (Hashtbl.find t.lm_env h) ~f:commit;
+  Option.iter (Hashtbl.find t.lm_env h) ~f:rotate;
   Option.iter (Hashtbl.find t.cell_env h)
-    ~f:(List.iter ~f:(fun (_, es) -> commit es))
+    ~f:(List.iter ~f:(fun (_, es) -> rotate es))
 
 
 
@@ -316,10 +378,7 @@ let lm_calc_steps_for_cell (t : t) (h : Tid.t) (cell : Cell_key.t)
 
 (* Commit one cell's current distances; the next measurement yields steps. *)
 let advance_cell (t : t) (h : Tid.t) (cell : Cell_key.t) : unit =
-  Option.iter (find_row t h cell) ~f:(fun es ->
-      List.iter es ~f:(fun entry ->
-          entry.dist_p <- entry.dist;
-          entry.dist <- None))
+  Option.iter (find_row t h cell) ~f:rotate
 
 (* Drop the cell's entries once its extrapolation consumed them; stale
    entries never narrow. *)

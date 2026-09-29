@@ -48,14 +48,16 @@ let is_vector_param_reg (t : t) (v : var) : bool =
 let is_return_reg (t : t) (v : var) : bool =
   Base.List.exists t.return_regs ~f:(Var.same v)
 
+(* BAP spells mapped targets [@name]; the leading [@] is a display prefix,
+   not part of the name. *)
+let strip_at (name : string) : string =
+  if String.length name > 0 && name.[0] = '@' then
+    String.sub name 1 (String.length name - 1)
+  else name
+
 (* BAP names mapped intrinsic targets [@intrinsic:<name>]. *)
 let is_intrinsic_name (name : string) : bool =
-  let name =
-    if String.length name > 0 && name.[0] = '@' then
-      String.sub name 1 (String.length name - 1)
-    else name
-  in
-  Base.String.is_prefix name ~prefix:"intrinsic:"
+  Base.String.is_prefix (strip_at name) ~prefix:"intrinsic:"
 
 let is_intrinsic_target (t : tid) : bool =
   is_intrinsic_name (Tid.name t)

@@ -23,12 +23,12 @@ here.
 | MOD-04 | The VLA chain resolves through the sequential state, so a two-temp spelling still fires on the SP def. | In `event_rhs`, do not chase the `Var` alias chain. | MOD-04. |
 | MOD-05 | The plus-form (a negative size ADDED) is the event — the value carries the unbounded stack position, not the MINUS spelling. | In `event_rhs`, remove the PLUS arm. | MOD-05. |
 | MOD-06 | A provably-above PLUS adjustment (hull `[0..63]`) is not the event — the def's value direction decides. | In `event_rhs`, treat every SP-adjusting PLUS as an event. | MOD-06. |
-| MOD-07 | The loop-carried VLA is the event; the shape test is local to the def, so the widened loop head does not hide it. | In `event_rhs`, require a straight-line (single-predecessor) block. | MOD-07. |
+| MOD-07 | A VLA in a looping sub is the event; the seed reads the final denotations, so the loop's widening does not hide it. | Make `vla_seed` require a straight-line (single-predecessor) block. | MOD-07. |
 | MOD-08 | `Hike_sections.layout_of_tree` carries the Region components (ascending ids) and no residue region for a precise tree. | In `src/hike_sections.ml` `layout_of_tree` (l.730), force the `Stack_residue` arm. | MOD-08; MOD-09 loses its regions. |
 | MOD-09 | Region bytes are the occupied span aligned once, never span×access-width. | In `layout_of_tree`'s byte computation, multiply the aligned span by the access width. | MOD-09. |
 | MOD-10 | A plain-TOP identity member forces the residue region (id 0) with the 64K unbounded floors. | In `layout_of_tree`, drop the `Stack_residue` floor (`stack_max`). | MOD-10; MOD-11. |
 | MOD-11 | A plain-TOP-only residue sub takes the same unbounded floor. | As MOD-10. | MOD-11. |
-| MOD-12 | `Hike_promote.rewrite_def` (`Conv_region`) rebinds a whole-access store's lhs and mem node to the region mem, keeping the SP address arithmetic. | In `src/hike_promote.ml`, `rewrite_def` (l.225): return the def unchanged. | MOD-12; also MOD-13..20. |
+| MOD-12 | `Hike_promote.rewrite_def` (`Conv_region`) rebinds a whole-access store's lhs and mem node to the region mem, its address rewritten to the storage's base (`stack_r1_ptr`, the displacement folded). | In `src/hike_promote.ml`, `rewrite_def` (l.225): return the def unchanged. | MOD-12; also MOD-13..20. |
 | MOD-13 | The nested load inside a BinOp def reads the region mem too (the -O0 cmp pattern). | In `rewrite_load_node`/`repoint_mapper` (l.182/213), skip loads nested below the rhs root. | MOD-13. |
 | MOD-14 | `slot_read` (l.201) turns the full-cell args read (width 64) into the bare `hike_slot0` var. | In `slot_read`, return the load unchanged for the full-cell case. | MOD-14; also MOD-15/16. |
 | MOD-15 | The aligned narrow args read (width 32 at cell start) splices a `LOW` cast. | In `slot_read`, drop the aligned-narrow arm. | MOD-15. |
@@ -38,9 +38,9 @@ here.
 | MOD-19 | `Hike_jump.compile_sub` compiles flag idioms to value comparisons — no memory node rides a cond. | In `src/hike_jump.ml`, `compile_sub` returns the sub unchanged. | MOD-19. |
 | MOD-20 | The load def converts to the region mem and the guard reads its converted temp transitively. | As MOD-12. | MOD-20. |
 | MOD-21 | The emitter's VLA lane emits a real runtime-sized `%vla = alloca i8, i64`. | In `src/bil2llvm*.ml`, drop the VLA alloca emission. | MOD-21. |
-| MOD-22 | The model SP binds to the alloca's integer (`%vla_i64 = ptrtoint`). | In the VLA emission, skip the SP bind. | MOD-22. |
-| MOD-23 | Residue storage anchors through the entry SP Slot (`%sp_slot`; `%stack_0 = load`). | In the anchor emission, skip the `sp_slot` for the residue class. | MOD-23. |
-| MOD-24 | Region storage anchors the SP Slot at region-0 + 8 (the SysV residue). | In the anchor emission, use a different anchor offset. | MOD-24. |
+| MOD-22 | The model SP binds to the residue's entry pointer (a real `ptr`, no `%vla_i64`/`%sp_slot`). | In the VLA emission, skip the SP bind. | MOD-22. |
+| MOD-23 | A residue access GEPs the residue alloca (`%stack_r0`) at the model address. | Drop the residue region from the layout. | MOD-23. |
+| MOD-24 | A carved region access GEPs the region's own alloca (`%stack_r1`). | Drop the carved region from the layout. | MOD-24. |
 | MOD-25 | A storage-free sub emits no SP Slot and no region. | In the emitter, emit the `sp_slot` unconditionally. | MOD-25. |
 | MOD-27 | `Hike_stack_model.string_text_table`: a printable run crossing the word start covers the word. | In `src/hike_stack_model.ml` (`string_text_table`'s prepass), record every byte as printable. | MOD-27. |
 | MOD-28 | A NUL directly before the word means no crossing. | In `string_text_table`'s answer, drop the NUL check on the last non-printable byte. | MOD-28. |

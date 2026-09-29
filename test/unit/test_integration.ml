@@ -708,7 +708,7 @@ let tests : unit Alcotest.test list =
         in
         let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
         let key =
-          match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
+          match Mem.Key.of_wordset (Ws.stack_word_i64 (-8L)) with
           | [ k ] -> k
   | _ -> failwith "key"
         in
@@ -772,7 +772,7 @@ let tests : unit Alcotest.test list =
         in
         let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
         let key_of w =
-          match Mem.Key.of_wordset (Ws.singleton (w64 w)) with
+          match Mem.Key.of_wordset (Ws.stack_word_i64 (Stdlib.Int64.of_int w)) with
           | [ k ] -> k
   | _ -> failwith "key"
         in
@@ -838,11 +838,16 @@ let tests : unit Alcotest.test list =
         in
         let bounded = mk ~unbounded:false "t5v_bounded" in
         let unbounded = mk ~unbounded:true "t5v_unbounded" in
+        let fb, bounded = fixture_facts_sub bounded in
+        let fu, unbounded = fixture_facts_sub unbounded in
         check
           "T5-3 (T12 ruling): a bounded runtime SP adjustment is NOT a VLA — no allocation event"
-          (Core.Set.is_empty (dyn_alloc_events bounded));
+          (Core.Set.is_empty
+             (Hike.Sections.dynamic_alloc_tids_of ~facts:fb bounded));
         check "T5-3 (T12 ruling): an unbounded runtime SP size IS the allocation event"
-          (not (Core.Set.is_empty (dyn_alloc_events unbounded))));
+          (not
+             (Core.Set.is_empty
+                (Hike.Sections.dynamic_alloc_tids_of ~facts:fu unbounded))));
 
     (* T5-4 (head extrapolation): a cell widens strictly by its OWN
        entries — no own entries plain-widen; own entries translate by
@@ -1046,7 +1051,7 @@ let tests : unit Alcotest.test list =
            re-denotes against — must carry the memory binding. *)
         let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
         let key =
-          match Mem.Key.of_wordset (Ws.singleton (w64 (-8))) with
+          match Mem.Key.of_wordset (Ws.stack_word_i64 (-8L)) with
           | [ k ] -> k
   | _ -> failwith "key"
         in
@@ -1085,6 +1090,102 @@ let tests : unit Alcotest.test list =
           "property LM F1-B4: the walk meets the cell (the fixture's precondition: the walk moves \
            the cell off its wide range)"
           (Ws.precedes full_cell wide));
+
+    (* The landmark consumption: one reading warms the entry, a second,
+       closer one fires the traversal-step estimate. *)
+    pin "INT-24"
+      "LM steps: a shrinking distance fires Finite (record, advance, re-record)"
+      (fun () ->
+        let h = Tid.for_name "lm_steps_head" in
+        let lm = Cbat_landmarks.create () in
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 100)
+          ~is_upper:true ~dist:10;
+        check "LM steps: a just-recorded entry waits for a second measurement"
+          (match Cbat_landmarks.lm_calc_steps lm h with
+           | `Zero -> true
+           | _ -> false);
+        Cbat_landmarks.lm_advance lm h;
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 100)
+          ~is_upper:true ~dist:6;
+        check "LM steps: the closer reading fires the steps ((6) / (10 - 6) = 1)"
+          (match Cbat_landmarks.lm_calc_steps lm h with
+           | `Finite 1 -> true
+           | _ -> false));
+
+    (* A landmark the guard stopped disabling leaves no reading behind;
+       it must not hold the head in the non-widening arm. *)
+    pin "INT-25"
+      "LM steps: an entry consumed without a fresh reading never holds the head in Zero"
+      (fun () ->
+        let h = Tid.for_name "lm_stale_head" in
+        let lm = Cbat_landmarks.create () in
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 100)
+          ~is_upper:true ~dist:10;
+        Cbat_landmarks.lm_advance lm h;
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 200)
+          ~is_upper:true ~dist:5;
+        Cbat_landmarks.lm_advance lm h;
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 200)
+          ~is_upper:true ~dist:4;
+        check "LM steps: the live entry still fires ((4) / (5 - 4) = 4)"
+          (match Cbat_landmarks.lm_calc_steps lm h with
+           | `Finite 4 -> true
+           | _ -> false));
+
+    (* The rotation keeps the history an entry holds: a round with no
+       reading of its own must not erase the measurement the next
+       reading pairs against. *)
+    pin "INT-28"
+      "LM steps: a round with no reading keeps the entry's history"
+      (fun () ->
+        let h = Tid.for_name "lm_rotate_head" in
+        let lm = Cbat_landmarks.create () in
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 100)
+          ~is_upper:true ~dist:10;
+        Cbat_landmarks.lm_advance lm h;
+        Cbat_landmarks.lm_advance lm h;
+        Cbat_landmarks.record_landmark_for_head lm ~head:h ~bound:(w32 100)
+          ~is_upper:true ~dist:5;
+        check "LM steps: the reading after an empty round still pairs ((5) / (10 - 5) = 1)"
+          (match Cbat_landmarks.lm_calc_steps lm h with
+           | `Finite 1 -> true
+           | _ -> false));
+
+    (* A stack-symbolic value and a plain word are disjoint by line: the
+       empty meet disables no behavior. *)
+    pin "INT-26"
+      "LM acquisition: an empty meet between different lines records no landmark"
+      (fun () ->
+        let h = Tid.for_name "lm_line_head" in
+        let lm = Cbat_landmarks.create () in
+        let p = Ws.stack_word (Clp.interval ~width:64 (w64 0) (w64 16)) in
+        Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
+            Cbat_landmarks.observe_unsat_var lm
+              (v64 "lm_line_v") ~p
+              ~cstr:(Ws.singleton (w64 4))
+              ~meet:(Ws.bottom 64));
+        check
+          "LM acquisition: a stack-symbolic value against a plain word is no landmark"
+          (Cbat_landmarks.entries_for_head lm h = []));
+
+    (* The distance is the counter's own (signed) walk: a value below
+       zero is one step from 0, not 2^64 - 1. *)
+    pin "INT-27"
+      "LM distance: a counter below zero measures its signed distance"
+      (fun () ->
+        let h = Tid.for_name "lm_dist_head" in
+        let lm = Cbat_landmarks.create () in
+        Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
+            Cbat_landmarks.observe_unsat_var lm
+              (v64 "lm_dist_v")
+              ~p:(Ws.singleton (w64 (-99999)))
+              ~cstr:(Ws.singleton (w64 0))
+              ~meet:(Ws.bottom 64));
+        check_bound "LM distance: the recorded distance is 99999"
+          (match Cbat_landmarks.entries_for_head lm h with
+           | e :: _ -> e.Cbat_landmarks.dist
+           | [] -> None)
+          (fun d -> d = 99999));
   ]
 
 let () = run "integration" tests

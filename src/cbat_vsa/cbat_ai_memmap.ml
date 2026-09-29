@@ -202,6 +202,10 @@ let cast_seq (sz, e : idx) (v : t) : WordSet.t seq =
 
 
   let op_at (op : WordSet.t -> WordSet.t -> WordSet.t) (sz, e : idx) (v1 : t) (v2 : t) : t =
+    (* The cell world is byte-granular: a sub-byte composition is
+       unrepresentable — the read identity (top at the read's width). *)
+    if sz mod addressable_width <> 0 then create (WordSet.top sz) e
+    else
     let w1, _ = get_idx v1 in
     let w2, _ = get_idx v2 in
     if
@@ -244,6 +248,23 @@ end
 
 module IT = Interval_tree.Make_binable(Key)
 
+(* The interval tree's [intersections] is point-only, so a cell of
+   another coordinate line would match a query at the same point.  Every
+   query filters by line; every removal removes only same-line cells. *)
+let same_line (a : Key.t) (b : Key.t) : bool =
+  Hike_origin.equal (Key.origin a) (Key.origin b)
+
+let it_intersections (m : 'a IT.t) (k : Key.t) : (Key.t * 'a) Sequence.t =
+  IT.intersections m k |> Sequence.filter ~f:(fun (k', _) -> same_line k k')
+
+let it_remove_intersections (m : 'a IT.t) (k : Key.t) : 'a IT.t =
+  Sequence.fold (it_intersections m k) ~init:m ~f:(fun m (k', _) ->
+      IT.remove m k')
+
+let it_dominates (m : 'a IT.t) (k : Key.t) : bool =
+  IT.dominators m k
+  |> Sequence.exists ~f:(fun (k', _) -> same_line k k')
+
 type idx = {addr_width:int; addressable_width:int} [@@deriving bin_io, sexp, compare]
 
 type itree = Val.t IT.t
@@ -267,9 +288,13 @@ let coalesce (it : itree) : itree =
       then (acc, pending) (* drop top *)
       else match pending with
         | None -> (acc, Some (k, v))
-        | Some (pk, pv) when Key.equal (Key.lower k) (Key.lower pk) ->
+        | Some (pk, pv)
+          when Hike_origin.equal (Key.origin k) (Key.origin pk)
+               && Key.equal (Key.lower k) (Key.lower pk) ->
             (acc, Some (Key.union pk k, Val.join_poly pv v)) (* merge *)
-        | Some (pk, pv) when Val.equal pv v &&
+        | Some (pk, pv)
+          when Hike_origin.equal (Key.origin k) (Key.origin pk)
+               && Val.equal pv v &&
             (let nxt = Key.succ (Key.upper pk) in
              not (Key.is_zero nxt) && Key.equal (Key.lower k) nxt) ->
             (acc, Some (Key.union pk k, v))
@@ -283,8 +308,8 @@ let coalesce (it : itree) : itree =
 let op_add' ~(op : Val.t -> Val.t -> Val.t)
     ~(op_demoted : Val.t -> Val.t -> Val.t)
     (m : itree) (width : int) ~key:(k : Key.t) ~data:(d : Val.t) : t =
-  let ints = IT.intersections m k in
-  let rest = IT.remove_intersections m k in
+  let ints = it_intersections m k in
+  let rest = it_remove_intersections m k in
   let gaps = Key.gaps (Val.top (Val.get_idx d)) k ints in
   let overlaps = Seq.append gaps ints in
   let itree =
@@ -326,28 +351,42 @@ let meet_add : t -> key:Key.t -> data:Val.t -> t =
 (* Meet [data] into intersecting cells. *)
 let meet_range (m : t) ~key ~data : t = meet_add m ~key ~data
 
-(* Keep cells at/above [keep_lo] outside [escape]. *)
+(* Keep the caller's frame across a call: all inputs are OFFSET-space
+   (the segment-relative line the Stack cells key by).  A called
+   function writes only its own frame below its entry SP and the
+   escape ranges — so Stack/Window cells keep at/above [keep_lo]
+   outside [escape]; a VLA cell belongs to the caller's own allocation,
+   which the callee cannot reach (it keeps); a plain (absolute) or rip
+   cell names no stack line and the callee may clobber any non-stack
+   memory (it drops). *)
 let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
   match m.itree with
   | None -> m
   | Some it ->
-    (* Unkeyable words keep the input. *)
     let escape_pts = Option.all (List.map escape ~f:(fun (lo, hi) ->
         Option.map2 (Key.of_word (Cbat_word.of_word lo))
           (Key.of_word (Cbat_word.of_word hi)) ~f:(fun lo hi -> (lo, hi)))) in
-    Option.value ~default:m
-      (Option.map2 (Key.of_word (Cbat_word.of_word keep_lo)) escape_pts
-         ~f:(fun keep_lo_pt escape_pts ->
-           let in_escape (k : Key.t) : bool =
-             List.exists escape_pts ~f:(fun (lo, hi) ->
-                 Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
-           let kept =
-             IT.to_sequence it
-             |> Seq.fold ~init:IT.empty ~f:(fun acc (k, v) ->
-                 if in_escape k then acc
-                 else if Key.lt (Key.lower k) keep_lo_pt then acc
-                 else IT.add acc k v) in
-           {itree = Some kept; width = m.width}))
+    let keep_lo_pt = Key.of_word (Cbat_word.of_word keep_lo) in
+    match keep_lo_pt, escape_pts with
+    | Some keep_lo_pt, Some escape_pts ->
+      let in_escape (k : Key.t) : bool =
+        List.exists escape_pts ~f:(fun (lo, hi) ->
+            Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
+      let keeps (k : Key.t) : bool =
+        match Key.origin k with
+        | Hike_origin.Vla _ -> true
+        | Hike_origin.Stack | Hike_origin.Window ->
+          (not (in_escape k)) && not (Key.lt (Key.lower k) keep_lo_pt)
+        | Hike_origin.Abs | Hike_origin.Rip -> false
+      in
+      let kept =
+        IT.to_sequence it
+        |> Seq.fold ~init:IT.empty ~f:(fun acc (k, v) ->
+            if keeps k then IT.add acc k v else acc) in
+      {itree = Some kept; width = m.width}
+    | _ ->
+      (* An unkeyable bound keeps the whole line (the sound identity). *)
+      m
 
 (* Whether the map is the bottom map: no tree, no reads (the
    unreached state's memory). *)
@@ -357,15 +396,17 @@ let is_bottom (m : t) : bool =
 (* Whether a stored cell's key intersects the byte range [lo, hi]
    (inclusive addresses).  Unkeyable bounds answer "yes" — the caller
    keeps its abstract read. *)
-let has_cell_in (m : t) ~(lo : Cbat_word.t) ~(hi : Cbat_word.t) : bool =
+let has_cell_in (m : t) ~(origin : Hike_origin.t) ~(lo : Cbat_word.t)
+    ~(hi : Cbat_word.t) : bool =
   match m.itree with
   | None -> false
   | Some it -> (
       match Key.of_word lo, Key.of_word hi with
       | Some plo, Some phi when Key.le plo phi ->
-        let k = { Key.lo = plo; hi = phi; step = 1 } in
-        (* The intersections index answers; no full-tree scan. *)
-        not (Seq.is_empty (IT.intersections it k))
+        let k = { Key.origin; lo = plo; hi = phi; step = 1 } in
+        (* The intersections index answers; no full-tree scan.  The
+           tree is point-only, so the query filters by line. *)
+        not (Seq.is_empty (it_intersections it k))
       | _ -> true)
 
 (* Width-aware point-store merge. *)
@@ -398,7 +439,7 @@ let add (m : t) ~key : data:Val.t -> t =
 (* Fold intersecting cells. *)
 let fold_intersections ~(default : 'a) (m : itree) (k : Key.t)
     ~(f : Val.t -> (Key.t * Val.t) seq -> (Key.t * Val.t) seq -> 'a) : 'a =
-  let ints = IT.intersections m k in
+  let ints = it_intersections m k in
   Option.value_map ~default (Seq.next ints) ~f:(fun ((_, hd), tl) ->
       f hd ints tl)
 
@@ -464,9 +505,9 @@ let find' (i : Val.idx) (m : itree) (k : Key.t) : Val.t =
           pvalue =
             Stdlib.Int64.add (Key.lower k).pvalue
               (Stdlib.Int64.of_int (req_bytes - 1)) } in
-      { Key.lo = Key.lower k; hi; step = Key.step k }
+      { Key.origin = Key.origin k; lo = Key.lower k; hi; step = Key.step k }
     else k in
-  let ints_list = Seq.to_list (IT.intersections m query_k) in
+  let ints_list = Seq.to_list (it_intersections m query_k) in
   match try_assemble_cells i query_k ints_list with
   | Some v -> v
   | None ->
@@ -498,17 +539,17 @@ let precedes' (m1 : itree) (m2 : itree) : bool =
   let m2_seq = IT.to_sequence m2 in
   Seq.for_all m1_seq ~f: begin fun (k, v) ->
     (* Gaps precede the default. *)
-    (IT.dominates m2 k ||
+    (it_dominates m2 k ||
      Val.precedes v (Val.top (Val.get_idx v))) &&
-    Seq.for_all (IT.intersections m2 k) ~f:begin fun (_,v') ->
+    Seq.for_all (it_intersections m2 k) ~f:begin fun (_,v') ->
       Val.precedes v v'
     end
   end &&
   Seq.for_all m2_seq ~f: begin fun (k, v) ->
     (* Default precedes gaps. *)
-    (IT.dominates m2 k ||
+    (it_dominates m2 k ||
      Val.precedes (Val.top (Val.get_idx v)) v) &&
-    Seq.for_all (IT.intersections m2 k) ~f:begin fun (_,v') ->
+    Seq.for_all (it_intersections m2 k) ~f:begin fun (_,v') ->
       Val.precedes v' v
     end
   end
@@ -542,8 +583,10 @@ let equal (m1 : t) (m2 : t) : bool =
 (* Join may grow the tree. *)
 
 
-(* Shared key walk for join and meet. *)
-let fold_keys (op : Val.t -> Val.t -> Val.t) (m1 : itree) (m2 : itree) : itree =
+(* Shared key walk for join, meet, and widen: the op takes the pair's
+   key (the cell-landmark rows are keyed by it). *)
+let fold_keys (op : Key.t -> Val.t -> Val.t -> Val.t) (m1 : itree)
+    (m2 : itree) : itree =
   let m1_seq = Seq.map ~f:fst (IT.to_sequence m1) in
   let m2_seq = Seq.map ~f:fst (IT.to_sequence m2) in
   let keys = Key.seq_product m1_seq m2_seq in
@@ -558,11 +601,11 @@ let fold_keys (op : Val.t -> Val.t -> Val.t) (m1 : itree) (m2 : itree) : itree =
         Val.Idx.join idx1 idx2 in
     let d1 = find' idx m1 key in
     let d2 = find' idx m2 key in
-    IT.add it key @@ op d1 d2
+    IT.add it key @@ op key d1 d2
   end
 
 let join' (m1 : itree) (m2 : itree) : itree =
-  coalesce (fold_keys Val.join m1 m2)
+  coalesce (fold_keys (fun _ d1 d2 -> Val.join d1 d2) m1 m2)
 
 let lift_join f (m1 : t) (m2 : t) : t =
   assert(m1.width = m2.width);
@@ -574,28 +617,26 @@ let lift_join f (m1 : t) (m2 : t) : t =
 
 let join : t -> t -> t = lift_join join'
 
+(* The trees widen cell by cell over the key-aligned product: every
+   overlapping pair takes the caller's per-cell widen, and a cell only
+   one side holds widens against the other side's default. *)
 let widen_join_op (w : Key.t -> Val.t -> Val.t -> Val.t) : t -> t -> t =
-  lift_join (fun t1 t2 ->
-    if precedes' t1 t2
-    then begin
-      let m2_seq = Seq.map ~f:fst (IT.to_sequence t2) in
-      coalesce begin
-        Seq.fold m2_seq ~init:IT.empty ~f:begin fun it key ->
-          let idx = find_idx' t2 key in
-          let d1 = find' idx t1 key in
-          let d2 = find' idx t2 key in
-          IT.add it key @@ w key d1 d2
-        end
-      end
-    end
-    else join' t1 t2)
+  lift_join (fun t1 t2 -> coalesce (fold_keys w t1 t2))
 
 let widen_join = widen_join_op (fun _ d1 d2 -> Val.widen_join d1 d2)
+
+#ifdef VSA_DEBUG
+(* The stored cells, for the churn diagnosis. *)
+let cells (m : t) : (Key.t * Val.t) list =
+  match m.itree with
+  | None -> []
+  | Some it -> IT.to_sequence it |> Sequence.to_list
+#endif
 
 
 (* Meet may grow the tree. *)
 let meet' (m1 : itree) (m2 : itree) : itree =
-  fold_keys Val.meet m1 m2
+  fold_keys (fun _ d1 d2 -> Val.meet d1 d2) m1 m2
 
 let meet (m1 : t) (m2 : t) : t =
   assert(m1.width = m2.width);

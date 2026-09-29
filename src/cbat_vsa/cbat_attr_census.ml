@@ -23,4 +23,13 @@ let dump () =
          Printf.eprintf "hike-attr-census: %s=%d\n%!" key n)
 
 let () = at_exit dump
+
+(* Print the first [limit] lines carrying [key]; the rest only count.
+   The per-visit witness a counting key cannot show. *)
+let noted : (string, int) Hashtbl.t = Hashtbl.create (module String)
+
+let note (key : string) ~(limit : int) (msg : string) : unit =
+  let n = Hashtbl.find noted key |> Option.value ~default:0 in
+  Hashtbl.set noted ~key ~data:(n + 1);
+  if n < limit then Printf.eprintf "hike-attr-census: %s\n%!" msg
 #endif

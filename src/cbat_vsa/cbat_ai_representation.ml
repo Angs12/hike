@@ -231,3 +231,100 @@ let map_memories (env : t) ~(f : key:var -> data:Mem.t -> Mem.t) : t =
 
 (* The whole-memory-top fallback; the words stay. *)
 let top_memories (env : t) : t = { env with memories = MemEnv.top }
+
+#ifdef VSA_DEBUG
+(* The per-visit witness: which word and memory bindings differ between
+   two states.  Two states that differ only in a value's representation
+   show up here as a same-denotation pair [equal] rejects. *)
+let word_keys (e : t) : Int.Set.t =
+  WordEnv.fold e.words ~init:Int.Set.empty ~f:(fun ~key ~data:_ acc ->
+      Set.add acc key)
+
+let clipped (s : string) : string =
+  if String.length s <= 300 then s else String.prefix s 300 ^ "..."
+
+let key_str (k : Mem.Key.t) : string =
+  String.substr_replace_all
+    (Core.Sexp.to_string (Mem.Key.sexp_of_t k))
+    ~pattern:"\n" ~with_:" "
+
+let ws_str (s : WordSet.t) : string =
+  clipped (Format.asprintf "%a" WordSet.pp s)
+
+(* The cells of [d1] whose value differs in [d2], first few. *)
+let mem_cells (d1 : Mem.t) (d2 : Mem.t) : int * string =
+  let n = ref 0 and shown = ref [] in
+  List.iter (Mem.cells d1) ~f:(fun (key, v1) ->
+      let v2 = Mem.find (Mem.Val.get_idx v1) d2 key in
+      if Mem.Val.equal v1 v2 then ()
+      else begin
+        incr n;
+        if List.length !shown < 4 then
+          shown :=
+            sprintf "%s %s -> %s" (key_str key)
+              (ws_str (Mem.Val.data v1)) (ws_str (Mem.Val.data v2))
+            :: !shown
+      end);
+  (!n, String.concat (List.rev !shown) ~sep:"; ")
+
+let mem_diff (e1 : t) (e2 : t) : string =
+  let n = ref 0 and shown = ref [] in
+  MemEnv.fold e1.memories ~init:() ~f:(fun ~key ~data:m1 () ->
+      let m2 = MemEnv.find (Mem.get_idx m1) e2.memories key in
+      if Mem.equal m1 m2 then ()
+      else begin
+        incr n;
+        if List.length !shown < 3 then
+          let _, cells = mem_cells m1 m2 in
+          shown := sprintf "%s {%s}" (Var.name (Cbat_var_id.var_of key)) cells :: !shown
+      end);
+  sprintf "nmem=%d %s" !n (String.concat (List.rev !shown) ~sep:" | ")
+
+(* (the differing bindings, how many of them print and tag identically
+   yet [equal] rejects — the representation-only churn). *)
+let diff (e1 : t) (e2 : t) : string * int =
+  let same_repr = ref 0 in
+  let differing =
+    Set.union (word_keys e1) (word_keys e2)
+    |> Set.fold ~init:[] ~f:(fun acc key ->
+        let d1 = WordEnv.find 64 e1.words key
+        and d2 = WordEnv.find 64 e2.words key in
+        if WordSet.equal d1 d2 then acc
+        else begin
+          let p1 = Format.asprintf "%a" WordSet.pp d1
+          and p2 = Format.asprintf "%a" WordSet.pp d2 in
+          if String.equal p1 p2 && String.equal (WordSet.tag d1) (WordSet.tag d2)
+          then incr same_repr;
+          sprintf "%s %s:%s -> %s:%s" (Var.name (Cbat_var_id.var_of key))
+            (ws_str d1) (WordSet.tag d1) (ws_str d2) (WordSet.tag d2)
+          :: acc
+        end)
+    |> List.rev
+  in
+  ( sprintf "words[%s] %s" (String.concat differing ~sep:"; ") (mem_diff e1 e2),
+    !same_repr )
+#endif
+
+#ifdef VSA_DEBUG
+(* Every word and memory binding, tagged and printed — a head's state in
+   one line. *)
+let head_summary (e : t) : string =
+  let words =
+    Set.fold (word_keys e) ~init:[] ~f:(fun acc key ->
+        let d = WordEnv.find 64 e.words key in
+        sprintf "%s=%s:%s" (Var.name (Cbat_var_id.var_of key))
+          (ws_str d) (WordSet.tag d)
+        :: acc)
+  in
+  let mems =
+    MemEnv.fold e.memories ~init:[] ~f:(fun ~key ~data:m acc ->
+        let cells =
+          List.map (Mem.cells m) ~f:(fun (k, v) ->
+              sprintf "%s=>%s" (key_str k) (ws_str (Mem.Val.data v)))
+        in
+        sprintf "%s={%s}" (Var.name (Cbat_var_id.var_of key))
+          (clipped (String.concat cells ~sep:", "))
+        :: acc)
+  in
+  String.concat (List.rev mems @ List.rev words) ~sep:" "
+#endif

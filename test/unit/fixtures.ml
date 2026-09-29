@@ -351,9 +351,6 @@ let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let prog = Program.create ~subs:[ sub ] () in
   Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
-(* The VLA events through the shape test. *)
-let dyn_alloc_events (sub : sub term) : Tid.Set.t =
-  Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts sub
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
 
@@ -1070,9 +1067,10 @@ let emit_ir (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
   let prog = Program.create ~subs () in
-  (* The types pass writes each sub's signature onto its [arg] terms,
-     as the pipeline does; the emitter reads them there.  The SSA pass
-     materializes the phis the emitter renders. *)
+  (* The FP pass qualifies the temp widths, as the pipeline does; the
+     types pass writes each sub's signature onto its [arg] terms; the
+     SSA pass materializes the phis the emitter renders. *)
+  let prog = Hike.Fp.run_program prog in
   let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
   let prog = Hike.Split_blocks.normalize prog in
   let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in

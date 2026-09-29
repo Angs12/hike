@@ -34,18 +34,44 @@ let () =
     let facts = Hike.Kb.facts () in
     Printf.printf "vla_extents: %s\n%!"
       (Core.Map.to_alist facts.Hike.Kb.vla_extents
-      |> Base.List.map ~f:(fun (t, (l, h)) ->
-             Printf.sprintf "%s[%Ld..%Ld]" (Tid.to_string t)
-               (Stdlib.Int64.sub l Ws.stack_base)
-               (Stdlib.Int64.sub h Ws.stack_base))
+      |> Base.List.map ~f:(fun (t, e) ->
+             let h =
+               match e.Hike_origin.off_hi with
+               | Some h -> Printf.sprintf "%Ld" h
+               | None -> "inf"
+             in
+             Printf.sprintf "%s{k>=%Ld,<%s,base=%s..%s}" (Tid.to_string t)
+               e.Hike_origin.off_lo h
+               (match e.Hike_origin.base_lo with Some v -> Printf.sprintf "%Ld" v | None -> "?")
+               (match e.Hike_origin.base_hi with Some v -> Printf.sprintf "%Ld" v | None -> "?"))
       |> String.concat ", ");
+    let dump_all = try Sys.getenv "VLA_TRACE_ALL" <> "" with _ -> false in
     Term.enum blk_t sub'
     |> Seq.iter ~f:(fun blk ->
            Term.enum def_t blk
            |> Seq.iter ~f:(fun d ->
+                  if dump_all && Hike.Stack_model.addr_of_rhs (Def.rhs d) = None
+                  then (
+                    match facts.Hike.Kb.denote ~blk ~def:d (Def.rhs d) with
+                    | Error _ -> ()
+                    | Ok ws ->
+                        Printf.printf "%s %-10s %-40s %s\n%!"
+                          (Tid.to_string (Term.tid d))
+                          (Var.name (Def.lhs d))
+                          (Format.asprintf "%a" Exp.pp (Def.rhs d))
+                          (match Ws.stack_bounds ws with
+                           | Some (l, h) -> Printf.sprintf "[%Ld..%Ld]" l h
+                           | None ->
+                               if Ws.is_top ws then "TOP"
+                               else if Ws.is_bottom ws then "BOT"
+                               else "plain"));
                   match Hike.Stack_model.addr_of_rhs (Def.rhs d) with
                   | Some (a, _) ->
-                      let show e =
+                    if dump_all then
+                      Printf.printf "%s %-10s %-46s\n%!" (Tid.to_string (Term.tid d))
+                        (Var.name (Def.lhs d))
+                        (Format.asprintf "%a" Exp.pp (Def.rhs d));
+                    let show e =
                         match facts.Hike.Kb.denote ~blk ~def:d e with
                         | Error err -> "err " ^ Type.Error.to_string err
                         | Ok ws ->

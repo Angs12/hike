@@ -1,0 +1,121 @@
+(* The FP temp width pins: one intrinsic temp name serves several
+   widths, so the pass puts the width into the identity (the name) and
+   names each mapped FP call's operand width. *)
+
+open Bap.Std
+open Bap_core_theory
+open Hike_test.Harness
+open Hike_test.Common
+open Hike_test.Fixtures
+
+let the_sub (p : program term) : sub term = Term.enum sub_t p |> Seq.hd_exn
+
+let subs_of (p : program term) : sub term list =
+  Term.enum sub_t p |> Seq.to_list
+
+let def_lhs_names (sub : sub term) : string list =
+  Term.enum blk_t sub
+  |> Seq.concat_map ~f:(fun b ->
+         Term.enum def_t b |> Seq.map ~f:(fun d -> Var.name (Def.lhs d)))
+  |> Seq.to_list
+
+let var_names (sub : sub term) : string list =
+  Term.enum blk_t sub
+  |> Seq.concat_map ~f:(fun b ->
+         Term.enum def_t b
+         |> Seq.concat_map ~f:(fun d ->
+                Core.Set.to_sequence (Exp.free_vars (Def.rhs d)))
+         |> Seq.map ~f:Var.name)
+  |> Seq.to_list
+
+let targets_of (sub : sub term) : string list =
+  Term.enum blk_t sub
+  |> Seq.concat_map ~f:(fun b ->
+         Term.enum jmp_t b
+         |> Seq.filter_map ~f:(fun j ->
+                match Jmp.kind j with
+                | Call c -> (
+                    match Call.target c with
+                    | Direct t -> Some (Tid.name t)
+                    | Indirect _ -> None)
+                | _ -> None))
+  |> Seq.to_list
+
+(* One temp def at [w] bits, read back, plus an FP call to [intr]. *)
+let fp_fixture (intr : string) (w : int) : sub term =
+  let temp =
+    Var.create ~is_virtual:false ~fresh:false "intrinsic:x0" (Type.Imm w)
+  in
+  let rd = Var.create ~is_virtual:false ~fresh:false "fp_rd" (Type.Imm w) in
+  let callee = Tid.for_name intr in
+  fst
+    (sub_of "fp_w"
+       [ ( [ Def.create temp (Bil.Int (Cbat_word.to_word (w64 1))) ],
+           [ (1,
+              fun t ->
+                Jmp.create
+                  (Call
+                     (Call.create ~return:(Direct t) ~target:(Direct callee) ()))) ]
+         );
+         ([ Def.create rd (Bil.Var temp) ], [ (2, mk_goto) ]);
+         ([], [ (0, fun _ -> Jmp.create (Ret (Direct (Tid.create ())))) ]) ])
+
+let fp_prog (subs : sub term list) : program term =
+  Hike.Fp.run_program (Program.create ~subs ())
+
+let tests : unit Alcotest.test list =
+  [
+    (* HFP-01: the def's lhs and its read carry the width. *)
+    pin "HFP-01" "a temp def and its read carry the lifter's width"
+      (fun () ->
+        let sub = the_sub (fp_prog [ fp_fixture "intrinsic:not_mapped" 64 ]) in
+        let names = def_lhs_names sub @ var_names sub in
+        check "HFP-01: the temp's identity carries its width"
+          (Base.List.mem names "intrinsic:x0:64" ~equal:String.equal
+          && not (Base.List.mem names "intrinsic:x0" ~equal:String.equal)));
+
+    (* HFP-02: the same source name at two widths stays two identities. *)
+    pin "HFP-02" "a 32-bit and a 64-bit temp def stay distinct"
+      (fun () ->
+        let names =
+          Base.List.concat_map
+            (subs_of (fp_prog [ fp_fixture "intrinsic:not_mapped" 32;
+                                fp_fixture "intrinsic:not_mapped" 64 ]))
+            ~f:def_lhs_names
+        in
+        check "HFP-02: both widths are distinct identities"
+          (Base.List.mem names "intrinsic:x0:32" ~equal:String.equal
+          && Base.List.mem names "intrinsic:x0:64" ~equal:String.equal));
+
+    (* HFP-03: an untagged mapped target takes the table's sized spelling
+       for the nearest preceding temp def's width. *)
+    pin "HFP-03" "an untagged mapped target is rewritten to its sized spelling"
+      (fun () ->
+        let sub =
+          the_sub (fp_prog [ fp_fixture "intrinsic:fadd_rne_ieee754_binary" 64 ])
+        in
+        check "HFP-03: the target names the operand width"
+          (Base.List.mem (targets_of sub)
+             "@intrinsic:fadd_rne_ieee754_binary_64"
+             ~equal:String.equal));
+
+    (* HFP-04: an already sized target is left alone, and a non-mapped one
+       is never rewritten. *)
+    pin "HFP-04" "a sized target and a non-mapped target are untouched"
+      (fun () ->
+        let targets =
+          Base.List.concat_map
+            (subs_of
+               (fp_prog
+                  [ fp_fixture "intrinsic:fadd_rne_ieee754_binary_32" 32;
+                    fp_fixture "intrinsic:not_a_real_intrinsic" 32 ]))
+            ~f:targets_of
+        in
+        check "HFP-04: sized and non-mapped targets keep their names"
+          (Base.List.mem targets "@intrinsic:fadd_rne_ieee754_binary_32"
+             ~equal:String.equal
+          && Base.List.mem targets "@intrinsic:not_a_real_intrinsic"
+               ~equal:String.equal));
+  ]
+
+let () = run "hike_fp" tests

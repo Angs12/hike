@@ -17,7 +17,7 @@ val sanitize_name : string -> string
 
 (** The signature pass, for the direct emitter callers (the fixtures):
     writes each sub's signature, with its lane types, onto its [arg]
-    terms.  The pipeline runs it as [hike-types]. *)
+    terms.  The pipeline runs it as [hike-sign]. *)
 val sign_program :
   target:Bap_core_theory.Theory.Target.t ->
   program term ->

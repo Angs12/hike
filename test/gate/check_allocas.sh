@@ -5,9 +5,8 @@
 # Usage: check_allocas.sh <out_dir> (holds out_<name>.ll; exit 0 iff all pass).
 #   (a) every region/window reference implies its storage exists
 #       (a stack_rN alloca; the window parameter for window mems).
-#   (b) one materialize shape: every GEP into a stack_rN alloca takes
-#       an index in the anchor-normalized world (a chain through the
-#       SP Slot's stack_0) or a pure constant (a fully static access).
+#   (b) a region GEP's index must be an integer (never a ptrtoint of an
+#       address value — the index is a model offset).
 #   (c) no @stack global reference.
 #   (d) residue discipline: no legacy %frame alloca (the residue is
 #       stack_r0); at most one residue alloca per define; references
@@ -84,43 +83,30 @@ for ll in "$OUT_DIR"/out_*.ll; do
     PASS=$((PASS + 1))
   fi
 
-  # (b) one materialize: every stack_rN GEP index is anchor-normalized
-  #     (its chain passes through a `sub ..., %stack_0`) or a literal.
+  # (b) a region GEP's index must be an integer: never the result of a
+  #     ptrtoint of an address value (the index is a model offset).
   bad="$(awk '
-    function chain(v) { return index(" " CHAIN " ", " " v " ") > 0 }
-    function add(v)  { if (v != "" && !chain(v)) CHAIN = CHAIN " " v }
-    /%stack_0 = load/ {
-      if (match($0, /^  %[^ ]+ = load/)) { v = substr($0, 3, index(substr($0,3), " ")-1); add(v) }
-    }
-    # the normalization: any sub whose RHS is a stack_0-chain value
-    # produces an anchor-relative value (the one-materialize core).
-    /^  %[^ ]+ = sub i64 / {
-      if (match($0, /^  %[^ ]+/)) { lhs = substr($0, 3, index(substr($0,3), " ")-1) }
-      line = $0
-      # operands after "sub i64"
-      while (match(line, /%[A-Za-z0-9_.]+/)) {
-        tok = substr(line, RSTART, RLENGTH)
-        if (chain(tok)) { add(lhs); break }
-        line = substr(line, RSTART+RLENGTH)
+    / = ptrtoint / {
+      if (match($0, /^  %[A-Za-z0-9_.]+ = ptrtoint /)) {
+        v = substr($0, 3, index(substr($0,3), " ")-1); itop[v] = 1
       }
     }
     /getelementptr.*%stack_r[0-9]+/ {
       line = $0
-      # every variable index on the GEP, not just the first
       while (match(line, /i64 %[A-Za-z0-9_.]+/)) {
         idx = substr(line, RSTART+4, RLENGTH-4)
-        if (idx !~ /^-?[0-9]+$/ && !chain(idx))
-          print "non-normalized GEP index into stack_r: " idx " in: " $0
+        if (idx in itop)
+          print "ptrtoint index into stack_r: " idx " in: " $0
         line = substr(line, RSTART+RLENGTH)
       }
     }
   ' "$ll" | head -5)"
   if [ -n "$bad" ]; then
-    echo "FAIL $name: (b) GEP index not in the anchor-normalized world:"
+    echo "FAIL $name: (b) region GEP index is a ptrtoint-derived address:"
     echo "$bad" | sed 's/^/    /'
     FAIL=$((FAIL + 1))
   else
-    echo "PASS $name: (b) every region GEP is anchor-normalized or static"
+    echo "PASS $name: (b) every region GEP index is an integer"
     PASS=$((PASS + 1))
   fi
 

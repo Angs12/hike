@@ -134,12 +134,8 @@ module Split_blocks : sig
   val split_sub : sub term -> sub term
   val normalize : program term -> program term
 
-  (** [fallthrough sub blk] is the block that follows [blk] in [sub]'s
-      term order — where an implicit fallthrough edge lands. *)
-  val fallthrough : sub term -> blk term -> Tid.t option
-
-  (** The sub's free registers over the rendered CFG (explicit targets
-      plus guarded-terminal fallthroughs), memory vars dropped. *)
+  (** The BIR's free registers over its explicit edges, memory vars
+      dropped. *)
   val free_regs : sub term -> var list
 end
 
@@ -159,6 +155,13 @@ module Coerce : sig
   val coerce_exp : exp -> exp
   val coerce_block : blk term -> blk term
   val coerce_program : program term -> program term
+end
+
+(** The FP temp widths: every [intrinsic:xN]/[intrinsic:yN] occurrence
+    carries its own width, and a mapped FP call's target names its
+    operand width in the model's sized spelling. *)
+module Fp : sig
+  val run_program : program term -> program term
 end
 
 (** Stack split decision and helpers, and the shared section
@@ -240,9 +243,30 @@ module Stack_model : sig
   val region_mem : int -> var
   val is_region_mem : var -> bool
 
+  (** The storage base vars: one Mem-typed value per storage, minted by
+     the attribution's rewrite; a rewritten address def's value is
+     [base + displacement]. *)
+  val region_ptr : addr_bits:int -> int -> var
+  val is_region_ptr : var -> bool
+  val region_ptr_id_of : var -> int option
+
+  (** The VLA storage base vars (one per allocation, keyed by the
+      decrement def's tid) and the storage-base predicate. *)
+  val vla_ptr : addr_bits:int -> Tid.t -> var
+  val is_vla_ptr : var -> bool
+  val is_storage_base : var -> bool
+
+  (** The section-component storage base vars. *)
+  val sec_comp_ptr : addr_bits:int -> int -> var
+  val is_sec_comp_ptr : var -> bool
+
   (** The incoming-window memory var (the caller's world) and its test. *)
   val window_mem : var
   val is_window_mem : var -> bool
+
+  (** The caller-window base parameter and its test. *)
+  val hike_window_var : word:int -> var
+  val is_window_var : var -> bool
 
   (** Mints and recognizes the section-component fission vars. *)
   val sec_comp_mem : int -> var
@@ -261,11 +285,9 @@ module Stack_model : sig
   (** The promoted incoming stack-slot parameter of index [i]. *)
   val arg_slot : word:int -> int -> var
 
-  (** Every alloca of the sub and the entry RSP's runtime position —
-      (region id, byte index); rides the sub term. *)
+  (** Every alloca of the sub; rides the sub term. *)
   type sub_layout = Hike_stack_model.sub_layout = {
     regions : (int * (int64 * int64) * int64) list;
-    anchor : (int * int64) option;
     window_param : bool;
   }
 

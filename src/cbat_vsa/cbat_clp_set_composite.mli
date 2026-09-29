@@ -62,15 +62,35 @@ val stack_band_lo : int64
 val stack_word : Cbat_clp.t -> t
 val stack_word_i64 : int64 -> t
 
+(* A fresh VLA frame named by the SP-assigning def: offset 0 is the
+   allocation base (the post-move SP). *)
+val vla_frame : Bap.Std.Tid.t -> t
+
 (* The offset set of a stack-symbolic value — [Some offs] ONLY for the
-   symbolic arm; a plain in-band set is None. *)
+   symbolic arm; a plain in-band set is None.  A VLA value's offsets are
+   materialised onto the entry line through its base range; an unknown
+   base answers None. *)
 val stack_offsets : t -> Cbat_clp.t option
+
+(* The frame-relative offsets of a VLA value (0 = the allocation base) —
+   [Some] only for the [Vla] origin. *)
+val vla_offsets : t -> Cbat_clp.t option
 
 (* The address pieces a memory key fans over: the symbolic offsets'
    piece union, a plain in-band value's segment-relative translation,
    or a plain out-of-band value's own pieces.  None when the value
    names no bounded address line. *)
-val address_pieces : t -> Cbat_clp.Pieces.t option
+val address_pieces : t -> (Origin.t * Cbat_clp.Pieces.t) option
+
+(* The coordinate line a value's origin keys under: the stack line
+   ([Stack]/[Window]/[Vla] share it, since a stack access can land in a
+   VLA region) vs the absolute line ([Rip]/[Abs]). *)
+val key_line : Origin.t -> Origin.t
+
+(* The coordinate line a value's origin keys under: the stack line
+   ([Stack]/[Window]/[Vla] share it) vs the absolute line
+   ([Rip]/[Abs]). *)
+val key_line : Origin.t -> Origin.t
 
 (* The set's own address stride: > 1 only for a bounded strided Clp or
    stack-offset progression; 1 otherwise. *)
@@ -87,8 +107,7 @@ val offset_extrema : t -> (Cbat_word.t * Cbat_word.t) option
 
 (* The solve-boundary refinement: a wholly window-side relative value
    (every offset at/above the ABI word) names the caller's frame
-   origin; a VLA-frame value whose offsets left its allocation's
-   extent re-absorbs onto the entry line. *)
+   origin. *)
 val refine_origin : word:int -> t -> t
 
 (* Segment-relative bounds of a stack value; None when not stack. *)
@@ -118,3 +137,8 @@ val classify : t -> kind
 (* The elements when the set is enumerable within [cap]; [None] = the
    count exceeds the budget. *)
 val enumerate : cap:int -> t -> Cbat_word.t list option
+
+#ifdef VSA_DEBUG
+(* The value's constructor, for the churn diagnosis. *)
+val tag : t -> string
+#endif

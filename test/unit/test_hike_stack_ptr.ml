@@ -22,9 +22,8 @@ let make_builder () =
   let llvm_builder = Llvm.builder_at_end llvm_ctx (Llvm.entry_block fn) in
   (llvm_ctx, llvm_module, llvm_builder)
 
-let layout_of ?(anchor = None) ?(window_param = false) regions :
-    Model.sub_layout =
-  { regions; anchor; window_param }
+let layout_of ?(window_param = false) regions : Model.sub_layout =
+  { regions; window_param }
 
 (* The absolute segment-line position of a frame offset, exactly as the
    producer stamps it: [base + o]. *)

@@ -24,8 +24,11 @@ module WordSet = Cbat_clp_set_composite
 type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
 (* The byte hull plus the address stride: step 1 claims every byte
-   of the hull; step > 1 claims only the grid lo + i*step. *)
-type t = {lo : point; hi : point; step : int} [@@deriving bin_io, sexp]
+   of the hull; step > 1 claims only the grid lo + i*step.  The origin
+   namespaces the key: cells of different origins are disjoint (a VLA
+   cell can never collide with a frame/window/rip cell). *)
+type t = {origin : Hike_origin.t; lo : point; hi : point; step : int}
+[@@deriving bin_io, sexp]
 let compare_point (p1 : point) (p2 : point) : int =
     let c = Int.compare p1.pwidth p2.pwidth in
     if c <> 0 then c else Stdlib.Int64.unsigned_compare p1.pvalue p2.pvalue
@@ -74,13 +77,17 @@ let upper (k : t) : point = k.hi
 (* First writable byte. *)
 let lower (k : t) : point = k.lo
 
+(* The key's origin namespace. *)
+let origin (k : t) : Hike_origin.t = k.origin
+
 (* The cell's stride (>= 1). *)
 let step (k : t) : int = k.step
 
 (* The key the landmark table records this cell under. *)
 let cell_key (k : t) : Cbat_landmarks.Cell_key.t =
     let lo = lower k and hi = upper k in
-    { Cbat_landmarks.Cell_key.lo_width = lo.pwidth;
+    { Cbat_landmarks.Cell_key.origin = k.origin;
+      lo_width = lo.pwidth;
       lo_value = lo.pvalue;
       hi_width = hi.pwidth; hi_value = hi.pvalue; stride = k.step }
 
@@ -111,17 +118,20 @@ let covers (k : t) (p : t) : bool =
                   (Stdlib.Int64.of_int k.step)) 0L)
 
 (* Sub-range of one owner key: the owner's stride carries. *)
-let piece (k : t) ~lo ~hi : t = {lo; hi; step = k.step}
+let piece (k : t) ~lo ~hi : t = {origin = k.origin; lo; hi; step = k.step}
 
-(* Orders by point width, then unsigned value. *)
+(* Orders by origin, then point width, then unsigned value. *)
 let compare (k1 : t) (k2 : t) : int =
-    compare_point (lower k1) (lower k2)
+    let c = Hike_origin.compare k1.origin k2.origin in
+    if c <> 0 then c else compare_point (lower k1) (lower k2)
 
 let contains (k : t) (pt : point) : bool =
     le (lower k) pt && le pt (upper k)
 
+(* Cells of different origins are disjoint namespaces. *)
 let overlap (k1 : t) (k2 : t) : bool =
-    contains k1 (lower k2) || contains k2 (lower k1)
+    Hike_origin.equal k1.origin k2.origin
+    && (contains k1 (lower k2) || contains k2 (lower k1))
 
 (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
      the shared base makes the offset the per-sub cell identity.  A
@@ -131,7 +141,7 @@ let overlap (k1 : t) (k2 : t) : bool =
    entry stores the full value (the tree stays single-keyed). *)
 let of_wordset (p : WordSet.t) : t list =
   let open Monads.Std.Monad.Option.Syntax in
-  let of_piece (q : WordSet.Clp.t) : t option =
+  let of_piece (origin : Hike_origin.t) (q : WordSet.Clp.t) : t option =
     let stride =
       if WordSet.Clp.is_infinite q then 1
       else
@@ -145,21 +155,25 @@ let of_wordset (p : WordSet.t) : t list =
     WordSet.Clp.max_elem q >>= fun hi_w ->
     of_word lo_w >>= fun lo ->
     of_word hi_w >>= fun hi ->
-    if le lo hi then Some {lo; hi; step = stride}
-    else Some {lo = hi; hi = lo; step = stride}
+    if le lo hi then Some {origin; lo; hi; step = stride}
+    else Some {origin; lo = hi; hi = lo; step = stride}
   in
   match WordSet.address_pieces p with
   | None -> []
-  | Some ps -> List.filter_map (WordSet.Clp.Pieces.to_list ps) ~f:of_piece
+  | Some (origin, ps) ->
+    List.filter_map (WordSet.Clp.Pieces.to_list ps) ~f:(of_piece origin)
 
-(* Hull of both inputs. *)
+(* Hull of both inputs.  Same-origin only: coalesce never unions across
+   origins (the cells stay separate). *)
 let union (k1 : t) (k2 : t) : t =
-    {lo = min (lower k1) (lower k2);
+    {origin = k1.origin;
+     lo = min (lower k1) (lower k2);
      hi = max (upper k1) (upper k2);
      step = combined_step k1 k2}
 
 let intersection (k1 : t) (k2 : t) : t =
-    {lo = max (lower k1) (lower k2);
+    {origin = k1.origin;
+     lo = max (lower k1) (lower k2);
      hi = min (upper k1) (upper k2);
      step = combined_step k1 k2}
 
@@ -173,9 +187,10 @@ let read_aligned ~(bits : int) ~(step : int) (c : point) (q : point) : bool =
     else aligned_mod c q bits
 
 
-(* Results may be unordered. *)
+(* Results may be unordered.  A key of another origin is disjoint. *)
 let interval_diff (k1 : t) (k2 : t) : t list =
-  if lt (lower k1) (lower k2) then
+  if not (Hike_origin.equal k1.origin k2.origin) then [ k1 ]
+  else if lt (lower k1) (lower k2) then
     if lt (upper k1) (lower k2) then [ k1 ]
     else if contains k2 (upper k1) then
       [ piece k1 ~lo:k1.lo ~hi:(pred k2.lo) ]
@@ -190,6 +205,8 @@ let interval_diff (k1 : t) (k2 : t) : t list =
 
 (* Gaps between cells within [k]. *)
 let gaps (v : 'a) (k : t) (s : (t * 'a) seq) : (t * 'a) seq =
+    (* Only the same-origin cells can cover [k]'s bytes. *)
+    let s = Seq.filter s ~f:(fun (k', _) -> Hike_origin.equal k'.origin k.origin) in
     (* Next point, if any. *)
     let next_pt pt =
       let next = succ pt in
@@ -238,8 +255,12 @@ type section =
    the grids differ).  Ordered relations: disjoint either way, one
    hull containing the other's head, or shared bounds. *)
 let sections (k1 : t) (k2 : t) : side * t * ((t, t) Seq_ME.t) option =
-  let mix lo hi = {lo; hi; step = combined_step k1 k2} in
-  if lt k1.hi k2.lo then Left, k1, Some (Seq_ME.Right k2)
+  let mix lo hi = {origin = k1.origin; lo; hi; step = combined_step k1 k2} in
+  if not (Hike_origin.equal k1.origin k2.origin) then
+    (* Disjoint namespaces. *)
+    (if compare k1 k2 < 0 then Left, k1, Some (Seq_ME.Right k2)
+     else Right, k2, Some (Seq_ME.Left k1))
+  else if lt k1.hi k2.lo then Left, k1, Some (Seq_ME.Right k2)
   else if lt k2.hi k1.lo then Right, k2, Some (Seq_ME.Left k1)
   else if lt k1.lo k2.lo then
     (* k1's head is exclusive; the shared stretch merges. *)

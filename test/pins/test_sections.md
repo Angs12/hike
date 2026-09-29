@@ -68,7 +68,7 @@ assertions.
 | SEC-52 | `top_claim Foreign` is the plain full-line claim | special-case a non-plain claim for `Foreign` | SEC-52 red: `plain` fails |
 | SEC-53 | `top_claim Unbounded_stack` clamps below the entry | answer the plain claim for `Unbounded_stack` | SEC-53 red: `clamped` fails |
 | SEC-54 | the denotation paths land on their claims (`Ws.top`→plain, symbolic→clamped) | diverge the denotation top arm from `top_claim` | SEC-54 red: `plain`/`clamped` fails |
-| SEC-55 | the narrow `r16` store converts to `region_mem 1` keeping address and width | make the region rewrite width-sensitive (skip narrow stores) | SEC-55 red: the narrow store's mem is not `region_mem 1` |
+| SEC-55 | the narrow `r16` store converts to `region_mem 1` at the storage base (`stack_r1_ptr`), keeping its width | make the region rewrite width-sensitive (skip narrow stores) | SEC-55 red: the narrow store's mem is not `region_mem 1` |
 | SEC-56 | the pre-call caller-frame cell `[RSP-8]` holds `{0xAA}` | break the store denotation at the frame cell | SEC-56 red: value ≠ `{0xAA}` |
 | SEC-57 | the pre-call outgoing slot `[RSP+16]` holds `{0xBB}` | drop the outgoing-slot store from the block | SEC-57 red: value ≠ `{0xBB}` |
 | SEC-58 | the caller-frame cell survives the call (frame-keep) | force whole-memory top at the call (`cbat_call_effects.transfer`) | SEC-58 red: post-call value ≠ `{0xAA}` |
@@ -82,5 +82,5 @@ assertions.
 | SEC-66 | `S2`: an untagged heap-RBP store does not degrade the sub (rsp cell keeps Region) | classify stack-ness by the base register's name | SEC-66 red: storage ≠ `Stack_region 1` |
 | SEC-67 | `S2b` control: the identical sub with an RBX-based heap store is not degraded | classify stack-ness by the base register's name | SEC-67 red: storage ≠ `Stack_region 1` |
 | SEC-68 | `S3`: an `[RBP := RSP]` prologue makes RBP sp-derived, so the `[RBP-0x30]` access takes Region | drop the value-based tag on the prologue (name-only) | SEC-68 red: storage ≠ `Stack_region 1` |
-| SEC-69 | AT4-VLA: the static frame carves beside a live VLA — the literal frame decrement puts the statics above the cut, the dynamic decrement seeds the extent below it, the extent claim's portion binds nowhere (origin = `Vla (the decrement's tid)`, portions = the extent cut), and the static cells carve as `Stack_region`s | drop the extent from the attribution's `extents` (empty list) | SEC-69 red: the band store's portions gain a Stack part; the carve asserts fail |
-| SEC-70 | AT4-VLA: a claim reaching into the extent is cut around it — a straddling store splits into the extent's Vla portion plus the surviving Stack run | invert `split_around_extents`'s empty-run guard | SEC-70 red: the inverted-run bug (a `stack[-36..-37]` portion) fails the portions assert |
+| SEC-69 | AT4-VLA: a runtime-sized VLA claim binds nowhere (origin = `Vla (the decrement's tid)`, portions = `[]`), and the static frame cells carve as `Stack_region`s | bind a `Vla` claim as a Stack portion | SEC-69 red: the portions/carve asserts fail |
+| SEC-70 | AT4-VLA: a frame claim is not cut around the VLA — it binds on its own line as one Stack portion | split a frame claim around the run's extents | SEC-70 red: the portion-count/split assert fails |

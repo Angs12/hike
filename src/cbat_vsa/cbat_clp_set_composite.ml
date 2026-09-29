@@ -109,6 +109,10 @@ let stack_word (offs : Clp.t) : t = Rel (Origin.Stack, P.of_progression offs)
 let stack_word_i64 (k : int64) : t =
   Rel (Origin.Stack, P.singleton (w64_of_i64 k))
 
+(* A fresh VLA frame: offset 0 is the allocation base (the post-move SP). *)
+let vla_frame (tid : Tid.t) : t =
+  Rel (Origin.Vla tid, P.singleton (w64_of_i64 0L))
+
 (* a + b + c with int64 overflow check. *)
 let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
   let pos x = Stdlib.Int64.compare x 0L >= 0 in
@@ -120,29 +124,52 @@ let checked_add3 (a : int64) (b : int64) (c : int64) : int64 option =
     then None
     else Some abc
 
+(* The allocation base's entry-line (segment-relative) range, known only
+   when the SP-before and the size bound it. *)
+let vla_base_range (tid : Tid.t) : (int64 * int64) option =
+  match Origin.Vla_seed.extent tid with
+  | Some { Origin.base_lo = Some lo; base_hi = Some hi; _ } -> Some (lo, hi)
+  | _ -> None
+
 (* The exact hull [base + offs_lo, base + offs_hi]; a missing
    direction clamps to the origin's materialisation bound — a
-   relative claim stays in its origin's extent. *)
+   relative claim stays in its origin's extent.  A VLA value is
+   frame-relative: its base is the allocation's, and an unknown base has
+   no entry-line position (top). *)
 let plain_bounds (o : Origin.t) (offs : P.t) : (int64 * int64) option =
-  let f = Origin.facts o in
-  let floor = Stdlib.Int64.add f.Origin.base f.Origin.lo in
-  let ceil = Stdlib.Int64.add f.Origin.base f.Origin.hi in
-  let side = function
-    | Some w ->
-      (match Cbat_word.to_int64 w with
-       | Ok v -> checked_add3 f.Origin.base 0L v
-       | Error _ -> None)
-    | None -> None
-  in
-  let lo = match P.min_elem offs with
-    | Some w -> side (Some w)
-    | None -> Some floor in
-  let hi = match P.max_elem offs with
-    | Some w -> side (Some w)
-    | None -> Some ceil in
-  match lo, hi with
-  | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
-  | _ -> None
+  let k_int w = match Cbat_word.to_int64 w with Ok v -> Some v | Error _ -> None in
+  match o with
+  | Origin.Vla tid -> (
+    match vla_base_range tid with
+    | Some (blo, bhi) -> (
+      match Option.bind (P.min_elem offs) ~f:k_int,
+            Option.bind (P.max_elem offs) ~f:k_int with
+      | Some klo, Some khi -> (
+        match checked_add3 stack_base blo klo, checked_add3 stack_base bhi khi with
+        | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
+        | _ -> None)
+      | _ -> None)
+    | None -> None)
+  | _ ->
+    let f = Origin.facts o in
+    let floor = Stdlib.Int64.add f.Origin.base f.Origin.lo in
+    let ceil = Stdlib.Int64.add f.Origin.base f.Origin.hi in
+    let side = function
+      | Some w ->
+        (match Cbat_word.to_int64 w with
+         | Ok v -> checked_add3 f.Origin.base 0L v
+         | Error _ -> None)
+      | None -> None
+    in
+    let lo = match P.min_elem offs with
+      | Some w -> side (Some w)
+      | None -> Some floor in
+    let hi = match P.max_elem offs with
+      | Some w -> side (Some w)
+      | None -> Some ceil in
+    match lo, hi with
+    | Some lo, Some hi when Stdlib.Int64.compare hi lo >= 0 -> Some (lo, hi)
+    | _ -> None
 
 (* A relative value's plain twin: the exact hull as a step-1 piece. *)
 let rec to_plain (t : t) : t =
@@ -451,9 +478,8 @@ let offsets_signed_extrema (offs : P.t)
 
 (* The solve-boundary refinement: a wholly window-side relative value
    (every offset at/above the ABI word) names the caller's frame
-   origin; a VLA-frame value whose offsets left its allocation's
-   extent re-absorbs onto the entry line — the positions were always
-   entry-line, only the routing fact changes. *)
+   origin.  A VLA frame keeps its origin; the routing gate refuses an
+   out-of-frame offset at the stamp, not here. *)
 let refine_origin ~(word : int) (t : t) : t =
   let extrema_i64 offs =
     Option.bind (offsets_signed_extrema offs) ~f:(fun (lo, hi) ->
@@ -468,24 +494,26 @@ let refine_origin ~(word : int) (t : t) : t =
      | Some (lo, _) when Stdlib.Int64.compare lo w >= 0 ->
        Rel (Origin.Window, offs)
      | _ -> t)
-  | Rel (Origin.Vla tid, offs) -> (
-    match Origin.Vla_seed.extent tid with
-    | Some (plo, phi) ->
-      let base = Origin.segment_base in
-      let lo = Stdlib.Int64.sub plo base in
-      let hi = Stdlib.Int64.sub phi base in
-      (match extrema_i64 offs with
-       | Some (mn, mx)
-         when Stdlib.Int64.compare mn lo >= 0
-              && Stdlib.Int64.compare mx hi <= 0 -> t
-       | _ -> Rel (Origin.Stack, offs))
-    | None -> t)
   | q -> q
 
-(* Segment-relative bounds: a relative value keeps its exact offsets;
-   a plain in-band set maps to its own hull. *)
+(* The VLA value's entry-line hull: its frame-relative offsets shifted
+   by the allocation base's range.  None when the base is unknown. *)
+let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
+  match vla_base_range tid, offsets_signed_extrema offs with
+  | Some (blo, bhi), Some (lo, hi) -> (
+    match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+    | Ok klo, Ok khi -> (
+      match checked_add3 blo 0L klo, checked_add3 bhi 0L khi with
+      | Some l, Some h when Stdlib.Int64.compare h l >= 0 -> Some (l, h)
+      | _ -> None)
+    | _ -> None)
+  | _ -> None
+
+(* Segment-relative bounds of a stack value; None when not stack.  A VLA
+   value is materialised onto the entry line through its base range. *)
 let stack_bounds (t : t) : (int64 * int64) option =
   match t with
+  | Rel (Origin.Vla tid, offs) -> vla_entry_hull tid offs
   | Rel (_, offs) ->
     Option.bind (offsets_signed_extrema offs) ~f:(fun (lo, hi) ->
         match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
@@ -499,6 +527,7 @@ let rec cardinality (t : t) : word =
   match t with
   | Clp ps -> P.cardinality ps
   | FinSet s -> FinSet.cardinality s
+  | Rel (Origin.Vla _, offs) -> P.cardinality offs
   | Rel (_, offs) -> stack_cardinality offs
   | Many ps ->
     let width = Stdlib.max 65 (bitwidth t + 1) in
@@ -550,6 +579,9 @@ let max_elem (t : t) : word option =
    set, or a plain in-band set's segment-relative hull. *)
 let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
   match t with
+  | Rel (Origin.Vla tid, offs) ->
+    Option.map (vla_entry_hull tid offs) ~f:(fun (lo, hi) ->
+        (w64_of_i64 lo, w64_of_i64 hi))
   | Rel (_, offs) -> offsets_signed_extrema offs
   | _ ->
     Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
@@ -568,15 +600,16 @@ let signed_leaf ~(dir : int) (q : t) : word option =
     let c = Cbat_word.compare (Cbat_word.signed m) (Cbat_word.signed a) in
     if (if dir < 0 then c < 0 else c > 0) then m else a
   in
-  let via_offsets offs =
+  let via_offsets_base base offs =
     Option.bind (offsets_signed_extrema offs)
       ~f:(fun ex ->
-        Option.bind (checked_add3 stack_base 0L
+        Option.bind (checked_add3 base 0L
                        (match Cbat_word.to_int64 (pick ex) with
                         | Ok v -> v
                         | Error _ -> clamp))
           ~f:(fun v -> Some (w64_of_i64 v)))
   in
+  let via_offsets offs = via_offsets_base stack_base offs in
   let via_pieces ps =
     List.fold (P.to_list ps) ~init:None ~f:(fun acc p ->
         let r =
@@ -603,6 +636,14 @@ let signed_leaf ~(dir : int) (q : t) : word option =
         | Some m, Some a -> Some (better m a))
   in
   match q with
+  | Rel (Origin.Vla tid, offs) -> (
+    match vla_base_range tid with
+    | Some (blo, bhi) -> (
+      let base = if dir < 0 then blo else bhi in
+      match checked_add3 stack_base base 0L with
+      | Some abs -> via_offsets_base abs offs
+      | None -> None)
+    | None -> None)
   | Rel (_, offs) -> via_offsets offs
   | Clp ps -> via_pieces ps
   | FinSet s ->
@@ -646,6 +687,15 @@ let rec elem w (t : t) =
    8 MiB of elements. *)
 let rec iter (t : t) : word list =
   match t with
+  | Rel (Origin.Vla tid, offs) -> (
+    match vla_base_range tid with
+    | Some (blo, _) -> (
+      match checked_add3 stack_base blo 0L with
+      | Some abs ->
+        List.map (P.elements offs)
+          ~f:(fun w -> Cbat_word.add (w64_of_i64 abs) w)
+      | None -> [])
+    | None -> [])
   | Rel (_, offs) ->
     List.map (P.elements offs)
       ~f:(fun w -> Cbat_word.add (w64_of_i64 stack_base) w)
@@ -794,7 +844,24 @@ let rec lift_unop (f_clp : P.t -> P.t) (f_fs : fset -> fset) : t -> t = fun t ->
    view is the hull (the exact union is the piece list itself). *)
 let stack_offsets (t : t) : Clp.t option =
   match t with
+  | Rel (Origin.Vla tid, offs) -> (
+    (* The frame-relative offsets shifted onto the entry line; an unknown
+       base has no entry-line position (the sound fallback). *)
+    match vla_entry_hull tid offs with
+    | Some (lo, hi) ->
+      Some (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi))
+    | None -> None)
   | Rel (_, offs) ->
+    (match hull_of_pieces offs with
+     | Some p -> Some p
+     | None -> Some (Clp.bottom 64))
+  | _ -> None
+
+(* The frame-relative offsets of a VLA value (0 = the allocation base) —
+   [Some] only for the [Vla] origin. *)
+let vla_offsets (t : t) : Clp.t option =
+  match t with
+  | Rel (Origin.Vla _, offs) ->
     (match hull_of_pieces offs with
      | Some p -> Some p
      | None -> Some (Clp.bottom 64))
@@ -804,24 +871,61 @@ let stack_offsets (t : t) : Clp.t option =
    piece union, a plain in-band value's segment-relative translation,
    or a plain out-of-band value's own pieces.  None when the value
    names no bounded address line. *)
-let address_pieces (t : t) : P.t option =
+(* The memory-key coordinate line.  A stack access can land inside a
+   VLA region (the allocation lives on the stack line), so [Stack],
+   [Window], and [Vla] share one namespace; [Rip] (module-relative) and
+   [Abs] (absolute) are distinct.  The origin still rides the value;
+   only the key line is coarsened. *)
+let key_line (o : Origin.t) : Origin.t =
+  match o with
+  | Origin.Stack | Origin.Window | Origin.Vla _ -> Origin.Stack
+  | Origin.Rip -> Origin.Rip
+  | Origin.Abs -> Origin.Abs
+
+(* The address a memory key fans over: the value's coordinate line plus
+   its offset pieces.  A `Rel` keeps its offsets under its line; a plain
+   in-band set is the entry-line [Stack] namespace; an out-of-band plain
+   set is [Abs]. *)
+let address_pieces (t : t) : (Origin.t * P.t) option =
   match t with
-  | Rel (_, offs) -> Some offs
+  | Rel (Origin.Vla tid, offs) -> (
+    (* The memory key is the entry-line address: the frame-relative
+       offsets shift by the allocation base's range; an unknown base
+       keys the whole stack line (a stack access can land in the VLA). *)
+    match vla_entry_hull tid offs with
+    | Some (lo, hi) ->
+      Some
+        (Origin.Stack,
+         P.of_progression
+           (Clp.interval ~width:64 (w64_of_i64 lo) (w64_of_i64 hi)))
+    | None -> Some (Origin.Stack, P.top 64))
+  | Rel (o, offs) -> Some (key_line o, offs)
   | _ ->
     (match stack_extrema t with
      | Some (lo, hi) ->
        (match relative_bounds lo hi with
         | Some (rlo, rhi) ->
           Some
-            (P.of_progression
+            (Origin.Stack,
+             P.of_progression
                (Clp.interval ~width:64 (w64_of_i64 rlo) (w64_of_i64 rhi)))
         | None -> None)
      | None ->
-       (* Out-of-band plain: its own absolute pieces. *)
-       (match t with
-        | Clp ps -> Some ps
-        | FinSet s -> Some (pieces_of_finset s)
-        | _ -> None))
+       (* Out-of-band plain: its own absolute pieces — but only when the
+          set cannot denote a stack offset.  A wrapping (circular) set
+          reaches into the stack band, so its coordinate is ambiguous:
+          no bounded key, the top identity. *)
+       let circular =
+         match t with
+         | Clp ps -> List.exists (P.to_list ps) ~f:Clp.is_circular
+         | _ -> false
+       in
+       if circular then None
+       else
+         (match t with
+          | Clp ps -> Some (Origin.Abs, ps)
+          | FinSet s -> Some (Origin.Abs, pieces_of_finset s)
+          | _ -> None))
 
 (* The value's own address stride: > 1 only when every piece shares one
    bounded stride; everything else is 1. *)
@@ -905,9 +1009,9 @@ let stride (t : t) : int =
    bases do not survive — both hulls, the plain op; [Top] = the op
    keeps unknown base bits: top.  THE table is the one home of "what
    type dominates"; a new origin lands by extending [Origin.t], a new
-   op by one row here.  A VLA value meeting the entry line absorbs
-   onto [Stack]: the offsets are entry-line already, so the union is
-   exact and the per-run portions route each run to its own space. *)
+   op by one row here.  The two entry-line origins absorb onto
+   [Stack]; a VLA frame never merges — its offsets are frame-relative,
+   so a cross-origin op materialises through the base range (or tops). *)
 let origin_is_relative x = not (Origin.equal x Origin.Abs)
 
 (* The stack-family origins share the segment base. *)
@@ -919,15 +1023,11 @@ let origin_on_line x =
 let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     Hike_origin.rel_row =
   let rel x = origin_is_relative x in
-  (* A VLA value meeting the entry line absorbs onto [Stack]; two
-     different VLA frames never merge (different allocations). *)
   let cross_line =
     rel o1 && rel o2 && not (Origin.equal o1 o2)
     && (match o1, o2 with
-        | Origin.Vla _, Origin.Vla _ -> false
-        | Origin.Vla _, _ | _, Origin.Vla _ ->
-            origin_on_line o1 && origin_on_line o2
-        | _ -> false)
+        | Origin.Vla _, _ | _, Origin.Vla _ -> false
+        | _ -> origin_on_line o1 && origin_on_line o2)
   in
   match op with
   | Union ->
@@ -978,7 +1078,8 @@ let rel_rel (op : binop) (a : P.t) (b : P.t) : P.t =
    cancels — no collapse). *)
 let materialise2 (op : binop) (t1 : t) (t2 : t) : t =
   match op, t1, t2 with
-  | Sub, Rel (_, a), Rel (_, b) -> canonical [ Clp (P.sub a b) ]
+  | Sub, Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->
+    canonical [ Clp (P.sub a b) ]
   | _ -> lift_binop op (to_plain t1) (to_plain t2)
 
 (* Only the base's low nibble is a fact (the ABI entry residue): an
@@ -1097,6 +1198,57 @@ let round_down_image (s : int) (offs : P.t) : P.t option =
   if List.length imgs = List.length (P.to_list offs) then Some (union_all imgs)
   else None
 
+(* The VLA frame's round-down: the frame-relative offset rounds by its
+   own low bits (the base is stack-aligned, so no base term); the
+   extent's floor widens by the alignment slack. *)
+let round_down_image_vla (tid : Tid.t) (s : int) (offs : P.t) : P.t option =
+  if s >= 64 then Some offs
+  else begin
+    let m64 = Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s) in
+    let keep = Stdlib.Int64.lognot m64 in
+    Origin.Vla_seed.widen_off_lo tid (Stdlib.Int64.neg m64);
+    let block (o : word) : word option =
+      match Cbat_word.to_int64 o with
+      | Error _ -> None
+      | Ok v ->
+        Some (Cbat_word.of_int64 ~width:64 (Stdlib.Int64.logand v keep))
+    in
+    let step =
+      Cbat_word.of_int64 ~width:64 (Stdlib.Int64.shift_left 1L s)
+    in
+    let imgs =
+      List.filter_map (P.to_list offs) ~f:(fun g ->
+          match Clp.min_elem g, Clp.max_elem g with
+          | Some a, Some b -> (
+              match block a, block b with
+              | Some a', Some b' ->
+                let span65 =
+                  Cbat_word.cast Bil.UNSIGNED 65 (Cbat_word.sub b a)
+                in
+                let cnt =
+                  Cbat_word.add
+                    (Cbat_word.rshift span65 (Cbat_word.of_int ~width:65 s))
+                    (Cbat_word.one 65)
+                in
+                Some (Clp.create a' ~step ~cardn:cnt)
+              | _ -> None)
+          | _ -> None)
+    in
+    let rec union_all = function
+      | [] -> P.bottom 64
+      | [ g ] -> P.of_progression g
+      | g :: rest -> P.union (P.of_progression g) (union_all rest)
+    in
+    if List.length imgs = List.length (P.to_list offs) then
+      Some (union_all imgs)
+    else None
+  end
+
+let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
+  match o with
+  | Origin.Vla tid -> round_down_image_vla tid s offs
+  | _ -> round_down_image s offs
+
 
 (* The plain meet: plain leaves meet pairwise; results merge. *)
 let meet_plain (t1 : t) (t2 : t) : t =
@@ -1138,7 +1290,7 @@ let logand_rel (o : Origin.t) (offs : P.t) (plain : t) : t =
   | Some k -> (
       match round_down_shift k with
       | Some s -> (
-          match round_down_image s offs with
+          match round_down_image_for o s offs with
           | Some offs' -> canonical [ Rel (o, offs') ]
           | None -> top 64)
       | None ->
@@ -1571,3 +1723,13 @@ let classify (t : t) : kind =
    count exceeds the budget, the caller takes its sound identity. *)
 let enumerate ~(cap : int) (t : t) : word list option =
   if Cbat_word.gt_int (cardinality t) cap then None else Some (iter t)
+
+#ifdef VSA_DEBUG
+(* The value's constructor, for the churn diagnosis. *)
+let tag (t : t) : string =
+  match t with
+  | Clp _ -> "Clp"
+  | FinSet _ -> "FinSet"
+  | Rel _ -> "Rel"
+  | Many ps -> sprintf "Many%d" (List.length ps)
+#endif

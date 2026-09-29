@@ -98,5 +98,11 @@ val is_bottom : t -> bool
 
 (* Whether a stored cell's key intersects the byte range [lo, hi]
    (inclusive addresses); unkeyable bounds answer true. *)
-val has_cell_in : t -> lo:Cbat_word.t -> hi:Cbat_word.t -> bool
+val has_cell_in :
+  t -> origin:Hike_origin.t -> lo:Cbat_word.t -> hi:Cbat_word.t -> bool
+
+#ifdef VSA_DEBUG
+(* The stored cells, for the churn diagnosis. *)
+val cells : t -> (Key.t * Val.t) list
+#endif
 

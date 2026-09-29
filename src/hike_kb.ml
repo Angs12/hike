@@ -32,10 +32,10 @@ type facts = {
   (* The run's resolution lookup: one name table for the program,
      built at the pass_vsa boundary beside the other facts. *)
   lookup : int64 -> Tid.t option;
-  (* Each VLA allocation's byte extent on the segment line (absolute,
-     inclusive), keyed by its decrement def's tid — the seed's own
-     fact, drained here so nothing crosses a program run. *)
-  vla_extents : (int64 * int64) Tid.Map.t;
+  (* Each VLA allocation's frame fact (its frame-relative offset band and
+     the base's entry-line range), keyed by its SP-assigning def's tid —
+     the seed's own fact, drained here so nothing crosses a program run. *)
+  vla_extents : Hike_origin.vla_extent Tid.Map.t;
   (* The emitter's section spec, installed by the attribution pass in
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)

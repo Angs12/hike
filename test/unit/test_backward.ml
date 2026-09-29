@@ -16,6 +16,13 @@ let bk_iv64 ~lo ~hi =
     (Clp.create ~width:64 ~step:(w64 1)
        ~cardn:(Cbat_word.of_int ~width:65 (hi - lo + 1)) (w64 lo))
 
+(* The same interval on the stack line: the fixture's offsets are stack
+   offsets, so the cell key carries the [Stack] origin. *)
+let bk_sv64 ~lo ~hi =
+  Ws.stack_word
+    (Clp.create ~width:64 ~step:(w64 1)
+       ~cardn:(Cbat_word.of_int ~width:65 (hi - lo + 1)) (w64 lo))
+
 let s_r32 = Cbat_word.of_int ~width:32
 
 let bk_iv32 ~lo ~hi =
@@ -963,7 +970,7 @@ let tests : unit Alcotest.test list =
        key (the frame's RSP offset 0)"
       (fun () ->
         let st1 =
-          t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.singleton (w64 (-8)))
+          t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.stack_word_i64 (-8L))
             (bk_iv64 ~lo:0 ~hi:20)
         in
         let env1 =
@@ -973,7 +980,7 @@ let tests : unit Alcotest.test list =
             (bk_iv64 ~lo:0 ~hi:9)
         in
         check "BK-57"
-          (let v = t_cell_at env1 (Ws.singleton (w64 (-8))) in
+          (let v = t_cell_at env1 (Ws.stack_word_i64 (-8L)) in
            Ws.elem (w64 9) v && not (Ws.elem (w64 15) v)));
 
     pin "BK-58"
@@ -982,10 +989,10 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let st2 =
           let s =
-            t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.singleton (w64 0))
+            t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.stack_word_i64 0L)
               (bk_iv64 ~lo:0 ~hi:20)
           in
-          t_add_cell s (Ws.singleton (w64 40)) (bk_iv64 ~lo:0 ~hi:20)
+          t_add_cell s (Ws.stack_word_i64 40L) (bk_iv64 ~lo:0 ~hi:20)
         in
         let st2 = AI.add_word st2 ~key:t_idx ~data:(bk_iv64 ~lo:0 ~hi:4) in
         let env2 =
@@ -998,8 +1005,8 @@ let tests : unit Alcotest.test list =
             (bk_iv64 ~lo:0 ~hi:9)
         in
         check "BK-58"
-          (let v0 = t_cell_at env2 (Ws.singleton (w64 0)) in
-           let v40 = t_cell_at env2 (Ws.singleton (w64 40)) in
+          (let v0 = t_cell_at env2 (Ws.stack_word_i64 0L) in
+           let v40 = t_cell_at env2 (Ws.stack_word_i64 40L) in
            Ws.elem (w64 9) v0 && (not (Ws.elem (w64 15) v0)) && Ws.elem (w64 15) v40));
 
     pin "BK-59"
@@ -1009,7 +1016,7 @@ let tests : unit Alcotest.test list =
        semantics: an unaligned sub-region read returns top)"
       (fun () ->
         let st3 =
-          t_add_cell (mk_seed_state t_rsp t_rbp ()) (bk_iv64 ~lo:0 ~hi:64)
+          t_add_cell (mk_seed_state t_rsp t_rbp ()) (bk_sv64 ~lo:0 ~hi:64)
             (bk_iv64 ~lo:0 ~hi:20)
         in
         let st3 = AI.add_word st3 ~key:t_idx ~data:(bk_iv64 ~lo:8 ~hi:24) in
@@ -1019,9 +1026,9 @@ let tests : unit Alcotest.test list =
             (bk_iv64 ~lo:0 ~hi:9)
         in
         check "BK-59"
-          (let v8 = t_cell_at env3 (Ws.singleton (w64 8)) in
-           let v0 = t_cell_at env3 (Ws.singleton (w64 0)) in
-           let v24 = t_cell_at env3 (Ws.singleton (w64 24)) in
+          (let v8 = t_cell_at env3 (Ws.stack_word_i64 8L) in
+           let v0 = t_cell_at env3 (Ws.stack_word_i64 0L) in
+           let v24 = t_cell_at env3 (Ws.stack_word_i64 24L) in
            Ws.elem (w64 9) v8
            && (not (Ws.elem (w64 15) v8))
            && Ws.elem (w64 15) v0
@@ -1033,11 +1040,11 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let st4 =
           let s =
-            t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.singleton (w64 0))
+            t_add_cell (mk_seed_state t_rsp t_rbp ()) (Ws.stack_word_i64 0L)
               (bk_iv64 ~lo:0 ~hi:20)
           in
-          let s = t_add_cell s (Ws.singleton (w64 40)) (bk_iv64 ~lo:0 ~hi:20) in
-          t_add_cell s (Ws.singleton (w64 80)) (bk_iv64 ~lo:0 ~hi:20)
+          let s = t_add_cell s (Ws.stack_word_i64 40L) (bk_iv64 ~lo:0 ~hi:20) in
+          t_add_cell s (Ws.stack_word_i64 80L) (bk_iv64 ~lo:0 ~hi:20)
         in
         let st4 = AI.add_word st4 ~key:t_idx ~data:(bk_iv64 ~lo:0 ~hi:4) in
         let env4 =
@@ -1050,9 +1057,9 @@ let tests : unit Alcotest.test list =
             (bk_iv64 ~lo:0 ~hi:9)
         in
         check "BK-60"
-          (let v0 = t_cell_at env4 (Ws.singleton (w64 0)) in
-           let v40 = t_cell_at env4 (Ws.singleton (w64 40)) in
-           let v80 = t_cell_at env4 (Ws.singleton (w64 80)) in
+          (let v0 = t_cell_at env4 (Ws.stack_word_i64 0L) in
+           let v40 = t_cell_at env4 (Ws.stack_word_i64 40L) in
+           let v80 = t_cell_at env4 (Ws.stack_word_i64 80L) in
            Ws.elem (w64 9) v0
            && (not (Ws.elem (w64 15) v0))
            && Ws.elem (w64 15) v40
@@ -1163,7 +1170,7 @@ let tests : unit Alcotest.test list =
           let mv = Mem.top k9 in
           AI.add_memory st9 ~key:s_m
             ~data:
-              (Mem.add mv ~key:(key_of (Ws.singleton (w64 0)))
+              (Mem.add mv ~key:(key_of (Ws.stack_word_i64 0L))
                  ~data:(Mem.Val.create (bk_iv32 ~lo:0 ~hi:40) LittleEndian))
         in
         let env9 =
@@ -1181,7 +1188,7 @@ let tests : unit Alcotest.test list =
         check "BK-69"
           (let mv = AI.find_memory k9 env9 s_m in
            let v =
-             Mem.Val.data (Mem.find (32, LittleEndian) mv (key_of (Ws.singleton (w64 (-8)))))
+             Mem.Val.data (Mem.find (32, LittleEndian) mv (key_of (Ws.stack_word_i64 (-8L))))
            in
            Ws.elem (s_r32 9) v && not (Ws.elem (s_r32 10) v)));
 

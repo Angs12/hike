@@ -80,11 +80,52 @@ let run_binary (path : string) (name : string) : unit =
   let sub', sol = analyze_and_fixpoint sub in
   Printf.printf "(fused single-pass: no views — the per-block IN-states are the solution)\n";
   let vars = lhs_vars_of sub' in
+  let dump_mem = try Sys.getenv "VSA_DUMP_MEM" <> "" with _ -> false in
+  let mem_idx : Cbat_vsa.Mem.idx = { addr_width = 64; addressable_width = 8 } in
+  let mem_of (st : Cbat_vsa.AI.t) (v : var) : Cbat_vsa.Mem.t option =
+    Core.Option.try_with (fun () ->
+        Cbat_vsa.AI.find_memory mem_idx st v)
+  in
+  let cellstat (st : Cbat_vsa.AI.t) (v : var) : string =
+    match mem_of st v with
+    | None -> "no-mem"
+    | Some m ->
+        let txt = Format.asprintf "%a" Cbat_vsa.Mem.pp m in
+        let cells =
+          String.split_on_char '[' txt
+          |> Base.List.length |> fun k -> k - 1
+        in
+        let txt =
+          Base.String.filter txt ~f:(fun c -> c != '\n' && c != '\t' && c != ' ')
+        in
+        Printf.sprintf "%d cells: %s" cells
+          (if cells > 0 then String.sub txt 0 (min 400 (String.length txt))
+           else "")
+  in
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->
-      let st = Graphlib.Std.Solution.get sol (Term.tid b) in
+      let st0 = Graphlib.Std.Solution.get sol (Term.tid b) in
       Printf.printf "%s :: %s\n" (Tid.name (Term.tid b))
-        (state_summary (sp :: vars) st))
+        (state_summary (sp :: vars) st0);
+      if dump_mem then begin
+        let st = ref st0 in
+        Term.enum def_t b
+        |> Seq.iter ~f:(fun d ->
+              let lv = Def.lhs d in
+              let is_mem =
+                match Var.typ lv with
+                | Bap.Std.Type.Mem _ -> true
+                | _ -> false
+              in
+              (if is_mem then
+               Printf.printf "  def %-8s | pre %s | post %s\n%!"
+                 (Var.name lv)
+                 (cellstat !st lv)
+                 (let post = Vsa.Test_seam.denote_def d !st in
+                  let r = cellstat post lv in
+                  st := post;
+                  r)))
+      end)
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in

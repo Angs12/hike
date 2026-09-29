@@ -16,8 +16,10 @@ open Bap.Std
 
 type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
-type t = {lo : point; hi : point; step : int} [@@deriving bin_io, sexp]
+type t = {origin : Hike_origin.t; lo : point; hi : point; step : int}
+[@@deriving bin_io, sexp]
 
+val origin : t -> Hike_origin.t
 val compare : t -> t -> int
 val compare_point : point -> point -> int
 val equal : point -> point -> bool

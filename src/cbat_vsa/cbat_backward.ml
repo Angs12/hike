@@ -934,7 +934,11 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
              env
            | keys ->
              let res_size = Size.in_bits size in
-             if WordSet.bitwidth produced <> res_size then env
+             (* The cell world is byte-addressed: a sub-byte read's
+                meet is unrepresentable — the identity (no meet) keeps
+                the cell's pre. *)
+             if res_size mod 8 <> 0 then env
+             else if WordSet.bitwidth produced <> res_size then env
              else
                let mv = AI.find_memory k env m in
                let data = Mem.Val.create produced endian in

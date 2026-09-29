@@ -145,7 +145,7 @@ let st_pre (sub : sub term) (blk0 : blk term) (blk1 : blk term) : AI.t =
     (Vsa.Test_seam.denote_defs (blk_of (Term.tid blk0)) (anchored_entry ()))
 
 let read64 (m : var) (ai : AI.t) (addr : int64) : Ws.t =
-  match Mem.Key.of_wordset (Ws.singleton (q64 addr)) with
+  match Mem.Key.of_wordset (Ws.stack_word_i64 addr) with
   | [ k ] ->
       Mem.Val.data
         (Mem.find (64, LittleEndian)
@@ -975,10 +975,9 @@ let tests : unit Alcotest.test list =
           (match narrow' with
            | Some d -> (
                match Def.rhs d with
-               | Bil.Store
-                   (Bil.Var mem, Bil.BinOp (Bil.MINUS, Bil.Var b, Bil.Int _), _, _, `r16)
-                 ->
-                   Var.same mem (Sm.region_mem 1) && Var.same b rsp
+               | Bil.Store (Bil.Var mem, Bil.Var b, _, _, `r16) ->
+                   Var.same mem (Sm.region_mem 1)
+                   && Sm.region_ptr_id_of b = Some 1
                    && Var.equal (Def.lhs d) mem
                | _ -> false)
            | None -> false));
@@ -1164,6 +1163,7 @@ let tests : unit Alcotest.test list =
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let rax = v64 "at_vla_rax" in
+        let at_vla_n = v64 "at_vla_n" in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
         (* The literal frame decrement: the static slots [rbp-12, rbp-1]
            sit at/above the cut, the VLA strictly below it. *)
@@ -1177,9 +1177,9 @@ let tests : unit Alcotest.test list =
                ( Bil.Var m,
                  Bil.BinOp
                    (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
-                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 32)),
+                 Bil.Var at_vla_n,
                  LittleEndian,
-                 `r32 ))
+                 `r64 ))
         in
         let def_load =
           Def.create rax
@@ -1188,7 +1188,7 @@ let tests : unit Alcotest.test list =
                  Bil.BinOp
                    (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
                  LittleEndian,
-                 Size.of_int_exn 32 ))
+                 `r64 ))
         in
         let def_sub =
           Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
@@ -1235,13 +1235,11 @@ let tests : unit Alcotest.test list =
           ((match projection def_band with
             | Some p ->
                 (* The frame fact rides the projection's origin, named by
-                   the decrement def's own tid; the claim's portion is the
-                   extent cut, binding nowhere in the tree. *)
+                   the decrement def's own tid; a VLA claim binds nowhere
+                   in the tree. *)
                 Option.equal Hike_origin.equal p.A.origin
                   (Some (Hike_origin.Vla (Term.tid def_sub)))
-                && (match p.A.portions with
-                    | [ vla ] -> portion_eq vla S.Vla (pos (-36L)) (pos (-33L))
-                    | _ -> false)
+                && p.A.portions = []
             | None -> false)
            && (match storage_at ctx sub Sm.Stack (pos (-8L)) (pos (-1L)) with
                | Some (A.Stack_region _) -> true
@@ -1251,10 +1249,11 @@ let tests : unit Alcotest.test list =
                | _ -> false)));
 
     pin "SEC-70"
-      "AT4-VLA: a claim reaching into the extent is cut around it — the allocation's bytes bind nowhere"
+      "AT4-VLA: a frame claim is not cut around the extent — it binds on its own line"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let rax = v64 "at_vla_rax" in
+        let at_vla_n = v64 "at_vla_n" in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
         let def_frame =
           Def.create rsp
@@ -1266,9 +1265,9 @@ let tests : unit Alcotest.test list =
                ( Bil.Var m,
                  Bil.BinOp
                    (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
-                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:32 32)),
+                 Bil.Var at_vla_n,
                  LittleEndian,
-                 `r32 ))
+                 `r64 ))
         in
         let def_load =
           Def.create rax
@@ -1277,14 +1276,14 @@ let tests : unit Alcotest.test list =
                  Bil.BinOp
                    (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 12))),
                  LittleEndian,
-                 Size.of_int_exn 32 ))
+                 `r64 ))
         in
         let def_sub =
           Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rax))
         in
-        (* A frame-pointer store whose occupied window straddles the
-           extent's top: the claim splits — the extent bytes are a Vla
-           portion, the rest keeps the frame line. *)
+        (* A frame-pointer store whose occupied window once straddled the
+           extent's top: with the cut deleted it binds on the stack line
+           as one portion. *)
         let def_straddle =
           Def.create m
             (Bil.Store
@@ -1306,10 +1305,8 @@ let tests : unit Alcotest.test list =
            with
            | Some (Some p) ->
                Base.List.exists p.A.portions ~f:(fun q ->
-                   portion_eq q S.Vla (pos (-20L)) (pos (-17L)))
-               && Base.List.exists p.A.portions ~f:(fun q ->
-                      portion_eq q S.Stack (pos (-16L)) (pos (-13L)))
-               && List.length p.A.portions = 2
+                   portion_eq q S.Stack (pos (-20L)) (pos (-13L)))
+               && Base.List.length p.A.portions = 1
            | _ -> false));
 ]
 

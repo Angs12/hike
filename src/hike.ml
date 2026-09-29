@@ -14,6 +14,7 @@ module Jump = Hike_jump
 module Split_mem = Hike_split_mem
 module Split_blocks = Hike_split_blocks
 module Coerce = Hike_coerce
+module Fp = Hike_fp
 module Stack_model = Hike_stack_model
 module Def_slots = Hike_def_slots
 module Sections = Hike_sections
@@ -77,6 +78,11 @@ let pass_split_mem proj = Project.map_program proj ~f:Hike_split_mem.normalize
 
 (* The one width-coercion point: every later consumer reads uniform widths. *)
 let pass_coerce proj = Project.map_program proj ~f:Hike_coerce.coerce_program
+
+(* The FP temp identity carries its width; after the coercion point the
+   lifter's widths are honest, so every later pass reads the qualified
+   names. *)
+let pass_fp proj = Project.map_program proj ~f:Hike_fp.run_program
 
 let pass_vsa proj =
   let target = Project.target proj in
@@ -152,6 +158,7 @@ let pass_vsa proj =
   let lookup =
     Hike_resolve.symtab_lookup ~symtab:(Some (Project.symbols proj))
       ~table:(Hike_resolve.name_table_of (Project.program proj))
+      ~addr_bits:(Hike_abi.addr_size_bits target)
   in
   (* The run's sub-entry index: the symtab resolves every block address
      that names a lifted subroutine to that subroutine's tid — the
@@ -253,8 +260,6 @@ let pass_convlir ~output proj = convert_binary output proj
 let pass_split_blocks proj =
   Project.map_program proj ~f:Hike_split_blocks.normalize
 
-let pass_types proj = Hike_types.run proj
-
 let pass_ssa proj =
   let target = Project.target proj in
   Project.map_program proj ~f:(Hike_ssa.ssa_program ~target)
@@ -267,7 +272,8 @@ let () =
       let jump = chain ~name:"jump" ~deps:[ filter ] pass_jump in
       let split_mem = chain ~name:"split-mem" ~deps:[ jump ] pass_split_mem in
       let coerce = chain ~name:"coerce" ~deps:[ split_mem ] pass_coerce in
-      let vsa = chain ~name:"vsa" ~deps:[ coerce ] pass_vsa in
+      let fp = chain ~name:"fp" ~deps:[ coerce ] pass_fp in
+      let vsa = chain ~name:"vsa" ~deps:[ fp ] pass_vsa in
       let strip_canaries =
         chain ~name:"strip-canaries" ~deps:[ vsa ] pass_strip_canaries
       in
@@ -275,8 +281,9 @@ let () =
       let split_blocks =
         chain ~name:"split-blocks" ~deps:[ sections ] pass_split_blocks
       in
-      let types = chain ~name:"types" ~deps:[ split_blocks ] pass_types in
-      let ssa = chain ~name:"ssa" ~deps:[ types ] pass_ssa in
-      let convlir = chain' ~name:"convlir" ~deps:[ ssa ] (pass_convlir ~output:output_file) in
+      let sign = chain ~name:"sign" ~deps:[ split_blocks ] Hike_types.sign_run in
+      let ssa = chain ~name:"ssa" ~deps:[ sign ] pass_ssa in
+      let types = chain ~name:"types" ~deps:[ ssa ] Hike_types.run in
+      let convlir = chain' ~name:"convlir" ~deps:[ types ] (pass_convlir ~output:output_file) in
       ignore convlir;
       Ok ())

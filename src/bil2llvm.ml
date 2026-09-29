@@ -12,56 +12,73 @@ open Bil2llvm_calls
 open Bil2llvm_fp
 open Bil2llvm_section
 
-(* One jmp per block: the splitter guarantees the lone terminator, and
-   the terminal guard's false edge is the block's term-order successor;
-   a block with none keeps the dead end.  A multi-jmp series is a loud
-   failure (the splitter leaves none in production). *)
-let create_branches ctx scope sub blk llvm_builder branches =
+(* Mechanical: a split piece is one jmp (an unconditional transfer) or
+   two (a guard plus its explicit fallthrough Goto).  The splitter
+   canonicalizes the shape, so the emitter maps it directly — no chain
+   walking, no term-order fallthrough. *)
+let create_branches ctx scope blk_tid llvm_builder branches =
   let open Bap.Std in
-  let blk_tid = Term.tid blk in
   let llvm_ctx = ctx.llvm_ctx in
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
-  let emit_terminal_guard ~tid ~bb ~(cond : exp) =
-    match (Hike_stack_model.is_true_cond cond, Hike_split_blocks.fallthrough sub blk) with
-    | true, _ -> Llvm.build_br bb llvm_builder |> ignore
-    | false, Some succ when Tid.equal succ tid ->
-        (* Both edges land on the target: the guard selects nothing. *)
-        Llvm.build_br bb llvm_builder |> ignore
-    | false, Some succ ->
-        let cont = get_bb scope succ in
-        let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
-        Llvm.build_cond_br cond_val bb cont llvm_builder |> ignore
-    | false, None ->
-        let dead = Llvm.append_block llvm_ctx (Tid.name blk_tid ^ "-dead") fn in
-        let cond_val = create_exp ctx scope llvm_builder blk_tid cond in
-        Llvm.build_cond_br cond_val bb dead llvm_builder |> ignore;
-        Llvm.position_at_end dead llvm_builder;
-        Llvm.build_unreachable llvm_builder |> ignore
+  let is_interrupt tid = Bil2llvm_env.is_interrupt_name (Tid.name tid) in
+  (* A conditional target that is an interrupt sub needs its own block;
+     the trap is terminal there. *)
+  let target_bb tid =
+    if is_interrupt tid then begin
+      let bb = Llvm.append_block llvm_ctx (Tid.name tid ^ "-trap") fn in
+      let cur = Llvm.insertion_block llvm_builder in
+      Llvm.position_at_end bb llvm_builder;
+      create_interrupt ctx llvm_builder;
+      Llvm.position_at_end cur llvm_builder;
+      bb
+    end
+    else get_bb scope tid
+  in
+  let emit_indirect exp =
+    Hike_diag.warn
+      "emit: indirect jump at block %s has no enumerated destinations (UB when taken)"
+      (Tid.name blk_tid);
+    let target_val = create_exp ctx scope llvm_builder blk_tid exp in
+    build_indirect_br llvm_builder target_val
+      ~reserved_destinations:indirect_br_one_reserved |> ignore
   in
   match Seq.to_list branches with
   | [ j ] -> (
-      match Jmp.kind j |> goto_label_exn with
-      | Direct tid ->
-          if Bil2llvm_env.is_interrupt_name (Tid.name tid) then
-            (* A divide-by-zero trap lifts as a direct goto to the
-               interrupt sub; it is terminal. *)
-            create_interrupt ctx llvm_builder
+      match Jmp.kind j with
+      | Goto (Direct tid) ->
+          if Hike_stack_model.is_true_cond (Jmp.cond j) then (
+            if is_interrupt tid then create_interrupt ctx llvm_builder
+            else Llvm.build_br (get_bb scope tid) llvm_builder |> ignore)
           else
-            emit_terminal_guard ~tid ~bb:(get_bb scope tid)
-              ~cond:(Jmp.cond j)
-      | Indirect exp ->
-          (* A label-less indirectbr is UB when taken, so the class is
-             named on the channel. *)
-          Hike_diag.warn
-            "emit: indirect jump at block %s has no enumerated destinations (UB when taken)"
-            (Tid.name blk_tid);
-          let target_val = create_exp ctx scope llvm_builder blk_tid exp in
-          build_indirect_br llvm_builder target_val
-            ~reserved_destinations:indirect_br_one_reserved |> ignore)
+            failwith
+              (Printf.sprintf
+                 "hike: create_branches: block %s: a lone guarded goto has \
+                  no explicit false edge (jmp %s)"
+                 (Tid.name blk_tid) (Tid.name (Term.tid j)))
+      | Goto (Indirect exp) -> emit_indirect exp
+      | _ ->
+          failwith "hike: create_branches: a piece's lone jmp is not a goto")
+  | [ j1; j2 ] -> (
+      match (Jmp.kind j1, Jmp.kind j2) with
+      | Goto (Direct t1), Goto (Direct t2) ->
+          if Hike_stack_model.is_true_cond (Jmp.cond j1) then
+            (* The first edge transfers unconditionally; the second is
+               the dead fallthrough. *)
+            if is_interrupt t1 then create_interrupt ctx llvm_builder
+            else Llvm.build_br (get_bb scope t1) llvm_builder |> ignore
+          else
+            let cond =
+              create_exp ctx scope llvm_builder blk_tid (Jmp.cond j1)
+            in
+            Llvm.build_cond_br cond (target_bb t1) (target_bb t2)
+              llvm_builder |> ignore
+      | _ ->
+          failwith
+            "hike: create_branches: a two-jmp piece is not a guard plus a \
+             fallthrough goto")
   | _ ->
       failwith
-        "hike-ssa: unsplit multi-jmp series reached the emitter \
-         (the splitter leaves none in production)"
+        "hike: create_branches: an unsplit multi-jmp series reached the emitter"
 
 let create_control_flow ctx scope llvm_builder blk sub fr =
   let control_flow = Term.enum jmp_t blk in
@@ -71,7 +88,7 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
     create_return ctx scope tid llvm_builder sub
   else
   match cf_type control_flow with
-  | Br -> create_branches ctx scope sub blk llvm_builder control_flow
+  | Br -> create_branches ctx scope tid llvm_builder control_flow
   | Int -> create_interrupt ctx llvm_builder
   | Ret -> create_return ctx scope tid llvm_builder sub
   | CallIndirect ->
@@ -93,9 +110,20 @@ let create_elts ctx scope llvm_builder blk sub_tid fr =
       | `Phi phi ->
           (* A BIR phi renders as the LLVM phi of its own lhs; the
              incomings fill after every body (a compound incoming
-             builds before its source block's terminator). *)
+             builds before its source block's terminator).  The type is
+             the lhs's, OR a pointer when any incoming is a pointer
+             value (D13). *)
           let var = Phi.lhs phi in
-          let typ = var_lltype ctx var in
+          let incoming_ptr =
+            Phi.values phi
+            |> Seq.exists ~f:(fun (_, e) ->
+                   match e with
+                   | Bil.Var v -> is_ptr_var v
+                   | _ -> false)
+          in
+          let typ =
+            if incoming_ptr then ctx.ptr_ty else var_lltype ctx var
+          in
           let res = Llvm.build_empty_phi typ "" llvm_builder in
           insert_bir_phi scope tid var res;
           insert_local scope tid var res;
@@ -115,20 +143,30 @@ let fill_bir_phis ctx scope blks =
           in
           Phi.values phi
           |> Seq.iter ~f:(fun (src, exp) ->
+              let src_bb = get_bb scope src in
+              let src_b =
+                match Llvm.block_terminator src_bb with
+                | Some t -> Llvm.builder_before ctx.llvm_ctx t
+                | None -> Llvm.builder_at_end ctx.llvm_ctx src_bb
+              in
               let value =
                 match exp with
                 | Bil.Var v when Base.Option.is_some (get_ssaval scope v) ->
                     Base.Option.value_exn (get_ssaval scope v)
-                | _ ->
-                    let bb = get_bb scope src in
-                    let b =
-                      match Llvm.block_terminator bb with
-                      | Some t -> Llvm.builder_before ctx.llvm_ctx t
-                      | None -> Llvm.builder_at_end ctx.llvm_ctx bb
-                    in
-                    create_exp ctx scope b src exp
+                | _ -> create_exp ctx scope src_b src exp
               in
-              Llvm.add_incoming (value, get_bb scope src) phi_ll)))
+              (* The phi's type is its lhs's; an integer incoming at a
+                 pointer phi inttoptrs (D13's one sanctioned value
+                 conversion). *)
+              let phi_is_ptr =
+                Llvm.classify_type (Llvm.type_of phi_ll) = Llvm.TypeKind.Pointer
+              in
+              let value =
+                if phi_is_ptr && not (Bil2llvm_ptr.is_ptr_value value) then
+                  Bil2llvm_ptr.as_pointer ctx src_b value
+                else value
+              in
+              Llvm.add_incoming (value, src_bb) phi_ll)))
 
 let populate_blks ctx scope blks sub fr =
   let sub_tid = Term.tid sub in
@@ -145,15 +183,14 @@ let exit_entry scope llvm_builder sub =
   ignore (Llvm.build_br (get_bb scope target) llvm_builder)
 
 let build_entry_block ctx scope llvm_builder fr sub =
-  (* The SP local binds to a per-invocation entry-block alloca: the
-     anchor is invocation-private — reentrancy-safe, no SP parameter.
-     The sub-wide binding serves every pre-def read. *)
+  (* The SP is the entry line: its offset is the model base, its pointer
+     is the residue's entry position.  Every pre-def SP read sees it. *)
   let sp0 =
-    (* storage-free subs: the constant anchor *)
-    frame_stack0 fr
+    Base.Option.value fr.entry_ptr ~default:(frame_stack0 fr)
   in
   insert_local scope Graphs.Tid.start ctx.sp sp0;
   bind_ssaval scope ctx.sp sp0;
+  insert_ptr_offset scope ctx.sp (frame_stack0 fr);
   exit_entry scope llvm_builder sub
 
 (* Creates the LLVM blocks: one per BIR block plus the entry. *)
@@ -164,14 +201,6 @@ let create_blocks ctx scope llvm_ctx blks fn sub =
       let tid = Term.tid blk in
       init_blk_llvals scope tid;
       insert_bb scope tid (Llvm.append_block llvm_ctx (Term.name blk) fn))
-
-(* The anchor pointer: the alloca position the SP Slot's stored integer
-   relativizes against.  [idx] keeps the SysV entry-SP residue mod 16, so
-   lifted alignment tests evaluate as the native. *)
-let anchor_gep llvm_ctx llvm_builder base idx =
-  Llvm.build_gep (Llvm.i8_type llvm_ctx) base
-    [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) idx false |]
-    "anchor" llvm_builder
 
 (* Consumes the sub's LAYOUT tag (region geometry). *)
 let create_sub ctx scope sub =
@@ -194,44 +223,40 @@ let create_sub ctx scope sub =
     let layout =
       Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:{ Hike_stack_model.Sub_layout.regions = [];
-                   anchor = None; window_param = false }
+                   window_param = false }
     in
+    let storages = Hike_stack_ptr.build ~llvm_ctx ~llvm_builder layout in
     let regions =
-      Hike_stack_ptr.build ~llvm_ctx ~llvm_builder layout
-      |> Base.List.map ~f:(fun (s : Hike_stack_ptr.storage) ->
-             (s.mem, (s.base, s.rel)))
+      Base.List.map storages
+        ~f:(fun (s : Hike_stack_ptr.storage) -> (s.mem, (s.base, s.rel)))
     in
-    let layout_anchor = layout.Hike_stack_model.Sub_layout.anchor in
-    (* The anchor: (region id, byte index) into the regions above. *)
-    let anchor_ptr =
-      Base.Option.bind layout_anchor ~f:(fun (rid, idx) ->
-          Base.Option.bind
-            (Base.List.find regions
-               ~f:(fun (v, _) -> Var.equal v (Hike_stack_model.region_mem rid)))
-            ~f:(fun (_, (base, _)) ->
-              Some (anchor_gep llvm_ctx llvm_builder base idx)))
-    in
-    Base.List.iter regions ~f:(fun (v, (base, _)) ->
-        insert_local scope Graphs.Tid.start v base);
-    let anchor_i64 =
-      Base.Option.value_map anchor_ptr
-        ~default:(Llvm.const_int (Llvm.i64_type llvm_ctx) 0)
-        ~f:(fun p ->
-          Llvm.build_ptrtoint p (Llvm.i64_type llvm_ctx) "anchor_i64"
-            llvm_builder)
-    in
-    let sp_slot = Base.Option.is_some anchor_ptr in
-    let stack0 =
-      if sp_slot then begin
-        let slot =
-          Llvm.build_alloca (Llvm.i64_type llvm_ctx) "sp_slot" llvm_builder
+    Base.List.iter storages ~f:(fun (s : Hike_stack_ptr.storage) ->
+        insert_local scope Graphs.Tid.start s.mem s.base;
+        (* The storage's base var binds to its alloca pointer: a
+           rewritten address def's value GEPs it directly. *)
+        let pv =
+          Hike_stack_model.region_ptr ~addr_bits:ctx.addr_bits s.id
         in
-        ignore (Llvm.build_store anchor_i64 slot llvm_builder);
-        Some (Llvm.build_load (Llvm.i64_type llvm_ctx) slot "stack_0" llvm_builder)
-      end
-      else None
+        insert_local scope Graphs.Tid.start pv s.base;
+        bind_ssaval scope pv s.base);
+    (* The entry line is the model's fixed stack base; its residue pointer
+       is the storage's base GEP'd at the entry position. *)
+    let entry_line =
+      Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+        Hike_stack_model.segment_base false
     in
-    let fr : sub_frame = { anchor_i64; stack0; anchor_ptr; regions } in
+    let entry_ptr =
+      Base.Option.map
+        (Base.List.find regions ~f:(fun (v, _) ->
+             Var.equal v
+               (Hike_stack_model.region_mem Hike_stack_model.residue_id)))
+        ~f:(fun (_, (base, rel)) ->
+          Llvm.build_gep (Llvm.i8_type llvm_ctx) base
+            [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
+                 (Stdlib.Int64.neg rel) false |]
+            "entry" llvm_builder)
+    in
+    let fr : sub_frame = { entry_line; entry_ptr; regions } in
     scope.cur_frame := Some fr;
     (* The window-value vars: a store of one materializes the real
        address at the use. *)
@@ -242,13 +267,23 @@ let create_sub ctx scope sub =
           if Hike_def_slots.def_is_window_value d then
             Core.Set.add acc (Def.lhs d)
           else acc);
-    scope.ptr_storages :=
-      Term.enum blk_t sub
-      |> Seq.concat_map ~f:(Term.enum def_t)
-      |> Seq.fold ~init:Var.Map.empty ~f:(fun acc d ->
-          match Hike_def_slots.def_ptr_storage d with
-          | Some s -> Core.Map.set acc ~key:(Def.lhs d) ~data:s
-          | None -> acc);
+    (* The section-component storage base vars bind to their globals
+       (the run's sec_comps map carries (global, native base)). *)
+    Core.Map.to_sequence !(ctx.sec_comps)
+    |> Seq.iter ~f:(fun (v, (base, _)) ->
+        if Hike_stack_model.is_sec_comp_mem v then
+          let name = Var.name v in
+          let plen = String.length "sec_comp_" in
+          let slen = String.length "_mem" in
+          match
+            Stdlib.int_of_string_opt
+              (String.sub name plen (String.length name - plen - slen))
+          with
+          | Some id ->
+              let pv = Hike_stack_model.sec_comp_ptr ~addr_bits:ctx.addr_bits id in
+              scope.sec_comp_ptrs :=
+                WVarMap.add (wvar_of pv) base !(scope.sec_comp_ptrs)
+          | None -> ());
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
     populate_blks ctx scope blks sub fr;

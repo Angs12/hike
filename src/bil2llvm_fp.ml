@@ -12,48 +12,78 @@ type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
 
 let fp_intrinsic_name = strip_at
 
-(* One row per mapped intrinsic name. *)
-let native_fp_table : (string * native_fp) list =
-  [ ("intrinsic:fmul_rne_ieee754_binary_64", FMUL);
-    ("intrinsic:fmul_rne_ieee754_binary_32", FMUL);
-    ("intrinsic:fadd_rne_ieee754_binary_64", FADD);
-    ("intrinsic:fadd_rne_ieee754_binary_32", FADD);
-    ("intrinsic:fsub_rne_ieee754_binary_64", FSUB);
-    ("intrinsic:fsub_rne_ieee754_binary_32", FSUB);
-    ("intrinsic:fdiv_rne_ieee754_binary_64", FDIV);
-    ("intrinsic:fdiv_rne_ieee754_binary_32", FDIV);
-    ("intrinsic:frem_rne_ieee754_binary_64", FREM);
-    ("intrinsic:frem_rne_ieee754_binary_32", FREM);
-    ("intrinsic:forder_rne_ieee754_binary_64", FORDER);
-    ("intrinsic:forder_rne_ieee754_binary_32", FORDER);
-    ("intrinsic:is_nan_rne_ieee754_binary_64", ISNAN);
-    ("intrinsic:is_nan_rne_ieee754_binary_32", ISNAN);
-    ("intrinsic:is_nan_ieee754_binary", ISNAN);
-    ("intrinsic:is_nan_rne_ieee754_binary", ISNAN);
-    ("intrinsic:forder_ieee754_binary", FORDER);
-    ("intrinsic:forder_rne_ieee754_binary", FORDER);
-    ("intrinsic:cast_sfloat_rne_ieee754_binary_64", SFLOAT);
-    ("intrinsic:cast_sint_rne_ieee754_binary_64", SINT);
-    ("intrinsic:cast_sint_rne_ieee754_binary_32", SINT);
+(* The FP temps' identity carries their width: the lifter uses one name
+   ([intrinsic:x0]) for a single- AND a double-precision operand, and
+   BAP's var identity is type-blind, so the width must be in the name.
+   [hike-fp] qualifies every occurrence. *)
+let temp_name (n : string) (w : int) : string = Printf.sprintf "%s:%d" n w
+
+(* One row per mapped intrinsic name, with the operand width it names.
+   The unsized spellings ([_binary]) carry none: the lifter picks the
+   width per instruction, and [hike-fp] rewrites the target to the sized
+   spelling before any consumer reads it. *)
+let native_fp_table : (string * native_fp * int option) list =
+  [ ("intrinsic:fmul_rne_ieee754_binary_64", FMUL, Some 64);
+    ("intrinsic:fmul_rne_ieee754_binary_32", FMUL, Some 32);
+    ("intrinsic:fadd_rne_ieee754_binary_64", FADD, Some 64);
+    ("intrinsic:fadd_rne_ieee754_binary_32", FADD, Some 32);
+    ("intrinsic:fsub_rne_ieee754_binary_64", FSUB, Some 64);
+    ("intrinsic:fsub_rne_ieee754_binary_32", FSUB, Some 32);
+    ("intrinsic:fdiv_rne_ieee754_binary_64", FDIV, Some 64);
+    ("intrinsic:fdiv_rne_ieee754_binary_32", FDIV, Some 32);
+    ("intrinsic:frem_rne_ieee754_binary_64", FREM, Some 64);
+    ("intrinsic:frem_rne_ieee754_binary_32", FREM, Some 32);
+    ("intrinsic:forder_rne_ieee754_binary_64", FORDER, Some 64);
+    ("intrinsic:forder_rne_ieee754_binary_32", FORDER, Some 32);
+    ("intrinsic:forder_ieee754_binary_64", FORDER, Some 64);
+    ("intrinsic:forder_ieee754_binary_32", FORDER, Some 32);
+    ("intrinsic:is_nan_rne_ieee754_binary_64", ISNAN, Some 64);
+    ("intrinsic:is_nan_rne_ieee754_binary_32", ISNAN, Some 32);
+    ("intrinsic:is_nan_ieee754_binary_64", ISNAN, Some 64);
+    ("intrinsic:is_nan_ieee754_binary_32", ISNAN, Some 32);
+    ("intrinsic:cast_sfloat_rne_ieee754_binary_64", SFLOAT, Some 64);
+    ("intrinsic:cast_sfloat_rne_ieee754_binary_32", SFLOAT, Some 32);
+    ("intrinsic:cast_sint_rne_ieee754_binary_64", SINT, Some 64);
+    ("intrinsic:cast_sint_rne_ieee754_binary_32", SINT, Some 32);
     (* Exact width conversions: the suffix is the result width. *)
-    ("intrinsic:fconvert_rne_ieee754_binary_64", FCONVERT 64);
-    ("intrinsic:fconvert_rne_ieee754_binary_32", FCONVERT 32);
-    ("intrinsic:fmul_rne_ieee754_binary", FMUL);
-    ("intrinsic:fadd_rne_ieee754_binary", FADD);
-    ("intrinsic:fsub_rne_ieee754_binary", FSUB);
-    ("intrinsic:fdiv_rne_ieee754_binary", FDIV);
-    ("intrinsic:frem_rne_ieee754_binary", FREM);
-    ("intrinsic:hlt", FHLT) ]
+    ("intrinsic:fconvert_rne_ieee754_binary_64", FCONVERT 64, Some 64);
+    ("intrinsic:fconvert_rne_ieee754_binary_32", FCONVERT 32, Some 32);
+    (* The untagged spellings the lifter emits: [hike-fp] rewrites them
+       to one of the sized rows above. *)
+    ("intrinsic:fmul_rne_ieee754_binary", FMUL, None);
+    ("intrinsic:fadd_rne_ieee754_binary", FADD, None);
+    ("intrinsic:fsub_rne_ieee754_binary", FSUB, None);
+    ("intrinsic:fdiv_rne_ieee754_binary", FDIV, None);
+    ("intrinsic:frem_rne_ieee754_binary", FREM, None);
+    ("intrinsic:forder_rne_ieee754_binary", FORDER, None);
+    ("intrinsic:is_nan_rne_ieee754_binary", ISNAN, None);
+    ("intrinsic:is_nan_ieee754_binary", ISNAN, None);
+    ("intrinsic:forder_ieee754_binary", FORDER, None);
+    ("intrinsic:hlt", FHLT, None) ]
 
 (* The table as a hash map, built once: call dispatch consults it
    per call site per sub. *)
 let native_fp_map =
   let t = Core.String.Table.create () in
-  Base.List.iter native_fp_table ~f:(fun (k, v) -> Core.Hashtbl.set t ~key:k ~data:v);
+  Base.List.iter native_fp_table ~f:(fun (k, v, w) ->
+      Core.Hashtbl.set t ~key:k ~data:(v, w));
   t
 
-let native_fp_op (name : string) : native_fp option =
+let row_of_name (name : string) : (native_fp * int option) option =
   Core.Hashtbl.find native_fp_map (fp_intrinsic_name name)
+
+let native_fp_op (name : string) : native_fp option =
+  Core.Option.map (row_of_name name) ~f:fst
+
+(* The operand width the target names; [None] for an untagged spelling. *)
+let fp_width_of_name (name : string) : int option =
+  Core.Option.bind (row_of_name name) ~f:snd
+
+(* The bare sized spelling of an untagged FP target, when the table
+   knows it: the name [hike-fp] rewrites the target to. *)
+let sized_name (name : string) (w : int) : string option =
+  let sized = Printf.sprintf "%s_%d" (fp_intrinsic_name name) w in
+  if Core.Hashtbl.mem native_fp_map sized then Some sized else None
 
 (* The static model interface of each mapped op: the input temps the
    call block defines (fp_args) and the result temps consumers read
@@ -66,15 +96,17 @@ let conv_in_w = function
   | FCONVERT res_w -> if res_w = 64 then 32 else 64
   | _ -> 64
 
-let fp_sig_of (op : native_fp) : fp_sig =
-  let v n w = Var.create ~is_virtual:false ~fresh:false n (Type.Imm w) in
-  let x0 w = v "intrinsic:x0" w in
-  let y0 w = v "intrinsic:y0" w in
+let fp_sig_of (op : native_fp) ~(w : int) : fp_sig =
+  let v n k =
+    Var.create ~is_virtual:false ~fresh:false (temp_name n k) (Type.Imm k)
+  in
+  let x0 k = v "intrinsic:x0" k in
+  let y0 k = v "intrinsic:y0" k in
   match op with
   | FMUL | FADD | FSUB | FDIV | FREM | FORDER ->
-    { fp_args = [ x0 64; v "intrinsic:x1" 64 ]; fp_rets = [ y0 64 ] }
+    { fp_args = [ x0 w; v "intrinsic:x1" w ]; fp_rets = [ y0 w ] }
   | SFLOAT | SINT | ISNAN ->
-    { fp_args = [ x0 64 ]; fp_rets = [ y0 64 ] }
+    { fp_args = [ x0 w ]; fp_rets = [ y0 w ] }
   | FCONVERT res_w ->
     { fp_args = [ x0 (conv_in_w op) ];
       fp_rets = [ y0 res_w ] }
@@ -149,7 +181,12 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
   let word_bits = Hike_abi.word_bits ctx.abi in
   let in_w, res_w = fp_intrinsic_sizes ~word_bits args rets in
   let temp_defs = temp_defs_of_blk blk in
-  let sig_ = fp_sig_of op in
+  let sig_ =
+    fp_sig_of op
+      ~w:
+        (Base.Option.value (fp_width_of_name (Tid.name target))
+           ~default:word_bits)
+  in
   let arg_value (i : int) : Llvm.llvalue =
     (* The [intrinsic:xN] temp the block defined IS the operand; it
        routes through the memory dispatch, so a converted operand

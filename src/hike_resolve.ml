@@ -29,11 +29,14 @@ let name_table_of (prog : program term) : Tid.t String.Map.t =
    program through the symtab and the name table; a foreign address
    resolves to no sub. *)
 let symtab_lookup ~(symtab : Symtab.t option)
-    ~(table : Tid.t String.Map.t) : int64 -> Tid.t option =
+    ~(table : Tid.t String.Map.t) ~(addr_bits : int) :
+    int64 -> Tid.t option =
   match symtab with
   | Some symtab ->
     (fun v ->
-       match Symtab.find_by_start symtab (Word.of_int64 ~width:64 v) with
+       match
+         Symtab.find_by_start symtab (Word.of_int64 ~width:addr_bits v)
+       with
        | Some (name, _, _) -> Core.Map.find table name
        | None -> None)
   | None -> fun _ -> None

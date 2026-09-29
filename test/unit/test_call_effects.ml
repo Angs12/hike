@@ -14,7 +14,7 @@ module Ce = Vsa.Call_effects
 let ce_idx = { Mem.addr_width = 64; Mem.addressable_width = 8 }
 
 let ce_mkey lo =
-  match Mem.Key.of_wordset (Ws.singleton (w64 lo)) with
+  match Mem.Key.of_wordset (Ws.stack_word_i64 lo) with
   | [ k ] -> k
   | _ -> failwith "key"
 
@@ -38,21 +38,22 @@ let ce_raw_env ?(lanes = []) () =
     Mem.add
       (Mem.add
          (Mem.add (Mem.top ce_idx)
-            ~key:(ce_mkey 0x2000)
+            ~key:(ce_mkey 0x2000L)
             ~data:(Mem.Val.create (Ws.singleton (w64 42)) LittleEndian))
-         ~key:(ce_mkey 0x3000)
+         ~key:(ce_mkey 0x3000L)
          ~data:(Mem.Val.create (Ws.singleton (w64 7)) LittleEndian))
-      ~key:(ce_mkey 0x500)
+      ~key:(ce_mkey 0x500L)
       ~data:(Mem.Val.create (Ws.singleton (w64 1)) LittleEndian)
   in
   let m = memv "ce_m" in
   let env =
     AI.add_memory AI.top ~key:m ~data:mem
-    |> AI.add_word ~key:ce_abi.Hike_abi.sp ~data:(Ws.singleton (w64 0x1000))
+    |> AI.add_word ~key:ce_abi.Hike_abi.sp
+       ~data:(Ws.stack_word_i64 0x1000L)
   in
   let env =
     Base.List.fold lanes ~init:env ~f:(fun acc v ->
-        AI.add_word acc ~key:v ~data:(Ws.singleton (w64 0x2000)))
+        AI.add_word acc ~key:v ~data:(Ws.stack_word_i64 0x2000L))
   in
   (env, m)
 
@@ -126,9 +127,9 @@ let tests : unit Alcotest.test list =
             ~site:{ Ce.summary = None; written_lanes = []; pushed = false } e
         in
         check "CE-03"
-          (Ws.equal (ce_reads m 0x2000 kept_frame) (Ws.singleton (w64 42))
-          && Ws.equal (ce_reads m 0x3000 kept_frame) (Ws.singleton (w64 7))
-          && Ws.is_top (ce_reads m 0x500 kept_frame)));
+          (Ws.equal (ce_reads m 0x2000L kept_frame) (Ws.singleton (w64 42))
+          && Ws.equal (ce_reads m 0x3000L kept_frame) (Ws.singleton (w64 7))
+          && Ws.is_top (ce_reads m 0x500L kept_frame)));
 
     (* An escape lane's range dies with the call, the rest of the frame survives. *)
     pin "CE-04" "an escape lane's range dies with the call, the rest of the frame survives"
@@ -140,8 +141,8 @@ let tests : unit Alcotest.test list =
             ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false } e
         in
         check "CE-04"
-          (Ws.is_top (ce_reads m 0x2000 escaped)
-          && Ws.equal (ce_reads m 0x3000 escaped) (Ws.singleton (w64 7))));
+          (Ws.is_top (ce_reads m 0x2000L escaped)
+          && Ws.equal (ce_reads m 0x3000L escaped) (Ws.singleton (w64 7))));
 
     (* A pushed site's SP gains one word — the popped retaddr. *)
     pin "CE-05" "a pushed site's SP gains one word — the popped retaddr" (fun () ->
@@ -165,7 +166,7 @@ let tests : unit Alcotest.test list =
         in
         check "CE-06"
           (Ws.equal (AI.find_word 64 trap ce_abi.Hike_abi.sp)
-             (Ws.singleton (w64 0x1000))));
+             (Ws.stack_word_i64 0x1000L)));
 
     (* A trap with a bounded RSP keeps the frame like any call. *)
     pin "CE-07" "a trap with a bounded RSP keeps the frame like any call" (fun () ->
@@ -177,9 +178,9 @@ let tests : unit Alcotest.test list =
             trap_env
         in
         check "CE-07"
-          (Ws.equal (ce_reads m_trap 0x2000 trap_frame) (Ws.singleton (w64 42))
-          && Ws.equal (ce_reads m_trap 0x3000 trap_frame) (Ws.singleton (w64 7))
-          && Ws.is_top (ce_reads m_trap 0x500 trap_frame)));
+          (Ws.equal (ce_reads m_trap 0x2000L trap_frame) (Ws.singleton (w64 42))
+          && Ws.equal (ce_reads m_trap 0x3000L trap_frame) (Ws.singleton (w64 7))
+          && Ws.is_top (ce_reads m_trap 0x500L trap_frame)));
 
     (* A singleton target naming a lifted sub reads its summary. *)
     pin "CE-08" "a singleton target naming a lifted sub reads its summary" (fun () ->
@@ -282,6 +283,37 @@ let tests : unit Alcotest.test list =
         let e_v = ce_call env_v (ids1 vv) in
         check "CE-15"
           (Ws.equal (AI.find_word 64 e_v vv) (Ws.singleton (w64 3))));
+
+    (* The frame-keep namespace rule: a plain-top escape cannot name the
+       stack line, so the caller's frame survives it. *)
+    pin "CE-16" "a plain-top escape keeps the caller's frame" (fun () ->
+        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+        let e, m = ce_raw_env () in
+        let env = AI.add_word e ~key:rdi ~data:(Ws.top 64) in
+        let kept =
+          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
+            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false }
+            env
+        in
+        check "CE-16"
+          (Ws.equal (ce_reads m 0x2000L kept) (Ws.singleton (w64 42))
+          && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
+
+    (* A Rel escape of bounded extent carves exactly its range. *)
+    pin "CE-17" "a Rel escape of bounded extent carves its range" (fun () ->
+        let rdi = Base.List.nth_exn ce_abi.Hike_abi.int_param_regs 0 in
+        let e, m = ce_raw_env () in
+        let env =
+          AI.add_word e ~key:rdi ~data:(Ws.stack_word_i64 0x2000L)
+        in
+        let kept =
+          Ce.transfer ~abi:ce_abi ~preserved:Core.Int.Set.empty
+            ~site:{ Ce.summary = None; written_lanes = [ rdi ]; pushed = false }
+            env
+        in
+        check "CE-17"
+          (Ws.is_top (ce_reads m 0x2000L kept)
+          && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
   ]
 
 let () = run "call_effects" tests

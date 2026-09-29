@@ -74,23 +74,54 @@ let name (t : t) : string =
   | Window -> "window"
   | Rip -> "rip"
 
-(* The run's VLA extents: the allocation's byte range on the segment
-   line (absolute, inclusive), keyed by the decrement def's tid — the
-   seed records, the boundary refinement and the attribution read.  The
-   one mutable cell of the origin algebra; [take] drains at the facts
-   boundary so nothing crosses a program run. *)
+(* A VLA allocation's fact in the allocation's own frame: the routable
+   offsets are frame-relative (0 = the allocation base = the post-move
+   SP).  [off_hi] bounds routing below the base (None = unbounded size);
+   [base_lo]/[base_hi] are the base's entry-line (segment-relative)
+   range, known when the base is bounded — they materialise a
+   frame-relative value back to the entry line. *)
+type vla_extent = {
+  off_lo : int64;
+  off_hi : int64 option;
+  base_lo : int64 option;
+  base_hi : int64 option;
+}
+
+(* The run's VLA extents, keyed by the SP-assigning def's tid — the seed
+   records; the boundary refinement, the materialiser and the call keep
+   read.
+   The one mutable cell of the origin algebra; [take] drains at the
+   facts boundary so nothing crosses a program run. *)
 module Vla_seed = struct
-  let empty : (int64 * int64) Tid.Map.t = Tid.Map.empty
+  let empty : vla_extent Tid.Map.t = Tid.Map.empty
 
-  let extents : (int64 * int64) Tid.Map.t ref = ref empty
+  let extents : vla_extent Tid.Map.t ref = ref empty
 
-  let record (t : Tid.t) (ext : int64 * int64) : unit =
+  let record (t : Tid.t) (ext : vla_extent) : unit =
     extents := Core.Map.set !extents ~key:t ~data:ext
 
-  let extent (t : Tid.t) : (int64 * int64) option =
-    Core.Map.find !extents t
+  let extent (t : Tid.t) : vla_extent option = Core.Map.find !extents t
 
-  let take () : (int64 * int64) Tid.Map.t =
+  (* Widen the routable offset floor, e.g. when a round-down is seen on
+     an in-frame value. *)
+  let widen_off_lo (t : Tid.t) (lo : int64) : unit =
+    match Core.Map.find !extents t with
+    | Some e when Stdlib.Int64.compare lo e.off_lo < 0 ->
+      extents := Core.Map.set !extents ~key:t ~data:{ e with off_lo = lo }
+    | _ -> ()
+
+  (* Keep only the allocations [keep] accepts — the post-solve
+     re-validation against the final denotations. *)
+  let filter (keep : Tid.t -> bool) : unit =
+    extents := Core.Map.filter_keys !extents ~f:keep
+
+  let keys () : Tid.Set.t = Core.Map.key_set !extents
+
+  (* Drop the table: the final replay re-seeds it against the converged
+     denotations, so fixpoint-transient events do not survive. *)
+  let reset () : unit = extents := empty
+
+  let take () : vla_extent Tid.Map.t =
     let e = !extents in
     extents := empty;
     e

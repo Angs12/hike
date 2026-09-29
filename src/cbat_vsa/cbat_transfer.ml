@@ -15,6 +15,9 @@ module Word_ops = Cbat_word
 let addr_bits_ref = ref 0
 let set_addr_bits (n : int) : unit = addr_bits_ref := n
 
+(* The target's word size, as the origin refinement reads it. *)
+let word_bytes () : int = if !addr_bits_ref > 0 then !addr_bits_ref / 8 else 8
+
 (* The SP var the VLA rebase anchors on; set at the solve entry next
    to the address bits. *)
 let sp_var_ref : var option ref = ref None
@@ -289,7 +292,13 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
               let last_w =
                 Cbat_word.of_word (Word.of_int64 ~width:64 last)
               in
-              if Mem.has_cell_in mv ~lo:(Option.value_exn mn_w) ~hi:last_w
+              if
+                Mem.has_cell_in mv
+                  ~origin:
+                    (WordSet.key_line
+                       (Option.value (WordSet.origin addr)
+                          ~default:WordSet.Origin.Abs))
+                  ~lo:(Option.value_exn mn_w) ~hi:last_w
               then None
               else if
                 Cbat_word.gt_int (WordSet.cardinality addr) image_load_card_cap
@@ -419,62 +428,68 @@ let offset_bounds (ws : wordset) : (int64 * int64) option =
       | _ -> None)
   | None -> None
 
-(* The VLA seed: the def that assigns SP the runtime decrement
-   [SP - x] opens a VLA frame — a coordinate frame whose zero is the
-   post-decrement SP, named by the def's tid.  The value's offsets are
-   the TRUE entry-line positions [B - S], so every consumer works in
-   real positions and the origin only routes; the allocation extent
-   [min(B - S), max(B)) rides the seed table for the boundary flip and
-   the attribution's extent cut.  Fires on the direct form (lhs = SP)
-   for a bounded strictly-positive size; anything else keeps the
-   plain-arithmetic result — the sound identity. *)
-let vla_seed (df : def term) (lhs : var) (e : exp) (env : AI.t)
-    (p : wordset) : wordset =
-  match (!sp_var_ref, e) with
-  | Some sp, Bil.BinOp (Bil.MINUS, Bil.Var a, x)
-    when Var.equal (Var.base lhs) (Var.base sp)
-         && Var.equal (Var.base a) (Var.base sp) -> (
-      let literal = match x with Bil.Int _ -> true | _ -> false in
-      if literal then p
+(* The VLA event: an SP-assigning def whose subtracted amount is
+   non-singleton and whose value strictly descends on the stack line.
+   The direct [SP - x] form and the temporary/copy chain are the same
+   event: the amount reads from the denotations ([before - after]), so
+   no shape is privileged.  A singleton move is a static frame
+   adjust. *)
+let vla_event ~(before : wordset) ~(after : wordset) :
+    Hike_origin.vla_extent option =
+  let amount = WordSet.sub before after in
+  let non_singleton =
+    WordSet.is_top amount || WordSet.is_infinite amount
+    || (match WordSet.min_elem amount, WordSet.max_elem amount with
+        | Some a, Some b -> not (Cbat_word.equal a b)
+        | _ -> true)
+  in
+  let after_unbounded = WordSet.is_top after || WordSet.is_infinite after in
+  let descends =
+    match offset_bounds before with
+    | None -> false
+    | Some (_, bhi) ->
+      if after_unbounded then true
+      else (
+        match offset_bounds after with
+        | Some (_, phi) -> Stdlib.Int64.compare phi bhi < 0
+        | None -> false)
+  in
+  if not (non_singleton && descends) then None
+  else
+    let base_lo, base_hi =
+      if after_unbounded then (None, None)
       else
-        match (denote_imm_exp x env, denote_imm_exp (Bil.Var a) env) with
-        | Ok size_ws, Ok before_ws -> (
-            let size_ok =
-              not (WordSet.is_top size_ws)
-              && not (WordSet.is_infinite size_ws)
-              && (match WordSet.min_elem size_ws, WordSet.max_elem size_ws with
-                  | Some lo, Some hi -> (
-                      match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-                      | Ok lo, Ok hi ->
-                        Stdlib.Int64.compare lo 1L >= 0
-                        && Stdlib.Int64.compare lo hi <= 0
-                      | _ -> false)
-                  | _ -> false)
-            in
-            let shifted = WordSet.sub before_ws size_ws in
-            let seedable =
-              size_ok
-              && (match offset_bounds before_ws with
-                  | Some (_, bhi) -> Stdlib.Int64.compare bhi 0L <= 0
-                  | None -> false)
-              && Option.is_some (offset_bounds shifted)
-            in
-            if seedable then
-              match (offset_bounds before_ws, offset_bounds shifted) with
-              | Some (_, bhi), Some (slo, _) -> (
-                  match
-                    ( WordSet.position_of_offset slo,
-                      WordSet.position_of_offset
-                        (Stdlib.Int64.pred bhi) )
-                  with
-                  | Some plo, Some phi ->
-                    let tid = Term.tid df in
-                    WordSet.Origin.Vla_seed.record tid (plo, phi);
-                    WordSet.set_origin (WordSet.Origin.Vla tid) shifted
-                  | _ -> p)
-              | _ -> p
-            else p)
-        | _ -> p)
+        match offset_bounds after with
+        | Some (lo, hi) -> (Some lo, Some hi)
+        | None -> (None, None)
+    in
+    let off_hi =
+      if WordSet.is_top amount || WordSet.is_infinite amount then None
+      else
+        match WordSet.max_elem amount with
+        | Some w -> (
+            match Cbat_word.to_int64 w with
+            | Ok v when Stdlib.Int64.compare v 0L > 0 -> Some v
+            | _ -> None)
+        | None -> None
+    in
+    Some { Hike_origin.off_lo = 0L; off_hi; base_lo; base_hi }
+
+(* The seed: an event opens the frame named by the def's tid and its
+   value becomes the allocation base (frame-relative zero); anything
+   else keeps the plain-arithmetic result — the sound identity. *)
+let vla_seed (df : def term) (lhs : var) (env : AI.t) (p : wordset) : wordset =
+  match !sp_var_ref with
+  | Some sp when Var.equal (Var.base lhs) (Var.base sp) -> (
+      match denote_imm_exp (Bil.Var sp) env with
+      | Error _ -> p
+      | Ok before -> (
+          match vla_event ~before ~after:p with
+          | None -> p
+          | Some ext ->
+            let tid = Term.tid df in
+            WordSet.Origin.Vla_seed.record tid ext;
+            WordSet.vla_frame tid))
   | _ -> p
 
 (* Every def is denoted: SP-derived addresses arrive as [StackOff]
@@ -498,7 +513,7 @@ let denote_def (df : def term) (env : AI.t) : AI.t =
             WordSet.cast Bil.UNSIGNED n p
           | _ -> p
         in
-        let p = vla_seed df v e env p in
+        let p = vla_seed df v env p in
         (* The solve-boundary origin: a wholly window-side value names
            the caller's frame; a wholly VLA-band value names the
            rebased SP. *)

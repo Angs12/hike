@@ -16,22 +16,25 @@ let is_compare : Bil.binop -> bool = function
   | _ -> false
 
 (* The exp's own width; 0 when undeterminable (then no coercion). *)
-let rec exp_width (e : exp) : int =
-  match e with
-  | Bil.Int w -> Word.bitwidth w
-  | Bil.Var v -> (match Var.typ v with Type.Imm n -> n | _ -> 0)
-  | Bil.Cast (_, n, _) -> n
-  | Bil.Extract (hi, lo, _) -> Stdlib.max 0 (hi - lo + 1)
-  | Bil.Concat (a, b) -> exp_width a + exp_width b
-  | Bil.Load (_, _, _, s) -> Size.in_bits s
-  | Bil.Store (_, _, data, _, _) -> exp_width data
-  | Bil.BinOp (op, a, b) ->
-      if is_compare op then 1 else Stdlib.max (exp_width a) (exp_width b)
-  | Bil.UnOp (_, a) -> exp_width a
-  | Bil.Ite (_, a, _) -> exp_width a
-  | Bil.Let (v, value, _) -> (
-      match Var.typ v with Type.Imm n -> n | _ -> exp_width value)
-  | Bil.Unknown (_, t) -> (match t with Type.Imm n -> n | _ -> 0)
+let exp_width (e : exp) : int =
+  Hike_exp_fold.fold
+    (fun e child ->
+      match e with
+      | Bil.Int w -> Word.bitwidth w
+      | Bil.Var v -> (match Var.typ v with Type.Imm n -> n | _ -> 0)
+      | Bil.Cast (_, n, _) -> n
+      | Bil.Extract (hi, lo, _) -> Stdlib.max 0 (hi - lo + 1)
+      | Bil.Concat (a, b) -> child a + child b
+      | Bil.Load (_, _, _, s) -> Size.in_bits s
+      | Bil.Store (_, _, data, _, _) -> child data
+      | Bil.BinOp (op, a, b) ->
+          if is_compare op then 1 else Stdlib.max (child a) (child b)
+      | Bil.UnOp (_, a) -> child a
+      | Bil.Ite (_, a, _) -> child a
+      | Bil.Let (v, value, _) -> (
+          match Var.typ v with Type.Imm n -> n | _ -> child value)
+      | Bil.Unknown (_, t) -> (match t with Type.Imm n -> n | _ -> 0))
+    e
 
 (* The width a var declares; 0 when not an integer lane. *)
 let var_width (v : var) : int =

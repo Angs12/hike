@@ -220,7 +220,7 @@ let tests : unit Alcotest.test list =
        pointer [In] lane"
       (fun () ->
         let layout : Sm.sub_layout =
-          { regions = []; anchor = None; window_param = true }
+          { regions = []; window_param = true }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
         let rets, args = Types.compute_sub_sig unknown sub in
@@ -273,7 +273,7 @@ let tests : unit Alcotest.test list =
         let sub' = Term.first sub_t prog' |> Base.Option.value_exn in
         check "TYPES-19" (lanes_of_sub sub' = lanes (rets @ args)));
 
-    pin "TYPES-20" "run: the project entry signs the project's program"
+    pin "TYPES-20" "sign_run: the project entry signs the project's program"
       (fun () ->
         let rsi = v64 "RSI" in
         let sub =
@@ -282,7 +282,7 @@ let tests : unit Alcotest.test list =
         let target = x86 () in
         let prog = Program.create ~subs:[ sub ] () in
         let proj = Project.with_program (Project.empty target) prog in
-        let proj' = Types.run proj in
+        let proj' = Types.sign_run proj in
         let sub' =
           Term.first sub_t (Project.program proj') |> Base.Option.value_exn
         in
@@ -356,7 +356,7 @@ let tests : unit Alcotest.test list =
                      Bil.Int (Cbat_word.to_word (w64 8)) )) ]
         in
         let facts, stamped = fixture_facts_sub sub in
-        let ptrs, _ = Types.ptr_defs ~facts stamped in
+        let pf = Types.ptr_defs ~facts stamped in
         let rax_def =
           Term.enum blk_t stamped
           |> Seq.concat_map ~f:(Term.enum def_t)
@@ -364,7 +364,7 @@ let tests : unit Alcotest.test list =
         in
         check "KIND-01"
           (match rax_def with
-           | Some d -> Core.Set.mem ptrs (Term.tid d)
+           | Some d -> Core.Set.mem pf.Types.def_tids (Term.tid d)
            | None -> false));
 
     pin "KIND-02" "a plain integer def is not ptr-kind" (fun () ->
@@ -374,7 +374,7 @@ let tests : unit Alcotest.test list =
             [ Def.create rcx (Bil.Int (Cbat_word.to_word (w64 5))) ]
         in
         let facts, stamped = fixture_facts_sub sub in
-        let ptrs, _ = Types.ptr_defs ~facts stamped in
+        let pf = Types.ptr_defs ~facts stamped in
         let def =
           Term.enum blk_t stamped
           |> Seq.concat_map ~f:(Term.enum def_t)
@@ -382,7 +382,7 @@ let tests : unit Alcotest.test list =
         in
         check "KIND-02"
           (match def with
-           | Some d -> not (Core.Set.mem ptrs (Term.tid d))
+           | Some d -> not (Core.Set.mem pf.Types.def_tids (Term.tid d))
            | None -> false));
 
     pin "KIND-03" "stamp_ptr_kinds round-trips through def_ptr_kind"

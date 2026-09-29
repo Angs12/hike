@@ -435,9 +435,15 @@ let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
       top_claim ~extents ~cause:Unbounded_stack ~entry ~word
     else top_claim ~extents ~cause:Foreign ~entry ~word
   else
-    match Vsa.WordSet.stack_offsets ws with
-    | Some _ -> stack_offset_portions ~extents ~word ~entry ~width ws
-    | None -> plain_portions ~extents ~word ~entry ~spans ~rip ~width ws
+    match Vsa.WordSet.origin ws with
+    | Some (Vsa.WordSet.Origin.Vla _) ->
+      (* A VLA claim's real storage is the dynamic alloca the origin
+         names; it binds nothing in the section tree. *)
+      (None, [])
+    | _ -> (
+      match Vsa.WordSet.stack_offsets ws with
+      | Some _ -> stack_offset_portions ~extents ~word ~entry ~width ws
+      | None -> plain_portions ~extents ~word ~entry ~spans ~rip ~width ws)
 
 type env = {
   word : int;
@@ -537,12 +543,14 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
 
 (* Pure constant arithmetic — the address shape whose emission
    evaluates to the exact native bits. *)
-let rec is_const_chain (e : exp) : bool =
-  match e with
-  | Bil.Int _ -> true
-  | Bil.BinOp ((Bil.PLUS | Bil.MINUS), e1, e2) ->
-    is_const_chain e1 && is_const_chain e2
-  | _ -> false
+let is_const_chain (e : exp) : bool =
+  Hike_exp_fold.fold
+    (fun e child ->
+      match e with
+      | Bil.Int _ -> true
+      | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) -> child a && child b
+      | _ -> false)
+    e
 
 (* The caller-window hull's slack above the call-time SP: pushes and
    alignment spillover the window must cover. *)
@@ -811,7 +819,7 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     (* Only the integer params ride the escape fold: the vector lanes
        are FP values the model's stack offsets never serve. *)
     { word; entry; spans;
-      extents = Core.Map.data facts.Hike_kb.vla_extents;
+      extents = [];
       params = abi.Hike_abi.int_param_regs;
       sp = abi.Hike_abi.sp; denote = facts.denote }
   in
@@ -830,96 +838,29 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   { sub_trees; data_tree; tags = collected.tags; projections = collected.projections;
     whole }
 
-(* The dynamic-allocation event: a def that moves SP by a runtime
-   size — the direct [SP +/- X] form or a copy chain reaching it,
-   with a non-fixed size and a strictly-below-SP value. *)
+(* The dynamic-allocation set is the seed's own, re-validated against
+   the final denotations: the event predicate over the def's SP-before
+   and SP-after words.  An alloca without an origin and an origin
+   without an alloca are the same set. *)
 let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
     (sub : sub term) : Tid.Set.t =
-  let sp_base = Var.base facts.abi.Hike_abi.sp in
-  let is_sp v = Var.equal (Var.base v) sp_base in
-  let denote = facts.denote in
-  (* The size's own denotation confirms the event: a singleton
-     displacement is a proven-constant frame adjust (no alloca), a
-     non-singleton or unknown one is the runtime move. *)
-  let runtime_at ~blk ~def d sz =
-    match denote ~blk ~def:d sz with
-    | Error _ -> true
-    | Ok ws ->
-      not (Vsa.WordSet.is_top ws)
-      && (match Vsa.WordSet.min_elem ws, Vsa.WordSet.max_elem ws with
-          | Some lo, Some hi -> not (Cbat_word.equal lo hi)
-          | _ -> true)
+  let sp = facts.abi.Hike_abi.sp in
+  let def_at =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
+        Term.enum def_t blk
+        |> Seq.fold ~init:m ~f:(fun m d ->
+            Core.Map.set m ~key:(Term.tid d) ~data:(d, blk)))
   in
-  (* A literal size is fixed; a var defers to its def; a def cycle or
-     any other exp is runtime. *)
-  let rec runtime_size chain seen sz =
-    match sz with
-    | Bil.Int _ -> false
-    | Bil.Var v -> var_size chain seen v
-    | _ -> true
-  and var_size chain seen v =
-    let b = Var.base v in
-    if Core.Set.mem seen b then true
-    else
-      let next d = runtime_size chain (Core.Set.add seen b) (Def.rhs d) in
-      Core.Option.value ~default:true (Core.Option.map ~f:next (Core.Map.find chain b))
-  in
-  (* The def's value must land strictly below the old SP (a
-     decrement); an unknown keeps the runtime-move verdict. *)
-  let descends ~blk ~def d =
-    match
-      (denote ~blk ~def:d (Bil.Var sp_base), denote ~blk ~def:d (Def.rhs d))
-    with
-    | Ok old, Ok neu when not (Vsa.WordSet.is_top neu) -> (
-      match (Vsa.WordSet.stack_offsets old, Vsa.WordSet.stack_offsets neu) with
-      | Some old_offs, Some neu_offs -> (
-        match Model.singleton_offset old_offs with
-        | Some old_off -> (
-          match Vsa.WordSet.Clp.max_elem neu_offs with
-          | Some nhi -> (
-            match Cbat_word.to_int64 nhi with
-            | Ok hi -> Stdlib.Int64.compare hi old_off < 0
-            | Error _ -> true)
-          | None -> true)
-        | None -> true)
-      | _ -> true)
-    | _ -> true
-  in
-  (* The direct [SP +/- X] form, or the copy chain reaching it. *)
-  let rec event_rhs chain seen rhs =
-    match rhs with
-    | Bil.BinOp ((Bil.PLUS | Bil.MINUS), Bil.Var a, sz) when is_sp a ->
-      runtime_size chain seen sz
-    | Bil.Var v ->
-      let b = Var.base v in
-      if Core.Set.mem seen b then false
-      else
-        let next d = event_rhs chain (Core.Set.add seen b) (Def.rhs d) in
-        Core.Option.value ~default:false
-          (Core.Option.map ~f:next (Core.Map.find chain b))
-    | _ -> false
-  in
-  (* The sequential walk: the chain holds the defs seen so far, in
-     block/def order. *)
-  Term.enum blk_t sub
-  |> Seq.fold ~init:(Tid.Set.empty, Var.Map.empty)
-       ~f:(fun (events, chain) blk ->
-         Seq.fold (Term.enum def_t blk) ~init:(events, chain)
-           ~f:(fun (events, chain) d ->
-             if is_sp (Def.lhs d) then
-               let moves =
-                 event_rhs chain Var.Set.empty (Def.rhs d)
-                 && descends ~blk ~def:d d
-                 && (match Model.addr_of_rhs (Def.rhs d) with
-                     | Some (sz, _) -> runtime_at ~blk ~def:d d sz
-                     | None -> true)
-               in
-               if moves then (Core.Set.add events (Term.tid d), chain)
-               else (events, chain)
-             else
-               (events,
-                Core.Map.set chain ~key:(Var.base (Def.lhs d)) ~data:d)))
-       |> fst
+  Core.Map.filter_keys facts.Hike_kb.vla_extents ~f:(fun tid ->
+      match Core.Map.find def_at tid with
+      | None -> false
+      | Some (d, blk) -> (
+        match facts.denote ~blk ~def:d (Bil.Var sp),
+              facts.denote ~blk ~def:d (Def.rhs d) with
+        | Ok before, Ok after -> Option.is_some (Vsa.vla_event ~before ~after)
+        | _ -> false))
+  |> Core.Map.key_set
 
 (* Merged bindings never overlap, so the binding containing the
    range's least point is THE owner. *)
@@ -1070,17 +1011,29 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   in
   let pushes = Hike_stack_model.has_call_push sub in
   let below = if pushes then Stdlib.Int64.add below w64 else below in
-  let below = Stdlib.Int64.max below 8192L in
+  (* The residue is sized by its own members: below-entry depth and
+     above-entry reach (the retaddr cell).  The full caller window
+     (65536) is claimed only when a residue member actually reads Args
+     space. *)
+  let residue_above =
+    Base.List.fold bindings ~init:0L ~f:(fun acc (k, rs) ->
+        match rs.storage with
+        | Stack_residue ->
+            Stdlib.Int64.max acc
+              (Stdlib.Int64.max 0L
+                 (Stdlib.Int64.add
+                    (Stdlib.Int64.sub k.hi.p_pos entry)
+                    1L))
+        | _ -> acc)
+  in
   let below = if residue_seen then below else Stdlib.Int64.add below w64 in
-  (* The window is the constant SysV extent; a wider reach reads past
-     it — a sound over-approximation. *)
   let window =
-    if args_residue || residue_seen then Hike_stack_model.caller_window_bytes
-    else 0L
+    if args_residue then Hike_stack_model.caller_window_bytes
+    else residue_above
   in
   (* The anchor sits at the SysV entry-SP alignment inside the
      residue: idx ≡ align − word (mod align), so the lifted arithmetic
-     (an SSE #GP guard tests (stack_0 + k) & (align − 1)) matches the
+     (an SSE #GP guard tests (frame_base + k) & (align − 1)) matches the
      native. *)
   let align = Stdlib.Int64.of_int Hike_abi.stack_align in
   let residue_mod = Stdlib.Int64.sub align (Stdlib.Int64.rem w64 align) in
@@ -1100,14 +1053,6 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
       (Model.residue_id, (rlo, rhi), residue_bytes) :: Base.List.rev carved
     else Base.List.rev carved
   in
-  let anchor =
-    if residue_seen || Stdlib.Int64.compare window 0L > 0 then
-      Some (Model.residue_id, anchor_idx)
-    else
-      match regions with
-      | (id, _, _) :: _ -> Some (id, residue_mod)
-      | [] -> None
-  in
   let window_param = args_residue in
-  { Hike_stack_model.regions; anchor; window_param }
+  { Hike_stack_model.regions; window_param }
 

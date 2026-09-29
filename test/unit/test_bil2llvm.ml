@@ -343,18 +343,17 @@ let tests : unit Alcotest.test list =
         let caller2 =
           Cu.set_layout
             { Cu.regions = [ (0, (pos (-24L), pos (-16L)), 16L) ];
-              Cu.anchor = Some (0, 8192L); Cu.window_param = false }
+              Cu.window_param = false }
             caller2
         in
         let callee2 = fst (sub_of "sp_callee2" [ [], [ (0, mk_ret) ] ]) in
         let ir2 = emit_ir [ caller2; callee2 ] in
         (* The restore is a BIR def at the continuation: the reload's
-           address chains two adds (restore, then +8). *)
+           address chains the restored SP. *)
         check "EMIT-07"
-          (contains_substring ir2 " = add i64 "
-          && contains_substring ir2 " = load i64, ptr"
-          && not (contains_substring ir2 "sp_restored")
-          && not (contains_substring ir2 " = phi i64 ")));
+          (contains_substring ir2 " = load i64, ptr"
+          && contains_substring ir2 "getelementptr"
+          && not (contains_substring ir2 "sp_restored")));
 
     (* CAST: a tagged stack store whose DATA is a narrower cast keeps the
        zext/trunc at the store. *)
@@ -398,7 +397,7 @@ let tests : unit Alcotest.test list =
 
     (* GOLDEN: the substring-complete golden (one singleton slot + one
        fission region + the anchor residue). *)
-    pin "EMIT-09" "the golden sub emits the define, fission alloca, loads/stores, branch, ret, and anchor"
+    pin "EMIT-09" "the golden sub emits the define, fission alloca, loads/stores, branch, ret, and entry pointer"
       (fun () ->
         let rsp = v64 "RSP" in
         let m = memv "gold_m" in
@@ -446,7 +445,7 @@ let tests : unit Alcotest.test list =
         let sub =
           Cu.set_layout
             { Cu.regions = [ (0, (pos (-24L), pos (-16L)), 16L) ];
-              Cu.anchor = Some (0, 8192L); Cu.window_param = false }
+              Cu.window_param = false }
             sub
         in
         let ir = emit_ir [ sub ] in
@@ -459,14 +458,12 @@ let tests : unit Alcotest.test list =
         check_ir "EMIT-09" "br " ir;
         check_ir "EMIT-09" "ret" ir;
         check_ir "EMIT-09" "i64" ir;
-        (* The anchor residue: the SP Slot word ≡ 8 (mod 16), the SysV
-           entry residue the lifted word arithmetic reproduces. *)
-        check_ir "EMIT-09" "getelementptr i8, ptr %stack_r0, i64 8" ir;
-        check_ir "EMIT-09" "%anchor_i64 = ptrtoint ptr %anchor to i64" ir);
+        (* The entry pointer: the residue base GEP'd at [entry − lo]. *)
+        check_ir "EMIT-09" "getelementptr i8, ptr %stack_r0, i64 24" ir);
 
     (* ANCHOR-RESIDUE: the anchor is built for arbitrary frame geometry,
        the layout tag set directly. *)
-    pin "EMIT-10" "the residue alloca keeps the exact byte count and the anchor follows the fold's index"
+    pin "EMIT-10" "the residue alloca keeps the exact byte count and the entry pointer follows the geometry"
       (fun () ->
         let rsp = v64 "RSP" in
         let m = memv "res_m" in
@@ -491,17 +488,18 @@ let tests : unit Alcotest.test list =
         let sub =
           Cu.set_layout
             Cu.{ regions = [ (0, (pos (-24L), pos (-16L)), 33L) ];
-                 Cu.anchor = Some (0, 24L); Cu.window_param = false }
+                 Cu.window_param = false }
             sub
         in
         let ir = emit_ir [ sub ] in
         check_ir "EMIT-10" "%stack_r0 = alloca [33 x i8]" ir;
         check_ir "EMIT-10" "getelementptr i8, ptr %stack_r0, i64 24" ir;
-        (* A full-depth residue: the anchor index rides the fold's name. *)
+        (* A full-depth residue: the entry pointer rides the geometry
+           [entry − lo]. *)
         let sub =
           Cu.set_layout
-            Cu.{ regions = [ (0, (pos (-24L), pos (-16L)), 8208L) ];
-                 Cu.anchor = Some (0, 8192L); Cu.window_param = false }
+            Cu.{ regions = [ (0, (pos (-8192L), pos (-8185L)), 8208L) ];
+                 Cu.window_param = false }
             sub
         in
         let ir = emit_ir [ sub ] in
@@ -917,12 +915,12 @@ let tests : unit Alcotest.test list =
                (String.split_on_char '\n' ir
                |> Base.List.filter ~f:(fun l -> contains_substring l " = phi "))
              = 0);
-        (* The terminal guard's false edge is the series block's
-           term-order successor (node 1), not a dead end. *)
+        (* The splitter materializes the terminal guard's false edge as an
+           explicit Goto to the series block's term-order successor
+           (node 1); the emitter renders it as a plain branch. *)
         check "EMIT-21"
           (contains_substring ir
-             ("label %\"" ^ Tid.name tids.(3) ^ "\", label %\""
-              ^ Tid.name tids.(1) ^ "\""));
+             ("br label %\"" ^ Tid.name tids.(1) ^ "\""));
         (* The call-dispatch series: guarded cases plus the literal-true
            terminal (the call's own continuation). *)
         let terminal, _ =
@@ -1198,28 +1196,30 @@ let tests : unit Alcotest.test list =
     (* ENTRYPIECE: after an entry-block split, the original entry tid
        stays the emitted entry (fresh piece ids sort above it). *)
     pin "EMIT-31"
-      "an entry block's piece 1 wins entry_blk_tid after the split"
+      "an entry block's piece 1 keeps the entry tid after the split"
       (fun () ->
         let flag = v64 "ep_flag" in
+        let g k =
+          Bil.BinOp
+            (Bil.EQ, Bil.Var flag, Bil.Int (Cbat_word.to_word (w64 k)))
+        in
         let sub, tids =
           sub_of "entry_split"
             [ [ Def.create flag (Bil.Int (Cbat_word.to_word (w64 0))) ],
-              [ (1, fun t -> mk_jmp_to t
-                    (Bil.BinOp
-                       (Bil.EQ, Bil.Var flag,
-                        Bil.Int (Cbat_word.to_word (w64 1)))));
-                (2, mk_goto) ];
+              [ (1, fun t -> mk_jmp_to t (g 1));
+                (2, fun t -> mk_jmp_to t (g 2));
+                (3, mk_goto) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let split = Hike.Split_blocks.split_sub sub in
         let ir = emit_ir [ split ] in
-        let pieces =
-          Term.enum blk_t split |> Seq.to_list
-        in
+        let pieces = Term.enum blk_t split |> Seq.to_list in
+        let p1 = Base.List.nth_exn pieces 0 in
         let p2 = Base.List.nth_exn pieces 1 in
         check "EMIT-31"
-          (contains_substring ir ("br label %\"" ^ Tid.name tids.(0) ^ "\"")
+          (Tid.equal (Term.tid p1) tids.(0)
           && contains_substring ir
                ("label %\"" ^ Tid.name tids.(1) ^ "\", label %\""
                 ^ Tid.name (Term.tid p2) ^ "\"")
@@ -1285,12 +1285,14 @@ let tests : unit Alcotest.test list =
           sub_of "unsplit_series"
             [ [],
               [ (1, mk_goto);
+                (2, mk_goto);
                 (0,
                  fun _ ->
                    Jmp.create
                      (Goto
                         (Indirect
                            (Bil.Int (Cbat_word.to_word (w64 0)))))) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let loud =
@@ -1351,7 +1353,7 @@ let tests : unit Alcotest.test list =
               (Core.Set.of_list (module Tid) [ Term.tid d_dec1; Term.tid d_dec2 ])
             sub
           |> Sm.set_layout
-               { Sm.regions = []; anchor = None; window_param = false }
+               { Sm.regions = []; window_param = false }
         in
         let ir = emit_ir [ sub ] in
         let count sub_str =
@@ -1360,13 +1362,8 @@ let tests : unit Alcotest.test list =
           |> List.length
         in
         check "EMIT-34"
-          (contains_substring ir "getelementptr i8, ptr %vla, i64"
-          && contains_substring ir "getelementptr i8, ptr %vla2, i64"
-          &&
-          (* each alloca is GEP'd exactly once — the load's access into
-             the first, the store's into the second. *)
-          count "getelementptr i8, ptr %vla, " = 1
-          && count "getelementptr i8, ptr %vla2, " = 1
+          (contains_substring ir "getelementptr i8, ptr %vla, i64 4"
+          && contains_substring ir "getelementptr i8, ptr %vla2, i64 8"
           && count " = alloca i8, i64 " = 2));
   ]
 

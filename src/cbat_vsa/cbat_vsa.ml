@@ -491,9 +491,13 @@ let rec static_graph_vsa
        else Cbat_attr_census.bump "bottomskip.entry.refine_only"
      end);
 #endif
+#ifdef VSA_DEBUG
+    let head_arm = ref "" in
+#endif
+    let has_widened = Core.Set.mem heads v && head_warmed v in
     let new_val =
       if List.is_empty preds then old
-      else if Core.Set.mem heads v && head_warmed v then begin
+      else if has_widened then begin
         let j = Stages.time `Join (fun () -> AI.join old incoming) in
         if Stages.time `Equal (fun () -> AI.equal old j)
         then old
@@ -502,7 +506,19 @@ let rec static_graph_vsa
         let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
         Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
           (fun () ->
-            match Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v with
+            let arm = Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v in
+#ifdef VSA_DEBUG
+            Cbat_attr_census.bump
+              (match arm with
+               | `Finite _ -> "widen.head.finite"
+               | `Zero -> "widen.head.zero"
+               | `Inf -> "widen.head.inf");
+            (match arm with
+             | `Finite n -> head_arm := Printf.sprintf "finite:%d" n
+             | `Zero -> head_arm := "zero"
+             | `Inf -> head_arm := "inf");
+#endif
+            match arm with
             | `Finite n ->
               let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
               Cbat_landmarks.clear_head rctx.Cbat_runctx.rc_landmarks v (Hashtbl.find_exn head_to_blocks v);
@@ -528,7 +544,34 @@ let rec static_graph_vsa
     if phys_equal old new_val
        || Stages.time `Equal (fun () -> AI.equal old new_val)
     then false
-    else (Stages.time `Glue (fun () -> set v new_val); true))
+    else begin
+#ifdef VSA_DEBUG
+      (let head = Core.Set.mem heads v in
+       let mono = Stages.time `Equal (fun () -> AI.precedes old new_val) in
+       Cbat_attr_census.bump
+         (Printf.sprintf "churn.%s.%s" (if head then "head" else "plain")
+            (if mono then "grow" else "nonmono"));
+       let detail, same_repr = AI.diff old new_val in
+       if same_repr > 0 then Cbat_attr_census.bump "churn.repr.same";
+       if has_widened then
+         Cbat_attr_census.note
+           (Printf.sprintf "churn.head.%s" (Tid.name v))
+           ~limit:16
+           (Printf.sprintf "churn(head) %s %s arm=%s %s\n    %s"
+              (Tid.name v) (if mono then "grow" else "nonmono")
+              (if String.is_empty !head_arm then "pre-warm" else !head_arm)
+              (AI.head_summary new_val) detail)
+       else
+         Cbat_attr_census.note
+           (Printf.sprintf "churn.%s" (if head then "head" else "plain"))
+           ~limit:3
+           (Printf.sprintf "churn%s %s %s\n    %s"
+              (if head then "(head)" else "") (Tid.name v)
+              (if mono then "grow" else "nonmono") detail));
+#endif
+      Stages.time `Glue (fun () -> set v new_val);
+      true
+    end)
   in
   (* The queue pops the lowest WTO position. *)
   let pos (v : Tid.t) : int =
@@ -596,6 +639,7 @@ let with_images = Cbat_transfer.with_images
 let denote_def = Cbat_transfer.denote_def
 let denote_defs = Cbat_transfer.denote_defs
 let denote_imm_exp = Cbat_transfer.denote_imm_exp
+let vla_event = Cbat_transfer.vla_event
 let reachable_jumps = Cbat_transfer.reachable_jumps
 let fold_block_states = Cbat_transfer.fold_block_states
 let last_defs = Cbat_transfer.last_defs

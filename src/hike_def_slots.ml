@@ -134,6 +134,14 @@ let stamp_ptr_storages ~(storages : Hike_stack_model.ptr_storage Tid.Map.t)
                 (KB.Value.put def_ptr_storage_slot (Def.value d) (Some s))
           | None -> d))
 
+(* The storage of the address a def accesses (or computes) — stamped by
+   the attribution's rewrite, so the emitter materializes every stack
+   address in its own alloca. *)
+let stamp_ptr_storage (s : Hike_stack_model.ptr_storage) (d : def term) :
+    def term =
+  Def.with_value d
+    (KB.Value.put def_ptr_storage_slot (Def.value d) (Some s))
+
 (* The section tag rides the def's value: the producer stamps it, the
    emitter's dispatch reads it off the term. *)
 

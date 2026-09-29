@@ -1,11 +1,11 @@
 (* SSA materialization: every cross-block register value flows through
    a BIR phi term, so the emitter renders joins straight off the terms.
-   The CFG is the RENDERED one (explicit targets plus the
-   guarded-terminal fallthrough).  SP is renamed like any register; the
-   call-pushed word rides a restore def (single-pred continuation) or
-   the phi incoming (shared continuation).  Each call site's ret lanes
-   mint fresh versions, and every block carries the versions in effect
-   at its end. *)
+   The CFG is the BIR's own (every edge an explicit jmp — the splitter
+   materializes the guards' fallthroughs).  SP is renamed like any
+   register; the call-pushed word rides a restore def (single-pred
+   continuation) or the phi incoming (shared continuation).  Each call
+   site's ret lanes mint fresh versions, and every block carries the
+   versions in effect at its end. *)
 
 open Bap.Std
 open Bap_core_theory
@@ -45,14 +45,20 @@ let machine_call (j : jmp term) : bool =
       | Indirect _ -> true)
   | _ -> false
 
-(* The call's ret lanes, mirroring the emitter's binding: a mapped
-   intrinsic versions its own ret temps; an in-program sub its own Out
-   intents; every other target (externs, excluded intrinsic
-   placeholders, the synthetic conventions) the ABI return registers. *)
+(* The call's ret lanes: a mapped intrinsic versions its own ret temps;
+   an in-program sub its own Out intents; every other target (externs,
+   excluded intrinsic placeholders, the synthetic conventions) the ABI
+   return registers. *)
 let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
     var list =
   match Bil2llvm_fp.native_fp_op (Tid.name target) with
-  | Some op -> Bil2llvm_fp.(fp_sig_of op).fp_rets
+  | Some op ->
+      let w =
+        Base.Option.value
+          (Bil2llvm_fp.fp_width_of_name (Tid.name target))
+          ~default:(8 * abi.Abi.word)
+      in
+      Bil2llvm_fp.(fp_sig_of op ~w).fp_rets
   | None -> (
       match Core.Map.find subs target with
       | Some sub -> Base.List.map (Model.sig_rets sub) ~f:Arg.lhs
@@ -82,25 +88,45 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
   else if Seq.is_empty (Term.enum blk_t sub) then sub
   else
     let abi = Abi.of_target target in
-    let sp = Abi.sp target in
     let pc = Abi.pc target in
+    (* The sub's own SP var: the retype gave it the pointer sort, and the
+       SP-restore def must keep that sort (a fresh [Abi.sp] would
+       reintroduce an integer SP beside the pointer one). *)
+    let sp =
+      Term.enum blk_t sub
+      |> Seq.concat_map ~f:(fun b -> Term.enum def_t b)
+      |> Seq.find_map ~f:(fun d ->
+             let v = Def.lhs d in
+             if Abi.is_sp abi (Var.base v) then Some v else None)
+      |> Base.Option.value ~default:(Abi.sp target)
+    in
     let window = Model.hike_window_var ~word:abi.Abi.word in
+    (* A Mem-typed var is a pointer value when it denotes an address and
+       a model memory state otherwise; only the model's own memory vars
+       (the mem operands) are un-renamable. *)
     let renamable (v : var) =
-      (match Var.typ v with Type.Mem _ -> false | _ -> true)
+      not (Model.is_region_mem v)
+      && not (Model.is_window_mem v)
+      && not (Model.is_sec_comp_mem v)
+      && not (Model.is_storage_base v)
       && not (Var.same v pc)
       && not (Var.same v window)
       && not (Model.is_arg_slot (Var.base v))
       && not (Model.is_call_arg (Var.base v))
     in
-    let succs = Hike_split_blocks.succs_of_sub sub in
+    (* The sub's CFG, straight from the BIR (every edge is an explicit
+       jmp: the splitter materializes the guards' fallthroughs).  The
+       [start]/[exit] pseudo-nodes are dropped for the block relations. *)
+    let g = Sub.to_graph sub in
+    let is_real tid =
+      not (Tid.equal tid Graphs.Tid.start)
+      && not (Tid.equal tid Graphs.Tid.exit)
+    in
     let succs_of tid =
-      Core.Map.find succs tid |> Option.value ~default:[]
+      Graphs.Tid.Node.succs tid g |> Seq.to_list |> Base.List.filter ~f:is_real
     in
     let preds_of tid =
-      succs
-      |> Core.Map.fold ~init:[] ~f:(fun ~key ~data acc ->
-             if Base.List.exists data ~f:(Tid.equal tid) then key :: acc
-             else acc)
+      Graphs.Tid.Node.preds tid g |> Seq.to_list |> Base.List.filter ~f:is_real
     in
     (* The call blocks: ret-mint sites and (for SP) edge-def sites. *)
     let call_info (blk : blk term) =
@@ -162,28 +188,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
           | Indirect _ -> abi.Abi.return_regs)
       |> Base.List.dedup_and_sort ~compare:Var.compare
     in
-    (* The graph: rendered edges plus [start] over the root blocks. *)
-    let with_pred tid =
-      succs
-      |> Core.Map.fold ~init:false ~f:(fun ~key:_ ~data hit ->
-             hit || Base.List.exists data ~f:(Tid.equal tid))
-    in
-    let g =
-      Base.List.fold blks ~init:Graphs.Tid.empty ~f:(fun g blk ->
-          let tid = Term.tid blk in
-          let g = Graphs.Tid.Node.insert tid g in
-          Base.List.fold (succs_of tid) ~init:g ~f:(fun g s ->
-              Graphs.Tid.Edge.insert (Graphs.Tid.Edge.create tid s tid) g))
-    in
-    let g =
-      Base.List.fold blks ~init:g ~f:(fun g blk ->
-          let tid = Term.tid blk in
-          if with_pred tid then g
-          else
-            Graphs.Tid.Edge.insert
-              (Graphs.Tid.Edge.create Graphs.Tid.start tid Graphs.Tid.start)
-              g)
-    in
+    (* The dom/phi machinery walks the BIR's own CFG ([g] above). *)
 #ifdef VSA_DEBUG
     let () =
       Graphs.Tid.nodes g
@@ -445,7 +450,8 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     Term.set_attr sub ssa_tag ()
 
 (* Under SSA the sub's input lanes are its index-0 reads: every
-   versioned read is dominated by its def. *)
+   versioned read is dominated by its def.  The model's memory vars and
+   storage bases are not lanes; a Mem-typed pointer value is. *)
 let free_regs_ssa (sub : sub term) : var list =
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
@@ -453,7 +459,10 @@ let free_regs_ssa (sub : sub term) : var list =
           (Blk.free_vars blk
            |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))
   |> Core.Set.filter ~f:(fun v ->
-         match Var.typ v with Type.Mem _ -> false | _ -> true)
+         not
+           (Model.is_region_mem v || Model.is_window_mem v
+          || Model.is_sec_comp_mem v || Model.is_storage_base v
+          || Model.is_window_var v))
   |> Core.Set.to_list
 
 let ssa_program ~(target : Bap_core_theory.Theory.Target.t)

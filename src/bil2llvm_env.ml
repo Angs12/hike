@@ -9,18 +9,45 @@ module Abi = Hike_abi
 
 module EHashtbl = Core.Hashtbl
 
-(* Vars keyed by (name, width). *)
-type wvar = WVar of Var.t * int
+(* The pure integer constructors, shared by the expression lane and the
+   pointer module (which must not depend on the expression lane). *)
+let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
+  match op with
+  | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
+  | MINUS -> Llvm.build_sub llvm_val1 llvm_val2 "" llvm_builder
+  | TIMES -> Llvm.build_mul llvm_val1 llvm_val2 "" llvm_builder
+  | DIVIDE -> Llvm.build_udiv llvm_val1 llvm_val2 "" llvm_builder
+  | SDIVIDE -> Llvm.build_sdiv llvm_val1 llvm_val2 "" llvm_builder
+  | MOD -> Llvm.build_urem llvm_val1 llvm_val2 "" llvm_builder
+  | SMOD -> Llvm.build_srem llvm_val1 llvm_val2 "" llvm_builder
+  | AND -> Llvm.build_and llvm_val1 llvm_val2 "" llvm_builder
+  | OR -> Llvm.build_or llvm_val1 llvm_val2 "" llvm_builder
+  | XOR -> Llvm.build_xor llvm_val1 llvm_val2 "" llvm_builder
+  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 "" llvm_builder
+  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 "" llvm_builder
+  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 "" llvm_builder
+  | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 "" llvm_builder
+  | NEQ -> Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 "" llvm_builder
+  | LT -> Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 "" llvm_builder
+  | SLT -> Llvm.build_icmp Llvm.Icmp.Slt llvm_val1 llvm_val2 "" llvm_builder
+  | LE -> Llvm.build_icmp Llvm.Icmp.Ule llvm_val1 llvm_val2 "" llvm_builder
+  | SLE -> Llvm.build_icmp Llvm.Icmp.Sle llvm_val1 llvm_val2 "" llvm_builder
 
-let wvar_of (v : Var.t) : wvar =
-  let w = match Var.typ v with Imm w -> w | Mem _ -> 0 | Unk -> 0 in
-  WVar (v, w)
+let create_unop llvm_builder (op, llvm_val) =
+  match op with
+  | NEG -> Llvm.build_neg llvm_val "" llvm_builder
+  | NOT -> Llvm.build_not llvm_val "" llvm_builder
+
+(* Vars are keyed by name; the retype changes a var's sort but not its
+   identity (`Var.compare` is the ident), so a binding written for one
+   sort is readable through the other. *)
+type wvar = Var.t
+
+let wvar_of (v : Var.t) : wvar = v
 
 module WVar = struct
   type t = wvar
-  let compare (WVar (a, wa)) (WVar (b, wb)) =
-    let c = Var.compare a b in
-    if c <> 0 then c else Int.compare wa wb
+  let compare = Var.compare
 end
 
 module WVarMap = Map.Make (WVar)
@@ -99,13 +126,12 @@ type section_spec = {
 }
 
 type sub_frame = {
-  (* The anchor integer: the SP slot's stored value, or the constant
-     0 for storage-free subs. *)
-  anchor_i64 : Llvm.llvalue;
-  (* The SP entry value; None = SP binds to [anchor_i64]. *)
-  stack0 : Llvm.llvalue option;
-  (* The anchor alloca pointer; None = storage-free. *)
-  anchor_ptr : Llvm.llvalue option;
+  (* The model entry line: the seeded SP's absolute address.  A constant,
+      so every address is derived from the model offsets, and every
+      storage GEP's index is [address − entry_line − rel]. *)
+  entry_line : Llvm.llvalue;
+  (* The entry line as a pointer into the residue (None = no storage). *)
+  entry_ptr : Llvm.llvalue option;
   (* Region mem var -> (alloca, entry-relative base). *)
   regions : (Var.t * (Llvm.llvalue * int64)) list;
 }
@@ -169,8 +195,6 @@ type sub_scope = {
   (* The vars whose value is an above-entry stack address (a window
      value): a store of one materializes the real address. *)
   window_vars : Var.Set.t ref;
-  (* Each address def's storage: the base a pointer argument GEPs into. *)
-  ptr_storages : Hike_stack_model.ptr_storage Var.Map.t ref;
   (* One frozen value per never-defined var, so two reads of the same
      undefined register observe identical bits (LLVM's per-use undef
      would fold a self-comparison). *)
@@ -185,9 +209,12 @@ type sub_scope = {
   (* The SSA version maps, read off the blocks' [hike-ssa-versions]
      stamps before any body emits. *)
   ssa_versions : Hike_stack_model.Versions.t Tid.Map.t ref;
-  (* Each dynamic alloca by its decrement def's tid: (ptr, i64).  A
-     [Vla tid]-origin access GEPs its own allocation. *)
-  vlas : (Llvm.llvalue * Llvm.llvalue) Tid.Map.t ref;
+  (* Each ptr value's entry-line offset (i64), where it is structurally
+     known; a load / parameter / phi has none (the value is a real
+     pointer and arithmetic GEPs it). *)
+  ptr_offsets : llvalue_map ref;
+  (* The section-component storage base vars -> their globals. *)
+  sec_comp_ptrs : llvalue_map ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -197,13 +224,13 @@ let fresh_scope () : sub_scope =
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
     window_vars = ref Var.Set.empty;
-    ptr_storages = ref Var.Map.empty;
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;
-    vlas = ref Tid.Map.empty }
+    ptr_offsets = ref WVarMap.empty;
+    sec_comp_ptrs = ref WVarMap.empty }
 
 let typ_lltype ctx typ =
   match typ with
@@ -211,10 +238,20 @@ let typ_lltype ctx typ =
   | _ -> ctx.ptr_ty
 
 (* The caller-window base is a real pointer; every other lane keeps its
-   BIR type. *)
+   BIR type.  A [Mem]-typed var is a pointer (a stack/VLA address). *)
 let var_lltype ctx var =
   if Hike_stack_model.is_window_var var then ctx.ptr_ty
   else typ_lltype ctx (Var.typ var)
+
+(* A var whose value is a stack/VLA address (a real pointer).  The
+   model's memory-state vars are storage, not pointer values. *)
+let is_ptr_var (v : Var.t) : bool =
+  (not
+     (Hike_stack_model.is_region_mem v
+     || Hike_stack_model.is_window_mem v
+     || Hike_stack_model.is_sec_comp_mem v))
+  && (Hike_stack_model.is_window_var v
+     || match Var.typ v with Type.Mem _ -> true | _ -> false)
 
 (* Coerces an integer value of known width to a lane width. *)
 let coerce_int_width llvm_ctx llvm_builder ~bits v w =
@@ -234,10 +271,8 @@ let is_extern ctx (sub_tid : tid) : bool =
    so the emitter's names and the resolver's name map agree. *)
 let sanitize_name = Hike_stack_model.sanitize_tid_name
 
-(* The frame's entry-SP value: the SP slot's load, or the constant
-   anchor for a storage-free sub. *)
-let frame_stack0 (fr : sub_frame) : Llvm.llvalue =
-  Base.Option.value fr.stack0 ~default:fr.anchor_i64
+(* The frame's entry-line value. *)
+let frame_stack0 (fr : sub_frame) : Llvm.llvalue = fr.entry_line
 
 
 (* The synthetic indirect-call sub: every pointer call targets it, and
@@ -249,10 +284,7 @@ let indirect_call_tid : tid = Tid.for_name "indirect_call"
 let count_slot_args (args : Arg.t list) : int =
   Base.List.count args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
 
-let strip_at (name : string) : string =
-  if String.length name > 0 && name.[0] = '@' then
-    String.sub name 1 (String.length name - 1)
-  else name
+let strip_at = Hike_abi.strip_at
 
 let bb_find map tid =
   match Core.Map.find map tid with
@@ -363,6 +395,14 @@ let init_blk_llvals scope blk_tid =
 let insert_local scope blk_tid var value =
   let blk_llvals = blk_llvals_find !(scope.blk_llvals) blk_tid in
   blk_llvals.locals := WVarMap.add (wvar_of var) value !(blk_llvals.locals)
+
+(* The entry-line offset of a ptr value, when it is structurally known
+   (an arithmetic chain from the entry line / a slot). *)
+let insert_ptr_offset scope var value =
+  scope.ptr_offsets := WVarMap.add (wvar_of var) value !(scope.ptr_offsets)
+
+let get_ptr_offset scope var =
+  WVarMap.find_opt (wvar_of var) !(scope.ptr_offsets)
 
 let get_local scope blk_tid var =
   let blk_vars = blk_llvals_find !(scope.blk_llvals) blk_tid in

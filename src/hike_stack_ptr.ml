@@ -7,6 +7,7 @@ module Model = Hike_stack_model
 module Abi = Hike_abi
 
 type storage = {
+  id : int;
   mem : Var.t;
   base : Llvm.llvalue;
   rel : int64;
@@ -24,23 +25,7 @@ let build ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
           llvm_builder
       in
       Llvm.set_alignment Abi.stack_align base;
-      { mem = Model.region_mem id;
+      { id;
+        mem = Model.region_mem id;
         base;
         rel = Stdlib.Int64.sub lo Model.segment_base })
-
-(* The storage's base GEP'd at the address's byte index: both the address
-   and the base are relative to the sub's entry SP, so the index is
-   [a − stack0 − rel].  [rel = 0] is a storage whose base IS the entry
-   line (the caller window): the index is [a − stack0], no difference. *)
-let ptr_of ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
-    ~(base : Llvm.llvalue) ~(rel : int64) ~(stack0 : Llvm.llvalue)
-    (a : Llvm.llvalue) : Llvm.llvalue =
-  let idx =
-    let rel_addr = Llvm.build_sub a stack0 "reg_rel" llvm_builder in
-    if Int64.equal rel 0L then rel_addr
-    else
-      Llvm.build_sub rel_addr
-        (Llvm.const_of_int64 (Llvm.i64_type llvm_ctx) rel false)
-        "" llvm_builder
-  in
-  Llvm.build_gep (Llvm.i8_type llvm_ctx) base [| idx |] "" llvm_builder
