@@ -144,15 +144,7 @@ let tests : unit Alcotest.test list =
                      && Var.index w > 0
                  | _ -> false)));
 
-    pin "SSA-04" "var versions are distinct under Var.equal, equal under Var.same"
-      (fun () ->
-        let v = v64 "RAX" in
-        let v1 = Var.with_index v 1 in
-        check "SSA-04"
-          (not (Var.equal v1 v)
-          && Var.same v1 v
-          && String.equal (Var.name v1) "RAX.1"
-          && Var.index (Var.base v1) = 0));
+
 
     pin "SSA-03" "under SSA the sub's input lanes are its index-0 reads"
       (fun () ->

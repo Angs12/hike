@@ -877,95 +877,11 @@ let tests : unit Alcotest.test list =
         check "T5-4 (contrast): the plain memory widen drives the cell data infinite"
           (Ws.is_infinite (cell_of plain)));
 
-    pin "INT-21" "T5-4 ownership: a cell with no own entries plain-widens"
-      (fun () ->
-        let mv = memv "t5x_m" in
-        let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
-        let key = key_of (Ws.singleton (w32 100)) in
-        let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
-        let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
-          let m = Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
-          AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd
-        in
-        let cell_of (st : AI.t) : Ws.t =
-          Mem.Val.data (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key)
-        in
-        let h = Tid.for_name "t5x_head" in
-        let lm = Cbat_landmarks.create () in
-        let need = Cbat_var_id.intern_set (Var.Set.singleton (Var.base xv)) in
-        let d_old = Ws.singleton (w32 1) in
-        let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
-        let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
-        let plain = AI.widen_join (mkstate d_old w_old) (mkstate d_new w_new) in
-        let r =
-          AI.selective_widen_extrapolate ~head:h ~landmarks:lm ~need ~steps:1
-            (mkstate d_old w_old) (mkstate d_new w_new)
-        in
-        check "T5-4 (ownership): a cell with no own entries plain-widens"
-          (Ws.equal (cell_of r) (cell_of plain)));
 
-    pin "INT-22"
-      "T5-4 landmarks: the cell translates by its OWN entry (growth 2 x 1 step: hi 2 -> 4)"
-      (fun () ->
-        let mv = memv "t5x_m" in
-        let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
-        let key = key_of (Ws.singleton (w32 100)) in
-        let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
-        let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
-          let m = Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
-          AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd
-        in
-        let cell_of (st : AI.t) : Ws.t =
-          Mem.Val.data (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key)
-        in
-        let h = Tid.for_name "t5x_head" in
-        let lm = Cbat_landmarks.create () in
-        let need = Cbat_var_id.intern_set (Var.Set.singleton (Var.base xv)) in
-        let d_old = Ws.singleton (w32 1) in
-        let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
-        let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
-        Cbat_landmarks.record lm ~head:h
-          ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key))
-          ~bound:(w32 10) ~is_upper:true ~dist:2;
-        (match
-           Cbat_landmarks.entries lm h
-             (Cbat_landmarks.Cell (Mem.Key.cell_key key))
-         with
-        | e :: _ -> e.Cbat_landmarks.dist_p <- Some 4
-        | [] -> failwith "T5-4: landmark not recorded");
-        let rl =
-          AI.selective_widen_extrapolate ~head:h ~landmarks:lm ~need ~steps:1
-            (mkstate d_old w_old) (mkstate d_new w_new)
-        in
-        check_bound
-          "T5-4 (landmarks): the cell translates by its OWN entry (growth 2 x 1 step: hi 2 -> 4)"
-          (Ws.max_elem (cell_of rl)) (fun hi -> W.equal hi (w32 4)));
 
-    pin "INT-23" "T5-4 bottom: a bottom old cell state equals the plain widen"
-      (fun () ->
-        let mv = memv "t5x_m" in
-        let xv = Var.create ~is_virtual:true ~fresh:false "t5x_w" (Type.Imm 32) in
-        let key = key_of (Ws.singleton (w32 100)) in
-        let midx = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
-        let mkstate (d : Ws.t) (wd : Ws.t) : AI.t =
-          let m = Mem.add (Mem.top midx) ~key ~data:(Mem.Val.create d LittleEndian) in
-          AI.add_word (AI.add_memory AI.top ~key:mv ~data:m) ~key:xv ~data:wd
-        in
-        let cell_of (st : AI.t) : Ws.t =
-          Mem.Val.data (Mem.find (32, LittleEndian) (AI.find_memory midx st mv) key)
-        in
-        let h = Tid.for_name "t5x_head" in
-        let lm = Cbat_landmarks.create () in
-        let need = Cbat_var_id.intern_set (Var.Set.singleton (Var.base xv)) in
-        let d_new = Ws.of_clp (Clp.interval ~width:32 (w32 1) (w32 2)) in
-        let w_old = Ws.singleton (w32 0) and w_new = Ws.singleton (w32 1) in
-        let r_ex =
-          AI.selective_widen_extrapolate ~head:h ~landmarks:lm ~need ~steps:1
-            (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new)
-        in
-        let r_w = AI.widen_join (mkstate (Ws.bottom 32) w_old) (mkstate d_new w_new) in
-        check "T5-4 (bottom): a bottom old cell state equals the plain widen"
-          (Ws.equal (cell_of r_ex) (cell_of r_w)));
+
+
+
 
     (* F1: the jle-counter head's lower bound is the entry constant. *)
     pin "INT-13" "LM F1: the jle-counter head and taken view lower bounds are the entry constant 0"

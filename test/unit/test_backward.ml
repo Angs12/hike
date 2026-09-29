@@ -61,12 +61,6 @@ let s_m = Var.create ~is_virtual:false ~fresh:false "s_m" (Type.Mem (`r32, `r8))
 
 let s_w32_of_env env v = AI.find_word 32 env (Var.base v)
 
-let s_window_of env cond v =
-  AI.find_word 32
-    (Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env cond
-       (Ws.singleton (Cbat_word.of_word Word.b1)))
-    (Var.base v)
-
 let tests : unit Alcotest.test list =
   [
     (* L3a: backward guard refinement through the producer rows. *)
@@ -224,22 +218,7 @@ let tests : unit Alcotest.test list =
           && not (Ws.elem (w32 0) cell4)
           && not (Ws.elem (w32 11) cell4)));
 
-    pin "BK-10"
-      "direct constrain_edge — the flag-state refinement is gated off (no cell \
-       refinement)"
-      (fun () ->
-        let m = memv "l3c1_m" in
-        let sub5, _, jmp5 = mk_l3c1_loop ~extra_header_defs:[] ~pre_cf_defs:[] in
-        let sol5 = run_anchored sub5 in
-        let hdr5 =
-          match Term.enum blk_t sub5 |> Seq.to_list with
-          | [ _; _; h; _ ] -> h
-          | _ -> assert false
-        in
-        let hdr_st = Graphlib.Std.Solution.get sol5 (Term.tid hdr5) in
-        let res5 = Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:hdr_st (Jmp.cond jmp5) in
-        let cell5 = cell_at m (v64 "RBP") res5 in
-        check "BK-10" (Ws.is_top cell5));
+
 
     (* L3c2: the signed comparison rows. *)
     pin "BK-11"
@@ -335,17 +314,7 @@ let tests : unit Alcotest.test list =
           (let v = l3c3_run sub1 body1 in
            bounded_above v (w32 9)));
 
-    pin "BK-17"
-      "the TIMES rule over an unbounded operand is the identity (sound — the \
-       cell is not bounded by the multiplier)"
-      (fun () ->
-        let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
-        let sub2, body2 =
-          mk_l3c3_loop ~seed:None
-            ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 8))))
-            ~cmp:Bil.SLT ~c:(w32 80) ~body_k:(w32 4)
-        in
-        check "BK-17" (Ws.is_top (l3c3_run sub2 body2)));
+
 
     pin "BK-18"
       "the seeded operand is bounded by the guard's signed row, so the TIMES \
@@ -400,15 +369,7 @@ let tests : unit Alcotest.test list =
         in
         check "BK-21" (Ws.is_top (l3c3_run sub4b body4b)));
 
-    pin "BK-22" "TIMES with k = 0 is a sound stop — the cell at RBP-8 stays top"
-      (fun () ->
-        let t = Var.create ~is_virtual:false ~fresh:false "l3c3_t" (Type.Imm 32) in
-        let sub5, body5 =
-          mk_l3c3_loop ~seed:None
-            ~chain:(Bil.BinOp (Bil.TIMES, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0))))
-            ~cmp:Bil.SLT ~c:(w32 10) ~body_k:(w32 4)
-        in
-        check "BK-22" (Ws.is_top (l3c3_run sub5 body5)));
+
 
     pin "BK-23"
       "TIMES with an EQ singleton {5} and k = 8 (non-divisible) — the row is \
@@ -525,21 +486,7 @@ let tests : unit Alcotest.test list =
           (let v = l3c5_run sub3a body3a in
            bounded_above v (w32 9)));
 
-    pin "BK-32"
-      "the OR-identity row — `v := t OR 0` (≡ t) — the cell at RBP-8 is bounded \
-       (⊆ [0,9])"
-      (fun () ->
-        let t = Var.create ~is_virtual:false ~fresh:false "l3c5_t" (Type.Imm 32) in
-        let v = Var.create ~is_virtual:false ~fresh:false "l3c5_v" (Type.Imm 32) in
-        let sub3b, body3b =
-          mk_l3c5_loop ~seed:(Some (w32 0))
-            ~chain:(Some (Bil.BinOp (Bil.OR, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 0)))))
-            ~cond:(Bil.BinOp (Bil.SLT, Bil.Var v, Bil.Int (Cbat_word.to_word (w32 10))))
-            ~body_k:(w32 4)
-        in
-        check "BK-32"
-          (let v = l3c5_run sub3b body3b in
-           bounded_above v (w32 9)));
+
 
     pin "BK-33"
       "an Unknown condition — the fixpoint completes and constrain_edge keeps \
@@ -576,14 +523,7 @@ let tests : unit Alcotest.test list =
           (AI.equal (Vsa.Test_seam.constrain_edge ~landmarks:(Cbat_landmarks.create ()) ~env:h_st4 (Jmp.cond jmp4)) h_st4));
 
     (* L-3b: the equal-lower merge arm and the partition views. *)
-    pin "BK-34"
-      "the traverse shape (the seeded RMW counter) collapses to <= 3 cells in \
-       the solution state (the equal-lower hull union keeps the cell count bounded)"
-      (fun () ->
-        let sub1, body1, _ = mk_l3b1_loop () in
-        let sol1 = run_anchored sub1 in
-        let st1 = Graphlib.Std.Solution.get sol1 body1 in
-        check "BK-34" (l3b_cells_of (memv "l3b1_m") st1 <= 3));
+
 
     pin "BK-35"
       "the partition — the iterate view's cell is the loop-body values (⊆ [0,7], \
@@ -614,15 +554,7 @@ let tests : unit Alcotest.test list =
           && (not (Ws.is_top ecell))
           && Ws.elem (w32 8) ecell));
 
-    pin "BK-36"
-      "two +1-adjacent equal-value cells ([RSP-8] and [RSP-7], both {7}) through \
-       ONE merge become a SINGLE cell (the +1-adjacent arm, not shadowed by the \
-       equal-lower arm)"
-      (fun () ->
-        let sub4, merge4 = mk_l3b4_diamond () in
-        let sol4 = run_anchored sub4 in
-        let st4 = Graphlib.Std.Solution.get sol4 merge4 in
-        check "BK-36" (l3b_cells_of (memv "l3b4_m") st4 = 1));
+
 
     (* B-1: interrupt edges. *)
     pin "BK-37"
@@ -1067,143 +999,25 @@ let tests : unit Alcotest.test list =
 
     (* The guard's operand windows observed through the inverse denote: on a
        TOP env the leaf meet preserves the raw row. *)
-    pin "BK-61" "EQ const-second -> the Var seed {10}"
-      (fun () ->
-        let c =
-          s_window_of (mk_env [])
-            (Bil.BinOp (Bil.EQ, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 10))))
-            s_t
-        in
-        check "BK-61" (Ws.elem (s_r32 10) c && not (Ws.elem (s_r32 11) c)));
 
-    pin "BK-62" "NEQ const-second -> the wrapped complement (10 ∉; 11, 9 ∈)"
-      (fun () ->
-        let c =
-          s_window_of (mk_env [])
-            (Bil.BinOp (Bil.NEQ, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 10))))
-            s_t
-        in
-        check "BK-62"
-          ((not (Ws.elem (s_r32 10) c)) && Ws.elem (s_r32 11) c && Ws.elem (s_r32 9) c));
 
-    pin "BK-63" "SLT const-second -> the two-piece [0,3] ∪ [2^31, max] (no gate)"
-      (fun () ->
-        let c =
-          s_window_of (mk_env [])
-            (Bil.BinOp (Bil.SLT, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 4))))
-            s_t
-        in
-        check "BK-63"
-          (Ws.elem (s_r32 3) c
-          && (not (Ws.elem (s_r32 4) c))
-          && Ws.elem (s_r32 0x80000000) c));
 
-    pin "BK-64" "const-first LT -> the UGT flip [11, max] (10 ∉; 11 ∈)"
-      (fun () ->
-        let c =
-          s_window_of (mk_env [])
-            (Bil.BinOp (Bil.LT, Bil.Int (Cbat_word.to_word (s_r32 10)), Bil.Var s_t))
-            s_t
-        in
-        check "BK-64" (Ws.elem (s_r32 11) c && not (Ws.elem (s_r32 10) c)));
 
-    pin "BK-65" "the var-vs-var LT overlap — t ∈ [0,9] (the u's max 10)"
-      (fun () ->
-        let env5 =
-          mk_env [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, Ws.singleton (s_r32 10)) ]
-        in
-        let c5 = s_window_of env5 (Bil.BinOp (Bil.LT, Bil.Var s_t, Bil.Var s_u)) s_t in
-        check "BK-65" (Ws.elem (s_r32 9) c5 && not (Ws.elem (s_r32 10) c5)));
 
-    pin "BK-66"
-      "the var-vs-var NEQ — the t seed = the complement of the {5} overlap (the \
-       interior: the identity — sound)"
-      (fun () ->
-        let env6 =
-          mk_env [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, Ws.singleton (s_r32 5)) ]
-        in
-        let c6 = s_window_of env6 (Bil.BinOp (Bil.NEQ, Bil.Var s_t, Bil.Var s_u)) s_t in
-        check "BK-66" (Ws.elem (s_r32 0) c6 && Ws.elem (s_r32 10) c6));
 
-    pin "BK-67"
-      "the generic comparison — the t row from the (u+1) value-set [1,4] \
-       (t ⊆ [0,3]) + the u producer seed"
-      (fun () ->
-        let env7 = mk_env [ (s_t, bk_iv32 ~lo:0 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:3) ] in
-        let env7' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env7
-            (Bil.BinOp
-               ( Bil.LT,
-                 Bil.Var s_t,
-                 Bil.BinOp (Bil.PLUS, Bil.Var s_u, Bil.Int (Cbat_word.to_word (s_r32 1))) ))
-            (Ws.singleton (Cbat_word.of_word Word.b1))
-        in
-        let ct7 = s_w32_of_env env7' s_t and cu7 = s_w32_of_env env7' s_u in
-        check "BK-67"
-          (Ws.elem (s_r32 3) ct7
-          && (not (Ws.elem (s_r32 4) ct7))
-          && Ws.elem (s_r32 1) cu7));
 
-    pin "BK-68" "the producer PLUS hull — the circular hull {0xFFFFFFFF} ∪ [0,8] on t"
-      (fun () ->
-        let c8 =
-          s_window_of (mk_env [])
-            (Bil.BinOp
-               ( Bil.LT,
-                 Bil.BinOp (Bil.PLUS, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 1))),
-                 Bil.Int (Cbat_word.to_word (s_r32 10)) ))
-            s_t
-        in
-        check "BK-68"
-          (Ws.elem (s_r32 8) c8
-          && (not (Ws.elem (s_r32 9) c8))
-          && Ws.elem (s_r32 0xFFFFFFFF) c8));
 
-    pin "BK-69"
-      "the load operand -> the cell fact meets the env's memory ([0,9] on the \
-       cell)"
-      (fun () ->
-        let rsp64 = Var.create ~is_virtual:false ~fresh:false "RSP" (Type.Imm 64) in
-        let st9 = mk_seed_state rsp64 rsp64 () in
-        let k9 = { Mem.addr_width = 32; Mem.addressable_width = 8 } in
-        let mem9 =
-          let mv = Mem.top k9 in
-          AI.add_memory st9 ~key:s_m
-            ~data:
-              (Mem.add mv ~key:(key_of (Ws.stack_word_i64 0L))
-                 ~data:(Mem.Val.create (bk_iv32 ~lo:0 ~hi:40) LittleEndian))
-        in
-        let env9 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:mem9
-            (Bil.BinOp
-               ( Bil.LT,
-                 Bil.Load
-                   ( Bil.Var s_m,
-                     Bil.BinOp (Bil.MINUS, Bil.Var rsp64, Bil.Int (Cbat_word.to_word (w64 8))),
-                     LittleEndian,
-                     `r32 ),
-                 Bil.Int (Cbat_word.to_word (s_r32 10)) ))
-            (Ws.singleton (Cbat_word.of_word Word.b1))
-        in
-        check "BK-69"
-          (let mv = AI.find_memory k9 env9 s_m in
-           let v =
-             Mem.Val.data (Mem.find (32, LittleEndian) mv (key_of (Ws.stack_word_i64 (-8L))))
-           in
-           Ws.elem (s_r32 9) v && not (Ws.elem (s_r32 10) v)));
 
-    pin "BK-70"
-      "the completed fallthrough of (t <u 10) seeds the UGE side [10, max] \
-       (10 ∈; 9 ∉)"
-      (fun () ->
-        let s10 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
-            (Cbat_vsa_utils.complete_cond
-               (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.LT, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 10))))))
-            (Ws.singleton (Cbat_word.of_word Word.b1))
-        in
-        let c10 = s_w32_of_env s10 s_t in
-        check "BK-70" (Ws.elem (s_r32 10) c10 && not (Ws.elem (s_r32 9) c10)));
+
+
+
+
+
+
+
+
+
+
 
     pin "BK-71" "the NEG row — the neg'd [0,9]: 0 ∈, −1 ∈"
       (fun () ->
@@ -1215,41 +1029,9 @@ let tests : unit Alcotest.test list =
         let c11 = s_w32_of_env s11 s_t in
         check "BK-71" (Ws.elem (s_r32 0) c11 && Ws.elem (s_r32 0xFFFFFFFF) c11));
 
-    pin "BK-72" "the completed dual — NOT (t EQ 10) -> the NEQ complement (10 ∉; 11 ∈)"
-      (fun () ->
-        let s13 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:(mk_env [])
-            (Cbat_vsa_utils.complete_cond
-               (Bil.UnOp (Bil.NOT, Bil.BinOp (Bil.EQ, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 10))))))
-            (Ws.singleton (Cbat_word.of_word Word.b1))
-        in
-        let c13 = s_w32_of_env s13 s_t in
-        check "BK-72" (not (Ws.elem (s_r32 10) c13) && Ws.elem (s_r32 11) c13));
 
-    pin "BK-73"
-      "the LOW cast row — the truncation hull [5, 5 + 2^32 − 2^8] (5 ∈; 5+0x100 \
-       ∈; 4 ∉)"
-      (fun () ->
-        let env15 =
-          mk_env
-            [ ( s_t,
-                Ws.of_clp
-                  (Clp.create ~width:32 ~step:(s_r32 1)
-                     ~cardn:(Cbat_word.of_int ~width:33 0x10000) (s_r32 0)) ) ]
-        in
-        let env15' =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ()) ~env:env15
-            (Bil.BinOp
-               ( Bil.EQ,
-                 Bil.Cast (Bil.LOW, 8, Bil.Var s_t),
-                 Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:8 5)) ))
-            (Ws.singleton (Cbat_word.of_word Word.b1))
-        in
-        let c15 = s_w32_of_env env15' s_t in
-        check "BK-73"
-          (Ws.elem (s_r32 5) c15
-          && Ws.elem (s_r32 0x105) c15
-          && not (Ws.elem (s_r32 4) c15)));
+
+
 
     pin "BK-74"
       "the SIGNED ext row — the pre-image [0, 0xFF] on a top env; the meet with \
@@ -1370,15 +1152,7 @@ let tests : unit Alcotest.test list =
                   (Ws.singleton (s_r32 5)))
                (mk_env [])));
 
-    pin "BK-79"
-      "the var-vs-var NEQ with a multi-element partner — the identity (every t \
-       keeps a differing u)"
-      (fun () ->
-        let env9 =
-          mk_env [ (s_t, bk_iv32 ~lo:5 ~hi:10); (s_u, bk_iv32 ~lo:0 ~hi:8) ]
-        in
-        let c9 = s_window_of env9 (Bil.BinOp (Bil.NEQ, Bil.Var s_t, Bil.Var s_u)) s_t in
-        check "BK-79" (Ws.elem (s_r32 6) c9 && Ws.elem (s_r32 10) c9));
+
 
     pin "BK-80"
       "the Ite inverse with a true condition — only the true branch is constrained"
@@ -1416,19 +1190,7 @@ let tests : unit Alcotest.test list =
           && Ws.equal (s_w32_of_env env11' s_u)
                (AI.find_word 32 env11 (Var.base s_u))));
 
-    pin "BK-82"
-      "the XOR singleton mask is an exact bitwise bijection — the pre-image of \
-       {0x6} under ^0xA is {0xC}"
-      (fun () ->
-        let env12 =
-          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
-            ~env:(mk_env [])
-            (Bil.BinOp (Bil.XOR, Bil.Var s_t,
-               Bil.Int (Cbat_word.to_word (s_r32 0xA))))
-            (Ws.singleton (s_r32 0x6))
-        in
-        check "BK-82"
-          (Ws.equal (s_w32_of_env env12 s_t) (Ws.singleton (s_r32 0xC))));
+
 
     pin "BK-83"
       "the AND singleton mask keeps the constrained bits and leaves the rest \

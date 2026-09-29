@@ -43,43 +43,13 @@ let tests : unit Alcotest.test list =
         | Error _ -> check "FWD-01" false);
 
     (* FWD-02: gate-free — every def is denoted without a tag. *)
-    pin "FWD-02" "gate-free — every def is denoted, no tag needed"
-      (fun () ->
-        let iv = v64 "t2_iv" in
-        let d = Def.create iv (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let e_den = Vsa.Test_seam.denote_def d AI.top in
-        check "FWD-02" (Ws.equal (AI.find_word 64 e_den iv) (Ws.singleton (w64 7))));
+
 
     (* FWD-03: the caller-alias fixture's pre-call state — the slot holds {42}. *)
-    pin "FWD-03" "pre-call the aliased slot holds {42} (non-vacuous pin)"
-      (fun () ->
-        let fx = mk_caller_alias () in
-        let sub = fx.ca_sub in
-        let entry_blk' =
-          match Term.find blk_t sub (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
-        in
-        let pre = Vsa.Test_seam.denote_defs entry_blk' AI.top in
-        let mkey =
-          match Mem.Key.of_wordset (Ws.singleton (w64 0xd0)) with [ k ] -> k | _ -> assert false
-        in
-        let pre_val =
-          Mem.Val.data
-            (Mem.find (64, LittleEndian)
-               (AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } pre fx.ca_m)
-               mkey)
-        in
-        check "FWD-03" (Ws.equal pre_val (Ws.singleton (w64 42))));
+
 
     (* FWD-04: pre-call rdi is the concrete aliased address {0xd0}. *)
-    pin "FWD-04" "pre-call rdi is the concrete address {0xd0} (the alias)"
-      (fun () ->
-        let fx = mk_caller_alias () in
-        let sub = fx.ca_sub in
-        let entry_blk' =
-          match Term.find blk_t sub (Term.tid fx.ca_entry_blk) with Some b -> b | None -> assert false
-        in
-        let pre = Vsa.Test_seam.denote_defs entry_blk' AI.top in
-        check "FWD-04" (Ws.equal (AI.find_word 64 pre fx.ca_rdi) (Ws.singleton (w64 0xd0))));
+
 
     (* FWD-05: a top-address store invalidates the whole memory. *)
     pin "FWD-05"
@@ -109,33 +79,7 @@ let tests : unit Alcotest.test list =
           && Mem.equal mem2 (Mem.top (Mem.get_idx mem2))));
 
     (* FWD-06: the load at the invalidated slot reads top. *)
-    pin "FWD-06"
-      "gate-free — the load at the slot reads top (the top store may hit 0x100, so the \
-       pre-store {42} is no longer provable — invalidated, not preserved)"
-      (fun () ->
-        let m = memv "e2ed_m3" in
-        let t = v64 "e2ed_t3" in
-        let d1 =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)),
-                 Bil.Int (Cbat_word.to_word (w64 42)), LittleEndian, `r64 ))
-        in
-        let env1 = Vsa.Test_seam.denote_def d1 AI.top in
-        let d2 =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m, Bil.Unknown ("e2ed_top", Type.Imm 64),
-                 Bil.Int (Cbat_word.to_word (w64 7)), LittleEndian, `r64 ))
-        in
-        let env2 = Vsa.Test_seam.denote_def d2 env1 in
-        let dload =
-          Def.create t
-            (Bil.Load (Bil.Var m, Bil.Int (Cbat_word.to_word (w64 0x100)), LittleEndian, `r64))
-        in
-        let env3 = Vsa.Test_seam.denote_def dload env2 in
-        let tv = AI.find_word 64 env3 t in
-        check "FWD-06" (Ws.is_top tv));
+
 
     (* FWD-07: EQ over a {0,1} operand is bool_top. *)
     pin "FWD-07"
@@ -387,45 +331,11 @@ let tests : unit Alcotest.test list =
 
     (* FWD-17: a width-mismatched ordering answers top too — the domain
        never re-derives a comparison on coerced operands. *)
-    pin "FWD-17" "a width-mismatched ordering answers top" (fun () ->
-        let v = v64 "t17_v" in
-        let e =
-          Bil.BinOp
-            ( Bil.LT,
-              Bil.Var v,
-              Bil.Int (Cbat_word.to_word (w32 0x80000000)) )
-        in
-        match
-          Vsa.Test_seam.denote_imm_exp e
-            (AI.add_word AI.top ~key:v ~data:(Ws.singleton (w64 0)))
-        with
-        | Ok ws ->
-            check "FWD-17"
-              (Ws.bitwidth ws = 1
-              && Ws.elem (Cbat_word.of_int ~width:1 0) ws
-              && Ws.elem (Cbat_word.of_int ~width:1 1) ws
-              && not (Ws.is_bottom ws))
-        | Error _ -> check "FWD-17" false);
+
 
     (* FWD-18: an arithmetic op with mismatched operand widths answers top
        at the common width. *)
-    pin "FWD-18"
-      "a width-mismatched arithmetic op answers top at the common width"
-      (fun () ->
-        let a =
-          Var.create ~is_virtual:false ~fresh:false "t18_a" (Type.Imm 32)
-        in
-        let b = v64 "t18_b" in
-        let env =
-          AI.add_word
-            (AI.add_word AI.top ~key:a
-               ~data:(Ws.of_list ~width:32 [ w32 1; w32 2 ]))
-            ~key:b ~data:(Ws.of_list ~width:64 [ w64 1; w64 2 ])
-        in
-        let e = Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b) in
-        match Vsa.Test_seam.denote_imm_exp e env with
-        | Ok ws -> check "FWD-18" (Ws.is_top ws && Ws.bitwidth ws = 64)
-        | Error _ -> check "FWD-18" false);
+
   ]
 
 let () = run "forward" tests

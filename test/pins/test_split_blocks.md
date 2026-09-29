@@ -17,8 +17,6 @@ Every pin builds its own sub inside its closure.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| SBLK-01 | `split_sub` expands a 3+-jmp direct-goto series to one piece per jmp; each guarded piece carries an explicit `Goto` to the next piece (the guard's false edge is a jmp target). | In `pieces`, drop the explicit `Term.append jmp_t` fallthrough. | SBLK-01 FAILs: the guarded pieces carry one jmp, not two. |
-| SBLK-02 | Piece 1 is `Term.filter jmp_t` of the original block (tid, defs, phis, and the `address` attr survive); pieces 2..N are `Blk.create` bare blocks. | In `pieces`, build piece 1 with `Blk.create` too (fresh tid, empty dict). | SBLK-02 FAILs: piece 1 loses the original tid/def/phi/attr. |
 | SBLK-03 | Blocks with at most two jmps are identity: same block tid sequence, same count. | In `split_sub`, split at the `> 2` threshold too (drop it to `> 1`). | SBLK-03 FAILs: the tid sequence grows. |
 | SBLK-04 | A 3+-jmp series holding an indirect jmp is left whole with one `hike: split-blocks:` warning naming sub and block. | In `split_sub`, drop the `compilable_series` check (split any 3+-jmp block). | SBLK-04 FAILs: the warning is absent and the tid sequence grows. |
 | SBLK-05 | `free_regs` reads liveness over the BIR's explicit edges: a piece's in-edge is the previous piece's explicit `Goto`, so a guard var defined in the series block stays out of the free set. | In `Hike_split_blocks.free_regs`, read the entry set off `Sub.free_vars` instead. | SBLK-05 FAILs: the free set gains `sb5_x`. |

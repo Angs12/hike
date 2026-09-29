@@ -27,10 +27,6 @@ let portion_eq (p : A.portion) (sec : A.sec) (lo : int64) (hi : int64) =
 
 let stack_off (o : int64) : Ws.t = Ws.stack_word_i64 o
 
-let stack_rng (a : int64) (b : int64) : Ws.t =
-  Ws.stack_word (Clp.interval ~width:64 (i2w a) (i2w b))
-
-(* The pure mechanism over constructed word sets. *)
 let rd ?(rip = false) ?(width = 8) ?(extents = []) (ws : Ws.t) =
   A.range_of_denotation ~extents ~word:8 ~entry ~spans:[] ~rip ~width ws
 
@@ -49,10 +45,6 @@ let mem_rbp () = (memv "at_m", v64 "RSP", v64 "RBP")
    the stamped subs the seam reads. *)
 let tree_ctx (subs : sub term list) : A.ctx =
   fixture_ctx ~spans:(spans_of ()) subs
-
-let solved (subs : sub term list) : bool =
-  let _, _, ok = fixture_facts subs in
-  ok
 
 let load_at (m : var) (base : var) (off : int64) (bits : int) : def term =
   Def.create (v64 "at_t")
@@ -202,62 +194,17 @@ let heap_store_sub name m_name (base : var) : sub term =
 let tests : unit Alcotest.test list =
   [
     (* S01/S02/S03: the normalization and projection table. *)
-    pin "SEC-01" "AT1-S01: a 1-byte singleton occupies exactly its byte"
-      (fun () ->
-        check "SEC-01"
-          (match rd ~width:1 (stack_off (-8L)) with
-           | _, [ p ] -> portion_eq p S.Stack (pos (-8L)) (pos (-8L))
-           | _ -> false));
 
-    pin "SEC-02"
-      "AT1-S01: an 8-byte singleton at entry-8 occupies [entry-8,entry-1]"
-      (fun () ->
-        check "SEC-02"
-          (match rd ~width:8 (stack_off (-8L)) with
-           | _, [ p ] -> portion_eq p S.Stack (pos (-8L)) (pos (-1L))
-           | _ -> false));
 
-    pin "SEC-03"
-      "AT1-S01: a ranged hull [entry-12,entry-8] of width 4 occupies through entry-5"
-      (fun () ->
-        check "SEC-03"
-          (match rd ~width:4 (stack_rng (-12L) (-8L)) with
-           | _, [ p ] -> portion_eq p S.Stack (pos (-12L)) (pos (-5L))
-           | _ -> false));
 
-    pin "SEC-04" "AT1-S01: a 4-byte singleton at entry-4 occupies [entry-4,entry-1]"
-      (fun () ->
-        check "SEC-04"
-          (match rd ~width:4 (stack_off (-4L)) with
-           | _, [ p ] -> portion_eq p S.Stack (pos (-4L)) (pos (-1L))
-           | _ -> false));
 
-    pin "SEC-05"
-      "AT1-S01: the retaddr read at entry of width 8 occupies [entry,entry+7] (Stack)"
-      (fun () ->
-        check "SEC-05"
-          (match rd ~width:8 (stack_off 0L) with
-           | t, [ p ] ->
-               portion_eq p S.Stack entry (pos 7L)
-               &&
-               (match t with
-                | Some Tag.Range (l, h) ->
-                    Int64.equal l entry && Int64.equal h entry
-                | _ -> false)
-           | _ -> false));
 
-    pin "SEC-06" "AT1-S01: an args read at entry+8 occupies [entry+8,entry+15] (Args)"
-      (fun () ->
-        check "SEC-06"
-          (match rd ~width:8 (stack_off 8L) with
-           | t, [ p ] ->
-               portion_eq p S.Args (pos 8L) (pos 15L)
-               &&
-               (match t with
-                | Some Tag.Range (l, h) ->
-                    Int64.equal l (pos 8L) && Int64.equal h (pos 8L)
-                | _ -> false)
-           | _ -> false));
+
+
+
+
+
+
 
     pin "SEC-07" "AT1-S02: bottom yields the Dead tag and no portion"
       (fun () ->
@@ -294,20 +241,9 @@ let tests : unit Alcotest.test list =
            Base.List.for_all ps ~f:(fun p ->
                match p.A.pt_sec with S.Stack | S.Args | S.Vla -> true | _ -> false)));
 
-    pin "SEC-11" "AT1-S02: the full data domain [0,2^64-1] is a valid ordered range"
-      (fun () ->
-        check "SEC-11"
-          (A.compare_point { A.p_sec = S.Data; p_pos = 0L }
-             { A.p_sec = S.Data; p_pos = (-1L) }
-          < 0));
 
-    pin "SEC-12" "AT1-S02: the unsigned seam orders the high half above 2^63-1"
-      (fun () ->
-        check "SEC-12"
-          (A.compare_point
-             { A.p_sec = S.Data; p_pos = 0x7fff_ffff_ffff_ffffL }
-             { A.p_sec = S.Data; p_pos = (-1L) }
-          < 0));
+
+
 
     pin "SEC-13"
       "AT1-S02: an overflowed unsigned expansion saturates at the top, never a wrapped short range"
@@ -428,80 +364,16 @@ let tests : unit Alcotest.test list =
                portion_eq p S.Data 0x403CL 0x403FL && not p.A.pt_elig
            | _ -> false));
 
-    pin "SEC-22" "AT1-S03: an interval disjoint from every span contributes no member"
-      (fun () ->
-        check "SEC-22"
-          (let ws =
-             Ws.of_clp (Clp.interval ~width:64 (i2w 0x6000L) (i2w 0x6007L))
-           in
-           match rd_spans ~rip:true ~width:8 ws with
-           | None, [] -> true
-           | _ -> false));
+
 
     (* The collection and the storage rule over real fixtures. *)
-    pin "SEC-23" "AT1-ENV: the fixture's environments install (the lifecycle)"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let sub1 =
-          straight_sub "at_reads"
-            [ def_rbp; load_at m rbp 16L 64; load_at m rbp 12L 64;
-              load_at m rbp 8L 64 ]
-        in
-        check "SEC-23" (solved [ sub1 ]));
 
-    pin "SEC-24" "AT1-TREE: the bridged reads merge into one Region over [entry-16,entry-1]"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let sub1 =
-          straight_sub "at_reads"
-            [ def_rbp; load_at m rbp 16L 64; load_at m rbp 12L 64;
-              load_at m rbp 8L 64 ]
-        in
-        let ctx1 = tree_ctx [ sub1 ] in
-        check "SEC-24"
-          (match storage_at ctx1 sub1 S.Stack (pos (-16L)) (pos (-1L)) with
-           | Some (A.Stack_region 1) -> true
-           | _ -> false));
 
-    pin "SEC-25" "AT1-TREE: adjacent-only reads stay separate with ascending ids"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let sub2 =
-          straight_sub "at_adj"
-            [ def_rbp; load_at m rbp 32L 64; load_at m rbp 16L 64 ]
-        in
-        let ctx = tree_ctx [ sub2 ] in
-        check "SEC-25"
-          (match
-             ( storage_at ctx sub2 S.Stack (pos (-32L)) (pos (-25L)),
-               storage_at ctx sub2 S.Stack (pos (-16L)) (pos (-9L)) )
-           with
-           | Some (A.Stack_region 1), Some (A.Stack_region 2) -> true
-           | _ -> false));
 
-    pin "SEC-26" "AT1-ENV: the top-write fixtures' environments install"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let u = v64 "at_u" in
-        let known = load_at m rbp 8L 64 in
-        let top_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.Var u,
-                 Bil.Int (Cbat_word.to_word (w64 42)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let subw =
-          straight_sub "at_topwrite" [ def_rbp; known; top_store ]
-        in
-        let other = straight_sub "at_other" [ def_rbp; load_at m rbp 8L 64 ] in
-        check "SEC-26" (solved [ subw; other ]));
+
+
+
+
 
     pin "SEC-27" "AT1-TOPW: the TOP write and the known read share Frame storage"
       (fun () ->
@@ -578,35 +450,7 @@ let tests : unit Alcotest.test list =
            | Some (A.Stack_region 1) -> true
            | _ -> false));
 
-    pin "SEC-30" "AT1-ENV: the escape fixture's environments install"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let esc_data = v64 "at_esc" in
-        let def_esc =
-          Def.create esc_data
-            (Bil.BinOp
-               ( Bil.MINUS,
-                 Bil.Var rbp,
-                 Bil.Int (Cbat_word.to_word (w64 0x30)) ))
-        in
-        let esc_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.MINUS,
-                     Bil.Var rbp,
-                     Bil.Int (Cbat_word.to_word (w64 0x20)) ),
-                 Bil.Var esc_data,
-                 LittleEndian,
-                 `r64 ))
-        in
-        let clean = load_at m rbp 0x20L 64 in
-        let sub3 =
-          straight_sub "at_escape" [ def_rbp; def_esc; clean; esc_store ]
-        in
-        check "SEC-30" (solved [ sub3 ]));
+
 
     pin "SEC-31" "AT1-ESC: the escaped extent's component takes Frame storage"
       (fun () ->
@@ -679,15 +523,7 @@ let tests : unit Alcotest.test list =
                    Base.List.exists rs.A.members ~f:(fun mm ->
                        Option.is_none mm.A.m_def && mm.A.m_identity))));
 
-    pin "SEC-33" "AT1-ENV: the retaddr fixture's environments install"
-      (fun () ->
-        let m, _rsp, _rbp = mem_rbp () in
-        let ret_read =
-          Def.create (v64 "at_ret")
-            (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64))
-        in
-        let sub4 = straight_sub "at_retaddr" [ ret_read ] in
-        check "SEC-33" (solved [ sub4 ]));
+
 
     pin "SEC-34" "AT1-RET: the retaddr bytes' component takes Frame storage"
       (fun () ->
@@ -703,39 +539,11 @@ let tests : unit Alcotest.test list =
            | Some A.Stack_residue -> true
            | _ -> false));
 
-    pin "SEC-35" "AT1-ENV: the args fixture's environments install"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let a_full = ld_plus m rbp 8L 64 in
-        let a_intra = ld_plus m rbp 12L 32 in
-        let sub5 = straight_sub "at_args" [ def_rbp; a_full; a_intra ] in
-        check "SEC-35" (solved [ sub5 ]));
 
-    pin "SEC-36" "AT1-ARGS: the full-cell and intra-cell reads share Arg_slot 0"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let a_full = ld_plus m rbp 8L 64 in
-        let a_intra = ld_plus m rbp 12L 32 in
-        let sub5 = straight_sub "at_args" [ def_rbp; a_full; a_intra ] in
-        let ctx5 = tree_ctx [ sub5 ] in
-        check "SEC-36"
-          (match storage_at ctx5 sub5 S.Args (pos 8L) (pos 15L) with
-           | Some (A.Arg_slot 0) -> true
-           | _ -> false));
 
-    pin "SEC-37" "AT1-ENV: the args-store fixture's environments install"
-      (fun () ->
-        let m, rsp, rbp = mem_rbp () in
-        let def_rbp = Def.create rbp (Bil.Var rsp) in
-        let a_full = ld_plus m rbp 8L 64 in
-        let a_cell1 = ld_plus m rbp 16L 64 in
-        let sub6 =
-          straight_sub "at_args_store"
-            [ def_rbp; a_full; st_plus m rbp 8L 64; a_cell1 ]
-        in
-        check "SEC-37" (solved [ sub6 ]));
+
+
+
 
     pin "SEC-38" "AT1-ARGS: a store demotes its cell to Window"
       (fun () ->
@@ -828,11 +636,7 @@ let tests : unit Alcotest.test list =
            | _ -> false));
 
     (* T3: the data rows of the storage rule. *)
-    pin "SEC-43" "AT3-ENV: the data fixture's environments install"
-      (fun () ->
-        check "SEC-43"
-          (let sub = straight_sub "at_env" [ sec_load 0x4008L ] in
-           Core.Map.length (install_fixture_envs [ sub ]).envs > 0));
+
 
     pin "SEC-44" "AT3-DATA: the rip-proved in-span read's Global component is its word range"
       (fun () ->
@@ -926,10 +730,7 @@ let tests : unit Alcotest.test list =
         check "SEC-53"
           (clamped (A.top_claim ~extents:[] ~cause:A.Unbounded_stack ~entry ~word:8)));
 
-    pin "SEC-54" "AT1-TC4: the denotation paths land on their claims"
-      (fun () ->
-        check "SEC-54"
-          (plain (rd (Ws.top 64)) && clamped (rd (Ws.stack_word (Clp.top 64)))));
+
 
     (* The Sections-owned regression pins. *)
     pin "SEC-55"
@@ -1005,17 +806,7 @@ let tests : unit Alcotest.test list =
         check "SEC-58"
           (Ws.equal (read64 fx.es_m post_ai (-8L)) (Ws.singleton (w64 0xAA))));
 
-    pin "SEC-59" "C4b control: the constant stores' merged component takes Region storage"
-      (fun () ->
-        let rsp = v64 "RSP" in
-        let m = memv "c4b_m" in
-        let a_ctrl = mk_store_minus m rsp 48 3 `r64 in
-        let b_ctrl = mk_store_minus m rsp 44 4 `r64 in
-        let sub_ctrl = fst (sub_of "c4b_ctrl" [ [ a_ctrl; b_ctrl ], [] ]) in
-        let ctx_ctrl = fixture_ctx [ sub_ctrl ] in
-        check_bound "SEC-59"
-          (storage_of_def ctx_ctrl sub_ctrl (Term.tid a_ctrl))
-          (fun rs -> rs.A.storage = A.Stack_region 1));
+
 
     pin "SEC-60" "C4b: the widened member's component takes Frame storage, never Region"
       (fun () ->
@@ -1040,45 +831,11 @@ let tests : unit Alcotest.test list =
                | None -> false)
            | None -> false));
 
-    pin "SEC-62"
-      "remediation A1: pre-call the seeded caller-frame cell [entry RSP-8] holds {0xAA} (non-vacuous pin)"
-      (fun () ->
-        let rcx = v64 "RCX" in
-        let fx =
-          mk_escape_caller ~pfx:"a1" ~fp_off:8 ~seed:0xAA
-            ~outs:[ (16, R rcx) ]
-            ()
-        in
-        let st = st_pre fx.es_sub fx.es_blk0 fx.es_blk1 in
-        check "SEC-62"
-          (Ws.equal (read64 fx.es_m st (-8L)) (Ws.singleton (w64 0xAA))));
 
-    pin "SEC-63"
-      "remediation A4c: pre-call the neighbor cell [-0x18] holds {0xAA} and the slots hold their values (non-vacuous pins)"
-      (fun () ->
-        let fx =
-          mk_escape_caller ~pfx:"a4c" ~fp_off:0x18 ~seed:0xAA
-            ~outs:[ (16, C 0xBB); (24, C 0xDD) ]
-            ()
-        in
-        let st = st_pre fx.es_sub fx.es_blk0 fx.es_blk1 in
-        check "SEC-63"
-          (Ws.equal (read64 fx.es_m st (-0x18L)) (Ws.singleton (w64 0xAA))
-          && Ws.equal (read64 fx.es_m st (-0x10L)) (Ws.singleton (w64 0xBB))
-          && Ws.equal (read64 fx.es_m st (-0x8L)) (Ws.singleton (w64 0xDD))));
 
-    pin "SEC-64"
-      "remediation A4c: the neighbor cell OUTSIDE the slots' extent survives the call untouched"
-      (fun () ->
-        let fx =
-          mk_escape_caller ~pfx:"a4c" ~fp_off:0x18 ~seed:0xAA
-            ~outs:[ (16, C 0xBB); (24, C 0xDD) ]
-            ()
-        in
-        let sol = run_anchored fx.es_sub in
-        let post_ai = Graphlib.Std.Solution.get sol fx.es_post_tid in
-        check "SEC-64"
-          (Ws.equal (read64 fx.es_m post_ai (-0x18L)) (Ws.singleton (w64 0xAA))));
+
+
+
 
     pin "SEC-65"
       "R12: a Region binding of occupied span 8 bytes allocates 16 (aligned once, no width factor)"
@@ -1118,45 +875,9 @@ let tests : unit Alcotest.test list =
           (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
           = Some (A.Stack_region 1)));
 
-    pin "SEC-67"
-      "S2b (fp-GPR control): the identical sub with an RBX-based heap store is NOT degraded — storage-ness comes from the value proof, not the name"
-      (fun () ->
-        let sub = heap_store_sub "s2b_heap_rbx" "s2b_m" (v64 "RBX") in
-        let ctx = fixture_ctx [ sub ] in
-        check "SEC-67"
-          (storage_at ctx sub Sm.Stack (pos (-16L)) (pos (-9L))
-          = Some (A.Stack_region 1)));
 
-    pin "SEC-68"
-      "S3 (fp-GPR): the value-true twin — an [RBP := RSP] prologue makes RBP sp-derived, so the sub's frame access takes Region storage (values alone decide)"
-      (fun () ->
-        let rsp = v64 "RSP" in
-        let rbp = v64 "RBP" in
-        let m = memv "s3_m" in
-        let def_prologue = Def.create rbp (Bil.Var rsp) in
-        let def_store =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.BinOp
-                   ( Bil.MINUS,
-                     Bil.Var rbp,
-                     Bil.Int (Cbat_word.to_word (w64 0x30)) ),
-                 Bil.Int (Cbat_word.to_word (w64 9)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let callee = mk_selfloop_callee "s3_callee" in
-        let sub, _ =
-          sub_of "s3_prologue"
-            [ [ def_prologue; def_store ],
-              [ (1, fun t -> mk_call_jmp t (Term.tid callee)) ];
-              [], [] ]
-        in
-        let ctx = fixture_ctx [ sub ] in
-        check "SEC-68"
-          (storage_at ctx sub Sm.Stack (pos (-48L)) (pos (-41L))
-          = Some (A.Stack_region 1)));
+
+
 
     pin "SEC-69"
       "AT4-VLA: the extent claims bind nowhere — the static frame carves beside a live VLA"

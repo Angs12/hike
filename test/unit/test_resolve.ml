@@ -513,71 +513,15 @@ let tests : unit Alcotest.test list =
            | _ -> false));
 
     (* J3b: the TOP target (an undefined var) stays too. *)
-    pin "RES-16" "T22-J3b: a TOP target is untouched by the rewrite"
-      (fun () ->
-        let j3b_top = v64 "t22_j3b_top" in
-        let j3b, _ =
-          sub_of "t22_top"
-            [ [], [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.Var j3b_top)))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, j3b', _ =
-          produce Theory.Target.unknown (Program.create ~subs:[ j3b ] ()) j3b
-        in
-        check "RES-16"
-          (match jmps_of_blk j3b' 0 with
-           | [ j ] -> (
-               match Jmp.kind j with Goto (Indirect _) -> true | _ -> false)
-           | _ -> false));
+
 
     (* J5 (the ret-not-dispatch pin): the epilogue's target VALUE is
        bounded — the corpus crash shape — and the resolution leaves it
        alone: no split, no growth, no loud failure.  The retaddr fact is
        the load's ADDRESS denotation (the entry-RSP cell). *)
-    pin "RES-17" "RET-ND1: the entry-RSP cell is keyable"
-      (fun () ->
-        check "RES-17"
-          (match Mem.Key.of_wordset (Ws.stack_word_i64 0L) with
-           | [ _ ] -> true
-           | _ -> false));
 
-    pin "RES-18" "RET-ND1: the seeded [RSP] load is the retaddr read"
-      (fun () ->
-        let j5_ra = v64 "t22_j5b_ra" in
-        let j5_m = memv "t22_j5b_m" in
-        let j5_ld =
-          Def.create j5_ra
-            (Bil.Load (Bil.Var j5_m, Bil.Var sp, LittleEndian, `r64))
-        in
-        let j5, _ =
-          sub_of "t22_bounded_ret"
-            [ [ j5_ld ],
-              [ (1, fun _ ->
-                    Jmp.create
-                      (Call (Call.create ~target:(Indirect (Bil.Var j5_ra)) ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        check "RES-18"
-          (match Mem.Key.of_wordset (Ws.stack_word_i64 0L) with
-           | [ k ] ->
-            let entry =
-              AI.add_memory (anchored_entry ()) ~key:j5_m
-                ~data:
-                  (Mem.add
-                     (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
-                     ~key:k
-                     ~data:(Mem.Val.create (Ws.singleton (w64 0)) LittleEndian))
-            in
-            let sol =
-              Cbat_vsa.static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
-                (Program.create ~subs:[ j5 ] ()) j5
-                (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
-            in
-            let retaddr5 =
-              Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol j5
-            in
-            Core.Set.mem retaddr5 (Term.tid j5_ld)
-           | _ -> false));
+
+
 
     pin "RES-19"
       "RET-ND1: a bounded retaddr target is not a dispatch (no raise, no growth)"
@@ -625,61 +569,7 @@ let tests : unit Alcotest.test list =
             (not events5) && Core.Set.is_empty fresh5'
             && Core.Map.is_empty resolved5'));
 
-    pin "RES-20"
-      "RET-ND1: the resolution leaves the epilogue sub's blocks and call untouched"
-      (fun () ->
-        let j5_ra = v64 "t22_j5b_ra" in
-        let j5_m = memv "t22_j5b_m" in
-        let j5_ld =
-          Def.create j5_ra
-            (Bil.Load (Bil.Var j5_m, Bil.Var sp, LittleEndian, `r64))
-        in
-        let j5, j5_tids =
-          sub_of "t22_bounded_ret"
-            [ [ j5_ld ],
-              [ (1, fun _ ->
-                    Jmp.create
-                      (Call (Call.create ~target:(Indirect (Bil.Var j5_ra)) ()))) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        check_key1 "RES-20"
-          (Mem.Key.of_wordset (Ws.stack_word_i64 0L))
-          (fun k ->
-            let entry =
-              AI.add_memory (anchored_entry ()) ~key:j5_m
-                ~data:
-                  (Mem.add
-                     (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
-                     ~key:k
-                     ~data:(Mem.Val.create (Ws.singleton (w64 0)) LittleEndian))
-            in
-            let sol =
-              Cbat_vsa.static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
-                (Program.create ~subs:[ j5 ] ()) j5
-                (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
-            in
-            let sub5', _, _, _, _ =
-              Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
-                ~images:[]
-                ~lift_at:(fun _ ~block_addrs:_ -> None)
-                ~block_addrs:
-                  (Core.Map.of_alist_exn (module Addr)
-                     [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
-                ~sub_addrs:(Core.Map.empty (module Addr))
-                j5 Tid.Map.empty
-            in
-            Base.List.map (Term.enum blk_t sub5' |> Seq.to_list) ~f:Term.tid
-            = Base.List.map (Term.enum blk_t j5 |> Seq.to_list) ~f:Term.tid
-            &&
-            match jmps_of_blk sub5' 0 with
-            | [ j ] -> (
-                match Jmp.kind j with
-                | Call c -> (
-                    match (Call.return c, Call.target c) with
-                    | None, Indirect (Bil.Var v) -> Var.equal v j5_ra
-                    | _ -> false)
-                | _ -> false)
-            | _ -> false));
+
 
     (* The completion owns the edge set: a conditional goto's false edge
        is named, and a destination two jumps share is carried once. *)

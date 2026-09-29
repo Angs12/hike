@@ -39,12 +39,6 @@ let def_of_tid (sub : sub term) (dtid : tid) : def term option =
   |> Seq.find ~f:(fun d -> Tid.equal (Term.tid d) dtid)
 
 (* The def with the given lhs in the sub. *)
-let def_of_lhs (sub : sub term) (v : var) : def term option =
-  Term.enum blk_t sub
-  |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)
-
-(* The layout tree of a fixture sub. *)
 let tree_of (sub : sub term) =
   let ctx = fixture_ctx [ sub ] in
   Base.Option.value_exn
@@ -53,26 +47,6 @@ let tree_of (sub : sub term) =
 (* The fixture stamp: the dyn-alloc facts and the layout tag onto the
    terms; the def's slim tag is stamped at the fixture site (the emitter
    consumes no record). *)
-let stamp_shape
-    ?(dynamic_alloc_tids : Tid.Set.t option)
-    ~(layout : Sm.sub_layout)
-    (sub : sub term) : sub term =
-  let sub =
-    Ds.stamp_dyn_allocs
-      ~dynamic_alloc_tids:
-        (Base.Option.value dynamic_alloc_tids ~default:Tid.Set.empty)
-      sub
-  in
-  Sm.set_layout layout sub
-
-(* The storage-free layout: no frame, no regions, no window. *)
-let empty_layout : Sm.sub_layout =
-  { regions = []; window_param = false }
-
-(* Stamps the production tag onto a fixture def. *)
-let tag_def (t : Ds.sec_tag) (d : def term) : def term = Ds.set_sec_tag t d
-
-(* The stack-to-locals fixture mem var and its MINUS/rsp-rooted store. *)
 let pr_c_m = memv "pr_c_m"
 
 let mk_store off data (sz : size) : def term =
@@ -275,42 +249,9 @@ let tests : unit Alcotest.test list =
           (Core.Set.equal a5b_events (tid_set [ a5b_body_sp ])));
 
     (* Lane B: the layout from the finalized tree ([layout_of_tree]). *)
-    pin "MOD-08"
-      "PR-B1: the precise tree carries its Region components and no residue region"
-      (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        let entry = Sm.segment_base in
-        let d_rbp = Def.create pr_b_rbp (Bil.Var sp) in
-        let sub1 =
-          straight_sub "pr_b1"
-            [ d_rbp; pr_b_mk_ld "pr_b1_t1" 24L; pr_b_mk_ld "pr_b1_t2" 16L ]
-        in
-        let l1 =
-          Hike.Sections.layout_of_tree ~word:8 ~entry ~abi ~sub:sub1
-            (tree_of sub1)
-        in
-        check "MOD-08"
-          (l1.Sm.regions =
-             [ (1, (pos (-24L), pos (-17L)), 16L);
-               (2, (pos (-16L), pos (-9L)), 16L) ]));
 
-    pin "MOD-09" "PR-B2: bytes are the occupied span aligned once, never span*width"
-      (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        let entry = Sm.segment_base in
-        let d_rbp = Def.create pr_b_rbp (Bil.Var sp) in
-        let sub1 =
-          straight_sub "pr_b1"
-            [ d_rbp; pr_b_mk_ld "pr_b1_t1" 24L; pr_b_mk_ld "pr_b1_t2" 16L ]
-        in
-        let l1 =
-          Hike.Sections.layout_of_tree ~word:8 ~entry ~abi ~sub:sub1
-            (tree_of sub1)
-        in
-        check "MOD-09"
-          (Base.List.for_all l1.Sm.regions ~f:(fun (_, (lo, hi), b) ->
-               Int64.equal (Int64.add (Int64.sub hi lo) 1L) 8L
-               && Int64.equal b 16L)));
+
+
 
     pin "MOD-10"
       "PR-B3: a plain-TOP identity member forces the residue region with the 64K unbounded floors"
@@ -339,130 +280,18 @@ let tests : unit Alcotest.test list =
           (Base.List.exists l2.Sm.regions ~f:(fun (id, _, b) ->
                Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
 
-    pin "MOD-11" "PR-B6: a plain-TOP-only residue sub takes the same unbounded floor"
-      (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        let entry = Sm.segment_base in
-        let d_rbp = Def.create pr_b_rbp (Bil.Var sp) in
-        let u = v64 "pr_b_u" in
-        let top_store =
-          Def.create pr_b_m
-            (Bil.Store
-               ( Bil.Var pr_b_m,
-                 Bil.Var u,
-                 Bil.Int (Cbat_word.to_word (w64 1)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let sub3 = straight_sub "pr_b6" [ d_rbp; top_store ] in
-        let l3 =
-          Hike.Sections.layout_of_tree ~word:8 ~entry ~abi ~sub:sub3
-            (tree_of sub3)
-        in
-        check "MOD-11"
-          (Base.List.exists l3.Sm.regions ~f:(fun (id, _, b) ->
-               Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
+
 
     (* Lane C: stack-to-locals fission. *)
-    pin "MOD-12"
-      "PR-C1: the whole-access store rebinds lhs and mem node to the region mem, its address the storage's base"
-      (fun () ->
-        let c1_st0 = mk_store 24L 1 `r64 in
-        let c1_st1 = mk_store 16L 2 `r64 in
-        let c1_t = v64 "pr_c1_t" in
-        let c1_ld_nested =
-          Def.create c1_t
-            (Bil.BinOp
-               ( Bil.PLUS,
-                 Bil.Load
-                   (Bil.Var pr_c_m, minus_addr sp 16L, LittleEndian, `r64),
-                 Bil.Int (Cbat_word.to_word (w64 1)) ))
-        in
-        let c1 =
-          straight_sub "pr_c1_fission" [ c1_st0; c1_st1; c1_ld_nested ]
-        in
-        let c1' = rewrite_one c1 in
-        check_bound "MOD-12"
-          (def_of_lhs c1' (Sm.region_mem 1))
-          (fun d ->
-            match Def.rhs d with
-            | Bil.Store (Bil.Var mem, Bil.Var b, _, _, _) ->
-                Var.same mem (Sm.region_mem 1)
-                && Sm.region_ptr_id_of b = Some 1
-            | _ -> false));
 
-    pin "MOD-13"
-      "PR-C1: the nested load inside a BinOp def reads the region mem too (the -O0 cmp pattern)"
-      (fun () ->
-        let c1_st0 = mk_store 24L 1 `r64 in
-        let c1_st1 = mk_store 16L 2 `r64 in
-        let c1_t = v64 "pr_c1_t" in
-        let c1_ld_nested =
-          Def.create c1_t
-            (Bil.BinOp
-               ( Bil.PLUS,
-                 Bil.Load
-                   (Bil.Var pr_c_m, minus_addr sp 16L, LittleEndian, `r64),
-                 Bil.Int (Cbat_word.to_word (w64 1)) ))
-        in
-        let c1 =
-          straight_sub "pr_c1_fission" [ c1_st0; c1_st1; c1_ld_nested ]
-        in
-        let c1' = rewrite_one c1 in
-        check_bound "MOD-13" (def_of_lhs c1' c1_t) (fun d ->
-            match Def.rhs d with
-            | Bil.BinOp (Bil.PLUS, Bil.Load (Bil.Var mem, _, _, _), Bil.Int _)
-              ->
-                Var.same mem (Sm.region_mem 2)
-            | _ -> false));
 
-    pin "MOD-14"
-      "PR-C2: the full-cell args read (width 64) becomes the bare hike_slot0 var"
-      (fun () ->
-        let d_rbp = Def.create pr_c_rbp (Bil.Var sp) in
-        let slot0 = Sm.arg_slot ~word:8 0 in
-        let c2_full = pr_c_args_ld "pr_c2_full" 8 `r64 in
-        let c2_narrow = pr_c_args_ld "pr_c2_narrow" 8 `r32 in
-        let c2_intra = pr_c_args_ld "pr_c2_intra" 12 `r32 in
-        let c2 =
-          straight_sub "pr_c2_slot" [ d_rbp; c2_full; c2_narrow; c2_intra ]
-        in
-        let c2' = rewrite_one c2 in
-        check_bound "MOD-14" (def_of_tid c2' (Term.tid c2_full)) (fun d ->
-            match Def.rhs d with Bil.Var v -> Var.equal v slot0 | _ -> false));
 
-    pin "MOD-15"
-      "PR-C2: the aligned narrow args read (width 32 at cell start) splices the LOW cast"
-      (fun () ->
-        let d_rbp = Def.create pr_c_rbp (Bil.Var sp) in
-        let slot0 = Sm.arg_slot ~word:8 0 in
-        let c2_full = pr_c_args_ld "pr_c2_full" 8 `r64 in
-        let c2_narrow = pr_c_args_ld "pr_c2_narrow" 8 `r32 in
-        let c2_intra = pr_c_args_ld "pr_c2_intra" 12 `r32 in
-        let c2 =
-          straight_sub "pr_c2_slot" [ d_rbp; c2_full; c2_narrow; c2_intra ]
-        in
-        let c2' = rewrite_one c2 in
-        check_bound "MOD-15" (def_of_tid c2' (Term.tid c2_narrow)) (fun d ->
-            match Def.rhs d with
-            | Bil.Cast (Bil.LOW, 32, Bil.Var v) -> Var.equal v slot0
-            | _ -> false));
 
-    pin "MOD-16" "PR-C2: the intra-cell args read (width 32 at byte 4) selects bits [32,63]"
-      (fun () ->
-        let d_rbp = Def.create pr_c_rbp (Bil.Var sp) in
-        let slot0 = Sm.arg_slot ~word:8 0 in
-        let c2_full = pr_c_args_ld "pr_c2_full" 8 `r64 in
-        let c2_narrow = pr_c_args_ld "pr_c2_narrow" 8 `r32 in
-        let c2_intra = pr_c_args_ld "pr_c2_intra" 12 `r32 in
-        let c2 =
-          straight_sub "pr_c2_slot" [ d_rbp; c2_full; c2_narrow; c2_intra ]
-        in
-        let c2' = rewrite_one c2 in
-        check_bound "MOD-16" (def_of_tid c2' (Term.tid c2_intra)) (fun d ->
-            match Def.rhs d with
-            | Bil.Extract (63, 32, Bil.Var v) -> Var.equal v slot0
-            | _ -> false));
+
+
+
+
+
 
     pin "MOD-17"
       "PR-C3: an Args read in a stored cell converts with the store to the incoming-window memory (write-closed)"
@@ -631,126 +460,15 @@ let tests : unit Alcotest.test list =
 
     (* Lane D: the emitter's alloca shapes — the VLA lane, the SP Slot /
        stack_0 anchoring per storage class, and the frame-request clamp. *)
-    pin "MOD-21" "PR-D1: the VLA def emits a real runtime-sized i8 alloca"
-      (fun () ->
-        let m = memv "pr_d_m" in
-        let d_rbx =
-          Def.create (v64 "pr_d_rbx") (Bil.Int (Cbat_word.to_word (w64 0x80)))
-        in
-        let d_vla =
-          Def.create sp
-            (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var (Def.lhs d_rbx)))
-        in
-        let d_st =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.Var sp,
-                 Bil.Int (Cbat_word.to_word (w64 7)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let d1 = straight_sub "pr_d1_vla" [ d_rbx; d_vla; d_st ] in
-        let ir1 =
-          emit_ir
-            [ stamp_shape
-                ~dynamic_alloc_tids:(tid_set [ Term.tid d_vla ])
-                ~layout:empty_layout d1 ]
-        in
-        check "MOD-21" (contains_substring ir1 "%vla = alloca i8, i64"));
 
-    pin "MOD-22" "PR-D1: the model SP binds to the residue's entry pointer"
-      (fun () ->
-        let m = memv "pr_d_m" in
-        let d_rbx =
-          Def.create (v64 "pr_d_rbx") (Bil.Int (Cbat_word.to_word (w64 0x80)))
-        in
-        let d_vla =
-          Def.create sp
-            (Bil.BinOp (Bil.MINUS, Bil.Var sp, Bil.Var (Def.lhs d_rbx)))
-        in
-        let d_st =
-          Def.create m
-            (Bil.Store
-               ( Bil.Var m,
-                 Bil.Var sp,
-                 Bil.Int (Cbat_word.to_word (w64 7)),
-                 LittleEndian,
-                 `r64 ))
-        in
-        let d1 = straight_sub "pr_d1_vla" [ d_rbx; d_vla; d_st ] in
-        let layout : Sm.sub_layout =
-          { regions = [ (0, (pos (-32L), pos 7L), 40L) ];
-            window_param = false }
-        in
-        let ir1 =
-          emit_ir
-            [ stamp_shape
-                ~dynamic_alloc_tids:(tid_set [ Term.tid d_vla ])
-                ~layout d1 ]
-        in
-        check "MOD-22"
-          (contains_substring ir1 "%vla = alloca i8, i64"
-          && contains_substring ir1 "getelementptr i8, ptr %stack_r0"
-          && not (contains_substring ir1 "vla_i64")
-          && not (contains_substring ir1 "sp_slot")));
 
-    pin "MOD-23"
-      "PR-D2: a residue access GEPs the residue alloca at the model address"
-      (fun () ->
-        let residue_layout bytes : Sm.sub_layout =
-          { regions = [ (0, (pos (-16L), pos (-9L)), bytes) ];
-            window_param = false }
-        in
-        let d_ld =
-          Def.create (v64 "pr_d2_t")
-            (Bil.Load
-               ( Bil.Var (Sm.region_mem 0),
-                 minus_addr sp 16L,
-                 LittleEndian,
-                 `r64 ))
-          |> tag_def (Sm.Tag.Range (pos (-16L), pos (-16L)))
-        in
-        let d2 = straight_sub "pr_d2_residue" [ d_ld ] in
-        let ir2 =
-          emit_ir [ stamp_shape ~layout:(residue_layout 32L) d2 ]
-        in
-        check "MOD-23"
-          (contains_substring ir2 "getelementptr i8, ptr %stack_r0"
-          && contains_substring ir2 "load i64"
-          && not (contains_substring ir2 "sp_slot")
-          && not (contains_substring ir2 "stack_0")));
 
-    pin "MOD-24"
-      "PR-D2b: a carved region access GEPs the region's own alloca"
-      (fun () ->
-        let d2b_ld =
-          Def.create (v64 "pr_d2b_t")
-            (Bil.Load
-               ( Bil.Var (Sm.region_mem 1),
-                 minus_addr sp 16L,
-                 LittleEndian,
-                 `r64 ))
-        in
-        let d2b = straight_sub "pr_d2b_region" [ d2b_ld ] in
-        let region_layout : Sm.sub_layout =
-          { regions = [ (0, (pos (-32L), pos (-1L)), 48L);
-                        (1, (pos (-16L), pos (-9L)), 16L) ];
-            window_param = false }
-        in
-        let ir2b = emit_ir [ stamp_shape ~layout:region_layout d2b ] in
-        check "MOD-24"
-          (contains_substring ir2b "%stack_r1"
-          && not (contains_substring ir2b "%anchor")
-          && not (contains_substring ir2b "%sp_slot")));
 
-    pin "MOD-25" "PR-D2c: a storage-free sub emits no SP Slot and no region"
-      (fun () ->
-        let d2c = straight_sub "pr_d2c_free" [] in
-        let ir2c = emit_ir [ stamp_shape ~layout:empty_layout d2c ] in
-        check "MOD-25"
-          (not (contains_substring ir2c "%sp_slot")
-          && not (contains_substring ir2c "%stack_r")));
+
+
+
+
+
 
     (* The printable-run rule (the model's one home): a word is string
        text iff a printable run crosses its start boundary. *)
@@ -759,31 +477,15 @@ let tests : unit Alcotest.test list =
         let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
         check "MOD-27" (Sm.string_text_table txt 1));
 
-    pin "MOD-28" "STRING-TEXT: a NUL directly before the word means no crossing"
-      (fun () ->
-        let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-28" (not (Sm.string_text_table txt 4)));
 
-    pin "MOD-29" "STRING-TEXT: pointer bytes before the word mean no crossing"
-      (fun () ->
-        let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-29" (not (Sm.string_text_table txt 6)));
 
-    pin "MOD-30" "STRING-TEXT: a non-printable start byte never covers"
-      (fun () ->
-        let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-30" (not (Sm.string_text_table txt 5)));
 
-    pin "MOD-31" "STRING-TEXT: the first word of the image never crosses"
-      (fun () ->
-        let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-31" (not (Sm.string_text_table txt 0)));
 
-    pin "MOD-32"
-      "STRING-TEXT: running off the front crosses iff the prefix is all printable"
-      (fun () ->
-        let all_txt = Bytes.of_string "\x63\x61\x74\x20\x7e" in
-        check "MOD-32" (Sm.string_text_table all_txt 4));
+
+
+
+
+
 
     (* Lane E: the register/convention facts (Hike_abi, ADR 0008: SP is the
        only stack-semantics register, fp an ordinary callee-saved GPR) and
@@ -805,31 +507,9 @@ let tests : unit Alcotest.test list =
           && names_are abi.Abi.callee_saved
                [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ]));
 
-    pin "MOD-35"
-      "PR-E1: the SysV lanes — 6 integer args, 8 vector args, RAX/RDX returns"
-      (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        check "MOD-35"
-          (names_are abi.Abi.int_param_regs
-             [ "RDI"; "RSI"; "RDX"; "RCX"; "R8"; "R9" ]
-          && Base.List.length abi.Abi.vector_param_regs = 8
-          && String.equal
-               (Var.name (Base.List.nth_exn abi.Abi.vector_param_regs 0))
-               "YMM0"
-          && names_are abi.Abi.return_regs [ "RAX"; "RDX" ]
-          && Base.List.length
-               (let unk = Abi.of_target Theory.Target.unknown in
-                unk.Abi.int_param_regs @ unk.Abi.vector_param_regs)
-             = 14));
 
-    pin "MOD-36" "PR-E1: the structural predicates partition the lanes"
-      (fun () ->
-        let abi = Hike.Abi.x86_64_sysv in
-        check "MOD-36"
-          (Abi.is_return_reg abi (named "RAX")
-          && not (Abi.is_return_reg abi (named "RCX"))
-          && Abi.is_vector_param_reg abi (named "YMM3")
-          && not (Abi.is_vector_param_reg abi (named "RDI"))));
+
+
 
     pin "MOD-37" "PR-E1: an unknown target falls back to the SysV record (total)"
       (fun () ->

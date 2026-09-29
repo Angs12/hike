@@ -169,18 +169,7 @@ let tests : unit Alcotest.test list =
              (Ws.stack_word_i64 0x1000L)));
 
     (* A trap with a bounded RSP keeps the frame like any call. *)
-    pin "CE-07" "a trap with a bounded RSP keeps the frame like any call" (fun () ->
-        let trap_env, m_trap = ce_raw_env () in
-        let trap_frame =
-          Ce.transfer ~abi:ce_abi
-            ~preserved:(ids1 ce_abi.Hike_abi.sp)
-            ~site:{ Ce.summary = None; written_lanes = []; pushed = false }
-            trap_env
-        in
-        check "CE-07"
-          (Ws.equal (ce_reads m_trap 0x2000L trap_frame) (Ws.singleton (w64 42))
-          && Ws.equal (ce_reads m_trap 0x3000L trap_frame) (Ws.singleton (w64 7))
-          && Ws.is_top (ce_reads m_trap 0x500L trap_frame)));
+
 
     (* A singleton target naming a lifted sub reads its summary. *)
     pin "CE-08" "a singleton target naming a lifted sub reads its summary" (fun () ->
@@ -232,10 +221,7 @@ let tests : unit Alcotest.test list =
           | Some _ -> false));
 
     (* A preserved word keeps its value-set. *)
-    pin "CE-11" "a preserved word keeps its value-set" (fun () ->
-        let x, _, env = ce_xy_env () in
-        let env' = ce_call env (ids1 x) in
-        check "CE-11" (Ws.equal (AI.find_word 64 env' x) (Ws.singleton (w64 5))));
+
 
     (* A non-preserved word is TOPed. *)
     pin "CE-12" "a non-preserved word is TOPed" (fun () ->

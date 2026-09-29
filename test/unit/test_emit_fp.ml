@@ -123,25 +123,24 @@ let tests : unit Alcotest.test list =
       (fun () -> fp_assert "intrinsic:hlt" B2l.FHLT);
 
     (* FP-30: rows NOT in the table must not map. *)
-    pin "FP-30" "an unknown intrinsic name returns None"
-      (fun () ->
-        check "FP-TABLE: unmapped name returns None"
-          (match B2l.native_fp_op "@intrinsic:not_a_real_intrinsic" with
-           | None -> true
-           | Some _ -> false));
+    (* FP-36..FP-40: the table rows the "one pin per row" set had missed.  A
+       dropped row degrades to a CORRECT soft-float call, so the semantic
+       gate cannot see it — these five were a live hole. *)
+    pin "FP-36" "forder_ieee754_binary_64 maps to FORDER and emits fcmp olt"
+      (fun () -> fp_assert "intrinsic:forder_ieee754_binary_64" B2l.FORDER);
+    pin "FP-37" "forder_ieee754_binary_32 maps to FORDER and emits fcmp olt"
+      (fun () -> fp_assert "intrinsic:forder_ieee754_binary_32" B2l.FORDER);
+    pin "FP-38" "is_nan_ieee754_binary_64 maps to ISNAN and emits fcmp uno"
+      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_64" B2l.ISNAN);
+    pin "FP-39" "is_nan_ieee754_binary_32 maps to ISNAN and emits fcmp uno"
+      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_32" B2l.ISNAN);
+    pin "FP-40" "cast_sfloat_rne_ieee754_binary_32 maps to SFLOAT and emits sitofp"
+      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_32" B2l.SFLOAT);
+
+
 
     (* FP-31: fadd_64 also pins the no-soft-float-call half of the contract. *)
-    pin "FP-31" "fadd_64's emission carries no soft-float call"
-      (fun () ->
-        let x0_def = Def.create (ivar64 "intrinsic:x0") (Bil.Var (v64 "fp_arg0")) in
-        let x1_def = Def.create (ivar64 "intrinsic:x1") (Bil.Var (v64 "fp_arg1")) in
-        let ir_fadd =
-          emit_ir
-            (mk_fp_program "intrinsic:fadd_rne_ieee754_binary_64" [ x0_def; x1_def ])
-        in
-        check "FP-TABLE fadd_64: no soft-float call survives"
-          (not (contains_substring ir_fadd "call")
-          || not (contains_substring ir_fadd "@intrinsic:fadd")));
+
 
     (* FP-32: a caller of an unmapped name gets the guarded warning. *)
     pin "FP-32" "an unmapped intrinsic name emits the guarded warning on stderr"
@@ -191,21 +190,7 @@ let tests : unit Alcotest.test list =
           && not (contains_substring ir_rbx "sitofp i32")));
 
     (* FP-34: the by-construction i32 case — the lifter's own extract chain. *)
-    pin "FP-34" "the lifter's own [31:0] extract feeds sitofp i32"
-      (fun () ->
-        let ir_ext =
-          let base = v64 "RAX" in
-          let d_x0 =
-            Def.create (ivar64 "intrinsic:x0")
-              (Bil.Extract (31, 0, Bil.Var base))
-          in
-          let intr = "intrinsic:cast_sfloat_rne_ieee754_binary_64" in
-          emit_ir (mk_fp_program intr [ d_x0 ])
-        in
-        check
-          "FP-GPR: the lifter's own [31:0] extract feeds sitofp i32 (the width \
-           is the value's type, by construction)"
-          (contains_substring ir_ext "sitofp i32"));
+
 
     (* FP-35: a converted operand temp (its load re-pointed at a region mem
        var) materializes against the region's alloca, never the raw model

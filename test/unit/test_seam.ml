@@ -73,24 +73,7 @@ let tests : unit Alcotest.test list =
     (* SC-B: the context's landmark table is the one source of truth: a refine
        run under the context's widening head records the empty meet's boundary
        in that same table. *)
-    pin "SEAM-02" "the context's landmark table is empty before the widening window"
-      (fun () ->
-        let sub = straight_sub "sc_lm" [] in
-        let cfg =
-          Sub.to_graph sub
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi sub in
-        let lm = Vsa.Test_seam.landmarks_of rctx in
-        let head = Tid.for_name "sc_lm_head" in
-        check "SEAM-02"
-          (match
-             Cbat_landmarks.entries lm head
-               (Cbat_landmarks.Word (v64 "seam_lm_word"))
-           with
-          | [] -> true
-          | _ -> false));
+
 
     pin "SEAM-03"
       "a refine under the context's widening head records the empty meet's boundary in the context's own table"

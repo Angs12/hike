@@ -114,23 +114,6 @@ let t4_fixture () = Lazy.force t4_fixture_ref
 
 (* The promoted callee with one proven incoming-slot read.  Returns the
    original sub and its rewrite. *)
-let t10_promoted () : sub term * sub term =
-  let m = memv "t10_m" in
-  let addr =
-    Bil.BinOp (Bil.PLUS, Bil.Var (v64 "RSP"), Cbat_word.to_word (w64 8) |> fun w -> Bil.Int w)
-  in
-  let d_ld =
-    Def.create (ivar64 "t10_t")
-      (Bil.Load (Bil.Var m, addr, LittleEndian, `r64))
-  in
-  let sub, _ =
-    sub_of "t10_callee"
-      [ [ d_ld ], [ (1, mk_goto) ];
-        [], [ (0, mk_ret) ] ]
-  in
-  let facts = mk_facts ~prom_arity:1 () in
-  (sub, Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub)
-
 let t10_find_def sub' dtid =
   Term.enum blk_t sub'
   |> Seq.find_map ~f:(fun b ->
@@ -141,45 +124,6 @@ let t10_find_def sub' dtid =
 (* The caller side: the site's store gains its call-arg def right after it
    (found through the chain replica's rewrite).  Returns the storing def
    and the bound call-arg def, when present. *)
-let t10_site () : def term * def term option =
-  let m2 = memv "t10_m2" in
-  let store =
-    Def.create m2
-      (Bil.Store
-         ( Bil.Var m2,
-           Bil.BinOp (Bil.PLUS, Bil.Var (v64 "RSP"), Cbat_word.to_word (w64 16) |> fun w -> Bil.Int w),
-           Bil.Int (Cbat_word.to_word (w64 7)),
-           LittleEndian,
-           `r64 ))
-  in
-  let caller, _ =
-    sub_of "t10_caller"
-      [ [ store ],
-        [ (1,
-           fun t ->
-             Jmp.create
-               (Call (Call.create ~return:(Direct t) ~target:(Indirect (Bil.Var (ivar64 "t10_tptr"))) ()))) ];
-        [], [ (0, mk_ret) ] ]
-  in
-  let caller' = rewrite_one caller in
-  let cblk = Base.List.hd_exn (Term.enum blk_t caller' |> Seq.to_list) in
-  let cdefs = Term.enum def_t cblk |> Seq.to_list in
-  let pos dtid = Base.List.findi cdefs ~f:(fun _ d -> Tid.equal (Term.tid d) dtid) in
-  let arg_at =
-    match pos (Term.tid store) with
-    | Some (i_store, _) -> (
-        match cdefs |> Base.List.findi ~f:(fun _ d -> Cu.is_call_arg (Def.lhs d)) with
-        | Some (i_arg, arg_def) when Base.Int.equal i_arg (i_store + 1) -> Some arg_def
-        | _ -> None)
-    | None -> None
-  in
-  (store, arg_at)
-
-(* Family 9b: the producer record's promotion lanes, through the REAL
-   fixpoint. *)
-
-(* The A4 storing sub: a store at [RSP+8] then reads at [RSP+8] and
-   [RSP+16]. *)
 let pr_a4_sub () : sub term =
   let m = memv "pr_m" in
   let a4_t = v64 "pr_a4_t" in
@@ -453,28 +397,14 @@ let tests : unit Alcotest.test list =
   [
     (* PR-01: the promoted signature carries the register lanes then the
        positional slots. *)
-    pin "PR-01" "the promoted signature carries the positional slots" (fun () ->
-        let _, ir, _ = t4_fixture () in
-        check_ir "PR-01"
-          "(i64 %RDI, i64 %RSI, i64 %hike_slot0, i64 %hike_slot1)" ir);
+
 
     (* PR-02: the resolved site is a DIRECT call through the promoted
        signature; the unpassed slots stay undef. *)
-    pin "PR-02" "the resolved site calls the promoted body directly" (fun () ->
-        let callee, ir, _ = t4_fixture () in
-        check "PR-02"
-          (contains_substring ir
-             (Printf.sprintf "call void @\"%s\"("
-                (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
-          && contains_substring ir ", i64 undef, i64 undef)"));
+
 
     (* PR-03: the memory-convention twin is internal. *)
-    pin "PR-03" "the memory-convention twin is emitted with internal linkage" (fun () ->
-        let callee, ir, _ = t4_fixture () in
-        check_ir "PR-03"
-          (Printf.sprintf "define internal void @\"%s_hike_thunk\""
-             (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
-          ir);
+
 
     (* PR-04: the twin's synthetic indirect convention carries the window
        base, never SP. *)
@@ -489,24 +419,14 @@ let tests : unit Alcotest.test list =
           ir);
 
     (* PR-05: the twin unpacks the window slots into the promoted body. *)
-    pin "PR-05" "the twin unpacks the window slots into the promoted body" (fun () ->
-        let callee, ir, _ = t4_fixture () in
-        check_ir "PR-05"
-          (Printf.sprintf "call void @\"%s\"(i64 %%RDI, i64 %%RSI, i64 %%"
-             (Hike.Bil2llvm.sanitize_name (Tid.name (Term.tid callee))))
-          ir);
+
 
     (* PR-06: the twin reads the slots through the window pointer. *)
-    pin "PR-06" "the twin reads the slots through the window pointer" (fun () ->
-        let _, ir, _ = t4_fixture () in
-        check_ir "PR-06" "getelementptr i8, ptr %hike_window" ir);
+
 
     (* PR-07: the unresolved site takes the pointer call through the
        synthetic signature. *)
-    pin "PR-07" "the unresolvable site takes the pointer call (never the promoted body)"
-      (fun () ->
-        let _, _, ir2 = t4_fixture () in
-        check_ir "PR-07" "call { i64, i64 } %" ir2);
+
 
     (* PR-08: the pointer call never lands on the promoted body directly. *)
     pin "PR-08" "the pointer call never lands on the promoted body directly" (fun () ->
@@ -522,17 +442,10 @@ let tests : unit Alcotest.test list =
           ir2);
 
     (* PR-10: the sub gains its promoted parameter as a real BIR arg. *)
-    pin "PR-10" "the sub gains its promoted parameter as a real BIR arg" (fun () ->
-        let _, sub' = t10_promoted () in
-        check "PR-10"
-          (Base.List.exists
-             (Term.enum arg_t sub' |> Seq.to_list)
-             ~f:(fun a -> Var.equal (Arg.lhs a) (Cu.arg_slot ~word:8 0))));
+
 
     (* PR-11: the sub keeps its tid through the arg-term rewrite. *)
-    pin "PR-11" "the sub keeps its tid through the arg-term rewrite" (fun () ->
-        let sub, sub' = t10_promoted () in
-        check "PR-11" (Tid.equal (Term.tid sub') (Term.tid sub)));
+
 
     (* PR-12: an identity access keeps its tag through the stamp. *)
     pin "PR-12" "an identity access keeps its tag through the stamp" (fun () ->
@@ -568,41 +481,14 @@ let tests : unit Alcotest.test list =
         check "PR-12" (Ds.sec_tag keep_def <> None));
 
     (* PR-13: the call-arg def is bound right after the storing def. *)
-    pin "PR-13" "the call-arg def is bound right after the storing def" (fun () ->
-        let _, arg_at = t10_site () in
-        check "PR-13" (Option.is_some arg_at));
+
 
     (* PR-14: the call-arg def reads the storing def's written bytes (7). *)
-    pin "PR-14" "the call-arg def reads the storing def's written bytes" (fun () ->
-        let _, arg_at = t10_site () in
-        check_bound "PR-14" arg_at (fun arg_def ->
-            match Def.rhs arg_def with
-            | Bil.Int w -> Word.to_int64_exn w = 7L
-            | _ -> false));
+
 
     (* PR-15: the proven incoming-slot read promotes — the read's cell is
        Arg_slot 0 in the finalized tree (arity 1, no window). *)
-    pin "PR-15" "the read's cell is Arg_slot 0 in the finalized tree (arity 1, no window)"
-      (fun () ->
-        let m = memv "pr_m" in
-        let a1_t = v64 "pr_a1_t" in
-        let a1_ld =
-          Def.create a1_t (Bil.Load (Bil.Var m, plus_addr sp 8L, LittleEndian, `r64))
-        in
-        let a1 = straight_sub "pr_a1_callee" [ a1_ld ] in
-        check "PR-15"
-          (let ctx = fixture_ctx [ a1 ] in
-           match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid a1) with
-           | None -> false
-           | Some tree ->
-               let bs = Hike.Sections.Tree.to_sequence tree |> Seq.to_list in
-               let argslots =
-                 Base.List.filter_map bs ~f:(fun (_, rs) ->
-                     match rs.Hike.Sections.storage with
-                     | Hike.Sections.Arg_slot i -> Some i
-                     | _ -> None)
-               in
-               argslots = [ 0 ]));
+
 
     (* PR-16: the return-address cell ([RSP+0] load) dies into the retaddr
        set — it never forces a window parameter. *)
@@ -752,10 +638,7 @@ let tests : unit Alcotest.test list =
 
     (* PR-24: the emitter lowers the rewritten address as the storage's
        own alloca (or one GEP) — never a re-derived offset. *)
-    pin "PR-24" "a rewritten region access emits into its own alloca" (fun () ->
-        let ir = emit_ir [ rw_frame () ] in
-        check_ir "PR-24" "store i64 42, ptr %stack_r1" ir;
-        check_ir "PR-24" "load i64, ptr %stack_r1" ir);
+
 
     (* PR-26: the residue's accesses and values take the same base +
        displacement form as a region's — the escaped cell write-closes

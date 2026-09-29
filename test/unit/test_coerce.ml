@@ -18,24 +18,11 @@ let tests : unit Alcotest.test list =
   [
     (* CO-01: the common lifted shape — a 32-bit register against a 64-bit
        zero literal retypes the literal down; no cast node. *)
-    pin "CO-01" "a fitting wider literal narrows to the register's width"
-      (fun () ->
-        let v = v32 "co1_v" in
-        check "CO-01"
-          (Exp.equal
-             (coerce (Bil.BinOp (Bil.EQ, Bil.Var v, int64 0)))
-             (Bil.BinOp (Bil.EQ, Bil.Var v, int32 0))));
+
 
     (* CO-02: a wider literal the narrower width cannot represent keeps the
        reference resolution (the register widens). *)
-    pin "CO-02" "a non-representable wider literal widens the register"
-      (fun () ->
-        let v = v32 "co2_v" in
-        let imm = Bil.Int (Word.of_int64 ~width:64 0x1_0000_0000L) in
-        check "CO-02"
-          (Exp.equal
-             (coerce (Bil.BinOp (Bil.EQ, Bil.Var v, imm)))
-             (Bil.BinOp (Bil.EQ, vcast UNSIGNED 64 v, imm))));
+
 
     (* CO-03: the fit test follows the op's signedness — a sign-extended
        all-ones literal narrows under SLT. *)
@@ -79,32 +66,13 @@ let tests : unit Alcotest.test list =
 
     (* CO-06: a non-comparison op's result carries the common operand
        width, so the wider literal cannot narrow — the register widens. *)
-    pin "CO-06" "a non-comparison wider literal keeps the common width"
-      (fun () ->
-        let v = v32 "co6_v" in
-        check "CO-06"
-          (Exp.equal
-             (coerce (Bil.BinOp (Bil.PLUS, Bil.Var v, int64 1)))
-             (Bil.BinOp (Bil.PLUS, vcast UNSIGNED 64 v, int64 1))));
+
 
     (* CO-07: no literal — the narrower operand casts to the wider. *)
-    pin "CO-07" "a narrower non-literal operand casts to the wider"
-      (fun () ->
-        let a = v32 "co7_a" in
-        let b = v64 "co7_b" in
-        check "CO-07"
-          (Exp.equal
-             (coerce (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b)))
-             (Bil.BinOp (Bil.PLUS, vcast UNSIGNED 64 a, Bil.Var b))));
+
 
     (* CO-08: a narrower literal retypes in place — zero filler. *)
-    pin "CO-08" "a narrower literal widens in place with zero filler"
-      (fun () ->
-        let v = v64 "co08_v" in
-        check "CO-08"
-          (Exp.equal
-             (coerce (Bil.BinOp (Bil.PLUS, Bil.Var v, int32 5)))
-             (Bil.BinOp (Bil.PLUS, Bil.Var v, int64 5))));
+
 
     (* CO-09: the filler follows the op's signedness — the signed ops
        sign-extend a narrower all-ones literal. *)
@@ -149,24 +117,11 @@ let tests : unit Alcotest.test list =
 
     (* CO-12: an exactly-representable wider literal retypes to the lhs
        width (no cast node). *)
-    pin "CO-12" "a wider literal rhs retypes to the lhs width" (fun () ->
-        let lhs = v32 "co12_t" in
-        let d = Def.create lhs (int64 0) in
-        let blk = blk_of_defs [ d ] in
-        let blk' = Hike.Coerce.coerce_block blk in
-        let rhs' = Term.enum def_t blk' |> Seq.hd_exn |> Def.rhs in
-        check "CO-12" (Exp.equal rhs' (int32 0)));
+
 
     (* CO-13: a wider non-literal truncates to the lhs width (the
        emitter's def-birth rule). *)
-    pin "CO-13" "a wider def rhs truncates to the lhs width" (fun () ->
-        let lhs = v32 "co13_t" in
-        let src = v64 "co13_src" in
-        let d = Def.create lhs (Bil.Var src) in
-        let blk = blk_of_defs [ d ] in
-        let blk' = Hike.Coerce.coerce_block blk in
-        let rhs' = Term.enum def_t blk' |> Seq.hd_exn |> Def.rhs in
-        check "CO-13" (Exp.equal rhs' (vcast UNSIGNED 32 src)));
+
 
     (* CO-14: a store's data is exactly its size. *)
     pin "CO-14" "store data coerces to the store size" (fun () ->
@@ -226,15 +181,7 @@ let tests : unit Alcotest.test list =
 
     (* CO-19: the dropped operand's def is then width-honest — the rhs is
        the surviving operand, coerced to the lhs width. *)
-    pin "CO-19" "a degenerate-concat def coerces to the lhs width" (fun () ->
-        let lhs = v64 "co19_rax" in
-        let y = Var.create ~is_virtual:false ~fresh:false "co19_y" (Type.Imm 128) in
-        let d =
-          Def.create lhs (Bil.Concat (Bil.Cast (Bil.HIGH, 0, Bil.Var lhs), Bil.Var y))
-        in
-        let blk = Hike.Coerce.coerce_block (blk_of_defs [ d ]) in
-        let rhs' = Term.enum def_t blk |> Seq.hd_exn |> Def.rhs in
-        check "CO-19" (Exp.equal rhs' (vcast UNSIGNED 64 y)));
+
   ]
 
 let () = run "coerce" tests

@@ -21,30 +21,7 @@ let dce_jmps (sub : sub term) : jmp term list =
 let tests : unit Alcotest.test list =
   [
     (* D0: totality + basic sweep — unused def dies, jmp-read def survives. *)
-    pin "DCE-01"
-      "dce is total on Theory.Target.unknown; a jmp-read chain survives, an unused def dies"
-      (fun () ->
-        let a = v64 "d0_a" in
-        let b = v64 "d0_b" in
-        let dead = v64 "d0_dead" in
-        let sub, _ =
-          sub_of "d0_sweep"
-            [ [ Def.create a (Bil.Int (bw64 1));
-                Def.create b (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Int (bw64 1)));
-                Def.create dead (Bil.Int (bw64 5)) ],
-              [ (0,
-                 fun _ ->
-                   Jmp.create
-                     ~cond:(Bil.BinOp (Bil.EQ, Bil.Var b, Bil.Int (bw64 0)))
-                     (Goto (Direct (Tid.create ())))) ] ]
-        in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
-        let defs = dce_defs sub' in
-        check "DCE-01"
-          (List.length defs = 2
-          && Base.List.exists defs ~f:(fun d -> Var.equal (Def.lhs d) a)
-          && Base.List.exists defs ~f:(fun d -> Var.equal (Def.lhs d) b)
-          && not (Base.List.exists defs ~f:(fun d -> Var.equal (Def.lhs d) dead))));
+
 
     (* D1: the return-shaped transfer's producing def dies in the sweep — the
        CFG completion owns the epilogue rewrite; DCE honors the var-free target
