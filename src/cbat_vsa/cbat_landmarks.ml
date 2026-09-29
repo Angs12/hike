@@ -114,10 +114,21 @@ let keys_at (t : t) (h : Tid.t) : key list =
   Option.value_map (Hashtbl.find t.rows h) ~default:[]
     ~f:(List.map ~f:(fun r -> r.key))
 
-(* Drop the rows of [h] and its SCC. *)
-let clear_head (t : t) (h : Tid.t) (blocks : Tid.Set.t) : unit =
-  Hashtbl.remove t.rows h;
-  Core.Set.iter blocks ~f:(fun btid -> Hashtbl.remove t.rows btid)
+(* Drop [h]'s word rows: the head's word arm consumed them.  A cell's rows
+   are its own — each is dropped by the cell arm that extrapolated with it
+   — so a word extrapolation does not spend them.  Rows are only ever
+   recorded at a head ([with_widening_head] names one), so there is nothing
+   to sweep beyond [h]. *)
+let clear_words (t : t) (h : Tid.t) : unit =
+  match Hashtbl.find t.rows h with
+  | None -> ()
+  | Some rows ->
+    let rows =
+      List.filter rows ~f:(fun r ->
+          match r.key with Word _ -> false | Cell _ -> true)
+    in
+    if List.is_empty rows then Hashtbl.remove t.rows h
+    else Hashtbl.set t.rows ~key:h ~data:rows
 
 (* No entry cap.  The upsert keeps one entry per (bound, is_upper) with the
    smallest distance, so a row grows only with the distinct boundaries its

@@ -522,7 +522,7 @@ let rec static_graph_vsa
             match arm with
             | `Finite n ->
               let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
-              Cbat_landmarks.clear_head rctx.Cbat_runctx.rc_landmarks v (Hashtbl.find_exn head_to_blocks v);
+              Cbat_landmarks.clear_words rctx.Cbat_runctx.rc_landmarks v;
               r
             | `Zero ->
               Cbat_landmarks.advance_head rctx.Cbat_runctx.rc_landmarks v;

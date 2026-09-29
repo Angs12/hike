@@ -35,8 +35,8 @@ type t
 (* One fresh table per solve. *)
 val create : unit -> t
 
-(* Drop the rows of [h] and its SCC. *)
-val clear_head : t -> Tid.t -> Tid.Set.t -> unit
+(* Drop [h]'s word rows: the head's word arm consumed them. *)
+val clear_words : t -> Tid.t -> unit
 
 (* Record an excluded behavior's boundary at the enclosing head; [true]
    when a landmark was recorded. *)
