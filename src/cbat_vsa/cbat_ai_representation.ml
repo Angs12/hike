@@ -117,25 +117,12 @@ let widen_join (e1 : t) (e2 : t) : t =
 
 
 
-(* The landmark consumption rule, shared by the words and memory
-   folds: translate [old] toward the head's entries at [old]'s width;
-   with no entries the plain steps-extrapolation (negative steps
-   widen). *)
-let extrapolate_data ~(entries : Cbat_landmarks.lm_entry list) ~(steps : int)
-    (old : wordset) (new_ : wordset) : wordset =
-  let entries =
-    List.filter entries ~f:(fun e ->
-        Cbat_word.bitwidth e.Cbat_landmarks.bound = WordSet.bitwidth old) in
-  match entries with
-  | [] ->
-    if steps < 0 then WordSet.widen_join old new_
-    else WordSet.extrapolate_steps ~steps old new_
-  | _ -> Cbat_landmarks.translate_to ~steps old new_ entries
-
-(* Extrapolate [need] vars by [steps]; negative steps widen. *)
-let selective_widen_extrapolate ~(head : Tid.t)
+(* The landmark walk: each key widens by its OWN arm.  [steps] is the
+   head's step count when its arm is Finite; [None] when the head's arm is
+   Inf — then the words widen and each cell still runs its own three-way. *)
+let walk_landmarks ~(head : Tid.t)
     ~(landmarks : Cbat_landmarks.t)
-    ~(need : Int.Set.t) ~(steps : int) (e1 : t) (e2 : t) : t =
+    ~(need : Int.Set.t) ~(steps : int option) (e1 : t) (e2 : t) : t =
   if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
   else if Core.Set.is_empty need then join e1 e2
@@ -147,14 +134,21 @@ let selective_widen_extrapolate ~(head : Tid.t)
         if WordSet.is_top data_new then acc
         else
           let data_res =
-            if Core.Set.mem need (Cbat_var_id.base_of key) then
-              extrapolate_data
-                ~entries:
-                  (Cbat_landmarks.entries landmarks head
-                     (Cbat_landmarks.Word (Cbat_var_id.var_of key)))
-                ~steps data_old data_new
-            else
+            if not (Core.Set.mem need (Cbat_var_id.base_of key)) then
               WordSet.join data_old data_new
+            else
+              match steps with
+              | None -> WordSet.widen_join data_old data_new
+              | Some n -> (
+                match
+                  Cbat_landmarks.extrapolate ~steps:n ~old:data_old
+                    ~new_:data_new
+                    ~entries:
+                      (Cbat_landmarks.entries landmarks head
+                         (Cbat_landmarks.Word (Cbat_var_id.var_of key)))
+                with
+                | `Extrapolated d -> d
+                | `Widen -> WordSet.widen_join data_old data_new)
           in
           if WordSet.is_top data_res then acc
           else WordEnv.add acc ~key ~data:data_res)
@@ -184,12 +178,14 @@ let selective_widen_extrapolate ~(head : Tid.t)
                      | `Finite n ->
                        let data_old = Mem.Val.data v1 in
                        let data_new = Mem.Val.data v2 in
-                       let data = extrapolate_data ~entries ~steps:n data_old data_new in
-                       (* Overflow escapes to the plain-widen arm. *)
                        let data =
-                         if WordSet.is_top data
-                         then WordSet.widen_join data_old data_new
-                         else data in
+                         match
+                           Cbat_landmarks.extrapolate ~steps:n ~old:data_old
+                             ~new_:data_new ~entries
+                         with
+                         | `Extrapolated d -> d
+                         | `Widen -> WordSet.widen_join data_old data_new
+                       in
                        Cbat_landmarks.clear_key landmarks head cl;
                        let _, e = Mem.Val.get_idx v2 in
                        Mem.Val.create data e)
@@ -199,6 +195,14 @@ let selective_widen_extrapolate ~(head : Tid.t)
             end)
     in
     { memories; words }
+
+(* Extrapolate [need]'s vars by [steps]; each cell runs its own arm. *)
+let selective_widen_extrapolate ~head ~landmarks ~need ~steps e1 e2 =
+  walk_landmarks ~head ~landmarks ~need ~steps:(Some steps) e1 e2
+
+(* No head-level steps: the words widen, each cell still runs its own arm. *)
+let widen_with_landmarks ~head ~landmarks ~need e1 e2 =
+  walk_landmarks ~head ~landmarks ~need ~steps:None e1 e2
 
 let meet (e1 : t) (e2 : t) : t =
   let memories = MemEnv.meet e1.memories e2.memories in

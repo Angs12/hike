@@ -75,15 +75,16 @@ val advance_head : t -> Tid.t -> unit
 (* Drop [key]'s entries. *)
 val clear_key : t -> Tid.t -> key -> unit
 
-(* Whether [h] carries cell landmarks and no word landmark: the memory arm
-   then runs the cells' own three-way. *)
-val cell_driven : t -> Tid.t -> bool
-
-(* Extrapolate bounds toward landmarks; clamp at landmark and current
-   bound. *)
-val translate_to :
-  steps:int -> Cbat_clp_set_composite.t -> Cbat_clp_set_composite.t ->
-  lm_entry list -> Cbat_clp_set_composite.t
+(* The extrapolation's own answer: the landmark translation at [old]'s
+   width, or the plain steps-extrapolation when no entry holds that width.
+   An extrapolation that overflows to top answers [Widen] — the rule's own
+   property, not a lane's. *)
+val extrapolate :
+  steps:int ->
+  old:Cbat_clp_set_composite.t ->
+  new_:Cbat_clp_set_composite.t ->
+  entries:lm_entry list ->
+  [ `Extrapolated of Cbat_clp_set_composite.t | `Widen ]
 
 (* Run [f] with [head] widened; the previous head is restored. *)
 val with_widening_head : t -> Tid.t option -> (unit -> 'a) -> 'a

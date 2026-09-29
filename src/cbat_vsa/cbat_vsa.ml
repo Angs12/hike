@@ -528,15 +528,13 @@ let rec static_graph_vsa
               Cbat_landmarks.advance_head rctx.Cbat_runctx.rc_landmarks v;
               j
             | `Inf ->
-              if Cbat_landmarks.cell_driven rctx.Cbat_runctx.rc_landmarks v then
-                (* No word landmarks at the head; the memory arm runs the
-                   cells' own three-way. Negative steps widen the words. *)
-                Stages.time `Widen (fun () ->
-                    AI.selective_widen_extrapolate ~head:v
-                      ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:(-1)
-                      old incoming)
-              else
-                Stages.time `Widen (fun () -> AI.widen_join old incoming))
+              (* No head-level steps: the words widen and each cell runs its
+                 own arm, so a head whose cells carry landmarks does not
+                 depend on whether its words happen to. *)
+              Stages.time `Widen (fun () ->
+                  AI.widen_with_landmarks ~head:v
+                    ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
+                    incoming))
         end
       end else
         Stages.time `Join (fun () -> AI.join old incoming)

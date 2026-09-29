@@ -387,14 +387,20 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width extrap_lo extrap_hi)
   end
 
-(* The head holds cell rows and no word row: the memory arm runs the cells'
-   own three-way. *)
-let cell_driven (t : t) (h : Tid.t) : bool =
-  match Hashtbl.find t.rows h with
-  | None -> false
-  | Some rows ->
-    (not
-       (List.exists rows ~f:(fun r ->
-            match r.key with Word _ -> true | Cell _ -> false)))
-    && List.exists rows ~f:(fun r ->
-           match r.key with Cell _ -> true | Word _ -> false)
+(* The extrapolation's own answer: the landmark translation at [old]'s
+   width, or the plain steps-extrapolation when no entry holds that width.
+   An extrapolation that overflows to top is a property of the rule, not of
+   a lane, so it answers [Widen] here. *)
+let extrapolate ~(steps : int) ~(old : Cbat_clp_set_composite.t)
+    ~(new_ : Cbat_clp_set_composite.t) ~(entries : lm_entry list) :
+    [ `Extrapolated of Cbat_clp_set_composite.t | `Widen ] =
+  let entries =
+    List.filter entries ~f:(fun e ->
+        Cbat_word.bitwidth e.bound = Cbat_clp_set_composite.bitwidth old)
+  in
+  match entries with
+  | [] ->
+    `Extrapolated (Cbat_clp_set_composite.extrapolate_steps ~steps old new_)
+  | _ ->
+    let data = translate_to ~steps old new_ entries in
+    if Cbat_clp_set_composite.is_top data then `Widen else `Extrapolated data
