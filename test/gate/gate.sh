@@ -2,7 +2,7 @@
 # The gate orchestrator: one entry point for the strict integration chain.
 #
 #   gate.sh <stage>
-#     stages: fail-before provenance corpus lift allocas semantics opt-safety
+#     stages: fail-before provenance corpus lift allocas semantics
 #             unit all
 #
 # `all` runs the documented chain in order and aborts on the first failure.
@@ -16,13 +16,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TREE="$(cd "$HERE/../.." && pwd)"
 . "$HERE/lib.sh"
 
-CORPUS="${HIKE_CORPUS:-/tmp/corpus}"
+CORPUS="${HIKE_CORPUS:-/tmp/corpus-o2}"
 EMIT="${HIKE_EMIT:-/tmp/hike-emit}"
 SEMOUT="${HIKE_SEMOUT:-/tmp/hike-sem}"
-SEMOPT="${HIKE_SEMOPT:-/tmp/hike-semopt}"
 
 usage() {
-  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|opt-safety|unit|fail-before|all>" >&2
+  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|unit|fail-before|all>" >&2
   exit 2
 }
 
@@ -43,7 +42,6 @@ stage() {
     lift)       need_provenance; "$HERE/run_corpus.sh" "$CORPUS" "$EMIT" ;;
     allocas)    "$HERE/check_allocas.sh" "$EMIT" ;;
     semantics)  need_provenance; need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
-    opt-safety) need_provenance; need_renderer; "$HERE/semantic/run_semantic_opt.sh" "$CORPUS" "$EMIT" "$SEMOPT" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
     fail-before) "$HERE/fail_before.sh" ;;
     *)          usage ;;
@@ -54,7 +52,7 @@ STAGE="${1:-}"
 [ -n "$STAGE" ] || usage
 
 if [ "$STAGE" = all ]; then
-  for s in provenance corpus lift allocas semantics opt-safety unit fail-before; do
+  for s in provenance corpus lift allocas semantics unit fail-before; do
     echo "=== gate: $s"
     stage "$s" || {
       echo "gate FAILED at stage: $s" >&2

@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Native-vs-lifted equivalence for EVERY emitted corpus binary.
-# Usage: run_semantic.sh [corpus_dir] [ir_dir] [out_dir]
-# Renames @main, llc -O0, links harness.c (+ setjmp_stub.S for setjmp
-# users), runs both with a 15 s timeout, byte-diffs stdout.
-#
-# STRICT: rc=1 on ANY failure — a failing binary is a loud red, never an
-# allowlisted known.  The render/link/run/compare recipe lives in
-# test/gate/lib.sh, shared with the other gates.
+# Native-vs-lifted equivalence with the consumer optimizer at HIKE_OPT_LEVEL (default 2; 0 = none).
+# between rename and llc. Strict: no allowlist; failures auto-bisect
+# every pass in BISECT_PASSES and list each breaking pass (CRASH = opt
+# crashed). Keeps *_renamed.ll/*_opt.ll as repro artifacts.
+# Pins opt-21 (fails loudly when missing); exit 0 iff all pass.
+# Usage: run_semantic_opt.sh [corpus_dir] [ir_dir] [out_dir]
 
 set -u
 CORPUS="${1:-/tmp/corpus}"
-IR="${2:-/tmp/hike-emit}"
-OUT="${3:-/tmp/hike-sem}"
+IR="${2:-/tmp/emit}"
+OUT="${3:-/tmp/sem_opt}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib.sh"
 mkdir -p "$OUT"
@@ -29,6 +27,21 @@ if [ ! -f "$IR_PROV" ] || [ ! -f "$INST_PROV" ] || ! cmp -s "$IR_PROV" "$INST_PR
 	echo "FATAL: the IR in $IR was not produced by the installed plugin — re-run the lift gate" >&2
 	exit 2
 fi
+
+# Pinned optimizer; a default switch must not silently change the gate.
+OPT=opt-21
+OPT_LEVEL="${HIKE_OPT_LEVEL:-2}"
+command -v "$OPT" >/dev/null 2>&1 || {
+	echo "FATAL: $OPT not found (the gate pins the opt version; NO FALLBACKS)"
+	exit 2
+}
+command -v "$LLC" >/dev/null 2>&1 || {
+	echo "FATAL: $LLC not found (set HIKE_LLC to pin one)"
+	exit 2
+}
+
+# Single-pass bisect list; an opt crash counts as breaking too.
+BISECT_PASSES="mem2reg sroa instcombine simplifycfg dse inline function-attrs argpromotion globalopt early-cse"
 
 pass=0
 fail=0
@@ -49,52 +62,119 @@ for ll in "$IR"/out_*.ll; do
 		continue
 	}
 
-	# Rebuild only when the IR changed: the recorded sha gates the
-	# rename/llc/link pipeline.  FRESH=1 forces the rebuild.
-	bin="$OUT/${base}_lifted"
+	# Rebuild only when the IR changed (the recorded sha gates the
+	# rename/opt/llc/link pipeline); FRESH=1 forces the rebuild.
+	bin="$OUT/${base}_opt.bin"
 	sha_now="$(sha256sum "$ll" | cut -d' ' -f1)"
 	sha_was="$(cat "$OUT/.sha_${base}" 2>/dev/null || true)"
 	if [ "${FRESH:-0}" != "1" ] && [ -x "$bin" ] \
 	   && [ -n "$sha_was" ] && [ "$sha_now" = "$sha_was" ]; then
-		echo "SKIP-RUN $base (IR unchanged)"
-		if hike_run_cmp "$bin" "$native" "$OUT" "$base"; then
-			pass=$((pass + 1))
-		else
+		timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$bin" >"$OUT/${base}_opt.out" 2>&1
+		lrc=$?
+		timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
+		nrc=$?
+		if [ "$lrc" -eq 124 ] || [ "$nrc" -eq 124 ]; then
+			echo "FAIL $base (timeout, cached: lifted rc=$lrc native rc=$nrc)"
 			fail=$((fail + 1))
-			FAILED+=("$base")
+			FAILED+=("$base (timeout)")
+			continue
 		fi
-		continue
+		if [ "$lrc" -eq "$nrc" ] && cmp -s "$OUT/${base}_opt.out" "$OUT/${base}_native.out"; then
+			echo "PASS $base (opt -O$OPT_LEVEL, IR unchanged)"
+			pass=$((pass + 1))
+			continue
+		fi
+		# A cached binary that no longer passes falls through to the
+		# full rebuild below (FRESH-like behavior for the stale one).
 	fi
-	if ! hike_rename "$ll" "$OUT/${base}_lifted.ll"; then
+	hike_rename "$ll" "$OUT/${base}_renamed.ll" || {
 		echo "FAIL $base (rename)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
-	fi
-	if ! hike_llc "$OUT/${base}_lifted.ll" "$OUT/${base}_lifted.o" 2>>"$OUT/.llc.log"; then
-		echo "FAIL $base (llc; see $OUT/.llc.log)"
+	}
+
+	# The gate step.
+	"$OPT" -O$OPT_LEVEL -S "$OUT/${base}_renamed.ll" -o "$OUT/${base}_opt.ll" 2>"$OUT/${base}_opt.err" || {
+		echo "FAIL $base (opt -O$OPT_LEVEL): $(head -1 "$OUT/${base}_opt.err")"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
-	fi
-	if ! hike_link "$OUT/${base}_lifted.o" "$ll" "$bin" "$HERE" 2>>"$OUT/.gcc.log"; then
-		echo "FAIL $base (link; see $OUT/.gcc.log)"
+	}
+
+	hike_llc "$OUT/${base}_opt.ll" "$OUT/${base}_opt.o" 2>>"$OUT/.llc.log" ||
+		{
+			echo "FAIL $base (llc after opt; see $OUT/.llc.log)"
+			fail=$((fail + 1))
+			FAILED+=("$base")
+			continue
+		}
+	if ! hike_link "$OUT/${base}_opt.o" "$ll" "$OUT/${base}_opt.bin" "$HERE" 2>>"$OUT/.gcc.log"; then
+		echo "FAIL $base (link after opt; see $OUT/.gcc.log)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
 	fi
 	printf '%s\n' "$sha_now" >"$OUT/.sha_${base}"
-	if hike_run_cmp "$OUT/${base}_lifted" "$native" "$OUT" "$base"; then
-		echo "PASS $base"
-		pass=$((pass + 1))
-	else
+	# The bisect below re-links by hand; keep the stub selection handy.
+	STUB=""
+	if grep -q '@_setjmp\|@longjmp' "$ll"; then STUB="$HERE/setjmp_stub.S"; fi
+
+	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
+	timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1
+	lrc=$?
+	timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$native" >"$OUT/${base}_native.out" 2>&1
+	nrc=$?
+	if [ $lrc -eq 124 ] || [ $nrc -eq 124 ]; then
+		echo "FAIL $base (timeout after opt: lifted rc=$lrc native rc=$nrc)"
+		fail=$((fail + 1))
+		FAILED+=("$base (timeout)")
+		continue
+	fi
+	if [ "$lrc" -ne "$nrc" ] || ! cmp -s "$OUT/${base}_opt.out" "$OUT/${base}_native.out"; then
+		echo "FAIL $base (opt -O$OPT_LEVEL; native rc=$nrc vs lifted rc=$lrc)"
+		diff "$OUT/${base}_native.out" "$OUT/${base}_opt.out" | head -3 | sed 's/^/    /'
+		# Auto-bisect: list every pass that alone breaks this binary.
+		bisect_line="    broken by:"
+		any_bisect=0
+		for p in $BISECT_PASSES; do
+			"$OPT" "-passes=$p" -S "$OUT/${base}_renamed.ll" -o "$OUT/${base}_bisect_$p.ll" 2>/dev/null ||
+				{
+					bisect_line="$bisect_line $p(CRASH)"
+					any_bisect=1
+					continue
+				}
+			llc -O0 -filetype=obj "$OUT/${base}_bisect_$p.ll" -o "$OUT/${base}_bisect_$p.o" 2>/dev/null ||
+				{
+					bisect_line="$bisect_line $p(llc)"
+					any_bisect=1
+					continue
+				}
+			gcc -O0 -no-pie -o "$OUT/${base}_bisect_$p.bin" \
+				"$OUT/${base}_bisect_$p.o" "$HERE/harness.c" $STUB 2>/dev/null ||
+				{
+					bisect_line="$bisect_line $p(link)"
+					any_bisect=1
+					continue
+				}
+			timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_bisect_$p.bin" >"$OUT/${base}_bisect_$p.out" 2>&1
+			prc=$?
+			if [ "$prc" -ne "$nrc" ] || ! cmp -s "$OUT/${base}_bisect_$p.out" "$OUT/${base}_native.out"; then
+				bisect_line="$bisect_line $p"
+				any_bisect=1
+			fi
+		done
+		[ $any_bisect -eq 1 ] && echo "$bisect_line"
 		fail=$((fail + 1))
 		FAILED+=("$base")
+		continue
 	fi
+	echo "PASS $base (opt -O$OPT_LEVEL)"
+	pass=$((pass + 1))
 done
 
 echo "----------------------------------------"
-echo "semantic-all: $pass PASS, $fail FAIL, $skip SKIP (of $(ls "$IR"/out_*.ll | wc -l) emitted)"
+echo "semantic-opt: $pass PASS, $fail FAIL, $skip SKIP (of $(ls "$IR"/out_*.ll | wc -l) emitted)"
 if [ "$fail" -gt 0 ]; then
 	printf 'failed: %s\n' "${FAILED[@]}"
 fi
