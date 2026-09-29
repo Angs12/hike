@@ -12,7 +12,7 @@ assertion and the emission assertion live in the same pin, so a dropped row is
 exactly one red pin (the recorded FP-table incident — a merge silently dropped
 11 of 26 rows).
 
-There is **no `Test_seam`** for the emitter, so no fail-before switch can be
+There is **no `Test_seam`** for the emitter, so no switch can be
 flipped from the test tier.  Production `src/` is never modified; the disable
 recipes below are textual, and the recorded red is re-demonstrated by review
 whenever the cited mechanism changes.  Every pin builds its own fixture inside

@@ -6,7 +6,7 @@ one pin; none retired.  Production mechanism: `src/hike_jump.ml`
 (`Hike.Jump.compile_sub`, target-driven by the `jump_target` flag-role
 target in `test/unit/fixtures.ml`).
 
-There is no `Test_seam` for this pass, so no fail-before switch can be
+There is no `Test_seam` for this pass, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The
 disable recipes below are textual and name the source site to break; the
 recorded red is the state that recipe produces (re-demonstrated whenever

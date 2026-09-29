@@ -16,7 +16,7 @@ Production mechanisms: `src/hike_promote.ml` (`promote_sub`,
 the emitter's promotion rendering `src/bil2llvm.ml` +
 `src/bil2llvm_calls.ml` (promoted signature, `_hike_thunk`, `indirect_call`).
 
-There is no `Test_seam` for this pass, so no fail-before switch can be
+There is no `Test_seam` for this pass, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The
 disable recipes below are textual and name the source site to break; the
 recorded red is the state that recipe produces (re-demonstrated whenever the

@@ -5,8 +5,8 @@
 # Usage: run_corpus.sh [corpus_dir] [out_dir]
 #
 # Per binary: out_<name>.ll / err_<name>.txt / stdout_<name>.txt /
-# rc_<name>.txt.  Plus diagnostics.txt (every `hike:` line, every class,
-# not just the two formerly-grepped prefixes) and a one-line summary.
+# rc_<name>.txt.  Plus diagnostics.txt (every `hike:` line, every class)
+# and a one-line summary.
 #
 # The lift is INCREMENTAL: an emission is reused when the plugin and the
 # binary are both unchanged — the lift's only inputs — recorded as a stamp
@@ -32,13 +32,26 @@ fi
 
 # Bind every emission in $OUT to the plugin that produced it: a later
 # consumer compares this copy with the installed plugin's provenance.
-PROV="$(opam var lib 2>/dev/null || true)/hike/hike.cmxs.provenance"
+LIBDIR="$(opam var lib 2>/dev/null || true)"
+PROV="$LIBDIR/hike/hike.cmxs.provenance"
 if [ ! -f "$PROV" ]; then
   echo "FATAL: no installed plugin provenance — run src/record_provenance.sh" >&2
   exit 2
 fi
 cp "$PROV" "$OUT/.plugin_provenance"
 PROV_SHA="$(sha256sum "$PROV" | cut -d' ' -f1)"
+
+# The whole toolchain the lift reads: the hike plugin (through its
+# provenance, which covers the installed bundle), the bap binary, and bap's
+# own plugin objects.  A stamp naming only the hike plugin would serve a
+# stale emission after a bap upgrade or a lifter rebuild — the
+# stale-IR-green class the gate exists to stop.
+BAP_BIN="$(command -v bap 2>/dev/null || true)"
+TOOLCHAIN_SHA="$({ sha256sum "$BAP_BIN" 2>/dev/null
+                   find "$LIBDIR" -maxdepth 3 -path '*bap*' \
+                     \( -name '*.cmxs' -o -name '*.cmxa' -o -name '*.cma' \) -print 2>/dev/null \
+                     | sort | xargs sha256sum 2>/dev/null
+                 } | sha256sum | cut -d' ' -f1)"
 
 # Corpus executables in sorted order (skips sources/stubs).
 BINS=""
@@ -62,7 +75,7 @@ for f in $BINS; do
   bin_sha="$(sha256sum "$CORPUS/$f" | cut -d' ' -f1)"
   stamp="$OUT/.lift_$f"
   if [ "${FRESH:-0}" != "1" ] && [ -f "$stamp" ] && [ -f "$OUT/out_$f.ll" ] \
-     && [ -f "$OUT/rc_$f.txt" ] && [ "$(cat "$stamp")" = "$bin_sha $PROV_SHA" ]; then
+     && [ -f "$OUT/rc_$f.txt" ] && [ "$(cat "$stamp")" = "$bin_sha $PROV_SHA $TOOLCHAIN_SHA" ]; then
     rc="$(cat "$OUT/rc_$f.txt")"
     cached=$((cached + 1))
     printf 'CACHED %s\n' "$f"
@@ -72,7 +85,7 @@ for f in $BINS; do
       >"$OUT/stdout_$f.txt" 2>"$OUT/err_$f.txt"
     rc=$?
     echo "$rc" >"$OUT/rc_$f.txt"
-    printf '%s\n' "$bin_sha $PROV_SHA" >"$stamp"
+    printf '%s\n' "$bin_sha $PROV_SHA $TOOLCHAIN_SHA" >"$stamp"
     if [ "$rc" -ne 0 ]; then
       printf 'FAIL %s rc=%d\n' "$f" "$rc"
     else

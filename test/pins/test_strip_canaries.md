@@ -3,7 +3,7 @@
 Module: `test/unit/test_strip_canaries.ml` (group `strip_canaries`, ids `SC-01`…`SC-08`).
 Production mechanism: `src/hike_strip_canaries.ml` (`Hike.Strip_canaries.strip_sub`).
 
-There is **no `Test_seam`** for this pass, so no fail-before switch can be
+There is **no `Test_seam`** for this pass, so no switch can be
 flipped from the test tier. Production `src/` is never modified. The disable
 recipes below are textual; the recorded red is the state each recipe produces
 (by review, re-demonstrated whenever the cited mechanism changes). Every pin

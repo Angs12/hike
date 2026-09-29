@@ -8,7 +8,7 @@ lanes `src/bil2llvm_mem.ml` / `src/bil2llvm_exp.ml` / `src/bil2llvm_calls.ml` /
 `src/bil2llvm_env.ml`, and `src/bil2llvm_section.ml`
 (`Bil2llvm.build_sections`).
 
-No `Test_seam` switch exists for the emitter, so no fail-before switch can be
+No `Test_seam` switch exists for the emitter, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The disable
 recipes below are textual and name the source site to break; the recorded red
 is the state that recipe produces (re-demonstrated whenever the cited mechanism

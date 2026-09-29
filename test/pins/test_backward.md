@@ -7,8 +7,7 @@ the backward pins come first (`BK-01`…`BK-56`), the seed pins after
 (`BK-57`…`BK-78`).  Every source `check` site is carried as one pin; none
 retired (`L3c2-6` carried no assertion and is not a site).
 
-There is **no `Test_seam` fail-before switch** for this lane, so — per the
-lane spec `§Fail-before` — the disable recipes below are textual inversions
+There is **no `Test_seam`** for this lane, so the disable recipes below are textual inversions
 of the pinned mechanism, and the red is re-demonstrated by review whenever
 the cited mechanism changes.  Production `src/` is never modified.  Each pin
 builds its own fixture inside its closure (no cross-pin state).

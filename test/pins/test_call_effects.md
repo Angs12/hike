@@ -9,7 +9,7 @@ site is carried as one pin; none retired.  Production mechanism:
 `indirect_summary`) with the frame-keep core in
 `src/cbat_vsa/cbat_ai_representation.ml` (`AI.call_abstraction_frame`).
 
-There is no `Test_seam` for this pass, so no fail-before switch can be
+There is no `Test_seam` for this pass, so no switch can be
 flipped from the test tier.  Production `src/` is never modified.  The
 disable recipes below are textual and name the source site to break; the
 recorded red is the state that recipe produces (re-demonstrated whenever
