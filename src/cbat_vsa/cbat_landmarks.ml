@@ -277,14 +277,12 @@ let steps_of_entries (lst : lm_entry list) :
   else if List.is_empty steps then `Inf
   else `Finite (List.min_elt steps ~compare:Int.compare |> Option.value_exn)
 
-let steps (t : t) (h : Tid.t) (key : key) :
-    [> `Zero | `Finite of int | `Inf ] =
-  let lst = entries t h key in
-  let answer = steps_of_entries lst in
 #ifdef VSA_DEBUG
-  let kind = kind_of_key key in
-  (* Which shape the key is in: how many entries the row holds, how many
-     carry a fresh reading, and whether the distances move. *)
+(* Which shape the entries are in — how many the row holds, how many carry
+   a fresh reading, and whether the distances move — and which arm they
+   answered for.  [kind] is the key kind, or "head" for the fold. *)
+let note_steps (kind : string) (lst : lm_entry list)
+    (answer : [ `Zero | `Finite of int | `Inf ]) : unit =
   let fresh = List.filter lst ~f:(fun e -> Option.is_some e.dist) in
   bump_steps
     (Printf.sprintf "table.%s.%d.%s" kind (List.length lst)
@@ -299,13 +297,21 @@ let steps (t : t) (h : Tid.t) (key : key) :
           (Printf.sprintf "%s.%s" kind
              (if dp > dc then "live.shrink" else "live.hold"))
       | _ -> ());
-  (match answer with
-   | `Finite _ -> bump_steps (Printf.sprintf "fire.finite.%s" kind)
-   | `Zero -> bump_steps (Printf.sprintf "fire.zero.%s" kind)
-   | `Inf ->
-     bump_steps
-       (Printf.sprintf "fire.inf.%s.%s" kind
-          (if List.is_empty fresh then "stale" else "held")));
+  match answer with
+  | `Finite _ -> bump_steps (Printf.sprintf "fire.finite.%s" kind)
+  | `Zero -> bump_steps (Printf.sprintf "fire.zero.%s" kind)
+  | `Inf ->
+    bump_steps
+      (Printf.sprintf "fire.inf.%s.%s" kind
+         (if List.is_empty fresh then "stale" else "held"))
+#endif
+
+let steps (t : t) (h : Tid.t) (key : key) :
+    [> `Zero | `Finite of int | `Inf ] =
+  let lst = entries t h key in
+  let answer = steps_of_entries lst in
+#ifdef VSA_DEBUG
+  note_steps (kind_of_key key) lst answer;
 #endif
   answer
 
@@ -313,9 +319,15 @@ let steps (t : t) (h : Tid.t) (key : key) :
    decision keeps the shape it had when the table was per head.  A
    variable's own arm is [steps]. *)
 let steps_head (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf ] =
-  steps_of_entries
-    (List.concat_map (keys_at t h) ~f:(fun k ->
-         match k with Word _ -> entries t h k | Cell _ -> []))
+  let lst =
+    List.concat_map (keys_at t h) ~f:(fun k ->
+        match k with Word _ -> entries t h k | Cell _ -> [])
+  in
+  let answer = steps_of_entries lst in
+#ifdef VSA_DEBUG
+  note_steps "head" lst answer;
+#endif
+  answer
 
 (* The rotation: the current reading becomes the previous one.  An entry
    with no fresh reading keeps the history it holds — erasing it would
