@@ -18,11 +18,16 @@ let cap_distance (d : int) : int = min d max_landmark_distance
    counter walking toward a negative boundary reads small, not as a
    2^width jump.  Unrepresentable distances cap. *)
 let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
-  let diff = Cbat_word.sub b a in
-  match Cbat_word.to_int64 diff with
-  | Ok d when Int64.compare (Int64.abs d) (Int64.of_int max_landmark_distance) < 0
-    -> Option.value_exn (Int64.to_int (Int64.abs d))
-  | Ok _ | Error _ -> max_landmark_distance
+  match Cbat_word.to_int64 (Cbat_word.sub b a) with
+  | Ok d ->
+    (* [Int64.abs] overflows exactly at [min_int] (a 2^63 difference). *)
+    let mag =
+      if Int64.equal d Int64.min_value then Int64.max_value else Int64.abs d
+    in
+    if Int64.compare mag (Int64.of_int max_landmark_distance) < 0
+    then Int64.to_int_exn mag
+    else max_landmark_distance
+  | Error _ -> max_landmark_distance
 
 (* The cell an entry is keyed by: the memory key's byte hull (each
    end as width/value) and stride — per-stride cells keep their own

@@ -1151,6 +1151,26 @@ let tests : unit Alcotest.test list =
            | `Finite 1 -> true
            | _ -> false));
 
+    (* The magnitude's own edge: |2^63| overflows int64, so the
+       difference must cap, never raise. *)
+    pin "INT-29" "LM distance: a 2^63 difference caps (the abs overflow)"
+      (fun () ->
+        let h = Tid.for_name "lm_dist63_head" in
+        let lm = Cbat_landmarks.create () in
+        Cbat_landmarks.with_widening_head lm (Some h) (fun () ->
+            Cbat_landmarks.observe_unsat_var lm
+              (v64 "lm_dist63_v")
+              ~p:(Ws.singleton (w64 0))
+              ~cstr:(Ws.singleton (Cbat_word.of_int64 Stdlib.Int64.min_int))
+              ~meet:(Ws.bottom 64));
+        check "LM distance: the 2^63 difference reads the cap"
+          (match Cbat_landmarks.entries_for_head lm h with
+           | e :: _ -> (
+               match e.Cbat_landmarks.dist with
+               | Some d -> d = 1 lsl 40
+               | None -> false)
+           | [] -> false));
+
     (* A stack-symbolic value and a plain word are disjoint by line: the
        empty meet disables no behavior. *)
     pin "INT-26"
