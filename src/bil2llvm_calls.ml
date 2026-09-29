@@ -180,6 +180,12 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
       in
       let value =
         match Llvm.classify_type (Llvm.type_of param) with
+        (* A pointer-typed lane is an address lane, so the body wants the
+           pointer itself: `is_ptr_var` holds for every kind lane, because
+           the kind pass retypes its parameter to `Mem`.  The conversion
+           below is therefore unreachable for a lane this tree produced —
+           it stays as the identity for a pointer parameter nothing
+           claimed. *)
         | Llvm.TypeKind.Pointer
           when not (Hike_stack_model.is_ptr_arg arg)
                && not (is_ptr_var (Arg.lhs arg)) ->
