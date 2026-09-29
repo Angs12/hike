@@ -506,7 +506,9 @@ let rec static_graph_vsa
         let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
         Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
           (fun () ->
-            let arm = Cbat_landmarks.lm_calc_steps rctx.Cbat_runctx.rc_landmarks v in
+            let arm =
+              Cbat_landmarks.steps rctx.Cbat_runctx.rc_landmarks v
+                Cbat_landmarks.Word in
 #ifdef VSA_DEBUG
             Cbat_attr_census.bump
               (match arm with
@@ -524,7 +526,7 @@ let rec static_graph_vsa
               Cbat_landmarks.clear_head rctx.Cbat_runctx.rc_landmarks v (Hashtbl.find_exn head_to_blocks v);
               r
             | `Zero ->
-              Cbat_landmarks.lm_advance rctx.Cbat_runctx.rc_landmarks v;
+              Cbat_landmarks.advance_head rctx.Cbat_runctx.rc_landmarks v;
               j
             | `Inf ->
               if Cbat_landmarks.cell_driven rctx.Cbat_runctx.rc_landmarks v then

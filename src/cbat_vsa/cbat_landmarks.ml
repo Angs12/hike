@@ -1,9 +1,11 @@
-(* Simon & King landmark widening. Empty meets acquire landmarks; heads extrapolate toward them. *)
+(* Simon & King landmark widening: excluded boundaries are recorded at the
+   enclosing cycle head; the head extrapolates toward them.  One table
+   serves every key — a word at a head, or a memory cell at a head. *)
 
 open Bap.Std
 open Core
 
-(* Per-(var, bound, is_upper) entry; smaller distance wins. *)
+(* Per-(key, bound, is_upper) entry; smaller distance wins. *)
 type lm_entry = {
   bound : Cbat_word.t;
   is_upper : bool;
@@ -29,37 +31,50 @@ let distance_words (a : Cbat_word.t) (b : Cbat_word.t) : int =
     else max_landmark_distance
   | Error _ -> max_landmark_distance
 
-(* The cell an entry is keyed by: the memory key's byte hull (each
-   end as width/value) and stride — per-stride cells keep their own
-   landmark rows. *)
-module Cell_key = struct
-  type t = { origin : Hike_origin.t; lo_width : int; lo_value : int64;
-             hi_width : int; hi_value : int64; stride : int }
+(* The cell a landmark is about: the memory key's byte hull (each end as
+   width/value) and stride — per-stride cells keep their own rows. *)
+type cell_desc = {
+  origin : Hike_origin.t;
+  lo_width : int;
+  lo_value : int64;
+  hi_width : int;
+  hi_value : int64;
+  stride : int;
+}
 
-  let equal a b =
-    Hike_origin.equal a.origin b.origin
-    && Int.equal a.lo_width b.lo_width && Stdlib.Int64.equal a.lo_value b.lo_value
-    && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
-    && Int.equal a.stride b.stride
-end
+let equal_cell (a : cell_desc) (b : cell_desc) : bool =
+  Hike_origin.equal a.origin b.origin
+  && Int.equal a.lo_width b.lo_width && Stdlib.Int64.equal a.lo_value b.lo_value
+  && Int.equal a.hi_width b.hi_width && Stdlib.Int64.equal a.hi_value b.hi_value
+  && Int.equal a.stride b.stride
 
-(* Per-head cell rows, oldest entry first. *)
-type cell_rows = (Cell_key.t * lm_entry list) list
+(* What a landmark is about.  The head is the table's outer key: the cycle
+   owns its rows. *)
+type key = Word | Cell of cell_desc
 
-(* Per-head landmark tables: words keyed by width-filtered entry lists,
-   cells by (head, cell). *)
+let equal_key (a : key) (b : key) : bool =
+  match a, b with
+  | Word, Word -> true
+  | Cell x, Cell y -> equal_cell x y
+  | Word, Cell _ | Cell _, Word -> false
+
+let kind_of_key (k : key) : string =
+  match k with Word -> "word" | Cell _ -> "cell"
+
+(* One row per key at a head; a new entry appends, so the oldest entry is
+   the list's head. *)
+type row = { key : key; entries : lm_entry list }
+
+(* The per-solve landmark table: one row list per head. *)
 type t = {
-  lm_env : (Tid.t, lm_entry list) Hashtbl.t;
-  cell_env : (Tid.t, cell_rows) Hashtbl.t;
+  rows : (Tid.t, row list) Hashtbl.t;
   mutable widening_at_head : Tid.t option;  (* head currently widened; None outside a cycle *)
 }
 
 (* One fresh table per solve — the widening state is the run's, never
    the process's. *)
 let create () : t =
-  { lm_env = Hashtbl.create (module Tid);
-    cell_env = Hashtbl.create (module Tid);
-    widening_at_head = None }
+  { rows = Hashtbl.create (module Tid); widening_at_head = None }
 
 (* Run [f] with [head] widened; the previous head is restored. *)
 let with_widening_head (t : t) (head : Tid.t option) (f : unit -> 'a) : 'a =
@@ -67,45 +82,91 @@ let with_widening_head (t : t) (head : Tid.t option) (f : unit -> 'a) : 'a =
   t.widening_at_head <- head;
   Fun.protect ~finally:(fun () -> t.widening_at_head <- prev) f
 
-(* Drop entries of [h] and its SCC. *)
+(* The row [key] holds at [head], if any. *)
+let find_row (t : t) (h : Tid.t) (key : key) : row option =
+  Option.bind (Hashtbl.find t.rows h)
+    ~f:(List.find ~f:(fun r -> equal_key r.key key))
+
+(* Entries recorded for [key] at [head]. *)
+let entries (t : t) (h : Tid.t) (key : key) : lm_entry list =
+  Option.value_map (find_row t h key) ~default:[] ~f:(fun r -> r.entries)
+
+(* Every key recorded at [head], oldest row first. *)
+let keys_at (t : t) (h : Tid.t) : key list =
+  Option.value_map (Hashtbl.find t.rows h) ~default:[]
+    ~f:(List.map ~f:(fun r -> r.key))
+
+(* Drop the rows of [h] and its SCC. *)
 let clear_head (t : t) (h : Tid.t) (blocks : Tid.Set.t) : unit =
-  Hashtbl.remove t.lm_env h;
-  Hashtbl.remove t.cell_env h;
-  Core.Set.iter blocks ~f:(fun btid ->
-      Hashtbl.remove t.lm_env btid;
-      Hashtbl.remove t.cell_env btid)
+  Hashtbl.remove t.rows h;
+  Core.Set.iter blocks ~f:(fun btid -> Hashtbl.remove t.rows btid)
 
-let add_smaller_dist (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
-  match List.find entries ~f:(fun e ->
-      Cbat_word.equal e.bound entry.bound
-      && Bool.equal e.is_upper entry.is_upper) with
-  | None -> entry :: entries
-  | Some existing ->
-    let keep =
-      match existing.dist, entry.dist with
-      | None, _ | _, None -> true
-      | Some d1, Some d2 -> d2 < d1
-    in
-    (* Preserve [dist_p]; only [lm_advance] rotates history. *)
-    if keep then
-      { entry with dist_p = existing.dist_p }
-      :: List.filter entries ~f:(fun e -> not (
-        Cbat_word.equal e.bound entry.bound
-        && Bool.equal e.is_upper entry.is_upper))
-    else entries
+(* A key's entry cap.  A word row is bounded by the guards that produce
+   it; a cell row is capped per head, so a long solve cannot grow the
+   table without bound. *)
+let cell_cap = 64
 
-let record_landmark_for_head (t : t) ~(head : Tid.t) ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
+let cap_of (k : key) : int option =
+  match k with Word -> None | Cell _ -> Some cell_cap
+
+let capped_total (rows : row list) : int =
+  List.fold rows ~init:0 ~f:(fun n (r : row) ->
+      match cap_of r.key with
+      | None -> n
+      | Some _ -> n + List.length r.entries)
+
+(* Drop the oldest entries of the capped rows until the head is within its
+   cap; an uncapped row is never trimmed. *)
+let trim (rows : row list) : row list =
+  let rec go rows n =
+    if n <= cell_cap then rows
+    else
+      match rows with
+      | [] -> rows
+      | (r : row) :: rest -> (
+        match cap_of r.key with
+        | None -> r :: go rest n
+        | Some _ -> (
+          match r.entries with
+          | [] -> go rest n
+          | [ _ ] -> go rest (n - 1)
+          | _ :: tl -> { r with entries = tl } :: go rest (n - 1)))
+  in
+  go rows (capped_total rows)
+
+(* The upsert: one entry per (bound, is_upper); a smaller distance wins and
+   the history is preserved — only [advance] rotates it. *)
+let upsert (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
+  let same (e : lm_entry) =
+    Cbat_word.equal e.bound entry.bound && Bool.equal e.is_upper entry.is_upper
+  in
+  if List.exists entries ~f:same then
+    List.map entries ~f:(fun e ->
+        if not (same e) then e
+        else
+          let keep =
+            match e.dist, entry.dist with
+            | None, _ | _, None -> true
+            | Some d1, Some d2 -> d2 < d1
+          in
+          if keep then { entry with dist_p = e.dist_p } else e)
+  else entries @ [ entry ]
+
+let record (t : t) ~(head : Tid.t) ~(key : key) ~(bound : Cbat_word.t)
+    ~(is_upper : bool) ~(dist : int) : unit =
   let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
-  let cur = Hashtbl.find t.lm_env head |> Option.value ~default:[] in
-  let next = add_smaller_dist cur entry in
-  Hashtbl.set t.lm_env ~key:head ~data:next
+  let rows = Option.value (Hashtbl.find t.rows head) ~default:[] in
+  let rows =
+    if Option.is_some (find_row t head key) then
+      List.map rows ~f:(fun (r : row) ->
+          if equal_key r.key key then { r with entries = upsert r.entries entry }
+          else r)
+    else rows @ [ { key; entries = [ entry ] } ]
+  in
+  Hashtbl.set t.rows ~key:head ~data:(trim rows)
 
-(* Entries recorded for [head]. *)
-let entries_for_head (t : t) (head : Tid.t) : lm_entry list =
-  Hashtbl.find t.lm_env head |> Option.value ~default:[]
-
-(* Two values live on the same coordinate line: an empty meet between
-   different lines is a category mismatch, not a disabled behavior. *)
+(* Two values live on the same coordinate line: an excluded set from a
+   different line is a category mismatch, not a disabled behavior. *)
 let same_line (a : Cbat_clp_set_composite.t) (b : Cbat_clp_set_composite.t) :
     bool =
   match Cbat_clp_set_composite.origin a, Cbat_clp_set_composite.origin b with
@@ -115,35 +176,70 @@ let same_line (a : Cbat_clp_set_composite.t) (b : Cbat_clp_set_composite.t) :
   | None, None -> true
   | Some _, None | None, Some _ -> false
 
-(* Record an empty meet's disabled boundary at the enclosing head. The
-   head check comes first: outside a cycle the meet below is pure
-   computation whose result is discarded. *)
-let observe_unsat_var (t : t) (v : var) ~(p : Cbat_clp_set_composite.t)
-    ~(cstr : Cbat_clp_set_composite.t)
-    ~(meet : Cbat_clp_set_composite.t) : unit =
-  if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then ()
-  else if not (same_line p cstr) then ()
+(* The prior set lies wholly outside the constraint: the excluded boundary
+   is the constraint's own edge, and the distance is the walk to it.  The
+   same rule for every key. *)
+let record_excluded (t : t) ~(head : Tid.t) ~(key : key)
+    ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : bool =
+  match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
+        Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with
+  | Some p_min, Some p_max, Some c_min, Some c_max ->
+    if Cbat_word.(<) p_max c_min then begin
+      (* Set below the boundary: upper landmark. *)
+      let d = distance_words p_max c_min in
+      record t ~head ~key ~bound:c_min ~is_upper:true ~dist:(cap_distance d);
+      true
+    end else if Cbat_word.(>) p_min c_max then begin
+      (* Set above the boundary: lower landmark. *)
+      let d = distance_words c_max p_min in
+      record t ~head ~key ~bound:c_max ~is_upper:false ~dist:(cap_distance d);
+      true
+    end else false
+  | _ -> false
+
+(* The meet kept a proper subset: the discarded piece is the disabled
+   behavior — its near boundary is the landmark. *)
+let record_narrowed (t : t) ~(head : Tid.t) ~(key : key)
+    ~(p : Cbat_clp_set_composite.t) ~(m : Cbat_clp_set_composite.t) : bool =
+  match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
+        Cbat_clp_set_composite.min_elem m, Cbat_clp_set_composite.max_elem m with
+  | Some p_min, Some p_max, Some m_min, Some m_max ->
+    if Cbat_word.(<) p_min m_min then begin
+      let bound = Cbat_word.pred m_min in
+      let d = distance_words p_min bound in
+      record t ~head ~key ~bound ~is_upper:false ~dist:(cap_distance d);
+      true
+    end else if Cbat_word.(>) p_max m_max then begin
+      let bound = Cbat_word.succ m_max in
+      let d = distance_words bound p_max in
+      record t ~head ~key ~bound ~is_upper:true ~dist:(cap_distance d);
+      true
+    end else false
+  | _ -> false
+
+(* Record an excluded behavior's boundary at the enclosing head.  The head
+   check comes first: outside a cycle the meet below is pure computation
+   whose result is discarded.  [true] when a landmark was recorded. *)
+let observe_unsat (t : t) ~(key : key)
+    ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : bool =
+  if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr
+  then false
   else
     match t.widening_at_head with
     | None ->
       (* Outside a cycle: no-op. *)
-      ()
+      false
     | Some h ->
-      if not (Cbat_clp_set_composite.is_bottom meet) then ()
-      else
-        match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
-              Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with
-        | Some p_min, Some p_max, Some c_min, Some c_max ->
-          if Cbat_word.(<) p_max c_min then begin
-            (* Set below the boundary: upper landmark. *)
-            let d = distance_words p_max c_min in
-            record_landmark_for_head t ~head:h ~bound:c_min ~is_upper:true ~dist:(cap_distance d)
-          end else if Cbat_word.(>) p_min c_max then begin
-            (* Set above the boundary: lower landmark. *)
-            let d = distance_words c_max p_min in
-            record_landmark_for_head t ~head:h ~bound:c_max ~is_upper:false ~dist:(cap_distance d)
-          end else ()
-        | _ -> ()
+      let m = Cbat_clp_set_composite.meet p cstr in
+      (match key with
+       | Word ->
+         if not (Cbat_clp_set_composite.is_bottom m) then false
+         else if not (same_line p cstr) then false
+         else record_excluded t ~head:h ~key ~p ~cstr
+       | Cell _ ->
+         if not (Cbat_clp_set_composite.is_bottom m) then
+           record_narrowed t ~head:h ~key ~p ~m
+         else record_excluded t ~head:h ~key ~p ~cstr)
 
 #ifdef VSA_DEBUG
 let steps_census : (string, int) Hashtbl.t = Hashtbl.create (module String)
@@ -160,10 +256,11 @@ let () =
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf
    widens.  Only an entry holding a fresh measurement speaks: an entry
-   already consumed by [lm_advance] carries no reading, and a table keeps
+   already consumed by [advance] carries no reading, and a table keeps
    entries whose boundary the guard stopped reaching — neither may hold
    the head in [Zero], which never widens. *)
-let steps_of_entries (lst : lm_entry list) : [> `Zero | `Finite of int | `Inf] =
+let steps_of_entries (lst : lm_entry list) :
+    [> `Zero | `Finite of int | `Inf ] =
   let fresh = List.filter lst ~f:(fun e -> Option.is_some e.dist) in
   let steps =
     List.filter_map fresh ~f:(fun e ->
@@ -171,16 +268,21 @@ let steps_of_entries (lst : lm_entry list) : [> `Zero | `Finite of int | `Inf] =
         | Some dp, Some dc when dp > dc -> Some (dc / (dp - dc))
         | _ -> None)
   in
-  let answer =
-    if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then `Zero
-    else if List.is_empty steps then `Inf
-    else `Finite (List.min_elt steps ~compare:Int.compare |> Option.value_exn)
-  in
+  if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then `Zero
+  else if List.is_empty steps then `Inf
+  else `Finite (List.min_elt steps ~compare:Int.compare |> Option.value_exn)
+
+let steps (t : t) (h : Tid.t) (key : key) :
+    [> `Zero | `Finite of int | `Inf ] =
+  let lst = entries t h key in
+  let answer = steps_of_entries lst in
 #ifdef VSA_DEBUG
-  (* Which shape the head is in: how many entries the table holds, how
-     many carry a fresh reading, and whether the distances move. *)
+  let kind = kind_of_key key in
+  (* Which shape the key is in: how many entries the row holds, how many
+     carry a fresh reading, and whether the distances move. *)
+  let fresh = List.filter lst ~f:(fun e -> Option.is_some e.dist) in
   bump_steps
-    (Printf.sprintf "table.%d.%s" (List.length lst)
+    (Printf.sprintf "table.%s.%d.%s" kind (List.length lst)
        (if List.is_empty lst then "empty"
         else if List.is_empty fresh then "stale"
         else if List.exists fresh ~f:(fun e -> Option.is_none e.dist_p) then "warm"
@@ -188,19 +290,19 @@ let steps_of_entries (lst : lm_entry list) : [> `Zero | `Finite of int | `Inf] =
   List.iter fresh ~f:(fun e ->
       match e.dist_p, e.dist with
       | Some dp, Some dc ->
-        bump_steps (if dp > dc then "live.shrink" else "live.hold")
+        bump_steps
+          (Printf.sprintf "%s.%s" kind
+             (if dp > dc then "live.shrink" else "live.hold"))
       | _ -> ());
   (match answer with
-   | `Finite _ -> bump_steps "fire.finite"
-   | `Zero -> bump_steps "fire.zero"
-   | `Inf -> bump_steps ("fire.inf." ^ (if List.is_empty fresh then "stale" else "held")));
+   | `Finite _ -> bump_steps (Printf.sprintf "fire.finite.%s" kind)
+   | `Zero -> bump_steps (Printf.sprintf "fire.zero.%s" kind)
+   | `Inf ->
+     bump_steps
+       (Printf.sprintf "fire.inf.%s.%s" kind
+          (if List.is_empty fresh then "stale" else "held")));
 #endif
   answer
-
-let lm_calc_steps (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf] =
-  match Hashtbl.find t.lm_env h with
-  | None -> `Inf
-  | Some lst -> steps_of_entries lst
 
 (* The rotation: the current reading becomes the previous one.  An entry
    with no fresh reading keeps the history it holds — erasing it would
@@ -212,14 +314,23 @@ let rotate (entries : lm_entry list) : unit =
        | None -> ());
       entry.dist <- None)
 
-(* Commit current distances as previous. *)
-let lm_advance (t : t) (h : Tid.t) : unit =
-  Option.iter (Hashtbl.find t.lm_env h) ~f:rotate;
-  Option.iter (Hashtbl.find t.cell_env h)
-    ~f:(List.iter ~f:(fun (_, es) -> rotate es))
+(* Commit one key's current distances as previous. *)
+let advance (t : t) (h : Tid.t) (key : key) : unit =
+  Option.iter (find_row t h key) ~f:(fun r -> rotate r.entries)
 
+(* Commit every key recorded at [h]: the head-wide advance the word arm
+   asks for is the fold, not a second rule. *)
+let advance_head (t : t) (h : Tid.t) : unit =
+  List.iter (keys_at t h) ~f:(fun key -> advance t h key)
 
-
+(* Drop one key's entries. *)
+let clear_key (t : t) (h : Tid.t) (key : key) : unit =
+  match Hashtbl.find t.rows h with
+  | None -> ()
+  | Some rows ->
+    let rows = List.filter rows ~f:(fun r -> not (equal_key r.key key)) in
+    if List.is_empty rows then Hashtbl.remove t.rows h
+    else Hashtbl.set t.rows ~key:h ~data:rows
 
 (* Extrapolate bounds toward landmarks; clamp at landmark and current bound. *)
 let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
@@ -275,128 +386,12 @@ let translate_to ~(steps : int) (data_old : Cbat_clp_set_composite.t)
     else Cbat_clp_set_composite.of_clp (Cbat_clp.interval ~width extrap_lo extrap_hi)
   end
 
-
-(* ---- Cell entries: recorded at empty cell meets, consumed per cell. ---- *)
-
-(* Per-head entry cap; the oldest entry drops when it overflows. *)
-let cell_cap = 64
-
-let record_landmark_for_cell (t : t) ~(head : Tid.t) ~(cell : Cell_key.t)
-    ~(bound : Cbat_word.t) ~(is_upper : bool) ~(dist : int) : unit =
-  let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
-  let same_bound (e : lm_entry) =
-    Cbat_word.equal e.bound entry.bound && Bool.equal e.is_upper entry.is_upper in
-  (* Same boundary updates in place — smaller distance wins, history
-     kept; a new boundary appends (newest last). *)
-  let upsert (es : lm_entry list) : lm_entry list =
-    if List.exists es ~f:same_bound then
-      List.map es ~f:(fun e ->
-          if not (same_bound e) then e
-          else
-            let keep =
-              match e.dist, entry.dist with
-              | None, _ | _, None -> true
-              | Some d1, Some d2 -> d2 < d1 in
-            if keep then { entry with dist_p = e.dist_p } else e)
-    else es @ [entry] in
-  let rows = Option.value (Hashtbl.find t.cell_env head) ~default:[] in
-  let rows =
-    match List.find rows ~f:(fun (k, _) -> Cell_key.equal k cell) with
-    | Some _ ->
-      List.map rows ~f:(fun (k, es) ->
-          if Cell_key.equal k cell then (k, upsert es) else (k, es))
-    | None -> rows @ [(cell, [entry])] in
-  let count = List.fold rows ~init:0 ~f:(fun n (_, es) -> n + List.length es) in
-  let rec trim rows n =
-    if n <= cell_cap then rows
-    else
-      match rows with
-      | [] -> rows
-      | (k, es) :: rest ->
-        (match es with
-         | [] -> trim rest n
-         | [_] -> trim rest (n - 1)
-         | _ :: tl -> trim ((k, tl) :: rest) (n - 1)) in
-  Hashtbl.set t.cell_env ~key:head ~data:(trim rows count)
-
-(* Record an empty cell meet's disabled boundary at the enclosing head;
-   the same rule the words lane applies to vars. True when an entry was
-   recorded. *)
-let observe_unsat_cell (t : t) ~(cell : Cell_key.t)
-    ~(p : Cbat_clp_set_composite.t) ~(cstr : Cbat_clp_set_composite.t) : bool =
-  if Cbat_clp_set_composite.bitwidth p <> Cbat_clp_set_composite.bitwidth cstr then false
-  else
-    match t.widening_at_head with
-    | None -> false
-    | Some h ->
-      let m = Cbat_clp_set_composite.meet p cstr in
-      if not (Cbat_clp_set_composite.is_bottom m) then begin
-        (* The meet kept a proper subset: the discarded piece is the
-           disabled behavior — record its boundary. *)
-        match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
-              Cbat_clp_set_composite.min_elem m, Cbat_clp_set_composite.max_elem m with
-        | Some p_min, Some p_max, Some m_min, Some m_max ->
-          if Cbat_word.(<) p_min m_min then begin
-            let bound = Cbat_word.pred m_min in
-            let d = distance_words p_min bound in
-            record_landmark_for_cell t ~head:h ~cell ~bound ~is_upper:false ~dist:(cap_distance d);
-            true
-          end else if Cbat_word.(>) p_max m_max then begin
-            let bound = Cbat_word.succ m_max in
-            let d = distance_words bound p_max in
-            record_landmark_for_cell t ~head:h ~cell ~bound ~is_upper:true ~dist:(cap_distance d);
-            true
-          end else false
-        | _ -> false
-      end
-      else
-        match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
-              Cbat_clp_set_composite.min_elem cstr, Cbat_clp_set_composite.max_elem cstr with
-        | Some p_min, Some p_max, Some c_min, Some c_max ->
-          if Cbat_word.(<) p_max c_min then begin
-            (* Cell below the boundary: upper landmark. *)
-            let d = distance_words p_max c_min in
-            record_landmark_for_cell t ~head:h ~cell ~bound:c_min ~is_upper:true ~dist:(cap_distance d);
-            true
-          end else if Cbat_word.(>) p_min c_max then begin
-            (* Cell above the boundary: lower landmark. *)
-            let d = distance_words c_max p_min in
-            record_landmark_for_cell t ~head:h ~cell ~bound:c_max ~is_upper:false ~dist:(cap_distance d);
-            true
-          end else false
-        | _ -> false
-
-(* The cell's own row, if recorded. *)
-let find_row (t : t) (h : Tid.t) (cell : Cell_key.t) : lm_entry list option =
-  let has_cell (k, _) = Cell_key.equal k cell in
-  Option.bind (Hashtbl.find t.cell_env h) ~f:(fun rows ->
-      Option.map ~f:snd (List.find rows ~f:has_cell))
-
-let entries_for_cell (t : t) (h : Tid.t) (cell : Cell_key.t) : lm_entry list =
-  Option.value ~default:[] (find_row t h cell)
-
-let lm_calc_steps_for_cell (t : t) (h : Tid.t) (cell : Cell_key.t)
-    : [> `Zero | `Finite of int | `Inf] =
-  match entries_for_cell t h cell with
-  | [] -> `Inf
-  | es -> steps_of_entries es
-
-(* Commit one cell's current distances; the next measurement yields steps. *)
-let advance_cell (t : t) (h : Tid.t) (cell : Cell_key.t) : unit =
-  Option.iter (find_row t h cell) ~f:rotate
-
-(* Drop the cell's entries once its extrapolation consumed them; stale
-   entries never narrow. *)
-let clear_cell (t : t) (h : Tid.t) (cell : Cell_key.t) : unit =
-  let lacks_cell (k, _) = not (Cell_key.equal k cell) in
-  match Hashtbl.find t.cell_env h with
-  | None -> ()
-  | Some rows ->
-    let rows = List.filter rows ~f:lacks_cell in
-    if List.is_empty rows then Hashtbl.remove t.cell_env h
-    else Hashtbl.set t.cell_env ~key:h ~data:rows
-
-(* The head holds cell entries and no word entries: the memory arm runs
-   its three-way on the cells' own entries. *)
+(* The head holds cell rows and no word row: the memory arm runs the cells'
+   own three-way. *)
 let cell_driven (t : t) (h : Tid.t) : bool =
-  not (Hashtbl.mem t.lm_env h) && Hashtbl.mem t.cell_env h
+  match Hashtbl.find t.rows h with
+  | None -> false
+  | Some rows ->
+    (not (List.exists rows ~f:(fun r -> equal_key r.key Word)))
+    && List.exists rows ~f:(fun r ->
+           match r.key with Cell _ -> true | Word -> false)

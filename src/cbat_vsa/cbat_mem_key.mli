@@ -36,7 +36,7 @@ val of_word : Cbat_word.t -> point option
 val upper : t -> point
 val lower : t -> point
 val step : t -> int
-val cell_key : t -> Cbat_landmarks.Cell_key.t
+val cell_key : t -> Cbat_landmarks.cell_desc
 val combined_step : t -> t -> int
 val covers : t -> t -> bool
 val piece : t -> lo:point -> hi:point -> t

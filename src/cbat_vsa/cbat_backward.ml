@@ -655,8 +655,9 @@ let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
         Format.eprintf "DBG OBSERVE-UNSAT var=%s cur=%a cstr=%a\n%!"
           (Var.name v) WordSet.pp cur WordSet.pp refined;
 #endif
-        Cbat_landmarks.observe_unsat_var landmarks v ~p:cur ~cstr:refined
-          ~meet:m;
+        ignore
+          (Cbat_landmarks.observe_unsat landmarks ~key:Cbat_landmarks.Word
+             ~p:cur ~cstr:refined);
         env
       end else if not (WordSet.precedes m cur)
       then env
@@ -946,8 +947,8 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
                List.iter keys ~f:(fun key ->
                    let pre =
                      Mem.Val.data (Mem.find (res_size, endian) mv key) in
-                   if Cbat_landmarks.observe_unsat_cell landmarks
-                        ~cell:(Mem.Key.cell_key key) ~p:pre ~cstr:produced
+                   if Cbat_landmarks.observe_unsat landmarks
+                        ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key)) ~p:pre ~cstr:produced
                    then incr Stages.cell_lm_recorded;
                    let res = WordSet.meet pre produced in
                    if not (WordSet.equal res pre) then
@@ -959,8 +960,8 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
                      (Sexp.to_string (Mem.Key.sexp_of_t key)));
 #else
                List.iter keys ~f:(fun key ->
-                   ignore (Cbat_landmarks.observe_unsat_cell landmarks
-                             ~cell:(Mem.Key.cell_key key)
+                   ignore (Cbat_landmarks.observe_unsat landmarks
+                             ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key))
                              ~p:(Mem.Val.data
                                    (Mem.find (res_size, endian) mv key))
                              ~cstr:produced));

@@ -149,7 +149,7 @@ let selective_widen_extrapolate ~(head : Tid.t)
           let data_res =
             if Core.Set.mem need (Cbat_var_id.base_of key) then
               extrapolate_data
-                ~entries:(Cbat_landmarks.entries_for_head landmarks head)
+                ~entries:(Cbat_landmarks.entries landmarks head Cbat_landmarks.Word)
                 ~steps data_old data_new
             else
               WordSet.join data_old data_new
@@ -170,13 +170,13 @@ let selective_widen_extrapolate ~(head : Tid.t)
               let extr ck v1 v2 =
                 if Mem.Val.equal v1 v2 then Mem.Val.widen_join v1 v2
                 else
-                  let cl = Mem.Key.cell_key ck in
-                  match Cbat_landmarks.entries_for_cell landmarks head cl with
+                  let cl = Cbat_landmarks.Cell (Mem.Key.cell_key ck) in
+                  match Cbat_landmarks.entries landmarks head cl with
                   | [] -> Mem.Val.widen_join v1 v2
                   | entries ->
-                    (match Cbat_landmarks.lm_calc_steps_for_cell landmarks head cl with
+                    (match Cbat_landmarks.steps landmarks head cl with
                      | `Zero ->
-                       Cbat_landmarks.advance_cell landmarks head cl;
+                       Cbat_landmarks.advance landmarks head cl;
                        Mem.Val.widen_join v1 v2
                      | `Inf -> Mem.Val.widen_join v1 v2
                      | `Finite n ->
@@ -191,7 +191,7 @@ let selective_widen_extrapolate ~(head : Tid.t)
                          if WordSet.is_top data
                          then WordSet.widen_join data_old data_new
                          else data in
-                       Cbat_landmarks.clear_cell landmarks head cl;
+                       Cbat_landmarks.clear_key landmarks head cl;
                        let _, e = Mem.Val.get_idx v2 in
                        Mem.Val.create data e)
               in

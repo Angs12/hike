@@ -84,9 +84,9 @@ let origin (k : t) : Hike_origin.t = k.origin
 let step (k : t) : int = k.step
 
 (* The key the landmark table records this cell under. *)
-let cell_key (k : t) : Cbat_landmarks.Cell_key.t =
+let cell_key (k : t) : Cbat_landmarks.cell_desc =
     let lo = lower k and hi = upper k in
-    { Cbat_landmarks.Cell_key.origin = k.origin;
+    { Cbat_landmarks.origin = k.origin;
       lo_width = lo.pwidth;
       lo_value = lo.pvalue;
       hi_width = hi.pwidth; hi_value = hi.pvalue; stride = k.step }

@@ -24,7 +24,7 @@ let empty = Mem.top opadd_axis
 let range_cell lo hi n = Mem.meet_add empty ~key:(range lo hi) ~data:(cell n)
 
 (* The key namespace helpers: the origin a key carries, and a 64-bit cell. *)
-let key_origin k = (Mem.Key.cell_key k).Cbat_landmarks.Cell_key.origin
+let key_origin k = (Mem.Key.cell_key k).Cbat_landmarks.origin
 let cell64 n = Mem.Val.create (Ws.singleton (w64 n)) LittleEndian
 let read64 m k = Mem.Val.data (Mem.find (64, LittleEndian) m k)
 

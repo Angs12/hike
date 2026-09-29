@@ -38,7 +38,7 @@ module Key : sig
   val gaps : 'a -> t -> (t * 'a) seq -> (t * 'a) seq
 
   (* The key the landmark table records this cell under. *)
-  val cell_key : t -> Cbat_landmarks.Cell_key.t
+  val cell_key : t -> Cbat_landmarks.cell_desc
 
   (* Key ranges share at least one address. *)
   val overlap : t -> t -> bool

@@ -1,5 +1,6 @@
-(* Simon & King landmark widening: empty meets acquire landmarks; heads
-   extrapolate toward them. *)
+(* Simon & King landmark widening: excluded boundaries are recorded at the
+   enclosing cycle head; the head extrapolates toward them.  One table
+   serves every key. *)
 
 open Bap.Std
 
@@ -12,33 +13,68 @@ type lm_entry = {
   mutable dist_p : int option;
 }
 
+(* The cell a landmark is about: the memory key's byte hull (each end as
+   width/value) and stride — per-stride cells keep their own rows. *)
+type cell_desc = {
+  origin : Hike_origin.t;
+  lo_width : int;
+  lo_value : int64;
+  hi_width : int;
+  hi_value : int64;
+  stride : int;
+}
+
+(* What a landmark is about: a word at the head, or a memory cell at the
+   head.  The head is the table's outer key. *)
+type key = Word | Cell of cell_desc
+
 (* The per-solve landmark table. *)
 type t
 
 (* One fresh table per solve. *)
 val create : unit -> t
 
-(* Drop entries of [h] and its SCC. *)
+(* Drop the rows of [h] and its SCC. *)
 val clear_head : t -> Tid.t -> Tid.Set.t -> unit
 
-(* Record an empty meet's disabled boundary at the enclosing head. *)
-val observe_unsat_var :
-  t -> var -> p:Cbat_clp_set_composite.t -> cstr:Cbat_clp_set_composite.t ->
-  meet:Cbat_clp_set_composite.t -> unit
+(* Record an excluded behavior's boundary at the enclosing head; [true]
+   when a landmark was recorded. *)
+val observe_unsat :
+  t -> key:key -> p:Cbat_clp_set_composite.t -> cstr:Cbat_clp_set_composite.t ->
+  bool
+
+(* Entries recorded for [key] at [head]. *)
+val entries : t -> Tid.t -> key -> lm_entry list
+
+(* Every key recorded at [head], oldest row first. *)
+val keys_at : t -> Tid.t -> key list
 
 (* Steps until the closest landmark; Zero needs another measurement, Inf
    widens. *)
-val lm_calc_steps : t -> Tid.t -> [> `Zero | `Finite of int | `Inf ]
+val steps : t -> Tid.t -> key -> [> `Zero | `Finite of int | `Inf ]
 
-(* Commit current distances as previous. *)
-val lm_advance : t -> Tid.t -> unit
+(* Record a landmark for [key] at [head]. *)
+val record :
+  t ->
+  head:Tid.t ->
+  key:key ->
+  bound:Cbat_word.t ->
+  is_upper:bool ->
+  dist:int ->
+  unit
 
-(* Record a landmark for [head]. *)
-val record_landmark_for_head :
-  t -> head:Tid.t -> bound:Cbat_word.t -> is_upper:bool -> dist:int -> unit
+(* Commit [key]'s current distances as previous. *)
+val advance : t -> Tid.t -> key -> unit
 
-(* Entries recorded for [head]. *)
-val entries_for_head : t -> Tid.t -> lm_entry list
+(* Commit every key recorded at [head]. *)
+val advance_head : t -> Tid.t -> unit
+
+(* Drop [key]'s entries. *)
+val clear_key : t -> Tid.t -> key -> unit
+
+(* Whether [h] carries cell landmarks and no word landmark: the memory arm
+   then runs the cells' own three-way. *)
+val cell_driven : t -> Tid.t -> bool
 
 (* Extrapolate bounds toward landmarks; clamp at landmark and current
    bound. *)
@@ -48,56 +84,3 @@ val translate_to :
 
 (* Run [f] with [head] widened; the previous head is restored. *)
 val with_widening_head : t -> Tid.t option -> (unit -> 'a) -> 'a
-
-(* The cell an entry is keyed by: the memory key's byte hull (each
-   end as width/value) and stride — per-stride cells keep their own
-   landmark rows. *)
-module Cell_key : sig
-  type t = {
-    origin : Hike_origin.t;
-    lo_width : int;
-    lo_value : int64;
-    hi_width : int;
-    hi_value : int64;
-    stride : int;
-  }
-
-  val equal : t -> t -> bool
-end
-
-(* Whether [h] carries only cell landmarks: the memory arm then runs the
-   cells' own three-way. *)
-val cell_driven : t -> Tid.t -> bool
-
-(* Entries recorded for [h]'s [cell]. *)
-val entries_for_cell : t -> Tid.t -> Cell_key.t -> lm_entry list
-
-(* Record a landmark for [head]'s [cell]. *)
-val record_landmark_for_cell :
-  t ->
-  head:Tid.t ->
-  cell:Cell_key.t ->
-  bound:Cbat_word.t ->
-  is_upper:bool ->
-  dist:int ->
-  unit
-
-(* Steps until the closest cell landmark; Zero needs another measurement,
-   Inf widens. *)
-val lm_calc_steps_for_cell :
-  t -> Tid.t -> Cell_key.t -> [> `Zero | `Finite of int | `Inf ]
-
-(* Commit a cell's current distances as previous. *)
-val advance_cell : t -> Tid.t -> Cell_key.t -> unit
-
-(* Drop a cell's entries. *)
-val clear_cell : t -> Tid.t -> Cell_key.t -> unit
-
-(* Record an empty meet's disabled boundary for a cell; [true] when one
-   was recorded. *)
-val observe_unsat_cell :
-  t ->
-  cell:Cell_key.t ->
-  p:Cbat_clp_set_composite.t ->
-  cstr:Cbat_clp_set_composite.t ->
-  bool
