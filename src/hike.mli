@@ -95,6 +95,11 @@ module Cfg_complete : sig
     block_addrs:Tid.t Addr.Map.t ->
     fresh:Tid.Set.t ->
     sub term -> sub term
+
+  (** Names every block's successors: a conditional goto's implicit
+      false edge becomes an explicit [Goto], and a destination two jumps
+      share collapses to one unconditional edge (ADR 0024). *)
+  val materialize_fallthroughs : sub term -> sub term
 end
 
 (** Indirect-target resolution, read from the target's denotation. *)

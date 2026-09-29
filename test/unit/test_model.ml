@@ -572,7 +572,8 @@ let tests : unit Alcotest.test list =
         let c4_pre, _ =
           sub_of "pr_c4_cond"
             [ [ c4_st; c4_ld; c4_flag ],
-              [ (1, fun t -> mk_jmp_to t (Bil.Var c4_zf)); (1, mk_goto) ];
+              [ (2, fun t -> mk_jmp_to t (Bil.Var c4_zf)); (1, mk_goto) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let c4 = Hike.Jump.compile_sub jump_target c4_pre in
@@ -609,7 +610,8 @@ let tests : unit Alcotest.test list =
         let c4_pre, _ =
           sub_of "pr_c4_cond"
             [ [ c4_st; c4_ld; c4_flag ],
-              [ (1, fun t -> mk_jmp_to t (Bil.Var c4_zf)); (1, mk_goto) ];
+              [ (2, fun t -> mk_jmp_to t (Bil.Var c4_zf)); (1, mk_goto) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let c4 = Hike.Jump.compile_sub jump_target c4_pre in

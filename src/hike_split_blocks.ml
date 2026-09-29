@@ -1,11 +1,10 @@
-(* The block/jmp split: every guard's false edge becomes an explicit
-   Goto (BAP's lifting leaves it implicit in the term order), and a
-   3+-jmp direct-goto series becomes one block per jmp — piece 1 keeps
-   the tid, defs, phis, and attrs; every piece carries an explicit Goto
-   to the next.  The BIR's edges are then the jmps themselves, so every
-   later pass (the emitter included) reads the BIR, never a term order.
-   A series that is not all direct gotos stays whole, named on the
-   channel. *)
+(* The block/jmp split: a 3+-jmp direct-goto series becomes one block per
+   jmp — piece 1 keeps the tid, defs, phis, and attrs; every piece carries
+   an explicit Goto to the next.  The guards' false edges are already
+   explicit by then (the completion writes them), so the BIR's edges are
+   the jmps themselves: every later pass (the emitter included) reads the
+   BIR, never a term order.  A series that is not all direct gotos stays
+   whole, named on the channel. *)
 
 open Bap.Std
 
@@ -45,32 +44,7 @@ let pieces (blk : blk term) : blk term list =
               (Jmp.create (Goto (Direct (Base.List.nth_exn tids (i + 1)))))
           else blk_i)
 
-(* The block that follows [blk] in [sub]'s term order: the false target of
-   a guard whose block has no later jmp. *)
-let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
-  let tid = Term.tid blk in
-  let rec go seen = function
-    | [] -> None
-    | b :: rest ->
-        if seen then Some (Term.tid b)
-        else go (Tid.equal (Term.tid b) tid) rest
-  in
-  go false (Term.enum blk_t sub |> Seq.to_list)
-
 let split_sub (sub : sub term) : sub term =
-  (* Every guard's false edge becomes an explicit Goto.  BAP's lifting
-     leaves it implicit (the term-order successor); materializing it here
-     means no later pass — the emitter included — reads a term order. *)
-  let sub =
-    Term.map blk_t sub ~f:(fun blk ->
-        match Base.List.last (Term.enum jmp_t blk |> Seq.to_list) with
-        | Some j when not (Hike_stack_model.is_true_cond (Jmp.cond j)) -> (
-            match fallthrough sub blk with
-            | Some succ ->
-                Term.append jmp_t blk (Jmp.create (Goto (Direct succ)))
-            | None -> blk)
-        | _ -> blk)
-  in
   (* A 3+-jmp block becomes one piece per jmp, each carrying an explicit
      Goto to the next. *)
   let multi =

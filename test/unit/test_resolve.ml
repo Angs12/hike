@@ -169,7 +169,7 @@ let tests : unit Alcotest.test list =
        two in-sub block constants; block_addrs names both blocks' tids,
        so every word of the set resolves in-sub. *)
     pin "RES-08"
-      "N8-DISP: the dispatch becomes a delta-guarded series, one goto per case target"
+      "N8-DISP: the dispatch becomes a delta-guarded series, one goto per case target, plus its named false edge"
       (fun () ->
         let j2_sel = v64 "t22_j2_sel" in
         let j2_base = v64 "t22_j2_base" in
@@ -196,7 +196,7 @@ let tests : unit Alcotest.test list =
         in
         check "RES-08"
           (match jmps_of_blk j2' 3 with
-           | [ g1; g2 ] ->
+           | g1 :: g2 :: _ ->
              (match Jmp.kind g1, Jmp.kind g2 with
               | Goto (Direct t1), Goto (Direct t2) ->
                 Tid.equal t1 b1_tid && Tid.equal t2 b2_tid
@@ -312,7 +312,7 @@ let tests : unit Alcotest.test list =
            | None -> false));
 
     pin "RES-12"
-      "FUSED-GROWTH: the exit series carries one guarded goto per table entry"
+      "FUSED-GROWTH: the exit series carries one guarded goto per table entry, plus its named false edge"
       (fun () ->
         let j6_sel = v64 "t22_j6_sel" in
         let j6_base = v64 "t22_j6_base" in
@@ -341,7 +341,7 @@ let tests : unit Alcotest.test list =
            | None -> false
            | Some fresh ->
              (match jmps_of_blk j6' 1 with
-              | [ g1; g2 ] ->
+              | g1 :: g2 :: _ ->
                 (match Jmp.kind g1, Jmp.kind g2 with
                  | Goto (Direct t1), Goto (Direct t2) ->
                    Tid.equal t1 j6_tids.(2) && Tid.equal t2 fresh
@@ -680,6 +680,56 @@ let tests : unit Alcotest.test list =
                     | _ -> false)
                 | _ -> false)
             | _ -> false));
+
+    (* The completion owns the edge set: a conditional goto's false edge
+       is named, and a destination two jumps share is carried once. *)
+    pin "RES-23" "the completion names the false edge and carries each destination once"
+      (fun () ->
+        let edge t = Jmp.create ~cond:(Bil.Var (v64 "c")) (Goto (Direct t)) in
+        let jmps_of (sub : sub term) (i : int) : jmp term list =
+          let blks = Term.enum blk_t sub |> Seq.to_list in
+          Term.enum jmp_t (Base.List.nth_exn blks i) |> Seq.to_list
+        in
+        let targets (js : jmp term list) : tid list =
+          Base.List.filter_map js ~f:(fun j ->
+              match Jmp.kind j with Goto (Direct t) -> Some t | _ -> None)
+        in
+        let unconditional (j : jmp term) : bool =
+          match Jmp.cond j with
+          | Bil.Int w -> Word.equal w (Word.one 1)
+          | _ -> false
+        in
+        (* a guard plus an explicit goto to the SAME block: one edge *)
+        let sub, tids =
+          sub_of "edge_dup" [ ([], [ (1, edge); (1, mk_goto) ]); ([], [ (0, mk_ret) ]) ]
+        in
+        (match jmps_of (Hike.Cfg_complete.materialize_fallthroughs sub) 0 with
+         | [ j ] ->
+             check "RES-23a: one unconditional edge to the shared target"
+               (unconditional j
+                && (match Jmp.kind j with
+                    | Goto (Direct t) -> Tid.equal t tids.(1)
+                    | _ -> false))
+         | _ -> check "RES-23a: one edge" false);
+        (* a lone conditional goto: the false edge (the term-order
+           successor, block 1) becomes explicit *)
+        let sub, tids =
+          sub_of "edge_implicit"
+            [ ([], [ (2, edge) ]); ([], [ (0, mk_ret) ]); ([], [ (0, mk_ret) ]) ]
+        in
+        check "RES-23b: the guard and its named false edge"
+          (targets (jmps_of (Hike.Cfg_complete.materialize_fallthroughs sub) 0)
+           = [ tids.(2); tids.(1) ]);
+        (* two distinct destinations stay two *)
+        let sub, tids =
+          sub_of "edge_two"
+            [ ([], [ (2, edge); (1, mk_goto) ]);
+              ([], [ (0, mk_ret) ]);
+              ([], [ (0, mk_ret) ]) ]
+        in
+        check "RES-23c: distinct destinations stay"
+          (targets (jmps_of (Hike.Cfg_complete.materialize_fallthroughs sub) 0)
+           = [ tids.(2); tids.(1) ]));
   ]
 
 let () = run "resolve" tests

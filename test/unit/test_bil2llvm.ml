@@ -103,13 +103,14 @@ let tests : unit Alcotest.test list =
         let undef_sub, _ =
           sub_of "scope_leak_a"
             [ [],
-              [ (1,
+              [ (2,
                  fun t ->
                    mk_jmp_to t
                      (Bil.BinOp
                         (Bil.EQ, Bil.Var r15,
                          Bil.Int (Cbat_word.to_word (w64 0)))));
                 (1, mk_goto) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let clean_sub, _ =
@@ -170,13 +171,14 @@ let tests : unit Alcotest.test list =
         let sub, _ =
           sub_of "undef_read_sub"
             [ [],
-              [ (1,
+              [ (2,
                  fun t ->
                    mk_jmp_to t
                      (Bil.BinOp
                         (Bil.EQ, Bil.Var r15,
                          Bil.Int (Cbat_word.to_word (w64 0)))));
                 (1, mk_goto) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let ir_holder = ref "" in
@@ -427,13 +429,14 @@ let tests : unit Alcotest.test list =
         let sub, _ =
           sub_of "golden_sub"
             [ [ d_ld; d_st; d_val ],
-              [ (1,
+              [ (2,
                  fun t ->
                    mk_jmp_to t
                      (Bil.BinOp
                         (Bil.EQ, Bil.Var st_val,
                          Bil.Int (Cbat_word.to_word (w64 0)))));
                 (1, mk_goto) ];
+              [], [ (0, mk_ret) ];
               [], [ (0, mk_ret) ] ]
         in
         let sub =

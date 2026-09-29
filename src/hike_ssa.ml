@@ -1,7 +1,7 @@
 (* SSA materialization: every cross-block register value flows through
    a BIR phi term, so the emitter renders joins straight off the terms.
-   The CFG is the BIR's own (every edge an explicit jmp — the splitter
-   materializes the guards' fallthroughs).  SP is renamed like any
+   The CFG is the BIR's own (every edge an explicit jmp — the completion
+   writes the guards' fallthroughs).  SP is renamed like any
    register; the call-pushed word rides a restore def (single-pred
    continuation) or the phi incoming (shared continuation).  Each call
    site's ret lanes mint fresh versions, and every block carries the
@@ -115,7 +115,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       && not (Model.is_call_arg (Var.base v))
     in
     (* The sub's CFG, straight from the BIR (every edge is an explicit
-       jmp: the splitter materializes the guards' fallthroughs).  The
+       jmp: the completion writes the guards' fallthroughs).  The
        [start]/[exit] pseudo-nodes are dropped for the block relations. *)
     let g = Sub.to_graph sub in
     let is_real tid =

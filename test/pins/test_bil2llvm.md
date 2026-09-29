@@ -54,3 +54,11 @@ one failing fixture never hides the rest of the module.
 | EMIT-32 | A BIR `Phi` term renders as its own LLVM phi (lhs = a fresh `Var.with_index` version, sub-wide bound): one incoming per (source block, exp), the exp evaluated in the source block's context. | In `create_elts`'s `Phi` arm, drop the `bind_ssaval`/`insert_bir_phi` (render nothing). | EMIT-32 FAILs: no ` = phi i64 [` line survives (the join loses its merge). |
 | EMIT-33 | A 3+-jmp series the splitter cannot compile (not all direct gotos) reaches the emitter, which fails loudly rather than render silently. | In `create_branches`, drop the `_ ->` failwith (render nothing). | EMIT-33 FAILs: `emit_ir` does not raise `"unsplit multi-jmp"`. |
 | EMIT-34 | a `Vla(T)`-origin access GEPs the `%vla` created at T (`create_dynamic_alloc` records its pair); each VLA's access hits its own alloca | drop the `Vla` arm from `mem_access` | EMIT-34 red: no `getelementptr i8, ptr %vla, i64 4` / `%vla2, i64 8` |
+
+**Fixture note (2026-09-29).** `emit_ir` now runs
+`Hike.Cfg_complete.materialize_fallthroughs` before the split, as the
+pipeline does (ADR 0024), so a fixture's guard reaches the emitter with
+its false edge named.  The fixtures whose guard and fallthrough targeted
+the SAME block (EMIT-01, EMIT-03, EMIT-09) now target distinct blocks —
+that shape is folded to one unconditional edge by the completion, which
+is the pin's point, not its subject.

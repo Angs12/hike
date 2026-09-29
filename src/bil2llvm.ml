@@ -13,9 +13,10 @@ open Bil2llvm_fp
 open Bil2llvm_section
 
 (* Mechanical: a split piece is one jmp (an unconditional transfer) or
-   two (a guard plus its explicit fallthrough Goto).  The splitter
-   canonicalizes the shape, so the emitter maps it directly — no chain
-   walking, no term-order fallthrough. *)
+   two (a guard plus its explicit fallthrough Goto).  The completion
+   writes the false edge and the splitter canonicalizes the shape, so
+   the emitter maps it directly — no chain walking, no term-order
+   fallthrough. *)
 let create_branches ctx scope blk_tid llvm_builder branches =
   let open Bap.Std in
   let llvm_ctx = ctx.llvm_ctx in

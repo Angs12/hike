@@ -793,6 +793,55 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
    not converge: a target var whose reaching def loads the entry SP
    cell.  This is the sanctioned pre-solution projection — the
    denotation path supersedes it wherever a solution exists. *)
+(* The block that follows [blk] in [sub]'s term order: the false edge of a
+   conditional goto whose block has no explicit one. *)
+let fallthrough (sub : sub term) (blk : blk term) : Tid.t option =
+  let tid = Term.tid blk in
+  let rec go seen = function
+    | [] -> None
+    | b :: rest ->
+        if seen then Some (Term.tid b)
+        else go (Tid.equal (Term.tid b) tid) rest
+  in
+  go false (Term.enum blk_t sub |> Seq.to_list)
+
+(* The completion owns the edge set, so it names it here: the BIR's jumps
+   ARE the block's successors.  A conditional goto's implicit false edge
+   becomes an explicit Goto, and a block whose every edge leads to ONE
+   destination is that single unconditional edge — the guards select
+   nothing.  A guarded series keeps its edges: the split makes each piece
+   a block of its own, so their destinations never collide. *)
+let materialize_fallthroughs (sub : sub term) : sub term =
+  let direct (j : jmp term) : Tid.t option =
+    match Jmp.kind j with Goto (Direct t) -> Some t | _ -> None
+  in
+  let normalize (blk : blk term) : blk term =
+    let blk =
+      match Base.List.last (Term.enum jmp_t blk |> Seq.to_list) with
+      | Some j
+        when Option.is_some (direct j)
+             && not (Model.is_true_cond (Jmp.cond j)) -> (
+          match fallthrough sub blk with
+          | Some succ -> Term.append jmp_t blk (Jmp.create (Goto (Direct succ)))
+          | None -> blk)
+      | _ -> blk
+    in
+    match Term.enum jmp_t blk |> Seq.to_list with
+    | [] | [ _ ] -> blk
+    | first :: _ as jmps -> (
+        let targets = Base.List.map jmps ~f:direct in
+        match direct first with
+        | Some t
+          when Base.List.for_all targets ~f:(fun x ->
+                   Option.equal Tid.equal x (Some t)) ->
+            Term.filter jmp_t blk ~f:(fun x ->
+                Tid.equal (Term.tid x) (Term.tid first))
+            |> Term.map jmp_t ~f:(fun x ->
+                   Jmp.create ~tid:(Term.tid x) ~cond:true_cond (Jmp.kind x))
+        | _ -> blk)
+  in
+  Term.map blk_t sub ~f:normalize
+
 let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
   let word_bits = Hike_abi.word_bits abi in
   let retaddr =
@@ -805,12 +854,13 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
            | _ -> None)
     |> Seq.to_list |> Tid.Set.of_list
   in
-  if Core.Set.is_empty retaddr then sub
+  if Core.Set.is_empty retaddr then materialize_fallthroughs sub
   else
     Term.map blk_t sub ~f:(fun blk ->
         let last_defs = Vsa.last_defs blk in
         splice_jmps blk
           ~classify:(ret_rewrite ~retaddr ~last_defs))
+    |> materialize_fallthroughs
 
 (* One resolution event pass on the phase's own solution: the case
    words land on the run's map and resolved dispatches contribute
@@ -882,4 +932,4 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
         in
         (sub, live))
   in
-  prune_unreachable ~fresh ~live sub
+  prune_unreachable ~fresh ~live sub |> materialize_fallthroughs

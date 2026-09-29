@@ -390,7 +390,7 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
            Core.Map.set m ~key:(Term.tid blk) ~data:(seed_of blk))
   in
   (* The sub's CFG, straight from the BIR (every edge is an explicit jmp:
-     the splitter materializes the guards' fallthroughs). *)
+     the completion writes the guards' fallthroughs). *)
   let g = Sub.to_graph sub in
   let sol =
     Graphlib.Std.Graphlib.fixpoint

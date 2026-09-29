@@ -1066,6 +1066,11 @@ let mk_cond_sub nm defs cond_var =
 let emit_ir (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
+  (* The completion names each block's successors, as the pipeline does
+     (ADR 0024). *)
+  let subs =
+    Base.List.map subs ~f:Hike.Cfg_complete.materialize_fallthroughs
+  in
   let prog = Program.create ~subs () in
   (* The FP pass qualifies the temp widths, as the pipeline does; the
      types pass writes each sub's signature onto its [arg] terms; the
