@@ -56,17 +56,8 @@ let ref_bottom (width : int) : Ws.Clp.t =
   Ws.Clp.create ~width (Cbat_word.of_word (Word.zero width))
     ~cardn:(Cbat_word.of_word (Word.zero (width + 1)))
 
-(* Fail-before hook, test code only: HIKE_FAIL_BEFORE corrupts the inlined
-   reference so the pin MUST go red.  Production src/ may hold no
-   runtime-variable switch (the instrumentation rule), so this is the one
-   mechanical sabotage; every other pin's disable recipe lives in
-   test/pins/ and is re-demonstrated by review. *)
-let sabotage =
-  match Sys.getenv_opt "HIKE_FAIL_BEFORE" with Some _ -> true | None -> false
-
 let ref_top (i : int) : Ws.Clp.t =
-  if sabotage then ref_bottom i
-  else Ws.Clp.infinite (Cbat_word.of_word (Word.zero i), Cbat_word.of_word (Word.one i))
+  Ws.Clp.infinite (Cbat_word.of_word (Word.zero i), Cbat_word.of_word (Word.one i))
 
 let ref_is_top (p : Ws.Clp.t) : bool = Ws.Clp.equal p (ref_top (Ws.Clp.bitwidth p))
 

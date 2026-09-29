@@ -42,7 +42,6 @@
   test_coerce
   test_resolve
   test_strip_canaries
-  test_clp_equiv
   test_seam
   test_hike_origin
   test_hike_stack_bounds
@@ -52,7 +51,35 @@
   test_hike_ssa
   test_hike_fp
   test_integration)
- (modules :standard \ harness common fixtures)
+ (modules :standard \ harness common fixtures test_clp_equiv)
+ (libraries
+  hike_test
+  alcotest
+  hike
+  bap
+  bap-main
+  bap-core-theory
+  cbat_vsa
+  cbat_vsa_domain
+  graphlib
+  core
+
+  llvm
+  hike.hike_origin
+  hike.hike_stack_bounds
+  unix)
+ (flags
+  :standard -g)
+ (preprocess
+  (pps ppx_bap)))
+
+; The CLP/word differential referee.  Its subject is the vendored domain,
+; not a pass: it sweeps 1.7M operand pairs against a concrete oracle, so it
+; is the gate's own stage (gate.sh referee) rather than part of the
+; per-change `dune runtest`.
+(executable
+ (name test_clp_equiv)
+ (modules test_clp_equiv)
  (libraries
   hike_test
   alcotest

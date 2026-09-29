@@ -1,6 +1,10 @@
 # Pins: CLP/word differential referee
 
-Module `test/unit/test_clp_equiv.ml`. One pin in the module.
+Module `test/unit/test_clp_equiv.ml`. One pin in the module, `CLEQ-01`.
+
+This module is the gate's **referee stage** (`gate.sh referee`), not part of
+the per-change `dune runtest` tier: it is a domain oracle (its subject is
+the vendored lattice, not a pass), and it sweeps 1.7M operand pairs.
 
 The pin runs the full referee sweep: every `Cbat_word` export against
 `Word`/`Ref_word`, the CLP identity/directional elements against the

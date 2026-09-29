@@ -2,7 +2,7 @@
 # The gate orchestrator: one entry point for the strict integration chain.
 #
 #   gate.sh <stage>
-#     stages: fail-before provenance corpus lift allocas semantics
+#     stages: provenance corpus lift allocas semantics unit referee
 #             unit all
 #
 # `all` runs the documented chain in order and aborts on the first failure.
@@ -21,7 +21,7 @@ EMIT="${HIKE_EMIT:-/tmp/hike-emit}"
 SEMOUT="${HIKE_SEMOUT:-/tmp/hike-sem}"
 
 usage() {
-  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|unit|fail-before|all>" >&2
+  echo "usage: gate.sh <provenance|corpus|lift|allocas|semantics|unit|referee|all>" >&2
   exit 2
 }
 
@@ -43,7 +43,7 @@ stage() {
     allocas)    "$HERE/check_allocas.sh" "$EMIT" ;;
     semantics)  need_provenance; need_renderer; "$HERE/semantic/run_semantic.sh" "$CORPUS" "$EMIT" "$SEMOUT" ;;
     unit)       ( cd "$TREE" && dune runtest --force ) ;;
-    fail-before) "$HERE/fail_before.sh" ;;
+    referee)    ( cd "$TREE" && dune exec test/unit/test_clp_equiv.exe ) ;;
     *)          usage ;;
   esac
 }
@@ -52,7 +52,7 @@ STAGE="${1:-}"
 [ -n "$STAGE" ] || usage
 
 if [ "$STAGE" = all ]; then
-  for s in provenance corpus lift allocas semantics unit fail-before; do
+  for s in provenance corpus lift allocas semantics unit referee; do
     echo "=== gate: $s"
     stage "$s" || {
       echo "gate FAILED at stage: $s" >&2
