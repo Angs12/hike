@@ -1014,12 +1014,6 @@ let stride (t : t) : int =
    so a cross-origin op materialises through the base range (or tops). *)
 let origin_is_relative x = not (Origin.equal x Origin.Abs)
 
-(* The stack-family origins share the segment base. *)
-let origin_on_line x =
-  match x with
-  | Origin.Abs | Origin.Rip -> false
-  | Origin.Stack | Origin.Vla _ | Origin.Window -> true
-
 let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     Hike_origin.rel_row =
   let rel x = origin_is_relative x in
@@ -1027,7 +1021,7 @@ let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
     rel o1 && rel o2 && not (Origin.equal o1 o2)
     && (match o1, o2 with
         | Origin.Vla _, _ | _, Origin.Vla _ -> false
-        | _ -> origin_on_line o1 && origin_on_line o2)
+        | _ -> Origin.names_stack_line o1 && Origin.names_stack_line o2)
   in
   match op with
   | Union ->

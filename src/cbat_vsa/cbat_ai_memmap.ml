@@ -373,11 +373,12 @@ let call_keep (m : t) ~(keep_lo : word) ~(escape : (word * word) list) : t =
         List.exists escape_pts ~f:(fun (lo, hi) ->
             Key.ge (Key.lower k) lo && Key.le (Key.upper k) hi) in
       let keeps (k : Key.t) : bool =
-        match Key.origin k with
-        | Hike_origin.Vla _ -> true
-        | Hike_origin.Stack | Hike_origin.Window ->
-          (not (in_escape k)) && not (Key.lt (Key.lower k) keep_lo_pt)
-        | Hike_origin.Abs | Hike_origin.Rip -> false
+        let o = Key.origin k in
+        Hike_origin.names_stack_line o
+        && (match o with
+            | Hike_origin.Vla _ -> true
+            | _ ->
+              (not (in_escape k)) && not (Key.lt (Key.lower k) keep_lo_pt))
       in
       let kept =
         IT.to_sequence it

@@ -634,6 +634,18 @@ let ori_17 () =
      | Some e -> Option.is_none e.Hike_origin.off_hi
      | None -> false)
 
+(* ORI-18: the D10 namespace test — the three stack-line origins answer
+   true; a plain or module-relative origin answers false. *)
+let ori_18 () =
+  check "Stack names the stack line" (Origin.names_stack_line Origin.Stack);
+  check "Window names the stack line" (Origin.names_stack_line Origin.Window);
+  check "a VLA frame names the stack line"
+    (Origin.names_stack_line (Origin.Vla (Tid.create ())));
+  check "an absolute origin names no stack line"
+    (not (Origin.names_stack_line Origin.Abs));
+  check "a module-relative origin names no stack line"
+    (not (Origin.names_stack_line Origin.Rip))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -652,4 +664,5 @@ let () =
       pin "ORI-14" "store-to-load round-trip (VLA)" ori_14;
       pin "ORI-15" "round-trip across a call" ori_15;
       pin "ORI-16" "round-trip across a loop" ori_16;
-      pin "ORI-17" "the D1 shape predicate (singleton / TOP / infinite)" ori_17 ]
+      pin "ORI-17" "the D1 shape predicate (singleton / TOP / infinite)" ori_17;
+      pin "ORI-18" "the D10 namespace test" ori_18 ]

@@ -84,21 +84,16 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
           | _ -> bound (WordSet.Clp.max_elem offs))
       | None -> Option.map ~f:snd (range_of rsp)
   in
-  (* The escape list: the stack-line-capable (relative-origin) escapes
-     only.  A plain/absolute escape cannot collide with a Stack-line
+  (* The escape list: the escapes whose origin names the stack line.  A
+     plain or module-relative escape cannot collide with a Stack-line
      cell (the key namespaces by origin); a bottom escape writes
-     nothing.  A relative escape keeps its bounded extent; a top one
-     spans the whole line (the sound claim). *)
+     nothing.  Such an escape keeps its bounded extent; a top one spans
+     the whole line (the sound claim). *)
   let escape_ranges =
     List.filter_map escape ~f:(fun ws ->
-        match WordSet.origin ws with
-        | Some (WordSet.Origin.Stack | WordSet.Origin.Vla _ | WordSet.Origin.Window)
-          -> range_of ws
-        | Some _ -> None
-        | None ->
-            (* A plain bounded set keyed in its own space — it cannot
-               name a Stack cell. *)
-            None)
+        if Option.exists ~f:Hike_origin.names_stack_line (WordSet.origin ws)
+        then range_of ws
+        else None)
   in
   match keep_lo with
   | Some lo ->

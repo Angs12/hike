@@ -74,6 +74,14 @@ let name (t : t) : string =
   | Window -> "window"
   | Rip -> "rip"
 
+(* The D10 namespace test: does an origin name the model's stack line.
+   [Stack], [Window] and a [Vla] frame share the entry-relative line; an
+   absolute or module-relative origin names no stack cell. *)
+let names_stack_line (t : t) : bool =
+  match t with
+  | Stack | Window | Vla _ -> true
+  | Abs | Rip -> false
+
 (* A VLA allocation's fact in the allocation's own frame: the routable
    offsets are frame-relative (0 = the allocation base = the post-move
    SP).  [off_hi] bounds routing below the base (None = unbounded size);
