@@ -816,7 +816,110 @@ let tests : unit Alcotest.test list =
         check
           "T5-2 (Store row): the constraint flows into the stored data's producers — the \
            producing load's cell meets {6}"
-          (Ws.equal (cell_of_key ka) (Ws.singleton (w32 6))));
+          (Ws.equal (cell_of_key ka) (Ws.singleton (w32 6)));
+        (* The hull case: the consuming load's address is a SET whose hull
+           contains the store's key without equalling it.  The handshake's
+           match is interval intersection, so the store row still delivers —
+           sound by the join ruling (a load's value is the join over the
+           cells its addresses can read, so the constraint contains every
+           contributing cell). *)
+        let hull_case ~(store_off : int) :
+            AI.t * var * var * var * exp * exp =
+          let hmem = memv "t5r_hm" in
+          let ha = Var.create ~is_virtual:true ~fresh:false "t5r_ha" (Type.Imm 32) in
+          let hb = Var.create ~is_virtual:true ~fresh:false "t5r_hb" (Type.Imm 32) in
+          let ht = Var.create ~is_virtual:true ~fresh:false "t5r_ht" (Type.Imm 32) in
+          let hu = Var.create ~is_virtual:true ~fresh:false "t5r_hu" (Type.Imm 64) in
+          let hka =
+            Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 16)))
+          in
+          let hkb =
+            Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 store_off)))
+          in
+          (* hu ∈ [0,8]: the load address rbp - hu is the hull [rbp-8, rbp]. *)
+          let hull_addr = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Var hu) in
+          let sub_h, _ =
+            sub_of "t5_store_row_hull"
+              [ [ Def.create rbp (Bil.Var (v64 "RSP"));
+                  Def.create ha (Bil.Load (Bil.Var hmem, hka, LittleEndian, `r32));
+                  Def.create hb (Bil.Var ha);
+                  Def.create hmem (Bil.Store (Bil.Var hmem, hkb, Bil.Var hb, LittleEndian, `r32));
+                  Def.create ht (Bil.Load (Bil.Var hmem, hull_addr, LittleEndian, `r32)) ],
+                [ (1, fun tt ->
+                      mk_jmp_to tt
+                        (Bil.BinOp (Bil.EQ, Bil.Var ht, Bil.Int (Cbat_word.to_word (w32 6))))) ];
+                [], [ (0, mk_ret) ] ]
+          in
+          let k16 = key_of (-16) and k8 = key_of (-8) in
+          let wide_h = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
+          let wide_mem_h =
+            Mem.add
+              (Mem.add
+                 (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+                 ~key:k16 ~data:(Mem.Val.create wide_h LittleEndian))
+              ~key:k8 ~data:(Mem.Val.create wide_h LittleEndian)
+          in
+          let entry_h =
+            AI.add_memory
+              (AI.add_word (anchored_entry ()) ~key:hu
+                 ~data:(Ws.of_clp (Clp.interval ~width:64 (w64 0) (w64 8))))
+              ~key:hmem ~data:wide_mem_h
+          in
+          let sol_h =
+            Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+              (Program.create ~subs:[ sub_h ] ()) sub_h
+              (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_h sub_h)
+          in
+          let cfg_h =
+            Sub.to_graph sub_h |> Graphs.Tid.Node.remove Graphs.Tid.start
+            |> Graphs.Tid.Node.remove Graphs.Tid.exit
+          in
+          let rctx_h = Vsa.Test_seam.mk_rctx ~cfg:cfg_h ~abi:Hike_abi.x86_64_sysv sub_h in
+          let blk_h = List.nth (Term.enum blk_t sub_h |> Seq.to_list) 0 in
+          let entry_h = AI.add_word entry_h ~key:ht ~data:(Ws.singleton (w32 6)) in
+          let refined =
+            Vsa.Test_seam.refine_edge ~sol:sol_h ~rctx:rctx_h
+              ~seeds:[ (ht, Ws.singleton (w32 6)) ]
+              entry_h blk_h
+          in
+          (refined, ha, hb, hmem, hka, hkb)
+        in
+        (* Positive: the store at rbp-8 sits inside the hull [rbp-8, rbp]. *)
+        let refined_p, ha_p, hb_p, hmem_p, hka_p, hkb_p = hull_case ~store_off:8 in
+        let cell_p addr =
+          Result.fold
+            (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_p, addr, LittleEndian, `r32)) refined_p)
+            ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
+        in
+        check
+          "T5-2 (Store row, hull): the consuming load's set-valued address still meets the \
+           store's key cell to {6}"
+          (Ws.equal (cell_p hkb_p) (Ws.singleton (w32 6)));
+        check
+          "T5-2 (Store row, hull): the delivery reaches the store's data producers — the \
+           producing load's cell meets {6}"
+          (Ws.equal (cell_p hka_p) (Ws.singleton (w32 6)));
+        check
+          "T5-2 (Store row, hull): the narrowed word var reaches the predecessor env — the \
+           store's data var and its producing load refines to {6}"
+          (Ws.equal (AI.find_word 32 refined_p hb_p) (Ws.singleton (w32 6))
+          && Ws.equal (AI.find_word 32 refined_p ha_p) (Ws.singleton (w32 6)));
+        (* Negative: the store at rbp-16 is outside the hull [rbp-8, rbp]. *)
+        let refined_n, ha_n, hb_n, hmem_n, _hka_n, hkb_n = hull_case ~store_off:16 in
+        let cell_n addr =
+          Result.fold
+            (Vsa.Test_seam.denote_imm_exp (Bil.Load (Bil.Var hmem_n, addr, LittleEndian, `r32)) refined_n)
+            ~ok:Fun.id ~error:(fun _ -> Ws.top 32)
+        in
+        check
+          "T5-2 (Store row, hull negative): a store outside the hull is untouched — its key \
+           cell stays wide"
+          (Ws.equal (cell_n hkb_n) (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200))));
+        check
+          "T5-2 (Store row, hull negative): a store outside the hull leaves the data \
+           producers unconstrained"
+          (Ws.is_top (AI.find_word 32 refined_n hb_n)
+          && Ws.is_top (AI.find_word 32 refined_n ha_n)));
 
     (* T5-3 (the T12 ruling): a bounded runtime SP adjustment is NOT a VLA
        — no allocation event; an unbounded size is the event. *)
