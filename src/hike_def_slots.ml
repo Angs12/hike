@@ -28,13 +28,13 @@ let bool_inspect (b : bool) : Sexp.t = Sexp.Atom (string_of_bool b)
 
 (* The def is a runtime-sized SP decrement and emits a real runtime-sized
    alloca; the storage fact rides the def's value beside the kind. *)
-let def_dyn_alloc : bool D.t =
+let def_dyn_alloc_d : bool D.t =
   D.flat ~name:"hike-dyn-alloc" ~empty:false ~equal:Bool.equal
     ~inspect:bool_inspect ~get_bump:"dyn_alloc.get" ~put_bump:"dyn_alloc.put"
     ~bump
 
-let def_dyn_alloc_slot = D.slot def_dyn_alloc
-let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc d
+let def_dyn_alloc_slot = D.slot def_dyn_alloc_d
+let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc_d d
 
 (* The def's address is a rip-relative constant; the emitter re-renders it
    through the section owner. *)
@@ -46,13 +46,13 @@ let def_is_rip_relative (d : def term) : bool =
 
 (* The def computes an address value at/above the entry line; its emitted
    integer re-bases to the hike_window parameter. *)
-let def_window_value : bool D.t =
+let def_window_value_d : bool D.t =
   D.flat ~name:"hike-window-value" ~empty:false ~equal:Bool.equal
     ~inspect:bool_inspect ~get_bump:"window_value.get"
     ~put_bump:"window_value.put" ~bump
 
-let def_window_value_slot = D.slot def_window_value
-let def_is_window_value (d : def term) : bool = D.get def_window_value d
+let def_window_value_slot = D.slot def_window_value_d
+let def_is_window_value (d : def term) : bool = D.get def_window_value_d d
 
 (* The def's value is a bounded stack or VLA address, so the emitter's
    ptr discipline emits it as a pointer.  Computed pre-SSA (where the
@@ -75,13 +75,13 @@ let stamp_tids ~(tids : Tid.Set.t) ~stamp (sub : sub term) : sub term =
 let stamp_window_values ~(window_values : Tid.Set.t)
     (sub : sub term) : sub term =
   stamp_tids ~tids:window_values
-    sub ~stamp:(fun d -> D.put def_window_value true d)
+    sub ~stamp:(fun d -> D.put def_window_value_d true d)
 
 (* Stamps the dynamic-allocation fact onto the event defs. *)
 let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
     (sub : sub term) : sub term =
   stamp_tids ~tids:dynamic_alloc_tids
-    sub ~stamp:(fun d -> D.put def_dyn_alloc true d)
+    sub ~stamp:(fun d -> D.put def_dyn_alloc_d true d)
 
 let stamp_ptr_kinds ~(ptr_tids : Tid.Set.t) (sub : sub term) : sub term =
   stamp_tids ~tids:ptr_tids sub ~stamp:(fun d -> D.put def_ptr_kind_d true d)

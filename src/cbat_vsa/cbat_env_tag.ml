@@ -32,8 +32,8 @@ let () =
           "hike: env-tag conflict: two different before-state environments were stamped for one def"
     | _ -> None)
 
-let env_tag_domain : AI.t option KB.Domain.t =
-  KB.Domain.optional
+let env_tag_d : AI.t option Hike_def_slot.t =
+  Hike_def_slot.optional ~name:"hike-env-tag"
     ~inspect:(fun _ -> Sexp.Atom "hike:env-tag")
     ~join:(fun a b ->
 #ifdef VSA_DEBUG
@@ -45,23 +45,20 @@ let env_tag_domain : AI.t option KB.Domain.t =
       let () = Cbat_kb_census.bump "domain.env.equal" in
 #endif
       AI.equal a b)
-    "hike:env-tag"
-
-let env_tag_slot : (Theory.Value.cls, AI.t option) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-env-tag"
-    env_tag_domain
-
-let env_tag (d : def term) : AI.t option =
+    ~get_bump:"env_tag.get" ~put_bump:"env_tag.put"
+    ~bump:
 #ifdef VSA_DEBUG
-  let () = Cbat_kb_census.bump "env_tag.get" in
+      Cbat_kb_census.bump
+#else
+      (fun _ -> ())
 #endif
-  KB.Value.get env_tag_slot (Def.value d)
+
+let env_tag_slot = Hike_def_slot.slot env_tag_d
+
+let env_tag (d : def term) : AI.t option = Hike_def_slot.get env_tag_d d
 
 let set_env_tag (env : AI.t) (d : def term) : def term =
-#ifdef VSA_DEBUG
-  let () = Cbat_kb_census.bump "env_tag.put" in
-#endif
-  Def.with_value d (KB.Value.put env_tag_slot (Def.value d) (Some env))
+  Hike_def_slot.put env_tag_d (Some env) d
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
    completion loop, ONLY.  Consumers use the seam [denote_exp_at];

@@ -130,17 +130,7 @@ let bitcast_to_fp llvm_builder v fp_ty =
     Llvm.build_bitcast v fp_ty "" llvm_builder
   else v
 
-(* The use-site integer coercion: a pointer-typed lane (an address
-   round-tripped through memory) converts to the address integer at the
-   use, the same discipline as the emitter's other ptr-as-integer
-   coercions; integer lanes pass through. *)
-let as_int_lane ctx llvm_builder v =
-  match Llvm.classify_type (Llvm.type_of v) with
-  | Llvm.TypeKind.Integer -> v
-  | Llvm.TypeKind.Pointer ->
-    Llvm.build_ptrtoint v
-      (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits) "" llvm_builder
-  | _ -> v
+
 
 let build_fp_binop ctx llvm_builder op a b ~(w : int) =
   let fp_ty, ret_ty = fp_ty_of ctx.llvm_ctx w in
@@ -221,12 +211,12 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
     | SFLOAT ->
         (* [sitofp] converts at the operand's own LLVM type (the
            lifter's extract/cast chain built it). *)
-        let x = as_int_lane ctx llvm_builder (arg_value 0) in
+        let x = Bil2llvm_ptr.as_integer ctx llvm_builder (arg_value 0) in
         let tgt_fp_ty, tgt_lane_ty = fp_ty_of llvm_ctx res_w in
         let d = Llvm.build_sitofp x tgt_fp_ty "" llvm_builder in
         Llvm.build_bitcast d tgt_lane_ty "" llvm_builder
     | SINT ->
-        let x = as_int_lane ctx llvm_builder (arg_value 0) in
+        let x = Bil2llvm_ptr.as_integer ctx llvm_builder (arg_value 0) in
         let src_w = int_width_or in_w x in
         let src_fp_ty, _ = fp_ty_of llvm_ctx src_w in
         let _, res_lane_ty = fp_ty_of llvm_ctx res_w in

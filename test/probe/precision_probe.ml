@@ -27,6 +27,14 @@ let acc_on () : bool =
   | Some "1" -> true
   | _ -> false
 
+(* Default OFF; HIKE_VSA_DIAG_DEFS=1 dumps one DIAG_DEF line per word def:
+   its class, cardinality, extrema and rhs.  Two builds' dumps diff into
+   the per-def bucket moves a column total cannot attribute. *)
+let defs_on () : bool =
+  match Sys.getenv_opt "HIKE_VSA_DIAG_DEFS" with
+  | Some "1" -> true
+  | _ -> false
+
 let () = Printexc.record_backtrace true
 
 (* Classification buckets. *)
@@ -247,6 +255,43 @@ let diag_bottom (bname : string) (sub' : sub term) (b : blk term)
     (Var.name (Def.lhs d)) kind op1 op2;
   flush stdout
 
+(* One DIAG_DEF line: the def's value class, cardinality, extrema and
+   rhs, so two runs' dumps attribute every bucket move to a def. *)
+let diag_def (bname : string) (sub' : sub term) (b : blk term) (d : def term)
+    (st_before : AI.t) (ws : Ws.t) : unit =
+  let class_of (e : exp) : string =
+    match Vsa.Test_seam.denote_imm_exp e st_before with
+    | Error _ -> "err"
+    | Ok ws -> classify_operand ws in
+  let kind, op1, op2 =
+    match Def.rhs d with
+    | Bil.BinOp (op, x, y) -> binop_name op, class_of x, class_of y
+    | Bil.Load (_, a, _, _) -> "load", class_of a, "n/a"
+    | Bil.Store (_, a, u, _, _) -> "store", class_of a, class_of u
+    | Bil.Cast (ct, _, _) -> "cast:" ^ cast_name ct, "n/a", "n/a"
+    | Bil.UnOp (_, x) -> "unop", class_of x, "n/a"
+    | _ -> "other", "n/a", "n/a" in
+  let card =
+    if Ws.is_top ws then "top"
+    else
+      match Cbat_word.to_int (Ws.cardinality ws) with
+      | Ok k -> string_of_int k
+      | Error _ -> "big" in
+  let i64_of_word (w : Cbat_word.t) : string =
+    match Cbat_word.to_int64 w with
+    | Ok v -> Printf.sprintf "%Ld" v
+    | Error _ -> "?" in
+  let ext =
+    match Ws.min_elem ws, Ws.max_elem ws with
+    | Some lo, Some hi ->
+      Printf.sprintf "%s..%s" (i64_of_word lo) (i64_of_word hi)
+    | _ -> "n/a" in
+  Printf.printf "DIAG_DEF\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n"
+    bname (Sub.name sub') (Tid.to_string (Term.tid b))
+    (Tid.to_string (Term.tid d)) (Var.name (Def.lhs d))
+    (classify_operand ws) card ext kind op1 op2 (def_to_string d);
+  flush stdout
+
 (* One DIAG_ACC line: the access address's class, its offset extrema
    (segment-relative) and absolute extrema under the tag-meet view, and
    its offset extrema under the def's before-state (the production
@@ -325,6 +370,7 @@ let collect_stats (bname : string) (sub' : sub term)
            | Type.Imm w ->
              let ws = AI.find_word w !st (Def.lhs d) in
               (* Gate-free: every def is denoted (spec §2.1). *)
+             if defs_on () then diag_def bname sub' b d st_before ws;
              let b =
                match classify_def ws with
                | `Bottom ->

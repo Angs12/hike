@@ -39,24 +39,21 @@ let () =
 
 (* Two different origins for one def coarsen to Abs: the absolute
    world is the sound join. *)
-let def_origin_domain : Origin.t option KB.Domain.t =
-  KB.Domain.optional
+let def_origin_d : Origin.t option Hike_def_slot.t =
+  Hike_def_slot.optional ~name:"hike-def-origin"
     ~inspect:(fun _ -> Sexp.Atom "hike:def-origin")
-    ~join:(fun a b ->
-        if Origin.equal a b then Ok a else Ok Origin.Abs)
+    ~join:(fun a b -> if Origin.equal a b then Ok a else Ok Origin.Abs)
     ~equal:Origin.equal
-    "hike:def-origin"
+    ~get_bump:"" ~put_bump:"" ~bump:(fun _ -> ())
 
-let def_origin_slot : (Theory.Value.cls, Origin.t option) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-def-origin"
-    def_origin_domain
+let def_origin_slot = Hike_def_slot.slot def_origin_d
 
 let def_origin (d : def term) : Origin.t option =
-  KB.Value.get def_origin_slot (Def.value d)
+  Hike_def_slot.get def_origin_d d
 
 (* Writes the origin onto the def (the fixture seam's writer). *)
 let with_origin (o : Origin.t) (d : def term) : def term =
-  Def.with_value d (KB.Value.put def_origin_slot (Def.value d) (Some o))
+  Hike_def_slot.put def_origin_d (Some o) d
 
 (* The def's stamped origin: its value's own origin.  A VLA origin is
    routable only when the value's frame-relative offsets are inside the
@@ -99,7 +96,7 @@ let stamp_origin ~(before : AI.t) (d : def term) (after : AI.t) : def term =
           (WordSet.refine_origin ~word:(Cbat_transfer.word_bytes ()) ws)
       | Error _ -> Origin.Abs
     in
-    Def.with_value d (KB.Value.put def_origin_slot (Def.value d) (Some o))
+    Hike_def_slot.put def_origin_d (Some o) d
   | None ->
     let width =
       match Var.typ (Def.lhs d) with
@@ -108,4 +105,4 @@ let stamp_origin ~(before : AI.t) (d : def term) (after : AI.t) : def term =
     in
     let v = AI.find_word width after (Def.lhs d) in
     let o = origin_of_def_value v in
-    Def.with_value d (KB.Value.put def_origin_slot (Def.value d) (Some o))
+    Hike_def_slot.put def_origin_d (Some o) d

@@ -509,9 +509,6 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
     | _ -> None)
   | _ -> None
 
-(* Segment-relative bounds of a stack value; None when not stack.  A VLA
-   value is materialised onto the entry line through its base range. *)
-
 let rec cardinality (t : t) : word =
   match t with
   | Clp ps -> P.cardinality ps
@@ -831,11 +828,10 @@ module Piece_binop = Binop (Piece_repr)
    results churn the fixpoint -- the 4-piece cap is not associative
    under repeated joins, and in-loop values oscillate between
    incomparable capped forms (measured: five fresh fixpoint backstops on
-   du and expr).  The collapse is the piece representation's policy.
-   The P4 narrowing (pieces within a block, hull at the join/widen)
-   measured NULL on precision: the interior-exclusion class dies at
-   widen_join's per-pair hull, not here -- so the simpler proven form
-   stays. *)
+   du and expr).  The interior exclusion a piece union can hold is lost
+   here, not at the join; the widening's per-pair hull is where it is
+   lost for fixpoint values.  The collapse is the piece representation's
+   policy. *)
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
   let collapse (ps : P.t) : P.t =
     match hull_of_pieces ps with

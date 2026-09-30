@@ -265,9 +265,8 @@ let tests : unit Alcotest.test list =
           && (not (Ws.equal st (Ws.top 64)))
           && not (Ws.equal (Ws.top 64) st)));
     pin "WS-37"
-      "C5 commit A: an all-ones 64-bit mask is the identity on the stack line — the round-\
-       down image at s = 64 keeps the offsets (the old block o = -stack_base singleton was \
-       the latent unsoundness)"
+      "C5: an all-ones 64-bit mask is the identity on the stack line — at s = 64 the round-\
+       down image is the offsets themselves, origin unchanged"
       (fun () ->
         let p = Ws.stack_word (Clp.interval ~width:64 (w64 8) (w64 40)) in
         let ones = Ws.singleton (Cbat_word.ones 64) in
