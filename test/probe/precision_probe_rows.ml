@@ -30,11 +30,12 @@ let classify_shape (ws : Ws.t) : shape =
   | Some (Origin.Abs | Origin.Rip) -> `Other
   | None -> `Lost
 
-(* The probe's stack test.  A stack value is the dead-path bottom, the
-   symbolic arm (a value carrying a runtime origin), or a plain value whose
-   base-relative offsets are frame offsets — within ±max(stack_max,
-   caller_window_bytes) of the segment base.  A plain integer that merely
-   reaches the segment band's lower bound is not a stack address. *)
+(* The probe's stack test.  A stack value is a bottom (kept for the bucket
+   series), the symbolic arm (a value carrying a runtime origin), or a
+   plain value whose hull is a real (non-crossing) interval inside the
+   frame band — ±max(stack_max, caller_window_bytes) around the segment
+   base.  A bottom carries no shape ([shape_of]); a plain literal inside
+   the band carries no provenance the API exposes and is admitted. *)
 let frame_band : int64 * int64 =
   let bound = Int64.max Hike_stack_bounds.stack_max
       Hike_stack_bounds.caller_window_bytes in
@@ -43,14 +44,22 @@ let frame_band : int64 * int64 =
 let is_stack_value (ws : Ws.t) : bool =
   Ws.is_bottom ws
   || Option.is_some (Ws.origin ws)
-  || (let lo, hi = frame_band in
-      match Ws.min_elem ws, Ws.max_elem ws with
-      | Some mn, Some mx ->
-        (match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
-         | Ok mni, Ok mxi ->
-           Int64.compare mni lo >= 0 && Int64.compare mxi hi <= 0
-         | _ -> false)
-      | _ -> false)
+  || (not (Ws.is_infinite ws)
+      && (let lo, hi = frame_band in
+          match Ws.min_elem ws, Ws.max_elem ws with
+          | Some mn, Some mx ->
+            (match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
+             | Ok mni, Ok mxi ->
+               (* A hull crossing the sign boundary reads [max] negative. *)
+               Int64.compare mni mxi <= 0
+               && Int64.compare mni lo >= 0 && Int64.compare mxi hi <= 0
+             | _ -> false)
+          | _ -> false))
+
+(* The value's stack shape; [None] for the dead-path bottom, which sits in
+   the population without an address shape. *)
+let shape_of (ws : Ws.t) : shape option =
+  if Ws.is_bottom ws then None else Some (classify_shape ws)
 
 (* Per-sub statistics record. *)
 
@@ -135,8 +144,8 @@ module Sub_stats = struct
     | `Lost -> s.defstk_sh_lost <- s.defstk_sh_lost + 1
 
   (* Count a word def into the series; a stack-flagged def also counts its
-     shape. *)
-  let add_def (s : t) ~(stack : bool) ~(shape : shape) (b : def_bucket) : unit =
+     shape (the dead-path bottom carries none). *)
+  let add_def (s : t) ~(stack : bool) ~(shape : shape option) (b : def_bucket) : unit =
     (match b with
      | `Exact -> s.def_exact <- s.def_exact + 1
      | `B2_3 -> s.def_b2_3 <- s.def_b2_3 + 1
@@ -146,9 +155,9 @@ module Sub_stats = struct
      | `Top -> s.def_top <- s.def_top + 1
      | `Bottom_live -> s.def_bottom_live <- s.def_bottom_live + 1
      | `Bottom_dead -> s.def_bottom_dead <- s.def_bottom_dead + 1);
-    if stack then add_def_shape s shape
+    if stack then Option.iter (add_def_shape s) shape
 
-  let add_ld (s : t) ~(stack : bool) ~(shape : shape) (b : ld_bucket) : unit =
+  let add_ld (s : t) ~(stack : bool) ~(shape : shape option) (b : ld_bucket) : unit =
     (match b with
      | `Exact ->
        s.ld_exact <- s.ld_exact + 1;
@@ -165,7 +174,7 @@ module Sub_stats = struct
      | `Bottom_dead ->
        s.ld_bottom_dead <- s.ld_bottom_dead + 1;
        if stack then s.ldstk_bottom_dead <- s.ldstk_bottom_dead + 1);
-    if stack then add_ld_shape s shape
+    if stack then Option.iter (add_ld_shape s) shape
 
   let add_window (s : t) (b : win_bucket) : unit =
     match b with

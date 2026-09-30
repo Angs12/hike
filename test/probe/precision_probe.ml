@@ -228,7 +228,7 @@ let collect_stats (bname : string) (sub' : sub term)
               (* Gate-free: every def is denoted (spec §2.1). *)
              if defs_on () then diag_def bname sub' b d st_before ws;
              let stack = Rows.is_stack_value ws in
-             let shape = Rows.classify_shape ws in
+             let shape = Rows.shape_of ws in
              let b =
                match classify_def ws with
                | `Bottom ->
@@ -267,7 +267,7 @@ let collect_stats (bname : string) (sub' : sub term)
                 if acc_on () then diag_acc bname sub' b d stack ws a st_before;
                 (* Bottom split uses [input_bottom], as the def series. *)
                 let lb = classify_ld ws input_bottom in
-                Sub_stats.add_ld s ~stack ~shape:(Rows.classify_shape ws) lb;
+                Sub_stats.add_ld s ~stack ~shape:(Rows.shape_of ws) lb;
                 (* Window buckets: stack-flagged finite non-top only. *)
                 if stack && (lb = `Exact || lb = `Bounded) then begin
                   let wb, win = Rows.window_metric_of ws in

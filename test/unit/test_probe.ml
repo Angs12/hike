@@ -31,18 +31,22 @@ let tests : unit Alcotest.test list =
           (Rows.classify_shape (Ws.set_origin Ws.Origin.Rip base) = `Other));
 
     pin "PROBE-02"
-      "the five access shape counters sum to the stack-flagged access \
-       population"
+      "the five access shape counters sum to the non-bottom stack-flagged \
+       access population"
       (fun () ->
         let s = Rows.Sub_stats.create "add" in
         let shapes : Rows.shape list =
           [ `Stack; `Vla; `Window; `Other; `Lost ]
         in
         List.iter
-          (fun sh -> Rows.Sub_stats.add_ld s ~stack:true ~shape:sh `Bounded)
+          (fun sh ->
+             Rows.Sub_stats.add_ld s ~stack:true ~shape:(Some sh) `Bounded)
           shapes;
+        (* Both bottom buckets sit in the population but count no shape. *)
+        Rows.Sub_stats.add_ld s ~stack:true ~shape:None `Bottom_dead;
+        Rows.Sub_stats.add_ld s ~stack:true ~shape:None `Bottom_live;
         (* A non-stack access counts no shape. *)
-        Rows.Sub_stats.add_ld s ~stack:false ~shape:`Lost `Exact;
+        Rows.Sub_stats.add_ld s ~stack:false ~shape:(Some `Lost) `Exact;
         let sum =
           s.Rows.Sub_stats.ldstk_sh_stack + s.Rows.Sub_stats.ldstk_sh_vla
           + s.Rows.Sub_stats.ldstk_sh_window + s.Rows.Sub_stats.ldstk_sh_other
@@ -53,26 +57,38 @@ let tests : unit Alcotest.test list =
           + s.Rows.Sub_stats.ldstk_top + s.Rows.Sub_stats.ldstk_bottom_live
           + s.Rows.Sub_stats.ldstk_bottom_dead
         in
-        check "PROBE-02" (sum = 5 && pop = 5 && sum = pop));
+        let non_bottom =
+          pop - s.Rows.Sub_stats.ldstk_bottom_dead
+          - s.Rows.Sub_stats.ldstk_bottom_live
+        in
+        check "PROBE-02"
+          (sum = 5 && pop = 7 && non_bottom = 5 && sum = non_bottom));
 
     pin "PROBE-03"
-      "the five def shape counters sum to the stack-flagged def population"
+      "the five def shape counters sum to the shape-carrying stack-flagged \
+       def population"
       (fun () ->
         let s = Rows.Sub_stats.create "add" in
         let shapes : Rows.shape list =
           [ `Stack; `Vla; `Window; `Other; `Lost ]
         in
         List.iter
-          (fun sh -> Rows.Sub_stats.add_def s ~stack:true ~shape:sh `Exact)
+          (fun sh ->
+             Rows.Sub_stats.add_def s ~stack:true ~shape:(Some sh) `Exact)
           shapes;
-        (* A non-stack def counts no shape. *)
-        Rows.Sub_stats.add_def s ~stack:false ~shape:`Stack `Top;
-        let sum =
+        let sum () =
           s.Rows.Sub_stats.defstk_sh_stack + s.Rows.Sub_stats.defstk_sh_vla
           + s.Rows.Sub_stats.defstk_sh_window + s.Rows.Sub_stats.defstk_sh_other
           + s.Rows.Sub_stats.defstk_sh_lost
         in
-        check "PROBE-03" (sum = 5));
+        let before = sum () in
+        (* A non-stack def and both bottom buckets count no shape. *)
+        Rows.Sub_stats.add_def s ~stack:false ~shape:(Some `Stack) `Top;
+        Rows.Sub_stats.add_def s ~stack:true ~shape:None `Bottom_dead;
+        Rows.Sub_stats.add_def s ~stack:true ~shape:None `Bottom_live;
+        check "PROBE-03"
+          (before = 5 && sum () = 5 && s.Rows.Sub_stats.def_bottom_dead = 1
+           && s.Rows.Sub_stats.def_bottom_live = 1));
 
     pin "PROBE-04"
       "the probe's stack test keeps the symbolic arm and the frame offsets \
@@ -93,8 +109,40 @@ let tests : unit Alcotest.test list =
           (Rows.is_stack_value (Ws.stack_word_i64 0L));
         check "PROBE-04 (a frame offset is stack)"
           (Rows.is_stack_value entry && Rows.is_stack_value below);
-        check "PROBE-04 (bottom is stack)"
-          (Rows.is_stack_value (Ws.bottom 64)));
+        check "PROBE-04 (the dead-path bottom is stack for the buckets)"
+          (Rows.is_stack_value (Ws.bottom 64));
+        check "PROBE-04 (the dead-path bottom carries no shape)"
+          (Rows.shape_of (Ws.bottom 64) = None));
+
+    pin "PROBE-05"
+      "a plain hull crossing the sign boundary is not a stack value"
+      (fun () ->
+        (* A pointer difference: min 2^63 - 8192, max 2^64 - 1. *)
+        let base = Cbat_word.of_int64 ~width:64 0x7FFFFFFFFFFFE000L in
+        let cardn = Cbat_word.of_int64 ~width:64 0x8000000000002000L in
+        let crossed =
+          Ws.of_clp
+            (Ws.Clp.create ~width:64 ~step:(Cbat_word.one 64) ~cardn base) in
+        check "PROBE-05 (the hull reads its max negative)"
+          (match Ws.min_elem crossed, Ws.max_elem crossed with
+           | Some mn, Some mx ->
+             (match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
+              | Ok mni, Ok mxi -> Int64.compare mni mxi > 0
+              | _ -> false)
+           | _ -> false);
+        check "PROBE-05 (the probe rejects the crossing hull)"
+          (not (Rows.is_stack_value crossed)));
+
+    pin "PROBE-06"
+      "a plain literal inside the frame band is admitted: the API exposes no \
+       provenance for a plain value"
+      (fun () ->
+        let literal =
+          Ws.singleton (Cbat_word.of_int64 ~width:64 0x3FFFFFFFFFFFFFFFL) in
+        check "PROBE-06 (the literal is inside the frame band)"
+          (Rows.is_stack_value literal);
+        check "PROBE-06 (and reads as a lost shape)"
+          (Rows.shape_of literal = Some `Lost));
   ]
 
 let () = run "probe" tests
