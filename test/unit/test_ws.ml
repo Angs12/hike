@@ -282,7 +282,29 @@ let tests : unit Alcotest.test list =
               | _ -> false)
            | None -> false);
         check "WS-37 (the same origin: the result stays stack-symbolic)"
-          (Ws.origin r = Ws.origin p))
+          (Ws.origin r = Ws.origin p));
+
+    pin "WS-38"
+      "a relative value and its plain in-band twin keep the origin through \
+       the union and the widen: the cell stays stack-symbolic"
+      (fun () ->
+        let rel = Ws.stack_word_i64 (-200L) in
+        let plain =
+          Ws.singleton (q64 (Stdlib.Int64.add Ws.stack_base (-200L)))
+        in
+        let keeps_origin (v : Ws.t) =
+          Option.equal Ws.Origin.equal (Ws.origin v) (Some Ws.Origin.Stack)
+          && (match Ws.stack_offsets v with
+              | Some offs ->
+                (match Clp.min_elem offs, Clp.max_elem offs with
+                 | Some lo, Some hi ->
+                   Cbat_word.equal lo (q64 (-200L))
+                   && Cbat_word.equal hi (q64 (-200L))
+                 | _ -> false)
+              | None -> false)
+        in
+        check "WS-38 (union)" (keeps_origin (Ws.union rel plain));
+        check "WS-38 (widen_join)" (keeps_origin (Ws.widen_join rel plain)))
   ]
 
 let () = run "ws" tests

@@ -1102,6 +1102,8 @@ let rel_table (op : binop) (o1 : Origin.t) (o2 : Origin.t) :
       if Origin.equal o1 o2 then Wrap o1
       else if cross_line then Wrap Origin.Stack
       else Materialise
+    else if rel o1 then Wrap o1
+    else if rel o2 then Wrap o2
     else Materialise
   | Meet ->
     if rel o1 && rel o2 then
@@ -1174,6 +1176,19 @@ let plain_offsets (p : t) : P.t option =
      | [] -> Some (P.bottom 64)
      | _ -> Some (pieces_of_words ~width:64 ws))
   | _ -> None
+
+
+(* The plain side's offsets in a concrete-base origin's frame: an in-band
+   set is the same address set re-labelled, so the origin survives a
+   union or widen.  An out-of-band or circular set names no offset line,
+   and a VLA frame's base is runtime, so nothing translates. *)
+let frame_offsets (o : Origin.t) (plain : t) : P.t option =
+  match o with
+  | Origin.Vla _ -> None
+  | _ -> (
+      match stack_extrema plain with
+      | Some _ -> plain_offsets plain
+      | None -> None)
 
 
 (* The singleton word of a plain operand, if it is one. *)
@@ -1370,6 +1385,15 @@ let rel_abs (op : binop) (t1 : t) (t2 : t) : t =
       | Rel (o, offs), plain -> logand_rel o offs plain
       | plain, Rel (o, offs) -> logand_rel o offs plain
       | _ -> top (Stdlib.max (bitwidth t1) (bitwidth t2)))
+  | Union -> (
+      (* The relative side keeps its origin when the plain twin is a
+         frame-relative set; the two sides' offsets union. *)
+      match t1, t2 with
+      | Rel (o, a), plain | plain, Rel (o, a) -> (
+          match frame_offsets o plain with
+          | Some offs -> canonical [ Rel (o, P.union a offs) ]
+          | None -> materialise2 op t1 t2)
+      | _ -> materialise2 op t1 t2)
   | _ -> lift_binop op t1 t2
 
 (* THE general binary operator: the operands classify by pattern (a
@@ -1587,21 +1611,34 @@ let rec precedes t1 t2 : bool =
 (* Widening lives in the offsets, HULLED to one progression: the
    positional piece widen lets the offsets' hull wiggle while pieces
    churn, and the memory keys derived from the hulls never stabilize
-   (measured: four fresh fixpoint backstops on expr's regex subs).
-   Mixed pairs degrade via the plain hull. *)
-(* Widen the two hulled progressions, keeping the origin: the offsets
-   widen for two symbolic pieces, the plain hulls otherwise. *)
+   (measured: four fresh fixpoint backstops on expr's regex subs). *)
+(* Widen the two hulled progressions, keeping the origin: two symbolic
+   pieces, or a symbolic piece and a frame-relative plain twin, widen in
+   the offsets; the plain hulls otherwise. *)
 let hull_join (f : Clp.t -> Clp.t -> Clp.t) t1 t2 : t =
+  let hull ps =
+    match hull_of_pieces ps with
+    | Some p -> p
+    | None -> Clp.bottom 64 in
+  let plain_hull () = Clp (P.of_progression (f (as_clp t1) (as_clp t2))) in
+  let rel_plain (o : Origin.t) (a : P.t) (plain : t) : t option =
+    match frame_offsets o plain with
+    | Some offs -> Some (Rel (o, P.of_progression (f (hull a) (hull offs))))
+    | None -> None
+  in
   canonical
     [ (match t1, t2 with
       | (Rel (o1, a), Rel (o2, b)) when Origin.equal o1 o2 ->
-        let hull ps =
-          match hull_of_pieces ps with
-          | Some p -> p
-          | None -> Clp.bottom 64 in
         Rel (o1, P.of_progression (f (hull a) (hull b)))
-      | _ ->
-        Clp (P.of_progression (f (as_clp t1) (as_clp t2)))) ]
+      | Rel (o, a), (Clp _ | FinSet _ as plain) -> (
+          match rel_plain o a plain with
+          | Some r -> r
+          | None -> plain_hull ())
+      | (Clp _ | FinSet _ as plain), Rel (o, a) -> (
+          match rel_plain o a plain with
+          | Some r -> r
+          | None -> plain_hull ())
+      | _ -> plain_hull ()) ]
 
 let widen_join t1 t2 : t = hull_join Clp.widen_join t1 t2
 let extrapolate_steps ~steps t1 t2 : t =
