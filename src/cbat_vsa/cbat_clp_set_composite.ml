@@ -511,17 +511,6 @@ let vla_entry_hull (tid : Tid.t) (offs : P.t) : (int64 * int64) option =
 
 (* Segment-relative bounds of a stack value; None when not stack.  A VLA
    value is materialised onto the entry line through its base range. *)
-let stack_bounds (t : t) : (int64 * int64) option =
-  match t with
-  | Rel (Origin.Vla tid, offs) -> vla_entry_hull tid offs
-  | Rel (_, offs) ->
-    Option.bind (offsets_signed_extrema offs) ~f:(fun (lo, hi) ->
-        match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
-        | Ok loi, Ok hii -> Some (loi, hii)
-        | _ -> None)
-  | _ ->
-    Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
-        relative_bounds lo hi)
 
 let rec cardinality (t : t) : word =
   match t with
@@ -587,6 +576,14 @@ let offset_extrema (t : t) : (Cbat_word.t * Cbat_word.t) option =
     Option.bind (stack_extrema t) ~f:(fun (lo, hi) ->
         Option.map (relative_bounds lo hi) ~f:(fun (rlo, rhi) ->
             (w64_of_i64 rlo, w64_of_i64 rhi)))
+
+let stack_bounds (t : t) : (int64 * int64) option =
+  (* The same three-arm hull offset_extrema answers, at int64s. *)
+  Option.bind (offset_extrema t) ~f:(fun (lo, hi) ->
+      match Cbat_word.to_int64 lo, Cbat_word.to_int64 hi with
+      | Ok loi, Ok hii -> Some (loi, hii)
+      | _ -> None)
+
 
 (* Signed extrema: the projection is signed-positive, so its signed
    and unsigned extrema agree; a set spanning the sign boundary has
