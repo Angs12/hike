@@ -1,6 +1,6 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-85`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-86`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
@@ -84,3 +84,4 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-83 | S21 the AND singleton mask keeps the mask's bits from the constraint and frees the rest (hull `[0x30, 0xFFFFFF3F]`). | Make the general-mask AND arm identity. | BK-83 (`0x30 ∈` false). |
 | BK-84 | the low cast of a zero-extended narrow value: `low:32[pad:64[x]]` collapses to `x`, so the constraint `[0,0xF]` narrows `x` to `[0,0xF]`, not the truncation hull. | Drop the widening arm so `low_cast_constraint` always takes the wide hull. | BK-84 (`x` stays `[0,2^32-1]`; `max_elem` is not `0xF`). |
 | BK-85 | the var-var signed guard reads its bound's payload: `SLT(low:32[x], y)` with `y = {4}` (a signed extremum) takes the unsigned window `[0,3]` when `x`'s low half is provably non-negative, so the low-cast pre-image drops the value whose low half is `0x10`. | Compare `c` with `half` through its signed flag (`Cbat_word.(>=) c half`) in `evidence_constraint`'s SLT/SLE arms. | BK-85 (`out ∈ x`; the wrapped reading's pre-image is top). |
+| BK-86 | the bounded-constraint seeding rule: a guard whose operand the analysis already satisfies is still seeded (`cond_seeds` seeds every bounded free var of the cond), and the edge refinement runs (`refine_edge_inline` no longer bails on an unchanged env), so the flag-indirected loop's body-IN cell at RBP-8 stays bounded. | Restore `cond_seeds`'s strict-narrowing test (`strictly_precedes after before`) and the `AI.equal env env_in` early return in `refine_edge_inline`. | regression pin: no red demonstrated — the fixture's cell is bounded under the pre-change rule too. |

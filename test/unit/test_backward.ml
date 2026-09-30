@@ -1251,6 +1251,23 @@ let tests : unit Alcotest.test list =
         in
         let r = AI.find_word 64 env' (Var.base x) in
         check "BK-85" (not (Ws.elem out r)));
+
+    pin "BK-86"
+      "a guard the operand already satisfies is still seeded — the \
+       flag-indirected loop head (CF := t < 100; if CF goto body) has CF = {1} \
+       at its post state, so the edge constraint is the identity; the bounded \
+       flag is seeded and the body's cell at RBP-8 stays bounded (⊆ [0,99])"
+      (fun () ->
+        let m = memv "l3c2_m" in
+        let sub1, body1 =
+          mk_l3c2_loop ~prologue:true ~seed:(Some (w32 0)) ~cmp:Bil.SLT
+            ~c:(w32 100) ~body_op:Bil.PLUS ~body_k:(w32 1) ~flag:true
+        in
+        let sol1 = run_anchored sub1 in
+        let cell1 =
+          cell_at m (v64 "RBP") (iter_state_of sub1 sol1 body1)
+        in
+        check "BK-86" (bounded_above cell1 (w32 99)));
   ]
 
 let () = run "backward" tests

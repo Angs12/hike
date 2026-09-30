@@ -1281,16 +1281,18 @@ let walk ~(locus : locus)
   List.iter prefixed ~f:walk_word_def;
   locus.carry st !env_out
 
-(* The walk's seeds: the cond's OWN narrowings — the strict per-var
-   diff of the constrained env against the pre-constrain state. *)
-let cond_seeds ~(base : AI.t) (env : AI.t) (cond : exp) : live_map =
+(* The walk's seeds: the cond's OWN constraints — each free var's
+   bounded constrained value, delivered to its producer.  A guard the
+   operand already satisfies still tells the producer what it is bounded
+   by, so the walk delivers the bound rather than stopping. *)
+let cond_seeds ~(env : AI.t) (cond : exp) : live_map =
   Core.Set.fold (Exp.free_vars cond) ~init:Var.Map.empty ~f:(fun acc v ->
       match Var.typ v with
       | Type.Imm w ->
-        let before = AI.find_word w base v in
         let after = AI.find_word w env v in
         if (not (WordSet.is_bottom after))
-           && strictly_precedes after before
+           && (not (WordSet.is_top after))
+           && not (WordSet.is_infinite after)
         then Core.Map.set acc ~key:(Var.base v) ~data:after
         else acc
       | _ -> acc)
@@ -1323,7 +1325,7 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
      producers so the empty meets land on the counters. *)
   let constrained = constrain_edge ~env ~landmarks disabled in
   if not (AI.equal constrained AI.bottom) then begin
-    let seeds = cond_seeds ~base:env constrained disabled in
+    let seeds = cond_seeds ~env:constrained disabled in
     (* An empty leaf meet leaves the env unchanged: re-derive the
        constraint as the raw seed of its var. *)
     let raw_seeds =
@@ -1340,6 +1342,7 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
   end
 
 let refine_edge_inline
+    ~(entry : AI.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(discarded : bool)
     (b : blk term) (env : AI.t) (acc_cond : exp)
@@ -1348,8 +1351,10 @@ let refine_edge_inline
   let env = constrain_edge ~env ~landmarks:rctx.rc_landmarks acc_cond in
   (* No constraint derived: nothing to deliver. *)
   if discarded then env_in
-  else if AI.equal env env_in || AI.equal env AI.bottom then env
+  else if AI.equal env AI.bottom then env
   else
-    let seeds = cond_seeds ~base:env_in env acc_cond in
-    Stages.time `Walk (fun () ->
-        refine_edge ~entry:env_in ~rctx ~seeds env b)
+    let seeds = cond_seeds ~env acc_cond in
+    if Core.Map.is_empty seeds then env
+    else
+      Stages.time `Walk (fun () ->
+          refine_edge ~entry ~rctx ~seeds env b)

@@ -54,7 +54,7 @@ let denote_jump
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
     ~(rctx : Cbat_runctx.refine_ctx)
-    (b : blk term)  (env : AI.t) ~(target : tid)
+    (b : blk term)  (env : AI.t) ~(entry : AI.t) ~(target : tid)
     : AI.t =
   (* The backward refinement's entry state IS the source block's IN
      state — the env this jump transfers. *)
@@ -80,7 +80,7 @@ let denote_jump
       match edge_cond with
       | Some acc_cond ->
         Cbat_backward.refine_edge_inline
-          ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
+          ~entry ~rctx ~discarded:(walk_discards ~target rel) b env acc_cond
       | None -> env in
 
     let call_site_transfer ~(summary : Int.Set.t option) ~(pushed : bool) =
@@ -169,6 +169,6 @@ let denote_block
      fun ~target ->
        denote_jump ~preserved ~written ~resolved ~edge_conds ~disabled
          ~rctx
-         b postcond ~target
+         b postcond ~entry:env ~target
    | None -> fun ~target ->
        invalid_arg "hike: source tid does not represent block"
