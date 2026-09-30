@@ -150,7 +150,7 @@ let audit_sub (sub : sub term) : unit =
    fixpoint report and skip. *)
 let wbig_main (path : string) : unit =
   let proj = load_project path in
-  let prog = Project.program proj in
+  let prog = production_input proj in
   let total = ref 0 in
   let skipped = ref 0 in
   all_subs prog
@@ -207,7 +207,7 @@ let () =
        (* The address width follows the loaded target ABI. *)
        let target = Project.target proj in
          Vsa.set_addr_bits (Hike.Abi.addr_size_bits target);
-       let prog = Project.program proj in
+       let prog = production_input proj in
        (if String.equal subname "ALL" then
           Term.enum sub_t prog |> Seq.iter ~f:(fun sub -> audit_sub sub)
         else

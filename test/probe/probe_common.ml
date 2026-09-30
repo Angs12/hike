@@ -75,6 +75,17 @@ type ws_binary_error =
   | Load_error of Core.Error.t
   | Run_error of exn
 
+(* The production input: the passes hike runs before the VSA, in the
+   chain's order (src/hike.ml).  The probes measure the analysis as
+   production runs it, never the raw lift. *)
+let production_input (proj : Project.t) : program term =
+  let target = Project.target proj in
+  Project.program proj
+  |> Term.map sub_t ~f:(Hike.Jump.compile_sub target)
+  |> Hike.Split_mem.normalize
+  |> Hike.Coerce.coerce_program
+  |> Hike.Fp.run_program
+
 (* Load a binary and apply [run_sub] to each sub in program order. *)
 let ws_run_binary (path : string) (run_sub : sub term -> 'a) :
     ('a list, ws_binary_error) result =
@@ -82,7 +93,7 @@ let ws_run_binary (path : string) (run_sub : sub term -> 'a) :
     match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
     | Error e -> Error (Load_error e)
     | Ok proj ->
-      let subs = Term.enum sub_t (Project.program proj) |> Seq.to_list in
+      let subs = Term.enum sub_t (production_input proj) |> Seq.to_list in
       Ok (List.map run_sub subs)
   with e -> Error (Run_error e)
 

@@ -1,7 +1,8 @@
 (* Precision measurement driver: per-sub fixpoint, TSV precision buckets + BIN rollup.
    Usage: dune exec test/probe/precision_probe.exe -- <binary> [<binary> ...]
    Gate-free: every def is denoted; entry is [Vsa.init_sol sub] (AI.top).
-   Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w (see [row_of]).
+   Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w, 5 ldstk_sh,
+   5 defstk_sh (see [row_of]).
    L2a diag mode (HIKE_VSA_DIAG_BOTTOM=1) adds DIAG/DIAG_SUM lines; OFF output is plain. *)
 
 open Bap.Std
@@ -37,106 +38,8 @@ let defs_on () : bool =
 
 let () = Printexc.record_backtrace true
 
-(* Classification buckets. *)
-
-(* Bottom bucket split by the block's entry state. *)
-type def_bucket =
-  [ `Exact | `B2_3 | `B4_8 | `B9_64 | `B65p | `Top
-  | `Bottom_live | `Bottom_dead ]
-
-(* Bottom bucket split by the block's input state (L1). *)
-type ld_bucket =
-  [ `Exact | `Bounded | `Top | `Bottom_live | `Bottom_dead ]
-
-(* Window buckets over stack-flagged finite non-top addresses. *)
-type win_bucket = [ `W_b64 | `W_4k | `W_2m | `W_big ]
-
-(* Per-sub statistics record. *)
-
-module Sub_stats = struct
-  type t = {
-    sname : string;
-    mutable sub_ms : int;
-    (* all-defs series (8 buckets) *)
-    mutable def_exact : int;
-    mutable def_b2_3 : int;
-    mutable def_b4_8 : int;
-    mutable def_b9_64 : int;
-    mutable def_b65p : int;
-    mutable def_top : int;
-    mutable def_bottom_live : int;
-    mutable def_bottom_dead : int;
-    (* tagged-defs-only series (8 buckets + count) *)
-    (* load/store address series (6) *)
-    mutable ld_exact : int;
-    mutable ld_bounded : int;
-    mutable ld_top : int;
-    mutable ld_bottom_live : int;
-    mutable ld_bottom_dead : int;
-    mutable ld_denote_err : int;
-    (* stack-flagged address subset (5) *)
-    mutable ldstk_exact : int;
-    mutable ldstk_bounded : int;
-    mutable ldstk_top : int;
-    mutable ldstk_bottom_live : int;
-    mutable ldstk_bottom_dead : int;
-    (* window-size buckets (5) *)
-    mutable ldstk_w_b64 : int;
-    mutable ldstk_w_4k : int;
-    mutable ldstk_w_2m : int;
-    mutable ldstk_w_big : int;
-    mutable ldstk_w_max : int64;
-  }
-
-  let create (name : string) : t =
-    { sname = name; sub_ms = 0;
-      def_exact = 0; def_b2_3 = 0; def_b4_8 = 0; def_b9_64 = 0;
-      def_b65p = 0; def_top = 0; def_bottom_live = 0;
-      def_bottom_dead = 0;
-      ld_exact = 0; ld_bounded = 0; ld_top = 0; ld_bottom_live = 0;
-      ld_bottom_dead = 0; ld_denote_err = 0;
-      ldstk_exact = 0; ldstk_bounded = 0; ldstk_top = 0;
-      ldstk_bottom_live = 0; ldstk_bottom_dead = 0;
-      ldstk_w_b64 = 0; ldstk_w_4k = 0; ldstk_w_2m = 0; ldstk_w_big = 0;
-      ldstk_w_max = 0L }
-
-  (* Count a word def into the series. *)
-  let add_def (s : t) (b : def_bucket) : unit =
-    match b with
-    | `Exact -> s.def_exact <- s.def_exact + 1
-    | `B2_3 -> s.def_b2_3 <- s.def_b2_3 + 1
-    | `B4_8 -> s.def_b4_8 <- s.def_b4_8 + 1
-    | `B9_64 -> s.def_b9_64 <- s.def_b9_64 + 1
-    | `B65p -> s.def_b65p <- s.def_b65p + 1
-    | `Top -> s.def_top <- s.def_top + 1
-    | `Bottom_live -> s.def_bottom_live <- s.def_bottom_live + 1
-    | `Bottom_dead -> s.def_bottom_dead <- s.def_bottom_dead + 1
-
-  let add_ld (s : t) (stack : bool) (b : ld_bucket) : unit =
-    match b with
-    | `Exact ->
-      s.ld_exact <- s.ld_exact + 1;
-      if stack then s.ldstk_exact <- s.ldstk_exact + 1
-    | `Bounded ->
-      s.ld_bounded <- s.ld_bounded + 1;
-      if stack then s.ldstk_bounded <- s.ldstk_bounded + 1
-    | `Top ->
-      s.ld_top <- s.ld_top + 1;
-      if stack then s.ldstk_top <- s.ldstk_top + 1
-    | `Bottom_live ->
-      s.ld_bottom_live <- s.ld_bottom_live + 1;
-      if stack then s.ldstk_bottom_live <- s.ldstk_bottom_live + 1
-    | `Bottom_dead ->
-      s.ld_bottom_dead <- s.ld_bottom_dead + 1;
-      if stack then s.ldstk_bottom_dead <- s.ldstk_bottom_dead + 1
-
-  let add_window (s : t) (b : win_bucket) : unit =
-    match b with
-    | `W_b64 -> s.ldstk_w_b64 <- s.ldstk_w_b64 + 1
-    | `W_4k -> s.ldstk_w_4k <- s.ldstk_w_4k + 1
-    | `W_2m -> s.ldstk_w_2m <- s.ldstk_w_2m + 1
-    | `W_big -> s.ldstk_w_big <- s.ldstk_w_big + 1
-end
+module Rows = Precision_probe_rows
+module Sub_stats = Rows.Sub_stats
 
 type outcome =
   | Ok of Sub_stats.t
@@ -144,37 +47,9 @@ type outcome =
 
 (* Classification. *)
 
-(* TOP/BOTTOM first; cardn buckets by size; unconvertible is b65p. *)
-let classify_def (ws : Ws.t) :
-    [ `Exact | `B2_3 | `B4_8 | `B9_64 | `B65p | `Top | `Bottom ] =
-  if Ws.is_top ws then `Top
-  else if Ws.is_bottom ws then `Bottom
-  else
-    match Probe_common.cardn_bucket_of_ws ws with
-    | Some b -> b
-    | None -> `B65p
-
-(* Bottom first; exact/bounded/top/split-bottom. *)
-let classify_ld (ws : Ws.t) (input_bottom : bool) : ld_bucket =
-  if Ws.is_bottom ws then
-    (if input_bottom then `Bottom_dead else `Bottom_live)
-  else if Ws.is_top ws then `Top
-  else
-    match Cbat_word.to_int (Ws.cardinality ws) with
-    | Ok 1 -> `Exact
-    | _ -> `Bounded
-
-(* Operand class: empty/exact/fin:k/big/top. *)
-let classify_operand (ws : Ws.t) : string =
-  if Ws.is_top ws then "top"
-  else if Ws.is_bottom ws then "empty"
-  else
-    match Cbat_word.to_int (Ws.cardinality ws) with
-    | Error _ -> "big"
-    | Ok 0 -> "empty"
-    | Ok 1 -> "exact"
-    | Ok k when k <= 64 -> Printf.sprintf "fin:%d" k
-    | Ok _ -> "big"
+let classify_def = Rows.classify_def
+let classify_ld = Rows.classify_ld
+let classify_operand = Rows.classify_operand
 
 (* Bil binop constructor name. *)
 let binop_name (op : Bil.binop) : string =
@@ -206,25 +81,6 @@ let cast_name (ct : Bil.cast) : string =
   | Bil.SIGNED -> "SIGNED"
   | Bil.HIGH -> "HIGH"
   | Bil.LOW -> "LOW"
-
-(* Signed-span window bucket + int64 value for w_max. *)
-let window_metric_of (ws : Ws.t) : win_bucket * int64 option =
-  if Ws.bitwidth ws > 64 then (`W_big, None)
-  else
-    match Ws.min_elem_signed ws, Ws.max_elem_signed ws with
-    | Some mn, Some mx ->
-      let w = Ws.bitwidth ws in
-      let win = Cbat_word.add (Cbat_word.sub mx mn) (Cbat_word.one w) in
-      (match Cbat_word.to_int64 win with
-       | Ok v when v < 0L -> (`W_big, Some Int64.max_int)
-       | Ok 0L -> (`W_big, Some Int64.max_int)
-       | Ok v ->
-         (if v <= 64L then `W_b64
-          else if v <= 4096L then `W_4k
-          else if v <= 1048576L then `W_2m
-          else `W_big), Some v
-       | Error _ -> (`W_big, Some Int64.max_int))
-    | _ -> (`W_big, None)
 
 (* Per-sub measurement. *)
 
@@ -371,6 +227,8 @@ let collect_stats (bname : string) (sub' : sub term)
              let ws = AI.find_word w !st (Def.lhs d) in
               (* Gate-free: every def is denoted (spec §2.1). *)
              if defs_on () then diag_def bname sub' b d st_before ws;
+             let stack = Ws.is_bottom ws || Ws.in_stack_segment ws in
+             let shape = Rows.classify_shape ws in
              let b =
                match classify_def ws with
                | `Bottom ->
@@ -394,7 +252,7 @@ let collect_stats (bname : string) (sub' : sub term)
                | `B65p -> `B65p
                | `Top -> `Top
              in
-             Sub_stats.add_def s b
+             Sub_stats.add_def s ~stack ~shape b
            | Type.Mem _ | Type.Unk -> ());
           (* Address metric in the PRE-def state. *)
           (match addr_exp_of_rhs (Def.rhs d) with
@@ -409,10 +267,10 @@ let collect_stats (bname : string) (sub' : sub term)
                 if acc_on () then diag_acc bname sub' b d stack ws a st_before;
                 (* Bottom split uses [input_bottom], as the def series. *)
                 let lb = classify_ld ws input_bottom in
-                Sub_stats.add_ld s stack lb;
+                Sub_stats.add_ld s ~stack ~shape:(Rows.classify_shape ws) lb;
                 (* Window buckets: stack-flagged finite non-top only. *)
                 if stack && (lb = `Exact || lb = `Bounded) then begin
-                  let wb, win = window_metric_of ws in
+                  let wb, win = Rows.window_metric_of ws in
                   Sub_stats.add_window s wb;
                   match win with
                   | Some v ->
@@ -466,54 +324,21 @@ let row_of (s : Sub_stats.t) : string list =
     string_of_int s.Sub_stats.ldstk_w_4k;
     string_of_int s.Sub_stats.ldstk_w_2m;
     string_of_int s.Sub_stats.ldstk_w_big;
-    Int64.to_string s.Sub_stats.ldstk_w_max ]
+    Int64.to_string s.Sub_stats.ldstk_w_max;
+    string_of_int s.Sub_stats.ldstk_sh_stack;
+    string_of_int s.Sub_stats.ldstk_sh_vla;
+    string_of_int s.Sub_stats.ldstk_sh_window;
+    string_of_int s.Sub_stats.ldstk_sh_other;
+    string_of_int s.Sub_stats.ldstk_sh_lost;
+    string_of_int s.Sub_stats.defstk_sh_stack;
+    string_of_int s.Sub_stats.defstk_sh_vla;
+    string_of_int s.Sub_stats.defstk_sh_window;
+    string_of_int s.Sub_stats.defstk_sh_other;
+    string_of_int s.Sub_stats.defstk_sh_lost ]
 
 let print_sub_line (path : string) (s : Sub_stats.t) : unit =
   Printf.printf "%s\n" (String.concat "\t" (path :: row_of s));
   flush stdout
-
-(* Accumulate one sub into the BIN sum (w_max takes max). *)
-let add_sum (dst : Sub_stats.t) (src : Sub_stats.t) : unit =
-  dst.Sub_stats.sub_ms <- dst.Sub_stats.sub_ms + src.Sub_stats.sub_ms;
-  dst.Sub_stats.def_exact <- dst.Sub_stats.def_exact + src.Sub_stats.def_exact;
-  dst.Sub_stats.def_b2_3 <- dst.Sub_stats.def_b2_3 + src.Sub_stats.def_b2_3;
-  dst.Sub_stats.def_b4_8 <- dst.Sub_stats.def_b4_8 + src.Sub_stats.def_b4_8;
-  dst.Sub_stats.def_b9_64 <- dst.Sub_stats.def_b9_64 + src.Sub_stats.def_b9_64;
-  dst.Sub_stats.def_b65p <- dst.Sub_stats.def_b65p + src.Sub_stats.def_b65p;
-  dst.Sub_stats.def_top <- dst.Sub_stats.def_top + src.Sub_stats.def_top;
-  dst.Sub_stats.def_bottom_live <-
-    dst.Sub_stats.def_bottom_live + src.Sub_stats.def_bottom_live;
-  dst.Sub_stats.def_bottom_dead <-
-    dst.Sub_stats.def_bottom_dead + src.Sub_stats.def_bottom_dead;
-  dst.Sub_stats.ld_exact <- dst.Sub_stats.ld_exact + src.Sub_stats.ld_exact;
-  dst.Sub_stats.ld_bounded <- dst.Sub_stats.ld_bounded + src.Sub_stats.ld_bounded;
-  dst.Sub_stats.ld_top <- dst.Sub_stats.ld_top + src.Sub_stats.ld_top;
-  dst.Sub_stats.ld_bottom_live <-
-    dst.Sub_stats.ld_bottom_live + src.Sub_stats.ld_bottom_live;
-  dst.Sub_stats.ld_bottom_dead <-
-    dst.Sub_stats.ld_bottom_dead + src.Sub_stats.ld_bottom_dead;
-  dst.Sub_stats.ld_denote_err <-
-    dst.Sub_stats.ld_denote_err + src.Sub_stats.ld_denote_err;
-  dst.Sub_stats.ldstk_exact <-
-    dst.Sub_stats.ldstk_exact + src.Sub_stats.ldstk_exact;
-  dst.Sub_stats.ldstk_bounded <-
-    dst.Sub_stats.ldstk_bounded + src.Sub_stats.ldstk_bounded;
-  dst.Sub_stats.ldstk_top <- dst.Sub_stats.ldstk_top + src.Sub_stats.ldstk_top;
-  dst.Sub_stats.ldstk_bottom_live <-
-    dst.Sub_stats.ldstk_bottom_live + src.Sub_stats.ldstk_bottom_live;
-  dst.Sub_stats.ldstk_bottom_dead <-
-    dst.Sub_stats.ldstk_bottom_dead + src.Sub_stats.ldstk_bottom_dead;
-  dst.Sub_stats.ldstk_w_b64 <-
-    dst.Sub_stats.ldstk_w_b64 + src.Sub_stats.ldstk_w_b64;
-  dst.Sub_stats.ldstk_w_4k <-
-    dst.Sub_stats.ldstk_w_4k + src.Sub_stats.ldstk_w_4k;
-  dst.Sub_stats.ldstk_w_2m <-
-    dst.Sub_stats.ldstk_w_2m + src.Sub_stats.ldstk_w_2m;
-  dst.Sub_stats.ldstk_w_big <-
-    dst.Sub_stats.ldstk_w_big + src.Sub_stats.ldstk_w_big;
-  if Int64.compare src.Sub_stats.ldstk_w_max
-      dst.Sub_stats.ldstk_w_max > 0 then
-    dst.Sub_stats.ldstk_w_max <- src.Sub_stats.ldstk_w_max
 
 (* BIN rollup: summed columns + the exact, full, and bound
    percentages.  The bound rate is the address-precision headline;
@@ -559,7 +384,7 @@ let run_binary (path : string) : bin_report =
     match run_sub bname sub with
     | Ok st ->
       r.nok <- r.nok + 1;
-      add_sum r.sum st;
+      Sub_stats.add_sum r.sum st;
       print_sub_line path st
     | Crash (es, bt) ->
       r.ncrashes <- r.ncrashes + 1;

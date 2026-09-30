@@ -319,7 +319,7 @@ let () =
          with
          | Error e -> ws_load_fail path e
          | Ok proj ->
-           let prog = Project.program proj in
+           let prog = production_input proj in
            Term.enum sub_t prog |> Seq.iter ~f:census_sub);
         dump ();
         Core.Hashtbl.clear counts)

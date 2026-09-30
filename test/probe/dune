@@ -36,6 +36,24 @@
  (flags
   :standard -g))
 
+(library
+ (name precision_probe_rows)
+ (modules precision_probe_rows)
+ (libraries
+  probe_common
+  hike
+  bap
+  bap-core-theory
+  bap-main
+  cbat_vsa
+  cbat_vsa_domain
+  core
+  graphlib
+  threads
+  unix)
+ (flags
+  :standard -g))
+
 (executables
  (names
   audit02
@@ -65,6 +83,7 @@
   env_footprint)
  (libraries
   clp_bench_rows
+  precision_probe_rows
   probe_common
   hike
   bap
