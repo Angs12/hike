@@ -504,7 +504,24 @@ let tests : unit Alcotest.test list =
           && Ws.max_elem r = Some (w64i (-1L))
           && Cbat_word.to_int (Ws.cardinality r) = Ok 4294967296));
 
-
+    pin "CLP-114"
+      "DIV-Z: sdiv by an exact {0} contains every elementwise image — a negative dividend gives 1, a \
+       non-negative one gives ones"
+      (fun () ->
+        let w8 = Cbat_word.of_int ~width:8 in
+        let zero = Clp.singleton (w8 0) in
+        let machine x = Wo.div (Wo.signed x) (Wo.signed (w8 0)) in
+        let covers p =
+          List.for_all
+            (fun x -> Clp.elem (machine x) (Clp.sdiv p zero))
+            (Clp.iter p)
+        in
+        (* {0xFF} is -1: x/0 = 1, not ones. *)
+        check "CLP-114"
+          (covers (Clp.singleton (w8 0xFF))
+          && Clp.elem (w8 1) (Clp.sdiv (Clp.singleton (w8 0xFF)) zero)
+          && covers (Clp.singleton (w8 0x05))
+          && covers (Clp.of_list ~width:8 [ w8 0; w8 0xFF ])));
 
 
 

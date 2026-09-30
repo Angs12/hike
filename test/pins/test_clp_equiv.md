@@ -18,10 +18,9 @@ or infinite ones are counted as skipped, never as checks). A
 `FinSet` against a `Clp`-represented progression (count > `fin_set_size`,
 so canonicalization keeps it a Clp), in both operand orders — so a
 non-commutative op in `op_pair`'s mixed arm cannot swap its operands.
-The mixed operands are non-zero: an exact-zero divisor reaches
-`sdiv_core`'s `{ones}` answer, which disagrees with the domain's own
-`sdiv_word` for a negative dividend — a separate pre-existing question,
-outside the operand-order invariant this sweep pins. The reference implementations
+The operand set includes zero: an exact-zero divisor's image is the
+concrete elementwise one (`ones` for a non-negative dividend, `1` for a
+negative one, their union when both occur). The reference implementations
 are inlined in the pin's own source, independent of production. The pin
 asserts `checked > 1000000 && mismatches = 0`.
 
@@ -35,4 +34,4 @@ a textual perturbation of one side.
 
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
-| CLEQ-01 | the CLP/word differential referee: every op agrees with the inlined reference / concrete oracle, and the composite's mixed `FinSet`/`Clp` binops keep each operand on its own side (1,934,570 checks, 0 mismatches, 1300 both-raised, 405,288 skipped) | in `test/unit/test_clp_equiv.ml`, perturb one inlined reference (`let ref_top (i : int) = ref_bottom i`), or revert the mixed-arm operand order (the reverse of commit `454ce52`: `| Ps ps, Fs s \| Fs s, Ps ps -> [ Clp (binop_pieces op ps (pieces_of_finset s)) ]`) | demonstrated: with `ref_top = ref_bottom`, the sweep reports `checked=1934570 mismatches=2888 both-raised=1300 skipped=405288` and CLEQ-01 FAILs. With the mixed arm's order reverted, it reports `checked=1934570 mismatches=172` — every one in the `FS,CLP` order (e.g. `COMP concat FS,CLP w=8 b1=1 b2=0 s2=1 c2=12: ... is outside the result`) — and CLEQ-01 FAILs; restored, it passes |
+| CLEQ-01 | the CLP/word differential referee: every op agrees with the inlined reference / concrete oracle, and the composite's mixed `FinSet`/`Clp` binops keep each operand on its own side (1,934,762 checks, 0 mismatches, 1300 both-raised, 405,288 skipped) | in `test/unit/test_clp_equiv.ml`, perturb one inlined reference (`let ref_top (i : int) = ref_bottom i`), or revert the mixed-arm operand order (the reverse of commit `454ce52`: `| Ps ps, Fs s \| Fs s, Ps ps -> [ Clp (binop_pieces op ps (pieces_of_finset s)) ]`), or restore `sdiv_core`'s exact-zero arm to `singleton (W.ones width)` | demonstrated: with `ref_top = ref_bottom`, the sweep reports `checked=1934762 mismatches=2888 both-raised=1300 skipped=405288` and CLEQ-01 FAILs. With the mixed arm's order reverted, it reports `checked=1934762 mismatches=224` — every printed one in the `FS,CLP` order (e.g. `COMP sub FS,CLP w=8 b1=0 b2=0 s2=1 c2=12: 0:8u 0xB:8u -> 0xF5:8u is outside the result`) — and CLEQ-01 FAILs. With the pre-fix exact-zero arm, it reports `checked=1934762 mismatches=2`, both `COMP sdiv CLP,FS` (a negative dividend's `1` outside `{ones}`), and CLEQ-01 FAILs; fixed, it passes |

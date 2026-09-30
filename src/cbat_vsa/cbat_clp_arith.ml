@@ -723,10 +723,18 @@ let sdiv_core (p1 : t) (p2 : t) : t =
     min_elem_signed p2 >>= fun min_e2 ->
     max_elem_signed p1 >>= fun max_e1 ->
     max_elem_signed p2 >>= fun max_e2 ->
-    (* A zero divisor: non-singleton stays top; exactly {0} is the word
-       semantics (x/0 = ones), never bottom. *)
+    (* A zero divisor: a divisor set merely containing 0 stays top; an
+       exact {0} takes the machine image — a non-negative dividend gives
+       [ones], a negative one gives [1], and a sign-spanning dividend
+       gives their union. *)
     if elem (W.zero width) p2
-    then !!(if W.is_one (cardinality p2) then singleton (W.ones width)
+    then !!(if W.is_one (cardinality p2) then
+              let has_neg = W.(>=) min_e1 (half width) in
+              let has_nonneg = W.(<) max_e1 (half width) in
+              if has_neg && has_nonneg then
+                union (singleton (W.one width)) (singleton (W.ones width))
+              else if has_neg then singleton (W.one width)
+              else singleton (W.ones width)
             else top width)
     else if W.is_one (cardinality p1) &&
             W.is_one (cardinality p2)

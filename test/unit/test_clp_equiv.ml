@@ -711,10 +711,10 @@ let run_sweep () : int * int * int =
     ; ("concat", Ws.concat, CW.concat) ]
   in
   let comp_widths = [ 8; 64 ] in
-  (* Non-zero operands: the sweep pins the operand order, not the
-     domain's division-by-zero convention for an exact-zero divisor. *)
+  (* The operand set includes zero: the exact-zero divisor's image is
+     the concrete elementwise one. *)
   let comp_fs_vals (w : int) : Z.t list =
-    [ Z.one; Z.of_int 3; Z.sub (Z.shift_left Z.one w) Z.one ]
+    [ Z.zero; Z.one; Z.of_int 3; Z.sub (Z.shift_left Z.one w) Z.one ]
   in
   (* (base, step, count); count > [fin_set_size] keeps the Clp. *)
   let comp_clp_shapes (w : int) : (Z.t * Z.t * int) list =
