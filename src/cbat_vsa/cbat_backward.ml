@@ -589,6 +589,11 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
        | _ -> None)
   | Error _ -> None
 
+(* Low-cast pre-image: the constraint's window repeated at every
+   multiple of [2^n] the operand can reach.  A zero-extension of an
+   n-bit value reaches the first window only, so its pre-image is the
+   constraint itself at the operand's width; a wider operand takes the
+   hull over the reachable windows. *)
 let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
     : wordset option =
   match denote_imm_exp a env with
@@ -597,13 +602,27 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
     let n = WordSet.bitwidth cstr in
     if n >= w then None
     else
+      (* A zero-extension of an n-bit value keeps its low n bits, so the
+         low cast is the identity there: the pre-image is the constraint
+         itself at the operand's width, never the wide hull. *)
+      let zero_extended_n =
+        match a with
+        | Bil.Cast (Bil.UNSIGNED, _, inner) ->
+          (match denote_imm_exp inner env with
+           | Ok inner_ws -> WordSet.bitwidth inner_ws = n
+           | Error _ -> false)
+        | _ -> false in
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
        | Some vlo, Some vhi ->
          let vlo_w = Cbat_word.extract_exn ~hi:(w - 1) vlo in
          let vhi_w = Cbat_word.extract_exn ~hi:(w - 1) vhi in
-         let two_n =
-           Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w n) in
-         let hi_a = Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n) in
+         let hi_a =
+           if zero_extended_n then vhi_w
+           else
+             let two_n =
+               Cbat_word.lshift (Cbat_word.one w)
+                 (Cbat_word.of_int ~width:w n) in
+             Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n) in
          hull ~wrapping:false w vlo_w hi_a
        | _ -> None)
   | Error _ -> None

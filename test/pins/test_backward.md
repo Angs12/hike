@@ -1,6 +1,6 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-83`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-84`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
@@ -82,3 +82,4 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-80 | S18 Ite with a singleton true condition constrains only the true branch. | Constrain both branch operands. | BK-80 (`u` narrowed). |
 | BK-81 | S19 Ite with an unknown condition keeps both branches. | Constrain both branch operands. | BK-81 (`t`/`u` narrowed). |
 | BK-83 | S21 the AND singleton mask keeps the mask's bits from the constraint and frees the rest (hull `[0x30, 0xFFFFFF3F]`). | Make the general-mask AND arm identity. | BK-83 (`0x30 ∈` false). |
+| BK-84 | the low cast of a zero-extended narrow value: `low:32[pad:64[x]]` collapses to `x`, so the constraint `[0,0xF]` narrows `x` to `[0,0xF]`, not the truncation hull. | Drop the widening arm so `low_cast_constraint` always takes the wide hull. | BK-84 (`x` stays `[0,2^32-1]`; `max_elem` is not `0xF`). |

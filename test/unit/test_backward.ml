@@ -1209,6 +1209,22 @@ let tests : unit Alcotest.test list =
           && Ws.elem (s_r32 0xFFFFFF3F) r
           && (not (Ws.elem (s_r32 0x2F) r))
           && not (Ws.elem (s_r32 0xFFFFFF40) r)));
+
+    pin "BK-84"
+      "the low cast of a zero-extended narrow value — low:32[pad:64[x]] — \
+       collapses to x: the constraint [0,0xF] narrows x to [0,0xF], not the \
+       truncation hull"
+      (fun () ->
+        let x = Var.create ~is_virtual:true ~fresh:false "bk_x" (Type.Imm 32) in
+        let env = mk_env [ (x, bk_iv32 ~lo:0 ~hi:0xFFFFFFFF) ] in
+        let widened = Bil.Cast (Bil.UNSIGNED, 64, Bil.Var x) in
+        let env' =
+          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+            ~env (Bil.Cast (Bil.LOW, 32, widened)) (bk_iv32 ~lo:0 ~hi:0xF)
+        in
+        let r = AI.find_word 32 env' (Var.base x) in
+        check "BK-84"
+          (Ws.min_elem r = Some (w32 0) && Ws.max_elem r = Some (w32 0xF)));
   ]
 
 let () = run "backward" tests
