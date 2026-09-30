@@ -1152,63 +1152,40 @@ let round_down_shift (k : word) : int option =
    blocks form the step-2^s progression [block(min), block(max)] (the
    exact image of a contiguous run, an over-approximation of a sparse
    one).  None when an extremum is not an int64. *)
-let round_down_image (s : int) (offs : P.t) : P.t option =
-  (* The AND is the identity at the full width: the offsets are their
-     own image. *)
+(* The round-down image, ONE rule over the per-origin record {block,
+   seed}: [block] is the coordinate line's own rounding of one offset
+   (the Stack line subtracts the base's concrete low bits, certified
+   at the entry; the VLA line's base is stack-aligned, so the offset
+   rounds by itself), and [seed] moves the extent's floor down by the
+   alignment slack — the routing gate must keep the rounded values in
+   the band they were rounded into.  The identity at the full width is
+   shared: the AND is the identity there. *)
+let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
   if s >= 64 then Some offs
   else
-  let m64 = Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s) in
-  let b_lo = Stdlib.Int64.logand stack_base m64 in
-  let block (o : word) : word option =
-    match Cbat_word.to_int64 o with
-    | Error _ -> None
-    | Ok v ->
-      let r = Stdlib.Int64.logand (Stdlib.Int64.add b_lo v) m64 in
-      Some (Cbat_word.of_int64 ~width:64 (Stdlib.Int64.sub v r))
-  in
-  let step =
-    if s >= 64 then Cbat_word.zero 64
-    else Cbat_word.of_int64 ~width:64 (Stdlib.Int64.shift_left 1L s)
-  in
-  let imgs =
-    List.filter_map (P.to_list offs) ~f:(fun g ->
-        match Clp.min_elem g, Clp.max_elem g with
-        | Some a, Some b -> (
-            match block a, block b with
-            | Some a', Some b' ->
-              let span65 = Cbat_word.cast Bil.UNSIGNED 65 (Cbat_word.sub b a) in
-              let cnt =
-                Cbat_word.add
-                  (Cbat_word.rshift span65 (Cbat_word.of_int ~width:65 s))
-                  (Cbat_word.one 65)
-              in
-              Some (Clp.create a' ~step ~cardn:cnt)
-            | _ -> None)
-        | _ -> None)
-  in
-  let rec union_all = function
-    | [] -> P.bottom 64
-    | [ g ] -> P.of_progression g
-    | g :: rest -> P.union (P.of_progression g) (union_all rest)
-  in
-  if List.length imgs = List.length (P.to_list offs) then Some (union_all imgs)
-  else None
-
-(* The VLA frame's round-down: the frame-relative offset rounds by its
-   own low bits (the base is stack-aligned, so no base term); the
-   extent's floor widens by the alignment slack. *)
-let round_down_image_vla (tid : Tid.t) (s : int) (offs : P.t) : P.t option =
-  if s >= 64 then Some offs
-  else begin
     let m64 = Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s) in
-    let keep = Stdlib.Int64.lognot m64 in
-    Origin.Vla_seed.widen_off_lo tid (Stdlib.Int64.neg m64);
-    let block (o : word) : word option =
-      match Cbat_word.to_int64 o with
-      | Error _ -> None
-      | Ok v ->
-        Some (Cbat_word.of_int64 ~width:64 (Stdlib.Int64.logand v keep))
+    let block, seed =
+      match o with
+      | Origin.Vla tid ->
+        (fun (w : word) ->
+           match Cbat_word.to_int64 w with
+           | Error _ -> None
+           | Ok v ->
+             Some
+               (Cbat_word.of_int64 ~width:64
+                  (Stdlib.Int64.logand v (Stdlib.Int64.lognot m64)))),
+        (fun () -> Origin.Vla_seed.widen_off_lo tid (Stdlib.Int64.neg m64))
+      | _ ->
+        let b_lo = Stdlib.Int64.logand stack_base m64 in
+        ((fun (w : word) ->
+            match Cbat_word.to_int64 w with
+            | Error _ -> None
+            | Ok v ->
+              let r = Stdlib.Int64.logand (Stdlib.Int64.add b_lo v) m64 in
+              Some (Cbat_word.of_int64 ~width:64 (Stdlib.Int64.sub v r))),
+         fun () -> ())
     in
+    seed ();
     let step =
       Cbat_word.of_int64 ~width:64 (Stdlib.Int64.shift_left 1L s)
     in
@@ -1238,13 +1215,6 @@ let round_down_image_vla (tid : Tid.t) (s : int) (offs : P.t) : P.t option =
     if List.length imgs = List.length (P.to_list offs) then
       Some (union_all imgs)
     else None
-  end
-
-let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
-  match o with
-  | Origin.Vla tid -> round_down_image_vla tid s offs
-  | _ -> round_down_image s offs
-
 
 (* The plain meet: plain leaves meet pairwise; results merge. *)
 let meet_plain (t1 : t) (t2 : t) : t =
