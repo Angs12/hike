@@ -1,10 +1,12 @@
 (* The def-carried KB value slots: the producer stamps each def's
-   value, the emitter reads the tags off the term.  The slot
-   registrations live here, beside the readers and stampers -- not in
-   the pure stack model. *)
+   value, the emitter reads the tags off the term.  Each slot declares
+   what it carries; the domain/property/getter/spelling lives once in
+   Hike_def_slot.  The registrations live here, beside the readers and
+   stampers -- not in the pure stack model. *)
 
 open Bap.Std
 open Bap_core_theory
+open! Core
 module Tag = Hike_stack_model.Tag
 type sec_tag = Hike_stack_model.sec_tag
 
@@ -12,23 +14,27 @@ type sec_tag = Hike_stack_model.sec_tag
    emitter reads the tags off the term. *)
 
 module KB = Bap_knowledge.Knowledge
+module D = Hike_def_slot
+
+(* The census observer: a no-op outside the debug build. *)
+let bump : string -> unit =
+#ifdef VSA_DEBUG
+  Cbat_vsa.Cbat_kb_census.bump
+#else
+  fun _ -> ()
+#endif
+
+let bool_inspect (b : bool) : Sexp.t = Sexp.Atom (string_of_bool b)
 
 (* The def is a runtime-sized SP decrement and emits a real runtime-sized
    alloca; the storage fact rides the def's value beside the kind. *)
-let def_dyn_alloc_slot : (Theory.Value.cls, bool) KB.slot =
-  let bool_domain =
-    KB.Domain.flat
-      ~inspect:(fun b -> Base.Sexp.Atom (string_of_bool b))
-      ~equal:Bool.equal ~empty:false "hike:dyn-alloc"
-  in
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-dyn-alloc"
-    bool_domain
+let def_dyn_alloc : bool D.t =
+  D.flat ~name:"hike-dyn-alloc" ~empty:false ~equal:Bool.equal
+    ~inspect:bool_inspect ~get_bump:"dyn_alloc.get" ~put_bump:"dyn_alloc.put"
+    ~bump
 
-let def_is_dyn_alloc (d : def term) : bool =
-#ifdef VSA_DEBUG
-  let () = Cbat_vsa.Cbat_kb_census.bump "dyn_alloc.get" in
-#endif
-  KB.Value.get def_dyn_alloc_slot (Def.value d)
+let def_dyn_alloc_slot = D.slot def_dyn_alloc
+let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc d
 
 (* The def's address is a rip-relative constant; the emitter re-renders it
    through the section owner. *)
@@ -40,32 +46,27 @@ let def_is_rip_relative (d : def term) : bool =
 
 (* The def computes an address value at/above the entry line; its emitted
    integer re-bases to the hike_window parameter. *)
-let def_window_value_slot : (Theory.Value.cls, bool) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-window-value"
-    (KB.Domain.flat
-       ~inspect:(fun b -> Base.Sexp.Atom (string_of_bool b))
-       ~equal:Bool.equal ~empty:false "hike:window-value")
+let def_window_value : bool D.t =
+  D.flat ~name:"hike-window-value" ~empty:false ~equal:Bool.equal
+    ~inspect:bool_inspect ~get_bump:"window_value.get"
+    ~put_bump:"window_value.put" ~bump
 
-let def_is_window_value (d : def term) : bool =
-#ifdef VSA_DEBUG
-  let () = Cbat_vsa.Cbat_kb_census.bump "window_value.get" in
-#endif
-  KB.Value.get def_window_value_slot (Def.value d)
+let def_window_value_slot = D.slot def_window_value
+let def_is_window_value (d : def term) : bool = D.get def_window_value d
 
 (* The def's value is a bounded stack or VLA address, so the emitter's
    ptr discipline emits it as a pointer.  Computed pre-SSA (where the
    denotation resolves) by [hike_types]; rides the def's value. *)
-let def_ptr_kind_slot : (Theory.Value.cls, bool) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-ptr-kind"
-    (KB.Domain.flat
-       ~inspect:(fun b -> Base.Sexp.Atom (string_of_bool b))
-       ~equal:Bool.equal ~empty:false "hike:ptr-kind")
+let def_ptr_kind_d : bool D.t =
+  D.flat ~name:"hike-ptr-kind" ~empty:false ~equal:Bool.equal
+    ~inspect:bool_inspect ~get_bump:"ptr_kind.get" ~put_bump:"ptr_kind.put"
+    ~bump
 
-let def_ptr_kind (d : def term) : bool =
-  KB.Value.get def_ptr_kind_slot (Def.value d)
+let def_ptr_kind_slot = D.slot def_ptr_kind_d
+let def_ptr_kind (d : def term) : bool = D.get def_ptr_kind_d d
 
 (* One map applies [stamp] to every def whose tid is in [tids] — the
-   two bool slots' shared stamper. *)
+   slots' shared stamper. *)
 let stamp_tids ~(tids : Tid.Set.t) ~stamp (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
@@ -73,30 +74,17 @@ let stamp_tids ~(tids : Tid.Set.t) ~stamp (sub : sub term) : sub term =
 
 let stamp_window_values ~(window_values : Tid.Set.t)
     (sub : sub term) : sub term =
-  stamp_tids ~tids:window_values sub ~stamp:(fun d ->
-#ifdef VSA_DEBUG
-      let () = Cbat_vsa.Cbat_kb_census.bump "window_value.put" in
-#endif
-      Def.with_value d
-        (KB.Value.put def_window_value_slot (Def.value d) true))
+  stamp_tids ~tids:window_values
+    sub ~stamp:(fun d -> D.put def_window_value true d)
 
 (* Stamps the dynamic-allocation fact onto the event defs. *)
 let stamp_dyn_allocs ~(dynamic_alloc_tids : Tid.Set.t)
     (sub : sub term) : sub term =
-  stamp_tids ~tids:dynamic_alloc_tids sub ~stamp:(fun d ->
-#ifdef VSA_DEBUG
-      let () = Cbat_vsa.Cbat_kb_census.bump "dyn_alloc.put" in
-#endif
-      Def.with_value d
-        (KB.Value.put def_dyn_alloc_slot (Def.value d) true))
+  stamp_tids ~tids:dynamic_alloc_tids
+    sub ~stamp:(fun d -> D.put def_dyn_alloc true d)
 
 let stamp_ptr_kinds ~(ptr_tids : Tid.Set.t) (sub : sub term) : sub term =
-  stamp_tids ~tids:ptr_tids sub ~stamp:(fun d ->
-#ifdef VSA_DEBUG
-      let () = Cbat_vsa.Cbat_kb_census.bump "ptr_kind.put" in
-#endif
-      Def.with_value d
-        (KB.Value.put def_ptr_kind_slot (Def.value d) true))
+  stamp_tids ~tids:ptr_tids sub ~stamp:(fun d -> D.put def_ptr_kind_d true d)
 
 (* The storage a ptr-kind value lives in: the region/residue alloca, the
    caller frame base, or a VLA.  Stamped by [hike_types] beside the
@@ -110,28 +98,25 @@ let () =
           "hike: ptr-storage conflict: two different storages were stamped for one def"
     | _ -> None)
 
-let def_ptr_storage_slot :
-    (Theory.Value.cls, Hike_stack_model.ptr_storage option) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-ptr-storage"
-    (KB.Domain.optional
-       ~inspect:(fun _ -> Base.Sexp.Atom "hike:ptr-storage")
-       ~join:(fun a b ->
-         if Hike_stack_model.equal_ptr_storage a b then Ok a
-         else Error Ptr_storage_conflict)
-       ~equal:Hike_stack_model.equal_ptr_storage
-       "hike:ptr-storage")
+let def_ptr_storage_d : Hike_stack_model.ptr_storage option D.t =
+  D.optional ~name:"hike-ptr-storage"
+    ~inspect:(fun _ -> Sexp.Atom "hike:ptr-storage")
+    ~join:(fun a b ->
+      if Hike_stack_model.equal_ptr_storage a b then Ok a
+      else Error Ptr_storage_conflict)
+    ~equal:Hike_stack_model.equal_ptr_storage
+    ~get_bump:"ptr_storage.get" ~put_bump:"ptr_storage.put" ~bump
 
+let def_ptr_storage_slot = D.slot def_ptr_storage_d
 let def_ptr_storage (d : def term) : Hike_stack_model.ptr_storage option =
-  KB.Value.get def_ptr_storage_slot (Def.value d)
+  D.get def_ptr_storage_d d
 
 let stamp_ptr_storages ~(storages : Hike_stack_model.ptr_storage Tid.Map.t)
     (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       Term.map def_t blk ~f:(fun d ->
           match Core.Map.find storages (Term.tid d) with
-          | Some s ->
-              Def.with_value d
-                (KB.Value.put def_ptr_storage_slot (Def.value d) (Some s))
+          | Some s -> D.put def_ptr_storage_d (Some s) d
           | None -> d))
 
 (* The storage of the address a def accesses (or computes) — stamped by
@@ -139,8 +124,7 @@ let stamp_ptr_storages ~(storages : Hike_stack_model.ptr_storage Tid.Map.t)
    address in its own alloca. *)
 let stamp_ptr_storage (s : Hike_stack_model.ptr_storage) (d : def term) :
     def term =
-  Def.with_value d
-    (KB.Value.put def_ptr_storage_slot (Def.value d) (Some s))
+  D.put def_ptr_storage_d (Some s) d
 
 (* The section tag rides the def's value: the producer stamps it, the
    emitter's dispatch reads it off the term. *)
@@ -154,29 +138,17 @@ let () =
           "hike: section-tag conflict: two different attributions were stamped for one def"
     | _ -> None)
 
-let sec_tag_domain : sec_tag option KB.Domain.t =
-  KB.Domain.optional
-    ~inspect:(fun _ -> Base.Sexp.Atom "hike:section-tag")
+let sec_tag_d : sec_tag option D.t =
+  D.optional ~name:"hike-section-tag"
+    ~inspect:(fun _ -> Sexp.Atom "hike:section-tag")
     ~join:(fun a b -> if Tag.equal a b then Ok a else Error Sec_tag_conflict)
     ~equal:(fun a b ->
-#ifdef VSA_DEBUG
-      let () = Cbat_vsa.Cbat_kb_census.bump "domain.sec.equal" in
-#endif
+      bump "domain.sec.equal";
       Tag.equal a b)
-    "hike:section-tag"
+    ~get_bump:"sec_tag.get" ~put_bump:"sec_tag.put" ~bump
 
-let sec_tag_slot : (Theory.Value.cls, sec_tag option) KB.slot =
-  KB.Class.property ~package:"hike" Theory.Value.cls "hike-section-tag"
-    sec_tag_domain
-
-let sec_tag (d : def term) : sec_tag option =
-#ifdef VSA_DEBUG
-  let () = Cbat_vsa.Cbat_kb_census.bump "sec_tag.get" in
-#endif
-  KB.Value.get sec_tag_slot (Def.value d)
+let sec_tag_slot = D.slot sec_tag_d
+let sec_tag (d : def term) : sec_tag option = D.get sec_tag_d d
 
 let set_sec_tag (t : sec_tag) (d : def term) : def term =
-#ifdef VSA_DEBUG
-  let () = Cbat_vsa.Cbat_kb_census.bump "sec_tag.put" in
-#endif
-  Def.with_value d (KB.Value.put sec_tag_slot (Def.value d) (Some t))
+  D.put sec_tag_d (Some t) d

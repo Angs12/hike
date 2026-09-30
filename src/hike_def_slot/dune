@@ -1,0 +1,11 @@
+(library
+ (name hike_def_slot)
+ (public_name hike.hike_def_slot)
+ (wrapped false)
+ (modules hike_def_slot)
+ (libraries bap bap-core-theory bap-knowledge core)
+ ; The cppo chain (mirrors src/dune and hike_origin): ppx-jane IS the
+ ; old pps ppx_bap driver, and cppo runs before it in every build.
+ (preprocess
+  (action
+   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))
