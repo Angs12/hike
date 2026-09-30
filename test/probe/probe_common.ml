@@ -86,15 +86,21 @@ let production_input (proj : Project.t) : program term =
   |> Hike.Coerce.coerce_program
   |> Hike.Fp.run_program
 
+(* pass_vsa's image set: every relocation-free section. *)
+let section_images (proj : Project.t) : Vsa.section_image list =
+  Hike.Image.get_section_images proj
+  |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
+         { Vsa.img_lo; img_hi; img_bytes })
+
 (* Load a binary and apply [run_sub] to each sub in program order. *)
-let ws_run_binary (path : string) (run_sub : sub term -> 'a) :
+let ws_run_binary (path : string) (run_sub : Vsa.section_image list -> sub term -> 'a) :
     ('a list, ws_binary_error) result =
   try
     match Project.create (Project.Input.file ~loader:"llvm" ~filename:path) with
     | Error e -> Error (Load_error e)
     | Ok proj ->
       let subs = Term.enum sub_t (production_input proj) |> Seq.to_list in
-      Ok (List.map run_sub subs)
+      Ok (List.map (run_sub (section_images proj)) subs)
   with e -> Error (Run_error e)
 
 let sp_of (proj : Project.t) : var = Hike.Abi.sp (Project.target proj)
@@ -120,11 +126,13 @@ let all_subs (prog : program term) : sub term list =
   Term.enum sub_t prog |> Seq.to_list
 
 (* The ONE per-sub solve (spec §2.1): the sub over its own program,
-   seeded from init_sol.  Every probe's fixpoint flow is this. *)
-let run_sub_fixpoint (sub : sub term) : Vsa.vsa_sol =
+   seeded from init_sol, with the image-backed sections armed exactly
+   as production arms them.  Every probe's fixpoint flow is this. *)
+let run_sub_fixpoint ?(images = []) (sub : sub term) : Vsa.vsa_sol =
   let prog' = Program.create ~subs:[ sub ] () in
-  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub
-    (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub)
+  Vsa.with_images images (fun () ->
+      Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub
+        (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub))
 
 let analyze_and_fixpoint (sub : sub term) : sub term * Vsa.vsa_sol =
   (sub, run_sub_fixpoint sub)

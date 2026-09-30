@@ -12,4 +12,8 @@ val get_section_data :
 val get_copy_relocations :
   Project.t -> bss_addr:int64 -> bss_size:int64 -> (int * string) list
 
+val get_relocated_words : Project.t -> int64 list
+
+val get_section_images : Project.t -> (Bytes.t * int64 * int64) list
+
 val get_named_region_info : Project.t -> region Base.Sequence.t

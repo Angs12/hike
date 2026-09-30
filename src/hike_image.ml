@@ -45,6 +45,43 @@ let get_copy_relocations proj ~bss_addr ~bss_size =
          else None)
   |> Base.List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
 
+(* Every word the loader's relocation facts name.  A word at one of
+   these addresses is a load-time relocation result; a section holding
+   one is not its static image. *)
+let get_relocated_words (proj : Project.t) : int64 list =
+  let open Ogre in
+  let collect attr = Ogre.collect Query.(select (from attr)) in
+  let relr = collect Image.Scheme.relative_relocation in
+  let rel = collect Image.Scheme.relocation in
+  let ext = collect Image.Scheme.external_reference in
+  let spec = Project.specification proj in
+  let rows q = fst (Ogre.run q spec |> Core.Or_error.ok_exn) in
+  let relr = Base.Sequence.to_list (rows relr) in
+  let rel = Base.Sequence.to_list (rows rel) |> Base.List.map ~f:fst in
+  let ext = Base.Sequence.to_list (rows ext) |> Base.List.map ~f:fst in
+  relr @ rel @ ext
+
+(* The sections whose runtime content IS the static image: every section
+   span with no relocated word inside it.  The bytes come from the
+   loader's memory image. *)
+let get_section_images (proj : Project.t) : (Bytes.t * int64 * int64) list =
+  let relocated = get_relocated_words proj in
+  Project.memory proj |> Memmap.to_sequence
+  |> Seq.filter_map ~f:(fun (mem, v) ->
+      match Value.get Image.section v with
+      | None -> None
+      | Some _ ->
+        let lo = Word.to_int64_exn (Memory.min_addr mem) in
+        let hi = Word.to_int64_exn (Memory.max_addr mem) in
+        if
+          Base.List.exists relocated ~f:(fun a ->
+              Int64.compare a lo >= 0 && Int64.compare a hi <= 0)
+        then None
+        else
+          Base.Option.map (get_section_data (Some (mem, v)))
+            ~f:(fun (bytes, _, _) -> (bytes, lo, hi)))
+  |> Seq.to_list
+
 let get_named_region_info proj =
   let query =
     let open Ogre in

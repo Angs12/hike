@@ -402,6 +402,33 @@ let tests : unit Alcotest.test list =
              Word.equal m mask
            | _ -> false));
 
+    (* A3: the main solve reads the threaded section images — a load from
+       a section address denotes the image bytes, not top. *)
+    pin "VSA-67"
+      "the main solve is image-armed: a load from a threaded section address denotes the image bytes"
+      (fun () ->
+        let m = memv "a3_img_m" in
+        let r = v64 "a3_img_r" in
+        let load =
+          Def.create r
+            (Bil.Load
+               ( Bil.Var m,
+                 Bil.Int (Cbat_word.to_word (w64 0x4000)),
+                 LittleEndian, `r64 ))
+        in
+        let sub = straight_sub "a3_image_solve" [ load ] in
+        let images =
+          [ { Vsa.img_lo = 0x4000L; img_hi = 0x4007L;
+              img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00" } ]
+        in
+        let envs, _, _ =
+          produce ~images Theory.Target.unknown
+            (Program.create ~subs:[ sub ] ()) sub
+        in
+        let blk = Term.first blk_t sub |> Base.Option.value_exn in
+        let _, post = Core.Map.find_exn envs (Term.tid blk) in
+        check "VSA-67"
+          (Ws.equal (AI.find_word 64 post r) (Ws.singleton (w64 0x2d))));
 
   ]
 

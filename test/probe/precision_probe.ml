@@ -363,13 +363,14 @@ let print_bin_line (r : bin_report) : unit =
   flush stdout
 
 (* One sub, one fixpoint + measurement walk. *)
-let run_sub (bname : string) (sub : sub term) : outcome =
+let run_sub (bname : string) (images : Vsa.section_image list) (sub : sub term) : outcome =
   try
     let t0 = Unix.gettimeofday () in
-    let sol = Probe_common.run_sub_fixpoint sub in
+    let sol = Probe_common.run_sub_fixpoint ~images sub in
     let t1 = Unix.gettimeofday () in
-    (* Per-block TAG state is the IN-state ([tags = sol]). *)
-    let st = collect_stats bname sub sol sol in
+    (* Per-block TAG state is the IN-state ([tags = sol]); the walk
+       re-denotes defs, so it reads the same images the solve read. *)
+    let st = Vsa.with_images images (fun () -> collect_stats bname sub sol sol) in
     st.Sub_stats.sub_ms <- int_of_float ((t1 -. t0) *. 1000.0);
     Ok st
   with e ->
@@ -379,9 +380,9 @@ let run_binary (path : string) : bin_report =
   let r = { bname = path; nsubs = 0; nok = 0; ncrashes = 0; nloadfail = 0;
             sum = Sub_stats.create "BIN" } in
   let bname = Filename.basename path in
-  let run_one sub =
+  let run_one images sub =
     r.nsubs <- r.nsubs + 1;
-    match run_sub bname sub with
+    match run_sub bname images sub with
     | Ok st ->
       r.nok <- r.nok + 1;
       Sub_stats.add_sum r.sum st;

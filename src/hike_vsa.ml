@@ -173,8 +173,12 @@ let fixpoint (target : Theory.Target.t)
       (init : Vsa.vsa_sol option) =
     let prog' = Program.create ~subs:[ sub ] () in
     let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
+    (* The solve reads the image-backed sections: a load from one
+       denotes its bytes. *)
     let sol =
-      Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup:lookup prog' sub seed
+      Vsa.with_images images (fun () ->
+          Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup:lookup
+            prog' sub seed)
     in
 #ifdef VSA_DEBUG
     dump_r8 sol sub;
@@ -208,7 +212,11 @@ let fixpoint (target : Theory.Target.t)
        attribution re-denotes from these rhs's, and the solve's
        materialization may reintroduce the shift pair. *)
     let sub'' = Vsa.normalize_round sub'' in
-    let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
+    (* The replay re-denotes every def: arm the same images the solve read,
+       so the returned environments carry the image-derived values. *)
+    let envs, stamped =
+      Vsa.with_images images (fun () -> Vsa.stamp_envs_of_sol ~sol sub'')
+    in
     (envs, stamped, block_addrs')
   | None ->
     ( Tid.Map.empty,

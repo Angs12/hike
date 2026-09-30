@@ -91,17 +91,12 @@ let pass_vsa proj =
       "target %s is not x86_64-gnu-elf; the x86-64 SysV convention record serves it"
       (KB.Name.to_string (Theory.Target.name target));
   (* Image-backed loads are sound only where the runtime content IS
-     the static image: .rodata is read-only and a valid PIE never
-     relocates it (relocated data lands in .data.rel.ro). *)
+     the static image; the relocation-free sections are exactly the
+     ones the loader's relocation facts do not name. *)
   let images =
-    Hike_image.get_section_mem
-      ("." ^ Hike_stack_model.sec_name Hike_stack_model.Rodata) proj
-    |> Hike_image.get_section_data
-    |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
-           [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
-               img_hi = Word.to_int64_exn max_addr;
-               img_bytes = arr } ])
-    |> Base.Option.value ~default:[]
+    Hike_image.get_section_images proj
+    |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
+           { Cbat_vsa.img_lo; img_hi; img_bytes })
   in
   (* The re-lift seam: decode and lift the case body at a dispatch word
      the lift never made a block.  The view starts at the word so the
