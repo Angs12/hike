@@ -80,7 +80,9 @@ include Cbat_map_lattice.S_indexed with module Val := Val and module Key := Key 
 type t := t and type idx := idx
 
 (* Meet [data] into every cell whose key intersects [key]. *)
-val meet_range : t -> key:Key.t -> data:Val.t -> t
+(* Meet into intersecting cells; an empty piece meet keeps the cell
+   (never the dead-path bottom). *)
+val meet_range_keep : t -> key:Key.t -> data:Val.t -> t
 
 (* [widen_join] with the caller's per-key combiner: where the trees
    are comparable, each cell of the new tree combines with the old

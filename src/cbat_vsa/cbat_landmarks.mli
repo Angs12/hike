@@ -63,6 +63,7 @@ val record :
   key:key ->
   bound:Cbat_word.t ->
   is_upper:bool ->
+  warmed:bool ->
   dist:int ->
   unit
 

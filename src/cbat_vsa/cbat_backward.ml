@@ -639,29 +639,33 @@ type pending_cell = {
   pc_cstr : wordset;     (* the produced value's constraint *)
 }
 
-(* The leaf var's inverse: the meet; an empty meet is observed as a
-   widening landmark and takes identity. *)
+(* THE one leaf meet, keyed by what it constrains (a variable, or a
+   memory cell) — the policy both lanes share.  Every meet is acquired
+   into the enclosing head's widening table (the excluded boundary when
+   the meet empties, the trimmed piece when it narrows).  An empty meet
+   is the excluded behavior: observed, the state unchanged — never the
+   dead-path bottom.  A meet that does not narrow takes the identity.
+   A real narrowing is written back. *)
+let leaf_meet ~(landmarks : Cbat_landmarks.t) ~(key : Cbat_landmarks.key)
+    ~(cur : wordset) ~(meet : wordset -> wordset -> wordset)
+    ~(write : wordset -> 'st -> 'st) (cstr : wordset) (st : 'st) : 'st =
+  if WordSet.bitwidth cur <> WordSet.bitwidth cstr then st
+  else begin
+    ignore (Cbat_landmarks.observe_unsat landmarks ~key ~p:cur ~cstr);
+    let m = meet cur cstr in
+    if Cbat_word.is_zero (WordSet.cardinality m) then st
+    else if (not (WordSet.precedes m cur)) || WordSet.equal m cur then st
+    else write m st
+  end
+
+(* The leaf var's inverse: the meet, through the one leaf rule. *)
 let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
     (v : var) (refined : wordset) : AI.t =
   match Var.typ v with
   | Type.Imm w ->
     let cur = AI.find_word w env v in
-    if WordSet.bitwidth cur <> w || WordSet.bitwidth refined <> w
-    then env
-    else
-      let m = WordSet.meet cur refined in
-      if Cbat_word.is_zero (WordSet.cardinality m) then begin
-#ifdef VSA_DEBUG
-        Format.eprintf "DBG OBSERVE-UNSAT var=%s cur=%a cstr=%a\n%!"
-          (Var.name v) WordSet.pp cur WordSet.pp refined;
-#endif
-        ignore
-          (Cbat_landmarks.observe_unsat landmarks
-             ~key:(Cbat_landmarks.Word v) ~p:cur ~cstr:refined);
-        env
-      end else if not (WordSet.precedes m cur)
-      then env
-      else begin
+    leaf_meet ~landmarks ~key:(Cbat_landmarks.Word v) ~cur ~meet:WordSet.meet
+      ~write:(fun m env ->
 #ifdef VSA_DEBUG
         (match WordSet.stack_offsets cur, WordSet.stack_offsets m with
          | Some _, None ->
@@ -669,8 +673,8 @@ let meet_var ~(landmarks : Cbat_landmarks.t) (env : AI.t)
              (Var.name v) WordSet.pp cur WordSet.pp refined WordSet.pp m
          | _ -> ());
 #endif
-        AI.add_word env ~key:v ~data:m
-      end
+        AI.add_word env ~key:v ~data:m)
+      refined env
   | Type.Mem _ | Type.Unk -> env
 
 #ifdef VSA_DEBUG
@@ -911,7 +915,9 @@ and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
 
 (* The load's cell fact meets the env's memory at the denoted address:
    stack-symbolic addresses key by segment offsets, foreign by their
-   concrete hulls; identity on doubt. *)
+   concrete hulls; identity on doubt.  Each fan-out key runs the one
+   leaf rule; the write-back is the piecewise meet whose empty piece
+   keeps its cell. *)
 and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem : exp)
     ~(addr : exp) ~(size : Size.t) ~(endian : endian) (produced : wordset) : AI.t =
   match mem with
@@ -920,19 +926,10 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
      | Type.Mem (addr_i, addressable_size) ->
        let k = mem_idx addr_i addressable_size in
        (match denote_imm_exp addr env with
-        | Error _ ->
-#ifdef VSA_DEBUG
-          Format.eprintf "DBG MEET-CELL: addr denote ERROR\n%!";
-#endif
-          env
+        | Error _ -> env
         | Ok addr_ws ->
           (match bounded_cell_key addr_ws with
-           | [] ->
-#ifdef VSA_DEBUG
-             Format.eprintf "DBG MEET-CELL: no key from %a\n%!"
-               WordSet.pp addr_ws;
-#endif
-             env
+           | [] -> env
            | keys ->
              let res_size = Size.in_bits size in
              (* The cell world is byte-addressed: a sub-byte read's
@@ -942,35 +939,28 @@ and constrain_cell_on_trace ~(landmarks : Cbat_landmarks.t) ~(env : AI.t) ~(mem 
              else if WordSet.bitwidth produced <> res_size then env
              else
                let mv = AI.find_memory k env m in
-               let data = Mem.Val.create produced endian in
+               List.fold keys ~init:env ~f:(fun env key ->
+                   let cur = Mem.Val.data (Mem.find (res_size, endian) mv key) in
 #ifdef VSA_DEBUG
-               List.iter keys ~f:(fun key ->
-                   let pre =
-                     Mem.Val.data (Mem.find (res_size, endian) mv key) in
-                   ignore
-                     (Cbat_landmarks.observe_unsat landmarks
-                        ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key))
-                        ~p:pre ~cstr:produced);
-                   let res = WordSet.meet pre produced in
-                   if not (WordSet.equal res pre) then
+                   let res = WordSet.meet cur produced in
+                   if not (WordSet.equal res cur) then
                      cell_meet_diff
                        ~ckey:(Sexp.to_string (Mem.Key.sexp_of_t key))
-                       ~pre ~cstr:produced ~res;
+                       ~pre:cur ~cstr:produced ~res;
                    Format.eprintf "DBG MEET-CELL: meet %a into key %s\n%!"
                      WordSet.pp produced
-                     (Sexp.to_string (Mem.Key.sexp_of_t key)));
-#else
-               List.iter keys ~f:(fun key ->
-                   ignore (Cbat_landmarks.observe_unsat landmarks
-                             ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key))
-                             ~p:(Mem.Val.data
-                                   (Mem.find (res_size, endian) mv key))
-                             ~cstr:produced));
+                     (Sexp.to_string (Mem.Key.sexp_of_t key));
 #endif
-               AI.add_memory env ~key:m
-                 ~data:(List.fold keys ~init:mv
-                          ~f:(fun mv key -> Mem.meet_range mv ~key ~data))))
-     | Type.Imm _ | Type.Unk -> env)
+                     leaf_meet ~landmarks
+                     ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key key))
+                     ~cur ~meet:WordSet.meet
+                     ~write:(fun mval mem ->
+                         let mvk = AI.find_memory k mem m in
+                         AI.add_memory mem ~key:m
+                           ~data:(Mem.meet_range_keep mvk ~key
+                                    ~data:(Mem.Val.create mval endian)))
+                     produced env)))
+       | Type.Imm _ | Type.Unk -> env)
   | _ -> env
 
 (* The edge step: the graph's completed cond constrained TRUE — the {1}

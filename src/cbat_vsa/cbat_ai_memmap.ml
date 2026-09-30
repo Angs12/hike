@@ -348,8 +348,15 @@ let join_add : t -> key:Key.t -> data:Val.t -> t =
 let meet_add : t -> key:Key.t -> data:Val.t -> t =
   op_add ~op:Val.meet_poly ~op_demoted:(fun _ d' -> d')
 
-(* Meet [data] into intersecting cells. *)
-let meet_range (m : t) ~key ~data : t = meet_add m ~key ~data
+(* Meet [data] into intersecting cells; an empty piece meet keeps the
+   cell — a constraint that empties a contributing cell bounds the
+   read, not that cell, and the dead-path bottom is never written. *)
+let meet_range_keep (m : t) ~key ~data : t =
+  op_add
+    ~op:(fun d d' ->
+      let m = Val.meet_poly d d' in
+      if Val.is_bottom m then d' else m)
+    ~op_demoted:(fun _ d' -> d') m ~key ~data
 
 (* Keep the caller's frame across a call: all inputs are OFFSET-space
    (the segment-relative line the Stack cells key by).  A called

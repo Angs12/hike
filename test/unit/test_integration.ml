@@ -921,6 +921,38 @@ let tests : unit Alcotest.test list =
           (Ws.is_top (AI.find_word 32 refined_n hb_n)
           && Ws.is_top (AI.find_word 32 refined_n ha_n)));
 
+    (* Pin A: the empty cell meet is the identity — the cell keeps its
+       stored value; the dead-path bottom is never written. *)
+    pin "INT-32"
+      "A: a cell meet whose intersection is empty leaves the env unchanged (the stored value        stays, no dead-path bottom)"
+      (fun () ->
+        let m = memv "pina_m" in
+        let rbp = v64 "RBP" in
+        let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+        let key = key_of (Ws.stack_word_i64 (-8L)) in
+        let cell5 =
+          Mem.add
+            (Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+            ~key ~data:(Mem.Val.create (Ws.singleton (w32 5)) LittleEndian)
+        in
+        let entry = AI.add_memory (anchored_entry ()) ~key:m ~data:cell5 in
+        let refined =
+          Vsa.Test_seam.constrain_operands
+            ~landmarks:(Cbat_landmarks.create ()) ~env:entry
+            (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32))
+            (Ws.singleton (w32 6))
+        in
+        let cell =
+          Mem.Val.data
+            (Mem.find (32, LittleEndian)
+               (AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } refined m)
+               key)
+        in
+        check
+          "A: the cell keeps its stored {5} — the empty meet writes nothing, not the dead-path            bottom"
+          (Ws.equal cell (Ws.singleton (w32 5)));
+        check "A: the env is unchanged by the empty meet" (AI.equal refined entry));
+
     (* T5-3 (the T12 ruling): a bounded runtime SP adjustment is NOT a VLA
        — no allocation event; an unbounded size is the event. *)
     pin "INT-10"
@@ -1125,14 +1157,14 @@ let tests : unit Alcotest.test list =
         let h = Tid.for_name "lm_steps_head" in
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
-          ~is_upper:true ~dist:10;
+          ~is_upper:true ~warmed:false ~dist:10;
         check "LM steps: a just-recorded entry waits for a second measurement"
           (match Cbat_landmarks.steps lm h lw with
            | `Zero -> true
            | _ -> false);
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
-          ~is_upper:true ~dist:6;
+          ~is_upper:true ~warmed:false ~dist:6;
         check "LM steps: the closer reading fires the steps ((6) / (10 - 6) = 1)"
           (match Cbat_landmarks.steps lm h lw with
            | `Finite 1 -> true
@@ -1146,13 +1178,13 @@ let tests : unit Alcotest.test list =
         let h = Tid.for_name "lm_stale_head" in
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
-          ~is_upper:true ~dist:10;
+          ~is_upper:true ~warmed:false ~dist:10;
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 200)
-          ~is_upper:true ~dist:5;
+          ~is_upper:true ~warmed:false ~dist:5;
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 200)
-          ~is_upper:true ~dist:4;
+          ~is_upper:true ~warmed:false ~dist:4;
         check "LM steps: the live entry still fires ((4) / (5 - 4) = 4)"
           (match Cbat_landmarks.steps lm h lw with
            | `Finite 4 -> true
@@ -1167,11 +1199,11 @@ let tests : unit Alcotest.test list =
         let h = Tid.for_name "lm_rotate_head" in
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
-          ~is_upper:true ~dist:10;
+          ~is_upper:true ~warmed:false ~dist:10;
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.record lm ~key:lw ~head:h ~bound:(w32 100)
-          ~is_upper:true ~dist:5;
+          ~is_upper:true ~warmed:false ~dist:5;
         check "LM steps: the reading after an empty round still pairs ((5) / (10 - 5) = 1)"
           (match Cbat_landmarks.steps lm h lw with
            | `Finite 1 -> true
@@ -1243,7 +1275,7 @@ let tests : unit Alcotest.test list =
         in
         for i = 0 to 99 do
           Cbat_landmarks.record lm ~head:h ~key:(cell i) ~bound:(w64 i)
-            ~is_upper:true ~dist:1
+            ~is_upper:true ~warmed:false ~dist:1
         done;
         let count which =
           List.fold_left
@@ -1255,7 +1287,7 @@ let tests : unit Alcotest.test list =
         let cells = count (function Cbat_landmarks.Cell _ -> true | _ -> false) in
         for i = 0 to 99 do
           Cbat_landmarks.record lm ~head:h ~key:lw
-            ~bound:(w64 i) ~is_upper:true ~dist:1
+            ~bound:(w64 i) ~is_upper:true ~warmed:false ~dist:1
         done;
         let words =
           count (function Cbat_landmarks.Word _ -> true | _ -> false)
@@ -1270,10 +1302,10 @@ let tests : unit Alcotest.test list =
         let h = Tid.for_name "lm_upsert_head" in
         let lm = Cbat_landmarks.create () in
         Cbat_landmarks.record lm ~head:h ~key:lw ~bound:(w64 7)
-          ~is_upper:true ~dist:10;
+          ~is_upper:true ~warmed:false ~dist:10;
         Cbat_landmarks.advance_head lm h;
         Cbat_landmarks.record lm ~head:h ~key:lw ~bound:(w64 7)
-          ~is_upper:true ~dist:6;
+          ~is_upper:true ~warmed:false ~dist:6;
         check "LM table: one entry per (bound, upper); 6 wins and 10 is the history"
           (match Cbat_landmarks.entries lm h lw with
            | [ e ] -> (

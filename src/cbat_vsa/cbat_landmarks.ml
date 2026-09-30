@@ -155,8 +155,13 @@ let upsert (entries : lm_entry list) (entry : lm_entry) : lm_entry list =
   else entries @ [ entry ]
 
 let record (t : t) ~(head : Tid.t) ~(key : key) ~(bound : Cbat_word.t)
-    ~(is_upper : bool) ~(dist : int) : unit =
-  let entry = { bound; is_upper; dist = Some dist; dist_p = None } in
+    ~(is_upper : bool) ~(warmed : bool) ~(dist : int) : unit =
+  (* A narrowed entry is never fresh: it carries its own reading as the
+     prior, so it cannot hold a head in the non-widening [Zero] arm; a
+     closer later reading pairs against it. *)
+  let entry =
+    { bound; is_upper; dist = Some dist;
+      dist_p = if warmed then Some dist else None } in
   let rows = Option.value (Hashtbl.find t.rows head) ~default:[] in
   let rows =
     if Option.is_some (find_row t head key) then
@@ -192,12 +197,14 @@ let record_excluded (t : t) ~(head : Tid.t) ~(key : key)
     if Cbat_word.(<) p_max c_min then begin
       (* Set below the boundary: upper landmark. *)
       let d = distance_words p_max c_min in
-      record t ~head ~key ~bound:c_min ~is_upper:true ~dist:(cap_distance d);
+      record t ~head ~key ~bound:c_min ~is_upper:true ~warmed:false
+        ~dist:(cap_distance d);
       true
     end else if Cbat_word.(>) p_min c_max then begin
       (* Set above the boundary: lower landmark. *)
       let d = distance_words c_max p_min in
-      record t ~head ~key ~bound:c_max ~is_upper:false ~dist:(cap_distance d);
+      record t ~head ~key ~bound:c_max ~is_upper:false ~warmed:false
+        ~dist:(cap_distance d);
       true
     end else false
   | _ -> false
@@ -209,15 +216,18 @@ let record_narrowed (t : t) ~(head : Tid.t) ~(key : key)
   match Cbat_clp_set_composite.min_elem p, Cbat_clp_set_composite.max_elem p,
         Cbat_clp_set_composite.min_elem m, Cbat_clp_set_composite.max_elem m with
   | Some p_min, Some p_max, Some m_min, Some m_max ->
+#ifdef VSA_DEBUG
+    bump_steps (Printf.sprintf "recorded.%s.narrowed" (kind_of_key key));
+#endif
     if Cbat_word.(<) p_min m_min then begin
       let bound = Cbat_word.pred m_min in
       let d = distance_words p_min bound in
-      record t ~head ~key ~bound ~is_upper:false ~dist:(cap_distance d);
+      record t ~head ~key ~bound ~is_upper:false ~dist:(cap_distance d) ~warmed:true;
       true
     end else if Cbat_word.(>) p_max m_max then begin
       let bound = Cbat_word.succ m_max in
       let d = distance_words bound p_max in
-      record t ~head ~key ~bound ~is_upper:true ~dist:(cap_distance d);
+      record t ~head ~key ~bound ~is_upper:true ~dist:(cap_distance d) ~warmed:true;
       true
     end else false
   | _ -> false
