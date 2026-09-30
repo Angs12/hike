@@ -347,21 +347,26 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     (match section_image_load ~addr ~endian:e ~bits:res_size mv with
     | Some ws -> return_imm ws
     | None ->
-      if WordSet.splits_by addr (Cbat_word.of_int ~width:res_size (Size.in_bytes s))
-      then
-        (match Mem.Key.of_wordset addr with
-         | [] -> return_imm @@ WordSet.bottom res_size
-         | k0 :: ks' ->
-           (* The first cell's data seeds the fold: join's identity is
-              the seed, so a stored relative value reads back with its
-              origin, and multi-cell joins merge per the algebra. *)
-           return_imm
-           @@ Base.List.fold ks'
-                 ~init:(Mem.find (res_size, e) mv k0 |> Mem.Val.data)
-                 ~f:(fun acc k ->
-                     WordSet.join acc
-                       (Mem.find (res_size, e) mv k |> Mem.Val.data)))
-      else return_imm @@ WordSet.top res_size)
+      (* The read joins the cells the bounded address set can touch: a
+         strided set names its slots, a contiguous band's range key
+         covers the read (find' expands the query by the size).  A
+         bounded set no key names reads bottom on a bottom memory (the
+         path is already dead) and top — the sound identity — on a
+         live one; top also when nothing bounds the address. *)
+      (match Mem.Key.of_wordset addr with
+       | [] ->
+         if Mem.is_bottom mv then return_imm @@ WordSet.bottom res_size
+         else return_imm @@ WordSet.top res_size
+       | k0 :: ks' ->
+         (* The first cell's data seeds the fold: join's identity is
+            the seed, so a stored relative value reads back with its
+            origin, and multi-cell joins merge per the algebra. *)
+         return_imm
+         @@ Base.List.fold ks'
+               ~init:(Mem.find (res_size, e) mv k0 |> Mem.Val.data)
+               ~f:(fun acc k ->
+                   WordSet.join acc
+                     (Mem.find (res_size, e) mv k |> Mem.Val.data))))
   | Bil.Store (m, a, u, e, s) ->
     Type.infer u >>= fun u_typ ->
     let sz = Size.in_bits s in
@@ -377,9 +382,10 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
     then return_mem @@ Mem.top (Mem.get_idx mv)
     else
     
-    let v' = if WordSet.splits_by addr (Cbat_word.of_int ~width:sz (Size.in_bytes s))
-      then v else WordSet.top sz in
-    let data = Mem.Val.create v' e in
+    (* The cell keyed by the bounded address set holds the written
+       value joined over the set — the same over-approximation the
+       strided store makes per slot. *)
+    let data = Mem.Val.create v e in
     return_mem
       @@ Base.List.fold (Mem.Key.of_wordset addr) ~init:mv
            ~f:(fun mv key -> Mem.add mv ~key ~data)
