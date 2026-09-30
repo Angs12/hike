@@ -33,7 +33,10 @@ val gc : t -> keep:Core.Int.Set.t -> t
 
 val selective_widen_extrapolate : head:Tid.t -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> steps:int -> t -> t -> t
 
-(* No head-level steps: the words widen, each cell still runs its own arm. *)
+(* The head's arm is Zero: advance-and-join per key. *)
+val advance_join_landmarks : head:Tid.t -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> t -> t -> t
+
+(* No head-level steps: the keys widen, each still reading its own row. *)
 val widen_with_landmarks : head:Tid.t -> landmarks:Cbat_landmarks.t -> need:Core.Int.Set.t -> t -> t -> t
 
 (* Top every word key not in [preserved]; the memories stay. *)

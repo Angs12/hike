@@ -117,15 +117,54 @@ let widen_join (e1 : t) (e2 : t) : t =
 
 
 
-(* The landmark walk: each key widens by its OWN arm.  [steps] is the
-   head's step count when its arm is Finite; [None] when the head's arm is
-   Inf — then the words widen and each cell still runs its own three-way. *)
+(* The one consumption rule, per key.  The head's arm decides the
+   round: [Zero] advances every key's own row and joins — the non-
+   widening arm, no extrapolation on it; [Finite n]/[Inf] let a key
+   read its own row first.  A key whose own arm is [Finite n_own]
+   extrapolates by [n_own] (the head's [n] otherwise) and spends its
+   own row on the translated answer.  A key whose own arm is [Zero]
+   advances and takes its kind's Zero action — [zero_action], the
+   word's tuned join vs the cell's loop-stabilizing widen. *)
+let consume_arm ~(head : Tid.t) ~(landmarks : Cbat_landmarks.t)
+    ~(key : Cbat_landmarks.key) ~(head_arm : Cbat_landmarks.arm)
+    ~(extrapolate : steps:int -> ('v * bool))
+    ~(zero_action : unit -> 'v) ~(widen : unit -> 'v) : 'v =
+  let extr n =
+    let v, translated = extrapolate ~steps:n in
+    if translated then Cbat_landmarks.clear_key landmarks head key;
+    v
+  in
+  (match Cbat_landmarks.steps landmarks head key with
+   | `Finite n -> extr n
+   | `Zero -> Cbat_landmarks.advance landmarks head key; zero_action ()
+   | `Inf ->
+     (match head_arm with
+      | Cbat_landmarks.Finite n ->
+        (* The head's steps are the fallback computation of [n]; a cell
+           with no own answer plain-widens — a word-steps translation
+           of cell data undershoots growing cells and grinds the
+           fixpoint. *)
+        widen ()
+      | Cbat_landmarks.Inf -> widen ()
+      | Cbat_landmarks.Zero -> assert false))
+
+(* The landmark walk: each key consumes its OWN row; the head's arm is
+   the fallback, never a scope. *)
 let walk_landmarks ~(head : Tid.t)
     ~(landmarks : Cbat_landmarks.t)
-    ~(need : Int.Set.t) ~(steps : int option) (e1 : t) (e2 : t) : t =
+    ~(need : Int.Set.t) ~(arm : Cbat_landmarks.arm) (e1 : t) (e2 : t) : t =
   if WordEnv.equal e1.words WordEnv.bottom then e2
   else if WordEnv.equal e2.words WordEnv.bottom then e1
   else if Core.Set.is_empty need then join e1 e2
+  else if Cbat_landmarks.equal_arm arm Cbat_landmarks.Zero then begin
+    (* The non-widening arm: the head's own consumption — every row at
+       the head advances (a row outside [need] would otherwise hold
+       [steps_head] in Zero forever), and the value is the plain
+       join. *)
+    List.iter (Cbat_landmarks.keys_at landmarks head)
+      ~f:(Cbat_landmarks.advance landmarks head);
+    join e1 e2
+  end
   else
     let words =
       WordEnv.fold e1.words ~init:WordEnv.top ~f:(fun ~key ~data:data_old acc ->
@@ -137,26 +176,26 @@ let walk_landmarks ~(head : Tid.t)
             if not (Core.Set.mem need (Cbat_var_id.base_of key)) then
               WordSet.join data_old data_new
             else
-              match steps with
-              | None -> WordSet.widen_join data_old data_new
-              | Some n -> (
-                match
-                  Cbat_landmarks.extrapolate ~steps:n ~old:data_old
-                    ~new_:data_new
-                    ~entries:
-                      (Cbat_landmarks.entries landmarks head
-                         (Cbat_landmarks.Word (Cbat_var_id.var_of key)))
-                with
-                | `Extrapolated d -> d
-                | `Widen -> WordSet.widen_join data_old data_new)
+              consume_arm ~head ~landmarks
+                ~key:(Cbat_landmarks.Word (Cbat_var_id.var_of key))
+                ~head_arm:arm
+                ~extrapolate:(fun ~steps:n ->
+                    match
+                      Cbat_landmarks.extrapolate ~steps:n ~old:data_old
+                        ~new_:data_new
+                        ~entries:
+                          (Cbat_landmarks.entries landmarks head
+                             (Cbat_landmarks.Word (Cbat_var_id.var_of key)))
+                    with
+                    | `Extrapolated d -> (d, true)
+                    | `Widen -> (WordSet.widen_join data_old data_new, false))
+                ~zero_action:(fun () -> WordSet.join data_old data_new)
+                ~widen:(fun () -> WordSet.widen_join data_old data_new)
           in
           if WordSet.is_top data_res then acc
           else WordEnv.add acc ~key ~data:data_res)
     in
     let memories =
-      (* Each cell widens by its OWN entries' three-way — Finite
-         translates, Zero advances and joins, Inf plain-widens; a cell
-         without own entries plain-widens. *)
       MemEnv.fold e1.memories ~init:MemEnv.top
         ~f:(fun ~key:mv ~data:old acc ->
             let idx = Mem.get_idx old in
@@ -167,28 +206,25 @@ let walk_landmarks ~(head : Tid.t)
                 if Mem.Val.equal v1 v2 then Mem.Val.widen_join v1 v2
                 else
                   let cl = Cbat_landmarks.Cell (Mem.Key.cell_key ck) in
-                  match Cbat_landmarks.entries landmarks head cl with
-                  | [] -> Mem.Val.widen_join v1 v2
-                  | entries ->
-                    (match Cbat_landmarks.steps landmarks head cl with
-                     | `Zero ->
-                       Cbat_landmarks.advance landmarks head cl;
-                       Mem.Val.widen_join v1 v2
-                     | `Inf -> Mem.Val.widen_join v1 v2
-                     | `Finite n ->
-                       let data_old = Mem.Val.data v1 in
-                       let data_new = Mem.Val.data v2 in
-                       let data =
-                         match
-                           Cbat_landmarks.extrapolate ~steps:n ~old:data_old
-                             ~new_:data_new ~entries
-                         with
-                         | `Extrapolated d -> d
-                         | `Widen -> WordSet.widen_join data_old data_new
-                       in
-                       Cbat_landmarks.clear_key landmarks head cl;
-                       let _, e = Mem.Val.get_idx v2 in
-                       Mem.Val.create data e)
+                  let data_old = Mem.Val.data v1 in
+                  let data_new = Mem.Val.data v2 in
+                  let data =
+                    consume_arm ~head ~landmarks ~key:cl ~head_arm:arm
+                      ~extrapolate:(fun ~steps:n ->
+                          match
+                            Cbat_landmarks.extrapolate ~steps:n
+                              ~old:data_old ~new_:data_new
+                              ~entries:
+                                (Cbat_landmarks.entries landmarks head cl)
+                          with
+                          | `Extrapolated d -> (d, true)
+                          | `Widen -> (WordSet.widen_join data_old data_new, false))
+                      ~zero_action:(fun () ->
+                          WordSet.widen_join data_old data_new)
+                      ~widen:(fun () -> WordSet.widen_join data_old data_new)
+                  in
+                  let _, e = Mem.Val.get_idx v2 in
+                  Mem.Val.create data e
               in
               MemEnv.add acc ~key:mv
                 ~data:(Mem.widen_join_op extr old nw)
@@ -196,13 +232,18 @@ let walk_landmarks ~(head : Tid.t)
     in
     { memories; words }
 
-(* Extrapolate [need]'s vars by [steps]; each cell runs its own arm. *)
+(* Extrapolate [need]'s keys by [steps]; each key still reads its own
+   row first. *)
 let selective_widen_extrapolate ~head ~landmarks ~need ~steps e1 e2 =
-  walk_landmarks ~head ~landmarks ~need ~steps:(Some steps) e1 e2
+  walk_landmarks ~head ~landmarks ~need ~arm:(Cbat_landmarks.Finite steps) e1 e2
 
-(* No head-level steps: the words widen, each cell still runs its own arm. *)
+(* The head has no steps: the keys widen, each still reading its own row. *)
 let widen_with_landmarks ~head ~landmarks ~need e1 e2 =
-  walk_landmarks ~head ~landmarks ~need ~steps:None e1 e2
+  walk_landmarks ~head ~landmarks ~need ~arm:Cbat_landmarks.Inf e1 e2
+
+(* The head's arm is Zero: advance-and-join per key. *)
+let advance_join_landmarks ~head ~landmarks ~need e1 e2 =
+  walk_landmarks ~head ~landmarks ~need ~arm:Cbat_landmarks.Zero e1 e2
 
 let meet (e1 : t) (e2 : t) : t =
   let memories = MemEnv.meet e1.memories e2.memories in

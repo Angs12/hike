@@ -1,10 +1,9 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-78`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-83`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
-the backward pins come first (`BK-01`…`BK-56`), the seed pins after
-(`BK-57`…`BK-78`).  Every source `check` site is carried as one pin; none
+the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
 retired (`L3c2-6` carried no assertion and is not a site).
 
 There is **no `Test_seam`** for this lane, so the disable recipes below are textual inversions

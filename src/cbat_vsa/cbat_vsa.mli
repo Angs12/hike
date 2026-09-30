@@ -218,7 +218,7 @@ module Test_seam : sig
   (* One backward rule per node kind, the mirror of the forward transfer —
      the forward transfer — env + expression + the constraint the value
      must satisfy -> the refined env. *)
-  val constrain_operands : env:AI.t -> ?cells:Cbat_backward.pending_cell list ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
+  val constrain_operands : env:AI.t -> ?cells:Cbat_backward.pending list ref -> ?nonneg:(exp -> bool) -> landmarks:Cbat_landmarks.t -> exp -> WordSet.t -> AI.t
 
   (* One fixpoint run's context: the static per-block facts, the
      convention facts, and the run's mutable state. *)

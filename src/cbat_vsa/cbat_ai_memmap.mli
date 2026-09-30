@@ -42,6 +42,10 @@ module Key : sig
 
   (* Key ranges share at least one address. *)
   val overlap : t -> t -> bool
+
+  (* The touched byte hull of a read anchored at [k]: the address hull
+     grown by the access size. *)
+  val expand : t -> bytes:int -> t
 end
 
 

@@ -43,6 +43,10 @@ val piece : t -> lo:point -> hi:point -> t
 val interval_diff : t -> t -> t list
 val gaps : 'a -> t -> (t * 'a) seq -> (t * 'a) seq
 val overlap : t -> t -> bool
+
+(* The touched byte hull of a read anchored at [k]: the address hull
+   grown by the access size. *)
+val expand : t -> bytes:int -> t
 (* One key per piece of the value's address line (capped at the piece
    union's cap); every fanned entry stores the full value. *)
 val of_wordset : Cbat_clp_set_composite.t -> t list

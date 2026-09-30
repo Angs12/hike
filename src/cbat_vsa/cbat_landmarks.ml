@@ -114,22 +114,6 @@ let keys_at (t : t) (h : Tid.t) : key list =
   Option.value_map (Hashtbl.find t.rows h) ~default:[]
     ~f:(List.map ~f:(fun r -> r.key))
 
-(* Drop [h]'s word rows: the head's word arm consumed them.  A cell's rows
-   are its own — each is dropped by the cell arm that extrapolated with it
-   — so a word extrapolation does not spend them.  Rows are only ever
-   recorded at a head ([with_widening_head] names one), so there is nothing
-   to sweep beyond [h]. *)
-let clear_words (t : t) (h : Tid.t) : unit =
-  match Hashtbl.find t.rows h with
-  | None -> ()
-  | Some rows ->
-    let rows =
-      List.filter rows ~f:(fun r ->
-          match r.key with Word _ -> false | Cell _ -> true)
-    in
-    if List.is_empty rows then Hashtbl.remove t.rows h
-    else Hashtbl.set t.rows ~key:h ~data:rows
-
 (* No entry cap.  The upsert keeps one entry per (bound, is_upper) with the
    smallest distance, so a row grows only with the distinct boundaries its
    key is measured against — and the same-line acquisition guard is what
@@ -312,10 +296,22 @@ let steps (t : t) (h : Tid.t) (key : key) :
 #endif
   answer
 
+(* The arm a key consumes: extrapolate by [Finite n] steps, advance and
+   join on [Zero], plain-widen on [Inf]. *)
+type arm = Finite of int | Zero | Inf
+
+let equal_arm (a : arm) (b : arm) : bool =
+  match a, b with
+  | Zero, Zero | Inf, Inf -> true
+  | Finite x, Finite y -> Int.equal x y
+  | _ -> false
+
 (* The head's own arm: its word keys' entries folded, so the caller's
-   decision keeps the shape it had when the table was per head.  A
-   variable's own arm is [steps]. *)
-let steps_head (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf ] =
+   decision keeps the shape it had when the table was per head.  It is
+   the FALLBACK a key consumes when its own arm is [Inf] — a
+   computation of [n], never a scope change: consumption is always the
+   key's own row. *)
+let head_arm (t : t) (h : Tid.t) : arm =
   let lst =
     List.concat_map (keys_at t h) ~f:(fun k ->
         match k with Word _ -> entries t h k | Cell _ -> [])
@@ -324,7 +320,10 @@ let steps_head (t : t) (h : Tid.t) : [> `Zero | `Finite of int | `Inf ] =
 #ifdef VSA_DEBUG
   note_steps "head" lst answer;
 #endif
-  answer
+  match answer with
+  | `Finite n -> Finite n
+  | `Zero -> Zero
+  | `Inf -> Inf
 
 (* The rotation: the current reading becomes the previous one.  An entry
    with no fresh reading keeps the history it holds — erasing it would
@@ -339,11 +338,6 @@ let rotate (entries : lm_entry list) : unit =
 (* Commit one key's current distances as previous. *)
 let advance (t : t) (h : Tid.t) (key : key) : unit =
   Option.iter (find_row t h key) ~f:(fun r -> rotate r.entries)
-
-(* Commit every key recorded at [h]: the head-wide advance the word arm
-   asks for is the fold, not a second rule. *)
-let advance_head (t : t) (h : Tid.t) : unit =
-  List.iter (keys_at t h) ~f:(fun key -> advance t h key)
 
 (* Drop one key's entries. *)
 let clear_key (t : t) (h : Tid.t) (key : key) : unit =

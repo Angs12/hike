@@ -29,14 +29,25 @@ type cell_desc = {
    variable (a versioned var names the same abstract value). *)
 type key = Word of var | Cell of cell_desc
 
+(* The key's equality: a versioned word var names the same abstract
+   value as its base; cells compare by their descriptor. *)
+val equal_key : key -> key -> bool
+
 (* The per-solve landmark table. *)
 type t
 
 (* One fresh table per solve. *)
 val create : unit -> t
 
-(* Drop [h]'s word rows: the head's word arm consumed them. *)
-val clear_words : t -> Tid.t -> unit
+(* The arm a key consumes: extrapolate by [Finite n] steps, advance and
+   join on [Zero], plain-widen on [Inf]. *)
+type arm = Finite of int | Zero | Inf
+
+val equal_arm : arm -> arm -> bool
+
+(* The head's own arm — its word keys' entries folded.  It is the
+   fallback a key consumes when its own arm is [Inf]. *)
+val head_arm : t -> Tid.t -> arm
 
 (* Record an excluded behavior's boundary at the enclosing head; [true]
    when a landmark was recorded. *)
@@ -50,11 +61,10 @@ val entries : t -> Tid.t -> key -> lm_entry list
 (* Every key recorded at [head], oldest row first. *)
 val keys_at : t -> Tid.t -> key list
 
-(* Steps until the closest landmark; Zero needs another measurement, Inf
-   widens.  Per key, and per head: [steps_head] folds the head's word
-   keys so a caller that decides for the whole state keeps one answer. *)
+(* A key's own arm: the steps until its closest landmark; Zero needs
+   another measurement, Inf has no own answer (the head's arm is the
+   fallback). *)
 val steps : t -> Tid.t -> key -> [> `Zero | `Finite of int | `Inf ]
-val steps_head : t -> Tid.t -> [> `Zero | `Finite of int | `Inf ]
 
 (* Record a landmark for [key] at [head]. *)
 val record :
@@ -70,8 +80,7 @@ val record :
 (* Commit [key]'s current distances as previous. *)
 val advance : t -> Tid.t -> key -> unit
 
-(* Commit every key recorded at [head]. *)
-val advance_head : t -> Tid.t -> unit
+
 
 (* Drop [key]'s entries. *)
 val clear_key : t -> Tid.t -> key -> unit

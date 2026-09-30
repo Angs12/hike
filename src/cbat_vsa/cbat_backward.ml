@@ -631,13 +631,41 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
    cast's extent widening, a leaf var's meet, a comparison's polarity
    windows.  A node with no closed-form inverse takes identity; a
    genuinely empty pre-image is the dead edge. *)
-(* A cell fact awaiting delivery to the same-block store that wrote
-   it. *)
-type pending_cell = {
-  pc_mem : var;          (* the memory var *)
-  pc_key : Mem.Key.t;    (* the key the load read *)
-  pc_cstr : wordset;     (* the produced value's constraint *)
-}
+(* The ONE pending-constraint map's entry: a constraint awaiting
+   delivery to the producer that wrote it, keyed by what it constrains
+   — a word var, or the byte range a load read.  A word entry dies at
+   its var's def; a cell entry at the store that overwrites its range
+   (a shape-matching one delivers, any overlapping one blocks the
+   boundary carry).  An entry no def consumes crosses the block
+   boundary into the edge state. *)
+type pending =
+  | PW of var * wordset
+  | PC of {
+      pm : var;              (* the memory var *)
+      prange : Mem.Key.t;    (* the read's touched byte range *)
+      pc : wordset;          (* the produced value's constraint *)
+      pbits : int;           (* the read's width *)
+      pendian : endian;      (* the read's endianness *)
+    }
+
+let pending_key (p : pending) : Cbat_landmarks.key =
+  match p with
+  | PW (v, _) -> Cbat_landmarks.Word v
+  | PC { prange; _ } -> Cbat_landmarks.Cell (Mem.Key.cell_key prange)
+
+(* The first entry at [key], paired with the other entries. *)
+let pending_take (key : Cbat_landmarks.key) (ps : pending list)
+    : (pending * pending list) option =
+  let rec go = function
+    | [] -> None
+    | p :: rest ->
+      if Cbat_landmarks.equal_key (pending_key p) key then Some (p, rest)
+      else
+        match go rest with
+        | Some (q, r) -> Some (q, p :: r)
+        | None -> None
+  in
+  go ps
 
 (* THE one leaf meet, keyed by what it constrains (a variable, or a
    memory cell) — the policy both lanes share.  Every meet is acquired
@@ -719,7 +747,7 @@ let bounded_cell_key (ws : wordset) : Mem.Key.t list =
   else Mem.Key.of_wordset ws
 
 let rec constrain_operands ~(env : AI.t)
-    ?(cells : pending_cell list ref = ref [])
+    ?(cells : pending list ref = ref [])
     ?(nonneg : exp -> bool = fun _ -> false)
     ~(landmarks : Cbat_landmarks.t)
     (e : exp) (produced : wordset) : AI.t =
@@ -787,7 +815,10 @@ let rec constrain_operands ~(env : AI.t)
   | Bil.Let (_, _, body) -> constrain_operands ~env ~cells ~nonneg ~landmarks body produced
   | Bil.Load (m, a, en, s) ->
     (* The cell fact meets the env's memory and threads to the store
-       that wrote it. *)
+       that wrote it; the entry carries the touched byte range (the
+       address denotation expanded by the read size) and the read's
+       endianness, so the store match compares the read's whole
+       shape. *)
     let env = constrain_cell_on_trace ~landmarks ~env ~mem:m ~addr:a ~size:s ~endian:en produced in
     (match m with
      | Bil.Var mv ->
@@ -795,45 +826,63 @@ let rec constrain_operands ~(env : AI.t)
         | Ok aws ->
           List.iter (bounded_cell_key aws)
             ~f:(fun k ->
-               cells := { pc_mem = mv; pc_key = k; pc_cstr = produced } :: !cells)
+               cells := PC { pm = mv;
+                             prange = Mem.Key.expand k ~bytes:(Size.in_bytes s);
+                             pc = produced;
+                             pbits = Size.in_bits s;
+                             pendian = en }
+                     :: !cells)
         | Error _ -> ())
      | _ -> ());
     env
-  | Bil.Store (m, a, u, _en, s) ->
-    (* The store carries the pending cell's constraint into its data,
-       met against the written value; no match: identity. *)
+  | Bil.Store (m, a, u, en, s) ->
+    (* The store consumes the first pending entry whose range it
+       overwrites: the constraint speaks about the store's data or
+       about nothing.  A shape-matching entry (same width, same
+       endianness) delivers into the written value, met against the
+       stored data's denotation; a shape-mismatched one is dropped —
+       the written bytes reassembled under another shape bound no
+       value.  The overlap match (no equality) is sound by the join
+       ruling: docs/adr/0025-the-join-ruling.md. *)
     (match m with
      | Bil.Var mv ->
        (match !cells with
         | [] -> env
         | pending ->
-          let res_size = Size.in_bits s in
           let ks =
             Base.Result.ok (denote_imm_exp a env)
             |> Base.Option.value_map ~default:[] ~f:bounded_cell_key in
           (match ks with
            | [] -> env
            | ks ->
+             let overwrites (p : pending) : bool =
+               match p with
+               | PC { pm; prange; _ } ->
+                 Var.same pm mv
+                 && List.exists ks ~f:(fun k -> Mem.Key.overlap k prange)
+               | PW _ -> false in
              let rec take pending = match pending with
                | [] -> None
-               | cell :: rest ->
-                 if Var.same cell.pc_mem mv
-                    && WordSet.bitwidth cell.pc_cstr = res_size
-                    && List.exists ks ~f:(fun k -> Mem.Key.overlap k cell.pc_key)
-                 then Some (cell, rest)
+               | p :: rest ->
+                 if overwrites p then Some (p, rest)
                  else
                    (match take rest with
-                    | Some (cell', rest') -> Some (cell', cell :: rest')
+                    | Some (q, r) -> Some (q, p :: r)
                     | None -> None) in
              (match take pending with
               | None -> env
-              | Some (cell, rest) ->
+              | Some (p, rest) ->
                 cells := rest;
-                let data_cstr =
-                  Option.value_map (Base.Result.ok (denote_imm_exp u env))
-                    ~default:cell.pc_cstr ~f:(WordSet.meet cell.pc_cstr) in
-                if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
-                else constrain_operands ~env ~cells ~nonneg ~landmarks u data_cstr)))
+                match p with
+                | PC c
+                  when c.pbits = Size.in_bits s
+                       && Bitvector.compare_endian c.pendian en = 0 ->
+                  let data_cstr =
+                    Option.value_map (Base.Result.ok (denote_imm_exp u env))
+                      ~default:c.pc ~f:(WordSet.meet c.pc) in
+                  if Cbat_word.is_zero (WordSet.cardinality data_cstr) then env
+                  else constrain_operands ~env ~cells ~nonneg ~landmarks u data_cstr
+                | _ -> env)))
      | _ -> env)
   | Bil.BinOp (Bil.AND, a, b) when WordSet.bitwidth produced = 1 ->
     (* AND = true constrains both operands. *)
@@ -885,7 +934,7 @@ let rec constrain_operands ~(env : AI.t)
   | Bil.Unknown _ -> env
 
 (* The produced {1} windows the operands by the ordering decision. *)
-and cmp_inverse ~(env : AI.t) ~(cells : pending_cell list ref)
+and cmp_inverse ~(env : AI.t) ~(cells : pending list ref)
     ~(landmarks : Cbat_landmarks.t)
     ~(nonneg : exp -> bool)
     (op : Bil.binop) (a : exp) (b : exp) : AI.t =
@@ -972,36 +1021,133 @@ let constrain_edge ~(env : AI.t) ~(landmarks : Cbat_landmarks.t)
 (* Var→constraint map; a constraint is consumed at its var's def. *)
 type live_map = wordset Var.Map.t
 
-(* The walk entry: the seeds pushed through the block's defs backwards.
-   Each def's incoming constraint is its var's live entry met with the
-   def's produced value; reads take the def's PREFIX state overlaid
-   with [live].  [~raw] applies the constraint AS GIVEN, skipping the
-   producer subtraction — the acquisition's hypothetical; raw walks
-   write nothing, only the empty-meet observations fire. *)
-(* Constraints on vars the block never defines cross unchanged. *)
-let carry_undefined ~(raw : bool) (live : wordset Var.Map.t)
-    (env : AI.t) : AI.t =
-  Core.Map.fold live ~init:env ~f:(fun ~key:v ~data:c acc ->
-      if raw then acc
-      else
-        match Var.typ v with
-        | Type.Imm w when WordSet.bitwidth c = w ->
-          let cur = AI.find_word w acc v in
-          let m = WordSet.meet cur c in
-          if (not (Cbat_word.is_zero (WordSet.cardinality m)))
-             && WordSet.precedes m cur
-          then AI.add_word acc ~key:v ~data:m
-          else acc
-        | _ -> acc)
-
 (* A produced-width dummy for mem defs: their constraint derivation reads
-   ~cells, never the width. *)
+   the pending map, never the width. *)
 let undefined_width = WordSet.bottom 8
 
 let strictly_precedes (narrow : wordset) (wide : wordset) : bool =
   WordSet.precedes narrow wide && not (WordSet.equal narrow wide)
 
-let walk ?(raw : bool = false)
+(* The walk's mutable delivery state; the writer locus owns it, the
+   observer never writes through it. *)
+type walk_state = {
+  env_out : AI.t ref;
+  pending : pending list ref;
+  confined : Cbat_landmarks.key list ref;
+  mem_vars : var list;
+  landmarks : Cbat_landmarks.t;
+}
+
+(* The walk's delivery locus: what a delivered constraint does.  ONE
+   walk serves both callers — the state-writer confines the edge state
+   by every producer (the subtraction at each def, the write-backs, the
+   boundary carry of what no def consumed); the observer drops every
+   write: its walk exists for the leaf meets the seeds fire on the way,
+   so its constraints apply as given and no path is claimed dead. *)
+type locus = {
+  at_def : post:wordset -> cstr:wordset -> wordset option;
+  invert_mem : pending list -> bool;
+  confine : walk_state -> var -> int -> wordset -> unit;
+  commit : walk_state -> AI.t -> unit;
+  harvest : walk_state -> base:AI.t -> env:AI.t -> rhs:exp -> unit;
+  carry : walk_state -> AI.t -> AI.t;
+}
+
+(* The state-writer: the edge state is the product. *)
+let writer_locus : locus =
+  let at_def ~post ~cstr =
+    let m = WordSet.meet cstr post in
+    if Cbat_word.is_zero (WordSet.cardinality m) then None else Some m
+  in
+  let invert_mem (ps : pending list) =
+    List.exists ps ~f:(fun p ->
+        match p with PC _ -> true | PW _ -> false)
+  in
+  let confine (st : walk_state) (v : var) (w : int) (cstr' : wordset) =
+    let key = Cbat_landmarks.Word v in
+    if not (List.exists !(st.confined) ~f:(Cbat_landmarks.equal_key key)) then begin
+      st.confined := key :: !(st.confined);
+      let cur = AI.find_word w !(st.env_out) v in
+      let m = WordSet.meet cur cstr' in
+      if (not (Cbat_word.is_zero (WordSet.cardinality m)))
+         && WordSet.precedes m cur
+      then st.env_out := AI.add_word !(st.env_out) ~key:v ~data:m
+    end
+  in
+  let commit (st : walk_state) (env' : AI.t) =
+    List.iter st.mem_vars ~f:(fun m ->
+        match Var.typ m with
+        | Type.Mem (ai, asz) ->
+          let k = mem_idx ai asz in
+          st.env_out := AI.add_memory !(st.env_out) ~key:m
+              ~data:(AI.find_memory k env' m)
+        | _ -> ())
+  in
+  let harvest (st : walk_state) ~(base : AI.t) ~(env : AI.t) ~(rhs : exp) =
+    Core.Set.fold (Exp.free_vars rhs) ~init:() ~f:(fun () v ->
+        match Var.typ v with
+        | Type.Imm w ->
+          let before = AI.find_word w base v in
+          let after = AI.find_word w env v in
+          if (not (WordSet.is_bottom after)) && strictly_precedes after before
+          then
+            st.pending := PW (v, after)
+                         :: List.filter !(st.pending) ~f:(fun p ->
+                                match p with
+                                | PW (v', _) -> not (Var.same v v')
+                                | PC _ -> true)
+        | _ -> ())
+  in
+  let carry (st : walk_state) (env : AI.t) : AI.t =
+    List.fold !(st.pending) ~init:env ~f:(fun acc p ->
+        match p with
+        | PW (v, c) ->
+          (match Var.typ v with
+           | Type.Imm w when WordSet.bitwidth c = w ->
+             let cur = AI.find_word w acc v in
+             let m = WordSet.meet cur c in
+             if (not (Cbat_word.is_zero (WordSet.cardinality m)))
+                && WordSet.precedes m cur
+             then AI.add_word acc ~key:v ~data:m
+             else acc
+           | _ -> acc)
+        | PC c ->
+          (* No store in the block overwrote the range, so the value
+             the load read is the value the block entered with: the
+             constraint crosses the boundary through the one leaf
+             rule. *)
+#ifdef VSA_DEBUG
+          Cbat_attr_census.bump "carry.cell.crossed";
+#endif
+
+          (match Var.typ c.pm with
+           | Type.Mem (ai, asz) ->
+             let k = mem_idx ai asz in
+             let mv = AI.find_memory k acc c.pm in
+             leaf_meet ~landmarks:st.landmarks
+               ~key:(Cbat_landmarks.Cell (Mem.Key.cell_key c.prange))
+               ~cur:(Mem.Val.data (Mem.find (c.pbits, c.pendian) mv c.prange))
+               ~meet:WordSet.meet
+               ~write:(fun mval mem ->
+                   let mvk = AI.find_memory k mem c.pm in
+                   AI.add_memory mem ~key:c.pm
+                     ~data:(Mem.meet_range_keep mvk ~key:c.prange
+                              ~data:(Mem.Val.create mval c.pendian)))
+               c.pc acc
+           | _ -> acc))
+  in
+  { at_def; invert_mem; confine; commit; harvest; carry }
+
+(* The observer: the walk's only product is the acquisitions. *)
+let observer_locus : locus =
+  { at_def = (fun ~post:_ ~cstr -> Some cstr);
+    invert_mem = (fun _ -> false);
+    confine = (fun _ _ _ _ -> ());
+    commit = (fun _ _ -> ());
+    harvest = (fun _ ~base:_ ~env:_ ~rhs:_ -> ());
+    carry = (fun _ env -> env) }
+
+let walk ~(locus : locus)
     ?(cache : (AI.t * (def term * AI.t * AI.t) list) Tid.Map.t ref option)
     ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
@@ -1054,48 +1200,28 @@ let walk ?(raw : bool = false)
     match Var.typ m with
     | Type.Mem (ai, asz) -> Some (mem_idx ai asz, m)
     | _ -> None in
-  let cells = ref [] in
-  let live = ref seeds in
-  (* A var's last def confines its edge value. *)
-  let confined = ref Var.Set.empty in
-  (* The positional call env: the prefix state's words, the live
-     constraints met in, the edge memory. *)
+  (* The ONE pending map: the seeds are its word entries; the loads
+     push the cell entries. *)
+  let cells =
+    ref (Core.Map.fold seeds ~init:[] ~f:(fun ~key:v ~data:c acc ->
+            PW (v, c) :: acc)) in
+  let confined : Cbat_landmarks.key list ref = ref [] in
+  let st = { env_out; pending = cells; confined; mem_vars; landmarks } in
+  (* The positional call env: the prefix state's words, the pending
+     word constraints met in, the edge memory. *)
   let call_env (pre : AI.t) : AI.t =
     let e = List.fold mem_vars ~init:pre ~f:(fun e m ->
         Option.value_map (mem_idx_of m) ~default:e ~f:(fun (k, m) ->
             AI.add_memory e ~key:m ~data:(AI.find_memory k !env_out m))) in
-    Core.Map.fold !live ~init:e ~f:(fun ~key:v ~data:c acc ->
-        match Var.typ v with
-        | Type.Imm w when WordSet.bitwidth c = w ->
-          AI.add_word acc ~key:v
-            ~data:(WordSet.meet (AI.find_word w pre v) c)
-        | _ -> acc) in
-  (* Records the rhs's free vars the constraint derivation narrowed; each
-     lives until its var's def consumes it. *)
-  let harvest ~(base : AI.t) (env' : AI.t) (rhs : exp) =
-    Core.Set.fold (Exp.free_vars rhs) ~init:() ~f:(fun () v ->
-        match Var.typ v with
-        | Type.Imm w ->
-          let before = AI.find_word w base v in
-          let after = AI.find_word w env' v in
-          if (not (WordSet.is_bottom after)) && strictly_precedes after before
-          then live := Core.Map.set !live ~key:(Var.base v) ~data:after
-        | _ -> ()) in
-  let commit_memory (env' : AI.t) =
-    List.iter mem_vars ~f:(fun m ->
-        Option.iter (mem_idx_of m) ~f:(fun (k, m) ->
-            env_out := AI.add_memory !env_out ~key:m
-                ~data:(AI.find_memory k env' m))) in
-  let confine_last_def (v : var) (w : int) (cstr' : wordset) =
-    if not raw && not (Core.Set.mem !confined (Var.base v)) then begin
-      confined := Core.Set.add !confined (Var.base v);
-      let cur = AI.find_word w !env_out v in
-      let m = WordSet.meet cur cstr' in
-      if (not (Cbat_word.is_zero (WordSet.cardinality m)))
-         && WordSet.precedes m cur
-      then env_out := AI.add_word !env_out ~key:v ~data:m
-    end
-  in
+    List.fold !cells ~init:e ~f:(fun acc p ->
+        match p with
+        | PW (v, c) ->
+          (match Var.typ v with
+           | Type.Imm w when WordSet.bitwidth c = w ->
+             AI.add_word acc ~key:v
+               ~data:(WordSet.meet (AI.find_word w pre v) c)
+           | _ -> acc)
+        | PC _ -> acc) in
   let invert_def (d : def term) (pre : AI.t) (cstr' : wordset) =
     let ce = call_env pre in
     let env' =
@@ -1103,44 +1229,34 @@ let walk ?(raw : bool = false)
         ~nonneg:(fun e -> witness ~env:ce e)
         (Def.rhs d) cstr'
     in
-    if not raw then begin
-      commit_memory env';
-      harvest ~base:ce env' (Def.rhs d)
-    end
+    locus.commit st env';
+    locus.harvest st ~base:ce ~env:env' ~rhs:(Def.rhs d)
   in
   let walk_word_def (d, pre, post) =
     let v = Def.lhs d in
     match Var.typ v with
     | Type.Imm w ->
-        let cstr = Core.Map.find !live (Var.base v) in
-        (* The def consumes its var's constraint, whatever it says. *)
-        live := Core.Map.remove !live (Var.base v);
-        (match cstr with
-         | None -> ()
-         | Some cstr ->
-           let post_v = AI.find_word w post v in
-         let cstr' = if raw then cstr else WordSet.meet cstr post_v in
-         if (not raw)
-            && Cbat_word.is_zero (WordSet.cardinality cstr') then
-           (* The produced value cannot satisfy the constraint: it does not
-              hold before this def. *)
-           ()
-         else begin
-           confine_last_def v w cstr';
-           if raw || WordSet.precedes cstr' post_v then
-             invert_def d pre cstr'
-         end)
+      (match pending_take (Cbat_landmarks.Word v) !cells with
+       | Some (PW (_, cstr), rest) ->
+         (* The def consumes its var's constraint, whatever it says. *)
+         cells := rest;
+         let post_v = AI.find_word w post v in
+         (match locus.at_def ~post:post_v ~cstr with
+          | None ->
+            (* The produced value cannot satisfy the constraint: it
+               does not hold before this def. *)
+            ()
+          | Some cstr' ->
+            locus.confine st v w cstr';
+            invert_def d pre cstr')
+       | _ -> ())
     | Type.Mem _ ->
       (* Driven by the pending cells the loads pushed. *)
-      if not raw then
-        (match !cells with
-         | [] -> ()
-         | _ -> invert_def d pre undefined_width)
+      if locus.invert_mem !cells then invert_def d pre undefined_width
     | Type.Unk -> ()
   in
   List.iter prefixed ~f:walk_word_def;
-  env_out := carry_undefined ~raw !live !env_out;
-  !env_out
+  locus.carry st !env_out
 
 (* The walk's seeds: the cond's OWN narrowings — the strict per-var
    diff of the constrained env against the pre-constrain state. *)
@@ -1156,17 +1272,12 @@ let cond_seeds ~(base : AI.t) (env : AI.t) (cond : exp) : live_map =
         else acc
       | _ -> acc)
 
-(* The refinement walk: the constraint meets the produced values (the
-   producer subtraction). *)
+(* The refinement walk (the state-writer locus): the constraint meets
+   the produced values (the producer subtraction). *)
 let walk_block ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
     ~seeds env blk =
-  walk ~raw:false ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
+  walk ~locus:writer_locus ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
     ~witness ~seeds env blk
-
-(* The acquisition's hypothetical: the constraint applies AS GIVEN,
-   skipping the producer subtraction. *)
-let walk_block_raw ~entry ~landmarks ~witness ~seeds env blk =
-  walk ~raw:true ~entry ~landmarks ~witness ~seeds env blk
 
 (* The deep walk: the guard block's defs backwards; leftover
    constraints and cell meets flow into the returned edge env. *)
@@ -1201,7 +1312,8 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
                 ~data:(WordSet.singleton Cbat_word.b1)
             | _ -> acc)
       else seeds in
-    ignore (walk_block_raw ~entry ~landmarks ~witness ~seeds:raw_seeds constrained blk)
+    ignore (walk ~locus:observer_locus ~entry ~landmarks ~witness
+              ~seeds:raw_seeds constrained blk)
   end
 
 let refine_edge_inline

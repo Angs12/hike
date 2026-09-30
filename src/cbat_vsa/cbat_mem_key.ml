@@ -103,6 +103,20 @@ let combined_step (k1 : t) (k2 : t) : int =
                (Stdlib.Int64.of_int s)) 0L
     then s else 1
 
+(* The touched byte hull of a read anchored at [k]: the address set's
+   hull grown by the access size — the bytes the read may land on. *)
+let expand (k : t) ~(bytes : int) : t =
+  if bytes <= 1 then k
+  else
+    let n = Stdlib.Int64.of_int (bytes - 1) in
+    let hi =
+      { k.hi with
+        pvalue =
+          if k.hi.pwidth >= 64 then Stdlib.Int64.add k.hi.pvalue n
+          else Stdlib.Int64.logand (Stdlib.Int64.add k.hi.pvalue n) (mask k.hi.pwidth) }
+    in
+    { k with hi }
+
 (* Whether every point [p] claims is also claimed by [k]: a step-1
    key claims its whole hull; a strided key claims its grid only. *)
 let covers (k : t) (p : t) : bool =

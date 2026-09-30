@@ -502,35 +502,35 @@ let rec static_graph_vsa
         if Stages.time `Equal (fun () -> AI.equal old j)
         then old
         else begin
-        (* Finite extrapolates; Zero joins; Inf widens. *)
+        (* The module owns the arm decision: Finite extrapolates; Zero
+           advances and joins; Inf widens.  Consumption is per key —
+           each key reads its own row first, the head's arm is the
+           fallback, and the clear spends only what was consumed. *)
         let need = Option.value ~default:Core.Int.Set.empty (Core.Map.find need_map v) in
         Cbat_landmarks.with_widening_head rctx.Cbat_runctx.rc_landmarks (Some v)
           (fun () ->
             let arm =
-              Cbat_landmarks.steps_head rctx.Cbat_runctx.rc_landmarks v in
+              Cbat_landmarks.head_arm rctx.Cbat_runctx.rc_landmarks v in
 #ifdef VSA_DEBUG
             Cbat_attr_census.bump
               (match arm with
-               | `Finite _ -> "widen.head.finite"
-               | `Zero -> "widen.head.zero"
-               | `Inf -> "widen.head.inf");
+               | Cbat_landmarks.Finite _ -> "widen.head.finite"
+               | Cbat_landmarks.Zero -> "widen.head.zero"
+               | Cbat_landmarks.Inf -> "widen.head.inf");
             (match arm with
-             | `Finite n -> head_arm := Printf.sprintf "finite:%d" n
-             | `Zero -> head_arm := "zero"
-             | `Inf -> head_arm := "inf");
+             | Cbat_landmarks.Finite n -> head_arm := Printf.sprintf "finite:%d" n
+             | Cbat_landmarks.Zero -> head_arm := "zero"
+             | Cbat_landmarks.Inf -> head_arm := "inf");
 #endif
             match arm with
-            | `Finite n ->
-              let r = Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming) in
-              Cbat_landmarks.clear_words rctx.Cbat_runctx.rc_landmarks v;
-              r
-            | `Zero ->
-              Cbat_landmarks.advance_head rctx.Cbat_runctx.rc_landmarks v;
-              j
-            | `Inf ->
-              (* No head-level steps: the words widen and each cell runs its
-                 own arm, so a head whose cells carry landmarks does not
-                 depend on whether its words happen to. *)
+            | Cbat_landmarks.Finite n ->
+              Stages.time `Widen (fun () -> AI.selective_widen_extrapolate ~head:v ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need ~steps:n old incoming)
+            | Cbat_landmarks.Zero ->
+              Stages.time `Widen (fun () ->
+                  AI.advance_join_landmarks ~head:v
+                    ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
+                    incoming)
+            | Cbat_landmarks.Inf ->
               Stages.time `Widen (fun () ->
                   AI.widen_with_landmarks ~head:v
                     ~landmarks:rctx.Cbat_runctx.rc_landmarks ~need old
