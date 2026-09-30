@@ -463,6 +463,47 @@ let tests : unit Alcotest.test list =
         check "CLP-110" (unsound = 0);
         check "CLP-111" (inexact = 0));
 
+    pin "CLP-112"
+      "CAST-S1: a SIGNED extension of a set crossing the sign boundary is the element-wise image of both \
+       runs — exact, never top"
+      (fun () ->
+        (* {126, 128} at 8 bits: 126 keeps its value, 128 sign-extends to
+           -128, so the 64-bit image is exactly {126, 2^64 - 128}. *)
+        let p =
+          Clp.create ~width:8 ~step:(Cbat_word.of_int ~width:8 2)
+            ~cardn:(Cbat_word.of_int ~width:9 2) (Cbat_word.of_int ~width:8 126)
+        in
+        let r = Clp.cast Bil.SIGNED 64 p in
+        check "CLP-112"
+          (not (Clp.is_top r)
+          && Clp.bitwidth r = 64
+          && Clp.elem (w64 126) r
+          && Clp.elem (w64i (-128L)) r
+          && Cbat_word.to_int_exn (Clp.cardinality r) = 2);
+        (* A wrapped progression {200, 44, 144} at 8 bits: the low arc
+           straddles the boundary, so 44 images to itself and 144 to
+           -112 — not to 144. *)
+        let q =
+          Clp.create ~width:8 ~step:(Cbat_word.of_int ~width:8 100)
+            ~cardn:(Cbat_word.of_int ~width:9 3) (Cbat_word.of_int ~width:8 200)
+        in
+        let s = Clp.cast Bil.SIGNED 64 q in
+        check "CLP-112w"
+          (not (Clp.is_top s)
+          && Clp.elem (w64i (-56L)) s
+          && Clp.elem (w64 44) s
+          && Clp.elem (w64i (-112L)) s));
+
+    pin "CLP-113"
+      "CAST-S2: the composite's SIGNED extension of the full 32-bit domain is the two half-domains, never top"
+      (fun () ->
+        let r = Ws.cast Bil.SIGNED 64 (Ws.top 32) in
+        check "CLP-113"
+          (not (Ws.is_top r)
+          && Ws.min_elem r = Some (w64 0)
+          && Ws.max_elem r = Some (w64i (-1L))
+          && Cbat_word.to_int (Ws.cardinality r) = Ok 4294967296));
+
 
 
 

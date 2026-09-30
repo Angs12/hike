@@ -618,18 +618,25 @@ let cast_parts ct (sz : int) (p : t) : t list =
     [ not_implemented ~top:(top width)
         (Printf.sprintf "HIGH cast to size %d wider than operand %d" sz width) ]
   | Bil.SIGNED when sz > width ->
-    (* Sign-extension: exact when the set stays in one sign half (the
-       progression maps element-wise under [sext]); top otherwise. *)
-    if is_infinite p then [ top sz ]
+    (* Sign-extension is the element-wise image on each run of one sign
+       half: the non-negative elements keep their value, the negative
+       ones shift by [2^sz - 2^width]. *)
+    let sext_run (q : t) : t =
+      create ~width:sz
+        ~step:(W.cast Bil.SIGNED sz (step_of q))
+        ~cardn:(cardn_of q)
+        (W.cast Bil.SIGNED sz (base_of q)) in
+    if is_infinite p then
+      (* A periodic set: the meet with each sign half confines every run
+         to that half before the image. *)
+      let h = half width in
+      let nonneg = intersection p (interval ~width (W.zero width) (W.pred h)) in
+      let neg = intersection p (interval ~width h (W.ones width)) in
+      [ sext_run nonneg; sext_run neg ]
     else (
       match finite_end p with
       | None -> [ top sz ]
-      | Some e when W.msb (base_of p) <> W.msb e -> [ top sz ]
-      | Some _ ->
-        [ create ~width:sz
-            ~step:(W.cast Bil.SIGNED sz (step_of p))
-            ~cardn:(cardn_of p)
-            (W.cast Bil.SIGNED sz (base_of p)) ])
+      | Some _ -> List.map (split_sign p) ~f:sext_run)
   | Bil.UNSIGNED -> extract_internal_parts ~hi:(sz - 1) p
   | Bil.SIGNED -> extract_internal_parts ~hi:(sz - 1) ~signed:true p
   | Bil.LOW -> extract_internal_parts ~hi:(sz - 1) p

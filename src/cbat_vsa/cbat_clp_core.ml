@@ -290,29 +290,44 @@ let is_wrapped (p : t) : bool =
     | Some e -> W.(<) e (base_of p)
     | None -> false
 
+(* The elements at or below [bound], then the rest; each part is a
+   non-wrapping arc when the input's span crosses [bound] once.  The
+   input must start at or below [bound]. *)
+let split_above (bound : W.t) (p : t) : t list =
+  let width = bitwidth p in
+  let b = base_of p and s = step_of p in
+  if W.is_zero s then [ p ]
+  else
+    let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
+    if W.is_zero n then [ infinite (b, s) ]
+    else
+      (* First index whose element exceeds [bound]. *)
+      let k = W.succ (W.div (W.sub bound b) s) in
+      let below = create ~width ~step:s ~cardn:k b in
+      let above_count = W.sub n k in
+      if W.is_zero above_count then [ below ]
+      else
+        let above_base = W.add b (W.mul k s) in
+        let above = create ~width ~step:s ~cardn:above_count above_base in
+        [ below; above ]
+
 (* A wrapped Finite piece is two non-wrapping arcs (the high arc before
    the modulus and the low arc after the wrap); the meet of each arc is
    joined. *)
 let split_wrapped (p : t) : t list =
   if not (is_wrapped p) then [ p ]
-  else
-    let width = bitwidth p in
-    let b = base_of p and s = step_of p in
-    if W.is_zero s then [ p ]
-    else
-      let max_w = W.ones width in
-      let n = W.extract_exn ~hi:(width - 1) (cardn_of p) in
-      if W.is_zero n then [ infinite (b, s) ]
-      else
-        (* First index whose element wraps past the modulus. *)
-        let k_wrap = W.succ (W.div (W.sub max_w b) s) in
-        let high = create ~width ~step:s ~cardn:k_wrap b in
-        let low_count = W.sub n k_wrap in
-        if W.is_zero low_count then [ high ]
-        else
-          let low_base = W.add b (W.mul k_wrap s) in
-          let low = create ~width ~step:s ~cardn:low_count low_base in
-          [ high; low ]
+  else split_above (W.ones (bitwidth p)) p
+
+(* The runs of one sign half: the non-negative elements first, the
+   negative ones after.  Each run maps element-wise under a signed
+   cast. *)
+let split_sign (p : t) : t list =
+  List.concat_map (split_wrapped p) ~f:(fun q ->
+      match finite_end q with
+      | None -> [ q ]
+      | Some e ->
+        if Bool.equal (W.msb (base_of q)) (W.msb e) then [ q ]
+        else split_above (W.pred (half (bitwidth q))) q)
 
 (* Signed order: at/above the half the word is negative. *)
 let signed_le (width : int) (x : W.t) (y : W.t) : bool =
