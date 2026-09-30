@@ -1225,6 +1225,32 @@ let tests : unit Alcotest.test list =
         let r = AI.find_word 32 env' (Var.base x) in
         check "BK-84"
           (Ws.min_elem r = Some (w32 0) && Ws.max_elem r = Some (w32 0xF)));
+
+    pin "BK-85"
+      "the var-var signed guard reads its bound's payload — SLT(low:32[x], y) \
+       with y = {4} (a signed extremum) and x's low half in [0,3]: the \
+       constraint is the unsigned window [0,3], whose low-cast pre-image \
+       drops the value whose low half is 0x10 (the wrapped reading keeps it)"
+      (fun () ->
+        let x = Var.create ~is_virtual:true ~fresh:false "bk85_x" (Type.Imm 64) in
+        let y = Var.create ~is_virtual:true ~fresh:false "bk85_y" (Type.Imm 32) in
+        let out = Cbat_word.of_int64 ~width:64 0xFFFFFFFF00000010L in
+        let env =
+          mk_env
+            [ (x, Ws.of_list ~width:64 [ w64 0x10; out ]);
+              (y, Ws.singleton (w32 4)) ]
+        in
+        let env' =
+          Vsa.Test_seam.constrain_operands ~landmarks:(Cbat_landmarks.create ())
+            ~env
+            (Bil.BinOp
+               ( Bil.SLT,
+                 Bil.Cast (Bil.LOW, 32, Bil.Var x),
+                 Bil.Var y ))
+            (Ws.singleton (Cbat_word.of_word Word.b1))
+        in
+        let r = AI.find_word 64 env' (Var.base x) in
+        check "BK-85" (not (Ws.elem out r)));
   ]
 
 let () = run "backward" tests

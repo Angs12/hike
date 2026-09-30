@@ -366,12 +366,16 @@ let evidence_constraint ?(cur : wordset option = None)
     if i < 0 then None else Some (Cbat_word.of_int ~width:(width + 1) i) in
   let int_of_word (v : Cbat_word.t) : int option =
     try Some (Cbat_word.to_int_exn v) with _ -> None in
+  (* The arms read the bound's payload: the sign flag a signed extremum
+     carries is an annotation, not part of the value the comparison
+     denotes, so the half tests run unsigned. *)
+  let payload = Cbat_word.unsigned in
   let provably_nonneg =
     known_nonneg
     || Option.value_map cur ~default:false ~f:(fun ws ->
         match WordSet.max_elem ws with
         | None -> false
-        | Some m -> Cbat_word.(<) m half) in
+        | Some m -> Cbat_word.(<) (payload m) half) in
   match op with
   | ULT ->
     Option.bind (int_of_word c) ~f:(fun i ->
@@ -383,13 +387,13 @@ let evidence_constraint ?(cur : wordset option = None)
             interval_clp_of ~width ~cardn (Cbat_word.zero width)))
   | EQ -> Some (WordSet.singleton c)
   | SLT ->
-    if Cbat_word.(>=) c half
+    if Cbat_word.(>=) (payload c) half
     then interval_clp_of ~width ~cardn:(Cbat_word.sub c half) half
     else if provably_nonneg
     then interval_clp_of ~width ~cardn:c (Cbat_word.zero width)
     else None
   | SLE ->
-    if Cbat_word.(>=) c half
+    if Cbat_word.(>=) (payload c) half
     then interval_clp_of ~width ~cardn:(Cbat_word.succ (Cbat_word.sub c half)) half
     else if provably_nonneg
     then interval_clp_of ~width ~cardn:(Cbat_word.succ c) (Cbat_word.zero width)

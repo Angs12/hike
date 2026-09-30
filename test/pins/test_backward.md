@@ -1,6 +1,6 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-84`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-85`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
@@ -83,3 +83,4 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-81 | S19 Ite with an unknown condition keeps both branches. | Constrain both branch operands. | BK-81 (`t`/`u` narrowed). |
 | BK-83 | S21 the AND singleton mask keeps the mask's bits from the constraint and frees the rest (hull `[0x30, 0xFFFFFF3F]`). | Make the general-mask AND arm identity. | BK-83 (`0x30 ∈` false). |
 | BK-84 | the low cast of a zero-extended narrow value: `low:32[pad:64[x]]` collapses to `x`, so the constraint `[0,0xF]` narrows `x` to `[0,0xF]`, not the truncation hull. | Drop the widening arm so `low_cast_constraint` always takes the wide hull. | BK-84 (`x` stays `[0,2^32-1]`; `max_elem` is not `0xF`). |
+| BK-85 | the var-var signed guard reads its bound's payload: `SLT(low:32[x], y)` with `y = {4}` (a signed extremum) takes the unsigned window `[0,3]` when `x`'s low half is provably non-negative, so the low-cast pre-image drops the value whose low half is `0x10`. | Compare `c` with `half` through its signed flag (`Cbat_word.(>=) c half`) in `evidence_constraint`'s SLT/SLE arms. | BK-85 (`out ∈ x`; the wrapped reading's pre-image is top). |
