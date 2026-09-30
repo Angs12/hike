@@ -14,7 +14,12 @@
    ~width:(2*width+1)] and [mul_exact]'s summed width at width 64).
 
    The same sweep cross-checks [Cbat_word] (the int63 substrate) against the
-   reference, over every op it exports. *)
+   reference, over every op it exports.
+
+   A composite-layer sweep drives [Cbat_clp_set_composite]'s own binops
+   (the mixed [FinSet]/[Clp] arm) in both operand orders against the
+   concrete oracle, so a non-commutative op cannot silently swap its
+   operands. *)
 
 open Bap.Std
 open Hike_test.Harness
@@ -674,6 +679,102 @@ let run_sweep () : int * int * int =
                        | Some v -> signed_z v
                        | None -> Z.of_string "unused")
                       (match tmax with Some z -> z | None -> Z.zero)))));
+
+  (* ---- composite mixed-representation sweep ------------------------- *)
+
+  (* The composite [t]'s own ops are a layer above the sub-module sweeps:
+     a small exact [FinSet] and a [Clp]-represented progression meet in
+     [op_pair]'s mixed arm, where a non-commutative op must keep each
+     operand on its own side.  Both orders are swept against the concrete
+     oracle.  The progression's count exceeds [fin_set_size] (10) so
+     canonicalization keeps it a Clp rather than demoting it to a FinSet,
+     and stays small enough to enumerate. *)
+  let comp_elems (p : Ws.t) : Cbat_word.t list option =
+    if Ws.is_infinite p then None
+    else
+      match Cbat_word.to_int (Ws.cardinality p) with
+      | Ok n when n <= 64 -> Some (Ws.iter p)
+      | _ -> None
+  in
+  let comp_cw (w : int) (z : Z.t) : Cbat_word.t = CW.of_word (word_of_z w z) in
+  let comp_binops :
+      (string * (Ws.t -> Ws.t -> Ws.t)
+       * (Cbat_word.t -> Cbat_word.t -> Cbat_word.t)) list =
+    [ ("sub", Ws.sub, CW.sub)
+    ; ("div", Ws.div, CW.div)
+    ; ("sdiv", Ws.sdiv, fun x y -> CW.div (CW.signed x) (CW.signed y))
+    ; ("modulo", Ws.modulo, CW.modulo)
+    ; ("smodulo", Ws.smodulo, fun x y -> CW.modulo (CW.signed x) (CW.signed y))
+    ; ("lshift", Ws.lshift, CW.lshift)
+    ; ("rshift", Ws.rshift, CW.rshift)
+    ; ("arshift", Ws.arshift, CW.arshift)
+    ; ("concat", Ws.concat, CW.concat) ]
+  in
+  let comp_widths = [ 8; 64 ] in
+  (* Non-zero operands: the sweep pins the operand order, not the
+     domain's division-by-zero convention for an exact-zero divisor. *)
+  let comp_fs_vals (w : int) : Z.t list =
+    [ Z.one; Z.of_int 3; Z.sub (Z.shift_left Z.one w) Z.one ]
+  in
+  (* (base, step, count); count > [fin_set_size] keeps the Clp. *)
+  let comp_clp_shapes (w : int) : (Z.t * Z.t * int) list =
+    [ (Z.zero, Z.one, 12); (Z.zero, Z.of_int 2, 12); (Z.one, Z.one, 12)
+    ; (Z.sub (Z.shift_left Z.one w) (Z.of_int 12), Z.one, 12) ]
+  in
+  CKL.iter comp_widths ~f:(fun w ->
+      CKL.iter (comp_fs_vals w) ~f:(fun b1 ->
+          CKL.iter (comp_clp_shapes w) ~f:(fun (b2, s2, c2) ->
+              let fs = Ws.singleton (comp_cw w b1) in
+              let clp =
+                Ws.of_clp
+                  (Ws.Clp.create ~width:w (comp_cw w b2) ~step:(comp_cw w s2)
+                     ~cardn:(CW.of_int ~width:(w + 1) c2))
+              in
+              let show =
+                Printf.sprintf "w=%d b1=%s b2=%s s2=%s c2=%d" w
+                  (Z.to_string b1) (Z.to_string b2) (Z.to_string s2) c2
+              in
+              CKL.iter [ (fs, clp, "FS,CLP"); (clp, fs, "CLP,FS") ]
+                ~f:(fun (p1, p2, ord) ->
+                    match comp_elems p1, comp_elems p2 with
+                    | Some xs, Some ys ->
+                      CKL.iter comp_binops ~f:(fun (nm, f, wop) ->
+                          incr checked;
+                          let got = f p1 p2 in
+                          match
+                            CKL.find_map xs ~f:(fun x ->
+                                CKL.find_map ys ~f:(fun y ->
+                                    let r = wop x y in
+                                    if Ws.elem r got then None
+                                    else Some (x, y, r)))
+                          with
+                          | None -> ()
+                          | Some (x, y, r) ->
+                            bad
+                              (Printf.sprintf
+                                 "COMP %s %s %s: %s %s -> %s is outside the result"
+                                 nm ord show (CW.to_string x) (CW.to_string y)
+                                 (CW.to_string r)))
+                    | _ -> incr skipped);
+              (* Extract is unary: each mixed operand takes the concrete
+                 slice oracle on its own. *)
+              CKL.iter [ (fs, "FS"); (clp, "CLP") ]
+                ~f:(fun (p, ord) ->
+                    match comp_elems p with
+                    | Some xs ->
+                      CKL.iter [ (w - 1, 0); (w - 1, w / 2); (w / 2, 0) ]
+                        ~f:(fun (hi, lo) ->
+                            incr checked;
+                            let got = Ws.extract ~hi ~lo p in
+                            if not
+                                 (CKL.for_all xs ~f:(fun x ->
+                                      Ws.elem (CW.extract_exn ~hi ~lo x) got))
+                            then
+                              bad
+                                (Printf.sprintf
+                                   "COMP extract %s %s hi=%d lo=%d: a concrete element is outside the result"
+                                   ord show hi lo))
+                    | None -> incr skipped))));
 
 (* Directional CLP checks. *)
   let check_directional () =
