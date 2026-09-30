@@ -866,6 +866,53 @@ let tests : unit Alcotest.test list =
         in
         check "SEC-65" (l.Sm.regions = [ (1, (pos (-8L), pos (-1L)), 16L) ]));
 
+    pin "SEC-71"
+      "B2a: the residue's window reserve is the def-backed members' proven reach — the call escape does not size it"
+      (fun () ->
+        let m = memv "b2a_m" in
+        let rsp = v64 "RSP" in
+        let callee = mk_selfloop_callee "b2a_callee" in
+        let callee_tid = Term.tid callee in
+        let def_out =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 Bil.BinOp
+                   ( Bil.PLUS,
+                     Bil.Var rsp,
+                     Bil.Int (Cbat_word.to_word (w64 0x10)) ),
+                 Bil.Int (Cbat_word.to_word (w64 0xBB)),
+                 LittleEndian,
+                 `r64 ))
+        in
+        let sub, _ =
+          sub_of "b2a_caller"
+            [ [ def_out ], [ (1, fun t -> mk_call_jmp t callee_tid) ]; [], [] ]
+        in
+        let ctx = fixture_ctx [ sub ] in
+        let tree =
+          Base.Option.value_exn (Core.Map.find ctx.A.sub_trees (Term.tid sub))
+        in
+        let l =
+          A.layout_of_tree ~word:8 ~entry:Hike.Stack_model.segment_base
+            ~abi:Hike.Abi.x86_64_sysv ~sub tree
+        in
+        check "SEC-71"
+          (match
+             Base.List.find l.Sm.regions ~f:(fun (id, _, _) -> Int.equal id 0)
+           with
+           | Some (_, (_, rhi), _) ->
+             let window =
+               Stdlib.Int64.add
+                 (Stdlib.Int64.sub rhi Hike.Stack_model.segment_base)
+                 1L
+             in
+             (* The outgoing store at RSP+0x10 is the only def-backed
+                Args member: the reserve is its 24-byte reach, never the
+                64 KiB the call escape alone would claim. *)
+             Stdlib.Int64.equal window 24L
+           | None -> false));
+
     pin "SEC-66"
       "S2 (fp-GPR): an untagged heap-RBP store does NOT degrade the sub (the rsp cell keeps Region storage — stack-ness is the value proof alone)"
       (fun () ->

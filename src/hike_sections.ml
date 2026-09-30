@@ -962,7 +962,8 @@ let stamp_tags (c : ctx) (sub : sub term) : sub term =
 
 (* The layout is the fold of the finalized tree: an unserved member
    fails loudly.  The residue (id 0) is the fallback alloca, sized to
-   its members' below-entry depth plus the caller window. *)
+   the reach its def-backed members PROVE: an escape member (no def) is
+   a claim about the callee's reach and never sizes it. *)
 let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(sub : sub term) (tree : sub_tree) : Hike_stack_model.sub_layout =
   let w64 = Stdlib.Int64.of_int word in
@@ -981,56 +982,68 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         | Stack_residue -> equal_sec k.lo.p_sec Args
         | _ -> false)
   in
-  let ( below, window, carved ), residue_seen =
+  (* A def-backed member's proven above-entry reach; a def-backed
+     identity member is an unbounded claim and keeps the fixed
+     fallback. *)
+  let member_above (m : member) : int64 =
+    match m.m_def with
+    | None -> 0L
+    | Some _ ->
+      let reach =
+        Stdlib.Int64.max 0L
+          (Stdlib.Int64.add (Stdlib.Int64.sub m.m_hi entry) 1L)
+      in
+      if m.m_identity then
+        Stdlib.Int64.min reach Hike_stack_model.caller_window_bytes
+      else reach
+  in
+  (* A def-backed member's proven below-entry depth; an unbounded claim
+     keeps the fixed fallback. *)
+  let member_below (m : member) : int64 =
+    match m.m_def with
+    | None -> 0L
+    | Some _ ->
+      let depth = Stdlib.Int64.sub entry m.m_lo in
+      if
+        Stdlib.Int64.equal m.m_lo (Model.stack_floor ~entry)
+        || Stdlib.Int64.compare depth Hike_stack_model.stack_max > 0
+      then Hike_stack_model.stack_max
+      else Stdlib.Int64.max depth 0L
+  in
+  let ( below, carved ), residue_seen =
     Base.List.fold bindings
       ~init:
         ( ( Stdlib.Int64.max (Hike_stack_model.deepest_sp_decrement sub ~abi) w64,
-            0L,
             [] ),
           false )
-      ~f:(fun ((below, window, carved), residue_seen) (k, rs) ->
+      ~f:(fun ((below, carved), residue_seen) (k, rs) ->
         match rs.storage with
-        | Arg_slot _ -> ((below, window, carved), residue_seen)
+        | Arg_slot _ -> ((below, carved), residue_seen)
         | Stack_residue ->
             let below =
-              if
-                Stdlib.Int64.equal k.lo.p_pos (Model.stack_floor ~entry)
-                || Stdlib.Int64.compare (Stdlib.Int64.sub entry k.lo.p_pos)
-                     Hike_stack_model.stack_max > 0
-              then Stdlib.Int64.max below Hike_stack_model.stack_max
-              else Stdlib.Int64.max below (Stdlib.Int64.sub entry k.lo.p_pos)
+              Base.List.fold rs.members ~init:below ~f:(fun acc m ->
+                  Stdlib.Int64.max acc (member_below m))
             in
-            ((below, window, carved), true)
+            ((below, carved), true)
         | Stack_region id ->
             let bytes = region_bytes k in
             (( below,
-               window,
                (id, (k.lo.p_pos, k.hi.p_pos), bytes) :: carved ),
              residue_seen)
         | Data_region _ -> fail_unserved "data binding in a sub tree" k)
   in
   let pushes = Hike_stack_model.has_call_push sub in
   let below = if pushes then Stdlib.Int64.add below w64 else below in
-  (* The residue is sized by its own members: below-entry depth and
-     above-entry reach (the retaddr cell).  The full caller window
-     (65536) is claimed only when a residue member actually reads Args
-     space. *)
   let residue_above =
-    Base.List.fold bindings ~init:0L ~f:(fun acc (k, rs) ->
+    Base.List.fold bindings ~init:0L ~f:(fun acc (_, rs) ->
         match rs.storage with
         | Stack_residue ->
-            Stdlib.Int64.max acc
-              (Stdlib.Int64.max 0L
-                 (Stdlib.Int64.add
-                    (Stdlib.Int64.sub k.hi.p_pos entry)
-                    1L))
+            Base.List.fold rs.members ~init:acc ~f:(fun acc m ->
+                Stdlib.Int64.max acc (member_above m))
         | _ -> acc)
   in
   let below = if residue_seen then below else Stdlib.Int64.add below w64 in
-  let window =
-    if args_residue then Hike_stack_model.caller_window_bytes
-    else residue_above
-  in
+  let window = residue_above in
   (* The anchor sits at the SysV entry-SP alignment inside the
      residue: idx ≡ align − word (mod align), so the lifted arithmetic
      (an SSE #GP guard tests (frame_base + k) & (align − 1)) matches the
