@@ -73,6 +73,28 @@ let tests : unit Alcotest.test list =
           + s.Rows.Sub_stats.defstk_sh_lost
         in
         check "PROBE-03" (sum = 5));
+
+    pin "PROBE-04"
+      "the probe's stack test keeps the symbolic arm and the frame offsets \
+       and rejects a plain integer that only reaches the segment band"
+      (fun () ->
+        let magic =
+          Ws.singleton (Cbat_word.of_int64 ~width:64 0x4EC4EC4EC4EC4EC5L) in
+        let entry =
+          Ws.singleton (Cbat_word.of_int64 ~width:64 Ws.stack_base) in
+        let below =
+          Ws.singleton
+            (Cbat_word.of_int64 ~width:64 (Int64.sub Ws.stack_base 64L)) in
+        check "PROBE-04 (the domain still reads the band)"
+          (Ws.in_stack_segment magic);
+        check "PROBE-04 (the probe rejects the band-reaching integer)"
+          (not (Rows.is_stack_value magic));
+        check "PROBE-04 (the symbolic arm is stack)"
+          (Rows.is_stack_value (Ws.stack_word_i64 0L));
+        check "PROBE-04 (a frame offset is stack)"
+          (Rows.is_stack_value entry && Rows.is_stack_value below);
+        check "PROBE-04 (bottom is stack)"
+          (Rows.is_stack_value (Ws.bottom 64)));
   ]
 
 let () = run "probe" tests

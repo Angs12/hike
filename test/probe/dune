@@ -47,6 +47,7 @@
   bap-main
   cbat_vsa
   cbat_vsa_domain
+  hike.hike_stack_bounds
   core
   graphlib
   threads

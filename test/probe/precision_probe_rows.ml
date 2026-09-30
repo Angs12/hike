@@ -30,6 +30,28 @@ let classify_shape (ws : Ws.t) : shape =
   | Some (Origin.Abs | Origin.Rip) -> `Other
   | None -> `Lost
 
+(* The probe's stack test.  A stack value is the dead-path bottom, the
+   symbolic arm (a value carrying a runtime origin), or a plain value whose
+   base-relative offsets are frame offsets — within ±max(stack_max,
+   caller_window_bytes) of the segment base.  A plain integer that merely
+   reaches the segment band's lower bound is not a stack address. *)
+let frame_band : int64 * int64 =
+  let bound = Int64.max Hike_stack_bounds.stack_max
+      Hike_stack_bounds.caller_window_bytes in
+  (Int64.sub Ws.stack_base bound, Int64.add Ws.stack_base bound)
+
+let is_stack_value (ws : Ws.t) : bool =
+  Ws.is_bottom ws
+  || Option.is_some (Ws.origin ws)
+  || (let lo, hi = frame_band in
+      match Ws.min_elem ws, Ws.max_elem ws with
+      | Some mn, Some mx ->
+        (match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
+         | Ok mni, Ok mxi ->
+           Int64.compare mni lo >= 0 && Int64.compare mxi hi <= 0
+         | _ -> false)
+      | _ -> false)
+
 (* Per-sub statistics record. *)
 
 module Sub_stats = struct

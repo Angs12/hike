@@ -184,7 +184,7 @@ let diag_acc (bname : string) (sub' : sub term) (b : blk term) (d : def term)
 let is_stack_access st addr =
   match Vsa.Test_seam.denote_imm_exp addr st with
   | Error _ -> false
-  | Ok ws -> Ws.is_bottom ws || Ws.in_stack_segment ws
+  | Ok ws -> Rows.is_stack_value ws
 
 let st_tag_of ~(tags : Vsa.vsa_sol) (blk : blk term) (addr : exp)
     (st_before : AI.t) : AI.t =
@@ -227,7 +227,7 @@ let collect_stats (bname : string) (sub' : sub term)
              let ws = AI.find_word w !st (Def.lhs d) in
               (* Gate-free: every def is denoted (spec §2.1). *)
              if defs_on () then diag_def bname sub' b d st_before ws;
-             let stack = Ws.is_bottom ws || Ws.in_stack_segment ws in
+             let stack = Rows.is_stack_value ws in
              let shape = Rows.classify_shape ws in
              let b =
                match classify_def ws with
