@@ -828,10 +828,14 @@ end
 module Piece_binop = Binop (Piece_repr)
 
 (* The distributed arithmetic collapses to one progression: multi-piece
-   results churn the fixpoint — the 4-piece cap is not associative
+   results churn the fixpoint -- the 4-piece cap is not associative
    under repeated joins, and in-loop values oscillate between
    incomparable capped forms (measured: five fresh fixpoint backstops on
-   du and expr).  The collapse is the piece representation's policy. *)
+   du and expr).  The collapse is the piece representation's policy.
+   The P4 narrowing (pieces within a block, hull at the join/widen)
+   measured NULL on precision: the interior-exclusion class dies at
+   widen_join's per-pair hull, not here -- so the simpler proven form
+   stays. *)
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
   let collapse (ps : P.t) : P.t =
     match hull_of_pieces ps with
