@@ -90,9 +90,10 @@ let pass_vsa proj =
     Hike_diag.warn
       "target %s is not x86_64-gnu-elf; the x86-64 SysV convention record serves it"
       (KB.Name.to_string (Theory.Target.name target));
-  (* Image-backed loads are sound only where the runtime content IS
-     the static image; the relocation-free sections are exactly the
-     ones the loader's relocation facts do not name. *)
+  (* Image-backed loads are sound only where the runtime content is
+     known: a relocation-free section is its file bytes, and a section
+     holding relocated words is its RELATIVE words' runtime values plus
+     the bytes no relocation names. *)
   let images =
     Hike_image.get_section_images proj
     |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->

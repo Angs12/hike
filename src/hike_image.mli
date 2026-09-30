@@ -14,6 +14,23 @@ val get_copy_relocations :
 
 val get_relocated_words : Project.t -> int64 list
 
+(** The load bias: memory-image addresses are the file vaddrs plus it. *)
+val get_bias : Project.t -> int64
+
+(** The (site, type, addend) rows of a RELA section's bytes. *)
+val rela_rows : Bytes.t -> (int64 * int64 * int64) list
+
+(** One section's image fragments: a RELATIVE word takes its runtime
+    value, an externally-relocated word is dropped, the rest keep the
+    file bytes. *)
+val substitute_relocated_words :
+  bytes:Bytes.t ->
+  lo:int64 ->
+  hi:int64 ->
+  relocated:int64 list ->
+  relative:(int64 * int64) list ->
+  (Bytes.t * int64 * int64) list
+
 val get_section_images : Project.t -> (Bytes.t * int64 * int64) list
 
 val get_named_region_info : Project.t -> region Base.Sequence.t
