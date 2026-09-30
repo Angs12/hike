@@ -867,7 +867,7 @@ let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
   Fs_binop.binop op s1 s2
 
 (* One op over one leaf pair; mixed kinds take the piece union of the
-   FinSet's elements (exact runs). *)
+   FinSet's elements (exact runs), the operands in their own order. *)
 (* The operand's representation decides the path: the exact finite set
    is the fast path, the piece union is the general one, and Rel/Many
    are opaque to the generic lift (the stack-aware ops route around
@@ -888,8 +888,8 @@ let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
   match repr_of q1, repr_of q2 with
   | Fs s1, Fs s2 -> [ FinSet (binop_fs op s1 s2) ]
   | Ps a, Ps b -> [ Clp (binop_pieces op a b) ]
-  | Ps ps, Fs s | Fs s, Ps ps ->
-    [ Clp (binop_pieces op ps (pieces_of_finset s)) ]
+  | Ps ps, Fs s -> [ Clp (binop_pieces op ps (pieces_of_finset s)) ]
+  | Fs s, Ps ps -> [ Clp (binop_pieces op (pieces_of_finset s) ps) ]
   | Opaque, _ | _, Opaque -> [ Clp (wide ()) ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =

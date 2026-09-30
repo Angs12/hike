@@ -329,9 +329,26 @@ let tests : unit Alcotest.test list =
         in
         check "FWD-16" (top1 && top1'));
 
-    (* FWD-17: a width-mismatched ordering answers top too — the domain
-       never re-derives a comparison on coerced operands. *)
-
+    (* FWD-17: a concat keeps its operands' order across representations.
+       A zero high half and an unbounded low half is the low-64 range
+       [0, 2^64-1], never the high-64 multiples. *)
+    pin "FWD-17"
+      "a concat keeps its operands' order across representations: a zero \
+       high half with an unbounded low half is the low-64 range, never the \
+       high-64 multiples"
+      (fun () ->
+        let e =
+          Bil.Concat
+            ( Bil.Int (Cbat_word.to_word (w64 0)),
+              Bil.Unknown ("t_top64", Type.Imm 64) )
+        in
+        match Vsa.Test_seam.denote_imm_exp e AI.top with
+        | Error _ -> check "FWD-17" false
+        | Ok ws ->
+          check "FWD-17"
+            (not (Ws.is_top ws)
+            && Ws.bitwidth ws = 128
+            && Ws.elem (Cbat_word.of_int ~width:128 1) ws));
 
     (* FWD-18: an arithmetic op with mismatched operand widths answers top
        at the common width. *)
