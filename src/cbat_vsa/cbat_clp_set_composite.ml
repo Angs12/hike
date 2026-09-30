@@ -1153,9 +1153,11 @@ let round_down_shift (k : word) : int option =
    exact image of a contiguous run, an over-approximation of a sparse
    one).  None when an extremum is not an int64. *)
 let round_down_image (s : int) (offs : P.t) : P.t option =
-  let m64 =
-    if s >= 64 then -1L else Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s)
-  in
+  (* The AND is the identity at the full width: the offsets are their
+     own image. *)
+  if s >= 64 then Some offs
+  else
+  let m64 = Stdlib.Int64.pred (Stdlib.Int64.shift_left 1L s) in
   let b_lo = Stdlib.Int64.logand stack_base m64 in
   let block (o : word) : word option =
     match Cbat_word.to_int64 o with

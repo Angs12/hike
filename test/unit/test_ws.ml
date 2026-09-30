@@ -264,6 +264,26 @@ let tests : unit Alcotest.test list =
           (Ws.is_top st
           && (not (Ws.equal st (Ws.top 64)))
           && not (Ws.equal (Ws.top 64) st)));
+    pin "WS-37"
+      "C5 commit A: an all-ones 64-bit mask is the identity on the stack line — the round-\
+       down image at s = 64 keeps the offsets (the old block o = -stack_base singleton was \
+       the latent unsoundness)"
+      (fun () ->
+        let p = Ws.stack_word (Clp.interval ~width:64 (w64 8) (w64 40)) in
+        let ones = Ws.singleton (Cbat_word.ones 64) in
+        let r = Ws.logand p ones in
+        (* The AND with all-ones is the identity: the image IS the
+           input band (offsets stay relative to the same base). *)
+        check "WS-37 (exactness: the image is the input band, not a singleton)"
+          (match Ws.stack_offsets r with
+           | Some offs ->
+             (match Clp.min_elem offs, Clp.max_elem offs with
+              | Some lo, Some hi ->
+                Cbat_word.equal lo (w64 8) && Cbat_word.equal hi (w64 40)
+              | _ -> false)
+           | None -> false);
+        check "WS-37 (the same origin: the result stays stack-symbolic)"
+          (Ws.origin r = Ws.origin p))
   ]
 
 let () = run "ws" tests
