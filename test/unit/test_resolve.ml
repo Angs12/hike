@@ -620,6 +620,73 @@ let tests : unit Alcotest.test list =
         check "RES-23c: distinct destinations stay"
           (targets (jmps_of (Hike.Cfg_complete.materialize_fallthroughs sub) 0)
            = [ tids.(2); tids.(1) ]));
+
+    (* A re-lifted block joins the program through the chain's own
+       normalizers: a def the lifter gave two memory nodes fissions,
+       so the one-def-one-node invariant holds for lifted code too. *)
+    pin "RES-24" "the materializer fissions a re-lifted def's memory nodes"
+      (fun () ->
+        let sel = v64 "t23_sel" in
+        let base = v64 "t23_base" in
+        let bdef = Def.create base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
+        let t1 = Def.create sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
+        let t2 = Def.create sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
+        let flag = v1 "t23_flag" in
+        let sub24, tids =
+          sub_of "t23_refiss"
+            [ [ bdef ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var flag)); (2, mk_goto) ];
+              [ t1 ], [ (3, mk_goto) ];
+              [ t2 ], [ (3, mk_goto) ];
+              [],
+              [ (4,
+                 fun _ ->
+                   Jmp.create
+                     (Goto
+                        (Indirect
+                           (Bil.BinOp (Bil.PLUS, Bil.Var sel, Bil.Var base))))) ];
+              [], [ (6, mk_goto) ];
+              [], [ (6, mk_goto) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let a = Addr.of_int64 0x3010L in
+        let m = memv "t23_m" in
+        let src = v64 "t23_src" in
+        let dst = v64 "t23_dst" in
+        let double_load =
+          Def.create dst
+            (Bil.Load
+               ( Bil.Var m,
+                 Bil.Load (Bil.Var m, Bil.Var src, LittleEndian, `r64),
+                 LittleEndian, `r64 ))
+        in
+        let lifted =
+          let e = Blk.Builder.create ~tid:(Tid.for_addr a) () in
+          Blk.Builder.add_def e double_load;
+          Blk.Builder.add_jmp e
+            (Jmp.create (Goto (Direct (Tid.for_addr (Addr.of_int64 0x3008L)))));
+          let e = Term.set_attr (Blk.Builder.result e) address a in
+          [ e ]
+        in
+        let _, sub24', _ =
+          produce Theory.Target.unknown
+            ~block_addrs:[ (0x3008L, tids.(4)); (0x400000L, tids.(5)) ]
+            ~lift_at:(fun a' ~block_addrs:_ ->
+              if Addr.equal a' a then Some lifted else None)
+            (Program.create ~subs:[ sub24 ] ()) sub24
+        in
+        match
+          Term.enum blk_t sub24'
+          |> Seq.find ~f:(fun b -> Tid.equal (Term.tid b) (Tid.for_addr a))
+        with
+        | Some b ->
+            let defs = Term.enum def_t b |> Seq.to_list in
+            let one_node =
+              Base.List.for_all defs ~f:(fun d ->
+                  Hike__Hike_stack_model.mem_node_count (Def.rhs d) <= 1)
+            in
+            check "RES-24" (Base.List.length defs >= 2 && one_node)
+        | None -> check "RES-24" false);
   ]
 
 let () = run "resolve" tests

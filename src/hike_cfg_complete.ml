@@ -191,6 +191,8 @@ let materialize_block
               (Term.map jmp_t b
                  ~f:(remap_jmp ~call:(retarget call_existing)
                         ~blk:(retarget existing))
+              |> fun b ->
+              Term.concat_map def_t b ~f:Hike_split_mem.split_def
               |> Hike_coerce.coerce_block))
     in
     let entries =
