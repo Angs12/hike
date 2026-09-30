@@ -761,63 +761,139 @@ type binop =
    under repeated joins, and in-loop values oscillate between
    incomparable capped forms (measured: five fresh fixpoint backstops on
    du and expr). *)
+(* The 16-op table, written ONCE over a representation signature: the
+   two concrete tables are instantiations, and the piece table's
+   collapse is that representation's policy, applied by its
+   instantiation. *)
+module type Binop_repr = sig
+  type t
+
+  val union : t -> t -> t
+  val meet : t -> t -> t
+  val add : t -> t -> t
+  val sub : t -> t -> t
+  val mul : t -> t -> t
+  val div : t -> t -> t
+  val sdiv : t -> t -> t
+  val modulo : t -> t -> t
+  val smodulo : t -> t -> t
+  val lshift : t -> t -> t
+  val rshift : t -> t -> t
+  val arshift : t -> t -> t
+  val logand : t -> t -> t
+  val logor : t -> t -> t
+  val logxor : t -> t -> t
+  val concat : t -> t -> t
+end
+
+module Binop (R : Binop_repr) = struct
+  let binop (op : binop) (a : R.t) (b : R.t) : R.t =
+    match op with
+    | Union -> R.union a b
+    | Meet -> R.meet a b
+    | Add -> R.add a b
+    | Sub -> R.sub a b
+    | Mul -> R.mul a b
+    | Div -> R.div a b
+    | Sdiv -> R.sdiv a b
+    | Modulo -> R.modulo a b
+    | Smodulo -> R.smodulo a b
+    | Lshift -> R.lshift a b
+    | Rshift -> R.rshift a b
+    | Arshift -> R.arshift a b
+    | Logand -> R.logand a b
+    | Logor -> R.logor a b
+    | Logxor -> R.logxor a b
+    | Concat -> R.concat a b
+end
+
+module Piece_repr = struct
+  type t = P.t
+
+  let union = P.union
+  let meet = P.intersection
+  let add = P.add
+  let sub = P.sub
+  let mul = P.mul
+  let div = P.div
+  let sdiv = P.sdiv
+  let modulo = P.modulo
+  let smodulo = P.smodulo
+  let lshift = P.lshift
+  let rshift = P.rshift
+  let arshift = P.arshift
+  let logand = P.logand
+  let logor = P.logor
+  let logxor = P.logxor
+  let concat = P.concat
+end
+
+module Piece_binop = Binop (Piece_repr)
+
+(* The distributed arithmetic collapses to one progression: multi-piece
+   results churn the fixpoint — the 4-piece cap is not associative
+   under repeated joins, and in-loop values oscillate between
+   incomparable capped forms (measured: five fresh fixpoint backstops on
+   du and expr).  The collapse is the piece representation's policy. *)
 let binop_pieces (op : binop) (a : P.t) (b : P.t) : P.t =
   let collapse (ps : P.t) : P.t =
     match hull_of_pieces ps with
     | Some p -> P.of_progression p
     | None -> ps
   in
-  collapse @@ (match op with
-  | Union -> P.union a b
-  | Meet -> P.intersection a b
-  | Add -> P.add a b
-  | Sub -> P.sub a b
-  | Mul -> P.mul a b
-  | Div -> P.div a b
-  | Sdiv -> P.sdiv a b
-  | Modulo -> P.modulo a b
-  | Smodulo -> P.smodulo a b
-  | Lshift -> P.lshift a b
-  | Rshift -> P.rshift a b
-  | Arshift -> P.arshift a b
-  | Logand -> P.logand a b
-  | Logor -> P.logor a b
-  | Logxor -> P.logxor a b
-  | Concat -> P.concat a b)
+  collapse (Piece_binop.binop op a b)
+
+module Fs_repr = struct
+  type t = fset
+
+  let union = FinSet.union
+  let meet = FinSet.intersection
+  let add = FinSet.add
+  let sub = FinSet.sub
+  let mul = FinSet.mul
+  let div = FinSet.div
+  let sdiv = FinSet.sdiv
+  let modulo = FinSet.modulo
+  let smodulo = FinSet.smodulo
+  let lshift = FinSet.lshift
+  let rshift = FinSet.rshift
+  let arshift = FinSet.arshift
+  let logand = FinSet.logand
+  let logor = FinSet.logor
+  let logxor = FinSet.logxor
+  let concat = FinSet.concat
+end
+
+module Fs_binop = Binop (Fs_repr)
 
 let binop_fs (op : binop) (s1 : fset) (s2 : fset) : fset =
-  match op with
-  | Union -> FinSet.union s1 s2
-  | Meet -> FinSet.intersection s1 s2
-  | Add -> FinSet.add s1 s2
-  | Sub -> FinSet.sub s1 s2
-  | Mul -> FinSet.mul s1 s2
-  | Div -> FinSet.div s1 s2
-  | Sdiv -> FinSet.sdiv s1 s2
-  | Modulo -> FinSet.modulo s1 s2
-  | Smodulo -> FinSet.smodulo s1 s2
-  | Lshift -> FinSet.lshift s1 s2
-  | Rshift -> FinSet.rshift s1 s2
-  | Arshift -> FinSet.arshift s1 s2
-  | Logand -> FinSet.logand s1 s2
-  | Logor -> FinSet.logor s1 s2
-  | Logxor -> FinSet.logxor s1 s2
-  | Concat -> FinSet.concat s1 s2
+  Fs_binop.binop op s1 s2
 
 (* One op over one leaf pair; mixed kinds take the piece union of the
    FinSet's elements (exact runs). *)
+(* The operand's representation decides the path: the exact finite set
+   is the fast path, the piece union is the general one, and Rel/Many
+   are opaque to the generic lift (the stack-aware ops route around
+   it) — top. *)
+type repr =
+  | Fs of fset
+  | Ps of P.t
+  | Opaque
+
+let repr_of (q : t) : repr =
+  match q with
+  | FinSet s -> Fs s
+  | Clp ps -> Ps ps
+  | Rel _ | Many _ -> Opaque
+
 let op_pair (op : binop) (q1 : t) (q2 : t) : t list =
-  match q1, q2 with
-  | FinSet s1, FinSet s2 -> [ FinSet (binop_fs op s1 s2) ]
-  | Clp ps1, Clp ps2 -> [ Clp (binop_pieces op ps1 ps2) ]
-  | Clp ps1, FinSet s2 | FinSet s2, Clp ps1 ->
-    [ Clp (binop_pieces op ps1 (pieces_of_finset s2)) ]
-  | Rel _, _ | _, Rel _ ->
-    (* The generic lift is blind to the base; the stack-aware ops route
-       around it. *)
-    [ Clp (P.top (Stdlib.max (bitwidth q1) (bitwidth q2))) ]
-  | Many _, _ | _, Many _ ->
-    [ Clp (P.top (Stdlib.max (bitwidth q1) (bitwidth q2))) ]
+  let wide () = P.top (Stdlib.max (bitwidth q1) (bitwidth q2)) in
+  match repr_of q1, repr_of q2 with
+  | Fs s1, Fs s2 -> [ FinSet (binop_fs op s1 s2) ]
+  | Ps a, Ps b -> [ Clp (binop_pieces op a b) ]
+  | Ps ps, Fs s | Fs s, Ps ps ->
+    [ Clp (binop_pieces op ps (pieces_of_finset s)) ]
+  | Opaque, _ | _, Opaque -> [ Clp (wide ()) ]
 
 let lift_binop (op : binop) (t1 : t) (t2 : t) : t =
   match to_plain t1, to_plain t2 with
