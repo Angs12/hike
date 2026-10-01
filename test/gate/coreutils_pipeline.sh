@@ -211,9 +211,13 @@ do_suite() {
 
     run_check() { # $1 = tag for log names
         # Stub doc tools: regenerating man/info would execute the swapped-in
-        # binaries before the real tests run.
+        # binaries before the real tests run.  The Makefile reaches help2man
+        # through the `run_help2man' variable, not HELP2MAN, so the variable
+        # is the one that must be overridden -- coreutils ships `dummy-man'
+        # (it copies the distributed pages without running the binary).
         note "suite[$1]: make -k check (doc tools stubbed; this takes a while)"
         (cd "$CORE" && timeout 5400 make -k check V=0 \
+            run_help2man="sh $CORE/man/dummy-man" \
             HELP2MAN=true MAKEINFO=true TEXI2PDF=true TEXI2DVI=true) \
             > "$suite_log/$1.check.out" 2>&1
         local log
