@@ -1,10 +1,11 @@
-(* Sweeps dead defs; region mems survive iff loaded. *)
+(* Sweeps dead defs and phis; region mems survive iff loaded. *)
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
+module Model = Hike_stack_model
 
 (* The call-register set, built once per sub's sweep; membership is
-   the per-def predicate. *)
+   the per-node predicate. *)
 let call_reg_set ~(abi : Abi.t) : Var.Set.t =
   Base.List.fold (Abi.param_regs abi @ abi.Abi.return_regs)
     ~init:Var.Set.empty ~f:(fun acc r -> Core.Set.add acc (Var.base r))
@@ -12,101 +13,174 @@ let call_reg_set ~(abi : Abi.t) : Var.Set.t =
 let is_call_reg ~(call_regs : Var.Set.t) (v : var) : bool =
   Core.Set.mem call_regs (Var.base v)
 
-(* The sweep census: contributor counts behind [used]/[roots].  Jmp/phi
-   mentions are permanent (only defs are ever removed); [cnt]/[rcnt] count
-   SURVIVING defs mentioning each var, so a var leaves its set exactly when
-   its count hits zero outside [perm] and the cascade re-checks precisely the
-   defs whose [keep] verdict could have flipped. *)
+(* A sweep node: a def or a phi.  Both define one var and read vars, so
+   the worklist treats them alike — a read by a dead phi does not pin its
+   operands, and a phi whose result no survivor reads is swept. *)
+type node = {
+  n_tid : Tid.t;
+  n_lhs : var;
+  n_reads : Var.Set.t;   (* the rhs free vars / the phi's incomings *)
+  n_loads : Var.Set.t;   (* the load mem vars (defs only) *)
+  n_def : def term option;
+  n_phi : phi term option;
+}
+
+let def_node (d : def term) : node =
+  {
+    n_tid = Term.tid d;
+    n_lhs = Def.lhs d;
+    n_reads = Exp.free_vars (Def.rhs d);
+    n_loads = Model.load_mem_vars (Def.rhs d);
+    n_def = Some d;
+    n_phi = None;
+  }
+
+let phi_node (p : phi term) : node =
+  {
+    n_tid = Term.tid p;
+    n_lhs = Phi.lhs p;
+    n_reads = Phi.free_vars p;
+    n_loads = Var.Set.empty;
+    n_def = None;
+    n_phi = Some p;
+  }
+
+(* The sweep census: contributor counts behind [used]/[roots].  Jmp
+   mentions are permanent (a jump is never removed); [cnt]/[rcnt] count
+   SURVIVING nodes mentioning each var, so a var leaves its set exactly
+   when its count hits zero outside [perm] and the cascade re-checks
+   precisely the nodes whose [keep] verdict could have flipped. *)
 type sweep_census = {
-  defs : def term Tid.Map.t;
-  (* Defs whose lhs is the key var (re-check set when the var leaves). *)
+  nodes : node Tid.Map.t;
+  (* Nodes whose lhs is the key var (re-check set when the var leaves). *)
   by_lhs : Tid.Set.t Var.Map.t;
-  (* Rhs free vars per def (contributor counts for [used]). *)
-  fvs : Var.Set.t Tid.Map.t;
-  (* Load-mem free vars per def (contributor counts for [roots]). *)
-  lms : Var.Set.t Tid.Map.t;
+  reads : Var.Set.t Tid.Map.t;
+  loads : Var.Set.t Tid.Map.t;
   cnt : int Var.Map.t;
   rcnt : int Var.Map.t;
   perm : Var.Set.t;
+  (* The SP versions the emitter resolves through a block's SSA stamp:
+     its defs/phis must survive even with no BIR read. *)
+  versions : Var.Set.t;
 }
 
-let sweep_census_of (sub : sub term) : sweep_census =
+let sweep_census_of ~(sp : var) (sub : sub term) : sweep_census =
   let bump m v =
     Core.Map.update m v ~f:(function None -> 1 | Some n -> n + 1)
   in
   let bump_all m vs = Core.Set.fold vs ~init:m ~f:(fun m v -> bump m v) in
   let init =
     {
-      defs = Tid.Map.empty;
+      nodes = Tid.Map.empty;
       by_lhs = Var.Map.empty;
-      fvs = Tid.Map.empty;
-      lms = Tid.Map.empty;
+      reads = Tid.Map.empty;
+      loads = Tid.Map.empty;
       cnt = Var.Map.empty;
       rcnt = Var.Map.empty;
       perm = Var.Set.empty;
+      versions = Var.Set.empty;
     }
+  in
+  let add acc (n : node) =
+    let by_lhs =
+      Core.Map.update acc.by_lhs n.n_lhs ~f:(function
+        | None -> Tid.Set.singleton n.n_tid
+        | Some s -> Core.Set.add s n.n_tid)
+    in
+    {
+      acc with
+      nodes = Core.Map.set acc.nodes ~key:n.n_tid ~data:n;
+      by_lhs;
+      reads = Core.Map.set acc.reads ~key:n.n_tid ~data:n.n_reads;
+      loads = Core.Map.set acc.loads ~key:n.n_tid ~data:n.n_loads;
+      cnt = bump_all acc.cnt n.n_reads;
+      rcnt = bump_all acc.rcnt n.n_loads;
+    }
+  in
+  (* The emitter reads the SP version of a block through the stamp's
+     [entry]/[args] maps; both must resolve. *)
+  let versions_of acc blk =
+    match Term.get_attr blk Model.versions_tag with
+    | None -> acc
+    | Some vs ->
+      let sp_vers =
+        Base.List.filter_map
+          (vs.Model.Versions.entry @ vs.Model.Versions.args)
+          ~f:(fun (b, v) -> if Var.same b sp then Some v else None)
+      in
+      Core.Set.union acc (Core.Set.of_list (module Var) sp_vers)
   in
   let census_blk acc blk =
     let acc =
       Term.enum def_t blk
-      |> Seq.fold ~init:acc ~f:(fun acc d ->
-          let tid = Term.tid d in
-          let lhs = Def.lhs d in
-          let fvs = Exp.free_vars (Def.rhs d) in
-          let lms = Hike_stack_model.load_mem_vars (Def.rhs d) in
-          let by_lhs =
-            Core.Map.update acc.by_lhs lhs ~f:(function
-              | None -> Tid.Set.singleton tid
-              | Some s -> Core.Set.add s tid)
-          in
-          {
-            acc with
-            defs = Core.Map.set acc.defs ~key:tid ~data:d;
-            by_lhs;
-            fvs = Core.Map.set acc.fvs ~key:tid ~data:fvs;
-            lms = Core.Map.set acc.lms ~key:tid ~data:lms;
-            cnt = bump_all acc.cnt fvs;
-            rcnt = bump_all acc.rcnt lms;
-          })
+      |> Seq.fold ~init:acc ~f:(fun a d -> add a (def_node d))
     in
-    let perm = Core.Set.union acc.perm (Hike_stack_model.blk_reads blk) in
-    { acc with perm }
+    let acc =
+      Term.enum phi_t blk
+      |> Seq.fold ~init:acc ~f:(fun a p -> add a (phi_node p))
+    in
+    let jreads =
+      Term.enum jmp_t blk
+      |> Seq.fold ~init:Var.Set.empty ~f:(fun a j ->
+             Core.Set.union a (Jmp.free_vars j))
+    in
+    {
+      acc with
+      perm = Core.Set.union acc.perm jreads;
+      versions = versions_of acc.versions blk;
+    }
   in
   Term.enum blk_t sub |> Seq.fold ~init ~f:census_blk
 
-(* Region and section-component mems survive iff loaded; call-arg defs
-   survive (they ARE the call's arguments — the emission consumes them at
-   the call); [mem] always survives.  SP needs no special case: the SP local
-   binds to the sub's SP Slot, so SP-derived address defs stay live by the
-   plain used rule. *)
-let keep ~(load_roots : Var.Set.t)
-    ~(abi : Abi.t) ~(call_regs : Var.Set.t) (d : def term) (used : Var.Set.t) :
-    bool =
+(* A def survives when a survivor reads its lhs, it is an always-kept
+   lane (an ABI return/param register, a call argument, an intrinsic
+   result), or its lhs is [Mem]-sorted — the raw memory lane and, after
+   [hike-types], every pointer value.  Region and section-component
+   storages survive iff loaded; the incoming window survives
+   unconditionally (its stores are the call's outgoing arguments, read
+   by the callee). *)
+let keep_def ~(load_roots : Var.Set.t) ~(abi : Abi.t)
+    ~(call_regs : Var.Set.t) ~(versions : Var.Set.t) (d : def term)
+    (used : Var.Set.t) : bool =
   let lhs = Def.lhs d in
-  if Hike_stack_model.is_window_mem lhs then
-    (* The incoming window's stores are the call's outgoing arguments —
-       their reader is the callee, never a def of this sub. *)
-    true
-  else if Hike_stack_model.is_region_mem lhs
-  || Hike_stack_model.is_sec_comp_mem lhs then
+  if Model.is_window_mem lhs then true
+  else if Model.is_region_mem lhs || Model.is_sec_comp_mem lhs then
     Core.Set.mem load_roots lhs
   else
     Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
-    || Hike_stack_model.is_mem lhs
-    || Hike_stack_model.is_call_arg lhs
+    || Model.is_mem lhs
+    || Model.is_call_arg lhs
     || is_call_reg ~call_regs lhs
+    || Core.Set.mem versions lhs
     (* Mapped-intrinsic results keep hike's own [intrinsic:<name>]
        var namespace (the sub-level [Sub.intrinsic] attr is BAP's
        twin fact for the whole sub). *)
     || Hike_abi.is_intrinsic_name (Var.name (Var.base lhs))
 
-(* Incremental sweep: [used] and [load_roots] start exact and stay exact (a
-   var leaves only when its last contributor is removed), so each [keep]
-   verdict is final. *)
-let sweep_worklist ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(roots : Var.Set.t)
-    (sub : sub term) :
-    sub term =
-  let census = sweep_census_of sub in
+(* A phi survives when a survivor reads its result, it names an ABI lane
+   the emitter resolves at the block, or it is one of the SP versions the
+   block's SSA stamp hands the emitter. *)
+let keep_phi ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(versions : Var.Set.t)
+    (p : phi term) (used : Var.Set.t) : bool =
+  let lhs = Phi.lhs p in
+  Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
+  || is_call_reg ~call_regs lhs
+  || Core.Set.mem versions lhs
+
+let keep_node ~(load_roots : Var.Set.t) ~(abi : Abi.t)
+    ~(call_regs : Var.Set.t) ~(versions : Var.Set.t) (n : node)
+    (used : Var.Set.t) : bool =
+  match (n.n_def, n.n_phi) with
+  | Some d, _ -> keep_def ~load_roots ~abi ~call_regs ~versions d used
+  | None, Some p -> keep_phi ~abi ~call_regs ~versions p used
+  | None, None -> true
+
+(* Incremental sweep: [used] and [load_roots] start exact and stay exact
+   (a var leaves only when its last contributor is removed), so each
+   [keep] verdict is final. *)
+let sweep_worklist ~(abi : Abi.t) ~(sp : var) ~(call_regs : Var.Set.t)
+    ~(roots : Var.Set.t) (sub : sub term) : sub term =
+  let census = sweep_census_of ~sp sub in
   let dom m =
     Core.Map.fold m ~init:Var.Set.empty ~f:(fun ~key:v ~data:_ acc ->
         Core.Set.add acc v)
@@ -119,7 +193,7 @@ let sweep_worklist ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(roots : Var.Set.t)
   let cnt = ref census.cnt in
   let rcnt = ref census.rcnt in
   let removed = ref Tid.Set.empty in
-  (* A contributor leaving can only flip defs whose lhs it is. *)
+  (* A contributor leaving can only flip nodes whose lhs it is. *)
   let readers_of v =
     Core.Map.find census.by_lhs v |> Option.value ~default:Tid.Set.empty
   in
@@ -135,17 +209,23 @@ let sweep_worklist ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(roots : Var.Set.t)
   let rec drain = function
     | [] -> ()
     | tid :: rest -> (
-        match Core.Map.find census.defs tid with
+        match Core.Map.find census.nodes tid with
         | None -> drain rest
-        | Some d ->
+        | Some n ->
             if
               Core.Set.mem !removed tid
-              || keep ~load_roots:!load_roots ~abi ~call_regs d !used
+              || keep_node ~load_roots:!load_roots ~abi ~call_regs
+                   ~versions:census.versions n !used
             then drain rest
             else begin
               removed := Core.Set.add !removed tid;
-              let unuse counts set v q =
-                if leave counts v && not (Core.Set.mem census.perm v) then begin
+              (* A jmp read and an escape root are permanent: the last
+                 contributor leaving must not evict them. *)
+              let unuse counts set permanent v q =
+                if
+                  leave counts v
+                  && not (Core.Set.mem permanent v)
+                then begin
                   set := Core.Set.remove !set v;
                   Core.Set.fold (readers_of v) ~init:q ~f:(fun q t ->
                       t :: q)
@@ -154,31 +234,37 @@ let sweep_worklist ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(roots : Var.Set.t)
               in
               let rest =
                 Core.Set.fold
-                  (Core.Map.find census.fvs tid
+                  (Core.Map.find census.reads tid
                   |> Option.value ~default:Var.Set.empty)
                   ~init:rest
-                  ~f:(fun q v -> unuse cnt used v q)
+                  ~f:(fun q v -> unuse cnt used census.perm v q)
               in
               let rest =
                 Core.Set.fold
-                  (Core.Map.find census.lms tid
+                  (Core.Map.find census.loads tid
                   |> Option.value ~default:Var.Set.empty)
                   ~init:rest
-                  ~f:(fun q m -> unuse rcnt load_roots m q)
+                  ~f:(fun q m ->
+                    unuse rcnt load_roots
+                      (Core.Set.union census.perm roots)
+                      m q)
               in
               drain rest
             end)
   in
-  drain (Core.Map.keys census.defs);
+  drain (Core.Map.keys census.nodes);
   if Core.Set.is_empty !removed then sub
   else
     Term.map blk_t sub ~f:(fun blk ->
-        if
-          Term.enum def_t blk
-          |> Seq.exists ~f:(fun d -> Core.Set.mem !removed (Term.tid d))
-        then
-          Term.filter def_t blk ~f:(fun d ->
-              not (Core.Set.mem !removed (Term.tid d)))
+        let dead tid = Core.Set.mem !removed tid in
+        let blk =
+          if Term.enum def_t blk |> Seq.exists ~f:(fun d -> dead (Term.tid d))
+          then
+            Term.filter def_t blk ~f:(fun d -> not (dead (Term.tid d)))
+          else blk
+        in
+        if Term.enum phi_t blk |> Seq.exists ~f:(fun p -> dead (Term.tid p))
+        then Term.filter phi_t blk ~f:(fun p -> not (dead (Term.tid p)))
         else blk)
 
 (* [roots] names the storage mem vars whose bytes escape this sub — their
@@ -187,4 +273,5 @@ let dce ?(roots = Var.Set.empty) ~target (sub : sub term) : sub term =
   if Term.has_attr sub Sub.intrinsic then sub
   else
     let abi = Abi.of_target target in
-    sweep_worklist ~abi ~call_regs:(call_reg_set ~abi) ~roots sub
+    sweep_worklist ~abi ~sp:abi.Abi.sp ~call_regs:(call_reg_set ~abi) ~roots
+      sub

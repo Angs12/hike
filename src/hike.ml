@@ -211,11 +211,10 @@ let pass_strip_canaries proj =
   in
   map_subs (Hike_strip_canaries.strip_sub ~facts ~names) proj
 
-(* The sections pass: attribution, promotion, DCE; the emitter spec is
-   installed into the KB facts for convert_binary. *)
+(* The sections pass: attribution and promotion; the emitter spec and the
+   sweep's escape roots are installed into the KB facts. *)
 let pass_attrib proj =
   let facts = Hike_kb.facts () in
-  let target = facts.target in
   let word = facts.abi.Hike_abi.word in
   let meta = Hike_sections.sec_meta ~word proj in
   let spans = Hike_sections.attrib_spans ~meta in
@@ -249,20 +248,29 @@ let pass_attrib proj =
       ~relative:(Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj))
       ~externals:(Hike_image.external_references proj)
   in
-  (* The DCE's load roots are the vars the rewrite created; its
-     escape roots are the storages carrying identity members. *)
-  let program =
-    Term.map sub_t program ~f:(fun sub ->
-        let roots =
-          Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
-          |> Option.value ~default:Hike_sections.Tree.empty
-          |> Hike_sections.escape_roots_of_tree
-              ~addr_bits:(Hike_stack_model.word_bits word)
-        in
-        Hike_dce.dce ~roots ~target sub)
+  (* The DCE's escape roots: the storages carrying identity members.
+     They ride the facts to the sweep's own pass, after [hike-types]. *)
+  let escape_roots =
+    Core.Map.map ctx.Hike_sections.sub_trees ~f:(fun tree ->
+        Hike_sections.escape_roots_of_tree
+          ~addr_bits:(Hike_stack_model.word_bits word) tree)
   in
-  Hike_kb.install (Hike_kb.with_spec facts spec);
+  Hike_kb.install (Hike_kb.with_attribution facts ~spec ~escape_roots);
   Project.with_program proj program
+
+(* The sweep runs after [hike-types]: SSA has materialized the joins, so
+   the dead values only the versioned defs and phis distinguish are
+   removable.  The escape roots ride the facts from the attribution. *)
+let pass_dce proj =
+  let facts = Hike_kb.facts () in
+  let target = facts.target in
+  Project.map_program proj ~f:(fun prog ->
+      Term.map sub_t prog ~f:(fun sub ->
+          let roots =
+            Core.Map.find facts.escape_roots (Term.tid sub)
+            |> Option.value ~default:Var.Set.empty
+          in
+          Hike_dce.dce ~roots ~target sub))
 
 let pass_convlir ~output proj = convert_binary output proj
 
@@ -293,6 +301,7 @@ let () =
       let sign = chain ~name:"sign" ~deps:[ split_blocks ] Hike_types.sign_run in
       let ssa = chain ~name:"ssa" ~deps:[ sign ] pass_ssa in
       let types = chain ~name:"types" ~deps:[ ssa ] Hike_types.run in
-      let convlir = chain' ~name:"convlir" ~deps:[ types ] (pass_convlir ~output:output_file) in
+      let dce = chain ~name:"dce" ~deps:[ types ] pass_dce in
+      let convlir = chain' ~name:"convlir" ~deps:[ dce ] (pass_convlir ~output:output_file) in
       ignore convlir;
       Ok ())

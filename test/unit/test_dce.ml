@@ -221,6 +221,84 @@ let tests : unit Alcotest.test list =
           Hike.Dce.dce ~roots:(Var.Set.singleton sm) ~target:Theory.Target.unknown sub
         in
         check "DCE-07" (List.length (dce_defs sub') = 2));
+
+    (* D7: the phi arm — a phi whose result no survivor reads is swept,
+       and its operands' defs cascade with it.  Under SSA a dead phi's
+       reads would otherwise pin every operand def forever. *)
+    pin "DCE-08" "a def read only by a dead phi is swept with the phi"
+      (fun () ->
+        let v = v64 "d8_v" in
+        let dead = v64 "d8_dead" in
+        let j_blk =
+          let b = Blk.Builder.create () in
+          Blk.Builder.add_def b (Def.create dead (Bil.Var v));
+          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          Blk.Builder.result b
+        in
+        let p1 =
+          with_jmps
+            (blk_of_defs [ Def.create v (Bil.Int (bw64 1)) ])
+            [ mk_goto (Term.tid j_blk) ]
+        in
+        let p2 =
+          with_jmps
+            (blk_of_defs [ Def.create v (Bil.Int (bw64 2)) ])
+            [ mk_goto (Term.tid j_blk) ]
+        in
+        let e =
+          with_jmps (blk_of_defs [])
+            [ mk_jmp_to (Term.tid p1) (Bil.Var (v64 "d8_c"));
+              mk_goto (Term.tid p2) ]
+        in
+        let sub =
+          let sb = Sub.Builder.create ~name:"d8" () in
+          List.iter (Sub.Builder.add_blk sb) [ e; p1; p2; j_blk ];
+          Sub.Builder.result sb
+        in
+        let prog = Program.create ~subs:[ sub ] () in
+        let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let sub = Term.enum sub_t prog |> Seq.hd_exn in
+        let phi_present =
+          Term.enum blk_t sub
+          |> Seq.exists ~f:(fun b -> not (Seq.is_empty (Term.enum phi_t b)))
+        in
+        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let phi_gone =
+          Term.enum blk_t sub'
+          |> Base.Sequence.for_all ~f:(fun b -> Seq.is_empty (Term.enum phi_t b))
+        in
+        let v_gone =
+          Base.List.for_all (dce_defs sub') ~f:(fun d ->
+              not (Var.same (Var.base (Def.lhs d)) v))
+        in
+        check "DCE-08" (phi_present && phi_gone && v_gone));
+
+    (* D8: the escape roots cross the pass boundary on the facts record
+       (the attribution computes them; the sweep's own pass reads them). *)
+    pin "DCE-09" "an escape root rides the facts to the sweep's own pass"
+      (fun () ->
+        let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
+        let base = v64 "d9_base" in
+        let sub, _ =
+          sub_of "d9_escape_root"
+            [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
+        in
+        let roots = Tid.Map.singleton (Term.tid sub) (Var.Set.singleton sm) in
+        let facts =
+          Hike.Kb.with_attribution top_facts ~spec:empty_spec
+            ~escape_roots:roots
+        in
+        let carried =
+          Core.Map.find facts.Hike.Kb.escape_roots (Term.tid sub)
+          |> Option.value ~default:Var.Set.empty
+        in
+        let sub' =
+          Hike.Dce.dce ~roots:carried ~target:Theory.Target.unknown sub
+        in
+        check "DCE-09"
+          (Var.Set.equal carried (Var.Set.singleton sm)
+          && List.length (dce_defs sub') = 2));
   ]
 
 let () = run "dce" tests

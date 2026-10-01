@@ -40,6 +40,10 @@ type facts = {
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
   spec : Bil2llvm_env.section_spec option;
+  (* The DCE's per-sub escape roots: the storage mem vars whose bytes
+     escape the sub.  The attribution computes them from its trees; the
+     sweep reads them off the record. *)
+  escape_roots : Var.Set.t Tid.Map.t;
 }
 
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
@@ -61,7 +65,8 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
       (fun ~blk ?def e ->
         let pre, post = blk_envs blk in
         Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e);
-    spec = None }
+    spec = None;
+    escape_roots = Tid.Map.empty }
 
 (* The run's record, installed once at the pass_vsa boundary. *)
 let run : facts option ref = ref None
@@ -76,6 +81,8 @@ let facts () =
 (* The optional read for passes that also run on fixtures (no analysis). *)
 let facts_opt () : facts option = !run
 
-(* The attribution pass adds the emitter spec to the installed record. *)
-let with_spec (f : facts) (spec : Bil2llvm_env.section_spec) : facts =
-  { f with spec = Some spec }
+(* The attribution pass adds the emitter spec and the sweep's escape
+   roots to the installed record. *)
+let with_attribution (f : facts) ~(spec : Bil2llvm_env.section_spec)
+    ~(escape_roots : Var.Set.t Tid.Map.t) : facts =
+  { f with spec = Some spec; escape_roots }
