@@ -15,7 +15,7 @@ type storage = {
 
 (* The sub's storages: one alloca per layout region, in layout order. *)
 let build ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
-    (layout : Model.Sub_layout.t) : storage list =
+    ~(addr_bits : int) (layout : Model.Sub_layout.t) : storage list =
   Base.List.map layout.Model.Sub_layout.regions
     ~f:(fun { Model.Sub_layout.r_id = id; r_lo = lo; r_bytes = bytes; _ } ->
       let base =
@@ -26,6 +26,6 @@ let build ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
       in
       Llvm.set_alignment Abi.stack_align base;
       { id;
-        mem = Model.region_mem id;
+        mem = Model.region_mem ~addr_bits id;
         base;
         rel = Stdlib.Int64.sub lo Model.segment_base })

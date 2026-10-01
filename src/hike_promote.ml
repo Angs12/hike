@@ -705,19 +705,19 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int)
   match conv with
   | Keep -> d
   | Conv_region id ->
-      let mem_var = Model.region_mem id in
+      let mem_var = Model.region_mem ~addr_bits:bits id in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_window ->
-      let mem_var = Model.window_mem in
+      let mem_var = Model.window_mem ~addr_bits:bits in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_global id ->
-      let mem_var = Model.sec_comp_mem id in
+      let mem_var = Model.sec_comp_mem ~addr_bits:bits id in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
       in

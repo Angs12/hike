@@ -315,7 +315,7 @@ let tests : unit Alcotest.test list =
         let c3' = rewrite_one c3 in
         check_bound "MOD-17" (def_of_tid c3' (Term.tid c3_rd)) (fun d ->
             match Def.rhs d with
-            | Bil.Load (Bil.Var mem, _, _, _) -> Var.same mem (Sm.window_mem)
+            | Bil.Load (Bil.Var mem, _, _, _) -> Var.same mem (Sm.window_mem ~addr_bits:64)
             | _ -> false));
 
     pin "MOD-18"
@@ -366,13 +366,13 @@ let tests : unit Alcotest.test list =
                   method! visit_load ~mem ~addr:_ _ _ acc =
                     acc
                     && (match mem with
-                       | Bil.Var v -> Var.same v (Sm.window_mem)
+                       | Bil.Var v -> Var.same v (Sm.window_mem ~addr_bits:64)
                        | _ -> false)
 
                   method! visit_store ~mem ~addr:_ ~exp:_ _ _ acc =
                     acc
                     && (match mem with
-                       | Bil.Var v -> Var.same v (Sm.window_mem)
+                       | Bil.Var v -> Var.same v (Sm.window_mem ~addr_bits:64)
                        | _ -> false)
                 end
               in
@@ -449,7 +449,7 @@ let tests : unit Alcotest.test list =
         check_bound "MOD-20" (def_of_tid c4' (Term.tid c4_ld)) (fun d ->
             match Def.rhs d with
             | Bil.Load (Bil.Var mem, _, _, _) ->
-                Var.same mem (Sm.region_mem 1)
+                Var.same mem (Sm.region_mem ~addr_bits:64 1)
                 && (Term.enum blk_t c4'
                    |> Seq.concat_map ~f:(Term.enum jmp_t)
                    |> Seq.exists ~f:(fun j ->

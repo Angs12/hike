@@ -856,14 +856,14 @@ let storage_of_range (tree : range_storage Tree.t) (r : range) :
    world (a callee, the window) reads through an escaped address — no
    def of this sub is their reader, so the DCE sweep keeps them as
    roots. *)
-let escape_roots_of_tree (tree : sub_tree) : Var.Set.t =
+let escape_roots_of_tree ~(addr_bits : int) (tree : sub_tree) : Var.Set.t =
   Tree.to_sequence tree
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc (_, rs) ->
          if not (Base.List.exists rs.members ~f:(fun m -> m.m_identity)) then acc
          else
            let mem_var = function
-             | Stack_region id -> Some (Model.region_mem id)
-             | Stack_residue -> Some (Model.region_mem Model.residue_id)
+             | Stack_region id -> Some (Model.region_mem ~addr_bits id)
+             | Stack_residue -> Some (Model.region_mem ~addr_bits Model.residue_id)
              | Arg_slot _ -> None
              | Data_region _ ->
                failwith "hike-sections: a data binding in a sub tree"

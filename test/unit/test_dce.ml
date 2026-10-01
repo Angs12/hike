@@ -118,7 +118,7 @@ let tests : unit Alcotest.test list =
        roots it. *)
     pin "DCE-04" "a fissioned region-mem store chain dies iff no Load roots it (the two-tier rule)"
       (fun () ->
-        let sm = Hike.Stack_model.region_mem 0 in
+        let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
         let base = v64 "d_base" in
         (* (a) never loaded: both store-chain members die *)
         let sub_a, _ =
@@ -211,7 +211,7 @@ let tests : unit Alcotest.test list =
     pin "DCE-07"
       "a never-loaded region-mem store chain survives when rooted as escape storage"
       (fun () ->
-        let sm = Hike.Stack_model.region_mem 0 in
+        let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
         let base = v64 "d_base" in
         let sub, _ =
           sub_of "d6_escape_root"

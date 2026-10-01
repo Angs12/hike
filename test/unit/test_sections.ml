@@ -777,7 +777,7 @@ let tests : unit Alcotest.test list =
            | Some d -> (
                match Def.rhs d with
                | Bil.Store (Bil.Var mem, Bil.Var b, _, _, `r16) ->
-                   Var.same mem (Sm.region_mem 1)
+                   Var.same mem (Sm.region_mem ~addr_bits:64 1)
                    && Sm.region_ptr_id_of b = Some 1
                    && Var.equal (Def.lhs d) mem
                | _ -> false)

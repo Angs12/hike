@@ -254,7 +254,7 @@ module Stack_model : sig
   val store_data_of_rhs : exp -> exp option
 
   (** Mints and recognizes fission vars. *)
-  val region_mem : int -> var
+  val region_mem : addr_bits:int -> int -> var
   val is_region_mem : var -> bool
 
   (** The storage base vars: one Mem-typed value per storage, minted by
@@ -275,7 +275,7 @@ module Stack_model : sig
   val is_sec_comp_ptr : var -> bool
 
   (** The incoming-window memory var (the caller's world) and its test. *)
-  val window_mem : var
+  val window_mem : addr_bits:int -> var
   val is_window_mem : var -> bool
 
   (** The caller-window base parameter and its test. *)
@@ -283,7 +283,7 @@ module Stack_model : sig
   val is_window_var : var -> bool
 
   (** Mints and recognizes the section-component fission vars. *)
-  val sec_comp_mem : int -> var
+  val sec_comp_mem : addr_bits:int -> int -> var
   val is_sec_comp_mem : var -> bool
   val sec_comp_name : int -> string
   val sec_res_name : int -> string

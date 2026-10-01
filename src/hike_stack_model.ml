@@ -303,11 +303,17 @@ let is_call_arg (v : var) : bool = is_in_family call_arg_family v
 
 let is_arg_slot (v : var) : bool = is_in_family slot_family v
 
+(* The fission mem vars' type: byte cells addressed at the target's
+   address width. *)
+let mem_t ~(addr_bits : int) =
+  if addr_bits <= 32 then mem32_t (Size.of_int_exn 8)
+  else mem64_t (Size.of_int_exn 8)
+
 (* The incoming-window memory var: a callee's above-entry accesses are
    materialized against the caller's window through it. *)
-let window_mem : var =
+let window_mem ~(addr_bits : int) : var =
   Var.create ~is_virtual:false ~fresh:false "hike_window_mem"
-    (mem64_t (Size.of_int_exn 8))
+    (mem_t ~addr_bits)
 
 let is_window_mem (v : var) : bool =
   String.equal (Var.name v) "hike_window_mem"
@@ -338,10 +344,10 @@ let slot_index_of_offset ~(word : int) (rel : int64) : int =
     (Stdlib.Int64.div (Stdlib.Int64.sub rel (Stdlib.Int64.of_int word))
        (Stdlib.Int64.of_int word))
 
-let region_mem (id : int) : var =
+let region_mem ~(addr_bits : int) (id : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (family_name region_family id)
-    (mem64_t (Size.of_int_exn 8))
+    (mem_t ~addr_bits)
 
 (* The storage base family: one Mem-typed value per storage, minted by
    the attribution's rewrite and bound by the emitter to the storage's
@@ -413,10 +419,10 @@ type sec_comp = {
 
 let sec_comp_name (n : int) : string = Printf.sprintf "sec_comp_%d" n
 
-let sec_comp_mem (n : int) : var =
+let sec_comp_mem ~(addr_bits : int) (n : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (family_name sec_comp_family n)
-    (mem64_t (Size.of_int_exn 8))
+    (mem_t ~addr_bits)
 
 (* The gap runs continue the same numbering; they emit globals but carry no
    BIL var. *)

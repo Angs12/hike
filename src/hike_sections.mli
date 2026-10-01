@@ -170,7 +170,7 @@ val is_const_chain : exp -> bool
 (** The mem vars of storages carrying identity members — bytes another
     world reads through an escaped address; the DCE sweep keeps them
     as roots. *)
-val escape_roots_of_tree : sub_tree -> Var.Set.t
+val escape_roots_of_tree : addr_bits:int -> sub_tree -> Var.Set.t
 
 (** Stamps the ctx's slim tags onto the sub's defs (a term mapper). *)
 val stamp_tags : ctx -> sub term -> sub term

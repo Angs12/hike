@@ -50,14 +50,14 @@ let tests : unit Alcotest.test list =
               r_bytes = 16L } ]
         in
         let storages =
-          Stack_ptr.build ~llvm_ctx ~llvm_builder (layout_of regions)
+          Stack_ptr.build ~llvm_ctx ~llvm_builder ~addr_bits:64 (layout_of regions)
         in
         ignore (Llvm.build_ret_void llvm_builder);
         let ir = Llvm.string_of_llmodule llvm_module in
         check "SPTR-02"
           (match storages with
           | [ s ] ->
-              Var.same s.mem (Model.region_mem 3)
+              Var.same s.mem (Model.region_mem ~addr_bits:64 3)
               && Int64.equal s.rel (-24L)
               && alloca_p s.base
               && String.equal (Llvm.value_name s.base) "stack_r3"

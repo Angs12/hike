@@ -226,7 +226,9 @@ let create_sub ctx scope sub =
         ~default:{ Hike_stack_model.Sub_layout.regions = [];
                    window_param = false }
     in
-    let storages = Hike_stack_ptr.build ~llvm_ctx ~llvm_builder layout in
+    let storages =
+      Hike_stack_ptr.build ~llvm_ctx ~llvm_builder ~addr_bits:ctx.addr_bits layout
+    in
     let regions =
       Base.List.map storages
         ~f:(fun (s : Hike_stack_ptr.storage) -> (s.mem, (s.base, s.rel)))
@@ -250,7 +252,8 @@ let create_sub ctx scope sub =
       Base.Option.map
         (Base.List.find regions ~f:(fun (v, _) ->
              Var.equal v
-               (Hike_stack_model.region_mem Hike_stack_model.residue_id)))
+               (Hike_stack_model.region_mem ~addr_bits:ctx.addr_bits
+                  Hike_stack_model.residue_id)))
         ~f:(fun (_, (base, rel)) ->
           Llvm.build_gep (Llvm.i8_type llvm_ctx) base
             [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
@@ -370,7 +373,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       Base.List.iter section.owners ~f:(fun o ->
           match o.own_id with
           | Some id ->
-            let v = Hike_stack_model.sec_comp_mem id in
+            let v = Hike_stack_model.sec_comp_mem ~addr_bits:ctx.addr_bits id in
             ctx.sec_comps := Core.Map.set !(ctx.sec_comps) ~key:v ~data:(o.base, o.own_lo)
           | None -> ()));
   (* An external function's PLT stub defines no function and emits no

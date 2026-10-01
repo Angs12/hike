@@ -13,5 +13,6 @@ type storage = {
 val build :
   llvm_ctx:Llvm.llcontext ->
   llvm_builder:Llvm.llbuilder ->
+  addr_bits:int ->
   Hike_stack_model.Sub_layout.t ->
   storage list

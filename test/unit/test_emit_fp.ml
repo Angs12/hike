@@ -208,7 +208,7 @@ let tests : unit Alcotest.test list =
         in
         let x1d =
           Def.create (ivar64 "intrinsic:x1")
-            (Bil.Load (Bil.Var (Sm.region_mem 1), minus_addr sp 16L, LittleEndian, `r64))
+            (Bil.Load (Bil.Var (Sm.region_mem ~addr_bits:64 1), minus_addr sp 16L, LittleEndian, `r64))
         in
         let residue_lo = -8200L
         and residue_hi = -17L

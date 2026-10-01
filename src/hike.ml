@@ -245,6 +245,7 @@ let pass_attrib proj =
           Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
           |> Option.value ~default:Hike_sections.Tree.empty
           |> Hike_sections.escape_roots_of_tree
+              ~addr_bits:(Hike_stack_model.word_bits word)
         in
         Hike_dce.dce ~roots ~target sub)
   in
