@@ -16,13 +16,14 @@ let is_call_reg ~(call_regs : Var.Set.t) (v : var) : bool =
 (* A sweep node: a def or a phi.  Both define one var and read vars, so
    the worklist treats them alike — a read by a dead phi does not pin its
    operands, and a phi whose result no survivor reads is swept. *)
+type body = Def of def term | Phi of phi term
+
 type node = {
   n_tid : Tid.t;
   n_lhs : var;
   n_reads : Var.Set.t;   (* the rhs free vars / the phi's incomings *)
   n_loads : Var.Set.t;   (* the load mem vars (defs only) *)
-  n_def : def term option;
-  n_phi : phi term option;
+  n_body : body;
 }
 
 let def_node (d : def term) : node =
@@ -31,8 +32,7 @@ let def_node (d : def term) : node =
     n_lhs = Def.lhs d;
     n_reads = Exp.free_vars (Def.rhs d);
     n_loads = Model.load_mem_vars (Def.rhs d);
-    n_def = Some d;
-    n_phi = None;
+    n_body = Def d;
   }
 
 let phi_node (p : phi term) : node =
@@ -41,8 +41,7 @@ let phi_node (p : phi term) : node =
     n_lhs = Phi.lhs p;
     n_reads = Phi.free_vars p;
     n_loads = Var.Set.empty;
-    n_def = None;
-    n_phi = Some p;
+    n_body = Phi p;
   }
 
 (* The sweep census: contributor counts behind [used]/[roots].  Jmp
@@ -170,10 +169,9 @@ let keep_phi ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(versions : Var.Set.t)
 let keep_node ~(load_roots : Var.Set.t) ~(abi : Abi.t)
     ~(call_regs : Var.Set.t) ~(versions : Var.Set.t) (n : node)
     (used : Var.Set.t) : bool =
-  match (n.n_def, n.n_phi) with
-  | Some d, _ -> keep_def ~load_roots ~abi ~call_regs ~versions d used
-  | None, Some p -> keep_phi ~abi ~call_regs ~versions p used
-  | None, None -> true
+  match n.n_body with
+  | Def d -> keep_def ~load_roots ~abi ~call_regs ~versions d used
+  | Phi p -> keep_phi ~abi ~call_regs ~versions p used
 
 (* Incremental sweep: [used] and [load_roots] start exact and stay exact
    (a var leaves only when its last contributor is removed), so each

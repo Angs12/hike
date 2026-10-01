@@ -149,27 +149,21 @@ let conversion_of ~(word : int) ~(entry : int64)
                   | Args, Arg_slot -> (
                       (* The slot index is the ACCESS's own word cell,
                          never the binding's: a binding may span several
-                         cells.  A portion outside a single cell is not
-                         a slot (the binding's promotability proved one,
-                         so this is the defensive identity). *)
-                      let cell pos =
-                        Model.slot_index_of_offset ~word
-                          (Stdlib.Int64.sub pos entry)
-                      in
-                      if
-                        Stdlib.Int64.compare p.pt_lo
-                          (Model.args_base ~entry ~word)
-                        >= 0
-                        && Int.equal (cell p.pt_lo) (cell p.pt_hi)
-                      then
-                        let i = cell p.pt_lo in
+                         cells.  A span outside a single cell is not a
+                         slot (the binding's promotability proved one, so
+                         this is the defensive identity). *)
+                      match
+                        Sections.args_cell_of_span ~word ~entry p.pt_lo
+                          p.pt_hi
+                      with
+                      | Some i ->
                         let cell_lo =
                           Stdlib.Int64.add entry (Model.slot_offset ~word i)
                         in
                         ( Conv_slot
                             (i, Stdlib.Int64.to_int (Stdlib.Int64.sub p.pt_lo cell_lo)),
                           tag )
-                      else (Keep, tag))
+                      | None -> (Keep, tag))
                   | _, Data_region id -> (Conv_global id, tag)
                   | _ -> (Keep, tag))
               | None -> (Keep, tag))
@@ -687,7 +681,7 @@ let slot_addr_mapper (addr : exp) =
 (* One def's rewrite: re-point to the owning storage's mem var at the
    storage-relative address, or address its memory node at the caller's
    slot. *)
-let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int)
+let rewrite_def ~(addr_bits : int) ~(conv : conv) ~(bits : int)
     ?(addr : exp option) (d : def term) : def term =
   match conv with
   | Keep -> d
@@ -710,7 +704,6 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_slot (i, byte_offset) ->
-      let addr_bits = Model.word_bits word in
       let slot = Model.arg_slot ~addr_bits i in
       let addr =
         base_plus slot ~rel:0L
@@ -726,9 +719,8 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int)
    above already re-pointed at the caller's storage.  A partial store
    passes its address too — the callee reads and writes the exact
    bytes. *)
-let bind_site_args ~(word : int) (bindings : site_binding list)
+let bind_site_args ~(addr_bits : int) (bindings : site_binding list)
     (blk : blk term) : blk term =
-  let addr_bits = Model.word_bits word in
   Base.List.fold bindings ~init:blk ~f:(fun blk b ->
       (* [b.sb_def] is the PRE-rewrite term; its address is read off the
          rewritten block, whose mapper has already run. *)
@@ -737,8 +729,16 @@ let bind_site_args ~(word : int) (bindings : site_binding list)
         | Some d -> (
             match Model.addr_of_rhs (Def.rhs d) with
             | Some (a, _) -> a
-            | None -> Bil.Var (Model.call_arg ~addr_bits b.sb_slot))
-        | None -> Bil.Var (Model.call_arg ~addr_bits b.sb_slot)
+            | None ->
+                failwith
+                  ("hike-promote: call-arg binding: slot "
+                  ^ Int.to_string b.sb_slot
+                  ^ "'s store address is not readable after the rewrite"))
+        | None ->
+            failwith
+              ("hike-promote: call-arg binding: slot "
+             ^ Int.to_string b.sb_slot
+             ^ "'s storing def is not in its block")
       in
       let arg = Def.create (Model.call_arg ~addr_bits b.sb_slot) addr in
       match Term.next def_t blk (Term.tid b.sb_def) with
@@ -796,9 +796,8 @@ let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
               | _ -> j)
           | _ -> j))
 
-let promote_sub ~(abi : Hike_abi.t) (facts : facts)
+let promote_sub ~(addr_bits : int) (facts : facts)
     (sub : sub term) : sub term =
-  let addr_bits = Hike_stack_model.word_bits abi.Hike_abi.word in
   let with_signature sub =
     if Hike_stack_model.fixed_signature sub then sub
     else
@@ -838,7 +837,8 @@ let slot_arity ~(word : int) ~(entry : int64) (tree : Sections.sub_tree) : int =
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
    products. *)
-let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
+let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
+    ~(abi : Hike_abi.t)
     ~(spans : Sections.data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
                 (Vsa.WordSet.t, Type.error) Result.t)
@@ -862,7 +862,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let arity = slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
-  let sub = promote_sub ~abi facts sub in
+  let sub = promote_sub ~addr_bits facts sub in
   (* A non-memory def whose value is a caller-window address — the
      model's one window denotation — is stamped; the emitter re-bases
      its integer to the window parameter. *)
@@ -916,7 +916,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
             | Some rhs -> Def.with_rhs d rhs
             | None ->
                 let d =
-                  rewrite_def ~word ~conv:f.fr_conv ~bits:f.fr_bits
+                  rewrite_def ~addr_bits ~conv:f.fr_conv ~bits:f.fr_bits
                     ?addr:f.fr_addr d
                 in
                 (* The conversion names the address's own alloca; carry
@@ -932,7 +932,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
       method! map_blk blk =
         let blk = super#map_blk blk in
         match Core.Map.find sites (Term.tid blk) with
-        | Some (bs, _) -> bind_site_args ~word bs blk
+        | Some (bs, _) -> bind_site_args ~addr_bits bs blk
         | None -> blk
     end
   in
@@ -955,6 +955,9 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
   let denote = facts.denote in
   let sp = abi.Hike_abi.sp in
   let lookup = facts.lookup in
+  (* The slot vars are address lanes: the run's target address width,
+     the same fact the emitter threads. *)
+  let addr_bits = Bap_core_theory.Theory.Target.bits facts.target in
   let callee_exempt = Hike_stack_model.fixed_signature in
   let exempt =
     Term.enum sub_t prog
@@ -975,7 +978,8 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
         Core.Map.find sides (Term.tid sub)
         |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
       in
-      rewrite_sub ~word ~entry ~abi ~spans ~denote ~ctx ~sites ~resolved
+      rewrite_sub ~word ~entry ~addr_bits ~abi ~spans ~denote ~ctx ~sites
+        ~resolved
         ~vla_tids:(Core.Map.key_set facts.Hike_kb.vla_extents)
         ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
         sub)

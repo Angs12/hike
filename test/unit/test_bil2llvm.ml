@@ -26,7 +26,7 @@ let stamp (tags : (Tid.t * Ds.sec_tag) list) (sub : sub term) : sub term =
             | Some t -> stamp_tag d (Some t)
             | None -> d))
   in
-  Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv (mk_facts ()) sub
+  Hike.Promote.promote_sub ~addr_bits:64 (mk_facts ()) sub
 
 (* Phi lines with exactly two incomings. *)
 let count_two_incoming_phis (ir : string) : int =
@@ -326,6 +326,118 @@ let tests : unit Alcotest.test list =
         check "EMIT-41"
           (contains_substring ir "@foobar"
           && not (contains_substring ir "@foo.bar")));
+
+    (* §5 — the initializer's substitution rule against fixture
+       relocation facts: a word is an address iff a relocation names
+       it; every other word keeps its raw bits. *)
+
+    (* REL: a RELATIVE site renders the relocation fact's runtime value
+       remapped through the sections — the image's raw bits never
+       surface. *)
+    pin "EMIT-43"
+      "a RELATIVE site renders the relocation fact's value remapped, \
+       never the raw bits"
+      (fun () ->
+        let text_img = Bytes.make 16 '\000' in
+        let text_meta =
+          { B2l.sm_type = Sm.Text; sm_const = true;
+            sm_lo = 0x500L; sm_hi = 0x50FL; sm_words = 2;
+            sm_image = Some text_img; sm_copy_relocs = [] }
+        in
+        let img = Bytes.make 8 '\000' in
+        Bytes.set img 0 '\x42';
+        let meta =
+          { B2l.sm_type = Sm.Data; sm_const = false;
+            sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
+            sm_image = Some img; sm_copy_relocs = [] }
+        in
+        let spec =
+          { empty_spec with
+            B2l.spec_sections = [ Some text_meta; Some meta ];
+            spec_relative = [ (0x1000L, 0x504L) ] }
+        in
+        let sub, _ =
+          sub_of "rel_slot"
+            [ [ Def.create (v64 "rel_slot_t")
+                  (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
+        in
+        let ir = emit_ir_spec spec [ sub ] in
+        check "EMIT-43"
+          (contains_substring ir
+             "ptrtoint (ptr getelementptr inbounds (i8, ptr @text, i64 4) \
+              to i64)"
+          && not (contains_substring ir "i64 66")));
+
+    (* CLASS-B: an unrelocated word keeps its raw bits even when they
+       land inside a built section's span — the span never guesses an
+       address (the corpus's class-(b) fixture's rule). *)
+    pin "EMIT-44"
+      "an unrelocated word inside a built span keeps its raw bits"
+      (fun () ->
+        let text_img = Bytes.make 16 '\000' in
+        let text_meta =
+          { B2l.sm_type = Sm.Text; sm_const = true;
+            sm_lo = 0x500L; sm_hi = 0x50FL; sm_words = 2;
+            sm_image = Some text_img; sm_copy_relocs = [] }
+        in
+        let img = Bytes.make 8 '\000' in
+        Bytes.set img 0 '\x08';
+        Bytes.set img 1 '\x05';
+        let meta =
+          { B2l.sm_type = Sm.Data; sm_const = false;
+            sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
+            sm_image = Some img; sm_copy_relocs = [] }
+        in
+        let spec =
+          { empty_spec with
+            B2l.spec_sections = [ Some text_meta; Some meta ] }
+        in
+        let sub, _ =
+          sub_of "classb_slot"
+            [ [ Def.create (v64 "classb_slot_t")
+                  (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
+        in
+        let ir = emit_ir_spec spec [ sub ] in
+        check "EMIT-44"
+          (contains_substring ir "i64 1288"
+          && not (contains_substring ir "ptrtoint")
+          && not (contains_substring ir "getelementptr")));
+
+    (* STRING: a printable-ASCII word keeps its raw bits too — no
+       printable-string guard and no span guess stand in the rule's
+       place. *)
+    pin "EMIT-45"
+      "a printable-ASCII unrelocated word keeps its raw bits"
+      (fun () ->
+        let ro_img = Bytes.make 8 '\000' in
+        let ro_meta =
+          { B2l.sm_type = Sm.Rodata; sm_const = true;
+            sm_lo = 0x216948L; sm_hi = 0x21694FL; sm_words = 1;
+            sm_image = Some ro_img; sm_copy_relocs = [] }
+        in
+        let img = Bytes.make 8 '\000' in
+        Bytes.set img 0 'H';
+        Bytes.set img 1 'i';
+        Bytes.set img 2 '!';
+        let meta =
+          { B2l.sm_type = Sm.Data; sm_const = false;
+            sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
+            sm_image = Some img; sm_copy_relocs = [] }
+        in
+        let spec =
+          { empty_spec with
+            B2l.spec_sections = [ Some ro_meta; Some meta ] }
+        in
+        let sub, _ =
+          sub_of "string_slot"
+            [ [ Def.create (v64 "string_slot_t")
+                  (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
+        in
+        let ir = emit_ir_spec spec [ sub ] in
+        check "EMIT-45"
+          (contains_substring ir "i64 2189640"
+          && not (contains_substring ir "ptrtoint")
+          && not (contains_substring ir "getelementptr")));
 
 
 

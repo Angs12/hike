@@ -44,25 +44,14 @@ let dump_sub ~(word : int) (proj : Project.t) (sub : sub term) : unit =
       Hike.Sections.layout_of_tree ~word ~entry:Hike.Stack_model.segment_base
         ~abi:(Hike.Abi.of_target (Project.target proj)) ~sub tree
     in
-    (* The promoted slot arity: one per distinct word cell an Arg_slot
-       member names (the access's own cell). *)
-    let slot_cells =
-      Hike.Sections.Tree.to_sequence tree
-      |> Seq.concat_map ~f:(fun (_, rs) ->
-             match rs.Hike.Sections.storage with
-             | Hike.Sections.Arg_slot ->
-                 Base.Sequence.of_list rs.Hike.Sections.members
-                 |> Seq.filter_map ~f:(fun mm ->
-                     Hike.Sections.args_member_cell ~word
-                       ~entry:Hike.Stack_model.segment_base mm)
-             | _ -> Seq.empty)
-      |> Seq.fold ~init:Core.Int.Set.empty ~f:(fun s i -> Core.Set.add s i)
+    (* The promoted slot arity: one per word cell an Arg_slot member
+       names (the access's own cell). *)
+    let slots =
+      Hike.Promote.slot_arity ~word ~entry:Hike.Stack_model.segment_base tree
     in
     Printf.printf "LAYOUT args_residue=%b slots=%d regions=%s\n%!"
       layout.Hike.Stack_model.Sub_layout.window_param
-      (match Core.Set.max_elt slot_cells with
-       | Some i -> i + 1
-       | None -> 0)
+      slots
       (String.concat ","
          (Base.List.map layout.Hike.Stack_model.Sub_layout.regions
             ~f:(fun (r : Hike.Stack_model.Sub_layout.region) ->

@@ -437,23 +437,38 @@ let create_thunk ctx (sub_tid : tid) =
          cell, and the window itself. *)
       let param_named (v : var) : Llvm.llvalue =
         let n = Var.name v in
-        Base.Option.value
-          (Base.List.findi twin_args ~f:(fun i a -> Var.name (Arg.lhs a) = n)
-           |> Base.Option.map ~f:(fun (i, _) -> Llvm.param fn i))
-          ~default:(Llvm.undef (Llvm.i64_type llvm_ctx))
+        match
+          Base.List.findi twin_args ~f:(fun _ a -> Var.name (Arg.lhs a) = n)
+        with
+        | Some (i, _) -> Llvm.param fn i
+        | None ->
+            failwith
+              ("hike-emit: thunk: the lane " ^ n
+              ^ " is not in the twin's convention")
       in
       let call_args =
         Base.List.map args ~f:(fun a ->
             let v = Arg.lhs a in
             if Hike_stack_model.is_arg_slot v then
               let i =
-                Base.Option.value
-                  (Hike_stack_model.id_of_family Hike_stack_model.slot_family
-                     (Var.name v))
-                  ~default:0
+                match
+                  Hike_stack_model.id_of_family Hike_stack_model.slot_family
+                    (Var.name v)
+                with
+                | Some i -> i
+                | None ->
+                    failwith
+                      ("hike-emit: thunk: the slot parameter "
+                     ^ Var.name v
+                     ^ " carries no slot index")
               in
-              Base.Option.value (Base.List.nth slot_vals i)
-                ~default:(Llvm.undef (Llvm.pointer_type llvm_ctx))
+              (match Base.List.nth slot_vals i with
+               | Some s -> s
+               | None ->
+                   failwith
+                     ("hike-emit: thunk: the slot "
+                    ^ Int.to_string i
+                    ^ " is outside the twin's slots"))
             else if Var.same v window_var then window
             else param_named v)
       in

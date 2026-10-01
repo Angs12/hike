@@ -1327,7 +1327,7 @@ let tests : unit Alcotest.test list =
       "A4 table — syntactic x extract-hull: the compared var is defined by \
        Extract(31,16,t) (the top half-word).  The exit edge stays live, the \
        head's cell keeps the reachable exit value 0x40000, and the body's \
-       cell excludes it (the pre-image [0, 0x3FFFF] is exact here)"
+       cell excludes it (the operand constraint [0, 0x3FFFF] is exact here)"
       (fun () ->
         let live, keeps, fired =
           a4_cell ~op:(Bil.Extract (31, 16, Bil.Var a4_t)) ~v_w:16
@@ -1422,9 +1422,10 @@ let tests : unit Alcotest.test list =
         check "BK-92.live" (Ws.elem Cbat_word.b0 cond_ws));
 
     pin "BK-94"
-      "the extract pre-image — Extract(15,0,x) constrained to [0,3]: the \
-       pre-image is [0, 0xFFFF0003] (the largest x whose low half is <= 3), \
-       so the rule fires and its hull is the exact reachable maximum"
+      "the extract constraint — Extract(15,0,x) constrained to [0,3]: the \
+       operand constraint is [0, 0xFFFF0003] (the largest x whose low half \
+       is <= 3), so the rule fires and its hull is the exact reachable \
+       maximum"
       (fun () ->
         let x = Var.create ~is_virtual:true ~fresh:false "bk94_x" (Type.Imm 32) in
         let env = mk_env [ (x, Ws.top 32) ] in

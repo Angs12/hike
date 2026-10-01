@@ -24,7 +24,7 @@ val call_resolution :
     real BIR args, the sites' outgoing stores gain their call-arg defs,
     and singleton-resolved indirect targets become direct. *)
 val promote_sub :
-  abi:Hike_abi.t -> facts -> sub term -> sub term
+  addr_bits:int -> facts -> sub term -> sub term
 
 
 (** One call-site binding: the outgoing slot and the storing def. *)
@@ -42,6 +42,11 @@ val site_bindings_of_sub :
           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
   sub term ->
   site_binding list Tid.Map.t
+
+(** The promoted slots' arity: one per word cell the tree's Arg_slot
+    members name, derived from each member's own address — the binding is
+    never the unit. *)
+val slot_arity : word:int -> entry:int64 -> Hike_sections.sub_tree -> int
 
 (** The per-sub rewrite driver: promotion, the storage rewrite, and
     the layout stamp. *)

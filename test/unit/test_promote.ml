@@ -22,7 +22,7 @@ let stamp (facts : Hike.Promote.facts) (sub : sub term) : sub term =
     Ds.stamp_dyn_allocs
       ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts:top_facts sub) sub
   in
-  Hike.Promote.promote_sub ~abi:Hike.Abi.x86_64_sysv facts sub
+  Hike.Promote.promote_sub ~addr_bits:64 facts sub
 
 (* Family 8: stack-arg promotion emission.  A promoted callee (two proven
    slots) and two callers — one resolved indirect site with the outgoing

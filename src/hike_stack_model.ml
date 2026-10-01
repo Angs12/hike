@@ -588,7 +588,11 @@ let is_variadic_construction ~(abi : Abi.t) ~(entry : int64)
                   ( ov || stores_overflow ~blk ~def:d d,
                     Core.Set.union regs (stored_params ~blk ~def:d d) )))
   in
-  overflow && Core.Set.length regs >= 4
+  (* The register-save bound: the reg_save_area saves a majority of the
+     integer parameter registers regardless of their individual use,
+     where an ordinary sub stores only the args it reads. *)
+  overflow
+  && Core.Set.length regs > Base.List.length abi.Abi.int_param_regs / 2
 
 (* The emitter's per-sub inputs are structure (BIR args, direct targets,
    def tags) plus this layout fact: the alloca-construction inputs alone. *)

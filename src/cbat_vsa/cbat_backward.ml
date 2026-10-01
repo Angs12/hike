@@ -297,11 +297,12 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
        | _ -> None, None)
     | _ -> None, None
 
-(* Bit-window pre-image: the constraint hull [vlo, vhi] placed at bit
-   position [k], width [d], of the operand (width [w]) — the window's
-   bits are the constraint's, every bit above the window free.  The
-   endpoints lift to the operand width; a constraint whose successor
-   wraps reaches the word top.  Identity on doubt. *)
+(* Operand constraints for a bit window: the result constraint's hull
+   [vlo, vhi] placed at bit position [k], width [d], of the operand
+   (width [w]) — the window's bits carry the constraint, every bit
+   above the window free.  The endpoints lift to the operand width; a
+   constraint whose successor wraps reaches the word top.  Identity on
+   doubt. *)
 let shift_fill_constraint ~(w : int) (k : int) (d : int)
     (vlo : Cbat_word.t) (vhi : Cbat_word.t) : wordset option =
   let sh = Cbat_word.of_int ~width:w k in
@@ -636,9 +637,9 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
        | _ -> None)
   | Error _ -> None
 
-(* Extract pre-image: the constraint is bits [lo, hi] of the operand;
-   the window sits mid-word, so the endpoints compute at the operand
-   width with the free-above bits filled. *)
+(* Operand constraints for an extract: the result constraint is the
+   operand's bits [lo, hi]; the window sits mid-word, so the endpoints
+   compute at the operand width with the free-above bits filled. *)
 let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     (cstr : wordset) : wordset option =
   match denote_imm_exp a env with
