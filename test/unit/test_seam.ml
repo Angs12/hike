@@ -64,8 +64,10 @@ let tests : unit Alcotest.test list =
         in
         let out =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:[ (zf, Ws.singleton Cbat_word.b1) ]
-            (Graphlib.Std.Solution.get sol guard_tid) guard_blk
+            ~seeds:(Var.Set.singleton zf)
+            (AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
+               ~data:(Ws.singleton Cbat_word.b1))
+            guard_blk
         in
         let row = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 4)) in
         check "SEAM-01" (Ws.precedes (AI.find_word 32 out x) row));
@@ -156,8 +158,10 @@ let tests : unit Alcotest.test list =
         in
         let out =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:[ (zf, Ws.singleton Cbat_word.b1) ]
-            (Graphlib.Std.Solution.get sol guard_tid) guard_blk
+            ~seeds:(Var.Set.singleton zf)
+            (AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
+               ~data:(Ws.singleton Cbat_word.b1))
+            guard_blk
         in
         check "SEAM-04"
           (Ws.elem (Cbat_word.of_int64 ~width:32 (-1L))

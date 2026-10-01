@@ -737,7 +737,7 @@ let tests : unit Alcotest.test list =
         let entry = AI.add_word entry ~key:t ~data:(Ws.singleton (w32 5)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:[ (t, Ws.singleton (w32 5)) ]
+            ~seeds:(Var.Set.singleton t)
             entry blk
         in
         let cell =
@@ -804,7 +804,7 @@ let tests : unit Alcotest.test list =
         let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:[ (t2, Ws.singleton (w32 6)) ]
+            ~seeds:(Var.Set.singleton t2)
             entry blk
         in
         let cell_of_key k =
@@ -880,7 +880,7 @@ let tests : unit Alcotest.test list =
           let entry_h = AI.add_word entry_h ~key:ht ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol:sol_h ~rctx:rctx_h
-              ~seeds:[ (ht, Ws.singleton (w32 6)) ]
+              ~seeds:(Var.Set.singleton ht)
               entry_h blk_h
           in
           (refined, ha, hb, hmem, hka, hkb)
@@ -992,7 +992,7 @@ let tests : unit Alcotest.test list =
         in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:[ (t2, Ws.singleton (w32 6)) ]
+            ~seeds:(Var.Set.singleton t2)
             (AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6))) blk1
         in
         check
@@ -1057,7 +1057,7 @@ let tests : unit Alcotest.test list =
           let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
           let refined =
             Vsa.Test_seam.refine_edge ~sol ~rctx
-              ~seeds:[ (t2, Ws.singleton (w32 6)) ]
+              ~seeds:(Var.Set.singleton t2)
               entry blk
           in
           (refined, ta, tb, mem)
@@ -1308,7 +1308,7 @@ let tests : unit Alcotest.test list =
         let walk () =
           let entry = AI.add_word entry ~key:i ~data:(Ws.singleton k) in
           Vsa.Test_seam.refine_edge ~sol ~rctx
-            ~seeds:[ (i, Ws.singleton k) ]
+            ~seeds:(Var.Set.singleton i)
             entry gb
         in
         let cell_of env =

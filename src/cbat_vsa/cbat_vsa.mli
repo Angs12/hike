@@ -197,11 +197,11 @@ module Test_seam : sig
 
   (* The deep backward walk: the env threads through every visited
      block's defs, running to its fixpoint over the block; [seeds] are
-     the cond's leaf constraints. *)
+     the cond's constrained vars. *)
   val refine_edge :
     sol:(tid, AI.t) Solution.t ->
     rctx:refine_ctx ->
-    seeds:(var * WordSet.t) list ->
+    seeds:Var.Set.t ->
     AI.t -> blk term -> AI.t
 
   (* The per-def classification vocabulary over the converged
