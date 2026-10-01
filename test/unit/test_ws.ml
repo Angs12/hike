@@ -304,7 +304,29 @@ let tests : unit Alcotest.test list =
               | None -> false)
         in
         check "WS-38 (union)" (keeps_origin (Ws.union rel plain));
-        check "WS-38 (widen_join)" (keeps_origin (Ws.widen_join rel plain)))
+        check "WS-38 (widen_join)" (keeps_origin (Ws.widen_join rel plain)));
+
+    (* WS-39: the interior exclusion widens as two pieces — the x != k
+       complement keeps its hole under widening instead of hulling it
+       shut. *)
+    pin "WS-39"
+      "widen_join keeps a two-piece value's hole (the interior exclusion survives widening)"
+      (fun () ->
+        let five = Cbat_word.of_int ~width:64 5 in
+        let hole = Ws.diff (Ws.top 64) (Ws.singleton five) in
+        (* Stability: widening the exclusion with itself is the
+           identity, hole intact. *)
+        let stable = Ws.widen_join hole hole in
+        let keeps_hole t =
+          not (Ws.elem five t) && Ws.elem (Cbat_word.of_int ~width:64 4) t
+          && Ws.elem (Cbat_word.of_int ~width:64 6) t
+        in
+        check "WS-39 (stable)" (keeps_hole stable);
+        (* Growth: one side grows past the hole, the widened value
+           still excludes nothing it did not exclude. *)
+        let grown = Ws.union hole (Ws.singleton five) in
+        let w = Ws.widen_join hole grown in
+        check "WS-39 (growth)" (Ws.elem five w && Ws.precedes hole w))
   ]
 
 let () = run "ws" tests

@@ -123,18 +123,19 @@ let tests : unit Alcotest.test list =
         check "BK-04" (Ws.is_top (l3a_run_analyzed sub4 body4)));
 
     pin "BK-05"
-      "a NEQ guard is doubt (constraint_of_compare None) — no walk, the cell \
-       at RBP-8 stays top"
+      "a NEQ guard refines: the loop counter's fixpoint excludes the \
+       guard's own value (the two-piece interior exclusion)"
       (fun () ->
         let sub5, body5 =
-          mk_l3a_loop ~cmp:Bil.NEQ ~c:(w32 5)
-            ~rhs:
-              (Bil.BinOp
-                 ( Bil.PLUS,
-                   Bil.Var (Var.create ~is_virtual:false ~fresh:false "l3a_t" (Type.Imm 32)),
-                   Bil.Int (Cbat_word.to_word (w32 1)) ))
+          mk_l3c2_loop ~prologue:true ~seed:(Some (w32 0)) ~cmp:Bil.NEQ
+            ~c:(w32 10) ~body_op:Bil.PLUS ~body_k:(w32 1) ~flag:false
         in
-        check "BK-05" (Ws.is_top (l3a_run_analyzed sub5 body5)));
+        let sol5 = run_anchored sub5 in
+        let cell5 =
+          cell_at (memv "l3c2_m") (v64 "RBP") (iter_state_of sub5 sol5 body5)
+        in
+        check "BK-05"
+          (not (Ws.is_top cell5) && not (Ws.elem (w32 10) cell5)));
 
     (* L3c1: the flag-state mechanism. *)
     pin "BK-06"
