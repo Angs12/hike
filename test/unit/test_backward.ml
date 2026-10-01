@@ -1466,6 +1466,27 @@ let tests : unit Alcotest.test list =
         check "BK-93.body-excludes"
           (not (Ws.elem (w32 4) (cell (Graphlib.Std.Solution.get sol body_tid)))));
 
+    pin "BK-97"
+      "the low-cast guard window reads the operand's reachable set —        SLT(low:32[x], 8) true with x = {0..9}: the pre-image is the        populated window's piece only, so x reads {0..7} (the wide hull        would keep the full range and never bound a counter)"
+      (fun () ->
+        let x = Var.create ~is_virtual:true ~fresh:false "k97_x" (Type.Imm 64) in
+        let ws09 =
+          let ws = ref (Ws.bottom 64) in
+          for k = 0 to 9 do
+            ws := Ws.union !ws (Ws.singleton (w64 k))
+          done;
+          !ws in
+        let env = AI.add_word AI.top ~key:x ~data:ws09 in
+        let env' =
+          Vsa.Test_seam.constrain_operands
+            ~landmarks:(Cbat_landmarks.create ()) ~env
+            (Bil.BinOp (Bil.SLT, Bil.Cast (Bil.LOW, 32, Bil.Var x),
+                        Bil.Int (Cbat_word.to_word (w32 8))))
+            (Ws.singleton (Cbat_word.of_word Word.b1)) in
+        let r = AI.find_word 64 env' (Var.base x) in
+        check "BK-97"
+          (Ws.min_elem r = Some (w64 0) && Ws.max_elem r = Some (w64 7)));
+
     (* ---------------------------------------------------------------- *)
     (* A5: the walk's write sites skip what changes nothing, and the
        collapsed seed delivers the walked state's own value.  The

@@ -69,7 +69,7 @@ let run_one_fixture (name : string) (sub : sub term) : unit =
 
 let run_binary (path : string) (name : string) : unit =
   let proj = load_project path in
-  let prog = Project.program proj in
+  let prog = production_input proj in
   let sp = sp_of proj in
   let sub =
     match find_sub prog name with
@@ -77,10 +77,27 @@ let run_binary (path : string) (name : string) : unit =
     | None -> usage Sys.argv.(0) (Printf.sprintf "<binary> [subname] - %s not found" name)
   in
   Printf.printf "=== binary %s (%s) ===\n" (Filename.basename path) (Sub.name sub);
-  let sub', sol = analyze_and_fixpoint sub in
-  Printf.printf "(fused single-pass: no views — the per-block IN-states are the solution)\n";
+  (* The fused solve returns the rewritten (normalized) sub and the
+     per-block (pre, post) envs: the walks read the forms production
+     analyses. *)
+  let envs, sub', _grown =
+    Hike.Vsa.fixpoint (Project.target proj)
+      ~lookup:(fun _ -> None)
+      ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
+      ~written:(Hike.Vsa.kill_summaries ~abi:Hike.Abi.x86_64_sysv
+                  (Program.create ~subs:[ sub ] ()))
+      ~lift_at:(fun _ ~block_addrs:_ -> None)
+      ~block_addrs:(Core.Map.empty (module Addr)) sub
+  in
+  let pre_of tid = match Core.Map.find envs tid with
+    | Some (pre, _) -> pre
+    | None -> Cbat_vsa.AI.top
+  in
   let vars = lhs_vars_of sub' in
   let dump_mem = try Sys.getenv "VSA_DUMP_MEM" <> "" with _ -> false in
+  (* One line per word def: the def, then the lhs's raw composite (the
+     origin and its offset pieces, not the materialized view). *)
+  let dump_defs = try Sys.getenv "VSA_DUMP_DEFS" <> "" with _ -> false in
   let mem_idx : Cbat_vsa.Mem.idx = { addr_width = 64; addressable_width = 8 } in
   let mem_of (st : Cbat_vsa.AI.t) (v : var) : Cbat_vsa.Mem.t option =
     Core.Option.try_with (fun () ->
@@ -102,9 +119,47 @@ let run_binary (path : string) (name : string) : unit =
           (if cells > 0 then String.sub txt 0 (min 400 (String.length txt))
            else "")
   in
+  if dump_defs then
+    Term.enum blk_t sub'
+    |> Seq.iter ~f:(fun b ->
+        let st = ref (pre_of (Term.tid b)) in
+        Term.enum def_t b
+        |> Seq.iter ~f:(fun d ->
+            let lv = Def.lhs d in
+            let post = Vsa.Test_seam.denote_def d !st in
+            (match Var.typ lv with
+             | Type.Imm n when n <= 64 ->
+               Printf.printf "  [%s] %s\n%!" (Tid.name (Term.tid b))
+                 (Format.asprintf "%a = %a" Def.pp d Vsa.WordSet.pp
+                    (Cbat_vsa.AI.find_word n post lv))
+             | Type.Mem _ ->
+               (* The access's address denotation and the resulting
+                  cells: the round trip's two ends. *)
+               let node = Hike.Stack_model.mem_node_of (Def.rhs d) in
+               let addr_exp =
+                 match node with
+                 | Some (`Load (_, a, _)) -> Some a
+                 | Some (`Store (_, a, _, _)) -> Some a
+                 | None -> None
+               in
+               let addr_s =
+                 match addr_exp with
+                 | None -> "?"
+                 | Some a ->
+                   (match
+                      Vsa.denote_exp_at ~pre:!st ~blk:b ~def:d a
+                    with
+                    | Ok ws -> Format.asprintf "%a" Vsa.WordSet.pp ws
+                    | Error _e -> "err")
+               in
+               Printf.printf "  [%s] %s | addr=%s | %s\n%!"
+                 (Tid.name (Term.tid b))
+                 (Format.asprintf "%a" Def.pp d) addr_s (cellstat post lv)
+             | _ -> ());
+            st := post));
   Term.enum blk_t sub'
   |> Seq.iter ~f:(fun b ->
-      let st0 = Graphlib.Std.Solution.get sol (Term.tid b) in
+      let st0 = pre_of (Term.tid b) in
       Printf.printf "%s :: %s\n" (Tid.name (Term.tid b))
         (state_summary (sp :: vars) st0);
       if dump_mem then begin

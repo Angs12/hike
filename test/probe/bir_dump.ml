@@ -103,7 +103,9 @@ let () =
                 then "true-cond"
                 else "guarded"
               in
-              (blk, Printf.sprintf "jmp %s -> %s" cond tgt)))
+              (blk,
+              Printf.sprintf "jmp %s -> %s  cond=%s" cond tgt
+                (Format.asprintf "%a" Exp.pp (Jmp.cond j)))))
       |> Seq.to_list in
     Base.List.iter jms ~f:(fun (blk, s) ->
         Printf.printf "  [%s] %s\n" (Tid.name (Term.tid blk)) s);

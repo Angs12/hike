@@ -303,12 +303,17 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
     | Some (Vsa.WordSet.Origin.Vla _) -> true
     | _ -> false
   in
-  let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage =
-    if vla_reach ws then Hike_stack_model.Ptr_vla
+  let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage option =
+    (* One storage per value: the denotation must name exactly one
+       alloca.  A value whose offsets span several regions (a phi's
+       mixed-incoming join, a two-band hull) names none — the emitter
+       keeps such a value on the pointer-value lane, where each path
+       carries its own storage's pointer. *)
+    if vla_reach ws then Some Hike_stack_model.Ptr_vla
     else if
       Hike_stack_model.is_window_denotation
         ~entry:Hike_stack_model.segment_base ~word ws
-    then Hike_stack_model.Ptr_window
+    then Some Hike_stack_model.Ptr_window
     else
       match Hike_stack_model.positions_of_offsets ws with
       | Some (lo, hi) -> (
@@ -319,9 +324,9 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
                 && Stdlib.Int64.compare hi rhi <= 0)
           with
           | Some { Hike_stack_model.Sub_layout.r_id = id; _ } ->
-            Hike_stack_model.Ptr_region id
-          | None -> Hike_stack_model.Ptr_residue)
-      | None -> Hike_stack_model.Ptr_residue
+            Some (Hike_stack_model.Ptr_region id)
+          | None -> None)
+      | None -> None
   in
   let addr_width = Hike_stack_model.word_bits word in
   let is_addr_width (d : def term) : bool =
@@ -374,7 +379,7 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
     if is_literal d then None
     else
       match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
-      | Ok ws when is_stack_addr ws -> Some (storage_of ws)
+      | Ok ws when is_stack_addr ws -> storage_of ws
       | _ -> None
   in
   let shape_ptr (ptrs : Var.Set.t) (e : exp) : bool =

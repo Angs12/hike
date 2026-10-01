@@ -604,11 +604,13 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
 (* Low-cast pre-image: the constraint's window repeated at every
    multiple of [2^n] the operand can reach.  A zero-extension of an
    n-bit value reaches the first window only, so its pre-image is the
-   constraint itself at the operand's width; a wider operand takes the
-   hull over the reachable windows. *)
+   constraint itself at the operand's width; a bounded operand reaches
+   only the windows its own value set populates; an unbounded operand
+   takes the wide hull. *)
 let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
     : wordset option =
   match denote_imm_exp a env with
+  | Error _ -> None
   | Ok a_ws ->
     let w = WordSet.bitwidth a_ws in
     let n = WordSet.bitwidth cstr in
@@ -624,18 +626,66 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
            | Ok inner_ws -> WordSet.bitwidth inner_ws = n
            | Error _ -> false)
         | _ -> false in
-      (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some vlo, Some vhi ->
-         let vlo_w = Cbat_word.extract_exn ~hi:(w - 1) vlo in
-         let vhi_w = Cbat_word.extract_exn ~hi:(w - 1) vhi in
-         let hi_a =
-           if zero_extended_n then vhi_w
-           else
-             let two_n = Cbat_word.pow2 ~width:w n in
-             Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n) in
-         hull ~wrapping:false w vlo_w hi_a
-       | _ -> None)
-  | Error _ -> None
+      match (WordSet.min_elem cstr, WordSet.max_elem cstr) with
+      | None, _ | _, None -> None
+      | Some vlo, Some vhi ->
+        let vlo_w = Cbat_word.extract_exn ~hi:(w - 1) vlo in
+        let vhi_w = Cbat_word.extract_exn ~hi:(w - 1) vhi in
+        let wide_hull () =
+          let two_n = Cbat_word.pow2 ~width:w n in
+          hull ~wrapping:false w vlo_w
+            (Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n)) in
+        if zero_extended_n then hull ~wrapping:false w vlo_w vhi_w
+        else begin
+          match (WordSet.min_elem a_ws, WordSet.max_elem a_ws) with
+          | (Some alo, Some ahi)
+            when (not (WordSet.is_infinite a_ws)) && Cbat_word.(<=) alo ahi ->
+            (* The windows [k] the operand's reachable set populates:
+               window [k·2^n, k·2^n + 2^n) can carry a concrete
+               execution only when it meets [alo, ahi]; the others drop
+               and the surviving windows' constraint pieces hull. *)
+            (* The window index and the count word: rshift takes the
+               count as a value, so the count rides a small literal
+               ([n < w <= 64]) and the window base multiplies. *)
+            let step = Cbat_word.pow2 ~width:w n in
+            let cnt = Cbat_word.of_int ~width:w n in
+            let k0 = Cbat_word.rshift alo cnt in
+            let k1 = Cbat_word.rshift ahi cnt in
+            begin match Cbat_word.to_int (Cbat_word.sub k1 k0) with
+              | Ok span when span <= 64 ->
+                (* One window's constraint pieces: a non-wrapping
+                   constraint contributes [base+lo, base+hi]; a wrapping
+                   one contributes its high half [base+lo, base+2^n-1]
+                   and its low half [base, base+hi]. *)
+                let piece k =
+                  let base = Cbat_word.mul k step in
+                  let ints =
+                    if Cbat_word.(<=) vlo_w vhi_w then
+                      [ (Cbat_word.add base vlo_w, Cbat_word.add base vhi_w) ]
+                    else
+                      [ (Cbat_word.add base vlo_w,
+                         Cbat_word.add base (Cbat_word.ones n));
+                        (base, Cbat_word.add base vhi_w) ] in
+                  List.filter_map ints ~f:(fun (l, h) ->
+                      let l = Cbat_word.max alo l in
+                      let h = Cbat_word.min ahi h in
+                      hull ~wrapping:false w l h) in
+                let rec collect k acc =
+                  if Cbat_word.(<=) k k1 then
+                    let acc =
+                      List.fold (piece k) ~init:acc
+                        ~f:(fun acc p ->
+                          match acc with
+                          | Some a -> Some (WordSet.union a p)
+                          | None -> Some p)
+                    in
+                    collect (Cbat_word.add k (Cbat_word.one w)) acc
+                  else acc in
+                collect k0 None
+              | _ -> wide_hull ()
+            end
+          | _ -> wide_hull ()
+        end
 
 (* Operand constraints for an extract: the result constraint is the
    operand's bits [lo, hi]; the window sits mid-word, so the endpoints
