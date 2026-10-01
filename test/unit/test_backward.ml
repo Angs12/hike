@@ -1464,6 +1464,167 @@ let tests : unit Alcotest.test list =
         check "BK-93.head-keeps" (Ws.elem (w32 4) (cell head_in));
         check "BK-93.body-excludes"
           (not (Ws.elem (w32 4) (cell (Graphlib.Std.Solution.get sol body_tid)))));
+
+    (* ---------------------------------------------------------------- *)
+    (* A5: the walk's write sites skip what changes nothing, and the
+       collapsed seed delivers the walked state's own value.  The
+       counting refine names each actual env write, so an equal delivery
+       is observable as a missing count, never as the returned env. *)
+
+    pin "BK-95"
+      "the write sites skip a delivery that changes nothing — confine \
+       counts the load def's strict delivery, never the guard def's equal \
+       one ({1} met into {1}); carry counts the strict leftover, never \
+       the unconsumed seed's equal one"
+      (fun () ->
+        let m = memv "w5_m" in
+        let rsp = v64 "RSP" in
+        let rbp = v64 "RBP" in
+        let x = Var.create ~is_virtual:false ~fresh:false "w5_x" (Type.Imm 32) in
+        let zf = v1 "w5_zf" in
+        let addr =
+          Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8)))
+        in
+        let sub, tids =
+          sub_of "w5_skip"
+            [ [ Def.create rbp (Bil.Var rsp) ], [ (1, mk_goto) ];
+              [ Def.create x (Bil.Load (Bil.Var m, addr, LittleEndian, `r32));
+                Def.create zf
+                  (Bil.BinOp
+                     (Bil.SLT, Bil.Var x, Bil.Int (Cbat_word.to_word (w32 5)))) ],
+              [ (2, mk_goto) ];
+              [ Def.create m
+                  (Bil.Store
+                     ( Bil.Var m, addr,
+                       Bil.Int (Cbat_word.to_word (w32 5)),
+                       LittleEndian, `r32 )) ],
+              [] ]
+        in
+        let guard_tid = tids.(1) in
+        let entry =
+          AI.add_memory (anchored_entry ()) ~key:m
+            ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
+        in
+        let sol =
+          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            (Program.create ~subs:[ sub ] ()) sub
+            (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
+        in
+        let cfg =
+          Sub.to_graph sub
+          |> Graphs.Tid.Node.remove Graphs.Tid.start
+          |> Graphs.Tid.Node.remove Graphs.Tid.exit
+        in
+        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let guard_blk =
+          Term.enum blk_t sub |> Seq.to_list
+          |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
+        in
+        let edge_env =
+          AI.add_word (Graphlib.Std.Solution.get sol guard_tid) ~key:zf
+            ~data:(Ws.singleton Cbat_word.b1)
+        in
+        (* The load def's confine strictly precedes (one write); the guard
+           def's delivery is the state's own {1} (no write). *)
+        let out, confine_writes, carry_writes =
+          Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
+            ~seeds:(Var.Set.singleton zf) edge_env guard_blk
+        in
+        check "BK-95.confine" (confine_writes = 1);
+        check "BK-95.carry-none" (carry_writes = 0);
+        check "BK-95.row"
+          (Ws.precedes (AI.find_word 32 out (Var.base x))
+             (Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 4))));
+        (* The carry site: the guard block defines x nowhere, so x's
+           leftover strictly precedes (one write) and the unconsumed seed
+           u's delivery equals the state's own [2,5] (no write). *)
+        let x2 = Var.create ~is_virtual:false ~fresh:false "w5_gx" (Type.Imm 32) in
+        let zf2 = v1 "w5_gzf" in
+        let u = Var.create ~is_virtual:false ~fresh:false "w5_u" (Type.Imm 32) in
+        let sub2, tids2 =
+          sub_of "w5_carry"
+            [ [ Def.create zf2
+                  (Bil.BinOp
+                     (Bil.SLT, Bil.Var x2, Bil.Int (Cbat_word.to_word (w32 5)))) ],
+              [ (1, mk_goto) ];
+              [], [] ]
+        in
+        let guard2 = tids2.(0) in
+        let sol2 =
+          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            (Program.create ~subs:[ sub2 ] ()) sub2
+            (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub2)
+        in
+        let cfg2 =
+          Sub.to_graph sub2
+          |> Graphs.Tid.Node.remove Graphs.Tid.start
+          |> Graphs.Tid.Node.remove Graphs.Tid.exit
+        in
+        let rctx2 = Vsa.Test_seam.mk_rctx ~cfg:cfg2 ~abi:Hike_abi.x86_64_sysv sub2 in
+        let guard2_blk =
+          Term.enum blk_t sub2 |> Seq.to_list
+          |> List.find (fun b -> Tid.equal (Term.tid b) guard2)
+        in
+        let out2, confine2, carry2 =
+          Vsa.Test_seam.refine_edge_count_writes ~sol:sol2 ~rctx:rctx2
+            ~seeds:(Core.Set.union (Var.Set.singleton zf2) (Var.Set.singleton u))
+            (AI.add_word
+               (AI.add_word (Graphlib.Std.Solution.get sol2 guard2) ~key:zf2
+                  ~data:(Ws.singleton Cbat_word.b1))
+               ~key:u ~data:(bk_iv32 ~lo:2 ~hi:5))
+            guard2_blk
+        in
+        check "BK-95.confine-equal" (confine2 = 0);
+        check "BK-95.carry" (carry2 = 1);
+        check "BK-95.carry-equal-kept"
+          (Ws.equal (AI.find_word 32 out2 (Var.base u)) (bk_iv32 ~lo:2 ~hi:5)));
+
+    pin "BK-96"
+      "the collapsed seed delivers the walked state's own value — the seed \
+       vars name the delivery and the walk reads each constraint from the \
+       env it walks, so the guard's row reaches x and the unconsumed seed \
+       keeps its env value [2,5]"
+      (fun () ->
+        let x2 = Var.create ~is_virtual:false ~fresh:false "w6_gx" (Type.Imm 32) in
+        let zf = v1 "w6_zf" in
+        let u = Var.create ~is_virtual:false ~fresh:false "w6_u" (Type.Imm 32) in
+        let sub, tids =
+          sub_of "w6_seeds"
+            [ [ Def.create zf
+                  (Bil.BinOp
+                     (Bil.SLT, Bil.Var x2, Bil.Int (Cbat_word.to_word (w32 5)))) ],
+              [ (1, mk_goto) ];
+              [], [] ]
+        in
+        let guard = tids.(0) in
+        let sol =
+          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            (Program.create ~subs:[ sub ] ()) sub
+            (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+        in
+        let cfg =
+          Sub.to_graph sub
+          |> Graphs.Tid.Node.remove Graphs.Tid.start
+          |> Graphs.Tid.Node.remove Graphs.Tid.exit
+        in
+        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let guard_blk =
+          Term.enum blk_t sub |> Seq.to_list
+          |> List.find (fun b -> Tid.equal (Term.tid b) guard)
+        in
+        let out, _, _ =
+          Vsa.Test_seam.refine_edge_count_writes ~sol ~rctx
+            ~seeds:(Core.Set.union (Var.Set.singleton zf) (Var.Set.singleton u))
+            (AI.add_word
+               (AI.add_word (Graphlib.Std.Solution.get sol guard) ~key:zf
+                  ~data:(Ws.singleton Cbat_word.b1))
+               ~key:u ~data:(bk_iv32 ~lo:2 ~hi:5))
+            guard_blk
+        in
+        check "BK-96.delivered"
+          (not (Ws.is_top (AI.find_word 32 out (Var.base x2))));
+        check "BK-96.env-value"
+          (Ws.equal (AI.find_word 32 out (Var.base u)) (bk_iv32 ~lo:2 ~hi:5)));
   ]
 
 let () = run "backward" tests

@@ -204,6 +204,18 @@ module Test_seam : sig
     seeds:Var.Set.t ->
     AI.t -> blk term -> AI.t
 
+  (* The walk's env-write sites, named for the counting refine. *)
+  type write_site = Cbat_backward.write_site = Confine_write | Carry_write
+
+  (* The walked env with the per-site count of ACTUAL env writes — a
+     delivery equal to the state's value writes nothing, so it never
+     counts. *)
+  val refine_edge_count_writes :
+    sol:(tid, AI.t) Solution.t ->
+    rctx:refine_ctx ->
+    seeds:Var.Set.t ->
+    AI.t -> blk term -> AI.t * int * int
+
   (* The per-def classification vocabulary over the converged
      solution, consumed only by the probes. *)
   module Cbat_extraction : sig

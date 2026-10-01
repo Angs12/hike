@@ -1056,6 +1056,9 @@ let undefined_width = WordSet.bottom 8
 let strictly_precedes (narrow : wordset) (wide : wordset) : bool =
   WordSet.precedes narrow wide && not (WordSet.equal narrow wide)
 
+(* The walk's env-write sites, named for the counting seam. *)
+type write_site = Confine_write | Carry_write
+
 (* The walk's mutable delivery state; the writer locus owns it, the
    observer never writes through it. *)
 type walk_state = {
@@ -1081,8 +1084,10 @@ type locus = {
   carry : walk_state -> AI.t -> AI.t;
 }
 
-(* The state-writer: the edge state is the product. *)
-let writer_locus : locus =
+(* The state-writer: the edge state is the product.  [on_write] names
+   each actual env write — a delivery equal to the state's value writes
+   nothing and never fires it. *)
+let writer_locus ~(on_write : write_site -> unit) : locus =
   let at_def ~post ~cstr =
     let m = WordSet.meet cstr post in
     if Cbat_word.is_zero (WordSet.cardinality m) then None else Some m
@@ -1099,7 +1104,10 @@ let writer_locus : locus =
       let m = WordSet.meet cur cstr' in
       if (not (Cbat_word.is_zero (WordSet.cardinality m)))
          && strictly_precedes m cur
-      then st.env_out := AI.add_word !(st.env_out) ~key:v ~data:m
+      then begin
+        on_write Confine_write;
+        st.env_out := AI.add_word !(st.env_out) ~key:v ~data:m
+      end
     end
   in
   let commit (st : walk_state) (env' : AI.t) =
@@ -1136,7 +1144,10 @@ let writer_locus : locus =
              let m = WordSet.meet cur c in
              if (not (Cbat_word.is_zero (WordSet.cardinality m)))
                 && strictly_precedes m cur
-             then AI.add_word acc ~key:v ~data:m
+             then begin
+               on_write Carry_write;
+               AI.add_word acc ~key:v ~data:m
+             end
              else acc
            | _ -> acc)
         | PC c ->
@@ -1307,20 +1318,23 @@ let cond_seeds ~(env : AI.t) (cond : exp) : Var.Set.t =
 
 (* The refinement walk (the state-writer locus): the constraint meets
    the produced values (the producer subtraction). *)
-let walk_block ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
+let walk_block ?(on_write : write_site -> unit = ignore)
+    ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
     ~seeds env blk =
-  walk ~locus:writer_locus ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
+  walk ~locus:(writer_locus ~on_write)
+    ~cache:rctx.Cbat_runctx.rc_prefix ~entry ~landmarks
     ~witness ~seeds env blk
 
 (* The deep walk: the guard block's defs backwards; leftover
    constraints and cell meets flow into the returned edge env. *)
-let refine_edge ~(entry : AI.t)
+let refine_edge ?(on_write : write_site -> unit = ignore)
+    ~(entry : AI.t)
     ~(rctx : Cbat_runctx.refine_ctx)
     ~(seeds : Var.Set.t)
     (env : AI.t) (blk : blk term) : AI.t =
   Stages.incr_walk ();
-  walk_block ~rctx ~entry ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg
-    ~seeds env blk
+  walk_block ~on_write ~rctx ~entry ~landmarks:rctx.rc_landmarks
+    ~witness:rctx.rc_nonneg ~seeds env blk
 
 (* The disabled continuation observed through the same rules, the
    result DISCARDED: every empty meet records the excluded boundary +

@@ -1,19 +1,21 @@
 # Pins — test_backward
 
-Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-86`).
+Module `test/unit/test_backward.ml` (group `backward`, ids `BK-01`…`BK-96`).
 Merges `test_cbat/test_backward.ml` (the backward-refinement pins) and
 `test_cbat/test_seed.ml` (the inverse-denotation pins) into one process;
 the backward pins come first, the seed pins after.  Every source `check` site is carried as one pin; none
 retired (`L3c2-6` carried no assertion and is not a site).
 
-There is **no `Test_seam`** for this lane, so the disable recipes below are textual inversions
-of the pinned mechanism, and the red is re-demonstrated by review whenever
-the cited mechanism changes.  Production `src/` is never modified.  Each pin
-builds its own fixture inside its closure (no cross-pin state).
+The pins consume `Vsa.Test_seam` (the constraint rows, the walk, and the
+counting refine `refine_edge_count_writes`, whose `on_write` hook names
+each actual env write).  Each pin builds its own fixture inside its
+closure (no cross-pin state); the disable recipes below are temporary
+inversions flipped in `src/cbat_vsa/` to demonstrate the red, then
+restored — the landed tree keeps only the seam.
 
 Mechanisms live in `src/cbat_vsa/cbat_backward.ml` (the inverse denote, the
 deep walk, `constrain_edge`), `src/cbat_vsa/cbat_vsa.ml` (the fixpoint's
-inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
+inline edge refinement, the seam), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 `src/cbat_vsa/cbat_call_effects.ml` (the matched-pair SP restore), and
 `src/hike_jump.ml` (the jcc/flag decoder).
 
@@ -84,4 +86,6 @@ inline edge refinement), `src/cbat_vsa/cbat_ai_memmap.ml` (the cell merge),
 | BK-83 | S21 the AND singleton mask keeps the mask's bits from the constraint and frees the rest (hull `[0x30, 0xFFFFFF3F]`). | Make the general-mask AND arm identity. | BK-83 (`0x30 ∈` false). |
 | BK-84 | the low cast of a zero-extended narrow value: `low:32[pad:64[x]]` collapses to `x`, so the constraint `[0,0xF]` narrows `x` to `[0,0xF]`, not the truncation hull. | Drop the widening arm so `low_cast_constraint` always takes the wide hull. | BK-84 (`x` stays `[0,2^32-1]`; `max_elem` is not `0xF`). |
 | BK-85 | the var-var signed guard reads its bound's payload: `SLT(low:32[x], y)` with `y = {4}` (a signed extremum) takes the unsigned window `[0,3]` when `x`'s low half is provably non-negative, so the low-cast pre-image drops the value whose low half is `0x10`. | Compare `c` with `half` through its signed flag (`Cbat_word.(>=) c half`) in `evidence_constraint`'s SLT/SLE arms. | BK-85 (`out ∈ x`; the wrapped reading's pre-image is top). |
-| BK-86 | the bounded-constraint seeding rule: a guard whose operand the analysis already satisfies is still seeded (`cond_seeds` seeds every bounded free var of the cond), and the edge refinement runs (`refine_edge_inline` no longer bails on an unchanged env), so the flag-indirected loop's body-IN cell at RBP-8 stays bounded. | Restore `cond_seeds`'s strict-narrowing test (`strictly_precedes after before`) and the `AI.equal env env_in` early return in `refine_edge_inline`. | regression pin: no red demonstrated — the fixture's cell is bounded under the pre-change rule too. |
+| BK-86 | the collapsed seeding rule: `cond_seeds` answers every bounded free var of the cond (a guard the analysis already satisfies still seeds), so `refine_edge_inline` runs the walk and the flag-indirected loop's body-IN cell at RBP-8 stays bounded. | Make `cond_seeds` return `Var.Set.empty` — the empty-seeds bail in `refine_edge_inline` then skips the walk. | BK-86 (cell unbounded; the seeding rule carries 42 backward pins red together). |
+| BK-95 | the write sites skip what changes nothing: `confine` and `carry`'s word arm write only a `strictly_precedes` meet, counted per site by `refine_edge_count_writes`'s `on_write` hook. | Remove `&& strictly_precedes m cur` in `writer_locus`'s `confine` (the guard def's equal `{1}` delivery then writes; `BK-95.confine` red) or in `carry`'s PW arm (the unconsumed seed's equal delivery then writes; `BK-95.carry` red). | BK-95.confine / BK-95.carry (the count rises by the equal delivery). |
+| BK-96 | the collapsed seed's delivery: `refine_edge` takes seed VARS and the walk reads each seed's constraint from the state it walks, so an unconsumed seed keeps the walked env's own value while the guard's row still reaches its operand. | Restore the pre-`33edbf8b` seam shape — `(var, constraint)` pairs folded into the walked env with `AI.add_word` before walking — and pass the unconsumed seed a folded `[0,1]` against its env value `[2,5]`; the seed then delivers the folded value. | BK-96.env-value (u delivers `[0,1]`; `BK-96.delivered` stays green, so the red is the fold alone). |
