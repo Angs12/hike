@@ -353,6 +353,75 @@ let tests : unit Alcotest.test list =
     (* FWD-18: an arithmetic op with mismatched operand widths answers top
        at the common width. *)
 
+    (* FWD-19: the band round trip — a stored VLA-band pointer reloads
+       with its band, so the through-pointer accesses stay bounded. *)
+    pin "FWD-19"
+      "a stored band pointer reloads with its band (the store->load round trip keeps the origin)"
+      (fun () ->
+        let m, rsp, rbp = memv "t19_m", v64 "RSP", v64 "t19_rbp" in
+        let rax = v64 "t19_rax" in
+        let rn = v64 "t19_n" in
+        let lit k = Bil.Int (Cbat_word.to_word (w64 k)) in
+        let d_rbp = Def.create rbp (Bil.Var rsp) in
+        let d_frame = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, lit 16)) in
+        (* n read from a cell: the VLA size is non-literal. *)
+        let d_n_cell =
+          Def.create m
+            (Bil.Store (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
+                        Bil.Int (Cbat_word.to_word (w32 8)), LittleEndian, `r32))
+        in
+        let d_n_load =
+          Def.create rn
+            (Bil.Load (Bil.Var m, Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 12),
+                       LittleEndian, `r64))
+        in
+        let d_sub = Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Var rn)) in
+        let d_ptr = Def.create rax (Bil.Var rsp) in
+        let d_align =
+          Def.create rax
+            (Bil.BinOp (Bil.AND, Bil.Var rax, Bil.Int (Cbat_word.to_word (w64 (-4)))))
+        in
+        let cell = Bil.BinOp (Bil.MINUS, Bil.Var rbp, lit 8) in
+        let d_save =
+          Def.create m (Bil.Store (Bil.Var m, cell, Bil.Var rax, LittleEndian, `r64))
+        in
+        let d_reload = Def.create rax (Bil.Load (Bil.Var m, cell, LittleEndian, `r64)) in
+        let i = v64 "t19_i" in
+        let d_i1 = Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, lit 1)) in
+        let cond = Bil.BinOp (Bil.LE, Bil.Var i, lit 3) in
+        let sub, _ =
+          sub_of "t19_vla_roundtrip"
+            [ [ d_rbp; d_frame; d_n_cell; d_n_load; d_sub; d_ptr; d_align;
+                d_save; d_i1 ],
+              [ (1, mk_goto) ];
+              [ d_reload ],
+              [ (3, fun t -> mk_jmp_to t cond);
+                (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+              [],
+              [ (1, mk_goto) ];
+              [], [] ]
+        in
+        let envs, _, _ =
+          Hv.fixpoint Theory.Target.unknown
+            ~lookup:(fun _ -> None)
+            ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
+            ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
+                        (Program.create ~subs:[ sub ] ()))
+            ~lift_at:(fun _ ~block_addrs:_ -> None)
+            ~block_addrs:(Core.Map.empty (module Addr)) sub
+        in
+        (* The solve's post state of the one block holds the reload's
+           value; the through-pointer reads keep the band only if the
+           reloaded value is still the Vla-origin Rel. *)
+        let post =
+          Core.Map.fold envs ~init:AI.bottom
+            ~f:(fun ~key:_ ~data:(_, post) acc -> post)
+        in
+        check "FWD-19"
+          (match Vsa.WordSet.vla_offsets (AI.find_word 64 post rax) with
+           | Some _ -> true
+           | None -> false));
+
   ]
 
 let () = run "forward" tests
