@@ -12,6 +12,7 @@
 
 set -u
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-/tmp/corpus}"
 cd "$(dirname "$0")/../../src/progs" || exit 1
 
@@ -60,6 +61,13 @@ build_lane () {
     fi
   done
   [ "$pie_fail" -eq 0 ] || exit 1
+
+  # The class-(b) fixture asserts its own coverage: the word is present
+  # at its expected offset and no relocation names it.
+  if [ -x "$dest/class_b_word" ]; then
+    python3 "$HERE/check_class_b.py" "$dest/class_b_word" || fail=1
+  fi
+
   [ "$fail" -eq 0 ] || exit 1
 
   echo "PIE corpus built in $dest:"
