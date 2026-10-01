@@ -867,9 +867,8 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
 (* One resolution event pass on the phase's own solution: the case
    words land on the run's map and resolved dispatches contribute
    their target sets to the extra edges.  The split is the only BIR
-   change and it is additive. *)
+   change and it is additive.  Runs under the caller's image bracket. *)
 let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
-    ~(images : Vsa.section_image list)
     ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(sub_addrs : Tid.t Addr.Map.t)
@@ -879,59 +878,54 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub_tids = sub_tids sub in
   let fresh = ref Tid.Set.empty in
-  Vsa.with_images images (fun () ->
-      let sub, block_addrs' =
-        prepare_dispatches ~denote ~retaddr ~fresh ~lift_at ~block_addrs ~sub_addrs sub
-      in
+  let sub, block_addrs' =
+    prepare_dispatches ~denote ~retaddr ~fresh ~lift_at ~block_addrs ~sub_addrs sub
+  in
 
-      let grew = ref false in
-      let resolved' =
-        Term.enum blk_t sub
-        |> Seq.fold ~init:resolved ~f:(fun acc blk ->
-            let last_defs = Vsa.last_defs blk in
-            Term.enum jmp_t blk
-            |> Seq.fold ~init:acc ~f:(fun acc j ->
-                match dispatch_target ~last_defs ~retaddr j with
+  let grew = ref false in
+  let resolved' =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:resolved ~f:(fun acc blk ->
+        let last_defs = Vsa.last_defs blk in
+        Term.enum jmp_t blk
+        |> Seq.fold ~init:acc ~f:(fun acc j ->
+            match dispatch_target ~last_defs ~retaddr j with
+            | None -> acc
+            | Some texp -> (
+                match resolved_pairs_of ~denote ~last_defs ~sub_tids
+                        ~block_addrs:block_addrs' ~blk texp with
                 | None -> acc
-                | Some texp -> (
-                    match resolved_pairs_of ~denote ~last_defs ~sub_tids
-                            ~block_addrs:block_addrs' ~blk texp with
-                    | None -> acc
-                    | Some (_, pairs, _) ->
-                      let ts =
-                        Core.Set.of_list (module Tid)
-                          (Base.List.map pairs ~f:snd) in
-                      match Core.Map.find acc (Term.tid j) with
-                      | Some old when Core.Set.equal old ts -> acc
-                      | Some old ->
+                | Some (_, pairs, _) ->
+                    let ts =
+                      Core.Set.of_list (module Tid)
+                        (Base.List.map pairs ~f:snd) in
+                    match Core.Map.find acc (Term.tid j) with
+                    | Some old when Core.Set.equal old ts -> acc
+                    | Some old ->
                         grew := true;
                         Core.Map.set acc ~key:(Term.tid j)
                           ~data:(Core.Set.union old ts)
-                      | None ->
+                    | None ->
                         grew := true;
                         Core.Map.set acc ~key:(Term.tid j) ~data:ts)))
-      in
-      (sub, resolved', !fresh, block_addrs',
-       not (Core.Set.is_empty !fresh) || !grew))
+  in
+  (sub, resolved', !fresh, block_addrs',
+   not (Core.Set.is_empty !fresh) || !grew)
 
 (* The exit materialization at drain: the rewrites land once and the
-   prune retracts the split structure the materialization didn't
-   claim; the denotations run with the section images armed. *)
+   prune retracts the split structure the materialization didn't claim.
+   [~images] is the table-coverage data; the denotations read them
+   through the caller's bracket. *)
 let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(images : Vsa.section_image list) ~(block_addrs : Tid.t Addr.Map.t)
     ~(fresh : Tid.Set.t)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
-  let sub, live =
-    Vsa.with_images images (fun () ->
-        let live =
-          indirect_live ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
-            ~fresh sub
-        in
-        let sub =
-          rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr
-            ~block_addrs ~images sub
-        in
-        (sub, live))
+  let live =
+    indirect_live ~denote:(denote_of_sol sol) ~retaddr ~block_addrs ~fresh sub
+  in
+  let sub =
+    rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr
+      ~block_addrs ~images sub
   in
   prune_unreachable ~fresh ~live sub |> materialize_fallthroughs

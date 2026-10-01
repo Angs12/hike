@@ -34,8 +34,9 @@ module Vsa : sig
       (pre, post) environments, the rewritten sub, and the grown
       block-address map.  Non-convergence is the top identity: empty
       environments, the shape-canonicalized sub, the input
-      block-address map.  [images] arm the resolver's denotations
-      only; [written] is the program's kill-summary pass, computed
+      block-address map.  [images] arm every denotation the solve, the
+      completion, and the replay compute (one bracket, inside);
+      [written] is the program's kill-summary pass, computed
       once at the boundary. *)
   val fixpoint :
     Theory.Target.t ->
@@ -73,11 +74,11 @@ module Cfg_complete : sig
       words land on the run's map (mid-block entries split their
       block, additively) and resolved dispatches grow the extra
       edges.  Returns the sub, the edge set, the fresh entry blocks,
-      the grown block-address map, and whether anything grew. *)
+      the grown block-address map, and whether anything grew.  Runs
+      under the caller's image bracket. *)
   val resolve_phase :
     abi:Abi.t ->
     sol:Cbat_vsa.vsa_sol ->
-    images:Cbat_vsa.section_image list ->
     lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
     block_addrs:Tid.t Addr.Map.t ->
     sub_addrs:Tid.t Addr.Map.t ->
@@ -87,7 +88,8 @@ module Cfg_complete : sig
 
   (** The exit materialization at drain: canonical returns,
       complete-only guarded-goto series, and the prune retracts split
-      structure the materialization didn't claim. *)
+      structure the materialization didn't claim.  [images] is the
+      table-coverage data. *)
   val materialize :
     abi:Abi.t ->
     sol:Cbat_vsa.vsa_sol ->

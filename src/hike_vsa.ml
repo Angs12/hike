@@ -168,57 +168,54 @@ let fixpoint (target : Theory.Target.t)
             (match Base.Option.map (Vsa.WordSet.min_elem w) ~f:(fun x -> match Cbat_word.to_int64 x with Ok v -> Printf.sprintf "%Lx" v | Error _ -> "err") with Some v -> v | None -> "none"))
   in
 #endif
-  let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
-      (fresh : Tid.Set.t) (block_addrs : Tid.t Addr.Map.t)
-      (init : Vsa.vsa_sol option) =
-    let prog' = Program.create ~subs:[ sub ] () in
-    let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
-    (* The solve reads the image-backed sections: a load from one
-       denotes its bytes. *)
-    let sol =
-      Vsa.with_images images (fun () ->
+  (* The images arm the whole fused solve: every denotation the
+     phases, the completion's rewrites, and the replay compute reads
+     them through one bracket. *)
+  Vsa.with_images images (fun () ->
+      let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
+          (fresh : Tid.Set.t) (block_addrs : Tid.t Addr.Map.t)
+          (init : Vsa.vsa_sol option) =
+        let prog' = Program.create ~subs:[ sub ] () in
+        let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
+        let sol =
           Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup:lookup
-            prog' sub seed)
-    in
+            prog' sub seed
+        in
 #ifdef VSA_DEBUG
-    dump_r8 sol sub;
+        dump_r8 sol sub;
 #endif
-    let sub', resolved', fresh', block_addrs', events =
-      Hike_cfg_complete.resolve_phase ~abi ~sol ~images ~lift_at ~block_addrs
-        ~sub_addrs
-        sub resolved
-    in
-    if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)
-    else (sol, sub', Core.Set.union fresh fresh', block_addrs')
-  in
-  let converged =
-    try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
-    with Vsa.Fixpoint_not_converged (n, _) ->
+        let sub', resolved', fresh', block_addrs', events =
+          Hike_cfg_complete.resolve_phase ~abi ~sol ~lift_at ~block_addrs
+            ~sub_addrs
+            sub resolved
+        in
+        if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)
+        else (sol, sub', Core.Set.union fresh fresh', block_addrs')
+      in
+      let converged =
+        try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
+        with Vsa.Fixpoint_not_converged (n, _) ->
 #ifdef VSA_DEBUG
-      Vsa.Cbat_attr_census.bump "backstop.sub";
+          Vsa.Cbat_attr_census.bump "backstop.sub";
 #endif
-      Hike_diag.warn
-        "vsa: sub %s: fixpoint not converged in %d iterations — shape return canonicalization only (every other reader takes the top identity)"
-        (Sub.name sub) n;
-      None
-  in
-  match converged with
-  | Some (sol, sub', fresh, block_addrs') ->
-    let sub'' =
-      Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
-        ~fresh sub'
-    in
-    (* The round-down normalization rides the returned sub: the
-       attribution re-denotes from these rhs's, and the solve's
-       materialization may reintroduce the shift pair. *)
-    let sub'' = Vsa.normalize_round sub'' in
-    (* The replay re-denotes every def: arm the same images the solve read,
-       so the returned environments carry the image-derived values. *)
-    let envs, stamped =
-      Vsa.with_images images (fun () -> Vsa.stamp_envs_of_sol ~sol sub'')
-    in
-    (envs, stamped, block_addrs')
-  | None ->
-    ( Tid.Map.empty,
-      Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
-      block_addrs )
+          Hike_diag.warn
+            "vsa: sub %s: fixpoint not converged in %d iterations — shape return canonicalization only (every other reader takes the top identity)"
+            (Sub.name sub) n;
+          None
+      in
+      match converged with
+      | Some (sol, sub', fresh, block_addrs') ->
+        let sub'' =
+          Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
+            ~fresh sub'
+        in
+        (* The round-down normalization rides the returned sub: the
+           attribution re-denotes from these rhs's, and the solve's
+           materialization may reintroduce the shift pair. *)
+        let sub'' = Vsa.normalize_round sub'' in
+        let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
+        (envs, stamped, block_addrs')
+      | None ->
+        ( Tid.Map.empty,
+          Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
+          block_addrs ))
