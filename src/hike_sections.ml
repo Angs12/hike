@@ -25,7 +25,7 @@ type data_span = {
 
 (* The section metadata rows, in the fixed table order; the spans,
    emitter spec, and copy-reloc slots all project from this builder. *)
-type sec_meta = {
+type sec_meta = Model.sec_meta = {
   sm_type : sec;
   sm_const : bool;
   sm_lo : int64;
@@ -94,31 +94,11 @@ let attrib_spans ~(meta : sec_meta option list) : data_span list =
 let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
     ~(whole : (int * int64 * int64) list) ~(meta : sec_meta option list) :
     Bil2llvm_env.section_spec =
-  let spec_section (m : sec_meta) =
-    let open Bil2llvm_env in
-    match m.sm_image with
-    | Some arr ->
-        Sec_bytes
-          { si_type = m.sm_type;
-            si_lo = m.sm_lo;
-            si_hi = m.sm_hi;
-            si_words = m.sm_words;
-            si_const = m.sm_const;
-            si_image = arr }
-    | None ->
-        Sec_bss
-          { si_lo = m.sm_lo;
-            si_hi = m.sm_hi;
-            si_words = m.sm_words;
-            si_copy_relocs = m.sm_copy_relocs }
-  in
   let open Bil2llvm_env in
   { spec_comps = comps;
     spec_whole = whole;
     spec_word = word;
-    spec_sections =
-      Base.List.map meta
-        ~f:(Base.Option.map ~f:spec_section);
+    spec_sections = meta;
     spec_copy_relocs =
       Base.List.concat_map meta ~f:(fun m ->
           Base.Option.value_map m ~default:[] ~f:slot_addrs_of) }

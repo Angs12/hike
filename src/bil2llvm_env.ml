@@ -95,22 +95,8 @@ let indirect_br_no_reserved = 0
 let build_indirect_br llvm_builder target ~reserved_destinations =
   Llvm.build_indirect_br target reserved_destinations llvm_builder
 
-(* One input section of the spec. *)
-type sec_input =
-  | Sec_bytes of {
-      si_type : section_type;
-      si_lo : int64;              (* native span [si_lo, si_hi] *)
-      si_hi : int64;
-      si_words : int;             (* the word count on the word grid *)
-      si_const : bool;
-      si_image : Bytes.t;       (* the section's byte image *)
-    }
-  | Sec_bss of {
-      si_lo : int64;
-      si_hi : int64;
-      si_words : int;
-      si_copy_relocs : (int * string) list;
-    }
+(* One input section of the spec: the model's [sec_meta] row —
+   [sm_image] is the section's byte image, None for the bss region. *)
 
 (* The section spec: the components, the spans served whole
    (each (id, lo, hi)), the word grid, the input sections in the
@@ -120,7 +106,7 @@ type section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
-  spec_sections : sec_input option list;
+  spec_sections : Hike_stack_model.sec_meta option list;
   (* Absolute addresses of copy-relocated slots, for access routing. *)
   spec_copy_relocs : int64 list;
 }

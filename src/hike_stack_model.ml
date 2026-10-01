@@ -37,6 +37,19 @@ end
 
 include Vocab
 
+(* One data section's row — the fixed-table facts every consumer (the
+   attribution's spans and the emitter's section build) reads.
+   [sm_image] is None for the bss region (zeroed, copy-relocated). *)
+type sec_meta = {
+  sm_type : sec;
+  sm_const : bool;
+  sm_lo : int64;
+  sm_hi : int64;
+  sm_words : int;
+  sm_image : Bytes.t option;
+  sm_copy_relocs : (int * string) list;
+}
+
 (* The stack-position predicates and frame arithmetic shared by the
    attribution, promotion, and emitter. *)
 

@@ -459,27 +459,21 @@ type section = Bil2llvm_env.section = {
 
 type section_type = Bil2llvm_env.section_type
 
-type sec_input = Bil2llvm_env.sec_input =
-  | Sec_bytes of {
-      si_type : section_type;
-      si_lo : int64;
-      si_hi : int64;
-      si_words : int;
-      si_const : bool;
-      si_image : Bytes.t;
-    }
-  | Sec_bss of {
-      si_lo : int64;
-      si_hi : int64;
-      si_words : int;
-      si_copy_relocs : (int * string) list;
-    }
+type sec_meta = Hike_stack_model.sec_meta = {
+  sm_type : section_type;
+  sm_const : bool;
+  sm_lo : int64;
+  sm_hi : int64;
+  sm_words : int;
+  sm_image : Bytes.t option;
+  sm_copy_relocs : (int * string) list;
+}
 
 type section_spec = Bil2llvm_env.section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
-  spec_sections : sec_input option list;
+  spec_sections : sec_meta option list;
   spec_copy_relocs : int64 list;
 }
 

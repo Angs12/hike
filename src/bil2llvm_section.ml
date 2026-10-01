@@ -397,64 +397,60 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     { base; min_addr = Word.of_int64 ~width:64 lo;
       max_addr = Word.of_int64 ~width:64 hi; bytes = arr; owners }
   in
-  let build_entry (entry : sec_input) : section =
-    match entry with
-    | Sec_bss { si_lo; si_hi; si_words; si_copy_relocs } ->
-        let llvm_name = Model.sec_name Model.Bss in
-        let comps = comps_of si_lo si_hi in
-        let whole = whole_id si_lo si_hi in
-        if not (Base.List.is_empty comps) && Option.is_none whole then
+  let build_entry (entry : Hike_stack_model.sec_meta) : section =
+    let { Hike_stack_model.sm_type; sm_const; sm_lo = si_lo;
+          sm_hi = si_hi; sm_words = si_words; sm_copy_relocs; _ } =
+      entry
+    in
+    let common bss bytes base =
+      let whole = whole_id si_lo si_hi in
+      let owners =
+        Base.Option.value_map whole ~default:[] ~f:(fun id ->
+            [ { own_id = Some id;
+                own_lo = si_lo;
+                own_hi = si_hi;
+                base;
+                typed_w = word } ])
+      in
+      if bss then
+        let size = Int64.to_int (Int64.sub (Int64.add si_hi 1L) si_lo) in
+        { base;
+          min_addr = Word.of_int ~width:64 (Int64.to_int si_lo);
+          max_addr = Word.of_int ~width:64 (Int64.to_int si_lo + size - 1);
+          bytes = None;
+          owners }
+      else
+        { base;
+          min_addr = Word.of_int64 ~width:64 si_lo;
+          max_addr = Word.of_int64 ~width:64 si_hi;
+          bytes;
+          owners }
+    in
+    let llvm_name = Model.sec_name sm_type in
+    let comps = comps_of si_lo si_hi in
+    match entry.Hike_stack_model.sm_image with
+    | None ->
+        let base =
+          if sm_copy_relocs = [] then
+            create_uninitialized_global llvm_ctx llvm_module
+              (Int64.sub (Int64.add si_hi 1L) si_lo) llvm_name
+          else
+            create_copy_reloc_bss llvm_ctx llvm_module
+              (Int64.sub (Int64.add si_hi 1L) si_lo) llvm_name
+              sm_copy_relocs ~word
+        in
+        common true None base
+    | Some image ->
+        if not (Base.List.is_empty comps) && Option.is_none (whole_id si_lo si_hi)
+        then
           tile llvm_name ~comps ~lo:si_lo ~hi:si_hi ~words:si_words
-            ~is_const:false ~bss:true ~arr:None
-        else
-          let size = Int64.sub (Int64.add si_hi 1L) si_lo in
-          let base =
-            if si_copy_relocs = [] then
-              create_uninitialized_global llvm_ctx llvm_module size llvm_name
-            else
-              create_copy_reloc_bss llvm_ctx llvm_module size llvm_name
-                si_copy_relocs ~word
-          in
-          let owners =
-            Base.Option.value_map whole ~default:[] ~f:(fun id ->
-                [ { own_id = Some id;
-                    own_lo = si_lo;
-                    own_hi = si_hi;
-                    base;
-                    typed_w = word } ])
-          in
-          let addr = Int64.to_int si_lo in
-          let size = Int64.to_int size in
-          { base;
-            min_addr = Word.of_int ~width:64 addr;
-            max_addr = Word.of_int ~width:64 (addr + size - 1);
-            bytes = None;
-            owners }
-    | Sec_bytes { si_type; si_lo; si_hi; si_words; si_const; si_image } ->
-        let llvm_name = Model.sec_name si_type in
-        let comps = comps_of si_lo si_hi in
-        let whole = whole_id si_lo si_hi in
-        if not (Base.List.is_empty comps) && Option.is_none whole then
-          tile llvm_name ~comps ~lo:si_lo ~hi:si_hi ~words:si_words
-            ~is_const:si_const ~bss:false ~arr:(Some si_image)
+            ~is_const:sm_const ~bss:false ~arr:(Some image)
         else
           let base =
             create_section_global llvm_ctx llvm_module
-              (Bytes.length si_image) llvm_name ~is_const:si_const ~word
+              (Bytes.length image) llvm_name ~is_const:sm_const ~word
           in
-          let owners =
-            Base.Option.value_map whole ~default:[] ~f:(fun id ->
-                [ { own_id = Some id;
-                    own_lo = si_lo;
-                    own_hi = si_hi;
-                    base;
-                    typed_w = word } ])
-          in
-          { base;
-            min_addr = Word.of_int64 ~width:64 si_lo;
-            max_addr = Word.of_int64 ~width:64 si_hi;
-            bytes = Some si_image;
-            owners }
+          common false (Some image) base
   in
   (* One pass over the spec: each present section builds and lands in
      the spec's own order; a section the binary lacks warns and emits
