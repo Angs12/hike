@@ -61,9 +61,12 @@ let get_relocated_words (proj : Project.t) : int64 list =
   let ext = Base.Sequence.to_list (rows ext) |> Base.List.map ~f:fst in
   relr @ rel @ ext
 
-(* Every externally-relocated word: its site and the symbol whose
-   address the dynamic linker binds there (a GLOB_DAT, JUMP_SLOT, or
-   COPY slot). *)
+(* Every symbol-bearing relocation site and the symbol named there: the
+   loader emits this for each relocation carrying a symbol, whatever its
+   type.  A site inside an image section holds the symbol's address — a
+   GLOB_DAT/JUMP_SLOT slot in .got/.got.plt, or an R_X86_64_64 in a
+   shared object's .data.  A COPY site is in .bss, which carries no
+   image and is served by the copy-relocation path instead. *)
 let external_references (proj : Project.t) : (int64 * string) list =
   let open Ogre in
   let c = Ogre.collect Query.(select (from Image.Scheme.external_reference)) in

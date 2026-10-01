@@ -96,11 +96,12 @@ let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
 
 (* A section initializer over the byte image: a word-sized element is
    an address iff a relocation names it — a RELATIVE word renders its
-   runtime value (base + addend, the loader's own fact), an
-   externally-relocated word renders the symbol's address; every other
-   word keeps its raw bits.  Narrower elements chunk the raw bytes;
-   BSS is zero.  [base_addr] is the section's first byte's address (the
-   [word_lo]/[word_hi] indices are on the section's word grid). *)
+   runtime value (base + addend, the loader's own fact), a word a
+   symbol-bearing relocation names renders the symbol's address; every
+   other word keeps its raw bits.  Narrower elements chunk the raw
+   bytes; BSS is zero.  [base_addr] is the section's first byte's
+   address (the [word_lo]/[word_hi] indices are on the section's word
+   grid). *)
 let set_owner_initializer ctx llvm_ctx llvm_module g
     (arr : Bytes.t) ~(base_addr : int64) ~(word_lo : int) ~(word_hi : int)
     ~(typed_w : int) ~(bss : bool) ~word =
@@ -113,8 +114,10 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
   (* An externally-relocated word binds the symbol's address; the
      declaration is extern_weak because the native slot may hold a
      weak-undefined symbol (it resolves to null, as the dynamic
-     loader would leave it). *)
+     loader would leave it).  The name is sanitized like every other
+     emitted name, so the slot names the same global a call site does. *)
   let relocated_symbol name =
+    let name = Bil2llvm_env.sanitize_name name in
     match Llvm.lookup_function name llvm_module with
     | Some fn -> Llvm.const_ptrtoint fn word_ty
     | None ->
@@ -127,14 +130,27 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
          Llvm.set_linkage Llvm.Linkage.External_weak extern;
          Llvm.const_ptrtoint extern word_ty)
   in
+  (* The loader's relocation facts, indexed: one binary's image holds
+     hundreds of thousands of words and thousands of relocation sites,
+     so the per-word lookup is a map read, not a list walk. *)
+  let relative =
+    Base.List.fold ctx.relative
+      ~init:(Core.Map.empty (module Core.Int64))
+      ~f:(fun m (site, rv) -> Core.Map.set m ~key:site ~data:rv)
+  in
+  let externals =
+    Base.List.fold ctx.externals
+      ~init:(Core.Map.empty (module Core.Int64))
+      ~f:(fun m (site, name) -> Core.Map.set m ~key:site ~data:name)
+  in
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
     let addr = Stdlib.Int64.add base_addr (Stdlib.Int64.of_int off) in
-    match Base.List.Assoc.find ctx.relative ~equal:Int64.equal addr with
+    match Core.Map.find relative addr with
     | Some rv -> remapped_const ctx llvm_ctx llvm_module rv word_ty
     | None ->
-      (match Base.List.Assoc.find ctx.externals ~equal:Int64.equal addr with
+      (match Core.Map.find externals addr with
        | Some name -> relocated_symbol name
        | None -> Llvm.const_of_int64 word_ty v false)
   in

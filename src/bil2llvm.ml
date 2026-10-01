@@ -410,7 +410,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     (* The initializer rule consults the loader's relocation facts
        (ctx.relative/externals); function-pointer data lands on a
        promoted sub's thunk through the same address map. *)
-  Base.List.iter sections ~f:(fun section ->
+    Base.List.iter sections ~f:(fun section ->
       match section.bytes with
       | Some arr ->
           let lo = Word.to_int64_exn section.min_addr in

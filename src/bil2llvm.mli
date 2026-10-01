@@ -67,10 +67,11 @@ type sec_meta = Hike_stack_model.sec_meta = {
     (each (id, lo, hi)), the word grid, the input sections in the
     fixed section-list order ([None] = absent from the binary), and
     the loader's relocation facts: [spec_relative] maps a RELATIVE
-    word's site to its runtime value, [spec_externals] maps an
-    externally-relocated word's site to its symbol, and
-    [spec_copy_relocs] holds the absolute copy-relocation slot
-    addresses used by access routing. *)
+    word's site to its runtime value, [spec_externals] maps every
+    symbol-bearing relocation site to its symbol (in an image section
+    the word holds the symbol's address), and [spec_copy_relocs] holds
+    the absolute copy-relocation slot addresses used by access
+    routing. *)
 type section_spec = Bil2llvm_env.section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;

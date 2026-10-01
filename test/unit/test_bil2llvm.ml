@@ -300,6 +300,34 @@ let tests : unit Alcotest.test list =
 
     (* T6-TEXT: text is a section row — a constant image-backed section. *)
 
+    (* A symbol-bearing relocation names a global through the same
+       sanitizer every function declaration uses: the slot and the call
+       site must name one entity. *)
+    pin "EMIT-41"
+      "an externally-relocated word binds the symbol's sanitized name"
+      (fun () ->
+        let img = Bytes.make 8 '\000' in
+        let meta =
+          { B2l.sm_type = Sm.Data; sm_const = false;
+            sm_lo = 0x1000L; sm_hi = 0x1007L; sm_words = 1;
+            sm_image = Some img; sm_copy_relocs = [] }
+        in
+        let spec =
+          { empty_spec with
+            B2l.spec_sections = [ Some meta ];
+            spec_externals = [ (0x1000L, "foo.bar") ] }
+        in
+        let sub, _ =
+          sub_of "ext_slot"
+            [ [ Def.create (v64 "ext_slot_t")
+                  (Bil.Int (Cbat_word.to_word (w64 1))) ], [] ]
+        in
+        let ir = emit_ir_spec spec [ sub ] in
+        check "EMIT-41"
+          (contains_substring ir "@foobar"
+          && not (contains_substring ir "@foo.bar")));
+
+
 
     (* TILE-RESIDUE: the run counter is module-wide and consumes in the
        fixed tiling order (data before rodata). *)

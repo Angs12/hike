@@ -1063,7 +1063,12 @@ let mk_cond_sub nm defs cond_var =
                 (Goto (Direct (Tid.create ())))) ] ])
 
 (* Emitter fixtures (moved verbatim from test_bil2llvm.ml). *)
-let emit_ir (subs : sub term list) : string =
+let empty_spec =
+  { B2l.spec_comps = []; B2l.spec_whole = []; B2l.spec_word = 8;
+    B2l.spec_sections = []; B2l.spec_relative = []; B2l.spec_externals = [];
+    B2l.spec_copy_relocs = [] }
+
+let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in
   let llvm_module = Llvm.create_module llvm_ctx "Test" in
   (* The completion names each block's successors, as the pipeline does
@@ -1081,15 +1086,13 @@ let emit_ir (subs : sub term list) : string =
   let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
   B2l.emit_program llvm_ctx llvm_module
     ~target:Theory.Target.unknown ~addr_bits:64
-    ~symtab:None
-    { B2l.spec_comps = []; B2l.spec_whole = []; B2l.spec_word = 8;
-      B2l.spec_sections = []; B2l.spec_relative = []; B2l.spec_externals = [];
-      B2l.spec_copy_relocs = [] }
-    prog;
+    ~symtab:None spec prog;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx;
   s
+
+let emit_ir (subs : sub term list) : string = emit_ir_spec empty_spec subs
 
 let check_ir (name : string) (must : string) (ir : string) : unit =
   check name (contains_substring ir must)

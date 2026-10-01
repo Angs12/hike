@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-34`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-41`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -31,6 +31,7 @@ one failing fixture never hides the rest of the module.
 | EMIT-28 | An indirect tail with no enumerated destinations is a loud failure (destination-less UB is never emitted behind a warning). | In `create_indirect_tail`, restore the warn-and-emit `indirectbr` arm. | EMIT-28 FAILs: `emit_ir` does not raise `"no enumerated destinations"`. |
 | EMIT-33 | A 3+-jmp series the splitter cannot compile (not all direct gotos) reaches the emitter, which fails loudly rather than render silently. | In `create_branches`, drop the `_ ->` failwith (render nothing). | EMIT-33 FAILs: `emit_ir` does not raise `"unsplit multi-jmp"`. |
 | EMIT-34 | a `Vla(T)`-origin access GEPs the `%vla` created at T (`create_dynamic_alloc` records its pair); each VLA's access hits its own alloca | drop the `Vla` arm from `mem_access` | EMIT-34 red: no `getelementptr i8, ptr %vla, i64 4` / `%vla2, i64 8` |
+| EMIT-41 | `set_owner_initializer`'s `relocated_symbol` names the symbol through `Bil2llvm_env.sanitize_name`, so a slot and the call site that names the same entity agree. | Drop the `sanitize_name` application in `relocated_symbol`. | EMIT-41 FAILs: the module carries `@foo.bar` instead of `@foobar` (measured). |
 
 **Fixture note (2026-09-29).** `emit_ir` now runs
 `Hike.Cfg_complete.materialize_fallthroughs` before the split, as the
