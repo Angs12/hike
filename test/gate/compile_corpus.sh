@@ -63,10 +63,10 @@ build_lane () {
   [ "$pie_fail" -eq 0 ] || exit 1
 
   # The class-(b) fixture asserts its own coverage: the word is present
-  # at its expected offset and no relocation names it.
-  if [ -x "$dest/class_b_word" ]; then
-    python3 "$HERE/check_class_b.py" "$dest/class_b_word" || fail=1
-  fi
+  # at its expected offset and no relocation names it.  A missing binary
+  # is the check's own failure — guarding on it would let the fixture
+  # stop testing silently.
+  python3 "$HERE/check_class_b.py" "$dest/class_b_word" || fail=1
 
   [ "$fail" -eq 0 ] || exit 1
 
