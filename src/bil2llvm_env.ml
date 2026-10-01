@@ -110,6 +110,7 @@ type section_spec = {
   spec_word : int;
   spec_sections : Hike_stack_model.sec_meta option list;
   spec_relative : (int64 * int64) list;
+  spec_externals : (int64 * string) list;
   (* Absolute addresses of copy-relocated slots, for access routing. *)
   spec_copy_relocs : int64 list;
 }
@@ -137,6 +138,7 @@ type emit_ctx = {
      runtime value (an in-module address) and an externally-relocated
      word's symbol. *)
   relative : (int64 * int64) list;
+  externals : (int64 * string) list;
   target : Theory.Target.t;
   (* ABI projection of [target], static per binary. *)
   abi : Abi.t;

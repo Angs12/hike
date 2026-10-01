@@ -342,6 +342,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     { symtab;
       copy_relocs;
       relative = spec.spec_relative;
+      externals = spec.spec_externals;
       target;
       abi;
       sp = Abi.sp target;
@@ -481,6 +482,7 @@ type section_spec = Bil2llvm_env.section_spec = {
   spec_word : int;
   spec_sections : sec_meta option list;
   spec_relative : (int64 * int64) list;
+  spec_externals : (int64 * string) list;
   spec_copy_relocs : int64 list;
 }
 

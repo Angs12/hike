@@ -61,6 +61,15 @@ let get_relocated_words (proj : Project.t) : int64 list =
   let ext = Base.Sequence.to_list (rows ext) |> Base.List.map ~f:fst in
   relr @ rel @ ext
 
+(* Every externally-relocated word: its site and the symbol whose
+   address the dynamic linker binds there (a GLOB_DAT, JUMP_SLOT, or
+   COPY slot). *)
+let external_references (proj : Project.t) : (int64 * string) list =
+  let open Ogre in
+  let c = Ogre.collect Query.(select (from Image.Scheme.external_reference)) in
+  fst (Ogre.run c (Project.specification proj) |> Core.Or_error.ok_exn)
+  |> Base.Sequence.to_list
+
 (* The loader's load bias: the memory image's addresses are the file
    vaddrs plus it, so a RELATIVE value [base + addend] reads as the
    addend plus it. *)

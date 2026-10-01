@@ -223,4 +223,5 @@ val section_spec_of :
   comps:Hike_stack_model.sec_comp list ->
   whole:(int * int64 * int64) list ->
   meta:sec_meta option list ->
-  relative:(int64 * int64) list -> Bil2llvm_env.section_spec
+  relative:(int64 * int64) list ->
+  externals:(int64 * string) list -> Bil2llvm_env.section_spec

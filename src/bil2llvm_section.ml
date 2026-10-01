@@ -110,13 +110,33 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     if typed_w >= word then word_ty
     else Llvm.integer_type llvm_ctx (typed_w * 8)
   in
+  (* An externally-relocated word binds the symbol's address; the
+     declaration is extern_weak because the native slot may hold a
+     weak-undefined symbol (it resolves to null, as the dynamic
+     loader would leave it). *)
+  let relocated_symbol name =
+    match Llvm.lookup_function name llvm_module with
+    | Some fn -> Llvm.const_ptrtoint fn word_ty
+    | None ->
+      (match Llvm.lookup_global name llvm_module with
+       | Some gv -> Llvm.const_ptrtoint gv word_ty
+       | None ->
+         let extern =
+           Llvm.declare_global (Llvm.i8_type llvm_ctx) name llvm_module
+         in
+         Llvm.set_linkage Llvm.Linkage.External_weak extern;
+         Llvm.const_ptrtoint extern word_ty)
+  in
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
     let addr = Stdlib.Int64.add base_addr (Stdlib.Int64.of_int off) in
     match Base.List.Assoc.find ctx.relative ~equal:Int64.equal addr with
     | Some rv -> remapped_const ctx llvm_ctx llvm_module rv word_ty
-    | None -> Llvm.const_of_int64 word_ty v false
+    | None ->
+      (match Base.List.Assoc.find ctx.externals ~equal:Int64.equal addr with
+       | Some name -> relocated_symbol name
+       | None -> Llvm.const_of_int64 word_ty v false)
   in
   if bss then Llvm.set_initializer (Llvm.const_null elem_ty) g
   else if typed_w >= word then

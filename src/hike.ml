@@ -33,11 +33,14 @@ let convert_binary output_program proj =
   let abi = Abi.of_target target in
   let word = abi.Abi.word in
   let addr_bits = Theory.Target.bits target in
-  let relative =
+  let relative, externals =
     match (Hike_kb.facts ()).Hike_kb.spec with
-    | Some spec -> spec.Bil2llvm_env.spec_relative
+    | Some spec ->
+      (spec.Bil2llvm_env.spec_relative, spec.Bil2llvm_env.spec_externals)
     | None ->
-      Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj)
+      let bias = Hike_image.get_bias proj in
+      (Hike_image.relative_values proj ~bias,
+       Hike_image.external_references proj)
   in
   let spec =
     match (Hike_kb.facts ()).Hike_kb.spec with
@@ -46,7 +49,7 @@ let convert_binary output_program proj =
         (* No attribution ran: the sections emit with no components. *)
         let meta = Hike_sections.sec_meta ~word proj in
         Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
-          ~relative
+          ~relative ~externals
   in
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
@@ -244,6 +247,7 @@ let pass_attrib proj =
       ~whole:(Hike_sections.whole_comps_of ctx)
       ~meta
       ~relative:(Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj))
+      ~externals:(Hike_image.external_references proj)
   in
   (* The DCE's load roots are the vars the rewrite created; its
      escape roots are the storages carrying identity members. *)
