@@ -212,6 +212,15 @@ val machine_call : jmp term -> bool
 val call_pushes : jmp term -> bool
 val has_call_push : sub term -> bool
 
+(* The lifted va_list construction: the proof a sub is variadic. *)
+val is_variadic_construction :
+  abi:Abi.t ->
+  entry:int64 ->
+  denote:(blk:blk term -> ?def:def term -> exp ->
+           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
+  sub term ->
+  bool
+
 (* The layout: every alloca of the sub, riding the sub term. *)
 module Sub_layout : sig
   type region = {
@@ -272,6 +281,12 @@ val versions_tag : Versions.t Value.Tag.t
 val ssa_tag : unit Value.Tag.t
 val is_ssa : sub term -> bool
 val set_layout : sub_layout -> sub term -> sub term
+
+(* The variadic stamp: the sub's body holds the lifted va_list
+   construction. *)
+val variadic_tag : unit Value.Tag.t
+val is_variadic : sub term -> bool
+val set_variadic : sub term -> sub term
 
 (* The emission signature rides the sub's own arg terms. *)
 val set_sig : sub term -> Arg.t list -> sub term

@@ -354,6 +354,47 @@ let rw_vla () : sub term =
   rewrite_one (straight_sub "rw_vla" defs)
 
 
+(* The lifted va_list construction: the incoming GP parameter registers
+   stored into the frame (the reg_save_area) beside a pointer at/above
+   the entry args base (the overflow_arg_area).  [overflow:false] drops
+   the second half, leaving the register spills alone. *)
+let rw_variadic ~(overflow : bool) () : sub term =
+  let m = memv "rw_va_m" in
+  let rsp = v64 "RSP" in
+  let ov = v64 "rw_va_ov" in
+  let k n = Cbat_word.to_word (w64 n) |> fun w -> Bil.Int w in
+  let store reg off =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m,
+           Bil.BinOp (Bil.MINUS, Bil.Var rsp, k off),
+           Bil.Var reg, LittleEndian, `r64 ))
+  in
+  let regs =
+    [ store (v64 "RSI") 0x28; store (v64 "RDX") 0x20;
+      store (v64 "RCX") 0x18; store (v64 "R8") 0x10 ]
+  in
+  let overflow_defs =
+    if overflow then
+      [ Def.create ov (Bil.BinOp (Bil.PLUS, Bil.Var rsp, k 0x10));
+        Def.create m
+          (Bil.Store
+             ( Bil.Var m,
+               Bil.BinOp (Bil.MINUS, Bil.Var rsp, k 0x40),
+               Bil.Var ov, LittleEndian, `r64 )) ]
+    else
+      (* A frame-pointer store alone is not the overflow area. *)
+      let p = v64 "rw_va_p" in
+      [ Def.create p (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k 0x30));
+        Def.create m
+          (Bil.Store
+             ( Bil.Var m,
+               Bil.BinOp (Bil.MINUS, Bil.Var rsp, k 0x50),
+               Bil.Var p, LittleEndian, `r64 )) ]
+  in
+  straight_sub "rw_variadic" (regs @ overflow_defs)
+
+
 (* The section-constant fixture: a def whose value is a .rodata
    constant address; the span owns it, so the value takes the
    component's base var. *)
@@ -894,7 +935,22 @@ let tests : unit Alcotest.test list =
         check_ir "PR-36"
           ("getelementptr i8, ptr %hike_window, i64 "
           ^ Int64.to_string (Cu.slot_offset ~word:8 0))
-          ir)
+          ir);
+
+    (* PR-37: the lifted va_list construction — the reg-save spills
+       beside the above-entry overflow pointer — stamps the sub
+       variadic, and the emitted definition is a real LLVM variadic. *)
+    pin "PR-37" "the va_list construction stamps the sub variadic"
+      (fun () ->
+        let sub' = rewrite_one (rw_variadic ~overflow:true ()) in
+        check "PR-37a" (Cu.is_variadic sub');
+        check_ir "PR-37b" ", ...)" (emit_ir [ sub' ]));
+
+    (* PR-38: the same registers spilled into the frame with no
+       overflow pointer are not the va_list construction. *)
+    pin "PR-38" "the register spills alone are not variadic" (fun () ->
+        let sub' = rewrite_one (rw_variadic ~overflow:false ()) in
+        check "PR-38" (not (Cu.is_variadic sub')))
   ]
 
 let () = run "promote" tests
