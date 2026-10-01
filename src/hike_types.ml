@@ -248,9 +248,6 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
           window_param = false }
   in
   let word = facts.Hike_kb.abi.Hike_abi.word in
-  let a_base =
-    Hike_stack_model.args_base ~entry:Hike_stack_model.segment_base ~word
-  in
   let vla_reach (ws : Vsa.WordSet.t) : bool =
     match Vsa.WordSet.origin ws with
     | Some (Vsa.WordSet.Origin.Vla _) -> true
@@ -258,10 +255,12 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
   in
   let storage_of (ws : Vsa.WordSet.t) : Hike_stack_model.ptr_storage =
     if vla_reach ws then Hike_stack_model.Ptr_vla
+    else if
+      Hike_stack_model.is_window_denotation
+        ~entry:Hike_stack_model.segment_base ~word ws
+    then Hike_stack_model.Ptr_window
     else
       match Hike_stack_model.positions_of_offsets ws with
-      | Some (lo, _) when Stdlib.Int64.compare lo a_base >= 0 ->
-          Hike_stack_model.Ptr_window
       | Some (lo, hi) -> (
           match
             Base.List.find layout.Hike_stack_model.Sub_layout.regions

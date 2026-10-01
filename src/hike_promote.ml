@@ -859,9 +859,9 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
   let sub = promote_sub ~abi facts sub in
-  (* A non-memory def whose value is bounded stack-symbolic at/above
-     the Args base computes an address in the caller's window — the
-     emitter re-bases its integer to the window parameter. *)
+  (* A non-memory def whose value is a caller-window address — the
+     model's one window denotation — is stamped; the emitter re-bases
+     its integer to the window parameter. *)
   let window_values =
     Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc blk ->
@@ -871,21 +871,10 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
             else
               match denote ~blk ~def:d (Def.rhs d) with
               | Error _ -> acc
-              | Ok ws -> (
-              match Vsa.WordSet.stack_offsets ws with
-              | None -> acc
-              | Some _ -> (
-                  let a_base = Model.args_base ~entry ~word in
-                  match Model.positions_of_offsets ws with
-                  (* At/above the args base: a caller-window address —
-                     the VLA extents sit below the entry line, never
-                     here. *)
-                  | Some (lo, hi)
-                    when Stdlib.Int64.compare lo a_base >= 0
-                         && Stdlib.Int64.compare hi a_base >= 0
-                         && Stdlib.Int64.compare lo hi <= 0 ->
+              | Ok ws ->
+                  if Model.is_window_denotation ~entry ~word ws then
                     Core.Set.add acc (Term.tid d)
-                  | _ -> acc))))
+                  else acc))
   in
   let sub = Hike_def_slots.stamp_window_values ~window_values sub in
   (* The layout precedes the rewrite: each storage's base offset [rel]

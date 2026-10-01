@@ -534,6 +534,37 @@ let tests : unit Alcotest.test list =
         check "MOD-39"
           (abi.Abi.word = 8
           && Hike.Abi.((of_target x86).Abi.word) = Theory.Target.bits x86 / 8));
+
+    (* The ONE window denotation: stack-symbolic, ordered, entirely
+       at/above the args base.  Both the promotion's window stamp and
+       the pointer-kind storage read this rule. *)
+    pin "MOD-40" "the caller-window denotation accepts exactly the window class"
+      (fun () ->
+        let module Ws = Cbat_vsa.WordSet in
+        let word = 8 in
+        let entry = Hike.Stack_model.segment_base in
+        let win k = Ws.stack_word_i64 k in
+        let is_win ws =
+          Hike.Stack_model.is_window_denotation ~entry ~word ws
+        in
+        (* a stack-symbolic singleton at/above the args base (entry+word) *)
+        check "MOD-40a: at/above the args base is window" (is_win (win 16L));
+        (* below the entry line is this sub's own frame, never window *)
+        check "MOD-40b: below-entry is not window" (not (is_win (win (-8L))));
+        (* the boundary: the args base itself is window *)
+        check "MOD-40c: the args base is window" (is_win (win 8L));
+        (* a plain foreign constant carries no stack offsets: not window *)
+        check "MOD-40d: a plain foreign word is not window"
+          (not (is_win (Ws.singleton (Cbat_word.of_int ~width:64 0x400000))));
+        (* two above-base offsets join into one window interval *)
+        check "MOD-40e: an above-base interval is window"
+          (is_win (Ws.union (win 16L) (win 32L)));
+        (* the degraded plain arm at a window position is not proof: a
+           window address must be stack-symbolic, not a plain word
+           that happens to land in the band *)
+        check "MOD-40f: a plain in-band word is not window"
+          (not (is_win (Ws.singleton (Cbat_word.of_int64 ~width:64
+                          (Int64.add entry 16L))))));
   ]
 
 let () = run "model" tests

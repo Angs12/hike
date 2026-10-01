@@ -219,6 +219,13 @@ module Stack_model : sig
       denotates to exactly one — the cell-identity predicate. *)
   val singleton_stack_position : Cbat_vsa.WordSet.t -> int64 option
 
+  (** The caller-window denotation: a stack-symbolic set whose
+      positions are ordered and entirely at/above the args base.  One
+      rule for the promotion's window stamp and the pointer-kind
+      storage. *)
+  val is_window_denotation :
+    entry:int64 -> word:int -> Cbat_vsa.WordSet.t -> bool
+
   (** THE return-address fact: the stack-symbolic singleton at the
       entry-RSP cell, in its three spellings (denotation, stamped tag,
       pre-solve shape). *)

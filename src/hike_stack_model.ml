@@ -70,6 +70,23 @@ module Vsa = struct
   let stack_top ~(entry : int64) ~(word : int) : int64 =
     Stdlib.Int64.pred (args_base ~entry ~word)
 
+  (* The caller-window denotation: a stack-symbolic set whose positions
+     are ordered and entirely at/above the args base — an address in the
+     caller's frame.  The ONE rule the promotion's window stamp and the
+     pointer-kind storage read. *)
+  let is_window_denotation ~(entry : int64) ~(word : int)
+      (ws : Cbat_vsa.WordSet.t) : bool =
+    match Cbat_vsa.WordSet.stack_offsets ws with
+    | None -> false
+    | Some _ -> (
+        match positions_of_offsets ws with
+        | Some (lo, hi) ->
+            let a_base = args_base ~entry ~word in
+            Stdlib.Int64.compare lo a_base >= 0
+            && Stdlib.Int64.compare hi a_base >= 0
+            && Stdlib.Int64.compare lo hi <= 0
+        | None -> false)
+
   (* [hi + n - 1] in signed arithmetic, saturating at the ceiling — a
      wrapped short interval would be unsound. *)
   let expand_hi ~(cap : int64) (hi : int64) (n : int) : int64 =
