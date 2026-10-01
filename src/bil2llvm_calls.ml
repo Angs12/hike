@@ -208,10 +208,16 @@ let create_fun_declaration ctx sub_tid =
   in
   register_fn ctx sub_tid fn fn_typ
 
-let create_fun ctx sub_tid ~rets ~args =
+let create_fun ctx sub_tid ~rets ~args ~variadic =
   let ret_typ = ret_type_of_rets ctx rets in
   let args_typ = arg_types_of ctx sub_tid args in
-  let fn_typ = Llvm.function_type ret_typ (Array.of_list args_typ) in
+  (* A lifted variadic body declares a real variadic definition; its
+     named lanes are the ABI's. *)
+  let fn_typ =
+    if variadic then
+      Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
+    else Llvm.function_type ret_typ (Array.of_list args_typ)
+  in
   let fn =
     Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ
       ctx.llvm_module
@@ -395,12 +401,7 @@ let create_thunk ctx (sub_tid : tid) =
        what a pointer call passes. *)
     let conv = ctx.abi in
     let twin_args = window_conv_args ~word conv in
-        let reg_args =
-          Base.List.filter args ~f:(fun a ->
-              (not (Hike_stack_model.is_arg_slot (Arg.lhs a)))
-              && not (Var.same (Arg.lhs a) window_var))
-        in
-      let ret_typ = ret_type_of_rets ctx rets in
+    let ret_typ = ret_type_of_rets ctx rets in
       let arg_typs =
         Base.List.map twin_args ~f:(fun a ->
             if Var.same (Arg.lhs a) window_var then
@@ -431,9 +432,9 @@ let create_thunk ctx (sub_tid : tid) =
             Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
               builder)
       in
-      (* Forwards [sub]'s register lanes by name from the twin's
-         params, then the unpacked slots; a lane the twin's
-         convention lacks reads undef. *)
+      (* Forwards [sub]'s own parameter order: each register lane by name
+         from the twin's convention, each slot as the window GEP'd at its
+         cell, and the window itself. *)
       let param_named (v : var) : Llvm.llvalue =
         let n = Var.name v in
         Base.Option.value
@@ -442,8 +443,19 @@ let create_thunk ctx (sub_tid : tid) =
           ~default:(Llvm.undef (Llvm.i64_type llvm_ctx))
       in
       let call_args =
-        Base.List.map reg_args ~f:(fun a -> param_named (Arg.lhs a))
-        |> fun regs -> regs @ slot_vals
+        Base.List.map args ~f:(fun a ->
+            let v = Arg.lhs a in
+            if Hike_stack_model.is_arg_slot v then
+              let i =
+                Base.Option.value
+                  (Hike_stack_model.id_of_family Hike_stack_model.slot_family
+                     (Var.name v))
+                  ~default:0
+              in
+              Base.Option.value (Base.List.nth slot_vals i)
+                ~default:(Llvm.undef (Llvm.pointer_type llvm_ctx))
+            else if Var.same v window_var then window
+            else param_named v)
       in
       let callee_fn, callee_typ = get_func ctx sub_tid in
       let r =
