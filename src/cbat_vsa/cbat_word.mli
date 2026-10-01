@@ -30,6 +30,9 @@ val unsigned : t -> t
 val zero : int -> t
 val one : int -> t
 val ones : int -> t
+
+(* 2^n at [width] bits. *)
+val pow2 : width:int -> int -> t
 val b0 : t
 val b1 : t
 val of_int : width:int -> int -> t

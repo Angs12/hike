@@ -551,8 +551,7 @@ let ext_cast_constraint ~(is_signed : bool) (env : AI.t) (a : exp)
     if w <= n then None
     else
       let zero = Cbat_word.zero w in
-      let two_n =
-        Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w n) in
+      let two_n = Cbat_word.pow2 ~width:w n in
       let half =
         Cbat_word.lshift (Cbat_word.one w) (Cbat_word.of_int ~width:w (n - 1)) in
       let maxn = Cbat_word.pred two_n in
@@ -623,9 +622,7 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
          let hi_a =
            if zero_extended_n then vhi_w
            else
-             let two_n =
-               Cbat_word.lshift (Cbat_word.one w)
-                 (Cbat_word.of_int ~width:w n) in
+             let two_n = Cbat_word.pow2 ~width:w n in
              Cbat_word.add vhi_w (Cbat_word.sub (Cbat_word.ones w) two_n) in
          hull ~wrapping:false w vlo_w hi_a
        | _ -> None)

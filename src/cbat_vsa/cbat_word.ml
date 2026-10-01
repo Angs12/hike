@@ -230,6 +230,10 @@ let lshift (a : t) (b : t) : t =
     if Z.fits_int n && Z.to_int n < w then mkz (Z.shift_left (to_z a) (Z.to_int n)) w
     else zero w
 
+(* 2^n at [width] bits. *)
+let pow2 ~(width : int) (n : int) : t =
+  lshift (one width) (of_int ~width n)
+
 let rshift (a : t) (b : t) : t =
   let w = bitwidth a in
   match a, b with
