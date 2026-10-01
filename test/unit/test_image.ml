@@ -46,20 +46,6 @@ let section_bytes (words : int64 list) : Bytes.t =
 
 let tests : unit Alcotest.test list =
   [
-    pin "IMG-01"
-      "rela_rows reads (site, type, addend) from the RELA bytes; the \
-       addend is the r_addend field, not the target bytes"
-      (fun () ->
-        let bytes =
-          rela_bytes [ (0x3dc0L, 8L, 0x11d0L); (0x4000L, 7L, 0L) ]
-        in
-        check "IMG-01 rows"
-          (Img.rela_rows bytes = [ (0x3dc0L, 8L, 0x11d0L); (0x4000L, 7L, 0L) ]);
-        (* A trailing partial entry is ignored. *)
-        let short = Bytes.sub bytes 0 40 in
-        check "IMG-01 partial"
-          (Img.rela_rows short = [ (0x3dc0L, 8L, 0x11d0L) ]));
-
     pin "IMG-02"
       "a RELATIVE word takes its runtime value, an externally-relocated \
        word is dropped, the rest keep the file bytes"

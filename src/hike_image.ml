@@ -61,44 +61,6 @@ let get_relocated_words (proj : Project.t) : int64 list =
   let ext = Base.Sequence.to_list (rows ext) |> Base.List.map ~f:fst in
   relr @ rel @ ext
 
-(* A RELA-format relocation section ([.rela.dyn], [.rela.plt], ...):
-   its entries carry the addend the loader's facts omit. *)
-let is_rela_section (name : string) : bool =
-  String.length name >= 5 && String.equal (String.sub name 0 5) ".rela"
-
-(* x86-64 [R_X86_64_RELATIVE]: the stored word is [base + addend],
-   the addend a link-time in-module address. *)
-let r_x86_64_relative = 8L
-
-(* The RELA entry layout: r_offset, r_info, r_addend, 8 bytes each. *)
-let rela_stride = 24
-let rela_info_off = 8
-let rela_addend_off = 16
-
-(* The (site, type, addend) rows of a RELA section's bytes. *)
-let rela_rows (bytes : Bytes.t) : (int64 * int64 * int64) list =
-  let len = Bytes.length bytes in
-  let u64 off =
-    let acc = ref 0L in
-    for k = 0 to 7 do
-      acc :=
-        Int64.logor !acc
-          (Int64.shift_left
-             (Int64.of_int (Char.code (Bytes.get bytes (off + k))))
-             (8 * k))
-    done;
-    !acc
-  in
-  let rec go off acc =
-    if off + rela_stride > len then Base.List.rev acc
-    else
-      let site = u64 off in
-      let typ = Int64.logand (u64 (off + rela_info_off)) 0xffffffffL in
-      let addend = u64 (off + rela_addend_off) in
-      go (off + rela_stride) ((site, typ, addend) :: acc)
-  in
-  go 0 []
-
 (* The loader's load bias: the memory image's addresses are the file
    vaddrs plus it, so a RELATIVE value [base + addend] reads as the
    addend plus it. *)
@@ -113,23 +75,22 @@ let get_bias (proj : Project.t) : int64 =
   | [] -> 0L
 
 (* Every RELATIVE site with its runtime value (an in-module address):
-   the RELA addend plus the bias, read from the relocation section bytes
-   rather than the target bytes. *)
+   the loader's (site, addend) fact — [R_X86_64_RELATIVE]'s r_offset and
+   r_addend — plus the bias. *)
 let relative_values (proj : Project.t) ~(bias : int64) : (int64 * int64) list
     =
-  Project.memory proj |> Memmap.to_sequence
-  |> Seq.filter_map ~f:(fun (mem, v) ->
-      match Value.get Image.section v with
-      | Some name when is_rela_section name ->
-        get_section_data (Some (mem, v))
-      | _ -> None)
-  |> Seq.concat_map ~f:(fun (bytes, _, _) ->
-      Seq.of_list (rela_rows bytes))
-  |> Seq.filter_map ~f:(fun (site, typ, addend) ->
-      if Int64.equal typ r_x86_64_relative
-      then Some (Int64.add site bias, Int64.add addend bias)
-      else None)
-  |> Seq.to_list
+  let open Ogre in
+  let at = Type.("at" %: int) in
+  let addend = Type.("addend" %: int) in
+  let rel_addend () =
+    Ogre.declare ~name:"llvm:relative-relocation-addend"
+      Type.(scheme at $ addend) (fun site addend -> (site, addend))
+  in
+  let c = Ogre.collect Query.(select (from rel_addend)) in
+  fst (Ogre.run c (Project.specification proj) |> Core.Or_error.ok_exn)
+  |> Base.Sequence.to_list
+  |> Base.List.map ~f:(fun (site, addend) ->
+         (Int64.add site bias, Int64.add addend bias))
 
 (* The image fragments of one section: a RELATIVE word takes its runtime
    value, an externally-relocated word is dropped (the abstract read is

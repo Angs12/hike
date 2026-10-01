@@ -17,8 +17,9 @@ val get_relocated_words : Project.t -> int64 list
 (** The load bias: memory-image addresses are the file vaddrs plus it. *)
 val get_bias : Project.t -> int64
 
-(** The (site, type, addend) rows of a RELA section's bytes. *)
-val rela_rows : Bytes.t -> (int64 * int64 * int64) list
+(** Every RELATIVE site with its runtime value: the loader's
+    (site, addend) fact plus the bias. *)
+val relative_values : Project.t -> bias:int64 -> (int64 * int64) list
 
 (** One section's image fragments: a RELATIVE word takes its runtime
     value, an externally-relocated word is dropped, the rest keep the
