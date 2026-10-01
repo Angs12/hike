@@ -439,9 +439,9 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   initializer_phase ()
 
 (* Re-exports from the lane modules (the mli surface). *)
-type native_fp = Bil2llvm_fp.native_fp =
-  | FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
-  | FCONVERT of int | FORDER | FHLT | ISNAN
+module Fp = Bil2llvm_fp
+
+type native_fp = Bil2llvm_fp.native_fp
 
 type sec_owner = Bil2llvm_env.sec_owner = {
   own_id : int option;

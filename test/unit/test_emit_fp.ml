@@ -4,51 +4,53 @@
 
 open Bap.Std
 open Bap_core_theory
+open Bap.Std
 open Hike_test.Harness
 open Hike_test.Common
 open Hike_test.Fixtures
+module Bil2llvm_fp = Hike.Bil2llvm.Fp
 
 (* The IR opcode each native_fp constructor emits. *)
 let op_ir_string = function
-  | B2l.FMUL -> "fmul"
-  | B2l.FADD -> "fadd"
-  | B2l.FSUB -> "fsub"
-  | B2l.FDIV -> "fdiv"
-  | B2l.FREM -> "frem"
-  | B2l.SFLOAT -> "sitofp"
-  | B2l.SINT -> "fptosi"
-  | B2l.FCONVERT 64 -> "fpext"
-  | B2l.FCONVERT _ -> "fptrunc"
-  | B2l.FORDER -> "fcmp olt"
-  | B2l.FHLT -> "unreachable"
-  | B2l.ISNAN -> "fcmp uno"
+  | Bil2llvm_fp.FMUL -> "fmul"
+  | Bil2llvm_fp.FADD -> "fadd"
+  | Bil2llvm_fp.FSUB -> "fsub"
+  | Bil2llvm_fp.FDIV -> "fdiv"
+  | Bil2llvm_fp.FREM -> "frem"
+  | Bil2llvm_fp.SFLOAT -> "sitofp"
+  | Bil2llvm_fp.SINT -> "fptosi"
+  | Bil2llvm_fp.FCONVERT 64 -> "fpext"
+  | Bil2llvm_fp.FCONVERT _ -> "fptrunc"
+  | Bil2llvm_fp.FORDER -> "fcmp olt"
+  | Bil2llvm_fp.FHLT -> "unreachable"
+  | Bil2llvm_fp.ISNAN -> "fcmp uno"
 
 let string_of_natfp = function
-  | B2l.FMUL -> "FMUL"
-  | B2l.FADD -> "FADD"
-  | B2l.FSUB -> "FSUB"
-  | B2l.FDIV -> "FDIV"
-  | B2l.FREM -> "FREM"
-  | B2l.SFLOAT -> "SFLOAT"
-  | B2l.SINT -> "SINT"
-  | B2l.FCONVERT 64 -> "FCONVERT 64"
-  | B2l.FCONVERT _ -> "FCONVERT 32"
-  | B2l.FORDER -> "FORDER"
-  | B2l.FHLT -> "FHLT"
-  | B2l.ISNAN -> "ISNAN"
+  | Bil2llvm_fp.FMUL -> "FMUL"
+  | Bil2llvm_fp.FADD -> "FADD"
+  | Bil2llvm_fp.FSUB -> "FSUB"
+  | Bil2llvm_fp.FDIV -> "FDIV"
+  | Bil2llvm_fp.FREM -> "FREM"
+  | Bil2llvm_fp.SFLOAT -> "SFLOAT"
+  | Bil2llvm_fp.SINT -> "SINT"
+  | Bil2llvm_fp.FCONVERT 64 -> "FCONVERT 64"
+  | Bil2llvm_fp.FCONVERT _ -> "FCONVERT 32"
+  | Bil2llvm_fp.FORDER -> "FORDER"
+  | Bil2llvm_fp.FHLT -> "FHLT"
+  | Bil2llvm_fp.ISNAN -> "ISNAN"
 
 (* Unary rows take one x-def, binary rows two. *)
 let fp_unary = function
-  | B2l.SFLOAT | B2l.SINT | B2l.FCONVERT _ | B2l.ISNAN | B2l.FHLT -> true
+  | Bil2llvm_fp.SFLOAT | Bil2llvm_fp.SINT | Bil2llvm_fp.FCONVERT _ | Bil2llvm_fp.ISNAN | Bil2llvm_fp.FHLT -> true
   | _ -> false
 
 (* One table row: the intrinsic maps to its constructor AND its native op is
    emitted (a dropped row degrades to a soft-float call with no warning
    difference, so emission is checked per row, not sampled). *)
-let fp_assert (name : string) (op : B2l.native_fp) : unit =
+let fp_assert (name : string) (op : Bil2llvm_fp.native_fp) : unit =
   check_bound
     ("FP-TABLE " ^ name ^ ": native_fp_op gives " ^ string_of_natfp op)
-    (B2l.native_fp_op ("@" ^ name))
+    (Bil2llvm_fp.native_fp_op ("@" ^ name))
     (fun op' -> op' = op);
   (* Non-constant operand temps: a constant folds away in LLVM, and the
      emission check must see the REAL instruction. *)
@@ -64,78 +66,78 @@ let tests : unit Alcotest.test list =
   [
     (* FP-01..FP-29: one pin per native-FP table row, in table order. *)
     pin "FP-01" "fmul_64 maps to FMUL and emits fmul"
-      (fun () -> fp_assert "intrinsic:fmul_rne_ieee754_binary_64" B2l.FMUL);
+      (fun () -> fp_assert "intrinsic:fmul_rne_ieee754_binary_64" Bil2llvm_fp.FMUL);
     pin "FP-02" "fmul_32 maps to FMUL and emits fmul"
-      (fun () -> fp_assert "intrinsic:fmul_rne_ieee754_binary_32" B2l.FMUL);
+      (fun () -> fp_assert "intrinsic:fmul_rne_ieee754_binary_32" Bil2llvm_fp.FMUL);
     pin "FP-03" "fadd_64 maps to FADD and emits fadd"
-      (fun () -> fp_assert "intrinsic:fadd_rne_ieee754_binary_64" B2l.FADD);
+      (fun () -> fp_assert "intrinsic:fadd_rne_ieee754_binary_64" Bil2llvm_fp.FADD);
     pin "FP-04" "fadd_32 maps to FADD and emits fadd"
-      (fun () -> fp_assert "intrinsic:fadd_rne_ieee754_binary_32" B2l.FADD);
+      (fun () -> fp_assert "intrinsic:fadd_rne_ieee754_binary_32" Bil2llvm_fp.FADD);
     pin "FP-05" "fsub_64 maps to FSUB and emits fsub"
-      (fun () -> fp_assert "intrinsic:fsub_rne_ieee754_binary_64" B2l.FSUB);
+      (fun () -> fp_assert "intrinsic:fsub_rne_ieee754_binary_64" Bil2llvm_fp.FSUB);
     pin "FP-06" "fsub_32 maps to FSUB and emits fsub"
-      (fun () -> fp_assert "intrinsic:fsub_rne_ieee754_binary_32" B2l.FSUB);
+      (fun () -> fp_assert "intrinsic:fsub_rne_ieee754_binary_32" Bil2llvm_fp.FSUB);
     pin "FP-07" "fdiv_64 maps to FDIV and emits fdiv"
-      (fun () -> fp_assert "intrinsic:fdiv_rne_ieee754_binary_64" B2l.FDIV);
+      (fun () -> fp_assert "intrinsic:fdiv_rne_ieee754_binary_64" Bil2llvm_fp.FDIV);
     pin "FP-08" "fdiv_32 maps to FDIV and emits fdiv"
-      (fun () -> fp_assert "intrinsic:fdiv_rne_ieee754_binary_32" B2l.FDIV);
+      (fun () -> fp_assert "intrinsic:fdiv_rne_ieee754_binary_32" Bil2llvm_fp.FDIV);
     pin "FP-09" "frem_64 maps to FREM and emits frem"
-      (fun () -> fp_assert "intrinsic:frem_rne_ieee754_binary_64" B2l.FREM);
+      (fun () -> fp_assert "intrinsic:frem_rne_ieee754_binary_64" Bil2llvm_fp.FREM);
     pin "FP-10" "frem_32 maps to FREM and emits frem"
-      (fun () -> fp_assert "intrinsic:frem_rne_ieee754_binary_32" B2l.FREM);
+      (fun () -> fp_assert "intrinsic:frem_rne_ieee754_binary_32" Bil2llvm_fp.FREM);
     pin "FP-11" "forder_64 maps to FORDER and emits fcmp olt"
-      (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary_64" B2l.FORDER);
+      (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary_64" Bil2llvm_fp.FORDER);
     pin "FP-12" "forder_32 maps to FORDER and emits fcmp olt"
-      (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary_32" B2l.FORDER);
+      (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary_32" Bil2llvm_fp.FORDER);
     pin "FP-13" "is_nan_64 maps to ISNAN and emits fcmp uno"
-      (fun () -> fp_assert "intrinsic:is_nan_rne_ieee754_binary_64" B2l.ISNAN);
+      (fun () -> fp_assert "intrinsic:is_nan_rne_ieee754_binary_64" Bil2llvm_fp.ISNAN);
     pin "FP-14" "is_nan_32 maps to ISNAN and emits fcmp uno"
-      (fun () -> fp_assert "intrinsic:is_nan_rne_ieee754_binary_32" B2l.ISNAN);
+      (fun () -> fp_assert "intrinsic:is_nan_rne_ieee754_binary_32" Bil2llvm_fp.ISNAN);
     pin "FP-15" "is_nan (unwidth'd) maps to ISNAN and emits fcmp uno"
-      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary" B2l.ISNAN);
+      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary" Bil2llvm_fp.ISNAN);
     pin "FP-16" "is_nan_rne (unwidth'd) maps to ISNAN and emits fcmp uno"
-      (fun () -> fp_assert "intrinsic:is_nan_rne_ieee754_binary" B2l.ISNAN);
+      (fun () -> fp_assert "intrinsic:is_nan_rne_ieee754_binary" Bil2llvm_fp.ISNAN);
     pin "FP-17" "forder (unwidth'd) maps to FORDER and emits fcmp olt"
-      (fun () -> fp_assert "intrinsic:forder_ieee754_binary" B2l.FORDER);
+      (fun () -> fp_assert "intrinsic:forder_ieee754_binary" Bil2llvm_fp.FORDER);
     pin "FP-18" "forder_rne (unwidth'd) maps to FORDER and emits fcmp olt"
-      (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary" B2l.FORDER);
+      (fun () -> fp_assert "intrinsic:forder_rne_ieee754_binary" Bil2llvm_fp.FORDER);
     pin "FP-19" "cast_sfloat_64 maps to SFLOAT and emits sitofp"
-      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_64" B2l.SFLOAT);
+      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_64" Bil2llvm_fp.SFLOAT);
     pin "FP-20" "cast_sint_64 maps to SINT and emits fptosi"
-      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_64" B2l.SINT);
+      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_64" Bil2llvm_fp.SINT);
     pin "FP-21" "cast_sint_32 maps to SINT and emits fptosi"
-      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_32" B2l.SINT);
+      (fun () -> fp_assert "intrinsic:cast_sint_rne_ieee754_binary_32" Bil2llvm_fp.SINT);
     pin "FP-22" "fconvert_64 maps to FCONVERT 64 and emits fpext"
-      (fun () -> fp_assert "intrinsic:fconvert_rne_ieee754_binary_64" (B2l.FCONVERT 64));
+      (fun () -> fp_assert "intrinsic:fconvert_rne_ieee754_binary_64" (Bil2llvm_fp.FCONVERT 64));
     pin "FP-23" "fconvert_32 maps to FCONVERT 32 and emits fptrunc"
-      (fun () -> fp_assert "intrinsic:fconvert_rne_ieee754_binary_32" (B2l.FCONVERT 32));
+      (fun () -> fp_assert "intrinsic:fconvert_rne_ieee754_binary_32" (Bil2llvm_fp.FCONVERT 32));
     pin "FP-24" "fmul (unwidth'd) maps to FMUL and emits fmul"
-      (fun () -> fp_assert "intrinsic:fmul_rne_ieee754_binary" B2l.FMUL);
+      (fun () -> fp_assert "intrinsic:fmul_rne_ieee754_binary" Bil2llvm_fp.FMUL);
     pin "FP-25" "fadd (unwidth'd) maps to FADD and emits fadd"
-      (fun () -> fp_assert "intrinsic:fadd_rne_ieee754_binary" B2l.FADD);
+      (fun () -> fp_assert "intrinsic:fadd_rne_ieee754_binary" Bil2llvm_fp.FADD);
     pin "FP-26" "fsub (unwidth'd) maps to FSUB and emits fsub"
-      (fun () -> fp_assert "intrinsic:fsub_rne_ieee754_binary" B2l.FSUB);
+      (fun () -> fp_assert "intrinsic:fsub_rne_ieee754_binary" Bil2llvm_fp.FSUB);
     pin "FP-27" "fdiv (unwidth'd) maps to FDIV and emits fdiv"
-      (fun () -> fp_assert "intrinsic:fdiv_rne_ieee754_binary" B2l.FDIV);
+      (fun () -> fp_assert "intrinsic:fdiv_rne_ieee754_binary" Bil2llvm_fp.FDIV);
     pin "FP-28" "frem (unwidth'd) maps to FREM and emits frem"
-      (fun () -> fp_assert "intrinsic:frem_rne_ieee754_binary" B2l.FREM);
+      (fun () -> fp_assert "intrinsic:frem_rne_ieee754_binary" Bil2llvm_fp.FREM);
     pin "FP-29" "hlt maps to FHLT and emits unreachable"
-      (fun () -> fp_assert "intrinsic:hlt" B2l.FHLT);
+      (fun () -> fp_assert "intrinsic:hlt" Bil2llvm_fp.FHLT);
 
     (* FP-30: rows NOT in the table must not map. *)
     (* FP-36..FP-40: the table rows the "one pin per row" set had missed.  A
        dropped row degrades to a CORRECT soft-float call, so the semantic
        gate cannot see it — these five were a live hole. *)
     pin "FP-36" "forder_ieee754_binary_64 maps to FORDER and emits fcmp olt"
-      (fun () -> fp_assert "intrinsic:forder_ieee754_binary_64" B2l.FORDER);
+      (fun () -> fp_assert "intrinsic:forder_ieee754_binary_64" Bil2llvm_fp.FORDER);
     pin "FP-37" "forder_ieee754_binary_32 maps to FORDER and emits fcmp olt"
-      (fun () -> fp_assert "intrinsic:forder_ieee754_binary_32" B2l.FORDER);
+      (fun () -> fp_assert "intrinsic:forder_ieee754_binary_32" Bil2llvm_fp.FORDER);
     pin "FP-38" "is_nan_ieee754_binary_64 maps to ISNAN and emits fcmp uno"
-      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_64" B2l.ISNAN);
+      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_64" Bil2llvm_fp.ISNAN);
     pin "FP-39" "is_nan_ieee754_binary_32 maps to ISNAN and emits fcmp uno"
-      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_32" B2l.ISNAN);
+      (fun () -> fp_assert "intrinsic:is_nan_ieee754_binary_32" Bil2llvm_fp.ISNAN);
     pin "FP-40" "cast_sfloat_rne_ieee754_binary_32 maps to SFLOAT and emits sitofp"
-      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_32" B2l.SFLOAT);
+      (fun () -> fp_assert "intrinsic:cast_sfloat_rne_ieee754_binary_32" Bil2llvm_fp.SFLOAT);
 
 
 

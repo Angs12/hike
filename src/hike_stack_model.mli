@@ -1,0 +1,308 @@
+(* The section vocabulary, denotation predicates, and the shared
+   stack/var/layout contracts used by the attribution, the passes, and
+   the emitter.  The producer/emitter contract point. *)
+
+open Bap.Std
+open Bap.Std.Bil.Types
+module Abi = Hike_abi
+
+(* The sections in declaration order. *)
+type sec =
+  | Stack
+  | Args
+  | Vla
+  | Text
+  | Rodata
+  | Data
+  | Got
+  | Gotplt
+  | Datarelro
+  | Bss
+
+val equal_sec : sec -> sec -> bool
+val compare_sec : sec -> sec -> int
+val sexp_of_sec : sec -> Base.Sexp.t
+val sec_of_sexp : Base.Sexp.t -> sec
+
+(* The section's ELF name — the one spelling of the name grammar. *)
+val sec_name : sec -> string
+
+(* The def-carried classification: the occupied extent, the justified
+   unbounded form, or Dead. *)
+module Tag : sig
+  type t =
+    | Range of int64 * int64
+    | Unbounded
+    | Dead
+
+  val equal : t -> t -> bool
+  val compare : t -> t -> int
+  val sexp_of_t : t -> Base.Sexp.t
+  val t_of_sexp : Base.Sexp.t -> t
+end
+
+type sec_tag = Tag.t
+
+(* The ABSOLUTE position of the entry RSP on the segment line. *)
+val segment_base : int64
+
+(* The clamp and its bounds, shared with the call abstraction. *)
+val caller_window_bytes : int64
+val stack_max : int64
+val stack_floor : entry:int64 -> int64
+val args_ceiling : int64
+val positions_of_offsets : Cbat_vsa.WordSet.t -> (int64 * int64) option
+val unsigned_bounds : Cbat_vsa.WordSet.t -> (int64 * int64) option
+val full_bounds :
+  Cbat_vsa.WordSet.t -> flo:int64 -> cei:int64 -> int64 -> int64 -> int64 * int64
+val escape_extent :
+  entry:int64 -> Cbat_vsa.WordSet.t -> (int64 * int64) option
+val key_extent : Cbat_vsa.WordSet.t -> (Cbat_word.t * Cbat_word.t) option
+
+val singleton_pair :
+  Cbat_word.t option -> Cbat_word.t option -> int64 option
+
+val args_base : entry:int64 -> word:int -> int64
+val stack_top : entry:int64 -> word:int -> int64
+
+(* The ONE caller-window denotation. *)
+val is_window_denotation :
+  entry:int64 -> word:int -> Cbat_vsa.WordSet.t -> bool
+
+val expand_hi : cap:int64 -> int64 -> int -> int64
+val expand_hi_unsigned : int64 -> int -> int64
+val clip :
+  cmp:(int64 -> int64 -> int) ->
+  int64 -> int64 -> int64 -> int64 -> (int64 * int64) option
+
+val singleton_i64 : Cbat_vsa.WordSet.t -> int64 option
+val singleton_offset : Cbat_vsa.WordSet.Clp.t -> int64 option
+val singleton_stack_position : Cbat_vsa.WordSet.t -> int64 option
+
+(* The return-address fact and its projections. *)
+val is_return_address : Cbat_vsa.WordSet.t -> bool
+val is_return_address_tag : sec_tag -> bool
+val is_return_address_shape : abi:Abi.t -> exp -> bool
+
+(* The storage a ptr-kind value lives in. *)
+type ptr_storage =
+  | Ptr_region of int
+  | Ptr_residue
+  | Ptr_window
+  | Ptr_vla
+
+val equal_ptr_storage : ptr_storage -> ptr_storage -> bool
+
+(* One def, one memory node — structural, so the emitter's
+   constructors pattern-match it. *)
+(* One def, one memory node. *)
+type mem_node = [ `Load of exp * exp * Size.t
+                | `Store of exp * exp * exp * Size.t ]
+
+val mem_nodes : exp -> mem_node list
+val mem_node_of : exp -> mem_node option
+val mem_node_where : (var -> bool) -> exp -> mem_node option
+val mem_node_count : exp -> int
+val reads_mem : exp -> bool
+val load_mem_vars : exp -> Var.Set.t
+val addr_of_rhs : exp -> (exp * Size.t) option
+val store_data_of_rhs : exp -> exp option
+
+val word_bits : int -> int
+val is_true_cond : exp -> bool
+
+(* The signature contract. *)
+val is_intrinsic : sub term -> bool
+val is_emittable_intrinsic : sub term -> bool
+val fixed_signature : sub term -> bool
+
+(* The name families: one record per name shape, shared by the minter
+   and the recognizer. *)
+type name_family = {
+  prefix : string;
+  suffix : string;
+}
+
+val slot_family : name_family
+val call_arg_family : name_family
+val region_family : name_family
+val sec_comp_family : name_family
+val family_name : name_family -> int -> string
+val is_in_family : name_family -> var -> bool
+val id_of_family : name_family -> string -> int option
+
+val arg_slot : word:int -> int -> var
+val call_arg : word:int -> int -> var
+val is_call_arg : var -> bool
+val is_arg_slot : var -> bool
+
+val window_mem : addr_bits:int -> var
+val is_window_mem : var -> bool
+
+val hike_window_var : word:int -> var
+val is_window_var : var -> bool
+
+val region_name : int -> string
+val residue_id : int
+
+(* Slot geometry. *)
+val slot_offset : word:int -> int -> int64
+val slot_index_of_offset : word:int -> int64 -> int
+
+val region_mem : addr_bits:int -> int -> var
+
+val region_ptr_family : name_family
+val region_ptr : addr_bits:int -> int -> var
+val is_region_ptr : var -> bool
+
+val vla_ptr_family : name_family
+val vla_ptr : addr_bits:int -> Tid.t -> var
+val is_vla_ptr : var -> bool
+
+val sec_comp_ptr_family : name_family
+val sec_comp_ptr : addr_bits:int -> int -> var
+val is_sec_comp_ptr : var -> bool
+
+val is_storage_base : var -> bool
+val region_ptr_id_of : var -> int option
+
+val is_mem : var -> bool
+val is_region_mem : var -> bool
+val region_id_of_mem : var -> int option
+
+(* One emitted component. *)
+type sec_comp = {
+  comp_id : int;
+  sec_lo : int64;
+  sec_hi : int64;
+  lo_w : int;
+  hi_w : int;
+  typed_w : int;
+}
+
+(* One data section's row — the fixed-table facts the attribution and
+   the emitter both read.  [sm_image] is None for the bss region. *)
+type sec_meta = {
+  sm_type : sec;
+  sm_const : bool;
+  sm_lo : int64;
+  sm_hi : int64;
+  sm_words : int;
+  sm_image : Bytes.t option;
+  sm_copy_relocs : (int * string) list;
+}
+
+val sec_comp_name : int -> string
+val sec_comp_mem : addr_bits:int -> int -> var
+val sec_comp_id_of_mem : var -> int option
+val sec_res_name : int -> string
+val is_sec_comp_mem : var -> bool
+
+(* The tid-name sanitization. *)
+val sanitize_tid_name : string -> string
+
+val blk_reads : blk term -> Var.Set.t
+val sub_map : program term -> sub term Tid.Map.t
+val sub_reads : sub term -> Var.Set.t
+
+(* A word is string text iff a printable run crosses its start. *)
+val string_text_table : Bytes.t -> int -> bool
+
+val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
+
+(* The call facts. *)
+val machine_call : jmp term -> bool
+val call_pushes : jmp term -> bool
+val has_call_push : sub term -> bool
+
+(* The layout: every alloca of the sub, riding the sub term. *)
+module Sub_layout : sig
+  type region = {
+    r_id : int;
+    r_lo : int64;
+    r_hi : int64;
+    r_bytes : int64;
+  }
+
+  val equal_region : region -> region -> bool
+  val compare_region : region -> region -> int
+  val sexp_of_region : region -> Base.Sexp.t
+  val region_of_sexp : Base.Sexp.t -> region
+
+  type t = {
+    regions : region list;
+    window_param : bool;
+  }
+
+  val equal : t -> t -> bool
+  val compare : t -> t -> int
+  val sexp_of_t : t -> Base.Sexp.t
+  val t_of_sexp : Base.Sexp.t -> t
+
+  val pp : Format.formatter -> t -> unit
+end
+
+type layout_region = Sub_layout.region = {
+  r_id : int;
+  r_lo : int64;
+  r_hi : int64;
+  r_bytes : int64;
+}
+
+type sub_layout = Sub_layout.t = {
+  regions : Sub_layout.region list;
+  window_param : bool;
+}
+
+val layout_tag : Sub_layout.t Value.Tag.t
+
+(* The SSA pass's block stamp. *)
+module Versions : sig
+  type t = {
+    args : (var * var) list;
+    rets : (var * var) list;
+    entry : (var * var) list;
+  }
+
+  val compare : t -> t -> int
+  val sexp_of_t : t -> Base.Sexp.t
+  val t_of_sexp : Base.Sexp.t -> t
+
+  val pp : Format.formatter -> t -> unit
+end
+
+val versions_tag : Versions.t Value.Tag.t
+val ssa_tag : unit Value.Tag.t
+val is_ssa : sub term -> bool
+val set_layout : sub_layout -> sub term -> sub term
+
+(* The emission signature rides the sub's own arg terms. *)
+val set_sig : sub term -> Arg.t list -> sub term
+val is_ret : Arg.t -> bool
+val sig_args : sub term -> Arg.t list
+val sig_rets : sub term -> Arg.t list
+
+(* The lane type/kind flags on the arg terms. *)
+module Flag : sig
+  (* The boolean stamp. *)
+  type t = bool
+
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val sexp_of_t : t -> Base.Sexp.t
+
+  val pp : Format.formatter -> t -> unit
+end
+
+val arg_ptr_tag : Flag.t Value.Tag.t
+val is_ptr_arg : Arg.t -> bool
+val set_ptr_arg : Arg.t -> Arg.t
+
+val arg_ptr_kind_tag : Flag.t Value.Tag.t
+val is_arg_ptr_kind : Arg.t -> bool
+val set_arg_ptr_kind : Arg.t -> Arg.t
+
+(* The PLT-trampoline stamp. *)
+val plt_trampoline_tag : Flag.t Value.Tag.t
+val is_plt_trampoline_sub : sub term -> bool
+val set_plt_trampoline : sub term -> sub term

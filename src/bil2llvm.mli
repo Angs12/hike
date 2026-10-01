@@ -5,9 +5,11 @@
 open Bap.Std
 open Bap_core_theory
 
-(** The native FP op constructors. *)
-type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
-               | FCONVERT of int | FORDER | FHLT | ISNAN
+(** The FP lane's one home (the table, the signatures, the render). *)
+module Fp = Bil2llvm_fp
+
+(** The native FP op constructors: one definition, in the FP lane. *)
+type native_fp = Bil2llvm_fp.native_fp
 
 (** Intrinsic classification: does [name] map to a native FP op? *)
 val native_fp_op : string -> native_fp option
