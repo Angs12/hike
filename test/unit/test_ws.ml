@@ -310,7 +310,9 @@ let tests : unit Alcotest.test list =
        complement keeps its hole under widening instead of hulling it
        shut. *)
     pin "WS-39"
-      "widen_join keeps a two-piece value's hole (the interior exclusion survives widening)"
+      "widen_join keeps a two-piece value's hole when the two sides are \
+       equal, and hulls it shut when the value grows (the piece-aligned \
+       widen is not implemented)"
       (fun () ->
         let five = Cbat_word.of_int ~width:64 5 in
         let hole = Ws.diff (Ws.top 64) (Ws.singleton five) in
@@ -322,11 +324,23 @@ let tests : unit Alcotest.test list =
           && Ws.elem (Cbat_word.of_int ~width:64 6) t
         in
         check "WS-39 (stable)" (keeps_hole stable);
-        (* Growth: one side grows past the hole, the widened value
-           still excludes nothing it did not exclude. *)
-        let grown = Ws.union hole (Ws.singleton five) in
+        (* Growth: the two-piece value meets a distinct two-piece value
+           whose upper piece is shorter.  The widening HULLS the pieces
+           (hull_join has no piece-aligned arm), so the hole is LOST —
+           the interior exclusion survives a stable widen only.  This
+           pins the limitation: landing the piece-aligned widen turns
+           this assertion red. *)
+        let grown =
+          Ws.diff
+            (Ws.of_clp
+               (Clp.create ~width:64 ~step:(w64 1)
+                  ~cardn:(Cbat_word.of_int ~width:65 21) (w64 0)))
+            (Ws.singleton five)
+        in
+        check "WS-39 (growth) grown-has-hole" (not (Ws.elem five grown));
         let w = Ws.widen_join hole grown in
-        check "WS-39 (growth)" (Ws.elem five w && Ws.precedes hole w))
+        check "WS-39 (growth) hulls-the-hole" (Ws.elem five w);
+        check "WS-39 (growth) covers-grown" (Ws.precedes grown w))
   ]
 
 let () = run "ws" tests
