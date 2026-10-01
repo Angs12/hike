@@ -15,7 +15,6 @@ module Sections = Hike_sections
 type site_binding = {
   sb_slot : int;
   sb_def : def term;
-  sb_full : bool;
 }
 
 let site_bindings_of_sub_with_blocks ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
@@ -56,27 +55,12 @@ let site_bindings_of_sub_with_blocks ~(word : int) ~(abi : Hike_abi.t) ~(sp : va
                           ( Model.addr_of_rhs (Def.rhs d),
                             Model.store_data_of_rhs (Def.rhs d) )
                         with
-                        | Some (addr, size), Some _ -> (
+                        | Some (addr, _size), Some _ -> (
                             match singleton_at ~def:d ~blk addr with
                             | Some a -> (
                                 match slot_of_start a d_sp with
                                 | Some i ->
-                                    let cell_lo =
-                                      Stdlib.Int64.add d_sp
-                                        (Model.slot_offset ~word i)
-                                    in
-                                    let occ_hi =
-                                      Stdlib.Int64.add a
-                                        (Stdlib.Int64.of_int
-                                           (Size.in_bytes size - 1))
-                                    in
-                                    let full =
-                                      Stdlib.Int64.equal a cell_lo
-                                      && Stdlib.Int64.equal occ_hi
-                                           (Stdlib.Int64.add cell_lo
-                                              (Stdlib.Int64.pred w64))
-                                    in
-                                    { sb_slot = i; sb_def = d; sb_full = full }
+                                    { sb_slot = i; sb_def = d }
                                     :: Base.List.filter acc ~f:(fun b ->
                                            not (Int.equal b.sb_slot i))
                                 | None -> acc)
@@ -99,7 +83,7 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
 let region_id_of_storage (s : Sections.storage) : int =
   match s with
   | Stack_region n | Data_region n -> n
-  | Stack_residue | Arg_slot _ -> Model.residue_id
+  | Stack_residue | Arg_slot -> Model.residue_id
 
 type conv =
   | Conv_region of int                    (* the region id *)
@@ -114,8 +98,7 @@ type conv =
 let conversion_of ~(word : int) ~(entry : int64)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
     ~(projected : Sections.projection option)
-    ~(access : (exp * int * bool) option)
-    ~(demoted : int list) : conv * Sections.Tag.t option =
+    ~(access : (exp * int * bool) option) : conv * Sections.Tag.t option =
   match access with
   | None -> (Keep, None)
   | Some (addr, _, _) -> (
@@ -163,31 +146,34 @@ let conversion_of ~(word : int) ~(entry : int64)
                   | (Stack, (Stack_region _ | Stack_residue)) ->
                     (Conv_region (region_id_of_storage rs.storage), tag)
                   | (Args, Stack_residue) -> (Conv_window, tag)
-                  | Args, Arg_slot i -> (
-                      let d_in =
-                        Stdlib.Int64.to_int
-                          (Stdlib.Int64.rem
-                             (Stdlib.Int64.sub p.pt_lo (Model.args_base ~entry ~word))
-                             (Stdlib.Int64.of_int word))
+                  | Args, Arg_slot -> (
+                      (* The slot index is the ACCESS's own word cell,
+                         never the binding's: a binding may span several
+                         cells.  A portion outside a single cell is not
+                         a slot (the binding's promotability proved one,
+                         so this is the defensive identity). *)
+                      let cell pos =
+                        Model.slot_index_of_offset ~word
+                          (Stdlib.Int64.sub pos entry)
                       in
-                      if Base.List.mem demoted i ~equal:Int.equal then
-                        (Keep, tag)
-                      else (Conv_slot (i, d_in), tag))
+                      if
+                        Stdlib.Int64.compare p.pt_lo
+                          (Model.args_base ~entry ~word)
+                        >= 0
+                        && Int.equal (cell p.pt_lo) (cell p.pt_hi)
+                      then
+                        let i = cell p.pt_lo in
+                        let cell_lo =
+                          Stdlib.Int64.add entry (Model.slot_offset ~word i)
+                        in
+                        ( Conv_slot
+                            (i, Stdlib.Int64.to_int (Stdlib.Int64.sub p.pt_lo cell_lo)),
+                          tag )
+                      else (Keep, tag))
                   | _, Data_region id -> (Conv_global id, tag)
                   | _ -> (Keep, tag))
               | None -> (Keep, tag))
           | _ -> (Keep, tag))
-
-(* Replaces every Load/Store node of the expression with [dst]. *)
-let rewrite_load_node ~(dst : exp) (e : exp) : exp =
-  let v =
-    object
-      inherit Exp.mapper
-      method! map_load ~mem:_ ~addr:_ (endian : endian) (size : Size.t) : exp = dst
-      method! map_store ~mem:_ ~addr:_ ~exp:_ (endian : endian) (size : Size.t) : exp = dst
-    end
-  in
-  v#map_exp e
 
 (* ---- The one address map: every address def's value is its storage's
    base plus the storage-relative displacement. ---- *)
@@ -358,7 +344,7 @@ let geoms_of_layout (layout : Hike_stack_model.sub_layout) :
 let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
     ~(projections : Sections.projection option Tid.Map.t)
-    ~(geoms : storage_geom Core.Int.Map.t) ~(demoted : int list)
+    ~(geoms : storage_geom Core.Int.Map.t)
     ~(window_param : bool) ~(vla_tids : Tid.Set.t)
     ~(spans : Sections.data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
@@ -425,7 +411,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                         conversion_of ~word ~entry ~tree ~data ~projected:
                           (Base.Option.join
                              (Core.Map.find projections (Term.tid d)))
-                          ~access:(Sections.access_of d) ~demoted
+                          ~access:(Sections.access_of d)
                       in
                       let addr_range () =
                         match denote ~blk ~def:d addr with
@@ -667,16 +653,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                     | None -> census "rw.value.raw"; acc)
                                 | _ -> census "rw.value.raw"; acc)))))
 
-(* A read starting [d] bytes into the word cell selects bits
-   [8d, 8d+bits) — BIL's little-endian bit numbering. *)
-let slot_read ~(word : int) (i : int) (byte_offset : int) (bits : int) : exp =
-  let slot = Bil.Var (Model.arg_slot ~word i) in
-  let wbits = Model.word_bits word in
-  if byte_offset = 0 then
-    if Int.equal bits wbits then slot
-    else Bil.Cast (Bil.LOW, bits, slot)
-  else Bil.Extract (8 * byte_offset + bits - 1, 8 * byte_offset, slot)
-
 (* Every memory node of the expression re-points at [mem_var] — a
    converted def keeps no model-memory node — and takes [addr] as its
    address when the rewrite computed the storage-relative form.  The
@@ -697,9 +673,20 @@ let repoint_mapper ?(addr : exp option) (mem_var : var) =
           super#map_exp exp, rest, s )
   end
 
+(* A slot access keeps its memory node and takes [addr] as its address:
+   the load/store is real, through the caller's slot pointer. *)
+let slot_addr_mapper (addr : exp) =
+  object
+    inherit Exp.mapper as super
+    method! map_load ~mem ~addr:_ endian size =
+      Bil.Load (mem, addr, endian, size)
+    method! map_store ~mem ~addr:_ ~exp endian size =
+      Bil.Store (mem, addr, super#map_exp exp, endian, size)
+  end
+
 (* One def's rewrite: re-point to the owning storage's mem var at the
-   storage-relative address, or read the slot parameter's selected
-   bytes. *)
+   storage-relative address, or address its memory node at the caller's
+   slot. *)
 let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int)
     ?(addr : exp option) (d : def term) : def term =
   match conv with
@@ -723,29 +710,40 @@ let rewrite_def ~(word : int) ~(conv : conv) ~(bits : int)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_slot (i, byte_offset) ->
-      let read = slot_read ~word i byte_offset bits in
-      Def.map_exp d ~f:(fun e -> rewrite_load_node ~dst:read e)
+      let addr_bits = Model.word_bits word in
+      let slot = Model.arg_slot ~addr_bits i in
+      let addr =
+        base_plus slot ~rel:0L
+          (Bil.Int
+             (Cbat_word.to_word
+                (Cbat_word.of_int64 ~width:addr_bits
+                   (Stdlib.Int64.of_int byte_offset))))
+      in
+      Def.map_exp d ~f:(fun e -> (slot_addr_mapper addr)#map_exp e)
 
-(* Each site's full-cell store gains its [hike_argN] def binding the
-   storing def's own value; a partial final store binds nothing (the
-   slot is demoted to the window on both sides). *)
+(* Each call site's stored slot gains its [hike_argN] def binding the
+   caller's own slot ADDRESS: the store's address, which the rewrite
+   above already re-pointed at the caller's storage.  A partial store
+   passes its address too — the callee reads and writes the exact
+   bytes. *)
 let bind_site_args ~(word : int) (bindings : site_binding list)
     (blk : blk term) : blk term =
+  let addr_bits = Model.word_bits word in
   Base.List.fold bindings ~init:blk ~f:(fun blk b ->
-      if not b.sb_full then blk
-      else
-        (* The parameter binds the bytes the store wrote — the store's
-           data expression, never the def's lhs (a memory-typed model
-           var). *)
-        let data =
-          match Model.store_data_of_rhs (Def.rhs b.sb_def) with
-          | Some data -> data
-          | None -> Bil.Var (Def.lhs b.sb_def)
-        in
-        let arg = Def.create (Model.call_arg ~word b.sb_slot) data in
-        match Term.next def_t blk (Term.tid b.sb_def) with
-        | Some next -> Term.prepend def_t blk ~before:(Term.tid next) arg
-        | None -> Term.append def_t blk arg)
+      (* [b.sb_def] is the PRE-rewrite term; its address is read off the
+         rewritten block, whose mapper has already run. *)
+      let addr =
+        match Term.find def_t blk (Term.tid b.sb_def) with
+        | Some d -> (
+            match Model.addr_of_rhs (Def.rhs d) with
+            | Some (a, _) -> a
+            | None -> Bil.Var (Model.call_arg ~addr_bits b.sb_slot))
+        | None -> Bil.Var (Model.call_arg ~addr_bits b.sb_slot)
+      in
+      let arg = Def.create (Model.call_arg ~addr_bits b.sb_slot) addr in
+      match Term.next def_t blk (Term.tid b.sb_def) with
+      | Some next -> Term.prepend def_t blk ~before:(Term.tid next) arg
+      | None -> Term.append def_t blk arg)
 
 (* The promotion's per-sub input facts. *)
 type facts = {
@@ -800,42 +798,42 @@ let resolve_targets ~(resolved : Tid.t option Tid.Map.t)
 
 let promote_sub ~(abi : Hike_abi.t) (facts : facts)
     (sub : sub term) : sub term =
-  let word = abi.Hike_abi.word in
+  let addr_bits = Hike_stack_model.word_bits abi.Hike_abi.word in
   let with_signature sub =
     if Hike_stack_model.fixed_signature sub then sub
     else
       (* Promotion defines the sub's whole argument convention: the
-         slots in signature order replace the sub's args. *)
+         slots in signature order replace the sub's args.  A slot is the
+         caller's cell ADDRESS, so the parameter is a pointer. *)
       let slots =
         Base.List.init facts.prom_arity ~f:(fun i ->
-            Arg.create ~intent:In (Model.arg_slot ~word i)
-              (Bil.Var (Model.arg_slot ~word i)))
+            Arg.create ~intent:In (Model.arg_slot ~addr_bits i)
+              (Bil.Var (Model.arg_slot ~addr_bits i)))
       in
       Model.set_sig sub slots
   in
   resolve_targets ~resolved:facts.prom_resolved (with_signature sub)
 
 
-(* The tree's Arg_slot member defs, minus the demoted slots. *)
-let slot_defs_of ~(demoted : int list) (tree : Sections.sub_tree) :
-    int Tid.Map.t * int =
-  let bindings = Sections.Tree.to_sequence tree |> Seq.to_list in
-  let slots, arity =
-    Base.List.fold bindings ~init:(Tid.Map.empty, None)
-      ~f:(fun (m, mx) (_, rs) ->
-        match rs.storage with
-        | Arg_slot i when not (Base.List.mem demoted i ~equal:Int.equal) ->
-            Base.List.fold rs.members ~init:(m, mx) ~f:(fun (m, mx) mm ->
-                match mm.m_def with
-                | Some dtid ->
-                    ( Core.Map.set m ~key:dtid ~data:i,
-                      (match mx with
+(* The promoted slots' arity: one per word cell the tree's Arg_slot
+   members name, derived from each member's own address — the binding is
+   never the unit. *)
+let slot_arity ~(word : int) ~(entry : int64) (tree : Sections.sub_tree) : int =
+  let arity =
+    Sections.Tree.to_sequence tree
+    |> Seq.fold ~init:None ~f:(fun mx (_, rs) ->
+           match rs.storage with
+           | Arg_slot ->
+               Base.List.fold rs.members ~init:mx ~f:(fun mx mm ->
+                   match Sections.args_member_cell ~word ~entry mm with
+                   | Some i -> (
+                       match mx with
                        | Some n -> Some (Int.max n i)
-                       | None -> Some i) )
-                | None -> (m, mx))
-        | _ -> (m, mx))
+                       | None -> Some i)
+                   | None -> mx)
+           | _ -> mx)
   in
-  (slots, match arity with Some i -> i + 1 | None -> 0)
+  match arity with Some i -> i + 1 | None -> 0
 
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
@@ -847,7 +845,6 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(ctx : Sections.ctx)
     ~(sites : (site_binding list * blk term) Tid.Map.t)
     ~(resolved : Tid.t option Tid.Map.t)
-    ~(demoted : int list)
     ~(vla_tids : Tid.Set.t)
     ~(callee_exempt : bool)
     (sub : sub term) : sub term =
@@ -855,7 +852,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     Core.Map.find ctx.sub_trees (Term.tid sub)
     |> Core.Option.value ~default:Sections.Tree.empty
   in
-  let slots, arity = slot_defs_of ~demoted tree in
+  let arity = slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
   let sub = promote_sub ~abi facts sub in
@@ -883,12 +880,17 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let layout = Sections.layout_of_tree ~word ~entry ~abi ~sub tree in
   let geoms = geoms_of_layout layout in
   (* The window forms need the signature's window parameter: a
-     fixed-signature sub (@main, the intrinsics) never carries it. *)
+     fixed-signature sub (@main, the intrinsics) never carries it.  A
+     window-VALUE def forces the parameter (the layout is stamped with it
+     below), so the forms are available for it too. *)
   let window_ok =
-    layout.Hike_stack_model.window_param && not callee_exempt in
+    (layout.Hike_stack_model.window_param
+    || not (Core.Set.is_empty window_values))
+    && not callee_exempt
+  in
   let facts =
     def_facts ~word ~entry ~abi ~tree ~data:ctx.data_tree
-      ~projections:ctx.projections ~geoms ~demoted ~window_param:window_ok
+      ~projections:ctx.projections ~geoms ~window_param:window_ok
       ~vla_tids ~spans ~denote sub
   in
   (* The second pass: one general [Term.mapper] over the sub.  Every def
@@ -936,8 +938,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   in
   Hike_stack_model.set_layout layout sub
 
-(* The program driver: per-sub sites and resolution, the cross-sub
-   demotion, the rewrite. *)
+(* The program driver: per-sub sites and resolution, the rewrite. *)
 let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
     ~(spans : Sections.data_span list)
     ~(ctx : Sections.ctx)
@@ -961,44 +962,12 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
            let resolved = call_resolution ~denote ~lookup sub in
            Core.Map.set acc ~key:(Term.tid sub) ~data:(sites, resolved))
   in
-  (* A slot whose outgoing final store is partial is demoted on both
-     sides: the callee's accesses take the window, never the
-     parameter. *)
-  let demotion =
-    Term.enum sub_t prog
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc caller ->
-        let sites, resolved =
-          Core.Map.find sides (Term.tid caller)
-          |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
-        in
-        Core.Map.fold sites ~init:acc
-          ~f:(fun ~key:_ ~data:(bs, blk) acc ->
-            let callees =
-              Term.enum jmp_t blk
-              |> Seq.filter_map ~f:(fun j ->
-                     match Core.Map.find resolved (Term.tid j) with
-                     | Some (Some t) -> Some t
-                     | _ -> None)
-              |> Seq.to_list
-            in
-            Base.List.fold callees ~init:acc ~f:(fun acc callee ->
-                Base.List.fold bs ~init:acc ~f:(fun acc b ->
-                    if b.sb_full then acc
-                    else
-                      Core.Map.update acc callee ~f:(function
-                          | None -> [ b.sb_slot ]
-                          | Some ds ->
-                              if Base.List.mem ds b.sb_slot ~equal:Int.equal then ds
-                              else b.sb_slot :: ds)))))
-  in
   Term.map sub_t prog ~f:(fun sub ->
       let sites, resolved =
         Core.Map.find sides (Term.tid sub)
         |> Core.Option.value ~default:(Tid.Map.empty, Tid.Map.empty)
       in
       rewrite_sub ~word ~entry ~abi ~spans ~denote ~ctx ~sites ~resolved
-        ~demoted:(Core.Map.find demotion (Term.tid sub)
-                  |> Core.Option.value ~default:[])
         ~vla_tids:(Core.Map.key_set facts.Hike_kb.vla_extents)
         ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
         sub)

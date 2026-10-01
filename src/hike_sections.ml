@@ -151,7 +151,7 @@ type storage =
   | Stack_region of int
   | Stack_residue
   | Data_region of int
-  | Arg_slot of int
+  | Arg_slot
   [@@deriving equal, compare, sexp]
 
 type range_storage = { storage : storage; members : member list }
@@ -510,9 +510,25 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
     m_def = def; m_width = width; m_store = store;
     m_identity = not p.pt_elig }
 
-(* The identity members of an escape extent, projected into the
-   sub-local spaces; no def.  [sub_portions]'s two clip windows ARE
-   the sub-local line's geometry. *)
+(* The word cell of a promotable Args member: a def-backed, non-identity
+   access wholly inside one word cell at/above the args base.  [None] for
+   any other member — an identity claim (a TOP access) converts to its
+   own memory form and never names a slot. *)
+let args_member_cell ~(word : int) ~(entry : int64) (m : member) : int option =
+  let a_base = Model.args_base ~entry ~word in
+  let cell pos = Model.slot_index_of_offset ~word (Stdlib.Int64.sub pos entry) in
+  if
+    m.m_identity
+    || Stdlib.Int64.compare m.m_lo a_base < 0
+    || not (Int.equal (cell m.m_lo) (cell m.m_hi))
+  then None
+  else Some (cell m.m_lo)
+
+(* The identity members of an escape extent, projected into the sub-local
+   spaces; no def.  Only the frame half binds this sub's storage: the
+   Args half names the caller's outgoing arguments, which the promoted
+   slot pointers carry, so it claims nothing here.  [sub_portions]'s two
+   clip windows ARE the sub-local line's geometry. *)
 let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
     member list =
   let lo, hi = ext in
@@ -521,7 +537,8 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
       ~elig:false ~alo:lo ~ahi:hi lo hi
   in
   Base.List.map
-    (Base.List.filter parts ~f:(fun p -> not (equal_sec p.pt_sec Vla)))
+    (Base.List.filter parts ~f:(fun p ->
+         (not (equal_sec p.pt_sec Vla)) && not (equal_sec p.pt_sec Args)))
     ~f:(fun p ->
       { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
         m_def = None; m_width = 0; m_store = false; m_identity = true })
@@ -754,30 +771,22 @@ let finalize_tree ~(word : int) ~(entry : int64)
           bump "region.stack.carved";
           incr next_region_id;
           { storage = Stack_region !next_region_id; members = ms })
-    | Args -> (
-        let base = Model.args_base ~entry ~word in
-        let w64 = Stdlib.Int64.of_int word in
-        let same_cell lo hi =
-          Stdlib.Int64.compare lo base >= 0
-          && Stdlib.Int64.equal
-               (Stdlib.Int64.div (Stdlib.Int64.sub lo base) w64)
-               (Stdlib.Int64.div (Stdlib.Int64.sub hi base) w64)
-        in
+    | Args ->
+        (* Every Args binding lies at or above the entry line, so its
+           cells are caller slots.  The unit is the word cell, never the
+           binding: a binding may span several cells.  A member that is
+           not a bounded single-cell access — a TOP claim (whose address
+           may alias any of them) or a multi-cell span — keeps the whole
+           binding write-closed in the residue. *)
         if
-          (not any_identity)
-          && same_cell k.lo.p_pos k.hi.p_pos
-          && Base.List.for_all ms ~f:(fun m ->
-                 (not m.m_store) && 0 < m.m_width && m.m_width <= word)
-        then
-          let () = bump "region.args.slot" in
-          { storage =
-              Arg_slot
-                (Model.slot_index_of_offset ~word
-                   (Stdlib.Int64.sub k.lo.p_pos entry));
-            members = ms }
+          Base.List.for_all ms ~f:(fun m ->
+              Base.Option.is_some (args_member_cell ~word ~entry m))
+        then (
+          bump "region.args.slot";
+          { storage = Arg_slot; members = ms })
         else (
           bump "region.args.residue";
-          { storage = Stack_residue; members = ms }))
+          { storage = Stack_residue; members = ms })
     | sec ->
         if in_whole_span whole sec k.lo.p_pos then
       let id =
@@ -869,7 +878,7 @@ let escape_roots_of_tree ~(addr_bits : int) (tree : sub_tree) : Var.Set.t =
            let mem_var = function
              | Stack_region id -> Some (Model.region_mem ~addr_bits id)
              | Stack_residue -> Some (Model.region_mem ~addr_bits Model.residue_id)
-             | Arg_slot _ -> None
+             | Arg_slot -> None
              | Data_region _ ->
                failwith "hike-sections: a data binding in a sub tree"
            in
@@ -1003,7 +1012,7 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
           false )
       ~f:(fun ((below, carved), residue_seen) (k, rs) ->
         match rs.storage with
-        | Arg_slot _ -> ((below, carved), residue_seen)
+        | Arg_slot -> ((below, carved), residue_seen)
         | Stack_residue ->
             let below =
               Base.List.fold rs.members ~init:below ~f:(fun acc m ->

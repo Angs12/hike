@@ -545,7 +545,7 @@ let tests : unit Alcotest.test list =
 
 
 
-    pin "SEC-38" "AT1-ARGS: a store demotes its cell to Window"
+    pin "SEC-38" "AT1-ARGS: a stored cell is a slot too (the pointer convention)"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
@@ -558,10 +558,10 @@ let tests : unit Alcotest.test list =
         let ctx6 = tree_ctx [ sub6 ] in
         check "SEC-38"
           (match storage_at ctx6 sub6 S.Args (pos 8L) (pos 15L) with
-           | Some A.Stack_residue -> true
+           | Some A.Arg_slot -> true
            | _ -> false));
 
-    pin "SEC-39" "AT1-ARGS: the neighboring cell keeps its own Arg_slot"
+    pin "SEC-39" "AT1-ARGS: the neighboring cell is its own slot"
       (fun () ->
         let m, rsp, rbp = mem_rbp () in
         let def_rbp = Def.create rbp (Bil.Var rsp) in
@@ -574,7 +574,7 @@ let tests : unit Alcotest.test list =
         let ctx6 = tree_ctx [ sub6 ] in
         check "SEC-39"
           (match storage_at ctx6 sub6 S.Args (pos 16L) (pos 23L) with
-           | Some (A.Arg_slot 1) -> true
+           | Some A.Arg_slot -> true
            | _ -> false));
 
     (* Stamping: the tags land on the defs' values (present BEFORE any
@@ -885,7 +885,7 @@ let tests : unit Alcotest.test list =
                  Bil.BinOp
                    ( Bil.PLUS,
                      Bil.Var rsp,
-                     Bil.Int (Cbat_word.to_word (w64 0x10)) ),
+                     Bil.Int (Cbat_word.to_word (w64 0xC)) ),
                  Bil.Int (Cbat_word.to_word (w64 0xBB)),
                  LittleEndian,
                  `r64 ))
@@ -912,10 +912,11 @@ let tests : unit Alcotest.test list =
                  (Stdlib.Int64.sub rhi Hike.Stack_model.segment_base)
                  1L
              in
-             (* The outgoing store at RSP+0x10 is the only def-backed
-                Args member: the reserve is its 24-byte reach, never the
-                64 KiB the call escape alone would claim. *)
-             Stdlib.Int64.equal window 24L
+             (* The unaligned store at RSP+0xC is the only def-backed Args
+                member and crosses two word cells, so it is not a slot:
+                the reserve is its 20-byte reach, never the 64 KiB the
+                call escape alone would claim. *)
+             Stdlib.Int64.equal window 20L
            | None -> false));
 
     pin "SEC-66"

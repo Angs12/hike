@@ -131,8 +131,8 @@ val family_name : name_family -> int -> string
 val is_in_family : name_family -> var -> bool
 val id_of_family : name_family -> string -> int option
 
-val arg_slot : word:int -> int -> var
-val call_arg : word:int -> int -> var
+val arg_slot : addr_bits:int -> int -> var
+val call_arg : addr_bits:int -> int -> var
 val is_call_arg : var -> bool
 val is_arg_slot : var -> bool
 

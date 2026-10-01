@@ -286,17 +286,21 @@ let id_of_family { prefix; suffix } (name : string) : int option =
   Stdlib.int_of_string_opt
     (String.sub name plen (String.length name - plen - slen))
 
-let arg_slot ~(word : int) (i : int) : var =
+(* The promoted slot's POINTER: the caller's slot cell, addressed.  The
+   parameter IS the address, so a slot access is a real load/store
+   through the caller's own storage. *)
+let arg_slot ~(addr_bits : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (family_name slot_family i)
-    (Type.Imm (word_bits word))
+    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
 
-(* The call-argument temp of slot [i]; deterministically minted like the
-   slots. *)
-let call_arg ~(word : int) (i : int) : var =
+(* The call-argument temp of slot [i]: the ADDRESS of the caller's slot
+   cell (the store the call site made), deterministically minted like
+   the slots. *)
+let call_arg ~(addr_bits : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (family_name call_arg_family i)
-    (Type.Imm (word_bits word))
+    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
 
 (* The call-argument temps survive DCE: they are the call's arguments. *)
 let is_call_arg (v : var) : bool = is_in_family call_arg_family v

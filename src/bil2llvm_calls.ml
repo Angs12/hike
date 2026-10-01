@@ -19,7 +19,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
      derive from the index, so the binding is order-independent. *)
   let arg_value_of_slot i =
     get_local scope blk_tid
-      (Hike_stack_model.call_arg ~word:ctx.abi.Abi.word i)
+      (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
   in
   Base.List.map args ~f:(fun arg ->
       (* Every lane read resolves through the block's version stamp —
@@ -53,17 +53,11 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
                ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg))
                |> Base.Option.map ~f:fst)
         in
+        (* The slot parameter is the caller's slot ADDRESS: the call
+           site's [hike_arg i] def holds it, and it passes as the
+           pointer it is. *)
         (match arg_value_of_slot i with
-         | Some v ->
-           let v =
-             match Llvm.classify_type (Llvm.type_of v) with
-             | Llvm.TypeKind.Integer ->
-                 coerce_int_width ctx.llvm_ctx llvm_builder
-                   ~bits:(Llvm.integer_bitwidth (Llvm.type_of v)) v
-                   (Llvm.integer_bitwidth (var_lltype ctx (Arg.lhs arg)))
-             | _ -> v
-           in
-           v
+         | Some v -> Bil2llvm_ptr.as_pointer ctx llvm_builder v
          | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if extern && is_fp_param ctx (Arg.lhs arg) then
         (* Lowers YMM args to doubles for externs. *)
@@ -267,7 +261,7 @@ let bind_call_rets ctx scope blk_tid llvm_builder fn_typ fn args rets =
   enumerated by index, stopping at the first absent slot.  An extern
   consumes stack slots after the register args, so the window stores
   are its trailing varargs. *)
-let extern_stack_args ctx scope blk_tid (blk : blk term) =
+let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
   let word = ctx.abi.Abi.word in
   (* The block's defined lhs vars, one pass; the slot walk conses and
      one rev restores slot order. *)
@@ -277,10 +271,20 @@ let extern_stack_args ctx scope blk_tid (blk : blk term) =
         Core.Set.add acc (Def.lhs d))
   in
   let rec slots i acc =
-    let v = Hike_stack_model.call_arg ~word i in
+    let v = Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i in
     if Core.Set.mem defined_vars v then
       match get_local scope blk_tid v with
-      | Some value -> slots (i + 1) (value :: acc)
+      | Some value ->
+          (* The call-arg def is the caller's slot ADDRESS; the vararg
+             is the value stored there. *)
+          let loaded =
+            Llvm.build_load
+              (Llvm.integer_type ctx.llvm_ctx
+                 (Hike_stack_model.word_bits word))
+              (Bil2llvm_ptr.as_pointer ctx llvm_builder value)
+              "" llvm_builder
+          in
+          slots (i + 1) (loaded :: acc)
       | None -> acc
     else List.rev acc
   in
@@ -325,7 +329,7 @@ let create_func_call ?(emit_unreachable = true) ctx scope llvm_builder blk_tid b
   let args = create_call_args ctx scope blk_tid llvm_builder target in
   let args =
     if is_extern ctx target then
-      args @ extern_stack_args ctx scope blk_tid blk
+      args @ extern_stack_args ctx scope llvm_builder blk_tid blk
     else args
   in
   let rets = get_rets ctx target in
@@ -422,13 +426,10 @@ let create_thunk ctx (sub_tid : tid) =
               Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
                 (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i) false
             in
-            let ptr =
-              Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
-                builder
-            in
-            Llvm.build_load
-              (Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word))
-                ptr "" builder)
+            (* The slot lane is the caller's cell address: the twin
+               forwards the window GEP'd at the slot. *)
+            Llvm.build_gep (Llvm.i8_type llvm_ctx) window [| off |] ""
+              builder)
       in
       (* Forwards [sub]'s register lanes by name from the twin's
          params, then the unpacked slots; a lane the twin's

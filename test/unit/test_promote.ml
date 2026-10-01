@@ -393,6 +393,32 @@ let rw_sec () : sub term =
   in
   Term.first sub_t prog |> Base.Option.value_exn
 
+(* The A7 fixture: a callee whose above-entry reads span several word
+   cells (slots 0 and 2, so the arity is 3 and the gap is real). *)
+let pr_slot_callee () : sub term * def term * def term =
+  let m = memv "pr_slot_m" in
+  let rbp = v64 "RBP" in
+  let d_rbp = Def.create rbp (Bil.Var sp) in
+  let ld0 =
+    Def.create (v64 "pr_slot_l0")
+      (Bil.Load (Bil.Var m, plus_addr rbp 8L, LittleEndian, `r64))
+  in
+  let ld2 =
+    Def.create (v64 "pr_slot_l2")
+      (Bil.Load (Bil.Var m, plus_addr rbp 24L, LittleEndian, `r64))
+  in
+  (straight_sub "pr_slot_callee" [ d_rbp; ld0; ld2 ], ld0, ld2)
+
+(* The slot a promoted access addresses, by the slot var's name. *)
+let slot_of_addr (d : def term) : string option =
+  match Def.rhs d with
+  | Bil.Load (_, a, _, _) -> (
+      match a with
+      | Bil.Var v -> Some (Var.name v)
+      | Bil.BinOp (Bil.PLUS, Bil.Var v, _) -> Some (Var.name v)
+      | _ -> None)
+  | _ -> None
+
 let tests : unit Alcotest.test list =
   [
     (* PR-01: the promoted signature carries the register lanes then the
@@ -510,22 +536,23 @@ let tests : unit Alcotest.test list =
         in
         check "PR-16" (Core.Set.mem a2_retaddr (Term.tid a2_ld)));
 
-    (* PR-17: the written slot demotes to Window (write-closed). *)
-    pin "PR-17" "the written cell is Window (write-closed; its reads take the window)"
+    (* PR-17: a written cell promotes too — the pointer convention carries
+       the store (no value to reconstruct, no demotion). *)
+    pin "PR-17" "a written slot promotes (the pointer convention carries the store)"
       (fun () ->
         let a4 = pr_a4_sub () in
         check "PR-17"
-          (pr_a4_storage a4 Sm.Args (pos 8L) (pos 15L) = Some Hike.Sections.Stack_residue));
+          (pr_a4_storage a4 Sm.Args (pos 8L) (pos 15L) = Some Hike.Sections.Arg_slot));
 
-    (* PR-18: the demotion is EXACT — an 8-byte store at [RSP+8] touches slot
-       0's cell only; slot 1 stays Arg_slot. *)
+    (* PR-18: the slot index is the ACCESS's own cell — the neighbouring
+       cell is its own slot, never the binding's low end. *)
     pin "PR-18"
-      "the demotion is EXACT — an 8-byte store at [RSP+8] leaves slot 1 Arg_slot"
+      "the neighbouring cell is its own slot (the binding is never the unit)"
       (fun () ->
         let a4 = pr_a4_sub () in
         check "PR-18"
           (pr_a4_storage a4 Sm.Args (pos 16L) (pos 23L)
-          = Some (Hike.Sections.Arg_slot 1)));
+          = Some Hike.Sections.Arg_slot));
 
     (* PR-19: the site's outgoing stores map to SysV slots, last store wins. *)
     pin "PR-19" "the site's outgoing stores map to SysV slots, last store wins"
@@ -555,9 +582,10 @@ let tests : unit Alcotest.test list =
            in
            Core.Map.find resolved (Term.tid j) = Some None));
 
-    (* PR-21: the window class keeps every slot unbound (arity 0) — the
-       window lane serves. *)
-    pin "PR-21" "the window class keeps every slot unbound (arity 0) — the window lane serves"
+    (* PR-21: a pure window-value sub binds no Args cell: the window value
+       carries the caller's pointer, so no slot and no residue is
+       claimed. *)
+    pin "PR-21" "a pure window-value sub binds no Args cell (the value carries it)"
       (fun () ->
         let prologue, al, ptr, filler, store, gp_args = prwc_mk_defs () in
         let mid, _ =
@@ -572,39 +600,30 @@ let tests : unit Alcotest.test list =
            match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid mid) with
            | None -> false
            | Some tree ->
-               let bs = Hike.Sections.Tree.to_sequence tree |> Seq.to_list in
-               Base.List.for_all bs ~f:(fun (_, rs) ->
-                   match rs.Hike.Sections.storage with
-                   | Hike.Sections.Arg_slot _ -> false
-                   | _ -> true)
-               && Base.List.exists bs ~f:(fun (k, rs) ->
-                      (match k.Hike.Sections.lo.Hike.Sections.p_sec with
-                       | Sm.Args -> true
-                       | _ -> false)
-                      && (match rs.Hike.Sections.storage with
-                          | Hike.Sections.Stack_residue -> true
-                          | _ -> false))));
+               not
+                 (Base.List.exists
+                    (Hike.Sections.Tree.to_sequence tree |> Seq.to_list)
+                    ~f:(fun (k, _) ->
+                      match k.Hike.Sections.lo.Hike.Sections.p_sec with
+                      | Sm.Args -> true
+                      | _ -> false))));
 
-    (* PR-22: the boundary-visible twin — the pointer is produced in a
-       previous block, so the store's data is SP-derived at the storing
-       block's entry; the anchor's pointer cell is Window-served. *)
-    pin "PR-22" "the anchor's pointer cell is Window-served in the tree" (fun () ->
+    (* PR-22: the boundary-visible twin — the window value is produced in
+       a previous block and is stamped (the emitter re-bases it to the
+       window parameter at its use). *)
+    pin "PR-22" "the twin's window-value def is stamped (the window lane serves it)"
+      (fun () ->
         let prologue, al, ptr, _filler, store, _gp_args = prwc_mk_defs () in
         let twin, _ =
           sub_of "prwc_va_twin"
             [ [ prologue; al; ptr ], [ (1, mk_goto) ];
               [ store ], [ (0, mk_ret) ] ]
         in
+        let twin' = rewrite_one twin in
         check "PR-22"
-          (let ctx = fixture_ctx [ twin ] in
-           match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid twin) with
-           | None -> false
-           | Some tree ->
-               Base.List.exists (Hike.Sections.Tree.to_sequence tree |> Seq.to_list)
-                 ~f:(fun (_, rs) ->
-                     match rs.Hike.Sections.storage with
-                     | Hike.Sections.Stack_residue -> true
-                     | _ -> false)));
+          (match t10_find_def twin' (Term.tid ptr) with
+           | Some d -> Ds.def_is_window_value d
+           | None -> false));
 
     (* PR-23: a region address def's value is its storage's base plus the
        folded displacement (zero here — the base itself). *)
@@ -760,7 +779,122 @@ let tests : unit Alcotest.test list =
            | Some (Bil.Var pv) -> Cu.is_sec_comp_ptr pv
            | Some (Bil.BinOp (Bil.PLUS, Bil.Var pv, _)) ->
                Cu.is_sec_comp_ptr pv
-           | _ -> false))
+           | _ -> false));
+
+    (* PR-31: the per-word-cell split — each access is its own cell's slot,
+       never the binding's low end (the design's single-index form would
+       give both accesses slot 0). *)
+    pin "PR-31"
+      "the per-word-cell split: a two-cell Args binding promotes each cell to its own slot"
+      (fun () ->
+        let sub, ld0, ld2 = pr_slot_callee () in
+        let sub' = rewrite_one sub in
+        check "PR-31"
+          (match (t10_find_def sub' (Term.tid ld0), t10_find_def sub' (Term.tid ld2)) with
+           | Some d0, Some d2 ->
+               slot_of_addr d0 = Some "hike_slot0"
+               && slot_of_addr d2 = Some "hike_slot2"
+           | _ -> false));
+
+    (* PR-32: the pointer convention — a promoted access is a REAL
+       load/store whose address is the slot pointer (the memory node is
+       kept, no value reconstruction). *)
+    pin "PR-32" "a promoted access keeps its memory node, addressed at the slot pointer"
+      (fun () ->
+        let sub, ld0, _ = pr_slot_callee () in
+        let sub' = rewrite_one sub in
+        check "PR-32"
+          (match t10_find_def sub' (Term.tid ld0) with
+           | Some d -> (
+               match Def.rhs d with
+               | Bil.Load (_, Bil.Var v, LittleEndian, `r64) -> Cu.is_arg_slot v
+               | _ -> false)
+           | None -> false));
+
+    (* PR-33: the promoted slot parameter is Mem-typed (a pointer), so the
+       signature and the body agree on the address. *)
+    pin "PR-33" "the promoted slot parameter is a pointer (Mem-typed)" (fun () ->
+        let sub, _, _ = pr_slot_callee () in
+        let sub' = rewrite_one sub in
+        let slots =
+          Term.enum arg_t sub' |> Base.Sequence.to_list
+          |> Base.List.filter ~f:(fun a -> Cu.is_arg_slot (Arg.lhs a))
+        in
+        check "PR-33"
+          (Base.List.length slots = 3
+          && Base.List.for_all slots ~f:(fun a -> Cu.is_mem (Arg.lhs a))
+          && Base.List.exists slots ~f:(fun a ->
+                 String.equal (Var.name (Arg.lhs a)) "hike_slot2")));
+
+    (* PR-34: the caller binds the slot ADDRESS — the store's own address,
+       already re-pointed at the caller's storage — never the stored
+       value. *)
+    pin "PR-34" "the caller binds the slot address (the store's own address)"
+      (fun () ->
+        let m = memv "pr_sc_m" in
+        let rsp = v64 "RSP" in
+        let frame =
+          Def.create rsp
+            (Bil.BinOp
+               ( Bil.MINUS,
+                 Bil.Var rsp,
+                 Bil.Int (Cbat_word.to_word (w64 24)) ))
+        in
+        let st0 =
+          Def.create m
+            (Bil.Store
+               ( Bil.Var m,
+                 plus_addr rsp 8L,
+                 Bil.Int (Cbat_word.to_word (w64 0x2A)),
+                 LittleEndian,
+                 `r64 ))
+        in
+        let sub, _ =
+          sub_of "pr_slot_caller"
+            [ [ frame; st0 ],
+              [ (1,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Direct t)
+                           ~target:(Indirect (Bil.Var (v64 "pr_sc_tptr")))
+                           ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let sub' = rewrite_one sub in
+        let arg0 =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 String.equal (Var.name (Var.base (Def.lhs d))) "hike_arg0")
+        in
+        check "PR-34"
+          (match arg0 with
+           | Some d -> (
+               match Def.rhs d with
+               (* The bound value is an ADDRESS, never the stored 0x2A. *)
+               | Bil.Int _ -> false
+               | rhs -> not (Core.Set.is_empty (Exp.free_vars rhs)))
+           | None -> false));
+
+    (* PR-35: the emitted slot parameter is an LLVM pointer and the
+       access loads through it — the address IS the parameter. *)
+    pin "PR-35"
+      "the emitted slot parameter is an LLVM pointer and the access loads through it"
+      (fun () ->
+        let sub, _, _ = pr_slot_callee () in
+        let sub' = rewrite_one sub in
+        let ir = emit_ir [ sub' ] in
+        check_ir "PR-35" "ptr %hike_slot0" ir);
+
+    (* PR-36: the twin forwards the window GEP'd at the slot — a pointer,
+       never a loaded value. *)
+    pin "PR-36" "the twin forwards the window slot pointer (no load)"
+      (fun () ->
+        let _, ir, _ = t4_fixture () in
+        check_ir "PR-36"
+          ("getelementptr i8, ptr %hike_window, i64 "
+          ^ Int64.to_string (Cu.slot_offset ~word:8 0))
+          ir)
   ]
 
 let () = run "promote" tests

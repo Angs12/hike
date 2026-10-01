@@ -295,7 +295,7 @@ let tests : unit Alcotest.test list =
 
 
     pin "MOD-17"
-      "PR-C3: an Args read in a stored cell converts with the store to the incoming-window memory (write-closed)"
+      "PR-C3: an Args access converts to the caller's slot pointer (the access's own cell)"
       (fun () ->
         let d_rbp = Def.create pr_c_rbp (Bil.Var sp) in
         let c3_rd = pr_c_args_ld "pr_c3_rd" 8 `r64 in
@@ -315,11 +315,11 @@ let tests : unit Alcotest.test list =
         let c3' = rewrite_one c3 in
         check_bound "MOD-17" (def_of_tid c3' (Term.tid c3_rd)) (fun d ->
             match Def.rhs d with
-            | Bil.Load (Bil.Var mem, _, _, _) -> Var.same mem (Sm.window_mem ~addr_bits:64)
+            | Bil.Load (_, Bil.Var a, _, _) -> Sm.is_arg_slot a
             | _ -> false));
 
     pin "MOD-18"
-      "PR-N3: the split RMW's hoisted read converts with the store to the incoming-window memory (write-closed)"
+      "PR-N3: the split RMW's hoisted read addresses the caller's slot pointer"
       (fun () ->
         let n3_rbp = v64 "RBP" in
         let n3_d_rbp = Def.create n3_rbp (Bil.Var sp) in
@@ -357,30 +357,30 @@ let tests : unit Alcotest.test list =
         let is_original d =
           Base.List.exists [ n3_rbp; v64 "pr_n3_rmw" ] ~f:(Var.equal (Def.lhs d))
         in
-        let all_window =
-          Base.List.for_all n3_defs ~f:(fun d ->
+        let slot_addressed =
+          Base.List.exists n3_defs ~f:(fun d ->
               let vis =
                 object
                   inherit [ bool ] Exp.visitor
 
-                  method! visit_load ~mem ~addr:_ _ _ acc =
+                  method! visit_load ~mem:_ ~addr:addr_v _ _ acc =
                     acc
-                    && (match mem with
-                       | Bil.Var v -> Var.same v (Sm.window_mem ~addr_bits:64)
+                    || (match addr_v with
+                       | Bil.Var v -> Sm.is_arg_slot v
                        | _ -> false)
 
-                  method! visit_store ~mem ~addr:_ ~exp:_ _ _ acc =
+                  method! visit_store ~mem:_ ~addr:addr_v ~exp:_ _ _ acc =
                     acc
-                    && (match mem with
-                       | Bil.Var v -> Var.same v (Sm.window_mem ~addr_bits:64)
+                    || (match addr_v with
+                       | Bil.Var v -> Sm.is_arg_slot v
                        | _ -> false)
                 end
               in
-              vis#visit_exp (Def.rhs d) true)
+              vis#visit_exp (Def.rhs d) false)
         in
         check "MOD-18"
           (Base.List.exists n3_defs ~f:(fun d -> not (is_original d))
-          && all_window));
+          && slot_addressed));
 
     pin "MOD-19"
       "PR-C4: the compiled guard is a value comparison — no memory node rides a cond"

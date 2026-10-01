@@ -49,15 +49,21 @@ type member = {
 }
 [@@deriving equal, compare, sexp]
 
+(** The word cell of a promotable Args member: a def-backed, non-identity
+    access wholly inside one word cell at/above the args base.  [None] for
+    any other member. *)
+val args_member_cell : word:int -> entry:int64 -> member -> int option
+
 (** The finalized storage of one merged range: a stack region id keys
     a per-sub alloca (the residue, id 0, is the fallback), a data
     region id a module-wide global (a whole span is one data region),
-    an Arg_slot a promoted incoming register. *)
+    an Arg_slot the caller's argument cells (the slot index is the
+    access's own word cell). *)
 type storage =
   | Stack_region of int
   | Stack_residue
   | Data_region of int
-  | Arg_slot of int
+  | Arg_slot
 [@@deriving equal, compare, sexp]
 
 (** One finalized binding: the storage decision and its members

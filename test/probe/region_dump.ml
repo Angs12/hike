@@ -44,8 +44,25 @@ let dump_sub ~(word : int) (proj : Project.t) (sub : sub term) : unit =
       Hike.Sections.layout_of_tree ~word ~entry:Hike.Stack_model.segment_base
         ~abi:(Hike.Abi.of_target (Project.target proj)) ~sub tree
     in
-    Printf.printf "LAYOUT window_param=%b regions=%s\n%!"
+    (* The promoted slot arity: one per distinct word cell an Arg_slot
+       member names (the access's own cell). *)
+    let slot_cells =
+      Hike.Sections.Tree.to_sequence tree
+      |> Seq.concat_map ~f:(fun (_, rs) ->
+             match rs.Hike.Sections.storage with
+             | Hike.Sections.Arg_slot ->
+                 Base.Sequence.of_list rs.Hike.Sections.members
+                 |> Seq.filter_map ~f:(fun mm ->
+                     Hike.Sections.args_member_cell ~word
+                       ~entry:Hike.Stack_model.segment_base mm)
+             | _ -> Seq.empty)
+      |> Seq.fold ~init:Core.Int.Set.empty ~f:(fun s i -> Core.Set.add s i)
+    in
+    Printf.printf "LAYOUT args_residue=%b slots=%d regions=%s\n%!"
       layout.Hike.Stack_model.Sub_layout.window_param
+      (match Core.Set.max_elt slot_cells with
+       | Some i -> i + 1
+       | None -> 0)
       (String.concat ","
          (Base.List.map layout.Hike.Stack_model.Sub_layout.regions
             ~f:(fun (r : Hike.Stack_model.Sub_layout.region) ->
@@ -57,7 +74,15 @@ let dump_sub ~(word : int) (proj : Project.t) (sub : sub term) : unit =
           match rs.Hike.Sections.storage with
           | Hike.Sections.Stack_region n -> Printf.sprintf "region%d" n
           | Hike.Sections.Stack_residue -> "residue"
-          | Hike.Sections.Arg_slot i -> Printf.sprintf "slot%d" i
+          | Hike.Sections.Arg_slot -> (
+              match
+                Base.List.filter_map rs.Hike.Sections.members
+                  ~f:(fun mm ->
+                    Hike.Sections.args_member_cell ~word
+                      ~entry:Hike.Stack_model.segment_base mm)
+              with
+              | i :: _ -> Printf.sprintf "slot%d" i
+              | [] -> "slot")
           | Hike.Sections.Data_region n -> Printf.sprintf "data%d" n
         in
         let identity =

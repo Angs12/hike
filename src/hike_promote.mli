@@ -27,12 +27,10 @@ val promote_sub :
   abi:Hike_abi.t -> facts -> sub term -> sub term
 
 
-(** One call-site binding: the outgoing slot, the storing def, and
-    whether the final store covers the whole cell. *)
+(** One call-site binding: the outgoing slot and the storing def. *)
 type site_binding = {
   sb_slot : int;
   sb_def : def term;
-  sb_full : bool;
 }
 
 (** The per-block store-to-call-slot correspondence. *)
