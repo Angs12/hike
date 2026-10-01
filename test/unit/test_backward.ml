@@ -61,6 +61,41 @@ let s_m = Var.create ~is_virtual:false ~fresh:false "s_m" (Type.Mem (`r32, `r8))
 
 let s_w32_of_env env v = AI.find_word 32 env (Var.base v)
 
+(* T07 / A4: the four-way soundness table.  {syntactic, range} x
+   {cast UNSIGNED, extract-hull}.  A 32-bit counter cell at RBP-8 is
+   seeded 0 and incremented by 1; the guard admits [0, c-1], so the
+   value c is reachable at the head and the guard must still be able to
+   be false there.  "syntactic" places the cast/extract in the compared
+   var's def; "range" places it in the guard operand itself. *)
+let a4_t = Var.create ~is_virtual:false ~fresh:false "a4_t" (Type.Imm 32)
+let a4_v (w : int) = Var.create ~is_virtual:false ~fresh:false "a4_v" (Type.Imm w)
+let a4_w16 = Cbat_word.of_int ~width:16
+
+(* One cell of the table.  Returns (guard-can-be-false,
+   head-cell-keeps-the-exit-value, body-cell-excludes-it). *)
+let a4_cell ~(op : exp) ~(v_w : int) ~(c : Cbat_word.t) ~(exit : Cbat_word.t)
+    ~(seed : Cbat_word.t) ~(body_k : Cbat_word.t) ~(inline : bool) :
+    bool * bool * bool =
+  let chain, operand =
+    if inline then (None, op) else (Some op, Bil.Var (a4_v v_w)) in
+  let cond = Bil.BinOp (Bil.LT, operand, Bil.Int (Cbat_word.to_word c)) in
+  let sub, body_tid =
+    mk_l3_chain_loop ~name:"a4" ~seed:(Some seed) ~v_w ~chain ~cond ~body_k
+  in
+  let sol = run_anchored sub in
+  let head = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
+  let head_in = Graphlib.Std.Solution.get sol (Term.tid head) in
+  let head_post = Vsa.Test_seam.denote_defs head head_in in
+  let cond_ws =
+    match Vsa.Test_seam.denote_imm_exp cond head_post with
+    | Ok ws -> ws
+    | Error _ -> failwith "a4: the guard does not denote"
+  in
+  let cell st = cell_at (memv "a4_m") (v64 "RBP") st in
+  ( Ws.elem Cbat_word.b0 cond_ws,
+    Ws.elem exit (cell head_in),
+    not (Ws.elem exit (cell (Graphlib.Std.Solution.get sol body_tid))) )
+
 let tests : unit Alcotest.test list =
   [
     (* L3a: backward guard refinement through the producer rows. *)
@@ -1269,6 +1304,166 @@ let tests : unit Alcotest.test list =
           cell_at m (v64 "RBP") (iter_state_of sub1 sol1 body1)
         in
         check "BK-86" (bounded_above cell1 (w32 99)));
+
+    (* ---------------------------------------------------------------- *)
+    (* T07 / A4: the four-way table. *)
+
+    pin "BK-87"
+      "A4 table — syntactic x cast-UNSIGNED: the compared var is defined by \
+       Cast(UNSIGNED,64,t).  The exit edge stays live, the head's cell keeps \
+       the reachable exit value 4, and the body's cell excludes it (the \
+       refinement fired)"
+      (fun () ->
+        let live, keeps, fired =
+          a4_cell ~op:(Bil.Cast (Bil.UNSIGNED, 64, Bil.Var a4_t)) ~v_w:64
+            ~c:(w64 4) ~exit:(w32 4) ~seed:(w32 0) ~body_k:(w32 1)
+            ~inline:false
+        in
+        check "BK-87.live" live;
+        check "BK-87.head-keeps" keeps;
+        check "BK-87.body-excludes" fired);
+
+    pin "BK-88"
+      "A4 table — syntactic x extract-hull: the compared var is defined by \
+       Extract(31,16,t) (the top half-word).  The exit edge stays live, the \
+       head's cell keeps the reachable exit value 0x40000, and the body's \
+       cell excludes it (the pre-image [0, 0x3FFFF] is exact here)"
+      (fun () ->
+        let live, keeps, fired =
+          a4_cell ~op:(Bil.Extract (31, 16, Bil.Var a4_t)) ~v_w:16
+            ~c:(a4_w16 4) ~exit:(w32 0x40000) ~seed:(w32 0)
+            ~body_k:(w32 0x10000) ~inline:false
+        in
+        check "BK-88.live" live;
+        check "BK-88.head-keeps" keeps;
+        check "BK-88.body-excludes" fired);
+
+    pin "BK-89"
+      "A4 table — range x cast-UNSIGNED: the guard's operand is \
+       Cast(UNSIGNED,64,t) itself.  The exit edge stays live, the head's cell \
+       keeps the reachable exit value 4, and the body's cell excludes it"
+      (fun () ->
+        let live, keeps, fired =
+          a4_cell ~op:(Bil.Cast (Bil.UNSIGNED, 64, Bil.Var a4_t)) ~v_w:64
+            ~c:(w64 4) ~exit:(w32 4) ~seed:(w32 0) ~body_k:(w32 1)
+            ~inline:true
+        in
+        check "BK-89.live" live;
+        check "BK-89.head-keeps" keeps;
+        check "BK-89.body-excludes" fired);
+
+    pin "BK-90"
+      "A4 table — range x extract-hull: the guard's operand is \
+       Extract(31,16,t) itself.  The exit edge stays live, the head's cell \
+       keeps the reachable exit value 0x40000, and the body's cell excludes \
+       it"
+      (fun () ->
+        let live, keeps, fired =
+          a4_cell ~op:(Bil.Extract (31, 16, Bil.Var a4_t)) ~v_w:16
+            ~c:(a4_w16 4) ~exit:(w32 0x40000) ~seed:(w32 0)
+            ~body_k:(w32 0x10000) ~inline:true
+        in
+        check "BK-90.live" live;
+        check "BK-90.head-keeps" keeps;
+        check "BK-90.body-excludes" fired);
+
+    (* ---------------------------------------------------------------- *)
+    (* T07 / A4 candidate 3: [evidence_constraint]'s non-negativity proof.
+       It reads the operand's CURRENT denotation and tests its UNSIGNED
+       max against the half line.  A wrapping set has a low unsigned max
+       and high (negative) elements, so the proof fires on a set that is
+       not non-negative and the SLT/SLE evidence row drops the reachable
+       negatives. *)
+
+    pin "BK-91"
+      "A4 candidate — the wrapping cur [0xFFFFFFF0, 0x10] has unsigned max \
+       0x10 < 2^31, so the SLT evidence row [0,4] drops the reachable value \
+       0xFFFFFFF0 (signed −16 <s 5)"
+      (fun () ->
+        let cur =
+          Ws.of_clp (Clp.interval ~width:32 (s_r32 0xFFFFFFF0) (s_r32 0x10))
+        in
+        let env = mk_env [ (s_t, cur) ] in
+        let env' =
+          Vsa.Test_seam.constrain_operands
+            ~landmarks:(Cbat_landmarks.create ()) ~env
+            (Bil.BinOp (Bil.SLT, Bil.Var s_t, Bil.Int (Cbat_word.to_word (s_r32 5))))
+            (Ws.singleton (Cbat_word.of_word Word.b1))
+        in
+        check "BK-91" (Ws.elem (s_r32 0xFFFFFFF0) (s_w32_of_env env' s_t)));
+
+    pin "BK-92"
+      "A4 loop — a wrapping counter (seeded 0xFFFFFFFE, +1, guard SLT(t,2)): \
+       the reachable head values are {0xFFFFFFFE, 0xFFFFFFFF, 0, 1, 2}; the \
+       body's IN cell must keep the negatives and the guard must stay able \
+       to be false at the head"
+      (fun () ->
+        let cond =
+          Bil.BinOp (Bil.SLT, Bil.Var a4_t, Bil.Int (Cbat_word.to_word (s_r32 2)))
+        in
+        let sub, body_tid =
+          mk_l3_chain_loop ~name:"a4" ~seed:(Some (s_r32 0xFFFFFFFE)) ~v_w:32
+            ~chain:None ~cond ~body_k:(w32 1)
+        in
+        let sol = run_anchored sub in
+        let head = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
+        let head_in = Graphlib.Std.Solution.get sol (Term.tid head) in
+        let head_post = Vsa.Test_seam.denote_defs head head_in in
+        let cond_ws =
+          match Vsa.Test_seam.denote_imm_exp cond head_post with
+          | Ok ws -> ws
+          | Error _ -> failwith "a4: the guard does not denote"
+        in
+        let body_cell =
+          cell_at (memv "a4_m") (v64 "RBP")
+            (Graphlib.Std.Solution.get sol body_tid)
+        in
+        check "BK-92.keeps" (Ws.elem (s_r32 0xFFFFFFFE) body_cell);
+        check "BK-92.live" (Ws.elem Cbat_word.b0 cond_ws));
+
+    pin "BK-94"
+      "the extract pre-image — Extract(15,0,x) constrained to [0,3]: the \
+       pre-image is [0, 0xFFFF0003] (the largest x whose low half is <= 3), \
+       so the rule fires and its hull is the exact reachable maximum"
+      (fun () ->
+        let x = Var.create ~is_virtual:true ~fresh:false "bk94_x" (Type.Imm 32) in
+        let env = mk_env [ (x, Ws.top 32) ] in
+        let cstr16 = Ws.of_clp (Clp.interval ~width:16 (a4_w16 0) (a4_w16 3)) in
+        let env' =
+          Vsa.Test_seam.constrain_operands
+            ~landmarks:(Cbat_landmarks.create ()) ~env
+            (Bil.Extract (15, 0, Bil.Var x)) cstr16
+        in
+        let r = AI.find_word 32 env' (Var.base x) in
+        check "BK-94.fires" (not (Ws.equal r (Ws.top 32)));
+        check "BK-94.max" (Ws.max_elem r = Some (s_r32 0xFFFF0003)));
+
+    pin "BK-93"
+      "A4 table — the BASE cell (no cast/extract anywhere): the guard compares \
+       the loaded var directly.  The exit edge stays live, the head's cell \
+       keeps the reachable exit value 4, and the body's cell excludes it"
+      (fun () ->
+        let cond =
+          Bil.BinOp (Bil.LT, Bil.Var a4_t, Bil.Int (Cbat_word.to_word (w32 4)))
+        in
+        let sub, body_tid =
+          mk_l3_chain_loop ~name:"a4" ~seed:(Some (w32 0)) ~v_w:32 ~chain:None
+            ~cond ~body_k:(w32 1)
+        in
+        let sol = run_anchored sub in
+        let head = List.nth (Term.enum blk_t sub |> Seq.to_list) 2 in
+        let head_in = Graphlib.Std.Solution.get sol (Term.tid head) in
+        let head_post = Vsa.Test_seam.denote_defs head head_in in
+        let cond_ws =
+          match Vsa.Test_seam.denote_imm_exp cond head_post with
+          | Ok ws -> ws
+          | Error _ -> failwith "a4: the guard does not denote"
+        in
+        let cell st = cell_at (memv "a4_m") (v64 "RBP") st in
+        check "BK-93.live" (Ws.elem Cbat_word.b0 cond_ws);
+        check "BK-93.head-keeps" (Ws.elem (w32 4) (cell head_in));
+        check "BK-93.body-excludes"
+          (not (Ws.elem (w32 4) (cell (Graphlib.Std.Solution.get sol body_tid)))));
   ]
 
 let () = run "backward" tests

@@ -297,24 +297,32 @@ let operand_constraints (op : Bil.binop) (cstr : wordset)
        | _ -> None, None)
     | _ -> None, None
 
-(* Bit-window pre-image: the constraint hull placed at bit position
-   [k], width [d] — the window's bits are the constraint's, the rest
-   free.  Identity on doubt. *)
-let shift_fill_constraint ~(w : int) ~(ew : int) (k : int) (d : int)
+(* Bit-window pre-image: the constraint hull [vlo, vhi] placed at bit
+   position [k], width [d], of the operand (width [w]) — the window's
+   bits are the constraint's, every bit above the window free.  The
+   endpoints lift to the operand width; a constraint whose successor
+   wraps reaches the word top.  Identity on doubt. *)
+let shift_fill_constraint ~(w : int) (k : int) (d : int)
     (vlo : Cbat_word.t) (vhi : Cbat_word.t) : wordset option =
   let sh = Cbat_word.of_int ~width:w k in
-  let lo_a = Cbat_word.lshift (Cbat_word.extract_exn ~hi:(ew - 1) vlo) sh in
-  let hi_a =
-    Cbat_word.pred
-      (Cbat_word.lshift
-         (Cbat_word.extract_exn ~hi:(ew - 1) (Cbat_word.succ vhi)) sh) in
-  let top =
-    if k + d >= w then Cbat_word.zero ew
+  let lo_a = Cbat_word.lshift (Cbat_word.extract_exn ~hi:(w - 1) vlo) sh in
+  let hi_max =
+    if Cbat_word.is_zero (Cbat_word.succ vhi) then Cbat_word.ones w
     else
-      Cbat_word.sub (Cbat_word.ones w)
-        (Cbat_word.lshift (Cbat_word.one w)
-           (Cbat_word.of_int ~width:w (k + d))) in
-  hull ~wrapping:false w lo_a (Cbat_word.add hi_a top)
+      let hi_a =
+        Cbat_word.pred
+          (Cbat_word.lshift
+             (Cbat_word.extract_exn ~hi:(w - 1) (Cbat_word.succ vhi)) sh) in
+      let top =
+        if k + d >= w then Cbat_word.zero w
+        else
+          Cbat_word.sub (Cbat_word.ones w)
+            (Cbat_word.pred
+               (Cbat_word.lshift (Cbat_word.one w)
+                  (Cbat_word.of_int ~width:w (k + d)))) in
+      Cbat_word.add hi_a top
+  in
+  hull ~wrapping:false w lo_a hi_max
 
 (* HIGH-cast pre-image: the constraint is the word's top [n] bits. *)
 let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
@@ -329,7 +337,7 @@ let high_cast_constraint (env : AI.t) (a : exp) (sz : int)
        | Some vlo, Some vhi ->
          (* An open-top constraint (the succ wraps) has no closed hull. *)
          if Cbat_word.is_zero (Cbat_word.succ vhi) then None
-         else shift_fill_constraint ~w ~ew:w (w - n) n vlo vhi
+         else shift_fill_constraint ~w (w - n) n vlo vhi
        | _ -> None)
   | Error _ -> None
 
@@ -629,8 +637,8 @@ let low_cast_constraint (env : AI.t) (a : exp) (cstr : wordset)
   | Error _ -> None
 
 (* Extract pre-image: the constraint is bits [lo, hi] of the operand;
-   the endpoints compute at the constraint width, the hull gate at the
-   operand width. *)
+   the window sits mid-word, so the endpoints compute at the operand
+   width with the free-above bits filled. *)
 let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     (cstr : wordset) : wordset option =
   match denote_imm_exp a env with
@@ -640,7 +648,7 @@ let extract_constraint (env : AI.t) (a : exp) (hi : int) (lo : int)
     if n <> hi - lo + 1 then None
     else
       (match WordSet.min_elem cstr, WordSet.max_elem cstr with
-       | Some vlo, Some vhi -> shift_fill_constraint ~w ~ew:n lo n vlo vhi
+       | Some vlo, Some vhi -> shift_fill_constraint ~w lo n vlo vhi
        | _ -> None)
   | Error _ -> None
 
