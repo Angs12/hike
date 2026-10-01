@@ -368,34 +368,6 @@ let create_indirect_call ctx scope llvm_builder blk_tid (j : jmp term) =
 let thunk_name_of (sub_tid : tid) : string =
   sanitize_name (Tid.name sub_tid) ^ "_hike_thunk"
 
-let rec is_plt_trampoline ctx (sub : sub term) : bool =
-  match Core.Map.find !(ctx.plt_trampolines) (Term.tid sub) with
-  | Some v -> v
-  | None ->
-    let verdict = is_plt_trampoline_slow ctx sub in
-    ctx.plt_trampolines := Core.Map.set !(ctx.plt_trampolines)
-        ~key:(Term.tid sub) ~data:verdict;
-    verdict
-
-and is_plt_trampoline_slow ctx (sub : sub term) : bool =
-  let free_vars =
-    if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa sub
-    else Hike_split_blocks.free_regs sub
-  in
-  let reg_vars =
-    Base.List.filter free_vars ~f:(fun reg ->
-        not (Var.same reg ctx.sp)
-        && not (Abi.is_return_reg ctx.abi reg))
-  in
-  reg_vars = []
-  && Term.enum blk_t sub
-     |> Seq.exists ~f:(fun blk ->
-            Term.enum jmp_t blk
-            |> Seq.exists ~f:(fun j ->
-                   match Jmp.kind j with
-                   | Call _ when not (Hike_return.is_jmp j) -> true
-                   | _ -> false))
-
 let thunk_tid_of (sub_tid : tid) : tid =
   Tid.for_name (Tid.name sub_tid ^ ":thunk")
 
@@ -563,24 +535,11 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
 
 (* A self-call stub targets its own address (the symtab names an
    external there); it declares but never defines, so call sites
-   resolve to the external at link time. *)
-let is_self_call_stub (ctx : emit_ctx) (sub : sub term) : bool =
-  let sub_name = sanitize_name (Tid.name (Term.tid sub)) in
-  let self_targeted =
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        Term.enum jmp_t blk
-        |> Seq.exists ~f:(fun j ->
-            match Jmp.kind j with
-            | Call c -> (
-                match Call.target c with
-                | Direct t ->
-                    Tid.equal t (Term.tid sub)
-                    || sanitize_name (Tid.name t) = sub_name
-                | Indirect _ -> false)
-            | _ -> false))
-  in
-  self_targeted && is_plt_trampoline ctx sub
+   resolve to the external at link time.  hike-sign stamped the
+   classification — self-targeted, reads no non-return, non-SP
+   register — from the liveness its signature computation ran. *)
+let is_self_call_stub (sub : sub term) : bool =
+  Hike_stack_model.is_plt_trampoline_sub sub
 
 let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in

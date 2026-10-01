@@ -683,3 +683,18 @@ let is_arg_ptr_kind (a : Arg.t) : bool =
 
 let set_arg_ptr_kind (a : Arg.t) : Arg.t =
   Term.set_attr a arg_ptr_kind_tag true
+
+(* The PLT-trampoline stamp: a self-call stub that reads no non-return,
+   non-SP register.  hike-sign computes it from the liveness its
+   signature computation already ran, and the emitter reads the stamp.
+   Absence is the identity — not a trampoline. *)
+let plt_trampoline_tag : Flag.t Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-plt-trampoline"
+    ~uuid:"8c3e6f1a-92d4-47b5-a083-5e7c1d9b4f62"
+    (module Flag)
+
+let is_plt_trampoline_sub (sub : sub term) : bool =
+  Base.Option.value (Term.get_attr sub plt_trampoline_tag) ~default:false
+
+let set_plt_trampoline (sub : sub term) : sub term =
+  Term.set_attr sub plt_trampoline_tag true

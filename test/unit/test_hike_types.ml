@@ -87,7 +87,7 @@ let tests : unit Alcotest.test list =
     pin "TYPES-10" "compute_sub_sig: an unknown target answers no returns"
       (fun () ->
         let sub = plain_sub "t14_ret" [] in
-        let rets, args = Types.compute_sub_sig unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
         check "TYPES-10" (rets = [] && args = []));
 
 
@@ -102,7 +102,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_f2") (Bil.Var (v64 "RBX"));
               Def.create (v64 "t14_f3") (Bil.Var (v64 "FS_BASE")) ]
         in
-        let _, args = Types.compute_sub_sig unknown sub in
+        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
         check "TYPES-12" (args = []));
 
     pin "TYPES-13"
@@ -115,7 +115,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_p2") (Bil.Var (v64 "hike_arg2"));
               Def.create (v64 "t14_p3") (Bil.Var (v64 "intrinsic:foo")) ]
         in
-        let _, args = Types.compute_sub_sig unknown sub in
+        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
         check "TYPES-13" (args = []));
 
 
@@ -130,7 +130,7 @@ let tests : unit Alcotest.test list =
           { regions = []; window_param = true }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
-        let rets, args = Types.compute_sub_sig unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
         check "TYPES-16"
           (rets = []
           && match args with
@@ -151,7 +151,7 @@ let tests : unit Alcotest.test list =
             (straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
             Sub.intrinsic ()
         in
-        let rets, args = Types.compute_sub_sig unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
         check "TYPES-17"
           (arg_names args = [ "RDI" ]
           && for_all_in args
@@ -163,7 +163,7 @@ let tests : unit Alcotest.test list =
       "compute_sub_sig: an FP-returning sub appends the YMM0 [Out] lane"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
-        let rets, _ = Types.compute_sub_sig (x86 ()) (epilogue_sub ymm0) in
+        let rets, _ = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in
         check "TYPES-18" (arg_names rets = [ "RAX"; "RDX"; "YMM0" ]));
 
 
@@ -259,6 +259,45 @@ let tests : unit Alcotest.test list =
           (match Core.Map.find pks (Term.tid callee) with
            | Some s -> Core.Set.mem s rdi
            | None -> false));
+
+    (* The PLT-trampoline stamp: hike-sign computes it from the same
+       liveness run as the signature; the emitter reads the stamp. *)
+    pin "TYPES-24" "sign stamps the self-call stub that reads no register"
+      (fun () ->
+        let self_tid = Tid.for_name "trampoline_self" in
+        let sub, _ =
+          sub_of ~tid:self_tid "trampoline_self"
+            [ ([],
+               [ (1,
+                  fun t ->
+                    Jmp.create
+                      (Call
+                         (Call.create ~return:(Direct t)
+                            ~target:(Direct self_tid) ()))) ]);
+              ([], [ (0, mk_ret) ]) ]
+        in
+        let prog = Types.sign_program ~target:unknown (Program.create ~subs:[ sub ] ()) in
+        let stamped = Term.enum sub_t prog |> Seq.hd_exn in
+        (* the same self-call shape reading RBX first: not a trampoline *)
+        let reader_tid = Tid.for_name "trampoline_reader" in
+        let rbx = v64 "trampoline_rbx" in
+        let rd = v64 "trampoline_rd" in
+        let reader, _ =
+          sub_of ~tid:reader_tid "trampoline_reader"
+            [ [ Def.create rd (Bil.Var rbx) ],
+              [ (1,
+                 fun t ->
+                   Jmp.create
+                     (Call
+                        (Call.create ~return:(Direct t)
+                           ~target:(Direct reader_tid) ()))) ];
+              ([], [ (0, mk_ret) ]) ]
+        in
+        let prog2 = Types.sign_program ~target:unknown (Program.create ~subs:[ reader ] ()) in
+        let stamped2 = Term.enum sub_t prog2 |> Seq.hd_exn in
+        check "TYPES-24"
+          (Model.is_plt_trampoline_sub stamped
+          && not (Model.is_plt_trampoline_sub stamped2)));
   ]
 
 let () = run "hike_types" tests

@@ -63,13 +63,16 @@ let tag_lane (a : Arg.t) : Arg.t =
   then Model.set_ptr_arg a
   else a
 
-let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
+(* The sub's entry reads: SSA index-0 reads, or pre-SSA liveness over
+   the BIR's explicit edges. *)
+let free_regs_of_sub (sub : sub term) : var list =
+  if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa sub
+  else Hike_split_blocks.free_regs sub
+
+let compute_sub_sig ~(free_vars : var list)
+    (target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : Arg.t list * Arg.t list =
   let abi = Abi.of_target target in
-  let free_vars =
-    if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa sub
-    else Hike_split_blocks.free_regs sub
-  in
   let rets =
     (if Abi.is_primary_target target then abi.return_regs else [])
     |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
@@ -203,11 +206,53 @@ let compute_sub_sig (target : Bap_core_theory.Theory.Target.t)
 
 (* The program-level entry: the pipeline's pass, and any direct emitter
    caller (the fixtures), run exactly this. *)
+(* The sign pass's one per-sub entry: the lane list, plus the
+   PLT-trampoline stamp — a self-call stub that reads no non-return,
+   non-SP register — from the same liveness run the signature used.
+   The emitter reads the stamp. *)
+let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
+    (sub : sub term) : sub term =
+  let abi = Abi.of_target target in
+  let free_vars = free_regs_of_sub sub in
+  let self_targeted =
+    Term.enum blk_t sub
+    |> Seq.exists ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun j ->
+            match Jmp.kind j with
+            | Call c -> (
+                match Call.target c with
+                | Direct t ->
+                    Tid.equal t (Term.tid sub)
+                    || Model.sanitize_tid_name (Tid.name t)
+                       = Model.sanitize_tid_name (Tid.name (Term.tid sub))
+                | Indirect _ -> false)
+            | _ -> false))
+  in
+  let has_call =
+    Term.enum blk_t sub
+    |> Seq.exists ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun j ->
+            match Jmp.kind j with
+            | Call _ -> not (Hike_return.is_jmp j)
+            | _ -> false))
+  in
+  let reads_only_return =
+    Base.List.for_all free_vars ~f:(fun reg ->
+        Abi.is_sp abi (Var.base reg) || Abi.is_return_reg abi reg)
+  in
+  let sub =
+    if self_targeted && has_call && reads_only_return then
+      Model.set_plt_trampoline sub
+    else sub
+  in
+  let rets, args = compute_sub_sig ~free_vars target sub in
+  Model.set_sig sub (rets @ args)
+
 let sign_program ~(target : Bap_core_theory.Theory.Target.t)
     (prog : program term) : program term =
-  Term.map sub_t prog ~f:(fun sub ->
-      let rets, args = compute_sub_sig target sub in
-      Model.set_sig sub (rets @ args))
+  Term.map sub_t prog ~f:(sign_sub ~target)
 
 (* ---- The value kind (ptr vs int) ----
    A value is a pointer when any part of its denotation is a bounded

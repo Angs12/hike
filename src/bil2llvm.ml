@@ -352,7 +352,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       sec_comps = ref Var.Map.empty;
       tls_anchor = ref None;
       trap_fn = ref None;
-      plt_trampolines = ref Tid.Map.empty;
       i64_ty = Llvm.i64_type llvm_ctx;
       ptr_ty = Llvm.pointer_type llvm_ctx;
       word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits abi.Abi.word);
@@ -378,7 +377,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
      body — its declaration carries the name for every call site. *)
   let self_call_stubs =
     Term.enum sub_t prog
-    |> Base.Sequence.filter ~f:(Bil2llvm_calls.is_self_call_stub ctx)
+    |> Base.Sequence.filter ~f:Bil2llvm_calls.is_self_call_stub
     |> Base.Sequence.map ~f:Term.tid
     |> Base.Sequence.to_list
     |> Core.Set.of_list (module Tid)

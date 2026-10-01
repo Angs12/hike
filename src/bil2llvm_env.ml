@@ -168,8 +168,6 @@ type emit_ctx = {
   (* The TLS anchor global and the llvm.trap function, declared once. *)
   tls_anchor : Llvm.llvalue option ref;
   trap_fn : Llvm.llvalue option ref;
-  (* PLT-trampoline verdicts, per sub: the O(sub) walk runs once. *)
-  plt_trampolines : bool Tid.Map.t ref;
   (* The hot LLVM types, bound once per emission. *)
   i64_ty : Llvm.lltype;
   ptr_ty : Llvm.lltype;
