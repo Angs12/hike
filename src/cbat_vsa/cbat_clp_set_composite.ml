@@ -274,6 +274,21 @@ and canonical (ps : t list) : t =
         | [] -> None
         | x :: rest -> Some (List.fold rest ~init:x ~f:FinSet.union)
     in
+    (* Contained pieces drop: a FinSet leaf covered by the Clp leaf adds
+       no element, and a Clp leaf covered by the FinSet is that FinSet.
+       Both would double-count the overlap in [cardinality]. *)
+    let clp_piece, fs_piece =
+      match clp_piece, fs_piece with
+      | Some cps, Some fss
+        when List.for_all (FinSet.iter fss) ~f:(fun w -> P.elem w cps) ->
+        (Some cps, None)
+      | Some cps, Some fss
+        when (not (P.is_top cps))
+             && not (Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size)
+             && List.for_all (P.elements cps) ~f:(fun w -> FinSet.elem w fss)
+        -> (None, Some fss)
+      | c, f -> c, f
+    in
     let clp_piece, fs_piece =
       match clp_piece, fs_piece with
       | Some cps, None
@@ -383,6 +398,52 @@ let pairwise (f : t -> t -> t list) (t1 : t) (t2 : t) : t =
   canonical
     (List.concat_map (leaves t1) ~f:(fun q1 ->
          List.concat_map (leaves t2) ~f:(fun q2 -> f q1 q2)))
+
+(* ---------------- the kind-aligned leaf pairing ---------------- *)
+
+(* The leaf of each kind: a canonical value carries at most one (the
+   [canonical] fold collapses same-kind leaves), so the first match is
+   the only one. *)
+let clp_leaf (t : t) : P.t option =
+  match t with
+  | Clp ps -> Some ps
+  | Many ps -> List.find_map ps ~f:(function Clp x -> Some x | _ -> None)
+  | FinSet _ | Rel _ -> None
+
+let fs_leaf (t : t) : fset option =
+  match t with
+  | FinSet s -> Some s
+  | Many ps -> List.find_map ps ~f:(function FinSet x -> Some x | _ -> None)
+  | Clp _ | Rel _ -> None
+
+let rel_leaf (t : t) : (Origin.t * P.t) option =
+  match t with
+  | Rel (o, x) -> Some (o, x)
+  | Many ps ->
+    List.find_map ps ~f:(function Rel (o, x) -> Some (o, x) | _ -> None)
+  | Clp _ | FinSet _ -> None
+
+(* The join pairing: every kind carried by EITHER side contributes — a
+   shared kind takes its own join, a one-sided kind is carried (the join
+   includes it).  Exact for the lattice join, which is why the join may
+   carry where a widening may not. *)
+let pair_join ~(clp_op : P.t -> P.t -> P.t) ~(fs_op : fset -> fset -> fset)
+    ~(rel_op : Origin.t -> P.t -> Origin.t -> P.t -> t) (t1 : t) (t2 : t) : t =
+  let parts =
+    (match clp_leaf t1, clp_leaf t2 with
+     | Some a, Some b -> [ Clp (clp_op a b) ]
+     | Some a, None | None, Some a -> [ Clp a ]
+     | None, None -> [])
+    @ (match fs_leaf t1, fs_leaf t2 with
+       | Some a, Some b -> [ FinSet (fs_op a b) ]
+       | Some a, None | None, Some a -> [ FinSet a ]
+       | None, None -> [])
+    @ (match rel_leaf t1, rel_leaf t2 with
+       | Some (o1, a), Some (o2, b) -> [ rel_op o1 a o2 b ]
+       | Some (o, a), None | None, Some (o, a) -> [ Rel (o, a) ]
+       | None, None -> [])
+  in
+  canonical parts
 
 (* The plain-arm band: signed-positive [2^61, 2^63); no real x86-64
    address can be there, so re-tagging a bounded set inside it stack is
@@ -1310,9 +1371,15 @@ let round_down_image_for (o : Origin.t) (s : int) (offs : P.t) : P.t option =
       Some (union_all imgs)
     else None
 
-(* The plain meet: plain leaves meet pairwise; results merge. *)
+(* The plain meet: every leaf pair contributes its exact intersection (a
+   relative leaf materialises — the meet is an over-approximation, the
+   hull is sound), and the results merge.  The cross product is the
+   exact meet: a kind carried by one side only must still meet the other
+   side's leaves. *)
 let meet_plain (t1 : t) (t2 : t) : t =
   let pair q1 q2 =
+    let q1 = match q1 with Rel _ -> to_plain q1 | q -> q in
+    let q2 = match q2 with Rel _ -> to_plain q2 | q -> q in
     match q1, q2 with
     | FinSet s1, FinSet s2 -> [ FinSet (FinSet.intersection s1 s2) ]
     | FinSet s, Clp ps | Clp ps, FinSet s ->
@@ -1325,10 +1392,27 @@ let meet_plain (t1 : t) (t2 : t) : t =
   in
   pairwise pair t1 t2
 
-(* The plain-plain payload: meet meets pairwise; every other op lifts
-   through the common plain machinery. *)
+(* The plain join: every leaf pair contributes — two Clp leaves the exact
+   piece union, two FinSet leaves the exact union, a one-sided kind its
+   own leaf — so the join never hulls. *)
+let join_plain (t1 : t) (t2 : t) : t =
+  let rel_op o1 a o2 b =
+    if Origin.equal o1 o2 then Rel (o1, P.union a b)
+    else
+      Clp
+        (P.union
+           (P.of_progression (as_clp (Rel (o1, a))))
+           (P.of_progression (as_clp (Rel (o2, b)))))
+  in
+  pair_join ~clp_op:P.union ~fs_op:FinSet.union ~rel_op t1 t2
+
+(* The plain-plain payload: the lattice ops pair by kind; every other op
+   lifts through the common plain machinery. *)
 let generic (op : binop) (t1 : t) (t2 : t) : t =
-  match op with Meet -> meet_plain t1 t2 | _ -> lift_binop op t1 t2
+  match op with
+  | Meet -> meet_plain t1 t2
+  | Union -> join_plain t1 t2
+  | _ -> lift_binop op t1 t2
 
 (* The [Wrap] payloads: the relative operand's offsets meet, shift, or
    mask with the absolute one, and the result wraps at the operand's
@@ -1616,43 +1700,77 @@ let rec precedes t1 t2 : bool =
 
 (* Widen the two values, keeping the origin: two symbolic pieces, or a
    symbolic piece and a frame-relative plain twin, widen in the offsets.
-   A plain pair widens piece-aligned when both sides carry a piece
-   union — a multi-piece value keeps its pieces (the interior exclusion
-   survives a growing widen) — and widens the single-progression hull
-   otherwise, so a FinSet's non-widening union never drives the
-   fixpoint. *)
+   A plain pair widens BY KIND — two Clp leaves via [fp] (the positional
+   piece widen), two FinSet leaves via the tier's own widen, two
+   relative leaves via the offsets widen — so a multi-piece value keeps
+   its pieces through a growing widen (the interior exclusion survives).
+   A kind carried by one side only (the excess) hulls the whole pair —
+   a widening must extrapolate, and the hull is the sound
+   extrapolation. *)
 let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
-  let hull ps =
-    match hull_of_pieces ps with
-    | Some p -> p
-    | None -> Clp.bottom 64 in
-  (* A widening pairs the two plain piece unions when both sides carry
-     one, so a multi-piece value keeps its pieces; every other shape
-     hulls. *)
-  let plain_hull () =
-    match t1, t2 with
-    | Clp a, Clp b when Stdlib.Int.equal (P.bitwidth a) (P.bitwidth b) ->
-      Clp (fp a b)
-    | _ -> Clp (P.of_progression (f (as_clp t1) (as_clp t2)))
+  (* The absolute hull of two relative leaves: different origins have no
+     shared offset line, so both materialise. *)
+  let rel_cross (o1 : Origin.t) (a : P.t) (o2 : Origin.t) (b : P.t) : t =
+    if Origin.equal o1 o2 then Rel (o1, fp a b)
+    else
+      Clp (P.of_progression (f (as_clp (Rel (o1, a))) (as_clp (Rel (o2, b)))))
   in
+  let plain_hull () =
+    canonical [ Clp (P.of_progression (f (as_clp t1) (as_clp t2))) ]
+  in
+  (* A relative value keeps its origin when its plain twin is
+     frame-relative: the offsets widen. *)
   let rel_plain (o : Origin.t) (a : P.t) (plain : t) : t option =
     match frame_offsets o plain with
-    | Some offs -> Some (Rel (o, P.of_progression (f (hull a) (hull offs))))
+    | Some offs -> Some (canonical [ Rel (o, fp a offs) ])
     | None -> None
   in
-  canonical
-    [ (match t1, t2 with
-      | (Rel (o1, a), Rel (o2, b)) when Origin.equal o1 o2 ->
-        Rel (o1, P.of_progression (f (hull a) (hull b)))
-      | Rel (o, a), (Clp _ | FinSet _ as plain) -> (
-          match rel_plain o a plain with
-          | Some r -> r
-          | None -> plain_hull ())
-      | (Clp _ | FinSet _ as plain), Rel (o, a) -> (
-          match rel_plain o a plain with
-          | Some r -> r
-          | None -> plain_hull ())
-      | _ -> plain_hull ()) ]
+  (* The FinSet tier widens by its own union while the union stays put;
+     a union that grew has left the exact-small tier, so it escapes to
+     the piece widen (the tier promotion the spec's Risks names) and the
+     widening still extrapolates. *)
+  let fs_widen (s1 : fset) (s2 : fset) : t =
+    let u = FinSet.widen_join s1 s2 in
+    if FinSet.equal u s1 then FinSet u
+    else Clp (fp (pieces_of_finset s1) (pieces_of_finset s2))
+  in
+  (* Both sides plain: every kind carried by BOTH sides pairs with its
+     own widen; a kind carried by one side only (the excess) hulls the
+     whole pair — a one-sided piece has no partner to widen against, and
+     a piece-preserving fold of it is the fixpoint's churn source. *)
+  let plain_pair () =
+    let c1 = clp_leaf t1 and c2 = clp_leaf t2 in
+    let s1 = fs_leaf t1 and s2 = fs_leaf t2 in
+    let r1 = rel_leaf t1 and r2 = rel_leaf t2 in
+    let has o = Option.is_some o in
+    if
+      Stdlib.Int.equal (bitwidth t1) (bitwidth t2)
+      && Bool.equal (has c1) (has c2)
+      && Bool.equal (has s1) (has s2)
+      && Bool.equal (has r1) (has r2)
+    then
+      let parts =
+        (match c1, c2 with Some a, Some b -> [ Clp (fp a b) ] | _ -> [])
+        @ (match s1, s2 with Some a, Some b -> [ fs_widen a b ] | _ -> [])
+        @ (match r1, r2 with
+           | Some (o1, a), Some (o2, b) -> [ rel_cross o1 a o2 b ]
+           | _ -> [])
+      in
+      if List.is_empty parts then plain_hull () else canonical parts
+    else plain_hull ()
+  in
+  match t1, t2 with
+  | Rel (o1, a), Rel (o2, b) when Origin.equal o1 o2 ->
+    canonical [ Rel (o1, fp a b) ]
+  | Rel (o, a), (Clp _ | FinSet _ as plain) -> (
+      match rel_plain o a plain with
+      | Some r -> r
+      | None -> plain_pair ())
+  | (Clp _ | FinSet _ as plain), Rel (o, a) -> (
+      match rel_plain o a plain with
+      | Some r -> r
+      | None -> plain_pair ())
+  | _ -> plain_pair ()
 
 let widen_join t1 t2 : t = hull_join Clp.widen_join P.widen_join t1 t2
 
