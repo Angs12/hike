@@ -144,6 +144,7 @@ type member = {
   m_width : int;
   m_store : bool;
   m_identity : bool;
+  m_callwin : bool;
 }
 [@@deriving equal, compare, sexp]
 
@@ -511,7 +512,7 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
   in
   { m_sec = p.pt_sec; m_lo = lo; m_hi = hi; m_sub = sub;
     m_def = def; m_width = width; m_store = store;
-    m_identity = not p.pt_elig }
+    m_identity = not p.pt_elig; m_callwin = false }
 
 (* The word cell an args-space span names: one slot only when the span
    starts at/above the args base and both ends land in the same cell. *)
@@ -533,12 +534,13 @@ let args_member_cell ~(word : int) ~(entry : int64) (m : member) : int option =
   else args_cell_of_span ~word ~entry m.m_lo m.m_hi
 
 (* The identity members of an escape extent, projected into the sub-local
-   spaces; no def.  Only the frame half binds this sub's storage: the
-   Args half names the caller's outgoing arguments, which the promoted
-   slot pointers carry, so it claims nothing here.  [sub_portions]'s two
-   clip windows ARE the sub-local line's geometry. *)
-let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
-    member list =
+   spaces; no def.  Only the frame half binds this sub's storage: the Args
+   half names the caller's outgoing arguments, which the promoted slot
+   pointers carry, so it claims nothing here.  [sub_portions]'s two clip
+   windows ARE the sub-local line's geometry.  [~callwin] marks the
+   calling block's window extent — a residue requirement, not an escape. *)
+let escape_members ~(sub : Tid.t) ~(env : env) ~(callwin : bool)
+    (ext : int64 * int64) : member list =
   let lo, hi = ext in
   let _, parts =
     sub_portions ~extents:env.extents ~entry:env.entry ~word:env.word
@@ -549,7 +551,8 @@ let escape_members ~(sub : Tid.t) ~(env : env) (ext : int64 * int64) :
          (not (equal_sec p.pt_sec Vla)) && not (equal_sec p.pt_sec Args)))
     ~f:(fun p ->
       { m_sec = p.pt_sec; m_lo = p.pt_lo; m_hi = p.pt_hi; m_sub = sub;
-        m_def = None; m_width = 0; m_store = false; m_identity = true })
+        m_def = None; m_width = 0; m_store = false; m_identity = true;
+        m_callwin = callwin })
 
 (* Pure constant arithmetic — the address shape whose emission
    evaluates to the exact native bits. *)
@@ -594,7 +597,7 @@ let collect (env : env) (prog : program term) : collecting =
                    ~f:(Model.escape_extent ~entry:env.entry))
                 ~init:acc
                 ~f:(fun acc ext ->
-                  Base.List.fold (escape_members ~sub:acc.sub ~env ext)
+                  Base.List.fold (escape_members ~sub:acc.sub ~env ~callwin:false ext)
                     ~init:acc
                     ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
         in
@@ -626,7 +629,7 @@ let collect (env : env) (prog : program term) : collecting =
                           (window_push_slop_words * env.word)))
                     Hike_stack_model.caller_window_bytes
                 in
-                Base.List.fold (escape_members ~sub:acc.sub ~env (win_lo, win_hi))
+                Base.List.fold (escape_members ~sub:acc.sub ~env ~callwin:true (win_lo, win_hi))
                   ~init:acc
                   ~f:(fun acc m -> { acc with tree = insert acc.tree m }))
 
@@ -689,7 +692,7 @@ let collect (env : env) (prog : program term) : collecting =
                      ~f:(Model.escape_extent ~entry:env.entry)))
               ~init:acc
               ~f:(fun acc ext ->
-                Base.List.fold (escape_members ~sub:acc.sub ~env ext)
+                Base.List.fold (escape_members ~sub:acc.sub ~env ~callwin:false ext)
                   ~init:acc
                   ~f:(fun acc m -> { acc with tree = insert acc.tree m })))
 
@@ -874,25 +877,157 @@ let storage_of_range (tree : range_storage Tree.t) (r : range) :
   | Some (_, v) -> Some v
   | None -> None
 
-(* The mem vars of storages carrying identity members: bytes another
-   world (a callee, the window) reads through an escaped address — no
-   def of this sub is their reader, so the DCE sweep keeps them as
-   roots. *)
-let escape_roots_of_tree ~(addr_bits : int) (tree : sub_tree) : Var.Set.t =
-  Tree.to_sequence tree
-  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc (_, rs) ->
-         if not (Base.List.exists rs.members ~f:(fun m -> m.m_identity)) then acc
-         else
-           let mem_var = function
-             | Stack_region id -> Some (Model.region_mem ~addr_bits id)
-             | Stack_residue -> Some (Model.region_mem ~addr_bits Model.residue_id)
-             | Arg_slot -> None
-             | Data_region _ ->
-               failwith "hike-sections: a data binding in a sub tree"
-           in
-           match mem_var rs.storage with
-           | Some v -> Core.Set.add acc v
-           | None -> acc)
+(* The storages an expression names: a storage base leaf itself, or a
+   var the map proved to hold one.  Only address arithmetic carries the
+   base — a load's result is memory content, never a proven address.
+   The id lists stay small and deduped (a var names a few regions). *)
+let named_storages ~(bases : int list Var.Map.t) (e : exp) : int list =
+  Hike_exp_fold.fold
+    (fun e child ->
+      match e with
+      | Bil.Var v -> (
+          match Model.region_ptr_id_of v with
+          | Some id -> [ id ]
+          | None -> (
+              match Core.Map.find bases (Var.base v) with
+              | Some ids -> ids
+              | None -> []))
+      | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) -> child a @ child b
+      | Bil.Ite (_, a, b) -> child a @ child b
+      | _ -> [])
+    e
+
+let add_region_ids (ids : int list) (more : int list) : int list =
+  Base.List.fold more ~init:ids ~f:(fun acc id ->
+      if Base.List.mem acc id ~equal:Int.equal then acc else id :: acc)
+
+(* The typed argument facts of the rewritten sub: a promoted call-site
+   binding ([hike_argN]) holds the caller-storage address the callee
+   reads through, and an argument register computed from one passes the
+   address to the callee.  Both root the storage they name.  A binding
+   is a typed argument only when the callee's slot convention reaches
+   it — a store above the call-time SP in a callee with no slot lanes
+   is a frame store (the prologue's callee-saved saves sit there), so
+   its binding is inert and roots nothing. *)
+let typed_escape_roots ~(addr_bits : int) ~(abi : Hike_abi.t)
+    ~(arities : int Tid.Map.t) (sub : sub term) : Var.Set.t =
+  let arg_regs =
+    Base.List.fold abi.Hike_abi.int_param_regs ~init:Var.Set.empty
+      ~f:(fun acc r -> Core.Set.add acc (Var.base r))
+  in
+  let defs =
+    Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list
+  in
+  let step bases d =
+    match Model.store_data_of_rhs (Def.rhs d) with
+    | Some _ -> (bases, false) (* a store's lhs is a memory state, not a value *)
+    | None -> (
+        match named_storages ~bases (Def.rhs d) with
+        | [] -> (bases, false)
+        | ids ->
+            let key = Var.base (Def.lhs d) in
+            let old = Core.Option.value (Core.Map.find bases key) ~default:[] in
+            let merged = add_region_ids old ids in
+            if Base.List.equal Int.equal old merged then (bases, false)
+            else (Core.Map.set bases ~key ~data:merged, true))
+  in
+  let rec fix bases =
+    let bases', changed =
+      Base.List.fold defs ~init:(bases, false)
+        ~f:(fun (bases, changed) d ->
+          let bases, grew = step bases d in
+          (bases, changed || grew))
+    in
+    if changed then fix bases' else bases'
+  in
+  let bases = fix Var.Map.empty in
+  let consumes_slot blk (i : int) =
+    Term.enum jmp_t blk
+    |> Seq.exists ~f:(fun j ->
+           match Jmp.kind j with
+           | Call c -> (
+               match Call.target c with
+               | Direct t ->
+                 Core.Option.value_map (Core.Map.find arities t) ~default:false
+                   ~f:(fun arity -> arity > i)
+               | Indirect _ -> false)
+           | _ -> false)
+  in
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+         Term.enum def_t blk
+         |> Seq.fold ~init:acc ~f:(fun acc d ->
+             let lhs = Def.lhs d in
+             let typed =
+               if Model.is_call_arg lhs then
+                 match Model.id_of_family Model.call_arg_family (Var.name lhs) with
+                 | Some i -> consumes_slot blk i
+                 | None -> false
+               else Core.Set.mem arg_regs (Var.base lhs)
+             in
+             if typed then
+               Base.List.fold (named_storages ~bases (Def.rhs d)) ~init:acc
+                 ~f:(fun acc id ->
+                     Core.Set.add acc (Model.region_mem ~addr_bits id))
+             else acc))
+
+(* The storages the call sites of [sub] pass through the model window:
+   a call whose lifted callee reads its call window through the model
+   (a variadic sub's overflow cells, or an unpromotable Args claim —
+   the memory-passed class the typed arguments do not reach) roots the
+   caller's residue, the storage the window shadow covers. *)
+let window_shadow_roots ~(addr_bits : int) ~(window_readers : Tid.Set.t)
+    (sub : sub term) : Var.Set.t =
+  if Core.Set.is_empty window_readers then Var.Set.empty
+  else
+    let shadow = Model.region_mem ~addr_bits Model.residue_id in
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+           Term.enum jmp_t blk
+           |> Seq.fold ~init:acc ~f:(fun acc j ->
+                   match Jmp.kind j with
+                   | Call c -> (
+                       match Call.target c with
+                       | Direct t when Core.Set.mem window_readers t ->
+                         Core.Set.add acc shadow
+                       | _ -> acc)
+                   | _ -> acc))
+
+(* The mem vars of storages whose bytes escape this sub: a storage
+   carrying an escape extent (a stored stack-symbolic value, an incoming
+   stack-address parameter — never the call-window hull, whose callee
+   reads through the typed slot pointers), or one a typed call argument
+   names.  A def-backed ineligible member (a TOP claim) is a carving
+   decision, not an escape: its own def keeps the raw lane, and no
+   reader of this storage is proven.  The DCE sweep keeps the rooted
+   storages' defs. *)
+let escape_roots_of_sub ~(addr_bits : int) ~(abi : Hike_abi.t)
+    ~(arities : int Tid.Map.t) ~(window_readers : Tid.Set.t)
+    ~(tree : sub_tree) (sub : sub term) : Var.Set.t =
+  let identity =
+    Tree.to_sequence tree
+    |> Seq.fold ~init:Var.Set.empty ~f:(fun acc (_, rs) ->
+           if
+             not
+               (Base.List.exists rs.members ~f:(fun m ->
+                    m.m_identity && Option.is_none m.m_def && not m.m_callwin))
+           then acc
+           else
+             let mem_var = function
+               | Stack_region id -> Some (Model.region_mem ~addr_bits id)
+               | Stack_residue -> Some (Model.region_mem ~addr_bits Model.residue_id)
+               | Arg_slot -> None
+               | Data_region _ ->
+                 failwith "hike-sections: a data binding in a sub tree"
+             in
+             match mem_var rs.storage with
+             | Some v -> Core.Set.add acc v
+             | None -> acc)
+  in
+  Core.Set.union identity
+    (Core.Set.union
+       (typed_escape_roots ~addr_bits ~abi ~arities sub)
+       (window_shadow_roots ~addr_bits ~window_readers sub))
 
 (* A whole span serves as ONE component covering the span, stored in
    the section's own image global (the emitter wires the id to it). *)

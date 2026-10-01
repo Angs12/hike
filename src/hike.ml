@@ -766,12 +766,48 @@ let pass_attrib proj =
       ~relative:(Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj))
       ~externals:(Hike_image.external_references proj)
   in
-  (* The DCE's escape roots: the storages carrying identity members.
-     They ride the facts to the sweep's own pass, after [hike-types]. *)
+  (* The DCE's escape roots: the storages a genuine escape extent, a
+     typed call argument, or a model-window callee's shadow names.  The
+     slot arity per sub gates which [hike_argN] bindings the callee's
+     convention actually reaches; the window readers are the lifted
+     subs that consume their call window through the model (a variadic
+     sub's overflow cells, an unpromotable Args claim).  The roots ride
+     the facts to the sweep's own pass, after [hike-types]. *)
+  let arities =
+    Core.Map.map ctx.Hike_sections.sub_trees
+      ~f:(Hike_promote.slot_arity ~word ~entry:Hike_stack_model.segment_base)
+  in
+  let window_readers =
+    Term.enum sub_t program
+    |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc sub ->
+           let reads_window =
+             Hike_stack_model.is_variadic sub
+             || Base.Option.value_map
+                  (Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub))
+                  ~default:false
+                  ~f:(fun tree ->
+                    Hike_sections.Tree.to_sequence tree
+                    |> Seq.exists ~f:(fun (_, rs) ->
+                           Base.List.exists rs.Hike_sections.members
+                             ~f:(fun m ->
+                                 m.Hike_sections.m_identity
+                                 && Hike_sections.equal_sec m.Hike_sections.m_sec
+                                      Hike_stack_model.Args)))
+           in
+           if reads_window then Core.Set.add acc (Term.tid sub) else acc)
+  in
   let escape_roots =
-    Core.Map.map ctx.Hike_sections.sub_trees ~f:(fun tree ->
-        Hike_sections.escape_roots_of_tree
-          ~addr_bits:(Hike_stack_model.word_bits word) tree)
+    Term.enum sub_t program
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
+           let tree =
+             Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
+             |> Base.Option.value ~default:Hike_sections.Tree.empty
+           in
+           Core.Map.set m ~key:(Term.tid sub)
+             ~data:
+               (Hike_sections.escape_roots_of_sub
+                  ~addr_bits:(Hike_stack_model.word_bits word)
+                  ~abi:facts.abi ~arities ~window_readers ~tree sub))
   in
   Hike_kb.install (Hike_kb.with_attribution facts ~spec ~escape_roots);
   Project.with_program proj program

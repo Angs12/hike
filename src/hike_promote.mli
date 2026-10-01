@@ -33,6 +33,10 @@ type site_binding = {
   sb_def : def term;
 }
 
+(** The promoted slot count of a finalized tree: the highest Arg_slot
+    cell index + 1; 0 when the tree names none. *)
+val slot_arity : word:int -> entry:int64 -> Hike_sections.sub_tree -> int
+
 (** The per-block store-to-call-slot correspondence. *)
 val site_bindings_of_sub :
   word:int ->

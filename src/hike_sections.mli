@@ -36,7 +36,10 @@ val range : sec -> int64 -> int64 -> range
 
 (** One membership fact: an access's occupied interval in one section,
     or an escape requirement ([m_def] absent, width 0).  [m_identity]
-    marks bytes that need shared, un-carved storage. *)
+    marks bytes that need shared, un-carved storage.  [m_callwin] marks
+    the extent a calling block exposes to its callee: it forces the
+    residue (the window shadow's storage) but is not an escape — the
+    callee reads the outgoing cells through the typed slot pointers. *)
 type member = {
   m_sec : sec;
   m_lo : int64;
@@ -46,6 +49,7 @@ type member = {
   m_width : int;
   m_store : bool;
   m_identity : bool;
+  m_callwin : bool;
 }
 [@@deriving equal, compare, sexp]
 
@@ -177,10 +181,22 @@ val is_sub_local : sec -> bool
 val access_of : def term -> (exp * int * bool) option
 val is_const_chain : exp -> bool
 
-(** The mem vars of storages carrying identity members — bytes another
-    world reads through an escaped address; the DCE sweep keeps them
-    as roots. *)
-val escape_roots_of_tree : addr_bits:int -> sub_tree -> Var.Set.t
+(** The mem vars of storages whose bytes escape this sub: a storage
+    carrying an escape extent (a stored stack-symbolic value, an
+    incoming stack-address parameter), one a typed call argument
+    names — a promoted [hike_argN] binding the callee's slot convention
+    reaches, or an argument register holding a rewritten storage-base
+    address — or the residue shadow a model-window callee reads (a
+    variadic callee's overflow cells, an unpromotable Args claim).  The
+    DCE sweep keeps the rooted storages' defs. *)
+val escape_roots_of_sub :
+  addr_bits:int ->
+  abi:Hike_abi.t ->
+  arities:int Tid.Map.t ->
+  window_readers:Tid.Set.t ->
+  tree:sub_tree ->
+  sub term ->
+  Var.Set.t
 
 (** Stamps the ctx's slim tags onto the sub's defs (a term mapper). *)
 val stamp_tags : ctx -> sub term -> sub term
