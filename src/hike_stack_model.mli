@@ -114,6 +114,10 @@ val is_true_cond : exp -> bool
 (* The signature contract. *)
 val is_intrinsic : sub term -> bool
 val is_emittable_intrinsic : sub term -> bool
+(** The program's main, stamped by the producer from the entry's
+    denotation; the C-ABI export the native crt1 calls. *)
+val main_role : unit Value.Tag.t
+
 val fixed_signature : sub term -> bool
 
 (* The name families: one record per name shape, shared by the minter

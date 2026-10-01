@@ -204,16 +204,12 @@ let compute_sub_sig ~(free_vars : var list)
   ( Base.List.map rets ~f:tag_lane,
     Base.List.map args ~f:tag_lane )
 
-(* The program-level entry: the pipeline's pass, and any direct emitter
-   caller (the fixtures), run exactly this. *)
-(* The sign pass's one per-sub entry: the lane list, plus the
-   PLT-trampoline stamp — a self-call stub that reads no non-return,
-   non-SP register — from the same liveness run the signature used.
-   The emitter reads the stamp. *)
-let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
-    (sub : sub term) : sub term =
+(* The PLT-trampoline shape: a self-targeted direct call, a real call
+   jmp, and reads confined to the SP and the return registers — the
+   stub's `call next; jmp *[GOT]` idiom, recognized without names. *)
+let is_plt_trampoline_shape ~(target : Bap_core_theory.Theory.Target.t)
+    (sub : sub term) : bool =
   let abi = Abi.of_target target in
-  let free_vars = free_regs_of_sub sub in
   let self_targeted =
     Term.enum blk_t sub
     |> Seq.exists ~f:(fun blk ->
@@ -239,17 +235,26 @@ let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
             | _ -> false))
   in
   let reads_only_return =
-    Base.List.for_all free_vars ~f:(fun reg ->
+    Base.List.for_all (free_regs_of_sub sub) ~f:(fun reg ->
         Abi.is_sp abi (Var.base reg) || Abi.is_return_reg abi reg)
   in
+  self_targeted && has_call && reads_only_return
+
+(* The sign pass's one per-sub entry: the PLT-trampoline stamp (the
+   emitter reads it) and the lane list. *)
+let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
+    (sub : sub term) : sub term =
   let sub =
-    if self_targeted && has_call && reads_only_return then
+    if is_plt_trampoline_shape ~target sub then
       Model.set_plt_trampoline sub
     else sub
   in
+  let free_vars = free_regs_of_sub sub in
   let rets, args = compute_sub_sig ~free_vars target sub in
   Model.set_sig sub (rets @ args)
 
+(* The pipeline's pass, and any direct emitter caller (the fixtures),
+   run exactly this. *)
 let sign_program ~(target : Bap_core_theory.Theory.Target.t)
     (prog : program term) : program term =
   Term.map sub_t prog ~f:(sign_sub ~target)

@@ -67,12 +67,15 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
           sm_image = None;
           sm_copy_relocs = copy_relocs })
   in
+  (* A section the loader relocates is runtime-written: its global is
+     mutable, so the dynamic relocations land in a writable segment and
+     the module links as a PIE with no text relocations. *)
   [ byte_row Data ~is_const:false;
     byte_row Rodata ~is_const:true;
     bss_row;
-    byte_row Got ~is_const:true;
-    byte_row Gotplt ~is_const:true;
-    byte_row Datarelro ~is_const:true;
+    byte_row Got ~is_const:false;
+    byte_row Gotplt ~is_const:false;
+    byte_row Datarelro ~is_const:false;
     byte_row Text ~is_const:true ]
 
 (* Every copy-relocated slot address (absolute): loads and stores at a

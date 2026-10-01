@@ -255,9 +255,16 @@ let is_intrinsic (term : sub term) : bool =
 let is_emittable_intrinsic (term : sub term) : bool =
   is_intrinsic term && not (Seq.is_empty (Term.enum blk_t term))
 
+(* The program's main: stamped by the producer (the address the entry
+   passes to the runtime) and exported with the C ABI, so the native
+   crt1 calls it directly. *)
+let main_role : unit Value.Tag.t =
+  Value.Tag.register ~package:"hike" ~name:"hike-main-role"
+    ~uuid:"7d3a9c41-2e58-4b0f-9a6d-1c8f5b2e7a10"
+    (module Core.Unit)
+
 let fixed_signature (term : sub term) : bool =
-  is_emittable_intrinsic term
-  || String.equal (Tid.name (Term.tid term)) "@main"
+  is_emittable_intrinsic term || Term.has_attr term main_role
 
 (* The promoted stack-slot parameter of index [i]; minted deterministically
    so the signature and the body agree on the same var. *)

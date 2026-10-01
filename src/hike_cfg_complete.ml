@@ -25,9 +25,11 @@ let load_addr_of (word_bits : int) (d : def term) : exp option =
   | _ -> None
 
 (* The defs whose load address denotates, in the def's own before-env,
-   to the stack-symbolic entry-RSP cell.  One replay per block: the
-   fold carries each def's before-env, so the per-def address
-   denotations ride the block's single pass. *)
+   to the stack-symbolic entry-RSP cell.  A BOTTOM denotation is a path
+   the solve proved dead — it refutes nothing, so the return shape
+   stands.  One replay per block: the fold carries each def's
+   before-env, so the per-def address denotations ride the block's
+   single pass. *)
 let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : Tid.Set.t =
   let word_bits = Hike_abi.word_bits abi in
@@ -40,6 +42,8 @@ let retaddr_defs ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
                   | Some addr -> (
                       match Vsa.denote_imm_exp addr before with
                       | Ok ws when Model.is_return_address ws ->
+                        Core.Set.add acc (Term.tid d)
+                      | Ok ws when Vsa.WordSet.is_bottom ws ->
                         Core.Set.add acc (Term.tid d)
                       | _ -> acc)
                   | None -> acc)))

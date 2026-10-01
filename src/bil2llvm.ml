@@ -17,7 +17,8 @@ open Bil2llvm_section
    writes the false edge and the splitter canonicalizes the shape, so
    the emitter maps it directly — no chain walking, no term-order
    fallthrough. *)
-let create_branches ctx scope blk_tid llvm_builder branches =
+let create_branches ctx scope blk_tid llvm_builder ?(sub : sub term option)
+    branches =
   let open Bap.Std in
   let llvm_ctx = ctx.llvm_ctx in
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
@@ -40,8 +41,11 @@ let create_branches ctx scope blk_tid llvm_builder branches =
        taken; the module never carries it behind a warning. *)
     failwith
       (Printf.sprintf
-         "hike: indirect jump at block %s has no enumerated destinations"
-         (Tid.name blk_tid))
+         "hike: indirect jump at block %s%s has no enumerated destinations"
+         (Tid.name blk_tid)
+         (match sub with
+          | Some s -> Printf.sprintf " (sub %s)" (Tid.name (Term.tid s))
+          | None -> ""))
   in
   match Seq.to_list branches with
   | [ j ] -> (
@@ -89,7 +93,8 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
     create_return ctx scope tid llvm_builder sub
   else
   match cf_type control_flow with
-  | Br -> create_branches ctx scope tid llvm_builder control_flow
+  | Br ->
+      create_branches ctx scope tid llvm_builder ~sub control_flow
   | Int -> create_interrupt ctx llvm_builder
   | Ret -> create_return ctx scope tid llvm_builder sub
   | CallIndirect ->
@@ -388,10 +393,16 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     |> Core.Set.of_list (module Tid)
   in
   let is_self_call_stub_tid t = Core.Set.mem self_call_stubs t in
+  (* The entry is analysed, not executed: the module never defines,
+     thunks, or bodies its own _start — the native crt1 runs and calls
+     the lifted main.  A dead call site naming it (a fallthrough fold
+     after a no-return call) declares against crt1's own _start. *)
+  let is_entry sub = Term.has_attr sub Sub.entry_point in
   let declare_phase () =
     Base.List.iter subs_list ~f:(fun sub ->
         let tid = Term.tid sub in
-        if Base.Option.is_some (native_fp_op (Tid.name tid)) then ()
+        if is_entry sub then create_fun_declaration ctx tid
+        else if Base.Option.is_some (native_fp_op (Tid.name tid)) then ()
         else if is_self_call_stub_tid tid then
           create_fun_declaration ctx tid
         else
@@ -399,11 +410,13 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
             ~variadic:(Hike_stack_model.is_variadic sub))
   in
   let thunk_phase () =
-    Base.List.iter subs_list ~f:(fun sub -> create_thunk ctx (Term.tid sub))
+    Base.List.iter subs_list ~f:(fun sub ->
+        if is_entry sub then () else create_thunk ctx (Term.tid sub))
   in
   let bodies_phase () =
     Base.List.iter subs_list ~f:(fun s ->
-        if is_self_call_stub_tid (Term.tid s) then ()
+        if is_entry s then ()
+        else if is_self_call_stub_tid (Term.tid s) then ()
         else
           let scope = fresh_scope () in
           create_sub ctx scope s)

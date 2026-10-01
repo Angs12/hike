@@ -38,30 +38,18 @@ let simplify_jmps sub =
         let new_blk = Term.with_attrs new_blk (Term.attrs blk) in
         children @ [ new_blk ])
 
-(* CRT and unwinding stubs carry no convertible code. *)
-let excluded_subs =
-  [
-    "_init";
-    "_fini";
-    "__cxa_finalize";
-    "__libc_start_main";
-    "register_tm_clones";
-    "deregister_tm_clones";
-    "__do_global_dtors_aux";
-    "frame_dummy";
-  ]
-
 (* What stays filtered: the intrinsic subs themselves — BAP's bodyless
    @intrinsic:* placeholders are not code; call targets map through
-   the emitter's table. *)
+   the emitter's table.  The entry sub stays: the analysis reads it and
+   the program's main is found from its denotation; the runtime stubs
+   drop by reachability from the program's roots after the solve, never
+   by spelling. *)
 let should_filter syms sub =
   (* Emittable intrinsics (the soft-float bodies) stay. *)
   if is_emittable_intrinsic sub then false
   else
-    Base.List.mem ~equal:String.equal excluded_subs (Sub.name sub)
-    || Term.has_attr sub Sub.stub
+    Term.has_attr sub Sub.stub
     || Term.has_attr sub Sub.extern
-    || Term.has_attr sub Sub.entry_point
     || is_intrinsic sub
     || (not @@ Core.Set.mem syms (Sub.name sub))
 

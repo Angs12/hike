@@ -524,8 +524,8 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
          is taken; the module never carries it behind a warning. *)
       failwith
         (Printf.sprintf
-           "hike: indirect tail call at block %s has no enumerated destinations"
-           (Tid.name blk_tid))
+           "hike: indirect tail call at block %s (sub %s) has no enumerated destinations"
+           (Tid.name blk_tid) (Tid.name (Term.tid sub)))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
 (* Unmapped intrinsic stubs use a fixed i64 synthetic ABI; normalize
