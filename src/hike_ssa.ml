@@ -56,7 +56,7 @@ let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
       let w =
         Base.Option.value
           (Bil2llvm_fp.fp_width_of_name (Tid.name target))
-          ~default:(8 * abi.Abi.word)
+          ~default:(Model.word_bits abi.Abi.word)
       in
       Bil2llvm_fp.(fp_sig_of op ~w).fp_rets
   | None -> (
@@ -66,7 +66,8 @@ let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
 
 let restore_word ~(abi : Abi.t) : exp =
   Bil.Int
-    (Cbat_word.to_word (Cbat_word.of_int ~width:(8 * abi.Abi.word) abi.Abi.word))
+    (Cbat_word.to_word
+       (Cbat_word.of_int ~width:(Model.word_bits abi.Abi.word) abi.Abi.word))
 
 (* The SP restore def at a call's single-pred continuation. *)
 let with_top_def (blk : blk term) (d : def term) : blk term =

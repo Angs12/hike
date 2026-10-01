@@ -369,7 +369,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
 #else
   let census _ = () in
 #endif
-  let addr_bits = word * 8 in
+  let addr_bits = Model.word_bits word in
   (* The rewrite's admissibility: the address's whole range lies inside
      the storage's allocated extent — a value or access outside it names
      no storage, and the model arithmetic keeps it. *)
@@ -671,7 +671,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
    [8d, 8d+bits) — BIL's little-endian bit numbering. *)
 let slot_read ~(word : int) (i : int) (byte_offset : int) (bits : int) : exp =
   let slot = Bil.Var (Model.arg_slot ~word i) in
-  let wbits = word * 8 in
+  let wbits = Model.word_bits word in
   if byte_offset = 0 then
     if Int.equal bits wbits then slot
     else Bil.Cast (Bil.LOW, bits, slot)

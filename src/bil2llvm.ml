@@ -272,19 +272,10 @@ let create_sub ctx scope sub =
        (the run's sec_comps map carries (global, native base)). *)
     Core.Map.to_sequence !(ctx.sec_comps)
     |> Seq.iter ~f:(fun (v, (base, _)) ->
-        if Hike_stack_model.is_sec_comp_mem v then
-          let name = Var.name v in
-          let plen = String.length "sec_comp_" in
-          let slen = String.length "_mem" in
-          match
-            Stdlib.int_of_string_opt
-              (String.sub name plen (String.length name - plen - slen))
-          with
-          | Some id ->
-              let pv = Hike_stack_model.sec_comp_ptr ~addr_bits:ctx.addr_bits id in
-              scope.sec_comp_ptrs :=
-                WVarMap.add (wvar_of pv) base !(scope.sec_comp_ptrs)
-          | None -> ());
+        Base.Option.iter (Hike_stack_model.sec_comp_id_of_mem v) ~f:(fun id ->
+            let pv = Hike_stack_model.sec_comp_ptr ~addr_bits:ctx.addr_bits id in
+            scope.sec_comp_ptrs :=
+              WVarMap.add (wvar_of pv) base !(scope.sec_comp_ptrs)));
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
     populate_blks ctx scope blks sub fr;
@@ -364,7 +355,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       plt_trampolines = ref Tid.Map.empty;
       i64_ty = Llvm.i64_type llvm_ctx;
       ptr_ty = Llvm.pointer_type llvm_ctx;
-      word_ty = Llvm.integer_type llvm_ctx (abi.Abi.word * 8);
+      word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits abi.Abi.word);
       native_starts =
         (match symtab with
          | Some st ->

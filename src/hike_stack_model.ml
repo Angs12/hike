@@ -249,6 +249,13 @@ let is_in_family { prefix; suffix } (v : var) : bool =
   && (String.equal suffix ""
       || Base.String.is_suffix (Var.name v) ~suffix)
 
+(* The index a family var's name carries; [None] for any other name. *)
+let id_of_family { prefix; suffix } (name : string) : int option =
+  let plen = String.length prefix in
+  let slen = String.length suffix in
+  Stdlib.int_of_string_opt
+    (String.sub name plen (String.length name - plen - slen))
+
 let arg_slot ~(word : int) (i : int) : var =
   Var.create ~is_virtual:false ~fresh:false
     (family_name slot_family i)
@@ -347,11 +354,7 @@ let is_storage_base (v : var) : bool =
 
 let region_ptr_id_of (v : var) : int option =
   if is_in_family region_ptr_family v then
-    let name = Var.name v in
-    let plen = String.length region_ptr_family.prefix in
-    let slen = String.length region_ptr_family.suffix in
-    Stdlib.int_of_string_opt
-      (String.sub name plen (String.length name - plen - slen))
+    id_of_family region_ptr_family (Var.name v)
   else None
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
@@ -360,12 +363,7 @@ let is_region_mem (v : var) : bool = is_in_family region_family v
 
 (* The region id a [stack_rN_mem] var names; [None] for any other var. *)
 let region_id_of_mem (v : var) : int option =
-  if is_in_family region_family v then
-    let name = Var.name v in
-    let plen = String.length region_family.prefix in
-    let slen = String.length region_family.suffix in
-    Stdlib.int_of_string_opt
-      (String.sub name plen (String.length name - plen - slen))
+  if is_in_family region_family v then id_of_family region_family (Var.name v)
   else None
 
 (* The section partition: each reserved span's components are carried in the
@@ -395,6 +393,13 @@ let sec_comp_mem (n : int) : var =
 let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
 
 let is_sec_comp_mem (v : var) : bool = is_in_family sec_comp_family v
+
+(* The component id a [sec_comp_N_mem] var names; [None] for any other
+   var. *)
+let sec_comp_id_of_mem (v : var) : int option =
+  if is_in_family sec_comp_family v then
+    id_of_family sec_comp_family (Var.name v)
+  else None
 
 (* The tid-name sanitization the symbol-table lookups and the emitted
    names share: a sub's symtab name and its LLVM name stay comparable. *)

@@ -455,7 +455,8 @@ let create_thunk ctx (sub_tid : tid) =
                 builder
             in
             Llvm.build_load
-              (Llvm.integer_type llvm_ctx (8 * word)) ptr "" builder)
+              (Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word))
+                ptr "" builder)
       in
       (* Forwards [sub]'s register lanes by name from the twin's
          params, then the unpacked slots; a lane the twin's

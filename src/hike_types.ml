@@ -273,7 +273,7 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
           | None -> Hike_stack_model.Ptr_residue)
       | None -> Hike_stack_model.Ptr_residue
   in
-  let addr_width = word * 8 in
+  let addr_width = Hike_stack_model.word_bits word in
   let is_addr_width (d : def term) : bool =
     match Var.typ (Def.lhs d) with
     | Type.Imm n -> Int.equal n addr_width

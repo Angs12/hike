@@ -69,7 +69,7 @@ let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
   let n64 = (size + word - 1) / word in
   let ret =
     Llvm.declare_global
-      (Llvm.array_type (Llvm.integer_type llvm_ctx (word * 8)) n64)
+      (Llvm.array_type (Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word)) n64)
       name llvm_module
   in
   Llvm.set_global_constant is_const ret;
@@ -102,7 +102,7 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     (arr : Bytes.t) ~(word_lo : int) ~(word_hi : int)
     ~(typed_w : int) ~(bss : bool) ~word =
   let words = word_hi - word_lo + 1 in
-  let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
+  let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
   let elem_ty =
     if typed_w >= word then word_ty
     else Llvm.integer_type llvm_ctx (typed_w * 8)
@@ -253,7 +253,7 @@ let create_copy_reloc_bss llvm_ctx llvm_module size name copy_relocs ~word
     =
   let size = Int64.to_int size in
   let n64 = (size + word - 1) / word in
-  let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
+  let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
   match copy_relocs with
   | [] -> create_array_global llvm_ctx llvm_module name word_ty n64 None
   | _ ->
@@ -307,7 +307,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     g
   in
   let create_run_global name ~words ~bss =
-    let ty = Llvm.integer_type llvm_ctx (word * 8) in
+    let ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
     declare_internal_array name ~elem_ty:ty ~n:words
       ~align:Abi.stack_align ~const:false
       ~init:(if bss then Some (Llvm.const_null (Llvm.array_type ty words)) else None)
@@ -315,7 +315,8 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
   let create_comp_global name (c : Model.sec_comp) ~is_const ~bss =
     let words = c.Model.hi_w - c.Model.lo_w + 1 in
     let elem_ty =
-      if c.Model.typed_w >= word then Llvm.integer_type llvm_ctx (word * 8)
+      if c.Model.typed_w >= word then
+         Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word)
       else Llvm.integer_type llvm_ctx (c.Model.typed_w * 8)
     in
     let n =
