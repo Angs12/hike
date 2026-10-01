@@ -574,42 +574,35 @@ let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t) :
                     | Some pb -> check_use pb (Array.length pb.b_defs) e
                     | None -> check_use b 0 e)))
 
-(* Removes the blocks the rewrite left with zero predecessors,
-   cascading.  [pre_preds_count] is the pre-rewrite count: a block
-   that was already unreachable stays. *)
-let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term)
-    ~(seeds : Tid.Set.t) : sub term =
-  let succs_of s =
-    Term.enum blk_t s
+(* Removes the blocks the rewrite orphaned: a block survives iff it
+   was already predecessor-free (the entry and the pre-existing
+   unreachable blocks stay) or some predecessor survives — one
+   reachability pass from those roots over the surviving edges. *)
+let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term) : sub term =
+  let succ_m =
+    Term.enum blk_t sub
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b)
           ~data:
             (Term.enum jmp_t b
             |> Seq.fold ~init:Tid.Set.empty ~f:(fun a j -> jmp_targets a j)))
   in
-  (* Each cascade round derives the current predecessor transpose. *)
-  let rec go s pending =
-    let succ_m = succs_of s in
-    let preds =
-      Core.Map.fold succ_m ~init:Tid.Map.empty
-        ~f:(fun ~key:src ~data:ts acc ->
-          Core.Set.fold ts ~init:acc ~f:(fun acc t ->
-              Core.Map.update acc t ~f:(fun ps ->
-                Core.Set.add (Option.value ps ~default:Tid.Set.empty) src)))
-    in
-    match
-      Base.List.find (Core.Set.to_list pending) ~f:(fun t ->
-          Core.Set.is_empty
-            (Option.value (Core.Map.find preds t) ~default:Tid.Set.empty)
-          && pre_preds_count t > 0)
-    with
-    | None -> s
-    | Some t ->
-      let succ_ts = Option.value (Core.Map.find succ_m t) ~default:Tid.Set.empty in
-      let s' = Term.filter blk_t s ~f:(fun b -> not (Tid.equal (Term.tid b) t)) in
-      go s' (Core.Set.union (Core.Set.remove pending t) succ_ts)
+  let roots =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc b ->
+        if pre_preds_count (Term.tid b) = 0
+        then Core.Set.add acc (Term.tid b)
+        else acc)
   in
-  go sub seeds
+  let rec reach seen t =
+    if Core.Set.mem seen t then seen
+    else
+      Core.Set.fold
+        (Option.value (Core.Map.find succ_m t) ~default:Tid.Set.empty)
+        ~init:(Core.Set.add seen t) ~f:reach
+  in
+  let reach = Core.Set.fold roots ~init:Tid.Set.empty ~f:reach in
+  Term.filter blk_t sub ~f:(fun b -> Core.Set.mem reach (Term.tid b))
 
 (* Detect, check, rewrite, repeat until the identity. *)
 let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
@@ -700,10 +693,6 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
                       Blk.map_elts ~phi:(fun p -> Phi.remove p c.c_cmp_blk) blk
                     else blk))
           in
-          let seeds =
-            Base.List.fold comps ~init:Tid.Set.empty ~f:(fun acc c ->
-                Core.Set.add acc c.c_fail_blk)
-          in
-          loop (prune ~pre_preds_count sub ~seeds) (depth + 1)
+          loop (prune ~pre_preds_count sub) (depth + 1)
   in
   loop sub 0
