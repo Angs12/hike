@@ -50,7 +50,7 @@ let sec_meta ~(word : int) (proj : Project.t) : sec_meta option list =
           sm_const = is_const;
           sm_lo = Word.to_int64_exn min_addr;
           sm_hi = Word.to_int64_exn max_addr;
-          sm_words = (Bytes.length arr + word - 1) / word;
+          sm_words = Hike_stack_bounds.cdiv (Bytes.length arr) word;
           sm_image = Some arr;
           sm_copy_relocs = [] })
   in

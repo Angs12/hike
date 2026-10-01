@@ -66,7 +66,7 @@ let remapped_const ctx llvm_ctx llvm_module v ty =
 
 (* Declares a section global as [n x iN], [word] bytes per cell. *)
 let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
-  let n64 = (size + word - 1) / word in
+  let n64 = Hike_stack_bounds.cdiv size word in
   let ret =
     Llvm.declare_global
       (Llvm.array_type (Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word)) n64)
@@ -252,7 +252,7 @@ let create_uninitialized_global llvm_ctx llvm_module size name =
 let create_copy_reloc_bss llvm_ctx llvm_module size name copy_relocs ~word
     =
   let size = Int64.to_int size in
-  let n64 = (size + word - 1) / word in
+  let n64 = Hike_stack_bounds.cdiv size word in
   let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
   match copy_relocs with
   | [] -> create_array_global llvm_ctx llvm_module name word_ty n64 None

@@ -12,6 +12,9 @@ module Clp = Cbat_clp
 let i64_opt (w : Cbat_word.t) : int64 option =
   Cbat_word.to_int64_opt w
 
+(* Ceiling division of sizes: an empty size spans no elements. *)
+let cdiv (x : int) (y : int) : int = (x + y - 1) / y
+
 let position_pair (lo : Cbat_word.t) (hi : Cbat_word.t)
     : (int64 * int64) option =
   let open Base.Option in
