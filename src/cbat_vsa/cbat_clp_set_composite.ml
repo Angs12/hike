@@ -277,7 +277,7 @@ and canonical (ps : t list) : t =
     let clp_piece, fs_piece =
       match clp_piece, fs_piece with
       | Some cps, None
-        when not (P.is_top cps)
+        when (not (P.is_bottom cps)) && not (P.is_top cps)
              && not (Cbat_word.gt_int (P.cardinality cps) Utils.fin_set_size)
         -> None, Some (FinSet.of_list ~width:(P.bitwidth cps) (P.elements cps))
       | c, f -> c, f
@@ -297,6 +297,12 @@ and canonical (ps : t list) : t =
     in
     (match leaves with
      | [ q ] -> q
+     | [] ->
+       (* No leaf survived: a bottom at the widest input, never an empty
+          [Many] (which would carry width 0). *)
+       FinSet
+         (FinSet.bottom
+            (List.fold ps ~init:1 ~f:(fun a q -> Stdlib.max a (bitwidth q))))
      | ps -> Many ps))
 
 
@@ -1608,19 +1614,27 @@ let rec precedes t1 t2 : bool =
   | FinSet s, Clp _ -> Clp.precedes (clp_of_finset s) (as_clp t2)
   | _ -> Clp.precedes (as_clp t1) (as_clp t2)
 
-(* Widening lives in the offsets, HULLED to one progression: the
-   positional piece widen lets the offsets' hull wiggle while pieces
-   churn, and the memory keys derived from the hulls never stabilize
-   (measured: four fresh fixpoint backstops on expr's regex subs). *)
-(* Widen the two hulled progressions, keeping the origin: two symbolic
-   pieces, or a symbolic piece and a frame-relative plain twin, widen in
-   the offsets; the plain hulls otherwise. *)
-let hull_join (f : Clp.t -> Clp.t -> Clp.t) t1 t2 : t =
+(* Widen the two values, keeping the origin: two symbolic pieces, or a
+   symbolic piece and a frame-relative plain twin, widen in the offsets.
+   A plain pair widens piece-aligned when both sides carry a piece
+   union — a multi-piece value keeps its pieces (the interior exclusion
+   survives a growing widen) — and widens the single-progression hull
+   otherwise, so a FinSet's non-widening union never drives the
+   fixpoint. *)
+let hull_join (f : Clp.t -> Clp.t -> Clp.t) (fp : P.t -> P.t -> P.t) t1 t2 : t =
   let hull ps =
     match hull_of_pieces ps with
     | Some p -> p
     | None -> Clp.bottom 64 in
-  let plain_hull () = Clp (P.of_progression (f (as_clp t1) (as_clp t2))) in
+  (* A widening pairs the two plain piece unions when both sides carry
+     one, so a multi-piece value keeps its pieces; every other shape
+     hulls. *)
+  let plain_hull () =
+    match t1, t2 with
+    | Clp a, Clp b when Stdlib.Int.equal (P.bitwidth a) (P.bitwidth b) ->
+      Clp (fp a b)
+    | _ -> Clp (P.of_progression (f (as_clp t1) (as_clp t2)))
+  in
   let rel_plain (o : Origin.t) (a : P.t) (plain : t) : t option =
     match frame_offsets o plain with
     | Some offs -> Some (Rel (o, P.of_progression (f (hull a) (hull offs))))
@@ -1640,9 +1654,13 @@ let hull_join (f : Clp.t -> Clp.t -> Clp.t) t1 t2 : t =
           | None -> plain_hull ())
       | _ -> plain_hull ()) ]
 
-let widen_join t1 t2 : t = hull_join Clp.widen_join t1 t2
+let widen_join t1 t2 : t = hull_join Clp.widen_join P.widen_join t1 t2
+
 let extrapolate_steps ~steps t1 t2 : t =
-  hull_join (Clp.extrapolate_steps ~steps) t1 t2
+  hull_join
+    (Clp.extrapolate_steps ~steps)
+    (fun a b -> P.extrapolate_steps ~steps a b)
+    t1 t2
 
 let join = union
 let meet = intersection
