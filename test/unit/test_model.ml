@@ -471,13 +471,6 @@ let tests : unit Alcotest.test list =
 
 
 
-    (* The printable-run rule (the model's one home): a word is string
-       text iff a printable run crosses its start boundary. *)
-    pin "MOD-27" "STRING-TEXT: a printable run crossing the start covers the word"
-      (fun () ->
-        let txt = Bytes.of_string "\x63\x61\x74\x00\x61\xff\x74\x00" in
-        check "MOD-27" (Sm.string_text_table txt 1));
-
 
 
 

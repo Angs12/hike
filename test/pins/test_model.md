@@ -29,7 +29,6 @@ here.
 | MOD-18 | `Hike_split_mem.normalize` splits the RMW; write-closure demotes the slot for both sides, so every memory node is on `window_mem`. | In `src/hike_split_mem.ml`, skip the split; or convert the hoisted read to a slot in the rewrite. | MOD-18. |
 | MOD-19 | `Hike_jump.compile_sub` compiles flag idioms to value comparisons — no memory node rides a cond. | In `src/hike_jump.ml`, `compile_sub` returns the sub unchanged. | MOD-19. |
 | MOD-20 | The load def converts to the region mem and the guard reads its converted temp transitively. | As MOD-12. | MOD-20. |
-| MOD-27 | `Hike_stack_model.string_text_table`: a printable run crossing the word start covers the word. | In `src/hike_stack_model.ml` (`string_text_table`'s prepass), record every byte as printable. | MOD-27. |
 | MOD-33 | `Hike_abi.is_sp` / `sp`: the stack pointer is RSP, and only RSP (SP-only, ADR 0008). | In `src/hike_abi.ml`, set the SysV `sp` to RBP (or make `is_sp` true for RBP). | MOD-33. |
 | MOD-34 | RBP is an ordinary callee-saved GPR; no frame-pointer fact exists. | In `hike_abi.ml`, remove RBP from `callee_saved` (or `is_callee_saved`). | MOD-34. |
 | MOD-37 | An unknown target falls back to the SysV record (`of_target` total; `addr_size_bits unknown = 0`). | In `hike_abi.ml`, make `of_target` raise on unknown, or return a nonzero `addr_size_bits`. | MOD-37. |

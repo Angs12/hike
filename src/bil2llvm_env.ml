@@ -101,12 +101,15 @@ let build_indirect_br llvm_builder target ~reserved_destinations =
 (* The section spec: the components, the spans served whole
    (each (id, lo, hi)), the word grid, the input sections in the
    fixed section-list order ([None] = absent from the binary), and the
-   absolute copy-relocation slot addresses used by access routing. *)
+   loader's relocation facts: the RELATIVE words' runtime values
+   (in-module addresses), the externally-relocated words' symbols, and
+   the absolute copy-relocation slot addresses used by access routing. *)
 type section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
   spec_sections : Hike_stack_model.sec_meta option list;
+  spec_relative : (int64 * int64) list;
   (* Absolute addresses of copy-relocated slots, for access routing. *)
   spec_copy_relocs : int64 list;
 }
@@ -130,6 +133,10 @@ type emit_ctx = {
   (* The section base map: every native address renders through its
      owning global. *)
   copy_relocs : int64 list;
+  (* The loader's relocation facts, word-grain: a RELATIVE word's
+     runtime value (an in-module address) and an externally-relocated
+     word's symbol. *)
+  relative : (int64 * int64) list;
   target : Theory.Target.t;
   (* ABI projection of [target], static per binary. *)
   abi : Abi.t;

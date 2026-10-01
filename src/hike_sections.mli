@@ -215,9 +215,12 @@ val attrib_spans : meta:sec_meta option list -> data_span list
 
 (** The emitter's section spec; a [whole] entry (id, lo, hi) is a span
     served whole — the section's own image global is the id's storage.
-    The spec also carries the absolute copy-relocation slot addresses. *)
+    [relative]/[externals] are the loader's relocation facts the
+    initializer consults; the spec also carries the absolute
+    copy-relocation slot addresses. *)
 val section_spec_of :
   word:int ->
   comps:Hike_stack_model.sec_comp list ->
   whole:(int * int64 * int64) list ->
-  meta:sec_meta option list -> Bil2llvm_env.section_spec
+  meta:sec_meta option list ->
+  relative:(int64 * int64) list -> Bil2llvm_env.section_spec

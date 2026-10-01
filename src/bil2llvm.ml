@@ -341,6 +341,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let ctx =
     { symtab;
       copy_relocs;
+      relative = spec.spec_relative;
       target;
       abi;
       sp = Abi.sp target;
@@ -405,8 +406,9 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
           create_sub ctx scope s)
   in
   let initializer_phase () =
-    (* Word data goes through [remap_native_addr], so function-pointer
-       data lands on a promoted sub's thunk. *)
+    (* The initializer rule consults the loader's relocation facts
+       (ctx.relative/externals); function-pointer data lands on a
+       promoted sub's thunk through the same address map. *)
   Base.List.iter sections ~f:(fun section ->
       match section.bytes with
       | Some arr ->
@@ -426,6 +428,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
               in
               Bil2llvm_section.set_owner_initializer ctx llvm_ctx
                 llvm_module o.base arr
+                ~base_addr:lo
                 ~word_lo:(w o.own_lo)
                 ~word_hi:(w o.own_hi)
                 ~typed_w:o.typed_w
@@ -477,6 +480,7 @@ type section_spec = Bil2llvm_env.section_spec = {
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
   spec_sections : sec_meta option list;
+  spec_relative : (int64 * int64) list;
   spec_copy_relocs : int64 list;
 }
 

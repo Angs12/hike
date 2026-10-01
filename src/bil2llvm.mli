@@ -65,13 +65,18 @@ type sec_meta = Hike_stack_model.sec_meta = {
 
 (** The section spec: the components, the spans served whole
     (each (id, lo, hi)), the word grid, the input sections in the
-    fixed section-list order ([None] = absent from the binary), and the
-    absolute copy-relocation slot addresses used by access routing. *)
+    fixed section-list order ([None] = absent from the binary), and
+    the loader's relocation facts: [spec_relative] maps a RELATIVE
+    word's site to its runtime value, [spec_externals] maps an
+    externally-relocated word's site to its symbol, and
+    [spec_copy_relocs] holds the absolute copy-relocation slot
+    addresses used by access routing. *)
 type section_spec = Bil2llvm_env.section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
   spec_word : int;
   spec_sections : sec_meta option list;
+  spec_relative : (int64 * int64) list;
   spec_copy_relocs : int64 list;
 }
 

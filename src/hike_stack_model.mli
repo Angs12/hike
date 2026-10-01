@@ -205,9 +205,6 @@ val blk_reads : blk term -> Var.Set.t
 val sub_map : program term -> sub term Tid.Map.t
 val sub_reads : sub term -> Var.Set.t
 
-(* A word is string text iff a printable run crosses its start. *)
-val string_text_table : Bytes.t -> int -> bool
-
 val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
 
 (* The call facts. *)

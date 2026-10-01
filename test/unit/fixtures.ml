@@ -1083,7 +1083,8 @@ let emit_ir (subs : sub term list) : string =
     ~target:Theory.Target.unknown ~addr_bits:64
     ~symtab:None
     { B2l.spec_comps = []; B2l.spec_whole = []; B2l.spec_word = 8;
-      B2l.spec_sections = []; B2l.spec_copy_relocs = [] }
+      B2l.spec_sections = []; B2l.spec_relative = [];
+      B2l.spec_copy_relocs = [] }
     prog;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;

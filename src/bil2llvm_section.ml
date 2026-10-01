@@ -94,12 +94,15 @@ let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
   in
   go 0L 0
 
-(* A section initializer over the byte image: word-sized elements
-   render through the address map (pointer-valued words render the
-   target address itself), narrower elements chunk the raw bytes;
-   BSS is zero. *)
+(* A section initializer over the byte image: a word-sized element is
+   an address iff a relocation names it — a RELATIVE word renders its
+   runtime value (base + addend, the loader's own fact), an
+   externally-relocated word renders the symbol's address; every other
+   word keeps its raw bits.  Narrower elements chunk the raw bytes;
+   BSS is zero.  [base_addr] is the section's first byte's address (the
+   [word_lo]/[word_hi] indices are on the section's word grid). *)
 let set_owner_initializer ctx llvm_ctx llvm_module g
-    (arr : Bytes.t) ~(word_lo : int) ~(word_hi : int)
+    (arr : Bytes.t) ~(base_addr : int64) ~(word_lo : int) ~(word_hi : int)
     ~(typed_w : int) ~(bss : bool) ~word =
   let words = word_hi - word_lo + 1 in
   let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
@@ -107,15 +110,13 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     if typed_w >= word then word_ty
     else Llvm.integer_type llvm_ctx (typed_w * 8)
   in
-  (* A word inside a printable string run keeps its raw bits:
-     remapping it would relocate the string's own bytes.  The text
-     table is one prepass over the image, not a rescan per word. *)
-  let text = Hike_stack_model.string_text_table arr in
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
-    if text off then Llvm.const_of_int64 word_ty v false
-    else remapped_const ctx llvm_ctx llvm_module v word_ty
+    let addr = Stdlib.Int64.add base_addr (Stdlib.Int64.of_int off) in
+    match Base.List.Assoc.find ctx.relative ~equal:Int64.equal addr with
+    | Some rv -> remapped_const ctx llvm_ctx llvm_module rv word_ty
+    | None -> Llvm.const_of_int64 word_ty v false
   in
   if bss then Llvm.set_initializer (Llvm.const_null elem_ty) g
   else if typed_w >= word then

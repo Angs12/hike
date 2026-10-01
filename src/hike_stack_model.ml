@@ -469,27 +469,6 @@ let sub_reads (s : sub term) : Var.Set.t =
       in
       Core.Set.union acc (blk_reads blk))
 
-(* A word is string text iff a printable run crosses its start boundary —
-   printable back to the last NUL (or the array start); a NUL directly
-   before it means the run starts at the word and it renders as a value.
-   The table answers every offset with one backward prepass (the naive
-   scan is quadratic over printable runs). *)
-let string_text_table (arr : Bytes.t) : int -> bool =
-  let n = Bytes.length arr in
-  let printable b = b >= 0x20 && b <= 0x7e in
-  (* pre.(i) = the last non-printable byte index at or before i-1. *)
-  let pre = Array.make (n + 1) (-1) in
-  for i = 0 to n - 1 do
-    let c = Char.code (Bytes.get arr i) in
-    pre.(i + 1) <- (if printable c then pre.(i) else i)
-  done;
-  fun off ->
-    off > 0 && off < n
-    && printable (Char.code (Bytes.get arr off))
-    && (match pre.(off) with
-       | -1 -> true
-       | j -> Char.code (Bytes.get arr j) = 0 && j < off - 1)
-
 (* The deepest literal SP decrement in the sub (prologues and VLAs),
    through a copy chain as in the dynamic-allocation walk. *)
 let deepest_sp_decrement (sub : sub term) ~(abi : Abi.t) : int64 =
