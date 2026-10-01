@@ -299,9 +299,18 @@ module Stack_model : sig
   (** The promoted incoming stack-slot parameter of index [i]. *)
   val arg_slot : word:int -> int -> var
 
+  (** One alloca of the sub: the region id, the model-address extent
+      it covers, and its byte size. *)
+  type layout_region = Hike_stack_model.layout_region = {
+    r_id : int;
+    r_lo : int64;
+    r_hi : int64;
+    r_bytes : int64;
+  }
+
   (** Every alloca of the sub; rides the sub term. *)
   type sub_layout = Hike_stack_model.sub_layout = {
-    regions : (int * (int64 * int64) * int64) list;
+    regions : layout_region list;
     window_param : bool;
   }
 

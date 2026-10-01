@@ -43,7 +43,12 @@ let tests : unit Alcotest.test list =
        base, and a real alloca of the range's bytes"
       (fun () ->
         let llvm_ctx, llvm_module, llvm_builder = make_builder () in
-        let regions = [ (3, (pos (-24L), pos (-17L)), 16L) ] in
+        let regions =
+          [ { Model.Sub_layout.r_id = 3;
+              r_lo = pos (-24L);
+              r_hi = pos (-17L);
+              r_bytes = 16L } ]
+        in
         let storages =
           Stack_ptr.build ~llvm_ctx ~llvm_builder (layout_of regions)
         in

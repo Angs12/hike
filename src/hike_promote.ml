@@ -345,7 +345,7 @@ type storage_geom = { sg_rel : int64; sg_lo : int64; sg_hi : int64 }
 let geoms_of_layout (layout : Hike_stack_model.sub_layout) :
     storage_geom Core.Int.Map.t =
   Base.List.fold layout.Hike_stack_model.regions ~init:Core.Int.Map.empty
-    ~f:(fun m (id, (lo, hi), _) ->
+    ~f:(fun m { Model.Sub_layout.r_id = id; r_lo = lo; r_hi = hi; _ } ->
         Core.Map.set m ~key:id
           ~data:
             { sg_rel = Stdlib.Int64.sub lo Model.segment_base;

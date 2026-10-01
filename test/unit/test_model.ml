@@ -277,7 +277,8 @@ let tests : unit Alcotest.test list =
             (tree_of sub2)
         in
         check "MOD-10"
-          (Base.List.exists l2.Sm.regions ~f:(fun (id, _, b) ->
+          (Base.List.exists l2.Sm.regions
+             ~f:(fun { Sm.r_id = id; r_bytes = b; _ } ->
                Int.equal id 0 && Int64.equal b unbounded_residue_bytes)));
 
 

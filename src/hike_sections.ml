@@ -1028,7 +1028,11 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
         | Stack_region id ->
             let bytes = region_bytes k in
             (( below,
-               (id, (k.lo.p_pos, k.hi.p_pos), bytes) :: carved ),
+               { Model.Sub_layout.r_id = id;
+                 r_lo = k.lo.p_pos;
+                 r_hi = k.hi.p_pos;
+                 r_bytes = bytes }
+               :: carved ),
              residue_seen)
         | Data_region _ -> fail_unserved "data binding in a sub tree" k)
   in
@@ -1063,7 +1067,11 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   let rhi = Stdlib.Int64.pred (Stdlib.Int64.add entry window) in
   let regions =
     if residue_seen || Stdlib.Int64.compare window 0L > 0 then
-      (Model.residue_id, (rlo, rhi), residue_bytes) :: Base.List.rev carved
+      { Model.Sub_layout.r_id = Model.residue_id;
+        r_lo = rlo;
+        r_hi = rhi;
+        r_bytes = residue_bytes }
+      :: Base.List.rev carved
     else Base.List.rev carved
   in
   let window_param = args_residue in

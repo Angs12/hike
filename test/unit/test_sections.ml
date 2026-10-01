@@ -864,7 +864,12 @@ let tests : unit Alcotest.test list =
           A.layout_of_tree ~word:8 ~entry:Hike.Stack_model.segment_base
             ~abi:Hike.Abi.x86_64_sysv ~sub tree
         in
-        check "SEC-65" (l.Sm.regions = [ (1, (pos (-8L), pos (-1L)), 16L) ]));
+        check "SEC-65"
+        (l.Sm.regions
+        = [ { Sm.r_id = 1;
+              r_lo = pos (-8L);
+              r_hi = pos (-1L);
+              r_bytes = 16L } ]));
 
     pin "SEC-71"
       "B2a: the residue's window reserve is the def-backed members' proven reach — the call escape does not size it"
@@ -899,9 +904,9 @@ let tests : unit Alcotest.test list =
         in
         check "SEC-71"
           (match
-             Base.List.find l.Sm.regions ~f:(fun (id, _, _) -> Int.equal id 0)
+             Base.List.find l.Sm.regions ~f:(fun { Sm.r_id = id; _ } -> Int.equal id 0)
            with
-           | Some (_, (_, rhi), _) ->
+           | Some { Sm.r_hi = rhi; _ } ->
              let window =
                Stdlib.Int64.add
                  (Stdlib.Int64.sub rhi Hike.Stack_model.segment_base)

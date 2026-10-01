@@ -534,11 +534,21 @@ let has_call_push (sub : sub term) : bool =
 module Sub_layout = struct
   open Core
 
+  (* One alloca of the sub: the region id, the model-address extent it
+     covers, and its byte size. *)
+  type region = {
+    r_id : int;
+    r_lo : int64;
+    r_hi : int64;
+    r_bytes : int64;
+  }
+  [@@deriving equal, compare, sexp]
+
   (* [regions] is every alloca of the sub — the carved regions plus the
      stack residue (id 0, whose extent contains the caller window).  Every
      model address resolves against one region's base. *)
   type t = {
-    regions : (int * (int64 * int64) * int64) list;
+    regions : region list;
     (* The sub reads its incoming window: its direct-call signature carries
        the hike_window parameter. *)
     window_param : bool;
@@ -561,13 +571,20 @@ module Sub_layout = struct
     include Stringable
 
     let caller_identity =
-      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/4"
+      Bin_prot.Shape.Uuid.of_string "hike:hike_stack_model.Sub_layout/5"
   end)
 end
 
 type sub_layout = Sub_layout.t = {
-  regions : (int * (int64 * int64) * int64) list;
+  regions : Sub_layout.region list;
   window_param : bool;
+}
+
+type layout_region = Sub_layout.region = {
+  r_id : int;
+  r_lo : int64;
+  r_hi : int64;
+  r_bytes : int64;
 }
 
 

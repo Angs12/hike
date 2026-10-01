@@ -219,8 +219,14 @@ let tests : unit Alcotest.test list =
         let layout : Sm.sub_layout =
           {
             regions =
-              [ (0, (pos residue_lo, pos residue_hi), residue_bytes);
-                (1, (pos arg_lo, pos arg_hi), arg_bytes) ];
+              [ { Sm.r_id = 0;
+                  r_lo = pos residue_lo;
+                  r_hi = pos residue_hi;
+                  r_bytes = residue_bytes };
+                { Sm.r_id = 1;
+                  r_lo = pos arg_lo;
+                  r_hi = pos arg_hi;
+                  r_bytes = arg_bytes } ];
             window_param = false;
           }
         in

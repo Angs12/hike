@@ -17,7 +17,7 @@ type storage = {
 let build ~(llvm_ctx : Llvm.llcontext) ~(llvm_builder : Llvm.llbuilder)
     (layout : Model.Sub_layout.t) : storage list =
   Base.List.map layout.Model.Sub_layout.regions
-    ~f:(fun (id, (lo, _), bytes) ->
+    ~f:(fun { Model.Sub_layout.r_id = id; r_lo = lo; r_bytes = bytes; _ } ->
       let base =
         Llvm.build_alloca
           (Llvm.array_type (Llvm.i8_type llvm_ctx) (Int64.to_int bytes))

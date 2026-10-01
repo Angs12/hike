@@ -309,11 +309,12 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
       | Some (lo, hi) -> (
           match
             Base.List.find layout.Hike_stack_model.Sub_layout.regions
-              ~f:(fun (_, (rlo, rhi), _) ->
+              ~f:(fun { Hike_stack_model.Sub_layout.r_lo = rlo; r_hi = rhi; _ } ->
                 Stdlib.Int64.compare lo rlo >= 0
                 && Stdlib.Int64.compare hi rhi <= 0)
           with
-          | Some (id, _, _) -> Hike_stack_model.Ptr_region id
+          | Some { Hike_stack_model.Sub_layout.r_id = id; _ } ->
+            Hike_stack_model.Ptr_region id
           | None -> Hike_stack_model.Ptr_residue)
       | None -> Hike_stack_model.Ptr_residue
   in
