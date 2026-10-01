@@ -40,6 +40,17 @@ let dump_sub ~(word : int) (proj : Project.t) (sub : sub term) : unit =
   match Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid sub) with
   | None -> Printf.printf "  (no tree)\n%!"
   | Some tree ->
+    let layout =
+      Hike.Sections.layout_of_tree ~word ~entry:Hike.Stack_model.segment_base
+        ~abi:(Hike.Abi.of_target (Project.target proj)) ~sub tree
+    in
+    Printf.printf "LAYOUT window_param=%b regions=%s\n%!"
+      layout.Hike.Stack_model.Sub_layout.window_param
+      (String.concat ","
+         (Base.List.map layout.Hike.Stack_model.Sub_layout.regions
+            ~f:(fun (r : Hike.Stack_model.Sub_layout.region) ->
+              Printf.sprintf "%d:[%Ld..%Ld]=%Ld" r.r_id r.r_lo r.r_hi
+                r.r_bytes)));
     Hike.Sections.Tree.to_sequence tree
     |> Seq.iter ~f:(fun (k, rs) ->
         let storage =
@@ -177,8 +188,13 @@ let () =
   | bin :: rest ->
     let proj = load_project bin in
     let word = (Hike.Abi.of_target (Project.target proj)).Hike_abi.word in
-    let name = match rest with n :: _ -> n | [] -> "main" in
-    (match find_sub (Project.program proj) name with
-     | None -> Printf.eprintf "no sub %s\n%!" name
-     | Some sub -> dump_sub ~word proj sub)
-  | _ -> usage Sys.argv.(0) "<binary> [<sub-name>]"
+    (match rest with
+     | [ "--all" ] ->
+       Term.enum sub_t (Project.program proj)
+       |> Seq.iter ~f:(dump_sub ~word proj)
+     | _ ->
+       let name = match rest with n :: _ -> n | [] -> "main" in
+       (match find_sub (Project.program proj) name with
+        | None -> Printf.eprintf "no sub %s\n%!" name
+        | Some sub -> dump_sub ~word proj sub))
+  | _ -> usage Sys.argv.(0) "<binary> [<sub-name> | --all]"
