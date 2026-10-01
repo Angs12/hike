@@ -348,7 +348,8 @@ let tests : unit Alcotest.test list =
 
 
     pin "EMIT-28"
-      "a no-return indirect tail emits an indirect branch"
+      "an indirect tail with no enumerated destinations is a loud failure — \
+       the module never carries destination-less UB behind a warning"
       (fun () ->
         let target = v64 "tail_target" in
         let sub, _ =
@@ -362,10 +363,15 @@ let tests : unit Alcotest.test list =
                         (Call.create
                            ~target:(Indirect (Bil.Var target)) ()))) ] ]
         in
-        let ir = emit_ir [ sub ] in
-        check "EMIT-28"
-          (contains_substring ir "indirectbr"
-           && not (contains_substring ir "ret void")));
+        let loud =
+          try
+            ignore (emit_ir [ sub ]);
+            false
+          with Failure m ->
+            Base.String.is_substring m
+              ~substring:"no enumerated destinations"
+        in
+        check "EMIT-28" loud);
 
 
 

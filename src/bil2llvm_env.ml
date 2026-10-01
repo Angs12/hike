@@ -88,13 +88,6 @@ type section_type = Hike_stack_model.sec
 let is_interrupt_name (n : string) : bool =
   Base.String.is_prefix n ~prefix:"@interrupt:"
 
-(* LLVM's indirectbr count reserves destination slots; it is not the
-   destination set. *)
-let indirect_br_one_reserved = 1
-let indirect_br_no_reserved = 0
-let build_indirect_br llvm_builder target ~reserved_destinations =
-  Llvm.build_indirect_br target reserved_destinations llvm_builder
-
 (* One input section of the spec: the model's [sec_meta] row —
    [sm_image] is the section's byte image, None for the bss region. *)
 

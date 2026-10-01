@@ -492,18 +492,12 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
         (Tid.name blk_tid);
       create_return ctx scope blk_tid llvm_builder sub
   | Indirect target ->
-      Hike_diag.warn
-        "emit: indirect tail call at block %s has no enumerated destinations (UB when taken)"
-        (Tid.name blk_tid);
-      let target_exp = create_exp ctx scope llvm_builder blk_tid target in
-      let target_ptr =
-        if Llvm.classify_type (Llvm.type_of target_exp) = Llvm.TypeKind.Pointer
-        then target_exp
-        else Bil2llvm_section.create_addr_ptr ctx llvm_builder target_exp
-      in
-      ignore
-        (build_indirect_br llvm_builder target_ptr
-           ~reserved_destinations:indirect_br_no_reserved)
+      (* A dispatch with no enumerated destinations is UB the moment it
+         is taken; the module never carries it behind a warning. *)
+      failwith
+        (Printf.sprintf
+           "hike: indirect tail call at block %s has no enumerated destinations"
+           (Tid.name blk_tid))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
 (* Unmapped intrinsic stubs use a fixed i64 synthetic ABI; normalize

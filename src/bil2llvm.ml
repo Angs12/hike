@@ -35,13 +35,13 @@ let create_branches ctx scope blk_tid llvm_builder branches =
     end
     else get_bb scope tid
   in
-  let emit_indirect exp =
-    Hike_diag.warn
-      "emit: indirect jump at block %s has no enumerated destinations (UB when taken)"
-      (Tid.name blk_tid);
-    let target_val = create_exp ctx scope llvm_builder blk_tid exp in
-    build_indirect_br llvm_builder target_val
-      ~reserved_destinations:indirect_br_one_reserved |> ignore
+  let emit_indirect _exp =
+    (* A dispatch with no enumerated destinations is UB the moment it is
+       taken; the module never carries it behind a warning. *)
+    failwith
+      (Printf.sprintf
+         "hike: indirect jump at block %s has no enumerated destinations"
+         (Tid.name blk_tid))
   in
   match Seq.to_list branches with
   | [ j ] -> (
