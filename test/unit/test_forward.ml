@@ -389,7 +389,7 @@ let tests : unit Alcotest.test list =
         let i = v64 "t19_i" in
         let d_i1 = Def.create i (Bil.BinOp (Bil.PLUS, Bil.Var i, lit 1)) in
         let cond = Bil.BinOp (Bil.LE, Bil.Var i, lit 3) in
-        let sub, _ =
+        let sub, tids =
           sub_of "t19_vla_roundtrip"
             [ [ d_rbp; d_frame; d_n_cell; d_n_load; d_sub; d_ptr; d_align;
                 d_save; d_i1 ],
@@ -410,12 +410,14 @@ let tests : unit Alcotest.test list =
             ~lift_at:(fun _ ~block_addrs:_ -> None)
             ~block_addrs:(Core.Map.empty (module Addr)) sub
         in
-        (* The solve's post state of the one block holds the reload's
-           value; the through-pointer reads keep the band only if the
-           reloaded value is still the Vla-origin Rel. *)
+        (* The RELOAD block's post state holds the reloaded value; the
+           through-pointer reads keep the band only if that value is
+           still the Vla-origin Rel.  Read by tid, never by map order. *)
+        let reload_tid = tids.(1) in
         let post =
-          Core.Map.fold envs ~init:AI.bottom
-            ~f:(fun ~key:_ ~data:(_, post) acc -> post)
+          match Core.Map.find envs reload_tid with
+          | Some (_, post) -> post
+          | None -> AI.bottom
         in
         check "FWD-19"
           (match Vsa.WordSet.vla_offsets (AI.find_word 64 post rax) with

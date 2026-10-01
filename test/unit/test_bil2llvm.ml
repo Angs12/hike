@@ -401,6 +401,26 @@ let tests : unit Alcotest.test list =
         in
         check "EMIT-28" loud);
 
+    pin "EMIT-42"
+      "an indirect JUMP with no enumerated destinations is a loud failure \
+       too (the sibling site to EMIT-28's indirect tail)"
+      (fun () ->
+        let target = v64 "jump_target" in
+        let sub, _ =
+          sub_of "indirect_jump"
+            [ [ Def.create target
+                  (Bil.Int (Cbat_word.to_word (w64 0x401000))) ],
+              [ (0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var target)))) ] ]
+        in
+        let loud =
+          try
+            ignore (emit_ir [ sub ]);
+            false
+          with Failure m ->
+            Base.String.is_substring m ~substring:"no enumerated destinations"
+        in
+        check "EMIT-42" loud);
+
 
 
     (* LGUARD: the lone guarded goto — the split shape — renders its
