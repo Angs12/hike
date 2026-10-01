@@ -649,12 +649,6 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
       | Goto (Indirect texp) -> series texp None
       | _ -> None)
 
-(* Rebuilds [blk] with exactly [js'] as its jmps. *)
-let with_jmps (blk : blk term) (js' : jmp term list) : blk term =
-  let b = Blk.Builder.init ~copy_phis:true ~copy_defs:true blk in
-  Base.List.iter js' ~f:(Blk.Builder.add_jmp b);
-  Term.with_attrs (Blk.Builder.result b) (Term.attrs blk)
-
 (* Rebuilds [blk] replacing each jmp its classifier rewrites; a
    classifier [None] keeps the jmp. *)
 let splice_jmps (blk : blk term)
@@ -668,13 +662,10 @@ let splice_jmps (blk : blk term)
   | [] -> blk
   | _ ->
       let rewr = Core.Map.of_alist_exn (module Tid) decided in
-      let spliced =
-        Base.List.concat_map js ~f:(fun j ->
-            match Core.Map.find rewr (Term.tid j) with
-            | Some js' -> js'
-            | None -> [ j ])
-      in
-      with_jmps blk spliced
+      Term.concat_map jmp_t blk ~f:(fun j ->
+          match Core.Map.find rewr (Term.tid j) with
+          | Some js' -> js'
+          | None -> [ j ])
 
 (* The fresh blocks a surviving indirect transfer may still denote:
    [go] does not follow indirect edges, so an unresolved transfer whose

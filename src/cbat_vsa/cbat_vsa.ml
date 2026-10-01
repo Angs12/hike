@@ -322,20 +322,14 @@ let normalize_round (s : Sub.t) : Sub.t =
         in
         if not has_rewrite then blk
         else
-          let b = Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk in
-          Term.enum def_t blk
-          |> Seq.iter ~f:(fun d ->
+          Term.concat_map def_t blk ~f:(fun d ->
               match Core.Map.find rewrites (Term.tid d) with
               | Some (`Mask (t, _, mask)) ->
-                Blk.Builder.add_def b
-                  (Def.with_rhs d
-                     (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int mask)))
+                [ Def.with_rhs d (Bil.BinOp (Bil.AND, Bil.Var t, Bil.Int mask)) ]
               | Some (`Temp (t, x, _)) ->
                 (* The temp reads [x] before the shift overwrites it. *)
-                Blk.Builder.add_def b (Def.create t x);
-                Blk.Builder.add_def b d
-              | None -> Blk.Builder.add_def b d);
-          Blk.Builder.result b)
+                [ Def.create t x; d ]
+              | None -> [ d ]))
 
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)

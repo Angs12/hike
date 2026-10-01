@@ -86,13 +86,15 @@ let qualify_sub (sub : sub term) : sub term =
     end
   in
   Term.map blk_t sub ~f:(fun blk ->
-      Term.map def_t blk ~f:(fun d ->
-          Def.with_lhs
-            (Def.with_rhs d (m#map_exp (Def.rhs d)))
-            (qualify (Def.lhs d)))
-      |> Term.map phi_t ~f:(fun p ->
-             Phi.with_lhs (Phi.map_exp p ~f:m#map_exp) (qualify (Phi.lhs p)))
-      |> Term.map jmp_t ~f:(Jmp.map_exp ~f:m#map_exp))
+      Blk.map_elts
+        ~def:(fun d ->
+            Def.with_lhs
+              (Def.with_rhs d (m#map_exp (Def.rhs d)))
+              (qualify (Def.lhs d)))
+        ~jmp:(Jmp.map_exp ~f:m#map_exp)
+        ~phi:(fun p ->
+            Phi.with_lhs (Phi.map_exp p ~f:m#map_exp) (qualify (Phi.lhs p)))
+        blk)
 
 let run_program (prog : program term) : program term =
   Term.map sub_t prog ~f:(fun sub -> qualify_sub (tag_targets sub))

@@ -166,9 +166,9 @@ let coerce_phi (p : phi term) : phi term =
 
 (* Every rhs, cond and phi of the block. *)
 let coerce_block (blk : blk term) : blk term =
-  Term.map def_t blk ~f:coerce_def
-  |> fun blk -> Term.map jmp_t blk ~f:(fun j -> Jmp.map_exp j ~f:coerce_exp)
-  |> fun blk -> Term.map phi_t blk ~f:coerce_phi
+  Blk.map_elts ~def:coerce_def
+    ~jmp:(fun j -> Jmp.map_exp j ~f:coerce_exp)
+    ~phi:coerce_phi blk
 
 let coerce_sub (sub : sub term) : sub term =
   Term.map blk_t sub ~f:coerce_block

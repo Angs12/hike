@@ -70,10 +70,7 @@ let restore_word ~(abi : Abi.t) : exp =
 
 (* The SP restore def at a call's single-pred continuation. *)
 let with_top_def (blk : blk term) (d : def term) : blk term =
-  let b = Blk.Builder.init ~copy_phis:true ~copy_jmps:true blk in
-  Blk.Builder.add_def b d;
-  Term.enum def_t blk |> Seq.iter ~f:(fun d0 -> Blk.Builder.add_def b d0);
-  Blk.Builder.result b
+  Term.prepend def_t blk d
 
 (* One phi rewrite: the incoming from [src] becomes [exp]. *)
 let set_incoming (phi : phi term) ~(src : Tid.t) (exp : exp) : phi term =
