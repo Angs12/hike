@@ -17,7 +17,7 @@ open Bil2llvm_section
    writes the false edge and the splitter canonicalizes the shape, so
    the emitter maps it directly — no chain walking, no term-order
    fallthrough. *)
-let create_branches ctx scope blk_tid llvm_builder ?(sub : sub term option)
+let create_branches ctx scope blk llvm_builder ?(sub : sub term option)
     branches =
   let open Bap.Std in
   let llvm_ctx = ctx.llvm_ctx in
@@ -36,16 +36,30 @@ let create_branches ctx scope blk_tid llvm_builder ?(sub : sub term option)
     end
     else get_bb scope tid
   in
-  let emit_indirect _exp =
-    (* A dispatch with no enumerated destinations is UB the moment it is
-       taken; the module never carries it behind a warning. *)
-    failwith
-      (Printf.sprintf
-         "hike: indirect jump at block %s%s has no enumerated destinations"
-         (Tid.name blk_tid)
-         (match sub with
-          | Some s -> Printf.sprintf " (sub %s)" (Tid.name (Term.tid s))
-          | None -> ""))
+  let blk_tid = Term.tid blk in
+  let emit_indirect blk exp =
+    (* The boundary class: the target is read through an
+       external-symbol slot, so the transfer leaves the program — the
+       module calls the symbol the slot binds and returns. *)
+    match external_slot_target ctx ?sub exp with
+    | Some name -> (
+        match sub with
+        | Some s -> create_external_boundary ctx scope llvm_builder blk_tid s name
+        | None ->
+          failwith
+            (Printf.sprintf
+               "hike: boundary indirect jump at block %s has no sub scope"
+               (Tid.name blk_tid)))
+    | None ->
+      (* A dispatch with no enumerated destinations is UB the moment it
+         is taken; the module never carries it behind a warning. *)
+      failwith
+        (Printf.sprintf
+           "hike: indirect jump at block %s%s has no enumerated destinations"
+           (Tid.name blk_tid)
+           (match sub with
+            | Some s -> Printf.sprintf " (sub %s)" (Tid.name (Term.tid s))
+            | None -> ""))
   in
   match Seq.to_list branches with
   | [ j ] -> (
@@ -60,7 +74,7 @@ let create_branches ctx scope blk_tid llvm_builder ?(sub : sub term option)
                  "hike: create_branches: block %s: a lone guarded goto has \
                   no explicit false edge (jmp %s)"
                  (Tid.name blk_tid) (Tid.name (Term.tid j)))
-      | Goto (Indirect exp) -> emit_indirect exp
+      | Goto (Indirect exp) -> emit_indirect blk exp
       | _ ->
           failwith "hike: create_branches: a piece's lone jmp is not a goto")
   | [ j1; j2 ] -> (
@@ -94,7 +108,7 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
   else
   match cf_type control_flow with
   | Br ->
-      create_branches ctx scope tid llvm_builder ~sub control_flow
+      create_branches ctx scope blk llvm_builder ~sub control_flow
   | Int -> create_interrupt ctx llvm_builder
   | Ret -> create_return ctx scope tid llvm_builder sub
   | CallIndirect ->

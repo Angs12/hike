@@ -48,3 +48,9 @@ open Bap.Std
       false edge becomes an explicit [Goto], and a destination two jumps
       share collapses to one unconditional edge (ADR 0024). *)
   val materialize_fallthroughs : sub term -> sub term
+
+(** Rewrites a lifted term's direct targets: a call's target names a
+    subroutine, a goto's a block, so the two resolve through different
+    maps.  Indirect targets stay the resolution's own. *)
+val remap_jmp :
+  call:(Tid.t -> Tid.t) -> blk:(Tid.t -> Tid.t) -> jmp term -> jmp term

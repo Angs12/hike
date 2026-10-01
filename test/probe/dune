@@ -68,7 +68,8 @@
   attr_census
   memmap_bench
   clp_bench
-  env_footprint)
+  env_footprint
+  relift_dump)
  (modules
   audit02
   conv_diag
@@ -81,7 +82,8 @@
   attr_census
   memmap_bench
   clp_bench
-  env_footprint)
+  env_footprint
+  relift_dump)
  (libraries
   clp_bench_rows
   precision_probe_rows

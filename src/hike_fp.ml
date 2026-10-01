@@ -58,9 +58,7 @@ let tag_targets (sub : sub term) : sub term =
               | Direct t -> (
                   let name = Tid.name t in
                   match Bil2llvm_fp.native_fp_op name with
-                  | Some _
-                    when Base.Option.is_none
-                           (Bil2llvm_fp.fp_width_of_name name) -> (
+                  | Some _ -> (
                       (* [widths] is total over the block's jmps — every
                          jmp elt records the width in effect there. *)
                       let w = Core.Map.find_exn !widths (Term.tid j) in
@@ -72,10 +70,15 @@ let tag_targets (sub : sub term) : sub term =
                                   (Direct (Tid.for_name sized))))
                       | None ->
                           (* No sized row at the temp's width: the
-                             unqualified target stays and every
-                             consumer falls back to the word width. *)
-                          Hike_diag.warn "fp: sub %s: intrinsic %s has no sized spelling at width %d - the unqualified target stays"
-                            (Sub.name sub) name w;
+                             unqualified target stays.  An op with sized
+                             rows at other widths says so — the residue
+                             is the recorded word-width fallback; an op
+                             with none (the runtime boundary) keeps the
+                             unqualified spelling as its identity. *)
+                          if Bil2llvm_fp.has_sized_rows name then
+                            Hike_diag.warn
+                              "fp: sub %s: intrinsic %s has no sized spelling at width %d - the unqualified target stays"
+                              (Sub.name sub) name w;
                           j)
                   | _ -> j)
               | _ -> j)

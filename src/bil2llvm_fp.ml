@@ -91,6 +91,18 @@ let sized_name (name : string) (w : int) : string option =
   let sized = Printf.sprintf "%s_%d" (fp_intrinsic_name name) w in
   if Core.Hashtbl.mem native_fp_map sized then Some sized else None
 
+(* Whether the table carries sized spellings for the op at all.  The
+   width-less rows without one (the runtime boundary) keep the
+   unqualified spelling as their identity; a miss at the temp's width is
+   then structural, not a residue. *)
+let has_sized_rows (name : string) : bool =
+  let bare = fp_intrinsic_name name in
+  Base.List.exists native_fp_table ~f:(fun (n, _, _) ->
+      let n = fp_intrinsic_name n in
+      Base.String.is_prefix n ~prefix:bare
+      && String.length n > String.length bare
+      && n.[String.length bare] = '_')
+
 (* The static model interface of each mapped op: the input temps the
    call block defines (fp_args) and the result temps consumers read
    (fp_rets); FCONVERT w reads x0 at the complementary width. *)

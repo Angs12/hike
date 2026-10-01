@@ -560,16 +560,24 @@ let create_interrupt ctx llvm_builder =
     (Llvm.build_call trap_ty trap [||] "" llvm_builder);
   ignore (Llvm.build_unreachable llvm_builder)
 
+(* The sub's entry block: the first block in term order among the block
+   graph's roots (the start node's successors).  A term can carry several
+   roots — a re-lifted main holds each flattened callee's entry — and the
+   entry is the block the sub's own execution starts at, which the lift
+   put first in the term. *)
 let entry_blk_tid sub =
   let cfg = Sub.to_graph sub in
-  let entry_blks = Graphs.Tid.Node.succs Graphs.Tid.start cfg in
-  let entry_blks =
-    Seq.filter entry_blks ~f:(fun tid -> not (tid = Graphs.Tid.exit))
+  let roots =
+    Graphs.Tid.Node.succs Graphs.Tid.start cfg
+    |> Seq.filter ~f:(fun tid -> not (tid = Graphs.Tid.exit))
+    |> Seq.to_list
+    |> Core.Set.of_list (module Tid)
   in
-  let entry_blk = Seq.min_elt entry_blks ~compare:Tid.compare in
-  match entry_blk with
+  match
+    Term.enum blk_t sub |> Seq.find ~f:(fun b -> Core.Set.mem roots (Term.tid b))
+  with
+  | Some b -> Term.tid b
   | None -> failwith "entry_blk_tid: no entry blk"
-  | Some tid -> tid
 
 let is_empty sub =
   let cfg = Sub.to_graph sub in

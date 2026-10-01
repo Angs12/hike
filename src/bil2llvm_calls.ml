@@ -222,6 +222,13 @@ let create_fun ctx sub_tid ~rets ~args ~variadic =
     Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ
       ctx.llvm_module
   in
+  (* The module's entry is the lifted main and the consumer enters
+     nothing else, so every other definition is internal: the system
+     crt's own _init/_fini do not collide with kept-by-refusal stubs,
+     and the optimizer may cross the boundaries. *)
+  (match Core.Map.find ctx.sub_of sub_tid with
+   | Some s when Term.has_attr s Hike_stack_model.main_role -> ()
+   | _ -> Llvm.set_linkage Llvm.Linkage.Internal fn);
   set_arg_names_of args fn;
   register_fn ctx sub_tid fn fn_typ;
   set_arg_attrs_of ctx fn args
@@ -509,6 +516,83 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
   | [ ret ] -> Llvm.build_ret ret llvm_builder |> ignore
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore
 
+(* The external-symbol slot a target exp reads: a Load whose address
+   names a slot the dynamic linker fills.  The target names a versioned
+   var under SSA, and its one defining def may sit in any block of the
+   sub — the split pieces separate a load from the transfer it feeds. *)
+let external_slot_target ctx ?(sub : sub term option) (target : exp) :
+    string option =
+  let e =
+    match target with
+    | Bil.Var v -> (
+      match sub with
+      | Some s -> (
+        match
+          Term.enum blk_t s
+          |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)
+        with
+        | Some d -> Def.rhs d
+        | None -> target)
+      | None -> target)
+    | e -> e
+  in
+  match e with
+  | Bil.Load (_, Bil.Int w, _, _) -> (
+      match Word.to_int64 w with
+      | Ok a ->
+        Base.List.find_map ctx.externals ~f:(fun (slot, name) ->
+            if Int64.equal slot a then Some name else None)
+      | Error _ -> None)
+  | _ -> None
+
+(* The boundary-class indirect transfer: the target leaves the program
+   through an external-symbol slot, so the module calls the symbol the
+   slot binds — the machine's integer lanes pass as the arguments, the
+   result binds the sub's return lanes, and the sub returns (the
+   transfer is a tail transfer). *)
+let create_external_boundary ctx scope llvm_builder blk_tid sub name =
+  let word = ctx.abi.Abi.word in
+  let window_var = Hike_stack_model.hike_window_var ~word in
+  let conv_args = synthetic_args ctx in
+  (* The register lanes only: the window stays the caller's private
+     shadow, and the external sees the machine's own ABI registers. *)
+  let reg_args = Base.List.take conv_args (Base.List.length conv_args - 1) in
+  let arg_typs =
+    Base.List.map reg_args ~f:(fun a ->
+        if Var.same (Arg.lhs a) window_var then ctx.ptr_ty
+        else lane_type ctx a)
+  in
+  let fn_typ =
+    Llvm.var_arg_function_type ctx.i64_ty (Array.of_list arg_typs)
+  in
+  (* The slot's symbol may already carry the extern_weak data binding the
+     initializer gives it; the call goes through it, so the module holds
+     ONE symbol and the slot's weak-undefined resolution (null) stays
+     the link-time answer, as the loader would leave it. *)
+  let callee =
+    match Llvm.lookup_function (sanitize_name name) ctx.llvm_module with
+    | Some fn -> fn
+    | None -> (
+      match Llvm.lookup_global (sanitize_name name) ctx.llvm_module with
+      | Some g -> Llvm.const_bitcast g (Llvm.pointer_type ctx.llvm_ctx)
+      | None ->
+        let f = Llvm.declare_function (sanitize_name name) fn_typ ctx.llvm_module in
+        Llvm.set_linkage Llvm.Linkage.External_weak f;
+        f)
+  in
+  let args =
+    Base.List.map reg_args ~f:(fun a ->
+        let exp = lane_exp scope blk_tid (Arg.rhs a) in
+        let v = create_exp ctx scope llvm_builder blk_tid exp in
+        Bil2llvm_ptr.as_integer ctx llvm_builder v)
+  in
+  let r = Llvm.build_call fn_typ callee (Array.of_list args) "" llvm_builder in
+  match get_rets ctx (Term.tid sub) with
+  | [ ret ] -> bind_call_ret ctx scope blk_tid ret r
+  | _ -> ();
+  create_return ctx scope blk_tid llvm_builder sub
+
 let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
   let call = call_exn j in
   match Call.target call with
@@ -519,13 +603,16 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
         "emit: indirect tail call at block %s has an unknown target — rendered as a return"
         (Tid.name blk_tid);
       create_return ctx scope blk_tid llvm_builder sub
-  | Indirect target ->
-      (* A dispatch with no enumerated destinations is UB the moment it
-         is taken; the module never carries it behind a warning. *)
-      failwith
-        (Printf.sprintf
-           "hike: indirect tail call at block %s (sub %s) has no enumerated destinations"
-           (Tid.name blk_tid) (Tid.name (Term.tid sub)))
+  | Indirect target -> (
+      match external_slot_target ctx ~sub target with
+      | Some name -> create_external_boundary ctx scope llvm_builder blk_tid sub name
+      | None ->
+        (* A dispatch with no enumerated destinations is UB the moment it
+           is taken; the module never carries it behind a warning. *)
+        failwith
+          (Printf.sprintf
+             "hike: indirect tail call at block %s (sub %s) has no enumerated destinations"
+             (Tid.name blk_tid) (Tid.name (Term.tid sub))))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
 (* Unmapped intrinsic stubs use a fixed i64 synthetic ABI; normalize

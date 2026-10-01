@@ -56,15 +56,22 @@ type vsa_sol = (tid, AI.t) Solution.t
 
 let default_entry () : AI.t = AI.top
 
-(* The sub's entry block: the CFG's [Start] pseudo-node points to it.
-   Term order need not put it first (a cold partition can precede it),
-   so read the graph, not [Term.first]. *)
+(* The sub's entry block: the first block in term order among the block
+   graph's roots (the start node's successors).  A term can carry several
+   roots — a re-lifted main holds each flattened callee's entry — and the
+   entry is the block the sub's own execution starts at, which the lift
+   put first in the term. *)
 let entry_block_of (sub : sub term) : blk term option =
   let cfg = Sub.to_graph sub in
-  Graphs.Tid.Node.succs Graphs.Tid.start cfg
-  |> Seq.filter ~f:(fun tid -> not (Tid.equal tid Graphs.Tid.exit))
-  |> Seq.min_elt ~compare:Tid.compare
-  |> Option.bind ~f:(fun tid -> Term.find blk_t sub tid)
+  let roots =
+    Graphs.Tid.Node.succs Graphs.Tid.start cfg
+    |> Seq.filter ~f:(fun tid -> not (Tid.equal tid Graphs.Tid.exit))
+    |> Seq.to_list
+    |> Core.Set.of_list (module Tid)
+  in
+  if Core.Set.is_empty roots then None
+  else
+    Term.enum blk_t sub |> Seq.find ~f:(fun b -> Core.Set.mem roots (Term.tid b))
 
 let init_sol ~(abi : Hike_abi.t) ?entry (sub : sub term) =
   let empty_map = Tid.Map.empty in
