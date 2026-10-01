@@ -25,50 +25,6 @@ module Call_effects = Cbat_call_effects
 (* Re-exported memory abstraction. *)
 module Mem = Cbat_ai_memmap
 
-(* Per-def classification over the converged solution. *)
-module Cbat_extraction : sig
-  (* Classification vocabulary: the (lo,hi) pair of the carrying
-     constructors is the denotation's position interval on the model's
-     ABSOLUTE segment line (the entry RSP = the segment base; a frame
-     offset o sits at [stack_base + o]).
-     - [Range]/[Infinite]: entirely below the entry RSP — this sub's
-       own frame.
-     - [Caller]: entirely at/above — ABI-visible caller-window traffic.
-     - [Mixed]: two-sided or wrapped — the runtime address is
-       GENUINELY either-based; the emitter's rule is the two-base
-       select.
-     - [Dead]: the access sits on an unreachable path. *)
-  type kind =
-    | Range of int64 * int64
-    | Infinite of int64 * int64
-    | Caller of int64 * int64
-    | Mixed of int64 * int64
-    | Dead
-  [@@deriving equal]
-
-  (* The fully-infinite span (the whole position line) — the kind of a
-     TOP denotation. *)
-  val unbounded_span : kind
-
-  val is_unbounded_span : int64 -> int64 -> bool
-
-  (* Kind of a word set (the denotation, read in place). *)
-  val classify : WordSet.t -> kind
-
-  (* The split over ABSOLUTE positions: entirely at/above the
-     entry RSP -> [Caller]; entirely below -> [Range]; two-sided or
-     wrapped -> [Mixed]. *)
-  val caller_split : kind -> kind
-
-  (* The absolute position of a frame offset (the segment base + the
-     offset, overflow-checked). *)
-  val position_of_offset : int64 -> int64 option
-
-  (* Address of a stack-access rhs, if any. *)
-  val stack_address_of_rhs : Bil.exp -> Bil.exp option
-
-end
-
 (* The per-def runtime origin: the origin the solve computed for the
    def's value, stamped at the solve boundary.  [None] = outside the
    analysis boundary (reads Abs). *)
@@ -247,4 +203,48 @@ module Test_seam : sig
     rctx:refine_ctx ->
     seeds:(var * WordSet.t) list ->
     AI.t -> blk term -> AI.t
+
+  (* The per-def classification vocabulary over the converged
+     solution, consumed only by the probes. *)
+  module Cbat_extraction : sig
+    (* Classification vocabulary: the (lo,hi) pair of the carrying
+       constructors is the denotation's position interval on the model's
+       ABSOLUTE segment line (the entry RSP = the segment base; a frame
+       offset o sits at [stack_base + o]).
+       - [Range]/[Infinite]: entirely below the entry RSP — this sub's
+         own frame.
+       - [Caller]: entirely at/above — ABI-visible caller-window traffic.
+       - [Mixed]: two-sided or wrapped — the runtime address is
+         GENUINELY either-based; the emitter's rule is the two-base
+         select.
+       - [Dead]: the access sits on an unreachable path. *)
+    type kind =
+      | Range of int64 * int64
+      | Infinite of int64 * int64
+      | Caller of int64 * int64
+      | Mixed of int64 * int64
+      | Dead
+    [@@deriving equal]
+
+    (* The fully-infinite span (the whole position line) — the kind of
+       a TOP denotation. *)
+    val unbounded_span : kind
+
+    val is_unbounded_span : int64 -> int64 -> bool
+
+    (* Kind of a word set (the denotation, read in place). *)
+    val classify : WordSet.t -> kind
+
+    (* The split over ABSOLUTE positions: entirely at/above the
+       entry RSP -> [Caller]; entirely below -> [Range]; two-sided or
+       wrapped -> [Mixed]. *)
+    val caller_split : kind -> kind
+
+    (* The absolute position of a frame offset (the segment base + the
+       offset, overflow-checked). *)
+    val position_of_offset : int64 -> int64 option
+
+    (* Address of a stack-access rhs, if any. *)
+    val stack_address_of_rhs : Bil.exp -> Bil.exp option
+  end
 end

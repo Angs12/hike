@@ -11,7 +11,7 @@ open Probe_common
 module Vsa = Cbat_vsa
 module AI = Vsa.AI
 module Ws = Cbat_clp_set_composite
-module Ext = Vsa.Cbat_extraction
+module Ext = Vsa.Test_seam.Cbat_extraction
 
 module VarMap = Core.Map.Make (Var)
 

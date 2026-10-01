@@ -205,13 +205,13 @@ let blk_bil_to_string (b : blk term) : string =
    at the def's own before-env, classified in place (the extraction's
    per-def rule; no merge). *)
 let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
-    Vsa.Cbat_extraction.kind Tid.Map.t =
+    Vsa.Test_seam.Cbat_extraction.kind Tid.Map.t =
   (* The seam reads the defs' Env Tags: walk the sweep's stamped sub. *)
   let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
   let kind_of blk d =
     let open Base.Option in
     Base.Option.bind
-      (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
+      (Vsa.Test_seam.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
       ~f:(fun addr ->
         Result.to_option
           (Vsa.denote_exp_at
@@ -219,8 +219,8 @@ let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
              ~blk ~def:d addr))
     >>= fun ws ->
     if Ws.is_bottom ws || Ws.in_stack_segment ws then
-      Some (Vsa.Cbat_extraction.caller_split (Vsa.Cbat_extraction.classify ws))
-    else if Ws.is_top ws then Some Vsa.Cbat_extraction.unbounded_span
+      Some (Vsa.Test_seam.Cbat_extraction.caller_split (Vsa.Test_seam.Cbat_extraction.classify ws))
+    else if Ws.is_top ws then Some Vsa.Test_seam.Cbat_extraction.unbounded_span
     else None
   in
   Term.enum blk_t sub
@@ -258,13 +258,13 @@ let cardn_bucket_name : cardn_bucket -> string = function
   | `B9_64 -> "b9_64"
   | `B65p -> "b65p"
 
-let vsa_kind_to_string (k : Vsa.Cbat_extraction.kind) : string =
+let vsa_kind_to_string (k : Vsa.Test_seam.Cbat_extraction.kind) : string =
   match k with
-  | Vsa.Cbat_extraction.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
-  | Vsa.Cbat_extraction.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
-  | Vsa.Cbat_extraction.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
-  | Vsa.Cbat_extraction.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
-  | Vsa.Cbat_extraction.Dead -> "Dead"
+  | Vsa.Test_seam.Cbat_extraction.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
+  | Vsa.Test_seam.Cbat_extraction.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
+  | Vsa.Test_seam.Cbat_extraction.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
+  | Vsa.Test_seam.Cbat_extraction.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
+  | Vsa.Test_seam.Cbat_extraction.Dead -> "Dead"
 
 (* Value-set of each named var in the state. *)
 let state_summary (vars : var list) (st : AI.t) : string =

@@ -662,6 +662,8 @@ let refine_edge ~sol ~rctx ~seeds env blk =
 
 (* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
 module Test_seam = struct
+
+  module Cbat_extraction = Cbat_extraction
   type refine_ctx = Cbat_runctx.refine_ctx
   let denote_def = denote_def
   let denote_defs = denote_defs

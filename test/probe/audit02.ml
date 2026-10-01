@@ -29,10 +29,10 @@ let audit_sub (sub : sub term) : unit =
   let sol = run_sub_fixpoint sub in
   (* The seam reads the defs' Env Tags: audit the sweep's stamped sub. *)
   let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
-  let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Cbat_extraction.kind option =
+  let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Test_seam.Cbat_extraction.kind option =
     let open Base.Option in
     Base.Option.bind
-      (Vsa.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
+      (Vsa.Test_seam.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
       ~f:(fun addr ->
         Result.to_option
           (Vsa.denote_exp_at
@@ -40,8 +40,8 @@ let audit_sub (sub : sub term) : unit =
              ~blk ~def:d addr))
     >>= fun ws ->
     if Ws.is_bottom ws || Ws.in_stack_segment ws then
-      Some (Vsa.Cbat_extraction.caller_split (Vsa.Cbat_extraction.classify ws))
-    else if Ws.is_top ws then Some Cbat_vsa.Cbat_extraction.unbounded_span
+      Some (Vsa.Test_seam.Cbat_extraction.caller_split (Vsa.Test_seam.Cbat_extraction.classify ws))
+    else if Ws.is_top ws then Some Cbat_vsa.Test_seam.Cbat_extraction.unbounded_span
     else None
   in
   let prod_map =
@@ -55,8 +55,8 @@ let audit_sub (sub : sub term) : unit =
   let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
   Core.Map.iteri prod_map ~f:(fun ~key:tid ~data:k ->
       match k with
-      | Cbat_vsa.Cbat_extraction.Infinite (lo, hi)
-        when Cbat_vsa.Cbat_extraction.is_unbounded_span lo hi ->
+      | Cbat_vsa.Test_seam.Cbat_extraction.Infinite (lo, hi)
+        when Cbat_vsa.Test_seam.Cbat_extraction.is_unbounded_span lo hi ->
           Hashtbl.add prod_unbounded tid ()
       | _ -> ());
   let prod_unbounded_count = Hashtbl.length prod_unbounded in
