@@ -650,15 +650,24 @@ let set_env_tag = Cbat_env_tag.set_env_tag
 let solve_denote = Cbat_env_tag.solve_denote
 
 (* The seam's seed shape: the cond's leaf constraints as (var, constraint)
-   pairs. *)
+   pairs.  A seed's constraint is the state's own value for the var, so
+   the pairs bind into the walked state and the vars name the delivery. *)
 let refine_edge ~sol ~rctx ~seeds env blk =
+  let env =
+    List.fold seeds ~init:env ~f:(fun env (v, c) ->
+        match Var.typ v with
+        | Type.Imm w when WordSet.bitwidth c = w ->
+          AI.add_word env ~key:(Var.base v) ~data:c
+        | _ -> env)
+  in
+  let seeds =
+    List.fold seeds ~init:Var.Set.empty ~f:(fun acc (v, _) ->
+        Core.Set.add acc (Var.base v))
+  in
   (* The walked block's IN state is its entry in [sol]. *)
   Cbat_backward.refine_edge
     ~entry:(Solution.get sol (Term.tid blk))
-    ~rctx
-    ~seeds:(List.fold seeds ~init:Var.Map.empty
-              ~f:(fun m (v, c) -> Core.Map.set m ~key:(Var.base v) ~data:c))
-    env blk
+    ~rctx ~seeds env blk
 
 (* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
 module Test_seam = struct

@@ -1090,7 +1090,7 @@ let writer_locus : locus =
       let cur = AI.find_word w !(st.env_out) v in
       let m = WordSet.meet cur cstr' in
       if (not (Cbat_word.is_zero (WordSet.cardinality m)))
-         && WordSet.precedes m cur
+         && strictly_precedes m cur
       then st.env_out := AI.add_word !(st.env_out) ~key:v ~data:m
     end
   in
@@ -1127,7 +1127,7 @@ let writer_locus : locus =
              let cur = AI.find_word w acc v in
              let m = WordSet.meet cur c in
              if (not (Cbat_word.is_zero (WordSet.cardinality m)))
-                && WordSet.precedes m cur
+                && strictly_precedes m cur
              then AI.add_word acc ~key:v ~data:m
              else acc
            | _ -> acc)
@@ -1172,7 +1172,7 @@ let walk ~(locus : locus)
     ~(entry : AI.t)
     ~(landmarks : Cbat_landmarks.t)
     ~(witness : env:AI.t -> exp -> bool)
-    ~(seeds : live_map)
+    ~(seeds : Var.Set.t)
     (env : AI.t) (blk : blk term) : AI.t =
   let env_out = ref env in
   (* The walked block's IN state, handed in by the caller — no
@@ -1220,11 +1220,14 @@ let walk ~(locus : locus)
     match Var.typ m with
     | Type.Mem (ai, asz) -> Some (mem_idx ai asz, m)
     | _ -> None in
-  (* The ONE pending map: the seeds are its word entries; the loads
-     push the cell entries. *)
+  (* The ONE pending map: the seeds are its word entries (each seed's
+     constraint is the state's own value for the var); the loads push
+     the cell entries. *)
   let cells =
-    ref (Core.Map.fold seeds ~init:[] ~f:(fun ~key:v ~data:c acc ->
-            PW (v, c) :: acc)) in
+    ref (Core.Set.fold seeds ~init:[] ~f:(fun acc v ->
+            match Var.typ v with
+            | Type.Imm w -> PW (v, AI.find_word w !env_out v) :: acc
+            | _ -> acc)) in
   let confined : Cbat_landmarks.key list ref = ref [] in
   let st = { env_out; pending = cells; confined; mem_vars; landmarks } in
   (* The positional call env: the prefix state's words, the pending
@@ -1278,19 +1281,19 @@ let walk ~(locus : locus)
   List.iter prefixed ~f:walk_word_def;
   locus.carry st !env_out
 
-(* The walk's seeds: the cond's OWN constraints — each free var's
-   bounded constrained value, delivered to its producer.  A guard the
-   operand already satisfies still tells the producer what it is bounded
-   by, so the walk delivers the bound rather than stopping. *)
-let cond_seeds ~(env : AI.t) (cond : exp) : live_map =
-  Core.Set.fold (Exp.free_vars cond) ~init:Var.Map.empty ~f:(fun acc v ->
+(* The walk's seeds: the cond's own constrained vars — every free var
+   the guard bounds.  A seed's constraint is the state's own value for
+   the var, so the var names the delivery and the walk reads the value
+   from the state it walks. *)
+let cond_seeds ~(env : AI.t) (cond : exp) : Var.Set.t =
+  Core.Set.fold (Exp.free_vars cond) ~init:Var.Set.empty ~f:(fun acc v ->
       match Var.typ v with
       | Type.Imm w ->
         let after = AI.find_word w env v in
         if (not (WordSet.is_bottom after))
            && (not (WordSet.is_top after))
            && not (WordSet.is_infinite after)
-        then Core.Map.set acc ~key:(Var.base v) ~data:after
+        then Core.Set.add acc (Var.base v)
         else acc
       | _ -> acc)
 
@@ -1305,7 +1308,7 @@ let walk_block ~(rctx : Cbat_runctx.refine_ctx) ~entry ~landmarks ~witness
    constraints and cell meets flow into the returned edge env. *)
 let refine_edge ~(entry : AI.t)
     ~(rctx : Cbat_runctx.refine_ctx)
-    ~(seeds : live_map)
+    ~(seeds : Var.Set.t)
     (env : AI.t) (blk : blk term) : AI.t =
   Stages.incr_walk ();
   walk_block ~rctx ~entry ~landmarks:rctx.rc_landmarks ~witness:rctx.rc_nonneg
@@ -1323,19 +1326,23 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
   let constrained = constrain_edge ~env ~landmarks disabled in
   if not (AI.equal constrained AI.bottom) then begin
     let seeds = cond_seeds ~env:constrained disabled in
-    (* An empty leaf meet leaves the env unchanged: re-derive the
-       constraint as the raw seed of its var. *)
-    let raw_seeds =
+    (* An empty leaf meet leaves the env unchanged: the disabled cond's
+       own bit is the constraint, so it rides the walked state. *)
+    let walked, seeds =
       if AI.equal constrained env then
-        Core.Set.fold (Exp.free_vars disabled) ~init:seeds ~f:(fun acc v ->
-            match Var.typ v with
-            | Type.Imm 1 ->
-              Core.Map.set acc ~key:(Var.base v)
-                ~data:(WordSet.singleton Cbat_word.b1)
-            | _ -> acc)
-      else seeds in
+        (Core.Set.fold (Exp.free_vars disabled) ~init:constrained
+           ~f:(fun acc v ->
+             match Var.typ v with
+             | Type.Imm 1 ->
+               AI.add_word acc ~key:v ~data:(WordSet.singleton Cbat_word.b1)
+             | _ -> acc),
+         Core.Set.union seeds
+           (Core.Set.filter (Exp.free_vars disabled)
+              ~f:(fun v ->
+                match Var.typ v with Type.Imm 1 -> true | _ -> false)))
+      else (constrained, seeds) in
     ignore (walk ~locus:observer_locus ~entry ~landmarks ~witness
-              ~seeds:raw_seeds constrained blk)
+              ~seeds walked blk)
   end
 
 let refine_edge_inline
@@ -1351,7 +1358,7 @@ let refine_edge_inline
   else if AI.equal env AI.bottom then env
   else
     let seeds = cond_seeds ~env acc_cond in
-    if Core.Map.is_empty seeds then env
+    if Core.Set.is_empty seeds then env
     else
       Stages.time `Walk (fun () ->
           refine_edge ~entry ~rctx ~seeds env b)
