@@ -496,12 +496,6 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
           | Some x -> x
           | None -> lane_value ctx scope blk_tid lane
         in
-        let is_window =
-          match lane_version scope blk_tid lane with
-          | Some ver -> Core.Set.mem !(scope.window_vars) ver
-          | None -> Core.Set.mem !(scope.window_vars) lane
-        in
-        ignore is_window;
         (* The ret lane's LLVM type drives: pointer lanes return the
            pointer, integer lanes the integer form. *)
         match Llvm.classify_type (lane_type ctx ret) with

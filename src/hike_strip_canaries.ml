@@ -50,10 +50,7 @@ let cells_of_sub ~(denote : denote) (sub : sub term) : int64 Tid.Map.t =
              | Some cell -> Core.Map.set m ~key:(Term.tid d) ~data:cell
              | None -> m))
 
-let store_data (d : def term) : exp option =
-  match Def.rhs d with
-  | Bil.Store (_, _, data, _, _) -> Some data
-  | _ -> None
+let store_data (d : def term) : exp option = Model.store_data_of_rhs (Def.rhs d)
 
 let is_mem_var (v : var) : bool =
   match Var.typ v with Mem _ -> true | _ -> false
@@ -544,8 +541,8 @@ let cells_accounted ~(cell_of : Tid.t -> int64 option) ~(ctx : ctx)
 
 (* The rewrite is valid only when every surviving use reads no deleted
    def (exact reaching analysis). *)
-let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t)
-    ~(edge_srcs : Tid.Set.t) : bool =
+let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t) :
+    bool =
   (* Only the deleted defs' lhs vars can reach a surviving use; every
      other operand var skips the scan. *)
   let deleted_vars =
@@ -662,11 +659,7 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
           Base.List.fold comps ~init:Tid.Set.empty ~f:(fun acc c ->
               Core.Set.add (Core.Set.add acc c.c_fail_jmp) c.c_eq_jmp)
         in
-        let edge_srcs =
-          Base.List.fold comps ~init:Tid.Set.empty ~f:(fun acc c ->
-              Core.Set.add acc c.c_cmp_blk)
-        in
-        if not (residual_ok ~ctx ~deleted ~exempt_jmps ~edge_srcs) then sub
+        if not (residual_ok ~ctx ~deleted ~exempt_jmps) then sub
         else
           let edge_edits =
             Base.List.fold comps ~init:Tid.Map.empty ~f:(fun m c ->

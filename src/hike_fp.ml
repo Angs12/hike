@@ -61,10 +61,10 @@ let tag_targets (sub : sub term) : sub term =
                   | Some _
                     when Base.Option.is_none
                            (Bil2llvm_fp.fp_width_of_name name) -> (
+                      (* [widths] is total over the block's jmps — every
+                         jmp elt records the width in effect there. *)
                       let w =
-                        Base.Option.value
-                          (Core.Map.find !widths (Term.tid j))
-                          ~default:64
+                        Core.Map.find_exn !widths (Term.tid j)
                       in
                       match Bil2llvm_fp.sized_name name w with
                       | Some sized ->

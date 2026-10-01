@@ -40,7 +40,6 @@ let gep_i8 ctx llvm_builder base idx =
 (* The one dispatch on operand LLVM types. *)
 let binop ctx llvm_builder ~(null1 : bool) ~(null2 : bool) (op, v1, v2) =
   let p1 = is_ptr_value v1 and p2 = is_ptr_value v2 in
-  let addr_ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
   let both_int () =
     let v1 = as_integer ctx llvm_builder v1 in
     let v2 = as_integer ctx llvm_builder v2 in
@@ -69,7 +68,7 @@ let binop ctx llvm_builder ~(null1 : bool) ~(null2 : bool) (op, v1, v2) =
         (Llvm.const_null ctx.ptr_ty) "" llvm_builder
   | LT when p1 && p2 -> Llvm.build_icmp Llvm.Icmp.Ult v1 v2 "" llvm_builder
   | LE when p1 && p2 -> Llvm.build_icmp Llvm.Icmp.Ule v1 v2 "" llvm_builder
-  | _ -> ignore addr_ty; both_int ()
+  | _ -> both_int ()
 
 (* An ite/select over values: a pointer if either branch is (D13's
    sanctioned inttoptr for a genuine pointer/integer mix). *)
