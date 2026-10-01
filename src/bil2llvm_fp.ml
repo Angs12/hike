@@ -79,6 +79,12 @@ let native_fp_op (name : string) : native_fp option =
 let fp_width_of_name (name : string) : int option =
   Core.Option.bind (row_of_name name) ~f:snd
 
+(* The ONE lane-width policy for a mapped call: the width the target
+   names, the target word when the spelling stayed unqualified.  Every
+   consumer of a mapped call's widths reads this. *)
+let lane_width_of_name ~(word_bits : int) (name : string) : int =
+  Base.Option.value (fp_width_of_name name) ~default:word_bits
+
 (* The bare sized spelling of an untagged FP target, when the table
    knows it: the name [hike-fp] rewrites the target to. *)
 let sized_name (name : string) (w : int) : string option =
@@ -185,9 +191,7 @@ let create_native_fp_call ctx scope llvm_builder blk_tid sub_tid _fr blk call op
   let temp_defs = temp_defs_of_blk blk in
   let sig_ =
     fp_sig_of op
-      ~w:
-        (Base.Option.value (fp_width_of_name (Tid.name target))
-           ~default:word_bits)
+      ~w:(lane_width_of_name ~word_bits (Tid.name target))
   in
   let arg_value (i : int) : Llvm.llvalue =
     (* The [intrinsic:xN] temp the block defined IS the operand; it

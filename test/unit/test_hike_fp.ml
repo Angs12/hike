@@ -116,6 +116,27 @@ let tests : unit Alcotest.test list =
              ~equal:String.equal
           && Base.List.mem targets "@intrinsic:not_a_real_intrinsic"
                ~equal:String.equal));
+
+    (* HFP-05: an unqualified target whose temp width has no sized row
+       stays unqualified AND says so — the residue is loud, and every
+       consumer's word-width fallback is the recorded answer. *)
+    pin "HFP-05" "an unsizable width leaves the target unqualified and warns"
+      (fun () ->
+        let out = ref "" in
+        let sub =
+          the_sub (fp_prog [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ])
+        in
+        out := capture_stderr (fun () ->
+            ignore (Hike.Fp.run_program (Program.create ~subs:[ sub ] ())));
+        let targets =
+          Base.List.concat_map (subs_of (fp_prog
+              [ fp_fixture "intrinsic:forder_ieee754_binary" 80 ]))
+            ~f:targets_of
+        in
+        check "HFP-05: the warn fires and the target stays unqualified"
+          (contains_substring !out "has no sized spelling at width 80"
+          && Base.List.mem targets "@intrinsic:forder_ieee754_binary"
+               ~equal:String.equal));
   ]
 
 let () = run "hike_fp" tests

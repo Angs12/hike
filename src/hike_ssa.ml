@@ -54,9 +54,9 @@ let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
   match Bil2llvm_fp.native_fp_op (Tid.name target) with
   | Some op ->
       let w =
-        Base.Option.value
-          (Bil2llvm_fp.fp_width_of_name (Tid.name target))
-          ~default:(Model.word_bits abi.Abi.word)
+        Bil2llvm_fp.lane_width_of_name
+          ~word_bits:(Model.word_bits abi.Abi.word)
+          (Tid.name target)
       in
       Bil2llvm_fp.(fp_sig_of op ~w).fp_rets
   | None -> (

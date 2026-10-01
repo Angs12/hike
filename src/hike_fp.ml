@@ -63,16 +63,20 @@ let tag_targets (sub : sub term) : sub term =
                            (Bil2llvm_fp.fp_width_of_name name) -> (
                       (* [widths] is total over the block's jmps — every
                          jmp elt records the width in effect there. *)
-                      let w =
-                        Core.Map.find_exn !widths (Term.tid j)
-                      in
+                      let w = Core.Map.find_exn !widths (Term.tid j) in
                       match Bil2llvm_fp.sized_name name w with
                       | Some sized ->
                           Jmp.with_kind j
                             (Call
                                (Call.with_target c
                                   (Direct (Tid.for_name sized))))
-                      | None -> j)
+                      | None ->
+                          (* No sized row at the temp's width: the
+                             unqualified target stays and every
+                             consumer falls back to the word width. *)
+                          Hike_diag.warn "fp: sub %s: intrinsic %s has no sized spelling at width %d - the unqualified target stays"
+                            (Sub.name sub) name w;
+                          j)
                   | _ -> j)
               | _ -> j)
           | _ -> j))
