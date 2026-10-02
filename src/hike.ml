@@ -109,41 +109,6 @@ let pass_vsa proj =
     |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
            { Cbat_vsa.img_lo; img_hi; img_bytes })
   in
-  (* The re-lift seam: decode and lift the case body at a dispatch word
-     the lift never made a block.  The view starts at the word so the
-     body's first block is aligned there; only the blocks reachable from
-     it are kept (the sweep's tail past the terminator is dropped). *)
-  let lift_at (a : Addr.t) ~(block_addrs : Tid.t Addr.Map.t) :
-      blk term list option =
-    match Seq.to_list (Memmap.lookup (Project.memory proj) a) with
-    | [] -> None
-    | (seg, _) :: _ -> (
-        let view = Memory.view_exn ~from:a seg in
-        match Disasm_expert.Recursive.run (Project.arch proj) view with
-        | Error _ -> None
-        | Ok rec_t ->
-          let cfg = Disasm_expert.Recursive.cfg rec_t in
-          let root =
-            Graphs.Cfg.nodes cfg
-            |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) a)
-          in
-          Base.Option.map root ~f:(fun root ->
-              let nodes =
-                Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) cfg
-                  ~init:[] ~f:(fun acc n -> n :: acc) root
-              in
-              let others =
-                Base.List.filter nodes ~f:(fun n ->
-                    not (Addr.equal (Block.addr n) a))
-              in
-              (* A block the run already names is not lifted again; the
-                 retarget resolves references to it. *)
-              let others =
-                Base.List.filter others ~f:(fun n ->
-                    not (Core.Map.mem block_addrs (Block.addr n)))
-              in
-              Base.List.concat_map (root :: others) ~f:(Blk.lift cfg)))
-  in
   (* The run's block-address map, read off the terms at this boundary:
      each block's own address stamp.  A block the lift created unnamed
      carries no stamp and names no case entry. *)
@@ -175,6 +140,102 @@ let pass_vsa proj =
           match lookup (Word.to_int64_exn addr) with
           | Some sub -> Core.Map.set m ~key:addr ~data:sub
           | None -> m)
+  in
+  (* The re-lift seam: decode and lift the case body at a dispatch word
+     the lift never made a block.  The view starts at the word so the
+     body's first block is aligned there; only the blocks reachable from
+     it are kept (the sweep's tail past the terminator is dropped). *)
+  (* The seam decodes under the project's own theory instance: outside
+     the loader's scope the recursive disassembler's machine reifies
+     against the generic theory, whose register model differs from the
+     primary lift's (128-bit XMM views vs the 256-bit YMM lanes, plain
+     32-bit GPR vars vs the 64-bit casts) — the FP-lane width class.
+     The scan runs inside [Theory.with_current], in the same machine;
+     the cfg's blocks then carry the merged instance's semantics. *)
+  let seam_cfg (view : mem) : Graphs.Cfg.t option =
+    let run : Disasm_expert.Recursive.t option Toplevel.var =
+      Toplevel.var "hike-seam-cfg"
+    in
+    Toplevel.put run
+      (let open KB.Syntax in
+       Theory.instance () >>= fun theory ->
+       Theory.with_current theory @@ fun () ->
+       Disasm_expert.Recursive.run_in_scope (Project.arch proj) view
+       >>| Result.to_option);
+    match Toplevel.get run with
+    | Some rec_t -> Some (Disasm_expert.Recursive.cfg rec_t)
+    | None -> None
+  in
+  let lift_at (a : Addr.t) ~(block_addrs : Tid.t Addr.Map.t) :
+      blk term list option =
+    match Seq.to_list (Memmap.lookup (Project.memory proj) a) with
+    | [] -> None
+    | (seg, _) :: _ -> (
+        let view = Memory.view_exn ~from:a seg in
+        match seam_cfg view with
+        | None -> None
+        | Some cfg ->
+          let root =
+            Graphs.Cfg.nodes cfg
+            |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) a)
+          in
+          Base.Option.map root ~f:(fun root ->
+              let nodes =
+                Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) cfg
+                  ~init:[] ~f:(fun acc n -> n :: acc) root
+              in
+              let others =
+                Base.List.filter nodes ~f:(fun n ->
+                    not (Addr.equal (Block.addr n) a))
+              in
+              (* A block the run already names is not lifted again; the
+                 call that entered it names the sub its address belongs
+                 to (the symtab-resolved sub-entry index). *)
+              let others =
+                Base.List.filter others ~f:(fun n ->
+                    not (Core.Map.mem block_addrs (Block.addr n)))
+              in
+              let sub_of_addr addr =
+                Core.Map.find sub_addrs addr
+              in
+              let excluded_sub node =
+                if Addr.equal (Block.addr node) a then None
+                else if Core.Map.mem block_addrs (Block.addr node) then
+                  let sub = sub_of_addr (Block.addr node) in
+                  let first = match Blk.lift cfg node with
+                    | first :: _ -> Some first
+                    | [] -> None
+                  in
+                  Base.Option.map2 ~f:(fun b sub -> (Term.tid b, sub))
+                    first sub
+                else None
+              in
+              let excluded_subs =
+                Base.List.filter_map nodes ~f:excluded_sub
+                |> Core.Map.of_alist_exn (module Tid)
+              in
+              let retarget t =
+                Core.Map.find excluded_subs t |> Base.Option.value ~default:t
+              in
+              Base.List.concat_map (root :: others) ~f:(fun n ->
+                  Blk.lift cfg n
+                  |> Base.List.map ~f:(fun blk ->
+                         Term.map jmp_t blk ~f:(fun jmp ->
+                             match Jmp.kind jmp with
+                             | Call c -> (
+                                 match Call.target c with
+                                 | Direct t -> (
+                                     let t' = retarget t in
+                                     if Tid.equal t t' then jmp
+                                     else
+                                       Jmp.create ~tid:(Term.tid jmp)
+                                         ~cond:(Jmp.cond jmp)
+                                         (Call
+                                            (Call.create
+                                               ?return:(Call.return c)
+                                               ~target:(Direct t') ())))
+                                 | _ -> jmp)
+                             | _ -> jmp)))))
   in
   let subs_acc, block_addrs =
     Term.enum sub_t (Project.program proj)
@@ -579,6 +640,24 @@ let pass_vsa proj =
                 match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
                 | None -> (acc, ba, hoisted, roots)
                 | Some vexp -> (
+                  (* A store wider than the word packs one address per
+                     word cell (the vector table-init idiom); each cell
+                     names a callee on its own. *)
+                  let wb =
+                    Hike_stack_model.word_bits
+                      (Hike_abi.of_target target).Hike_abi.word
+                  in
+                  let candidates =
+                    match Hike_stack_model.addr_of_rhs (Def.rhs d) with
+                    | Some (_, size) when Size.in_bits size > wb ->
+                      Base.List.init (Size.in_bits size / wb) ~f:(fun k ->
+                          let lo = k * wb in
+                          Bil.extract ~hi:(lo + wb - 1) ~lo vexp)
+                    | _ -> [ vexp ]
+                  in
+                  Base.List.fold candidates
+                    ~init:(acc, ba, hoisted, roots)
+                    ~f:(fun (acc, ba, hoisted, roots) vexp ->
                   match
                     Cbat_vsa.denote_exp_at ~pre ~post ~blk ~def:d vexp
                   with
@@ -611,7 +690,7 @@ let pass_vsa proj =
                          | Some t -> t :: roots
                          | None -> roots)
                       | _ -> (acc, ba, hoisted, roots))
-                    | _ -> (acc, ba, hoisted, roots))))
+                    | _ -> (acc, ba, hoisted, roots)))))
               )
   in
   let store_roots (acc, ba, hoisted, roots) =

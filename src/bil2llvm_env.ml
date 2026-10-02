@@ -163,6 +163,10 @@ type emit_ctx = {
   (* The symtab's function-start addresses: the initializer path's
      remap queries precheck this set before touching the symtab. *)
   native_starts : Core.Int64.Set.t;
+  (* Every sub's entry address to its tid: the address-to-function
+     binding for binaries with no symbol table (a stripped binary's
+     re-lifted subs are nameless but their starts are callable). *)
+  sub_starts : Tid.t Core.Int64.Map.t;
 }
 
 (* The sub-emission scope: every per-sub emission state.  [emit_program]'s

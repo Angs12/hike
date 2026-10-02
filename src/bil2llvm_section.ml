@@ -8,8 +8,27 @@ open Bil2llvm_env
 (* Finds the LLVM function at a native address; a promoted sub
    renders to its thunk so unresolvable pointer sites stay sound. *)
 let lookup_native_fn ctx llvm_module v =
+  let by_start () =
+    Base.Option.bind
+      (Core.Map.find ctx.sub_starts v)
+      ~f:(fun tid ->
+        let named n =
+          match Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) n with
+          | Some thunk -> Some thunk
+          | None -> Base.Option.map (Core.Map.find !(ctx.ll_funcs) tid)
+                      ~f:(fun (fn, _) -> fn)
+        in
+        match Core.Map.find ctx.sub_of tid with
+        | Some sub -> named (Bil2llvm_env.sanitize_name (Tid.name tid))
+        | None ->
+          Base.Option.map (Core.Map.find !(ctx.ll_funcs) tid)
+            ~f:(fun (fn, _) -> fn))
+  in
   (* The start-set precheck: the initializer path asks per word and
      the vast majority name data, not functions. *)
+  match by_start () with
+  | Some fn -> Some fn
+  | None ->
   if not (Core.Set.mem ctx.native_starts v) then None
   else Base.Option.bind ctx.symtab ~f:(fun symtab ->
       Base.Option.bind
