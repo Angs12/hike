@@ -333,10 +333,10 @@ let image_word_at (bytes : Bytes.t) (off : int) ~(endian : endian)
        done);
     Some !word
 
-(* The image's word at [a]: [bits]-byte little-endian, when [a]'s bytes
+(* The image's word at [a]: [bits]-bit, in [endian], when [a]'s bytes
    lie in one section image. *)
 let image_word ~(images : Vsa.section_image list) ~(a : Int64.t)
-    ~(bits : int) : Int64.t option =
+    ~(bits : int) ~(endian : endian) : Int64.t option =
   Base.List.find_map images ~f:(fun img ->
       if
         Stdlib.Int64.unsigned_compare a img.img_lo >= 0
@@ -346,103 +346,142 @@ let image_word ~(images : Vsa.section_image list) ~(a : Int64.t)
       then
         image_word_at img.img_bytes
           (Int64.to_int (Int64.sub a img.img_lo))
-          ~endian:LittleEndian ~bits
+          ~endian ~bits
       else None)
 
 (* The relative-offset jump table, symbolically: the target exp
-   composes to ONE image-cell set (a [bits]-wide load behind casts,
-   through the def chain) plus one constant base —
-   [base + sext(table[addr])] in any association, including chained
-   tables.  Each enumerated cell address's image word names one
-   target; a second cell set or an unknown constant refuses the arm. *)
-type cell_sum = Const of Int64.t | Cells | Unknown
+   composes to ONE constant base plus ONE [bits]-wide cell load (behind
+   a sign/zero cast, through the def chain) —
+   [base + cast(table[addr])] in any association, including chained
+   tables.  A var read inside a def's rhs resolves to the def of that
+   var strictly before the reading def, in the block's term order — the
+   read's before-state — so a [v := v + e] def composes over the def it
+   extends.  Two cell sets or a missing side refuse the composition. *)
+type table_cells =
+  { base : Int64.t;
+    addr_exp : exp;
+    load : def term option;
+    signed : bool;
+    endian : endian }
+
+let compose_table_cells ~(last_defs : def term Var.Map.t)
+    ~(blk : blk term) ~(sub : sub term) ~(at : def term option)
+    (texp : exp) : table_cells option =
+  let bits = 32 in
+  let defs = Seq.to_list (Term.enum def_t blk) in
+  let before_defs (d : def term) : def term Var.Map.t =
+    let rec go m = function
+      | [] -> Var.Map.empty
+      | x :: rest ->
+        if Tid.equal (Term.tid x) (Term.tid d) then m
+        else go (Core.Map.set m ~key:(Def.lhs x) ~data:x) rest
+    in
+    go Var.Map.empty defs
+  in
+  let cast_signed kind =
+    match kind with
+    | Bil.SIGNED -> Some true
+    | Bil.UNSIGNED -> Some false
+    | _ -> None
+  in
+  let rec sym ~at ~depth (e : exp) :
+      (Int64.t option
+       * (exp * bool * endian * def term option) option)
+      option =
+    if depth > 16 then None
+    else
+      match e with
+      | Bil.Int w -> (
+        match Cbat_word.to_int64 (Cbat_word.of_word w) with
+        | Ok v -> Some (Some v, None)
+        | Error _ -> None)
+      | Bil.Load (_, addr, endi, size) when Size.in_bits size = bits ->
+        Some (None, Some (addr, false, endi, at))
+      | Bil.Cast (kind, _, e2) -> (
+        match sym ~at ~depth:(depth + 1) e2 with
+        | Some (base, Some (addr, _, endi, load)) -> (
+          match cast_signed kind with
+          | Some sgn -> Some (base, Some (addr, sgn, endi, load))
+          | None -> None)
+        | other -> other)
+      | Bil.Var v -> (
+        let found =
+          match at with
+          | Some d -> Core.Map.find (before_defs d) v
+          | None -> (
+            match Core.Map.find last_defs v with
+            | Some d -> Some d
+            | None ->
+              Term.enum blk_t sub
+              |> Seq.find_map ~f:(fun b ->
+                     Term.enum def_t b
+                     |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)))
+        in
+        match found with
+        | Some d -> sym ~at:(Some d) ~depth:(depth + 1) (Def.rhs d)
+        | None -> None)
+      | Bil.BinOp (Bil.PLUS, a, b) -> (
+        match sym ~at ~depth:(depth + 1) a with
+        | None -> None
+        | Some (ba, ca) -> (
+          match sym ~at ~depth:(depth + 1) b with
+          | None -> None
+          | Some (bb, cb) ->
+            if Option.is_some ca && Option.is_some cb then None
+            else
+              Some
+                ((match ba, bb with
+                  | Some x, Some y -> Some (Int64.add x y)
+                  | Some _, None -> ba
+                  | None, Some _ -> bb
+                  | None, None -> None),
+                 match ca, cb with Some _, _ -> ca | None, _ -> cb)))
+      | _ -> None
+  in
+  match sym ~at ~depth:0 texp with
+  | Some (Some base, Some (addr_exp, sgn, endi, load)) ->
+    Some { base; addr_exp; load; signed = sgn; endian = endi }
+  | _ -> None
 
 let image_table_pairs ~(denote : denote)
     ~(images : Vsa.section_image list)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t)
     ~(sub : sub term)
-    ~(blk : blk term) (texp : exp) : Cbat_word.t list option =
+    ~(blk : blk term) ~(at : def term option)
+    (texp : exp) : Cbat_word.t list option =
   let bits = 32 in
-  let rec sym ~depth (e : exp) : cell_sum * exp option =
-    if depth > 16 then (Unknown, None)
-    else
-      match e with
-      | Bil.Int w ->
-        (match Cbat_word.to_int64 (Cbat_word.of_word w) with
-         | Ok v -> (Const v, None)
-         | Error _ -> (Unknown, None))
-      | Bil.Cast (_, _, e2) ->
-        (* a width cast over the cell load keeps the cell set *)
-        (match sym ~depth:(depth + 1) e2 with
-         | (Cells, addr) -> (Cells, addr)
-         | (Const v, _) -> (
-           (* a sign/zero cast of a constant *)
-           (match Cbat_word.to_int64 (Cbat_word.of_int64 ~width:64 v) with
-            | Ok _ -> (Const v, None)
-            | Error _ -> (Unknown, None)))
-         | (Unknown, _) -> (Unknown, None))
-      | Bil.Load (_, addr, _, size) when Size.in_bits size = bits ->
-        (Cells, Some addr)
-      | Bil.Var v -> (
-        match
-          match Core.Map.find last_defs v with
-          | Some d -> Some d
-          | None ->
-            Term.enum blk_t sub
-            |> Seq.find_map ~f:(fun b ->
-                   Term.enum def_t b
-                   |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v))
-        with
-        | Some d -> sym ~depth:(depth + 1) (Def.rhs d)
-        | None -> (Unknown, None))
-      | Bil.BinOp (Bil.PLUS, a, b) ->
-        let sa, ada = sym ~depth:(depth + 1) a in
-        let sb, adb = sym ~depth:(depth + 1) b in
-        (match sa, sb with
-         | Const x, Const y -> (Const (Int64.add x y), None)
-         | Const _, Cells -> (sb, adb)
-         | Cells, Const _ -> (sa, ada)
-         | _ -> (Unknown, None))
-      | _ -> (Unknown, None)
-  in
-  let sum, addr_exp = sym ~depth:0 texp in
-  (match sum with
-   | Cells -> debug_trace (fun () -> "image-table: cells")
-   | Const _ -> debug_trace (fun () -> "image-table: const")
-   | Unknown -> debug_trace (fun () -> "image-table: unknown"));
-  match sum, addr_exp with
-  | Cells, Some addr_exp -> (
-    match bounded_words ~denote ~block_addrs ~blk addr_exp with
+  match compose_table_cells ~last_defs ~blk ~sub ~at texp with
+  | Some { base; addr_exp; load; signed; endian } -> (
+    let cells = bounded_words ~denote ~block_addrs ~blk ?def:load addr_exp in
+    match cells with
     | None -> None
     | Some cells ->
       let words =
         Base.List.filter_map cells ~f:(fun c ->
             match Cbat_word.to_int64 c with
+            | Error _ -> None
             | Ok a ->
-              image_word ~images ~a ~bits
-              |> Base.Option.bind
-                   ~f:(fun w64 ->
-                     let sext =
-                       if Stdlib.Int64.equal (Int64.logand w64 0x80000000L) 0L
-                       then w64
-                       else Int64.logor w64 0xFFFFFFFF00000000L
+              image_word ~images ~a ~bits ~endian
+              |> Base.Option.map
+                   ~f:(fun w ->
+                     let ext =
+                       if
+                         signed
+                         && not
+                              (Stdlib.Int64.equal
+                                 (Int64.logand w 0x80000000L)
+                                 0L)
+                       then Int64.logor w 0xFFFFFFFF00000000L
+                       else w
                      in
-                     match sum with
-                     | Const b ->
-                       Base.Option.map
-                         (Core.Map.find block_addrs
-                            (Addr.of_int64 (Int64.add b sext)))
-                         ~f:(fun _ ->
-                           Cbat_word.of_int64 ~width:64 (Int64.add b sext))
-                     | _ -> None)
-            | Error _ -> None)
+                     Cbat_word.of_int64 ~width:64 (Int64.add base ext)))
       in
       if Base.List.length words = Base.List.length cells
          && not (Base.List.is_empty words)
       then Some words
       else None)
-  | _ -> None
+  | None -> None
 
 let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t)
@@ -465,30 +504,16 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     | Some _ as ws -> ws
     | None ->
       image_table_pairs ~denote ~images ~block_addrs ~last_defs ~sub ~blk
-        texp)
+        ~at:None texp)
   | Bil.Var v ->
     Base.Option.bind (Core.Map.find last_defs v) ~f:(fun add_def ->
         let rhs = Def.rhs add_def in
-        debug_trace (fun () ->
-            Printf.sprintf "rhs: %s [%s]"
-              (match rhs with
-               | Bil.BinOp (Bil.PLUS, _, _) -> "binop plus"
-               | Bil.BinOp _ -> "binop other"
-               | Bil.Load _ -> "load"
-               | Bil.Cast (_, _, e) ->
-                 "cast of "
-                 ^ (match e with
-                    | Bil.Load _ -> "load"
-                    | Bil.Var v -> "var " ^ Var.name v
-                    | _ -> "other")
-               | Bil.Var v -> "var " ^ Var.name v
-               | _ -> "other")
-              (Format.asprintf "%a" Exp.pp rhs));
-        match bounded_words ~denote ~block_addrs ~blk ~def:add_def rhs with
+        let bw = bounded_words ~denote ~block_addrs ~blk ~def:add_def rhs in
+        match bw with
         | Some _ as ws -> ws
         | None ->
-          image_table_pairs ~denote ~images ~block_addrs ~last_defs ~sub ~blk
-            rhs)
+          image_table_pairs ~denote ~images ~block_addrs ~last_defs ~sub
+            ~blk ~at:(Some add_def) rhs)
   | _ -> None
 
 (* The resolution's preparation walk: every resolvable dispatch's case
@@ -585,10 +610,12 @@ let delta_subject ~(denote : denote) ~(last_defs : def term Var.Map.t)
    runtime comparison never depends on where the table was linked. *)
 let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(images : Vsa.section_image list)
     ~(sub : sub term)
     ~(blk : blk term) (texp : exp) :
     (exp * (word * tid) list * Int64.t) option =
-  match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp with
+  match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk ~images texp
+  with
   | None -> None
   | Some ws ->
     (match delta_subject ~denote ~last_defs ~blk texp with
@@ -709,81 +736,68 @@ let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
       Some [ canonical_ret j ]
   | _ -> None
 
-let max_table_slots = 64
-
-(* The completeness premise: the enumerated words cover every value
-   the dispatch's source may produce; a memory-read value only when
-   every address the table load may read is bounded and each slot's
-   image word is one of the case addresses.  Any doubt is incomplete. *)
+(* The completeness premise: the enumerated words cover every value the
+   dispatch's source may produce; a memory-read value only when every
+   address the table load may read is bounded and each slot's image
+   word lands on one of the case addresses.  The composition walk is
+   the one home of the load's shape: when it composes, the premise is
+   verified against the composed base and extension; when it refuses,
+   the words came from the solve's own denotation and that denotation
+   is the premise.  Any doubt is incomplete. *)
 let table_covered ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(blk : blk term) ~(base : Int64.t) ~(pairs : (word * tid) list)
     ~(images : Vsa.section_image list)
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(sub : sub term)
     (texp : exp) : bool =
-  let enumerated =
-    Core.Set.of_list (module Core.Int64)
-      (Base.List.map pairs ~f:(fun (w, _) ->
-           Int64.add (Word.to_int64_exn w) base))
-  in
-  let value_var =
-    let singleton e =
-      Base.Option.value_map (Base.Result.ok (denote ~blk e))
-        ~default:false ~f:(fun ws ->
-          Cbat_word.is_one (Vsa.WordSet.cardinality ws))
-    in
-    match texp with
-    | Bil.Var _ -> Some texp
-    | Bil.BinOp (Bil.PLUS, x, y) ->
-      if singleton x then Some y
-      else if singleton y then Some x
-      else None
-    | _ -> None
-  in
-  let load =
-    Base.Option.bind value_var ~f:(fun e ->
-        match e with
-        | Bil.Var v -> Core.Map.find last_defs v
-        | _ -> None)
-  in
-  (* One enumerated address: inside some image, and its slot's image
-     word is one of the enumerated case addresses. *)
-  let slot_covered ~(endian : endian) ~(bits : int) (a : Cbat_word.t) : bool
-      =
-    match Cbat_word.to_int64 a with
-    | Error _ -> false
-    | Ok a ->
-      Base.List.find_map images ~f:(fun img ->
-          if Stdlib.Int64.unsigned_compare a img.img_lo >= 0
-             && Stdlib.Int64.unsigned_compare
-                  (Int64.add a (Int64.of_int (bits / 8 - 1)))
-                  img.img_hi <= 0
-          then Some img
-          else None)
-      |> Base.Option.bind ~f:(fun img ->
-          let off =
-            Stdlib.Int64.to_int (Stdlib.Int64.sub a img.img_lo) in
-          Base.Option.map
-            (image_word_at img.img_bytes off ~endian ~bits)
-            ~f:(Core.Set.mem enumerated))
-      |> Base.Option.value ~default:false
-  in
-  Base.Option.bind load ~f:(fun d ->
-      match Def.rhs d with
-      | Bil.Load (_, addr_exp, endian, size) ->
-        Some (d, addr_exp, endian, Size.in_bits size)
-      | _ -> None)
-  |> Base.Option.map ~f:(fun (d, addr_exp, endian, bits) ->
-      match Base.Result.ok (denote ~blk ~def:d addr_exp) with
+  match compose_table_cells ~last_defs ~blk ~sub ~at:None texp with
+  | None -> true
+  | Some { base = b; addr_exp; load; signed; endian } ->
+    if not (Int64.equal b base) then false
+    else
+      let enumerated =
+        Core.Set.of_list (module Core.Int64)
+          (Base.List.map pairs ~f:(fun (w, _) ->
+               Int64.add (Word.to_int64_exn w) base))
+      in
+      let ext w =
+        if
+          signed
+          && not (Stdlib.Int64.equal (Int64.logand w 0x80000000L) 0L)
+        then Int64.logor w 0xFFFFFFFF00000000L
+        else w
+      in
+      (* One enumerated address: inside some image, and its slot's
+         image word is one of the enumerated case addresses. *)
+      let slot_covered ~(bits : int) (a : Cbat_word.t) : bool =
+        match Cbat_word.to_int64 a with
+        | Error _ -> false
+        | Ok a ->
+          Base.List.find_map images ~f:(fun img ->
+              if Stdlib.Int64.unsigned_compare a img.img_lo >= 0
+                 && Stdlib.Int64.unsigned_compare
+                      (Int64.add a (Int64.of_int (bits / 8 - 1)))
+                      img.img_hi <= 0
+              then Some img
+              else None)
+          |> Base.Option.bind ~f:(fun img ->
+              let off =
+                Stdlib.Int64.to_int (Stdlib.Int64.sub a img.img_lo) in
+              Base.Option.map
+                (image_word_at img.img_bytes off ~endian ~bits)
+                ~f:(fun w -> Core.Set.mem enumerated (Int64.add base (ext w))))
+          |> Base.Option.value ~default:false
+      in
+      match Base.Result.ok (denote ~blk ?def:load addr_exp) with
       | Some addrs
         when (not (Vsa.WordSet.is_top addrs))
              && (not (Vsa.WordSet.is_infinite addrs))
              && (not (Vsa.WordSet.is_bottom addrs))
              && not
                   (Cbat_word.gt_int (Vsa.WordSet.cardinality addrs)
-                     max_table_slots)
-        -> Base.List.for_all (Vsa.WordSet.iter addrs)
-             ~f:(slot_covered ~endian ~bits)
-      | _ -> false)
-  |> Base.Option.value ~default:true
+                     (Core.Map.length block_addrs)) ->
+        Base.List.for_all (Vsa.WordSet.iter addrs) ~f:(slot_covered ~bits:32)
+      | _ -> false
 
 (* One jmp's rewrite decision: the return epilogue (a noreturn call
    whose target var's reaching def is the retaddr read) becomes the
@@ -798,11 +812,13 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     jmp term list option =
   let series texp cont =
     Base.Option.bind
-      (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs ~sub ~blk
+      (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs ~images
+         ~sub ~blk
          texp)
       ~f:(fun (subject, pairs, base) ->
           if
-            table_covered ~denote ~last_defs ~blk ~base ~pairs ~images texp
+            table_covered ~denote ~last_defs ~blk ~base ~pairs ~images
+              ~block_addrs ~sub texp
           then dispatch_jmps j subject pairs cont
           else None)
   in
@@ -846,7 +862,8 @@ let splice_jmps (blk : blk term)
    target denotation names a split entry keeps it live.  A transfer
    whose denotation cannot be bounded keeps every fresh block. *)
 let indirect_live ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t) ~(fresh : Tid.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t) ~(images : Vsa.section_image list)
+    ~(fresh : Tid.Set.t)
     (sub : sub term) : Tid.Set.t =
   if Core.Set.is_empty fresh then Tid.Set.empty
   else
@@ -855,7 +872,8 @@ let indirect_live ~(denote : denote) ~(retaddr : Tid.Set.t)
       match texp with
       | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> acc
       | _ -> (
-          match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp with
+          match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk
+                  ~images texp with
           | None -> Core.Set.union acc fresh
           | Some ws ->
             Base.List.fold ws ~init:acc ~f:(fun acc w ->
@@ -1058,8 +1076,10 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
             match dispatch_target ~last_defs ~retaddr j with
             | None -> acc
             | Some texp -> (
-                match resolved_pairs_of ~denote ~last_defs ~sub_tids
-                        ~block_addrs:block_addrs' ~sub ~blk texp with
+                match
+                  resolved_pairs_of ~denote ~last_defs ~sub_tids
+                    ~block_addrs:block_addrs' ~images ~sub ~blk texp
+                with
                 | None -> acc
                 | Some (_, pairs, _) ->
                     let ts =
@@ -1088,7 +1108,8 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
   let live =
-    indirect_live ~denote:(denote_of_sol sol) ~retaddr ~block_addrs ~fresh sub
+    indirect_live ~denote:(denote_of_sol sol) ~retaddr ~block_addrs ~images
+      ~fresh sub
   in
   let sub =
     rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr
