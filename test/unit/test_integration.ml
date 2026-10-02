@@ -597,9 +597,8 @@ let tests : unit Alcotest.test list =
                    (Ws.singleton W.b1))
                 x)
              (range 0 9));
-        let prog' = Program.create ~subs:[ sub ] () in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub
+          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let st tid = Graphlib.Std.Solution.get sol tid in
@@ -726,7 +725,7 @@ let tests : unit Alcotest.test list =
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
+            sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let cfg =
@@ -793,7 +792,7 @@ let tests : unit Alcotest.test list =
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
+            sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let cfg =
@@ -868,7 +867,7 @@ let tests : unit Alcotest.test list =
           in
           let sol_h =
             Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-              (Program.create ~subs:[ sub_h ] ()) sub_h
+              sub_h
               (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_h sub_h)
           in
           let cfg_h =
@@ -971,7 +970,7 @@ let tests : unit Alcotest.test list =
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
+            sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let cell_of env =
@@ -1045,7 +1044,7 @@ let tests : unit Alcotest.test list =
           let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:base in
           let sol =
             Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-              (Program.create ~subs:[ sub ] ()) sub
+              sub
               (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
           in
           let cfg =
@@ -1301,7 +1300,7 @@ let tests : unit Alcotest.test list =
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
+            sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in

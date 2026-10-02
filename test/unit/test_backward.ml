@@ -1487,6 +1487,35 @@ let tests : unit Alcotest.test list =
         check "BK-97"
           (Ws.min_elem r = Some (w64 0) && Ws.max_elem r = Some (w64 7)));
 
+    (* T10 continuation: the -O0 store-head loop (the increment store in
+       the walked block), the guard's bound in a cell.  The taken edge
+       admits t in {0,1}, so the head's IN counter cell must stay bounded
+       (the loop exits at 2) whatever shape the increment store takes. *)
+    pin "BK-98"
+      "the nested-load increment store (mem[c] := mem[c] + 1) inside the \
+       walked head block — the guard's bound cell still bounds the counter \
+       cell through the walk's store handshake (the head's IN cell at \
+       RBP-8 stays within {0..2}, never the 32-bit range)"
+      (fun () ->
+        let sub, head_tid =
+          mk_l3c6_storehead_loop ~nested:true ~seed:(Some (w32 0)) ~bound:(w32 2) in
+        let sol = run_anchored sub in
+        let cell =
+          cell_at (memv "l3c6_m") (v64 "RBP") (iter_state_of sub sol head_tid) in
+        check "BK-98" (bounded_above cell (w32 2)));
+
+    pin "BK-99"
+      "the def-carried increment (v := t + 1; mem[c] := v) in the same \
+       walked head block bounds the same counter cell — the control for \
+       BK-98's nested shape"
+      (fun () ->
+        let sub, head_tid =
+          mk_l3c6_storehead_loop ~nested:false ~seed:(Some (w32 0)) ~bound:(w32 2) in
+        let sol = run_anchored sub in
+        let cell =
+          cell_at (memv "l3c6_m") (v64 "RBP") (iter_state_of sub sol head_tid) in
+        check "BK-99" (bounded_above cell (w32 2)));
+
     (* ---------------------------------------------------------------- *)
     (* A5: the walk's write sites skip what changes nothing, and the
        collapsed seed delivers the walked state's own value.  The
@@ -1529,7 +1558,7 @@ let tests : unit Alcotest.test list =
         in
         let sol =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
+            sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let cfg =
@@ -1574,7 +1603,7 @@ let tests : unit Alcotest.test list =
         let guard2 = tids2.(0) in
         let sol2 =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub2 ] ()) sub2
+            sub2
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub2)
         in
         let cfg2 =
@@ -1621,7 +1650,7 @@ let tests : unit Alcotest.test list =
         let guard = tids.(0) in
         let sol =
           Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
-            (Program.create ~subs:[ sub ] ()) sub
+            sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
         in
         let cfg =

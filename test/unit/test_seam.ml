@@ -49,7 +49,7 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          Vsa.static_graph_vsa ~abi (Program.create ~subs:[ sub ] ()) sub
+          Vsa.static_graph_vsa ~abi sub
             (Vsa.init_sol ~abi ~entry sub)
         in
         let cfg =
@@ -143,7 +143,7 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          Vsa.static_graph_vsa ~abi (Program.create ~subs:[ sub ] ()) sub
+          Vsa.static_graph_vsa ~abi sub
             (Vsa.init_sol ~abi ~entry sub)
         in
         let cfg =

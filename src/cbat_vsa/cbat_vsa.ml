@@ -343,7 +343,7 @@ let rec static_graph_vsa
     ?(written : Int.Set.t option Tid.Map.t = Tid.Map.empty)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
-    (ctx : Program.t) (s : Sub.t) (init : vsa_sol) : vsa_sol =
+    (s : Sub.t) (init : vsa_sol) : vsa_sol =
   let s = normalize_round s in
   let preserved = preserved_of_sub ~abi s in
   let edge_conds = edge_conds_of s in
@@ -468,7 +468,7 @@ let rec static_graph_vsa
                   Cbat_forward.denote_block ~preserved ~written ~resolved
                         ~edge_conds ~disabled:disabled_conds
                         ~rctx:rc
-                        ctx ~source:p p_entry ~target:v) in
+                        ~source:p p_entry ~target:v) in
                 let res = Stages.time `Glue (fun () -> AI.gc res ~keep) in
 #ifdef VSA_DEBUG
                 (if AI.equal res AI.bottom then begin

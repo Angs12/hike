@@ -570,7 +570,7 @@ let tests : unit Alcotest.test list =
           let sol =
             Cbat_vsa.static_graph_vsa
               ~abi:Hike_abi.x86_64_sysv
-              ~resolved:Tid.Map.empty (Program.create ~subs:[ a2 ] ()) a2
+              ~resolved:Tid.Map.empty a2
               (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv a2)
           in
           Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol a2

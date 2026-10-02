@@ -174,7 +174,7 @@ let () =
             Cbat_vsa.with_images images (fun () ->
                 Cbat_vsa.static_graph_vsa ~abi ~written
                   ~resolved:Tid.Map.empty ~sub_lookup:lookup
-                  (Bap.Std.Program.create ~subs:[ s ] ()) s
+                  s
                   (Cbat_vsa.init_sol ~abi s))
           in
           let s1, _, _, ba', events =

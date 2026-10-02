@@ -175,11 +175,10 @@ let fixpoint (target : Theory.Target.t)
       let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
           (fresh : Tid.Set.t) (block_addrs : Tid.t Addr.Map.t)
           (init : Vsa.vsa_sol option) =
-        let prog' = Program.create ~subs:[ sub ] () in
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol =
           Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup:lookup
-            prog' sub seed
+            sub seed
         in
 #ifdef VSA_DEBUG
         dump_r8 sol sub;

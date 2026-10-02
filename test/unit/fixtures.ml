@@ -348,8 +348,7 @@ let jump_target =
 
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let sub = Hike.Jump.compile_sub jump_target sub in
-  let prog = Program.create ~subs:[ sub ] () in
-  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid
@@ -547,6 +546,54 @@ let mk_l3c5_loop ~(seed : Cbat_word.t option) ~(chain : exp option) ~(cond : exp
 (* Plain fixpoint; BODY input cell at RBP-8. *)
 let l3c5_run (sub : sub term) (body_tid : tid) : Ws.t =
   iter_cell_of sub (run_anchored sub) body_tid (cell_at (memv "l3c5_m") (v64 "RBP"))
+
+(* L3c-6: the -O0 store-head loop — the counter's increment store lives
+   in the WALKED head block (the do-while merge), the guard's bound is a
+   second cell, and the increment is either the nested-load store
+   (mem[c] := mem[c] + 1) or the def-carried one (v := t + 1;
+   mem[c] := v).  The counter cell sits at RBP-8, the bound cell at
+   RSP-16.  Returns (sub, body tid). *)
+let mk_l3c6_storehead_loop ~(nested : bool) ~(seed : Cbat_word.t option)
+    ~(bound : Cbat_word.t) : sub term * tid =
+  let m = memv "l3c6_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let t = Var.create ~is_virtual:false ~fresh:false "l3c6_t" (Type.Imm 32) in
+  let u = Var.create ~is_virtual:false ~fresh:false "l3c6_u" (Type.Imm 32) in
+  let v = Var.create ~is_virtual:false ~fresh:false "l3c6_v" (Type.Imm 32) in
+  let addr_e = Bil.BinOp (Bil.MINUS, Bil.Var rbp, Bil.Int (Cbat_word.to_word (w64 8))) in
+  let addr_b = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16))) in
+  let cond = Bil.BinOp (Bil.SLT, Bil.Var t, Bil.Var u) in
+  let increment =
+    if nested then
+      [ Def.create m
+          (Bil.Store (Bil.Var m, addr_e,
+                      Bil.BinOp (Bil.PLUS,
+                                 Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32),
+                                 Bil.Int (Cbat_word.to_word (w32 1))),
+                      LittleEndian, `r32)) ]
+    else
+      [ Def.create v (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Int (Cbat_word.to_word (w32 1))));
+        Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Var v, LittleEndian, `r32)) ]
+  in
+  let seed_defs =
+    (match seed with
+     | Some sv ->
+       [ Def.create m (Bil.Store (Bil.Var m, addr_e, Bil.Int (Cbat_word.to_word sv), LittleEndian, `r32)) ]
+     | None -> [])
+    @ [ Def.create m (Bil.Store (Bil.Var m, addr_b, Bil.Int (Cbat_word.to_word bound), LittleEndian, `r32));
+        Def.create rbp (Bil.Var rsp) ]
+  in
+  let sub, tids =
+    sub_of "l3c6_loop"
+      [ seed_defs, [ (1, mk_goto) ];
+        [ Def.create t (Bil.Load (Bil.Var m, addr_e, LittleEndian, `r32)) ]
+        @ increment
+        @ [ Def.create u (Bil.Load (Bil.Var m, addr_b, LittleEndian, `r32)) ],
+        [ (1, fun t -> mk_jmp_to t cond); (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
+        [], [] ]
+  in
+  (sub, tids.(1))
 
 (* Interrupt denotation: unknown external callee via call_abstraction. *)
 (* L-3b: coalesce equal-lower merge arm — piles collapse, reads preserved. *)

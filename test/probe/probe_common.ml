@@ -129,9 +129,8 @@ let all_subs (prog : program term) : sub term list =
    seeded from init_sol, with the image-backed sections armed exactly
    as production arms them.  Every probe's fixpoint flow is this. *)
 let run_sub_fixpoint ?(images = []) (sub : sub term) : Vsa.vsa_sol =
-  let prog' = Program.create ~subs:[ sub ] () in
   Vsa.with_images images (fun () ->
-      Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv prog' sub
+      Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
         (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub))
 
 let analyze_and_fixpoint (sub : sub term) : sub term * Vsa.vsa_sol =

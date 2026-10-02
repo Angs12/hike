@@ -77,10 +77,9 @@ let () =
     Printf.printf "=== vsa_gap %s (%s) mode=%s written=%s  %d blk %d defs ===\n%!"
       (Filename.basename path) (Sub.name raw) mode written_mode nblk ndefs;
     let abi = Hike.Abi.of_target target in
-    let prog' = Program.create ~subs:[ sub ] () in
     let t0 = Unix.gettimeofday () in
     match
-      Vsa.static_graph_vsa ~abi ~written ~sub_lookup:(fun _ -> None) prog' sub
+      Vsa.static_graph_vsa ~abi ~written ~sub_lookup:(fun _ -> None) sub
         (Vsa.init_sol ~abi sub)
     with
     | sol ->

@@ -150,10 +150,11 @@ let denote_block
     ~(edge_conds : exp Tid.Map.t Tid.Map.t)
     ~(disabled : exp Tid.Map.t)
     ~(rctx : Cbat_runctx.refine_ctx)
-    (ctx : program term) ~(source : tid) (env : AI.t)
+    ~(source : tid) (env : AI.t)
     : target:tid -> AI.t =
- match (Program.lookup blk_t ctx source) with
-   | Some b ->
+ match (Core.Map.find rctx.Cbat_runctx.rc_blocks source) with
+   | Some bf ->
+     let b = bf.Cbat_runctx.bf_term in
      (* The block's postcondition depends only on the source block's
         IN state: one denotation per (block, state), shared by every
         successor edge. *)

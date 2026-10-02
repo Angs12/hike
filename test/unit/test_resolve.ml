@@ -83,7 +83,7 @@ let tests : unit Alcotest.test list =
         let j1_retaddr =
           let sol =
             Cbat_vsa.static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
-              ~resolved:Tid.Map.empty (Program.create ~subs:[ j1 ] ()) j1
+              ~resolved:Tid.Map.empty j1
               (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv j1)
           in
           Hike.Cfg_complete.retaddr_defs ~abi:Hike.Abi.x86_64_sysv ~sol j1
@@ -553,7 +553,7 @@ let tests : unit Alcotest.test list =
             in
             let sol =
               Cbat_vsa.static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
-                (Program.create ~subs:[ j5 ] ()) j5
+                j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
             let sub5', resolved5', fresh5', _, events5 =

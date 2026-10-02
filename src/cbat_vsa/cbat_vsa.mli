@@ -92,7 +92,7 @@ val static_graph_vsa :
   ?written:Core.Int.Set.t option Tid.Map.t ->
   ?resolved:Tid.Set.t Tid.Map.t ->
   ?sub_lookup:(int64 -> Tid.t option) ->
-  Program.t -> Sub.t -> vsa_sol -> vsa_sol
+  Sub.t -> vsa_sol -> vsa_sol
 
 (* The SOLVE's own replay — for Hike_cfg_complete, the producer's
    completion loop, ONLY.  Consumers use the seam [denote_exp_at];

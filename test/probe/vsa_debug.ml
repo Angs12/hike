@@ -94,6 +94,18 @@ let run_binary (path : string) (name : string) : unit =
     | None -> Cbat_vsa.AI.top
   in
   let vars = lhs_vars_of sub' in
+  (* The sub's model memory var (any store's lhs). *)
+  let sub_mem_var =
+    Seq.filter_map (Term.enum blk_t sub')
+      ~f:(fun b ->
+        Seq.filter_map (Term.enum def_t b)
+          ~f:(fun d ->
+            match Var.typ (Def.lhs d) with
+            | Type.Mem _ -> Some (Def.lhs d)
+            | _ -> None)
+        |> Seq.hd)
+    |> Seq.hd
+  in
   let dump_mem = try Sys.getenv "VSA_DUMP_MEM" <> "" with _ -> false in
   (* One line per word def: the def, then the lhs's raw composite (the
      origin and its offset pieces, not the materialized view). *)
@@ -123,6 +135,13 @@ let run_binary (path : string) (name : string) : unit =
     Term.enum blk_t sub'
     |> Seq.iter ~f:(fun b ->
         let st = ref (pre_of (Term.tid b)) in
+        (* The block's IN memory: the cells the walk's deliveries and the
+           joins produced. *)
+        (match sub_mem_var with
+         | Some mv ->
+           Printf.printf "  [%s] PRE-MEM %s\n%!" (Tid.name (Term.tid b))
+             (cellstat !st mv)
+         | None -> ());
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->
             let lv = Def.lhs d in
