@@ -281,8 +281,14 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
               match WVarMap.find_opt (wvar_of v) !(scope.sec_comp_ptrs) with
               | Some x -> x
               | None ->
-                  warn_undef_read ctx scope v blk_tid;
-                  frozen_undef ctx scope v)))
+                  if Abi.is_env_reg ctx.abi v then
+                    (* An environment register is process state: the
+                       read loads the module global. *)
+                    load_env_reg ctx llvm_builder v
+                  else begin
+                    warn_undef_read ctx scope v blk_tid;
+                    frozen_undef ctx scope v
+                  end)))
   | Int i -> create_immediate ctx i
   | Cast (cast, i, e) ->
       let v = create_exp ctx scope llvm_builder blk_tid e in

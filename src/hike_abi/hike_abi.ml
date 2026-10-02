@@ -17,6 +17,11 @@ type t = {
   caller_saved_gprs : var list;  (* GPRs a call may clobber (SysV) *)
   variadic_count_reg : var option; (* the lane carrying the vector-register
                                       count at a variadic call (SysV: RAX) *)
+  env_regs : var list;           (* process-global environment registers
+                                    (the x87 control word, MXCSR): never
+                                    call-crossing, persistent per process *)
+  flag_regs : var list;          (* the arithmetic flags: call-clobbered,
+                                    undefined at sub entry *)
   word : int;                    (* target word size in bytes *)
 }
 
@@ -39,6 +44,14 @@ let x86_64_sysv : t =
       Base.List.map ~f:r64
         [ "RAX"; "RCX"; "RDX"; "RSI"; "RDI"; "R8"; "R9"; "R10"; "R11" ];
     variadic_count_reg = Some rax;
+    env_regs =
+      [ Var.create ~is_virtual:false ~fresh:false "FPU_CONTROL" (Type.Imm 16);
+        Var.create ~is_virtual:false ~fresh:false "MXCSR" (Type.Imm 32) ];
+    flag_regs =
+      Base.List.map
+        ~f:(fun name ->
+          Var.create ~is_virtual:false ~fresh:false name (Type.Imm 1))
+        [ "CF"; "PF"; "AF"; "ZF"; "SF"; "OF" ];
     word = 8;
   }
 
@@ -51,6 +64,10 @@ let is_vector_param_reg (t : t) (v : var) : bool =
   Base.List.exists t.vector_param_regs ~f:(Var.same v)
 let is_return_reg (t : t) (v : var) : bool =
   Base.List.exists t.return_regs ~f:(Var.same v)
+let is_env_reg (t : t) (v : var) : bool =
+  Base.List.exists t.env_regs ~f:(Var.same v)
+let is_flag_reg (t : t) (v : var) : bool =
+  Base.List.exists t.flag_regs ~f:(Var.same v)
 
 (* BAP spells mapped targets [@name]; the leading [@] is a display prefix,
    not part of the name. *)
@@ -114,6 +131,8 @@ let of_target (target : Theory.Target.t) : t =
       callee_saved = x86_64_sysv.callee_saved;
       caller_saved_gprs = x86_64_sysv.caller_saved_gprs;
       variadic_count_reg = x86_64_sysv.variadic_count_reg;
+      env_regs = x86_64_sysv.env_regs;
+      flag_regs = x86_64_sysv.flag_regs;
       word = Theory.Target.bits target / 8;
     }
   else x86_64_sysv

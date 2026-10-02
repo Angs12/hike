@@ -219,6 +219,11 @@ let fill_bir_phis ctx scope blks =
                   Bil2llvm_ptr.as_pointer ctx src_b value
                 else value
               in
+              (* An environment register's phi also stores each
+                 incoming to the process-global cell at its own source
+                 block — whichever edge runs leaves its value there. *)
+              if Abi.is_env_reg ctx.abi (Phi.lhs phi) then
+                ignore (Llvm.build_store value (env_global ctx (Phi.lhs phi)) src_b);
               Llvm.add_incoming (value, src_bb) phi_ll)))
 
 let populate_blks ctx scope blks sub fr =
@@ -426,11 +431,12 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
             match
               Base.Option.bind
                 (Term.find blk_t sub (Bil2llvm_env.entry_blk_tid sub))
-                ~f:(fun b -> Term.get_attr b address)
+                ~f:(fun b ->
+                  Base.Option.map (Term.get_attr b address)
+                    ~f:(fun a -> (a, Term.tid sub)))
             with
-            | Some a ->
-              Core.Map.set m ~key:(Word.to_int64_exn a)
-                ~data:(Term.tid sub)
+            | Some (a, t) ->
+              Core.Map.set m ~key:(Word.to_int64_exn a) ~data:t
             | None -> m) }
   in
   (* The named-component map: filled before any body emits; the

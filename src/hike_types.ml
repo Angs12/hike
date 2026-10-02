@@ -151,6 +151,8 @@ let compute_sub_sig ~(free_vars : var list)
               (Var.same reg (Abi.sp target)
               || Var.same reg abi.thread_pointer
               || is_callee_saved
+              || Abi.is_env_reg abi reg
+              || Abi.is_flag_reg abi reg
               || Hike_abi.is_intrinsic_name n
               || Model.is_arg_slot (Var.base reg)
               || Model.is_call_arg (Var.base reg)

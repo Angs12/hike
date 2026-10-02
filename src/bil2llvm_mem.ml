@@ -165,4 +165,8 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   insert_local scope blk_tid var res;
   (* An SSA version has one def: its value is valid wherever the def
      dominates, so the binding is sub-wide. *)
-  if Var.index var > 0 then bind_ssaval scope var res
+  if Var.index var > 0 then bind_ssaval scope var res;
+  (* An environment register's def also stores the process-global cell:
+     the value must outlive the sub (its lane rides no signature). *)
+  if Abi.is_env_reg ctx.abi var then
+    ignore (Llvm.build_store res (env_global ctx var) llvm_builder)

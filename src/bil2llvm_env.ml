@@ -233,6 +233,25 @@ let var_lltype ctx var =
   if Hike_stack_model.is_window_var var then ctx.ptr_ty
   else typ_lltype ctx (Var.typ var)
 
+(* An environment register's process-global cell: one internal module
+   global per register, zero-initialized.  Reads load it, defs and phi
+   incomings store it — the register never rides a call signature. *)
+let env_global ctx (v : var) =
+  let name = "hike_env_" ^ Hike_stack_model.sanitize_tid_name (Var.name v) in
+  match Llvm.lookup_global name ctx.llvm_module with
+  | Some g -> g
+  | None ->
+    let g =
+      Llvm.define_global name
+        (Llvm.const_int (var_lltype ctx v) 0)
+        ctx.llvm_module
+    in
+    Llvm.set_linkage Llvm.Linkage.Internal g;
+    g
+
+let load_env_reg ctx llvm_builder (v : var) =
+  Llvm.build_load (var_lltype ctx v) (env_global ctx v) "" llvm_builder
+
 (* A var whose value is a stack/VLA address (a real pointer).  The
    model's memory-state vars are storage, not pointer values. *)
 let is_ptr_var (v : Var.t) : bool =

@@ -147,6 +147,7 @@ let keep_def ~(load_roots : Var.Set.t) ~(abi : Abi.t)
     Core.Set.mem load_roots lhs
   else
     Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
+    || Abi.is_env_reg abi (Var.base lhs)
     || Model.is_mem lhs
     || Model.is_call_arg lhs
     || is_call_reg ~call_regs lhs
@@ -158,11 +159,13 @@ let keep_def ~(load_roots : Var.Set.t) ~(abi : Abi.t)
 
 (* A phi survives when a survivor reads its result, it names an ABI lane
    the emitter resolves at the block, or it is one of the SP versions the
-   block's SSA stamp hands the emitter. *)
+   block's SSA stamp hands the emitter.  An environment register's phi
+   keeps too: its incomings store the process-global cell. *)
 let keep_phi ~(abi : Abi.t) ~(call_regs : Var.Set.t) ~(versions : Var.Set.t)
     (p : phi term) (used : Var.Set.t) : bool =
   let lhs = Phi.lhs p in
   Core.Set.mem used lhs || Abi.is_return_reg abi (Var.base lhs)
+  || Abi.is_env_reg abi (Var.base lhs)
   || is_call_reg ~call_regs lhs
   || Core.Set.mem versions lhs
 
