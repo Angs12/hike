@@ -15,12 +15,15 @@ type t = {
   return_regs : var list;        (* integer return registers *)
   callee_saved : var list;       (* callee-saved GPRs (incl. RBP) *)
   caller_saved_gprs : var list;  (* GPRs a call may clobber (SysV) *)
+  variadic_count_reg : var option; (* the lane carrying the vector-register
+                                      count at a variadic call (SysV: RAX) *)
   word : int;                    (* target word size in bytes *)
 }
 
 let x86_64_sysv : t =
   let r64 name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 64) in
   let r256 name = Var.create ~is_virtual:false ~fresh:false name (Type.Imm 256) in
+  let rax = r64 "RAX" in
   {
     sp = r64 "RSP";
     thread_pointer = r64 "FS_BASE";
@@ -30,11 +33,12 @@ let x86_64_sysv : t =
       Base.List.map ~f:r256
         (Base.List.map ~f:(fun i -> "YMM" ^ Base.Int.to_string i)
            (Base.List.range 0 8));
-    return_regs = [ r64 "RAX"; r64 "RDX" ];
+    return_regs = [ rax; r64 "RDX" ];
     callee_saved = Base.List.map ~f:r64 [ "RBX"; "RBP"; "R12"; "R13"; "R14"; "R15" ];
     caller_saved_gprs =
       Base.List.map ~f:r64
         [ "RAX"; "RCX"; "RDX"; "RSI"; "RDI"; "R8"; "R9"; "R10"; "R11" ];
+    variadic_count_reg = Some rax;
     word = 8;
   }
 
@@ -109,6 +113,7 @@ let of_target (target : Theory.Target.t) : t =
       return_regs = x86_64_sysv.return_regs;
       callee_saved = x86_64_sysv.callee_saved;
       caller_saved_gprs = x86_64_sysv.caller_saved_gprs;
+      variadic_count_reg = x86_64_sysv.variadic_count_reg;
       word = Theory.Target.bits target / 8;
     }
   else x86_64_sysv

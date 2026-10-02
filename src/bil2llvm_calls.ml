@@ -71,9 +71,13 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
           llvm_builder
       else if Hike_stack_model.is_arg_ptr_kind arg then
         (* A stack/VLA address is passed as a pointer into the caller's
-           own storage. *)
+           own storage.  The kind is a callee-side may — a site whose
+           value is not itself a stack address passes the register's
+           bits, coerced to the lane's pointer type. *)
         let v = create_exp ctx scope llvm_builder blk_tid exp in
-        as_arg ctx scope llvm_builder blk_tid exp v
+        let v = as_arg ctx scope llvm_builder blk_tid exp v in
+        if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Pointer then v
+        else Llvm.build_inttoptr v (lane_type ctx arg) "" llvm_builder
       else
         let v = create_exp ctx scope llvm_builder blk_tid exp in
         as_int ctx scope llvm_builder blk_tid (is_window_exp scope exp) v)
@@ -451,7 +455,18 @@ let create_thunk ctx (sub_tid : tid) =
         | None ->
             failwith
               ("hike-emit: thunk: the lane " ^ n
-              ^ " is not in the twin's convention")
+              ^ " is not in the twin's convention (sub "
+              ^ Tid.name sub_tid ^ ")")
+      in
+      (* A forwarded lane takes the callee's own lane type: the twin's
+         convention is integer-honest, and a callee lane the kind pass
+         typed ptr receives the register's bits as a pointer. *)
+      let forward (a : Arg.t) (v : Llvm.llvalue) : Llvm.llvalue =
+        let ty = lane_type ctx a in
+        if Llvm.type_of v = ty then v
+        else if Llvm.classify_type ty = Llvm.TypeKind.Pointer then
+          Llvm.build_inttoptr v ty "" builder
+        else Llvm.build_ptrtoint v ty "" builder
       in
       let call_args =
         Base.List.map args ~f:(fun a ->
@@ -477,7 +492,7 @@ let create_thunk ctx (sub_tid : tid) =
                     ^ Int.to_string i
                     ^ " is outside the twin's slots"))
             else if Var.same v window_var then window
-            else param_named v)
+            else forward a (param_named v))
       in
       let callee_fn, callee_typ = get_func ctx sub_tid in
       let r =

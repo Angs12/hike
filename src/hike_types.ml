@@ -712,6 +712,16 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t) (sub : sub term) :
       Var.reify (Bap_core_theory.Theory.Var.create mem_sort (Var.ident v))
     else v
   in
+  (* An argument lane's sort is the convention's fact (the exact lane
+     var the param-kind fixpoint proves), never the body's own
+     redefinition of the register: a lane the body mem-sorts but no
+     caller proves would flip its declared type with no call site
+     coerced to match. *)
+  let repl_arg v =
+    if Core.Set.mem ptr_vars v then
+      Var.reify (Bap_core_theory.Theory.Var.create mem_sort (Var.ident v))
+    else v
+  in
   (object
      inherit Term.mapper as super
 
@@ -720,7 +730,7 @@ let retype_sub ~(mem_typ : Type.t) ~(ptr_vars : Var.Set.t) (sub : sub term) :
      method! map_phi p = Phi.with_lhs (super#map_phi p) (repl (Phi.lhs p))
      method! map_arg a =
        let a = super#map_arg a in
-       Arg.create ?intent:(Arg.intent a) (repl (Arg.lhs a)) (Arg.rhs a)
+       Arg.create ?intent:(Arg.intent a) (repl_arg (Arg.lhs a)) (Arg.rhs a)
    end)#map_sub sub
 
 (* The signature pass: write every sub's lane list onto its own [arg]
@@ -819,6 +829,40 @@ let run (proj : Project.t) : Project.t =
                   Core.Set.add ptr_vars
                     (Hike_stack_model.hike_window_var
                        ~word:facts.Hike_kb.abi.Hike_abi.word)
+                in
+                (* An indirect target keeps the word sort: the term
+                   layer cannot carry a Mem-sorted label exp (the call
+                   or dispatch would degrade to its plain transfer),
+                   and the emitter materializes the code address from
+                   the integer at the site. *)
+                let with_base (vs : Var.Set.t) : Var.Set.t =
+                  Core.Set.fold vs ~init:vs ~f:(fun acc v ->
+                      Core.Set.add acc (Var.base v))
+                in
+                let target_vars =
+                  Term.enum blk_t sub
+                  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+                         Term.enum jmp_t blk
+                         |> Seq.fold ~init:acc ~f:(fun acc j ->
+                                match Jmp.kind j with
+                                | Goto (Indirect e) | Ret (Indirect e) ->
+                                  with_base (Core.Set.union acc (Exp.free_vars e))
+                                | Call c -> (
+                                    let acc =
+                                      match Call.target c with
+                                      | Indirect e ->
+                                        Core.Set.union acc (Exp.free_vars e)
+                                      | _ -> acc
+                                    in
+                                    match Call.return c with
+                                    | Some (Indirect e) ->
+                                      Core.Set.union acc (Exp.free_vars e)
+                                    | _ -> acc)
+                                | _ -> acc))
+                in
+                let target_vars = with_base target_vars in
+                let ptr_vars =
+                  Core.Set.diff ptr_vars target_vars
                 in
                 retype_sub ~mem_typ ~ptr_vars sub)
           in

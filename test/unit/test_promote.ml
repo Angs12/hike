@@ -482,7 +482,8 @@ let tests : unit Alcotest.test list =
         check_ir "PR-04"
           ("_hike_thunk\"(i64 %RDI, i64 %RSI, i64 %RDX, i64 %RCX, i64 %R8, "
           ^ "i64 %R9, i256 %YMM0, i256 %YMM1, i256 %YMM2, i256 %YMM3, "
-          ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, ptr %hike_window)")
+          ^ "i256 %YMM4, i256 %YMM5, i256 %YMM6, i256 %YMM7, i64 %RAX, "
+          ^ "ptr %hike_window)")
           ir);
 
     (* PR-05: the twin unpacks the window slots into the promoted body. *)
@@ -505,7 +506,7 @@ let tests : unit Alcotest.test list =
         let _, _, ir2 = t4_fixture () in
         check_ir "PR-09"
           "@indirect_call(i64, i64, i64, i64, i64, i64, i256, i256, i256, i256, \
-           i256, i256, i256, i256, ptr)"
+           i256, i256, i256, i256, i64, ptr)"
           ir2);
 
     (* PR-10: the sub gains its promoted parameter as a real BIR arg. *)

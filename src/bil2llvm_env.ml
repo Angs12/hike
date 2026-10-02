@@ -286,12 +286,14 @@ let blk_llvals_find map tid =
 let reg_args ~intent (regs : var list) : Arg.t list =
   Base.List.map regs ~f:(fun reg -> Arg.create ~intent reg (Var reg))
 
-(* The synthetic indirect-call convention: every register lane plus
-   the caller-window base — exactly what a pointer call passes and a
-   thunk accepts. *)
+(* The synthetic indirect-call convention: every register lane a call
+   passes (the parameter registers and the variadic count) plus the
+   caller-window base — exactly what a pointer call passes and a thunk
+   accepts. *)
 let window_conv_args ~(word : int) (conv : Abi.t) : Arg.t list =
   let window = Hike_stack_model.hike_window_var ~word in
-  reg_args ~intent:In (Abi.param_regs conv)
+  reg_args ~intent:In
+    (Abi.param_regs conv @ Base.Option.to_list conv.Abi.variadic_count_reg)
   @ [ Arg.create ~intent:In window (Var window) ]
 
 (* A lifted sub carries its own signature on its [arg] terms (the returns

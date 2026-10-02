@@ -512,40 +512,31 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                    owning_data_binding data c)
                                 with
                                 | false, Some (id, comp_lo) -> (
+                                    (* A pure constant address materializes
+                                       at this def: the component's pointer
+                                       base plus its own constant.  A value
+                                       with var leaves composes over its
+                                       operands' own pointers — the address
+                                       defs carrying it already render the
+                                       real bits, so a re-base here would
+                                       materialize the address twice. *)
                                     match
-                                      Base.Option.map
-                                        (offset_of ~piece_ok ~leaves
-                                           (Def.rhs d))
-                                        ~f:(function
-                                          | Bil.Int w -> (
-                                              match
-                                                Cbat_word.to_int64
-                                                  (Cbat_word.of_word w)
-                                              with
-                                              | Ok k
-                                                when Stdlib.Int64.equal k c
-                                                ->
-                                                base_plus
-                                                  (Model.sec_comp_ptr
-                                                     ~addr_bits id)
-                                                  ~rel:comp_lo (Bil.Int w)
-                                              | _ ->
-                                                  Bil.BinOp
-                                                    ( Bil.PLUS,
-                                                      Bil.Var
-                                                        (Model.sec_comp_ptr
-                                                           ~addr_bits id),
-                                                      Bil.BinOp
-                                                        ( Bil.MINUS,
-                                                          Bil.Int w,
-                                                          Bil.Int
-                                                            (Cbat_word.to_word
-                                                               (Cbat_word
-                                                                  .of_int64
-                                                                  ~width:64
-                                                                  comp_lo))
-                                                        ) ))
-                                          | folded ->
+                                      offset_of ~piece_ok ~leaves (Def.rhs d)
+                                    with
+                                    | Some (Bil.Int w) ->
+                                        census "rw.value.section";
+                                        let rhs =
+                                          match
+                                            Cbat_word.to_int64
+                                              (Cbat_word.of_word w)
+                                          with
+                                          | Ok k
+                                            when Stdlib.Int64.equal k c ->
+                                              base_plus
+                                                (Model.sec_comp_ptr
+                                                   ~addr_bits id)
+                                                ~rel:comp_lo (Bil.Int w)
+                                          | _ ->
                                               Bil.BinOp
                                                 ( Bil.PLUS,
                                                   Bil.Var
@@ -553,20 +544,20 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                                        ~addr_bits id),
                                                   Bil.BinOp
                                                     ( Bil.MINUS,
-                                                      folded,
+                                                      Bil.Int w,
                                                       Bil.Int
                                                         (Cbat_word.to_word
-                                                           (Cbat_word.of_int64
+                                                           (Cbat_word
+                                                              .of_int64
                                                               ~width:64
-                                                              comp_lo)) ))
-                                        )
-                                    with
-                                    | Some rhs ->
-                                        census "rw.value.section";
+                                                              comp_lo))
+                                                    ) )
+                                        in
                                         Core.Map.set acc ~key:(Term.tid d)
-                                          ~data:{ fact with fr_rhs = Some rhs }
-                                    | None ->
-                                        census "rw.value.section.unfoldable";
+                                          ~data:
+                                            { fact with fr_rhs = Some rhs }
+                                    | _ ->
+                                        census "rw.value.section.carried";
                                         acc)
                                 | _ -> census "rw.value.raw"; acc))
                         | Ok ws -> (

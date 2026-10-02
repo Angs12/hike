@@ -692,14 +692,22 @@ let pass_vsa proj =
         |> Core.Int64.Set.of_list
       in
       (* The set's own words of a bounded target denotation; [None] when
-         the target is unbounded or the set is too wide to enumerate. *)
+         the target is unbounded or the set is too wide to enumerate.
+         The width compares as a WORD (unsigned): a cardinality past
+         2^63 signed-extracts negative through int64 and a signed
+         compare would read it small. *)
+      let bounded_words (ws : Cbat_vsa.WordSet.t) : Cbat_word.t list option =
+        if
+          Cbat_vsa.WordSet.is_top ws
+          || Cbat_vsa.WordSet.is_infinite ws
+          || Cbat_vsa.WordSet.is_bottom ws
+          || Cbat_word.gt_int (Cbat_vsa.WordSet.cardinality ws) 64
+        then None
+        else Some (Cbat_vsa.WordSet.iter ws)
+      in
       let target_words ~blk e =
         match facts.Hike_kb.denote ~blk e with
-        | Ok ws when not (Cbat_vsa.WordSet.is_top ws) -> (
-          match Cbat_word.to_int64 (Cbat_vsa.WordSet.cardinality ws) with
-          | Ok n when Stdlib.Int64.compare n 64L <= 0 ->
-            Some (Cbat_vsa.WordSet.iter ws)
-          | _ -> None)
+        | Ok ws -> bounded_words ws
         | _ -> None
       in
       (* A target read through a relocated slot names no lifted sub.  The
@@ -736,7 +744,10 @@ let pass_vsa proj =
         | Error _ -> None
       in
       (* A target var whose reaching def reads the return-address cell is
-         the return epilogue, never a dispatch. *)
+         the return epilogue, never a dispatch.  A BOTTOM address proves
+         the shape only on a path the solve proved dead (a wholly-BOTTOM
+         env); inside a live env it is an absent var — a never-defined
+         register — and names no return. *)
       let is_return ~blk e =
         match e with
         | Bil.Var v -> (
@@ -751,7 +762,12 @@ let pass_vsa proj =
               match facts.Hike_kb.denote ~blk ~def:d addr with
               | Ok ws ->
                 Hike_stack_model.is_return_address ws
-                || Cbat_vsa.WordSet.is_bottom ws
+                || (Cbat_vsa.WordSet.is_bottom ws
+                    && Base.Option.value_map
+                         (Cbat_vsa.env_tag d)
+                         ~default:false
+                         ~f:(fun env ->
+                           Cbat_vsa.AI.equal env Cbat_vsa.AI.bottom))
               | Error _ -> false)
             | None -> false))
         | _ -> false
@@ -878,6 +894,32 @@ let pass_vsa proj =
         |> Seq.to_list
         |> edges_of_tids
       in
+      (* An address taken as a VALUE (a callback handed to a foreign API —
+         atexit, qsort) is an edge the native side walks: a def whose
+         denotation names an in-module sub keeps that sub, and the
+         closure recurses into its own calls. *)
+      let addr_targets_of_sub sub =
+        let reach = reachable_tids sub in
+        Term.enum blk_t sub
+        |> Seq.filter ~f:(fun blk -> Core.Set.mem reach (Term.tid blk))
+        |> Seq.to_list
+        |> Base.List.concat_map ~f:(fun blk ->
+            Term.enum def_t blk
+            |> Seq.to_list
+            |> Base.List.filter_map ~f:(fun d ->
+                match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
+                | Ok ws -> (
+                  match bounded_words ws with
+                  | Some ws ->
+                    Some
+                      (Base.List.filter_map ws ~f:(fun w ->
+                           match Cbat_word.to_int64 w with
+                           | Ok v -> Core.Map.find sub_addrs (Addr.of_int64 v)
+                           | Error _ -> None))
+                  | None -> None)
+                | _ -> None)
+            |> Base.List.concat)
+      in
       let rec closure seen work =
         match work with
         | [] -> Some seen
@@ -894,7 +936,10 @@ let pass_vsa proj =
                  call graph. *)
               let more =
                 if Term.has_attr s Sub.entry_point then Some []
-                else edges_of_sub s
+                else
+                  match edges_of_sub s with
+                  | None -> None
+                  | Some es -> Some (es @ addr_targets_of_sub s)
               in
               match more with
               | None -> None
