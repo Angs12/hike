@@ -64,7 +64,10 @@ let () =
     let run : unit Toplevel.var = Toplevel.var "dec-diff-seam" in
     Toplevel.put run
       (Theory.Unit.for_region ~lower ~upper >>= fun unit ->
-           KB.provide Theory.Unit.target unit (Project.target proj));
+           KB.provide Theory.Unit.target unit (Project.target proj)
+           >>= fun () ->
+           KB.provide Image.Spec.slot unit
+             (Project.specification proj));
     Disasm_expert.Recursive.run (Project.arch proj) view
   in
   match seam_run view with
