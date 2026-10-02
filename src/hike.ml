@@ -51,10 +51,11 @@ let convert_binary output_program proj =
         Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
           ~relative ~externals
   in
+  let prog = Project.program proj in
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
     ~symtab:(Some (Project.symbols proj))
-    spec (Project.program proj);
+    spec prog;
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx
@@ -302,18 +303,47 @@ let pass_vsa proj =
       Core.Map.of_alist_exn (module Tid)
         (Base.List.map blks ~f:(fun b -> (Term.tid b, b)))
     in
+    (* The edge set the completion names (ADR 0024): the jmps, plus a
+       conditional or jmp-less block's term-order false edge.  The
+       lift's block list is the term order. *)
+    let pos =
+      Core.Map.of_alist_exn (module Tid)
+        (Base.List.mapi blks ~f:(fun i b -> (Term.tid b, i)))
+    in
+    let fallthrough_of tid =
+      match
+        Core.Map.find pos tid
+        |> Base.Option.bind ~f:(fun i ->
+               Base.Option.some_if
+                 (i + 1 < Base.List.length blks)
+                 (Base.List.nth_exn blks (i + 1)))
+      with
+      | Some b -> [ Term.tid b ]
+      | None -> []
+    in
     let succ_tids b =
-      Term.enum jmp_t b
-      |> Seq.filter_map ~f:(fun j ->
-          match Jmp.kind j with
-          | Goto (Direct t) | Int (_, t) -> Some t
-          | Call c -> (
-            match Call.return c with
-            | Some (Direct t) -> Some t
+      let explicit =
+        Term.enum jmp_t b
+        |> Seq.filter_map ~f:(fun j ->
+            match Jmp.kind j with
+            | Goto (Direct t) | Int (_, t) -> Some t
+            | Call c -> (
+              match Call.return c with
+              | Some (Direct t) -> Some t
+              | _ -> None)
             | _ -> None)
-          | _ -> None)
-      |> Seq.filter ~f:(Core.Map.mem by_tid)
-      |> Seq.to_list
+        |> Seq.to_list
+      in
+      let falls =
+        match Term.enum jmp_t b |> Seq.to_list with
+        | [] -> fallthrough_of (Term.tid b)
+        | js ->
+          if Hike_stack_model.is_true_cond (Jmp.cond (Base.List.last_exn js))
+          then []
+          else fallthrough_of (Term.tid b)
+      in
+      (explicit @ falls)
+      |> Base.List.filter ~f:(Core.Map.mem by_tid)
     in
     let rec closure seen work =
       match work with
@@ -458,6 +488,15 @@ let pass_vsa proj =
         Core.Set.of_list (module Tid)
           (Base.List.map blks ~f:Term.tid)
       in
+      let blk_owner =
+        Term.enum sub_t (Project.program proj)
+        |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
+            Term.enum blk_t s
+            |> Seq.fold ~init:m ~f:(fun m b ->
+                match Core.Map.find m (Term.tid b) with
+                | Some _ -> m
+                | None -> Core.Map.set m ~key:(Term.tid b) ~data:(Term.tid s)))
+      in
       let rewrite b =
         Term.map jmp_t b
           ~f:(fun j ->
@@ -472,6 +511,30 @@ let pass_vsa proj =
                           ~target:(Call.target c)
                           ()))
                 | _ -> j)
+              | Goto (Direct t) when not (Core.Set.mem kept t) -> (
+                (* The decode followed a jump into a sub the program
+                   already carries: a target at that sub's entry is a
+                   tail call (the register state carries over); a
+                   mid-sub target has no calling convention — the loud
+                   failure stands. *)
+                match
+                  Term.enum sub_t (Project.program proj)
+                  |> Seq.find_map ~f:(fun s ->
+                         let entry =
+                           Term.enum blk_t s |> Seq.hd_exn |> Term.tid
+                         in
+                         if Tid.equal entry t then Some (Term.tid s)
+                         else None)
+                with
+                | Some owner ->
+                  Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j)
+                    (Call (Call.create ~target:(Direct owner) ()))
+                | None ->
+                  failwith
+                    (Printf.sprintf
+                       "hike-vsa: the re-lift at %s jumps into sub %s's mid-block %s"
+                       name (Tid.name (Core.Map.find_exn blk_owner t))
+                       (Tid.name t)))
               | _ -> j
             in
             Hike_cfg_complete.remap_jmp ~call:retarget_call
@@ -504,7 +567,7 @@ let pass_vsa proj =
          run's maps before the solve: a dispatch, the prune, or a
          resolution anywhere in the run names in-module targets
          through them. *)
-      let block_addrs =
+        let block_addrs =
         Base.List.fold (frag_subs @ [ root_sub ]) ~init:block_addrs
           ~f:(fun m s ->
             Term.enum blk_t s
@@ -599,6 +662,40 @@ let pass_vsa proj =
     Base.List.exists init_fini_slots ~f:(fun (lo, hi) ->
         Int64.compare slot lo >= 0 && Int64.compare slot hi <= 0)
   in
+  (* The claimed spans: an address inside a lifted sub's block span is
+     that sub's own code (an internal jump target its resolution
+     owns) — never a new lift root.  The owner is the greatest block
+     start at or below the address; the address is inside the owner's
+     sub's span iff that sub has a block after it. *)
+  let in_claimed_span ba v =
+    let sub_of_blk =
+      Term.enum sub_t (Project.program proj)
+      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
+          Term.enum blk_t s
+          |> Seq.fold ~init:m ~f:(fun m b ->
+              match Core.Map.find m (Term.tid b) with
+              | Some _ -> m
+              | None -> Core.Map.set m ~key:(Term.tid b) ~data:(Term.tid s)))
+    in
+    match
+      Core.Map.to_alist ba
+      |> Base.List.filter ~f:(fun (addr, _) ->
+             Int64.compare (Word.to_int64_exn addr) v <= 0)
+      |> Base.List.max_elt ~compare:(fun (x, _) (y, _) ->
+             Int64.compare (Word.to_int64_exn x) (Word.to_int64_exn y))
+    with
+    | None -> false
+    | Some (_, blk) -> (
+      match Core.Map.find sub_of_blk blk with
+      | None -> false
+      | Some sub ->
+        Core.Map.to_alist ba
+        |> Base.List.exists ~f:(fun (addr, t) ->
+               match Core.Map.find sub_of_blk t with
+               | Some s when Tid.equal s sub ->
+                 Int64.compare (Word.to_int64_exn addr) v > 0
+               | _ -> false))
+  in
   let subs_acc, block_addrs, hoisted_subs, discovered =
     Base.List.fold rels
       ~init:(subs_acc, block_addrs, hoisted_subs, [])
@@ -606,6 +703,7 @@ let pass_vsa proj =
         if
           is_code_addr value
           && not (in_init_fini slot)
+          && not (in_claimed_span ba value)
           && Base.Option.is_none (lookup value)
           && Base.Option.is_none
                (Core.Map.find sub_addrs (Addr.of_int64 value))
@@ -673,6 +771,7 @@ let pass_vsa proj =
                       with
                       | Some v
                         when is_code_addr v
+                             && not (in_claimed_span ba v)
                              && Base.Option.is_none (lookup v)
                              && Base.Option.is_none
                                   (Core.Map.find sub_addrs
