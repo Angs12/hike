@@ -67,7 +67,27 @@ let create_branches ctx scope blk llvm_builder ?(sub : sub term option)
       | Goto (Direct tid) ->
           if Hike_stack_model.is_true_cond (Jmp.cond j) then (
             if is_interrupt tid then create_interrupt ctx llvm_builder
-            else Llvm.build_br (get_bb scope tid) llvm_builder |> ignore)
+            else
+              let bb =
+                let in_sub =
+                  match sub with
+                  | Some s ->
+                    Term.enum blk_t s
+                    |> Seq.exists ~f:(fun b -> Tid.equal (Term.tid b) tid)
+                  | None -> true
+                in
+                if in_sub then get_bb scope tid
+                else
+                  failwith
+                    (Printf.sprintf
+                       "hike: block %s: goto names block %s, which is not \
+                        a block of sub %s"
+                       (Tid.name blk_tid) (Tid.name tid)
+                       (match sub with
+                        | Some s -> Tid.name (Term.tid s)
+                        | None -> "?"))
+              in
+              Llvm.build_br bb llvm_builder |> ignore)
           else
             failwith
               (Printf.sprintf
@@ -163,7 +183,20 @@ let fill_bir_phis ctx scope blks =
           in
           Phi.values phi
           |> Seq.iter ~f:(fun (src, exp) ->
-              let src_bb = get_bb scope src in
+              let src_bb =
+                match
+                  Seq.find blks ~f:(fun b -> Tid.equal (Term.tid b) src)
+                with
+                | Some _ -> get_bb scope src
+                | None ->
+                  failwith
+                    (Printf.sprintf
+                       "hike: phi incoming from block %s, which is not a \
+                        block of sub %s"
+                       (Tid.name src)
+                       (Tid.name (Term.tid
+                                    (Seq.hd_exn blks))))
+              in
               let src_b =
                 match Llvm.block_terminator src_bb with
                 | Some t -> Llvm.builder_before ctx.llvm_ctx t

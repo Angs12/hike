@@ -72,5 +72,9 @@ module Kb = Hike_kb
     proven canary compositions delete before the sections pass. *)
 module Strip_canaries = Hike_strip_canaries
 
+(** The type inference: every value typed from the denotation and the
+    use graph; the lane kinds stamped; runs after [Ssa]. *)
+module Types = Hike_types
+
 (** LLVM emitter. *)
 module Bil2llvm = Bil2llvm

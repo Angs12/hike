@@ -92,6 +92,7 @@
   bap
   bap-core-theory
   bap-main
+  llvm
 
   cbat_vsa
   cbat_vsa_domain

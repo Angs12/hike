@@ -265,9 +265,46 @@ let pass_vsa proj =
           | None -> closure seen rest
           | Some b -> closure seen (succ_tids b @ rest)
     in
-    let blocks_of seen =
-      Base.List.filter blks ~f:(fun b -> Core.Set.mem seen (Term.tid b))
+    (* The lift's block list is a DFS from the lifted root, so a callee
+       fragment's blocks keep the CALLER's traversal order.  Every sub's
+       blocks must read in a DFS from their OWN entry — the emitter
+       resolves a block's reads against the defs term-preceding it, which
+       is exactly the property the lift gives its own subs. *)
+    let dfs_order entry_tid =
+      let rec go seen acc work =
+        match work with
+        | [] -> List.rev acc
+        | t :: rest ->
+          if Core.Set.mem seen t then go seen acc rest
+          else
+            let seen = Core.Set.add seen t in
+            let succs =
+              match Core.Map.find by_tid t with
+              | Some b -> succ_tids b
+              | None -> []
+            in
+            go seen (t :: acc) (succs @ rest)
+      in
+      go (Core.Set.empty (module Tid)) [] [ entry_tid ]
     in
+    let order_blocks seen entry_tid =
+      let ordered = dfs_order entry_tid in
+      let rank =
+        Core.Map.of_alist_exn (module Tid)
+          (Base.List.mapi ordered ~f:(fun i t -> (t, i)))
+      in
+      let in_seen =
+        Base.List.filter ordered ~f:(fun t -> Core.Set.mem seen t)
+      in
+      let leftovers =
+        Base.List.filter blks ~f:(fun b ->
+            Core.Set.mem seen (Term.tid b)
+            && not (Core.Map.mem rank (Term.tid b)))
+      in
+      Base.List.map in_seen ~f:(fun t -> Core.Map.find_exn by_tid t)
+      @ leftovers
+    in
+    let blocks_of seen = Base.List.filter blks ~f:(fun b -> Core.Set.mem seen (Term.tid b)) in
     let root = Base.List.hd_exn blks in
     let entry_seen = closure (Core.Set.empty (module Tid)) [ Term.tid root ] in
     let call_targets =
@@ -302,135 +339,292 @@ let pass_vsa proj =
     in
     (* Blocks no closure claimed stay with the entry sub: the lift lifted
        them, so the term keeps them. *)
-    (blocks_of entry_seen @ blocks_of remaining, frags)
+    ( order_blocks entry_seen (Term.tid root),
+      Base.List.map frags ~f:(fun (t, blocks) ->
+          let seen =
+            Core.Set.of_list (module Tid)
+              (Base.List.map blocks ~f:Term.tid)
+          in
+          (t, order_blocks seen t)) )
   in
 
-  let main_tid, subs_acc, block_addrs, hoisted_subs =
+  (* One re-lift root: the lift, the partition, the hoist, the maps, the
+     solve.  [main] is the first root (the entry's denotation names it);
+     a relocated data word naming an unclaimed entry of the executable
+     section is another (the dead-text discovery below). *)
+  let relift_root ~(name : string) ~(addr : int64)
+      (subs_acc, block_addrs, hoisted) =
+    match lift_at (Addr.of_int64 addr) ~block_addrs with
+    | None | Some [] -> (subs_acc, block_addrs, hoisted, None)
+    | Some blks ->
+      let entry_blocks, frags = partition_lifted blks in
+      let build_sub ~tid blocks =
+        let sb = Sub.Builder.create ~tid ~name:(Tid.name tid) () in
+        Base.List.iter blocks ~f:(fun b ->
+            let b =
+              Term.concat_map def_t b ~f:Hike_split_mem.split_def
+            in
+            Sub.Builder.add_blk sb (Hike_coerce.coerce_block b));
+        Sub.Builder.result sb
+      in
+      (* Each fragment earns its own tid; the flattened call retargets
+         to it. *)
+      let frag_tids =
+        Base.List.map frags ~f:(fun (_, blocks) ->
+            let entry = Base.List.hd_exn blocks in
+            match Term.get_attr entry address with
+            | Some a ->
+              Tid.for_name
+                (Printf.sprintf "sub_%Lx" (Word.to_int64_exn a))
+            | None -> Tid.for_name "sub")
+      in
+      let retarget =
+        match Base.List.map2 frags frag_tids ~f:(fun (entry_tid, _) ftid -> (entry_tid, ftid)) with
+        | Ok rows -> Core.Map.of_alist_exn (module Tid) rows
+        | Unequal_lengths ->
+          failwith "hike-vsa: the re-lift partition lost a fragment tid"
+      in
+      let retarget_call t =
+        Base.Option.value (Core.Map.find retarget t) ~default:t
+      in
+      (* The kept tids: every block the partition claims.  A call's
+         return may name a block the filter dropped — the continuation
+         lies in another sub's territory (a no-return call at a
+         function's end, the next function's first block) — and the
+         re-lifted sub cannot express it: the call loses its return,
+         which the emitter renders as the no-return transfer it is. *)
+      let kept =
+        Core.Set.of_list (module Tid)
+          (Base.List.map blks ~f:Term.tid)
+      in
+      let rewrite b =
+        Term.map jmp_t b
+          ~f:(fun j ->
+            let j =
+              match Jmp.kind j with
+              | Call c -> (
+                match Call.return c with
+                | Some (Direct t) when not (Core.Set.mem kept t) ->
+                  Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j)
+                    (Call
+                       (Call.create
+                          ~target:(Call.target c)
+                          ()))
+                | _ -> j)
+              | _ -> j
+            in
+            Hike_cfg_complete.remap_jmp ~call:retarget_call
+              ~blk:(fun t -> t) j)
+      in
+      (* The re-lifted terms take the pre-solve normalization the
+         program's own subs went through above this pass: the FP temp
+         width qualification (the unsized intrinsic temp spellings). *)
+      let fp_normalize (s : sub term) : sub term =
+        Term.enum sub_t (Hike_fp.run_program (Program.create ~subs:[ s ] ()))
+        |> Seq.hd_exn
+      in
+      let frag_subs =
+        match
+          Base.List.map2 frags frag_tids ~f:(fun (_, blocks) ftid ->
+              fp_normalize
+                (build_sub ~tid:ftid (Base.List.map blocks ~f:rewrite)))
+        with
+        | Ok subs -> subs
+        | Unequal_lengths ->
+          failwith "hike-vsa: the re-lift partition lost a fragment"
+      in
+      let root_tid = Tid.for_name name in
+      let root_sub =
+        fp_normalize
+          (build_sub ~tid:root_tid
+             (Base.List.map entry_blocks ~f:rewrite))
+      in
+      (* The re-lifted terms' address stamps and entry rows enter the
+         run's maps before the solve: a dispatch, the prune, or a
+         resolution anywhere in the run names in-module targets
+         through them. *)
+      let block_addrs =
+        Base.List.fold (frag_subs @ [ root_sub ]) ~init:block_addrs
+          ~f:(fun m s ->
+            Term.enum blk_t s
+            |> Seq.fold ~init:m ~f:(fun m b ->
+                match Term.get_attr b address with
+                | Some a -> Core.Map.set m ~key:a ~data:(Term.tid b)
+                | None -> m))
+      in
+      let sub_addrs =
+        (Addr.of_int64 addr, root_tid)
+        :: Base.List.filter_map frag_subs ~f:(fun s ->
+            match Term.first blk_t s with
+            | Some b ->
+              Base.Option.map (Term.get_attr b address)
+                ~f:(fun a -> (a, Term.tid s))
+            | None -> None)
+        |> Core.Map.of_alist_exn (module Addr)
+        |> Core.Map.fold ~init:sub_addrs ~f:(fun ~key ~data m ->
+               Core.Map.set m ~key ~data)
+      in
+      (* The hoisted subs ride their own summaries: a caller's call names
+         a sub of the extended program. *)
+      let written =
+        Hike_vsa.kill_summaries ~abi:(Hike_abi.of_target target)
+          (Program.create
+             ~subs:(Base.List.append
+                      (Term.enum sub_t (Project.program proj)
+                      |> Seq.to_list)
+                      (Base.List.append hoisted
+                         (Base.List.append frag_subs [ root_sub ])))
+             ())
+      in
+      let solved_frags = ref [] in
+      let subs_acc, block_addrs =
+        Base.List.fold frag_subs ~init:(subs_acc, block_addrs)
+          ~f:(fun (acc, ba) s ->
+            let envs, stamped, ba' =
+              Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images
+                ~written ~lift_at ~block_addrs:ba s
+            in
+            solved_frags := stamped :: !solved_frags;
+            ( Core.Map.set acc ~key:(Term.tid s) ~data:(envs, stamped),
+              Core.Map.fold ba' ~init:ba ~f:(fun ~key ~data m ->
+                  Core.Map.set m ~key ~data) ))
+      in
+      let envs, stamped, block_addrs' =
+        Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images ~written
+          ~lift_at ~block_addrs root_sub
+      in
+      ( Core.Map.set subs_acc ~key:root_tid ~data:(envs, stamped),
+        Core.Map.fold block_addrs' ~init:block_addrs
+          ~f:(fun ~key ~data m -> Core.Map.set m ~key ~data),
+        List.rev_append !solved_frags (stamped :: hoisted),
+        Some root_tid )
+  in
+  let subs_acc, block_addrs, hoisted_subs, main_tid =
     match main_addr with
-    | None -> (None, subs_acc, block_addrs, [])
+    | None -> (subs_acc, block_addrs, [], None)
     | Some addr -> (
       match lookup addr with
-      | Some t -> (Some t, subs_acc, block_addrs, [])
-      | None -> (
-        match lift_at (Addr.of_int64 addr) ~block_addrs with
-        | None | Some [] -> (None, subs_acc, block_addrs, [])
-        | Some blks ->
-          let entry_blocks, frags = partition_lifted blks in
-          let build_sub ~tid blocks =
-            let sb = Sub.Builder.create ~tid ~name:(Tid.name tid) () in
-            Base.List.iter blocks ~f:(fun b ->
-                let b =
-                  Term.concat_map def_t b ~f:Hike_split_mem.split_def
-                in
-                Sub.Builder.add_blk sb (Hike_coerce.coerce_block b));
-            Sub.Builder.result sb
+      | Some t -> (subs_acc, block_addrs, [], Some t)
+      | None -> relift_root ~name:"main" ~addr (subs_acc, block_addrs, []))
+  in
+  (* The dead-text discovery: a relocated data word whose value names an
+     unclaimed entry of the executable section makes that address a lift
+     root.  The data image names the callees a spilled function-pointer
+     table calls — the store/load round trip loses them, the relocation
+     facts do not.  The init/fini arrays are excluded: they belong to
+     nothing the module runs.  A word naming a block the run already
+     carries (a jump-table entry into a lifted sub) lifts nothing. *)
+  let range_of_section name =
+    match
+      Hike_image.get_section_mem name proj |> Hike_image.get_section_data
+    with
+    | Some (_, lo, hi) -> Some (Word.to_int64_exn lo, Word.to_int64_exn hi)
+    | None -> None
+  in
+  let text_range = range_of_section ".text" in
+  let init_fini_slots =
+    Base.List.filter_map [ ".init_array"; ".fini_array" ] ~f:range_of_section
+  in
+  let rels =
+    Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj)
+  in
+  let is_code_addr v =
+    match text_range with
+    | Some (lo, hi) ->
+      Int64.compare v lo >= 0 && Int64.compare v hi <= 0
+    | None -> false
+  in
+  let in_init_fini slot =
+    Base.List.exists init_fini_slots ~f:(fun (lo, hi) ->
+        Int64.compare slot lo >= 0 && Int64.compare slot hi <= 0)
+  in
+  let subs_acc, block_addrs, hoisted_subs, discovered =
+    Base.List.fold rels
+      ~init:(subs_acc, block_addrs, hoisted_subs, [])
+      ~f:(fun (acc, ba, hoisted, roots) (slot, value) ->
+        if
+          is_code_addr value
+          && not (in_init_fini slot)
+          && Base.Option.is_none (lookup value)
+          && Base.Option.is_none
+               (Core.Map.find sub_addrs (Addr.of_int64 value))
+          && Base.Option.is_none
+               (Core.Map.find ba (Addr.of_int64 value))
+        then
+          let acc, ba, hoisted, root =
+            relift_root
+              ~name:(Printf.sprintf "sub_%Lx" value)
+              ~addr:value (acc, ba, hoisted)
           in
-          (* Each fragment earns its own tid; the flattened call retargets
-             to it. *)
-          let frag_tids =
-            Base.List.map frags ~f:(fun (_, blocks) ->
-                let entry = Base.List.hd_exn blocks in
-                match Term.get_attr entry address with
-                | Some a ->
-                  Tid.for_name
-                    (Printf.sprintf "sub_%Lx" (Word.to_int64_exn a))
-                | None -> Tid.for_name "sub")
-          in
-          let retarget =
-            match Base.List.map2 frags frag_tids ~f:(fun (entry_tid, _) ftid -> (entry_tid, ftid)) with
-            | Ok rows -> Core.Map.of_alist_exn (module Tid) rows
-            | Unequal_lengths ->
-              failwith "hike-vsa: the re-lift partition lost a fragment tid"
-          in
-          let retarget_call t =
-            Base.Option.value (Core.Map.find retarget t) ~default:t
-          in
-          let rewrite b =
-            Term.map jmp_t b
-              ~f:(Hike_cfg_complete.remap_jmp ~call:retarget_call
-                    ~blk:(fun t -> t))
-          in
-          (* The re-lifted terms take the pre-solve normalization the
-             program's own subs went through above this pass: the FP temp
-             width qualification (the unsized intrinsic temp spellings). *)
-          let fp_normalize (s : sub term) : sub term =
-            Term.enum sub_t (Hike_fp.run_program (Program.create ~subs:[ s ] ()))
-            |> Seq.hd_exn
-          in
-          let frag_subs =
-            match
-              Base.List.map2 frags frag_tids ~f:(fun (_, blocks) ftid ->
-                  fp_normalize
-                    (build_sub ~tid:ftid (Base.List.map blocks ~f:rewrite)))
-            with
-            | Ok subs -> subs
-            | Unequal_lengths ->
-              failwith "hike-vsa: the re-lift partition lost a fragment"
-          in
-          let main_tid = Tid.for_name "main" in
-          let main_sub =
-            fp_normalize
-              (build_sub ~tid:main_tid
-                 (Base.List.map entry_blocks ~f:rewrite))
-          in
-          (* The re-lifted terms' address stamps and entry rows enter the
-             run's maps before the solve: a dispatch, the prune, or a
-             resolution anywhere in the run names in-module targets
-             through them. *)
-          let block_addrs =
-            Base.List.fold (frag_subs @ [ main_sub ]) ~init:block_addrs
-              ~f:(fun m s ->
-                Term.enum blk_t s
-                |> Seq.fold ~init:m ~f:(fun m b ->
-                    match Term.get_attr b address with
-                    | Some a -> Core.Map.set m ~key:a ~data:(Term.tid b)
-                    | None -> m))
-          in
-          let sub_addrs =
-            (Addr.of_int64 addr, main_tid)
-            :: Base.List.filter_map frag_subs ~f:(fun s ->
-                match Term.first blk_t s with
-                | Some b ->
-                  Base.Option.map (Term.get_attr b address)
-                    ~f:(fun a -> (a, Term.tid s))
-                | None -> None)
-            |> Core.Map.of_alist_exn (module Addr)
-            |> Core.Map.fold ~init:sub_addrs ~f:(fun ~key ~data m ->
-                   Core.Map.set m ~key ~data)
-          in
-          (* The hoisted subs ride their own summaries: main's call names
-             a sub of the extended program. *)
-          let written =
-            Hike_vsa.kill_summaries ~abi:(Hike_abi.of_target target)
-              (Program.create
-                 ~subs:(Base.List.append
-                          (Term.enum sub_t (Project.program proj)
-                          |> Seq.to_list)
-                          (frag_subs @ [ main_sub ]))
-                 ())
-          in
-          let solved_frags = ref [] in
-          let subs_acc, block_addrs =
-            Base.List.fold frag_subs ~init:(subs_acc, block_addrs)
-              ~f:(fun (acc, ba) s ->
-                let envs, stamped, ba' =
-                  Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images
-                    ~written ~lift_at ~block_addrs:ba s
-                in
-                solved_frags := stamped :: !solved_frags;
-                ( Core.Map.set acc ~key:(Term.tid s) ~data:(envs, stamped),
-                  Core.Map.fold ba' ~init:ba ~f:(fun ~key ~data m ->
-                      Core.Map.set m ~key ~data) ))
-          in
-          let envs, stamped, block_addrs' =
-            Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images ~written
-              ~lift_at ~block_addrs main_sub
-          in
-          ( Some main_tid,
-            Core.Map.set subs_acc ~key:main_tid ~data:(envs, stamped),
-            Core.Map.fold block_addrs' ~init:block_addrs
-              ~f:(fun ~key ~data m -> Core.Map.set m ~key ~data),
-            List.rev !solved_frags )))
+          (acc, ba, hoisted, match root with Some t -> t :: roots | None -> roots)
+        else (acc, ba, hoisted, roots))
+  in
+  (* The store-side discovery: a root sub's store whose data denotates to
+     an unclaimed entry of the executable section names a callee the
+     pointer round trip loses at the load — the store still carries it.
+     The denotations come from the roots' own solve environments. *)
+  let store_root (acc, ba, hoisted, roots) rtid =
+    match Core.Map.find acc rtid with
+    | None -> (acc, ba, hoisted, roots)
+    | Some (envs, stamped) ->
+      Base.List.fold (Term.enum blk_t stamped |> Seq.to_list)
+        ~init:(acc, ba, hoisted, roots)
+        ~f:(fun (acc, ba, hoisted, roots) blk ->
+          match Core.Map.find envs (Term.tid blk) with
+          | None -> (acc, ba, hoisted, roots)
+          | Some (pre, post) ->
+            Base.List.fold (Term.enum def_t blk |> Seq.to_list)
+              ~init:(acc, ba, hoisted, roots)
+              ~f:(fun (acc, ba, hoisted, roots) d ->
+                match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
+                | None -> (acc, ba, hoisted, roots)
+                | Some vexp -> (
+                  match
+                    Cbat_vsa.denote_exp_at ~pre ~post ~blk ~def:d vexp
+                  with
+                  | Error _ -> (acc, ba, hoisted, roots)
+                  | Ok ws -> (
+                    match
+                      Cbat_word.to_int64 (Cbat_vsa.WordSet.cardinality ws)
+                    with
+                    | Ok 1L -> (
+                      match
+                        Base.Option.bind (Cbat_vsa.WordSet.min_elem ws)
+                          ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w))
+                      with
+                      | Some v
+                        when is_code_addr v
+                             && Base.Option.is_none (lookup v)
+                             && Base.Option.is_none
+                                  (Core.Map.find sub_addrs
+                                     (Addr.of_int64 v))
+                             && Base.Option.is_none
+                                  (Core.Map.find ba (Addr.of_int64 v))
+                      ->
+                        let acc, ba, hoisted, root =
+                          relift_root
+                            ~name:(Printf.sprintf "sub_%Lx" v)
+                            ~addr:v (acc, ba, hoisted)
+                        in
+                        (acc, ba, hoisted,
+                         match root with
+                         | Some t -> t :: roots
+                         | None -> roots)
+                      | _ -> (acc, ba, hoisted, roots))
+                    | _ -> (acc, ba, hoisted, roots))))
+              )
+  in
+  let store_roots (acc, ba, hoisted, roots) =
+    let root_tids =
+      match main_tid with
+      | Some t -> List.rev_append discovered [ t ]
+      | None -> discovered
+    in
+    Base.List.fold root_tids ~init:(acc, ba, hoisted, roots)
+      ~f:store_root
+  in
+  let subs_acc, block_addrs, hoisted_subs, discovered =
+    store_roots (subs_acc, block_addrs, hoisted_subs, discovered)
   in
   let all_envs =
     Core.Map.fold subs_acc ~init:Tid.Map.empty
@@ -474,9 +668,14 @@ let pass_vsa proj =
      contributes no edge.  Without a root the prune does not run: the
      identity keeps every sub. *)
   let pruned_program =
-    match main_tid with
-    | None -> program
-    | Some root -> (
+    let roots =
+      match main_tid with
+      | Some t -> t :: discovered
+      | None -> discovered
+    in
+    match roots with
+    | [] -> program
+    | root :: roots -> (
       let sub_of_tid =
         Term.enum sub_t program
         |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
@@ -701,7 +900,9 @@ let pass_vsa proj =
               | None -> None
               | Some more -> closure seen (more @ rest)
       in
-      match closure (Core.Set.empty (module Tid)) [ root ] with
+      match
+        closure (Core.Set.empty (module Tid)) (root :: roots)
+      with
       | None -> program
       | Some closure ->
         Term.filter sub_t program ~f:(fun s -> Core.Set.mem closure (Term.tid s)))

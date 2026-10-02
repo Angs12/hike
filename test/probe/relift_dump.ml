@@ -20,29 +20,44 @@ let () =
     match Seq.to_list (Memmap.lookup (Project.memory proj) a) with
     | [] -> None
     | (seg, _) :: _ -> (
-        let view = Memory.view_exn ~from:a seg in
-        match Disasm_expert.Recursive.run (Project.arch proj) view with
-        | Error _ -> None
-        | Ok rec_t ->
-          let cfg = Disasm_expert.Recursive.cfg rec_t in
-          let root =
+        let lift_from ~rooter view =
+          match
+            Disasm_expert.Recursive.run ~rooter (Project.arch proj) view
+          with
+          | Error _ -> None
+          | Ok rec_t ->
+            let cfg = Disasm_expert.Recursive.cfg rec_t in
             Graphs.Cfg.nodes cfg
-            |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) a)
-          in
-          Base.Option.map root ~f:(fun root ->
-              let nodes =
-                Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) cfg
-                  ~init:[] ~f:(fun acc n -> n :: acc) root
-              in
-              let others =
-                Base.List.filter nodes ~f:(fun n ->
-                    not (Addr.equal (Block.addr n) a))
-              in
-              let others =
-                Base.List.filter others ~f:(fun n ->
-                    not (Core.Map.mem block_addrs (Block.addr n)))
-              in
-              Base.List.concat_map (root :: others) ~f:(Blk.lift cfg)))
+            |> Seq.iter ~f:(fun b ->
+                Printf.printf "CFG node @%Lx\n%!"
+                  (Word.to_int64_exn (Block.addr b)));
+            let root =
+              Graphs.Cfg.nodes cfg
+              |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) a)
+            in
+            Base.Option.map root ~f:(fun root ->
+                let nodes =
+                  Graphlib.Std.Graphlib.fold_reachable (module Graphs.Cfg) cfg
+                    ~init:[] ~f:(fun acc n -> n :: acc) root
+                in
+                let others =
+                  Base.List.filter nodes ~f:(fun n ->
+                      not (Addr.equal (Block.addr n) a))
+                in
+                let others =
+                  Base.List.filter others ~f:(fun n ->
+                      not (Core.Map.mem block_addrs (Block.addr n)))
+                in
+                Base.List.concat_map (root :: others) ~f:(Blk.lift cfg))
+        in
+        let whole = Memory.view_exn seg in
+        match
+          lift_from ~rooter:(Bap.Std.Rooter.create (Seq.return a)) whole
+        with
+        | Some _ as lifted -> lifted
+        | None ->
+          lift_from ~rooter:(Bap.Std.Rooter.create Seq.empty)
+            (Memory.view_exn ~from:a seg))
   in
   let block_addrs =
     Term.enum sub_t program
@@ -143,7 +158,12 @@ let () =
           Printf.printf "=== %s\n" what;
           Term.enum blk_t s
           |> Seq.iter ~f:(fun b ->
-              Printf.printf "block %s\n" (Tid.name (Term.tid b));
+              let addr =
+                match Term.get_attr b address with
+                | Some a -> Printf.sprintf " @%Lx" (Word.to_int64_exn a)
+                | None -> ""
+              in
+              Printf.printf "block %s%s\n" (Tid.name (Term.tid b)) addr;
               Term.enum jmp_t b
               |> Seq.iter ~f:(fun j ->
                   let kn =
@@ -276,6 +296,11 @@ let () =
               Sub.Builder.add_blk sb (Hike.Coerce.coerce_block b));
           Sub.Builder.result sb
         in
+        (* The production re-lift normalizes the FP temp widths. *)
+        let fp_normalize (s : sub term) : sub term =
+          Term.enum sub_t (Hike.Fp.run_program (Program.create ~subs:[ s ] ()))
+          |> Seq.hd_exn
+        in
         let frag_tids =
           Base.List.map frags ~f:(fun (_, blocks) ->
               let entry = Base.List.hd_exn blocks in
@@ -302,15 +327,17 @@ let () =
         let frag_subs =
           match
             Base.List.map2 frags frag_tids ~f:(fun (_, blocks) ftid ->
-                build_sub ~tid:ftid (Base.List.map blocks ~f:rewrite))
+                fp_normalize
+                  (build_sub ~tid:ftid (Base.List.map blocks ~f:rewrite)))
           with
           | Ok subs -> subs
           | Unequal_lengths -> failwith "frags2"
         in
         let main_tid = Tid.for_name "main" in
         let main_sub =
-          build_sub ~tid:main_tid
-            (Base.List.map (blocks_of entry_seen) ~f:rewrite)
+          fp_normalize
+            (build_sub ~tid:main_tid
+               (Base.List.map (blocks_of entry_seen) ~f:rewrite))
         in
         let block_addrs =
           Base.List.fold (frag_subs @ [ main_sub ]) ~init:block_addrs
@@ -428,6 +455,46 @@ let () =
                      Tid.equal (Term.tid x) (Term.tid s))
             in
             dump (Printf.sprintf "after-sections %s" (Sub.name s)) s');
+        (* The real chain from the attribution on: the spec + escape roots
+           install, split-blocks, sign, ssa, types, dce, then emission. *)
+        let word = facts.Hike.Kb.abi.Hike.Abi.word in
+        let spec =
+          Hike.Sections.section_spec_of ~word
+            ~comps:(Hike.Sections.global_comps_of ~word ~spans ctx)
+            ~whole:(Hike.Sections.whole_comps_of ctx)
+            ~meta
+            ~relative:(Hike.Image.relative_values proj
+                         ~bias:(Hike.Image.get_bias proj))
+            ~externals:(Hike.Image.external_references proj)
+        in
+        let escape_roots =
+          Core.Map.map ctx.Hike.Sections.sub_trees
+            ~f:(Hike.Sections.escape_roots_of_tree
+                  ~addr_bits:(Hike.Stack_model.word_bits word))
+        in
+        Hike.Kb.install (Hike.Kb.with_attribution facts ~spec ~escape_roots);
+        let census what =
+          let n =
+            Term.enum sub_t prog
+            |> Seq.find_exn ~f:(fun x -> Tid.equal (Term.tid x) main_tid)
+            |> Term.enum blk_t |> Seq.to_list |> Base.List.length
+          in
+          Printf.printf "MAIN-BLOCKS %s: %d\n" what n
+        in
+        census "post-solve";
+        let proj = Project.with_program proj prog in
+        let proj =
+          Project.with_program proj (Hike.Split_blocks.normalize (Project.program proj))
+        in
+        let proj = Hike.Types.sign_run proj in
+        let proj =
+          Project.with_program proj
+            (Hike.Ssa.ssa_program ~target (Project.program proj))
+        in
+        let proj = Hike.Types.run proj in
+        let prog = Project.program proj in
+        let facts = Hike.Kb.facts () in
+        census "post-types";
         let prog =
           Term.map sub_t prog ~f:(fun s ->
               let roots =
@@ -436,61 +503,96 @@ let () =
               in
               Hike.Dce.dce ~roots ~target s)
         in
-        let prog = Hike.Split_blocks.normalize prog in
-        let prog = Hike.Bil2llvm.sign_program ~target prog in
-        let prog = Hike.Ssa.ssa_program ~target prog in
+        census "post-dce";
+        (* The emitter input: per-def rhs + stamps for every re-lifted
+           sub, so a raw-routed def is visible beside its tags. *)
+        let dump_defs what s =
+          Printf.printf "EMIT-IN %s\n" what;
+          Term.enum blk_t s
+          |> Seq.iter ~f:(fun b ->
+              Printf.printf "  blk %s\n" (Tid.name (Term.tid b));
+              Term.enum jmp_t b
+              |> Seq.iter ~f:(fun j ->
+                  let js =
+                    match Jmp.kind j with
+                    | Goto (Direct t) -> "goto " ^ Tid.name t
+                    | Goto (Indirect _) -> "gotoind"
+                    | Call c ->
+                      "call "
+                      ^ (match Call.target c with
+                         | Direct t -> Tid.name t
+                         | Indirect _ -> "ind")
+                      ^ ";ret="
+                      ^ (match Call.return c with
+                         | Some (Direct t) -> Tid.name t
+                         | _ -> "none")
+                    | Ret _ -> "ret"
+                    | Int (_, t) -> "int " ^ Tid.name t
+                  in
+                  Printf.printf "    JMP %s\n" js);
+              Term.enum phi_t b
+              |> Seq.iter ~f:(fun ph ->
+                  let incom =
+                    Phi.values ph |> Seq.to_list
+                    |> Base.List.map ~f:(fun (t, e) ->
+                           Tid.name t ^ ":" ^ (Format.asprintf "%a" Exp.pp e))
+                    |> String.concat " "
+                  in
+                  Printf.printf "    PHI %s := [%s]\n"
+                    (Var.name (Phi.lhs ph)) incom);
+              Term.enum def_t b
+              |> Seq.iter ~f:(fun d ->
+                  let a =
+                    if Hike.Def_slots.def_is_window_value d then " W" else ""
+                  in
+                  let b =
+                    match Hike.Def_slots.sec_tag d with
+                    | Some t ->
+                      " S" ^ (Base.Sexp.to_string (Hike.Stack_model.Tag.sexp_of_t t))
+                    | None -> ""
+                  in
+                  let c =
+                    match Hike.Def_slots.def_ptr_storage d with
+                    | Some _ -> " P"
+                    | None -> ""
+                  in
+                  let k = if Hike.Def_slots.def_ptr_kind d then " K" else "" in
+                  let v = if Hike.Def_slots.def_is_dyn_alloc d then " V" else "" in
+                  Printf.printf "    %s := %s%s\n"
+                    (Var.name (Def.lhs d))
+                    (Format.asprintf "%a" Exp.pp (Def.rhs d))
+                    (String.concat "" [ a; b; c; k; v ])))
+        in
         Base.List.iter solved_frags ~f:(fun s ->
-            let s' =
-              Term.enum sub_t prog
-              |> Seq.find_exn ~f:(fun x ->
-                     Tid.equal (Term.tid x) (Term.tid s))
-            in
-            dump (Printf.sprintf "after-end %s" (Sub.name s)) s');
-        (* The frag's defs at the emitter boundary: find the alignment
-           check's base var. *)
-        Base.List.iter solved_frags ~f:(fun s ->
-            let s' =
-              Term.enum sub_t prog
-              |> Seq.find_exn ~f:(fun x ->
-                     Tid.equal (Term.tid x) (Term.tid s))
-            in
-            Printf.printf "DEFS-END %s\n" (Sub.name s');
-            Term.enum blk_t s'
-            |> Seq.iter ~f:(fun b ->
-                Printf.printf "  blk %s\n" (Tid.name (Term.tid b));
-                Term.enum def_t b
-                |> Seq.iter ~f:(fun d ->
-                    Printf.printf "    %s := %s\n"
-                      (Var.name (Def.lhs d))
-                      (Format.asprintf "%a" Exp.pp (Def.rhs d))));
-            let fv =
-              Term.enum blk_t s'
-              |> Seq.fold ~init:Var.Set.empty ~f:(fun acc b ->
-                     Core.Set.union acc (Blk.free_vars b))
-              |> Core.Set.to_list
-              |> Base.List.filter ~f:(fun v ->
-                     (match Var.typ v with Type.Mem _ -> true | _ -> false))
-            in
-            Printf.printf "  FREE-PTRS: %s\n"
-              (String.concat ","
-                 (Base.List.map fv ~f:(fun v ->
-                      Var.name v ^ "/" ^ string_of_int (Var.index v))));
-            (* The window-value and section tags on the frag's defs. *)
-            let wv, st =
-              Term.enum blk_t s'
-              |> Seq.fold ~init:(0, 0) ~f:(fun (wv, st) b ->
-                  Term.enum def_t b
-                  |> Seq.fold ~init:(wv, st) ~f:(fun (wv, st) d ->
-                      let wv =
-                        if Hike.Def_slots.def_is_window_value d then wv + 1
-                        else wv
-                      in
-                      let st =
-                        match Hike.Def_slots.sec_tag d with
-                        | Some _ -> st + 1
-                        | None -> st
-                      in
-                      (wv, st)))
-            in
-            Printf.printf "  TAGS: window_values=%d sec_tags=%d\n" wv st);
+            dump_defs (Printf.sprintf "frag %s" (Sub.name s))
+              (Term.enum sub_t prog
+              |> Seq.find_exn ~f:(fun x -> Tid.equal (Term.tid x) (Term.tid s))));
+        dump_defs "main"
+          (Term.enum sub_t prog
+          |> Seq.find_exn ~f:(fun x -> Tid.equal (Term.tid x) main_tid));
+        (* Emission: the exact entry the pass runs.  The prune keeps the
+           re-lifted subs and the entry (emitted as a declaration), so the
+           probe's module carries the same body set for these shapes. *)
+        let keep =
+          Core.Set.of_list (module Tid)
+            (Base.List.map solved_frags ~f:Term.tid
+            @ [ main_tid; Term.tid entry ])
+        in
+        let prog =
+          Term.filter sub_t prog ~f:(fun s -> Core.Set.mem keep (Term.tid s))
+        in
+        let llvm_ctx = Llvm.create_context () in
+        let llvm_module = Llvm.create_module llvm_ctx "ReliftProbe" in
+        let out_file =
+          if Array.length Sys.argv > 2 then Sys.argv.(2)
+          else "/tmp/relift_probe.ll"
+        in
+        Hike.Bil2llvm.emit_program llvm_ctx llvm_module ~target
+          ~addr_bits:(Hike.Abi.addr_size_bits target)
+          ~symtab:(Some (Project.symbols proj))
+          (Base.Option.value_exn facts.Hike.Kb.spec
+             ~message:"probe: no spec installed")
+          prog;
+        Llvm.print_module out_file llvm_module;
+        Printf.printf "EMITTED %s\n" out_file;
         flush stdout)
