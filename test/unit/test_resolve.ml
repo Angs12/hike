@@ -557,9 +557,8 @@ let tests : unit Alcotest.test list =
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
             let sub5', resolved5', fresh5', _, events5 =
-              Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
+              Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~images:[] ~sol
                 ~lift_at:(fun _ ~block_addrs:_ -> None)
-                ~images:[]
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
@@ -687,6 +686,145 @@ let tests : unit Alcotest.test list =
             in
             check "RES-24" (Base.List.length defs >= 2 && one_node)
         | None -> check "RES-24" false);
+
+    (* RES-25 — the two-caller case (one direct + one indirect on the
+       same target): a relative-offset jump table and a direct goto both
+       name the case block, and the resolve materializes it once — the
+       block keeps its tid and both edges read the same map.  The
+       128-entry table rides the completion's image arm: the load's
+       value hulls (the solve's image read refuses past its 64-entry
+       cap) while the load's bounded address set enumerates. *)
+    pin "RES-25" "a table word and a direct goto resolve one case block"
+      (fun () ->
+        let rdx = v64 "t25_rdx" in
+        let rcx = v64 "t25_rcx" in
+        let rax = v64 "t25_rax" in
+        let m = memv "t25_m" in
+        let base_def = Def.create rdx (Bil.Int (Cbat_word.to_word (q64 0x4000L))) in
+        let zero_def = Def.create rcx (Bil.Int (Cbat_word.to_word (q64 0L))) in
+        let four_def = Def.create rcx (Bil.Int (Cbat_word.to_word (q64 1L))) in
+        let flag = v1 "t25_flag" in
+        let load_def =
+          Def.create rax
+            (Bil.Cast
+               ( Bil.SIGNED, 64,
+                 Bil.Load
+                   ( Bil.Var m,
+                     Bil.BinOp
+                       ( Bil.PLUS, Bil.Var rdx,
+                         Bil.BinOp (Bil.LSHIFT, Bil.Var rcx, Bil.Int (Word.of_int ~width:64 2)) ),
+                     LittleEndian, `r32 ) ))
+        in
+        let add_def =
+          Def.create rax (Bil.BinOp (Bil.PLUS, Bil.Var rax, Bil.Var rdx))
+        in
+        (* The two-word relative table at 0x4000: entry 0 names the
+           block at 0x3000, entry 1 the block at 0x3008. *)
+        let word_bytes (k : int) : string =
+          let delta = if k land 1 = 0 then -0x1000L else -0xFF8L in
+          let w = Int64.logand delta 0xFFFFFFFFL in
+          String.init 4 (fun i ->
+              Char.chr (Int64.to_int (Int64.logand (Int64.shift_right_logical w (8 * i)) 0xFFL)))
+        in
+        let img_bytes = Bytes.of_string (String.concat "" (Base.List.init 2 ~f:word_bytes)) in
+        let images = [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x4007L; img_bytes } ] in
+        let sub25, tids =
+          sub_of "t25_tbl"
+            [ [ ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var flag));
+                (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, Bil.Var flag))) ];
+              [ zero_def ], [ (3, mk_goto) ];
+              [ four_def ], [ (3, mk_goto) ];
+              [ base_def; load_def; add_def ],
+                [ (0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var rax)))) ];
+              [ ], [ (5, mk_goto) ];
+              [ ], [ (7, mk_goto) ];
+              [ ], [ (7, mk_goto) ];
+              [ ], [ (0, mk_ret) ] ]
+        in
+        let real_addr tid =
+          if Tid.equal tid tids.(0) then 0x2000L
+          else if Tid.equal tid tids.(1) then 0x2008L
+          else if Tid.equal tid tids.(2) then 0x2010L
+          else if Tid.equal tid tids.(3) then 0x2018L
+          else if Tid.equal tid tids.(4) then 0x2020L
+          else if Tid.equal tid tids.(5) then 0x3000L
+          else if Tid.equal tid tids.(6) then 0x3008L
+          else if Tid.equal tid tids.(7) then 0x2028L
+          else 0L
+        in
+        (* Every block carries its address. *)
+        let stamped =
+          let blks = Term.enum blk_t sub25 |> Seq.to_list in
+          let stamped_blks =
+            Base.List.map blks ~f:(fun b ->
+                Term.set_attr b address
+                  (Addr.of_int64 (real_addr (Term.tid b))))
+          in
+          let sb =
+            Sub.Builder.create ~tid:(Term.tid sub25) ~name:(Sub.name sub25) ()
+          in
+          Base.List.iter stamped_blks ~f:(Sub.Builder.add_blk sb);
+          Sub.Builder.result sb
+        in
+        let _, sub25', ba' =
+          produce ~block_addrs:
+            [ (0x2000L, tids.(0)); (0x2008L, tids.(1)); (0x2010L, tids.(2));
+              (0x2018L, tids.(3)); (0x2020L, tids.(4)); (0x3000L, tids.(5));
+              (0x3008L, tids.(6)); (0x2028L, tids.(7)) ]
+            ~images Theory.Target.unknown
+            (Program.create ~subs:[ stamped ] ()) stamped
+        in
+        let blk_of tid =
+          Term.enum blk_t sub25' |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tid)
+        in
+        let disp = blk_of tids.(3) in
+        let disp_jmps = Term.enum jmp_t disp |> Seq.to_list in
+        Printf.eprintf "T25 disp_jmps=%d tids=[%s]\n%!"
+          (Base.List.length disp_jmps)
+          (String.concat ","
+             (Base.List.map (Base.Array.to_list tids) ~f:Tid.name));
+        Base.List.iter disp_jmps ~f:(fun j ->
+            Printf.eprintf "T25 jmp kind=%s cond=%b target=%s\n%!"
+              (match Jmp.kind j with
+               | Goto (Direct t) -> "gotoD"
+               | Goto (Indirect _) -> "gotoI"
+               | Call _ -> "call"
+               | Ret _ -> "ret"
+               | Int _ -> "int")
+              (not (Hike.Stack_model.is_true_cond (Jmp.cond j)))
+              (match Jmp.kind j with
+               | Goto (Direct t) -> Tid.name t
+               | _ -> "-"));
+        let has_case t =
+          Base.List.exists disp_jmps ~f:(fun j ->
+              match Jmp.kind j with
+              | Goto (Direct t') ->
+                Tid.equal t' t
+                && not (Hike.Stack_model.is_true_cond (Jmp.cond j))
+              | _ -> false)
+        in
+        let resolved =
+          has_case tids.(5) && has_case tids.(6)
+          && not
+               (Base.List.exists disp_jmps ~f:(fun j ->
+                    match Jmp.kind j with
+                    | Goto (Indirect _) -> true
+                    | _ -> false))
+        in
+        let direct_same_target =
+          match Jmp.kind (Term.enum jmp_t (blk_of tids.(4)) |> Seq.hd_exn) with
+          | Goto (Direct t) -> Tid.equal t tids.(5)
+          | _ -> false
+        in
+        let map_names_case =
+          match Core.Map.find ba' (Addr.of_int64 0x3000L) with
+          | Some t -> Tid.equal t tids.(5)
+          | None -> false
+        in
+        check "RES-25a the dispatch resolves to its case blocks" resolved;
+        check "RES-25b the direct caller keeps the case block" direct_same_target;
+        check "RES-25c the map names the case block" map_names_case);
   ]
 
 let () = run "resolve" tests
