@@ -467,10 +467,45 @@ let () =
                          ~bias:(Hike.Image.get_bias proj))
             ~externals:(Hike.Image.external_references proj)
         in
-        let escape_roots =
+        let arities =
           Core.Map.map ctx.Hike.Sections.sub_trees
-            ~f:(Hike.Sections.escape_roots_of_tree
-                  ~addr_bits:(Hike.Stack_model.word_bits word))
+            ~f:(Hike.Promote.slot_arity ~word
+                  ~entry:Hike.Stack_model.segment_base)
+        in
+        let window_readers =
+          Term.enum sub_t prog
+          |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc sub ->
+              let reads_window =
+                Hike.Stack_model.is_variadic sub
+                || Base.Option.value_map
+                     (Core.Map.find ctx.Hike.Sections.sub_trees
+                        (Term.tid sub))
+                     ~default:false
+                     ~f:(fun tree ->
+                       Hike.Sections.Tree.to_sequence tree
+                       |> Seq.exists ~f:(fun (_, rs) ->
+                              Base.List.exists rs.Hike.Sections.members
+                                ~f:(fun m ->
+                                    m.Hike.Sections.m_identity
+                                    && Hike.Sections.equal_sec
+                                         m.Hike.Sections.m_sec
+                                         Hike.Stack_model.Args)))
+              in
+              if reads_window then Core.Set.add acc (Term.tid sub) else acc)
+        in
+        let escape_roots =
+          Term.enum sub_t prog
+          |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
+              let tree =
+                Core.Map.find ctx.Hike.Sections.sub_trees (Term.tid sub)
+                |> Base.Option.value ~default:Hike.Sections.Tree.empty
+              in
+              Core.Map.set m ~key:(Term.tid sub)
+                ~data:
+                  (Hike.Sections.escape_roots_of_sub
+                     ~addr_bits:(Hike.Stack_model.word_bits word)
+                     ~abi:facts.Hike.Kb.abi ~arities ~window_readers ~tree
+                     sub))
         in
         Hike.Kb.install (Hike.Kb.with_attribution facts ~spec ~escape_roots);
         let census what =
