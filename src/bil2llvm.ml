@@ -428,16 +428,18 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       sub_starts =
         Base.List.fold subs_list ~init:Core.Int64.Map.empty
           ~f:(fun m sub ->
-            match
-              Base.Option.bind
-                (Term.find blk_t sub (Bil2llvm_env.entry_blk_tid sub))
-                ~f:(fun b ->
-                  Base.Option.map (Term.get_attr b address)
-                    ~f:(fun a -> (a, Term.tid sub)))
-            with
-            | Some (a, t) ->
-              Core.Map.set m ~key:(Word.to_int64_exn a) ~data:t
-            | None -> m) }
+            if is_empty sub then m
+            else
+              match
+                Base.Option.bind
+                  (Term.find blk_t sub (Bil2llvm_env.entry_blk_tid sub))
+                  ~f:(fun b ->
+                    Base.Option.map (Term.get_attr b address)
+                      ~f:(fun a -> (a, Term.tid sub)))
+              with
+              | Some (a, t) ->
+                Core.Map.set m ~key:(Word.to_int64_exn a) ~data:t
+              | None -> m) }
   in
   (* The named-component map: filled before any body emits; the
      rip-relative path renders through the same owners. *)
