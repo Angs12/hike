@@ -198,7 +198,7 @@ let () =
                   (Cbat_vsa.init_sol ~abi s))
           in
           let s1, _, _, ba', events =
-            Hike.Cfg_complete.resolve_phase ~abi ~sol ~lift_at
+            Hike.Cfg_complete.resolve_phase ~abi ~sol ~lift_at ~images
               ~block_addrs ~sub_addrs s Tid.Map.empty
           in
           ignore ba';

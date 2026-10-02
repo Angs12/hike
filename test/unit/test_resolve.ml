@@ -559,6 +559,7 @@ let tests : unit Alcotest.test list =
             let sub5', resolved5', fresh5', _, events5 =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                 ~lift_at:(fun _ ~block_addrs:_ -> None)
+                ~images:[]
                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])

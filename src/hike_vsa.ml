@@ -184,7 +184,8 @@ let fixpoint (target : Theory.Target.t)
         dump_r8 sol sub;
 #endif
         let sub', resolved', fresh', block_addrs', events =
-          Hike_cfg_complete.resolve_phase ~abi ~sol ~lift_at ~block_addrs
+          Hike_cfg_complete.resolve_phase ~abi ~sol ~lift_at ~images
+            ~block_addrs
             ~sub_addrs
             sub resolved
         in

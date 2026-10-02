@@ -22,6 +22,7 @@ open Bap.Std
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
+    images:Cbat_vsa.section_image list ->
     block_addrs:Tid.t Addr.Map.t ->
     sub_addrs:Tid.t Addr.Map.t ->
     sub term ->

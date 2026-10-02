@@ -581,6 +581,9 @@ let rec cardinality (t : t) : word =
   | Clp ps -> P.cardinality ps
   | FinSet s -> FinSet.cardinality s
   | Rel (Origin.Vla _, offs) -> P.cardinality offs
+  (* An absolute-origin value's offsets ARE its absolute words: the
+     base is the fixed 0, no segment multiplies. *)
+  | Rel (Origin.Abs, offs) -> P.cardinality offs
   | Rel (_, offs) -> stack_cardinality offs
   | Many ps ->
     let width = Stdlib.max 65 (bitwidth t + 1) in
@@ -757,6 +760,8 @@ let rec iter (t : t) : word list =
           ~f:(fun w -> Cbat_word.add (w64_of_i64 abs) w)
       | None -> [])
     | None -> [])
+  (* An absolute-origin value enumerates its offsets as they are. *)
+  | Rel (Origin.Abs, offs) -> P.elements offs
   | Rel (_, offs) ->
     List.map (P.elements offs)
       ~f:(fun w -> Cbat_word.add (w64_of_i64 stack_base) w)
@@ -1934,7 +1939,19 @@ let classify (t : t) : kind =
 (* The elements, when the set is enumerable within [cap]; [None] = the
    count exceeds the budget, the caller takes its sound identity. *)
 let enumerate ~(cap : int) (t : t) : word list option =
-  if Cbat_word.gt_int (cardinality t) cap then None else Some (iter t)
+#ifdef VSA_DEBUG
+  if Cbat_word.gt_int (cardinality t) cap then begin
+    let tag = match t with
+      | Clp _ -> "Clp" | FinSet _ -> "FinSet" | Rel _ -> "Rel"
+      | Many ps -> sprintf "Many%d" (List.length ps) in
+    Printf.eprintf "hike-dbg-enum: cap=%d card=%s tag=%s\n%!"
+      cap (Cbat_word.to_string (cardinality t)) tag;
+    None
+  end else
+#else
+  if Cbat_word.gt_int (cardinality t) cap then None else
+#endif
+    Some (iter t)
 
 #ifdef VSA_DEBUG
 (* The value's constructor, for the churn diagnosis. *)
