@@ -126,11 +126,30 @@ let pass_vsa proj =
     Hike_vsa.kill_summaries ~abi:(Hike_abi.of_target target)
       (Project.program proj)
   in
-  (* The program-wide resolution lookup: one name table for the run. *)
+  (* The program-wide resolution lookup: one name table for the run.
+     A stripped binary's symbol table is empty — the program's own sub
+     entries are the address side of the same table. *)
+  let entry_addrs =
+    Term.enum sub_t (Project.program proj)
+    |> Seq.fold ~init:Core.Int64.Map.empty ~f:(fun m s ->
+        match
+          match Term.first blk_t s with
+          | Some b -> Term.get_attr b address
+          | None -> None
+        with
+        | Some a -> Core.Map.set m ~key:(Word.to_int64_exn a) ~data:(Term.tid s)
+        | None -> m)
+  in
   let lookup =
-    Hike_resolve.symtab_lookup ~symtab:(Some (Project.symbols proj))
-      ~table:(Hike_resolve.name_table_of (Project.program proj))
-      ~addr_bits:(Hike_abi.addr_size_bits target)
+    let named =
+      Hike_resolve.symtab_lookup ~symtab:(Some (Project.symbols proj))
+        ~table:(Hike_resolve.name_table_of (Project.program proj))
+        ~addr_bits:(Hike_abi.addr_size_bits target)
+    in
+    fun v ->
+      match named v with
+      | Some t -> Some t
+      | None -> Core.Map.find entry_addrs v
   in
   (* The run's sub-entry index: the symtab resolves every block address
      that names a lifted subroutine to that subroutine's tid — the
@@ -159,10 +178,21 @@ let pass_vsa proj =
     in
     Toplevel.put run
       (let open KB.Syntax in
+       let lower = Word.to_bitvec (Memory.min_addr view) in
+       let upper = Word.to_bitvec (Memory.max_addr view) in
+       Theory.Unit.for_region ~lower ~upper >>= fun unit ->
+       KB.provide Theory.Unit.target unit (Project.target proj)
+       >>= fun () ->
        Theory.instance () >>= fun theory ->
        Theory.with_current theory @@ fun () ->
-       Disasm_expert.Recursive.run_in_scope (Project.arch proj) view
-       >>| Result.to_option);
+       (* The region run owns its labels: the unit promise is
+          unconditional, so the semantics' register model resolves for
+          every label the scan queries — the loader's own shape. *)
+       KB.promising Theory.Label.unit
+         ~promise:(fun _ -> !!(Some unit))
+         (fun () ->
+            Disasm_expert.Recursive.run_in_scope (Project.arch proj) view
+            >>| Result.to_option));
     match Toplevel.get run with
     | Some rec_t -> Some (Disasm_expert.Recursive.cfg rec_t)
     | None -> None
@@ -511,12 +541,15 @@ let pass_vsa proj =
                           ~target:(Call.target c)
                           ()))
                 | _ -> j)
-              | Goto (Direct t) when not (Core.Set.mem kept t) -> (
+              | Goto (Direct t) when not (Core.Set.mem kept t)
+                             && not (Hike_abi.is_intrinsic_name (Tid.name t))
+                             && not (Bil2llvm_env.is_interrupt_name (Tid.name t)) -> (
                 (* The decode followed a jump into a sub the program
                    already carries: a target at that sub's entry is a
                    tail call (the register state carries over); a
                    mid-sub target has no calling convention — the loud
-                   failure stands. *)
+                   failure stands.  An interrupt label renders as the
+                   interrupt it is (the emitter's own rule). *)
                 match
                   Term.enum sub_t (Project.program proj)
                   |> Seq.find_map ~f:(fun s ->
@@ -530,11 +563,15 @@ let pass_vsa proj =
                   Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j)
                     (Call (Call.create ~target:(Direct owner) ()))
                 | None ->
+                  let owner =
+                    match Core.Map.find blk_owner t with
+                    | Some o -> Tid.name o
+                    | None -> "no sub"
+                  in
                   failwith
                     (Printf.sprintf
-                       "hike-vsa: the re-lift at %s jumps into sub %s's mid-block %s"
-                       name (Tid.name (Core.Map.find_exn blk_owner t))
-                       (Tid.name t)))
+                       "hike-vsa: the re-lift at %s jumps into %s's block %s, which no fragment kept"
+                       name owner (Tid.name t)))
               | _ -> j
             in
             Hike_cfg_complete.remap_jmp ~call:retarget_call

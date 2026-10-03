@@ -179,17 +179,13 @@ do_link() {
         # gnulib hashing can route through libcrypto
         grep -qE '@(MD5_|SHA1_|SHA224_|SHA256_|SHA384_|SHA512_|EVP_)' "$ll" \
           && CRYPTO="-lcrypto"
-        hike_rename "$ll" "$OUT/${name}_lifted.ll" 2>/dev/null \
-          || { echo "FAIL $name (rename)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
         # The lifted code is memory-heavy; at -O0 it runs far slower than
         # the native originals the suite was timed against.  LLC_OPT=-O2
         # both lets the suite finish and exercises the optimized module.
-        hike_llc "$OUT/${name}_lifted.ll" "$OUT/${name}_lifted.o" "${LLC_OPT:--O0}" 2>>"$OUT/$name.llc.log" \
+        hike_llc "$ll" "$OUT/${name}_lifted.o" "${LLC_OPT:--O0}" -relocation-model=pic 2>>"$OUT/$name.llc.log" \
           || { echo "FAIL $name (llc)" >> "$TEST_LOG"; fail=$((fail+1)); continue; }
-        # --allow-multiple-definition: gnulib modules defining their own
-        # malloc/free must not collide with the harness wrappers
-        if ! hike_link "$OUT/${name}_lifted.o" "$ll" "$OUT/${name}_lifted" "$SEM" \
-                 -Wl,--allow-multiple-definition $GMP $CRYPTO 2>>"$OUT/$name.gcc.log"; then
+        if ! gcc -O0 -pie -o "$OUT/${name}_lifted" "$OUT/${name}_lifted.o" \
+                 $GMP $CRYPTO 2>>"$OUT/$name.gcc.log"; then
             echo "FAIL $name (link)" >> "$TEST_LOG"; fail=$((fail+1)); continue
         fi
         rm -f "$OUT/${name}_lifted.o"

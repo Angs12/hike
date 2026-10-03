@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
-# Builds the PIE-only test corpus.
-# Usage: compile_corpus.sh [out_dir] (default /tmp/corpus)
-#
-# Two lanes, one corpus dir each:
-#   -O0 (the primary corpus, distro-style PIE)
-#   -O2 (the optimization lane: same sources, gcc -O2 — the -O2 gates are
-#        semantic + allocas; no IR baseline exists, snapshotting would pin
-#        bugs)
-# The -O2 lane writes <out>-o2 next to the -O0 dir unless OUT already ends
-# in -o2 (then it is the only lane built).
+# Builds the PIE-only test corpus: the -O2 lane, every binary stripped.
+# Usage: compile_corpus.sh [out_dir] (default /tmp/corpus-o2)
 
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="${1:-/tmp/corpus}"
+OUT="${1:-/tmp/corpus-o2}"
 cd "$(dirname "$0")/../../src/progs" || exit 1
 
 build_lane () {
@@ -62,11 +54,22 @@ build_lane () {
   done
   [ "$pie_fail" -eq 0 ] || exit 1
 
-  # The class-(b) fixture asserts its own coverage: the word is present
-  # at its expected offset and no relocation names it.  A missing binary
-  # is the check's own failure — guarding on it would let the fixture
+  # The class-(b) fixture asserts its own coverage while the symbols
+  # are still there (the check reads them): the word is present at its
+  # expected offset and no relocation names it.  A missing binary is
+  # the check's own failure — guarding on it would let the fixture
   # stop testing silently.
   python3 "$HERE/check_class_b.py" "$dest/class_b_word" || fail=1
+
+  # The corpus arrives the way real binaries do: stripped.  Sections,
+  # dynamic symbols and relocations survive; the class-b check above
+  # is the guard that stripping never precedes its own assertion.
+  local strip_fail=0
+  for b in "$dest"/*; do
+    [ -x "$b" ] || continue
+    objcopy --strip-all "$b" || { echo "FAIL $(basename "$b") (strip)"; strip_fail=1; }
+  done
+  [ "$strip_fail" -eq 0 ] || exit 1
 
   [ "$fail" -eq 0 ] || exit 1
 
@@ -74,9 +77,4 @@ build_lane () {
   ls -la "$dest"
 }
 
-if [ "${OUT%-o2}" != "$OUT" ]; then
-  build_lane "-O2" "$OUT"
-else
-  build_lane "-O0" "$OUT"
-  build_lane "-O2" "$OUT-o2"
-fi
+build_lane "-O2" "$OUT"

@@ -21,7 +21,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-CORPUS="${1:-/tmp/corpus}"
+CORPUS="${1:-/tmp/corpus-o2}"
 OUT="${2:-/tmp/hike-emit}"
 mkdir -p "$OUT"
 

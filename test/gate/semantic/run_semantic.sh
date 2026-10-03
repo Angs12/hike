@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# THE semantic gate: native-vs-lifted stdout equivalence at the consumer
-# optimizer's HIKE_OPT_LEVEL (default 2; 0 = no optimization passes),
-# applied between rename and llc.  Strict: no allowlist; failures
-# auto-bisect every pass in BISECT_PASSES and list each breaking pass
-# (CRASH = opt crashed).  Keeps *_renamed.ll/*_opt.ll as repro artifacts.
-# Pins opt-21 (fails loudly when missing); exit 0 iff all pass.
+# THE semantic gate: the lifted module links and runs like a program —
+# llc -relocation-model=pic, gcc -pie, no harness, no rename, no stub —
+# and its stdout and exit status are byte-diffed against the native
+# binary at the consumer optimizer's HIKE_OPT_LEVEL (default 2; 0 = no
+# optimization passes).  Strict: no allowlist; failures auto-bisect
+# every pass in BISECT_PASSES and list each breaking pass (CRASH = opt
+# crashed).  Keeps *_opt.ll as the repro artifact.  Pins opt-21 (fails
+# loudly when missing); exit 0 iff all pass.
 # Usage: run_semantic.sh [corpus_dir] [ir_dir] [out_dir]
 
 set -u
-CORPUS="${1:-/tmp/corpus}"
+CORPUS="${1:-/tmp/corpus-o2}"
 IR="${2:-/tmp/emit}"
 OUT="${3:-/tmp/sem_opt}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -88,38 +90,29 @@ for ll in "$IR"/out_*.ll; do
 		# A cached binary that no longer passes falls through to the
 		# full rebuild below (FRESH-like behavior for the stale one).
 	fi
-	hike_rename "$ll" "$OUT/${base}_renamed.ll" || {
-		echo "FAIL $base (rename)"
-		fail=$((fail + 1))
-		FAILED+=("$base")
-		continue
-	}
-
 	# The gate step.
-	"$OPT" -O$OPT_LEVEL -S "$OUT/${base}_renamed.ll" -o "$OUT/${base}_opt.ll" 2>"$OUT/${base}_opt.err" || {
+	"$OPT" -O$OPT_LEVEL -S "$ll" -o "$OUT/${base}_opt.ll" 2>"$OUT/${base}_opt.err" || {
 		echo "FAIL $base (opt -O$OPT_LEVEL): $(head -1 "$OUT/${base}_opt.err")"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
 	}
 
-	hike_llc "$OUT/${base}_opt.ll" "$OUT/${base}_opt.o" 2>>"$OUT/.llc.log" ||
+	hike_llc "$OUT/${base}_opt.ll" "$OUT/${base}_opt.o" -relocation-model=pic \
+		2>>"$OUT/.llc.log" ||
 		{
 			echo "FAIL $base (llc after opt; see $OUT/.llc.log)"
 			fail=$((fail + 1))
 			FAILED+=("$base")
 			continue
 		}
-	if ! hike_link "$OUT/${base}_opt.o" "$ll" "$OUT/${base}_opt.bin" "$HERE" 2>>"$OUT/.gcc.log"; then
+	if ! gcc -O0 -pie -o "$OUT/${base}_opt.bin" "$OUT/${base}_opt.o" 2>>"$OUT/.gcc.log"; then
 		echo "FAIL $base (link after opt; see $OUT/.gcc.log)"
 		fail=$((fail + 1))
 		FAILED+=("$base")
 		continue
 	fi
 	printf '%s\n' "$sha_now" >"$OUT/.sha_${base}"
-	# The bisect below re-links by hand; keep the stub selection handy.
-	STUB=""
-	if grep -q '@_setjmp\|@longjmp' "$ll"; then STUB="$HERE/setjmp_stub.S"; fi
 
 	# exec -a keeps argv[0] identical (glibc prints it in usage messages).
 	timeout "${HIKE_RUN_TIMEOUT:-15}" bash -c 'exec -a "$1" "$2"' _ prog "$OUT/${base}_opt.bin" >"$OUT/${base}_opt.out" 2>&1
@@ -139,20 +132,20 @@ for ll in "$IR"/out_*.ll; do
 		bisect_line="    broken by:"
 		any_bisect=0
 		for p in $BISECT_PASSES; do
-			"$OPT" "-passes=$p" -S "$OUT/${base}_renamed.ll" -o "$OUT/${base}_bisect_$p.ll" 2>/dev/null ||
+			"$OPT" "-passes=$p" -S "$ll" -o "$OUT/${base}_bisect_$p.ll" 2>/dev/null ||
 				{
 					bisect_line="$bisect_line $p(CRASH)"
 					any_bisect=1
 					continue
 				}
-			llc -O0 -filetype=obj "$OUT/${base}_bisect_$p.ll" -o "$OUT/${base}_bisect_$p.o" 2>/dev/null ||
+			llc -O0 -relocation-model=pic -filetype=obj "$OUT/${base}_bisect_$p.ll" -o "$OUT/${base}_bisect_$p.o" 2>/dev/null ||
 				{
 					bisect_line="$bisect_line $p(llc)"
 					any_bisect=1
 					continue
 				}
-			gcc -O0 -no-pie -o "$OUT/${base}_bisect_$p.bin" \
-				"$OUT/${base}_bisect_$p.o" "$HERE/harness.c" $STUB 2>/dev/null ||
+			gcc -O0 -pie -o "$OUT/${base}_bisect_$p.bin" \
+				"$OUT/${base}_bisect_$p.o" 2>/dev/null ||
 				{
 					bisect_line="$bisect_line $p(link)"
 					any_bisect=1

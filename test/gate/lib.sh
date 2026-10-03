@@ -2,15 +2,6 @@
 # The gate tier's shared pipeline: ONE copy of the render / link / run /
 # compare recipe and the provenance check.  Sourced, never executed.
 
-# Rename the harness-colliding symbols so the lifted module links with
-# harness.c: @main becomes @hike_main, and the crt1-compiled
-# @_dl_relocate_static_pie is suffixed.
-hike_rename() {
-  sed -e 's/@main/@hike_main/g' \
-      -e 's/@_dl_relocate_static_pie/@_dl_relocate_static_pie_lifted/g' \
-      "$1" >"$2"
-}
-
 # The renderer: the llc on PATH, overridable for a pinned toolchain.
 LLC="${HIKE_LLC:-llc}"
 
@@ -23,17 +14,6 @@ hike_llc() {
     return 127
   }
   "$LLC" "$@" -filetype=obj "$ll" -o "$obj"
-}
-
-# Link a lifted object with harness.c, plus setjmp_stub.S when the module
-# uses setjmp/longjmp.  Extra linker flags come after the module argument.
-# The link stays -no-pie: a linker constraint of the harness artifact
-# (baked absolute constants + extern_weak refs reject DT_TEXTREL).
-hike_link() {
-  local obj="$1" ll="$2" bin="$3" here="$4"; shift 4
-  local stub=""
-  if grep -q '@_setjmp\|@longjmp' "$ll"; then stub="$here/setjmp_stub.S"; fi
-  gcc -O0 -no-pie -o "$bin" "$obj" "$here/harness.c" $stub "$@"
 }
 
 # The run timeout every gate shares (a corpus binary must finish in
