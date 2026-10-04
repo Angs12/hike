@@ -264,9 +264,15 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
                   abi.Abi.return_regs @ abi.Abi.int_param_regs))
       |> Core.Set.of_list (module Var)
     in
+    let boundary =
+      Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
+          Term.enum jmp_t blk
+          |> Seq.fold ~init:acc ~f:(fun a j ->
+                 Core.Set.union a (Model.jmp_boundary_reads ~abi j)))
+    in
     let vars =
-      Base.List.fold blks ~init:call_lanes ~f:(fun acc blk ->
-          Core.Set.union acc (Blk.free_vars blk))
+      Base.List.fold blks ~init:(Core.Set.union call_lanes boundary)
+        ~f:(fun acc blk -> Core.Set.union acc (Model.blk_free_vars blk))
       |> Core.Set.filter ~f:renamable
     in
     let defines (v : var) (blk : blk term) =

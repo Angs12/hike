@@ -63,7 +63,7 @@ type sweep_census = {
   versions : Var.Set.t;
 }
 
-let sweep_census_of ~(abi : Abi.t) ~(sp : var) (sub : sub term) : sweep_census =
+let sweep_census_of ~(sp : var) (sub : sub term) : sweep_census =
   let bump m v =
     Core.Map.update m v ~f:(function None -> 1 | Some n -> n + 1)
   in
@@ -181,7 +181,7 @@ let keep_node ~(load_roots : Var.Set.t) ~(abi : Abi.t)
    [keep] verdict is final. *)
 let sweep_worklist ~(abi : Abi.t) ~(sp : var) ~(call_regs : Var.Set.t)
     ~(roots : Var.Set.t) (sub : sub term) : sub term =
-  let census = sweep_census_of ~abi ~sp sub in
+  let census = sweep_census_of ~sp sub in
   let dom m =
     Core.Map.fold m ~init:Var.Set.empty ~f:(fun ~key:v ~data:_ acc ->
         Core.Set.add acc v)
