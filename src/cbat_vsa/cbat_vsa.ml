@@ -117,9 +117,13 @@ let stores_of_sub (s : sub term) : def term list =
    the non-negativity oracle over the sub's defs and stores, and the run's
    sub-address lookup.  The fixpoint and the fixtures' seam build the same
    context through this one builder. *)
-let mk_rctx_with_oracle ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
-    ?sub_lookup (s : sub term) : Cbat_runctx.refine_ctx =
-  let rctx = Cbat_runctx.mk_rctx ~cfg ~abi ?sub_lookup s in
+let mk_rctx_with_oracle ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
+    ~phi_writes ~jmp_reads ?sub_lookup (s : sub term) :
+    Cbat_runctx.refine_ctx =
+  let rctx =
+    Cbat_runctx.mk_rctx ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
+      ~jmp_reads ?sub_lookup s
+  in
   let defs = defs_of_sub s in
   let stores = stores_of_sub s in
   (* The stores grouped by their address exp: the witness reads the
@@ -138,7 +142,8 @@ let mk_rctx_with_oracle ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
       (fun ~env e -> Cbat_backward.prove_nonneg ~defs ~index:store_index ~env e) }
 
 (* Preserved registers: the convention's SP plus its callee-saved GPRs. *)
-let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Int.Set.t =
+let preserved_of_sub ~(abi : Hike_abi.t) ~def_reads (s : sub term) :
+    Int.Set.t =
   let regs =
     abi.Hike_abi.sp :: abi.Hike_abi.callee_saved
     |> Var.Set.of_list in
@@ -149,7 +154,7 @@ let preserved_of_sub ~(abi : Hike_abi.t) (s : sub term) : Int.Set.t =
       let acc =
         if Var.is_virtual (Def.lhs d)
         then Core.Set.add acc (Var.base (Def.lhs d)) else acc in
-      Exp.free_vars (Def.rhs d)
+      def_reads d
       |> Core.Set.fold ~init:acc ~f:begin fun acc v ->
         if Var.is_virtual v then Core.Set.add acc (Var.base v) else acc
       end
@@ -203,7 +208,8 @@ let disabled_conds_of ~(edge_conds : exp Tid.Map.t Tid.Map.t)
 (* The widen cycle's need set: the block SCC's variable SCCs (a
    singleton variable SCC needs itself iff self-looping; every
    multi-vertex variable SCC needs all its members). *)
-let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
+let compute_need ~def_reads
+    ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
     (blocks : Tid.Set.t) : Var.Set.t =
   let defs =
     Core.Set.to_list blocks
@@ -219,7 +225,7 @@ let compute_need ~(rc_blocks : Cbat_runctx.block_facts Tid.Map.t)
     let pred_tbl : (Var.t, Var.t list) Hashtbl.t = Hashtbl.create (module Var) in
     List.iter defs ~f:(fun d ->
       let lhs = Var.base (Def.lhs d) in
-      let uses = Exp.free_vars (Def.rhs d) |> Core.Set.to_list |> List.map ~f:Var.base in
+      let uses = def_reads d |> Core.Set.to_list |> List.map ~f:Var.base in
       List.iter uses ~f:(fun u ->
         if Core.Set.mem cycle_vars u then begin
           Hashtbl.add_multi succ_tbl ~key:lhs ~data:u;
@@ -340,19 +346,23 @@ let normalize_round (s : Sub.t) : Sub.t =
 
 let rec static_graph_vsa
     ~(abi : Hike_abi.t)
+    ~def_reads ~def_writes ~phi_reads ~phi_writes ~jmp_reads
     ?(written : Int.Set.t option Tid.Map.t = Tid.Map.empty)
     ?(resolved : Tid.Set.t Tid.Map.t = Tid.Map.empty)
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (s : Sub.t) (init : vsa_sol) : vsa_sol =
   let s = normalize_round s in
-  let preserved = preserved_of_sub ~abi s in
+  let preserved = preserved_of_sub ~abi ~def_reads s in
   let edge_conds = edge_conds_of s in
   let disabled_conds = disabled_conds_of ~edge_conds s in
   let cfg = Sub.to_graph s in
   (* Pseudo-nodes never reach denotation. *)
   let cfg_tmp = Graphs.Tid.Node.remove Graphs.Tid.start cfg
             |> Graphs.Tid.Node.remove Graphs.Tid.exit in
-  let rctx = mk_rctx_with_oracle ~cfg:cfg_tmp ~abi ~sub_lookup s in
+  let rctx =
+    mk_rctx_with_oracle ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
+      ~jmp_reads ~sub_lookup s
+  in
   let cfg = cfg_tmp in
   (* The dispatch graph: the CFG plus the Resolved dispatches' extra
      edges, serving the WTO, the worklist, and the predecessor lists. *)
@@ -370,7 +380,7 @@ let rec static_graph_vsa
   let need_map : Core.Int.Set.t Tid.Map.t =
     Hashtbl.fold head_to_blocks ~init:Tid.Map.empty
       ~f:(fun ~key:h ~data:blocks acc ->
-        Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~rc_blocks:rctx.rc_blocks blocks)))
+        Core.Map.set acc ~key:h ~data:(Cbat_var_id.intern_set (compute_need ~def_reads ~rc_blocks:rctx.rc_blocks blocks)))
   in
   
   let sol_default = Solution.default init in
@@ -617,10 +627,6 @@ let rec static_graph_vsa
   stabilize_worklist ();
   Stages.report (Sub.name s);
   mk_sol ()
-(* The classification vocabulary lives in Cbat_extraction (re-exported
-   so the seam's consumers keep their paths). *)
-module Cbat_extraction = Cbat_extraction
-
 (* Re-exports for the mli's fixture seam. *)
 type refine_ctx = Cbat_runctx.refine_ctx
 
@@ -687,7 +693,7 @@ let refine_edge_count_writes ~sol ~rctx ~seeds env blk =
 (* The fixtures' construction seam (cbat_vsa.mli's Test_seam). *)
 module Test_seam = struct
 
-  module Cbat_extraction = Cbat_extraction
+  let mem_addr_of = Cbat_def_origin.mem_addr_of
   type refine_ctx = Cbat_runctx.refine_ctx
   let denote_def = denote_def
   let denote_defs = denote_defs

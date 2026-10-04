@@ -1,0 +1,14 @@
+(library
+ (name precision_probe_rows)
+ (modules precision_probe_rows)
+ (libraries probe_common hike bap bap-core-theory bap-main
+  cbat_vsa cbat_vsa_domain hike.hike_stack_bounds core graphlib threads unix)
+ (flags :standard -g))
+
+(executables
+ (names corpus_watch dec_diff drive_loop precision_probe)
+ (modules corpus_watch dec_diff drive_loop precision_probe)
+ (libraries precision_probe_rows probe_common hike bap bap-core-theory bap-main llvm
+  cbat_vsa cbat_vsa_domain core graphlib threads unix)
+ (flags :standard -g)
+ (preprocess (pps ppx_bap)))

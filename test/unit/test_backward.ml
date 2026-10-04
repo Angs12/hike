@@ -1557,16 +1557,11 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let cfg =
-          Sub.to_graph sub
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
@@ -1602,16 +1597,11 @@ let tests : unit Alcotest.test list =
         in
         let guard2 = tids2.(0) in
         let sol2 =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub2
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub2)
         in
-        let cfg2 =
-          Sub.to_graph sub2
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx2 = Vsa.Test_seam.mk_rctx ~cfg:cfg2 ~abi:Hike_abi.x86_64_sysv sub2 in
+        let rctx2 = mk_rctx ~abi:Hike_abi.x86_64_sysv sub2 in
         let guard2_blk =
           Term.enum blk_t sub2 |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard2)
@@ -1649,16 +1639,11 @@ let tests : unit Alcotest.test list =
         in
         let guard = tids.(0) in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
         in
-        let cfg =
-          Sub.to_graph sub
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard)

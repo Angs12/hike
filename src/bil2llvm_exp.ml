@@ -71,34 +71,6 @@ let tls_anchor_addr ctx llvm_builder =
   let f = Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module in
   Llvm.build_call fty f [| g |] "tls_anchor" llvm_builder
 
-let create_load ctx llvm_builder (addr, size) =
-  match Llvm.int64_of_const addr with
-  | Some v ->
-      const_addr_load ctx llvm_builder (Word.of_int64 ~width:64 v) size
-        ~fallback:(fun () ->
-          let ptr = create_addr_ptr ctx llvm_builder addr in
-          Llvm.build_load (Llvm.integer_type ctx.llvm_ctx size) ptr ""
-            llvm_builder)
-  | _ ->
-      (* Non-constant addresses materialize through [create_addr_ptr]. *)
-      let addr = create_addr_ptr ctx llvm_builder addr in
-      Llvm.build_load (Llvm.integer_type ctx.llvm_ctx size) addr ""
-        llvm_builder
-
-let create_store ctx llvm_builder (llvm_var, addr) =
-  match Llvm.int64_of_const addr with
-  | Some v ->
-      const_addr_store ctx llvm_builder (Word.of_int64 ~width:64 v)
-        ~data:(fun () -> llvm_var)
-        ~fallback:(fun () ->
-          let addr = create_addr_ptr ctx llvm_builder addr in
-          let _ : Llvm.llvalue = Llvm.build_store llvm_var addr llvm_builder in
-          llvm_var)
-  | _ ->
-      let addr = create_addr_ptr ctx llvm_builder addr in
-      let _ : Llvm.llvalue = Llvm.build_store llvm_var addr llvm_builder in
-      llvm_var
-
 let create_cast ctx llvm_builder (cast, i, llvm_val) =
   (* A pointer coerces through its integer form; the caller re-types it
      at a pointer use. *)
@@ -318,8 +290,7 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
   | Store (_, addr, data, _, _) when is_tls_addr ctx addr ->
       let ptr = create_tls_ptr ctx scope llvm_builder blk_tid addr in
       let d = create_exp ctx scope llvm_builder blk_tid data in
-      let _ : Llvm.llvalue = Llvm.build_store d ptr llvm_builder in
-      d
+      Bil2llvm_memory.store_ptr llvm_builder d ptr
   | Load (_, addr, _, size) when is_tls_addr ctx addr ->
       let ptr = create_tls_ptr ctx scope llvm_builder blk_tid addr in
       let ty =
@@ -327,18 +298,18 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
         | Some t -> t
         | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
       in
-      Llvm.build_load ty ptr "" llvm_builder
+      Bil2llvm_memory.load_ptr llvm_builder ty ptr
   | Store (_, addr, data, _, _) ->
       let a = create_exp ctx scope llvm_builder blk_tid addr in
       let d = create_exp ctx scope llvm_builder blk_tid data in
-      create_store ctx llvm_builder (d, a)
+      Bil2llvm_memory.store ctx llvm_builder (d, a)
   | Load (_, addr, _, size) ->
       let a = create_exp ctx scope llvm_builder blk_tid addr in
       (match want with
        | Some ty when not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
-           Llvm.build_load ty (as_pointer ctx llvm_builder a) ""
-             llvm_builder
-       | _ -> create_load ctx llvm_builder (a, Size.in_bits size))
+           Bil2llvm_memory.load_ptr llvm_builder ty
+             (as_pointer ctx llvm_builder a)
+       | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
   | Let (var, e, body) ->
       let unique_var = fresh_let_var scope var in
       let v = create_exp ctx scope llvm_builder blk_tid e in
@@ -406,7 +377,7 @@ and storage_access ?want ?(is_window = false)
         | Some t -> t
         | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
       in
-      let emit () = Llvm.build_load ty p "" llvm_builder in
+      let emit () = Bil2llvm_memory.load_ptr llvm_builder ty p in
       emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
         ~rewrite:(rewrite addr size)
   | `Store (addr, data, size) ->
@@ -414,8 +385,7 @@ and storage_access ?want ?(is_window = false)
       let p = addr_ptr addr in
       let emit () =
         let d = create_exp ctx scope llvm_builder blk_tid data in
-        let _ : Llvm.llvalue = Llvm.build_store d p llvm_builder in
-        d
+        Bil2llvm_memory.store_ptr llvm_builder d p
       in
       emit_with_marker ctx scope llvm_builder blk_tid marker ~emit
         ~rewrite:(rewrite addr size)
@@ -445,8 +415,7 @@ and sec_comp_access ?want ctx scope llvm_builder blk_tid ~(store : bool)
       (match data with
        | Some d ->
          let v = create_exp ctx scope llvm_builder blk_tid d in
-         let _ : Llvm.llvalue = Llvm.build_store v p llvm_builder in
-         v
+         Bil2llvm_memory.store_ptr llvm_builder v p
        | None -> assert false)
     else
       let ty =
@@ -454,7 +423,7 @@ and sec_comp_access ?want ctx scope llvm_builder blk_tid ~(store : bool)
         | Some t -> t
         | None -> Llvm.integer_type ctx.llvm_ctx size
       in
-      Llvm.build_load ty p "" llvm_builder
+      Bil2llvm_memory.load_ptr llvm_builder ty p
   | None ->
     (* Unknown component: the generic memory path, unremapped. *)
     if store then
@@ -462,11 +431,11 @@ and sec_comp_access ?want ctx scope llvm_builder blk_tid ~(store : bool)
        | Some d ->
          let a = create_exp ctx scope llvm_builder blk_tid addr in
          let v = create_exp ctx scope llvm_builder blk_tid d in
-         create_store ctx llvm_builder (v, a)
+         Bil2llvm_memory.store ctx llvm_builder (v, a)
        | None -> assert false)
     else
       let a = create_exp ctx scope llvm_builder blk_tid addr in
-      create_load ctx llvm_builder (a, size)
+      Bil2llvm_memory.load ctx llvm_builder (a, size)
 
 (* A rip-relative def's VALUE is a constant address: the section
    owner's base plus its offset — never the native constant.  Every

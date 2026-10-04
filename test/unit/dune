@@ -48,6 +48,7 @@
   test_hike_stack_ptr
   test_hike_types
   test_split_blocks
+  test_hike_bir_flow
   test_hike_ssa
   test_hike_fp
   test_probe
@@ -64,6 +65,7 @@
   cbat_vsa
   cbat_vsa_domain
   graphlib
+  hike_bir_flow
   core
 
   precision_probe_rows

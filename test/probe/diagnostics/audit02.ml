@@ -24,15 +24,14 @@ let exp_str (e : exp) : string = Format.asprintf "%a" Exp.pp e
 let audit_sub (sub : sub term) : unit =
   Printf.printf "  raw defs: %d\n"
     (Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.length);
-  (* The PROD verdict through the seam: the per-def classification the
-     extraction produced, recomputed from the denotations. *)
+  (* The production per-def verdict, recomputed from the denotations. *)
   let sol = run_sub_fixpoint sub in
   (* The seam reads the defs' Env Tags: audit the sweep's stamped sub. *)
   let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
-  let kind_of (blk : blk term) (d : def term) : Cbat_vsa.Test_seam.Cbat_extraction.kind option =
+  let kind_of (blk : blk term) (d : def term) : Ws.kind option =
     let open Base.Option in
     Base.Option.bind
-      (Vsa.Test_seam.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
+      (Vsa.Test_seam.mem_addr_of (Def.rhs d))
       ~f:(fun addr ->
         Result.to_option
           (Vsa.denote_exp_at
@@ -40,8 +39,8 @@ let audit_sub (sub : sub term) : unit =
              ~blk ~def:d addr))
     >>= fun ws ->
     if Ws.is_bottom ws || Ws.in_stack_segment ws then
-      Some (Vsa.Test_seam.Cbat_extraction.caller_split (Vsa.Test_seam.Cbat_extraction.classify ws))
-    else if Ws.is_top ws then Some Cbat_vsa.Test_seam.Cbat_extraction.unbounded_span
+      Some (Ws.caller_split (Ws.classify ws))
+    else if Ws.is_top ws then Some Ws.unbounded_span
     else None
   in
   let prod_map =
@@ -55,8 +54,7 @@ let audit_sub (sub : sub term) : unit =
   let prod_unbounded : (Tid.t, unit) Hashtbl.t = Hashtbl.create 16 in
   Core.Map.iteri prod_map ~f:(fun ~key:tid ~data:k ->
       match k with
-      | Cbat_vsa.Test_seam.Cbat_extraction.Infinite (lo, hi)
-        when Cbat_vsa.Test_seam.Cbat_extraction.is_unbounded_span lo hi ->
+      | Ws.Infinite (lo, hi) when Ws.is_unbounded_span lo hi ->
           Hashtbl.add prod_unbounded tid ()
       | _ -> ());
   let prod_unbounded_count = Hashtbl.length prod_unbounded in

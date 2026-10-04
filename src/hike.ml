@@ -20,6 +20,7 @@ module Def_slots = Hike_def_slots
 module Sections = Hike_sections
 module Image = Hike_image
 module Promote = Hike_promote
+module Attribution = Hike_attribution
 module Kb = Hike_kb
 module Types = Hike_types
 module Ssa = Hike_ssa
@@ -1145,88 +1146,20 @@ let pass_strip_canaries proj =
   in
   map_subs (Hike_strip_canaries.strip_sub ~facts ~names) proj
 
-(* The sections pass: attribution and promotion; the emitter spec and the
-   sweep's escape roots are installed into the KB facts. *)
+(* ELF facts are read here; attribution owns the BIR and facts protocol. *)
 let pass_attrib proj =
   let facts = Hike_kb.facts () in
   let word = facts.abi.Hike_abi.word in
   let meta = Hike_sections.sec_meta ~word proj in
   let spans = Hike_sections.attrib_spans ~meta in
-  let dyn_allocs =
-    Term.enum sub_t (Project.program proj)
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
-           Core.Map.set m ~key:(Term.tid sub)
-             ~data:(Hike_sections.dynamic_alloc_tids_of ~facts sub))
-  in
-  let program =
-    Term.map sub_t (Project.program proj) ~f:(fun sub ->
-        Hike_def_slots.stamp_dyn_allocs
-          ~dynamic_alloc_tids:(Core.Map.find dyn_allocs (Term.tid sub)
-                               |> Option.value ~default:Tid.Set.empty)
-          sub)
-  in
-  let ctx =
-    Hike_sections.attribute ~facts ~word ~entry:Hike_stack_model.segment_base
-      ~spans program
-  in
-  let program =
-    Term.map sub_t program ~f:(Hike_sections.stamp_tags ctx)
-    |> Hike_promote.rewrite_program ~word ~entry:Hike_stack_model.segment_base
-          ~facts ~spans ~ctx
-  in
-  let spec =
-    Hike_sections.section_spec_of ~word
-      ~comps:(Hike_sections.global_comps_of ~word ~spans ctx)
-      ~whole:(Hike_sections.whole_comps_of ctx)
-      ~meta
+  let result =
+    Hike_attribution.run ~facts ~word
+      ~entry:Hike_stack_model.segment_base ~spans ~meta
       ~relative:(Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj))
-      ~externals:(Hike_image.external_references proj)
+      ~externals:(Hike_image.external_references proj) (Project.program proj)
   in
-  (* The DCE's escape roots: the storages a genuine escape extent, a
-     typed call argument, or a model-window callee's shadow names.  The
-     slot arity per sub gates which [hike_argN] bindings the callee's
-     convention actually reaches; the window readers are the lifted
-     subs that consume their call window through the model (a variadic
-     sub's overflow cells, an unpromotable Args claim).  The roots ride
-     the facts to the sweep's own pass, after [hike-types]. *)
-  let arities =
-    Core.Map.map ctx.Hike_sections.sub_trees
-      ~f:(Hike_promote.slot_arity ~word ~entry:Hike_stack_model.segment_base)
-  in
-  let window_readers =
-    Term.enum sub_t program
-    |> Seq.fold ~init:Tid.Set.empty ~f:(fun acc sub ->
-           let reads_window =
-             Hike_stack_model.is_variadic sub
-             || Base.Option.value_map
-                  (Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub))
-                  ~default:false
-                  ~f:(fun tree ->
-                    Hike_sections.Tree.to_sequence tree
-                    |> Seq.exists ~f:(fun (_, rs) ->
-                           Base.List.exists rs.Hike_sections.members
-                             ~f:(fun m ->
-                                 m.Hike_sections.m_identity
-                                 && Hike_sections.equal_sec m.Hike_sections.m_sec
-                                      Hike_stack_model.Args)))
-           in
-           if reads_window then Core.Set.add acc (Term.tid sub) else acc)
-  in
-  let escape_roots =
-    Term.enum sub_t program
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m sub ->
-           let tree =
-             Core.Map.find ctx.Hike_sections.sub_trees (Term.tid sub)
-             |> Base.Option.value ~default:Hike_sections.Tree.empty
-           in
-           Core.Map.set m ~key:(Term.tid sub)
-             ~data:
-               (Hike_sections.escape_roots_of_sub
-                  ~addr_bits:(Hike_stack_model.word_bits word)
-                  ~abi:facts.abi ~arities ~window_readers ~tree sub))
-  in
-  Hike_kb.install (Hike_kb.with_attribution facts ~spec ~escape_roots);
-  Project.with_program proj program
+  Hike_kb.install result.facts;
+  Project.with_program proj result.program
 
 (* The sweep runs after [hike-types]: SSA has materialized the joins, so
    the dead values only the versioned defs and phis distinguish are

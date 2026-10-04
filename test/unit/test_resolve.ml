@@ -84,7 +84,7 @@ let tests : unit Alcotest.test list =
         in
         let j1_retaddr =
           let sol =
-            Cbat_vsa.static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
+            static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
               ~resolved:Tid.Map.empty j1
               (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv j1)
           in
@@ -423,7 +423,7 @@ let tests : unit Alcotest.test list =
                      ~data:(Mem.Val.create (Ws.singleton (w64 0)) LittleEndian))
             in
             let sol =
-              Cbat_vsa.static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
+              static_graph_vsa ~abi:Hike.Abi.x86_64_sysv
                 j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in

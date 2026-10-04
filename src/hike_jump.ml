@@ -344,36 +344,6 @@ let rjoin (a : rstate) (b : rstate) : rstate =
               { st with unique_site = Core.Map.set st.unique_site ~key:v ~data:d }
           | None, None -> st)
 
-let rtrans (bin : rstate) (bi : binfo) : rstate =
-  let gen =
-    List.fold_left bi.idefs ~init:Var.Map.empty
-      ~f:(fun acc (_, d) ->
-        Core.Map.set acc ~key:(Var.base (Def.lhs d)) ~data:d) in
-  let unique_site =
-    Core.Map.filter_keys bin.unique_site ~f:(fun k -> not (Core.Set.mem bi.defined k))
-  in
-  let unique_site = Core.Map.merge unique_site gen
-      ~f:(fun ~key:_ -> function
-        | `Both (_, d) | `Left d | `Right d -> Some d) in
-  let multi_site =
-    Core.Set.filter bin.multi_site ~f:(fun v -> not (Core.Set.mem bi.defined v)) in
-  (* A phi defines its lhs at the entry with no def site — the var's entry
-     value stays site-less (multi). *)
-  let multi_site =
-    Core.Set.fold bi.defined ~init:multi_site ~f:(fun s v ->
-        if Core.Map.mem gen v then s else Core.Set.add s v) in
-  { unique_site; multi_site }
-
-(* The jump targets of a block that are blocks of the sub. *)
-let blk_targets (b : blk term) : tid list =
-  Term.enum jmp_t b
-  |> Seq.fold ~init:[] ~f:(fun acc j ->
-         match Jmp.kind j with
-         | Goto (Direct t) | Ret (Direct t) -> t :: acc
-         | Call c -> (
-             match Call.return c with Some (Direct t) -> t :: acc | _ -> acc)
-         | Goto (Indirect _) | Ret (Indirect _) | Int _ -> acc)
-
 type xenv = {
   in_state : rstate Tid.Map.t; (* reaching defs at each block entry *)
   bins : binfo Tid.Map.t;
@@ -382,7 +352,8 @@ type xenv = {
 
 (* The reaching-defs fixpoint: the unique site per var when every path
    agrees, ambiguity otherwise. *)
-let reaching_defs (blocks : blk term list) : xenv =
+let reaching_defs (sub : sub term) : xenv =
+  let blocks = Term.enum blk_t sub |> Seq.to_list in
   let all_tids = Core.Set.of_list (module Tid) (List.map blocks ~f:(fun b -> Term.tid b)) in
   let bins =
     List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
@@ -402,42 +373,36 @@ let reaching_defs (blocks : blk term list) : xenv =
                ~f:(fun acc (_, d) -> Core.Set.add acc (Var.base (Def.lhs d))))
             phis in
         Core.Map.set m ~key:(Term.tid b) ~data:{ idefs; last_pos; defined }) in
-  let preds =
-    List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
-        List.fold_left (blk_targets b) ~init:m ~f:(fun m t ->
-            if not (Core.Set.mem all_tids t) then m
-            else
-              let ps =
-                Option.value (Core.Map.find m t) ~default:Tid.Set.empty in
-              Core.Map.set m ~key:t ~data:(Core.Set.add ps (Term.tid b)))) in
   let empty = { unique_site = Var.Map.empty; multi_site = Var.Set.empty } in
-  let states =
-    ref
-      (List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
-           Core.Map.set m ~key:(Term.tid b) ~data:(empty, empty))) in
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    List.iter blocks ~f:(fun b ->
-        let bt = Term.tid b in
-        let inn =
-          Option.value
-            (Option.map (Core.Map.find preds bt) ~f:(fun ps ->
-                 Core.Set.fold ps ~init:empty ~f:(fun acc p ->
-                     Option.value
-                       (Option.map (Core.Map.find !states p)
-                          ~f:(fun (_, out) -> rjoin acc out))
-                       ~default:acc)))
-            ~default:empty in
-        let out =
-          Option.value (Option.map (Core.Map.find bins bt) ~f:(rtrans inn))
-            ~default:inn in
-        let (_, prev_out) = Option.value_exn (Core.Map.find !states bt) in
-        if not (rstate_equal prev_out out) then begin
-          states := Core.Map.set !states ~key:bt ~data:(inn, out);
-          changed := true
-        end);
-  done;
+  let graph =
+    Term.enum blk_t sub
+    |> Seq.fold ~init:(Sub.to_graph sub) ~f:(fun graph blk ->
+           Term.enum jmp_t blk
+           |> Seq.fold ~init:graph ~f:(fun graph j ->
+                  match Jmp.kind j with
+                  | Ret (Direct dst) when Core.Set.mem all_tids dst ->
+                      Graphs.Tid.Edge.insert
+                        (Graphs.Tid.Edge.create (Term.tid blk) dst
+                           (Term.tid j))
+                        graph
+                  | _ -> graph))
+  in
+  let def state d =
+    let var = Var.base (Def.lhs d) in
+    { unique_site = Core.Map.set state.unique_site ~key:var ~data:d;
+      multi_site = Core.Set.remove state.multi_site var }
+  in
+  let phi state p =
+    let var = Var.base (Phi.lhs p) in
+    { unique_site = Core.Map.remove state.unique_site var;
+      multi_site = Core.Set.add state.multi_site var }
+  in
+  let jmp state _ = state in
+  let flow =
+    Hike_bir_flow.run ~graph ~sub ~rev:false
+      ~initial:(Tid.Map.singleton Graphs.Tid.start empty) ~default:empty
+      ~equal:rstate_equal ~merge:rjoin ~def ~phi ~jmp
+  in
   let site =
     List.fold_left blocks ~init:Tid.Map.empty ~f:(fun m b ->
         match Core.Map.find bins (Term.tid b) with
@@ -445,11 +410,7 @@ let reaching_defs (blocks : blk term list) : xenv =
         | Some bi ->
             List.fold_left bi.idefs ~init:m ~f:(fun m (i, d) ->
                 Core.Map.set m ~key:(Term.tid d) ~data:(Term.tid b, i))) in
-  { in_state =
-      Core.Map.to_alist !states
-      |> List.map ~f:(fun (k, (inn, _)) -> (k, inn))
-      |> List.fold_left ~init:Tid.Map.empty
-           ~f:(fun m (k, v) -> Core.Map.set m ~key:k ~data:v);
+  { in_state = flow.before;
     bins;
     site }
 
@@ -617,16 +578,17 @@ let plan_block (xenv : xenv) (fv : flag_vars) (blk : blk term) :
   in
   ({ changed; consumed_vars }, compiled)
 
-let uses_of (s : sub term) : Var.Set.t =
-  Hike_stack_model.sub_reads s
+let uses_of ~(abi : Hike_abi.t) (s : sub term) : Var.Set.t =
+  Hike_stack_model.sub_reads ~abi s
 
 (* Compiles every eligible cond, then drops every def of a consumed flag var
    whose only use was the rewritten jump.  A compiled cond reading memory
    binds the comparison to a fresh 1-bit def — the VSA tags the def, and the
    tag is what licenses the emitter's frame addressing. *)
 let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
+  let abi = Hike_abi.of_target target in
   let fv = flag_vars target in
-  let xenv = reaching_defs (Term.enum blk_t sub |> Seq.to_list) in
+  let xenv = reaching_defs sub in
   let consumed = ref Var.Set.empty in
   let sub1 =
     Term.map blk_t sub ~f:(fun blk ->
@@ -669,7 +631,7 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
   in
   if Core.Set.is_empty !consumed then sub1
   else
-    let used = uses_of sub1 in
+    let used = uses_of ~abi sub1 in
     let dead = Core.Set.diff !consumed used in
     if Core.Set.is_empty dead then sub1
     else
@@ -681,4 +643,3 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
             Term.filter def_t blk ~f:(fun d ->
                 not (Core.Set.mem dead (Def.lhs d)))
           else blk)
-

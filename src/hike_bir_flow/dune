@@ -1,0 +1,9 @@
+(library
+ (name hike_bir_flow)
+ (public_name hike.hike_bir_flow)
+ (wrapped false)
+ (modules hike_bir_flow)
+ (libraries bap graphlib core)
+ (preprocess
+  (action
+   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))

@@ -598,7 +598,7 @@ let tests : unit Alcotest.test list =
                 x)
              (range 0 9));
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
         let st tid = Graphlib.Std.Solution.get sol tid in
@@ -724,15 +724,11 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let cfg =
-          Sub.to_graph sub |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
         let entry = AI.add_word entry ~key:t ~data:(Ws.singleton (w32 5)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
@@ -791,15 +787,11 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let cfg =
-          Sub.to_graph sub |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
         let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
         let refined =
           Vsa.Test_seam.refine_edge ~sol ~rctx
@@ -866,15 +858,11 @@ let tests : unit Alcotest.test list =
               ~key:hmem ~data:wide_mem_h
           in
           let sol_h =
-            Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            static_graph_vsa ~abi:Hike_abi.x86_64_sysv
               sub_h
               (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:entry_h sub_h)
           in
-          let cfg_h =
-            Sub.to_graph sub_h |> Graphs.Tid.Node.remove Graphs.Tid.start
-            |> Graphs.Tid.Node.remove Graphs.Tid.exit
-          in
-          let rctx_h = Vsa.Test_seam.mk_rctx ~cfg:cfg_h ~abi:Hike_abi.x86_64_sysv sub_h in
+          let rctx_h = mk_rctx ~abi:Hike_abi.x86_64_sysv sub_h in
           let blk_h = List.nth (Term.enum blk_t sub_h |> Seq.to_list) 0 in
           let entry_h = AI.add_word entry_h ~key:ht ~data:(Ws.singleton (w32 6)) in
           let refined =
@@ -969,7 +957,7 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
@@ -980,11 +968,7 @@ let tests : unit Alcotest.test list =
         in
         (* Walk-level: the guard block's walk returns the block's entry
            state with the constrained cell. *)
-        let cfg =
-          Sub.to_graph sub |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
         let blk1 =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Term.tid b = guard_tid)
@@ -1043,15 +1027,11 @@ let tests : unit Alcotest.test list =
           in
           let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:base in
           let sol =
-            Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+            static_graph_vsa ~abi:Hike_abi.x86_64_sysv
               sub
               (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
           in
-          let cfg =
-            Sub.to_graph sub |> Graphs.Tid.Node.remove Graphs.Tid.start
-            |> Graphs.Tid.Node.remove Graphs.Tid.exit
-          in
-          let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+          let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
           let blk = List.nth (Term.enum blk_t sub |> Seq.to_list) 0 in
           let entry = AI.add_word entry ~key:t2 ~data:(Ws.singleton (w32 6)) in
           let refined =
@@ -1280,10 +1260,6 @@ let tests : unit Alcotest.test list =
                if Term.tid b = l1_tid then Sub.Builder.add_blk sub_b gb
                else Sub.Builder.add_blk sub_b b);
         let sub = Sub.Builder.result sub_b in
-        let cfg =
-          Sub.to_graph sub |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
         (* The entry — and therefore the solution snapshot the walk
            re-denotes against — must carry the memory binding. *)
         let wide = Ws.of_clp (Clp.interval ~width:32 (w32 0) (w32 200)) in
@@ -1299,11 +1275,11 @@ let tests : unit Alcotest.test list =
         in
         let entry = AI.add_memory (anchored_entry ()) ~key:mem ~data:wide_mem in
         let sol =
-          Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv
+          static_graph_vsa ~abi:Hike_abi.x86_64_sysv
             sub
             (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry sub)
         in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi:Hike_abi.x86_64_sysv sub in
+        let rctx = mk_rctx ~abi:Hike_abi.x86_64_sysv sub in
         let walk () =
           let entry = AI.add_word entry ~key:i ~data:(Ws.singleton k) in
           Vsa.Test_seam.refine_edge ~sol ~rctx

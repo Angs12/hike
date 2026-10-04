@@ -49,15 +49,10 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          Vsa.static_graph_vsa ~abi sub
+          static_graph_vsa ~abi sub
             (Vsa.init_sol ~abi ~entry sub)
         in
-        let cfg =
-          Sub.to_graph sub
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi sub in
+        let rctx = mk_rctx ~abi sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)
@@ -81,12 +76,7 @@ let tests : unit Alcotest.test list =
       "a refine under the context's widening head records the empty meet's boundary in the context's own table"
       (fun () ->
         let sub = straight_sub "sc_lm" [] in
-        let cfg =
-          Sub.to_graph sub
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi sub in
+        let rctx = mk_rctx ~abi sub in
         let lm = Vsa.Test_seam.landmarks_of rctx in
         let x = Var.create ~is_virtual:false ~fresh:false "sc_lm_x" (Type.Imm 32) in
         let head = Tid.for_name "sc_lm_head" in
@@ -143,15 +133,10 @@ let tests : unit Alcotest.test list =
             ~data:(Mem.top { Mem.addr_width = 64; Mem.addressable_width = 8 })
         in
         let sol =
-          Vsa.static_graph_vsa ~abi sub
+          static_graph_vsa ~abi sub
             (Vsa.init_sol ~abi ~entry sub)
         in
-        let cfg =
-          Sub.to_graph sub
-          |> Graphs.Tid.Node.remove Graphs.Tid.start
-          |> Graphs.Tid.Node.remove Graphs.Tid.exit
-        in
-        let rctx = Vsa.Test_seam.mk_rctx ~cfg ~abi sub in
+        let rctx = mk_rctx ~abi sub in
         let guard_blk =
           Term.enum blk_t sub |> Seq.to_list
           |> List.find (fun b -> Tid.equal (Term.tid b) guard_tid)

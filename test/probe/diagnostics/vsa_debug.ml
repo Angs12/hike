@@ -80,13 +80,14 @@ let run_binary (path : string) (name : string) : unit =
   (* The fused solve returns the rewritten (normalized) sub and the
      per-block (pre, post) envs: the walks read the forms production
      analyses. *)
-  let envs, sub', _grown =
+  let envs, sub', _grown, _facts =
     Hike.Vsa.fixpoint (Project.target proj)
       ~lookup:(fun _ -> None)
       ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
       ~written:(Hike.Vsa.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                   (Program.create ~subs:[ sub ] ()))
-            ~block_addrs:(Core.Map.empty (module Addr)) sub
+            ~block_addrs:(Core.Map.empty (module Addr))
+      ~foreign_slots:(Core.Int64.Set.empty) sub
   in
   let pre_of tid = match Core.Map.find envs tid with
     | Some (pre, _) -> pre

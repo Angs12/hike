@@ -299,7 +299,7 @@ let jump_target =
 
 let run_anchored (sub : sub term) : Vsa.vsa_sol =
   let sub = Hike.Jump.compile_sub jump_target sub in
-  Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
+  static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv ~entry:(anchored_entry ()) sub)
 
 let iter_state_of (_sub : sub term) (sol : Vsa.vsa_sol) (target_tid : tid) : AI.t =
   Graphlib.Std.Solution.get sol target_tid

@@ -6,7 +6,7 @@ module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_fp
-open Bil2llvm_mem
+open Bil2llvm_access
 
 let dbg_tail (msg : unit -> string) =
 #ifdef VSA_DEBUG
@@ -315,11 +315,10 @@ let extern_stack_args ctx scope llvm_builder blk_tid (blk : blk term) =
           (* The call-arg def is the caller's slot ADDRESS; the vararg
              is the value stored there. *)
           let loaded =
-            Llvm.build_load
+            Bil2llvm_memory.load_ptr llvm_builder
               (Llvm.integer_type ctx.llvm_ctx
                  (Hike_stack_model.word_bits word))
               (Bil2llvm_ptr.as_pointer ctx llvm_builder value)
-              "" llvm_builder
           in
           slots (i + 1) (loaded :: acc)
       | None -> acc

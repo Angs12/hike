@@ -63,6 +63,9 @@ module Sections = Hike_sections
     promoted parameters and call sites bind the stored values. *)
 module Promote = Hike_promote
 
+(** The section ownership and promotion protocol used by the production pass. *)
+module Attribution = Hike_attribution
+
 (** The analysis closure: the run's facts as ONE value, built by
     [Kb.build] at the pass_vsa boundary, installed once, and threaded
     through every consumer as a parameter.  Also the term-carried KB

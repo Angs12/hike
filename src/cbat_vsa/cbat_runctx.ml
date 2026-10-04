@@ -72,11 +72,12 @@ let with_sol (rc : refine_ctx) (sol : AI.t Tid.Map.t) : refine_ctx =
    block writes, and whether the block's call pushes a return address
    (a machine call with a return; an intrinsic is rendered inline and a
    no-return transfer is a tail, so neither pushes). *)
-let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) : var list * bool =
+let call_facts_of_block ~(abi : Hike_abi.t) ~def_writes (b : blk term) :
+    var list * bool =
   let defs = Term.enum def_t b |> Seq.to_list in
   let written =
     List.filter abi.Hike_abi.int_param_regs ~f:(fun v ->
-        List.exists defs ~f:(fun d -> Var.same (Def.lhs d) v)) in
+        List.exists defs ~f:(fun d -> Core.Set.mem (def_writes d) v)) in
   let pushed =
     Term.enum jmp_t b
     |> Seq.exists ~f:(fun j ->
@@ -91,71 +92,36 @@ let call_facts_of_block ~(abi : Hike_abi.t) (b : blk term) : var list * bool =
   (written, pushed)
 
 (* Backward may-liveness over base-normalized vars. *)
-let block_uses (b : blk term) : Var.Set.t =
-  let base acc v = Core.Set.add acc (Var.base v) in
-  let u =
-    Core.Set.fold (Blk.free_vars b) ~init:Var.Set.empty
-      ~f:(fun acc v -> base acc v) in
-  Term.enum phi_t b
-  |> Seq.fold ~init:u ~f:(fun acc ph ->
-      Core.Set.fold (Phi.free_vars ph) ~init:acc
-        ~f:(fun acc v -> base acc v))
+let base_vars vars =
+  Core.Set.fold vars ~init:Var.Set.empty ~f:(fun acc v ->
+      Core.Set.add acc (Var.base v))
 
-(* Word-typed lhs vars defined in the block. *)
-let block_defs (b : blk term) : Var.Set.t =
-  Term.enum def_t b
-  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+let live_in_of_sub ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads
+    ~phi_writes ~jmp_reads (s : sub term) =
+  let def live d =
+    let live =
       match Var.typ (Def.lhs d) with
-      | Type.Imm _ -> Core.Set.add acc (Var.base (Def.lhs d))
-      | Type.Mem _ | Type.Unk -> acc)
-
-(* Live-in vars per block; fixpoint over successor unions. *)
-let live_in_of_sub (s : sub term) (cfg : Graphs.Tid.t) :
-    Var.Set.t Tid.Map.t =
-  let blocks = Term.enum blk_t s |> Seq.to_list in
-  let find m tid =
-    Option.value ~default:Var.Set.empty (Core.Map.find m tid) in
-  let uses =
-    List.fold blocks ~init:Tid.Map.empty ~f:(fun m b ->
-        Core.Map.set m ~key:(Term.tid b) ~data:(block_uses b)) in
-  let defs =
-    List.fold blocks ~init:Tid.Map.empty ~f:(fun m b ->
-        Core.Map.set m ~key:(Term.tid b) ~data:(block_defs b)) in
-  (* Pred-worklist: a block re-joins only when a successor's live set
-     changed; reversed term order seeds the first sweep backwards. *)
-  let by_tid_term =
-    Core.Map.of_alist_exn (module Tid)
-      (List.map blocks ~f:(fun b -> (Term.tid b, b)))
+      | Type.Imm _ ->
+        Core.Set.diff live (base_vars (def_writes d))
+      | Type.Mem _ | Type.Unk -> live
+    in
+    Core.Set.union live (base_vars (def_reads d))
   in
-  let live = ref Tid.Map.empty in
-  let order = List.rev blocks in
-  let pending =
-    Core.Set.of_list (module Tid) (List.map order ~f:Term.tid) in
-  let pending = ref pending in
-  while not (Core.Set.is_empty !pending) do
-    let bt = Core.Set.choose_exn !pending in
-    pending := Core.Set.remove !pending bt;
-    (match Core.Map.find by_tid_term bt with
-     | Some b ->
-       let out =
-         Graphs.Tid.Node.succs bt cfg |> Seq.fold ~init:Var.Set.empty
-           ~f:(fun acc t -> Core.Set.union acc (find !live t)) in
-       let inn =
-         Core.Set.union (find uses bt)
-           (Core.Set.diff out (find defs bt)) in
-       if not (Core.Set.equal inn (find !live bt)) then begin
-         live := Core.Map.set !live ~key:bt ~data:inn;
-         (* The preds re-join; the block's own preds read [live] next. *)
-         Graphs.Tid.Node.preds bt cfg
-         |> Seq.iter ~f:(fun t -> pending := Core.Set.add !pending t)
-       end
-     | None -> ())
-  done;
-  !live
+  let phi live p =
+    Core.Set.union live (base_vars (phi_reads p))
+  in
+  let jmp live j =
+    Core.Set.union live (base_vars (jmp_reads j))
+  in
+  Hike_bir_flow.run ~graph:(Sub.to_graph s) ~sub:s ~rev:true
+    ~initial:(Tid.Map.singleton Graphs.Tid.exit Var.Set.empty)
+    ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
+    ~def ~phi ~jmp
 
 (* The per-run analysis context: one fold over the sub's blocks builds
    the per-block fact records; the live-in fixpoint feeds them. *)
-let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
+let mk_rctx ~(abi : Hike_abi.t) ~def_reads ~def_writes ~phi_reads ~phi_writes
+    ~jmp_reads
     ?(sub_lookup : int64 -> Tid.t option = fun _ -> None)
     (s : sub term) : refine_ctx = {
   rc_nonneg = (fun ~env:_ _ -> false);
@@ -168,17 +134,20 @@ let mk_rctx ~(cfg : Graphs.Tid.t) ~(abi : Hike_abi.t)
   rc_abi = abi;
   rc_sub_lookup = sub_lookup;
   rc_blocks =
-    let live = live_in_of_sub s cfg in
+    let live =
+      live_in_of_sub ~abi ~def_reads ~def_writes ~phi_reads ~phi_writes
+        ~jmp_reads s
+    in
     Term.enum blk_t s
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun m b ->
         Core.Map.set m ~key:(Term.tid b)
           ~data:{
             bf_term = b;
-            bf_call_facts = call_facts_of_block ~abi b;
+            bf_call_facts = call_facts_of_block ~abi ~def_writes b;
             bf_live_ids =
               Cbat_var_id.intern_set
                 (Option.value ~default:Var.Set.empty
-                   (Core.Map.find live (Term.tid b))) });
+                   (Core.Map.find live.before (Term.tid b))) });
 }
 
 (* The per-run analysis context: one fold over the sub's blocks builds

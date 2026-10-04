@@ -6,4 +6,4 @@ open Bap.Std
 
   (** The BIR's free registers over its explicit edges, memory vars
       dropped. *)
-  val free_regs : sub term -> var list
+  val free_regs : abi:Hike_abi.t -> sub term -> var list

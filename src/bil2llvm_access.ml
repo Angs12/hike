@@ -1,6 +1,4 @@
-(* Emitter memory lane: dynamic allocation and the per-def access
-   dispatch.  A stack/VLA address is a real pointer; the emitter lowers
-   it mechanically. *)
+(* Per-definition access routing and dynamic allocations. *)
 
 open Bap.Std
 open Bap.Std.Bil.Types

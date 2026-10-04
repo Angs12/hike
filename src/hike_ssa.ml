@@ -267,8 +267,8 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     let boundary =
       Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
           Term.enum jmp_t blk
-          |> Seq.fold ~init:acc ~f:(fun a j ->
-                 Core.Set.union a (Model.jmp_boundary_reads ~abi j)))
+          |> Seq.fold ~init:acc ~f:(fun reads j ->
+                 Core.Set.union reads (Model.jmp_boundary_reads ~abi j)))
     in
     let vars =
       Base.List.fold blks ~init:(Core.Set.union call_lanes boundary)
@@ -279,8 +279,8 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       Blk.elts blk
       |> Seq.exists ~f:(fun elt ->
              match elt with
-             | `Def d -> Var.same (Def.lhs d) v
-             | `Phi p -> Var.same (Phi.lhs p) v
+             | `Def d -> Core.Set.mem (Model.def_writes d) v
+             | `Phi p -> Core.Set.mem (Model.phi_writes p) v
              | _ -> false)
     in
     let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
@@ -470,17 +470,31 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
 (* Under SSA the sub's input lanes are its index-0 reads: every
    versioned read is dominated by its def.  The model's memory vars and
    storage bases are not lanes; a Mem-typed pointer value is. *)
-let free_regs_ssa (sub : sub term) : var list =
+let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+        let phi_reads =
+          Term.enum phi_t blk
+          |> Seq.fold ~init:Var.Set.empty ~f:(fun reads p ->
+                 Core.Set.union reads (Model.phi_reads p))
+          |> Core.Set.filter ~f:(fun v -> Var.index v = 0)
+        in
+        let boundary_reads =
+          Term.enum jmp_t blk
+          |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
+                 Core.Set.union reads (Model.jmp_boundary_reads ~abi j))
+          |> Core.Set.filter ~f:(fun v -> Var.index v = 0)
+        in
         Core.Set.union acc
-          (Model.blk_free_vars blk
-           |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))
+          (Core.Set.union phi_reads
+             (Core.Set.union boundary_reads
+                (Model.blk_free_vars blk
+                |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))))
   |> Core.Set.filter ~f:(fun v ->
          not
            (Model.is_region_mem v || Model.is_window_mem v
           || Model.is_sec_comp_mem v || Model.is_storage_base v
-          || Model.is_window_var v))
+          || Model.is_window_var v || Abi.is_sp abi (Var.base v)))
   |> Core.Set.to_list
 
 let ssa_program ~(target : Bap_core_theory.Theory.Target.t)

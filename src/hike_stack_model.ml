@@ -398,46 +398,66 @@ let region_ptr_id_of (v : var) : int option =
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
-(* The vars a term reads — the one home; every consumer of a read set
-   derives it here.  A def reads its rhs's vars, a phi its incomings,
-   a jmp its operand expressions plus what its kind consumes at the
-   ABI boundary: a ret the return registers and SP (the return-address
-   pop), a call the parameter registers and SP (the return-address
-   push). *)
-let def_reads (d : def term) : Var.Set.t = Exp.free_vars (Def.rhs d)
-
+(* BAP owns explicit term reads; the ABI adds transfer inputs. *)
+let def_reads (d : def term) : Var.Set.t = Def.free_vars d
 let phi_reads (p : phi term) : Var.Set.t = Phi.free_vars p
 
-(* The reads of a jmp's own operands: the condition and the target
-   expressions. *)
+let phi_reads_from (p : phi term) (pred : Tid.t) : Var.Set.t =
+  Phi.values p
+  |> Seq.fold ~init:Var.Set.empty ~f:(fun reads (src, exp) ->
+         if Tid.equal src pred then
+           Core.Set.union reads (Exp.free_vars exp)
+         else reads)
+
 let jmp_operand_reads (j : jmp term) : Var.Set.t = Jmp.free_vars j
 
-(* The boundary reads a jmp's kind consumes with no operand naming
-   them. *)
 let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   match Jmp.kind j with
-  | Ret _ -> Core.Set.of_list (module Var) (abi.return_regs @ [abi.sp])
-  | Call _ -> Core.Set.of_list (module Var) (Abi.param_regs abi @ [abi.sp])
+  | Ret _ -> Var.Set.singleton abi.sp
+  | Call _ when Hike_return.is_jmp j ->
+    Var.Set.singleton abi.sp
+  | Call _ ->
+    Core.Set.of_list (module Var) (Abi.param_regs abi @ [ abi.sp ])
   | _ -> Var.Set.empty
 
 let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   Core.Set.union (jmp_operand_reads j) (jmp_boundary_reads ~abi j)
 
-(* The block's free vars, the liveness view: a def's reads minus what
-   its later defs kill, the jmps' operand reads; a phi contributes no
-   reads (it binds its lhs). *)
-let blk_free_vars (blk : blk term) : Var.Set.t =
-  fst
-  @@ Seq.fold (Blk.elts blk)
-       ~init:(Var.Set.empty, Var.Set.empty)
-       ~f:(fun (vars, kill) -> function
-             | `Phi _ -> (vars, kill)
-             | `Def d ->
-               (Core.Set.union (Core.Set.diff (def_reads d) kill) vars,
-                Core.Set.add kill (Def.lhs d))
-             | `Jmp j ->
-               (Core.Set.union (Core.Set.diff (jmp_operand_reads j) kill) vars,
-                kill))
+let jmp_target_reads (j : jmp term) : Var.Set.t =
+  match Jmp.kind j with
+  | Goto (Indirect e) | Ret (Indirect e) -> Exp.free_vars e
+  | Call c ->
+    let target =
+      match Call.target c with
+      | Indirect e -> Exp.free_vars e
+      | Direct _ -> Var.Set.empty
+    in
+    let ret =
+      match Call.return c with
+      | Some (Indirect e) -> Exp.free_vars e
+      | Some (Direct _) | None -> Var.Set.empty
+    in
+    Core.Set.union target ret
+  | Goto (Direct _) | Ret (Direct _) | Int _ -> Var.Set.empty
+
+let def_writes (d : def term) : Var.Set.t = Var.Set.singleton (Def.lhs d)
+let phi_writes (p : phi term) : Var.Set.t = Var.Set.singleton (Phi.lhs p)
+
+let blk_free_vars (blk : blk term) : Var.Set.t = Blk.free_vars blk
+
+let blk_reads ~(abi : Abi.t) (blk : blk term) : Var.Set.t =
+  Blk.elts blk
+  |> Seq.fold ~init:Var.Set.empty ~f:(fun reads -> function
+         | `Def d -> Core.Set.union reads (def_reads d)
+         | `Phi p -> Core.Set.union reads (phi_reads p)
+         | `Jmp j -> Core.Set.union reads (jmp_reads ~abi j))
+
+let blk_defines (v : var) (blk : blk term) : bool =
+  Blk.elts blk
+  |> Seq.exists ~f:(function
+         | `Def d -> Core.Set.mem (def_writes d) v
+         | `Phi p -> Core.Set.mem (phi_writes p) v
+         | `Jmp _ -> false)
 
 (* The value vars of an exp: the free vars, memory excluded — the
    storage mem vars are the memory machinery's subject, not values. *)
@@ -512,31 +532,26 @@ let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
       match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)
 
-(* The vars a block reads: its jumps' and phis' free vars. *)
-let blk_reads (b : blk term) : Var.Set.t =
-  Term.enum jmp_t b
-  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc j ->
-         Core.Set.union acc (Jmp.free_vars j))
-  |> fun acc ->
-  Term.enum phi_t b
-  |> Seq.fold ~init:acc ~f:(fun acc p -> Core.Set.union acc (Phi.free_vars p))
-
 (* The program's subs keyed by tid. *)
 let sub_map (prog : program term) : sub term Tid.Map.t =
   Term.enum sub_t prog
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
       Core.Map.set m ~key:(Term.tid s) ~data:s)
 
-(* The vars a sub reads: every def's rhs plus each block's reads. *)
-let sub_reads (s : sub term) : Var.Set.t =
+(* The vars a sub reads, including the ABI boundary of each transfer. *)
+let sub_reads ~(abi : Abi.t) (s : sub term) : Var.Set.t =
   Term.enum blk_t s
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
-      let acc =
-        Term.enum def_t blk
-        |> Seq.fold ~init:acc ~f:(fun acc d ->
-            Core.Set.union acc (Exp.free_vars (Def.rhs d)))
-      in
-      Core.Set.union acc (blk_reads blk))
+      Core.Set.union acc (blk_reads ~abi blk))
+
+let sub_operand_reads (s : sub term) : Var.Set.t =
+  Term.enum blk_t s
+  |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
+      Blk.elts blk
+      |> Seq.fold ~init:acc ~f:(fun reads -> function
+             | `Def d -> Core.Set.union reads (def_reads d)
+             | `Phi p -> Core.Set.union reads (phi_reads p)
+             | `Jmp j -> Core.Set.union reads (jmp_operand_reads j)))
 
 (* The deepest literal SP decrement in the sub (prologues and VLAs),
    through a copy chain as in the dynamic-allocation walk. *)

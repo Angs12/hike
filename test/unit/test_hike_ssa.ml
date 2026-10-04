@@ -167,7 +167,9 @@ let tests : unit Alcotest.test list =
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
         check "SSA-03"
           (Hike.Stack_model.is_ssa sub
-          && Hike.Ssa.free_regs_ssa sub = [ v64 "RDI" ]));
+          && Hike.Ssa.free_regs_ssa
+               ~abi:(Hike.Abi.of_target Theory.Target.unknown) sub
+             = [ v64 "RDI" ]));
 
     pin "SSA-04" "a call return and bypass value meet in a join phi"
       (fun () ->

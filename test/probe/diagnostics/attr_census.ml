@@ -11,8 +11,6 @@ open Probe_common
 module Vsa = Cbat_vsa
 module AI = Vsa.AI
 module Ws = Cbat_clp_set_composite
-module Ext = Vsa.Test_seam.Cbat_extraction
-
 module VarMap = Core.Map.Make (Var)
 
 (* Current-sub base-var mechanism shadow: a top var's root cause, set at
@@ -211,8 +209,8 @@ let census_addr ~(sub : string) ~(env : AI.t) (a : exp) : unit =
     let stackish = Ws.is_bottom v || Ws.in_stack_segment v in
     if stackish then begin
       bump "stack.def";
-      (match Ext.caller_split (Ext.classify v) with
-       | Ext.Infinite (lo, hi) when Ext.is_unbounded_span lo hi ->
+      (match Ws.caller_split (Ws.classify v) with
+       | Ws.Infinite (lo, hi) when Ws.is_unbounded_span lo hi ->
          bump "stack.unbounded";
          let m = classify_top_addr env a in
          bump ("unbounded.stack." ^ m);
@@ -245,7 +243,7 @@ let census_sub (sub : sub term) : unit =
         Term.enum def_t b
         |> Seq.iter ~f:(fun d ->
             let st_before = !st in
-            (match Ext.stack_address_of_rhs (Def.rhs d) with
+            (match Vsa.Test_seam.mem_addr_of (Def.rhs d) with
              | Some a -> census_addr ~sub:sname ~env:st_before a
              | None -> ());
             st := Vsa.Test_seam.denote_def d !st;

@@ -91,7 +91,9 @@ let tests : unit Alcotest.test list =
         in
         let split = Hike.Split_blocks.split_sub sub in
         check "SBLK-05"
-          (Base.List.map (Hike.Split_blocks.free_regs split) ~f:Var.name
+          (Base.List.map
+             (Hike.Split_blocks.free_regs ~abi:Hike.Abi.x86_64_sysv split)
+             ~f:Var.name
            = []));
   ]
 

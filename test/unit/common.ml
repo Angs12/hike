@@ -62,6 +62,20 @@ let sp = v64 "RSP"
 module Kb = Hike.Kb
 module Sm = Hike.Stack_model
 module Ds = Hike.Def_slots
+
+let static_graph_vsa ~abi ?written ?resolved ?sub_lookup sub init =
+  Vsa.static_graph_vsa ~abi
+    ~def_reads:Sm.def_reads ~def_writes:Sm.def_writes
+    ~phi_reads:Sm.phi_reads ~phi_writes:Sm.phi_writes
+    ~jmp_reads:(Sm.jmp_reads ~abi)
+    ?written ?resolved ?sub_lookup sub init
+
+let mk_rctx ~abi ?sub_lookup sub =
+  Vsa.Test_seam.mk_rctx ~abi
+    ~def_reads:Sm.def_reads ~def_writes:Sm.def_writes
+    ~phi_reads:Sm.phi_reads ~phi_writes:Sm.phi_writes
+    ~jmp_reads:(Sm.jmp_reads ~abi)
+    ?sub_lookup sub
 (* The record vocabulary: test_fixtures resolves [Cu] through this open. *)
 module Cu = Hike.Stack_model
 
@@ -110,10 +124,7 @@ let produce ?(block_addrs = []) ?(images = []) target (prog : program term)
   in
   (envs, sub', ba')
 
-(* The T2 chain replica over fixtures: the composed production entries
-   (fixpoint, facts, the one install, the jmp/dyn stamps, the
-   attribution, and the rewrite) — the tests' one-line driver.
-   Returns the rewritten program. *)
+(* Runs the production attribution protocol over fixture analysis facts. *)
 let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
   let target = Theory.Target.unknown in
   let prog = Program.create ~subs () in
@@ -132,20 +143,14 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
   in
   let prog =
     Term.map sub_t prog ~f:(fun sub ->
-        let _, sub' =
-          Core.Map.find acc (Term.tid sub)
-          |> Option.value ~default:(Tid.Map.empty, sub)
-        in
-        Ds.stamp_dyn_allocs
-          ~dynamic_alloc_tids:(Hike.Sections.dynamic_alloc_tids_of ~facts sub') sub')
+        Core.Map.find acc (Term.tid sub)
+        |> Base.Option.value_map ~default:sub ~f:snd)
   in
-  let ctx =
-    Hike.Sections.attribute ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
-      ~spans prog
+  let result =
+    Hike.Attribution.run ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
+      ~spans ~meta:[] ~relative:[] ~externals:[] prog
   in
-  let prog = Term.map sub_t prog ~f:(Hike.Sections.stamp_tags ctx) in
-  Hike.Promote.rewrite_program ~word:8 ~entry:Hike.Stack_model.segment_base ~facts
-    ~spans ~ctx prog
+  result.program
 
 (* The fixtures' analysis facts: the subs' converged environments, plus
    the stamped subs the seam reads (the fixpoint's sweep tags every def

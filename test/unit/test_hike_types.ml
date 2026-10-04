@@ -87,7 +87,7 @@ let tests : unit Alcotest.test list =
     pin "TYPES-10" "compute_sub_sig: an unknown target answers no returns"
       (fun () ->
         let sub = plain_sub "t14_ret" [] in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
         check "TYPES-10" (rets = [] && args = []));
 
 
@@ -102,7 +102,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_f2") (Bil.Var (v64 "RBX"));
               Def.create (v64 "t14_f3") (Bil.Var (v64 "FS_BASE")) ]
         in
-        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
+        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
         check "TYPES-12" (args = []));
 
     pin "TYPES-13"
@@ -115,7 +115,7 @@ let tests : unit Alcotest.test list =
               Def.create (v64 "t14_p2") (Bil.Var (v64 "hike_arg2"));
               Def.create (v64 "t14_p3") (Bil.Var (v64 "intrinsic:foo")) ]
         in
-        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
+        let _, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
         check "TYPES-13" (args = []));
 
 
@@ -130,7 +130,7 @@ let tests : unit Alcotest.test list =
           { regions = []; window_param = true }
         in
         let sub = Sm.set_layout layout (plain_sub "t14_window" []) in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
         check "TYPES-16"
           (rets = []
           && match args with
@@ -151,7 +151,7 @@ let tests : unit Alcotest.test list =
             (straight_sub "intrinsic:testsig" [ Def.create y (Bil.Var rdi) ])
             Sub.intrinsic ()
         in
-        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub sub) unknown sub in
+        let rets, args = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:unknown sub) unknown sub in
         check "TYPES-17"
           (arg_names args = [ "RDI" ]
           && for_all_in args
@@ -163,7 +163,7 @@ let tests : unit Alcotest.test list =
       "compute_sub_sig: an FP-returning sub appends the YMM0 [Out] lane"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
-        let rets, _ = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in
+        let rets, _ = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in
         check "TYPES-18" (arg_names rets = [ "RAX"; "RDX"; "YMM0" ]));
 
 
@@ -254,10 +254,32 @@ let tests : unit Alcotest.test list =
         let facts, stamped, _ = fixture_facts [ caller; callee ] in
         let prog = Program.create ~subs:stamped () in
         let sub_of_m = Types.sub_of_program prog in
-        let pks = Types.param_kinds ~facts ~sub_of:sub_of_m prog in
+        let pks, _ = Types.ptr_kinds ~facts ~sub_of:sub_of_m prog in
+        let mem_typ = Types.mem_type_of_target facts.Hike.Kb.target in
+        let prog =
+          Term.map sub_t prog ~f:(fun sub ->
+              let ptr_vars =
+                Core.Map.find pks (Term.tid sub)
+                |> Base.Option.value ~default:Var.Set.empty
+              in
+              Types.retype_sub ~mem_typ ~ptr_vars sub)
+          |> Types.stamp_arg_kinds ~param_kinds:pks
+        in
+        let callee =
+          Core.Map.find (Types.sub_of_program prog) (Term.tid callee)
+          |> Base.Option.value_exn
+        in
+        let arg =
+          Term.enum arg_t callee
+          |> Seq.find ~f:(fun a -> Var.same (Arg.lhs a) rdi)
+          |> Base.Option.value_exn
+        in
         check "KIND-04"
           (match Core.Map.find pks (Term.tid callee) with
-           | Some s -> Core.Set.mem s rdi
+           | Some s ->
+             Core.Set.mem s rdi
+             && Var.typ (Arg.lhs arg) = mem_typ
+             && Model.is_arg_ptr_kind arg
            | None -> false));
 
     (* The PLT-trampoline stamp: hike-sign computes it from the same

@@ -1,6 +1,6 @@
 # Pins: precision-probe classification
 
-Module `Precision_probe_rows` (`test/probe/precision_probe_rows.ml`). One row
+Module `Precision_probe_rows` (`test/probe/research/precision_probe_rows.ml`). One row
 per pin in `test/unit/test_probe.ml`.
 
 | id | mechanism | disable recipe | red evidence |

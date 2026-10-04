@@ -7,7 +7,7 @@ open Bap.Std
 module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_exp
-open Bil2llvm_mem
+open Bil2llvm_access
 open Bil2llvm_calls
 open Bil2llvm_fp
 open Bil2llvm_section

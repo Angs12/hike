@@ -181,7 +181,11 @@ let fixpoint (target : Theory.Target.t)
           (init : Vsa.vsa_sol option) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol =
-          Vsa.static_graph_vsa ~abi ~written ~resolved ~sub_lookup:lookup
+          Vsa.static_graph_vsa ~abi
+            ~def_reads:Model.def_reads ~def_writes:Model.def_writes
+            ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
+            ~jmp_reads:(Model.jmp_reads ~abi)
+            ~written ~resolved ~sub_lookup:lookup
             sub seed
         in
 #ifdef VSA_DEBUG

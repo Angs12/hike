@@ -23,6 +23,7 @@
     hike.hike_def_slot
     hike.hike_origin
     hike.hike_stack_bounds
+    hike.hike_bir_flow
     hike.cbat_vsa
     hike.cbat_vsa_domain))
 

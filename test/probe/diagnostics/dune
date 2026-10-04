@@ -1,0 +1,16 @@
+(executables
+ (names audit02 attr_census conv_diag vsa_gap)
+ (modules audit02 attr_census conv_diag vsa_gap)
+ (libraries probe_common hike bap bap-core-theory bap-main llvm
+  cbat_vsa cbat_vsa_domain core graphlib threads unix)
+ (flags :standard -g)
+ (preprocess (pps ppx_bap)))
+
+(executables
+ (names vsa_debug)
+ (modules vsa_debug)
+ (enabled_if (= %{profile} vsa-debug))
+ (libraries probe_common hike bap bap-core-theory bap-main
+  cbat_vsa cbat_vsa_domain core graphlib threads)
+ (flags :standard -g)
+ (preprocess (pps ppx_bap)))

@@ -79,7 +79,7 @@ let () =
     let abi = Hike.Abi.of_target target in
     let t0 = Unix.gettimeofday () in
     match
-      Vsa.static_graph_vsa ~abi ~written ~sub_lookup:(fun _ -> None) sub
+      static_graph_vsa ~abi ~written ~sub_lookup:(fun _ -> None) sub
         (Vsa.init_sol ~abi sub)
     with
     | sol ->

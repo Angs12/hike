@@ -547,8 +547,9 @@ let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t) :
                     (* An edge value flows from the predecessor's end
                        state, not this block's entry. *)
                     match Core.Map.find ctx.by_tid pred with
-                    | Some pb -> check_use pb (Array.length pb.b_defs) (Exp.free_vars e)
-                    | None -> check_use b 0 (Exp.free_vars e))))
+                    | Some pb -> check_use pb (Array.length pb.b_defs)
+                                   (Model.phi_reads_from p pred)
+                    | None -> check_use b 0 (Model.phi_reads_from p pred))))
 
 (* Removes the blocks the rewrite orphaned: a block survives iff it
    was already predecessor-free (the entry and the pre-existing

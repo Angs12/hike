@@ -5,7 +5,7 @@ open Bap.Std
 module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_exp
-open Bil2llvm_mem
+open Bil2llvm_access
 
 type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
                | FCONVERT of int | FORDER | FHLT | ISNAN

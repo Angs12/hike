@@ -6,6 +6,14 @@ open Bap_core_theory
 module AI = Cbat_vsa.AI
 module Vsa = Cbat_vsa
 module Ws = Cbat_clp_set_composite
+module Model = Hike.Stack_model
+
+let static_graph_vsa ~abi ?written ?resolved ?sub_lookup sub init =
+  Vsa.static_graph_vsa ~abi
+    ~def_reads:Model.def_reads ~def_writes:Model.def_writes
+    ~phi_reads:Model.phi_reads ~phi_writes:Model.phi_writes
+    ~jmp_reads:(Model.jmp_reads ~abi)
+    ?written ?resolved ?sub_lookup sub init
 
 (* Watcher-shell driver shared by corpus_watch and precision_probe.
    Each probe owns its per-sub report; this seam owns project loading and
@@ -140,7 +148,7 @@ let all_subs (prog : program term) : sub term list =
    as production arms them.  Every probe's fixpoint flow is this. *)
 let run_sub_fixpoint ?(images = []) (sub : sub term) : Vsa.vsa_sol =
   Vsa.with_images images (fun () ->
-      Vsa.static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
+      static_graph_vsa ~abi:Hike_abi.x86_64_sysv sub
         (Vsa.init_sol ~abi:Hike_abi.x86_64_sysv sub))
 
 let analyze_and_fixpoint (sub : sub term) : sub term * Vsa.vsa_sol =
@@ -210,17 +218,16 @@ let blk_bil_to_string (b : blk term) : string =
   in
   Printf.sprintf "-- blk %s\n%s\n%s" (Tid.name (Term.tid b)) defs jmps
 
-(* The per-def stack kinds through the seam: the address's denotation
-   at the def's own before-env, classified in place (the extraction's
-   per-def rule; no merge). *)
+(* Each stack kind comes from its def's before-state address denotation;
+   definitions are classified independently. *)
 let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
-    Vsa.Test_seam.Cbat_extraction.kind Tid.Map.t =
+    Ws.kind Tid.Map.t =
   (* The seam reads the defs' Env Tags: walk the sweep's stamped sub. *)
   let _, sub = Vsa.stamp_envs_of_sol ~sol sub in
   let kind_of blk d =
     let open Base.Option in
     Base.Option.bind
-      (Vsa.Test_seam.Cbat_extraction.stack_address_of_rhs (Def.rhs d))
+      (Vsa.Test_seam.mem_addr_of (Def.rhs d))
       ~f:(fun addr ->
         Result.to_option
           (Vsa.denote_exp_at
@@ -228,8 +235,8 @@ let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
              ~blk ~def:d addr))
     >>= fun ws ->
     if Ws.is_bottom ws || Ws.in_stack_segment ws then
-      Some (Vsa.Test_seam.Cbat_extraction.caller_split (Vsa.Test_seam.Cbat_extraction.classify ws))
-    else if Ws.is_top ws then Some Vsa.Test_seam.Cbat_extraction.unbounded_span
+      Some (Ws.caller_split (Ws.classify ws))
+    else if Ws.is_top ws then Some Ws.unbounded_span
     else None
   in
   Term.enum blk_t sub
@@ -267,13 +274,13 @@ let cardn_bucket_name : cardn_bucket -> string = function
   | `B9_64 -> "b9_64"
   | `B65p -> "b65p"
 
-let vsa_kind_to_string (k : Vsa.Test_seam.Cbat_extraction.kind) : string =
+let vsa_kind_to_string (k : Ws.kind) : string =
   match k with
-  | Vsa.Test_seam.Cbat_extraction.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
-  | Vsa.Test_seam.Cbat_extraction.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
-  | Vsa.Test_seam.Cbat_extraction.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
-  | Vsa.Test_seam.Cbat_extraction.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
-  | Vsa.Test_seam.Cbat_extraction.Dead -> "Dead"
+  | Ws.Range (lo, hi) -> Printf.sprintf "Range(%Ld,%Ld)" lo hi
+  | Ws.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
+  | Ws.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
+  | Ws.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
+  | Ws.Dead -> "Dead"
 
 (* Value-set of each named var in the state. *)
 let state_summary (vars : var list) (st : AI.t) : string =

@@ -569,7 +569,7 @@ let tests : unit Alcotest.test list =
         let a2 = straight_sub "pr_a2_retaddr" [ a2_ld ] in
         let a2_retaddr =
           let sol =
-            Cbat_vsa.static_graph_vsa
+            static_graph_vsa
               ~abi:Hike_abi.x86_64_sysv
               ~resolved:Tid.Map.empty a2
               (Cbat_vsa.init_sol ~abi:Hike_abi.x86_64_sysv a2)

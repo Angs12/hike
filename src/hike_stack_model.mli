@@ -104,16 +104,20 @@ val load_mem_vars : exp -> Var.Set.t
 val addr_of_rhs : exp -> (exp * Size.t) option
 val store_data_of_rhs : exp -> exp option
 
-(* The vars a term reads — the one home; every consumer of a read set
-   derives it here.  [jmp_reads] is the operand reads plus the kind's
-   boundary reads (a ret: the return registers and SP; a call: the
-   parameter registers and SP). *)
+(* BAP term reads plus ABI transfer inputs: calls read parameter registers
+   and SP; returns read SP, while return values are sub outputs. *)
 val def_reads : def term -> Var.Set.t
 val phi_reads : phi term -> Var.Set.t
+val phi_reads_from : phi term -> Tid.t -> Var.Set.t
 val jmp_operand_reads : jmp term -> Var.Set.t
 val jmp_boundary_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
+val jmp_target_reads : jmp term -> Var.Set.t
+val def_writes : def term -> Var.Set.t
+val phi_writes : phi term -> Var.Set.t
 val blk_free_vars : blk term -> Var.Set.t
+val blk_reads : abi:Abi.t -> blk term -> Var.Set.t
+val blk_defines : var -> blk term -> bool
 
 (* The value vars of an exp (memory excluded); the memory accesses'
    address vars; the data reads (value minus address). *)
@@ -212,7 +216,8 @@ val is_sec_comp_mem : var -> bool
 val sanitize_tid_name : string -> string
 
 val sub_map : program term -> sub term Tid.Map.t
-val sub_reads : sub term -> Var.Set.t
+val sub_reads : abi:Abi.t -> sub term -> Var.Set.t
+val sub_operand_reads : sub term -> Var.Set.t
 
 val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
 

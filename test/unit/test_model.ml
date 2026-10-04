@@ -559,6 +559,53 @@ let tests : unit Alcotest.test list =
         check "MOD-40f: a plain in-band word is not window"
           (not (is_win (Ws.singleton (Cbat_word.of_int64 ~width:64
                           (Int64.add entry 16L))))));
+
+    pin "MOD-41"
+      "term read sets use BAP terms and include ABI transfer reads"
+      (fun () ->
+        let module Model = Hike.Stack_model in
+        let abi = Hike.Abi.x86_64_sysv in
+        let rdi = Var.base (Base.List.hd_exn abi.Abi.int_param_regs) in
+        let rax = named "RAX" in
+        let rbx = named "RBX" in
+        let dst = named "term_phi_dst" in
+        let d = Def.create rdi (Bil.Var rax) in
+        let p1 = Tid.create () in
+        let p2 = Tid.create () in
+        let phi =
+          Phi.of_list dst [ (p1, Bil.Var rax); (p2, Bil.Var rbx) ]
+        in
+        let call =
+          Jmp.create
+            (Call (Call.create ~target:(Direct (Tid.create ())) ()))
+        in
+        let ret = Hike__Hike_return.create () in
+        let call_reads =
+          Core.Set.of_list
+            (module Var) (Hike.Abi.param_regs abi @ [ abi.Abi.sp ])
+        in
+        let block =
+          let b = Blk.Builder.create () in
+          Blk.Builder.add_def b d;
+          ignore (Blk.Builder.add_jmp b call);
+          Blk.Builder.result b
+        in
+        check "MOD-41 def/phi terms use BAP accessors"
+          (Core.Set.equal (Model.def_reads d) (Var.Set.singleton rax)
+          && Core.Set.equal (Model.def_writes d) (Var.Set.singleton rdi)
+          && Core.Set.equal (Model.phi_reads phi)
+               (Core.Set.of_list (module Var) [ rax; rbx ])
+          && Core.Set.equal (Model.phi_reads_from phi p1)
+               (Var.Set.singleton rax)
+          && Core.Set.equal (Model.phi_writes phi) (Var.Set.singleton dst));
+        check "MOD-41 calls include implicit ABI reads"
+          (Core.Set.equal (Model.jmp_reads ~abi call) call_reads);
+        check "MOD-41 returns include implicit ABI reads"
+          (Core.Set.equal (Model.jmp_reads ~abi ret)
+             (Var.Set.singleton abi.Abi.sp));
+        check "MOD-41 block uses respect local definitions"
+          (Core.Set.equal (Model.blk_free_vars block)
+             (Var.Set.singleton rax)));
   ]
 
 let () = run "model" tests

@@ -116,7 +116,7 @@ let round_trip (offs : int64) : Origin.t option =
   let sub = straight_sub "rt" [ store; load ] in
   let entry = anchored_entry () in
   let sol =
-    Vsa.static_graph_vsa ~abi sub
+    static_graph_vsa ~abi sub
       (Vsa.init_sol ~abi ~entry sub)
   in
   let _, stamped = Vsa.stamp_envs_of_sol ~sol sub in
@@ -187,7 +187,7 @@ let vla_fixture ~(frame : int) ~(sizes : int64 list)
   in
   let entry = anchored_entry () in
   let sol =
-    Vsa.static_graph_vsa ~abi sub
+    static_graph_vsa ~abi sub
       (Vsa.init_sol ~abi ~entry sub)
   in
   let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub in

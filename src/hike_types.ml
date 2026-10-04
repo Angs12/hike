@@ -65,9 +65,11 @@ let tag_lane (a : Arg.t) : Arg.t =
 
 (* The sub's entry reads: SSA index-0 reads, or pre-SSA liveness over
    the BIR's explicit edges. *)
-let free_regs_of_sub (sub : sub term) : var list =
-  if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa sub
-  else Hike_split_blocks.free_regs sub
+let free_regs_of_sub ~(target : Bap_core_theory.Theory.Target.t)
+    (sub : sub term) : var list =
+  let abi = Abi.of_target target in
+  if Hike_ssa.is_ssa sub then Hike_ssa.free_regs_ssa ~abi sub
+  else Hike_split_blocks.free_regs ~abi sub
 
 let compute_sub_sig ~(free_vars : var list)
     (target : Bap_core_theory.Theory.Target.t)
@@ -131,8 +133,6 @@ let compute_sub_sig ~(free_vars : var list)
          (promoted slots included). *)
       let arg_terms = Term.enum arg_t sub |> Base.Sequence.to_list in
       let args =
-        (* Non-parameters sort after every convention register; the
-           register list is hoisted out of the sort comparator. *)
         let nonparam_rank = 100 in
         let param_regs = Abi.param_regs abi in
         let rank_of_var (v : var) : int * string =
@@ -144,15 +144,20 @@ let compute_sub_sig ~(free_vars : var list)
         Base.List.filter free_vars ~f:(fun reg ->
             let n = Var.name (Var.base reg) in
             let is_callee_saved = Abi.is_callee_saved abi reg in
-            (* Filters non-parameter lanes: callee-saved regs, the
-               self-basing TLS base, the emitter's own promoted
-               names. *)
+            let is_nonparam_vector =
+              match Var.typ reg with
+              | Type.Imm bits ->
+                bits > Model.word_bits abi.Abi.word
+                && not (Abi.is_vector_param_reg abi reg)
+              | _ -> false
+            in
             not
               (Var.same reg (Abi.sp target)
               || Var.same reg abi.thread_pointer
               || is_callee_saved
               || Abi.is_env_reg abi reg
               || Abi.is_flag_reg abi reg
+              || is_nonparam_vector
               || Hike_abi.is_intrinsic_name n
               || Model.is_arg_slot (Var.base reg)
               || Model.is_call_arg (Var.base reg)
@@ -237,7 +242,7 @@ let is_plt_trampoline_shape ~(target : Bap_core_theory.Theory.Target.t)
             | _ -> false))
   in
   let reads_only_return =
-    Base.List.for_all (free_regs_of_sub sub) ~f:(fun reg ->
+    Core.Set.for_all (Model.sub_operand_reads sub) ~f:(fun reg ->
         Abi.is_sp abi (Var.base reg) || Abi.is_return_reg abi reg)
   in
   self_targeted && has_call && reads_only_return
@@ -251,7 +256,7 @@ let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
       Model.set_plt_trampoline sub
     else sub
   in
-  let free_vars = free_regs_of_sub sub in
+  let free_vars = free_regs_of_sub ~target sub in
   let rets, args = compute_sub_sig ~free_vars target sub in
   Model.set_sig sub (rets @ args)
 
@@ -408,37 +413,23 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
              | Ok ws when is_stack_addr ws -> add_value acc d
              | _ -> acc)
   in
-  let transfer tid ptrs =
-    match Term.find blk_t sub tid with
-    | None -> ptrs
-    | Some blk ->
-        let ptrs = Core.Set.union ptrs (seed_of blk) in
-        let defs = Term.enum def_t blk |> Seq.to_list in
-        (* The block's defs reach a local fixpoint, so a use is found
-           however the defs are ordered. *)
-        let rec fold ptrs =
-          let ptrs' =
-            Base.List.fold defs ~init:ptrs ~f:(fun acc d ->
-                if shape_ptr acc (Def.rhs d) then add_value acc d else acc)
-          in
-          if Core.Set.equal ptrs ptrs' then ptrs' else fold ptrs'
-        in
-        let ptrs = fold ptrs in
-        Term.enum phi_t blk
-        |> Seq.fold ~init:ptrs ~f:(fun acc p ->
-               let inc =
-                 Phi.values p
-                 |> Seq.exists ~f:(fun (_, e) ->
-                        match e with
-                        | Bil.Var v ->
-                            Core.Set.mem acc v
-                            || Core.Set.mem acc (Var.base v)
-                        | _ -> false)
-               in
-               if inc && is_value_var (Phi.lhs p) then
-                 Core.Set.add acc (Phi.lhs p)
-               else acc)
+  let def ptrs d =
+    if shape_ptr ptrs (Def.rhs d) then add_value ptrs d else ptrs
   in
+  let phi ptrs p =
+    let inc =
+      Phi.values p
+      |> Seq.exists ~f:(fun (_, e) ->
+             match e with
+             | Bil.Var v ->
+                 Core.Set.mem ptrs v || Core.Set.mem ptrs (Var.base v)
+             | _ -> false)
+    in
+    if inc && is_value_var (Phi.lhs p) then
+      Core.Set.add ptrs (Phi.lhs p)
+    else ptrs
+  in
+  let jmp ptrs _ = ptrs in
   let base_map =
     Term.enum blk_t sub
     |> Seq.fold
@@ -446,22 +437,18 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
          ~f:(fun m blk ->
            Core.Map.set m ~key:(Term.tid blk) ~data:(seed_of blk))
   in
-  (* The sub's CFG, straight from the BIR (every edge is an explicit jmp:
-     the completion writes the guards' fallthroughs). *)
-  let g = Sub.to_graph sub in
-  let sol =
-    Graphlib.Std.Graphlib.fixpoint
-      (module Graphs.Tid)
-      ~start:Graphs.Tid.start
-      ~init:(Graphlib.Std.Solution.create base_map Var.Set.empty)
-      ~equal:Core.Set.equal ~merge:Core.Set.union ~f:transfer g
+  let graph = Sub.to_graph sub in
+  let flow =
+    Hike_bir_flow.run ~graph ~sub ~rev:false ~initial:base_map
+      ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
+      ~def ~phi ~jmp
   in
   let ptrs =
     Term.enum blk_t sub
     |> Seq.fold ~init:extra ~f:(fun acc blk ->
-           let tid = Term.tid blk in
            Core.Set.union acc
-             (transfer tid (Graphlib.Std.Solution.get sol tid)))
+             (Option.value (Core.Map.find flow.after (Term.tid blk))
+                ~default:Var.Set.empty))
   in
   (* The storage of each pointer def: the denotation's, else inherited
      from a pointer operand. *)
@@ -534,45 +521,6 @@ let sub_of_program (prog : program term) : sub term Tid.Map.t =
   Term.enum sub_t prog
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
       Core.Map.set m ~key:(Term.tid s) ~data:s)
-
-(* The callee's In lanes: its own signature, or the ABI integer
-   parameters for an extern. *)
-let callee_lanes ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
-    (t : tid) : Arg.t list =
-  match Core.Map.find sub_of t with
-  | Some callee -> Hike_stack_model.sig_args callee
-  | None ->
-      Base.List.map facts.Hike_kb.abi.Hike_abi.int_param_regs
-        ~f:(fun reg -> Arg.create ~intent:In reg (Var reg))
-
-(* A callee parameter is a pointer when any caller passes a stack or VLA
-   address at that lane (NULL counts as an address; a genuine address/
-   integer mix is a buggy program and is typed a pointer). *)
-let param_kinds ~(facts : Hike_kb.facts) ~(sub_of : sub term Tid.Map.t)
-    (prog : program term) : Var.Set.t Tid.Map.t =
-  let add acc t v =
-    Core.Map.update acc t ~f:(function
-        | None -> Var.Set.singleton v
-        | Some s -> Core.Set.add s v)
-  in
-  Term.enum sub_t prog
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc caller ->
-      Term.enum blk_t caller
-      |> Seq.fold ~init:acc ~f:(fun acc blk ->
-          Term.enum jmp_t blk
-          |> Seq.fold ~init:acc ~f:(fun acc j ->
-              match Jmp.kind j with
-              | Call c -> (
-                  match Call.target c with
-                  | Direct t ->
-                      Base.List.fold (callee_lanes ~facts ~sub_of t)
-                        ~init:acc ~f:(fun acc a ->
-                          if Hike_stack_model.is_ret a then acc
-                          else if ptr_kind_of ~facts ~blk (Arg.rhs a) then
-                            add acc t (Arg.lhs a)
-                          else acc)
-                  | Indirect _ -> acc)
-              | _ -> acc)))
 
 (* The whole-program pointer-kind fixpoint.  A value is a pointer when
    the VSA proves its denotation is a stack/VLA address, or it flows
@@ -846,21 +794,8 @@ let run (proj : Project.t) : Project.t =
                   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
                          Term.enum jmp_t blk
                          |> Seq.fold ~init:acc ~f:(fun acc j ->
-                                match Jmp.kind j with
-                                | Goto (Indirect e) | Ret (Indirect e) ->
-                                  with_base (Core.Set.union acc (Exp.free_vars e))
-                                | Call c -> (
-                                    let acc =
-                                      match Call.target c with
-                                      | Indirect e ->
-                                        Core.Set.union acc (Exp.free_vars e)
-                                      | _ -> acc
-                                    in
-                                    match Call.return c with
-                                    | Some (Indirect e) ->
-                                      Core.Set.union acc (Exp.free_vars e)
-                                    | _ -> acc)
-                                | _ -> acc))
+                                Core.Set.union acc
+                                  (Model.jmp_target_reads j)))
                 in
                 let target_vars = with_base target_vars in
                 let ptr_vars =

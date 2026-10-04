@@ -1,0 +1,20 @@
+(library
+ (name clp_bench_rows)
+ (modules clp_bench_rows)
+ (libraries probe_common hike bap bap-core-theory bap-main
+  cbat_vsa cbat_vsa_domain core graphlib threads unix)
+ (flags :standard -g))
+
+(executables
+ (names clp_bench env_footprint memmap_bench stage_timer subtimes var_key_bench)
+ (modules clp_bench env_footprint memmap_bench stage_timer subtimes var_key_bench)
+ (libraries clp_bench_rows probe_common hike bap bap-core-theory bap-main llvm
+  cbat_vsa cbat_vsa_domain core graphlib threads unix)
+ (flags :standard -g)
+ (preprocess (pps ppx_bap)))
+
+(test
+ (name clp_tripwire)
+ (modules clp_tripwire)
+ (libraries clp_bench_rows probe_common)
+ (flags :standard -g))

@@ -6,7 +6,7 @@ open Bap_core_theory
     target:Theory.Target.t -> program term -> program term
 
   (** The input lanes of an SSA sub: its index-0 reads. *)
-  val free_regs_ssa : sub term -> var list
+  val free_regs_ssa : abi:Hike_abi.t -> sub term -> var list
 
   (** The sub's SSA mark. *)
   val is_ssa : sub term -> bool

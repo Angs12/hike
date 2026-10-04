@@ -1,5 +1,5 @@
 (* Precision measurement driver: per-sub fixpoint, TSV precision buckets + BIN rollup.
-   Usage: dune exec test/probe/precision_probe.exe -- <binary> [<binary> ...]
+   Usage: dune exec test/probe/research/precision_probe.exe -- <binary> [<binary> ...]
    Gate-free: every def is denoted; entry is [Vsa.init_sol sub] (AI.top).
    Columns: binary, sub, sub_ms, 8 def, 6 ld, 5 ldstk, 5 ldstk_w, 5 ldstk_sh,
    5 defstk_sh (see [row_of]).

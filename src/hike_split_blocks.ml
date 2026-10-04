@@ -90,49 +90,12 @@ let split_sub (sub : sub term) : sub term =
 let normalize (prog : program term) : program term =
   Term.map sub_t prog ~f:split_sub
 
-(* The rendered CFG's edge set: every jmp target, explicit in the BIR.
-   The liveness and SSA passes read the CFG from here — one successor
-   relation, no term-order fallthrough. *)
-let succs_of_sub (sub : sub term) : Tid.t list Tid.Map.t =
-  Term.enum blk_t sub
-  |> Seq.fold ~init:Tid.Map.empty ~f:(fun m blk ->
-      let succs =
-        Term.enum jmp_t blk
-        |> Seq.filter_map ~f:(fun j ->
-               match Jmp.kind j with
-               | Goto (Direct tid) | Int (_, tid) -> Some tid
-               | Call c -> (
-                   match Call.return c with
-                   | Some (Direct tid) -> Some tid
-                   | _ -> None)
-               | _ -> None)
-        |> Seq.to_list
-      in
-      Core.Map.set m ~key:(Term.tid blk) ~data:succs)
-
 (* The sub's free registers, read at its own entries over the BIR's
    explicit edges.  A split piece carries no defs; its entering edge is
    the previous piece's explicit Goto, so liveness does not transport a
    target's live set to the sub entry. *)
-let free_regs (sub : sub term) : var list =
+let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
   let blks = Term.enum blk_t sub |> Seq.to_list in
-  let succs = succs_of_sub sub in
-  let uses_and_defs (blk : blk term) =
-    let defs =
-      Blk.elts blk
-      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc elt ->
-             match elt with
-             | `Def d -> Core.Set.add acc (Def.lhs d)
-             | `Phi p -> Core.Set.add acc (Phi.lhs p)
-             | _ -> acc)
-    in
-    (Model.blk_free_vars blk, defs)
-  in
-  let trans =
-    Base.List.fold blks ~init:Tid.Map.empty ~f:(fun m blk ->
-        let uses, defs = uses_and_defs blk in
-        Core.Map.set m ~key:(Term.tid blk) ~data:(uses, defs))
-  in
   (* The exit seed mirrors BAP's liveness: outgoing lanes read their
      value at the return. *)
   let exit_seed =
@@ -143,49 +106,38 @@ let free_regs (sub : sub term) : var list =
                Core.Set.union acc (Exp.free_vars (Arg.rhs arg))
            | _ -> acc)
   in
-  let has_succs tid =
-    match Core.Map.find succs tid with
-    | Some (_ :: _) -> true
-    | _ -> false
+  let def live d =
+    Core.Set.union
+      (Core.Set.diff live (Model.def_writes d))
+      (Model.def_reads d)
   in
-  let live_in = ref Tid.Map.empty in
-  let get_in tid =
-    Core.Map.find !(live_in) tid |> Option.value ~default:Var.Set.empty
+  let phi live p =
+    Core.Set.union (Core.Set.diff live (Model.phi_writes p))
+      (Model.phi_reads p)
   in
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    Base.List.iter blks ~f:(fun blk ->
-        let tid = Term.tid blk in
-        let out =
-          if has_succs tid then
-            Core.Map.find succs tid
-            |> Option.value ~default:[]
-            |> Base.List.fold ~init:Var.Set.empty
-                 ~f:(fun acc s -> Core.Set.union acc (get_in s))
-          else exit_seed
-        in
-        let uses, defs =
-          Core.Map.find trans tid |> Option.value ~default:(Var.Set.empty, Var.Set.empty)
-        in
-        let inn =
-          Core.Set.union uses (Core.Set.diff out defs)
-        in
-        if not (Core.Set.equal inn (get_in tid)) then begin
-          live_in := Core.Map.set !(live_in) ~key:tid ~data:inn;
-          changed := true
-        end)
-  done;
-  (* Roots: no in-edge under the rendered edge set (dead blocks join
-     the real entry, exactly as the BAP glue does). *)
-  let with_pred =
-    Core.Map.fold succs ~init:Tid.Set.empty ~f:(fun ~key:_ ~data acc ->
-        Base.List.fold data ~init:acc ~f:(fun acc t -> Core.Set.add acc t))
+  let jmp live j = Core.Set.union live (Model.jmp_reads ~abi j) in
+  let graph = Sub.to_graph sub in
+  let block_ids =
+    Base.List.map blks ~f:Term.tid |> Core.Set.of_list (module Tid)
+  in
+  let live =
+    Hike_bir_flow.run ~graph ~sub ~rev:true
+      ~initial:(Tid.Map.singleton Graphs.Tid.exit exit_seed)
+      ~default:Var.Set.empty ~equal:Core.Set.equal ~merge:Core.Set.union
+      ~def ~phi ~jmp
   in
   Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
       let tid = Term.tid blk in
-      if Core.Set.mem with_pred tid then acc
-      else Core.Set.union acc (get_in tid))
+      let has_block_pred =
+        Graphs.Tid.Node.preds tid graph
+        |> Seq.exists ~f:(Core.Set.mem block_ids)
+      in
+      if has_block_pred then acc
+      else
+        Core.Set.union acc
+          (Option.value (Core.Map.find live.before tid)
+             ~default:Var.Set.empty))
   |> Core.Set.filter ~f:(fun v ->
-         match Var.typ v with Type.Mem _ -> false | _ -> true)
+         not (Hike_abi.is_sp abi (Var.base v))
+         && match Var.typ v with Type.Mem _ -> false | _ -> true)
   |> Core.Set.to_list
