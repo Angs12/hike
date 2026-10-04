@@ -614,7 +614,8 @@ let pass_vsa proj =
           ~f:(fun ~key ~data m' -> Core.Map.set m' ~key ~data))
   in
   Hike_kb.install
-    (Hike_kb.build ~block_envs:all_envs ~block_addrs ~target ~lookup);
+    { (Hike_kb.build ~block_envs:all_envs ~block_addrs ~target ~lookup) with
+      Hike_kb.sub_addrs; images; foreign_slots = linker_slots };
   let facts = Hike_kb.facts () in
   (* The solved program: the loop's lift with every sub replaced by its
      solved rewrite.  Nothing is appended — the program already carries
@@ -1165,15 +1166,9 @@ let pass_attrib proj =
    the dead values only the versioned defs and phis distinguish are
    removable.  The escape roots ride the facts from the attribution. *)
 let pass_dce proj =
-  let facts = Hike_kb.facts () in
-  let target = facts.target in
+  let target = (Hike_kb.facts ()).target in
   Project.map_program proj ~f:(fun prog ->
-      Term.map sub_t prog ~f:(fun sub ->
-          let roots =
-            Core.Map.find facts.escape_roots (Term.tid sub)
-            |> Option.value ~default:Var.Set.empty
-          in
-          Hike_dce.dce ~roots ~target sub))
+      Term.map sub_t prog ~f:(Hike_dce.dce ~target))
 
 let pass_convlir ~output proj = convert_binary output proj
 

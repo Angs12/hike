@@ -411,13 +411,19 @@ let phi_reads_from (p : phi term) (pred : Tid.t) : Var.Set.t =
 
 let jmp_operand_reads (j : jmp term) : Var.Set.t = Jmp.free_vars j
 
+(* The boundary reads a jmp's kind consumes with no operand naming
+   them: a return edge (the canonical return reads as a call) the ABI
+   return registers and SP (the return-address pop); a call the
+   parameter registers, the ABI return registers the call produces, and
+   SP (the return-address push). *)
 let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   match Jmp.kind j with
-  | Ret _ -> Var.Set.singleton abi.sp
+  | Ret _ -> Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
   | Call _ when Hike_return.is_jmp j ->
-    Var.Set.singleton abi.sp
+    Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
   | Call _ ->
-    Core.Set.of_list (module Var) (Abi.param_regs abi @ [ abi.sp ])
+    Core.Set.of_list (module Var)
+      (Abi.param_regs abi @ abi.return_regs @ [ abi.sp ])
   | _ -> Var.Set.empty
 
 let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =

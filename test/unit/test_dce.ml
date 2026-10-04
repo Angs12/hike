@@ -83,12 +83,13 @@ let tests : unit Alcotest.test list =
     (* D2: always-keeps — return/param regs, memory writes, intrinsic vars
        survive unread. *)
     pin "DCE-03"
-      "ABI register defs, memory writes, and intrinsic interface vars always survive"
+      "an ABI register def survives through the jump's boundary reads - a ret        reads the return registers, a call the parameter registers; an unread        memory write and an unread intrinsic temp die"
       (fun () ->
         let rax = v64 "RAX" in
         let rdi = v64 "RDI" in
         let m = memv "d2_m" in
         let x0 = v64 "intrinsic:x0" in
+        let callee_tid = Tid.for_name "d2_callee" in
         let sub, _ =
           sub_of "d2_keeps"
             [ [ Def.create rax (Bil.Int (bw64 1));
@@ -101,18 +102,24 @@ let tests : unit Alcotest.test list =
                        LittleEndian,
                        `r64 ));
                 Def.create x0 (Bil.Int (bw64 4)) ],
-              [] ]
+              [ (0,
+                 fun _ ->
+                   Jmp.create
+                     (Call (Call.create ~target:(Direct callee_tid) ())));
+                (0, mk_ret) ] ]
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let sub' =
+          Hike.Dce.dce
+            ~target:(Theory.Target.of_string "x86_64-gnu-elf")
+            sub
+        in
         let lhs_set =
           Base.List.map (dce_defs sub') ~f:(fun d -> Var.name (Var.base (Def.lhs d)))
         in
         check "DCE-03"
-          (List.length lhs_set = 4
+          (List.length lhs_set = 2
           && Base.List.mem lhs_set ~equal:String.equal "RAX"
-          && Base.List.mem lhs_set ~equal:String.equal "RDI"
-          && Base.List.mem lhs_set ~equal:String.equal "d2_m"
-          && Base.List.mem lhs_set ~equal:String.equal "intrinsic:x0"));
+          && Base.List.mem lhs_set ~equal:String.equal "RDI"));
 
     (* D3: two-tier region-mem rule — a fissioned store chain dies iff no Load
        roots it. *)
@@ -205,11 +212,12 @@ let tests : unit Alcotest.test list =
                (Def.lhs (match dce_defs sub' with d :: _ -> d | [] -> assert false))
                x));
 
-    (* D6: the escape root — a never-loaded region-mem store chain whose storage
-       carries escaped bytes survives the sweep; its reader is never a def of
-       this sub (another world reads the raw pointer). *)
+    (* D6: the reads-only sweep — a never-read region-mem store chain
+       dies; no in-sub read and no jump's boundary read names its
+       storage.  (An escaping store survives through the call boundary
+       reads — the recorded increment on this rule.) *)
     pin "DCE-07"
-      "a never-loaded region-mem store chain survives when rooted as escape storage"
+      "a never-read region-mem store chain is swept (the reads-only rule)"
       (fun () ->
         let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
         let base = v64 "d_base" in
@@ -218,9 +226,9 @@ let tests : unit Alcotest.test list =
             [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
         in
         let sub' =
-          Hike.Dce.dce ~roots:(Var.Set.singleton sm) ~target:Theory.Target.unknown sub
+          Hike.Dce.dce ~target:Theory.Target.unknown sub
         in
-        check "DCE-07" (List.length (dce_defs sub') = 2));
+        check "DCE-07" (List.length (dce_defs sub') = 0));
 
     (* D7: the phi arm — a phi whose result no survivor reads is swept,
        and its operands' defs cascade with it.  Under SSA a dead phi's
@@ -274,9 +282,8 @@ let tests : unit Alcotest.test list =
         in
         check "DCE-08" (phi_present && phi_gone && v_gone));
 
-    (* D8: the escape roots cross the pass boundary on the facts record
-       (the attribution computes them; the sweep's own pass reads them). *)
-    pin "DCE-09" "an escape root rides the facts to the sweep's own pass"
+    (* D8: attribution still records escape roots on the facts record. *)
+    pin "DCE-09" "an escape root rides the attribution facts record"
       (fun () ->
         let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
         let base = v64 "d9_base" in
@@ -293,12 +300,8 @@ let tests : unit Alcotest.test list =
           Core.Map.find facts.Hike.Kb.escape_roots (Term.tid sub)
           |> Option.value ~default:Var.Set.empty
         in
-        let sub' =
-          Hike.Dce.dce ~roots:carried ~target:Theory.Target.unknown sub
-        in
         check "DCE-09"
-          (Var.Set.equal carried (Var.Set.singleton sm)
-          && List.length (dce_defs sub') = 2));
+          (Var.Set.equal carried (Var.Set.singleton sm)));
   ]
 
 let () = run "dce" tests

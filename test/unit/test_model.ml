@@ -582,7 +582,8 @@ let tests : unit Alcotest.test list =
         let ret = Hike__Hike_return.create () in
         let call_reads =
           Core.Set.of_list
-            (module Var) (Hike.Abi.param_regs abi @ [ abi.Abi.sp ])
+            (module Var)
+            (Hike.Abi.param_regs abi @ abi.Abi.return_regs @ [ abi.Abi.sp ])
         in
         let block =
           let b = Blk.Builder.create () in
@@ -602,7 +603,8 @@ let tests : unit Alcotest.test list =
           (Core.Set.equal (Model.jmp_reads ~abi call) call_reads);
         check "MOD-41 returns include implicit ABI reads"
           (Core.Set.equal (Model.jmp_reads ~abi ret)
-             (Var.Set.singleton abi.Abi.sp));
+             (Core.Set.of_list (module Var)
+                (abi.Abi.return_regs @ [ abi.Abi.sp ])));
         check "MOD-41 block uses respect local definitions"
           (Core.Set.equal (Model.blk_free_vars block)
              (Var.Set.singleton rax)));

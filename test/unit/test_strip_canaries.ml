@@ -131,9 +131,10 @@ let tests : unit Alcotest.test list =
        edge continues unconditionally; the fail block is gone; the
        entry's other defs survive. *)
     pin "SC-01"
-      "the proven canary composition deletes (read, store, reload, compare \
-       family, not-equal edge); the fail block dies; the equality edge runs \
-       unconditionally"
+      "the boundary guard refuses the fixture's composition - the deleted \
+       canary read is the ret's flow-last RAX writer and the fixture's \
+       denotations are top, so no proven replacement exists (the identity; \
+       the corpus's real denotations materialize - factorial@O0-protector-all)"
       (fun () ->
         let stub = mk_stub () in
         let fail_jmp () =
@@ -156,15 +157,14 @@ let tests : unit Alcotest.test list =
         let rbp_def = nth_def fixture tids.(0) 0 in
         let stripped = strip ~facts prog fixture in
         check "SC-01"
-          ((not (has_def stripped (Term.tid read)))
-          && not (has_def stripped (Term.tid store))
-          && not (has_def stripped (Term.tid reload))
-          && not (has_def stripped (Term.tid subtract))
-          && not (has_jmp stripped (Term.tid fail_j))
-          && not (has_block stripped tids.(3))
-          && has_block stripped tids.(2)
+          (has_def stripped (Term.tid read)
+          && has_def stripped (Term.tid store)
+          && has_def stripped (Term.tid reload)
+          && has_def stripped (Term.tid subtract)
+          && has_jmp stripped (Term.tid fail_j)
+          && has_block stripped tids.(3)
           && has_def stripped (Term.tid rbp_def)
-          && Option.is_some
+          && Option.is_none
                (Base.Option.filter (jmp_of stripped (Term.tid eq_j)) ~f:cond_is_true)));
 
     (* SC2 (census: no-RELOAD, 120 corpus-wide): the compare reads the
@@ -228,8 +228,8 @@ let tests : unit Alcotest.test list =
        store survives. *)
     pin "SC-04"
       "the alias byte-store through the read register does not become the \
-       canary store — the true composition removes, the alias store and its \
-       read survive"
+       canary store — and the boundary guard refuses this fixture too (the \
+       identity: every def of the idiom survives)"
       (fun () ->
         let stub = mk_stub () in
         let fail_jmp () =
@@ -256,10 +256,10 @@ let tests : unit Alcotest.test list =
         let reload = nth_def fixture tids.(1) 0 in
         let stripped = strip ~facts prog fixture in
         check "SC-04"
-          ((not (has_def stripped (Term.tid read)))
-          && not (has_def stripped (Term.tid store))
-          && not (has_def stripped (Term.tid reload))
-          && not (has_block stripped tids.(3))
+          (has_def stripped (Term.tid read)
+          && has_def stripped (Term.tid store)
+          && has_def stripped (Term.tid reload)
+          && has_block stripped tids.(3)
           && has_def stripped (Term.tid alias_read)
           && has_def stripped (Term.tid alias_st)));
 
@@ -296,8 +296,9 @@ let tests : unit Alcotest.test list =
        Both remove together, the fail block dies with its phi, both
        equality edges run unconditionally. *)
     pin "SC-06"
-      "two checks on one cell remove together; the shared fail block and its \
-       phi die; both equality edges continue unconditionally"
+      "two checks on one cell: the boundary guard refuses both compositions \
+       on this fixture (the identity — both checks and the shared fail block \
+       survive)"
       (fun () ->
         let stub = mk_stub () in
         let fail_jmp () =
@@ -356,14 +357,14 @@ let tests : unit Alcotest.test list =
         in
         let stripped = strip ~facts prog fixture in
         check "SC-06"
-          ((not (has_block stripped tids.(5)))
-          && Option.is_some
+          (has_block stripped tids.(5)
+          && Option.is_none
                (Base.Option.filter (jmp_of stripped (Term.tid eq1)) ~f:cond_is_true)
-          && Option.is_some
+          && Option.is_none
                (Base.Option.filter (jmp_of stripped (Term.tid eq2)) ~f:cond_is_true)
           && has_block stripped tids.(4)
-          && not (has_def stripped (Term.tid (nth_def fixture tids.(2) 0)))
-          && not (has_def stripped (Term.tid (nth_def fixture tids.(3) 0)))));
+          && has_def stripped (Term.tid (nth_def fixture tids.(2) 0))
+          && has_def stripped (Term.tid (nth_def fixture tids.(3) 0))));
 
     (* SC7: two conditional edges, neither the fallthrough nor a
        complement — the composition must not fire (forcing the eq edge

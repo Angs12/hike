@@ -1,7 +1,9 @@
 open Bap_core_theory
 
-(** [dce ?roots ~target sub] sweeps unused defs; [roots] names storage mem
-    vars whose bytes escape this sub — their stores survive the sweep. *)
-val dce : ?roots:Bap.Std.Var.Set.t ->
-  target:Theory.Target.t -> Bap.Std.sub Bap.Std.term ->
+(** [dce ~target sub] sweeps dead defs and phis: the roots are every
+    jump's reads — its operand expressions plus the kind's ABI boundary
+    reads (a ret consumes the return registers and SP, a call the
+    parameter registers and SP) — and a def or phi is live iff its lhs
+    is read by a live node, to a fixpoint. *)
+val dce : target:Theory.Target.t -> Bap.Std.sub Bap.Std.term ->
   Bap.Std.sub Bap.Std.term
