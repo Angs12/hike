@@ -632,6 +632,7 @@ type section_image = Cbat_transfer.section_image = {
   img_lo : int64;
   img_hi : int64;
   img_bytes : Bytes.t;
+  img_slots : Int64.Set.t;
 }
 
 let set_section_images = Cbat_transfer.set_section_images

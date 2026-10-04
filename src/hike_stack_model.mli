@@ -59,9 +59,6 @@ val escape_extent :
   entry:int64 -> Cbat_vsa.WordSet.t -> (int64 * int64) option
 val key_extent : Cbat_vsa.WordSet.t -> (Cbat_word.t * Cbat_word.t) option
 
-val singleton_pair :
-  Cbat_word.t option -> Cbat_word.t option -> int64 option
-
 val args_base : entry:int64 -> word:int -> int64
 val stack_top : entry:int64 -> word:int -> int64
 
@@ -99,14 +96,30 @@ val equal_ptr_storage : ptr_storage -> ptr_storage -> bool
 type mem_node = [ `Load of exp * exp * Size.t
                 | `Store of exp * exp * exp * Size.t ]
 
-val mem_nodes : exp -> mem_node list
 val mem_node_of : exp -> mem_node option
-val mem_node_where : (var -> bool) -> exp -> mem_node option
+
 val mem_node_count : exp -> int
 val reads_mem : exp -> bool
 val load_mem_vars : exp -> Var.Set.t
 val addr_of_rhs : exp -> (exp * Size.t) option
 val store_data_of_rhs : exp -> exp option
+
+(* The vars a term reads — the one home; every consumer of a read set
+   derives it here.  [jmp_reads] is the operand reads plus the kind's
+   boundary reads (a ret: the return registers and SP; a call: the
+   parameter registers and SP). *)
+val def_reads : def term -> Var.Set.t
+val phi_reads : phi term -> Var.Set.t
+val jmp_operand_reads : jmp term -> Var.Set.t
+val jmp_boundary_reads : abi:Abi.t -> jmp term -> Var.Set.t
+val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
+val blk_free_vars : blk term -> Var.Set.t
+
+(* The value vars of an exp (memory excluded); the memory accesses'
+   address vars; the data reads (value minus address). *)
+val value_vars : exp -> Var.Set.t
+val address_vars : exp -> Var.Set.t
+val data_vars : exp -> Var.Set.t
 
 val word_bits : int -> int
 val is_true_cond : exp -> bool
@@ -129,10 +142,6 @@ type name_family = {
 
 val slot_family : name_family
 val call_arg_family : name_family
-val region_family : name_family
-val sec_comp_family : name_family
-val family_name : name_family -> int -> string
-val is_in_family : name_family -> var -> bool
 val id_of_family : name_family -> string -> int option
 
 val arg_slot : addr_bits:int -> int -> var
@@ -155,15 +164,12 @@ val slot_index_of_offset : word:int -> int64 -> int
 
 val region_mem : addr_bits:int -> int -> var
 
-val region_ptr_family : name_family
 val region_ptr : addr_bits:int -> int -> var
 val is_region_ptr : var -> bool
 
-val vla_ptr_family : name_family
 val vla_ptr : addr_bits:int -> Tid.t -> var
 val is_vla_ptr : var -> bool
 
-val sec_comp_ptr_family : name_family
 val sec_comp_ptr : addr_bits:int -> int -> var
 val is_sec_comp_ptr : var -> bool
 
@@ -205,7 +211,6 @@ val is_sec_comp_mem : var -> bool
 (* The tid-name sanitization. *)
 val sanitize_tid_name : string -> string
 
-val blk_reads : blk term -> Var.Set.t
 val sub_map : program term -> sub term Tid.Map.t
 val sub_reads : sub term -> Var.Set.t
 
@@ -288,7 +293,6 @@ val set_layout : sub_layout -> sub term -> sub term
 
 (* The variadic stamp: the sub's body holds the lifted va_list
    construction. *)
-val variadic_tag : unit Value.Tag.t
 val is_variadic : sub term -> bool
 val set_variadic : sub term -> sub term
 
@@ -310,15 +314,12 @@ module Flag : sig
   val pp : Format.formatter -> t -> unit
 end
 
-val arg_ptr_tag : Flag.t Value.Tag.t
 val is_ptr_arg : Arg.t -> bool
 val set_ptr_arg : Arg.t -> Arg.t
 
-val arg_ptr_kind_tag : Flag.t Value.Tag.t
 val is_arg_ptr_kind : Arg.t -> bool
 val set_arg_ptr_kind : Arg.t -> Arg.t
 
 (* The PLT-trampoline stamp. *)
-val plt_trampoline_tag : Flag.t Value.Tag.t
 val is_plt_trampoline_sub : sub term -> bool
 val set_plt_trampoline : sub term -> sub term

@@ -71,7 +71,8 @@ let () =
   let images =
     Hike.Image.get_section_images proj
     |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
-           { Cbat_vsa.img_lo; img_hi; img_bytes })
+           { Cbat_vsa.img_lo; img_hi; img_bytes;
+             img_slots = Core.Int64.Set.empty })
   in
   let written =
     Hike.Vsa.kill_summaries ~abi:(Hike.Abi.of_target target) program
@@ -88,20 +89,21 @@ let () =
       Term.enum sub_t program
       |> Seq.fold ~init:(Tid.Map.empty, block_addrs)
            ~f:(fun (acc, block_addrs) sub ->
-          let envs, sub', block_addrs' =
+          let envs, sub', block_addrs', _facts =
             Hike.Vsa.fixpoint target ~lookup
               ~sub_addrs:(Core.Map.empty (module Addr)) ~images ~written
-              ~lift_at ~block_addrs sub
+              ~foreign_slots:Core.Int64.Set.empty
+              ~block_addrs sub
           in
           (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'),
            Core.Map.fold block_addrs' ~init:block_addrs
              ~f:(fun ~key ~data m -> Core.Map.set m ~key ~data)))
     in
     ignore subs_acc;
-    let envs, _, _ =
+    let envs, _, _, _ =
       Hike.Vsa.fixpoint target ~lookup
         ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[] ~written
-        ~lift_at:(fun _ ~block_addrs:_ -> None)
+        ~foreign_slots:Core.Int64.Set.empty
         ~block_addrs entry
     in
     let arg0 = Hike.Abi.argc_argv_regs (Hike.Abi.of_target target) |> fst in
@@ -197,14 +199,15 @@ let () =
                   s
                   (Cbat_vsa.init_sol ~abi s))
           in
-          let s1, _, _, ba', events =
-            Hike.Cfg_complete.resolve_phase ~abi ~sol ~lift_at ~images
-              ~block_addrs ~sub_addrs s Tid.Map.empty
+          let s1, _, ba', _facts, events =
+            Hike.Cfg_complete.resolve_phase ~abi ~sol ~images
+              ~block_addrs ~sub_addrs ~foreign_slots:Core.Int64.Set.empty
+              s Tid.Map.empty
           in
           ignore ba';
           let s2 =
             Hike.Cfg_complete.materialize ~abi ~sol ~images
-              ~block_addrs ~fresh:Tid.Set.empty s1
+              ~block_addrs ~foreign_slots:Core.Int64.Set.empty s1
           in
           dump (Printf.sprintf "%s: resolve(events=%b) materialize" what events)
             s2
@@ -369,9 +372,10 @@ let () =
                ())
         in
         let solve s ~block_addrs =
-          let envs, stamped, ba' =
+          let envs, stamped, ba', _facts =
             Hike.Vsa.fixpoint target ~lookup ~sub_addrs ~images ~written
-              ~lift_at ~block_addrs s
+              ~foreign_slots:Core.Int64.Set.empty
+              ~block_addrs s
           in
           (envs, stamped, ba')
         in

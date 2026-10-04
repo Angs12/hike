@@ -8,6 +8,13 @@ open Bil2llvm_exp
 open Bil2llvm_fp
 open Bil2llvm_mem
 
+let dbg_tail (msg : unit -> string) =
+#ifdef VSA_DEBUG
+  Printf.eprintf "hike-dbg-tail: %s\n%!" (msg ())
+#else
+  ignore msg
+#endif
+
 
 let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let args = get_args ctx call_tid in
@@ -206,6 +213,13 @@ let create_fun_declaration ctx sub_tid =
       Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
     else Llvm.function_type ret_typ (Array.of_list args_typ)
   in
+  dbg_tail (fun () ->
+      Printf.sprintf "decl %s extern=%b blocks=%s"
+        (Tid.name sub_tid) (is_extern ctx sub_tid)
+        (match Core.Map.find ctx.sub_of sub_tid with
+         | Some s ->
+           Base.List.length (Term.enum blk_t s |> Seq.to_list) |> string_of_int
+         | None -> "absent"));
   let fn =
     Llvm.declare_function (sanitize_name @@ Tid.name sub_tid) fn_typ
       ctx.llvm_module
@@ -222,9 +236,15 @@ let create_fun ctx sub_tid ~rets ~args ~variadic =
       Llvm.var_arg_function_type ret_typ (Array.of_list args_typ)
     else Llvm.function_type ret_typ (Array.of_list args_typ)
   in
+  (* The main-role sub is the C entry the native crt1 calls: it is the
+     module's `main` whatever the decode named it. *)
+  let fn_name =
+    match Core.Map.find ctx.sub_of sub_tid with
+    | Some s when Term.has_attr s Hike_stack_model.main_role -> "main"
+    | _ -> Tid.name sub_tid
+  in
   let fn =
-    Llvm.define_function (sanitize_name @@ Tid.name sub_tid) fn_typ
-      ctx.llvm_module
+    Llvm.define_function (sanitize_name fn_name) fn_typ ctx.llvm_module
   in
   (* The module's entry is the lifted main and the consumer enters
      nothing else, so every other definition is internal: the system
@@ -531,35 +551,18 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
   | [ ret ] -> Llvm.build_ret ret llvm_builder |> ignore
   | rets -> Llvm.build_aggregate_ret (Array.of_list rets) llvm_builder |> ignore
 
-(* The external-symbol slot a target exp reads: a Load whose address
-   names a slot the dynamic linker fills.  The target names a versioned
-   var under SSA, and its one defining def may sit in any block of the
-   sub — the split pieces separate a load from the transfer it feeds. *)
+(* The external-symbol slot a target exp reads, as the symbol's name:
+   the slot rule resolves the target's load through the sub's own defs
+   (the load may sit in any block of the sub — the split pieces
+   separate a load from the transfer it feeds), and the slot addresses
+   the module's externals name. *)
 let external_slot_target ctx ?(sub : sub term option) (target : exp) :
     string option =
-  let e =
-    match target with
-    | Bil.Var v -> (
-      match sub with
-      | Some s -> (
-        match
-          Term.enum blk_t s
-          |> Seq.concat_map ~f:(Term.enum def_t)
-          |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)
-        with
-        | Some d -> Def.rhs d
-        | None -> target)
-      | None -> target)
-    | e -> e
-  in
-  match e with
-  | Bil.Load (_, Bil.Int w, _, _) -> (
-      match Word.to_int64 w with
-      | Ok a ->
-        Base.List.find_map ctx.externals ~f:(fun (slot, name) ->
-            if Int64.equal slot a then Some name else None)
-      | Error _ -> None)
-  | _ -> None
+  match Hike_transfer.slot_of_target ?sub target with
+  | Some a ->
+    Base.List.find_map ctx.externals ~f:(fun (slot, name) ->
+        if Int64.equal slot a then Some name else None)
+  | None -> None
 
 (* The boundary-class indirect transfer: the target leaves the program
    through an external-symbol slot, so the module calls the symbol the
@@ -608,6 +611,9 @@ let create_external_boundary ctx scope llvm_builder blk_tid sub name =
   | _ -> ();
   create_return ctx scope blk_tid llvm_builder sub
 
+(* The indirect tail's resolution debug; thunk-guarded like the
+   completion's trace. *)
+
 let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
   let call = call_exn j in
   match Call.target call with
@@ -622,12 +628,27 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
       match external_slot_target ctx ~sub target with
       | Some name -> create_external_boundary ctx scope llvm_builder blk_tid sub name
       | None ->
+        dbg_tail (fun () ->
+            Printf.sprintf "sub %s blk %s target %s defs=[%s]"
+              (Tid.name (Term.tid sub)) (Tid.name blk_tid) (Exp.to_string target)
+              (Term.enum blk_t sub
+               |> Seq.concat_map ~f:(Term.enum def_t)
+               |> Seq.filter_map ~f:(fun d ->
+                   if
+                     match target with
+                     | Bil.Var v -> Var.equal (Def.lhs d) v
+                     | _ -> false
+                   then Some (Exp.to_string (Def.rhs d))
+                   else None)
+               |> Seq.to_list
+               |> String.concat "; "));
         (* A dispatch with no enumerated destinations is UB the moment it
            is taken; the module never carries it behind a warning. *)
         failwith
           (Printf.sprintf
-             "hike: indirect tail call at block %s (sub %s) has no enumerated destinations"
-             (Tid.name blk_tid) (Tid.name (Term.tid sub))))
+             "hike: indirect tail call at block %s (sub %s) has no enumerated destinations: target %s"
+             (Tid.name blk_tid) (Tid.name (Term.tid sub))
+             (Exp.to_string target)))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
 (* Unmapped intrinsic stubs use a fixed i64 synthetic ABI; normalize

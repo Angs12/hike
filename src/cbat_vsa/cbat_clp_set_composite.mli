@@ -51,10 +51,6 @@ val extrapolate_steps : steps:int -> t -> t -> t
    RSP is 8 (mod 16)), as int64. *)
 val stack_base : int64
 
-(* The certified width: the low bits of the base that are a fact (the
-   entry residue's nibble). *)
-val certified_bits : int
-
 (* The plain-arm band's lower bound; the band is
    [stack_band_lo, 2^63) — unreachable for real addresses. *)
 val stack_band_lo : int64
@@ -104,6 +100,9 @@ val in_stack_segment : t -> bool
 (* The offset set's extrema of a stack-symbolic value; None for a
    plain value. *)
 val offset_extrema : t -> (Cbat_word.t * Cbat_word.t) option
+
+(* The singleton word of a plain operand, if it is one. *)
+val singleton_of : t -> Cbat_word.t option
 
 (* The solve-boundary refinement: a wholly window-side relative value
    (every offset at/above the ABI word) names the caller's frame

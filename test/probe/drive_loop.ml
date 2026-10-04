@@ -240,11 +240,9 @@ let harvest proj program =
   let subs_acc, stamped =
     Base.List.fold subs ~init:(Tid.Map.empty, [])
       ~f:(fun (acc, st) sub ->
-          let envs, sub', _ba' =
+          let envs, sub', _ba', _facts =
             Hike.Vsa.fixpoint target ~lookup ~sub_addrs:sub_addrs0 ~images
-              ~written
-              ~lift_at:(fun a ~(block_addrs : Tid.t Addr.Map.t) ->
-                  make_lift_at proj ~block_addrs a)
+              ~written ~foreign_slots:Core.Int64.Set.empty
               ~block_addrs:block_addrs0 sub
           in
           (Core.Map.set acc ~key:(Term.tid sub) ~data:envs,

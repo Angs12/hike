@@ -41,12 +41,12 @@ type row = {
 }
 
 let measure_sub (target : Bap_core_theory.Theory.Target.t) (sub : sub term) : row =
-  let envs, _, _ =
+  let envs, _, _, _ =
     Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
       ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
       ~written:(Hike.Vsa.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                   (Program.create ~subs:[ sub ] ()))
-      ~lift_at:(fun _ ~block_addrs:_ -> None)
+      ~foreign_slots:Core.Int64.Set.empty
       ~block_addrs:(Core.Map.empty (module Addr)) sub
   in
   let pairs = Core.Map.data envs in

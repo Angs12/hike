@@ -71,7 +71,8 @@
   env_footprint
   relift_dump
   dec_diff
-  drive_loop)
+  drive_loop
+  t15_pkg)
  (modules
   audit02
   conv_diag
@@ -87,7 +88,8 @@
   env_footprint
   relift_dump
   dec_diff
-  drive_loop)
+  drive_loop
+  t15_pkg)
  (libraries
   clp_bench_rows
   precision_probe_rows
@@ -110,8 +112,8 @@
   (pps ppx_bap)))
 
 (executables
- (names vsa_debug bir_dump region_dump)
- (modules vsa_debug bir_dump region_dump)
+ (names vsa_debug)
+ (modules vsa_debug)
  (enabled_if
   (= %{profile} vsa-debug))
  (libraries

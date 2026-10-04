@@ -217,6 +217,12 @@ let fill_bir_phis ctx scope blks =
               let value =
                 if phi_is_ptr && not (Bil2llvm_ptr.is_ptr_value value) then
                   Bil2llvm_ptr.as_pointer ctx src_b value
+                else if (not phi_is_ptr) && Bil2llvm_ptr.is_ptr_value value
+                then
+                  (* A pointer incoming at an integer phi materializes
+                     the address as an integer (the as_int boundary's
+                     value conversion). *)
+                  Llvm.build_ptrtoint value (Llvm.type_of phi_ll) "" src_b
                 else value
               in
               (* An environment register's phi also stores each
@@ -451,10 +457,27 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
             ctx.sec_comps := Core.Map.set !(ctx.sec_comps) ~key:v ~data:(o.base, o.own_lo)
           | None -> ()));
   (* An external function's PLT stub defines no function and emits no
-     body — its declaration carries the name for every call site. *)
+     body — its declaration carries the name for every call site.  A
+     PLT entry the re-decode discovered is named by BAP's symtab after
+     the external it lands in, so the external names themselves are the
+     discriminator. *)
+  let external_names =
+    Base.List.map ctx.externals ~f:snd |> Core.String.Set.of_list
+  in
+  let external_name sub =
+    let n = Tid.name (Term.tid sub) in
+    match Base.String.chop_prefix n ~prefix:"@" with
+    | Some s -> s
+    | None -> n
+  in
   let self_call_stubs =
     Term.enum sub_t prog
-    |> Base.Sequence.filter ~f:Bil2llvm_calls.is_self_call_stub
+    |> Base.Sequence.filter ~f:(fun sub ->
+           Bil2llvm_calls.is_self_call_stub sub
+           (* A block-less sub is a name-only external: declared, never
+              defined. *)
+           || Base.Option.is_none (Term.first blk_t sub)
+           || Core.Set.mem external_names (external_name sub))
     |> Base.Sequence.map ~f:Term.tid
     |> Base.Sequence.to_list
     |> Core.Set.of_list (module Tid)

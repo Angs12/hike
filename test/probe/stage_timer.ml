@@ -29,12 +29,12 @@ let () =
       Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:Tid.Map.empty
         ~block_addrs:(Core.Map.empty (module Addr)) ~target
     in
-    let _envs, _sub', _ =
+    let _envs, _sub', _, _ =
       Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
         ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
         ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi
                     (Program.create ~subs:[ sub ] ()))
-        ~lift_at:(fun _ ~block_addrs:_ -> None)
+        ~foreign_slots:Core.Int64.Set.empty
         ~block_addrs:(Core.Map.empty (module Addr)) sub
     in
     let t_total = Unix.gettimeofday () -. t0 in

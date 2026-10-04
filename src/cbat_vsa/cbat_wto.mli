@@ -20,12 +20,6 @@ type comp =
   | Vertex of Tid.t
   | SCC of Tid.t * comp list
 
-(* All blocks; heads precede members. *)
-val flatten_comps : comp list -> Tid.t list
-
-(* Heads of every nested SCC. *)
-val heads_of_comps : comp list -> Tid.Set.t
-
 (* The driver's views of one ordering: the head set, each head's member
    blocks, each block's innermost head, and the WTO position index. *)
 type summary = {

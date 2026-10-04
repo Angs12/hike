@@ -454,7 +454,7 @@ let free_regs_ssa (sub : sub term) : var list =
   Term.enum blk_t sub
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc blk ->
         Core.Set.union acc
-          (Blk.free_vars blk
+          (Model.blk_free_vars blk
            |> Core.Set.filter ~f:(fun v -> Var.index v = 0)))
   |> Core.Set.filter ~f:(fun v ->
          not

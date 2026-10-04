@@ -175,13 +175,16 @@ let val_top : typ -> val_t or_type_error = function
   | Type.Unk -> Error Type.Error.bad_imm
 
 (* An image-backed section: [img_lo..img_hi] are the span's inclusive
-   address bounds, [img_bytes] the section's static content.  The
-   pass entry threads only sections whose runtime content IS the
-   image. *)
+   address bounds, [img_bytes] the section's static content, [img_slots]
+   the linker-owned slot addresses inside the span — a slot's value the
+   dynamic linker writes at startup, so the file bytes there are not a
+   value.  The pass entry threads only sections whose runtime content
+   IS the image. *)
 type section_image =
   { img_lo : int64;
     img_hi : int64;
-    img_bytes : Bytes.t }
+    img_bytes : Bytes.t;
+    img_slots : Int64.Set.t }
 
 let section_images_ref : section_image list ref = ref []
 
@@ -246,18 +249,23 @@ let image_address_ok (addr : wordset) (bits : int) : bool =
   && not (WordSet.in_stack_segment addr)
 
 (* The enumerate-and-read: each enumerated address reads its image
-   word; one unreadable word refuses the arm for the whole set. *)
+   word; one unreadable word or one linker-owned slot address refuses
+   the arm for the whole set — a slot's value is the loader's, never
+   the file bytes. *)
 let read_image_words ~(img_bytes : Bytes.t) ~(img_lo : int64)
+    ~(slots : Int64.Set.t)
     ~(endian : endian) ~(bits : int) (addr : wordset) : wordset option =
   Base.List.fold (WordSet.iter addr) ~init:(Some [])
     ~f:(fun acc a ->
         Base.Option.bind acc ~f:(fun ws ->
             Base.Option.bind (word_i64 a) ~f:(fun ai ->
-                Base.Option.map
-                  (image_word img_bytes
-                     (Stdlib.Int64.to_int (Stdlib.Int64.sub ai img_lo))
-                     ~endian ~bits)
-                  ~f:(fun w -> w :: ws))))
+                if Core.Set.mem slots ai then None
+                else
+                  Base.Option.map
+                    (image_word img_bytes
+                       (Stdlib.Int64.to_int (Stdlib.Int64.sub ai img_lo))
+                       ~endian ~bits)
+                    ~f:(fun w -> w :: ws))))
   |> Option.map ~f:(fun words -> WordSet.of_list ~width:bits words)
 
 let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
@@ -288,7 +296,7 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
                   && Stdlib.Int64.unsigned_compare last img_hi <= 0)
             with
             | None -> None
-            | Some { img_lo; img_bytes; _ } ->
+            | Some { img_lo; img_bytes; img_slots; _ } ->
               let last_w =
                 Cbat_word.of_word (Word.of_int64 ~width:64 last)
               in
@@ -307,7 +315,8 @@ let section_image_load ~(addr : wordset) ~(endian : endian) ~(bits : int)
                 (* Every enumerated address lies inside the hull, whose
                    whole extent the span check covered — the reads stay
                    in bounds. *)
-                read_image_words ~img_bytes ~img_lo ~endian ~bits addr)
+                read_image_words ~img_bytes ~img_lo ~slots:img_slots
+                  ~endian ~bits addr)
         | _ -> None
 
 let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =

@@ -18,12 +18,14 @@ let jmps_of_blk sub i =
   List.nth (Term.enum blk_t sub |> Seq.to_list) i
   |> Term.enum jmp_t |> Seq.to_list
 
-(* The dispatch guard lives in the DELTA domain: the target's delta summand
-   equals the table's own entry. *)
-let eq_delta v w j =
+(* The dispatch guard lives in the TARGET domain: the whole target
+   expression equals the case word (a composed table's guards subtract
+   the table base first; a plain bounded set has none). *)
+let eq_target (a : var) (b : var) (w : int64) j =
   match Jmp.cond j with
-  | Bil.BinOp (Bil.EQ, Bil.Var v', Bil.Int w') ->
-    Var.equal v' v && Int64.equal (Word.to_int64_exn w') w
+  | Bil.BinOp
+      (Bil.EQ, Bil.BinOp (Bil.PLUS, Bil.Var a', Bil.Var b'), Bil.Int w') ->
+    Var.equal a' a && Var.equal b' b && Int64.equal (Word.to_int64_exn w') w
   | _ -> false
 
 (* [of_wordset] fans: the pinned fixtures are single-piece address lines. *)
@@ -169,7 +171,7 @@ let tests : unit Alcotest.test list =
        two in-sub block constants; block_addrs names both blocks' tids,
        so every word of the set resolves in-sub. *)
     pin "RES-08"
-      "N8-DISP: the dispatch becomes a delta-guarded series, one goto per case target, plus its named false edge"
+      "N8-DISP: the dispatch becomes a target-guarded series, one goto per case target, plus its named false edge"
       (fun () ->
         let j2_sel = v64 "t22_j2_sel" in
         let j2_base = v64 "t22_j2_base" in
@@ -200,7 +202,8 @@ let tests : unit Alcotest.test list =
              (match Jmp.kind g1, Jmp.kind g2 with
               | Goto (Direct t1), Goto (Direct t2) ->
                 Tid.equal t1 b1_tid && Tid.equal t2 b2_tid
-                && eq_delta j2_sel 0x1008L g1 && eq_delta j2_sel 0x1010L g2
+                && eq_target j2_sel j2_base 0x3008L g1
+                && eq_target j2_sel j2_base 0x3010L g2
               | _ -> false)
            | _ -> false));
 
@@ -275,120 +278,60 @@ let tests : unit Alcotest.test list =
         in
         check "RES-10" (Int64.equal sel_card 2L));
 
-    pin "RES-11"
-      "FUSED-GROWTH: the mid-block case entry split, the fresh entry block took the address"
-      (fun () ->
-        let j6_sel = v64 "t22_j6_sel" in
-        let j6_base = v64 "t22_j6_base" in
-        let j6_bdef = Def.create j6_base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
-        let j6_s1 = Def.create j6_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
-        let j6_s2 = Def.create j6_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
-        let j6_pad = v64 "t22_j6_pad" in
-        let j6_pivot = Def.create j6_pad (Bil.Int (Cbat_word.to_word (q64 0L))) in
-        let j6_pivot = Term.set_attr j6_pivot address (Cbat_word.to_word (q64 0x3010L)) in
-        let j6, j6_tids =
-          sub_of "t22_growth"
-            [ [ j6_bdef; j6_s1 ], [ (1, mk_goto) ];
-              [], [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var j6_sel, Bil.Var j6_base))))) ];
-              [ j6_s2 ], [ (1, mk_goto) ];
-              [ j6_pivot ], [ (4, mk_goto) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, j6', block_addrs6 =
-          produce Theory.Target.unknown
-            ~block_addrs:[ (0x3008L, j6_tids.(2)); (0x300cL, j6_tids.(3)) ]
-            (Program.create ~subs:[ j6 ] ()) j6
-        in
-        let j6_fresh = Core.Map.find block_addrs6 (Addr.of_int64 0x3010L) in
-        check "RES-11"
-          (match j6_fresh with
-           | Some t ->
-             not (Tid.equal t j6_tids.(3))
-             && Base.List.exists (Term.enum blk_t j6' |> Seq.to_list)
-                  ~f:(fun b ->
-                    match Term.get_attr b address with
-                    | Some a -> Word.equal a (Cbat_word.to_word (q64 0x3010L))
-                    | None -> false)
-           | None -> false));
-
-    pin "RES-12"
-      "FUSED-GROWTH: the exit series carries one guarded goto per table entry, plus its named false edge"
-      (fun () ->
-        let j6_sel = v64 "t22_j6_sel" in
-        let j6_base = v64 "t22_j6_base" in
-        let j6_bdef = Def.create j6_base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
-        let j6_s1 = Def.create j6_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
-        let j6_s2 = Def.create j6_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
-        let j6_pad = v64 "t22_j6_pad" in
-        let j6_pivot = Def.create j6_pad (Bil.Int (Cbat_word.to_word (q64 0L))) in
-        let j6_pivot = Term.set_attr j6_pivot address (Cbat_word.to_word (q64 0x3010L)) in
-        let j6, j6_tids =
-          sub_of "t22_growth"
-            [ [ j6_bdef; j6_s1 ], [ (1, mk_goto) ];
-              [], [ (1, fun _ -> Jmp.create (Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var j6_sel, Bil.Var j6_base))))) ];
-              [ j6_s2 ], [ (1, mk_goto) ];
-              [ j6_pivot ], [ (4, mk_goto) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let _, j6', block_addrs6 =
-          produce Theory.Target.unknown
-            ~block_addrs:[ (0x3008L, j6_tids.(2)); (0x300cL, j6_tids.(3)) ]
-            (Program.create ~subs:[ j6 ] ()) j6
-        in
-        let j6_fresh = Core.Map.find block_addrs6 (Addr.of_int64 0x3010L) in
-        check "RES-12"
-          (match j6_fresh with
-           | None -> false
-           | Some fresh ->
-             (match jmps_of_blk j6' 1 with
-              | g1 :: g2 :: _ ->
-                (match Jmp.kind g1, Jmp.kind g2 with
-                 | Goto (Direct t1), Goto (Direct t2) ->
-                   Tid.equal t1 j6_tids.(2) && Tid.equal t2 fresh
-                   && eq_delta j6_sel 0x1008L g1 && eq_delta j6_sel 0x1010L g2
-                 | _ -> false)
-              | _ -> false)));
-
-    (* The liveness pin: a resolution whose materialization declines
-       (a cross-sub word keeps the pairs list empty) leaves its eager
-       split unclaimed — but the surviving indirect transfer still
-       denotes the split's address, so the address-bearing fresh block
-       stays (the runtime transfer may land on it). *)
+    (* The liveness pin: a resolution whose word set is incomplete (a
+       word naming no in-sub block) renders nothing — a partial series
+       would drop live cases — so the indirect transfer stays exactly
+       as it came, and the word rides the fact channels to the
+       driver's decode instead. *)
     pin "RES-13"
-      "FUSED-LIVE: an unresolved indirect transfer's denotation keeps its split fresh block"
+      "FUSED-LIVE: a partially-resolvable dispatch stays the indirect transfer (no partial series)"
       (fun () ->
         let j7_sel = v64 "t22_j7_sel" in
         let j7_base = v64 "t22_j7_base" in
         let j7_bdef = Def.create j7_base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
         let j7_s1 = Def.create j7_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
-        let j7_s2 = Def.create j7_sel (Bil.Int (Cbat_word.to_word (q64 0x7000L))) in
+        let j7_s2 = Def.create j7_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
+        let j7_s3 = Def.create j7_sel (Bil.Int (Cbat_word.to_word (q64 0x7000L))) in
         let j7_flag = v1 "t22_j7_flag" in
         let j7_pad = v64 "t22_j7_pad" in
         let j7_pivot = Def.create j7_pad (Bil.Int (Cbat_word.to_word (q64 0L))) in
         let j7_pivot = Term.set_attr j7_pivot address (Cbat_word.to_word (q64 0x3008L)) in
         let j7, j7_tids =
           sub_of "t22_live"
-            [ [ j7_bdef ], [ (1, fun t -> mk_jmp_to t (Bil.Var j7_flag)); (2, mk_goto) ];
-              [ j7_s1 ], [ (3, mk_goto) ];
-              [ j7_s2 ], [ (3, mk_goto) ];
-              [], [ (4, fun _ -> Jmp.create (Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var j7_sel, Bil.Var j7_base))))) ];
-              [ j7_pivot ], [ (5, mk_goto) ];
+            [ [ j7_bdef ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var j7_flag));
+                (2, fun t ->
+                      mk_jmp_to t (Bil.UnOp (Bil.NOT, Bil.Var j7_flag)));
+                (3, mk_goto) ];
+              [ j7_s1 ], [ (4, mk_goto) ];
+              [ j7_s2 ], [ (4, mk_goto) ];
+              [ j7_s3 ], [ (4, mk_goto) ];
+              [], [ (5, fun _ -> Jmp.create (Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var j7_sel, Bil.Var j7_base))))) ];
+              [ j7_pivot ], [ (6, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
         let _, j7', _ =
           produce Theory.Target.unknown
-            ~block_addrs:[ (0x2000L, j7_tids.(4)); (0x9000L, Tid.create ()) ]
+            ~block_addrs:
+            [ (0x3008L, j7_tids.(5)); (0x3010L, j7_tids.(6));
+              (0x9000L, Tid.create ()) ]
             (Program.create ~subs:[ j7 ] ()) j7
         in
         check "RES-13"
-          (Base.List.exists (Term.enum blk_t j7' |> Seq.to_list)
-             ~f:(fun b ->
-               match Term.get_attr b address with
-               | Some a -> Word.equal a (Cbat_word.to_word (q64 0x3008L))
-               | None -> false)));
+          (match jmps_of_blk j7' 4 with
+           | [ j ] -> (
+               match Jmp.kind j with
+               | Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b))) ->
+                 Var.equal a j7_sel && Var.equal b j7_base
+               | _ -> false)
+           | _ -> false));
 
-    (* J4: a word the run's map cannot name is a loud failure. *)
-    pin "RES-14" "T22-J4: a dispatch word the map cannot name fails loudly"
+    (* J4: a word the run's map cannot name is a decline, not a failure —
+       it rides the fact channels to the driver's decode. *)
+
+
+    pin "RES-14"
+      "T22-J4: a dispatch word the map cannot name declines (the transfer stays, no failure)"
       (fun () ->
         let j4_sel = v64 "t22_j4_sel" in
         let j4_base = v64 "t22_j4_base" in
@@ -406,94 +349,22 @@ let tests : unit Alcotest.test list =
               [], [ (6, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
+        let _, j4', _ =
+          produce Theory.Target.unknown
+            ~block_addrs:[ (0x3008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
+            (Program.create ~subs:[ j4 ] ()) j4
+        in
         check "RES-14"
-          (try
-             ignore
-               (produce Theory.Target.unknown
-                  ~block_addrs:
-                    [ (0x3008L, j4_tids.(4)); (0x400000L, j4_tids.(5)) ]
-                  (Program.create ~subs:[ j4 ] ()) j4);
-             false
-           with Failure _ -> true));
+          (match jmps_of_blk j4' 3 with
+           | [ j ] -> (
+               match Jmp.kind j with
+               | Goto (Indirect (Bil.BinOp (Bil.PLUS, Bil.Var a, Bil.Var b))) ->
+                 Var.equal a j4_sel && Var.equal b j4_base
+               | _ -> false)
+           | _ -> false));
 
     (* The materializer retargets an existing indirect transfer to the
        addresses named by the case. *)
-    pin "RES-21"
-      "the materializer: a gap word re-lifts its case body and retargets existing blocks"
-      (fun () ->
-        let j8_sel = v64 "t22_j8_sel" in
-        let j8_base = v64 "t22_j8_base" in
-        let j8_bdef =
-          Def.create j8_base (Bil.Int (Cbat_word.to_word (q64 0x2000L)))
-        in
-        let j8_t1 =
-          Def.create j8_sel (Bil.Int (Cbat_word.to_word (q64 0x1008L)))
-        in
-        let j8_t2 =
-          Def.create j8_sel (Bil.Int (Cbat_word.to_word (q64 0x1010L)))
-        in
-        let j8_flag = v1 "t22_j8_flag" in
-        let j8, j8_tids =
-          sub_of "t22_materialize"
-            [ [ j8_bdef ],
-              [ (1, fun t -> mk_jmp_to t (Bil.Var j8_flag)); (2, mk_goto) ];
-              [ j8_t1 ], [ (3, mk_goto) ];
-              [ j8_t2 ], [ (3, mk_goto) ];
-              [],
-              [ (4,
-                 fun _ ->
-                   Jmp.create
-                     (Goto
-                        (Indirect
-                           (Bil.BinOp (Bil.PLUS, Bil.Var j8_sel, Bil.Var j8_base))))) ];
-              [], [ (6, mk_goto) ];
-              [], [ (6, mk_goto) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let a = Addr.of_int64 0x3010L in
-        let b = Addr.of_int64 0x3014L in
-        let materialized =
-          let e = Blk.Builder.create ~tid:(Tid.for_addr a) () in
-          Blk.Builder.add_jmp e
-            (Jmp.create
-               (Goto (Direct (Tid.for_addr (Addr.of_int64 0x3008L)))));
-          let e = Term.set_attr (Blk.Builder.result e) address a in
-          let i = Blk.Builder.create ~tid:(Tid.for_addr b) () in
-          let i = Term.set_attr (Blk.Builder.result i) address b in
-          [ e; i ]
-        in
-        let _, sub8', block_addrs8 =
-          produce Theory.Target.unknown
-            ~block_addrs:
-              [ (0x3008L, j8_tids.(4)); (0x400000L, j8_tids.(5)) ]
-            ~lift_at:(fun a' ~block_addrs:_ ->
-              if Addr.equal a' a then Some materialized else None)
-            (Program.create ~subs:[ j8 ] ()) j8
-        in
-        let named =
-          match Core.Map.find block_addrs8 a with
-          | Some t -> Tid.equal t (Tid.for_addr a)
-          | None -> false
-        in
-        (* Every new block is registered, not just the dispatch entry. *)
-        let registered =
-          match Core.Map.find block_addrs8 b with
-          | Some t -> Tid.equal t (Tid.for_addr b)
-          | None -> false
-        in
-        let retargeted =
-          Term.enum blk_t sub8'
-          |> Seq.find ~f:(fun b -> Tid.equal (Term.tid b) (Tid.for_addr a))
-          |> Base.Option.value_map ~default:false ~f:(fun b ->
-                 match Term.enum jmp_t b |> Seq.to_list with
-                 | [ j ] -> (
-                     match Jmp.kind j with
-                     | Goto (Direct t) -> Tid.equal t j8_tids.(4)
-                     | _ -> false)
-                 | _ -> false)
-        in
-        check "RES-21" (named && registered && retargeted));
-
     pin "RES-15" "T22-J3: a foreign pointer target is untouched by the rewrite"
       (fun () ->
         let j3_t = v64 "t22_j3_t" in
@@ -556,17 +427,16 @@ let tests : unit Alcotest.test list =
                 j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
-            let sub5', resolved5', fresh5', _, events5 =
+            let sub5', resolved5', _, _facts5, events5 =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~images:[] ~sol
-                ~lift_at:(fun _ ~block_addrs:_ -> None)
-                ~block_addrs:
+                                ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
                 ~sub_addrs:(Core.Map.empty (module Addr))
+                ~foreign_slots:Core.Int64.Set.empty
                 j5 Tid.Map.empty
             in
-            (not events5) && Core.Set.is_empty fresh5'
-            && Core.Map.is_empty resolved5'));
+            (not events5) && Core.Map.is_empty resolved5'));
 
 
 
@@ -623,77 +493,6 @@ let tests : unit Alcotest.test list =
     (* A re-lifted block joins the program through the chain's own
        normalizers: a def the lifter gave two memory nodes fissions,
        so the one-def-one-node invariant holds for lifted code too. *)
-    pin "RES-24" "the materializer fissions a re-lifted def's memory nodes"
-      (fun () ->
-        let sel = v64 "t23_sel" in
-        let base = v64 "t23_base" in
-        let bdef = Def.create base (Bil.Int (Cbat_word.to_word (q64 0x2000L))) in
-        let t1 = Def.create sel (Bil.Int (Cbat_word.to_word (q64 0x1008L))) in
-        let t2 = Def.create sel (Bil.Int (Cbat_word.to_word (q64 0x1010L))) in
-        let flag = v1 "t23_flag" in
-        let sub24, tids =
-          sub_of "t23_refiss"
-            [ [ bdef ],
-              [ (1, fun t -> mk_jmp_to t (Bil.Var flag)); (2, mk_goto) ];
-              [ t1 ], [ (3, mk_goto) ];
-              [ t2 ], [ (3, mk_goto) ];
-              [],
-              [ (4,
-                 fun _ ->
-                   Jmp.create
-                     (Goto
-                        (Indirect
-                           (Bil.BinOp (Bil.PLUS, Bil.Var sel, Bil.Var base))))) ];
-              [], [ (6, mk_goto) ];
-              [], [ (6, mk_goto) ];
-              [], [ (0, mk_ret) ] ]
-        in
-        let a = Addr.of_int64 0x3010L in
-        let m = memv "t23_m" in
-        let src = v64 "t23_src" in
-        let dst = v64 "t23_dst" in
-        let double_load =
-          Def.create dst
-            (Bil.Load
-               ( Bil.Var m,
-                 Bil.Load (Bil.Var m, Bil.Var src, LittleEndian, `r64),
-                 LittleEndian, `r64 ))
-        in
-        let lifted =
-          let e = Blk.Builder.create ~tid:(Tid.for_addr a) () in
-          Blk.Builder.add_def e double_load;
-          Blk.Builder.add_jmp e
-            (Jmp.create (Goto (Direct (Tid.for_addr (Addr.of_int64 0x3008L)))));
-          let e = Term.set_attr (Blk.Builder.result e) address a in
-          [ e ]
-        in
-        let _, sub24', _ =
-          produce Theory.Target.unknown
-            ~block_addrs:[ (0x3008L, tids.(4)); (0x400000L, tids.(5)) ]
-            ~lift_at:(fun a' ~block_addrs:_ ->
-              if Addr.equal a' a then Some lifted else None)
-            (Program.create ~subs:[ sub24 ] ()) sub24
-        in
-        match
-          Term.enum blk_t sub24'
-          |> Seq.find ~f:(fun b -> Tid.equal (Term.tid b) (Tid.for_addr a))
-        with
-        | Some b ->
-            let defs = Term.enum def_t b |> Seq.to_list in
-            let one_node =
-              Base.List.for_all defs ~f:(fun d ->
-                  Hike__Hike_stack_model.mem_node_count (Def.rhs d) <= 1)
-            in
-            check "RES-24" (Base.List.length defs >= 2 && one_node)
-        | None -> check "RES-24" false);
-
-    (* RES-25 — the two-caller case (one direct + one indirect on the
-       same target): a relative-offset jump table and a direct goto both
-       name the case block, and the resolve materializes it once — the
-       block keeps its tid and both edges read the same map.  The
-       128-entry table rides the completion's image arm: the load's
-       value hulls (the solve's image read refuses past its 64-entry
-       cap) while the load's bounded address set enumerates. *)
     pin "RES-25" "a table word and a direct goto resolve one case block"
       (fun () ->
         let rdx = v64 "t25_rdx" in
@@ -727,7 +526,9 @@ let tests : unit Alcotest.test list =
               Char.chr (Int64.to_int (Int64.logand (Int64.shift_right_logical w (8 * i)) 0xFFL)))
         in
         let img_bytes = Bytes.of_string (String.concat "" (Base.List.init 2 ~f:word_bytes)) in
-        let images = [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x4007L; img_bytes } ] in
+        let images =
+          [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x4007L; img_bytes;
+              img_slots = Core.Int64.Set.empty } ] in
         let sub25, tids =
           sub_of "t25_tbl"
             [ [ ],

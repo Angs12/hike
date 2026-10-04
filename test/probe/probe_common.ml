@@ -88,9 +88,19 @@ let production_input (proj : Project.t) : program term =
 
 (* pass_vsa's image set: every section, with relocated words resolved. *)
 let section_images (proj : Project.t) : Vsa.section_image list =
+  let slots =
+    Hike.Image.external_references proj |> Base.List.map ~f:fst
+    |> Core.Int64.Set.of_list
+  in
   Hike.Image.get_section_images proj
   |> Base.List.map ~f:(fun (img_bytes, img_lo, img_hi) ->
-         { Vsa.img_lo; img_hi; img_bytes })
+         { Vsa.img_lo;
+           img_hi;
+           img_bytes;
+           img_slots =
+             Core.Set.filter slots
+               ~f:(fun a ->
+                   Int64.compare a img_lo >= 0 && Int64.compare a img_hi <= 0) })
 
 (* Load a binary and apply [run_sub] to each sub in program order. *)
 let ws_run_binary (path : string) (run_sub : Vsa.section_image list -> sub term -> 'a) :
@@ -346,35 +356,6 @@ type cyclic_head_report = {
   vars : var list;
   state : AI.t;
 }
-
-let cyclic_head_reports (sub : sub term) (sol : Vsa.vsa_sol) :
-    cyclic_head_report list =
-  let block_of_tid t =
-    Term.enum blk_t sub
-    |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) t)
-  in
-  cyclic_heads (cfg_of sub)
-  |> List.map (fun (head, members) ->
-         let block = block_of_tid head in
-         let vars =
-           members
-           |> Base.List.concat_map ~f:(fun t ->
-                  Term.enum def_t (block_of_tid t)
-                  |> Seq.map ~f:(fun d -> Var.base (Def.lhs d))
-                  |> Seq.to_list)
-           |> Base.List.dedup_and_sort
-                ~compare:(fun a b -> String.compare (Var.name a) (Var.name b))
-         in
-         { head; members; block; vars; state = Graphlib.Std.Solution.get sol head })
-
-let report_cyclic_heads ~(label : string) ~(sub : sub term)
-    ~(sol : Vsa.vsa_sol) ~(print_one : cyclic_head_report -> unit) : unit =
-  let reports = cyclic_head_reports sub sol in
-  Printf.printf "%s (%d cyclic SCCs)\n" label (List.length reports);
-  List.iter print_one reports
-
-(* The probes' bench harness: the warmup + two-loop measure and the
-   table printer, shared by the three bench probes. *)
 let bench_now = Unix.gettimeofday
 
 type bench_row = {

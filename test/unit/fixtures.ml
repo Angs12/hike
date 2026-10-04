@@ -80,25 +80,6 @@ let mk_seed_state rsp rbp () =
     ~key:rbp
     ~data:(Ws.stack_word_i64 0L)
 
-(* VSA fixture builders (moved verbatim from test_vsa.ml). *)
-let mk_counter_loop ~(exit_defs : var -> def term list) : var * Program.t * sub term * tid =
-  let i = Var.create ~is_virtual:false ~fresh:false "i" (Type.Imm 32) in
-  let t = Var.create ~is_virtual:false ~fresh:false "t" (Type.Imm 32) in
-  let iv = Bil.Var i in
-  let tv = Bil.Var t in
-  let lt = Bil.BinOp (Bil.LT, iv, tv) in
-  let nlt = Bil.UnOp (Bil.NOT, lt) in
-  let sub, tids =
-    sub_of "counter_loop"
-      [ [ Def.create i (Bil.Int (Cbat_word.to_word (w32 0))) ], [ (1, mk_goto) ];
-        [ Def.create i (Bil.BinOp (Bil.PLUS, iv, Bil.Int (Cbat_word.to_word (w32 1)))) ], [ (2, mk_goto) ];
-        [], [ (3, fun t -> mk_jmp_to t lt); (2, fun t -> mk_jmp_to t nlt) ];
-        exit_defs i, [] ]
-  in
-  let ctx = Program.create ~subs:[ sub ] () in
-  (i, ctx, sub, tids.(3))
-
-(* Flag-guard fixture: mixed vs single def shapes. *)
 let mk_flag_sub ~(mixed : bool) :
     var * Program.t * sub term * tid * def term * def term option * def term =
   let f = v1 "t3_f" in
@@ -261,36 +242,6 @@ let mk_high0_cast_sub () : var * Program.t * sub term * tid =
 
 (* Stack-only residue closure: heap-indexed stores fall out; top-addr stores skipped. *)
 
-(* Heap-indexed store negative. Returns (def_base, def_idx, def_data, def_store, sub, exit tid). *)
-let mk_e2ed_heap_sub () : def term * def term * def term * def term * sub term * tid =
-  let rdi = v64 "e2ed_rdi" in
-  let i = v64 "e2ed_i" in
-  let v = v64 "e2ed_v" in
-  let m = memv "e2ed_m" in
-  let def_base = Def.create rdi (Bil.Int (Cbat_word.to_word (w64 0x400000))) in
-  let def_idx = Def.create i (Bil.Int (Cbat_word.to_word (w64 5))) in
-  let def_data = Def.create v (Bil.Int (Cbat_word.to_word (w64 99))) in
-  let def_store =
-    Def.create m
-      (Bil.Store
-         ( Bil.Var m,
-           Bil.BinOp (Bil.PLUS, Bil.Var rdi, Bil.BinOp (Bil.TIMES, Bil.Var i, Bil.Int (Cbat_word.to_word (w64 8)))),
-           Bil.Var v,
-           LittleEndian,
-           `r64 ))
-  in
-  let sub, tids =
-    sub_of "e2ed_heap"
-      [ [ def_base; def_idx; def_data; def_store ], [ (1, mk_goto) ];
-        [], [] ]
-  in
-  (def_base, def_idx, def_data, def_store, sub, tids.(1))
-
-
-
-(* RSP := 0 anchor def is tagged, so the entry state carries RSP = {0}. *)
-
-(* Smallest sub running the fixpoint: one block, one trivial def. *)
 let mk_p3_anchor_sub () : sub term =
   let t = v64 "p3_t" in
   fst (sub_of "p3_anchor" [ [ Def.create t (Bil.Int (Cbat_word.to_word (w64 0))) ], [] ])
@@ -618,42 +569,6 @@ let mk_l3b1_loop () : sub term * tid * tid =
         [], [] ]
   in
   (sub, tids.(1), tids.(2))
-
-(* Diamond: both branches store {7} at [RSP-8]/[RSP-7]; merge unions them. Returns (sub, merge tid). *)
-let mk_l3b4_diamond () : sub term * tid =
-  let m = memv "l3b4_m" in
-  let rsp = v64 "RSP" in
-  let i = Var.create ~is_virtual:false ~fresh:false "l3b4_i" (Type.Imm 32) in
-  let addr8 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 8))) in
-  let addr7 = Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 7))) in
-  let cond = Bil.BinOp (Bil.LT, Bil.Var i, Bil.Int (Cbat_word.to_word (w32 1))) in
-  let store7 addr = Def.create m (Bil.Store (Bil.Var m, addr, Bil.Int (Cbat_word.to_word (w32 7)), LittleEndian, `r32)) in
-  let sub, tids =
-    sub_of "l3b4_diamond"
-      [ [], [ (1, fun t -> mk_jmp_to t cond); (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, cond))) ];
-        [ store7 addr8; store7 addr7 ], [ (3, mk_goto) ];
-        [ store7 addr8; store7 addr7 ], [ (3, mk_goto) ];
-        [], [] ]
-  in
-  (sub, tids.(3))
-
-(* Cell count in [st]'s memory: the mem map's tree nodes — one
-   "(height" per map node in the sexp (the fork's Mem exposes no
-   enumeration; the count is the printer's node marker). *)
-let l3b_cells_of (mv : var) (st : AI.t) : int =
-  let mem = AI.find_memory { Mem.addr_width = 64; Mem.addressable_width = 8 } st mv in
-  let s = Core.Sexp.to_string (Mem.sexp_of_t mem) in
-  let marker = "(height " in
-  let mlen = String.length marker in
-  let n = ref 0 in
-  for i = 0 to String.length s - mlen do
-    if String.sub s i mlen = marker then incr n
-  done;
-  !n
-
-(* L-B: jcc-decoder pins — exact -O0 corpus block fixture. *)
-
-(* jle/jl/ja guard nestings the decoder matcher accepts. *)
 let l39_jle (zf : var) (sf : var) (ofv : var) : exp =
   Bil.BinOp
     ( Bil.OR,
@@ -1048,17 +963,6 @@ let mk_escape_caller ~pfx ~fp_off ~seed ~(outs : (int * escape_payload) list) ()
   let blks = Term.enum blk_t caller |> Seq.to_list in
   { es_sub = caller; es_blk0 = List.nth blks 0; es_blk1 = List.nth blks 1; es_post_tid = tids.(2); es_m = m }
 
-(* Store builder, MINUS/rsp-rooted with explicit size. *)
-let mk_store_minus m rsp lo data sz =
-  Def.create m
-    (Bil.Store
-       ( Bil.Var m,
-         Bil.BinOp (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 lo))),
-         Bil.Int (Cbat_word.to_word (w64 data)),
-         LittleEndian,
-         sz ))
-
-(* When-chain fixture (moved verbatim from test_properties.ml). *)
 let mk_when_chain () : sub term * tid * tid * tid * tid * var =
   let m = memv "wc_m" in
   let rbp = v64 "RBP" in

@@ -86,8 +86,7 @@ let run_binary (path : string) (name : string) : unit =
       ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
       ~written:(Hike.Vsa.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                   (Program.create ~subs:[ sub ] ()))
-      ~lift_at:(fun _ ~block_addrs:_ -> None)
-      ~block_addrs:(Core.Map.empty (module Addr)) sub
+            ~block_addrs:(Core.Map.empty (module Addr)) sub
   in
   let pre_of tid = match Core.Map.find envs tid with
     | Some (pre, _) -> pre

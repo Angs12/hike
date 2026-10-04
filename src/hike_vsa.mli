@@ -15,21 +15,25 @@ open Bap_core_theory
     val with_origin : Hike_origin.t -> def term -> def term
   end
 
-  (** An image-backed section: inclusive bounds plus static content. *)
+  (** An image-backed section: inclusive bounds plus static content;
+      [img_slots] are the linker-owned slot addresses in the span. *)
   type section_image = Cbat_vsa.section_image = {
     img_lo : int64;
     img_hi : int64;
     img_bytes : Bytes.t;
+    img_slots : Core.Int64.Set.t;
   }
 
   (** The fused solve: phases of solve + resolution growth until
       stable, materialization once at drain.  Returns the per-block
-      (pre, post) environments, the rewritten sub, and the grown
-      block-address map.  Non-convergence is the top identity: empty
+      (pre, post) environments, the rewritten sub, the grown
+      block-address map, and the phases' dispatch facts (the site's
+      address, its call class, the case words — the drive loop's fact
+      source).  Non-convergence is the top identity: empty
       environments, the shape-canonicalized sub, the input
-      block-address map.  [images] arm every denotation the solve, the
-      completion, and the replay compute (one bracket, inside);
-      [written] is the program's kill-summary pass, computed
+      block-address map, no facts.  [images] arm every denotation the
+      solve, the completion, and the replay compute (one bracket,
+      inside); [written] is the program's kill-summary pass, computed
       once at the boundary. *)
   val fixpoint :
     Theory.Target.t ->
@@ -37,10 +41,12 @@ open Bap_core_theory
     sub_addrs:Tid.t Addr.Map.t ->
     images:section_image list ->
     written:Core.Int.Set.t option Tid.Map.t ->
-    lift_at:(Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option) ->
     block_addrs:Tid.t Addr.Map.t ->
+    foreign_slots:Core.Int64.Set.t ->
+    ?code_range:(int64 * int64) option ->
     sub term ->
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
+    * (Addr.t * bool * Cbat_word.t list) list
 
   (** The program's kill summaries (every subs' transitive written
       register set); computed once per program at the boundary and

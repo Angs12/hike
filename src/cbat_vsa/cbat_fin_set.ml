@@ -182,16 +182,6 @@ let compare (s1, bw1) (s2, bw2) =
   else if bw1 > bw2 then 1
   else WSet.compare s1 s2
 
-(* Generic Cbat_word.t-set actions. *)
-
-let intersect_generic (type ws) (module WS : WordSet.S with type t = ws)
-    (s, bw : t) (s' : ws) : t =
-  (* Width mismatch keeps the input. *)
-  if WS.bitwidth s' <> bw then (s, bw)
-  else
-    let keep_set = Core.Set.filter s ~f:(fun w -> WS.elem w s') in
-    keep_set, bw
-
 let overlap_generic (type ws) (module WS : WordSet.S with type t = ws)
     (s, bw : t) (s' : ws) : bool =
   (* Width mismatch answers may-overlap. *)

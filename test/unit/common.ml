@@ -95,17 +95,20 @@ let top_facts : Hike.Kb.facts =
 (* The producer, composed: the fixpoint's two products (the block
    environments and the REWRITTEN SUB) — the tests' one-line driver.
    [written] is computed at the boundary, exactly like the pass. *)
-let produce ?(block_addrs = []) ?(images = [])
-    ?(lift_at = fun _ ~block_addrs:_ -> None) target (prog : program term) (sub : sub term) :
+let produce ?(block_addrs = []) ?(images = []) target (prog : program term)
+    (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
-  Hv.fixpoint target ~lookup:(fun _ -> None)
-    ~sub_addrs:(Core.Map.empty (module Addr)) ~images
-    ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
-    ~lift_at
-    ~block_addrs:
-      (Core.Map.of_alist_exn (module Addr)
-         (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
-    sub
+  let envs, sub', ba', _facts =
+    Hv.fixpoint target ~lookup:(fun _ -> None)
+      ~sub_addrs:(Core.Map.empty (module Addr)) ~images
+      ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
+      ~foreign_slots:Core.Int64.Set.empty
+      ~block_addrs:
+        (Core.Map.of_alist_exn (module Addr)
+           (Base.List.map block_addrs ~f:(fun (a, t) -> (Addr.of_int64 a, t))))
+      sub
+  in
+  (envs, sub', ba')
 
 (* The T2 chain replica over fixtures: the composed production entries
    (fixpoint, facts, the one install, the jmp/dyn stamps, the
@@ -152,13 +155,13 @@ let fixture_facts (subs : sub term list) :
   let all_envs, stamped, ok =
     Base.List.fold subs ~init:(Tid.Map.empty, [], true)
       ~f:(fun (m, stamped, ok) sub ->
-        let envs, sub', _ =
+        let envs, sub', _, _ =
           Hv.fixpoint Theory.Target.unknown
             ~lookup:(fun _ -> None)
             ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
             ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                         (Program.create ~subs:[ sub ] ()))
-            ~lift_at:(fun _ ~block_addrs:_ -> None)
+            ~foreign_slots:Core.Int64.Set.empty
             ~block_addrs:(Core.Map.empty (module Addr)) sub
         in
         (Core.Map.merge m envs

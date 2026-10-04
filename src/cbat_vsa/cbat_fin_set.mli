@@ -20,6 +20,5 @@ include Cbat_wordset_intf.S with type t := t and type word = Cbat_word.t
 val nearest_pred : Cbat_word.t -> t -> Cbat_word.t option
 val nearest_succ : Cbat_word.t -> t -> Cbat_word.t option
 
-val intersect_generic : (module Cbat_wordset_intf.S with type t = 'ws) ->  t -> 'ws -> t
 
 val overlap_generic : (module Cbat_wordset_intf.S with type t = 'ws) ->  t -> 'ws -> bool

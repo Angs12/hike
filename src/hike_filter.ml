@@ -44,24 +44,15 @@ let simplify_jmps sub =
    the program's main is found from its denotation; the runtime stubs
    drop by reachability from the program's roots after the solve, never
    by spelling. *)
-let should_filter syms sub =
+let should_filter sub =
   (* Emittable intrinsics (the soft-float bodies) stay. *)
   if is_emittable_intrinsic sub then false
   else
     Term.has_attr sub Sub.stub
     || Term.has_attr sub Sub.extern
     || is_intrinsic sub
-    || (not @@ Core.Set.mem syms (Sub.name sub))
 
 let filter_subs proj =
-  let syms =
-    Symtab.to_sequence (Project.symbols proj)
-    |> Seq.fold ~init:StrSet.empty ~f:(fun set (name, _, _) ->
-        Core.Set.add set name)
-  in
   Project.map_program proj ~f:(fun prog ->
       Term.filter_map sub_t prog ~f:(fun sub ->
-          if should_filter syms sub then
-            None
-          else
-            Some (sub |> simplify_jmps)))
+          if should_filter sub then None else Some (sub |> simplify_jmps)))

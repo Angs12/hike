@@ -12,8 +12,6 @@ val get_section_data :
 val get_copy_relocations :
   Project.t -> bss_addr:int64 -> bss_size:int64 -> (int * string) list
 
-val get_relocated_words : Project.t -> int64 list
-
 (** Every externally-relocated word: its site and the symbol whose
     address the dynamic linker binds there. *)
 val external_references : Project.t -> (int64 * string) list

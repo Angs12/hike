@@ -61,11 +61,14 @@ val set_addr_bits : int -> unit
 val set_sp_var : var -> unit
 
 (* An image-backed section: the span's inclusive bounds plus the
-   section's static content. *)
+   section's static content; [img_slots] are the linker-owned slot
+   addresses in the span — a slot's value the loader writes, so the
+   file bytes there are not a value. *)
 type section_image = Cbat_transfer.section_image = {
   img_lo : int64;
   img_hi : int64;
   img_bytes : Bytes.t;
+  img_slots : Int64.Set.t;
 }
 
 (* Threads the image-backed sections in: only sections whose runtime

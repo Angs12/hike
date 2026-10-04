@@ -19,6 +19,7 @@ type section_image = Vsa.section_image = {
   img_lo : int64;
   img_hi : int64;
   img_bytes : Bytes.t;
+  img_slots : Core.Int64.Set.t;
 }
 
 (* The per-sub written-register summary: every def whose lhs base is a
@@ -148,10 +149,12 @@ let fixpoint (target : Theory.Target.t)
     ~(sub_addrs : Tid.t Addr.Map.t)
     ~(images : Vsa.section_image list)
     ~(written : Core.Int.Set.t option Tid.Map.t)
-    ~(lift_at : Addr.t -> block_addrs:Tid.t Addr.Map.t -> blk term list option)
     ~(block_addrs : Tid.t Addr.Map.t)
+    ~(foreign_slots : Core.Int64.Set.t)
+    ?(code_range : (int64 * int64) option = None)
     (sub : sub term) :
-    (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
+    (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
+    * (Addr.t * bool * Cbat_word.t list) list =
   self_arm target;
   let abi = Hike_abi.of_target target in
 #ifdef VSA_DEBUG
@@ -173,7 +176,8 @@ let fixpoint (target : Theory.Target.t)
      them through one bracket. *)
   Vsa.with_images images (fun () ->
       let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
-          (fresh : Tid.Set.t) (block_addrs : Tid.t Addr.Map.t)
+          (block_addrs : Tid.t Addr.Map.t)
+          (dfacts : (Addr.t * bool * Cbat_word.t list) list)
           (init : Vsa.vsa_sol option) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol =
@@ -183,17 +187,18 @@ let fixpoint (target : Theory.Target.t)
 #ifdef VSA_DEBUG
         dump_r8 sol sub;
 #endif
-        let sub', resolved', fresh', block_addrs', events =
-          Hike_cfg_complete.resolve_phase ~abi ~sol ~lift_at ~images
+        let sub', resolved', block_addrs', facts, events =
+          Hike_cfg_complete.resolve_phase ~abi ~sol ~images
             ~block_addrs
-            ~sub_addrs
+            ~sub_addrs ~foreign_slots ~code_range:code_range
             sub resolved
         in
-        if events then phases sub' resolved' (Core.Set.union fresh fresh') block_addrs' (Some sol)
-        else (sol, sub', Core.Set.union fresh fresh', block_addrs')
+        let dfacts = Base.List.append dfacts facts in
+        if events then phases sub' resolved' block_addrs' dfacts (Some sol)
+        else (sol, sub', block_addrs', dfacts)
       in
       let converged =
-        try Some (phases sub Tid.Map.empty Tid.Set.empty block_addrs None)
+        try Some (phases sub Tid.Map.empty block_addrs [] None)
         with Vsa.Fixpoint_not_converged (n, _) ->
 #ifdef VSA_DEBUG
           Vsa.Cbat_attr_census.bump "backstop.sub";
@@ -204,18 +209,19 @@ let fixpoint (target : Theory.Target.t)
           None
       in
       match converged with
-      | Some (sol, sub', fresh, block_addrs') ->
+      | Some (sol, sub', block_addrs', dfacts) ->
         let sub'' =
           Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
-            ~fresh sub'
+            ~foreign_slots ~code_range:code_range sub'
         in
         (* The round-down normalization rides the returned sub: the
            attribution re-denotes from these rhs's, and the solve's
            materialization may reintroduce the shift pair. *)
         let sub'' = Vsa.normalize_round sub'' in
         let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
-        (envs, stamped, block_addrs')
+        (envs, stamped, block_addrs', dfacts)
       | None ->
         ( Tid.Map.empty,
           Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
-          block_addrs ))
+          block_addrs,
+          [] ))

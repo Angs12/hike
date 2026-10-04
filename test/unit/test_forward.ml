@@ -17,7 +17,9 @@ let img_fixture =
   let img_var = v64 "t_img_base" in
   let m = Var.create ~is_virtual:false ~fresh:false "t_img_m" (Type.Mem (`r64, `r8)) in
   let img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00\x1e\x5a\x00\x00" in
-  let images = [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes } ] in
+  let images =
+    [ { Vsa.img_lo = 0x4000L; img_hi = 0x400bL; img_bytes;
+        img_slots = Core.Int64.Set.empty } ] in
   let k = { Mem.addr_width = 64; Mem.addressable_width = 8 } in
   let env_with_addrs addrs =
     let st = AI.add_memory AI.top ~key:m ~data:(Mem.top k) in
@@ -401,13 +403,13 @@ let tests : unit Alcotest.test list =
               [ (1, mk_goto) ];
               [], [] ]
         in
-        let envs, _, _ =
+        let envs, _, _, _ =
           Hv.fixpoint Theory.Target.unknown
             ~lookup:(fun _ -> None)
             ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
             ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv
                         (Program.create ~subs:[ sub ] ()))
-            ~lift_at:(fun _ ~block_addrs:_ -> None)
+            ~foreign_slots:Core.Int64.Set.empty
             ~block_addrs:(Core.Map.empty (module Addr)) sub
         in
         (* The RELOAD block's post state holds the reloaded value; the

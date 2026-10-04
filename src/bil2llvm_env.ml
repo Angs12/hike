@@ -11,6 +11,18 @@ module EHashtbl = Core.Hashtbl
 
 (* The pure integer constructors, shared by the expression lane and the
    pointer module (which must not depend on the expression lane). *)
+(* A shift's amount reads at the shifted value's width: LLVM requires
+   the two operands to share the type, while the BIL's shift amount
+   carries its own (the ISA's i8 encoding idiom). *)
+let shift_amount llvm_builder (llvm_val1, llvm_val2) =
+  let t1 = Llvm.type_of llvm_val1 in
+  if Llvm.type_of llvm_val2 = t1 then llvm_val2
+  else if
+    Llvm.integer_bitwidth (Llvm.type_of llvm_val2)
+    < Llvm.integer_bitwidth t1
+  then Llvm.build_zext llvm_val2 t1 "" llvm_builder
+  else Llvm.build_trunc llvm_val2 t1 "" llvm_builder
+
 let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   match op with
   | PLUS -> Llvm.build_add llvm_val1 llvm_val2 "" llvm_builder
@@ -23,9 +35,15 @@ let create_binop llvm_builder (op, llvm_val1, llvm_val2) =
   | AND -> Llvm.build_and llvm_val1 llvm_val2 "" llvm_builder
   | OR -> Llvm.build_or llvm_val1 llvm_val2 "" llvm_builder
   | XOR -> Llvm.build_xor llvm_val1 llvm_val2 "" llvm_builder
-  | LSHIFT -> Llvm.build_shl llvm_val1 llvm_val2 "" llvm_builder
-  | RSHIFT -> Llvm.build_lshr llvm_val1 llvm_val2 "" llvm_builder
-  | ARSHIFT -> Llvm.build_ashr llvm_val1 llvm_val2 "" llvm_builder
+  | LSHIFT ->
+    Llvm.build_shl llvm_val1 (shift_amount llvm_builder (llvm_val1, llvm_val2))
+      "" llvm_builder
+  | RSHIFT ->
+    Llvm.build_lshr llvm_val1 (shift_amount llvm_builder (llvm_val1, llvm_val2))
+      "" llvm_builder
+  | ARSHIFT ->
+    Llvm.build_ashr llvm_val1 (shift_amount llvm_builder (llvm_val1, llvm_val2))
+      "" llvm_builder
   | EQ -> Llvm.build_icmp Llvm.Icmp.Eq llvm_val1 llvm_val2 "" llvm_builder
   | NEQ -> Llvm.build_icmp Llvm.Icmp.Ne llvm_val1 llvm_val2 "" llvm_builder
   | LT -> Llvm.build_icmp Llvm.Icmp.Ult llvm_val1 llvm_val2 "" llvm_builder
@@ -273,8 +291,16 @@ let is_fp_param (ctx : emit_ctx) (v : var) : bool =
   Abi.is_vector_param_reg ctx.abi v
 
 let is_extern ctx (sub_tid : tid) : bool =
-  (not (Core.Map.mem ctx.sub_of sub_tid))
-  && not (Core.Set.mem ctx.synthetic sub_tid)
+  not (Core.Set.mem ctx.synthetic sub_tid)
+  &&
+  match Core.Map.find ctx.sub_of sub_tid with
+  | Some s ->
+    (* A block-less sub is the declaration the loader binds; a
+       trampoline (the PLT stub: every exit leaves the module) declares
+       the same external — its body never runs. *)
+    Base.Option.is_none (Term.first blk_t s)
+    || Hike_stack_model.is_plt_trampoline_sub s
+  | None -> true
 
 (* Strips tid prefixes for LLVM names; the model owns the character set,
    so the emitter's names and the resolver's name map agree. *)
@@ -337,17 +363,25 @@ let lane_type ctx (a : Arg.t) : Llvm.lltype =
 
 let get_args ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
-  | Some sub -> Hike_stack_model.sig_args sub
-  | None ->
-      if Core.Set.mem ctx.synthetic sub_tid then synthetic_args ctx
-      else reg_args ~intent:In (Abi.param_regs ctx.abi)
+  | Some sub
+    when Base.Option.is_some (Term.first blk_t sub)
+         && not (Hike_stack_model.is_plt_trampoline_sub sub) ->
+    Hike_stack_model.sig_args sub
+  | Some _ | None ->
+    (* A declaration's interface is the machine's own convention: the
+       bodyless sub (an external the loader binds) and the trampoline
+       (the PLT stub — its absorbed body is the loader's protocol,
+       never the module's code) carry no lanes of their own. *)
+    if Core.Set.mem ctx.synthetic sub_tid then synthetic_args ctx
+    else reg_args ~intent:In (Abi.param_regs ctx.abi)
 
 let get_rets ctx sub_tid =
   match Core.Map.find ctx.sub_of sub_tid with
-  | Some sub -> Hike_stack_model.sig_rets sub
-  | None ->
-      if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
-      else reg_args ~intent:Out ctx.abi.Abi.return_regs
+  | Some sub when Base.Option.is_some (Term.first blk_t sub) ->
+    Hike_stack_model.sig_rets sub
+  | Some _ | None ->
+    if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
+    else reg_args ~intent:Out ctx.abi.Abi.return_regs
 
 let ret_set ctx = Var.Set.of_list ctx.abi.Abi.return_regs
 

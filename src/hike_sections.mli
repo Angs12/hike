@@ -26,9 +26,7 @@ type range = { lo : point; hi : point } [@@deriving sexp]
 
 (** The endpoint ordering: section first, then the section's numeric
     order (signed for Stack/Args, unsigned for data sections). *)
-val compare_point : point -> point -> int
 val compare : range -> range -> int
-val equal_point : point -> point -> bool
 val equal : range -> range -> bool
 
 val point : sec -> int64 -> point
@@ -174,7 +172,6 @@ val storage_of_range : range_storage Tree.t -> range -> range_storage option
 
 (** The section space predicates: data sections vs the sub-local
     stack/arg spaces. *)
-val is_data_sec : sec -> bool
 val is_sub_local : sec -> bool
 
 (** The def's memory access: (address, width in bytes, stores?). *)

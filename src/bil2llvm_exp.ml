@@ -22,7 +22,10 @@ let create_concat ctx llvm_builder (llvm_var1, llvm_var2) =
 let create_extract ctx llvm_builder (hi, lo, llvm_var) =
   let width = Llvm.integer_bitwidth (Llvm.type_of llvm_var) in
   let result_size = hi - lo + 1 in
-  if lo >= width then
+  if result_size <= 0 then
+    (* An empty extract names no bits; the value is zero. *)
+    Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 1) 0
+  else if lo >= width then
     (* Out-of-range extracts yield zero. *)
     Llvm.const_int (Llvm.integer_type ctx.llvm_ctx result_size) 0
   else
@@ -112,6 +115,10 @@ let create_cast ctx llvm_builder (cast, i, llvm_val) =
     else llvm_val
   in
   let width = Llvm.integer_bitwidth (Llvm.type_of llvm_val) in
+  if i <= 0 then
+    (* A zero-width cast names no bits; the value is zero. *)
+    Llvm.const_int (Llvm.integer_type ctx.llvm_ctx 1) 0
+  else
   let target = Llvm.integer_type ctx.llvm_ctx i in
   let extend cast =
     match cast with SIGNED -> Llvm.build_sext | _ -> Llvm.build_zext

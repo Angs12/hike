@@ -52,13 +52,6 @@ let cells_of_sub ~(denote : denote) (sub : sub term) : int64 Tid.Map.t =
 
 let store_data (d : def term) : exp option = Model.store_data_of_rhs (Def.rhs d)
 
-let is_mem_var (v : var) : bool =
-  match Var.typ v with Mem _ -> true | _ -> false
-
-(* The value operands of an exp: the free vars, memory excluded. *)
-let value_vars (e : exp) : Var.Set.t =
-  Core.Set.filter (Exp.free_vars e) ~f:(fun v -> not (is_mem_var v))
-
 type block_data = {
   b_blk : blk term;
   b_tid : Tid.t;
@@ -152,8 +145,9 @@ let build_ctx (sub : sub term) : ctx =
         | `Both (x, y) -> Some (Core.Set.union x y)
         | `Left s | `Right s -> Some s)
   in
-  (* The predecessor transpose, built once: each block's entry merge
-     walks its preds, not the whole successor map. *)
+  (* The entry state per block: the union over predecessors of their
+     out states; a block's own defs kill then gen (applied when a
+     successor reads a predecessor). *)
   let preds =
     Core.Map.fold succs ~init:Tid.Map.empty
       ~f:(fun ~key:src ~data:ts acc ->
@@ -171,17 +165,21 @@ let build_ctx (sub : sub term) : ctx =
                (Core.Map.find preds b.b_tid |> Option.value ~default:[]))
             ~init:Var.Map.empty
             ~f:(fun acc src ->
-              merge_st acc
-                (Option.value (Core.Map.find !state src) ~default:Var.Map.empty))
+              match Core.Map.find by_tid src with
+              | Some pb ->
+                merge_st acc
+                  (transfer
+                     (Option.value (Core.Map.find !state src) ~default:Var.Map.empty)
+                     pb)
+              | None -> acc)
         in
-        let out = transfer inn b in
         if
           not
-            (Var.Map.equal Core.Set.equal out
+            (Var.Map.equal Core.Set.equal inn
                (Option.value (Core.Map.find !state b.b_tid) ~default:Var.Map.empty))
         then (
           changed := true;
-          state := Core.Map.set !state ~key:b.b_tid ~data:out));
+          state := Core.Map.set !state ~key:b.b_tid ~data:inn));
   done;
   let def_lhs =
     Base.List.concat_map blocks ~f:(fun b ->
@@ -252,7 +250,7 @@ let compare_operand_is_reload_value ~(denote : denote) (b : block_data) (reload 
     else consumer (i + 1)
   and after i =
     if i >= Array.length b.b_defs then None
-    else if Core.Set.mem (value_vars (Def.rhs b.b_defs.(i))) v then
+    else if Core.Set.mem (Model.value_vars (Def.rhs b.b_defs.(i))) v then
       Some b.b_defs.(i)
     else after (i + 1)
   in
@@ -284,40 +282,14 @@ let in_block_chain (b : block_data) (from_vars : Var.Set.t) : Tid.Set.t =
         if Core.Set.mem visited tid then go visited rest
         else
           let visited = Core.Set.add visited tid in
-          let vars = value_vars (Def.rhs b.b_defs.(j)) in
+          let vars = Model.data_vars (Def.rhs b.b_defs.(j)) in
           go visited
             (Core.Set.fold vars ~init:rest ~f:(fun acc v -> (v, j) :: acc))
   in
-  let vars = Core.Set.filter from_vars ~f:(fun v -> not (is_mem_var v)) in
+  let vars = Core.Set.filter from_vars ~f:(fun v -> not (Model.is_mem v)) in
   go Tid.Set.empty
     (Core.Set.fold vars ~init:[] ~f:(fun acc v ->
          (v, Array.length b.b_defs) :: acc))
-
-(* The compare family: the chain plus every block def whose value
-   operands mention a family lhs; memory-typed lhs never propagates. *)
-let compare_family ~(ctx : ctx) (b : block_data) (chain : Tid.Set.t) :
-    Tid.Set.t =
-  let fam = ref chain in
-  let changed = ref true in
-  while !changed do
-    changed := false;
-    let vars =
-      Core.Set.fold !fam ~init:Var.Set.empty ~f:(fun acc tid ->
-          match Core.Map.find ctx.def_lhs tid with
-          | Some v -> Core.Set.union acc (value_vars (Bil.Var v))
-          | None -> acc)
-    in
-    Base.List.iter (Array.to_list b.b_defs) ~f:(fun d ->
-        let tid = Term.tid d in
-        if
-          (not (Core.Set.mem !fam tid))
-          && not
-               (Core.Set.is_empty (Core.Set.inter (value_vars (Def.rhs d)) vars))
-        then (
-          changed := true;
-          fam := Core.Set.add !fam tid));
-  done;
-  !fam
 
 (* The glibc fail names: exactly [__stack_chk_fail] or its
    version/PLT-suffixed forms, never a user symbol that merely
@@ -404,7 +376,7 @@ let comp_of_block ~(denote : denote) ~(reach : Tid.t -> bool)
         else
         let from_vars =
           Base.List.fold (Array.to_list b.b_jmps) ~init:Var.Set.empty
-            ~f:(fun acc j -> Core.Set.union acc (value_vars (Jmp.cond j)))
+            ~f:(fun acc j -> Core.Set.union acc (Model.data_vars (Jmp.cond j)))
         in
         let chain = in_block_chain b from_vars in
         let cell_of_load tid =
@@ -464,9 +436,10 @@ let comp_of_block ~(denote : denote) ~(reach : Tid.t -> bool)
                     in
                     Base.Option.map read ~f:(fun (_, rd) ->
                         let rtid = Term.tid rd in
+                        (* The family is the value chain: the compare
+                           operands' in-block producers plus the reload. *)
                         let fam =
-                          compare_family ~ctx b
-                            (Core.Set.union chain (Tid.Set.singleton rtid))
+                          Core.Set.union chain (Tid.Set.singleton rtid)
                         in
                         let delete =
                           Core.Set.union fam
@@ -551,8 +524,10 @@ let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t) :
         | Some v -> Core.Set.add acc v
         | None -> acc)
   in
-  let check_use b i e =
-    Core.Set.for_all (value_vars e) ~f:(fun v ->
+  let check_use b i reads =
+    Core.Set.for_all
+      (Core.Set.filter reads ~f:(fun v -> not (Model.is_mem v)))
+      ~f:(fun v ->
         (not (Core.Set.mem deleted_vars v))
         || Core.Set.is_empty (Core.Set.inter deleted (reaching_at ctx b i v)))
   in
@@ -560,19 +535,20 @@ let residual_ok ~(ctx : ctx) ~(deleted : Tid.Set.t) ~(exempt_jmps : Tid.Set.t) :
       Base.List.for_all (Array.to_list b.b_defs) ~f:(fun d ->
           match Core.Map.find ctx.def_site (Term.tid d) with
           | Some (_, i) ->
-            Core.Set.mem deleted (Term.tid d) || check_use b i (Def.rhs d)
+            Core.Set.mem deleted (Term.tid d)
+            || check_use b i (Model.def_reads d)
           | None -> true)
       && Base.List.for_all (Array.to_list b.b_jmps) ~f:(fun j ->
              Core.Set.mem exempt_jmps (Term.tid j)
-             || check_use b (Array.length b.b_defs) (Jmp.cond j))
+             || check_use b (Array.length b.b_defs) (Model.jmp_operand_reads j))
       && Base.List.for_all b.b_phis ~f:(fun p ->
                 Base.List.for_all (Phi.values p |> Seq.to_list)
                   ~f:(fun (pred, e) ->
                     (* An edge value flows from the predecessor's end
                        state, not this block's entry. *)
                     match Core.Map.find ctx.by_tid pred with
-                    | Some pb -> check_use pb (Array.length pb.b_defs) e
-                    | None -> check_use b 0 e)))
+                    | Some pb -> check_use pb (Array.length pb.b_defs) (Exp.free_vars e)
+                    | None -> check_use b 0 (Exp.free_vars e))))
 
 (* Removes the blocks the rewrite orphaned: a block survives iff it
    was already predecessor-free (the entry and the pre-existing
@@ -603,6 +579,91 @@ let prune ~(pre_preds_count : Tid.t -> int) (sub : sub term) : sub term =
   in
   let reach = Core.Set.fold roots ~init:Tid.Set.empty ~f:reach in
   Term.filter blk_t sub ~f:(fun b -> Core.Set.mem reach (Term.tid b))
+
+(* The boundary guard: every transfer's boundary reads (a ret's return
+   registers and SP, a call's parameter registers and SP) must read a
+   surviving def — the transfer consumes them with no operand naming
+   them.  A flow-last writer the composition deletes is materialized at
+   the transfer's block with its proven singleton value; a writer the
+   denotation leaves unproven refuses the strip (the canary stays,
+   sound).  Paths through the fail blocks die with the rewrite and are
+   excluded. *)
+let boundary_ok ~(ctx : ctx) ~(denote : denote) ~(abi : Abi.t)
+    ~(deleted : Tid.Set.t) ~(fail_blks : Tid.Set.t)
+    : (Tid.t * (var * Word.t) list) list option =
+  let rec writers (visited : Tid.Set.t) (btid : Tid.t) (v : var)
+      (acc : Tid.Set.t) : Tid.Set.t =
+    if Core.Set.mem visited btid then acc
+    else
+      let visited = Core.Set.add visited btid in
+      match Core.Map.find ctx.by_tid btid with
+      | None -> acc
+      | Some b -> (
+          match
+            Option.bind (Core.Map.find ctx.last_def b.b_tid)
+              (fun m -> Core.Map.find m (Var.base v))
+          with
+          | Some i -> Core.Set.add acc (Term.tid b.b_defs.(i))
+          | None ->
+            let live_preds =
+              Core.Set.filter
+                (Core.Set.of_list (module Tid)
+                   (Core.Map.find ctx.preds btid |> Option.value ~default:[]))
+                ~f:(fun p -> not (Core.Set.mem fail_blks p))
+            in
+            Core.Set.fold live_preds ~init:acc ~f:(fun acc p ->
+                writers visited p v acc))
+  in
+  (* The deleted writer's produced value: its rhs in its own before-env. *)
+  let produced (tid : Tid.t) : (var * Word.t) option =
+    match Core.Map.find ctx.def_site tid with
+    | None -> None
+    | Some (btid, i) -> (
+        match Core.Map.find ctx.by_tid btid with
+        | None -> None
+        | Some b ->
+          let d = b.b_defs.(i) in
+          (match denote ~blk:b.b_blk ~def:d (Def.rhs d) with
+           | Ok ws ->
+             Base.Option.map (Vsa.WordSet.singleton_of ws) ~f:(fun w ->
+                 (Def.lhs d, Cbat_word.to_word w))
+           | Error _ -> None))
+  in
+  let mats = ref Tid.Map.empty in
+  let ok = ref true in
+  Base.List.iter ctx.blocks ~f:(fun b ->
+      if Core.Set.mem fail_blks b.b_tid then ()
+      else
+        Base.List.iter (Array.to_list b.b_jmps) ~f:(fun j ->
+            if not !ok then ()
+            else
+              Core.Set.iter (Model.jmp_boundary_reads ~abi j) ~f:(fun v ->
+                  if not !ok then ()
+                  else
+                    let ws = writers Tid.Set.empty b.b_tid v Tid.Set.empty in
+                    let del = Core.Set.inter ws deleted in
+                    if Core.Set.is_empty del then ()
+                    else if not (Core.Set.equal ws del) then ok := false
+                    else
+                      let produced =
+                        Core.Set.to_list del |> Base.List.filter_map ~f:produced
+                      in
+                      match produced with
+                      | (lv, w) :: rest
+                        when Base.List.length rest + 1 = Core.Set.length del
+                             && Base.List.for_all rest ~f:(fun (_, x) ->
+                                    Word.equal x w) ->
+                        let prev =
+                          Base.Option.value (Core.Map.find !mats b.b_tid)
+                            ~default:[]
+                        in
+                        let prev =
+                          Base.List.filter prev ~f:(fun (pv, _) ->
+                              not (Var.same pv lv))
+                        in
+                        mats := Core.Map.set !mats ~key:b.b_tid ~data:((lv, w) :: prev)
+                      | _ -> ok := false)));
+  if !ok then Some (Core.Map.to_alist !mats) else None
 
 (* Detect, check, rewrite, repeat until the identity. *)
 let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
@@ -652,8 +713,15 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
           Base.List.fold comps ~init:Tid.Set.empty ~f:(fun acc c ->
               Core.Set.add (Core.Set.add acc c.c_fail_jmp) c.c_eq_jmp)
         in
+        let fail_blks =
+          Base.List.fold comps ~init:Tid.Set.empty ~f:(fun acc c ->
+              Core.Set.add acc c.c_fail_blk)
+        in
         if not (residual_ok ~ctx ~deleted ~exempt_jmps) then sub
         else
+          match boundary_ok ~ctx ~denote ~abi ~deleted ~fail_blks with
+          | None -> sub
+          | Some mats ->
           let edge_edits =
             Base.List.fold comps ~init:Tid.Map.empty ~f:(fun m c ->
                 Core.Map.set m ~key:c.c_cmp_blk
@@ -673,6 +741,18 @@ let strip_sub ~(facts : Hike_kb.facts) ~(names : string Tid.Map.t)
                     Term.filter def_t blk ~f:(fun d ->
                         not (Core.Set.mem deleted (Term.tid d)))
                   else blk
+                in
+                let blk =
+                  match Base.List.Assoc.find mats t ~equal:Tid.equal with
+                  | None -> blk
+                  | Some vs ->
+                    let bld =
+                      Blk.Builder.init ~copy_phis:true ~copy_defs:true blk
+                    in
+                    Base.List.iter vs ~f:(fun (v, w) ->
+                        Blk.Builder.add_def bld (Def.create v (Bil.Int w)));
+                    Term.enum jmp_t blk |> Seq.iter ~f:(Blk.Builder.add_jmp bld);
+                    Blk.Builder.result bld
                 in
                 Base.Option.value_map (Core.Map.find edge_edits t) ~default:blk
                   ~f:(fun (fail_j, eq_j) ->

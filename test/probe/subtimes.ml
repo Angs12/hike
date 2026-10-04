@@ -56,8 +56,7 @@ let passcost_main (args : string list) : unit =
                 Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
                   ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]
                   ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi prog)
-                  ~lift_at:(fun _ ~block_addrs:_ -> None)
-                  ~block_addrs:(Core.Map.empty (module Addr)) sub)
+                                    ~block_addrs:(Core.Map.empty (module Addr)) sub)
           in
           let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in
           let rounds, _ = dce_rounds target sub in
@@ -86,7 +85,8 @@ let () =
       |> Base.Option.map ~f:(fun (arr, min_addr, max_addr) ->
              [ { Cbat_vsa.img_lo = Word.to_int64_exn min_addr;
                  img_hi = Word.to_int64_exn max_addr;
-                 img_bytes = arr } ])
+                 img_bytes = arr;
+                 img_slots = Core.Int64.Set.empty } ])
       |> Base.Option.value ~default:[]
     in
     Printf.eprintf "probe: .rodata image %d bytes\n%!"
@@ -123,10 +123,10 @@ let () =
           in
           Printf.eprintf "probe: solving %s (%d blk %d defs)\n%!" name nblk ndefs;
           let t0 = Unix.gettimeofday () in
-          let _envs, _sub', _ =
+          let _envs, _sub', _, _ =
             Hike.Vsa.fixpoint target ~lookup:(fun _ -> None)
               ~sub_addrs:(Core.Map.empty (module Addr)) ~images ~written
-              ~lift_at:(fun _ ~block_addrs:_ -> None)
+              ~foreign_slots:Core.Int64.Set.empty
               ~block_addrs sub
           in
           let dt = Unix.gettimeofday () -. t0 in

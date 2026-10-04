@@ -205,14 +205,6 @@ let mem_nodes (e : exp) : mem_node list =
 let mem_node_of (e : exp) : mem_node option =
   match mem_nodes e with n :: _ -> Some n | [] -> None
 
-(* The first node whose mem var satisfies [pred]. *)
-let mem_node_where (pred : var -> bool) (e : exp) : mem_node option =
-  Base.List.find_map (mem_nodes e) ~f:(fun n ->
-      match n with
-      | `Load (Bil.Var v, _, _) when pred v -> Some n
-      | `Store (Bil.Var v, _, _, _) when pred v -> Some n
-      | _ -> None)
-
 let mem_node_count (e : exp) : int = List.length (mem_nodes e)
 
 let reads_mem (e : exp) : bool =
@@ -405,6 +397,72 @@ let region_ptr_id_of (v : var) : int option =
   else None
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
+
+(* The vars a term reads — the one home; every consumer of a read set
+   derives it here.  A def reads its rhs's vars, a phi its incomings,
+   a jmp its operand expressions plus what its kind consumes at the
+   ABI boundary: a ret the return registers and SP (the return-address
+   pop), a call the parameter registers and SP (the return-address
+   push). *)
+let def_reads (d : def term) : Var.Set.t = Exp.free_vars (Def.rhs d)
+
+let phi_reads (p : phi term) : Var.Set.t = Phi.free_vars p
+
+(* The reads of a jmp's own operands: the condition and the target
+   expressions. *)
+let jmp_operand_reads (j : jmp term) : Var.Set.t = Jmp.free_vars j
+
+(* The boundary reads a jmp's kind consumes with no operand naming
+   them. *)
+let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
+  match Jmp.kind j with
+  | Ret _ -> Core.Set.of_list (module Var) (abi.return_regs @ [abi.sp])
+  | Call _ -> Core.Set.of_list (module Var) (Abi.param_regs abi @ [abi.sp])
+  | _ -> Var.Set.empty
+
+let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
+  Core.Set.union (jmp_operand_reads j) (jmp_boundary_reads ~abi j)
+
+(* The block's free vars, the liveness view: a def's reads minus what
+   its later defs kill, the jmps' operand reads; a phi contributes no
+   reads (it binds its lhs). *)
+let blk_free_vars (blk : blk term) : Var.Set.t =
+  fst
+  @@ Seq.fold (Blk.elts blk)
+       ~init:(Var.Set.empty, Var.Set.empty)
+       ~f:(fun (vars, kill) -> function
+             | `Phi _ -> (vars, kill)
+             | `Def d ->
+               (Core.Set.union (Core.Set.diff (def_reads d) kill) vars,
+                Core.Set.add kill (Def.lhs d))
+             | `Jmp j ->
+               (Core.Set.union (Core.Set.diff (jmp_operand_reads j) kill) vars,
+                kill))
+
+(* The value vars of an exp: the free vars, memory excluded — the
+   storage mem vars are the memory machinery's subject, not values. *)
+let value_vars (e : exp) : Var.Set.t =
+  Core.Set.filter (Exp.free_vars e) ~f:(fun v -> not (is_mem v))
+
+(* The vars of an exp's memory addresses: an address names the
+   location; the value flows through the cell. *)
+let address_vars (e : exp) : Var.Set.t =
+  let addrs = ref Var.Set.empty in
+  let vis =
+    object
+      inherit [ unit ] Exp.visitor
+      method! visit_load ~mem:_ ~addr _ _ () =
+        addrs := Core.Set.union !addrs (Exp.free_vars addr)
+      method! visit_store ~mem:_ ~addr ~exp:_ _ _ () =
+        addrs := Core.Set.union !addrs (Exp.free_vars addr)
+    end
+  in
+  vis#visit_exp e ();
+  !addrs
+
+(* The data reads of an exp: the value vars minus the address vars. *)
+let data_vars (e : exp) : Var.Set.t =
+  Core.Set.diff (value_vars e) (address_vars e)
 
 let is_region_mem (v : var) : bool = is_in_family region_family v
 

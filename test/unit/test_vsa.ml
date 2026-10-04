@@ -419,7 +419,8 @@ let tests : unit Alcotest.test list =
         let sub = straight_sub "a3_image_solve" [ load ] in
         let images =
           [ { Vsa.img_lo = 0x4000L; img_hi = 0x4007L;
-              img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00" } ]
+              img_bytes = Bytes.of_string "\x2d\x00\x00\x00\x00\x00\x00\x00";
+              img_slots = Core.Int64.Set.empty } ]
         in
         let envs, _, _ =
           produce ~images Theory.Target.unknown

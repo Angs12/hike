@@ -7,6 +7,7 @@
    whole, named on the channel. *)
 
 open Bap.Std
+module Model = Hike_stack_model
 
 (* A compilable series: every jmp a direct Goto to a non-interrupt. *)
 let compilable_series (jmps : jmp term list) : bool =
@@ -125,7 +126,7 @@ let free_regs (sub : sub term) : var list =
              | `Phi p -> Core.Set.add acc (Phi.lhs p)
              | _ -> acc)
     in
-    (Blk.free_vars blk, defs)
+    (Model.blk_free_vars blk, defs)
   in
   let trans =
     Base.List.fold blks ~init:Tid.Map.empty ~f:(fun m blk ->
