@@ -168,6 +168,90 @@ let tests : unit Alcotest.test list =
         check "SSA-03"
           (Hike.Stack_model.is_ssa sub
           && Hike.Ssa.free_regs_ssa sub = [ v64 "RDI" ]));
+
+    pin "SSA-04" "a call return and bypass value meet in a join phi"
+      (fun () ->
+        let ret_reg = v64 "RAX" in
+        let callee, _ = sub_of "ssa4_callee" [ [], [ (0, mk_ret) ] ] in
+        let callee =
+          Term.append arg_t callee
+            (Arg.create ~intent:Out ret_reg (Bil.Var ret_reg))
+        in
+        let join =
+          let b = Blk.Builder.create () in
+          Blk.Builder.add_def b
+            (Def.create (v64 "ssa4_use") (Bil.Var ret_reg));
+          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          Blk.Builder.result b
+        in
+        let call =
+          with_jmps (blk_of_defs [])
+            [ Jmp.create
+                (Call
+                   (Call.create ~return:(Direct (Term.tid join))
+                      ~target:(Direct (Term.tid callee)) ())) ]
+        in
+        let bypass = with_jmps (blk_of_defs []) [ mk_goto (Term.tid join) ] in
+        let initial = Cbat_word.to_word (w64 5) in
+        let entry =
+          with_jmps
+            (blk_of_defs [ Def.create ret_reg (Bil.Int initial) ])
+            [ mk_jmp_to (Term.tid call) (Bil.Var (v1 "ssa4_cond"));
+              mk_goto (Term.tid bypass) ]
+        in
+        let sub =
+          let sb = Sub.Builder.create ~name:"ssa4_caller" () in
+          Sub.Builder.add_blk sb entry;
+          Sub.Builder.add_blk sb call;
+          Sub.Builder.add_blk sb bypass;
+          Sub.Builder.add_blk sb join;
+          Sub.Builder.result sb
+        in
+        let prog = Program.create ~subs:[ callee; sub ] () in
+        let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
+        let caller =
+          Term.enum sub_t prog
+          |> Seq.find ~f:(fun s -> String.equal (Sub.name s) "ssa4_caller")
+          |> Base.Option.value_exn
+        in
+        let call' = Term.find blk_t caller (Term.tid call) |> Base.Option.value_exn in
+        let join' = Term.find blk_t caller (Term.tid join) |> Base.Option.value_exn in
+        let phi =
+          Term.enum phi_t join'
+          |> Seq.find ~f:(fun p -> Var.same (Var.base (Phi.lhs p)) ret_reg)
+          |> Base.Option.value_exn
+        in
+        let versions =
+          Term.get_attr call' Hike.Stack_model.versions_tag
+          |> Base.Option.value_exn
+        in
+        let call_version =
+          Base.List.Assoc.find versions.Hike.Stack_model.Versions.rets ret_reg
+            ~equal:Var.same
+          |> Base.Option.value_exn
+        in
+        let incoming = Phi.values phi |> Seq.to_list in
+        let call_incoming =
+          Base.List.Assoc.find incoming (Term.tid call) ~equal:Tid.equal
+        in
+        let bypass_incoming =
+          Base.List.Assoc.find incoming (Term.tid bypass) ~equal:Tid.equal
+        in
+        let bypass_has_version =
+          match bypass_incoming with
+          | None -> false
+          | Some exp ->
+              let vars = Exp.free_vars exp in
+              Core.Set.length vars = 1
+              && (let v = Core.Set.choose_exn vars in
+                  Exp.equal exp (Bil.Var v)
+                  && Var.same (Var.base v) ret_reg
+                  && Var.index v > 0)
+        in
+        check "SSA-04"
+          (Var.index (Phi.lhs phi) > 0
+          && Option.equal Exp.equal call_incoming (Some (Bil.Var call_version))
+          && bypass_has_version));
   ]
 
 let () = run "hike_ssa" tests

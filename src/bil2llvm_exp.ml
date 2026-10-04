@@ -43,16 +43,12 @@ let create_extract ctx llvm_builder (hi, lo, llvm_var) =
         (Llvm.integer_type ctx.llvm_ctx result_size) "" llvm_builder
 
 (* True when the address bases on the target's TLS register. *)
-let rec is_tls_addr ctx (e : exp) : bool =
-  match e with
-  | Var v -> Var.same v ctx.abi.Abi.thread_pointer
-  | BinOp (_, e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
-  | UnOp (_, e) -> is_tls_addr ctx e
-  | Cast (_, _, e) -> is_tls_addr ctx e
-  | Extract (_, _, e) -> is_tls_addr ctx e
-  | Concat (e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
-  | Let (_, e1, e2) -> is_tls_addr ctx e1 || is_tls_addr ctx e2
-  | _ -> false
+let is_tls_addr ctx (e : exp) : bool =
+  (object
+     inherit [ bool ] Exp.visitor
+     method! visit_var v found =
+       found || Var.same v ctx.abi.Abi.thread_pointer
+   end)#visit_exp e false
 
 (* A thread_local global's address is not a constant;
    llvm.threadlocal.address is its accessor. *)
@@ -207,20 +203,23 @@ let is_window_exp scope (e : exp) : bool =
 (* The entry-line offset of an expression, when structurally known: an
    arithmetic chain from the entry line / a slot.  A load, parameter,
    phi, or cast has none. *)
-let rec static_offset scope (exp : exp) : int64 option =
-  match exp with
-  | Bil.Int w -> ( match Word.to_int64 w with Ok x -> Some x | Error _ -> None)
-  | Bil.Var v -> (
-      match get_ptr_offset scope v with
-      | Some ll -> Llvm.int64_of_const ll
-      | None -> None)
-  | Bil.BinOp (Bil.PLUS, a, b) ->
-      Base.Option.bind (static_offset scope a) ~f:(fun x ->
-          Base.Option.map (static_offset scope b) ~f:(Stdlib.Int64.add x))
-  | Bil.BinOp (Bil.MINUS, a, b) ->
-      Base.Option.bind (static_offset scope a) ~f:(fun x ->
-          Base.Option.map (static_offset scope b) ~f:(Stdlib.Int64.sub x))
-  | _ -> None
+let static_offset scope (exp : exp) : int64 option =
+  Hike_exp_fold.fold
+    (fun exp child ->
+      match exp with
+      | Bil.Int w -> (match Word.to_int64 w with Ok x -> Some x | Error _ -> None)
+      | Bil.Var v -> (
+          match get_ptr_offset scope v with
+          | Some ll -> Llvm.int64_of_const ll
+          | None -> None)
+      | Bil.BinOp (Bil.PLUS, a, b) ->
+          Base.Option.bind (child a) ~f:(fun x ->
+              Base.Option.map (child b) ~f:(Stdlib.Int64.add x))
+      | Bil.BinOp (Bil.MINUS, a, b) ->
+          Base.Option.bind (child a) ~f:(fun x ->
+              Base.Option.map (child b) ~f:(Stdlib.Int64.sub x))
+      | _ -> None)
+    exp
 
 let rec create_offset ctx scope llvm_builder blk_tid exp :
     Llvm.llvalue option =
@@ -317,12 +316,12 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
       in
       create_extract ctx llvm_builder (hi, lo, v)
   | Store (_, addr, data, _, _) when is_tls_addr ctx addr ->
-      let ptr = tls_anchor_addr ctx llvm_builder in
+      let ptr = create_tls_ptr ctx scope llvm_builder blk_tid addr in
       let d = create_exp ctx scope llvm_builder blk_tid data in
       let _ : Llvm.llvalue = Llvm.build_store d ptr llvm_builder in
       d
   | Load (_, addr, _, size) when is_tls_addr ctx addr ->
-      let ptr = tls_anchor_addr ctx llvm_builder in
+      let ptr = create_tls_ptr ctx scope llvm_builder blk_tid addr in
       let ty =
         match want with
         | Some t -> t
@@ -359,6 +358,18 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
         match want with Some t -> t | None -> typ_lltype ctx typ
       in
       Llvm.build_freeze (Llvm.undef typ) "hike_unknown" llvm_builder
+
+and create_tls_ptr ctx scope llvm_builder blk_tid addr =
+  let anchor = tls_anchor_addr ctx llvm_builder in
+  let offset_exp =
+    Exp.substitute (Bil.Var ctx.abi.Abi.thread_pointer)
+      (Bil.Int (Word.zero ctx.addr_bits)) addr
+  in
+  let offset =
+    create_exp ctx scope llvm_builder blk_tid offset_exp
+    |> as_integer ctx llvm_builder
+  in
+  Bil2llvm_ptr.gep_i8 ctx llvm_builder anchor offset
 
 (* One memory node: the address is a pointer (a stack/VLA value) or an
    integer (the raw/heap lane); the marker carries the loaded value

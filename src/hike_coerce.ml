@@ -31,8 +31,7 @@ let exp_width (e : exp) : int =
           if is_compare op then 1 else Stdlib.max (child a) (child b)
       | Bil.UnOp (_, a) -> child a
       | Bil.Ite (_, a, _) -> child a
-      | Bil.Let (v, value, _) -> (
-          match Var.typ v with Type.Imm n -> n | _ -> child value)
+      | Bil.Let (_, _, body) -> child body
       | Bil.Unknown (_, t) -> (match t with Type.Imm n -> n | _ -> 0))
     e
 

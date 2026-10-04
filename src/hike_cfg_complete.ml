@@ -327,53 +327,53 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
       option =
     if depth > 16 then None
     else
-      match e with
-      | Bil.Int w -> (
-        match Cbat_word.to_int64 (Cbat_word.of_word w) with
-        | Ok v -> Some (Some v, None)
-        | Error _ -> None)
-      | Bil.Load (_, addr, endi, size) when Size.in_bits size = bits ->
-        Some (None, Some (addr, false, endi, at))
-      | Bil.Cast (kind, _, e2) -> (
-        match sym ~at ~depth:(depth + 1) e2 with
-        | Some (base, Some (addr, _, endi, load)) -> (
-          match cast_signed kind with
-          | Some sgn -> Some (base, Some (addr, sgn, endi, load))
-          | None -> None)
-        | other -> other)
-      | Bil.Var v -> (
-        let found =
-          match at with
-          | Some d -> Core.Map.find (before_defs d) v
-          | None -> (
-            match Core.Map.find last_defs v with
-            | Some d -> Some d
-            | None ->
-              Term.enum blk_t sub
-              |> Seq.find_map ~f:(fun b ->
-                     Term.enum def_t b
-                     |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)))
-        in
-        match found with
-        | Some d -> sym ~at:(Some d) ~depth:(depth + 1) (Def.rhs d)
-        | None -> None)
-      | Bil.BinOp (Bil.PLUS, a, b) -> (
-        match sym ~at ~depth:(depth + 1) a with
-        | None -> None
-        | Some (ba, ca) -> (
-          match sym ~at ~depth:(depth + 1) b with
-          | None -> None
-          | Some (bb, cb) ->
-            if Option.is_some ca && Option.is_some cb then None
-            else
-              Some
-                ((match ba, bb with
-                  | Some x, Some y -> Some (Int64.add x y)
-                  | Some _, None -> ba
-                  | None, Some _ -> bb
-                  | None, None -> None),
-                 match ca, cb with Some _, _ -> ca | None, _ -> cb)))
-      | _ -> None
+      Hike_exp_fold.fold
+        (fun e child ->
+          match e with
+          | Bil.Int w -> (
+              match Cbat_word.to_int64 (Cbat_word.of_word w) with
+              | Ok v -> Some (Some v, None)
+              | Error _ -> None)
+          | Bil.Load (_, addr, endi, size) when Size.in_bits size = bits ->
+              Some (None, Some (addr, false, endi, at))
+          | Bil.Cast (kind, _, e2) -> (
+              match child e2 with
+              | Some (base, Some (addr, _, endi, load)) -> (
+                  match cast_signed kind with
+                  | Some sgn -> Some (base, Some (addr, sgn, endi, load))
+                  | None -> None)
+              | other -> other)
+          | Bil.Var v -> (
+              let found =
+                match at with
+                | Some d -> Core.Map.find (before_defs d) v
+                | None -> (
+                    match Core.Map.find last_defs v with
+                    | Some d -> Some d
+                    | None ->
+                        Term.enum blk_t sub
+                        |> Seq.find_map ~f:(fun b ->
+                               Term.enum def_t b
+                               |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)))
+              in
+              match found with
+              | Some d -> sym ~at:(Some d) ~depth:(depth + 1) (Def.rhs d)
+              | None -> None)
+          | Bil.BinOp (Bil.PLUS, a, b) -> (
+              match (child a, child b) with
+              | Some (ba, ca), Some (bb, cb) ->
+                  if Option.is_some ca && Option.is_some cb then None
+                  else
+                    Some
+                      ((match ba, bb with
+                        | Some x, Some y -> Some (Int64.add x y)
+                        | Some _, None -> ba
+                        | None, Some _ -> bb
+                        | None, None -> None),
+                       match ca, cb with Some _, _ -> ca | None, _ -> cb)
+              | _ -> None)
+          | _ -> None)
+        e
   in
   match sym ~at ~depth:0 texp with
   | Some (Some base, Some (addr_exp, sgn, endi, load)) ->

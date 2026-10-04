@@ -214,51 +214,51 @@ let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
    to its singleton offset, the runtime pieces stay.  [None] when an
    address part is not statically known — the value then composes over
    its operands' own pointers. *)
-let rec offset_of ~(piece_ok : var -> bool) ~(leaves : leaf Var.Map.t)
+let offset_of ~(piece_ok : var -> bool) ~(leaves : leaf Var.Map.t)
     (e : exp) : exp option =
   let w64 (k : int64) : exp =
     Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 k))
   in
-  match e with
-  | Bil.Int _ -> Some e
-  | Bil.Var v -> (
-      match Core.Map.find leaves v with
-      | Some (`Static k) -> Some (w64 k)
-      | Some `Int when piece_ok v -> Some e
-      | Some (`Int | `Addr) | None -> None)
-  | Bil.BinOp ((Bil.PLUS | Bil.MINUS) as op, a, b) -> (
-      match (offset_of ~piece_ok ~leaves a, offset_of ~piece_ok ~leaves b) with
-      | Some a', Some b' -> (
-          match (a', b') with
-          | Bil.Int x, Bil.Int y -> (
-              match
-                (Cbat_word.to_int64 (Cbat_word.of_word x),
-                 Cbat_word.to_int64 (Cbat_word.of_word y))
-              with
-              | Ok x', Ok y' ->
-                  Some (w64 ((if op = Bil.PLUS then Stdlib.Int64.add
-                             else Stdlib.Int64.sub)
-                               x' y'))
+  Hike_exp_fold.fold
+    (fun e child ->
+      match e with
+      | Bil.Int _ -> Some e
+      | Bil.Var v -> (
+          match Core.Map.find leaves v with
+          | Some (`Static k) -> Some (w64 k)
+          | Some `Int when piece_ok v -> Some e
+          | Some (`Int | `Addr) | None -> None)
+      | Bil.BinOp ((Bil.PLUS | Bil.MINUS) as op, a, b) -> (
+          match (child a, child b) with
+          | Some a', Some b' -> (
+              match (a', b') with
+              | Bil.Int x, Bil.Int y -> (
+                  match
+                    (Cbat_word.to_int64 (Cbat_word.of_word x),
+                     Cbat_word.to_int64 (Cbat_word.of_word y))
+                  with
+                  | Ok x', Ok y' ->
+                      Some (w64 ((if op = Bil.PLUS then Stdlib.Int64.add
+                                 else Stdlib.Int64.sub)
+                                   x' y'))
+                  | _ -> Some (Bil.BinOp (op, a', b')))
               | _ -> Some (Bil.BinOp (op, a', b')))
-          | _ -> Some (Bil.BinOp (op, a', b')))
-      | _ -> None)
-  | Bil.Cast (cast, w, a) ->
-      Base.Option.map (offset_of ~piece_ok ~leaves a) ~f:(fun a' ->
-          Bil.Cast (cast, w, a'))
-  | Bil.Ite (c, a, b) -> (
-      match (offset_of ~piece_ok ~leaves a, offset_of ~piece_ok ~leaves b) with
-      | Some a', Some b' -> Some (Bil.Ite (c, a', b'))
-      | _ -> None)
-  | _ ->
-      (* Any other shape is a runtime piece only when every var leaf is
-         a visible non-address on a stable sort. *)
-      if
-        Core.Set.exists (Exp.free_vars e) ~f:(fun v ->
-            match Core.Map.find leaves v with
-            | Some `Int when piece_ok v -> false
-            | _ -> true)
-      then None
-      else Some e
+          | _ -> None)
+      | Bil.Cast (cast, width, a) ->
+          Base.Option.map (child a) ~f:(fun a' -> Bil.Cast (cast, width, a'))
+      | Bil.Ite (c, a, b) -> (
+          match (child a, child b) with
+          | Some a', Some b' -> Some (Bil.Ite (c, a', b'))
+          | _ -> None)
+      | _ ->
+          if
+            Core.Set.exists (Exp.free_vars e) ~f:(fun v ->
+                match Core.Map.find leaves v with
+                | Some `Int when piece_ok v -> false
+                | _ -> true)
+          then None
+          else Some e)
+    e
 
 (* [base + (disp − rel)] with the displacement folded: a static
    displacement folds to a constant (the base itself at zero). *)
@@ -974,4 +974,3 @@ let rewrite_program ~(word : int) ~(entry : int64) ~(facts : Hike_kb.facts)
         ~vla_tids:(Core.Map.key_set facts.Hike_kb.vla_extents)
         ~callee_exempt:(Core.Set.mem exempt (Term.tid sub))
         sub)
-

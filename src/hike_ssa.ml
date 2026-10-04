@@ -186,6 +186,16 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
           | Indirect _ -> abi.Abi.return_regs)
       |> Base.List.dedup_and_sort ~compare:Var.compare
     in
+    let ret_mint_sites =
+      Base.List.fold call_blocks ~init:Var.Map.empty
+        ~f:(fun sites (blk, cs) ->
+          let tid = Term.tid blk in
+          Base.List.fold (mint_of cs) ~init:sites ~f:(fun sites v ->
+              let tids =
+                Base.Option.value (Core.Map.find sites v) ~default:[]
+              in
+              Core.Map.set sites ~key:v ~data:(tid :: tids)))
+    in
     (* The dom/phi machinery walks the BIR's own CFG ([g] above). *)
 #ifdef VSA_DEBUG
     let () =
@@ -303,6 +313,10 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
           let sites =
             Base.List.filter_map blks ~f:(fun blk ->
                 if defines v blk then Some (Term.tid blk) else None)
+          in
+          let sites =
+            sites
+            @ Base.Option.value (Core.Map.find ret_mint_sites v) ~default:[]
           in
           let sites =
             if Var.same v sp then

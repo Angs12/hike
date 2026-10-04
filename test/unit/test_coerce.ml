@@ -182,6 +182,26 @@ let tests : unit Alcotest.test list =
     (* CO-19: the dropped operand's def is then width-honest — the rhs is
        the surviving operand, coerced to the lhs width. *)
 
+    (* A Let expression's value width is the body's width, independent of
+       the temporary binder's width. *)
+    pin "CO-20" "a Let rhs is coerced from the body width"
+      (fun () ->
+        let binder = v64 "co20_binder" in
+        let lhs = v64 "co20_lhs" in
+        let narrow =
+          Bil.Int (Cbat_word.to_word (Cbat_word.of_int ~width:8 7))
+        in
+        let e = Bil.Let (binder, int64 1, narrow) in
+        let rhs =
+          Hike.Coerce.coerce_block (blk_of_defs [ Def.create lhs e ])
+          |> Term.enum def_t |> Seq.hd_exn |> Def.rhs
+        in
+        check "CO-20"
+          (Exp.equal rhs
+             (Bil.Cast
+                (UNSIGNED, 64,
+                 Bil.Let (binder, int64 1, narrow)))));
+
   ]
 
 let () = run "coerce" tests

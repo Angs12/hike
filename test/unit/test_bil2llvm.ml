@@ -256,23 +256,33 @@ let tests : unit Alcotest.test list =
           && contains_substring mismatched "add i64 %RDI, 1"
           && not (contains_substring control "trunc i64 ")));
 
-    (* TLS: the stack-protector canary's thread-pointer access renders as
-       the thread-local anchor's per-thread address. *)
-    pin "EMIT-14" "the TLS access renders the thread_local anchor, its accessor, and drops the base offset"
+    (* TLS offsets address distinct locations relative to the per-thread
+       anchor. *)
+    pin "EMIT-14" "TLS accesses preserve their offsets from the thread_local anchor"
       (fun () ->
         let tp = Hike.Abi.x86_64_sysv.thread_pointer in
         let m = memv "tls_m" in
         let out = v64 "tls_out" in
-        let addr =
+        let addr offset =
           Bil.BinOp
-            (Bil.PLUS, Bil.Var tp, Bil.Int (Cbat_word.to_word (w64 0x28)))
+            (Bil.PLUS, Bil.Var tp, Bil.Int (Cbat_word.to_word (w64 offset)))
+        in
+        let store offset value =
+          Def.create (memv (Printf.sprintf "tls_store_%d" offset))
+            (Bil.Store
+               ( Bil.Var m
+               , addr offset
+               , Bil.Int (Cbat_word.to_word (w64 value))
+               , LittleEndian
+               , `r64 ))
         in
         let ld =
-          Def.create out (Bil.Load (Bil.Var m, addr, LittleEndian, `r64))
+          Def.create out
+            (Bil.Load (Bil.Var m, addr 0x28, LittleEndian, `r64))
         in
         let sub, _ =
           sub_of "tls_anchor_sub"
-            [ [ ld ],
+            [ [ store 0x28 111; store 0x30 222; ld ],
               [ (1,
                  fun t ->
                    mk_jmp_to t
@@ -287,9 +297,13 @@ let tests : unit Alcotest.test list =
           && contains_substring ir "ptr @llvm.threadlocal.address(ptr"
           && contains_substring ir
                "call ptr @llvm.threadlocal.address(ptr @hike_tls_anchor)"
-          && contains_substring ir "load i64, ptr %tls_anchor"
-          && (not (contains_substring ir "getelementptr"))
-          && not (contains_substring ir "add i64 40")));
+          && contains_substring ir
+               "getelementptr i8, ptr %tls_anchor, i64 40"
+          && contains_substring ir
+               "getelementptr i8, ptr %tls_anchor1, i64 48"
+          && contains_substring ir "store i64 111"
+          && contains_substring ir "store i64 222"
+          && contains_substring ir "load i64"));
 
     (* ROWS-COUNT: the resolved dispatch's emitter views — one incoming
        per rendered edge. *)
