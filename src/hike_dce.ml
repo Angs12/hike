@@ -39,7 +39,14 @@ let dce ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
                  Core.Set.fold (Model.jmp_boundary_reads ~abi j)
                    ~init:!base_roots
                    ~f:(fun acc v -> Core.Set.add acc (Var.base v))));
-    let live_vars = ref !exact_roots in
+    (* Liveness is per STORAGE, not per SSA version: the roots and every
+       node's reads project to base vars, so a load of any version of a
+       mem var roots the stores into it. *)
+    let live_bases =
+      ref
+        (Core.Set.fold !exact_roots ~init:Var.Set.empty ~f:(fun acc v ->
+             Core.Set.add acc (Var.base v)))
+    in
     let live_tids = ref Tid.Set.empty in
     let changed = ref true in
     while !changed do
@@ -47,11 +54,13 @@ let dce ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
       Base.List.iter nodes ~f:(fun (tid, lhs, reads) ->
           if
             (not (Core.Set.mem !live_tids tid))
-            && (Core.Set.mem !live_vars lhs
+            && (Core.Set.mem !live_bases (Var.base lhs)
                 || Core.Set.mem !base_roots (Var.base lhs))
           then begin
             live_tids := Core.Set.add !live_tids tid;
-            live_vars := Core.Set.union !live_vars reads;
+            live_bases :=
+              Core.Set.fold reads ~init:!live_bases ~f:(fun acc v ->
+                  Core.Set.add acc (Var.base v));
             changed := true
           end)
     done;
