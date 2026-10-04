@@ -69,7 +69,6 @@
   memmap_bench
   clp_bench
   env_footprint
-  relift_dump
   dec_diff
   drive_loop
   t15_pkg)
@@ -86,7 +85,6 @@
   memmap_bench
   clp_bench
   env_footprint
-  relift_dump
   dec_diff
   drive_loop
   t15_pkg)
