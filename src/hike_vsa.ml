@@ -152,10 +152,12 @@ let fixpoint (target : Theory.Target.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     ?(code_range : (int64 * int64) option = None)
+    ?(noreturn : Tid.Set.t = Tid.Set.empty)
     (sub : sub term) :
     (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
     * (Addr.t * bool * Cbat_word.t list) list =
   self_arm target;
+  let sub = Hike_cfg_complete.clear_noreturn_returns ~noreturn sub in
   let abi = Hike_abi.of_target target in
 #ifdef VSA_DEBUG
   let dump_r8 (sol : Vsa.vsa_sol) (sub : sub term) =

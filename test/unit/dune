@@ -5,6 +5,7 @@
   hike
   hike.hike_core
   hike.hike_emit
+  hike.hike_noreturn
   bap
   bap-main
   bap-core-theory
@@ -54,6 +55,7 @@
   test_hike_fp
   test_probe
   test_image
+  test_noreturn
   test_integration)
  (modules :standard \ harness common fixtures test_clp_equiv)
  (libraries
@@ -62,6 +64,7 @@
   hike
   hike.hike_core
   hike.hike_emit
+  hike.hike_noreturn
   bap
   bap-main
   bap-core-theory

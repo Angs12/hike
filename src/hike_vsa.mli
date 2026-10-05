@@ -44,6 +44,7 @@ open Bap_core_theory
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
     ?code_range:(int64 * int64) option ->
+    ?noreturn:Tid.Set.t ->
     sub term ->
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
     * (Addr.t * bool * Cbat_word.t list) list

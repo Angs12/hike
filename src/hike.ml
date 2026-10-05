@@ -390,6 +390,11 @@ let pass_vsa proj =
      are other subs' entries), is a root; any other goto word is a case
      body the driver decodes inside its owning sub.  The loop settles
      when neither the decode nor the discoveries grow. *)
+  (* The noreturn fact: computed on each round's SOLVED program (where
+     the denotations and canonical returns are final) and threaded into
+     the next round's solve, so the completion's edge set never keeps a
+     return continuation for a never-returning callee. *)
+  let noreturn = ref Tid.Set.empty in
   let rec round prev =
     if !rounds_left <= 0 then begin
       Hike_diag.warn "vsa: the drive loop stopped at its round budget";
@@ -488,12 +493,26 @@ let pass_vsa proj =
                  let envs, sub', ba', facts =
                    Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images
                      ~written ~foreign_slots:linker_slots
-                     ~code_range:text_range ~block_addrs:ba sub
+                     ~code_range:text_range ~noreturn:!noreturn
+                     ~block_addrs:ba sub
                  in
                  (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'),
                   Base.List.append dfs facts,
                   ba'))
         in
+        (* The noreturn fact on the solved program (denotations and the
+           canonical returns are final): the set feeds the NEXT round's
+           solve, whose completion keeps no continuation for a
+           never-returning callee. *)
+        let solved_program =
+          Term.map sub_t program ~f:(fun s ->
+              match Core.Map.find subs_acc (Term.tid s) with
+              | Some (_, s') -> s'
+              | None -> s)
+        in
+        let noreturn' = Hike_noreturn.classify ~target solved_program in
+        let noreturn_grew = not (Core.Set.equal noreturn' !noreturn) in
+        noreturn := noreturn';
         (* main: the address the entry passes to the runtime — the
            entry's call block's postcondition denotates it as a
            singleton.  A named sub sits there (the symtab names it); a
@@ -639,6 +658,8 @@ let pass_vsa proj =
            lookup, main_addr)
         in
         let settled =
+          (not noreturn_grew)
+          &&
           match prev with
           | Some (pstate, pdisc, _) ->
             Disasm.Driver.equal pstate out.grown

@@ -27,7 +27,8 @@
     hike.cbat_vsa
     hike.cbat_vsa_domain
     hike.hike_core
-    hike.hike_emit))
+    hike.hike_emit
+    hike.hike_noreturn))
 
 ; Build blocker: fails the build on env reads in src/ or direct prints
 ; outside Hike_diag / Event.Log. Runs on [dune build] and [@install].

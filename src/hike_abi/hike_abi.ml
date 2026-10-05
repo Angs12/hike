@@ -27,6 +27,9 @@ type t = {
   entry_symbol : string;         (* the process entry's linker symbol, the
                                     runtime boundary a dead continuation
                                     binds to (SysV: _start) *)
+  noreturn_symbols : string list; (* the runtime contract's never-returning
+                                    functions (the base fact for body-less
+                                    externs; DWARF extends it upstream) *)
 }
 
 let x86_64_sysv : t =
@@ -59,6 +62,9 @@ let x86_64_sysv : t =
         [ "CF"; "PF"; "AF"; "ZF"; "SF"; "OF" ];
     word = 8;
     entry_symbol = "_start";
+    noreturn_symbols =
+      [ "longjmp"; "siglongjmp"; "__stack_chk_fail"; "abort"; "exit";
+        "_exit"; "_Exit"; "quick_exit"; "__assert_fail"; "pthread_exit" ];
   }
 
 (* Var-based predicates; [Var.same] compares base vars (EAX ~ RAX),
@@ -142,6 +148,7 @@ let of_target (target : Theory.Target.t) : t =
       flag_regs = x86_64_sysv.flag_regs;
       word = Theory.Target.bits target / 8;
       entry_symbol = x86_64_sysv.entry_symbol;
+      noreturn_symbols = x86_64_sysv.noreturn_symbols;
     }
   else x86_64_sysv
 

@@ -71,6 +71,11 @@ open Bap.Std
       share collapses to one unconditional edge (ADR 0024). *)
   val materialize_fallthroughs : sub term -> sub term
 
+  (** The noreturn fact's consumption: a call whose resolved target is a
+      classified never-returning sub carries no return continuation, so
+      the decode's fallthrough after it is not an edge. *)
+  val clear_noreturn_returns : noreturn:Tid.Set.t -> sub term -> sub term
+
 (** Rewrites a lifted term's direct targets: a call's target names a
     subroutine, a goto's a block, so the two resolve through different
     maps.  Indirect targets stay the resolution's own. *)
