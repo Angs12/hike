@@ -25,11 +25,15 @@ let lookup_native_fn ctx llvm_module v =
             ~f:(fun (fn, _) -> fn))
   in
   (* The start-set precheck: the initializer path asks per word and
-     the vast majority name data, not functions. *)
+     the vast majority name data, not functions.  A stripped binary's
+     callable starts ride the drive's own decode (sub_starts). *)
   match by_start () with
   | Some fn -> Some fn
   | None ->
-  if not (Core.Set.mem ctx.native_starts v) then None
+  if
+    not (Core.Set.mem ctx.native_starts v)
+    && not (Core.Map.mem ctx.sub_starts v)
+  then None
   else Base.Option.bind ctx.symtab ~f:(fun symtab ->
       Base.Option.bind
         (Symtab.find_by_start symtab (Word.of_int64 ~width:64 v))

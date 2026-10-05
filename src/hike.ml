@@ -356,6 +356,34 @@ let pass_vsa proj =
                             Result.to_option (Cbat_word.to_int64 w))
                       | _ -> None))))
   in
+  (* The value lane: a def whose value denotates to a bounded singleton
+     naming an unclaimed code word roots it — a register-carried
+     function pointer (the lea+call-argument idiom) loses no callee to
+     the store lane's memory-only scan. *)
+  let value_words (envs, stamped) : int64 list =
+    Base.List.concat_map (Term.enum blk_t stamped |> Seq.to_list)
+      ~f:(fun blk ->
+        match Core.Map.find envs (Term.tid blk) with
+        | None -> []
+        | Some (pre, post) ->
+          Base.List.filter_map (Term.enum def_t blk |> Seq.to_list)
+            ~f:(fun d ->
+              match Hike_stack_model.store_data_of_rhs (Def.rhs d) with
+              | Some _ -> None
+              | None -> (
+                match
+                  Cbat_vsa.denote_exp_at ~pre ~post ~blk ~def:d (Def.rhs d)
+                with
+                | Error _ -> None
+                | Ok ws -> (
+                  match
+                    Cbat_word.to_int64 (Cbat_vsa.WordSet.cardinality ws)
+                  with
+                  | Ok 1L ->
+                    Base.Option.bind (Cbat_vsa.WordSet.min_elem ws)
+                      ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w))
+                  | _ -> None))))
+  in
   (* One round: BAP decodes and partitions, the run solves every sub of
      the decoded program under the same fold, and the harvest routes
      every resolved word by its class — a call-class word, or a goto
@@ -592,6 +620,11 @@ let pass_vsa proj =
                   (* The word joins the discovery census: the settle
                      criterion reads it, so a store-named root keeps
                      the loop scanning. *)
+                  found_roots := w :: !found_roots;
+                  add_root w
+                end);
+            Base.List.iter (value_words solved) ~f:(fun w ->
+                if unclaimed w && is_code_addr w then begin
                   found_roots := w :: !found_roots;
                   add_root w
                 end));
