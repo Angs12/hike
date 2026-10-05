@@ -1,9 +1,11 @@
 (* The dead-def sweep: plain liveness over the model's read sets.  The
    roots are every jump's reads — its operand expressions and the kind's
    ABI boundary (a ret consumes the return registers and SP; a call the
-   parameter registers, the ABI return registers the call produces, and
-   SP).  A def or phi is live iff its lhs is read by a live node, to a
-   fixpoint.  Everything unmarked leaves — no per-var keep arms. *)
+   parameter registers, the ABI return registers it produces, and SP) —
+   and a call-bearing block's mem-typed defs, the memory state the site
+   hands its callee.  A def or phi is live iff its lhs is read by a live
+   node, to a fixpoint.  Everything unmarked leaves — no per-var keep
+   arms. *)
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
@@ -34,11 +36,17 @@ let dce ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
            Term.enum jmp_t b
            |> Seq.iter ~f:(fun j ->
                exact_roots :=
-                 Core.Set.union !exact_roots (Model.jmp_operand_reads j);
-               base_roots :=
-                 Core.Set.fold (Model.jmp_boundary_reads ~abi j)
-                   ~init:!base_roots
-                   ~f:(fun acc v -> Core.Set.add acc (Var.base v))));
+                 Core.Set.union !exact_roots (Model.jmp_operand_reads j));
+           let boundary =
+             Core.Set.union
+               (Term.enum jmp_t b
+                |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
+                       Core.Set.union reads (Model.jmp_boundary_reads ~abi j)))
+               (Model.blk_boundary_reads b)
+           in
+           base_roots :=
+             Core.Set.fold boundary ~init:!base_roots
+               ~f:(fun acc v -> Core.Set.add acc (Var.base v)));
     (* Liveness is per STORAGE, not per SSA version: the roots and every
        node's reads project to base vars, so a load of any version of a
        mem var roots the stores into it. *)

@@ -439,6 +439,24 @@ let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
 let jmp_input_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   Core.Set.union (jmp_operand_reads j) (jmp_boundary_inputs ~abi j)
 
+(* A call consumes the containing block's memory: the mem-typed vars the
+   block defines — the outgoing stores' storages and the call-argument
+   address temps.  The callee reads the state the site built, through the
+   slot addresses the site minted. *)
+let blk_boundary_reads (blk : blk term) : Var.Set.t =
+  let has_call =
+    Term.enum jmp_t blk
+    |> Seq.exists ~f:(fun j ->
+           match Jmp.kind j with
+           | Call _ when not (Hike_return.is_jmp j) -> true
+           | _ -> false)
+  in
+  if not has_call then Var.Set.empty
+  else
+    Term.enum def_t blk
+    |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+           if is_mem (Def.lhs d) then Core.Set.add acc (Def.lhs d) else acc)
+
 let jmp_target_reads (j : jmp term) : Var.Set.t =
   match Jmp.kind j with
   | Goto (Indirect e) | Ret (Indirect e) -> Exp.free_vars e

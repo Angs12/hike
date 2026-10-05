@@ -83,7 +83,7 @@ let tests : unit Alcotest.test list =
     (* D2: always-keeps — return/param regs, memory writes, intrinsic vars
        survive unread. *)
     pin "DCE-03"
-      "an ABI register def survives through the jump's boundary reads - a ret        reads the return registers, a call the parameter registers; an unread        memory write and an unread intrinsic temp die"
+      "an ABI register def survives through the jump's boundary reads - a ret        reads the return registers, a call the parameter registers; the call block's memory write is the call's read, and an unread intrinsic temp dies"
       (fun () ->
         let rax = v64 "RAX" in
         let rdi = v64 "RDI" in
@@ -117,9 +117,10 @@ let tests : unit Alcotest.test list =
           Base.List.map (dce_defs sub') ~f:(fun d -> Var.name (Var.base (Def.lhs d)))
         in
         check "DCE-03"
-          (List.length lhs_set = 2
+          (List.length lhs_set = 3
           && Base.List.mem lhs_set ~equal:String.equal "RAX"
-          && Base.List.mem lhs_set ~equal:String.equal "RDI"));
+          && Base.List.mem lhs_set ~equal:String.equal "RDI"
+          && Base.List.mem lhs_set ~equal:String.equal "d2_m"));
 
     (* D3: two-tier region-mem rule — a fissioned store chain dies iff no Load
        roots it. *)
@@ -229,6 +230,35 @@ let tests : unit Alcotest.test list =
           Hike.Dce.dce ~target:Theory.Target.unknown sub
         in
         check "DCE-07" (List.length (dce_defs sub') = 0));
+
+    (* D10: the call's memory boundary — a call-bearing block's mem-typed
+       defs (the outgoing store's storage, the call-arg address temp) are
+       the call's reads; an unread plain def in the same block still
+       dies. *)
+    pin "DCE-10"
+      "a call-bearing block's mem defs are the call's boundary reads"
+      (fun () ->
+        let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
+        let base = v64 "d10_base" in
+        let arg0 = Hike.Stack_model.call_arg ~addr_bits:64 0 in
+        let dead = v64 "d10_dead" in
+        let callee = Tid.for_name "d10_callee" in
+        let sub, _ =
+          sub_of "d10_callmem"
+            [ [ mk_store_plus sm base 8 42;
+                Def.create arg0 (Bil.Var base);
+                Def.create dead (Bil.Int (bw64 7)) ],
+              [ (0,
+                 fun _ ->
+                   Jmp.create (Call (Call.create ~target:(Direct callee) ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
+        check "DCE-10"
+          (List.mem "stack_r0_mem" lhs
+           && List.mem "hike_arg0" lhs
+           && not (List.mem "d10_dead" lhs)));
 
     (* D7: the phi arm — a phi whose result no survivor reads is swept,
        and its operands' defs cascade with it.  Under SSA a dead phi's
