@@ -15,3 +15,4 @@ _build-dbg2/
 _build-default-check/
 _build-fast/
 _build-release/
+__pycache__/

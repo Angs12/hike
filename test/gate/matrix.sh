@@ -6,6 +6,7 @@
 #
 # Usage: matrix.sh <stage>
 #   stages: opts compilers protector protector-strip strip recomp
+#           performance --reference-lib DIR [performance options]
 # Each stage prints one line per cell: PASS/FAIL counts + the red list.
 
 set -u
@@ -86,39 +87,11 @@ cell () {
   fi
 }
 
-stage_opts () {
-  for o in O0 O1 O2 O3 Os Oz; do
-    cell "gcc-$o-nosp-nostrip" gcc "-$o" "-fno-stack-protector" nostrip
-  done
-}
-
-stage_compilers () {
-  # gcc is the opts stage's configuration (gcc-$o-nosp-nostrip); this
-  # stage owns the clang arm.
-  for o in O0 O2; do
-    cell "clang-$o-compilers-nosp-nostrip" clang "-$o" "-fno-stack-protector" nostrip
-  done
-}
-
-stage_protector () {
-  # The no-protector control is the opts stage's gcc-$o-nosp-nostrip;
-  # this stage owns the -fstack-protector-all arm.
-  for o in O0 O2; do
-    cell "gcc-$o-fstackprotectorall-nostrip" gcc "-$o" "-fstack-protector-all" nostrip
-  done
-}
-
-stage_strip () {
-  for o in O0 O1 O2 O3 Os Oz; do
-    cell "gcc-$o-nosp-strip" gcc "-$o" "-fno-stack-protector" strip
-  done
-}
-
-# The protector lane on the corpus that actually ships: stripped.
-stage_protector_strip () {
-  for o in O0 O2; do
-    cell "gcc-$o-fstackprotectorall-strip" gcc "-$o" "-fstack-protector-all" strip
-  done
+stage_cells () {
+  python3 "$HERE/matrix_cases.py" "$1" |
+    while IFS=$'\t' read -r tag cc optflag sp strip; do
+      cell "$tag" "$cc" "$optflag" "$sp" "$strip"
+    done
 }
 
 # The recompile sweep runs the semantic gate's own machinery over the
@@ -137,11 +110,15 @@ stage_recomp () {
 }
 
 case "${1:-}" in
-  opts)             stage_opts ;;
-  compilers)        stage_compilers ;;
-  protector)        stage_protector ;;
-  protector-strip)  stage_protector_strip ;;
-  strip)            stage_strip ;;
+  performance)
+    shift
+    python3 "$HERE/matrix_performance.py" --output "$WORK/performance" "$@"
+    ;;
+  opts)             stage_cells opts ;;
+  compilers)        stage_cells compilers ;;
+  protector)        stage_cells protector ;;
+  protector-strip)  stage_cells protector-strip ;;
+  strip)            stage_cells strip ;;
   recomp)           stage_recomp ;;
-  *) echo "usage: matrix.sh <opts|compilers|protector|protector-strip|strip|recomp>" >&2; exit 2 ;;
+  *) echo "usage: matrix.sh <opts|compilers|protector|protector-strip|strip|recomp|performance> [options]" >&2; exit 2 ;;
 esac

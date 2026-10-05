@@ -11,6 +11,9 @@ module Diag = Hike_diag
 
 module Vsa = Hike_vsa
 
+(** Program discovery, before jump compilation and normalization. *)
+module Drive = Hike_drive
+
 (** The CFG completion, fused into the solver's loop: resolution is an
     in-loop step of the fixpoint, materialization runs once at drain. *)
 module Cfg_complete = Hike_cfg_complete
