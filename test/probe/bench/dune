@@ -6,8 +6,8 @@
  (flags :standard -g))
 
 (executables
- (names clp_bench env_footprint memmap_bench stage_timer subtimes var_key_bench)
- (modules clp_bench env_footprint memmap_bench stage_timer subtimes var_key_bench)
+ (names clp_bench env_footprint memmap_bench var_key_bench)
+ (modules clp_bench env_footprint memmap_bench var_key_bench)
  (libraries clp_bench_rows probe_common hike bap bap-core-theory bap-main llvm
   cbat_vsa cbat_vsa_domain core graphlib threads unix)
  (flags :standard -g)
