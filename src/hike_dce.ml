@@ -94,18 +94,10 @@ let dce ~(target : Bap_core_theory.Theory.Target.t)
             changed := true
           end)
     done;
-    (if String.equal (Sub.name sub) "build" then
-       Hike_diag.warn "[DEBUG-qi] build roots=%s"
-         (Base.String.concat ~sep:","
-            (Base.List.map (Core.Set.to_list !base_roots) ~f:Var.name)));
     Term.map blk_t sub ~f:(fun b ->
         let b =
           Term.filter def_t b ~f:(fun d ->
-              let live = Core.Set.mem !live_tids (Term.tid d) in
-              if (not live) && Model.is_mem (Def.lhs d) then
-                Hike_diag.warn "[DEBUG-qi] kills %s"
-                  (Var.name (Def.lhs d));
-              live)
+              Core.Set.mem !live_tids (Term.tid d))
         in
         Term.filter phi_t b ~f:(fun p ->
             Core.Set.mem !live_tids (Term.tid p)))

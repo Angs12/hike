@@ -554,19 +554,47 @@ let pass_vsa proj =
                 | None -> ()));
         (* The store lane over every solved sub: a store whose data
            denotates to a code word names a callee the pointer round
-           trip loses at the load — an entry only outside the
-           partition's territory (a stored address inside a sub's
-           territory is that sub's own code). *)
+           trip loses at the load — an entry only outside the DECODED
+           bytes.  The partition's territory covers undecoded gaps too,
+           and a stored code word naming gap bytes names an undiscovered
+           sub (the stripped-binary discovery); a word inside a decoded
+           sub's own blocks is that sub's code. *)
+        let decoded_extents =
+          Term.enum sub_t program
+          |> Seq.filter_map ~f:(fun s ->
+                 let addrs =
+                   Term.enum blk_t s
+                   |> Seq.filter_map ~f:(fun b ->
+                       Term.get_attr b address
+                       |> Base.Option.bind ~f:(fun a ->
+                           Result.to_option (Addr.to_int64 a)))
+                   |> Seq.to_list
+                 in
+                 match addrs with
+                 | [] -> None
+                 | _ -> (
+                   match
+                     ( Base.List.min_elt addrs ~compare:Int64.compare,
+                       Base.List.max_elt addrs ~compare:Int64.compare )
+                   with
+                   | Some lo, Some hi -> Some (lo, hi)
+                   | _ -> None ))
+          |> Seq.to_list
+        in
         let unclaimed w =
           not
-            (Disasm.Subroutines.entries out.subs
-             |> Core.Set.exists ~f:(fun e ->
-                 Disasm.Subroutines.belongs out.subs ~entry:e
-                   (Addr.of_int64 w)))
+            (Base.List.exists decoded_extents ~f:(fun (lo, hi) ->
+                 Int64.compare w lo >= 0 && Int64.compare w hi <= 0))
         in
         Core.Map.fold subs_acc ~init:() ~f:(fun ~key:_ ~data:solved () ->
             Base.List.iter (store_words solved) ~f:(fun w ->
-                if unclaimed w then add_root w));
+                if unclaimed w then begin
+                  (* The word joins the discovery census: the settle
+                     criterion reads it, so a store-named root keeps
+                     the loop scanning. *)
+                  found_roots := w :: !found_roots;
+                  add_root w
+                end));
         let disc =
           (Base.List.sort !found_roots ~compare:Int64.compare,
            Base.List.sort !found_dests
