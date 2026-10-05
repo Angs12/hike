@@ -5,7 +5,7 @@
 # native binary), stripped and unstripped.
 #
 # Usage: matrix.sh <stage>
-#   stages: opts compilers protector recomp strip
+#   stages: opts compilers protector protector-strip strip recomp
 # Each stage prints one line per cell: PASS/FAIL counts + the red list.
 
 set -u
@@ -118,6 +118,14 @@ stage_strip () {
   done
 }
 
+# The protector lane on the corpus that actually ships: stripped.  The
+# canary machinery's interaction with the stripped path is the subject.
+stage_protector_strip () {
+  for o in O0 O2; do
+    cell "gcc-$o-fstackprotectorall-strip" gcc "-$o" "-fstack-protector-all" strip
+  done
+}
+
 # The recompile sweep runs the semantic gate's own machinery over the
 # recorded -O2 stripped corpus emissions, one consumer level at a time.
 stage_recomp () {
@@ -134,10 +142,11 @@ stage_recomp () {
 }
 
 case "${1:-}" in
-  opts)      stage_opts ;;
-  compilers) stage_compilers ;;
-  protector) stage_protector ;;
-  strip)     stage_strip ;;
-  recomp)    stage_recomp ;;
-  *) echo "usage: matrix.sh <opts|compilers|protector|strip|recomp>" >&2; exit 2 ;;
+  opts)             stage_opts ;;
+  compilers)        stage_compilers ;;
+  protector)        stage_protector ;;
+  protector-strip)  stage_protector_strip ;;
+  strip)            stage_strip ;;
+  recomp)           stage_recomp ;;
+  *) echo "usage: matrix.sh <opts|compilers|protector|protector-strip|strip|recomp>" >&2; exit 2 ;;
 esac
