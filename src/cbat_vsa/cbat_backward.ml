@@ -1399,23 +1399,9 @@ let acquire_unsat ~(entry : AI.t) ~(landmarks : Cbat_landmarks.t)
   let constrained = constrain_edge ~env ~landmarks disabled in
   if not (AI.equal constrained AI.bottom) then begin
     let seeds = cond_seeds ~env:constrained disabled in
-    (* An empty leaf meet leaves the env unchanged: the disabled cond's
-       own bit is the constraint, so it rides the walked state. *)
-    let walked, seeds =
-      if AI.equal constrained env then
-        (Core.Set.fold (Exp.free_vars disabled) ~init:constrained
-           ~f:(fun acc v ->
-             match Var.typ v with
-             | Type.Imm 1 ->
-               AI.add_word acc ~key:v ~data:(WordSet.singleton Cbat_word.b1)
-             | _ -> acc),
-         Core.Set.union seeds
-           (Core.Set.filter (Exp.free_vars disabled)
-              ~f:(fun v ->
-                match Var.typ v with Type.Imm 1 -> true | _ -> false)))
-      else (constrained, seeds) in
-    ignore (walk ~locus:observer_locus ~entry ~landmarks ~witness
-              ~seeds walked blk)
+    ignore
+      (walk ~locus:observer_locus ~entry ~landmarks ~witness ~seeds
+         constrained blk)
   end
 
 let refine_edge_inline

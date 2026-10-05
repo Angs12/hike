@@ -590,15 +590,22 @@ let last_defs (blk : blk term) : def term Var.Map.t =
 (* Jumps reachable in the env.  An SP-derived var's word is the
    segment base plus its exact offsets: bit tests and comparisons
    against concrete addresses decide consistently with real pointer
-   behavior.  A cond whose denotation is the empty set names no verdict
-   — a contradictory refinement is an artifact at a reachable point —
-   so both edges may run. *)
+   behavior.  A cond whose denotation is the empty set is unreachable:
+   no edge may run.  A live state that produces one is an analysis bug,
+   and the decision seam says so loudly rather than widening the
+   guard. *)
 let reachable_jumps (env : AI.t) (jmps : jmp term seq) : jmp term seq =
   Seq.unfold_with jmps  ~init:true ~f:begin fun reachable jmp ->
     let cond =
       match denote_imm_exp (Jmp.cond jmp) env with
-      | Ok c when not (WordSet.is_bottom c) -> c
-      | _ -> WordSet.top 1
+      | Ok c ->
+          if WordSet.is_bottom c && not (AI.equal env AI.bottom) then
+            failwith
+              (Printf.sprintf
+                 "vsa: bottom cond denotation in a live state (jmp %s)"
+                 (Tid.name (Term.tid jmp)));
+          c
+      | Error _ -> WordSet.top 1
     in
     let can_fall_through = WordSet.elem Cbat_word.b0 cond in
     if not reachable then Seq.Step.Done
