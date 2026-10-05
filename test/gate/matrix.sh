@@ -48,7 +48,7 @@ cell () {
     f="${srcs[$i]}"; name="${names[$i]}"
     total=$((total + 1))
     local bin="$dir/$name" ll="$dir/$name.ll" o="$dir/$name.o" exe="$dir/$name.lifted"
-    if ! $cc $optflag $sp -o "$bin" "$f" 2>>"$log"; then
+    if ! $cc $optflag $sp -o "$bin" "$f" -lpthread 2>>"$log"; then
       echo "  $name: COMPILE-FAIL" >> "$log"; reds="$reds $name(compile)"
       continue
     fi

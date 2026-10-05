@@ -8,6 +8,19 @@ let () =
   let args = List.tl (Array.to_list Sys.argv) in
   init ();
   match args with
+  | [ path; "insns"; name ] ->
+    let proj = load_project path in
+    let prog = Project.program proj in
+    (match find_sub prog name with
+     | Some s ->
+       Term.enum blk_t s
+       |> Seq.iter ~f:(fun b ->
+              Block.insns (Term.strip b)
+              |> Base.List.iter ~f:(fun i ->
+                     Printf.printf "insn %s | %s\n" (Insn.name i)
+                       (Insn.asm i)))
+     | None -> Printf.printf "no sub %s\n" name);
+    exit 0
   | [ path; "subs"; _ ] ->
     let proj = load_project path in
     Term.enum sub_t (production_input proj)

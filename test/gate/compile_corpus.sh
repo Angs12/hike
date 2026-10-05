@@ -15,7 +15,7 @@ build_lane () {
   for f in *.c; do
     [ "$f" = "list.c" ] && continue
     name="${f%.c}"
-    gcc $flags -fno-stack-protector -o "$dest/$name" "$f" || { echo "FAIL $name (compile)"; fail=1; }
+    gcc $flags -fno-stack-protector -o "$dest/$name" "$f" -lpthread || { echo "FAIL $name (compile)"; fail=1; }
   done
 
   # list.c needs a main stub; the stub lives in $dest/.build/ so the
@@ -28,7 +28,7 @@ build_lane () {
   # synth sources are picked up automatically.
   for f in synth/*.c; do
     name="$(basename "$f" .c)"
-    gcc $flags -fno-stack-protector -o "$dest/$name" "$f" || { echo "FAIL $name (compile)"; fail=1; }
+    gcc $flags -fno-stack-protector -o "$dest/$name" "$f" -lpthread || { echo "FAIL $name (compile)"; fail=1; }
   done
 
   # One binary per source: a silently-shrunk corpus masks everything
