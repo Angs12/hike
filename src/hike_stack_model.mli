@@ -104,13 +104,17 @@ val load_mem_vars : exp -> Var.Set.t
 val addr_of_rhs : exp -> (exp * Size.t) option
 val store_data_of_rhs : exp -> exp option
 
-(* BAP term reads plus ABI transfer inputs: calls read parameter registers
-   and SP; returns read SP, while return values are sub outputs. *)
+(* BAP term reads plus ABI transfer boundary reads, split by direction:
+   the inputs the transfer consumes from the containing sub (a call's
+   parameter registers) vs the outputs the convention produces (the
+   return registers; a sub's entry lanes read inputs only). *)
 val def_reads : def term -> Var.Set.t
 val phi_reads : phi term -> Var.Set.t
 val phi_reads_from : phi term -> Tid.t -> Var.Set.t
 val jmp_operand_reads : jmp term -> Var.Set.t
 val jmp_boundary_reads : abi:Abi.t -> jmp term -> Var.Set.t
+val jmp_boundary_inputs : abi:Abi.t -> jmp term -> Var.Set.t
+val jmp_input_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val jmp_target_reads : jmp term -> Var.Set.t
 val def_writes : def term -> Var.Set.t

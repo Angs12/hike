@@ -482,7 +482,7 @@ let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
         let boundary_reads =
           Term.enum jmp_t blk
           |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
-                 Core.Set.union reads (Model.jmp_boundary_reads ~abi j))
+                 Core.Set.union reads (Model.jmp_boundary_inputs ~abi j))
           |> Core.Set.filter ~f:(fun v -> Var.index v = 0)
         in
         Core.Set.union acc

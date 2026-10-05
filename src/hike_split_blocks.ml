@@ -189,7 +189,7 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
     Core.Set.union (Core.Set.diff live (Model.phi_writes p))
       (Model.phi_reads p)
   in
-  let jmp live j = Core.Set.union live (Model.jmp_reads ~abi j) in
+  let jmp live j = Core.Set.union live (Model.jmp_input_reads ~abi j) in
   let graph = Sub.to_graph sub in
   let block_ids =
     Base.List.map blks ~f:Term.tid |> Core.Set.of_list (module Tid)

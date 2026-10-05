@@ -412,22 +412,32 @@ let phi_reads_from (p : phi term) (pred : Tid.t) : Var.Set.t =
 let jmp_operand_reads (j : jmp term) : Var.Set.t = Jmp.free_vars j
 
 (* The boundary reads a jmp's kind consumes with no operand naming
-   them: a return edge (the canonical return reads as a call) the ABI
-   return registers and SP (the return-address pop); a call the
-   parameter registers, the ABI return registers the call produces, and
-   SP (the return-address push). *)
-let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
+   them, split by direction.  The inputs are what the transfer consumes
+   from the containing sub: a call's parameter registers.  The outputs
+   are what the convention produces at the boundary: the return
+   registers (the sub's own at a return edge, the callee's at a call)
+   and SP.  Liveness reads the union (an output's producer stays live);
+   a sub's input lanes read the inputs only — an output lane with no
+   producer is the ABI's undef, not an entry value. *)
+let jmp_boundary_inputs ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   match Jmp.kind j with
-  | Ret _ -> Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
-  | Call _ when Hike_return.is_jmp j ->
-    Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
-  | Call _ ->
-    Core.Set.of_list (module Var)
-      (Abi.param_regs abi @ abi.return_regs @ [ abi.sp ])
+  | Call _ when not (Hike_return.is_jmp j) ->
+    Core.Set.of_list (module Var) (Abi.param_regs abi)
   | _ -> Var.Set.empty
+
+let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
+  Core.Set.union (jmp_boundary_inputs ~abi j)
+    (match Jmp.kind j with
+     | Ret _ | Call _ ->
+       Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
+     | _ -> Var.Set.empty)
 
 let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   Core.Set.union (jmp_operand_reads j) (jmp_boundary_reads ~abi j)
+
+(* The reads that name the containing sub's entry values. *)
+let jmp_input_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
+  Core.Set.union (jmp_operand_reads j) (jmp_boundary_inputs ~abi j)
 
 let jmp_target_reads (j : jmp term) : Var.Set.t =
   match Jmp.kind j with
