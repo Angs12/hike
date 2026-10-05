@@ -222,7 +222,8 @@ let add_args_to_vars ctx scope llvm_builder blk_tid sub_tid fn =
       bind_ssaval scope (Arg.lhs arg) value)
     fn
 
-let create_fun_declaration ctx sub_tid =
+let create_fun_declaration ?name ctx sub_tid =
+  let name = Base.Option.value name ~default:(Tid.name sub_tid) in
   let ret_typ = create_ret_type ctx sub_tid in
   let args_typ = create_arg_types ctx sub_tid in
   (* Extern declares are variadic. *)
@@ -239,7 +240,7 @@ let create_fun_declaration ctx sub_tid =
            Base.List.length (Term.enum blk_t s |> Seq.to_list) |> string_of_int
          | None -> "absent"));
   let fn =
-    Llvm.declare_function (sanitize_name @@ Tid.name sub_tid) fn_typ
+    Llvm.declare_function (sanitize_name name) fn_typ
       ctx.llvm_module
   in
   register_fn ctx sub_tid fn fn_typ

@@ -624,6 +624,22 @@ let tests : unit Alcotest.test list =
           (contains_substring ir "getelementptr i8, ptr %vla, i64 4"
           && contains_substring ir "getelementptr i8, ptr %vla2, i64 8"
           && count " = alloca i8, i64 " = 2));
+
+    (* ENTRY-NAME: the entry sub is analysed, never defined, and its
+       declaration carries the ABI's process-entry symbol — a stripped
+       binary's decoded tid must not leak into the link. *)
+    pin "EMIT-46"
+      "the entry's declaration carries the ABI entry symbol, not the decoded tid name"
+      (fun () ->
+        let entry, _ =
+          sub_of ~tid:(Tid.for_name "sub_10b0") "sub_10b0"
+            [ [], [ (0, mk_ret) ] ]
+        in
+        let entry = Term.set_attr entry Sub.entry_point () in
+        let ir = emit_ir [ entry ] in
+        check "EMIT-46"
+          (contains_substring ir "@_start("
+           && not (contains_substring ir "@sub_10b0")));
   ]
 
 let () = run "bil2llvm" tests

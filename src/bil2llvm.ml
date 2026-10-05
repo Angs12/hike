@@ -606,7 +606,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let declare_phase () =
     Base.List.iter subs_list ~f:(fun sub ->
         let tid = Term.tid sub in
-        if is_entry sub then create_fun_declaration ctx tid
+        if is_entry sub then
+          create_fun_declaration ~name:ctx.abi.Abi.entry_symbol ctx tid
         else if Base.Option.is_some (native_fp_op (Tid.name tid)) then ()
         else if is_self_call_stub_tid tid then
           create_fun_declaration ctx tid

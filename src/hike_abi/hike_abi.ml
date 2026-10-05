@@ -24,6 +24,9 @@ type t = {
   flag_regs : var list;          (* the arithmetic flags: call-clobbered,
                                     undefined at sub entry *)
   word : int;                    (* target word size in bytes *)
+  entry_symbol : string;         (* the process entry's linker symbol, the
+                                    runtime boundary a dead continuation
+                                    binds to (SysV: _start) *)
 }
 
 let x86_64_sysv : t =
@@ -55,6 +58,7 @@ let x86_64_sysv : t =
           Var.create ~is_virtual:false ~fresh:false name (Type.Imm 1))
         [ "CF"; "PF"; "AF"; "ZF"; "SF"; "OF" ];
     word = 8;
+    entry_symbol = "_start";
   }
 
 (* Var-based predicates; [Var.same] compares base vars (EAX ~ RAX),
@@ -137,6 +141,7 @@ let of_target (target : Theory.Target.t) : t =
       env_regs = x86_64_sysv.env_regs;
       flag_regs = x86_64_sysv.flag_regs;
       word = Theory.Target.bits target / 8;
+      entry_symbol = x86_64_sysv.entry_symbol;
     }
   else x86_64_sysv
 
