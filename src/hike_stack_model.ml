@@ -453,10 +453,14 @@ let jmp_boundary_inputs ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
   | _ -> Var.Set.empty
 
 let jmp_boundary_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
+  let fp_ret =
+    match abi.vector_return_reg with Some v -> [ v ] | None -> []
+  in
   Core.Set.union (jmp_boundary_inputs ~abi j)
     (match Jmp.kind j with
      | Ret _ | Call _ ->
-       Core.Set.of_list (module Var) (abi.return_regs @ [ abi.sp ])
+       Core.Set.of_list (module Var)
+         (abi.return_regs @ fp_ret @ [ abi.sp ])
      | _ -> Var.Set.empty)
 
 let jmp_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
