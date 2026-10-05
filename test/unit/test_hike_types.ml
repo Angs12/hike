@@ -10,7 +10,7 @@ open Hike_test.Common
 open Hike_test.Fixtures
 
 module Types = Hike__Hike_types
-module Model = Hike__Hike_stack_model
+module Model = Hike_stack_model
 module Abi = Hike.Abi
 
 (* The real SysV convention (the module contract's [abi]). *)

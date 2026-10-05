@@ -38,7 +38,7 @@ let tests : unit Alcotest.test list =
               [ (0, mk_ret) ] ]
         in
         let prog = Program.create ~subs:[ callee; caller ] () in
-        let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
         let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
         let caller' =
           Term.enum sub_t prog
@@ -90,7 +90,7 @@ let tests : unit Alcotest.test list =
                (Bil.BinOp
                   (Bil.PLUS, Bil.Var v,
                    Bil.Int (Cbat_word.to_word (w64 1)))));
-          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          ignore (Blk.Builder.add_jmp b (Hike_return.create ()));
           Blk.Builder.result b
         in
         let p1 =
@@ -117,7 +117,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
         let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
         let sub =
           Term.enum sub_t prog |> Seq.hd_exn
@@ -153,7 +153,7 @@ let tests : unit Alcotest.test list =
           let b = Blk.Builder.create () in
           Blk.Builder.add_def b
             (Def.create v (Bil.Var (v64 "RDI")));
-          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          ignore (Blk.Builder.add_jmp b (Hike_return.create ()));
           Blk.Builder.result b
         in
         let sub =
@@ -162,7 +162,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
         let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
         check "SSA-03"
@@ -183,7 +183,7 @@ let tests : unit Alcotest.test list =
           let b = Blk.Builder.create () in
           Blk.Builder.add_def b
             (Def.create (v64 "ssa4_use") (Bil.Var ret_reg));
-          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          ignore (Blk.Builder.add_jmp b (Hike_return.create ()));
           Blk.Builder.result b
         in
         let call =

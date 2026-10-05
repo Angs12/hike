@@ -41,7 +41,7 @@ let tests : unit Alcotest.test list =
                 Def.create t2 (Bil.Int (bw64 7)) ],
               [ (0,
                  fun _ ->
-                   Hike__Hike_return.create ());
+                   Hike_return.create ());
                 (0,
                  fun _ ->
                    Jmp.create
@@ -59,7 +59,7 @@ let tests : unit Alcotest.test list =
         let jmps = dce_jmps sub' in
         let epilogue_target_stays_varfree =
           match jmps with
-          | j1 :: _ -> Hike__Hike_return.is_jmp j1
+          | j1 :: _ -> Hike_return.is_jmp j1
           | [] -> false
         in
         let others_untouched =
@@ -319,7 +319,7 @@ let tests : unit Alcotest.test list =
         let j_blk =
           let b = Blk.Builder.create () in
           Blk.Builder.add_def b (Def.create dead (Bil.Var v));
-          ignore (Blk.Builder.add_jmp b (Hike__Hike_return.create ()));
+          ignore (Blk.Builder.add_jmp b (Hike_return.create ()));
           Blk.Builder.result b
         in
         let p1 =
@@ -343,7 +343,7 @@ let tests : unit Alcotest.test list =
           Sub.Builder.result sb
         in
         let prog = Program.create ~subs:[ sub ] () in
-        let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
+        let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
         let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
         let sub = Term.enum sub_t prog |> Seq.hd_exn in
         let phi_present =

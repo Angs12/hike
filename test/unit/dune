@@ -3,6 +3,8 @@
  (modules harness common fixtures)
  (libraries
   hike
+  hike.hike_core
+  hike.hike_emit
   bap
   bap-main
   bap-core-theory
@@ -58,6 +60,8 @@
   hike_test
   alcotest
   hike
+  hike.hike_core
+  hike.hike_emit
   bap
   bap-main
   bap-core-theory

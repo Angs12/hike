@@ -16,7 +16,7 @@ let mk_goto (tgt : tid) : jmp term = Jmp.create (Goto (Direct tgt))
 
 (* A terminal Ret to a fresh tid (the exit-block idiom); the edge maker
    ignores the node index. *)
-let mk_ret : tid -> jmp term = fun _ -> Hike__Hike_return.create ()
+let mk_ret : tid -> jmp term = fun _ -> Hike_return.create ()
 
 (* One block from a def list (phase 1 of the two-phase builder dance:
    tids are captured from the result before jumps are wired). *)
@@ -1032,7 +1032,7 @@ let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
      types pass writes each sub's signature onto its [arg] terms; the
      SSA pass materializes the phis the emitter renders. *)
   let prog = Hike.Fp.run_program prog in
-  let prog = B2l.sign_program ~target:Theory.Target.unknown prog in
+  let prog = Hike.Types.sign_program ~target:Theory.Target.unknown prog in
   let prog = Hike.Split_blocks.normalize prog in
   let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
   B2l.emit_program llvm_ctx llvm_module

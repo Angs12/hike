@@ -1,0 +1,28 @@
+(library
+ (name hike_emit)
+ (public_name hike.hike_emit)
+ (wrapped false)
+ (modules
+  bil2llvm
+  bil2llvm_access
+  bil2llvm_calls
+  bil2llvm_env
+  bil2llvm_exp
+  bil2llvm_fp
+  bil2llvm_memory
+  bil2llvm_ptr
+  bil2llvm_section
+  hike_def_slots)
+ (libraries
+  bap
+  bap-core-theory
+  llvm
+  core
+  hike.hike_abi
+  hike.hike_def_slot
+  hike.hike_stack_bounds
+  hike.cbat_vsa
+  hike.hike_core)
+ (preprocess
+  (action
+   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))

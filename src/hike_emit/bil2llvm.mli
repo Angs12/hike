@@ -17,14 +17,6 @@ val native_fp_op : string -> native_fp option
 (** The sub's LLVM name (tid-name sanitization). *)
 val sanitize_name : string -> string
 
-(** The signature pass, for the direct emitter callers (the fixtures):
-    writes each sub's signature, with its lane types, onto its [arg]
-    terms.  The pipeline runs it as [hike-sign]. *)
-val sign_program :
-  target:Bap_core_theory.Theory.Target.t ->
-  program term ->
-  program term
-
 (** One owner of a byte range of a section: a component or a gap run.
     [own_id] is the component id ([None] for a gap run). *)
 type sec_owner = Bil2llvm_env.sec_owner = {

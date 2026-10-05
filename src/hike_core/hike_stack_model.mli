@@ -50,20 +50,20 @@ val caller_window_bytes : int64
 val stack_max : int64
 val stack_floor : entry:int64 -> int64
 val args_ceiling : int64
-val positions_of_offsets : Cbat_vsa.WordSet.t -> (int64 * int64) option
-val unsigned_bounds : Cbat_vsa.WordSet.t -> (int64 * int64) option
+val positions_of_offsets : Cbat_clp_set_composite.t -> (int64 * int64) option
+val unsigned_bounds : Cbat_clp_set_composite.t -> (int64 * int64) option
 val full_bounds :
-  Cbat_vsa.WordSet.t -> flo:int64 -> cei:int64 -> int64 -> int64 -> int64 * int64
+  Cbat_clp_set_composite.t -> flo:int64 -> cei:int64 -> int64 -> int64 -> int64 * int64
 val escape_extent :
-  entry:int64 -> Cbat_vsa.WordSet.t -> (int64 * int64) option
-val key_extent : Cbat_vsa.WordSet.t -> (Cbat_word.t * Cbat_word.t) option
+  entry:int64 -> Cbat_clp_set_composite.t -> (int64 * int64) option
+val key_extent : Cbat_clp_set_composite.t -> (Cbat_word.t * Cbat_word.t) option
 
 val args_base : entry:int64 -> word:int -> int64
 val stack_top : entry:int64 -> word:int -> int64
 
 (* The ONE caller-window denotation. *)
 val is_window_denotation :
-  entry:int64 -> word:int -> Cbat_vsa.WordSet.t -> bool
+  entry:int64 -> word:int -> Cbat_clp_set_composite.t -> bool
 
 val expand_hi : cap:int64 -> int64 -> int -> int64
 val expand_hi_unsigned : int64 -> int -> int64
@@ -71,12 +71,12 @@ val clip :
   cmp:(int64 -> int64 -> int) ->
   int64 -> int64 -> int64 -> int64 -> (int64 * int64) option
 
-val singleton_i64 : Cbat_vsa.WordSet.t -> int64 option
-val singleton_offset : Cbat_vsa.WordSet.Clp.t -> int64 option
-val singleton_stack_position : Cbat_vsa.WordSet.t -> int64 option
+val singleton_i64 : Cbat_clp_set_composite.t -> int64 option
+val singleton_offset : Cbat_clp_set_composite.Clp.t -> int64 option
+val singleton_stack_position : Cbat_clp_set_composite.t -> int64 option
 
 (* The return-address fact and its projections. *)
-val is_return_address : Cbat_vsa.WordSet.t -> bool
+val is_return_address : Cbat_clp_set_composite.t -> bool
 val is_return_address_tag : sec_tag -> bool
 val is_return_address_shape : abi:Abi.t -> exp -> bool
 
@@ -244,7 +244,7 @@ val is_variadic_construction :
   abi:Abi.t ->
   entry:int64 ->
   denote:(blk:blk term -> ?def:def term -> exp ->
-           (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
+           (Cbat_clp_set_composite.t, Type.error) Result.t) ->
   sub term ->
   bool
 

@@ -579,7 +579,7 @@ let tests : unit Alcotest.test list =
           Jmp.create
             (Call (Call.create ~target:(Direct (Tid.create ())) ()))
         in
-        let ret = Hike__Hike_return.create () in
+        let ret = Hike_return.create () in
         let call_reads =
           Core.Set.of_list
             (module Var)

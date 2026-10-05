@@ -711,8 +711,4 @@ let native_fp_op = Bil2llvm_fp.native_fp_op
 
 let sanitize_name = Bil2llvm_env.sanitize_name
 
-(* The signature pass, re-exported for the direct emitter callers (the
-   fixtures), which run it exactly as the pipeline does. *)
-let sign_program = Hike_types.sign_program
-
 let build_sections = Bil2llvm_section.build_sections

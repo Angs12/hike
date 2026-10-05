@@ -111,7 +111,7 @@ let tests : unit Alcotest.test list =
         in
         check "RES-06"
           (match jmps_of_blk j1' 0 with
-           | [ j ] -> Hike__Hike_return.is_jmp j
+           | [ j ] -> Hike_return.is_jmp j
            | _ -> false));
 
     (* The lifted `ret` is a plain `Goto` (BAP lifts `retq` as
@@ -137,7 +137,7 @@ let tests : unit Alcotest.test list =
         in
         check "RES-22"
           (match jmps_of_blk j9' 0 with
-           | [ j ] -> Hike__Hike_return.is_jmp j
+           | [ j ] -> Hike_return.is_jmp j
            | _ -> false));
 
     (* J1b: the control — the same target read behind a return=Some call

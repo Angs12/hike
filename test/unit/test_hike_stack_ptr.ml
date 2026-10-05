@@ -9,8 +9,8 @@ open Hike_test.Harness
 open Hike_test.Common
 open Hike_test.Fixtures
 
-module Model = Hike__Hike_stack_model
-module Stack_ptr = Hike__Hike_stack_ptr
+module Model = Hike_stack_model
+module Stack_ptr = Hike_stack_ptr
 
 (* A real function to build into, the builder at the end of its entry block
    (the emitter's [create_sub] position).  Allocas need an insertion point. *)

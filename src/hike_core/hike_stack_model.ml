@@ -66,7 +66,7 @@ module Vsa = struct
 
   (* The ABSOLUTE position of the entry RSP on the segment line (the seeded
      SP is base + offset 0); a frame-relative depth is [base − position]. *)
-  let segment_base = Cbat_vsa.WordSet.stack_base
+  let segment_base = Cbat_clp_set_composite.stack_base
 
   (* The clamp and its bounds are shared with the call abstraction. *)
   include Hike_stack_bounds
@@ -88,8 +88,8 @@ module Vsa = struct
      caller's frame.  The ONE rule the promotion's window stamp and the
      pointer-kind storage read. *)
   let is_window_denotation ~(entry : int64) ~(word : int)
-      (ws : Cbat_vsa.WordSet.t) : bool =
-    match Cbat_vsa.WordSet.stack_offsets ws with
+      (ws : Cbat_clp_set_composite.t) : bool =
+    match Cbat_clp_set_composite.stack_offsets ws with
     | None -> false
     | Some _ -> (
         match positions_of_offsets ws with
@@ -121,31 +121,31 @@ module Vsa = struct
     if cmp lo hi <= 0 then Some (lo, hi) else None
 
   (* A single known word; a TOP set is deliberately not one. *)
-  let singleton_i64 (ws : Cbat_vsa.WordSet.t) : int64 option =
-    if Cbat_vsa.WordSet.is_top ws then None
-    else singleton_pair (Cbat_vsa.WordSet.min_elem ws) (Cbat_vsa.WordSet.max_elem ws)
+  let singleton_i64 (ws : Cbat_clp_set_composite.t) : int64 option =
+    if Cbat_clp_set_composite.is_top ws then None
+    else singleton_pair (Cbat_clp_set_composite.min_elem ws) (Cbat_clp_set_composite.max_elem ws)
 
-  let singleton_offset (offs : Cbat_vsa.WordSet.Clp.t) : int64 option =
+  let singleton_offset (offs : Cbat_clp_set_composite.Clp.t) : int64 option =
     singleton_pair
-      (Cbat_vsa.WordSet.Clp.min_elem offs)
-      (Cbat_vsa.WordSet.Clp.max_elem offs)
+      (Cbat_clp_set_composite.Clp.min_elem offs)
+      (Cbat_clp_set_composite.Clp.max_elem offs)
 
   (* The denotation's single stack position (absolute), when it has
      exactly one: the symbolic arm or the in-band plain arm (the band
      holds no real x86-64 address, so a plain word there is stack). *)
-  let singleton_stack_position (ws : Cbat_vsa.WordSet.t) : int64 option =
-    match Cbat_vsa.WordSet.stack_offsets ws with
+  let singleton_stack_position (ws : Cbat_clp_set_composite.t) : int64 option =
+    match Cbat_clp_set_composite.stack_offsets ws with
     | Some _ -> (
         match positions_of_offsets ws with
         | Some (lo, hi) when Int64.equal lo hi -> Some lo
         | _ -> None)
     | None ->
-        if Cbat_vsa.WordSet.in_stack_segment ws then singleton_i64 ws
+        if Cbat_clp_set_composite.in_stack_segment ws then singleton_i64 ws
         else None
 
   (* The return-address fact and its projections: an address that denotes to
      the stack-symbolic singleton at the entry-RSP cell. *)
-  let is_return_address (ws : Cbat_vsa.WordSet.t) : bool =
+  let is_return_address (ws : Cbat_clp_set_composite.t) : bool =
     match singleton_stack_position ws with
     | Some p -> Int64.equal p segment_base
     | None -> false
@@ -684,7 +684,7 @@ let has_call_push (sub : sub term) : bool =
    positions and the register set come from the denotation and [Abi]. *)
 let is_variadic_construction ~(abi : Abi.t) ~(entry : int64)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
-               (Cbat_vsa.WordSet.t, Type.error) Result.t)
+               (Cbat_clp_set_composite.t, Type.error) Result.t)
     (sub : sub term) : bool =
   let word = abi.Abi.word in
   let a_base = args_base ~entry ~word in

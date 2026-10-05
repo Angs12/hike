@@ -106,16 +106,10 @@ type section_type = Hike_stack_model.sec
 let is_interrupt_name (n : string) : bool =
   Base.String.is_prefix n ~prefix:"@interrupt:"
 
-(* One input section of the spec: the model's [sec_meta] row —
-   [sm_image] is the section's byte image, None for the bss region. *)
-
-(* The section spec: the components, the spans served whole
-   (each (id, lo, hi)), the word grid, the input sections in the
-   fixed section-list order ([None] = absent from the binary), and the
-   loader's relocation facts: the RELATIVE words' runtime values
-   (in-module addresses), the externally-relocated words' symbols, and
-   the absolute copy-relocation slot addresses used by access routing. *)
-type section_spec = {
+(* The section spec's home is [Hike_spec] (the lower library); the
+   destructive re-export keeps this module's consumers spelling the
+   type [Bil2llvm_env.section_spec] and the fields unqualified. *)
+type section_spec = Hike_spec.section_spec = {
   spec_comps : Hike_stack_model.sec_comp list;
   spec_whole : (int * int64 * int64) list;
   spec_word : int;

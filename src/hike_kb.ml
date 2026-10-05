@@ -42,7 +42,7 @@ type facts = {
   (* The emitter's section spec, installed by the attribution pass in
      the same run that built [envs]; [None] = no attribution ran and
      the sections emit with no components. *)
-  spec : Bil2llvm_env.section_spec option;
+  spec : Hike_spec.section_spec option;
   (* The DCE's per-sub escape roots: the storage mem vars whose bytes
      escape the sub.  The attribution computes them from its trees; the
      sweep reads them off the record. *)
@@ -89,6 +89,6 @@ let facts_opt () : facts option = !run
 
 (* The attribution pass adds the emitter spec and the sweep's escape
    roots to the installed record. *)
-let with_attribution (f : facts) ~(spec : Bil2llvm_env.section_spec)
+let with_attribution (f : facts) ~(spec : Hike_spec.section_spec)
     ~(escape_roots : Var.Set.t Tid.Map.t) : facts =
   { f with spec = Some spec; escape_roots }

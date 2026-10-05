@@ -1,0 +1,24 @@
+(library
+ (name hike_core)
+ (public_name hike.hike_core)
+ (wrapped false)
+ (modules
+  hike_diag
+  hike_exp_fold
+  hike_return
+  hike_spec
+  hike_stack_model
+  hike_stack_ptr
+  hike_transfer)
+ (libraries
+  bap
+  bap-core-theory
+  bitvec
+  core
+  llvm
+  hike.hike_abi
+  hike.hike_stack_bounds
+  hike.cbat_vsa_domain)
+ (preprocess
+  (action
+   (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))
