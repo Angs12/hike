@@ -411,6 +411,13 @@ let is_sec_comp_ptr (v : var) : bool = is_in_family sec_comp_ptr_family v
 let is_storage_base (v : var) : bool =
   is_region_ptr v || is_vla_ptr v || is_sec_comp_ptr v
 
+(* The un-carved global memory state: BAP's own [mem] var, outside the
+   fissioned families.  A store into it is observable outside the sub
+   (the caller reads the sret buffer through its own pointer) — the
+   sweep never kills one. *)
+let is_global_mem (v : var) : bool =
+  Core.String.equal (Var.name (Var.base v)) "mem"
+
 let region_ptr_id_of (v : var) : int option =
   if is_in_family region_ptr_family v then
     id_of_family region_ptr_family (Var.name v)

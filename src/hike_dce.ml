@@ -2,16 +2,19 @@
    roots are every jump's reads — its operand expressions and the kind's
    ABI boundary (a ret consumes the return registers and SP; a call the
    parameter registers, the ABI return registers it produces, and SP) —
-   and a call-bearing block's mem-typed defs, the memory state the site
-   hands its callee.  A def or phi is live iff its lhs is read by a live
-   node, to a fixpoint.  Everything unmarked leaves — no per-var keep
-   arms. *)
+   a call-bearing block's mem-typed defs (the memory state the site
+   hands its callee), and the sub's escape roots (the storages whose
+   bytes leave the sub: an incoming stack-address parameter's target,
+   a typed call argument's storage).  A def or phi is live iff its lhs
+   is read by a live node, to a fixpoint.  Everything unmarked leaves —
+   no per-var keep arms. *)
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
 module Model = Hike_stack_model
 
-let dce ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
+let dce ~(target : Bap_core_theory.Theory.Target.t)
+    ~(escape_roots : Var.Set.t) (sub : sub term) :
     sub term =
   let abi = Abi.of_target target in
   (* A mapped-intrinsic sub's body is the emitter's interface. *)
@@ -30,7 +33,26 @@ let dce ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
       |> Seq.to_list
     in
     let exact_roots = ref Var.Set.empty in
-    let base_roots = ref Var.Set.empty in
+    (* The un-routed global memory's stores cross sub boundaries: a
+       sub that writes [mem] roots it — the reader may be any
+       caller. *)
+    let global_mem_base =
+      Term.enum blk_t sub
+      |> Seq.concat_map ~f:(fun b -> Term.enum def_t b)
+      |> Seq.filter ~f:(fun d -> Model.is_global_mem (Def.lhs d))
+      |> Seq.map ~f:(fun d -> Var.base (Def.lhs d))
+      |> Seq.to_list
+      |> Base.List.hd
+    in
+    let base_roots =
+      ref
+        (Core.Set.fold escape_roots
+           ~init:
+             (match global_mem_base with
+              | Some v -> Var.Set.singleton v
+              | None -> Var.Set.empty)
+           ~f:(fun acc v -> Core.Set.add acc (Var.base v)))
+    in
     Term.enum blk_t sub
     |> Seq.iter ~f:(fun b ->
            Term.enum jmp_t b
@@ -72,10 +94,18 @@ let dce ~(target : Bap_core_theory.Theory.Target.t) (sub : sub term) :
             changed := true
           end)
     done;
+    (if String.equal (Sub.name sub) "build" then
+       Hike_diag.warn "[DEBUG-qi] build roots=%s"
+         (Base.String.concat ~sep:","
+            (Base.List.map (Core.Set.to_list !base_roots) ~f:Var.name)));
     Term.map blk_t sub ~f:(fun b ->
         let b =
           Term.filter def_t b ~f:(fun d ->
-              Core.Set.mem !live_tids (Term.tid d))
+              let live = Core.Set.mem !live_tids (Term.tid d) in
+              if (not live) && Model.is_mem (Def.lhs d) then
+                Hike_diag.warn "[DEBUG-qi] kills %s"
+                  (Var.name (Def.lhs d));
+              live)
         in
         Term.filter phi_t b ~f:(fun p ->
             Core.Set.mem !live_tids (Term.tid p)))

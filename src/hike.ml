@@ -1166,9 +1166,16 @@ let pass_attrib proj =
    the dead values only the versioned defs and phis distinguish are
    removable.  The escape roots ride the facts from the attribution. *)
 let pass_dce proj =
-  let target = (Hike_kb.facts ()).target in
+  let facts = Hike_kb.facts () in
+  let target = facts.target in
   Project.map_program proj ~f:(fun prog ->
-      Term.map sub_t prog ~f:(Hike_dce.dce ~target))
+      Term.map sub_t prog ~f:(fun sub ->
+          let roots =
+            Core.Option.value
+              (Core.Map.find facts.escape_roots (Term.tid sub))
+              ~default:Var.Set.empty
+          in
+          Hike_dce.dce ~target ~escape_roots:roots sub))
 
 let pass_convlir ~output proj = convert_binary output proj
 

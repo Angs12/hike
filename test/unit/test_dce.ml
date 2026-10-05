@@ -55,7 +55,7 @@ let tests : unit Alcotest.test list =
                         (Call.create ~return:(Direct exit_tid)
                            ~target:(Direct exit_tid) ()))) ] ]
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
         let jmps = dce_jmps sub' in
         let epilogue_target_stays_varfree =
           match jmps with
@@ -111,7 +111,7 @@ let tests : unit Alcotest.test list =
         let sub' =
           Hike.Dce.dce
             ~target:(Theory.Target.of_string "x86_64-gnu-elf")
-            sub
+            ~escape_roots:Var.Set.empty sub
         in
         let lhs_set =
           Base.List.map (dce_defs sub') ~f:(fun d -> Var.name (Var.base (Def.lhs d)))
@@ -133,7 +133,7 @@ let tests : unit Alcotest.test list =
           sub_of "d3_fission_dead"
             [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
         in
-        let sub_a' = Hike.Dce.dce ~target:Theory.Target.unknown sub_a in
+        let sub_a' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub_a in
         let dead_count = List.length (dce_defs sub_a') in
         (* (b) loaded with result read: the whole chain survives. *)
         let t = v64 "d3_t" in
@@ -153,7 +153,7 @@ let tests : unit Alcotest.test list =
                      ~cond:(Bil.BinOp (Bil.EQ, Bil.Var t, Bil.Int (bw64 0)))
                      (Goto (Direct (Tid.create ())))) ] ]
         in
-        let sub_b' = Hike.Dce.dce ~target:Theory.Target.unknown sub_b in
+        let sub_b' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub_b in
         let live_count = List.length (dce_defs sub_b') in
         check "DCE-04" (dead_count = 0 && live_count = 3));
 
@@ -185,8 +185,8 @@ let tests : unit Alcotest.test list =
         in
         let precise_sub = mk_cond_sub "d4_precise" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
         let ctl_sub = mk_cond_sub "d4_ctl" [ rsp_def; hstk_def; tmp_def; arg_def ] arg_read in
-        let precise' = Hike.Dce.dce ~target:Theory.Target.unknown precise_sub in
-        let ctl' = Hike.Dce.dce ~target:Theory.Target.unknown ctl_sub in
+        let precise' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty precise_sub in
+        let ctl' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty ctl_sub in
         let names sub' =
           Base.List.map (dce_defs sub') ~f:(fun d -> Var.name (Var.base (Def.lhs d)))
         in
@@ -206,7 +206,7 @@ let tests : unit Alcotest.test list =
               [ (0, fun _ -> Jmp.create (Goto (Direct (Tid.create ())))) ] ]
         in
         let sub = Term.set_attr sub Sub.intrinsic () in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
         check "DCE-06"
           (List.length (dce_defs sub') = 1
           && Var.equal
@@ -227,7 +227,7 @@ let tests : unit Alcotest.test list =
             [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
         in
         let sub' =
-          Hike.Dce.dce ~target:Theory.Target.unknown sub
+          Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub
         in
         check "DCE-07" (List.length (dce_defs sub') = 0));
 
@@ -255,13 +255,57 @@ let tests : unit Alcotest.test list =
                    Jmp.create (Call (Call.create ~target:(Direct callee) ()))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
         let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
         check "DCE-10"
           (List.mem "stack_r0_mem" lhs
            && List.mem "hike_arg0" lhs
            && List.mem "intrinsic:x0:64" lhs
            && not (List.mem "d10_dead" lhs)));
+
+    (* D11: the escape roots - a storage whose bytes leave the sub (an
+       incoming stack-address parameter's target) survives with no
+       in-sub reader. *)
+    pin "DCE-11"
+      "a store into an escape-rooted storage survives with no in-sub reader"
+      (fun () ->
+        let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
+        let base = v64 "d11_base" in
+        let dead = v64 "d11_dead" in
+        let sub, _ =
+          sub_of "d11_escape"
+            [ [ mk_store_plus sm base 8 42; Def.create dead (Bil.Int (bw64 7)) ],
+              [], [ (0, mk_ret) ] ]
+        in
+        let sub' =
+          Hike.Dce.dce ~target:Theory.Target.unknown
+            ~escape_roots:(Var.Set.singleton sm) sub
+        in
+        let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
+        check "DCE-11"
+          (List.mem "stack_r0_mem" lhs && not (List.mem "d11_dead" lhs)));
+
+    (* D12: the un-routed global memory - a store into plain [mem] has
+       its reader outside the sub (the sret buffer's caller); it never
+       dies in the per-sub sweep. *)
+    pin "DCE-12"
+      "a store into the global memory state survives with no in-sub reader"
+      (fun () ->
+        let m = memv "d12_m" in
+        let m = Var.with_index m 2 in
+        let dead = v64 "d12_dead" in
+        let sub, _ =
+          sub_of "d12_global"
+            [ [ mk_store_plus m (v64 "d12_base") 8 42;
+                Def.create dead (Bil.Int (bw64 7)) ],
+              [], [ (0, mk_ret) ] ]
+        in
+        let sub' =
+          Hike.Dce.dce ~target:Theory.Target.unknown
+            ~escape_roots:Var.Set.empty sub
+        in
+        let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
+        check "DCE-12" (List.mem "d12_m.2" lhs && not (List.mem "d12_dead" lhs))));
 
     (* D7: the phi arm — a phi whose result no survivor reads is swept,
        and its operands' defs cascade with it.  Under SSA a dead phi's
@@ -304,7 +348,7 @@ let tests : unit Alcotest.test list =
           Term.enum blk_t sub
           |> Seq.exists ~f:(fun b -> not (Seq.is_empty (Term.enum phi_t b)))
         in
-        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown sub in
+        let sub' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub in
         let phi_gone =
           Term.enum blk_t sub'
           |> Base.Sequence.for_all ~f:(fun b -> Seq.is_empty (Term.enum phi_t b))

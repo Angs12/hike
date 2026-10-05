@@ -18,7 +18,7 @@ let dce_rounds (target : Bap_core_theory.Theory.Target.t) (sub : sub term) : int
   in
   (* dce runs its own sweep to stability, so re-running it must be a no-op. *)
   let rec go sub prev_n rounds =
-    let sub' = Dce.dce ~target sub in
+    let sub' = Dce.dce ~target ~escape_roots:Var.Set.empty sub in
     let n' =
       Term.enum blk_t sub'
       |> Seq.fold ~init:0 ~f:(fun n blk -> n + Seq.length (Term.enum def_t blk))
@@ -58,7 +58,7 @@ let passcost_main (args : string list) : unit =
                   ~written:(Hike.Vsa.kill_summaries ~abi:facts.Hike.Kb.abi prog)
                                     ~block_addrs:(Core.Map.empty (module Addr)) sub)
           in
-          let _dced, t_dce = time (fun () -> Dce.dce ~target sub) in
+          let _dced, t_dce = time (fun () -> Dce.dce ~target ~escape_roots:Var.Set.empty sub) in
           let rounds, _ = dce_rounds target sub in
           tot := !tot +. t_vsa;
           Printf.printf "%s,%s,%d,%.4f,%.4f,%.4f,%d\n"
