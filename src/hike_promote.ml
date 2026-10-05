@@ -424,6 +424,12 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                               in_extent id lo hi)
                           -> (
                           let folded = offset_of ~piece_ok ~leaves addr in
+                          (match folded with
+                           | Some off ->
+                             Hike_diag.warn "[DEBUG-qo2] folded off=%s addr=%s"
+                               (Format.asprintf "%a" Bap.Std.Exp.pp off)
+                               (Format.asprintf "%a" Bap.Std.Exp.pp addr)
+                           | None -> ());
                           census
                             (if Int.equal id Model.residue_id then
                                (match folded with
@@ -560,6 +566,15 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                         census "rw.value.section.carried";
                                         acc)
                                 | _ -> census "rw.value.raw"; acc))
+                        | Ok ws when Core.Map.is_empty leaves -> (
+                            (* A pure constant is a machine constant, not
+                               a synthesized address: the model's stack
+                               line sits at 2^62, and a double's bits can
+                               land inside it — only a value with var
+                               leaves (an SP-derived address) routes to
+                               the frame's storages. *)
+                            census "rw.value.raw";
+                            acc)
                         | Ok ws -> (
                             (* The routing of an address value: at/above
                                the args base it names the caller's window
@@ -678,9 +693,20 @@ let rewrite_def ~(addr_bits : int) ~(conv : conv) ~(bits : int)
   | Keep -> d
   | Conv_region id ->
       let mem_var = Model.region_mem ~addr_bits:bits id in
+      (match addr with
+       | Some a ->
+         Hike_diag.warn "[DEBUG-qp] rewrite addr=%s"
+           (String.concat ""
+              (String.split_on_char '\n'
+                 (Format.asprintf "%a" Bap.Std.Exp.pp a)))
+       | None -> ());
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
       in
+      Hike_diag.warn "[DEBUG-qq] post=%s"
+        (String.concat ""
+           (String.split_on_char '\n'
+              (Format.asprintf "%a" Bap.Std.Exp.pp (Def.rhs d))));
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_window ->
       let mem_var = Model.window_mem ~addr_bits:bits in
