@@ -93,22 +93,18 @@ stage_opts () {
 }
 
 stage_compilers () {
-  for cc in gcc clang; do
-    for o in O0 O2; do
-      # the gcc cells re-validate the opts stage's own configuration
-      # under their own tag, so no two lines in the log name the same
-      # cell twice
-      cell "$cc-$o-compilers-nosp-nostrip" "$cc" "-$o"         "-fno-stack-protector" nostrip
-    done
+  # gcc is the opts stage's configuration (gcc-$o-nosp-nostrip); this
+  # stage owns the clang arm.
+  for o in O0 O2; do
+    cell "clang-$o-compilers-nosp-nostrip" clang "-$o" "-fno-stack-protector" nostrip
   done
 }
 
 stage_protector () {
-  for sp in "-fno-stack-protector" "-fstack-protector-all"; do
-    for o in O0 O2; do
-      local t="gcc-$o-${sp//-/}-nostrip"
-      cell "$t" gcc "-$o" "$sp" nostrip
-    done
+  # The no-protector control is the opts stage's gcc-$o-nosp-nostrip;
+  # this stage owns the -fstack-protector-all arm.
+  for o in O0 O2; do
+    cell "gcc-$o-fstackprotectorall-nostrip" gcc "-$o" "-fstack-protector-all" nostrip
   done
 }
 
