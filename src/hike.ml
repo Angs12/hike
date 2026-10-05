@@ -24,7 +24,6 @@ module Attribution = Hike_attribution
 module Kb = Hike_kb
 module Types = Hike_types
 module Ssa = Hike_ssa
-module Strip_canaries = Hike_strip_canaries
 module Bil2llvm = Bil2llvm
 
 let convert_binary output_program proj =
@@ -1197,17 +1196,6 @@ let pass_vsa proj =
   in
   Project.with_program proj program
 
-(* The canary strip runs after the solve, before the attribution: a
-   proven canary composition is deleted before emission. *)
-let pass_strip_canaries proj =
-  let facts = Hike_kb.facts () in
-  let names =
-    Term.enum sub_t (Project.program proj)
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun m s ->
-        Core.Map.set m ~key:(Term.tid s) ~data:(Sub.name s))
-  in
-  map_subs (Hike_strip_canaries.strip_sub ~facts ~names) proj
-
 (* ELF facts are read here; attribution owns the BIR and facts protocol. *)
 let pass_attrib proj =
   let facts = Hike_kb.facts () in
@@ -1261,10 +1249,7 @@ let () =
       let fp = chain ~name:"fp" ~deps:[ coerce ] pass_fp in
       let vsa = chain ~name:"vsa" ~deps:[ fp ] pass_vsa in
       let filter = chain ~name:"filter" ~deps:[ vsa ] pass_filter in
-      let strip_canaries =
-        chain ~name:"strip-canaries" ~deps:[ filter ] pass_strip_canaries
-      in
-      let sections = chain ~name:"sections" ~deps:[ strip_canaries ] pass_attrib in
+      let sections = chain ~name:"sections" ~deps:[ filter ] pass_attrib in
       let split_blocks =
         chain ~name:"split-blocks" ~deps:[ sections ] pass_split_blocks
       in

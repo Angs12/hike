@@ -41,7 +41,6 @@
   test_jump
   test_coerce
   test_resolve
-  test_strip_canaries
   test_seam
   test_hike_origin
   test_hike_stack_bounds

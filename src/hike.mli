@@ -71,9 +71,6 @@ module Attribution = Hike_attribution
     through every consumer as a parameter.  Also the term-carried KB
     value slots' home. *)
 module Kb = Hike_kb
-(** The canary-strip pass (after the solve, before the attribution):
-    proven canary compositions delete before the sections pass. *)
-module Strip_canaries = Hike_strip_canaries
 
 (** The type inference: every value typed from the denotation and the
     use graph; the lane kinds stamped; runs after [Ssa]. *)
