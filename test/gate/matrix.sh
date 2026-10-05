@@ -70,7 +70,10 @@ cell () {
     local lout="$dir/$name.l.out" nout="$dir/$name.n.out" lrc nrc
     "$exe" > "$lout" 2>/dev/null; lrc=$?
     "$bin" > "$nout" 2>/dev/null; nrc=$?
-    if [ "$lrc" = "$nrc" ] && cmp -s "$lout" "$nout"; then
+    if [ "$lrc" -ge 128 ] && [ "$nrc" -lt 128 ]; then
+      echo "  $name: SIGNAL (rc l=$lrc n=$nrc)" >> "$log"
+      reds="$reds $name(signal)"
+    elif [ "$lrc" = "$nrc" ] && cmp -s "$lout" "$nout"; then
       n=$((n + 1)); echo "  $name: PASS" >> "$log"
     else
       echo "  $name: DIFF (rc l=$lrc n=$nrc)" >> "$log"; reds="$reds $name(diff)"
@@ -92,7 +95,10 @@ stage_opts () {
 stage_compilers () {
   for cc in gcc clang; do
     for o in O0 O2; do
-      cell "$cc-$o-nosp-nostrip" "$cc" "-$o" "-fno-stack-protector" nostrip
+      # the gcc cells re-validate the opts stage's own configuration
+      # under their own tag, so no two lines in the log name the same
+      # cell twice
+      cell "$cc-$o-compilers-nosp-nostrip" "$cc" "-$o"         "-fno-stack-protector" nostrip
     done
   done
 }
