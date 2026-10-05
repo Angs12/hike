@@ -1,6 +1,6 @@
 # Pins — test_promote
 
-Module: `test/unit/test_promote.ml` (group `promote`, ids `PR-01`…`PR-30`),
+Module: `test/unit/test_promote.ml` (group `promote`, ids `PR-01`…`PR-39`),
 merging every entry point of `test_cbat/test_promote.ml` in source order:
 `run_promotion` (9 `T4-*` checks), `run_t10_rewrite` (5 `T10-*` checks),
 `run_producer_promotion` (6 `PR-A*` checks), and `run_window_escape`
@@ -45,3 +45,4 @@ closure — no cross-pin state.
 | PR-26 | a residue-routed access's value is `residue_ptr + (disp − rel)` — the residue takes the one address rule | re-derive the address geometrically at emission | pin FAILs: the base is not the residue's |
 | PR-37 | The lifted va_list construction — the incoming parameter registers stored into the sub's own frame beside an at/above-entry overflow pointer stored into the frame — stamps the sub variadic (`is_variadic_construction` in `src/hike_stack_model.ml`, the stamp in `src/hike_promote.ml` `rewrite_sub`), so the emitter declares a real LLVM variadic definition. | In `src/hike_stack_model.ml` `is_variadic_construction`, drop the overflow-pointer half (keep only the register spills). | PR-37: `Cu.is_variadic sub'` is false and the `, ...)` tail is absent (review). |
 | PR-38 | The register spills alone, with no overflow pointer, are not the va_list construction. | In `src/hike_stack_model.ml` `is_variadic_construction`, drop the register-spill half (keep only the overflow pointer). | PR-38: `Cu.is_variadic sub'` is true (review). |
+| PR-39 | A runtime index in an ABI lane (a bounded non-stack denotation) folds into the access's region: the per-use leaf kind is the value fact, never the register's ABI role. | In `src/hike_promote.ml`, exclude the ABI parameter/return lanes from `offset_of`'s runtime pieces. | PR-39: the indexed store's address keeps `Var RBP` (the raw lane) instead of a `stack_r1_ptr` base (review). |

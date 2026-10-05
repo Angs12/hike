@@ -210,11 +210,12 @@ let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
        | Ok _ | Error _ -> acc
    end)#visit_exp e Var.Map.empty
 
-(* The entry-line arithmetic of an address exp: each address leaf folds
-   to its singleton offset, the runtime pieces stay.  [None] when an
-   address part is not statically known — the value then composes over
-   its operands' own pointers. *)
-let offset_of ~(piece_ok : var -> bool) ~(leaves : leaf Var.Map.t)
+(* The entry-line arithmetic of an address exp: each [ `Static ] leaf
+   folds to its constant, each [ `Int ] leaf (a value outside the stack
+   segment) stays a runtime piece.  [None] when an address part is a
+   pointer or invisible — the value then composes over its operands'
+   own pointers. *)
+let offset_of ~(leaves : leaf Var.Map.t)
     (e : exp) : exp option =
   let w64 (k : int64) : exp =
     Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 k))
@@ -226,8 +227,8 @@ let offset_of ~(piece_ok : var -> bool) ~(leaves : leaf Var.Map.t)
       | Bil.Var v -> (
           match Core.Map.find leaves v with
           | Some (`Static k) -> Some (w64 k)
-          | Some `Int when piece_ok v -> Some e
-          | Some (`Int | `Addr) | None -> None)
+          | Some `Int -> Some e
+          | Some `Addr | None -> None)
       | Bil.BinOp ((Bil.PLUS | Bil.MINUS) as op, a, b) -> (
           match (child a, child b) with
           | Some a', Some b' -> (
@@ -254,7 +255,7 @@ let offset_of ~(piece_ok : var -> bool) ~(leaves : leaf Var.Map.t)
           if
             Core.Set.exists (Exp.free_vars e) ~f:(fun v ->
                 match Core.Map.find leaves v with
-                | Some `Int when piece_ok v -> false
+                | Some `Int -> false
                 | _ -> true)
           then None
           else Some e)
@@ -367,27 +368,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
           ~f:(base_plus (Model.region_ptr ~addr_bits id) ~rel:g.sg_rel)
     | None -> None
   in
-  (* The bases whose sort the value join can ptr-ify: a base with any
-     address-valued def, plus the ABI lanes (the kind pass proves them
-     from callers and callees).  A displacement piece must not ride one
-     — its emitted value may be a real pointer, a different world from
-     the model offsets. *)
-  let ptr_bases =
-    Term.enum blk_t sub
-    |> Seq.concat_map ~f:(fun blk ->
-           Term.enum def_t blk
-           |> Seq.filter_map ~f:(fun d ->
-                  match denote ~blk ~def:d (Def.rhs d) with
-                  | Ok ws when Vsa.WordSet.in_stack_segment ws ->
-                      Some (Var.base (Def.lhs d))
-                  | _ -> None))
-    |> Seq.fold ~init:Var.Set.empty ~f:(fun acc b -> Core.Set.add acc b)
-    |> fun defs ->
-    Base.List.fold
-      (Hike_abi.param_regs abi @ abi.Hike_abi.return_regs)
-      ~init:defs ~f:(fun acc v -> Core.Set.add acc (Var.base v))
-  in
-  let piece_ok (v : var) = not (Core.Set.mem ptr_bases (Var.base v)) in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
          Term.enum def_t blk
@@ -423,7 +403,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                             ~default:false ~f:(fun (lo, hi) ->
                               in_extent id lo hi)
                           -> (
-                          let folded = offset_of ~piece_ok ~leaves addr in
+                          let folded = offset_of ~leaves addr in
 
                           census
                             (if Int.equal id Model.residue_id then
@@ -455,7 +435,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                           let f =
                             match
                               Base.Option.map
-                                (offset_of ~piece_ok ~leaves addr)
+                                (offset_of ~leaves addr)
                                 ~f:(base_plus (Model.hike_window_var ~word)
                                        ~rel:0L)
                             with
@@ -522,7 +502,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                        real bits, so a re-base here would
                                        materialize the address twice. *)
                                     match
-                                      offset_of ~piece_ok ~leaves (Def.rhs d)
+                                      offset_of ~leaves (Def.rhs d)
                                     with
                                     | Some (Bil.Int w) ->
                                         census "rw.value.section";
@@ -585,7 +565,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                    position arithmetic applies. *)
                                 match
                                   Base.Option.map
-                                    (offset_of ~piece_ok ~leaves (Def.rhs d))
+                                    (offset_of ~leaves (Def.rhs d))
                                     ~f:(base_plus (Model.vla_ptr ~addr_bits tid)
                                          ~rel:0L)
                                 with
@@ -609,7 +589,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                        && window_param -> (
                                     match
                                       Base.Option.map
-                                        (offset_of ~piece_ok ~leaves
+                                        (offset_of ~leaves
                                            (Def.rhs d))
                                         ~f:(base_plus
                                               (Model.hike_window_var ~word)
@@ -633,7 +613,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                       -> (
                                         match
                                           region_base (region_id_of_storage st)
-                                            (offset_of ~piece_ok ~leaves
+                                            (offset_of ~leaves
                                                (Def.rhs d))
                                         with
                                         | Some rhs ->

@@ -252,6 +252,50 @@ let rw_frame () : sub term =
   in
   rewrite_one (straight_sub "rw_frame" defs)
 
+(* The same -O0 frame with the index in a return register (RAX) holding
+   a bounded non-stack value: the per-use leaf classification must fold
+   the runtime piece and rebase the indexed access into its region. *)
+let rw_abi_index () : sub term =
+  let m = memv "rw_m" in
+  let rsp = v64 "RSP" in
+  let rbp = v64 "RBP" in
+  let rax = v64 "RAX" in
+  let c = v1 "rw_c" in
+  let push =
+    Def.create m
+      (Bil.Store
+         ( Bil.Var m, Bil.Var rsp, Bil.Var rbp, LittleEndian, `r64 ))
+  in
+  let k n = Cbat_word.to_word (w64 n) |> fun w -> Bil.Int w in
+  let defs =
+    [ Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k 8));
+      push;
+      Def.create rbp (Bil.Var rsp);
+      Def.create rsp (Bil.BinOp (Bil.MINUS, Bil.Var rsp, k 16));
+      Def.create rax (Bil.Ite (Bil.Var c, k 0, k 1));
+      Def.create m
+        (Bil.Store
+           ( Bil.Var m,
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k 16),
+             Bil.Int (Cbat_word.to_word (w64 42)),
+             LittleEndian, `r64 ));
+      Def.create (v64 "rw_t")
+        (Bil.Load
+           ( Bil.Var m,
+             Bil.BinOp (Bil.MINUS, Bil.Var rbp, k 16),
+             LittleEndian, `r64 ));
+      Def.create m
+        (Bil.Store
+           ( Bil.Var m,
+             Bil.BinOp
+               ( Bil.PLUS,
+                 Bil.BinOp (Bil.MINUS, Bil.Var rbp, k 16),
+                 Bil.BinOp (Bil.TIMES, Bil.Var rax, k 8) ),
+             Bil.Int (Cbat_word.to_word (w64 7)),
+             LittleEndian, `r64 )) ]
+  in
+  rewrite_one (straight_sub "rw_abi_index" defs)
+
 (* The saved-then-reloaded pointer: the address of the local is stored
    into a cell and the through-pointer store dereferences the reload —
    the escaped cell write-closes into the residue, and the reloaded
@@ -695,6 +739,31 @@ let tests : unit Alcotest.test list =
            | Some (Bil.Var pv), Some (Bil.Var av) ->
                Cu.region_ptr_id_of pv = Some 2
                && Cu.region_ptr_id_of av = Some 1
+           | _ -> false));
+
+    (* PR-39: a runtime index in an ABI lane (a bounded non-stack value)
+       is a foldable piece: the indexed store's address is its region's
+       base plus the piece, never the raw frame arithmetic. *)
+    pin "PR-39" "an ABI-lane runtime index folds into the access's region"
+      (fun () ->
+        let sub' = rw_abi_index () in
+        let indexed =
+          Term.enum blk_t sub' |> Seq.concat_map ~f:(Term.enum def_t)
+          |> Seq.find ~f:(fun d ->
+                 match Cu.addr_of_rhs (Def.rhs d) with
+                 | Some (a, _) ->
+                     Core.Set.exists (Exp.free_vars a) ~f:(fun v ->
+                         String.equal (Var.name (Var.base v)) "RAX")
+                 | None -> false)
+        in
+        check "PR-39"
+          (match
+             Base.Option.bind indexed ~f:(fun d ->
+                 Base.Option.map (Cu.addr_of_rhs (Def.rhs d)) ~f:fst)
+           with
+           | Some (Bil.Var b) -> Cu.region_ptr_id_of b = Some 1
+           | Some (Bil.BinOp (Bil.PLUS, Bil.Var b, _)) ->
+               Cu.region_ptr_id_of b = Some 1
            | _ -> false));
 
     (* PR-24: the emitter lowers the rewritten address as the storage's
