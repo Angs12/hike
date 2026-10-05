@@ -60,15 +60,6 @@ let tests : unit Alcotest.test list =
   [
 
 
-    pin "TYPES-02" "is_fp_returning: a YMM def on the epilogue path is an FP return"
-      (fun () ->
-        let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
-        check "TYPES-02" (Types.is_fp_returning ~abi (epilogue_sub ymm0)));
-
-
-
-
-
     pin "TYPES-05" "tag_lane: a plain [In] register lane is not a pointer"
       (fun () ->
         let rdi = v64 "RDI" in
@@ -160,7 +151,7 @@ let tests : unit Alcotest.test list =
                  Arg.intent a = Some Out && not (is_ptr a))));
 
     pin "TYPES-18"
-      "compute_sub_sig: an FP-returning sub appends the YMM0 [Out] lane"
+      "compute_sub_sig: an internal sub carries the ABI return carriers (RAX, RDX, YMM0), no body scan"
       (fun () ->
         let ymm0 = Base.List.nth_exn abi.Abi.vector_param_regs 0 in
         let rets, _ = Types.compute_sub_sig ~free_vars:(Types.free_regs_of_sub ~target:(x86 ()) (epilogue_sub ymm0)) (x86 ()) (epilogue_sub ymm0) in

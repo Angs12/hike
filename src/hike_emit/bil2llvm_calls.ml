@@ -460,13 +460,22 @@ let create_thunk ctx (sub_tid : tid) =
     else begin
     let args = get_args ctx sub_tid in
     let rets = get_rets ctx sub_tid in
+    (* The twin is the machine-convention face: its return is the
+       synthetic convention's (the ABI's integer return registers),
+       never the callee's own carrier list.  Its body extracts the
+       lanes the convention can carry and drops the rest (the vector
+       return has no synthetic carrier). *)
+    let conv_rets =
+      Base.List.map ctx.abi.Abi.return_regs ~f:(fun reg ->
+          Arg.create ~intent:Out reg (Var reg))
+    in
     let word = ctx.abi.Abi.word in
     let window_var = Hike_stack_model.hike_window_var ~word in
     (* The twin carries the synthetic indirect convention — exactly
        what a pointer call passes. *)
     let conv = ctx.abi in
     let twin_args = window_conv_args ~word conv in
-    let ret_typ = ret_type_of_rets ctx rets in
+    let ret_typ = ret_type_of_rets ctx conv_rets in
       let arg_typs =
         Base.List.map twin_args ~f:(fun a ->
             if Var.same (Arg.lhs a) window_var then
@@ -553,9 +562,27 @@ let create_thunk ctx (sub_tid : tid) =
         Llvm.build_call callee_typ callee_fn
           (Array.of_list call_args) "" builder
       in
-      (match rets with
+      let n_callee = Base.List.length rets in
+      let lane_value (i : int) (a : Arg.t) : Llvm.llvalue =
+        let v =
+          if i >= n_callee then Llvm.undef (lane_type ctx a)
+          else
+            match rets with
+            | [ _ ] -> r
+            | _ -> Llvm.build_extractvalue r i "" builder
+        in
+        (* The synthetic lane is integer-honest; a callee lane the kind
+           pass typed ptr is re-coerced like a forwarded argument. *)
+        forward a v
+      in
+      (match conv_rets with
        | [] -> ignore (Llvm.build_ret_void builder)
-       | _ -> ignore (Llvm.build_ret r builder));
+       | [ a ] -> ignore (Llvm.build_ret (lane_value 0 a) builder)
+       | _ ->
+         let agg = ref (Llvm.undef ret_typ) in
+         Base.List.iteri conv_rets ~f:(fun i a ->
+             agg := Llvm.build_insertvalue !agg (lane_value i a) i "" builder);
+         ignore (Llvm.build_ret !agg builder));
       ctx.thunks :=
         (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks)
     end

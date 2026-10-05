@@ -19,14 +19,13 @@ under that inversion.
 
 | id | mechanism | disable recipe | red evidence |
 |----|-----------|----------------|--------------|
-| TYPES-02 | `is_fp_returning`: a YMM def on the epilogue path (an indirect call with no return) is an FP return. | In `is_fp_returning`, make `is_epilogue` always `false` (or drop the `Seq.exists`). | TYPES-02 FAILs: the FP sub answers `false`. |
 | TYPES-05 | `tag_lane`: a plain `In` register lane is left untagged. | In `tag_lane`, drop the pointer guard (always `set_ptr_arg`). | TYPES-05 FAILs: the lane becomes a pointer. |
 | TYPES-10 | `compute_sub_sig`: an unknown target answers no returns (the target check is the switch). | As TYPES-09 but make the target test always `true`. | TYPES-10 FAILs: the unknown target gains RAX/RDX. |
 | TYPES-12 | `compute_sub_sig`: SP, the thread pointer, and callee-saved registers are filtered from argument lanes. | In the `filter`, drop the `is_callee_saved`/`Abi.sp`/`thread_pointer` disjuncts. | TYPES-12 FAILs: RSP/RBX/FS_BASE become args. |
 | TYPES-13 | `compute_sub_sig`: intrinsic-target and promoted (`hike_slot`/`hike_arg`) names are filtered from argument lanes. | In the `filter`, drop the intrinsic-name/`hike_slot`/`hike_arg` disjuncts. | TYPES-13 FAILs: the promoted lanes become args. |
 | TYPES-16 | `compute_sub_sig`: a `window_param` layout carries the caller window as a pointer `In` lane. | In `compute_sub_sig`, drop the `window_arg` append (`args @ []`). | TYPES-16 FAILs: the window lane is absent. |
 | TYPES-17 | `compute_sub_sig`: an emittable intrinsic takes its free vars `In` and its own defs `Out`. | In the intrinsic branch, skip the def scan for returns (return the target's `rets`). | TYPES-17 FAILs: the intrinsic's `Out` lane is absent. |
-| TYPES-18 | `compute_sub_sig`: an FP-returning sub appends the `YMM0` `Out` lane to the integer returns. | In `compute_sub_sig`, drop the `if is_fp_returning … then rets @ [ymm0]` branch. | TYPES-18 FAILs: YMM0 is missing. |
+| TYPES-18 | `compute_sub_sig`: every internal sub carries the ABI return carriers (RAX, RDX, YMM0); the boundary (the C entry) and unknown targets do not. | In `compute_sub_sig`, drop the `vector_return_reg` from the carriers (or take the `fixed_signature` branch for every sub). | TYPES-18 FAILs: YMM0 is missing (a boundary-only signature). |
 | TYPES-22 | A named external call receives the synthetic parameter-register ABI even when its target sub is not in the filtered program. | In `is_native_call`, classify every generated no-return direct target as a real call. | TYPES-22 FAILs: the external-call sub has no synthetic argument lanes. |
 | TYPES-23 | A canonical direct `hike_return` edge is not a native call and does not add synthetic parameter lanes. | In `is_native_call`, count the canonical direct return as a call. | TYPES-23 FAILs: the terminal-return sub has synthetic argument lanes. |
 | KIND-01 | a def computing a stack address is ptr-kind (its denotation is stack-resident) — the emitter's pointer argument depends on it | drop the denotation seed from `ptr_defs` | pin FAILs: the def is not ptr-kind |

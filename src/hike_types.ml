@@ -8,50 +8,6 @@ open Bap.Std
 module Model = Hike_stack_model
 module Abi = Hike_abi
 
-let is_fp_returning ~(abi : Abi.t) (sub : sub term) : bool =
-  let is_value_reg v =
-    Abi.is_return_reg abi v || Abi.is_vector_param_reg abi v
-  in
-  let is_epilogue blk =
-    Term.enum jmp_t blk
-    |> Seq.exists ~f:(fun j ->
-        match Jmp.kind j with
-        | Call _ when Hike_return.is_jmp j -> true
-        | Call c -> (
-            match Call.target c with
-            | Indirect _ -> Option.is_none (Call.return c)
-            | _ -> false)
-        | _ -> false)
-  in
-  let value_defs blk =
-    Term.enum def_t blk
-    |> Seq.fold ~init:[] ~f:(fun acc d ->
-        if is_value_reg (Def.lhs d) then d :: acc else acc)
-  in
-  let cfg = Sub.to_graph sub in
-  let blocks =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
-           Core.Map.set acc ~key:(Term.tid blk) ~data:blk)
-  in
-  let return_path_defs =
-    Term.enum blk_t sub
-    |> Seq.fold ~init:[] ~f:(fun acc blk ->
-        if not (is_epilogue blk) then acc
-        else
-          let preds = Graphs.Tid.Node.preds (Term.tid blk) cfg in
-          let pred_defs =
-            Seq.fold preds ~init:[] ~f:(fun acc p ->
-                match Core.Map.find blocks p with
-                | Some pb -> value_defs pb @ acc
-                | None -> acc)
-          in
-          value_defs blk @ pred_defs @ acc)
-  in
-  match return_path_defs with
-  | [] -> false
-  | d :: _ -> Abi.is_vector_param_reg abi (Def.lhs d)
-
 (* A lane is a pointer when it is an address lane: a by-reference
    argument, a memory var (its storage), or the caller window. *)
 let tag_lane (a : Arg.t) : Arg.t =
@@ -76,15 +32,23 @@ let compute_sub_sig ~(free_vars : var list)
     (sub : sub term) : Arg.t list * Arg.t list =
   let abi = Abi.of_target target in
   let rets =
-    (if Abi.is_primary_target target then abi.return_regs else [])
-    |> Base.List.map ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
-  in
-  let rets =
-    (* Double returns arrive via [%YMM0]. *)
-    if is_fp_returning ~abi sub then
-      let ymm0 = Abi.fp_return_reg abi in
-      rets @ [ Arg.create ~intent:Out ymm0 (Var ymm0) ]
-    else rets
+    (* The return carriers: an internal sub returns every carrier the
+       model can carry (RAX, RDX, and the vector return — the boundary
+       facts, not a body scan); the boundary itself (the C entry and
+       the emitted intrinsics) keeps its ABI shape, and a foreign
+       target answers no returns. *)
+    let carriers =
+      if not (Abi.is_primary_target target) then []
+      else if
+        Model.fixed_signature sub
+        || Model.is_plt_trampoline_sub sub
+        || Base.Option.is_none (Term.first blk_t sub)
+      then abi.Abi.return_regs
+      else
+        abi.Abi.return_regs
+        @ Base.Option.to_list abi.Abi.vector_return_reg
+    in
+    Base.List.map carriers ~f:(fun reg -> Arg.create ~intent:Out reg (Var reg))
   in
   let rets, args =
     (* A sub reading its incoming window carries the caller-window
