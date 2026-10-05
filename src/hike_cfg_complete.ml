@@ -219,18 +219,30 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
      strictly before the reading def, in the SUB's term order: the
      table's base register is commonly defined blocks away from the
      dispatch block. *)
-  let sub_defs =
+  let definitions = lazy (
     Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.to_list
+    |> Seq.fold ~init:(Tid.Map.empty, Var.Map.empty, Var.Map.empty)
+         ~f:(fun (before, first, last) d ->
+           let v = Def.lhs d in
+           (Core.Map.set before ~key:(Term.tid d) ~data:last,
+            (if Core.Map.mem first v then first
+             else Core.Map.set first ~key:v ~data:d),
+            Core.Map.set last ~key:v ~data:d)))
   in
-  let before_defs (d : def term) : def term Var.Map.t =
-    let rec go m = function
-      | [] -> m
-      | x :: rest ->
-        if Tid.equal (Term.tid x) (Term.tid d) then m
-        else go (Core.Map.set m ~key:(Def.lhs x) ~data:x) rest
-    in
-    go Var.Map.empty sub_defs
+  let find_def at v =
+    match at with
+    | Some d ->
+      let before, _, last = Lazy.force definitions in
+      let defs =
+        Base.Option.value (Core.Map.find before (Term.tid d)) ~default:last
+      in
+      Core.Map.find defs v
+    | None -> (
+      match Core.Map.find last_defs v with
+      | Some _ as found -> found
+      | None ->
+        let _, first, _ = Lazy.force definitions in
+        Core.Map.find first v)
   in
   let cast_signed kind =
     match kind with
@@ -260,18 +272,7 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
         | Some _, Some _ -> Some e
         | _ -> None)
       | Bil.Var v -> (
-        let found =
-          match at with
-          | Some d -> Core.Map.find (before_defs d) v
-          | None -> (
-            match Core.Map.find last_defs v with
-            | Some d -> Some d
-            | None ->
-              Term.enum blk_t sub
-              |> Seq.find_map ~f:(fun b ->
-                     Term.enum def_t b
-                     |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)))
-        in
+        let found = find_def at v in
         match found with
         | Some d -> (
           match Def.rhs d with
@@ -301,18 +302,7 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
           | Some bs, Some pb -> Some (pb :: bs)
           | _ -> None))
       | Bil.Var v -> (
-        let found =
-          match at with
-          | Some d -> Core.Map.find (before_defs d) v
-          | None -> (
-            match Core.Map.find last_defs v with
-            | Some d -> Some d
-            | None ->
-              Term.enum blk_t sub
-              |> Seq.find_map ~f:(fun b ->
-                     Term.enum def_t b
-                     |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)))
-        in
+        let found = find_def at v in
         match found with
         | Some d -> (
           match Def.rhs d with
@@ -327,53 +317,39 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
       option =
     if depth > 16 then None
     else
-      Hike_exp_fold.fold
-        (fun e child ->
-          match e with
-          | Bil.Int w -> (
-              match Cbat_word.to_int64 (Cbat_word.of_word w) with
-              | Ok v -> Some (Some v, None)
-              | Error _ -> None)
-          | Bil.Load (_, addr, endi, size) when Size.in_bits size = bits ->
-              Some (None, Some (addr, false, endi, at))
-          | Bil.Cast (kind, _, e2) -> (
-              match child e2 with
-              | Some (base, Some (addr, _, endi, load)) -> (
-                  match cast_signed kind with
-                  | Some sgn -> Some (base, Some (addr, sgn, endi, load))
-                  | None -> None)
-              | other -> other)
-          | Bil.Var v -> (
-              let found =
-                match at with
-                | Some d -> Core.Map.find (before_defs d) v
-                | None -> (
-                    match Core.Map.find last_defs v with
-                    | Some d -> Some d
-                    | None ->
-                        Term.enum blk_t sub
-                        |> Seq.find_map ~f:(fun b ->
-                               Term.enum def_t b
-                               |> Seq.find ~f:(fun d -> Var.equal (Def.lhs d) v)))
-              in
-              match found with
-              | Some d -> sym ~at:(Some d) ~depth:(depth + 1) (Def.rhs d)
+      let child = sym ~at ~depth in
+      match e with
+      | Bil.Int w -> (
+          match Cbat_word.to_int64 (Cbat_word.of_word w) with
+          | Ok v -> Some (Some v, None)
+          | Error _ -> None)
+      | Bil.Load (_, addr, endi, size) when Size.in_bits size = bits ->
+          Some (None, Some (addr, false, endi, at))
+      | Bil.Cast (kind, _, e2) -> (
+          match child e2 with
+          | Some (base, Some (addr, _, endi, load)) -> (
+              match cast_signed kind with
+              | Some sgn -> Some (base, Some (addr, sgn, endi, load))
               | None -> None)
-          | Bil.BinOp (Bil.PLUS, a, b) -> (
-              match (child a, child b) with
-              | Some (ba, ca), Some (bb, cb) ->
-                  if Option.is_some ca && Option.is_some cb then None
-                  else
-                    Some
-                      ((match ba, bb with
-                        | Some x, Some y -> Some (Int64.add x y)
-                        | Some _, None -> ba
-                        | None, Some _ -> bb
-                        | None, None -> None),
-                       match ca, cb with Some _, _ -> ca | None, _ -> cb)
-              | _ -> None)
+          | other -> other)
+      | Bil.Var v -> (
+          match find_def at v with
+          | Some d -> sym ~at:(Some d) ~depth:(depth + 1) (Def.rhs d)
+          | None -> None)
+      | Bil.BinOp (Bil.PLUS, a, b) -> (
+          match (child a, child b) with
+          | Some (ba, ca), Some (bb, cb) ->
+              if Option.is_some ca && Option.is_some cb then None
+              else
+                Some
+                  ((match ba, bb with
+                    | Some x, Some y -> Some (Int64.add x y)
+                    | Some _, None -> ba
+                    | None, Some _ -> bb
+                    | None, None -> None),
+                   match ca, cb with Some _, _ -> ca | None, _ -> cb)
           | _ -> None)
-        e
+      | _ -> None
   in
   match sym ~at ~depth:0 texp with
   | Some (Some base, Some (addr_exp, sgn, endi, load)) ->
