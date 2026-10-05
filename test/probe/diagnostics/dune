@@ -1,6 +1,6 @@
 (executables
- (names audit02 attr_census conv_diag vsa_gap)
- (modules audit02 attr_census conv_diag vsa_gap)
+ (names audit02 attr_census bir_dump conv_diag vsa_gap)
+ (modules audit02 attr_census bir_dump conv_diag vsa_gap)
  (libraries probe_common hike bap bap-core-theory bap-main llvm
   cbat_vsa cbat_vsa_domain core graphlib threads unix)
  (flags :standard -g)
