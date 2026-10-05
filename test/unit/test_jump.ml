@@ -328,6 +328,30 @@ let tests : unit Alcotest.test list =
         check "JMP-44"
           (Exp.equal (jmp_cond_of s') (Bil.Int (Word.one 1))
           && not (has_def_for s' cf)));
+
+    (* cmp x,0: BAP folds x - 0 to x and leaves OF := high:1[x & (x ^ t)]
+       with t := x; the OF is identically zero, so jle compiles to
+       x <=s 0 and the flag defs die. *)
+    pin "JMP-45" "cmp x,0's folded OF (x & (x ^ t), t := x) is OF == 0"
+      (fun () ->
+        let defs =
+          [
+            Def.create t xv;
+            Def.create zf (Bil.BinOp (Bil.EQ, w0_32, tv));
+            Def.create sf (Bil.Cast (Bil.HIGH, 1, tv));
+            Def.create ovf
+              (Bil.Cast
+                 ( Bil.HIGH
+                 , 1
+                 , Bil.BinOp (Bil.AND, xv, Bil.BinOp (Bil.XOR, xv, tv)) ));
+          ]
+        in
+        let s = sub_of_defs_and_jmp "t13_cmpzero" defs zf_or_core in
+        let s' = compile_sub s in
+        check "JMP-45"
+          (Exp.equal (jmp_cond_of s')
+             (Bil.BinOp (Bil.SLE, tv, w0_64))
+          && Int.equal (Base.List.length (defs_of s')) 1));
   ]
 
 let () = run "jump" tests

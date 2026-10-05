@@ -1,6 +1,6 @@
 # Pins — test_jump
 
-Module: `test/unit/test_jump.ml` (group `jump`, ids `JMP-01`…`JMP-43`),
+Module: `test/unit/test_jump.ml` (group `jump`, ids `JMP-01`…`JMP-45`),
 migrating `test_cbat/test_jump.ml`.  Every source `check` site is carried as
 one pin; none retired.  Production mechanism: `src/hike_jump.ml`
 (`Hike.Jump.compile_sub`, target-driven by the `jump_target` flag-role
@@ -31,3 +31,4 @@ measured red is claimed here.
 | JMP-42 | An unconditional jump cond (`Int 1`) is not a bexp — `parse_bexp` returns `None` and the cond is untouched. | In `plan_block`, default a failed `parse_bexp` to a compiled constant. | to be recorded |
 | JMP-43 | No `Int`-cond def family is consumed, so all five cmp defs survive. | In `plan_block`, set `changed = true` unconditionally (consuming flag defs for the `Int 1` cond). | to be recorded |
 | JMP-44 | `CF := 1` is the const-true flag fact: a `jb` over it compiles to the const-true branch and the CF def dies. | Drop the `CF, e when is_one_int e` arm in `extract_facts`. | JMP-44 red: the cond stays `Var CF` and the def survives. |
+| JMP-45 | `cmp x, 0` folds the diff to `x`, leaving `OF := high:1[x & (x ^ t)]` with `t := x`; the folded OF is identically zero (the `x ^ d` factor with `d` resolving to `x`), so `jle` compiles to `x <=s 0` and the flag defs die. | In `src/hike_jump.ml` `extract_facts`, drop the `Ovf_folded` arm (the `AND(a, XOR(a, d))` shape). | JMP-45 red: the cond stays the residual `zf_or_core` (review). |

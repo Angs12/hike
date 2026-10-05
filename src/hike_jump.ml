@@ -73,11 +73,17 @@ type zf_fact = Zero of exp | Zconst of bool
 
 type cf_fact = Ult of exp * exp | Cconst of bool
 
+(* The OF fact: the canonical (op1^op2)&(op1^diff) triple, or the
+   folded x&(x^d) form (BAP folds x^0 to x; the diff is a temp). *)
+type ovf_fact =
+  | Ovf_core of exp * exp * exp
+  | Ovf_folded of exp * exp
+
 type facts = {
   zf : zf_fact option; (* ZF ⇔ (d = 0) / constant *)
   cf : cf_fact option; (* CF ⇔ (a <u b) / constant *)
   sf : exp option; (* SF ⇔ sign bit of e *)
-  ovf : (exp * exp * exp) option; (* OF ⇔ signed overflow of x−y, d = x−y *)
+  ovf : ovf_fact option; (* OF ⇔ signed overflow of x−y, d = x−y *)
   and_form : bool; (* OF := 0 — the test/and group (OF identically 0) *)
 }
 
@@ -102,6 +108,12 @@ let is_zero_int = function Bil.Int w -> Word.is_zero w | _ -> false
 
 let is_one_int = function Bil.Int w -> Word.is_one w | _ -> false
 
+(* A XOR of one value with itself is identically zero; the OF formula's
+   factors can fold to this (cmp x, 0 leaves x & (x ^ x)). *)
+let is_self_cancelling_xor = function
+  | Bil.BinOp (Bil.XOR, a, b) -> Exp.equal a b
+  | _ -> false
+
 (* Fact extraction from one flag def rhs (the table above); [None] when the
    shape is unknown. *)
 let extract_facts (fl : flag) (rhs : exp) (f : facts) : facts option =
@@ -122,13 +134,33 @@ let extract_facts (fl : flag) (rhs : exp) (f : facts) : facts option =
       match f.cf with None -> Some { f with cf = Some (Cconst false) } | _ -> None)
   | SF, Bil.Cast (Bil.HIGH, 1, e) -> (
       match f.sf with None -> Some { f with sf = Some e } | _ -> None)
+  (* The OF formula's factors can self-cancel — cmp x, 0 folds x - 0 to
+     x and leaves x & (x ^ x); either factor being a self-cancelling xor
+     makes the whole expression zero, so OF ≡ 0 and the signed family
+     runs on SF alone. *)
+  | OF, Bil.Cast (Bil.HIGH, 1, Bil.BinOp (Bil.AND, a, b))
+    when is_self_cancelling_xor a || is_self_cancelling_xor b ->
+    if f.and_form then None else Some { f with and_form = true }
   | ( OF
     , Bil.Cast
         ( Bil.HIGH
         , 1
         , Bil.BinOp (Bil.AND, Bil.BinOp (Bil.XOR, x, y), Bil.BinOp (Bil.XOR, x2, d)) ) )
     when Exp.equal x x2 -> (
-      match f.ovf with None -> Some { f with ovf = Some (x, y, d) } | _ -> None)
+      match f.ovf with
+      | None -> Some { f with ovf = Some (Ovf_core (x, y, d)) }
+      | _ -> None)
+  (* The x^0 fold: BAP leaves x & (x ^ d) where d is the diff temp
+     (cmp x, 0 folds x - 0 to x).  The ctx resolves d against x. *)
+  | ( OF
+    , Bil.Cast
+        ( Bil.HIGH
+        , 1
+        , Bil.BinOp (Bil.AND, a, Bil.BinOp (Bil.XOR, b, d)) ) )
+    when Exp.equal a b -> (
+      match f.ovf with
+      | None -> Some { f with ovf = Some (Ovf_folded (a, d)) }
+      | _ -> None)
   (* test/and: OF is identically 0 — the group's signed identity is SF alone. *)
   | OF, e when is_zero_int e ->
     if f.and_form then None else Some { f with and_form = true }
@@ -254,8 +286,18 @@ let flag_item (fv : flag_vars) (c : ctx) (facts : facts) (v : var) : item option
    the sign exp to the same diff; with OF ≡ 0 the core is the sign alone. *)
 let signed_item (c : ctx) (facts : facts) : item option =
   match (facts.sf, facts.ovf) with
-  | Some e, Some (x, y, d) when is_minus_xy c d x y && same_exp c e d ->
+  | Some e, Some (Ovf_core (x, y, d))
+    when is_minus_xy c d x y && same_exp c e d ->
       Some { atom = Rel (LT, true, x, y); pair = Some (x, y); flags = [ SF; OF ] }
+  | Some e, Some (Ovf_core (x, _, d)) when same_exp c x d ->
+      (* op1 = diff: the x^d factor is zero, so OF ≡ 0. *)
+      sign_item e [ SF; OF ]
+  | Some e, Some (Ovf_core (x, y, _)) when same_exp c x y ->
+      (* op1 = op2: the x^y factor is zero, so OF ≡ 0. *)
+      sign_item e [ SF; OF ]
+  | Some e, Some (Ovf_folded (x, d)) when same_exp c x d ->
+      (* cmp x, 0: the diff folded to x, leaving x & (x ^ x). *)
+      sign_item e [ SF; OF ]
   | Some e, None when facts.and_form -> sign_item e [ SF; OF ]
   | _ -> None
 
