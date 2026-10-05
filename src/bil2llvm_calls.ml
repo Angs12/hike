@@ -22,11 +22,49 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
   let slot_args =
     Base.List.filter args ~f:(fun a -> Hike_stack_model.is_arg_slot (Arg.lhs a))
   in
+  (* The caller-window base is the caller's SP at the call: its position
+     in the caller's residue (the shadow that covers the above-entry
+     window). *)
+  let window_ptr () =
+    match !(scope.cur_frame) with
+    | Some _ -> (
+        let sp_ver =
+          match lane_version scope blk_tid ctx.sp with
+          | Some v -> v
+          | None -> ctx.sp
+        in
+        match get_ptr_offset scope sp_ver with
+        | Some off ->
+          Some
+            (Bil2llvm_ptr.materialize ctx scope llvm_builder blk_tid
+               Hike_stack_model.Ptr_residue off)
+        | None ->
+          let sp = lane_value ctx scope blk_tid ctx.sp in
+          Some (Bil2llvm_ptr.as_pointer ctx llvm_builder sp))
+    | None -> None
+  in
   (* Slot parameter i binds the block's [call_arg i] def; both names
-     derive from the index, so the binding is order-independent. *)
-  let arg_value_of_slot i =
-    get_local scope blk_tid
-      (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
+     derive from the index, so the binding is order-independent.  A slot
+     the site never stored still has its window cell: the address is the
+     window at the slot's own offset (the stored-address defs are the
+     refinement of exactly that). *)
+  let slot_ptr i =
+    match
+      get_local scope blk_tid
+        (Hike_stack_model.call_arg ~addr_bits:ctx.addr_bits i)
+    with
+    | Some v -> Bil2llvm_ptr.as_pointer ctx llvm_builder v
+    | None -> (
+        match window_ptr () with
+        | None -> Llvm.undef (Llvm.pointer_type ctx.llvm_ctx)
+        | Some w ->
+          let off =
+            Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx)
+              (Hike_stack_model.slot_offset ~word:ctx.abi.Abi.word i)
+              false
+          in
+          Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) w [| off |] ""
+            llvm_builder)
   in
   Base.List.map args ~f:(fun arg ->
       (* Every lane read resolves through the block's version stamp —
@@ -35,23 +73,8 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
       if Var.same (Arg.lhs arg)
           (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
       then
-        (* The caller-window base is the caller's SP at the call: its
-           position in the caller's residue (the shadow that covers the
-           above-entry window). *)
-        (match !(scope.cur_frame) with
-         | Some _ -> (
-             let sp_ver =
-               match lane_version scope blk_tid ctx.sp with
-               | Some v -> v
-               | None -> ctx.sp
-             in
-             match get_ptr_offset scope sp_ver with
-             | Some off ->
-                 Bil2llvm_ptr.materialize ctx scope llvm_builder blk_tid
-                   Hike_stack_model.Ptr_residue off
-             | None ->
-                 let sp = lane_value ctx scope blk_tid ctx.sp in
-                 Bil2llvm_ptr.as_pointer ctx llvm_builder sp)
+        (match window_ptr () with
+         | Some w -> w
          | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
       else if Hike_stack_model.is_arg_slot (Arg.lhs arg) then
         let i =
@@ -60,12 +83,7 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
                ~f:(fun _ a -> Var.equal (Arg.lhs a) (Arg.lhs arg))
                |> Base.Option.map ~f:fst)
         in
-        (* The slot parameter is the caller's slot ADDRESS: the call
-           site's [hike_arg i] def holds it, and it passes as the
-           pointer it is. *)
-        (match arg_value_of_slot i with
-         | Some v -> Bil2llvm_ptr.as_pointer ctx llvm_builder v
-         | None -> Llvm.undef (var_lltype ctx (Arg.lhs arg)))
+        slot_ptr i
       else if extern && is_fp_param ctx (Arg.lhs arg) then
         (* Lowers YMM args to doubles for externs. *)
         let v = create_exp ctx scope llvm_builder blk_tid exp in
