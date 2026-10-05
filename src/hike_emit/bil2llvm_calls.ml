@@ -100,12 +100,11 @@ let create_call_args ctx scope blk_tid llvm_builder call_tid =
            value is not itself a stack address passes the register's
            bits, coerced to the lane's pointer type. *)
         let v = create_exp ctx scope llvm_builder blk_tid exp in
-        let v = as_arg ctx scope llvm_builder blk_tid exp v in
         if Llvm.classify_type (Llvm.type_of v) = Llvm.TypeKind.Pointer then v
         else Llvm.build_inttoptr v (lane_type ctx arg) "" llvm_builder
       else
         let v = create_exp ctx scope llvm_builder blk_tid exp in
-        as_int ctx scope llvm_builder blk_tid (is_window_exp scope exp) v)
+        Bil2llvm_ptr.as_integer ctx llvm_builder v)
 
 type fp_ret_kind = FpFloat | FpDouble | FpLongDouble
 

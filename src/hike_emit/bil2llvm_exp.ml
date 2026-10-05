@@ -160,15 +160,6 @@ let rewrite_mem_node exp addr size marker =
   in
   v#map_exp exp
 
-(* A window value is a model address; when it escapes into i64 memory
-   (a store) or a numeric lane, materialize the real address — the
-   caller-window pointer plus the entry-relative offset.  This is the
-   ONE as_int boundary. *)
-let is_window_exp scope (e : exp) : bool =
-  match e with
-  | Bil.Var w -> Core.Set.mem !(scope.window_vars) w
-  | _ -> false
-
 (* ---- The expression evaluator.  The pointer semantics live in
    [Bil2llvm_ptr]; this lane evaluates exps and asks it for values. ---- *)
 
@@ -476,10 +467,3 @@ and emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
   let v = emit () in
   insert_local scope blk_tid marker v;
   create_exp ?want ctx scope llvm_builder blk_tid (rewrite marker)
-
-(* The one as_int boundary; as_arg is the identity (a lane's value is
-   already its type). *)
-let as_int ctx _scope llvm_builder _blk_tid _is_window v =
-  Bil2llvm_ptr.as_int ctx llvm_builder v
-
-let as_arg _ctx _scope _llvm_builder _blk_tid _a_exp v = v

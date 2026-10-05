@@ -367,15 +367,6 @@ let create_sub ctx scope sub =
     in
     let fr : sub_frame = { entry_line; entry_ptr; regions } in
     scope.cur_frame := Some fr;
-    (* The window-value vars: a store of one materializes the real
-       address at the use. *)
-    scope.window_vars :=
-      Term.enum blk_t sub
-      |> Seq.concat_map ~f:(Term.enum def_t)
-      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
-          if Hike_def_slots.def_is_window_value d then
-            Core.Set.add acc (Def.lhs d)
-          else acc);
     (* The section-component storage base vars bind to their globals
        (the run's sec_comps map carries (global, native base)). *)
     Core.Map.to_sequence !(ctx.sec_comps)
