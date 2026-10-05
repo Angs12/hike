@@ -9,83 +9,157 @@
 open Bap.Std
 module Model = Hike_stack_model
 
-(* A compilable series: every jmp a direct Goto to a non-interrupt. *)
+(* Materialize before attribution rewrites addresses. Keep the call arms
+   beside their stores until promotion binds the outgoing slot pointers;
+   [normalize] then gives every call its own block before signature/SSA. *)
+let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
+  let sub_at a =
+    match Core.Map.find facts.sub_addrs a with
+    | Some t -> Some t
+    | None -> facts.lookup (Word.to_int64_exn a)
+  in
+  let name ~(sub : sub term) (j : jmp term) w =
+    let a = Cbat_word.to_word w in
+    let local =
+      Base.Option.bind (Core.Map.find facts.block_addrs a) ~f:(fun t ->
+          Base.Option.some_if (Option.is_some (Term.find blk_t sub t)) t)
+    in
+    match Jmp.kind j, local, sub_at a with
+    | Goto _, Some t, _ -> Goto (Direct t)
+    | Goto _, _, Some t -> Call (Call.create ~target:(Direct t) ())
+    | Call c, _, Some t -> Call (Call.with_target c (Direct t))
+    | Call c, Some t, _ when Option.is_none (Call.return c) ->
+      (* The noreturn rendering of an indirect TAIL jump: the drive's
+         second channel — the words name jump destinations, and the arms
+         are gotos. *)
+      Goto (Direct t)
+    | Call _, Some _, _ ->
+      failwith
+        (Printf.sprintf
+           "hike: dispatch: call target %s names a block, not a sub start"
+           (Word.to_string a))
+    | _ ->
+      failwith
+        (Printf.sprintf
+           "hike: dispatch: sub %s block target %s at jmp %s names no transfer destination"
+           (Sub.name sub) (Word.to_string a) (Tid.name (Term.tid j)))
+  in
+  let series sub blk j e =
+    if Base.Option.value_map (Hike_transfer.slot_of_target ~sub e)
+         ~default:false ~f:(Core.Set.mem facts.foreign_slots)
+    then [ j ]
+    else
+      match Hike_cfg_complete.dispatch_words ~denote:facts.denote
+              ~block_addrs:facts.block_addrs ~last_defs:(Cbat_vsa.last_defs blk)
+              ~sub ~blk ~images:facts.images e with
+      | None -> [ j ]
+      | Some (base, bases, words) ->
+        let base = Option.value base ~default:0L in
+        let subject =
+          Base.List.fold (Option.value bases ~default:[]) ~init:e
+            ~f:(fun acc b -> Bil.BinOp (Bil.MINUS, acc, b))
+        in
+        let groups =
+          Base.List.fold words ~init:[] ~f:(fun acc w ->
+              let kind = name ~sub j w in
+              let w = Word.of_int64 ~width:(Word.bitwidth (Cbat_word.to_word w))
+                        (Int64.sub (Word.to_int64_exn (Cbat_word.to_word w)) base) in
+              match Base.List.Assoc.find acc kind ~equal:Base.Poly.equal with
+              | Some ws -> Base.List.Assoc.add acc kind (w :: ws) ~equal:Base.Poly.equal
+              | None -> (kind, [ w ]) :: acc)
+          |> List.rev
+        in
+        Base.List.mapi groups ~f:(fun i (kind, ws) ->
+            let cond =
+              if i + 1 = Base.List.length groups then Jmp.cond j
+              else Hike_cfg_complete.guarded_cond subject ws in
+            let cond = Hike_cfg_complete.and_guard
+                         (Hike_cfg_complete.guard_of j) cond in
+            let arm = if i = 0 then j else Jmp.create kind in
+            Jmp.with_kind arm kind |> fun arm -> Jmp.with_cond arm cond)
+  in
+  Cbat_vsa.with_images facts.images (fun () ->
+      Term.map sub_t prog ~f:(fun sub ->
+          Term.map blk_t sub ~f:(fun blk ->
+              Term.concat_map jmp_t blk ~f:(fun j ->
+                  if Hike_return.is_jmp j then [ j ]
+                  else match Jmp.kind j with
+                    | Goto (Indirect e) -> series sub blk j e
+                    | Call c -> (match Call.target c with
+                        | Indirect e -> series sub blk j e
+                        | Direct _ -> [ j ])
+                    | _ -> [ j ]))))
+
+(* Calls execute in their own arm blocks; the selector blocks contain
+   only guarded gotos and explicit false edges. A call's return remains
+   its original continuation, so SSA sees one ret-lane definition per arm. *)
 let compilable_series (jmps : jmp term list) : bool =
   Base.List.for_all jmps ~f:(fun j ->
       match Jmp.kind j with
       | Goto (Direct tid) ->
           not (Bil2llvm_env.is_interrupt_name (Tid.name tid))
+      | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
       | _ -> false)
 
-(* One block per jmp: piece 1 is the original block minus the later
-   jmps; each later jmp becomes a fresh block of its own.  Every piece
-   but the last carries an explicit [Goto] to the next piece, so a
-   guard's false edge is a jmp target — the BIR carries its own edges
-   and no pass reads the term order. *)
 let pieces (blk : blk term) : blk term list =
   match Term.enum jmp_t blk |> Seq.to_list with
   | [] | [ _ ] -> [ blk ]
   | jmps ->
-      let tids =
-        match jmps with
-        | _ :: rest ->
-            Term.tid blk :: Base.List.map rest ~f:(fun _ -> Tid.create ())
-        | [] -> []
+      let actions = ref [] in
+      let selectors =
+        Base.List.map jmps ~f:(fun j ->
+            match Jmp.kind j with
+            | Call _ ->
+              let action =
+                let bindings =
+                  Term.enum def_t blk
+                  |> Seq.filter ~f:(fun d -> Model.is_call_arg (Def.lhs d))
+                  |> Seq.map ~f:(fun d -> Def.create (Def.lhs d) (Def.rhs d))
+                  |> Seq.to_list
+                in
+                Blk.create ~defs:bindings
+                  ~jmps:[ Jmp.with_cond j (Bil.Int (Word.one 1)) ] ()
+              in
+              actions := action :: !actions;
+              Jmp.create ~cond:(Jmp.cond j) (Goto (Direct (Term.tid action)))
+            | _ -> j)
       in
-      let n = Base.List.length jmps in
-      Base.List.mapi jmps ~f:(fun i j ->
-          let blk_i =
-            if Int.equal i 0 then
-              Term.filter jmp_t blk ~f:(fun x ->
-                  Tid.equal (Term.tid x) (Term.tid j))
-            else Blk.create ~tid:(Base.List.nth_exn tids i) ~jmps:[ j ] ()
-          in
-          if i + 1 < n then
-            Term.append jmp_t blk_i
-              (Jmp.create (Goto (Direct (Base.List.nth_exn tids (i + 1)))))
-          else blk_i)
+      let tids = Term.tid blk ::
+                 Base.List.map (Base.List.tl_exn selectors) ~f:(fun _ -> Tid.create ()) in
+      let n = Base.List.length selectors in
+      let pieces =
+        Base.List.mapi selectors ~f:(fun i j ->
+            let blk_i =
+              if Int.equal i 0 then
+                Term.filter jmp_t blk ~f:(fun _ -> false)
+                |> Term.filter def_t ~f:(fun d ->
+                     Base.List.is_empty !actions || not (Model.is_call_arg (Def.lhs d)))
+                |> fun b -> Term.append jmp_t b j
+              else Blk.create ~tid:(Base.List.nth_exn tids i) ~jmps:[ j ] ()
+            in
+            if i + 1 < n then
+              Term.append jmp_t blk_i
+                (Jmp.create (Goto (Direct (Base.List.nth_exn tids (i + 1)))))
+            else blk_i)
+      in
+      pieces @ List.rev !actions
 
 let split_sub (sub : sub term) : sub term =
-  (* A 3+-jmp block becomes one piece per jmp, each carrying an explicit
-     Goto to the next. *)
-  let multi =
-    Term.enum blk_t sub
-    |> Seq.filter ~f:(fun blk ->
-           Base.List.length (Term.enum jmp_t blk |> Seq.to_list) > 2)
-    |> Seq.to_list
-  in
-  if Base.List.is_empty multi then sub
-  else begin
-    let splittable =
-      Base.List.filter_map multi ~f:(fun blk ->
-          let jmps = Term.enum jmp_t blk |> Seq.to_list in
-          if compilable_series jmps then Some (Term.tid blk)
-          else begin
-            let shape =
-              Base.String.concat ~sep:","
-                (Base.List.map jmps ~f:(fun j ->
-                     match Jmp.kind j with
-                     | Goto (Direct _) -> "goto"
-                     | Goto (Indirect _) -> "goto*"
-                     | Ret _ -> "ret"
-                     | Call _ -> "call"
-                     | Int _ -> "int"))
-            in
-            Hike_diag.warn
-              "split-blocks: sub %s: block %s: multi-jmp series [%s] not all \
-               direct gotos; left unsplit"
-              (Sub.name sub) (Tid.name (Term.tid blk)) shape;
-            None
-          end)
-    in
-    if Base.List.is_empty splittable then sub
-    else begin
-      let splittable = Core.Set.of_list (module Tid) splittable in
-      Term.concat_map blk_t sub ~f:(fun blk ->
-          if Core.Set.mem splittable (Term.tid blk) then pieces blk
-          else [ blk ])
-    end
-  end
+  Term.concat_map blk_t sub ~f:(fun blk ->
+      let jmps = Term.enum jmp_t blk |> Seq.to_list in
+      let needs_split =
+        Base.List.length jmps > 2
+        || (Base.List.length jmps > 1
+            && Base.List.exists jmps ~f:(fun j ->
+                   match Jmp.kind j with Call _ -> true | _ -> false))
+      in
+      if not needs_split then [ blk ]
+      else if compilable_series jmps then pieces blk
+      else begin
+        Hike_diag.warn "split-blocks: sub %s: block %s: unsupported multi-jmp series; left unsplit"
+          (Sub.name sub) (Tid.name (Term.tid blk));
+        [ blk ]
+      end)
 
 let normalize (prog : program term) : program term =
   Term.map sub_t prog ~f:split_sub

@@ -23,6 +23,49 @@ let goto_target (j : jmp term) : Tid.t =
   | Goto (Direct t) -> t
   | _ -> failwith "goto_target"
 
+(* A tiny facts fixture for the post-solve materializer.  The denotation is
+   deliberately independent of the expression so the pin exercises the
+   bounded-target seam rather than the VSA transfer rules. *)
+let materialize_facts ~(program : program term) ~(words : Cbat_vsa.WordSet.t)
+    ~(subs : (int64 * tid) list) : Hike.Kb.facts =
+  let block_addrs =
+    Term.enum sub_t program
+    |> Seq.concat_map ~f:(Term.enum blk_t)
+    |> Seq.filter_map ~f:(fun blk ->
+           Base.Option.map (Term.get_attr blk address) ~f:(fun a ->
+               (a, Term.tid blk)))
+    |> Seq.to_list
+    |> Core.Map.of_alist_exn (module Addr)
+  in
+  let sub_addrs =
+    Base.List.map subs ~f:(fun (a, t) -> (Addr.of_int64 a, t))
+    |> Core.Map.of_alist_exn (module Addr)
+  in
+  let facts =
+    Hike.Kb.build ~lookup:(fun a ->
+        Base.List.find_map subs ~f:(fun (v, t) ->
+            Base.Option.some_if (Int64.equal a v) t))
+      ~block_envs:Tid.Map.empty ~block_addrs
+      ~target:Theory.Target.unknown
+  in
+  { facts with
+    Hike.Kb.sub_addrs;
+    denote = (fun ~blk:_ ?def:_ _ -> Ok words) }
+
+let stamp_sub (sub : sub term) (addresses : (int64 * tid) list) : sub term =
+  Term.map blk_t sub ~f:(fun blk ->
+      match
+        Base.List.find_map addresses ~f:(fun (a, t) ->
+            Base.Option.some_if (Tid.equal t (Term.tid blk)) a)
+      with
+      | Some a -> Term.set_attr blk address (Addr.of_int64 a)
+      | None -> blk)
+
+let direct_call_target (j : jmp term) : tid option =
+  match Jmp.kind j with
+  | Call c -> (match Call.target c with Direct t -> Some t | _ -> None)
+  | _ -> None
+
 let tests : unit Alcotest.test list =
   [
 
@@ -93,8 +136,83 @@ let tests : unit Alcotest.test list =
         check "SBLK-05"
           (Base.List.map
              (Hike.Split_blocks.free_regs ~abi:Hike.Abi.x86_64_sysv split)
-             ~f:Var.name
+           ~f:Var.name
            = []));
+
+    pin "SBLK-06"
+      "a bounded indirect call becomes one direct arm per named sub start"
+      (fun () ->
+        let target = v64 "sb6_target" in
+        let callee_a, callee_a_tids =
+          sub_of "sb6_a" [ [], [ (0, mk_ret) ] ]
+        in
+        let callee_b, callee_b_tids =
+          sub_of "sb6_b" [ [], [ (0, mk_ret) ] ]
+        in
+        let caller, caller_tids =
+          sub_of "sb6_caller"
+            [ [], [ (1, fun t ->
+                        Jmp.create
+                          (Call
+                             (Call.create ~target:(Indirect (Bil.Var target))
+                                ~return:(Direct t) ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let caller =
+          stamp_sub caller [ (0x1000L, caller_tids.(0)); (0x1008L, caller_tids.(1)) ]
+        in
+        let callee_a = stamp_sub callee_a [ (0x2000L, callee_a_tids.(0)) ] in
+        let callee_b = stamp_sub callee_b [ (0x3000L, callee_b_tids.(0)) ] in
+        let program = Program.create ~subs:[ caller; callee_a; callee_b ] () in
+        let words =
+          Cbat_vsa.WordSet.of_list ~width:64 [ w64 0x2000; w64 0x3000 ]
+        in
+        let facts =
+          materialize_facts ~program ~words
+            ~subs:[ (0x2000L, Term.tid callee_a); (0x3000L, Term.tid callee_b) ]
+        in
+        let result = Hike.Split_blocks.materialize ~facts program in
+        let caller' =
+          Term.find sub_t result (Term.tid caller)
+          |> Base.Option.value_exn
+        in
+        let js = Term.enum blk_t caller' |> Seq.hd_exn |> Term.enum jmp_t
+                   |> Seq.to_list
+        in
+        let targets =
+          Base.List.filter_map js ~f:direct_call_target
+          |> Base.List.map ~f:Tid.name
+          |> Base.List.sort ~compare:String.compare
+        in
+        check "SBLK-06"
+          (targets =
+           (Base.List.map [ Term.tid callee_a; Term.tid callee_b ] ~f:Tid.name
+            |> Base.List.sort ~compare:String.compare)));
+
+    pin "SBLK-07"
+      "a bounded target with no naming-map entry fails loudly"
+      (fun () ->
+        let target = v64 "sb7_target" in
+        let caller, tids =
+          sub_of "sb7_caller"
+            [ [], [ (1, fun t ->
+                        Jmp.create
+                          (Call
+                             (Call.create ~target:(Indirect (Bil.Var target))
+                                ~return:(Direct t) ()))) ];
+              [], [ (0, mk_ret) ] ]
+        in
+        let caller = stamp_sub caller [ (0x1000L, tids.(0)); (0x1008L, tids.(1)) ] in
+        let program = Program.create ~subs:[ caller ] () in
+        let facts = materialize_facts ~program
+            ~words:(Cbat_vsa.WordSet.singleton (w64 0x4000)) ~subs:[] in
+        let raised =
+          try
+            ignore (Hike.Split_blocks.materialize ~facts program);
+            false
+          with Failure _ -> true
+        in
+        check "SBLK-07" raised);
   ]
 
 let () = run "split_blocks" tests

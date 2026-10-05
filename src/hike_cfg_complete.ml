@@ -475,12 +475,14 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     | Some _ as r -> r
     | None -> plain texp ())
   | Bil.Var v ->
-    Base.Option.bind (Core.Map.find last_defs v) ~f:(fun add_def ->
-        let rhs = Def.rhs add_def in
-        match table rhs (Some add_def) with
+    (match Core.Map.find last_defs v with
+     | Some add_def ->
+       let rhs = Def.rhs add_def in
+       (match table rhs (Some add_def) with
         | Some _ as r -> r
         | None -> plain rhs ~def:add_def ())
-  | _ -> None
+     | None -> plain texp ())
+  | _ -> plain texp ()
 
 (* The resolution's preparation walk: every resolvable dispatch's case
    words land on the run's map (mid-block entries through the block
@@ -649,19 +651,16 @@ let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
       Some [ canonical_ret j ]
   | _ -> None
 
+(* Keep the in-sub completion rewrite as the solver's CFG edge product.
+   Cross-sub targets deliberately decline here; [Split_blocks.materialize]
+   owns those call arms after the whole-program address maps are final. *)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(sub_tids : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t)
-    ~(sub : sub term)
-    ~(foreign_slots : Core.Int64.Set.t)
+    ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(sub : sub term) ~(foreign_slots : Core.Int64.Set.t)
     ~(last_defs : def term Var.Map.t) ~(images : Vsa.section_image list)
-    ?(code_range : (int64 * int64) option = None)
-    ~(blk : blk term) (j : jmp term) :
-    jmp term list option =
-  let series texp cont =
-    (* A target read through a linker-owned slot is a foreign boundary,
-       never a dispatch: the linker fills the value, so the file bytes
-       are not case words. *)
+    ?(code_range : (int64 * int64) option = None) ~(blk : blk term)
+    (j : jmp term) : jmp term list option =
+  let series texp =
     if
       Base.Option.value_map (Hike_transfer.slot_of_target ~sub texp)
         ~default:false ~f:(fun a -> Core.Set.mem foreign_slots a)
@@ -670,25 +669,14 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
       Base.Option.bind
         (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs ~images
            ~sub ~blk ~code_range:code_range texp)
-        ~f:(fun (subject, pairs, _base) ->
-          dispatch_jmps j subject pairs cont)
+        ~f:(fun (subject, pairs, _base) -> dispatch_jmps j subject pairs None)
   in
   match ret_rewrite ~last_defs ~retaddr j with
   | Some rewritten -> Some rewritten
-  | None -> (
-      match Jmp.kind j with
-      | Call c -> (
-          match Call.target c with
-          | Indirect texp ->
-            let cont =
-              match Call.return c with
-              | Some (Direct t) -> Some t
-              | Some (Indirect _) | None -> None
-            in
-            series texp cont
-          | _ -> None)
-      | Goto (Indirect texp) -> series texp None
-      | _ -> None)
+  | None ->
+    match Jmp.kind j with
+    | Goto (Indirect texp) -> series texp
+    | _ -> None
 
 (* Rebuilds [blk] replacing each jmp its classifier rewrites; a
    classifier [None] keeps the jmp. *)
@@ -707,6 +695,19 @@ let splice_jmps (blk : blk term)
           match Core.Map.find rewr (Term.tid j) with
           | Some js' -> js'
           | None -> [ j ])
+
+let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
+    ~(block_addrs : Tid.t Addr.Map.t) ~(images : Vsa.section_image list)
+    ~(foreign_slots : Core.Int64.Set.t)
+    ?(code_range : (int64 * int64) option = None) (sub : sub term) :
+    sub term =
+  let sub_tids = sub_tids sub in
+  Term.map blk_t sub ~f:(fun blk ->
+      let last_defs = Vsa.last_defs blk in
+      splice_jmps blk
+        ~classify:(rewritten_jmps ~denote ~retaddr ~sub_tids ~block_addrs
+                     ~sub ~foreign_slots ~last_defs ~images
+                     ~code_range:code_range ~blk))
 
 (* The unreachable-block rule, one walk over the rewritten edge set: a
    block is kept iff the walk reaches it — from the sub's entry over the
@@ -838,22 +839,6 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
     let reachable = go Tid.Set.empty entry in
     Term.filter_map blk_t sub ~f:(fun b ->
         Base.Option.some_if (Core.Set.mem reachable (Term.tid b)) b)
-
-(* The exit rewrite, once at drain; a sub with no decision comes back
-   unchanged. *)
-let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t)
-    ~(images : Vsa.section_image list)
-    ~(foreign_slots : Core.Int64.Set.t)
-    ?(code_range : (int64 * int64) option = None)
-    (sub : sub term) : sub term =
-  let sub_tids = sub_tids sub in
-  Term.map blk_t sub ~f:(fun blk ->
-      let last_defs = Vsa.last_defs blk in
-      splice_jmps blk ~classify:(rewritten_jmps ~denote ~retaddr ~sub_tids
-                                   ~block_addrs ~sub ~foreign_slots
-                                   ~last_defs ~images
-                                   ~code_range:code_range ~blk))
 
 (* The shape-only return canonicalization, for a sub whose fixpoint did
    not converge: a target var whose reaching def loads the entry SP
@@ -991,8 +976,8 @@ let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub =
-    rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr
-      ~block_addrs ~images ~foreign_slots ~code_range:code_range sub
+    rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
+      ~images ~foreign_slots ~code_range:code_range sub
   in
   prune_unreachable ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
     ~images ~foreign_slots sub

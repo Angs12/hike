@@ -22,6 +22,9 @@ type facts = {
   (* An address to the tid of the block whose extent contains it.
      An empty map keeps every dispatch foreign. *)
   block_addrs : Tid.t Addr.Map.t;
+  sub_addrs : Tid.t Addr.Map.t;
+  images : Cbat_vsa.section_image list;
+  foreign_slots : Core.Int64.Set.t;
   target : Bap_core_theory.Theory.Target.t;
   abi : Hike_abi.t;
   (* [e] denotes in the before-env of [def] — the def's Env Tag — or,
@@ -57,6 +60,9 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
   in
   { envs = block_envs;
     block_addrs;
+    sub_addrs = Addr.Map.empty;
+    images = [];
+    foreign_slots = Core.Int64.Set.empty;
     target;
     abi = Hike_abi.of_target target;
     lookup;

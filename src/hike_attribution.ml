@@ -10,6 +10,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     ~(meta : Hike_sections.sec_meta option list)
     ~(relative : (int64 * int64) list) ~(externals : (int64 * string) list)
     (program : program term) : result =
+  let program = Hike_split_blocks.materialize ~facts program in
   let dynamic_allocs =
     Term.enum sub_t program
     |> Seq.fold ~init:Tid.Map.empty ~f:(fun map sub ->
