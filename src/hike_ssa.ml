@@ -266,9 +266,12 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     in
     let boundary =
       Base.List.fold blks ~init:Var.Set.empty ~f:(fun acc blk ->
-          Term.enum jmp_t blk
-          |> Seq.fold ~init:acc ~f:(fun reads j ->
-                 Core.Set.union reads (Model.jmp_boundary_reads ~abi j)))
+          Core.Set.union
+            (Core.Set.union acc
+               (Term.enum jmp_t blk
+                |> Seq.fold ~init:Var.Set.empty ~f:(fun reads j ->
+                       Core.Set.union reads (Model.jmp_boundary_reads ~abi j))))
+            (Model.blk_boundary_reads blk))
     in
     let vars =
       Base.List.fold blks ~init:(Core.Set.union call_lanes boundary)

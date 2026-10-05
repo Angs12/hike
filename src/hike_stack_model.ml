@@ -304,6 +304,26 @@ let call_arg ~(addr_bits : int) (i : int) : var =
 (* The call-argument temps survive DCE: they are the call's arguments. *)
 let is_call_arg (v : var) : bool = is_in_family call_arg_family v
 
+(* The FP model's operand temp: [intrinsic:x<N>], width-qualified by the
+   fp pass ([intrinsic:x<N>:<width>]); an FP call site's argument.  The
+   base name carries no SSA version. *)
+let is_fp_operand_temp (v : var) : bool =
+  let n = Var.name (Var.base v) in
+  let plen = String.length "intrinsic:x" in
+  if
+    Core.String.is_prefix n ~prefix:"intrinsic:x"
+    && String.length n > plen
+  then
+    let rest = String.sub n plen (String.length n - plen) in
+    match String.index_opt rest ':' with
+    | None -> Core.String.for_all rest ~f:Core.Char.is_digit
+    | Some i ->
+      Core.String.for_all (String.sub rest 0 i) ~f:Core.Char.is_digit
+      && Core.String.for_all
+           (String.sub rest (i + 1) (String.length rest - i - 1))
+           ~f:Core.Char.is_digit
+  else false
+
 let is_arg_slot (v : var) : bool = is_in_family slot_family v
 
 (* The fission mem vars' type: byte cells addressed at the target's
@@ -444,18 +464,18 @@ let jmp_input_reads ~(abi : Abi.t) (j : jmp term) : Var.Set.t =
    address temps.  The callee reads the state the site built, through the
    slot addresses the site minted. *)
 let blk_boundary_reads (blk : blk term) : Var.Set.t =
-  let has_call =
-    Term.enum jmp_t blk
-    |> Seq.exists ~f:(fun j ->
-           match Jmp.kind j with
-           | Call _ when not (Hike_return.is_jmp j) -> true
-           | _ -> false)
+  let is_call j =
+    match Jmp.kind j with
+    | Call _ when not (Hike_return.is_jmp j) -> true
+    | _ -> false
   in
-  if not has_call then Var.Set.empty
+  if not (Term.enum jmp_t blk |> Seq.exists ~f:is_call) then Var.Set.empty
   else
     Term.enum def_t blk
     |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
-           if is_mem (Def.lhs d) then Core.Set.add acc (Def.lhs d) else acc)
+           let lhs = Def.lhs d in
+           if is_mem lhs || is_fp_operand_temp lhs then Core.Set.add acc lhs
+           else acc)
 
 let jmp_target_reads (j : jmp term) : Var.Set.t =
   match Jmp.kind j with

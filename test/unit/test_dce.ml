@@ -88,7 +88,7 @@ let tests : unit Alcotest.test list =
         let rax = v64 "RAX" in
         let rdi = v64 "RDI" in
         let m = memv "d2_m" in
-        let x0 = v64 "intrinsic:x0" in
+        let x0 = v64 "intrinsic:dead0" in
         let callee_tid = Tid.for_name "d2_callee" in
         let sub, _ =
           sub_of "d2_keeps"
@@ -231,22 +231,24 @@ let tests : unit Alcotest.test list =
         in
         check "DCE-07" (List.length (dce_defs sub') = 0));
 
-    (* D10: the call's memory boundary — a call-bearing block's mem-typed
-       defs (the outgoing store's storage, the call-arg address temp) are
-       the call's reads; an unread plain def in the same block still
-       dies. *)
+    (* D10: the call's argument boundary — a call-bearing block's
+       mem-typed defs (the outgoing store's storage, the call-arg address
+       temp) and FP operand temps are the call's reads; an unread plain
+       def in the same block still dies. *)
     pin "DCE-10"
-      "a call-bearing block's mem defs are the call's boundary reads"
+      "a call-bearing block's argument temps are the call's boundary reads"
       (fun () ->
         let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
         let base = v64 "d10_base" in
         let arg0 = Hike.Stack_model.call_arg ~addr_bits:64 0 in
+        let x0 = v64 "intrinsic:x0:64" in
         let dead = v64 "d10_dead" in
         let callee = Tid.for_name "d10_callee" in
         let sub, _ =
           sub_of "d10_callmem"
             [ [ mk_store_plus sm base 8 42;
                 Def.create arg0 (Bil.Var base);
+                Def.create x0 (Bil.Int (bw64 7));
                 Def.create dead (Bil.Int (bw64 7)) ],
               [ (0,
                  fun _ ->
@@ -258,6 +260,7 @@ let tests : unit Alcotest.test list =
         check "DCE-10"
           (List.mem "stack_r0_mem" lhs
            && List.mem "hike_arg0" lhs
+           && List.mem "intrinsic:x0:64" lhs
            && not (List.mem "d10_dead" lhs)));
 
     (* D7: the phi arm — a phi whose result no survivor reads is swept,

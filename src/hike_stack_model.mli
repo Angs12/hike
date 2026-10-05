@@ -119,6 +119,8 @@ val jmp_input_reads : abi:Abi.t -> jmp term -> Var.Set.t
    storages the site's stores built and the call-argument address
    temps. *)
 val blk_boundary_reads : blk term -> Var.Set.t
+(* The FP call site's argument temp ([intrinsic:xN[:width]]). *)
+val is_fp_operand_temp : var -> bool
 val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val jmp_target_reads : jmp term -> Var.Set.t
 val def_writes : def term -> Var.Set.t
