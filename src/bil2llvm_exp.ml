@@ -392,6 +392,7 @@ and storage_access ?want ?(is_window = false)
   | `Load (addr, size) ->
       let marker = marker_of_size size in
       let p = addr_ptr addr in
+
       let ty =
         match want with
         | Some t -> t
@@ -403,6 +404,7 @@ and storage_access ?want ?(is_window = false)
   | `Store (addr, data, size) ->
       let marker = marker_of_size size in
       let p = addr_ptr addr in
+
       let emit () =
         let d = create_exp ctx scope llvm_builder blk_tid data in
         Bil2llvm_memory.store_ptr llvm_builder d p
