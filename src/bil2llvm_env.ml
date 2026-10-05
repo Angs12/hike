@@ -193,8 +193,6 @@ type emit_ctx = {
 type sub_scope = {
   ll_bbs : Llvm.llbasicblock Tid.Map.t ref;
   blk_llvals : blk_llvals Tid.Map.t ref;
-  (* One Dead-classification warn per sub. *)
-  dead_warned : bool ref;
   (* Dedups [hike: undef-read:] warnings per (block, var). *)
   undef_warned : Var.Set.t ref Tid.Map.t ref;
   (* The body's frame: routes region/window mem vars; bound around
@@ -228,7 +226,6 @@ type sub_scope = {
 let fresh_scope () : sub_scope =
   { ll_bbs = ref Tid.Map.empty;
     blk_llvals = ref Tid.Map.empty;
-    dead_warned = ref false;
     undef_warned = ref Tid.Map.empty;
     cur_frame = ref None;
     window_vars = ref Var.Set.empty;

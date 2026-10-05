@@ -234,7 +234,7 @@ let seam_kinds_of (sol : Vsa.vsa_sol) (sub : sub term) :
              ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
              ~blk ~def:d addr))
     >>= fun ws ->
-    if Ws.is_bottom ws || Ws.in_stack_segment ws then
+    if Ws.in_stack_segment ws then
       Some (Ws.caller_split (Ws.classify ws))
     else if Ws.is_top ws then Some Ws.unbounded_span
     else None
@@ -280,7 +280,6 @@ let vsa_kind_to_string (k : Ws.kind) : string =
   | Ws.Infinite (lo, hi) -> Printf.sprintf "Infinite(%Ld,%Ld)" lo hi
   | Ws.Caller (lo, hi) -> Printf.sprintf "Caller(%Ld,%Ld)" lo hi
   | Ws.Mixed (lo, hi) -> Printf.sprintf "Mixed(%Ld,%Ld)" lo hi
-  | Ws.Dead -> "Dead"
 
 (* Value-set of each named var in the state. *)
 let state_summary (vars : var list) (st : AI.t) : string =

@@ -206,11 +206,12 @@ let tests : unit Alcotest.test list =
 
 
 
-    pin "SEC-07" "AT1-S02: bottom yields the Dead tag and no portion"
+    pin "SEC-07"
+      "AT1-S02: bottom claims like a failed query - no tag, full-range portions"
       (fun () ->
         check "SEC-07"
           (match rd (Ws.of_clp (Clp.bottom 64)) with
-           | Some Tag.Dead, [] -> true
+           | None, ps -> not (Base.List.is_empty ps)
            | _ -> false));
 
     pin "SEC-08" "AT1-S02: a plain TOP claims the sub-local line, no tag"

@@ -92,7 +92,7 @@ type data_tree = range_storage Tree.t
 
 (** The slim def-carried classification: the def's section with its
     ADDRESS bounds (not the occupied-byte bounds), the justified
-    unbounded form, the data-section anchoring, or Dead. *)
+    unbounded form, or the data-section anchoring. *)
 module Tag = Hike_stack_model.Tag
 
 type sec_tag = Hike_stack_model.sec_tag

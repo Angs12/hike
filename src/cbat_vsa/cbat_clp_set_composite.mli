@@ -112,14 +112,13 @@ val refine_origin : word:int -> t -> t
 (* Segment-relative bounds of a stack value; None when not stack. *)
 val stack_bounds : t -> (int64 * int64) option
 
-(* The def-carried classification of a set on the model's absolute
-   segment line. *)
+(* A non-bottom set's classification on the model's absolute
+   segment line; a bottom set has no values to classify. *)
 type kind =
   | Range of int64 * int64
   | Infinite of int64 * int64
   | Caller of int64 * int64
   | Mixed of int64 * int64
-  | Dead
 
 val equal_kind : kind -> kind -> bool
 

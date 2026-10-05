@@ -1864,7 +1864,6 @@ type kind =
   | Infinite of int64 * int64
   | Caller of int64 * int64
   | Mixed of int64 * int64
-  | Dead
 [@@deriving equal]
 
 (* The fully-infinite span: the whole position line.  A TOP denotation
@@ -1917,7 +1916,6 @@ let caller_split (k : kind) : kind =
 
 let classify (t : t) : kind =
   if is_top t then unbounded_span
-  else if is_bottom t then Dead
   else
     let bounds =
       match offset_extrema t with

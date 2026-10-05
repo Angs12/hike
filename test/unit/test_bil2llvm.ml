@@ -44,34 +44,6 @@ let tests : unit Alcotest.test list =
     (* SCOPE: undef-read diagnostics stay with the sub that reads the lane. *)
 
 
-    (* POISON: an unbounded-span access warns and emits; a Dead-tagged
-       access emits a poison value and warns through Hike_diag. *)
-    pin "EMIT-02"
-      "a Dead-tagged stack access warns and emits a poison value"
-      (fun () ->
-        let rsp = v64 "RSP" in
-        let m = memv "poison_m" in
-        let t = v64 "poison_t" in
-        let addr =
-          Bil.BinOp
-            (Bil.MINUS, Bil.Var rsp, Bil.Int (Cbat_word.to_word (w64 16)))
-        in
-        let ld = Def.create t (Bil.Load (Bil.Var m, addr, LittleEndian, `r64)) in
-        (* The store consumes the LOAD result: the poison is textually live. *)
-        let st =
-          Def.create m
-            (Bil.Store (Bil.Var m, addr, Bil.Var t, LittleEndian, `r64))
-        in
-        let dead_sub = mk_lds_sub "poison_dead" [ ld; st ] in
-        let dead_sub = stamp [ (Term.tid ld, Sm.Tag.Dead) ] dead_sub in
-        let ir_holder = ref "" in
-        let err =
-          capture_stderr (fun () -> ir_holder := emit_ir [ dead_sub ])
-        in
-        check "EMIT-02"
-          (contains_substring !ir_holder "poison"
-          && contains_substring err "hike: guarded: sub"));
-
     (* UNDEF: reading a never-defined register warns and the value
        becomes a frozen undef. *)
 

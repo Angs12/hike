@@ -414,7 +414,12 @@ let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
 let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
     ~(entry : int64) ~(spans : data_span list) ~(rip : bool) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
-  if Vsa.WordSet.is_bottom ws then (Some Tag.Dead, [])
+  if Vsa.WordSet.is_bottom ws then
+    (* A def-anchored bottom is the refinement's empty meet, not a
+       reachability proof — the def's block is CFG-reachable.  The
+       access keeps its memory form: the raw-address emission is
+       exact. *)
+    top_claim ~extents ~cause:Query_failed ~entry ~word
   else if Vsa.WordSet.is_top ws then
     (* A plain top claims the sub-local spaces' full range — the
        identity member forcing write closure; a rip-relative address

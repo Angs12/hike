@@ -125,15 +125,6 @@ let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
     match want with Some t -> t | None -> typ_lltype ctx (Var.typ var)
   in
   match def_tag with
-  | Some Hike_stack_model.Tag.Dead ->
-      if not !(scope.dead_warned) then begin
-        scope.dead_warned := true;
-        (* Warning text is a grepped contract. *)
-        Hike_diag.warn
-          "guarded: sub %s: stack access classified Dead (empty range): def %s rhs=%s"
-          (Tid.name sub_tid) (Var.name var) (Format.asprintf "%a" Exp.pp exp)
-      end;
-      Llvm.poison fallback_ty
   | Some def_tag when Hike_stack_model.is_return_address_tag def_tag -> (
       match Hike_stack_model.mem_node_of exp with
       | Some (`Load (_, addr, size))

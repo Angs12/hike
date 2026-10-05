@@ -206,7 +206,7 @@ let census_addr ~(sub : string) ~(env : AI.t) (a : exp) : unit =
           (Format.asprintf "%a" Exp.pp a) m
     end
     else bump "ld.bounded";
-    let stackish = Ws.is_bottom v || Ws.in_stack_segment v in
+    let stackish = Ws.in_stack_segment v in
     if stackish then begin
       bump "stack.def";
       (match Ws.caller_split (Ws.classify v) with

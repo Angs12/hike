@@ -14,7 +14,7 @@ assertions.
 
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
-| SEC-07 | bottom denotation yields `Dead` and no portion | make the bottom arm return a `Stack` portion instead of `None, []` | SEC-07 red: pattern `Dead, []` fails |
+| SEC-07 | a bottom denotation claims like a failed query (no tag, full-range portions); a def-anchored bottom is incomplete evidence on a reachable path, so the access keeps its memory form | make the bottom arm return `(Some Tag.Dead, [])` (the removed dead-class row) | SEC-07 red: the bottom denotation must produce non-empty portions and no tag |
 | SEC-08 | plain TOP claims Stack `[entry+min_int,entry+7]` + Args `[entry+8,max]`, no tag | clamp a plain top like a symbolic top | SEC-08 red: shape is not the two-portion plain claim |
 | SEC-09 | symbolic TOP clamps to `Stack [entry-65536,entry-1]` with `Stack_unbounded` | let a symbolic top fall through to the plain full-line claim | SEC-09 red: `t ≠ Stack_unbounded` / wrong bounds |
 | SEC-10 | a plain TOP contributes no data-space portion | let the plain top add a `Data`/`Rodata` portion | SEC-10 red: `for_all ps ∈ {Stack,Args}` fails |

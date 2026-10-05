@@ -38,7 +38,7 @@ let audit_sub (sub : sub term) : unit =
              ~pre:(Graphlib.Std.Solution.get sol (Term.tid blk))
              ~blk ~def:d addr))
     >>= fun ws ->
-    if Ws.is_bottom ws || Ws.in_stack_segment ws then
+    if Ws.in_stack_segment ws then
       Some (Ws.caller_split (Ws.classify ws))
     else if Ws.is_top ws then Some Ws.unbounded_span
     else None

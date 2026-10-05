@@ -19,16 +19,16 @@ module Vocab = struct
     | Datarelro -> "data.rel.ro"
     | Text -> "text"
 
-  (* The def-carried classification: the occupied extent, the justified
-     unbounded form, or Dead.  The RUNTIME ORIGIN is not here — it rides
-     the def's origin slot (one carrier); the band rules that consumed
-     the kind read the denotation's origin instead.  Absence is the
-     identity.  In [Tag] so the [sec] constructors stay unshadowed. *)
+  (* The def-carried classification: the occupied extent or the
+     justified unbounded form.  The RUNTIME ORIGIN is not here — it
+     rides the def's origin slot (one carrier); the band rules that
+     consumed the kind read the denotation's origin instead.  Absence
+     is the identity.  In [Tag] so the [sec] constructors stay
+     unshadowed. *)
   module Tag = struct
   type t =
     | Range of int64 * int64
     | Unbounded
-    | Dead
   [@@deriving equal, compare, sexp]
   end
 

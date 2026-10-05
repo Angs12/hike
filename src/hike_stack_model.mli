@@ -27,13 +27,12 @@ val sec_of_sexp : Base.Sexp.t -> sec
 (* The section's ELF name — the one spelling of the name grammar. *)
 val sec_name : sec -> string
 
-(* The def-carried classification: the occupied extent, the justified
-   unbounded form, or Dead. *)
+(* The def-carried classification: the occupied extent or the
+   justified unbounded form. *)
 module Tag : sig
   type t =
     | Range of int64 * int64
     | Unbounded
-    | Dead
 
   val equal : t -> t -> bool
   val compare : t -> t -> int
