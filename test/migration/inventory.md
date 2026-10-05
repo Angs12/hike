@@ -34,7 +34,6 @@ per-pin detail is in `test/pins/<module>.md`.
 | test_cbat/test_properties.ml + test_landmarks.ml | 34 + 18 | test_integration | 19 (52 assertions) | CARRIED |
 | test_cbat/test_fp.ml | 7 | test_emit_fp | 35 (64 assertions) | CARRIED |
 | test_cbat/test_dce.ml | 7 | test_dce | 7 | CARRIED |
-| test_cbat/test_strip_canaries.ml | 6 | test_strip_canaries | 6 | CARRIED |
 | zz_scratch_probe/clpequiv.ml | 1 | test_clp_equiv | 1 | CARRIED |
 | test_cbat/test_main.ml, test_common.ml, test_fixtures.ml | infra | test/unit/harness.ml, common.ml, fixtures.ml | — | RELOCATED |
 

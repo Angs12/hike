@@ -118,8 +118,7 @@ stage_strip () {
   done
 }
 
-# The protector lane on the corpus that actually ships: stripped.  The
-# canary machinery's interaction with the stripped path is the subject.
+# The protector lane on the corpus that actually ships: stripped.
 stage_protector_strip () {
   for o in O0 O2; do
     cell "gcc-$o-fstackprotectorall-strip" gcc "-$o" "-fstack-protector-all" strip
