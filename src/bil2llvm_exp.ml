@@ -331,7 +331,14 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
       Llvm.build_freeze (Llvm.undef typ) "hike_unknown" llvm_builder
 
 and create_tls_ptr ctx scope llvm_builder blk_tid addr =
-  let anchor = tls_anchor_addr ctx llvm_builder in
+  let tls_addr (g : Llvm.llvalue) : Llvm.llvalue =
+    let tp = ctx.ptr_ty in
+    let fty = Llvm.function_type tp [| tp |] in
+    let f =
+      Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
+    in
+    Llvm.build_call fty f [| g |] "tls_addr" llvm_builder
+  in
   let offset_exp =
     Exp.substitute (Bil.Var ctx.abi.Abi.thread_pointer)
       (Bil.Int (Word.zero ctx.addr_bits)) addr
@@ -340,7 +347,20 @@ and create_tls_ptr ctx scope llvm_builder blk_tid addr =
     create_exp ctx scope llvm_builder blk_tid offset_exp
     |> as_integer ctx llvm_builder
   in
-  Bil2llvm_ptr.gep_i8 ctx llvm_builder anchor offset
+  match !(ctx.tls_block) with
+  | Some (block, min_off) ->
+    (* The access's cell inside the module's own thread-local block:
+        the block's per-thread copy is private storage; the anchor lane
+        would address TLS the module does not own. *)
+    let idx =
+      Llvm.build_sub offset
+        (Llvm.const_of_int64 (Llvm.type_of offset) min_off false)
+        "" llvm_builder
+    in
+    Bil2llvm_ptr.gep_i8 ctx llvm_builder (tls_addr block) idx
+  | None ->
+    let anchor = tls_anchor_addr ctx llvm_builder in
+    Bil2llvm_ptr.gep_i8 ctx llvm_builder anchor offset
 
 (* One memory node: the address is a pointer (a stack/VLA value) or an
    integer (the raw/heap lane); the marker carries the loaded value

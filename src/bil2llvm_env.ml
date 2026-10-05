@@ -173,6 +173,9 @@ type emit_ctx = {
   sec_comps : (Llvm.llvalue * int64) Var.Map.t ref;
   (* The TLS anchor global and the llvm.trap function, declared once. *)
   tls_anchor : Llvm.llvalue option ref;
+  (* The module's TLS block: one thread_local byte array covering every
+     TP-relative access, indexed by (offset - min). *)
+  tls_block : (Llvm.llvalue * int64) option ref;
   trap_fn : Llvm.llvalue option ref;
   (* The hot LLVM types, bound once per emission. *)
   i64_ty : Llvm.lltype;
@@ -207,6 +210,11 @@ type sub_scope = {
   undef_vals : llvalue_map ref;
   (* The Let-temp counter: names need only sub-scoped uniqueness. *)
   let_counter : int ref;
+  (* The block's RMW pairs: a store whose data reads an earlier
+     same-address load is one machine RMW (BAP's BIL is single-threaded
+     and drops the lock's atomicity); the emitter renders the pair as
+     one atomicrmw.  Key: the store def's tid. *)
+  rmw_stores : (Bil.binop * exp) Tid.Map.t ref;
   (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
      call ret — one var, one value, valid wherever the def dominates. *)
   ssavals : llvalue_map ref;
@@ -231,6 +239,7 @@ let fresh_scope () : sub_scope =
     window_vars = ref Var.Set.empty;
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
+    rmw_stores = ref Tid.Map.empty;
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;

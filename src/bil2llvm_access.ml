@@ -139,17 +139,82 @@ let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
       | _ -> access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp)
   | _ -> access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp
 
+(* The machine's atomic RMW: a same-address load→store pair in one
+   block is the lock-prefixed instruction whose atomicity BAP's
+   single-threaded BIL drops; the pair renders as one atomicrmw (a
+   sound strengthening) and the pair's other operand is its value. *)
+let create_atomic_rmw ctx scope llvm_builder blk_tid exp op other =
+  match exp with
+  | Bil.Store (_, addr, _, _, size) ->
+    let v = create_exp ctx scope llvm_builder blk_tid other in
+    let ptr =
+      if is_tls_addr ctx addr then
+        create_tls_ptr ctx scope llvm_builder blk_tid addr
+      else
+        let a = create_exp ctx scope llvm_builder blk_tid addr in
+        match Llvm.int64_of_const a with
+        | Some ai ->
+          Bil2llvm_memory.const_addr_ptr ctx llvm_builder ai
+            ~fallback:(fun () ->
+              Llvm.const_inttoptr
+                (Llvm.const_int (Llvm.i64_type ctx.llvm_ctx)
+                   (Int64.to_int ai))
+                ctx.ptr_ty)
+        | None ->
+          Bil2llvm_section.create_addr_ptr ctx llvm_builder a
+          |> fun p ->
+          if Llvm.type_of p = ctx.ptr_ty then p
+          else Llvm.build_inttoptr p ctx.ptr_ty "" llvm_builder
+    in
+    let bits = Size.in_bits size in
+    let v =
+      let w = Llvm.integer_bitwidth (Llvm.type_of v) in
+      if w = bits then v
+      else if w > bits then Llvm.build_trunc v (Llvm.integer_type ctx.llvm_ctx bits) "" llvm_builder
+      else Llvm.build_zext v (Llvm.integer_type ctx.llvm_ctx bits) "" llvm_builder
+    in
+    let amop =
+      match op with
+      | Bil.PLUS -> Llvm.AtomicRMWBinOp.Add
+      | Bil.MINUS -> Llvm.AtomicRMWBinOp.Sub
+      | Bil.AND -> Llvm.AtomicRMWBinOp.And
+      | Bil.OR -> Llvm.AtomicRMWBinOp.Or
+      | Bil.XOR -> Llvm.AtomicRMWBinOp.Xor
+      | _ -> failwith "hike-emit: rmw: unsupported binop"
+    in
+    let old =
+      Llvm.build_atomicrmw amop ptr v Llvm.AtomicOrdering.Monotonic false ""
+        llvm_builder
+    in
+    (* The pair's readers keep the decomposed shape: the pre-reads read
+       the old cell (emitted before), the post-reads re-load.  The def's
+       own value is the stored data, as the plain store binds. *)
+    let binop b x y =
+      match op with
+      | Bil.PLUS -> Llvm.build_add x y "" b
+      | Bil.MINUS -> Llvm.build_sub x y "" b
+      | Bil.AND -> Llvm.build_and x y "" b
+      | Bil.OR -> Llvm.build_or x y "" b
+      | Bil.XOR -> Llvm.build_xor x y "" b
+      | _ -> failwith "hike-emit: rmw: unsupported binop"
+    in
+    binop llvm_builder old v
+  | _ -> failwith "hike-emit: rmw: the marked def is not a store"
+
 let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   let var = Def.lhs def in
   let exp = Def.rhs def in
   let def_tag = find_def_tag def in
   let want = if is_ptr_var var then Some ctx.ptr_ty else None in
   let res =
-    if Hike_def_slots.def_is_dyn_alloc def then
-      create_dynamic_alloc ctx scope llvm_builder blk_tid def exp
-    else if Hike_def_slots.def_is_rip_relative def then
-      create_rip_relative_addr ctx scope llvm_builder blk_tid exp
-    else mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp
+    match Core.Map.find !(scope.rmw_stores) (Term.tid def) with
+    | Some (op, other) -> create_atomic_rmw ctx scope llvm_builder blk_tid exp op other
+    | None ->
+      if Hike_def_slots.def_is_dyn_alloc def then
+        create_dynamic_alloc ctx scope llvm_builder blk_tid def exp
+      else if Hike_def_slots.def_is_rip_relative def then
+        create_rip_relative_addr ctx scope llvm_builder blk_tid exp
+      else mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp
   in
   insert_local scope blk_tid var res;
   (* An SSA version has one def: its value is valid wherever the def

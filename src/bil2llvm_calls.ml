@@ -417,12 +417,28 @@ let thunk_tid_of (sub_tid : tid) : tid =
 let create_thunk ctx (sub_tid : tid) =
   let llvm_ctx = ctx.llvm_ctx in
   let llvm_module = ctx.llvm_module in
-      (* A twin exists iff the sub's own signature carries promoted
-         slots. *)
+  (* Every non-entry sub carries a twin when the synthetic indirect
+     convention can serve it: an address handed to an external (a data
+     word, a call argument) is callable through the machine convention.
+     An external has no body to forward to; a signature with lanes the
+     convention does not carry (a promoted pointer parameter) stays
+     untwinned. *)
+  if is_extern ctx sub_tid then ()
+  else
   let arity = count_slot_args (get_args ctx sub_tid) in
-  if arity = 0 then ()
-  else if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then ()
+  if Core.Map.mem !(ctx.ll_funcs) (thunk_tid_of sub_tid) then ()
   else begin
+    let conv_lane v =
+      Hike_stack_model.is_arg_slot (Var.base v)
+      || Var.same v (Hike_stack_model.hike_window_var ~word:ctx.abi.Abi.word)
+      || Base.List.exists
+           (window_conv_args ~word:ctx.abi.Abi.word ctx.abi)
+           ~f:(fun a -> Var.same (Arg.lhs a) v)
+    in
+    if not (Base.List.for_all (get_args ctx sub_tid) ~f:(fun a ->
+                conv_lane (Arg.lhs a)))
+    then ()
+    else begin
     let args = get_args ctx sub_tid in
     let rets = get_rets ctx sub_tid in
     let word = ctx.abi.Abi.word in
@@ -523,6 +539,7 @@ let create_thunk ctx (sub_tid : tid) =
        | _ -> ignore (Llvm.build_ret r builder));
       ctx.thunks :=
         (sanitize_name (Tid.name sub_tid), fn) :: !(ctx.thunks)
+    end
     end
 
 let create_return ctx scope blk_tid llvm_builder cur_sub =

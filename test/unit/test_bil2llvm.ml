@@ -230,7 +230,7 @@ let tests : unit Alcotest.test list =
 
     (* TLS offsets address distinct locations relative to the per-thread
        anchor. *)
-    pin "EMIT-14" "TLS accesses preserve their offsets from the thread_local anchor"
+    pin "EMIT-14" "TLS accesses land in the module's own thread_local block at their relative offsets"
       (fun () ->
         let tp = Hike.Abi.x86_64_sysv.thread_pointer in
         let m = memv "tls_m" in
@@ -265,14 +265,15 @@ let tests : unit Alcotest.test list =
         in
         let ir = emit_ir [ sub ] in
         check "EMIT-14"
-          (contains_substring ir "@hike_tls_anchor = thread_local global i64 0"
+          (contains_substring ir "@hike_tls_block = thread_local global"
           && contains_substring ir "ptr @llvm.threadlocal.address(ptr"
           && contains_substring ir
-               "call ptr @llvm.threadlocal.address(ptr @hike_tls_anchor)"
+               "call ptr @llvm.threadlocal.address(ptr @hike_tls_block)"
+          (* the cells rebased at the span's 16-byte-floored minimum:
+             accesses at +0x28/+0x30 land at +8/+16 in the block *)
+          && contains_substring ir "getelementptr i8, ptr %tls_addr, i64 8"
           && contains_substring ir
-               "getelementptr i8, ptr %tls_anchor, i64 40"
-          && contains_substring ir
-               "getelementptr i8, ptr %tls_anchor1, i64 48"
+               "getelementptr i8, ptr %tls_addr1, i64 16"
           && contains_substring ir "store i64 111"
           && contains_substring ir "store i64 222"
           && contains_substring ir "load i64"));

@@ -26,6 +26,19 @@ let const_load ctx llvm_builder addr size ~fallback =
       const_load_in ctx llvm_builder section addr v size
   | None -> fallback ()
 
+(* The section-owner pointer of a constant address: the atomic path's
+   target (the store path's own resolution, without the value). *)
+let const_addr_ptr ctx llvm_builder addr_i64 ~fallback =
+  let w = Word.of_int64 ~width:64 addr_i64 in
+  match section_of_addr ctx.sections w with
+  | Some section ->
+    let base = resolve_addr_in ctx llvm_builder section w in
+    if Base.List.exists ctx.copy_relocs ~f:(Int64.equal addr_i64) then begin
+      let p = load_ptr llvm_builder ctx.i64_ty base in
+      Llvm.build_inttoptr p (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder
+    end else base
+  | None -> fallback ()
+
 let const_store ctx llvm_builder addr ~data ~fallback =
   match section_of_addr ctx.sections addr with
   | Some section ->
