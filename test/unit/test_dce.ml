@@ -275,6 +275,7 @@ let tests : unit Alcotest.test list =
         let sub, _ =
           sub_of "d11_escape"
             [ [ mk_store_plus sm base 8 42; Def.create dead (Bil.Int (bw64 7)) ],
+              [ (1, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
         let sub' =
@@ -291,13 +292,14 @@ let tests : unit Alcotest.test list =
     pin "DCE-12"
       "a store into the global memory state survives with no in-sub reader"
       (fun () ->
-        let m = memv "d12_m" in
+        let m = memv "mem" in
         let m = Var.with_index m 2 in
         let dead = v64 "d12_dead" in
         let sub, _ =
           sub_of "d12_global"
             [ [ mk_store_plus m (v64 "d12_base") 8 42;
                 Def.create dead (Bil.Int (bw64 7)) ],
+              [ (1, mk_goto) ];
               [], [ (0, mk_ret) ] ]
         in
         let sub' =
@@ -305,7 +307,7 @@ let tests : unit Alcotest.test list =
             ~escape_roots:Var.Set.empty sub
         in
         let lhs = dce_defs sub' |> List.map (fun d -> Var.name (Def.lhs d)) in
-        check "DCE-12" (List.mem "d12_m.2" lhs && not (List.mem "d12_dead" lhs))));
+        check "DCE-12" (List.mem "mem.2" lhs && not (List.mem "d12_dead" lhs)));
 
     (* D7: the phi arm — a phi whose result no survivor reads is swept,
        and its operands' defs cascade with it.  Under SSA a dead phi's
