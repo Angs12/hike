@@ -99,7 +99,6 @@ val mem_node_of : exp -> mem_node option
 
 val mem_node_count : exp -> int
 val reads_mem : exp -> bool
-val load_mem_vars : exp -> Var.Set.t
 val addr_of_rhs : exp -> (exp * Size.t) option
 val store_data_of_rhs : exp -> exp option
 
@@ -119,21 +118,11 @@ val jmp_input_reads : abi:Abi.t -> jmp term -> Var.Set.t
    temps. *)
 val blk_boundary_reads : blk term -> Var.Set.t
 (* The FP call site's argument temp ([intrinsic:xN[:width]]). *)
-val is_fp_operand_temp : var -> bool
 val jmp_reads : abi:Abi.t -> jmp term -> Var.Set.t
 val jmp_target_reads : jmp term -> Var.Set.t
 val def_writes : def term -> Var.Set.t
 val phi_writes : phi term -> Var.Set.t
 val blk_free_vars : blk term -> Var.Set.t
-val blk_reads : abi:Abi.t -> blk term -> Var.Set.t
-val blk_defines : var -> blk term -> bool
-
-(* The value vars of an exp (memory excluded); the memory accesses'
-   address vars; the data reads (value minus address). *)
-val value_vars : exp -> Var.Set.t
-val address_vars : exp -> Var.Set.t
-val data_vars : exp -> Var.Set.t
-
 val word_bits : int -> int
 val is_true_cond : exp -> bool
 
@@ -185,9 +174,6 @@ val region_ptr_id_of : var -> int option
 
 val is_mem : var -> bool
 val is_region_mem : var -> bool
-val region_id_of_mem : var -> int option
-
-(* One emitted component. *)
 type sec_comp = {
   comp_id : int;
   sec_lo : int64;
@@ -211,7 +197,6 @@ type sec_meta = {
 
 val sec_comp_name : int -> string
 val sec_comp_mem : addr_bits:int -> int -> var
-val sec_comp_id_of_mem : var -> int option
 val sec_res_name : int -> string
 val is_sec_comp_mem : var -> bool
 
@@ -220,8 +205,6 @@ val sanitize_tid_name : string -> string
 
 val sub_map : program term -> sub term Tid.Map.t
 val sub_reads : abi:Abi.t -> sub term -> Var.Set.t
-val sub_operand_reads : sub term -> Var.Set.t
-
 val deepest_sp_decrement : sub term -> abi:Abi.t -> int64
 
 (* The call facts. *)

@@ -33,7 +33,6 @@ let def_dyn_alloc_d : bool D.t =
     ~inspect:bool_inspect ~get_bump:"dyn_alloc.get" ~put_bump:"dyn_alloc.put"
     ~bump
 
-let def_dyn_alloc_slot = D.slot def_dyn_alloc_d
 let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc_d d
 
 (* The def computes an address value at/above the entry line; its emitted
@@ -43,7 +42,6 @@ let def_window_value_d : bool D.t =
     ~inspect:bool_inspect ~get_bump:"window_value.get"
     ~put_bump:"window_value.put" ~bump
 
-let def_window_value_slot = D.slot def_window_value_d
 let def_is_window_value (d : def term) : bool = D.get def_window_value_d d
 
 (* The def's value is a bounded stack or VLA address, so the emitter's
@@ -54,7 +52,6 @@ let def_ptr_kind_d : bool D.t =
     ~inspect:bool_inspect ~get_bump:"ptr_kind.get" ~put_bump:"ptr_kind.put"
     ~bump
 
-let def_ptr_kind_slot = D.slot def_ptr_kind_d
 let def_ptr_kind (d : def term) : bool = D.get def_ptr_kind_d d
 
 (* One map applies [stamp] to every def whose tid is in [tids] — the
@@ -99,7 +96,6 @@ let def_ptr_storage_d : Hike_stack_model.ptr_storage option D.t =
     ~equal:Hike_stack_model.equal_ptr_storage
     ~get_bump:"ptr_storage.get" ~put_bump:"ptr_storage.put" ~bump
 
-let def_ptr_storage_slot = D.slot def_ptr_storage_d
 let def_ptr_storage (d : def term) : Hike_stack_model.ptr_storage option =
   D.get def_ptr_storage_d d
 
@@ -132,7 +128,6 @@ let sec_tag_d : sec_tag option D.t =
       Tag.equal a b)
     ~get_bump:"sec_tag.get" ~put_bump:"sec_tag.put" ~bump
 
-let sec_tag_slot = D.slot sec_tag_d
 let sec_tag (d : def term) : sec_tag option = D.get sec_tag_d d
 
 let set_sec_tag (t : sec_tag) (d : def term) : def term =

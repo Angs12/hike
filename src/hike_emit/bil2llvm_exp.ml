@@ -123,12 +123,6 @@ let create_immediate ctx word =
 (* The one memory node of an exp (a def's rhs holds at most one). *)
 type mem_node = [ `Load of exp * Size.t | `Store of exp * exp * Size.t ]
 
-let find_mem_node (exp : exp) : mem_node option =
-  match Hike_stack_model.mem_node_of exp with
-  | Some (`Load (_, addr, size)) -> Some (`Load (addr, size))
-  | Some (`Store (_, addr, data, size)) -> Some (`Store (addr, data, size))
-  | None -> None
-
 let marker_of_size size =
   Hike_synth.accumulator ~addr_bits:(Size.in_bits size)
 
@@ -160,26 +154,6 @@ let rewrite_mem_node exp addr size marker =
 (* The entry-line offset of an expression, when structurally known: an
    arithmetic chain from the entry line / a slot.  A load, parameter,
    phi, or cast has none. *)
-let static_offset scope (exp : exp) : int64 option =
-  Hike_exp_fold.fold
-    (fun exp child ->
-      match exp with
-      | Bil.Int w -> (match Word.to_int64 w with Ok x -> Some x | Error _ -> None)
-      | Bil.Var v -> (
-          match get_ptr_offset scope v with
-          | Some ll -> Llvm.int64_of_const ll
-          | None -> None)
-      | Bil.BinOp (Bil.PLUS, a, b) ->
-          Base.Option.bind (child a) ~f:(fun x ->
-              Base.Option.map (child b) ~f:(Stdlib.Int64.add x))
-      | Bil.BinOp (Bil.MINUS, a, b) ->
-          Base.Option.bind (child a) ~f:(fun x ->
-              Base.Option.map (child b) ~f:(Stdlib.Int64.sub x))
-      | _ -> None)
-    exp
-
-(* The undef arm of the synth-value lane: a var the lane cannot bind
-   warns once per (block, var) and reads frozen bits. *)
 let synth_value ctx scope llvm_builder blk_tid v =
   match Bil2llvm_synth.value ctx scope llvm_builder blk_tid v with
   | Some value -> value

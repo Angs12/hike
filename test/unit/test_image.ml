@@ -28,17 +28,6 @@ let put_u64_le (b : Bytes.t) (off : int) (v : int64) : unit =
   done
 
 (* A RELA section's bytes over [rows] of (site, type, addend). *)
-let rela_bytes (rows : (int64 * int64 * int64) list) : Bytes.t =
-  let b = Bytes.create (24 * List.length rows) in
-  List.iteri
-    (fun i (site, typ, addend) ->
-      put_u64_le b (i * 24) site;
-      put_u64_le b ((i * 24) + 8) typ;
-      put_u64_le b ((i * 24) + 16) addend)
-    rows;
-  b
-
-(* A section image: [words] little-endian. *)
 let section_bytes (words : int64 list) : Bytes.t =
   let b = Bytes.create (8 * List.length words) in
   List.iteri (fun i w -> put_u64_le b (i * 8) w) words;

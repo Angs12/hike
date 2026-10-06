@@ -1,6 +1,7 @@
-(* The synthetic-variable vocabulary: one module owns the kinds, the
-   storage/base/index machinery, and the access rewriting.  Consumers
-   use the general operations and never inspect a kind. *)
+(* The synthetic-variable vocabulary: one module owns the kinds and the
+   storage/base/index machinery; the address interpretation and access
+   rewriting live above, in Hike_synth_addr.  Consumers use the general
+   operations and never inspect a kind. *)
 
 open Bap.Std
 

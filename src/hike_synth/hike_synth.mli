@@ -74,7 +74,6 @@ type storage_span = {
   ss_hi : int64;
 }
 
-val equal_storage : storage -> storage -> bool
 val storage_span : addr_bits:int -> storage -> lo:int64 -> hi:int64 -> storage_span
 val span_of_storage : storage_span list -> storage -> storage_span option
 (* The canonical base and memory vars of a synthetic storage var. *)

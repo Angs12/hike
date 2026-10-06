@@ -57,8 +57,6 @@ type member = {
 (** The word cell of a promotable Args member: a def-backed, non-identity
     access wholly inside one word cell at/above the args base.  [None] for
     any other member. *)
-val args_member_cell : word:int -> entry:int64 -> member -> int option
-
 (** The finalized storage of one merged range: a stack region id keys
     a per-sub alloca (the residue, id 0, is the fallback), a data
     region id a module-wide global (a whole span is one data region),
@@ -69,9 +67,6 @@ type storage =
   | Stack_residue
   | Data_region of int
   | Arg_slot
-
-val region_id_of_storage : storage -> int
-[@@deriving equal, compare, sexp]
 
 (** One finalized binding: the storage decision and its members
     (newest first). *)
@@ -90,9 +85,6 @@ type sub_tree = range_storage Tree.t
 
 (** The program tree (all subs' data-section members). *)
 type data_tree = range_storage Tree.t
-
-val owning_storage : sub_tree -> int64 -> int64 -> storage option
-val owning_data_binding : data_tree -> int64 -> (int * int64) option
 
 (** The slim def-carried classification: the def's section with its
     ADDRESS bounds (not the occupied-byte bounds), the justified
@@ -149,8 +141,6 @@ type def_fact = {
   fr_addr : exp option;
   fr_rhs : exp option;
 }
-
-val no_fact : def_fact
 
 (** The sub's storage spans: the layout's regions in the synth fact
     shape. *)
@@ -219,11 +209,7 @@ val storage_of_range : range_storage Tree.t -> range -> range_storage option
 
 (** The section space predicates: data sections vs the sub-local
     stack/arg spaces. *)
-val is_sub_local : sec -> bool
-
 (** The def's memory access: (address, width in bytes, stores?). *)
-val access_of : def term -> (exp * int * bool) option
-
 (** The mem vars of storages whose bytes escape this sub: a storage
     carrying an escape extent (a stored stack-symbolic value, an
     incoming stack-address parameter), one a typed call argument

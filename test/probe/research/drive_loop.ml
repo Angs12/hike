@@ -130,54 +130,6 @@ type resolution = {
 (* The production seam's decode, verbatim in shape (src/hike.ml seam_cfg
    + lift_at): a region view from the word, the unit promise, the
    project's theory instance.  Used only to GET the resolutions. *)
-let make_lift_at proj =
-  let seam_cfg (view : mem) : Cfg.t option =
-    let run : Disasm_expert.Recursive.t option Toplevel.var =
-      Toplevel.var "drive-loop-seam-cfg" in
-    Toplevel.put run
-      (let open Kb.Syntax in
-       let lower = Word.to_bitvec (Memory.min_addr view) in
-       let upper = Word.to_bitvec (Memory.max_addr view) in
-       Theory.Unit.for_region ~lower ~upper >>= fun unit ->
-       Kb.provide Theory.Unit.target unit (Project.target proj)
-       >>= fun () ->
-       Theory.instance () >>= fun theory ->
-       Theory.with_current theory @@ fun () ->
-       Kb.promising Theory.Label.unit
-         ~promise:(fun _ -> !!(Some unit))
-         (fun () ->
-            Disasm_expert.Recursive.run_in_scope (Project.arch proj) view
-            >>| Result.to_option));
-    match Toplevel.get run with
-    | Some rec_t -> Some (Disasm_expert.Recursive.cfg rec_t)
-    | None -> None
-  in
-  fun ~(block_addrs : Tid.t Addr.Map.t) (a : Addr.t) : blk term list option ->
-    match Seq.to_list (Memmap.lookup (Project.memory proj) a) with
-    | [] -> None
-    | (seg, _) :: _ -> (
-        let view = Memory.view_exn ~from:a seg in
-        match seam_cfg view with
-        | None -> None
-        | Some cfg ->
-          let root =
-            Cfg.nodes cfg |> Seq.find ~f:(fun b -> Addr.equal (Block.addr b) a)
-          in
-          Base.Option.map root ~f:(fun root ->
-              let nodes =
-                Graphlib.Std.Graphlib.fold_reachable (module Cfg) cfg ~init:[]
-                  ~f:(fun acc n -> n :: acc) root
-              in
-              let others =
-                Base.List.filter nodes ~f:(fun n ->
-                    not (Addr.equal (Block.addr n) a))
-              in
-              let others =
-                Base.List.filter others ~f:(fun n ->
-                    not (Core.Map.mem block_addrs (Block.addr n)))
-              in
-              Base.List.concat_map (root :: others) ~f:(Blk.lift cfg)))
-
 let blk_addr (b : blk term) : Addr.t option = Term.get_attr b address
 
 let bounded_words (ws : Cbat_vsa.WordSet.t) : int64 list option =

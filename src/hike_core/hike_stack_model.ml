@@ -211,13 +211,6 @@ let reads_mem (e : exp) : bool =
   match mem_node_of e with Some _ -> true | None -> false
 
 (* Free vars of every Load mem in one rhs. *)
-let load_mem_vars (rhs : exp) : Var.Set.t =
-  Base.List.fold (mem_nodes rhs) ~init:Var.Set.empty
-    ~f:(fun (acc : Var.Set.t) n ->
-      match n with
-      | `Load (mem, _, _) -> Core.Set.union acc (Exp.free_vars mem)
-      | _ -> acc)
-
 let addr_of_rhs (e : exp) : (exp * Size.t) option =
   match mem_node_of e with
   | Some (`Load (_, a, s)) | Some (`Store (_, a, _, s)) -> Some (a, s)
@@ -483,53 +476,12 @@ let blk_reads ~(abi : Abi.t) (blk : blk term) : Var.Set.t =
          | `Phi p -> Core.Set.union reads (phi_reads p)
          | `Jmp j -> Core.Set.union reads (jmp_reads ~abi j))
 
-let blk_defines (v : var) (blk : blk term) : bool =
-  Blk.elts blk
-  |> Seq.exists ~f:(function
-         | `Def d -> Core.Set.mem (def_writes d) v
-         | `Phi p -> Core.Set.mem (phi_writes p) v
-         | `Jmp _ -> false)
-
-(* The value vars of an exp: the free vars, memory excluded — the
-   storage mem vars are the memory machinery's subject, not values. *)
-let value_vars (e : exp) : Var.Set.t =
-  Core.Set.filter (Exp.free_vars e) ~f:(fun v -> not (is_mem v))
-
-(* The vars of an exp's memory addresses: an address names the
-   location; the value flows through the cell. *)
-let address_vars (e : exp) : Var.Set.t =
-  let addrs = ref Var.Set.empty in
-  let vis =
-    object
-      inherit [ unit ] Exp.visitor
-      method! visit_load ~mem:_ ~addr _ _ () =
-        addrs := Core.Set.union !addrs (Exp.free_vars addr)
-      method! visit_store ~mem:_ ~addr ~exp:_ _ _ () =
-        addrs := Core.Set.union !addrs (Exp.free_vars addr)
-    end
-  in
-  vis#visit_exp e ();
-  !addrs
-
-(* The data reads of an exp: the value vars minus the address vars. *)
-let data_vars (e : exp) : Var.Set.t =
-  Core.Set.diff (value_vars e) (address_vars e)
-
 let is_region_mem v =
   match Hike_synth.classify Hike_synth.empty v with
   | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
   | _ -> false
 
 (* The region id a [stack_rN_mem] var names; [None] for any other var. *)
-let region_id_of_mem v =
-  match Hike_synth.classify Hike_synth.empty v with
-  | Some (Hike_synth.Bytes (Hike_synth.Stack id)) -> Some id
-  | _ -> None
-
-(* The section partition's components carry their storage identity. *)
-
-(* One emitted component: a word range of the section keyed by its native
-   span, plus the typed-emission decision. *)
 type sec_comp = {
   comp_id : int;              (* the N in sec_comp_N (module-wide) *)
   sec_lo : int64;             (* the owning section's native span *)
@@ -554,13 +506,6 @@ let is_sec_comp_mem v =
 
 (* The component id a [sec_comp_N_mem] var names; [None] for any other
    var. *)
-let sec_comp_id_of_mem v =
-  match Hike_synth.classify Hike_synth.empty v with
-  | Some (Hike_synth.Bytes (Hike_synth.Global id)) -> Some id
-  | _ -> None
-
-(* The tid-name sanitization the symbol-table lookups and the emitted
-   names share: a sub's symtab name and its LLVM name stay comparable. *)
 let sanitize_tid_name (n : string) : string =
   Base.String.filter n ~f:(fun c ->
       match c with '#' | '.' | '%' | '\\' | '@' -> false | _ -> true)

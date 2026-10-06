@@ -204,16 +204,6 @@ let body_tid (fix : vla_fix) : Tid.t option =
 
 (* The def's stamped origin through the seam, by lhs name inside the
    frame block (the branches define their own RAX). *)
-let stamped_origin (fix : vla_fix) (name : string) : Origin.t option =
-  Base.Option.bind (body_tid fix) ~f:(fun btid ->
-      Base.Option.bind (Term.find blk_t fix.vla_stamped btid) ~f:(fun blk ->
-          Term.enum def_t blk
-          |> Seq.fold ~init:None ~f:(fun acc d ->
-                 if String.equal (Var.name (Def.lhs d)) name then
-                   Vsa.Def_origin.def_origin d
-                 else acc)))
-
-(* The frame block's post-env word for a var name. *)
 let post_word_named (fix : vla_fix) (name : string) : Ws.t option =
   Base.Option.bind (body_tid fix) ~f:(fun btid ->
       Core.Map.find fix.vla_envs btid

@@ -165,8 +165,6 @@ let stack_align = 16
 (* The convention's named lanes: the FP return rides the first vector
    register; the fixed (argc, argv) signature reads the first two
    integer params. *)
-let fp_return_reg (t : t) : var = Base.List.nth_exn t.vector_param_regs 0
-
 let argc_argv_regs (t : t) : var * var =
   match t.int_param_regs with
   | rdi :: rsi :: _ -> (rdi, rsi)

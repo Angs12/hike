@@ -375,8 +375,6 @@ let get_rets ctx sub_tid =
     if Core.Set.mem ctx.synthetic sub_tid then synthetic_rets ctx
     else reg_args ~intent:Out ctx.abi.Abi.return_regs
 
-let ret_set ctx = Var.Set.of_list ctx.abi.Abi.return_regs
-
 let goto_label_exn jmp =
   match jmp with Goto l -> l | _ -> failwith "goto_label_exn: ret jmp"
 
@@ -506,11 +504,6 @@ let get_bir_phi scope blk_tid var =
   | Some m -> WVarMap.find_opt (wvar_of var) !m
   | None -> None
 
-let has_bir_phi scope blk_tid var =
-  Base.Option.is_some (get_bir_phi scope blk_tid var)
-
-(* One frozen value per never-defined var, memoized per sub and
-   placed in the entry block so it dominates every reader. *)
 let frozen_undef ctx scope ?(builder : Llvm.llbuilder option) (var : var) :
     Llvm.llvalue =
   match WVarMap.find_opt (wvar_of var) !(scope.undef_vals) with

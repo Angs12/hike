@@ -1081,5 +1081,3 @@ let mk_fp_program (intr : string) (arg_defs : def term list) : sub term list =
   [ mk_fp_call_sub intr arg_defs; mk_fp_stub intr ]
 
 (* Single-block sub over caller-supplied defs with a terminal Ret. *)
-let mk_lds_sub nm defs =
-  fst (sub_of nm [ defs, [ (0, fun _ -> Jmp.create (Ret (Direct (Tid.create ())))) ] ])

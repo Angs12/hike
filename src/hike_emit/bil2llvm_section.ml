@@ -242,19 +242,6 @@ let resolve_addr_in ctx llvm_builder section addr =
   Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| offset |] ""
     llvm_builder
 
-let resolve_addr ctx llvm_builder addr =
-  match section_of_addr ctx.address addr with
-  | None ->
-      (* Out-of-section address: inttoptr of the raw constant. *)
-      let v =
-        Llvm.const_of_int64 (ctx.i64_ty)
-          (Word.to_int64_exn addr) false
-      in
-      Llvm.build_inttoptr v (Llvm.pointer_type ctx.llvm_ctx) "" llvm_builder
-  | Some section -> resolve_addr_in ctx llvm_builder section addr
-
-(* Materializes the pointer for an address integer; an
-   already-pointer value passes through. *)
 let create_addr_ptr ctx llvm_builder llvm_val =
   if Llvm.classify_type (Llvm.type_of llvm_val) = Llvm.TypeKind.Pointer
   then llvm_val

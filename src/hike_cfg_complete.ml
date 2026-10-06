@@ -97,15 +97,6 @@ let sub_tids (sub : sub term) : Tid.Set.t =
   Core.Set.of_list (module Tid)
     (Base.List.map (Seq.to_list (Term.enum blk_t sub)) ~f:Term.tid)
 
-let addressed_starts ~(block_addrs : Tid.t Addr.Map.t) (sub : sub term) :
-    (Addr.t * tid) list =
-  let tids = sub_tids sub in
-  block_addrs
-  |> Core.Map.to_alist
-  |> Base.List.filter ~f:(fun (_, t) -> Core.Set.mem tids t)
-
-(* The dispatch's case words: a bounded plain set no larger than the
-   run's block count — the words a resolution may target or split at. *)
 let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     ~(blk : blk term) ?def
     (texp : exp) : Cbat_word.t list option =
@@ -140,32 +131,6 @@ let remap_label f = function
   | Direct t -> Direct (f t)
   | Indirect e -> Indirect e
 
-let remap_jmp ~(call : Tid.t -> Tid.t) ~(blk : Tid.t -> Tid.t) (j : jmp term) :
-    jmp term =
-  if Hike_return.is_jmp j then j
-  else
-    let kind =
-      match Jmp.kind j with
-      | Goto l -> Goto (remap_label blk l)
-      | Ret l -> Ret (remap_label blk l)
-      | Int (n, t) -> Int (n, blk t)
-      | Call c ->
-        Call
-          (Call.create ~target:(remap_label call (Call.target c))
-             ?return:(Base.Option.map (Call.return c) ~f:(remap_label blk))
-             ())
-    in
-    Jmp.create ~tid:(Term.tid j) ~cond:(Jmp.cond j) kind
-
-(* The dispatch's case words, denotated at the state the jump reads;
-   a bare-variable target's words come from its reaching definition's
-   before-env, never the noreturn-poisoned post-transfer state. *)
-
-(* A composed expression's form: [Whole e] is an operand made entirely
-   of base subtrees — no loaded cell — and [e] is the operand as it
-   participates in the subtraction (a cast is transparent, a bare var
-   keeps its name); [Cells bases] is the base operands that isolate
-   exactly one loaded cell. *)
 type composed = Whole of exp | Cells of exp list
 
 (* The composed address's base operands: the very operand subtrees that
@@ -358,17 +323,6 @@ let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
    The words share the selector's width, so the comparisons typecheck. *)
 (* [ws] is non-empty — a case group is built from at least one word. *)
-let guarded_cond (sel : exp) (ws : word list) : exp =
-  let eq w = Bil.BinOp (Bil.EQ, sel, Bil.Int w) in
-  (match ws with
-   | w :: rest ->
-       Base.List.fold rest ~init:(eq w)
-         ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
-   | [] -> failwith "hike-cfg-complete: empty case group")
-  |> Hike_coerce.coerce_exp
-
-(* The dispatch jmp's own guard narrows every case and the default
-   alike. *)
 let true_cond : exp = Bil.Int (Word.one 1)
 
 let guard_of (j : jmp term) : exp option =

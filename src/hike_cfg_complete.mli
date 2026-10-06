@@ -72,9 +72,5 @@ open Bap.Std
 (** Rewrites a lifted term's direct targets: a call's target names a
     subroutine, a goto's a block, so the two resolve through different
     maps.  Indirect targets stay the resolution's own. *)
-val remap_jmp :
-  call:(Tid.t -> Tid.t) -> blk:(Tid.t -> Tid.t) -> jmp term -> jmp term
-
-val guarded_cond : exp -> word list -> exp
 val guard_of : jmp term -> exp option
 val and_guard : exp option -> exp -> exp
