@@ -279,13 +279,25 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
         ~f:(fun acc blk -> Core.Set.union acc (Model.blk_free_vars blk))
       |> Core.Set.filter ~f:renamable
     in
-    let defines (v : var) (blk : blk term) =
-      Blk.elts blk
-      |> Seq.exists ~f:(fun elt ->
-             match elt with
-             | `Def d -> Core.Set.mem (Model.def_writes d) v
-             | `Phi p -> Core.Set.mem (Model.phi_writes p) v
-             | _ -> false)
+    (* The definition census: for each var, the block tids whose defs or
+       phis write it, in block order — one term scan, queried per var. *)
+    let def_sites : Tid.t list Var.Map.t =
+      Base.List.fold blks ~init:Var.Map.empty ~f:(fun m blk ->
+          let written =
+            Blk.elts blk
+            |> Seq.fold ~init:Var.Set.empty ~f:(fun ws elt ->
+                   Core.Set.union ws
+                     (match elt with
+                      | `Def d -> Model.def_writes d
+                      | `Phi p -> Model.phi_writes p
+                      | _ -> Var.Set.empty))
+          in
+          Core.Set.fold written ~init:m ~f:(fun m v ->
+              let tids = Base.Option.value (Core.Map.find m v) ~default:[] in
+              Core.Map.set m ~key:v ~data:(Term.tid blk :: tids)))
+    in
+    let def_sites_of v =
+      Base.Option.value (Core.Map.find def_sites v) ~default:[] |> Base.List.rev
     in
     let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
       if
@@ -304,14 +316,10 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       Core.Set.to_list vars
       |> Base.List.fold ~init:sub ~f:(fun sub v ->
 #ifdef VSA_DEBUG
-          let dbg_sites =
-            Base.List.filter_map blks ~f:(fun blk ->
-                if defines v blk then Some (Tid.name (Term.tid blk)) else None)
-          in
+          let dbg_tids = def_sites_of v in
+          let dbg_sites = Base.List.map dbg_tids ~f:Tid.name in
           let dbg_bs =
-            Graphs.Tid.start :: Base.List.filter_map blks ~f:(fun blk ->
-                if defines v blk then Some (Term.tid blk) else None)
-            |> Core.Set.of_list (module Tid)
+            Graphs.Tid.start :: dbg_tids |> Core.Set.of_list (module Tid)
           in
           Format.eprintf "SSA-DBG var %s sites=[%s] idf=[%s]@." (Var.name v)
             (String.concat "," dbg_sites)
@@ -320,10 +328,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
                 |> Base.List.map ~f:Tid.name));
 #endif
 
-          let sites =
-            Base.List.filter_map blks ~f:(fun blk ->
-                if defines v blk then Some (Term.tid blk) else None)
-          in
+          let sites = def_sites_of v in
           let sites =
             sites
             @ Base.Option.value (Core.Map.find ret_mint_sites v) ~default:[]
@@ -383,8 +388,20 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       end)#map_exp
     in
     let stamps : Versions.t Tid.Map.t ref = ref Tid.Map.empty in
+    (* The dominator tree's immediate children, indexed once in node
+       order; the rename walk queries it per node. *)
+    let dom_children : Tid.t list Tid.Map.t =
+      Graphs.Tid.nodes g
+      |> Seq.fold ~init:Tid.Map.empty ~f:(fun m n ->
+             match Graphlib.Std.Tree.parent dom n with
+             | Some p ->
+               let cs = Base.Option.value (Core.Map.find m p) ~default:[] in
+               Core.Map.set m ~key:p ~data:(n :: cs)
+             | None -> m)
+    in
     let children tid =
-      Graphs.Tid.nodes g |> Seq.filter ~f:(Graphlib.Std.Tree.is_child_of ~parent:tid dom)
+      Base.Option.value (Core.Map.find dom_children tid) ~default:[]
+      |> Base.List.rev
     in
     let rec walk sub' tid =
       let minted = ref [] in
@@ -445,7 +462,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
                        set_incoming phi ~src:tid exp))
             | None -> acc)
       in
-      let sub' = children tid |> Seq.fold ~init:sub' ~f:walk in
+      let sub' = Base.List.fold (children tid) ~init:sub' ~f:walk in
       (* Pop this block's names: defs, phis, and minted rets. *)
       (match Term.find blk_t sub' tid with
        | Some blk ->
