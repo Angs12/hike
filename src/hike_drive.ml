@@ -314,7 +314,6 @@ let run proj =
         let solution = Hike_program_vsa.solve context proj ~noreturn:!noreturn program in
         let subs_acc = solution.subs in
         let sub_addrs = solution.sub_addrs in
-        let dfacts = solution.dispatches in
         (* The noreturn fact on the solved program (denotations and the
            canonical returns are final): the set feeds the NEXT round's
            solve, whose completion keeps no continuation for a
@@ -392,12 +391,6 @@ let run proj =
             Base.List.iter (transfer_words solved)
               ~f:(fun (site, call, words) ->
                 Base.List.iter words ~f:(route site call)));
-        Base.List.iter dfacts ~f:(fun (a, call, ws) ->
-            let site = Word.to_int64_exn a in
-            Base.List.iter ws ~f:(fun w ->
-                match Result.to_option (Cbat_word.to_int64 w) with
-                | Some v -> route site call v
-                | None -> ()));
         (* The store lane over every solved sub: a store whose data
            denotates to a code word names a callee the pointer round
            trip loses at the load — an entry only outside the DECODED

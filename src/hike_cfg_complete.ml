@@ -328,49 +328,6 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
      | None -> plain texp ())
   | _ -> plain texp ()
 
-(* The resolution's preparation walk: every resolvable dispatch's case
-   words land on the run's map (mid-block entries through the block
-   split).  A cross-sub word stays foreign; a word in no block is a
-   loud analysis loss.  One split per walk, so the walks terminate. *)
-let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t)
-    ~(sub_addrs : Tid.t Addr.Map.t)
-    ~(foreign_slots : Core.Int64.Set.t)
-    (sub : sub term) :
-    sub term * Tid.t Addr.Map.t * (Addr.t * bool * Cbat_word.t list) list =
-  (* The dispatches' resolved word sets are the facts; a word the decode
-     does not already name rides them to the driver, which decodes it.
-     The completion creates nothing. *)
-  let facts =
-    Term.enum blk_t sub
-    |> Seq.concat_map ~f:(fun blk ->
-        let last_defs = Vsa.last_defs blk in
-        Term.enum jmp_t blk
-        |> Seq.filter_map ~f:(fun j ->
-            match dispatch_target ~last_defs ~retaddr ~sub ~foreign_slots j with
-            | None -> None
-            | Some texp -> (
-              (* A real call (one WITH a return) names function starts;
-                 BAP's noreturn rendering of an indirect tail jump
-                 names jump destinations. *)
-              let call =
-                match Jmp.kind j with
-                | Call c -> Base.Option.is_some (Call.return c)
-                | _ -> false
-              in
-              match
-                dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp
-              with
-              | None -> None
-              | Some (_, _, ws) ->
-                if Base.List.is_empty ws then None
-                else
-                  Base.Option.map (Term.get_attr blk address)
-                    ~f:(fun a -> (a, call, ws)))))
-    |> Seq.to_list
-  in
-  (sub, block_addrs, facts)
-
 let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(sub : sub term)
@@ -434,41 +391,6 @@ let guard_of (j : jmp term) : exp option =
 let and_guard (guard : exp option) (cond : exp) : exp =
   Base.Option.fold guard ~init:cond ~f:(fun cond g -> Bil.BinOp (Bil.AND, g, cond))
 
-(* The dispatch's successor series: one conditional goto per distinct
-   case target (its words OR-merge into one guard).  A call dispatch's
-   continuation is the series' terminal; a goto dispatch has none —
-   under the completeness premise its guards are exhaustive. *)
-let dispatch_jmps (j : jmp term) (sel : exp)
-    (pairs : (word * tid) list) (cont : tid option) :
-    jmp term list option =
-  let by_target =
-    Base.List.fold pairs ~init:[] ~f:(fun acc (w, t) ->
-        match Base.List.Assoc.find acc t ~equal:Tid.equal with
-        | Some ws -> Base.List.Assoc.add acc t (w :: ws) ~equal:Tid.equal
-        | None -> (t, [ w ]) :: acc)
-  in
-  (* Groups in ascending first-word order. *)
-  let ascending = List.rev by_target in
-  let guard = guard_of j in
-  let guarded (t, ws) =
-    Jmp.create ~cond:(and_guard guard (guarded_cond sel ws))
-      (Goto (Direct t))
-  in
-  match cont with
-  | Some t ->
-    let groups =
-      Base.List.filter ascending ~f:(fun (g, _) -> not (Tid.equal g t)) in
-    if Base.List.is_empty groups then None
-    else
-      Some
-        (Base.List.map groups ~f:guarded
-         @ [ Jmp.create
-               ~cond:(Base.Option.value guard ~default:true_cond)
-               (Goto (Direct t)) ])
-  | None ->
-    if Base.List.length ascending < 2 then None
-    else Some (Base.List.map ascending ~f:guarded)
-
 (* The return epilogue's replacement: the canonical direct return edge. *)
 let ret_jmp : jmp term = Hike_return.create ()
 
@@ -490,32 +412,6 @@ let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
       Some [ canonical_ret j ]
   | _ -> None
 
-(* Keep the in-sub completion rewrite as the solver's CFG edge product.
-   Cross-sub targets deliberately decline here; [Split_blocks.materialize]
-   owns those call arms after the whole-program address maps are final. *)
-let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(sub : sub term) ~(foreign_slots : Core.Int64.Set.t)
-    ~(last_defs : def term Var.Map.t) ~(blk : blk term)
-    (j : jmp term) : jmp term list option =
-  let series texp =
-    if
-      Base.Option.value_map (Hike_transfer.slot_of_target ~sub texp)
-        ~default:false ~f:(fun a -> Core.Set.mem foreign_slots a)
-    then None
-    else
-      Base.Option.bind
-        (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs
-           ~sub ~blk texp)
-        ~f:(fun (subject, pairs, _base) -> dispatch_jmps j subject pairs None)
-  in
-  match ret_rewrite ~last_defs ~retaddr j with
-  | Some rewritten -> Some rewritten
-  | None ->
-    match Jmp.kind j with
-    | Goto (Indirect texp) -> series texp
-    | _ -> None
-
 (* Rebuilds [blk] replacing each jmp its classifier rewrites; a
    classifier [None] keeps the jmp. *)
 let splice_jmps (blk : blk term)
@@ -534,15 +430,15 @@ let splice_jmps (blk : blk term)
           | Some js' -> js'
           | None -> [ j ])
 
-let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t)
-    ~(foreign_slots : Core.Int64.Set.t) (sub : sub term) : sub term =
-  let sub_tids = sub_tids sub in
+(* The drain's one BIR change: the retaddr read becomes the canonical
+   return edge.  The bounded dispatches materialize later, in
+   [Split_blocks.materialize], where the whole-program address maps are
+   final. *)
+let rewrite_jmps_once ~(retaddr : Tid.Set.t) (sub : sub term) : sub term =
   Term.map blk_t sub ~f:(fun blk ->
       let last_defs = Vsa.last_defs blk in
       splice_jmps blk
-        ~classify:(rewritten_jmps ~denote ~retaddr ~sub_tids ~block_addrs
-                     ~sub ~foreign_slots ~last_defs ~blk))
+        ~classify:(ret_rewrite ~last_defs ~retaddr))
 
 (* The unreachable-block rule, one walk over the rewritten edge set: a
    block is kept iff the walk reaches it — from the sub's entry over the
@@ -766,25 +662,19 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
           ~classify:(ret_rewrite ~retaddr ~last_defs))
     |> materialize_fallthroughs
 
-(* One resolution event pass on the phase's own solution: the case
-   words land on the run's map and resolved dispatches contribute
-   their target sets to the extra edges.  The split is the only BIR
-   change and it is additive.  Runs under the caller's image bracket. *)
+(* One resolution event pass on the phase's own solution: the resolved
+   dispatches contribute their target sets to the extra edges.  The
+   words are the target denotations; the drive discovers the case
+   bodies from the raw transfers' own denotations, so the completion
+   carries no fact channel. *)
 let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(block_addrs : Tid.t Addr.Map.t)
-    ~(sub_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
-    sub term * Tid.Set.t Tid.Map.t * Tid.t Addr.Map.t
-    * (Addr.t * bool * Cbat_word.t list) list * bool =
+    Tid.Set.t Tid.Map.t * bool =
   let denote = denote_of_sol sol in
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub_tids = sub_tids sub in
-  let sub, block_addrs', facts =
-    prepare_dispatches ~denote ~retaddr ~block_addrs
-      ~sub_addrs ~foreign_slots sub
-  in
-
   let grew = ref false in
   let resolved' =
     Term.enum blk_t sub
@@ -797,7 +687,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
             | Some texp -> (
                 match
                   resolved_pairs_of ~denote ~last_defs ~sub_tids
-                    ~block_addrs:block_addrs' ~sub ~blk texp
+                    ~block_addrs ~sub ~blk texp
                 with
                 | None -> acc
                 | Some (_, pairs, _) ->
@@ -814,20 +704,19 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
                         grew := true;
                         Core.Map.set acc ~key:(Term.tid j) ~data:ts)))
   in
-  (sub, resolved', block_addrs', facts, !grew)
+  (resolved', !grew)
 
-(* The exit materialization at drain: the rewrites land once, then the
-   unreachable-block rule runs on the rewritten edge set.  The
-   denotations read the images through the caller's bracket. *)
+(* The exit materialization at drain: the return canonicalization lands
+   once, then the unreachable-block rule runs on the edge set.  The
+   bounded dispatches materialize later, in
+   [Split_blocks.materialize].  The denotations read the images through
+   the caller's bracket. *)
 let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
-  let sub =
-    rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
-      ~foreign_slots sub
-  in
+  let sub = rewrite_jmps_once ~retaddr sub in
   prune_unreachable ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
     ~foreign_slots sub
   |> materialize_fallthroughs

@@ -16,13 +16,10 @@ type solution = {
   block_addrs : Tid.t Addr.Map.t;
   sub_addrs : Tid.t Addr.Map.t;
   lookup : int64 -> Tid.t option;
-  dispatches : (Addr.t * bool * Cbat_word.t list) list;
 }
 
 let prepare proj =
   let target = Project.target proj in
-  (* The executable span: the completion's table walk reads a composed
-     table's consecutive cells and keeps the entries that land in code. *)
   let range_of_section name =
     match
       Hike_image.get_section_mem name proj |> Hike_image.get_section_data
@@ -90,7 +87,7 @@ let normalize context program =
   |> Hike_fp.run_program
 
 let solve context proj ~noreturn program =
-  let { target; images; linker_slots; text_range; _ } = context in
+  let { target; images; linker_slots; _ } = context in
   let block_addrs =
     Term.enum sub_t program
     |> Seq.concat_map ~f:(Term.enum blk_t)
@@ -133,18 +130,17 @@ let solve context proj ~noreturn program =
   let written =
     Hike_vsa.kill_summaries ~abi:(Hike_abi.of_target target) program
   in
-  let subs_acc, dfacts, block_addrs =
+  let subs_acc, block_addrs =
     Term.enum sub_t program
-    |> Seq.fold ~init:(Tid.Map.empty, [], block_addrs)
-         ~f:(fun (acc, dfs, ba) sub ->
-           let envs, sub', ba', facts =
+    |> Seq.fold ~init:(Tid.Map.empty, block_addrs)
+         ~f:(fun (acc, ba) sub ->
+           let envs, sub', ba' =
              Hike_vsa.fixpoint target ~lookup ~sub_addrs ~images
                ~written ~foreign_slots:linker_slots
-               ~code_range:text_range ~noreturn
+               ~noreturn
                ~block_addrs:ba sub
            in
            (Core.Map.set acc ~key:(Term.tid sub) ~data:(envs, sub'),
-            Base.List.append dfs facts,
             ba'))
   in
   let program =
@@ -153,8 +149,7 @@ let solve context proj ~noreturn program =
         | Some (_, s') -> s'
         | None -> s)
   in
-  { program; subs = subs_acc; block_addrs; sub_addrs; lookup;
-    dispatches = dfacts }
+  { program; subs = subs_acc; block_addrs; sub_addrs; lookup }
 
 let install context solution =
   let envs =

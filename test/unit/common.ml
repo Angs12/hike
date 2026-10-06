@@ -112,7 +112,7 @@ let top_facts : Hike.Kb.facts =
 let produce ?(block_addrs = []) ?(images = []) target (prog : program term)
     (sub : sub term) :
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
-  let envs, sub', ba', _facts =
+  let envs, sub', ba' =
     Hv.fixpoint target ~lookup:(fun _ -> None)
       ~sub_addrs:(Core.Map.empty (module Addr)) ~images
       ~written:(Hv.kill_summaries ~abi:Hike.Abi.x86_64_sysv prog)
@@ -160,7 +160,7 @@ let fixture_facts (subs : sub term list) :
   let all_envs, stamped, ok =
     Base.List.fold subs ~init:(Tid.Map.empty, [], true)
       ~f:(fun (m, stamped, ok) sub ->
-        let envs, sub', _, _ =
+        let envs, sub', _ =
           Hv.fixpoint Theory.Target.unknown
             ~lookup:(fun _ -> None)
             ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]

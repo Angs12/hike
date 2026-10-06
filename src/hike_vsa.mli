@@ -43,11 +43,9 @@ open Bap_core_theory
     written:Core.Int.Set.t option Tid.Map.t ->
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
-    ?code_range:(int64 * int64) option ->
     ?noreturn:Tid.Set.t ->
     sub term ->
     (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
-    * (Addr.t * bool * Cbat_word.t list) list
 
   (** The program's kill summaries (every subs' transitive written
       register set); computed once per program at the boundary and

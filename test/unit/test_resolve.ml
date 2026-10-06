@@ -427,12 +427,11 @@ let tests : unit Alcotest.test list =
                 j5
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
-            let sub5', resolved5', _, _facts5, events5 =
+            let resolved5', events5 =
               Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
-                ~sub_addrs:(Core.Map.empty (module Addr))
                 ~foreign_slots:Core.Int64.Set.empty
                 j5 Tid.Map.empty
             in
@@ -568,7 +567,7 @@ let tests : unit Alcotest.test list =
           Base.List.iter stamped_blks ~f:(Sub.Builder.add_blk sb);
           Sub.Builder.result sb
         in
-        let _, sub25', ba' =
+        let envs, sub25', ba' =
           produce ~block_addrs:
             [ (0x2000L, tids.(0)); (0x2008L, tids.(1)); (0x2010L, tids.(2));
               (0x2018L, tids.(3)); (0x2020L, tids.(4)); (0x3000L, tids.(5));
@@ -576,27 +575,25 @@ let tests : unit Alcotest.test list =
             ~images Theory.Target.unknown
             (Program.create ~subs:[ stamped ] ()) stamped
         in
+        (* The dispatch materializes after the solve, in split-blocks:
+           the bounded denotation names the case blocks, the composed
+           base gives the guards' delta coordinate. *)
+        let facts =
+          { (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:envs
+               ~block_addrs:ba' ~target:Theory.Target.unknown) with
+            images;
+            foreign_slots = Core.Int64.Set.empty }
+        in
+        let materialized =
+          Hike.Split_blocks.materialize ~facts
+            (Program.create ~subs:[ sub25' ] ())
+        in
+        let sub25'' = Term.enum sub_t materialized |> Seq.hd_exn in
         let blk_of tid =
-          Term.enum blk_t sub25' |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tid)
+          Term.enum blk_t sub25'' |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tid)
         in
         let disp = blk_of tids.(3) in
         let disp_jmps = Term.enum jmp_t disp |> Seq.to_list in
-        Printf.eprintf "T25 disp_jmps=%d tids=[%s]\n%!"
-          (Base.List.length disp_jmps)
-          (String.concat ","
-             (Base.List.map (Base.Array.to_list tids) ~f:Tid.name));
-        Base.List.iter disp_jmps ~f:(fun j ->
-            Printf.eprintf "T25 jmp kind=%s cond=%b target=%s\n%!"
-              (match Jmp.kind j with
-               | Goto (Direct t) -> "gotoD"
-               | Goto (Indirect _) -> "gotoI"
-               | Call _ -> "call"
-               | Ret _ -> "ret"
-               | Int _ -> "int")
-              (not (Hike.Stack_model.is_true_cond (Jmp.cond j)))
-              (match Jmp.kind j with
-               | Goto (Direct t) -> Tid.name t
-               | _ -> "-"));
         let has_case t =
           Base.List.exists disp_jmps ~f:(fun j ->
               match Jmp.kind j with

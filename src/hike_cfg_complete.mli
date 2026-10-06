@@ -26,28 +26,28 @@ open Bap.Std
   val retaddr_defs :
     abi:Hike_abi.t -> sol:Cbat_vsa.vsa_sol -> sub term -> Tid.Set.t
 
-  (** One resolution pass on the phase's solution: resolvable case
-      words land on the run's map and resolved dispatches grow the
-      extra edges.  Returns the sub, the edge set, the grown
-      block-address map, the phase's dispatch facts (the site's
-      address, its call class, the case words), and whether anything
-      grew.  Runs under the caller's image bracket. *)
+  (** One resolution event pass on the phase's solution: the resolved
+      dispatches contribute their target sets to the extra edges.  The
+      words are the target denotations; the drive discovers the case
+      bodies from the raw transfers' own denotations.  Returns the
+      grown edge set and whether anything grew.  Runs under the
+      caller's image bracket. *)
   val resolve_phase :
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
     block_addrs:Tid.t Addr.Map.t ->
-    sub_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
     sub term ->
     Tid.Set.t Tid.Map.t ->
-    sub term * Tid.Set.t Tid.Map.t * Tid.t Addr.Map.t
-    * (Addr.t * bool * Cbat_word.t list) list * bool
+    Tid.Set.t Tid.Map.t * bool
 
-  (** The exit materialization at drain: the rewrites land once, then
-      every block neither reachable from the sub's entry nor live
-      behind a surviving indirect transfer drops ([foreign_slots] are
-      the linker-owned slot addresses a transfer may read its target
-      through — such a transfer leaves the program). *)
+  (** The exit materialization at drain: the return canonicalization
+      lands once, then every block neither reachable from the sub's
+      entry nor live behind a surviving indirect transfer drops
+      ([foreign_slots] are the linker-owned slot addresses a transfer
+      may read its target through — such a transfer leaves the
+      program).  The bounded dispatches materialize later, in
+      [Split_blocks.materialize]. *)
   val materialize :
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->

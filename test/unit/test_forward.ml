@@ -403,7 +403,7 @@ let tests : unit Alcotest.test list =
               [ (1, mk_goto) ];
               [], [] ]
         in
-        let envs, _, _, _ =
+        let envs, _, _ =
           Hv.fixpoint Theory.Target.unknown
             ~lookup:(fun _ -> None)
             ~sub_addrs:(Core.Map.empty (module Addr)) ~images:[]

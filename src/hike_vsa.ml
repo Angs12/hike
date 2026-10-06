@@ -151,11 +151,9 @@ let fixpoint (target : Theory.Target.t)
     ~(written : Core.Int.Set.t option Tid.Map.t)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
-    ?(code_range : (int64 * int64) option = None)
     ?(noreturn : Tid.Set.t = Tid.Set.empty)
     (sub : sub term) :
-    (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t
-    * (Addr.t * bool * Cbat_word.t list) list =
+    (Vsa.AI.t * Vsa.AI.t) Tid.Map.t * sub term * Tid.t Addr.Map.t =
   self_arm target;
   let sub = Hike_cfg_complete.clear_noreturn_returns ~noreturn sub in
   let abi = Hike_abi.of_target target in
@@ -165,7 +163,6 @@ let fixpoint (target : Theory.Target.t)
   Vsa.with_images images (fun () ->
       let rec phases (sub : sub term) (resolved : Tid.Set.t Tid.Map.t)
           (block_addrs : Tid.t Addr.Map.t)
-          (dfacts : (Addr.t * bool * Cbat_word.t list) list)
           (init : Vsa.vsa_sol option) =
         let seed = match init with Some s -> s | None -> Vsa.init_sol ~abi sub in
         let sol =
@@ -176,18 +173,15 @@ let fixpoint (target : Theory.Target.t)
             ~written ~resolved ~sub_lookup:lookup
             sub seed
         in
-        let sub', resolved', block_addrs', facts, events =
-          Hike_cfg_complete.resolve_phase ~abi ~sol
-            ~block_addrs
-            ~sub_addrs ~foreign_slots
-            sub resolved
+        let resolved', events =
+          Hike_cfg_complete.resolve_phase ~abi ~sol ~block_addrs
+            ~foreign_slots sub resolved
         in
-        let dfacts = Base.List.append dfacts facts in
-        if events then phases sub' resolved' block_addrs' dfacts (Some sol)
-        else (sol, sub', block_addrs', dfacts)
+        if events then phases sub resolved' block_addrs (Some sol)
+        else (sol, sub, block_addrs)
       in
       let converged =
-        try Some (phases sub Tid.Map.empty block_addrs [] None)
+        try Some (phases sub Tid.Map.empty block_addrs None)
         with Vsa.Fixpoint_not_converged (n, _) ->
 #ifdef VSA_DEBUG
           Vsa.Cbat_attr_census.bump "backstop.sub";
@@ -198,7 +192,7 @@ let fixpoint (target : Theory.Target.t)
           None
       in
       match converged with
-      | Some (sol, sub', block_addrs', dfacts) ->
+      | Some (sol, sub', block_addrs') ->
         let sub'' =
           Hike_cfg_complete.materialize ~abi ~sol ~block_addrs:block_addrs'
             ~foreign_slots sub'
@@ -208,9 +202,8 @@ let fixpoint (target : Theory.Target.t)
            materialization may reintroduce the shift pair. *)
         let sub'' = Vsa.normalize_round sub'' in
         let envs, stamped = Vsa.stamp_envs_of_sol ~sol sub'' in
-        (envs, stamped, block_addrs', dfacts)
+        (envs, stamped, block_addrs')
       | None ->
         ( Tid.Map.empty,
           Hike_cfg_complete.canonicalize_shape_returns ~abi sub,
-          block_addrs,
-          [] ))
+          block_addrs ))
