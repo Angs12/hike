@@ -9,6 +9,7 @@
   hike_spec
   hike_stack_model
   hike_stack_ptr
+  hike_synth_addr
   hike_transfer)
  (libraries
   bap

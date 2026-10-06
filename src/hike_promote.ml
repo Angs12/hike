@@ -177,127 +177,6 @@ let conversion_of ~(word : int) ~(entry : int64)
    a visible non-address (a runtime piece).  A var the denotation cannot
    see is absent — unknown may be a pointer at emission, so it never
    enters a displacement. *)
-type leaf = [ `Static of int64 | `Addr | `Int ]
-
-let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
-                     (Vsa.WordSet.t, Type.error) Result.t)
-    ~(storages : Hike_synth.storage_span list)
-    ~(blk : blk term) ~(def : def term) (e : exp) : leaf Var.Map.t =
-  (object
-     inherit [ leaf Var.Map.t ] Exp.visitor
-     method! visit_var v acc =
-       (* A synthetic leaf's class is its kind's, not a denotation: a
-          module address is an integer value, a stack storage's base is
-          its allocated offset.  A var with no synthetic identity still
-          needs the denotation. *)
-       let by_denotation () =
-         match denote ~blk ~def (Bil.Var v) with
-         | Ok ws
-           when (not (Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws))
-                && Vsa.WordSet.in_stack_segment ws ->
-           (* A Vla-origin value's offsets are frame-relative —
-              read them off the value, never the entry-line hull. *)
-           let off =
-             match Vsa.WordSet.origin ws with
-             | Some (Vsa.WordSet.Origin.Vla _) -> (
-                 match Vsa.WordSet.vla_offsets ws with
-                 | Some offs -> Model.singleton_offset offs
-                 | None -> None)
-             | _ -> (
-                 match Vsa.WordSet.stack_offsets ws with
-                 | Some offs -> Model.singleton_offset offs
-                 | None -> None)
-           in
-           Core.Map.set acc ~key:v
-             ~data:(match off with Some k -> `Static k | None -> `Addr)
-         | Ok ws
-           when not (Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws) ->
-           Core.Map.set acc ~key:v ~data:`Int
-         | Ok _ | Error _ -> acc
-       in
-       match Hike_synth.classify Hike_synth.empty v with
-       | Some (Hike_synth.Module_addr _) ->
-         Core.Map.set acc ~key:v ~data:`Int
-       | Some (Hike_synth.Storage (Hike_synth.Stack id)) -> (
-         match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
-         | Some s ->
-           Core.Map.set acc ~key:v
-             ~data:
-               (`Static
-                  (Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base))
-         | None -> by_denotation ())
-       | _ -> by_denotation ()
-   end)#visit_exp e Var.Map.empty
-
-(* The entry-line arithmetic of an address exp: each [ `Static ] leaf
-   folds to its constant, each [ `Int ] leaf (a value outside the stack
-   segment) stays a runtime piece.  [None] when an address part is a
-   pointer or invisible — the value then composes over its operands'
-   own pointers. *)
-let offset_of ~(leaves : leaf Var.Map.t)
-    (e : exp) : exp option =
-  let w64 (k : int64) : exp =
-    Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 k))
-  in
-  Hike_exp_fold.fold
-    (fun e child ->
-      match e with
-      | Bil.Int _ -> Some e
-      | Bil.Var v -> (
-          match Core.Map.find leaves v with
-          | Some (`Static k) -> Some (w64 k)
-          | Some `Int -> Some e
-          | Some `Addr | None -> None)
-      | Bil.BinOp ((Bil.PLUS | Bil.MINUS) as op, a, b) -> (
-          match (child a, child b) with
-          | Some a', Some b' -> (
-              match (a', b') with
-              | Bil.Int x, Bil.Int y -> (
-                  match
-                    (Cbat_word.to_int64 (Cbat_word.of_word x),
-                     Cbat_word.to_int64 (Cbat_word.of_word y))
-                  with
-                  | Ok x', Ok y' ->
-                      Some (w64 ((if op = Bil.PLUS then Stdlib.Int64.add
-                                 else Stdlib.Int64.sub)
-                                   x' y'))
-                  | _ -> Some (Bil.BinOp (op, a', b')))
-              | _ -> Some (Bil.BinOp (op, a', b')))
-          | _ -> None)
-      | Bil.Cast (cast, width, a) ->
-          Base.Option.map (child a) ~f:(fun a' -> Bil.Cast (cast, width, a'))
-      | Bil.Ite (c, a, b) -> (
-          match (child a, child b) with
-          | Some a', Some b' -> Some (Bil.Ite (c, a', b'))
-          | _ -> None)
-      | _ ->
-          if
-            Core.Set.exists (Exp.free_vars e) ~f:(fun v ->
-                match Core.Map.find leaves v with
-                | Some `Int -> false
-                | _ -> true)
-          then None
-          else Some e)
-    e
-
-(* [base + (disp − rel)] with the displacement folded: a static
-   displacement folds to a constant (the base itself at zero). *)
-let base_plus (base : var) ~(rel : int64) (disp : exp) : exp =
-  let w64 (k : int64) =
-    Bil.Int (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 k))
-  in
-  match disp with
-  | Bil.Int w -> (
-      match Cbat_word.to_int64 (Cbat_word.of_word w) with
-      | Ok k ->
-          let k = Stdlib.Int64.sub k rel in
-          if Stdlib.Int64.equal k 0L then Bil.Var base
-          else Bil.BinOp (Bil.PLUS, Bil.Var base, w64 k)
-      | Error _ -> Bil.BinOp (Bil.PLUS, Bil.Var base, disp))
-  | _ ->
-      Bil.BinOp
-        (Bil.PLUS, Bil.Var base, Bil.BinOp (Bil.MINUS, disp, w64 rel))
-
 (* The stack binding wholly owning [lo, hi]: a value spanning two
    bindings names no one storage. *)
 let owning_storage (tree : Sections.sub_tree) (lo : int64) (hi : int64) :
@@ -379,7 +258,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
     | Some s ->
         Base.Option.map disp
-          ~f:(base_plus s.Hike_synth.ss_base
+          ~f:(Hike_synth_addr.base_plus s.Hike_synth.ss_base
                 ~rel:(Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base))
     | None -> None
   in
@@ -391,7 +270,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                   Hike_def_slots.def_is_dyn_alloc d
                 then acc
                 else
-                  let leaves = address_leaves ~denote ~storages ~blk ~def:d (Def.rhs d) in
+                  let leaves = Hike_synth_addr.address_leaves ~denote ~storages ~blk ~def:d (Def.rhs d) in
                   let fact = no_fact in
                   match Sections.access_of d with
                   | Some (addr, w, _) -> (
@@ -417,7 +296,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                             ~default:false ~f:(fun (lo, hi) ->
                               in_extent id lo hi)
                           -> (
-                          let folded = offset_of ~leaves addr in
+                          let folded = Hike_synth_addr.offset_of ~leaves addr in
 
                           census
                             (if Int.equal id Model.residue_id then
@@ -449,8 +328,8 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                           let f =
                             match
                               Base.Option.map
-                                (offset_of ~leaves addr)
-                                ~f:(base_plus (Model.hike_window_var ~word)
+                                (Hike_synth_addr.offset_of ~leaves addr)
+                                ~f:(Hike_synth_addr.base_plus (Model.hike_window_var ~word)
                                        ~rel:0L)
                             with
                             | Some a -> { fact with fr_addr = Some a }
@@ -516,7 +395,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                        real bits, so a re-base here would
                                        materialize the address twice. *)
                                     match
-                                      offset_of ~leaves (Def.rhs d)
+                                      Hike_synth_addr.offset_of ~leaves (Def.rhs d)
                                     with
                                     | Some (Bil.Int w) ->
                                         census "rw.value.section";
@@ -527,7 +406,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                           with
                                           | Ok k
                                             when Stdlib.Int64.equal k c ->
-                                              base_plus
+                                              Hike_synth_addr.base_plus
                                                 (Model.sec_comp_ptr
                                                    ~addr_bits id)
                                                 ~rel:comp_lo (Bil.Int w)
@@ -579,8 +458,8 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                    position arithmetic applies. *)
                                 match
                                   Base.Option.map
-                                    (offset_of ~leaves (Def.rhs d))
-                                    ~f:(base_plus (Model.vla_ptr ~addr_bits tid)
+                                    (Hike_synth_addr.offset_of ~leaves (Def.rhs d))
+                                    ~f:(Hike_synth_addr.base_plus (Model.vla_ptr ~addr_bits tid)
                                          ~rel:0L)
                                 with
                                 | Some rhs ->
@@ -603,9 +482,9 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                        && window_param -> (
                                     match
                                       Base.Option.map
-                                        (offset_of ~leaves
+                                        (Hike_synth_addr.offset_of ~leaves
                                            (Def.rhs d))
-                                        ~f:(base_plus
+                                        ~f:(Hike_synth_addr.base_plus
                                               (Model.hike_window_var ~word)
                                               ~rel:0L)
                                     with
@@ -627,7 +506,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                       -> (
                                         match
                                           region_base (region_id_of_storage st)
-                                            (offset_of ~leaves
+                                            (Hike_synth_addr.offset_of ~leaves
                                                (Def.rhs d))
                                         with
                                         | Some rhs ->
@@ -703,7 +582,7 @@ let rewrite_def ~(addr_bits : int) ~(conv : conv) ~(bits : int)
   | Conv_slot (i, byte_offset) ->
       let slot = Model.arg_slot ~addr_bits i in
       let addr =
-        base_plus slot ~rel:0L
+        Hike_synth_addr.base_plus slot ~rel:0L
           (Bil.Int
              (Cbat_word.to_word
                 (Cbat_word.of_int64 ~width:addr_bits
