@@ -44,19 +44,64 @@ let lookup_native_fn ctx llvm_module v =
                 (Base.List.Assoc.find ~equal:String.equal !(ctx.thunks) name)
                 ~default:f)))
 
-(* (global, owner base) for the address; no owners = the
-   whole-section array. *)
-let owner_of section (addr_i64 : int64) : Llvm.llvalue * int64 =
+(* The one emission address index: the section tiling and each section's
+   owner tiling, keyed by base for a closest-key lookup, plus the
+   loader's relocation facts.  Built once per run. *)
+let build_address_index (sections : section list)
+    ~(relative : (int64 * int64) list) ~(externals : (int64 * string) list) :
+    address_index =
+  let section_map =
+    Base.List.fold sections ~init:Core.Int64.Map.empty ~f:(fun m s ->
+        Core.Map.set m ~key:(Word.to_int64_exn s.min_addr) ~data:s)
+  in
+  let owners =
+    Base.List.fold sections ~init:Core.Int64.Map.empty ~f:(fun m s ->
+        match s.owners with
+        | [] -> m
+        | os ->
+          let om =
+            Base.List.fold os ~init:Core.Int64.Map.empty ~f:(fun m o ->
+                Core.Map.set m ~key:o.own_lo ~data:o)
+          in
+          Core.Map.set m ~key:(Word.to_int64_exn s.min_addr) ~data:om)
+  in
+  let relative =
+    Base.List.fold relative ~init:Core.Int64.Map.empty ~f:(fun m (site, rv) ->
+        Core.Map.set m ~key:site ~data:rv)
+  in
+  let externals =
+    Base.List.fold externals ~init:Core.Int64.Map.empty
+      ~f:(fun m (site, name) -> Core.Map.set m ~key:site ~data:name)
+  in
+  { sections = section_map; owners; relative; externals }
+
+(* The section containing the address: the nearest base at or below it
+   (the sections tile disjointly), checked against its span. *)
+let section_of_addr (index : address_index) (addr : word) : section option =
+  let a = Word.to_int64_exn addr in
+  Base.Option.bind (Core.Map.closest_key index.sections `Less_or_equal_to a)
+    ~f:(fun (_, s) ->
+        Base.Option.some_if
+          (Word.between ~low:s.min_addr addr ~high:s.max_addr)
+          s)
+
+(* (global, owner base) for the address; no owners = the whole-section
+   array. *)
+let owner_of (index : address_index) section (addr_i64 : int64) :
+    Llvm.llvalue * int64 =
   let identity = (section.base, Word.to_int64_exn section.min_addr) in
-  match section.owners with
-  | [] -> identity
-  | owners ->
+  let key = Word.to_int64_exn section.min_addr in
+  match Core.Map.find index.owners key with
+  | None -> identity
+  | Some owners ->
       Base.Option.value
-        (Base.Option.map
-           (Base.List.find owners ~f:(fun o ->
-                Int64.compare o.own_lo addr_i64 <= 0
-                && Int64.compare addr_i64 o.own_hi <= 0))
-           ~f:(fun o -> (o.base, o.own_lo)))
+        (Base.Option.bind
+           (Core.Map.closest_key owners `Less_or_equal_to addr_i64)
+           ~f:(fun (_, o) ->
+               Base.Option.some_if
+                 (Int64.compare o.own_lo addr_i64 <= 0
+                  && Int64.compare addr_i64 o.own_hi <= 0)
+                 (o.base, o.own_lo)))
         ~default:identity
 
 (* The one address map: a function start to its function, a section
@@ -66,12 +111,9 @@ let remap_native ctx llvm_ctx llvm_module v ~finish =
   Base.Option.first_some
     (Base.Option.map (lookup_native_fn ctx llvm_module v) ~f:finish)
     (Base.Option.bind
-       (Base.List.find ctx.sections ~f:(fun s ->
-            let lo = Word.to_int64_exn s.min_addr in
-            let hi = Word.to_int64_exn s.max_addr in
-            Int64.compare lo v <= 0 && Int64.compare v hi <= 0))
+       (section_of_addr ctx.address (Word.of_int64 ~width:64 v))
        ~f:(fun section ->
-         let base, own_lo = owner_of section v in
+         let base, own_lo = owner_of ctx.address section v in
          Some
            (finish
               (Llvm.const_in_bounds_gep (Llvm.i8_type llvm_ctx) base
@@ -153,19 +195,10 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
          Llvm.set_linkage Llvm.Linkage.External_weak extern;
          Llvm.const_ptrtoint extern word_ty)
   in
-  (* The loader's relocation facts, indexed: one binary's image holds
-     hundreds of thousands of words and thousands of relocation sites,
-     so the per-word lookup is a map read, not a list walk. *)
-  let relative =
-    Base.List.fold ctx.relative
-      ~init:(Core.Map.empty (module Core.Int64))
-      ~f:(fun m (site, rv) -> Core.Map.set m ~key:site ~data:rv)
-  in
-  let externals =
-    Base.List.fold ctx.externals
-      ~init:(Core.Map.empty (module Core.Int64))
-      ~f:(fun m (site, name) -> Core.Map.set m ~key:site ~data:name)
-  in
+  (* The loader's relocation facts, indexed once for the run (the
+     image holds many words; the per-word lookup is a map read). *)
+  let relative = ctx.address.relative in
+  let externals = ctx.address.externals in
   let word64 (w : int) : Llvm.llvalue =
     let off = w * word in
     let v = word_of_bytes ~arr ~off ~len:word in
@@ -191,13 +224,9 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     in
     Llvm.set_initializer (Llvm.const_array elem_ty elems) g
 
-let section_of_addr sections (addr : word) =
-  Base.List.find sections ~f:(fun section ->
-      Word.between ~low:section.min_addr addr ~high:section.max_addr)
-
 let resolve_addr_in ctx llvm_builder section addr =
   let base, own_lo =
-    owner_of section (Word.to_int64_exn addr)
+    owner_of ctx.address section (Word.to_int64_exn addr)
   in
   let offset =
     Llvm.const_of_int64 (ctx.i64_ty)
@@ -208,7 +237,7 @@ let resolve_addr_in ctx llvm_builder section addr =
     llvm_builder
 
 let resolve_addr ctx llvm_builder addr =
-  match section_of_addr ctx.sections addr with
+  match section_of_addr ctx.address addr with
   | None ->
       (* Out-of-section address: inttoptr of the raw constant. *)
       let v =

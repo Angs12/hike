@@ -24,7 +24,7 @@ let const_load_in ctx llvm_builder section addr size =
   load_ptr llvm_builder (Llvm.integer_type ctx.llvm_ctx size) base
 
 let const_load ctx llvm_builder addr size ~fallback =
-  match section_of_addr ctx.sections addr with
+  match section_of_addr ctx.address addr with
   | Some section -> const_load_in ctx llvm_builder section addr size
   | None -> fallback ()
 
@@ -32,12 +32,12 @@ let const_load ctx llvm_builder addr size ~fallback =
    target (the store path's own resolution, without the value). *)
 let const_addr_ptr ctx llvm_builder addr_i64 ~fallback =
   let w = Word.of_int64 ~width:64 addr_i64 in
-  match section_of_addr ctx.sections w with
+  match section_of_addr ctx.address w with
   | Some section -> resolve_addr_in ctx llvm_builder section w
   | None -> fallback ()
 
 let const_store ctx llvm_builder addr ~data ~fallback =
-  match section_of_addr ctx.sections addr with
+  match section_of_addr ctx.address addr with
   | Some section ->
       let base = resolve_addr_in ctx llvm_builder section addr in
       store_ptr llvm_builder (data ()) base

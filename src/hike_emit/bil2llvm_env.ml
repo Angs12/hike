@@ -117,16 +117,25 @@ type sub_frame = {
   regions : (Var.t * (Llvm.llvalue * int64)) list;
 }
 
+(* The one emission address index: the exact section tiling and each
+   section's owners, keyed by base for a closest-key lookup, plus the
+   loader's relocation facts.  Built once per run; every address
+   resolution and initializer word reads it. *)
+type address_index = {
+  sections : section Core.Int64.Map.t;
+  owners : sec_owner Core.Int64.Map.t Core.Int64.Map.t;
+  relative : int64 Core.Int64.Map.t;             (* site -> runtime value *)
+  externals : string Core.Int64.Map.t;           (* site -> symbol *)
+}
+
 (* The emission run: static per-binary facts and the cross-phase
    state.  One value, created by [emit_program], threaded through the
    lanes; the caller owns the LLVM context and module. *)
 type emit_ctx = {
   symtab : Symtab.t option;
-  (* The loader's relocation facts, word-grain: a RELATIVE word's
-     runtime value (an in-module address) and an externally-relocated
-     word's symbol. *)
-  relative : (int64 * int64) list;
-  externals : (int64 * string) list;
+  (* The loader's relocation facts, section tiling and owner tiling:
+     one immutable index for the whole run. *)
+  address : address_index;
   target : Theory.Target.t;
   (* ABI projection of [target], static per binary. *)
   abi : Abi.t;

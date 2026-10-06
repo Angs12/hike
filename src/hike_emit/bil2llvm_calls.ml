@@ -622,9 +622,7 @@ let external_slot_target ctx ?(sub : sub term option) (target : exp) :
     Base.Option.map (Core.Map.find !(ctx.sec_comps) v) ~f:snd
   in
   match Hike_transfer.slot_of_target ~synth:ctx.synth ~origin ?sub target with
-  | Some a ->
-    Base.List.find_map ctx.externals ~f:(fun (slot, name) ->
-        if Int64.equal slot a then Some name else None)
+  | Some a -> Core.Map.find ctx.address.externals a
   | None -> None
 
 (* The boundary-class indirect transfer: the target leaves the program

@@ -518,8 +518,9 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   let ctx =
     { symtab;
-      relative = spec.spec_relative;
-      externals = spec.spec_externals;
+      address =
+        Bil2llvm_section.build_address_index sections
+          ~relative:spec.spec_relative ~externals:spec.spec_externals;
       target;
       abi;
       sp = Abi.sp target;
@@ -564,7 +565,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
      the external it lands in, so the external names themselves are the
      discriminator. *)
   let external_names =
-    Base.List.map ctx.externals ~f:snd |> Core.String.Set.of_list
+    Core.Map.data ctx.address.externals |> Core.String.Set.of_list
   in
   let external_name sub =
     let n = Tid.name (Term.tid sub) in
@@ -721,7 +722,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   let initializer_phase () =
     (* The initializer rule consults the loader's relocation facts
-       (ctx.relative/externals); function-pointer data lands on a
+       (in the emission address index); function-pointer data lands on a
        promoted sub's thunk through the same address map. *)
     Base.List.iter sections ~f:(fun section ->
       match section.bytes with
