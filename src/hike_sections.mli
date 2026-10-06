@@ -70,6 +70,8 @@ type storage =
   | Stack_residue
   | Data_region of int
   | Arg_slot
+
+val region_id_of_storage : storage -> int
 [@@deriving equal, compare, sexp]
 
 (** One finalized binding: the storage decision and its members
@@ -118,6 +120,13 @@ type projection = {
   offsets : (int64 * int64) option;
 }
 
+type conv =
+  | Conv_region of int                    (* the region id *)
+  | Conv_window                           (* the incoming window: the caller's world *)
+  | Conv_slot of int * int                (* slot index, intra-slot byte *)
+  | Conv_global of int                    (* the component id *)
+  | Keep
+
 (** The completed attribution: the finalized trees, the def tags, each
     access def's projection, and the data spans served whole. *)
 type ctx = {
@@ -125,6 +134,7 @@ type ctx = {
   data_tree : data_tree;
   tags : sec_tag Tid.Map.t;
   projections : projection option Tid.Map.t;
+  conversions : conv Tid.Map.t;
   whole : data_span list;
 }
 

@@ -200,6 +200,13 @@ type projection = {
   offsets : (int64 * int64) option;
 }
 
+type conv =
+  | Conv_region of int                    (* the region id *)
+  | Conv_window                           (* the incoming window: the caller's world *)
+  | Conv_slot of int * int                (* slot index, intra-slot byte *)
+  | Conv_global of int                    (* the component id *)
+  | Keep
+
 type ctx = {
   sub_trees : sub_tree Tid.Map.t;
   data_tree : data_tree;
@@ -207,6 +214,9 @@ type ctx = {
   (* Each access def's projection; [None] = the attribution's query
      failed and the rewrite keeps the memory form. *)
   projections : projection option Tid.Map.t;
+  (* Each access def's storage conversion, decided once from the
+     projections and the finalized trees. *)
+  conversions : conv Tid.Map.t;
   (* The data spans served whole, computed once by [attribute] and
      shared by the finalize and both spec projections. *)
   whole : data_span list;
@@ -837,6 +847,100 @@ let finalize_tree ~(word : int) ~(entry : int64)
   Base.List.fold sorted ~init:Tree.empty ~f:(fun t (k, ms) ->
       Tree.add t k (decide k ms))
 
+(* Merged bindings never overlap, so the binding containing the
+   range's least point is THE owner. *)
+let storage_of_range (tree : range_storage Tree.t) (r : range) :
+    range_storage option =
+  (* The rewrite's hottest query; the tree's lookup yields the
+     containing (or nearest) entries, of which the first decides. *)
+  match Seq.hd (Tree.lookup tree r.lo) with
+  | Some (_, v) -> Some v
+  | None -> None
+
+let region_id_of_storage (s : storage) : int =
+  match s with
+  | Stack_region n | Data_region n -> n
+  | Stack_residue | Arg_slot -> Model.residue_id
+
+
+(* The rewrite decision reads the attribution's own projection of the
+   def (ctx.projections) — the collect path computed it; the rewrite
+   cannot disagree with the tree. *)
+let conversion_of ~(word : int) ~(entry : int64)
+    ~(tree : sub_tree) ~(data : data_tree)
+    ~(projected : projection option)
+    ~(access : (exp * int * bool) option) : conv * Tag.t option =
+  match access with
+  | None -> (Keep, None)
+  | Some (addr, _, _) -> (
+      match projected with
+      (* A failed attribution query keeps the memory form. *)
+      | None -> (Keep, None)
+      | Some p ->
+          (* An unbounded address keeps its memory form: an above-entry
+             direction's storage is the caller's world, which the typed
+             arguments carry; a below-entry one is a pointer into the
+             residue alloca, exactly like a bounded one.  A VLA-origin
+             claim keeps its memory form too: the band's real storage is
+             the dynamic alloca the pointer chain names. *)
+          let tag = p.tag in
+          let portions = p.portions in
+          match (tag, p.origin) with
+          | (Some Tag.Unbounded, _) -> (Keep, tag)
+          | (_, Some (Hike_origin.Vla _)) -> (Keep, tag)
+          | _ ->
+          (* A return-address cell keeps its tag — the emitter's
+             return arm. *)
+          let retaddr_cell =
+            match tag with
+            | Some t -> Model.is_return_address_tag t
+            | None -> false
+          in
+          (* A conversion needs the eligibility proof: an identity
+             portion (an escape, a full-span claim, a VLA extent) keeps
+             the memory form — the raw lane is its sound answer. *)
+          let owned =
+            Base.List.filter portions ~f:(fun p ->
+                p.pt_elig
+                && (if is_sub_local p.pt_sec then not retaddr_cell
+                    else is_const_chain addr))
+          in
+          match owned with
+          | [ p ] -> (
+              let owner =
+                let space = if is_sub_local p.pt_sec then tree else data in
+                storage_of_range space (range p.pt_sec p.pt_lo p.pt_hi)
+              in
+              match owner with
+              | Some rs -> (
+                  match (p.pt_sec, rs.storage) with
+                  | (Stack, (Stack_region _ | Stack_residue)) ->
+                    (Conv_region (region_id_of_storage rs.storage), tag)
+                  | (Args, Stack_residue) -> (Conv_window, tag)
+                  | Args, Arg_slot -> (
+                      (* The slot index is the ACCESS's own word cell,
+                         never the binding's: a binding may span several
+                         cells.  A span outside a single cell is not a
+                         slot (the binding's promotability proved one, so
+                         this is the defensive identity). *)
+                      match
+                        args_cell_of_span ~word ~entry p.pt_lo
+                          p.pt_hi
+                      with
+                      | Some i ->
+                        let cell_lo =
+                          Stdlib.Int64.add entry (Model.slot_offset ~word i)
+                        in
+                        ( Conv_slot
+                            (i, Stdlib.Int64.to_int (Stdlib.Int64.sub p.pt_lo cell_lo)),
+                          tag )
+                      | None -> (Keep, tag))
+                  | _, Data_region id -> (Conv_global id, tag)
+                  | _ -> (Keep, tag))
+              | None -> (Keep, tag))
+          | _ -> (Keep, tag))
+
+
 let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     ~(spans : data_span list)
     (prog : program term) : ctx =
@@ -861,8 +965,32 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
   in
   let data_tree =
     finalize_tree ~word ~entry ~whole collected.data in
-  { sub_trees; data_tree; tags = collected.tags; projections = collected.projections;
-    whole }
+  let conversions =
+    Term.enum sub_t prog
+    |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc sub ->
+           let tid = Term.tid sub in
+           let tree =
+             Core.Map.find sub_trees tid
+             |> Base.Option.value ~default:Tree.empty
+           in
+           Term.enum blk_t sub
+           |> Seq.concat_map ~f:(Term.enum def_t)
+           |> Seq.fold ~init:acc ~f:(fun acc d ->
+                  match access_of d with
+                  | None -> acc
+                  | Some _ as access ->
+                    let projected =
+                      Base.Option.join
+                        (Core.Map.find collected.projections (Term.tid d))
+                    in
+                    let c, _ =
+                      conversion_of ~word ~entry ~tree ~data:data_tree
+                        ~projected ~access
+                    in
+                    Core.Map.set acc ~key:(Term.tid d) ~data:c))
+  in
+  { sub_trees; data_tree; tags = collected.tags;
+    projections = collected.projections; conversions; whole }
 
 (* The dynamic-allocation set is the seed's own, re-validated against
    the final denotations: the event predicate over the def's SP-before
@@ -887,16 +1015,6 @@ let dynamic_alloc_tids_of ~(facts : Hike_kb.facts)
         | Ok before, Ok after -> Option.is_some (Vsa.vla_event ~before ~after)
         | _ -> false))
   |> Core.Map.key_set
-
-(* Merged bindings never overlap, so the binding containing the
-   range's least point is THE owner. *)
-let storage_of_range (tree : range_storage Tree.t) (r : range) :
-    range_storage option =
-  (* The rewrite's hottest query; the tree's lookup yields the
-     containing (or nearest) entries, of which the first decides. *)
-  match Seq.hd (Tree.lookup tree r.lo) with
-  | Some (_, v) -> Some v
-  | None -> None
 
 (* The storages an expression names: a storage base leaf itself, or a
    var the map proved to hold one.  Only address arithmetic carries the

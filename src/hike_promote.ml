@@ -80,95 +80,6 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
   site_bindings_of_sub_with_blocks ~word ~abi ~sp ~denote sub
   |> Core.Map.map ~f:fst
 
-let region_id_of_storage (s : Sections.storage) : int =
-  match s with
-  | Stack_region n | Data_region n -> n
-  | Stack_residue | Arg_slot -> Model.residue_id
-
-type conv =
-  | Conv_region of int                    (* the region id *)
-  | Conv_window                           (* the incoming window: the caller's world *)
-  | Conv_slot of int * int                (* slot index, intra-slot byte *)
-  | Conv_global of int                    (* the component id *)
-  | Keep
-
-(* The rewrite decision reads the attribution's own projection of the
-   def (ctx.projections) — the collect path computed it; the rewrite
-   cannot disagree with the tree. *)
-let conversion_of ~(word : int) ~(entry : int64)
-    ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
-    ~(projected : Sections.projection option)
-    ~(access : (exp * int * bool) option) : conv * Sections.Tag.t option =
-  match access with
-  | None -> (Keep, None)
-  | Some (addr, _, _) -> (
-      match projected with
-      (* A failed attribution query keeps the memory form. *)
-      | None -> (Keep, None)
-      | Some p ->
-          (* An unbounded address keeps its memory form: an above-entry
-             direction's storage is the caller's world, which the typed
-             arguments carry; a below-entry one is a pointer into the
-             residue alloca, exactly like a bounded one.  A VLA-origin
-             claim keeps its memory form too: the band's real storage is
-             the dynamic alloca the pointer chain names. *)
-          let tag = p.Sections.tag in
-          let portions = p.Sections.portions in
-          match (tag, p.Sections.origin) with
-          | (Some Sections.Tag.Unbounded, _) -> (Keep, tag)
-          | (_, Some (Hike_origin.Vla _)) -> (Keep, tag)
-          | _ ->
-          (* A return-address cell keeps its tag — the emitter's
-             return arm. *)
-          let retaddr_cell =
-            match tag with
-            | Some t -> Model.is_return_address_tag t
-            | None -> false
-          in
-          (* A conversion needs the eligibility proof: an identity
-             portion (an escape, a full-span claim, a VLA extent) keeps
-             the memory form — the raw lane is its sound answer. *)
-          let owned =
-            Base.List.filter portions ~f:(fun p ->
-                p.pt_elig
-                && (if Sections.is_sub_local p.pt_sec then not retaddr_cell
-                    else Sections.is_const_chain addr))
-          in
-          match owned with
-          | [ p ] -> (
-              let owner =
-                let space = if Sections.is_sub_local p.pt_sec then tree else data in
-                Sections.storage_of_range space (Sections.range p.pt_sec p.pt_lo p.pt_hi)
-              in
-              match owner with
-              | Some rs -> (
-                  match (p.pt_sec, rs.storage) with
-                  | (Stack, (Stack_region _ | Stack_residue)) ->
-                    (Conv_region (region_id_of_storage rs.storage), tag)
-                  | (Args, Stack_residue) -> (Conv_window, tag)
-                  | Args, Arg_slot -> (
-                      (* The slot index is the ACCESS's own word cell,
-                         never the binding's: a binding may span several
-                         cells.  A span outside a single cell is not a
-                         slot (the binding's promotability proved one, so
-                         this is the defensive identity). *)
-                      match
-                        Sections.args_cell_of_span ~word ~entry p.pt_lo
-                          p.pt_hi
-                      with
-                      | Some i ->
-                        let cell_lo =
-                          Stdlib.Int64.add entry (Model.slot_offset ~word i)
-                        in
-                        ( Conv_slot
-                            (i, Stdlib.Int64.to_int (Stdlib.Int64.sub p.pt_lo cell_lo)),
-                          tag )
-                      | None -> (Keep, tag))
-                  | _, Data_region id -> (Conv_global id, tag)
-                  | _ -> (Keep, tag))
-              | None -> (Keep, tag))
-          | _ -> (Keep, tag))
-
 (* ---- The one address map: every address def's value is its storage's
    base plus the storage-relative displacement. ---- *)
 
@@ -209,13 +120,13 @@ let owning_data_binding (tree : Sections.data_tree) (c : int64) :
    plus the storage-relative address forms — a value def's whole rhs,
    an access def's mem-node address. *)
 type def_fact = {
-  fr_conv : conv;
+  fr_conv : Sections.conv;
   fr_bits : int;
   fr_addr : exp option;
   fr_rhs : exp option;
 }
 
-let no_fact = { fr_conv = Keep; fr_bits = 0; fr_addr = None; fr_rhs = None }
+let no_fact = { fr_conv = Sections.Keep; fr_bits = 0; fr_addr = None; fr_rhs = None }
 
 (* The sub's storage spans: the layout's regions in the synth fact
    shape, built once and read by every consumer. *)
@@ -232,6 +143,7 @@ let spans_of_layout ~(word : int) (layout : Hike_stack_model.sub_layout) :
 let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
     ~(projections : Sections.projection option Tid.Map.t)
+    ~(conversions : Sections.conv Tid.Map.t)
     ~(storages : Hike_synth.storage_span list)
     ~(window_param : bool) ~(vla_tids : Tid.Set.t)
     ~(spans : Sections.data_span list)
@@ -278,16 +190,17 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                         Base.Option.join
                           (Core.Map.find projections (Term.tid d))
                       in
-                      let conv, _tag =
-                        conversion_of ~word ~entry ~tree ~data ~projected
-                          ~access:(Sections.access_of d)
+                      let conv =
+                        Base.Option.value
+                          (Core.Map.find conversions (Term.tid d))
+                          ~default:Sections.Keep
                       in
                       let addr_range () =
                         Base.Option.bind projected
                           ~f:(fun p -> p.Sections.offsets)
                       in
                       match conv with
-                      | Conv_region id when
+                      | Sections.Conv_region id when
                           Base.Option.value_map (addr_range ())
                             ~default:false ~f:(fun (lo, hi) ->
                               in_extent id lo hi)
@@ -310,14 +223,14 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                           in
                           Core.Map.set acc ~key:(Term.tid d)
                             ~data:{ f with fr_conv = conv; fr_bits = 8 * w })
-                      | Conv_region id ->
+                      | Sections.Conv_region id ->
                           census
                             (if Int.equal id Model.residue_id then
                                "rw.access.residue.outside"
                              else "rw.access.region.outside");
                           Core.Map.set acc ~key:(Term.tid d)
                             ~data:{ fact with fr_conv = conv; fr_bits = 8 * w }
-                      | Conv_window ->
+                      | Sections.Conv_window ->
                           census "rw.access.window";
                           (* The window's base is the parameter; its
                              coordinate IS the entry-relative offset. *)
@@ -333,7 +246,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                           in
                           Core.Map.set acc ~key:(Term.tid d)
                             ~data:{ f with fr_conv = conv; fr_bits = 8 * w }
-                      | Conv_global _ ->
+                      | Sections.Conv_global _ ->
                           census "rw.access.section";
                           Core.Map.set acc ~key:(Term.tid d)
                             ~data:{ fact with fr_conv = conv; fr_bits = 8 * w }
@@ -498,10 +411,10 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                         ((Stack_region _ | Stack_residue) as
                                         st)
                                       when in_extent
-                                             (region_id_of_storage st) lo hi
+                                             (Sections.region_id_of_storage st) lo hi
                                       -> (
                                         match
-                                          region_base (region_id_of_storage st)
+                                          region_base (Sections.region_id_of_storage st)
                                             (Hike_synth_addr.offset_of ~leaves
                                                (Def.rhs d))
                                         with
@@ -551,11 +464,11 @@ let slot_addr_mapper (addr : exp) =
 (* One def's rewrite: re-point to the owning storage's mem var at the
    storage-relative address, or address its memory node at the caller's
    slot. *)
-let rewrite_def ~(addr_bits : int) ~(conv : conv) ~(bits : int)
+let rewrite_def ~(addr_bits : int) ~(conv : Sections.conv) ~(bits : int)
     ?(addr : exp option) (d : def term) : def term =
   match conv with
-  | Keep -> d
-  | Conv_region id ->
+  | Sections.Keep -> d
+  | Sections.Conv_region id ->
       let mem_var = Model.region_mem ~addr_bits:bits id in
 
       let d =
@@ -563,19 +476,19 @@ let rewrite_def ~(addr_bits : int) ~(conv : conv) ~(bits : int)
       in
 
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Conv_window ->
+  | Sections.Conv_window ->
       let mem_var = Model.window_mem ~addr_bits:bits in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Conv_global id ->
+  | Sections.Conv_global id ->
       let mem_var = Model.sec_comp_mem ~addr_bits id in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Conv_slot (i, byte_offset) ->
+  | Sections.Conv_slot (i, byte_offset) ->
       let slot = Model.arg_slot ~addr_bits i in
       let addr =
         Hike_synth_addr.base_plus slot ~rel:0L
@@ -769,8 +682,8 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
   in
   let facts =
     def_facts ~word ~entry ~abi ~tree ~data:ctx.data_tree
-      ~projections:ctx.projections ~storages ~window_param:window_ok
-      ~vla_tids ~spans ~denote sub
+      ~projections:ctx.projections ~conversions:ctx.conversions ~storages
+      ~window_param:window_ok ~vla_tids ~spans ~denote sub
   in
   (* The second pass: one general [Term.mapper] over the sub.  Every def
      (and phi) the attribution proved is rewritten to its owning
@@ -795,8 +708,8 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
                    it on the def so the emitter materializes into that
                    region, never the operand's. *)
                 match f.fr_conv with
-                | Conv_region _ | Conv_window -> d
-                | Conv_slot _ | Conv_global _ | Keep -> d)
+                | Sections.Conv_region _ | Sections.Conv_window -> d
+                | Sections.Conv_slot _ | Sections.Conv_global _ | Sections.Keep -> d)
 
       method! map_blk blk =
         let blk = super#map_blk blk in
