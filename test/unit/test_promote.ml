@@ -53,6 +53,18 @@ let t4_fixture () : sub term * string * string =
         [ (1, mk_goto) ];
         [], [ (0, mk_ret) ] ]
   in
+  (* The callee's address is taken (the caller's pointer site), so it
+     escapes through the loader word below and earns its public face. *)
+  let next = ref 0x1000L in
+  let callee =
+    Term.map blk_t callee ~f:(fun b ->
+        let a = !next in
+        next := Int64.add !next 0x10L;
+        Term.set_attr b address (Addr.of_int64 a))
+  in
+  let escape_spec =
+    { empty_spec with spec_relative = [ (0x5000L, 0x1000L) ] }
+  in
   let store1 =
     Def.create m
       (Bil.Store
@@ -86,7 +98,7 @@ let t4_fixture () : sub term * string * string =
   in
   let callee = stamp callee_facts callee in
   let caller = stamp caller_facts caller in
-  let ir = emit_ir [ caller; callee ] in
+  let ir = emit_ir_spec escape_spec [ caller; callee ] in
   let caller2, _ =
     sub_of "prom_caller2"
       [ [],
@@ -101,7 +113,7 @@ let t4_fixture () : sub term * string * string =
     mk_facts ~prom_resolved:(Tid.Map.singleton (Term.tid j2) None) ()
   in
   let caller2 = stamp caller2_facts caller2 in
-  let ir2 = emit_ir [ caller2; callee ] in
+  let ir2 = emit_ir_spec escape_spec [ caller2; callee ] in
   (callee, ir, ir2)
 in
 t4_fixture ())

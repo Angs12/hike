@@ -416,21 +416,108 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     Base.List.fold subs_list ~init:Tid.Map.empty ~f:(fun acc s ->
         Core.Map.set acc ~key:(Term.tid s) ~data:s)
   in
-  (* Every pointer call passes the caller's SP, so a promoted
-     target's thunk can unpack the caller window. *)
-  (* A sub earns a thunk twin iff its own signature carries promoted
-     slots; the twin's signature is the synthetic indirect
-     convention. *)
+  (* The sub-start map: an address naming a lifted sub's entry. *)
+  let sub_starts =
+    Base.List.fold subs_list ~init:Core.Int64.Map.empty
+      ~f:(fun m sub ->
+        if is_empty sub then m
+        else
+          match
+            Base.Option.bind
+              (Term.find blk_t sub (Bil2llvm_env.entry_blk_tid sub))
+              ~f:(fun b ->
+                Base.Option.map (Term.get_attr b address)
+                  ~f:(fun a -> (a, Term.tid sub)))
+          with
+          | Some (a, t) ->
+            Core.Map.set m ~key:(Word.to_int64_exn a) ~data:t
+          | None -> m)
+  in
+  (* Every sub whose start address escapes as a VALUE — a loader
+     relocation word, a section image word, or a BIR constant (an
+     address-taken def) — earns a public face: the machine-convention
+     wrapper a foreign caller reaches through the word.  An unescaped
+     sub needs none: every call the program itself makes is a direct
+     arm that forwards the caller's window slots. *)
+  let escaped =
+    let is_start v = Core.Map.mem sub_starts v in
+    let from_relative =
+      Base.List.fold spec.spec_relative ~init:Core.Int64.Set.empty
+        ~f:(fun acc (_, rv) ->
+          if is_start rv then Core.Set.add acc rv else acc)
+    in
+    let from_images =
+      Base.List.fold spec.spec_sections ~init:Core.Int64.Set.empty
+        ~f:(fun acc -> function
+          | Some { Hike_stack_model.sm_image = Some bytes; _ } ->
+            let n = Bytes.length bytes in
+            let wb = spec.spec_word in
+            let rec go off acc =
+              if off + wb > n then acc
+              else
+                let w =
+                  Base.List.fold (Base.List.init wb ~f:(fun i -> i)) ~init:0L
+                    ~f:(fun v i ->
+                      Stdlib.Int64.logor v
+                        (Stdlib.Int64.shift_left
+                           (Stdlib.Int64.of_int
+                              (Char.code (Bytes.get bytes (off + i))))
+                           (8 * i)))
+                in
+                go (off + wb)
+                  (if is_start w then Core.Set.add acc w else acc)
+            in
+            go 0 acc
+          | _ -> acc)
+    in
+    let from_bir =
+      Base.List.fold subs_list ~init:Core.Int64.Set.empty
+        ~f:(fun acc sub ->
+          Term.enum blk_t sub
+          |> Seq.fold ~init:acc ~f:(fun acc blk ->
+              let consts acc e =
+                (object
+                   inherit [ Core.Int64.Set.t ] Exp.visitor
+                   method! visit_int w acc =
+                     match Word.to_int64 w with
+                     | Ok x when is_start x -> Core.Set.add acc x
+                     | _ -> acc
+                 end)#visit_exp
+                  e acc
+              in
+              let acc =
+                Term.enum def_t blk
+                |> Seq.fold ~init:acc ~f:(fun acc d -> consts acc (Def.rhs d))
+              in
+              let acc =
+                Term.enum phi_t blk
+                |> Seq.fold ~init:acc ~f:(fun acc p ->
+                    Base.Sequence.fold (Phi.values p) ~init:acc
+                      ~f:(fun acc (_, e) -> consts acc e))
+              in
+              Term.enum jmp_t blk
+              |> Seq.fold ~init:acc ~f:(fun acc j -> consts acc (Jmp.cond j))))
+    in
+    Core.Set.fold
+      (Core.Set.union from_relative (Core.Set.union from_images from_bir))
+      ~init:Tid.Set.empty ~f:(fun acc v ->
+        match Core.Map.find sub_starts v with
+        | Some t -> Core.Set.add acc t
+        | None -> acc)
+  in
+  (* A sub earns a public face iff its address escapes; its signature
+     must still fit the machine convention.  The synthetic conventions:
+     the indirect call and every escaped sub.  Their signatures are
+     DERIVED from the ABI — only their names are held. *)
   let has_slot_args args = count_slot_args args > 0 in
-  (* The synthetic conventions: the indirect call and every sub that
-     earned a twin.  Their signatures are DERIVED from the ABI — only
-     their names are held. *)
   let synthetic =
     Base.List.fold subs_list
       ~init:(Core.Set.of_list (module Tid) [ indirect_call_tid ])
       ~f:(fun acc sub ->
         let args = Hike_stack_model.sig_args sub in
-        if has_slot_args args && not (Hike_stack_model.fixed_signature sub)
+        if has_slot_args args
+           && not (Hike_stack_model.fixed_signature sub)
+           && Core.Set.mem escaped (Term.tid sub)
         then Core.Set.add acc (Bil2llvm_calls.thunk_tid_of (Term.tid sub))
         else acc)
   in
@@ -465,21 +552,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                 ~f:(fun acc (_, entry, _) ->
                   Core.Set.add acc (Word.to_int64_exn (Block.addr entry)))
          | None -> Core.Int64.Set.empty);
-      sub_starts =
-        Base.List.fold subs_list ~init:Core.Int64.Map.empty
-          ~f:(fun m sub ->
-            if is_empty sub then m
-            else
-              match
-                Base.Option.bind
-                  (Term.find blk_t sub (Bil2llvm_env.entry_blk_tid sub))
-                  ~f:(fun b ->
-                    Base.Option.map (Term.get_attr b address)
-                      ~f:(fun a -> (a, Term.tid sub)))
-              with
-              | Some (a, t) ->
-                Core.Map.set m ~key:(Word.to_int64_exn a) ~data:t
-              | None -> m) }
+      sub_starts }
   in
   (* The named-component map: filled before any body emits; the
      rip-relative path renders through the same owners. *)
@@ -608,7 +681,8 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   let thunk_phase () =
     Base.List.iter subs_list ~f:(fun sub ->
-        if is_entry sub then () else create_thunk ctx (Term.tid sub))
+        if is_entry sub || not (Core.Set.mem escaped (Term.tid sub)) then ()
+        else create_thunk ctx (Term.tid sub))
   in
   let bodies_phase () =
     Base.List.iter subs_list ~f:(fun s ->

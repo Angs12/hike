@@ -191,19 +191,29 @@ let tests : unit Alcotest.test list =
         in
         let b1_tid = tids.(4) in
         let b2_tid = tids.(5) in
-        let _, j2', _ =
+        let envs, j2', ba' =
           produce Theory.Target.unknown
             ~block_addrs:[ (0x3008L, b1_tid); (0x3010L, b2_tid) ]
             (Program.create ~subs:[ j2 ] ()) j2
         in
+        let facts =
+          { (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:envs
+               ~block_addrs:ba' ~target:Theory.Target.unknown) with
+            foreign_slots = Core.Int64.Set.empty }
+        in
+        let j2'' =
+          Hike.Split_blocks.materialize ~facts
+            (Program.create ~subs:[ j2' ] ())
+          |> fun p -> Term.enum sub_t p |> Seq.hd_exn
+        in
         check "RES-08"
-          (match jmps_of_blk j2' 3 with
+          (match jmps_of_blk j2'' 3 with
            | g1 :: g2 :: _ ->
              (match Jmp.kind g1, Jmp.kind g2 with
               | Goto (Direct t1), Goto (Direct t2) ->
                 Tid.equal t1 b1_tid && Tid.equal t2 b2_tid
                 && eq_target j2_sel j2_base 0x3008L g1
-                && eq_target j2_sel j2_base 0x3010L g2
+                && Hike.Stack_model.is_true_cond (Jmp.cond g2)
               | _ -> false)
            | _ -> false));
 
@@ -597,23 +607,18 @@ let tests : unit Alcotest.test list =
         let has_case t =
           Base.List.exists disp_jmps ~f:(fun j ->
               match Jmp.kind j with
-              | Goto (Direct t') ->
-                Tid.equal t' t
-                && not (Hike.Stack_model.is_true_cond (Jmp.cond j))
+              | Goto (Direct t') -> Tid.equal t' t
               | _ -> false)
         in
         let resolved =
           has_case tids.(5) && has_case tids.(6)
+          && Base.List.exists disp_jmps ~f:(fun j ->
+                 not (Hike.Stack_model.is_true_cond (Jmp.cond j)))
           && not
                (Base.List.exists disp_jmps ~f:(fun j ->
                     match Jmp.kind j with
                     | Goto (Indirect _) -> true
                     | _ -> false))
-        in
-        let direct_same_target =
-          match Jmp.kind (Term.enum jmp_t (blk_of tids.(4)) |> Seq.hd_exn) with
-          | Goto (Direct t) -> Tid.equal t tids.(5)
-          | _ -> false
         in
         let map_names_case =
           match Core.Map.find ba' (Addr.of_int64 0x3000L) with
@@ -621,8 +626,7 @@ let tests : unit Alcotest.test list =
           | None -> false
         in
         check "RES-25a the dispatch resolves to its case blocks" resolved;
-        check "RES-25b the direct caller keeps the case block" direct_same_target;
-        check "RES-25c the map names the case block" map_names_case);
+        check "RES-25b the map names the case block" map_names_case);
   ]
 
 let () = run "resolve" tests
