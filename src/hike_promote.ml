@@ -181,33 +181,52 @@ type leaf = [ `Static of int64 | `Addr | `Int ]
 
 let address_leaves ~(denote : blk:blk term -> ?def:def term -> exp ->
                      (Vsa.WordSet.t, Type.error) Result.t)
+    ~(storages : Hike_synth.storage_span list)
     ~(blk : blk term) ~(def : def term) (e : exp) : leaf Var.Map.t =
   (object
      inherit [ leaf Var.Map.t ] Exp.visitor
      method! visit_var v acc =
-       match denote ~blk ~def (Bil.Var v) with
-       | Ok ws
-         when (not (Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws))
-              && Vsa.WordSet.in_stack_segment ws ->
-             (* A Vla-origin value's offsets are frame-relative —
-                read them off the value, never the entry-line hull. *)
-             let off =
-               match Vsa.WordSet.origin ws with
-               | Some (Vsa.WordSet.Origin.Vla _) -> (
-                   match Vsa.WordSet.vla_offsets ws with
-                   | Some offs -> Model.singleton_offset offs
-                   | None -> None)
-               | _ -> (
-                   match Vsa.WordSet.stack_offsets ws with
-                   | Some offs -> Model.singleton_offset offs
-                   | None -> None)
-             in
-             Core.Map.set acc ~key:v
-               ~data:(match off with Some k -> `Static k | None -> `Addr)
-       | Ok ws
-         when not (Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws) ->
+       (* A synthetic leaf's class is its kind's, not a denotation: a
+          module address is an integer value, a stack storage's base is
+          its allocated offset.  A var with no synthetic identity still
+          needs the denotation. *)
+       let by_denotation () =
+         match denote ~blk ~def (Bil.Var v) with
+         | Ok ws
+           when (not (Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws))
+                && Vsa.WordSet.in_stack_segment ws ->
+           (* A Vla-origin value's offsets are frame-relative —
+              read them off the value, never the entry-line hull. *)
+           let off =
+             match Vsa.WordSet.origin ws with
+             | Some (Vsa.WordSet.Origin.Vla _) -> (
+                 match Vsa.WordSet.vla_offsets ws with
+                 | Some offs -> Model.singleton_offset offs
+                 | None -> None)
+             | _ -> (
+                 match Vsa.WordSet.stack_offsets ws with
+                 | Some offs -> Model.singleton_offset offs
+                 | None -> None)
+           in
+           Core.Map.set acc ~key:v
+             ~data:(match off with Some k -> `Static k | None -> `Addr)
+         | Ok ws
+           when not (Vsa.WordSet.is_top ws || Vsa.WordSet.is_bottom ws) ->
            Core.Map.set acc ~key:v ~data:`Int
-       | Ok _ | Error _ -> acc
+         | Ok _ | Error _ -> acc
+       in
+       match Hike_synth.classify Hike_synth.empty v with
+       | Some (Hike_synth.Module_addr _) ->
+         Core.Map.set acc ~key:v ~data:`Int
+       | Some (Hike_synth.Storage (Hike_synth.Stack id)) -> (
+         match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
+         | Some s ->
+           Core.Map.set acc ~key:v
+             ~data:
+               (`Static
+                  (Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base))
+         | None -> by_denotation ())
+       | _ -> by_denotation ()
    end)#visit_exp e Var.Map.empty
 
 (* The entry-line arithmetic of an address exp: each [ `Static ] leaf
@@ -372,7 +391,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                   Hike_def_slots.def_is_dyn_alloc d
                 then acc
                 else
-                  let leaves = address_leaves ~denote ~blk ~def:d (Def.rhs d) in
+                  let leaves = address_leaves ~denote ~storages ~blk ~def:d (Def.rhs d) in
                   let fact = no_fact in
                   match Sections.access_of d with
                   | Some (addr, w, _) -> (
