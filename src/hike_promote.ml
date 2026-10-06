@@ -319,19 +319,14 @@ type def_fact = {
 
 let no_fact = { fr_conv = Keep; fr_bits = 0; fr_addr = None; fr_rhs = None }
 
-(* Each storage's geometry: its entry-line offset [rel] and its
-   allocated extent (the alloca's own byte range, in positions). *)
-type storage_geom = { sg_rel : int64; sg_lo : int64; sg_hi : int64 }
-
-let geoms_of_layout (layout : Hike_stack_model.sub_layout) :
-    storage_geom Core.Int.Map.t =
-  Base.List.fold layout.Hike_stack_model.regions ~init:Core.Int.Map.empty
-    ~f:(fun m { Model.Sub_layout.r_id = id; r_lo = lo; r_hi = hi; _ } ->
-        Core.Map.set m ~key:id
-          ~data:
-            { sg_rel = Stdlib.Int64.sub lo Model.segment_base;
-              sg_lo = lo;
-              sg_hi = hi })
+(* The sub's storage spans: the layout's regions in the synth fact
+   shape, built once and read by every consumer. *)
+let spans_of_layout ~(word : int) (layout : Hike_stack_model.sub_layout) :
+    Hike_synth.storage_span list =
+  Base.List.map layout.Hike_stack_model.regions
+    ~f:(fun { Model.Sub_layout.r_id = id; r_lo = lo; r_hi = hi; _ } ->
+        Hike_synth.storage_span ~addr_bits:(Model.word_bits word)
+          (Hike_synth.Stack id) ~lo ~hi)
 
 (* The per-def rewrite facts of one sub: every access keeps its
    conversion; every address def whose value routes to a storage takes
@@ -339,7 +334,7 @@ let geoms_of_layout (layout : Hike_stack_model.sub_layout) :
 let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
     ~(tree : Sections.sub_tree) ~(data : Sections.data_tree)
     ~(projections : Sections.projection option Tid.Map.t)
-    ~(geoms : storage_geom Core.Int.Map.t)
+    ~(storages : Hike_synth.storage_span list)
     ~(window_param : bool) ~(vla_tids : Tid.Set.t)
     ~(spans : Sections.data_span list)
     ~(denote : blk:blk term -> ?def:def term -> exp ->
@@ -355,17 +350,18 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
      the storage's allocated extent — a value or access outside it names
      no storage, and the model arithmetic keeps it. *)
   let in_extent id (lo : int64) (hi : int64) =
-    match Core.Map.find geoms id with
-    | Some g ->
-        Stdlib.Int64.compare lo g.sg_lo >= 0
-        && Stdlib.Int64.compare hi g.sg_hi <= 0
+    match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
+    | Some s ->
+        Stdlib.Int64.compare lo s.Hike_synth.ss_lo >= 0
+        && Stdlib.Int64.compare hi s.Hike_synth.ss_hi <= 0
     | None -> false
   in
   let region_base id disp =
-    match Core.Map.find geoms id with
-    | Some g ->
+    match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
+    | Some s ->
         Base.Option.map disp
-          ~f:(base_plus (Model.region_ptr ~addr_bits id) ~rel:g.sg_rel)
+          ~f:(base_plus s.Hike_synth.ss_base
+                ~rel:(Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base))
     | None -> None
   in
   Term.enum blk_t sub
@@ -867,7 +863,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
      reads off it, and the rewrite's value forms must not perturb the
      region geometry the layout measures. *)
   let layout = Sections.layout_of_tree ~word ~entry ~abi ~sub tree in
-  let geoms = geoms_of_layout layout in
+  let storages = spans_of_layout ~word layout in
   (* The window forms need the signature's window parameter: a
      fixed-signature sub (@main, the intrinsics) never carries it.  A
      window-VALUE def forces the parameter (the layout is stamped with it
@@ -879,7 +875,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
   in
   let facts =
     def_facts ~word ~entry ~abi ~tree ~data:ctx.data_tree
-      ~projections:ctx.projections ~geoms ~window_param:window_ok
+      ~projections:ctx.projections ~storages ~window_param:window_ok
       ~vla_tids ~spans ~denote sub
   in
   (* The second pass: one general [Term.mapper] over the sub.  Every def

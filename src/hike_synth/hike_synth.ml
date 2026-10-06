@@ -269,6 +269,30 @@ let index_of tbl v =
   | Some (Fp_lane (_, i)) -> Some i
   | _ -> None
 
+(* A storage's allocated span and canonical base var: the one layout
+   fact every consumer reads.  [ss_lo]/[ss_hi] are model addresses;
+   [ss_base] is the canonical base var at the run's address width. *)
+type storage_span = {
+  ss_storage : storage;
+  ss_base : var;
+  ss_lo : int64;
+  ss_hi : int64;
+}
+
+let equal_storage (a : storage) (b : storage) : bool =
+  match (a, b) with
+  | Stack i, Stack j | Global i, Global j | Slot i, Slot j
+  | Argument i, Argument j | Allocation i, Allocation j -> Int.equal i j
+  | Window, Window -> true
+  | _ -> false
+
+let storage_span ~addr_bits storage ~lo ~hi =
+  { ss_storage = storage; ss_base = base ~addr_bits storage; ss_lo = lo;
+    ss_hi = hi }
+
+let span_of_storage (spans : storage_span list) storage =
+  Base.List.find spans ~f:(fun s -> equal_storage s.ss_storage storage)
+
 let base_var ~addr_bits v =
   Base.Option.map ~f:(var ~addr_bits)
     (Base.Option.bind (resolve empty v) ~f:base_kind)

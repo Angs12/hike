@@ -65,6 +65,19 @@ val module_addr_of : table -> var -> int64 option
 val env_of : table -> var -> var option
 val storage_of : table -> var -> storage option
 val index_of : table -> var -> int option
+
+(** A storage's allocated span and canonical base var: the one layout
+    fact every consumer reads.  Endpoints are model addresses. *)
+type storage_span = {
+  ss_storage : storage;
+  ss_base : var;
+  ss_lo : int64;
+  ss_hi : int64;
+}
+
+val equal_storage : storage -> storage -> bool
+val storage_span : addr_bits:int -> storage -> lo:int64 -> hi:int64 -> storage_span
+val span_of_storage : storage_span list -> storage -> storage_span option
 (* The canonical base and memory vars of a synthetic storage var. *)
 val base_var : addr_bits:int -> var -> var option
 val memory_var : addr_bits:int -> var -> var option
