@@ -5,7 +5,6 @@ open Bap.Std.Bil.Types
 module Abi = Hike_abi
 open Bil2llvm_env
 open Bil2llvm_ptr
-open Bil2llvm_section
 
 let create_concat ctx llvm_builder (llvm_var1, llvm_var2) =
   let llvm_var1_size = Llvm.type_of llvm_var1 |> Llvm.integer_bitwidth in
@@ -179,39 +178,14 @@ let static_offset scope (exp : exp) : int64 option =
       | _ -> None)
     exp
 
-(* The one renderer for the synthetic vocabulary: the KB table names
-   the kind, this maps it to the LLVM value. *)
-let variable_value ctx scope llvm_builder blk_tid v =
-  let missing () =
+(* The undef arm of the synth-value lane: a var the lane cannot bind
+   warns once per (block, var) and reads frozen bits. *)
+let synth_value ctx scope llvm_builder blk_tid v =
+  match Bil2llvm_synth.value ctx scope llvm_builder blk_tid v with
+  | Some value -> value
+  | None ->
     warn_undef_read ctx scope v blk_tid;
     frozen_undef ctx scope v
-  in
-  match Hike_synth.module_addr_of ctx.synth v with
-  | Some a -> (
-    let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
-    match Core.Map.find !(ctx.synth_vals) v with
-    | Some value -> value
-    | None ->
-      Base.Option.value
-        (remap_native ctx ctx.llvm_ctx ctx.llvm_module a
-           ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
-        ~default:(Llvm.const_of_int64 ty a false))
-  | None -> (
-    match Base.Option.first_some (get_ssaval scope v) (get_local scope blk_tid v) with
-    | Some value -> value
-    | None ->
-      if Option.is_some (Hike_synth.env_of ctx.synth v) then
-        load_env_reg ctx llvm_builder v
-      else
-        match Hike_synth.memory_var ~addr_bits:ctx.addr_bits v with
-        | Some mv -> (
-          match Core.Map.find !(ctx.synth_vals) mv with
-          | Some base -> base
-          | None -> (
-            match Core.Map.find !(ctx.sec_comps) mv with
-            | Some (base, _) -> base
-            | None -> missing ()))
-        | None -> missing ())
 
 let rec create_offset ctx scope llvm_builder blk_tid exp :
     Llvm.llvalue option =
@@ -269,7 +243,7 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
           (create_exp ctx scope llvm_builder blk_tid e)
       in
       create_unop llvm_builder (op, v)
-  | Var v -> variable_value ctx scope llvm_builder blk_tid v
+  | Var v -> synth_value ctx scope llvm_builder blk_tid v
   | Int i -> create_immediate ctx i
   | Cast (cast, i, e) ->
       let v = create_exp ctx scope llvm_builder blk_tid e in

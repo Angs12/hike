@@ -680,38 +680,10 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
         if is_entry sub || not (Core.Set.mem escaped (Term.tid sub)) then ()
         else create_thunk ctx (Term.tid sub))
   in
-  (* The per-run synth-var bindings: a module-address var resolves once
-     through the one address map (a function or its owning section
-     byte), and a component var binds its global — every later read is
-     one lookup, never a fresh address scan. *)
-  let synth_phase () =
-    let vals =
-      Base.List.fold (Hike_synth.bindings ctx.synth) ~init:Var.Map.empty
-        ~f:(fun acc (v, c) ->
-          match c with
-          | Hike_synth.Module_addr a ->
-            let ty = Llvm.integer_type llvm_ctx ctx.addr_bits in
-            let value =
-              match
-                Bil2llvm_section.remap_native ctx llvm_ctx llvm_module a
-                  ~finish:Fun.id
-              with
-              | Some ptr -> Llvm.const_ptrtoint ptr ty
-              | None -> Llvm.const_of_int64 ty a false
-            in
-            Core.Map.set acc ~key:v ~data:value
-          | Hike_synth.Storage (Hike_synth.Global i)
-          | Hike_synth.Bytes (Hike_synth.Global i) -> (
-            let mv =
-              Hike_stack_model.sec_comp_mem ~addr_bits:ctx.addr_bits i
-            in
-            match Core.Map.find !(ctx.sec_comps) mv with
-            | Some (base, _) -> Core.Map.set acc ~key:v ~data:base
-            | None -> acc)
-          | _ -> acc)
-    in
-    ctx.synth_vals := vals
-  in
+  (* The per-run synth-var bindings: the synth-value lane enumerates the
+     vocabulary once and binds each module-lifetime var before any body
+     emits. *)
+  let synth_phase () = ctx.synth_vals := Bil2llvm_synth.build ctx in
   let bodies_phase () =
     Base.List.iter subs_list ~f:(fun s ->
         if is_entry s then ()
