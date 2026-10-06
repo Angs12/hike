@@ -51,7 +51,7 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
     else
       match Hike_cfg_complete.dispatch_words ~denote:facts.denote
               ~block_addrs:facts.block_addrs ~last_defs:(Cbat_vsa.last_defs blk)
-              ~sub ~blk ~images:facts.images e with
+              ~sub ~blk e with
       | None -> [ j ]
       | Some (base, bases, words) ->
         let base = Option.value base ~default:0L in

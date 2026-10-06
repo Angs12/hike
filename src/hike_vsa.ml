@@ -159,20 +159,6 @@ let fixpoint (target : Theory.Target.t)
   self_arm target;
   let sub = Hike_cfg_complete.clear_noreturn_returns ~noreturn sub in
   let abi = Hike_abi.of_target target in
-#ifdef VSA_DEBUG
-  let dump_r8 (sol : Vsa.vsa_sol) (sub : sub term) =
-    let rep = Base.List.nth_exn abi.Hike_abi.int_param_regs 4 in
-    Term.enum blk_t sub
-    |> Seq.iter ~f:(fun b ->
-        if Sub.name sub = "main" then
-          let st = Graphlib.Std.Solution.get sol (Term.tid b) in
-          let w = Vsa.AI.find_word 64 st rep in
-          Printf.eprintf "hike-r8: blk %s R8 top=%b lo=%s\n%!"
-            (Tid.name (Term.tid b))
-            (Vsa.WordSet.is_top w)
-            (match Base.Option.map (Vsa.WordSet.min_elem w) ~f:(fun x -> match Cbat_word.to_int64 x with Ok v -> Printf.sprintf "%Lx" v | Error _ -> "err") with Some v -> v | None -> "none"))
-  in
-#endif
   (* The images arm the whole fused solve: every denotation the
      phases, the completion's rewrites, and the replay compute reads
      them through one bracket. *)
@@ -190,13 +176,10 @@ let fixpoint (target : Theory.Target.t)
             ~written ~resolved ~sub_lookup:lookup
             sub seed
         in
-#ifdef VSA_DEBUG
-        dump_r8 sol sub;
-#endif
         let sub', resolved', block_addrs', facts, events =
-          Hike_cfg_complete.resolve_phase ~abi ~sol ~images
+          Hike_cfg_complete.resolve_phase ~abi ~sol
             ~block_addrs
-            ~sub_addrs ~foreign_slots ~code_range:code_range
+            ~sub_addrs ~foreign_slots
             sub resolved
         in
         let dfacts = Base.List.append dfacts facts in
@@ -217,8 +200,8 @@ let fixpoint (target : Theory.Target.t)
       match converged with
       | Some (sol, sub', block_addrs', dfacts) ->
         let sub'' =
-          Hike_cfg_complete.materialize ~abi ~sol ~images ~block_addrs:block_addrs'
-            ~foreign_slots ~code_range:code_range sub'
+          Hike_cfg_complete.materialize ~abi ~sol ~block_addrs:block_addrs'
+            ~foreign_slots sub'
         in
         (* The round-down normalization rides the returned sub: the
            attribution re-denotes from these rhs's, and the solve's

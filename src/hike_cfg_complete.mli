@@ -8,19 +8,17 @@ open Bap.Std
     (Cbat_vsa.WordSet.t, Type.error) Result.t
 
   (** A dispatch site's case words with their guard subject: the
-      target's own bounded denotation (no base, the target compared
-      against each word), else the relative-offset table composed from
-      the images (its base, and the base operands whose subtraction
-      leaves the signed deltas the guards compare — the base
-      materializes only to cancel against itself). *)
+      denotation's bounded destination set, with the composed base
+      operands whose subtraction leaves the signed deltas the guards
+      compare (the base materializes only to cancel against itself, so
+      the guards are PIE-safe).  A shape with no composed base compares
+      the target against each word. *)
   val dispatch_words :
     denote:denote ->
     block_addrs:Tid.t Addr.Map.t ->
     last_defs:def term Var.Map.t ->
     sub:sub term ->
     blk:blk term ->
-    ?images:Cbat_vsa.section_image list ->
-    ?code_range:(int64 * int64) option ->
     exp -> (int64 option * exp list option * Cbat_word.t list) option
 
   (** The defs whose load address denotates, in the def's own
@@ -37,11 +35,9 @@ open Bap.Std
   val resolve_phase :
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
-    images:Cbat_vsa.section_image list ->
     block_addrs:Tid.t Addr.Map.t ->
     sub_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
-    ?code_range:(int64 * int64) option ->
     sub term ->
     Tid.Set.t Tid.Map.t ->
     sub term * Tid.Set.t Tid.Map.t * Tid.t Addr.Map.t
@@ -51,15 +47,12 @@ open Bap.Std
       every block neither reachable from the sub's entry nor live
       behind a surviving indirect transfer drops ([foreign_slots] are
       the linker-owned slot addresses a transfer may read its target
-      through — such a transfer leaves the program).  [images] is the
-      table-coverage data. *)
+      through — such a transfer leaves the program). *)
   val materialize :
     abi:Hike_abi.t ->
     sol:Cbat_vsa.vsa_sol ->
-    images:Cbat_vsa.section_image list ->
     block_addrs:Tid.t Addr.Map.t ->
     foreign_slots:Core.Int64.Set.t ->
-    ?code_range:(int64 * int64) option ->
     sub term -> sub term
 
   (** The shape-only return canonicalization for a sub whose fixpoint

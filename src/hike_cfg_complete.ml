@@ -160,61 +160,17 @@ let remap_jmp ~(call : Tid.t -> Tid.t) ~(blk : Tid.t -> Tid.t) (j : jmp term) :
 (* The dispatch's case words, denotated at the state the jump reads;
    a bare-variable target's words come from its reaching definition's
    before-env, never the noreturn-poisoned post-transfer state. *)
-(* The [bits]-bit word of an image's byte array at [off], in [endian]. *)
-let image_word_at (bytes : Bytes.t) (off : int) ~(endian : endian)
-    ~(bits : int) : int64 option =
-  let byte_width = bits / 8 in
-  if off < 0 || off + byte_width > Bytes.length bytes then None
-  else
-    let byte i = Int64.of_int (Char.code (Bytes.get bytes (off + i))) in
-    let word = ref 0L in
-    (match endian with
-     | LittleEndian ->
-       for i = 0 to byte_width - 1 do
-         word := Int64.logor !word (Int64.shift_left (byte i) (8 * i))
-       done
-     | BigEndian ->
-       for i = 0 to byte_width - 1 do
-         word := Int64.logor (Int64.shift_left !word 8) (byte i)
-       done);
-    Some !word
 
-(* The image's word at [a]: [bits]-bit, in [endian], when [a]'s bytes
-   lie in one section image. *)
-let image_word ~(images : Vsa.section_image list) ~(a : Int64.t)
-    ~(bits : int) ~(endian : endian) : Int64.t option =
-  Base.List.find_map images ~f:(fun img ->
-      if
-        Stdlib.Int64.unsigned_compare a img.img_lo >= 0
-        && Stdlib.Int64.unsigned_compare
-             (Int64.add a (Int64.of_int (bits / 8 - 1)))
-             img.img_hi <= 0
-      then
-        image_word_at img.img_bytes
-          (Int64.to_int (Int64.sub a img.img_lo))
-          ~endian ~bits
-      else None)
-
-(* The relative-offset jump table, symbolically: the target exp
-   composes to ONE constant base plus ONE [bits]-wide cell load (behind
-   a sign/zero cast, through the def chain) —
-   [base + cast(table[addr])] in any association, including chained
-   tables.  A var read inside a def's rhs resolves to the def of that
-   var strictly before the reading def, in the sub's term order — the
-   read's before-state — so a [v := v + e] def composes over the def it
-   extends.  Two cell sets or a missing side refuse the composition. *)
-type table_cells =
-  { base : Int64.t;
-    addr_exp : exp;
-    load : def term option;
-    signed : bool;
-    endian : endian;
-    bases : exp list }
-
-let compose_table_cells ~(last_defs : def term Var.Map.t)
-    ~(blk : blk term) ~(sub : sub term) ~(at : def term option)
-    (texp : exp) : table_cells option =
-  let bits = 32 in
+(* The composed address's base operands: the very operand subtrees that
+   contributed the table's start address.  The guard subtracts them from
+   the target so the subject is the loaded cell value — the table's own
+   data coordinate, which cancels any runtime base (PIE).  A var read
+   inside a def's rhs resolves to the def of that var strictly before
+   the reading def, in the sub's term order; a [v := v + e] def composes
+   over the def it extends.  Two cell sets or a missing side refuse the
+   composition. *)
+let base_operands ~(last_defs : def term Var.Map.t) ~(sub : sub term)
+    ~(at : def term option) (texp : exp) : exp list option =
   (* A var read inside a def's rhs resolves to the def of that var
      strictly before the reading def, in the SUB's term order: the
      table's base register is commonly defined blocks away from the
@@ -243,12 +199,6 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
       | None ->
         let _, first, _ = Lazy.force definitions in
         Core.Map.find first v)
-  in
-  let cast_signed kind =
-    match kind with
-    | Bil.SIGNED -> Some true
-    | Bil.UNSIGNED -> Some false
-    | _ -> None
   in
   (* The guard subtracts the composed BASE from the target as the very
      operand subtrees that contributed it, so the two renderings cancel
@@ -311,115 +261,35 @@ let compose_table_cells ~(last_defs : def term Var.Map.t)
         | None -> None)
       | _ -> None
   in
-  let rec sym ~at ~depth (e : exp) :
-      (Int64.t option
-       * (exp * bool * endian * def term option) option)
-      option =
-    if depth > 16 then None
-    else
-      let child = sym ~at ~depth in
-      match e with
-      | Bil.Int w -> (
-          match Cbat_word.to_int64 (Cbat_word.of_word w) with
-          | Ok v -> Some (Some v, None)
-          | Error _ -> None)
-      | Bil.Load (_, addr, endi, size) when Size.in_bits size = bits ->
-          Some (None, Some (addr, false, endi, at))
-      | Bil.Cast (kind, _, e2) -> (
-          match child e2 with
-          | Some (base, Some (addr, _, endi, load)) -> (
-              match cast_signed kind with
-              | Some sgn -> Some (base, Some (addr, sgn, endi, load))
-              | None -> None)
-          | other -> other)
-      | Bil.Var v -> (
-          match find_def at v with
-          | Some d -> sym ~at:(Some d) ~depth:(depth + 1) (Def.rhs d)
-          | None -> None)
-      | Bil.BinOp (Bil.PLUS, a, b) -> (
-          match (child a, child b) with
-          | Some (ba, ca), Some (bb, cb) ->
-              if Option.is_some ca && Option.is_some cb then None
-              else
-                Some
-                  ((match ba, bb with
-                    | Some x, Some y -> Some (Int64.add x y)
-                    | Some _, None -> ba
-                    | None, Some _ -> bb
-                    | None, None -> None),
-                   match ca, cb with Some _, _ -> ca | None, _ -> cb)
-          | _ -> None)
-      | _ -> None
-  in
-  match sym ~at ~depth:0 texp with
-  | Some (Some base, Some (addr_exp, sgn, endi, load)) ->
-    Base.Option.map (bases_of ~at ~depth:0 texp) ~f:(fun bases ->
-        { base; addr_exp; load; signed = sgn; endian = endi; bases })
-  | _ -> None
+  bases_of ~at ~depth:0 texp
 
-let image_table_pairs
-    ~(images : Vsa.section_image list)
-    ~(block_addrs : Tid.t Addr.Map.t)
-    ~(last_defs : def term Var.Map.t)
-    ~(sub : sub term)
-    ~(blk : blk term) ~(at : def term option)
-    ?(code_range : (int64 * int64) option = None) (texp : exp) :
+(* The dispatch's table words: the composed base operands give the
+   guard's delta coordinate; the denotation is the one destination-set
+   fact and enumerates the cells — the phase loop widens the index
+   across the resolved edges, so no image walk is needed. *)
+let table_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(last_defs : def term Var.Map.t) ~(sub : sub term) ~(blk : blk term)
+    ~(at : def term option) (texp : exp) :
     (Int64.t * exp list * Cbat_word.t list) option =
-  let bits = 32 in
-  let stride = bits / 8 in
-  match compose_table_cells ~last_defs ~blk ~sub ~at texp with
-  | Some { base; bases; signed; endian; _ } -> (
-    (* The composed base names the table's first cell; the walk reads its
-       consecutive cells while their image value is a code entry.  The
-       table's own entries are the value-true destination set — complete
-       regardless of how far a counter the solve has not yet widened
-       reaches — and the walk stops at the first cell that is not code,
-       so adjacent data never names a destination.  The returned base is
-       the guard's subject base: [target - base] is the table's signed
-       delta.  Without the executable span the already-decoded blocks
-       are the entry test. *)
-    let ext w =
-      if signed && not (Stdlib.Int64.equal (Int64.logand w 0x80000000L) 0L)
-      then Int64.logor w 0xFFFFFFFF00000000L
-      else w
+  match base_operands ~last_defs ~sub ~at texp with
+  | Some bases when not (Base.List.is_empty bases) -> (
+    let base_exp =
+      Base.List.reduce_exn bases ~f:(fun a b -> Bil.BinOp (Bil.PLUS, a, b))
     in
-    let target_of cell =
-      image_word ~images ~a:cell ~bits ~endian
-      |> Base.Option.map ~f:(fun w -> Int64.add base (ext w))
-    in
-    let is_code a =
-      match code_range with
-      | Some (lo, hi) ->
-        Int64.compare a lo >= 0 && Int64.compare a hi <= 0
-      | None ->
-        Core.Map.mem block_addrs
-          (Cbat_word.to_word (Cbat_word.of_int64 ~width:64 a))
-    in
-    let cap =
-      match code_range with
-      | Some (lo, hi) ->
-        if Int64.compare hi lo <= 0 then 0
-        else Int64.to_int (Int64.div (Int64.sub hi lo) (Int64.of_int stride)) + 1
-      | None -> Core.Map.length block_addrs
-    in
-    let rec walk k acc =
-      if k > cap then List.rev acc
-      else
-        match target_of (Int64.add base (Int64.of_int (k * stride))) with
-        | Some t when is_code t ->
-          walk (k + 1) (Cbat_word.of_int64 ~width:64 t :: acc)
-        | _ -> List.rev acc
-    in
-    let walked = walk 0 [] in
-    if Base.List.is_empty walked then None
-    else Some (base, bases, walked))
-  | None -> None
+    match
+      ( bounded_words ~denote ~block_addrs ~blk ?def:at texp,
+        bounded_words ~denote ~block_addrs ~blk base_exp )
+    with
+    | Some ws, Some [ b ] ->
+      Base.Option.map (Base.Result.ok (Cbat_word.to_int64 b))
+        ~f:(fun base -> (base, bases, ws))
+    | _ -> None)
+  | _ -> None
 
 let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
     ~(last_defs : def term Var.Map.t)
     ~(sub : sub term)
-    ~(blk : blk term) ?(images : Vsa.section_image list = [])
-    ?(code_range : (int64 * int64) option = None) (texp : exp) :
+    ~(blk : blk term) (texp : exp) :
     (Int64.t option * exp list option * Cbat_word.t list) option =
   debug_trace (fun () ->
       Printf.sprintf "dw: blk %s texp=%s last=%b"
@@ -433,8 +303,7 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
          | _ -> true));
   let table e at =
     Base.Option.map
-      (image_table_pairs ~images ~block_addrs ~last_defs ~sub ~blk ~at
-         ~code_range:code_range e)
+      (table_words ~denote ~block_addrs ~last_defs ~sub ~blk ~at e)
       ~f:(fun (base, bases, ws) -> (Some base, Some bases, ws))
   in
   let plain e ?def () =
@@ -443,10 +312,9 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
   in
   match texp with
   | Bil.BinOp (Bil.PLUS, _, _) -> (
-    (* The composed table's own entries come first: they are the
-       value-true destination set, complete regardless of how far a
-       counter the solve has not yet widened reaches.  The denotation's
-       bounded set serves the shapes no table composes. *)
+    (* The composed table's guard coordinate (the base subtraction) with
+       the denotation's bounded set as the destination words; the plain
+       arm serves the shapes no base composes. *)
     match table texp None with
     | Some _ as r -> r
     | None -> plain texp ())
@@ -465,11 +333,9 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
    split).  A cross-sub word stays foreign; a word in no block is a
    loud analysis loss.  One split per walk, so the walks terminate. *)
 let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(images : Vsa.section_image list)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(sub_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
-    ?(code_range : (int64 * int64) option = None)
     (sub : sub term) :
     sub term * Tid.t Addr.Map.t * (Addr.t * bool * Cbat_word.t list) list =
   (* The dispatches' resolved word sets are the facts; a word the decode
@@ -493,8 +359,7 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
                 | _ -> false
               in
               match
-                dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk
-                  ~images ~code_range:code_range texp
+                dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp
               with
               | None -> None
               | Some (_, _, ws) ->
@@ -508,13 +373,11 @@ let prepare_dispatches ~(denote : denote) ~(retaddr : Tid.Set.t)
 
 let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(images : Vsa.section_image list)
     ~(sub : sub term)
-    ~(blk : blk term) ?(code_range : (int64 * int64) option = None) (texp : exp) :
+    ~(blk : blk term) (texp : exp) :
     (exp * (word * tid) list * Int64.t) option =
   match
-    dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk ~images
-      ~code_range:code_range texp
+    dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp
   with
   | None -> None
   | Some (base, bases, ws) ->
@@ -633,8 +496,7 @@ let ret_rewrite ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
 let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
     ~(sub : sub term) ~(foreign_slots : Core.Int64.Set.t)
-    ~(last_defs : def term Var.Map.t) ~(images : Vsa.section_image list)
-    ?(code_range : (int64 * int64) option = None) ~(blk : blk term)
+    ~(last_defs : def term Var.Map.t) ~(blk : blk term)
     (j : jmp term) : jmp term list option =
   let series texp =
     if
@@ -643,8 +505,8 @@ let rewritten_jmps ~(denote : denote) ~(retaddr : Tid.Set.t)
     then None
     else
       Base.Option.bind
-        (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs ~images
-           ~sub ~blk ~code_range:code_range texp)
+        (resolved_pairs_of ~denote ~last_defs ~sub_tids ~block_addrs
+           ~sub ~blk texp)
         ~f:(fun (subject, pairs, _base) -> dispatch_jmps j subject pairs None)
   in
   match ret_rewrite ~last_defs ~retaddr j with
@@ -673,17 +535,14 @@ let splice_jmps (blk : blk term)
           | None -> [ j ])
 
 let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t) ~(images : Vsa.section_image list)
-    ~(foreign_slots : Core.Int64.Set.t)
-    ?(code_range : (int64 * int64) option = None) (sub : sub term) :
-    sub term =
+    ~(block_addrs : Tid.t Addr.Map.t)
+    ~(foreign_slots : Core.Int64.Set.t) (sub : sub term) : sub term =
   let sub_tids = sub_tids sub in
   Term.map blk_t sub ~f:(fun blk ->
       let last_defs = Vsa.last_defs blk in
       splice_jmps blk
         ~classify:(rewritten_jmps ~denote ~retaddr ~sub_tids ~block_addrs
-                     ~sub ~foreign_slots ~last_defs ~images
-                     ~code_range:code_range ~blk))
+                     ~sub ~foreign_slots ~last_defs ~blk))
 
 (* The unreachable-block rule, one walk over the rewritten edge set: a
    block is kept iff the walk reaches it — from the sub's entry over the
@@ -697,7 +556,7 @@ let rewrite_jmps_once ~(denote : denote) ~(retaddr : Tid.Set.t)
    another sub's interior is the tail-call rule, its entry only) — so
    dropping it is dead-code removal, never a missing definition. *)
 let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
-    ~(block_addrs : Tid.t Addr.Map.t) ~(images : Vsa.section_image list)
+    ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t) (sub : sub term) : sub term =
   (* The walk starts at the sub's own entry — the block at the address
      the partition named — falling back to the graph's in-degree-0 root
@@ -745,8 +604,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
         with
         | Some _ -> Some Tid.Set.empty
         | None ->
-          match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk
-                  ~images texp with
+          match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp with
           | None -> Some all
           | Some (_, _, ws) ->
             Some
@@ -913,11 +771,9 @@ let canonicalize_shape_returns ~(abi : Hike_abi.t) (sub : sub term) : sub term =
    their target sets to the extra edges.  The split is the only BIR
    change and it is additive.  Runs under the caller's image bracket. *)
 let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
-    ~(images : Vsa.section_image list)
     ~(block_addrs : Tid.t Addr.Map.t)
     ~(sub_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
-    ?(code_range : (int64 * int64) option = None)
     (sub : sub term) (resolved : Tid.Set.t Tid.Map.t) :
     sub term * Tid.Set.t Tid.Map.t * Tid.t Addr.Map.t
     * (Addr.t * bool * Cbat_word.t list) list * bool =
@@ -925,8 +781,8 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub_tids = sub_tids sub in
   let sub, block_addrs', facts =
-    prepare_dispatches ~denote ~retaddr ~images ~block_addrs
-      ~sub_addrs ~foreign_slots ~code_range:code_range sub
+    prepare_dispatches ~denote ~retaddr ~block_addrs
+      ~sub_addrs ~foreign_slots sub
   in
 
   let grew = ref false in
@@ -941,7 +797,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
             | Some texp -> (
                 match
                   resolved_pairs_of ~denote ~last_defs ~sub_tids
-                    ~block_addrs:block_addrs' ~images ~sub ~blk ~code_range:code_range texp
+                    ~block_addrs:block_addrs' ~sub ~blk texp
                 with
                 | None -> acc
                 | Some (_, pairs, _) ->
@@ -961,19 +817,17 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   (sub, resolved', block_addrs', facts, !grew)
 
 (* The exit materialization at drain: the rewrites land once, then the
-   unreachable-block rule runs on the rewritten edge set.  [~images] is
-   the table-coverage data; the denotations read them through the
-   caller's bracket. *)
+   unreachable-block rule runs on the rewritten edge set.  The
+   denotations read the images through the caller's bracket. *)
 let materialize ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
-    ~(images : Vsa.section_image list) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(block_addrs : Tid.t Addr.Map.t)
     ~(foreign_slots : Core.Int64.Set.t)
-    ?(code_range : (int64 * int64) option = None)
     (sub : sub term) : sub term =
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub =
     rewrite_jmps_once ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
-      ~images ~foreign_slots ~code_range:code_range sub
+      ~foreign_slots sub
   in
   prune_unreachable ~denote:(denote_of_sol sol) ~retaddr ~block_addrs
-    ~images ~foreign_slots sub
+    ~foreign_slots sub
   |> materialize_fallthroughs

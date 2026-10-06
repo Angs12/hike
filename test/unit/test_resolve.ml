@@ -428,7 +428,7 @@ let tests : unit Alcotest.test list =
                 (Cbat_vsa.init_sol ~abi:Hike.Abi.x86_64_sysv ~entry j5)
             in
             let sub5', resolved5', _, _facts5, events5 =
-              Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~images:[] ~sol
+              Hike.Cfg_complete.resolve_phase ~abi:Hike.Abi.x86_64_sysv ~sol
                                 ~block_addrs:
                   (Core.Map.of_alist_exn (module Addr)
                      [ (Addr.of_int64 0x3008L, j5_tids.(1)) ])
