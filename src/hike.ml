@@ -184,6 +184,7 @@ let pass_vsa proj =
        with at least one loader-bound exit.  A sub whose body computes
        (a return, a call into the module) stays. *)
     let leaves seen s =
+      let index = Hike_transfer.index_of_sub s in
       let own_blocks =
         Core.Set.of_list (module Tid)
           (Term.enum blk_t s |> Seq.map ~f:Term.tid |> Seq.to_list)
@@ -223,13 +224,13 @@ let pass_vsa proj =
                    (block_less x || Core.Set.mem seen (Term.tid x))
                | None -> Some false)
           | Goto (Indirect e) -> (
-            match Hike_transfer.slot_of_target ~sub:s e with
+            match Hike_transfer.slot_of_target ~index e with
             | Some a -> Some (Core.Set.mem linker_slots a)
             | None -> Some false)
           | Call c -> (
             match Call.target c with
             | Indirect e -> (
-              match Hike_transfer.slot_of_target ~sub:s e with
+              match Hike_transfer.slot_of_target ~index e with
               | Some a -> Some (Core.Set.mem linker_slots a)
               | None -> Some false)
             | Direct t -> Some (call_leaves s t))
@@ -238,7 +239,7 @@ let pass_vsa proj =
         Term.enum blk_t s |> Seq.concat_map ~f:(Term.enum jmp_t)
         |> Seq.exists ~f:(fun j ->
                let slot e =
-                 Base.Option.bind (Hike_transfer.slot_of_target ~sub:s e)
+                 Base.Option.bind (Hike_transfer.slot_of_target ~index e)
                    ~f:(fun a -> Some (Core.Set.mem reserved_slots a))
                in
                match Jmp.kind j with
@@ -354,8 +355,8 @@ let pass_vsa proj =
       (* A target read through a relocated slot names no lifted sub: the
          slot rule resolves the target's load through the sub's own defs
          (the load may sit in any block). *)
-      let is_foreign_boundary ~sub e =
-        match Hike_transfer.slot_of_target ~sub e with
+      let is_foreign_boundary ~index e =
+        match Hike_transfer.slot_of_target ~index e with
         | Some a -> Core.Set.mem relocated a
         | None -> false
       in
@@ -400,6 +401,7 @@ let pass_vsa proj =
          every block: the walk claims no deadness it cannot prove.  A
          sub with no entry block (an empty body) serves whole. *)
       let reachable_tids sub : Tid.Set.t =
+        let index = Hike_transfer.index_of_sub sub in
         let blocks = Term.enum blk_t sub |> Seq.to_list in
         match Cbat_vsa.entry_block_of sub with
         | None ->
@@ -454,8 +456,8 @@ let pass_vsa proj =
                                       Printf.sprintf "call-ind %s blk %s exp %s foreign=%b"
                                         (Sub.name sub) (Tid.name (Term.tid blk))
                                         (Exp.to_string e)
-                                        (is_foreign_boundary ~sub e));
-                                  if is_foreign_boundary ~sub e then seen
+                                        (is_foreign_boundary ~index e));
+                                  if is_foreign_boundary ~index e then seen
                                   else (keeps_all := true; seen)
                                 | _ -> seen
                               in
@@ -468,8 +470,8 @@ let pass_vsa proj =
                                 Printf.sprintf "goto-ind %s blk %s exp %s foreign=%b"
                                   (Sub.name sub) (Tid.name (Term.tid blk))
                                   (Exp.to_string e)
-                                  (is_foreign_boundary ~sub e));
-                            if is_foreign_boundary ~sub e then seen
+                                  (is_foreign_boundary ~index e));
+                            if is_foreign_boundary ~index e then seen
                             else (keeps_all := true; seen))
                     in
                     if !keeps_all then Core.Set.union seen all else seen)
@@ -488,6 +490,7 @@ let pass_vsa proj =
            its edges leave with it. *)
         if Core.Set.mem leaving (Term.tid sub) then Some []
         else begin
+        let index = Hike_transfer.index_of_sub sub in
         let reach = reachable_tids sub in
         let refuse blk =
           Hike_diag.warn
@@ -496,7 +499,7 @@ let pass_vsa proj =
             (Sub.name sub) (Tid.name (Term.tid blk))
         in
         let indirect ~blk e =
-          if is_foreign_boundary ~sub e then Some []
+          if is_foreign_boundary ~index e then Some []
           else if is_return ~blk e then Some []
           else
             match target_words ~blk e with

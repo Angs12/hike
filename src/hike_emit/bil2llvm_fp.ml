@@ -1,5 +1,6 @@
-(* Emitter FP lane: the native-FP intrinsic table, the fp_sig interface
-   records, and the native render arms. *)
+(* Emitter FP lane: the native render arms.  The op vocabulary, its
+   sized spellings and the lane signatures live in [Hike_native_fp]
+   (the lower core library); this module only lowers them to LLVM. *)
 
 open Bap.Std
 module Abi = Hike_abi
@@ -7,125 +8,7 @@ open Bil2llvm_env
 open Bil2llvm_exp
 open Bil2llvm_access
 
-type native_fp = FMUL | FADD | FSUB | FDIV | FREM | SFLOAT | SINT
-               | FCONVERT of int | FORDER | FHLT | ISNAN
-
-let fp_intrinsic_name = strip_at
-
-(* The FP temps' identity carries their width: the lifter uses one name
-   ([intrinsic:x0]) for a single- AND a double-precision operand, and
-   BAP's var identity is type-blind, so the width must be in the name.
-   [hike-fp] qualifies every occurrence. *)
-
-(* One row per mapped intrinsic name, with the operand width it names.
-   The unsized spellings ([_binary]) carry none: the lifter picks the
-   width per instruction, and [hike-fp] rewrites the target to the sized
-   spelling before any consumer reads it. *)
-let native_fp_table : (string * native_fp * int option) list =
-  [ ("intrinsic:fmul_rne_ieee754_binary_64", FMUL, Some 64);
-    ("intrinsic:fmul_rne_ieee754_binary_32", FMUL, Some 32);
-    ("intrinsic:fadd_rne_ieee754_binary_64", FADD, Some 64);
-    ("intrinsic:fadd_rne_ieee754_binary_32", FADD, Some 32);
-    ("intrinsic:fsub_rne_ieee754_binary_64", FSUB, Some 64);
-    ("intrinsic:fsub_rne_ieee754_binary_32", FSUB, Some 32);
-    ("intrinsic:fdiv_rne_ieee754_binary_64", FDIV, Some 64);
-    ("intrinsic:fdiv_rne_ieee754_binary_32", FDIV, Some 32);
-    ("intrinsic:frem_rne_ieee754_binary_64", FREM, Some 64);
-    ("intrinsic:frem_rne_ieee754_binary_32", FREM, Some 32);
-    ("intrinsic:forder_rne_ieee754_binary_64", FORDER, Some 64);
-    ("intrinsic:forder_rne_ieee754_binary_32", FORDER, Some 32);
-    ("intrinsic:forder_ieee754_binary_64", FORDER, Some 64);
-    ("intrinsic:forder_ieee754_binary_32", FORDER, Some 32);
-    ("intrinsic:is_nan_rne_ieee754_binary_64", ISNAN, Some 64);
-    ("intrinsic:is_nan_rne_ieee754_binary_32", ISNAN, Some 32);
-    ("intrinsic:is_nan_ieee754_binary_64", ISNAN, Some 64);
-    ("intrinsic:is_nan_ieee754_binary_32", ISNAN, Some 32);
-    ("intrinsic:cast_sfloat_rne_ieee754_binary_64", SFLOAT, Some 64);
-    ("intrinsic:cast_sfloat_rne_ieee754_binary_32", SFLOAT, Some 32);
-    ("intrinsic:cast_sint_rne_ieee754_binary_64", SINT, Some 64);
-    ("intrinsic:cast_sint_rne_ieee754_binary_32", SINT, Some 32);
-    (* Exact width conversions: the suffix is the result width. *)
-    ("intrinsic:fconvert_rne_ieee754_binary_64", FCONVERT 64, Some 64);
-    ("intrinsic:fconvert_rne_ieee754_binary_32", FCONVERT 32, Some 32);
-    (* The untagged spellings the lifter emits: [hike-fp] rewrites them
-       to one of the sized rows above. *)
-    ("intrinsic:fmul_rne_ieee754_binary", FMUL, None);
-    ("intrinsic:fadd_rne_ieee754_binary", FADD, None);
-    ("intrinsic:fsub_rne_ieee754_binary", FSUB, None);
-    ("intrinsic:fdiv_rne_ieee754_binary", FDIV, None);
-    ("intrinsic:frem_rne_ieee754_binary", FREM, None);
-    ("intrinsic:forder_rne_ieee754_binary", FORDER, None);
-    ("intrinsic:is_nan_rne_ieee754_binary", ISNAN, None);
-    ("intrinsic:is_nan_ieee754_binary", ISNAN, None);
-    ("intrinsic:forder_ieee754_binary", FORDER, None);
-    ("intrinsic:hlt", FHLT, None) ]
-
-(* The table as a hash map, built once: call dispatch consults it
-   per call site per sub. *)
-let native_fp_map =
-  let t = Core.String.Table.create () in
-  Base.List.iter native_fp_table ~f:(fun (k, v, w) ->
-      Core.Hashtbl.set t ~key:k ~data:(v, w));
-  t
-
-let row_of_name (name : string) : (native_fp * int option) option =
-  Core.Hashtbl.find native_fp_map (fp_intrinsic_name name)
-
-let native_fp_op (name : string) : native_fp option =
-  Core.Option.map (row_of_name name) ~f:fst
-
-(* The operand width the target names; [None] for an untagged spelling. *)
-let fp_width_of_name (name : string) : int option =
-  Core.Option.bind (row_of_name name) ~f:snd
-
-(* The ONE lane-width policy for a mapped call: the width the target
-   names, the target word when the spelling stayed unqualified.  Every
-   consumer of a mapped call's widths reads this. *)
-let lane_width_of_name ~(word_bits : int) (name : string) : int =
-  Base.Option.value (fp_width_of_name name) ~default:word_bits
-
-(* The bare sized spelling of an untagged FP target, when the table
-   knows it: the name [hike-fp] rewrites the target to. *)
-let sized_name (name : string) (w : int) : string option =
-  let sized = Printf.sprintf "%s_%d" (fp_intrinsic_name name) w in
-  if Core.Hashtbl.mem native_fp_map sized then Some sized else None
-
-(* Whether the table carries sized spellings for the op at all.  The
-   width-less rows without one (the runtime boundary) keep the
-   unqualified spelling as their identity; a miss at the temp's width is
-   then structural, not a residue. *)
-let has_sized_rows (name : string) : bool =
-  let bare = fp_intrinsic_name name in
-  Base.List.exists native_fp_table ~f:(fun (n, _, _) ->
-      let n = fp_intrinsic_name n in
-      Base.String.is_prefix n ~prefix:bare
-      && String.length n > String.length bare
-      && n.[String.length bare] = '_')
-
-(* The static model interface of each mapped op: the input temps the
-   call block defines (fp_args) and the result temps consumers read
-   (fp_rets); FCONVERT w reads x0 at the complementary width. *)
-type fp_sig = { fp_args : Var.t list; fp_rets : Var.t list }
-
-(* The complementary FP input width of a conversion (fpext widens,
-   fptrunc narrows); the identity for the non-conversion ops. *)
-let conv_in_w = function
-  | FCONVERT res_w -> if res_w = 64 then 32 else 64
-  | _ -> 64
-
-let fp_sig_of (op : native_fp) ~(w : int) : fp_sig =
-  let x0 k = Hike_synth.fp_lane ~addr_bits:k Hike_synth.Input 0 in
-  let y0 k = Hike_synth.fp_lane ~addr_bits:k Hike_synth.Output 0 in
-  match op with
-  | FMUL | FADD | FSUB | FDIV | FREM | FORDER ->
-    { fp_args = [ x0 w; Hike_synth.fp_lane ~addr_bits:w Hike_synth.Input 1 ];
-      fp_rets = [ y0 w ] }
-  | SFLOAT | SINT | ISNAN ->
-    { fp_args = [ x0 w ]; fp_rets = [ y0 w ] }
-  | FCONVERT res_w ->
-    { fp_args = [ x0 (conv_in_w op) ];
-      fp_rets = [ y0 res_w ] }
-  | FHLT -> { fp_args = []; fp_rets = [] }
+include Hike_native_fp
 
 let fp_ty_of (llvm_ctx : Llvm.llcontext) (w : int) :
     Llvm.lltype * Llvm.lltype =

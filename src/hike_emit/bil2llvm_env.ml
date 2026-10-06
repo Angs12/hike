@@ -102,10 +102,6 @@ type section = {
    the section table carries the data sections only. *)
 type section_type = Hike_stack_model.sec
 
-(* The trap-id vocabulary's one test (the divide-by-zero interrupt sub). *)
-let is_interrupt_name (n : string) : bool =
-  Base.String.is_prefix n ~prefix:"@interrupt:"
-
 (* The section spec's one definition is [Hike_spec] (the lower library);
    this re-export keeps the type and its labels reachable here. *)
 include Hike_spec

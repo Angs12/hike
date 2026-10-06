@@ -77,7 +77,7 @@ let debug_trace (msg : unit -> string) =
    the dynamic linker fills the value, so the file bytes are not a
    dispatch's case words.  Neither is ever a dispatch. *)
 let dispatch_target ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
-    ~(sub : sub term) ~(foreign_slots : Core.Int64.Set.t)
+    ~(index : Hike_transfer.index) ~(foreign_slots : Core.Int64.Set.t)
     (j : jmp term) : exp option =
   let target =
     match Jmp.kind j with
@@ -88,7 +88,7 @@ let dispatch_target ~(last_defs : def term Var.Map.t) ~(retaddr : Tid.Set.t)
   match target with
   | Some (Bil.Var v) when retaddr_read ~last_defs ~retaddr v -> None
   | Some t when
-      Base.Option.value_map (Hike_transfer.slot_of_target ~sub t)
+      Base.Option.value_map (Hike_transfer.slot_of_target ~index t)
         ~default:false ~f:(fun a -> Core.Set.mem foreign_slots a) -> None
   | t -> t
 
@@ -461,6 +461,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
   match entry with
   | None -> sub
   | Some entry ->
+    let index = Hike_transfer.index_of_sub sub in
     let blocks = Seq.to_list (Term.enum blk_t sub) in
     let by_tid =
       Core.Map.of_alist_exn (module Tid)
@@ -481,7 +482,7 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
       | Bil.Var v when retaddr_read ~last_defs ~retaddr v -> Some Tid.Set.empty
       | _ -> (
         match
-          Base.Option.bind (Hike_transfer.slot_of_target ~sub texp)
+          Base.Option.bind (Hike_transfer.slot_of_target ~index texp)
             ~f:(fun a -> Base.Option.some_if (Core.Set.mem foreign_slots a) a)
         with
         | Some _ -> Some Tid.Set.empty
@@ -661,6 +662,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
   let denote = denote_of_sol sol in
   let retaddr = retaddr_defs ~abi ~sol sub in
   let sub_tids = sub_tids sub in
+  let index = Hike_transfer.index_of_sub sub in
   let grew = ref false in
   let resolved' =
     Term.enum blk_t sub
@@ -668,7 +670,7 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
         let last_defs = Vsa.last_defs blk in
         Term.enum jmp_t blk
         |> Seq.fold ~init:acc ~f:(fun acc j ->
-            match dispatch_target ~last_defs ~retaddr ~sub ~foreign_slots j with
+            match dispatch_target ~last_defs ~retaddr ~index ~foreign_slots j with
             | None -> acc
             | Some texp -> (
                 match

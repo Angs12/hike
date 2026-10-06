@@ -44,8 +44,8 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
            "hike: dispatch: sub %s block target %s at jmp %s names no transfer destination"
            (Sub.name sub) (Word.to_string a) (Tid.name (Term.tid j)))
   in
-  let series sub blk j e =
-    if Base.Option.value_map (Hike_transfer.slot_of_target ~sub e)
+  let series ~index sub blk j e =
+    if Base.Option.value_map (Hike_transfer.slot_of_target ~index e)
          ~default:false ~f:(Core.Set.mem facts.foreign_slots)
     then [ j ]
     else
@@ -93,13 +93,14 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
   in
   Cbat_vsa.with_images facts.images (fun () ->
       Term.map sub_t prog ~f:(fun sub ->
+          let index = Hike_transfer.index_of_sub sub in
           Term.map blk_t sub ~f:(fun blk ->
               Term.concat_map jmp_t blk ~f:(fun j ->
                   if Hike_return.is_jmp j then [ j ]
                   else match Jmp.kind j with
-                    | Goto (Indirect e) -> series sub blk j e
+                    | Goto (Indirect e) -> series ~index sub blk j e
                     | Call c -> (match Call.target c with
-                        | Indirect e -> series sub blk j e
+                        | Indirect e -> series ~index sub blk j e
                         | Direct _ -> [ j ])
                     | _ -> [ j ]))))
 
@@ -110,7 +111,7 @@ let compilable_series (jmps : jmp term list) : bool =
   Base.List.for_all jmps ~f:(fun j ->
       match Jmp.kind j with
       | Goto (Direct tid) ->
-          not (Bil2llvm_env.is_interrupt_name (Tid.name tid))
+          not (Hike_abi.is_interrupt_name (Tid.name tid))
       | Call c -> (match Call.target c with Direct _ -> true | _ -> false)
       | _ -> false)
 

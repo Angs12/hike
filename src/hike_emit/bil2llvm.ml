@@ -22,7 +22,7 @@ let create_branches ctx scope blk llvm_builder ?(sub : sub term option)
   let open Bap.Std in
   let llvm_ctx = ctx.llvm_ctx in
   let fn = Llvm.block_parent (Llvm.insertion_block llvm_builder) in
-  let is_interrupt tid = Bil2llvm_env.is_interrupt_name (Tid.name tid) in
+  let is_interrupt tid = Hike_abi.is_interrupt_name (Tid.name tid) in
   (* A conditional target that is an interrupt sub needs its own block;
      the trap is terminal there. *)
   let target_bb tid =

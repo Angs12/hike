@@ -26,9 +26,9 @@ let call_of_jmp (j : jmp term) : Call.t option =
   | Call c -> (
       match Call.target c with
       | Direct target ->
-          if Bil2llvm_env.is_interrupt_name (Tid.name target) then None
+          if Hike_abi.is_interrupt_name (Tid.name target) then None
           else if
-            Bil2llvm_fp.native_fp_op (Tid.name target) = Some Bil2llvm_fp.FHLT
+            Hike_native_fp.native_fp_op (Tid.name target) = Some Hike_native_fp.FHLT
           then None
           else Some c
       | Indirect _ -> Some c)
@@ -41,7 +41,7 @@ let machine_call (j : jmp term) : bool =
   | Call c -> (
       match Call.target c with
       | Direct target ->
-          Base.Option.is_none (Bil2llvm_fp.native_fp_op (Tid.name target))
+          Base.Option.is_none (Hike_native_fp.native_fp_op (Tid.name target))
       | Indirect _ -> true)
   | _ -> false
 
@@ -51,14 +51,14 @@ let machine_call (j : jmp term) : bool =
    return registers. *)
 let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
     var list =
-  match Bil2llvm_fp.native_fp_op (Tid.name target) with
+  match Hike_native_fp.native_fp_op (Tid.name target) with
   | Some op ->
       let w =
-        Bil2llvm_fp.lane_width_of_name
+        Hike_native_fp.lane_width_of_name
           ~word_bits:(Model.word_bits abi.Abi.word)
           (Tid.name target)
       in
-      Bil2llvm_fp.(fp_sig_of op ~w).fp_rets
+      Hike_native_fp.(fp_sig_of op ~w).fp_rets
   | None -> (
       match Core.Map.find subs target with
       | Some sub -> Base.List.map (Model.sig_rets sub) ~f:Arg.lhs

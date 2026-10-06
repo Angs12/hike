@@ -9,38 +9,50 @@
 
 open Bap.Std
 
-(* The defining rhs of [v]: the last def of the var in term order (under
-   SSA that is the one def). *)
-let def_rhs ~(sub : sub term) (v : var) : exp option =
+(* The sub's last rhs per var, built once: the var-link resolution
+   follows links through it, so a loop that resolves many targets for
+   one sub shares one scan. *)
+type index = exp Var.Map.t
+
+let index_of_sub (sub : sub term) : index =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(Term.enum def_t)
-  |> Seq.fold ~init:None ~f:(fun found d ->
-      if Var.equal (Def.lhs d) v then Some (Def.rhs d) else found)
+  |> Seq.fold ~init:Var.Map.empty ~f:(fun m d ->
+      Core.Map.set m ~key:(Def.lhs d) ~data:(Def.rhs d))
 
-(* Var-links resolved through the sub's defs; [seen] keeps a copy cycle
-   from looping. *)
-let rec resolve ~(sub : sub term option) ~(seen : var list) (e : exp) : exp =
+(* Var-links resolved through [index]; [seen] keeps a copy cycle from
+   looping. *)
+let rec resolve_index ~(index : index) ~(seen : var list) (e : exp) : exp =
   match e with
   | Bil.Var v ->
     if Base.List.exists ~f:(Var.equal v) seen then e
-    else
-      (match sub with
-       | None -> e
-       | Some sub -> (
-         match def_rhs ~sub v with
-         | Some rhs -> resolve ~sub:(Some sub) ~seen:(v :: seen) rhs
-         | None -> e))
+    else (
+      match Core.Map.find index v with
+      | Some rhs -> resolve_index ~index ~seen:(v :: seen) rhs
+      | None -> e)
   | e -> e
 
 (* The linker slot the transfer's target reads, if any.  [origin] maps a
    storage base var to its module byte origin, so a resolved
-   component-relative access recovers its absolute slot. *)
-let slot_of_target ?(synth = Hike_synth.empty)
+   component-relative access recovers its absolute slot.  [index] shares
+   one per-sub def scan across many resolutions; without it (and with
+   [sub]) each call builds its own. *)
+let slot_of_target ?index ?(synth = Hike_synth.empty)
     ?(origin : (var -> int64 option) option) ?(sub : sub term option)
     (target : exp) : int64 option =
-  match resolve ~sub ~seen:[] target with
+  let index =
+    match index with
+    | Some index -> Some index
+    | None -> Base.Option.map sub ~f:index_of_sub
+  in
+  let resolve e =
+    match index with
+    | Some index -> resolve_index ~index ~seen:[] e
+    | None -> e
+  in
+  match resolve target with
   | Bil.Load (mem, addr, _, _) -> (
-    let addr = resolve ~sub ~seen:[] addr in
+    let addr = resolve addr in
     match mem with
     | Bil.Var mv -> Hike_synth.access_address ?origin synth mv addr
     | _ -> Hike_synth.address_of_exp synth addr)

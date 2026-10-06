@@ -45,12 +45,12 @@ let tag_targets (sub : sub term) : sub term =
               match Call.target c with
               | Direct t -> (
                   let name = Tid.name t in
-                  match Bil2llvm_fp.native_fp_op name with
+                  match Hike_native_fp.native_fp_op name with
                   | Some _ -> (
                       (* [widths] is total over the block's jmps — every
                          jmp elt records the width in effect there. *)
                       let w = Core.Map.find_exn !widths (Term.tid j) in
-                      match Bil2llvm_fp.sized_name name w with
+                      match Hike_native_fp.sized_name name w with
                       | Some sized ->
                           Jmp.with_kind j
                             (Call
@@ -63,7 +63,7 @@ let tag_targets (sub : sub term) : sub term =
                              is the recorded word-width fallback; an op
                              with none (the runtime boundary) keeps the
                              unqualified spelling as its identity. *)
-                          if Bil2llvm_fp.has_sized_rows name then
+                          if Hike_native_fp.has_sized_rows name then
                             Hike_diag.warn
                               "fp: sub %s: intrinsic %s has no sized spelling at width %d - the unqualified target stays"
                               (Sub.name sub) name w;

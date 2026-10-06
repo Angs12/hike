@@ -95,6 +95,10 @@ let is_intrinsic_name (name : string) : bool =
 let is_intrinsic_target (t : tid) : bool =
   is_intrinsic_name (Tid.name t)
 
+(* The trap-id vocabulary's one test (the divide-by-zero interrupt sub). *)
+let is_interrupt_name (n : string) : bool =
+  Base.String.is_prefix n ~prefix:"@interrupt:"
+
 (* Argument registers in convention order: integer, then vector. *)
 let param_regs (t : t) : var list = t.int_param_regs @ t.vector_param_regs
 

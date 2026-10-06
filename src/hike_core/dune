@@ -4,6 +4,7 @@
  (wrapped false)
  (modules
   hike_diag
+  hike_native_fp
   hike_return
   hike_spec
   hike_stack_model

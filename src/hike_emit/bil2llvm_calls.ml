@@ -752,7 +752,7 @@ let is_self_call_stub (sub : sub term) : bool =
 let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in
   let name = Tid.name target |> fp_intrinsic_name in
-  if Bil2llvm_env.is_interrupt_name (Tid.name target) then
+  if Hike_abi.is_interrupt_name (Tid.name target) then
     create_interrupt ctx llvm_builder
   else
     match native_fp_op (Tid.name target) with
