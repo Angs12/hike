@@ -618,9 +618,7 @@ let external_slot_target ctx ?(sub : sub term option) (target : exp) :
     string option =
   (* A resolved access is component-relative; the component's module
      origin recovers the absolute slot the loader's externals name. *)
-  let origin v =
-    Base.Option.map (Core.Map.find !(ctx.sec_comps) v) ~f:snd
-  in
+  let origin v = Bil2llvm_synth.storage_origin ctx v in
   match Hike_transfer.slot_of_target ~synth:ctx.synth ~origin ?sub target with
   | Some a -> Core.Map.find ctx.address.externals a
   | None -> None

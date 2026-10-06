@@ -12,12 +12,9 @@ let store_ptr llvm_builder value ptr =
   value
 
 let component_ptr ctx llvm_builder v index =
-  match Hike_synth.memory_var ~addr_bits:ctx.addr_bits v with
-  | Some mv ->
-    Base.Option.map (Core.Map.find !(ctx.sec_comps) mv) ~f:(fun (base, _) ->
-        Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| index |] ""
-          llvm_builder)
-  | None -> None
+  Base.Option.map (Bil2llvm_synth.memory_value ctx v) ~f:(fun base ->
+      Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| index |] ""
+        llvm_builder)
 
 let const_load_in ctx llvm_builder section addr size =
   let base = resolve_addr_in ctx llvm_builder section addr in

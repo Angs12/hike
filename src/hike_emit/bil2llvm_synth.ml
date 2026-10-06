@@ -37,6 +37,18 @@ let build ctx : Llvm.llvalue Var.Map.t =
         | None -> acc)
       | _ -> acc)
 
+(* A memory var's storage global, without the block context. *)
+let memory_value ctx v : Llvm.llvalue option =
+  Base.Option.bind (Hike_synth.memory_var ~addr_bits:ctx.addr_bits v)
+    ~f:(fun mv ->
+      match Core.Map.find !(ctx.synth_vals) mv with
+      | Some base -> Some base
+      | None -> Base.Option.map (Core.Map.find !(ctx.sec_comps) mv) ~f:fst)
+
+(* A storage var's native byte origin, when the component map knows it. *)
+let storage_origin ctx v : int64 option =
+  Base.Option.map (Core.Map.find !(ctx.sec_comps) v) ~f:snd
+
 (* The one resolution: the classification picks the home.  [None] is
    the caller's undef arm. *)
 let value ctx scope llvm_builder blk_tid v : Llvm.llvalue option =
@@ -61,12 +73,5 @@ let value ctx scope llvm_builder blk_tid v : Llvm.llvalue option =
       match classified with
       | Some (Hike_synth.Env_register _) ->
         Some (load_env_reg ctx llvm_builder v)
-      | Some (Hike_synth.Bytes _) -> (
-        match Hike_synth.memory_var ~addr_bits:ctx.addr_bits v with
-        | Some mv -> (
-          match Core.Map.find !(ctx.synth_vals) mv with
-          | Some base -> Some base
-          | None ->
-            Base.Option.map (Core.Map.find !(ctx.sec_comps) mv) ~f:fst)
-        | None -> None)
+      | Some (Hike_synth.Bytes _) -> memory_value ctx v
       | _ -> None))
