@@ -120,7 +120,7 @@ type projection = {
   offsets : (int64 * int64) option;
 }
 
-type conv =
+type conv = Hike_synth_addr.conv =
   | Conv_region of int                    (* the region id *)
   | Conv_window                           (* the incoming window: the caller's world *)
   | Conv_slot of int * int                (* slot index, intra-slot byte *)

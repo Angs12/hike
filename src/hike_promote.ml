@@ -435,70 +435,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
    address when the rewrite computed the storage-relative form.  The
    override receives children unmapped, so it maps the address and
    store data itself. *)
-let repoint_mapper ?(addr : exp option) (mem_var : var) =
-  object
-    inherit Exp.mapper as super
-    method! map_load ~mem:_ ~addr:a rest s =
-      Bil.Load
-        ( Bil.Var mem_var,
-          (match addr with Some e -> e | None -> super#map_exp a),
-          rest, s )
-    method! map_store ~mem:_ ~addr:a ~exp rest s =
-      Bil.Store
-        ( Bil.Var mem_var,
-          (match addr with Some e -> e | None -> super#map_exp a),
-          super#map_exp exp, rest, s )
-  end
-
-(* A slot access keeps its memory node and takes [addr] as its address:
-   the load/store is real, through the caller's slot pointer. *)
-let slot_addr_mapper (addr : exp) =
-  object
-    inherit Exp.mapper as super
-    method! map_load ~mem ~addr:_ endian size =
-      Bil.Load (mem, addr, endian, size)
-    method! map_store ~mem ~addr:_ ~exp endian size =
-      Bil.Store (mem, addr, super#map_exp exp, endian, size)
-  end
-
-(* One def's rewrite: re-point to the owning storage's mem var at the
-   storage-relative address, or address its memory node at the caller's
-   slot. *)
-let rewrite_def ~(addr_bits : int) ~(conv : Sections.conv) ~(bits : int)
-    ?(addr : exp option) (d : def term) : def term =
-  match conv with
-  | Sections.Keep -> d
-  | Sections.Conv_region id ->
-      let mem_var = Model.region_mem ~addr_bits:bits id in
-
-      let d =
-        Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
-      in
-
-      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Sections.Conv_window ->
-      let mem_var = Model.window_mem ~addr_bits:bits in
-      let d =
-        Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
-      in
-      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Sections.Conv_global id ->
-      let mem_var = Model.sec_comp_mem ~addr_bits id in
-      let d =
-        Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
-      in
-      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
-  | Sections.Conv_slot (i, byte_offset) ->
-      let slot = Model.arg_slot ~addr_bits i in
-      let addr =
-        Hike_synth_addr.base_plus slot ~rel:0L
-          (Bil.Int
-             (Cbat_word.to_word
-                (Cbat_word.of_int64 ~width:addr_bits
-                   (Stdlib.Int64.of_int byte_offset))))
-      in
-      Def.map_exp d ~f:(fun e -> (slot_addr_mapper addr)#map_exp e)
-
 (* Each call site's stored slot gains its [hike_argN] def binding the
    caller's own slot ADDRESS: the store's address, which the rewrite
    above already re-pointed at the caller's storage.  A partial store
@@ -701,7 +637,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
             | Some rhs -> Def.with_rhs d rhs
             | None ->
                 let d =
-                  rewrite_def ~addr_bits ~conv:f.fr_conv ~bits:f.fr_bits
+                  Hike_synth_addr.rewrite_storage ~addr_bits ~conv:f.fr_conv ~bits:f.fr_bits
                     ?addr:f.fr_addr d
                 in
                 (* The conversion names the address's own alloca; carry

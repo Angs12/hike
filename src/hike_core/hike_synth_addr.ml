@@ -288,3 +288,78 @@ let rewrite_def ?slots ~addr_bits tbl ~regions ~named_only d =
     | Type.Mem _ -> Def.with_lhs d mv
     | _ -> d)
   | None -> d
+
+(* The storage conversion an access def takes: decided by the
+   attribution (its projection and finalized trees) and consumed by the
+   rewrite below. *)
+type conv =
+  | Conv_region of int                    (* the region id *)
+  | Conv_window                           (* the incoming window: the caller's world *)
+  | Conv_slot of int * int                (* slot index, intra-slot byte *)
+  | Conv_global of int                    (* the component id *)
+  | Keep
+
+let repoint_mapper ?(addr : exp option) (mem_var : var) =
+  object
+    inherit Exp.mapper as super
+    method! map_load ~mem:_ ~addr:a rest s =
+      Bil.Load
+        ( Bil.Var mem_var,
+          (match addr with Some e -> e | None -> super#map_exp a),
+          rest, s )
+    method! map_store ~mem:_ ~addr:a ~exp rest s =
+      Bil.Store
+        ( Bil.Var mem_var,
+          (match addr with Some e -> e | None -> super#map_exp a),
+          super#map_exp exp, rest, s )
+  end
+
+(* A slot access keeps its memory node and takes [addr] as its address:
+   the load/store is real, through the caller's slot pointer. *)
+let slot_addr_mapper (addr : exp) =
+  object
+    inherit Exp.mapper as super
+    method! map_load ~mem ~addr:_ endian size =
+      Bil.Load (mem, addr, endian, size)
+    method! map_store ~mem ~addr:_ ~exp endian size =
+      Bil.Store (mem, addr, super#map_exp exp, endian, size)
+  end
+
+(* One def's rewrite: re-point to the owning storage's mem var at the
+   storage-relative address, or address its memory node at the caller's
+   slot. *)
+let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
+    ?(addr : exp option) (d : def term) : def term =
+  match conv with
+  | Keep -> d
+  | Conv_region id ->
+      let mem_var = Model.region_mem ~addr_bits:bits id in
+
+      let d =
+        Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
+      in
+
+      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
+  | Conv_window ->
+      let mem_var = Model.window_mem ~addr_bits:bits in
+      let d =
+        Def.map_exp d ~f:(fun e -> (repoint_mapper ?addr mem_var)#map_exp e)
+      in
+      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
+  | Conv_global id ->
+      let mem_var = Model.sec_comp_mem ~addr_bits id in
+      let d =
+        Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
+      in
+      if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
+  | Conv_slot (i, byte_offset) ->
+      let slot = Model.arg_slot ~addr_bits i in
+      let addr =
+        base_plus slot ~rel:0L
+          (Bil.Int
+             (Cbat_word.to_word
+                (Cbat_word.of_int64 ~width:addr_bits
+                   (Stdlib.Int64.of_int byte_offset))))
+      in
+      Def.map_exp d ~f:(fun e -> (slot_addr_mapper addr)#map_exp e)
+
