@@ -525,7 +525,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       sections;
       ll_funcs = ref Tid.Map.empty;
       thunks = ref [];
-      sec_comps = ref Var.Map.empty;
+      synth_origins = ref Var.Map.empty;
       synth_vals = ref Var.Map.empty;
       tls_anchor = ref None;
       tls_block = ref None;
@@ -543,14 +543,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
          | None -> Core.Int64.Set.empty);
       sub_starts }
   in
-  (* The named-component map is filled before any body emits. *)
-  Base.List.iter sections ~f:(fun section ->
-      Base.List.iter section.owners ~f:(fun o ->
-          match o.own_id with
-          | Some id ->
-            let v = Hike_stack_model.sec_comp_mem ~addr_bits:ctx.addr_bits id in
-            ctx.sec_comps := Core.Map.set !(ctx.sec_comps) ~key:v ~data:(o.base, o.own_lo)
-          | None -> ()));
   (* An external function's PLT stub defines no function and emits no
      body — its declaration carries the name for every call site.  A
      PLT entry the re-decode discovered is named by BAP's symtab after
@@ -665,7 +657,11 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   (* The per-run synth-var bindings: the synth-value lane enumerates the
      vocabulary once and binds each module-lifetime var before any body
      emits. *)
-  let synth_phase () = ctx.synth_vals := Bil2llvm_synth.build ctx in
+  let synth_phase () =
+    let b = Bil2llvm_synth.build ctx in
+    ctx.synth_vals := b.values;
+    ctx.synth_origins := b.origins
+  in
   let bodies_phase () =
     Base.List.iter subs_list ~f:(fun s ->
         if is_entry s then ()

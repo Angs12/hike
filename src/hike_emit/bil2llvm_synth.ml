@@ -1,23 +1,46 @@
 (* The synth-value lane: one home for every synthetic variable's LLVM
    value.  [build] enumerates the vocabulary once and binds each
    module-lifetime var — a module address through the address map, a
-   component var to its global; [value] resolves a var at the use site,
-   reading those per-run bindings, the per-sub/block SSA bindings, or
-   the environment cell.  The classification is Hike_synth's; the LLVM
-   object a kind denotes is the emitter's. *)
+   component var to its global and native origin; [value] resolves a
+   var at the use site, reading those per-run bindings, the
+   per-sub/block SSA bindings, or the environment cell.  The
+   classification is Hike_synth's; the LLVM object a kind denotes is
+   the emitter's. *)
 
 open Bap.Std
 open Bil2llvm_env
 
 module Section = Bil2llvm_section
 
-(* The per-run bindings, built before any body emits. *)
-let build ctx : Llvm.llvalue Var.Map.t =
-  Base.List.fold (Hike_synth.bindings ctx.synth) ~init:Var.Map.empty
+(* The per-run bindings: the values and the component origins. *)
+type bindings = {
+  values : Llvm.llvalue Var.Map.t;
+  origins : int64 Var.Map.t;
+}
+
+let add key data m = Core.Map.set m ~key ~data
+
+(* The component globals and their native origins, from the one owner
+   tiling: a component's base var and memory var share its global. *)
+let build_components ~addr_bits (sections : section list) : bindings =
+  Base.List.fold sections ~init:{ values = Var.Map.empty; origins = Var.Map.empty }
+    ~f:(fun acc section ->
+      Base.List.fold section.owners ~init:acc ~f:(fun acc o ->
+          match o.own_id with
+          | None -> acc
+          | Some id ->
+            let mem = Hike_stack_model.sec_comp_mem ~addr_bits id in
+            let ptr = Hike_stack_model.sec_comp_ptr ~addr_bits id in
+            { values = acc.values |> add mem o.base |> add ptr o.base;
+              origins = acc.origins |> add mem o.own_lo |> add ptr o.own_lo }))
+
+(* The module-address vars: one value per distinct address. *)
+let build_addrs ctx (acc : bindings) : bindings =
+  let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
+  Base.List.fold (Hike_synth.bindings ctx.synth) ~init:acc
     ~f:(fun acc (v, c) ->
       match c with
       | Hike_synth.Module_addr a ->
-        let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
         let value =
           match
             Section.remap_native ctx ctx.llvm_ctx ctx.llvm_module a
@@ -26,28 +49,21 @@ let build ctx : Llvm.llvalue Var.Map.t =
           | Some ptr -> Llvm.const_ptrtoint ptr ty
           | None -> Llvm.const_of_int64 ty a false
         in
-        Core.Map.set acc ~key:v ~data:value
-      | Hike_synth.Storage (Hike_synth.Global i)
-      | Hike_synth.Bytes (Hike_synth.Global i) -> (
-        let mv =
-          Hike_stack_model.sec_comp_mem ~addr_bits:ctx.addr_bits i
-        in
-        match Core.Map.find !(ctx.sec_comps) mv with
-        | Some (base, _) -> Core.Map.set acc ~key:v ~data:base
-        | None -> acc)
+        { acc with values = add v value acc.values }
       | _ -> acc)
+
+(* The per-run bindings, built before any body emits. *)
+let build ctx : bindings =
+  build_addrs ctx (build_components ~addr_bits:ctx.addr_bits ctx.sections)
 
 (* A memory var's storage global, without the block context. *)
 let memory_value ctx v : Llvm.llvalue option =
   Base.Option.bind (Hike_synth.memory_var ~addr_bits:ctx.addr_bits v)
-    ~f:(fun mv ->
-      match Core.Map.find !(ctx.synth_vals) mv with
-      | Some base -> Some base
-      | None -> Base.Option.map (Core.Map.find !(ctx.sec_comps) mv) ~f:fst)
+    ~f:(fun mv -> Core.Map.find !(ctx.synth_vals) mv)
 
-(* A storage var's native byte origin, when the component map knows it. *)
+(* A storage var's native byte origin, from the component bindings. *)
 let storage_origin ctx v : int64 option =
-  Base.Option.map (Core.Map.find !(ctx.sec_comps) v) ~f:snd
+  Core.Map.find !(ctx.synth_origins) v
 
 (* The one resolution: the classification picks the home.  [None] is
    the caller's undef arm. *)

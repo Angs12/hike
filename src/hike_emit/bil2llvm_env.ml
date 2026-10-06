@@ -154,12 +154,13 @@ type emit_ctx = {
   llvm_module : Llvm.llmodule;
   sections : section list;
   (* Cross-phase state: declarations fill [ll_funcs], the thunk phase
-     fills [thunks], the preamble fills [sec_comps]; later phases
-     read them. *)
+     fills [thunks], the synth phase fills [synth_vals]/[synth_origins];
+     later phases read them. *)
   ll_funcs : (Llvm.llvalue * Llvm.lltype) Tid.Map.t ref;
   thunks : (string * Llvm.llvalue) list ref;
-  (* [sec_comp_N_mem] var -> (global, native base). *)
-  sec_comps : (Llvm.llvalue * int64) Var.Map.t ref;
+  (* The component vars' native byte origins, beside their values in
+     [synth_vals]. *)
+  synth_origins : int64 Var.Map.t ref;
   (* The synth vars that name a module value: each one's LLVM value,
      bound once before any body emits (module address vars, component
      globals). *)
