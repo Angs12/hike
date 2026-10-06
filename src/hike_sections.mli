@@ -141,6 +141,38 @@ type ctx = {
   whole : data_span list;
 }
 
+(** One def's rewrite facts: the access's conversion (the mem
+    re-point) plus the storage-relative address forms — a value def's
+    whole rhs, an access def's mem-node address. *)
+type def_fact = {
+  fr_conv : conv;
+  fr_bits : int;
+  fr_addr : exp option;
+  fr_rhs : exp option;
+}
+
+val no_fact : def_fact
+
+(** The sub's storage spans: the layout's regions in the synth fact
+    shape. *)
+val spans_of_layout :
+  word:int -> Hike_stack_model.sub_layout -> Hike_synth.storage_span list
+
+(** Every def's rewrite facts, selected from the finalized trees, the
+    access conversions, the storage spans and the value's leaves. *)
+val def_facts :
+  word:int -> entry:int64 -> abi:Hike_abi.t ->
+  tree:sub_tree -> data:data_tree ->
+  projections:projection option Tid.Map.t ->
+  conversions:conv Tid.Map.t ->
+  storages:Hike_synth.storage_span list ->
+  window_param:bool -> vla_tids:Tid.Set.t -> spans:data_span list ->
+  denote:(blk:blk term -> ?def:def term -> exp ->
+          (Cbat_vsa.WordSet.t, Type.error) Result.t) ->
+  is_dyn_alloc:(def term -> bool) ->
+  sub term -> def_fact Tid.Map.t
+
+
 (** Projects one address denotation of [width] bytes into its
     occupied-byte portions per represented space, plus the def's tag.
     Bottom yields no portion; an unknown address contributes its full

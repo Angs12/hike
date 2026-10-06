@@ -1378,3 +1378,310 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   in
   let window_param = args_residue in
   { Hike_stack_model.regions; window_param }
+
+type def_fact = {
+  fr_conv : conv;
+  fr_bits : int;
+  fr_addr : exp option;
+  fr_rhs : exp option;
+}
+
+let no_fact = { fr_conv = Keep; fr_bits = 0; fr_addr = None; fr_rhs = None }
+
+(* The sub's storage spans: the layout's regions in the synth fact
+   shape, built once and read by every consumer. *)
+let spans_of_layout ~(word : int) (layout : Hike_stack_model.sub_layout) :
+    Hike_synth.storage_span list =
+  Base.List.map layout.Hike_stack_model.regions
+    ~f:(fun { Model.Sub_layout.r_id = id; r_lo = lo; r_hi = hi; _ } ->
+        Hike_synth.storage_span ~addr_bits:(Model.word_bits word)
+          (Hike_synth.Stack id) ~lo ~hi)
+
+(* The per-def rewrite facts of one sub: every access keeps its
+   conversion; every address def whose value routes to a storage takes
+   the base + displacement form. *)
+let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
+    ~(tree : sub_tree) ~(data : data_tree)
+    ~(projections : projection option Tid.Map.t)
+    ~(conversions : conv Tid.Map.t)
+    ~(storages : Hike_synth.storage_span list)
+    ~(window_param : bool) ~(vla_tids : Tid.Set.t)
+    ~(spans : data_span list)
+    ~(denote : blk:blk term -> ?def:def term -> exp ->
+                (Vsa.WordSet.t, Type.error) Result.t)
+    ~(is_dyn_alloc : def term -> bool)
+    (sub : sub term) : def_fact Tid.Map.t =
+#ifdef VSA_DEBUG
+  let census key = Cbat_vsa.Cbat_attr_census.bump key in
+#else
+  let census _ = () in
+#endif
+  let addr_bits = Model.word_bits word in
+  (* The rewrite's admissibility: the address's whole range lies inside
+     the storage's allocated extent — a value or access outside it names
+     no storage, and the model arithmetic keeps it. *)
+  Term.enum blk_t sub
+  |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
+         Term.enum def_t blk
+         |> Seq.fold ~init:acc ~f:(fun acc d ->
+                if
+                  is_dyn_alloc d
+                then acc
+                else
+                  let leaves = Hike_synth_addr.address_leaves ~denote ~storages ~blk ~def:d (Def.rhs d) in
+                  let fact = no_fact in
+                  match access_of d with
+                  | Some (addr, w, _) -> (
+                      let projected =
+                        Base.Option.join
+                          (Core.Map.find projections (Term.tid d))
+                      in
+                      let conv =
+                        Base.Option.value
+                          (Core.Map.find conversions (Term.tid d))
+                          ~default:Keep
+                      in
+                      let addr_range () =
+                        Base.Option.bind projected
+                          ~f:(fun p -> p.offsets)
+                      in
+                      match conv with
+                      | Conv_region id when
+                          Base.Option.value_map (addr_range ())
+                            ~default:false ~f:(fun (lo, hi) ->
+                              Hike_synth_addr.fits_span ~storages (Hike_synth.Stack id) lo hi)
+                          -> (
+                          let folded = Hike_synth_addr.offset_of ~leaves addr in
+
+                          census
+                            (if Int.equal id Model.residue_id then
+                               (match folded with
+                                | Some _ -> "rw.access.residue.folded"
+                                | None -> "rw.access.residue.geom")
+                             else
+                               (match folded with
+                                | Some _ -> "rw.access.region.folded"
+                                | None -> "rw.access.region.geom"));
+                          let f =
+                            match Hike_synth_addr.span_base ~storages (Hike_synth.Stack id) folded with
+                            | Some a -> { fact with fr_addr = Some a }
+                            | None -> fact
+                          in
+                          Core.Map.set acc ~key:(Term.tid d)
+                            ~data:{ f with fr_conv = conv; fr_bits = 8 * w })
+                      | Conv_region id ->
+                          census
+                            (if Int.equal id Model.residue_id then
+                               "rw.access.residue.outside"
+                             else "rw.access.region.outside");
+                          Core.Map.set acc ~key:(Term.tid d)
+                            ~data:{ fact with fr_conv = conv; fr_bits = 8 * w }
+                      | Conv_window ->
+                          census "rw.access.window";
+                          (* The window's base is the parameter; its
+                             coordinate IS the entry-relative offset. *)
+                          let f =
+                            match
+                              Hike_synth_addr.base_form ~leaves
+                                ~base:(Model.hike_window_var ~word) ~rel:0L addr
+                            with
+                            | Some a -> { fact with fr_addr = Some a }
+                            | None -> fact
+                          in
+                          Core.Map.set acc ~key:(Term.tid d)
+                            ~data:{ f with fr_conv = conv; fr_bits = 8 * w }
+                      | Conv_global _ ->
+                          census "rw.access.section";
+                          Core.Map.set acc ~key:(Term.tid d)
+                            ~data:{ fact with fr_conv = conv; fr_bits = 8 * w }
+                      | _ ->
+                          census "rw.access.keep";
+                          Core.Map.set acc ~key:(Term.tid d)
+                            ~data:
+                              { fact with fr_conv = conv;
+                                fr_bits = 8 * w })
+                  | None -> (
+                      let v = Def.lhs d in
+                      if
+                        Model.is_mem v
+                        || Hike_abi.is_sp abi (Var.base v)
+                        || not
+                             (match Var.typ v with
+                              | Type.Imm n -> Int.equal n addr_bits
+                              | _ -> false)
+                      then acc
+                      else
+                        match denote ~blk ~def:d (Def.rhs d) with
+                        | Error _ -> acc
+                        | Ok ws
+                          when not (Vsa.WordSet.in_stack_segment ws)
+                               && not (Vsa.WordSet.is_top ws)
+                               && not (Vsa.WordSet.is_bottom ws) -> (
+                            (* A plain constant address routes to its
+                               component's base: the binding wholly
+                               owning it, minus the component's own low
+                               bound.  A constant at a copy-relocated
+                               slot is externally owned — it keeps the
+                               raw lane. *)
+                            match Model.singleton_i64 ws with
+                            | None -> census "rw.value.raw"; acc
+                            | Some c -> (
+                                let at_slot =
+                                  Base.List.exists spans ~f:(fun sp ->
+                                      equal_sec sp.ds_sec
+                                        (point Rodata c).p_sec
+                                      && Base.List.exists sp.ds_slots
+                                           ~f:(fun sl ->
+                                             Stdlib.Int64.equal sl c))
+                                in
+                                match
+                                  (at_slot,
+                                   owning_data_binding data c)
+                                with
+                                | false, Some (id, comp_lo) -> (
+                                    (* A pure constant address materializes
+                                       at this def: the component's pointer
+                                       base plus its own constant.  A value
+                                       with var leaves composes over its
+                                       operands' own pointers — the address
+                                       defs carrying it already render the
+                                       real bits, so a re-base here would
+                                       materialize the address twice. *)
+                                    match
+                                      Hike_synth_addr.offset_of ~leaves (Def.rhs d)
+                                    with
+                                    | Some (Bil.Int w) ->
+                                        census "rw.value.section";
+                                        let rhs =
+                                          match
+                                            Cbat_word.to_int64
+                                              (Cbat_word.of_word w)
+                                          with
+                                          | Ok k
+                                            when Stdlib.Int64.equal k c ->
+                                              Hike_synth_addr.base_plus
+                                                (Model.sec_comp_ptr
+                                                   ~addr_bits id)
+                                                ~rel:comp_lo (Bil.Int w)
+                                          | _ ->
+                                              Bil.BinOp
+                                                ( Bil.PLUS,
+                                                  Bil.Var
+                                                    (Model.sec_comp_ptr
+                                                       ~addr_bits id),
+                                                  Bil.BinOp
+                                                    ( Bil.MINUS,
+                                                      Bil.Int w,
+                                                      Bil.Int
+                                                        (Cbat_word.to_word
+                                                           (Cbat_word
+                                                              .of_int64
+                                                              ~width:64
+                                                              comp_lo))
+                                                    ) )
+                                        in
+                                        Core.Map.set acc ~key:(Term.tid d)
+                                          ~data:
+                                            { fact with fr_rhs = Some rhs }
+                                    | _ ->
+                                        census "rw.value.section.carried";
+                                        acc)
+                                | _ -> census "rw.value.raw"; acc))
+                        | Ok ws when Core.Map.is_empty leaves -> (
+                            (* A pure constant is a machine constant, not
+                               a synthesized address: the model's stack
+                               line sits at 2^62, and a double's bits can
+                               land inside it — only a value with var
+                               leaves (an SP-derived address) routes to
+                               the frame's storages. *)
+                            census "rw.value.raw";
+                            acc)
+                        | Ok ws -> (
+                            (* The routing of an address value: at/above
+                               the args base it names the caller's window
+                               (the parameter is the base); below the
+                               entry line the tree's binding owns its
+                               whole range. *)
+                            match Vsa.WordSet.origin ws with
+                            | Some (Vsa.WordSet.Origin.Vla tid)
+                              when (not (Vsa.WordSet.is_infinite ws))
+                                   && Core.Set.mem vla_tids tid -> (
+                                (* The offsets are frame-relative: the
+                                   allocation's base is byte zero, no
+                                   position arithmetic applies. *)
+                                match
+                                  Base.Option.map
+                                    (Hike_synth_addr.offset_of ~leaves (Def.rhs d))
+                                    ~f:(Hike_synth_addr.base_plus (Model.vla_ptr ~addr_bits tid)
+                                         ~rel:0L)
+                                with
+                                | Some rhs ->
+                                    census "rw.value.vla";
+                                    Core.Map.set acc ~key:(Term.tid d)
+                                      ~data:{ fact with fr_rhs = Some rhs }
+                                | None ->
+                                    census "rw.value.vla.unfoldable"; acc)
+                            | Some (Vsa.WordSet.Origin.Vla _) ->
+                                census "rw.value.vla"; acc
+                            | _ -> (
+                                let a_base = Model.args_base ~entry ~word in
+                                match
+                                  (not (Vsa.WordSet.is_infinite ws),
+                                   Model.positions_of_offsets ws)
+                                with
+                                | true, Some (lo, hi)
+                                  when Stdlib.Int64.compare lo hi <= 0
+                                       && Stdlib.Int64.compare lo a_base >= 0
+                                       && window_param -> (
+                                    match
+                                      Hike_synth_addr.base_form ~leaves
+                                        ~base:(Model.hike_window_var ~word)
+                                        ~rel:0L (Def.rhs d)
+                                    with
+                                    | Some rhs ->
+                                        census "rw.value.window";
+                                        Core.Map.set acc ~key:(Term.tid d)
+                                          ~data:{ fact with fr_rhs = Some rhs }
+                                    | None ->
+                                        census "rw.value.window.unfoldable";
+                                        acc)
+                                | true, Some (lo, hi)
+                                  when Stdlib.Int64.compare lo hi <= 0 -> (
+                                    match owning_storage tree lo hi with
+                                    | Some
+                                        ((Stack_region _ | Stack_residue) as
+                                        st)
+                                      when Hike_synth_addr.fits_span ~storages
+                                             (Hike_synth.Stack
+                                                (region_id_of_storage st))
+                                             lo hi
+                                      -> (
+                                        match
+                                          Hike_synth_addr.span_base ~storages
+                                            (Hike_synth.Stack
+                                               (region_id_of_storage st))
+                                            (Hike_synth_addr.offset_of ~leaves
+                                               (Def.rhs d))
+                                        with
+                                        | Some rhs ->
+                                            census "rw.value.region";
+                                            Core.Map.set acc
+                                              ~key:(Term.tid d)
+                                              ~data:{ fact with fr_rhs = Some rhs }
+                                        | None ->
+                                            census "rw.value.region.unfoldable";
+                                            acc)
+                                    | Some _ -> census "rw.value.window"; acc
+                                    | None -> census "rw.value.raw"; acc)
+                                | _ -> census "rw.value.raw"; acc)))))
+
+(* Every memory node of the expression re-points at [mem_var] — a
+   converted def keeps no model-memory node — and takes [addr] as its
+   address when the rewrite computed the storage-relative form.  The
+   override receives children unmapped, so it maps the address and
+   store data itself. *)
+(* Each call site's stored slot gains its [hike_argN] def binding the
+   caller's own slot ADDRESS: the store's address, which the rewrite
+   above already re-pointed at the caller's storage.  A partial store
+   passes its address too — the callee reads and writes the exact
+   bytes. *)
