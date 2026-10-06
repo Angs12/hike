@@ -1,0 +1,6 @@
+(library
+ (name hike_synth)
+ (public_name hike.hike_synth)
+ (wrapped false)
+ (modules hike_synth hike_exp_fold)
+ (libraries bap hike.hike_abi core))

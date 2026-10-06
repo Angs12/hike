@@ -258,73 +258,34 @@ let main_role : unit Value.Tag.t =
 let fixed_signature (term : sub term) : bool =
   is_emittable_intrinsic term || Term.has_attr term main_role
 
-(* The promoted stack-slot parameter of index [i]; minted deterministically
-   so the signature and the body agree on the same var. *)
-(* The parameterized families of the hike var grammar: one record per
-   name shape, shared by the minter and the recognizer, so the two
-   cannot drift (a drift would silently mis-route at emission). *)
-type name_family = { prefix : string; suffix : string }
-
-let slot_family = { prefix = "hike_slot"; suffix = "" }
-let call_arg_family = { prefix = "hike_arg"; suffix = "" }
-let region_family = { prefix = "stack_r"; suffix = "_mem" }
-let sec_comp_family = { prefix = "sec_comp_"; suffix = "_mem" }
-
-let family_name { prefix; suffix } (i : int) : string =
-  Printf.sprintf "%s%d%s" prefix i suffix
-
-let is_in_family { prefix; suffix } (v : var) : bool =
-  Base.String.is_prefix (Var.name v) ~prefix
-  && (String.equal suffix ""
-      || Base.String.is_suffix (Var.name v) ~suffix)
-
-(* The index a family var's name carries; [None] for any other name. *)
-let id_of_family { prefix; suffix } (name : string) : int option =
-  let plen = String.length prefix in
-  let slen = String.length suffix in
-  Stdlib.int_of_string_opt
-    (String.sub name plen (String.length name - plen - slen))
-
 (* The promoted slot's POINTER: the caller's slot cell, addressed.  The
    parameter IS the address, so a slot access is a real load/store
    through the caller's own storage. *)
-let arg_slot ~(addr_bits : int) (i : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name slot_family i)
-    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
+let arg_slot ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Slot i)
 
 (* The call-argument temp of slot [i]: the ADDRESS of the caller's slot
    cell (the store the call site made), deterministically minted like
    the slots. *)
-let call_arg ~(addr_bits : int) (i : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name call_arg_family i)
-    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
+let call_arg ~addr_bits i = Hike_synth.base ~addr_bits (Hike_synth.Argument i)
 
 (* The call-argument temps survive DCE: they are the call's arguments. *)
-let is_call_arg (v : var) : bool = is_in_family call_arg_family v
+let is_call_arg v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage (Hike_synth.Argument _)) -> true
+  | _ -> false
 
 (* The FP model's operand temp: [intrinsic:x<N>], width-qualified by the
    fp pass ([intrinsic:x<N>:<width>]); an FP call site's argument.  The
    base name carries no SSA version. *)
-let is_fp_operand_temp (v : var) : bool =
-  let n = Var.name (Var.base v) in
-  let plen = String.length "intrinsic:x" in
-  if
-    Core.String.is_prefix n ~prefix:"intrinsic:x"
-    && String.length n > plen
-  then
-    let rest = String.sub n plen (String.length n - plen) in
-    match String.index_opt rest ':' with
-    | None -> Core.String.for_all rest ~f:Core.Char.is_digit
-    | Some i ->
-      Core.String.for_all (String.sub rest 0 i) ~f:Core.Char.is_digit
-      && Core.String.for_all
-           (String.sub rest (i + 1) (String.length rest - i - 1))
-           ~f:Core.Char.is_digit
-  else false
+let is_fp_operand_temp v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Fp_lane (Hike_synth.Input, _)) -> true
+  | _ -> false
 
-let is_arg_slot (v : var) : bool = is_in_family slot_family v
+let is_arg_slot v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage (Hike_synth.Slot _)) -> true
+  | _ -> false
 
 (* The fission mem vars' type: byte cells addressed at the target's
    address width. *)
@@ -334,21 +295,21 @@ let mem_t ~(addr_bits : int) =
 
 (* The incoming-window memory var: a callee's above-entry accesses are
    materialized against the caller's window through it. *)
-let window_mem ~(addr_bits : int) : var =
-  Var.create ~is_virtual:false ~fresh:false "hike_window_mem"
-    (mem_t ~addr_bits)
+let window_mem ~addr_bits = Hike_synth.bytes ~addr_bits Hike_synth.Window
 
-let is_window_mem (v : var) : bool =
-  String.equal (Var.name v) "hike_window_mem"
+let is_window_mem v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Bytes Hike_synth.Window) -> true
+  | _ -> false
 
-(* The caller-window base parameter (not SP); the model mints the whole var
-   grammar — window, slots, regions — here. *)
-let hike_window_var ~(word : int) : var =
-  Var.create ~is_virtual:false ~fresh:false "hike_window"
-    (Type.Imm (word_bits word))
+(* The caller-window base parameter. *)
+let hike_window_var ~word =
+  Hike_synth.base ~addr_bits:(word_bits word) Hike_synth.Window
 
-let is_window_var (v : var) : bool =
-  String.equal (Var.name v) "hike_window"
+let is_window_var v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage Hike_synth.Window) -> true
+  | _ -> false
 
 let region_name (id : int) : string = Printf.sprintf "stack_r%d" id
 
@@ -367,45 +328,37 @@ let slot_index_of_offset ~(word : int) (rel : int64) : int =
     (Stdlib.Int64.div (Stdlib.Int64.sub rel (Stdlib.Int64.of_int word))
        (Stdlib.Int64.of_int word))
 
-let region_mem ~(addr_bits : int) (id : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name region_family id)
-    (mem_t ~addr_bits)
+let region_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Stack id)
 
 (* The storage base family: one Mem-typed value per storage, minted by
    the attribution's rewrite and bound by the emitter to the storage's
    alloca/global (a parameter-backed storage binds nothing).  A
    rewritten address def's value is [base + displacement]. *)
-let region_ptr_family = { prefix = "stack_r"; suffix = "_ptr" }
+let region_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Stack id)
 
-let region_ptr ~(addr_bits : int) (id : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name region_ptr_family id)
-    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
-
-let is_region_ptr (v : var) : bool = is_in_family region_ptr_family v
+let is_region_ptr v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage (Hike_synth.Stack _)) -> true
+  | _ -> false
 
 (* The VLA storage base: one var per allocation, keyed by the
    decrement def's tid — the emitter binds it to that %vla alloca. *)
-let vla_ptr_family = { prefix = "hike_vla_"; suffix = "_ptr" }
+let vla_ptr ~addr_bits t =
+  Hike_synth.base ~addr_bits (Hike_synth.Allocation (Tid.hash t))
 
-let vla_ptr ~(addr_bits : int) (t : Tid.t) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name vla_ptr_family (Tid.hash t))
-    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
-
-let is_vla_ptr (v : var) : bool = is_in_family vla_ptr_family v
+let is_vla_ptr v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage (Hike_synth.Allocation _)) -> true
+  | _ -> false
 
 (* The section-component storage base: one var per component id, the
    emitter binds it to the component's global. *)
-let sec_comp_ptr_family = { prefix = "sec_comp_"; suffix = "_ptr" }
+let sec_comp_ptr ~addr_bits id = Hike_synth.base ~addr_bits (Hike_synth.Global id)
 
-let sec_comp_ptr ~(addr_bits : int) (id : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name sec_comp_ptr_family id)
-    (Type.Mem ((if addr_bits <= 32 then `r32 else `r64), `r8))
-
-let is_sec_comp_ptr (v : var) : bool = is_in_family sec_comp_ptr_family v
+let is_sec_comp_ptr v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage (Hike_synth.Global _)) -> true
+  | _ -> false
 
 (* A storage's base value: never renamed, never a lane. *)
 let is_storage_base (v : var) : bool =
@@ -416,12 +369,14 @@ let is_storage_base (v : var) : bool =
    (the caller reads the sret buffer through its own pointer) — the
    sweep never kills one. *)
 let is_global_mem (v : var) : bool =
-  Core.String.equal (Var.name (Var.base v)) "mem"
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
+  | _ -> Core.String.equal (Var.name (Var.base v)) "mem"
 
-let region_ptr_id_of (v : var) : int option =
-  if is_in_family region_ptr_family v then
-    id_of_family region_ptr_family (Var.name v)
-  else None
+let region_ptr_id_of v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Storage (Hike_synth.Stack id)) -> Some id
+  | _ -> None
 
 let is_mem var = match Var.typ var with Mem _ -> true | _ -> false
 
@@ -549,16 +504,18 @@ let address_vars (e : exp) : Var.Set.t =
 let data_vars (e : exp) : Var.Set.t =
   Core.Set.diff (value_vars e) (address_vars e)
 
-let is_region_mem (v : var) : bool = is_in_family region_family v
+let is_region_mem v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
+  | _ -> false
 
 (* The region id a [stack_rN_mem] var names; [None] for any other var. *)
-let region_id_of_mem (v : var) : int option =
-  if is_in_family region_family v then id_of_family region_family (Var.name v)
-  else None
+let region_id_of_mem v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Bytes (Hike_synth.Stack id)) -> Some id
+  | _ -> None
 
-(* The section partition: each reserved span's components are carried in the
-   mem var [sec_comp_N_mem] and the emitter routes by name.  A section's
-   arithmetic. *)
+(* The section partition's components carry their storage identity. *)
 
 (* One emitted component: a word range of the section keyed by its native
    span, plus the typed-emission decision. *)
@@ -573,23 +530,23 @@ type sec_comp = {
 
 let sec_comp_name (n : int) : string = Printf.sprintf "sec_comp_%d" n
 
-let sec_comp_mem ~(addr_bits : int) (n : int) : var =
-  Var.create ~is_virtual:false ~fresh:false
-    (family_name sec_comp_family n)
-    (mem_t ~addr_bits)
+let sec_comp_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Global id)
 
 (* The gap runs continue the same numbering; they emit globals but carry no
    BIL var. *)
 let sec_res_name (n : int) : string = Printf.sprintf "sec_res_%d" n
 
-let is_sec_comp_mem (v : var) : bool = is_in_family sec_comp_family v
+let is_sec_comp_mem v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
+  | _ -> false
 
 (* The component id a [sec_comp_N_mem] var names; [None] for any other
    var. *)
-let sec_comp_id_of_mem (v : var) : int option =
-  if is_in_family sec_comp_family v then
-    id_of_family sec_comp_family (Var.name v)
-  else None
+let sec_comp_id_of_mem v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Bytes (Hike_synth.Global id)) -> Some id
+  | _ -> None
 
 (* The tid-name sanitization the symbol-table lookups and the emitted
    names share: a sub's symtab name and its LLVM name stay comparable. *)

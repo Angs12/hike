@@ -374,7 +374,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
          |> Seq.fold ~init:acc ~f:(fun acc d ->
                 if
                   Hike_def_slots.def_is_dyn_alloc d
-                  || Hike_def_slots.def_is_rip_relative d
                 then acc
                 else
                   let leaves = address_leaves ~denote ~blk ~def:d (Def.rhs d) in
@@ -681,7 +680,7 @@ let rewrite_def ~(addr_bits : int) ~(conv : conv) ~(bits : int)
       in
       if Model.is_mem (Def.lhs d) then Def.with_lhs d mem_var else d
   | Conv_global id ->
-      let mem_var = Model.sec_comp_mem ~addr_bits:bits id in
+      let mem_var = Model.sec_comp_mem ~addr_bits id in
       let d =
         Def.map_exp d ~f:(fun e -> (repoint_mapper mem_var)#map_exp e)
       in

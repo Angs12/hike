@@ -146,17 +146,6 @@ val main_role : unit Value.Tag.t
 
 val fixed_signature : sub term -> bool
 
-(* The name families: one record per name shape, shared by the minter
-   and the recognizer. *)
-type name_family = {
-  prefix : string;
-  suffix : string;
-}
-
-val slot_family : name_family
-val call_arg_family : name_family
-val id_of_family : name_family -> string -> int option
-
 val arg_slot : addr_bits:int -> int -> var
 val call_arg : addr_bits:int -> int -> var
 val is_call_arg : var -> bool

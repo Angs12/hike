@@ -72,7 +72,20 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
         Base.List.mapi groups ~f:(fun i (kind, ws) ->
             let cond =
               if i + 1 = Base.List.length groups then Jmp.cond j
-              else Hike_cfg_complete.guarded_cond subject ws in
+              else
+                let face w =
+                  let a = Word.to_int64_exn w in
+                  if Int64.equal base 0L then
+                    Bil.Var
+                      (Hike_synth.module_addr ~addr_bits:(Word.bitwidth w) a)
+                  else Bil.Int w
+                in
+                let eq w = Bil.BinOp (Bil.EQ, subject, face w) in
+                (match ws with
+                 | w :: rest -> Base.List.fold rest ~init:(eq w)
+                     ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
+                 | [] -> failwith "hike: dispatch: empty case group")
+                |> Hike_coerce.coerce_exp in
             let cond = Hike_cfg_complete.and_guard
                          (Hike_cfg_complete.guard_of j) cond in
             let arm = if i = 0 then j else Jmp.create kind in
@@ -213,5 +226,6 @@ let free_regs ~(abi : Hike_abi.t) (sub : sub term) : var list =
              ~default:Var.Set.empty))
   |> Core.Set.filter ~f:(fun v ->
          not (Hike_abi.is_sp abi (Var.base v))
+         && not (Hike_synth.is_module_addr_var Hike_synth.empty v)
          && match Var.typ v with Type.Mem _ -> false | _ -> true)
   |> Core.Set.to_list

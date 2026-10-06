@@ -301,7 +301,7 @@ let tests : unit Alcotest.test list =
         in
         let spec =
           { empty_spec with
-            B2l.spec_sections = [ Some meta ];
+            spec_sections = [ Some meta ];
             spec_externals = [ (0x1000L, "foo.bar") ] }
         in
         let sub, _ =
@@ -340,7 +340,7 @@ let tests : unit Alcotest.test list =
         in
         let spec =
           { empty_spec with
-            B2l.spec_sections = [ Some text_meta; Some meta ];
+            spec_sections = [ Some text_meta; Some meta ];
             spec_relative = [ (0x1000L, 0x504L) ] }
         in
         let sub, _ =
@@ -377,7 +377,7 @@ let tests : unit Alcotest.test list =
         in
         let spec =
           { empty_spec with
-            B2l.spec_sections = [ Some text_meta; Some meta ] }
+            spec_sections = [ Some text_meta; Some meta ] }
         in
         let sub, _ =
           sub_of "classb_slot"
@@ -413,7 +413,7 @@ let tests : unit Alcotest.test list =
         in
         let spec =
           { empty_spec with
-            B2l.spec_sections = [ Some ro_meta; Some meta ] }
+            spec_sections = [ Some ro_meta; Some meta ] }
         in
         let sub, _ =
           sub_of "string_slot"

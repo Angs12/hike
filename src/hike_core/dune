@@ -4,7 +4,6 @@
  (wrapped false)
  (modules
   hike_diag
-  hike_exp_fold
   hike_return
   hike_spec
   hike_stack_model
@@ -17,6 +16,7 @@
   core
   llvm
   hike.hike_abi
+  hike.hike_synth
   hike.hike_stack_bounds
   hike.cbat_vsa_domain)
  (preprocess

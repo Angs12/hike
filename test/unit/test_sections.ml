@@ -27,16 +27,21 @@ let portion_eq (p : A.portion) (sec : A.sec) (lo : int64) (hi : int64) =
 
 let stack_off (o : int64) : Ws.t = Ws.stack_word_i64 o
 
-let rd ?(rip = false) ?(width = 8) ?(extents = []) (ws : Ws.t) =
-  A.range_of_denotation ~extents ~word:8 ~entry ~spans:[] ~rip ~width ws
+let resolved_addr resolved =
+  if resolved then Bil.Var (Hike_synth.module_addr ~addr_bits:64 0x4000L)
+  else Bil.Int (Word.zero 64)
+
+let rd ?(resolved = false) ?(width = 8) ?(extents = []) (ws : Ws.t) =
+  A.range_of_denotation ~extents ~word:8 ~entry ~spans:[] ~synth:Hike_synth.empty
+    ~address:(resolved_addr resolved) ~width ws
 
 let spans_of () =
   [ { A.ds_sec = S.Data; ds_lo = 0x4000L; ds_hi = 0x403FL; ds_slots = [] };
     { A.ds_sec = S.Rodata; ds_lo = 0x5000L; ds_hi = 0x501FL; ds_slots = [] } ]
 
-let rd_spans ?(rip = false) ?(width = 8) (ws : Ws.t) =
-  A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:(spans_of ()) ~rip
-    ~width ws
+let rd_spans ?(resolved = false) ?(width = 8) (ws : Ws.t) =
+  A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:(spans_of ()) ~synth:Hike_synth.empty
+    ~address:(resolved_addr resolved) ~width ws
 
 (* Fixture stack frame: the mem, the SP and the frame pointer. *)
 let mem_rbp () = (memv "at_m", v64 "RSP", v64 "RBP")
@@ -96,9 +101,9 @@ let storage_at (ctx : A.ctx) (sub : sub term) (sec : A.sec) (lo : int64)
         ~f:(fun rs -> rs.A.storage))
 
 (* T3: the data rows of the storage rule — Global conversion through the
-   rip proof, the word hull, the typed-width agreement, and the
+   resolved proof, the word hull, the typed-width agreement, and the
    Whole_span identity. *)
-let sec_load ?(rip = true) ?(width = 8) (addr : int64) : def term =
+let sec_load ?(resolved = true) ?(width = 8) (addr : int64) : def term =
   let d =
     Def.create (v64 "at_g")
       (Bil.Load
@@ -107,10 +112,9 @@ let sec_load ?(rip = true) ?(width = 8) (addr : int64) : def term =
            LittleEndian,
            Size.of_int_exn (8 * width) ))
   in
-  if rip then
-    Def.with_value d
-      (Bap_knowledge.Knowledge.Value.put Bap.Std.rip_relative_addr
-         (Def.value d) true)
+  if resolved then Def.map_exp d ~f:(Exp.substitute
+      (Bil.Int (Word.of_int64 ~width:64 addr))
+      (Bil.Var (Hike_synth.module_addr ~addr_bits:64 addr)))
   else d
 
 let data_ctx (defs : def term list) : A.ctx =
@@ -259,7 +263,7 @@ let tests : unit Alcotest.test list =
            in
            match
              A.range_of_denotation ~extents:[] ~word:8 ~entry ~spans:top_span
-               ~rip:true ~width:8 ws
+               ~synth:Hike_synth.empty ~address:(Bil.Var (Hike_synth.module_addr ~addr_bits:64 (-8L))) ~width:8 ws
            with
            | None, [ p ] ->
                (* The whole occupied range [2^64-8, 2^64-1]: hi+7 wrapped
@@ -317,13 +321,13 @@ let tests : unit Alcotest.test list =
                && portion_eq p S.Stack (pos (-16L)) (pos (-2L))
            | _ -> false));
 
-    pin "SEC-18" "AT1-S03: a rip-tagged plain access wholly in one span proves its portion"
+    pin "SEC-18" "AT1-S03: a resolved-tagged plain access wholly in one span proves its portion"
       (fun () ->
         check "SEC-18"
           (let ws =
              Ws.of_clp (Clp.interval ~width:64 (i2w 0x4010L) (i2w 0x4017L))
            in
-           match rd_spans ~rip:true ~width:8 ws with
+           match rd_spans ~resolved:true ~width:8 ws with
            | None, [ p ] ->
                (* The portion's bounds are the occupied extent (the width
                   rides in). *)
@@ -343,13 +347,13 @@ let tests : unit Alcotest.test list =
                Base.List.for_all ps ~f:(fun p -> not p.A.pt_elig)
                && Base.List.length ps = 2));
 
-    pin "SEC-20" "AT1-S03: the same access without the rip tag contributes identity"
+    pin "SEC-20" "AT1-S03: the same access without the resolved tag contributes identity"
       (fun () ->
         check "SEC-20"
           (let ws =
              Ws.of_clp (Clp.interval ~width:64 (i2w 0x4010L) (i2w 0x4017L))
            in
-           match rd_spans ~rip:false ~width:8 ws with
+           match rd_spans ~resolved:false ~width:8 ws with
            | None, [ p ] -> not p.A.pt_elig
            | _ -> false));
 
@@ -360,7 +364,7 @@ let tests : unit Alcotest.test list =
           (let ws =
              Ws.of_clp (Clp.interval ~width:64 (i2w 0x403CL) (i2w 0x4043L))
            in
-           match rd_spans ~rip:true ~width:8 ws with
+           match rd_spans ~resolved:true ~width:8 ws with
            | None, [ p ] ->
                portion_eq p S.Data 0x403CL 0x403FL && not p.A.pt_elig
            | _ -> false));
@@ -639,18 +643,18 @@ let tests : unit Alcotest.test list =
     (* T3: the data rows of the storage rule. *)
 
 
-    pin "SEC-44" "AT3-DATA: the rip-proved in-span read's Global component is its word range"
+    pin "SEC-44" "AT3-DATA: the resolved-proved in-span read's Global component is its word range"
       (fun () ->
         check "SEC-44"
           (match data_comps (data_ctx [ sec_load 0x4008L ]) with
            | [ c ] -> component_is c ~id:0 ~lo_w:1 ~hi_w:1 ~typed_w:8
            | _ -> false));
 
-    pin "SEC-45" "AT3-DATA: the same read without the rip proof converts to nothing"
+    pin "SEC-45" "AT3-DATA: the same read without the resolved proof converts to nothing"
       (fun () ->
         check "SEC-45"
           (Base.List.is_empty
-             (data_comps (data_ctx [ sec_load ~rip:false 0x4008L ]))));
+             (data_comps (data_ctx [ sec_load ~resolved:false 0x4008L ]))));
 
     pin "SEC-46" "AT3-DATA: a sub-word read's component covers the whole word (the word hull)"
       (fun () ->

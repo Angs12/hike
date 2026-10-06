@@ -135,14 +135,15 @@ val range_of_denotation :
   word:int ->
   entry:int64 ->
   spans:data_span list ->
-  rip:bool ->
+  synth:Hike_synth.table ->
+  address:exp ->
   width:int ->
   Cbat_vsa.WordSet.t ->
   sec_tag option * portion list
 
 (** Why an address denotated TOP: the denotation query itself failed, a
     stack-symbolic set with no surviving bounds, or a plain top (no
-    stack basis, no rip proof — the heap). *)
+    stack or section basis — the heap). *)
 type top_cause = Query_failed | Unbounded_stack | Foreign
 
 (** The full-span claim for a TOP address: a stack-symbolic top clamps

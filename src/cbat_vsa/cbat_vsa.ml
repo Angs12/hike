@@ -152,11 +152,11 @@ let preserved_of_sub ~(abi : Hike_abi.t) ~def_reads (s : sub term) :
     |> Seq.concat_map ~f:(Term.enum def_t)
     |> Seq.fold ~init:Var.Set.empty ~f:begin fun acc d ->
       let acc =
-        if Var.is_virtual (Def.lhs d)
+        if Hike_synth.is_temporary (Def.lhs d)
         then Core.Set.add acc (Var.base (Def.lhs d)) else acc in
       def_reads d
       |> Core.Set.fold ~init:acc ~f:begin fun acc v ->
-        if Var.is_virtual v then Core.Set.add acc (Var.base v) else acc
+        if Hike_synth.is_temporary v then Core.Set.add acc (Var.base v) else acc
       end
     end in
   Cbat_var_id.intern_set (Core.Set.union regs virt)
@@ -277,7 +277,6 @@ let normalize_round (s : Sub.t) : Sub.t =
     | Bil.Var v -> (match Var.typ v with Type.Imm n -> n | _ -> 64)
     | _ -> 64
   in
-  let temps = ref 0 in
   let rewrites =
     Term.enum blk_t s
     |> Seq.fold
@@ -300,11 +299,8 @@ let normalize_round (s : Sub.t) : Sub.t =
                   | Some (d0, x, k, w) when Word.equal k j -> (
                       match mask_of k w with
                       | Some mask ->
-                          incr temps;
                           let t =
-                            Var.create ~is_virtual:true ~fresh:false
-                              (Printf.sprintf "hike_rd%d" !temps)
-                              (Type.Imm w)
+                            Hike_synth.fresh ~bits:w Hike_synth.Refinement
                           in
                           (* d0's tid keys the temp insertion; d's tid keys
                              the mask rewrite. *)

@@ -300,31 +300,55 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     Option.iter (fun v -> Llvm.set_initializer v g) init;
     g
   in
-  let create_run_global name ~words ~bss =
-    let ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
-    declare_internal_array name ~elem_ty:ty ~n:words
-      ~align:Abi.stack_align ~const:false
-      ~init:(if bss then Some (Llvm.const_null (Llvm.array_type ty words)) else None)
+  let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
+  (* The [n] words at section-relative word [wlo]: every copy-relocated
+     slot holds its symbol's address, every other word zero. *)
+  let bss_words ~copy_relocs ~wlo ~n =
+    let ty = Llvm.array_type word_ty n in
+    if copy_relocs = [] then Llvm.const_null ty
+    else begin
+      let arr = Array.init n (fun _ -> Llvm.const_int word_ty 0) in
+      Base.List.iter copy_relocs ~f:(fun (off, sym) ->
+          let widx =
+            Int64.to_int (Int64.div (Int64.of_int off) (Int64.of_int word))
+          in
+          if widx >= wlo && widx < wlo + n then begin
+            let extern =
+              Llvm.declare_global (Llvm.i8_type llvm_ctx) sym llvm_module
+            in
+            arr.(widx - wlo) <- Llvm.const_ptrtoint extern word_ty
+          end);
+      Llvm.const_array word_ty arr
+    end
   in
-  let create_comp_global name (c : Model.sec_comp) ~is_const ~bss =
+  let create_run_global name ~copy_relocs ~wlo ~words ~bss =
+    declare_internal_array name ~elem_ty:word_ty ~n:words
+      ~align:Abi.stack_align ~const:false
+      ~init:
+        (if bss then Some (bss_words ~copy_relocs ~wlo ~n:words) else None)
+  in
+  let create_comp_global name (c : Model.sec_comp) ~is_const ~bss ~copy_relocs =
     let words = c.Model.hi_w - c.Model.lo_w + 1 in
     let elem_ty =
-      if c.Model.typed_w >= word then
-         Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word)
+      if c.Model.typed_w >= word then word_ty
       else Llvm.integer_type llvm_ctx (c.Model.typed_w * 8)
     in
     let n =
       if c.Model.typed_w >= word then words
       else words * (word / c.Model.typed_w)
     in
-    let ty = Llvm.array_type elem_ty n in
+    let init =
+      if not bss then None
+      else if c.Model.typed_w >= word then
+        Some (bss_words ~copy_relocs ~wlo:c.Model.lo_w ~n:words)
+      else Some (Llvm.const_null (Llvm.array_type elem_ty n))
+    in
     declare_internal_array name ~elem_ty ~n
       ~align:(align_of (Int64.add c.Model.sec_lo (Int64.of_int (c.Model.lo_w * word))))
-      ~const:(is_const && not bss)
-      ~init:(if bss then Some (Llvm.const_null ty) else None)
+      ~const:(is_const && not bss) ~init
   in
   let tile name ~(comps : Model.sec_comp list) ~lo ~hi ~words ~is_const ~bss
-      ~arr =
+      ~copy_relocs ~arr =
     let sorted =
       Base.List.sort comps ~compare:(fun a b ->
           Int.compare a.Model.lo_w b.Model.lo_w)
@@ -334,8 +358,8 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     Base.List.iter sorted ~f:(fun c ->
         if c.Model.lo_w > !cursor then begin
           let g =
-            create_run_global (Model.sec_res_name !counter)
-              ~words:(c.Model.lo_w - !cursor) ~bss
+            create_run_global (Model.sec_res_name !counter) ~copy_relocs
+              ~wlo:!cursor ~words:(c.Model.lo_w - !cursor) ~bss
           in
           owners :=
             { own_id = None;
@@ -350,7 +374,7 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
         end;
         let g =
           create_comp_global (Model.sec_comp_name c.Model.comp_id) c
-            ~is_const ~bss
+            ~is_const ~bss ~copy_relocs
         in
         owners :=
           { own_id = Some c.Model.comp_id;
@@ -365,8 +389,8 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
         cursor := c.Model.hi_w + 1);
     if !cursor < words then begin
       let g =
-        create_run_global (Model.sec_res_name !counter)
-          ~words:(words - !cursor) ~bss
+        create_run_global (Model.sec_res_name !counter) ~copy_relocs
+          ~wlo:!cursor ~words:(words - !cursor) ~bss
       in
       owners :=
         { own_id = None;
@@ -424,21 +448,28 @@ let build_sections llvm_ctx llvm_module (spec : section_spec) : section list =
     let comps = comps_of si_lo si_hi in
     match entry.Hike_stack_model.sm_image with
     | None ->
-        let base =
-          if sm_copy_relocs = [] then
-            create_uninitialized_global llvm_ctx llvm_module
-              (Int64.sub (Int64.add si_hi 1L) si_lo) llvm_name
-          else
-            create_copy_reloc_bss llvm_ctx llvm_module
-              (Int64.sub (Int64.add si_hi 1L) si_lo) llvm_name
-              sm_copy_relocs ~word
-        in
-        common true None base
+        if not (Base.List.is_empty comps) then
+          (* The bss components carry their own storage, exactly as an
+             image section's do; a copy-relocated word holds its
+             symbol's address in its component global. *)
+          tile llvm_name ~comps ~lo:si_lo ~hi:si_hi ~words:si_words
+            ~is_const:false ~bss:true ~copy_relocs:sm_copy_relocs ~arr:None
+        else
+          let base =
+            if sm_copy_relocs = [] then
+              create_uninitialized_global llvm_ctx llvm_module
+                (Int64.sub (Int64.add si_hi 1L) si_lo) llvm_name
+            else
+              create_copy_reloc_bss llvm_ctx llvm_module
+                (Int64.sub (Int64.add si_hi 1L) si_lo) llvm_name
+                sm_copy_relocs ~word
+          in
+          common true None base
     | Some image ->
         if not (Base.List.is_empty comps) && Option.is_none (whole_id si_lo si_hi)
         then
           tile llvm_name ~comps ~lo:si_lo ~hi:si_hi ~words:si_words
-            ~is_const:sm_const ~bss:false ~arr:(Some image)
+            ~is_const:sm_const ~bss:false ~copy_relocs:[] ~arr:(Some image)
         else
           let base =
             create_section_global llvm_ctx llvm_module

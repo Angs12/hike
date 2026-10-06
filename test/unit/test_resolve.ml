@@ -24,8 +24,10 @@ let jmps_of_blk sub i =
 let eq_target (a : var) (b : var) (w : int64) j =
   match Jmp.cond j with
   | Bil.BinOp
-      (Bil.EQ, Bil.BinOp (Bil.PLUS, Bil.Var a', Bil.Var b'), Bil.Int w') ->
-    Var.equal a' a && Var.equal b' b && Int64.equal (Word.to_int64_exn w') w
+      (Bil.EQ, Bil.BinOp (Bil.PLUS, Bil.Var a', Bil.Var b'), face) ->
+    Var.equal a' a && Var.equal b' b
+    && Base.Option.equal Int64.equal
+         (Hike_synth.address_of_exp Hike_synth.empty face) (Some w)
   | _ -> false
 
 (* [of_wordset] fans: the pinned fixtures are single-piece address lines. *)

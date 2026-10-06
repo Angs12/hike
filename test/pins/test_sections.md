@@ -23,9 +23,9 @@ assertions.
 | SEC-15 | a crossing interval splits into Stack + Args portions, both identity | emit one portion across the boundary (no split) | SEC-15 red: `length ps ≠ 2` / section wrong |
 | SEC-16 | a bounded single-space symbolic read is eligible | clear `pt_elig` on the symbolic arm | SEC-16 red: `not p.pt_elig` |
 | SEC-17 | a plain band hull is identity (no StackOff proof) | set `pt_elig = true` on the plain arm | SEC-17 red: `p.pt_elig` |
-| SEC-18 | a rip-tagged plain access wholly in one span is the `Sec` proof with occupied bounds | ignore the rip flag when forming `Sec` | SEC-18 red: `t ≠ Sec …` / bounds differ |
+| SEC-18 | a resolved address basis wholly in one span proves its occupied portion | discard the synthetic address basis | SEC-18 red: the portion is ineligible |
 | SEC-19 | a symbolic range crossing the retaddr boundary is identity on both sides | mark crossing portions eligible | SEC-19 red: some `p.pt_elig` |
-| SEC-20 | the same access without the rip tag contributes identity (`None`) | stamp a `Sec` tag when `rip=false` | SEC-20 red: `t ≠ None` / `p.pt_elig` |
+| SEC-20 | the same denotation without a resolved address basis contributes identity | grant eligibility without a section basis | SEC-20 red: the portion is eligible |
 | SEC-21 | a plain access straddling a span edge contributes only the intersecting portion, identity | emit the whole access or mark it eligible | SEC-21 red: bounds or `pt_elig` differ |
 | SEC-27 | a TOP write + known read share `Stack_residue` | keep the TOP write out of the merge (spurious Region) | SEC-27 red: storage ≠ `Stack_residue` |
 | SEC-28 | the TOP write also claims the Args space (`Stack_residue`) | scope the TOP write to Stack only | SEC-28 red: Args range is unowned |
@@ -38,8 +38,8 @@ assertions.
 | SEC-40 | `stamp_tags` lands `Stack (entry-16,entry-16)` on the known read | drop the `set_sec_tag` call in `stamp_tags` | SEC-40 red: tag is `None` / wrong bounds |
 | SEC-41 | `stamp_tags` lands `Args (entry+12,entry+12)` on the intra-cell read | as SEC-40 | SEC-41 red: tag is `None` / wrong bounds |
 | SEC-42 | a TOP-addressed store carries no tag | stamp the unknown-provenance def too | SEC-42 red: tag is `Some _` |
-| SEC-44 | `global_comps_of` — a rip-proved in-span read is a one-word component typed 8 | drop the rip proof requirement in the data collector | SEC-44 red: no/short component |
-| SEC-45 | the same read without the rip proof converts to nothing | emit a component without the rip proof | SEC-45 red: list nonempty |
+| SEC-44 | `global_comps_of` — a resolved in-span read is a one-word component typed 8 | discard the synthetic address basis in the data collector | SEC-44 red: no/short component |
+| SEC-45 | the same read without a resolved address basis converts to nothing | emit a component without a section basis | SEC-45 red: list nonempty |
 | SEC-46 | a sub-word read's component covers the whole word (word hull) | key the component by bytes instead of words | SEC-46 red: `lo_w/hi_w` ≠ 0 |
 | SEC-47 | same-word reads merge; agreeing widths type the tile | fail to merge same-word facts | SEC-47 red: two components |
 | SEC-48 | disagreeing widths collapse the component's type to bytes (typed_w 1) | keep the first width instead of the byte floor | SEC-48 red: `typed_w ≠ 1` |

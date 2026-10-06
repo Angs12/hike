@@ -648,8 +648,7 @@ let compile_sub (target : Theory.Target.t) (sub : sub term) : sub term =
                     Some
                       (Term.tid j,
                        Def.create
-                         (Var.create ~is_virtual:true ~fresh:true "hike_cmp"
-                            (Type.Imm 1)) c)
+                         (Hike_synth.fresh ~bits:1 Hike_synth.Comparison) c)
                 | _ -> None)
           in
           let blk =

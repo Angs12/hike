@@ -107,6 +107,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       && not (Model.is_window_mem v)
       && not (Model.is_sec_comp_mem v)
       && not (Model.is_storage_base v)
+      && not (Hike_synth.is_module_addr_var Hike_synth.empty v)
       && not (Var.same v pc)
       && not (Var.same v window)
       && not (Model.is_arg_slot (Var.base v))
@@ -497,7 +498,8 @@ let free_regs_ssa ~(abi : Abi.t) (sub : sub term) : var list =
          not
            (Model.is_region_mem v || Model.is_window_mem v
           || Model.is_sec_comp_mem v || Model.is_storage_base v
-          || Model.is_window_var v || Abi.is_sp abi (Var.base v)))
+          || Model.is_window_var v || Abi.is_sp abi (Var.base v)
+          || Hike_synth.is_module_addr_var Hike_synth.empty v))
   |> Core.Set.to_list
 
 let ssa_program ~(target : Bap_core_theory.Theory.Target.t)

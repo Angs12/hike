@@ -221,6 +221,11 @@ let base_operands ~(last_defs : def term Var.Map.t) ~(sub : sub term)
         with
         | Some _, Some _ -> Some e
         | _ -> None)
+      | Bil.Var v when Hike_synth.is_base_var Hike_synth.empty v ->
+        (* Every synthetic base family — the resolved rip address, the
+           argument lanes, the allocas, the storage pointers — is a base
+           operand, never a cell. *)
+        Some e
       | Bil.Var v -> (
         let found = find_def at v in
         match found with

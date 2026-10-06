@@ -367,14 +367,6 @@ let create_sub ctx scope sub =
     in
     let fr : sub_frame = { entry_line; entry_ptr; regions } in
     scope.cur_frame := Some fr;
-    (* The section-component storage base vars bind to their globals
-       (the run's sec_comps map carries (global, native base)). *)
-    Core.Map.to_sequence !(ctx.sec_comps)
-    |> Seq.iter ~f:(fun (v, (base, _)) ->
-        Base.Option.iter (Hike_stack_model.sec_comp_id_of_mem v) ~f:(fun id ->
-            let pv = Hike_stack_model.sec_comp_ptr ~addr_bits:ctx.addr_bits id in
-            scope.sec_comp_ptrs :=
-              WVarMap.add (wvar_of pv) base !(scope.sec_comp_ptrs)));
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;
     populate_blks ctx scope blks sub fr;
@@ -407,7 +399,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     (prog : program term) : unit =
   (* The sections construct from the spec before any function declares. *)
   let sections = Bil2llvm_section.build_sections llvm_ctx llvm_module spec in
-  let copy_relocs = spec.spec_copy_relocs in
   let abi = Abi.of_target target in
   (* The signature rides each sub's own [arg] terms (written by the types
      pass); the emitter reads it off the sub. *)
@@ -482,6 +473,10 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
                      match Word.to_int64 w with
                      | Ok x when is_start x -> Core.Set.add acc x
                      | _ -> acc
+                   method! visit_var v acc =
+                     match Hike_synth.module_addr_of synth v with
+                     | Some x when is_start x -> Core.Set.add acc x
+                     | _ -> acc
                  end)#visit_exp
                   e acc
               in
@@ -523,7 +518,6 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   in
   let ctx =
     { symtab;
-      copy_relocs;
       relative = spec.spec_relative;
       externals = spec.spec_externals;
       target;
@@ -555,8 +549,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
          | None -> Core.Int64.Set.empty);
       sub_starts }
   in
-  (* The named-component map: filled before any body emits; the
-     rip-relative path renders through the same owners. *)
+  (* The named-component map is filled before any body emits. *)
   Base.List.iter sections ~f:(fun section ->
       Base.List.iter section.owners ~f:(fun o ->
           match o.own_id with
@@ -763,15 +756,7 @@ type sec_meta = Hike_stack_model.sec_meta = {
   sm_copy_relocs : (int * string) list;
 }
 
-type section_spec = Bil2llvm_env.section_spec = {
-  spec_comps : Hike_stack_model.sec_comp list;
-  spec_whole : (int * int64 * int64) list;
-  spec_word : int;
-  spec_sections : sec_meta option list;
-  spec_relative : (int64 * int64) list;
-  spec_externals : (int64 * string) list;
-  spec_copy_relocs : int64 list;
-}
+type section_spec = Hike_spec.section_spec
 
 let native_fp_op = Bil2llvm_fp.native_fp_op
 

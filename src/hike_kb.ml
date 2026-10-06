@@ -47,9 +47,8 @@ type facts = {
      escape the sub.  The attribution computes them from its trees; the
      sweep reads them off the record. *)
   escape_roots : Var.Set.t Tid.Map.t;
-  (* The synthetic-variable vocabulary (the rip pass's resolved
-     addresses, and the emitter's other synthetic values): var -> kind,
-     recorded once so no consumer parses names. *)
+  (* All synthetic kinds, recorded once at attribution's facts boundary
+     after storage and dispatch materialization. *)
   synth : Hike_synth.table;
 }
 

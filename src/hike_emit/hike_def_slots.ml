@@ -36,14 +36,6 @@ let def_dyn_alloc_d : bool D.t =
 let def_dyn_alloc_slot = D.slot def_dyn_alloc_d
 let def_is_dyn_alloc (d : def term) : bool = D.get def_dyn_alloc_d d
 
-(* The def's address is a rip-relative constant; the emitter re-renders it
-   through the section owner. *)
-let def_is_rip_relative (d : def term) : bool =
-#ifdef VSA_DEBUG
-  let () = Cbat_vsa.Cbat_kb_census.bump "rip_relative_addr.get" in
-#endif
-  KB.Value.get rip_relative_addr (Def.value d)
-
 (* The def computes an address value at/above the entry line; its emitted
    integer re-bases to the hike_window parameter. *)
 let def_window_value_d : bool D.t =

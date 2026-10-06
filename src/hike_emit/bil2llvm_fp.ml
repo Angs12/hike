@@ -16,7 +16,6 @@ let fp_intrinsic_name = strip_at
    ([intrinsic:x0]) for a single- AND a double-precision operand, and
    BAP's var identity is type-blind, so the width must be in the name.
    [hike-fp] qualifies every occurrence. *)
-let temp_name (n : string) (w : int) : string = Printf.sprintf "%s:%d" n w
 
 (* One row per mapped intrinsic name, with the operand width it names.
    The unsized spellings ([_binary]) carry none: the lifter picks the
@@ -115,14 +114,12 @@ let conv_in_w = function
   | _ -> 64
 
 let fp_sig_of (op : native_fp) ~(w : int) : fp_sig =
-  let v n k =
-    Var.create ~is_virtual:false ~fresh:false (temp_name n k) (Type.Imm k)
-  in
-  let x0 k = v "intrinsic:x0" k in
-  let y0 k = v "intrinsic:y0" k in
+  let x0 k = Hike_synth.fp_lane ~addr_bits:k Hike_synth.Input 0 in
+  let y0 k = Hike_synth.fp_lane ~addr_bits:k Hike_synth.Output 0 in
   match op with
   | FMUL | FADD | FSUB | FDIV | FREM | FORDER ->
-    { fp_args = [ x0 w; v "intrinsic:x1" w ]; fp_rets = [ y0 w ] }
+    { fp_args = [ x0 w; Hike_synth.fp_lane ~addr_bits:w Hike_synth.Input 1 ];
+      fp_rets = [ y0 w ] }
   | SFLOAT | SINT | ISNAN ->
     { fp_args = [ x0 w ]; fp_rets = [ y0 w ] }
   | FCONVERT res_w ->

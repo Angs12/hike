@@ -20,6 +20,23 @@ let dce_jmps (sub : sub term) : jmp term list =
 
 let tests : unit Alcotest.test list =
   [
+    pin "DCE-13" "every written global component survives without an in-sub reader"
+      (fun () ->
+         let memories = [Hike.Synth.Global 1; Hike.Synth.Global 2;
+                         Hike.Synth.Stack 1] in
+         let defs = Base.List.map memories ~f:(fun storage ->
+             let mem = Hike.Synth.bytes ~addr_bits:64 storage in
+             Def.create mem (Bil.Store (Bil.Var mem, Bil.Int (bw64 0),
+                                       Bil.Int (bw64 9), LittleEndian, `r64))) in
+         let sub = straight_sub "global_writes" defs in
+         let sub = Hike.Dce.dce ~target:Theory.Target.unknown
+             ~escape_roots:Var.Set.empty sub in
+         let lhs = Base.List.map (dce_defs sub) ~f:Def.lhs in
+         check "both globals stay and the unused local storage dies"
+           (Base.List.length lhs = 2
+            && Base.List.for_all lhs ~f:(fun v ->
+                match Hike.Synth.storage_of Hike.Synth.empty v with
+                | Some (Hike.Synth.Global _) -> true | _ -> false)));
     (* D0: totality + basic sweep — unused def dies, jmp-read def survives. *)
 
 

@@ -11,6 +11,7 @@ No keep arms, no escape roots.
 
 | id | mechanism | disable recipe | red evidence |
 |---|---|---|---|
+| DCE-13 | Every written global component is a root across sub boundaries; an unused local storage still dies. | Keep only the first global root, or classify component memories as local. | One or both component stores disappear. |
 | DCE-02 | the canonical direct return edge stands; the popped-address def dies; indirect-with-return and direct calls stay untouched | re-introduce the `mem[RSP]` load in the epilogue rewrite | the popped-address def survives → `t_gone` fails |
 | DCE-03 | an ABI register def survives through the jump's boundary reads: a ret reads the return registers, a call the parameter registers and the return registers | drop the boundary reads from the roots (or the return regs from a call's reads) | `lhs_set` loses `RAX`/`RDI` → the check fails |
 | DCE-04 | the two-tier region-mem rule: a fissioned store chain dies iff no Load roots it | make `region_mem` stores always live | `dead_count = 0` fails |

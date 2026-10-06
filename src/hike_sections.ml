@@ -106,10 +106,7 @@ let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
     spec_word = word;
     spec_sections = meta;
     spec_relative = relative;
-    spec_externals = externals;
-    spec_copy_relocs =
-      Base.List.concat_map meta ~f:(fun m ->
-          Base.Option.value_map m ~default:[] ~f:slot_addrs_of) }
+    spec_externals = externals }
 
 type point = { p_sec : sec; p_pos : int64 } [@@deriving sexp]
 type range = { lo : point; hi : point } [@@deriving sexp]
@@ -342,9 +339,9 @@ let stack_offset_portions ~(extents : (int64 * int64) list) ~(word : int)
 (* Case 2: a plain (offset-free) address.  A stack-band hull keeps
    the memory form; an unbounded ascending set's minimum names its
    section; the remaining bounded sets split across the data spans,
-   with a rip proof where one span owns the whole occupied extent. *)
+   with a resolved address basis where one span owns the occupied extent. *)
 let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
-    ~(entry : int64) ~(spans : data_span list) ~(rip : bool) ~(width : int)
+    ~(entry : int64) ~(spans : data_span list) ~(basis : int64 option) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   let cei = Model.args_ceiling in
   let in_band = Vsa.WordSet.in_stack_segment ws in
@@ -362,8 +359,8 @@ let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
       if Vsa.WordSet.is_infinite ws && Vsa.WordSet.is_ascending ws then begin
         (* Accesses never cross sections, so an unbounded ascending
            access's minimum names its section; the claim clamps into
-           it.  A non-rip address outside every span is the heap. *)
-        if rip then
+           it.  An address without a section basis keeps the identity claim. *)
+        if Option.is_some basis then
           match
             Base.List.find spans ~f:(fun d ->
                 Stdlib.Int64.unsigned_compare lo d.ds_lo >= 0
@@ -401,7 +398,7 @@ let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
               && Stdlib.Int64.unsigned_compare s phi <= 0)
         in
         let elig =
-          rip && whole_in_one
+          Option.is_some basis && whole_in_one
           && not (Base.List.exists parts ~f:at_slot)
         in
         ( None,
@@ -412,8 +409,15 @@ let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
 (* The def's address claim: the sections each reachable position may
    touch, and whether conversion is proven. *)
 let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
-    ~(entry : int64) ~(spans : data_span list) ~(rip : bool) ~(width : int)
+    ~(entry : int64) ~(spans : data_span list) ~(synth : Hike_synth.table)
+    ~(address : exp) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
+  let regions = Base.List.mapi spans ~f:(fun id span ->
+      { Hike_synth.id; lo = span.ds_lo; hi = span.ds_hi }) in
+  let basis = Base.Option.bind (Hike_synth.address_basis synth address)
+      ~f:(fun a -> Base.Option.map
+          (Hike_synth.of_address ~addr_bits:(Model.word_bits word) ~regions a)
+          ~f:(fun _ -> a)) in
   if Vsa.WordSet.is_bottom ws then
     (* A def-anchored bottom is the refinement's empty meet, not a
        reachability proof — the def's block is CFG-reachable.  The
@@ -422,9 +426,8 @@ let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
     top_claim ~extents ~cause:Query_failed ~entry ~word
   else if Vsa.WordSet.is_top ws then
     (* A plain top claims the sub-local spaces' full range — the
-       identity member forcing write closure; a rip-relative address
-       is a link-time constant in the encoding, so plain top there is
-       an analysis loss answered the same way. *)
+       identity member forcing write closure; a resolved address
+       that loses its bounds receives the same conservative claim. *)
     if Option.is_some (Vsa.WordSet.stack_offsets ws) then
       top_claim ~extents ~cause:Unbounded_stack ~entry ~word
     else top_claim ~extents ~cause:Foreign ~entry ~word
@@ -437,13 +440,14 @@ let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
     | _ -> (
       match Vsa.WordSet.stack_offsets ws with
       | Some _ -> stack_offset_portions ~extents ~word ~entry ~width ws
-      | None -> plain_portions ~extents ~word ~entry ~spans ~rip ~width ws)
+      | None -> plain_portions ~extents ~word ~entry ~spans ~basis ~width ws)
 
 type env = {
   word : int;
   entry : int64;
   spans : data_span list;
   extents : (int64 * int64) list;
+  synth : Hike_synth.table;
   params : var list;
   sp : var;
   denote : blk:blk term -> ?def:def term -> exp ->
@@ -566,6 +570,7 @@ let is_const_chain (e : exp) : bool =
     (fun e child ->
       match e with
       | Bil.Int _ -> true
+      | Bil.Var v -> Hike_synth.is_module_addr_var Hike_synth.empty v
       | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) -> child a && child b
       | _ -> false)
     e
@@ -652,7 +657,7 @@ let collect (env : env) (prog : program term) : collecting =
                 let tag, portions =
                   range_of_denotation ~extents:env.extents
                      ~word:env.word ~entry:env.entry ~spans:env.spans
-                     ~rip:(Hike_def_slots.def_is_rip_relative d) ~width ws
+                     ~synth:env.synth ~address:addr ~width ws
                 in
                 Some { tag; origin = Vsa.WordSet.origin ws; portions }
             in
@@ -831,7 +836,7 @@ let attribute ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     { word; entry; spans;
       extents = [];
       params = abi.Hike_abi.int_param_regs;
-      sp = abi.Hike_abi.sp; denote = facts.denote }
+      synth = facts.synth; sp = abi.Hike_abi.sp; denote = facts.denote }
   in
   let collected = collect env prog in
   (* The whole-served set: computed once, consumed by the data
@@ -964,11 +969,9 @@ let typed_escape_roots ~(addr_bits : int) ~(abi : Hike_abi.t)
          |> Seq.fold ~init:acc ~f:(fun acc d ->
              let lhs = Def.lhs d in
              let typed =
-               if Model.is_call_arg lhs then
-                 match Model.id_of_family Model.call_arg_family (Var.name lhs) with
-                 | Some i -> consumes_slot blk i
-                 | None -> false
-               else Core.Set.mem arg_regs (Var.base lhs)
+               match Hike_synth.storage_of Hike_synth.empty lhs with
+               | Some (Hike_synth.Argument i) -> consumes_slot blk i
+               | _ -> Core.Set.mem arg_regs (Var.base lhs)
              in
              if typed then
                Base.List.fold (named_storages ~bases (Def.rhs d)) ~init:acc
@@ -1218,4 +1221,3 @@ let layout_of_tree ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   in
   let window_param = args_residue in
   { Hike_stack_model.regions; window_param }
-

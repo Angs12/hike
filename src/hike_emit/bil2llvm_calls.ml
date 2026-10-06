@@ -535,10 +535,7 @@ let create_thunk ctx (sub_tid : tid) =
             let v = Arg.lhs a in
             if Hike_stack_model.is_arg_slot v then
               let i =
-                match
-                  Hike_stack_model.id_of_family Hike_stack_model.slot_family
-                    (Var.name v)
-                with
+                match Hike_synth.index_of ctx.synth v with
                 | Some i -> i
                 | None ->
                     failwith
@@ -619,7 +616,12 @@ let create_return ctx scope blk_tid llvm_builder cur_sub =
    the module's externals name. *)
 let external_slot_target ctx ?(sub : sub term option) (target : exp) :
     string option =
-  match Hike_transfer.slot_of_target ?sub target with
+  (* A resolved access is component-relative; the component's module
+     origin recovers the absolute slot the loader's externals name. *)
+  let origin v =
+    Base.Option.map (Core.Map.find !(ctx.sec_comps) v) ~f:snd
+  in
+  match Hike_transfer.slot_of_target ~synth:ctx.synth ~origin ?sub target with
   | Some a ->
     Base.List.find_map ctx.externals ~f:(fun (slot, name) ->
         if Int64.equal slot a then Some name else None)

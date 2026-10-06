@@ -34,7 +34,7 @@ let rec intern (v : var) : int =
     grow i;
     Core.Hashtbl.set ids ~key:v ~data:i;
     (!vars).(i) <- Some v;
-    (!virtuals).(i) <- Var.is_virtual v;
+    (!virtuals).(i) <- Hike_synth.is_temporary v;
     (* The base's id serves the keep/need tests; a base var is itself. *)
     (!bases).(i) <- intern (Var.base v);
     i

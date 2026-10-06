@@ -1,5 +1,5 @@
 (* The node-fission pass: every def keeps exactly one memory node
-   inline; the later nodes of a multi-node rhs become fresh virtual
+   inline; the later nodes of a multi-node rhs become fresh synthetic
    load defs before it, reading the same mem-var state (nested loads
    see pre-store memory either way).  The per-def tag is then the
    complete proof of the def's only memory node. *)
@@ -10,7 +10,7 @@ let mem_count (e : exp) : int = Hike_stack_model.mem_node_count e
 
 (* The first memory node stays inline (the one the VSA's
    classification describes); every distinct later load becomes a
-   fresh virtual def; equal later nodes share one def. *)
+   fresh synthetic def; equal later nodes share one def. *)
 let split_def (d : def term) : def term list =
   let rhs = Def.rhs d in
   if mem_count rhs <= 1 then [ d ]
@@ -22,8 +22,7 @@ let split_def (d : def term) : def term list =
       | Some v -> v
       | None ->
         let v =
-          Var.create ~is_virtual:true ~fresh:true "hike_ld"
-            (Type.Imm (Size.in_bits bits))
+          Hike_synth.fresh ~bits:(Size.in_bits bits) Hike_synth.Load
         in
         later := (node, v) :: !later;
         v

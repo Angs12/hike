@@ -130,19 +130,14 @@ let find_mem_node (exp : exp) : mem_node option =
   | Some (`Store (_, addr, data, size)) -> Some (`Store (addr, data, size))
   | None -> None
 
-let marker_name = "hike_acc"
-
 let marker_of_size size =
-  Var.create ~is_virtual:true ~fresh:false marker_name
-    (Type.Imm (Size.in_bits size))
+  Hike_synth.accumulator ~addr_bits:(Size.in_bits size)
 
 (* The Let-binder's evaluation temp: a fresh identity with a name the
    lifted vocabulary never uses, so the substitution cannot capture. *)
-let fresh_let_var scope (v : Var.t) : Var.t =
+let fresh_let_var ctx scope (v : Var.t) : Var.t =
   incr scope.let_counter;
-  Var.create ~is_virtual:true ~fresh:false
-    (Printf.sprintf "hike_let%d" !(scope.let_counter))
-    (Var.typ v)
+  Hike_synth.let_var ~addr_bits:ctx.addr_bits !(scope.let_counter) (Var.typ v)
 
 (* Maps only the mem node matching (addr, size) to a var, preserving
    the enclosing structure. *)
@@ -186,11 +181,31 @@ let static_offset scope (exp : exp) : int64 option =
 
 (* The one renderer for the synthetic vocabulary: the KB table names
    the kind, this maps it to the LLVM value. *)
-let synth_value (ctx : Bil2llvm_env.emit_ctx) (k : Hike_synth.kind) :
-    Llvm.llvalue =
-  match k with
-  | Hike_synth.Addr a ->
-    remapped_const ctx ctx.llvm_ctx ctx.llvm_module a ctx.i64_ty
+let variable_value ctx scope llvm_builder blk_tid v =
+  let missing () =
+    warn_undef_read ctx scope v blk_tid;
+    frozen_undef ctx scope v
+  in
+  match Hike_synth.module_addr_of ctx.synth v with
+  | Some a ->
+    let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
+    Base.Option.value
+      (remap_native ctx ctx.llvm_ctx ctx.llvm_module a
+         ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
+      ~default:(Llvm.const_of_int64 ty a false)
+  | None -> (
+    match Base.Option.first_some (get_ssaval scope v) (get_local scope blk_tid v) with
+    | Some value -> value
+    | None ->
+      if Option.is_some (Hike_synth.env_of ctx.synth v) then
+        load_env_reg ctx llvm_builder v
+      else
+        match Hike_synth.memory_var ~addr_bits:ctx.addr_bits v with
+        | Some mv -> (
+          match Core.Map.find !(ctx.sec_comps) mv with
+          | Some (base, _) -> base
+          | None -> missing ())
+        | None -> missing ())
 
 let rec create_offset ctx scope llvm_builder blk_tid exp :
     Llvm.llvalue option =
@@ -248,27 +263,7 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
           (create_exp ctx scope llvm_builder blk_tid e)
       in
       create_unop llvm_builder (op, v)
-  | Var v -> (
-      match Hike_synth.resolve ctx.synth v with
-      | Some k -> synth_value ctx k
-      | None -> (
-          match get_ssaval scope v with
-          | Some x -> x
-          | None -> (
-              match get_local scope blk_tid v with
-              | Some x -> x
-              | None -> (
-                  match WVarMap.find_opt (wvar_of v) !(scope.sec_comp_ptrs) with
-                  | Some x -> x
-                  | None ->
-                      if Abi.is_env_reg ctx.abi v then
-                        (* An environment register is process state: the
-                           read loads the module global. *)
-                        load_env_reg ctx llvm_builder v
-                      else begin
-                        warn_undef_read ctx scope v blk_tid;
-                        frozen_undef ctx scope v
-                      end))))
+  | Var v -> variable_value ctx scope llvm_builder blk_tid v
   | Int i -> create_immediate ctx i
   | Cast (cast, i, e) ->
       let v = create_exp ctx scope llvm_builder blk_tid e in
@@ -301,19 +296,41 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
         | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
       in
       Bil2llvm_memory.load_ptr llvm_builder ty ptr
-  | Store (_, addr, data, _, _) ->
+  | Store (mem, addr, data, _, _) ->
       let a = create_exp ctx scope llvm_builder blk_tid addr in
       let d = create_exp ctx scope llvm_builder blk_tid data in
-      Bil2llvm_memory.store ctx llvm_builder (d, a)
-  | Load (_, addr, _, size) ->
+      (* A resolved storage access carries its storage's memory var and
+         the storage-relative index: one component renderer for every
+         nested access, exactly as for a def's own node. *)
+      (match mem with
+       | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
+         let idx = as_integer ctx llvm_builder a in
+         match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
+         | Some p -> Bil2llvm_memory.store_ptr llvm_builder d p
+         | None -> Bil2llvm_memory.store ctx llvm_builder (d, a))
+       | _ -> Bil2llvm_memory.store ctx llvm_builder (d, a))
+  | Load (mem, addr, _, size) ->
       let a = create_exp ctx scope llvm_builder blk_tid addr in
-      (match want with
-       | Some ty when not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
-           Bil2llvm_memory.load_ptr llvm_builder ty
-             (as_pointer ctx llvm_builder a)
-       | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
+      (match mem with
+       | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
+         let idx = as_integer ctx llvm_builder a in
+         match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
+         | Some p ->
+           let ty =
+             match want with
+             | Some t -> t
+             | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
+           in
+           Bil2llvm_memory.load_ptr llvm_builder ty p
+         | None -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
+       | _ -> (
+         match want with
+         | Some ty when not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
+             Bil2llvm_memory.load_ptr llvm_builder ty
+               (as_pointer ctx llvm_builder a)
+         | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size)))
   | Let (var, e, body) ->
-      let unique_var = fresh_let_var scope var in
+      let unique_var = fresh_let_var ctx scope var in
       let v = create_exp ctx scope llvm_builder blk_tid e in
       insert_local scope blk_tid unique_var v;
       let body = Exp.substitute (Var var) (Var unique_var) body in
@@ -414,64 +431,46 @@ and storage_access ?want ?(is_window = false)
       emit_with_marker ctx scope llvm_builder blk_tid marker ~emit
         ~rewrite:(rewrite addr size)
 
-(* Named-component routing: the mem var is the component's identity,
-   bound to its global and native base; the address evaluates to
-   native bits, so the GEP index is the exact native delta. *)
-and sec_comp_access ?want ctx scope llvm_builder blk_tid ~(store : bool)
-    (mv : var) (addr : exp) ~(data : exp option) (size : int) :
+(* Named-component routing: the mem var names storage and the address
+   is its byte index, just as for a stack storage access.  The marker
+   re-evaluation preserves the def's enclosing structure (a load inside
+   a cast), exactly as the stack path does. *)
+and sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~(store : bool)
+    (mv : var) (addr : exp) ~(data : exp option) (size : Size.t) :
     Llvm.llvalue =
-  match Core.Map.find !(ctx.sec_comps) mv with
-  | Some (base, own_lo) ->
-    let a =
-      as_integer ctx llvm_builder
-        (create_exp ctx scope llvm_builder blk_tid addr)
-    in
-    let idx =
-      Llvm.build_sub a
-        (Llvm.const_of_int64 (ctx.i64_ty) own_lo false)
-        "" llvm_builder
-    in
-    let p =
-      Llvm.build_gep (Llvm.i8_type ctx.llvm_ctx) base [| idx |] ""
-        llvm_builder
-    in
-    if store then
-      (match data with
-       | Some d ->
-         let v = create_exp ctx scope llvm_builder blk_tid d in
-         Bil2llvm_memory.store_ptr llvm_builder v p
-       | None -> assert false)
-    else
-      let ty =
-        match want with
-        | Some t -> t
-        | None -> Llvm.integer_type ctx.llvm_ctx size
-      in
-      Bil2llvm_memory.load_ptr llvm_builder ty p
-  | None ->
-    (* Unknown component: the generic memory path, unremapped. *)
-    if store then
-      (match data with
-       | Some d ->
-         let a = create_exp ctx scope llvm_builder blk_tid addr in
-         let v = create_exp ctx scope llvm_builder blk_tid d in
-         Bil2llvm_memory.store ctx llvm_builder (v, a)
-       | None -> assert false)
-    else
-      let a = create_exp ctx scope llvm_builder blk_tid addr in
-      Bil2llvm_memory.load ctx llvm_builder (a, size)
-
-(* A rip-relative def's VALUE is a constant address: the section
-   owner's base plus its offset — never the native constant.  Every
-   other shape renders through the generic exp path, whose load/store
-   arms own the const-address and section routing. *)
-and create_rip_relative_addr ctx scope llvm_builder blk_tid exp =
-  match exp with
-  | Bil.Int w ->
-      let v = Word.to_int64_exn w in
-      remapped_const ctx ctx.llvm_ctx ctx.llvm_module v
-        (ctx.i64_ty)
-  | exp -> create_exp ctx scope llvm_builder blk_tid exp
+  let bits = Size.in_bits size in
+  let marker = marker_of_size size in
+  let emit () =
+    let idx = as_integer ctx llvm_builder
+        (create_exp ctx scope llvm_builder blk_tid addr) in
+    match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
+    | Some p ->
+      if store then
+        (match data with
+         | Some d ->
+           let v = create_exp ctx scope llvm_builder blk_tid d in
+           Bil2llvm_memory.store_ptr llvm_builder v p
+         | None -> assert false)
+      else
+        let ty =
+          match want with
+          | Some t -> t
+          | None -> Llvm.integer_type ctx.llvm_ctx bits
+        in
+        Bil2llvm_memory.load_ptr llvm_builder ty p
+    | None ->
+      (* Unknown component: the generic memory path, unremapped. *)
+      if store then
+        (match data with
+         | Some d ->
+           let v = create_exp ctx scope llvm_builder blk_tid d in
+           Bil2llvm_memory.store ctx llvm_builder (v, idx)
+         | None -> assert false)
+      else
+        Bil2llvm_memory.load ctx llvm_builder (idx, bits)
+  in
+  emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
+    ~rewrite:(rewrite_mem_node exp addr size)
 
 and emit_with_marker ?want ctx scope llvm_builder blk_tid marker ~emit
     ~rewrite =

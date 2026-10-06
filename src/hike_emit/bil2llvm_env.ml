@@ -106,19 +106,9 @@ type section_type = Hike_stack_model.sec
 let is_interrupt_name (n : string) : bool =
   Base.String.is_prefix n ~prefix:"@interrupt:"
 
-(* The section spec's home is [Hike_spec] (the lower library); the
-   destructive re-export keeps this module's consumers spelling the
-   type [Bil2llvm_env.section_spec] and the fields unqualified. *)
-type section_spec = Hike_spec.section_spec = {
-  spec_comps : Hike_stack_model.sec_comp list;
-  spec_whole : (int * int64 * int64) list;
-  spec_word : int;
-  spec_sections : Hike_stack_model.sec_meta option list;
-  spec_relative : (int64 * int64) list;
-  spec_externals : (int64 * string) list;
-  (* Absolute addresses of copy-relocated slots, for access routing. *)
-  spec_copy_relocs : int64 list;
-}
+(* The section spec's one definition is [Hike_spec] (the lower library);
+   this re-export keeps the type and its labels reachable here. *)
+include Hike_spec
 
 type sub_frame = {
   (* The model entry line: the seeded SP's absolute address.  A constant,
@@ -136,9 +126,6 @@ type sub_frame = {
    lanes; the caller owns the LLVM context and module. *)
 type emit_ctx = {
   symtab : Symtab.t option;
-  (* The section base map: every native address renders through its
-     owning global. *)
-  copy_relocs : int64 list;
   (* The loader's relocation facts, word-grain: a RELATIVE word's
      runtime value (an in-module address) and an externally-relocated
      word's symbol. *)
@@ -221,8 +208,6 @@ type sub_scope = {
      known; a load / parameter / phi has none (the value is a real
      pointer and arithmetic GEPs it). *)
   ptr_offsets : llvalue_map ref;
-  (* The section-component storage base vars -> their globals. *)
-  sec_comp_ptrs : llvalue_map ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -236,8 +221,7 @@ let fresh_scope () : sub_scope =
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;
-    ptr_offsets = ref WVarMap.empty;
-    sec_comp_ptrs = ref WVarMap.empty }
+    ptr_offsets = ref WVarMap.empty }
 
 let typ_lltype ctx typ =
   match typ with

@@ -33,24 +33,19 @@ let dce ~(target : Bap_core_theory.Theory.Target.t)
       |> Seq.to_list
     in
     let exact_roots = ref Var.Set.empty in
-    (* The un-routed global memory's stores cross sub boundaries: a
-       sub that writes [mem] roots it — the reader may be any
-       caller. *)
-    let global_mem_base =
+    (* Global storage crosses sub boundaries; every written component
+       is rooted because its reader may be another sub. *)
+    let global_mem_bases =
       Term.enum blk_t sub
       |> Seq.concat_map ~f:(fun b -> Term.enum def_t b)
       |> Seq.filter ~f:(fun d -> Model.is_global_mem (Def.lhs d))
-      |> Seq.map ~f:(fun d -> Var.base (Def.lhs d))
-      |> Seq.to_list
-      |> Base.List.hd
+      |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
+          Core.Set.add acc (Var.base (Def.lhs d)))
     in
     let base_roots =
       ref
         (Core.Set.fold escape_roots
-           ~init:
-             (match global_mem_base with
-              | Some v -> Var.Set.singleton v
-              | None -> Var.Set.empty)
+           ~init:global_mem_bases
            ~f:(fun acc v -> Core.Set.add acc (Var.base v)))
     in
     Term.enum blk_t sub

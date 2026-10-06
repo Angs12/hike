@@ -96,11 +96,11 @@ let access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp =
       in
       (match mv, sec_comp, region_or_window, node with
       | Some mv, true, _, `Load (_, addr, size) ->
-          sec_comp_access ?want ctx scope llvm_builder blk_tid ~store:false
-            mv addr ~data:None (Size.in_bits size)
+          sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~store:false
+            mv addr ~data:None size
       | Some mv, true, _, `Store (_, addr, data, size) ->
-          sec_comp_access ?want ctx scope llvm_builder blk_tid ~store:true mv
-            addr ~data:(Some data) (Size.in_bits size)
+          sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~store:true mv
+            addr ~data:(Some data) size
       | _, _, true, `Load (_, addr, size) ->
           let is_window =
             match mv with
@@ -145,12 +145,24 @@ let mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp =
    sound strengthening) and the pair's other operand is its value. *)
 let create_atomic_rmw ctx scope llvm_builder blk_tid exp op other =
   match exp with
-  | Bil.Store (_, addr, _, _, size) ->
+  | Bil.Store (mem, addr, _, _, size) ->
     let v = create_exp ctx scope llvm_builder blk_tid other in
     let ptr =
-      if is_tls_addr ctx addr then
+      let component = match mem with
+        | Bil.Var mv when (
+            match Hike_synth.storage_of ctx.synth mv with
+            | Some (Hike_synth.Global _) -> true
+            | _ -> false) ->
+          let index = as_integer ctx llvm_builder
+              (create_exp ctx scope llvm_builder blk_tid addr) in
+          Bil2llvm_memory.component_ptr ctx llvm_builder mv index
+        | _ -> None
+      in
+      match component with
+      | Some ptr -> ptr
+      | None when is_tls_addr ctx addr ->
         create_tls_ptr ctx scope llvm_builder blk_tid addr
-      else
+      | None ->
         let a = create_exp ctx scope llvm_builder blk_tid addr in
         match Llvm.int64_of_const a with
         | Some ai ->
@@ -212,8 +224,6 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
     | None ->
       if Hike_def_slots.def_is_dyn_alloc def then
         create_dynamic_alloc ctx scope llvm_builder blk_tid def exp
-      else if Hike_def_slots.def_is_rip_relative def then
-        create_rip_relative_addr ctx scope llvm_builder blk_tid exp
       else mem_access ?want ctx scope llvm_builder blk_tid sub_tid def_tag def exp
   in
   insert_local scope blk_tid var res;
@@ -222,5 +232,5 @@ let create_def ctx scope blk_tid llvm_builder sub_tid _fr def =
   if Var.index var > 0 then bind_ssaval scope var res;
   (* An environment register's def also stores the process-global cell:
      the value must outlive the sub (its lane rides no signature). *)
-  if Abi.is_env_reg ctx.abi var then
+  if Option.is_some (Hike_synth.env_of ctx.synth var) then
     ignore (Llvm.build_store res (env_global ctx var) llvm_builder)

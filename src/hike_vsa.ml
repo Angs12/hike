@@ -23,14 +23,14 @@ type section_image = Vsa.section_image = {
 }
 
 (* The per-sub written-register summary: every def whose lhs base is a
-   non-virtual register; [Var.base] normalizes partial defs. *)
+   persistent register; [Var.base] normalizes partial defs. *)
 let written_regs_of_sub (sub : sub term) : Var.Set.t =
   Term.enum blk_t sub
   |> Seq.concat_map ~f:(Term.enum def_t)
   |> Seq.fold ~init:Var.Set.empty ~f:(fun acc d ->
       let lhs = Def.lhs d in
       match Var.typ (Var.base lhs) with
-      | Type.Imm _ when not (Var.is_virtual lhs) ->
+      | Type.Imm _ when not (Hike_synth.is_temporary lhs) ->
         Core.Set.add acc (Var.base lhs)
       | _ -> acc)
 

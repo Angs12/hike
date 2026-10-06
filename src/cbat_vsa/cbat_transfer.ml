@@ -327,7 +327,12 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   let return_mem (v : Mem.t) = return @@ `Mem v in
   match e with
   | Bil.Var v -> begin match Var.typ v with
-    | Type.Imm bitwidth -> return_imm @@ AI.find_word bitwidth env v
+    | Type.Imm bitwidth ->
+      (match Hike_synth.module_addr_of Hike_synth.empty v with
+       | Some a ->
+         return_imm (WordSet.singleton
+                       (Cbat_word.of_word (Word.of_int64 ~width:bitwidth a)))
+       | None -> return_imm @@ AI.find_word bitwidth env v)
     | Type.Mem (addr_i, addressable_size) ->
       let k = mem_idx addr_i addressable_size in
       return_mem @@ AI.find_memory k env v

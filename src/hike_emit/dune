@@ -12,8 +12,7 @@
   bil2llvm_memory
   bil2llvm_ptr
   bil2llvm_section
-  hike_def_slots
-  hike_synth)
+  hike_def_slots)
  (libraries
   bap
   bap-core-theory

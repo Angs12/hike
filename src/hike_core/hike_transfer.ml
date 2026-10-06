@@ -32,11 +32,16 @@ let rec resolve ~(sub : sub term option) ~(seen : var list) (e : exp) : exp =
          | None -> e))
   | e -> e
 
-(* The linker slot the transfer's target reads, if any. *)
-let slot_of_target ?(sub : sub term option) (target : exp) : int64 option =
+(* The linker slot the transfer's target reads, if any.  [origin] maps a
+   storage base var to its module byte origin, so a resolved
+   component-relative access recovers its absolute slot. *)
+let slot_of_target ?(synth = Hike_synth.empty)
+    ?(origin : (var -> int64 option) option) ?(sub : sub term option)
+    (target : exp) : int64 option =
   match resolve ~sub ~seen:[] target with
-  | Bil.Load (_, addr, _, _) -> (
-    match resolve ~sub ~seen:[] addr with
-    | Bil.Int w -> Result.to_option (Word.to_int64 w)
-    | _ -> None)
+  | Bil.Load (mem, addr, _, _) -> (
+    let addr = resolve ~sub ~seen:[] addr in
+    match mem with
+    | Bil.Var mv -> Hike_synth.access_address ?origin synth mv addr
+    | _ -> Hike_synth.address_of_exp synth addr)
   | _ -> None

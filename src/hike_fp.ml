@@ -9,28 +9,16 @@ open Bap.Std.Bil.Types
 
 (* The FP model's operand and result temps: [intrinsic:xN] /
    [intrinsic:yN], any number of them. *)
-let is_temp (n : string) : bool =
-  let rest p =
-    let lp = String.length p in
-    if Core.String.is_prefix n ~prefix:p && String.length n > lp then
-      Some (String.sub n lp (String.length n - lp))
-    else None
-  in
-  let digits s = Core.String.for_all s ~f:Core.Char.is_digit in
-  match rest "intrinsic:x" with
-  | Some d -> digits d
-  | None -> ( match rest "intrinsic:y" with Some d -> digits d | None -> false)
+let temp_lane v =
+  match Hike_synth.classify Hike_synth.empty v with
+  | Some (Hike_synth.Fp_lane (lane, i)) -> Some (lane, i)
+  | _ -> None
 
 (* A temp's identity carries its width. *)
-let qualify (v : var) : var =
-  match Var.typ v with
-  | Type.Imm w when is_temp (Var.name v) ->
-      let nv =
-        Var.create ~is_virtual:false ~fresh:false
-          (Bil2llvm_fp.temp_name (Var.name v) w)
-          (Type.Imm w)
-      in
-      Var.with_index nv (Var.index v)
+let qualify v =
+  match Var.typ v, temp_lane v with
+  | Type.Imm w, Some (lane, i) ->
+    Var.with_index (Hike_synth.fp_lane ~addr_bits:w lane i) (Var.index v)
   | _ -> v
 
 (* A mapped FP call's target names its operand width: the nearest
@@ -46,7 +34,7 @@ let tag_targets (sub : sub term) : sub term =
              | `Def d -> (
                  let l = Def.lhs d in
                  match Var.typ l with
-                 | Type.Imm w when is_temp (Var.name l) -> cur := w
+                 | Type.Imm w when Option.is_some (temp_lane l) -> cur := w
                  | _ -> ())
              | `Jmp j ->
                  widths := Core.Map.set !widths ~key:(Term.tid j) ~data:!cur
