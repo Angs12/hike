@@ -92,6 +92,9 @@ type sub_tree = range_storage Tree.t
 (** The program tree (all subs' data-section members). *)
 type data_tree = range_storage Tree.t
 
+val owning_storage : sub_tree -> int64 -> int64 -> storage option
+val owning_data_binding : data_tree -> int64 -> (int * int64) option
+
 (** The slim def-carried classification: the def's section with its
     ADDRESS bounds (not the occupied-byte bounds), the justified
     unbounded form, or the data-section anchoring. *)

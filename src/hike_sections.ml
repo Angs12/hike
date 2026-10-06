@@ -847,6 +847,34 @@ let finalize_tree ~(word : int) ~(entry : int64)
   Base.List.fold sorted ~init:Tree.empty ~f:(fun t (k, ms) ->
       Tree.add t k (decide k ms))
 
+(* The stack binding wholly owning [lo, hi]: a value spanning two
+   bindings names no one storage. *)
+let owning_storage (tree : sub_tree) (lo : int64) (hi : int64) :
+    storage option =
+  Tree.lookup tree (point Stack lo)
+  |> Seq.find_map ~f:(fun (k, rs) ->
+         if
+           Stdlib.Int64.compare k.lo.p_pos lo <= 0
+           && Stdlib.Int64.compare hi k.hi.p_pos <= 0
+         then Some rs.storage
+         else None)
+
+(* The data binding wholly owning [c]: (component id, its native low
+   bound).  A constant spanning bindings names no one storage. *)
+let owning_data_binding (tree : data_tree) (c : int64) :
+    (int * int64) option =
+  Tree.lookup tree (point Rodata c)
+  |> Seq.find_map ~f:(fun (k, rs) ->
+         if
+           Stdlib.Int64.unsigned_compare c k.lo.p_pos >= 0
+           && Stdlib.Int64.unsigned_compare c k.hi.p_pos <= 0
+         then (
+           match rs.storage with
+           | Data_region id ->
+               Some (id, k.lo.p_pos)
+           | _ -> None)
+         else None)
+
 (* Merged bindings never overlap, so the binding containing the
    range's least point is THE owner. *)
 let storage_of_range (tree : range_storage Tree.t) (r : range) :

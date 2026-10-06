@@ -88,34 +88,6 @@ let site_bindings_of_sub ~(word : int) ~(abi : Hike_abi.t) ~(sp : var)
    a visible non-address (a runtime piece).  A var the denotation cannot
    see is absent — unknown may be a pointer at emission, so it never
    enters a displacement. *)
-(* The stack binding wholly owning [lo, hi]: a value spanning two
-   bindings names no one storage. *)
-let owning_storage (tree : Sections.sub_tree) (lo : int64) (hi : int64) :
-    Sections.storage option =
-  Sections.Tree.lookup tree (Sections.point Stack lo)
-  |> Seq.find_map ~f:(fun (k, rs) ->
-         if
-           Stdlib.Int64.compare k.Sections.lo.Sections.p_pos lo <= 0
-           && Stdlib.Int64.compare hi k.Sections.hi.Sections.p_pos <= 0
-         then Some rs.Sections.storage
-         else None)
-
-(* The data binding wholly owning [c]: (component id, its native low
-   bound).  A constant spanning bindings names no one storage. *)
-let owning_data_binding (tree : Sections.data_tree) (c : int64) :
-    (int * int64) option =
-  Sections.Tree.lookup tree (Sections.point Rodata c)
-  |> Seq.find_map ~f:(fun (k, rs) ->
-         if
-           Stdlib.Int64.unsigned_compare c k.Sections.lo.Sections.p_pos >= 0
-           && Stdlib.Int64.unsigned_compare c k.Sections.hi.Sections.p_pos <= 0
-         then (
-           match rs.Sections.storage with
-           | Sections.Data_region id ->
-               Some (id, k.Sections.lo.Sections.p_pos)
-           | _ -> None)
-         else None)
-
 (* One def's rewrite facts: the access's conversion (the mem re-point)
    plus the storage-relative address forms — a value def's whole rhs,
    an access def's mem-node address. *)
@@ -159,21 +131,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
   (* The rewrite's admissibility: the address's whole range lies inside
      the storage's allocated extent — a value or access outside it names
      no storage, and the model arithmetic keeps it. *)
-  let in_extent id (lo : int64) (hi : int64) =
-    match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
-    | Some s ->
-        Stdlib.Int64.compare lo s.Hike_synth.ss_lo >= 0
-        && Stdlib.Int64.compare hi s.Hike_synth.ss_hi <= 0
-    | None -> false
-  in
-  let region_base id disp =
-    match Hike_synth.span_of_storage storages (Hike_synth.Stack id) with
-    | Some s ->
-        Base.Option.map disp
-          ~f:(Hike_synth_addr.base_plus s.Hike_synth.ss_base
-                ~rel:(Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base))
-    | None -> None
-  in
   Term.enum blk_t sub
   |> Seq.fold ~init:Tid.Map.empty ~f:(fun acc blk ->
          Term.enum def_t blk
@@ -203,7 +160,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                       | Sections.Conv_region id when
                           Base.Option.value_map (addr_range ())
                             ~default:false ~f:(fun (lo, hi) ->
-                              in_extent id lo hi)
+                              Hike_synth_addr.fits_span ~storages (Hike_synth.Stack id) lo hi)
                           -> (
                           let folded = Hike_synth_addr.offset_of ~leaves addr in
 
@@ -217,7 +174,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                 | Some _ -> "rw.access.region.folded"
                                 | None -> "rw.access.region.geom"));
                           let f =
-                            match region_base id folded with
+                            match Hike_synth_addr.span_base ~storages (Hike_synth.Stack id) folded with
                             | Some a -> { fact with fr_addr = Some a }
                             | None -> fact
                           in
@@ -236,10 +193,8 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                              coordinate IS the entry-relative offset. *)
                           let f =
                             match
-                              Base.Option.map
-                                (Hike_synth_addr.offset_of ~leaves addr)
-                                ~f:(Hike_synth_addr.base_plus (Model.hike_window_var ~word)
-                                       ~rel:0L)
+                              Hike_synth_addr.base_form ~leaves
+                                ~base:(Model.hike_window_var ~word) ~rel:0L addr
                             with
                             | Some a -> { fact with fr_addr = Some a }
                             | None -> fact
@@ -292,7 +247,7 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                 in
                                 match
                                   (at_slot,
-                                   owning_data_binding data c)
+                                   Sections.owning_data_binding data c)
                                 with
                                 | false, Some (id, comp_lo) -> (
                                     (* A pure constant address materializes
@@ -390,12 +345,9 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                        && Stdlib.Int64.compare lo a_base >= 0
                                        && window_param -> (
                                     match
-                                      Base.Option.map
-                                        (Hike_synth_addr.offset_of ~leaves
-                                           (Def.rhs d))
-                                        ~f:(Hike_synth_addr.base_plus
-                                              (Model.hike_window_var ~word)
-                                              ~rel:0L)
+                                      Hike_synth_addr.base_form ~leaves
+                                        ~base:(Model.hike_window_var ~word)
+                                        ~rel:0L (Def.rhs d)
                                     with
                                     | Some rhs ->
                                         census "rw.value.window";
@@ -406,15 +358,19 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                         acc)
                                 | true, Some (lo, hi)
                                   when Stdlib.Int64.compare lo hi <= 0 -> (
-                                    match owning_storage tree lo hi with
+                                    match Sections.owning_storage tree lo hi with
                                     | Some
                                         ((Stack_region _ | Stack_residue) as
                                         st)
-                                      when in_extent
-                                             (Sections.region_id_of_storage st) lo hi
+                                      when Hike_synth_addr.fits_span ~storages
+                                             (Hike_synth.Stack
+                                                (Sections.region_id_of_storage st))
+                                             lo hi
                                       -> (
                                         match
-                                          region_base (Sections.region_id_of_storage st)
+                                          Hike_synth_addr.span_base ~storages
+                                            (Hike_synth.Stack
+                                               (Sections.region_id_of_storage st))
                                             (Hike_synth_addr.offset_of ~leaves
                                                (Def.rhs d))
                                         with

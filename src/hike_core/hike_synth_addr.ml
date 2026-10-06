@@ -363,3 +363,26 @@ let rewrite_storage ~(addr_bits : int) ~(conv : conv) ~(bits : int)
       in
       Def.map_exp d ~f:(fun e -> (slot_addr_mapper addr)#map_exp e)
 
+(* The folded storage form: a storage span's base var plus an
+   already-folded displacement. *)
+let span_base ~(storages : Hike_synth.storage_span list) storage
+    (disp : exp option) : exp option =
+  Base.Option.bind (Hike_synth.span_of_storage storages storage)
+    ~f:(fun s ->
+      Base.Option.map disp
+        ~f:(base_plus s.Hike_synth.ss_base
+              ~rel:(Stdlib.Int64.sub s.Hike_synth.ss_lo Model.segment_base)))
+
+(* The same, folding the value's leaves first. *)
+let base_form ~(leaves : leaf Var.Map.t) ~(base : var) ~(rel : int64)
+    (e : exp) : exp option =
+  Base.Option.map (offset_of ~leaves e) ~f:(base_plus base ~rel)
+
+(* Whether [lo, hi] lies inside the storage's allocated span. *)
+let fits_span ~(storages : Hike_synth.storage_span list) storage
+    (lo : int64) (hi : int64) : bool =
+  match Hike_synth.span_of_storage storages storage with
+  | Some s ->
+    Stdlib.Int64.compare lo s.Hike_synth.ss_lo >= 0
+    && Stdlib.Int64.compare hi s.Hike_synth.ss_hi <= 0
+  | None -> false
