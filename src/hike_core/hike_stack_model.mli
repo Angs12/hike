@@ -330,3 +330,9 @@ val set_arg_ptr_kind : Arg.t -> Arg.t
 (* The PLT-trampoline stamp. *)
 val is_plt_trampoline_sub : sub term -> bool
 val set_plt_trampoline : sub term -> sub term
+
+(** The declaration classification: the prune's leave census and the
+    sign pass's self-call shape stamp the trampoline tag; a bodyless
+    sub, and a sub named by a loader relocation ([reloc_names]), are
+    declarations too.  One predicate for every consumer. *)
+val is_declared : ?reloc_names:Core.String.Set.t -> sub term -> bool

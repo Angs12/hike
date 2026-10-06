@@ -567,20 +567,10 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
   let external_names =
     Core.Map.data ctx.address.externals |> Core.String.Set.of_list
   in
-  let external_name sub =
-    let n = Tid.name (Term.tid sub) in
-    match Base.String.chop_prefix n ~prefix:"@" with
-    | Some s -> s
-    | None -> n
-  in
   let self_call_stubs =
     Term.enum sub_t prog
     |> Base.Sequence.filter ~f:(fun sub ->
-           Bil2llvm_calls.is_self_call_stub sub
-           (* A block-less sub is a name-only external: declared, never
-              defined. *)
-           || Base.Option.is_none (Term.first blk_t sub)
-           || Core.Set.mem external_names (external_name sub))
+           Hike_stack_model.is_declared ~reloc_names:external_names sub)
     |> Base.Sequence.map ~f:Term.tid
     |> Base.Sequence.to_list
     |> Core.Set.of_list (module Tid)

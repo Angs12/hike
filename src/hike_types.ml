@@ -41,8 +41,7 @@ let compute_sub_sig ~(free_vars : var list)
       if not (Abi.is_primary_target target) then []
       else if
         Model.fixed_signature sub
-        || Model.is_plt_trampoline_sub sub
-        || Base.Option.is_none (Term.first blk_t sub)
+        || Model.is_declared sub
       then abi.Abi.return_regs
       else
         abi.Abi.return_regs
@@ -155,7 +154,7 @@ let compute_sub_sig ~(free_vars : var list)
       in
       let args =
         if has_call then
-          let is_plt_sig = args = [] in
+          let is_plt_sig = Model.is_declared sub in
           let params =
             if is_plt_sig then Abi.param_regs abi else abi.Abi.int_param_regs
           in

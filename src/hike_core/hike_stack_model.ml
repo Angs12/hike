@@ -894,5 +894,15 @@ let plt_trampoline_tag : Flag.t Value.Tag.t =
 let is_plt_trampoline_sub (sub : sub term) : bool =
   Base.Option.value (Term.get_attr sub plt_trampoline_tag) ~default:false
 
+(* The declaration classification: a sub the module DECLARES but never
+   defines.  Evidence accumulates where it is visible — the prune's
+   leave census and the sign pass's self-call shape stamp the tag; a
+   bodyless sub is a declaration by observation; a sub named by a
+   loader relocation is the loader's, named by [reloc_names]. *)
+let is_declared ?(reloc_names = Core.String.Set.empty) (sub : sub term) : bool =
+  is_plt_trampoline_sub sub
+  || Base.Option.is_none (Term.first blk_t sub)
+  || Core.Set.mem reloc_names (Hike_abi.strip_at (Tid.name (Term.tid sub)))
+
 let set_plt_trampoline (sub : sub term) : sub term =
   Term.set_attr sub plt_trampoline_tag true

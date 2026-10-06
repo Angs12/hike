@@ -287,11 +287,9 @@ let is_extern ctx (sub_tid : tid) : bool =
   &&
   match Core.Map.find ctx.sub_of sub_tid with
   | Some s ->
-    (* A block-less sub is the declaration the loader binds; a
-       trampoline (the PLT stub: every exit leaves the module) declares
-       the same external — its body never runs. *)
-    Base.Option.is_none (Term.first blk_t s)
-    || Hike_stack_model.is_plt_trampoline_sub s
+    (* A block-less sub and a trampoline (the PLT stub whose body never
+       runs) are declarations: the loader binds the name. *)
+    Hike_stack_model.is_declared s
   | None -> true
 
 (* Strips tid prefixes for LLVM names; the model owns the character set,

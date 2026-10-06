@@ -737,14 +737,6 @@ let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
   let fallthrough = Option.map label_tid (Call.return call) in
   finish_call scope llvm_builder fallthrough
 
-(* A self-call stub targets its own address (the symtab names an
-   external there); it declares but never defines, so call sites
-   resolve to the external at link time.  hike-sign stamped the
-   classification — self-targeted, reads no non-return, non-SP
-   register — from the liveness its signature computation ran. *)
-let is_self_call_stub (sub : sub term) : bool =
-  Hike_stack_model.is_plt_trampoline_sub sub
-
 let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   let target = Call.target call |> label_tid in
   let name = Tid.name target |> fp_intrinsic_name in
