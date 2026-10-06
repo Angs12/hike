@@ -238,11 +238,6 @@ let bindings tbl =
   |> Base.List.filter_map ~f:(fun (v, _) ->
       Base.Option.map (classify tbl v) ~f:(fun c -> (v, c)))
 
-let is_storage_var tbl v =
-  match classify tbl v with
-  | Some (Storage _ | Bytes _) -> true
-  | _ -> false
-
 let is_memory_var tbl v =
   match classify tbl v with Some (Bytes _) -> true | _ -> false
 

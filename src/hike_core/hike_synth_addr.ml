@@ -233,29 +233,6 @@ let access ?(slots = []) ~addr_bits ~regions ~named_only tbl mem addr ~size =
             ~f:(fun (mv, index) -> (Bil.Var mv, index)))
     | None, None -> None)
 
-(* The def's single memory node takes its general form; the rewrite does
-   not descend into a node's own address (the generated slot pointer
-   read is already in final form). *)
-let rewrite_exp ?slots ~addr_bits tbl ~regions ~named_only e =
-  (object
-     inherit Exp.mapper as super
-     method! map_load ~mem ~addr endian size =
-       match
-         access ?slots ~addr_bits ~regions ~named_only tbl mem addr
-           ~size:(Size.in_bytes size)
-       with
-       | Some (mem', addr') -> Bil.Load (mem', addr', endian, size)
-       | None -> Bil.Load (mem, addr, endian, size)
-     method! map_store ~mem ~addr ~exp endian size =
-       match
-         access ?slots ~addr_bits ~regions ~named_only tbl mem addr
-           ~size:(Size.in_bytes size)
-       with
-       | Some (mem', addr') ->
-         Bil.Store (mem', addr', super#map_exp exp, endian, size)
-       | None -> Bil.Store (mem, addr, super#map_exp exp, endian, size)
-   end)#map_exp e
-
 let rewrite_def ?slots ~addr_bits tbl ~regions ~named_only d =
   let memory = ref None in
   let mapper =

@@ -58,7 +58,6 @@ val fresh : bits:int -> temporary -> var
 val is_temporary : Var.t -> bool
 (* A base operand: a module address or a storage base, never a cell. *)
 val is_base_var : table -> var -> bool
-val is_storage_var : table -> var -> bool
 val is_memory_var : table -> var -> bool
 val is_module_addr_var : table -> var -> bool
 val module_addr_of : table -> var -> int64 option
