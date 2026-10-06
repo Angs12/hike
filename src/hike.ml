@@ -139,6 +139,16 @@ let pass_vsa proj =
      emitter declares it. *)
   let leaving =
     let sub_list = Term.enum sub_t program |> Seq.to_list in
+    let sub_by_tid =
+      Core.Map.of_alist_exn (module Tid)
+        (Base.List.map sub_list ~f:(fun s -> (Term.tid s, s)))
+    in
+    let sub_by_block =
+      Core.Map.of_alist_exn (module Tid)
+        (Base.List.concat_map sub_list ~f:(fun s ->
+             Term.enum blk_t s |> Seq.to_list
+             |> Base.List.map ~f:(fun b -> (Term.tid b, s))))
+    in
     let block_less s = Base.Option.is_none (Term.first blk_t s) in
     (* The loader binds DYNAMIC symbols only, and every dynamic
        external is a block-less sub of the program: a leaving
@@ -192,20 +202,14 @@ let pass_vsa proj =
       let call_leaves s t =
         if Hike_return.is_target t || Tid.name t = "hike_return" then false
         else
-          match
-            Base.List.find sub_list ~f:(fun x -> Tid.equal (Term.tid x) t)
-          with
+          match Core.Map.find sub_by_tid t with
           | Some callee ->
             block_less callee || Core.Set.mem seen (Term.tid callee)
           | None -> true
       in
       (* [Some true] = leaves; [Some false] = stays; [None] = internal
          plumbing (neither). *)
-      let sub_of_block t =
-        Base.List.find sub_list ~f:(fun x ->
-            Term.enum blk_t x
-            |> Seq.exists ~f:(fun b -> Tid.equal (Term.tid b) t))
-      in
+      let sub_of_block t = Core.Map.find sub_by_block t in
       let exit_kind s j =
         if Hike_return.is_jmp j then Some false
         else
