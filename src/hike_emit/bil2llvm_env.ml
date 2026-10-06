@@ -268,10 +268,9 @@ let load_env_reg ctx llvm_builder (v : var) =
 (* A var whose value is a stack/VLA address (a real pointer).  The
    model's memory-state vars are storage, not pointer values. *)
 let is_ptr_var (v : Var.t) : bool =
-  (not
-     (Hike_stack_model.is_region_mem v
-     || Hike_stack_model.is_window_mem v
-     || Hike_stack_model.is_sec_comp_mem v))
+  (match Hike_synth.classify Hike_synth.empty v with
+   | Some (Hike_synth.Bytes _) -> false
+   | _ -> true)
   && (Hike_stack_model.is_window_var v
      || match Var.typ v with Type.Mem _ -> true | _ -> false)
 
