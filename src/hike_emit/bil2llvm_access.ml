@@ -68,31 +68,44 @@ let access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp =
         | `Store (Bil.Var mv, _, _, _) -> Some mv
         | _ -> None
       in
-      let region_or_window =
-        match mv with
-        | Some mv ->
-            Hike_stack_model.is_region_mem mv
-            || Hike_stack_model.is_window_mem mv
-        | None -> false
+      (* The synth vocabulary is the one classification: a stack bytes
+         var is a region access, the window bytes var a window access,
+         a Global bytes var a component access.  Anything else keeps
+         the value lane's storage fact. *)
+      let classified =
+        Base.Option.bind mv ~f:(Hike_synth.classify ctx.synth)
       in
+      let is_region =
+        match classified with
+        | Some (Hike_synth.Storage (Hike_synth.Stack _))
+        | Some (Hike_synth.Bytes (Hike_synth.Stack _)) -> true
+        | _ -> false
+      in
+      let is_window =
+        match classified with
+        | Some (Hike_synth.Storage Hike_synth.Window)
+        | Some (Hike_synth.Bytes Hike_synth.Window) -> true
+        | _ -> false
+      in
+      let region_or_window = is_region || is_window in
       let sec_comp =
-        match mv with
-        | Some mv -> Hike_stack_model.is_sec_comp_mem mv
-        | None -> false
+        match classified with
+        | Some (Hike_synth.Storage (Hike_synth.Global _))
+        | Some (Hike_synth.Bytes (Hike_synth.Global _)) -> true
+        | _ -> false
       in
       (* The attribution's rewrite re-pointed the memory node at the
          owning storage's mem var: the def's own alloca is the region it
          names (the residue included), never the address operand's. *)
       let storage =
-        match mv with
-        | Some mv -> (
-            match Hike_stack_model.region_id_of_mem mv with
-            | Some id -> Some (Hike_stack_model.Ptr_region id)
-            | None ->
-                if Hike_stack_model.is_window_mem mv then
-                  Some Hike_stack_model.Ptr_window
-                else Hike_def_slots.def_ptr_storage def)
-        | None -> Hike_def_slots.def_ptr_storage def
+        match classified with
+        | Some (Hike_synth.Storage (Hike_synth.Stack id))
+        | Some (Hike_synth.Bytes (Hike_synth.Stack id)) ->
+          Some (Hike_stack_model.Ptr_region id)
+        | Some (Hike_synth.Storage Hike_synth.Window)
+        | Some (Hike_synth.Bytes Hike_synth.Window) ->
+          Some Hike_stack_model.Ptr_window
+        | _ -> Hike_def_slots.def_ptr_storage def
       in
       (match mv, sec_comp, region_or_window, node with
       | Some mv, true, _, `Load (_, addr, size) ->
@@ -102,19 +115,9 @@ let access_value ?want ctx scope llvm_builder blk_tid sub_tid def exp =
           sec_comp_access ?want ctx scope llvm_builder blk_tid exp ~store:true mv
             addr ~data:(Some data) size
       | _, _, true, `Load (_, addr, size) ->
-          let is_window =
-            match mv with
-            | Some mv -> Hike_stack_model.is_window_mem mv
-            | None -> false
-          in
           storage_access ?want ~is_window ~storage ctx scope llvm_builder
             blk_tid (`Load (addr, size)) exp
       | _, _, true, `Store (_, addr, data, size) ->
-          let is_window =
-            match mv with
-            | Some mv -> Hike_stack_model.is_window_mem mv
-            | None -> false
-          in
           storage_access ?want ~is_window ~storage ctx scope llvm_builder
             blk_tid (`Store (addr, data, size)) exp
       | _ -> create_exp ?want ctx scope llvm_builder blk_tid exp)
