@@ -154,6 +154,9 @@ type emit_ctx = {
      are DERIVED — [synthetic] names them, nothing is stored. *)
   sub_of : sub term Tid.Map.t;
   synthetic : Tid.Set.t;
+  (* The KB's synthetic-variable table: every synthetic var's kind, so
+     the evaluator resolves through one function. *)
+  synth : Hike_synth.table;
   (* Bound once per emission. *)
   llvm_ctx : Llvm.llcontext;
   llvm_module : Llvm.llmodule;

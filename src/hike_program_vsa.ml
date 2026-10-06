@@ -162,6 +162,7 @@ let install context solution =
     { (Hike_kb.build ~block_envs:envs ~block_addrs:solution.block_addrs
          ~target:context.target ~lookup:solution.lookup) with
       Hike_kb.sub_addrs = solution.sub_addrs;
+      synth = Hike_synth.table_of_program solution.program;
       images = context.images; foreign_slots = context.linker_slots }
 
 let run context proj program =

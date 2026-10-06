@@ -184,6 +184,14 @@ let static_offset scope (exp : exp) : int64 option =
       | _ -> None)
     exp
 
+(* The one renderer for the synthetic vocabulary: the KB table names
+   the kind, this maps it to the LLVM value. *)
+let synth_value (ctx : Bil2llvm_env.emit_ctx) (k : Hike_synth.kind) :
+    Llvm.llvalue =
+  match k with
+  | Hike_synth.Addr a ->
+    remapped_const ctx ctx.llvm_ctx ctx.llvm_module a ctx.i64_ty
+
 let rec create_offset ctx scope llvm_builder blk_tid exp :
     Llvm.llvalue option =
   let addr_ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
@@ -241,23 +249,26 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
       in
       create_unop llvm_builder (op, v)
   | Var v -> (
-      match get_ssaval scope v with
-      | Some x -> x
+      match Hike_synth.resolve ctx.synth v with
+      | Some k -> synth_value ctx k
       | None -> (
-          match get_local scope blk_tid v with
+          match get_ssaval scope v with
           | Some x -> x
           | None -> (
-              match WVarMap.find_opt (wvar_of v) !(scope.sec_comp_ptrs) with
+              match get_local scope blk_tid v with
               | Some x -> x
-              | None ->
-                  if Abi.is_env_reg ctx.abi v then
-                    (* An environment register is process state: the
-                       read loads the module global. *)
-                    load_env_reg ctx llvm_builder v
-                  else begin
-                    warn_undef_read ctx scope v blk_tid;
-                    frozen_undef ctx scope v
-                  end)))
+              | None -> (
+                  match WVarMap.find_opt (wvar_of v) !(scope.sec_comp_ptrs) with
+                  | Some x -> x
+                  | None ->
+                      if Abi.is_env_reg ctx.abi v then
+                        (* An environment register is process state: the
+                           read loads the module global. *)
+                        load_env_reg ctx llvm_builder v
+                      else begin
+                        warn_undef_read ctx scope v blk_tid;
+                        frozen_undef ctx scope v
+                      end))))
   | Int i -> create_immediate ctx i
   | Cast (cast, i, e) ->
       let v = create_exp ctx scope llvm_builder blk_tid e in

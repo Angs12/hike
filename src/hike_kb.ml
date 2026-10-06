@@ -47,6 +47,10 @@ type facts = {
      escape the sub.  The attribution computes them from its trees; the
      sweep reads them off the record. *)
   escape_roots : Var.Set.t Tid.Map.t;
+  (* The synthetic-variable vocabulary (the rip pass's resolved
+     addresses, and the emitter's other synthetic values): var -> kind,
+     recorded once so no consumer parses names. *)
+  synth : Hike_synth.table;
 }
 
 let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
@@ -72,7 +76,8 @@ let build ~(block_envs : (Cbat_vsa.AI.t * Cbat_vsa.AI.t) Tid.Map.t)
         let pre, post = blk_envs blk in
         Cbat_vsa.denote_exp_at ~pre ~post ~blk ?def e);
     spec = None;
-    escape_roots = Tid.Map.empty }
+    escape_roots = Tid.Map.empty;
+    synth = Hike_synth.empty }
 
 (* The run's record, installed once at the pass_vsa boundary. *)
 let run : facts option ref = ref None

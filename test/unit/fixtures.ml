@@ -1037,7 +1037,7 @@ let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
   let prog = Hike.Ssa.ssa_program ~target:Theory.Target.unknown prog in
   B2l.emit_program llvm_ctx llvm_module
     ~target:Theory.Target.unknown ~addr_bits:64
-    ~symtab:None spec prog;
+    ~symtab:None ~synth:Hike_synth.empty spec prog;
   let s = Llvm.string_of_llmodule llvm_module in
   Llvm.dispose_module llvm_module;
   Llvm.dispose_context llvm_ctx;

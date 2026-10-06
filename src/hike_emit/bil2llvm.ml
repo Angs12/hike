@@ -402,7 +402,7 @@ let create_sub ctx scope sub =
    boundary. *)
 let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
     ~(target : Bap_core_theory.Theory.Target.t) ~(addr_bits : int)
-    ~(symtab : Symtab.t option)
+    ~(symtab : Symtab.t option) ~(synth : Hike_synth.table)
     (spec : section_spec)
     (prog : program term) : unit =
   (* The sections construct from the spec before any function declares. *)
@@ -532,6 +532,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       addr_bits;
       sub_of;
       synthetic;
+      synth;
       llvm_ctx;
       llvm_module;
       sections;

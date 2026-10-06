@@ -88,6 +88,7 @@ val emit_program :
   target:Theory.Target.t ->
   addr_bits:int ->
   symtab:Symtab.t option ->
+  synth:Hike_synth.table ->
   section_spec ->
   program term ->
   unit

@@ -56,6 +56,7 @@ let convert_binary output_program proj =
   Bil2llvm.emit_program llvm_ctx llvm_module
     ~target ~addr_bits
     ~symtab:(Some (Project.symbols proj))
+    ~synth:(Hike_kb.facts ()).synth
     spec prog;
   Llvm.print_module output_program llvm_module;
   Llvm.dispose_module llvm_module;
