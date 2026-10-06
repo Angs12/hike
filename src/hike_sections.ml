@@ -538,22 +538,13 @@ let member_of ~(sub : Tid.t) ~(def : Tid.t option) ~(width : int) ~(store : bool
 
 (* The word cell an args-space span names: one slot only when the span
    starts at/above the args base and both ends land in the same cell. *)
-let args_cell_of_span ~(word : int) ~(entry : int64)
-    (lo : int64) (hi : int64) : int option =
-  let cell pos = Model.slot_index_of_offset ~word (Stdlib.Int64.sub pos entry) in
-  if
-    Stdlib.Int64.compare lo (Model.args_base ~entry ~word) >= 0
-    && Int.equal (cell lo) (cell hi)
-  then Some (cell lo)
-  else None
-
 (* The word cell of a promotable Args member: a def-backed, non-identity
    access wholly inside one word cell at/above the args base.  [None] for
    any other member — an identity claim (a TOP access) converts to its
    own memory form and never names a slot. *)
 let args_member_cell ~(word : int) ~(entry : int64) (m : member) : int option =
   if m.m_identity then None
-  else args_cell_of_span ~word ~entry m.m_lo m.m_hi
+  else Model.args_cell_of_span ~word ~entry m.m_lo m.m_hi
 
 (* The identity members of an escape extent, projected into the sub-local
    spaces; no def.  Only the frame half binds this sub's storage: the Args
@@ -943,7 +934,7 @@ let conversion_of ~(word : int) ~(entry : int64)
                          slot (the binding's promotability proved one, so
                          this is the defensive identity). *)
                       match
-                        args_cell_of_span ~word ~entry p.pt_lo
+                        Model.args_cell_of_span ~word ~entry p.pt_lo
                           p.pt_hi
                       with
                       | Some i ->

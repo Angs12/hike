@@ -328,6 +328,17 @@ let slot_index_of_offset ~(word : int) (rel : int64) : int =
     (Stdlib.Int64.div (Stdlib.Int64.sub rel (Stdlib.Int64.of_int word))
        (Stdlib.Int64.of_int word))
 
+(* The word cell of an Args span wholly inside one cell at/above the
+   args base: its slot index, else [None]. *)
+let args_cell_of_span ~(word : int) ~(entry : int64) (lo : int64)
+    (hi : int64) : int option =
+  let cell pos = slot_index_of_offset ~word (Stdlib.Int64.sub pos entry) in
+  if
+    Stdlib.Int64.compare lo (args_base ~entry ~word) >= 0
+    && Stdlib.Int.equal (cell lo) (cell hi)
+  then Some (cell lo)
+  else None
+
 let region_mem ~addr_bits id = Hike_synth.bytes ~addr_bits (Hike_synth.Stack id)
 
 (* The storage base family: one Mem-typed value per storage, minted by

@@ -163,6 +163,7 @@ val residue_id : int
 (* Slot geometry. *)
 val slot_offset : word:int -> int -> int64
 val slot_index_of_offset : word:int -> int64 -> int
+val args_cell_of_span : word:int -> entry:int64 -> int64 -> int64 -> int option
 
 val region_mem : addr_bits:int -> int -> var
 
