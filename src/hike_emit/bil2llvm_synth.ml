@@ -56,6 +56,18 @@ let build_addrs ctx (acc : bindings) : bindings =
 let build ctx : bindings =
   build_addrs ctx (build_components ~addr_bits:ctx.addr_bits ctx.sections)
 
+(* The per-sub storage bindings: each storage var names its alloca and
+   entry-line base. *)
+let bind_storage scope v base rel =
+  scope.Bil2llvm_env.storages :=
+    WVarMap.add (wvar_of v) (base, rel) !(scope.storages)
+
+let storage_base scope v : (Llvm.llvalue * int64) option =
+  WVarMap.find_opt (wvar_of v) !(scope.storages)
+
+let storage_base_of_id scope ~addr_bits id : (Llvm.llvalue * int64) option =
+  storage_base scope (Hike_stack_model.region_mem ~addr_bits id)
+
 (* A memory var's storage global, without the block context. *)
 let memory_value ctx v : Llvm.llvalue option =
   Base.Option.bind (Hike_synth.memory_var ~addr_bits:ctx.addr_bits v)
@@ -89,5 +101,8 @@ let value ctx scope llvm_builder blk_tid v : Llvm.llvalue option =
       match classified with
       | Some (Hike_synth.Env_register _) ->
         Some (load_env_reg ctx llvm_builder v)
-      | Some (Hike_synth.Bytes _) -> memory_value ctx v
+      | Some (Hike_synth.Bytes _) -> (
+        match storage_base scope v with
+        | Some (base, _) -> Some base
+        | None -> memory_value ctx v)
       | _ -> None))

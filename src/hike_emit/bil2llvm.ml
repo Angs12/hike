@@ -326,17 +326,14 @@ let create_sub ctx scope sub =
     let storages =
       Hike_stack_ptr.build ~llvm_ctx ~llvm_builder ~addr_bits:ctx.addr_bits layout
     in
-    let regions =
-      Base.List.map storages
-        ~f:(fun (s : Hike_stack_ptr.storage) -> (s.mem, (s.base, s.rel)))
-    in
     Base.List.iter storages ~f:(fun (s : Hike_stack_ptr.storage) ->
-        insert_local scope Graphs.Tid.start s.mem s.base;
+        Bil2llvm_synth.bind_storage scope s.mem s.base s.rel;
         (* The storage's base var binds to its alloca pointer: a
            rewritten address def's value GEPs it directly. *)
         let pv =
           Hike_stack_model.region_ptr ~addr_bits:ctx.addr_bits s.id
         in
+        Bil2llvm_synth.bind_storage scope pv s.base s.rel;
         insert_local scope Graphs.Tid.start pv s.base;
         bind_ssaval scope pv s.base);
     (* The entry line is the model's fixed stack base; its residue pointer
@@ -347,17 +344,15 @@ let create_sub ctx scope sub =
     in
     let entry_ptr =
       Base.Option.map
-        (Base.List.find regions ~f:(fun (v, _) ->
-             Var.equal v
-               (Hike_stack_model.region_mem ~addr_bits:ctx.addr_bits
-                  Hike_stack_model.residue_id)))
-        ~f:(fun (_, (base, rel)) ->
+        (Bil2llvm_synth.storage_base_of_id scope
+           ~addr_bits:ctx.addr_bits Hike_stack_model.residue_id)
+        ~f:(fun (base, rel) ->
           Llvm.build_gep (Llvm.i8_type llvm_ctx) base
             [| Llvm.const_of_int64 (Llvm.i64_type llvm_ctx)
                  (Stdlib.Int64.neg rel) false |]
             "entry" llvm_builder)
     in
-    let fr : sub_frame = { entry_line; entry_ptr; regions } in
+    let fr : sub_frame = { entry_line; entry_ptr } in
     scope.cur_frame := Some fr;
     add_args_to_vars ctx scope llvm_builder Graphs.Tid.start (Term.tid sub) fn;
     build_entry_block ctx scope llvm_builder fr sub;

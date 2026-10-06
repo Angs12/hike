@@ -119,14 +119,10 @@ let materialize ctx scope llvm_builder blk_tid
         llvm_builder
   in
   let region_ptr id =
-    match !(scope.cur_frame) with
-    | Some fr -> (
-        match
-          Base.List.find fr.regions ~f:(fun (m, _) ->
-              Var.equal m (Hike_stack_model.region_mem ~addr_bits:ctx.addr_bits id))
-        with
-        | Some (_, (base, rel)) -> gep_i8 ctx llvm_builder base (rel_off rel)
-        | None -> as_pointer ctx llvm_builder off)
+    match
+      Bil2llvm_synth.storage_base_of_id scope ~addr_bits:ctx.addr_bits id
+    with
+    | Some (base, rel) -> gep_i8 ctx llvm_builder base (rel_off rel)
     | None -> as_pointer ctx llvm_builder off
   in
   match storage with

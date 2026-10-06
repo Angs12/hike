@@ -113,8 +113,6 @@ type sub_frame = {
   entry_line : Llvm.llvalue;
   (* The entry line as a pointer into the residue (None = no storage). *)
   entry_ptr : Llvm.llvalue option;
-  (* Region mem var -> (alloca, entry-relative base). *)
-  regions : (Var.t * (Llvm.llvalue * int64)) list;
 }
 
 (* The one emission address index: the exact section tiling and each
@@ -218,6 +216,9 @@ type sub_scope = {
      known; a load / parameter / phi has none (the value is a real
      pointer and arithmetic GEPs it). *)
   ptr_offsets : llvalue_map ref;
+  (* The per-sub storages: each storage var binds its alloca and
+     entry-line base — the lane's per-sub storage bindings. *)
+  storages : (Llvm.llvalue * int64) WVarMap.t ref;
 }
 
 let fresh_scope () : sub_scope =
@@ -231,7 +232,8 @@ let fresh_scope () : sub_scope =
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;
-    ptr_offsets = ref WVarMap.empty }
+    ptr_offsets = ref WVarMap.empty;
+    storages = ref WVarMap.empty }
 
 let typ_lltype ctx typ =
   match typ with
