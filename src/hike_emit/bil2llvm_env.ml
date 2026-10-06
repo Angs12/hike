@@ -151,6 +151,10 @@ type emit_ctx = {
   thunks : (string * Llvm.llvalue) list ref;
   (* [sec_comp_N_mem] var -> (global, native base). *)
   sec_comps : (Llvm.llvalue * int64) Var.Map.t ref;
+  (* The synth vars that name a module value: each one's LLVM value,
+     bound once before any body emits (module address vars, component
+     globals). *)
+  synth_vals : Llvm.llvalue Var.Map.t ref;
   (* The TLS anchor global and the llvm.trap function, declared once. *)
   tls_anchor : Llvm.llvalue option ref;
   (* The module's TLS block: one thread_local byte array covering every

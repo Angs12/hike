@@ -187,12 +187,15 @@ let variable_value ctx scope llvm_builder blk_tid v =
     frozen_undef ctx scope v
   in
   match Hike_synth.module_addr_of ctx.synth v with
-  | Some a ->
+  | Some a -> (
     let ty = Llvm.integer_type ctx.llvm_ctx ctx.addr_bits in
-    Base.Option.value
-      (remap_native ctx ctx.llvm_ctx ctx.llvm_module a
-         ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
-      ~default:(Llvm.const_of_int64 ty a false)
+    match Core.Map.find !(ctx.synth_vals) v with
+    | Some value -> value
+    | None ->
+      Base.Option.value
+        (remap_native ctx ctx.llvm_ctx ctx.llvm_module a
+           ~finish:(fun ptr -> Llvm.const_ptrtoint ptr ty))
+        ~default:(Llvm.const_of_int64 ty a false))
   | None -> (
     match Base.Option.first_some (get_ssaval scope v) (get_local scope blk_tid v) with
     | Some value -> value
@@ -202,9 +205,12 @@ let variable_value ctx scope llvm_builder blk_tid v =
       else
         match Hike_synth.memory_var ~addr_bits:ctx.addr_bits v with
         | Some mv -> (
-          match Core.Map.find !(ctx.sec_comps) mv with
-          | Some (base, _) -> base
-          | None -> missing ())
+          match Core.Map.find !(ctx.synth_vals) mv with
+          | Some base -> base
+          | None -> (
+            match Core.Map.find !(ctx.sec_comps) mv with
+            | Some (base, _) -> base
+            | None -> missing ()))
         | None -> missing ())
 
 let rec create_offset ctx scope llvm_builder blk_tid exp :

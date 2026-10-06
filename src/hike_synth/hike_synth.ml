@@ -231,6 +231,13 @@ let is_base_var tbl v =
   | Some (Module_addr _ | Storage _) -> true
   | _ -> false
 
+(* Every var the table knows, with its classification: the emitter's
+   one enumeration of the synthetic vocabulary. *)
+let bindings tbl =
+  Core.Map.to_alist tbl
+  |> Base.List.filter_map ~f:(fun (v, _) ->
+      Base.Option.map (classify tbl v) ~f:(fun c -> (v, c)))
+
 let is_storage_var tbl v =
   match classify tbl v with
   | Some (Storage _ | Bytes _) -> true

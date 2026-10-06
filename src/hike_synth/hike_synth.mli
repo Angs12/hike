@@ -40,6 +40,9 @@ val empty : table
 val table_of_program : program term -> table
 val mem : table -> var -> bool
 
+(** Every var the table knows, with its classification. *)
+val bindings : table -> (var * classification) list
+
 (* — Construction: the general producer entries. — *)
 val base : addr_bits:int -> storage -> var
 val bytes : addr_bits:int -> storage -> var
