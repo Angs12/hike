@@ -799,10 +799,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
                    it on the def so the emitter materializes into that
                    region, never the operand's. *)
                 match f.fr_conv with
-                | Conv_region id ->
-                    Hike_def_slots.stamp_ptr_storage (Model.Ptr_region id) d
-                | Conv_window ->
-                    Hike_def_slots.stamp_ptr_storage Model.Ptr_window d
+                | Conv_region _ | Conv_window -> d
                 | Conv_slot _ | Conv_global _ | Keep -> d)
 
       method! map_blk blk =
