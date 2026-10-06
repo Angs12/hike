@@ -161,6 +161,13 @@ let remap_jmp ~(call : Tid.t -> Tid.t) ~(blk : Tid.t -> Tid.t) (j : jmp term) :
    a bare-variable target's words come from its reaching definition's
    before-env, never the noreturn-poisoned post-transfer state. *)
 
+(* A composed expression's form: [Whole e] is an operand made entirely
+   of base subtrees — no loaded cell — and [e] is the operand as it
+   participates in the subtraction (a cast is transparent, a bare var
+   keeps its name); [Cells bases] is the base operands that isolate
+   exactly one loaded cell. *)
+type composed = Whole of exp | Cells of exp list
+
 (* The composed address's base operands: the very operand subtrees that
    contributed the table's start address.  The guard subtracts them from
    the target so the subject is the loaded cell value — the table's own
@@ -188,11 +195,13 @@ let base_operands ~(last_defs : def term Var.Map.t) ~(sub : sub term)
   let find_def at v =
     match at with
     | Some d ->
-      let before, _, last = Lazy.force definitions in
-      let defs =
-        Base.Option.value (Core.Map.find before (Term.tid d)) ~default:last
-      in
-      Core.Map.find defs v
+      (* [before] is the definition prefix before [d] in the sub's term
+         order, so the answer is strictly earlier than the reading
+         def.  A def outside the sub has no position there; the
+         composition refuses rather than resolving forward. *)
+      let before, _, _ = Lazy.force definitions in
+      Base.Option.bind (Core.Map.find before (Term.tid d)) ~f:(fun defs ->
+          Core.Map.find defs v)
     | None -> (
       match Core.Map.find last_defs v with
       | Some _ as found -> found
@@ -200,73 +209,45 @@ let base_operands ~(last_defs : def term Var.Map.t) ~(sub : sub term)
         let _, first, _ = Lazy.force definitions in
         Core.Map.find first v)
   in
-  (* The guard subtracts the composed BASE from the target as the very
-     operand subtrees that contributed it, so the two renderings cancel
-     exactly in any coordinate system (a section-backed base may
-     render as a real pointer under PIE; a raw module constant beside
-     it would disagree) — what remains is the loaded entry's signed
-     delta, which is table data.  [pure_base]: the operand is entirely
-     base (no cell inside).  [bases_of]: the subtraction list that
-     isolates the operand's cell. *)
-  let rec pure_base ~at ~depth (e : exp) : exp option =
-    if depth > 16 then None
-    else
-      match e with
-      | Bil.Int _ -> Some e
-      | Bil.Cast (_, _, e2) -> pure_base ~at ~depth:(depth + 1) e2
-      | Bil.BinOp (Bil.PLUS, a, b) -> (
-        match
-          (pure_base ~at ~depth:(depth + 1) a,
-           pure_base ~at ~depth:(depth + 1) b)
-        with
-        | Some _, Some _ -> Some e
-        | _ -> None)
-      | Bil.Var v when Hike_synth.is_base_var Hike_synth.empty v ->
-        (* Every synthetic base family — the resolved rip address, the
-           argument lanes, the allocas, the storage pointers — is a base
-           operand, never a cell. *)
-        Some e
-      | Bil.Var v -> (
-        let found = find_def at v in
-        match found with
-        | Some d -> (
-          match Def.rhs d with
-          | Bil.Load _ | Bil.Cast (_, _, Bil.Load _) -> None
-          | rhs ->
-            Base.Option.map
-              (pure_base ~at:(Some d) ~depth:(depth + 1) rhs)
-              ~f:(fun _ -> Bil.Var v))
+  (* One composition rule over the supported grammar: a cast is
+     transparent; a plus over a whole-base side and a cell side is the
+     cell's base list; a bare var follows its definition.  Termination:
+     a var step resolves to a def strictly EARLIER than the reading def
+     in the sub's term order ([find_def]'s prefix), and every other
+     step descends into a strictly smaller expression — a well-founded
+     descent, so no depth budget is needed.  The rule returns the
+     operand's form: [Whole] keeps the operand as it participates (a
+     cast is transparent, a bare var keeps its name), [Cells] the base
+     operands isolating its one loaded cell. *)
+  let rec compose ~at (e : exp) : composed option =
+    match e with
+    | Bil.Int _ -> Some (Whole e)
+    | Bil.Load _ -> Some (Cells [])
+    | Bil.Cast (_, _, e2) -> compose ~at e2
+    | Bil.BinOp (Bil.PLUS, a, b) -> (
+      match (compose ~at a, compose ~at b) with
+      | Some (Whole _), Some (Whole _) -> Some (Whole e)
+      | Some (Whole pa), Some (Cells bs) -> Some (Cells (pa :: bs))
+      | Some (Cells bs), Some (Whole pb) -> Some (Cells (pb :: bs))
+      | _ -> None)
+    | Bil.Var v when Hike_synth.is_base_var Hike_synth.empty v ->
+      (* Every synthetic base family — the resolved rip address, the
+         argument lanes, the allocas, the storage pointers — is a base
+         operand, never a cell. *)
+      Some (Whole e)
+    | Bil.Var v -> (
+      match find_def at v with
+      | Some d -> (
+        match compose ~at:(Some d) (Def.rhs d) with
+        | Some (Whole _) -> Some (Whole e)
+        | Some (Cells _ as cells) -> Some cells
         | None -> None)
-      | _ -> None
+      | None -> None)
+    | _ -> None
   in
-  let rec bases_of ~at ~depth (e : exp) : exp list option =
-    if depth > 16 then None
-    else
-      match e with
-      | Bil.Load _ -> Some []
-      | Bil.Cast (_, _, e2) -> bases_of ~at ~depth:(depth + 1) e2
-      | Bil.BinOp (Bil.PLUS, a, b) -> (
-        match
-          (pure_base ~at ~depth a, bases_of ~at ~depth:(depth + 1) b)
-        with
-        | Some pb, Some bs -> Some (pb :: bs)
-        | _ -> (
-          match
-            (bases_of ~at ~depth:(depth + 1) a, pure_base ~at ~depth b)
-          with
-          | Some bs, Some pb -> Some (pb :: bs)
-          | _ -> None))
-      | Bil.Var v -> (
-        let found = find_def at v in
-        match found with
-        | Some d -> (
-          match Def.rhs d with
-          | Bil.Load _ | Bil.Cast (_, _, Bil.Load _) -> Some []
-          | rhs -> bases_of ~at:(Some d) ~depth:(depth + 1) rhs)
-        | None -> None)
-      | _ -> None
-  in
-  bases_of ~at ~depth:0 texp
+  match compose ~at texp with
+  | Some (Cells bases) -> Some bases
+  | Some (Whole _) | None -> None
 
 (* The dispatch's table words: the composed base operands give the
    guard's delta coordinate; the denotation is the one destination-set
