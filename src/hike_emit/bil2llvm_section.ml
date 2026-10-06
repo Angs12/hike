@@ -124,10 +124,16 @@ let remap_native_addr ctx llvm_ctx llvm_module v =
   remap_native ctx llvm_ctx llvm_module v
     ~finish:(fun f -> Llvm.const_ptrtoint f (Llvm.i64_type llvm_ctx))
 
-(* The remapped address integer, else the raw constant. *)
-let remapped_const ctx llvm_ctx llvm_module v ty =
-  Base.Option.value (remap_native_addr ctx llvm_ctx llvm_module v)
-    ~default:(Llvm.const_of_int64 ty v false)
+(* The remapped address integer; a relative word whose runtime value
+   names no emitted storage is a hole, never a raw constant (the raw
+   bits would disagree with the loader's runtime value under PIE). *)
+let remapped_const ctx llvm_ctx llvm_module v =
+  match remap_native_addr ctx llvm_ctx llvm_module v with
+  | Some c -> c
+  | None ->
+    failwith
+      (Printf.sprintf
+         "hike-emit: relative word %Lx names no emitted storage" v)
 
 (* Declares a section global as [n x iN], [word] bytes per cell. *)
 let create_section_global llvm_ctx llvm_module size name ~is_const ~word =
@@ -204,7 +210,7 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
     let v = word_of_bytes ~arr ~off ~len:word in
     let addr = Stdlib.Int64.add base_addr (Stdlib.Int64.of_int off) in
     match Core.Map.find relative addr with
-    | Some rv -> remapped_const ctx llvm_ctx llvm_module rv word_ty
+    | Some rv -> remapped_const ctx llvm_ctx llvm_module rv
     | None ->
       (match Core.Map.find externals addr with
        | Some name -> relocated_symbol name
