@@ -63,7 +63,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     in
     let arities =
       Core.Map.map sections.sub_trees
-        ~f:(Hike_promote.slot_arity ~word ~entry)
+        ~f:(Hike_sections.slot_arity ~word ~entry)
     in
     let window_readers =
       Term.enum sub_t program

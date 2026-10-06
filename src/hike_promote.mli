@@ -35,7 +35,6 @@ type site_binding = {
 
 (** The promoted slot count of a finalized tree: the highest Arg_slot
     cell index + 1; 0 when the tree names none. *)
-val slot_arity : word:int -> entry:int64 -> Hike_sections.sub_tree -> int
 
 (** The per-block store-to-call-slot correspondence. *)
 val site_bindings_of_sub :
@@ -50,7 +49,6 @@ val site_bindings_of_sub :
 (** The promoted slots' arity: one per word cell the tree's Arg_slot
     members name, derived from each member's own address — the binding is
     never the unit. *)
-val slot_arity : word:int -> entry:int64 -> Hike_sections.sub_tree -> int
 
 (** The per-sub rewrite driver: promotion, the storage rewrite, and
     the layout stamp. *)

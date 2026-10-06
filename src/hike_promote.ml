@@ -189,23 +189,6 @@ let promote_sub ~(addr_bits : int) (facts : facts)
 (* The promoted slots' arity: one per word cell the tree's Arg_slot
    members name, derived from each member's own address — the binding is
    never the unit. *)
-let slot_arity ~(word : int) ~(entry : int64) (tree : Sections.sub_tree) : int =
-  let arity =
-    Sections.Tree.to_sequence tree
-    |> Seq.fold ~init:None ~f:(fun mx (_, rs) ->
-           match rs.storage with
-           | Arg_slot ->
-               Base.List.fold rs.members ~init:mx ~f:(fun mx mm ->
-                   match Sections.args_member_cell ~word ~entry mm with
-                   | Some i -> (
-                       match mx with
-                       | Some n -> Some (Int.max n i)
-                       | None -> Some i)
-                   | None -> mx)
-           | _ -> mx)
-  in
-  match arity with Some i -> i + 1 | None -> 0
-
 (* The per-sub rewrite: promotion, the storage rewrite, and the layout
    stamp.  [sites]/[resolved] are the call-site and resolution
    products. *)
@@ -231,7 +214,7 @@ let rewrite_sub ~(word : int) ~(entry : int64) ~(addr_bits : int)
     Core.Map.find ctx.sub_trees (Term.tid sub)
     |> Core.Option.value ~default:Sections.Tree.empty
   in
-  let arity = slot_arity ~word ~entry tree in
+  let arity = Sections.slot_arity ~word ~entry tree in
   let arity = if callee_exempt then 0 else arity in
   let facts = { prom_arity = arity; prom_resolved = resolved } in
   let sub = promote_sub ~addr_bits facts sub in

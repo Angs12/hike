@@ -224,7 +224,6 @@ val is_sub_local : sec -> bool
 
 (** The def's memory access: (address, width in bytes, stores?). *)
 val access_of : def term -> (exp * int * bool) option
-val is_const_chain : exp -> bool
 
 (** The mem vars of storages whose bytes escape this sub: a storage
     carrying an escape extent (a stored stack-symbolic value, an
@@ -296,3 +295,7 @@ val section_spec_of :
   meta:sec_meta option list ->
   relative:(int64 * int64) list ->
   externals:(int64 * string) list -> Bil2llvm_env.section_spec
+
+(** The promoted slot count of a finalized tree: the highest
+    Arg_slot cell index + 1; 0 when the tree names none. *)
+val slot_arity : word:int -> entry:int64 -> sub_tree -> int

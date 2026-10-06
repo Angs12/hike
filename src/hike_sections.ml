@@ -578,16 +578,6 @@ let escape_members ~(sub : Tid.t) ~(env : env) ~(callwin : bool)
 
 (* Pure constant arithmetic — the address shape whose emission
    evaluates to the exact native bits. *)
-let is_const_chain (e : exp) : bool =
-  Hike_exp_fold.fold
-    (fun e child ->
-      match e with
-      | Bil.Int _ -> true
-      | Bil.Var v -> Hike_synth.is_module_addr_var Hike_synth.empty v
-      | Bil.BinOp ((Bil.PLUS | Bil.MINUS), a, b) -> child a && child b
-      | _ -> false)
-    e
-
 (* The caller-window hull's slack above the call-time SP: pushes and
    alignment spillover the window must cover. *)
 let window_push_slop_words = 8
@@ -931,7 +921,8 @@ let conversion_of ~(word : int) ~(entry : int64)
             Base.List.filter portions ~f:(fun p ->
                 p.pt_elig
                 && (if is_sub_local p.pt_sec then not retaddr_cell
-                    else is_const_chain addr))
+                    else Base.Option.is_some
+                        (Hike_synth_addr.address_of_exp Hike_synth.empty addr)))
           in
           match owned with
           | [ p ] -> (
@@ -1685,3 +1676,20 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
    above already re-pointed at the caller's storage.  A partial store
    passes its address too — the callee reads and writes the exact
    bytes. *)
+
+let slot_arity ~(word : int) ~(entry : int64) (tree : sub_tree) : int =
+  let arity =
+    Tree.to_sequence tree
+    |> Seq.fold ~init:None ~f:(fun mx (_, rs) ->
+           match rs.storage with
+           | Arg_slot ->
+               Base.List.fold rs.members ~init:mx ~f:(fun mx mm ->
+                   match args_member_cell ~word ~entry mm with
+                   | Some i -> (
+                       match mx with
+                       | Some n -> Some (Int.max n i)
+                       | None -> Some i)
+                   | None -> mx)
+           | _ -> mx)
+  in
+  match arity with Some i -> i + 1 | None -> 0
