@@ -274,21 +274,17 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                   let fact = no_fact in
                   match Sections.access_of d with
                   | Some (addr, w, _) -> (
+                      let projected =
+                        Base.Option.join
+                          (Core.Map.find projections (Term.tid d))
+                      in
                       let conv, _tag =
-                        conversion_of ~word ~entry ~tree ~data ~projected:
-                          (Base.Option.join
-                             (Core.Map.find projections (Term.tid d)))
+                        conversion_of ~word ~entry ~tree ~data ~projected
                           ~access:(Sections.access_of d)
                       in
                       let addr_range () =
-                        match denote ~blk ~def:d addr with
-                        | Ok ws when not (Vsa.WordSet.is_infinite ws) -> (
-                            match Model.positions_of_offsets ws with
-                            | Some (lo, hi)
-                              when Stdlib.Int64.compare lo hi <= 0 ->
-                                Some (lo, hi)
-                            | _ -> None)
-                        | _ -> None
+                        Base.Option.bind projected
+                          ~f:(fun p -> p.Sections.offsets)
                       in
                       match conv with
                       | Conv_region id when

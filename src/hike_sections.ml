@@ -195,6 +195,9 @@ type projection = {
   tag : sec_tag option;
   origin : Hike_origin.t option;
   portions : portion list;
+  (* The access's stack-offset hull, when the denotation names one:
+     promotion's extent admissibility reads it instead of re-denoting. *)
+  offsets : (int64 * int64) option;
 }
 
 type ctx = {
@@ -659,7 +662,15 @@ let collect (env : env) (prog : program term) : collecting =
                      ~word:env.word ~entry:env.entry ~spans:env.spans
                      ~synth:env.synth ~address:addr ~width ws
                 in
-                Some { tag; origin = Vsa.WordSet.origin ws; portions }
+                let offsets =
+                  if Vsa.WordSet.is_infinite ws then None
+                  else
+                    match Model.positions_of_offsets ws with
+                    | Some (lo, hi)
+                      when Stdlib.Int64.compare lo hi <= 0 -> Some (lo, hi)
+                    | _ -> None
+                in
+                Some { tag; origin = Vsa.WordSet.origin ws; portions; offsets }
             in
             let tag, portions =
               match projected with

@@ -114,6 +114,8 @@ type projection = {
   tag : sec_tag option;
   origin : Hike_origin.t option;
   portions : portion list;
+  (** The access's stack-offset hull, when the denotation names one. *)
+  offsets : (int64 * int64) option;
 }
 
 (** The completed attribution: the finalized trees, the def tags, each
