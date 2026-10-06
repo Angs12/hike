@@ -54,6 +54,6 @@ let slot_of_target ?index ?(synth = Hike_synth.empty)
   | Bil.Load (mem, addr, _, _) -> (
     let addr = resolve addr in
     match mem with
-    | Bil.Var mv -> Hike_synth.access_address ?origin synth mv addr
-    | _ -> Hike_synth.address_of_exp synth addr)
+    | Bil.Var mv -> Hike_synth_addr.access_address ?origin synth mv addr
+    | _ -> Hike_synth_addr.address_of_exp synth addr)
   | _ -> None

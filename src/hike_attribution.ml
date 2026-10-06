@@ -56,10 +56,10 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
       Base.List.map spec.spec_comps ~f:(fun comp ->
           let byte w = Int64.add comp.Hike_stack_model.sec_lo
               (Int64.of_int (w * word)) in
-          { Hike_synth.id = comp.comp_id;
+          { Hike_synth_addr.id = comp.comp_id;
             lo = byte comp.lo_w; hi = Int64.pred (byte (comp.hi_w + 1)) })
       @ Base.List.map spec.spec_whole ~f:(fun (id, lo, hi) ->
-            { Hike_synth.id; lo; hi })
+            { Hike_synth_addr.id; lo; hi })
     in
     let arities =
       Core.Map.map sections.sub_trees

@@ -55,7 +55,7 @@ let bind_program ~addr_bits ~synth ~regions ~slots ~named_only program =
   (object
      inherit Term.mapper
      method! map_def d =
-       Synth.rewrite_def ~addr_bits synth ~regions ~slots ~named_only d
+       Hike_synth_addr.rewrite_def ~addr_bits synth ~regions ~slots ~named_only d
    end)#run program
 
 let resolve ~addr_bits ~is_address ~named_only ~slots ~layout program =

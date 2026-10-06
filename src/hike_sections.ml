@@ -413,10 +413,10 @@ let range_of_denotation ~(extents : (int64 * int64) list) ~(word : int)
     ~(address : exp) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
   let regions = Base.List.mapi spans ~f:(fun id span ->
-      { Hike_synth.id; lo = span.ds_lo; hi = span.ds_hi }) in
-  let basis = Base.Option.bind (Hike_synth.address_basis synth address)
+      { Hike_synth_addr.id; lo = span.ds_lo; hi = span.ds_hi }) in
+  let basis = Base.Option.bind (Hike_synth_addr.address_basis synth address)
       ~f:(fun a -> Base.Option.map
-          (Hike_synth.of_address ~addr_bits:(Model.word_bits word) ~regions a)
+          (Hike_synth_addr.of_address ~addr_bits:(Model.word_bits word) ~regions a)
           ~f:(fun _ -> a)) in
   if Vsa.WordSet.is_bottom ws then
     (* A def-anchored bottom is the refinement's empty meet, not a

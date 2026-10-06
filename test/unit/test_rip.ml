@@ -9,8 +9,8 @@ module KB = Bap_knowledge.Knowledge
 let int a = Bil.Int (Word.of_int64 ~width:64 a)
 let tagged d =
   Def.with_value d (KB.Value.put rip_relative_addr (Def.value d) true)
-let region = { Synth.id = 7; lo = 0x4008L; hi = 0x401fL }
-let is_address a = Synth.contains region a || Int64.equal a 0x2000L
+let region = { Hike_synth_addr.id = 7; lo = 0x4008L; hi = 0x401fL }
+let is_address a = Hike_synth_addr.contains region a || Int64.equal a 0x2000L
 let resolve = Rip.resolve_program ~addr_bits:64 ~is_address ~regions:[region]
 let defs program = Term.enum sub_t program
     |> Seq.concat_map ~f:(Term.enum blk_t)
@@ -226,7 +226,7 @@ let tests = [
        Base.List.iter origins ~f:(fun (mem, lo) ->
            check "base plus index is the module address"
              (Base.Option.equal Int64.equal
-                (Synth.access_address ~origin Synth.empty mem (int 8L))
+                (Hike_synth_addr.access_address ~origin Synth.empty mem (int 8L))
                 (Some (Int64.add lo 8L)));
            check "the resolved slot is recognized"
              (Base.Option.equal Int64.equal
@@ -235,11 +235,11 @@ let tests = [
                 (Some (Int64.add lo 8L))));
        check "a synthetic storage without an origin has no module address"
          (Base.Option.is_none
-            (Synth.access_address Synth.empty
+            (Hike_synth_addr.access_address Synth.empty
                (Synth.bytes ~addr_bits:64 (Synth.Global 7)) (int 8L)));
        check "a plain memory keeps its index as the address"
          (Base.Option.equal Int64.equal
-            (Synth.access_address ~origin Synth.empty (memv "plain") (int 8L))
+            (Hike_synth_addr.access_address ~origin Synth.empty (memv "plain") (int 8L))
             (Some 8L)));
 ]
 

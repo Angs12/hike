@@ -81,35 +81,3 @@ val span_of_storage : storage_span list -> storage -> storage_span option
 (* The canonical base and memory vars of a synthetic storage var. *)
 val base_var : addr_bits:int -> var -> var option
 val memory_var : addr_bits:int -> var -> var option
-
-(* — Address interpretation. — *)
-type region = { id : int; lo : int64; hi : int64 }
-val contains : region -> int64 -> bool
-
-(** The owning memory variable and its byte index. *)
-val of_address :
-  addr_bits:int -> regions:region list -> int64 -> (var * exp) option
-
-(** Constant address arithmetic and its synthetic address basis. *)
-val address_of_exp : table -> exp -> int64 option
-val address_basis : table -> exp -> int64 option
-
-(** The module address of a storage access: the storage's byte origin
-    plus its constant index.  [origin] supplies a base var's byte origin
-    (the emitter's component map, the layout's regions); an access with
-    no synthetic storage keeps its index as the address. *)
-val access_address :
-  ?origin:(var -> int64 option) -> table -> var -> exp -> int64 option
-
-(** The general access rewriting: every Load/Store takes its storage's
-    memory var and the storage-relative index.  [named_only] rewrites
-    only accesses whose memory var already names a synthetic storage; a
-    copy-relocated [slots] access reads the pointer the loader stores in
-    the slot, so the emitter needs no relocation path. *)
-val rewrite_exp :
-  ?slots:int64 list -> addr_bits:int -> table -> regions:region list ->
-  named_only:bool -> exp -> exp
-
-val rewrite_def :
-  ?slots:int64 list -> addr_bits:int -> table -> regions:region list ->
-  named_only:bool -> def term -> def term

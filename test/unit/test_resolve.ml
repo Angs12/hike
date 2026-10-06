@@ -27,7 +27,7 @@ let eq_target (a : var) (b : var) (w : int64) j =
       (Bil.EQ, Bil.BinOp (Bil.PLUS, Bil.Var a', Bil.Var b'), face) ->
     Var.equal a' a && Var.equal b' b
     && Base.Option.equal Int64.equal
-         (Hike_synth.address_of_exp Hike_synth.empty face) (Some w)
+         (Hike_synth_addr.address_of_exp Hike_synth.empty face) (Some w)
   | _ -> false
 
 (* [of_wordset] fans: the pinned fixtures are single-piece address lines. *)
