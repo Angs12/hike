@@ -282,12 +282,6 @@ let is_arg_slot v =
 
 (* The fission mem vars' type: byte cells addressed at the target's
    address width. *)
-let mem_t ~(addr_bits : int) =
-  if addr_bits <= 32 then mem32_t (Size.of_int_exn 8)
-  else mem64_t (Size.of_int_exn 8)
-
-(* The incoming-window memory var: a callee's above-entry accesses are
-   materialized against the caller's window through it. *)
 let window_mem ~addr_bits = Hike_synth.bytes ~addr_bits Hike_synth.Window
 
 let is_window_mem v =

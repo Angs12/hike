@@ -127,10 +127,6 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
 (* Rewrite a lifted term's direct targets: a call's target names a
    subroutine, a goto's a block, so the two resolve through different
    maps.  Indirect targets stay the resolution's own. *)
-let remap_label f = function
-  | Direct t -> Direct (f t)
-  | Indirect e -> Indirect e
-
 type composed = Whole of exp | Cells of exp list
 
 (* The composed address's base operands: the very operand subtrees that
