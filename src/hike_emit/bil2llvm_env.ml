@@ -420,6 +420,10 @@ let insert_bb scope tid llvm_bb =
 
 let get_bb scope tid = bb_find !(scope.ll_bbs) tid
 
+(* The scope's block membership: [None] is a target this sub never
+   registered. *)
+let get_bb_opt scope tid = Core.Map.find !(scope.ll_bbs) tid
+
 let init_blk_llvals scope blk_tid =
   let phis = ref WVarMap.empty in
   let locals = ref WVarMap.empty in
