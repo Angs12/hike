@@ -331,6 +331,12 @@ val set_arg_ptr_kind : Arg.t -> Arg.t
 val is_plt_trampoline_sub : sub term -> bool
 val set_plt_trampoline : sub term -> sub term
 
+(** The self-call stub's shape: a self-targeted direct call, a real
+    call jmp, and reads confined to SP and the return registers.  One
+    rule, here with the tag it produces; the sign pass stamps it. *)
+val is_self_call_shape :
+  target:Bap_core_theory.Theory.Target.t -> sub term -> bool
+
 (** The declaration classification: the prune's leave census and the
     sign pass's self-call shape stamp the trampoline tag; a bodyless
     sub, and a sub named by a loader relocation ([reloc_names]), are

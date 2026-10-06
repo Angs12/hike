@@ -174,48 +174,12 @@ let compute_sub_sig ~(free_vars : var list)
   ( Base.List.map rets ~f:tag_lane,
     Base.List.map args ~f:tag_lane )
 
-(* The PLT-trampoline shape: a self-targeted direct call, a real call
-   jmp, and reads confined to the SP and the return registers — the
-   stub's `call next; jmp *[GOT]` idiom, recognized without names. *)
-let is_plt_trampoline_shape ~(target : Bap_core_theory.Theory.Target.t)
-    (sub : sub term) : bool =
-  let abi = Abi.of_target target in
-  let self_targeted =
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        Term.enum jmp_t blk
-        |> Seq.exists ~f:(fun j ->
-            match Jmp.kind j with
-            | Call c -> (
-                match Call.target c with
-                | Direct t ->
-                    Tid.equal t (Term.tid sub)
-                    || Model.sanitize_tid_name (Tid.name t)
-                       = Model.sanitize_tid_name (Tid.name (Term.tid sub))
-                | Indirect _ -> false)
-            | _ -> false))
-  in
-  let has_call =
-    Term.enum blk_t sub
-    |> Seq.exists ~f:(fun blk ->
-        Term.enum jmp_t blk
-        |> Seq.exists ~f:(fun j ->
-            match Jmp.kind j with
-            | Call _ -> not (Hike_return.is_jmp j)
-            | _ -> false))
-  in
-  let reads_only_return =
-    Core.Set.for_all (Model.sub_operand_reads sub) ~f:(fun reg ->
-        Abi.is_sp abi (Var.base reg) || Abi.is_return_reg abi reg)
-  in
-  self_targeted && has_call && reads_only_return
-
 (* The sign pass's one per-sub entry: the PLT-trampoline stamp (the
    emitter reads it) and the lane list. *)
 let sign_sub ~(target : Bap_core_theory.Theory.Target.t)
     (sub : sub term) : sub term =
   let sub =
-    if is_plt_trampoline_shape ~target sub then
+    if Model.is_self_call_shape ~target sub then
       Model.set_plt_trampoline sub
     else sub
   in

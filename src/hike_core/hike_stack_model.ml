@@ -894,6 +894,43 @@ let plt_trampoline_tag : Flag.t Value.Tag.t =
 let is_plt_trampoline_sub (sub : sub term) : bool =
   Base.Option.value (Term.get_attr sub plt_trampoline_tag) ~default:false
 
+(* The self-call stub's shape: a self-targeted direct call, a real call
+   jmp, and reads confined to the SP and the return registers — the
+   stub's `call next; jmp *[GOT]` idiom, recognized without names.  The
+   sign pass stamps what this recognizes; the tag is the carried fact. *)
+let is_self_call_shape ~(target : Bap_core_theory.Theory.Target.t)
+    (sub : sub term) : bool =
+  let abi = Hike_abi.of_target target in
+  let self_targeted =
+    Term.enum blk_t sub
+    |> Seq.exists ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun j ->
+            match Jmp.kind j with
+            | Call c -> (
+                match Call.target c with
+                | Direct t ->
+                    Tid.equal t (Term.tid sub)
+                    || sanitize_tid_name (Tid.name t)
+                       = sanitize_tid_name (Tid.name (Term.tid sub))
+                | Indirect _ -> false)
+            | _ -> false))
+  in
+  let has_call =
+    Term.enum blk_t sub
+    |> Seq.exists ~f:(fun blk ->
+        Term.enum jmp_t blk
+        |> Seq.exists ~f:(fun j ->
+            match Jmp.kind j with
+            | Call _ -> not (Hike_return.is_jmp j)
+            | _ -> false))
+  in
+  let reads_only_return =
+    Core.Set.for_all (sub_operand_reads sub) ~f:(fun reg ->
+        Hike_abi.is_sp abi (Var.base reg) || Hike_abi.is_return_reg abi reg)
+  in
+  self_targeted && has_call && reads_only_return
+
 (* The declaration classification: a sub the module DECLARES but never
    defines.  Evidence accumulates where it is visible — the prune's
    leave census and the sign pass's self-call shape stamp the tag; a
