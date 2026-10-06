@@ -197,7 +197,7 @@ let tests = [
              (Bil.Load (Bil.Var mem,
                         Bil.BinOp (Bil.MINUS, addr, Bil.Var base), LittleEndian, `r64)));
        check "indexed resolution is idempotent" (Program.equal program (resolve program)));
-  pin "RIP-06" "atomic operations use the same resolved component pointer"
+  pin "RIP-06" "a marked RMW addresses the same component global and byte index as ordinary accesses; an unmarked RMW stays plain"
     (fun () ->
        let mem = Synth.bytes ~addr_bits:64 (Synth.Global 7) in
        let loaded = v64 "RDX" in
@@ -206,13 +206,43 @@ let tests = [
                     sm_image = Some (Bytes.make 24 '\000'); sm_copy_relocs = [] } in
        let spec = { empty_spec with spec_sections = [Some meta];
                                    spec_whole = [(7, 0x4008L, 0x401fL)] } in
-       let sub = straight_sub "rip_atomic"
-           [Def.create loaded (Bil.Load (Bil.Var mem, int 8L, LittleEndian, `r64));
-            Def.create mem (Bil.Store (Bil.Var mem, int 8L,
-                Bil.BinOp (Bil.PLUS, Bil.Var loaded, int 1L), LittleEndian, `r64))] in
-       let ir = emit_ir_spec spec [sub] in
-       check "atomic add addresses the owning global at its byte index"
-         (contains_substring ir "atomicrmw add ptr getelementptr (i8, ptr @data, i64 8)"));
+       (* The marked bracket: BAP's lock markers around the RMW. *)
+       let lock = Tid.for_name "intrinsic:x86:lock" in
+       let unlock = Tid.for_name "intrinsic:x86:unlock" in
+       let mk_marker target : tid -> jmp term = fun cont ->
+         Jmp.create (Call (Call.create ~return:(Direct cont)
+                             ~target:(Direct target) ())) in
+       let resolve subs =
+         let prog = resolve (Program.create ~subs:subs ()) in
+         Term.enum sub_t prog |> Seq.to_list
+       in
+       let marked, _ = sub_of "rip_atomic"
+           [ [Def.create loaded (Bil.Int (Cbat_word.to_word (w64 5)))],
+             [(1, mk_marker lock)];
+             [Def.create mem (Bil.Store (Bil.Var mem, int 8L,
+                 Bil.BinOp (Bil.PLUS,
+                     Bil.Load (Bil.Var mem, int 8L, LittleEndian, `r64),
+                     Bil.Var loaded), LittleEndian, `r64))],
+             [(2, mk_marker unlock)];
+             [], [(0, mk_ret)] ] in
+       (* The unmarked twin: the same load/store pair, no markers. *)
+       let unmarked, _ = sub_of "rip_plain"
+           [ [Def.create loaded (Bil.Int (Cbat_word.to_word (w64 5)));
+              Def.create mem (Bil.Store (Bil.Var mem, int 8L,
+                  Bil.BinOp (Bil.PLUS,
+                      Bil.Load (Bil.Var mem, int 8L, LittleEndian, `r64),
+                      Bil.Var loaded), LittleEndian, `r64))],
+             [(0, mk_ret)] ] in
+       let ir_marked = emit_ir_spec spec (resolve [marked]) in
+       let ir_plain = emit_ir_spec spec (resolve [unmarked]) in
+       check "a marked RMW addresses the owning global at its byte index"
+         (contains_substring ir_marked
+            "atomicrmw add ptr getelementptr (i8, ptr @data, i64 8)"
+         && contains_substring ir_marked "seq_cst");
+       check "the markers render no external call"
+         (not (contains_substring ir_marked "intrinsic:x86"));
+       check "an unmarked RMW stays plain"
+         (not (contains_substring ir_plain "atomicrmw")));
   pin "RIP-07" "resolved storage accesses recover their module address generally"
     (fun () ->
        let origins =

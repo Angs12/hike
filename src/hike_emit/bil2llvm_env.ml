@@ -182,6 +182,19 @@ type emit_ctx = {
   sub_starts : Tid.t Core.Int64.Map.t;
 }
 
+(* The atomic lane's per-def plan: how a def inside a lock-marker
+   bracket renders.  One entry per def that renders specially. *)
+type atomic_action =
+  (* The def lowers to [atomicrmw]: a store def to [atomicrmw op val]
+     (the op's own write replaces the store), a load def to
+     [atomicrmw xchg] (its lhs binds the returned old value). *)
+  | Atomic_rmw of Llvm.AtomicRMWBinOp.t * exp
+  (* The def binds the bracket's atomic op result (xadd's register:
+     the machine's returned old value, not the BIL's sum). *)
+  | Atomic_old_result
+  (* A store whose write the bracket's atomic op already performed. *)
+  | Atomic_suppressed
+
 (* The sub-emission scope: every per-sub emission state.  [emit_program]'s
    body loop opens one per sub and drops it at the boundary — nothing
    here survives the sub that created it, so no field needs a clear. *)
@@ -199,11 +212,13 @@ type sub_scope = {
   undef_vals : llvalue_map ref;
   (* The Let-temp counter: names need only sub-scoped uniqueness. *)
   let_counter : int ref;
-  (* The block's RMW pairs: a store whose data reads an earlier
-     same-address load is one machine RMW (BAP's BIL is single-threaded
-     and drops the lock's atomicity); the emitter renders the pair as
-     one atomicrmw.  Key: the store def's tid. *)
-  rmw_stores : (Bil.binop * exp) Tid.Map.t ref;
+  (* The lock-marker brackets' per-def plans, computed once per sub
+     before any body emits.  Key: the def's tid. *)
+  atomic_plan : atomic_action Tid.Map.t ref;
+  (* The bracket's most recent atomic result, read by the
+     [Atomic_old_result] action (the BIL order keeps its def after the
+     op's def). *)
+  atomic_old : Llvm.llvalue option ref;
   (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
      call ret — one var, one value, valid wherever the def dominates. *)
   ssavals : llvalue_map ref;
@@ -228,7 +243,8 @@ let fresh_scope () : sub_scope =
     cur_frame = ref None;
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
-    rmw_stores = ref Tid.Map.empty;
+    atomic_plan = ref Tid.Map.empty;
+    atomic_old = ref None;
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;

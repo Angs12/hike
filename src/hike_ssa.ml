@@ -35,31 +35,37 @@ let call_of_jmp (j : jmp term) : Call.t option =
   | _ -> None
 
 (* The machine calls: a mapped intrinsic is a soft-float helper, not a
-   call — no return address is pushed, so no SP restore rides it. *)
+   call — no return address is pushed, so no SP restore rides it.  An
+   unmapped intrinsic target (the atomic family's marker stubs) is a
+   fact about one instruction, not code — the model's own rule. *)
 let machine_call (j : jmp term) : bool =
   match Jmp.kind j with
   | Call c -> (
       match Call.target c with
       | Direct target ->
-          Base.Option.is_none (Hike_native_fp.native_fp_op (Tid.name target))
+        Base.Option.is_none (Hike_native_fp.native_fp_op (Tid.name target))
+        && not (Hike_abi.is_intrinsic_name (Tid.name target))
       | Indirect _ -> true)
   | _ -> false
 
 (* The call's ret lanes: a mapped intrinsic versions its own ret temps;
-   an in-program sub its own Out intents; every other target (externs,
-   excluded intrinsic placeholders, the synthetic conventions) the ABI
+   an in-program sub its own Out intents; an unmapped intrinsic target
+   (the atomic family's marker stubs) no lanes at all — it is not code;
+   every other target (externs, the synthetic conventions) the ABI
    return registers. *)
 let ret_lanes_of ~(subs : sub term Tid.Map.t) ~(abi : Abi.t) (target : Tid.t) :
     var list =
   match Hike_native_fp.native_fp_op (Tid.name target) with
   | Some op ->
-      let w =
-        Hike_native_fp.lane_width_of_name
-          ~word_bits:(Model.word_bits abi.Abi.word)
-          (Tid.name target)
-      in
-      Hike_native_fp.(fp_sig_of op ~w).fp_rets
+    let w =
+      Hike_native_fp.lane_width_of_name
+        ~word_bits:(Model.word_bits abi.Abi.word)
+        (Tid.name target)
+    in
+    Hike_native_fp.(fp_sig_of op ~w).fp_rets
   | None -> (
+    if Hike_abi.is_intrinsic_name (Tid.name target) then []
+    else
       match Core.Map.find subs target with
       | Some sub -> Base.List.map (Model.sig_rets sub) ~f:Arg.lhs
       | None -> abi.Abi.return_regs)
@@ -252,6 +258,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       Base.List.concat_map call_blocks ~f:(fun (_, cs) ->
           Base.List.concat_map cs ~f:(fun (_, c) ->
               match Call.target c with
+              | Direct t when Hike_abi.is_intrinsic_name (Tid.name t) -> []
               | Direct t ->
                   ret_lanes_of ~subs ~abi t
                   @ (match Core.Map.find subs t with

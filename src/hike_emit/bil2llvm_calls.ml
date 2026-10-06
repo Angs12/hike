@@ -710,30 +710,25 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
              (Exp.to_string target)))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
-(* Unmapped intrinsic stubs use a fixed i64 synthetic ABI; normalize
-   their operands to that interface before the external call. *)
-let create_external_intrinsic_call ctx scope llvm_builder blk_tid call name =
-  let target = Call.target call |> label_tid in
-  let args = get_args ctx target in
-  let n_args = Base.List.length args in
-  let fn_ty = Llvm.function_type (ctx.i64_ty)
-      (Array.init n_args (fun _ -> ctx.i64_ty)) in
-  let callee = Llvm.declare_function name fn_ty ctx.llvm_module in
-  let arg_vals =
-    Base.List.map ~f:(fun a ->
-        let v =
-          Bil2llvm_ptr.as_integer ctx llvm_builder
-            (create_exp ctx scope llvm_builder blk_tid (Arg.rhs a))
-        in
-        let bits = Llvm.integer_bitwidth (Llvm.type_of v) in
-        coerce_int_width ctx.llvm_ctx llvm_builder ~bits v 64)
-      args
-  in
-  let r = Llvm.build_call fn_ty callee
-      (Array.of_list arg_vals) "" llvm_builder in
-  (match get_rets ctx target with
-   | [ ret ] -> bind_call_ret ctx scope blk_tid ret r
-   | _ -> ());
+(* The atomic-family intrinsics: the lock-marker pair and the fences.
+   The markers bracket the RMW the access lane renders; here the call
+   itself renders nothing but the continuation edge.  The fence class
+   is refused: LLVM 19's OCaml bindings ship no fence builder, and a
+   dropped or external fence is unsound. *)
+let create_atomic_intrinsic_call ctx scope llvm_builder ~sub_tid name call =
+  (match Abi.strip_at name with
+   | "intrinsic:x86:lock" | "intrinsic:x86:unlock" -> ()
+   | "intrinsic:mfence" | "intrinsic:lfence" | "intrinsic:sfence" ->
+     failwith
+       (Printf.sprintf
+          "hike-emit: fence intrinsic %s (in sub %s): the LLVM 19 OCaml \
+           bindings ship no fence builder - refusing the class"
+          (Abi.strip_at name) (Tid.name sub_tid))
+   | other ->
+     failwith
+       (Printf.sprintf
+          "hike-emit: unmapped atomic intrinsic call: %s (in sub %s)"
+          other (Tid.name sub_tid)));
   let fallthrough = Option.map label_tid (Call.return call) in
   finish_call scope llvm_builder fallthrough
 
@@ -742,18 +737,21 @@ let create_call ctx scope llvm_builder blk_tid blk sub call fr =
   let name = Tid.name target |> fp_intrinsic_name in
   if Hike_abi.is_interrupt_name (Tid.name target) then
     create_interrupt ctx llvm_builder
+  else if Hike_abi.is_atomic_intrinsic_name (Tid.name target) then
+    create_atomic_intrinsic_call ctx scope llvm_builder
+      ~sub_tid:(Term.tid sub) (Tid.name target) call
   else
     match native_fp_op (Tid.name target) with
     | Some op ->
         create_native_fp_call ctx scope llvm_builder blk_tid (Term.tid sub) fr blk call
           op
     | None ->
-        if Hike_abi.is_intrinsic_name name then begin
-          Hike_diag.warn
-            "guarded: unmapped intrinsic call: %s (in sub %s) - emitting as external; result lanes bind the external result"
-            name (Tid.name (Term.tid sub));
-          create_external_intrinsic_call ctx scope llvm_builder blk_tid call name
-        end
+        if Hike_abi.is_intrinsic_name name then
+          failwith
+            (Printf.sprintf
+               "hike-emit: unmapped intrinsic call: %s (in sub %s) - no \
+                lowering exists; refusing to emit an external"
+               name (Tid.name (Term.tid sub)))
         else (
         match Call.return call with
         | Some l ->

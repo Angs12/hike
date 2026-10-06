@@ -136,50 +136,8 @@ let create_control_flow ctx scope llvm_builder blk sub fr =
       let call = Bap.Std.Seq.hd_exn control_flow |> call_exn in
       create_call ctx scope llvm_builder tid blk sub call fr
 
-(* The block's RMW census: a store whose data reads an earlier
-   same-address load is the machine's atomic RMW — the lock prefix's
-   fact survives the lift only as this shape, and rendering the pair
-   atomic is the sound strengthening of BAP's single-threaded BIL. *)
-let scan_rmw scope blk =
-  scope.rmw_stores := Tid.Map.empty;
-  let loads = ref [] in
-  Term.enum def_t blk
-  |> Seq.iter ~f:(fun d ->
-      match Def.rhs d with
-      | Bil.Load (Bil.Var m, a, _, _) ->
-        loads := (m, a, Def.lhs d) :: !loads
-      | Bil.Store (Bil.Var m2, a2, Bil.BinOp (op, x, y), _, _) -> (
-        let pick side other =
-          match side with
-          | Bil.Var v ->
-            if
-              Base.List.exists
-                (Core.Set.to_list (Exp.free_vars other))
-                ~f:(fun w -> Var.same (Var.base v) w)
-            then None
-            else
-              Base.List.find_map !loads ~f:(fun (m, la, lv) ->
-                  if
-                    Var.same v lv && Var.same m m2 && Exp.equal la a2
-                  then Some (op, other)
-                  else None)
-          | _ -> None
-        in
-        (match pick x y with
-         | Some r ->
-           scope.rmw_stores :=
-             Core.Map.set !(scope.rmw_stores) ~key:(Term.tid d) ~data:r
-         | None -> (
-           match pick y x with
-           | Some r ->
-             scope.rmw_stores :=
-               Core.Map.set !(scope.rmw_stores) ~key:(Term.tid d) ~data:r
-           | None -> ())))
-      | _ -> ())
-
 let create_elts ctx scope llvm_builder blk sub_tid fr =
   let tid = Term.tid blk in
-  scan_rmw scope blk;
   Blk.elts blk
   |> Seq.iter ~f:(fun elt ->
       match elt with
@@ -318,6 +276,8 @@ let create_sub ctx scope sub =
 
     create_blocks ctx scope llvm_ctx blks fn sub;
     load_ssa_versions scope blks;
+    (* The lock-marker brackets' plan, before any body emits. *)
+    scope.atomic_plan := Bil2llvm_access.plan_atomics sub;
     let layout =
       Base.Option.value (Term.get_attr sub Hike_stack_model.layout_tag)
         ~default:{ Hike_stack_model.Sub_layout.regions = [];

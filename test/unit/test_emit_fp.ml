@@ -144,17 +144,22 @@ let tests : unit Alcotest.test list =
     (* FP-31: fadd_64 also pins the no-soft-float-call half of the contract. *)
 
 
-    (* FP-32: a caller of an unmapped name gets the guarded warning. *)
-    pin "FP-32" "an unmapped intrinsic name emits the guarded warning on stderr"
+    (* FP-32: a caller of an unmapped name is a loud failure — the
+       external-emission fallback is gone (the atomic lane's deletion),
+       so no module ever carries a silent external intrinsic call. *)
+    pin "FP-32" "an unmapped intrinsic name is a loud failure at emission"
       (fun () ->
         let x0b = ivar64 "intrinsic:x0" in
         let db = Def.create x0b (Bil.Int (Cbat_word.to_word (w64 7))) in
-        let captured =
-          capture_stderr (fun () ->
-              ignore (emit_ir (mk_fp_program "intrinsic:not_a_real_intrinsic" [ db ])))
+        let loud =
+          try
+            ignore (emit_ir (mk_fp_program "intrinsic:not_a_real_intrinsic" [ db ]));
+            false
+          with Failure msg ->
+            contains_substring msg "unmapped intrinsic call"
         in
-        check "FP-TABLE: an unmapped name emits the guarded warning on stderr"
-          (contains_substring captured "hike: guarded:"));
+        check "FP-32: an unmapped name fails loudly"
+          loud);
 
     (* FP-33: the fp-GPR cast width is the operand value's own type, never a
        register-name fact. *)
