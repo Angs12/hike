@@ -75,20 +75,12 @@ let create_branches ctx scope blk llvm_builder ?(sub : sub term option)
                   match get_bb_opt scope tid with
                   | Some bb -> bb
                   | None ->
-                    (* The cold path keeps the exact diagnostics: a block
-                       the scope never registered, versus a target
-                       outside the sub. *)
-                    if
-                      Term.enum blk_t s
-                      |> Seq.exists ~f:(fun b -> Tid.equal (Term.tid b) tid)
-                    then get_bb scope tid
-                    else
-                      failwith
-                        (Printf.sprintf
-                           "hike: block %s: goto names block %s, which is not \
-                            a block of sub %s"
-                           (Tid.name blk_tid) (Tid.name tid)
-                           (Tid.name (Term.tid s))))
+                    failwith
+                      (Printf.sprintf
+                         "hike: block %s: goto names block %s, which is not \
+                          a block of sub %s"
+                         (Tid.name blk_tid) (Tid.name tid)
+                         (Tid.name (Term.tid s))))
               in
               Llvm.build_br bb llvm_builder |> ignore)
           else
@@ -231,22 +223,13 @@ let fill_bir_phis ctx scope blks =
               let src_bb =
                 match get_bb_opt scope src with
                 | Some bb -> bb
-                | None -> (
-                  (* The cold path keeps the exact diagnostics: a block
-                     the scope never registered, versus a source
-                     outside the sub. *)
-                  match
-                    Seq.find blks ~f:(fun b -> Tid.equal (Term.tid b) src)
-                  with
-                  | Some _ -> get_bb scope src
-                  | None ->
-                    failwith
-                      (Printf.sprintf
-                         "hike: phi incoming from block %s, which is not a \
-                          block of sub %s"
-                         (Tid.name src)
-                         (Tid.name (Term.tid
-                                      (Seq.hd_exn blks)))))
+                | None ->
+                  failwith
+                    (Printf.sprintf
+                       "hike: phi incoming from block %s, which is not a \
+                        block of sub %s"
+                       (Tid.name src)
+                       (Tid.name (Term.tid (Seq.hd_exn blks))))
               in
               let src_b =
                 match Llvm.block_terminator src_bb with
