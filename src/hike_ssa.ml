@@ -280,7 +280,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       |> Core.Set.filter ~f:renamable
     in
     (* The definition census: for each var, the block tids whose defs or
-       phis write it, in block order — one term scan, queried per var. *)
+       phis write it — one term scan, queried per var. *)
     let def_sites : Tid.t list Var.Map.t =
       Base.List.fold blks ~init:Var.Map.empty ~f:(fun m blk ->
           let written =
@@ -297,7 +297,7 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
               Core.Map.set m ~key:v ~data:(Term.tid blk :: tids)))
     in
     let def_sites_of v =
-      Base.Option.value (Core.Map.find def_sites v) ~default:[] |> Base.List.rev
+      Base.Option.value (Core.Map.find def_sites v) ~default:[]
     in
     let insert_phi ~(preds : Tid.t list) (blk : blk term) (v : var) =
       if
@@ -388,8 +388,8 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
       end)#map_exp
     in
     let stamps : Versions.t Tid.Map.t ref = ref Tid.Map.empty in
-    (* The dominator tree's immediate children, indexed once in node
-       order; the rename walk queries it per node. *)
+    (* The dominator tree's immediate children, indexed once; the rename
+       walk queries it per node (any dom-tree order is a valid walk). *)
     let dom_children : Tid.t list Tid.Map.t =
       Graphs.Tid.nodes g
       |> Seq.fold ~init:Tid.Map.empty ~f:(fun m n ->
@@ -401,7 +401,6 @@ let ssa_sub ~(target : Bap_core_theory.Theory.Target.t)
     in
     let children tid =
       Base.Option.value (Core.Map.find dom_children tid) ~default:[]
-      |> Base.List.rev
     in
     let rec walk sub' tid =
       let minted = ref [] in
