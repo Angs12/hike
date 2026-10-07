@@ -11,7 +11,9 @@ let tagged d =
   Def.with_value d (KB.Value.put rip_relative_addr (Def.value d) true)
 let region = { Hike_synth_addr.id = 7; lo = 0x4008L; hi = 0x401fL }
 let is_address a = Hike_synth_addr.contains region a || Int64.equal a 0x2000L
-let resolve = Rip.resolve_program ~addr_bits:64 ~is_address ~regions:[region]
+let resolve ?slots program =
+  Rip.prepare_program ~addr_bits:64 ~is_address program
+  |> Rip.resolve_program ?slots ~addr_bits:64 ~regions:[region]
 let defs program = Term.enum sub_t program
     |> Seq.concat_map ~f:(Term.enum blk_t)
     |> Seq.concat_map ~f:(Term.enum def_t) |> Seq.to_list
@@ -78,7 +80,7 @@ let tests = [
        let mem = memv "rip_mem" in
        let value = tagged (Def.create (v64 "rip_value") (int 0x4010L))
            |> Cbat_vsa.set_env_tag AI.top
-           |> Cbat_vsa.Def_origin.with_origin Hike_origin.Rip in
+           |> Cbat_vsa.Def_origin.with_origin (Hike_origin.Rip Hike_section.Data) in
        let load = tagged (Def.create (v64 "rip_load")
            (Bil.Load (Bil.Var mem, int 0x4010L, LittleEndian, `r32))) in
        let store = tagged (Def.create mem
@@ -93,7 +95,7 @@ let tests = [
          (Option.is_some (Cbat_vsa.env_tag (find value))
           && KB.Value.get rip_relative_addr (Def.value (find value))
           && Base.Option.equal Hike_origin.equal
-               (Cbat_vsa.Def_origin.def_origin (find value)) (Some Hike_origin.Rip));
+               (Cbat_vsa.Def_origin.def_origin (find value)) (Some (Hike_origin.Rip Hike_section.Data)));
        let mv = Hike.Stack_model.sec_comp_mem ~addr_bits:64 7 in
        check "value is a synthetic address" (match Def.rhs (find value) with
            | Bil.Var v -> Var.equal v (Synth.module_addr ~addr_bits:64 0x4010L)

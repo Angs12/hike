@@ -8,6 +8,7 @@ type context = {
   linker_slots : Core.Int64.Set.t;
   reserved_slots : Core.Int64.Set.t;
   text_range : (int64 * int64) option;
+  data_spans : Hike_sections.data_span list;
 }
 
 type solution = {
@@ -79,7 +80,15 @@ let prepare proj =
                      && Int64.compare a img_hi <= 0) })
   in
   let text_range = range_of_section ".text" in
-  { target; images; linker_slots; reserved_slots; text_range }
+  let data_spans =
+    Hike_sections.attrib_spans
+      ~meta:(Hike_sections.sec_meta
+               ~word:(Hike_abi.of_target target).Hike_abi.word proj)
+  in
+  Hike_origin.Regions.install
+    (Base.List.map data_spans ~f:(fun span ->
+         (span.Hike_sections.ds_sec, span.ds_lo, span.ds_hi)));
+  { target; images; linker_slots; reserved_slots; text_range; data_spans }
 
 let normalize context program =
   Term.map sub_t program ~f:(Hike_jump.compile_sub context.target)
@@ -87,7 +96,7 @@ let normalize context program =
   |> Hike_fp.run_program
 
 let solve context proj ~noreturn program =
-  let { target; images; linker_slots; _ } = context in
+  let { target; images; linker_slots; data_spans; _ } = context in
   let block_addrs =
     Term.enum sub_t program
     |> Seq.concat_map ~f:(Term.enum blk_t)
@@ -119,6 +128,19 @@ let solve context proj ~noreturn program =
     match named v with
     | Some t -> Some t
     | None -> Core.Map.find entry_addrs v
+  in
+  (* The rip tag is read once, here: a tagged literal naming a function
+     entry or a data section becomes a module address, so every
+     denotation of it carries its [Rip] anchor. *)
+  let program =
+    let is_address a =
+      Option.is_some (lookup a)
+      || Base.List.exists data_spans ~f:(fun span ->
+          Int64.unsigned_compare span.Hike_sections.ds_lo a <= 0
+          && Int64.unsigned_compare a span.ds_hi <= 0)
+    in
+    Hike_rip.prepare_program ~addr_bits:(Hike_abi.addr_size_bits target)
+      ~is_address program
   in
   let sub_addrs =
     Core.Map.fold block_addrs ~init:Addr.Map.empty

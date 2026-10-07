@@ -27,7 +27,7 @@ let classify_shape (ws : Ws.t) : shape =
   | Some Origin.Stack -> `Stack
   | Some (Origin.Vla _) -> `Vla
   | Some Origin.Window -> `Window
-  | Some (Origin.Abs | Origin.Rip) -> `Other
+  | Some (Origin.Abs | Origin.Rip _) -> `Other
   | None -> `Lost
 
 (* Bottom remains in the diagnostic buckets; address identity uses the

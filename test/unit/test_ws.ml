@@ -300,6 +300,54 @@ let tests : unit Alcotest.test list =
             check "WS-38 (widen_join)" (stays_plain (Ws.widen_join a b)))
           [rel, plain; plain, rel]);
 
+    pin "WS-43" "landmark extrapolation keeps a shared module section"
+      (fun () ->
+        Hike_origin.Regions.install [ (Hike_section.Rodata, 0x2000L, 0x2fffL) ];
+        let walk hi =
+          Ws.add (Ws.module_address 0x2000L)
+            (Ws.of_clp (Clp.interval ~width:64 (q64 0x60L) (q64 hi))) in
+        let old = walk 0x6AL and new_ = walk 0x6BL in
+        Hike_origin.Regions.install [];
+        let entries =
+          [ { Cbat_landmarks.bound = q64 0x2070L; is_upper = true;
+              dist = Some 4; dist_p = Some 5 } ] in
+        check "WS-43 (the translated walk stays in its section)"
+          (match Cbat_landmarks.extrapolate ~steps:2 ~old ~new_ ~entries with
+           | `Extrapolated d -> Ws.origin d = Some (Ws.Origin.Rip Hike_section.Rodata)
+           | `Widen -> false));
+
+    pin "WS-42" "a singleton continuing a run widens with the run"
+      (fun () ->
+        Hike_origin.Regions.install [ (Hike_section.Rodata, 0x2000L, 0x2fffL) ];
+        let walk lo hi =
+          Ws.add (Ws.module_address 0x2000L)
+            (Ws.of_clp (Clp.interval ~width:64 (q64 lo) (q64 hi))) in
+        let old = walk 0x60L 0x6AL in
+        let next = Ws.union (Ws.module_address 0x2060L) (walk 0x61L 0x6BL) in
+        let widened = Ws.widen_join old next in
+        let run = walk 0x60L 0x6BL in
+        Hike_origin.Regions.install [];
+        check "WS-42 (the joined walk is one run)" (Ws.equal next run);
+        check "WS-42 (the widened walk keeps its section and extrapolates)"
+          (Ws.origin widened = Some (Ws.Origin.Rip Hike_section.Rodata)
+           && Ws.max_elem widened = Some (q64 (-1L))));
+
+    pin "WS-41" "a relative set within the exact budget keeps every element"
+      (fun () ->
+        let words =
+          [ 0x10b0L; 0x10c4L; 0x10d0L; 0x10f8L; 0x1100L; 0x1124L; 0x1130L; 0x1158L; 0x1170L ] in
+        Hike_origin.Regions.install [ (Hike_section.Rodata, 0x2000L, 0x2fffL) ];
+        let target =
+          Ws.add (Ws.module_address 0x2000L)
+            (Ws.of_list ~width:64 (List.map (fun w -> q64 (Int64.sub w 0x2000L)) words))
+        in
+        Hike_origin.Regions.install [];
+        check "WS-41 (nine irregular words stay exact)"
+          (Ws.origin target = Some (Ws.Origin.Rip Hike_section.Rodata)
+           && match Ws.enumerate ~cap:16 target with
+           | Some ws -> List.length ws = List.length words
+           | None -> false));
+
     pin "WS-40" "only stack-family origins supply stack identity, offsets and keys"
       (fun () ->
         let plain = Ws.singleton (q64 0x4000000000000000L) in
@@ -310,7 +358,7 @@ let tests : unit Alcotest.test list =
           && Hike.Stack_model.singleton_stack_position v = None
           && Hike.Stack_model.positions_of_offsets v = None in
         List.iter (fun v -> check "WS-40 (no stack identity)" (nonstack v))
-          [plain; Ws.set_origin Ws.Origin.Rip base;
+          [plain; Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) base;
            Ws.set_origin Ws.Origin.Abs base];
         check "WS-40 (absolute memory key)"
           (match Ws.address_pieces plain with

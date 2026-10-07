@@ -38,7 +38,7 @@ let ori_02 () =
       Origin.Stack;
       Origin.Vla (Tid.create ());
       Origin.Window;
-      Origin.Rip ]
+      Origin.Rip Hike_section.Rodata ]
   in
   List.iter all ~f:(fun o ->
       let n = Origin.name o in
@@ -277,12 +277,12 @@ let ori_18 () =
   check "an absolute origin names no stack line"
     (not (Origin.names_stack_line Origin.Abs));
   check "a module-relative origin names no stack line"
-    (not (Origin.names_stack_line Origin.Rip))
+    (not (Origin.names_stack_line (Origin.Rip Hike_section.Rodata)))
 
 let ori_19 () =
   let origins =
-    [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip;
-      Origin.Vla (Tid.create ()); Origin.Vla (Tid.create ()) ]
+    [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip Hike_section.Rodata;
+      Origin.Rip Hike_section.Data; Origin.Vla (Tid.create ()); Origin.Vla (Tid.create ()) ]
   in
   let value o = Ws.set_origin o (Ws.stack_word_i64 3L) in
   List.iter origins ~f:(fun a ->
@@ -297,17 +297,29 @@ let ori_19 () =
         (Option.equal Origin.equal
            (Ws.origin (Ws.add (value a) (Ws.singleton (i2w 1L))))
            (if Origin.equal a Origin.Abs then None else Some a)));
-  let rip = value Origin.Rip in
-  check "an unknown module base has no concrete enumeration"
-    (List.is_empty (Ws.iter rip));
-  check "a module-relative value materialises soundly"
-    (Ws.is_top (Ws.union rip (Ws.singleton (i2w 3L))));
-  check "unknown-base membership remains conservative" (Ws.elem (i2w 3L) rip);
-  check "Rip has no certified low base bits"
-    (Ws.is_top (Ws.logand rip (Ws.singleton (i2w 15L))));
-  check "subtracting a symbolic base cannot keep that base"
-    (Option.is_none (Ws.origin (Ws.sub (Ws.singleton (i2w 12L)) rip)));
-  List.iter [ Origin.Abs; Origin.Rip; Origin.Stack; Origin.Window ] ~f:(fun o ->
+  let region = Origin.Rip Hike_section.Rodata in
+  let rip = value region in
+  let plain k = Ws.singleton (i2w k) in
+  check "a module address enumerates its link-time words"
+    (Option.equal (List.equal Cbat_word.equal)
+       (Ws.enumerate ~cap:4 rip) (Some [ i2w 3L ]));
+  check "membership is exact on the absolute line"
+    (Ws.elem (i2w 3L) rip && not (Ws.elem (i2w 4L) rip));
+  check "a join with a plain value keeps the exact words, not the region"
+    (Ws.equal (Ws.union rip (plain 5L)) (Ws.union (plain 3L) (plain 5L)));
+  check "a displacement and a mask keep the region"
+    (Option.equal Origin.equal (Ws.origin (Ws.add rip (plain 8L))) (Some region)
+     && Option.equal Origin.equal
+          (Ws.origin (Ws.logand rip (plain (-2L)))) (Some region)
+     && Ws.equal (Ws.logand rip (plain 15L)) (value region));
+  check "subtracting a module address yields plain link-time words"
+    (Ws.equal (Ws.sub (plain 12L) rip) (plain 9L)
+     && Ws.equal (Ws.sub (Ws.add rip (plain 4L)) rip) (plain 4L));
+  check "different regions materialise to exact plain words"
+    (Ws.equal
+       (Ws.union rip (Ws.set_origin (Origin.Rip Hike_section.Data) (Ws.stack_word_i64 5L)))
+       (Ws.union (plain 3L) (plain 5L)));
+  List.iter [ Origin.Abs; region; Origin.Stack; Origin.Window ] ~f:(fun o ->
       check "memory namespace follows the carried origin"
         (match Ws.address_pieces (value o) with
          | Some (key, _) -> Origin.equal key (Ws.key_line o)
@@ -352,7 +364,8 @@ let ori_22 () =
   Origin.Vla_seed.record tid
     { Origin.off_lo = 0L; off_hi = Some 32L;
       base_lo = Some 0L; base_hi = Some 0L };
-  let origins = [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip; Origin.Vla tid ] in
+  let origins =
+    [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip Hike_section.Rodata; Origin.Vla tid ] in
   let value o = Ws.set_origin o (Ws.stack_word_i64 0L) in
   let key ws = List.hd_exn (Mem.Key.of_wordset ws) in
   let cell = key (Ws.singleton (i2w 0x1000L)) in
@@ -383,7 +396,8 @@ let ori_23 () =
               ~f:(fun offs -> Clp.elem (i2w (-8L)) offs && Clp.elem (i2w 8L) offs)))
 
 let ori_24 () =
-  let origins = [ Origin.Stack; Origin.Window; Origin.Rip; Origin.Vla (Tid.create ()) ] in
+  let origins =
+    [ Origin.Stack; Origin.Window; Origin.Rip Hike_section.Rodata; Origin.Vla (Tid.create ()) ] in
   List.iter origins ~f:(fun o ->
       let a = Ws.set_origin o (Ws.stack_word_i64 0L) in
       let b = Ws.set_origin o (Ws.stack_word_i64 1L) in
@@ -391,9 +405,11 @@ let ori_24 () =
         (Ws.equal (Ws.diff a b) a);
       check "same-origin self-difference is empty" (Ws.is_bottom (Ws.diff a a)));
   let a = Ws.singleton (i2w 42L) in
-  let b = Ws.set_origin Origin.Rip (Ws.stack_word_i64 0L) in
-  check "an unknown-base subtrahend cannot erase reachable plain values"
-    (Ws.elem (i2w 42L) (Ws.diff a b))
+  let b = Ws.set_origin (Origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 0L) in
+  check "a module-address subtrahend removes only its link-time words"
+    (Ws.elem (i2w 42L) (Ws.diff a b)
+     && Ws.is_bottom
+          (Ws.diff a (Ws.set_origin (Origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 42L))))
 
 let () =
   run "hike_origin"

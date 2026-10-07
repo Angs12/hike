@@ -329,6 +329,7 @@ let rec denote_exp (e : exp) (env : AI.t) : val_t or_type_error =
   | Bil.Var v -> begin match Var.typ v with
     | Type.Imm bitwidth ->
       (match Hike_synth.module_addr_of Hike_synth.empty v with
+       | Some a when bitwidth = 64 -> return_imm (WordSet.module_address a)
        | Some a ->
          return_imm (WordSet.singleton
                        (Cbat_word.of_word (Word.of_int64 ~width:bitwidth a)))

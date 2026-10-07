@@ -9,7 +9,8 @@ type t =
   | Stack  (* the sub's entry SP *)
   | Vla of Tid.t  (* the SP after that def's dynamic decrement *)
   | Window  (* the caller's frame (the call boundary) *)
-  | Rip  (* the module base (BAP's rip_relative_addr slot) *)
+  | Rip of Hike_section.t
+  (* a module address into that section: offsets are link-time words *)
 [@@deriving bin_io, sexp, compare]
 
 (* Core's [(=)] is int equality; origins compare structurally. *)
@@ -66,7 +67,7 @@ let facts (t : t) : facts =
       certified = 4;
       lo = window_floor;
       hi = Stdlib.Int64.max_int }
-  | Rip -> { base = 0L; certified = 0; lo = Stdlib.Int64.min_int; hi = Stdlib.Int64.max_int }
+  | Rip _ -> { base = 0L; certified = 64; lo = 0L; hi = 0L }
 
 let name (t : t) : string =
   match t with
@@ -74,7 +75,7 @@ let name (t : t) : string =
   | Stack -> "stack"
   | Vla _ -> "vla"
   | Window -> "window"
-  | Rip -> "rip"
+  | Rip _ -> "rip"
 
 (* The D10 namespace test: does an origin name the model's stack line.
    [Stack], [Window] and a [Vla] frame share the entry-relative line; an
@@ -82,7 +83,7 @@ let name (t : t) : string =
 let names_stack_line (t : t) : bool =
   match t with
   | Stack | Window | Vla _ -> true
-  | Abs | Rip -> false
+  | Abs | Rip _ -> false
 
 (* A VLA allocation's fact in the allocation's own frame: the routable
    offsets are frame-relative (0 = the allocation base = the post-move
@@ -135,4 +136,19 @@ module Vla_seed = struct
     let e = !extents in
     extents := empty;
     e
+end
+
+(* The program's section map: the section each module address lies in.
+   Installed once per program from the loaded image. *)
+module Regions = struct
+  let spans : (Hike_section.t * int64 * int64) list ref = ref []
+
+  let install (rs : (Hike_section.t * int64 * int64) list) : unit = spans := rs
+
+  let of_address (a : int64) : Hike_section.t option =
+    Base.List.find_map !spans ~f:(fun (r, lo, hi) ->
+        Base.Option.some_if
+          (Stdlib.Int64.unsigned_compare lo a <= 0
+           && Stdlib.Int64.unsigned_compare a hi <= 0)
+          r)
 end

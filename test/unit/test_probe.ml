@@ -28,7 +28,7 @@ let tests : unit Alcotest.test list =
         check "PROBE-01 (vla)"
           (Rows.classify_shape (Ws.vla_frame tid) = `Vla);
         check "PROBE-01 (rip -> other)"
-          (Rows.classify_shape (Ws.set_origin Ws.Origin.Rip base) = `Other));
+          (Rows.classify_shape (Ws.set_origin (Ws.Origin.Rip Hike_section.Rodata) base) = `Other));
 
     pin "PROBE-02"
       "the five access shape counters sum to the non-bottom stack-flagged \

@@ -2,10 +2,10 @@ open Bap.Std
 module Synth = Hike_synth
 module KB = Bap_knowledge.Knowledge
 
-(* The one reader of the lifter's rip tag.  The pass rewrites every
-   tagged def's classified address literals into synthetic module
-   addresses; the access rewrite itself belongs to Hike_synth, which
-   turns every Load/Store into its storage form. *)
+(* The one reader of the lifter's rip tag, run at the analysis entry:
+   every tagged def's module-address literals become synthetic module
+   addresses, which the VSA denotes with their [Rip] anchor.  The later
+   storage bind turns every Load/Store into its storage form. *)
 
 let prepare_program ~addr_bits ~is_address program =
 #ifdef VSA_DEBUG
@@ -58,17 +58,16 @@ let bind_program ~addr_bits ~synth ~regions ~slots ~named_only program =
        Hike_synth_addr.rewrite_def ~addr_bits synth ~regions ~slots ~named_only d
    end)#run program
 
-let resolve ~addr_bits ~is_address ~named_only ~slots ~layout program =
-  let program = prepare_program ~addr_bits ~is_address program in
+let resolve ~addr_bits ~named_only ~slots ~layout program =
   let synth = Synth.empty in
   let program, regions, result = layout ~synth program in
   (bind_program ~addr_bits ~synth ~regions ~slots ~named_only program, result)
 
-let resolve_with_layout ~addr_bits ~is_address ~slots ~layout program =
-  resolve ~addr_bits ~is_address ~named_only:true ~slots ~layout program
+let resolve_with_layout ~addr_bits ~slots ~layout program =
+  resolve ~addr_bits ~named_only:true ~slots ~layout program
 
-let resolve_program ?(slots = []) ~addr_bits ~is_address ~regions program =
+let resolve_program ?(slots = []) ~addr_bits ~regions program =
   fst
-    (resolve ~addr_bits ~is_address ~named_only:false ~slots
+    (resolve ~addr_bits ~named_only:false ~slots
        ~layout:(fun ~synth:_ program -> (program, regions, ()))
        program)

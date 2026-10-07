@@ -2,7 +2,7 @@
  (name hike_origin)
  (public_name hike.hike_origin)
  (wrapped false)
- (modules hike_origin)
+ (modules hike_section hike_origin)
  (libraries bap bin_prot core)
  ; The cppo chain (mirrors src/dune and cbat_vsa): ppx-jane IS the old
  ; pps ppx_bap driver, and cppo runs before it in every build.

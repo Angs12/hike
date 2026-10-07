@@ -13,12 +13,6 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     (program : program term) : result =
   let program = Hike_split_blocks.materialize ~facts program in
   let addr_bits = Hike_abi.addr_size_bits facts.target in
-  let is_address a =
-    Option.is_some (facts.lookup a)
-    || Base.List.exists spans ~f:(fun span ->
-        Int64.unsigned_compare span.Hike_sections.ds_lo a <= 0
-        && Int64.unsigned_compare a span.ds_hi <= 0)
-  in
   (* A copy-relocated slot's bytes are externally owned: the access keeps
      its absolute address so the emitter's relocation path renders it. *)
   let slots =
@@ -101,6 +95,6 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     (program, regions, Hike_kb.with_attribution facts ~spec ~escape_roots)
   in
   let program, facts =
-    Hike_rip.resolve_with_layout ~addr_bits ~is_address ~slots ~layout program
+    Hike_rip.resolve_with_layout ~addr_bits ~slots ~layout program
   in
   { program; facts = { facts with Hike_kb.synth = Hike_synth.table_of_program program } }

@@ -111,8 +111,12 @@ module Pieces = struct
   let adjacent_merge (q : progression) (p : progression) : progression option =
     if C.is_infinite q || C.is_infinite p then None
     else
-      let step = C.step_of q in
-      if Cbat_word.is_zero step || not (Cbat_word.equal step (C.step_of p))
+      (* A singleton continues its neighbour's run at the run's step. *)
+      let step =
+        if Cbat_word.is_one (C.cardn_of q) then C.step_of p else C.step_of q in
+      let p_step =
+        if Cbat_word.is_one (C.cardn_of p) then step else C.step_of p in
+      if Cbat_word.is_zero step || not (Cbat_word.equal step p_step)
       then None
       else
         match C.finite_end q with
@@ -249,6 +253,20 @@ module Pieces = struct
       let rest = List.filteri ps ~f:(fun k _ -> k <> i && k <> j) in
       Some (hull, rest)
 
+  (* A union of at most [U.fin_set_size] elements stays exact: the cap
+     bounds large unions, never an exact set the FinSet tier would keep. *)
+  let within_exact_budget (ps : progression list) : bool =
+    let budget = U.fin_set_size in
+    let rec go n = function
+      | [] -> true
+      | p :: rest ->
+        (not (C.is_infinite p))
+        && (match Cbat_word.to_int (C.cardinality p) with
+            | Ok k -> n + k <= budget && go (n + k) rest
+            | Error _ -> false)
+    in
+    go 0 ps
+
   (* Canonicalize and cap: split wrapped pieces into their arcs, sort,
      merge, then hull the smallest-growth pair until the list fits.  No
      piece in a canonical list wraps. *)
@@ -278,7 +296,7 @@ module Pieces = struct
     let ps = List.sort ps ~compare:compare_piece in
     let ps = List.rev (List.fold ps ~init:[] ~f:insert) in
     let ps =
-      if List.length ps > max_pieces then begin
+      if List.length ps > max_pieces && not (within_exact_budget ps) then begin
 #ifdef VSA_DEBUG
         census_cap ();
 #endif

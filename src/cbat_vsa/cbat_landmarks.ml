@@ -418,4 +418,5 @@ let extrapolate ~(steps : int) ~(old : Cbat_clp_set_composite.t)
     `Extrapolated (Cbat_clp_set_composite.extrapolate_steps ~steps old new_)
   | _ ->
     let data = translate_to ~steps old new_ entries in
-    if Cbat_clp_set_composite.is_top data then `Widen else `Extrapolated data
+    if Cbat_clp_set_composite.is_top data then `Widen
+    else `Extrapolated (Cbat_clp_set_composite.keep_section ~old ~new_ data)

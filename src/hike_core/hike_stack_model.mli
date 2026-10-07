@@ -6,8 +6,8 @@ open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
 
-(* The sections in declaration order. *)
-type sec =
+(* The sections in declaration order: the shared [Hike_section] ADT. *)
+type sec = Hike_section.t =
   | Stack
   | Args
   | Vla

@@ -305,7 +305,7 @@ let tests : unit Alcotest.test list =
         let values =
           [ Ws.singleton (w64 0x1000);
             Ws.set_origin Hike_origin.Abs (Ws.stack_word_i64 0x1000L);
-            Ws.set_origin Hike_origin.Rip (Ws.stack_word_i64 0x1000L) ] in
+            Ws.set_origin (Hike_origin.Rip Hike_section.Rodata) (Ws.stack_word_i64 0x1000L) ] in
         Base.List.iter values ~f:(fun rsp ->
             let post = ce_call (AI.add_word env ~key:ce_abi.Hike_abi.sp ~data:rsp)
                 (ids1 ce_abi.Hike_abi.sp) in

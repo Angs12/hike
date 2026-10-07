@@ -3,21 +3,11 @@
 module Vocab = struct
   open! Core
 
-  type sec = Stack | Args | Vla | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
+  type sec = Hike_section.t =
+    | Stack | Args | Vla | Text | Rodata | Data | Got | Gotplt | Datarelro | Bss
   [@@deriving equal, compare, sexp]
 
-  (* The section's ELF name — the one spelling of the name grammar. *)
-  let sec_name = function
-    | Stack -> "stack"
-    | Args -> "args"
-    | Vla -> "vla"
-    | Data -> "data"
-    | Rodata -> "rodata"
-    | Bss -> "bss"
-    | Got -> "got"
-    | Gotplt -> "got.plt"
-    | Datarelro -> "data.rel.ro"
-    | Text -> "text"
+  let sec_name = Hike_section.name
 
   (* The def-carried classification: the occupied extent or the
      justified unbounded form.  The RUNTIME ORIGIN is not here — it

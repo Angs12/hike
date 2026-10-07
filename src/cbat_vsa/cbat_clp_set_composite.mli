@@ -51,6 +51,12 @@ val extrapolate_steps : steps:int -> t -> t -> t
    RSP is 8 (mod 16)), as int64. *)
 val stack_base : int64
 
+(* A module address: its link-time word in its section. *)
+val module_address : int64 -> t
+
+(* [r] re-tagged with the section [old] and [new_] share, if any. *)
+val keep_section : old:t -> new_:t -> t -> t
+
 val stack_word : Cbat_clp.t -> t
 val stack_word_i64 : int64 -> t
 
