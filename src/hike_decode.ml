@@ -84,7 +84,9 @@ let initial proj =
   let state = Project.state proj in
   let grown = Project.State.disassembly state in
   let cfg = Toplevel.var "hike-drive-initial-cfg" in
-  Toplevel.put cfg (cfg_of_state grown);
+  Toplevel.put cfg
+    (Kb.Symbol.in_package (file_of (Project.program proj)) @@ fun () ->
+     cfg_of_state grown);
   { grown; cfg = Toplevel.get cfg; subs = Project.State.subroutines state }
 
 let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
@@ -156,10 +158,11 @@ let rescan (proj : Project.t) ~(file : string) ~(roots : int64 list) :
    same three calls the loader makes ([Symtab.create] over the state and
    the partition, [Program.lift]) — so every sub the decode and the
    partition name is in the program, discovered callees included. *)
-let program_of_state (state : Driver.state) (subs : Subs.t) : program term =
+let program_of_state ~(file : string) (state : Driver.state) (subs : Subs.t) : program term =
   let run : program term Toplevel.var = Toplevel.var "hike-drive-program" in
   Toplevel.put run
-    (let open Kb.Syntax in
+    (Kb.Symbol.in_package file @@ fun () ->
+     let open Kb.Syntax in
      Symtab.create state subs >>= fun symtab -> Program.KB.lift symtab);
   Toplevel.get run
 

@@ -107,20 +107,13 @@ let run proj =
       || Cbat_vsa.WordSet.is_infinite ws
     then None
     else
-      match Cbat_word.to_int64 (Cbat_vsa.WordSet.cardinality ws) with
-      | Error _ -> None
-      | Ok n when n <= 0L || n > 64L -> None
-      | Ok _ ->
-        Some
-          (Base.List.filter_map (Cbat_vsa.WordSet.iter ws)
-             ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w)))
+      Base.Option.map (Cbat_vsa.WordSet.enumerate ~cap:64 ws) ~f:(fun words ->
+          Base.List.filter_map words
+            ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w)))
   in
-  (* Every surviving indirect transfer's bounded words, denotated at
-     the state its block reads; the dispatch sites' own word sets ride
-     the completion's facts (collected during the solve).  The
-     call-class words are sub entries, the goto-class words the
-     dispatch's case bodies. *)
-  let transfer_words (envs, sub') : (int64 * bool * int64 list) list =
+  (* Resolved targets retain their instruction sites so BAP can classify
+     the transfers from the original instruction semantics. *)
+  let transfer_words (envs, sub') : (int64 * int64 list) list =
     Base.List.concat_map (Term.enum blk_t sub' |> Seq.to_list)
       ~f:(fun blk ->
         match Core.Map.find envs (Term.tid blk) with
@@ -132,22 +125,14 @@ let run proj =
             let site = Word.to_int64_exn site in
             Base.List.filter_map (Term.enum jmp_t blk |> Seq.to_list)
               ~f:(fun j ->
-                (* A real call (one WITH a return) names function
-                   starts — the pushed return address is the ABI's
-                   entry contract.  BAP renders an indirect TAIL JUMP
-                   as a noreturn call; its destinations are jump
-                   destinations, not entries (rooting them carves the
-                   dispatching loop into per-case subs and hands the
-                   loop head its own sub). *)
-                let call, e =
+                let e =
                   match Jmp.kind j with
-                  | Goto (Indirect e) -> (false, Some e)
+                  | Goto (Indirect e) -> Some e
                   | Call c -> (
                     match Call.target c with
-                    | Indirect e ->
-                      (Base.Option.is_some (Call.return c), Some e)
-                    | _ -> (true, None))
-                  | _ -> (false, None)
+                    | Indirect e -> Some e
+                    | Direct _ -> None)
+                  | _ -> None
                 in
                 match e with
                 | None | Some (Bil.Int _) -> None
@@ -156,16 +141,8 @@ let run proj =
                   | Error _ -> None
                   | Ok ws ->
                     Base.Option.map (bounded_words ws) ~f:(fun words ->
-                        (site, call, words))))))
+                        (site, words))))))
   in
-  (* The completion's dispatch facts: the sites' word sets the solve's
-     phases enumerated.  A goto fact decodes as the dispatching sub's
-     own case body when it sits in no claimed span or in the
-     dispatching sub's span; a foreign span names another sub's
-     territory and rides nothing. *)
-  (* Every resolved word rides the fact channel; the harvest routes it
-     by class.  Nothing is dropped for sitting in another sub's
-     territory — the owning sub is where the driver decodes it. *)
   (* The store lane: a solved root's store whose data denotates to a
      code word names a callee the pointer round trip loses at the
      load.  A store wider than the word packs one address per word
@@ -237,13 +214,8 @@ let run proj =
                       ~f:(fun w -> Result.to_option (Cbat_word.to_int64 w))
                   | _ -> None))))
   in
-  (* One round: BAP decodes and partitions, the run solves every sub of
-     the decoded program under the same fold, and the harvest routes
-     every resolved word by its class — a call-class word, or a goto
-     word naming a partition entry (the cross-sub dispatch's handlers
-     are other subs' entries), is a root; any other goto word is a case
-     body the driver decodes inside its owning sub.  The loop settles
-     when neither the decode nor the discoveries grow. *)
+  (* Each round supplies destinations and data-discovered entry roots,
+     then lets BAP decode and partition the resulting graph. *)
   (* The noreturn fact: computed on each round's SOLVED program (where
      the denotations and canonical returns are final) and threaded into
      the next round's solve, so the completion's edge set never keeps a
@@ -278,7 +250,7 @@ let run proj =
         let lifted =
           match prev with
           | None -> Project.program proj
-          | Some _ -> Hike_decode.program_of_state out.grown out.subs
+          | Some _ -> Hike_decode.program_of_state ~file out.grown out.subs
         in
         (* The entry sub is the target's own fact (B1): the primary
            program's entry names the address; the lifted program's sub
@@ -313,7 +285,6 @@ let run proj =
         in
         let solution = Hike_program_vsa.solve context proj ~noreturn:!noreturn program in
         let subs_acc = solution.subs in
-        let sub_addrs = solution.sub_addrs in
         (* The noreturn fact on the solved program (denotations and the
            canonical returns are final): the set feeds the NEXT round's
            solve, whose completion keeps no continuation for a
@@ -366,38 +337,30 @@ let run proj =
                           | _ -> None)))
               |> Seq.hd)
         in
-        (* The route follows the decode's own two channels: a real
-           call's word, main, or a word already naming a sub is a
-           FUNCTION START (the rooter); every other word is a JUMP
-           DESTINATION (the brancher) — the driver decodes it as plain
-           code and the partition assigns it to its owning sub.  An
-           undecoded in-span case body is a destination, never an
-           entry: rooting it carves its owner at the dispatch. *)
+        (* Resolved transfers feed BAP's destination channel. Instruction
+           semantics determine calls; the partition owns function entries. *)
         Base.Option.iter main_addr ~f:add_root;
-        let route site call w =
-          if call || Core.Map.mem sub_addrs (Addr.of_int64 w) then add_root w
-          else begin
-            let site = terminator_of site in
-            let words = Base.Option.value (Core.Map.find !destinations site)
-                ~default:Core.Int64.Set.empty in
-            if not (Core.Set.mem words w) then begin
-              destinations := Core.Map.set !destinations ~key:site
-                  ~data:(Core.Set.add words w);
-              provide_dests site w
-            end
+        let transfer_targets = ref
+            (Core.Map.fold !destinations ~init:Core.Int64.Set.empty
+               ~f:(fun ~key:_ ~data targets -> Core.Set.union targets data)) in
+        let route site w =
+          transfer_targets := Core.Set.add !transfer_targets w;
+          let site = terminator_of site in
+          let words = Base.Option.value (Core.Map.find !destinations site)
+              ~default:Core.Int64.Set.empty in
+          if not (Core.Set.mem words w) then begin
+            destinations := Core.Map.set !destinations ~key:site
+                ~data:(Core.Set.add words w);
+            provide_dests site w
           end
         in
         Core.Map.fold subs_acc ~init:() ~f:(fun ~key:_ ~data:solved () ->
             Base.List.iter (transfer_words solved)
-              ~f:(fun (site, call, words) ->
-                Base.List.iter words ~f:(route site call)));
-        (* The store lane over every solved sub: a store whose data
-           denotates to a code word names a callee the pointer round
-           trip loses at the load — an entry only outside the DECODED
-           bytes.  The partition's territory covers undecoded gaps too,
-           and a stored code word naming gap bytes names an undiscovered
-           sub (the stripped-binary discovery); a word inside a decoded
-           sub's own blocks is that sub's code. *)
+              ~f:(fun (site, words) ->
+                Base.List.iter words ~f:(route site)));
+        (* A transfer target is decoded through its instruction, not rooted
+           again by the code-value scan. Other code values retain the data
+           discovery lane for callbacks outside the decoded sub extents. *)
         let decoded_extents =
           Term.enum sub_t solved_program
           |> Seq.filter_map ~f:(fun s ->
@@ -427,9 +390,9 @@ let run proj =
         in
         Core.Map.fold subs_acc ~init:() ~f:(fun ~key:_ ~data:solved () ->
             Base.List.iter (store_words solved) ~f:(fun w ->
-                if unclaimed w then add_root w);
+                if unclaimed w && not (Core.Set.mem !transfer_targets w) then add_root w);
             Base.List.iter (value_words solved) ~f:(fun w ->
-                if unclaimed w then add_root w));
+                if unclaimed w && not (Core.Set.mem !transfer_targets w) then add_root w));
         let result = { decoded = out; program = raw;
                        main_addr; noreturn = used_noreturn;
                        roots = !root_set; destinations = !destinations } in
