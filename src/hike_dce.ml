@@ -1,13 +1,6 @@
-(* The dead-def sweep: plain liveness over the model's read sets.  The
-   roots are every jump's reads — its operand expressions and the kind's
-   ABI boundary (a ret consumes the return registers and SP; a call the
-   parameter registers, the ABI return registers it produces, and SP) —
-   a call-bearing block's mem-typed defs (the memory state the site
-   hands its callee), and the sub's escape roots (the storages whose
-   bytes leave the sub: an incoming stack-address parameter's target,
-   a typed call argument's storage).  A def or phi is live iff its lhs
-   is read by a live node, to a fixpoint.  Everything unmarked leaves —
-   no per-var keep arms. *)
+(* Loads and stores are liveness roots, including nested expressions.
+   Their dependencies and the ABI/escape roots propagate through the
+   ordinary def/phi fixpoint; unused scalar definitions remain removable. *)
 open Bap.Std
 open Bap.Std.Bil.Types
 module Abi = Hike_abi
@@ -26,10 +19,11 @@ let dce ~(target : Bap_core_theory.Theory.Target.t)
              Seq.append
                (Term.enum def_t b
                |> Seq.map ~f:(fun d ->
-                      (Term.tid d, Def.lhs d, Model.def_reads d)))
+                      (Term.tid d, Def.lhs d, Model.def_reads d, Model.reads_mem (Def.rhs d))))
                (Term.enum phi_t b
                |> Seq.map ~f:(fun p ->
-                      (Term.tid p, Phi.lhs p, Model.phi_reads p))))
+                      (Term.tid p, Phi.lhs p, Model.phi_reads p,
+                       Seq.exists (Phi.values p) ~f:(fun (_, e) -> Model.reads_mem e)))))
       |> Seq.to_list
     in
     let exact_roots = ref Var.Set.empty in
@@ -76,10 +70,10 @@ let dce ~(target : Bap_core_theory.Theory.Target.t)
     let changed = ref true in
     while !changed do
       changed := false;
-      Base.List.iter nodes ~f:(fun (tid, lhs, reads) ->
+      Base.List.iter nodes ~f:(fun (tid, lhs, reads, memory) ->
           if
             (not (Core.Set.mem !live_tids tid))
-            && (Core.Set.mem !live_bases (Var.base lhs)
+            && (memory || Core.Set.mem !live_bases (Var.base lhs)
                 || Core.Set.mem !base_roots (Var.base lhs))
           then begin
             live_tids := Core.Set.add !live_tids tid;

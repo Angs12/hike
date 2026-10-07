@@ -20,7 +20,7 @@ let dce_jmps (sub : sub term) : jmp term list =
 
 let tests : unit Alcotest.test list =
   [
-    pin "DCE-13" "every written global component survives without an in-sub reader"
+    pin "DCE-13" "every global and local store survives without an in-sub reader"
       (fun () ->
          let memories = [Hike.Synth.Global 1; Hike.Synth.Global 2;
                          Hike.Synth.Stack 1] in
@@ -32,20 +32,14 @@ let tests : unit Alcotest.test list =
          let sub = Hike.Dce.dce ~target:Theory.Target.unknown
              ~escape_roots:Var.Set.empty sub in
          let lhs = Base.List.map (dce_defs sub) ~f:Def.lhs in
-         check "both globals stay and the unused local storage dies"
-           (Base.List.length lhs = 2
-            && Base.List.for_all lhs ~f:(fun v ->
-                match Hike.Synth.storage_of Hike.Synth.empty v with
-                | Some (Hike.Synth.Global _) -> true | _ -> false)));
+         check "global and local stores all stay"
+           (Base.List.length lhs = 3));
     (* D0: totality + basic sweep — unused def dies, jmp-read def survives. *)
 
 
-    (* D1: the return-shaped transfer's producing def dies in the sweep — the
-       CFG completion owns the epilogue rewrite; DCE honors the var-free target
-       the completion left.  Indirect with return and direct calls stay
-       untouched. *)
+    (* Return and call transfers stay intact; the unused load stays too. *)
     pin "DCE-02"
-      "the return-shaped transfer's var-free target stands and its popped-address def dies"
+      "the return-shaped transfer stays var-free and its load survives"
       (fun () ->
         let t = v64 "d1_t" in
         let t2 = v64 "d1_t2" in
@@ -90,12 +84,12 @@ let tests : unit Alcotest.test list =
               | _ -> false)
           | _ -> false
         in
-        let t_gone =
-          Base.List.for_all (dce_defs sub') ~f:(fun d -> not (Var.equal (Def.lhs d) t))
+        let t_kept =
+          Base.List.exists (dce_defs sub') ~f:(fun d -> Var.equal (Def.lhs d) t)
         in
         check "DCE-02"
           (List.length jmps = 3 && epilogue_target_stays_varfree && others_untouched
-          && t_gone));
+          && t_kept));
 
     (* D2: always-keeps — return/param regs, memory writes, intrinsic vars
        survive unread. *)
@@ -139,13 +133,12 @@ let tests : unit Alcotest.test list =
           && Base.List.mem lhs_set ~equal:String.equal "RDI"
           && Base.List.mem lhs_set ~equal:String.equal "d2_m"));
 
-    (* D3: two-tier region-mem rule — a fissioned store chain dies iff no Load
-       roots it. *)
-    pin "DCE-04" "a fissioned region-mem store chain dies iff no Load roots it (the two-tier rule)"
+    (* Region stores survive independently of their readers. *)
+    pin "DCE-04" "region stores survive with and without a reader"
       (fun () ->
         let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
         let base = v64 "d_base" in
-        (* (a) never loaded: both store-chain members die *)
+        (* Both unread stores survive. *)
         let sub_a, _ =
           sub_of "d3_fission_dead"
             [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
@@ -172,7 +165,7 @@ let tests : unit Alcotest.test list =
         in
         let sub_b' = Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub_b in
         let live_count = List.length (dce_defs sub_b') in
-        check "DCE-04" (dead_count = 0 && live_count = 3));
+        check "DCE-04" (dead_count = 2 && live_count = 3));
 
     (* D4: SP-erasure on the precise path; the control sub keeps everything. *)
     pin "DCE-05"
@@ -229,24 +222,6 @@ let tests : unit Alcotest.test list =
           && Var.equal
                (Def.lhs (match dce_defs sub' with d :: _ -> d | [] -> assert false))
                x));
-
-    (* D6: the reads-only sweep — a never-read region-mem store chain
-       dies; no in-sub read and no jump's boundary read names its
-       storage.  (An escaping store survives through the call boundary
-       reads — the recorded increment on this rule.) *)
-    pin "DCE-07"
-      "a never-read region-mem store chain is swept (the reads-only rule)"
-      (fun () ->
-        let sm = Hike.Stack_model.region_mem ~addr_bits:64 0 in
-        let base = v64 "d_base" in
-        let sub, _ =
-          sub_of "d6_escape_root"
-            [ [ mk_store_plus sm base 8 42; mk_store_plus sm base 16 43 ], [] ]
-        in
-        let sub' =
-          Hike.Dce.dce ~target:Theory.Target.unknown ~escape_roots:Var.Set.empty sub
-        in
-        check "DCE-07" (List.length (dce_defs sub') = 0));
 
     (* D10: the call's argument boundary — a call-bearing block's
        mem-typed defs (the outgoing store's storage, the call-arg address
@@ -398,6 +373,7 @@ let tests : unit Alcotest.test list =
         in
         check "DCE-09"
           (Var.Set.equal carried (Var.Set.singleton sm)));
+
   ]
 
 let () = run "dce" tests
