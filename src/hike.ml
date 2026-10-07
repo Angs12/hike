@@ -648,21 +648,6 @@ let pass_attrib proj =
   Hike_kb.install result.facts;
   Project.with_program proj result.program
 
-(* The sweep runs after [hike-types]: SSA has materialized the joins, so
-   the dead values only the versioned defs and phis distinguish are
-   removable.  The escape roots ride the facts from the attribution. *)
-let pass_dce proj =
-  let facts = Hike_kb.facts () in
-  let target = facts.target in
-  Project.map_program proj ~f:(fun prog ->
-      Term.map sub_t prog ~f:(fun sub ->
-          let roots =
-            Core.Option.value
-              (Core.Map.find facts.escape_roots (Term.tid sub))
-              ~default:Var.Set.empty
-          in
-          Hike_dce.dce ~target ~escape_roots:roots sub))
-
 let pass_convlir ~output proj = convert_binary output proj
 
 let pass_split_blocks proj =
@@ -692,7 +677,6 @@ let () =
       let sign = chain ~name:"sign" ~deps:[ split_blocks ] Hike_types.sign_run in
       let ssa = chain ~name:"ssa" ~deps:[ sign ] pass_ssa in
       let types = chain ~name:"types" ~deps:[ ssa ] Hike_types.run in
-      let dce = chain ~name:"dce" ~deps:[ types ] pass_dce in
-      let convlir = chain' ~name:"convlir" ~deps:[ dce ] (pass_convlir ~output:output_file) in
+      let convlir = chain' ~name:"convlir" ~deps:[ types ] (pass_convlir ~output:output_file) in
       ignore convlir;
       Ok ())
