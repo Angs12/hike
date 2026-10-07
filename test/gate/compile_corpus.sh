@@ -18,11 +18,8 @@ build_lane () {
     gcc $flags -fno-stack-protector -o "$dest/$name" "$f" -lpthread || { echo "FAIL $name (compile)"; fail=1; }
   done
 
-  # list.c needs a main stub; the stub lives in $dest/.build/ so the
-  # corpus dir holds binaries only.
-  mkdir -p "$dest/.build"
-  printf 'int main(void){return 0;}\n' > "$dest/.build/list_main_stub.c"
-  gcc $flags -fno-stack-protector -o "$dest/list" list.c "$dest/.build/list_main_stub.c" \
+  # Exercise the library through a functional driver.
+  gcc $flags -fno-stack-protector -I. -o "$dest/list" list.c "$HERE/fixtures/list_main.c" \
     || { echo "FAIL list (compile)"; fail=1; }
 
   # synth sources are picked up automatically.

@@ -36,7 +36,6 @@ cell () {
   local f name
   for f in "$SRC"/*.c; do
     name="$(basename "$f" .c)"
-    [ "$name" = "list" ] && continue
     srcs+=("$f"); names+=("$name")
   done
   for f in "$SRC"/synth/*.c; do
@@ -51,7 +50,11 @@ cell () {
     if [ -n "${HIKE_MATRIX_FILTER:-}" ] && ! [[ "$name" =~ $HIKE_MATRIX_FILTER ]]; then continue; fi
     total=$((total + 1))
     local bin="$dir/$name" ll="$dir/$name.ll" o="$dir/$name.o" exe="$dir/$name.lifted"
-    if ! $cc $optflag $sp $model -o "$bin" "$f" -lpthread 2>>"$log"; then
+    local extra=()
+    if [ "$name" = "list" ]; then
+      extra=(-I"$SRC" "$HERE/fixtures/list_main.c")
+    fi
+    if ! $cc $optflag $sp $model -o "$bin" "$f" "${extra[@]}" -lpthread 2>>"$log"; then
       echo "  $name: COMPILE-FAIL" >> "$log"; reds="$reds $name(compile)"
       continue
     fi
@@ -80,6 +83,10 @@ cell () {
     for ((run=1; run<=repeats; run++)); do
       timeout "$HIKE_RUN_TIMEOUT" "$exe" > "$lout" 2>/dev/null; lrc=$?
       timeout "$HIKE_RUN_TIMEOUT" "$bin" > "$nout" 2>/dev/null; nrc=$?
+      if [ "$lrc" -eq 124 ] || [ "$nrc" -eq 124 ]; then
+        echo "  $name: TIMEOUT run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
+        reds="$reds $name(timeout)"; passed=0; break
+      fi
       if [ "$lrc" != "$nrc" ] || ! cmp -s "$lout" "$nout"; then
         echo "  $name: DIFF run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
         reds="$reds $name(diff-run-$run)"; passed=0; break
@@ -112,15 +119,17 @@ stage_cells () {
 # recorded -O2 stripped corpus emissions, one consumer level at a time.
 stage_recomp () {
   local corpus="${HIKE_CORPUS:-/tmp/corpus-o2}"
-  for lvl in 0 1 2 3 s; do
+  local failed=0
+  for lvl in 0 1 2 3 s z; do
     local out="$WORK/recomp-$lvl"
     mkdir -p "$out"
     HIKE_OPT_LEVEL="$lvl" "$HERE/semantic/run_semantic.sh" "$corpus" \
-      "${HIKE_EMIT:-/tmp/hike-emit}" "$out" > "$out/summary.log" 2>&1
+      "${HIKE_EMIT:-/tmp/hike-emit}" "$out" > "$out/summary.log" 2>&1 || failed=1
     local line
     line="$(grep 'semantic-opt:' "$out/summary.log" | tail -1)"
     echo "CELL recomp-$lvl: ${line:-NO-RESULT}"
   done
+  return "$failed"
 }
 
 case "${1:-}" in

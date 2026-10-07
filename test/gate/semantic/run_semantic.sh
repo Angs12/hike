@@ -56,7 +56,7 @@ for ll in "$IR"/out_*.ll; do
 	base="$(basename "$ll" .ll)" # out_<name>
 	name="${base#out_}"
 	case "$name" in
-	list) native="$CORPUS/list" ;; # list.c + stub main
+	list) native="$CORPUS/list" ;; # list.c + functional driver
 	*) native="$CORPUS/$name" ;;
 	esac
 	[ -x "$native" ] || {
