@@ -37,3 +37,6 @@ val substitute_relocated_words :
 val get_section_images : Project.t -> (Bytes.t * int64 * int64) list
 
 val get_named_region_info : Project.t -> region Base.Sequence.t
+
+(** PT_TLS layout and file image; missing facts or unreadable bytes are errors. *)
+val tls_spec : Project.t -> Hike_spec.tls_spec option

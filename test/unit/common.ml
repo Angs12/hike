@@ -148,7 +148,7 @@ let run_chain_attrib ?(spans = []) (subs : sub term list) : program term =
   in
   let result =
     Hike.Attribution.run ~facts ~word:8 ~entry:Hike.Stack_model.segment_base
-      ~spans ~meta:[] ~relative:[] ~externals:[] prog
+      ~spans ~meta:[] ~tls:None ~relative:[] ~externals:[] prog
   in
   result.program
 

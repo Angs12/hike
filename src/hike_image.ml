@@ -194,3 +194,57 @@ let get_named_region_info proj =
   let regions = Ogre.collect query in
   fst (Ogre.run regions (Project.specification proj) |> Core.Or_error.ok_exn)
 
+
+(* Header type and alignment come from the ELF producer; joining by the
+   producer's header index keeps this independent of section/symbol names. *)
+let tls_spec (proj : Project.t) : Hike_spec.tls_spec option =
+  let open Ogre in
+  let name = Type.("name" %: str) in
+  let off = Type.("off" %: int) in
+  let size = Type.("size" %: int) in
+  let addr = Type.("addr" %: int) in
+  let typ = Type.("type" %: int) in
+  let align = Type.("align" %: int) in
+  let types () = declare ~name:"llvm:elf-program-header-type"
+      Type.(scheme name $ typ $ align) (fun n t a -> (n, (t, a))) in
+  let files () = declare ~name:"llvm:elf-program-header"
+      Type.(scheme name $ off $ size) (fun n o s -> (n, (o, s))) in
+  let virtuals () = declare ~name:"llvm:elf-virtual-program-header"
+      Type.(scheme name $ addr $ size) (fun n a s -> (n, (a, s))) in
+  let rows table =
+    fst (run (collect Query.(select (from table))) (Project.specification proj)
+         |> Core.Or_error.ok_exn) |> Base.Sequence.to_list in
+  let headers = rows types in
+  if Base.List.is_empty headers then
+    failwith "hike-image: missing ELF program-header type/alignment facts";
+  let tls = Base.List.filter headers ~f:(fun (_, (t, _)) -> Int64.equal t 7L) in
+  match tls with
+  | [] -> None
+  | [ (id, (_, alignment)) ] ->
+    let lookup table =
+      Base.List.Assoc.find (rows table) ~equal:String.equal id
+      |> Base.Option.value_exn ~message:"hike-image: incomplete PT_TLS header" in
+    let _, filesz = lookup files in
+    let vaddr, memsz = lookup virtuals in
+    let alignment = Int64.max 1L alignment in
+    if filesz < 0L || memsz < filesz
+       || Int64.logand alignment (Int64.sub alignment 1L) <> 0L then
+      failwith "hike-image: invalid PT_TLS extent or alignment";
+    let prefix = Int64.rem vaddr alignment in
+    let span = Int64.add memsz prefix in
+    let rounded = Int64.logand (Int64.add span (Int64.sub alignment 1L))
+        (Int64.neg alignment) in
+    let lo = Int64.add vaddr (get_bias proj) in
+    let image = Bytes.init (Int64.to_int filesz) (fun i ->
+        let a = Word.of_int64 ~width:64 (Int64.add lo (Int64.of_int i)) in
+        let mem = Project.memory proj |> Memmap.to_sequence
+            |> Base.Sequence.find ~f:(fun (mem, _) -> Memory.contains mem a)
+            |> Base.Option.value_exn ~message:"hike-image: unreadable PT_TLS image"
+            |> fst in
+        Memory.get ~addr:a mem |> Core.Or_error.ok_exn |> Word.to_int_exn
+        |> Char.chr) in
+    Some { Hike_spec.tls_lo = lo; tls_memsz = memsz;
+           tls_align = Int64.to_int alignment;
+           tls_base = Int64.sub prefix rounded;
+           tls_prefix = Int64.to_int prefix; tls_image = image }
+  | _ -> failwith "hike-image: multiple PT_TLS headers"

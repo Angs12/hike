@@ -52,6 +52,7 @@ let convert_binary output_program proj =
         (* No attribution ran: the sections emit with no components. *)
         let meta = Hike_sections.sec_meta ~word proj in
         Hike_sections.section_spec_of ~word ~comps:[] ~whole:[] ~meta
+          ~tls:(Hike_image.tls_spec proj)
           ~relative ~externals
   in
   let prog = Project.program proj in
@@ -636,9 +637,12 @@ let pass_attrib proj =
   let word = facts.abi.Hike_abi.word in
   let meta = Hike_sections.sec_meta ~word proj in
   let spans = Hike_sections.attrib_spans ~meta in
+  let tls =
+    Hike_image.tls_spec proj
+  in
   let result =
     Hike_attribution.run ~facts ~word
-      ~entry:Hike_stack_model.segment_base ~spans ~meta
+      ~entry:Hike_stack_model.segment_base ~spans ~meta ~tls
       ~relative:(Hike_image.relative_values proj ~bias:(Hike_image.get_bias proj))
       ~externals:(Hike_image.external_references proj) (Project.program proj)
   in

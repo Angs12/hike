@@ -1016,7 +1016,8 @@ let mk_cond_sub nm defs cond_var =
 (* Emitter fixtures (moved verbatim from test_bil2llvm.ml). *)
 let empty_spec : B2l.section_spec =
   { spec_comps = []; spec_whole = []; spec_word = 8;
-    spec_sections = []; spec_relative = []; spec_externals = [] }
+    spec_sections = []; spec_tls = None;
+    spec_relative = []; spec_externals = [] }
 
 let emit_ir_spec (spec : B2l.section_spec) (subs : sub term list) : string =
   let llvm_ctx = Llvm.create_context () in

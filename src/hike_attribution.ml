@@ -8,6 +8,7 @@ type result = {
 let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     ~(spans : Hike_sections.data_span list)
     ~(meta : Hike_sections.sec_meta option list)
+    ~(tls : Hike_spec.tls_spec option)
     ~(relative : (int64 * int64) list) ~(externals : (int64 * string) list)
     (program : program term) : result =
   let program = Hike_split_blocks.materialize ~facts program in
@@ -49,7 +50,7 @@ let run ~(facts : Hike_kb.facts) ~(word : int) ~(entry : int64)
     let spec =
       Hike_sections.section_spec_of ~word
         ~comps:(Hike_sections.global_comps_of ~word ~spans sections)
-        ~whole:(Hike_sections.whole_comps_of sections) ~meta ~relative
+        ~whole:(Hike_sections.whole_comps_of sections) ~meta ~tls ~relative
         ~externals
     in
     let regions =

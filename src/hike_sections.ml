@@ -98,13 +98,14 @@ let attrib_spans ~(meta : sec_meta option list) : data_span list =
    initializer consults. *)
 let section_spec_of ~(word : int) ~(comps : Model.sec_comp list)
     ~(whole : (int * int64 * int64) list) ~(meta : sec_meta option list)
-    ~(relative : (int64 * int64) list)
+    ~(tls : Bil2llvm_env.tls_spec option) ~(relative : (int64 * int64) list)
     ~(externals : (int64 * string) list) : Bil2llvm_env.section_spec =
   let open Bil2llvm_env in
   { spec_comps = comps;
     spec_whole = whole;
     spec_word = word;
     spec_sections = meta;
+    spec_tls = tls;
     spec_relative = relative;
     spec_externals = externals }
 

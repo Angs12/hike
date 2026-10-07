@@ -25,6 +25,13 @@ let minus_addr sp (off : int64) : exp =
       Bil.Int (Cbat_word.to_word (w64 (Int64.to_int off))) )
 
 (* The model's 64-KiB below-entry floor plus the ABI entry word. *)
+let tp_offset_equal (a : Hike.Stack_model.tp_offset) (b : Hike.Stack_model.tp_offset) =
+  match (a, b) with
+  | Tp_absent, Tp_absent -> true
+  | Tp_nonlinear, Tp_nonlinear -> true
+  | Tp_based x, Tp_based y -> Base.Option.equal Int64.equal x y
+  | _ -> false
+
 let stack_floor_bytes = Int64.mul 64L 1024L
 let residue_index = Int64.add stack_floor_bytes 8L
 let unbounded_residue_bytes = Int64.mul 2L residue_index
@@ -528,6 +535,64 @@ let tests : unit Alcotest.test list =
         check "MOD-39"
           (abi.Abi.word = 8
           && Hike.Abi.((of_target x86).Abi.word) = Theory.Target.bits x86 / 8));
+
+    (* The ONE thread-pointer offset rule: the classification and the
+       width semantics.  A bare constant is a summand, never a base;
+       casts keep an offset only when they preserve the value. *)
+    pin "MOD-43"
+      "the one TP offset rule: constants never base, casts preserve or drop"
+      (fun () ->
+        let open Bil in
+        let open Hike.Stack_model in
+        let tp = Hike.Abi.x86_64_sysv.Abi.thread_pointer in
+        let w x = Cbat_word.to_word (w64 x) in
+        let at e = tls_tp_offset ~tp e in
+        let int x = Int (w x) in
+        check "MOD-43.absent" (tp_offset_equal (at (Int (w 0x4038))) Tp_absent);
+        check "MOD-43.self" (tp_offset_equal (at (Var tp)) (Tp_based (Some 0L)));
+        check "MOD-43.offset"
+          (tp_offset_equal (at (BinOp (MINUS, Var tp, int 8)))
+             (Tp_based (Some (-8L))));
+        check "MOD-43.identity-cast"
+          (tp_offset_equal
+             (at (Cast (SIGNED, 64, BinOp (MINUS, Var tp, int 8))))
+             (Tp_based (Some (-8L))));
+        check "MOD-43.width-cast"
+          (tp_offset_equal
+             (at (Cast (LOW, 32, BinOp (MINUS, Var tp, int 8))))
+             Tp_nonlinear);
+        (* (tp+1)-tp cancels to the constant 1: the value no longer
+           reads the pointer, so the expression is absent. *)
+        check "MOD-43.cancel"
+          (tp_offset_equal
+             (at (BinOp (Bil.MINUS, BinOp (PLUS, Var tp, int 1), Var tp)))
+             Tp_absent);
+        check "MOD-43.dynamic"
+          (tp_offset_equal
+             (at (BinOp (PLUS, Var tp, Var (v64 "RDX"))))
+             (Tp_based None));
+        check "MOD-43.signed-cast"
+          (tp_offset_equal
+             (at (BinOp (PLUS, Var tp,
+                     Cast (SIGNED, 64, Int (Word.of_int ~width:32 (-8))))))
+             (Tp_based (Some (-8L))));
+        check "MOD-43.unsigned-cast"
+          (tp_offset_equal
+             (at (BinOp (PLUS, Var tp,
+                     Cast (UNSIGNED, 64, Int (Word.of_int ~width:32 (-8))))))
+             (Tp_based (Some 0xfffffff8L)));
+        check "MOD-43.high-cast"
+          (tp_offset_equal
+             (at (BinOp (PLUS, Var tp,
+                     Cast (HIGH, 64, Concat (int (-8), int 1)))))
+             (Tp_based (Some (-8L))));
+        check "MOD-43.low-cast"
+          (tp_offset_equal
+             (at (BinOp (PLUS, Var tp,
+                     Cast (LOW, 64, Concat (int (-8), int 1)))))
+             (Tp_based (Some 1L)));
+        check "MOD-43.foreign"
+          (tp_offset_equal (at (Var (v64 "RAX"))) Tp_absent));
 
     (* The ONE window denotation: stack-symbolic, ordered, entirely
        at/above the args base.  Both the promotion's window stamp and

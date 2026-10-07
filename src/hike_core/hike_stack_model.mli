@@ -126,6 +126,17 @@ val blk_free_vars : blk term -> Var.Set.t
 val word_bits : int -> int
 val is_true_cond : exp -> bool
 
+(** The one thread-pointer offset rule: whether an address expression
+    is the thread pointer plus a byte offset (an affine analysis in the
+    pointer).  [Tp_based (Some o)] — the pointer plus the constant [o];
+    [Tp_based None] — the pointer plus a dynamic pointer-free offset;
+    [Tp_nonlinear] — the expression reads the pointer but is not
+    pointer-plus-offset (a width-changing cast, a non-unit coefficient);
+    [Tp_absent] — the pointer never occurs. *)
+type tp_offset = Tp_absent | Tp_based of int64 option | Tp_nonlinear
+
+val tls_tp_offset : tp:var -> exp -> tp_offset
+
 (* The signature contract. *)
 val is_intrinsic : sub term -> bool
 val is_emittable_intrinsic : sub term -> bool

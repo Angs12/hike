@@ -232,6 +232,81 @@ let word_bits (word : int) : int = 8 * word
 let is_true_cond (e : exp) : bool =
   match e with Bil.Int w -> Word.equal w (Word.one 1) | _ -> false
 
+(* The one thread-pointer offset rule: whether an address expression
+   is the thread pointer plus a byte offset.  The fold is an affine
+   analysis in the pointer: [Tp_based (Some o)] — pointer plus the
+   constant [o]; [Tp_based None] — pointer plus a dynamic (pointer-free)
+   offset; [Tp_nonlinear] — the expression reads the pointer but is not
+   pointer-plus-offset (a cast that changes the pointer's width, or a
+   non-unit coefficient); [Tp_absent] — the pointer never occurs (a
+   bare constant is a summand, never a base). *)
+type tp_offset = Tp_absent | Tp_based of int64 option | Tp_nonlinear
+
+(* The affine coefficient of the thread pointer. *)
+type tp_coeff = Tp_zero | Tp_one | Tp_non
+
+let tp_add_coeff a b =
+  match (a, b) with
+  | Tp_zero, x | x, Tp_zero -> x
+  | Tp_non, _ | _, Tp_non -> Tp_non
+  | Tp_one, Tp_one -> Tp_non
+
+let tp_sub_coeff a b =
+  match (a, b) with
+  | x, Tp_zero -> x
+  | Tp_non, _ | _, Tp_non -> Tp_non
+  | Tp_one, Tp_one -> Tp_zero
+  | Tp_zero, Tp_one -> Tp_non
+
+let tp_bits_of (v : var) : int =
+  match Var.typ v with
+  | Type.Imm n -> n
+  | _ -> invalid_arg "tls_tp_offset: thread pointer is not an immediate"
+
+let tls_tp_offset ~(tp : var) (e : exp) : tp_offset =
+  let tp_bits = tp_bits_of tp in
+  let rec fold = function
+    | Bil.Int w -> (Tp_zero, Some w)
+    | Bil.Var v ->
+      if Var.same v tp then (Tp_one, Some (Word.zero tp_bits))
+      else (Tp_zero, None)
+    | Bil.BinOp (op, a, b) ->
+      let ca, va = fold a and cb, vb = fold b in
+      let coeff = match op with
+        | Bil.PLUS -> tp_add_coeff ca cb
+        | Bil.MINUS -> tp_sub_coeff ca cb
+        | _ -> if ca = Tp_zero && cb = Tp_zero then Tp_zero else Tp_non in
+      coeff, Base.Option.map2 va vb ~f:(Bil.Apply.binop op)
+    | Bil.Cast (cast, bits, e) ->
+      let c, v = fold e in
+      if c = Tp_zero then c, Base.Option.map v ~f:(Bil.Apply.cast cast bits)
+      else if bits = tp_bits then c, v
+      else Tp_non, None
+    | Bil.UnOp (op, e) ->
+      let c, v = fold e in
+      if c = Tp_zero then c, Base.Option.map v ~f:(Bil.Apply.unop op)
+      else Tp_non, None
+    | Bil.Concat (a, b) ->
+      let ca, va = fold a and cb, vb = fold b in
+      if ca = Tp_zero && cb = Tp_zero then
+        Tp_zero, Base.Option.map2 va vb ~f:Word.concat
+      else Tp_non, None
+    | Bil.Extract (hi, lo, e) ->
+      let c, v = fold e in
+      if c = Tp_zero then c, Base.Option.map v ~f:(Word.extract_exn ~hi ~lo)
+      else Tp_non, None
+    | e ->
+      let reads_tp = (object inherit [bool] Exp.visitor
+          method! visit_var v found = found || Var.same v tp
+        end)#visit_exp e false in
+      (if reads_tp then Tp_non else Tp_zero), None in
+  match fold e with
+  | Tp_non, _ -> Tp_nonlinear
+  | Tp_zero, _ -> Tp_absent
+  | Tp_one, v ->
+    Tp_based (Base.Option.bind v ~f:(fun w ->
+        match Word.to_int64 w with Ok off -> Some off | Error _ -> None))
+
 (* The producer/emitter signature contract: which subs keep their
    pre-promotion signature — emittable intrinsics and @main. *)
 let is_intrinsic (term : sub term) : bool =
