@@ -31,11 +31,17 @@ build_lane () {
     gcc $flags -fno-stack-protector -o "$dest/$name" "$f" -lpthread || { echo "FAIL $name (compile)"; fail=1; }
   done
 
+  for model in local-exec initial-exec global-dynamic local-dynamic; do
+    gcc $flags -fno-stack-protector -ftls-model="$model" \
+      -o "$dest/tls_models_$model" synth/tls_models.c -lpthread \
+      || { echo "FAIL tls_models_$model (compile)"; fail=1; }
+  done
+
   # One binary per source: a silently-shrunk corpus masks everything
   # downstream.
   local expected built
   expected=$(( $(ls *.c | grep -v '^list\.c$' | wc -l) \
-            + $(ls synth/*.c 2>/dev/null | wc -l) + 1 ))
+            + $(ls synth/*.c 2>/dev/null | wc -l) + 5 ))
   built=$(find "$dest" -maxdepth 1 -type f -perm -u+x | wc -l)
   if [ "$built" -ne "$expected" ]; then
     echo "FAIL: $built binaries built, $expected sources (see the FAIL lines above)"

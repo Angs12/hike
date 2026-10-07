@@ -21,7 +21,7 @@ fi
 
 TREE="$(cd "$(git rev-parse --show-toplevel)" && pwd)"
 GIT_DESC=$(git -C "$TREE" describe --always --dirty 2>/dev/null || echo unknown)
-SRC_HASH=$({ find "$TREE/src" \( -name '*.ml' -o -name '*.mli' -o -name 'dune' -o -name '*.sh' \) -print \
+SRC_HASH=$({ find "$TREE/src" \( -name '*.ml' -o -name '*.mli' -o -name '*.c' -o -name 'dune' -o -name '*.sh' \) -print \
               | sort | xargs sha256sum 2>/dev/null; \
             sha256sum "$TREE/dune-project" 2>/dev/null; } \
           | sha256sum | cut -c1-16)

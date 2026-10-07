@@ -1,6 +1,6 @@
 # Pins — test_bil2llvm
 
-Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-54`),
+Module: `test/unit/test_bil2llvm.ml` (group `bil2llvm`, ids `EMIT-01`…`EMIT-55`),
 migrating `test_cbat/test_bil2llvm.ml`.  Every source `check` site is carried as
 an assertion inside its family's pin; **none retired**.  Production mechanism:
 `src/bil2llvm.ml` (the `emit_program` body loop and `create_sub`), the emission
@@ -42,6 +42,10 @@ one failing fixture never hides the rest of the module.
 | EMIT-51 | The LLVM C API bridge emits mfence/lfence/sfence as seq_cst/acquire/release fences. | Drop the fence bridge call. | Each exact fence assertion fails. |
 | EMIT-52 | A marked guarded or ite compare/store emits one strong seq_cst cmpxchg. | Return an empty bracket plan. | The cmpxchg assertion fails and a plain store survives. |
 
+| EMIT-53 | All operand widths use the captured old/new cell for flags, without a racing reload. | Leave post-store loads unreplaced. | Ordinary loads survive and the no-load assertion fails. |
+| EMIT-54 | TLS initializer relocation sites cover file bytes only; the zero tail stays zero even where ELF virtual addresses alias other sections. | Apply relocation rules to the zero tail. | The unrelated RELATIVE word replaces zero bytes. |
+| EMIT-55 | Every path in a lock bracket closes; cyclic, nested, overlapping or orphan markers refuse. | Accept a terminal path without unlock. | The partially closed bracket emits instead of refusing. |
+
 **Fixture note (2026-09-29).** `emit_ir` now runs
 `Hike.Cfg_complete.materialize_fallthroughs` before the split, as the
 pipeline does (ADR 0024), so a fixture's guard reaches the emitter with
@@ -49,6 +53,3 @@ its false edge named.  The fixtures whose guard and fallthrough targeted
 the SAME block (EMIT-01, EMIT-03, EMIT-09) now target distinct blocks —
 that shape is folded to one unconditional edge by the completion, which
 is the pin's point, not its subject.
-
-| EMIT-53 | All operand widths use the captured old/new cell for flags, without a racing reload. | Leave post-store loads unreplaced. | Ordinary loads survive and the no-load assertion fails. |
-| EMIT-54 | TLS initializer relocation sites cover file bytes only; the zero tail stays zero even where ELF virtual addresses alias other sections. | Apply relocation rules to the zero tail. | The unrelated RELATIVE word replaces zero bytes. |

@@ -27,7 +27,7 @@ provenance_ok "$TREE" || exit $?
 # Prints "CELL <tag>: <n>/<total> pass[; reds: ...]" and appends the
 # per-binary details to $WORK/<tag>.log.
 cell () {
-  local tag="$1" cc="$2" optflag="$3" sp="$4" strip="$5"
+  local tag="$1" cc="$2" optflag="$3" sp="$4" strip="$5" model="${6:-}"
   local dir="$WORK/$tag" log="$WORK/$tag.log"
   mkdir -p "$dir"
   : > "$log"
@@ -47,37 +47,50 @@ cell () {
   local n=0 total=0 reds=""
   for i in "${!srcs[@]}"; do
     f="${srcs[$i]}"; name="${names[$i]}"
+    if [ -n "$model" ] && [ "$name" != "tls_models" ]; then continue; fi
+    if [ -n "${HIKE_MATRIX_FILTER:-}" ] && ! [[ "$name" =~ $HIKE_MATRIX_FILTER ]]; then continue; fi
     total=$((total + 1))
     local bin="$dir/$name" ll="$dir/$name.ll" o="$dir/$name.o" exe="$dir/$name.lifted"
-    if ! $cc $optflag $sp -o "$bin" "$f" -lpthread 2>>"$log"; then
+    if ! $cc $optflag $sp $model -o "$bin" "$f" -lpthread 2>>"$log"; then
       echo "  $name: COMPILE-FAIL" >> "$log"; reds="$reds $name(compile)"
       continue
     fi
     [ "$strip" = "strip" ] && objcopy --strip-all "$bin"
-    if ! OCAMLPATH="$TREE/_build/install/default/lib" bap "$bin" \
+    if ! bap "$bin" \
          --pass=hike-convlir --hike-output-file="$ll" \
          --cache-dir="$dir/.cache-$name" >>"$log" 2>&1; then
       echo "  $name: LIFT-FAIL" >> "$log"; reds="$reds $name(lift)"
+      continue
+    fi
+    if grep -Eq 'call .*@(\"[^\"]*)?(intrinsic:)?(x86:)?(lock|unlock|[mls]fence)(\"|\()' "$ll"; then
+      echo "  $name: EXTERNAL-ATOMIC-CALL" >> "$log"; reds="$reds $name(atomic-call)"
       continue
     fi
     if ! $LLC -O0 -relocation-model=pic -filetype=obj "$ll" -o "$o" 2>>"$log"; then
       echo "  $name: LLC-FAIL" >> "$log"; reds="$reds $name(llc)"
       continue
     fi
-    if ! gcc -pie "$o" -o "$exe" 2>>"$log"; then
+    if ! gcc -pie "$o" -o "$exe" -lpthread 2>>"$log"; then
       echo "  $name: LINK-FAIL" >> "$log"; reds="$reds $name(link)"
       continue
     fi
     local lout="$dir/$name.l.out" nout="$dir/$name.n.out" lrc nrc
-    "$exe" > "$lout" 2>/dev/null; lrc=$?
-    "$bin" > "$nout" 2>/dev/null; nrc=$?
-    if [ "$lrc" -ge 128 ] && [ "$nrc" -lt 128 ]; then
-      echo "  $name: SIGNAL (rc l=$lrc n=$nrc)" >> "$log"
-      reds="$reds $name(signal)"
-    elif [ "$lrc" = "$nrc" ] && cmp -s "$lout" "$nout"; then
-      n=$((n + 1)); echo "  $name: PASS" >> "$log"
-    else
-      echo "  $name: DIFF (rc l=$lrc n=$nrc)" >> "$log"; reds="$reds $name(diff)"
+    local repeats=1 run passed=1
+    case "$name" in tls_pthreads|tls_initialized|tls_models) repeats=20 ;; esac
+    for ((run=1; run<=repeats; run++)); do
+      timeout "$HIKE_RUN_TIMEOUT" "$exe" > "$lout" 2>/dev/null; lrc=$?
+      timeout "$HIKE_RUN_TIMEOUT" "$bin" > "$nout" 2>/dev/null; nrc=$?
+      if [ "$lrc" != "$nrc" ] || ! cmp -s "$lout" "$nout"; then
+        echo "  $name: DIFF run=$run/$repeats (rc l=$lrc n=$nrc)" >> "$log"
+        reds="$reds $name(diff-run-$run)"; passed=0; break
+      fi
+      if [ "$lrc" -ge 128 ]; then
+        echo "  $name: SIGNAL run=$run/$repeats (rc=$lrc)" >> "$log"
+        reds="$reds $name(signal)"; passed=0; break
+      fi
+    done
+    if [ "$passed" = 1 ]; then
+      n=$((n + 1)); echo "  $name: PASS runs=$repeats" >> "$log"
     fi
   done
   if [ -n "$reds" ]; then
@@ -85,13 +98,14 @@ cell () {
   else
     echo "CELL $tag: $n/$total pass"
   fi
+  [ "$total" -gt 0 ] && [ "$n" -eq "$total" ]
 }
 
 stage_cells () {
   python3 "$HERE/matrix_cases.py" "$1" |
-    while IFS=$'\t' read -r tag cc optflag sp strip; do
-      cell "$tag" "$cc" "$optflag" "$sp" "$strip"
-    done
+    { failed=0; while IFS=$'\t' read -r tag cc optflag sp strip model; do
+      cell "$tag" "$cc" "$optflag" "$sp" "$strip" "$model" || failed=1
+    done; exit "$failed"; }
 }
 
 # The recompile sweep runs the semantic gate's own machinery over the
@@ -114,11 +128,13 @@ case "${1:-}" in
     shift
     python3 "$HERE/matrix_performance.py" --output "$WORK/performance" "$@"
     ;;
+  tls)              HIKE_MATRIX_FILTER='^(tls_|atomic_)' stage_cells tls ;;
+  tls-models)       stage_cells tls-models ;;
   opts)             stage_cells opts ;;
   compilers)        stage_cells compilers ;;
   protector)        stage_cells protector ;;
   protector-strip)  stage_cells protector-strip ;;
   strip)            stage_cells strip ;;
   recomp)           stage_recomp ;;
-  *) echo "usage: matrix.sh <opts|compilers|protector|protector-strip|strip|recomp|performance> [options]" >&2; exit 2 ;;
+  *) echo "usage: matrix.sh <opts|compilers|protector|protector-strip|strip|tls|tls-models|recomp|performance> [options]" >&2; exit 2 ;;
 esac

@@ -67,7 +67,7 @@ provenance_ok() {
   # the build) is a hard stop.
   local rec_src src
   rec_src="$(sed -n 's/^src_sha16: //p' "$prov")"
-  src="$({ find "$tree/src" \( -name '*.ml' -o -name '*.mli' -o -name 'dune' -o -name '*.sh' \) -print \
+  src="$({ find "$tree/src" \( -name '*.ml' -o -name '*.mli' -o -name '*.c' -o -name 'dune' -o -name '*.sh' \) -print \
             | sort | xargs sha256sum 2>/dev/null; \
            sha256sum "$tree/dune-project" 2>/dev/null; } \
          | sha256sum | cut -c1-16)"
