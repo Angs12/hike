@@ -710,20 +710,13 @@ let create_indirect_tail ctx scope llvm_builder blk_tid blk sub (j : jmp term) =
              (Exp.to_string target)))
   | Direct _ -> failwith "create_indirect_tail: expected an indirect target"
 
-(* The atomic-family intrinsics: the lock-marker pair and the fences.
-   The markers bracket the RMW the access lane renders; here the call
-   itself renders nothing but the continuation edge.  The fence class
-   is refused: LLVM 19's OCaml bindings ship no fence builder, and a
-   dropped or external fence is unsound. *)
+(* Marker calls retain only their continuation; fences emit their exact ordering. *)
 let create_atomic_intrinsic_call ctx scope llvm_builder ~sub_tid name call =
   (match Abi.strip_at name with
    | "intrinsic:x86:lock" | "intrinsic:x86:unlock" -> ()
-   | "intrinsic:mfence" | "intrinsic:lfence" | "intrinsic:sfence" ->
-     failwith
-       (Printf.sprintf
-          "hike-emit: fence intrinsic %s (in sub %s): the LLVM 19 OCaml \
-           bindings ship no fence builder - refusing the class"
-          (Abi.strip_at name) (Tid.name sub_tid))
+   | "intrinsic:mfence" -> Bil2llvm_atomic.fence Llvm.AtomicOrdering.SequentiallyConsistent llvm_builder
+   | "intrinsic:lfence" -> Bil2llvm_atomic.fence Llvm.AtomicOrdering.Acquire llvm_builder
+   | "intrinsic:sfence" -> Bil2llvm_atomic.fence Llvm.AtomicOrdering.Release llvm_builder
    | other ->
      failwith
        (Printf.sprintf

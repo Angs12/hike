@@ -179,18 +179,21 @@ type emit_ctx = {
   sub_starts : Tid.t Core.Int64.Map.t;
 }
 
-(* The atomic lane's per-def plan: how a def inside a lock-marker
-   bracket renders.  One entry per def that renders specially. *)
+type atomic_kind =
+  | Rmw of Llvm.AtomicRMWBinOp.t * exp
+  | Compare_exchange of exp * exp
+
 type atomic_action =
-  (* The def lowers to [atomicrmw]: a store def to [atomicrmw op val]
-     (the op's own write replaces the store), a load def to
-     [atomicrmw xchg] (its lhs binds the returned old value). *)
-  | Atomic_rmw of Llvm.AtomicRMWBinOp.t * exp
-  (* The def binds the bracket's atomic op result (xadd's register:
-     the machine's returned old value, not the BIL's sum). *)
-  | Atomic_old_result
-  (* A store whose write the bracket's atomic op already performed. *)
-  | Atomic_suppressed
+  | Atomic_begin of {
+      kind : atomic_kind;
+      mem : exp;
+      addr : exp;
+      size : Size.t;
+      old_var : var;
+      new_var : var;
+      rhs : exp;
+    }
+  | Atomic_value of exp
 
 (* The sub-emission scope: every per-sub emission state.  [emit_program]'s
    body loop opens one per sub and drops it at the boundary — nothing
@@ -212,10 +215,6 @@ type sub_scope = {
   (* The lock-marker brackets' per-def plans, computed once per sub
      before any body emits.  Key: the def's tid. *)
   atomic_plan : atomic_action Tid.Map.t ref;
-  (* The bracket's most recent atomic result, read by the
-     [Atomic_old_result] action (the BIL order keeps its def after the
-     op's def). *)
-  atomic_old : Llvm.llvalue option ref;
   (* Sub-wide SSA bindings: a phi lhs, a versioned def, or a stamped
      call ret — one var, one value, valid wherever the def dominates. *)
   ssavals : llvalue_map ref;
@@ -241,7 +240,6 @@ let fresh_scope () : sub_scope =
     undef_vals = ref WVarMap.empty;
     let_counter = ref 0;
     atomic_plan = ref Tid.Map.empty;
-    atomic_old = ref None;
     ssavals = ref WVarMap.empty;
     bir_phis = ref Tid.Map.empty;
     ssa_versions = ref Tid.Map.empty;

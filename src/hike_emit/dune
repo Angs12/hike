@@ -5,6 +5,7 @@
  (modules
   bil2llvm
   bil2llvm_access
+  bil2llvm_atomic
   bil2llvm_calls
   bil2llvm_env
   bil2llvm_exp
@@ -24,6 +25,9 @@
   hike.hike_stack_bounds
   hike.cbat_vsa
   hike.hike_core)
+ (foreign_stubs
+  (language c)
+  (names bil2llvm_atomic_stubs))
  (preprocess
   (action
    (run %{workspace_root}/src/cppo_preprocess.sh %{profile} %{input-file}))))

@@ -255,44 +255,54 @@ let tests : unit Alcotest.test list =
           Bil.BinOp
             (Bil.PLUS, Bil.Var tp, Bil.Int (Cbat_word.to_word (w64 offset)))
         in
-        let store offset value =
-          Def.create (memv (Printf.sprintf "tls_store_%d" offset))
+        let store name offset value =
+          Def.create (memv name)
             (Bil.Store
-               ( Bil.Var m
-               , addr offset
-               , Bil.Int (Cbat_word.to_word (w64 value))
-               , LittleEndian
-               , `r64 ))
+               ( Bil.Var m, addr offset,
+                 Bil.Int (Cbat_word.to_word (w64 value)), LittleEndian, `r64 ))
         in
-        let ld =
-          Def.create out
-            (Bil.Load (Bil.Var m, addr 0x28, LittleEndian, `r64))
+        let ld_self =
+          Def.create (v64 "tls_self")
+            (Bil.Load (Bil.Var m, addr 0, LittleEndian, `r64))
+        in
+        let ld_canary =
+          Def.create out (Bil.Load (Bil.Var m, addr 0x28, LittleEndian, `r64))
         in
         let sub, _ =
-          sub_of "tls_anchor_sub"
-            [ [ store 0x28 111; store 0x30 222; ld ],
+          sub_of "tls_class_sub"
+            [ [ store "tls_own_a" (-0x8) 111;
+                store "tls_own_b" (-0x10) 222;
+                ld_self;
+                ld_canary;
+                Def.create (v64 "tls_guard") (Bil.Var out) ],
               [ (1,
                  fun t ->
                    mk_jmp_to t
                      (Bil.BinOp
-                        (Bil.EQ, Bil.Var out,
+                        (Bil.EQ, Bil.Var (v64 "tls_guard"),
                          Bil.Int (Cbat_word.to_word (w64 0))))) ];
               [], [ (0, mk_ret) ] ]
         in
-        let ir = emit_ir [ sub ] in
+        let spec =
+          { empty_spec with
+            spec_tls = Some { tls_lo = 0x3dd0L; tls_memsz = 0x18L; tls_align = 8;
+                              tls_base = -0x18L; tls_prefix = 0; tls_image = Bytes.empty } }
+        in
+        let ir = emit_ir_spec spec [ sub ] in
         check "EMIT-14"
           (contains_substring ir "@hike_tls_block = thread_local global"
-          && contains_substring ir "ptr @llvm.threadlocal.address(ptr"
-          && contains_substring ir
-               "call ptr @llvm.threadlocal.address(ptr @hike_tls_block)"
-          (* the cells rebased at the span's 16-byte-floored minimum:
-             accesses at +0x28/+0x30 land at +8/+16 in the block *)
-          && contains_substring ir "getelementptr i8, ptr %tls_addr, i64 8"
-          && contains_substring ir
-               "getelementptr i8, ptr %tls_addr1, i64 16"
-          && contains_substring ir "store i64 111"
-          && contains_substring ir "store i64 222"
-          && contains_substring ir "load i64"));
+           (* the own-range cells: memsz 0x18, offsets -8/-10 land at
+              +0x10/+0x8 in the block *)
+           && contains_substring ir "getelementptr i8, ptr %tls_addr, i64 16"
+           && contains_substring ir "getelementptr i8, ptr %tls_addr1, i64 8"
+           && contains_substring ir "store i64 111"
+           && contains_substring ir "store i64 222"
+           (* fs:0 is the self pointer: the loaded value IS the real
+              thread pointer, never a block cell *)
+           && contains_substring ir "getelementptr i8, ptr %hike_tp, i64 0"
+           (* the canary slot loads through the real thread pointer *)
+           && contains_substring ir "i64 40"
+           && contains_substring ir "load i64"));
 
     (* ROWS-COUNT: the resolved dispatch's emitter views — one incoming
        per rendered edge. *)
@@ -701,8 +711,8 @@ let tests : unit Alcotest.test list =
         let sub, _ =
           sub_of "xadd_sub"
             [ ([ Def.create rax (Bil.Int (atomic_w 3)) ], [ (1, mk_marker lock_tid) ]);
-              ([ Def.create t (Bil.BinOp (Bil.PLUS, ld 0x2000, Bil.Var rax));
-                 st 0x2000 (Bil.Var rax);
+              ([ Def.create t (ld 0x2000);
+                 st 0x2000 (Bil.BinOp (Bil.PLUS, Bil.Var t, Bil.Var rax));
                  Def.create rax (Bil.Var t) ],
                [ (2, mk_marker unlock_tid) ]);
               ([ st 0x2010 (Bil.Var rax) ], [ (0, mk_ret) ]) ]
@@ -778,25 +788,20 @@ let tests : unit Alcotest.test list =
            && contains_substring ir "store i64 9"));
 
     pin "EMIT-51"
-      "a fence intrinsic is a loud refusal: no fence builder ships in the \
-       LLVM 19 OCaml bindings, and a dropped or external fence is unsound"
+      "the three fence intrinsics emit their exact LLVM ordering"
       (fun () ->
-        let sub, _ =
-          sub_of "fence_sub"
-            [ ([], [ (1, mk_marker (Tid.for_name "intrinsic:mfence")) ]);
-              ([], [ (0, mk_ret) ]) ]
-        in
-        let loud =
-          try
-            ignore (emit_ir [ sub ]);
-            false
-          with Failure msg -> contains_substring msg "fence"
-        in
-        check "EMIT-51" loud);
+        List.iter (fun (name, order) ->
+            let sub, _ = sub_of "fence_sub"
+                [ ([], [ (1, mk_marker (Tid.for_name ("intrinsic:" ^ name))) ]);
+                  ([], [ (0, mk_ret) ]) ] in
+            let ir = emit_ir [ sub ] in
+            check ("EMIT-51." ^ name)
+              (contains_substring ir ("fence " ^ order)
+               && not (contains_substring ir ("call void @" ^ name))))
+          [ "mfence", "seq_cst"; "lfence", "acquire"; "sfence", "release" ]);
 
     pin "EMIT-52"
-      "a marked compare-exchange is a loud refusal: no cmpxchg builder \
-       ships in the LLVM 19 OCaml bindings"
+      "a marked compare-exchange emits one seq_cst cmpxchg"
       (fun () ->
         let m = memv "cas_m" in
         let rax = v64 "RAX" in
@@ -820,14 +825,69 @@ let tests : unit Alcotest.test list =
               ([], [ (5, mk_marker unlock_tid) ]);
               ([], [ (0, mk_ret) ]) ]
         in
-        let loud =
-          try
-            ignore (emit_ir [ sub ]);
-            false
-          with Failure msg ->
-            contains_substring msg "compare-exchange"
-        in
-        check "EMIT-52" loud);
+        let ir = emit_ir [ sub ] in
+        check "EMIT-52"
+          (contains_substring ir "cmpxchg ptr"
+           && contains_substring ir "seq_cst seq_cst"
+           && not (contains_substring ir "intrinsic:x86")));
+
+
+    pin "EMIT-53"
+      "atomic flags use the captured cell result at every operand width"
+      (fun () ->
+        List.iter (fun size ->
+            let bits = Size.in_bits size in
+            let m = memv "flags_before" and after = memv "flags_after" in
+            let old = Var.create "flags_old" (Type.Imm bits) in
+            let flag = Var.create "flags_zero" (Type.Imm 1) in
+            let addr = Bil.Int (atomic_w 0x2000) in
+            let sub, _ = sub_of "flags_sub"
+                [ [], [ (1, mk_marker lock_tid) ];
+                  [ Def.create old (Bil.Load (Bil.Var m, addr, LittleEndian, size));
+                    Def.create after (Bil.Store (Bil.Var m, addr,
+                        Bil.BinOp (Bil.PLUS, Bil.Var old, Bil.Int (Word.one bits)),
+                        LittleEndian, size));
+                    Def.create flag (Bil.BinOp (Bil.EQ,
+                        Bil.Load (Bil.Var after, addr, LittleEndian, size),
+                        Bil.Int (Word.zero bits))) ],
+                  [ (2, mk_marker unlock_tid) ];
+                  [ Def.create m (Bil.Store (Bil.Var after,
+                        Bil.Int (atomic_w 0x2010), Bil.Cast (Bil.UNSIGNED, 64, Bil.Var flag),
+                        LittleEndian, `r64)) ], [ (0, mk_ret) ] ] in
+            let ir = emit_ir [ sub ] in
+            check ("EMIT-53." ^ string_of_int bits)
+              (contains_substring ir ("atomicrmw add ptr")
+               && contains_substring ir ("icmp eq i" ^ string_of_int bits)
+               && not (contains_substring ir " = load ")))
+          [ `r8; `r16; `r32; `r64 ]);
+
+    pin "EMIT-54"
+      "TLS relocations affect initialized bytes and never the zero tail"
+      (fun () ->
+        let tls = { Hike_spec.tls_lo = 0x5000L; tls_memsz = 16L;
+                    tls_align = 8; tls_base = -16L; tls_prefix = 0;
+                    tls_image = Bytes.make 8 '\127' } in
+        let spec = { empty_spec with spec_tls = Some tls;
+                      spec_externals = [ 0x5000L, "tls_external" ];
+                      spec_relative = [ 0x5008L, 0xdeadL ] } in
+        let sub, _ = sub_of "tls_init_sub" [ [], [ (0, mk_ret) ] ] in
+        let ir = emit_ir_spec spec [ sub ] in
+        check "EMIT-54"
+          (contains_substring ir "ptrtoint (ptr @tls_external to i64)"
+           && contains_substring ir "[8 x i8] zeroinitializer"
+           && not (contains_substring ir "i64 57005")));
+
+    pin "EMIT-55" "every lock-bracket path must reach its unlock"
+      (fun () ->
+        let flag = Var.create "open_bracket_flag" (Type.Imm 1) in
+        let sub, _ = sub_of "open_bracket"
+            [ [], [ (1, mk_marker lock_tid) ];
+              [], [ (2, fun t -> mk_jmp_to t (Bil.Var flag)); (3, mk_goto) ];
+              [], [ (3, mk_marker unlock_tid) ];
+              [], [ (0, mk_ret) ] ] in
+        let refused = try ignore (emit_ir [sub]); false with
+          | Failure message -> contains_substring message "no unlock" in
+        check "EMIT-55" refused);
 
     (* ENTRY-NAME: the entry sub is analysed, never defined, and its
        declaration carries the ABI's process-entry symbol — a stripped
