@@ -399,7 +399,7 @@ let run proj =
            sub (the stripped-binary discovery); a word inside a decoded
            sub's own blocks is that sub's code. *)
         let decoded_extents =
-          Term.enum sub_t program
+          Term.enum sub_t solved_program
           |> Seq.filter_map ~f:(fun s ->
                  let addrs =
                    Term.enum blk_t s
