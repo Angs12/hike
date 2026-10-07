@@ -165,23 +165,9 @@ let word_of_bytes ~(arr : Bytes.t) ~(off : int) ~(len : int) : int64 =
   in
   go 0L 0
 
-(* A section initializer over the byte image: a word-sized element is
-   an address iff a relocation names it — a RELATIVE word renders its
-   runtime value (base + addend, the loader's own fact), a word a
-   symbol-bearing relocation names renders the symbol's address; every
-   other word keeps its raw bits.  Narrower elements chunk the raw
-   bytes; BSS is zero.  [base_addr] is the section's first byte's
-   address (the [word_lo]/[word_hi] indices are on the section's word
-   grid). *)
-let set_owner_initializer ctx llvm_ctx llvm_module g
-    (arr : Bytes.t) ~(base_addr : int64) ~(word_lo : int) ~(word_hi : int)
-    ~(typed_w : int) ~(bss : bool) ~word =
-  let words = word_hi - word_lo + 1 in
-  let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
-  let elem_ty =
-    if typed_w >= word then word_ty
-    else Llvm.integer_type llvm_ctx (typed_w * 8)
-  in
+(* The relocation rule shared by section and TLS images. *)
+let image_word ctx llvm_ctx llvm_module ~word ~arr ~base_addr off =
+  let word_ty = Llvm.integer_type llvm_ctx (word * 8) in
   (* An externally-relocated word binds the symbol's address; the
      declaration is extern_weak because the native slot may hold a
      weak-undefined symbol (it resolves to null, as the dynamic
@@ -205,8 +191,7 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
      image holds many words; the per-word lookup is a map read). *)
   let relative = ctx.address.relative in
   let externals = ctx.address.externals in
-  let word64 (w : int) : Llvm.llvalue =
-    let off = w * word in
+  let word64 off : Llvm.llvalue =
     let v = word_of_bytes ~arr ~off ~len:word in
     let addr = Stdlib.Int64.add base_addr (Stdlib.Int64.of_int off) in
     match Core.Map.find relative addr with
@@ -215,6 +200,55 @@ let set_owner_initializer ctx llvm_ctx llvm_module g
       (match Core.Map.find externals addr with
        | Some name -> relocated_symbol name
        | None -> Llvm.const_of_int64 word_ty v false)
+  in
+  word64 off
+
+(* A byte-exact image, with relocation words kept as LLVM constants.
+   Packed fields preserve unaligned sites and partial trailing words. *)
+let image_initializer ?(resolve = true) ?(prefix = 0) ?(zero_tail = 0) ctx llvm_ctx llvm_module ~word ~arr ~base_addr =
+  let len = Bytes.length arr in
+  let relocated off =
+    let at = Int64.add base_addr (Int64.of_int off) in
+    Core.Map.mem ctx.address.relative at || Core.Map.mem ctx.address.externals at
+  in
+  let rec fields off acc =
+    if off = len then Array.of_list (List.rev acc)
+    else if relocated off then begin
+      if off + word > len then failwith "hike-emit: relocation exceeds image extent";
+      fields (off + word)
+        ((if resolve then image_word ctx llvm_ctx llvm_module ~word ~arr ~base_addr off
+          else Llvm.const_null (Llvm.integer_type llvm_ctx (word * 8))) :: acc)
+    end else begin
+      let stop = ref (off + 1) in
+      while !stop < len && not (relocated !stop) do incr stop done;
+      let bytes = Array.init (!stop - off) (fun i ->
+          Llvm.const_int (Llvm.i8_type llvm_ctx) (Char.code (Bytes.get arr (off + i)))) in
+      fields !stop (Llvm.const_array (Llvm.i8_type llvm_ctx) bytes :: acc)
+    end
+  in
+  let zeroes n = Llvm.const_null (Llvm.array_type (Llvm.i8_type llvm_ctx) n) in
+  Llvm.const_packed_struct llvm_ctx
+    (Array.concat [ [| zeroes prefix |]; fields 0 []; [| zeroes zero_tail |] ])
+
+(* A section initializer over the byte image: a word-sized element is
+   an address iff a relocation names it — a RELATIVE word renders its
+   runtime value (base + addend, the loader's own fact), a word a
+   symbol-bearing relocation names renders the symbol's address; every
+   other word keeps its raw bits.  Narrower elements chunk the raw
+   bytes; BSS is zero.  [base_addr] is the section's first byte's
+   address (the [word_lo]/[word_hi] indices are on the section's word
+   grid). *)
+let set_owner_initializer ctx llvm_ctx llvm_module g
+    (arr : Bytes.t) ~(base_addr : int64) ~(word_lo : int) ~(word_hi : int)
+    ~(typed_w : int) ~(bss : bool) ~word =
+  let words = word_hi - word_lo + 1 in
+  let word_ty = Llvm.integer_type llvm_ctx (Hike_stack_model.word_bits word) in
+  let elem_ty =
+    if typed_w >= word then word_ty
+    else Llvm.integer_type llvm_ctx (typed_w * 8)
+  in
+  let word64 w =
+    image_word ctx llvm_ctx llvm_module ~word ~arr ~base_addr (w * word)
   in
   if bss then Llvm.set_initializer (Llvm.const_null elem_ty) g
   else if typed_w >= word then

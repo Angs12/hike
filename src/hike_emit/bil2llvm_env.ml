@@ -163,11 +163,8 @@ type emit_ctx = {
      bound once before any body emits (module address vars, component
      globals). *)
   synth_vals : Llvm.llvalue Var.Map.t ref;
-  (* The TLS anchor global and the llvm.trap function, declared once. *)
-  tls_anchor : Llvm.llvalue option ref;
-  (* The module's TLS block: one thread_local byte array covering every
-     TP-relative access, indexed by (offset - min). *)
-  tls_block : (Llvm.llvalue * int64) option ref;
+  (* One executable TLS image with its original Variant-II layout. *)
+  tls : (Llvm.llvalue * Hike_spec.tls_spec) option ref;
   trap_fn : Llvm.llvalue option ref;
   (* The hot LLVM types, bound once per emission. *)
   i64_ty : Llvm.lltype;

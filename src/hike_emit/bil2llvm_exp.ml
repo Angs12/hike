@@ -41,34 +41,40 @@ let create_extract ctx llvm_builder (hi, lo, llvm_var) =
       Llvm.build_trunc temp_var
         (Llvm.integer_type ctx.llvm_ctx result_size) "" llvm_builder
 
-(* True when the address bases on the target's TLS register. *)
-let is_tls_addr ctx (e : exp) : bool =
-  (object
-     inherit [ bool ] Exp.visitor
-     method! visit_var v found =
-       found || Var.same v ctx.abi.Abi.thread_pointer
-   end)#visit_exp e false
+(* PT_TLS owns its byte range; the TCB belongs to the native runtime. *)
+type tls_class =
+  | Tls_block of int64           (* the block's byte index *)
+  | Tls_tp of int64              (* the real thread pointer's offset *)
+  | Tls_tp_exp of exp            (* the dynamic offset; the pointer reads 0 *)
+  | Not_tls
 
-(* A thread_local global's address is not a constant;
-   llvm.threadlocal.address is its accessor. *)
-let tls_anchor_addr ctx llvm_builder =
-  let g =
-    match !(ctx.tls_anchor) with
-    | Some g -> g
-    | None ->
-      let g =
-        Llvm.declare_global (ctx.i64_ty) "hike_tls_anchor"
-          ctx.llvm_module
-      in
-      Llvm.set_thread_local_mode Llvm.ThreadLocalMode.GeneralDynamic g;
-      Llvm.set_initializer (Llvm.const_int (ctx.i64_ty) 0) g;
-      ctx.tls_anchor := Some g;
-      g
-  in
-  let tp = ctx.ptr_ty in
-  let fty = Llvm.function_type tp [| tp |] in
-  let f = Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module in
-  Llvm.build_call fty f [| g |] "tls_anchor" llvm_builder
+let tls_classify ctx (addr : exp) : tls_class =
+  match
+    Hike_stack_model.tls_tp_offset ~tp:ctx.abi.Abi.thread_pointer addr
+  with
+  | Hike_stack_model.Tp_absent -> Not_tls
+  | Tp_nonlinear ->
+    failwith
+      "hike-emit: tls: an access reads the thread pointer but is not \
+       pointer-plus-offset (a width-changing cast or a non-unit \
+       coefficient) - no sound TLS rendering exists"
+  | Tp_based None ->
+    Tls_tp_exp
+      (Exp.substitute (Bil.Var ctx.abi.Abi.thread_pointer)
+         (Bil.Int (Word.zero ctx.addr_bits)) addr)
+  | Tp_based (Some o) -> (
+    match !(ctx.tls) with
+    | Some (_, tls) when o >= tls.tls_base
+                        && o < Int64.add tls.tls_base tls.tls_memsz ->
+      Tls_block (Int64.add (Int64.sub o tls.tls_base)
+                   (Int64.of_int tls.tls_prefix))
+    | _ -> Tls_tp o)
+
+(* The real thread pointer: the native runtime's own value. *)
+let thread_pointer ctx llvm_builder =
+  let fty = Llvm.function_type ctx.ptr_ty [||] in
+  let f = Llvm.declare_function "llvm.thread.pointer" fty ctx.llvm_module in
+  Llvm.build_call fty f [||] "hike_tp" llvm_builder
 
 let create_cast ctx llvm_builder (cast, i, llvm_val) =
   (* A pointer coerces through its integer form; the caller re-types it
@@ -217,6 +223,9 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
           (create_exp ctx scope llvm_builder blk_tid e)
       in
       create_unop llvm_builder (op, v)
+  | Var v when Var.same v ctx.abi.Abi.thread_pointer ->
+      Llvm.build_ptrtoint (thread_pointer ctx llvm_builder)
+        (Llvm.integer_type ctx.llvm_ctx ctx.addr_bits) "hike_tp_value" llvm_builder
   | Var v -> synth_value ctx scope llvm_builder blk_tid v
   | Int i -> create_immediate ctx i
   | Cast (cast, i, e) ->
@@ -238,51 +247,25 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
           (create_exp ctx scope llvm_builder blk_tid e)
       in
       create_extract ctx llvm_builder (hi, lo, v)
-  | Store (_, addr, data, _, _) when is_tls_addr ctx addr ->
-      let ptr = create_tls_ptr ctx scope llvm_builder blk_tid addr in
-      let d = create_exp ctx scope llvm_builder blk_tid data in
-      Bil2llvm_memory.store_ptr llvm_builder d ptr
-  | Load (_, addr, _, size) when is_tls_addr ctx addr ->
-      let ptr = create_tls_ptr ctx scope llvm_builder blk_tid addr in
-      let ty =
-        match want with
-        | Some t -> t
-        | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
-      in
-      Bil2llvm_memory.load_ptr llvm_builder ty ptr
-  | Store (mem, addr, data, _, _) ->
-      let a = create_exp ctx scope llvm_builder blk_tid addr in
-      let d = create_exp ctx scope llvm_builder blk_tid data in
-      (* A resolved storage access carries its storage's memory var and
-         the storage-relative index: one component renderer for every
-         nested access, exactly as for a def's own node. *)
-      (match mem with
-       | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
-         let idx = as_integer ctx llvm_builder a in
-         match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
-         | Some p -> Bil2llvm_memory.store_ptr llvm_builder d p
-         | None -> Bil2llvm_memory.store ctx llvm_builder (d, a))
-       | _ -> Bil2llvm_memory.store ctx llvm_builder (d, a))
-  | Load (mem, addr, _, size) ->
-      let a = create_exp ctx scope llvm_builder blk_tid addr in
-      (match mem with
-       | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
-         let idx = as_integer ctx llvm_builder a in
-         match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
-         | Some p ->
-           let ty =
-             match want with
-             | Some t -> t
-             | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
-           in
-           Bil2llvm_memory.load_ptr llvm_builder ty p
-         | None -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
-       | _ -> (
-         match want with
-         | Some ty when not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
-             Bil2llvm_memory.load_ptr llvm_builder ty
-               (as_pointer ctx llvm_builder a)
-         | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size)))
+  | Store (mem, addr, data, _, _) -> (
+    match tls_classify ctx addr with
+    | Not_tls -> tls_plain_store ctx scope llvm_builder blk_tid mem addr data
+    | cls ->
+        let ptr = tls_ptr ctx scope llvm_builder blk_tid cls in
+        let d = create_exp ctx scope llvm_builder blk_tid data in
+        Bil2llvm_memory.store_ptr llvm_builder d ptr)
+  | Load (mem, addr, _, size) -> (
+    match tls_classify ctx addr with
+    | Not_tls ->
+        tls_plain_load ctx scope llvm_builder blk_tid ~want mem addr size
+    | cls ->
+        let ptr = tls_ptr ctx scope llvm_builder blk_tid cls in
+        let ty =
+          match want with
+          | Some t -> t
+          | None -> Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)
+        in
+        Bil2llvm_memory.load_ptr llvm_builder ty ptr)
   | Let (var, e, body) ->
       let unique_var = fresh_let_var ctx scope var in
       let v = create_exp ctx scope llvm_builder blk_tid e in
@@ -303,37 +286,56 @@ and create_exp ?want ctx scope llvm_builder blk_tid exp =
       in
       Llvm.build_freeze (Llvm.undef typ) "hike_unknown" llvm_builder
 
-and create_tls_ptr ctx scope llvm_builder blk_tid addr =
-  let tls_addr (g : Llvm.llvalue) : Llvm.llvalue =
-    let tp = ctx.ptr_ty in
-    let fty = Llvm.function_type tp [| tp |] in
+and tls_ptr ctx scope llvm_builder blk_tid = function
+  | Tls_block idx ->
+    let block, _ = Base.Option.value_exn !(ctx.tls) in
+    let fty = Llvm.function_type ctx.ptr_ty [| ctx.ptr_ty |] in
     let f =
       Llvm.declare_function "llvm.threadlocal.address" fty ctx.llvm_module
     in
-    Llvm.build_call fty f [| g |] "tls_addr" llvm_builder
-  in
-  let offset_exp =
-    Exp.substitute (Bil.Var ctx.abi.Abi.thread_pointer)
-      (Bil.Int (Word.zero ctx.addr_bits)) addr
-  in
-  let offset =
-    create_exp ctx scope llvm_builder blk_tid offset_exp
-    |> as_integer ctx llvm_builder
-  in
-  match !(ctx.tls_block) with
-  | Some (block, min_off) ->
-    (* The access's cell inside the module's own thread-local block:
-        the block's per-thread copy is private storage; the anchor lane
-        would address TLS the module does not own. *)
-    let idx =
-      Llvm.build_sub offset
-        (Llvm.const_of_int64 (Llvm.type_of offset) min_off false)
-        "" llvm_builder
-    in
-    Bil2llvm_ptr.gep_i8 ctx llvm_builder (tls_addr block) idx
-  | None ->
-    let anchor = tls_anchor_addr ctx llvm_builder in
-    Bil2llvm_ptr.gep_i8 ctx llvm_builder anchor offset
+    let base = Llvm.build_call fty f [| block |] "tls_addr" llvm_builder in
+    Bil2llvm_ptr.gep_i8 ctx llvm_builder base
+      (Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) idx false)
+  | Tls_tp off ->
+    let tp = thread_pointer ctx llvm_builder in
+    Bil2llvm_ptr.gep_i8 ctx llvm_builder tp
+      (Llvm.const_of_int64 (Llvm.i64_type ctx.llvm_ctx) off false)
+  | Tls_tp_exp e ->
+    let off = create_exp ctx scope llvm_builder blk_tid e in
+    let tp = thread_pointer ctx llvm_builder in
+    Bil2llvm_ptr.gep_i8 ctx llvm_builder tp (as_integer ctx llvm_builder off)
+  | Not_tls -> assert false
+
+(* The generic memory arms an unclassified access keeps (split out of
+   [create_exp]'s dispatch so the TLS arms read as one rule). *)
+and tls_plain_store ctx scope llvm_builder blk_tid mem addr data =
+  let a = create_exp ctx scope llvm_builder blk_tid addr in
+  let d = create_exp ctx scope llvm_builder blk_tid data in
+  (match mem with
+   | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
+     let idx = as_integer ctx llvm_builder a in
+     match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
+     | Some p -> Bil2llvm_memory.store_ptr llvm_builder d p
+     | None -> Bil2llvm_memory.store ctx llvm_builder (d, a))
+   | _ -> Bil2llvm_memory.store ctx llvm_builder (d, a))
+
+and tls_plain_load ctx scope llvm_builder blk_tid ~want:(want : Llvm.lltype option)
+    mem addr size =
+  let a = create_exp ctx scope llvm_builder blk_tid addr in
+  match mem with
+  | Bil.Var mv when Hike_synth.is_memory_var ctx.synth mv -> (
+    let idx = as_integer ctx llvm_builder a in
+    match Bil2llvm_memory.component_ptr ctx llvm_builder mv idx with
+    | Some p ->
+        Bil2llvm_memory.load_ptr llvm_builder
+          (Llvm.integer_type ctx.llvm_ctx (Size.in_bits size)) p
+    | None -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
+  | _ -> (
+    match want with
+    | Some ty when not (Llvm.classify_type ty = Llvm.TypeKind.Integer) ->
+        Bil2llvm_memory.load_ptr llvm_builder ty
+          (as_pointer ctx llvm_builder a)
+    | _ -> Bil2llvm_memory.load ctx llvm_builder (a, Size.in_bits size))
 
 (* One memory node: the address is a pointer (a stack/VLA value) or an
    integer (the raw/heap lane); the marker carries the loaded value

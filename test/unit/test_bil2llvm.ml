@@ -240,9 +240,13 @@ let tests : unit Alcotest.test list =
           && contains_substring mismatched "add i64 %RDI, 1"
           && not (contains_substring control "trunc i64 ")));
 
-    (* TLS offsets address distinct locations relative to the per-thread
-       anchor. *)
-    pin "EMIT-14" "TLS accesses land in the module's own thread_local block at their relative offsets"
+    (* The one TP classification: an offset inside the PT_TLS extent
+       (negative, within memsz) indexes the module's own thread_local
+       block; every other TP-relative address (the FS:0 self pointer,
+       the canary slot) routes through the real thread pointer; an
+       address that never reads the thread pointer is not TLS. *)
+    pin "EMIT-14"
+      "own-range TP offsets index the PT_TLS block; the others route through the real thread pointer"
       (fun () ->
         let tp = Hike.Abi.x86_64_sysv.thread_pointer in
         let m = memv "tls_m" in

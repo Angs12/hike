@@ -482,8 +482,7 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
       thunks = ref [];
       synth_origins = ref Var.Map.empty;
       synth_vals = ref Var.Map.empty;
-      tls_anchor = ref None;
-      tls_block = ref None;
+      tls = ref None;
       trap_fn = ref None;
       i64_ty = Llvm.i64_type llvm_ctx;
       ptr_ty = Llvm.pointer_type llvm_ctx;
@@ -520,78 +519,20 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
      the lifted main.  A dead call site naming it (a fallthrough fold
      after a no-return call) declares against crt1's own _start. *)
   let is_entry sub = Term.has_attr sub Sub.entry_point in
-  (* The module's TLS block: every TP-relative access's (offset, size)
-     folds to a constant cell inside one thread_local byte array; the
-     block is each thread's private copy, zero-initialized (the .tdata
-     image does not reach the emitter's section table).  A non-constant
-     TLS address stays on the anchor lane. *)
-  let mentions_tp (e : exp) : bool =
-    (object
-       inherit [ bool ] Exp.visitor
-       method! visit_var v found =
-         found || Var.same v abi.Abi.thread_pointer
-     end)#visit_exp e false
-  in
-  let rec const_fold (e : exp) : int64 option =
-    match e with
-    | Bil.Int w -> (try Some (Word.to_int64_exn w) with _ -> None)
-    | Bil.Var v when Var.same v abi.Abi.thread_pointer -> Some 0L
-    | Bil.BinOp (Bil.PLUS, a, b) ->
-      Base.Option.map2 (const_fold a) (const_fold b) ~f:Int64.add
-    | Bil.BinOp (Bil.MINUS, a, b) ->
-      Base.Option.map2 (const_fold a) (const_fold b) ~f:Int64.sub
-    | Bil.Cast (Bil.UNSIGNED, _, a) | Bil.Cast (Bil.SIGNED, _, a)
-    | Bil.Cast (Bil.LOW, _, a) ->
-      const_fold a
-    | _ -> None
-  in
-  let tls_cells =
-    Base.List.concat_map subs_list ~f:(fun s ->
-        Term.enum blk_t s
-        |> Base.Sequence.concat_map ~f:(fun b -> Term.enum def_t b)
-        |> Base.Sequence.filter_map ~f:(fun d ->
-               Base.Option.bind (Hike_stack_model.addr_of_rhs (Def.rhs d))
-                 ~f:(fun (a, sz) ->
-                   if mentions_tp a then
-                     Base.Option.map (const_fold a)
-                       ~f:(fun off -> (off, Int64.of_int (Size.in_bytes sz)))
-                   else None))
-        |> Base.Sequence.to_list)
-  in
-  (match tls_cells with
-   | [] -> ()
-   | _ ->
-     let min_off =
-       Base.List.min_elt tls_cells ~compare:(fun (a, _) (b, _) ->
-           Int64.compare a b)
-       |> Base.Option.map ~f:(fun (off, _) ->
-              (* floor to a 16-byte boundary: arithmetic shifts, since
-                 Int64.div truncates toward zero and an offset above
-                 -16 would rebase to 0 *)
-              Int64.mul (Int64.shift_right off 4) 16L)
-       |> Base.Option.value ~default:0L
-     in
-     let max_end =
-       Base.List.map tls_cells ~f:(fun (off, n) -> Int64.add off n)
-       |> Base.List.max_elt ~compare:Int64.compare
-       |> Base.Option.value ~default:min_off
-     in
-     let span = Int64.to_int (Int64.sub max_end min_off) in
-     let span =
-       if span <= 0 then 16 else ((span + 15) / 16) * 16
-     in
-     let g =
-       Llvm.declare_global
-         (Llvm.array_type (Llvm.i8_type llvm_ctx) span)
-         "hike_tls_block" llvm_module
-     in
+  (* The executable owns one TLS block. Its size and alignment reproduce
+     PT_TLS's Variant-II layout, including any first-byte padding. *)
+  (match spec.spec_tls with
+   | Some tls when tls.Hike_spec.tls_memsz > 0L ->
+     let init = Bil2llvm_section.image_initializer ~resolve:false ctx llvm_ctx llvm_module
+         ~word:abi.Abi.word ~arr:tls.tls_image ~base_addr:tls.tls_lo
+         ~prefix:tls.tls_prefix
+         ~zero_tail:(Int64.to_int tls.tls_memsz - Bytes.length tls.tls_image) in
+     let g = Llvm.declare_global (Llvm.type_of init) "hike_tls_block" llvm_module in
      Llvm.set_thread_local_mode Llvm.ThreadLocalMode.GeneralDynamic g;
-     Llvm.set_initializer
-       (Llvm.const_array (Llvm.i8_type llvm_ctx)
-          (Array.init span (fun _ -> Llvm.const_int (Llvm.i8_type llvm_ctx) 0)))
-       g;
-     Llvm.set_alignment 16 g;
-     ctx.tls_block := Some (g, min_off));
+     Llvm.set_initializer (Llvm.const_null (Llvm.type_of init)) g;
+     Llvm.set_alignment tls.tls_align g;
+     ctx.tls := Some (g, tls)
+   | _ -> ());
   let declare_phase () =
     Base.List.iter subs_list ~f:(fun sub ->
         let tid = Term.tid sub in
@@ -626,6 +567,14 @@ let emit_program (llvm_ctx : Llvm.llcontext) (llvm_module : Llvm.llmodule)
           create_sub ctx scope s)
   in
   let initializer_phase () =
+    (match !(ctx.tls) with
+     | None -> ()
+     | Some (g, tls) ->
+       Llvm.set_initializer
+         (Bil2llvm_section.image_initializer ctx llvm_ctx llvm_module
+            ~word:abi.Abi.word ~arr:tls.tls_image ~base_addr:tls.tls_lo
+            ~prefix:tls.tls_prefix
+            ~zero_tail:(Int64.to_int tls.tls_memsz - Bytes.length tls.tls_image)) g);
     (* The initializer rule consults the loader's relocation facts
        (in the emission address index); function-pointer data lands on a
        promoted sub's thunk through the same address map. *)
