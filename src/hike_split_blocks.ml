@@ -51,39 +51,49 @@ let materialize ~(facts : Hike_kb.facts) (prog : program term) : program term =
     else
       match Hike_cfg_complete.dispatch_words ~denote:facts.denote
               ~block_addrs:facts.block_addrs ~last_defs:(Cbat_vsa.last_defs blk)
-              ~sub ~blk e with
+              ~blk e with
       | None -> [ j ]
-      | Some (base, bases, words) ->
-        let base = Option.value base ~default:0L in
-        let subject =
-          Base.List.fold (Option.value bases ~default:[]) ~init:e
-            ~f:(fun acc b -> Bil.BinOp (Bil.MINUS, acc, b))
-        in
+      | Some { words; base } ->
         let groups =
           Base.List.fold words ~init:[] ~f:(fun acc w ->
               let kind = name ~sub j w in
-              let w = Word.of_int64 ~width:(Word.bitwidth (Cbat_word.to_word w))
-                        (Int64.sub (Word.to_int64_exn (Cbat_word.to_word w)) base) in
+              let w = Cbat_word.to_word w in
               match Base.List.Assoc.find acc kind ~equal:Base.Poly.equal with
               | Some ws -> Base.List.Assoc.add acc kind (w :: ws) ~equal:Base.Poly.equal
               | None -> (kind, [ w ]) :: acc)
           |> List.rev
         in
+        (* The case test for one word: the target equals the word's
+           module address, or — over a module-relative base — the loaded
+           data equals [word - base] while the base is [base]. *)
+        let case (w : word) : exp =
+          let bits = Word.bitwidth w in
+          let a = Word.to_int64_exn w in
+          match base with
+          | None ->
+            Bil.BinOp (Bil.EQ, e, Bil.Var (Hike_synth.module_addr ~addr_bits:bits a))
+          | Some (b_exp, bs) ->
+            let delta b =
+              Bil.BinOp (Bil.EQ, Bil.BinOp (Bil.MINUS, e, b_exp),
+                         Bil.Int (Word.of_int64 ~width:bits (Int64.sub a b)))
+            in
+            (match bs with
+             | [ b ] -> delta b
+             | _ ->
+               Base.List.map bs ~f:(fun b ->
+                   Bil.BinOp (Bil.AND,
+                              Bil.BinOp (Bil.EQ, b_exp,
+                                         Bil.Var (Hike_synth.module_addr ~addr_bits:bits b)),
+                              delta b))
+               |> Base.List.reduce_exn ~f:(fun x y -> Bil.BinOp (Bil.OR, x, y)))
+        in
         Base.List.mapi groups ~f:(fun i (kind, ws) ->
             let cond =
               if i + 1 = Base.List.length groups then Jmp.cond j
               else
-                let face w =
-                  let a = Word.to_int64_exn w in
-                  if Int64.equal base 0L then
-                    Bil.Var
-                      (Hike_synth.module_addr ~addr_bits:(Word.bitwidth w) a)
-                  else Bil.Int w
-                in
-                let eq w = Bil.BinOp (Bil.EQ, subject, face w) in
                 (match ws with
-                 | w :: rest -> Base.List.fold rest ~init:(eq w)
-                     ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, eq w))
+                 | w :: rest -> Base.List.fold rest ~init:(case w)
+                     ~f:(fun acc w -> Bil.BinOp (Bil.OR, acc, case w))
                  | [] -> failwith "hike: dispatch: empty case group")
                 |> Hike_coerce.coerce_exp in
             let cond = Hike_cfg_complete.and_guard

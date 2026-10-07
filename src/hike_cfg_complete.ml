@@ -124,120 +124,68 @@ let bounded_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
                    (Core.Map.length block_addrs));
              None))
 
-(* Rewrite a lifted term's direct targets: a call's target names a
-   subroutine, a goto's a block, so the two resolve through different
-   maps.  Indirect targets stay the resolution's own. *)
-type composed = Whole of exp | Cells of exp list
+(* A dispatch's destination words and, when the target adds a loaded
+   value to a module address, that base summand with its link-time
+   values.  The guards subtract the summand itself, so the relocation
+   of whatever global holds the base cancels; each case then compares
+   table data against [word - base]. *)
+type dispatch = {
+  words : Cbat_word.t list;
+  base : (exp * int64 list) option;
+}
 
-(* The composed address's base operands: the very operand subtrees that
-   contributed the table's start address.  The guard subtracts them from
-   the target so the subject is the loaded cell value — the table's own
-   data coordinate, which cancels any runtime base (PIE).  A var read
-   inside a def's rhs resolves to the def of that var strictly before
-   the reading def, in the sub's term order; a [v := v + e] def composes
-   over the def it extends.  Two cell sets or a missing side refuse the
-   composition. *)
-let base_operands ~(last_defs : def term Var.Map.t) ~(sub : sub term)
-    ~(at : def term option) (texp : exp) : exp list option =
-  (* A var read inside a def's rhs resolves to the def of that var
-     strictly before the reading def, in the SUB's term order: the
-     table's base register is commonly defined blocks away from the
-     dispatch block. *)
-  let definitions = lazy (
-    Term.enum blk_t sub |> Seq.concat_map ~f:(Term.enum def_t)
-    |> Seq.fold ~init:(Tid.Map.empty, Var.Map.empty, Var.Map.empty)
-         ~f:(fun (before, first, last) d ->
-           let v = Def.lhs d in
-           (Core.Map.set before ~key:(Term.tid d) ~data:last,
-            (if Core.Map.mem first v then first
-             else Core.Map.set first ~key:v ~data:d),
-            Core.Map.set last ~key:v ~data:d)))
+(* The base guard enumerates (base, word) pairs: a few bases at most. *)
+let base_cap = 16
+
+let is_module_address (ws : Vsa.WordSet.t) : bool =
+  match Vsa.WordSet.origin ws with
+  | Some (Vsa.WordSet.Origin.Rip _) -> true
+  | _ -> false
+
+let rec summands (e : exp) : exp list =
+  match e with
+  | Bil.BinOp (Bil.PLUS, a, b) -> summands a @ summands b
+  | e -> [ e ]
+
+(* [v] still holds its value at the transfer: no def after [at] in the
+   block rewrites it. *)
+let unchanged_after ~(blk : blk term) ~(at : def term option) (v : var) : bool =
+  match at with
+  | None -> true
+  | Some d ->
+    Term.enum def_t blk |> Seq.to_list
+    |> Base.List.drop_while ~f:(fun x -> not (Tid.equal (Term.tid x) (Term.tid d)))
+    |> (fun l -> Base.List.drop l 1)
+    |> Base.List.for_all ~f:(fun x -> not (Var.equal (Def.lhs x) v))
+
+(* [Some None]: no summand is a module address.  [Some (Some base)]: one
+   module-address var summand beside other summands, enumerable and
+   unchanged up to the transfer.  [None]: a module address the guards
+   cannot cancel, so no case series is sound. *)
+let module_base ~(denote : denote) ~(blk : blk term) ~(at : def term option)
+    (rhs : exp) : (exp * int64 list) option option =
+  let parts = summands rhs in
+  let based =
+    Base.List.filter_map parts ~f:(fun e ->
+        match denote ~blk ?def:at e with
+        | Ok ws when is_module_address ws -> Some (e, ws)
+        | _ -> None)
   in
-  let find_def at v =
-    match at with
-    | Some d ->
-      (* [before] is the definition prefix before [d] in the sub's term
-         order, so the answer is strictly earlier than the reading
-         def.  A def outside the sub has no position there; the
-         composition refuses rather than resolving forward. *)
-      let before, _, _ = Lazy.force definitions in
-      Base.Option.bind (Core.Map.find before (Term.tid d)) ~f:(fun defs ->
-          Core.Map.find defs v)
-    | None -> (
-      match Core.Map.find last_defs v with
-      | Some _ as found -> found
-      | None ->
-        let _, first, _ = Lazy.force definitions in
-        Core.Map.find first v)
-  in
-  (* One composition rule over the supported grammar: a cast is
-     transparent; a plus over a whole-base side and a cell side is the
-     cell's base list; a bare var follows its definition.  Termination:
-     a var step resolves to a def strictly EARLIER than the reading def
-     in the sub's term order ([find_def]'s prefix), and every other
-     step descends into a strictly smaller expression — a well-founded
-     descent, so no depth budget is needed.  The rule returns the
-     operand's form: [Whole] keeps the operand as it participates (a
-     cast is transparent, a bare var keeps its name), [Cells] the base
-     operands isolating its one loaded cell. *)
-  let rec compose ~at (e : exp) : composed option =
-    match e with
-    | Bil.Int _ -> Some (Whole e)
-    | Bil.Load _ -> Some (Cells [])
-    | Bil.Cast (_, _, e2) -> compose ~at e2
-    | Bil.BinOp (Bil.PLUS, a, b) -> (
-      match (compose ~at a, compose ~at b) with
-      | Some (Whole _), Some (Whole _) -> Some (Whole e)
-      | Some (Whole pa), Some (Cells bs) -> Some (Cells (pa :: bs))
-      | Some (Cells bs), Some (Whole pb) -> Some (Cells (pb :: bs))
-      | _ -> None)
-    | Bil.Var v when Hike_synth.is_base_var Hike_synth.empty v ->
-      (* Every synthetic base family — the resolved rip address, the
-         argument lanes, the allocas, the storage pointers — is a base
-         operand, never a cell. *)
-      Some (Whole e)
-    | Bil.Var v -> (
-      match find_def at v with
-      | Some d -> (
-        match compose ~at:(Some d) (Def.rhs d) with
-        | Some (Whole _) -> Some (Whole e)
-        | Some (Cells _ as cells) -> Some cells
-        | None -> None)
+  match based with
+  | [] -> Some None
+  | [ (_, _) ] when Base.List.length parts < 2 -> Some None
+  | [ ((Bil.Var v as e), ws) ] when unchanged_after ~blk ~at v -> (
+    match Vsa.WordSet.enumerate ~cap:base_cap ws with
+    | Some ws -> (
+      match Base.Option.all (Base.List.map ws ~f:Cbat_word.to_int64_opt) with
+      | Some bs -> Some (Some (e, bs))
       | None -> None)
-    | _ -> None
-  in
-  match compose ~at texp with
-  | Some (Cells bases) -> Some bases
-  | Some (Whole _) | None -> None
-
-(* The dispatch's table words: the composed base operands give the
-   guard's delta coordinate; the denotation is the one destination-set
-   fact and enumerates the cells — the phase loop widens the index
-   across the resolved edges, so no image walk is needed. *)
-let table_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(last_defs : def term Var.Map.t) ~(sub : sub term) ~(blk : blk term)
-    ~(at : def term option) (texp : exp) :
-    (Int64.t * exp list * Cbat_word.t list) option =
-  match base_operands ~last_defs ~sub ~at texp with
-  | Some bases when not (Base.List.is_empty bases) -> (
-    let base_exp =
-      Base.List.reduce_exn bases ~f:(fun a b -> Bil.BinOp (Bil.PLUS, a, b))
-    in
-    match
-      ( bounded_words ~denote ~block_addrs ~blk ?def:at texp,
-        bounded_words ~denote ~block_addrs ~blk base_exp )
-    with
-    | Some ws, Some [ b ] ->
-      Base.Option.map (Base.Result.ok (Cbat_word.to_int64 b))
-        ~f:(fun base -> (base, bases, ws))
-    | _ -> None)
+    | None -> None)
   | _ -> None
 
 let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(last_defs : def term Var.Map.t)
-    ~(sub : sub term)
-    ~(blk : blk term) (texp : exp) :
-    (Int64.t option * exp list option * Cbat_word.t list) option =
+    ~(last_defs : def term Var.Map.t) ~(blk : blk term) (texp : exp) :
+    dispatch option =
   debug_trace (fun () ->
       Printf.sprintf "dw: blk %s texp=%s last=%b"
         (Tid.name (Term.tid blk))
@@ -248,73 +196,37 @@ let dispatch_words ~(denote : denote) ~(block_addrs : Tid.t Addr.Map.t)
         (match texp with
          | Bil.Var v -> Core.Map.mem last_defs v
          | _ -> true));
-  let table e at =
-    Base.Option.map
-      (table_words ~denote ~block_addrs ~last_defs ~sub ~blk ~at e)
-      ~f:(fun (base, bases, ws) -> (Some base, Some bases, ws))
+  let rhs, at =
+    match texp with
+    | Bil.Var v -> (
+      match Core.Map.find last_defs v with
+      | Some d -> (Def.rhs d, Some d)
+      | None -> (texp, None))
+    | _ -> (texp, None)
   in
-  let plain e ?def () =
-    Base.Option.map (bounded_words ~denote ~block_addrs ~blk ?def e)
-      ~f:(fun ws -> (None, None, ws))
-  in
-  match texp with
-  | Bil.BinOp (Bil.PLUS, _, _) -> (
-    (* The composed table's guard coordinate (the base subtraction) with
-       the denotation's bounded set as the destination words; the plain
-       arm serves the shapes no base composes. *)
-    match table texp None with
-    | Some _ as r -> r
-    | None -> plain texp ())
-  | Bil.Var v ->
-    (match Core.Map.find last_defs v with
-     | Some add_def ->
-       let rhs = Def.rhs add_def in
-       (match table rhs (Some add_def) with
-        | Some _ as r -> r
-        | None -> plain rhs ~def:add_def ())
-     | None -> plain texp ())
-  | _ -> plain texp ()
-
-let resolved_pairs_of ~(denote : denote) ~(last_defs : def term Var.Map.t)
-    ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
-    ~(sub : sub term)
-    ~(blk : blk term) (texp : exp) :
-    (exp * (word * tid) list * Int64.t) option =
-  match
-    dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp
-  with
+  match module_base ~denote ~blk ~at rhs with
   | None -> None
-  | Some (base, bases, ws) ->
-    (* The guard's subject subtracts every base operand as the very
-       exp that contributed it, so the subtraction cancels exactly in
-       any coordinate system (a section-backed base may render as a
-       real pointer under PIE; a raw module constant beside it would
-       disagree) — the guards then compare the loaded entry's signed
-       delta, which is table data.  A plain bounded set has no base:
-       its guards compare the target itself (internally consistent).
-       The set is complete by construction — the walk covers every
-       consecutive code entry from the base, and a bounded
-       denotation is an over-approximation. *)
-    let b = Base.Option.value base ~default:0L in
-    let case (w : Cbat_word.t) : (word * tid) option =
-      let a = Cbat_word.to_word w in
-      match Core.Map.find block_addrs a with
-      | Some t when Core.Set.mem sub_tids t ->
-        Some (Addr.of_int64 (Int64.sub (Word.to_int64_exn a) b), t)
-      | _ -> None
-    in
-    let pairs = Base.List.filter_map ws ~f:case in
-    if
-      Base.List.length pairs = Base.List.length ws
-      && not (Base.List.is_empty pairs)
-    then
-      let subject =
-        Base.List.fold_left (Base.Option.value ~default:[] bases)
-          ~init:texp
-          ~f:(fun acc b -> Bil.BinOp (Bil.MINUS, acc, b))
+  | Some base ->
+    Base.Option.map (bounded_words ~denote ~block_addrs ~blk ?def:at rhs)
+      ~f:(fun words -> { words; base })
+
+(* The case blocks of a complete dispatch: every word names an in-sub
+   block, or the series would drop live cases. *)
+let resolved_cases ~(denote : denote) ~(last_defs : def term Var.Map.t)
+    ~(sub_tids : Tid.Set.t) ~(block_addrs : Tid.t Addr.Map.t)
+    ~(blk : blk term) (texp : exp) : tid list option =
+  Base.Option.bind (dispatch_words ~denote ~block_addrs ~last_defs ~blk texp)
+    ~f:(fun { words; _ } ->
+      let cases =
+        Base.List.filter_map words ~f:(fun w ->
+            match Core.Map.find block_addrs (Cbat_word.to_word w) with
+            | Some t when Core.Set.mem sub_tids t -> Some t
+            | _ -> None)
       in
-      Some (subject, pairs, b)
-    else None
+      if Base.List.length cases = Base.List.length words
+         && not (Base.List.is_empty cases)
+      then Some cases
+      else None)
 
 (* The eq chain of one target's words: [sel = w1 || sel = w2 || ...].
    The words share the selector's width, so the comparisons typecheck. *)
@@ -437,9 +349,9 @@ let prune_unreachable ~(denote : denote) ~(retaddr : Tid.Set.t)
         with
         | Some _ -> Some Tid.Set.empty
         | None ->
-          match dispatch_words ~denote ~block_addrs ~last_defs ~sub ~blk texp with
+          match dispatch_words ~denote ~block_addrs ~last_defs ~blk texp with
           | None -> Some all
-          | Some (_, _, ws) ->
+          | Some { words = ws; _ } ->
             Some
               (Base.List.fold ws ~init:Tid.Set.empty ~f:(fun acc w ->
                    let a = Cbat_word.to_word w in
@@ -624,14 +536,12 @@ let resolve_phase ~(abi : Hike_abi.t) ~(sol : Vsa.vsa_sol)
             | None -> acc
             | Some texp -> (
                 match
-                  resolved_pairs_of ~denote ~last_defs ~sub_tids
-                    ~block_addrs ~sub ~blk texp
+                  resolved_cases ~denote ~last_defs ~sub_tids
+                    ~block_addrs ~blk texp
                 with
                 | None -> acc
-                | Some (_, pairs, _) ->
-                    let ts =
-                      Core.Set.of_list (module Tid)
-                        (Base.List.map pairs ~f:snd) in
+                | Some cases ->
+                    let ts = Core.Set.of_list (module Tid) cases in
                     match Core.Map.find acc (Term.tid j) with
                     | Some old when Core.Set.equal old ts -> acc
                     | Some old ->

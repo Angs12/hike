@@ -7,19 +7,23 @@ open Bap.Std
     blk:blk term -> ?def:def term -> exp ->
     (Cbat_vsa.WordSet.t, Type.error) Result.t
 
-  (** A dispatch site's case words with their guard subject: the
-      denotation's bounded destination set, with the composed base
-      operands whose subtraction leaves the signed deltas the guards
-      compare (the base materializes only to cancel against itself, so
-      the guards are PIE-safe).  A shape with no composed base compares
-      the target against each word. *)
+  (** A dispatch site's destination words (the target's bounded
+      denotation) and, when the target adds a loaded value to a module
+      address, that base summand with its link-time values: the guards
+      subtract the summand, so the base's relocation cancels and each
+      case compares [word - base].  [None] when no complete, sound case
+      series exists. *)
+  type dispatch = {
+    words : Cbat_word.t list;
+    base : (exp * int64 list) option;
+  }
+
   val dispatch_words :
     denote:denote ->
     block_addrs:Tid.t Addr.Map.t ->
     last_defs:def term Var.Map.t ->
-    sub:sub term ->
     blk:blk term ->
-    exp -> (int64 option * exp list option * Cbat_word.t list) option
+    exp -> dispatch option
 
   (** The defs whose load address denotates, in the def's own
       before-env, to the stack-symbolic entry-RSP cell. *)

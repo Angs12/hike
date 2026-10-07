@@ -629,6 +629,111 @@ let tests : unit Alcotest.test list =
         in
         check "RES-25a the dispatch resolves to its case blocks" resolved;
         check "RES-25b the map names the case block" map_names_case);
+
+    (* The protected-gcc shape: the table base is a module address kept in
+       a callee-saved register, and the epilogue's pop of that register
+       precedes the dispatch block in term order without reaching it.
+       The guards subtract the base summand the denotation names. *)
+    pin "RES-26" "a module-address base guards table data, not runtime targets"
+      (fun () ->
+        Hike_origin.Regions.install [ (Hike_section.Rodata, 0x4000L, 0x4007L) ];
+        let rdx = v64 "t26_rdx" in
+        let rcx = v64 "t26_rcx" in
+        let rax = v64 "t26_rax" in
+        let tmp = v64 "t26_tmp" in
+        let m = memv "t26_m" in
+        let flag = v1 "t26_flag" in
+        let base_def =
+          Def.create rdx (Bil.Var (Hike_synth.module_addr ~addr_bits:64 0x4000L)) in
+        let zero_def = Def.create rcx (Bil.Int (Cbat_word.to_word (q64 0L))) in
+        let one_def = Def.create rcx (Bil.Int (Cbat_word.to_word (q64 1L))) in
+        let pop_def = Def.create rdx (Bil.Load (Bil.Var m, Bil.Var sp, LittleEndian, `r64)) in
+        let load_def =
+          Def.create rax
+            (Bil.Cast
+               ( Bil.SIGNED, 64,
+                 Bil.Load
+                   ( Bil.Var m,
+                     Bil.BinOp
+                       ( Bil.PLUS, Bil.Var rdx,
+                         Bil.BinOp (Bil.LSHIFT, Bil.Var rcx, Bil.Int (Word.of_int ~width:64 2)) ),
+                     LittleEndian, `r32 ) ))
+        in
+        let copy_def = Def.create tmp (Bil.Var rdx) in
+        let add_def = Def.create rax (Bil.BinOp (Bil.PLUS, Bil.Var rax, Bil.Var tmp)) in
+        let word_bytes (delta : int64) : string =
+          let w = Int64.logand delta 0xFFFFFFFFL in
+          String.init 4 (fun i ->
+              Char.chr (Int64.to_int (Int64.logand (Int64.shift_right_logical w (8 * i)) 0xFFL)))
+        in
+        let img_bytes = Bytes.of_string (word_bytes (-0x1000L) ^ word_bytes (-0xFF8L)) in
+        let images =
+          [ { Cbat_vsa.img_lo = 0x4000L; img_hi = 0x4007L; img_bytes;
+              img_slots = Core.Int64.Set.empty } ] in
+        let sub26, tids =
+          sub_of "t26_tbl"
+            [ [ base_def ],
+              [ (1, fun t -> mk_jmp_to t (Bil.Var flag));
+                (2, fun t -> mk_jmp_to t (Bil.UnOp (Bil.NOT, Bil.Var flag))) ];
+              [ zero_def ], [ (4, mk_goto) ];
+              [ one_def ], [ (4, mk_goto) ];
+              [ pop_def ], [ (0, mk_ret) ];
+              [ load_def; copy_def; add_def ],
+                [ (0, fun _ -> Jmp.create (Goto (Indirect (Bil.Var rax)))) ];
+              [ ], [ (3, mk_goto) ];
+              [ ], [ (3, mk_goto) ] ]
+        in
+        let addrs = [| 0x2000L; 0x2008L; 0x2010L; 0x2018L; 0x2020L; 0x3000L; 0x3008L |] in
+        let stamped =
+          let sb = Sub.Builder.create ~tid:(Term.tid sub26) ~name:(Sub.name sub26) () in
+          Term.enum blk_t sub26
+          |> Seq.iteri ~f:(fun i b ->
+              Sub.Builder.add_blk sb (Term.set_attr b address (Addr.of_int64 addrs.(i))));
+          Sub.Builder.result sb
+        in
+        let block_addrs = Base.List.init 7 ~f:(fun i -> (addrs.(i), tids.(i))) in
+        let envs, sub26', ba' =
+          produce ~block_addrs ~images Theory.Target.unknown
+            (Program.create ~subs:[ stamped ] ()) stamped
+        in
+        let facts =
+          { (Hike.Kb.build ~lookup:(fun _ -> None) ~block_envs:envs
+               ~block_addrs:ba' ~target:Theory.Target.unknown) with
+            images;
+            foreign_slots = Core.Int64.Set.empty }
+        in
+        let materialized =
+          Hike.Split_blocks.materialize ~facts (Program.create ~subs:[ sub26' ] ())
+        in
+        let disp =
+          Term.enum sub_t materialized |> Seq.hd_exn |> Term.enum blk_t
+          |> Seq.find_exn ~f:(fun b -> Tid.equal (Term.tid b) tids.(4))
+        in
+        let jmps = Term.enum jmp_t disp |> Seq.to_list in
+        let data_guard delta j =
+          let found = ref false in
+          (object
+            inherit [unit] Exp.visitor
+            method! visit_binop op a b () =
+              (match op, a, b with
+               | Bil.EQ, Bil.BinOp (Bil.MINUS, Bil.Var r, Bil.Var t), Bil.Int w
+                 when Var.equal r rax && Var.equal t tmp
+                      && Int64.equal (Word.to_int64_exn w) delta ->
+                 found := true
+               | _ -> ())
+          end)#visit_exp (Jmp.cond j) ();
+          !found
+        in
+        let goes_to t j =
+          match Jmp.kind j with Goto (Direct t') -> Tid.equal t t' | _ -> false
+        in
+        Hike_origin.Regions.install [];
+        check "RES-26a both cases resolve"
+          (Base.List.exists jmps ~f:(goes_to tids.(5))
+           && Base.List.exists jmps ~f:(goes_to tids.(6)));
+        check "RES-26b the guard compares table data against word - base"
+          (Base.List.exists jmps ~f:(fun j ->
+               data_guard (-0x1000L) j || data_guard (-0xFF8L) j)));
   ]
 
 let () = run "resolve" tests
