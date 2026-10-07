@@ -285,26 +285,44 @@ let tests : unit Alcotest.test list =
           (Ws.origin r = Ws.origin p));
 
     pin "WS-38"
-      "a relative value and its plain in-band twin keep the origin through \
-       the union and the widen: the cell stays stack-symbolic"
+      "union and widening with an originless value cannot invent stack provenance"
       (fun () ->
         let rel = Ws.stack_word_i64 (-200L) in
         let plain =
           Ws.singleton (q64 (Stdlib.Int64.add Ws.stack_base (-200L)))
         in
-        let keeps_origin (v : Ws.t) =
-          Option.equal Ws.Origin.equal (Ws.origin v) (Some Ws.Origin.Stack)
-          && (match Ws.stack_offsets v with
-              | Some offs ->
-                (match Clp.min_elem offs, Clp.max_elem offs with
-                 | Some lo, Some hi ->
-                   Cbat_word.equal lo (q64 (-200L))
-                   && Cbat_word.equal hi (q64 (-200L))
-                 | _ -> false)
-              | None -> false)
+        let stays_plain v =
+          Ws.origin v = None && not (Ws.in_stack_segment v)
+          && Ws.elem (q64 (Int64.sub Ws.stack_base 200L)) v
         in
-        check "WS-38 (union)" (keeps_origin (Ws.union rel plain));
-        check "WS-38 (widen_join)" (keeps_origin (Ws.widen_join rel plain)));
+        List.iter (fun (a, b) ->
+            check "WS-38 (union)" (stays_plain (Ws.union a b));
+            check "WS-38 (widen_join)" (stays_plain (Ws.widen_join a b)))
+          [rel, plain; plain, rel]);
+
+    pin "WS-40" "only stack-family origins supply stack identity, offsets and keys"
+      (fun () ->
+        let plain = Ws.singleton (q64 0x4000000000000000L) in
+        let base = Ws.stack_word_i64 (-8L) in
+        let nonstack v =
+          not (Ws.in_stack_segment v)
+          && Ws.stack_offsets v = None && Ws.offset_extrema v = None
+          && Hike.Stack_model.singleton_stack_position v = None
+          && Hike.Stack_model.positions_of_offsets v = None in
+        List.iter (fun v -> check "WS-40 (no stack identity)" (nonstack v))
+          [plain; Ws.set_origin Ws.Origin.Rip base;
+           Ws.set_origin Ws.Origin.Abs base];
+        check "WS-40 (absolute memory key)"
+          (match Ws.address_pieces plain with
+           | Some (Ws.Origin.Abs, _) -> true | _ -> false);
+        List.iter (fun v ->
+            check "WS-40 (stack-family identity)"
+              (Ws.in_stack_segment v
+               && Option.is_some (Ws.stack_offsets v)))
+          [base; Ws.set_origin Ws.Origin.Window base];
+        let tid = Tid.create () in
+        check "WS-40 (VLA identity)"
+          (Ws.in_stack_segment (Ws.vla_frame tid)));
 
     (* WS-39: the interior exclusion widens as two pieces — the x != k
        complement keeps its hole under a growing widen instead of being

@@ -20,14 +20,12 @@ let indirect_summary ~(lookup : int64 -> Tid.t option)
   match Cbat_transfer.denote_imm_exp texp env with
   | Error _ -> None
   | Ok ws ->
-    if WordSet.is_top ws then None
-    else
-      match WordSet.min_elem ws, WordSet.max_elem ws with
-      | Some lo, Some hi when Cbat_word.equal lo hi ->
-        (match Cbat_word.to_int64 lo with
-         | Ok v -> Option.bind (lookup v) ~f:summary_of
-         | Error _ -> None)
-      | _ -> None
+    (match WordSet.enumerate ~cap:1 ws with
+     | Some [ target ] ->
+       (match Cbat_word.to_int64 target with
+        | Ok v -> Option.bind (lookup v) ~f:summary_of
+        | Error _ -> None)
+     | _ -> None)
 
 (* Segment-relative bounds of a stack value; None when no bound exists.
    [key_extent] is the shared key-space clamp — the same rule the
@@ -46,11 +44,8 @@ let range_of (ws : WordSet.t) : (word * word) option =
    and the callee reaches below its entry only.  An unbounded-above SP
    keeps nothing — the whole-memory top stays the sound fallback on
    any doubt. *)
-(* The frame-keep namespace rule: a stack address is [Rel]; a plain or
-   absolute value cannot name the model's stack line, so it never
-   forces the whole-memory top and never enters the escape list.  All
-   inputs are OFFSET-space (segment-relative), matching the Stack cells
-   [call_keep] filters. *)
+(* Only Stack/Window/Vla origins certify a frame-keep boundary or a
+   stack escape. An SP without that proof forces whole-memory top. *)
 let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
     ~(escape : WordSet.t list) (env : AI.t) : AI.t =
 #ifdef VSA_DEBUG
@@ -82,7 +77,7 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
               bound (Some (Cbat_word.of_int64 ~width:64 blo))
             | _ -> None)
           | _ -> bound (WordSet.Clp.max_elem offs))
-      | None -> Option.map ~f:snd (range_of rsp)
+      | None -> None
   in
   (* The escape list: the escapes whose origin names the stack line.  A
      plain or module-relative escape cannot collide with a Stack-line
@@ -91,7 +86,7 @@ let frame_keep ~(preserved : Int.Set.t) ~(rsp : WordSet.t)
      the whole line (the sound claim). *)
   let escape_ranges =
     List.filter_map escape ~f:(fun ws ->
-        if Option.exists ~f:Hike_origin.names_stack_line (WordSet.origin ws)
+        if WordSet.in_stack_segment ws
         then range_of ws
         else None)
   in

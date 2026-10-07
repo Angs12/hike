@@ -289,13 +289,12 @@ let tests : unit Alcotest.test list =
       (fun () ->
         check "SEC-15"
           (let ws =
-             Ws.of_clp
-               (Clp.interval ~width:64 (i2w (pos (-4L))) (i2w (pos 12L)))
+             Ws.stack_word (Clp.interval ~width:64 (i2w 4L) (i2w 12L))
            in
            match rd ~width:1 ws with
            | Some Tag.Range (l, h), [ p1; p2 ] ->
-               Int64.equal l (pos (-4L)) && Int64.equal h (pos 12L)
-               && portion_eq p1 S.Stack (pos (-4L)) (pos 7L)
+               Int64.equal l (pos 4L) && Int64.equal h (pos 12L)
+               && portion_eq p1 S.Stack (pos 4L) (pos 7L)
                && portion_eq p2 S.Args (pos 8L) (pos 12L)
                && (not p1.A.pt_elig) && not p2.A.pt_elig
            | _ -> false));
@@ -307,7 +306,7 @@ let tests : unit Alcotest.test list =
            | _, [ p ] -> p.A.pt_elig
            | _ -> false));
 
-    pin "SEC-17" "AT1-S03: a plain band hull contributes identity portions (no StackOff proof)"
+    pin "SEC-17" "a plain numeric stack-band hull has no stack attribution"
       (fun () ->
         check "SEC-17"
           (let ws =
@@ -315,10 +314,7 @@ let tests : unit Alcotest.test list =
                (Clp.interval ~width:64 (i2w (pos (-16L))) (i2w (pos (-9L))))
            in
            match rd ~width:8 ws with
-           | Some Tag.Range (l, h), [ p ] ->
-               Int64.equal l (pos (-16L)) && Int64.equal h (pos (-9L))
-               && (not p.A.pt_elig)
-               && portion_eq p S.Stack (pos (-16L)) (pos (-2L))
+           | None, [] -> true
            | _ -> false));
 
     pin "SEC-18" "AT1-S03: a resolved-tagged plain access wholly in one span proves its portion"

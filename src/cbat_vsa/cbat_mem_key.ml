@@ -25,8 +25,8 @@ type point = {pwidth : int; pvalue : int64} [@@deriving bin_io, sexp]
 
 (* The byte hull plus the address stride: step 1 claims every byte
    of the hull; step > 1 claims only the grid lo + i*step.  The origin
-   namespaces the key: cells of different origins are disjoint (a VLA
-   cell can never collide with a frame/window/rip cell). *)
+   namespaces the key. Stack/Window/Vla addresses are translated to
+   the shared Stack line before key construction; Rip and Abs stay separate. *)
 type t = {origin : Hike_origin.t; lo : point; hi : point; step : int}
 [@@deriving bin_io, sexp]
 let compare_point (p1 : point) (p2 : point) : int =
@@ -149,7 +149,7 @@ let overlap (k1 : t) (k2 : t) : bool =
 
 (* Cell keys are SEGMENT-RELATIVE for stack-symbolic denotations:
      the shared base makes the offset the per-sub cell identity.  A
-     plain denotation keys by its segment-relative pieces or its own.
+     plain denotation keys by its own absolute pieces.
    The key FANS OUT per piece: each entry names one piece's line, the
    stride is that piece's own bounded progression, and every fanned
    entry stores the full value (the tree stays single-keyed). *)

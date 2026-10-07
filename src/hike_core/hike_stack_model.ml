@@ -130,18 +130,14 @@ module Vsa = struct
       (Cbat_clp_set_composite.Clp.min_elem offs)
       (Cbat_clp_set_composite.Clp.max_elem offs)
 
-  (* The denotation's single stack position (absolute), when it has
-     exactly one: the symbolic arm or the in-band plain arm (the band
-     holds no real x86-64 address, so a plain word there is stack). *)
+  (* The denotation's single position on its stack-origin line. *)
   let singleton_stack_position (ws : Cbat_clp_set_composite.t) : int64 option =
     match Cbat_clp_set_composite.stack_offsets ws with
     | Some _ -> (
         match positions_of_offsets ws with
         | Some (lo, hi) when Int64.equal lo hi -> Some lo
         | _ -> None)
-    | None ->
-        if Cbat_clp_set_composite.in_stack_segment ws then singleton_i64 ws
-        else None
+    | None -> None
 
   (* The return-address fact and its projections: an address that denotes to
      the stack-symbolic singleton at the entry-RSP cell. *)

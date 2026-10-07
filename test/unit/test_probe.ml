@@ -17,8 +17,8 @@ let tests : unit Alcotest.test list =
         let lost = Ws.singleton (Cbat_word.of_int64 ~width:64 Ws.stack_base) in
         let base = Ws.stack_word_i64 0L in
         let tid = Tid.create () in
-        check "PROBE-01 (both land in the segment)"
-          (Ws.in_stack_segment kept && Ws.in_stack_segment lost);
+        check "PROBE-01 (only the carried origin names stack)"
+          (Ws.in_stack_segment kept && not (Ws.in_stack_segment lost));
         check "PROBE-01 (the symbolic arm keeps its origin)"
           (Rows.classify_shape kept = `Stack);
         check "PROBE-01 (the plain in-segment value lost it)"
@@ -91,8 +91,7 @@ let tests : unit Alcotest.test list =
            && s.Rows.Sub_stats.def_bottom_live = 1));
 
     pin "PROBE-04"
-      "the probe's stack test keeps the symbolic arm and the frame offsets \
-       and rejects a plain integer that only reaches the segment band"
+      "the probe follows stack-family origins and diagnostic bottom"
       (fun () ->
         let magic =
           Ws.singleton (Cbat_word.of_int64 ~width:64 0x4EC4EC4EC4EC4EC5L) in
@@ -101,14 +100,14 @@ let tests : unit Alcotest.test list =
         let below =
           Ws.singleton
             (Cbat_word.of_int64 ~width:64 (Int64.sub Ws.stack_base 64L)) in
-        check "PROBE-04 (the domain still reads the band)"
-          (Ws.in_stack_segment magic);
+        check "PROBE-04 (the domain rejects numeric coincidence)"
+          (not (Ws.in_stack_segment magic));
         check "PROBE-04 (the probe rejects the band-reaching integer)"
           (not (Rows.is_stack_value magic));
         check "PROBE-04 (the symbolic arm is stack)"
           (Rows.is_stack_value (Ws.stack_word_i64 0L));
-        check "PROBE-04 (a frame offset is stack)"
-          (Rows.is_stack_value entry && Rows.is_stack_value below);
+        check "PROBE-04 (plain frame-shaped integers are not stack)"
+          (not (Rows.is_stack_value entry) && not (Rows.is_stack_value below));
         check "PROBE-04 (the dead-path bottom is stack for the buckets)"
           (Rows.is_stack_value (Ws.bottom 64));
         check "PROBE-04 (the dead-path bottom carries no shape)"
@@ -134,13 +133,12 @@ let tests : unit Alcotest.test list =
           (not (Rows.is_stack_value crossed)));
 
     pin "PROBE-06"
-      "a plain literal inside the frame band is admitted: the API exposes no \
-       provenance for a plain value"
+      "a plain literal inside the frame band has no stack identity"
       (fun () ->
         let literal =
           Ws.singleton (Cbat_word.of_int64 ~width:64 0x3FFFFFFFFFFFFFFFL) in
-        check "PROBE-06 (the literal is inside the frame band)"
-          (Rows.is_stack_value literal);
+        check "PROBE-06 (the literal has no stack origin)"
+          (not (Rows.is_stack_value literal));
         check "PROBE-06 (and reads as a lost shape)"
           (Rows.shape_of literal = Some `Lost));
   ]

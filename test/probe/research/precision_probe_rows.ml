@@ -30,31 +30,10 @@ let classify_shape (ws : Ws.t) : shape =
   | Some (Origin.Abs | Origin.Rip) -> `Other
   | None -> `Lost
 
-(* The probe's stack test.  A stack value is a bottom (kept for the bucket
-   series), the symbolic arm (a value carrying a runtime origin), or a
-   plain value whose hull is a real (non-crossing) interval inside the
-   frame band — ±max(stack_max, caller_window_bytes) around the segment
-   base.  A bottom carries no shape ([shape_of]); a plain literal inside
-   the band carries no provenance the API exposes and is admitted. *)
-let frame_band : int64 * int64 =
-  let bound = Int64.max Hike_stack_bounds.stack_max
-      Hike_stack_bounds.caller_window_bytes in
-  (Int64.sub Ws.stack_base bound, Int64.add Ws.stack_base bound)
-
+(* Bottom remains in the diagnostic buckets; address identity uses the
+   same origin contract as production. *)
 let is_stack_value (ws : Ws.t) : bool =
-  Ws.is_bottom ws
-  || Option.is_some (Ws.origin ws)
-  || (not (Ws.is_infinite ws)
-      && (let lo, hi = frame_band in
-          match Ws.min_elem ws, Ws.max_elem ws with
-          | Some mn, Some mx ->
-            (match Cbat_word.to_int64 mn, Cbat_word.to_int64 mx with
-             | Ok mni, Ok mxi ->
-               (* A hull crossing the sign boundary reads [max] negative. *)
-               Int64.compare mni mxi <= 0
-               && Int64.compare mni lo >= 0 && Int64.compare mxi hi <= 0
-             | _ -> false)
-          | _ -> false))
+  Ws.is_bottom ws || Ws.in_stack_segment ws
 
 (* The value's stack shape; [None] for the dead-path bottom, which sits in
    the population without an address shape. *)

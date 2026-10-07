@@ -350,22 +350,13 @@ let stack_offset_portions ~(extents : (int64 * int64) list) ~(word : int)
            in
            (Some (Tag.Range (lo, occ_hi)), parts)))
 
-(* Case 2: a plain (offset-free) address.  A stack-band hull keeps
-   the memory form; an unbounded ascending set's minimum names its
+(* Case 2: a plain address. An unbounded ascending set's minimum names its
    section; the remaining bounded sets split across the data spans,
    with a resolved address basis where one span owns the occupied extent. *)
 let plain_portions ~(extents : (int64 * int64) list) ~(word : int)
     ~(entry : int64) ~(spans : data_span list) ~(basis : int64 option) ~(width : int)
     (ws : Vsa.WordSet.t) : sec_tag option * portion list =
-  let cei = Model.args_ceiling in
-  let in_band = Vsa.WordSet.in_stack_segment ws in
-  match (if in_band then Model.unsigned_bounds ws else None) with
-  | Some (lo, hi) ->
-    (* A band hull gets no conversion proof — identity. *)
-    sub_portions ~extents ~entry ~word ~elig:false ~alo:lo ~ahi:hi lo
-      (Model.expand_hi ~cap:cei hi width)
-  | None ->
-    match Model.unsigned_bounds ws with
+  match Model.unsigned_bounds ws with
     | None ->
       (* No surviving bound: the identity claim, never the heap claim. *)
       top_claim ~extents ~cause:Foreign ~entry ~word
@@ -1570,15 +1561,6 @@ let def_facts ~(word : int) ~(entry : int64) ~(abi : Hike_abi.t)
                                         census "rw.value.section.carried";
                                         acc)
                                 | _ -> census "rw.value.raw"; acc))
-                        | Ok ws when Core.Map.is_empty leaves -> (
-                            (* A pure constant is a machine constant, not
-                               a synthesized address: the model's stack
-                               line sits at 2^62, and a double's bits can
-                               land inside it — only a value with var
-                               leaves (an SP-derived address) routes to
-                               the frame's storages. *)
-                            census "rw.value.raw";
-                            acc)
                         | Ok ws -> (
                             (* The routing of an address value: at/above
                                the args base it names the caller's window

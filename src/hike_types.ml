@@ -297,24 +297,13 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
     in
     Core.Set.add (Core.Set.add extra sp) window
   in
-  (* A provably-stack denotation: the symbolic arm (a real stack offset).
-     The degraded in-band plain arm can hold a genuine constant (an
-     arithmetic magic), so it is not proof of a stack address. *)
   let is_stack_addr (ws : Vsa.WordSet.t) : bool =
     Vsa.WordSet.in_stack_segment ws
-    && Base.Option.is_some (Hike_stack_model.positions_of_offsets ws)
-  in
-  (* A literal constant is an integer value, never a stack address (the
-     VSA's in-band plain arm can catch an arithmetic magic). *)
-  let is_literal (d : def term) : bool =
-    match Def.rhs d with Bil.Int _ -> true | _ -> false
   in
   let denot_storage blk d =
-    if is_literal d then None
-    else
-      match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
-      | Ok ws when is_stack_addr ws -> storage_of ws
-      | _ -> None
+    match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
+    | Ok ws when is_stack_addr ws -> storage_of ws
+    | _ -> None
   in
   let shape_ptr (ptrs : Var.Set.t) (e : exp) : bool =
     Hike_exp_fold.fold
@@ -334,9 +323,7 @@ let ptr_defs ?(extra = Var.Set.empty) ~(facts : Hike_kb.facts)
   let seed_of blk =
     Term.enum def_t blk
     |> Seq.fold ~init:extra ~f:(fun acc d ->
-           if is_literal d then acc
-           else
-             match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
+           match facts.Hike_kb.denote ~blk ~def:d (Def.rhs d) with
              | Ok ws when is_stack_addr ws -> add_value acc d
              | _ -> acc)
   in

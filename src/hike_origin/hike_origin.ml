@@ -48,17 +48,19 @@ let stack_span = Stdlib.Int64.shift_left 1L 23
    word) starts above the return-address slot. *)
 let window_floor = 1L
 
-(* A VLA frame's base is runtime-dependent, so its materialisation
-   clamps are the segment's own — the allocation lives on the frame
-   line, inside the symbolic span. *)
+(* VLA bases have no unconditional alignment fact. Their clamps stay
+   on the stack line; allocation-specific facts live in Vla_seed. *)
 let facts (t : t) : facts =
   match t with
   | Abs -> { base = 0L; certified = 64; lo = 0L; hi = 0L }
-  | Stack | Vla _ ->
+  | Stack ->
     { base = segment_base;
       certified = 4;
       lo = Stdlib.Int64.neg stack_span;
       hi = stack_span }
+  | Vla _ ->
+    { base = segment_base; certified = 0;
+      lo = Stdlib.Int64.neg stack_span; hi = stack_span }
   | Window ->
     { base = segment_base;
       certified = 4;

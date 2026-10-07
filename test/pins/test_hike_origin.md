@@ -18,3 +18,12 @@ fails under that inversion.
 | ORI-09 | the VLA seed: `rsp := rsp − rax` with a set-valued size stamps the decrement def's value `Vla T` (T = its own tid) as the frame base (`Rel (Vla T, {0})`, materialised to the base range) and records `{off_lo = 0; off_hi = Some 32; base_lo = Some −48; base_hi = Some −32}` | make `vla_seed` return `p` (no seed) | pin FAILs: the stamp, the base-range, and the extent asserts fail |
 | ORI-17 | the D1 shape predicate (`vla_event`): a singleton amount is not an event; a TOP size and a directional-infinite size are events with `off_hi = None` | make `vla_event` require a bounded amount | pin FAILs: the TOP/infinite accepts fail |
 | ORI-18 | the D10 namespace test (`names_stack_line`): `Stack`, `Window` and a `Vla` frame name the stack line; `Abs` and `Rip` name none | make `names_stack_line` answer `true` for `Abs` | pin FAILs: the absolute-origin assert fails |
+
+| ORI-19 | equality distinguishes every origin and VLA frame; arithmetic, enumeration, certified bits and memory keys follow the source origin | ignore origins in equality or use Stack facts for Rip | distinct origins compare equal or Rip uses stack coordinates |
+
+| ORI-20 | Abs arithmetic and materialization preserve exact absolute bits, including high-bit words | send Abs through symbolic-base arithmetic | multiplication/negation return TOP or materialization loses bits |
+| ORI-21 | VLA masks use allocation-specific certified bits; unknown-residue rounding keeps possible slack and origin; symbolic bases are not concretely enumerated | assume VLA alignment or enumerate one base | wrong residue or incomplete concrete enumeration |
+| ORI-22 | full-width memory preserves every origin's payload and only the explicit Stack/Window/Vla line aliases | drop payload origin or merge Rip/Abs namespaces | payload or pairwise key checks fail |
+| ORI-23 | alignment images count rounded blocks rather than the original span | count blocks from the unrounded endpoints | a boundary-crossing interval loses its second result |
+
+| ORI-24 | relative difference uses exact shared offsets; an uncertain relative subtrahend preserves reachable survivors | subtract materialized relative hulls | disjoint Rip/VLA offsets or a plain value incorrectly become bottom |

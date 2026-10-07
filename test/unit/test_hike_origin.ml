@@ -279,6 +279,122 @@ let ori_18 () =
   check "a module-relative origin names no stack line"
     (not (Origin.names_stack_line Origin.Rip))
 
+let ori_19 () =
+  let origins =
+    [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip;
+      Origin.Vla (Tid.create ()); Origin.Vla (Tid.create ()) ]
+  in
+  let value o = Ws.set_origin o (Ws.stack_word_i64 3L) in
+  List.iter origins ~f:(fun a ->
+      check "same-origin disjoint offsets do not overlap"
+        (not (Ws.overlap (value a) (Ws.set_origin a (Ws.stack_word_i64 4L))));
+      List.iter origins ~f:(fun b ->
+          check "equal offsets retain distinct origin identities"
+            (Bool.equal (Ws.equal (value a) (value b)) (Origin.equal a b));
+          check "containment never substitutes a different origin"
+            (Bool.equal (Ws.precedes (value a) (value b)) (Origin.equal a b)));
+      check "offset arithmetic retains its source origin"
+        (Option.equal Origin.equal
+           (Ws.origin (Ws.add (value a) (Ws.singleton (i2w 1L))))
+           (if Origin.equal a Origin.Abs then None else Some a)));
+  let rip = value Origin.Rip in
+  check "an unknown module base has no concrete enumeration"
+    (List.is_empty (Ws.iter rip));
+  check "a module-relative value materialises soundly"
+    (Ws.is_top (Ws.union rip (Ws.singleton (i2w 3L))));
+  check "unknown-base membership remains conservative" (Ws.elem (i2w 3L) rip);
+  check "Rip has no certified low base bits"
+    (Ws.is_top (Ws.logand rip (Ws.singleton (i2w 15L))));
+  check "subtracting a symbolic base cannot keep that base"
+    (Option.is_none (Ws.origin (Ws.sub (Ws.singleton (i2w 12L)) rip)));
+  List.iter [ Origin.Abs; Origin.Rip; Origin.Stack; Origin.Window ] ~f:(fun o ->
+      check "memory namespace follows the carried origin"
+        (match Ws.address_pieces (value o) with
+         | Some (key, _) -> Origin.equal key (Ws.key_line o)
+         | None -> false))
+
+let ori_20 () =
+  let abs k = Ws.set_origin Origin.Abs (Ws.stack_word_i64 k) in
+  let plain k = Ws.singleton (i2w k) in
+  List.iter [ 3L; -1L; Stdlib.Int64.min_int ] ~f:(fun k ->
+      check "Abs union preserves exact absolute bits"
+        (Ws.equal (Ws.union (abs k) (plain k)) (plain k));
+      check "Abs multiplication uses absolute arithmetic"
+        (Ws.equal (Ws.mul (abs k) (plain 2L)) (Ws.mul (plain k) (plain 2L)));
+      check "Abs negation uses absolute arithmetic"
+        (Ws.equal (Ws.neg (abs k)) (Ws.neg (plain k))))
+
+let ori_21 () =
+  let plain k = Ws.singleton (i2w k) in
+  let tid = Tid.create () in
+  let frame = Ws.vla_frame tid in
+  Origin.Vla_seed.record tid
+    { Origin.off_lo = 0L; off_hi = Some 32L;
+      base_lo = Some (-31L); base_hi = Some (-31L) };
+  check "VLA certified bits include the allocation base residue"
+    (Ws.equal (Ws.logand frame (plain 15L)) (plain 9L));
+  Origin.Vla_seed.record tid
+    { Origin.off_lo = 0L; off_hi = Some 32L;
+      base_lo = Some (-31L); base_hi = Some (-16L) };
+  check "a variable VLA base has no assumed alignment"
+    (Ws.is_top (Ws.logand frame (plain 15L)));
+  let rounded = Ws.logand frame (plain (-4L)) in
+  check "unknown-residue rounding preserves origin with possible slack"
+    (Option.equal Origin.equal (Ws.origin rounded) (Some (Origin.Vla tid))
+     && Option.value_map (Ws.vla_offsets rounded) ~default:false
+          ~f:(fun offs -> Clp.elem (i2w (-3L)) offs && Clp.elem (i2w 0L) offs));
+  check "a runtime base is not a complete concrete enumeration"
+    (Option.is_none (Ws.enumerate ~cap:100 frame));
+  Origin.Vla_seed.reset ()
+
+let ori_22 () =
+  let tid = Tid.create () in
+  Origin.Vla_seed.record tid
+    { Origin.off_lo = 0L; off_hi = Some 32L;
+      base_lo = Some 0L; base_hi = Some 0L };
+  let origins = [ Origin.Abs; Origin.Stack; Origin.Window; Origin.Rip; Origin.Vla tid ] in
+  let value o = Ws.set_origin o (Ws.stack_word_i64 0L) in
+  let key ws = List.hd_exn (Mem.Key.of_wordset ws) in
+  let cell = key (Ws.singleton (i2w 0x1000L)) in
+  List.iter origins ~f:(fun a ->
+      let data = value a in
+      let mem = Mem.add
+          (Mem.top { Mem.addr_width = 64; addressable_width = 8 })
+          ~key:cell ~data:(Mem.Val.create data LittleEndian) in
+      let loaded = Mem.Val.data (Mem.find (64, LittleEndian) mem cell) in
+      check ("full-width memory preserves " ^ Origin.name a)
+        (if Origin.equal a Origin.Abs then
+           Ws.equal loaded (Ws.singleton (i2w 0L))
+         else Ws.equal data loaded);
+      List.iter origins ~f:(fun b ->
+          check "memory aliases only the explicit shared coordinate line"
+            (Bool.equal (Mem.Key.overlap (key data) (key (value b)))
+               (Origin.equal (Ws.key_line a) (Ws.key_line b)))));
+  Origin.Vla_seed.reset ()
+
+let ori_23 () =
+  List.iter [ Origin.Stack; Origin.Window ] ~f:(fun o ->
+      let value = Ws.set_origin o
+          (Ws.stack_word (Clp.interval ~width:64 (i2w 7L) (i2w 9L))) in
+      let rounded = Ws.logand value (Ws.singleton (i2w (-16L))) in
+      check "rounding retains both blocks across the certified base boundary"
+        (Option.equal Origin.equal (Ws.origin rounded) (Some o)
+         && Option.value_map (Ws.stack_offsets rounded) ~default:false
+              ~f:(fun offs -> Clp.elem (i2w (-8L)) offs && Clp.elem (i2w 8L) offs)))
+
+let ori_24 () =
+  let origins = [ Origin.Stack; Origin.Window; Origin.Rip; Origin.Vla (Tid.create ()) ] in
+  List.iter origins ~f:(fun o ->
+      let a = Ws.set_origin o (Ws.stack_word_i64 0L) in
+      let b = Ws.set_origin o (Ws.stack_word_i64 1L) in
+      check "same-origin difference uses exact offsets"
+        (Ws.equal (Ws.diff a b) a);
+      check "same-origin self-difference is empty" (Ws.is_bottom (Ws.diff a a)));
+  let a = Ws.singleton (i2w 42L) in
+  let b = Ws.set_origin Origin.Rip (Ws.stack_word_i64 0L) in
+  check "an unknown-base subtrahend cannot erase reachable plain values"
+    (Ws.elem (i2w 42L) (Ws.diff a b))
+
 let () =
   run "hike_origin"
     [ pin "ORI-01" "the facts table" ori_01;
@@ -298,4 +414,10 @@ let () =
 
 
       pin "ORI-17" "the D1 shape predicate (singleton / TOP / infinite)" ori_17;
-      pin "ORI-18" "the D10 namespace test" ori_18 ]
+      pin "ORI-18" "the D10 namespace test" ori_18;
+      pin "ORI-19" "all origins retain identity and use their own facts" ori_19;
+      pin "ORI-20" "absolute-origin arithmetic preserves bits" ori_20;
+      pin "ORI-21" "VLA operations require certified base bits" ori_21;
+      pin "ORI-22" "all-origin memory round trips and alias namespaces" ori_22;
+      pin "ORI-23" "rounding crosses base-residue block boundaries" ori_23;
+      pin "ORI-24" "difference preserves exact offsets and uncertain survivors" ori_24 ]

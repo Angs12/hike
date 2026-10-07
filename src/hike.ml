@@ -348,9 +348,8 @@ let pass_vsa proj =
           Cbat_vsa.WordSet.is_top ws
           || Cbat_vsa.WordSet.is_infinite ws
           || Cbat_vsa.WordSet.is_bottom ws
-          || Cbat_word.gt_int (Cbat_vsa.WordSet.cardinality ws) 64
         then None
-        else Some (Cbat_vsa.WordSet.iter ws)
+        else Cbat_vsa.WordSet.enumerate ~cap:64 ws
       in
       let target_words ~blk e =
         match facts.Hike_kb.denote ~blk e with

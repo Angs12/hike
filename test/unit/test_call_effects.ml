@@ -300,6 +300,18 @@ let tests : unit Alcotest.test list =
         check "CE-17"
           (Ws.is_top (ce_reads m 0x2000L kept)
           && Ws.equal (ce_reads m 0x3000L kept) (Ws.singleton (w64 7))));
+    pin "CE-18" "call-frame retention requires a stack-origin SP" (fun () ->
+        let env, m = ce_raw_env () in
+        let values =
+          [ Ws.singleton (w64 0x1000);
+            Ws.set_origin Hike_origin.Abs (Ws.stack_word_i64 0x1000L);
+            Ws.set_origin Hike_origin.Rip (Ws.stack_word_i64 0x1000L) ] in
+        Base.List.iter values ~f:(fun rsp ->
+            let post = ce_call (AI.add_word env ~key:ce_abi.Hike_abi.sp ~data:rsp)
+                (ids1 ce_abi.Hike_abi.sp) in
+            check "a non-stack SP cannot certify caller-frame survival"
+              (Ws.is_top (ce_reads m 0x2000L post))));
+
   ]
 
 let () = run "call_effects" tests

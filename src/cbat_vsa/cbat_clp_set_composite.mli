@@ -51,10 +51,6 @@ val extrapolate_steps : steps:int -> t -> t -> t
    RSP is 8 (mod 16)), as int64. *)
 val stack_base : int64
 
-(* The plain-arm band's lower bound; the band is
-   [stack_band_lo, 2^63) — unreachable for real addresses. *)
-val stack_band_lo : int64
-
 val stack_word : Cbat_clp.t -> t
 val stack_word_i64 : int64 -> t
 
@@ -72,29 +68,18 @@ val stack_offsets : t -> Cbat_clp.t option
    [Some] only for the [Vla] origin. *)
 val vla_offsets : t -> Cbat_clp.t option
 
-(* The address pieces a memory key fans over: the symbolic offsets'
-   piece union, a plain in-band value's segment-relative translation,
-   or a plain out-of-band value's own pieces.  None when the value
-   names no bounded address line. *)
+(* Memory keys retain the carried origin's line; plain values stay absolute. *)
 val address_pieces : t -> (Origin.t * Cbat_clp.Pieces.t) option
 
-(* The coordinate line a value's origin keys under: the stack line
-   ([Stack]/[Window]/[Vla] share it, since a stack access can land in a
-   VLA region) vs the absolute line ([Rip]/[Abs]). *)
-val key_line : Origin.t -> Origin.t
-
-(* The coordinate line a value's origin keys under: the stack line
-   ([Stack]/[Window]/[Vla] share it) vs the absolute line
-   ([Rip]/[Abs]). *)
+(* Memory namespaces: Stack, Window and Vla share the stack line;
+   Rip and Abs each retain their own line. *)
 val key_line : Origin.t -> Origin.t
 
 (* The set's own address stride: > 1 only for a bounded strided Clp or
    stack-offset progression; 1 otherwise. *)
 val stride : t -> int
 
-(* Stack residency: the symbolic arm, or a bounded plain hull inside
-   the signed-positive band [2^61, 2^63) — unreachable for real
-   addresses. *)
+(* Stack identity requires a Stack, Window or Vla runtime origin. *)
 val in_stack_segment : t -> bool
 
 (* The offset set's extrema of a stack-symbolic value; None for a

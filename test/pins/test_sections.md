@@ -22,7 +22,7 @@ assertions.
 | SEC-14 | a signed expansion at the line top saturates at `max_int` (Args) | wrap the signed `lo+w-1` at the Args ceiling | SEC-14 red: no Args portion at `max_int` |
 | SEC-15 | a crossing interval splits into Stack + Args portions, both identity | emit one portion across the boundary (no split) | SEC-15 red: `length ps ≠ 2` / section wrong |
 | SEC-16 | a bounded single-space symbolic read is eligible | clear `pt_elig` on the symbolic arm | SEC-16 red: `not p.pt_elig` |
-| SEC-17 | a plain band hull is identity (no StackOff proof) | set `pt_elig = true` on the plain arm | SEC-17 red: `p.pt_elig` |
+| SEC-17 | a plain numeric stack-band hull has no stack attribution | classify plain numeric bands as Stack | a plain floating-point bit pattern acquires stack portions |
 | SEC-18 | a resolved address basis wholly in one span proves its occupied portion | discard the synthetic address basis | SEC-18 red: the portion is ineligible |
 | SEC-19 | a symbolic range crossing the retaddr boundary is identity on both sides | mark crossing portions eligible | SEC-19 red: some `p.pt_elig` |
 | SEC-20 | the same denotation without a resolved address basis contributes identity | grant eligibility without a section basis | SEC-20 red: the portion is eligible |
